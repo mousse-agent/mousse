@@ -61,7 +61,7 @@ function scriptedAgent(script: AgentScript) {
   return { ...agentApp, calls, cancels }
 }
 
-function core(connect: ReturnType<typeof scriptedAgent>['connect'], options: { closeSessions?: boolean } = {}) {
+function core(connect: ReturnType<typeof scriptedAgent>['connect'], options: { closeSessions?: boolean; cancelDeadlineMs?: number } = {}) {
   const saved = new Map<string, SavedAcpSession>()
   let models: LlmModelOption[] = []
   const sessions = new AcpSessions({
@@ -71,6 +71,7 @@ function core(connect: ReturnType<typeof scriptedAgent>['connect'], options: { c
     connect,
     quirks: NO_QUIRKS,
     ...(options.closeSessions ? { closeSessions: true } : {}),
+    ...(options.cancelDeadlineMs !== undefined ? { cancelDeadlineMs: options.cancelDeadlineMs } : {}),
     store: {
       saved: (threadId) => saved.get(threadId),
       setSaved: (threadId, value) => (value ? saved.set(threadId, value) : saved.delete(threadId)),
@@ -121,6 +122,22 @@ describe('ACP sessions', () => {
     expect(await text).toBe('working\n\nthen focus on tests')
     expect(onSteer).toHaveBeenCalledExactlyOnceWith('focus on tests')
     expect(agent.cancels).toEqual(['native-1'])
+  })
+
+  it('ends an agent that ignores the cancel a steer sends, and fails the turn without replaying it', async () => {
+    const agent = scriptedAgent({ prompt: async (_text, ctx) => { await ctx.notify('working'); return new Promise<string>(() => {}) } })
+    const { sessions, saved } = core(agent.connect, { cancelDeadlineMs: 50 })
+    let steer: string | undefined
+    const turn = sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'long task', onText: vi.fn(), drainSteer: () => { const value = steer; steer = undefined; return value } })
+    const failed = expect(turn).rejects.toThrow('did not stop for the new guidance')
+    await vi.waitFor(() => expect(agent.calls.filter((call) => call.method === 'session/prompt')).toHaveLength(1))
+    steer = 'focus on tests'
+    await failed
+    expect(agent.cancels).toEqual(['native-1'])
+    expect(agent.connections[0].killed).toBe(true)
+    expect(saved.has('t')).toBe(false)
+    // The steer text was never sent as a prompt.
+    expect(agent.calls.filter((call) => call.method === 'session/prompt')).toHaveLength(1)
   })
 
   it('cancels natively, and when the cancel misses its deadline kills the process and forgets the session', async () => {

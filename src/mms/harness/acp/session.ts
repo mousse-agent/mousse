@@ -3,7 +3,7 @@ import { methods, type NewSessionResponse } from '@agentclientprotocol/sdk'
 import type { LlmModelOption } from '../../../shared/settings'
 import type { ChatImageAttachment } from '../../../shared/types'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
-import { loadWithDeadline, SessionLoadTimeoutError } from '../supervise'
+import { interruptWithDeadline, loadWithDeadline, SessionLoadTimeoutError } from '../supervise'
 import { isAuthRequired } from './auth'
 import { initializeAgent, sessionCapability, type AcpAgentInfo } from './capabilities'
 import { closeAcpConnection, type AcpClientHandlers, type AcpConnection, type AcpConnectionFactory, type AcpPurpose } from './connection'
@@ -128,6 +128,8 @@ export interface AcpSessionsOptions {
   prompter?: PermissionPrompter
   /** `_meta` sent with `initialize`. */
   initializeMeta?: Record<string, unknown>
+  /** Test seam: how long a cancel may take before the process is ended (`INTERRUPT_DEADLINE_MS`). */
+  cancelDeadlineMs?: number
   /** Test seam: how long a load replay may pause before the gate opens (`LOAD_REPLAY_IDLE_MS`). */
   loadIdleMs?: number
   /** Client capabilities added to `initialize` (ACP `auth`, `elicitation`). */
@@ -595,8 +597,22 @@ export class AcpSessions {
           if (prompting && !cancelSent) {
             cancelSent = true
             questions.autoRejectPendingForThread(input.threadId)
-            void turnProcess.connection.agent.notify(methods.agent.session.cancel, { sessionId: turnProcess.sessionId! })
-              .catch((error) => { steerFailure = error; this.close(turnProcess) })
+            // The same cancel and deadline as a stop: an agent that does not stop for the steer is
+            // ended, and the turn fails rather than replaying a request whose outcome is unknown.
+            void interruptWithDeadline({
+              interrupt: async () => {
+                await turnProcess.connection.agent.notify(methods.agent.session.cancel, { sessionId: turnProcess.sessionId! })
+                await turnProcess.prompting
+                return 'interrupted'
+              },
+              terminate: () => {
+                steerFailure ??= new Error(`${label} did not stop for the new guidance, so it was ended. Send the guidance again.`)
+                closeAcpConnection(turnProcess)
+                this.sessions.delete(input.threadId)
+              },
+              forgetConversation: (threadId) => this.forgetConversation(threadId)
+            }, { provider: '', ...(turnProcess.sessionId ? { sessionId: turnProcess.sessionId } : {}) }, { threadId: input.threadId, ...(this.options.cancelDeadlineMs !== undefined ? { deadlineMs: this.options.cancelDeadlineMs } : {}) })
+              .catch((error) => { steerFailure ??= error; this.close(turnProcess) })
           }
         } catch (error) { steerFailure = error; this.close(turnProcess) }
       }
