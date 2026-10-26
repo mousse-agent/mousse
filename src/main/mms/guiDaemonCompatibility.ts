@@ -17,7 +17,9 @@ export const GUI_REQUIRED_METHODS = [
   'providers.instances.update', 'providers.instances.signIn', 'providers.instances.respondSignIn',
   'providers.instances.signOut', 'providers.instances.recheck', 'providers.instances.refreshModels',
   'providers.instances.setModelPrefs', 'providers.instances.move', 'providers.instances.removeInstall',
-  'providers.registry.search'
+  'providers.registry.search',
+  // The Files panel and composer search through the daemon; an older service lacks it.
+  'files.search'
 ] as const
 
 export async function assertGuiDaemonCompatible(client: LocalMmsClient, hello: ProtocolHelloOk, homeDir: string): Promise<void> {

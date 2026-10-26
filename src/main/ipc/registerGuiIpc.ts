@@ -89,6 +89,7 @@ import type {
   ChannelConfig,
   ChannelPlatform,
   CreateScheduledJobInput,
+  FileSearchResponse,
   GitCommitOptions,
   MainView,
   OrchestratorContextUsageInput,
@@ -1750,6 +1751,38 @@ export function registerGuiIpc(
       )
       await guiMms.request('stats.recordManualEdits', { lines, expectedProfileId: profileId })
     }
+  )
+
+  // Search runs in the daemon, never in this process. It deliberately skips
+  // `resolveFilesRoot`, whose home-directory fallback must never be indexed.
+  // The daemon rejects `threadId` and `projectId` together, hence the sequence.
+  const searchScoped = async <T>(
+    method: string,
+    params: Record<string, unknown>,
+    projectId?: string,
+    threadId?: string | null
+  ): Promise<T> => {
+    if (!projectId && !threadId) throw new Error('Search needs a project')
+    if (threadId) {
+      try {
+        return await guiMms.request<T>(method, { ...params, threadId })
+      } catch (error) {
+        // A thread without a project workspace, or with a worktree under
+        // recovery, still searches the primary checkout, as the tree shows.
+        if (!projectId) throw error
+      }
+    }
+    return guiMms.request<T>(method, { ...params, projectId })
+  }
+  registerHandler(
+    'fs:search',
+    (
+      _e,
+      query: string,
+      options?: { limit?: number; kinds?: Array<'file' | 'directory'> },
+      projectId?: string,
+      threadId?: string | null
+    ) => searchScoped<FileSearchResponse>('files.search', { query, ...options }, projectId, threadId)
   )
 
   const resolveGitCwd = async (projectId?: string, cwd?: string): Promise<string> => {
