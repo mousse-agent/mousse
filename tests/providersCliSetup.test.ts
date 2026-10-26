@@ -272,7 +272,9 @@ describe('Add provider choices', () => {
       loginOption('claude-subscription', { authType: 'oauth' }),
       loginOption('codex', { authType: 'oauth' }),
       loginOption('openai'),
-      loginOption('anthropic', { configured: true })
+      loginOption('anthropic', { configured: true }),
+      // A model API that now runs as an agent is added as that agent.
+      loginOption('cursor')
     ])
     expect(choices.filter((choice) => choice.kind === 'api').map((choice) => choice.label)).toEqual(['openai'])
     expect(choices.find((choice) => choice.key === 'new:cursor')).toMatchObject({ label: 'Cursor', group: 'Agents' })

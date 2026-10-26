@@ -27,7 +27,7 @@ export function MoveNotice({
 }: {
   snapshot: InstanceSnapshot
   snapshots: readonly InstanceSnapshot[]
-  onMove: (toInstanceId: string) => Promise<MoveResult>
+  onMove: (toInstanceId: string, options: { copyKey: boolean }) => Promise<MoveResult>
 }) {
   const [open, setOpen] = useState(false)
   const agent = foldedInto(piProviderIdOf(snapshot.instanceId))
@@ -65,10 +65,13 @@ export function MoveProviderDialog({
   snapshot: InstanceSnapshot
   targets: readonly InstanceSnapshot[]
   agentLabel: string
-  onMove: (toInstanceId: string) => Promise<MoveResult>
+  onMove: (toInstanceId: string, options: { copyKey: boolean }) => Promise<MoveResult>
   onClose: () => void
 }) {
   const [target, setTarget] = useState(targets[0]?.instanceId ?? '')
+  // The key is copied only when the user ticks it.
+  const [copyKey, setCopyKey] = useState(false)
+  const hasKey = snapshot.auth.state === 'signed_in' && snapshot.auth.methodLabel === 'API key'
   const [result, setResult] = useState<MoveResult | null>(null)
   const { busy, error, run } = useAsyncAction()
   const footer = result ? (
@@ -84,7 +87,7 @@ export function MoveProviderDialog({
         type="button"
         className="btn btn-primary"
         disabled={busy !== null || !target}
-        onClick={() => void run('move', async () => setResult(await onMove(target)))}
+        onClick={() => void run('move', async () => setResult(await onMove(target, { copyKey: hasKey && copyKey })))}
       >
         {busy ? 'Moving…' : 'Move'}
       </button>
@@ -131,6 +134,14 @@ export function MoveProviderDialog({
               </button>
             ))}
           </div>
+          {hasKey ? (
+            <label className="prov-check-row">
+              <input type="checkbox" checked={copyKey} onChange={(event) => setCopyKey(event.target.checked)} />
+              <span>Use the same API key for {agentLabel}</span>
+            </label>
+          ) : (
+            <p className="settings-muted">Sign in to {agentLabel} on its entry after the move.</p>
+          )}
         </div>
       )}
     </Modal>

@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cursorDriver } from '../../src/mms/harness/drivers/cursor'
+import { piLegacyDriver } from '../../src/mms/harness/drivers/piLegacy'
 import type { Harness, TurnSpec } from '../../src/mms/harness/gateway'
 import { instanceStateDir } from '../../src/mms/harness/instances'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
@@ -127,6 +128,34 @@ describe('Cursor turns at the host protocol', () => {
     const next = await (await turn('a', { prompt: 'Try again', history: 'user: Fix the build' })).result
     expect(next).toMatchObject({ text: 'Done', aborted: false })
     transport.assertDone()
+  })
+})
+
+describe('moving pi:cursor to Cursor', () => {
+  it('turns the model API off, gives Cursor its key when asked, and a pinned thread continues on Cursor', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'mousse-cursor-move-'))
+    homes.push(home)
+    const host = new FakeCursorHost({ me: (params) => ({ userId: params.apiKey === 'pi-cursor-key' ? 9 : 1 }), models: () => ({ models: [{ id: 'composer-1', displayName: 'Composer' }] }) })
+    let stored: unknown = { 'pi:cursor': { driver: 'pi', enabled: true }, [INSTANCE]: { driver: 'cursor', enabled: true, config: { displayName: 'Work' } } }
+    const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
+    const harness = testHarness({
+      drivers: [
+        piLegacyDriver({
+          client: () => ({ chat: async () => { throw new Error('unused') } }),
+          credentials: () => ({ has: () => true, storedApiKey: (id: string) => (id === 'cursor' ? 'pi-cursor-key' : undefined), getConfiguredProviders: () => [], getConfiguredLlmProviders: () => [] })
+        }),
+        cursorDriver({ connect: host.connect })
+      ],
+      instances,
+      profileHome: home
+    })
+    harnesses.push(harness)
+    const result = await harness.instances.move('pi:cursor', INSTANCE, { copyKey: true })
+    expect(result).toMatchObject({ from: 'pi:cursor', to: INSTANCE })
+    expect((stored as Record<string, unknown>)['pi:cursor']).toEqual({ driver: 'pi', enabled: false, config: { movedTo: INSTANCE } })
+    expect(host.calls('me')).toContainEqual({ apiKey: 'pi-cursor-key' })
+    const resolved = harness.resolveStored({ instanceId: 'pi:cursor', llmProvider: 'cursor', model: 'composer-1' }, { purpose: 'turn' })
+    expect(resolved).toMatchObject({ instanceId: INSTANCE, driver: 'cursor', movedFrom: 'pi:cursor' })
   })
 })
 

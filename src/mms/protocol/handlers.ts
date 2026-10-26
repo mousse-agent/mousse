@@ -1856,7 +1856,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'providers.instances.move': {
       const p = isObject(params) ? params : {}
-      return { result: await harnessGateway(ctx).instances.move(asInstanceId(p.instanceId), asInstanceId(p.toInstanceId, 'toInstanceId')) }
+      return { result: await harnessGateway(ctx).instances.move(asInstanceId(p.instanceId), asInstanceId(p.toInstanceId, 'toInstanceId'), { copyKey: p.copyKey === true }) }
     }
     case 'workspace.getStatus': {
       const p = isObject(params) ? params : {}

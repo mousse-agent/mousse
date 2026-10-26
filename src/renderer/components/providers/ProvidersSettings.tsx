@@ -242,8 +242,8 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
             <MoveNotice
               snapshot={snapshot}
               snapshots={sorted}
-              onMove={async (toInstanceId) => {
-                const result = await window.mousse.providers.instances.move(snapshot.instanceId, toInstanceId)
+              onMove={async (toInstanceId, options) => {
+                const result = await window.mousse.providers.instances.move(snapshot.instanceId, toInstanceId, options)
                 await reload()
                 return result
               }}

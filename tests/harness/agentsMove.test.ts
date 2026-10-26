@@ -38,7 +38,7 @@ afterEach(() => {
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
 })
 
-function fixture() {
+function fixture(keys: { exported?: string; adopted?: string[] } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'mousse-move-'))
   homes.push(home)
   let stored: Record<string, unknown> = { 'pi:fake': { driver: 'pi', enabled: true }, codex: { driver: 'codex', enabled: true } }
@@ -48,8 +48,13 @@ function fixture() {
   const agent = new Agent('codex')
   const harness = testHarness({
     drivers: [
-      adapterDriver(new Agent('pi')),
-      adapterDriver(agent, { runtime: { models: () => [{ id: 'agent-model', label: 'Agent model' }] } })
+      adapterDriver(new Agent('pi'), { runtime: { exportApiKey: async () => keys.exported } }),
+      adapterDriver(agent, {
+        runtime: {
+          models: () => [{ id: 'agent-model', label: 'Agent model' }],
+          adoptApiKey: async (key: string) => void keys.adopted?.push(key)
+        }
+      })
     ],
     instances,
     profileHome: home,
@@ -78,8 +83,25 @@ function fixture() {
 }
 
 describe('moving a model API to its agent', () => {
-  it('ships with no rows: each agent PR adds its own', () => {
-    expect(FOLDED_INTO_AGENT).toEqual({})
+  it('has a row per agent that took a model API over', () => {
+    expect(FOLDED_INTO_AGENT).toEqual({ cursor: 'cursor' })
+  })
+
+  it("copies the entry's API key only when asked, before anything moves", async () => {
+    const adopted: string[] = []
+    const { harness, stored } = fixture({ exported: 'saved-key', adopted })
+    await harness.instances.move('pi:fake', 'codex')
+    expect(adopted).toEqual([])
+    const again = fixture({ exported: 'saved-key', adopted })
+    await again.harness.instances.move('pi:fake', 'codex', { copyKey: true })
+    expect(adopted).toEqual(['saved-key'])
+    expect(stored()['pi:fake']).toMatchObject({ enabled: false })
+  })
+
+  it('refuses to copy a key the entry does not have, and moves nothing', async () => {
+    const { harness, stored } = fixture({ adopted: [] })
+    await expect(harness.instances.move('pi:fake', 'codex', { copyKey: true })).rejects.toMatchObject({ code: 'unsupported' })
+    expect(stored()['pi:fake']).toEqual({ driver: 'pi', enabled: true })
   })
 
   it('never moves without the user: a pinned thread keeps the model API until then', () => {

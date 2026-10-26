@@ -5,7 +5,9 @@ import type { HarnessDriverKind } from './types'
  * "Move…" to the agent kind named here. The table is data: each agent PR adds its own row
  * (`cursor: 'cursor'`, `xai: 'grok'`) with its copy, and nothing else branches on it.
  */
-export const FOLDED_INTO_AGENT: Readonly<Record<string, HarnessDriverKind>> = Object.freeze({})
+export const FOLDED_INTO_AGENT: Readonly<Record<string, HarnessDriverKind>> = Object.freeze({
+  cursor: 'cursor'
+})
 
 /** The agent a model API's provider id moves to, when it has one. */
 export function foldedInto(providerId: string | undefined): HarnessDriverKind | undefined {
