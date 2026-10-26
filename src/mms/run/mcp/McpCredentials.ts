@@ -57,11 +57,13 @@ export interface BearerTurn {
 export interface TurnSettlement {
   status: 'completed' | 'failed' | 'aborted'
   /**
-   * What the runtime announced of its Mousse calls in the turn: `mousseCalls`, the count of calls to
-   * Mousse's server it started (Codex names the server); `toolsSettled`, every tool call it started
-   * reached a completed update and none failed (ACP, whose updates do not name the server).
+   * What the runtime announced of its Mousse calls in the turn: `mousseCalls`, the calls to Mousse's
+   * server it announced (Codex names the server), which must equal what Mousse received; `toolCalls`,
+   * every tool call it announced (ACP, whose updates do not name the server), which Mousse's received
+   * calls cannot exceed; `toolsSettled`, each announced call reached a terminal update from the
+   * runtime itself (a Codex completion it sent, an ACP `completed` update).
    */
-  drain?: { mousseCalls?: number; toolsSettled?: boolean }
+  drain?: { mousseCalls?: number; toolCalls?: number; toolsSettled?: boolean }
 }
 
 interface EpochState {
@@ -249,10 +251,11 @@ export class McpCredentials {
     if (record.binding === 'per_call') keep = settlement.status !== 'failed'
     else if (record.binding === 'drained_turn') {
       const drain = settlement.drain
-      const proven = drain !== undefined && (drain.mousseCalls !== undefined || drain.toolsSettled !== undefined)
+      const proven = drain !== undefined && (drain.mousseCalls !== undefined || drain.toolCalls !== undefined) && drain.toolsSettled !== undefined
       keep = settlement.status === 'completed' && running === 0 && proven &&
         (drain!.mousseCalls === undefined || drain!.mousseCalls === received) &&
-        drain!.toolsSettled !== false
+        (drain!.toolCalls === undefined || received <= drain!.toolCalls) &&
+        drain!.toolsSettled === true
     } else keep = false
     if (keep) return 'kept'
     this.bumpEpoch(record.threadId, record.provider)

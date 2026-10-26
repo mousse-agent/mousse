@@ -134,12 +134,29 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     const { server, fx, run, bearer, turns } = await setup()
     const first = bearer()
     await rpc(server.url, first.token, call(1, 'list_tasks'))
-    expect(server.turnEnded({ threadId: 'thread-a', runId: run.runId, tokenHash: first.tokenHash, settlement: { status: 'completed', drain: { mousseCalls: 1 } } })).toBe('kept')
+    expect(server.turnEnded({ threadId: 'thread-a', runId: run.runId, tokenHash: first.tokenHash, settlement: { status: 'completed', drain: { mousseCalls: 1, toolsSettled: true } } })).toBe('kept')
     fx.engine.markTerminal(run.runId, 'completed')
     const next = await fx.runningRun('thread-a')
     turns.register(appTurn({ threadId: 'thread-a', runId: next.runId }))
     expect(bearer({ runId: next.runId }).token).toBe(first.token)
     expect((await rpc(server.url, first.token, call(2, 'list_tasks'))).body.result.isError).toBeUndefined()
+  })
+
+  it('a completed Codex turn whose Mousse call Codex never completed rotates, and the old bearer is refused next turn', async () => {
+    const { server, fx, run, bearer, turns, enqueued } = await setup()
+    const first = bearer()
+    await rpc(server.url, first.token, call(1, 'list_tasks'))
+    // Codex announced the call, Mousse answered it, but Codex sent no completion of its own (the
+    // service closed the row when the turn ended): the turn is not proven drained.
+    expect(server.turnEnded({ threadId: 'thread-a', runId: run.runId, tokenHash: first.tokenHash, settlement: { status: 'completed', drain: { mousseCalls: 1, toolsSettled: false } } })).toBe('rotated')
+    fx.engine.markTerminal(run.runId, 'completed')
+    const next = await fx.runningRun('thread-a')
+    turns.register(appTurn({ threadId: 'thread-a', runId: next.runId }))
+    const fresh = bearer({ runId: next.runId })
+    expect(fresh.token).not.toBe(first.token)
+    // A late call of turn N on its old bearer reaches nothing in turn N+1.
+    expect((await rpc(server.url, first.token, call(2, 'queue_enqueue', { content: 'late' }))).status).toBe(401)
+    expect(enqueued).toEqual([])
   })
 
   it('a Claude call is accepted only with the active turn\'s token in its input', async () => {
@@ -278,7 +295,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
       const { a, started, callHang } = await hanging()
       const pending = callHang(a.token)
       await vi.waitFor(() => expect(started).toEqual(['thread-a']))
-      expect(server!.turnEnded({ threadId: 'thread-a', runId: a.runId, tokenHash: a.tokenHash, settlement: { status: 'completed', drain: { mousseCalls: 1 } } })).toBe('rotated')
+      expect(server!.turnEnded({ threadId: 'thread-a', runId: a.runId, tokenHash: a.tokenHash, settlement: { status: 'completed', drain: { mousseCalls: 1, toolsSettled: true } } })).toBe('rotated')
       await pending.then((response) => response.text())
       const list = await rpc(server!.url, a.token, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })
       expect(list.status).toBe(401)

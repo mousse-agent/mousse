@@ -164,18 +164,22 @@ describe('McpCredentials (SPEC §15.1)', () => {
       credentials.callReceived(first.tokenHash, 'r1')
       credentials.callRunning(first.tokenHash, 'r1', 1)
       credentials.callRunning(first.tokenHash, 'r1', -1)
-      expect(credentials.settleTurn(first.tokenHash, 'r1', { status: 'completed', drain: { mousseCalls: 1 } })).toBe('kept')
+      expect(credentials.settleTurn(first.tokenHash, 'r1', { status: 'completed', drain: { mousseCalls: 1, toolsSettled: true } })).toBe('kept')
       const next = credentials.bearerForTurn(codex('r2'))
       expect(next).toMatchObject({ token: first.token, reused: true })
     })
 
     it.each([
-      ['a stopped turn', { status: 'aborted' as const, drain: { mousseCalls: 0 } }, 0, 0],
+      ['a stopped turn', { status: 'aborted' as const, drain: { mousseCalls: 0, toolsSettled: true } }, 0, 0],
       ['a failed turn', { status: 'failed' as const }, 0, 0],
-      ['a call still running at settle', { status: 'completed' as const, drain: { mousseCalls: 1 } }, 1, 1],
-      ['a call Codex started that Mousse never received', { status: 'completed' as const, drain: { mousseCalls: 2 } }, 1, 0],
-      ['a call Mousse received that Codex did not announce', { status: 'completed' as const, drain: { mousseCalls: 0 } }, 1, 0],
-      ['an ACP tool call that did not complete', { status: 'completed' as const, drain: { toolsSettled: false } }, 0, 0],
+      ['a call still running at settle', { status: 'completed' as const, drain: { mousseCalls: 1, toolsSettled: true } }, 1, 1],
+      ['a call Codex started that Mousse never received', { status: 'completed' as const, drain: { mousseCalls: 2, toolsSettled: true } }, 1, 0],
+      ['a call Mousse received that Codex did not announce', { status: 'completed' as const, drain: { mousseCalls: 0, toolsSettled: true } }, 1, 0],
+      ['a Codex call Codex itself never completed', { status: 'completed' as const, drain: { mousseCalls: 1, toolsSettled: false } }, 1, 0],
+      ['a Codex count with no settlement report', { status: 'completed' as const, drain: { mousseCalls: 1 } }, 1, 0],
+      ['an ACP tool call that did not complete', { status: 'completed' as const, drain: { toolCalls: 1, toolsSettled: false } }, 0, 0],
+      ['more Mousse calls than the ACP agent announced tool calls', { status: 'completed' as const, drain: { toolCalls: 1, toolsSettled: true } }, 2, 0],
+      ['an ACP agent that announced nothing while Mousse received a call', { status: 'completed' as const, drain: { toolCalls: 0, toolsSettled: true } }, 1, 0],
       ['no proof at all', { status: 'completed' as const }, 0, 0]
     ])('rotates after %s, revoking the bearer at once', (_name, settlement, received, running) => {
       const { credentials, codex } = drainedSetup()
@@ -193,7 +197,8 @@ describe('McpCredentials (SPEC §15.1)', () => {
       const { credentials } = setup()
       const acp = (runId: string) => turn({ runId, instanceId: 'antigravity', binding: 'drained_turn', generation: 'antigravity|default|0|0' })
       const first = credentials.bearerForTurn(acp('r1'))
-      expect(credentials.settleTurn(first.tokenHash, 'r1', { status: 'completed', drain: { toolsSettled: true } })).toBe('kept')
+      credentials.callReceived(first.tokenHash, 'r1')
+      expect(credentials.settleTurn(first.tokenHash, 'r1', { status: 'completed', drain: { toolCalls: 2, toolsSettled: true } })).toBe('kept')
       expect(credentials.bearerForTurn(acp('r2')).token).toBe(first.token)
     })
 

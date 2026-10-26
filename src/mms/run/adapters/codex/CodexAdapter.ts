@@ -105,8 +105,10 @@ export class CodexAdapter implements ProviderAdapter {
       sink.progress()
       ctl.heartbeat()
     }
-    // The drained-turn proof for the bearer: the Mousse server's calls Codex started this turn.
-    const mousseCalls = new Set<string>()
+    // The drained-turn proof for the bearer: every Mousse server call Codex announced this turn (started
+    // or completed) and whether the server itself reported each one completed. The completions the
+    // service adds for rows left open when a turn ends are not proof.
+    const mousseCalls = new Map<string, boolean>()
     const chatInput = (): CodexChatInput => ({
       mode: input.mode === 'plan' ? 'plan' : 'default',
       child: input.child,
@@ -138,8 +140,11 @@ export class CodexAdapter implements ProviderAdapter {
       },
       onTool: (event) => {
         progress()
-        if (event.phase === 'start' && event.toolName?.startsWith(CODEX_MOUSSE_TOOL_PREFIX)) mousseCalls.add(event.callId)
         sink.tool(runtimeToolEvent(event))
+      },
+      onToolNotification: (event) => {
+        if (!event.toolName?.startsWith(CODEX_MOUSSE_TOOL_PREFIX)) return
+        mousseCalls.set(event.callId, event.phase === 'complete' || (mousseCalls.get(event.callId) ?? false))
       },
       onHeartbeat: () => ctl.heartbeat(),
       onLineEdits: (lines) => sink.lineEdits(lines),
@@ -206,7 +211,7 @@ export class CodexAdapter implements ProviderAdapter {
       contextModelKey: contextKey,
       nativeMessages: [],
       providerRef: { ...providerRef, sessionId: result.codexThreadId, nativeTurnId: result.turnId },
-      drain: { mousseCalls: mousseCalls.size }
+      drain: { mousseCalls: mousseCalls.size, toolsSettled: [...mousseCalls.values()].every(Boolean) }
     }
   }
 

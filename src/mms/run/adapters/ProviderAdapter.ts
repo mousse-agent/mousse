@@ -221,10 +221,11 @@ export interface TurnResult {
   providerRef: ProviderRef
   /**
    * What the runtime announced of its Mousse MCP calls this turn, for a `drained_turn` bearer (PR 2
-   * §2): `mousseCalls`, the calls to Mousse's server it started (a runtime that names the server);
-   * `toolsSettled`, every tool call it started reached a completed update and none failed.
+   * §2): `mousseCalls`, the calls to Mousse's server it announced (a runtime that names the server);
+   * `toolCalls`, every tool call it announced (one that does not); `toolsSettled`, each of those
+   * reached a terminal update from the runtime itself.
    */
-  drain?: { mousseCalls?: number; toolsSettled?: boolean }
+  drain?: { mousseCalls?: number; toolCalls?: number; toolsSettled?: boolean }
 }
 
 /**
@@ -234,7 +235,7 @@ export interface TurnResult {
  */
 export type ToolHost = Pick<
   LlmChatOptions,
-  'delegation' | 'toolAccess' | 'toolLedger' | 'browser' | 'onPublishApplet'
+  'delegation' | 'toolAccess' | 'toolLedger' | 'browser' | 'onPublishApplet' | 'runActive'
 >
 
 /** One compaction of the thread's transcript: the compacted context to (re)send. */

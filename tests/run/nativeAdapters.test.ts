@@ -329,6 +329,6 @@ describe('AntigravityAdapter', () => {
     expect(result.totalTokensUsed).toBeUndefined()
     expect(typeof result.totalResponseTimeMs).toBe('number')
     // The subagent tool call never reached a completed update: the turn cannot be proven drained.
-    expect(result.drain).toEqual({ toolsSettled: false })
+    expect(result.drain).toEqual({ toolCalls: 1, toolsSettled: false })
   })
 })

@@ -229,8 +229,8 @@ describe('CodexAdapter', () => {
     const sink = recordingSink()
     const result = await adapter.startTurn(input(), sink, control(), host())
     replay.assertDone()
-    // The drained-turn proof counts the calls Codex started on Mousse's server only.
-    expect(result.drain).toEqual({ mousseCalls: 1 })
+    // The drained-turn proof counts the calls Codex announced on Mousse's server only, each completed by Codex.
+    expect(result.drain).toEqual({ mousseCalls: 1, toolsSettled: true })
     const tools = sink.calls.filter(([name]) => name === 'tool').map(([, event]) => event as Record<string, unknown>)
     expect(tools[0]).toMatchObject({ phase: 'start', callId: 'sub-1', input: { title: 'API reviewer' } })
     expect(tools[0]).not.toHaveProperty('response')
@@ -241,6 +241,29 @@ describe('CodexAdapter', () => {
       expect(event).not.toHaveProperty('input')
       expect(event).not.toHaveProperty('response')
     }
+  })
+
+  it('a Mousse call Codex never completed is not drained: the completion the service adds at the end is not proof', async () => {
+    const mcp = (id: string, tool: string, extra: Record<string, unknown>) => ({ type: 'mcpToolCall', id, server: 'mousse', tool, ...extra })
+    const replay = transport([
+      ...handshake(),
+      ...threadStart(4),
+      ...turnStart(5, 'hello'),
+      // Started and never completed by the server: the turn still completes.
+      note('item/started', { threadId: T, turnId: 'turn-1', item: mcp('m-open', 'thread_read', { arguments: {}, status: 'inProgress' }) }),
+      // Completed with no start the adapter saw: still announced, and settled.
+      note('item/completed', { threadId: T, turnId: 'turn-1', item: mcp('m-late', 'list_tasks', { arguments: {}, status: 'completed' }) }),
+      ...message('msg-1', ['ok']),
+      completed('completed')
+    ])
+    const sink = recordingSink()
+    const result = await new CodexAdapter(() => service(replay)).startTurn(input(), sink, control(), host())
+    replay.assertDone()
+    // The open row still closes in the timeline...
+    const tools = sink.calls.filter(([name]) => name === 'tool').map(([, event]) => event as { callId: string; phase: string })
+    expect(tools).toEqual(expect.arrayContaining([expect.objectContaining({ callId: 'm-open', phase: 'complete' })]))
+    // ...but the proof counts both calls and knows one never settled, so the bearer rotates.
+    expect(result.drain).toEqual({ mousseCalls: 2, toolsSettled: false })
   })
 
   it('runs a turn: text, thinking, tools, edits, usage and the thread reference', async () => {

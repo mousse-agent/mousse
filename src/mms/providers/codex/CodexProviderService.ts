@@ -203,6 +203,12 @@ export type CodexChatInput = {
   onText: (text: string) => void
   onThinking?: (text: string) => void
   onTool?: (event: CodexToolEvent) => void
+  /**
+   * Every `item/started` and `item/completed` notification of a tool item, as the server sent it
+   * (never the completions `closeTools` adds for rows left open): the drained-turn proof of the
+   * turn's Mousse MCP calls.
+   */
+  onToolNotification?: (event: { phase: 'start' | 'complete'; callId: string; toolName?: string }) => void
   onLineEdits?: (lines: number) => void
   /** The server retries a failed model call itself (`error` with `willRetry`). */
   onRetry?: (attempt: number) => void
@@ -628,6 +634,7 @@ class TurnRun {
       const event = toolEvent(item, 'start')
       if (event) {
         this.openTools.set(item.id, event)
+        this.input.onToolNotification?.({ phase: 'start', callId: event.callId, toolName: event.toolName })
         this.input.onTool?.(event)
       }
       return
@@ -645,6 +652,8 @@ class TurnRun {
           this.input.onText(this.text)
         }
       }
+      const settled = toolEvent(item, 'complete')
+      if (settled) this.input.onToolNotification?.({ phase: 'complete', callId: settled.callId, toolName: settled.toolName })
       const open = this.openTools.get(item.id)
       if (open) {
         this.openTools.delete(item.id)

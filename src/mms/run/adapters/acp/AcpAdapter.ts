@@ -127,7 +127,7 @@ export class AcpAdapter implements ProviderAdapter {
       contextModelKey: contextKey,
       nativeMessages: [],
       providerRef,
-      drain: { toolsSettled: [...toolCalls.values()].every((status) => status === 'completed') }
+      drain: { toolCalls: toolCalls.size, toolsSettled: [...toolCalls.values()].every((status) => status === 'completed') }
     }
   }
 
