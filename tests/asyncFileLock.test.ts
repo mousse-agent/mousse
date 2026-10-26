@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { FileLockBusyError, setReclaimDepthForTests, setReclaimHookForTests, tryAcquireOnceForTests, withAsyncFileLock } from '../src/mms/platform/asyncFileLock'
+import { FileLockBusyError, releaseForTests, setReclaimDepthForTests, setReclaimHookForTests, tryAcquireOnceForTests, withAsyncFileLock } from '../src/mms/platform/asyncFileLock'
 import { PROCESS_INSTANCE_ID } from '../src/mms/queue/processLiveness'
 import { crashChild } from './support/build'
 
@@ -186,6 +186,35 @@ describe('withAsyncFileLock', () => {
     expect(replacement).toMatch(/^[0-9a-f]{32}$/)
     expect(JSON.parse(readFileSync(lock, 'utf8')).token).toBe(replacement)
     expect(readdirSync(dirname(lock))).toEqual(['test.lock'])
+  })
+
+  it('a holder paused before its release puts back a lock that replaced its own meanwhile', () => {
+    const lock = lockPath()
+    mkdirSync(dirname(lock), { recursive: true })
+    const mine = tryAcquireOnceForTests(lock)!
+    let replacement: string | null = null
+    setReclaimHookForTests((step) => {
+      if (step !== 'releasing' || replacement !== null) return
+      setReclaimHookForTests(null)
+      // While the holder is paused past its hold, another process reclaims and takes the lock.
+      unlinkSync(lock)
+      replacement = tryAcquireOnceForTests(lock)
+    })
+    releaseForTests(lock, mine)
+    expect(replacement).toMatch(/^[0-9a-f]{32}$/)
+    expect(JSON.parse(readFileSync(lock, 'utf8')).token).toBe(replacement)
+    expect(readdirSync(dirname(lock))).toEqual(['test.lock'])
+  })
+
+  it('the next acquire clears what a crashed removal set aside, and only that', async () => {
+    const lock = lockPath()
+    mkdirSync(dirname(lock), { recursive: true })
+    const crashed = `test.lock.${deadPid()}.aaaa.removed`
+    const inFlight = `test.lock.${process.ppid}.bbbb.removed`
+    writeFileSync(join(dirname(lock), crashed), owner('x'))
+    writeFileSync(join(dirname(lock), inFlight), owner('y'))
+    await withAsyncFileLock(lock, async () => undefined, { waitMs: 0 })
+    expect(readdirSync(dirname(lock))).toEqual([inFlight])
   })
 
   it('reclaims a live pid whose lock is older than maxHoldMs (pid reuse), and only then', async () => {

@@ -1,5 +1,11 @@
 /**
- * A cross-process file lock that may be held across `await`.
+ * A cross-process ADVISORY file lock that may be held across `await`.
+ *
+ * It gives mutual exclusion in the normal case (one refresh at a time, one install at a time), but
+ * no file lock can guarantee it: a holder suspended past `maxHoldMs` resumes as if it still held
+ * the lock, and the rare races documented at `removeIfSame` remain. Callers that need correctness
+ * must make their commit conditional on what they read (the ChatGPT store's
+ * `UPDATE … WHERE revision = ?`), and treat a lost race as "read again".
  *
  * `withFileLock` (scheduled/fileLock.ts) is synchronous: it cannot cover a network round trip. This
  * lock uses the same owner record and the same stale rules, and adds waiting:
@@ -32,9 +38,9 @@
  */
 
 import { createHash, randomBytes } from 'node:crypto'
-import { closeSync, existsSync, linkSync, mkdirSync, openSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
-import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
+import { closeSync, existsSync, linkSync, mkdirSync, openSync, readdirSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs'
+import { basename, dirname, join, resolve } from 'node:path'
+import { isOwnerLive, isProcessAlive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import {
   FileLockBusyError,
   mayReclaimUnreadableLock,
@@ -189,7 +195,7 @@ function isStale(path: string, snap: Snapshot, maxHoldMs: number | undefined): b
 }
 
 /** Tests only: runs at each step of a reclaim, so a test can interleave reclaimers. */
-let reclaimHook: ((step: 'checked' | 'marked' | 'removing', path: string) => void) | null = null
+let reclaimHook: ((step: 'checked' | 'marked' | 'removing' | 'releasing', path: string) => void) | null = null
 export function setReclaimHookForTests(hook: typeof reclaimHook): void {
   reclaimHook = hook
 }
@@ -217,9 +223,9 @@ function markerFor(root: string, path: string, key: string): string {
  * store does), so a holder that lost its lock this way, or was suspended past `maxHoldMs`, cannot
  * overwrite anything.
  */
-function removeIfSame(path: string, key: string): boolean {
-  reclaimHook?.('removing', path)
-  const moved = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.removed`
+function removeIfSame(path: string, key: string, notify = true): boolean {
+  if (notify) reclaimHook?.('removing', path)
+  const moved = `${path}.${process.pid}.${randomBytes(6).toString('hex')}${REMOVED_SUFFIX}`
   try {
     renameSync(path, moved)
   } catch {
@@ -280,11 +286,43 @@ export function tryAcquireOnceForTests(lockPath: string, maxHoldMs?: number): st
 }
 
 /** Deletes the lock file only while it still carries our token. */
+/**
+ * Releases a lock (or marker) only while it still carries our token, with the same conditional
+ * removal as a reclaim: a holder paused after its check, whose lock was reclaimed and replaced
+ * meanwhile, puts the replacement back instead of deleting it.
+ */
 function release(lockPath: string, token: string): void {
+  if (readFileLockOwner(lockPath)?.token !== token) return
+  reclaimHook?.('releasing', lockPath)
+  removeIfSame(lockPath, `token:${token}`, false)
+}
+
+/** Tests only: releases a lock taken with `tryAcquireOnceForTests`. */
+export function releaseForTests(lockPath: string, token: string): void {
+  release(lockPath, token)
+}
+
+const REMOVED_SUFFIX = '.removed'
+
+/**
+ * Deletes files a conditional removal set aside and never cleaned up because its process died in
+ * between. Only names whose process is gone (or is this one, which never sweeps while it removes)
+ * are touched, so a removal in flight in another process is left alone.
+ */
+function sweepRemoved(lockPath: string): void {
+  const directory = dirname(lockPath)
+  const prefix = `${basename(lockPath)}.`
+  let names: string[]
   try {
-    if (readFileLockOwner(lockPath)?.token === token) unlinkSync(lockPath)
+    names = readdirSync(directory)
   } catch {
-    /* a missing file is already released */
+    return
+  }
+  for (const name of names) {
+    if (!name.startsWith(prefix) || !name.endsWith(REMOVED_SUFFIX)) continue
+    const pid = Number(name.slice(prefix.length).split('.')[0])
+    if (!Number.isInteger(pid) || (pid !== process.pid && isProcessAlive(pid))) continue
+    try { unlinkSync(join(directory, name)) } catch { /* gone already */ }
   }
 }
 
@@ -303,6 +341,7 @@ function pause(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 async function acquireFile(lockPath: string, deadline: number, signal: AbortSignal, maxHoldMs: number | undefined): Promise<FileLockOwner> {
+  sweepRemoved(lockPath)
   for (;;) {
     signal.throwIfAborted()
     const owner = tryCreate(lockPath)
