@@ -1,6 +1,5 @@
 import { memo, useState } from "react";
 import { Streamdown } from "streamdown";
-import { createCodePlugin } from "@streamdown/code";
 import {
   IconCheck,
   IconChevronsDown,
@@ -11,13 +10,10 @@ import {
   IconX,
 } from "../../../../lib/icons";
 import { Markdown } from "../markdown";
+import { codeHighlighter } from "../code-highlighter";
 import { IconSpinner } from "../icons";
 import { areToolPropsEqual, getToolStatus } from "../utils/format-tool";
 import { useQuickActionApproval } from "./quick-action-approval";
-
-const code = createCodePlugin({
-  themes: ["github-light", "github-dark"],
-});
 
 export type QuickActionToolProps = {
   part: {
@@ -237,7 +233,7 @@ export const QuickActionTool = memo(function QuickActionTool({
                   <div className="px-3 text-base text-an-tool-color-muted">
                   {isBash ? (
                     <div className="an-markdown an-code-no-header">
-                      <Streamdown plugins={{ code }} controls={{ code: false }}>
+                      <Streamdown plugins={{ code: codeHighlighter }} controls={{ code: false }}>
                         {"```bash\n" +
                           (payload.length > 4000
                             ? `${payload.slice(0, 4000)}…`
