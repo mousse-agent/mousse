@@ -19,6 +19,7 @@
     "tests/gitServiceWrites.test.ts",
     "tests/guiMmsController.test.ts",
     "tests/harness/chatgpt/crossProcess.test.ts",
+    "tests/harness/chatgpt/storeProcesses.test.ts",
     "tests/harness/piRuntimeProcess.test.ts",
     "tests/headlessCommand.test.ts",
     "tests/mmsOwnerLease.test.ts",

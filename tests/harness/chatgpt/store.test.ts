@@ -1,11 +1,11 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { chatgptHostIdPath, ensureChatGptHostId } from '../../../src/mms/harness/chatgpt/hostId'
 import { ChatGptLifecycle } from '../../../src/mms/harness/chatgpt/lifecycle'
 import type { SecretCodec } from '../../../src/mms/providers/secretCodec'
-import { ChatGptStore, chatgptStorePath, emptyStore, profileKeyOf, setSwapHookForTests, type ChatGptStoreData } from '../../../src/mms/harness/chatgpt/store'
+import { ChatGptStore, chatgptStorePath, emptyStore, profileKeyOf, setStoreHookForTests, type ChatGptStoreData } from '../../../src/mms/harness/chatgpt/store'
 import { FakeIssuer, fakeVault, guardNetwork, plainCodec, tempHomes } from './fakeIssuer'
 import { chatgptAuth, signIn, startSignIn } from './signInFlow'
 
@@ -381,13 +381,13 @@ describe('ChatGPT store', () => {
     const path = chatgptStorePath(profileHome, 'codex:managed')
     new ChatGptStore(path, plainCodec).write(SAMPLE())
     damageHeader(path)
-    setSwapHookForTests(() => {
-      throw new Error('crash')
+    setStoreHookForTests((step) => {
+      if (step === 'swap-moved') throw new Error('crash')
     })
     try {
       expect(() => new ChatGptStore(path, plainCodec).recover()).toThrow('crash')
     } finally {
-      setSwapHookForTests(null)
+      setStoreHookForTests(null)
     }
     expect(existsSync(path)).toBe(false)
     const after = new ChatGptStore(path, plainCodec).read()
@@ -403,14 +403,15 @@ describe('ChatGPT store', () => {
     new ChatGptStore(path, plainCodec).write(SAMPLE())
     damageHeader(path)
     const before = readFileSync(path)
-    setSwapHookForTests(() => {
+    setStoreHookForTests((step) => {
+      if (step !== 'swap-moved') return
       for (const name of readdirSync(dirname(path))) if (name.includes('.new-')) rmSync(join(dirname(path), name))
       throw new Error('crash')
     })
     try {
       expect(() => new ChatGptStore(path, plainCodec).recover()).toThrow('crash')
     } finally {
-      setSwapHookForTests(null)
+      setStoreHookForTests(null)
     }
     expect(() => new ChatGptStore(path, plainCodec).read()).toThrow(expect.objectContaining({ failure: 'storage' }))
     expect(readFileSync(path).equals(before)).toBe(true)
@@ -445,20 +446,16 @@ describe('ChatGPT store', () => {
     new ChatGptStore(path, plainCodec).write({ ...data, credentialEpoch: 6 })
   })
 
-  it('clears replacements an interrupted swap left before saving its intent', () => {
+  it('clears replacement files a swap abandoned, under the mutex, whatever their age', () => {
     const { profileHome } = homes()
     const path = chatgptStorePath(profileHome, 'i')
     new ChatGptStore(path, plainCodec).write(SAMPLE())
-    const old = `${path}.new-11111111-1111-4111-8111-111111111111`
-    const recent = `${path}.new-22222222-2222-4222-8222-222222222222`
-    writeFileSync(old, 'x')
-    writeFileSync(recent, 'y')
-    const longAgo = new Date(Date.now() - 10 * 60_000)
-    utimesSync(old, longAgo, longAgo)
+    const abandoned = [`${path}.new-11111111-1111-4111-8111-111111111111`, `${path}.new-22222222-2222-4222-8222-222222222222`]
+    for (const file of abandoned) writeFileSync(file, 'x')
+    // Nothing else holds the mutex, so they are not being worked on (a live one is covered in
+    // storeProcesses.test.ts).
     new ChatGptStore(path, plainCodec).read()
-    expect(existsSync(old)).toBe(false)
-    // One in flight in another process is left alone.
-    expect(existsSync(recent)).toBe(true)
+    for (const file of abandoned) expect(existsSync(file)).toBe(false)
   })
 
   it('the profile key covers client, subject, ID token and epoch', () => {

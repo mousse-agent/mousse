@@ -208,8 +208,8 @@ const corrupt = () => new ChatGptAuthError('protocol', 'storage', MESSAGES.stora
 
 /** A replacement database is built as `chatgpt.db.new-<uuid>` before it takes the name. */
 const TEMPORARY_INFIX = '.new-'
-/** A replacement older than this was left by a swap that never saved its intent. */
-const ORPHAN_TEMPORARY_MS = 60_000
+/** How long an operation waits for another process's maintenance to finish. */
+const MUTEX_WAIT_MS = 15_000
 
 /** Saved before a damaged database is swapped out, so a crash mid-swap can be finished. */
 interface SwapIntent {
@@ -217,11 +217,19 @@ interface SwapIntent {
   aside: string
 }
 
-/** Tests only: runs between the two halves of a swap; a throw there acts like a crash. */
-let swapHook: (() => void) | null = null
-export function setSwapHookForTests(hook: (() => void) | null): void {
-  swapHook = hook
+/**
+ * Tests only: runs at named points inside the maintenance mutex, so a test can pause or "crash"
+ * (throw) there: after an encrypted commit before its marker is promoted, after a replacement is
+ * built before its swap intent is saved, and between the two halves of a swap.
+ */
+type StoreHookStep = 'encrypted-committed' | 'swap-built' | 'swap-moved'
+let storeHook: ((step: StoreHookStep) => void) | null = null
+export function setStoreHookForTests(hook: ((step: StoreHookStep) => void) | null): void {
+  storeHook = hook
 }
+
+/** Mutexes this process holds, by control database, so maintenance can nest. */
+const heldMutexes = new Map<string, { depth: number }>()
 
 /** Whether a damaged database file still shows encrypted payloads, so its replacement stays encrypted. */
 function wasEncryptedFile(path: string): boolean {
@@ -270,7 +278,6 @@ export class ChatGptStore {
           throw error
         }
       }
-      this.settleEncryptionMarker(database)
       return work(database)
     } catch (error) {
       if (error instanceof ChatGptAuthError || error instanceof CorruptDatabase) throw error
@@ -321,7 +328,8 @@ export class ChatGptStore {
    * fails typed and is never touched. A corrupt payload or database fails typed (`storage`).
    */
   read(): ChatGptStoreData {
-    this.finishSwap()
+    // Maintenance is never done without the mutex: a read that finds some takes it and redoes it.
+    if (this.needsMaintenance()) this.withMutex(() => this.maintain())
     if (!existsSync(this.path)) {
       // A database set aside earlier and now missing must be recovered, not read as never written.
       if (this.wasSetAside()) throw corrupt()
@@ -347,7 +355,13 @@ export class ChatGptStore {
    * Anything else (a locked vault, a newer Mousse, a readable store) is returned or thrown as `read`.
    */
   recover(): ChatGptStoreData {
-    this.finishSwap()
+    return this.withMutex(() => {
+      this.maintain()
+      return this.recoverHolding()
+    })
+  }
+
+  private recoverHolding(): ChatGptStoreData {
     if (!existsSync(this.path)) return this.replaceDamagedFile()
     let promote = false
     try {
@@ -376,23 +390,17 @@ export class ChatGptStore {
           throw error
         }
       })
-      if (promote) this.promoteEncrypted()
+      if (promote) {
+        storeHook?.('encrypted-committed')
+        this.promoteEncrypted()
+      }
       return recovered
     } catch (error) {
       if (!(error instanceof CorruptDatabase)) {
-        if (promote) this.settleAfterFailure()
+        if (promote) this.settlePending()
         throw error
       }
       return this.replaceDamagedFile()
-    }
-  }
-
-  /** After a failed commit, settles a pending marker from what is actually committed. */
-  private settleAfterFailure(): void {
-    try {
-      this.withDatabase(() => undefined)
-    } catch {
-      // Unreadable now: the pending marker stays and keeps encryption required until settled.
     }
   }
 
@@ -402,7 +410,7 @@ export class ChatGptStore {
    * The complete replacement is built first, under a temporary name, sealed as the old store
    * required; a seal that fails leaves everything untouched. A swap intent naming both files is
    * saved next, so a crash at any later point is finished or rolled back by the next open
-   * (`finishSwap`), and a missing database is never mistaken for a store never written. The old
+   * (`maintain`), and a missing database is never mistaken for a store never written. The old
    * journal files move aside before the old database, so the new database never meets an old
    * WAL. Any failure puts back what moved and removes the replacement; only a completed swap
    * counts as recovered. The replacement has a new incarnation, so data read from the old file can
@@ -433,6 +441,7 @@ export class ChatGptStore {
     } catch {
       giveUp(new ChatGptAuthError('protocol', 'storage', MESSAGES.storageWrite))
     }
+    storeHook?.('swap-built')
     const aside = `${this.path}.corrupt-${new Date().toISOString().replace(/:/g, '-')}`
     try {
       atomicWriteJsonSync(this.swapIntentPath(), { temporary, aside } satisfies SwapIntent, { mode: 0o600 })
@@ -456,7 +465,7 @@ export class ChatGptStore {
       giveUp(new ChatGptAuthError('operation_busy', 'storage', MESSAGES.storageSetAside))
     }
     // Tests only: a crash between the two halves of the swap (no clean-up runs).
-    swapHook?.()
+    storeHook?.('swap-moved')
     try {
       renameSync(temporary, this.path)
     } catch {
@@ -472,13 +481,81 @@ export class ChatGptStore {
     return `${this.path}.swap`
   }
 
+  /** The sidecar database whose write lock is the maintenance mutex. Never replaced. */
+  private controlPath(): string {
+    return join(dirname(this.path), 'chatgpt.control.db')
+  }
+
   /**
-   * Finishes a swap a crash interrupted: if the replacement is complete but not in place, it takes
-   * the name; if it is gone, the original comes back. Then clears replacements left by a swap that
-   * never saved its intent (older than a minute, so one in flight elsewhere is left alone). Fails
-   * typed while an intent remains and the database is missing.
+   * Runs `work` holding the maintenance mutex: a `BEGIN IMMEDIATE` transaction on the sidecar
+   * control database, held for the whole call and rolled back afterwards. SQLite's lock belongs to
+   * the OS: it ends when its process does, and it never expires while the process lives, however
+   * long it is suspended. Every write, every recovery and every maintenance action (settling a
+   * pending marker, finishing or rolling back a swap, clearing replacements) runs under it, so
+   * whatever maintenance finds that is not being worked on now was abandoned. `work` is
+   * synchronous. Nested calls in this process share the outer hold.
    */
-  private finishSwap(): void {
+  private withMutex<T>(work: () => T): T {
+    const key = this.controlPath()
+    const held = heldMutexes.get(key)
+    if (held) {
+      held.depth++
+      try {
+        return work()
+      } finally {
+        held.depth--
+      }
+    }
+    mkdirSync(dirname(key), { recursive: true, mode: 0o700 })
+    let control: DatabaseSync
+    try {
+      control = new DatabaseSync(key)
+    } catch {
+      throw new ChatGptAuthError('protocol', 'storage', MESSAGES.storageWrite)
+    }
+    try {
+      try {
+        control.exec(`PRAGMA busy_timeout=${MUTEX_WAIT_MS}`)
+        control.exec('BEGIN IMMEDIATE')
+      } catch (error) {
+        if (sqliteCode(error) === SQLITE_BUSY) throw new ChatGptAuthError('operation_busy', 'busy', MESSAGES.busy)
+        throw new ChatGptAuthError('protocol', 'storage', MESSAGES.storageWrite)
+      }
+      heldMutexes.set(key, { depth: 1 })
+      try {
+        return work()
+      } finally {
+        heldMutexes.delete(key)
+        try { control.exec('ROLLBACK') } catch { /* nothing to roll back */ }
+      }
+    } finally {
+      try { control.close() } catch { /* already closed */ }
+    }
+  }
+
+  /** Whether there is maintenance to do: a pending marker, a swap intent or a replacement file. */
+  private needsMaintenance(): boolean {
+    if (existsSync(this.pendingMarker()) || existsSync(this.swapIntentPath())) return true
+    return this.temporaries().length > 0
+  }
+
+  private temporaries(): string[] {
+    const prefix = `${basename(this.path)}${TEMPORARY_INFIX}`
+    try {
+      return readdirSync(dirname(this.path)).filter((name) => name.startsWith(prefix)).map((name) => join(dirname(this.path), name))
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * Maintenance, under the mutex only. Nothing else holds it, so any swap intent, replacement file
+   * or pending marker found here belongs to a process that died:
+   * - a swap intent is finished if its replacement is complete, or rolled back if it is gone;
+   * - replacement files are removed;
+   * - a pending marker is promoted if the committed row is encrypted, or removed if not.
+   */
+  private maintain(): void {
     const intentPath = this.swapIntentPath()
     if (existsSync(intentPath)) {
       let intent: SwapIntent | null = null
@@ -502,21 +579,25 @@ export class ChatGptStore {
           throw corrupt()
         }
       }
-      if (!existsSync(this.path)) throw corrupt()
-      if (intent) rmSync(intent.temporary, { force: true })
+      if (!existsSync(this.path) && this.wasSetAside()) throw corrupt()
       rmSync(intentPath, { force: true })
     }
-    const directory = dirname(this.path)
-    const prefix = `${basename(this.path)}${TEMPORARY_INFIX}`
-    let names: string[] = []
-    try { names = readdirSync(directory) } catch { /* no directory yet */ }
-    for (const name of names) {
-      if (!name.startsWith(prefix)) continue
-      const file = join(directory, name)
-      try {
-        if (Date.now() - statSync(file).mtimeMs > ORPHAN_TEMPORARY_MS) rmSync(file, { force: true })
-      } catch { /* gone already */ }
+    for (const file of this.temporaries()) rmSync(file, { force: true })
+    this.settlePending()
+  }
+
+  /** Settles a pending marker from the committed row (under the mutex). */
+  private settlePending(): void {
+    if (!existsSync(this.pendingMarker()) || !existsSync(this.path)) return
+    let encrypted: boolean
+    try {
+      encrypted = this.withDatabase((database) => this.row(database)?.encrypted === 1)
+    } catch {
+      // Unreadable now: the pending marker stays and keeps encryption required until settled.
+      return
     }
+    if (encrypted) this.promoteEncrypted()
+    else rmSync(this.pendingMarker(), { force: true })
   }
 
   /** Whether a damaged database was set aside here, so a missing one is not a store never written. */
@@ -565,13 +646,6 @@ export class ChatGptStore {
     rmSync(this.pendingMarker(), { force: true })
   }
 
-  /** Settles a pending marker from the committed row (run on every open). */
-  private settleEncryptionMarker(database: DatabaseSync): void {
-    if (!existsSync(this.pendingMarker())) return
-    if (this.row(database)?.encrypted === 1) this.promoteEncrypted()
-    else rmSync(this.pendingMarker(), { force: true })
-  }
-
   private seal(data: ChatGptStoreData, wasEncrypted: boolean): { stored: string; encrypted: boolean } {
     const { revision: _revision, signInFence: _fence, incarnation: _incarnation, ...payload } = data
     const required = wasEncrypted || existsSync(this.encryptionMarker()) || existsSync(this.pendingMarker())
@@ -587,7 +661,7 @@ export class ChatGptStore {
    * or a store that once held encrypted data under a host that cannot encrypt).
    */
   assertWritable(): void {
-    this.finishSwap()
+    if (this.needsMaintenance()) this.withMutex(() => this.maintain())
     if (!existsSync(this.path)) {
       this.seal(emptyStore(), false)
       return
@@ -615,10 +689,16 @@ export class ChatGptStore {
    * cannot seal it now fails `storage` (or `storage_locked`), never `operation_busy`.
    */
   write(data: ChatGptStoreData): void {
+    this.withMutex(() => {
+      this.maintain()
+      this.writeHolding(data)
+    })
+  }
+
+  private writeHolding(data: ChatGptStoreData): void {
     const changed = () => new ChatGptAuthError('operation_busy', 'busy', MESSAGES.storeChanged)
     let incarnation = ''
     let encrypted = false
-    this.finishSwap()
     if (!existsSync(this.path) && this.wasSetAside()) throw corrupt()
     try {
       this.withDatabase((database) => {
@@ -649,11 +729,14 @@ export class ChatGptStore {
       })
     } catch (error) {
       // A rejected write must not change the encryption policy: settle from the committed row.
-      if (encrypted) this.settleAfterFailure()
+      if (encrypted) this.settlePending()
       if (error instanceof CorruptDatabase) throw corrupt()
       throw error
     }
-    if (encrypted) this.promoteEncrypted()
+    if (encrypted) {
+      storeHook?.('encrypted-committed')
+      this.promoteEncrypted()
+    }
     data.revision += 1
     data.incarnation = incarnation
   }
