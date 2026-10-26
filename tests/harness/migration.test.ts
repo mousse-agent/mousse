@@ -157,4 +157,17 @@ describe('legacy profiles', () => {
       profile.stop()
     }
   })
+
+  it('keeps a Cursor record untouched, and a Cursor selection names no legacy provider (never the pi:cursor loop)', async () => {
+    const cursor = { driver: 'cursor', enabled: true, config: { displayName: 'Work' } }
+    const profile = legacyProfile({ loginPolicy: 'cli' }, { claude: { driver: 'claude', enabled: true }, 'cursor:work': cursor })
+    try {
+      await profile.harness.instances.setEnabled('claude', { kind: 'device' }, false)
+      expect(profile.section().instances).toMatchObject({ 'cursor:work': cursor })
+      const binding = { instanceId: 'cursor:work', driver: 'cursor' as const, accountGeneration: 0, homeId: 'default', configRevision: 0, model: 'default', policy: { mode: 'default' as const, approvals: 'ask' as const } }
+      expect(profile.harness.selectionOf(binding)).toEqual({ instanceId: 'cursor:work', llmProvider: '', model: 'default' })
+    } finally {
+      profile.stop()
+    }
+  })
 })

@@ -55,7 +55,7 @@
     "@anthropic-ai/claude-agent-sdk": "0.3.291",
     "@anthropic-ai/sdk": "^0.123.0",
     "@base-ui/react": "^1.7.0",
-    "@cursor/sdk": "^1.0.22",
+    "@cursor/sdk": "1.0.35",
     "@earendil-works/pi-ai": "0.85.1",
     "@earendil-works/pi-coding-agent": "0.85.1",
     "@earendil-works/pi-tui": "0.85.1",
@@ -145,6 +145,7 @@
     "zustand": "^5.0.2"
   },
   "overrides": {
+    "@cursor/sdk": "$@cursor/sdk",
     "@hono/node-server": "^2.0.12",
     "@xmldom/xmldom": "0.8.15",
     "baseline-browser-mapping": "2.11.21",
@@ -220,7 +221,9 @@
       "node_modules/node-pty/prebuilds/win32-x64/**",
       "node_modules/node-pty/prebuilds/linux-x64/**",
       "node_modules/node-pty/third_party/**",
-      "node_modules/@node-datachannel/**"
+      "node_modules/@node-datachannel/**",
+      "node_modules/@cursor/sdk-*/**",
+      "out/main/cursorHost.js"
     ],
     "npmRebuild": false,
     "extraResources": [

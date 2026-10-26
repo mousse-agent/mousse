@@ -56,6 +56,14 @@ export const DRIVER_INFO: Record<HarnessDriverKind, DriverInfo> = {
     multiInstance: false,
     customModels: false
   },
+  cursor: {
+    label: 'Cursor',
+    iconId: 'cursor',
+    family: 'agent',
+    description: "Cursor's agent, signed in with your Cursor account or an API key. Cursor approves its tools itself.",
+    multiInstance: true,
+    customModels: false
+  },
   acp: {
     label: 'ACP agent',
     iconId: 'acp',

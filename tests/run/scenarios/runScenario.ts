@@ -28,6 +28,9 @@ import { antigravityDriver } from '../../../src/mms/harness/drivers/antigravity'
 import { acpDriver } from '../../../src/mms/harness/drivers/acp'
 import { claudeCodeDriver } from '../../../src/mms/harness/drivers/claudeCode'
 import { codexDriver } from '../../../src/mms/harness/drivers/codex'
+import { cursorDriver } from '../../../src/mms/harness/drivers/cursor'
+import { instanceStateDir } from '../../../src/mms/harness/instances'
+import { replayCursorHost } from '../../../src/mms/run/testkit/cursorHostReplay'
 import { piLegacyDriver } from '../../../src/mms/harness/drivers/piLegacy'
 import { ProviderInstanceService } from '../../../src/mms/providers/ProviderInstanceService'
 import { replayPiChat } from '../../../src/mms/run/testkit/piChatReplay'
@@ -50,6 +53,8 @@ const SELECTION: Record<string, { instanceId?: string; llmProvider: string; mode
   pi: { llmProvider: 'openai', model: 'gpt-replay' },
   // A Custom command: named by its instance only (no legacy provider name), on the agent's own model.
   acp: { instanceId: 'acp:replay', llmProvider: '', model: 'default' },
+  // An added Cursor entry, on the model Cursor chooses (Auto).
+  cursor: { instanceId: 'cursor:replay', llmProvider: '', model: 'default' },
   'claude-subscription': { llmProvider: 'claude-subscription', model: 'sonnet' },
   antigravity: { llmProvider: 'antigravity', model: 'replay-model' },
   codex: { llmProvider: 'codex', model: 'gpt-replay-codex' }
@@ -243,17 +248,26 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
       antigravityDriver({ builtIn: () => services.antigravity! }),
       // The generic driver runs for real; only its agent connection is replayed.
       acpDriver({ connect: (_context, request) => replayAcpProcess(transport)(request), pty: { available: () => false } }),
-      codexDriver({ builtIn: () => services.codex! })
+      codexDriver({ builtIn: () => services.codex! }),
+      // The driver and its session lifecycle run for real; only the host process is replayed.
+      cursorDriver({ connect: replayCursorHost(transport) })
     ]
   })
   stops.push(() => harness.stop())
   if (involved.has('acp')) harness.instanceMap.setEntry('acp:replay', { driver: 'acp', enabled: true, config: { displayName: 'Replay agent', binaryPath: process.execPath } })
+  if (involved.has('cursor')) {
+    // A key saved for the entry (the vault keeps plain text outside Electron).
+    const stateDir = instanceStateDir(home, 'cursor:replay')
+    mkdirSync(stateDir, { recursive: true })
+    writeFileSync(join(stateDir, 'secrets.json'), JSON.stringify({ apiKey: 'replay-key', apiKeySubject: 'cursor-user:1' }))
+    harness.instanceMap.setEntry('cursor:replay', { driver: 'cursor', enabled: true, config: { displayName: 'Replay Cursor' } })
+  }
   orch.setHarness(harness)
 
   try {
     let thread
     // ACP agents work in a project workspace.
-    if (adapterId === 'antigravity' || adapterId === 'acp') {
+    if (adapterId === 'antigravity' || adapterId === 'acp' || adapterId === 'cursor') {
       const workspace = join(home, 'workspace')
       mkdirSync(workspace)
       const project = projects.openProject(workspace)

@@ -15,6 +15,7 @@ import { antigravityDriver } from './harness/drivers/antigravity'
 import { acpDriver } from './harness/drivers/acp'
 import { claudeCodeDriver } from './harness/drivers/claudeCode'
 import { codexDriver } from './harness/drivers/codex'
+import { cursorDriver } from './harness/drivers/cursor'
 import { piLegacyDriver } from './harness/drivers/piLegacy'
 import { harnessAuthRunner, recordHarnessSpawn } from './harness/spawn'
 import { spawnCodexAppServer } from './providers/codex/CodexAppServerClient'
@@ -376,7 +377,8 @@ export class MmsProfileServices {
         }),
         codexDriver({ builtIn: () => this.codex }),
         antigravityDriver({ builtIn: () => this.antigravity }),
-        acpDriver()
+        acpDriver(),
+        cursorDriver()
       ],
       questions: this.questions,
       prefs: {

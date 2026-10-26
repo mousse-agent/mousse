@@ -57,6 +57,12 @@ export function claudeMcpServers(attachment: McpAttachment | null | undefined): 
   }
 }
 
+/** Cursor SDK `mcpServers` (SPEC §15.2): the Mousse server over HTTP, or none. */
+export function cursorMcpServers(attachment: McpAttachment | null | undefined): Record<string, { type: 'http'; url: string; headers: Record<string, string> }> {
+  if (!attachment) return {}
+  return { [MOUSSE_MCP_SERVER_NAME]: { type: 'http', url: attachment.url, headers: { Authorization: bearerHeader(attachment) } } }
+}
+
 /** Tool-name prefix Claude gives the Mousse server's tools. */
 export const CLAUDE_MOUSSE_TOOL_PREFIX = `mcp__${MOUSSE_MCP_SERVER_NAME}__`
 

@@ -46,6 +46,8 @@ asarUnpack:
   - node_modules/node-pty/prebuilds/linux-x64/**
   - node_modules/node-pty/third_party/**
   - node_modules/@node-datachannel/**
+  - node_modules/@cursor/sdk-*/**
+  - out/main/cursorHost.js
 npmRebuild: false
 extraResources:
   - from: macros

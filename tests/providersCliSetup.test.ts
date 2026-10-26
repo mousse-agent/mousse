@@ -247,7 +247,7 @@ describe('Add provider choices', () => {
 
   it('offers a second Claude Code account and skips single-instance agents already in the list, on or off', () => {
     const choices = addChoices([claude, codex, antigravity], [])
-    expect(choices.map((choice) => [choice.kind, choice.label])).toEqual([['new', 'Claude Code · another account'], ['new', 'Custom command']])
+    expect(choices.map((choice) => [choice.kind, choice.label])).toEqual([['new', 'Claude Code · another account'], ['new', 'Cursor'], ['new', 'Custom command']])
   })
 
   it('always offers a Custom command, never as another account', () => {
@@ -261,6 +261,7 @@ describe('Add provider choices', () => {
     expect(choices.map((choice) => [choice.kind, choice.label])).toEqual([
       ['new', 'Claude Code'],
       ['new', 'Antigravity'],
+      ['new', 'Cursor'],
       ['new', 'Custom command']
     ])
     expect(choices.every((choice) => choice.kind === 'new' && choice.existing === undefined)).toBe(true)
@@ -274,6 +275,7 @@ describe('Add provider choices', () => {
       loginOption('anthropic', { configured: true })
     ])
     expect(choices.filter((choice) => choice.kind === 'api').map((choice) => choice.label)).toEqual(['openai'])
+    expect(choices.find((choice) => choice.key === 'new:cursor')).toMatchObject({ label: 'Cursor', group: 'Agents' })
   })
 
   it('shows a provider with several sign-in methods once, with its methods to choose from', () => {

@@ -8,7 +8,7 @@ import { SCENARIOS } from './index'
 import { FIXTURES_DIR, fixtureAdapters, runScenario } from './runScenario'
 import { join } from 'node:path'
 
-const ADAPTERS = ['acp', 'antigravity', 'claude-subscription', 'codex', 'pi']
+const ADAPTERS = ['acp', 'antigravity', 'claude-subscription', 'codex', 'cursor', 'pi']
 
 // A scenario may declare a subset of adapters (`delegate-child` is pi-only: vendor runtimes get no
 // ToolHost until Phase 5).

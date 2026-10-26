@@ -1,0 +1,9 @@
+{"kind":"transcript","adapter":"cursor","scenario":"provider-error","boundary":"Cursor host NDJSON on the host process: requests out; replies, run updates and exits in","recordedAt":"hand-authored","version":1}
+{"dir":"out","frame":{"kind":"request","method":"create","params":{"apiKey":"replay-key","model":{"id":"default"},"mode":"agent","settingSources":["project","user","team","mdm","plugins"],"autoReview":true}}}
+{"dir":"in","frame":{"kind":"reply","method":"create","result":{"agentId":"agent-1"}}}
+{"dir":"out","frame":{"kind":"request","method":"send","params":{"agentId":"agent-1","text":"Summarise the repository","model":{"id":"default"},"mode":"agent"}}}
+{"dir":"in","frame":{"kind":"reply","method":"send","result":{"runId":"run-1"}}}
+{"dir":"in","frame":{"kind":"delta","runId":"run-1","update":{"type":"text-delta","text":"Partial"}}}
+{"dir":"in","frame":{"kind":"run_end","runId":"run-1","status":"error","error":{"message":"Upstream overloaded"}}}
+{"dir":"out","frame":{"kind":"request","method":"close","params":{"agentId":"agent-1"}}}
+{"dir":"in","frame":{"kind":"reply","method":"close","result":{}}}

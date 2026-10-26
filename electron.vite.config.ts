@@ -48,7 +48,9 @@ export default defineConfig({
         ],
         input: {
           index: resolve(__dirname, 'src/main/index.ts'),
-          cli: resolve(__dirname, 'src/main/cli.ts')
+          cli: resolve(__dirname, 'src/main/cli.ts'),
+          // The Cursor host runs as its own process (`ELECTRON_RUN_AS_NODE`), one per Cursor instance.
+          cursorHost: resolve(__dirname, 'src/mms/harness/hosts/cursorHost.ts')
         },
         // Keep the public package id. Vite's dependency externalizer resolves
         // highlight.js to lib/index.js, which is not an exported ESM subpath.

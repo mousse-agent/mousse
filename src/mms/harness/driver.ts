@@ -114,6 +114,10 @@ export interface DriverRuntime {
   refreshModels?(cwd: string): Promise<void>
   signIn?(session: LoginSession, cwd: string, method?: string): Promise<ProviderLoginResult>
   signOut?(): Promise<void>
+  /** The API key this entry runs with, for a move that copies it (model APIs with a saved key). */
+  exportApiKey?(): Promise<string | undefined>
+  /** Saves `apiKey` as this entry's own credential (a move that copies the old entry's key). */
+  adoptApiKey?(apiKey: string): Promise<void>
   install?(onProgress: (message: string, fraction?: number) => void): Promise<void>
   cancelInstall?(): boolean
   installState?(): { installing: boolean; progress?: string }
