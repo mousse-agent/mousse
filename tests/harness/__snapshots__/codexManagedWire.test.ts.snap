@@ -1,0 +1,129 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`managed Codex on the wire (pinned binary, fake ChatGPT) > a helper that cannot get a token fails the turn 1`] = `
+{
+  "additionalDetails": null,
+  "codexErrorInfo": "other",
+  "httpStatus": null,
+  "mapped": "auth_expired",
+  "message": "provider auth command \`<node>\` exited with status exit code: 1: This Codex process is no longer allowed to use the ChatGPT sign-in. Mousse restarts it with the current sign-in.",
+}
+`;
+
+exports[`managed Codex on the wire (pinned binary, fake ChatGPT) > a turn carries the helper's bearer and none of the fields ChatGPT plan use omits 1`] = `
+{
+  "encoding": null,
+  "keys": [
+    "client_metadata",
+    "include",
+    "input",
+    "model",
+    "parallel_tool_calls",
+    "prompt_cache_key",
+    "reasoning",
+    "store",
+    "stream",
+    "tool_choice",
+    "tools",
+  ],
+  "model": "gpt-wire",
+  "toolTypes": [
+    "function",
+    "web_search",
+  ],
+}
+`;
+
+exports[`managed Codex on the wire (pinned binary, fake ChatGPT) > model discovery: a turn on an explicit model, with and without the catalog URL and api_key_model_discovery 1`] = `
+{
+  "catalog": {
+    "answered": true,
+    "modelBearer": [
+      true,
+      true,
+    ],
+    "modelRequests": 2,
+  },
+  "discovery": {
+    "answered": true,
+    "modelBearer": [
+      true,
+      true,
+      true,
+    ],
+    "modelRequests": 3,
+  },
+  "plain": {
+    "answered": true,
+    "modelBearer": [
+      true,
+      true,
+      true,
+    ],
+    "modelRequests": 3,
+  },
+}
+`;
+
+exports[`managed Codex on the wire (pinned binary, fake ChatGPT) > records what Codex reports for each upstream failure 1`] = `
+{
+  "failed_after_deltas": {
+    "additionalDetails": null,
+    "codexErrorInfo": "other",
+    "httpStatus": null,
+    "mapped": "protocol",
+    "message": "stream disconnected before completion: This route is not supported.",
+  },
+  "invalid_user_401": {
+    "additionalDetails": null,
+    "codexErrorInfo": {
+      "httpConnectionFailed": {
+        "httpStatusCode": 401,
+      },
+    },
+    "httpStatus": 401,
+    "mapped": "auth_expired",
+    "message": "unexpected status 401 Unauthorized: This ChatGPT account cannot be used here., url: <base>/responses",
+  },
+  "not_eligible_403": {
+    "additionalDetails": null,
+    "codexErrorInfo": {
+      "httpConnectionFailed": {
+        "httpStatusCode": 403,
+      },
+    },
+    "httpStatus": 403,
+    "mapped": "not_eligible",
+    "message": "unexpected status 403 Forbidden: This plan cannot use ChatGPT sign-in for this app., url: <base>/responses",
+  },
+  "unavailable_503": {
+    "additionalDetails": null,
+    "codexErrorInfo": {
+      "httpConnectionFailed": {
+        "httpStatusCode": 503,
+      },
+    },
+    "httpStatus": 503,
+    "mapped": "service_unavailable",
+    "message": "unexpected status 503 Service Unavailable: The service is overloaded., url: <base>/responses",
+  },
+  "unsupported_capability_403": {
+    "additionalDetails": null,
+    "codexErrorInfo": {
+      "httpConnectionFailed": {
+        "httpStatusCode": 403,
+      },
+    },
+    "httpStatus": 403,
+    "mapped": "not_eligible",
+    "message": "unexpected status 403 Forbidden: This capability is not supported., url: <base>/responses",
+  },
+  "usage_limit_429": {
+    "additionalDetails": null,
+    "codexErrorInfo": "usageLimitExceeded",
+    "httpStatus": null,
+    "mapped": "rate_limited",
+    "message": "You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits or try again later.",
+  },
+}
+`;
