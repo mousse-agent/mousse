@@ -308,12 +308,7 @@ export class BackgroundObligations {
     return changed
   }
 
-  /** Some task's result may never arrive (a cancel may have dropped its notification). */
-  hasLost(): boolean {
-    return this.lostCount() > 0
-  }
-
-  /** How many tasks' results may never arrive. */
+  /** How many tasks' results may never arrive (a cancel may have dropped their notifications). */
   lostCount(): number {
     let count = 0
     for (const consumer of this.consumers.values()) if (consumer === LOST) count++

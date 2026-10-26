@@ -981,7 +981,7 @@ export class ClaudeSubscriptionProviderService {
         const lost = live.obligations.lostCount()
         const others = working - lost
         const message = lost > 0
-          ? `Claude is still holding ${lost === 1 ? 'a background task' : `${lost} background tasks`} for this thread whose result may not arrive${others > 0 ? `, along with ${others === 1 ? 'another background task' : `${others} other background tasks`}` : ''}. ${cause} and would end that work. Press Stop to release it now, then send again.`
+          ? `Claude is still holding ${lost === 1 ? 'a background task' : `${lost} background tasks`} for this thread whose ${lost === 1 ? 'result' : 'results'} may not arrive${others > 0 ? `, along with ${others === 1 ? 'another background task' : `${others} other background tasks`}` : ''}. ${cause} and would end that work. Press Stop to release ${working === 1 ? 'it' : 'them'} now, then send again.`
           : unshown > 0 && running === 0
             ? `Claude read the result of ${unshownTasks} for this thread, but ${unshown === 1 ? 'its reply was' : 'their replies were'} cut off or could not be shown. ${cause}. Send a message without the change to clear ${unshown === 1 ? 'it' : 'them'}, or press Stop, then send again.`
             : unshown > 0
