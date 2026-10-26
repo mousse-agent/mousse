@@ -36,6 +36,8 @@ export interface CursorToolEvent {
   callId: string
   title: string
   toolName?: string
+  /** On completion: `unfinished` when the run ended before the tool reported its own end. */
+  status?: 'completed' | 'unfinished'
 }
 
 export interface CursorChatInput {
@@ -45,7 +47,8 @@ export interface CursorChatInput {
   model: string
   mode?: 'default' | 'plan'
   prompt: string
-  appletInstructions?: string
+  /** Prefixed to every prompt (skills, the mode's instructions, the applet catalogue, usable tools). */
+  turnPreamble?: string
   history?: string
   images?: ChatImageAttachment[]
   signal?: AbortSignal
@@ -438,7 +441,7 @@ export class CursorSessions {
     const orchestration = !open.resumed && input.orchestrationInstructions
       ? `<mousse_orchestration_instructions>\n${input.orchestrationInstructions}\n</mousse_orchestration_instructions>\n\n`
       : ''
-    let prompt = orchestration + history + (input.appletInstructions ? input.appletInstructions + '\n\nCurrent request:\n' : '') + (input.prompt || '(image attachment)')
+    let prompt = orchestration + history + (input.turnPreamble ? input.turnPreamble + '\n\nCurrent request:\n' : '') + (input.prompt || '(image attachment)')
     let images = (input.images ?? []).map((image) => ({ data: image.data, mimeType: image.mimeType }))
     const model = { id: input.model || CURSOR_DEFAULT_MODEL }
     const mcpServers = input.mcp ? cursorMcpServers(input.mcp) : undefined
@@ -508,7 +511,7 @@ export class CursorSessions {
             case 'tool-call-completed': {
               const callId = str(update.callId)
               if (!callId) return
-              input.onTool?.({ phase: 'complete', callId, title: tools.get(callId) ?? cursorToolTitle(update.toolCall, label) })
+              input.onTool?.({ phase: 'complete', callId, title: tools.get(callId) ?? cursorToolTitle(update.toolCall, label), status: 'completed' })
               tools.delete(callId)
               return
             }
@@ -557,7 +560,7 @@ export class CursorSessions {
         clearInterval(steerTimer)
         stop.removeEventListener('abort', onStop)
       }
-      for (const [callId, title] of tools) input.onTool?.({ phase: 'complete', callId, title })
+      for (const [callId, title] of tools) input.onTool?.({ phase: 'complete', callId, title, status: 'unfinished' })
       if ('hostExited' in end) {
         if (steerFailure) throw steerFailure
         throw new CursorHostExitedError('while the run streamed')

@@ -1,8 +1,7 @@
 import type { CursorChatInput, CursorChatResult } from '../../../harness/cursor/session'
-import { mousseOrchestrationInstructions } from '../../mcp/instructions'
 import type { ProviderRef } from '../../types'
 import type { AdapterHost, ModelInfo, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../ProviderAdapter'
-import { promptStreams, runtimeToolEvent, withAppletGuidance } from '../shared/promptRuntime'
+import { promptStreams, runtimeToolEvent } from '../shared/promptRuntime'
 
 /**
  * Cursor runs its own agent loop and tools in the project workspace (weak containment) through
@@ -57,6 +56,9 @@ export class CursorAdapter implements ProviderAdapter {
       sink.progress()
       ctl.heartbeat()
     }
+    // The drained-turn proof for the bearer: Cursor's updates do not name the MCP server, so every
+    // tool call it started must reach its own completed update.
+    const toolCalls = new Map<string, 'running' | 'completed' | 'unfinished'>()
     const result = await client.chat({
       threadId: input.threadId,
       cwd: input.cwd,
@@ -65,11 +67,11 @@ export class CursorAdapter implements ProviderAdapter {
       prompt: input.prompt,
       ...(input.images ? { images: input.images } : {}),
       signal: input.signal,
-      ...(withAppletGuidance(input.appletInstructions) ? { appletInstructions: withAppletGuidance(input.appletInstructions) } : {}),
+      ...(host.bridge?.turnPreamble ? { turnPreamble: host.bridge.turnPreamble } : {}),
       ...(input.nativeHistory !== undefined ? { history: input.nativeHistory } : {}),
       // SPEC §15.2: the Mousse MCP server over HTTP, and the shared guidance in the first prompt.
-      mcp: host.mcp ?? null,
-      ...(host.mcp ? { orchestrationInstructions: mousseOrchestrationInstructions() } : {}),
+      mcp: host.bridge?.mcp ?? null,
+      ...(host.bridge?.sessionInstructions ? { orchestrationInstructions: host.bridge.sessionInstructions } : {}),
       drainSteer: () => ctl.drainSteer(),
       onSteer: (steer) => {
         progress()
@@ -84,6 +86,8 @@ export class CursorAdapter implements ProviderAdapter {
         streams.thinking.update(content)
       },
       onTool: (event) => {
+        if (event.phase === 'start') toolCalls.set(event.callId, 'running')
+        else toolCalls.set(event.callId, event.status === 'unfinished' ? 'unfinished' : 'completed')
         progress()
         sink.tool(runtimeToolEvent(event))
       },
@@ -113,7 +117,8 @@ export class CursorAdapter implements ProviderAdapter {
       contextSignature: contextKey,
       contextModelKey: contextKey,
       nativeMessages: [],
-      providerRef
+      providerRef,
+      drain: { toolCalls: toolCalls.size, toolsSettled: [...toolCalls.values()].every((status) => status === 'completed') }
     }
   }
 

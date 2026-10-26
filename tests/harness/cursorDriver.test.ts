@@ -69,7 +69,10 @@ function setup(connect: NonNullable<NonNullable<Parameters<typeof cursorDriver>[
       usage: () => {}
     } as unknown as TurnSpec['sink'],
     control: { drainSteer: () => undefined, heartbeat: () => {} } as unknown as TurnSpec['control'],
-    host: { mcp: options.mcp ?? null, context: { nativeHistoryAfterTurn: (text: string) => text } } as unknown as TurnSpec['host']
+    host: {
+      ...(options.mcp ? { bridge: { mcp: options.mcp, turnToken: 't', sessionInstructions: '', turnPreamble: '', userMcp: 'native' } } : {}),
+      context: { nativeHistoryAfterTurn: (text: string) => text }
+    } as unknown as TurnSpec['host']
   })
   const turn = async (threadId: string, options: Parameters<typeof spec>[2] = {}) => {
     const binding = await harness.bind(harness.resolveStored({ instanceId: INSTANCE, llmProvider: '', model: 'default' }, { purpose: 'turn' }), { mode: 'agent' })
