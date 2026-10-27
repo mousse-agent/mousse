@@ -6,6 +6,8 @@ import { MousseMainService } from '../src/mms/MousseMainService'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
 import { dispatchMethod } from '../src/mms/protocol/handlers'
 import type { AppletReference } from '../src/shared/applets'
+import { testHarness } from '../src/mms/run/testkit/harness'
+import { piAdapter } from './run/phase6Fixture'
 
 const source = {
   schemaVersion: 1,
@@ -179,51 +181,21 @@ it('admits visible assistant references and denies user-crafted, hidden, cross-t
 it('stages structured tool submissions through the same final publication path and enforces three per turn', async () => {
   const { main, thread } = await fixture()
   main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
-  const llm = (
-    main.orchestrator as unknown as {
-      llm: {
-        getSelectedModelContextLimit: () => unknown
-        getContextInputs: () => Promise<unknown>
-        chat: (...args: unknown[]) => Promise<unknown>
-      }
-    }
-  ).llm
-  const contextInputs = {
-    systemPromptText: '',
-    mcpToolsText: '',
-    otherToolsText: '',
-    signature: 'applets-test'
-  }
-  vi.spyOn(llm, 'getSelectedModelContextLimit').mockReturnValue({ limit: 100_000 })
-  vi.spyOn(llm, 'getContextInputs').mockResolvedValue(contextInputs)
-  vi.spyOn(llm, 'chat').mockImplementation(async (...args) => {
-    const options = args[2] as { onPublishApplet: (value: unknown) => unknown }
-    expect(options.onPublishApplet).toBeTypeOf('function')
+  // The turn's tool host stages applets, as the `publish_applet` tool does.
+  const adapter = piAdapter(() => 'Here are three charts.')
+  const startTurn = adapter.startTurn.bind(adapter)
+  adapter.startTurn = async (input, sink, ctl, host) => {
+    const onPublishApplet = host.tools.onPublishApplet
+    expect(onPublishApplet).toBeTypeOf('function')
     for (let i = 0; i < 3; i++)
-      expect(options.onPublishApplet({ ...source, title: `Chart ${i}` })).toEqual({
+      expect(onPublishApplet!({ ...source, title: `Chart ${i}` })).toEqual({
         queued: true,
         title: `Chart ${i}`
       })
-    expect(() => options.onPublishApplet(source)).toThrow('three')
-    return {
-      text: 'Here are three charts.',
-      usage: {
-        input: 1,
-        output: 1,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 2,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
-      },
-      modelName: 'test',
-      totalResponseTimeMs: 1,
-      totalTokensUsed: 2,
-      tokensPerSecond: 1,
-      contextInputs,
-      toolEvents: [],
-      nativeMessages: []
-    }
-  })
+    expect(() => onPublishApplet!(source)).toThrow('three')
+    return startTurn(input, sink, ctl, host)
+  }
+  main.orchestrator.setHarness(testHarness({ adapters: [adapter], profileHome: main.getProfileHomeDir() }))
   await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, {
     threadId: thread.id
   })

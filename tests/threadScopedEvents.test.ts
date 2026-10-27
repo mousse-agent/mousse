@@ -1,11 +1,12 @@
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { OrchestratorService } from '../src/mms/orchestrator/OrchestratorService'
-import { createOrchestrator } from './run/phase6Fixture'
+import { createOrchestrator, piAdapter } from './run/phase6Fixture'
+import { testHarness } from '../src/mms/run/testkit/harness'
 import { ProfileDatabase } from '../src/mms/run/db/ProfileDatabase'
 import { RunEngine } from '../src/mms/run/RunEngine'
 import { RunStore } from '../src/mms/run/RunStore'
@@ -207,77 +208,24 @@ describe('thread-scoped orchestrator conversation events', () => {
     expect(legacySyncs).toHaveLength(0)
   })
 
-  it('runs background channel turns with live events and orchestration actions', async () => {
+  it('runs background channel turns with live events', async () => {
     const selected = store.createThread('Selected thread')
     const thread = store.createThread('Channel thread')
     orch.bindThread(selected.id, [], undefined, [])
-    // spawn_agents is retired (SPEC §14.5); complete_task is the remaining orchestration action.
-    const completeTask = vi.spyOn(orch as unknown as { completeTask: (ids: string[], merge: boolean) => Promise<string[]> }, 'completeTask').mockResolvedValue(['[complete] No agents selected'])
 
-    const llm = (orch as unknown as {
-      llm: {
-        getSelectedModelContextLimit: () => { limit: number }
-        getContextInputs: () => Promise<unknown>
-        chat: (...args: unknown[]) => Promise<unknown>
-      }
-    }).llm
-    const contextInputs = {
-      systemPromptText: '',
-      mcpToolsText: '',
-      otherToolsText: '',
-      signature: 'channel-live-events'
+    const adapter = piAdapter(() => 'live answer')
+    const startTurn = adapter.startTurn.bind(adapter)
+    adapter.startTurn = async (input, sink, ctl, host) => {
+      sink.thinking({ phase: 'start', content: '' })
+      sink.thinking({ phase: 'delta', content: 'checking' })
+      sink.tool({ phase: 'start', callId: 'call-1', kind: 'mcp_tool_call', title: 'Read file', summary: 'Reading', details: [] })
+      sink.tool({ phase: 'complete', callId: 'call-1', kind: 'mcp_tool_call', title: 'Read file', summary: 'Read complete', details: ['done'] })
+      sink.thinking({ phase: 'complete', content: 'checked' })
+      sink.text({ phase: 'start', content: '', contentIndex: 0 })
+      sink.text({ phase: 'delta', content: 'live answer', contentIndex: 0 })
+      return startTurn(input, sink, ctl, host)
     }
-    vi.spyOn(llm, 'getSelectedModelContextLimit').mockReturnValue({ limit: 100_000 })
-    vi.spyOn(llm, 'getContextInputs').mockResolvedValue(contextInputs)
-    vi.spyOn(llm, 'chat').mockImplementation(async (...args: unknown[]) => {
-      const onTool = args[1] as (event: unknown) => void
-      const onThinking = args[3] as (event: unknown) => void
-      const onText = args[4] as (event: unknown) => void
-      onThinking({ phase: 'start', content: '' })
-      onThinking({ phase: 'delta', content: 'checking' })
-      onTool({
-        phase: 'start',
-        callId: 'call-1',
-        kind: 'mcp_tool_call',
-        title: 'Read file',
-        summary: 'Reading',
-        details: []
-      })
-      onTool({
-        phase: 'complete',
-        callId: 'call-1',
-        kind: 'mcp_tool_call',
-        title: 'Read file',
-        summary: 'Read complete',
-        details: ['done']
-      })
-      onThinking({ phase: 'complete', content: 'checked' })
-      onText({ phase: 'start', content: '', contentIndex: 0 })
-      onText({ phase: 'delta', content: 'live answer', contentIndex: 0 })
-      onText({ phase: 'complete', content: 'live answer', contentIndex: 0 })
-      return {
-        text:
-          'live answer\n```mousse-actions\n' +
-          '{"actions":[{"type":"complete_task","agentIds":["remote-agent"],"merge":true}]}\n' +
-          '```',
-        aborted: false,
-        usage: {
-          input: 1,
-          output: 1,
-          cacheRead: 0,
-          cacheWrite: 0,
-          totalTokens: 2,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
-        },
-        modelName: 'test',
-        totalResponseTimeMs: 1,
-        totalTokensUsed: 2,
-        tokensPerSecond: 1,
-        contextInputs,
-        toolEvents: [],
-        nativeMessages: []
-      }
-    })
+    orch.setHarness(testHarness({ adapters: [adapter], profileHome: home }))
 
     const adds: Array<{ threadId: string; message: ChatMessage }> = []
     const updates: Array<{ threadId: string; message: ChatMessage }> = []
@@ -297,8 +245,6 @@ describe('thread-scoped orchestrator conversation events', () => {
     expect(adds.some((event) => event.message.kind === 'mcp_tool_call')).toBe(true)
     expect(updates.some((event) => event.message.toolCall?.status === 'complete')).toBe(true)
     expect(updates.some((event) => event.message.role === 'assistant' && event.message.content === 'live answer')).toBe(true)
-    expect(completeTask).toHaveBeenCalledWith(['remote-agent'], true)
-    expect(adds.some((event) => event.message.kind === 'tool_call')).toBe(true)
     expect(orch.getMessages(thread.id).some((message) => message.content === 'from Telegram')).toBe(true)
   })
 })

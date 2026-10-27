@@ -16,6 +16,8 @@ import { PROFILES_V1_CAPABILITY } from '../src/shared/profiles/types'
 import type { WorkflowBundle } from '../src/shared/workflows'
 import { WORKFLOW_RUN_CAPABILITY } from '../src/shared/workflowRunPlatform'
 import { FakeAttachedExecutor } from './fixtures/agent-platform/browser-daemon-composition/fakeAttachedExecutor'
+import { testHarness } from '../src/mms/run/testkit/harness'
+import { piAdapter } from './run/phase6Fixture'
 
 const OWNER_TOKEN = 'cross-feature-owner-token'
 const roots: string[] = []
@@ -65,14 +67,6 @@ function approvalWorkflow(): WorkflowBundle {
   } }
 }
 
-const nativeResult = (text: string) => ({
-  text, usage: { input: 3, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 5,
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-  modelName: 'fixture', totalResponseTimeMs: 1, totalTokensUsed: 5, tokensPerSecond: 5,
-  contextInputs: { systemPromptText: '', mcpToolsText: '', otherToolsText: '', signature: 'cross-feature' },
-  toolEvents: [], nativeMessages: []
-})
-
 describe('profile cross-feature production composition', () => {
   it('switches A to B while chat, workflow, and attached browser are active without publishing late A state into B', async () => {
     vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
@@ -115,14 +109,12 @@ describe('profile cross-feature production composition', () => {
       const opened = await aServices.platform.browser.dispatch(browserContext(a.id, aThread.id), 'browser_open', {})
       expect(opened.ok).toBe(true)
 
-      const llm = (aServices.orchestrator as unknown as { llm: { getSelectedModelContextLimit(): { limit: number }; getContextInputs(): Promise<unknown>; chat(): Promise<unknown> } }).llm
-      vi.spyOn(llm, 'getSelectedModelContextLimit').mockReturnValue({ limit: 100_000 })
-      vi.spyOn(llm, 'getContextInputs').mockResolvedValue(nativeResult('').contextInputs)
-      vi.spyOn(llm, 'chat').mockImplementation(async () => {
+      aServices.settings.set({ provider: { llmProvider: 'openai', model: 'fixture' } })
+      aServices.orchestrator.setHarness(testHarness({ profileHome: aServices.getProfileHomeDir(), adapters: [piAdapter(async () => {
         chatEntered()
         await new Promise<void>((resolve) => { releaseChat = resolve })
-        return nativeResult('late answer owned by A')
-      })
+        return 'late answer owned by A'
+      })] }))
       client.onEvent((event) => events.push(event))
       await client.subscribe(0)
       const pendingChat = client.request<{ message: string }>('orchestrator.send', { threadId: aThread.id, content: 'hold A active' })

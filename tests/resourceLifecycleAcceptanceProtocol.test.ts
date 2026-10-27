@@ -9,6 +9,8 @@ import type { Thread } from '../src/shared/types'
 import type { WorkflowRunView } from '../src/shared/workflowRunPlatform'
 import { releaseExecutionLeaseHandle, tryAcquireExecutionLease } from '../src/mms/queue/ThreadExecutionLease'
 import { lifecycleApprovalWorkflow, lifecycleHarness } from './fixtures/resource-lifecycle-harness'
+import { testHarness } from '../src/mms/run/testkit/harness'
+import { piAdapter } from './run/phase6Fixture'
 
 describe('lifecycle public protocol acceptance', () => {
   it('threads.delete preserves opaque data, requires reviewed purge admission and restores the same identity', async () => {
@@ -143,22 +145,14 @@ describe('lifecycle public protocol acceptance', () => {
     try {
       const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'drain must not strand a writer' })
       const peer = await f.connect()
-      const llm = (f.services.orchestrator as unknown as { llm: {
-        getSelectedModelContextLimit(): { limit: number }; getContextInputs(): Promise<unknown>; chat(): Promise<unknown>
-      } }).llm
-      const contextInputs = { systemPromptText: '', mcpToolsText: '', otherToolsText: '', signature: 'resource-lifecycle-acceptance' }
       let entered = () => {}
       const started = new Promise<void>((resolve) => { entered = resolve })
       const hold = new Promise<void>((resolve) => { release = resolve })
-      vi.spyOn(llm, 'getSelectedModelContextLimit').mockReturnValue({ limit: 100_000 })
-      vi.spyOn(llm, 'getContextInputs').mockResolvedValue(contextInputs)
-      vi.spyOn(llm, 'chat').mockImplementation(async () => {
+      f.services.settings.set({ provider: { llmProvider: 'openai', model: 'deterministic' } })
+      f.services.orchestrator.setHarness(testHarness({ profileHome: f.services.getProfileHomeDir(), adapters: [piAdapter(async () => {
         entered(); await hold
-        return { text: 'durable result after refused deletion', contextInputs, toolEvents: [], nativeMessages: [],
-          usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-          modelName: 'deterministic', totalResponseTimeMs: 1, totalTokensUsed: 2, tokensPerSecond: 2 }
-      })
+        return 'durable result after refused deletion'
+      })] }))
       pending = f.rpc.request('orchestrator.send', { threadId: thread.id, content: 'wait in provider seam' })
       await started
       for (const method of ['threads.delete', 'threads.trash']) {
