@@ -249,6 +249,7 @@ export const PROTOCOL_METHODS = [
   'subagents.stopAll',
   'queue.list',
   'queue.enqueue',
+  'queue.edit',
   'queue.reorder',
   'queue.remove',
   'queue.promoteToSteer',

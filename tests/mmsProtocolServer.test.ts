@@ -1048,6 +1048,47 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
     await client.close()
   })
 
+  it('queue.edit changes a queued message and keeps whose it is; queue.list hands out the revision, and every change that names a stale one is refused', async () => {
+    const client = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'test' })
+    await client.connect()
+    mockLlm(mms)
+    const thread = mms.threads.createThread('Edit')
+    mms.orchestrator.getOrCreateSession(thread.id).activeTurn = { abort: new AbortController(), pendingSteer: [] }
+    const a = mms.orchestrator.enqueueForThread(thread.id, { content: 'a' }, { source: 'mcp', permissionMode: 'ask', origin: { kind: 'agent', threadId: 'other', runId: 'run:other', hops: 1 } })
+    const b = mms.orchestrator.enqueueForThread(thread.id, { content: 'b' }, { source: 'gui' })
+    const list = () => client.request<{ items: { id: string; content: string }[]; claimed: unknown[]; revision: string; open: boolean }>('queue.list', { threadId: thread.id })
+    const first = await list()
+    expect(first).toMatchObject({ open: true, claimed: [], revision: expect.stringMatching(/^[0-9a-f]{16}$/) })
+    expect(first.items.map((item) => item.content)).toEqual(['a', 'b'])
+
+    // The edit changes the words and chat mode only: the agent that wrote the message and its limit stay.
+    const edited = await client.request<{ item: { content: string; mode?: string; origin?: unknown; permissionMode?: string }; items: unknown[] }>('queue.edit', {
+      threadId: thread.id, itemId: a.id, content: 'a, edited', mode: 'plan', expectedRevision: first.revision
+    })
+    expect(edited.item).toMatchObject({ content: 'a, edited', mode: 'plan', permissionMode: 'ask', origin: { kind: 'agent', threadId: 'other' } })
+    const second = await list()
+    expect(second.revision).not.toBe(first.revision)
+
+    // Every change that names the revision before the edit is refused, and nothing changes.
+    for (const [method, params] of [
+      ['queue.edit', { itemId: b.id, content: 'b, edited' }],
+      ['queue.remove', { itemId: b.id }],
+      ['queue.reorder', { orderedIds: [b.id, a.id] }],
+      ['queue.promoteToSteer', { itemId: b.id }]
+    ] as const) {
+      await expect(client.request(method, { threadId: thread.id, expectedRevision: first.revision, ...params }), method).rejects.toThrow(/queue changed since you read it/)
+    }
+    expect((await list()).items.map((item) => item.content)).toEqual(['a, edited', 'b'])
+    // Without a revision they are today's calls, and with the current one they go through.
+    await client.request('queue.reorder', { threadId: thread.id, orderedIds: [b.id, a.id], expectedRevision: second.revision })
+    expect((await list()).items.map((item) => item.id)).toEqual([b.id, a.id])
+
+    await expect(client.request('queue.edit', { threadId: thread.id, itemId: a.id })).rejects.toThrow(/content or mode/)
+    await expect(client.request('queue.edit', { threadId: thread.id, itemId: a.id, content: 'x', mode: 'root' })).rejects.toThrow(/mode/i)
+    await expect(client.request('queue.edit', { threadId: thread.id, itemId: 'nope', content: 'x' })).rejects.toThrow(/not in the queue/)
+    await client.close()
+  })
+
   it('emits turn.started and turn.completed lifecycle protocol events', async () => {
     const client = new LocalMmsClient({
       homeDir: home,
