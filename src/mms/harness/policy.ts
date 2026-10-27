@@ -134,15 +134,21 @@ function spendModelGap(budget: NonNullable<RunPolicy['budget']>, model: SpendMod
  *   control: only a runtime whose every tool call Mousse decides can be held to it;
  * - pre-granted or no approvals need at least `approval_only` (pre-granted under Full access is what
  *   an uncontrolled instance does anyway);
- * - approvals answered by the host (`approve: 'host'`) are refused on every instance for now:
- *   nothing answers them yet, and the turn would otherwise ask the person;
+ * - approvals answered by the host (`approve: 'host'`) need a bot authority and a runtime that
+ *   holds every call of the turn to it (`options.hostApprovals`, `HarnessDriver.botAuthority`);
+ *   anywhere else nothing would answer them, and the turn would ask the person;
  * - a turn nobody watches (delegated, workflow, definition, bot) needs more than `uncontrolled`,
  *   for its first dispatch and every retry, continuation and steer.
  */
-/** Why a policy with `approve: 'host'` is refused until a runtime answers approvals for the host. */
-export const HOST_APPROVALS_UNAVAILABLE = 'No runtime answers approvals for the host yet.'
+/** Why a policy with `approve: 'host'` is refused where the host cannot answer its approvals. */
+export const HOST_APPROVALS_UNAVAILABLE = 'This runtime cannot hold a bot to its permissions, so nothing would answer its approvals.'
 
-export function checkPolicy(caps: HarnessCaps, policy: RunPolicy, instanceId?: string, model?: SpendModelFacts): Enforceability {
+export interface CheckPolicyOptions {
+  /** The runtime holds every call of a bot turn to its bot authority (`HarnessDriver.botAuthority`). */
+  hostApprovals?: boolean
+}
+
+export function checkPolicy(caps: HarnessCaps, policy: RunPolicy, instanceId?: string, model?: SpendModelFacts, options: CheckPolicyOptions = {}): Enforceability {
   const missing: Array<keyof HarnessCaps> = []
   const control = toolControlLevel(caps)
   if (policy.mode === 'plan' && !planModeAvailable(caps)) missing.push('planMode')
@@ -153,9 +159,9 @@ export function checkPolicy(caps: HarnessCaps, policy: RunPolicy, instanceId?: s
   // `grants` under Full access is literally "the agent approves its own tools", which an
   // uncontrolled instance does; any other pre-granted or absent approval needs control.
   const needsApprovals = (policy.approvals === 'grants' && policy.permissionMode !== 'full') || policy.approvals === 'never'
-  // Nothing answers approvals for the host yet (PR 6's locked runtimes and bot engine will): until
-  // then a policy that asks for it is refused rather than left to ask the person.
-  const hostApprovals = policy.approve === 'host'
+  // Only a bot authority answers approvals for the host, and only on a runtime that holds every
+  // call to it; anywhere else such a policy is refused rather than left to ask the person.
+  const hostApprovals = policy.approve === 'host' && !(policy.authority?.kind === 'bot' && options.hostApprovals === true)
   const unattended = policyOrigin(policy) !== 'interactive'
   if ((needsExact && control !== 'exact') || (needsApprovals && control === 'uncontrolled') || (unattended && control === 'uncontrolled'))
     missing.push('toolControl')

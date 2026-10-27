@@ -17,6 +17,7 @@ import type {
   ProviderSelection,
   RegistryAgentView,
   RemoveInstallResult,
+  Enforceability,
   RunPolicy,
   RuntimeFacts,
   SignInResponse,
@@ -69,6 +70,7 @@ import {
   type PermissionLimits,
   type PermissionMode
 } from '../../shared/permissionMode'
+import type { BotAuthority } from '../../shared/bots/personal/authority'
 import { HarnessScopeStore } from './scope'
 import { sharedShellPath, type ShellPathResult } from './shellPath'
 import { compatibilityOf, fingerprintOf, PROBE_TIMEOUTS, probeInstance, sameBinary, updateAffordance, type ProbeResult } from './status'
@@ -177,6 +179,11 @@ export interface HarnessGateway {
    * about a change before the turn is admitted.
    */
   previewPermissionMode(resolved: ResolvedTurnSelection, requested: PermissionMode, cwd?: string | null): EffectivePermissionMode
+   * Whether the instance can enforce `policy` now (its live caps, the model's spend facts, and
+   * whether its runtime holds a bot authority), as turn admission will decide: the bot editor's
+   * and the bot engine's check before anything is bound.
+   */
+  checkPolicy(instanceId: string, policy: RunPolicy, model?: string): Enforceability
   /** The selection a binding runs: a retry or recovery of a run executes its binding, never the current selection. */
   selectionOf(binding: ExecutionBinding): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'>
   /**
@@ -443,6 +450,11 @@ export interface TurnAppContext {
    * built-ins and the app and MCP tools are held to one authority.
    */
   definition?: DefinitionAuthority
+  /**
+   * A bot turn's authority (`AppToolTurn.bot`, PR 6 §4): its one source, handed to the runtime as
+   * `AdapterHost.bot` so built-ins and app and MCP tools are held to one authority.
+   */
+  bot?: BotAuthority
 }
 
 export interface TurnHandle {
@@ -1038,6 +1050,18 @@ export class Harness implements HarnessGateway {
     return { ok: false, error: { code: 'policy_unenforceable', message: `This provider cannot enforce the requested restrictions (toolControl). ${reason}`, missing: ['toolControl'], reason, instanceId } }
   }
 
+  checkPolicy(instanceId: string, policy: RunPolicy, model?: string): Enforceability {
+    let record: InstanceRecord
+    try {
+      record = this.record(instanceId)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return { ok: false, error: { code: 'policy_unenforceable', message, missing: ['toolControl'], reason: message, instanceId } }
+    }
+    const spendModel = model && hasSpendLimit(policy) ? record.runtime.spendModel?.(model) : undefined
+    return checkPolicy(this.recordCaps(record), policy, instanceId, spendModel, { hostApprovals: record.driver.botAuthority?.(record.config) === true })
+  }
+
   selectionOf(binding: ExecutionBinding): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'> {
     if (binding.instanceId === PI_DRIVER_ID) return { instanceId: PI_DRIVER_ID, llmProvider: '', model: binding.model }
     const entry = this.instanceMap.list()[binding.instanceId]
@@ -1194,10 +1218,12 @@ export class Harness implements HarnessGateway {
         // The definition authority comes only from the app context (one source for every tool).
         const base: AdapterHost = { ...spec.host }
         delete base.definition
+        delete base.bot
         const host: AdapterHost = {
           ...base,
           ...(minted ? { bridge: minted.bridge } : {}),
           ...(spec.app?.definition ? { definition: spec.app.definition } : {}),
+          ...(spec.app?.bot ? { bot: spec.app.bot } : {}),
           ...(counted ? { budget: counted.budget } : {})
         }
         const turn = await record.runtime.adapter.startTurn(input, sink, spec.control, host)
@@ -1307,7 +1333,7 @@ export class Harness implements HarnessGateway {
     const caps = binding.caps ?? this.recordCaps(record)
     // Token and spend limits also need the model's own facts (an output cap, a price).
     const spendModel = hasSpendLimit(binding.policy) ? record.runtime.spendModel?.(binding.model) : undefined
-    const enforceable = checkPolicy(caps, binding.policy, binding.instanceId, spendModel)
+    const enforceable = checkPolicy(caps, binding.policy, binding.instanceId, spendModel, { hostApprovals: record.driver.botAuthority?.(record.config) === true })
     if (!enforceable.ok) throw harnessAppError(enforceable.error)
     // The runtime takes its permission mode from the input: it must be the binding's.
     if (binding.policy.permissionMode !== undefined && input.permissionMode !== undefined && input.permissionMode !== binding.policy.permissionMode)

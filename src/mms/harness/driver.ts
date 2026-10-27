@@ -396,6 +396,12 @@ export interface HarnessDriver {
    * the driver, when the runtime has no such tool: a policy that names it is refused.
    */
   nativeToolNames?(neutral: NeutralTool, config: InstanceConfig): readonly string[]
+  /**
+   * The runtime holds every built-in call of a bot turn to the turn's bot authority
+   * (`AdapterHost.bot`) before it runs, so a bot policy's approvals are answered by the host
+   * (`approve: 'host'`) and never reach a person. Absent: such a policy is refused.
+   */
+  botAuthority?(config: InstanceConfig): boolean
   create(context: DriverContext): DriverRuntime
   /** The command that updates a binary installed by `owner`, when there is one. */
   updateCommand?(owner: InstallOwner): string | undefined

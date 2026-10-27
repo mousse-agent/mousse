@@ -6,6 +6,7 @@ import type { ApprovalTag } from '../../../orchestrator/UserQuestionService'
 import { isAgentAccessLevel, narrowAgentAccess, type AgentAccessLevel } from '../../../../shared/settings'
 import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
 import { authorizeDefinitionCall, definitionRefusal, takeAuthorizedCall, withoutTransportFields } from '../../../agentDefinitions/definitionGate'
+import { botAppToolRefusal } from '../../../../shared/bots/personal/walls'
 import type { ModeCeiling } from '../../types'
 import type { AppToolTurns } from './turns'
 import { callerThreadOnly } from './thread'
@@ -294,6 +295,12 @@ export class ToolRegistry {
     if (availability !== true) return { text: availability, isError: true }
     const unattended = unattendedRefusal(tool, turn)
     if (unattended) return { text: unattended, isError: true }
+    // A bot turn: every app tool is held to the bot's grant, on every call (a list cached before a
+    // narrower revision cannot reach a removed tool). Nobody is asked.
+    if (turn.bot) {
+      const refusal = botAppToolRefusal(turn.bot, name, args)
+      if (refusal) return { text: refusal, isError: true }
+    }
     // A definition run: its grants, policy and approvals hold for every call, as in the in-process loop.
     // A call the runtime's gate already authorized in full (approval included, before it was
     // charged) is revalidated without asking again; any other call is authorized here.

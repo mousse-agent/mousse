@@ -7,6 +7,7 @@ import type { AgentAccessLevel } from '../../../../shared/settings'
 import type { ChatMode } from '../../../../shared/types'
 import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
 import type { DefinitionAuthority } from '../../../agentDefinitions/definitionGate'
+import type { BotAuthority } from '../../../../shared/bots/personal/authority'
 import type { BrowserExecutionBinding } from '../../../orchestrator/browser'
 import type { LlmToolEvent, StreamingLlmToolEvent } from '../../../harness/turnEvents'
 import type { ModeCeiling } from '../../types'
@@ -125,6 +126,11 @@ export interface AppToolTurn {
    * the definition's grants, policy and approvals before it runs (PR 4 §5a).
    */
   definition?: DefinitionAuthority
+  /**
+   * A bot turn (PR 6 §4): every app-tool call is held to the bot's grant before it runs, and its
+   * skills are only the granted ones.
+   */
+  bot?: BotAuthority
   /**
    * The run refuses everything that would wait for the user (`RunPolicy.approvals: 'never'`):
    * tools that ask for approval or put a question to the user are refused at call time.

@@ -1,14 +1,15 @@
-import type { NativeToolTable } from '../../../../shared/harness/tools'
 import { piProviderIdOf } from '../../../../shared/providerInstances'
 import { PiLoopAdapter, type PiChatClient } from '../../../run/adapters/pi/PiLoopAdapter'
 import { decodeInstanceConfig, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig } from '../../driver'
 import { PI_LEGACY_CAPS, piInstanceRuntime, type PiCredentials } from './engines/legacy'
 import { PI_RPC_CAPS, createRpcRuntime, type PiRpcDriverOptions } from './engines/rpc'
 import { piEngineFor, piEngineOf, piEngineSwitchable, storedPiEngine } from './engines'
+import { PI_NATIVE_TOOLS } from '../../pi/nativeTools'
 
 export { PI_LEGACY_CAPS, type PiCredentials } from './engines/legacy'
 export { PI_RPC_CAPS, type PiRpcDriverOptions } from './engines/rpc'
 export { PI_LEGACY_ONLY, piEngineFor, piEngineOf } from './engines'
+export { PI_NATIVE_TOOLS } from '../../pi/nativeTools'
 
 /**
  * Decoded with the instance id, `engine` is the engine in effect (`engines.ts`); without it (a
@@ -22,20 +23,6 @@ function decodePiConfig(raw: Record<string, unknown> | undefined, instanceId: st
   if (engine) config.engine = engine
   return config
 }
-
-/**
- * Pi's own tools for each neutral tool (PR 6 §2), on the RPC engine. Pi has no web tools, and its
- * `powershell` has no neutral name. Every name exists in the pinned Pi's `tools/index.js`
- * (`toolNames` test). The legacy loop runs Mousse's own tools and maps none.
- */
-export const PI_NATIVE_TOOLS: NativeToolTable = Object.freeze({
-  read: ['read'],
-  list: ['ls'],
-  search: ['find', 'grep'],
-  edit: ['edit'],
-  write: ['write'],
-  shell: ['bash']
-})
 
 /**
  * The `pi` driver: every `pi:<provider>` instance. Two engines share one stored kind:
@@ -77,6 +64,8 @@ export function piDriver(options: { client: () => PiChatClient; credentials?: ()
       return { effective: piEngineFor(providerId, storedPiEngine(stored), Boolean(options.rpc)), switchable: piEngineSwitchable(providerId, Boolean(options.rpc)) }
     },
     caps: (config) => (piEngineOf(config, Boolean(options.rpc)) === 'rpc' ? PI_RPC_CAPS : PI_LEGACY_CAPS),
+    // The RPC engine's gate holds Pi's built-ins to a bot turn's authority (`/pi/gate`).
+    botAuthority: (config) => piEngineOf(config, Boolean(options.rpc)) === 'rpc',
     nativeToolNames: (neutral, config) => (piEngineOf(config, Boolean(options.rpc)) === 'rpc' ? PI_NATIVE_TOOLS[neutral] ?? [] : []),
     create(context: DriverContext): DriverRuntime {
       const providerId = piProviderIdOf(context.instanceId) ?? ''

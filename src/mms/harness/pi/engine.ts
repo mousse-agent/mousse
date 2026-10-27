@@ -41,6 +41,8 @@ import { PI_PATH_ARGUMENTS, piResolvePath, piResolveReadPath } from './paths'
 import { piCredentialHandler, piOAuthCredential, piOAuthHandle, writePiAuth, type PiOAuthSource } from './oauthBroker'
 import type { PiRpcEvent, PiRpcExit, PiRpcRequest } from './rpcClient'
 import { preparePiHome, type PiSettingsInput } from './settings'
+import { PI_NATIVE_TOOLS } from './nativeTools'
+import { checkBuiltinCall, wallMessage } from '../../../shared/bots/personal/walls'
 
 /**
  * The Pi RPC engine (PR 2 §4): each thread of a `pi:*` instance runs on its own Pi process
@@ -1050,7 +1052,7 @@ export class PiRpcEngine implements ProviderAdapter {
     let rewritten: Record<string, unknown> | undefined
     // An app or MCP tool is approved as the registry will run it: without transport fields.
     if (definition && !builtin) input = withoutTransportFields(request.input)
-    if (access || (definition && builtin)) {
+    if (access || ((definition || turn.host.bot) && builtin)) {
       input = { ...request.input }
       const argument = PI_PATH_ARGUMENTS[request.toolName]
       if (argument) {
@@ -1069,6 +1071,13 @@ export class PiRpcEngine implements ProviderAdapter {
       } catch (error) {
         return { allow: false, reason: error instanceof Error ? error.message : GATE_REFUSALS.denied }
       }
+    }
+    // A bot turn: each built-in is held to the bot's grant (tools, roots, scratch) on the path Pi
+    // will open. Its app and MCP tools are held by the Mousse MCP registry. Nobody is asked.
+    const bot = turn.host.bot
+    if (bot && builtin) {
+      const decided = checkBuiltinCall(bot, PI_NATIVE_TOOLS, request.toolName, input)
+      if (!decided.ok) return { allow: false, reason: wallMessage(decided.wall) }
     }
     // A definition run: every call, built-in or app/MCP, is authorized in full (approval included)
     // before it is charged, so a refused call never costs a tool call.

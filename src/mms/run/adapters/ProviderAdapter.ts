@@ -9,6 +9,7 @@ import type { ChildPreflightContext, SubagentRefusal } from '../policy/featureGa
 import type { PermissionPrompter } from '../../harness/acp/permissions'
 import type { TurnBudget } from '../../harness/budget'
 import type { DefinitionAuthority } from '../../agentDefinitions/definitionGate'
+import type { BotAuthority } from '../../../shared/bots/personal/authority'
 import type { ProviderRef } from '../types'
 
 /**
@@ -311,6 +312,12 @@ export interface AdapterHost {
    * that same object.
    */
   definition?: DefinitionAuthority
+  /**
+   * A bot turn's authority (PR 6 §4), checked before each call the runtime's own tools would run.
+   * Set only by the gateway, from the turn's app context; the Mousse MCP registry checks app and
+   * MCP tools against the same object.
+   */
+  bot?: BotAuthority
   context: {
     /** Safe-boundary compaction inside a long tool loop; absent when compaction is disabled. */
     toolLoopSafety?: ToolLoopSafetyOptions
