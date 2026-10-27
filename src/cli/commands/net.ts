@@ -86,6 +86,9 @@ export const BRIDGE_HELP = `Usage:
 
 Only the current authority can invite, revoke or rename nodes.
 revoke and rename require the nod_ identifier shown by bridge nodes.
+bridge nodes also reports each device's version, the route in use, every known
+route with its last result, and when it was last seen. A device that predates
+these fields shows none of them.
 Invite output is a secret. join without an argument reads it at a no-echo
 prompt, or from piped stdin, to keep it out of shell history. A lost response
 can be retried with the same invite; the daemon retains the same node keys.

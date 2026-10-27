@@ -36,6 +36,7 @@ export class SyncSupervisor implements SyncSession {
   private closeConnection?: () => void
   private rosterListener?: () => void
   private failures = 0
+  private failure?: NetErrorCode
   private openedAt = 0
   private subscriptions = new Map<
     StreamId,
@@ -77,6 +78,10 @@ export class SyncSupervisor implements SyncSession {
   get peer(): SyncSession['peer'] {
     if (!this.lastPeer) throw new NetError('not_enrolled')
     return this.lastPeer
+  }
+  /** Why the last attempt failed; cleared once a session opens. For the device list only. */
+  lastError(): NetErrorCode | undefined {
+    return this.failure
   }
   state(): SessionState {
     return this.stopped || this.blocked
@@ -230,6 +235,7 @@ export class SyncSupervisor implements SyncSession {
         throw new NetError('peer_offline')
       }
       this.active = session
+      this.failure = undefined
       this.lastPeer = session.peer
       this.openedAt = this.clock.monotonic()
       this.closeConnection = session.onClosed((error) => {
@@ -265,6 +271,7 @@ export class SyncSupervisor implements SyncSession {
     }
   }
   private scheduleRetry(error: unknown): void {
+    this.failure = error instanceof NetError ? error.code : undefined
     const retryable =
       error instanceof NetError &&
       ['route_unreachable', 'peer_offline', 'deadline_exceeded'].includes(error.code)

@@ -5,7 +5,7 @@ import { Modal } from './ui/Modal'
 import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './settings/SettingsRow'
 import { CopyButton } from './settings/IconButtons'
 import { mousseIdAvailable, useMousseIdStore } from '../stores/mousseIdStore'
-import { listedDevices, readDevices, type Device } from '../lib/netDevices'
+import { deviceLine, isIncompatible, listedDevices, readDevices, routeDetails, updateInstructions, type Device } from '../lib/netDevices'
 import type { NetDoctor, NetStatus } from '../../shared/net'
 import type { PlatformRequestMethod } from '../../shared/platform'
 import type { TransportManifest } from '../../mms/net/contracts'
@@ -23,11 +23,6 @@ function networkingLine(status?: NetStatus): string {
   if (status.keystore === 'locked') return `On · locked until you enter the passphrase${error}`
   if (status.rosterState === 'conflict') return `On · device list conflict, recovery required${error}`
   return `On${error}`
-}
-
-function deviceLine(device: Device): string {
-  const state = device.state === 'open' ? 'Online' : device.state === 'connecting' ? 'Connecting' : 'Offline'
-  return device.caps.length ? `${state} · can ${device.caps.join(', ')}` : state
 }
 
 const TRANSPORT_STATE: Record<Transport['state'], string> = {
@@ -87,7 +82,7 @@ export function NetDevicesSection() {
   const [error, setError] = useState(''), [busy, setBusy] = useState(false), [passphrase, setPassphrase] = useState(''), [name, setName] = useState('My device'), [invite, setInvite] = useState(''), [joinText, setJoinText] = useState(''), [doctor, setDoctor] = useState<NetDoctor>()
   const [relayAddress, setRelayAddress] = useState(''), [named, setNamed] = useState(false), [tunnelId, setTunnelId] = useState(''), [hostname, setHostname] = useState(''), [credentialsFile, setCredentialsFile] = useState('')
   const [sshEndpoint, setSshEndpoint] = useState(''), [sshPort, setSshPort] = useState('')
-  const [adding, setAdding] = useState(false), [revoking, setRevoking] = useState<Device>()
+  const [adding, setAdding] = useState(false), [revoking, setRevoking] = useState<Device>(), [updating, setUpdating] = useState<Device>()
   const nameEdited = useRef(false)
   const reload = async () => {
     const owner = ++generation.current
@@ -212,14 +207,26 @@ export function NetDevicesSection() {
           </button>
         )}
       >
-        {others.map((device) => (
+        {others.map((device) => [
           <SettingsRow
             key={device.node}
             title={device.name}
-            description={deviceLine(device)}
+            description={<span title={routeDetails(device) || undefined}>{deviceLine(device, Date.now())}</span>}
             control={authority && <DeviceMenu name={device.name} disabled={busy} onRevoke={() => setRevoking(device)} />}
-          />
-        ))}
+          />,
+          isIncompatible(device) && (
+            <SettingsRow key={`${device.node}-incompatible`} indent title="Incompatible version" description={`Update ${device.name} or this device so they can talk to each other.`} />
+          ),
+          device.olderThanThis && (
+            <SettingsRow
+              key={`${device.node}-older`}
+              indent
+              title={device.version ? `Older than this device (${device.version})` : 'Older than this device'}
+              description={device.version ? `This device runs ${selfDevice?.version ?? 'a newer version'}.` : `${device.name} is too old to report its version${selfDevice?.version ? `; this device runs ${selfDevice.version}` : ''}.`}
+              control={selfDevice?.version && <button type="button" className="settings-btn" onClick={() => setUpdating(device)}>{updateInstructions(device, selfDevice.version).command ? 'Show command' : 'How to update'}</button>}
+            />
+          )
+        ])}
         {self && unlocked && !others.length && <p className="settings-muted devices-note">No other devices yet.</p>}
       </SettingsGroup>
     )}
@@ -380,6 +387,25 @@ export function NetDevicesSection() {
         </div>
       </Modal>
     )}
+
+    {updating && selfDevice?.version && (() => {
+      const instructions = updateInstructions(updating, selfDevice.version)
+      return (
+        <Modal open title={`Update ${updating.name}`} onClose={() => setUpdating(undefined)}>
+          <div className="devices-dialog">
+            <p>{instructions.summary}</p>
+            {instructions.command && (
+              <>
+                <code className="devices-code devices-code-block">{instructions.command}</code>
+                <div className="devices-dialog-actions">
+                  <CopyButton text={instructions.command} label="Copy command" />
+                </div>
+              </>
+            )}
+          </div>
+        </Modal>
+      )
+    })()}
 
     {revoking && (
       <Modal

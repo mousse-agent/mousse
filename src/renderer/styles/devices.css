@@ -55,6 +55,12 @@
   overflow-wrap: anywhere;
 }
 
+/* A multi-line command to copy. */
+.devices-code-block {
+  display: block;
+  white-space: pre-wrap;
+}
+
 /* Overflow menu on a device row. */
 .devices-menu {
   position: relative;

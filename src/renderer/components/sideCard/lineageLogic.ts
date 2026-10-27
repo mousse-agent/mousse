@@ -1,4 +1,5 @@
 import { isRunningSubagent, type SubagentSummary } from '../../../shared/subagents'
+import { formatAgo } from '../../lib/formatAgo'
 
 /** Rows shown before the list asks to be expanded. */
 export const LINEAGE_COLLAPSED_COUNT = 5
@@ -49,20 +50,7 @@ export function sliceLineage<T>(ordered: readonly T[], expanded: boolean, limit 
   return { visible: ordered.slice(0, limit), hiddenCount: ordered.length - limit }
 }
 
-/** Short relative label such as "just now", "5m ago" or "2d ago"; empty when the time is unknown. */
-export function formatAgo(timestamp: number, now: number): string {
-  if (!Number.isFinite(timestamp)) return ''
-  const seconds = Math.max(0, Math.floor((now - timestamp) / 1000))
-  if (seconds < 60) return 'just now'
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  if (days < 30) return `${days}d ago`
-  const months = Math.floor(days / 30)
-  return months < 12 ? `${months}mo ago` : `${Math.floor(days / 365)}y ago`
-}
+export { formatAgo }
 
 const RUNNING_LABELS: Record<string, string> = {
   needs_input: 'Needs input',
