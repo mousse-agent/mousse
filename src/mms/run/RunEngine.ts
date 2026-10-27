@@ -395,6 +395,22 @@ export class RunEngine extends EventEmitter {
     return this.mutex.withLock(command.threadId, () => this.decide(command, opts ?? {}))
   }
 
+  /**
+   * A send whose run, receipt and `turn.start` effect are written in one transaction (PR 6 §4, as
+   * `commitDelegation` does for a child): the run never exists without its effect, and a crash
+   * leaves either all three or none. `payload` builds the effect's payload from the new run's id.
+   * A repeat with the same `clientRequestId` replays the receipt and writes nothing.
+   */
+  sendWithStart(command: Extract<RunCommand, { kind: 'send' }>, payload: (runId: string) => unknown): Promise<CommandResult> {
+    return this.mutex.withLock(command.threadId, () => this.store.db.transaction((): CommandResult => {
+      const result = this.decide(command, {})
+      if (result.status !== 'accepted' || result.replayed) return result
+      this.outbox.enqueue({ threadId: command.threadId, runId: result.runId, kind: 'turn.start', payload: payload(result.runId) })
+      this.store.db.checkpoint('sendWithStart.beforeCommit')
+      return result
+    }))
+  }
+
   /** queued -> starting. Creates the `initial` attempt when the run has none. */
   markStarting(runId: string): RunRecord {
     return this.mark(runId, true, (run, expectedEpoch) => {

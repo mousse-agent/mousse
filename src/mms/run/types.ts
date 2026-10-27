@@ -436,6 +436,34 @@ export function isWakeTurnPayload(payload: unknown): payload is WakeTurnPayload 
 }
 
 /**
+ * Payload of a bot dispatch's `turn.start` (PR 6 §4). It carries no `input` and no authority: the
+ * prompt and the grant live only in `bots.db`, and the executor rebuilds the turn from there. With
+ * no `input` and a string `kind`, rule 5 never restarts it as an ordinary send, in this build or in
+ * any older one (`strandedQueuedRuns`), so a build without bots never starts a bot run.
+ */
+export interface BotTurnPayload {
+  kind: 'bot'
+  runId: string
+  threadId: string
+  activationId: string
+  dispatchN: number
+}
+
+export function isBotTurnPayload(payload: unknown): payload is BotTurnPayload {
+  if (!payload || typeof payload !== 'object') return false
+  const value = payload as Record<string, unknown>
+  return value.kind === 'bot' && typeof value.runId === 'string' && typeof value.threadId === 'string' &&
+    typeof value.activationId === 'string' && Number.isSafeInteger(value.dispatchN)
+}
+
+/** A `turn.start` payload of a kind this build does not know: refused, never cast to a send. */
+export function hasUnknownTurnPayloadKind(payload: unknown, known: readonly string[]): boolean {
+  if (!payload || typeof payload !== 'object') return false
+  const kind = (payload as { kind?: unknown }).kind
+  return typeof kind === 'string' && !known.includes(kind)
+}
+
+/**
  * A `turn.start` payload that carries an ordinary send (its `input`), so a queued run whose effect
  * died can be started again from it (reconciler rule 5). Wake and integration payloads carry no
  * `input`; a queue item's payload (`queueItemId`) is restarted by the message queue's own recovery.
