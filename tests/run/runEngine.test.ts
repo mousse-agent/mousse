@@ -775,6 +775,19 @@ describe('RunEngine pause (SPEC §5)', () => {
       expect(await sendFrom('t1', 'message-1', 'gui')).toEqual({ ...sent, replayed: true })
     })
 
+    it('a scheduled send is refused thread_paused and writes nothing: the pause, its timer and its chain stay', async () => {
+      fixture()
+      const run = await paused()
+
+      const sent = await sendFrom('t1', 'schedule:job:1', 'schedule')
+
+      expect(sent).toMatchObject({ status: 'rejected', reason: 'thread_paused' })
+      expect(f!.store.getRun(run.runId)!.status).toBe('paused')
+      expect(resumeEffects(run.runId).map((effect) => effect.status)).toEqual(['pending'])
+      expect(f!.store.getReceipt('schedule:job:1')).toBeNull()
+      expect(f!.store.listRuns('t1')).toHaveLength(1)
+    })
+
     it('a subagent keeps its task running across the hand-over', async () => {
       fixture()
       const parent = await f!.runningRun('parent')
@@ -893,6 +906,19 @@ describe('RunEngine pause (SPEC §5)', () => {
       expect(f!.store.getRun(first.runId)).toMatchObject({ status: 'cancelled', outcome: { interruptedBy: 'user', pause: { endedBy: 'user_message' } } })
       expect(f!.store.getRun(queued.runId)!.status).toBe('starting')
       expect(resumeEffects(first.runId).map((effect) => effect.status)).toEqual(['cancelled'])
+    })
+
+    it('a scheduled run (a webhook-triggered one too) is refused like work on the thread\'s behalf: it never ends a pause', async () => {
+      fixture()
+      const first = await f!.runningRun('t1')
+      const scheduled = f!.store.createRun({ threadId: 't1', source: 'schedule' })
+      f!.engine.pauseRun({ runId: first.runId, pause: pauseOf(), resumeAt: UNTIL })
+
+      expect(reasonOf(() => f!.engine.markStarting(scheduled.runId))).toBe('conflict')
+
+      expect(f!.store.getRun(scheduled.runId)!.status).toBe('queued')
+      expect(f!.store.getRun(first.runId)!.status).toBe('paused')
+      expect(resumeEffects(first.runId).map((effect) => effect.status)).toEqual(['pending'])
     })
 
     it('a run started on the thread\'s behalf is refused with a conflict and the pause and its timer stay', async () => {
