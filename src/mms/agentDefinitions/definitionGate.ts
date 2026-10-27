@@ -51,29 +51,62 @@ export function definitionRefusal(authority: DefinitionAuthority, call: { toolNa
 }
 
 /**
- * Calls a runtime's tool gate already authorized in full (approval included) for app or MCP tools
- * that run later through the Mousse MCP registry: by call id, the digest of the authorized
- * arguments. The registry takes each once, so approval is asked once per call.
+ * Fields a transport adds to, rewrites in or strips from a tool call's arguments before the tool
+ * sees them: the call id (Pi's extension overwrites it with its own; the Mousse MCP server strips
+ * it) and the turn tokens (the registry strips them). They are never part of what is approved.
  */
-const AUTHORIZED = new WeakMap<DefinitionAuthority, Map<string, string>>()
+const TRANSPORT_FIELDS = ['clientRequestId', '_mousse_turn', '_mousse_attempt'] as const
 
-/** The gate authorized `callId` with `args` in full; the registry's dispatch may take it once. */
-export function recordAuthorizedCall(authority: DefinitionAuthority, callId: string, args: Record<string, unknown>): void {
-  let calls = AUTHORIZED.get(authority)
-  if (!calls) AUTHORIZED.set(authority, (calls = new Map()))
-  calls.set(callId, digestToolArguments(args))
+/** The arguments a tool runs with, as approval sees them: without transport fields. */
+export function withoutTransportFields(args: Record<string, unknown>): Record<string, unknown> {
+  const call = { ...args }
+  for (const field of TRANSPORT_FIELDS) delete call[field]
+  return call
+}
+
+/** One app or MCP tool call a runtime's gate authorized, as the registry later receives it. */
+export interface AuthorizedCall {
+  /** The turn token the call is stamped with (`_mousse_turn`, or the attempt token). */
+  turnToken: string
+  toolName: string
+  /** The runtime's tool call id (the MCP server's `clientRequestId`). */
+  callId: string
+  /** The arguments, without transport fields. */
+  args: Record<string, unknown>
 }
 
 /**
- * At dispatch: whether `callId` was authorized in full with exactly these arguments. The record is
- * taken (one dispatch per authorization).
+ * Calls a runtime's tool gate already authorized in full (approval included) for app or MCP tools
+ * that run later through the Mousse MCP registry, keyed by turn token, tool (and MCP server), and
+ * call id; the value is the digest of the authorized arguments. The registry takes each once, so
+ * approval is asked once per call, and an approval never covers another tool, turn or argument set.
  */
-export function takeAuthorizedCall(authority: DefinitionAuthority, callId: string, args: Record<string, unknown>): boolean {
+const AUTHORIZED = new WeakMap<DefinitionAuthority, Map<string, string>>()
+
+function authorizedKey(authority: DefinitionAuthority, call: AuthorizedCall): string {
+  const mcp = (authority.mcpTools ?? []).find((tool) => tool.providerName === call.toolName)
+  const tool = mcp ? `mcp:${mcp.installationId ?? mcp.serverId}:${mcp.toolName}` : `tool:${call.toolName}`
+  return JSON.stringify([call.turnToken, tool, call.callId])
+}
+
+/** The gate authorized `call` in full; the registry's dispatch of exactly that call may take it once. */
+export function recordAuthorizedCall(authority: DefinitionAuthority, call: AuthorizedCall): void {
+  let calls = AUTHORIZED.get(authority)
+  if (!calls) AUTHORIZED.set(authority, (calls = new Map()))
+  calls.set(authorizedKey(authority, call), digestToolArguments(withoutTransportFields(call.args)))
+}
+
+/**
+ * At dispatch: whether exactly this call (turn, tool, call id, arguments) was authorized in full.
+ * The record is taken: one dispatch per authorization.
+ */
+export function takeAuthorizedCall(authority: DefinitionAuthority, call: AuthorizedCall): boolean {
   const calls = AUTHORIZED.get(authority)
-  const digest = calls?.get(callId)
+  const key = authorizedKey(authority, call)
+  const digest = calls?.get(key)
   if (digest === undefined) return false
-  calls!.delete(callId)
-  return digest === digestToolArguments(args)
+  calls!.delete(key)
+  return digest === digestToolArguments(withoutTransportFields(call.args))
 }
 
 /**

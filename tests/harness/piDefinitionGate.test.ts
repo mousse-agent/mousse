@@ -165,7 +165,7 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
    * A definition run whose app tool `create_task` runs through the real Mousse tool registry behind
    * a local MCP endpoint, with `maxToolCalls: 1`. The model calls `create_task`, then `write`.
    */
-  async function appToolRun(approve: (request: AgentRuntimeToolApprovalRequest) => { status: 'approved' | 'denied'; digest?: string; reason?: string }) {
+  async function appToolRun(approve: (request: AgentRuntimeToolApprovalRequest) => { status: 'approved' | 'denied'; digest?: string; reason?: string }, appArgs: Record<string, unknown> = { description: 'a task' }) {
     const { engine, recorder, project } = await setup(cleanups, {
       mousseTools: () => [{ name: 'create_task', description: 'Create a task', inputSchema: { type: 'object', properties: { description: { type: 'string' } } }, class: 'mutation' }]
     })
@@ -197,7 +197,7 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
     await new Promise<void>((done) => server.listen(0, '127.0.0.1', done))
     cleanups.push(() => new Promise<void>((done) => server.close(() => done())))
     recorder.respond(script([
-      { tool: { name: 'create_task', args: { description: 'a task' } } },
+      { tool: { name: 'create_task', args: appArgs } },
       { tool: { name: 'write', args: { path: 'allowed.txt', content: 'ok' } } },
       { text: 'done' }
     ]))
@@ -242,5 +242,13 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
     // The write past the limit never ran, and the run ended on the limit.
     expect(existsSync(join(project, 'allowed.txt'))).toBe(false)
     expect(result).toMatchObject({ code: 'budget_exhausted', details: { limit: { kind: 'tool_calls', limit: 1, actual: 1 } } })
+  }, 90_000)
+
+  it('a model-supplied clientRequestId is not part of the approved call: asked once, run once', async () => {
+    const { asked, ran, counters } = await appToolRun((request) => ({ status: 'approved', digest: request.argumentDigest }), { description: 'a task', clientRequestId: 'model-chosen-id' })
+    // The approver saw the call as the tool runs it; the registry did not ask again after the charge.
+    expect(asked.map((request) => [request.toolName, request.arguments])).toEqual([['create_task', { description: 'a task' }], ['write', expect.anything()]])
+    expect(ran).toEqual([{ description: 'a task' }])
+    expect(counters.toolCalls).toBe(1)
   }, 90_000)
 })

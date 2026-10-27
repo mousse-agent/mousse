@@ -26,7 +26,7 @@ import { COMMAND_DEADLINE_MS, INTERRUPT_DEADLINE_MS, READY_DEADLINE_MS } from '.
 import { PiBridge, type PiBridgeRegistration } from './bridge'
 import { DescendantTracker, OwnedGroups } from './descendants'
 import { WriterEpisode, type PiToolClass } from './episode'
-import { authorizeDefinitionCall, recordAuthorizedCall } from '../../agentDefinitions/definitionGate'
+import { authorizeDefinitionCall, recordAuthorizedCall, withoutTransportFields } from '../../agentDefinitions/definitionGate'
 import type { AgentExecutionLimit } from '../../../shared/agents/execution'
 import { ANTHROPIC_OAUTH_REFUSED, BUDGET_EXHAUSTED, CREDENTIAL_UNAVAILABLE, GATE_REFUSALS, GATE_UNAVAILABLE, REQUEST_REFUSED } from './extension/messages'
 import { PI_BRIDGE_ENV, type PiCatalogProvider, type PiGateRequest, type PiGateResponse, type PiReadyRequest, type PiRequestResponse, type PiTurnResponse, type PiTurnTool } from './extension/protocol'
@@ -718,6 +718,8 @@ export class PiRpcEngine implements ProviderAdapter {
     const definition = turn.host.definition
     let input = request.input
     let rewritten: Record<string, unknown> | undefined
+    // An app or MCP tool is approved as the registry will run it: without transport fields.
+    if (definition && !builtin) input = withoutTransportFields(request.input)
     if (access || (definition && builtin)) {
       input = { ...request.input }
       const argument = PI_PATH_ARGUMENTS[request.toolName]
@@ -757,7 +759,7 @@ export class PiRpcEngine implements ProviderAdapter {
     }
     // An app or MCP tool runs through the Mousse MCP registry, which takes this authorization
     // instead of asking for approval a second time.
-    if (definition && !builtin) recordAuthorizedCall(definition, request.toolCallId, input)
+    if (definition && !builtin) recordAuthorizedCall(definition, { turnToken: turn.attemptToken, toolName: request.toolName, callId: request.toolCallId, args: input })
     return rewritten ? { allow: true, input: rewritten } : { allow: true }
   }
 
