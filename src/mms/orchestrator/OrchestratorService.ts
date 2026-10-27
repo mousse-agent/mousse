@@ -136,6 +136,15 @@ import type { McpManager } from '../integrations/mcp/McpManager'
 import type { SkillsRegistry } from '../integrations/skills/SkillsRegistry'
 import type { FileService } from '../files/FileService'
 import type { GitService } from '../git/GitService'
+import {
+  PULL_REQUEST_DRAFT_SYSTEM,
+  buildPullRequestDraftPrompt,
+  conversationExcerpt,
+  heuristicPullRequestDraft,
+  parsePullRequestDraft,
+  type PullRequestDraftInputs
+} from '../git/pullRequestDraft'
+import { readPullRequestTemplate } from '../git/pullRequestTemplate'
 import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
 import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
@@ -4063,6 +4072,63 @@ export class OrchestratorService extends EventEmitter {
     const title = this.settingsStore.get().title
     const resolved = this.harness.resolveStored(title, { purpose: 'title', ...(threadId ? { scope: this.threadScope(threadId) } : {}) })
     return this.llm.generateTitle(userRequest, firstResponse, threadId, { instanceId: resolved.instanceId, llmProvider: resolved.llmProvider, model: title.model })
+  }
+
+  /**
+   * Proposes a title and description for a branch's pull request from the originating thread's
+   * conversation, the branch's commits and patch, and the repository's template. The title model writes
+   * it when one is chosen (the same guard as `generateThreadTitle`); without one, or on any failure, a
+   * plain draft built from the commits and the template is returned instead, so this never throws.
+   */
+  async draftPullRequest(params: {
+    root: string
+    branch: string
+    base: string
+    remote: string | null
+    originThreadId: string | null
+    threadName: string | null
+  }): Promise<{ title: string; body: string; source: 'model' | 'heuristic' }> {
+    const summary = await (this.gitService?.readBranchSummary(params.root, params).catch(() => null) ?? null)
+    const template = await readPullRequestTemplate(params.root).catch(() => null)
+    let conversation = ''
+    if (params.originThreadId) {
+      try {
+        conversation = conversationExcerpt(this.getMessages(params.originThreadId))
+      } catch {
+        // A thread that cannot be read still gets a draft from its commits.
+      }
+    }
+    const name = params.threadName?.trim()
+    const inputs: PullRequestDraftInputs = {
+      branch: params.branch,
+      base: params.base,
+      threadName: name && name !== 'New Chat' ? name : null,
+      conversation,
+      commits: summary?.commits ?? [],
+      stat: summary?.stat ?? '',
+      patch: summary?.patch ?? '',
+      template
+    }
+    const heuristic = { ...heuristicPullRequestDraft(inputs), source: 'heuristic' as const }
+    const titleSettings = this.settingsStore.get().title
+    const hasExplicitTitleModel = Boolean(titleSettings.llmProvider?.trim() && titleSettings.model?.trim())
+    if (!hasExplicitTitleModel || (!inputs.commits.length && !inputs.patch && !conversation)) return heuristic
+    try {
+      const resolved = this.harness.resolveStored(titleSettings, {
+        purpose: 'title',
+        ...(params.originThreadId ? { scope: this.threadScope(params.originThreadId) } : {})
+      })
+      const text = await this.llm.draftPullRequest(
+        PULL_REQUEST_DRAFT_SYSTEM,
+        buildPullRequestDraftPrompt(inputs),
+        params.originThreadId ?? undefined,
+        { instanceId: resolved.instanceId, llmProvider: resolved.llmProvider, model: titleSettings.model }
+      )
+      const parsed = parsePullRequestDraft(text)
+      return parsed ? { ...parsed, source: 'model' } : heuristic
+    } catch {
+      return heuristic
+    }
   }
 
   /**

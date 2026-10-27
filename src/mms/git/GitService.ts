@@ -12,6 +12,7 @@ import { explicitActionGitEnv } from './gitEnv'
 import { IN_PROGRESS_GIT_MARKERS } from './gitMarkers'
 import { GitHubCodeHost } from './GitHubCodeHost'
 import { GitHubService } from './GitHubService'
+import { PULL_REQUEST_DRAFT_LIMITS, type DraftCommit } from './pullRequestDraft'
 import { resolveRepositoryIdentity } from './RepositoryIdentity'
 import { acquireRepositoryLease, RepositoryLeaseAbortedError } from './RepositoryLease'
 import type {
@@ -315,6 +316,56 @@ function failure(code: GitErrorCode, run: GitRun): AppError {
   const fixed = gitErrors.create(code)
   const text = redactGitText(run.output).trim()
   return text ? new AppError({ code, message: text, errorInfo: fixed.errorInfo }) : fixed
+}
+
+export interface BranchSummary {
+  commits: DraftCommit[]
+  stat: string
+  patch: string
+}
+
+/** How long a read of a branch's history may take before it is given up. */
+const SUMMARY_READ_MS = 30_000
+
+/**
+ * The first `maxBytes` of a read-only Git command's output. A command that prints more is stopped, so a
+ * huge diff never fills memory; one that fails for another reason yields nothing.
+ */
+function readBoundedGit(cwd: string, args: readonly string[], maxBytes: number): Promise<string> {
+  return new Promise((resolvePromise) => {
+    const child = spawn('git', args, {
+      cwd,
+      env: { ...process.env, ...englishMessagesEnv(), GIT_OPTIONAL_LOCKS: '0' },
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true
+    })
+    const chunks: Buffer[] = []
+    let size = 0
+    let truncated = false
+    let done = false
+    const finish = (ok: boolean): void => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      resolvePromise(ok || truncated ? Buffer.concat(chunks).subarray(0, maxBytes).toString('utf8') : '')
+    }
+    const timer = setTimeout(() => {
+      child.kill()
+      finish(false)
+    }, SUMMARY_READ_MS)
+    child.stdout.on('data', (chunk: Buffer) => {
+      if (truncated) return
+      chunks.push(chunk)
+      size += chunk.length
+      if (size >= maxBytes) {
+        truncated = true
+        child.kill()
+        finish(true)
+      }
+    })
+    child.on('error', () => finish(false))
+    child.on('close', (code) => finish(code === 0))
+  })
 }
 
 export class GitService {
@@ -748,12 +799,48 @@ export class GitService {
     })
   }
 
-  private async currentBranch(cwd: string): Promise<string | null> {
+  /** The checked-out branch, or null for a detached HEAD. */
+  async currentBranch(cwd: string): Promise<string | null> {
     return (await this.read(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD'])) || null
   }
 
-  private async assertBranch(cwd: string, expected: string | undefined): Promise<void> {
+  /** Refuses with `git_branch_changed` when `expected` is given and HEAD is on another branch. */
+  async assertBranch(cwd: string, expected: string | undefined): Promise<void> {
     if (expected !== undefined && await this.currentBranch(cwd) !== expected) throw gitErrors.create('git_branch_changed')
+  }
+
+  /**
+   * What a branch adds to its base, for describing it: its commits, a diffstat and the patch. Always read
+   * from the named branch's ref, never from HEAD, and bounded in size. The base is its remote-tracking
+   * branch when there is one, else the local branch; with neither, nothing is read.
+   */
+  async readBranchSummary(
+    cwd: string,
+    { branch, base, remote }: { branch: string; base: string; remote: string | null }
+  ): Promise<BranchSummary> {
+    const none: BranchSummary = { commits: [], stat: '', patch: '' }
+    if (!branch || !base || branch.startsWith('-') || base.startsWith('-') || (remote?.startsWith('-') ?? false)) return none
+    const head = `refs/heads/${branch}`
+    let from: string | null = null
+    for (const ref of [...(remote ? [`refs/remotes/${remote}/${base}`] : []), `refs/heads/${base}`]) {
+      if (await this.read(cwd, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]) !== null) {
+        from = ref
+        break
+      }
+    }
+    if (!from || await this.read(cwd, ['rev-parse', '--verify', '--quiet', `${head}^{commit}`]) === null) return none
+    // No external diff driver or text conversion: a repository's configuration must not run programs here.
+    const diff = ['diff', '--no-color', '--no-ext-diff', '--no-textconv']
+    const [log, stat, patch] = await Promise.all([
+      readBoundedGit(cwd, ['log', '--no-color', '--max-count=50', '--format=%x1e%s%x1f%b', `${from}..${head}`], 2 * PULL_REQUEST_DRAFT_LIMITS.commits),
+      readBoundedGit(cwd, [...diff, '--stat=100', `${from}...${head}`], 2 * PULL_REQUEST_DRAFT_LIMITS.stat),
+      readBoundedGit(cwd, [...diff, '--unified=3', `${from}...${head}`], 2 * PULL_REQUEST_DRAFT_LIMITS.patch)
+    ])
+    const commits = log.split('\x1e').filter((entry) => entry.trim()).map((entry) => {
+      const [subject = '', ...body] = entry.split('\x1f')
+      return { subject: subject.trim(), body: body.join('\x1f').trim() }
+    })
+    return { commits, stat: stat.trim(), patch }
   }
 
   /** A name Git accepts for a branch, and one that cannot be mistaken for an option. */
