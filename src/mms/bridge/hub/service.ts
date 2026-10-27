@@ -573,6 +573,10 @@ export class BridgeHub {
   threads(target: NodeId, projectId?: string): Promise<unknown> {
     return this.call(target, 'threads.list', projectId ? { projectId } : {})
   }
+  /** The other computer's cached disk usage: totals by project, thread and kind. */
+  storage(target: NodeId): Promise<unknown> {
+    return this.call(target, 'storage.usage', {})
+  }
   get(ref: BridgeEntityRef): Promise<unknown> {
     return this.call(ref.nodeId, 'threads.get', { threadId: ref.entityId })
   }

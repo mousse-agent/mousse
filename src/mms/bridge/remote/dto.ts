@@ -79,6 +79,8 @@ export function validateRemoteParams(
   }
   switch (method) {
     case 'projects.list':
+    // No `refresh`: scanning another computer's disk is not something a remote caller may ask for.
+    case 'storage.usage':
       keys([])
       break
     case 'threads.list':
