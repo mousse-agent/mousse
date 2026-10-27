@@ -1,5 +1,5 @@
 import { createAssistantMessageEventStream, lazyStream, type Api, type AssistantMessage, type AssistantMessageEventStream, type Model, type Provider, type ProviderStreams } from '@earendil-works/pi-ai'
-import { hookCandidates, hookCap } from '../reservation'
+import { fallbackModels, hookCandidates, hookCap, unreservedRoute } from '../reservation'
 import { ANTHROPIC_OAUTH_REFUSED, LOGIN_REFUSED, SPEND_CAP_MISMATCH } from './messages'
 
 /**
@@ -179,14 +179,15 @@ function refused(model: Model<Api>): AssistantMessageEventStream {
 /**
  * How a reserved request ended; never less than it may have been billed.
  * - Nothing sent (the payload check refused it, or setup failed): released.
- * - The provider answered with an error status (a non-2xx response was seen): released.
+ * - The provider refused it with a status that is never billed (any 4xx, 503, Anthropic's 529):
+ *   released. Other 5xx (502, 504, 524) may come from a proxy after the upstream billed: kept.
  * - A complete reply with its usage: that usage.
  * - Anything else (a failure, a stop, a dropped stream, a reply without usage): its usage, but at
  *   least the reservation, since what the provider billed is not known.
  */
 function outcomeOf(message: AssistantMessage | undefined, sent: boolean, status: number | undefined): RequestOutcome {
   if (!sent) return { kind: 'released' }
-  if (status !== undefined && (status < 200 || status >= 300)) return { kind: 'released' }
+  if (status !== undefined && ((status >= 400 && status < 500) || status === 503 || status === 529)) return { kind: 'released' }
   const usage = message?.usage
   const input = (usage?.input ?? 0) + (usage?.cacheRead ?? 0) + (usage?.cacheWrite ?? 0)
   const output = usage?.output ?? 0
@@ -223,8 +224,10 @@ function reservedStream(original: (model: Model<Api>, input: unknown, options?: 
       const chained = before ? await before(params, payloadModel) : undefined
       if (chained !== undefined) next = chained
       const cap = hookCap(model.api, next)
-      // One completion per request: each candidate is capped separately.
-      if (cap === undefined || cap > grant.cap || hookCandidates(model.api, next) !== 1) throw new Error(SPEND_CAP_MISMATCH)
+      // One completion per request (each candidate is capped separately), and only models whose
+      // prices were reserved (the model and its allowed fallbacks).
+      const allowed = fallbackModels(model).map((fallback) => fallback.model)
+      if (cap === undefined || cap > grant.cap || hookCandidates(model.api, next) !== 1 || unreservedRoute(model.api, next, allowed)) throw new Error(SPEND_CAP_MISMATCH)
       observer?.payload?.(model, next, grant)
       sent = true
       return next
@@ -246,6 +249,8 @@ function reservedStream(original: (model: Model<Api>, input: unknown, options?: 
   const outer = createAssistantMessageEventStream()
   void (async () => {
     let settled = false
+    // The terminal event passed on, once there is one: nothing is pushed after it.
+    let final: AssistantMessage | undefined
     const settle = async (message: AssistantMessage | undefined) => {
       if (settled) return
       settled = true
@@ -253,13 +258,20 @@ function reservedStream(original: (model: Model<Api>, input: unknown, options?: 
     }
     try {
       for await (const event of inner) {
-        if (event.type === 'done' || event.type === 'error') await settle(event.type === 'done' ? event.message : event.error)
+        if (event.type === 'done' || event.type === 'error') {
+          final = event.type === 'done' ? event.message : event.error
+          await settle(final)
+        }
         outer.push(event)
       }
       const result = await inner.result()
       await settle(result)
       outer.end(result)
     } catch (error) {
+      if (final) {
+        outer.end(final)
+        return
+      }
       const message = failedMessage(model, error)
       await settle(message)
       outer.push({ type: 'error', reason: 'error', error: message })

@@ -222,27 +222,36 @@ export default async function mousseExtension(pi: ExtensionAPI): Promise<void> {
   let turn: PiTurnResponse | undefined
   // Mousse charges every request to the live turn before it goes, or refuses it. The text thrown
   // is always one of the fixed ones, never the transport's (Pi would retry "fetch failed").
-  // Every `streamSimple` request (all Pi's agent, compactions and summaries make) carries what it
-  // would spend, whatever the turn: Pi compacts before a prompt, ahead of `before_agent_start`, so
-  // the extension cannot know the live turn's limits. Mousse decides, and a grant comes back only
-  // when the live turn reserves; a request that cannot be sized carries nothing and is refused there.
+  // Mousse decides from the live turn whether a request is reserved: Pi compacts before a prompt,
+  // ahead of `before_agent_start`, so the extension cannot know the turn's limits. A request goes
+  // with what it would spend when the last answer asked for it (sizing serialises the whole
+  // context, so unbudgeted turns skip it); otherwise Mousse answers `spendRequired`, charging
+  // nothing, and the request asks again with it. Only `streamSimple` (every request Pi's agent,
+  // compactions and summaries make) can be sized; anything else is refused under spend limits.
+  let reserving = false
+  const spendOf = (model: Model<Api>, context: unknown, options: Record<string, unknown>): { spend: PiSpendRequest; thinkingBudget: number } => {
+    const typed = context as Parameters<typeof wirePlan>[1]
+    const plan = wirePlan(model, typed, typeof options.maxTokens === 'number' ? options.maxTokens : undefined, options.reasoning as PiReasoning | undefined, options.thinkingBudgets as ThinkingBudgets | undefined)
+    return { spend: { inputBound: inputBound(typed, model.api) ?? null, wireCap: plan.wireCap ?? null, thinkingBudget: plan.thinkingBudget, model: { provider: model.provider, id: model.id, api: model.api } }, thinkingBudget: plan.thinkingBudget }
+  }
+  const ask = async (body: PiRequestRequest): Promise<PiRequestResponse> => {
+    try {
+      return await call<PiRequestResponse>('request', body)
+    } catch {
+      throw new Error(GATE_UNAVAILABLE)
+    }
+  }
   const gate: RequestGate = {
     request: async (model, context, options, fn) => {
-      let spend: PiSpendRequest | undefined
-      let thinkingBudget = 0
-      if (fn === 'streamSimple') {
-        const typed = context as Parameters<typeof wirePlan>[1]
-        const plan = wirePlan(model, typed, typeof options.maxTokens === 'number' ? options.maxTokens : undefined, options.reasoning as PiReasoning | undefined, options.thinkingBudgets as ThinkingBudgets | undefined)
-        thinkingBudget = plan.thinkingBudget
-        spend = { inputBound: inputBound(typed, model.api) ?? null, wireCap: plan.wireCap ?? null, thinkingBudget, model: { provider: model.provider, id: model.id, api: model.api } }
+      let sized = fn === 'streamSimple' && reserving ? spendOf(model, context, options) : undefined
+      let answer = await ask({ attemptToken: turn?.attemptToken ?? '', kind: 'request', ...(sized ? { spend: sized.spend } : {}) })
+      if (answer?.ok === false && answer.spendRequired && !sized && fn === 'streamSimple') {
+        sized = spendOf(model, context, options)
+        answer = await ask({ attemptToken: turn?.attemptToken ?? '', kind: 'request', spend: sized.spend })
       }
-      const body: PiRequestRequest = { attemptToken: turn?.attemptToken ?? '', kind: 'request', ...(spend ? { spend } : {}) }
-      let answer: PiRequestResponse
-      try {
-        answer = await call<PiRequestResponse>('request', body)
-      } catch {
-        throw new Error(GATE_UNAVAILABLE)
-      }
+      reserving = answer?.ok === true ? Boolean(answer.reservation) : answer?.ok === false && Boolean(answer.spendRequired) ? true : reserving
+      const spend = sized?.spend
+      const thinkingBudget = sized?.thinkingBudget ?? 0
       if (answer?.ok === true) {
         const reservation = answer.reservation
         if (!reservation) return undefined

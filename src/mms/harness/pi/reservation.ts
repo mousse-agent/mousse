@@ -258,19 +258,45 @@ export interface ModelPrice {
 const SERVICE_TIER_MULTIPLIER: Readonly<Record<string, number>> = Object.freeze({ 'openai-responses': 2.5 })
 
 /**
+ * The models a request on `model` may be answered and billed by besides itself: Anthropic's
+ * server-side fallbacks (`compat.allowedFallbackModels`, sent as `fallbacks` and billed at the
+ * fallback's price). No other listed API routes a request to a different model on pi-ai's side.
+ */
+export function fallbackModels(model: { api: string; compat?: unknown }): Array<{ model: string; cost?: ModelPrice }> {
+  if (model.api !== 'anthropic-messages' || !model.compat || typeof model.compat !== 'object') return []
+  const allowed = (model.compat as { allowedFallbackModels?: unknown }).allowedFallbackModels
+  return Array.isArray(allowed) ? (allowed as Array<{ model: string; cost?: ModelPrice }>) : []
+}
+
+/**
  * The rates a reservation is held at, in USD per token: the highest any input-side token can be
  * billed (input, cache read, cache write, or a one-hour cache write at twice input) and the highest
- * output rate, over the base price and every tier, times the API's highest service-tier
- * multiplier. Undefined when the model has no input or no output price (a USD limit cannot be held).
+ * output rate, over the base price, every tier and every fallback model (`fallbacks`), times the
+ * API's highest service-tier multiplier. Undefined when the model, or any of its fallbacks, has no
+ * input or no output price (a USD limit cannot be held).
  */
-export function reservationRates(api: string, cost: ModelPrice | undefined): { input: number; output: number } | undefined {
-  const levels = [cost ?? {}, ...(cost?.tiers ?? [])]
+export function reservationRates(api: string, cost: ModelPrice | undefined, fallbacks: ReadonlyArray<ModelPrice | undefined> = []): { input: number; output: number } | undefined {
   const rate = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0)
+  const prices = [cost, ...fallbacks]
+  if (prices.some((price) => !(rate(price?.input) > 0) || !(rate(price?.output) > 0))) return undefined
+  const levels = prices.flatMap((price) => [price ?? {}, ...(price?.tiers ?? [])])
   const input = Math.max(...levels.flatMap((level) => [rate(level.input), rate(level.cacheRead), rate(level.cacheWrite), 2 * rate(level.input)]))
   const output = Math.max(...levels.map((level) => rate(level.output)))
-  if (!(rate(cost?.input) > 0) || !(rate(cost?.output) > 0)) return undefined
   const multiplier = SERVICE_TIER_MULTIPLIER[api] ?? 1
   return { input: perToken(input) * multiplier, output: perToken(output) * multiplier }
+}
+
+/**
+ * Whether the hook parameters route the request to a model whose price was not reserved: an
+ * Anthropic `fallbacks` entry outside the model's allowed fallbacks, or a `models` list (an
+ * OpenAI-compatible gateway's model fallbacks) on any API.
+ */
+export function unreservedRoute(api: string, params: unknown, allowed: readonly string[]): boolean {
+  const value = params && typeof params === 'object' ? (params as Record<string, unknown>) : {}
+  if (value.models !== undefined) return true
+  if (value.fallbacks === undefined) return false
+  if (api !== 'anthropic-messages' || !Array.isArray(value.fallbacks)) return true
+  return value.fallbacks.some((entry) => !entry || typeof entry !== 'object' || !allowed.includes((entry as { model?: unknown }).model as string))
 }
 
 /**

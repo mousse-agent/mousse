@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { RunCounters, RunSpend, TurnBudget, type BudgetLimits, type SpendScope } from '../../src/mms/harness/budget'
 import { grantFloor, hookCap, hookThinkingBudget, thinkingBudgetFor } from '../../src/mms/harness/pi/reservation'
-import { harness, setup as setupEngine, type SetupOptions } from './piRpcEngineFixture'
+import { harness, script, setup as setupEngine, type SetupOptions } from './piRpcEngineFixture'
 import type { RecordedRequest } from './piRpcFixture'
 
 // PR 4 4b3: spend reservation in the real pinned Pi child, against local recorders for every API
@@ -117,8 +117,10 @@ function spending(limits: BudgetLimits) {
   const ledger = new RunSpend()
   const grants: number[] = []
   const settled: string[] = []
+  const requests: Array<{ inputBound: number; price: { input: number; output: number } }> = []
   const scope: SpendScope = {
     reserve: (request, binding) => {
+      requests.push(request)
       const result = ledger.reserve(request, binding)
       grants.push(result.ok ? result.cap : -1)
       return result
@@ -128,15 +130,15 @@ function spending(limits: BudgetLimits) {
       return ledger.settle(id, outcome)
     }
   }
-  return { budget: new TurnBudget(limits, new RunCounters(), scope), grants, settled, ledger }
+  return { budget: new TurnBudget(limits, new RunCounters(), scope), grants, settled, ledger, requests }
 }
 
 interface HookEntry { api: string; id: string; cap: number; thinkingBudget: number; params: unknown }
 
-async function setup(options: SetupOptions & { modelPatch?: Record<string, unknown> } = {}) {
+async function setup(options: SetupOptions & { modelPatch?: Record<string, unknown>; extraModels?: (url: string) => unknown[] } = {}) {
   const bedrock = await bedrockRecorder()
   const env = await setupEngine(cleanups, {
-    models: (url) => models(url, bedrock.url, options.modelPatch),
+    models: (url) => [...models(url, bedrock.url, options.modelPatch), ...(options.extraModels?.(url) ?? [])],
     extraEnv: { AWS_REGION: 'us-east-1' },
     ...options,
     testEnv: { ...(options.testEnv ?? {}) }
@@ -390,7 +392,103 @@ describe('spend reservation in the real Pi child (Pi RPC engine)', () => {
     await expect(engine.startTurn(d.input, d.sink, d.ctl, d.host)).rejects.toBeTruthy()
     expect(refused.settled).toEqual(['released'])
     expect(refused.ledger.used()).toEqual({ input: 0, output: 0, usd: 0 })
+
+    // A 429 is never billed: released. A 502 may come from a proxy after the upstream billed: kept.
+    for (const [status, kept] of [[429, false], [502, true], [504, true]] as const) {
+      recorder.respond((_request, res) => {
+        const body = JSON.stringify({ error: { message: 'gateway', type: 'server_error' } })
+        res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) })
+        res.end(body)
+      })
+      const answered = run(`s${status}`)
+      const e = harness(project, { model: 'gpt-4.1', runId: `s${status}`, threadId: `s${status}` }, { budget: answered.budget })
+      await expect(engine.startTurn(e.input, e.sink, e.ctl, e.host)).rejects.toBeTruthy()
+      expect(answered.settled, String(status)).toEqual([kept ? 'used' : 'released'])
+      expect(answered.ledger.committed.output, String(status)).toBe(kept ? answered.grants[0] : 0)
+    }
   }, 120_000)
+
+  it('an unbudgeted turn sends no spend; a budgeted one asks again with it once, then sends it with every request', async () => {
+    const { engine, recorder, project } = await setup()
+    const seen: boolean[] = []
+    const internals = engine as unknown as { admitRequest(thread: unknown, request: { spend?: unknown }): unknown }
+    const admit = internals.admitRequest.bind(engine)
+    internals.admitRequest = (thread, request) => {
+      seen.push(Boolean(request?.spend))
+      return admit(thread, request)
+    }
+    recorder.respond(reply())
+    const plain = harness(project, { model: 'gpt-4.1', runId: 'p1', threadId: 'p1' })
+    await engine.startTurn(plain.input, plain.sink, plain.ctl, plain.host)
+    expect(seen).toEqual([false])
+
+    seen.length = 0
+    recorder.respond(script([{ tool: { name: 'ls', args: {} } }, { text: 'done' }]))
+    const run = spending({ maxOutputTokens: 50_000 })
+    const budgeted = harness(project, { model: 'gpt-4.1', runId: 'b1', threadId: 'b1' }, { budget: run.budget })
+    await engine.startTurn(budgeted.input, budgeted.sink, budgeted.ctl, budgeted.host)
+    // The first request learns that the turn reserves (nothing charged), the next goes with its spend.
+    expect(seen).toEqual([false, true, true])
+    expect(run.grants).toHaveLength(2)
+  }, 90_000)
+
+  /** An Anthropic model whose refusals may fall back to a model ten times its price. */
+  const WITH_FALLBACK = (url: string) => [{
+    provider: 'mock', id: 'claude-guarded', name: 'Claude guarded', api: 'anthropic-messages', baseUrl: url, reasoning: false, input: ['text'],
+    cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }, contextWindow: 200_000, maxTokens: 64_000,
+    compat: { allowedFallbackModels: [{ provider: 'mock', model: 'claude-fallback', cost: { input: 30, output: 150, cacheRead: 3, cacheWrite: 37.5 } }] }
+  }]
+
+  it('an Anthropic request with server-side fallbacks is reserved at the fallback’s prices, and a reply billed by the fallback stays within the USD limit', async () => {
+    const { engine, recorder, project } = await setup({ extraModels: WITH_FALLBACK })
+    recorder.respond((_request, res) => sse(res, [
+      { type: 'message_start', message: { id: 'msg_1', type: 'message', role: 'assistant', model: 'claude-fallback', content: [], stop_reason: null, usage: { input_tokens: 10, output_tokens: 1 } } },
+      { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 1 } },
+      { type: 'message_stop' }
+    ], true))
+    const run = spending({ maxUsd: 3 })
+    const turn = harness(project, { model: 'claude-guarded' }, { budget: run.budget })
+    expect((await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)).text).toBe('hi')
+    const body = JSON.parse(recorder.requests[0].body) as { max_tokens: number; fallbacks?: Array<{ model: string }> }
+    expect(body.fallbacks).toEqual([{ model: 'claude-fallback' }])
+    // Held at $60/M input (a one-hour cache write at the fallback's input price) and $150/M output.
+    const [request] = run.requests
+    expect(request.price.input).toBeCloseTo(60 / 1_000_000, 12)
+    expect(request.price.output).toBeCloseTo(150 / 1_000_000, 12)
+    const grant = run.grants[0]
+    expect(body.max_tokens).toBe(grant)
+    // The whole bound and the whole cap, billed by the fallback, stay within the limit.
+    expect(request.inputBound * 60 / 1_000_000 + grant * 150 / 1_000_000).toBeLessThanOrEqual(3 + 1e-9)
+    // The fallback answered: pi-ai bills it at the fallback's price, within what was held.
+    expect(run.settled).toEqual(['used'])
+    expect(run.ledger.committed.usd).toBeCloseTo((10 * 30 + 1 * 150) / 1_000_000, 9)
+  }, 60_000)
+
+  it('a payload hook that adds an unreserved fallback model, or a gateway models list, trips the final check with nothing sent', async () => {
+    for (const [model, patch] of [['claude-guarded', { fallbacks: [{ model: 'claude-elsewhere' }] }], ['gpt-4.1', { models: ['gpt-4.1', 'gpt-5'] }]] as const) {
+      const { engine, recorder, project } = await setup({ extraModels: WITH_FALLBACK, testEnv: { MOUSSE_PI_TEST_PAYLOAD_PATCH: JSON.stringify(patch) } })
+      recorder.respond(reply())
+      const run = spending({ maxUsd: 1 })
+      const turn = harness(project, { model }, { budget: run.budget })
+      const error = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host).catch((caught: unknown) => caught) as Error
+      expect(error.message, model).toContain('did not match its reservation')
+      expect(recorder.connections(), model).toBe(0)
+      expect(run.settled, model).toEqual(['released'])
+    }
+  }, 120_000)
+
+  it('a token limit on a model priced on one side completes: a reported cost is not an overshoot when no USD was held', async () => {
+    const { engine, recorder, project } = await setup({ extraModels: (url) => [{ provider: 'mock', id: 'half-priced', name: 'Half priced', api: 'openai-completions', baseUrl: `${url}/v1`, reasoning: false, input: ['text'], cost: { input: 3, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128_000, maxTokens: 4_096, compat: { supportsStore: false, supportsDeveloperRole: false } }] })
+    recorder.respond(reply())
+    const run = spending({ maxOutputTokens: 1_000 })
+    const turn = harness(project, { model: 'half-priced' }, { budget: run.budget })
+    expect((await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)).text).toBe('hi')
+    expect(run.settled).toEqual(['used'])
+    expect(run.ledger.committed.usd).toBeGreaterThan(0)
+  }, 60_000)
 
   it('a payload hook that asks for two completions trips the final check, with nothing sent', async () => {
     const { engine, recorder, project } = await setup({ testEnv: { MOUSSE_PI_TEST_PAYLOAD_PATCH: JSON.stringify({ n: 2 }) } })

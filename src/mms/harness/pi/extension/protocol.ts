@@ -118,9 +118,11 @@ export interface PiSpendRequest {
 
 /**
  * `reason`: one of the fixed request-path texts (`messages.ts`), never a number. `reservation`: the
- * request is reserved, and must go with exactly `cap` as its wire cap.
+ * request is reserved, and must go with exactly `cap` as its wire cap. `spendRequired`: the live
+ * turn reserves and the request came without `spend`; nothing was charged, and it may ask again
+ * with it.
  */
-export type PiRequestResponse = { ok: true; reservation?: { id: string; cap: number } } | { ok: false; reason: string }
+export type PiRequestResponse = { ok: true; reservation?: { id: string; cap: number } } | { ok: false; reason: string; spendRequired?: true }
 
 /**
  * `/pi/settle`, once a reserved request ended: `released` when nothing was sent (refused before

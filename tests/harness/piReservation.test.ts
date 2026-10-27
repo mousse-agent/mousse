@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { Api, Context, Model } from '@earendil-works/pi-ai'
 import { budgetLimitsOf, RunCounterBook, RunCounters, RunSpend, TurnBudget, type SpendRequest } from '../../src/mms/harness/budget'
-import { grantFloor, hookCandidates, IMAGE_TOKEN_CEILING, INPUT_OVERHEAD_TOKENS, inputBound, MIN_ANSWER_TOKENS, MIN_GRANT_TOKENS, multipleCandidates, perToken, reservationRates, thinkingBudgetFor, wirePlan } from '../../src/mms/harness/pi/reservation'
+import { fallbackModels, grantFloor, hookCandidates, unreservedRoute, IMAGE_TOKEN_CEILING, INPUT_OVERHEAD_TOKENS, inputBound, MIN_ANSWER_TOKENS, MIN_GRANT_TOKENS, multipleCandidates, perToken, reservationRates, thinkingBudgetFor, wirePlan } from '../../src/mms/harness/pi/reservation'
 
 // PR 4 §16 `reservation.test.ts`: the input bound, the grant from the run's ledger, and the refusal
 // thresholds (256 without thinking; the thinking budget plus 1024 with it, after the context clamp).
@@ -53,6 +53,24 @@ describe('the input bound', () => {
     expect(reservationRates('anthropic-messages', { input: 3, output: 0, cacheRead: 0, cacheWrite: 0 })).toBeUndefined()
     expect(reservationRates('anthropic-messages', { input: 0, output: 15, cacheRead: 0, cacheWrite: 0 })).toBeUndefined()
     expect(reservationRates('anthropic-messages', undefined)).toBeUndefined()
+  })
+
+  it('an Anthropic model’s allowed fallbacks are billed at their own prices: their highest rates are held, and an unpriced fallback refuses a USD limit', () => {
+    const primary = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }
+    const fallback = { input: 30, output: 150, cacheRead: 3, cacheWrite: 37.5 }
+    const model = { api: 'anthropic-messages', compat: { allowedFallbackModels: [{ provider: 'p', model: 'big', cost: fallback }] } }
+    expect(fallbackModels(model).map((entry) => entry.model)).toEqual(['big'])
+    expect(fallbackModels({ api: 'openai-completions', compat: model.compat })).toEqual([])
+    expect(reservationRates('anthropic-messages', primary, fallbackModels(model).map((entry) => entry.cost))).toEqual({ input: perToken(60), output: perToken(150) })
+    expect(reservationRates('anthropic-messages', primary, [undefined])).toBeUndefined()
+  })
+
+  it('a payload routed to a model whose price was not reserved is caught: unknown Anthropic fallbacks, or a gateway models list', () => {
+    expect(unreservedRoute('anthropic-messages', { max_tokens: 10 }, [])).toBe(false)
+    expect(unreservedRoute('anthropic-messages', { fallbacks: [{ model: 'big' }] }, ['big'])).toBe(false)
+    expect(unreservedRoute('anthropic-messages', { fallbacks: [{ model: 'other' }] }, ['big'])).toBe(true)
+    expect(unreservedRoute('openai-completions', { models: ['a', 'b'] }, [])).toBe(true)
+    expect(unreservedRoute('openai-completions', { fallbacks: [] }, [])).toBe(true)
   })
 
   it('one completion per request: n and candidateCount above one are seen, in the payload and in a model’s defaults', () => {
@@ -146,15 +164,23 @@ describe('settling', () => {
   it('input above its bound, or cost above what was held, is an overshoot too', () => {
     const spend = new RunSpend()
     const price = { input: perToken(3), output: perToken(15) }
-    const first = spend.reserve(ask({ price }), {})
+    const first = spend.reserve(ask({ price }), { maxUsd: 10 })
     if (!first.ok) throw new Error('refused')
     expect(spend.settle(first.id, { kind: 'used', input: 1_200, output: 10, usd: 0 })).toMatchObject({ ok: false, limit: { kind: 'input_tokens', limit: 1_000, actual: 1_200 }, overshoot: 200 })
-    const second = spend.reserve(ask({ price }), {})
+    const second = spend.reserve(ask({ price }), { maxUsd: 10 })
     if (!second.ok) throw new Error('refused')
     expect(spend.settle(second.id, { kind: 'used', input: 900, output: 10, usd: 1 })).toMatchObject({ ok: false, limit: { kind: 'cost_usd' } })
-    const third = spend.reserve(ask({ price }), {})
+    const third = spend.reserve(ask({ price }), { maxUsd: 10 })
     if (!third.ok) throw new Error('refused')
     expect(spend.settle(third.id, { kind: 'used', input: 1_000, output: 8_000, usd: 1_000 * perToken(3) + 8_000 * perToken(15) })).toEqual({ ok: true })
+  })
+
+  it('without a USD limit no cost is held, so a reported cost is recorded but never an overshoot (token limits on a model priced on one side)', () => {
+    const spend = new RunSpend()
+    const granted = spend.reserve(ask(), { maxOutputTokens: 1_000 })
+    if (!granted.ok) throw new Error('refused')
+    expect(spend.settle(granted.id, { kind: 'used', input: 10, output: 5, usd: 0.00003 })).toEqual({ ok: true })
+    expect(spend.committed).toEqual({ input: 10, output: 5, usd: 0.00003 })
   })
 
   it('an overshoot ends the run: the budget refuses every later step and keeps the overshoot', () => {

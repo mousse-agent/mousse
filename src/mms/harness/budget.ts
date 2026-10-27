@@ -120,11 +120,13 @@ export interface SpendScope {
 }
 
 interface SpendAmounts { input: number; output: number; usd: number }
+/** A reservation: its amounts, and whether a USD allowance was held for it (a USD limit applied). */
+interface HeldSpend extends SpendAmounts { costLimited: boolean }
 
 /** One run's ledger, `committed + reserved`, with no allowance of its own. */
 export class RunSpend implements SpendScope {
   readonly committed: SpendAmounts = { input: 0, output: 0, usd: 0 }
-  private readonly held = new Map<string, SpendAmounts>()
+  private readonly held = new Map<string, HeldSpend>()
   private next = 0
 
   /** Committed plus everything still reserved. */
@@ -168,7 +170,7 @@ export class RunSpend implements SpendScope {
       return { ok: false, limit }
     }
     const id = `s${++this.next}`
-    this.held.set(id, { input: request.inputBound, output: cap, usd: inputUsd + cap * request.price.output })
+    this.held.set(id, { input: request.inputBound, output: cap, usd: inputUsd + cap * request.price.output, costLimited: limits.maxUsd !== undefined })
     return { ok: true, id, cap }
   }
 
@@ -183,8 +185,9 @@ export class RunSpend implements SpendScope {
     this.committed.usd += at(outcome.usd, held.usd)
     if (outcome.output > held.output) return { ok: false, limit: { kind: 'output_tokens', limit: held.output, actual: outcome.output }, overshoot: outcome.output - held.output }
     if (outcome.input > held.input) return { ok: false, limit: { kind: 'input_tokens', limit: held.input, actual: outcome.input }, overshoot: outcome.input - held.input }
-    // Rounding aside: the reservation was taken at the highest rates.
-    if (outcome.usd > held.usd * (1 + 1e-9) + 1e-12) return { ok: false, limit: { kind: 'cost_usd', limit: held.usd, actual: outcome.usd }, overshoot: outcome.usd - held.usd }
+    // Rounding aside: a USD allowance was held at the highest rates. Without a USD limit no cost was
+    // held (the model may be priced on one side only), so cost is recorded but cannot overshoot.
+    if (held.costLimited && outcome.usd > held.usd * (1 + 1e-9) + 1e-12) return { ok: false, limit: { kind: 'cost_usd', limit: held.usd, actual: outcome.usd }, overshoot: outcome.usd - held.usd }
     return { ok: true }
   }
 }

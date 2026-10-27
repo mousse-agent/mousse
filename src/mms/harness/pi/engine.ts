@@ -30,7 +30,7 @@ import { authorizeDefinitionCall, recordAuthorizedCall, withoutTransportFields }
 import type { AgentExecutionLimit } from '../../../shared/agents/execution'
 import { ANTHROPIC_OAUTH_REFUSED, BUDGET_EXHAUSTED, CREDENTIAL_UNAVAILABLE, GATE_REFUSALS, GATE_UNAVAILABLE, REQUEST_REFUSED, SPEND_CAP_MISMATCH } from './extension/messages'
 import { PI_BRIDGE_ENV, type PiCatalogProvider, type PiGateRequest, type PiGateResponse, type PiReadyRequest, type PiRequestRequest, type PiRequestResponse, type PiSettleRequest, type PiTurnResponse, type PiTurnTool } from './extension/protocol'
-import { addsThinkingBudget, capHonouring, grantFloor, multipleCandidates, reservationRates, thinkingBudgetFor, type PiReasoning } from './reservation'
+import { addsThinkingBudget, capHonouring, fallbackModels, grantFloor, multipleCandidates, reservationRates, thinkingBudgetFor, type PiReasoning } from './reservation'
 import type { SpendModelFacts } from '../policy'
 import type { TurnBudget } from '../budget'
 import { piLaunch, startPiProcess, type PiLaunch, type PiProcess, type PiRuntimePaths, type PiThinkingLevel } from './launch'
@@ -465,7 +465,7 @@ export class PiRpcEngine implements ProviderAdapter {
     if (!entry) return undefined
     const level = piThinkingLevel(effort)
     const reasoning = level === 'off' || !entry.reasoning ? undefined : (level as PiReasoning)
-    const rates = reservationRates(entry.api, entry.cost)
+    const rates = reservationRates(entry.api, entry.cost, fallbackModels(entry).map((fallback) => fallback.cost))
     return {
       label: entry.name || entry.id,
       outputCap: capHonouring(entry) && !multipleCandidates(entry),
@@ -741,6 +741,8 @@ export class PiRpcEngine implements ProviderAdapter {
       return { ok: false, reason: REQUEST_REFUSED }
     }
     const budget = turn.host.budget
+    // Asked without its spend under a spend limit: nothing is charged, the request asks again with it.
+    if (budget?.reserves && !request.spend && !budget.exhausted) return { ok: false, reason: REQUEST_REFUSED, spendRequired: true }
     const decision = budget?.request() ?? { ok: true }
     if (!decision.ok) {
       turn.refusal ??= BUDGET_EXHAUSTED
@@ -751,7 +753,7 @@ export class PiRpcEngine implements ProviderAdapter {
     const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0
     const modelId = parseThinkingSuffixFromModelId(turn.input.model).baseId
     const entry = this.options.catalog().provider.models.find((candidate) => candidate.id === modelId)
-    const rates = entry ? reservationRates(entry.api, entry.cost) : undefined
+    const rates = entry ? reservationRates(entry.api, entry.cost, fallbackModels(entry).map((fallback) => fallback.cost)) : undefined
     const refuse = (): PiRequestResponse => {
       turn.refusal ??= REQUEST_REFUSED
       return { ok: false, reason: REQUEST_REFUSED }
