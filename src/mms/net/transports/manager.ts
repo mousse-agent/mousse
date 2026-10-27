@@ -1,9 +1,11 @@
 import type { Duplex } from 'node:stream'
 import { isIP } from 'node:net'
 import type {
+  AddonRecordStore,
   Clock,
   Transport,
   TransportAddon,
+  TransportAddonAction,
   TransportDialContext,
   TransportManifest,
   TransportStatus,
@@ -57,6 +59,8 @@ export interface ManagedTransportStatus {
   state: TransportStatus['state']
   routes: Route[]
   error?: import('../../../shared/net').NetErrorCode
+  /** Why the transport is not ready, when its add-on says so. */
+  detail?: string
 }
 
 /** Profiles select listeners; verified remote endpoints remain dialable without local tunnel accounts/binaries. */
@@ -83,10 +87,16 @@ export class ProfileTransports {
       hosted?: HostedRelayTransports
       /** Tests replace the `ssh` executable and the user's known_hosts file. */
       ssh?: { binary?: string; userKnownHosts?: string }
+      /** What add-on actions changed outside Mousse. */
+      addonRecords?: AddonRecordStore
     }
   ) {
     this.admission = new PreauthAdmission(options.clock)
-    this.registry = new TransportRegistry(options)
+    this.registry = new TransportRegistry({
+      clock: options.clock,
+      profileDir: options.profileDir,
+      records: options.addonRecords
+    })
     for (const addon of [
       directAddon,
       tailscaleAddon,
@@ -115,6 +125,15 @@ export class ProfileTransports {
   manifests(): TransportManifest[] {
     return this.registry.manifests()
   }
+  action(id: string, name: string): TransportAddonAction | undefined {
+    return this.registry.action(id, name)
+  }
+  holdsLoopback(id: string, port: number): boolean {
+    return this.registry.holdsLoopback(id, port)
+  }
+  refresh(id: string): Promise<void> {
+    return this.registry.refresh(id)
+  }
   validate(configuration: TransportConfiguration): TransportConfiguration {
     if (
       !configuration ||
@@ -135,6 +154,11 @@ export class ProfileTransports {
       const address = relayUrl((checked.settings as { address: string }).address)
       if (address.search) throw new NetError('bad_request')
     }
+    if (checked.id === 'tailscale')
+      tailscaleAddon.create(checked.settings, {
+        clock: this.options.clock,
+        profileDir: this.options.profileDir
+      })
     if (checked.id === 'cloudflared')
       cloudflaredAddon.create(checked.settings, {
         clock: this.options.clock,
@@ -211,7 +235,8 @@ export class ProfileTransports {
         enabled,
         state: error && !status.routes.length ? 'failed' : status.state,
         routes: status.routes,
-        ...(error ? { error } : {})
+        ...(error ? { error } : {}),
+        ...(status.detail ? { detail: status.detail } : {})
       }
     })
   }

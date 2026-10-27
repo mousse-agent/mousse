@@ -34,8 +34,16 @@ import {
   newId,
   isId
 } from '../../shared/net'
-import type { NetDoctor, NetInitInput, NetLocalMethod, NetStatus } from '../../shared/net/local'
 import type {
+  NetAddonActionResult,
+  NetAddonRecords,
+  NetDoctor,
+  NetInitInput,
+  NetLocalMethod,
+  NetStatus
+} from '../../shared/net/local'
+import type {
+  AddonRecordStore,
   Clock,
   Mux,
   SecureChannel,
@@ -97,6 +105,8 @@ interface NetConfiguration {
   direct: { enabled: boolean; host: string; port: number }
   routesVersion: number
   transports?: TransportConfiguration[]
+  /** What an add-on action changed outside Mousse, kept so it can be undone. Keyed by add-on. */
+  addonRecords?: Record<string, { action: string; appliedAt: number; record: unknown }>
   preparedForJoin?: boolean
 }
 export interface NetRuntime {
@@ -233,6 +243,21 @@ export class NetService {
         )
           throw new NetError('storage_corrupt')
         if (cfg.preparedForJoin !== undefined && typeof cfg.preparedForJoin !== 'boolean')
+          throw new NetError('storage_corrupt')
+        if (
+          cfg.addonRecords !== undefined &&
+          (!cfg.addonRecords ||
+            typeof cfg.addonRecords !== 'object' ||
+            Array.isArray(cfg.addonRecords) ||
+            Object.entries(cfg.addonRecords).length > 8 ||
+            Object.values(cfg.addonRecords).some(
+              (row) =>
+                !row ||
+                typeof row.action !== 'string' ||
+                !Number.isSafeInteger(row.appliedAt) ||
+                row.appliedAt < 0
+            ))
+        )
           throw new NetError('storage_corrupt')
         if (cfg.transports !== undefined) {
           if (
@@ -441,15 +466,44 @@ export class NetService {
     if (method === 'net.status') return this.status()
     if (method === 'net.plus.status') return this.hosted?.status() ?? hostedNotConfigured()
     if (method === 'net.disable') return this.disable()
+    // What an add-on changed outside Mousse can always be seen and undone, also while networking is off.
+    if (method === 'net.transport.action.undo') return this.undoAddon(params)
+    if (method === 'net.transport.list' && (this.disabled || !this.config.enabled))
+      return this.transportList()
     if (this.disabled) throw new NetError('disabled')
     if (!['net.init', 'bridge.join'].includes(method)) this.assertEnabled()
     if (method.startsWith('bridge.') && method !== 'bridge.join') this.assertFeature('netBridge')
     if (method === 'net.doctor') return this.doctor()
-    if (method === 'net.transport.list')
-      return {
-        manifests: this.createTransports().manifests(),
-        transports: this.status().transports ?? []
-      }
+    if (method === 'net.transport.list') return this.transportList()
+    if (method === 'net.transport.action.describe') {
+      this.requireEnrolled()
+      const { id, action, settings, context } = this.addonAction(params)
+      return this.addonResult(() =>
+        this.exclusiveAddon(id, async () => ({
+          ok: true,
+          changes: (await action.describe(settings, context)).changes
+        }))
+      )
+    }
+    // Outside the serial queue: the external change can take a while, and it touches no other
+    // network setting. One change per add-on at a time instead.
+    if (method === 'net.transport.action.apply') {
+      this.requireEnrolled()
+      const { id, name, action, settings, context } = this.addonAction(params)
+      return this.addonResult(() =>
+        this.exclusiveAddon(id, async () => {
+          const { record } = await action.apply(settings, context)
+          this.config.addonRecords = {
+            ...this.config.addonRecords,
+            [id]: { action: name, appliedAt: this.clock.now(), record }
+          }
+          this.saveConfig()
+          await this.refreshAddon(id)
+          this.emit()
+          return { ok: true }
+        })
+      )
+    }
     if (method === 'bridge.nodes') return this.nodes()
     if (method.startsWith('net.plus.') && !this.hosted) throw hostedUnavailable()
     if (method === 'net.plus.login.cancel') return this.hosted!.cancelLogin()
@@ -717,8 +771,126 @@ export class NetService {
       clock: this.clock,
       profileDir: this.options.profileDir,
       hosted: this.hosted?.transports,
-      identity: () => this.relayIdentity()
+      identity: () => this.relayIdentity(),
+      addonRecords: this.addonRecords()
     })
+  }
+  private addonRecords(): AddonRecordStore {
+    return {
+      get: (id) => this.config.addonRecords?.[id]?.record,
+      remember: (id, record) => this.rememberAddon(id, record),
+      forget: (id) => this.forgetAddon(id)
+    }
+  }
+  /** Saves the record of an add-on that already has one (an action adds the first one itself). */
+  private rememberAddon(id: string, record: unknown, action?: string): void {
+    const row = this.config.addonRecords?.[id]
+    const name = action ?? row?.action
+    if (!name) return
+    this.config.addonRecords = {
+      ...this.config.addonRecords,
+      [id]: { action: name, appliedAt: row?.appliedAt ?? this.clock.now(), record }
+    }
+    this.saveConfig()
+  }
+  private forgetAddon(id: string): void {
+    if (!this.config.addonRecords?.[id]) return
+    const { [id]: _removed, ...rest } = this.config.addonRecords
+    if (Object.keys(rest).length) this.config.addonRecords = rest
+    else delete this.config.addonRecords
+    this.saveConfig()
+  }
+  private transportList() {
+    return {
+      manifests: this.createTransports().manifests(),
+      transports: this.status().transports ?? [],
+      records: structuredClone(this.config.addonRecords ?? {}) satisfies NetAddonRecords,
+      settings: Object.fromEntries(
+        this.transportConfigurations().map((row) => [row.id, row.settings])
+      )
+    }
+  }
+  private readonly addonBusy = new Set<string>()
+  /** One change to an add-on at a time. */
+  private async exclusiveAddon<T>(id: string, work: () => Promise<T>): Promise<T> {
+    if (this.addonBusy.has(id))
+      throw new NetError('conflict', 'Another change to this add-on is still running.')
+    this.addonBusy.add(id)
+    try {
+      return await work()
+    } finally {
+      this.addonBusy.delete(id)
+    }
+  }
+  private async refreshAddon(id: string): Promise<void> {
+    try {
+      await this.transport?.refresh(id)
+    } catch {
+      // The status keeps showing what the add-on last knew.
+    }
+  }
+  private undoAddon(params: Record<string, unknown>): Promise<NetAddonActionResult> {
+    const { id, name, action, settings, context } = this.addonAction(params)
+    return this.addonResult(() =>
+      this.exclusiveAddon(id, async () => {
+        const recorded = this.config.addonRecords?.[id]
+        // Nothing recorded means nothing of Mousse's to undo.
+        if (recorded?.action !== name)
+          return {
+            ok: true,
+            outcome: 'already-removed',
+            message: 'Nothing was recorded, so there was nothing to undo.'
+          }
+        // A refusal or an unreadable answer throws, and the record stays.
+        const result = await action.undo(recorded.record, settings, context)
+        this.forgetAddon(id)
+        await this.refreshAddon(id)
+        this.emit()
+        return { ok: true, ...result }
+      })
+    )
+  }
+  /** Looks up an add-on action and the settings it works with (the stored ones when none are given). */
+  private addonAction(params: Record<string, unknown>) {
+    const id = params.id as string,
+      name = params.action as string,
+      transports = this.createTransports(),
+      action = transports.action(id, name)
+    if (!action) throw new NetError('bad_request', 'Unknown add-on action.')
+    const settings =
+      params.settings ?? this.transportConfigurations().find((row) => row.id === id)?.settings ?? {}
+    transports.validate({ id, enabled: true, settings })
+    return {
+      id,
+      name,
+      action,
+      settings,
+      context: {
+        clock: this.clock,
+        profileDir: this.options.profileDir,
+        record: () => this.config.addonRecords?.[id]?.record,
+        remember: (record: unknown) => this.rememberAddon(id, record, name),
+        forget: () => this.forgetAddon(id),
+        listening: (port: number) => this.transport?.holdsLoopback(id, port) ?? false
+      }
+    }
+  }
+  /** A refusal from the add-on is a result the dialog can show; anything else is a real failure. */
+  private async addonResult(
+    work: () => Promise<NetAddonActionResult>
+  ): Promise<NetAddonActionResult> {
+    try {
+      return await work()
+    } catch (error) {
+      if (!(error instanceof NetError)) throw error
+      const remedy = (error.details as { remedy?: unknown } | undefined)?.remedy
+      return {
+        ok: false,
+        code: error.code,
+        message: error.message,
+        ...(typeof remedy === 'string' ? { remedy } : {})
+      }
+    }
   }
   private async activate(): Promise<void> {
     this.assertEnabled()
@@ -740,6 +912,7 @@ export class NetService {
           ? rt.enrollment.preparedNodeJoin()!.rendezvous
           : undefined,
       identity: () => this.relayIdentity(),
+      addonRecords: this.addonRecords(),
       onChanged: () => {
         if (this.stopped || this.disabled || !this.config.enabled || !this.routes) return
         try {

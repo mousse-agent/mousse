@@ -23,6 +23,9 @@ export const NET_LOCAL_METHODS = [
   'net.plus.enrollment.offer',
   'net.transport.list',
   'net.transport.configure',
+  'net.transport.action.describe',
+  'net.transport.action.apply',
+  'net.transport.action.undo',
   'net.init',
   'net.disable',
   'net.status',
@@ -47,6 +50,32 @@ export interface NetInitInput {
   port?: number
   passphrase?: string
 }
+/** One change an add-on action will make, shown before it runs. */
+export interface NetAddonChange {
+  title: string
+  detail: string
+  command?: string
+}
+/** `net.transport.action.describe|apply|undo`. A refusal is a result, so its message reaches the dialog. */
+export type NetAddonActionResult =
+  | {
+      ok: true
+      changes?: NetAddonChange[]
+      /** For an undo: what was found and done. `left` means something was deliberately not touched. */
+      outcome?: 'removed' | 'already-removed' | 'left'
+      message?: string
+    }
+  | {
+      ok: false
+      code: NetErrorCode
+      message: string
+      /** A command for the user to run themselves; Mousse never runs it. */
+      remedy?: string
+    }
+/** Tailnet ports that Tailscale uses for Funnel (the public internet). Serve never uses them. */
+export const TAILSCALE_FUNNEL_PORTS: readonly number[] = [443, 8443, 10000]
+/** What `net.transport.list` reports about changes made through add-on actions, keyed by add-on. */
+export type NetAddonRecords = Record<string, { action: string; appliedAt: number; record: unknown }>
 export interface BridgeInviteInput {
   ttlMs?: number
   name?: string
@@ -63,6 +92,8 @@ export interface NetStatus {
     state: 'disabled' | 'provisioning' | 'ready' | 'degraded' | 'failed'
     routes: Route[]
     error?: NetErrorCode
+    /** Why the add-on is not ready, in words for the user. */
+    detail?: string
   }>
   protected?: boolean
   self?: { node: NodeId; user: UserId; isAuthority: boolean }

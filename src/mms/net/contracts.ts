@@ -555,6 +555,10 @@ export interface Transport {
   onStatus(listener: (status: TransportStatus) => void): () => void
   /** Idempotent. */
   teardown(): Promise<void>
+  /** True while this transport itself holds a listener on 127.0.0.1:<port>. */
+  holdsLoopback?(port: number): boolean
+  /** Reads outside state again (for example after an add-on action) and updates the status. */
+  refresh?(): Promise<void>
 }
 
 export interface TransportManifest {
@@ -565,11 +569,60 @@ export interface TransportManifest {
   /** JSON Schema for this add-on's settings. */
   settingsSchema: Record<string, unknown>
   setupSteps: Array<{ title: string; detail: string; command?: string }>
+  /** Changes this add-on can make outside Mousse, listed so the UI can offer them. */
+  actions?: Array<{ id: string; title: string }>
+}
+
+/** Where the service keeps what each add-on changed outside Mousse. */
+export interface AddonRecordStore {
+  get(id: string): unknown
+  /** Saves the record of an add-on that already has one. */
+  remember(id: string, record: unknown): void
+  forget(id: string): void
+}
+
+export interface TransportAddonContext {
+  clock: Clock
+  profileDir: string
+  /** What the last applied action of this add-on recorded, if anything. */
+  record?(): unknown
+  /** Saves the record durably. An action calls it before the change and again as the change settles. */
+  remember?(record: unknown): void
+  /** Drops the record once nothing of Mousse's is left outside Mousse. */
+  forget?(): void
+  /** Whether this add-on's own transport currently listens on 127.0.0.1:<port>. */
+  listening?(port: number): boolean
+}
+
+/** What an undo found and did. The record is cleared for every outcome that returns. */
+export interface TransportAddonUndo {
+  outcome: 'removed' | 'already-removed' | 'left'
+  message: string
+}
+
+/**
+ * A change an add-on can make to the host or network. Each step is shown before it runs
+ * (`describe`), and the exact change is recorded so `undo` can reverse only what Mousse made.
+ * A refusal is a `NetError`; `details.remedy` carries a command Mousse never runs itself.
+ */
+export interface TransportAddonAction {
+  title: string
+  describe(
+    settings: unknown,
+    context: TransportAddonContext
+  ): Promise<{ changes: Array<{ title: string; detail: string; command?: string }> }>
+  apply(settings: unknown, context: TransportAddonContext): Promise<{ record: unknown }>
+  undo(
+    record: unknown,
+    settings: unknown,
+    context: TransportAddonContext
+  ): Promise<TransportAddonUndo>
 }
 
 export interface TransportAddon {
   manifest: TransportManifest
-  create(settings: unknown, context: { clock: Clock; profileDir: string }): Transport
+  create(settings: unknown, context: TransportAddonContext): Transport
+  actions?: Record<string, TransportAddonAction>
 }
 
 export type SecureChannelOptions = {
