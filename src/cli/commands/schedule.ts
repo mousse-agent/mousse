@@ -106,12 +106,12 @@ export async function runSchedule(args: ParsedArgs): Promise<void> {
           case 'enable': {
             const port = flagString(flags, 'port')
             const res = await client.request<WebhookSecretResult>('scheduled.webhook.enable', { id, ...(port ? { port: Number(port) } : {}) })
-            writeOutput(globals.mode, webhookSecretOutput(res), (data) => formatWebhookSecret(data as ReturnType<typeof webhookSecretOutput>, 'enabled'))
+            writeOutput(globals.mode, webhookSecretOutput(res), (data) => formatWebhookSecret(data as WebhookSecretOutput, 'enabled'))
             break
           }
           case 'rotate': {
             const res = await client.request<WebhookSecretResult>('scheduled.webhook.rotate', { id })
-            writeOutput(globals.mode, webhookSecretOutput(res), (data) => formatWebhookSecret(data as ReturnType<typeof webhookSecretOutput>, 'rotated'))
+            writeOutput(globals.mode, webhookSecretOutput(res), (data) => formatWebhookSecret(data as WebhookSecretOutput, 'rotated'))
             break
           }
           case 'disable': {
@@ -146,25 +146,41 @@ export async function runSchedule(args: ParsedArgs): Promise<void> {
 
 interface WebhookSecretResult {
   job: ScheduledJob
-  secret: string
+  /** Absent when the webhook already existed and only the listener's port moved. */
+  secret?: string
   url: string
   listening?: boolean
   error?: string
+  warning?: string
 }
+
+type WebhookSecretOutput = { id: string; url: string; secret?: string; listening?: boolean; error?: string; warning?: string }
 
 /** What `webhook enable|rotate` prints: the secret appears here and nowhere else. */
-function webhookSecretOutput(res: WebhookSecretResult): { id: string; url: string; secret: string; listening?: boolean; error?: string } {
-  return { id: res.job.id, url: res.url, secret: res.secret, ...(res.listening === undefined ? {} : { listening: res.listening }), ...(res.error ? { error: res.error } : {}) }
+function webhookSecretOutput(res: WebhookSecretResult): WebhookSecretOutput {
+  return {
+    id: res.job.id,
+    url: res.url,
+    ...(res.secret ? { secret: res.secret } : {}),
+    ...(res.listening === undefined ? {} : { listening: res.listening }),
+    ...(res.error ? { error: res.error } : {}),
+    ...(res.warning ? { warning: res.warning } : {})
+  }
 }
 
-function formatWebhookSecret(out: ReturnType<typeof webhookSecretOutput>, verb: string): string {
+function formatWebhookSecret(out: WebhookSecretOutput, verb: string): string {
   return [
-    `Webhook ${verb} for job ${out.id}.`,
+    out.secret ? `Webhook ${verb} for job ${out.id}.` : `Webhook listener updated for job ${out.id}; its secret is unchanged.`,
     `URL:    ${out.url}`,
-    `Secret: ${out.secret}`,
-    'This is the only time the secret is shown; store it now. Sign "<unix seconds>.<raw body>" with HMAC-SHA256 and send',
-    'X-Mousse-Timestamp: <unix seconds> and X-Mousse-Signature: sha256=<hex> (see docs/CLI.md).',
-    ...(out.listening === false ? [`The listener is not running: ${out.error ?? 'unknown error'}`] : [])
+    ...(out.secret
+      ? [
+          `Secret: ${out.secret}`,
+          'This is the only time the secret is shown; store it now. Sign "<unix seconds>.<raw body>" with HMAC-SHA256 and send',
+          'X-Mousse-Timestamp: <unix seconds> and X-Mousse-Signature: sha256=<hex> (see docs/CLI.md).'
+        ]
+      : []),
+    ...(out.listening === false ? [`The listener is not running: ${out.error ?? 'unknown error'}`] : []),
+    ...(out.warning ? [out.warning] : [])
   ].join('\n')
 }
 

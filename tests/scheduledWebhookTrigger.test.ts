@@ -1,8 +1,16 @@
+import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
-import { request as httpRequest, createServer as createHttpServer } from 'node:http'
+import { connect as netConnect } from 'node:net'
+import { request as httpRequest, createServer as createHttpServer, ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+// Wraps the durable writer so tests can see which files were written through it (it still writes them).
+vi.mock('../src/mms/data/AtomicFs', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../src/mms/data/AtomicFs')>()
+  return { ...original, atomicWriteJsonSync: vi.fn(original.atomicWriteJsonSync) }
+})
 import { MousseConfigStore } from '../src/mms/config/MousseConfigStore'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { MmsProtocolServer } from '../src/mms/protocol/server'
@@ -11,7 +19,9 @@ import { createProfileSecretAdapter, deleteProfileSecret, writeProfileSecret } f
 import { ScheduledJobService, ScheduledWebhookError } from '../src/mms/scheduled/ScheduledJobService'
 import { ScheduledJobStore, WEBHOOK_RATE_LIMIT_PER_MINUTE } from '../src/mms/scheduled/ScheduledJobStore'
 import { ScheduledWebhookServer, WEBHOOK_MAX_BODY_BYTES, scheduledWebhookPort, signWebhookBody, type ScheduledWebhookHooks } from '../src/mms/scheduled/ScheduledWebhookServer'
-import { appendDelivery, readDeliveries, readTriggerPayload } from '../src/mms/scheduled/webhookFiles'
+import { WebhookSecretCache } from '../src/mms/scheduled/webhookSecretCache'
+import { atomicWriteJsonSync } from '../src/mms/data/AtomicFs'
+import { appendDelivery, readDeliveries, readReceipts, readTriggerPayload, writeReceipts } from '../src/mms/scheduled/webhookFiles'
 import type { ScheduledJob, ScheduledWebhookDelivery } from '../src/shared/types'
 import type { ScheduledJobIngress } from '../src/mms/platform/MmsWorkflowChat'
 
@@ -103,7 +113,7 @@ describe('scheduled job webhook trigger', () => {
   })
 
   /** The pieces a profile wires together, over `home`; a second call over the same home is a restart. */
-  async function boot(options: { start?: boolean; listen?: boolean } = {}) {
+  async function boot(options: { start?: boolean; listen?: boolean; schedulerGate?: boolean; server?: { stopGraceMs?: number; bodyTimeoutMs?: number }; recordRejection?: ScheduledWebhookHooks['recordRejection'] } = {}) {
     const config = MousseConfigStore.load(home)
     const store = new ScheduledJobStore(config)
     const calls: Array<{ prompt: string; ingress: ScheduledJobIngress }> = []
@@ -118,18 +128,16 @@ describe('scheduled job webhook trigger', () => {
     }, store)
     service.setWebhookSecrets({ write: (ref, value) => writeProfileSecret(home, ref, value), delete: (ref) => deleteProfileSecret(home, ref) })
     const secrets = createProfileSecretAdapter({ profileRoot: home, inheritProcessEnv: false })
-    const resolveSecret = vi.fn((jobId: string) => {
-      const job = store.getJob(jobId)
-      const webhook = job && !job.createdBy ? job.trigger?.webhook : undefined
-      const secret = secrets.resolveSecretRef?.(webhook?.secretRef ?? 'scheduled-webhook-none')
-      return webhook ? secret : undefined
-    })
+    const cache = new WebhookSecretCache(store, secrets)
+    service.on('updated', () => cache.invalidate())
+    const resolveSecret = vi.fn((jobId: string) => cache.resolve(jobId))
     const server = new ScheduledWebhookServer({
       resolveSecret,
       trigger: (jobId, request) => store.triggerFromWebhook(jobId, request),
-      recordRejection: (jobId, outcome, bodyBytes) => store.recordWebhookRejection(jobId, outcome, bodyBytes),
-      accepted: () => service.wake()
-    })
+      recordRejection: options.recordRejection ?? ((jobId, outcome, bodyBytes) => store.recordWebhookRejection(jobId, outcome, bodyBytes)),
+      accepted: () => service.wake(),
+      ...(options.schedulerGate ? { schedulerRunning: () => service.isRunning() } : {})
+    }, options.server)
     if (options.listen !== false) await server.start(0)
     if (options.start) service.start()
     running.push(async () => {
@@ -141,7 +149,7 @@ describe('scheduled job webhook trigger', () => {
       holds.set(jobId, new Promise<void>((resolve) => { release = resolve }))
       return () => { holds.delete(jobId); release() }
     }
-    return { config, store, service, server, calls, hold, resolveSecret, port: () => server.getPort() as number }
+    return { config, store, service, server, calls, hold, resolveSecret, cache, port: () => server.getPort() as number }
   }
 
   type Booted = Awaited<ReturnType<typeof boot>>
@@ -167,7 +175,7 @@ describe('scheduled job webhook trigger', () => {
       // Read what a crash right now would leave: a fresh store over the same files.
       const after = new ScheduledJobStore(MousseConfigStore.load(home)).getJob(job.id)!
       expect(after.pendingTrigger?.occurrenceId).toBe(answer.occurrenceId)
-      expect(after.webhookReceipts).toHaveLength(1)
+      expect(readReceipts(home, job.id).receipts).toHaveLength(1)
       const payload = readTriggerPayload(home, job.id, answer.occurrenceId)
       expect(payload).toMatchObject({ occurrenceId: answer.occurrenceId, jobId: job.id, body, bodyBytes: Buffer.byteLength(body) })
       if (process.platform !== 'win32') {
@@ -210,7 +218,7 @@ describe('scheduled job webhook trigger', () => {
       // Nothing was started or stored for any of them.
       const stored = b.store.getJob(job.id)!
       expect(stored.pendingTrigger).toBeUndefined()
-      expect(stored.webhookReceipts ?? []).toHaveLength(0)
+      expect(readReceipts(home, job.id).receipts).toHaveLength(0)
     })
 
     it('does the same secret lookup for an unknown job as for a known one, and answers in about the same time', async () => {
@@ -220,20 +228,42 @@ describe('scheduled job webhook trigger', () => {
       await signedPost(b.port(), 'no-such-job', body, { secret })
       expect(b.resolveSecret).toHaveBeenCalledWith('no-such-job')
 
-      const median = async (jobId: string): Promise<number> => {
-        const times: number[] = []
-        for (let i = 0; i < 25; i += 1) {
+      // Alternate known and unknown so a slow moment affects both the same way.
+      const known: number[] = []
+      const unknown: number[] = []
+      for (let i = 0; i < 40; i += 1) {
+        for (const [jobId, into] of [[job.id, known], ['no-such-job', unknown]] as const) {
           const started = performance.now()
           await signedPost(b.port(), jobId, body, { secret: 'whsec_wrong' })
-          times.push(performance.now() - started)
+          into.push(performance.now() - started)
         }
-        return times.sort((a, c) => a - c)[12]
       }
-      await median(job.id)
-      const known = await median(job.id)
-      const unknown = await median('no-such-job')
-      // A coarse bound: a lookup or hash that only one of the two paths did would show as a gap far beyond this.
-      expect(Math.abs(known - unknown)).toBeLessThan(25)
+      const median = (values: number[]): number => values.sort((a, c) => a - c)[Math.floor(values.length / 2)]
+      // Neither path touches a file or the jobs lock, so the medians match closely; the old split was about 2x.
+      expect(Math.abs(median(known) - median(unknown))).toBeLessThan(Math.max(2.5, median(unknown) * 0.5))
+    })
+
+    it('answers an authentication failure before it logs it', async () => {
+      const ends: number[] = []
+      const originalEnd = ServerResponse.prototype.end
+      vi.spyOn(ServerResponse.prototype, 'end').mockImplementation(function (this: ServerResponse, ...args: unknown[]) {
+        ends.push(1)
+        return (originalEnd as (...a: unknown[]) => ServerResponse).apply(this, args)
+      } as never)
+      const answeredWhenLogged: number[] = []
+      const b = await boot({
+        recordRejection: (jobId, outcome, bodyBytes) => {
+          answeredWhenLogged.push(ends.length)
+          b.store.recordWebhookRejection(jobId, outcome, bodyBytes)
+        }
+      })
+      const { job } = webhookJob(b)
+      const res = await signedPost(b.port(), job.id, '{}', { secret: 'whsec_wrong' })
+      expect(res.status).toBe(401)
+      await until(() => deliveries(b, job.id).some((row) => row.outcome === 'rejected_signature'), 'the rejection to be logged')
+      // By the time the log was written the answer had already been written.
+      expect(answeredWhenLogged).toHaveLength(1)
+      expect(answeredWhenLogged[0]).toBeGreaterThanOrEqual(1)
     })
 
     it('refuses browser requests and a foreign Host with 403, and any other path or method with 404', async () => {
@@ -297,7 +327,7 @@ describe('scheduled job webhook trigger', () => {
       const results = await Promise.all(Array.from({ length: 6 }, () => signedPost(b.port(), job.id, '{"same":true}', { secret, ts })))
       expect(results.filter((res) => res.status === 202)).toHaveLength(1)
       expect(results.filter((res) => res.status === 409)).toHaveLength(5)
-      expect(b.store.getJob(job.id)!.webhookReceipts).toHaveLength(1)
+      expect(readReceipts(home, job.id).receipts).toHaveLength(1)
     })
 
     it('refuses a request that was answered 409 when it is sent again later', async () => {
@@ -325,12 +355,12 @@ describe('scheduled job webhook trigger', () => {
       const nowMs = Date.now()
       const nowSec = Math.floor(nowMs / 1000)
       expect(b.store.triggerFromWebhook(job.id, { ts: nowSec, sig: 'a'.repeat(64), body: Buffer.from('x'), now: nowMs })).toMatchObject({ kind: 'accepted' })
-      expect(b.store.getJob(job.id)!.webhookReceipts).toHaveLength(1)
+      expect(readReceipts(home, job.id).receipts).toHaveLength(1)
       // 11 minutes later the old receipt is gone (any request with that timestamp would be stale anyway).
       b.store.updateJob(job.id, { pendingTrigger: undefined })
       const later = nowMs + 11 * 60_000
       expect(b.store.triggerFromWebhook(job.id, { ts: Math.floor(later / 1000), sig: 'b'.repeat(64), body: Buffer.from('y'), now: later })).toMatchObject({ kind: 'accepted' })
-      expect(b.store.getJob(job.id)!.webhookReceipts?.map((r) => r.sig)).toEqual(['b'.repeat(64)])
+      expect(readReceipts(home, job.id).receipts.map((r) => r.sig)).toEqual(['b'.repeat(64)])
     })
   })
 
@@ -589,6 +619,7 @@ describe('scheduled job webhook trigger', () => {
       const b = await boot()
       const { job, secret } = webhookJob(b)
       b.store.updateJob(job.id, { createdBy: { threadId: 'thread-1' } })
+      b.cache.invalidate()
       expect((await signedPost(b.port(), job.id, '{}', { secret })).status).toBe(401)
     })
 
@@ -657,6 +688,235 @@ describe('scheduled job webhook trigger', () => {
     })
   })
 
+  describe('shutdown and stalled clients', () => {
+    /** Opens a raw connection, writes `text` and holds the socket open without finishing the request. */
+    async function stall(port: number, text: string): Promise<{ close(): void; closed: Promise<void> }> {
+      const socket = netConnect({ host: '127.0.0.1', port })
+      socket.on('error', () => undefined)
+      const closed = new Promise<void>((resolve) => socket.on('close', () => resolve()))
+      await new Promise<void>((resolve) => socket.on('connect', () => resolve()))
+      socket.write(text)
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      return { close: () => socket.destroy(), closed }
+    }
+
+    it('stops within the grace period although a client sent a partial body and went quiet', async () => {
+      const b = await boot({ server: { stopGraceMs: 300, bodyTimeoutMs: 60_000 } })
+      const { job } = webhookJob(b)
+      const client = await stall(b.port(), `POST /hooks/${job.id} HTTP/1.1\r\nHost: 127.0.0.1:${b.port()}\r\nContent-Length: 100\r\n\r\nabc`)
+      const started = Date.now()
+      await b.server.stop()
+      expect(Date.now() - started).toBeLessThan(3000)
+      await client.closed
+    })
+
+    it('stops within the grace period although a client sent part of the headers and went quiet', async () => {
+      const b = await boot({ server: { stopGraceMs: 300 } })
+      const client = await stall(b.port(), 'POST /hooks/x HTTP/1.1\r\nHost:')
+      const started = Date.now()
+      await b.server.stop()
+      expect(Date.now() - started).toBeLessThan(3000)
+      await client.closed
+    })
+
+    it('drops a body that does not finish in time with 408, and a client that aborts mid-body frees its handler', async () => {
+      const b = await boot({ server: { stopGraceMs: 300, bodyTimeoutMs: 250 } })
+      const { job } = webhookJob(b)
+      const slow = await new Promise<string>((resolve) => {
+        const socket = netConnect({ host: '127.0.0.1', port: b.port() })
+        let received = ''
+        socket.on('data', (chunk) => { received += chunk.toString() })
+        socket.on('error', () => undefined)
+        socket.on('close', () => resolve(received))
+        socket.on('connect', () => socket.write(`POST /hooks/${job.id} HTTP/1.1\r\nHost: 127.0.0.1:${b.port()}\r\nContent-Length: 100\r\n\r\nabc`))
+      })
+      expect(slow).toMatch(/^HTTP\/1\.1 408/)
+
+      const aborted = await stall(b.port(), `POST /hooks/${job.id} HTTP/1.1\r\nHost: 127.0.0.1:${b.port()}\r\nContent-Length: 100\r\n\r\nabc`)
+      aborted.close()
+      await aborted.closed
+      const started = Date.now()
+      await b.server.stop()
+      expect(Date.now() - started).toBeLessThan(1500)
+    })
+  })
+
+  describe('the replay record', () => {
+    const FULL = 2000
+
+    function seed(jobId: string, count: number, ts: number, extra: { saturatedUntil?: number } = {}): void {
+      const receipts = Array.from({ length: count }, (_, i) => ({ ts, sig: i.toString(16).padStart(64, '0'), at: Date.now() - 3_600_000 }))
+      writeReceipts(home, jobId, { receipts, ...extra })
+    }
+
+    it('never forgets a receipt that can still verify: a full record refuses new requests, unrecorded, and replays stay refused', () => {
+      const store = new ScheduledJobStore(MousseConfigStore.load(home))
+      const job = store.createJob({ name: 'Busy', prompt: 'x', schedule: { kind: 'manual' } })
+      store.setWebhookTrigger(job.id, { scheme: 'mousse', secretRef: `scheduled-webhook-${job.id}`, createdAt: new Date().toISOString() })
+      const nowMs = Date.now()
+      const nowSec = Math.floor(nowMs / 1000)
+      seed(job.id, FULL, nowSec)
+
+      // The 2001st distinct request cannot be recorded: it is refused and the record goes into saturation.
+      const unrecorded = { ts: nowSec, sig: 'f'.repeat(64), body: Buffer.from('late') }
+      expect(store.triggerFromWebhook(job.id, { ...unrecorded, now: nowMs })).toEqual({ kind: 'rate_limited' })
+      const after = readReceipts(home, job.id)
+      expect(after.receipts).toHaveLength(FULL)
+      expect(after.saturatedUntil).toBeGreaterThan(nowSec + 300)
+
+      // After a restart, a minute later (the per-minute window is clear and the job idle): the oldest captured
+      // request is still a replay, and the request that could not be recorded is still refused.
+      const restarted = new ScheduledJobStore(MousseConfigStore.load(home))
+      const later = nowMs + 61_000
+      expect(restarted.triggerFromWebhook(job.id, { ts: nowSec, sig: (0).toString(16).padStart(64, '0'), body: Buffer.from('x'), now: later })).toEqual({ kind: 'replay' })
+      expect(restarted.triggerFromWebhook(job.id, { ...unrecorded, now: later })).toEqual({ kind: 'rate_limited' })
+      expect(restarted.getJob(job.id)!.pendingTrigger).toBeUndefined()
+
+      // Once a request with any timestamp the unrecorded one could have carried is stale, the job takes requests again.
+      const muchLater = nowMs + 12 * 60_000
+      expect(restarted.triggerFromWebhook(job.id, { ts: Math.floor(muchLater / 1000), sig: 'e'.repeat(64), body: Buffer.from('new'), now: muchLater })).toMatchObject({ kind: 'accepted' })
+      expect(readReceipts(home, job.id).saturatedUntil).toBeUndefined()
+    })
+
+    it('does not count receipts whose timestamps have gone stale toward the cap', () => {
+      const store = new ScheduledJobStore(MousseConfigStore.load(home))
+      const job = store.createJob({ name: 'Old', prompt: 'x', schedule: { kind: 'manual' } })
+      store.setWebhookTrigger(job.id, { scheme: 'mousse', secretRef: `scheduled-webhook-${job.id}`, createdAt: new Date().toISOString() })
+      const nowMs = Date.now()
+      seed(job.id, FULL, Math.floor(nowMs / 1000) - 3600)
+      expect(store.triggerFromWebhook(job.id, { ts: Math.floor(nowMs / 1000), sig: 'a'.repeat(64), body: Buffer.from('x'), now: nowMs })).toMatchObject({ kind: 'accepted' })
+      expect(readReceipts(home, job.id).receipts).toHaveLength(1)
+    })
+
+    it('refuses everything while the receipts file cannot be read, and rotating the secret repairs it', async () => {
+      const b = await boot()
+      const { job, secret } = webhookJob(b)
+      const now = Math.floor(Date.now() / 1000)
+      expect((await signedPost(b.port(), job.id, '{"n":1}', { secret, ts: now })).status).toBe(202)
+      const file = join(home, 'scheduled', 'triggers', job.id, 'receipts.json')
+      for (const damaged of ['{"receipts": [', '[]', '{"receipts":[{"ts":"x"}]}', '']) {
+        writeFileSync(file, damaged)
+        b.store.updateJob(job.id, { pendingTrigger: undefined })
+        const res = await signedPost(b.port(), job.id, `{"n":${damaged.length}}`, { secret, ts: now + 1 })
+        expect(res.status, damaged).toBe(503)
+        expect(res.body).toBe('{"error":"unavailable"}')
+        // Never read as empty: even the request that was accepted before the damage is not accepted again.
+        expect((await signedPost(b.port(), job.id, '{"n":1}', { secret, ts: now })).status, damaged).toBe(503)
+        expect(b.store.getJob(job.id)!.pendingTrigger).toBeUndefined()
+      }
+      // A restart does not repair it either.
+      const restarted = await boot()
+      expect((await signedPost(restarted.port(), job.id, '{"n":9}', { secret, ts: now + 2 })).status).toBe(503)
+
+      const rotated = restarted.service.rotateWebhook(job.id)
+      expect((await signedPost(restarted.port(), job.id, '{"n":9}', { secret: rotated.secret, ts: now + 2 })).status).toBe(202)
+      expect(readReceipts(home, job.id).receipts).toHaveLength(1)
+    })
+
+    it('keeps the receipts file out of the payload sweep', () => {
+      const store = new ScheduledJobStore(MousseConfigStore.load(home))
+      const job = store.createJob({ name: 'Sweep', prompt: 'x', schedule: { kind: 'manual' } })
+      store.setWebhookTrigger(job.id, { scheme: 'mousse', secretRef: `scheduled-webhook-${job.id}`, createdAt: new Date().toISOString() })
+      const nowMs = Date.now()
+      writeReceipts(home, job.id, { receipts: [{ ts: Math.floor(nowMs / 1000), sig: 'a'.repeat(64), at: nowMs }] })
+      const file = join(home, 'scheduled', 'triggers', job.id, 'receipts.json')
+      const old = new Date(nowMs - 3 * 24 * 60 * 60 * 1000)
+      utimesSync(file, old, old)
+      store.sweepWebhookPayloads(nowMs)
+      expect(existsSync(file)).toBe(true)
+    })
+
+    it('syncs every write to the runtime file and the receipts file to disk', () => {
+      const store = new ScheduledJobStore(MousseConfigStore.load(home))
+      const written = (): string[] => vi.mocked(atomicWriteJsonSync).mock.calls.map((call) => String(call[0]).replace(/\\/g, '/').split('/').slice(-1)[0])
+      vi.mocked(atomicWriteJsonSync).mockClear()
+      const job = store.createJob({ name: 'Sync', prompt: 'x', schedule: { kind: 'interval', minutes: 1 } })
+      expect(written()).toContain('jobs-runtime.json')
+
+      vi.mocked(atomicWriteJsonSync).mockClear()
+      store.updateJob(job.id, { nextRunAt: '2000-01-01T00:00:00.000Z', state: 'scheduled' })
+      store.claimDueJobs(new Date('2026-01-01T00:00:00.000Z'))
+      const claimed = store.getJob(job.id)!
+      store.markJobRun(job.id, true, 'ok', undefined, false, claimed.runClaim!.token)
+      store.pauseJob(job.id)
+      expect(written().filter((name) => name === 'jobs-runtime.json').length).toBeGreaterThanOrEqual(4)
+
+      vi.mocked(atomicWriteJsonSync).mockClear()
+      store.setWebhookTrigger(job.id, { scheme: 'mousse', secretRef: 'x', createdAt: new Date().toISOString() })
+      store.resumeJob(job.id)
+      const nowMs = Date.now()
+      store.triggerFromWebhook(job.id, { ts: Math.floor(nowMs / 1000), sig: 'a'.repeat(64), body: Buffer.from('x'), now: nowMs })
+      expect(written()).toEqual(expect.arrayContaining(['receipts.json', 'jobs-runtime.json']))
+    })
+  })
+
+  describe('when the scheduler is off', () => {
+    it('answers 503 for a verified request and uses nothing up, so the sender can retry once it is on', async () => {
+      const b = await boot({ schedulerGate: true })
+      const { job, secret } = webhookJob(b)
+      const now = Math.floor(Date.now() / 1000)
+      const res = await signedPost(b.port(), job.id, '{"n":1}', { secret, ts: now })
+      expect(res.status).toBe(503)
+      expect(res.body).toBe('{"error":"scheduler_disabled"}')
+      expect(b.store.getJob(job.id)!.pendingTrigger).toBeUndefined()
+      expect(readReceipts(home, job.id).receipts).toHaveLength(0)
+      // An unsigned request still sees only the 401.
+      expect((await signedPost(b.port(), job.id, '{"n":1}', { secret: 'whsec_wrong', ts: now })).status).toBe(401)
+
+      b.service.start()
+      expect((await signedPost(b.port(), job.id, '{"n":1}', { secret, ts: now })).status).toBe(202)
+    })
+  })
+
+  describe('the delivery log', () => {
+    it('keeps refusals of signed requests when unsigned traffic floods the log', () => {
+      mkdirSync(join(home, 'scheduled'), { recursive: true })
+      for (const outcome of ['replay', 'rate_limited', 'running'] as const) {
+        appendDelivery(home, 'job-b', { receivedAt: new Date(1000).toISOString(), outcome, bodyBytes: 1 })
+      }
+      for (let i = 0; i < 100; i += 1) appendDelivery(home, 'job-b', { receivedAt: new Date(5000 + i).toISOString(), outcome: i % 2 ? 'too_large' : 'rejected_signature', bodyBytes: 1 })
+      const rows = readDeliveries(home, 'job-b')
+      expect(rows.filter((row) => ['replay', 'rate_limited', 'running'].includes(row.outcome))).toHaveLength(3)
+      expect(rows.filter((row) => ['too_large', 'rejected_signature'].includes(row.outcome))).toHaveLength(20)
+    })
+
+    it('does file work for a flood of bad signatures at most once a second', async () => {
+      const b = await boot()
+      const { job } = webhookJob(b)
+      for (let i = 0; i < 30; i += 1) await signedPost(b.port(), job.id, `{"i":${i}}`, { secret: 'whsec_wrong' })
+      await until(() => deliveries(b, job.id).some((row) => row.outcome === 'rejected_signature'), 'a row')
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect(deliveries(b, job.id).filter((row) => row.outcome === 'rejected_signature').length).toBeLessThanOrEqual(2)
+    })
+  })
+
+  describe.skipIf(process.platform !== 'win32')('Windows permissions', () => {
+    const aclOf = (path: string): string => execFileSync('icacls.exe', [path], { encoding: 'utf8', windowsHide: true }).split(path).join('')
+
+    it('limits the secrets folder and the stored payloads to this account and SYSTEM', async () => {
+      const b = await boot()
+      const { job, secret } = webhookJob(b)
+      const res = await signedPost(b.port(), job.id, '{"x":1}', { secret })
+      expect(res.status).toBe(202)
+      const { occurrenceId } = JSON.parse(res.body) as { occurrenceId: string }
+      const targets = [
+        join(home, 'secrets'),
+        join(home, 'secrets', 'refs.json'),
+        join(home, 'scheduled', 'triggers'),
+        join(home, 'scheduled', 'triggers', job.id),
+        join(home, 'scheduled', 'triggers', job.id, `${occurrenceId}.json`),
+        join(home, 'scheduled', 'triggers', job.id, 'receipts.json')
+      ]
+      for (const target of targets) {
+        const acl = aclOf(target)
+        expect(acl, target).not.toMatch(/Everyone|BUILTIN\\Users|Authenticated Users/i)
+        expect(acl, target).toContain(process.env.USERNAME as string)
+        const principals = acl.split(/\r?\n/).map((line) => line.trim()).filter((line) => /:\(/.test(line))
+        expect(principals.length, target).toBeLessThanOrEqual(2)
+      }
+    })
+  })
+
   describe('through the daemon protocol', () => {
     let mms: MousseMainService
     let protocol: MmsProtocolServer
@@ -720,6 +980,9 @@ describe('scheduled job webhook trigger', () => {
       expect(rotated.secret).not.toBe(enabled.secret)
       await expect(client.request('scheduled.webhook.enable', { id })).rejects.toThrow(/already has a webhook/)
       await client.request('scheduled.webhook.disable', { id })
+      // Another job's webhook keeps the listener up, and this job's old secret no longer verifies.
+      const other = await client.request<{ job: { id: string } }>('scheduled.create', { input: { name: 'other', prompt: 'x', schedule: { kind: 'manual' } } })
+      await client.request('scheduled.webhook.enable', { id: other.job.id })
       expect((await signedPost(port, id, '{"x":2}', { secret: rotated.secret })).status).toBe(401)
       const log = await client.request<{ deliveries: ScheduledWebhookDelivery[] }>('scheduled.webhook.deliveries', { id })
       expect(log.deliveries.some((row) => row.outcome === 'accepted' || row.outcome === 'completed')).toBe(true)
@@ -739,6 +1002,78 @@ describe('scheduled job webhook trigger', () => {
       expect(enabled.error).toMatch(/could not start/)
       const status = await client.request<{ status: { lastTickError: string | null } }>('scheduled.status')
       expect(status.status.lastTickError).toMatch(/could not start/)
+    })
+
+    it('turns the listener off with the last webhook, moves it with enable --port without a new secret, and keeps the old port when the new one is taken', async () => {
+      const calls: string[] = []
+      ;(mms.scheduled as unknown as { runner: { runIsolated: (prompt: string) => Promise<{ text: string; silent: boolean }> } }).runner = {
+        runIsolated: async (prompt) => { calls.push(prompt); return { text: 'ok', silent: false } }
+      }
+      const first = await freePort()
+      const second = await freePort()
+      const created = await client.request<{ job: { id: string } }>('scheduled.create', { input: { name: 'moving', prompt: 'move me', schedule: { kind: 'manual' } } })
+      const id = created.job.id
+      const enabled = await client.request<{ secret: string; listening: boolean }>('scheduled.webhook.enable', { id, port: first })
+      expect(enabled.listening).toBe(true)
+      expect((await signedPost(first, id, '{"n":1}', { secret: enabled.secret })).status).toBe(202)
+      await until(() => calls.length === 1, 'the first run')
+
+      // enable --port on a job that has a webhook moves the listener and issues no new secret.
+      const moved = await client.request<{ secret?: string; listening: boolean; url: string }>('scheduled.webhook.enable', { id, port: second })
+      expect(moved.secret).toBeUndefined()
+      expect(moved.listening).toBe(true)
+      expect(moved.url).toBe(`http://127.0.0.1:${second}/hooks/${id}`)
+      expect(await signedPost(first, id, '{"n":2}', { secret: enabled.secret })).toMatchObject({ status: 0, body: 'ECONNREFUSED' })
+      await until(() => !mms.scheduled.getJob(id)?.runClaim && !mms.scheduled.getJob(id)?.pendingOccurrence, 'the job to be idle')
+      expect((await signedPost(second, id, '{"n":2}', { secret: enabled.secret })).status).toBe(202)
+      await expect(client.request('scheduled.webhook.enable', { id })).rejects.toThrow(/already has a webhook/)
+
+      // A port that is taken: the listener stays where it was.
+      const taken = createHttpServer()
+      blockers.push(taken)
+      await new Promise<void>((resolve) => taken.listen(0, '127.0.0.1', resolve))
+      const busyPort = (taken.address() as { port: number }).port
+      const refused = await client.request<{ listening: boolean; error?: string }>('scheduled.webhook.enable', { id, port: busyPort })
+      expect(refused.listening).toBe(false)
+      expect(refused.error).toMatch(/stays on port/)
+      expect(mms.config.getScheduledSection().webhooks).toEqual({ enabled: true, port: second })
+      await until(() => !mms.scheduled.getJob(id)?.runClaim && !mms.scheduled.getJob(id)?.pendingOccurrence, 'the job to be idle again')
+      expect((await signedPost(second, id, '{"n":3}', { secret: enabled.secret, ts: Math.floor(Date.now() / 1000) + 1 })).status).toBe(202)
+
+      // Removing the last webhook stops the listener and turns it off.
+      await client.request('scheduled.webhook.disable', { id })
+      expect(mms.config.getScheduledSection().webhooks?.enabled).toBe(false)
+      expect(await signedPost(second, id, '{"n":4}', { secret: enabled.secret })).toMatchObject({ status: 0, body: 'ECONNREFUSED' })
+    })
+
+    it('retries a listener that could not bind, and refuses a port the net service uses', async () => {
+      const taken = createHttpServer()
+      blockers.push(taken)
+      await new Promise<void>((resolve) => taken.listen(0, '127.0.0.1', resolve))
+      const port = (taken.address() as { port: number }).port
+      const created = await client.request<{ job: { id: string } }>('scheduled.create', { input: { name: 'retry', prompt: 'x', schedule: { kind: 'manual' } } })
+      const id = created.job.id
+      ;(mms.scheduled as unknown as { runner: { runIsolated: () => Promise<{ text: string; silent: boolean }> } }).runner = { runIsolated: async () => ({ text: 'ok', silent: false }) }
+      const failed = await client.request<{ listening: boolean; secret: string }>('scheduled.webhook.enable', { id, port })
+      expect(failed.listening).toBe(false)
+      expect((mms as unknown as { webhookRetryTimer: unknown }).webhookRetryTimer).not.toBeNull()
+
+      // The port frees up; the retry (run now instead of waiting half a minute) brings the listener up.
+      await new Promise<void>((resolve) => taken.close(() => resolve()))
+      blockers.length = 0
+      await (mms as unknown as { listenScheduledWebhooksIfEnabled(): Promise<void> }).listenScheduledWebhooksIfEnabled()
+      expect((await signedPost(port, id, '{}', { secret: failed.secret })).status).toBe(202)
+      const status = await client.request<{ status: { lastTickError: string | null } }>('scheduled.status')
+      expect(status.status.lastTickError).toBeNull()
+
+      // A port the net service uses is refused, in a profile whose net service reports it.
+      const netPort = await freePort()
+      vi.spyOn((mms as unknown as { net: { localPorts(): number[] } }).net, 'localPorts').mockReturnValue([netPort])
+      const other = await client.request<{ job: { id: string } }>('scheduled.create', { input: { name: 'net', prompt: 'x', schedule: { kind: 'manual' } } })
+      const refused = await client.request<{ listening: boolean; error?: string }>('scheduled.webhook.enable', { id: other.job.id, port: netPort })
+      expect(refused.listening).toBe(false)
+      expect(refused.error).toMatch(/net service/)
+      expect(await signedPost(netPort, other.job.id, '{}', { secret: 'x' })).toMatchObject({ status: 0, body: 'ECONNREFUSED' })
     })
 
     it('does not accept a webhook trigger through scheduled.create or scheduled.update', async () => {

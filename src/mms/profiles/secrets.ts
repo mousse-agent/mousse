@@ -1,10 +1,11 @@
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   createProcessEnvSecretAdapter,
   type IntegrationSecretAdapter
 } from '../integrations/secrets'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
+import { ensurePrivateDirectory } from '../data/privateAcl'
 
 /**
  * Profile-scoped secret resolver. New profiles never read arbitrary process.env.
@@ -49,7 +50,8 @@ export function createProfileSecretAdapter(options: {
 
 export function writeProfileSecret(profileRoot: string, name: string, value: string): void {
   const dir = join(profileRoot, 'secrets')
-  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  // Private to this account on Windows too, before any secret is written into it.
+  ensurePrivateDirectory(dir)
   const filePath = join(dir, 'refs.json')
   const current = existsSync(filePath)
     ? (JSON.parse(readFileSync(filePath, 'utf8')) as Record<string, string>)

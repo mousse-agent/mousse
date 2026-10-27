@@ -14,6 +14,13 @@ export class BodyTooLargeError extends Error {
   }
 }
 
+export class BodyTimeoutError extends Error {
+  constructor() {
+    super('Request body timed out')
+    this.name = 'BodyTimeoutError'
+  }
+}
+
 /** True when a declared `Content-Length` already exceeds `maxBytes` (refuse before reading anything). */
 export function declaredLengthExceeds(headers: IncomingHttpHeaders, maxBytes: number): boolean {
   const declared = Number(headers['content-length'])
@@ -24,8 +31,16 @@ export function declaredLengthExceeds(headers: IncomingHttpHeaders, maxBytes: nu
  * Reads the request body as bytes, counting what actually arrives: a chunked body or one with no
  * declared length is limited the same as one that declares its size. Rejects with `BodyTooLargeError`
  * as soon as `maxBytes` is passed and stops reading.
+ *
+ * `abortOnClose` rejects when the connection ends before the body does, and `timeoutMs` rejects when the whole
+ * body has not arrived by then, so a stalled client cannot hold a handler (or a shutdown) open. Both are
+ * off by default: the channel webhook keeps its behaviour.
  */
-export function readBodyBytes(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
+export function readBodyBytes(
+  req: IncomingMessage,
+  maxBytes: number,
+  options: { timeoutMs?: number; abortOnClose?: boolean } = {}
+): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     if (declaredLengthExceeds(req.headers, maxBytes)) {
       reject(new BodyTooLargeError())
@@ -34,6 +49,21 @@ export function readBodyBytes(req: IncomingMessage, maxBytes: number): Promise<B
     const chunks: Buffer[] = []
     let size = 0
     let done = false
+    let timer: NodeJS.Timeout | undefined
+    const finish = (settle: () => void): void => {
+      if (timer) clearTimeout(timer)
+      settle()
+    }
+    if (options.timeoutMs !== undefined) {
+      timer = setTimeout(() => {
+        if (done) return
+        done = true
+        chunks.length = 0
+        req.removeAllListeners('data')
+        reject(new BodyTimeoutError())
+      }, options.timeoutMs)
+      timer.unref?.()
+    }
     req.on('data', (chunk) => {
       if (done) return
       const buf = Buffer.from(chunk)
@@ -43,17 +73,25 @@ export function readBodyBytes(req: IncomingMessage, maxBytes: number): Promise<B
         chunks.length = 0
         req.pause()
         req.removeAllListeners('data')
-        reject(new BodyTooLargeError())
+        finish(() => reject(new BodyTooLargeError()))
         return
       }
       chunks.push(buf)
     })
     req.on('end', () => {
-      if (!done) resolve(Buffer.concat(chunks))
+      if (!done) finish(() => resolve(Buffer.concat(chunks)))
     })
     req.on('error', (err) => {
-      if (!done) reject(err)
+      if (!done) finish(() => reject(err))
     })
+    if (options.abortOnClose) {
+      req.on('close', () => {
+        if (!done && !req.complete) {
+          done = true
+          finish(() => reject(new Error('Connection closed before the body ended')))
+        }
+      })
+    }
   })
 }
 

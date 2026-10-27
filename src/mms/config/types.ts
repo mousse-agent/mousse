@@ -89,7 +89,6 @@ export interface ScheduledJobRuntime {
   runClaim?: ScheduledJob['runClaim']
   pendingOccurrence?: ScheduledJob['pendingOccurrence']
   pendingTrigger?: ScheduledJob['pendingTrigger']
-  webhookReceipts?: ScheduledJob['webhookReceipts']
 }
 
 export interface MousseConf {

@@ -46,9 +46,10 @@ import type { BotEngine } from './bots/activation/BotEngine'
 import { openPersonalBots } from './bots/activation/open'
 import type { BotStore } from './bots/store/BotStore'
 import { RunStore } from './run/RunStore'
-import { ScheduledJobService } from './scheduled/ScheduledJobService'
+import { ScheduledJobService, ScheduledWebhookError } from './scheduled/ScheduledJobService'
 import { ScheduledJobStore } from './scheduled/ScheduledJobStore'
 import { ScheduledWebhookServer, scheduledWebhookPort } from './scheduled/ScheduledWebhookServer'
+import { WebhookSecretCache } from './scheduled/webhookSecretCache'
 import { ChannelService } from './channels/ChannelService'
 import { ChannelStore } from './channels/ChannelStore'
 import { AgentRegistry } from './agents/AgentRegistry'
@@ -228,6 +229,10 @@ export class MmsProfileServices {
   private readonly channelStore: ChannelStore
   private readonly scheduledStore: ScheduledJobStore
   private readonly scheduledWebhookServer: ScheduledWebhookServer
+  private readonly webhookSecretCache: WebhookSecretCache
+  private webhookRetryTimer: NodeJS.Timeout | null = null
+  /** Set when the profile starts shutting down: the webhook listener is not started or retried again. */
+  private webhooksClosed = false
   private started = false
   private stopped = false
   private readonly requests = new OwnedWorkBarrier()
@@ -544,21 +549,17 @@ export class MmsProfileServices {
     // The Run Engine decides when a scheduled occurrence is over, including after a restart.
     this.scheduledStore.setRunProbe(this.orchestrator.scheduledRunProbe())
     this.orchestrator.setScheduledHooks({ onOccurrenceSettled: (event) => this.scheduled.occurrenceSettled(event) })
-    // Job webhooks: secrets live in this profile's secret file, read on each request (a rotation applies at once)
-    // and never from the process environment.
+    // Job webhooks: secrets live in this profile's secret file, never in the process environment. The listener
+    // looks them up in a small in-memory table that is rebuilt on any scheduler change, so a request costs no file work.
     const webhookSecrets = createProfileSecretAdapter({ profileRoot: homeDir, inheritProcessEnv: false })
     this.scheduled.setWebhookSecrets({
       write: (ref, value) => writeProfileSecret(homeDir, ref, value),
       delete: (ref) => deleteProfileSecret(homeDir, ref)
     })
+    this.webhookSecretCache = new WebhookSecretCache(this.scheduledStore, webhookSecrets)
     this.scheduledWebhookServer = new ScheduledWebhookServer({
-      resolveSecret: (jobId) => {
-        const job = this.scheduledStore.getJob(jobId)
-        const webhook = job && !job.createdBy ? job.trigger?.webhook : undefined
-        // An unknown job does the same lookup, under a name no job has, so the work does not tell them apart.
-        const secret = webhookSecrets.resolveSecretRef?.(webhook?.secretRef ?? 'scheduled-webhook-none')
-        return webhook ? secret : undefined
-      },
+      resolveSecret: (jobId) => this.webhookSecretCache.resolve(jobId),
+      schedulerRunning: () => this.scheduled.isRunning(),
       trigger: (jobId, request) => this.scheduledStore.triggerFromWebhook(jobId, request),
       recordRejection: (jobId, outcome, bodyBytes) => this.scheduledStore.recordWebhookRejection(jobId, outcome, bodyBytes),
       accepted: () => this.scheduled.wake()
@@ -944,6 +945,9 @@ export class MmsProfileServices {
     this.platform.beginShutdown()
     this.orchestrator.beginShutdown()
     this.scheduled.beginShutdown()
+    this.webhooksClosed = true
+    if (this.webhookRetryTimer) clearTimeout(this.webhookRetryTimer)
+    this.webhookRetryTimer = null
     void this.scheduledWebhookServer.stop().catch(() => undefined)
     this.ptyManager.beginShutdown()
   }
@@ -990,6 +994,9 @@ export class MmsProfileServices {
   private wireServiceEvents(): void {
     this.scheduled.on('updated', (jobs) => {
       this.events.emit({ channel: 'scheduled:updated', data: jobs })
+      // A change to the jobs (a rotated or removed secret, a deleted job) applies to the listener at once.
+      this.webhookSecretCache.invalidate()
+      this.reconcileScheduledWebhookListener(jobs as ScheduledJob[])
     })
     this.scheduled.on('status', (status) => {
       this.events.emit({ channel: 'scheduled:status', data: status })
@@ -999,14 +1006,31 @@ export class MmsProfileServices {
     })
   }
 
-  /** Brings the job webhook listener up when the profile has it enabled; a taken port is reported, not fatal. */
+  /** True when at least one job has a webhook (the listener has a reason to run). */
+  private hasScheduledWebhooks(jobs: ScheduledJob[] = this.scheduled.listJobs()): boolean {
+    return jobs.some((job) => job.trigger?.webhook !== undefined)
+  }
+
+  /** Brings the job webhook listener up when the profile has it enabled; a taken port is reported and retried, not fatal. */
   private async listenScheduledWebhooksIfEnabled(): Promise<void> {
     const section = this.config.getScheduledSection().webhooks
-    if (!section?.enabled) return
+    if (!section?.enabled || this.webhooksClosed) return
+    if (!this.hasScheduledWebhooks()) {
+      this.config.updateScheduledSection({ webhooks: { enabled: false, port: scheduledWebhookPort(section.port) } })
+      return
+    }
     await this.listenScheduledWebhooks(scheduledWebhookPort(section.port))
   }
 
+  /** Binds the listener; returns the reason when it could not. A failed bind is tried again every half minute. */
   private async listenScheduledWebhooks(port: number): Promise<string | undefined> {
+    if (this.webhooksClosed) return 'The profile is shutting down.'
+    // A forward set up for a net transport (Tailscale Serve) would reach whatever listens on its port.
+    if (this.net.localPorts().includes(port)) {
+      const message = `Webhook listener not started: port ${port} is used by this profile's net service. Choose another port.`
+      this.scheduled.setWebhookListenerError(message)
+      return message
+    }
     try {
       await this.scheduledWebhookServer.start(port)
       this.scheduled.setWebhookListenerError(null)
@@ -1014,8 +1038,29 @@ export class MmsProfileServices {
     } catch (error) {
       const message = `Webhook listener could not start on 127.0.0.1:${port}: ${error instanceof Error ? error.message : String(error)}`
       this.scheduled.setWebhookListenerError(message)
+      this.scheduleWebhookRetry()
       return message
     }
+  }
+
+  private scheduleWebhookRetry(): void {
+    if (this.webhookRetryTimer || this.webhooksClosed) return
+    this.webhookRetryTimer = setTimeout(() => {
+      this.webhookRetryTimer = null
+      void this.listenScheduledWebhooksIfEnabled().catch(() => undefined)
+    }, 30_000)
+    this.webhookRetryTimer.unref?.()
+  }
+
+  /** The listener runs only while some job has a webhook: removing the last one stops it and turns it off. */
+  private reconcileScheduledWebhookListener(jobs: ScheduledJob[]): void {
+    const section = this.config.getScheduledSection().webhooks
+    if (!section?.enabled || this.hasScheduledWebhooks(jobs)) return
+    if (this.webhookRetryTimer) clearTimeout(this.webhookRetryTimer)
+    this.webhookRetryTimer = null
+    this.scheduled.setWebhookListenerError(null)
+    this.config.updateScheduledSection({ webhooks: { enabled: false, port: scheduledWebhookPort(section.port) } })
+    void this.scheduledWebhookServer.stop().catch(() => undefined)
   }
 
   /** The URL a sender posts to for a job (the configured port; the listener may not be up). */
@@ -1026,15 +1071,39 @@ export class MmsProfileServices {
 
   /**
    * Gives a job a webhook, turns the listener on (and moves it when a different port is asked for) and returns the
-   * secret, shown only here. A listener that cannot bind is reported with the result; the job keeps its webhook.
+   * secret, shown only here. For a job that already has a webhook, a port moves the listener and no secret is
+   * issued. A listener that cannot bind is reported with the result; the job keeps its webhook.
    */
-  async enableScheduledWebhook(jobId: string, options: { port?: number } = {}): Promise<{ job: ScheduledJob; secret: string; url: string; listening: boolean; error?: string }> {
-    const { job, secret } = this.scheduled.enableWebhook(jobId)
+  async enableScheduledWebhook(
+    jobId: string,
+    options: { port?: number } = {}
+  ): Promise<{ job: ScheduledJob; secret?: string; url: string; listening: boolean; error?: string; warning?: string }> {
+    const existing = this.scheduled.getJob(jobId)
+    let job: ScheduledJob
+    let secret: string | undefined
+    if (existing?.trigger?.webhook) {
+      if (options.port === undefined) {
+        throw new ScheduledWebhookError('This job already has a webhook. Rotate its secret to get a new one, or give a port to move the listener.')
+      }
+      job = existing
+    } else {
+      ;({ job, secret } = this.scheduled.enableWebhook(jobId))
+    }
     const current = this.config.getScheduledSection().webhooks
     const port = scheduledWebhookPort(options.port ?? current?.port)
     if (!current?.enabled || current.port !== port) this.config.updateScheduledSection({ webhooks: { enabled: true, port } })
-    const error = await this.listenScheduledWebhooks(port)
-    return { job, secret, url: this.scheduledWebhookUrl(jobId), listening: error === undefined, ...(error ? { error } : {}) }
+    this.webhooksClosed = false
+    let error = await this.listenScheduledWebhooks(port)
+    if (error && current?.enabled && current.port !== port) {
+      // The new port is not available: go back to the one that was working.
+      this.config.updateScheduledSection({ webhooks: { enabled: true, port: current.port } })
+      await this.listenScheduledWebhooks(current.port)
+      error = `${error} The listener stays on port ${current.port}.`
+    }
+    const warning = this.scheduled.isRunning()
+      ? undefined
+      : 'The scheduler is off, so requests are refused (503) until it is turned on (scheduled.enabled).'
+    return { job, ...(secret ? { secret } : {}), url: this.scheduledWebhookUrl(jobId), listening: error === undefined, ...(error ? { error } : {}), ...(warning ? { warning } : {}) }
   }
 
   start(): Promise<void> {
@@ -1055,9 +1124,10 @@ export class MmsProfileServices {
     if (this.config.getScheduledSection().enabled) {
       this.scheduled.start()
     }
-    await this.listenScheduledWebhooksIfEnabled()
     await this.channels.startEnabled()
     await this.net.start()
+    // After the net service has loaded its ports, so the listener can refuse one of them.
+    await this.listenScheduledWebhooksIfEnabled()
 
     await this.startMcpServer()
     // Restore multi-tenant runtimes; mark non-reattachable PTY/agents interrupted.

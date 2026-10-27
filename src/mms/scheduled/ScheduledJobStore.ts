@@ -37,12 +37,16 @@ import { createLeaseToken } from '../queue/ThreadExecutionLease'
 import { computeNextRun } from './computeNextRun'
 import { withFileLock } from './fileLock'
 import {
+  ReceiptsUnreadableError,
   appendDelivery,
   readDeliveries,
+  readReceipts,
   removeJobTriggerFiles,
   removeTriggerPayload,
+  resetReceipts,
   sweepTriggerPayloads,
   updateDelivery,
+  writeReceipts,
   writeTriggerPayload
 } from './webhookFiles'
 
@@ -55,9 +59,8 @@ export const WEBHOOK_RATE_LIMIT_PER_MINUTE = 60
 /** A receipt is kept while its timestamp could still pass the freshness check, plus a minute of clock slack. */
 const WEBHOOK_RECEIPT_RETENTION_S = WEBHOOK_TIMESTAMP_TOLERANCE_S + 60
 /**
- * Receipts one job keeps at most. Only a holder of the secret can add them (every one is a verified
- * signature), and such a sender can sign a fresh request anyway, so dropping the oldest at the cap
- * costs nothing: replay protection exists for captured traffic.
+ * Receipts one job keeps at most. A receipt is never dropped while its timestamp can still pass the freshness
+ * check: at the cap the job refuses new requests instead (see `saturatedUntil`).
  */
 const MAX_WEBHOOK_RECEIPTS = 2000
 /** A refusal of the same kind is logged at most this often per job, so a flood cannot churn the log file. */
@@ -74,22 +77,13 @@ export function webhookIdOfOccurrence(occurrenceKey: string | undefined): string
   return occurrenceKey?.startsWith(WEBHOOK_OCCURRENCE_PREFIX) ? occurrenceKey.slice(WEBHOOK_OCCURRENCE_PREFIX.length) : undefined
 }
 
-/**
- * A job as clients see it: without the webhook receipts, which are the replay record (hundreds of signatures
- * for a busy webhook), not something to list or broadcast on every update.
- */
-export function publicJob<T extends ScheduledJob | null | undefined>(job: T): T {
-  if (!job || !job.webhookReceipts) return job
-  const { webhookReceipts: _receipts, ...rest } = job
-  void _receipts
-  return rest as T
-}
-
 /** What the store did with a signature-verified webhook request (the listener maps it to an HTTP status). */
 export type WebhookTriggerResult =
   | { kind: 'accepted'; occurrenceId: string }
   | { kind: 'unknown' }
   | { kind: 'replay' | 'rate_limited' | 'running' | 'pending' | 'paused' }
+  /** The replay record cannot be read: nothing is accepted until it is repaired. */
+  | { kind: 'unavailable' }
 
 /** The log outcome of an occurrence that ended, and whether the run it had (if any) is the reason. */
 function deliveryOutcomeOf(result: ScheduledOccurrenceResult, hadRun: boolean): { outcome: ScheduledWebhookDeliveryOutcome; error?: string } {
@@ -216,7 +210,6 @@ function extractRuntime(job: ScheduledJob): ScheduledJobRuntime {
     runClaim: job.runClaim,
     pendingOccurrence: job.pendingOccurrence,
     pendingTrigger: job.pendingTrigger,
-    webhookReceipts: job.webhookReceipts,
     repeat: job.repeat?.times
       ? { times: job.repeat.times, completed: job.repeat.completed ?? 0 }
       : undefined
@@ -247,7 +240,6 @@ function mergeJob(definition: ScheduledJobDefinition, runtime?: ScheduledJobRunt
     runClaim: runtime?.runClaim,
     pendingOccurrence: runtime?.pendingOccurrence,
     pendingTrigger: runtime?.pendingTrigger,
-    webhookReceipts: runtime?.webhookReceipts,
     repeat
   }
 }
@@ -368,8 +360,9 @@ export class ScheduledJobStore {
   }
 
   /**
-   * Writes only the runtime file, durably (fsync before the rename). For changes that touch no definition and
-   * must survive a crash the moment they are acknowledged, like a webhook delivery and its receipt.
+   * Writes the runtime file, durably (the file and its folder are synced before the rename is trusted). Every
+   * replacement of it goes through here, so a crash cannot lose what an earlier acknowledged write recorded, such
+   * as a webhook delivery waiting to start.
    */
   private saveRuntimeDurably(jobs: ScheduledJob[]): void {
     const runtimeMap: Record<string, ScheduledJobRuntime> = {}
@@ -383,12 +376,8 @@ export class ScheduledJobStore {
       if (job.state === 'scheduled' && job.pausedAt && !job.enabled && !job.runClaim) job.state = 'paused'
     }
     const definitions = jobs.map((job) => jobToDefinition(job))
-    const runtimeMap: Record<string, ScheduledJobRuntime> = {}
-    for (const job of jobs) {
-      runtimeMap[job.id] = extractRuntime(job)
-    }
     this.config.updateScheduledSection({ jobs: definitions })
-    atomicWriteJson(join(this.homeDir, 'scheduled', 'jobs-runtime.json'), runtimeMap)
+    this.saveRuntimeDurably(jobs)
   }
 
   getJob(id: string): ScheduledJob | undefined {
@@ -473,6 +462,9 @@ export class ScheduledJobStore {
       if (!job) return null
       if (trigger && job.schedule.kind === 'once') throw new Error('A one-time job runs once and cannot have a webhook; use a manual job for a webhook-only trigger.')
       const dropped = trigger ? undefined : job.pendingTrigger
+      // A new or rotated secret verifies no earlier signature, so the old replay record goes with it. This is also
+      // how an unreadable replay record is repaired.
+      if (trigger) resetReceipts(this.homeDir, job.id)
       job.trigger = trigger ? { webhook: trigger } : undefined
       if (dropped) job.pendingTrigger = undefined
       job.updatedAt = new Date().toISOString()
@@ -490,6 +482,11 @@ export class ScheduledJobStore {
    * delivered later, and senders re-sign a retry with a fresh timestamp); then the rate limit, the job's
    * state and the single pending slot decide; an accepted delivery's payload and pending slot are on disk
    * before this returns.
+   *
+   * Receipts live in their own file, synced on every write. One that is there and unreadable is never treated as
+   * empty: the request is refused (`unavailable`) until the file is repaired. A receipt is never dropped while its
+   * timestamp could still verify; when the file is full of such receipts the job refuses requests, unrecorded,
+   * until none of them could be replayed (`saturatedUntil`).
    */
   triggerFromWebhook(jobId: string, request: { ts: number; sig: string; body: Buffer; now?: number }): WebhookTriggerResult {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
@@ -499,21 +496,37 @@ export class ScheduledJobStore {
       if (!job?.trigger?.webhook || job.createdBy) return { kind: 'unknown' }
 
       const nowMs = request.now ?? Date.now()
+      const nowSec = Math.floor(nowMs / 1000)
       const nowIso = new Date(nowMs).toISOString()
       const bodyBytes = request.body.length
-      const receipts = (job.webhookReceipts ?? []).filter((receipt) => receipt.ts >= Math.floor(nowMs / 1000) - WEBHOOK_RECEIPT_RETENTION_S)
+      let record
+      try {
+        record = readReceipts(this.homeDir, job.id)
+      } catch (error) {
+        if (error instanceof ReceiptsUnreadableError) return { kind: 'unavailable' }
+        throw error
+      }
+      const receipts = record.receipts.filter((receipt) => receipt.ts >= nowSec - WEBHOOK_RECEIPT_RETENTION_S)
 
       if (receipts.some((receipt) => receipt.sig === request.sig)) {
         this.logRefusal(job.id, 'replay', { receivedAt: nowIso, bodyBytes })
         return { kind: 'replay' }
       }
+      if (record.saturatedUntil !== undefined && nowSec < record.saturatedUntil) {
+        this.logRefusal(job.id, 'rate_limited', { receivedAt: nowIso, bodyBytes, error: 'Too many requests are recorded; none is accepted for a few minutes' })
+        return { kind: 'rate_limited' }
+      }
+      if (receipts.length >= MAX_WEBHOOK_RECEIPTS) {
+        // This request cannot be recorded, so it must not be deliverable later: refuse everything until a request
+        // with any timestamp it could have carried is stale.
+        writeReceipts(this.homeDir, job.id, { receipts, saturatedUntil: nowSec + 2 * WEBHOOK_TIMESTAMP_TOLERANCE_S + 60 })
+        this.logRefusal(job.id, 'rate_limited', { receivedAt: nowIso, bodyBytes, error: 'Too many requests are recorded; none is accepted for a few minutes' })
+        return { kind: 'rate_limited' }
+      }
       receipts.push({ ts: request.ts, sig: request.sig, at: nowMs })
-      if (receipts.length > MAX_WEBHOOK_RECEIPTS) receipts.splice(0, receipts.length - MAX_WEBHOOK_RECEIPTS)
-      job.webhookReceipts = receipts
-
       // The receipt is durable before any answer, whatever the answer is.
+      writeReceipts(this.homeDir, job.id, { receipts })
       const refuse = (kind: 'rate_limited' | 'running' | 'pending' | 'paused', error?: string): WebhookTriggerResult => {
-        this.saveRuntimeDurably(jobs)
         this.logRefusal(job.id, kind, { receivedAt: nowIso, bodyBytes, ...(error ? { error } : {}) })
         return { kind }
       }
@@ -541,13 +554,17 @@ export class ScheduledJobStore {
     })
   }
 
-  /** A request that failed verification, for the job's log. Only a job with a webhook has a log. */
+  /**
+   * A request that failed verification, for the job's log. Called after the answer has gone out. The per-job
+   * throttle is checked first, outside the jobs lock, so a flood costs a map lookup, not file work.
+   */
   recordWebhookRejection(jobId: string, outcome: 'rejected_signature' | 'too_large', bodyBytes: number): void {
+    if (!this.refusalLogDue(jobId, outcome)) return
     try {
       withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
         const job = this.listJobs().find((entry) => entry.id === jobId)
         if (!job?.trigger?.webhook) return
-        this.logRefusal(job.id, outcome, { receivedAt: new Date().toISOString(), bodyBytes })
+        this.logDelivery(job.id, { outcome, receivedAt: new Date().toISOString(), bodyBytes })
       })
     } catch {
       /* the log is a courtesy; the request was refused either way */
@@ -588,11 +605,17 @@ export class ScheduledJobStore {
     }
   }
 
-  private logRefusal(jobId: string, outcome: ScheduledWebhookDeliveryOutcome, row: Omit<ScheduledWebhookDelivery, 'outcome'>): void {
+  /** True when a refusal of this kind for this job may be written now; records that it was. */
+  private refusalLogDue(jobId: string, outcome: ScheduledWebhookDeliveryOutcome): boolean {
     const key = `${jobId}:${outcome}`
     const at = Date.now()
-    if (at - (this.lastRefusalLogAt.get(key) ?? 0) < REFUSAL_LOG_INTERVAL_MS) return
+    if (at - (this.lastRefusalLogAt.get(key) ?? 0) < REFUSAL_LOG_INTERVAL_MS) return false
     this.lastRefusalLogAt.set(key, at)
+    return true
+  }
+
+  private logRefusal(jobId: string, outcome: ScheduledWebhookDeliveryOutcome, row: Omit<ScheduledWebhookDelivery, 'outcome'>): void {
+    if (!this.refusalLogDue(jobId, outcome)) return
     this.logDelivery(jobId, { ...row, outcome })
   }
 

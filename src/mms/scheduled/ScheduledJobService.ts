@@ -12,7 +12,6 @@ import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import {
   ScheduledJobStore,
   TICKER_INTERVAL_MS,
-  publicJob,
   recordTickerHeartbeat,
   readTickerHeartbeat,
   type ScheduledRunDetails
@@ -109,6 +108,11 @@ export class ScheduledJobService extends EventEmitter {
     })
   }
 
+  /** True while the scheduler is started: only then does anything start a webhook delivery. */
+  isRunning(): boolean {
+    return !this.stopped && !this.lifecycle.stopping
+  }
+
   /** Where webhook secrets live; without it a job cannot get a webhook. */
   setWebhookSecrets(secrets: ScheduledWebhookSecrets | null): void {
     this.webhookSecrets = secrets
@@ -146,7 +150,7 @@ export class ScheduledJobService extends EventEmitter {
       throw new ScheduledWebhookError(`Job not found: ${id}`)
     }
     this.emitUpdated()
-    return { job: publicJob(updated), secret }
+    return { job: updated, secret }
   }
 
   /** Replaces the job's signing secret at once (the old one stops verifying) and returns the new one, shown only now. */
@@ -160,7 +164,7 @@ export class ScheduledJobService extends EventEmitter {
     const updated = this.store.setWebhookTrigger(id, { ...trigger, rotatedAt: new Date().toISOString() })
     if (!updated) throw new ScheduledWebhookError(`Job not found: ${id}`)
     this.emitUpdated()
-    return { job: publicJob(updated), secret }
+    return { job: updated, secret }
   }
 
   /** Takes the webhook off the job: requests stop verifying at once, the secret is deleted, a waiting delivery is dropped. */
@@ -173,7 +177,7 @@ export class ScheduledJobService extends EventEmitter {
     if (!updated) throw new ScheduledWebhookError(`Job not found: ${id}`)
     secrets.delete(trigger.secretRef)
     this.emitUpdated()
-    return publicJob(updated)
+    return updated
   }
 
   /** The job's recent webhook requests and what became of each, newest first. */
@@ -265,11 +269,11 @@ export class ScheduledJobService extends EventEmitter {
   }
 
   listJobs(): ScheduledJob[] {
-    return this.store.listJobs().map((job) => publicJob(job))
+    return this.store.listJobs()
   }
 
   getJob(id: string): ScheduledJob | undefined {
-    return publicJob(this.store.getJob(id))
+    return this.store.getJob(id)
   }
 
   createJob(input: Parameters<ScheduledJobStore['createJob']>[0]): ScheduledJob {
@@ -283,7 +287,7 @@ export class ScheduledJobService extends EventEmitter {
     this.lifecycle.assertAccepting()
     const job = this.store.updateJob(id, patch)
     if (job) this.emitUpdated()
-    return publicJob(job)
+    return job
   }
 
   deleteJob(id: string): boolean {
@@ -297,21 +301,21 @@ export class ScheduledJobService extends EventEmitter {
     this.lifecycle.assertAccepting()
     const job = this.store.pauseJob(id, reason)
     if (job) this.emitUpdated()
-    return publicJob(job)
+    return job
   }
 
   resumeJob(id: string): ScheduledJob | null {
     this.lifecycle.assertAccepting()
     const job = this.store.resumeJob(id)
     if (job) this.emitUpdated()
-    return publicJob(job)
+    return job
   }
 
   triggerJob(id: string): ScheduledJob | null {
     this.lifecycle.assertAccepting()
     const job = this.store.triggerJob(id)
     if (job) this.emitUpdated()
-    return publicJob(job)
+    return job
   }
 
   /**

@@ -1,6 +1,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import {
+  BodyTimeoutError,
   BodyTooLargeError,
   declaredLengthExceeds,
   isAllowedLoopbackHost,
@@ -26,6 +27,10 @@ import { WEBHOOK_TIMESTAMP_TOLERANCE_S, type WebhookTriggerResult } from './Sche
 
 /** Largest request body accepted. */
 export const WEBHOOK_MAX_BODY_BYTES = 1024 * 1024
+/** A body that has not fully arrived by then is dropped (a stalled client must not hold a handler open). */
+export const WEBHOOK_BODY_TIMEOUT_MS = 15_000
+/** On stop, requests still in flight get this long before their connections are closed. */
+export const WEBHOOK_STOP_GRACE_MS = 2_000
 
 /** The port a stored value names, or the default when it is missing or not a usable port. */
 export function scheduledWebhookPort(value: unknown): number {
@@ -52,6 +57,8 @@ export interface ScheduledWebhookHooks {
   recordRejection(jobId: string, outcome: 'rejected_signature' | 'too_large', bodyBytes: number): void
   /** A delivery was accepted: the scheduler should start it now. */
   accepted(): void
+  /** False while the scheduler is off: nothing would start a delivery, so a verified request is refused (503), unrecorded. */
+  schedulerRunning?(): boolean
   /** The clock, in milliseconds; tests move it. */
   now?(): number
 }
@@ -73,7 +80,10 @@ export class ScheduledWebhookServer {
   private stopping: Promise<void> | null = null
   private readonly inFlight = new Set<Promise<void>>()
 
-  constructor(private readonly hooks: ScheduledWebhookHooks) {}
+  constructor(
+    private readonly hooks: ScheduledWebhookHooks,
+    private readonly options: { stopGraceMs?: number; bodyTimeoutMs?: number } = {}
+  ) {}
 
   /** The port the listener is bound to (the real one when started on port 0), or null when it is down. */
   getPort(): number | null {
@@ -131,8 +141,17 @@ export class ScheduledWebhookServer {
     if (!server) return
     const closed = new Promise<void>((resolve) => server.close(() => resolve()))
     server.closeIdleConnections?.()
+    // In-flight requests get a short grace; whatever is still open then (a client that stalled mid-request) is cut,
+    // so one slow or silent client cannot hold the profile's shutdown.
+    const grace = this.options.stopGraceMs ?? WEBHOOK_STOP_GRACE_MS
+    let timer: NodeJS.Timeout | undefined
+    await Promise.race([
+      Promise.allSettled([...this.inFlight]),
+      new Promise<void>((resolve) => { timer = setTimeout(resolve, grace) })
+    ])
+    if (timer) clearTimeout(timer)
+    server.closeAllConnections?.()
     await Promise.allSettled([...this.inFlight])
-    server.closeIdleConnections?.()
     await closed
   }
 
@@ -142,10 +161,24 @@ export class ScheduledWebhookServer {
     res.end(JSON.stringify(body))
   }
 
+  /**
+   * Logs a refused request after its answer has gone out, so the answer's timing cannot show whether the job has a
+   * webhook (only a job that has one has a log to write to).
+   */
+  private logAfterAnswer(jobId: string, outcome: 'rejected_signature' | 'too_large', bodyBytes: number, known: boolean): void {
+    setImmediate(() => {
+      try {
+        if (known) this.hooks.recordRejection(jobId, outcome, bodyBytes)
+      } catch {
+        /* the log is a courtesy */
+      }
+    })
+  }
+
   private tooLarge(res: ServerResponse, jobId: string): void {
-    // Whether the job exists decides only whether the log hears of it; the answer is the same.
-    if (this.hooks.resolveSecret(jobId) !== undefined) this.hooks.recordRejection(jobId, 'too_large', 0)
+    const known = this.hooks.resolveSecret(jobId) !== undefined
     this.send(res, 413, { error: 'payload_too_large' }, { Connection: 'close' })
+    this.logAfterAnswer(jobId, 'too_large', 0, known)
   }
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -160,10 +193,12 @@ export class ScheduledWebhookServer {
     if (declaredLengthExceeds(req.headers, WEBHOOK_MAX_BODY_BYTES)) return this.tooLarge(res, jobId)
     let body: Buffer
     try {
-      body = await readBodyBytes(req, WEBHOOK_MAX_BODY_BYTES)
+      body = await readBodyBytes(req, WEBHOOK_MAX_BODY_BYTES, { timeoutMs: this.options.bodyTimeoutMs ?? WEBHOOK_BODY_TIMEOUT_MS, abortOnClose: true })
     } catch (error) {
       if (error instanceof BodyTooLargeError) return this.tooLarge(res, jobId)
-      throw error
+      if (error instanceof BodyTimeoutError) return this.send(res, 408, { error: 'request_timeout' }, { Connection: 'close' })
+      // The client went away mid-body: nobody is left to answer.
+      return void req.destroy()
     }
     if (this.closing) return this.send(res, 503, { error: 'shutting_down' })
 
@@ -171,8 +206,12 @@ export class ScheduledWebhookServer {
     try {
       const verified = this.verify(jobId, req.headers, body)
       if (!verified.ok) {
-        if (verified.known) this.hooks.recordRejection(jobId, 'rejected_signature', body.length)
-        return this.send(res, 401, { error: 'unauthorized' })
+        // The same work for every failure, then the answer, then (off the response path) the log.
+        this.send(res, 401, { error: 'unauthorized' })
+        return this.logAfterAnswer(jobId, 'rejected_signature', body.length, verified.known)
+      }
+      if (this.hooks.schedulerRunning && !this.hooks.schedulerRunning()) {
+        return this.send(res, 503, { error: 'scheduler_disabled' }, { 'Retry-After': '60' })
       }
       result = this.hooks.trigger(jobId, { ts: verified.ts, sig: verified.sig, body })
     } catch (error) {
@@ -188,6 +227,8 @@ export class ScheduledWebhookServer {
         return
       case 'unknown':
         return this.send(res, 401, { error: 'unauthorized' })
+      case 'unavailable':
+        return this.send(res, 503, { error: 'unavailable' }, { 'Retry-After': '60' })
       case 'rate_limited':
         return this.send(res, 429, { error: 'rate_limited' }, { 'Retry-After': '60' })
       default:

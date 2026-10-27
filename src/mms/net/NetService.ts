@@ -687,6 +687,18 @@ export class NetService {
     await this.activate()
     return this.status()
   }
+  /**
+   * Loopback ports this profile's net transports listen on or are set to forward to (the direct listener and the
+   * add-on transports), once the saved configuration has been loaded. Another listener must not take one: a
+   * forward set up for the net service would reach it.
+   */
+  localPorts(): number[] {
+    if (!this.state) return []
+    return this.transportConfigurations()
+      .map((row) => (row.settings as { port?: unknown } | undefined)?.port)
+      .filter((port): port is number => typeof port === 'number' && Number.isInteger(port) && port > 0)
+  }
+
   private transportConfigurations(): TransportConfiguration[] {
     return (
       this.config.transports ?? [

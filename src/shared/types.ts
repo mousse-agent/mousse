@@ -88,16 +88,6 @@ export interface ScheduledJobPendingTrigger {
 }
 
 /**
- * A signed request the job has consumed, kept while its timestamp could still pass the freshness check so a
- * captured request cannot be delivered again. `at` is when it arrived (it drives the per-minute limit).
- */
-export interface ScheduledJobWebhookReceipt {
-  ts: number
-  sig: string
-  at: number
-}
-
-/**
  * How a webhook request ended. The first six name the life of an accepted delivery; the rest are requests
  * that were answered without starting anything. `failed`: the run ended in an error or was interrupted;
  * `dispatch_failed`: the occurrence never got a run.
@@ -183,8 +173,6 @@ export interface ScheduledJob {
   trigger?: { webhook: ScheduledJobWebhookTrigger }
   /** A verified delivery that the next tick starts (one at a time). */
   pendingTrigger?: ScheduledJobPendingTrigger
-  /** Requests this job has consumed within the replay window. */
-  webhookReceipts?: ScheduledJobWebhookReceipt[]
   createdAt: string
   updatedAt: string
 }

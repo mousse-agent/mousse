@@ -98,7 +98,7 @@ export const SCHEDULE_HELP = `Usage:
   mousse-cli schedule run <id>
   mousse-cli schedule enable <id>
   mousse-cli schedule disable <id>
-  mousse-cli schedule webhook enable <id> [--port <port>]
+  mousse-cli schedule webhook enable <id> [--port <port>]   (on a job that has one, --port moves the listener)
   mousse-cli schedule webhook rotate <id>
   mousse-cli schedule webhook disable <id>
   mousse-cli schedule webhook deliveries <id>
