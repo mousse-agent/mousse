@@ -504,7 +504,6 @@ Native-agent providers (Claude subscription, Antigravity) receive `mcpServers: {
 | `PiLoopAdapter` | in-process `ToolHost`, no MCP needed |
 | `ClaudeSubscriptionAdapter` | SDK `mcpServers: { mousse: { type:'http', url, headers:{ Authorization } } }` |
 | `AcpAdapter` | ACP `session/new` `mcpServers: [{ name:'mousse', type:'http', url, headers }]`; fall back to the stdio bridge when the agent rejects http |
-| CLI children (claude-code, codex, opencode, cursor) | `AgentConfigManager` materialises a `mousse` entry next to the user's servers, with the token in env |
 
 `caps.mcp === false` adapters show the orchestration tools as unavailable; nothing is emulated.
 

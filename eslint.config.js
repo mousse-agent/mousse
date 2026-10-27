@@ -20,8 +20,7 @@ export default tseslint.config(
       '.mousse-dev/**',
       'dist/**',
       'docs/**',
-      'resources/**',
-      'macros/**'
+      'resources/**'
     ]
   },
   {
