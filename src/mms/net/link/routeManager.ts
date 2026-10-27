@@ -249,7 +249,7 @@ export class RouteManagerImpl implements RouteManager {
             controller.signal
           )
           raw = await this.phase(
-            (phaseSignal) => transport.dial(route, phaseSignal),
+            (phaseSignal) => transport.dial(route, phaseSignal, { peer: peer.node }),
             DIAL_CONNECT_DEADLINE_MS,
             controller.signal,
             (stream) => stream.destroy()

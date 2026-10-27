@@ -96,6 +96,18 @@ mousse-cli service stop
 
 For boot-time autostart, see [STARTUP.md](STARTUP.md) (installed via `mousse-cli service install`).
 
+### Reachable only over SSH
+
+A machine that other devices can only reach with `ssh` (no open port, no Tailscale) can advertise an SSH route. Put the settings in a private file and enable the `ssh` add-on on that machine:
+
+```bash
+# endpoint is what other devices type after `ssh`; port is a free loopback port for the daemon
+echo '{"endpoint":"me@box.example.com","port":47821}' > ssh.json && chmod 600 ssh.json
+mousse-cli net transport configure ssh --settings-file ssh.json
+```
+
+SSH is dial-side only on the devices that connect: each one approves the endpoint for that machine before Mousse will run `ssh` against it. See [net/ssh-setup.md](net/ssh-setup.md).
+
 ## Global options
 
 | Flag | Description |
