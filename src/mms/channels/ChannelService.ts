@@ -5,6 +5,7 @@ import { EventEmitter } from 'events'
 import type {
   ChannelActivityEvent,
   ChannelConfig,
+  ChannelOwner,
   ChannelPlatform,
   ChannelsSnapshot,
   ChannelStatus,
@@ -66,6 +67,9 @@ function createDefaultAdapter(
   }
 }
 
+/** How long a failed bot reply waits before it is sent again (times the attempt). */
+const BOT_REPLY_RETRY_MS = 30_000
+
 function isProfileDraining(error: unknown): boolean {
   return Boolean(error && typeof error === 'object' && (error as { code?: string }).code === 'profile_draining')
 }
@@ -100,7 +104,12 @@ export class ChannelService extends EventEmitter {
     this.ownerClaims = options?.ownerClaims ?? new ChannelOwnerClaims()
     this.bots = options?.bots
     this.auth = new ChannelAuth(this.store.getPairingDirectory())
-    this.sessionManager = new ChannelSessionManager(this.store, threadStore, (override) => orchestrator.migrateModelOverride(override) ?? override)
+    this.sessionManager = new ChannelSessionManager(
+      this.store,
+      threadStore,
+      (override) => orchestrator.migrateModelOverride(override) ?? override,
+      (threadId) => orchestrator.isBotThread(threadId)
+    )
     this.router = new ChannelRouter(
       this.store,
       this.sessionManager,
@@ -158,15 +167,43 @@ export class ChannelService extends EventEmitter {
     if (!this.bots || this.lifecycle.stopping) return
     let reply: ReturnType<ChannelBots['channelReply']>
     try {
-      reply = this.bots.channelReply(activationId, { canSend: (replyTo) => !this.lifecycle.stopping && this.adapters.get(replyTo.platform)?.getStatus().state === 'connected' })
+      // Only to a reachable chat, and only while the account that wrote is still the owner: after
+      // "Forget" or an owner change, earlier activations no longer post to the old owner's DM.
+      reply = this.bots.channelReply(activationId, {
+        canSend: (replyTo) => !this.lifecycle.stopping &&
+          this.adapters.get(replyTo.platform)?.getStatus().state === 'connected' &&
+          replyTo.userId !== undefined && this.store.getOwners()[replyTo.platform]?.userId === replyTo.userId
+      })
     } catch (error) {
       console.warn('[channels] bot reply could not be read', error)
       return
     }
     if (!reply) return
-    void this.router.deliverBotReply(reply.replyTo, reply.text).catch((error) => {
-      if (!isProfileDraining(error)) console.error('[channels] bot reply failed:', error)
-    })
+    const claimed = reply
+    const failed = (error?: unknown) => {
+      if (error !== undefined && !isProfileDraining(error)) console.error('[channels] bot reply failed:', error)
+      // The claim goes back, and the reply is tried again later (at most three times in a row).
+      try { claimed.release() } catch { /* the next change or connect tries again */ }
+      this.retryBotReply(activationId)
+    }
+    void this.router.deliverBotReply(claimed.replyTo, claimed.text).then((sent) => {
+      if (sent) this.replyRetries.delete(activationId)
+      else failed()
+    }, failed)
+  }
+
+  private readonly replyRetries = new Map<string, number>()
+
+  private retryBotReply(activationId: string): void {
+    if (this.lifecycle.stopping) return
+    const tries = (this.replyRetries.get(activationId) ?? 0) + 1
+    if (tries > 3) {
+      this.replyRetries.delete(activationId)
+      return
+    }
+    this.replyRetries.set(activationId, tries)
+    const timer = setTimeout(() => this.sendBotReply(activationId), BOT_REPLY_RETRY_MS * tries)
+    timer.unref?.()
   }
 
   /** Replies channel activations still owe a chat on `platform`, once it is connected. */
@@ -179,7 +216,12 @@ export class ChannelService extends EventEmitter {
 
   // -- "This is me" (PR 6 §6) -------------------------------------------------------------------
 
-  /** A one-time code the owner sends with `/owner <code>` from a direct message (10 minutes, one try). */
+  /** Each platform's confirmed owner. */
+  getOwners(): Partial<Record<ChannelPlatform, ChannelOwner>> {
+    return this.store.getOwners()
+  }
+
+  /** A one-time code the owner sends with `/owner <code>` from a direct message (10 minutes, one try per account). */
   startOwnerClaim(platform: ChannelPlatform): { code: string; expiresAt: string } {
     this.lifecycle.assertAccepting()
     // A webhook caller names its own user id, so a webhook account can never be confirmed as anyone.
@@ -195,28 +237,28 @@ export class ChannelService extends EventEmitter {
   }
 
   /** "Is this your account?" — yes: stores the account that sent the code as the platform's owner. */
-  confirmOwner(platform: ChannelPlatform, userId: string): ChannelConfig {
+  confirmOwner(platform: ChannelPlatform, userId: string): Partial<Record<ChannelPlatform, ChannelOwner>> {
     this.lifecycle.assertAccepting()
     const owner = this.ownerClaims.confirm(platform, userId)
     if (!owner) throw Object.assign(new Error('No account sent that code, or the code expired. Start again.'), { code: 'channel_owner_unconfirmed' })
-    const config = this.store.getConfig()
-    config.platforms[platform] = { ...config.platforms[platform], owner }
-    this.store.saveConfig(config)
+    const owners = this.store.setOwner(platform, owner)
     this.emitUpdated()
-    return redactConfigForRenderer(this.store.getConfig())
+    return owners
+  }
+
+  /** "No" or "Cancel": ends the claim in progress, so its code stops working; a stored owner stays. */
+  cancelOwnerClaim(platform: ChannelPlatform): void {
+    this.ownerClaims.cancel(platform)
+    this.emitUpdated()
   }
 
   /** Forgets the platform's owner (and any claim in progress): its bots answer nobody until one is confirmed. */
-  clearOwner(platform: ChannelPlatform): ChannelConfig {
+  clearOwner(platform: ChannelPlatform): Partial<Record<ChannelPlatform, ChannelOwner>> {
     this.lifecycle.assertAccepting()
     this.ownerClaims.cancel(platform)
-    const config = this.store.getConfig()
-    const next = { ...config.platforms[platform] }
-    delete next.owner
-    config.platforms[platform] = next
-    this.store.saveConfig(config)
+    const owners = this.store.setOwner(platform, undefined)
     this.emitUpdated()
-    return redactConfigForRenderer(this.store.getConfig())
+    return owners
   }
 
   /** The caps a channel turn on the thread runs on: the `/model` choice, else the thread's selection. */
@@ -266,7 +308,7 @@ export class ChannelService extends EventEmitter {
     const directoryUpdatedAt = this.lifecycle.stopping
       ? undefined
       : this.store.rebuildDirectoryFromSessions(sessions)
-    return { config, sessions, statuses, directoryUpdatedAt }
+    return { config, sessions, statuses, directoryUpdatedAt, owners: this.store.getOwners() }
   }
 
   getConfig(): ChannelConfig {
@@ -280,8 +322,7 @@ export class ChannelService extends EventEmitter {
     const mergedPlatforms = { ...current.platforms }
     if (patch.platforms) {
       for (const platform of Object.keys(patch.platforms) as ChannelPlatform[]) {
-        // The owner is set only through "This is me", never by a config patch.
-        const { owner: _owner, ...incoming } = patch.platforms[platform] ?? {}
+        const incoming = patch.platforms[platform] ?? {}
         const existing = mergedPlatforms[platform]
         const next = { ...existing, ...incoming }
         if (incoming.token?.includes('•')) {

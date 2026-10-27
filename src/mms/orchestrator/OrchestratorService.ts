@@ -1341,6 +1341,11 @@ export class OrchestratorService extends EventEmitter {
     })
   }
 
+  /** Whether a thread belongs to a bot (only its own dispatches run there; a chat cannot bind to it). */
+  isBotThread(threadId: string): boolean {
+    return this.botThreadRefusal(threadId) !== undefined
+  }
+
   /** Cancels a queued run that would start a turn on a bot's thread outside its bot dispatch. */
   private refuseOnBotThread(runId: string, threadId: string): boolean {
     if (!this.botThreadRefusal(threadId)) return false

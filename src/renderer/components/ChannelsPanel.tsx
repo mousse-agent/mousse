@@ -128,6 +128,11 @@ function OwnerField({ platform, owner, revision, onError }: { platform: ChannelP
     setCode(null)
     setClaim(undefined)
   }
+  // "No" and "Cancel" end the claim in the daemon too, so the code stops working.
+  const cancel = () => {
+    reset()
+    void run(() => window.mousse.channels.owner.cancel(platform))
+  }
   if (owner && !code) {
     return (
       <div className="channels-field">
@@ -157,19 +162,19 @@ function OwnerField({ platform, owner, revision, onError }: { platform: ChannelP
           <button type="button" className="channels-btn primary" onClick={() => void run(async () => { await window.mousse.channels.owner.confirm(platform, claim.claimant!.userId); reset() })}>
             Yes, that's me
           </button>
-          <button type="button" className="channels-btn" onClick={reset}>
+          <button type="button" className="channels-btn" onClick={cancel}>
             No
           </button>
         </div>
       ) : (
         <div className="channels-field-row split">
           <span className="channels-hint">
-            {claim === null || claim?.attempted
-              ? 'That code was used or expired. Start again.'
-              : <>From your own account, send <code>/owner {code.code}</code> to the bot in a direct message. The code works once, until {new Date(code.expiresAt).toLocaleTimeString()}.</>}
+            {claim === null
+              ? 'That code was used up or expired. Start again.'
+              : <>From your own account, which must already be allowed or paired, send <code>/owner {code.code}</code> to the bot in a direct message. The code works until {new Date(code.expiresAt).toLocaleTimeString()}.</>}
           </span>
-          <button type="button" className="channels-btn" onClick={reset}>
-            Cancel
+          <button type="button" className="channels-btn" onClick={claim === null ? reset : cancel}>
+            {claim === null ? 'Close' : 'Cancel'}
           </button>
         </div>
       )}
@@ -655,7 +660,7 @@ export function ChannelsPanel() {
                 {platform !== 'webhook' ? (
                   <OwnerField
                     platform={platform}
-                    owner={snapshot?.config.platforms[platform].owner}
+                    owner={snapshot?.owners?.[platform]}
                     revision={snapshot}
                     onError={(text) => showMessage('error', text)}
                   />

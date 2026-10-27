@@ -324,6 +324,7 @@ export const PROTOCOL_METHODS = [
   'channels.owner.start',
   'channels.owner.status',
   'channels.owner.confirm',
+  'channels.owner.cancel',
   'channels.owner.clear',
   'mcp.listServers',
   'mcp.listTools',

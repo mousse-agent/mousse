@@ -2074,16 +2074,21 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const platform = asChannelPlatform(p.platform)
       const userId = asString(p.userId, 'userId', 256)
       try {
-        return { config: ctx.mms.channels.confirmOwner(platform, userId) }
+        return { owners: ctx.mms.channels.confirmOwner(platform, userId) }
       } catch (error) {
         if ((error as { code?: unknown }).code === 'channel_owner_unconfirmed')
           throw knownAppError({ code: 'channel_owner_unconfirmed', message: (error as Error).message }, { category: 'invalid', retryable: false })
         throw error
       }
     }
+    case 'channels.owner.cancel': {
+      const p = isObject(params) ? params : {}
+      ctx.mms.channels.cancelOwnerClaim(asChannelPlatform(p.platform))
+      return { ok: true }
+    }
     case 'channels.owner.clear': {
       const p = isObject(params) ? params : {}
-      return { config: ctx.mms.channels.clearOwner(asChannelPlatform(p.platform)) }
+      return { owners: ctx.mms.channels.clearOwner(asChannelPlatform(p.platform)) }
     }
     // ── MCP / skills ──────────────────────────────────────────────────────
     case 'mcp.listServers': {

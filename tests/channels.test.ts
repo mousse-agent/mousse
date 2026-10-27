@@ -36,6 +36,7 @@ import type {
   ChannelAdapter
 } from '../src/mms/channels/types'
 import type { LlmProviderOption } from '../src/shared/settings'
+import type { ChannelConfig } from '../src/shared/types'
 
 describe('buildSessionKey', () => {
   it('builds stable session keys', () => {
@@ -1093,76 +1094,123 @@ describe('channel owner and bot replies (PR 6 §6)', () => {
     const projects = new ProjectManager()
     const threads = new ThreadDataStore(projects)
     projects.setThreadStore(threads)
-    const orchestrator = { migrateModelOverride: (override: unknown) => override } as never
-    return { store, channels: new ChannelService(orchestrator, threads, store, new SettingsStore(configStore), {} as never, undefined, options) }
+    const orchestrator = { migrateModelOverride: (override: unknown) => override, isBotThread: () => false } as never
+    return { store, configStore, channels: new ChannelService(orchestrator, threads, store, new SettingsStore(configStore), {} as never, undefined, options) }
   }
 
-  it('a config patch never sets or changes the owner; only the confirmed code does', async () => {
+  /** What the router records when the right code arrives from `userId`. */
+  function receiveCode(channels: ChannelService, code: string, userId: string) {
+    const claims = (channels as unknown as { ownerClaims: { receive(message: InboundChannelMessage, code: string): string } }).ownerClaims
+    expect(claims.receive({ platform: 'telegram', chatId: `chat-${userId}`, chatType: 'dm', userId, userName: 'Me', text: '' }, code)).toBe('received')
+  }
+
+  /** The platform config validator as builds before 6d shipped it: no `owner` key is allowed. */
+  const PRE_6D_PLATFORM_KEYS = new Set(['enabled', 'token', 'allowedUserIds', 'allowAllUsers', 'homeChatId', 'webhookPort', 'webhookSecret'])
+  const pre6dAccepts = (config: ChannelConfig) =>
+    Object.values(config.platforms).every((platform) => Object.keys(platform).every((key) => PRE_6D_PLATFORM_KEYS.has(key))) &&
+    Object.keys(config).every((key) => ['platforms', 'filterSilenceNarration', 'unauthorizedDmBehavior'].includes(key))
+
+  it('the owner is kept outside the channel config, so what Settings saves back stays valid for older builds', async () => {
     await withTempHome(async () => {
-      const { store, channels } = service()
-      // The protocol accepts a form that sends the owner back, and drops it.
-      expect(asChannelConfigPatch({ platforms: { telegram: { enabled: true, owner: { userId: 'x' } } } }).platforms!.telegram).toEqual({ enabled: true })
-      channels.updateConfig({ platforms: { telegram: { enabled: true, owner: { userId: 'intruder', displayName: 'I', confirmedAt: 'x' } } } as never })
-      expect(store.getConfig().platforms.telegram.owner).toBeUndefined()
+      const { store, configStore, channels } = service()
+      store.updateConfig({ platforms: { telegram: { enabled: true, token: 't' }, discord: { enabled: false }, webhook: { enabled: false } } })
       expect(() => channels.startOwnerClaim('webhook')).toThrow(/Webhook senders/)
       expect(() => channels.confirmOwner('telegram', 'u1')).toThrow(/No account sent that code/)
-      channels.startOwnerClaim('telegram')
-      // The account that sent the code (as the router records it) is the one confirmed.
-      ;(channels as unknown as { ownerClaims: { claims: Map<string, { attempted: boolean; claimant?: unknown }> } }).ownerClaims.claims.get('telegram')!.claimant = { userId: 'u1', displayName: 'Me' }
+      const { code } = channels.startOwnerClaim('telegram')
+      receiveCode(channels, code, 'u1')
       expect(channels.ownerClaimStatus('telegram')).toMatchObject({ claimant: { userId: 'u1' } })
-      expect(channels.confirmOwner('telegram', 'u1').platforms.telegram.owner).toMatchObject({ userId: 'u1', displayName: 'Me' })
-      channels.updateConfig({ platforms: { telegram: { enabled: true, allowAllUsers: true } } as never })
-      expect(store.getConfig().platforms.telegram.owner).toMatchObject({ userId: 'u1' })
-      expect(channels.clearOwner('telegram').platforms.telegram.owner).toBeUndefined()
+      expect(channels.confirmOwner('telegram', 'u1').telegram).toMatchObject({ userId: 'u1', displayName: 'Me' })
+      const snapshot = channels.getSnapshot()
+      expect(snapshot.owners?.telegram).toMatchObject({ userId: 'u1' })
+      // Neither the stored config nor the form the renderer sends back carries the owner.
+      expect(JSON.stringify(configStore.getChannelsSection())).not.toContain('u1')
+      expect(pre6dAccepts(snapshot.config)).toBe(true)
+      expect(() => asChannelConfigPatch(snapshot.config)).not.toThrow()
+      channels.updateConfig(snapshot.config)
+      expect(store.getOwners().telegram).toMatchObject({ userId: 'u1' })
+      expect(channels.clearOwner('telegram').telegram).toBeUndefined()
     })
   })
 
-  it('a bot activation\'s reply goes to its chat once the channel is connected', async () => {
+  it('"No" ends the claim in the daemon: the code stops working and a stored owner stays', async () => {
     await withTempHome(async () => {
-      const sent: OutboundChannelMessage[] = []
-      let listener: ((event: { activationId?: string }) => void) | undefined
-      const told = new Set<string>()
-      const replyTo = { platform: 'telegram' as const, chatId: '42', messageId: 'm1' }
-      const { store, channels } = service({
-        createAdapter: (platform) => ({
-          platform,
-          connect: async () => {},
-          disconnect: async () => {},
-          getStatus: () => ({ platform, state: 'connected' }),
-          setInboundHandler: () => {},
-          send: async (message) => {
-            sent.push(message)
-            return { success: true }
+      const { store, channels } = service()
+      store.setOwner('telegram', { userId: 'u1', displayName: 'Me', confirmedAt: 'x' })
+      const { code } = channels.startOwnerClaim('telegram')
+      receiveCode(channels, code, 'u2')
+      channels.cancelOwnerClaim('telegram')
+      expect(channels.ownerClaimStatus('telegram')).toBeNull()
+      expect(() => channels.confirmOwner('telegram', 'u2')).toThrow(/No account sent that code/)
+      expect(store.getOwners().telegram).toMatchObject({ userId: 'u1' })
+    })
+  })
+
+  it('a bot reply goes to the owner\'s chat once connected, is retried after a failed send, and never to a former owner', async () => {
+    await withTempHome(async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout'] })
+      try {
+        const sent: OutboundChannelMessage[] = []
+        let failNext = 0
+        let listener: ((event: { activationId?: string }) => void) | undefined
+        const told = new Set<string>()
+        const releases: string[] = []
+        const replyTo = { platform: 'telegram' as const, chatId: '42', messageId: 'm1', userId: 'u1' }
+        const { store, channels } = service({
+          createAdapter: (platform) => ({
+            platform,
+            connect: async () => {},
+            disconnect: async () => {},
+            getStatus: () => ({ platform, state: 'connected' }),
+            setInboundHandler: () => {},
+            send: async (message) => {
+              if (failNext > 0) {
+                failNext -= 1
+                return { success: false, error: '429' }
+              }
+              sent.push(message)
+              return { success: true }
+            }
+          }),
+          bots: {
+            findByName: () => undefined,
+            activateFromChannel: async () => {},
+            channelReply: (id, options) => {
+              if (told.has(id) || (options?.canSend && !options.canSend(replyTo))) return undefined
+              told.add(id)
+              return { replyTo, text: 'Footer fixed.', release: () => { told.delete(id); releases.push(id) } }
+            },
+            recentChannelActivations: () => ['act-1'],
+            onChanged: (next) => {
+              listener = next
+              return () => { listener = undefined }
+            }
           }
-        }),
-        bots: {
-          findByName: () => undefined,
-          activateFromChannel: async () => {},
-          channelReply: (id, options) => {
-            if (told.has(id) || (options?.canSend && !options.canSend(replyTo))) return undefined
-            told.add(id)
-            return { replyTo, text: 'Footer fixed.' }
-          },
-          recentChannelActivations: () => ['act-1'],
-          onChanged: (next) => {
-            listener = next
-            return () => { listener = undefined }
-          }
-        }
-      })
-      store.updateConfig({ platforms: { telegram: { enabled: true, token: 't' }, discord: { enabled: false }, webhook: { enabled: false } } })
-      // Not connected: nothing is claimed or sent.
-      listener!({ activationId: 'act-1' })
-      expect(told.size).toBe(0)
-      // Connecting sweeps what is still owed; a later change has nothing new to say.
-      await channels.connect('telegram')
-      await vi.waitFor(() => expect(sent).toHaveLength(1))
-      expect(sent[0]).toMatchObject({ chatId: '42', text: 'Footer fixed.', replyToMessageId: 'm1' })
-      listener!({ activationId: 'act-1' })
-      await new Promise((resolve) => setImmediate(resolve))
-      expect(sent).toHaveLength(1)
-      channels.beginShutdown()
-      expect(listener).toBeUndefined()
+        })
+        store.updateConfig({ platforms: { telegram: { enabled: true, token: 't' }, discord: { enabled: false }, webhook: { enabled: false } } })
+        store.setOwner('telegram', { userId: 'u1', displayName: 'Me', confirmedAt: 'x' })
+        // Not connected: nothing is claimed or sent.
+        listener!({ activationId: 'act-1' })
+        expect(told.size).toBe(0)
+        // Connecting sweeps what is still owed; the first send fails and is retried.
+        failNext = 1
+        await channels.connect('telegram')
+        await vi.waitFor(() => expect(releases).toEqual(['act-1']))
+        expect(sent).toHaveLength(0)
+        await vi.advanceTimersByTimeAsync(30_000)
+        await vi.waitFor(() => expect(sent).toHaveLength(1))
+        expect(sent[0]).toMatchObject({ chatId: '42', text: 'Footer fixed.', replyToMessageId: 'm1' })
+        listener!({ activationId: 'act-1' })
+        await Promise.resolve()
+        expect(sent).toHaveLength(1)
+        // After an owner change, another activation's reply to the former owner is not sent.
+        store.setOwner('telegram', { userId: 'u9', displayName: 'New', confirmedAt: 'y' })
+        listener!({ activationId: 'act-2' })
+        expect(told.has('act-2')).toBe(false)
+        channels.beginShutdown()
+        expect(listener).toBeUndefined()
+      } finally {
+        vi.useRealTimers()
+      }
     })
   })
 })

@@ -1647,12 +1647,15 @@ export function registerGuiIpc(
     return res.claim
   })
   registerHandler('channels:owner:confirm', async (_e, platform: ChannelPlatform, userId: string) => {
-    const res = await guiMms.request<{ config: unknown }>('channels.owner.confirm', { platform, userId })
-    return res.config
+    const res = await guiMms.request<{ owners: unknown }>('channels.owner.confirm', { platform, userId })
+    return res.owners
+  })
+  registerHandler('channels:owner:cancel', async (_e, platform: ChannelPlatform) => {
+    await guiMms.request<{ ok: boolean }>('channels.owner.cancel', { platform })
   })
   registerHandler('channels:owner:clear', async (_e, platform: ChannelPlatform) => {
-    const res = await guiMms.request<{ config: unknown }>('channels.owner.clear', { platform })
-    return res.config
+    const res = await guiMms.request<{ owners: unknown }>('channels.owner.clear', { platform })
+    return res.owners
   })
 
   registerHandler('mcp:listServers', async (_e, projectId?: string) => {

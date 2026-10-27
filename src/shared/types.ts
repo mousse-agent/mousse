@@ -302,13 +302,13 @@ export interface ChannelPlatformConfig {
   homeChatId?: string
   webhookPort?: number
   webhookSecret?: string
-  /**
-   * The account confirmed as this platform's owner (Settings → Channels → "This is me"). Personal
-   * bots answer only this account, in a direct message. Never inferred from allowed users or pairing.
-   */
-  owner?: ChannelOwner
 }
 
+/**
+ * The account confirmed as a platform's owner (Settings → Channels → "This is me"). Personal bots
+ * answer only this account, in a direct message. Never inferred from allowed users or pairing.
+ * Stored in `channels/owners.json`, outside the channel config, so older builds never see it.
+ */
 export interface ChannelOwner {
   userId: string
   displayName: string
@@ -318,7 +318,8 @@ export interface ChannelOwner {
 /** A "This is me" code in progress: when it expires, whether its one attempt was used, and who sent it. */
 export interface ChannelOwnerClaim {
   expiresAt: string
-  attempted: boolean
+  /** Accounts that sent a wrong code (each has one attempt). */
+  failedAttempts: number
   claimant?: { userId: string; displayName: string }
 }
 
@@ -366,6 +367,8 @@ export interface ChannelsSnapshot {
   sessions: ChannelSession[]
   statuses: ChannelStatus[]
   directoryUpdatedAt?: string
+  /** Each platform's confirmed owner ("This is me"); absent from older daemons. */
+  owners?: Partial<Record<ChannelPlatform, ChannelOwner>>
 }
 
 export interface PairingRequest {

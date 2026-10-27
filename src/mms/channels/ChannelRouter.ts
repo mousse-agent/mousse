@@ -15,7 +15,7 @@ import { applyEffortToModelId, formatEffortLabel } from '../../shared/modelVaria
 import type { SettingsStore } from '../settings/SettingsStore'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
 import { ChannelAuth } from './ChannelAuth'
-import { BOT_NO_OWNER_REPLY, BOT_NOT_OWNER_REPLY, channelAudience, type ChannelBots, type ChannelOwnerClaims } from './channelBots'
+import { BOT_NO_MESSAGE_ID_REPLY, BOT_NO_OWNER_REPLY, BOT_NOT_OWNER_REPLY, channelAudience, type ChannelBots, type ChannelOwnerClaims } from './channelBots'
 import { ChannelSessionManager } from './ChannelSessionManager'
 import { ChannelStore } from './ChannelStore'
 import { chunkMessage } from './chunkMessage'
@@ -352,10 +352,10 @@ export class ChannelRouter extends EventEmitter {
       this.sessionManager.setBot(session.sessionKey, undefined)
       return 'Detached. Messages here go to the chat thread again.'
     }
-    const platform = this.getConfig().platforms[message.platform]
+    const owner = this.store.getOwners()[message.platform]
     // Attaching is refused until the owner is confirmed, and for anyone but the owner.
-    if (!platform?.owner) return BOT_NO_OWNER_REPLY
-    if (channelAudience(platform, session, message) !== 'owner') return BOT_NOT_OWNER_REPLY
+    if (!owner) return BOT_NO_OWNER_REPLY
+    if (channelAudience(owner, session, message) !== 'owner') return BOT_NOT_OWNER_REPLY
     const bot = bots.findByName(name)
     if (!bot) return `No bot named "${name.slice(0, 60)}".`
     if (!this.sessionManager.setBot(session.sessionKey, bot.id)) return 'Could not update this channel session.'
@@ -374,20 +374,26 @@ export class ChannelRouter extends EventEmitter {
       await this.deliverReply(message, 'Bots are unavailable in this profile.')
       return
     }
-    if (channelAudience(this.getConfig().platforms[message.platform], session, message) !== 'owner') {
+    if (channelAudience(this.store.getOwners()[message.platform], session, message) !== 'owner') {
       await this.deliverReply(message, BOT_NOT_OWNER_REPLY)
       return
     }
+    // The chat message's own id keys the activation, so a redelivery runs once; without one, the
+    // bot cannot tell a redelivery from a new message and refuses it.
     const messageId = message.messageId?.trim()
+    if (!messageId) {
+      await this.deliverReply(message, BOT_NO_MESSAGE_ID_REPLY)
+      return
+    }
     const replyTo: BotChannelReplyTo = {
       platform: message.platform,
       chatId: message.chatId,
       ...(message.threadId ? { threadId: message.threadId } : {}),
-      ...(messageId ? { messageId } : {})
+      messageId,
+      userId: message.userId
     }
     try {
-      // The same chat message activates the bot once, also when the platform delivers it again.
-      await bots.activateFromChannel({ botId: session.botId, input: text, clientRequestId: `${sessionKey}:${messageId ?? uuidv4()}`, replyTo })
+      await bots.activateFromChannel({ botId: session.botId, input: text, clientRequestId: `${sessionKey}:${messageId}`, replyTo })
     } catch (error) {
       await this.deliverReply(message, error instanceof Error ? error.message : String(error))
     }
@@ -608,7 +614,7 @@ export class ChannelRouter extends EventEmitter {
     const thread = this.deps.threadStore.getThread(threadId)
     if (!thread) return 'That thread no longer exists. Run /threads again.'
     const bound = this.sessionManager.bindThread(sessionKey, thread.id)
-    if (!bound) return `Could not bind thread \`${thread.id.slice(0, 8)}\`.`
+    if (!bound) return `Could not bind thread \`${thread.id.slice(0, 8)}\`. A bot's thread can't be used from a chat; send /bot <name> instead.`
     return `Selected thread ${thread.id.slice(0, 8)} — ${thread.name?.trim() || '(unnamed)'}\n(Session binding updated; history preserved.)`
   }
 

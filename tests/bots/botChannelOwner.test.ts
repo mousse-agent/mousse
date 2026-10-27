@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ChannelAuth } from '../../src/mms/channels/ChannelAuth'
-import { BOT_NO_OWNER_REPLY, BOT_NOT_OWNER_REPLY, ChannelOwnerClaims, channelAudience, type ChannelBots } from '../../src/mms/channels/channelBots'
+import { BOT_NO_MESSAGE_ID_REPLY, BOT_NO_OWNER_REPLY, BOT_NOT_OWNER_REPLY, ChannelOwnerClaims, channelAudience, type ChannelBots } from '../../src/mms/channels/channelBots'
 import { ChannelRouter } from '../../src/mms/channels/ChannelRouter'
 import { ChannelSessionManager } from '../../src/mms/channels/ChannelSessionManager'
 import { ChannelStore } from '../../src/mms/channels/ChannelStore'
@@ -34,6 +34,8 @@ let router: ChannelRouter
 let sent: Array<{ chatId: string; text: string }>
 let activated: Array<{ botId: string; input: string; clientRequestId: string }>
 let turns: ReturnType<typeof vi.fn>
+let botThread: string
+let plainThread: string
 
 const bots: ChannelBots = {
   findByName: (name) => (name.toLowerCase() === 'site editor' || name === 'site-editor' ? { id: 'site-editor', name: 'Site editor' } : undefined),
@@ -48,12 +50,7 @@ function configure(platform: Partial<ChannelPlatformConfig>): void {
 }
 
 function setOwner(owner: ChannelOwner | undefined): void {
-  const config = store.getConfig()
-  const telegram = { ...config.platforms.telegram }
-  if (owner) telegram.owner = owner
-  else delete telegram.owner
-  config.platforms.telegram = telegram
-  store.saveConfig(config)
+  store.setOwner('telegram', owner)
 }
 
 const dm = (userId: string, text: string, patch: Partial<InboundChannelMessage> = {}): InboundChannelMessage => ({
@@ -77,7 +74,9 @@ beforeEach(() => {
   const projects = new ProjectManager()
   const threads = new ThreadDataStore(projects)
   projects.setThreadStore(threads)
-  sessions = new ChannelSessionManager(store, threads)
+  botThread = threads.createThread('Site editor: Fix the footer').id
+  sessions = new ChannelSessionManager(store, threads, (override) => override, (threadId) => threadId === botThread)
+  plainThread = threads.createThread('Plain').id
   claims = new ChannelOwnerClaims(() => clock)
   sent = []
   activated = []
@@ -118,7 +117,7 @@ describe('owner confirmation', () => {
     expect(code).toMatch(/^\d{6}$/)
     await router.handleInbound(dm(OWNER, `/owner ${code}`))
     expect(lastReply()).toBe('Code received. Confirm in Mousse that this is your account.')
-    expect(claims.status('telegram')).toMatchObject({ attempted: true, claimant: { userId: OWNER, displayName: OWNER } })
+    expect(claims.status('telegram')).toMatchObject({ failedAttempts: 0, claimant: { userId: OWNER, displayName: OWNER } })
     // Only the account that sent the code can be confirmed.
     expect(claims.confirm('telegram', 'u-friend')).toBeUndefined()
     const second = claims.start('telegram')
@@ -129,16 +128,29 @@ describe('owner confirmation', () => {
     expect(activated).toEqual([])
   })
 
-  it('a code allows one attempt, only from a DM, and expires after 10 minutes', async () => {
+  it('each account has one attempt, only from a DM; another account\'s wrong guess never uses up the owner\'s', async () => {
     const { code } = claims.start('telegram')
+    const wrong = code === '000000' ? '111111' : '000000'
     await router.handleInbound(dm(OWNER, `/owner ${code}`, { chatType: 'group', chatId: 'group-1' }))
     expect(lastReply()).toBe('Send /owner from a direct message to this bot.')
-    await router.handleInbound(dm('u-friend', `/owner ${code === '000000' ? '111111' : '000000'}`))
+    await router.handleInbound(dm('u-friend', `/owner ${wrong}`))
     expect(lastReply()).toMatch(/not valid/)
-    // The one attempt is used: the right code no longer works.
+    // The friend's attempt is used: even the right code no longer works for that account.
+    await router.handleInbound(dm('u-friend', `/owner ${code}`))
+    expect(lastReply()).toMatch(/not valid/)
+    expect(claims.status('telegram')).toMatchObject({ failedAttempts: 1 })
     await router.handleInbound(dm(OWNER, `/owner ${code}`))
-    expect(lastReply()).toMatch(/not valid/)
-    expect(claims.confirm('telegram', OWNER)).toBeUndefined()
+    expect(lastReply()).toMatch(/Code received/)
+    expect(claims.confirm('telegram', OWNER)).toMatchObject({ userId: OWNER })
+    // Five wrong accounts end the claim.
+    const guessed = claims.start('telegram')
+    for (const user of ['a', 'b', 'c', 'd', 'e']) claims.receive(dm(user, ''), guessed.code === '000000' ? '111111' : '000000')
+    expect(claims.status('telegram')).toBeNull()
+    expect(claims.receive(dm(OWNER, ''), guessed.code)).toBe('invalid')
+    // Cancel ("No" in the desktop app) ends the claim: its code stops working.
+    const cancelled = claims.start('telegram')
+    claims.cancel('telegram')
+    expect(claims.receive(dm(OWNER, ''), cancelled.code)).toBe('invalid')
     const late = claims.start('telegram')
     clock += 10 * 60_000
     await router.handleInbound(dm(OWNER, `/owner ${late.code}`))
@@ -159,7 +171,7 @@ describe('bot audience', () => {
     await router.handleInbound(dm(OWNER, '/bot site editor'))
     expect(lastReply()).toMatch(/now go to the bot Site editor/)
     await router.handleInbound(dm(OWNER, 'Fix the footer', { messageId: 'm1' }))
-    expect(activated).toEqual([{ botId: 'site-editor', input: 'Fix the footer', clientRequestId: `${buildSessionKey('telegram', `chat-${OWNER}`)}:m1`, replyTo: { platform: 'telegram', chatId: `chat-${OWNER}`, messageId: 'm1' } }])
+    expect(activated).toEqual([{ botId: 'site-editor', input: 'Fix the footer', clientRequestId: `${buildSessionKey('telegram', `chat-${OWNER}`)}:m1`, replyTo: { platform: 'telegram', chatId: `chat-${OWNER}`, messageId: 'm1', userId: OWNER } }])
     expect(turns).not.toHaveBeenCalled()
     await router.handleInbound(dm(OWNER, '/bot off'))
     await router.handleInbound(dm(OWNER, 'Just chat'))
@@ -234,10 +246,29 @@ describe('bot audience', () => {
   it('channelAudience is owner only for the owner\'s own DM session', () => {
     const session = { sessionKey: 'k', platform: 'telegram' as const, chatId: 'c', chatType: 'dm' as const, userId: OWNER, mousseThreadId: 't', createdAt: 'x' }
     const message = dm(OWNER, 'x')
-    expect(channelAudience({ enabled: true, owner }, session, message)).toBe('owner')
-    expect(channelAudience({ enabled: true }, session, message)).toBe('others')
-    expect(channelAudience({ enabled: true, owner }, undefined, message)).toBe('others')
-    expect(channelAudience({ enabled: true, owner }, session, { ...message, userId: 'u-friend' })).toBe('others')
-    expect(channelAudience({ enabled: true, owner }, { ...session, platform: 'webhook' }, { ...message, platform: 'webhook' })).toBe('others')
+    expect(channelAudience(owner, session, message)).toBe('owner')
+    expect(channelAudience(undefined, session, message)).toBe('others')
+    expect(channelAudience(owner, undefined, message)).toBe('others')
+    expect(channelAudience(owner, session, { ...message, userId: 'u-friend' })).toBe('others')
+    expect(channelAudience(owner, { ...session, platform: 'webhook' }, { ...message, platform: 'webhook' })).toBe('others')
+  })
+
+  it('a message without a chat message id is refused, so a redelivery can never run twice', async () => {
+    setOwner(owner)
+    attached(OWNER)
+    await router.handleInbound(dm(OWNER, 'Fix the footer', { messageId: undefined }))
+    await router.handleInbound(dm(OWNER, 'Fix the footer', { messageId: '  ' }))
+    expect(lastReply()).toBe(BOT_NO_MESSAGE_ID_REPLY)
+    expect(activated).toEqual([])
+  })
+
+  it('/threads cannot bind a chat to a bot\'s thread, and /help lists /bot and /owner', async () => {
+    const message = dm(OWNER, 'hello')
+    const session = sessions.resolveThread(message)
+    expect(sessions.bindThread(session.sessionKey, botThread)).toBeUndefined()
+    expect(sessions.bindThread(session.sessionKey, plainThread)?.mousseThreadId).toBe(plainThread)
+    await router.handleInbound(dm(OWNER, '/help'))
+    expect(lastReply()).toContain('/bot')
+    expect(lastReply()).toContain('/owner')
   })
 })

@@ -168,7 +168,7 @@ function handleThreads(ctx: SlashContext): string {
 
   const bound = ctx.sessionManager.bindThread(session.sessionKey, result.thread.id)
   if (!bound) {
-    return `Could not bind thread \`${result.thread.id.slice(0, 8)}\`.`
+    return `Could not bind thread \`${result.thread.id.slice(0, 8)}\`. A bot's thread can't be used from a chat; send /bot <name> instead.`
   }
   const name = result.thread.name?.trim() || '(unnamed)'
   return `Selected thread ${result.thread.id.slice(0, 8)} — ${name}\n(Session binding updated; history preserved.)`

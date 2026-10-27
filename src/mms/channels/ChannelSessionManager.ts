@@ -13,7 +13,9 @@ export class ChannelSessionManager {
      * Migrate-on-read for a session model (SPEC §13.8): adds the provider instance an older
      * `llmProvider` maps to, so the next save writes the instance shape. Never throws.
      */
-    private migrateModel: (override: ModelOverride) => ModelOverride = (override) => override
+    private migrateModel: (override: ModelOverride) => ModelOverride = (override) => override,
+    /** Threads a chat may never be bound to: a bot's threads take only the bot's own runs (PR 6 §6). */
+    private refuseThread: (threadId: string) => boolean = () => false
   ) {}
 
   resolveThread(message: InboundChannelMessage): ChannelSession {
@@ -90,7 +92,7 @@ export class ChannelSessionManager {
     const existing = this.getSession(sessionKey)
     if (!existing) return undefined
     const thread = this.threadStore.getThread(mousseThreadId)
-    if (!thread) return undefined
+    if (!thread || this.refuseThread(thread.id)) return undefined
     const updated: ChannelSession = {
       ...existing,
       mousseThreadId: thread.id,

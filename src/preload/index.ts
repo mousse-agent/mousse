@@ -883,9 +883,11 @@ const api = {
         ipcRenderer.invoke('channels:owner:start', platform),
       status: (platform: ChannelPlatform): Promise<ChannelOwnerClaim | null> =>
         ipcRenderer.invoke('channels:owner:status', platform),
-      confirm: (platform: ChannelPlatform, userId: string): Promise<ChannelConfig> =>
+      confirm: (platform: ChannelPlatform, userId: string): Promise<unknown> =>
         ipcRenderer.invoke('channels:owner:confirm', platform, userId),
-      clear: (platform: ChannelPlatform): Promise<ChannelConfig> =>
+      cancel: (platform: ChannelPlatform): Promise<void> =>
+        ipcRenderer.invoke('channels:owner:cancel', platform),
+      clear: (platform: ChannelPlatform): Promise<unknown> =>
         ipcRenderer.invoke('channels:owner:clear', platform)
     },
     onUpdated: (cb: (snapshot: ChannelsSnapshot) => void): (() => void) => {
