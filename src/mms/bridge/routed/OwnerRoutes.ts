@@ -591,8 +591,9 @@ export class OwnerRoutes {
     if (typeof projectId === 'string' && !services.projects.getProject(projectId))
       throw new DomainRpcError('project_not_found', 'Project not found', { projectId })
     // A folder call on a thread without a folder has nothing to read or change; say so instead of failing inside Git.
+    // A save names its thread only, but it needs the thread's folder just the same.
     if (
-      row.target === 'folder' &&
+      (row.target === 'folder' || method === 'files.write') &&
       typeof threadId === 'string' &&
       !resolveThreadProjectPath(services.projects, services.threads, threadId)
     )

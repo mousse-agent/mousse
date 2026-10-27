@@ -2,8 +2,11 @@
  * Large values are sent ahead of the call that uses them: uploaded as a request artifact of
  * `routed.stage`, held in the blob store within limits, and named in `stagedValues`.
  */
+import { readFileSync, statSync } from 'node:fs'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { validateRoutedParams } from '../../../../src/mms/bridge/routed/OwnerRoutes'
+import { ThreadWorkspaceManager } from '../../../../src/mms/workspace/ThreadWorkspaceManager'
 import { ROUTED_METHODS, ROUTED_STAGE_TTL_MS } from '../../../../src/shared/bridge/routed'
 import { newId } from '../../../../src/shared/net'
 import { cleanup } from '../hub/fixture'
@@ -229,17 +232,41 @@ describe('routed.stage', () => {
     void f
   }, 120_000)
 
-  it('keeps a staged value over 512 KiB for files.write out, as the save limit does for an inline one', async () => {
-    const { f, call, thread, stage, staging } = await routedOwner({ staging: {} })
+  it('saves a staged file over 512 KiB, which is what staging is for, up to what staging holds', async () => {
+    const { f, ok, thread, stage, staging } = await routedOwner({ staging: {} })
     const path = repo()
     const project = f.mms.projects.openProject(path)
     const t = thread('Saved', project.id, path)
-    // The save limit is the handler's (raised for routed saves by a later change); staging does not get around it.
-    const id = stageId(await stage('y'.repeat(600 * KIB)))
+    // The editor opens files of at most 512 KiB but can save more; a save from another computer is not cut at that size.
+    const content = 'y'.repeat(600 * KIB)
+    const id = stageId(await stage(content))
     expect(
-      await call('files.write', { threadId: t.id, path: 'big.txt', stagedValues: { content: id } })
-    ).toMatchObject({ ok: false, error: { code: 'invalid_params' } })
-    expect(staging!.count()).toBe(1)
+      await ok('files.write', { threadId: t.id, path: 'big.txt', stagedValues: { content: id } })
+    ).toMatchObject({
+      path: 'big.txt',
+      receiptId: expect.any(String)
+    })
+    expect(staging!.count()).toBe(0)
+    const worktree = new ThreadWorkspaceManager(f.mms.threads.getThreadDir(t.id)).load()!
+      .worktreePath
+    expect(readFileSync(join(worktree, 'big.txt'), 'utf8')).toBe(content)
+  }, 120_000)
+
+  it('saves a file of several megabytes sent staged', async () => {
+    const { f, ok, thread, stage } = await routedOwner({ staging: {} })
+    const path = repo()
+    const project = f.mms.projects.openProject(path)
+    const t = thread('Saved', project.id, path)
+    const content = `${'a line of text that repeats\n'.repeat(150_000)}`
+    expect(Buffer.byteLength(content)).toBeGreaterThan(4 * 1024 * KIB)
+    await ok('files.write', {
+      threadId: t.id,
+      path: 'huge.txt',
+      stagedValues: { content: stageId(await stage(content)) }
+    })
+    const worktree = new ThreadWorkspaceManager(f.mms.threads.getThreadDir(t.id)).load()!
+      .worktreePath
+    expect(statSync(join(worktree, 'huge.txt')).size).toBe(Buffer.byteLength(content))
   }, 120_000)
 
   it('drops what a device has staged or is waiting to fetch when it is blocked here', async () => {
