@@ -750,7 +750,7 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
       expect(prompt).toContain(requestId)
       // The wake read it; the parent answers with answer_subagent.
       expect(s.d.engine.inbox.get(row.inboxId)!.status).toBe('acknowledged')
-      expect(await (s.d.orch as any).answerSubagent(s.parentId, { subagent: 'Worker', requestId, answers: { db: 'sqlite' } })).toMatchObject({ answered: true })
+      expect(await (s.d.orch as any).answerSubagent(s.parentId, wake, { subagent: 'Worker', requestId, answers: { db: 'sqlite' } })).toMatchObject({ answered: true })
       await expect(answer).resolves.toEqual({ db: 'sqlite' })
     })
 
