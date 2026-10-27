@@ -694,6 +694,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         if (this.store.activeGrant(row.botId)?.digest !== input.grantDigest) return { kind: 'revoked' }
         const status = this.store.activation(row.id)?.status
         if (status === 'paused') return { kind: 'paused' }
+        if (status === 'waiting_grant') return { kind: 'waiting' }
         if (controller.signal.aborted || (status !== 'running' && status !== 'waiting_grant')) return { kind: 'ended' }
         return undefined
       },
