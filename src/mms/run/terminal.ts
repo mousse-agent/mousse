@@ -3,6 +3,7 @@ import { recordRunResultText } from './delegation/hold'
 import { Inbox } from './Inbox'
 import { stableStringify } from './json'
 import type { RunStore } from './RunStore'
+import { cancelApprovalRows } from './ThreadApprovals'
 import type { AttemptStatus, ChildResultPayload, InboxKind, InboxRecord, RunOutcome, RunRecord } from './types'
 
 /**
@@ -64,6 +65,11 @@ export function writeTerminalRun(
         completedAt
       })
     recordRunResultText(store, next, options.resultText)
+    // A run's saved approval requests never outlive it while the daemon lives: whatever asked is gone.
+    // A restart cut-off (boot, or a clean shutdown) keeps them: the next boot turns them into
+    // requests whose answer continues the thread (SPEC §17.6).
+    if (status !== 'uncertain' && outcome?.interruptedBy !== 'daemon_restart')
+      cancelApprovalRows(store, 'run_id = ?', [next.runId], 'turn_ended')
     // Before anything is acknowledged or judged, so every evaluation below sees the row.
     const notice = options.notice ?? interruptedIntegrationNotice(store, next)
     if (notice) new Inbox(store).append({ threadId: next.threadId, runId: next.runId, kind: notice.kind, payload: notice.payload })
