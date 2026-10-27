@@ -1,7 +1,6 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type { InstallOwner } from '../../../shared/harness/status'
-import type { NativeToolTable } from '../../../shared/harness/tools'
 import type { HarnessCaps } from '../../../shared/harness/types'
 import type { ResolvedSettings } from '@anthropic-ai/claude-agent-sdk'
 import type { CliProviderConfigPatch } from '../../../shared/providerAuth'
@@ -28,7 +27,10 @@ import {
   entryBaseUrl,
   type ClaudeApiKeyChecker
 } from '../claude/apiKey'
-import { cliNames, ownedLaunchEnv, ownedUserEnv } from '../env'
+import { cliNames, findOnPath, lockedEnv, ownedLaunchEnv, ownedUserEnv } from '../env'
+import { CLAUDE_LOCKED_PROFILE, CLAUDE_NATIVE_TOOLS, claudeLockedCaps, claudeLockedHoldsBots, claudeSandboxFact } from '../claude/locked'
+import { hasContainmentEvidence } from '../compatibility'
+import { claudeManagedPolicyPresent } from '../../providers/claudeSubscription/accountSubject'
 import { decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig } from '../driver'
 import { ownedHomeProblem } from '../ownedHome'
 import { ptyAvailable, redactSignIn, runInPty, terminalText, transcriptLinks, type PtyRun, type PtySpawn } from '../pty'
@@ -50,21 +52,12 @@ export const CLAUDE_CODE_CAPS: HarnessCaps = Object.freeze({
   definitionLimits: 'none'
 })
 
-/**
- * Claude Code's built-ins for each neutral tool (PR 6 §2). Every name exists in the pinned SDK's
- * `ToolInputSchemas` (`toolNames` test); the other built-ins have no neutral name and are never
- * granted.
- */
-export const CLAUDE_NATIVE_TOOLS: NativeToolTable = Object.freeze({
-  read: ['Read'],
-  list: ['Glob'],
-  search: ['Glob', 'Grep'],
-  edit: ['Edit'],
-  write: ['Write'],
-  shell: ['Bash'],
-  web_fetch: ['WebFetch'],
-  web_search: ['WebSearch']
-})
+export { CLAUDE_NATIVE_TOOLS } from '../claude/locked'
+
+/** A locked entry (PR 6 §3): it runs bots only, in a home of its own, under the locked profile. */
+export function claudeLocked(config: Pick<InstanceConfig, 'profile' | 'home'>): boolean {
+  return config.profile === CLAUDE_LOCKED_PROFILE && config.home === 'private'
+}
 
 /**
  * The terminal sign-in command for an instance: its own home is passed as `CLAUDE_CONFIG_DIR`. On
@@ -113,6 +106,12 @@ export interface ClaudeCodeDriverOptions {
   checkApiKey?: ClaudeApiKeyChecker
   /** Test seam: the SDK's offline settings resolver, read before each turn of an API-key entry. */
   resolveSettings?: SettingsResolver
+  /** Test seam: the platform a locked entry's caps and evidence are read for (default `process.platform`). */
+  platform?: NodeJS.Platform
+  /** Test seam: whether an organisation's managed Claude Code policy is installed (default: read from disk). */
+  managedPolicy?: () => boolean
+  /** Each Claude Code process a locked entry's bot turn starts (its active-time supervision). */
+  onLockedProcess?: (pid: number, threadId: string) => void
 }
 
 /** The SDK's `resolveSettings`: the settings a turn's folder gives Claude Code, without starting it. */
@@ -177,6 +176,8 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
    * the last runtime using it stops. A new home gets a new service; the old one stops writing.
    */
   const owned = new Map<string, OwnedService>()
+  const platform = options.platform ?? process.platform
+  const managedPolicy = options.managedPolicy ?? (() => claudeManagedPolicyPresent(platform))
   return {
     kind: 'claude',
     label: 'Claude Code',
@@ -196,8 +197,13 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     mirrorsVendorFile: true,
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: true }),
     // An API-key entry has a home of its own: the user's own Claude Code runs exactly as they set it up.
-    privateHomeFor: (config) => (claudeRunsOnApiKey(config) ? 'required' : 'allowed'),
-    caps: () => CLAUDE_CODE_CAPS,
+    // So does a locked entry: a bot never runs in the user's own Claude Code setup.
+    privateHomeFor: (config) => (claudeRunsOnApiKey(config) || config.profile === CLAUDE_LOCKED_PROFILE ? 'required' : 'allowed'),
+    caps: (config, installedVersion) =>
+      claudeLocked(config) ? claudeLockedCaps(CLAUDE_CODE_CAPS, { platform, ...(installedVersion ? { cliVersion: installedVersion } : {}), managedPolicy: managedPolicy() }) : CLAUDE_CODE_CAPS,
+    // Only a locked entry holds a bot to its grant, and only once its gate, ledger and sandbox have
+    // evidence on this platform (`CONTAINMENT_EVIDENCE`); no record exists yet.
+    botAuthority: (config) => claudeLocked(config) && claudeLockedHoldsBots(platform, managedPolicy()),
     nativeToolNames: (neutral) => CLAUDE_NATIVE_TOOLS[neutral] ?? [],
     updateCommand: (owner: InstallOwner) => {
       if (owner === 'npm') return 'npm install -g @anthropic-ai/claude-code@latest'
@@ -222,7 +228,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
       else {
         if (context.env.home) mkdirSync(context.env.home, { recursive: true, mode: 0o700 })
         entry = owned.get(context.instanceId)
-        if (entry && (entry.home !== context.env.home || Boolean(entry.credential) !== onKey)) {
+        if (entry && (entry.home !== context.env.home || Boolean(entry.credential) !== onKey || entry.locked !== claudeLocked(context.config))) {
           // Another home: the old service keeps running its turns but never writes the file again.
           entry.service.freezeSettings()
           owned.delete(context.instanceId)
@@ -245,7 +251,15 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
               ...(configured ? { env: configured } : {})
             }
           }
+          // A locked entry's turns start from nothing but the allowlist, with the entry's own home.
+          const locked = claudeLocked(context.config)
           const serviceOptions = {
+            ...(locked
+              ? {
+                  lockedEnv: (scratch: string) =>
+                    lockedEnv({ platform, base: live().env.env, driver: 'claude', credential: onKey ? 'api_key' : 'subscription', ...(live().env.home ? { home: live().env.home } : {}), scratch })
+                }
+              : {}),
             stateDir: context.stateDir,
             findBinary: () => live().findBinary(),
             baseEnv: () => environmentOf(live()),
@@ -260,6 +274,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
           entry = {
             service: created,
             home: context.env.home,
+            locked,
             ...(credential ? { credential } : {}),
             users: 0,
             get context() { return current.context },
@@ -412,7 +427,19 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
       }
 
       const integrations = options.integrations?.(env) ?? null
-      const adapter = new ClaudeSubscriptionAdapter(() => service, () => integrations)
+      const lockedEntry = !shared && claudeLocked(context.config)
+      const adapter = new ClaudeSubscriptionAdapter(() => service, () => integrations, lockedEntry
+        ? {
+            // Shell runs only where the sandbox is there and has evidence for this CLI version here.
+            shellContained: async () => {
+              if (managedPolicy()) return false
+              if (claudeSandboxFact(platform, (name) => Boolean(findOnPath([name], context.env))) !== 'available') return false
+              const version = (await service.cliConfig()).version
+              return version !== undefined && hasContainmentEvidence({ driver: 'claude', kind: 'sandbox', platform, cliVersion: version })
+            },
+            ...(options.onLockedProcess ? { onProcess: options.onLockedProcess } : {})
+          }
+        : undefined)
       const runtime: DriverRuntime = {
         adapter,
         configured: () => service.configured(),
@@ -610,6 +637,8 @@ function apiKeyCredential(live: () => DriverContext, check: ClaudeApiKeyChecker,
 interface OwnedService {
   service: ClaudeSubscriptionProviderService
   home: string | undefined
+  /** Built for a locked entry (`claudeLocked`): its turns take the locked environment. */
+  locked: boolean
   /** The newest runtime's context, which the service reads. */
   context: DriverContext
   users: number

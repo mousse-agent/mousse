@@ -60,6 +60,12 @@ export interface InstanceConfig {
    * out without asking the runtime, whatever the agent's own sign-in says.
    */
   signedOutInMousse?: boolean
+  /**
+   * `locked`: the entry runs bots only, in a home of its own, under the locked profile of its driver
+   * (Claude Code, PR 6 §3): no user settings, plugins or launch settings, the exact granted tools,
+   * Mousse's grant gate on every call. Chosen when the entry is added; absent for every other entry.
+   */
+  profile?: 'locked'
 }
 
 /** Whether an entry runs in a Mousse-owned home: it must, it may, or it must not. */
@@ -452,6 +458,8 @@ export function decodeInstanceConfig(raw: Record<string, unknown> | undefined, o
     if (Object.keys(env).length) config.env = env
   }
   if (raw.signedOutInMousse === true) config.signedOutInMousse = true
+  // Only an entry with a home of its own can be locked: the user's own setup is never.
+  if (raw.profile === 'locked' && config.home === 'private') config.profile = 'locked'
   return config
 }
 

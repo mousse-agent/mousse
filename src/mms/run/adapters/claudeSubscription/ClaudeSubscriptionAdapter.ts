@@ -16,7 +16,20 @@ import type {
   TurnSink
 } from '../ProviderAdapter'
 import { promptStreams, runtimeToolEvent } from '../../transcript/promptRuntime'
+import { AppError } from '../../../../shared/errors'
+import type { ClaudeLockedTurn } from '../../../harness/claude/locked'
+import { systemTempDirs } from '../../../bots/grants/compile'
 import { retryContextOverflowOnce } from '../shared/retryContextOverflow'
+
+/**
+ * A locked instance (PR 6 §3): it runs bot turns only, each under the locked profile. Read per turn:
+ * whether a `shell` grant may run here now (the sandbox is available and has evidence for this CLI
+ * on this platform), and where each Claude Code process is reported.
+ */
+export interface ClaudeLockedProfile {
+  shellContained(): Promise<boolean>
+  onProcess?(pid: number, threadId: string): void
+}
 
 /** The slice of the provider service a turn drives. */
 export type ClaudeSubscriptionClient = Pick<
@@ -55,8 +68,37 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
   constructor(
     private readonly service: () => ClaudeSubscriptionClient | null,
     /** The user's Mousse MCP servers and skills; read per turn, like the service. */
-    private readonly integrations: () => ClaudeIntegrationSource | null = () => null
+    private readonly integrations: () => ClaudeIntegrationSource | null = () => null,
+    /** Set for a locked instance, which runs bot turns only. */
+    private readonly locked?: ClaudeLockedProfile
   ) {}
+
+  /**
+   * A bot runs on Claude Code only under the locked profile, and a locked instance runs nothing but
+   * bots: either mismatch is refused before anything starts.
+   */
+  private async lockedTurn(input: TurnInput, host: AdapterHost, service: ClaudeSubscriptionClient): Promise<ClaudeLockedTurn | undefined> {
+    const refuse = (message: string) => new AppError({ code: 'policy_unenforceable', message, errorInfo: { category: 'unavailable', retryable: false } })
+    if (!this.locked) {
+      if (host.bot) throw refuse('A bot runs on Claude Code only in a locked runtime. Add a bot runtime for it.')
+      return undefined
+    }
+    const bot = host.bot
+    if (!bot) throw refuse('This Claude Code runtime is locked for bots, so it runs only bot turns.')
+    const shellContained = await this.locked.shellContained()
+    const onProcess = this.locked.onProcess
+    return {
+      authority: bot,
+      ...(host.tools.toolLedger ? { ledger: host.tools.toolLedger } : {}),
+      // Never a root and never the thread's project folder: the activation's scratch folder, or, for
+      // a bot with no folder at all, an empty folder of Mousse's own.
+      cwd: bot.workspace?.scratch ?? service.standaloneWorkspace(input.threadId),
+      shellContained,
+      temps: systemTempDirs(),
+      systemPrompt: host.bridge?.sessionInstructions ?? '',
+      ...(onProcess ? { onProcess: (pid: number) => onProcess(pid, input.threadId) } : {})
+    }
+  }
 
   /** Claude reports its context window and prompt usage after each turn. */
   describe(_model: string): ModelInfo {
@@ -79,13 +121,15 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
     // The SDK session id stays inside the service's saved sessions; the ref names the runtime.
     const providerRef: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model }
     sink.providerRef(providerRef)
-    const cwd = input.cwd ?? service.standaloneWorkspace(input.threadId)
+    const locked = await this.lockedTurn(input, host, service)
+    const cwd = locked ? locked.cwd : input.cwd ?? service.standaloneWorkspace(input.threadId)
     let history = host.context.prepareNativeContext(input.llmProvider, input.model)?.nativeHistory ?? input.nativeHistory
     const streams = promptStreams(sink)
     // Resolved once per turn so a retry after context overflow runs with the same servers and skills.
     let integrations: ClaudeTurnIntegrations | undefined
     try {
-      integrations = await this.integrations()?.resolve(input.cwd ?? undefined)
+      // A locked turn takes none of the user's MCP servers or skills.
+      integrations = locked ? undefined : await this.integrations()?.resolve(input.cwd ?? undefined)
     } catch (error) {
       // The user's integrations are optional; a broken registry cannot block the turn.
       console.warn(`[claude-subscription] integrations unavailable: ${error instanceof Error ? error.message : String(error)}`)
@@ -121,7 +165,9 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       mcpTurnToken: host.bridge?.mcp ? host.bridge.turnToken : undefined,
       // Claude Code loads the project's instruction files itself, as in a terminal (CLAUDE.md, and
       // AGENTS.md as its own settings decide), so Mousse appends only its own session instructions.
-      systemPromptAppend: host.bridge?.sessionInstructions || undefined,
+      // A locked turn's instructions replace Claude Code's own system prompt instead (`locked`).
+      systemPromptAppend: locked ? undefined : host.bridge?.sessionInstructions || undefined,
+      ...(locked ? { locked } : {}),
       ...(host.bridge?.permission?.approvals === 'never' ? { approvals: 'never' as const } : {}),
       integrations,
       drainSteer: () => ctl.drainSteer(),

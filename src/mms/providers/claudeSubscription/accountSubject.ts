@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -11,6 +11,14 @@ function managedSettingsPaths(platform: NodeJS.Platform): string[] {
   if (platform === 'win32') return ['C:\\Program Files\\ClaudeCode\\managed-settings.json', 'C:\\ProgramData\\ClaudeCode\\managed-settings.json']
   if (platform === 'darwin') return ['/Library/Application Support/ClaudeCode/managed-settings.json']
   return ['/etc/claude-code/managed-settings.json']
+}
+
+/**
+ * Whether an organisation's managed Claude Code policy is installed here: it applies over every
+ * setting Mousse passes, so a locked profile cannot vouch for its tool list (PR 6 §3).
+ */
+export function claudeManagedPolicyPresent(platform: NodeJS.Platform = process.platform, exists: (path: string) => boolean = existsSync): boolean {
+  return managedSettingsPaths(platform).some((path) => exists(path))
 }
 
 export interface AccountSubjectOptions {
