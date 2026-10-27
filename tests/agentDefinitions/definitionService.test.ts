@@ -25,6 +25,7 @@ import { APPROVAL_ONLY_INSTANCE } from '../fixtures/agent-platform/exactDefiniti
 import { createDefinitionEngine, DEFINITION_ENGINES, ENGINE_MODEL, FAKE_KEY, type DefinitionEngine } from '../fixtures/agent-platform/definitionEngines'
 import type { Harness } from '../../src/mms/harness/gateway'
 import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
+import { harnessAppError } from '../../src/shared/harness/types'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 
@@ -626,6 +627,35 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     const resolved = resolver.resolve({ definitionId: definition.id, revision: definition.revision })
     const result = await orch.runAgentDefinition(request(resolved, store.createThread('deadline').id))
     expect(result).toMatchObject({ status: 'failed', error: { code: 'BUDGET_EXCEEDED', details: { limit: { kind: 'elapsed_ms', limit: 200 } } } })
+  })
+
+  it('a runtime that reports usage per request (Pi’s agent): the run’s usage is what it reported, a turn that reached a limit included', async () => {
+    harness.stop()
+    let limited = false
+    // Two requests' usage with their prices, then a reply (or a limit refusing the third request).
+    const reporting: ProviderAdapter = {
+      driver: 'codex',
+      capabilities: { steer: 'none', interrupt: true, rollback: 'none', fork: 'portable', events: 'rich', containment: 'strong', historyInjection: 'prompt', mcp: true, childPolicy: 'enforced' },
+      configured: () => true,
+      startTurn: async (input, sink) => {
+        sink.providerRef({ provider: 'p', instanceId: input.instanceId, model: input.model })
+        sink.usage({ input: 100, output: 20, cacheRead: 0, cacheWrite: 0, costUsd: 0.25 })
+        sink.usage({ input: 50, output: 10, cacheRead: 7, cacheWrite: 0, costUsd: 0.125 })
+        if (limited) throw harnessAppError({ code: 'budget_exhausted', message: 'The turn limit was reached.', limit: { kind: 'turns', limit: 2, actual: 2 } })
+        return { text: 'done', aborted: false, modelName: input.model, totalResponseTimeMs: 1, usage: { input: 150, output: 30, cacheRead: 7, cacheWrite: 0 }, contextSignature: 's', nativeMessages: [], providerRef: { provider: 'p' } }
+      },
+      interrupt: async () => 'not_active'
+    }
+    let stored: unknown = { reporting: { driver: 'codex', enabled: true } }
+    harness = testHarness({ drivers: [adapterDriver(reporting, { toolControl: 'exact', budgets: 'hard' })], instances: new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (state) => { stored = state.instances } } }), profileHome: home })
+    orch.setHarness(harness)
+    const definition = publish('mousse', 'reporting')
+    const resolved = resolver.resolve({ definitionId: definition.id, revision: definition.revision })
+    const completed = await orch.runAgentDefinition(request(resolved, store.createThread('usage').id))
+    expect(completed).toMatchObject({ status: 'completed', usage: { inputTokens: 150, outputTokens: 30, costUsd: 0.375 } })
+    limited = true
+    const stopped = await orch.runAgentDefinition(request(resolved, store.createThread('usage-limit').id))
+    expect(stopped).toMatchObject({ usage: { inputTokens: 150, outputTokens: 30, costUsd: 0.375 } })
   })
 
   it('an owned lease that another holds fails the turn as busy, and never queues it', async () => {
