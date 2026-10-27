@@ -76,6 +76,42 @@ describe('the request gate in the real Pi child (Pi RPC engine)', () => {
     expect(requests()).toBe(2)
   }, 90_000)
 
+  /** A first turn with a long reply (enough to summarize) and small reported usage (no compaction yet). */
+  const LONG_REPLY = 'long answer '.repeat(12_000)
+
+  it('a context overflow whose recovery compaction is refused at the limit ends budget_exhausted, not as the overflow', async () => {
+    const { engine, recorder, project } = await setup()
+    recorder.respond(script([{ text: LONG_REPLY }]))
+    const first = harness(project)
+    expect((await engine.startTurn(first.input, first.sink, first.ctl, first.host)).text).toBe(LONG_REPLY)
+    // The next request overflows; Pi compacts to recover, and that summary request is past the limit.
+    recorder.respond((_request, res) => {
+      const body = JSON.stringify({ error: { message: 'Your input exceeds the context window of this model.', type: 'invalid_request_error', code: 'context_length_exceeded' } })
+      res.writeHead(400, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) })
+      res.end(body)
+    })
+    const { budget, requests } = counted({ maxTurns: 1 })
+    const second = harness(project, { runId: 'r2', nativeHistory: `user: Say hello
+assistant: ${LONG_REPLY}` }, { budget })
+    const error = await engine.startTurn(second.input, second.sink, second.ctl, second.host).catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ code: 'budget_exhausted', details: { limit: { kind: 'turns', limit: 1, actual: 1 } } })
+    expect(recorder.requests).toHaveLength(2)
+    expect(requests()).toBe(2)
+  }, 90_000)
+
+  it('a compaction asked for with no live turn (Pi’s compact command) sends nothing', async () => {
+    const { engine, recorder, project } = await setup()
+    recorder.respond(script([{ text: LONG_REPLY }, { text: 'a summary that is never asked for' }]))
+    const first = harness(project)
+    await engine.startTurn(first.input, first.sink, first.ctl, first.host)
+    expect(recorder.requests).toHaveLength(1)
+    // The warm process, between turns: Mousse never sends `compact`; a test sends it directly.
+    const threads = (engine as unknown as { threads: Map<string, { process: { client: { send(command: { type: string }): Promise<unknown> } } }> }).threads
+    const compacted = await threads.get('t1')!.process.client.send({ type: 'compact' }).then(() => 'compacted', (caught: Error) => caught.message)
+    expect(compacted).toContain('mousse_request_refused')
+    expect(recorder.requests).toHaveLength(1)
+  }, 90_000)
+
   it('maxTurns 0: nothing is sent, and the refusal is not retried even with Pi’s retry on', async () => {
     const { engine, recorder, project } = await setup({ retry: RETRY })
     recorder.respond(script([{ text: 'never sent' }]))
