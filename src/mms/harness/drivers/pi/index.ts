@@ -5,11 +5,13 @@ import { PI_LEGACY_CAPS, piInstanceRuntime, type PiCredentials } from './engines
 import { PI_RPC_CAPS, createRpcRuntime, type PiRpcDriverOptions } from './engines/rpc'
 import { piEngineFor, piEngineOf, piEngineSwitchable, storedPiEngine } from './engines'
 import { PI_NATIVE_TOOLS } from '../../pi/nativeTools'
+import { piRetiredOf, piRetiredPrompt } from './retired'
 
 export { PI_LEGACY_CAPS, type PiCredentials } from './engines/legacy'
 export { PI_RPC_CAPS, type PiRpcDriverOptions } from './engines/rpc'
 export { PI_LEGACY_ONLY, piEngineFor, piEngineOf } from './engines'
 export { PI_NATIVE_TOOLS } from '../../pi/nativeTools'
+export { PI_RETIRED, piRetiredOf } from './retired'
 
 /**
  * Decoded with the instance id, `engine` is the engine in effect (`engines.ts`); without it (a
@@ -27,7 +29,7 @@ function decodePiConfig(raw: Record<string, unknown> | undefined, instanceId: st
 /**
  * The `pi` driver: every `pi:<provider>` instance. Two engines share one stored kind:
  * - `legacy`, the in-process pi-ai loop (`LlmClient`), shared by the profile: the default, and
- *   always for `openai-codex`, `cursor` and the bare route;
+ *   always for the bare route (`openai-codex` and `cursor` are retired: `retired.ts`);
  * - `rpc`, Pi's agent as its own process per thread (`harness/pi/engine.ts`), for an instance the
  *   user switched to it (Advanced → Engine: New engine), once the profile gave the driver its `rpc`
  *   options (the packaged runtime exists).
@@ -62,6 +64,10 @@ export function piDriver(options: { client: () => PiChatClient; credentials?: ()
     engine: (instanceId, stored) => {
       const providerId = piProviderIdOf(instanceId) ?? ''
       return { effective: piEngineFor(providerId, storedPiEngine(stored), Boolean(options.rpc)), switchable: piEngineSwitchable(providerId, Boolean(options.rpc)) }
+    },
+    retired: (instanceId) => {
+      const retired = piRetiredOf(piProviderIdOf(instanceId))
+      return retired ? piRetiredPrompt(retired) : undefined
     },
     caps: (config) => (piEngineOf(config, Boolean(options.rpc)) === 'rpc' ? PI_RPC_CAPS : PI_LEGACY_CAPS),
     // The RPC engine's gate holds Pi's built-ins to a bot turn's authority (`/pi/gate`).

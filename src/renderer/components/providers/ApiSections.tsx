@@ -55,7 +55,7 @@ export function ApiSetupRow({
     return <SettingsRow title="Cloud credentials" description={errorLine ?? (instructions.join(' ') || statusLine)} />
   }
 
-  // An old sign-in that is going away: it keeps working, but there is no signing in to it again.
+  // A retired entry: its sign-in stays until it moves, nothing runs on it, and there is no signing in to it again.
   if (retired) {
     return <SettingsRow title="Account" description={statusLine} />
   }

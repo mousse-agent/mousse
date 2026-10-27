@@ -8,7 +8,7 @@ import { describeStatus, type InstanceSnapshot } from '../src/shared/harness/sta
 import { snapshot } from './providerSnapshotFixture'
 
 const noop = async () => undefined
-const movePrompt = { action: 'move' as const, label: 'Move', title: 'Move to ChatGPT subscription', detail: 'This connection uses an older sign-in that a coming Mousse update turns off. Your chats stay.' }
+const movePrompt = { action: 'move' as const, label: 'Move', title: 'Retired by this update', detail: 'Move to ChatGPT subscription to keep chatting. Your chats stay.' }
 const chatgpt = (overrides: Parameters<typeof snapshot>[0] = {}) =>
   snapshot({ instanceId: 'pi:openai-codex', driver: 'pi', builtIn: false, displayName: 'ChatGPT', auth: { state: 'signed_in', account: undefined, methodLabel: 'Sign-in' }, nextStep: movePrompt, ...overrides })
 const managed = (overrides: Parameters<typeof snapshot>[0] = {}) =>
@@ -36,8 +36,8 @@ describe('the Move banner of an entry whose old route is going away', () => {
 
   it('shows on the card with its Move button, in place of the plain row', () => {
     const html = renderToStaticMarkup(createElement(MoveNotice, { variant: 'banner', snapshot: chatgpt(), snapshots: [chatgpt(), managed()] }))
-    expect(html).toContain('Move to ChatGPT subscription.')
-    expect(html).toContain('Your chats stay.')
+    expect(html).toContain('Retired by this update.')
+    expect(html).toContain('Move to ChatGPT subscription to keep chatting. Your chats stay.')
     expect(buttons(html).map((entry) => entry.label)).toEqual(['Move'])
     // The row variant leaves it to the banner.
     expect(renderToStaticMarkup(createElement(MoveNotice, { snapshot: chatgpt(), snapshots: [chatgpt(), managed()] }))).toBe('')
@@ -63,12 +63,12 @@ describe('the Move banner of an entry whose old route is going away', () => {
   })
 
   it('an offer that only runs as an agent now keeps its quiet row', () => {
-    const cursor = snapshot({ instanceId: 'pi:cursor', driver: 'pi', displayName: 'Cursor' })
-    const html = renderToStaticMarkup(createElement(MoveNotice, { snapshot: cursor, snapshots: [cursor] }))
-    expect(html).toContain('Runs as Cursor now')
+    const xai = snapshot({ instanceId: 'pi:xai', driver: 'pi', displayName: 'xAI' })
+    const html = renderToStaticMarkup(createElement(MoveNotice, { snapshot: xai, snapshots: [xai] }))
+    expect(html).toContain('Runs as Grok now')
     expect(html).not.toContain('move-banner')
     // No banner variant for it either.
-    expect(renderToStaticMarkup(createElement(MoveNotice, { variant: 'banner', snapshot: cursor, snapshots: [cursor] }))).toBe('')
+    expect(renderToStaticMarkup(createElement(MoveNotice, { variant: 'banner', snapshot: xai, snapshots: [xai] }))).toBe('')
   })
 
   it('a moved entry says where it went and has no banner', () => {
@@ -131,6 +131,23 @@ describe('the Move dialog for such an entry', () => {
     expect(oldSignInNote({ ...move, oldSignIn: 'removed' })).toBe(' and its old sign-in is removed')
     expect(oldSignInNote({ ...move, oldSignIn: 'kept_shared' })).toContain('another profile still uses it')
     expect(oldSignInNote({ ...move, oldSignIn: 'remains' })).toContain('could not be removed')
+  })
+
+  it('a retired entry with an API key may copy it: Move is ready without signing the target in first', () => {
+    const retiredKey = snapshot({ instanceId: 'pi:cursor', driver: 'pi', displayName: 'Cursor', auth: { state: 'signed_in', account: undefined, methodLabel: 'API key' }, nextStep: { ...movePrompt, detail: 'Move to Cursor to keep chatting. Your chats stay.' } })
+    const target = snapshot({ instanceId: 'cursor', driver: 'cursor', displayName: 'Cursor agent', auth: { state: 'signed_out', account: undefined, canSignIn: true, canTakeKey: true } })
+    const html = renderToStaticMarkup(createElement(MoveProviderDialog, { snapshot: retiredKey, targets: [target], agentLabel: 'Cursor', onMove: noop as never, onSignIn: noop, onRecheck: noop, onClose: () => {} }))
+    expect(html).toContain('Use the same API key for Cursor')
+    // Unticked, the target must be signed in first.
+    expect(disabled(html, 'Move')).toBe(true)
+  })
+
+  it('offers the key only to a target that can take one: a ChatGPT entry on an API key moving to Codex gets no box', () => {
+    const keyed = chatgpt({ auth: { state: 'signed_in', account: undefined, methodLabel: 'API key' } })
+    const html = dialog(keyed, [managed({ auth: { state: 'signed_out', account: undefined, canSignIn: true } })])
+    expect(html).not.toContain('same API key')
+    expect(html).toContain('Continue with ChatGPT')
+    expect(disabled(html, 'Move')).toBe(true)
   })
 
   it('with no Codex entry, says to add one first', () => {

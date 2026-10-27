@@ -107,10 +107,6 @@ import {
   resolveStreamInactivityTimeout
 } from '../harness/drivers/pi/stream'
 import {
-  CURSOR_PROVIDER_ID,
-  setCursorSessionProjectScope
-} from '../providers/cursorPiProvider'
-import {
   accumulateProviderUsage,
   applySafeBoundaryCompaction,
   emptyAccumulatedUsage,
@@ -902,7 +898,7 @@ export class LlmClient {
           try {
             // Pi SDK adapters turn HTTP errors into strings before onResponse runs.
             // Capture only status and retry delay at the HTTP boundary; never read bodies.
-            const capturesHttp = ['anthropic-messages', 'openai-completions', 'openai-responses', 'openai-codex-responses'].includes(model.api)
+            const capturesHttp = ['anthropic-messages', 'openai-completions', 'openai-responses'].includes(model.api)
             const streamOptions = {
               ...getReasoningStreamOptions(model.api, (reasoningLevel ?? 'off') as ThinkingLevel, streamSignal, cacheSessionId, llmProvider),
               maxRetries: 0,
@@ -914,9 +910,7 @@ export class LlmClient {
               }) as typeof globalThis.fetch } : {})
             }
             const context = { systemPrompt, messages: piMessages, tools: tools.length > 0 ? tools : undefined }
-            const stream = model.api === 'openai-codex-responses'
-              ? this.providerAuth.models.stream(model, context, streamOptions)
-              : this.providerAuth.models.streamSimple(model, context, streamOptions as { reasoning: ThinkingLevel; signal?: AbortSignal })
+            const stream = this.providerAuth.models.streamSimple(model, context, streamOptions as { reasoning: ThinkingLevel; signal?: AbortSignal })
             const candidate = await consumeAssistantStream(stream, { onThinking: onThinkingEvent, onText: onTextEvent }, {
               inactivityTimeoutMs: streamInactivityTimeoutMs, signal: streamSignal,
               onTimeout: () => stallAbort.abort(), onProgress: markProgress
@@ -1254,17 +1248,7 @@ export class LlmClient {
       titleSessionId,
       llmProvider
     )
-    const stream = model.api === 'openai-codex-responses'
-      ? this.providerAuth.models.stream(
-          model,
-          titleContext,
-          streamOptions
-        )
-      : this.providerAuth.models.streamSimple(
-          model,
-          titleContext,
-          streamOptions as { reasoning: ThinkingLevel }
-        )
+    const stream = this.providerAuth.models.streamSimple(model, titleContext, streamOptions as { reasoning: ThinkingLevel })
     // Bounded like main turns: a dead title connection must fail fast (the caller
     // falls back to a heuristic) instead of leaking a pending promise forever.
     const response = await consumeAssistantStream(
@@ -1453,11 +1437,8 @@ export class LlmClient {
       }),
       modeFacts.build && !subagent
         ? Promise.resolve([] as McpToolDescriptor[])
-        : this.getMcpTools(projectPath, actor),
-      llmProvider === CURSOR_PROVIDER_ID && projectPath
-        ? setCursorSessionProjectScope(projectPath)
-        : Promise.resolve()
-    ]).then(([skillsContext, tools]) => [skillsContext, tools] as const)
+        : this.getMcpTools(projectPath, actor)
+    ])
 
     const toolEnabled = (name: string): boolean => trustedAgent ? true : settingsToolEnabled(this.settingsStore.get().integrations.tools, name)
     // The turn the app tools are selected for and act in (the request adds what its host minted).

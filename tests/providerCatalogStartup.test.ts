@@ -90,13 +90,13 @@ describe('ProviderAuthService startup', () => {
         piVersion: '9.9.9',
         checkedAt: Date.now(),
         providers: {
-          'openai-codex': [
+          openai: [
             {
               id: 'gpt-6-sol',
               name: 'GPT-6 Sol',
-              api: 'openai-codex-responses',
-              provider: 'openai-codex',
-              baseUrl: 'https://chatgpt.com/backend-api',
+              api: 'openai-responses',
+              provider: 'openai',
+              baseUrl: 'https://api.openai.com/v1',
               reasoning: true,
               input: ['text', 'image'],
               cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
@@ -122,8 +122,7 @@ describe('ProviderAuthService startup', () => {
     const catalogs = service.getCatalogLlmProviders()
     const models = (id: string) => catalogs.find((provider) => provider.id === id)?.models.map((model) => model.id) ?? []
     expect(models('openrouter')).toContain('cached/model-from-last-run')
-    expect(models('openai-codex')).toContain('gpt-6-sol')
-    expect(models('cursor').length).toBeGreaterThan(0)
+    expect(models('openai')).toContain('gpt-6-sol')
   })
 
   async function controlledCatalog(context: { onTestFinished: (fn: () => void) => void }) {

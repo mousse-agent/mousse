@@ -13,8 +13,8 @@ import { SignInDialog } from './SignInDialog'
 /**
  * A model API that now runs as an agent (`FOLDED_INTO_AGENT`) says so on its card and offers Move.
  * Moving never happens on its own: the old entry is turned off (not deleted), and the defaults
- * that named it are rewritten and listed here. An entry whose old route is going away (a Move
- * banner) moves only onto an agent that is installed and signed in, so the dialog signs it in first.
+ * that named it are rewritten and listed here. A retired entry (a Move banner) moves only onto an
+ * agent that is installed and signed in (or given the entry's API key), so the dialog signs it in first.
  * A model API that moves to a narrower kind of entry (`FOLDED_TARGETS`: Anthropic → Claude Code on
  * an API key) moves only to such an entry, and the dialog offers to add one when there is none.
  */
@@ -110,7 +110,7 @@ async function addMoveTarget(snapshot: InstanceSnapshot): Promise<string> {
 }
 
 /**
- * The card's Move prompt. `banner`: the persistent banner of an entry whose old route is going away,
+ * The card's Move prompt. `banner`: the persistent banner of a retired entry,
  * shown above its Setup. `row`: the quiet row of any other entry that runs as an agent now (or the
  * note that it moved), inside Setup. The editor renders both; each shows only its own case.
  */
@@ -245,14 +245,18 @@ export function MoveProviderDialog({
   }, [target, targets])
   // Copied only when the user leaves it ticked; the target kind says whether it starts ticked.
   const [copyKey, setCopyKey] = useState(kind?.copyKey ?? false)
-  // An entry with a Move banner has an old sign-in that goes with it; nothing is copied. Read once:
-  // after the move the entry no longer carries the banner, and the result still says what happened.
+  // An entry with a Move banner (retired) has an old sign-in that goes with it. Read once: after the
+  // move the entry no longer carries the banner, and the result still says what happened.
   const [retiring] = useState(() => moveBannerOf(snapshot) !== null)
-  const hasKey = !retiring && snapshot.auth.state === 'signed_in' && snapshot.auth.methodLabel === 'API key'
+  const hasKey = snapshot.auth.state === 'signed_in' && snapshot.auth.methodLabel === 'API key'
   const [result, setResult] = useState<MoveResult | null>(null)
   const { busy, error, run } = useAsyncAction()
   const chosen = targets.find((entry) => entry.instanceId === target)
-  const ready = !retiring || (chosen !== undefined && isMoveReady(chosen))
+  // The key is offered only to a target that can take one (a new entry of the target kind can).
+  const offerKey = hasKey && (chosen ? chosen.auth.canTakeKey === true : target === null && Boolean(kind))
+  const copying = offerKey && copyKey
+  // A retired entry moves onto a target that can run now: signed in, or installed and given the copied key.
+  const ready = !retiring || (chosen !== undefined && (copying ? chosen.install.state === 'installed' : isMoveReady(chosen)))
   const destination = kind?.displayName ?? agentLabel
   const footer = result ? (
     <button type="button" className="btn btn-primary" onClick={onClose}>
@@ -267,7 +271,7 @@ export function MoveProviderDialog({
         type="button"
         className="btn btn-primary"
         disabled={busy !== null || target === '' || !ready}
-        onClick={() => void run('move', async () => setResult(await onMove(target === '' ? null : target, { copyKey: hasKey && copyKey })))}
+        onClick={() => void run('move', async () => setResult(await onMove(target === '' ? null : target, { copyKey: copying })))}
       >
         {busy ? 'Moving…' : 'Move'}
       </button>
@@ -330,16 +334,15 @@ export function MoveProviderDialog({
               </button>
             )}
           </div>
-          {retiring && chosen && <TargetReadiness target={chosen} onSignIn={onSignIn} onRecheck={onRecheck} />}
-          {!retiring &&
-            (hasKey ? (
-              <label className="prov-check-row">
-                <input type="checkbox" checked={copyKey} onChange={(event) => setCopyKey(event.target.checked)} />
-                <span>{kind ? 'Copy my API key' : `Use the same API key for ${agentLabel}`}</span>
-              </label>
-            ) : (
-              <p className="settings-muted">Sign in to {destination} on its entry after the move.</p>
-            ))}
+          {offerKey ? (
+            <label className="prov-check-row">
+              <input type="checkbox" checked={copyKey} onChange={(event) => setCopyKey(event.target.checked)} />
+              <span>{kind ? 'Copy my API key' : `Use the same API key for ${agentLabel}`}</span>
+            </label>
+          ) : (
+            !retiring && <p className="settings-muted">Sign in to {destination} on its entry after the move.</p>
+          )}
+          {retiring && chosen && (!copying || chosen.install.state !== 'installed') && <TargetReadiness target={chosen} onSignIn={onSignIn} onRecheck={onRecheck} />}
         </div>
       )}
     </Modal>

@@ -40,16 +40,6 @@ export function getReasoningStreamOptions(
         })
       }
     : {}
-  if (modelApi === 'openai-codex-responses') {
-    return {
-      reasoningEffort: reasoning === 'off' ? 'none' : reasoning,
-      reasoningSummary: 'auto' as const,
-      signal,
-      ...cacheOptions,
-      ...providerOptions
-    }
-  }
-
   return {
     reasoning,
     signal,

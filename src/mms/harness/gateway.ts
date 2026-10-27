@@ -40,7 +40,7 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import type { InstanceConfigView, InstanceEngine, NextStep, UpdateAffordance } from '../../shared/harness/status'
-import { acceptsMove, foldedInto, foldedTarget, movePromptOf, type MoveResult } from '../../shared/harness/move'
+import { acceptsMove, foldedInto, foldedTarget, type MoveResult } from '../../shared/harness/move'
 import { harnessAppError, type HarnessErrorCode, type ModelPrefs, type SignInPrompt } from '../../shared/harness/types'
 import type { ProviderLoginEvent, ProviderUsage } from '../../shared/providerAuth'
 import {
@@ -53,7 +53,7 @@ import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { LoginSession as LoginSessionImpl } from '../providers/LoginSession'
 import { fail } from '../run/db/RunStoreError'
 import { hidesModel, modelsWithPrefs, ModelPrefsService, visibleProviderOption, type ModelPrefsStore } from './catalog'
-import { privateHomeRule, type AuthReading, type DriverRuntime, type HarnessDriver, type InstallProgress, type InstanceConfig, type LiveProcessHost } from './driver'
+import { privateHomeRule, type AuthReading, type DriverRuntime, type HarnessDriver, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost } from './driver'
 import { DEFAULT_HOME_ID, findOnPath, instanceEnv, reservedEnvName, type InstanceEnv } from './env'
 import { addedInstanceId, defaultInstanceId, InstanceCounterStore, instanceStateDir, isBuiltInInstance } from './instances'
 import { LatestVersionCache } from './latest'
@@ -657,6 +657,20 @@ function harnessFail(code: HarnessErrorCode, message: string, instanceId?: strin
   throw harnessAppError({ code, message, ...(instanceId ? { instanceId } : {}) })
 }
 
+/** The Move prompt of an instance a Mousse update retired, while it has not moved. */
+function retiredPrompt(driver: HarnessDriver, instanceId: string, config: InstanceConfig): RetiredPrompt | undefined {
+  return config.movedTo ? undefined : driver.retired?.(instanceId)
+}
+
+/** The refusal of a turn on a retired entry: where to go, for callers with no Move button (channels). */
+function retiredError(name: string, prompt: RetiredPrompt, instanceId: string) {
+  return harnessAppError({
+    code: 'provider_retired',
+    message: `${name} was retired by a Mousse update. Move it to ${prompt.target} in Settings → Providers to keep chatting. Your chats stay.`,
+    instanceId
+  })
+}
+
 /** The provider-instance error codes the run engine reports, as harness codes for `resolve()`. */
 function asHarnessError(error: unknown, instanceId: string): unknown {
   const code = (error as { code?: unknown } | undefined)?.code
@@ -694,6 +708,8 @@ export class Harness implements HarnessGateway {
   private readonly probes = new Map<string, ProbeState>()
   /** Entries being moved now (`move`): one move at a time per entry. */
   private readonly moving = new Set<string>()
+  /** Sign-outs started per instance (`signOut`), so a move that copies a key never undoes one. */
+  private readonly signOutsStarted = new Map<string, number>()
   private readonly facts: RuntimeFactsStore
   /** Executable stats taken when no probe recorded one, reused for the probe TTL. */
   private readonly stats = new Map<string, { fingerprint?: BinaryFingerprint; atMs: number }>()
@@ -785,6 +801,10 @@ export class Harness implements HarnessGateway {
         // A runtime that cannot run a model by id does not offer adding one.
         if (patch.custom?.length && !record.driver.customModels)
           harnessFail('unsupported', `${record.driver.label} runs only the models it lists; custom models cannot be added.`, instanceId)
+        // A retired entry takes no new custom model (the ones it has stay stored).
+        const retired = retiredPrompt(record.driver, instanceId, record.config)
+        const stored = new Set(this.prefs.get(instanceId).custom.map((model) => model.id))
+        if (retired && patch.custom?.some((model) => !stored.has(model.id))) throw retiredError(this.displayName(record), retired, instanceId)
         this.prefs.set(instanceId, patch)
         this.changed(instanceId)
         return this.snapshot(instanceId, { kind: 'device' })
@@ -796,7 +816,11 @@ export class Harness implements HarnessGateway {
     }
     this.registry = { search: (query) => options.registry?.search(query) ?? Promise.resolve([]) }
     this.catalog = {
-      models: (instanceId) => modelsWithPrefs(this.record(instanceId, { allowDisabled: true }).runtime.models(), this.prefs.get(instanceId)),
+      models: (instanceId) => {
+        const record = this.record(instanceId, { allowDisabled: true })
+        // A retired entry offers no model to choose, custom ones included (its prefs are kept).
+        return retiredPrompt(record.driver, instanceId, record.config) ? [] : modelsWithPrefs(record.runtime.models(), this.prefs.get(instanceId))
+      },
       customModel: (instanceId, modelId) => {
         const prefs = this.prefs.get(instanceId)
         return hidesModel(prefs, modelId) ? undefined : prefs.custom.find((model) => model.id === modelId)
@@ -891,9 +915,13 @@ export class Harness implements HarnessGateway {
     }
     const named = this.instanceMap.instanceIdOf(selection)
     const target = this.movedTarget(named)
+    // A retired entry is refused for every purpose, before it reads as turned off: turning it on
+    // would not help. Reading or stopping work (`allowDisabled`) is not refused.
+    if (!options.allowDisabled) this.refuseRetiredId(target ?? named)
     const resolved = this.instanceMap.resolve(target ?? named, { allowDisabled: options.allowDisabled })
     const driver = this.drivers.get(resolved.entry.driver)
     if (!driver) fail('bad_request', `No provider adapter for driver ${resolved.entry.driver} (instance ${resolved.instanceId}).`)
+    const config = driver.decodeConfig(resolved.entry.config, resolved.instanceId)
     // Chat titles are a one-shot completion of an API provider's model; agent runtimes run turns only.
     if (options.purpose === 'title' && !driver.oneShot)
       harnessFail('unsupported', `${driver.label} cannot name chats. Choose an API provider's model for chat titles, or Automatic.`, resolved.instanceId)
@@ -903,7 +931,6 @@ export class Harness implements HarnessGateway {
       if (selection.model && hidesModel(this.prefs.get(resolved.instanceId), selection.model))
         harnessFail('model_hidden', `${this.modelName(resolved.instanceId, selection.model)} is hidden. Show it in Settings → Providers or choose another model.`, resolved.instanceId)
     }
-    const config = driver.decodeConfig(resolved.entry.config, resolved.instanceId)
     const version = this.probes.get(resolved.instanceId)?.lastGood?.binary?.version
     const caps = driver.caps(config, version, this.currentFacts(resolved.instanceId))
     // An instance that approves tools itself runs only turns a person drives; reading or stopping
@@ -1368,7 +1395,9 @@ export class Harness implements HarnessGateway {
     const draining = this.stopBarriers.get(record.instanceId)
     if (draining?.size) await Promise.all([...draining])
     this.refuseStopped(record, entry)
-    // Every attempt (first, retry, recovery, continuation) of an instance signed out in Mousse is refused.
+    // Every attempt (first, retry, recovery, continuation) of a retired instance, or one signed out
+    // in Mousse, is refused; retired first, since signing in again would not help.
+    this.refuseRetired(record)
     this.refuseSignedOut(record)
     if (input.instanceId !== binding.instanceId || input.model !== binding.model)
       harnessFail('protocol', `The turn names ${input.instanceId ?? 'no instance'}/${input.model} but its binding is ${binding.instanceId}/${binding.model}.`, binding.instanceId)
@@ -2019,9 +2048,9 @@ export class Harness implements HarnessGateway {
     const signInStep: NextStep | undefined = auth.state === 'signed_out' || auth.state === 'expired'
       ? { action: 'sign_in', label: auth.state === 'expired' ? 'Sign in again' : 'Sign in', ...(auth.signInCommand ? { command: auth.signInCommand } : {}) }
       : undefined
-    // An entry whose old route is going away keeps asking to move (and offers no sign-in) until it moved.
-    const prompt = record.entry.driver === 'pi' && !record.config.movedTo ? movePromptOf(piProviderIdOf(instanceId)) : undefined
-    const nextStep: NextStep | undefined = prompt ? { action: 'move', label: 'Move', title: prompt.title, detail: prompt.detail } : signInStep
+    // A retired entry runs nothing and keeps asking to move (it offers no sign-in) until it moved.
+    const retired = retiredPrompt(driver, instanceId, record.config)
+    const nextStep: NextStep | undefined = retired ? { action: 'move', label: 'Move', title: retired.title, detail: retired.detail } : signInStep
     return {
       instanceId,
       driver: driver.kind,
@@ -2038,7 +2067,7 @@ export class Harness implements HarnessGateway {
         ...(managed?.checksum ? { checksum: managed.checksum } : {}),
         ...(managed?.advisory ? { advisory: managed.advisory } : {})
       },
-      runs: shown?.runs ?? { state: 'unknown' },
+      runs: retired ? { state: 'no', message: `${retired.title}. ${retired.detail}` } : shown?.runs ?? { state: 'unknown' },
       auth: {
         state: auth.state,
         // Keyed by its salted hash: the vendor's account id never leaves the gateway.
@@ -2047,6 +2076,7 @@ export class Harness implements HarnessGateway {
         ...(sameAccount || dropped || auth.message ? { message: [auth.message, sameAccount, dropped].filter(Boolean).join(' ') } : {}),
         canSignOut: Boolean(runtime.signOut) && (auth.state === 'signed_in' || auth.state === 'expired') && (this.ownsSignIn(record) || auth.ownedByMousse === true),
         ...(runtime.signIn && auth.canSignIn ? { canSignIn: true } : {}),
+        ...(runtime.adoptApiKey ? { canTakeKey: true } : {}),
         ...(auth.credential ? { credential: auth.credential } : {})
       },
       compatibility: shown?.compatibility ?? compatibilityOf(driver, undefined),
@@ -2057,9 +2087,10 @@ export class Harness implements HarnessGateway {
       config: this.configView(record),
       ...this.engineView(record),
       models: {
-        entries: modelsWithPrefs(listed, prefs),
+        // A retired entry offers no model to choose, custom ones included (its prefs are kept).
+        entries: retired ? [] : modelsWithPrefs(listed, prefs),
         source: listed.length ? (models?.live || (runtime.modelsRefreshedAt && refreshedAt) ? 'live' : 'cached') : prefs.custom.length ? 'manifest' : 'none',
-        canAddCustom: driver.customModels,
+        canAddCustom: driver.customModels && !retired,
         ...(refreshedAt ? { refreshedAt } : {}),
         ...(models?.error ? { error: models.error } : {})
       },
@@ -2440,6 +2471,21 @@ export class Harness implements HarnessGateway {
       harnessFail('signed_out', `${this.displayName(record)} is signed out in Mousse. Sign in again in Settings → Providers.`, record.instanceId)
   }
 
+  /** An entry a Mousse update retired runs nothing until it moved (a binding from before included). */
+  private refuseRetired(record: InstanceRecord): void {
+    const prompt = retiredPrompt(record.driver, record.instanceId, record.config)
+    if (prompt) throw retiredError(this.displayName(record), prompt, record.instanceId)
+  }
+
+  /** `refuseRetired` for an instance id, turned off or not (an unknown id is left to the caller). */
+  private refuseRetiredId(instanceId: string): void {
+    const entry = this.instanceMap.get(instanceId)
+    const driver = entry && this.drivers.get(entry.driver)
+    if (!driver?.retired?.(instanceId)) return
+    const record = this.recordOrUndefined(instanceId)
+    if (record) this.refuseRetired(record)
+  }
+
   /** Stores the instance's config (one write) and keeps the record's copy in step with it. */
   private storeConfig(record: InstanceRecord, config: Record<string, unknown>): void {
     const entry = { ...(this.instanceMap.list()[record.instanceId] ?? record.entry), config }
@@ -2669,15 +2715,20 @@ export class Harness implements HarnessGateway {
   private async moveEntry(from: InstanceRecord, to: InstanceRecord, options: { copyKey?: boolean }): Promise<MoveResult> {
     const fromId = from.instanceId
     const toId = to.instanceId
-    // An entry whose old route is going away moves only onto a route that works now (nothing is
-    // copied: the new route has its own sign-in), and its old sign-in goes last, after the move is saved.
-    const retiring = movePromptOf(piProviderIdOf(fromId)) !== undefined
-    if (retiring) {
-      if (!to.entry.enabled) harnessFail('unsupported', `Turn on ${this.displayName(to)} first, then move ${this.displayName(from)} to it. Nothing moved.`, toId)
+    // A retired entry moves only onto a route that works now (signed in on its own, or with the
+    // entry's API key copied over), and its old sign-in goes last, after the move is saved.
+    const retiring = retiredPrompt(from.driver, fromId, from.config) !== undefined
+    // A sign-out of the target started during the move (another window) is never undone by it.
+    const signOutsBefore = this.signOutsStarted.get(toId) ?? 0
+    const signedOutMeanwhile = () => (this.signOutsStarted.get(toId) ?? 0) !== signOutsBefore
+    const signedOutMessage = () => `${this.displayName(to)} was signed out during the move. Nothing moved${options.copyKey ? `, and ${this.displayName(from)} keeps its key` : ''}.`
+    if (retiring && !to.entry.enabled) harnessFail('unsupported', `Turn on ${this.displayName(to)} first, then move ${this.displayName(from)} to it. Nothing moved.`, toId)
+    if (retiring && options.copyKey) {
+      // The key goes only to a target that is installed: a copy cannot make anything else run.
       await this.probe(toId, true)
-      // Installed and signed in: a chat on it can run now.
-      if (!to.runtime.configured())
-        harnessFail('signed_out', `Install and sign in to ${this.displayName(to)} first, then move ${this.displayName(from)} to it. Nothing moved.`, toId)
+      const install = this.probes.get(toId)?.result?.install
+      if (install === 'not_installed' || install === 'broken')
+        harnessFail('signed_out', `Install ${this.displayName(to)} first, then move ${this.displayName(from)} to it. Nothing moved.`, toId)
     }
     // The key goes over first: when it cannot, nothing has moved yet.
     if (options.copyKey) {
@@ -2685,12 +2736,30 @@ export class Harness implements HarnessGateway {
       if (!key) harnessFail('unsupported', `${this.displayName(from)} has no saved API key to copy.`, fromId)
       if (!to.runtime.adoptApiKey) harnessFail('unsupported', `${this.displayName(to)} cannot take an API key.`, toId)
       await to.runtime.adoptApiKey(key)
+      // A sign-out of the target while its key was copied wins: the sign-out stands, nothing moves,
+      // and the old entry keeps its key.
+      if (signedOutMeanwhile()) harnessFail('signed_out', signedOutMessage(), toId)
       // A key it now holds signs an entry signed out in Mousse in again (and moves its account on).
       const current = this.recordOrUndefined(toId) ?? to
       if (this.isSignedOut(current)) await this.reconnect(current)
       else this.counters.bumpAccount(toId)
-      void this.probe(toId, true)
+      if (!retiring) void this.probe(toId, true)
     }
+    if (retiring) {
+      await this.probe(toId, true)
+      // Installed, signed in, and not signed out in Mousse: a chat on it can run now. Otherwise
+      // nothing moves, and the old entry keeps its sign-in (a copied key stays on the target too).
+      const target = this.record(toId, { allowDisabled: true })
+      if (!target.runtime.configured() || this.isSignedOut(target))
+        harnessFail(
+          'signed_out',
+          options.copyKey
+            ? `The API key was saved to ${this.displayName(target)}, but it cannot run yet. Install and sign in to it, then move ${this.displayName(from)} again. Nothing moved, and ${this.displayName(from)} keeps its key.`
+            : `Install and sign in to ${this.displayName(target)} first, then move ${this.displayName(from)} to it. Nothing moved.`,
+          toId
+        )
+    }
+    if (signedOutMeanwhile()) harnessFail('signed_out', signedOutMessage(), toId)
     // Turned off, never deleted: an older build can still turn it back on. A save that fails throws
     // here, before anything else changed: the old sign-in is still there and the entry still works.
     this.instanceMap.setEntry(fromId, { ...from.entry, enabled: false, config: { ...(from.entry.config ?? {}), movedTo: toId } })
@@ -2743,6 +2812,8 @@ export class Harness implements HarnessGateway {
   private async signOut(instanceId: string): Promise<InstanceSnapshot> {
     const record = this.record(instanceId, { allowDisabled: true })
     if (!record.runtime.signOut) harnessFail('unsupported', 'This provider has no sign-out.', instanceId)
+    // Counted first: a move copying a key to this instance meanwhile sees it and stops (`moveEntry`).
+    this.signOutsStarted.set(instanceId, (this.signOutsStarted.get(instanceId) ?? 0) + 1)
     // 1. The flag first: from here on nothing is admitted on the instance (fail closed).
     const config = { ...this.storedConfig(record), signedOutInMousse: true }
     this.storeConfig(record, config)
@@ -2784,6 +2855,8 @@ export class Harness implements HarnessGateway {
       const result = (outcome: ModelRefreshResult['outcome'], message?: string): ModelRefreshResult =>
         ({ instanceId, outcome, ...(message ? { message } : {}), snapshot: this.snapshot(instanceId, { kind: 'device' }) })
       try {
+        const retired = this.retiredSkip(instanceId)
+        if (retired) return result('skipped', retired)
         if (entry.driver === 'pi') {
           pi ??= this.refreshModelsOf(instanceId)
           await pi
@@ -2811,12 +2884,20 @@ export class Harness implements HarnessGateway {
     if (!entry?.enabled) return 'Turned off'
     const record = this.recordOrUndefined(instanceId)
     if (!record || record.stopped) return 'Turned off'
+    const retired = this.retiredSkip(instanceId)
+    if (retired) return retired
     const auth = this.probes.get(instanceId)?.lastGood?.auth.state
     if (auth !== 'signed_in' && auth !== 'not_required') return 'Not signed in'
     if (record.active > 0) return 'A chat is running'
     const installing = record.runtime.installState?.().installing === true || [...this.operations.values()].some((operation) => operation.started.instanceId === instanceId && operation.started.kind !== 'sign_in')
     if (installing) return 'Being installed'
     return undefined
+  }
+
+  /** Why a retired entry's models are left alone, or undefined for any other. */
+  private retiredSkip(instanceId: string): string | undefined {
+    const record = this.recordOrUndefined(instanceId)
+    return record && retiredPrompt(record.driver, instanceId, record.config) ? 'Retired by this update' : undefined
   }
 
   /**
@@ -2830,7 +2911,8 @@ export class Harness implements HarnessGateway {
     const job = this.withModelSlot(async () => {
       if (this.stopped) return
       const record = this.recordOrUndefined(instanceId)
-      if (!record) return
+      // A retired entry's models are never fetched: nothing reads its sign-in.
+      if (!record || this.retiredSkip(instanceId)) return
       if (when) {
         if (!this.probes.get(instanceId)?.result) await this.probe(instanceId, false)
         if (this.stopped || this.modelRefreshSkip(instanceId) || this.modelsAgeMs(record) < when.minAgeMs) return
@@ -2986,6 +3068,8 @@ export class Harness implements HarnessGateway {
   private async signIn(instanceId: string, method?: string): Promise<ProviderOperationStarted> {
     const record = this.record(instanceId, { allowDisabled: true })
     const runtime = record.runtime
+    // A retired entry offers no sign-in: its one step is Move.
+    this.refuseRetired(record)
     // Signed out in Mousse on the user's own sign-in (their CLI's home): reconnecting only clears the
     // flag. No sign-in runs; when the agent itself is signed out, the card shows its command.
     const reconnecting = this.isSignedOut(record) && !this.ownsSignIn(record)

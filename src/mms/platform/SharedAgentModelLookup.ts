@@ -48,7 +48,7 @@ export class SharedAgentModelLookup implements AgentModelLookup {
     if (model.input.includes('image')) capabilities.push('vision')
     // These are the existing pi-ai structured tool transports. Browser/native and
     // JSON-schema output support require separate adapter qualification.
-    if (new Set(['anthropic-messages', 'openai-completions', 'openai-responses', 'openai-codex-responses', 'google-generative-ai', 'google-vertex', 'google-gemini-cli', 'bedrock-converse-stream']).has(model.api)) capabilities.push('tools')
+    if (new Set(['anthropic-messages', 'openai-completions', 'openai-responses', 'google-generative-ai', 'google-vertex', 'google-gemini-cli', 'bedrock-converse-stream']).has(model.api)) capabilities.push('tools')
     if (model.contextWindow >= 128_000) capabilities.push('long_context')
     return {
       ref: { ...ref }, label: model.name, available: true,

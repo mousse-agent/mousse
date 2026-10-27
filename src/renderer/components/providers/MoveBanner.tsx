@@ -2,7 +2,7 @@ import type { MoveBanner } from '../../../shared/harness/move'
 import './moveBanner.css'
 
 /**
- * The persistent Move prompt of an entry whose old route is going away: on its Providers card and
+ * The persistent Move prompt of a retired entry: on its Providers card and
  * at the top of every chat that uses it. It stays until the entry moved, and says so in plain words.
  */
 export function MoveBannerView({ banner, onMove }: { banner: MoveBanner; onMove: () => void }) {

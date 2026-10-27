@@ -28,7 +28,7 @@ const anthropic = {
   auth: { state: 'signed_in', methodLabel: 'API key' },
   config: { home: 'default', args: [], env: {} }
 } as unknown as InstanceSnapshot
-const keyEntry = { instanceId: 'claude:api', driver: 'claude', displayName: 'Claude Code (API key)', config: { home: 'private', args: [], env: {}, loginMethod: 'api_key' } } as unknown as InstanceSnapshot
+const keyEntry = { instanceId: 'claude:api', driver: 'claude', displayName: 'Claude Code (API key)', auth: { state: 'signed_out', canTakeKey: true }, config: { home: 'private', args: [], env: {}, loginMethod: 'api_key' } } as unknown as InstanceSnapshot
 
 const moveButton = () => [...document.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent === 'Move')!
 const copyBox = () => document.querySelector<HTMLInputElement>('input[type="checkbox"]')!
