@@ -5,6 +5,7 @@ import type { ProviderAuthService } from '../../../../providers/ProviderAuthServ
 import { PI_LOOP_CAPABILITIES } from '../../../../run/adapters/pi/PiLoopAdapter'
 import type { ProviderAdapter } from '../../../../run/adapters/ProviderAdapter'
 import type { DriverRuntime } from '../../../driver'
+import { piAmbientProvider } from '../../../pi/envKeys'
 import { runPiOneShot } from '../oneShot'
 
 /** Mousse measures the pi loop's transcript itself and offers Plan mode on it. */
@@ -47,9 +48,10 @@ export function piInstanceRuntime(instanceId: string, providerId: string, creden
     models: () => llmProvider()?.models ?? [],
     auth: async () => {
       const provider = configuredProvider()
-      return signedIn()
-        ? { state: 'signed_in', methodLabel: provider?.authType === 'api_key' ? 'API key' : provider?.source ?? 'Sign-in' }
-        : { state: 'signed_out', methodLabel: 'API key or sign-in' }
+      if (!signedIn()) return { state: 'signed_out', methodLabel: 'API key or sign-in' }
+      // What it runs on: the environment's cloud credentials, a subscription sign-in, or a key.
+      const credential = piAmbientProvider(providerId) ? 'ambient' : provider?.authType === 'oauth' ? 'subscription' : 'api_key'
+      return { state: 'signed_in', methodLabel: provider?.authType === 'api_key' ? 'API key' : provider?.source ?? 'Sign-in', credential }
     },
     refreshModels: async () => void (await credentials()?.refreshDynamicModels?.()),
     signIn: async (session, _cwd, method) => {

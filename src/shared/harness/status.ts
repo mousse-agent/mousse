@@ -77,6 +77,13 @@ export interface InstanceConfigView {
   setup?: 'managed' | 'existing'
 }
 
+/**
+ * What an instance's turns run on: a key the user gave (`api_key`), a subscription sign-in
+ * (`subscription`), the environment's cloud credentials (`ambient`: AWS, or Google's application
+ * default credentials), or `unknown` (the user's own home, which Mousse does not inspect further).
+ */
+export type CredentialKind = 'api_key' | 'subscription' | 'ambient' | 'unknown'
+
 export interface InstanceSnapshot {
   instanceId: string
   driver: HarnessDriverKind
@@ -114,6 +121,8 @@ export interface InstanceSnapshot {
     canSignOut?: boolean
     /** A sign-in can start in Mousse now, even when the account is not checked (`unknown`). */
     canSignIn?: boolean
+    /** What the instance runs on once signed in; absent when the driver cannot tell without another check. */
+    credential?: CredentialKind
   }
   compatibility: { state: CompatibilityState; testedRange?: string }
   update?: UpdateAffordance

@@ -1,3 +1,4 @@
+import type { NativeToolTable } from '../../../../shared/harness/tools'
 import { piProviderIdOf } from '../../../../shared/providerInstances'
 import { PiLoopAdapter, type PiChatClient } from '../../../run/adapters/pi/PiLoopAdapter'
 import { decodeInstanceConfig, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig } from '../../driver'
@@ -17,6 +18,20 @@ function decodePiConfig(raw: Record<string, unknown> | undefined): InstanceConfi
   if (raw?.engine === 'rpc' || raw?.engine === 'legacy') config.engine = raw.engine
   return config
 }
+
+/**
+ * Pi's own tools for each neutral tool (PR 6 §2), on the RPC engine. Pi has no web tools, and its
+ * `powershell` has no neutral name. Every name exists in the pinned Pi's `tools/index.js`
+ * (`toolNames` test). The legacy loop runs Mousse's own tools and maps none.
+ */
+export const PI_NATIVE_TOOLS: NativeToolTable = Object.freeze({
+  read: ['read'],
+  list: ['ls'],
+  search: ['find', 'grep'],
+  edit: ['edit'],
+  write: ['write'],
+  shell: ['bash']
+})
 
 /**
  * The `pi` driver: every `pi:<provider>` instance. Two engines share one stored kind:
@@ -52,6 +67,7 @@ export function piDriver(options: { client: () => PiChatClient; credentials?: ()
     userMcp: 'proxy',
     decodeConfig: decodePiConfig,
     caps: (config) => (piEngineOf(config, Boolean(options.rpc)) === 'rpc' ? PI_RPC_CAPS : PI_LEGACY_CAPS),
+    nativeToolNames: (neutral, config) => (piEngineOf(config, Boolean(options.rpc)) === 'rpc' ? PI_NATIVE_TOOLS[neutral] ?? [] : []),
     create(context: DriverContext): DriverRuntime {
       const providerId = piProviderIdOf(context.instanceId) ?? ''
       if (piEngineOf(context.config, Boolean(options.rpc)) === 'rpc' && providerId)

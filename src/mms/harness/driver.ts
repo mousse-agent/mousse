@@ -1,5 +1,6 @@
-import type { AuthState, InstallOwner } from '../../shared/harness/status'
+import type { AuthState, CredentialKind, InstallOwner } from '../../shared/harness/status'
 import type { CustomModel, HarnessCaps, HarnessDriverKind, RemoveInstallResult, RuntimeFacts } from '../../shared/harness/types'
+import type { NeutralTool } from '../../shared/harness/tools'
 import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult } from '../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
 import type { UserQuestionService } from '../orchestrator/UserQuestionService'
@@ -101,6 +102,8 @@ export interface AuthReading {
   canSignIn?: boolean
   /** The sign-in is one Mousse made and keeps (it may sign out), beyond the gateway's own rules. */
   ownedByMousse?: boolean
+  /** What the instance runs on (`InstanceSnapshot.auth.credential`), from what the driver already knows: never another check. */
+  credential?: CredentialKind
 }
 
 export interface DriverContext {
@@ -327,6 +330,12 @@ export interface HarnessDriver {
    * `['--version']`.
    */
   versionArgs?(config: InstanceConfig): string[] | null
+  /**
+   * The runtime's own names for a neutral built-in tool (PR 6 §2), for an exact allowlist: several
+   * when the runtime splits it (`search` is Claude Code's `Glob` and `Grep`). Empty, or absent on
+   * the driver, when the runtime has no such tool: a policy that names it is refused.
+   */
+  nativeToolNames?(neutral: NeutralTool, config: InstanceConfig): readonly string[]
   create(context: DriverContext): DriverRuntime
   /** The command that updates a binary installed by `owner`, when there is one. */
   updateCommand?(owner: InstallOwner): string | undefined

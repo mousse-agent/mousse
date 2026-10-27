@@ -106,8 +106,28 @@ export interface RunPolicy {
    * without asking (`never`: the turn bridge denies every permission request).
    */
   approvals: 'ask' | 'grants' | 'never'
+  /**
+   * Who answers a call that needs approval under `grants`: the host's own authority for the turn
+   * (an agent definition's or a bot's, registered with the turn's app tools), never a person.
+   */
+  approve?: 'host'
   budget?: { maxTurns?: number; maxToolCalls?: number; maxInputTokens?: number; maxOutputTokens?: number; maxUsd?: number; maxWallMs?: number }
+  /**
+   * The turn runs under a host authority (an agent definition's or a bot's grants, roots and rules),
+   * named by kind and the digest of what was approved. The authority itself is registered with the
+   * turn's app tools, never carried in the policy. It needs `toolControl: exact`.
+   */
+  authority?: PolicyAuthority
 }
+
+/** `RunPolicy.authority`. */
+export interface PolicyAuthority {
+  kind: 'definition' | 'bot'
+  digest: string
+}
+
+/** The caller's part of a binding's policy (`HarnessGateway.bind`): mode and origin are bound separately. */
+export type BindPolicy = Pick<RunPolicy, 'tools' | 'approvals' | 'approve' | 'budget' | 'authority'>
 
 /**
  * The immutable binding one RunEngine attempt runs on, resolved at admission. Retries, steering,
@@ -130,7 +150,15 @@ export interface ExecutionBinding {
   accountId?: string
   model: string
   effort?: string
+  /** Frozen when the binding is made: every attempt, retry and steer of the run holds to it. */
   policy: RunPolicy
+  /**
+   * SHA-256 of the policy's canonical JSON, when the caller gave a policy (definitions, workflows,
+   * bots; `bind(…, {policy})`). A thread whose next binding has another digest gets a new Mousse MCP
+   * epoch, so a runtime never keeps a tool list from an earlier grant. A stored binding whose policy
+   * no longer matches its digest is refused.
+   */
+  policyDigest?: string
   /**
    * The instance's capabilities when the binding was made: an attempt runs on them even when the
    * runtime's facts change meanwhile. Absent on bindings from before snapshots (live caps apply).

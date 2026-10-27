@@ -58,7 +58,8 @@ import { stableStringify } from '../run/json'
 import { closeStaleActivity, cutOffActivityOf, formatRestartNote } from '../run/restartNote'
 import { createHarnessGateway, PI_DRIVER_ID, type AdapterHost, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
 import { piDriver } from '../harness/drivers/pi'
-import { contextGauge } from '../harness/policy'
+import { contextGauge, threadTurnOrigin } from '../harness/policy'
+import type { BotThreads } from '../../shared/bots/personal/authority'
 import { isRetriesExhausted, type ExecutionBinding, type HarnessCaps, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
@@ -641,6 +642,14 @@ export class OrchestratorService extends EventEmitter {
    * the pi loop serves turns; the pi loop reads `this.llm` per turn.
    */
   private harness: HarnessGateway
+  /** The profile's bot threads (`bots.db`): a turn on one binds with origin `bot`. */
+  private botThreads: BotThreads | null = null
+
+  /** The profile's bot threads, for the origin of their turns; null: none. */
+  setBotThreads(threads: BotThreads | null): void {
+    this.botThreads = threads
+  }
+
   /** The profile's harness gateway; also the test seam for fake drivers. */
   setHarness(harness: HarnessGateway): void {
     this.harness.setLiveHost(null)
@@ -2229,17 +2238,20 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * Who a thread's turn runs for: a workflow step, a delegated child (its lineage), or a person.
-   * The binding records it, so retries, continuations and steers of the turn keep it.
+   * Who a thread's turn runs for: a bot (any bot thread, ahead of its lineage), a workflow step, a
+   * delegated child (its lineage), or a person. The binding records it, so retries, continuations
+   * and steers of the turn keep it. An unreadable bot index fails the turn rather than binding a
+   * bot thread as the person's own.
    */
   private turnOrigin(threadId: string, workflowInvocationId?: string): TurnOrigin {
-    if (workflowInvocationId) return 'workflow'
+    const botRole = this.botThreads?.roleOf(threadId)
+    let lineage: string | undefined
     try {
-      if (this.runEngine?.delegations.getLineage(threadId)?.relationship === 'subagent') return 'delegated'
+      lineage = this.runEngine?.delegations.getLineage(threadId)?.relationship
     } catch {
       // No lineage readable: the thread is the person's own.
     }
-    return 'interactive'
+    return threadTurnOrigin({ ...(botRole ? { botRole } : {}), workflow: Boolean(workflowInvocationId), ...(lineage ? { lineage } : {}) })
   }
 
   /** The parent's workspace path a `shared` child observes, or null when the parent has none. */

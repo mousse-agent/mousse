@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import type { InstallOwner } from '../../../shared/harness/status'
+import type { CredentialKind, InstallOwner } from '../../../shared/harness/status'
+import type { NativeToolTable } from '../../../shared/harness/tools'
 import type { HarnessCaps } from '../../../shared/harness/types'
 import type { StoredCliConfig } from '../../providers/cliConfig'
 import {
@@ -28,6 +29,22 @@ export const CLAUDE_CODE_CAPS: HarnessCaps = Object.freeze({
 })
 
 /**
+ * Claude Code's built-ins for each neutral tool (PR 6 §2). Every name exists in the pinned SDK's
+ * `ToolInputSchemas` (`toolNames` test); the other built-ins have no neutral name and are never
+ * granted.
+ */
+export const CLAUDE_NATIVE_TOOLS: NativeToolTable = Object.freeze({
+  read: ['Read'],
+  list: ['Glob'],
+  search: ['Glob', 'Grep'],
+  edit: ['Edit'],
+  write: ['Write'],
+  shell: ['Bash'],
+  web_fetch: ['WebFetch'],
+  web_search: ['WebSearch']
+})
+
+/**
  * The terminal sign-in command for an instance: its own home is passed as `CLAUDE_CONFIG_DIR`. On
  * Windows it runs through `cmd /c`, which works the same pasted into Command Prompt or PowerShell
  * and leaves the terminal's own environment unchanged.
@@ -48,12 +65,22 @@ export interface ClaudeCodeDriverOptions {
   createService?: (context: DriverContext, options: ConstructorParameters<typeof ClaudeSubscriptionProviderService>[2]) => ClaudeSubscriptionProviderService
 }
 
-function readAuth(service: ClaudeSubscriptionProviderService, status: Awaited<ReturnType<ClaudeSubscriptionProviderService['status']>>, signInCommand: string): AuthReading {
+/**
+ * What a signed-in Claude instance runs on, from its settings alone: an API key when it signs in
+ * with one, Claude's own subscription sign-in in a Mousse-owned home, and `unknown` in the user's
+ * own home (whatever Claude Code there uses; reading it would take another `claude auth status`).
+ */
+export function claudeCredential(context: Pick<DriverContext, 'config' | 'env'>): CredentialKind {
+  if (context.config.loginMethod === 'api_key') return 'api_key'
+  return context.env.home ? 'subscription' : 'unknown'
+}
+
+function readAuth(service: ClaudeSubscriptionProviderService, status: Awaited<ReturnType<ClaudeSubscriptionProviderService['status']>>, signInCommand: string, credential: CredentialKind): AuthReading {
   const methodLabel = 'Claude Code sign-in'
   switch (status.state) {
     case 'connected': {
       const account = service.account()
-      return { state: 'signed_in', methodLabel, ...(account?.label ? { account: { label: account.label } } : {}), ...(account?.subject ? { subject: account.subject } : {}) }
+      return { state: 'signed_in', methodLabel, credential, ...(account?.label ? { account: { label: account.label } } : {}), ...(account?.subject ? { subject: account.subject } : {}) }
     }
     case 'signed_out':
       return { state: 'signed_out', methodLabel, message: status.message, signInCommand }
@@ -91,6 +118,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     mcpImageResults: true,
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: true }),
     caps: () => CLAUDE_CODE_CAPS,
+    nativeToolNames: (neutral) => CLAUDE_NATIVE_TOOLS[neutral] ?? [],
     updateCommand: (owner: InstallOwner) => {
       if (owner === 'npm') return 'npm install -g @anthropic-ai/claude-code@latest'
       if (owner === 'brew') return 'brew upgrade claude-code'
@@ -136,7 +164,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
               setLaunch: async (patch) => void (await service.setCliConfig(patch))
             }
           : {}),
-        auth: async ({ force }) => readAuth(service, await service.status({ force }), signInCommand),
+        auth: async ({ force }) => readAuth(service, await service.status({ force }), signInCommand, claudeCredential(context)),
         // Read from the home and the variables Claude Code reads; `claude auth status` is the turn's own check.
         identity: async () => service.accountSubject(),
         refreshModels: async (cwd) => {
