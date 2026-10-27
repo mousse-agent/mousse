@@ -194,6 +194,19 @@ const NEGATIVE_TTL_MS = 30_000
 /** A client's `force` cannot reach the host more often than this for one entry. */
 const FORCE_MIN_AGE_MS = 5_000
 
+/** The daemon lives as long as the app, so every cache keeps at most this many entries, oldest first out. */
+const MAX_CACHE_ENTRIES = 500
+
+function remember<V>(map: Map<string, V>, key: string, value: V): void {
+  map.delete(key)
+  map.set(key, value)
+  while (map.size > MAX_CACHE_ENTRIES) {
+    const oldest = map.keys().next()
+    if (oldest.done) break
+    map.delete(oldest.value)
+  }
+}
+
 /** Failures worth remembering briefly: asking again at once only repeats them. */
 function isLastingFailure(message: string): boolean {
   const kind = classifyGhFailure(message)
@@ -240,7 +253,7 @@ class ReadCache<T> {
         if (this.flights.get(key) === started) {
           this.flights.delete(key)
           if (!options.cacheable || options.cacheable(value)) {
-            this.values.set(key, { at: this.clock(), ttlMs: options.shortLived?.(value) ? NEGATIVE_TTL_MS : this.ttlMs, result: { value } })
+            remember(this.values, key, { at: this.clock(), ttlMs: options.shortLived?.(value) ? NEGATIVE_TTL_MS : this.ttlMs, result: { value } })
           }
         }
         return value
@@ -248,7 +261,7 @@ class ReadCache<T> {
       (error: unknown) => {
         if (this.flights.get(key) === started) {
           this.flights.delete(key)
-          if (options.cacheError?.(error)) this.values.set(key, { at: this.clock(), ttlMs: NEGATIVE_TTL_MS, result: { error } })
+          if (options.cacheError?.(error)) remember(this.values, key, { at: this.clock(), ttlMs: NEGATIVE_TTL_MS, result: { error } })
         }
         throw error
       }
@@ -362,9 +375,10 @@ export class GitHubCodeHost implements CodeHost {
     if (title.length < 1 || title.length > 256) throw new Error('The title must be 1–256 characters.')
     const base = input.base.trim()
     if (!base) throw new Error('Choose a base branch.')
-    const head = input.head?.trim()
+    const head = input.head.trim()
+    if (!head) throw new Error('Name the branch the pull request is opened from.')
     // Git refuses branch names that start with a dash; never let one read as a gh flag.
-    if (base.startsWith('-') || (head !== undefined && (!head || head.startsWith('-')))) throw new Error('Unsupported branch name.')
+    if (base.startsWith('-') || head.startsWith('-')) throw new Error('Unsupported branch name.')
 
     const directory = await mkdtemp(join(tmpdir(), 'mousse-pr-'))
     const bodyFile = join(directory, 'body.md')
@@ -372,9 +386,9 @@ export class GitHubCodeHost implements CodeHost {
     let stderr: string
     try {
       await writeFile(bodyFile, input.body, 'utf8')
-      const args = ['pr', 'create', '--title', title, '--body-file', bodyFile, '--base', base]
+      // `--flag=value` keeps every value, whatever it starts with, from being read as another flag.
+      const args = ['pr', 'create', `--title=${title}`, `--body-file=${bodyFile}`, `--base=${base}`, `--head=${head}`]
       if (input.draft) args.push('--draft')
-      if (head !== undefined) args.push('--head', head)
       try {
         ({ stdout, stderr } = await this.runExecutable('gh', args, { cwd }))
       } catch (error) {
@@ -406,7 +420,7 @@ export class GitHubCodeHost implements CodeHost {
       url,
       state: 'open',
       isDraft: input.draft,
-      ...(head ? { headRefName: head } : {}),
+      headRefName: head,
       baseRefName: base,
       ...summarizeCheckRollup([])
     }
@@ -439,7 +453,7 @@ export class GitHubCodeHost implements CodeHost {
   }
 
   /** The remote that points at this folder's repository, else `origin`, else the only remote. */
-  private async remoteForRepository(cwd: string): Promise<string | null> {
+  async remoteForRepository(cwd: string): Promise<string | null> {
     try {
       const remotes = parseRemotes((await this.runExecutable('git', ['remote', '-v'], { cwd })).stdout)
       const identity = await this.repositoryIdentity(cwd).catch(() => null)
@@ -485,7 +499,7 @@ export class GitHubCodeHost implements CodeHost {
         return null
       }
       if (!name) return null
-      this.defaultBranches.set(cwd, name)
+      remember(this.defaultBranches, cwd, name)
     }
     return name
   }
