@@ -216,10 +216,15 @@ describe('production platform composition through framed MMS', () => {
       const client = await f.connect(f.alice.id)
       const provider = services.providerAuth.models.getProviders().find((entry) => services.providerAuth.models.getModels(entry.id).length > 0)!
       const model = services.providerAuth.models.getModels(provider.id)[0]
+      // A signed-in provider: the gateway catalogue lists the models of the instances that serve.
+      vi.spyOn(services.providerAuth, 'has').mockReturnValue(true)
+      vi.spyOn(services.providerAuth.credentials, 'listProviderIds').mockReturnValue([provider.id])
       const settings = defaultAgentSettings({ name: 'Catalog agent', slug: 'catalog-agent' })
       settings.primaryModel.ref = { providerId: provider.id, modelId: model.id }
       const created = await client.agents.create({ profileId: f.alice.id, settings, systemPrompt: 'System instructions' })
       expect((await client.agents.validate({ profileId: f.alice.id, id: created.id, expectedDraftHash: created.draftHash })).issues).toEqual([])
+      // The editor's check of where the draft runs: the model's instance holds it, so nothing to report.
+      expect((await client.agents.validate({ profileId: f.alice.id, id: created.id, expectedDraftHash: created.draftHash, runtimeOnly: true })).issues).toEqual([])
       const skill = await client.integrations.createSkill({ profileId: f.alice.id, scope: 'global', name: 'selected-skill', description: 'Selected skill', enable: true })
       const integrations = services.settings.get().integrations
       services.settings.set({ integrations: {

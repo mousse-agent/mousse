@@ -27,6 +27,8 @@ describe('Chats daemon composition', () => {
       const provider = services.providerAuth.models.getProviders().find((entry) => services.providerAuth.models.getModels(entry.id).length > 0)!
       const model = services.providerAuth.models.getModels(provider.id)[0]!
       vi.spyOn(services.providerAuth, 'has').mockReturnValue(true)
+      // Its stored sign-in: the gateway catalogue lists the models of signed-in instances.
+      vi.spyOn(services.providerAuth.credentials, 'listProviderIds').mockReturnValue([provider.id])
       vi.spyOn(services.providerAuth.models, 'getAuth').mockResolvedValue({ apiKey: 'fixture' } as never)
       const captured: Context[] = []
       const outputs = ['@forge review this', 'Reviewed.', 'I remember the review.']

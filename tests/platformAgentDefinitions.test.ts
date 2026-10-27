@@ -6,7 +6,6 @@ import { AgentDefinitionError } from '../src/shared/agents/errors'
 import { AGENT_PROMPT_MAX_BYTES, defaultAgentSettings } from '../src/shared/agents/defaults'
 import { computeSemanticHash, computeVisualHash } from '../src/shared/agents/hashes'
 import { assertSafeBundlePath } from '../src/shared/agents/pathSafety'
-import { collectUnsupportedCliSettings, getRuntimeCompatibility } from '../src/shared/agents/compatibility'
 import { resolveEffectiveGrants } from '../src/shared/agents/grants'
 import {
   AgentDefinitionRegistry,
@@ -313,7 +312,7 @@ describe('visual vs semantic hashes', () => {
   })
 })
 
-describe('model capability and CLI compatibility', () => {
+describe('model capability and stored runtime kinds', () => {
   it('fails resolve when the model is missing or an effort is unsupported', () => {
     const { registry, resolver } = createServices('profile-a', tempProfileRoot('model'))
     const missing = registry.createDraft({
@@ -357,27 +356,19 @@ describe('model capability and CLI compatibility', () => {
     expect(() => resolver.resolve({ definitionId: created.id })).toThrow(/Effort "high"/)
   })
 
-  it('rejects unsupported CLI settings instead of pretending they work', () => {
+  it('a stored runtime kind no longer picks a settings table: what runs it is checked by the gateway', () => {
     const { registry } = createServices('profile-a', tempProfileRoot('cli'))
-    expect(getRuntimeCompatibility('codex').native).toBe(false)
     const settings = {
       ...nativeSettings('codex-bot'),
       browser: { mode: 'native' as const, allowedDomains: ['example.com'], traceRetention: 'run' as const }
     }
-    expect(collectUnsupportedCliSettings('codex', settings)).toContain('/settings/browser')
-    expect(() =>
-      registry.createDraft({
-        runtimeKind: 'codex',
-        settings,
-        systemPrompt: 'CLI prompt'
-      })
-    ).toThrow(/does not support/)
-    const allowed = registry.createDraft({
-      runtimeKind: 'codex',
-      settings: nativeSettings('codex-ok'),
-      systemPrompt: 'CLI prompt'
-    })
-    expect(allowed.runtimeKind).toBe('codex')
+    // Saved, kind kept: the run's instance (the model ref's) decides, as for any definition.
+    const saved = registry.createDraft({ runtimeKind: 'codex', settings, systemPrompt: 'CLI prompt' })
+    expect(saved.runtimeKind).toBe('codex')
+    const published = registry.publish(saved.id, saved.draftHash)
+    const revision = registry.getRevision(saved.id, published.revision)
+    expect(revision.runtimeKind).toBe('codex')
+    expect(revision.settings.browser.mode).toBe('native')
 
     const switchable = registry.createDraft({
       settings: nativeSettings('switch-runtime'),

@@ -69,6 +69,9 @@ describe('production editor UI compound persistence', () => {
     let services = await main.getProfileServices(profileId)
     const provider = services.providerAuth.models.getProviders().find((entry) => services.providerAuth.models.getModels(entry.id).length > 0)!
     const model = services.providerAuth.models.getModels(provider.id)[0]
+    // A signed-in provider: publishing reads the model from the gateway catalogue of its instance.
+    vi.spyOn(services.providerAuth, 'has').mockReturnValue(true)
+    vi.spyOn(services.providerAuth.credentials, 'listProviderIds').mockReturnValue([provider.id])
     let protocol = new MmsProtocolServer({ mms: main, ownerToken })
     let endpoint = await protocol.start()
     const common = { home, ownerToken, profileId, url,
@@ -101,6 +104,8 @@ describe('production editor UI compound persistence', () => {
     services = await main.getProfileServices(profileId)
     const captured: Array<{ model: Model<any>; context: Context }> = []
     vi.spyOn(services.providerAuth, 'has').mockReturnValue(true)
+    // Its stored sign-in: the gateway catalogue lists the models of signed-in instances.
+    vi.spyOn(services.providerAuth.credentials, 'listProviderIds').mockReturnValue([provider.id])
     vi.spyOn(services.providerAuth.models, 'getAuth').mockResolvedValue({ apiKey: 'fixture' } as never)
     vi.spyOn(services.providerAuth.models, 'streamSimple').mockImplementation((selected, context) => {
       captured.push({ model: selected as Model<any>, context: structuredClone(context) })

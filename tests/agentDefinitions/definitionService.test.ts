@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentDefinitionRegistry } from '../../src/mms/agentDefinitions/AgentDefinitionRegistry'
 import { AgentResolver } from '../../src/mms/agentDefinitions/AgentResolver'
+import { definitionCheckIssues } from '../../src/mms/agentDefinitions/definitionRuntime'
 import { StaticAgentIntegrationLookup, StaticAgentModelLookup } from '../../src/mms/agentDefinitions/lookups'
 import { AgentRegistry } from '../../src/mms/agents/AgentRegistry'
 import { ProjectManager } from '../../src/mms/data/ProjectManager'
@@ -130,6 +131,29 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     expect(defs.turns).toEqual([])
     expect(engine.listRuns(thread.id)).toEqual([])
     expect(revisionBytes(stored.revision)).toEqual(before)
+  })
+
+  it("the editor's check reports the gateway's refusal before anything runs: a primary blocks, a fallback is skipped", async () => {
+    const issues = (instanceId: string, mutate?: (settings: ReturnType<typeof defaultAgentSettings>) => void, runtimeKind: AgentRuntimeKind = 'claude-code') => {
+      const stored = publish(runtimeKind, instanceId, mutate)
+      const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })
+      return definitionCheckIssues(orch, { threadId: '', definition: { id: stored.id, revision: stored.revision }, settings: resolved.settings, grants: resolved.grants })
+    }
+    const refused = issues(APPROVAL_ONLY_INSTANCE)
+    expect(refused.map((issue) => issue.pointer)).toEqual(['/settings/tools/mode', '/settings/workspace/mode'])
+    expect(refused[0]).toMatchObject({ code: 'SETTINGS_UNSUPPORTED', details: { code: 'policy_unenforceable', missing: ['toolControl'] } })
+    expect(refused[0]!.message).toMatch(/can't enforce this agent's workspace and tool limits/)
+    expect(refused[0]!.details).not.toHaveProperty('blocking')
+    // The same kind on a runtime that holds definitions: nothing to report.
+    expect(issues(`pi:${PROVIDER}`)).toEqual([])
+    // A fallback that cannot hold it is reported, without blocking: the run skips it.
+    const fallback = issues(`pi:${PROVIDER}`, (settings) => {
+      settings.fallbacks = { ...settings.fallbacks, enabled: true, allowHigherCost: true, models: [{ providerId: PROVIDER, modelId: MODEL, instanceId: APPROVAL_ONLY_INSTANCE }] }
+    }, 'mousse')
+    expect(fallback.length).toBeGreaterThan(0)
+    expect(fallback.every((issue) => issue.details?.blocking === false && issue.details?.at === '/settings/fallbacks/models/0')).toBe(true)
+    // Checking ran nothing.
+    expect(defs.turns).toEqual([])
   })
 
   it('runs the same stored kind on a runtime that holds definitions, with its own session, instructions, grants and limits', async () => {

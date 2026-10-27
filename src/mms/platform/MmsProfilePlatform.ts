@@ -15,6 +15,7 @@ import { WorkflowRegistry } from '../workflows/registry/WorkflowRegistry'
 import { WorkflowInvocationResolver } from '../workflows/commands/WorkflowInvocationResolver'
 import type { MmsProfileServices } from '../MmsProfileServices'
 import { SharedAgentModelLookup } from './SharedAgentModelLookup'
+import { definitionCheckIssues } from '../agentDefinitions/definitionRuntime'
 import { MmsWorkflowCoordinator } from './MmsWorkflowCoordinator'
 import { MmsWorkflowChatBridge } from './MmsWorkflowChatBridge'
 import { MmsWorkflowIntegrations } from './MmsWorkflowIntegrations'
@@ -219,7 +220,8 @@ export class MmsProfilePlatform {
     let integrationLookup = new StaticAgentIntegrationLookup()
     // Ordinary editor CRUD never starts a configured MCP executable. Explicit
     // validate/publish/run requests resolve a fresh, immutable grant snapshot.
-    if (typeof params.id === 'string' && ['agentDefinitions.validate', 'agentDefinitions.publish', 'agentDefinitions.tryRun'].includes(method)) {
+    // The editor's runtime check (`runtimeOnly`) starts nothing either.
+    if (typeof params.id === 'string' && ['agentDefinitions.validate', 'agentDefinitions.publish', 'agentDefinitions.tryRun'].includes(method) && params.runtimeOnly !== true) {
       const record = this.agentDefinitions.get(params.id)
       const runtimeKind = typeof params.revision === 'string'
         ? this.agentDefinitions.getRevision(record.id, params.revision).runtimeKind
@@ -231,6 +233,13 @@ export class MmsProfilePlatform {
       registry: this.agentDefinitions,
       resolver: new AgentResolver({ registry: this.agentDefinitions, modelLookup: this.models, integrationLookup }),
       integrationLookup,
+      checkRuntime: (input) => definitionCheckIssues(this.services.orchestrator, {
+        // No thread yet: the check runs at device scope, as a run on a new execution thread would.
+        threadId: '',
+        definition: { id: input.definitionId, revision: input.revision },
+        settings: input.settings,
+        grants: input.grants
+      }),
       tryRun: (input) => this.agentRuns.tryRun(input),
       tryRunPending: (input) => this.agentRuns.pending(input),
       tryRunAnswer: (input) => this.agentRuns.answer(input)
