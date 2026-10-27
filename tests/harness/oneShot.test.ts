@@ -5,12 +5,16 @@
  * (`oneShot` absent) are refused with their typed errors.
  */
 import { mkdtempSync, rmSync } from 'node:fs'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createAssistantMessageEventStream, type AssistantMessage, type AssistantMessageEventStream, type Context, type Model } from '@earendil-works/pi-ai'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ONE_SHOT_INACTIVITY_MS, type Harness, type OneShotRequest } from '../../src/mms/harness/gateway'
 import { piLegacyDriver } from '../../src/mms/harness/drivers/piLegacy'
+import { runPiOneShot } from '../../src/mms/harness/drivers/pi/oneShot'
+import { streamSimple as bedrockStreamSimple } from '@earendil-works/pi-ai/api/bedrock-converse-stream'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import { CODEX_CAPABILITIES } from '../../src/mms/run/adapters/codex/CodexAdapter'
 import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
@@ -201,4 +205,40 @@ describe('gateway.oneShot refusals', () => {
     await expect(s.harness.oneShot(s.request({ selection: { instanceId: 'codex', llmProvider: 'codex', model: 'gpt-5' } }))).rejects.toMatchObject({ code: 'unsupported' })
     expect(s.pi.requests).toHaveLength(0)
   })
+})
+
+describe('Bedrock one-shots', () => {
+  it('make one HTTP attempt even when the environment asks the AWS SDK for three', async () => {
+    let requests = 0
+    const server = createServer((_request, response) => {
+      requests += 1
+      response.writeHead(503, { 'content-type': 'application/json', 'x-amzn-errortype': 'ServiceUnavailableException' })
+      response.end(JSON.stringify({ message: 'offline recorder' }))
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as AddressInfo).port
+    vi.stubEnv('AWS_MAX_ATTEMPTS', '3')
+    vi.stubEnv('AWS_RETRY_MODE', 'adaptive')
+    for (const name of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']) vi.stubEnv(name, '')
+    const model = { id: 'anthropic.claude-3-haiku-20240307-v1:0', name: 'Recorder', provider: 'amazon-bedrock', api: 'bedrock-converse-stream', baseUrl: `http://127.0.0.1:${port}`, reasoning: false, input: ['text'], cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200_000, maxTokens: 100 } as unknown as Model<'bedrock-converse-stream'>
+    const models = {
+      getModel: () => model,
+      getModels: () => [model],
+      getAuth: async () => ({ apiKey: 'fake' }),
+      stream: () => { throw new Error('unused') },
+      // The real pinned Bedrock transport, pointed at the recorder with no AWS sign-in.
+      streamSimple: (target: Model<'bedrock-converse-stream'>, context: Context, options: Record<string, unknown>) =>
+        bedrockStreamSimple(target, context, { ...options, env: { AWS_BEDROCK_SKIP_AUTH: '1', AWS_BEDROCK_FORCE_HTTP1: '1', AWS_REGION: 'us-east-1' } } as never)
+    }
+    try {
+      await expect(runPiOneShot(models as never, 'amazon-bedrock', { model: model.id, system: 'Name chats.', prompt: 'hi', onActivity: () => {} }, AbortSignal.timeout(20_000))).rejects.toThrow()
+      expect(requests).toBe(1)
+      expect(process.env.AWS_MAX_ATTEMPTS).toBe('1')
+      expect(process.env.AWS_RETRY_MODE).toBe('standard')
+    } finally {
+      vi.unstubAllEnvs()
+      server.closeAllConnections()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  }, 30_000)
 })
