@@ -252,14 +252,7 @@ export class BridgeProfileService {
       }
     })
     routes.register()
-    // A device that is blocked has nothing held for it: its paged results and staged values go with it.
-    this.disposers.add(
-      rt.policy.onChange((event) => {
-        if (!event.after.blocked || event.before.blocked) return
-        routes.pages.dropCaller(event.node)
-        staging.dropCaller(event.node)
-      })
-    )
+    this.disposers.add(() => routes.close())
     for (const method of remoteListMethods({
       openLists: () => {
         const descriptor = this.threads.activate(LISTS_STREAM_THREAD_ID)

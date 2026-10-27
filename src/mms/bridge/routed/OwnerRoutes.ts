@@ -69,7 +69,7 @@ export interface OwnerRoutesOptions {
   services: MmsProfileServices
   rpc: RpcDispatcher
   /** What this computer lets each device do here. */
-  policy: Pick<SqliteNodePolicy, 'get'>
+  policy: Pick<SqliteNodePolicy, 'get' | 'onChange'>
   audit: Pick<SqliteBridgeAudit, 'record' | 'countRead'>
   /** Keeps a call owned by the profile, so it drains when the profile closes. */
   track<T>(work: Promise<T>): Promise<T>
@@ -234,7 +234,20 @@ export class OwnerRoutes {
     for (const [method, row] of Object.entries(ROUTED_METHODS))
       this.options.rpc.register(this.methodFor(method, row))
     this.registerTransport()
+    // A device that is blocked has nothing held for it: the results waiting to be fetched and the
+    // values it staged go with it.
+    this.stopWatching = this.options.policy.onChange((event) => {
+      if (!event.after.blocked || event.before.blocked) return
+      this.pages.dropCaller(event.node)
+      this.options.staging?.dropCaller(event.node)
+    })
   }
+
+  close(): void {
+    this.stopWatching?.()
+    this.stopWatching = undefined
+  }
+  private stopWatching?: () => void
 
   /**
    * The methods that carry the API itself. They hold to the same checks as a row (the grant, the

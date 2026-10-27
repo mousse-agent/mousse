@@ -157,6 +157,32 @@ describe('routed.stage', () => {
     expect(f.targetBlobs.isReferenced(ref.blob, ref.stream)).toBe(false)
   }, 120_000)
 
+  it('drops what a device has staged or is waiting to fetch when it is blocked here', async () => {
+    const { f, stage, staging, thread, raw, routes, policy } = await routedOwner({ staging: {} })
+    stageId(await stage('staged before the block'))
+    const t = thread()
+    f.mms.orchestrator.getOrCreateSession(t.id).messages = [
+      {
+        id: 'm-0',
+        role: 'user',
+        content: 'z'.repeat(200 * KIB),
+        timestamp: new Date().toISOString()
+      }
+    ] as never
+    expect(await raw('thread.snapshot', { threadId: t.id })).toMatchObject({
+      paged: expect.any(Object)
+    })
+    expect(staging!.count(f.callerNode)).toBe(1)
+    expect(routes.pages.heldCount(f.callerNode)).toBe(1)
+
+    policy.set(f.callerNode, { blocked: true })
+    expect(staging!.count(f.callerNode)).toBe(0)
+    expect(routes.pages.heldCount(f.callerNode)).toBe(0)
+    // Closing the routes ends the watch: a later block changes nothing here.
+    routes.close()
+    policy.set(f.callerNode, { blocked: false })
+  }, 120_000)
+
   it("never gives one computer another's value, and drops what a computer staged when it goes", async () => {
     const { f, stage, staging, call, thread } = await routedOwner({ staging: {} })
     const mine = stageId(await stage('mine'))
