@@ -109,7 +109,15 @@ export const PI_AMBIENT_ENV: Readonly<Record<string, readonly string[]>> = Objec
   ])
 })
 
-/** A Pi provider that signs in with the environment's cloud credentials instead of a key. */
+/**
+ * What pi-ai's `getEnvApiKey` returns for Bedrock and Vertex when the environment's cloud
+ * credentials (not a key) sign them in, and what Mousse then stores as their credential. Any other
+ * stored value is a real key (a Vertex API key saved by hand, or found in `GOOGLE_CLOUD_API_KEY`),
+ * which Pi uses as the key.
+ */
+export const PI_AMBIENT_MARKER = '<authenticated>'
+
+/** A Pi provider that can sign in with the environment's cloud credentials instead of a key. */
 export function piAmbientProvider(provider: string): boolean {
   return Object.hasOwn(PI_AMBIENT_ENV, provider)
 }

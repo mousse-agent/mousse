@@ -14,6 +14,7 @@ import type {
   ProviderUsage
 } from '../../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../../shared/settings'
+import type { CredentialKind } from '../../../shared/harness/status'
 import type { ChatImageAttachment } from '../../../shared/types'
 import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
 import { AppError } from '../../../shared/errors'
@@ -212,7 +213,28 @@ const CLAUDE_AUTH_METHOD_LABELS: Record<string, string> = {
  * The signed-in account: a display label (plan or sign-in method) and `subject`, a stable id of
  * the account or credential (`claudeAccountSubject`), never shown.
  */
-export type ClaudeAccount = { label?: string; subject?: string }
+export type ClaudeAccount = { label?: string; subject?: string; credential?: CredentialKind }
+/** Claude Code's cloud routes that sign in with the environment's AWS or Google credentials. */
+const CLAUDE_AMBIENT_PROVIDERS: ReadonlySet<string> = new Set(['bedrock', 'vertex', 'anthropicAws', 'anthropicGoogleCloud'])
+/**
+ * What a signed-in Claude Code runs on, from its own `claude auth status`: a claude.ai sign-in or
+ * its OAuth token is the subscription, an API key or Console sign-in is a key, Bedrock and Vertex
+ * run on the environment's cloud credentials. Anything else (another provider, a gateway, a method
+ * this version does not name) is `unknown`.
+ */
+export function claudeCredentialKind(status: { authMethod?: string; apiProvider?: string }): CredentialKind {
+  if (status.apiProvider && status.apiProvider !== 'firstParty') return CLAUDE_AMBIENT_PROVIDERS.has(status.apiProvider) ? 'ambient' : 'unknown'
+  switch (status.authMethod) {
+    case 'claude.ai':
+    case 'oauth_token':
+      return 'subscription'
+    case 'api_key':
+    case 'console':
+      return 'api_key'
+    default:
+      return 'unknown'
+  }
+}
 type AuthProbe =
   | { kind: 'signed_in'; account?: ClaudeAccount }
   | { kind: 'signed_out'; message: string }
@@ -579,7 +601,7 @@ export class ClaudeSubscriptionProviderService {
       if (typeof stdout !== 'string' || !stdout.trim()) return unreadable
       output = stdout
     }
-    let status: { loggedIn?: unknown; authMethod?: unknown; subscriptionType?: unknown }
+    let status: { loggedIn?: unknown; authMethod?: unknown; apiProvider?: unknown; subscriptionType?: unknown }
     try {
       status = JSON.parse(output) as typeof status
     } catch {
@@ -596,7 +618,9 @@ export class ClaudeSubscriptionProviderService {
     const plan = text(status.subscriptionType)
     const label = plan ? `Claude ${plan[0].toUpperCase()}${plan.slice(1)}` : method && (CLAUDE_AUTH_METHOD_LABELS[method] ?? method)
     const subject = claudeAccountSubject(env)
-    return { kind: 'signed_in', account: { ...(label ? { label } : {}), ...(subject ? { subject } : {}) } }
+    const apiProvider = text(status.apiProvider)
+    const credential = claudeCredentialKind({ ...(method ? { authMethod: method } : {}), ...(apiProvider ? { apiProvider } : {}) })
+    return { kind: 'signed_in', account: { ...(label ? { label } : {}), ...(subject ? { subject } : {}), credential } }
   }
   /** The account of the last live sign-in check, when it was signed in and named one. */
   account(): ClaudeAccount | undefined {

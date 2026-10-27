@@ -1,6 +1,6 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import type { CredentialKind, InstallOwner } from '../../../shared/harness/status'
+import type { InstallOwner } from '../../../shared/harness/status'
 import type { NativeToolTable } from '../../../shared/harness/tools'
 import type { HarnessCaps } from '../../../shared/harness/types'
 import type { StoredCliConfig } from '../../providers/cliConfig'
@@ -65,22 +65,13 @@ export interface ClaudeCodeDriverOptions {
   createService?: (context: DriverContext, options: ConstructorParameters<typeof ClaudeSubscriptionProviderService>[2]) => ClaudeSubscriptionProviderService
 }
 
-/**
- * What a signed-in Claude instance runs on, from its settings alone: an API key when it signs in
- * with one, Claude's own subscription sign-in in a Mousse-owned home, and `unknown` in the user's
- * own home (whatever Claude Code there uses; reading it would take another `claude auth status`).
- */
-export function claudeCredential(context: Pick<DriverContext, 'config' | 'env'>): CredentialKind {
-  if (context.config.loginMethod === 'api_key') return 'api_key'
-  return context.env.home ? 'subscription' : 'unknown'
-}
-
-function readAuth(service: ClaudeSubscriptionProviderService, status: Awaited<ReturnType<ClaudeSubscriptionProviderService['status']>>, signInCommand: string, credential: CredentialKind): AuthReading {
+function readAuth(service: ClaudeSubscriptionProviderService, status: Awaited<ReturnType<ClaudeSubscriptionProviderService['status']>>, signInCommand: string): AuthReading {
   const methodLabel = 'Claude Code sign-in'
   switch (status.state) {
     case 'connected': {
       const account = service.account()
-      return { state: 'signed_in', methodLabel, credential, ...(account?.label ? { account: { label: account.label } } : {}), ...(account?.subject ? { subject: account.subject } : {}) }
+      // What it runs on, as `claude auth status` said in this same check: never another one.
+      return { state: 'signed_in', methodLabel, credential: account?.credential ?? 'unknown', ...(account?.label ? { account: { label: account.label } } : {}), ...(account?.subject ? { subject: account.subject } : {}) }
     }
     case 'signed_out':
       return { state: 'signed_out', methodLabel, message: status.message, signInCommand }
@@ -164,7 +155,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
               setLaunch: async (patch) => void (await service.setCliConfig(patch))
             }
           : {}),
-        auth: async ({ force }) => readAuth(service, await service.status({ force }), signInCommand, claudeCredential(context)),
+        auth: async ({ force }) => readAuth(service, await service.status({ force }), signInCommand),
         // Read from the home and the variables Claude Code reads; `claude auth status` is the turn's own check.
         identity: async () => service.accountSubject(),
         refreshModels: async (cwd) => {
