@@ -179,7 +179,7 @@ export class ToolRegistry {
   register(tool: MousseTool): this {
     if (!tool || typeof tool.name !== 'string' || !tool.name) throw new Error('A Mousse tool needs a name')
     if (!ACCESS_CLASSES.has(tool.access as string))
-      throw new Error(`Mousse tool ${tool.name} has no access class (reads | actsAsCaller | writesThreads | startsThreads | editsWorkspace)`)
+      throw new Error(`Mousse tool ${tool.name} has no access class (reads | readsOthers | actsAsCaller | writesThreads | startsThreads | editsWorkspace | managesOthers)`)
     if (!TOOL_CLASSES.has(tool.class as string)) throw new Error(`Mousse tool ${tool.name} has no class (read | mutation | delegation)`)
     if (typeof tool.handler !== 'function') throw new Error(`Mousse tool ${tool.name} has no handler`)
     const uncovered = uncoveredThreadArgs(tool)

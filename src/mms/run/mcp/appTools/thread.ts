@@ -402,7 +402,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
       // it asks unless the run's permission mode allows edits.
       access: 'editsWorkspace',
       permissionKey: PERMISSION_KEYS.mousseMergeBack,
-      threadArgChecked: 'the handler accepts the caller's own fork only',
+      threadArgChecked: "the handler accepts the caller's own fork only",
       class: 'mutation',
       offered: () => false,
       handler: async (args, ctx) => {

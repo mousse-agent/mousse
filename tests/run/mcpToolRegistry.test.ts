@@ -889,6 +889,46 @@ describe('agent access level (SPEC §15.1)', () => {
     expect(ledger.start).toHaveBeenCalledTimes(2)
   })
 
+  it('a definition run is held to the access level before its approval is asked, so a refused call never prompts a person', async () => {
+    fx = delegationFixture()
+    const run = await fx.runningRun('parent')
+    await fx.runningRun('stranger')
+    const state = { profile: profile({ level: 'manage' }) }
+    const asked: string[] = []
+    const policy = {
+      profileId: 'default', threadId: 'parent', runId: 'r', definitionId: 'def-1', definitionRevision: 'rev-1', source: 'editor',
+      workspace: { mode: 'thread_worktree', canonicalRoots: [process.cwd()] },
+      script: { enabled: false, allowFilesystem: false, allowNetwork: false, executionMode: 'workspace', interpreters: [] },
+      approval: { askUser: true, policy: 'always', unattendedBehavior: 'pause' },
+      memoryScope: 'off', includeCurrentThread: false, includeProjectInstructions: false, attachmentPolicy: 'none',
+      fallbacks: { enabled: false, retryOn: [], allowHigherCost: false, retryCount: 0, backoffMs: 0 },
+      fallbackModels: []
+    }
+    const definition = {
+      policy,
+      grants: { skills: [], mcpTools: [], builtinTools: ['thread_read', 'thread_list'].map((id) => ({ id, source: 'definition' })), denied: [] },
+      approve: async (request: { argumentDigest: string }) => (asked.push('asked'), { status: 'approved', digest: request.argumentDigest })
+    }
+    const fake = fakeAppToolHost({ agentAccess: () => state.profile, threadMeta: (id) => thread(id), listThreads: () => [thread('stranger')], listProjects: () => [] })
+    const { registry, turns, request } = appToolRegistry(fx.engine, fake.host)
+    turns.register(appTurn({ threadId: 'parent', runId: run.runId, definition: definition as never }))
+    const as = (accessLevel: AgentAccessLevel) => {
+      const built = request({ threadId: 'parent', runId: run.runId })
+      return { ...built, credential: { ...built.credential, accessLevel } }
+    }
+    // A lineage grant: refused by the access check, which comes before the definition's approval.
+    for (const [name, args] of [['thread_read', { threadId: 'stranger' }], ['thread_list', {}]] as const)
+      await expect(registry.call(name, { ...args }, as('lineage'))).rejects.toMatchObject({ code: 'mousse_scope_denied' })
+    expect(asked).toEqual([])
+    // A manage grant passes the access check and then meets the definition's own approval, as before.
+    expect((await registry.call('thread_read', { threadId: 'stranger' }, as('manage'))).isError).toBeFalsy()
+    expect(asked).toEqual(['asked'])
+    // Lowering the setting refuses the same grant again without asking.
+    state.profile = profile({ level: 'lineage' })
+    await expect(registry.call('thread_read', { threadId: 'stranger' }, as('manage'))).rejects.toMatchObject({ code: 'mousse_scope_denied' })
+    expect(asked).toEqual(['asked'])
+  })
+
   it('a tool whose host method is absent answers "not available in this host"', async () => {
     const { call } = await world({ level: 'manage' }, { listThreads: undefined, searchThreads: undefined, threadMessages: undefined })
     expect(await call('parent', 'manage', 'thread_list')).toMatchObject({ isError: true, text: expect.stringContaining('not available in this host') })
