@@ -1,0 +1,67 @@
+/* Threads that run on another computer: the main-area view, its notices and the sidebar rows. */
+
+.remote-thread-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 4px 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.remote-thread-unsupported {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 6px 4px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(var(--accent-pale-rgb), 0.1);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.remote-thread-unsupported strong {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+/* Covers the app panel while a remote thread is shown; the terminals underneath keep running. */
+.main-area:has(> .remote-thread-unsupported-panel) {
+  position: relative;
+}
+
+.remote-thread-unsupported-panel {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 24px;
+  background: var(--surface-strong, var(--bg-primary));
+  color: var(--text-secondary);
+  font-size: 13px;
+  text-align: center;
+}
+
+.remote-thread-unsupported-panel strong {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.remote-threads-heading {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.remote-threads-heading span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

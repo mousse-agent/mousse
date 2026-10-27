@@ -13,6 +13,7 @@ import { useAppStore } from '../stores/appStore'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useChatsStore } from '../stores/chatsStore'
 import { createAndSelectThread, selectThread } from '../lib/threadActions'
+import { RemoteAttachedThreads } from './RemoteAttachedThreads'
 import { ChatsSidebar } from './chats/ChatsSidebar'
 import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 
@@ -1241,6 +1242,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             {orphanThreads.length === 0 ? <div className="threads-sidebar-empty">No recent chats</div> : orphanThreads.map((thread) => renderThreadRow(thread, true))}
           </div>}
         </section>
+
+      <RemoteAttachedThreads />
 
       <div
 
