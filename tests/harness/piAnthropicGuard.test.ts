@@ -139,3 +139,33 @@ describe('guardProvider', () => {
     expect(sent).toHaveLength(1)
   })
 })
+
+describe('a reserved request’s stream', () => {
+  it('passes on exactly one final event, settled once, even when the inner stream throws after finishing', async () => {
+    const model = { id: 'm', name: 'M', api: 'openai-completions', provider: 'p', baseUrl: 'http://127.0.0.1:9/v1', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000, maxTokens: 100 } as unknown as Model<Api>
+    const done = { role: 'assistant', content: [{ type: 'text', text: 'hi' }], api: model.api, provider: 'p', model: 'm', usage: { input: 3, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 5, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: 'stop', timestamp: 1 }
+    const settled: unknown[] = []
+    const gate: RequestGate = {
+      request: async () => ({ id: 'r', cap: 50, maxTokens: 50, thinkingBudget: 0 }),
+      settle: async (_grant, outcome) => void settled.push(outcome)
+    }
+    const streamSimple = (_model: Model<Api>, _input: unknown, options?: { onPayload?: (params: unknown, model: Model<Api>) => unknown }) => {
+      const broken = {
+        async *[Symbol.asyncIterator]() {
+          await options?.onPayload?.({ max_completion_tokens: 50 }, model)
+          yield { type: 'done', reason: 'stop', message: done }
+          throw new Error('late failure')
+        },
+        result: async () => done
+      }
+      return broken as unknown as AssistantMessageEventStream
+    }
+    const guarded = guardStreams({ streamSimple } as never, undefined, undefined, gate) as unknown as { streamSimple(model: Model<Api>, input: unknown, options: Record<string, unknown>): AssistantMessageEventStream }
+    const events: string[] = []
+    const stream = guarded.streamSimple(model, { messages: [] }, { apiKey: 'k' })
+    for await (const event of stream) events.push(event.type)
+    expect(events).toEqual(['done'])
+    expect(await stream.result()).toBe(done)
+    expect(settled).toEqual([{ kind: 'used', input: 3, output: 2, usd: 0 }])
+  })
+})

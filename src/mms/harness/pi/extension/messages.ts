@@ -20,8 +20,15 @@ export const REQUEST_REFUSED = 'mousse_request_refused'
 /** `/pi/request` could not be reached or answered badly (never the transport's own text). */
 export const GATE_UNAVAILABLE = 'mousse_gate_unavailable'
 
+/**
+ * The final payload of a reserved request carried no output cap, or one above its reservation
+ * (thrown from `onPayload`, so nothing is sent). Sizing makes this a backstop: it means the wire-cap
+ * mirror drifted from pi-ai, or a hook raised the cap.
+ */
+export const SPEND_CAP_MISMATCH = 'mousse_spend_cap_mismatch'
+
 /** Every text Mousse raises on the request path; a unit test checks pi-ai does not retry any. */
-export const REQUEST_PATH_ERRORS: readonly string[] = Object.freeze([ANTHROPIC_OAUTH_REFUSED, CREDENTIAL_UNAVAILABLE, BUDGET_EXHAUSTED, REQUEST_REFUSED, GATE_UNAVAILABLE])
+export const REQUEST_PATH_ERRORS: readonly string[] = Object.freeze([ANTHROPIC_OAUTH_REFUSED, CREDENTIAL_UNAVAILABLE, BUDGET_EXHAUSTED, REQUEST_REFUSED, GATE_UNAVAILABLE, SPEND_CAP_MISMATCH])
 
 /** Pi's sign-in flows are Mousse's: a provider's `login` rejects with this. */
 export const LOGIN_REFUSED = "mousse_login_refused: sign in from Mousse's Providers page"

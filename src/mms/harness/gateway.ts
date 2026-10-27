@@ -56,7 +56,7 @@ import { LatestVersionCache } from './latest'
 import { RuntimeFactsStore } from './facts'
 import { questionsPrompter, refusingPrompter } from './acp/permissions'
 import { checkPolicy, hasSpendLimit, purposeAllowed, toolControlLevel } from './policy'
-import { countLimitsOf, RunCounterBook, type CounterScope } from './budget'
+import { budgetLimitsOf, RunCounterBook, type CounterScope, type SpendScope } from './budget'
 import type { DefinitionAuthority } from '../agentDefinitions/definitionGate'
 import { HarnessScopeStore } from './scope'
 import { sharedShellPath, type ShellPathResult } from './shellPath'
@@ -353,6 +353,12 @@ export interface TurnSpec {
    * limits are always the binding's policy.
    */
   counters?: CounterScope
+  /**
+   * Where the run's token and USD spend is reserved and settled, for a caller that shares one
+   * allowance across runs (PR 6). Default: the run's own ledger, shared by its attempts. The limits
+   * are always the binding's policy.
+   */
+  spend?: SpendScope
 }
 
 /** What the `turn.start` executor knows of a turn's app tools, for its bridge (PR 2 §2). */
@@ -1030,10 +1036,11 @@ export class Harness implements HarnessGateway {
     const result = (async () => {
       let outcome: 'ok' | 'aborted' | 'failed' = 'failed'
       let minted: ReturnType<Harness['mintBridge']>
-      // A count limit travels as the run's budget; only a `hard` runtime passes admission with one.
-      // The record is taken before admission, so a first attempt that is refused still leaves one.
-      const limits = countLimitsOf(spec.binding.policy)
-      const counted = limits ? this.runCounters.acquire(spec.input.runId, limits, spec.counters, { laterAttempt: (spec.attemptOrdinal ?? 1) > 1 }) : undefined
+      // Count and spend limits travel as the run's budget; only a `hard` (and, for spend, `reserved`)
+      // runtime passes admission with them. The record is taken before admission, so a first attempt
+      // that is refused still leaves one.
+      const limits = budgetLimitsOf(spec.binding.policy)
+      const counted = limits ? this.runCounters.acquire(spec.input.runId, limits, spec.counters, { laterAttempt: (spec.attemptOrdinal ?? 1) > 1, ...(spec.spend ? { spend: spec.spend } : {}) }) : undefined
       let signal = spec.input.signal
       try {
         await this.admitTurn(record, spec, entry)

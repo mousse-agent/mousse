@@ -13,8 +13,12 @@ import { piInstanceRuntime, type PiCredentials } from './legacy'
  *   whole execution profile: Mousse sees and can refuse every call, but does not run the tools.
  * - `budgets: 'hard'`: every model request is charged through the guarded request wrapper
  *   (`/pi/request`) and every tool call at the gate, and the next one is refused before it starts
- *   once a turn or tool-call limit is reached. `spendLimits: 'unsupported'` until token and cost
- *   reservations land (PR 4 4b3).
+ *   once a turn or tool-call limit is reached.
+ * - `spendLimits: 'reserved'`: under a token or USD limit every request is reserved first at its
+ *   final wire cap, sized to fit what is left, and its final payload is checked before it is sent
+ *   (PR 4 §5b). A model whose API does not always send the cap, or an unpriced model under a USD
+ *   limit, or an effort whose smallest request cannot fit the limit, is refused at admission
+ *   (`spendModel`).
  * - `fork: 'portable'` until the native fork is wired (a fork hands the history over).
  */
 export const PI_RPC_CAPS: HarnessCaps = Object.freeze({
@@ -31,7 +35,7 @@ export const PI_RPC_CAPS: HarnessCaps = Object.freeze({
   contextUsage: 'reported',
   toolControl: 'approval_only',
   budgets: 'hard',
-  spendLimits: 'unsupported'
+  spendLimits: 'reserved'
 })
 
 /** What the RPC engine needs from the profile. */
@@ -78,6 +82,7 @@ export function createRpcRuntime(context: DriverContext, providerId: string, lab
   const base = piInstanceRuntime(context.instanceId, providerId, credentials, engine)
   return {
     ...base,
+    spendModel: (model) => engine.spendModel(model),
     forgetConversation: (threadId) => engine.forgetConversation(threadId),
     terminate: (ref) => engine.terminate(ref),
     stop: () => engine.stop()

@@ -97,10 +97,41 @@ export interface PiRequestRequest {
   /** The attempt token of the turn the extension last fetched ('' before the first); informational. */
   attemptToken: string
   kind: 'request'
+  /**
+   * What the request would spend (every `streamSimple` request; Mousse reserves it when the live
+   * turn has token or USD limits). Prices and cap support are Mousse's own, from its catalogue.
+   */
+  spend?: PiSpendRequest
 }
 
-/** `reason`: one of the fixed request-path texts (`messages.ts`), never a number. */
-export type PiRequestResponse = { ok: true } | { ok: false; reason: string }
+/** One request's reservation ask (`harness/pi/reservation.ts` computes every number). */
+export interface PiSpendRequest {
+  /** Upper bound of the input tokens. */
+  inputBound: number | null
+  /** The output cap pi-ai would send as Pi asked for the request; null when it would send none. */
+  wireCap: number | null
+  /** The thinking budget pi-ai adds to the cap (0 when none). */
+  thinkingBudget: number
+  /** The request's model: it must be the turn's. */
+  model: { provider: string; id: string; api: string }
+}
+
+/**
+ * `reason`: one of the fixed request-path texts (`messages.ts`), never a number. `reservation`: the
+ * request is reserved, and must go with exactly `cap` as its wire cap. `spendRequired`: the live
+ * turn reserves and the request came without `spend`; nothing was charged, and it may ask again
+ * with it.
+ */
+export type PiRequestResponse = { ok: true; reservation?: { id: string; cap: number } } | { ok: false; reason: string; spendRequired?: true }
+
+/**
+ * `/pi/settle`, once a reserved request ended: `released` when nothing was sent (refused before
+ * the HTTP call), `used` with its usage (`partial` when it failed or stopped after being sent).
+ */
+export interface PiSettleRequest {
+  reservationId: string
+  outcome: { kind: 'released' } | { kind: 'used'; input: number; output: number; usd: number; partial?: boolean }
+}
 
 /** `/pi/quiesce`: a delegation tool waits here before it runs (no parent mutation authorized or running). */
 export interface PiQuiesceRequest {
