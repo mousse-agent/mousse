@@ -20,7 +20,13 @@ import type {
   WireMessage
 } from '../../../shared/net'
 import { isBlobId, isId } from '../../../shared/net/ids'
-import { NetError, NET_ERRORS, type NetErrorCode } from '../../../shared/net/errors'
+import {
+  NetError,
+  NET_ERRORS,
+  forbiddenReason,
+  isForbiddenReason,
+  type NetErrorCode
+} from '../../../shared/net/errors'
 import { laneFor } from '../../../shared/net/wire'
 import { SESSION_CAPABILITIES, type SessionCapability } from '../../../shared/net/capabilities'
 import {
@@ -161,12 +167,36 @@ const equalKey = (a: string, b: string): boolean => {
     y = Buffer.from(b, 'base64url')
   return x.length === y.length && timingSafeEqual(x, y)
 }
+/** Why a routed call was refused; the only detail of a refusal that crosses the wire. */
+const FORBIDDEN_REASON_PREFIX = 'forbidden.'
 function wireError(error: unknown): WireError {
   const code = error instanceof NetError ? error.code : 'internal'
-  // Do not serialize arbitrary provider/OS messages, credentials or payloads.
-  return { code, message: NET_ERRORS[code].message, retryable: NET_ERRORS[code].retryable }
+  // Do not serialize arbitrary provider/OS messages, credentials or payloads. A refusal of a routed
+  // call says which kind it was (a fixed word), in the cause slot older peers already accept.
+  const reason =
+    error instanceof NetError && code === 'forbidden' ? forbiddenReason(error.details) : undefined
+  return {
+    code,
+    message: NET_ERRORS[code].message,
+    retryable: NET_ERRORS[code].retryable,
+    ...(reason
+      ? {
+          cause: [{ code: FORBIDDEN_REASON_PREFIX + reason, message: NET_ERRORS.forbidden.message }]
+        }
+      : {})
+  }
 }
-const remoteError = (error: WireError): NetError => new NetError(error.code)
+const remoteError = (error: WireError): NetError => {
+  const reason =
+    error.code === 'forbidden'
+      ? error.cause
+          ?.find((entry) => entry.code?.startsWith(FORBIDDEN_REASON_PREFIX))
+          ?.code?.slice(FORBIDDEN_REASON_PREFIX.length)
+      : undefined
+  return reason && isForbiddenReason(reason)
+    ? new NetError(error.code, undefined, { details: { reason } })
+    : new NetError(error.code)
+}
 
 /** Authenticated normal session. Enrollment-only composition is implemented in P2. */
 export class NetSyncSession implements SyncSession {

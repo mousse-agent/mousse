@@ -371,6 +371,9 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
       throw new NetError('revoked')
     const required = capability ?? method.capability
     if (!current.caps.includes(required)) throw new NetError('forbidden')
+    // The grant that marks a computer (a phone never holds it), also checked when a result is asked for later.
+    if (method.requires?.some((extra) => !current.caps.includes(extra)))
+      throw new NetError('forbidden', undefined, { details: { reason: 'capability' } })
     this.options.authorizeMethod?.(method, peer, required)
     return method
   }

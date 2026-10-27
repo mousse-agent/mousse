@@ -54,6 +54,7 @@ export const NET_LOCAL_METHODS = [
   'bridge.setCaps',
   'bridge.setKind',
   'bridge.policy',
+  'bridge.workOnThreads',
   'net.authority.transfer',
   'net.authority.status',
   'net.recovery.export',
@@ -113,6 +114,8 @@ export interface BridgeNodePolicy {
 export interface NetStatus {
   enabled: boolean
   features?: import('../featureFlags').NetFeatureFlags
+  /** Whether other computers of the user may work on this computer's threads (`bridge.workOnThreads`). Off by default. */
+  workOnThreads?: boolean
   restartRequired?: boolean
   keystore: KeystoreState | 'unavailable'
   transports?: Array<{

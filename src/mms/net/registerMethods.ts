@@ -64,7 +64,8 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
   'bridge.rename': ['node', 'name'],
   'bridge.setCaps': ['node', 'caps'],
   'bridge.setKind': ['node', 'kind'],
-  'bridge.policy': ['node', 'blocked', 'maxPermissionMode', 'terminal']
+  'bridge.policy': ['node', 'blocked', 'maxPermissionMode', 'terminal'],
+  'bridge.workOnThreads': ['enabled']
 }
 const SSH_ID = /^[A-Za-z0-9_-]{1,64}$/u
 const FINGERPRINT = /^SHA256:[A-Za-z0-9+/]{43}$/u
@@ -240,6 +241,12 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
     throw new DomainRpcError('invalid_params', 'kind must be computer or phone')
   if (method === 'bridge.setCaps' && params.caps === undefined)
     throw new DomainRpcError('invalid_params', 'A capability list is required')
+  if (
+    method === 'bridge.workOnThreads' &&
+    params.enabled !== undefined &&
+    typeof params.enabled !== 'boolean'
+  )
+    throw new DomainRpcError('invalid_params', 'enabled must be boolean')
   if (method === 'bridge.policy') {
     if (
       params.blocked === undefined &&

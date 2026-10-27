@@ -46,6 +46,7 @@ import type {
   NetStatus
 } from '../../shared/net/local'
 import type { PermissionMode } from '../../shared/permissionMode'
+import { routedVersions } from '../../shared/bridge/routed'
 import type { NodePolicy } from './store/nodePolicy'
 import type {
   AddonRecordStore,
@@ -66,6 +67,7 @@ import { SqliteBudgetLedger } from './store/budgets'
 import { SqliteOutbox } from './store/outbox'
 import { SqliteQuotaRateLedger } from './store/limits'
 import { SqliteNodePolicy } from './store/nodePolicy'
+import { SqliteBridgeAudit } from './store/audit'
 import { FileBlobStore } from './store/blobs'
 import { FileKeyStore, NetIdentityService } from './identity'
 import { ProfileTransports } from './transports/manager'
@@ -122,6 +124,11 @@ interface NetConfiguration {
   direct: { enabled: boolean; host: string; port: number }
   routesVersion: number
   transports?: TransportConfiguration[]
+  /**
+   * "Let my other computers work on this computer's threads": routed calls from other computers
+   * that hold "Works on threads" are answered only while this is on. Off by default.
+   */
+  workOnThreads?: boolean
   /** What an add-on action changed outside Mousse, kept so it can be undone. Keyed by add-on. */
   addonRecords?: Record<string, { action: string; appliedAt: number; record: unknown }>
   preparedForJoin?: boolean
@@ -138,6 +145,8 @@ export interface NetRuntime {
   blobs: FileBlobStore
   /** What this computer lets each other device do here (`net_node_policy`). */
   policy: SqliteNodePolicy
+  /** What other computers did on this one, and how much they read (`bridge_audit`). */
+  audit: SqliteBridgeAudit
   rpc: DurableRpcDispatcher
   enrollment: EnrollmentService
   transfer: AuthorityTransferDelivery
@@ -269,6 +278,8 @@ export class NetService {
           throw new NetError('storage_corrupt')
         if (cfg.preparedForJoin !== undefined && typeof cfg.preparedForJoin !== 'boolean')
           throw new NetError('storage_corrupt')
+        if (cfg.workOnThreads !== undefined && typeof cfg.workOnThreads !== 'boolean')
+          throw new NetError('storage_corrupt')
         if (
           cfg.addonRecords !== undefined &&
           (!cfg.addonRecords ||
@@ -349,7 +360,18 @@ export class NetService {
               (method.family === 'bridge' || method.family === 'routed') &&
               policy.isBlocked(peer.node)
             )
-              throw new NetError('forbidden')
+              throw new NetError(
+                'forbidden',
+                undefined,
+                method.family === 'routed' ? { details: { reason: 'blocked' } } : undefined
+              )
+            if (method.family === 'routed') {
+              // The owner's switch is read on every call, so turning it off is also a kill switch.
+              if (!this.config.workOnThreads)
+                throw new NetError('forbidden', undefined, { details: { reason: 'setting_off' } })
+              if (method.needsTerminal && !policy.get(peer.node).terminal)
+                throw new NetError('forbidden', undefined, { details: { reason: 'terminal_off' } })
+            }
           }
         }),
         transfer = new AuthorityTransferDelivery({ db, identity, keys })
@@ -446,7 +468,10 @@ export class NetService {
           version: mousseVersion(),
           platform: process.platform,
           arch: process.arch,
-          protoMinor: NET_PROTO_MINOR
+          protoMinor: NET_PROTO_MINOR,
+          // The version of each routed method this computer accepts, so a caller sends only keys it knows
+          // and says "update Mousse" for the one action that needs more. Absent: an older computer.
+          routed: routedVersions()
         })
       })
       this.state = {
@@ -462,6 +487,7 @@ export class NetService {
         outbox: new SqliteOutbox(db),
         limits: new SqliteQuotaRateLedger(db),
         policy,
+        audit: new SqliteBridgeAudit(db, this.clock),
         rpc
       }
       // A block ends what the device is doing here now, not only what it asks for next.
@@ -737,6 +763,17 @@ export class NetService {
           })
           this.emit()
           return { policy: policyView(policy) }
+        }
+        case 'bridge.workOnThreads': {
+          // "Let my other computers work on this computer's threads". Any computer sets it for itself; it
+          // takes effect on the next routed call, so turning it off is also the kill switch.
+          this.requireEnrolled()
+          if (params.enabled !== undefined) {
+            this.config = { ...this.config, workOnThreads: params.enabled === true }
+            this.saveConfig()
+            this.emit()
+          }
+          return { enabled: this.config.workOnThreads === true }
         }
         default:
           throw new NetError('bad_request')
@@ -2174,6 +2211,7 @@ export class NetService {
       return {
         enabled: this.config.enabled,
         features: { ...this.config.features! },
+        workOnThreads: this.config.workOnThreads === true,
         ...(this.disabled ? { restartRequired: true } : {}),
         keystore: rt.keys.state(),
         protected: rt.keys.encryptedAtRest(),
