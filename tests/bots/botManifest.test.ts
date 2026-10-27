@@ -9,6 +9,7 @@ import { foldersOf, type BotManifest } from '../../src/shared/bots/personal/defi
 import { withPermission } from '../../src/shared/bots/personal/escalation'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import { compileBotThread } from '../../src/mms/bots/grants/compile'
+import { claudeLockedSandbox } from '../../src/mms/harness/claude/locked'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -235,5 +236,13 @@ describe('round 2: per-folder access survives every answer and narrowing', () =>
     } finally {
       rmSync(base, { recursive: true, force: true })
     }
+  })
+})
+
+describe('round 2: the locked Claude sandbox writes only to folders granted for writing', () => {
+  it('a mixed workspace denies its read-only folders and allows its write folders', () => {
+    const sandbox = claudeLockedSandbox({ workspace: { roots: ['/a', '/b'], access: 'read', writeRoots: ['/b'], scratch: '/s' }, temps: ['/tmp'], home: '/home/me' }) as { filesystem: { allowWrite: string[]; denyWrite: string[] } }
+    expect(sandbox.filesystem.allowWrite).toEqual(['/b', '/s'])
+    expect(sandbox.filesystem.denyWrite).toEqual(['/a', '/tmp'])
   })
 })

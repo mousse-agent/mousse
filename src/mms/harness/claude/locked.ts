@@ -157,6 +157,9 @@ export function claudeLockedTools(turn: Pick<ClaudeLockedTurn, 'authority' | 'sh
  */
 export function claudeLockedSandbox(input: { workspace: NonNullable<BotAuthority['workspace']>; temps: readonly string[]; home?: string }): SandboxSettings {
   const { roots, access, scratch } = input.workspace
+  // Per folder (6c-2): only the folders granted for writing are writable; every other root is denied.
+  const writeRoots = input.workspace.writeRoots ?? (access === 'write' ? roots : [])
+  const readRoots = roots.filter((root) => !writeRoots.includes(root))
   return {
     enabled: true,
     failIfUnavailable: true,
@@ -165,8 +168,8 @@ export function claudeLockedSandbox(input: { workspace: NonNullable<BotAuthority
     excludedCommands: [],
     enableWeakerNestedSandbox: false,
     filesystem: {
-      allowWrite: access === 'write' ? [...roots, scratch] : [scratch],
-      denyWrite: [...(access === 'read' ? roots : []), ...input.temps],
+      allowWrite: [...writeRoots, scratch],
+      denyWrite: [...readRoots, ...input.temps],
       denyRead: [input.home ?? homedir()],
       allowRead: [...roots, scratch]
     },
