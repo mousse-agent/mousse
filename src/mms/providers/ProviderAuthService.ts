@@ -27,6 +27,7 @@ import {
   isClaudeSubscriptionToken,
   registerClaudeSdkProvider
 } from './claudeSdkProvider'
+import { piOneShotRunsOn } from '../harness/drivers/pi/oneShotApis'
 import { FileCredentialStore } from './FileCredentialStore'
 import { FileModelsStore } from './FileModelsStore'
 import { LoginSession } from './LoginSession'
@@ -309,7 +310,8 @@ export class ProviderAuthService {
       return {
         id: model.id,
         label: model.name,
-        ...(efforts && efforts.length > 0 ? { efforts } : {})
+        ...(efforts && efforts.length > 0 ? { efforts } : {}),
+        ...(piOneShotRunsOn(model.api) ? {} : { oneShot: false as const })
       }
     })
     if (models.length === 0) return null

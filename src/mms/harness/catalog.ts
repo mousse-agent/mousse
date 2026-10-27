@@ -164,8 +164,11 @@ export function modelsWithPrefs(listed: readonly LlmModelOption[], prefs: ModelP
 /** A picker listing without hidden models, custom models added, in display order. */
 export function visibleProviderOption(option: LlmProviderOption, prefs: ModelPrefs): LlmProviderOption {
   const byId = new Map(option.models.map((model) => [model.id, model]))
+  // A custom model runs on the transport of the provider's first listed model, so it runs one-shots
+  // exactly when that model does.
+  const customOneShot = option.models[0]?.oneShot === false ? { oneShot: false as const } : {}
   const models = modelsWithPrefs(option.models, prefs)
     .filter((model) => !model.hidden)
-    .map((model) => byId.get(model.id) ?? { id: model.id, label: model.label, ...(model.capabilities.efforts.length ? { efforts: model.capabilities.efforts } : {}) })
+    .map((model) => byId.get(model.id) ?? { id: model.id, label: model.label, ...(model.capabilities.efforts.length ? { efforts: model.capabilities.efforts } : {}), ...customOneShot })
   return { ...option, models }
 }

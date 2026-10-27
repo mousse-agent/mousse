@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events'
-import type { ExecutionBinding } from '../../shared/harness/types'
+import { onRetiredBareRoute, type ExecutionBinding } from '../../shared/harness/types'
 import { isStricter, type PermissionMode } from '../../shared/permissionMode'
 import { narrowAgentAccess, type AgentAccessLevel } from '../../shared/settings'
 import { DaemonEpoch } from './DaemonEpoch'
@@ -357,6 +357,12 @@ export class TitleTakenRejection extends CommandRejection {
     this.name = 'TitleTakenRejection'
   }
 }
+
+/** The outcome of a run whose binding names the retired bare pi route (PR 4). */
+const RETIRED_ROUTE_OUTCOME = Object.freeze({
+  errorCode: 'binding_stale',
+  error: 'This run started on a route Mousse no longer has, so it cannot continue. Send the message again.'
+})
 
 const ACTIVE_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
   'starting',
@@ -760,6 +766,11 @@ export class RunEngine extends EventEmitter {
    *    uncertain child runs publish through the terminal write's publication gate.
    * Step 6 (heartbeat and reconciler) belongs to the profile that owns the worker (Phase 2b).
    */
+  /** Whether the run's binding was made on the retired bare pi route. */
+  private onRetiredRoute(runId: string): boolean {
+    return onRetiredBareRoute(this.bindingForRun(runId)?.instanceId)
+  }
+
   reconcileOnBoot(): BootReport {
     this.epochs.clear()
     const report = this.store.db.transaction((): BootReport => {
@@ -787,16 +798,20 @@ export class RunEngine extends EventEmitter {
       for (const run of active) {
         const started = this.tools.listStarted(run.runId)
         const unsafe = previousCrashed ? started.filter((tool) => !tool.idempotent) : []
+        // A run bound on the retired bare pi route says so (`binding_stale`); an unsafe tool still
+        // makes it `uncertain`, with that tool's error.
+        const retired = this.onRetiredRoute(run.runId)
         if (unsafe.length) {
           const names = [...new Set(unsafe.map((tool) => tool.tool))]
           this.writeTerminal(run, run.epoch, 'uncertain', {
             uncertainReason: 'non_idempotent_tool_in_flight',
-            error: `Non-idempotent tools were in flight when the daemon stopped: ${names.join(', ')}.`
+            error: `Non-idempotent tools were in flight when the daemon stopped: ${names.join(', ')}.`,
+            ...(retired ? { errorCode: 'binding_stale' } : {})
           })
           uncertain.push(run.runId)
           uncertainTools.set(run.runId, names)
         } else {
-          this.writeTerminal(run, run.epoch, 'interrupted', { interruptedBy: 'daemon_restart' })
+          this.writeTerminal(run, run.epoch, 'interrupted', { interruptedBy: 'daemon_restart', ...(retired ? RETIRED_ROUTE_OUTCOME : {}) })
           interrupted.push(run.runId)
         }
         const note = noteFor(run.threadId)
@@ -809,6 +824,16 @@ export class RunEngine extends EventEmitter {
             tool: tool.tool,
             idempotent: tool.idempotent
           })
+      }
+      // A run still waiting (never started again) on a binding made on the retired bare pi route can
+      // never run there: it is interrupted, typed `binding_stale`, and its pending work is cancelled,
+      // so nothing is replayed. It never ran in this epoch, so the restart note leaves it out. The
+      // thread's next turn resolves the default model.
+      for (const run of this.store.listNonTerminalRuns()) {
+        if (!this.onRetiredRoute(run.runId)) continue
+        for (const effect of this.outbox.listForRun(run.runId)) this.outbox.cancel(effect.effectId, now, 'binding_stale')
+        this.writeTerminal(run, run.epoch, 'interrupted', RETIRED_ROUTE_OUTCOME)
+        interrupted.push(run.runId)
       }
       const orphanedChildren = this.settleOrphanedChildren()
       const recoveredWakes = recoverWakesOnBoot(this.store, this.outbox, now)

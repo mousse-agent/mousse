@@ -32,7 +32,8 @@ function createOrchestrator(home: string, store: ThreadDataStore): OrchestratorS
     new TaskQueue(),
     new WorktreeManager(home),
     new PtyManager(),
-    { get: () => getDefaultSettings() } as never,
+    // The profile's default model is a pi instance; a turn with no selection runs it.
+    { get: () => ({ ...getDefaultSettings(), provider: { ...getDefaultSettings().provider, llmProvider: 'openai', model: 'gpt-x' } }) } as never,
     {} as never
   )
   orch.setThreadStore(store)

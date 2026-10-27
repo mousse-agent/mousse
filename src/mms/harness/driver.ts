@@ -175,9 +175,14 @@ export interface OneShotSpec {
   prompt: string
   /** Prompt-cache affinity, hashed before it reaches the provider (a thread id). */
   sessionKey?: string
+  /** What the request is for, so a refusal can say so; absent reads as `title`. */
+  task?: OneShotTask
   /** Called on every event the provider sends; the gateway's inactivity timeout restarts. */
   onActivity(): void
 }
+
+/** What a one-shot writes on the title model: a chat title, a pull request draft or a commit message. */
+export type OneShotTask = 'title' | 'pull_request' | 'commit_message'
 
 export interface DriverRuntime {
   /** The turn runtime of this instance. */

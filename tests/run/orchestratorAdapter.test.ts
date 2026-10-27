@@ -77,7 +77,8 @@ describe('adapter-based turn.start', () => {
       new TaskQueue(),
       new WorktreeManager(home),
       new PtyManager(),
-      { get: () => getDefaultSettings() } as never,
+      // The profile's default model is a pi instance; a turn with no selection runs it.
+      { get: () => ({ ...getDefaultSettings(), provider: { ...getDefaultSettings().provider, llmProvider: 'openai', model: 'gpt-x' } }) } as never,
       {} as never
     )
     orch.setThreadStore(store)
@@ -112,7 +113,7 @@ describe('adapter-based turn.start', () => {
     const thread = store.createThread('blank override')
     store.updateThreadMeta(thread.id, { modelOverride: { instanceId: '', llmProvider: '', model: '' } })
     const response = await orch.send('hi', false, { threadId: thread.id, clientRequestId: 'send-blank' })
-    expect(response.message).toContain('provider_instance_unknown')
+    expect(response.message).toContain('no_model_selected')
     expect(adapter.turns).toHaveLength(0)
   })
 

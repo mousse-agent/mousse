@@ -60,6 +60,13 @@ export interface ChannelRouterDeps {
   listModels: () => LlmProviderOption[]
   listAgents?: () => SlashAgentInfo[]
   getSubscriptionUsage?: (providerId: string) => Promise<string | undefined>
+  /**
+   * Checked before each channel turn: `refusal` replaces the turn (the model cannot run in channels);
+   * `notice` is sent first, once per thread (tools that need approval are refused), and confirmed
+   * through `noticeDelivered` after it reached the chat.
+   */
+  channelGate?: (threadId: string, modelOverride: ModelOverride | undefined) => { refusal?: string; notice?: string }
+  noticeDelivered?: (threadId: string) => void
 }
 
 interface InteractiveMenuDefinition {
@@ -340,6 +347,20 @@ export class ChannelRouter extends EventEmitter {
     this.activeSessionTurns.set(sessionKey, turn)
 
     try {
+      const gate = this.deps.channelGate?.(effectiveThreadId, modelOverride)
+      // A model that cannot hold the channel policy is refused before the turn, with what to do.
+      if (gate?.refusal) {
+        await this.deliverReply(message, gate.refusal)
+        return
+      }
+      if (gate?.notice) {
+        // The notice is remembered only once it reached the chat; a failed send never blocks the turn.
+        try {
+          if (await this.deliverReply(message, gate.notice)) this.deps.noticeDelivered?.(effectiveThreadId)
+        } catch (error) {
+          console.warn('[channels] approvals notice could not be sent', error)
+        }
+      }
       const messageId = message.messageId?.trim()
       const result = await this.runner.runChannelTurn(effectiveThreadId, text, {
         modelOverride,
@@ -697,14 +718,15 @@ export class ChannelRouter extends EventEmitter {
     this.recordActivity('outbound', message.platform, message, text)
   }
 
-  private async deliverReply(message: InboundChannelMessage, text: string): Promise<void> {
-    if (this.lifecycle.stopping) return
+  /** Sends `text` as the reply; true when every chunk reached the chat. */
+  private async deliverReply(message: InboundChannelMessage, text: string): Promise<boolean> {
+    if (this.lifecycle.stopping) return false
     const adapter = this.getAdapter(message.platform)
-    if (!adapter) return
+    if (!adapter) return false
 
     const chunks = chunkMessage(text)
     for (const chunk of chunks) {
-      if (this.lifecycle.stopping) return
+      if (this.lifecycle.stopping) return false
       const outbound: OutboundChannelMessage = {
         platform: message.platform,
         chatId: message.chatId,
@@ -715,10 +737,11 @@ export class ChannelRouter extends EventEmitter {
       const result = await adapter.send(outbound)
       if (!result.success) {
         console.error('[channels] outbound failed:', result.error)
-        break
+        return false
       }
       this.recordActivity('outbound', message.platform, message, chunk)
     }
+    return true
   }
 
   async sendTest(

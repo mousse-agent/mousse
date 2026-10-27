@@ -510,6 +510,117 @@ describe('ScheduledJobService stop + startup reconcile', () => {
     listSpy.mockRestore()
   })
 
+  it('a result delivered before a crash that left the occurrence unrecorded is delivered once', async () => {
+    const config = MousseConfigStore.load(tempHome)
+    const store = new ScheduledJobStore(config)
+    const projects = new ProjectManager()
+    const threads = new ThreadDataStore(projects)
+    const target = threads.createThread('Digest target')
+    const job = store.createJob({ name: 'Digest', prompt: '/digest', schedule: { kind: 'interval', minutes: 10 }, threadId: target.id })
+    const newThread = store.createJob({ name: 'Report', prompt: '/report', schedule: { kind: 'interval', minutes: 10 }, createThread: true })
+    for (const id of [job.id, newThread.id]) store.updateJob(id, { nextRunAt: '2000-01-01T00:00:00.000Z', state: 'scheduled' })
+    // A workflow's result: Mousse writes it, the run did not.
+    const service = new ScheduledJobService({ runIsolated: async () => ({ text: 'Numbers are up.', silent: false, threadId: 'workflow-thread' }) }, store, threads, projects)
+    const execute = (claimed: ScheduledJob) => (service as unknown as { executeJob: (j: ScheduledJob) => Promise<void> }).executeJob(claimed)
+    const reports = () => threads.listAllThreads().filter((thread) => thread.name === 'Scheduled: Report')
+
+    // The process dies after the result is written and before the occurrence is recorded.
+    const claims = store.claimDueJobs(new Date('2026-01-01T00:00:00.000Z'))
+    const markJobRun = vi.spyOn(store, 'markJobRun').mockImplementation(() => { throw new Error('process died') })
+    for (const claimed of claims) await execute(claimed).catch(() => undefined)
+    markJobRun.mockRestore()
+    expect(threads.loadThreadData(target.id).messages).toHaveLength(1)
+    expect(reports()).toHaveLength(1)
+
+    // The same occurrence is delivered again on recovery: nothing is written twice.
+    for (const claimed of claims) await execute(claimed)
+    const delivered = threads.loadThreadData(target.id).messages
+    expect(delivered.map((message) => message.content)).toEqual(['[Scheduled: Digest]\n\nNumbers are up.'])
+    // It links to the thread the workflow ran on.
+    expect(delivered[0]).toMatchObject({ scheduledRun: { jobId: job.id, threadId: 'workflow-thread' } })
+    expect(reports()).toHaveLength(1)
+    expect(threads.loadThreadData(reports()[0]!.id).messages.map((message) => message.content)).toEqual(['Numbers are up.'])
+    expect(store.getJob(job.id)?.runHistory).toHaveLength(1)
+  })
+
+  it('a workflow result for a job whose project was removed is kept on a thread outside any project', async () => {
+    const config = MousseConfigStore.load(tempHome)
+    const store = new ScheduledJobStore(config)
+    const projects = new ProjectManager()
+    const threads = new ThreadDataStore(projects)
+    const job = store.createJob({ name: 'Orphan', prompt: '/report', schedule: { kind: 'interval', minutes: 10 }, createThread: true, projectId: 'removed-project' })
+    store.updateJob(job.id, { nextRunAt: '2000-01-01T00:00:00.000Z', state: 'scheduled' })
+    const service = new ScheduledJobService({ runIsolated: async () => ({ text: 'Report text.', silent: false }) }, store, threads, projects)
+    const [claimed] = store.claimDueJobs(new Date('2026-01-01T00:00:00.000Z'))
+    await (service as unknown as { executeJob: (j: ScheduledJob) => Promise<void> }).executeJob(claimed!)
+    const result = threads.listAllThreads().find((thread) => thread.name === 'Scheduled: Orphan')
+    expect(result?.projectId).toBeUndefined()
+    expect(threads.loadThreadData(result!.id).messages.map((message) => message.content)).toEqual(['Report text.'])
+    expect(store.getJob(job.id)?.runHistory?.at(-1)).toMatchObject({ status: 'ok' })
+  })
+
+  it('shows a working occurrence as running, or as needing an answer while its thread waits', () => {
+    const store = new ScheduledJobStore(MousseConfigStore.load(tempHome))
+    const job = store.createJob({ name: 'Live', prompt: 'hi', schedule: { kind: 'interval', minutes: 10 } })
+    const service = new ScheduledJobService({ runIsolated: async () => ({ text: '', silent: true }) }, store)
+    const waiting = new Set<string>()
+    service.setQuestionProbe((threadId) => waiting.has(threadId))
+    expect(service.getJob(job.id)?.liveStatus).toBeUndefined()
+    const pending = (state: 'admitted' | 'queued' | 'running') => vi.spyOn(store, 'getJob').mockReturnValue({ ...store.listJobs()[0]!, pendingOccurrence: { occurrenceKey: 'k', threadId: 't1', runId: 'r1', state } })
+    pending('queued')
+    expect(service.getJob(job.id)?.liveStatus).toBeUndefined()
+    pending('running')
+    expect(service.getJob(job.id)?.liveStatus).toBe('running')
+    waiting.add('t1')
+    expect(service.getJob(job.id)?.liveStatus).toBe('needs_answer')
+    vi.restoreAllMocks()
+    // Derived, never stored: a patch that carries it back leaves the stored job without it.
+    service.updateJob(job.id, { liveStatus: 'running', name: 'Live 2' })
+    expect(store.getJob(job.id)).toMatchObject({ name: 'Live 2' })
+    expect(store.getJob(job.id)?.liveStatus).toBeUndefined()
+  })
+
+  it('shows the claimed occurrence from its claim: its thread, and an answer it waits for, while the turn still runs', async () => {
+    const store = new ScheduledJobStore(MousseConfigStore.load(tempHome))
+    const job = store.createJob({ name: 'Claimed', prompt: 'hi', schedule: { kind: 'interval', minutes: 10 } })
+    store.updateJob(job.id, {
+      nextRunAt: '2000-01-01T00:00:00.000Z',
+      state: 'scheduled',
+      runHistory: [{ startedAt: '2000-01-01T00:00:00.000Z', finishedAt: '2000-01-01T00:01:00.000Z', status: 'ok', threadId: 't-old' } as never]
+    })
+    let release!: () => void
+    const turnEnds = new Promise<void>((resolve) => { release = resolve })
+    let entered!: () => void
+    const inTurn = new Promise<void>((resolve) => { entered = resolve })
+    const service = new ScheduledJobService({
+      runIsolated: async (_prompt, ingress) => {
+        // The turn runs on a new thread, chosen before it starts, and waits for an approval there.
+        ingress?.onThreadChosen?.('t-new')
+        entered()
+        await turnEnds
+        return { text: 'done', silent: false, threadId: 't-new', transcriptWritten: true }
+      }
+    }, store)
+    const waiting = new Set<string>()
+    service.setQuestionProbe((threadId) => waiting.has(threadId))
+    const [claimed] = store.claimDueJobs(new Date('2026-01-01T00:00:00.000Z'))
+    const running = (service as unknown as { executeJob: (j: ScheduledJob) => Promise<void> }).executeJob(claimed!)
+    await inTurn
+    expect(store.getJob(job.id)?.pendingOccurrence).toBeUndefined()
+    expect(service.getJob(job.id)).toMatchObject({ liveStatus: 'running', liveThreadId: 't-new' })
+    waiting.add('t-new')
+    expect(service.listJobs().find((listed) => listed.id === job.id)).toMatchObject({ liveStatus: 'needs_answer', liveThreadId: 't-new' })
+    release()
+    await running
+    expect(service.getJob(job.id)?.liveStatus).toBeUndefined()
+
+    // An occurrence admitted before a crash shows its thread before the next tick takes it up.
+    vi.spyOn(store, 'getJob').mockReturnValue({ ...store.listJobs()[0]!, state: 'scheduled', pendingOccurrence: { occurrenceKey: 'k', threadId: 't-admitted', runId: 'r1', state: 'admitted' } })
+    waiting.add('t-admitted')
+    expect(service.getJob(job.id)).toMatchObject({ liveStatus: 'needs_answer', liveThreadId: 't-admitted' })
+    vi.restoreAllMocks()
+  })
+
   it('stale finisher produces no thread append and no job-state overwrite', async () => {
     const config = MousseConfigStore.load(tempHome)
     const store = new ScheduledJobStore(config)

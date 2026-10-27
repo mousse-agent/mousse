@@ -292,6 +292,18 @@ export function isRetriesExhausted(error: unknown): boolean {
   return error instanceof AppError && (error.details as { retriesExhausted?: unknown } | undefined)?.retriesExhausted === true
 }
 
+/**
+ * The instance id that runs and provider refs carried when a turn with no selection ran on the bare
+ * pi loop. That route is gone: such a record never resolves again (a binding is `binding_stale`, a
+ * ref is not active), and the thread's next turn resolves the default model.
+ */
+const RETIRED_BARE_ROUTE_ID = 'pi'
+
+/** Whether a stored binding or ref was made on the retired bare pi route. */
+export function onRetiredBareRoute(instanceId: string | undefined): boolean {
+  return instanceId === RETIRED_BARE_ROUTE_ID
+}
+
 const HARNESS_ERROR_CATEGORY: Record<HarnessErrorCode, ErrorCategory> = {
   instance_unknown: 'invalid',
   instance_disabled: 'unavailable',

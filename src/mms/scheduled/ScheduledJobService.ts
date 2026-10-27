@@ -1,6 +1,5 @@
 import { randomBytes } from 'node:crypto'
 import { EventEmitter } from 'events'
-import { v4 as uuidv4 } from 'uuid'
 import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
 import type { SchedulerStatus, ScheduledJob, ScheduledOccurrenceResult, ScheduledWebhookDelivery } from '../../shared/types'
@@ -94,6 +93,7 @@ export class ScheduledJobService extends EventEmitter {
   private lastJobCount = 0
   private lastDueCount = 0
   private webhookSecrets: ScheduledWebhookSecrets | null = null
+  private questionProbe: ((threadId: string) => boolean) | null = null
   /** Why the webhook listener is not up (a taken port), shown with the scheduler's errors. */
   private webhookListenerError: string | null = null
   private lastPayloadSweepAt = 0
@@ -116,6 +116,14 @@ export class ScheduledJobService extends EventEmitter {
   /** True while the scheduler is started: only then does anything start a webhook delivery. */
   isRunning(): boolean {
     return !this.stopped && !this.lifecycle.stopping
+  }
+
+  /**
+   * Whether a thread has a question waiting for the person (the profile's question service), for the
+   * job view's live status. Without it a working occurrence shows as running.
+   */
+  setQuestionProbe(probe: ((threadId: string) => boolean) | null): void {
+    this.questionProbe = probe
   }
 
   /** Where webhook secrets live; without it a job cannot get a webhook. */
@@ -274,11 +282,32 @@ export class ScheduledJobService extends EventEmitter {
   }
 
   listJobs(): ScheduledJob[] {
-    return this.store.listJobs()
+    return this.store.listJobs().map((job) => this.withLiveStatus(job))
   }
 
   getJob(id: string): ScheduledJob | undefined {
-    return this.store.getJob(id)
+    const job = this.store.getJob(id)
+    return job ? this.withLiveStatus(job) : undefined
+  }
+
+  /**
+   * The current occurrence's thread and whether it waits for the person, from the moment it is claimed:
+   * a claim that is running its turn (`runClaim.threadId`, set once the thread is chosen), else an
+   * admitted or running occurrence the claim handed over. A queued occurrence and a job with nothing
+   * under way show their own state. Derived when listed, never stored.
+   */
+  private withLiveStatus(job: ScheduledJob): ScheduledJob {
+    const pending = job.pendingOccurrence
+    const threadId = (job.state === 'running' ? job.runClaim?.threadId : undefined) ??
+      (pending && pending.state !== 'queued' ? pending.threadId : undefined)
+    if (!threadId) return job
+    let waiting = false
+    try {
+      waiting = this.questionProbe?.(threadId) ?? false
+    } catch {
+      // An unreadable question list shows the occurrence as running.
+    }
+    return { ...job, liveStatus: waiting ? 'needs_answer' : 'running', liveThreadId: threadId }
   }
 
   createJob(input: Parameters<ScheduledJobStore['createJob']>[0]): ScheduledJob {
@@ -290,7 +319,9 @@ export class ScheduledJobService extends EventEmitter {
 
   updateJob(id: string, patch: Partial<ScheduledJob>, options?: Parameters<ScheduledJobStore['updateJob']>[2]): ScheduledJob | null {
     this.lifecycle.assertAccepting()
-    const job = this.store.updateJob(id, patch, options)
+    // The live status is derived when listed; a patch that carries it back never stores it.
+    const { liveStatus: _status, liveThreadId: _thread, ...stored } = patch
+    const job = this.store.updateJob(id, stored, options)
     if (job) this.emitUpdated()
     return job
   }
@@ -728,38 +759,35 @@ export class ScheduledJobService extends EventEmitter {
       const writeThread = !silent && !result.transcriptWritten
 
       if (writeThread && this.threadStore) {
+        // The result thread and message are named by the occurrence. A crash after this write and
+        // before the occurrence is recorded delivers the same result again on recovery; it then
+        // finds both and writes nothing, so one occurrence never appears twice.
+        const resultKey = `scheduled-result:${job.id}:${occurrenceKey}`
+        // A result that ran on another thread (a workflow's own thread) links to it.
+        const ranOn = (target: string) => result.threadId && result.threadId !== target
+          ? { scheduledRun: { jobId: job.id, threadId: result.threadId, ...(result.runId ? { runId: result.runId } : {}) } }
+          : {}
+        const deliver = (threadId: string, content: string): void => {
+          this.threadStore!.mutateThreadData(threadId, (current) => current.messages.some((message) => message.id === resultKey) ? {} : ({
+            messages: [
+              ...current.messages,
+              { id: resultKey, role: 'assistant', content, timestamp: new Date().toISOString(), ...ranOn(threadId) }
+            ]
+          }))
+        }
         if (job.createThread) {
-          const projectPath = job.projectId
-            ? this.projectManager?.getProject(job.projectId)?.path
-            : undefined
-          const thread = this.threadStore.createThread(
-            `Scheduled: ${job.name}`,
-            job.projectId,
-            projectPath
-          )
-          this.threadStore.mutateThreadData(thread.id, (current) => ({
-            messages: [
-              ...current.messages,
-              {
-                id: uuidv4(),
-                role: 'assistant',
-                content: result.text,
-                timestamp: new Date().toISOString()
-              }
-            ]
-          }))
+          const name = `Scheduled: ${job.name}`.slice(0, 120)
+          let thread: { id: string }
+          try {
+            thread = this.threadStore.ensureExecutionThread(resultKey, name, job.projectId)
+          } catch (error) {
+            // A job whose project was removed still keeps its result, on a thread outside any project.
+            if (!job.projectId || !/project is unavailable/i.test(error instanceof Error ? error.message : String(error))) throw error
+            thread = this.threadStore.ensureExecutionThread(resultKey, name)
+          }
+          deliver(thread.id, result.text)
         } else if (job.threadId) {
-          this.threadStore.mutateThreadData(job.threadId, (current) => ({
-            messages: [
-              ...current.messages,
-              {
-                id: uuidv4(),
-                role: 'assistant',
-                content: `[Scheduled: ${job.name}]\n\n${result.text}`,
-                timestamp: new Date().toISOString()
-              }
-            ]
-          }))
+          deliver(job.threadId, `[Scheduled: ${job.name}]\n\n${result.text}`)
         }
       }
 

@@ -22,6 +22,9 @@ import {
 } from '../../src/renderer/components/scheduled/jobDraft'
 import { SECRET_VISIBLE_MS } from '../../src/renderer/components/scheduled/WebhookDialog'
 
+const openThread = vi.hoisted(() => vi.fn(async (_threadId: string) => undefined))
+vi.mock('../../src/renderer/lib/openThread', () => ({ openThread }))
+
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const providers = [
@@ -389,6 +392,28 @@ describe('Scheduled page: creating a job', () => {
 
 describe('Scheduled page: rows and history', () => {
   const record = (patch: Partial<NonNullable<ScheduledJob['runHistory']>[number]>) => ({ runAt: '2026-10-27T09:00:00.000Z', status: 'ok' as const, ...patch })
+
+  it('shows a working run as Running or Needs your answer, and opens the thread it runs on', async () => {
+    await mount([
+      job({ liveStatus: 'needs_answer', pendingOccurrence: { occurrenceKey: 'k', threadId: 't-run', runId: 'r1', state: 'running' } }),
+      job({ id: 'job-2', name: 'Working', liveStatus: 'running', pendingOccurrence: { occurrenceKey: 'k', threadId: 't-two', runId: 'r2', state: 'running' } }),
+      job({ id: 'job-3', name: 'Idle' }),
+      // Claimed and still inside its turn: no pending occurrence yet, an older run in the history.
+      job({ id: 'job-4', name: 'Claimed', state: 'running', liveStatus: 'needs_answer', liveThreadId: 't-live', runHistory: [{ startedAt: '2026-01-01T00:00:00.000Z', status: 'ok', threadId: 't-old' } as never] })
+    ])
+    const row = must(document.querySelector('[data-job-id="job-1"]'), 'row')
+    expect(row.querySelector('.scheduled-status')?.textContent).toBe('Needs your answer')
+    expect(must(document.querySelector('[data-job-id="job-2"]'), 'working').querySelector('.scheduled-status')?.textContent).toBe('Running')
+    const open = must(row.querySelector<HTMLButtonElement>('button[title="Open the run\'s thread"]'), 'open button')
+    await act(async () => open.click())
+    expect(openThread).toHaveBeenCalledWith('t-run')
+    const claimed = must(document.querySelector('[data-job-id="job-4"]'), 'claimed')
+    expect(claimed.querySelector('.scheduled-status')?.textContent).toBe('Needs your answer')
+    await act(async () => must(claimed.querySelector<HTMLButtonElement>('button[title="Open the run\'s thread"]'), 'claimed open').click())
+    expect(openThread).toHaveBeenLastCalledWith('t-live')
+    // A job that never ran has no thread to open.
+    expect(must(document.querySelector('[data-job-id="job-3"]'), 'idle').querySelector('button[title="Open the run\'s thread"]')).toBeNull()
+  })
 
   it('shows the model, mode, workspace, target, webhook and a queued run on the row', async () => {
     await mount([

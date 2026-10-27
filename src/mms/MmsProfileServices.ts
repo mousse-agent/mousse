@@ -53,6 +53,7 @@ import { ScheduledWebhookServer, scheduledWebhookPort } from './scheduled/Schedu
 import { WebhookSecretCache } from './scheduled/webhookSecretCache'
 import { scheduledJobOptionsDepsFrom, validateScheduledJobOptions } from './scheduled/validateJobOptions'
 import { ChannelService } from './channels/ChannelService'
+import { channelModelOptions } from './channels/channelModels'
 import { ChannelStore } from './channels/ChannelStore'
 import { AgentRegistry } from './agents/AgentRegistry'
 import { TaskQueue } from './tasks/TaskQueue'
@@ -586,6 +587,7 @@ export class MmsProfileServices {
         return job ? jobPermissionRequest(job) : undefined
       }
     })
+    this.scheduled.setQuestionProbe((threadId) => this.questions.listPendingForThread(threadId).length > 0)
     // Jobs saved before permission ceilings existed get one now: the mode of the thread they run on, else the
     // mode threads start in, else `ask`. Jobs that already have one are untouched, so this is safe on every start.
     try {
@@ -629,6 +631,7 @@ export class MmsProfileServices {
       recordRejection: (jobId, outcome, bodyBytes) => this.scheduledStore.recordWebhookRejection(jobId, outcome, bodyBytes),
       accepted: () => this.scheduled.wake()
     })
+    const channelCapsOf = (instanceId: string) => harness.resolve({ instanceId, model: '' }, { kind: 'device' }, 'channel_model').caps
     this.channels = new ChannelService(
       this.orchestrator,
       this.threads,
@@ -637,8 +640,10 @@ export class MmsProfileServices {
       this.providerAuth,
       this.agents,
       {
-        // Channel turns pick pi-ai providers by name; disabled instances and hidden models leave.
-        listModels: () => this.providerInstances.llmProviders().filter((option) => option.instanceId && piProviderIdOf(option.instanceId))
+        // `/model` lists what a channel turn can run on and hold `CHANNEL_POLICY` (disabled
+        // instances and hidden models already left the listing); nothing is picked by name.
+        listModels: () => channelModelOptions(this.providerInstances.llmProviders(), channelCapsOf),
+        capsOf: channelCapsOf
       }
     )
 

@@ -32,6 +32,7 @@ import { SubagentCardGroup } from "./tools/SubagentCard";
 import { SubagentNotice } from "./tools/SubagentNotice";
 import { useSubagentCards } from "./tools/subagent-cards-context";
 import { readSubagentNotice } from "../../adapters/subagentNotice";
+import { openThread } from "../../../lib/openThread";
 import { normalizeAssistantToolParts } from "./utils/tool-part-normalizer";
 import {
   activityGroupLabel,
@@ -1963,6 +1964,23 @@ function AssistantParts({
     const text = parts.filter(isTextPart).map((part) => part.text).join('');
     return <div role="status"><ToolRowBase icon={compactionMetadata.compacting ? <SpiralLoader size={12} /> : undefined}
       shimmerLabel="Compacting context…" completeLabel={text || 'Context compacted'} isAnimating={compactionMetadata.compacting === true} /></div>;
+  }
+  // A scheduled job's result appended here links to the thread where its turn ran.
+  const scheduledRun = (msg.metadata as { scheduledRun?: { threadId?: unknown } } | undefined)?.scheduledRun;
+  if (typeof scheduledRun?.threadId === "string") {
+    const runThreadId = scheduledRun.threadId;
+    return (
+      <div className="group/assistant-turn flex flex-col gap-3">
+        {elements}
+        <button
+          type="button"
+          className="an-md-link self-start text-sm hover:underline underline-offset-2 text-an-primary-color"
+          onClick={() => void openThread(runThreadId)}
+        >
+          Open the scheduled run
+        </button>
+      </div>
+    );
   }
   if (elements.length > 1) {
     return (

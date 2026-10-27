@@ -494,6 +494,7 @@ export function mousseToUIMessages(messages: ChatMessage[]): UIMessage[] {
     if (msg.role === 'user' && msg.steered) base.metadata = { ...(base.metadata as object | undefined), steered: true }
     const subagentNotice = msg.role === 'user' && msg.subagentNotice?.length ? msg.subagentNotice : undefined
     if (subagentNotice) base.metadata = { ...(base.metadata as object | undefined), subagentNotice }
+    if (msg.role === 'assistant' && msg.scheduledRun) base.metadata = { ...(base.metadata as object | undefined), scheduledRun: msg.scheduledRun }
     if (!displayText.trim() && !msg.images?.length && extraFileNames.length === 0 && references.length === 0 && !subagentNotice) {
       continue
     }

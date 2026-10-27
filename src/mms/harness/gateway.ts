@@ -41,7 +41,7 @@ import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import type { InstanceConfigView, InstanceEngine, NextStep, UpdateAffordance } from '../../shared/harness/status'
 import { acceptsMove, foldedInto, foldedTarget, type MoveResult } from '../../shared/harness/move'
-import { harnessAppError, type HarnessErrorCode, type ModelPrefs, type SignInPrompt } from '../../shared/harness/types'
+import { harnessAppError, onRetiredBareRoute, type HarnessErrorCode, type ModelPrefs, type SignInPrompt } from '../../shared/harness/types'
 import type { ProviderLoginEvent, ProviderUsage } from '../../shared/providerAuth'
 import {
   legacyProviderForInstance,
@@ -53,7 +53,7 @@ import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { LoginSession as LoginSessionImpl } from '../providers/LoginSession'
 import { fail } from '../run/db/RunStoreError'
 import { hidesModel, modelsWithPrefs, ModelPrefsService, visibleProviderOption, type ModelPrefsStore } from './catalog'
-import { privateHomeRule, type AuthReading, type DriverRuntime, type HarnessDriver, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost } from './driver'
+import { privateHomeRule, type AuthReading, type DriverRuntime, type HarnessDriver, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type OneShotTask } from './driver'
 import { DEFAULT_HOME_ID, findOnPath, instanceEnv, reservedEnvName, type InstanceEnv } from './env'
 import { addedInstanceId, defaultInstanceId, InstanceCounterStore, instanceStateDir, isBuiltInInstance } from './instances'
 import { LatestVersionCache } from './latest'
@@ -89,8 +89,6 @@ import {
 } from './vendorMirror'
 import type { StoredCliConfig } from '../providers/cliConfig'
 
-/** Instance id of a turn that ran on the unselected default: the bare pi loop. */
-export const PI_DRIVER_ID = 'pi'
 
 // The turn contract callers build (`TurnSpec`): app code imports these from the gateway, never
 // from the adapters behind it.
@@ -151,9 +149,9 @@ export interface HarnessGateway {
    * `resolve` for a stored selection (`ModelOverride`, possibly naming only a legacy
    * `llmProvider`). Throws the instance errors (`provider_instance_unknown`/`_disabled`) the run
    * engine has always reported, `instance_disabled` for a project that turned the instance off,
-   * and `model_hidden`. `allowDisabled` serves stopping or reading work already running;
-   * `unselectedDefault` lets a turn without any configured model run on the pi loop, which
-   * reports the missing default itself.
+   * and `model_hidden`. `allowDisabled` serves stopping or reading work already running. A blank
+   * selection (no instance, no provider) fails with `no_model_selected`: callers pass the profile's
+   * default when nothing is chosen, so blank means there is no default either.
    */
   resolveStored(selection: Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'>, options: ResolveStoredOptions): ResolvedTurnSelection
   /**
@@ -256,7 +254,6 @@ export interface ResolveStoredOptions {
   definition?: boolean
   scope?: ProviderScope
   allowDisabled?: boolean
-  unselectedDefault?: boolean
 }
 
 export interface ResolvedTurnSelection {
@@ -318,6 +315,8 @@ export interface OneShotRequest {
   maxChars: number
   /** Prompt-cache affinity (a thread id), hashed before it reaches the provider. */
   sessionKey?: string
+  /** What the request is for (a refusal names it); absent reads as `title`. */
+  task?: OneShotTask
   signal?: AbortSignal
 }
 
@@ -787,7 +786,7 @@ export class Harness implements HarnessGateway {
           llmProvider: () => named(record.runtime.llmProvider?.())
         }
       },
-      (option) => ({ ...visibleProviderOption(option, this.prefs.get(option.instanceId)), instanceId: option.instanceId })
+      (option) => ({ ...visibleProviderOption(option, this.prefs.get(option.instanceId)), instanceId: option.instanceId, oneShot: this.oneShotAvailable(option.instanceId) })
     )
     this.instances = {
       snapshots: (scope) => this.snapshots(scope),
@@ -923,11 +922,7 @@ export class Harness implements HarnessGateway {
 
   resolveStored(selection: Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'>, options: ResolveStoredOptions): ResolvedTurnSelection {
     const blank = !selection.instanceId?.trim() && !selection.llmProvider?.trim()
-    if (options.unselectedDefault && (blank || selection.instanceId === PI_DRIVER_ID)) {
-      const driver = this.drivers.get('pi')
-      if (!driver) fail('bad_request', 'No model is selected and no pi loop adapter is registered.')
-      return { instanceId: PI_DRIVER_ID, llmProvider: '', driver: 'pi', model: selection.model, caps: driver.caps({ home: 'default' }) }
-    }
+    if (blank || onRetiredBareRoute(selection.instanceId)) harnessFail('no_model_selected', 'No model is selected. Choose a model.', '')
     const named = this.instanceMap.instanceIdOf(selection)
     const target = this.movedTarget(named)
     // A retired entry is refused for every purpose, before it reads as turned off: turning it on
@@ -1061,7 +1056,7 @@ export class Harness implements HarnessGateway {
   }
 
   check(resolved: ResolvedTurnSelection, policy: RunPolicy): Enforceability {
-    const record = resolved.instanceId === PI_DRIVER_ID ? undefined : this.recordOrUndefined(resolved.instanceId)
+    const record = this.recordOrUndefined(resolved.instanceId)
     const caps = record ? this.capsFor(record, policy.authority?.kind === 'definition') : resolved.caps
     const spendModel = hasSpendLimit(policy) ? record?.runtime.spendModel?.(resolved.model) : undefined
     const verdict = checkPolicy(caps, policy, resolved.instanceId, spendModel, record ? this.policyOptions(record) : undefined)
@@ -1074,7 +1069,7 @@ export class Harness implements HarnessGateway {
   }
 
   async bind(resolved: ResolvedTurnSelection, input: BindInput): Promise<ExecutionBinding> {
-    const record = resolved.instanceId === PI_DRIVER_ID ? undefined : this.recordOrUndefined(resolved.instanceId)
+    const record = this.recordOrUndefined(resolved.instanceId)
     // Nothing is admitted on an instance signed out in Mousse: no account check, no runtime start.
     if (record) this.refuseSignedOut(record)
     const accountId = record ? await this.currentAccount(record) : undefined
@@ -1163,7 +1158,6 @@ export class Harness implements HarnessGateway {
   }
 
   selectionOf(binding: ExecutionBinding): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'> {
-    if (binding.instanceId === PI_DRIVER_ID) return { instanceId: PI_DRIVER_ID, llmProvider: '', model: binding.model }
     const entry = this.instanceMap.list()[binding.instanceId]
     return { instanceId: binding.instanceId, llmProvider: (entry && legacyProviderForInstance(binding.instanceId, entry)) || '', model: binding.model }
   }
@@ -1387,6 +1381,12 @@ export class Harness implements HarnessGateway {
     }
   }
 
+  /** Whether the instance's driver runs one-shots (`HarnessDriver.oneShot`); read for picker listings. */
+  private oneShotAvailable(instanceId: string): boolean {
+    const entry = this.instanceMap.get(instanceId)
+    return Boolean(entry && this.drivers.get(entry.driver)?.oneShot)
+  }
+
   async oneShot(request: OneShotRequest): Promise<{ text: string }> {
     let resolved: ResolvedTurnSelection
     try {
@@ -1417,6 +1417,7 @@ export class Harness implements HarnessGateway {
         system: request.system,
         prompt: request.prompt,
         ...(request.sessionKey ? { sessionKey: request.sessionKey } : {}),
+        ...(request.task ? { task: request.task } : {}),
         onActivity: restart
       }, signal)
       return { text: text.slice(0, Math.max(0, request.maxChars)) }
@@ -1590,7 +1591,7 @@ export class Harness implements HarnessGateway {
   }
 
   previewPermissionMode(resolved: ResolvedTurnSelection, requested: PermissionMode, cwd?: string | null): EffectivePermissionMode {
-    const record = resolved.instanceId === PI_DRIVER_ID ? undefined : this.recordOrUndefined(resolved.instanceId)
+    const record = this.recordOrUndefined(resolved.instanceId)
     return this.resolvePermissionMode(record, record ? this.recordCaps(record) : resolved.caps, requested, cwd ?? undefined).effective
   }
 
@@ -1717,17 +1718,18 @@ export class Harness implements HarnessGateway {
   }
 
   async childPreflight(instanceId: string, context: ChildPreflightContext): Promise<SubagentRefusal | null> {
-    const record = instanceId === PI_DRIVER_ID ? this.piRecord() : this.record(instanceId, { allowDisabled: true })
+    const record = this.record(instanceId, { allowDisabled: true })
     return (await record.runtime.adapter.childPreflight?.(context)) ?? null
   }
 
   async interrupt(ref: ProviderRef): Promise<'interrupted' | 'not_active'> {
-    return this.interruptOn(this.refRecord(ref), ref)
+    const record = this.refRecord(ref)
+    return record ? this.interruptOn(record, ref) : 'not_active'
   }
 
   async forkSession(ref: ProviderRef, atTurnOrdinal: number, target?: { threadId: string }): Promise<ProviderRef | null> {
-    const adapter = this.refRecord(ref).runtime.adapter
-    return adapter.forkSession ? adapter.forkSession(ref, atTurnOrdinal, target) : null
+    const adapter = this.refRecord(ref)?.runtime.adapter
+    return adapter?.forkSession ? adapter.forkSession(ref, atTurnOrdinal, target) : null
   }
 
   async stopThread(threadId: string): Promise<'stopped' | 'not_active'> {
@@ -1822,21 +1824,21 @@ export class Harness implements HarnessGateway {
     for (const record of this.records.values()) record.runtime.discardContinuations?.(threadId, id)
   }
 
-  /** The runtime of a turn's binding; the bare pi driver serves unselected-default turns. */
+  /** The runtime of a turn's binding. A binding made on the retired bare route runs nowhere. */
   private turnRecord(binding: ExecutionBinding): InstanceRecord {
-    if (binding.instanceId === PI_DRIVER_ID) return this.piRecord()
+    if (onRetiredBareRoute(binding.instanceId))
+      harnessFail('binding_stale', 'This run started on a route Mousse no longer has, so it cannot continue. Send the message again.', binding.instanceId)
     return this.record(binding.instanceId, { allowDisabled: true })
   }
 
-  private refRecord(ref: ProviderRef): InstanceRecord {
-    const resolved = this.resolveStored({ instanceId: ref.instanceId, llmProvider: ref.provider, model: ref.model ?? '' }, { purpose: 'turn', allowDisabled: true, unselectedDefault: true })
-    return resolved.instanceId === PI_DRIVER_ID ? this.piRecord() : this.record(resolved.instanceId, { allowDisabled: true })
-  }
-
-  private piRecord(): InstanceRecord {
-    const existing = this.records.get(PI_DRIVER_ID)
-    if (existing) return existing
-    return this.build(PI_DRIVER_ID, { driver: 'pi', enabled: true })
+  /**
+   * The runtime a provider ref belongs to; undefined for a ref made on the retired bare route, or
+   * one naming no instance and no provider: nothing of it can still be running.
+   */
+  private refRecord(ref: ProviderRef): InstanceRecord | undefined {
+    if (onRetiredBareRoute(ref.instanceId) || (!ref.instanceId?.trim() && !ref.provider?.trim())) return undefined
+    const resolved = this.resolveStored({ instanceId: ref.instanceId, llmProvider: ref.provider, model: ref.model ?? '' }, { purpose: 'turn', allowDisabled: true })
+    return this.record(resolved.instanceId, { allowDisabled: true })
   }
 
   // -- Records ----------------------------------------------------------------------------------

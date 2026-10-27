@@ -48,7 +48,6 @@ describe('concurrent same-project turns', () => {
           otherToolsText: '',
           signature: 'probe-sig'
         }),
-        generateTitle: async () => 'Probe Title',
         chat: async (_messages: unknown, _onTool: unknown, opts: any) => {
           inFlight += 1
           maxInFlight = Math.max(maxInFlight, inFlight)

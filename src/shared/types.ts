@@ -193,6 +193,10 @@ export interface ScheduledJob {
   runClaim?: ScheduledJobRunClaim
   /** Present while an admitted occurrence has not reached a terminal run. */
   pendingOccurrence?: ScheduledJobPendingOccurrence
+  /** The current occurrence's run is working, or waits for the person's answer; derived when listed, never stored. */
+  liveStatus?: 'running' | 'needs_answer'
+  /** The thread the current occurrence runs on, with `liveStatus`; derived when listed, never stored. */
+  liveThreadId?: string
   /** A signed request starts this job; absent when the job has no webhook. */
   trigger?: { webhook: ScheduledJobWebhookTrigger }
   /** A verified delivery that the next tick starts (one at a time). */
@@ -677,6 +681,11 @@ export interface ChatMessage {
   scheduled?: { jobId: string; jobName?: string }
   /** Set on a user message another thread's agent sent (`thread_send`), so the thread can say whose it is. */
   origin?: AgentOrigin
+  /**
+   * Set on a scheduled job's result appended to its thread when it ran on another thread (a
+   * workflow's): that thread and run, which the transcript links to.
+   */
+  scheduledRun?: { jobId: string; threadId: string; runId?: string }
   /**
    * A user message added to a turn that was already running (a steer), so it does not start a turn.
    * Older transcripts do not carry it.
