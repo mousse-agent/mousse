@@ -64,9 +64,8 @@ export class SharedAgentModelLookup implements AgentModelLookup {
     const capabilities: AgentCapabilityKind[] = []
     if (model.capabilities.efforts.length > 0) capabilities.push('reasoning')
     if (model.capabilities.images) capabilities.push('vision')
-    // Mousse's tools reach the model over MCP, or inside the legacy loop that runs definitions
-    // until 4d-rpc (`definitionLimits: 'in_loop'`, deleted with the loop in 4h).
-    if (resolved.caps.mcp || resolved.caps.definitionLimits === 'in_loop') capabilities.push('tools')
+    // Mousse's tools reach the model over MCP.
+    if (resolved.caps.mcp) capabilities.push('tools')
     if ((model.capabilities.contextWindow ?? 0) >= LONG_CONTEXT_TOKENS) capabilities.push('long_context')
     return {
       ref: resolvedRef, label: model.label, available: true,

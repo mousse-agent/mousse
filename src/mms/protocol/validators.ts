@@ -522,6 +522,7 @@ function asNullableTrimmed(v: unknown, name: string, maxLen: number): string | n
 export function asInstanceConfigPatch(v: unknown, name = 'patch'): InstanceConfigPatch {
   if (v === undefined || v === null) return {}
   const o = asPlainObject(v, name)
+  // `engine` (the removed Pi engine setting) is still accepted from an older client, and ignored.
   assertKnownKeys(o, name, ['displayName', 'home', 'binaryPath', 'args', 'env', 'loginMethod', 'source', 'setup', 'engine', 'useOlderSettings', 'provider'])
   if (o.useOlderSettings !== undefined) {
     if (o.useOlderSettings !== true) throw invalidParams(`${name}.useOlderSettings must be true`)
@@ -539,10 +540,6 @@ export function asInstanceConfigPatch(v: unknown, name = 'patch'): InstanceConfi
   if (o.setup !== undefined) {
     if (o.setup !== 'managed' && o.setup !== 'existing') throw invalidParams(`${name}.setup must be managed|existing`)
     patch.setup = o.setup
-  }
-  if (o.engine !== undefined) {
-    if (o.engine !== null && o.engine !== 'rpc' && o.engine !== 'legacy') throw invalidParams(`${name}.engine must be rpc|legacy|null`)
-    patch.engine = o.engine
   }
   if (o.provider !== undefined) {
     const provider = asString(o.provider, `${name}.provider`, 64)

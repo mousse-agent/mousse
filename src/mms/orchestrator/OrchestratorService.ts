@@ -89,7 +89,8 @@ import { WebTools } from './WebTools'
 import { stableStringify } from '../run/json'
 import { closeStaleActivity, cutOffActivityOf, formatRestartNote } from '../run/restartNote'
 import type { OneShotTask } from '../harness/driver'
-import { createHarnessGateway, type AdapterHost, type BindInput, type ChildTurnPolicy, type DefinitionLoop, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
+import { createHarnessGateway, type AdapterHost, type BindInput, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
+import type { ToolHost } from '../run/adapters/ProviderAdapter'
 import { piDriver } from '../harness/drivers/pi'
 import { contextGauge, policyOrigin, threadTurnOrigin } from '../harness/policy'
 import type { BotThreads } from '../../shared/bots/personal/authority'
@@ -176,7 +177,6 @@ import { TaskQueue } from '../tasks/TaskQueue'
 import { WorktreeManager } from '../worktree/WorktreeManager'
 import { PtyManager } from '../terminals/PtyManager'
 import { filterActionsForChatMode, parseActions, rejectOrchestrationAction, stripActionBlocks } from './actions'
-import { LlmClient, type LlmChatOptions } from './LlmClient'
 import type { DelegateTaskInput, DelegationToolCall, DelegationToolHost, NamedAgentToolRequest, SubagentRef } from '../run/mcp/appTools/delegation'
 import type { StreamingLlmTextEvent, StreamingLlmThinkingEvent, StreamingLlmToolEvent } from '../harness/turnEvents'
 import type { BrowserRuntimePort } from '../../shared/browser/runtime'
@@ -278,7 +278,6 @@ import {
 import { ThreadSession, type ActiveTurnControl, type SteerEntry } from './ThreadSession'
 import { userQuestionService as defaultUserQuestionService, UserQuestionService, withoutStandingRules } from './UserQuestionService'
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
-import { ConnectionRetriesExhaustedError } from './connectionRetry'
 import { AppError, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError, type AppErrorShape } from '../../shared/errors'
 import {
   compactMessagesAtSafeBoundary,
@@ -822,7 +821,6 @@ export class OrchestratorService extends EventEmitter {
   /** Host-injected dispatcher. Root adapts platform.browser to BrowserRuntimePort. */
   setBrowserRuntime(port: BrowserRuntimePort | undefined): void {
     this.browserRuntime = port
-    this.llm.setBrowserRuntime(port)
   }
 
   /**
@@ -1000,31 +998,6 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  /**
-   * The chat client a definition's loop runs on (the legacy engine): one of the run's own, so it
-   * sees the definition thread's task queue and browser binding, never the GUI client's.
-   */
-  private definitionChatClient(turn: DefinitionTurnRequest, extras: DefinitionTurnExtras): Pick<LlmClient, 'chat'> {
-    const session = this.getOrCreateSession(turn.threadId)
-    const llm = new LlmClient(
-      this.settingsStore,
-      this.providerAuth,
-      this.mcpManager,
-      this.skillsRegistry,
-      () => turn.projectPath ?? session.projectCwd ?? this.worktrees.getRepoRoot(),
-      this.fileService,
-      this.gitService,
-      this.lineEditStats,
-      (payload) => this.emit('document-opened', payload),
-      session.tasks,
-      (action) => this.emit('quick-action-created', action),
-      (payload, threadId) => this.presentPlanCard(payload, threadId),
-      { questions: this.questions, modeRegistry: this.modeRegistry, browserRuntime: readHostBrowserRuntime(extras.host) ?? this.browserRuntime, customModel: (provider, modelId) => this.customPiModel(provider, modelId) }
-    )
-    if (extras.browser) llm.bindBrowserExecution(extras.browser)
-    return { chat: (...args) => this.sessionAls.run(session, () => llm.chat(...args)) }
-  }
-
   private async runDefinitionTurn(turn: DefinitionTurnRequest, engine: RunEngine, lease: ThreadLeaseHandle, extras: DefinitionTurnExtras): Promise<DefinitionTurnResult> {
     const { threadId } = turn
     const resolved = this.placeDefinition(turn)
@@ -1038,11 +1011,11 @@ export class OrchestratorService extends EventEmitter {
     if (!verdict.ok) throw harnessAppError(verdict.error)
     const featureRefusal = definitionFeatureRefusal(resolved.caps, turn.features, resolved.instanceId)
     if (featureRefusal) throw harnessAppError({ code: 'policy_unenforceable', message: featureRefusal.message, missing: featureRefusal.missing ?? ['toolControl'], instanceId: resolved.instanceId })
-    // A runtime other than the loop reaches the definition's browser as Mousse app tools, on the
-    // host's browser runtime (an agent chat's shared browser) as the loop does, else the profile's,
-    // which also lists them. Without one the turn fails before it starts, as on the loop.
+    // The definition's browser is Mousse app tools, on the host's browser runtime (an agent chat's
+    // shared browser), else the profile's, which also lists them. Without one the turn fails before
+    // it starts.
     const hostBrowser = readHostBrowserRuntime(extras.host)
-    if (extras.browser && resolved.caps.definitionLimits !== 'in_loop' && !this.browserRuntime)
+    if (extras.browser && !this.browserRuntime)
       throw knownAppError({ code: 'browser_runtime_unbound', message: 'Browser runtime is not bound. Call setBrowserRuntime with a BrowserRuntimePort before enabling browser tools.' })
     if (turn.signal.aborted) throw turn.signal.reason ?? new DOMException('Aborted', 'AbortError')
     const dispatched = await engine.dispatch({ kind: 'send', threadId, clientRequestId: `definition:${turn.runId}:${turn.attempt}`, source: 'definition' })
@@ -1117,20 +1090,6 @@ export class OrchestratorService extends EventEmitter {
       }
     }, this.definitionHeartbeatMs)
     beat.unref?.()
-    // A runtime that runs the definition's loop itself (the legacy engine) runs it on a client of the
-    // run's own, under the limits left, and reports the limit that ended it.
-    let loopLimit: AgentExecutionLimit | undefined
-    let loopUsed = false
-    const definitionLoop: DefinitionLoop = {
-      client: () => {
-        loopUsed = true
-        return this.definitionChatClient(turn, extras)
-      },
-      budget: turn.remaining,
-      effects: turn.effects,
-      actor: definitionActor(turn.grants),
-      limitReached: (limit) => { loopLimit = limit }
-    }
     let handle: ReturnType<HarnessGateway['startTurn']> | undefined
     const interrupt = (): void => { void handle?.interrupt().catch(() => {}) }
     signal.addEventListener('abort', interrupt, { once: true })
@@ -1139,7 +1098,6 @@ export class OrchestratorService extends EventEmitter {
       const { tools, approvals, budget, authority } = policy
       const binding = await this.bindTurn(runId, undefined, resolved, 'agent', () => turn.origin, { cwd: projectPath ?? null, permissionMode: 'ask' }, { approvals, ...(tools ? { tools } : {}), ...(budget ? { budget } : {}), ...(authority ? { authority } : {}) }, true)
       const context = await this.completeAppTurn(app.turn, {
-        promptRuntime: handoffDelivery(resolved.caps) === 'prompt_preamble',
         ...(extras.browser ? { browser: extras.browser } : {}),
         userContent: turn.userMessage,
         instanceId: resolved.instanceId,
@@ -1153,9 +1111,9 @@ export class OrchestratorService extends EventEmitter {
         const token = writers.issue(`definition:${runId}`, { version: 1, workspace: 'shared', access: 'write' })
         return <T>(run: () => Promise<T>): Promise<T> => writers.runWriter(token, run)
       })()
-      // The definition's prompt as written. A runtime other than the loop gets its granted skills after
-      // it, as the loop adds them itself (`Granted skill <name>`); nothing else of Mousse's is added.
-      const loadedSkills = resolved.caps.definitionLimits === 'in_loop' ? [] : this.appToolTurns.get(runId)?.loadedSkills ?? []
+      // The definition's prompt as written, then its granted skills (`Granted skill <name>`); nothing
+      // else of Mousse's is added.
+      const loadedSkills = this.appToolTurns.get(runId)?.loadedSkills ?? []
       const systemPrompt = [turn.systemPrompt, ...loadedSkills.map((skill) => `Granted skill ${skill.name}:\n${skill.content}`)].filter(Boolean).join('\n\n')
       // Prior turns only, as a runtime that takes history in its prompt reads them.
       const preamble = turn.conversation.length ? nativeAgentHistory(createNativeContext(definitionMessages(turn.conversation, '').slice(0, -1))) : ''
@@ -1189,11 +1147,9 @@ export class OrchestratorService extends EventEmitter {
         retry: () => {},
         progress: () => {},
         // A runtime that reports usage per request (Pi's agent): it is the record's usage, kept as it
-        // arrives, so a turn that fails (a limit reached, a provider error) is still counted. A loop
-        // that runs under the definition's limits reports its own (`effects.attemptUsage`).
+        // arrives, so a turn that fails (a limit reached, a provider error) is still counted.
         usage: (reported) => {
-          if (loopUsed) return
-          // In the usage statistics too, as the loop records its own.
+          // In the usage statistics too.
           this.lineEditStats?.recordUsage({
             timestamp: new Date().toISOString(), provider: resolved.llmProvider, model: binding.model,
             input: reported.input, output: reported.output, cacheRead: reported.cacheRead, cacheWrite: reported.cacheWrite
@@ -1213,7 +1169,6 @@ export class OrchestratorService extends EventEmitter {
       }
       const control: TurnControl = { drainSteer: () => undefined, heartbeat: () => this.heartbeatRun(runId) }
       const host: AdapterHost = {
-        definitionLoop,
         tools: {
           ...(extras.browser ? { browser: extras.browser } : {}),
           toolAccess: { allows: () => true, execute: (_name, _args, run) => writer(run) },
@@ -1228,10 +1183,10 @@ export class OrchestratorService extends EventEmitter {
         }
       }
       if (signal.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError')
-      // The granted app tools (the browser, `ask_user`, …) reach a runtime other than the loop only
-      // over the Mousse MCP server: without its bearer the turn is refused, never run without them.
+      // The granted app tools (the browser, `ask_user`, …) reach the runtime only over the Mousse MCP
+      // server: without its bearer the turn is refused, never run without them.
       const allowed = new Set(tools?.allow ?? [])
-      const requiredTools = resolved.caps.definitionLimits === 'in_loop' ? [] : this.mcpToolRegistry().listForTurn(threadId, runId)
+      const requiredTools = this.mcpToolRegistry().listForTurn(threadId, runId)
         .filter((tool) => allowed.has(tool.name) && tool.class !== 'delegation').map((tool) => tool.name)
       handle = this.harness.startTurn({
         binding,
@@ -1254,17 +1209,15 @@ export class OrchestratorService extends EventEmitter {
       if (!lost.signal.aborted && (!owned || TERMINAL_RUN_STATUSES.has(owned.status))) lost.abort(new DOMException('The agent run ended elsewhere.', 'AbortError'))
       if (lost.signal.aborted && !turn.signal.aborted) throw lost.signal.reason
       if (result.aborted || turn.signal.aborted) markTerminal('interrupted', { interruptedBy: 'user' }, text)
-      // A limit the loop reached fails the run, as the definition's result does.
-      else if (loopLimit) markTerminal('failed', { error: `The agent reached its ${loopLimit.kind} limit (${loopLimit.limit}).` }, text)
       else markTerminal('completed', undefined, text)
       const reported = turn.effects.attemptUsage
-      const usage = loopUsed || reported.inputTokens || reported.outputTokens || reported.costUsd
+      const usage = reported.inputTokens || reported.outputTokens || reported.costUsd
         ? { inputTokens: reported.inputTokens, outputTokens: reported.outputTokens, costUsd: reported.costUsd }
         : record.usage(result.usage)
-      return { text, history: record.history(turn.userMessage, text), usage, ...(loopLimit ? { limit: loopLimit } : {}) }
+      return { text, history: record.history(turn.userMessage, text), usage }
     } catch (error) {
-      // A limit the runtime refused the next step for (Pi's agent) ends the run as the loop's does:
-      // with the reply so far and the limit, not as an error that drops it.
+      // A limit the runtime refused the next step for ends the run with the reply so far and the
+      // limit, not as an error that drops it.
       const limit = !signal.aborted && error instanceof AppError && error.code === 'budget_exhausted' ? (error.details as { limit?: AgentExecutionLimit } | undefined)?.limit : undefined
       if (limit && typeof limit.kind === 'string' && typeof limit.limit === 'number') {
         const text = record.finalText()
@@ -1297,11 +1250,10 @@ export class OrchestratorService extends EventEmitter {
       this.persistFn?.(threadId)
     })
   }
-  private llm: LlmClient
   /**
    * The harness gateway (SPEC §13): instance id → driver → turn runtime, capabilities, scope and
    * model prefs. Until the profile installs its own (`setHarness`), an in-memory instance map with
-   * the pi loop serves turns; the pi loop reads `this.llm` per turn.
+   * the `pi` driver and no Pi runtime (its turns are refused).
    */
   private harness: HarnessGateway
   /** The profile's bot threads (`bots.db`): a turn on one binds with origin `bot`. */
@@ -1377,17 +1329,6 @@ export class OrchestratorService extends EventEmitter {
       notice: (threadId, text) => this.noteProviderNotice(threadId, text)
     })
   }
-  /**
-   * A custom model added to a pi provider in Settings → Providers, as the pi loop runs it: the
-   * provider's transport (api, base URL, headers) with the capabilities the user declared.
-   */
-  private customPiModel(provider: string, modelId: string): Model<Api> | undefined {
-    const custom = this.harness?.catalog.customModel(piInstanceId(provider), modelId)
-    const template = custom ? this.providerAuth.models.getModels(provider)[0] : undefined
-    return custom && template ? customModelDefinition(template, custom) : undefined
-  }
-  /** The pi loop's chat client, read per turn by the gateway's pi driver. */
-  piChatClient(): Pick<LlmClient, 'chat'> { return this.llm }
   /**
    * Migrate-on-read for a stored model selection: adds the instance id an older `llmProvider`
    * maps to. Never throws; an unmappable selection fails when a turn resolves it.
@@ -1643,7 +1584,7 @@ export class OrchestratorService extends EventEmitter {
       profileHome: unboundHome,
       installationHome: unboundHome,
       instanceMap: new ProviderInstanceService({ providerAuth }),
-      drivers: [piDriver({ client: () => this.llm, credentials: () => this.providerAuth })],
+      drivers: [piDriver({ credentials: () => this.providerAuth })],
       questions: runtime?.questions ?? defaultUserQuestionService,
       shellPath: async () => ({ entries: [], source: 'failed' })
     })
@@ -1660,22 +1601,6 @@ export class OrchestratorService extends EventEmitter {
     // Seed unbound session registries (tests / legacy inject shared instances).
     this.boundSession.agents = agents
     this.boundSession.tasks = tasks
-    this.llm = new LlmClient(
-      settingsStore,
-      providerAuth,
-      mcpManager,
-      skillsRegistry,
-      // Prefer ALS-scoped thread project cwd so concurrent turns never share WorktreeManager.repoRoot.
-      () => this.session.projectCwd ?? this.worktrees.getRepoRoot(),
-      fileService,
-      gitService,
-      lineEditStats,
-      (payload) => this.emit('document-opened', payload),
-      this.tasks,
-      (action) => this.emit('quick-action-created', action),
-      (payload, threadId) => this.presentPlanCard(payload, threadId),
-      { questions: this.questions, modeRegistry: this.modeRegistry, customModel: (provider, modelId) => this.customPiModel(provider, modelId) }
-    )
   }
 
   /**
@@ -2873,31 +2798,29 @@ export class OrchestratorService extends EventEmitter {
    */
   private async completeAppTurn(
     registered: AppToolTurn,
-    input: { promptRuntime: boolean; browser?: AppToolTurn['browser']; onPublishApplet?: AppToolTurn['onPublishApplet']; userContent: string; instanceId: string; model: string; approvals: RunPolicy['approvals']; botInstructions?: string; grants?: EffectiveAgentGrants }
+    input: { browser?: AppToolTurn['browser']; onPublishApplet?: AppToolTurn['onPublishApplet']; userContent: string; instanceId: string; model: string; approvals: RunPolicy['approvals']; botInstructions?: string; grants?: EffectiveAgentGrants }
   ): Promise<TurnAppContext> {
     let skills: Pick<AppToolTurn, 'enabledSkills' | 'loadedSkills'> = { enabledSkills: [], loadedSkills: [] }
-    if (input.promptRuntime) {
-      try {
-        skills = await prepareSkills({
-          registry: this.skillsRegistry,
-          settings: () => this.settingsStore.get().integrations.skills,
-          projectPath: registered.projectPath,
-          mode: registered.mode,
-          userContent: input.userContent,
-          actor: registered.actor,
-          // A definition loads only the skills it was granted.
-          ...(input.grants ? { grants: input.grants } : {})
-        })
-      } catch (error) {
-        // Skills are optional for a runtime with its own loop: a broken registry cannot block the turn.
-        console.warn('skills unavailable for the turn', { threadId: registered.threadId, error: error instanceof Error ? error.message : String(error) })
-      }
+    try {
+      skills = await prepareSkills({
+        registry: this.skillsRegistry,
+        settings: () => this.settingsStore.get().integrations.skills,
+        projectPath: registered.projectPath,
+        mode: registered.mode,
+        userContent: input.userContent,
+        actor: registered.actor,
+        // A definition loads only the skills it was granted.
+        ...(input.grants ? { grants: input.grants } : {})
+      })
+    } catch (error) {
+      // Skills are optional: a broken registry cannot block the turn.
+      console.warn('skills unavailable for the turn', { threadId: registered.threadId, error: error instanceof Error ? error.message : String(error) })
     }
-    // A runtime with its own loop runs the selected model natively: its vision decides whether a browser
-    // screenshot can reach the model (the pi loop's `LlmClient` sets it from its own model).
-    const browser = input.browser && input.promptRuntime
+    // The runtime runs the selected model natively: its vision decides whether a browser screenshot
+    // can reach the model.
+    const browser = input.browser
       ? snapshotBrowserExecutionBinding({ ...input.browser, vision: this.harness.catalog.toolImages(input.instanceId, input.model) })
-      : input.browser
+      : undefined
     const turn = this.appToolTurns.update(registered.runId, {
       ...(browser ? { browser } : {}),
       ...(input.onPublishApplet ? { onPublishApplet: input.onPublishApplet } : {}),
@@ -4865,7 +4788,6 @@ export class OrchestratorService extends EventEmitter {
     resolved: ResolvedTurnSelection
     selection: { llmProvider: string; model: string }
     previousModel: { provider: string; model: string } | undefined
-    promptRuntime: boolean
     content: string
     images: ChatImageAttachment[] | undefined
     mode: ChatMode
@@ -4886,9 +4808,7 @@ export class OrchestratorService extends EventEmitter {
     const planned: PlannedHandoff[] = []
     try {
       const capacity = this.nativeContext.nativeProviderModel
-      const modelWindow = input.promptRuntime
-        ? capacity?.selectedModel === to.model ? capacity?.contextWindow : undefined
-        : this.llm.getSelectedModelContextLimit(input.mode, input.modelOverride).limit
+      const modelWindow = capacity?.selectedModel === to.model ? capacity?.contextWindow : undefined
       // A transfer whose history an earlier (aborted) turn already committed is consumed, not resent.
       const inTranscript = committedTransfers(this.nativeContext.messages)
       const pendingTransfer = (transfer: TransferRecord | undefined | null): TransferRecord | null =>
@@ -4932,7 +4852,7 @@ export class OrchestratorService extends EventEmitter {
             strategy: 'fork_delta_summary',
             afterOrdinal: Number(merge.payload.fromOrdinal ?? 1) - 1,
             throughOrdinal: Number(merge.payload.toOrdinal ?? merge.sourceRunOrdinal),
-            nativeTokens: input.promptRuntime ? 0 : estimateActiveContextTokens(getActiveMessages(this.nativeContext), getCompactionSummary(this.nativeContext))
+            nativeTokens: 0
           })
         })
       }
@@ -4943,7 +4863,7 @@ export class OrchestratorService extends EventEmitter {
         error: error instanceof Error ? error.message : String(error)
       })
     }
-    return planned.length ? new TurnHandoffs(engine, planned, !input.promptRuntime) : null
+    return planned.length ? new TurnHandoffs(engine, planned, false) : null
   }
 
   /**
@@ -5851,7 +5771,7 @@ export class OrchestratorService extends EventEmitter {
    * SPEC §12.6 tool ledger for an engine run: `started` before a tool runs, `committed|failed`
    * after. A ledger failure is logged and never breaks the tool.
    */
-  private toolLedgerFor(runId: string | undefined): LlmChatOptions['toolLedger'] {
+  private toolLedgerFor(runId: string | undefined): ToolHost['toolLedger'] {
     const engine = this.runEngine
     if (!engine || !runId) return undefined
     const now = (): string => new Date().toISOString()
@@ -7372,70 +7292,35 @@ export class OrchestratorService extends EventEmitter {
       // Nothing to measure against before a model is chosen (a fresh profile): an empty gauge.
       if (!selectedModel.model?.trim() || !(selectedModel.instanceId?.trim() || selectedModel.llmProvider?.trim()))
         return { percent: 0, used: 0, limit: 0, modelName: selectedModel.model ?? '', source: 'estimated', categories: [] }
-      // The gauge never fails: a selection that cannot be resolved is measured like the pi loop's.
+      // The gauge never fails: a selection that cannot be resolved shows no measurement.
       let caps: HarnessCaps | undefined
       try {
         caps = this.harness.resolveStored(selectedModel, { purpose: 'composer', allowDisabled: true }).caps
       } catch {
         caps = undefined
       }
-      if (caps && handoffDelivery(caps) === 'prompt_preamble') {
-        // Prompt-injected runtimes own their context. Without a reported window, do not display
-        // a fabricated Mousse context measurement.
-        if (contextGauge(caps) !== 'reported') {
-          return { percent: 0, used: 0, limit: 0, modelName: selectedModel.model, source: 'estimated', categories: [] }
-        }
-        const key = `${selectedModel.llmProvider}:${selectedModel.model}`
-        const stored = this.nativeContext.lastTurnUsage
-        const capacity = this.nativeContext.nativeProviderModel
-        const matches = stored?.modelKey === key && stored.contextRevision === (this.nativeContext.revision ?? 0)
-        const limit = capacity?.selectedModel === selectedModel.model ? capacity.contextWindow ?? 0 : 0
-        const usage = computeContextUsage({
-          messages: getActiveMessages(this.nativeContext), draftInput: request.draftInput,
-          contextLimit: limit, modelName: capacity?.selectedModel === selectedModel.model ? capacity.modelName : selectedModel.model,
-          lastMeasuredInput: matches ? stored.input : null,
-          lastMeasuredCacheRead: matches ? stored.cacheRead : null,
-          lastMeasuredCacheWrite: matches ? stored.cacheWrite : null,
-          measuredAtMessageLength: matches ? stored.measuredAtHistoryLength : 0,
-          summaryText: getCompactionSummary(this.nativeContext),
-          systemPromptText: '', legacyEstimated: this.nativeContext.fidelity === 'legacy-estimated'
-        })
-        const latestResponse = [...this.session.messages].reverse().find((message) => message.responseMetadata?.tokensUsed !== undefined)
-        return { ...usage, limit, modelLimit: limit, percent: limit > 0 ? usage.percent : 0, processedTokens: latestResponse?.responseMetadata?.tokensUsed }
+      // Runtimes own their context. Without a reported window, do not display a fabricated Mousse
+      // context measurement.
+      if (!caps || contextGauge(caps) !== 'reported') {
+        return { percent: 0, used: 0, limit: 0, modelName: selectedModel.model, source: 'estimated', categories: [] }
       }
-      const { limit, modelName } = this.llm.getSelectedModelContextLimit(request.mode, modelOverride)
-      const contextInputs = await this.llm.getContextInputs(
-        request.mode,
-        request.draftInput,
-        {
-          ...modelOverride,
-          projectPath: this.session.projectCwd ?? undefined,
-          contextSummary: getCompactionSummary(this.nativeContext)
-        }
-      )
-      const contextRevision = this.nativeContext.revision ?? 0
-      const storedUsage = this.nativeContext.lastTurnUsage
-      const measurementMatches =
-        this.lastMeasuredContextSignature === contextInputs.signature &&
-        (!storedUsage?.modelKey || storedUsage.modelKey === contextInputs.modelKey) &&
-        (storedUsage?.contextRevision === undefined || storedUsage.contextRevision === contextRevision)
+      const key = `${selectedModel.llmProvider}:${selectedModel.model}`
+      const stored = this.nativeContext.lastTurnUsage
+      const capacity = this.nativeContext.nativeProviderModel
+      const matches = stored?.modelKey === key && stored.contextRevision === (this.nativeContext.revision ?? 0)
+      const limit = capacity?.selectedModel === selectedModel.model ? capacity.contextWindow ?? 0 : 0
       const usage = computeContextUsage({
-        messages: getActiveMessages(this.nativeContext),
-        draftInput: request.draftInput,
-        contextLimit: limit,
-        modelName,
-        lastMeasuredInput: measurementMatches ? this.lastMeasuredInput : null,
-        lastMeasuredCacheRead: measurementMatches ? this.lastMeasuredCacheRead : null,
-        lastMeasuredCacheWrite: measurementMatches ? this.lastMeasuredCacheWrite : null,
-        measuredAtMessageLength: this.measuredAtHistoryLength,
-        legacyEstimated: this.nativeContext.fidelity === 'legacy-estimated' && !measurementMatches,
-        summaryText: this.nativeContext.compaction?.summary,
-        systemPromptText: contextInputs.baseSystemPromptText ?? contextInputs.systemPromptText,
-        mcpToolsText: contextInputs.mcpToolsText,
-        otherToolsText: contextInputs.otherToolsText
+        messages: getActiveMessages(this.nativeContext), draftInput: request.draftInput,
+        contextLimit: limit, modelName: capacity?.selectedModel === selectedModel.model ? capacity.modelName : selectedModel.model,
+        lastMeasuredInput: matches ? stored.input : null,
+        lastMeasuredCacheRead: matches ? stored.cacheRead : null,
+        lastMeasuredCacheWrite: matches ? stored.cacheWrite : null,
+        measuredAtMessageLength: matches ? stored.measuredAtHistoryLength : 0,
+        summaryText: getCompactionSummary(this.nativeContext),
+        systemPromptText: '', legacyEstimated: this.nativeContext.fidelity === 'legacy-estimated'
       })
       const latestResponse = [...this.session.messages].reverse().find((message) => message.responseMetadata?.tokensUsed !== undefined)
-      return { ...usage, modelLimit: limit, processedTokens: latestResponse?.responseMetadata?.tokensUsed }
+      return { ...usage, limit, modelLimit: limit, percent: limit > 0 ? usage.percent : 0, processedTokens: latestResponse?.responseMetadata?.tokensUsed }
     }
     if (threadId && threadId !== this.session.threadId) {
       const session = this.getOrCreateSession(threadId)
@@ -9217,8 +9102,6 @@ export class OrchestratorService extends EventEmitter {
         this.persist(true)
       }
     }
-    // Set once the adapter is resolved; read by the post-turn action parsing below.
-    let promptRuntime = false
     // SPEC §16.1-§16.2: context handed over this turn (provider switch, fork, merge-back).
     let handoffs: TurnHandoffs | null = null
     const onCompaction = (phase: 'start' | 'complete' | 'unchanged'): void => {
@@ -9296,52 +9179,18 @@ export class OrchestratorService extends EventEmitter {
         cwd: opts?.bot ? opts.bot.scratch : session.projectCwd,
         ...this.turnApprovals(session.threadId, engineRunId, opts)
       }, opts?.bot?.policy)
-      // A transcript-native runtime (the pi loop) is sent Mousse's transcript and tools, so Mousse
-      // keeps that transcript within the window before the turn. A prompt-injected runtime owns its
-      // loop, context and tools and receives prior turns as a prompt preamble.
-      promptRuntime = handoffDelivery(instance.caps) === 'prompt_preamble'
+      // Every runtime owns its loop, context and tools and receives prior turns as a prompt preamble.
       const modelOverride = opts?.modelOverride ?? session.modelOverride
       const contextSettings = normalizeContextSettings(this.settingsStore.get().context)
       // Runtimes with their own loop get the browser through Mousse's MCP server.
-      const browserExecution = promptRuntime && !mcpAttachable(instance.caps)
+      const browserExecution = !mcpAttachable(instance.caps)
         ? undefined
         : this.mainBrowserFactory
           ? this.mainBrowserFactory({ threadId: session.threadId, turnId, source: opts?.source, mode })
           : this.mainAgentBrowser?.execution.threadId === session.threadId && this.mainAgentBrowser.execution.turnId === turnId ? this.mainAgentBrowser : undefined
-      let configuredThreshold: number | undefined
-      if (!promptRuntime) {
-        const { limit } = this.llm.getSelectedModelContextLimit(mode, modelOverride)
-        let activeTokens = estimateActiveContextTokens(
-          getActiveMessages(this.nativeContext),
-          getCompactionSummary(this.nativeContext)
-        )
-        try {
-          const contextInputs = await this.llm.getContextInputs(mode, userContent, {
-            ...modelOverride,
-            projectPath: session.projectCwd ?? undefined,
-            browser: browserExecution,
-            contextSummary: getCompactionSummary(this.nativeContext)
-          })
-          activeTokens += Math.ceil(((contextInputs.baseSystemPromptText ?? contextInputs.systemPromptText).length + contextInputs.mcpToolsText.length + contextInputs.otherToolsText.length) / 4)
-        } catch {
-          // Prompt preflight is advisory. The actual chat path owns provider/model
-          // validation and produces the authoritative connection error.
-        }
-        configuredThreshold = resolveContextCompactionTokens(contextSettings.compactionTokens, limit)
-        if (contextSettings.compactionEnabled && shouldCompactNativeContext(
-          activeTokens,
-          limit,
-          DEFAULT_COMPACTION_RESERVE_TOKENS,
-          configuredThreshold
-        )) {
-          onCompaction('start')
-          await new Promise<void>((resolve) => setTimeout(resolve, 30))
-          compactTranscript()
-        }
-      }
       const planning: { failed: boolean; nativeFork?: boolean } = { failed: false }
       handoffs = await this.planTurnHandoffs({
-        session, runId: engineRunId, resolved: instance, selection: selectedModel, previousModel, promptRuntime,
+        session, runId: engineRunId, resolved: instance, selection: selectedModel, previousModel,
         content: userContent, images, mode, modelOverride, planning
       })
       if (handoffs) this.recordHandoffMarkers(session, handoffs, switchMarker, turnId, selectedModel)
@@ -9371,13 +9220,11 @@ export class OrchestratorService extends EventEmitter {
         contextSummary: handoffs?.replaceHistory ? undefined : getCompactionSummary(this.nativeContext),
         images,
         appletInstructions: this.appletStore ? this.appletCatalogue() : undefined,
-        nativeHistory: promptRuntime
-          ? handoffs?.replaceHistory ? '' : nativeAgentHistory(this.nativeContext, turnNativeStartBoundary.messageIndex)
-          : undefined,
-        ...(promptRuntime && handoffs?.historyHandedOver ? { historyHandedOver: true } : {}),
+        nativeHistory: handoffs?.replaceHistory ? '' : nativeAgentHistory(this.nativeContext, turnNativeStartBoundary.messageIndex),
+        ...(handoffs?.historyHandedOver ? { historyHandedOver: true } : {}),
         // A branch forked for this very turn holds the parent's history: it stays trusted even when
         // planning failed after it was made.
-        ...(promptRuntime && planning.failed && !planning.nativeFork ? { handoffUnplanned: true } : {}),
+        ...(planning.failed && !planning.nativeFork ? { handoffUnplanned: true } : {}),
         signal: turn.abort.signal
       }
       const turnSink: TurnSink = {
@@ -9413,8 +9260,7 @@ export class OrchestratorService extends EventEmitter {
         compaction: onCompaction,
         retry: (attempt) => this.addSystemMessage(`Retrying provider request (${attempt}/5)…`),
         progress: () => { providerProgress = true },
-        // Runtimes that do not record usage themselves; LlmClient records pi usage, and
-        // recordLastTurnUsage consumes the TurnResult below.
+        // Usage statistics, as each runtime reports them.
         usage: (usage) => this.lineEditStats?.recordUsage({
           timestamp: new Date().toISOString(), provider: selectedModel.llmProvider,
           model: promptMetrics?.realModelName ?? selectedModel.model, input: usage.input, output: usage.output,
@@ -9480,7 +9326,7 @@ export class OrchestratorService extends EventEmitter {
         stagedApplets.push(validateAppletSubmission(value))
         return { queued: true, title: stagedApplets[stagedApplets.length - 1].title }
       } : undefined
-      const app = appTurn ? await this.completeAppTurn(appTurn.turn, { promptRuntime, browser: browserExecution, onPublishApplet,
+      const app = appTurn ? await this.completeAppTurn(appTurn.turn, { browser: browserExecution, onPublishApplet,
         // What another thread's agent wrote is never read for `/skill` mentions: only a person invokes a skill.
         userContent: opts?.agent ? '' : userContent,
         instanceId: instance.instanceId, model: selectedModel.model, approvals: opts?.bot ? 'never' : binding.policy.approvals, ...(opts?.bot?.instructions ? { botInstructions: opts.bot.instructions } : {}) }) : undefined
@@ -9493,18 +9339,10 @@ export class OrchestratorService extends EventEmitter {
             ? createAgentToolAccess(SHARED_READER_POLICY, session.sharedWorkspace.path)
             : turnAuthority && turnWriter ? { allows: () => true, execute: (_name, _args, run) => { conversationToolsUsed = true; return turnAuthority.runWriter(turnWriter, run) } } : undefined,
           toolLedger: this.toolLedgerFor(engineRunId),
-          // The loop's app tools act only while this run is the thread's active one.
+          // The app tools act only while this run is the thread's active one.
           ...(engineRunId && this.runEngine ? { runActive: () => this.runEngine?.getActiveRun(session.threadId)?.runId === engineRunId } : {})
         },
         context: {
-          // In-loop compaction checkpoints index the sent transcript; a switch handoff is not canonical.
-          toolLoopSafety: contextSettings.compactionEnabled && configuredThreshold !== undefined && !handoffs?.replaceHistory
-            ? {
-                compactionThresholdTokens: configuredThreshold,
-                compactNativeMessages: (nativeMessages) =>
-                  compactMessagesAtSafeBoundary(nativeMessages, undefined, this.nativeContext.compaction)
-              }
-            : undefined,
           recoverOverflow: () => {
             if (conversationToolsUsed || providerProgress || !contextSettings.compactionEnabled) return null
             onCompaction('start')
@@ -9560,26 +9398,8 @@ export class OrchestratorService extends EventEmitter {
         tokensUsed: result.totalTokensUsed,
         tokensPerSecond: result.tokensPerSecond
       }
-      if (promptRuntime) {
-        // No-op when the adapter already committed through `nativeHistoryAfterTurn`.
-        commitPromptTurn(result.text)
-      } else {
-        this.commitActiveNativeMessages(handoffs ? handoffs.canonical(result.nativeMessages) : result.nativeMessages)
-        if (handoffs) {
-          this.persist(true)
-          handoffs.committed()
-        }
-        // Provider prompt usage excludes the assistant message it produced.
-        this.recordLastTurnUsage({
-          input: result.usage.input,
-          cacheRead: result.usage.cacheRead,
-          cacheWrite: result.usage.cacheWrite,
-          signature: result.contextSignature,
-          measuredAtHistoryLength: Math.max(0, getActiveMessages(this.nativeContext).length - 1),
-          contextRevision: this.nativeContext.revision ?? 0,
-          modelKey: result.contextModelKey
-        })
-      }
+      // No-op when the adapter already committed through `nativeHistoryAfterTurn`.
+      commitPromptTurn(result.text)
     } catch (err) {
       const normalized = normalizeAppError(err, 'orchestrator_turn_failed')
       const isAbort = turn.abort.signal.aborted || normalized.errorInfo.category === 'cancelled'
@@ -9588,7 +9408,7 @@ export class OrchestratorService extends EventEmitter {
       if (isAbort) {
         aborted = true
         assistantText = ''
-      } else if ((err instanceof ConnectionRetriesExhaustedError || isRetriesExhausted(err)) && !usageLimitOf(err)) {
+      } else if (isRetriesExhausted(err) && !usageLimitOf(err)) {
         // A usage limit is never a connection failure, however often the provider's own retries met it: it pauses below.
         connectionFailed = true
         providerError = serializeAppError(normalized)
@@ -9758,7 +9578,7 @@ export class OrchestratorService extends EventEmitter {
     }
 
     // Vendor runtimes act through their own tools; `mousse-actions` blocks are a pi-loop protocol.
-    const parsedActions = promptRuntime ? [] : parseActions(assistantText)
+    const parsedActions: ReturnType<typeof parseActions> = []
     const actions = filterActionsForChatMode(parsedActions, mode)
     const displayText = stripActionBlocks(assistantText) + stagedApplets.map(source => '\n\n```mousse-applet\n' + JSON.stringify(source) + '\n```').join('')
 

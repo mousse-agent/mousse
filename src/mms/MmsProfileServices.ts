@@ -441,7 +441,6 @@ export class MmsProfileServices {
       instanceMap: this.providerInstances,
       drivers: [
         piDriver({
-          client: () => this.orchestrator.piChatClient(),
           credentials: () => this.providerAuth,
           // `pi:*` instances run on Pi's agent when this build ships its runtime (PR 2 §5).
           rpc: piRpcProfileOptions({

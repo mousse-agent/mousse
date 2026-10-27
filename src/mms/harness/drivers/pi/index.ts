@@ -1,31 +1,41 @@
 import { harnessAppError, type AddOptionMethod } from '../../../../shared/harness/types'
 import { piInstanceId, piProviderIdOf } from '../../../../shared/providerInstances'
 import { foldedInto } from '../../../../shared/harness/move'
-import { PiLoopAdapter, type PiChatClient } from '../../../run/adapters/pi/PiLoopAdapter'
-import { decodeInstanceConfig, type DriverAddOption, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig } from '../../driver'
-import { PI_LEGACY_CAPS, piInstanceRuntime, type PiCredentials } from './engines/legacy'
-import { createRpcRuntime, piRpcCaps, piRpcEvidenceOf, piRpcHasEvidence, type PiRpcDriverOptions } from './engines/rpc'
-import { piEngineFor, piEngineOf, piEngineSwitchable, storedPiEngine } from './engines'
+import type { ProviderAdapter } from '../../../run/adapters/ProviderAdapter'
+import { decodeInstanceConfig, type DriverAddOption, type DriverContext, type DriverRuntime, type HarnessDriver } from '../../driver'
+import { piInstanceRuntime, type PiCredentials } from './instance'
+import { createRpcRuntime, PI_RPC_CAPS, piRpcCaps, piRpcEvidenceOf, type PiRpcDriverOptions } from './engines/rpc'
 import { PI_NATIVE_TOOLS } from '../../pi/nativeTools'
 import { piRetiredOf, piRetiredPrompt } from './retired'
 
-export { PI_LEGACY_CAPS, type PiCredentials } from './engines/legacy'
+export type { PiCredentials } from './instance'
 export { PI_RPC_CAPS, PI_RPC_EXACT_CAPS, PI_RPC_NO_SHELL_CAPS, piRpcCaps, piRpcEvidenceLevel, piRpcHasEvidence, type PiRpcDriverOptions, type PiRpcEvidenceLevel } from './engines/rpc'
-export { PI_LEGACY_ONLY, piEngineFor, piEngineOf } from './engines'
 export { PI_NATIVE_TOOLS } from '../../pi/nativeTools'
 export { PI_RETIRED, piRetiredOf } from './retired'
 
 /**
- * Decoded with the instance id, `engine` is the engine in effect (`engines.ts`); without it (a
- * patch, the bare route) only the stored choice, so an unresolved config runs on the loop.
+ * A build without Pi's packaged runtime (no `rpc` options): the instance keeps its sign-in and
+ * models, and every turn is refused with the reason.
  */
-function decodePiConfig(raw: Record<string, unknown> | undefined, instanceId: string | undefined, rpcAvailable: boolean): InstanceConfig {
-  const config = decodeInstanceConfig(raw, { privateHome: false })
-  const stored = storedPiEngine(raw)
-  const providerId = instanceId ? piProviderIdOf(instanceId) : undefined
-  const engine = providerId ? piEngineFor(providerId, stored, rpcAvailable) : stored
-  if (engine) config.engine = engine
-  return config
+function noRuntimeAdapter(): ProviderAdapter {
+  return {
+    driver: 'pi',
+    capabilities: {
+      steer: PI_RPC_CAPS.steer,
+      interrupt: PI_RPC_CAPS.interrupt,
+      rollback: PI_RPC_CAPS.rollback,
+      fork: PI_RPC_CAPS.fork,
+      events: PI_RPC_CAPS.events,
+      containment: PI_RPC_CAPS.containment,
+      historyInjection: PI_RPC_CAPS.historyInjection,
+      mcp: PI_RPC_CAPS.mcp,
+      childPolicy: PI_RPC_CAPS.childPolicy
+    },
+    startTurn: async (input) => {
+      throw harnessAppError({ code: 'unsupported', message: 'This build of Mousse has no Pi runtime, so it cannot run this model. Install a build that includes it.', instanceId: input.instanceId })
+    },
+    interrupt: async () => 'not_active'
+  }
 }
 
 /**
@@ -86,23 +96,16 @@ function piProviderKnown(credentials: PiCredentials | undefined, providerId: str
 }
 
 /**
- * The `pi` driver: every `pi:<provider>` instance. Two engines share one stored kind:
- * - `legacy`, the in-process pi-ai loop (`LlmClient`), shared by the profile: the default, and
- *   always for the bare route (`openai-codex` and `cursor` are retired: `retired.ts`);
- * - `rpc`, Pi's agent as its own process per thread (`harness/pi/engine.ts`), for an instance the
- *   user switched to it (Advanced → Engine: New engine), once the profile gave the driver its `rpc`
- *   options (the packaged runtime exists).
+ * The `pi` driver: every `pi:<provider>` instance, on Pi's agent as its own process per thread
+ * (`harness/pi/engine.ts`) once the profile gave the driver its `rpc` options (the packaged runtime
+ * exists); without them every turn is refused. `openai-codex` and `cursor` are retired
+ * (`retired.ts`). Each instance has a Mousse-owned home under its state dir (Pi's agent dir).
  *
- * An instance on the RPC engine, built-in ones included, has a Mousse-owned home under its state
- * dir (Pi's agent dir); one on the legacy loop keeps its home, which the loop does not read.
+ * A stored `engine` (the removed Advanced → Engine setting) is ignored and dropped on the next write.
  */
-export function piDriver(options: { client: () => PiChatClient; credentials?: () => PiCredentials | undefined; rpc?: PiRpcDriverOptions }): HarnessDriver {
-  // One loop adapter for every legacy pi instance: the loop resolves the provider per turn.
-  const adapter = new PiLoopAdapter(options.client)
+export function piDriver(options: { credentials?: () => PiCredentials | undefined; rpc?: PiRpcDriverOptions } = {}): HarnessDriver {
   const credentials = () => options.credentials?.()
-  /** Definitions run on the RPC engine: the instance is on it, and its evidence (with or without the shell) passed here. */
-  const definitionsOnRpc = (config: InstanceConfig): boolean =>
-    piEngineOf(config, Boolean(options.rpc)) === 'rpc' && piRpcHasEvidence(piRpcEvidenceOf(options.rpc!))
+  const caps = () => (options.rpc ? piRpcCaps(piRpcEvidenceOf(options.rpc)) : PI_RPC_CAPS)
   return {
     kind: 'pi',
     label: 'Mousse agent',
@@ -126,48 +129,36 @@ export function piDriver(options: { client: () => PiChatClient; credentials?: ()
     },
     addOptions: () => piAddOptions(credentials()),
     privateHome: false,
-    // Pi's agent dir is the instance's state-dir home. The legacy loop reads no home, so its
-    // instances keep theirs (`default`) and their bindings stay valid.
-    alwaysPrivateHome: (config) => piEngineOf(config, Boolean(options.rpc)) === 'rpc',
+    // Pi's agent dir is the instance's state-dir home.
+    alwaysPrivateHome: true,
     canInstall: false,
-    // The loop runs a custom model with its provider's transport (`customModelDefinition`).
+    // A custom model runs with its provider's transport (`customModelDefinition`).
     customModels: true,
     // Chat titles: one pi-ai request in Mousse's process (`runPiOneShot`).
     oneShot: true,
     methodLabel: 'API key or sign-in',
-    // The RPC engine's extension stamps the attempt token on every Mousse call (the legacy loop has no MCP).
+    // The engine's extension stamps the attempt token on every Mousse call.
     mcpTurnBinding: 'per_call',
-    // The pi loop calls the app tools in process and proxies the user's MCP servers.
+    // Pi's agent reaches the user's MCP servers through Mousse's MCP server.
     userMcp: 'proxy',
-    decodeConfig: (raw, instanceId) => decodePiConfig(raw, instanceId, Boolean(options.rpc)),
-    engine: (instanceId, stored) => {
-      const providerId = piProviderIdOf(instanceId) ?? ''
-      return { effective: piEngineFor(providerId, storedPiEngine(stored), Boolean(options.rpc)), switchable: piEngineSwitchable(providerId, Boolean(options.rpc)) }
-    },
+    decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),
     retired: (instanceId) => {
       const retired = piRetiredOf(piProviderIdOf(instanceId))
       return retired ? piRetiredPrompt(retired) : undefined
     },
-    caps: (config) => (piEngineOf(config, Boolean(options.rpc)) === 'rpc' ? piRpcCaps(piRpcEvidenceOf(options.rpc!)) : PI_LEGACY_CAPS),
-    // The RPC engine's gate holds Pi's built-ins to a bot turn's authority (`/pi/gate`).
-    botAuthority: (config) => piEngineOf(config, Boolean(options.rpc)) === 'rpc',
-    nativeToolNames: (neutral, config) => (piEngineOf(config, Boolean(options.rpc)) === 'rpc' ? PI_NATIVE_TOOLS[neutral] ?? [] : []),
-    // Agent definitions run on Pi's agent where its evidence suite passed, with or without the
-    // contained shell (a fresh process and session per turn, the definition's system prompt, its
-    // exact tools and limits: PR 4 4d-rpc). Without the contained shell (a no-shell record), a
-    // definition's shell command asks a person first and an unattended one runs none. Its browser is
-    // Mousse's browser app tools over its MCP server, held to the definition's authority.
-    // Everywhere else, on the legacy engine, and for a definition that needs the loop (its settings
-    // not known, or a spend limit only the loop holds), they run on Mousse's loop as they always have.
-    definitionCaps: (config, needs) => (definitionsOnRpc(config) && !needs?.loop ? piRpcCaps(piRpcEvidenceOf(options.rpc!)) : PI_LEGACY_CAPS),
+    // Where the evidence suite passed for this platform and Pi version, `exact` tool control (with or
+    // without the contained shell); elsewhere `approval_only`, so agent definitions are refused there
+    // with a typed reason. With a no-shell record, a definition's shell asks a person first and an
+    // unattended one runs none (`PiRpcEngine.gate`).
+    caps,
+    // The engine's gate holds Pi's built-ins to a bot turn's authority (`/pi/gate`).
+    botAuthority: () => Boolean(options.rpc),
+    nativeToolNames: (neutral) => (options.rpc ? PI_NATIVE_TOOLS[neutral] ?? [] : []),
     create(context: DriverContext): DriverRuntime {
       const providerId = piProviderIdOf(context.instanceId) ?? ''
-      if (providerId && piEngineFor(providerId, piEngineOf(context.config, Boolean(options.rpc)), Boolean(options.rpc)) === 'rpc') {
-        const runtime = createRpcRuntime(context, providerId, context.config.displayName ?? credentials()?.getProviderDisplayName?.(providerId) ?? providerId, credentials, options.rpc!)
-        // The loop stays for definitions whose caps are the loop's (`definitionCaps`): the gateway picks per turn.
-        return { ...runtime, definitionAdapter: adapter }
-      }
-      return piInstanceRuntime(context.instanceId, providerId, credentials, adapter)
+      if (providerId && options.rpc)
+        return createRpcRuntime(context, providerId, context.config.displayName ?? credentials()?.getProviderDisplayName?.(providerId) ?? providerId, credentials, options.rpc)
+      return piInstanceRuntime(context.instanceId, providerId, credentials, noRuntimeAdapter())
     }
   }
 }

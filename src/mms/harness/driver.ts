@@ -50,12 +50,6 @@ export interface InstanceConfig {
    */
   setup?: 'managed' | 'existing'
   /**
-   * Which engine runs a `pi` instance: Pi's agent as its own process (`rpc`) or the in-process pi
-   * loop (`legacy`). Stored only as the user's choice; decoded with the instance id it is the
-   * engine in effect (`drivers/pi/engines.ts`). Part of the record key: a switch builds a new runtime.
-   */
-  engine?: 'rpc' | 'legacy'
-  /**
    * Signed out in Mousse (Sign out on the page): the gateway refuses its turns and reports it signed
    * out without asking the runtime, whatever the agent's own sign-in says.
    */
@@ -187,8 +181,6 @@ export type OneShotTask = 'title' | 'pull_request' | 'commit_message'
 export interface DriverRuntime {
   /** The turn runtime of this instance. */
   readonly adapter: ProviderAdapter
-  /** Runs agent definitions' turns, when they do not run on `adapter` (`HarnessDriver.definitionCaps`). */
-  readonly definitionAdapter?: ProviderAdapter
   /**
    * One request with no tools (`HarnessDriver.oneShot`). Throws the provider's failure; `signal`
    * aborts it (the caller stopped, or the gateway's inactivity timeout).
@@ -418,15 +410,9 @@ export interface HarnessDriver {
   /** What the driver offers in Add provider (`providers.catalog.addOptions`), without `added`. */
   addOptions?(): DriverAddOption[]
   /**
-   * Lenient decoder of an instance's stored `config`: unknown or malformed fields fall back. With
-   * `instanceId`, fields that default per instance are resolved (the `pi` driver's engine).
+   * Lenient decoder of an instance's stored `config`: unknown or malformed fields fall back.
    */
   decodeConfig(raw: Record<string, unknown> | undefined, instanceId?: string): InstanceConfig
-  /**
-   * The engine an instance of a driver with several runs on (`pi`): the one in effect for its
-   * stored config, and whether the user may switch it (Providers → Advanced → Engine).
-   */
-  engine?(instanceId: string, stored: Record<string, unknown> | undefined): { effective: 'rpc' | 'legacy'; switchable: boolean }
   /**
    * The Move prompt of an instance a Mousse update retired (`pi`: `drivers/pi/retired.ts`), else
    * undefined. A retired instance keeps its record and sign-in, runs nothing, and moves on.
@@ -438,12 +424,6 @@ export interface HarnessDriver {
    */
   /** `instanceId`: the entry, for caps that depend on what was read for it (a locked entry's policy). */
   caps(config: InstanceConfig, installedVersion?: string, facts?: RuntimeFacts, instanceId?: string): HarnessCaps
-  /**
-   * The caps an agent definition's turn runs on, when the instance runs definitions on another
-   * runtime than its chats (`DriverRuntime.definitionAdapter`): a Pi connection on the RPC engine
-   * runs definitions on Mousse's loop until Pi RPC can hold them (PR 4 unit 4d-rpc). Absent: `caps`.
-   */
-  definitionCaps?(config: InstanceConfig, needs?: { loop?: boolean }): HarnessCaps
   /**
    * Arguments that make the executable print its version; `null` when it has no such flag (the
    * probe then skips the version check and the handshake decides whether it runs). Default

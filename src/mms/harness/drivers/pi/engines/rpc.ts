@@ -7,7 +7,7 @@ import { PiRpcEngine, type PiEngineCatalog, type PiMousseTool, type PiRpcEngineO
 import type { PiRuntimePaths } from '../../../pi/launch'
 import type { PiOAuthSource } from '../../../pi/oauthBroker'
 import { piShellPath } from '../../../pi/settings'
-import { piInstanceRuntime, type PiCredentials } from './legacy'
+import { piInstanceRuntime, type PiCredentials } from '../instance'
 
 /**
  * Pi's agent as its own process (PR 2 §4): a `pi:*` instance the user switched to it (Advanced →
@@ -44,8 +44,7 @@ export const PI_RPC_CAPS: HarnessCaps = Object.freeze({
   contextUsage: 'reported',
   toolControl: 'approval_only',
   budgets: 'hard',
-  spendLimits: 'reserved',
-  definitionLimits: 'none'
+  spendLimits: 'reserved'
 })
 
 /** What decides whether the evidence suite passed here: the platform, the pinned Pi and the records. */

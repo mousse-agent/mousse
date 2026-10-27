@@ -35,7 +35,7 @@ export function adapterDriver(adapter: ProviderAdapter, extra: Partial<HarnessCa
     oneShot: adapter.driver === 'pi',
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),
     // Mousse-run tools (strong containment) are exact; the vendor-like test runtimes ask first.
-    caps: () => ({ ...adapter.capabilities, planMode: true, contextUsage, toolControl: adapter.capabilities.containment === 'strong' ? 'exact' : 'approval_only', budgets: 'unsupported', spendLimits: 'unsupported', definitionLimits: 'none', ...caps }),
+    caps: () => ({ ...adapter.capabilities, planMode: true, contextUsage, toolControl: adapter.capabilities.containment === 'strong' ? 'exact' : 'approval_only', budgets: 'unsupported', spendLimits: 'unsupported', ...caps }),
     create: () => ({
       adapter,
       configured: () => adapter.configured?.() ?? false,

@@ -2,9 +2,10 @@ import type { AssistantMessage, Message } from '../../../shared/transcript'
 import type { ProviderDriverKind } from '../../../shared/providerInstances'
 import type { PermissionMode } from '../../../shared/permissionMode'
 import type { ChatImageAttachment, ChatMode } from '../../../shared/types'
-import type { LlmChatOptions, LlmClient, ToolLoopSafetyOptions } from '../../orchestrator/LlmClient'
-import type { AgentExecutionBudget, AgentExecutionLimit, AgentRuntimeEffectTracker } from '../../../shared/agents/execution'
-import type { IntegrationActor } from '../../../shared/integrations/actor'
+import type { ToolCall } from '../../../shared/transcript'
+import type { AgentToolAccess } from '../../agents/WorkspaceAccessPolicy'
+import type { BrowserExecutionBinding } from '../../orchestrator/browser'
+import type { DelegationToolHost } from '../mcp/appTools/delegation'
 import type { StreamingLlmTextEvent, StreamingLlmThinkingEvent, StreamingLlmToolEvent } from '../../harness/turnEvents'
 import type { NativeMessageCheckpoint } from '../../orchestrator/nativeContext'
 import type { ChildPreflightContext, SubagentRefusal } from '../policy/featureGates'
@@ -80,8 +81,7 @@ export interface TurnInput {
   llmProvider: string
   /**
    * The thread or caller pinned `model`/`instanceId`. When false the selection is the configured
-   * default for `mode`, and an adapter whose runtime resolves its own default (the pi loop's
-   * `LlmClient`) is left to do so, exactly as before adapters.
+   * default for `mode`, and an adapter whose runtime resolves its own default is left to do so.
    */
   modelPinned: boolean
   mode: ChatMode
@@ -172,9 +172,8 @@ export interface TurnSink {
   /** The provider produced output; a context-overflow retry is no longer safe. */
   progress(): void
   /**
-   * Token usage for runtimes that do not record it themselves; the orchestrator adds it to the
-   * usage statistics, attributed to the latest `providerMetrics` model. The pi loop's `LlmClient`
-   * records its own usage, so the pi adapter does not report here (no double counting).
+   * Token usage; the orchestrator adds it to the usage statistics, attributed to the latest
+   * `providerMetrics` model.
    */
   usage(u: { input: number; output: number; cacheRead: number; cacheWrite: number; /** The request's price, when the runtime knows it. */ costUsd?: number }): void
   /** The provider session reference, as soon as it is known and whenever it changes (§13.1 `nativeRef`). */
@@ -265,14 +264,30 @@ export interface TurnResult {
 }
 
 /**
- * Mousse tools an in-process loop calls directly (SPEC §13.1 `ToolHost`). Vendor runtimes reach
- * the same tools over the Mousse MCP server (`AdapterHost.bridge`, SPEC §15). Every field is minted
- * by the daemon for this turn; none comes from protocol input.
+ * What the daemon mints for a turn's tools (SPEC §13.1 `ToolHost`); runtimes reach Mousse's tools
+ * over the Mousse MCP server (`AdapterHost.bridge`, SPEC §15). None comes from protocol input.
  */
-export type ToolHost = Pick<
-  LlmChatOptions,
-  'delegation' | 'toolAccess' | 'toolLedger' | 'browser' | 'onPublishApplet' | 'runActive'
->
+export interface ToolHost {
+  onPublishApplet?: (source: unknown) => unknown
+  delegation?: DelegationToolHost
+  /** Daemon-minted episode capability. */
+  toolAccess?: AgentToolAccess
+  /**
+   * Run Engine tool ledger (docs/run-engine/SPEC.md §12.6). `start` runs before a tool executes
+   * and returns the invocation id (undefined skips the ledger for that call); `commit` or
+   * `failed` follows once the outcome is known.
+   */
+  toolLedger?: {
+    /** `idempotent`: the call's class says so (a bot gate's built-in); absent, the tool's name decides. */
+    start(call: ToolCall, options?: { idempotent?: boolean }): string | undefined
+    commit(id: string): void
+    failed(id: string): void
+  }
+  /** Per-turn trusted browser binding. */
+  browser?: BrowserExecutionBinding
+  /** Whether the turn's run is still its thread's active run; an app tool call after that is refused. */
+  runActive?: () => boolean
+}
 
 /** One compaction of the thread's transcript: the compacted context to (re)send. */
 export interface RecoveredContext {
@@ -336,16 +351,7 @@ export interface AdapterHost {
    * MCP tools against the same object.
    */
   bot?: BotAuthority
-  /**
-   * What a runtime that runs a definition's loop itself (`HarnessCaps.definitionLimits: 'in_loop'`,
-   * the legacy engine) needs beside `definition`: the run's own chat client (its own task queue and
-   * browser binding), the limits left for this turn, and the effect tracker. Host-minted for a
-   * definition turn only; other runtimes ignore it.
-   */
-  definitionLoop?: DefinitionLoop
   context: {
-    /** Safe-boundary compaction inside a long tool loop; absent when compaction is disabled. */
-    toolLoopSafety?: ToolLoopSafetyOptions
     /**
      * Compacts the thread's transcript after a context-overflow failure. Returns the compacted
      * active transcript to retry with, or null when it cannot (compaction disabled or a no-op, or
@@ -371,19 +377,6 @@ export interface AdapterHost {
      */
     nativeHistoryNow?(): string
   }
-}
-
-/** `AdapterHost.definitionLoop`. */
-export interface DefinitionLoop {
-  /** A chat client of the definition run's own, made on first use. */
-  client(): Pick<LlmClient, 'chat'>
-  /** The definition's limits left for this turn (counts, tokens, cost, time). */
-  budget: AgentExecutionBudget
-  effects: AgentRuntimeEffectTracker
-  /** Only the definition's granted skills and MCP tools are visible to the loop. */
-  actor: IntegrationActor
-  /** The loop reports the limit that ended the turn, if one did. */
-  limitReached(limit: AgentExecutionLimit): void
 }
 
 /** Per-model facts the orchestrator needs outside a turn (SPEC §13.1 `describe`). */

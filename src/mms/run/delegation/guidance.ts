@@ -21,17 +21,6 @@ export function delegationGuidanceLines(): string[] {
   ]
 }
 
-/** The `## Delegation` section of the pi loop's system prompt. */
-export function piDelegationPrompt(): string {
-  return [
-    '## Delegation',
-    'Use delegate_task to hand a bounded task to a subagent. It returns immediately with a delegationId; do not wait or poll. When the subagent finishes, Mousse sends you a notice with its result. task_cancel stops a subagent and everything it delegated. list_subagents lists your subagents and what they are doing.',
-    ...delegationGuidanceLines().map((line) => `- ${line}`),
-    '- Include the plan or spec body (or a readable path), the acceptance criteria and the focused validation to run. instanceId and model default to yours; set them only when the user explicitly requests an override, using known connected identifiers. Never copy example or guessed model identifiers.',
-    '- Isolated results do not affect this task until you call integrate_delegation after the subagent finished; it runs as its own integration run after your turn and you are notified of the outcome. Never claim integration from completion alone.'
-  ].join('\n')
-}
-
 /** The delegation bullets of the Mousse MCP server's instructions. */
 export function mcpDelegationInstructions(): string[] {
   return [

@@ -68,32 +68,6 @@ export interface McpCallRequest {
 }
 
 /**
- * Who an in-process call acts for (PR 2 §2 `InProcessAuthority`). `run`: the legacy loop of a run
- * engine turn, which must still be the thread's active run (read by the run's owner through
- * `active`, else by the registry's own run engine).
- * `trusted`: a definition, bot or scheduled run with no run engine turn; its grants and budget were
- * checked by the caller (`LlmClient`), exactly as before. Either way the caller writes the ledger
- * (`ledgerEntryId`), so the registry writes none.
- */
-export type InProcessAuthority =
-  | {
-      kind: 'run'
-      runId: string
-      ledgerEntryId?: string
-      /** Whether the run is still the thread's active run, read by the run's owner (the registry may not know the run engine). */
-      active?: () => boolean
-    }
-  | { kind: 'trusted'; ledgerEntryId?: string }
-
-export interface InProcessCall {
-  turn: AppToolTurn
-  toolCallId: string
-  signal: AbortSignal
-  timeline?: ToolTimeline
-  markEffect?(): void
-}
-
-/**
  * What the central check of `readsOthers` and `managesOthers` tools asks of the thread owner (SPEC
  * §15.1). All of it is read at call time, so lowering the profile setting reaches a turn that is
  * already running.
@@ -380,53 +354,6 @@ export class ToolRegistry {
       else ledger?.commit(ledgerId)
     }
     return outcome
-  }
-
-  /**
-   * A call from an in-process loop (the pi loop, a definition, the scheduled job). The caller has
-   * already applied its own authority (a read-only child's workspace capability, a definition's
-   * grants and budget) and writes the ledger; refusals come back as error results, as the loop has
-   * always reported them.
-   */
-  async callInProcess(name: string, args: Record<string, unknown>, authority: InProcessAuthority, call: InProcessCall): Promise<ToolOutcome> {
-    const tool = this.tools.get(name)
-    if (!tool) return { text: `Unknown tool: ${name}`, isError: true }
-    const { turn } = call
-    try {
-      const caller: McpCaller = { threadId: turn.threadId, runId: turn.runId, provider: 'in_process', modeCeiling: turn.modeCeiling, accessLevel: turn.accessLevel ?? 'lineage' }
-      // A tool that reaches other threads is held to the same central check here, though no in-process
-      // registry registers one today: it fails closed rather than relying on that.
-      const scope = tool.access === 'readsOthers' || tool.access === 'managesOthers' ? this.checkOthers(tool, args, caller) : undefined
-      if (authority.kind === 'run') {
-        const active = turn.threadId ? this.options.activeRunId(turn.threadId) : null
-        const live = authority.active ? authority.active() : active === null || active === authority.runId
-        if (!live) throw notLive(`Run ${authority.runId} is no longer the active run of thread ${turn.threadId}.`)
-      }
-      const availability = tool.available?.(turn) ?? true
-      if (availability !== true) return { text: availability, isError: true }
-      const unattended = unattendedRefusal(tool, turn)
-      if (unattended) return { text: unattended, isError: true }
-      // A trusted definition had its grants checked before dispatch; the loop of a person's thread asks
-      // the user as any other runtime does, with or without a run.
-      if (tool.access === 'editsWorkspace' && !turn.trusted) {
-        callerThreadOnly(args, caller)
-        const refusal = await this.askBeforeEditing(tool, { ...caller, runId: authority.kind === 'run' ? authority.runId : turn.runId }, call.signal, args, turn.permissionMode)
-        if (refusal) return refusal
-      }
-      return await tool.handler(args, {
-        caller,
-        turn,
-        level: this.effectiveLevel(caller.accessLevel),
-        ...(scope ? { scope } : {}),
-        toolCallId: call.toolCallId,
-        signal: call.signal,
-        transport: 'in_process',
-        timeline: call.timeline,
-        markEffect: call.markEffect
-      })
-    } catch (error) {
-      return { text: error instanceof Error ? error.message : String(error), isError: true }
-    }
   }
 
   /**
