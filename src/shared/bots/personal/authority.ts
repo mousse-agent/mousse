@@ -42,6 +42,10 @@ export type WallReason =
   | { kind: 'mcp'; server: string; tool: string }
   | { kind: 'waiting' }
   | { kind: 'policy_unenforceable'; tool: string; missing: string[] }
+  /** The grant this turn runs under was revoked or replaced since the turn started. */
+  | { kind: 'revoked' }
+  /** The activation or its dispatch ended (stopped, deadline): nothing more runs. */
+  | { kind: 'ended' }
 
 /**
  * A bot activation's authority over one turn, registered with the turn's app tools (never in the

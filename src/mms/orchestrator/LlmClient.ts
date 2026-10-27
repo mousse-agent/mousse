@@ -168,7 +168,8 @@ export interface LlmChatOptions {
    * `failed` follows once the outcome is known. Host-supplied; never from protocol input.
    */
   toolLedger?: {
-    start(call: ToolCall): string | undefined
+    /** `idempotent`: the call's class says so (a bot gate's built-in); absent, the tool's name decides. */
+    start(call: ToolCall, options?: { idempotent?: boolean }): string | undefined
     commit(id: string): void
     failed(id: string): void
   }

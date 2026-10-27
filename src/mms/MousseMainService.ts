@@ -26,6 +26,7 @@ import { registerSpaceArchiveMethods } from './spaces/archive/registerMethods'
 import { registerBotMethods } from './bots/space/registerMethods'
 import { BotLocalService } from './bots/space/BotLocalService'
 import { registerAgentDefinitionMethods } from './agentDefinitions/registerMethods'
+import { registerPersonalBotMethods } from './bots/registerMethods'
 import { registerWorkflowDefinitionMethods } from './workflows/registerDefinitionMethods'
 import { registerWorkflowRunMethods } from './workflows/registerRunMethods'
 import { registerIntegrationMethods, type IntegrationDomainRegistration } from './integrations/registerMethods'
@@ -231,6 +232,7 @@ export class MousseMainService extends MmsProfileServices {
     registerChatNetworkMethods(this.domains, async profileId => (await profile(profileId)).chatNetwork)
     const chatResourceDomains = registerChatResourceMethods(this.domains, async (profileId) => (await profile(profileId)).platform.chatResources)
     this.domainCleanupSubscriptions.push(() => chatResourceDomains.dispose())
+    registerPersonalBotMethods(this.domains, async (profileId) => (await profile(profileId)).personalBots)
     registerAgentDefinitionMethods(this.domains, async (profileId, request) =>
       (await profile(profileId)).platform.agentDomain(request.method, request.params))
     registerWorkflowDefinitionMethods(this.domains, async (profileId) =>

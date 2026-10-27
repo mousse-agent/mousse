@@ -27,3 +27,11 @@ export function neutralToolIdempotent(tool: NeutralTool): boolean {
 
 /** A driver's native names per neutral tool; a missing or empty entry means the runtime has no such tool. */
 export type NativeToolTable = Readonly<Partial<Record<NeutralTool, readonly string[]>>>
+
+/**
+ * The neutral tools a native name stands for in `table` (Claude Code's `Glob` is both `list` and
+ * `search`); empty for a name with no neutral tool, which is never granted.
+ */
+export function neutralToolsOf(table: NativeToolTable, nativeName: string): NeutralTool[] {
+  return NEUTRAL_TOOLS.filter((tool) => table[tool]?.includes(nativeName))
+}

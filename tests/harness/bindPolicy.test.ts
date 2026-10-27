@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { TurnSpec } from '../../src/mms/harness/gateway'
-import { checkPolicy, HOST_APPROVALS_UNAVAILABLE, policyDigest } from '../../src/mms/harness/policy'
+import { BOT_RUNTIME_GAPS, botRuntimeGapReason, checkPolicy, HOST_APPROVALS_UNAVAILABLE, policyDigest } from '../../src/mms/harness/policy'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import type { AdapterHost, ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
@@ -18,6 +18,7 @@ import type { McpAttachmentProvider } from '../../src/mms/run/mcp/MousseMcpServe
 import { stableStringify } from '../../src/mms/run/json'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import type { BindPolicy, ExecutionBinding } from '../../src/shared/harness/types'
+import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 
 const homes: string[] = []
 afterEach(() => {
@@ -31,7 +32,10 @@ const BOT_POLICY: BindPolicy = {
   authority: { kind: 'bot', digest: 'manifest-1' }
 }
 
-function setup() {
+/** A bot authority as the bot engine registers it with a turn's app context. */
+const APP_BOT = { activationId: 'act-1', check: () => ({ ok: true }) } as unknown as BotAuthority
+
+function setup(options: { botAuthority?: boolean; gaps?: readonly string[]; startTurn?: ProviderAdapter['startTurn'] } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'mousse-bind-policy-'))
   homes.push(home)
   const hosts: AdapterHost[] = []
@@ -39,16 +43,18 @@ function setup() {
     driver: 'claude',
     capabilities: CLAUDE_SUBSCRIPTION_CAPABILITIES,
     configured: () => true,
-    startTurn: async (input, _sink, _ctl, host) => {
+    startTurn: options.startTurn ?? (async (input, _sink, _ctl, host) => {
       hosts.push(host)
       return { text: 'ok', aborted: false, modelName: input.model, totalResponseTimeMs: 1, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextSignature: 's', nativeMessages: [], providerRef: { provider: 'p' } }
-    },
+    }),
     interrupt: async () => 'not_active'
   }
   // A runtime whose every tool Mousse decides, as a locked bot runtime is.
-  const driver = adapterDriver(adapter, { toolControl: 'exact' })
+  const base = adapterDriver(adapter, { toolControl: 'exact' })
+  const driver = options.botAuthority ? { ...base, botAuthority: () => true } : base
   const instances = new ProviderInstanceService({ store: { read: () => ({ instances: undefined }), write: () => {} } })
-  const harness = testHarness({ drivers: [driver], instances, profileHome: home })
+  // Bot runtimes are refused while they lack a piece (`BOT_RUNTIME_GAPS`); these tests remove the switch unless they test it.
+  const harness = testHarness({ drivers: [driver], instances, profileHome: home, botRuntimeGaps: options.gaps ?? [] })
   const bearers: BearerTurn[] = []
   const mcp: McpAttachmentProvider = {
     bearerForTurn: (input) => {
@@ -68,7 +74,7 @@ function setup() {
       sink: { text: noop, thinking: noop, tool: noop, nativeMessages: noop, compaction: noop, retry: noop, progress: noop, usage: noop, providerRef: noop, steerAccepted: noop, providerMetrics: noop, lineEdits: noop },
       control: { drainSteer: () => undefined, heartbeat: noop },
       host: { tools: {}, context: { recoverOverflow: () => null, prepareNativeContext: () => null, nativeHistoryAfterTurn: () => '' } },
-      app: { turnToken: 'turn-token', modeCeiling: 'default', mcpEligible: true, instructions: () => ({ sessionInstructions: 'S', turnPreamble: 'P' }) },
+      app: { turnToken: 'turn-token', modeCeiling: 'default', mcpEligible: true, instructions: () => ({ sessionInstructions: 'S', turnPreamble: 'P' }), ...(binding.policy.authority?.kind === 'bot' ? { bot: APP_BOT } : {}) },
       ...(attemptOrdinal ? { attemptOrdinal } : {})
     }
   }
@@ -85,8 +91,8 @@ describe('bind with a policy', () => {
     const s = setup()
     const caller = structuredClone(BOT_POLICY)
     const binding = await s.harness.bind(s.resolved(), { mode: 'agent', origin: 'bot', policy: caller })
-    expect(binding.policy).toEqual({ ...BOT_POLICY, mode: 'default', origin: 'bot' })
-    const expected = createHash('sha256').update(stableStringify({ ...BOT_POLICY, mode: 'default', origin: 'bot' })).digest('hex')
+    expect(binding.policy).toEqual({ ...BOT_POLICY, mode: 'default', origin: 'bot', permissionMode: 'ask' })
+    const expected = createHash('sha256').update(stableStringify({ ...BOT_POLICY, mode: 'default', origin: 'bot', permissionMode: 'ask' })).digest('hex')
     expect(binding.policyDigest).toBe(expected)
     expect(policyDigest(binding.policy)).toBe(expected)
     // Frozen to its leaves; the caller's own object stays the caller's.
@@ -111,7 +117,7 @@ describe('bind with a policy', () => {
   it('keeps approvals as the shorthand, and records no digest without a policy', async () => {
     const s = setup()
     const plain = await s.harness.bind(s.resolved(), { mode: 'agent', approvals: 'never' })
-    expect(plain.policy).toEqual({ mode: 'default', approvals: 'never', origin: 'interactive' })
+    expect(plain.policy).toEqual({ mode: 'default', approvals: 'never', origin: 'interactive', permissionMode: 'ask' })
     expect(plain.policyDigest).toBeUndefined()
     expect(Object.isFrozen(plain.policy)).toBe(true)
     const both = await s.harness.bind(s.resolved(), { mode: 'agent', approvals: 'never', policy: { approvals: 'grants' } })
@@ -120,8 +126,8 @@ describe('bind with a policy', () => {
 
   it('needs exact tool control for a host authority', () => {
     const policy = { mode: 'default' as const, approvals: 'ask' as const, authority: { kind: 'bot' as const, digest: 'd' } }
-    expect(checkPolicy({ ...CLAUDE_SUBSCRIPTION_CAPABILITIES, planMode: true, contextUsage: 'reported', toolControl: 'exact', budgets: 'unsupported', spendLimits: 'unsupported' }, policy)).toEqual({ ok: true })
-    expect(checkPolicy({ ...CLAUDE_SUBSCRIPTION_CAPABILITIES, planMode: true, contextUsage: 'reported', toolControl: 'approval_only', budgets: 'unsupported', spendLimits: 'unsupported' }, policy))
+    expect(checkPolicy({ ...CLAUDE_SUBSCRIPTION_CAPABILITIES, planMode: true, contextUsage: 'reported', toolControl: 'exact', budgets: 'unsupported', spendLimits: 'unsupported' }, policy, undefined, undefined, { botRuntimeGaps: [] })).toEqual({ ok: true })
+    expect(checkPolicy({ ...CLAUDE_SUBSCRIPTION_CAPABILITIES, planMode: true, contextUsage: 'reported', toolControl: 'approval_only', budgets: 'unsupported', spendLimits: 'unsupported' }, policy, undefined, undefined, { botRuntimeGaps: [] }))
       .toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['toolControl'] } })
   })
 })
@@ -137,6 +143,66 @@ describe('approvals answered by the host', () => {
     const exact = { ...CLAUDE_SUBSCRIPTION_CAPABILITIES, planMode: true, contextUsage: 'reported' as const, toolControl: 'exact' as const, budgets: 'hard' as const, spendLimits: 'unsupported' as const }
     expect(checkPolicy(exact, { mode: 'default', approvals: 'grants', approve: 'host' })).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['toolControl'], reason: HOST_APPROVALS_UNAVAILABLE } })
     expect(checkPolicy(exact, { mode: 'default', approvals: 'grants' })).toEqual({ ok: true })
+  })
+})
+
+describe('approvals answered by a bot authority (PR 6 6c-1)', () => {
+  const authority = { activationId: 'act-1', check: () => ({ ok: true }) } as unknown as BotAuthority
+
+  it('are admitted on a runtime that holds every call to it, which receives that authority and the shared counts', async () => {
+    const s = setup({ botAuthority: true })
+    const binding = await s.harness.bind(s.resolved(), { mode: 'agent', origin: 'bot', policy: { ...BOT_POLICY, approve: 'host' } })
+    const charged: string[] = []
+    const counters = { charge: (kind: 'request' | 'tool') => { charged.push(kind); return { ok: true as const, count: charged.length } } }
+    const spec = s.spec(binding)
+    await s.harness.startTurn({ ...spec, app: { ...spec.app!, bot: authority }, host: { ...spec.host, bot: { forged: true } as never }, counters }).result
+    expect(s.hosts).toHaveLength(1)
+    // The authority comes only from the app context; one the caller put on the host is dropped.
+    expect(s.hosts[0].bot).toBe(authority)
+    expect(s.harness.checkPolicy('claude', { mode: 'default', origin: 'bot', ...BOT_POLICY, approve: 'host' })).toEqual({ ok: true })
+  })
+
+  it('a bot policy without its bot authority never reaches the runtime, nor does a bot authority on another policy', async () => {
+    const s = setup({ botAuthority: true })
+    const binding = await s.harness.bind(s.resolved(), { mode: 'agent', origin: 'bot', policy: { ...BOT_POLICY, approve: 'host' } })
+    const spec = s.spec(binding)
+    const { bot: _bot, ...plainApp } = spec.app!
+    // An ordinary app context, and a forged authority on the host, are both refused.
+    await expect(s.harness.startTurn({ ...spec, app: plainApp, host: { ...spec.host, bot: APP_BOT } }).result).rejects.toMatchObject({ code: 'policy_unenforceable', message: 'This bot turn has no bot authority, so it does not run.' })
+    const plain = await s.harness.bind(s.resolved(), { mode: 'agent', approvals: 'grants' })
+    await expect(s.harness.startTurn({ ...s.spec(plain), app: { ...s.spec(plain).app!, bot: APP_BOT } }).result).rejects.toMatchObject({ code: 'policy_unenforceable' })
+    expect(s.hosts).toHaveLength(0)
+  })
+
+  it('fail closed: with bot runtimes still lacking a piece, a bot turn is refused at admission', async () => {
+    const s = setup({ botAuthority: true, gaps: BOT_RUNTIME_GAPS })
+    const binding = await s.harness.bind(s.resolved(), { mode: 'agent', origin: 'bot', policy: { ...BOT_POLICY, approve: 'host' } })
+    await expect(s.harness.startTurn(s.spec(binding)).result).rejects.toMatchObject({ code: 'policy_unenforceable', details: { missing: ['containment'], reason: botRuntimeGapReason(BOT_RUNTIME_GAPS) } })
+    expect(s.hosts).toHaveLength(0)
+    expect(s.harness.checkPolicy('claude', { mode: 'default', origin: 'bot', ...BOT_POLICY, approve: 'host' })).toMatchObject({ ok: false, error: { missing: ['containment'] } })
+  })
+
+  it('a wall-clock budget stops the attempt when it runs out', async () => {
+    let seen: AbortSignal | undefined
+    const s = setup({
+      botAuthority: true,
+      startTurn: async (input) => {
+        seen = input.signal
+        await new Promise<void>((resolve) => input.signal.addEventListener('abort', () => resolve(), { once: true }))
+        return { text: '', aborted: true, modelName: input.model, totalResponseTimeMs: 1, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextSignature: 's', nativeMessages: [], providerRef: { provider: 'p' } }
+      }
+    })
+    const binding = await s.harness.bind(s.resolved(), { mode: 'agent', origin: 'bot', policy: { ...BOT_POLICY, approve: 'host', budget: { maxWallMs: 30 } } })
+    const result = await s.harness.startTurn(s.spec(binding)).result
+    expect(result.aborted).toBe(true)
+    expect(seen?.aborted).toBe(true)
+  })
+
+  it('are refused on the same runtime for anything but a bot authority', () => {
+    const s = setup({ botAuthority: true })
+    expect(s.harness.checkPolicy('claude', { mode: 'default', approvals: 'grants', approve: 'host', authority: { kind: 'definition', digest: 'd' } }))
+      .toMatchObject({ ok: false, error: { reason: HOST_APPROVALS_UNAVAILABLE } })
+    expect(s.harness.checkPolicy('missing', { mode: 'default', approvals: 'ask' })).toMatchObject({ ok: false, error: { code: 'policy_unenforceable' } })
   })
 })
 

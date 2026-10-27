@@ -30,6 +30,7 @@ import { PiBridge, type PiBridgeRegistration } from './bridge'
 import { DescendantTracker, OwnedGroups } from './descendants'
 import { WriterEpisode, type PiToolClass } from './episode'
 import { authorizeDefinitionCall, recordAuthorizedCall, withoutTransportFields } from '../../agentDefinitions/definitionGate'
+import type { ToolCall } from '@earendil-works/pi-ai'
 import type { AgentExecutionLimit } from '../../../shared/agents/execution'
 import { ANTHROPIC_OAUTH_REFUSED, BUDGET_EXHAUSTED, CREDENTIAL_UNAVAILABLE, GATE_REFUSALS, GATE_UNAVAILABLE, REQUEST_REFUSED, SPEND_CAP_MISMATCH } from './extension/messages'
 import { PI_BRIDGE_ENV, type PiCatalogProvider, type PiGateRequest, type PiGateResponse, type PiReadyRequest, type PiRequestRequest, type PiRequestResponse, type PiSettleRequest, type PiTurnResponse, type PiTurnTool } from './extension/protocol'
@@ -41,6 +42,9 @@ import { PI_PATH_ARGUMENTS, piResolvePath, piResolveReadPath } from './paths'
 import { piCredentialHandler, piOAuthCredential, piOAuthHandle, writePiAuth, type PiOAuthSource } from './oauthBroker'
 import type { PiRpcEvent, PiRpcExit, PiRpcRequest } from './rpcClient'
 import { preparePiHome, type PiSettingsInput } from './settings'
+import { PI_NATIVE_TOOLS } from './nativeTools'
+import { botAppToolRefusal, checkBuiltinCall, wallMessage } from '../../../shared/bots/personal/walls'
+import { neutralToolIdempotent, neutralToolsOf } from '../../../shared/harness/tools'
 
 /**
  * The Pi RPC engine (PR 2 §4): each thread of a `pi:*` instance runs on its own Pi process
@@ -328,6 +332,8 @@ class PiTurn {
   progressed = false
   readonly startedAt = Date.now()
   readonly openTools = new Map<string, { name: string; mousse: boolean }>()
+  /** A bot's built-in calls with a `started` ledger row, by call id. */
+  readonly ledgerRows = new Map<string, string>()
   readonly steers: Array<{ text: string; token?: string }> = []
   usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
   /** The current assistant message's text blocks by `contentIndex`. */
@@ -1050,7 +1056,7 @@ export class PiRpcEngine implements ProviderAdapter {
     let rewritten: Record<string, unknown> | undefined
     // An app or MCP tool is approved as the registry will run it: without transport fields.
     if (definition && !builtin) input = withoutTransportFields(request.input)
-    if (access || (definition && builtin)) {
+    if (access || ((definition || turn.host.bot) && builtin)) {
       input = { ...request.input }
       const argument = PI_PATH_ARGUMENTS[request.toolName]
       if (argument) {
@@ -1070,6 +1076,19 @@ export class PiRpcEngine implements ProviderAdapter {
         return { allow: false, reason: error instanceof Error ? error.message : GATE_REFUSALS.denied }
       }
     }
+    // A bot turn: each built-in is held to the bot's grant (tools, roots, scratch) on the path Pi
+    // will open. Its app and MCP tools are held by the Mousse MCP registry. Nobody is asked.
+    const bot = turn.host.bot
+    if (bot && builtin) {
+      const decided = checkBuiltinCall(bot, PI_NATIVE_TOOLS, request.toolName, input)
+      if (!decided.ok) return { allow: false, reason: wallMessage(decided.wall) }
+    }
+    // A bot's app tool is checked here too (the registry checks it again when it runs), so a
+    // refused call never costs a tool call.
+    if (bot && !builtin) {
+      const refusal = botAppToolRefusal(bot, request.toolName, withoutTransportFields(request.input))
+      if (refusal) return { allow: false, reason: refusal }
+    }
     // A definition run: every call, built-in or app/MCP, is authorized in full (approval included)
     // before it is charged, so a refused call never costs a tool call.
     if (definition) {
@@ -1080,8 +1099,8 @@ export class PiRpcEngine implements ProviderAdapter {
       if (thread.turn !== turn || (turn.phase as PiTurn['phase']) === 'stopping') return { allow: false, reason: GATE_REFUSALS.denied }
     }
     // The thread's permission mode: a command (and, under Ask, an edit) asks the user first. A definition
-    // run is held to its own grants above and never asks a person.
-    if (!definition && builtin) {
+    // run and a bot run are held to their own grants above and never ask a person.
+    if (!definition && !bot && builtin) {
       const refusal = await this.askPermission(turn, request.toolName, input)
       if (refusal) return refusal
       if (thread.turn !== turn || (turn.phase as PiTurn['phase']) === 'stopping') return { allow: false, reason: GATE_REFUSALS.denied }
@@ -1097,6 +1116,19 @@ export class PiRpcEngine implements ProviderAdapter {
     // An app or MCP tool runs through the Mousse MCP registry, which takes this authorization
     // instead of asking for approval a second time.
     if (definition && !builtin) recordAuthorizedCall(definition, { turnToken: turn.attemptToken, toolName: request.toolName, callId: request.toolCallId, args: input })
+    // A bot's built-in is in the run's tool ledger before it runs (`started`, then `committed` or
+    // `failed` from its end event), by its neutral class's idempotency: an `edit` cut off without
+    // an outcome is then found and shown to the owner. No row, no call.
+    if (bot && builtin) {
+      const ledger = turn.host.tools.toolLedger
+      const neutral = neutralToolsOf(PI_NATIVE_TOOLS, request.toolName)
+      const row = ledger?.start({ type: 'toolCall', id: request.toolCallId, name: request.toolName, arguments: input } as ToolCall, { idempotent: neutral.length > 0 && neutral.every(neutralToolIdempotent) })
+      if (!row) {
+        turn.episode.ended(request.toolCallId)
+        return { allow: false, reason: `${GATE_REFUSALS.denied}: the call could not be recorded` }
+      }
+      turn.ledgerRows.set(request.toolCallId, row)
+    }
     return rewritten ? { allow: true, input: rewritten } : { allow: true }
   }
 
@@ -1754,6 +1786,12 @@ export class PiRpcEngine implements ProviderAdapter {
         turn.openTools.delete(callId)
         turn.episode.ended(callId)
         const failed = event.isError === true
+        const row = turn.ledgerRows.get(callId)
+        if (row) {
+          turn.ledgerRows.delete(callId)
+          if (failed) turn.host.tools.toolLedger?.failed(row)
+          else turn.host.tools.toolLedger?.commit(row)
+        }
         sink.tool({
           kind: open?.mousse ? 'mcp_tool_call' : 'build_tool_result',
           phase: 'complete',

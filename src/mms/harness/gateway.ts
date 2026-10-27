@@ -17,6 +17,7 @@ import type {
   ProviderSelection,
   RegistryAgentView,
   RemoveInstallResult,
+  Enforceability,
   RunPolicy,
   RuntimeFacts,
   SignInResponse,
@@ -58,7 +59,7 @@ import { addedInstanceId, defaultInstanceId, InstanceCounterStore, instanceState
 import { LatestVersionCache } from './latest'
 import { RuntimeFactsStore } from './facts'
 import { questionsPrompter, refusingPrompter } from './acp/permissions'
-import { checkPermissionMode, checkPolicy, freezePolicy, hasSpendLimit, mapNeutralTools, permissionModeRefusal, policyDigest, purposeAllowed, toolControlLevel } from './policy'
+import { checkPermissionMode, checkPolicy, type CheckPolicyOptions, freezePolicy, hasSpendLimit, mapNeutralTools, permissionModeRefusal, policyDigest, purposeAllowed, toolControlLevel } from './policy'
 import { budgetLimitsOf, RunCounterBook, type CounterScope, type SpendScope } from './budget'
 import type { DefinitionAuthority } from '../agentDefinitions/definitionGate'
 import {
@@ -69,6 +70,7 @@ import {
   type PermissionLimits,
   type PermissionMode
 } from '../../shared/permissionMode'
+import type { BotAuthority } from '../../shared/bots/personal/authority'
 import { HarnessScopeStore } from './scope'
 import { sharedShellPath, type ShellPathResult } from './shellPath'
 import { compatibilityOf, fingerprintOf, PROBE_TIMEOUTS, probeInstance, sameBinary, updateAffordance, type ProbeResult } from './status'
@@ -177,6 +179,12 @@ export interface HarnessGateway {
    * about a change before the turn is admitted.
    */
   previewPermissionMode(resolved: ResolvedTurnSelection, requested: PermissionMode, cwd?: string | null): EffectivePermissionMode
+  /**
+   * Whether the instance can enforce `policy` now (its live caps, the model's spend facts, and
+   * whether its runtime holds a bot authority), as turn admission will decide: the bot editor's
+   * and the bot engine's check before anything is bound.
+   */
+  checkPolicy(instanceId: string, policy: RunPolicy, model?: string): Enforceability
   /** The selection a binding runs: a retry or recovery of a run executes its binding, never the current selection. */
   selectionOf(binding: ExecutionBinding): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'>
   /**
@@ -445,6 +453,11 @@ export interface TurnAppContext {
    * built-ins and the app and MCP tools are held to one authority.
    */
   definition?: DefinitionAuthority
+  /**
+   * A bot turn's authority (`AppToolTurn.bot`, PR 6 §4): its one source, handed to the runtime as
+   * `AdapterHost.bot` so built-ins and app and MCP tools are held to one authority.
+   */
+  bot?: BotAuthority
 }
 
 export interface TurnHandle {
@@ -479,6 +492,8 @@ export const USAGE_READ_MS = 15_000
 export const TURN_ACCOUNT_CHECK_MS = 10_000
 
 export interface HarnessGatewayOptions {
+  /** Test seam only: what bot runtimes still lack (default `BOT_RUNTIME_GAPS`: bots are refused). */
+  botRuntimeGaps?: readonly string[]
   profileHome: string
   installationHome: string
   instanceMap: ProviderInstanceService
@@ -1063,6 +1078,25 @@ export class Harness implements HarnessGateway {
     return { ok: false, error: { code: 'policy_unenforceable', message: `This provider cannot enforce the requested restrictions (toolControl). ${reason}`, missing: ['toolControl'], reason, instanceId } }
   }
 
+  checkPolicy(instanceId: string, policy: RunPolicy, model?: string): Enforceability {
+    let record: InstanceRecord
+    try {
+      record = this.record(instanceId)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return { ok: false, error: { code: 'policy_unenforceable', message, missing: ['toolControl'], reason: message, instanceId } }
+    }
+    const spendModel = model && hasSpendLimit(policy) ? record.runtime.spendModel?.(model) : undefined
+    return checkPolicy(this.recordCaps(record), policy, instanceId, spendModel, this.policyOptions(record))
+  }
+
+  private policyOptions(record: InstanceRecord): CheckPolicyOptions {
+    return {
+      hostApprovals: record.driver.botAuthority?.(record.config) === true,
+      ...(this.options.botRuntimeGaps ? { botRuntimeGaps: this.options.botRuntimeGaps } : {})
+    }
+  }
+
   selectionOf(binding: ExecutionBinding): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'> {
     if (binding.instanceId === PI_DRIVER_ID) return { instanceId: PI_DRIVER_ID, llmProvider: '', model: binding.model }
     const entry = this.instanceMap.list()[binding.instanceId]
@@ -1199,10 +1233,24 @@ export class Harness implements HarnessGateway {
       const counted = limits ? this.runCounters.acquire(spec.input.runId, limits, spec.counters, { laterAttempt: (spec.attemptOrdinal ?? 1) > 1, ...(spec.spend ? { spend: spec.spend } : {}) }) : undefined
       let signal = spec.input.signal
       try {
+        // A bot policy runs only with its bot authority, from the turn's app context: the policy's
+        // marker alone is not an authority, and a bot authority never rides on another policy.
+        const botPolicy = spec.binding.policy.authority?.kind === 'bot'
+        if (botPolicy !== Boolean(spec.app?.bot))
+          throw harnessAppError({
+            code: 'policy_unenforceable',
+            message: botPolicy ? 'This bot turn has no bot authority, so it does not run.' : 'A bot authority needs its bot policy.',
+            reason: botPolicy ? 'The binding names a bot authority that the turn does not carry.' : 'The turn carries a bot authority under a policy that is not for a bot.',
+            missing: ['toolControl'],
+            instanceId: spec.binding.instanceId
+          })
         await this.admitTurn(record, spec, entry)
         // Admission awaits; the fence is checked again right before the runtime is reached.
         this.refuseStopped(record, entry)
         signal = AbortSignal.any([spec.input.signal, entry.cancel.signal])
+        // A wall-clock budget (a bot dispatch's deadline) stops the attempt when it runs out.
+        const wallMs = spec.binding.policy.budget?.maxWallMs
+        if (wallMs !== undefined) signal = AbortSignal.any([signal, AbortSignal.timeout(Math.max(0, wallMs))])
         const input: TurnInput = { ...spec.input, signal }
         minted = this.mintBridge(record, spec)
         // Approvals other than `ask` are answered by the turn's bridge: a turn without one would
@@ -1219,10 +1267,12 @@ export class Harness implements HarnessGateway {
         // The definition authority comes only from the app context (one source for every tool).
         const base: AdapterHost = { ...spec.host }
         delete base.definition
+        delete base.bot
         const host: AdapterHost = {
           ...base,
           ...(minted ? { bridge: minted.bridge } : {}),
           ...(spec.app?.definition ? { definition: spec.app.definition } : {}),
+          ...(spec.app?.bot ? { bot: spec.app.bot } : {}),
           ...(counted ? { budget: counted.budget } : {})
         }
         const turn = await record.runtime.adapter.startTurn(input, sink, spec.control, host)
@@ -1332,7 +1382,7 @@ export class Harness implements HarnessGateway {
     const caps = binding.caps ?? this.recordCaps(record)
     // Token and spend limits also need the model's own facts (an output cap, a price).
     const spendModel = hasSpendLimit(binding.policy) ? record.runtime.spendModel?.(binding.model) : undefined
-    const enforceable = checkPolicy(caps, binding.policy, binding.instanceId, spendModel)
+    const enforceable = checkPolicy(caps, binding.policy, binding.instanceId, spendModel, this.policyOptions(record))
     if (!enforceable.ok) throw harnessAppError(enforceable.error)
     // The runtime takes its permission mode from the input: it must be the binding's.
     if (binding.policy.permissionMode !== undefined && input.permissionMode !== undefined && input.permissionMode !== binding.policy.permissionMode)
