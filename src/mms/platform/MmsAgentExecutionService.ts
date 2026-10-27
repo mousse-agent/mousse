@@ -3,8 +3,9 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { AgentDefinitionError } from '../../shared/agents/errors'
 import type { AgentExecutionResult, AgentRuntimeContextSnapshot, AgentRuntimeToolApprovalRequest } from '../../shared/agents/execution'
-import type { AgentDefinitionDomainServices, DefinitionTryRunResult } from '../agentDefinitions/registerMethods'
-import { assertRuntimeSettingsSupported } from '../agentDefinitions/runtimePolicy'
+import type { AgentDefinitionDomainServices, DefinitionTryRunPending, DefinitionTryRunResult } from '../agentDefinitions/registerMethods'
+import type { UserQuestionAnswers } from '../../shared/types'
+import { approvalTooLongReason, assertRuntimeSettingsSupported } from '../agentDefinitions/runtimePolicy'
 import type { BrowserRuntimePort } from '../../shared/browser/runtime'
 import type { AgentRuntimeHostWithBrowser } from '../orchestrator/browser'
 import type { MmsProfileServices } from '../MmsProfileServices'
@@ -40,6 +41,8 @@ export class MmsAgentExecutionService {
   private readonly root: string
   private readonly canonicalRoot: string
   private browserRuntime?: BrowserRuntimePort
+  /** Running Try Runs, by run id: who started them and the thread their questions are asked on. */
+  private readonly running = new Map<string, { definitionId: string; connectionId: string; threadId: string; threadTitle: string }>()
 
   constructor(private readonly services: MmsProfileServices) {
     this.root = join(services.getProfileHomeDir(), 'agent-runs')
@@ -57,6 +60,30 @@ export class MmsAgentExecutionService {
   /** Host-injected dispatcher. Root adapts platform.browser to BrowserRuntimePort. */
   setBrowserRuntime(port: BrowserRuntimePort | undefined): void {
     this.browserRuntime = port
+  }
+
+  /**
+   * The questions a connection's running Try Runs of a definition wait on. Their thread is a hidden
+   * "Try Agent" thread, so the Try Run panel shows them (a shell command's approval where the shell is
+   * not contained, an `ask_user`, an approval under `always`).
+   */
+  pending(input: { definitionId: string; connectionId: string }): DefinitionTryRunPending {
+    const runs: DefinitionTryRunPending['runs'] = []
+    for (const [runId, run] of this.running) {
+      if (run.definitionId !== input.definitionId || run.connectionId !== input.connectionId) continue
+      runs.push({ runId, threadId: run.threadId, threadTitle: run.threadTitle, questions: this.services.questions.listPendingForThread(run.threadId) })
+    }
+    return { runs }
+  }
+
+  /** Answers or dismisses a question of one of those runs; a request of any other thread is refused. */
+  answer(input: { definitionId: string; connectionId: string; requestId: string; answers?: UserQuestionAnswers; dismiss?: boolean; via: 'gui' | 'cli' | 'internal' }): { ok: boolean } {
+    const pending = this.services.questions.getPending(input.requestId)
+    const owned = pending !== null && [...this.running.values()].some((run) => run.definitionId === input.definitionId && run.connectionId === input.connectionId && run.threadId === pending.threadId)
+    if (!owned) return { ok: false }
+    const answeredBy = { kind: 'user' as const, via: input.via }
+    if (input.dismiss) return { ok: this.services.questions.dismiss(input.requestId, answeredBy) }
+    return { ok: this.services.questions.submitAnswers(input.requestId, input.answers ?? {}, answeredBy) }
   }
 
   tryRun(input: TryInput): Promise<DefinitionTryRunResult> {
@@ -80,10 +107,13 @@ export class MmsAgentExecutionService {
     const host: AgentRuntimeHostWithBrowser = {
       workspaceRoots: [realpathSync(workspace)],
       approveToolRequest: (request: AgentRuntimeToolApprovalRequest) => this.approve(runRoot, request),
+      // The person who started the Try Run watches it, and answers its questions in the panel.
+      attended: true,
       ...(this.browserRuntime ? { browserRuntime: this.browserRuntime } : {})
     }
     assertRuntimeSettingsSupported(resolved, host)
     const thread = this.services.threads.createThread(`Try Agent: ${resolved.settings.identity.name}`)
+    this.running.set(runId, { definitionId: resolved.definitionId, connectionId: input.connectionId, threadId: thread.id, threadTitle: `Try Agent: ${resolved.settings.identity.name}` })
     const registry = this.services.threadRuntimes.getOrHydrate(thread.id).agents
     const record: AgentRunRecord = { version: 1, runId, profileId: this.services.profileId, threadId: thread.id,
       definitionId: resolved.definitionId, definitionRevision: resolved.revision, createdAt: new Date().toISOString(), state: 'running', snapshot: resolved, input: input.prompt }
@@ -123,6 +153,7 @@ export class MmsAgentExecutionService {
       registry.updateStatus(runId, record.state)
       throw error
     } finally {
+      this.running.delete(runId)
       this.lifecycle.signal.removeEventListener('abort', cancelQuestions)
       cancelQuestions()
       this.services.events.broadcast('threads:updated', this.services.threads.listAllThreads())
@@ -138,11 +169,13 @@ export class MmsAgentExecutionService {
     const approvalId = randomUUID(), path = join(runRoot, `approval-${approvalId}.json`)
     this.assertRoot(); assertOwnedPath(this.root, path)
     const argumentsJson = canonicalJson(request.arguments)
-    if (Buffer.byteLength(argumentsJson, 'utf8') > APPROVAL_ARGUMENT_MAX_BYTES || sha256Hex(argumentsJson) !== request.argumentDigest) {
+    const tooLong = Buffer.byteLength(argumentsJson, 'utf8') > APPROVAL_ARGUMENT_MAX_BYTES
+    if (tooLong || sha256Hex(argumentsJson) !== request.argumentDigest) {
+      const reason = tooLong ? approvalTooLongReason(request) : 'Tool arguments were not safely reviewable in full.'
       atomicWriteJsonSync(path, { version: 1, approvalId, request: { canonicalToolName: request.canonicalToolName,
         argumentDigest: request.argumentDigest, threadId: request.threadId, runId: request.runId }, state: 'denied',
-        reason: 'Tool arguments were not safely reviewable in full.', decidedAt: new Date().toISOString() })
-      return { status: 'denied' as const }
+        reason, decidedAt: new Date().toISOString() })
+      return { status: 'denied' as const, reason }
     }
     atomicWriteJsonSync(path, { version: 1, approvalId, request, state: 'pending' })
     try {

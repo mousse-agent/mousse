@@ -11,7 +11,8 @@ import { appTurn } from '../run/appToolsFixture'
 import type { AgentRuntimePolicy, AgentRuntimeToolApprovalRequest } from '../../src/shared/agents/execution'
 import type { EffectiveAgentGrants } from '../../src/shared/agents/types'
 import type { AdapterHost } from '../../src/mms/run/adapters/ProviderAdapter'
-import { harness, script, setup } from './piRpcEngineFixture'
+import { PI_RPC_EXACT_CAPS } from '../../src/mms/harness/drivers/pi'
+import { harness, script, setup, type SetupOptions } from './piRpcEngineFixture'
 
 // PR 4 4b2: a definition's authority over Pi's built-in tools, at the gate (`/pi/gate`), on the real
 // pinned Pi child. Every refusal is proven by the file system (a write that never happened, a read
@@ -22,7 +23,7 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
 })
 
-function policy(project: string, overrides: { workspace?: Partial<AgentRuntimePolicy['workspace']>; script?: Partial<AgentRuntimePolicy['script']>; approval?: Partial<AgentRuntimePolicy['approval']>; source?: AgentRuntimePolicy['source'] } = {}): AgentRuntimePolicy {
+function policy(project: string, overrides: { workspace?: Partial<AgentRuntimePolicy['workspace']>; script?: Partial<AgentRuntimePolicy['script']>; approval?: Partial<AgentRuntimePolicy['approval']>; source?: AgentRuntimePolicy['source']; unattended?: true } = {}): AgentRuntimePolicy {
   return {
     profileId: 'default', threadId: 't1', runId: 'r1', definitionId: 'def-1', definitionRevision: 'rev-1',
     source: overrides.source ?? 'editor',
@@ -31,7 +32,8 @@ function policy(project: string, overrides: { workspace?: Partial<AgentRuntimePo
     approval: { askUser: true, policy: 'inherit', unattendedBehavior: 'pause', ...overrides.approval },
     memoryScope: 'off', includeCurrentThread: false, includeProjectInstructions: false, attachmentPolicy: 'none',
     fallbacks: { enabled: false, retryOn: [], allowHigherCost: false, retryCount: 0, backoffMs: 0 },
-    fallbackModels: []
+    fallbackModels: [],
+    ...(overrides.unattended ? { unattended: true as const } : {})
   }
 }
 
@@ -42,8 +44,8 @@ function grants(...tools: string[]): EffectiveAgentGrants {
 const ALL = ['read', 'write', 'edit', 'bash', 'ls', 'grep', 'find']
 
 /** One turn whose model calls `calls` in order, under `definition`; returns the tool results. */
-async function run(definition: (project: string) => DefinitionAuthority, calls: Array<{ name: string; args: Record<string, unknown> }>, host: Partial<AdapterHost> = {}) {
-  const { engine, recorder, project } = await setup(cleanups)
+async function run(definition: (project: string) => DefinitionAuthority, calls: Array<{ name: string; args: Record<string, unknown> }>, host: Partial<AdapterHost> = {}, options: SetupOptions = {}) {
+  const { engine, recorder, project } = await setup(cleanups, options)
   recorder.respond(script([...calls.map((tool) => ({ tool })), { text: 'done' }]))
   const turn = harness(project, {}, { definition: definition(project), ...host })
   const result = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
@@ -294,5 +296,74 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
     ], { bridge: { mcp: null, turnToken: 'tt', sessionInstructions: '', turnPreamble: '', userMcp: 'proxy', toolPolicy: { allow: ['read', 'write'] } } })
     expect(existsSync(join(project, 'beyond.txt'))).toBe(false)
     expect(String(results[0].response)).toContain('not granted')
+  }, 90_000)
+})
+
+// #299: where Pi's shell is not contained (a no-shell record: `weak` containment, the fixture's
+// default), a definition's shell command asks a person first whatever its grants say, the approval
+// bound to the exact command, and an unattended run runs none. Where it is contained, grants decide.
+describe('a definition’s shell where Pi’s shell is not contained (Pi RPC engine, real child)', () => {
+  const scripts = { enabled: true, allowFilesystem: true }
+  const shell = (file: string) => ({ name: 'bash', args: { command: `echo ran > ${file}` } })
+
+  it('asks a person before every command, even under grants that ask nothing; the approval is bound to the exact command', async () => {
+    const asked: AgentRuntimeToolApprovalRequest[] = []
+    const approved = await run((root) => ({
+      policy: policy(root, { script: scripts }),
+      grants: grants(...ALL),
+      approve: async (request) => (asked.push(request), { status: 'approved', digest: request.argumentDigest })
+    }), [shell('approved.txt')])
+    expect(asked.map((request) => [request.canonicalToolName, request.classification, request.arguments])).toEqual([['bash', 'script', { command: 'echo ran > approved.txt' }]])
+    expect(readFileSync(join(approved.project, 'approved.txt'), 'utf8').trim()).toBe('ran')
+
+    const denied = await run((root) => ({
+      policy: policy(root, { script: scripts }),
+      grants: grants(...ALL),
+      approve: async () => ({ status: 'denied', reason: 'not this one' })
+    }), [shell('denied.txt')])
+    expect(existsSync(join(denied.project, 'denied.txt'))).toBe(false)
+    expect(String(denied.results[0].response)).toContain('not this one')
+
+    // An approval of another command (its digest) never runs this one.
+    const other = await run((root) => ({
+      policy: policy(root, { script: scripts }),
+      grants: grants(...ALL),
+      approve: async () => ({ status: 'approved', digest: 'digest-of-another-command' })
+    }), [shell('other.txt')])
+    expect(existsSync(join(other.project, 'other.txt'))).toBe(false)
+    expect(String(other.results[0].response)).toContain('stale')
+  }, 180_000)
+
+  it('an unattended run (a workflow node, a schedule, a dispatch) runs no shell command, and nobody is asked', async () => {
+    for (const unattended of [{ source: 'cli' as const, unattended: true as const }, { source: 'workflow' as const, unattended: true as const }]) {
+      const asked: AgentRuntimeToolApprovalRequest[] = []
+      const { project, results } = await run((root) => ({
+        policy: policy(root, { script: scripts, ...unattended }),
+        grants: grants(...ALL),
+        approve: async (request) => (asked.push(request), { status: 'approved', digest: request.argumentDigest })
+      }), [shell('unattended.txt'), { name: 'write', args: { path: 'written.txt', content: 'x' } }])
+      expect(asked.map((request) => request.canonicalToolName), JSON.stringify(unattended)).toEqual([])
+      expect(existsSync(join(project, 'unattended.txt'))).toBe(false)
+      expect(String(results[0].response)).toContain("Shell commands can't run in an unattended agent run")
+      // Its other tools still run under its grants.
+      expect(readFileSync(join(project, 'written.txt'), 'utf8')).toBe('x')
+    }
+  }, 180_000)
+
+  it('a run with no way to ask a person is refused, saying why', async () => {
+    const { project, results } = await run((root) => ({ policy: policy(root, { script: scripts }), grants: grants(...ALL) }), [shell('unasked.txt')])
+    expect(existsSync(join(project, 'unasked.txt'))).toBe(false)
+    expect(String(results[0].response)).toContain('Shell commands ask a person first on this platform')
+  }, 90_000)
+
+  it('where the shell is contained (strong), the same command runs under its grants without asking', async () => {
+    const asked: AgentRuntimeToolApprovalRequest[] = []
+    const { project } = await run((root) => ({
+      policy: policy(root, { script: scripts }),
+      grants: grants(...ALL),
+      approve: async (request) => (asked.push(request), { status: 'denied' })
+    }), [shell('contained.txt')], {}, { capabilities: PI_RPC_EXACT_CAPS })
+    expect(asked).toEqual([])
+    expect(readFileSync(join(project, 'contained.txt'), 'utf8').trim()).toBe('ran')
   }, 90_000)
 })

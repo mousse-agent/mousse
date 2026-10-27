@@ -14,6 +14,8 @@ export function createAgentDefinitionsClient(transport: AgentPlatformRequester):
     importBundle: (params) => transport.request('agentDefinitions.importBundle', params),
     exportBundle: (params) => transport.request('agentDefinitions.exportBundle', params),
     validate: (params) => transport.request('agentDefinitions.validate', params),
-    tryRun: (params) => transport.request('agentDefinitions.tryRun', params)
+    tryRun: (params) => transport.request('agentDefinitions.tryRun', params),
+    tryRunPending: (params) => transport.request('agentDefinitions.tryRunPending', params),
+    tryRunAnswer: (params) => transport.request('agentDefinitions.tryRunAnswer', params)
   }
 }

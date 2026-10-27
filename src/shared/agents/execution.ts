@@ -117,6 +117,12 @@ export interface AgentRuntimePolicy {
   maxContextTokens?: number
   fallbacks: AgentRuntimeFallbackPolicy
   fallbackModels: ResolvedAgentDefinition['model']['fallbacks']
+  /**
+   * Nobody watches this run as it goes (`definitionRunUnattended`: every run whose host does not
+   * mark it attended, and every schedule, channel or workflow run). Where the platform's shell is not
+   * contained, its shell commands are refused rather than asked about. Absent: a person watches it.
+   */
+  unattended?: true
 }
 
 export interface AgentRuntimeToolApprovalRequest {
@@ -155,6 +161,12 @@ export interface AgentRuntimeHostBindings {
    * Revalidated after the await, immediately before side effects.
    */
   approveToolRequest?: AgentRuntimeToolApprovalCallback
+  /**
+   * A person watches this run and can answer its questions where they are asked (Try Run in the
+   * editor, an agent chat's reply). Absent: the run is unattended (`AgentRuntimePolicy.unattended`),
+   * so a host that forgets the mark refuses the uncontained shell rather than waiting on nobody.
+   */
+  attended?: boolean
 }
 
 export interface AgentRuntimeAttachment {

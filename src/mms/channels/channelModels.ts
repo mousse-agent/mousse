@@ -1,6 +1,6 @@
 import type { HarnessCaps, RunPolicy } from '../../shared/harness/types'
 import type { LlmProviderOption } from '../../shared/settings'
-import { checkPolicy, toolControlLevel } from '../harness/policy'
+import { checkPolicy, definitionLimitsLevel, toolControlLevel } from '../harness/policy'
 
 /**
  * The policy every channel turn binds with. Nobody in a channel can answer a tool approval, so the
@@ -8,7 +8,7 @@ import { checkPolicy, toolControlLevel } from '../harness/policy'
  */
 export const CHANNEL_POLICY: RunPolicy = Object.freeze({ mode: 'default', approvals: 'never', origin: 'interactive' })
 
-/** Shown once per channel thread whose runtime asks before some tools (`approval_only`). */
+/** Shown once per channel thread whose runtime asks before some tools (`asksBeforeTools`). */
 export const CHANNEL_APPROVALS_NOTICE = 'Tools that need approval are refused in channels.'
 
 /** The reply to a channel turn on a model that cannot hold `CHANNEL_POLICY` (it approves tools itself). */
@@ -38,7 +38,19 @@ export function channelModelOptions(providers: readonly LlmProviderOption[], cap
 export function channelGate(caps: HarnessCaps | null, instanceId?: string): { refusal?: string; approvalOnly?: true } {
   if (!caps) return {}
   if (!checkPolicy(caps, CHANNEL_POLICY, instanceId).ok) return { refusal: CHANNEL_MODEL_REFUSED }
-  return toolControlLevel(caps) === 'approval_only' ? { approvalOnly: true } : {}
+  return asksBeforeTools(caps) ? { approvalOnly: true } : {}
+}
+
+/**
+ * Whether a runtime admitted to channels asks before some of its tools, so a channel turn refuses
+ * them: one that asks Mousse before each tool (`approval_only`), and one that runs its own tools
+ * under the thread's permission mode with Mousse deciding each (`exact` outside Mousse's own loop:
+ * Pi's agent on any platform). Mousse's loop (`definitionLimits: 'in_loop'`) never showed the
+ * notice; 4h deletes it, and then every `exact` runtime shows it.
+ */
+export function asksBeforeTools(caps: HarnessCaps): boolean {
+  const control = toolControlLevel(caps)
+  return control === 'approval_only' || (control === 'exact' && definitionLimitsLevel(caps) !== 'in_loop')
 }
 
 /**
@@ -49,7 +61,7 @@ export class ChannelApprovalNotices {
   private readonly shown = new Set<string>()
 
   pending(threadId: string, caps: HarnessCaps | null): string | undefined {
-    if (!caps || toolControlLevel(caps) !== 'approval_only' || this.shown.has(threadId)) return undefined
+    if (!caps || !asksBeforeTools(caps) || this.shown.has(threadId)) return undefined
     return CHANNEL_APPROVALS_NOTICE
   }
 

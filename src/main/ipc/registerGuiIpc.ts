@@ -191,6 +191,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   'agentDefinitions.saveDraft', 'agentDefinitions.publish', 'agentDefinitions.archive',
   'agentDefinitions.duplicate', 'agentDefinitions.importBundle',
   'agentDefinitions.exportBundle', 'agentDefinitions.validate', 'agentDefinitions.tryRun',
+  'agentDefinitions.tryRunPending', 'agentDefinitions.tryRunAnswer',
   'integrations.snapshot',
   'chatReferences.resolve',
   'skills.create', 'skills.update', 'skills.editor', 'skills.enable', 'skills.archive',
