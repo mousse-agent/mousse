@@ -11,7 +11,7 @@ import type { Query, SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 import { ClaudeSubscriptionProviderService } from '../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
-import { claudeActivityComplete, claudeActivityStart } from '../src/mms/providers/claudeSubscription/claudeActivity'
+import { claudeActivityComplete, claudeActivityStart, claudeCallContext } from '../src/mms/providers/claudeSubscription/claudeActivity'
 import { ClaudeMetricsCollector } from '../src/mms/providers/claudeSubscription/metrics'
 import { TurnFrames } from '../src/mms/providers/claudeSubscription/turnFrames'
 import { TranscriptAssembler, type TranscriptStreamState } from '../src/mms/run/adapters/shared/TranscriptAssembler'
@@ -84,6 +84,9 @@ function saved(events: ProviderToolEvent[]): { rows: ChatMessage[]; byCall: (cal
   }
 }
 
+const complete = (name: string, input: unknown, structured: unknown, text: string, isError = false) =>
+  claudeActivityComplete(claudeCallContext(name, input, true), structured, text, isError)
+
 describe('claudeActivityStart and claudeActivityComplete', () => {
   it('types each tool from its arguments, and a call with unusable arguments is generic', () => {
     expect(claudeActivityStart('Bash', { command: 'ls' }, true)).toEqual({ kind: 'command', command: 'ls' })
@@ -97,7 +100,7 @@ describe('claudeActivityStart and claudeActivityComplete', () => {
     expect(claudeActivityStart('Agent', undefined, true)).toEqual({ kind: 'subagent' })
     // A Mousse delegation keeps its bounded record, not typed fields.
     expect(claudeActivityStart('mcp__mousse__delegate_task', { title: 'x', prompt: 'p' }, true)).toBeUndefined()
-    expect(claudeActivityComplete('mcp__mousse__delegate_task', {}, undefined, 'x', false, true)).toEqual({ handedOff: false })
+    expect(claudeActivityComplete(claudeCallContext('mcp__mousse__delegate_task', {}, true), undefined, 'x', false)).toEqual({ handedOff: false })
   })
 
   it('caps a generic call arguments and never keeps a huge one whole', () => {
@@ -106,17 +109,17 @@ describe('claudeActivityStart and claudeActivityComplete', () => {
   })
 
   it('reads a legacy JSON Bash result and a result that has only text', () => {
-    expect(claudeActivityComplete('Bash', { command: 'x' }, undefined, JSON.stringify({ stdout: 'out', stderr: 'err' }), false, true).activity).toMatchObject({ output: 'out\nerr' })
-    expect(claudeActivityComplete('Bash', { command: 'x' }, undefined, 'plain', false, true).activity).toMatchObject({ output: 'plain' })
+    expect(complete('Bash', { command: 'x' }, undefined, JSON.stringify({ stdout: 'out', stderr: 'err' })).activity).toMatchObject({ output: 'out\nerr' })
+    expect(complete('Bash', { command: 'x' }, undefined, 'plain').activity).toMatchObject({ output: 'plain' })
   })
 
   it('a Bash result the user interrupted is interrupted, not done', () => {
-    const completion = claudeActivityComplete('Bash', { command: 'x' }, { stdout: 'partial', stderr: '', interrupted: true }, 'partial', false, true)
+    const completion = complete('Bash', { command: 'x' }, { stdout: 'partial', stderr: '', interrupted: true }, 'partial')
     expect(completion.activity).toMatchObject({ output: 'partial', status: 'interrupted', interruptedBy: 'stop' })
   })
 
   it('a backgrounded command says so and keeps its task id', () => {
-    const completion = claudeActivityComplete('Bash', { command: 'x', run_in_background: true }, { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'b1' }, 'started', false, true)
+    const completion = complete('Bash', { command: 'x', run_in_background: true }, { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'b1' }, 'started')
     expect(completion.activity).toMatchObject({ nativeId: 'b1', summary: 'Running in the background' })
   })
 
@@ -368,6 +371,40 @@ describe('the provider service', () => {
     expect(completeOf(events, 'bg')?.activity).toMatchObject({ status: 'done', summary: 'Background finished' })
   })
 
+  it('a task frame that reaches a later turn on the same process changes nothing in it', async () => {
+    const dir = home()
+    const cli = new FakeClaudeCli()
+    const launch: Frame[] = [
+      { type: 'stream_event', session_id: SESSION, parent_tool_use_id: null, event: { type: 'content_block_start', content_block: { type: 'tool_use', id: 'bg', name: 'Agent' } } },
+      { type: 'assistant', session_id: SESSION, parent_tool_use_id: null, message: { content: [{ type: 'tool_use', id: 'bg', name: 'Agent', input: { description: 'Worker', run_in_background: true } }] } },
+      { type: 'user', session_id: SESSION, parent_tool_use_id: null, message: { content: [{ type: 'tool_result', tool_use_id: 'bg', content: 'launched' }] }, tool_use_result: { status: 'async_launched', agentId: 't9' } }
+    ]
+    cli.reply = (message, process) => {
+      const uuid = String(message.uuid)
+      process.emit({ ...launch[0]!, user_message_uuid: uuid, user_message_uuids: [uuid] }, ...launch.slice(1), resultFrame({ uuids: [uuid], text: 'Done' }))
+    }
+    const service = new ClaudeSubscriptionProviderService(dir, new UserQuestionService(), { query: cli.query, runAuth, live: { noticeDelayMs: 10 } })
+    const chat = (onTool: (event: ProviderToolEvent) => void) =>
+      service.chat({ threadId: 'thread', cwd: dir, model: 'sonnet', prompt: 'go', history: '', onText: vi.fn(), onTool })
+    const first: ProviderToolEvent[] = []
+    await chat((event) => first.push(event))
+    service.commitConversation('thread', '')
+    expect(saved(first).byCall('bg')).toMatchObject({ status: 'done', background: true })
+    // The next turn is running when the earlier agent's task frames and calls arrive.
+    cli.reply = (message, process) => {
+      const uuid = String(message.uuid)
+      process.emit(
+        { type: 'system', subtype: 'task_started', session_id: SESSION, task_id: 't9', tool_use_id: 'bg', is_backgrounded: true, description: 'Worker', user_message_uuid: uuid, user_message_uuids: [uuid] },
+        { type: 'assistant', session_id: SESSION, parent_tool_use_id: 'bg', message: { content: [{ type: 'tool_use', id: 'late', name: 'Read', input: { file_path: '/w/a.ts' } }] } },
+        { type: 'system', subtype: 'task_notification', session_id: SESSION, task_id: 't9', tool_use_id: 'bg', status: 'completed', summary: 'Worker finished', output_file: '' },
+        resultFrame({ uuids: [uuid], text: 'Second' })
+      )
+    }
+    const second: ProviderToolEvent[] = []
+    await chat((event) => second.push(event))
+    expect(second).toEqual([])
+  })
+
   it('a stopped turn closes its open calls as stop', async () => {
     const dir = home()
     let release: (() => void) | undefined
@@ -389,5 +426,148 @@ describe('the provider service', () => {
     abort.abort()
     await expect(turn).rejects.toThrow()
     expect(completeOf(events, 'open')?.activity).toEqual({ status: 'interrupted', interruptedBy: 'stop', summary: 'Stopped' })
+  })
+})
+
+describe('what the frame reader keeps of a call', () => {
+  const stream = (id: string, name: string, parent: string | null = null): Frame => ({
+    type: 'stream_event', session_id: SESSION, parent_tool_use_id: parent, event: { type: 'content_block_start', content_block: { type: 'tool_use', id, name } }
+  })
+  const assistant = (id: string, name: string, input: Record<string, unknown>, parent: string | null = null): Frame => ({
+    type: 'assistant', session_id: SESSION, parent_tool_use_id: parent, message: { content: [{ type: 'tool_use', id, name, input }] }
+  })
+  const answer = (id: string, content: unknown, structured?: unknown, isError = false, parent: string | null = null): Frame => ({
+    type: 'user', session_id: SESSION, parent_tool_use_id: parent,
+    message: { content: [{ type: 'tool_result', tool_use_id: id, content, ...(isError ? { is_error: true } : {}) }] },
+    ...(structured !== undefined ? { tool_use_result: structured } : {})
+  })
+  const system = (subtype: string, extra: Record<string, unknown>): Frame => ({ type: 'system', subtype, session_id: SESSION, ...extra })
+  const big = 'line of code\n'.repeat(3000)
+
+  it('a foreground command that ran long reports its task end before its result, and the result still settles the row', () => {
+    const events = readFrames([
+      stream('long', 'Bash'),
+      assistant('long', 'Bash', { command: 'npm test' }),
+      system('task_started', { task_id: 'b1', tool_use_id: 'long', description: 'Run tests', is_backgrounded: false }),
+      system('task_notification', { task_id: 'b1', tool_use_id: 'long', status: 'completed', summary: 'Run tests', output_file: '' }),
+      answer('long', 'out', { stdout: 'all green\n', stderr: '', interrupted: false })
+    ])
+    expect(of(events, 'long').map((event) => event.phase)).toEqual(['start', 'start', 'update', 'complete'])
+    expect(completeOf(events, 'long')?.activity).toEqual({ kind: 'command', output: 'all green\n' })
+    expect(saved(events).byCall('long')).toMatchObject({ kind: 'command', status: 'done', output: 'all green\n', nativeId: 'b1' })
+  })
+
+  it('a failed foreground command is failed by its result, not by the task end', () => {
+    const events = readFrames([
+      stream('long', 'Bash'),
+      assistant('long', 'Bash', { command: 'npm test' }),
+      system('task_started', { task_id: 'b1', tool_use_id: 'long', description: 'Run tests', is_backgrounded: false }),
+      system('task_notification', { task_id: 'b1', tool_use_id: 'long', status: 'failed', summary: 'Run tests', output_file: '' }),
+      answer('long', 'Exit code 1\nfailing test', undefined, true)
+    ])
+    expect(saved(events).byCall('long')).toMatchObject({ status: 'failed', output: 'Exit code 1\nfailing test' })
+  })
+
+  it('a foreground agent keeps its result the same way, with the notification before it', () => {
+    const events = readFrames([
+      stream('fg', 'Agent'),
+      assistant('fg', 'Agent', { description: 'Look around', subagent_type: 'Explore', prompt: 'p' }),
+      system('task_started', { task_id: 'a1', tool_use_id: 'fg', description: 'Look around', is_backgrounded: false }),
+      system('task_notification', { task_id: 'a1', tool_use_id: 'fg', status: 'completed', summary: 'Agent "Look around" completed', output_file: '', usage: { total_tokens: 1, tool_uses: 1, duration_ms: 5000 } }),
+      answer('fg', [{ type: 'text', text: 'report' }], { status: 'completed', agentId: 'a1', agentType: 'Explore', totalDurationMs: 4800, content: [], prompt: 'p' })
+    ])
+    expect(saved(events).byCall('fg')).toMatchObject({ kind: 'subagent', status: 'done', durationMs: 4800, agentType: 'Explore' })
+    expect(saved(events).byCall('fg').summary).toBeUndefined()
+  })
+
+  it('a background agent whose end comes before its launch placeholder still ends once the placeholder says it was handed off', () => {
+    const events = readFrames([
+      stream('bg', 'Agent'),
+      assistant('bg', 'Agent', { description: 'Quick job', run_in_background: true, prompt: 'p' }),
+      system('task_notification', { task_id: 't1', tool_use_id: 'bg', status: 'completed', summary: 'Quick job done', output_file: '' }),
+      answer('bg', 'launched', { status: 'async_launched', agentId: 't1', prompt: 'p', outputFile: '/tmp/x' })
+    ])
+    expect(saved(events).byCall('bg')).toMatchObject({ status: 'done', summary: 'Quick job done', background: true })
+  })
+
+  it('a Write above the argument cap is still a file change from its result', () => {
+    const content = big.repeat(2)
+    expect(content.length).toBeGreaterThan(60_000)
+    const events = readFrames([
+      stream('w', 'Write'),
+      assistant('w', 'Write', { file_path: '/w/big.ts', content }),
+      answer('w', 'File created', { type: 'create', filePath: '/w/big.ts', content, structuredPatch: [], originalFile: null })
+    ])
+    expect(completeOf(events, 'w')?.activity).toMatchObject({ kind: 'file_change', changes: [{ path: '/w/big.ts', change: 'add', diffTruncated: true, added: 6000 }] })
+    const item = saved(events).byCall('w')
+    expect(item).toMatchObject({ kind: 'file_change', status: 'done', changes: [{ path: '/w/big.ts', change: 'add' }] })
+    expect(JSON.stringify(item).length).toBeLessThan(100_000)
+  })
+
+  it('an Edit above the argument cap keeps its patch, and a failed one keeps its error and no diff', () => {
+    const oldString = big
+    const newString = big.replace('line', 'LINE')
+    const input = { file_path: '/w/big.ts', old_string: oldString, new_string: newString }
+    const patch = [{ oldStart: 1, oldLines: 2, newStart: 1, newLines: 2, lines: ['-line of code', '+LINE of code', ' line of code'] }]
+    const done = saved(readFrames([stream('e', 'Edit'), assistant('e', 'Edit', input), answer('e', 'updated', { filePath: '/w/big.ts', oldString, newString, originalFile: null, structuredPatch: patch })]))
+    expect(done.byCall('e')).toMatchObject({ kind: 'file_change', status: 'done', changes: [{ path: '/w/big.ts', change: 'update', added: 1, removed: 1 }] })
+    const failed = saved(readFrames([stream('f', 'Edit'), assistant('f', 'Edit', input), answer('f', 'String not found', undefined, true)])).byCall('f')
+    expect(failed).toMatchObject({ kind: 'file_change', status: 'failed', changes: [{ path: '/w/big.ts', error: 'String not found' }] })
+    expect(JSON.stringify(failed)).not.toContain('"diff"')
+  })
+
+  it('a long command and a long plan keep their kind through completion, and a Mousse delegation keeps its record', () => {
+    const command = `cat > f <<'EOF'\n${big}EOF`
+    const bash = saved(readFrames([stream('c', 'Bash'), assistant('c', 'Bash', { command }), answer('c', 'ok', { stdout: 'ok', stderr: '', interrupted: false })]))
+    expect(bash.byCall('c')).toMatchObject({ kind: 'command', status: 'done', output: 'ok' })
+    const plan = saved(readFrames([stream('p', 'ExitPlanMode'), assistant('p', 'ExitPlanMode', { plan: big }), answer('p', 'approved')]))
+    expect(plan.byCall('p')).toMatchObject({ kind: 'plan', status: 'done' })
+    const events = readFrames([
+      stream('d', 'mcp__mousse__delegate_task'),
+      assistant('d', 'mcp__mousse__delegate_task', { title: 'Reviewer', prompt: big + big }),
+      answer('d', JSON.stringify({ started: true, delegationId: 'd-1', title: 'Reviewer' }))
+    ])
+    expect(completeOf(events, 'd')?.record?.input).toEqual({ recordVersion: 1, title: 'Reviewer' })
+  })
+
+  it('a call a background agent of an earlier turn makes opens nothing in this turn', () => {
+    const events = readFrames([
+      assistant('child', 'Read', { file_path: '/w/a.ts' }, 'agentFromLastTurn'),
+      stream('child2', 'Bash', 'agentFromLastTurn'),
+      assistant('child2', 'Bash', { command: 'ls' }, 'agentFromLastTurn'),
+      answer('child2', 'out', { stdout: 'out', stderr: '', interrupted: false }, false, 'agentFromLastTurn')
+    ], 'no_result')
+    expect(events).toEqual([])
+  })
+
+  it('a call made under an agent this turn has open nests under it even when it streamed no start', () => {
+    const events = readFrames([
+      stream('bg', 'Agent'),
+      assistant('bg', 'Agent', { description: 'Worker', run_in_background: true, prompt: 'p' }),
+      answer('bg', 'launched', { status: 'async_launched', agentId: 't1', prompt: 'p', outputFile: '/tmp/x' }),
+      assistant('inner', 'Read', { file_path: '/w/a.ts' }, 'bg'),
+      answer('inner', 'contents', undefined, false, 'bg')
+    ], 'no_result')
+    expect(of(events, 'inner')[0]?.parentCallId).toBe('bg')
+    const { byCall } = saved(events)
+    expect(byCall('inner')).toMatchObject({ status: 'done', parentId: byCall('bg').id })
+  })
+
+  it('a detached web call is not left running, and a Read keeps no file contents', () => {
+    const events = readFrames([
+      stream('web', 'WebFetch'),
+      assistant('web', 'WebFetch', { url: 'https://a.test', prompt: 'x' }),
+      answer('web', 'stepped aside', { detachedToolCall: true }),
+      stream('read', 'Read'),
+      assistant('read', 'Read', { file_path: '/w/a.ts' }),
+      answer('read', 'FILE CONTENTS')
+    ])
+    expect(saved(events).byCall('web')).toMatchObject({ kind: 'web_search', status: 'interrupted', interruptedBy: 'no_result', summary: 'Still running; the result comes in a later turn' })
+    expect(JSON.stringify(saved(events).byCall('read'))).not.toContain('FILE CONTENTS')
+  })
+
+  it('a MultiEdit has no diff until its result brings a patch', () => {
+    const patch = claudeActivityStart('MultiEdit', { file_path: '/w/a.ts', edits: [{ old_string: 'a', new_string: 'b' }, { old_string: 'c', new_string: 'd' }] }, true)
+    expect(patch).toEqual({ kind: 'file_change', changes: [{ path: '/w/a.ts', change: 'update', diffUnavailable: true }] })
   })
 })

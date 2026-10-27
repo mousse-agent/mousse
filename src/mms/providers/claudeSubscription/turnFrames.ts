@@ -2,14 +2,12 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import {
   ACTIVITY_DESCRIPTION_CHARS,
   INTERRUPTED_SUMMARY,
-  capRecord,
   type ActivityInterruptedBy,
-  type ActivityKind,
   type ActivityPatch,
   type ProviderToolEvent
 } from '../../../shared/agentActivity'
 import { recordSubagentCall, toolResultText } from '../../../shared/subagentTools'
-import { claudeActivityComplete, claudeActivityStart } from './claudeActivity'
+import { claudeActivityComplete, claudeActivityStart, claudeCallContext, type ClaudeCallContext } from './claudeActivity'
 import type { ClaudeMetricsCollector } from './metrics'
 
 /** Where a turn's frames are reported; the slice of the chat input the stream needs. */
@@ -29,12 +27,20 @@ export class TurnFrames {
   thinking = ''
   sessionId: string | undefined
   readonly tools = new Map<string, string>()
-  /** Each open call's arguments, capped (the result readers need them; they are dropped once the result arrives). */
-  private readonly toolInputs = new Map<string, Record<string, unknown>>()
+  /**
+   * What each open call's result reader needs of its arguments (their kind and a few short fields,
+   * never the arguments), so a call with huge arguments is still read as what it is. Dropped when the
+   * call closes.
+   */
+  private readonly contexts = new Map<string, ClaudeCallContext>()
+  /** A Mousse subagent call's bounded record input (its title, subagent and delegation id), per open call. */
+  private readonly recordInputs = new Map<string, Record<string, unknown>>()
   /** The call a subagent's call ran under, per open call. */
   private readonly parents = new Map<string, string | undefined>()
-  /** The typed kind each open call reported, so a task frame only patches a row of the right shape. */
-  private readonly kinds = new Map<string, ActivityKind | undefined>()
+  /** Open calls whose result was a hand-off placeholder: only these end on their task's notification. */
+  private readonly handedOff = new Set<string>()
+  /** A task's end that arrived before its call's placeholder result, kept until that result says whether it is the call's end. */
+  private readonly earlyEnds = new Map<string, Record<string, unknown>>()
   /** Where the text of the current segment starts (a steer starts a new one); a result fills it in when it streamed nothing. */
   segmentStart = 0
 
@@ -71,6 +77,8 @@ export class TurnFrames {
       }
       if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
         const parent = message.parent_tool_use_id ?? undefined
+        // A call of a subagent this turn does not have open (a background agent of an earlier turn) is not this turn's.
+        if (parent && !this.tools.has(parent)) return
         this.open(event.content_block.id, event.content_block.name, parent)
         // A subagent call's row is marked as recorded from the start, before its arguments are known.
         const record = recordSubagentCall(event.content_block.name, undefined, {})
@@ -91,17 +99,19 @@ export class TurnFrames {
       for (const block of message.message.content) {
         if (block.type !== 'tool_use') continue
         const parent = message.parent_tool_use_id ?? undefined
-        // A subagent's calls may not have streamed a start of their own: the message that holds them opens them.
-        if (!this.tools.has(block.id) && parent) this.open(block.id, block.name, parent)
+        // A subagent's calls may not have streamed a start of their own: the message that holds them opens them,
+        // but only under a call this turn has open (a background agent of an earlier turn keeps sending frames).
+        if (!this.tools.has(block.id) && parent && this.tools.has(parent)) this.open(block.id, block.name, parent)
         if (!this.tools.has(block.id)) continue
         const name = this.tools.get(block.id)!
         const input = record(block.input) ?? {}
-        this.toolInputs.set(block.id, capRecord(input) ?? {})
+        const isRoot = !this.parents.get(block.id)
         // The arguments are known now: a subagent call's row names its subagent before the call returns,
         // and every other call gets the typed fields its arguments carry.
         const subagentRecord = recordSubagentCall(block.name, block.input, {})
-        const activity = claudeActivityStart(name, input, !this.parents.get(block.id))
-        if (activity) this.kinds.set(block.id, activity.kind)
+        const activity = claudeActivityStart(name, input, isRoot)
+        this.contexts.set(block.id, claudeCallContext(name, input, isRoot))
+        if (subagentRecord) this.recordInputs.set(block.id, subagentRecord.input)
         if (subagentRecord || activity) {
           this.sink.onTool?.({
             phase: 'start',
@@ -122,20 +132,21 @@ export class TurnFrames {
         const title = this.tools.get(callId)!
         const text = toolResultText(block.content)
         const isError = block.is_error === true
-        const subagentRecord = recordSubagentCall(title, this.toolInputs.get(callId), { text, isError })
+        const subagentRecord = recordSubagentCall(title, this.recordInputs.get(callId), { text, isError })
         // `tool_use_result` is the message's one structured output: it is this call's only when it answers one call.
         const completion = claudeActivityComplete(
-          title,
-          this.toolInputs.get(callId),
+          this.contexts.get(callId) ?? claudeCallContext(title, undefined, !this.parents.get(callId)),
           results.length === 1 ? message.tool_use_result : undefined,
           text,
-          isError,
-          !this.parents.get(callId)
+          isError
         )
         if (completion.handedOff) {
           // The call returned a placeholder and the work goes on: the row stays open until its notification
           // or the end of the turn, which closes it as handed off (a subagent) or without a result.
+          this.handedOff.add(callId)
           if (completion.activity) this.sink.onTool?.({ phase: 'update', callId, title, toolName: title, activity: completion.activity })
+          const early = this.earlyEnds.get(callId)
+          if (early) this.endTask(callId, early)
           continue
         }
         this.sink.onTool?.({
@@ -154,27 +165,30 @@ export class TurnFrames {
   private open(callId: string, name: string, parent: string | undefined): void {
     this.tools.set(callId, name)
     this.parents.set(callId, parent)
-    const kind = claudeActivityStart(name, undefined, !parent)?.kind
-    if (kind) this.kinds.set(callId, kind)
+    this.contexts.set(callId, claudeCallContext(name, undefined, !parent))
   }
 
   private forget(callId: string): void {
     this.tools.delete(callId)
-    this.toolInputs.delete(callId)
+    this.contexts.delete(callId)
+    this.recordInputs.delete(callId)
     this.parents.delete(callId)
-    this.kinds.delete(callId)
+    this.handedOff.delete(callId)
+    this.earlyEnds.delete(callId)
   }
 
   /**
-   * A background task's own frames. `task_started` names the task of an open call (and says whether it
-   * was handed off); `task_notification` ends it. Only a call this turn still has open is touched: a
-   * notification that arrives after the turn settled belongs to the continuation run and is dropped here.
+   * A task's own frames. `task_started` names the task of an open call (and says whether it was handed
+   * off). A foreground command or agent that runs a while is a task too, and reports its end before its
+   * result: that end is the result's to settle, so `task_notification` closes only a call whose result
+   * was a hand-off placeholder. A call this turn does not have open is not touched: a notification that
+   * arrives after the turn settled belongs to the continuation run.
    */
   private observeTask(frame: Record<string, unknown>): void {
     const callId = typeof frame.tool_use_id === 'string' ? frame.tool_use_id : undefined
     const title = callId ? this.tools.get(callId) : undefined
     if (!callId || title === undefined) return
-    const kind = this.kinds.get(callId)
+    const kind = this.contexts.get(callId)?.kind
     if (frame.subtype === 'task_started') {
       const taskId = typeof frame.task_id === 'string' ? frame.task_id : undefined
       const background = frame.is_backgrounded === true && kind === 'subagent'
@@ -189,6 +203,16 @@ export class TurnFrames {
       return
     }
     if (frame.subtype !== 'task_notification') return
+    if (this.handedOff.has(callId)) this.endTask(callId, frame)
+    // Kept in case the placeholder result is still to come; a result that is the call's own ends it first.
+    else this.earlyEnds.set(callId, frame)
+  }
+
+  /** The end of a handed-off call's task: done, failed or stopped, with the task's own summary. */
+  private endTask(callId: string, frame: Record<string, unknown>): void {
+    const title = this.tools.get(callId)
+    if (title === undefined) return
+    const kind = this.contexts.get(callId)?.kind
     const summary = typeof frame.summary === 'string' && frame.summary.trim() ? clipSummary(frame.summary) : undefined
     const usage = record(frame.usage)
     const duration = typeof usage?.duration_ms === 'number' && (kind === 'subagent' || kind === 'command') ? usage.duration_ms : undefined
