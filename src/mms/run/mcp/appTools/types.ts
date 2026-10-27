@@ -267,7 +267,7 @@ export class McpToolError extends Error {
 }
 
 export type ToolLedger = {
-  start(call: ToolCall): string | undefined
+  start(call: ToolCall, options?: { idempotent?: boolean }): string | undefined
   commit(id: string): void
   failed(id: string): void
 }

@@ -31,6 +31,18 @@ function bot(root: string, scratch: string, tools: NeutralTool[], access: 'read'
 const refused = (event: { summary?: unknown }) => event.summary === 'The tool returned an error.'
 
 describe('a bot’s authority over Pi’s built-in tools (Pi RPC engine, real child)', () => {
+  it('a built-in whose ledger row cannot be written never runs', async () => {
+    const { engine, recorder, project } = await setup(cleanups)
+    const root = realpathSync(project)
+    const scratch = join(root, '..', 'scratch')
+    mkdirSync(scratch, { recursive: true })
+    recorder.respond(script([{ tool: { name: 'write', args: { path: join(scratch, 'x.md'), content: 'x' } } }, { text: 'done' }]))
+    const toolLedger = { start: () => undefined, commit: () => {}, failed: () => {} }
+    const turn = harness(root, {}, { bot: bot(root, scratch, ['write']), tools: { toolLedger } })
+    await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
+    expect(existsSync(join(scratch, 'x.md'))).toBe(false)
+  }, 120_000)
+
   it('reads inside the root, writes only to scratch, and is walled outside', async () => {
     const { engine, recorder, project } = await setup(cleanups)
     const root = realpathSync(project)
@@ -48,7 +60,18 @@ describe('a bot’s authority over Pi’s built-in tools (Pi RPC engine, real ch
     ]))
     const counts = new RunCounters()
     const budget = new TurnBudget({ maxToolCalls: 10 }, counts)
-    const turn = harness(root, {}, { bot: bot(root, scratch, ['read', 'write']), budget })
+    // The run's tool ledger, as the orchestrator hands it to the runtime.
+    const rows: Array<{ id: string; tool: string; idempotent?: boolean; status: 'started' | 'committed' | 'failed' }> = []
+    const toolLedger = {
+      start: (call: { name: string }, options?: { idempotent?: boolean }) => {
+        const id = `row-${rows.length + 1}`
+        rows.push({ id, tool: call.name, idempotent: options?.idempotent, status: 'started' })
+        return id
+      },
+      commit: (id: string) => { rows.find((row) => row.id === id)!.status = 'committed' },
+      failed: (id: string) => { rows.find((row) => row.id === id)!.status = 'failed' }
+    }
+    const turn = harness(root, {}, { bot: bot(root, scratch, ['read', 'write']), budget, tools: { toolLedger } })
     const result = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
     expect(result.text).toBe('done')
     const results = turn.events.filter((event) => event.kind === 'tool' && event.phase === 'complete')
@@ -64,5 +87,11 @@ describe('a bot’s authority over Pi’s built-in tools (Pi RPC engine, real ch
     expect(readFileSync(join(root, 'inside.txt'), 'utf8')).toBe('inside-content')
     // A refused call costs no tool call: only the two that ran were counted.
     expect(counts.toolCalls).toBe(2)
+    // Each allowed built-in was in the ledger before it ran, by its class's idempotency, and its
+    // end settled the row; a refused call has none.
+    expect(rows.map(({ tool, idempotent, status }) => ({ tool, idempotent, status }))).toEqual([
+      { tool: 'read', idempotent: true, status: 'committed' },
+      { tool: 'write', idempotent: false, status: 'committed' }
+    ])
   }, 120_000)
 })
