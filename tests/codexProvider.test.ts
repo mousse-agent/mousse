@@ -9,7 +9,6 @@ import { LoginSession } from '../src/mms/providers/LoginSession'
 import type { CodexLaunch, CodexProcess } from '../src/mms/providers/codex/CodexAppServerClient'
 import {
   CODEX_ACCOUNT_TTL_MS,
-  CODEX_FALLBACK_MODELS,
   CODEX_MODEL_PROVIDER,
   CodexProviderService,
   CodexTurnFailure,
@@ -68,6 +67,8 @@ const chatgpt = { result: { account: { type: 'chatgpt', email: 'me@example.com',
 let home: string
 let binary: string
 let questions: UserQuestionService
+/** The instance's signed-out flag (the gateway's), as the services read it. */
+let signedOut = false
 const services: CodexProviderService[] = []
 
 beforeEach(() => {
@@ -76,6 +77,7 @@ beforeEach(() => {
   writeFileSync(binary, '#!/bin/sh\nexit 0\n')
   chmodSync(binary, 0o755)
   questions = new UserQuestionService()
+  signedOut = false
 })
 afterEach(() => {
   for (const service of services.splice(0)) service.stop()
@@ -88,7 +90,11 @@ afterEach(() => {
 function create(server: Pick<ReturnType<typeof scriptedServer>, 'launch'>, settings: Record<string, unknown> = {}): CodexProviderService {
   mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
   writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: binary, ...settings }))
-  const service = new CodexProviderService(home, questions, { launch: server.launch })
+  // The instance config's launch settings and sign-out flag, as the gateway hands them over.
+  const service = new CodexProviderService(home, questions, { launch: server.launch }, {
+    launch: () => ({ binaryPath: binary }),
+    signedOut: () => signedOut
+  })
   services.push(service)
   return service
 }
@@ -225,7 +231,7 @@ describe('CodexProviderService', () => {
     expect(service.configured()).toBe(false)
   })
 
-  it('lists models from model/list across pages, falling back to the Codex default model', async () => {
+  it('lists models from model/list across pages, and lists none until one has run', async () => {
     const server = scriptedServer((message) => {
       if (message.method === 'account/read') return chatgpt
       if (message.method !== 'model/list') return { result: {} }
@@ -255,14 +261,18 @@ describe('CodexProviderService', () => {
     const unlisted = new CodexProviderService(mkdtempSync(join(tmpdir(), 'mousse-codex-empty-')), questions, { launch: fresh.launch, findBinary: () => binary })
     services.push(unlisted)
     await unlisted.status()
-    expect(unlisted.llmProvider()?.models).toEqual(CODEX_FALLBACK_MODELS)
+    // No invented default: an entry that has not listed shows "Refresh models" until it has.
+    expect(unlisted.llmProvider()?.models).toEqual([])
   })
 
   it('disconnects in Mousse only: never sends account/logout and keeps reporting disconnected', async () => {
     const server = scriptedServer(() => chatgpt)
     const service = create(server, { threads: { t: { codexThreadId: 'thr', cwd: home, historyKey: 'k' } } })
     await service.status()
+    // The gateway sets the flag, then the service stops its work; the mirror records the flag.
+    signedOut = true
     await service.logout()
+    service.vendorMirror(['signedOut']).write({ signedOut: true })
     expect(server.methods()).not.toContain('account/logout')
     expect(server.processes[0].signalCode).toBe('SIGTERM')
     expect(service.configured()).toBe(false)
@@ -280,7 +290,7 @@ describe('CodexProviderService', () => {
       if (message.method === 'model/list') return { error: { code: -32600, message: 'unavailable' } }
       return { result: {} }
     })
-    const service = create(server, { disconnected: true })
+    const service = create(server)
     const session = new LoginSession('login-1')
     const prompts: string[] = []
     session.on('event', (event: { type: string; message?: string }) => {
@@ -301,7 +311,7 @@ describe('CodexProviderService', () => {
     const server = scriptedServer((message) => (message.method === 'account/read' ? chatgpt : { result: { data: [], nextCursor: null } }))
     mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
     writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: binary, models: [{ id: 'gpt-x', label: 'GPT X' }] }))
-    const service = new CodexProviderService(home, questions, { launch: server.launch, idleCloseMs: 20 })
+    const service = new CodexProviderService(home, questions, { launch: server.launch, idleCloseMs: 20 }, { launch: () => ({ binaryPath: binary }) })
     services.push(service)
     await service.status()
     expect(server.processes[0].signalCode).toBeNull()
@@ -709,5 +719,66 @@ describe('a usage limit on a Codex turn', () => {
     await chat(service, 'H1 + request')
     expect(server.methods().filter((method) => method === 'thread/start')).toHaveLength(1)
     expect(server.messages.filter((message) => message.method === 'turn/start').map((message) => (message.params as { threadId: string }).threadId)).toEqual(['thr-1', 'thr-1'])
+  })
+})
+
+describe('plan usage limits for the usage page', () => {
+  const window = (usedPercent: number, windowDurationMins: number, resetsAt: number) => ({ usedPercent, windowDurationMins, resetsAt })
+  const limits = (used: number) => ({ primary: window(used, 300, 1_900_000_000), secondary: window(used / 2, 10_080, 1_900_100_000), rateLimitReachedType: null })
+
+  it('reads account/rateLimits/read from Codex through its app-server', async () => {
+    const server = scriptedServer((message) => (message.method === 'account/rateLimits/read' ? { result: { rateLimits: limits(40) } } : chatgpt))
+    const service = create(server)
+    const read = await service.rateLimits()
+    expect(read).toMatchObject({ live: true, snapshot: limits(40) })
+    expect(server.methods()).toContain('account/rateLimits/read')
+  })
+
+  it('when a read fails, the last snapshot Codex sent stands in, marked as not live', async () => {
+    let failing = false
+    const server = scriptedServer((message) => {
+      if (message.method !== 'account/rateLimits/read') return chatgpt
+      return failing ? { error: { code: -32000, message: 'rate limits are unavailable' } } : { result: { rateLimits: limits(10) } }
+    })
+    const service = create(server)
+    await service.status({ force: true })
+    expect(await service.rateLimits()).toMatchObject({ live: true, snapshot: limits(10) })
+    // A turn's account update is kept too, and is newer than the read.
+    server.processes.at(-1)!.stdout.write(JSON.stringify({ method: 'account/rateLimits/updated', params: { rateLimits: limits(55) } }) + '\n')
+    await vi.waitFor(async () => {
+      failing = true
+      const stale = await service.rateLimits()
+      expect(stale).toMatchObject({ live: false, snapshot: limits(55) })
+    })
+  })
+
+  it("never shows another account's limits: after an account switch or a disconnect a failed read throws", async () => {
+    let email = 'me@example.com'
+    let failing = false
+    const server = scriptedServer((message) => {
+      if (message.method === 'account/read') return { result: { account: { type: 'chatgpt', email, planType: 'plus' }, requiresOpenaiAuth: true } }
+      return failing ? { error: { code: -32000, message: 'rate limits are unavailable' } } : { result: { rateLimits: limits(10) } }
+    })
+    const service = create(server)
+    await service.status({ force: true })
+    expect(await service.rateLimits()).toMatchObject({ live: true })
+    failing = true
+    // The same account: its last snapshot stands in.
+    expect(await service.rateLimits()).toMatchObject({ live: false, snapshot: limits(10) })
+    // Another account signs in in the terminal: the old account's numbers are not shown.
+    email = 'other@example.com'
+    await service.status({ force: true })
+    await expect(service.rateLimits()).rejects.toThrow(/unavailable/)
+    // A read that succeeds for the new account is that account's own snapshot from then on; a disconnect forgets it.
+    failing = false
+    expect(await service.rateLimits()).toMatchObject({ live: true })
+    await service.logout()
+    failing = true
+    await expect(service.rateLimits()).rejects.toThrow(/unavailable/)
+  })
+
+  it('with nothing to fall back on, a failed read is thrown', async () => {
+    const server = scriptedServer((message) => (message.method === 'account/rateLimits/read' ? { error: { code: -32601, message: 'method not found' } } : chatgpt))
+    await expect(create(server).rateLimits()).rejects.toThrow(/method not found/)
   })
 })

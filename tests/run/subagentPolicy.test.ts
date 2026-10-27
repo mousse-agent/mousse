@@ -8,6 +8,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { DelegateTaskInput, DelegationToolHost } from '../../src/mms/run/mcp/appTools/delegation'
+import type { PermissionLimits } from '../../src/shared/permissionMode'
+import { adapterDriver } from '../../src/mms/run/testkit/harness'
+import type { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { ANTIGRAVITY_CAPABILITIES } from '../../src/mms/harness/acp/presets/antigravity'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import { CODEX_CAPABILITIES } from '../../src/mms/run/adapters/codex/CodexAdapter'
@@ -85,7 +88,7 @@ describe('delegated child policy', () => {
   })
 
   /** A pi parent in a project; `onParent` runs inside its first turn with the delegation tools. */
-  const daemon = (onParent: (delegation: DelegationToolHost, threadId: string) => Promise<void>, onChild: Script = async () => 'Looked.', onPiChild?: Script) => {
+  const daemon = (onParent: (delegation: DelegationToolHost, threadId: string) => Promise<void>, onChild: Script = async () => 'Looked.', onPiChild?: Script, parentLimits?: PermissionLimits) => {
     home = mkdtempSync(join(tmpdir(), 'mousse-subagent-policy-'))
     previousHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = home
@@ -98,7 +101,10 @@ describe('delegated child policy', () => {
     })
     const claude = new ScriptedAdapter('claude', CLAUDE_SUBSCRIPTION_CAPABILITIES, onChild)
     const antigravity = new ScriptedAdapter('antigravity', ANTIGRAVITY_CAPABILITIES, async () => 'Looked.')
-    const d = phase6Daemon(home, [parent, claude, antigravity])
+    // `parentLimits` makes the parent's provider unable to enforce some mode, so its runs are bound to a stricter one.
+    const d = parentLimits
+      ? phase6Daemon(home, [claude, antigravity], { drivers: [adapterDriver(parent, { runtime: { permissionLimits: () => parentLimits } })] })
+      : phase6Daemon(home, [parent, claude, antigravity])
     stops.push(d.stop)
     const project = d.projects.openProject(projectDir)
     const thread = d.store.createThread('Parent', project.id)
@@ -149,7 +155,7 @@ describe('delegated child policy', () => {
   it('the read-only Mousse tool list runtimes use matches what the registry lets a read-only child call', () => {
     const { d } = daemon(async () => undefined)
     const registry = d.orch.mcpToolRegistry()
-    const callable = registry.list().filter((tool) => !tool.hidden && (tool.access === 'reads' || tool.readOnlySafe)).map((tool) => tool.name)
+    const callable = registry.list().filter((tool) => !tool.hidden && (tool.access === 'reads' || tool.access === 'readsOthers' || tool.readOnlySafe)).map((tool) => tool.name)
     expect(new Set(callable)).toEqual(READ_ONLY_MOUSSE_TOOLS)
   })
 
@@ -247,6 +253,153 @@ describe('delegated child policy', () => {
     // The parent is not a subagent.
     expect(claude.turns.every((turn) => turn.input.threadId !== thread.id)).toBe(true)
   }, 30_000)
+
+  it('a child starts at its lineage ceiling, cannot be set above it, and follows a tightened ancestor on its next turn (depth 2)', async () => {
+    const started: Record<string, { childThreadId: string; childRunId: string }> = {}
+    const { d, claude, thread } = daemon(
+      async (delegation) => {
+        started.child = await delegate(delegation, { workspace: 'isolated', role: 'implement' }, 'child') as never
+      },
+      async (input, host) => {
+        if (input.prompt === 'Nest') started.grandchild = await delegate(host.tools.delegation!, { workspace: 'isolated', role: 'implement' }, 'grandchild') as never
+        return 'Looked.'
+      }
+    )
+    const modeOf = (threadId: string) => d.store.getThread(threadId)?.permissionMode
+    const turnsOf = (threadId: string) => claude.turns.filter((turn) => turn.input.threadId === threadId)
+    const done = (run: { childRunId: string }) => waitFor(() => d.engine.getRun(run.childRunId)?.status === 'completed', 'a child run')
+
+    d.orch.setThreadPermissionMode(thread.id, 'accept_edits')
+    expect(d.engine.store.listEvents(thread.id).filter((event) => event.type === 'thread.permission_mode')).toHaveLength(1)
+    await d.orch.send('Delegate it', false, { threadId: thread.id, clientRequestId: 'parent' })
+    await done(started.child)
+    // The child is stored at the parent's mode and runs in it.
+    expect(modeOf(started.child.childThreadId)).toBe('accept_edits')
+    expect(turnsOf(started.child.childThreadId)[0].input.permissionMode).toBe('accept_edits')
+    expect(() => d.orch.setThreadPermissionMode(started.child.childThreadId, 'full')).toThrowError(expect.objectContaining({ code: 'permission_mode_above_ceiling' }))
+    expect(modeOf(started.child.childThreadId)).toBe('accept_edits')
+
+    await d.orch.send('Nest', false, { threadId: started.child.childThreadId, clientRequestId: 'nest' })
+    await done(started.grandchild)
+    expect(modeOf(started.grandchild.childThreadId)).toBe('accept_edits')
+
+    // Tightening the root narrows the grandchild on its next turn; its stored mode is untouched.
+    d.orch.setThreadPermissionMode(thread.id, 'ask')
+    await d.orch.send('Look again', false, { threadId: started.grandchild.childThreadId, clientRequestId: 'again-ask' })
+    expect(turnsOf(started.grandchild.childThreadId).at(-1)?.input.permissionMode).toBe('ask')
+    expect(modeOf(started.grandchild.childThreadId)).toBe('accept_edits')
+
+    // Loosening it restores the grandchild's own mode, which never exceeds the child's.
+    d.orch.setThreadPermissionMode(thread.id, 'full')
+    await d.orch.send('Look again', false, { threadId: started.grandchild.childThreadId, clientRequestId: 'again-full' })
+    expect(turnsOf(started.grandchild.childThreadId).at(-1)?.input.permissionMode).toBe('accept_edits')
+  }, 60_000)
+
+  describe('a child never starts wider than the run that delegated it', () => {
+    const delegateChild = async (options: { limits?: PermissionLimits; sendMode?: 'ask' | 'accept_edits' | 'full'; parentMode?: 'ask' | 'accept_edits' | 'full' }) => {
+      const started: Record<string, { childThreadId: string; childRunId: string }> = {}
+      const { d, claude, thread } = daemon(async (delegation) => {
+        started.child = await delegate(delegation, { workspace: 'isolated', role: 'implement' }, 'child') as never
+      }, async () => 'Looked.', undefined, options.limits)
+      if (options.parentMode) d.orch.setThreadPermissionMode(thread.id, options.parentMode)
+      await d.orch.send('Delegate it', false, { threadId: thread.id, clientRequestId: 'parent', ...(options.sendMode ? { permissionMode: options.sendMode } : {}) })
+      await waitFor(() => d.engine.getRun(started.child.childRunId)?.status === 'completed', 'the child run')
+      return { d, claude, thread, child: started.child }
+    }
+
+    it('follows a mode the parent\'s provider lowered: a parent set to Auto-accept edits that runs as Ask delegates an Ask child', async () => {
+      const { d, claude, child } = await delegateChild({ parentMode: 'accept_edits', limits: { unavailable: { accept_edits: 'cannot auto-accept edits' } } })
+      expect(d.store.getThread(child.childThreadId)?.permissionMode).toBe('ask')
+      expect(claude.turns.find((turn) => turn.input.threadId === child.childThreadId)?.input.permissionMode).toBe('ask')
+    }, 30_000)
+
+    it('follows a mode the parent\'s turn was tightened to, and keeps it for the child\'s later turns', async () => {
+      const { d, thread, child } = await delegateChild({ parentMode: 'full', sendMode: 'ask' })
+      expect(d.store.getThread(child.childThreadId)?.permissionMode).toBe('ask')
+      expect(d.store.getThread(thread.id)?.permissionMode).toBe('full')
+      expect(d.orch.requestedPermissionMode(child.childThreadId)).toBe('ask')
+    }, 30_000)
+
+    it('is unchanged when the run enforces the saved mode', async () => {
+      const { d, child } = await delegateChild({ parentMode: 'accept_edits' })
+      expect(d.store.getThread(child.childThreadId)?.permissionMode).toBe('accept_edits')
+    }, 30_000)
+  })
+
+  it('a fork of a subagent whose ancestor was tightened gets the narrowed mode, not its stale stored one', async () => {
+    const started: Record<string, { childThreadId: string; childRunId: string }> = {}
+    const { d, thread } = daemon(async (delegation) => {
+      started.child = await delegate(delegation, { workspace: 'isolated', role: 'implement' }, 'child') as never
+    })
+    d.orch.setThreadPermissionMode(thread.id, 'full')
+    await d.orch.send('Delegate it', false, { threadId: thread.id, clientRequestId: 'parent' })
+    await waitFor(() => d.engine.getRun(started.child.childRunId)?.status === 'completed', 'the child run')
+    expect(d.store.getThread(started.child.childThreadId)?.permissionMode).toBe('full')
+
+    d.orch.setThreadPermissionMode(thread.id, 'ask')
+    // The child's stored mode is still the wider one; its turns are narrowed by the ceiling.
+    expect(d.store.getThread(started.child.childThreadId)?.permissionMode).toBe('full')
+    const forked = await d.engine.forkThread({ sourceThreadId: started.child.childThreadId, clientRequestId: 'fork-child' })
+    expect(d.store.getThread(forked.threadId)?.permissionMode).toBe('ask')
+    // A fork starts a lineage of its own: it is no wider than what its source could run.
+    expect(d.orch.requestedPermissionMode(forked.threadId)).toBe('ask')
+  }, 30_000)
+
+  describe('answer_subagent and the parent\'s permission mode', () => {
+    type Outcome = Record<string, unknown>
+    /** The parent answers a command, a file-change and a "for this thread" approval of its child, in `parentMode`. */
+    const answerChildApprovals = async (parentMode: 'ask' | 'accept_edits' | 'full') => {
+      const outcomes: Record<string, Outcome> = {}
+      let world: ReturnType<typeof daemon> | undefined
+      world = daemon(async (delegation) => {
+        const child = await delegate(delegation, { workspace: 'isolated', role: 'implement', title: 'Writer' }, 'child') as unknown as { childThreadId: string }
+        const questions = (world!.d.orch as unknown as { questions: UserQuestionService }).questions
+        const ask = (action: 'command' | 'edit', permissionKey: string) => {
+          void questions.requestAnswers(
+            [{ id: 'permission', prompt: `Allow ${action}?`, options: [{ id: 'allow', label: 'Allow once' }, { id: 'allow_always', label: 'Always' }, { id: 'reject', label: 'Reject' }] }],
+            child.childThreadId,
+            { approval: { action, permissionKey, options: [{ id: 'allow', decision: 'allow', scope: 'once' }, { id: 'allow_always', decision: 'allow', scope: 'always' }, { id: 'reject', decision: 'reject' }] } }
+          )
+          return questions.listPendingForThread(child.childThreadId).at(-1)!.requestId
+        }
+        const answer = (requestId: string, permission: string) =>
+          delegation.answerSubagent({ subagent: 'Writer', requestId, answers: { permission } }, { toolCallId: `answer-${requestId}` }) as Promise<Outcome>
+        outcomes.command = await answer(ask('command', 'codex:command'), 'allow')
+        outcomes.edit = await answer(ask('edit', 'codex:fileChange'), 'allow')
+        outcomes.always = await answer(ask('edit', 'codex:fileChange'), 'allow_always')
+        outcomes.reject = await answer(ask('command', 'codex:command'), 'reject')
+        // Whatever the parent could not answer is still pending for the user.
+        outcomes.pending = { count: questions.listPendingForThread(child.childThreadId).length }
+      })
+      world.d.orch.setThreadPermissionMode(world.thread.id, parentMode)
+      await world.d.orch.send('Delegate it', false, { threadId: world.thread.id, clientRequestId: 'parent' })
+      return outcomes
+    }
+
+    it('an Ask parent cannot approve or reject its child\'s command or edit', async () => {
+      const outcomes = await answerChildApprovals('ask')
+      for (const key of ['command', 'edit', 'always', 'reject']) expect(outcomes[key], key).toMatchObject({ answered: false, code: 'mode_forbids' })
+      expect(outcomes.pending).toEqual({ count: 4 })
+    }, 30_000)
+
+    it('an Auto-accept-edits parent approves an edit once, but not a command and never "always"', async () => {
+      const outcomes = await answerChildApprovals('accept_edits')
+      expect(outcomes.command).toMatchObject({ answered: false, code: 'mode_forbids' })
+      expect(outcomes.edit).toMatchObject({ answered: true })
+      expect(outcomes.always).toMatchObject({ answered: false, code: 'agent_no_standing_grant' })
+      expect(outcomes.reject).toMatchObject({ answered: false, code: 'mode_forbids' })
+      expect(outcomes.pending).toEqual({ count: 3 })
+    }, 30_000)
+
+    it('a Full-access parent approves its child\'s command once, but never "always"', async () => {
+      const outcomes = await answerChildApprovals('full')
+      expect(outcomes.command).toMatchObject({ answered: true })
+      expect(outcomes.edit).toMatchObject({ answered: true })
+      expect(outcomes.always).toMatchObject({ answered: false, code: 'agent_no_standing_grant' })
+      expect(outcomes.reject).toMatchObject({ answered: true })
+      expect(outcomes.pending).toEqual({ count: 1 })
+    }, 30_000)
+  })
 
   it('a shared child switched to Antigravity is refused on its next turn, and an isolated one is not', async () => {
     const started: Record<string, { childThreadId: string; childRunId: string }> = {}
@@ -346,7 +499,7 @@ describe('delegated child policy', () => {
       if (!name || probed.has(name)) return 'Looked.'
       probed.add(name)
       const tools = await registry
-      const credential = { threadId: input.threadId, runId: input.runId, provider: 'codex', modeCeiling: 'default' as const, binding: 'drained_turn' as const, current: () => true }
+      const credential = { threadId: input.threadId, runId: input.runId, provider: 'codex', modeCeiling: 'default' as const, accessLevel: 'lineage' as const, binding: 'drained_turn' as const, current: () => true }
       for (const [tool, args] of [
         ['thread_read', {}],
         ['queue_list', {}],
@@ -393,32 +546,33 @@ describe('delegated child policy', () => {
 })
 
 describe('ToolRegistry read-only gate', () => {
-  const tool = (name: string, access: 'reads' | 'actsAsCaller' | 'writesThreads' | 'startsThreads', readOnlySafe = false) => ({
+  const tool = (name: string, access: 'reads' | 'readsOthers' | 'actsAsCaller' | 'writesThreads' | 'startsThreads', readOnlySafe = false) => ({
     name, description: name, inputSchema: {}, access, class: 'read' as const, ...(readOnlySafe ? { readOnlySafe } : {}), handler: () => ({ text: 'ok' })
   })
   const turns = new AppToolTurns()
   for (const threadId of ['child', 'parent']) turns.register(appTurn({ threadId, runId: `run-${threadId}` }))
   const registry = new ToolRegistry({ activeRunId: (threadId) => `run-${threadId}`, readOnlyThread: (threadId) => threadId === 'child', turns })
     .register(tool('reads', 'reads'))
+    .register(tool('readsOthers', 'readsOthers'))
     .register(tool('safe', 'actsAsCaller', true))
     .register(tool('acts', 'actsAsCaller'))
     .register(tool('writes', 'writesThreads'))
     .register(tool('starts', 'startsThreads'))
   const call = (name: string, threadId: string) =>
     registry.call(name, {}, {
-      credential: { threadId, runId: `run-${threadId}`, provider: 'codex', modeCeiling: 'default', binding: 'drained_turn', current: () => true },
+      credential: { threadId, runId: `run-${threadId}`, provider: 'codex', modeCeiling: 'default', accessLevel: 'lineage', binding: 'drained_turn', current: () => true },
       toolCallId: 'c',
       signal: new AbortController().signal
     })
 
   it.each([
-    ['reads', true], ['safe', true], ['acts', false], ['writes', false], ['starts', false]
+    ['reads', true], ['readsOthers', true], ['safe', true], ['acts', false], ['writes', false], ['starts', false]
   ])('%s is %s for a read-only caller', async (name, allowed) => {
     if (allowed) await expect(call(name, 'child')).resolves.toMatchObject({ text: 'ok' })
     else await expect(call(name, 'child')).rejects.toMatchObject({ code: 'mousse_read_only' })
   })
 
-  it.each(['reads', 'safe', 'acts', 'writes', 'starts'])('%s works for any other caller', async (name) => {
+  it.each(['reads', 'readsOthers', 'safe', 'acts', 'writes', 'starts'])('%s works for any other caller', async (name) => {
     await expect(call(name, 'parent')).resolves.toMatchObject({ text: 'ok' })
   })
 })

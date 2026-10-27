@@ -20,6 +20,10 @@ export function redactGitText(text: string): string {
         .replace(/\b(https?:\/\/)[^\s/@]+@/gi, '$1[redacted]@')
         // `user:password@host`; an scp-style `git@host:path` has no colon before the `@`.
         .replace(/(^|[\s'"(=])[\w.~%+-]+:[^\s/@'"]+@(?=[\w[-])/g, '$1[redacted]@')
+        // A header whatever its scheme (`Authorization: token abc`, `Proxy-Authorization: ...`), and tokens printed on their own.
+        .replace(/(authorization["']?\s*[:=]\s*["']?)[^\r\n"',;]+/gi, '$1[redacted]')
+        .replace(/\b(?:github_pat_[A-Za-z0-9_]{8,}|gl(?:pat|ptt|rt|dt|cbt|imt|soat|ft|agent)-[A-Za-z0-9_-]{8,})/g, '[redacted]')
+        .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+/g, '[redacted]')
       return redacted.length > MAX_GIT_LINE_LENGTH ? `${redacted.slice(0, MAX_GIT_LINE_LENGTH)}…` : redacted
     })
     .join('\n')

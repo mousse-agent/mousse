@@ -28,7 +28,7 @@ function fixture(query: (input: { options: Options; prompt: unknown }) => Query)
     JSON.stringify({ loginPolicy: 'cli', binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] })
   )
   const runAuth = async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })
-  const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), { query, runAuth })
+  const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), { query, runAuth, launchConfig: () => ({ binaryPath: binary }) })
   services.push(service)
   return { home, service }
 }

@@ -41,6 +41,8 @@ import type { ChatMode } from '../../shared/types'
 
 import { normalizeChatMode } from '../../shared/chatMode'
 import { isToolAllowedForMode } from '../../shared/modes'
+import { permissionModeAllows, type PermissionMode } from '../../shared/permissionMode'
+import { piPermissionKey, piToolAction } from '../../shared/permissionKeys'
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
 
 import { resolveModelForMode, resolveTitleModel, normalizeContextSettings, resolveContextCompactionTokens } from '../../shared/settings'
@@ -105,10 +107,6 @@ import {
   resolveStreamInactivityTimeout
 } from '../harness/drivers/pi/stream'
 import {
-  CURSOR_PROVIDER_ID,
-  setCursorSessionProjectScope
-} from '../providers/cursorPiProvider'
-import {
   accumulateProviderUsage,
   applySafeBoundaryCompaction,
   emptyAccumulatedUsage,
@@ -150,6 +148,13 @@ export interface LlmChatOptions {
   }
   delegation?: DelegationToolHost
 
+  /**
+   * The thread's permission mode for this turn (`ask`, `accept_edits`, `full`). A tool the mode does
+   * not allow without asking (a command, a file edit, an integration) asks the thread's user first.
+   * Absent for turns without a person behind them (definitions, workflow steps): no gate.
+   */
+  permissionMode?: PermissionMode
+
   /** Daemon-minted episode capability; never accepted from protocol input. */
   toolAccess?: AgentToolAccess
 
@@ -159,7 +164,8 @@ export interface LlmChatOptions {
    * `failed` follows once the outcome is known. Host-supplied; never from protocol input.
    */
   toolLedger?: {
-    start(call: ToolCall): string | undefined
+    /** `idempotent`: the call's class says so (a bot gate's built-in); absent, the tool's name decides. */
+    start(call: ToolCall, options?: { idempotent?: boolean }): string | undefined
     commit(id: string): void
     failed(id: string): void
   }
@@ -470,6 +476,8 @@ export class LlmClient {
         },
         askUser: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
         dismissQuestions: (threadId) => this.questions.dismissAllForThread(threadId),
+        // The turn carries its permission mode (`AppToolTurn.permissionMode`); a tool that edits the workspace asks here.
+        askApproval: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
         presentPlan: (threadId, payload) => this.onPresentPlan?.(payload, threadId),
         openDocument: (payload) => this.onOpenDocument?.(payload),
         tasks: () => tasks ?? null,
@@ -668,6 +676,7 @@ export class LlmClient {
     const appTurn: AppToolTurn | undefined = requestContext.appTurn && {
       ...requestContext.appTurn,
       runId: options.runId ?? '',
+      ...(options.permissionMode !== undefined ? { permissionMode: options.permissionMode } : {}),
       ...(options.onPublishApplet && !subagent ? { onPublishApplet: options.onPublishApplet } : {}),
       ...(options.delegation ? { delegation: options.delegation } : {}),
       ...(options.toolAccess ? { toolAccess: options.toolAccess } : {}),
@@ -889,7 +898,7 @@ export class LlmClient {
           try {
             // Pi SDK adapters turn HTTP errors into strings before onResponse runs.
             // Capture only status and retry delay at the HTTP boundary; never read bodies.
-            const capturesHttp = ['anthropic-messages', 'openai-completions', 'openai-responses', 'openai-codex-responses'].includes(model.api)
+            const capturesHttp = ['anthropic-messages', 'openai-completions', 'openai-responses'].includes(model.api)
             const streamOptions = {
               ...getReasoningStreamOptions(model.api, (reasoningLevel ?? 'off') as ThinkingLevel, streamSignal, cacheSessionId, llmProvider),
               maxRetries: 0,
@@ -901,9 +910,7 @@ export class LlmClient {
               }) as typeof globalThis.fetch } : {})
             }
             const context = { systemPrompt, messages: piMessages, tools: tools.length > 0 ? tools : undefined }
-            const stream = model.api === 'openai-codex-responses'
-              ? this.providerAuth.models.stream(model, context, streamOptions)
-              : this.providerAuth.models.streamSimple(model, context, streamOptions as { reasoning: ThinkingLevel; signal?: AbortSignal })
+            const stream = this.providerAuth.models.streamSimple(model, context, streamOptions as { reasoning: ThinkingLevel; signal?: AbortSignal })
             const candidate = await consumeAssistantStream(stream, { onThinking: onThinkingEvent, onText: onTextEvent }, {
               inactivityTimeoutMs: streamInactivityTimeoutMs, signal: streamSignal,
               onTimeout: () => stallAbort.abort(), onProgress: markProgress
@@ -1020,11 +1027,16 @@ export class LlmClient {
 
         // The caller writes the ledger row of every call, app tools included (the registry writes none in process).
         const ledgerId = options.toolLedger?.start(toolCall)
-        const authority: InProcessAuthority = trustedAgent || !options.runId
+        // A definition run with a run record acts as that run: its calls stop once it is no longer the
+        // thread's active run, as any run's do (its grants are still checked below).
+        const authority: InProcessAuthority = !options.runId || (trustedAgent && !options.runActive)
           ? { kind: 'trusted', ledgerEntryId: ledgerId }
           : { kind: 'run', runId: options.runId, ledgerEntryId: ledgerId, ...(options.runActive ? { active: options.runActive } : {}) }
         const dispatch = async (): Promise<ToolResultMessage> => {
           if (runtimeContext) return runtimeContext.executeTool(toolCall, requestSignal)
+          // Mousse's own file and shell tools of a definition run do not run once the run is no longer active.
+          if (trustedAgent && options.runActive && !options.runActive())
+            return toolResult(toolCall, `Run ${options.runId} is no longer the active run of this thread; the tool was not run.`, true)
           if (appTurn && ((toolCall.name === 'publish_applet' && options.onPublishApplet) ||
               (options.delegation && DELEGATION_TOOL_NAMES.has(toolCall.name)))) {
             return this.callAppTool(toolCall, appTurn, authority, toolEvents, onToolEvent, requestSignal)
@@ -1041,7 +1053,8 @@ export class LlmClient {
           authority,
           discovery,
           actor,
-          trustedAgent
+          trustedAgent,
+          options.permissionMode
         )
         }
         let result: ToolResultMessage
@@ -1240,17 +1253,7 @@ export class LlmClient {
       titleSessionId,
       llmProvider
     )
-    const stream = model.api === 'openai-codex-responses'
-      ? this.providerAuth.models.stream(
-          model,
-          titleContext,
-          streamOptions
-        )
-      : this.providerAuth.models.streamSimple(
-          model,
-          titleContext,
-          streamOptions as { reasoning: ThinkingLevel }
-        )
+    const stream = this.providerAuth.models.streamSimple(model, titleContext, streamOptions as { reasoning: ThinkingLevel })
     // Bounded like main turns: a dead title connection must fail fast (the caller
     // falls back to a heuristic) instead of leaking a pending promise forever.
     const response = await consumeAssistantStream(
@@ -1439,11 +1442,8 @@ export class LlmClient {
       }),
       modeFacts.build && !subagent
         ? Promise.resolve([] as McpToolDescriptor[])
-        : this.getMcpTools(projectPath, actor),
-      llmProvider === CURSOR_PROVIDER_ID && projectPath
-        ? setCursorSessionProjectScope(projectPath)
-        : Promise.resolve()
-    ]).then(([skillsContext, tools]) => [skillsContext, tools] as const)
+        : this.getMcpTools(projectPath, actor)
+    ])
 
     const toolEnabled = (name: string): boolean => trustedAgent ? true : settingsToolEnabled(this.settingsStore.get().integrations.tools, name)
     // The turn the app tools are selected for and act in (the request adds what its host minted).
@@ -1576,6 +1576,58 @@ export class LlmClient {
     return appToolResult(toolCall, outcome)
   }
 
+
+  /**
+   * Asks the thread's user before a tool the permission mode does not allow without asking. Returns
+   * the tool error to hand the model when the user rejects (or dismisses) the call, and null when
+   * the call may run.
+   */
+  private async askPermission(
+    toolCall: ToolCall,
+    permissionMode: PermissionMode,
+    action: 'command' | 'edit',
+    permissionKey: string,
+    threadId: string | undefined,
+    signal: AbortSignal | undefined
+  ): Promise<ToolResultMessage | null> {
+    if (permissionModeAllows(permissionMode, action)) return null
+    const args = (toolCall.arguments ?? {}) as Record<string, unknown>
+    const detail = typeof args.command === 'string'
+      ? [args.command, ...(Array.isArray(args.args) ? args.args.map(String) : [])].join(' ')
+      : typeof args.path === 'string' ? args.path : JSON.stringify(args)
+    const what = action === 'command' ? 'run this command' : 'edit this file'
+    try {
+      const answer = await this.questions.requestAnswers(
+        [
+          {
+            id: 'permission',
+            prompt: `Allow Mousse to ${what}?\n${detail.slice(0, 4000)}`,
+            options: [
+              { id: 'allow', label: 'Allow once' },
+              { id: 'reject', label: 'Reject' }
+            ]
+          }
+        ],
+        threadId ?? '__unbound__',
+        {
+          ...(signal ? { signal } : {}),
+          approval: {
+            action,
+            permissionKey,
+            options: [
+              { id: 'allow', decision: 'allow', scope: 'once' },
+              { id: 'reject', decision: 'reject' }
+            ]
+          }
+        }
+      )
+      if (answer.permission === 'allow' && !signal?.aborted) return null
+      return toolResult(toolCall, `The user rejected the request to ${what}. Do not retry it unless they ask.`, true)
+    } catch {
+      return toolResult(toolCall, `The user did not approve the request to ${what}.`, true)
+    }
+  }
+
   private async executeToolCall(
     toolCall: ToolCall,
     mcpTools: McpToolDescriptor[],
@@ -1588,7 +1640,8 @@ export class LlmClient {
     authority: InProcessAuthority,
     discovery?: LlmChatOptions['subagentDiscovery'],
     actor: IntegrationActor = defaultIntegrationActor(false),
-    trustedAgent?: TrustedAgentExecutionOptions
+    trustedAgent?: TrustedAgentExecutionOptions,
+    permissionMode?: PermissionMode
   ): Promise<ToolResultMessage> {
 
     try {
@@ -1626,6 +1679,11 @@ export class LlmClient {
           return toolResult(toolCall, authorized.message, true)
         }
       }
+      // The run may have ended while its approval was pending (reconciled, stopped, taken over):
+      // checked again right before anything runs, never only before the wait.
+      if (trustedAgent && authority.kind === 'run' && authority.active && !authority.active())
+        return toolResult(toolCall, `Run ${authority.runId} is no longer the active run of this thread; the tool was not run.`, true)
+      if (trustedAgent && signal?.aborted) return toolResult(toolCall, 'Tool dispatch cancelled immediately before side effects.', true)
 
       // App tools run through the registry; delegation and applets only where the request has them
       // (see `dispatch`), as before.
@@ -1683,7 +1741,15 @@ export class LlmClient {
           return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Skills & MCP.`, true)
         }
 
-
+        // The thread's permission mode: a command (and, under Ask, an edit) asks the user first.
+        // The Pi RPC route that takes over these tool calls (`harness/pi/extension`, provider
+        // abstraction PR 2) must call `permissionModeAllows` and this same prompt before it runs one,
+        // and `tests/piLoopApprovals.test.ts` is pointed at that route.
+        const permissionAction = permissionMode !== undefined ? piToolAction(toolCall.name) : null
+        if (permissionAction) {
+          const refusal = await this.askPermission(toolCall, permissionMode!, permissionAction, piPermissionKey(permissionAction), appTurn?.threadId || undefined, signal)
+          if (refusal) return refusal
+        }
 
         const callEvent: LlmToolEvent = {
 

@@ -93,10 +93,22 @@ export const SCHEDULE_HELP = `Usage:
   mousse-cli schedule add --name <name> --prompt <text> --every <minutes>
   mousse-cli schedule add --name <name> --prompt <text> --cron <expr>
   mousse-cli schedule add --name <name> --prompt <text> --at <iso-datetime>
+  mousse-cli schedule add --name <name> --prompt <text> --manual
   mousse-cli schedule remove <id>
   mousse-cli schedule run <id>
   mousse-cli schedule enable <id>
   mousse-cli schedule disable <id>
+
+Options for add:
+  --instance <id> --model <model>   Provider instance and model every run uses
+  --mode agent|plan                 Mode of the run (default agent)
+  --project <id>                    Project the run works in
+  --thread <id>                     Run as a turn on this thread, with its history
+  --workspace project|new-worktree|<path>
+                                    Project checkout (default; an agent edits your own folder, unattended,
+                                    with no undo: prefer new-worktree in a Git project), a new worktree
+                                    per run, or an existing worktree
+  --manual                          No clock: the job runs only with "schedule run"
 `
 
 export const WORKFLOW_HELP = `Usage:
@@ -189,6 +201,7 @@ export const SERVICE_HELP = `Usage:
   mousse-cli service stop             Stop daemon via pidfile
   mousse-cli service status           Show daemon status
   mousse-cli service install          Install launch-on-startup entry
+                                      --headless adds ELECTRON_DISABLE_SANDBOX=1 to the Linux unit
   mousse-cli service uninstall        Remove launch-on-startup entry
 `
 

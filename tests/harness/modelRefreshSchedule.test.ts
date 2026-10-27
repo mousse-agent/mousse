@@ -294,7 +294,8 @@ describe('the model list keeps its refresh time on disk', () => {
       const make = () => new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
         query: (_input: { options: Options; prompt: unknown }) => query(),
         runAuth: async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }),
-        live: false
+        live: false,
+        launchConfig: () => ({ binaryPath: binary })
       })
       const service = make()
       // The fallback aliases carry no time.

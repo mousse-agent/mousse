@@ -57,6 +57,7 @@ describe('stopping a Claude turn and continuing the thread (issue #142)', () => 
       return Object.assign(events, { close: vi.fn(() => open()), interrupt: vi.fn(async () => {}) }) as unknown as Query
     }
     const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+      launchConfig: () => ({ binaryPath: binary }),
       live: false,
       query,
       runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
@@ -110,6 +111,7 @@ describe('stopping a Claude turn and continuing the thread (issue #142)', () => 
       else claude.answer(String(message.uuid), `answer ${claude.inputs.length}`)
     }
     const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+      launchConfig: () => ({ binaryPath: binary }),
       query: cli.query,
       runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
     })
@@ -154,6 +156,7 @@ describe('stopping a Claude turn and continuing the thread (issue #142)', () => 
       claude.answer(String(message.uuid), 'started')
     }
     const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+      launchConfig: () => ({ binaryPath: binary }),
       query: cli.query,
       runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
     })

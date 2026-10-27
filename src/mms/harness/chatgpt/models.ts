@@ -4,8 +4,7 @@ import { getJson, isRecord, retryAt } from './http'
 
 /**
  * The models a ChatGPT plan may use: `GET /models` with the plan's access token. Only entries with
- * `visibility: 'list'` are kept, in the server's order. The optional fields are read leniently, as
- * `openAiCodexModelFetch.ts` reads them for the older Codex sign-in.
+ * `visibility: 'list'` are kept, in the server's order. The optional fields are read leniently.
  */
 
 export interface ChatGptModel {

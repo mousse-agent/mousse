@@ -73,6 +73,15 @@ export interface AcquireLeaseOptions {
   tryOnce?: boolean
 }
 
+/** `source` of the lease storage cleanup holds while it re-checks and retires one thread's worktree. */
+export const STORAGE_CLEANUP_LEASE_SOURCE = 'storage-cleanup'
+export const STORAGE_CLEANUP_BUSY_MESSAGE = 'Cleanup is checking this thread; try again in a moment'
+
+/** The message for a busy thread lease; it names cleanup when cleanup is the holder. */
+export function leaseBusyMessage(owner: ThreadLeaseOwner | null, fallback: string): string {
+  return owner?.source === STORAGE_CLEANUP_LEASE_SOURCE ? STORAGE_CLEANUP_BUSY_MESSAGE : fallback
+}
+
 export class LeaseBusyError extends Error {
   readonly owner: ThreadLeaseOwner | null
   constructor(message: string, owner: ThreadLeaseOwner | null = null) {
@@ -370,7 +379,7 @@ export function acquireExecutionLease(
   if (handle) return handle
   const lastOwner = readLeaseOwner(getExecutionLeasePath(threadDir))
   throw new LeaseBusyError(
-    `Thread execution lease busy${lastOwner ? ` (pid ${lastOwner.pid})` : ''}`,
+    leaseBusyMessage(lastOwner, `Thread execution lease busy${lastOwner ? ` (pid ${lastOwner.pid})` : ''}`),
     lastOwner
   )
 }
@@ -396,7 +405,7 @@ export async function waitAcquireExecutionLease(
     await sleepMsAsync(delay, opts?.signal)
   }
   throw new LeaseBusyError(
-    `Thread execution lease busy${lastOwner ? ` (pid ${lastOwner.pid})` : ''}`,
+    leaseBusyMessage(lastOwner, `Thread execution lease busy${lastOwner ? ` (pid ${lastOwner.pid})` : ''}`),
     lastOwner
   )
 }

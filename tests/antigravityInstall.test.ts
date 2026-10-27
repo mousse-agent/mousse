@@ -49,16 +49,21 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-function setup(settings: Record<string, unknown> = {}) {
+/** `launch` is the instance config's launch settings; `saveLaunch` stands for the gateway's `configure`. */
+function setup(settings: Record<string, unknown> = {}, initialLaunch: { binaryPath?: string } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'mousse-agy-install-'))
   homes.push(home)
   mkdirSync(join(home, 'providers', 'antigravity'), { recursive: true })
   const settingsPath = join(home, 'providers', 'antigravity', 'settings.json')
   writeFileSync(settingsPath, JSON.stringify(settings))
-  const service = new AntigravityProviderService(home, home, new UserQuestionService())
+  let launch = { ...initialLaunch }
+  const saveLaunch = vi.fn(async (patch: { binaryPath?: string | null }) => {
+    if (patch.binaryPath === null) launch = {}
+  })
+  const service = new AntigravityProviderService(home, home, new UserQuestionService(), undefined, { launch: () => launch, saveLaunch })
   services.push(service)
   const saved = () => JSON.parse(readFileSync(settingsPath, 'utf8')) as Record<string, unknown>
-  return { home, service, saved }
+  return { home, service, saved, saveLaunch, launch: () => launch }
 }
 
 /** An install that stays pending until it is aborted. */
@@ -70,7 +75,7 @@ function pendingInstall() {
 
 describe('Antigravity install', () => {
   it('installs, streams progress, replaces a manual path and leaves sign-in alone', async () => {
-    const { home, service, saved } = setup({ binaryPath: join('manual', 'agy_acp_server'), signedIn: true, models: [{ id: 'm', label: 'M' }] })
+    const { home, service, saved, saveLaunch } = setup({ signedIn: true, models: [{ id: 'm', label: 'M' }] }, { binaryPath: join('manual', 'agy_acp_server') })
     installMock.mockImplementation(async (_home, _signal, progress) => {
       progress?.('Downloading Google Antigravity ACP agent…')
       progress?.('Verifying agent and local harness…')
@@ -85,6 +90,8 @@ describe('Antigravity install', () => {
     expect(messages).toEqual(['Downloading Google Antigravity ACP agent…', 'Verifying agent and local harness…'])
     expect(changed).toHaveBeenCalledTimes(1)
     expect(config).toMatchObject({ instanceId: 'antigravity', args: [], env: {} })
+    // The manual path leaves the instance config through the gateway (which also mirrors it).
+    expect(saveLaunch).toHaveBeenCalledWith({ binaryPath: null })
     expect(config.binaryPath).toBeUndefined()
     expect(saved().binaryPath).toBeUndefined()
     expect(saved()).toMatchObject({ signedIn: true, models: [{ id: 'm', label: 'M' }] })
@@ -101,16 +108,18 @@ describe('Antigravity install', () => {
   })
 
   it('surfaces a failed download without clearing the manual path', async () => {
-    const { service, saved } = setup({ binaryPath: 'kept' })
+    const { service, saveLaunch, launch } = setup({}, { binaryPath: 'kept' })
     installMock.mockRejectedValue(new Error('Google download failed (503)'))
     await expect(service.install()).rejects.toThrow('Google download failed (503)')
-    expect(saved().binaryPath).toBe('kept')
+    expect(saveLaunch).not.toHaveBeenCalled()
+    expect(launch().binaryPath).toBe('kept')
   })
 
   it('leaves the settings alone when a cancel lands after the download finished', async () => {
-    const { service, saved } = setup({ binaryPath: 'kept', signedIn: true })
+    const { service, saved, saveLaunch } = setup({ binaryPath: 'kept', signedIn: true }, { binaryPath: 'kept' })
     installMock.mockImplementation(async () => { service.stop(); return 'agy' })
     await expect(service.install()).rejects.toThrow('Antigravity install cancelled')
+    expect(saveLaunch).not.toHaveBeenCalled()
     expect(saved()).toEqual({ binaryPath: 'kept', signedIn: true })
   })
 

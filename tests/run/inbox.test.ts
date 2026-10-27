@@ -6,6 +6,7 @@ import {
   NOTICE_WAKE_CHARS,
   planWakeNotice
 } from '../../src/mms/run/delegation/notice'
+import { cancelQueuedWakes } from '../../src/mms/run/delegation/wake'
 import type { InboxRecord } from '../../src/mms/run/types'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
@@ -41,6 +42,75 @@ describe('Inbox (SPEC §14.1)', () => {
     expect(f.engine.inbox.markDelivered([row.inboxId])).toEqual([])
     expect(f.engine.inbox.get(row.inboxId)!.status).toBe('acknowledged')
     expect(() => f!.engine.inbox.markDelivered(['missing'])).toThrow('Unknown inbox row')
+  })
+
+  describe('a paused thread (SPEC §14.3)', () => {
+    /** A parent whose subagent finished, with the wake run rule 4 made for it: its row is delivered by the wake's `turn.start`. */
+    const wakeOfFinishedChild = async (fixture: DelegationFixture) => {
+      const parent = await fixture.runningRun('parent')
+      const child = await fixture.delegate(parent.runId, 'call-1')
+      fixture.finish(child.childRunId)
+      fixture.engine.markTerminal(parent.runId, 'completed')
+      const [wakeRunId] = fixture.reconciler.runOnce().wakes.wakes
+      const [row] = fixture.engine.inbox.listForThread('parent')
+      return { wakeRunId, row }
+    }
+
+    it('releaseRunDeliveries gives back the rows a run delivered, uncounted, and only those', async () => {
+      f = delegationFixture()
+      const { wakeRunId, row } = await wakeOfFinishedChild(f)
+      const other = f.engine.inbox.append({ threadId: 'parent', kind: 'reconcile_notice', payload: { text: 'unrelated' } })
+      f.engine.inbox.markDelivered([other.inboxId], 'queue:somebody-else')
+      expect(f.engine.inbox.get(row.inboxId)).toMatchObject({ status: 'delivered', deliveredBy: `effect:${wakeRunId}:turn.start:1` })
+
+      expect(f.engine.inbox.releaseRunDeliveries(wakeRunId)).toEqual([row.inboxId])
+
+      expect(f.engine.inbox.get(row.inboxId)).toMatchObject({ status: 'pending', deliveredBy: null, payload: { releases: 1 } })
+      expect(f.engine.inbox.pendingCount(row.inboxId, 'parent')).toBe(1)
+      expect(f.engine.inbox.get(other.inboxId)).toMatchObject({ status: 'delivered', deliveredBy: 'queue:somebody-else' })
+      expect(f.engine.inbox.releaseRunDeliveries(wakeRunId)).toEqual([])
+    })
+
+    it('releaseRunDeliveries leaves a steer the model has not read alone', async () => {
+      f = delegationFixture()
+      const run = await f.runningRun('parent')
+      const row = f.engine.inbox.append({ threadId: 'parent', kind: 'reconcile_notice', payload: { text: 'steer' } })
+      const steer = f.outbox.enqueue({ threadId: 'parent', runId: run.runId, kind: 'turn.steer', payload: {} })
+      f.engine.inbox.markDelivered([row.inboxId], steer.effectId)
+
+      expect(f.engine.inbox.releaseRunDeliveries(run.runId)).toEqual([])
+      f.engine.inbox.markSteerTaken([row.inboxId], steer.effectId)
+      expect(f.engine.inbox.releaseRunDeliveries(run.runId)).toEqual([row.inboxId])
+    })
+
+    it('cancelQueuedWakes cancels a wake that has not been claimed: run, effect and delivered rows', async () => {
+      f = delegationFixture()
+      const { wakeRunId, row } = await wakeOfFinishedChild(f)
+      const effectId = `effect:${wakeRunId}:turn.start:1`
+
+      expect(cancelQueuedWakes(f.store, f.outbox, f.now(), 'elsewhere')).toEqual([])
+      expect(cancelQueuedWakes(f.store, f.outbox, f.now(), 'parent')).toEqual([wakeRunId])
+
+      expect(f.engine.getRun(wakeRunId)).toMatchObject({ status: 'cancelled' })
+      expect(f.outbox.get(effectId)).toMatchObject({ status: 'cancelled', lastError: 'thread_paused' })
+      expect(f.engine.inbox.get(row.inboxId)).toMatchObject({ status: 'pending', deliveredBy: null })
+      expect(f.store.listEvents('parent').find((event) => event.type === 'reconcile.wake_cancelled')!.payload).toMatchObject({ runId: wakeRunId, reason: 'thread_paused' })
+      expect(cancelQueuedWakes(f.store, f.outbox, f.now(), 'parent')).toEqual([])
+    })
+
+    it('cancelQueuedWakes leaves a wake that is already claimed to its executor', async () => {
+      f = delegationFixture()
+      const { wakeRunId, row } = await wakeOfFinishedChild(f)
+      // The child's own `turn.start` is older and goes first; claim until the wake's is running.
+      let claimed = f.outbox.claimNext('owner', f.now())
+      while (claimed && claimed.runId !== wakeRunId) claimed = f.outbox.claimNext('owner', f.now())
+      expect(claimed).toMatchObject({ runId: wakeRunId, status: 'running' })
+
+      expect(cancelQueuedWakes(f.store, f.outbox, f.now(), 'parent')).toEqual([])
+
+      expect(f.engine.getRun(wakeRunId)!.status).toBe('queued')
+      expect(f.engine.inbox.get(row.inboxId)!.status).toBe('delivered')
+    })
   })
 
   describe('wake notices (issue #142)', () => {

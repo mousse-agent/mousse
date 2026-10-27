@@ -126,5 +126,6 @@ export type {
   AgentExecutionStatus,
   AgentRuntimeInput,
   AgentRuntimeResult,
+  AgentRuntimePort,
   NativeAgentRuntimePort
 } from './execution'

@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { ERROR_INFO_CAPABILITY } from '../src/shared/errors'
 import type { LifecyclePurgePreview, TrashRetentionPolicy } from '../src/shared/resourceLifecycle'
+import { STORAGE_POLICY_DEFAULTS, summarizeCleanupReport, type StorageCleanupReport, type StoragePolicy, type StorageUsageSnapshot } from '../src/shared/storage'
 import type { Thread } from '../src/shared/types'
 import type { WorkflowRunView } from '../src/shared/workflowRunPlatform'
 import { releaseExecutionLeaseHandle, tryAcquireExecutionLease } from '../src/mms/queue/ThreadExecutionLease'
@@ -206,5 +207,188 @@ describe('lifecycle public protocol acceptance', () => {
       if (ptyId) await f.rpc.request('pty.kill', { ptyId }).catch(() => undefined)
       await f.close()
     }
+  })
+
+  it('storage.policy reports the storage rules, the trash policy and whether the storage clock paused cleanup', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
+      expect(await cli.request('storage.policy', {})).toEqual({
+        trash: { schemaVersion: 1, graceDays: 30, automaticPurge: false }, trashSweepStatus: { suspended: false },
+        policy: STORAGE_POLICY_DEFAULTS, clockSuspended: false
+      })
+    } finally { await f.close() }
+  })
+
+  it('storage.configure saves a validated policy for a gui client and refuses a cli client', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const gui = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY])
+      const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
+      const policy: StoragePolicy = { schemaVersion: 1, worktrees: { removeWithDeletedThreads: false, inactiveDays: 14, removeMerged: true }, browser: { captureDays: 30 } }
+      expect((await gui.request<{ policy: StoragePolicy }>('storage.configure', { policy })).policy).toEqual(policy)
+      await expect(cli.request('storage.configure', { policy: STORAGE_POLICY_DEFAULTS })).rejects.toMatchObject({ code: 'handler_error' })
+      for (const bad of [{ ...policy, worktrees: { ...policy.worktrees, inactiveDays: 0 } }, { ...policy, worktrees: { ...policy.worktrees, inactiveDays: 4000 } }, { ...policy, worktrees: { inactiveDays: 14, removeMerged: true } }, { ...policy, browser: { captureDays: 'soon' } }]) {
+        await expect(gui.request('storage.configure', { policy: bad })).rejects.toThrow()
+      }
+      expect((await cli.request<{ policy: StoragePolicy }>('storage.policy', {})).policy).toEqual(policy)
+      expect(JSON.parse(readFileSync(join(f.services.threads.lifecycleStore.root, 'storage-policy.json'), 'utf8'))).toEqual(policy)
+    } finally { await f.close() }
+  })
+
+  it('storage.cleanup.run is open to a cli client, always answers with a report, and storage.cleanup.lastReport returns it', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
+      expect(await cli.request('storage.cleanup.lastReport', {})).toEqual({ report: null })
+      const { report } = await cli.request<{ report: StorageCleanupReport }>('storage.cleanup.run', {})
+      expect(report).toMatchObject({ trigger: 'manual', counts: { removed: 0, kept: 0, failed: 0 }, items: [], omittedCount: 0 })
+      expect(summarizeCleanupReport(report)).toBe('Nothing needed cleanup.')
+      expect(await cli.request('storage.cleanup.lastReport', {})).toEqual({ report })
+    } finally { await f.close() }
+  })
+
+  it('storage.cleanup.plan is a dry run open to a cli client: it lists what a run would do and records nothing', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const gui = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY])
+      const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
+      const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'plan me' })
+      await f.rpc.request('threads.trash', { threadId: thread.id })
+      await gui.request('threads.configureTrash', { graceDays: 1, automaticPurge: true })
+      f.services.threads.lifecycleStore.update(thread.id, (record) => { record.trashedAt = new Date(Date.now() - 3 * 86_400_000).toISOString() })
+      const { plan } = await cli.request<{ plan: Array<{ rule: string; threadId?: string; action: string }> }>('storage.cleanup.plan', {})
+      expect(plan).toEqual([expect.objectContaining({ rule: 'trash', threadId: thread.id, action: 'remove' })])
+      expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('trashed')
+      expect(await cli.request('storage.cleanup.lastReport', {})).toEqual({ report: null })
+    } finally { await f.close() }
+  })
+
+  it('storage.usage is open to a cli client, answers from the cache until asked to refresh, and names no path', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
+      const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'measured thread' })
+      writeFileSync(join(f.services.threads.getThreadDir(thread.id), 'payload.bin'), Buffer.alloc(96 * 1024, 1))
+      const first = await cli.request<StorageUsageSnapshot>('storage.usage', {})
+      expect(first.entries.find((entry) => entry.kind === 'threads' && entry.threadId === thread.id)!.bytes).toBeGreaterThanOrEqual(96 * 1024)
+      expect(first.names.threads[thread.id]).toBe('measured thread')
+      // New data does not show until a refresh.
+      writeFileSync(join(f.services.threads.getThreadDir(thread.id), 'more.bin'), Buffer.alloc(96 * 1024, 2))
+      expect(await cli.request('storage.usage', {})).toEqual(first)
+      const refreshed = await cli.request<StorageUsageSnapshot>('storage.usage', { refresh: true })
+      expect(refreshed.measuredAt).not.toBe(first.measuredAt)
+      expect(refreshed.entries.find((entry) => entry.threadId === thread.id)!.bytes).toBeGreaterThanOrEqual(192 * 1024)
+      expect(JSON.stringify(refreshed)).not.toContain(f.services.threads.getThreadDir(thread.id).replaceAll('\\', '\\\\'))
+      await expect(cli.request('storage.usage', { refresh: 'yes' })).rejects.toThrow()
+    } finally { await f.close() }
+  })
+
+  it('a usage scan and a cleanup run overlap without failing, and the next scan shows the space the run freed', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const gui = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY])
+      const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
+      const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'to be purged' })
+      writeFileSync(join(f.services.threads.getThreadDir(thread.id), 'payload.bin'), Buffer.alloc(128 * 1024, 1))
+      await f.rpc.request('threads.trash', { threadId: thread.id })
+      await gui.request('threads.configureTrash', { graceDays: 1, automaticPurge: true })
+      f.services.threads.lifecycleStore.update(thread.id, (record) => { record.trashedAt = new Date(Date.now() - 3 * 86_400_000).toISOString() })
+      const unattributed = (usage: StorageUsageSnapshot): number => usage.entries.find((entry) => entry.kind === 'threads' && !entry.threadId)?.bytes ?? 0
+      const before = await cli.request<StorageUsageSnapshot>('storage.usage', { refresh: true })
+      expect(unattributed(before)).toBeGreaterThanOrEqual(128 * 1024)
+      const [report, during] = await Promise.all([
+        cli.request<{ report: StorageCleanupReport }>('storage.cleanup.run', {}),
+        cli.request<StorageUsageSnapshot>('storage.usage', { refresh: true })
+      ])
+      expect(report.report.counts.removed).toBe(1)
+      expect(during.entries.length).toBeGreaterThan(0)
+      const after = await cli.request<StorageUsageSnapshot>('storage.usage', { refresh: true })
+      expect(unattributed(after)).toBeLessThan(unattributed(before) - 100 * 1024)
+    } finally { await f.close() }
+  })
+
+  it('trash and restore go ahead while a slow storage.usage request is still in flight', async () => {
+    const f = await lifecycleHarness()
+    let release: () => void = () => undefined
+    try {
+      const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
+      const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'trashed during a scan' })
+      let entered: () => void = () => undefined
+      const inFlight = new Promise<void>((resolve) => { entered = resolve })
+      const held = new Promise<void>((resolve) => { release = resolve })
+      vi.spyOn(f.services.storageUsage, 'measure').mockImplementation(async () => {
+        entered()
+        await held
+        return { measuredAt: new Date().toISOString(), durationMs: 0, partial: true, entries: [], names: { projects: {}, threads: {} } }
+      })
+      const slow = cli.request('storage.usage', { refresh: true })
+      await inFlight
+      const began = Date.now()
+      await f.rpc.request('threads.trash', { threadId: thread.id })
+      await f.rpc.request('threads.restore', { threadId: thread.id })
+      // Without the exemption each of these waits two seconds for the scan and then fails with "profile requests are still active".
+      expect(Date.now() - began).toBeLessThan(1500)
+      expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('active')
+      release()
+      await slow
+    } finally { release(); await f.close() }
+  })
+
+  it('trash, restore and permanent delete each stop disk measurement first and let it carry on afterwards', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const gui = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY])
+      const pause = vi.spyOn(f.services.storageUsage, 'pause')
+      const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'moved and removed' })
+      writeFileSync(join(f.services.threads.getThreadDir(thread.id), 'payload.bin'), Buffer.alloc(32 * 1024, 1))
+      await f.rpc.request('threads.trash', { threadId: thread.id })
+      const afterTrash = pause.mock.calls.length
+      expect(afterTrash).toBeGreaterThanOrEqual(1)
+      await f.rpc.request('threads.restore', { threadId: thread.id })
+      expect(pause.mock.calls.length).toBeGreaterThan(afterTrash)
+      await f.rpc.request('threads.trash', { threadId: thread.id })
+      const { preview } = await gui.request<{ preview: LifecyclePurgePreview }>('threads.purge', { threadId: thread.id, preview: true })
+      const beforePurge = pause.mock.calls.length
+      await gui.request('threads.purge', { threadId: thread.id, operationId: 'remove-it', expectedGeneration: preview.generation, previewDigest: preview.digest })
+      expect(pause.mock.calls.length).toBeGreaterThan(beforePurge)
+      expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('purged')
+      // Every pause was released: a scan still runs.
+      const usage = await gui.request<StorageUsageSnapshot>('storage.usage', { refresh: true })
+      expect(usage.entries.length).toBeGreaterThan(0)
+    } finally { await f.close() }
+  })
+
+  it.runIf(process.platform === 'win32')('threads can be trashed while a scan is walking their folders', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
+      const created: Thread[] = []
+      for (let index = 0; index < 5; index++) {
+        const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: `busy folder ${index}` })
+        const folder = join(f.services.threads.getThreadDir(thread.id), 'many')
+        mkdirSync(folder, { recursive: true })
+        for (let file = 0; file < 1500; file++) writeFileSync(join(folder, `f${file}.txt`), 'x')
+        created.push(thread)
+      }
+      // A scan walks the folders while each thread is moved; a walker's open handles make Windows refuse such a rename.
+      const scanning = cli.request('storage.usage', { refresh: true })
+      for (const thread of created) await f.rpc.request('threads.trash', { threadId: thread.id })
+      await scanning
+      for (const thread of created) expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('trashed')
+    } finally { await f.close() }
+  })
+
+  it('a purge preview carries a reclaim estimate beside a preview whose digest is unchanged', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'preview with reclaim' })
+      writeFileSync(join(f.services.threads.getThreadDir(thread.id), 'payload.bin'), Buffer.alloc(64 * 1024, 1))
+      await f.rpc.request('threads.trash', { threadId: thread.id })
+      const response = await f.rpc.request<{ preview: LifecyclePurgePreview; reclaim: { bytes: number; estimated: boolean; partial: boolean } }>('threads.purge', { threadId: thread.id, preview: true })
+      expect(response.reclaim.bytes).toBeGreaterThanOrEqual(64 * 1024); expect(response.reclaim.partial).toBe(false)
+      expect(response.preview).not.toHaveProperty('reclaim')
+      expect((await f.services.lifecycle.cleanup.preview(thread.id)).digest).toBe(response.preview.digest)
+    } finally { await f.close() }
   })
 })

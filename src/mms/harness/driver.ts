@@ -1,9 +1,10 @@
-import type { AuthState, InstallOwner } from '../../shared/harness/status'
+import type { AuthState, CredentialKind, InstallOwner } from '../../shared/harness/status'
 import type { CustomModel, HarnessCaps, HarnessDriverKind, RemoveInstallResult, RuntimeFacts } from '../../shared/harness/types'
-import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult } from '../../shared/providerAuth'
+import type { NeutralTool } from '../../shared/harness/tools'
+import type { PermissionLimits } from '../../shared/permissionMode'
+import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult, ProviderUsage } from '../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
 import type { UserQuestionService } from '../orchestrator/UserQuestionService'
-import type { StoredCliConfig } from '../providers/cliConfig'
 import type { AcpSource } from './acp/preset'
 import type { LoginSession } from '../providers/LoginSession'
 import type { ProviderAdapter } from '../run/adapters/ProviderAdapter'
@@ -12,6 +13,7 @@ import type { ProviderRef } from '../run/types'
 import type { InstanceEnv } from './env'
 import type { LatestVersionSource } from './latest'
 import type { SpendModelFacts } from './policy'
+import type { VendorMirror } from './vendorMirror'
 
 /**
  * A driver is a kind of runtime (Claude Code, Codex, Antigravity, the pi loop). The gateway asks
@@ -31,7 +33,10 @@ export interface InstanceConfig {
   /** `private`: a Mousse-owned home under `<profileHome>/harness/<instanceId>/home`. */
   home: 'default' | 'private'
   loginMethod?: string
-  /** Launch settings of an added instance (built-in instances keep theirs in `settings.json`). */
+  /**
+   * Launch settings, kept by every instance (a cleared one is stored as `null` and decodes as
+   * absent). Built-in vendor instances also mirror them to their `settings.json` (`vendorMirror`).
+   */
   binaryPath?: string
   args?: string[]
   env?: Record<string, string>
@@ -46,9 +51,15 @@ export interface InstanceConfig {
   setup?: 'managed' | 'existing'
   /**
    * Which engine runs a `pi` instance: Pi's agent as its own process (`rpc`) or the in-process pi
-   * loop (`legacy`, the default until PR 2c). Part of the record key: a switch builds a new runtime.
+   * loop (`legacy`). Stored only as the user's choice; decoded with the instance id it is the
+   * engine in effect (`drivers/pi/engines.ts`). Part of the record key: a switch builds a new runtime.
    */
   engine?: 'rpc' | 'legacy'
+  /**
+   * Signed out in Mousse (Sign out on the page): the gateway refuses its turns and reports it signed
+   * out without asking the runtime, whatever the agent's own sign-in says.
+   */
+  signedOutInMousse?: boolean
 }
 
 /** Whether an entry runs in a Mousse-owned home: it must, it may, or it must not. */
@@ -79,6 +90,9 @@ export interface ManagedInstall {
   advisory?: string
 }
 
+/** What a runtime says of the account's usage; the gateway adds the instance's id and name. */
+export type RuntimeUsage = Pick<ProviderUsage, 'status' | 'windows' | 'message' | 'manageUrl'>
+
 /** Runtime facts as a runtime reports them; the gateway stamps the instance and its counters. */
 export type RuntimeFactsReport = Omit<RuntimeFacts, 'instanceId' | 'configRevision' | 'accountGeneration'>
 
@@ -101,6 +115,8 @@ export interface AuthReading {
   canSignIn?: boolean
   /** The sign-in is one Mousse made and keeps (it may sign out), beyond the gateway's own rules. */
   ownedByMousse?: boolean
+  /** What the instance runs on (`InstanceSnapshot.auth.credential`), from what the driver already knows: never another check. */
+  credential?: CredentialKind
 }
 
 export interface DriverContext {
@@ -117,6 +133,13 @@ export interface DriverContext {
   findBinary(): string | undefined
   /** Clients learn about a change the runtime noticed on its own (sign-in refused, install done). */
   changed(): void
+  /** Whether the instance is signed out in Mousse (`InstanceConfig.signedOutInMousse`), read live. */
+  signedOut(): boolean
+  /**
+   * Saves launch settings the runtime learned itself (a path entered at sign-in, a manual path an
+   * install replaces) through the gateway's `configure`, so they land in the instance config.
+   */
+  saveLaunch(patch: CliProviderConfigPatch): Promise<void>
 }
 
 /**
@@ -153,6 +176,8 @@ export interface OneShotSpec {
 export interface DriverRuntime {
   /** The turn runtime of this instance. */
   readonly adapter: ProviderAdapter
+  /** Runs agent definitions' turns, when they do not run on `adapter` (`HarnessDriver.definitionCaps`). */
+  readonly definitionAdapter?: ProviderAdapter
   /**
    * One request with no tools (`HarnessDriver.oneShot`). Throws the provider's failure; `signal`
    * aborts it (the caller stopped, or the gateway's inactivity timeout).
@@ -176,10 +201,21 @@ export interface DriverRuntime {
    * Undefined when no model is listed. Without it, the binding keeps `model` as selected.
    */
   concreteModel?(model: string): string | undefined
-  /** The stored launch settings (built-in vendor instances: their `settings.json`). */
-  launch?(): StoredCliConfig
-  /** Saves launch settings of a built-in instance; added instances are configured by the gateway. */
-  setLaunch?(patch: CliProviderConfigPatch): Promise<void>
+  /**
+   * The copy of the instance's launch settings and sign-out flag in the vendor's own `settings.json`
+   * (`harness/vendorMirror`), kept so an older Mousse reads what the user set. Only the gateway uses it.
+   */
+  vendorMirror?: VendorMirror
+  /** Checks a launch-settings patch before anything is saved (an executable that cannot run, unsupported args). */
+  validateLaunch?(patch: CliProviderConfigPatch): void
+  /** The instance's launch settings changed: processes started with the old ones are replaced. */
+  launchChanged?(): void
+  /**
+   * The plan usage of the signed-in account, for the usage page (`HarnessInstances.usage`): the
+   * windows the provider reports, or `unavailable` with a link when only its own site has them.
+   * Throws when it cannot be read; the gateway reports that as an error entry. Absent: no usage.
+   */
+  usage?(signal: AbortSignal): Promise<RuntimeUsage>
   /** `force` skips the runtime's own cache (Recheck; turn admission without `identity`). */
   auth(options: { force: boolean; signal?: AbortSignal }): Promise<AuthReading>
   /**
@@ -187,6 +223,12 @@ export interface DriverRuntime {
    * admission: no model call, no runtime start. Without it the gateway uses `auth({ force: true })`.
    */
   identity?(signal: AbortSignal): Promise<string | undefined>
+  /**
+   * What limits the permission modes the runtime can enforce for a turn in `cwd` (Claude Code: the
+   * user's settings forbid bypassing permissions). Read at every turn admission and snapshot, never
+   * cached: the user may edit their settings at any time. Synchronous, no runtime start.
+   */
+  permissionLimits?(cwd?: string): PermissionLimits | undefined
   refreshModels?(cwd: string): Promise<void>
   /**
    * When the stored model list was last updated from the vendor (ISO time), kept with the list so
@@ -196,10 +238,20 @@ export interface DriverRuntime {
   modelsRefreshedAt?(): string | undefined
   signIn?(session: LoginSession, cwd: string, method?: string): Promise<ProviderLoginResult>
   signOut?(): Promise<void>
+  /**
+   * The instance's credential changed outside its own sign-in and sign-out (another surface set a
+   * key or signed in): a runtime holding credentials in its processes retires them.
+   */
+  credentialsChanged?(): Promise<void>
   /** The API key this entry runs with, for a move that copies it (model APIs with a saved key). */
   exportApiKey?(): Promise<string | undefined>
   /** Saves `apiKey` as this entry's own credential (a move that copies the old entry's key). */
   adoptApiKey?(apiKey: string): Promise<void>
+  /**
+   * This runtime's name for a model of a model API that moved here and that it does not list under
+   * the same id (Claude Code: `claude-sonnet-4-5` → `sonnet`). Undefined: the agent's default.
+   */
+  movedModel?(model: string): string | undefined
   /**
    * Installs (or updates) the runtime. A result's `config` is merged into the instance's stored
    * config, which moves its revision on (a registry agent records the install it was made with).
@@ -265,6 +317,13 @@ export interface DriverRuntime {
   stop(): void | Promise<void>
 }
 
+/** The Move prompt of a retired instance (its card and chats), and the target its errors name. */
+export interface RetiredPrompt {
+  title: string
+  detail: string
+  target: string
+}
+
 export interface HarnessDriver {
   readonly kind: HarnessDriverKind
   readonly label: string
@@ -314,19 +373,60 @@ export interface HarnessDriver {
    * agent without it reads images when its `initialize` says so (`promptCapabilities.image`).
    */
   readonly mcpImageResults?: boolean
-  /** Lenient decoder of an instance's stored `config`: unknown or malformed fields fall back. */
-  decodeConfig(raw: Record<string, unknown> | undefined): InstanceConfig
+  /**
+   * Its runtimes may keep a copy of their settings in a vendor file (`DriverRuntime.vendorMirror`),
+   * reconciled when the gateway starts.
+   */
+  readonly mirrorsVendorFile?: boolean
+  /**
+   * Mousse holds the sign-in of every instance (its own sign-in flow and saved session), whatever
+   * executable runs: a sign-out revokes it, and only a sign-in in Mousse restores it.
+   */
+  readonly ownsSignIn?: boolean
+  /**
+   * Lenient decoder of an instance's stored `config`: unknown or malformed fields fall back. With
+   * `instanceId`, fields that default per instance are resolved (the `pi` driver's engine).
+   */
+  decodeConfig(raw: Record<string, unknown> | undefined, instanceId?: string): InstanceConfig
+  /**
+   * The engine an instance of a driver with several runs on (`pi`): the one in effect for its
+   * stored config, and whether the user may switch it (Providers → Advanced → Engine).
+   */
+  engine?(instanceId: string, stored: Record<string, unknown> | undefined): { effective: 'rpc' | 'legacy'; switchable: boolean }
+  /**
+   * The Move prompt of an instance a Mousse update retired (`pi`: `drivers/pi/retired.ts`), else
+   * undefined. A retired instance keeps its record and sign-in, runs nothing, and moves on.
+   */
+  retired?(instanceId: string): RetiredPrompt | undefined
   /**
    * Capabilities for an instance at an installed version. `facts` (when the runtime reported them)
    * refine what a preset cannot know statically: fork, plan mode, models.
    */
   caps(config: InstanceConfig, installedVersion?: string, facts?: RuntimeFacts): HarnessCaps
   /**
+   * The caps an agent definition's turn runs on, when the instance runs definitions on another
+   * runtime than its chats (`DriverRuntime.definitionAdapter`): a Pi connection on the RPC engine
+   * runs definitions on Mousse's loop until Pi RPC can hold them (PR 4 unit 4d-rpc). Absent: `caps`.
+   */
+  definitionCaps?(config: InstanceConfig): HarnessCaps
+  /**
    * Arguments that make the executable print its version; `null` when it has no such flag (the
    * probe then skips the version check and the handshake decides whether it runs). Default
    * `['--version']`.
    */
   versionArgs?(config: InstanceConfig): string[] | null
+  /**
+   * The runtime's own names for a neutral built-in tool (PR 6 §2), for an exact allowlist: several
+   * when the runtime splits it (`search` is Claude Code's `Glob` and `Grep`). Empty, or absent on
+   * the driver, when the runtime has no such tool: a policy that names it is refused.
+   */
+  nativeToolNames?(neutral: NeutralTool, config: InstanceConfig): readonly string[]
+  /**
+   * The runtime holds every built-in call of a bot turn to the turn's bot authority
+   * (`AdapterHost.bot`) before it runs, so a bot policy's approvals are answered by the host
+   * (`approve: 'host'`) and never reach a person. Absent: such a policy is refused.
+   */
+  botAuthority?(config: InstanceConfig): boolean
   create(context: DriverContext): DriverRuntime
   /** The command that updates a binary installed by `owner`, when there is one. */
   updateCommand?(owner: InstallOwner): string | undefined
@@ -351,6 +451,7 @@ export function decodeInstanceConfig(raw: Record<string, unknown> | undefined, o
     const env = Object.fromEntries(Object.entries(raw.env as Record<string, unknown>).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
     if (Object.keys(env).length) config.env = env
   }
+  if (raw.signedOutInMousse === true) config.signedOutInMousse = true
   return config
 }
 

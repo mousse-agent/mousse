@@ -69,6 +69,16 @@ describe('network CLI validation', () => {
       params: {},
       promptInvite: true
     })
+    expect(
+      prepareNetCommand(
+        args('bridge', 'join', [], [['via', 'ws://127.0.0.1:41000/mousse-net'], ['name', 'VPS']])
+      )
+    ).toEqual({
+      method: 'bridge.join',
+      params: { name: 'VPS', via: 'ws://127.0.0.1:41000/mousse-net' },
+      promptInvite: true
+    })
+    expect(prepareNetCommand(args('net', 'routes'))).toEqual({ method: 'net.routes', params: {} })
     expect(prepareNetCommand(args('bridge', 'nodes'))).toEqual({
       method: 'bridge.nodes',
       params: {}
@@ -88,6 +98,10 @@ describe('network CLI validation', () => {
       args('net', 'status', [], [['token', bearer]]),
       args('bridge', 'join', ['not-an-invite']),
       args('bridge', 'join', [bearer, bearer]),
+      args('bridge', 'join', [bearer], [['via', 'ws://10.0.0.1:41000/mousse-net']]),
+      args('bridge', 'join', [bearer], [['via', 'ws://127.0.0.1:41000/mousse-net?x=1']]),
+      args('bridge', 'join', [bearer], [['via', 'ws://[::1]:41000/mousse-net']]),
+      args('net', 'routes', ['extra']),
       args('bridge', 'rename', ['node']),
       args('bridge', 'invite', [], [['caps', 'read,read']]),
       args('bridge', 'invite', [], [['caps', 'admin']]),
@@ -231,6 +245,32 @@ describe('network CLI command transport and presentation', () => {
       { invite: bearer, inviteId: 'inv_public', expiresAt: 1000 },
       `mousse-cli bridge join ${bearer}\nExpires: 1970-01-01T00:00:01.000Z`
     )
+  })
+  it('prints a device version, route, routes and last seen from bridge nodes', async () => {
+    const emitted: unknown[] = []
+    const row = {
+      node: 'nod_vps',
+      name: 'VPS',
+      state: 'open',
+      version: '0.1.3',
+      platform: 'linux',
+      route: { transport: 'ssh', direction: 'out' },
+      routes: [
+        {
+          route: { transport: 'ssh', address: 'ssh://me@box/127.0.0.1:47821', priority: 40 },
+          state: 'failing',
+          lastError: 'route_unreachable'
+        }
+      ],
+      lastSeenAt: 1000,
+      olderThanThis: false
+    }
+    await executeNetCommand(
+      { method: 'bridge.nodes', params: {} },
+      { request: vi.fn(async () => ({ nodes: [row] })) },
+      { emit: (value) => emitted.push(value) }
+    )
+    expect(emitted).toEqual([{ nodes: [row] }])
   })
   it('redacts nested diagnostics and URL credentials', () => {
     expect(

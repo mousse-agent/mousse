@@ -55,6 +55,12 @@ export function committedTransfers(messages: readonly Message[]): Map<string, Tr
 export class TurnHandoffs {
   /** A provider switch replaces this turn's raw history (`TurnInput.messages`/`nativeHistory`). */
   readonly replaceHistory: boolean
+  /**
+   * A switch or fork hands over a stand-in for the history before it this turn (not a native
+   * session): a summary or an import. A `delta` only adds what ran elsewhere since the runtime's
+   * own session, which it assumes holds the rest (a native fork's branch, for one), so it is not.
+   */
+  readonly historyHandedOver: boolean
   private readonly prefix: Message[] = []
   private readonly kept: Message[] = []
   private readonly blocks: string[] = []
@@ -86,6 +92,7 @@ export class TurnHandoffs {
       }
     }
     this.replaceHistory = planned.some((entry) => entry.kind === 'switch' && entry.plan.strategy !== 'native_resume')
+    this.historyHandedOver = planned.some((entry) => (entry.kind === 'switch' || entry.kind === 'fork') && entry.plan.strategy !== 'native_resume' && entry.plan.strategy !== 'delta')
   }
 
   /** `TurnInput.messages` for a transcript-native adapter; `active` ends with the admitted message. */

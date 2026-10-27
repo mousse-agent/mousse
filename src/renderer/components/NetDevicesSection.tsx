@@ -1,12 +1,17 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
 import { AlertTriangle, CircleCheck, Monitor, MonitorSmartphone, MoreHorizontal, Plus, RefreshCw, Smartphone } from '../lib/icons'
 import { RemoteDeviceThreads } from './RemoteDeviceThreads'
+import { ChangePlanDialog } from './devices/ChangePlanDialog'
+import { AddSshDeviceDialog } from './devices/AddSshDeviceDialog'
+import { ApproveSshRouteDialog } from './devices/ApproveSshRouteDialog'
+import { RenameEndpointDialog, UndoSetupDialog, UpdateRemoteDialog } from './devices/SshRecordDialogs'
 import { Modal } from './ui/Modal'
 import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './settings/SettingsRow'
 import { CopyButton } from './settings/IconButtons'
 import { mousseIdAvailable, useMousseIdStore } from '../stores/mousseIdStore'
-import { listedDevices, readDevices, type Device } from '../lib/netDevices'
+import { bindSettings, deviceLine, isIncompatible, listedDevices, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, type Device } from '../lib/netDevices'
 import type { NetDoctor, NetStatus } from '../../shared/net'
+import { TAILSCALE_FUNNEL_PORTS, type NetAddonActionResult, type NetAddonRecords, type SshRecordView, type SshSetupPhase } from '../../shared/net/local'
 import type { PlatformRequestMethod } from '../../shared/platform'
 import type { TransportManifest } from '../../mms/net/contracts'
 import '../styles/devices.css'
@@ -25,9 +30,12 @@ function networkingLine(status?: NetStatus): string {
   return `On${error}`
 }
 
-function deviceLine(device: Device): string {
-  const state = device.state === 'open' ? 'Online' : device.state === 'connecting' ? 'Connecting' : 'Offline'
-  return device.caps.length ? `${state} · can ${device.caps.join(', ')}` : state
+const SETUP_PHASE: Record<SshSetupPhase, string> = {
+  running: 'Setting up',
+  done: 'Set up',
+  failed: 'Setup failed',
+  cancelled: 'Setup cancelled',
+  interrupted: 'Setup interrupted'
 }
 
 const TRANSPORT_STATE: Record<Transport['state'], string> = {
@@ -39,14 +47,19 @@ const TRANSPORT_STATE: Record<Transport['state'], string> = {
 }
 
 function addonLine(manifest: TransportManifest, live?: Transport): string {
-  if (live?.enabled) return `${TRANSPORT_STATE[live.state]}${live.error ? ` · ${live.error}` : ''}`
+  if (live?.enabled) {
+    const why = live.detail ?? live.error
+    return `${TRANSPORT_STATE[live.state]}${why ? ` · ${why}` : ''}`
+  }
   const step = manifest.setupSteps[0]
   if (!step) return live?.error ? `Off · ${live.error}` : 'Off'
   return step.command ? `${step.title}: ${step.command}` : step.title
 }
 
+interface MenuItem { label: string; danger?: boolean; onSelect: () => void }
+
 /** Overflow menu on a device row. */
-function DeviceMenu({ name, disabled, onRevoke }: { name: string; disabled: boolean; onRevoke: () => void }) {
+function DeviceMenu({ name, disabled, items }: { name: string; disabled: boolean; items: MenuItem[] }) {
   const [open, setOpen] = useState(false)
   const root = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -73,7 +86,9 @@ function DeviceMenu({ name, disabled, onRevoke }: { name: string; disabled: bool
       </button>
       {open && (
         <div className="devices-menu-panel" role="menu">
-          <button type="button" role="menuitem" className="devices-menu-item danger" onClick={() => { setOpen(false); onRevoke() }}>Revoke…</button>
+          {items.map((item) => (
+            <button key={item.label} type="button" role="menuitem" className={item.danger ? 'devices-menu-item danger' : 'devices-menu-item'} onClick={() => { setOpen(false); item.onSelect() }}>{item.label}</button>
+          ))}
         </div>
       )}
     </div>
@@ -87,12 +102,15 @@ export function NetDevicesSection() {
   const [error, setError] = useState(''), [busy, setBusy] = useState(false), [passphrase, setPassphrase] = useState(''), [name, setName] = useState('My device'), [invite, setInvite] = useState(''), [joinText, setJoinText] = useState(''), [doctor, setDoctor] = useState<NetDoctor>()
   const [relayAddress, setRelayAddress] = useState(''), [named, setNamed] = useState(false), [tunnelId, setTunnelId] = useState(''), [hostname, setHostname] = useState(''), [credentialsFile, setCredentialsFile] = useState('')
   const [sshEndpoint, setSshEndpoint] = useState(''), [sshPort, setSshPort] = useState('')
-  const [adding, setAdding] = useState(false), [revoking, setRevoking] = useState<Device>()
+  const [adding, setAdding] = useState(false), [addKind, setAddKind] = useState<'computer'>(), [revoking, setRevoking] = useState<Device>(), [updating, setUpdating] = useState<Device>()
+  const [records, setRecords] = useState<NetAddonRecords>({}), [saved, setSaved] = useState<Record<string, unknown>>({}), [notice, setNotice] = useState(''), [servePort, setServePort] = useState('47890'), [serveDialog, setServeDialog] = useState<{ wasOn: boolean }>()
+  const [sshRecords, setSshRecords] = useState<SshRecordView[]>([]), [sshSetup, setSshSetup] = useState<{ setupId?: string }>(), [approving, setApproving] = useState<Device & { sshOffer: { endpoint: string } }>()
+  const [recordDialog, setRecordDialog] = useState<{ kind: 'undo' | 'rename' | 'update'; record: SshRecordView; name: string }>()
   const nameEdited = useRef(false)
   const reload = async () => {
     const owner = ++generation.current
-    const { current, addons, nodes } = await readDevices(mousseIdAvailable(useMousseIdStore.getState()))
-    if (alive.current && owner === generation.current) { setStatus(current); setManifests(addons.manifests); setDevices(nodes) }
+    const { current, addons, nodes, ssh } = await readDevices(mousseIdAvailable(useMousseIdStore.getState()))
+    if (alive.current && owner === generation.current) { setStatus(current); setManifests(addons.manifests); setRecords(addons.records ?? {}); setSaved(addons.settings ?? {}); setDevices(nodes); setSshRecords(ssh) }
   }
   useEffect(() => {
     alive.current = true
@@ -102,8 +120,8 @@ export function NetDevicesSection() {
       running = true
       try {
         const owner = ++generation.current
-        const { current, addons, nodes } = await readDevices(mousseIdAvailable(useMousseIdStore.getState()))
-        if (active && owner === generation.current) { setStatus(current); setManifests(addons.manifests); setDevices(nodes) }
+        const { current, addons, nodes, ssh } = await readDevices(mousseIdAvailable(useMousseIdStore.getState()))
+        if (active && owner === generation.current) { setStatus(current); setManifests(addons.manifests); setRecords(addons.records ?? {}); setSaved(addons.settings ?? {}); setDevices(nodes); setSshRecords(ssh) }
       } catch (cause) { if (active) { setDevices([]); setManifests([]); setError(String((cause as Error)?.message ?? cause)) } }
       finally { running = false }
     }
@@ -122,6 +140,52 @@ export function NetDevicesSection() {
     finally { if (alive.current) { setBusy(false); setPassphrase('') } }
   }
   const transport = (transportId: string, enabled: boolean, settings?: Record<string, unknown>) => action('net.transport.configure', { id: transportId, enabled, ...(settings ? { settings } : {}) })
+
+  // Tailscale Serve keeps the daemon on loopback and lets Tailscale forward a tailnet port to it.
+  const call = <T,>(method: PlatformRequestMethod, params: unknown) => window.mousse.platformRequest.request<T>(method, params)
+  const tailscale = status?.transports?.find((t) => t.id === 'tailscale')
+  const served = records.tailscale?.action === 'serve' ? (records.tailscale.record as { port: number; servePort: number; state?: string }) : undefined
+  const servePending = served?.state === 'pending'
+  const portValue = Number.parseInt(servePort, 10)
+  // Tailscale uses 443, 8443 and 10000 for Funnel (the public internet); Serve never does.
+  const portValid = /^\d+$/.test(servePort) && portValue >= 1024 && portValue <= 65535 && !TAILSCALE_FUNNEL_PORTS.includes(portValue)
+  const tailscaleSaved = saved.tailscale
+  // The saved settings (a custom binary path) travel with every change to this add-on.
+  const serveSettingsNow = served ? serveSettings(tailscaleSaved, served.port, served.servePort) : serveSettings(tailscaleSaved, portValue, portValue)
+  const serveUndo = async (enabled: boolean) => {
+    const result = await call<NetAddonActionResult>('net.transport.action.undo', { id: 'tailscale', action: 'serve' })
+    // Without Serve the add-on goes back to listening on the tailnet address, as before. While networking is off there is nothing to restart.
+    if (result.ok && status?.enabled) await call('net.transport.configure', { id: 'tailscale', enabled, settings: bindSettings(tailscaleSaved) })
+    return result
+  }
+  const turnOffServe = async () => {
+    generation.current++; setBusy(true); setError(''); setNotice('')
+    try {
+      const result = await serveUndo(!!tailscale?.enabled)
+      if (!result.ok) setError(result.message)
+      else if (result.outcome && result.outcome !== 'removed' && result.message) setNotice(result.message)
+      if (alive.current) await reload()
+    } catch (cause) { if (alive.current) setError(String((cause as Error)?.message ?? cause)) }
+    finally { if (alive.current) setBusy(false) }
+  }
+  // Mousse takes its loopback port first; only then is a tailnet port forwarded to it. A failed run puts the add-on back as it was.
+  const turnOnServe = async (wasOn: boolean): Promise<NetAddonActionResult> => {
+    const revert = () => call('net.transport.configure', { id: 'tailscale', enabled: wasOn, settings: bindSettings(tailscaleSaved) }).catch(() => undefined)
+    try {
+      const configured = await call<{ transports?: Transport[] }>('net.transport.configure', { id: 'tailscale', enabled: true, settings: serveSettingsNow })
+      const row = configured.transports?.find((t) => t.id === 'tailscale')
+      if (row?.state === 'failed') {
+        await revert()
+        return { ok: false, code: 'route_unreachable', message: row.detail ?? 'Tailscale could not start with Serve.' }
+      }
+      const result = await call<NetAddonActionResult>('net.transport.action.apply', { id: 'tailscale', action: 'serve', settings: serveSettingsNow })
+      if (!result.ok) await revert()
+      return result
+    } catch (cause) {
+      await revert()
+      throw cause
+    }
+  }
 
   const self = status?.self
   const selfDevice = devices.find((device) => device.self)
@@ -146,7 +210,8 @@ export function NetDevicesSection() {
   // "Add device" joins this device to my other devices, or invites a new one from the owner.
   const addMode: 'join' | 'invite' | undefined = status && !self ? 'join' : authority ? 'invite' : undefined
   const inviteReady = unlocked && !!status?.protected
-  const closeAdd = () => { setAdding(false); setInvite(''); setJoinText(''); setPassphrase('') }
+  const closeAdd = () => { setAdding(false); setAddKind(undefined); setInvite(''); setJoinText(''); setPassphrase('') }
+  const reloadQuietly = () => void reload().catch(() => undefined)
   const submitJoin = (event: FormEvent) => {
     event.preventDefault()
     if (!joinText.trim() || !passphrase || !name.trim() || busy) return
@@ -161,6 +226,17 @@ export function NetDevicesSection() {
             : undefined
 
   const showAddons = !!status?.enabled && !!self && unlocked
+  // Setups over SSH that stopped before the machine joined; they have no device row yet.
+  const unfinished = sshRecords.filter((record) => record.phase !== 'done' && !record.node)
+  const deviceMenu = (device: Device): MenuItem[] => {
+    const record = sshRecordFor(device, sshRecords)
+    const open = (kind: 'undo' | 'rename' | 'update') => () => { if (record) setRecordDialog({ kind, record, name: device.name }) }
+    return [
+      ...(record ? [{ label: 'Undo setup…', onSelect: open('undo') }, { label: 'Rename SSH endpoint…', onSelect: open('rename') }] : []),
+      ...(record?.owner === 'managed' ? [{ label: 'Update…', onSelect: open('update') }] : []),
+      ...(authority ? [{ label: 'Revoke…', danger: true, onSelect: () => setRevoking(device) }] : [])
+    ]
+  }
 
   return <>
     {error && !adding && <p role="alert" className="chat-error devices-error">{error}</p>}
@@ -212,18 +288,67 @@ export function NetDevicesSection() {
           </button>
         )}
       >
-        {others.map((device) => (
-          <SettingsRow
-            key={device.node}
-            title={device.name}
-            titleAction={device.kind === 'phone' ? <span className="devices-kind" title="Phone"><Smartphone size={13} aria-hidden="true" />Phone</span> : undefined}
-            description={deviceLine(device)}
-            control={authority && <DeviceMenu name={device.name} disabled={busy} onRevoke={() => setRevoking(device)} />}
-          />
-        ))}
+        {others.map((device) => {
+          const items = deviceMenu(device), offer = device.sshOffer, record = sshRecordFor(device, sshRecords)
+          return [
+            <SettingsRow
+              key={device.node}
+              title={device.name}
+              titleAction={device.kind === 'phone' ? <span className="devices-kind" title="Phone"><Smartphone size={13} aria-hidden="true" />Phone</span> : undefined}
+              description={<span title={routeDetails(device) || undefined}>{deviceLine(device, Date.now())}{offer ? ' · offers an SSH route' : ''}</span>}
+              control={<>
+                {offer && <button type="button" className="settings-btn" disabled={busy} onClick={() => setApproving({ ...device, sshOffer: offer })}>Use SSH route…</button>}
+                {items.length > 0 && <DeviceMenu name={device.name} disabled={busy} items={items} />}
+              </>}
+            />,
+            isIncompatible(device) && (
+              <SettingsRow key={`${device.node}-incompatible`} indent title="Incompatible version" description={`Update ${device.name} or this device so they can talk to each other.`} />
+            ),
+            device.olderThanThis && (
+              <SettingsRow
+                key={`${device.node}-older`}
+                indent
+                title={device.version ? `Older than this device (${device.version})` : 'Older than this device'}
+                description={device.version ? `This device runs ${selfDevice?.version ?? 'a newer version'}.` : `${device.name} is too old to report its version${selfDevice?.version ? `; this device runs ${selfDevice.version}` : ''}.`}
+                control={record?.owner === 'managed'
+                  ? <button type="button" className="settings-btn" onClick={() => setRecordDialog({ kind: 'update', record, name: device.name })}>Update…</button>
+                  : selfDevice?.version && <button type="button" className="settings-btn" onClick={() => setUpdating(device)}>{updateInstructions(device, selfDevice.version).command ? 'Show command' : 'How to update'}</button>}
+              />
+            )
+          ]
+        })}
         {self && unlocked && !others.length && <p className="settings-muted devices-note">No other devices yet.</p>}
       </SettingsGroup>
     )}
+
+    {status && unfinished.length > 0 && (
+      <SettingsGroup title="Unfinished remote machine setups" className="devices-group">
+        {unfinished.map((record) => (
+          <SettingsRow
+            key={record.id}
+            title={record.endpoint}
+            description={SETUP_PHASE[record.phase]}
+            control={record.phase === 'running'
+              ? <button type="button" className="settings-btn" onClick={() => setSshSetup({ setupId: record.id })}>Show progress</button>
+              : record.recoverable && <>
+                <button type="button" className="settings-btn" disabled={busy} onClick={() => void action('net.ssh.setup.retry', { id: record.id }, () => setSshSetup({ setupId: record.id }))}>Retry</button>
+                <button type="button" className="settings-btn" disabled={busy} onClick={() => setRecordDialog({ kind: 'undo', record, name: record.endpoint })}>Undo…</button>
+              </>}
+          />
+        ))}
+      </SettingsGroup>
+    )}
+
+    {status && served && !showAddons && (
+      <SettingsGroup className="devices-group" title="Tailscale Serve">
+        <SettingsRow
+          title="Tailscale Serve"
+          description={servePending ? 'Started but not confirmed · Turn off Serve clears it' : `Still on · tailnet port ${served.servePort} forwards to this device, also while networking is off`}
+          control={<button type="button" className="settings-btn" disabled={busy} onClick={() => void turnOffServe()}>Turn off Serve</button>}
+        />
+      </SettingsGroup>
+    )}
+    {notice && <p role="status" className="settings-muted devices-note">{notice}</p>}
 
     {status && (
       <SettingsAdvanced>
@@ -239,13 +364,13 @@ export function NetDevicesSection() {
               const enableSettings: Record<string, unknown> | undefined =
                 cloudflare ? (named ? { mode: 'named', tunnelId, hostname, credentialsFile } : { mode: 'quick' })
                   : manifest.id === 'direct' ? { host: '127.0.0.1', port: 0 }
-                    : manifest.id === 'tailscale' ? {}
+                    : manifest.id === 'tailscale' ? (served ? serveSettingsNow : bindSettings(tailscaleSaved))
                       : relay ? { address: relayAddress }
                         : ssh ? (sshReady ? { endpoint: sshEndpoint.trim(), port: sshPortNumber } : undefined)
                           : undefined
               const canEnable = !!enableSettings && (!cloudflare || namedReady) && (!relay || !!relayAddress)
               // Switching SSH off keeps the saved settings, which the screen may not have (a listener that failed to start has no route and the form starts empty).
-              const disableSettings = cloudflare ? { mode: 'quick' } : relay ? { address: relayAddress || live?.routes[0]?.address || '' } : ssh ? undefined : {}
+              const disableSettings = cloudflare ? { mode: 'quick' } : relay ? { address: relayAddress || live?.routes[0]?.address || '' } : ssh || manifest.id === 'tailscale' ? undefined : {}
               const label = manifest.id === 'direct' ? 'Local listener' : manifest.id === 'tailscale' ? 'Tailscale' : relay ? 'Relay' : ssh ? 'SSH (for devices that can ssh here)' : manifest.displayName
               return [
                 <SettingsRow
@@ -266,6 +391,22 @@ export function NetDevicesSection() {
                     </>
                   }
                 />,
+                manifest.id === 'tailscale' && manifest.actions?.some((entry) => entry.id === 'serve') && (
+                  <SettingsRow
+                    key={`${manifest.id}-serve`}
+                    indent
+                    title="Tailscale Serve"
+                    description={served ? (servePending ? 'Started but not confirmed · Turn off Serve clears it' : `On · tailnet port ${served.servePort} forwards to this device`) : 'Keep the listener on this computer only and let Tailscale forward a tailnet port to it'}
+                    control={served
+                      ? <button type="button" className="settings-btn" disabled={busy} onClick={() => void turnOffServe()}>Turn off Serve</button>
+                      : (
+                        <div className="devices-inline-form">
+                          <input className="settings-input devices-port-input" inputMode="numeric" aria-label="Tailnet port" title="Not 443, 8443 or 10000: Tailscale uses those for Funnel" aria-invalid={!portValid} value={servePort} disabled={busy} onChange={(event) => setServePort(event.target.value)} />
+                          <button type="button" className="settings-btn" disabled={busy || !portValid} onClick={() => { setError(''); setServeDialog({ wasOn: !!tailscale?.enabled }) }}>Turn on Serve…</button>
+                        </div>
+                      )}
+                  />
+                ),
                 cloudflare && (
                   <SettingsRow key={`${manifest.id}-named`} indent title="Use a named tunnel" description="A tunnel in your own Cloudflare account" control={<Switch checked={named} label="Use a named tunnel" onChange={setNamed} />} />
                 ),
@@ -351,7 +492,22 @@ export function NetDevicesSection() {
       </Modal>
     )}
 
-    {adding && addMode === 'invite' && (
+    {adding && addMode === 'invite' && !addKind && (
+      <Modal open title="Add a device" onClose={closeAdd}>
+        <div className="devices-dialog">
+          <button type="button" className="devices-choice" onClick={() => setAddKind('computer')}>
+            <span>Another computer with Mousse</span>
+            <span className="settings-muted">Create an invitation and paste it on the other computer.</span>
+          </button>
+          <button type="button" className="devices-choice" onClick={() => { closeAdd(); setSshSetup({}) }}>
+            <span>Remote machine over SSH</span>
+            <span className="settings-muted">Set up Mousse on a machine you reach with ssh.</span>
+          </button>
+        </div>
+      </Modal>
+    )}
+
+    {adding && addMode === 'invite' && addKind === 'computer' && (
       <Modal
         open
         title="Add a device"
@@ -382,6 +538,36 @@ export function NetDevicesSection() {
       </Modal>
     )}
 
+    {updating && selfDevice?.version && (() => {
+      const instructions = updateInstructions(updating, selfDevice.version)
+      return (
+        <Modal open title={`Update ${updating.name}`} onClose={() => setUpdating(undefined)}>
+          <div className="devices-dialog">
+            <p>{instructions.summary}</p>
+            {instructions.command && (
+              <>
+                <code className="devices-code devices-code-block">{instructions.command}</code>
+                <div className="devices-dialog-actions">
+                  <CopyButton text={instructions.command} label="Copy command" />
+                </div>
+              </>
+            )}
+          </div>
+        </Modal>
+      )
+    })()}
+
+    {serveDialog && (
+      <ChangePlanDialog
+        title="Turn on Tailscale Serve"
+        describe={() => call<NetAddonActionResult>('net.transport.action.describe', { id: 'tailscale', action: 'serve', settings: serveSettingsNow })}
+        apply={() => turnOnServe(serveDialog.wasOn)}
+        undo={() => serveUndo(serveDialog.wasOn)}
+        onClose={() => setServeDialog(undefined)}
+        onChanged={() => void reload()}
+      />
+    )}
+
     {revoking && (
       <Modal
         open
@@ -392,6 +578,12 @@ export function NetDevicesSection() {
         <p>{revoking.name} will no longer connect to your other devices.</p>
       </Modal>
     )}
+
+    {sshSetup && <AddSshDeviceDialog open setupId={sshSetup.setupId} onClose={() => { setSshSetup(undefined); reloadQuietly() }} onDone={reloadQuietly} />}
+    {approving && <ApproveSshRouteDialog node={approving.node} name={approving.name} endpoint={approving.sshOffer.endpoint} onClose={() => setApproving(undefined)} onDone={reloadQuietly} />}
+    {recordDialog?.kind === 'undo' && <UndoSetupDialog record={recordDialog.record} name={recordDialog.name} onClose={() => setRecordDialog(undefined)} onDone={reloadQuietly} />}
+    {recordDialog?.kind === 'rename' && <RenameEndpointDialog record={recordDialog.record} name={recordDialog.name} onClose={() => setRecordDialog(undefined)} onDone={reloadQuietly} />}
+    {recordDialog?.kind === 'update' && <UpdateRemoteDialog record={recordDialog.record} name={recordDialog.name} onClose={() => setRecordDialog(undefined)} onDone={reloadQuietly} />}
   </>
 }
 

@@ -33,7 +33,9 @@ import type {
   GitCommitSuggestion,
   GitDeleteBranchOptions,
   GitDiffStats,
+  GitFetchOptions,
   GitFetchResult,
+  GitOperationEvent,
   GitMutationResult,
   GitPullOptions,
   GitPullRequestLookup,
@@ -43,6 +45,7 @@ import type {
   GitStatusSnapshot,
   MainView,
   OrchestratorResponse,
+  PermissionMode,
   Project,
   PtyCreateRequest,
   PtyCreateResult,
@@ -71,8 +74,13 @@ import type {
   PullRequestDetail,
   PullRequestDraft,
   PullRequestFormInput,
+  PullRequestListItem,
+  PullRequestPushTarget,
   PullRequestRef,
-  PullRequestScope
+  PullRequestScope,
+  ResolvedPullRequestSummary,
+  StartPullRequestThreadInput,
+  StartPullRequestThreadResult
 } from '../shared/pullRequests'
 import type { ProfileCreateInput, ProfilePublicDto, ProfileUpdateInput } from '../shared/profiles/types'
 import type { LlmProviderOption, MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../shared/settings'
@@ -479,10 +487,19 @@ const api = {
       storageInvoke('git:unstage', scope, input),
     discard: (scope: GitScope, paths: string[]): Promise<GitMutationResult> =>
       storageInvoke('git:discard', scope, paths),
-    fetch: (scope: GitScope): Promise<GitMutationResult<GitFetchResult>> =>
-      storageInvoke('git:fetch', scope),
+    fetch: (scope: GitScope, options?: GitFetchOptions): Promise<GitMutationResult<GitFetchResult>> =>
+      storageInvoke('git:fetch', scope, options),
     pull: (scope: GitScope, options?: GitPullOptions): Promise<GitMutationResult<GitPullResult>> =>
       storageInvoke('git:pull', scope, options),
+    /** Live output of the Git actions this window started. */
+    onOperation: (cb: (event: GitOperationEvent) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: GitOperationEvent): void => cb(payload)
+      ipcRenderer.on('git:operation', handler)
+      return () => ipcRenderer.removeListener('git:operation', handler)
+    },
+    /** Stops a push, pull, fetch or commit this window started, with everything Git started for it. */
+    cancelOperation: (operationId: string): Promise<{ cancelled: boolean }> =>
+      storageInvoke('git:cancelOperation', operationId),
     abortInProgress: (scope: GitScope, kind: 'merge' | 'rebase'): Promise<GitMutationResult> =>
       storageInvoke('git:abortInProgress', scope, kind),
     createBranch: (scope: GitScope, name: string, options?: GitBranchOptions): Promise<GitMutationResult> =>
@@ -504,7 +521,19 @@ const api = {
     create: (scope: PullRequestScope, input: PullRequestFormInput): Promise<CreatePullRequestResult> =>
       ipcRenderer.invoke('pullRequests:create', scope, input),
     baseBranches: (ref: PullRequestRef): Promise<PullRequestBaseBranches> =>
-      ipcRenderer.invoke('pullRequests:baseBranches', ref)
+      ipcRenderer.invoke('pullRequests:baseBranches', ref),
+    /** The project's open pull requests, most recently updated first. */
+    list: (projectId: string, force?: boolean): Promise<PullRequestListItem[]> =>
+      storageInvoke('pullRequests:list', projectId, force),
+    /** The pull request a number, URL or `gh pr checkout` command names; rejects with a code when it is not this project's. */
+    resolve: (projectId: string, reference: string): Promise<ResolvedPullRequestSummary> =>
+      storageInvoke('pullRequests:resolve', projectId, reference),
+    /** Creates a thread whose worktree starts at the pull request's head; the seed message is returned for the composer. */
+    startThread: (input: StartPullRequestThreadInput): Promise<StartPullRequestThreadResult & { thread: Thread }> =>
+      storageInvoke('pullRequests:startThread', input),
+    /** Where Push goes for a thread linked to a pull request. */
+    pushTarget: (threadId: string): Promise<PullRequestPushTarget> =>
+      ipcRenderer.invoke('pullRequests:pushTarget', threadId)
   },
   editors: {
     list: (options?: { refresh?: boolean }): Promise<EditorInfo[]> =>
@@ -604,6 +633,13 @@ const api = {
       return () => ipcRenderer.removeListener('skills:changed', handler)
     }
   },
+  storage: {
+    policy: (): Promise<{ trash: import('../shared/resourceLifecycle').TrashRetentionPolicy; trashSweepStatus: { suspended: boolean; reason?: string }; policy: import('../shared/storage').StoragePolicy; clockSuspended: boolean }> => storageInvoke('storage:policy'),
+    configure: (policy: import('../shared/storage').StoragePolicy): Promise<{ policy: import('../shared/storage').StoragePolicy }> => storageInvoke('storage:configure', policy),
+    cleanupRun: (): Promise<{ report: import('../shared/storage').StorageCleanupReport }> => storageInvoke('storage:cleanupRun'),
+    cleanupLastReport: (): Promise<{ report: import('../shared/storage').StorageCleanupReport | null }> => storageInvoke('storage:cleanupLastReport'),
+    usage: (options?: { refresh?: boolean }): Promise<import('../shared/storage').StorageUsageSnapshot> => storageInvoke('storage:usage', options)
+  },
   workspace: {
     getStatus: (threadId: string): Promise<unknown> => ipcRenderer.invoke('workspace:getStatus', threadId),
     restore: (threadId: string, expectedJournalGeneration?: number): Promise<unknown> =>
@@ -667,7 +703,7 @@ const api = {
     select: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:select', threadId),
     delete: (threadId: string): Promise<void> => storageInvoke('threads:delete', threadId),
     restore: (threadId: string): Promise<unknown> => storageInvoke('threads:restore', threadId),
-    purge: (threadId: string, options?: { preview?: boolean; operationId?: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean }): Promise<{ preview?: import('../shared/resourceLifecycle').LifecyclePurgePreview; lifecycle?: import('../shared/resourceLifecycle').TaskLifecycleRecord }> => storageInvoke('threads:purge', threadId, options),
+    purge: (threadId: string, options?: { preview?: boolean; operationId?: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean }): Promise<{ preview?: import('../shared/resourceLifecycle').LifecyclePurgePreview; reclaim?: { bytes: number; estimated: boolean; partial: boolean }; lifecycle?: import('../shared/resourceLifecycle').TaskLifecycleRecord }> => storageInvoke('threads:purge', threadId, options),
     inventory: (threadId?: string): Promise<{ lifecycles: import('../shared/resourceLifecycle').TaskLifecycleRecord[]; taskNames: Record<string, string>; trashPolicy: import('../shared/resourceLifecycle').TrashRetentionPolicy; trashSweepStatus: { suspended: boolean; reason?: string } }> => storageInvoke('threads:inventory', threadId),
     configureTrash: (policy: { graceDays: number; automaticPurge: boolean }): Promise<unknown> => storageInvoke('threads:configureTrash', policy),
     rename: (threadId: string, name: string): Promise<Thread> =>
@@ -682,6 +718,8 @@ const api = {
       ipcRenderer.invoke('threads:pin', threadId, pinned),
     setWorktreeEnabled: (threadId: string, enabled: boolean): Promise<Thread> =>
       ipcRenderer.invoke('threads:setWorktreeEnabled', threadId, enabled),
+    setPermissionMode: (threadId: string, mode: PermissionMode): Promise<Thread> =>
+      ipcRenderer.invoke('threads:setPermissionMode', threadId, mode),
     settle: (threadId: string, settled: boolean): Promise<Thread> =>
       ipcRenderer.invoke('threads:settle', threadId, settled),
     reorder: (projectId: string | undefined, threadIds: string[]): Promise<Thread[]> =>

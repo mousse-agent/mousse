@@ -20,6 +20,8 @@ import { builtinProviders } from '@earendil-works/pi-ai/providers/all'
 import { createBashToolDefinition, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent'
 import { guardProvider, guardStreams, isGuarded, type GuardObserver, type RequestGate } from './guard'
 import { BUDGET_EXHAUSTED, GATE_REFUSALS, GATE_UNAVAILABLE, REQUEST_REFUSED } from './messages'
+import { brokerOAuth, type PiCredentialPost } from './oauth'
+import { inputBound, sizedMaxTokens, wirePlan, type PiReasoning, type ThinkingBudgets } from '../reservation'
 import { containedBashOperations } from './shell'
 
 /** The input key the app-tool registry reads a `per_call` runtime's turn token from (`registry.ts`). */
@@ -35,6 +37,8 @@ import {
   type PiReadyRequest,
   type PiRequestRequest,
   type PiRequestResponse,
+  type PiSettleRequest,
+  type PiSpendRequest,
   type PiTurnResponse,
   type PiTurnTool
 } from './protocol'
@@ -56,7 +60,10 @@ import {
  *   unreachable gate blocks.
  * - **Requests (PR 4 §5a).** Every model request the guard admits, compactions, summaries and Pi's
  *   own retries included, is charged first through `/pi/request`; a refusal or an unreachable
- *   endpoint ends it with a fixed text Pi does not retry, before any network I/O.
+ *   endpoint ends it with a fixed text Pi does not retry, before any network I/O. The charge
+ *   carries the request's input bound and final wire cap (`reservation.ts`); when the live turn
+ *   has token or USD limits (PR 4 §5b) Mousse answers with a grant that sizes it (`guard.ts`), and
+ *   `/pi/settle` ends it.
  */
 
 /**
@@ -147,7 +154,9 @@ function instanceProvider(catalog: PiCatalogResponse, builtins: Map<string, Prov
   const auth = key && stock.auth.apiKey
     ? { ...stock.auth, apiKey: Object.assign(Object.create(Object.getPrototypeOf(stock.auth.apiKey) as object) as NonNullable<Provider['auth']['apiKey']>, stock.auth.apiKey, {
         resolve: async (input: Parameters<NonNullable<Provider['auth']['apiKey']>['resolve']>[0]) => {
-          const resolved = await stock.auth.apiKey!.resolve(input).catch(() => undefined)
+          // The stock resolver sees Mousse's key as the stored credential, so providers that build
+          // their address from ids beside it (Cloudflare's account) find them in the environment.
+          const resolved = await stock.auth.apiKey!.resolve({ ...input, credential: { type: 'api_key', key } } as typeof input).catch(() => undefined)
           return { ...(resolved ?? {}), auth: { ...(resolved?.auth ?? {}), apiKey: key }, source: 'Mousse' }
         },
         check: async () => ({ type: 'api_key' as const, source: 'Mousse' })
@@ -187,6 +196,23 @@ export default async function mousseExtension(pi: ExtensionAPI): Promise<void> {
     delete process.env.MOUSSE_PI_TEST_GUARD_LOG
     delete process.env.MOUSSE_PI_TEST_FAIL_REGISTRATION
     if (log) observer = { admitted: (model) => appendFileSync(log, `${JSON.stringify({ provider: model.provider, id: model.id, api: model.api })}\n`) }
+    // The final hook parameters of each reserved request, as `onPayload` saw them after Mousse's check.
+    const payloads = process.env.MOUSSE_PI_TEST_PAYLOAD_LOG
+    delete process.env.MOUSSE_PI_TEST_PAYLOAD_LOG
+    if (payloads) observer = { ...observer, payload: (model, params, grant) => appendFileSync(payloads, `${JSON.stringify({ api: model.api, id: model.id, cap: grant.cap, thinkingBudget: grant.thinkingBudget, params })}\n`) }
+    // A `before_provider_request` that raises the output cap, as a careless extension could.
+    // Or that sets fields of its own (`MOUSSE_PI_TEST_PAYLOAD_PATCH`, JSON), such as `n`.
+    const raise = process.env.MOUSSE_PI_TEST_RAISE_CAP
+    const patch = process.env.MOUSSE_PI_TEST_PAYLOAD_PATCH
+    delete process.env.MOUSSE_PI_TEST_RAISE_CAP
+    delete process.env.MOUSSE_PI_TEST_PAYLOAD_PATCH
+    if (raise || patch) {
+      pi.on('before_provider_request', (event) => {
+        const payload = { ...(event.payload as Record<string, unknown>), ...(patch ? (JSON.parse(patch) as Record<string, unknown>) : {}) }
+        if (raise) for (const key of ['max_tokens', 'max_completion_tokens', 'max_output_tokens']) if (typeof payload[key] === 'number') payload[key] = (payload[key] as number) + 1_000
+        return payload
+      })
+    }
   }
 
   // Linux and macOS: every shell runs in a process group the engine recorded first (`shell.ts`).
@@ -199,17 +225,47 @@ export default async function mousseExtension(pi: ExtensionAPI): Promise<void> {
   let turn: PiTurnResponse | undefined
   // Mousse charges every request to the live turn before it goes, or refuses it. The text thrown
   // is always one of the fixed ones, never the transport's (Pi would retry "fetch failed").
+  // Mousse decides from the live turn whether a request is reserved: Pi compacts before a prompt,
+  // ahead of `before_agent_start`, so the extension cannot know the turn's limits. A request goes
+  // with what it would spend when the last answer asked for it (sizing serialises the whole
+  // context, so unbudgeted turns skip it); otherwise Mousse answers `spendRequired`, charging
+  // nothing, and the request asks again with it. Only `streamSimple` (every request Pi's agent,
+  // compactions and summaries make) can be sized; anything else is refused under spend limits.
+  let reserving = false
+  const spendOf = (model: Model<Api>, context: unknown, options: Record<string, unknown>): { spend: PiSpendRequest; thinkingBudget: number } => {
+    const typed = context as Parameters<typeof wirePlan>[1]
+    const plan = wirePlan(model, typed, typeof options.maxTokens === 'number' ? options.maxTokens : undefined, options.reasoning as PiReasoning | undefined, options.thinkingBudgets as ThinkingBudgets | undefined)
+    return { spend: { inputBound: inputBound(typed, model.api) ?? null, wireCap: plan.wireCap ?? null, thinkingBudget: plan.thinkingBudget, model: { provider: model.provider, id: model.id, api: model.api } }, thinkingBudget: plan.thinkingBudget }
+  }
+  const ask = async (body: PiRequestRequest): Promise<PiRequestResponse> => {
+    try {
+      return await call<PiRequestResponse>('request', body)
+    } catch {
+      throw new Error(GATE_UNAVAILABLE)
+    }
+  }
   const gate: RequestGate = {
-    request: async () => {
-      const body: PiRequestRequest = { attemptToken: turn?.attemptToken ?? '', kind: 'request' }
-      let answer: PiRequestResponse
-      try {
-        answer = await call<PiRequestResponse>('request', body)
-      } catch {
-        throw new Error(GATE_UNAVAILABLE)
+    request: async (model, context, options, fn) => {
+      let sized = fn === 'streamSimple' && reserving ? spendOf(model, context, options) : undefined
+      let answer = await ask({ attemptToken: turn?.attemptToken ?? '', kind: 'request', ...(sized ? { spend: sized.spend } : {}) })
+      if (answer?.ok === false && answer.spendRequired && !sized && fn === 'streamSimple') {
+        sized = spendOf(model, context, options)
+        answer = await ask({ attemptToken: turn?.attemptToken ?? '', kind: 'request', spend: sized.spend })
       }
-      if (answer?.ok === true) return
+      reserving = answer?.ok === true ? Boolean(answer.reservation) : answer?.ok === false && Boolean(answer.spendRequired) ? true : reserving
+      const spend = sized?.spend
+      const thinkingBudget = sized?.thinkingBudget ?? 0
+      if (answer?.ok === true) {
+        const reservation = answer.reservation
+        if (!reservation) return undefined
+        if (!spend || typeof reservation.cap !== 'number' || typeof reservation.id !== 'string') throw new Error(REQUEST_REFUSED)
+        return { id: reservation.id, cap: reservation.cap, maxTokens: sizedMaxTokens(reservation.cap, { thinkingBudget }), thinkingBudget }
+      }
       throw new Error(answer?.ok === false && answer.reason === BUDGET_EXHAUSTED ? BUDGET_EXHAUSTED : REQUEST_REFUSED)
+    },
+    settle: async (grant, outcome) => {
+      const body: PiSettleRequest = { reservationId: grant.id, outcome }
+      await call('settle', body).catch(() => undefined)
     }
   }
 
@@ -219,7 +275,9 @@ export default async function mousseExtension(pi: ExtensionAPI): Promise<void> {
   for (const entry of getApiProviders()) registerApiProvider(guardStreams({ api: entry.api, stream: entry.stream, streamSimple: entry.streamSimple }, undefined, observer, gate) as never)
 
   let catalog = await call<PiCatalogResponse>('catalog', {})
-  const builtins = new Map(builtinProviders().map((provider) => [provider.id, provider]))
+  // Mousse is the only OAuth refresher: every OAuth provider's `refresh` asks Mousse (`oauth.ts`).
+  const credential: PiCredentialPost = (request, signal) => call('credential', request, signal)
+  const builtins = new Map(builtinProviders().map((provider) => [provider.id, brokerOAuth(provider, credential)]))
   // Every built-in, guarded; the instance's provider with Mousse's catalogue and key. Queued now and
   // flushed before the session's options resolve, so `--model` finds Mousse's model.
   for (const provider of builtins.values()) if (provider.id !== catalog.provider.id) pi.registerProvider(guardProvider(provider, observer, gate))
@@ -249,7 +307,7 @@ export default async function mousseExtension(pi: ExtensionAPI): Promise<void> {
     for (const id of ids) {
       if (isGuarded(registry.getRegisteredNativeProvider(id))) continue
       const current = registry.getProvider(id)
-      if (current) await registerNow(guardProvider(current, observer, gate))
+      if (current) await registerNow(guardProvider(brokerOAuth(current, credential), observer, gate))
     }
     const guarded = [...ids].filter((id) => isGuarded(registry.getRegisteredNativeProvider(id)))
     const ready: PiReadyRequest = {

@@ -4,9 +4,10 @@ import { knownAppError, parseErrorInfo } from '../../shared/errors'
  * Untrusted frame fields must not drive file/tool access before validation.
  */
 
-import type { ChatImageAttachment, ChatMode } from '../../shared/types'
+import type { ChatImageAttachment, ChatMode, ScheduledJobWorkspace } from '../../shared/types'
 import type { ProviderLoginResponse } from '../../shared/providerAuth'
-import { PROVIDER_DRIVER_KINDS } from '../../shared/providerInstances'
+import { PROVIDER_DRIVER_KINDS, type ModelOverride } from '../../shared/providerInstances'
+import { isAgentAccessLevel } from '../../shared/settings'
 import {
   RESERVED_AGENT_IDS,
   reservedAgentMessage,
@@ -91,7 +92,7 @@ export function parseEnvelope(raw: unknown): ProtocolEnvelope | null {
         Object.keys(raw).some(
           key => !['kind', 'type', 'profileId', 'profileEpoch', 'data'].includes(key)
         ) ||
-        (raw.type !== 'bridge.hub.thread' && raw.type !== 'mcp.auth-url') ||
+        (raw.type !== 'bridge.hub.thread' && raw.type !== 'mcp.auth-url' && raw.type !== 'git.operation') ||
         !isBoundedString(raw.profileId, 128, { nonEmpty: true }) ||
         !Number.isSafeInteger(raw.profileEpoch) ||
         (raw.profileEpoch as number) < 1
@@ -535,7 +536,11 @@ function asNullableTrimmed(v: unknown, name: string, maxLen: number): string | n
 export function asInstanceConfigPatch(v: unknown, name = 'patch'): InstanceConfigPatch {
   if (v === undefined || v === null) return {}
   const o = asPlainObject(v, name)
-  assertKnownKeys(o, name, ['displayName', 'home', 'binaryPath', 'args', 'env', 'loginMethod', 'source', 'setup'])
+  assertKnownKeys(o, name, ['displayName', 'home', 'binaryPath', 'args', 'env', 'loginMethod', 'source', 'setup', 'engine', 'useOlderSettings'])
+  if (o.useOlderSettings !== undefined) {
+    if (o.useOlderSettings !== true) throw invalidParams(`${name}.useOlderSettings must be true`)
+    return { useOlderSettings: true }
+  }
   // binaryPath, args and env share the CLI launch-settings limits.
   const patch: InstanceConfigPatch = { ...parseCliConfigPatch({ binaryPath: o.binaryPath, args: o.args, env: o.env }) }
   if (o.displayName !== undefined) patch.displayName = asNullableTrimmed(o.displayName, `${name}.displayName`, 80)
@@ -548,6 +553,10 @@ export function asInstanceConfigPatch(v: unknown, name = 'patch'): InstanceConfi
   if (o.setup !== undefined) {
     if (o.setup !== 'managed' && o.setup !== 'existing') throw invalidParams(`${name}.setup must be managed|existing`)
     patch.setup = o.setup
+  }
+  if (o.engine !== undefined) {
+    if (o.engine !== null && o.engine !== 'rpc' && o.engine !== 'legacy') throw invalidParams(`${name}.engine must be rpc|legacy|null`)
+    patch.engine = o.engine
   }
   return patch
 }
@@ -579,7 +588,12 @@ export function asAddInstanceInput(v: unknown): AddInstanceInput {
   const o = asPlainObject(v, 'params')
   const driver = asHarnessDriverKind(o.driver)
   const config = asInstanceConfigPatch(o.config, 'config')
-  return Object.keys(config).length > 0 ? { driver, config } : { driver }
+  let slug: string | undefined
+  if (o.slug !== undefined) {
+    slug = asString(o.slug, 'slug', 32)
+    if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(slug)) throw invalidParams('slug must be lowercase letters, digits and inner dashes')
+  }
+  return { driver, ...(Object.keys(config).length > 0 ? { config } : {}), ...(slug ? { slug } : {}) }
 }
 
 /** Device scope takes a boolean; a project may also clear its override with null. */
@@ -713,16 +727,18 @@ export function asIsoDateString(v: unknown, name: string): string {
 }
 
 export function asJobSchedule(v: unknown, name = 'schedule'): {
-  kind: 'once' | 'interval' | 'cron'
+  kind: 'once' | 'interval' | 'cron' | 'manual'
   runAt?: string
   minutes?: number
   expr?: string
 } {
   const o = asPlainObject(v, name)
   const kind = o.kind
-  if (kind !== 'once' && kind !== 'interval' && kind !== 'cron') {
-    throw new Error(`${name}.kind must be once|interval|cron`)
+  if (kind !== 'once' && kind !== 'interval' && kind !== 'cron' && kind !== 'manual') {
+    throw new Error(`${name}.kind must be once|interval|cron|manual`)
   }
+  // No clock: the job runs only when it is started.
+  if (kind === 'manual') return { kind }
   if (kind === 'once') {
     const runAt = asIsoDateString(o.runAt, `${name}.runAt`)
     return { kind, runAt }
@@ -746,7 +762,33 @@ export type CreateScheduledJobInputValidated = {
   threadId?: string
   projectId?: string
   createThread?: boolean
+  selection?: ModelOverride
+  mode?: 'agent' | 'plan'
+  workspace?: ScheduledJobWorkspace
   repeat?: { times?: number }
+}
+
+/** The provider instance and model a job runs on. The instance and model are checked against the profile later. */
+export function asJobSelection(v: unknown, name = 'selection'): ModelOverride {
+  const o = asPlainObject(v, name)
+  const instanceId = asOptionalString(o.instanceId, 256)
+  // An empty provider is the stored shape of a selection that names only its instance.
+  const llmProvider = o.llmProvider === undefined || o.llmProvider === '' ? undefined : asString(o.llmProvider, `${name}.llmProvider`, 256)
+  const model = asString(o.model, `${name}.model`, 512)
+  if (!instanceId && !llmProvider) throw new Error(`${name}.instanceId or ${name}.llmProvider is required`)
+  return { ...(instanceId ? { instanceId } : {}), llmProvider: llmProvider ?? '', model }
+}
+
+export function asJobMode(v: unknown, name = 'mode'): 'agent' | 'plan' {
+  if (v !== 'agent' && v !== 'plan') throw new Error(`${name} must be agent|plan`)
+  return v
+}
+
+export function asJobWorkspace(v: unknown, name = 'workspace'): ScheduledJobWorkspace {
+  const o = asPlainObject(v, name)
+  if (o.kind === 'project' || o.kind === 'newWorktree') return { kind: o.kind }
+  if (o.kind === 'worktree') return { kind: 'worktree', path: asString(o.path, `${name}.path`, 4096) }
+  throw new Error(`${name}.kind must be project|newWorktree|worktree`)
 }
 
 export function asCreateScheduledJobInput(v: unknown): CreateScheduledJobInputValidated {
@@ -761,6 +803,9 @@ export function asCreateScheduledJobInput(v: unknown): CreateScheduledJobInputVa
   const projectId = asOptionalString(o.projectId, 256)
   if (projectId) input.projectId = projectId
   if (o.createThread !== undefined) input.createThread = asBoolean(o.createThread, 'createThread')
+  if (o.selection !== undefined) input.selection = asJobSelection(o.selection)
+  if (o.mode !== undefined) input.mode = asJobMode(o.mode)
+  if (o.workspace !== undefined) input.workspace = asJobWorkspace(o.workspace)
   if (o.repeat !== undefined) {
     const r = asPlainObject(o.repeat, 'repeat')
     const times = asOptionalBoundedInt(r.times, 'repeat.times', { min: 1, max: 10_000 })
@@ -774,6 +819,9 @@ export function asCreateScheduledJobInput(v: unknown): CreateScheduledJobInputVa
     'threadId',
     'projectId',
     'createThread',
+    'selection',
+    'mode',
+    'workspace',
     'repeat'
   ])
   for (const key of Object.keys(o)) {
@@ -790,6 +838,9 @@ export function asScheduledJobPatch(v: unknown): {
   threadId?: string | null
   projectId?: string | null
   createThread?: boolean
+  selection?: ModelOverride | null
+  mode?: 'agent' | 'plan' | null
+  workspace?: ScheduledJobWorkspace | null
   repeat?: { times?: number } | null
 } {
   const o = asPlainObject(v, 'patch')
@@ -801,6 +852,9 @@ export function asScheduledJobPatch(v: unknown): {
     'threadId',
     'projectId',
     'createThread',
+    'selection',
+    'mode',
+    'workspace',
     'repeat'
   ])
   for (const key of Object.keys(o)) {
@@ -816,6 +870,13 @@ export function asScheduledJobPatch(v: unknown): {
   if (o.projectId === null) patch.projectId = null
   else if (o.projectId !== undefined) patch.projectId = asString(o.projectId, 'projectId', 256)
   if (o.createThread !== undefined) patch.createThread = asBoolean(o.createThread, 'createThread')
+  // `null` clears the field: the job goes back to the default.
+  if (o.selection === null) patch.selection = null
+  else if (o.selection !== undefined) patch.selection = asJobSelection(o.selection)
+  if (o.mode === null) patch.mode = null
+  else if (o.mode !== undefined) patch.mode = asJobMode(o.mode)
+  if (o.workspace === null) patch.workspace = null
+  else if (o.workspace !== undefined) patch.workspace = asJobWorkspace(o.workspace)
   if (o.repeat === null) patch.repeat = null
   else if (o.repeat !== undefined) {
     const r = asPlainObject(o.repeat, 'repeat')
@@ -926,6 +987,7 @@ export function asSettingsPartial(v: unknown): Record<string, unknown> {
     'notifications',
     'shortcuts',
     'context',
+    'agentAccess',
     'provider',
     'title',
     'agents',
@@ -958,7 +1020,23 @@ export function asSettingsPartial(v: unknown): Record<string, unknown> {
     }
     throw new Error(`${path} has unsupported type`)
   }
-  return walk(o, 'partial', 0) as Record<string, unknown>
+  const walked = walk(o, 'partial', 0) as Record<string, unknown>
+  if (walked.agentAccess !== undefined) assertAgentAccessPatch(walked.agentAccess)
+  return walked
+}
+
+/** `agentAccess` narrows what agents may reach, so a malformed patch is refused rather than guessed at. */
+function assertAgentAccessPatch(value: unknown): void {
+  const patch = asPlainObject(value, 'partial.agentAccess')
+  for (const key of Object.keys(patch)) {
+    if (key !== 'level' && key !== 'projectIds' && key !== 'answerApprovals') throw new Error(`partial.agentAccess.${key} is not allowed`)
+  }
+  if (patch.level !== undefined && !isAgentAccessLevel(patch.level)) throw new Error('partial.agentAccess.level must be lineage, read or manage')
+  if (patch.answerApprovals !== undefined && typeof patch.answerApprovals !== 'boolean') throw new Error('partial.agentAccess.answerApprovals must be a boolean')
+  if (patch.projectIds !== undefined) {
+    if (!Array.isArray(patch.projectIds) || patch.projectIds.some((id) => typeof id !== 'string' || id.length === 0 || id.length > 256))
+      throw new Error('partial.agentAccess.projectIds must be an array of project ids')
+  }
 }
 
 export function asStringEnvMap(v: unknown, name = 'env'): Record<string, string> {

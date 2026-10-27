@@ -75,6 +75,7 @@ export function childActivity(runs: readonly RunRecord[], pendingQuestion: boole
   const live = runs.filter((run) => !TERMINAL_RUN_STATUSES.has(run.status))
   if (live.some((run) => run.status === 'running' || run.status === 'finalizing')) return 'working'
   if (live.some((run) => run.status === 'starting')) return 'starting'
+  if (live.some((run) => run.status === 'paused')) return 'paused'
   if (live.some((run) => run.status === 'queued')) return 'queued'
   return inputs && isChildBusy(runs, inputs) ? 'waiting' : 'idle'
 }

@@ -5,6 +5,7 @@ import { RUN_MIGRATIONS } from './db/migrations'
 import { json, str, type Row } from './db/rows'
 import { fail } from './db/RunStoreError'
 import { settleWaitingDelegations } from './delegation/hold'
+import { isAgentAccessLevel, narrowAgentAccess, type AgentAccessLevel } from '../../shared/settings'
 import { stableStringify } from './json'
 import { currentStopGeneration } from './stopGeneration'
 import {
@@ -224,6 +225,21 @@ export class RunStore {
     })
   }
 
+  /**
+   * Records the agent access level the run's turn was granted. It is a plain column, not a run status
+   * write: no epoch moves and no event is appended. Only ever narrower: a second call keeps the narrower
+   * level. Returns the level now recorded, or undefined for an unknown run.
+   */
+  setRunAccessGrant(runId: string, level: AgentAccessLevel): AgentAccessLevel | undefined {
+    return this.db.transaction(() => {
+      const row = this.db.statement('SELECT access_grant FROM runs WHERE run_id = ?').get(runId)
+      if (!row) return undefined
+      const next = narrowAgentAccess(isAgentAccessLevel(row.access_grant) ? row.access_grant : undefined, level) ?? 'lineage'
+      if (row.access_grant !== next) this.db.statement('UPDATE runs SET access_grant = ? WHERE run_id = ?').run(next, runId)
+      return next
+    })
+  }
+
   /** Merges `outcomePatch` into the run outcome under the same CAS rule as `casRunStatus`. */
   casRunOutcome(input: {
     runId: string
@@ -324,6 +340,18 @@ export class RunStore {
       )
       .all(threadId)
     if (rows.length > 1) fail('conflict', `Thread ${threadId} has more than one active run.`)
+    return rows.length ? toRun(rows[0]) : null
+  }
+
+  /**
+   * The thread's `paused` run (SPEC §5), or null. A paused run is not active: the thread accepts a
+   * person's message. At most one exists; more than one is an invariant violation and raises `conflict`.
+   */
+  getPausedRun(threadId: string): RunRecord | null {
+    const rows = this.db
+      .statement(`SELECT * FROM runs WHERE thread_id = ? AND status = 'paused' ORDER BY ordinal LIMIT 2`)
+      .all(threadId)
+    if (rows.length > 1) fail('conflict', `Thread ${threadId} has more than one paused run.`)
     return rows.length ? toRun(rows[0]) : null
   }
 
@@ -573,7 +601,8 @@ function toRun(row: Row): RunRecord {
     startedAt: str(row.started_at),
     completedAt: str(row.completed_at),
     outcome: json<RunOutcome>(row.outcome),
-    heartbeatAt: str(row.heartbeat_at)
+    heartbeatAt: str(row.heartbeat_at),
+    ...(isAgentAccessLevel(row.access_grant) ? { accessGrant: row.access_grant } : {})
   }
 }
 

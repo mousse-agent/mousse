@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import {
   friendlyOAuthError,
   parseAnthropicUsage,
-  parseOpenAiUsage,
   parseXaiCreditsUsage,
   parseXaiMonthlyUsage,
   percentRemainingFromUtilization
@@ -37,20 +36,6 @@ describe('provider usage parsers', () => {
         resetsAt: '2026-01-07T00:00:00Z'
       }
     ])
-  })
-
-  it('parses OpenAI codex used_percent windows with resets', () => {
-    const windows = parseOpenAiUsage({
-      rate_limit: {
-        primary_window: { limit_window_seconds: 18000, used_percent: 25, reset_at: 1700000000 },
-        secondary_window: { limit_window_seconds: 604800, used_percent: 10 }
-      }
-    })
-    expect(windows).toMatchObject([
-      { id: 'five_hour', label: '5-hour', remainingPercent: 75 },
-      { id: 'seven_day', label: 'Weekly', remainingPercent: 90 }
-    ])
-    expect(windows[0]?.resetsAt).toBe(new Date(1700000000 * 1000).toISOString())
   })
 
   it('parses Grok SuperGrok weekly credits usage (used percent → remaining)', () => {

@@ -42,7 +42,7 @@ export interface MousseAgentsConfig {
 
 export type MousseSettingsSection = Pick<
   MousseSettings,
-  'profile' | 'appearance' | 'notifications' | 'shortcuts' | 'context' | 'integrations' | 'title'
+  'profile' | 'appearance' | 'notifications' | 'shortcuts' | 'permissions' | 'context' | 'agentAccess' | 'integrations' | 'title'
 >
 
 export interface ScheduledConfigSection {
@@ -60,6 +60,11 @@ export interface ScheduledJobDefinition {
   threadId?: string
   projectId?: string
   createThread?: boolean
+  selection?: ScheduledJob['selection']
+  mode?: ScheduledJob['mode']
+  workspace?: ScheduledJob['workspace']
+  createdBy?: ScheduledJob['createdBy']
+  accessCap?: ScheduledJob['accessCap']
   repeat?: { times: number; completed?: number }
   createdAt: string
   updatedAt: string
@@ -76,6 +81,7 @@ export interface ScheduledJobRuntime {
   runHistory?: ScheduledJob['runHistory']
   repeat?: { times: number; completed: number }
   runClaim?: ScheduledJob['runClaim']
+  pendingOccurrence?: ScheduledJob['pendingOccurrence']
 }
 
 export interface MousseConf {

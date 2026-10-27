@@ -5,12 +5,14 @@ import type { Scenario } from '../types'
 export const scenario: Scenario = {
   name: 'provider-error',
   prompt: 'Summarise the repository',
-  assert({ response, run, messages, llmMessages, turnState }) {
+  assert({ adapterId, response, run, messages, llmMessages, turnState }) {
     expect(run).toMatchObject({ status: 'failed' })
     expect(turnState.phase).toBe('failed')
-    // A provider failure without a typed error surfaces as a sanitised turn failure.
-    expect(response.error).toMatchObject({ code: 'orchestrator_turn_failed' })
-    expect(response.message).toMatch(/^\[orchestrator_turn_failed\] /)
+    // A provider failure without a typed error surfaces as a sanitised turn failure. The Pi RPC
+    // engine types every failed request from Pi's error text (`normalizeProviderError`).
+    const code = adapterId === 'pi-rpc' ? 'provider_unknown' : 'orchestrator_turn_failed'
+    expect(response.error).toMatchObject({ code })
+    expect(response.message.startsWith(`[${code}] `)).toBe(true)
     const replies = messages.filter((message) => message.role === 'assistant' && !message.kind)
     expect(replies).toEqual([expect.objectContaining({ content: 'Partial', streaming: false, incomplete: true })])
     const failure = messages.at(-1)

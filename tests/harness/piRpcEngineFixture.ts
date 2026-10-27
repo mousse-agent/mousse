@@ -40,6 +40,11 @@ export interface SetupOptions {
   adjustLaunch?: PiRpcEngineOptions['adjustLaunch']
   holdTurn?: PiRpcEngineOptions['holdTurn']
   mousseTools?: PiRpcEngineOptions['mousseTools']
+  /** The mock provider's models instead of the one OpenAI-compatible model (`url`: the recorder's). */
+  models?: (url: string) => unknown[]
+  extraEnv?: Record<string, string>
+  /** Pi's threshold compaction, read when a process starts (default on). */
+  compaction?: () => boolean
 }
 
 /** An engine on a fresh scratch dir with a recorder; `cleanups` gets what to undo, in order. */
@@ -69,7 +74,7 @@ export async function setup(cleanups: Array<() => unknown>, options: SetupOption
       revision: catalogRevision.value,
       provider: {
         id: 'mock', builtin: false, name: 'Mock',
-        models: [{ id: 'mock-model', name: 'Mock model', api: 'openai-completions', provider: 'mock', baseUrl: `${recorder.url}/v1`, reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 4096, compat: { supportsStore: false, supportsDeveloperRole: false } }] as never
+        models: (options.models?.(recorder.url) ?? [{ id: 'mock-model', name: 'Mock model', api: 'openai-completions', provider: 'mock', baseUrl: `${recorder.url}/v1`, reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 4096, compat: { supportsStore: false, supportsDeveloperRole: false } }]) as never
       }
     }),
     apiKey: () => 'fake-mock-key',
@@ -77,6 +82,8 @@ export async function setup(cleanups: Array<() => unknown>, options: SetupOption
     onSpawn: (pid) => void spawned.push(pid),
     readyDeadlineMs: 15_000,
     ...(options.testEnv ? { testEnv: options.testEnv } : {}),
+    ...(options.extraEnv ? { extraEnv: () => options.extraEnv } : {}),
+    ...(options.compaction ? { compaction: options.compaction } : {}),
     ...(options.adjustLaunch ? { adjustLaunch: options.adjustLaunch } : {}),
     ...(options.holdTurn ? { holdTurn: options.holdTurn } : {}),
     ...(options.mousseTools ? { mousseTools: options.mousseTools } : {}),

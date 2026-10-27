@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { afterEach, expect, it } from 'vitest'
-import { BotOutbox, BotRecordAuthorization } from '../../../../src/mms/bots/admission'
+import { BotOutbox, BotRecordAuthorization } from '../../../../src/mms/bots/space/admission'
 import { PrivateSpaceService, privateContentAAD } from '../../../../src/mms/spaces/private/service'
 import { SqlPrivateStreamKeys } from '../../../../src/mms/net/identity'
 import { SpaceHostService } from '../../../../src/mms/spaces/host'

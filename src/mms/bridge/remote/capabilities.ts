@@ -31,7 +31,9 @@ export const BRIDGE_REMOTE_METHODS = {
   'queue.enqueue': { capability: 'chat', mutating: true },
   'queue.remove': { capability: 'chat', mutating: true },
   'queue.reorder': { capability: 'chat', mutating: true },
-  'queue.promoteToSteer': { capability: 'chat', mutating: true }
+  'queue.promoteToSteer': { capability: 'chat', mutating: true },
+  // Disk usage totals by project, thread and kind: ids, names and byte counts only, never a path. Cached; a remote caller cannot force a rescan.
+  'storage.usage': { capability: 'read', mutating: false }
 } as const satisfies Record<string, { capability: NodeCapability; mutating: boolean }>
 export type BridgeRemoteMethod = keyof typeof BRIDGE_REMOTE_METHODS
 export type BridgeOrdinaryMethod = Exclude<

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { methods, type NewSessionResponse } from '@agentclientprotocol/sdk'
 import type { ProviderToolEvent } from '../../../shared/agentActivity'
+import type { PermissionMode } from '../../../shared/permissionMode'
 import type { LlmModelOption } from '../../../shared/settings'
 import type { ChatImageAttachment } from '../../../shared/types'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
@@ -41,6 +42,8 @@ export interface AcpProcess extends AcpConnection {
   turnSignal?: AbortSignal
   /** Who answers the running turn's permission requests (its bridge's); the sessions' own otherwise. */
   turnPrompter?: PermissionPrompter
+  /** The permission mode of the turn running now, read per request; cleared when the turn ends. */
+  permissionMode?: PermissionMode
   /** `initialize` advertised `mcpCapabilities.http`; otherwise the Mousse server goes through the stdio bridge. */
   mcpHttp?: boolean
   /** What `initialize` answered. */
@@ -175,6 +178,11 @@ export interface AcpChatInput {
   model: string
   /** `plan`: the session runs in the agent's plan mode (only where the agent offers one). */
   mode?: 'default' | 'plan'
+  /**
+   * The thread's permission mode for this turn: whether `session/request_permission` and client
+   * file writes are answered without asking. Absent asks about everything.
+   */
+  permissionMode?: PermissionMode
   prompt: string
   /** Prefixed to every prompt: the turn's skills, mode, applet catalogue and usable Mousse tools. */
   turnPreamble?: string
@@ -268,6 +276,7 @@ export class AcpSessions {
       get threadId() { return active?.threadId },
       get cwd() { return active?.cwd },
       get approvals() { return active?.turnPrompter?.approvals },
+      get permissionMode() { return active?.permissionMode },
       aborted: () => Boolean(active?.turnSignal?.aborted || active?.connection.signal.aborted),
       throwIfAborted: () => {
         active?.turnSignal?.throwIfAborted()
@@ -610,6 +619,8 @@ export class AcpSessions {
       next.cwd = input.cwd
       next.turnSignal = input.signal
       next.turnPrompter = input.prompter
+      // Read per request, so a change applies from the next turn without restarting the agent.
+      next.permissionMode = input.permissionMode ?? 'ask'
       this.turning.add(next)
       current = next
     }
@@ -908,6 +919,7 @@ export class AcpSessions {
       current.onUpdate = (update) => noteCommands(current, update)
       current.turnSignal = undefined
       current.turnPrompter = undefined
+      current.permissionMode = undefined
       this.turning.delete(current)
     }
   }

@@ -8,6 +8,7 @@ import type {
   QueuedMessageState
 } from '../../shared/types'
 import { normalizeChatMode } from '../../shared/chatMode'
+import { isPermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import { WORKFLOW_UUID_PATTERN } from '../../shared/workflows'
 
 export interface EnqueueMessageInput {
@@ -23,6 +24,8 @@ export interface EnqueueMessageInput {
   inboxIds?: string[]
   subagentNotice?: QueuedMessage['subagentNotice']
   stopGeneration?: number
+  permissionMode?: PermissionMode
+  origin?: QueuedMessage['origin']
 }
 
 export interface ClaimOwnerInput {
@@ -66,6 +69,25 @@ function normalizeClaim(raw: unknown): QueuedMessageClaim | undefined {
   }
 }
 
+/** The scheduled-job origin of an item, or undefined when it is absent or malformed (dropped like any unknown field). */
+function normalizeOrigin(raw: unknown): QueuedMessage['origin'] {
+  if (!raw || typeof raw !== 'object') return undefined
+  const origin = raw as Partial<NonNullable<QueuedMessage['origin']>>
+  if (origin.kind !== 'schedule') return undefined
+  if (typeof origin.jobId !== 'string' || !origin.jobId || typeof origin.occurrenceKey !== 'string' || !origin.occurrenceKey) return undefined
+  const selection = origin.selection
+  const validSelection = selection !== undefined && typeof selection === 'object' && selection !== null
+    && typeof selection.llmProvider === 'string' && typeof selection.model === 'string'
+    && (selection.instanceId === undefined || typeof selection.instanceId === 'string')
+  return {
+    kind: 'schedule',
+    jobId: origin.jobId,
+    occurrenceKey: origin.occurrenceKey,
+    ...(typeof origin.jobName === 'string' && origin.jobName ? { jobName: origin.jobName } : {}),
+    ...(validSelection ? { selection: structuredClone(selection) } : {})
+  }
+}
+
 /** Normalize and clone a durable queue snapshot (drops invalid entries). */
 export function normalizeQueuedMessages(raw: unknown, threadId?: string): QueuedMessage[] {
   if (!Array.isArray(raw)) return []
@@ -93,6 +115,7 @@ export function normalizeQueuedMessages(raw: unknown, threadId?: string): Queued
     if (recognizedState === 'drained' || recognizedState === 'removed') continue
     const state: QueuedMessageState = recognizedState ?? 'pending'
     const claim = state === 'claimed' ? normalizeClaim(item.claim) : undefined
+    const origin = normalizeOrigin(item.origin)
     out.push({
       id: item.id,
       threadId: item.threadId,
@@ -113,7 +136,9 @@ export function normalizeQueuedMessages(raw: unknown, threadId?: string): Queued
       ...(typeof item.runId === 'string' && item.runId ? { runId: item.runId } : {}),
       ...(Array.isArray(item.inboxIds) && item.inboxIds.length && item.inboxIds.every((id) => typeof id === 'string') ? { inboxIds: item.inboxIds } : {}),
       ...(Array.isArray(item.subagentNotice) && item.subagentNotice.length ? { subagentNotice: item.subagentNotice } : {}),
-      ...(typeof item.stopGeneration === 'number' && Number.isSafeInteger(item.stopGeneration) && item.stopGeneration >= 0 ? { stopGeneration: item.stopGeneration } : {})
+      ...(typeof item.stopGeneration === 'number' && Number.isSafeInteger(item.stopGeneration) && item.stopGeneration >= 0 ? { stopGeneration: item.stopGeneration } : {}),
+      ...(isPermissionMode(item.permissionMode) ? { permissionMode: item.permissionMode } : {}),
+      ...(origin ? { origin } : {})
     })
   }
   return sortQueue(out)
@@ -173,7 +198,9 @@ export function enqueueMessage(
     ...(input.runId ? { runId: input.runId } : {}),
     ...(input.inboxIds?.length ? { inboxIds: input.inboxIds } : {}),
     ...(input.subagentNotice?.length ? { subagentNotice: input.subagentNotice } : {}),
-    ...(input.stopGeneration !== undefined ? { stopGeneration: input.stopGeneration } : {})
+    ...(input.stopGeneration !== undefined ? { stopGeneration: input.stopGeneration } : {}),
+    ...(input.permissionMode ? { permissionMode: input.permissionMode } : {}),
+    ...(input.origin ? { origin: input.origin } : {})
   }
 
   return { items: sortQueue([...items, item]), item }

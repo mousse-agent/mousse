@@ -26,7 +26,7 @@ import type {
   SpaceArchiveParams,
   SpaceArchiveStatus
 } from '../../../shared/spaces/archive'
-import type { BotProfileService } from '../../bots/BotProfileService'
+import type { BotProfileService } from '../../bots/space/BotProfileService'
 import type { SpaceProfileService } from '../SpaceProfileService'
 import { json } from '../../net/store/database'
 import { signedDocument } from '../../net/identity/crypto'

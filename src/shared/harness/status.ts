@@ -1,3 +1,4 @@
+import type { PermissionLimits } from '../permissionMode'
 import type { HarnessCaps, HarnessDriverKind, InstanceModel, ProviderScope } from './types'
 
 /**
@@ -40,12 +41,17 @@ export type NextStepAction =
   | 'recheck'
   | 'sign_in'
   | 'update'
+  /** A Mousse update retired the entry's route: move to the agent that replaces it. */
+  | 'move'
 
 export interface NextStep {
   action: NextStepAction
   label: string
   /** A command the user can copy (advisory update, terminal sign-in). */
   command?: string
+  /** The headline and the explanation of a persistent prompt (`move`). */
+  title?: string
+  detail?: string
 }
 
 export interface InstanceEnabled {
@@ -75,6 +81,22 @@ export interface InstanceConfigView {
   source?: { kind: 'registry'; agentId: string; version: string; distribution: 'binary' | 'npx' }
   /** Codex: Mousse's own download and sign-in, or the user's Codex CLI. */
   setup?: 'managed' | 'existing'
+}
+
+/**
+ * What an instance's turns run on: a key the user gave (`api_key`), a subscription sign-in
+ * (`subscription`), the environment's cloud credentials (`ambient`: AWS, or Google's application
+ * default credentials), or `unknown` (the user's own home, which Mousse does not inspect further).
+ */
+export type CredentialKind = 'api_key' | 'subscription' | 'ambient' | 'unknown'
+
+/** `rpc`: Pi's agent as its own process; `legacy`: the in-process loop Mousse used before. */
+export type PiEngine = 'rpc' | 'legacy'
+
+export interface InstanceEngine {
+  setting?: PiEngine
+  effective: PiEngine
+  switchable: boolean
 }
 
 export interface InstanceSnapshot {
@@ -114,13 +136,27 @@ export interface InstanceSnapshot {
     canSignOut?: boolean
     /** A sign-in can start in Mousse now, even when the account is not checked (`unknown`). */
     canSignIn?: boolean
+    /** A move may copy a model API's saved API key to this entry (`instances.move` with `copyKey`). */
+    canTakeKey?: boolean
+    /** What the instance runs on once signed in; absent when the driver cannot tell without another check. */
+    credential?: CredentialKind
   }
   compatibility: { state: CompatibilityState; testedRange?: string }
   update?: UpdateAffordance
   binary?: InstanceBinary
   caps: HarnessCaps
+  /**
+   * What limits the permission modes the instance can enforce right now (Claude: the user's
+   * settings forbid bypassing permissions). Read on every snapshot; absent when nothing does.
+   */
+  permissionLimits?: PermissionLimits
   /** The stored settings the editor shows; present on daemons with the harness gateway. */
   config?: InstanceConfigView
+  /**
+   * The engine a `pi` instance runs on: the user's stored choice (absent = the default), the one in
+   * effect, and whether the user may switch it (Advanced → Engine). Absent for other drivers.
+   */
+  engine?: InstanceEngine
   models: {
     entries: InstanceModel[]
     source: 'live' | 'cached' | 'manifest' | 'none'
@@ -139,6 +175,13 @@ export interface InstanceSnapshot {
    * uses it when it names the same action the status calls for.
    */
   nextStep?: NextStep
+  /**
+   * An older Mousse version changed this provider's settings in its own settings file, found when
+   * Mousse started: `older_applied` took them over (shown until the next start or a change);
+   * `older_conflict` kept this version's and offers "Use the older settings"
+   * (`configure({ useOlderSettings: true })`) until the user picks or saves.
+   */
+  settingsNotice?: { kind: 'older_applied' | 'older_conflict'; message: string }
 }
 
 /**
@@ -174,12 +217,18 @@ const DEFAULT_STEPS: Record<NextStepAction, string> = {
   fix_override: 'Change path',
   recheck: 'Check again',
   sign_in: 'Sign in',
-  update: 'Update'
+  update: 'Update',
+  move: 'Move'
 }
 
 function step(snapshot: InstanceSnapshot, action: NextStepAction, label = DEFAULT_STEPS[action]): NextStep {
   const hint = snapshot.nextStep
   return hint?.action === action ? hint : { action, label }
+}
+
+/** A retired entry has no sign-in to offer: signed out, its step stays Move. */
+function signInStep(snapshot: InstanceSnapshot, label?: string): NextStep {
+  return snapshot.nextStep?.action === 'move' ? snapshot.nextStep : step(snapshot, 'sign_in', label)
 }
 
 function updateStep(snapshot: InstanceSnapshot): NextStep | null {
@@ -203,6 +252,16 @@ const STALE_DETAIL = 'The last check did not finish. Showing the last good statu
  */
 export function describeStatus(snapshot: InstanceSnapshot): StatusDescription {
   const { enabled, install, runs, auth, compatibility } = snapshot
+
+  // Retired by a Mousse update: nothing runs on it, on or off, and Move is the one step.
+  if (runs.state === 'no' && snapshot.nextStep?.action === 'move') {
+    return {
+      headline: snapshot.nextStep.title ?? 'Retired',
+      detail: snapshot.nextStep.detail ?? runs.message ?? null,
+      tone: 'warning',
+      nextStep: snapshot.nextStep
+    }
+  }
 
   if (!enabled.effective) {
     return {
@@ -288,7 +347,7 @@ export function describeStatus(snapshot: InstanceSnapshot): StatusDescription {
       headline: 'Not signed in',
       detail: auth.message ?? staleDetail,
       tone: 'neutral',
-      nextStep: step(snapshot, 'sign_in')
+      nextStep: signInStep(snapshot)
     }
   }
 
@@ -297,7 +356,7 @@ export function describeStatus(snapshot: InstanceSnapshot): StatusDescription {
       headline: 'Sign-in expired',
       detail: auth.message ?? staleDetail,
       tone: 'warning',
-      nextStep: step(snapshot, 'sign_in', 'Sign in again')
+      nextStep: signInStep(snapshot, 'Sign in again')
     }
   }
 

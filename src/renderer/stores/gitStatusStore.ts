@@ -15,10 +15,12 @@ import type {
   GitScope,
   GitStatusSnapshot
 } from '../../shared/types'
+import type { PullRequestScope } from '../../shared/pullRequests'
 import { errorText } from '../lib/errorText'
 import { anyTurnEnded } from '../lib/turnEnded'
 import { useAppStore } from './appStore'
-import { refreshPullRequest } from './pullRequestStore'
+import { trackGitOperation } from './gitOperationStore'
+import { createPullRequestForBranch, pullRequestKey, refreshPullRequest, useGitPullRequestStore } from './pullRequestStore'
 
 /**
  * One shared copy of Git state per working folder, read by the Git panel and the
@@ -171,7 +173,7 @@ async function refreshAfterMutation(path: string, scope: GitScope): Promise<void
 /** Switch branches, then refresh. Rejects with Git's message when the checkout fails. */
 export async function checkoutGitBranch(path: string, branch: string, scope: GitScope, options: GitCheckoutOptions = {}): Promise<GitCheckoutResult> {
   try {
-    const result = await window.mousse.git.checkout(scope, branch, options)
+    const result = await trackGitOperation(path, 'checkout', (operationId) => window.mousse.git.checkout(scope, branch, { ...options, operationId }))
     return { stashKept: result.stashKept }
   } finally {
     // A failed stash-and-switch can already have taken the changes out of the working tree.
@@ -209,7 +211,7 @@ export async function discardGitPaths(path: string, paths: readonly string[], sc
 /** Fetch the branch's remote and say how far behind it is now. */
 export async function fetchGit(path: string, scope: GitScope): Promise<GitFetchResult> {
   try {
-    const result = await window.mousse.git.fetch(scope)
+    const result = await trackGitOperation(path, 'fetch', (operationId) => window.mousse.git.fetch(scope, { operationId }))
     return { behindBefore: result.behindBefore, behindAfter: result.behindAfter }
   } finally {
     await refreshAfterMutation(path, scope)
@@ -219,7 +221,7 @@ export async function fetchGit(path: string, scope: GitScope): Promise<GitFetchR
 /** Pull the upstream into the branch; `conflicted` leaves the merge or rebase for the user. */
 export async function pullGit(path: string, scope: GitScope, options: GitPullOptions = {}): Promise<GitPullResult> {
   try {
-    const result = await window.mousse.git.pull(scope, options)
+    const result = await trackGitOperation(path, 'pull', (operationId) => window.mousse.git.pull(scope, { ...options, operationId }))
     return { result: result.result }
   } finally {
     // A conflicted pull rejects nothing, but a failed one may still have changed the folder.
@@ -260,13 +262,34 @@ export async function deleteGitBranch(path: string, name: string, scope: GitScop
   }
 }
 
+/** The step of a running commit flow, in the order the steps happen. */
+export type CommitPhase = 'committing' | 'pushing' | 'opening-pr'
+
+/** The daemon's wording for a commit or push that finds HEAD on another branch than the one the user chose. */
+export const BRANCH_CHANGED_MESSAGE = 'The branch changed while this was open. Review it, then try again.'
+
 export interface CommitGitOptions {
   /** Rewrite the latest commit instead of adding one. */
   amend?: boolean
   /** Push the branch after the commit. */
   push?: boolean
+  /**
+   * Push, and then open the Create PR form for this scope, the same form the Create PR row opens. The scope is
+   * the one the row would use, captured when the button was pressed; its branch must be the folder's current one.
+   */
+  openPullRequest?: PullRequestScope
   /** Reports each step, so a button can say what is running. */
-  onPhase?: (phase: 'committing' | 'pushing') => void
+  onPhase?: (phase: CommitPhase) => void
+}
+
+/** What became of the pull request step of "Commit, push and open PR". */
+export type CommitPullRequestOutcome =
+  | { kind: 'form' }
+  | { kind: 'existing'; number: number; state: 'open' | 'closed' | 'merged' }
+
+export interface CommitGitResult {
+  /** Set only when `openPullRequest` was asked for. */
+  pullRequest: CommitPullRequestOutcome | null
 }
 
 /** The commit landed but the push after it failed; `pushError` is the push's own failure. */
@@ -277,6 +300,14 @@ export class CommitPushError extends Error {
   }
 }
 
+/** The commit and the push landed but the pull request step could not start; nothing was opened and nothing is half done. */
+export class OpenPullRequestError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'OpenPullRequestError'
+  }
+}
+
 /** Look up the pull request of the folder's current branch again, bypassing its max age. */
 async function refreshBranchPullRequest(path: string, projectId: string | undefined): Promise<void> {
   const branch = useGitStatusStore.getState().entries[path]?.status?.branch
@@ -284,33 +315,70 @@ async function refreshBranchPullRequest(path: string, projectId: string | undefi
 }
 
 /**
- * Stage everything and commit (or amend), optionally push, then refresh. Rejects with
- * Git's message when the commit fails, and with a `CommitPushError` when only the push does.
+ * After a push: look the branch's pull request up past every cache, then show the Create PR form for it, or
+ * report the pull request it already has. Opens nothing for a branch that is not pushed, is not the one the
+ * flow started on, or cannot get a pull request, and says why.
+ */
+async function openPullRequestAfterPush(path: string, expectedBranch: string, projectId: string | undefined, scope: PullRequestScope): Promise<CommitPullRequestOutcome> {
+  await refreshPullRequest(path, expectedBranch, { force: true, projectId, threadId: scope.threadId })
+  const status = useGitStatusStore.getState().entries[path]?.status
+  if (!status) throw new OpenPullRequestError('Could not read the state of the branch.')
+  if (status.branch !== expectedBranch) throw new OpenPullRequestError(BRANCH_CHANGED_MESSAGE)
+  // The same rule as the Create PR row: a pull request is only opened for a branch whose commits are all on its upstream.
+  if (status.tracking !== 'tracked' || status.ahead > 0) throw new OpenPullRequestError('The branch is not on the remote yet. Push it, then use Create PR.')
+  const lookup = useGitPullRequestStore.getState().entries[pullRequestKey(path, expectedBranch)]?.lookup
+  if (lookup?.state === 'found') {
+    const { number, state } = lookup.pullRequest
+    return { kind: 'existing', number, state }
+  }
+  if (lookup?.state === 'unavailable') throw new OpenPullRequestError(lookup.message)
+  if (lookup?.state !== 'none') throw new OpenPullRequestError('Could not look up pull requests for this branch.')
+  if (lookup.isDefaultBranch !== false) throw new OpenPullRequestError(lookup.isDefaultBranch ? 'This is the default branch; a pull request needs another branch.' : 'Could not tell whether this is the default branch.')
+  await createPullRequestForBranch(scope)
+  return { kind: 'form' }
+}
+
+/**
+ * Stage everything and commit (or amend), optionally push, optionally open the Create PR form, then refresh.
+ * Each step runs only if the one before it succeeded. Rejects with Git's message when the commit fails (nothing
+ * else ran), with a `CommitPushError` when only the push does (nothing is opened), and with an
+ * `OpenPullRequestError` when both landed but the pull request step could not start. A branch that already has
+ * a pull request resolves with it instead of a second form.
  */
 export async function commitGitChanges(
   path: string,
   message: string,
   scope: GitScope,
   options: CommitGitOptions = {}
-): Promise<void> {
+): Promise<CommitGitResult> {
   const git = window.mousse.git
   const projectId = refreshProjectId(scope)
+  const pullRequestScope = options.openPullRequest
+  const push = options.push === true || pullRequestScope !== undefined
   // The branch the user was looking at; the daemon refuses if HEAD is on another one by then.
   const expectedBranch = useGitStatusStore.getState().entries[path]?.status?.branch ?? undefined
+  // The form is for the branch the button was pressed on; if the status has moved on, nothing has run yet, so stop here.
+  if (pullRequestScope && pullRequestScope.branch !== expectedBranch) throw new Error(BRANCH_CHANGED_MESSAGE)
   options.onPhase?.('committing')
-  await git.commit(scope, message, { amend: options.amend === true, expectedBranch })
+  await trackGitOperation(path, 'commit', (operationId) => git.commit(scope, message, { amend: options.amend === true, expectedBranch, operationId }))
   let pushError: CommitPushError | null = null
-  if (options.push) {
+  if (push) {
     options.onPhase?.('pushing')
     try {
-      await git.push(scope, { expectedBranch })
+      await trackGitOperation(path, 'push', (operationId) => git.push(scope, { expectedBranch, operationId }))
     } catch (error) {
       pushError = new CommitPushError(error)
     }
   }
   await refreshGitStatus(path, { force: true, quiet: true, projectId })
   if (pushError) throw pushError
-  if (options.push) await refreshBranchPullRequest(path, projectId)
+  if (!push) return { pullRequest: null }
+  if (!pullRequestScope || !expectedBranch) {
+    await refreshBranchPullRequest(path, projectId)
+    return { pullRequest: null }
+  }
+  options.onPhase?.('opening-pr')
+  return { pullRequest: await openPullRequestAfterPush(path, expectedBranch, projectId, pullRequestScope) }
 }
 
 /**
@@ -326,7 +394,7 @@ export async function suggestGitCommitMessage(path: string, scope: GitScope): Pr
 /** Push the current branch (publishing it when it has no upstream), then refresh. Rejects with Git's message. */
 export async function pushGitBranch(path: string, scope: GitScope): Promise<void> {
   const expectedBranch = useGitStatusStore.getState().entries[path]?.status?.branch ?? undefined
-  await window.mousse.git.push(scope, { expectedBranch })
+  await trackGitOperation(path, 'push', (operationId) => window.mousse.git.push(scope, { expectedBranch, operationId }))
   await refreshAfterMutation(path, scope)
   await refreshBranchPullRequest(path, refreshProjectId(scope))
 }

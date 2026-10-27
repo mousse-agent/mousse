@@ -87,7 +87,8 @@ export function validateBridgeHubLocal<M extends BridgeHubLocalMethod>(
     'bridge.hub.dispatch': [['target', 'input'], ['options']],
     'bridge.hub.result': [['id'], []],
     'bridge.hub.cancel': [['id'], []],
-    'bridge.hub.requests': [[], ['target']]
+    'bridge.hub.requests': [[], ['target']],
+    'bridge.hub.storage': [['target'], []]
   }
   const [required, optional] = fields[method]
   const row = object(value, required, optional)
@@ -202,6 +203,8 @@ export async function executeBridgeHubLocal(
       return { cancelled: true }
     case 'bridge.hub.requests':
       return hub.requests(row.target)
+    case 'bridge.hub.storage':
+      return hub.storage(row.target)
     case 'bridge.hub.detach':
       if (!events) throw new NetError('forbidden')
       hub.detachFor(events.owner, row.ref)

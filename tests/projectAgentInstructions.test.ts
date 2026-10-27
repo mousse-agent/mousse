@@ -91,7 +91,7 @@ describe('project AGENTS.md system instructions', () => {
     const root = project('NAMED AGENT PROJECT INSTRUCTIONS')
     const captured: Context[] = []
     const llm = nativeClient([providerResponse([{ type: 'text', text: 'done' }], 'stop')], captured)
-    const result = await new AgentExecutionService({ native: createNativeAgentRuntime(llm) }).run({
+    const result = await new AgentExecutionService({ runtime: createNativeAgentRuntime(llm) }).run({
       profileId: 'profile-1', resolved: resolvedDefinition(), threadId: 'agent-thread',
       projectPath: root, input: 'inspect'
     })
@@ -104,7 +104,7 @@ describe('project AGENTS.md system instructions', () => {
   it('uses the validated workspace root when the host omits projectPath', async () => {
     const root = project('WORKSPACE ROOT INSTRUCTIONS')
     let actualPrompt = ''
-    const service = new AgentExecutionService({ native: { run: async (input) => {
+    const service = new AgentExecutionService({ runtime: { run: async (input) => {
       actualPrompt = input.systemPrompt
       return { text: 'done' }
     } } })
@@ -121,7 +121,7 @@ describe('project AGENTS.md system instructions', () => {
     const resolved = resolvedDefinition()
     resolved.settings.context.includeProjectInstructions = false
     let actualPrompt = ''
-    await new AgentExecutionService({ native: { run: async (input) => {
+    await new AgentExecutionService({ runtime: { run: async (input) => {
       actualPrompt = input.systemPrompt
       return { text: 'done' }
     } } }).run({

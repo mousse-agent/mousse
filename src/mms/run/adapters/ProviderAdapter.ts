@@ -1,13 +1,17 @@
 import type { AssistantMessage, Message } from '../../../shared/transcript'
 import type { ProviderDriverKind } from '../../../shared/providerInstances'
+import type { PermissionMode } from '../../../shared/permissionMode'
 import type { ChatImageAttachment, ChatMode } from '../../../shared/types'
-import type { LlmChatOptions, ToolLoopSafetyOptions } from '../../orchestrator/LlmClient'
+import type { LlmChatOptions, LlmClient, ToolLoopSafetyOptions } from '../../orchestrator/LlmClient'
+import type { AgentExecutionBudget, AgentExecutionLimit, AgentRuntimeEffectTracker } from '../../../shared/agents/execution'
+import type { IntegrationActor } from '../../../shared/integrations/actor'
 import type { StreamingLlmTextEvent, StreamingLlmThinkingEvent, StreamingLlmToolEvent } from '../../harness/turnEvents'
 import type { NativeMessageCheckpoint } from '../../orchestrator/nativeContext'
 import type { ChildPreflightContext, SubagentRefusal } from '../policy/featureGates'
 import type { PermissionPrompter } from '../../harness/acp/permissions'
 import type { TurnBudget } from '../../harness/budget'
 import type { DefinitionAuthority } from '../../agentDefinitions/definitionGate'
+import type { BotAuthority } from '../../../shared/bots/personal/authority'
 import type { ProviderRef } from '../types'
 
 /**
@@ -81,6 +85,12 @@ export interface TurnInput {
    */
   modelPinned: boolean
   mode: ChatMode
+  /**
+   * The permission mode the turn runs in: the binding's (the thread's mode, or the nearest stricter
+   * one the instance can enforce). Each adapter enforces it with its runtime's own controls on every
+   * turn; a plan turn carries it unchanged, and it does not matter there.
+   */
+  permissionMode: PermissionMode
   /** Set when the thread is a delegated child; adapters apply it on every turn of the thread. */
   child?: ChildTurnPolicy
   /**
@@ -114,6 +124,30 @@ export interface TurnInput {
    * turn hands back a fresh copy (`RecoveredContext.nativeHistory`).
    */
   nativeHistory?: string
+  /**
+   * The orchestrator handed history over in the prompt this turn (a provider switch's handover,
+   * which then stands in for the transcript and leaves `nativeHistory` empty, or a fork's portable
+   * handover of its parent): no native session the runtime kept for the thread may be resumed in
+   * its place.
+   */
+  historyHandedOver?: boolean
+  /**
+   * Planning this turn's handoffs failed, so the turn carries its raw history only: whether a native
+   * session the runtime kept for the thread is still current (a fork's branch, with turns elsewhere
+   * since) is unknown, and such a session is not resumed.
+   */
+  handoffUnplanned?: boolean
+  /**
+   * `ephemeral`: the turn runs in a session of its own, made for this turn and not kept for the
+   * thread (an agent definition's turn, PR 4 §6); `messages` and `nativeHistory` carry its whole
+   * conversation. Only an `exact` runtime is given one (`TurnSpec.session`).
+   */
+  session?: 'thread' | 'ephemeral'
+  /**
+   * The turn's own instructions (an agent definition's system prompt): they replace the runtime's
+   * default instructions or are appended to them. Only an `exact` runtime is given them.
+   */
+  instructions?: { text: string; placement: 'replace' | 'append' }
   /** Aborted by the orchestrator on Stop, effect timeout or shutdown. */
   signal: AbortSignal
 }
@@ -291,6 +325,19 @@ export interface AdapterHost {
    * that same object.
    */
   definition?: DefinitionAuthority
+  /**
+   * A bot turn's authority (PR 6 §4), checked before each call the runtime's own tools would run.
+   * Set only by the gateway, from the turn's app context; the Mousse MCP registry checks app and
+   * MCP tools against the same object.
+   */
+  bot?: BotAuthority
+  /**
+   * What a runtime that runs a definition's loop itself (`HarnessCaps.definitionLimits: 'in_loop'`,
+   * the legacy engine) needs beside `definition`: the run's own chat client (its own task queue and
+   * browser binding), the limits left for this turn, and the effect tracker. Host-minted for a
+   * definition turn only; other runtimes ignore it.
+   */
+  definitionLoop?: DefinitionLoop
   context: {
     /** Safe-boundary compaction inside a long tool loop; absent when compaction is disabled. */
     toolLoopSafety?: ToolLoopSafetyOptions
@@ -319,6 +366,19 @@ export interface AdapterHost {
      */
     nativeHistoryNow?(): string
   }
+}
+
+/** `AdapterHost.definitionLoop`. */
+export interface DefinitionLoop {
+  /** A chat client of the definition run's own, made on first use. */
+  client(): Pick<LlmClient, 'chat'>
+  /** The definition's limits left for this turn (counts, tokens, cost, time). */
+  budget: AgentExecutionBudget
+  effects: AgentRuntimeEffectTracker
+  /** Only the definition's granted skills and MCP tools are visible to the loop. */
+  actor: IntegrationActor
+  /** The loop reports the limit that ended the turn, if one did. */
+  limitReached(limit: AgentExecutionLimit): void
 }
 
 /** Per-model facts the orchestrator needs outside a turn (SPEC §13.1 `describe`). */
@@ -365,5 +425,6 @@ export interface ProviderAdapter {
    * null when the runtime cannot branch it (the fork then falls back to a portable handoff). Only
    * called when `featureGates.forkStrategy(caps)` is `native` and `ref` names a session.
    */
-  forkSession?(ref: ProviderRef, atTurnOrdinal: number): Promise<ProviderRef | null>
+  /** `target`: the thread the fork belongs to (a runtime that keeps sessions per thread binds the new one to it). */
+  forkSession?(ref: ProviderRef, atTurnOrdinal: number, target?: { threadId: string }): Promise<ProviderRef | null>
 }

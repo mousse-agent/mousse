@@ -33,10 +33,18 @@ export function defaultInstanceId(driver: HarnessDriverKind): string | undefined
   return BUILT_IN_IDS[driver]
 }
 
-/** `<driver>:<slug>` for a new instance, unique among `existing`. */
-export function addedInstanceId(driver: HarnessDriverKind, displayName: string | undefined, existing: Iterable<string>): string {
+/** Lowercase letters, digits and inner dashes, at most 32 characters. */
+function slugOf(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32)
+}
+
+/**
+ * `<driver>:<slug>` for a new instance, unique among `existing`. An explicit `slug` wins over the
+ * display name's (`claude:api`, then `claude:api-2`).
+ */
+export function addedInstanceId(driver: HarnessDriverKind, displayName: string | undefined, existing: Iterable<string>, explicitSlug?: string): string {
   const taken = new Set(existing)
-  const slug = (displayName ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32)
+  const slug = (explicitSlug ? slugOf(explicitSlug) : '') || slugOf(displayName ?? '')
   const base = slug && slug !== 'default' ? `${driver}:${slug}` : `${driver}:2`
   if (!taken.has(base)) return base
   for (let index = 2; ; index += 1) {
@@ -92,9 +100,24 @@ export class InstanceCounterStore {
    * the home `homeId`: a salted one-way hash.
    */
   accountIdentity(homeId: string, subject: string): string {
+    return createHash('sha256').update(`${this.salt()}|${homeId}|${subject}`).digest('hex').slice(0, 32)
+  }
+
+  /**
+   * `subject` hashed with the profile's salt but without a home: two instances signed in to the same
+   * account read the same, which is how the page tells the user. Kept in memory only, never shown.
+   */
+  accountFingerprint(subject: string): string {
+    return createHash('sha256').update(`${this.salt()}|account|${subject}`).digest('hex').slice(0, 32)
+  }
+
+  /** The profile's salt, created and saved on first use. */
+  private salt(): string {
     const state = this.read()
-    if (!state.salt) this.write({ ...state, salt: randomBytes(16).toString('hex') })
-    return createHash('sha256').update(`${this.read().salt}|${homeId}|${subject}`).digest('hex').slice(0, 32)
+    if (state.salt) return state.salt
+    const salt = randomBytes(16).toString('hex')
+    this.write({ ...state, salt })
+    return salt
   }
 
   bumpConfig(instanceId: string): InstanceCounters {

@@ -441,6 +441,7 @@ html.platform-darwin .titlebar-left {
   line-height: 1.4;
   word-break: break-word;
 }
+.usage-manage { margin-top: 10px; }
 
 /* Functional progress indicators must keep spinning even when Windows
    reports prefers-reduced-motion (global baseline short-circuits animation). */
@@ -2276,6 +2277,21 @@ html[data-theme='high-contrast'] .model-picker-row.selected {
   margin-left: auto;
   font-size: 12px;
   font-weight: 400;
+  color: var(--text-secondary);
+}
+
+/* A row with a name and a line saying what the choice does (the permission mode menu). */
+.composer-mode-menu-item-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.composer-mode-menu-item-desc {
+  max-width: 260px;
+  font-size: 11.5px;
+  font-weight: 400;
+  line-height: 1.35;
   color: var(--text-secondary);
 }
 
@@ -4260,6 +4276,82 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   padding: 6px 12px;
   font-size: 11px;
   line-height: 1.4;
+}
+
+/* The Git action in flight or just ended: what it is doing, Cancel, and its output. */
+.git-operation {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 12px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  border-bottom: 1px solid rgba(var(--accent-rgb), 0.08);
+}
+
+.git-operation-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 8px;
+  flex-wrap: wrap;
+}
+
+.git-operation-text {
+  flex: 1 1 12rem;
+  min-width: 0;
+  display: flex;
+  gap: 6px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.git-operation-headline {
+  flex-shrink: 0;
+  color: var(--text-primary);
+}
+
+.git-operation[data-phase='failed'] .git-operation-headline {
+  color: var(--danger);
+}
+
+.git-operation-detail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.git-operation-elapsed {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.git-operation-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.git-operation-output summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.git-operation-log {
+  max-height: 160px;
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  border-radius: 4px;
+  background: rgba(var(--accent-rgb), 0.06);
+  color: var(--text-secondary);
+  user-select: text;
 }
 
 .git-status-badge {

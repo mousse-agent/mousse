@@ -55,6 +55,35 @@ describe('RunStore', () => {
     expect(created[0].payload).toEqual(JSON.parse(JSON.stringify(a[0])))
   })
 
+  it('getPausedRun finds the thread\'s paused run: not active, not terminal, at most one', () => {
+    const store = open()
+    const a = store.createRun({ threadId: 't', source: 'gui' })
+    const b = store.createRun({ threadId: 't', source: 'gui' })
+    const other = store.createRun({ threadId: 'other', source: 'gui' })
+    expect(store.getPausedRun('t')).toBeNull()
+
+    const running = store.casRunStatus({ runId: a.runId, expectedEpoch: 0, status: 'running' })
+    const paused = store.casRunStatus({ runId: a.runId, expectedEpoch: running.epoch, status: 'paused' })
+
+    expect(store.getPausedRun('t')).toEqual(paused)
+    expect(store.getPausedRun('other')).toBeNull()
+    expect(store.getActiveRun('t')).toBeNull()
+    expect(store.listQueuedRuns('t').map((run) => run.runId)).toEqual([b.runId])
+    expect(store.listNonTerminalRuns().map((run) => [run.runId, run.status])).toEqual([[other.runId, 'queued'], [a.runId, 'paused'], [b.runId, 'queued']])
+    // The pause can still be left: paused is not final.
+    expect(store.casRunStatus({ runId: a.runId, expectedEpoch: paused.epoch, status: 'cancelled' }).status).toBe('cancelled')
+    expect(store.getPausedRun('t')).toBeNull()
+  })
+
+  it('getPausedRun raises conflict when a thread has two paused runs', () => {
+    const store = open()
+    for (const _ of [1, 2]) {
+      const run = store.createRun({ threadId: 't', source: 'gui' })
+      store.casRunStatus({ runId: run.runId, expectedEpoch: 0, status: 'paused' })
+    }
+    expect(codeOf(() => store.getPausedRun('t'))).toBe('conflict')
+  })
+
   it('advances status by CAS, bumping epoch and appending events in order', () => {
     const store = open()
     const run = store.createRun({ threadId: 't', source: 'gui' })

@@ -75,8 +75,13 @@ export function buildLaunchctlPrintArgs(uid: number = os.userInfo().uid): string
   return ['print', `${getGuiDomain(uid)}/${MACOS_LABEL}`]
 }
 
-export async function installMacosStartup(cliPath: string, homeDir: string): Promise<void> {
-  const plistPath = getLaunchAgentPath(homeDir)
+/** `homeDir` is Mousse's data directory; the LaunchAgent plist belongs under the user's own home. */
+export async function installMacosStartup(
+  cliPath: string,
+  homeDir: string,
+  userHome: string = os.homedir()
+): Promise<void> {
+  const plistPath = getLaunchAgentPath(userHome)
   const launchAgentsDir = path.posix.dirname(plistPath)
   await fs.mkdir(launchAgentsDir, { recursive: true })
   await fs.writeFile(plistPath, buildLaunchAgentPlist(cliPath, homeDir), 'utf8')

@@ -1,5 +1,6 @@
 import { AppError, type ErrorCategory } from '../errors'
 import type { AgentExecutionLimit } from '../agents/execution'
+import type { PermissionMode } from '../permissionMode'
 import type { ProviderDriverKind } from '../providerInstances'
 
 /**
@@ -64,6 +65,17 @@ export interface HarnessCaps {
    * what is left. They also need `budgets: 'hard'`.
    */
   spendLimits: 'reserved' | 'unsupported'
+  /**
+   * `in_loop`: the runtime runs an agent definition's whole loop itself, under the definition's own
+   * limits, as definitions have always run (Mousse's in-process loop, the legacy Pi engine): the turn
+   * and tool-call counts refuse the next request or call before it starts, and the token and cost
+   * limits are checked after each response. A definition authority's limits are then admitted
+   * without `hard` budgets or `reserved` spend; nothing else is, and admission also requires the
+   * turn to carry that definition and its loop. `none` everywhere else (and for caps from before the
+   * key existed). Transitional: PR 4 unit 4d-rpc moves definitions to Pi RPC (exact tool control, a
+   * session per definition turn), and 4h deletes this key, its reader and the loop that declares it.
+   */
+  definitionLimits: 'in_loop' | 'none'
 }
 
 /**
@@ -76,7 +88,7 @@ export type RunCapabilities = Pick<
 >
 
 export const HARNESS_CAP_KEYS = [
-  'steer', 'interrupt', 'rollback', 'fork', 'events', 'containment', 'historyInjection', 'mcp', 'childPolicy', 'planMode', 'contextUsage', 'toolControl', 'budgets', 'spendLimits'
+  'steer', 'interrupt', 'rollback', 'fork', 'events', 'containment', 'historyInjection', 'mcp', 'childPolicy', 'planMode', 'contextUsage', 'toolControl', 'budgets', 'spendLimits', 'definitionLimits'
 ] as const satisfies ReadonlyArray<keyof HarnessCaps>
 
 /** What a caller picks to run an agent. */
@@ -106,8 +118,36 @@ export interface RunPolicy {
    * without asking (`never`: the turn bridge denies every permission request).
    */
   approvals: 'ask' | 'grants' | 'never'
+  /**
+   * Who answers a call that needs approval under `grants`: the host's own authority for the turn
+   * (an agent definition's or a bot's, registered with the turn's app tools), never a person.
+   * `checkPolicy` refuses it until the runtimes answer approvals that way.
+   */
+  approve?: 'host'
+  /**
+   * The permission mode the run enforces: the thread's mode, or the nearest stricter one the
+   * instance supports. Absent on bindings recorded before permission modes: they read as Ask.
+   */
+  permissionMode?: PermissionMode
+  /** The mode the thread asked for, when `permissionMode` is a stricter fallback. */
+  requestedPermissionMode?: PermissionMode
   budget?: { maxTurns?: number; maxToolCalls?: number; maxInputTokens?: number; maxOutputTokens?: number; maxUsd?: number; maxWallMs?: number }
+  /**
+   * The turn runs under a host authority (an agent definition's or a bot's grants, roots and rules),
+   * named by kind and the digest of what was approved. The authority itself is registered with the
+   * turn's app tools, never carried in the policy. It needs `toolControl: exact`.
+   */
+  authority?: PolicyAuthority
 }
+
+/** `RunPolicy.authority`. */
+export interface PolicyAuthority {
+  kind: 'definition' | 'bot'
+  digest: string
+}
+
+/** The caller's part of a binding's policy (`HarnessGateway.bind`): mode and origin are bound separately. */
+export type BindPolicy = Pick<RunPolicy, 'tools' | 'approvals' | 'approve' | 'budget' | 'authority'>
 
 /**
  * The immutable binding one RunEngine attempt runs on, resolved at admission. Retries, steering,
@@ -130,7 +170,15 @@ export interface ExecutionBinding {
   accountId?: string
   model: string
   effort?: string
+  /** Frozen when the binding is made: every attempt, retry and steer of the run holds to it. */
   policy: RunPolicy
+  /**
+   * SHA-256 of the policy's canonical JSON, when the caller gave a policy (definitions, workflows,
+   * bots; `bind(…, {policy})`). A thread whose next binding has another digest gets a new Mousse MCP
+   * epoch, so a runtime never keeps a tool list from an earlier grant. A stored binding whose policy
+   * no longer matches its digest is refused.
+   */
+  policyDigest?: string
   /**
    * The instance's capabilities when the binding was made: an attempt runs on them even when the
    * runtime's facts change meanwhile. Absent on bindings from before snapshots (live caps apply).
@@ -195,6 +243,8 @@ export const HARNESS_ERROR_CODES = [
   'model_unavailable',
   'model_hidden',
   'policy_unenforceable',
+  /** The thread's permission mode needs more control than the instance has (it approves tools itself). */
+  'permission_mode_unenforceable',
   'operation_busy',
   'operation_unknown',
   'unsupported',
@@ -233,6 +283,8 @@ export interface HarnessError {
    * turn shows the connection-failed retry affordance, and no turn-level retry runs again.
    */
   retriesExhausted?: true
+  /** `permission_mode_unenforceable`: the modes the instance can enforce. */
+  supportedModes?: PermissionMode[]
 }
 
 /** A turn error whose details say the runtime's own request retries ran out (`HarnessError.retriesExhausted`). */
@@ -255,6 +307,7 @@ const HARNESS_ERROR_CATEGORY: Record<HarnessErrorCode, ErrorCategory> = {
   model_unavailable: 'unavailable',
   model_hidden: 'invalid',
   policy_unenforceable: 'unsupported',
+  permission_mode_unenforceable: 'unsupported',
   operation_busy: 'conflict',
   operation_unknown: 'invalid',
   unsupported: 'unsupported',
@@ -364,6 +417,16 @@ export interface InstanceConfigPatch {
    * own) or `existing` (the user's Codex CLI). Set when the entry is added; it cannot change.
    */
   setup?: 'managed' | 'existing'
+  /**
+   * `pi` instances whose provider runs on Pi's agent: `legacy` switches back to the in-process loop
+   * (Advanced → Engine); `null` clears it back to the default engine.
+   */
+  engine?: 'rpc' | 'legacy' | null
+  /**
+   * Takes the settings an older Mousse version left in the provider's own settings file
+   * (`InstanceSnapshot.settingsNotice` `older_conflict`); every other field is ignored.
+   */
+  useOlderSettings?: true
 }
 
 /**
@@ -423,6 +486,8 @@ export type RemoveInstallResult =
 export interface AddInstanceInput {
   driver: HarnessDriverKind
   config?: InstanceConfigPatch
+  /** The id's slug (`claude:api`), when it should not come from the display name. */
+  slug?: string
 }
 
 /** Long provider operations; each returns an operation id at once and reports through events. */

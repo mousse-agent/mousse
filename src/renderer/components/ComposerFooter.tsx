@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef } from 'react'
 import { ArrowUp, ChevronDown, Mic, Paperclip, Square } from '../lib/icons'
 import { showsContextGauge, type ProviderWithStatus } from '../lib/providerSnapshots'
+import type { PermissionMode } from '../../shared/permissionMode'
 import type { ContextUsageSnapshot } from '../../shared/types'
 import { ComposerEffortPicker } from './ComposerEffortPicker'
+import { ComposerPermissionPicker } from './ComposerPermissionPicker'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { getGroupedModelButtonParts, ModelFamilyMenu } from './ModelFamilyMenu'
 import { ProviderIcon } from '../lib/providerIcons'
@@ -64,6 +66,13 @@ export interface ComposerFooterProps {
   implementPlanDisabled?: boolean
   /** When true, file attach stays enabled during an active turn (queued sends). */
   allowAttachWhileLoading?: boolean
+  /** The thread's permission mode and how to change it; without it the footer has no such control. */
+  permission?: {
+    mode: PermissionMode
+    /** A subagent's lineage ceiling. */
+    ceiling?: PermissionMode
+    onSelect: (mode: PermissionMode) => void
+  }
 }
 
 export function ComposerFooter({
@@ -92,7 +101,8 @@ export function ComposerFooter({
   primaryAction = 'send',
   onImplementPlan,
   implementPlanDisabled = false,
-  allowAttachWhileLoading = false
+  allowAttachWhileLoading = false,
+  permission
 }: ComposerFooterProps) {
   const modelPickerRef = useRef<HTMLDivElement>(null)
   const modelButtonRef = useRef<HTMLButtonElement>(null)
@@ -229,6 +239,15 @@ export function ComposerFooter({
           </button>
         </div>
         <ComposerEffortPicker providerId={selectedProviderId} modelId={selectedModelId} models={providerModels} readOnly={modelReadOnly} onSelect={onModelSelect} />
+        {permission && <ComposerPermissionPicker
+          mode={permission.mode}
+          agent={selectedProvider?.label ?? 'The agent'}
+          caps={selectedProvider?.caps}
+          limits={selectedProvider?.permissionLimits}
+          ceiling={permission.ceiling}
+          sandboxOffInFull={selectedProvider?.id === 'codex'}
+          onSelect={permission.onSelect}
+        />}
       </div>
 
       <div className="composer-footer-right">

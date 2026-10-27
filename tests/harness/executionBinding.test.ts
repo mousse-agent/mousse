@@ -101,7 +101,7 @@ describe('execution bindings', () => {
       authChecks += 1
       return { state: 'signed_in' as const, ...(subject ? { subject } : {}) }
     }
-    const claude = adapterDriver(adapter, { runtime: { auth, forgetConversation: (threadId) => forgotten.push(threadId), signOut: async () => {}, setLaunch: async () => {} } })
+    const claude = adapterDriver(adapter, { runtime: { auth, forgetConversation: (threadId) => forgotten.push(threadId), signOut: async () => {} } })
     const codexDriver = adapterDriver(codex, {
       runtime: {
         auth,
@@ -146,7 +146,7 @@ describe('execution bindings', () => {
     expect(bindingOf(run.runId)).toEqual({
       instanceId: 'claude', driver: 'claude', accountGeneration: 0, homeId: 'default', configRevision: 0, model: 'sonnet',
       accountId: expect.stringMatching(/^[0-9a-f]{32}$/),
-      policy: { mode: 'default', approvals: 'ask', origin: 'interactive' },
+      policy: { mode: 'default', approvals: 'ask', permissionMode: 'accept_edits', origin: 'interactive' },
       // The caps the attempt runs on, frozen with the binding.
       caps: expect.objectContaining({ steer: 'interrupt_restart', toolControl: 'approval_only' }),
       factsRevision: 0
@@ -226,13 +226,14 @@ describe('execution bindings', () => {
     orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })
     await orch.send('one', false, { threadId: thread.id, clientRequestId: 'send-a' })
     expect(forgotten).toEqual([])
-    // Signing out moves the account generation on.
+    // Signing out and in again moves the account generation on (once each).
     await harness.instances.signOut('claude')
+    await harness.instances.signIn('claude')
     later()
     await orch.send('two', false, { threadId: thread.id, clientRequestId: 'send-b' })
     const [latest, previous] = engine.listRuns(thread.id)
     expect(bindingOf(previous.runId)?.accountGeneration).toBe(0)
-    expect(bindingOf(latest.runId)?.accountGeneration).toBe(1)
+    expect(bindingOf(latest.runId)?.accountGeneration).toBe(2)
     expect(forgotten).toEqual([thread.id])
     // The same account again: nothing is dropped.
     later()
@@ -358,7 +359,7 @@ describe('execution bindings', () => {
     expect(adapter.turns).toHaveLength(1)
     expect(adapter.turns[0]).toMatchObject({ instanceId: 'claude', model: 'bound-model', mode: 'agent' })
     expect(engine.store.getAttempt(retryAttempt!)?.executionBinding).toEqual(bound)
-    expect(bound.policy).toEqual({ mode: 'default', approvals: 'ask', origin: 'interactive' })
+    expect(bound.policy).toEqual({ mode: 'default', approvals: 'ask', permissionMode: 'ask', origin: 'interactive' })
   })
 
   it('a turn on a runtime that resolves `default` runs and records the bound model, and recovery keeps it', async () => {
@@ -397,7 +398,7 @@ describe('execution bindings', () => {
     const thread = store.createThread('plan retry')
     orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })
     const bound = await harness.bind(harness.resolveStored({ instanceId: 'claude', llmProvider: '', model: 'sonnet' }, { purpose: 'turn' }), { mode: 'plan' })
-    expect(bound.policy).toEqual({ mode: 'plan', approvals: 'ask', origin: 'interactive' })
+    expect(bound.policy).toEqual({ mode: 'plan', approvals: 'ask', permissionMode: 'ask', origin: 'interactive' })
     const markStarting = engine.markStarting.bind(engine)
     engine.markStarting = (runId) => {
       const run = markStarting(runId)
@@ -418,7 +419,7 @@ describe('execution bindings', () => {
     orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })
     await orch.send({ content: 'one', mode: 'plan' }, false, { threadId: thread.id, clientRequestId: 'send-a' })
     const [run] = engine.listRuns(thread.id)
-    expect(bindingOf(run.runId)?.policy).toEqual({ mode: 'plan', approvals: 'ask', origin: 'interactive' })
+    expect(bindingOf(run.runId)?.policy).toEqual({ mode: 'plan', approvals: 'ask', permissionMode: 'accept_edits', origin: 'interactive' })
     expect(adapter.turns.map((turn) => turn.mode)).toEqual(['plan'])
   })
 

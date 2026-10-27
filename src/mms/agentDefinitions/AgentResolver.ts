@@ -1,5 +1,4 @@
 import { AgentDefinitionError, type AgentDefinitionIssue } from '../../shared/agents/errors'
-import { collectUnsupportedCliSettings, getRuntimeCompatibility } from '../../shared/agents/compatibility'
 import { grantDependencyHashes, resolveEffectiveGrants } from '../../shared/agents/grants'
 import { compileAgentInstructions } from '../../shared/agents/prompt'
 import type {
@@ -175,16 +174,9 @@ export class AgentResolver {
       dependencyHashes = { ...pinned.dependencyHashes }
     }
 
+    // A stored runtimeKind no longer picks a runtime or a settings table: every definition runs on
+    // the model ref's instance and is held to the same rules there (PR 4 §6).
     const issues: AgentDefinitionIssue[] = []
-    const unsupported = collectUnsupportedCliSettings(runtimeKind, settings)
-    if (unsupported.length > 0) {
-      issues.push({
-        code: 'SETTINGS_UNSUPPORTED',
-        message: `Runtime ${runtimeKind} does not support ${unsupported.join(', ')}.`,
-        retryable: false,
-        details: { runtimeKind, pointers: unsupported, compatibility: getRuntimeCompatibility(runtimeKind) }
-      })
-    }
 
     const primaryProfile = this.lookupModel(settings.primaryModel.ref, '/settings/primaryModel/ref', modelLookup, issues)
     const fallbacks: AgentModelCapabilityProfile[] = []

@@ -1,13 +1,15 @@
 import { execFile } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdirSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync } from 'node:fs'
+import { join, resolve as resolvePath } from 'node:path'
 import { promisify } from 'node:util'
 import { isRetryableAssistantError } from '@earendil-works/pi-ai'
 import { AppError } from '../../../shared/errors'
+import { piPermissionKey, piToolAction } from '../../../shared/permissionKeys'
+import { permissionModeAllows } from '../../../shared/permissionMode'
 import { harnessAppError } from '../../../shared/harness/types'
 import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
-import { atomicWriteJsonSync } from '../../data/AtomicFs'
+import { atomicWriteFileSync, atomicWriteJsonSync } from '../../data/AtomicFs'
 import { normalizeProviderError } from '../../orchestrator/providerErrors'
 import type {
   AdapterHost,
@@ -19,6 +21,7 @@ import type {
   TurnResult,
   TurnSink
 } from '../../run/adapters/ProviderAdapter'
+import { CumulativeStream } from '../../run/transcript/promptRuntime'
 import type { ProviderRef } from '../../run/types'
 import type { InstanceEnv } from '../env'
 import { killTree } from '../spawn'
@@ -27,13 +30,21 @@ import { PiBridge, type PiBridgeRegistration } from './bridge'
 import { DescendantTracker, OwnedGroups } from './descendants'
 import { WriterEpisode, type PiToolClass } from './episode'
 import { authorizeDefinitionCall, recordAuthorizedCall, withoutTransportFields } from '../../agentDefinitions/definitionGate'
+import type { ToolCall } from '@earendil-works/pi-ai'
 import type { AgentExecutionLimit } from '../../../shared/agents/execution'
-import { ANTHROPIC_OAUTH_REFUSED, BUDGET_EXHAUSTED, CREDENTIAL_UNAVAILABLE, GATE_REFUSALS, GATE_UNAVAILABLE, REQUEST_REFUSED } from './extension/messages'
-import { PI_BRIDGE_ENV, type PiCatalogProvider, type PiGateRequest, type PiGateResponse, type PiReadyRequest, type PiRequestResponse, type PiTurnResponse, type PiTurnTool } from './extension/protocol'
+import { ANTHROPIC_OAUTH_REFUSED, BUDGET_EXHAUSTED, CREDENTIAL_UNAVAILABLE, GATE_REFUSALS, GATE_UNAVAILABLE, REQUEST_REFUSED, SPEND_CAP_MISMATCH } from './extension/messages'
+import { PI_BRIDGE_ENV, type PiCatalogProvider, type PiGateRequest, type PiGateResponse, type PiReadyRequest, type PiRequestRequest, type PiRequestResponse, type PiSettleRequest, type PiTurnResponse, type PiTurnTool } from './extension/protocol'
+import { addsThinkingBudget, capHonouring, fallbackModels, grantFloor, multipleCandidates, reservationRates, thinkingBudgetFor, type PiReasoning } from './reservation'
+import type { SpendModelFacts } from '../policy'
+import type { TurnBudget } from '../budget'
 import { piLaunch, startPiProcess, type PiLaunch, type PiProcess, type PiRuntimePaths, type PiThinkingLevel } from './launch'
 import { PI_PATH_ARGUMENTS, piResolvePath, piResolveReadPath } from './paths'
+import { piCredentialHandler, piOAuthCredential, piOAuthHandle, writePiAuth, type PiOAuthSource } from './oauthBroker'
 import type { PiRpcEvent, PiRpcExit, PiRpcRequest } from './rpcClient'
 import { preparePiHome, type PiSettingsInput } from './settings'
+import { PI_NATIVE_TOOLS } from './nativeTools'
+import { botAppToolRefusal, checkBuiltinCall, wallMessage } from '../../../shared/bots/personal/walls'
+import { neutralToolIdempotent, neutralToolsOf } from '../../../shared/harness/tools'
 
 /**
  * The Pi RPC engine (PR 2 §4): each thread of a `pi:*` instance runs on its own Pi process
@@ -46,6 +57,8 @@ import { preparePiHome, type PiSettingsInput } from './settings'
  * the writer episode and its barrier, a definition's authority over Pi's built-ins, and the run's
  * tool-call limit. Every model request is charged first (`/pi/request`): none is sent outside a
  * live turn, and the run's turn limit refuses the next one before it starts (`budgets: 'hard'`).
+ * Under token or USD limits each request is also reserved first, at its final wire cap, and settled
+ * with its usage (`spendLimits: 'reserved'`, PR 4 §5b).
  * The engine never retries: Pi's own retry (as `settings.json` configures it) is mapped to the
  * status line and, when exhausted, to `retriesExhausted`.
  *
@@ -70,6 +83,11 @@ export const PI_WARM_MS = 10 * 60_000
 export const PI_PROMPT_DEADLINE_MS = 120_000
 /** Pi's thinking levels (`--thinking`); Mousse efforts map onto them. */
 const THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh'])
+
+/** Pi's thinking level for a Mousse effort (`max` is Pi's `xhigh`; none or unknown is `off`). */
+function piThinkingLevel(effort: string | undefined): PiThinkingLevel {
+  return (effort && THINKING_LEVELS.has(effort) ? effort : effort === 'max' ? 'xhigh' : 'off') as PiThinkingLevel
+}
 
 export interface PiEngineCatalog {
   provider: PiCatalogProvider
@@ -96,6 +114,12 @@ export interface PiRpcEngineOptions {
   catalog: () => PiEngineCatalog
   /** The stored key of the instance; it reaches Pi only in the factory's catalogue answer. */
   apiKey?: () => string | undefined
+  /**
+   * Mousse's OAuth credentials (`piOAuthBroker`): the instance provider's one is written to Pi's
+   * `auth.json` before every start with an opaque handle for its refresh token, and Pi's refreshes
+   * come back to it over `/pi/credential`.
+   */
+  oauth?: PiOAuthSource
   /** Variables configured on the instance (ids only; the launcher refuses credentials). */
   extraEnv?: () => Readonly<Record<string, string>> | undefined
   /** Git Bash on Windows. */
@@ -121,12 +145,91 @@ export interface PiRpcEngineOptions {
   onSpawn?: (pid: number, threadId: string) => void
   /** Variables for a test build of the extension (`MOUSSE_PI_TEST_*`). */
   testEnv?: Readonly<Record<`MOUSSE_PI_TEST_${string}`, string>>
+  /**
+   * A line for the thread's user (`history_injected`): a turn started a new Pi session with the
+   * thread's history handed over, seeded into the session or as a prompt preamble.
+   */
+  notice?: (threadId: string, notice: { code: 'history_injected'; message: string }) => void
+  /** Test seam: runs after a seeded session file was written, before Pi loads it (tests corrupt it). */
+  onSeed?: (file: string) => void
 }
 
 interface SavedThread {
   sessionId: string
   historyFingerprint?: string
   instructionsHash?: string
+  /** The session's leaf entry after the last completed turn (the cursor of `get_entries since`). */
+  leafId?: string
+  /** The leaf entry each completed turn left, by the turn's key (`nativeTurnId`): a fork's branch point. */
+  turnLeaves?: Record<string, string>
+  /**
+   * A native fork's branch, bound to the fork's thread before its first turn. The gateway's fence
+   * keeps it (the thread has no binding of its own yet); a credential change drops it.
+   */
+  pendingFork?: true
+}
+
+/** A session Mousse wrote from a thread's transcript, and the roles Pi must report back for it. */
+interface PiSeed {
+  sessionId: string
+  file: string
+  roles: string[]
+}
+
+/** How many turns' leaves a thread keeps for forks. */
+const FORKABLE_TURNS = 200
+/** Messages Pi's `convertToLlm` passes to the model as they are: the only ones a seeded session holds. */
+const SEED_ROLES = new Set(['user', 'assistant', 'toolResult'])
+
+/** The file of a Pi session in `dir` (Pi names them `<timestamp>_<sessionId>.jsonl`). */
+function sessionFileOf(dir: string, sessionId: string): string | undefined {
+  try {
+    const name = readdirSync(dir).find((entry) => entry.endsWith(`_${sessionId}.jsonl`))
+    return name ? join(dir, name) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** The header line of a Pi session file (`{type:'session', id, cwd, ...}`), read without loading the file. */
+function sessionHeaderOf(file: string): { line: string; header: { type?: unknown; id?: unknown; cwd?: unknown } } | undefined {
+  let fd: number | undefined
+  try {
+    fd = openSync(file, 'r')
+    const buffer = Buffer.alloc(64 * 1024)
+    const read = readSync(fd, buffer, 0, buffer.length, 0)
+    const text = buffer.subarray(0, read).toString('utf8')
+    const end = text.indexOf('\n')
+    if (end < 0) return undefined
+    const line = text.slice(0, end)
+    const header = JSON.parse(line) as { type?: unknown; id?: unknown; cwd?: unknown }
+    return header?.type === 'session' ? { line, header } : undefined
+  } catch {
+    return undefined
+  } finally {
+    if (fd !== undefined) closeSync(fd)
+  }
+}
+
+/**
+ * A saved session is resumable in `cwd` only when its file is there and its header names `cwd`:
+ * Pi finds `--session <id>` among the sessions of its working directory, and one recorded for
+ * another directory (a fork's first turn in its own worktree) would make it ask on stdin. Mousse
+ * owns the files, so the header is moved to `cwd`. False when the session cannot be resumed.
+ */
+function prepareSession(dir: string, sessionId: string, cwd: string): boolean {
+  const file = sessionFileOf(dir, sessionId)
+  const found = file ? sessionHeaderOf(file) : undefined
+  if (!file || !found || found.header.id !== sessionId) return false
+  const target = resolvePath(cwd)
+  if (typeof found.header.cwd === 'string' && resolvePath(found.header.cwd) === target) return true
+  try {
+    const content = readFileSync(file, 'utf8')
+    atomicWriteFileSync(file, `${JSON.stringify({ ...found.header, cwd: target })}${content.slice(found.line.length)}`, { mode: 0o600 })
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** A Pi process failed before or during a turn in a way Mousse must not paper over. */
@@ -139,10 +242,16 @@ function interruptedError(message: string): AppError {
   return new AppError({ code: 'interrupted', message, errorInfo: { category: 'unavailable', retryable: false } })
 }
 
-/** What a turn that hit a count limit says. */
-function limitMessage(limit: AgentExecutionLimit | undefined): string {
+/** What a turn that hit a limit says. */
+function limitMessage(limit: AgentExecutionLimit | undefined, overshoot?: number): string {
+  if (overshoot !== undefined && limit?.kind === 'input_tokens') return `The provider counted ${overshoot} more input token${overshoot === 1 ? '' : 's'} than Mousse reserved for the request, so this run stopped.`
+  if (overshoot !== undefined && limit?.kind === 'cost_usd') return `The request cost $${overshoot.toFixed(6)} more than Mousse reserved for it, so this run stopped.`
+  if (overshoot !== undefined) return `The provider exceeded its output cap by ${overshoot} token${overshoot === 1 ? '' : 's'}, so this run stopped.`
   if (limit?.kind === 'turns') return `This run reached its limit of ${limit.limit} model request${limit.limit === 1 ? '' : 's'}, so the next one was not sent.`
   if (limit?.kind === 'tool_calls') return `This run reached its limit of ${limit.limit} tool call${limit.limit === 1 ? '' : 's'}, so it stopped before the next step.`
+  if (limit?.kind === 'input_tokens') return `The next model request could go over this run's limit of ${limit.limit} input tokens, so it was not sent.`
+  if (limit?.kind === 'output_tokens') return `Too little of this run's limit of ${limit.limit} output tokens is left for the next model request at this effort, so it was not sent.`
+  if (limit?.kind === 'cost_usd') return `The next model request could go over this run's cost limit of $${limit.limit}, so it was not sent.`
   return 'This run reached one of its limits, so the next step was not sent.'
 }
 
@@ -214,15 +323,23 @@ class PiTurn {
   retryExhaustedError: AppError | undefined
   /** Pi's retry limit, as its last `auto_retry_start` stated it. */
   maxRetries = 0
-  lastText = ''
+  /** The text of each assistant message that ended the turn's steps, in order (the reply joins them). */
+  readonly texts: string[] = []
+  /** The Stop in progress: a second caller (thread Stop after a turn Stop) waits for the same one. */
+  stopping: Promise<'interrupted' | 'not_active'> | undefined
   /** Pi acknowledged the prompt (its preflight ended); before that, Stop must kill the process. */
   promptAccepted = false
   progressed = false
   readonly startedAt = Date.now()
   readonly openTools = new Map<string, { name: string; mousse: boolean }>()
+  /** A bot's built-in calls with a `started` ledger row, by call id. */
+  readonly ledgerRows = new Map<string, string>()
   readonly steers: Array<{ text: string; token?: string }> = []
   usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+  /** The current assistant message's text blocks by `contentIndex`. */
   text = new Map<number, string>()
+  /** The turn's reply as one cumulative stream, closed with the joined text when the turn ends. */
+  readonly reply: CumulativeStream
   thinking = ''
   settled!: () => void
   failed!: (error: unknown) => void
@@ -257,12 +374,19 @@ class PiTurn {
         })
       : undefined
     this.episode = new WriterEpisode(writer ? { acquire: writer } : {})
+    this.reply = new CumulativeStream((phase, content) => sink.text({ phase, content, contentIndex: 0 }))
     this.done = new Promise<void>((resolve, reject) => {
       this.settled = resolve
       this.failed = reject
     })
     // A turn that ended through one path must not also reject unobserved through another.
     this.done.catch(() => {})
+  }
+
+  /** The reply so far: every ended step's text, then the current message's. */
+  replyText(): string {
+    const current = [...this.text.entries()].sort(([a], [b]) => a - b).map(([, text]) => text).join('')
+    return [...this.texts, current].filter((text) => text.trim()).join('\n\n')
   }
 
   progress(): void {
@@ -294,6 +418,8 @@ class PiThreadProcess {
   groups = new OwnedGroups()
   exit: PiRpcExit | undefined
   turn: PiTurn | undefined
+  /** Reservations not settled yet, by id, with the turn and budget they were made for. */
+  readonly reservations = new Map<string, { turn: PiTurn; budget: TurnBudget }>()
   warm: ReturnType<typeof setTimeout> | undefined
   sessionId: string | undefined
   /** The stored key it was started with (a rotated key restarts it). */
@@ -344,9 +470,26 @@ export class PiRpcEngine implements ProviderAdapter {
   private readonly closing = new Set<PiThreadProcess>()
   private readonly starts = new Set<Promise<unknown>>()
   private stopped = false
+  /**
+   * The `refresh` Pi holds in `auth.json`: opaque, for this instance and this engine only. Every
+   * process of the instance shares its agent dir (and so the file); a handle from another instance
+   * or an earlier run of Mousse is refused.
+   */
+  private oauthHandle: string
+  /** The credential retirement in progress, if any; starts and forks wait for it. */
+  private retiring: Promise<void> | undefined
+  /** The credential epoch in which a start last wrote `auth.json`. */
+  private authWrittenEpoch = -1
+  /** Moves on with every credential change; a start or refresh across one is refused. */
+  private credentialEpoch = 0
+  /** The account claim of the credential the processes were given (when it has one). */
+  private oauthSubject: string | undefined
+  /** Threads already told their history went into a new session (once per thread). */
+  private readonly historyNoticed = new Set<string>()
 
   constructor(private readonly options: PiRpcEngineOptions) {
     this.capabilities = options.capabilities
+    this.oauthHandle = piOAuthHandle(options.instanceId)
   }
 
   describe(_model: string): ModelInfo {
@@ -370,17 +513,98 @@ export class PiRpcEngine implements ProviderAdapter {
 
   private save(threadId: string, entry: SavedThread | undefined): void {
     const all = this.saved()
+    const previous = all[threadId]?.sessionId
     if (entry) all[threadId] = entry
     else delete all[threadId]
     mkdirSync(this.options.stateDir, { recursive: true, mode: 0o700 })
     atomicWriteJsonSync(this.savedPath, all, { mode: 0o600 })
+    // A session no thread maps to is never resumed or forked again: its file goes (best effort: a
+    // process still closing may hold it open on Windows).
+    // Never one a thread's live process runs, either.
+    const live = [...this.threads.values()].some((thread) => thread.sessionId === previous && !thread.dead)
+    if (previous && previous !== entry?.sessionId && !live && !Object.values(all).some((other) => other.sessionId === previous)) {
+      const file = sessionFileOf(this.sessionsDir, previous)
+      if (file) {
+        try {
+          rmSync(file, { force: true })
+        } catch {
+          // Held open: it stays, unreferenced.
+        }
+      }
+    }
   }
 
-  /** The thread's next turn starts a new Pi session with the history handed over. */
+  /**
+   * The thread's next turn starts a new Pi session with the history handed over. A native fork's
+   * branch waiting for its first turn is kept: it was made for this thread under the current
+   * credential (a credential change drops it, `retireCredentials`).
+   */
   forgetConversation(threadId: string): void {
-    this.save(threadId, undefined)
+    if (!this.saved()[threadId]?.pendingFork) this.save(threadId, undefined)
     const thread = this.threads.get(threadId)
-    if (thread && !thread.turn) this.kill(thread)
+    if (thread && !thread.turn) void this.kill(thread)
+  }
+
+  /**
+   * The provider's credential changed (sign-in, sign-out, another account): every process goes,
+   * with the handle it held, so none refreshes into the next account; Pi's `auth.json` is removed
+   * once they closed (a refresh answered just before cannot write it back), and pending forks made
+   * under the old credential are dropped.
+   *
+   * Starts and forks wait until it finished (`afterRetirement`), so nothing of the new credential
+   * exists while it cleans up: it never removes another epoch's `auth.json`, branch or session.
+   */
+  retireCredentials(): Promise<void> {
+    const previous = this.retiring ?? Promise.resolve()
+    // A failed retirement does not skip the next one.
+    const retiring = previous.catch(() => {}).then(() => this.retire())
+    const gate = retiring.finally(() => {
+      if (this.retiring === gate) this.retiring = undefined
+    })
+    this.retiring = gate
+    return gate
+  }
+
+  private async retire(): Promise<void> {
+    const epoch = ++this.credentialEpoch
+    this.oauthHandle = piOAuthHandle(this.options.instanceId)
+    this.oauthSubject = undefined
+    // The processes and the token go first: a failed write of the thread list below cannot keep them.
+    const closing = [...this.threads.values()].map((thread) => this.kill(thread))
+    this.removeAuthFile()
+    try {
+      for (const [threadId, entry] of Object.entries(this.saved())) if (entry.pendingFork) this.save(threadId, undefined)
+    } catch (error) {
+      console.warn('[harness] could not drop pending forks', { instanceId: this.options.instanceId, error: error instanceof Error ? error.message : String(error) })
+    }
+    await within(Promise.allSettled([...closing, ...[...this.closing].map((thread) => thread.closed)]), CLEANUP_DEADLINE_MS)
+    // Again once the old processes closed (a refresh answered just before cannot write it back).
+    if (epoch === this.credentialEpoch && this.authWrittenEpoch !== epoch) this.removeAuthFile()
+  }
+
+  /** Waits while a credential retirement runs (a start or fork then belongs to the new credential). */
+  private async afterRetirement(): Promise<void> {
+    while (this.retiring) await this.retiring.catch(() => {})
+  }
+
+  /**
+   * An API key or ambient credential changed: processes not running a turn go (the next turn starts
+   * with the new credential, as a rotated key restarts a process anyway); running turns finish.
+   */
+  releaseIdle(): void {
+    // Idle: between turns, in its warm period (not starting, not handed to a turn being set up).
+    for (const thread of [...this.threads.values()]) if (thread.warm && !thread.turn && !thread.starting) void this.kill(thread)
+  }
+
+  /** Pi's private `auth.json` (an OAuth access token) is removed. */
+  private removeAuthFile(): void {
+    const home = this.options.env().home
+    if (!home || !this.options.oauth) return
+    try {
+      writePiAuth(home, this.options.provider, undefined)
+    } catch (error) {
+      console.warn('[harness] could not remove the Pi auth file', { instanceId: this.options.instanceId, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   // -- Processes ----------------------------------------------------------------------------------
@@ -434,11 +658,36 @@ export class PiRpcEngine implements ProviderAdapter {
     const closed = [...killed, ...[...this.threads.values()].map((thread) => this.kill(thread))]
     await Promise.allSettled([...closed, ...[...this.closing].map((thread) => thread.closed)])
     this.bridge.stop()
+    // The access token does not outlive the engine on disk.
+    this.removeAuthFile()
+  }
+
+  /**
+   * What token and USD limits need from `model` (a catalogue id with its effort suffix): an API
+   * whose cap pi-ai always sends, a price, and the smallest wire cap a request at this effort can
+   * carry (the thinking budget plus the answer room on budget-thinking models, else 256).
+   */
+  spendModel(model: string): SpendModelFacts | undefined {
+    const { baseId, effort } = parseThinkingSuffixFromModelId(model)
+    const entry = this.options.catalog().provider.models.find((candidate) => candidate.id === baseId)
+    if (!entry) return undefined
+    const level = piThinkingLevel(effort)
+    const reasoning = level === 'off' || !entry.reasoning ? undefined : (level as PiReasoning)
+    const rates = reservationRates(entry.api, entry.cost, fallbackModels(entry).map((fallback) => fallback.cost))
+    return {
+      label: entry.name || entry.id,
+      outputCap: capHonouring(entry) && !multipleCandidates(entry),
+      // A USD limit needs both an input and an output price (held at their highest rates).
+      priced: rates !== undefined,
+      effort: reasoning ?? 'off',
+      smallestCap: grantFloor(addsThinkingBudget(entry, reasoning) ? thinkingBudgetFor(reasoning!) : 0),
+      ...(rates ? { outputUsdPerToken: rates.output } : {})
+    }
   }
 
   private thinkingFor(model: string): { modelId: string; thinking: PiThinkingLevel } {
     const { baseId, effort } = parseThinkingSuffixFromModelId(model)
-    const thinking = (effort && THINKING_LEVELS.has(effort) ? effort : effort === 'max' ? 'xhigh' : 'off') as PiThinkingLevel
+    const thinking = piThinkingLevel(effort)
     return { modelId: baseId, thinking }
   }
 
@@ -473,6 +722,10 @@ export class PiRpcEngine implements ProviderAdapter {
 
   /** The thread's process for this turn: the warm one, or a new one that reported ready. */
   private async processFor(input: TurnInput, cwd: string, resume: string | undefined, starting: StartingTurn): Promise<{ thread: PiThreadProcess; resumed: boolean }> {
+    // Before the process is registered: a credential retirement in progress would count it as one
+    // of the old credential's and kill it.
+    await this.afterRetirement()
+    if (starting.cancelled || this.stopped) throw protocolError(this.options.instanceId, `${this.options.label} was stopped while it started.`)
     const { modelId, thinking } = this.thinkingFor(input.model)
     const keyFingerprint = fingerprint(this.options.apiKey?.() ?? '')
     const existing = this.threads.get(input.threadId)
@@ -505,6 +758,8 @@ export class PiRpcEngine implements ProviderAdapter {
       await started
     } finally {
       this.starts.delete(started)
+      // Started (or failed): no longer starting, so `releaseIdle` sees it as the idle process it is.
+      if (thread.starting === started) thread.starting = undefined
     }
     if (starting.cancelled) {
       await within(this.kill(thread), CLEANUP_DEADLINE_MS)
@@ -514,6 +769,7 @@ export class PiRpcEngine implements ProviderAdapter {
   }
 
   private async start(thread: PiThreadProcess, sessionId: string | undefined, cancelled: () => boolean = () => false): Promise<void> {
+    await this.afterRetirement()
     const stopping = () => protocolError(this.options.instanceId, `${this.options.label} is stopping.`)
     if (this.stopped) throw stopping()
     await this.bridge.start()
@@ -526,7 +782,34 @@ export class PiRpcEngine implements ProviderAdapter {
       ...(this.options.compaction ? { compaction: this.options.compaction() } : {}),
       ...(this.options.settings?.retry ? { retry: this.options.settings.retry } : {})
     })
+    const epoch = this.credentialEpoch
+    const grant = await this.options.oauth?.credential(this.options.provider)
+    if (this.stopped || thread.cancelled || cancelled()) throw stopping()
+    // The credential changed while it was read: this start does not get it.
+    if (epoch !== this.credentialEpoch) throw protocolError(this.options.instanceId, `${this.options.label}'s sign-in changed while it started.`)
+    if (grant) this.oauthSubject ??= grant.subject
+    writePiAuth(env.home, this.options.provider, grant ? piOAuthCredential(grant, this.oauthHandle) : undefined)
+    this.authWrittenEpoch = epoch
     const registration = this.bridge.register({
+      ...(this.options.oauth
+        ? {
+            credential: piCredentialHandler({
+              provider: this.options.provider,
+              source: this.options.oauth,
+              // The handle of this process's credential epoch; a credential change replaces it.
+              handle: () => (epoch === this.credentialEpoch ? this.oauthHandle : undefined),
+              // A refresh that returns another account's credential retires every process.
+              accept: (next) => {
+                if (epoch !== this.credentialEpoch) return false
+                if (this.oauthSubject && next.subject && next.subject !== this.oauthSubject) {
+                  void this.retireCredentials()
+                  return false
+                }
+                return true
+              }
+            })
+          }
+        : {}),
       catalog: async (first) => {
         const catalog = this.options.catalog()
         const key = first ? this.options.apiKey?.() : undefined
@@ -541,7 +824,8 @@ export class PiRpcEngine implements ProviderAdapter {
         return this.turnFor(thread)
       },
       gate: (request) => this.gate(thread, request),
-      request: async () => this.admitRequest(thread),
+      request: async (request) => this.admitRequest(thread, request),
+      settle: (request) => this.settleRequest(thread, request),
       quiesce: async (request, signal) => {
         const turn = thread.turn
         if (!turn || turn.attemptToken !== request.attemptToken) return { ok: false, reason: GATE_REFUSALS.denied }
@@ -686,18 +970,70 @@ export class PiRpcEngine implements ProviderAdapter {
   /**
    * One model request about to go (an agent request, a compaction, a summary or one of Pi's
    * retries): refused outside a live turn and after Stop; under a count limit it is charged to the
-   * run, and refused once the run's turn limit (or an earlier limit) is reached.
+   * run, and refused once the run's turn limit (or an earlier limit) is reached. Under a token or
+   * USD limit it is then reserved: the grant is the wire cap it must carry, at most the one it asked
+   * for. The model must be the turn's, and its cap support and prices are read from Mousse's own
+   * catalogue, never from the request; a request that cannot show its spend (no bound, no cap, a
+   * model whose cap is not honoured, no price under a USD limit) is refused.
    */
-  private admitRequest(thread: PiThreadProcess): PiRequestResponse {
+  private admitRequest(thread: PiThreadProcess, request: Partial<PiRequestRequest> = {}): PiRequestResponse {
     const turn = thread.turn
     if (!turn || turn.phase === 'stopping' || !thread.alive) {
       if (turn && turn.phase !== 'stopping') turn.refusal ??= REQUEST_REFUSED
       return { ok: false, reason: REQUEST_REFUSED }
     }
-    const decision = turn.host.budget?.request() ?? { ok: true }
-    if (decision.ok) return { ok: true }
-    turn.refusal ??= BUDGET_EXHAUSTED
-    return { ok: false, reason: BUDGET_EXHAUSTED }
+    const budget = turn.host.budget
+    // Asked without its spend under a spend limit: nothing is charged, the request asks again with it.
+    if (budget?.reserves && !request.spend && !budget.exhausted) return { ok: false, reason: REQUEST_REFUSED, spendRequired: true }
+    const decision = budget?.request() ?? { ok: true }
+    if (!decision.ok) {
+      turn.refusal ??= BUDGET_EXHAUSTED
+      return { ok: false, reason: BUDGET_EXHAUSTED }
+    }
+    if (!budget?.reserves) return { ok: true }
+    const spend = request.spend
+    const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0
+    const modelId = parseThinkingSuffixFromModelId(turn.input.model).baseId
+    const entry = this.options.catalog().provider.models.find((candidate) => candidate.id === modelId)
+    const rates = entry ? reservationRates(entry.api, entry.cost, fallbackModels(entry).map((fallback) => fallback.cost)) : undefined
+    const refuse = (): PiRequestResponse => {
+      turn.refusal ??= REQUEST_REFUSED
+      return { ok: false, reason: REQUEST_REFUSED }
+    }
+    if (!spend || !entry || spend.model?.provider !== this.options.provider || spend.model.id !== modelId || spend.model.api !== entry.api) return refuse()
+    if (!capHonouring(entry) || multipleCandidates(entry) || !finite(spend.inputBound) || !finite(spend.wireCap) || !finite(spend.thinkingBudget)) return refuse()
+    if (budget.limits.maxUsd !== undefined && !rates) return refuse()
+    const reserved = budget.reserve({
+      inputBound: spend.inputBound,
+      wireCap: spend.wireCap,
+      floor: grantFloor(spend.thinkingBudget),
+      price: rates ?? { input: 0, output: 0 }
+    })
+    if (!reserved.ok) {
+      turn.refusal ??= BUDGET_EXHAUSTED
+      return { ok: false, reason: BUDGET_EXHAUSTED }
+    }
+    thread.reservations.set(reserved.id, { turn, budget })
+    return { ok: true, reservation: { id: reserved.id, cap: reserved.cap } }
+  }
+
+  /**
+   * A reserved request ended. A request that went over its reservation (output above the cap it was
+   * sent, input above its bound, or cost above what was held) ends the run: the turn fails
+   * `budget_exhausted` with the overshoot, and every later step is refused. A reservation that is
+   * never settled (the process died mid-request) stays charged in full.
+   */
+  private settleRequest(thread: PiThreadProcess, request: PiSettleRequest): void {
+    const held = thread.reservations.get(request.reservationId)
+    if (!held) return
+    thread.reservations.delete(request.reservationId)
+    const { turn, budget } = held
+    const outcome = request.outcome
+    const amount = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0)
+    const settled = budget.settle(request.reservationId, outcome?.kind === 'released'
+      ? { kind: 'released' }
+      : { kind: 'used', input: amount(outcome?.input), output: amount(outcome?.output), usd: amount(outcome?.usd), ...(outcome?.partial ? { partial: true } : {}) })
+    if (!settled.ok) turn.refusal ??= BUDGET_EXHAUSTED
   }
 
   /**
@@ -720,7 +1056,7 @@ export class PiRpcEngine implements ProviderAdapter {
     let rewritten: Record<string, unknown> | undefined
     // An app or MCP tool is approved as the registry will run it: without transport fields.
     if (definition && !builtin) input = withoutTransportFields(request.input)
-    if (access || (definition && builtin)) {
+    if (access || ((definition || turn.host.bot) && builtin)) {
       input = { ...request.input }
       const argument = PI_PATH_ARGUMENTS[request.toolName]
       if (argument) {
@@ -740,6 +1076,19 @@ export class PiRpcEngine implements ProviderAdapter {
         return { allow: false, reason: error instanceof Error ? error.message : GATE_REFUSALS.denied }
       }
     }
+    // A bot turn: each built-in is held to the bot's grant (tools, roots, scratch) on the path Pi
+    // will open. Its app and MCP tools are held by the Mousse MCP registry. Nobody is asked.
+    const bot = turn.host.bot
+    if (bot && builtin) {
+      const decided = checkBuiltinCall(bot, PI_NATIVE_TOOLS, request.toolName, input)
+      if (!decided.ok) return { allow: false, reason: wallMessage(decided.wall) }
+    }
+    // A bot's app tool is checked here too (the registry checks it again when it runs), so a
+    // refused call never costs a tool call.
+    if (bot && !builtin) {
+      const refusal = botAppToolRefusal(bot, request.toolName, withoutTransportFields(request.input))
+      if (refusal) return { allow: false, reason: refusal }
+    }
     // A definition run: every call, built-in or app/MCP, is authorized in full (approval included)
     // before it is charged, so a refused call never costs a tool call.
     if (definition) {
@@ -747,6 +1096,13 @@ export class PiRpcEngine implements ProviderAdapter {
       const decided = await authorizeDefinitionCall(definition, { toolName: request.toolName, args: input, projectPath: thread.cwd, signal: turn.input.signal })
       if (!decided.allowed) return { allow: false, reason: decided.message }
       // Stopped while the approval was pending: nothing runs.
+      if (thread.turn !== turn || (turn.phase as PiTurn['phase']) === 'stopping') return { allow: false, reason: GATE_REFUSALS.denied }
+    }
+    // The thread's permission mode: a command (and, under Ask, an edit) asks the user first. A definition
+    // run and a bot run are held to their own grants above and never ask a person.
+    if (!definition && !bot && builtin) {
+      const refusal = await this.askPermission(turn, request.toolName, input)
+      if (refusal) return refusal
       if (thread.turn !== turn || (turn.phase as PiTurn['phase']) === 'stopping') return { allow: false, reason: GATE_REFUSALS.denied }
     }
     const decision = await turn.episode.authorize(request.toolCallId, kind)
@@ -760,10 +1116,57 @@ export class PiRpcEngine implements ProviderAdapter {
     // An app or MCP tool runs through the Mousse MCP registry, which takes this authorization
     // instead of asking for approval a second time.
     if (definition && !builtin) recordAuthorizedCall(definition, { turnToken: turn.attemptToken, toolName: request.toolName, callId: request.toolCallId, args: input })
+    // A bot's built-in is in the run's tool ledger before it runs (`started`, then `committed` or
+    // `failed` from its end event), by its neutral class's idempotency: an `edit` cut off without
+    // an outcome is then found and shown to the owner. No row, no call.
+    if (bot && builtin) {
+      const ledger = turn.host.tools.toolLedger
+      const neutral = neutralToolsOf(PI_NATIVE_TOOLS, request.toolName)
+      const row = ledger?.start({ type: 'toolCall', id: request.toolCallId, name: request.toolName, arguments: input } as ToolCall, { idempotent: neutral.length > 0 && neutral.every(neutralToolIdempotent) })
+      if (!row) {
+        turn.episode.ended(request.toolCallId)
+        return { allow: false, reason: `${GATE_REFUSALS.denied}: the call could not be recorded` }
+      }
+      turn.ledgerRows.set(request.toolCallId, row)
+    }
     return rewritten ? { allow: true, input: rewritten } : { allow: true }
   }
 
+  /**
+   * Asks the user before a built-in tool the turn's permission mode does not allow without asking
+   * (`bash` under Ask and Auto-accept edits, `edit` and `write` under Ask). Null when the call may go
+   * on. A turn with no way to ask, or whose approvals are refused, denies: nothing runs unapproved.
+   */
+  private async askPermission(turn: PiTurn, toolName: string, input: Record<string, unknown>): Promise<PiGateResponse | null> {
+    const action = piToolAction(toolName)
+    if (!action || permissionModeAllows(turn.input.permissionMode, action)) return null
+    const prompter = turn.host.bridge?.permission
+    const denied = (reason: string): PiGateResponse => ({ allow: false, reason })
+    if (!prompter || prompter.approvals === 'never') return denied(`${GATE_REFUSALS.denied}: ${toolName} needs the user's approval and this turn cannot ask`)
+    const detail = typeof input.command === 'string' ? input.command : typeof input.path === 'string' ? input.path : JSON.stringify(input)
+    try {
+      const chosen = await prompter.choose({
+        threadId: turn.input.threadId,
+        title: `Allow Pi to ${action === 'command' ? 'run this command' : 'edit this file'}?\n${detail.slice(0, 4000)}`,
+        options: [
+          { optionId: 'allow', kind: 'allow_once', label: 'Allow once', scope: 'once' },
+          { optionId: 'reject', kind: 'reject_once', label: 'Reject', scope: 'once' }
+        ],
+        approval: { action, permissionKey: piPermissionKey(action) }
+      })
+      if (chosen === 'allow' && !turn.input.signal.aborted) return null
+      return denied(`The user rejected the request to ${action === 'command' ? 'run this command' : 'edit this file'}. Do not retry it unless they ask.`)
+    } catch {
+      return denied(`${GATE_REFUSALS.denied}: the user did not approve ${toolName}`)
+    }
+  }
+
   async startTurn(input: TurnInput, sink: TurnSink, ctl: TurnControl, host: AdapterHost): Promise<TurnResult> {
+    // A definition turn (a session of its own, its own instructions) needs a fresh short-lived
+    // process and the instructions applied in `before_agent_start`; neither exists yet, and the
+    // engine is not `exact`, so the gateway never sends one. Refused here too, before anything runs.
+    if (input.session === 'ephemeral' || input.instructions)
+      throw harnessAppError({ code: 'policy_unenforceable', message: "Pi's agent cannot run an agent definition's turn yet.", missing: ['toolControl'], instanceId: this.options.instanceId })
     const key = randomUUID()
     const ref: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model, nativeTurnId: key }
     sink.providerRef(ref)
@@ -780,16 +1183,47 @@ export class PiRpcEngine implements ProviderAdapter {
       const cwd = input.cwd ?? join(this.options.stateDir, 'chats', fingerprint(input.threadId).slice(0, 16))
       mkdirSync(cwd, { recursive: true })
       const history = input.nativeHistory ?? ''
-      const saved = this.saved()[input.threadId]
-      const resume = saved && saved.historyFingerprint === fingerprint(history) ? saved.sessionId : undefined
+      let saved: SavedThread | undefined = this.saved()[input.threadId]
+      // History the orchestrator handed over in the prompt (a provider switch, or a fork that could
+      // not branch natively) stands in for any native session of the thread.
+      const handedOver = input.historyHandedOver === true
+      // Unplanned handoffs: whether a turn ran elsewhere since the branch is unknown, so the branch
+      // is not trusted and the raw history is handed over (as before native forks).
+      if (saved?.pendingFork && input.handoffUnplanned === true && !handedOver && !history) {
+        // Nothing to hand over in the branch's place: the fork's own history is empty, and running
+        // without the parent's would answer out of context. The turn fails; the resend plans again.
+        throw harnessAppError({ code: 'binding_stale', message: `${this.options.label} could not prepare this fork's history. Send the message again.`, instanceId: this.options.instanceId })
+      }
+      if (saved?.pendingFork && (handedOver || input.handoffUnplanned === true)) {
+        // The prompt carries the parent's history: the branch (made before turns elsewhere, or before
+        // a re-fork that did not happen) is not resumed beside it.
+        this.save(input.threadId, undefined)
+        saved = undefined
+      }
+      // A pending fork resumes its branch whatever the thread's history holds: every turn of the fork
+      // thread since the branch was made ran here and failed or stopped (one that completed replaced
+      // the mapping; one elsewhere comes back with the history handed over), and its message is resent.
+      const matches = !handedOver && saved?.historyFingerprint === fingerprint(history)
+      let resume = saved && (saved.pendingFork || matches) ? saved.sessionId : undefined
+      // A cold resume needs the session's file, in this workspace (a fork's first turn runs in its own).
+      const warm = this.threads.get(input.threadId)
+      const warmOnIt = warm?.alive && warm.cwd === cwd && warm.sessionId === resume
+      if (resume && !warmOnIt && !prepareSession(this.sessionsDir, resume, cwd)) resume = undefined
+      if (saved?.pendingFork && !resume) {
+        // A fork's first turn has no history of its own: running it on a new session would lose the
+        // parent's. The branch is dropped, so the retry forks again or hands the history over.
+        this.save(input.threadId, undefined)
+        throw harnessAppError({ code: 'binding_stale', message: `${this.options.label} could not open this fork's session. Send the message again.`, instanceId: this.options.instanceId })
+      }
       let started: { thread: PiThreadProcess; resumed: boolean }
       try {
         if (input.signal.aborted || starting.cancelled) throw new Error('aborted')
-        started = await this.processFor(input, cwd, resume, starting)
+        started = resume || !history ? await this.processFor(input, cwd, resume, starting) : await this.handOver(input, cwd, starting)
       } catch (error) {
         if (input.signal.aborted || starting.cancelled) return this.abortedResult(input, ref, startedAt)
         throw error
       }
+      if (history && !resume) this.historyNotice(input.threadId)
       return await this.runTurn(started.thread, started.resumed, key, starting, ref, input, sink, ctl, host, history)
     } finally {
       input.signal.removeEventListener('abort', onEarlyAbort)
@@ -863,12 +1297,19 @@ export class PiRpcEngine implements ProviderAdapter {
       }
     }
     sink.providerMetrics({ totalResponseTimeMs: Date.now() - turn.startedAt, totalTokensUsed: turn.usage.input + turn.usage.output, ...(context ? { context } : {}) })
-    const text = turn.lastText
+    // Every step's text, as the legacy loop's reply joins them (a steered turn answers more than once).
+    // A stopped turn keeps its partial reply; a finished one is every step's text, joined.
+    const text = stopped ? turn.replyText() : turn.texts.join('\n\n')
+    // A stopped or failed reply stays open: the orchestrator closes it as incomplete.
+    if (!stopped) turn.reply.complete(text)
     if (!stopped) {
       const committed = host.context.nativeHistoryAfterTurn(text)
-      if (thread.sessionId) this.save(input.threadId, { sessionId: thread.sessionId, historyFingerprint: fingerprint(committed), instructionsHash: fingerprint(host.bridge?.sessionInstructions ?? '') })
+      if (thread.sessionId) {
+        const leaves = await this.turnLeaf(thread, input.threadId, key)
+        this.save(input.threadId, { sessionId: thread.sessionId, historyFingerprint: fingerprint(committed), instructionsHash: fingerprint(host.bridge?.sessionInstructions ?? ''), ...leaves })
+      }
     } else if (thread.sessionId && thread.alive && host.context.nativeHistoryNow) {
-      this.save(input.threadId, { sessionId: thread.sessionId, historyFingerprint: fingerprint(host.context.nativeHistoryNow()) })
+      this.save(input.threadId, { sessionId: thread.sessionId, historyFingerprint: fingerprint(host.context.nativeHistoryNow()), ...this.leavesOf(input.threadId, thread.sessionId) })
     }
     const contextKey = `${input.llmProvider}:${input.model}`
     return {
@@ -889,8 +1330,14 @@ export class PiRpcEngine implements ProviderAdapter {
    * Stop: fence steers, clear Pi's queue (returning what it held once), revoke the episode, abort.
    * Past the deadline the tree is killed, and the turn ends only once it is gone.
    */
-  private async stopTurn(thread: PiThreadProcess, turn: PiTurn): Promise<'interrupted' | 'not_active'> {
-    if (turn.phase === 'stopping') return 'interrupted'
+  private stopTurn(thread: PiThreadProcess, turn: PiTurn): Promise<'interrupted' | 'not_active'> {
+    // One graceful Stop per turn: a later caller (thread Stop, deletion) waits for it instead of
+    // cutting it off with a kill before `clear_queue` and `abort` reached Pi.
+    turn.stopping ??= this.stopTurnOnce(thread, turn)
+    return turn.stopping
+  }
+
+  private async stopTurnOnce(thread: PiThreadProcess, turn: PiTurn): Promise<'interrupted' | 'not_active'> {
     turn.phase = 'stopping'
     turn.episode.revoke()
     if (!thread.alive) {
@@ -979,9 +1426,196 @@ export class PiRpcEngine implements ProviderAdapter {
     }
   }
 
-  /** Native fork is not wired yet: a fork uses the portable handoff. */
-  async forkSession(_ref: ProviderRef, _atTurnOrdinal: number): Promise<ProviderRef | null> {
-    return null
+  /**
+   * Native fork (SPEC §16.2): a new Pi session holding the source session up to the end of the turn
+   * `ref` names (its key, `nativeTurnId`, not the ordinal: Mousse's run ordinals do not count Pi's
+   * prompts). `clone` when that turn is the session's latest, else `fork` before the prompt that
+   * followed it. A process of its own on the source session does it, so the source thread's process
+   * is untouched, under the command deadline. `target` is the thread the fork belongs to: its first
+   * turn resumes the new session. Null (a portable handoff) without a target to bind the session
+   * to, when the turn's branch point is unknown (a turn before 2c, a stopped one) or Pi declines.
+   */
+  async forkSession(ref: ProviderRef, _atTurnOrdinal: number, target?: { threadId: string }): Promise<ProviderRef | null> {
+    await this.afterRetirement()
+    if (!target || !ref.sessionId || !ref.nativeTurnId || !ref.model || this.stopped) return null
+    const leaf = Object.values(this.saved()).find((entry) => entry.sessionId === ref.sessionId)?.turnLeaves?.[ref.nativeTurnId]
+    const file = leaf ? sessionFileOf(this.sessionsDir, ref.sessionId) : undefined
+    const cwd = file ? sessionHeaderOf(file)?.header.cwd : undefined
+    if (!leaf || typeof cwd !== 'string') return null
+    const { modelId, thinking } = this.thinkingFor(ref.model)
+    const thread = new PiThreadProcess(`fork:${randomUUID()}`, cwd, modelId, thinking)
+    thread.keyFingerprint = fingerprint(this.options.apiKey?.() ?? '')
+    // Tracked like a thread's process, so `stop()` kills it; no turn ever runs on it.
+    this.threads.set(thread.threadId, thread)
+    try {
+      const started = this.start(thread, ref.sessionId)
+      thread.starting = started
+      this.starts.add(started)
+      try {
+        await started
+      } finally {
+        this.starts.delete(started)
+        if (thread.starting === started) thread.starting = undefined
+      }
+      const after = await this.send<{ entries: Array<{ id: string; type: string; message?: { role?: string } }> }>(thread, { type: 'get_entries', since: leaf })
+      const next = after.entries.find((entry) => entry.type === 'message')
+      if (!next) {
+        if ((await this.send<{ cancelled: boolean }>(thread, { type: 'clone' })).cancelled) return null
+      } else {
+        const { messages } = await this.send<{ messages: Array<{ entryId: string }> }>(thread, { type: 'get_fork_messages' })
+        if (next.message?.role !== 'user' || !messages.some((message) => message.entryId === next.id)) return null
+        if ((await this.send<{ cancelled: boolean }>(thread, { type: 'fork', entryId: next.id })).cancelled) return null
+      }
+      const { sessionId } = await this.send<{ sessionId?: string }>(thread, { type: 'get_state' })
+      // Pi writes a branch once it holds a reply; one it did not write cannot be resumed.
+      if (!sessionId || sessionId === ref.sessionId || !sessionFileOf(this.sessionsDir, sessionId)) return null
+      // The fork's thread has no history of its own before its first turn, which resumes the branch.
+      this.save(target.threadId, { sessionId, historyFingerprint: fingerprint(''), pendingFork: true })
+      return { provider: ref.provider, ...(ref.instanceId ? { instanceId: ref.instanceId } : {}), model: ref.model, sessionId }
+    } finally {
+      await within(this.kill(thread), CLEANUP_DEADLINE_MS)
+    }
+  }
+
+  // -- Sessions handed over -------------------------------------------------------------------------
+
+  private get sessionsDir(): string {
+    return join(this.options.stateDir, 'sessions')
+  }
+
+  /**
+   * A new session for a thread with history and no session to resume (a thread from the pi loop,
+   * whose refs name none, or one whose session was forgotten): seeded from the thread's transcript
+   * and checked with `get_messages`. Anything wrong, and the history goes in the prompt instead
+   * (`resumed: false`).
+   */
+  private async handOver(input: TurnInput, cwd: string, starting: StartingTurn): Promise<{ thread: PiThreadProcess; resumed: boolean }> {
+    let seed: PiSeed | undefined
+    try {
+      seed = this.seedSession(input, cwd)
+    } catch (error) {
+      console.warn('[harness] could not seed a Pi session', { instanceId: this.options.instanceId, error: error instanceof Error ? error.message : String(error) })
+    }
+    if (seed) {
+      try {
+        const started = await this.processFor(input, cwd, seed.sessionId, starting)
+        if (await this.seedLoaded(started.thread, seed)) return started
+        await within(this.kill(started.thread), CLEANUP_DEADLINE_MS)
+      } catch (error) {
+        if (input.signal.aborted || starting.cancelled) throw error
+      }
+      console.warn('[harness] Pi did not load the seeded session; the history goes in the prompt', { instanceId: this.options.instanceId })
+      try {
+        rmSync(seed.file, { force: true })
+      } catch {
+        // A stray seed is never resumed: no thread maps to it.
+      }
+    }
+    const started = await this.processFor(input, cwd, undefined, starting)
+    return { thread: started.thread, resumed: false }
+  }
+
+  /**
+   * Writes a v3 Pi session holding the thread's transcript before the admitted message: the
+   * messages Pi's `convertToLlm` passes as they are (user, assistant, tool results), chained in
+   * order, and the compaction memory as a compaction entry that keeps all of them. Undefined when
+   * there is nothing to seed.
+   */
+  private seedSession(input: TurnInput, cwd: string): PiSeed | undefined {
+    const prior = input.messages.at(-1)?.role === 'user' ? input.messages.slice(0, -1) : input.messages
+    const messages = prior.filter((message) => SEED_ROLES.has(message.role))
+    const summary = input.contextSummary?.trim()
+    if (!messages.length && !summary) return undefined
+    const sessionId = randomUUID()
+    const timestamp = new Date().toISOString()
+    const ids = new Set<string>()
+    const entryId = (): string => {
+      let id = randomUUID().slice(0, 8)
+      while (ids.has(id)) id = randomUUID().slice(0, 8)
+      ids.add(id)
+      return id
+    }
+    // The model and thinking level, as Pi records them in every session it creates: a session
+    // without a thinking entry gets one appended when Pi next opens it (a fork would write it into
+    // this, the source session).
+    const { modelId, thinking } = this.thinkingFor(input.model)
+    const modelEntry = entryId()
+    const thinkingEntry = entryId()
+    const lines: Array<Record<string, unknown>> = [
+      { type: 'session', version: 3, id: sessionId, timestamp, cwd: resolvePath(cwd) },
+      { type: 'model_change', id: modelEntry, parentId: null, timestamp, provider: this.options.provider, modelId },
+      { type: 'thinking_level_change', id: thinkingEntry, parentId: modelEntry, timestamp, thinkingLevel: thinking }
+    ]
+    const roles: string[] = []
+    let parentId: string | null = thinkingEntry
+    let firstKeptEntryId: string | undefined
+    for (const message of messages) {
+      const id = entryId()
+      firstKeptEntryId ??= id
+      lines.push({ type: 'message', id, parentId, timestamp, message })
+      roles.push(message.role)
+      parentId = id
+    }
+    if (summary) {
+      lines.push({ type: 'compaction', id: entryId(), parentId, timestamp, summary, tokensBefore: 0, ...(firstKeptEntryId ? { firstKeptEntryId } : {}) })
+      roles.unshift('compactionSummary')
+    }
+    mkdirSync(this.sessionsDir, { recursive: true, mode: 0o700 })
+    const file = join(this.sessionsDir, `${timestamp.replace(/[:.]/g, '-')}_${sessionId}.jsonl`)
+    atomicWriteFileSync(file, `${lines.map((line) => JSON.stringify(line)).join('\n')}\n`, { mode: 0o600 })
+    this.options.onSeed?.(file)
+    return { sessionId, file, roles }
+  }
+
+  /** Pi runs the seeded session and holds exactly the seeded messages. */
+  private async seedLoaded(thread: PiThreadProcess, seed: PiSeed): Promise<boolean> {
+    if (thread.sessionId !== seed.sessionId) return false
+    try {
+      const { messages } = await this.send<{ messages: Array<{ role?: unknown }> }>(thread, { type: 'get_messages' })
+      return messages.length === seed.roles.length && messages.every((message, index) => message?.role === seed.roles[index])
+    } catch {
+      return false
+    }
+  }
+
+  /** The thread is told its history was handed to a new session (`history_injected`). */
+  private historyNotice(threadId: string): void {
+    if (this.historyNoticed.has(threadId)) return
+    this.historyNoticed.add(threadId)
+    try {
+      this.options.notice?.(threadId, { code: 'history_injected', message: `${this.options.label} started a new session for this chat, with the chat history handed over.` })
+    } catch (error) {
+      console.warn('[harness] notice failed', error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /** The fork points the thread keeps for `sessionId` (none when it ran another session). */
+  private leavesOf(threadId: string, sessionId: string): Pick<SavedThread, 'leafId' | 'turnLeaves'> {
+    const saved = this.saved()[threadId]
+    if (saved?.sessionId !== sessionId) return {}
+    return { ...(saved.leafId ? { leafId: saved.leafId } : {}), ...(saved.turnLeaves ? { turnLeaves: saved.turnLeaves } : {}) }
+  }
+
+  /**
+   * The session's leaf after a completed turn, kept under the turn's key beside the thread's earlier
+   * turns in the same session. Read with `get_entries since` the previous leaf, so only the turn's
+   * own entries cross the pipe. Without it the turn cannot be forked natively.
+   */
+  private async turnLeaf(thread: PiThreadProcess, threadId: string, key: string): Promise<Pick<SavedThread, 'leafId' | 'turnLeaves'>> {
+    const kept = this.leavesOf(threadId, thread.sessionId ?? '')
+    const read = async (since?: string): Promise<string | undefined> => {
+      if (!thread.alive) return undefined
+      try {
+        const { leafId } = await this.send<{ leafId: string | null }>(thread, { type: 'get_entries', ...(since ? { since } : {}) })
+        return leafId ?? undefined
+      } catch {
+        return undefined
+      }
+    }
+    // A cursor Pi no longer knows is read again from the start.
+    const leafId = (await read(kept.leafId)) ?? (kept.leafId ? await read() : undefined)
+    if (!leafId) return kept
+    return { leafId, turnLeaves: Object.fromEntries(Object.entries({ ...kept.turnLeaves, [key]: leafId }).slice(-FORKABLE_TURNS)) }
   }
 
   // -- Events -------------------------------------------------------------------------------------
@@ -1122,7 +1756,9 @@ export class PiRpcEngine implements ProviderAdapter {
         if (message.stopReason === 'aborted') return
         turn.pendingError = undefined
         const text = textOf(message)
-        if (text.trim()) turn.lastText = text
+        if (text.trim()) turn.texts.push(text)
+        // Counted once: the message's blocks are in `texts` now.
+        turn.text = new Map()
         return
       }
       case 'tool_execution_start': {
@@ -1155,6 +1791,12 @@ export class PiRpcEngine implements ProviderAdapter {
         turn.openTools.delete(callId)
         turn.episode.ended(callId)
         const failed = event.isError === true
+        const row = turn.ledgerRows.get(callId)
+        if (row) {
+          turn.ledgerRows.delete(callId)
+          if (failed) turn.host.tools.toolLedger?.failed(row)
+          else turn.host.tools.toolLedger?.commit(row)
+        }
         sink.tool({
           kind: open?.mousse ? 'mcp_tool_call' : 'build_tool_result',
           phase: 'complete',
@@ -1172,6 +1814,8 @@ export class PiRpcEngine implements ProviderAdapter {
         return
       }
       case 'auto_retry_start':
+        // The failed attempt's partial text is not part of the reply.
+        turn.text = new Map()
         // Pi dropped the failed attempt from its context; its partial output is superseded.
         turn.pendingError = undefined
         turn.maxRetries = Number(event.maxAttempts) || turn.maxRetries
@@ -1200,7 +1844,7 @@ export class PiRpcEngine implements ProviderAdapter {
       case 'compaction_end': {
         // A summary request Mousse refused (or could not be asked about) fails the compaction only.
         const failure = typeof event.errorMessage === 'string' ? event.errorMessage : ''
-        const refusal = [BUDGET_EXHAUSTED, REQUEST_REFUSED, GATE_UNAVAILABLE].find((text) => failure.includes(text))
+        const refusal = [BUDGET_EXHAUSTED, REQUEST_REFUSED, GATE_UNAVAILABLE, SPEND_CAP_MISMATCH].find((text) => failure.includes(text))
         if (refusal) turn.refusal ??= refusal
         sink.compaction(event.result ? 'complete' : 'unchanged')
         return
@@ -1226,20 +1870,16 @@ export class PiRpcEngine implements ProviderAdapter {
     const { sink } = turn
     turn.progress()
     switch (update.type) {
+      // One reply bubble per turn, as the legacy loop shows it: every step's text, joined.
       case 'text_start':
         turn.text.set(update.contentIndex, '')
-        return sink.text({ phase: 'start', content: '', contentIndex: update.contentIndex })
-      case 'text_delta': {
-        if (!turn.text.has(update.contentIndex)) sink.text({ phase: 'start', content: '', contentIndex: update.contentIndex })
-        const content = `${turn.text.get(update.contentIndex) ?? ''}${update.delta ?? ''}`
-        turn.text.set(update.contentIndex, content)
-        return sink.text({ phase: 'delta', content, contentIndex: update.contentIndex })
-      }
-      case 'text_end': {
-        const content = update.content ?? turn.text.get(update.contentIndex) ?? ''
-        turn.text.set(update.contentIndex, content)
-        return sink.text({ phase: 'complete', content, contentIndex: update.contentIndex })
-      }
+        return turn.reply.update(turn.replyText())
+      case 'text_delta':
+        turn.text.set(update.contentIndex, `${turn.text.get(update.contentIndex) ?? ''}${update.delta ?? ''}`)
+        return turn.reply.update(turn.replyText())
+      case 'text_end':
+        turn.text.set(update.contentIndex, update.content ?? turn.text.get(update.contentIndex) ?? '')
+        return turn.reply.update(turn.replyText())
       case 'thinking_start':
         turn.thinking = ''
         return sink.thinking({ phase: 'start', content: '' })
@@ -1255,7 +1895,7 @@ export class PiRpcEngine implements ProviderAdapter {
   }
 
   private mousseRefusal(message: string): boolean {
-    return [ANTHROPIC_OAUTH_REFUSED, CREDENTIAL_UNAVAILABLE, BUDGET_EXHAUSTED, REQUEST_REFUSED, GATE_UNAVAILABLE].some((text) => message.includes(text))
+    return [ANTHROPIC_OAUTH_REFUSED, CREDENTIAL_UNAVAILABLE, BUDGET_EXHAUSTED, REQUEST_REFUSED, GATE_UNAVAILABLE, SPEND_CAP_MISMATCH].some((text) => message.includes(text))
   }
 
   /**
@@ -1267,9 +1907,11 @@ export class PiRpcEngine implements ProviderAdapter {
       const limit = turn.host.budget?.exhausted
       const text = turn.host.budget?.lost
         ? "This run's earlier usage is no longer known (Mousse restarted, or the run had already ended), so it cannot continue under its limits."
-        : limitMessage(limit)
+        : limitMessage(limit, turn.host.budget?.overshoot)
       return harnessAppError({ code: 'budget_exhausted', message: text, ...(limit ? { limit } : {}), instanceId: this.options.instanceId })
     }
+    if (message.includes(SPEND_CAP_MISMATCH))
+      return protocolError(this.options.instanceId, `${this.options.label} built a model request whose output cap did not match its reservation, so nothing was sent.`)
     if (message.includes(REQUEST_REFUSED) || message.includes(GATE_UNAVAILABLE))
       return protocolError(this.options.instanceId, `${this.options.label} could not get Mousse's approval for a model request, so nothing was sent.`)
     if (message.includes(ANTHROPIC_OAUTH_REFUSED))

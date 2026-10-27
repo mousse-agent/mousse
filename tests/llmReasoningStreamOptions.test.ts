@@ -2,13 +2,6 @@ import { describe, expect, it } from 'vitest'
 import { getCacheSessionId, getReasoningStreamOptions } from '../src/mms/harness/drivers/pi/stream'
 
 describe('getReasoningStreamOptions', () => {
-  it('requests a visible reasoning summary for ChatGPT subscription models', () => {
-    expect(getReasoningStreamOptions('openai-codex-responses', 'medium')).toMatchObject({
-      reasoningEffort: 'medium',
-      reasoningSummary: 'auto'
-    })
-  })
-
   it('keeps Claude requests on its native thinking stream and adds the thread cache affinity when given', () => {
     expect(getReasoningStreamOptions('anthropic-messages', 'high')).toEqual({
       reasoning: 'high',

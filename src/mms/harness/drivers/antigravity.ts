@@ -4,6 +4,7 @@ import { ANTIGRAVITY_RELEASE, validateManualAntigravityBinary } from '../../prov
 import { AcpAdapter, type AcpTurnClient } from '../../run/adapters/acp/AcpAdapter'
 import { ANTIGRAVITY_CAPABILITIES, ANTIGRAVITY_LABEL } from '../acp/presets/antigravity'
 import { decodeInstanceConfig, type DriverContext, type DriverRuntime, type HarnessDriver } from '../driver'
+import { LAUNCH_MIRROR_FIELDS } from '../vendorMirror'
 
 /** The pinned agent release Mousse installs and verifies. */
 export const ANTIGRAVITY_VERSION = ANTIGRAVITY_RELEASE.replace(/^agy_acp_server_/, '')
@@ -16,7 +17,8 @@ export const ANTIGRAVITY_CAPS: HarnessCaps = Object.freeze({
   // The agent asks Mousse for every tool permission and file write.
   toolControl: 'approval_only',
   budgets: 'unsupported',
-  spendLimits: 'unsupported'
+  spendLimits: 'unsupported',
+  definitionLimits: 'none'
 })
 
 /** The turn runtime of Antigravity: the ACP adapter with the preset's name and capabilities. */
@@ -45,6 +47,9 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
     // ACP updates do not name the MCP server: the bearer is kept only after a turn whose tool calls all completed.
     mcpTurnBinding: 'drained_turn',
     userMcp: 'native',
+    mirrorsVendorFile: true,
+    // The Google sign-in is the profile's session Mousse keeps, with the installed or a manual agent.
+    ownsSignIn: true,
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),
     caps: () => ANTIGRAVITY_CAPS,
     updateCommand: () => undefined,
@@ -57,15 +62,21 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
         llmProvider: () => service.llmProvider(),
         models: () => service.models(),
         modelsRefreshedAt: () => service.modelsRefreshedAt(),
-        launch: () => service.storedLaunch(),
-        setLaunch: async (patch) => void (await service.setCliConfig(patch)),
+        // Launch settings only: Antigravity's `signedIn` is its real sign-in, not a Mousse sign-out.
+        vendorMirror: service.vendorMirror(LAUNCH_MIRROR_FIELDS),
+        validateLaunch: (patch) => service.validateLaunch(patch),
+        launchChanged: () => service.launchChanged(),
         // The sign-in is the profile's saved Google session; checking it would start the agent. It
         // changes only through Mousse's own sign-in and sign-out, which move the account generation
         // on, so the session itself is the account's identity.
-        auth: async () =>
-          service.signedIn()
+        auth: async () => {
+          // An unreadable settings file is never overwritten; the card says so until it is fixed.
+          const problem = service.settingsProblem()
+          if (problem) return { state: 'unknown', methodLabel: 'Google sign-in', message: problem }
+          return service.signedIn()
             ? { state: 'signed_in', methodLabel: 'Google sign-in', subject: 'mousse-google-sign-in' }
-            : { state: 'signed_out', methodLabel: 'Google sign-in' },
+            : { state: 'signed_out', methodLabel: 'Google sign-in' }
+        },
         refreshModels: async (cwd) => void (await service.refreshModels(cwd)),
         signIn: (session, cwd) => service.login(session, cwd),
         signOut: () => service.logout(),

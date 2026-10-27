@@ -337,3 +337,86 @@ it('reaches a device that listens only on ssh, and serves rpc in both directions
     expect.arrayContaining(['-p', '2222', '-W', `127.0.0.1:${port}`, '--', 'box.example.com'])
   )
 }, 30_000)
+
+it('joins through the setup listener and the via tunnel while the invitation routes are unreachable', async () => {
+  const a = profile(),
+    b = profile()
+  await a.net.request('net.init', { listen: true, port: 0 })
+  await a.net.request('net.protect', { passphrase: 'test authority protection' })
+  // The invitation advertises an address nothing answers on.
+  await a.net.request('net.transport.configure', {
+    id: 'direct',
+    enabled: true,
+    settings: { host: '127.0.0.1', advertiseHost: '192.0.2.1', port: 0 }
+  })
+  const listener = await (
+    a.net as unknown as {
+      openEnrollmentListener(): Promise<{ port: number; close(): Promise<void> }>
+    }
+  ).openEnrollmentListener()
+  const via = `ws://127.0.0.1:${listener.port}/mousse-net`
+  const invite = (await a.net.request('bridge.invite', {})) as { invite: string }
+  // Only the loopback tunnel shape is accepted, through the real method registry too.
+  await expect(
+    b.net.request('bridge.join', { invite: invite.invite, via: 'ws://10.0.0.1:1/mousse-net' })
+  ).rejects.toMatchObject({ code: 'bad_request' })
+  const joined = (await b.net.request('bridge.join', { invite: invite.invite, via })) as {
+    node: NodeId
+    authority: NodeId
+  }
+  const nodes = (await a.net.request('bridge.nodes', {})) as { nodes: Array<{ node: NodeId }> }
+  expect(nodes.nodes.map((row) => row.node)).toContain(joined.node)
+  // The listener is not part of the saved configuration and goes away when closed.
+  expect(JSON.stringify(a.net.status().transports)).not.toContain(String(listener.port))
+  await listener.close()
+  await expect(
+    new Promise<void>((resolve, reject) => {
+      const probe = createServer()
+      probe.once('error', reject)
+      probe.listen(listener.port, '127.0.0.1', () => probe.close(() => resolve()))
+    })
+  ).resolves.toBeUndefined()
+}, 30_000)
+
+it('the method registry refuses via anywhere but bridge.join and any non-loopback shape', async () => {
+  const registry = new DomainHandlerRegistry()
+  const requests: string[] = []
+  registerNetMethods(registry, () => ({
+    request: (method) => {
+      requests.push(method)
+      return {}
+    }
+  }))
+  const context = {
+    connection: {
+      id: 'local-owner',
+      binding: { profileId: 'selected-profile', epoch: 1 },
+      capabilities: new Set(['net.v1'])
+    }
+  } as unknown as HandlerContext
+  const call = (method: string, params: Record<string, unknown>) =>
+    registry.dispatch(context, method, { profileId: 'selected-profile', ...params })
+  const invite = 'mj1_' + 'a'.repeat(20)
+  for (const via of [
+    'ws://127.0.0.1:9/mousse-net?x=1',
+    'ws://user@127.0.0.1:9/mousse-net',
+    'ws://[::1]:9/mousse-net',
+    'wss://127.0.0.1:9/mousse-net',
+    'ws://localhost:9/mousse-net',
+    'ws://127.0.0.1:99999/mousse-net'
+  ])
+    await expect(call('bridge.join', { invite, via })).rejects.toBeTruthy()
+  await expect(
+    call('bridge.join', { invite, via: 'ws://127.0.0.1:47821/mousse-net' })
+  ).resolves.toBeDefined()
+  await expect(
+    call('bridge.rename', { node: newId('node'), name: 'x', via: 'ws://127.0.0.1:1/mousse-net' })
+  ).rejects.toBeTruthy()
+  expect(requests).toEqual(['bridge.join'])
+  // The remote machine methods validate their shapes and reach the service only when well formed.
+  await expect(
+    call('net.ssh.trust', { host: 'box', fingerprint: 'not-a-fingerprint' })
+  ).rejects.toBeTruthy()
+  await expect(call('net.ssh.approve', { node: 'nope', endpoint: 'box' })).rejects.toBeTruthy()
+  await expect(call('net.ssh.check', { host: 'box' })).resolves.toBeDefined()
+})

@@ -55,7 +55,7 @@ function fixture(outputs: Array<string | AssistantMessage> = ['done'], override?
   const questions = new UserQuestionService()
   const captured: Context[] = [], requests: AgentExecutionRequest[] = []
   const llm = nativeClient(outputs.map((text) => typeof text === 'string' ? providerResponse([{ type: 'text', text }], 'stop') : text), captured)
-  const run = new AgentExecutionService({ native: createNativeAgentRuntime(llm) })
+  const run = new AgentExecutionService({ runtime: createNativeAgentRuntime(llm) })
   const options = { services: { profileId, getProfileHomeDir: () => root, projects, threads, questions,
     events: { broadcast: vi.fn() }, orchestrator: {
       recordAgentDefinitionMessages: vi.fn(), runAgentDefinition: async (request: AgentExecutionRequest) => {

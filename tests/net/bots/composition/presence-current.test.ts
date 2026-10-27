@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { setup } from '../admission/helpers'
 import { cleanup, peer } from '../../spaces/host/helpers'
-import { BotPresenceReceiver, BotPresenceService } from '../../../../src/mms/bots/presence'
+import { BotPresenceReceiver, BotPresenceService } from '../../../../src/mms/bots/space/presence'
 import { SpaceCurrentIdentity } from '../../../../src/mms/spaces/SpaceCurrentIdentity'
 import { newId, type PresenceMessage } from '../../../../src/shared/net'
 

@@ -1,6 +1,7 @@
 import type {
   PullRequestCheck,
   PullRequestDetail,
+  PullRequestPushTarget,
   PullRequestReviewDecision,
   PullRequestScope,
   ThreadPullRequestLink
@@ -16,6 +17,7 @@ import type {
   GitStatusSnapshot
 } from '../../../shared/types'
 import { ipcErrorLine } from '../../lib/errorText'
+import type { CommitPhase } from '../../stores/gitStatusStore'
 
 const MINUS = '−'
 
@@ -269,6 +271,11 @@ export function branchFailureMessage(error: unknown, name = 'The branch', contex
 export function gitErrorCode(error: unknown): string | null {
   if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string') return error.code
   return null
+}
+
+/** The user pressed Cancel on a long action and it stopped. That is an outcome, not a failure to report. */
+export function isGitCancelled(error: unknown): boolean {
+  return gitErrorCode(error) === 'git_cancelled'
 }
 
 /** Git's own message for an IPC failure, trimmed to its first line without the transport prefix. */
@@ -548,6 +555,8 @@ export interface PushButtonModel {
   title: string
   /** Why the button is disabled right now; absent when it can be used. */
   disabledReason?: string
+  /** Why Push does not go to the pull request's branch ("push by hand"); absent when it does or there is no pull request. */
+  note?: string
 }
 
 /** Whether the branch has somewhere to push to: an upstream, or a remote to publish to. */
@@ -604,7 +613,10 @@ export interface GitActionAvailability {
   push: { enabled: boolean; reason: string | null }
   /** The commit popover offers "Commit and push": there is somewhere to push, and the branch is not behind. */
   offerCommitAndPush: boolean
-  /** The commit popover also offers "Commit, push and open PR": a pushable branch without a pull request that is not the default one. */
+  /**
+   * The commit popover also offers "Commit, push and open PR": there are changes to commit, the branch can be
+   * pushed (not behind, diverged or conflicted) and has no pull request, and is known not to be the default branch.
+   */
   offerCommitPushAndOpenPr: boolean
   amend: { enabled: boolean; reason: string | null }
   commit: CommitAvailability
@@ -650,7 +662,7 @@ export function gitActionAvailability(
   return {
     push: { enabled: pushReason === null, reason: pushReason },
     offerCommitAndPush,
-    offerCommitPushAndOpenPr: offerCommitAndPush && counts.changedCount > 0 && lookupNone,
+    offerCommitPushAndOpenPr: offerCommitAndPush && counts.changedCount > 0 && counts.conflictedCount === 0 && lookupNone,
     amend: { enabled: amendReason === null, reason: amendReason },
     commit: { ...counts, mode, blockedReason: conflictedReason }
   }
@@ -662,17 +674,28 @@ const PROJECT_SCOPE = { workspaceThreadId: null } as const
 export function pushButtonModel(
   status: GitStatusSnapshot | null,
   commitCount: number,
-  scope: Pick<GitScope, 'workspaceThreadId'> = PROJECT_SCOPE
+  scope: Pick<GitScope, 'workspaceThreadId'> = PROJECT_SCOPE,
+  /** Where Push goes for a thread linked to a pull request; null when it keeps its usual target. */
+  pullRequestTarget: PullRequestPushTarget | null = null
 ): PushButtonModel | null {
   if (!status || !canPush(status)) return null
   const { push } = gitActionAvailability(status, null, commitCount, scope)
   const disabled = push.enabled || push.reason === null ? {} : { disabledReason: push.reason }
+  const target = pullRequestTarget?.remote && pullRequestTarget.branch ? `${pullRequestTarget.remote}/${pullRequestTarget.branch}` : null
+  const note = pullRequestTarget?.reason ? { note: pullRequestTarget.reason } : {}
   if (status.tracking === 'tracked' && status.ahead > 0) {
     const noun = status.ahead === 1 ? '1 commit' : `${status.ahead} commits`
-    return { label: 'Push', count: status.ahead, title: status.upstream ? `Push ${noun} to ${status.upstream}` : `Push ${noun}`, ...disabled }
+    const destination = target ?? status.upstream
+    return { label: 'Push', count: status.ahead, title: destination ? `Push ${noun} to ${destination}` : `Push ${noun}`, ...note, ...disabled }
   }
   if (status.tracking === 'none' && commitCount > 0) {
-    return { label: 'Publish', count: null, title: 'Push this branch and track it on the remote', ...disabled }
+    return {
+      label: 'Publish',
+      count: null,
+      title: target ? `Push this branch to ${target}, the pull request's branch` : 'Push this branch and track it on the remote',
+      ...note,
+      ...disabled
+    }
   }
   return null
 }
@@ -742,8 +765,37 @@ export function commitHint(amend: boolean, shortHash: string | null, fileCount: 
   return `${target} · stages ${files}`
 }
 
-export function commitButtonLabels(amend: boolean): { commit: string; commitAndPush: string } {
-  return amend ? { commit: 'Amend', commitAndPush: 'Amend and push' } : { commit: 'Commit', commitAndPush: 'Commit and push' }
+export function commitButtonLabels(amend: boolean): { commit: string; commitAndPush: string; commitPushAndOpenPr: string } {
+  return amend
+    ? { commit: 'Amend', commitAndPush: 'Amend and push', commitPushAndOpenPr: 'Amend, push and open PR' }
+    : { commit: 'Commit', commitAndPush: 'Commit and push', commitPushAndOpenPr: 'Commit, push and open PR' }
+}
+
+/** What a commit button does: only commit, also push, or also push and open a pull request. */
+export type CommitFlow = 'commit' | 'push' | 'push-pr'
+
+export interface CommitFlowButton {
+  flow: CommitFlow
+  label: string
+  /** The plain commit is the primary button; the ones that go on to push are quiet. */
+  quiet: boolean
+}
+
+/**
+ * The buttons of the commit popover, in the order shown. "Commit and push" needs somewhere to push and a branch that
+ * is not behind; "Commit, push and open PR" needs `openPullRequest`, which `gitActionAvailability` decides.
+ */
+export function commitFlowButtons(input: { pushable: boolean; openPullRequest: boolean; amend: boolean }): CommitFlowButton[] {
+  const labels = commitButtonLabels(input.amend)
+  return [
+    ...(input.pushable && input.openPullRequest ? [{ flow: 'push-pr' as const, label: labels.commitPushAndOpenPr, quiet: true }] : []),
+    ...(input.pushable ? [{ flow: 'push' as const, label: labels.commitAndPush, quiet: true }] : []),
+    { flow: 'commit', label: labels.commit, quiet: false }
+  ]
+}
+
+export function commitPhaseLabel(phase: CommitPhase): string {
+  return phase === 'committing' ? 'Committing…' : phase === 'pushing' ? 'Pushing…' : 'Opening PR…'
 }
 
 export interface CommitDraft {
@@ -834,4 +886,15 @@ export function gitActionLock(running: GitAction | null, action: GitAction): Git
 /** Shown in the section when the commit landed and the push after it did not. */
 export function pushFailedMessage(error: unknown): string {
   return `Committed, but the push failed: ${gitErrorMessage(error)}`
+}
+
+/** Shown when the commit and push landed and the pull request step did not start; the branch is pushed, so Create PR can be used. */
+export function openPullRequestFailedMessage(error: unknown): string {
+  return `Committed and pushed, but no pull request was opened: ${gitErrorMessage(error)}`
+}
+
+/** Said when "Commit, push and open PR" finds the branch already has a pull request, which the row below shows instead of a second form. */
+export function existingPullRequestNotice(pullRequest: { number: number; state: 'open' | 'closed' | 'merged' }): string {
+  const state = pullRequest.state === 'open' ? 'already open' : pullRequest.state
+  return `Pushed. #${pullRequest.number} is ${state} for this branch.`
 }

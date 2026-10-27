@@ -1,4 +1,7 @@
 import { v5 as uuidv5 } from 'uuid'
+import type { ModelOverride } from '../../shared/providerInstances'
+import type { ScheduledJobWorkspace } from '../../shared/types'
+import type { AgentAccessLevel } from '../../shared/settings'
 import type { WorkflowChatRun } from '../../shared/workflowChat'
 import type { WorkflowRunState } from '../../shared/workflowRunPlatform'
 import type { WorkflowRunSnapshot } from '../../shared/workflows'
@@ -21,6 +24,20 @@ export interface ScheduledJobIngress {
   jobName?: string
   resumeWaiting?: boolean
   onWorkflowPrepared?: (invocationId: string) => void
+  /** The provider instance and model the run uses; absent = the thread's model, else the profile default. */
+  selection?: ModelOverride
+  mode?: 'agent' | 'plan'
+  workspace?: ScheduledJobWorkspace
+  /** The most agent access the run may be granted (`ScheduledJob.accessCap`); absent reads as `lineage`. */
+  accessCap?: AgentAccessLevel
+  /** Names the occurrence; the deterministic send receipt is `schedule:<jobId>:<occurrenceKey>`. Defaults to `occurrenceAt`. */
+  occurrenceKey?: string
+  /** What the claim already recorded, so a retry reuses its thread. */
+  claim?: { threadId?: string; runId?: string }
+  /** The occurrence chose its thread (a per-run thread was created, or the bound thread was found). */
+  onThreadChosen?: (threadId: string) => void
+  /** The run was admitted (accepted and new), before anything is queued or started. */
+  onAdmitted?: (runId: string) => void
 }
 
 export interface BackgroundWorkflowTurnResult {
@@ -30,6 +47,13 @@ export interface BackgroundWorkflowTurnResult {
   aborted?: boolean
   waiting?: boolean
   transcriptWritten?: boolean
+  /** `queued`: the occurrence waits behind a busy thread. `replayed`: the occurrence was already admitted; its run is observed. */
+  status?: 'queued' | 'replayed'
+  threadId?: string
+  runId?: string
+  queueItemId?: string
+  /** The model the run's binding used, when it was bound by the time the call returned. */
+  selection?: ModelOverride
 }
 
 const WAITING = new Set<WorkflowRunState>(['waiting-approval', 'waiting-input', 'waiting-condition'])

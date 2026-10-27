@@ -124,6 +124,27 @@ describe('linux systemd startup generation', () => {
     expect(content).toContain('WantedBy=default.target')
   })
 
+  it('adds the headless sandbox opt-out to the unit only when asked', () => {
+    expect(buildSystemdUnitContent(cliPath, homeDir)).not.toContain('ELECTRON_DISABLE_SANDBOX')
+    const content = buildSystemdUnitContent(cliPath, homeDir, { ELECTRON_DISABLE_SANDBOX: '1' })
+    expect(content).toContain('Environment=ELECTRON_DISABLE_SANDBOX=1')
+    expect(content.indexOf('Environment=ELECTRON_DISABLE_SANDBOX=1')).toBeLessThan(
+      content.indexOf('[Install]')
+    )
+  })
+
+  it('adds the display switches after service run when asked', () => {
+    expect(buildSystemdUnitContent(cliPath, homeDir)).toContain(`ExecStart=${cliPath} service run\n`)
+    const content = buildSystemdUnitContent(cliPath, homeDir, {}, [
+      '--ozone-platform=headless',
+      '--disable-gpu',
+      '--password-store=gnome-libsecret'
+    ])
+    expect(content).toContain(
+      `ExecStart=${cliPath} service run --ozone-platform=headless --disable-gpu --password-store=gnome-libsecret\n`
+    )
+  })
+
   it('builds systemctl arg arrays', () => {
     expect(buildSystemctlDaemonReloadArgs()).toEqual(['--user', 'daemon-reload'])
     expect(buildSystemctlEnableNowArgs()).toEqual([

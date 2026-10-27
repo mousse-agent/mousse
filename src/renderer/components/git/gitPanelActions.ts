@@ -7,7 +7,7 @@ import {
   stageGitPaths,
   unstageGitPaths
 } from '../../stores/gitStatusStore'
-import { THREAD_CHECKPOINTED_REASON, gitErrorMessage } from '../sideCard/gitSectionLogic'
+import { THREAD_CHECKPOINTED_REASON, gitErrorMessage, isGitCancelled } from '../sideCard/gitSectionLogic'
 import {
   discardPrompt,
   fetchResultNotice,
@@ -61,6 +61,8 @@ export async function runRowAction(
   }
 }
 
+const CANCELLED_TEXT = { fetch: 'Fetch cancelled', pull: 'Pull cancelled', abort: 'Abort cancelled' } as const
+
 export type SyncRequest =
   | { action: 'fetch' }
   | { action: 'pull'; strategy: GitPullStrategy }
@@ -89,6 +91,8 @@ export async function runSync(
       onActivity({ phase: 'done', action: 'abort', message: `${request.kind === 'merge' ? 'Merge' : 'Rebase'} aborted` })
     }
   } catch (error) {
-    onActivity({ phase: 'failed', action: request.action, message: gitErrorMessage(error) })
+    // Cancel is an outcome the user chose, not a failure; a stopped pull can leave a merge, which the sync bar then offers to abort.
+    if (isGitCancelled(error)) onActivity({ phase: 'done', action: request.action, message: CANCELLED_TEXT[request.action] })
+    else onActivity({ phase: 'failed', action: request.action, message: gitErrorMessage(error) })
   }
 }

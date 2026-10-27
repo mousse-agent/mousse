@@ -2,10 +2,13 @@ import type { InstanceSnapshot, ModelRefreshResult, ProviderSnapshotsEvent } fro
 import type {
   AddInstanceInput,
   BinaryFingerprint,
+  BindPolicy,
   CustomModel,
+  Enforceability,
   ExecutionBinding,
   HarnessCaps,
   HarnessDriverKind,
+  HarnessError,
   InstanceConfigPatch,
   InstanceModel,
   ModelPrefsPatch,
@@ -20,9 +23,10 @@ import type {
   SignInResponse,
   TurnOrigin
 } from '../../shared/harness/types'
+import type { NeutralTool } from '../../shared/harness/tools'
 import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult } from '../../shared/providerAuth'
 import type { ModelOverride } from '../../shared/providerInstances'
-import type { LlmProviderOption } from '../../shared/settings'
+import type { AgentAccessLevel, LlmProviderOption } from '../../shared/settings'
 import type { ChatMode } from '../../shared/types'
 import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import type { LoginSession } from '../providers/LoginSession'
@@ -35,10 +39,10 @@ import type { ModeCeiling, ProviderRef } from '../run/types'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import type { InstanceConfigView, NextStep, UpdateAffordance } from '../../shared/harness/status'
-import { foldedInto, type MoveResult } from '../../shared/harness/move'
+import type { InstanceConfigView, InstanceEngine, NextStep, UpdateAffordance } from '../../shared/harness/status'
+import { acceptsMove, foldedInto, foldedTarget, type MoveResult } from '../../shared/harness/move'
 import { harnessAppError, type HarnessErrorCode, type ModelPrefs, type SignInPrompt } from '../../shared/harness/types'
-import type { ProviderLoginEvent } from '../../shared/providerAuth'
+import type { ProviderLoginEvent, ProviderUsage } from '../../shared/providerAuth'
 import {
   legacyProviderForInstance,
   piProviderIdOf,
@@ -49,19 +53,41 @@ import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { LoginSession as LoginSessionImpl } from '../providers/LoginSession'
 import { fail } from '../run/db/RunStoreError'
 import { hidesModel, modelsWithPrefs, ModelPrefsService, visibleProviderOption, type ModelPrefsStore } from './catalog'
-import { privateHomeRule, type AuthReading, type DriverRuntime, type HarnessDriver, type InstallProgress, type InstanceConfig, type LiveProcessHost } from './driver'
-import { DEFAULT_HOME_ID, findOnPath, instanceEnv, type InstanceEnv } from './env'
+import { privateHomeRule, type AuthReading, type DriverRuntime, type HarnessDriver, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost } from './driver'
+import { DEFAULT_HOME_ID, findOnPath, instanceEnv, reservedEnvName, type InstanceEnv } from './env'
 import { addedInstanceId, defaultInstanceId, InstanceCounterStore, instanceStateDir, isBuiltInInstance } from './instances'
 import { LatestVersionCache } from './latest'
 import { RuntimeFactsStore } from './facts'
 import { questionsPrompter, refusingPrompter } from './acp/permissions'
-import { checkPolicy, hasSpendLimit, purposeAllowed, toolControlLevel } from './policy'
-import { countLimitsOf, RunCounterBook, type CounterScope } from './budget'
-import type { DefinitionAuthority } from '../agentDefinitions/definitionGate'
+import { checkPermissionMode, checkPolicy, type CheckPolicyOptions, definitionLimitsLevel, freezePolicy, hasSpendLimit, mapNeutralTools, permissionModeRefusal, policyDigest, purposeAllowed, toolControlLevel } from './policy'
+import { budgetLimitsOf, RunCounterBook, type CounterScope, type SpendScope } from './budget'
+import { definitionAuthorityDigest, type DefinitionAuthority } from '../agentDefinitions/definitionGate'
+import {
+  effectivePermissionMode,
+  normalizePermissionMode,
+  supportedPermissionModes,
+  type EffectivePermissionMode,
+  type PermissionLimits,
+  type PermissionMode
+} from '../../shared/permissionMode'
+import type { BotAuthority } from '../../shared/bots/personal/authority'
 import { HarnessScopeStore } from './scope'
 import { sharedShellPath, type ShellPathResult } from './shellPath'
 import { compatibilityOf, fingerprintOf, PROBE_TIMEOUTS, probeInstance, sameBinary, updateAffordance, type ProbeResult } from './status'
 import { interruptWithDeadline } from './supervise'
+import {
+  changedFields,
+  fieldLabels,
+  instanceTuple,
+  MIRROR_MARKER_KEY,
+  mirrorHash,
+  reconcileRow,
+  storedMarker,
+  tupleConfig,
+  unsetFields,
+  type MirrorTuple
+} from './vendorMirror'
+import type { StoredCliConfig } from '../providers/cliConfig'
 
 /** Instance id of a turn that ran on the unselected default: the bare pi loop. */
 export const PI_DRIVER_ID = 'pi'
@@ -71,6 +97,7 @@ export const PI_DRIVER_ID = 'pi'
 export type {
   AdapterHost,
   ChildTurnPolicy,
+  DefinitionLoop,
   ProviderMetrics,
   RecoveredContext,
   TurnBridge,
@@ -135,8 +162,36 @@ export interface HarnessGateway {
    * so a sign-in changed in a terminal since the last turn moves the account generation on before
    * the binding records it. That reading serves the `startTurn` of this binding once; any other
    * dispatch (a stored binding: retry, recovery) reads the account again.
+   *
+   * `policy` is the caller's part of the binding's policy (tools, approvals, budget, authority);
+   * `approvals` alone is its shorthand, and `policy.approvals` wins. The binding freezes the policy
+   * and, when the caller gave one, records its digest (`ExecutionBinding.policyDigest`). Retries and
+   * steers reuse the binding; a continuation binds anew.
    */
-  bind(resolved: ResolvedTurnSelection, input: { mode: ChatMode; effort?: string; origin?: TurnOrigin; approvals?: RunPolicy['approvals'] }): Promise<ExecutionBinding>
+  bind(resolved: ResolvedTurnSelection, input: BindInput): Promise<ExecutionBinding>
+  /**
+   * The instance's own names for neutral built-in tools (PR 6 §2), for an exact allowlist; refused
+   * with `policy_unenforceable` when the runtime has no tool for one of them.
+   */
+  nativeToolNames(instanceId: string, tools: readonly NeutralTool[]): { ok: true; names: string[] } | { ok: false; error: HarnessError & { code: 'policy_unenforceable' } }
+  /**
+   * The permission mode `bind` would record for a thread asking for `requested` (the mode itself, a
+   * stricter fallback with the reason, or a refusal). Reads, binds nothing; used to tell the agent
+   * about a change before the turn is admitted.
+   */
+  previewPermissionMode(resolved: ResolvedTurnSelection, requested: PermissionMode, cwd?: string | null): EffectivePermissionMode
+  /**
+   * Whether the instance can enforce `policy` now (its live caps, the model's spend facts, and
+   * whether its runtime holds a bot authority), as turn admission will decide: the bot editor's
+   * and the bot engine's check before anything is bound.
+   */
+  checkPolicy(instanceId: string, policy: RunPolicy, model?: string): Enforceability
+  /**
+   * Whether the resolved instance can enforce `policy` (`checkPolicy`, with the model's own spend
+   * facts), without binding or starting anything: the typed `policy_unenforceable` refusal admission
+   * would raise, for callers that check a candidate before they run it (definitions, PR 4 §6).
+   */
+  check(resolved: ResolvedTurnSelection, policy: RunPolicy): Enforceability
   /** The selection a binding runs: a retry or recovery of a run executes its binding, never the current selection. */
   selectionOf(binding: ExecutionBinding): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'>
   /**
@@ -147,7 +202,7 @@ export interface HarnessGateway {
   /** Stops a native session by its ref (an instance disabled since can still be stopped). */
   interrupt(ref: ProviderRef): Promise<'interrupted' | 'not_active'>
   /** A native fork of `ref` after `atTurnOrdinal`, or null when the instance cannot branch it. */
-  forkSession(ref: ProviderRef, atTurnOrdinal: number): Promise<ProviderRef | null>
+  forkSession(ref: ProviderRef, atTurnOrdinal: number, target?: { threadId: string }): Promise<ProviderRef | null>
   /**
    * Ends what a thread's process still runs in the background (`ProviderAdapter.stopThread`), on
    * whichever instance holds it: the thread may have switched instances since. 'stopped' when one did.
@@ -171,8 +226,28 @@ export interface HarnessGateway {
   stop(): void
 }
 
+/** `HarnessGateway.bind`: the turn's mode, effort and origin, and the caller's part of its policy. */
+export interface BindInput {
+  mode: ChatMode
+  effort?: string
+  origin?: TurnOrigin
+  /** Shorthand for `policy.approvals`. */
+  approvals?: RunPolicy['approvals']
+  /**
+   * The permission mode the thread asks for (its own, narrowed by its lineage's ceiling). The
+   * binding records the mode the instance can enforce: this one, the nearest stricter one, or the
+   * bind is refused with `permission_mode_unenforceable`. Absent reads as the profile default.
+   */
+  permissionMode?: PermissionMode
+  /** The turn's working directory, where project settings that limit the modes are read from. */
+  cwd?: string | null
+  policy?: BindPolicy
+}
+
 export interface ResolveStoredOptions {
   purpose: ResolvePurpose
+  /** An agent definition's turn: the instance's definition caps apply (`HarnessDriver.definitionCaps`). */
+  definition?: boolean
   scope?: ProviderScope
   allowDisabled?: boolean
   unselectedDefault?: boolean
@@ -187,6 +262,8 @@ export interface ResolvedTurnSelection {
   caps: HarnessCaps
   /** The selection named an entry that moved to this instance (`config.movedTo`). */
   movedFrom?: string
+  /** The model that selection named, when the agent runs another one for it (`movedModel`). */
+  movedFromModel?: string
 }
 
 /** The old provider RPCs, served through the instances that replace the vendor branches. */
@@ -251,6 +328,12 @@ export interface ResolvedSelection {
  */
 export interface HarnessInstances {
   snapshots(scope: ProviderScope): Promise<InstanceSnapshot[]>
+  /**
+   * The plan usage of every enabled, signed-in instance whose runtime reports any (`DriverRuntime.usage`),
+   * for the usage page: keyed by the instance and named like it. An instance that cannot be read
+   * says so in its own entry; one failing never fails the others.
+   */
+  usage(scope: ProviderScope): Promise<ProviderUsage[]>
   add(input: AddInstanceInput): Promise<InstanceSnapshot>
   /** Deletes any instance, built-in ones too; a vendor agent is not seeded again. */
   remove(instanceId: string): Promise<void>
@@ -353,6 +436,12 @@ export interface TurnSpec {
    * limits are always the binding's policy.
    */
   counters?: CounterScope
+  /**
+   * Where the run's token and USD spend is reserved and settled, for a caller that shares one
+   * allowance across runs (PR 6). Default: the run's own ledger, shared by its attempts. The limits
+   * are always the binding's policy.
+   */
+  spend?: SpendScope
 }
 
 /** What the `turn.start` executor knows of a turn's app tools, for its bridge (PR 2 §2). */
@@ -361,6 +450,8 @@ export interface TurnAppContext {
   turnToken: string
   /** The credential ceiling of the run. */
   modeCeiling: ModeCeiling
+  /** The agent access level granted to the run (SPEC §15.1); absent is `lineage`. */
+  accessLevel?: AgentAccessLevel
   /** The turn may attach the Mousse MCP server (a run engine run). */
   mcpEligible: boolean
   /** The session text and turn preamble, given whether the server was attached. */
@@ -371,6 +462,11 @@ export interface TurnAppContext {
    * built-ins and the app and MCP tools are held to one authority.
    */
   definition?: DefinitionAuthority
+  /**
+   * A bot turn's authority (`AppToolTurn.bot`, PR 6 §4): its one source, handed to the runtime as
+   * `AdapterHost.bot` so built-ins and app and MCP tools are held to one authority.
+   */
+  bot?: BotAuthority
 }
 
 export interface TurnHandle {
@@ -399,10 +495,14 @@ const MODEL_REFRESH_CONCURRENCY = 2
 const MODEL_REFRESH_INTERVAL_ENV = 'MOUSSE_MODEL_REFRESH_INTERVAL_MS'
 /** A one-shot request ends with `timeout` after this long without a provider event. */
 export const ONE_SHOT_INACTIVITY_MS = 60_000
+/** A usage read gives up after this long (the usage page shows the instance as unreadable). */
+export const USAGE_READ_MS = 15_000
 /** How long turn admission waits for the account check; past it the account counts as unknown. */
 export const TURN_ACCOUNT_CHECK_MS = 10_000
 
 export interface HarnessGatewayOptions {
+  /** Test seam only: what bot runtimes still lack (default `BOT_RUNTIME_GAPS`: bots are refused). */
+  botRuntimeGaps?: readonly string[]
   profileHome: string
   installationHome: string
   instanceMap: ProviderInstanceService
@@ -428,6 +528,11 @@ export interface HarnessGatewayOptions {
    * changed, for the Move dialog. Project defaults are the gateway's own.
    */
   defaults?: { rewrite(from: string, to: { instanceId: string; llmProvider: string; model(model: string): string }): string[] }
+  /**
+   * Whether another profile of this device still has an unmoved entry `instanceId` (or cannot be
+   * read), so a sign-in the profiles share is kept when this profile moves. Absent: none does.
+   */
+  otherProfilesUse?: (instanceId: string) => boolean
   /** Test seam: the agent a model API moves to (`FOLDED_INTO_AGENT`). */
   foldedInto?: (providerId: string | undefined) => HarnessDriverKind | undefined
   /** The ACP agent registry; without it the search finds nothing. */
@@ -484,6 +589,8 @@ interface ProbeState {
   models?: { refreshedAt?: string; error?: string; live?: boolean }
   /** The account read running for a turn admission (resolves undefined = unknown). */
   accountCheck?: Promise<string | undefined>
+  /** The signed-in account without its home (`accountFingerprint`), to tell two instances on one account. In memory only. */
+  fingerprint?: string
   /** The last start-up check: what it found, for which executable and config revision. */
   handshake?: { runs: ProbeResult['runs']; fingerprint?: BinaryFingerprint; revision: number }
 }
@@ -559,6 +666,20 @@ function harnessFail(code: HarnessErrorCode, message: string, instanceId?: strin
   throw harnessAppError({ code, message, ...(instanceId ? { instanceId } : {}) })
 }
 
+/** The Move prompt of an instance a Mousse update retired, while it has not moved. */
+function retiredPrompt(driver: HarnessDriver, instanceId: string, config: InstanceConfig): RetiredPrompt | undefined {
+  return config.movedTo ? undefined : driver.retired?.(instanceId)
+}
+
+/** The refusal of a turn on a retired entry: where to go, for callers with no Move button (channels). */
+function retiredError(name: string, prompt: RetiredPrompt, instanceId: string) {
+  return harnessAppError({
+    code: 'provider_retired',
+    message: `${name} was retired by a Mousse update. Move it to ${prompt.target} in Settings → Providers to keep chatting. Your chats stay.`,
+    instanceId
+  })
+}
+
 /** The provider-instance error codes the run engine reports, as harness codes for `resolve()`. */
 function asHarnessError(error: unknown, instanceId: string): unknown {
   const code = (error as { code?: unknown } | undefined)?.code
@@ -594,6 +715,10 @@ export class Harness implements HarnessGateway {
   /** The account reading `bind` took, for the `startTurn` of that binding (once). */
   private readonly boundAccounts = new WeakMap<ExecutionBinding, { accountId?: string }>()
   private readonly probes = new Map<string, ProbeState>()
+  /** Entries being moved now (`move`): one move at a time per entry. */
+  private readonly moving = new Set<string>()
+  /** Sign-outs started per instance (`signOut`), so a move that copies a key never undoes one. */
+  private readonly signOutsStarted = new Map<string, number>()
   private readonly facts: RuntimeFactsStore
   /** Executable stats taken when no probe recorded one, reused for the probe TTL. */
   private readonly stats = new Map<string, { fingerprint?: BinaryFingerprint; atMs: number }>()
@@ -602,8 +727,10 @@ export class Harness implements HarnessGateway {
   /** Each run's own request and tool-call counts (`budgets: 'hard'`), shared by its attempts. */
   private readonly runCounters = new RunCounterBook()
   /** Bindings made for a selection that named a moved entry: their thread is told once. */
-  private readonly boundMoves = new WeakMap<ExecutionBinding, string>()
+  private readonly boundMoves = new WeakMap<ExecutionBinding, { from: string; model?: { from: string; to: string } }>()
   private readonly operations = new Map<string, Operation>()
+  /** What this start's reconcile found about a vendor file an older Mousse changed, per instance. */
+  private readonly settingsNotices = new Map<string, NonNullable<InstanceSnapshot['settingsNotice']>>()
   private readonly listeners = new Set<(event: HarnessGatewayEvent) => void>()
   private readonly scopes: HarnessScopeStore
   private readonly counters: InstanceCounterStore
@@ -644,7 +771,8 @@ export class Harness implements HarnessGateway {
     this.instanceMap.setListings(
       (instanceId) => {
         const record = this.recordOrUndefined(instanceId)
-        if (!record) return undefined
+        // An instance signed out in Mousse lists nothing, whatever its runtime says.
+        if (!record || this.isSignedOut(record)) return undefined
         // An added instance is named after itself, so two Claude instances read apart.
         const named = <T extends { label: string }>(value: T | undefined): T | undefined =>
           value && !record.builtIn ? { ...value, label: this.displayName(record) } : value
@@ -657,6 +785,7 @@ export class Harness implements HarnessGateway {
     )
     this.instances = {
       snapshots: (scope) => this.snapshots(scope),
+      usage: (scope) => this.usage(scope),
       add: (input) => this.add(input),
       remove: (instanceId) => this.remove(instanceId),
       configure: (instanceId, patch) => this.configure(instanceId, patch),
@@ -681,6 +810,10 @@ export class Harness implements HarnessGateway {
         // A runtime that cannot run a model by id does not offer adding one.
         if (patch.custom?.length && !record.driver.customModels)
           harnessFail('unsupported', `${record.driver.label} runs only the models it lists; custom models cannot be added.`, instanceId)
+        // A retired entry takes no new custom model (the ones it has stay stored).
+        const retired = retiredPrompt(record.driver, instanceId, record.config)
+        const stored = new Set(this.prefs.get(instanceId).custom.map((model) => model.id))
+        if (retired && patch.custom?.some((model) => !stored.has(model.id))) throw retiredError(this.displayName(record), retired, instanceId)
         this.prefs.set(instanceId, patch)
         this.changed(instanceId)
         return this.snapshot(instanceId, { kind: 'device' })
@@ -692,7 +825,11 @@ export class Harness implements HarnessGateway {
     }
     this.registry = { search: (query) => options.registry?.search(query) ?? Promise.resolve([]) }
     this.catalog = {
-      models: (instanceId) => modelsWithPrefs(this.record(instanceId, { allowDisabled: true }).runtime.models(), this.prefs.get(instanceId)),
+      models: (instanceId) => {
+        const record = this.record(instanceId, { allowDisabled: true })
+        // A retired entry offers no model to choose, custom ones included (its prefs are kept).
+        return retiredPrompt(record.driver, instanceId, record.config) ? [] : modelsWithPrefs(record.runtime.models(), this.prefs.get(instanceId))
+      },
       customModel: (instanceId, modelId) => {
         const prefs = this.prefs.get(instanceId)
         return hidesModel(prefs, modelId) ? undefined : prefs.custom.find((model) => model.id === modelId)
@@ -727,7 +864,20 @@ export class Harness implements HarnessGateway {
       login: (providerId, session, cwd) => {
         const record = this.legacyRecord(providerId)
         if (!record?.runtime.signIn) return undefined
-        return record.runtime.signIn(session, cwd).finally(() => void this.probe(record.instanceId, true))
+        // Reconnecting an instance signed out in Mousse: on the user's own sign-in, only the flag clears.
+        if (this.isSignedOut(record) && !this.ownsSignIn(record))
+          return this.reconnect(record)
+            .then((): ProviderLoginResult => ({ success: true, sessionId: session.sessionId }))
+            .catch((error): ProviderLoginResult => ({ success: false, sessionId: session.sessionId, error: errorText(error) }))
+            .finally(() => void this.probe(record.instanceId, true))
+        return record.runtime.signIn(session, cwd)
+          .then(async (result) => {
+            // Through the record serving the instance now (the sign-in may have changed its config).
+            const current = this.recordOrUndefined(record.instanceId) ?? record
+            if (result.success && this.isSignedOut(current)) await this.reconnect(current)
+            return result
+          })
+          .finally(() => void this.probe(record.instanceId, true))
       },
       credentialsChanged: async (providerId) => {
         let instanceId: string
@@ -737,11 +887,20 @@ export class Harness implements HarnessGateway {
           return
         }
         if (this.instanceMap.get(instanceId)?.driver !== 'pi') return
+        // Processes started with the old credential stop holding it (Pi's agent: its auth.json too).
+        const record = this.records.get(instanceId)
+        await record?.runtime.credentialsChanged?.().catch((error) => console.warn('[harness] could not retire old credentials', { instanceId, error: errorText(error) }))
+        // A key saved for an instance signed out in Mousse signs it in again; a call that saved
+        // nothing (a removed key, a failed check) leaves it signed out.
+        const flagged = this.recordOrUndefined(instanceId)
+        if (flagged && this.isSignedOut(flagged) && flagged.runtime.configured()) await this.reconnect(flagged).catch((error) => console.warn('[harness] could not clear a sign-out', { instanceId, error: errorText(error) }))
         // A check already running read the old credentials: wait for it, then check again.
         await this.probes.get(instanceId)?.probing
         await this.probe(instanceId, true)
       }
     }
+    // Before the first probe: launch settings and sign-outs an older Mousse left in vendor files.
+    this.reconcileVendorMirrors()
   }
 
   // -- Resolution -------------------------------------------------------------------------------
@@ -765,9 +924,13 @@ export class Harness implements HarnessGateway {
     }
     const named = this.instanceMap.instanceIdOf(selection)
     const target = this.movedTarget(named)
+    // A retired entry is refused for every purpose, before it reads as turned off: turning it on
+    // would not help. Reading or stopping work (`allowDisabled`) is not refused.
+    if (!options.allowDisabled) this.refuseRetiredId(target ?? named)
     const resolved = this.instanceMap.resolve(target ?? named, { allowDisabled: options.allowDisabled })
     const driver = this.drivers.get(resolved.entry.driver)
     if (!driver) fail('bad_request', `No provider adapter for driver ${resolved.entry.driver} (instance ${resolved.instanceId}).`)
+    const config = driver.decodeConfig(resolved.entry.config, resolved.instanceId)
     // Chat titles are a one-shot completion of an API provider's model; agent runtimes run turns only.
     if (options.purpose === 'title' && !driver.oneShot)
       harnessFail('unsupported', `${driver.label} cannot name chats. Choose an API provider's model for chat titles, or Automatic.`, resolved.instanceId)
@@ -777,9 +940,8 @@ export class Harness implements HarnessGateway {
       if (selection.model && hidesModel(this.prefs.get(resolved.instanceId), selection.model))
         harnessFail('model_hidden', `${this.modelName(resolved.instanceId, selection.model)} is hidden. Show it in Settings → Providers or choose another model.`, resolved.instanceId)
     }
-    const config = driver.decodeConfig(resolved.entry.config)
     const version = this.probes.get(resolved.instanceId)?.lastGood?.binary?.version
-    const caps = driver.caps(config, version, this.currentFacts(resolved.instanceId))
+    const caps = (options.definition && driver.definitionCaps?.(config)) || driver.caps(config, version, this.currentFacts(resolved.instanceId))
     // An instance that approves tools itself runs only turns a person drives; reading or stopping
     // work already running (`allowDisabled`) is never refused.
     if (!options.allowDisabled && !purposeAllowed(caps, options.purpose))
@@ -789,13 +951,35 @@ export class Harness implements HarnessGateway {
         missing: ['toolControl'],
         instanceId: resolved.instanceId
       })
-    // A moved entry's model runs on the agent when it lists it; otherwise the agent's first model.
-    let model = selection.model
-    if (target) {
-      const listed = this.recordOrUndefined(target)?.runtime.models() ?? []
-      if (listed.length && !listed.some((entry) => entry.id === model)) model = listed[0]!.id
+    const model = target ? this.movedModel(target, selection.model) : selection.model
+    return {
+      instanceId: resolved.instanceId,
+      llmProvider: resolved.llmProvider,
+      driver: driver.kind,
+      model,
+      caps,
+      ...(target ? { movedFrom: named } : {}),
+      ...(target && model !== selection.model ? { movedFromModel: selection.model } : {})
     }
-    return { instanceId: resolved.instanceId, llmProvider: resolved.llmProvider, driver: driver.kind, model, caps, ...(target ? { movedFrom: named } : {}) }
+  }
+
+  /**
+   * The agent's model for a model of an entry that moved to it: the same id when the agent has it
+   * (its listing or a custom model of the user's), else the agent's own name for it
+   * (`DriverRuntime.movedModel`, a family alias), else the agent's default (its first model). A
+   * reasoning effort (`:high`) stays when the model it lands on takes it. The move lists every
+   * default whose model changed, and a moved thread is told once.
+   */
+  private movedModel(instanceId: string, model: string): string {
+    const runtime = this.recordOrUndefined(instanceId)?.runtime
+    if (!runtime) return model
+    const available = this.catalog.models(instanceId, { kind: 'device' })
+    if (!available.length) return model
+    const { baseId, effort } = parseThinkingSuffixFromModelId(model)
+    const find = (id: string | undefined) => (id ? available.find((entry) => entry.id === id) : undefined)
+    const landed = find(model) ?? find(baseId) ?? find(runtime.movedModel?.(baseId)) ?? available.find((entry) => !entry.hidden) ?? available[0]!
+    if (landed.id === model) return model
+    return effort && landed.capabilities.efforts.includes(effort) ? `${landed.id}:${effort}` : landed.id
   }
 
   /** The entry an instance moved to (one hop), when that entry still exists. */
@@ -870,12 +1054,30 @@ export class Harness implements HarnessGateway {
     if (this.facts.set(record.instanceId, facts) && !this.stopped) this.changed(record.instanceId, { legacy: false })
   }
 
-  async bind(resolved: ResolvedTurnSelection, input: { mode: ChatMode; effort?: string; origin?: TurnOrigin; approvals?: RunPolicy['approvals'] }): Promise<ExecutionBinding> {
+  check(resolved: ResolvedTurnSelection, policy: RunPolicy): Enforceability {
     const record = resolved.instanceId === PI_DRIVER_ID ? undefined : this.recordOrUndefined(resolved.instanceId)
+    const caps = record ? this.capsFor(record, policy.authority?.kind === 'definition') : resolved.caps
+    const spendModel = hasSpendLimit(policy) ? record?.runtime.spendModel?.(resolved.model) : undefined
+    const verdict = checkPolicy(caps, policy, resolved.instanceId, spendModel, record ? this.policyOptions(record) : undefined)
+    // An agent definition names the provider that cannot hold it, for the editor and the run's error.
+    if (!verdict.ok && verdict.error.missing?.includes('toolControl') && (policy.origin === 'definition' || policy.origin === 'workflow')) {
+      const name = record ? this.displayName(record) : resolved.instanceId
+      return { ok: false, error: { ...verdict.error, message: `${name} can't enforce this agent's workspace and tool limits yet, so it can't run agent definitions. ${verdict.error.message}` } }
+    }
+    return verdict
+  }
+
+  async bind(resolved: ResolvedTurnSelection, input: BindInput): Promise<ExecutionBinding> {
+    const record = resolved.instanceId === PI_DRIVER_ID ? undefined : this.recordOrUndefined(resolved.instanceId)
+    // Nothing is admitted on an instance signed out in Mousse: no account check, no runtime start.
+    if (record) this.refuseSignedOut(record)
     const accountId = record ? await this.currentAccount(record) : undefined
     const counters = this.counters.get(resolved.instanceId)
     // The attempt runs on the caps of this moment, whatever the runtime reports meanwhile.
-    const caps = record ? this.recordCaps(record) : resolved.caps
+    const caps = record ? this.capsFor(record, input.policy?.authority?.kind === 'definition') : resolved.caps
+    const requested = normalizePermissionMode(input.permissionMode)
+    const { effective, supported } = this.resolvePermissionMode(record, caps, requested, input.cwd ?? undefined)
+    if (effective.refused) throw harnessAppError(permissionModeRefusal(effective.reason, supported, resolved.instanceId))
     const binary = record ? this.probes.get(record.instanceId)?.lastGood?.fingerprint : undefined
     // The model is fixed here: a runtime that resolves `default` itself runs the bound model on
     // dispatch, retry and recovery, whatever its listing says by then.
@@ -885,6 +1087,16 @@ export class Harness implements HarnessGateway {
       if (!concrete) harnessFail('model_unavailable', `${this.displayName(record)} has no models listed. Refresh models, then try again.`, record.instanceId)
       model = concrete
     }
+    const policy = freezePolicy({
+      ...input.policy,
+      mode: policyMode(input.mode),
+      // A caller's own approvals policy (a definition's, a bot's) wins; otherwise Full access is the
+      // agent approving its own tools and every other mode asks.
+      approvals: input.policy?.approvals ?? input.approvals ?? (effective.mode === 'full' ? 'grants' : 'ask'),
+      permissionMode: effective.mode,
+      ...(effective.mode !== requested ? { requestedPermissionMode: requested } : {}),
+      origin: input.origin ?? 'interactive'
+    })
     const binding: ExecutionBinding = {
       instanceId: resolved.instanceId,
       driver: resolved.driver,
@@ -894,14 +1106,44 @@ export class Harness implements HarnessGateway {
       ...(accountId ? { accountId } : {}),
       model,
       ...(input.effort ? { effort: input.effort } : {}),
-      policy: { mode: policyMode(input.mode), approvals: input.approvals ?? 'ask', origin: input.origin ?? 'interactive' },
+      policy,
+      ...(input.policy ? { policyDigest: policyDigest(policy) } : {}),
       caps: { ...caps },
       factsRevision: record ? this.facts.revision(record.instanceId) : 0,
       ...(binary ? { binary: { ...binary } } : {})
     }
     this.boundAccounts.set(binding, accountId ? { accountId } : {})
-    if (resolved.movedFrom) this.boundMoves.set(binding, resolved.movedFrom)
+    if (resolved.movedFrom)
+      this.boundMoves.set(binding, { from: resolved.movedFrom, ...(resolved.movedFromModel ? { model: { from: resolved.movedFromModel, to: resolved.model } } : {}) })
     return binding
+  }
+
+  nativeToolNames(instanceId: string, tools: readonly NeutralTool[]): { ok: true; names: string[] } | { ok: false; error: HarnessError & { code: 'policy_unenforceable' } } {
+    const record = this.record(instanceId)
+    const driver = record.driver
+    const mapped = mapNeutralTools(driver.nativeToolNames ? (neutral) => driver.nativeToolNames!(neutral, record.config) : undefined, tools)
+    if (mapped.ok) return mapped
+    const reason = `${this.displayName(record)} has no tool for ${mapped.unmapped.join(', ')}.`
+    return { ok: false, error: { code: 'policy_unenforceable', message: `This provider cannot enforce the requested restrictions (toolControl). ${reason}`, missing: ['toolControl'], reason, instanceId } }
+  }
+
+  checkPolicy(instanceId: string, policy: RunPolicy, model?: string): Enforceability {
+    let record: InstanceRecord
+    try {
+      record = this.record(instanceId)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return { ok: false, error: { code: 'policy_unenforceable', message, missing: ['toolControl'], reason: message, instanceId } }
+    }
+    const spendModel = model && hasSpendLimit(policy) ? record.runtime.spendModel?.(model) : undefined
+    return checkPolicy(this.recordCaps(record), policy, instanceId, spendModel, this.policyOptions(record))
+  }
+
+  private policyOptions(record: InstanceRecord): CheckPolicyOptions {
+    return {
+      hostApprovals: record.driver.botAuthority?.(record.config) === true,
+      ...(this.options.botRuntimeGaps ? { botRuntimeGaps: this.options.botRuntimeGaps } : {})
+    }
   }
 
   selectionOf(binding: ExecutionBinding): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'> {
@@ -960,12 +1202,15 @@ export class Harness implements HarnessGateway {
       if (!state.result.timedOut) state.lastGood = state.result
       if (!this.stopped && !state.probing) this.changed(record.instanceId, { legacy: false })
     }
+    // Signed out: no account to share with another instance any more.
+    if (reading.state === 'signed_out' || reading.state === 'expired') delete state.fingerprint
     return reading.state === 'signed_in' ? this.noteSubject(record, reading.subject) : undefined
   }
 
   /** Records the account `subject` names; a different one than last time moves the generation on. */
   private noteSubject(record: InstanceRecord, subject: string | undefined): string | undefined {
     if (!subject) return undefined
+    this.probeState(record.instanceId).fingerprint = this.counters.accountFingerprint(subject)
     const accountId = this.counters.accountIdentity(record.env.homeId, subject)
     this.counters.noteAccount(record.instanceId, accountId)
     return accountId
@@ -984,7 +1229,7 @@ export class Harness implements HarnessGateway {
       try {
         const record = this.record(instanceId)
         const llmProvider = legacyProviderForInstance(instanceId, entry)
-        if (llmProvider && record.runtime.configured() && !ids.includes(llmProvider)) ids.push(llmProvider)
+        if (llmProvider && !this.isSignedOut(record) && record.runtime.configured() && !ids.includes(llmProvider)) ids.push(llmProvider)
       } catch {
         // An instance whose driver is missing offers nothing.
       }
@@ -1030,21 +1275,43 @@ export class Harness implements HarnessGateway {
     const result = (async () => {
       let outcome: 'ok' | 'aborted' | 'failed' = 'failed'
       let minted: ReturnType<Harness['mintBridge']>
-      // A count limit travels as the run's budget; only a `hard` runtime passes admission with one.
-      // The record is taken before admission, so a first attempt that is refused still leaves one.
-      const limits = countLimitsOf(spec.binding.policy)
-      const counted = limits ? this.runCounters.acquire(spec.input.runId, limits, spec.counters, { laterAttempt: (spec.attemptOrdinal ?? 1) > 1 }) : undefined
+      // Count and spend limits travel as the run's budget; only a `hard` (and, for spend, `reserved`)
+      // runtime passes admission with them. The record is taken before admission, so a first attempt
+      // that is refused still leaves one.
+      const limits = budgetLimitsOf(spec.binding.policy)
+      const counted = limits ? this.runCounters.acquire(spec.input.runId, limits, spec.counters, { laterAttempt: (spec.attemptOrdinal ?? 1) > 1, ...(spec.spend ? { spend: spec.spend } : {}) }) : undefined
       let signal = spec.input.signal
       try {
+        // A bot policy runs only with its bot authority, from the turn's app context: the policy's
+        // marker alone is not an authority, and a bot authority never rides on another policy.
+        const botPolicy = spec.binding.policy.authority?.kind === 'bot'
+        if (botPolicy !== Boolean(spec.app?.bot))
+          throw harnessAppError({
+            code: 'policy_unenforceable',
+            message: botPolicy ? 'This bot turn has no bot authority, so it does not run.' : 'A bot authority needs its bot policy.',
+            reason: botPolicy ? 'The binding names a bot authority that the turn does not carry.' : 'The turn carries a bot authority under a policy that is not for a bot.',
+            missing: ['toolControl'],
+            instanceId: spec.binding.instanceId
+          })
         await this.admitTurn(record, spec, entry)
         // Admission awaits; the fence is checked again right before the runtime is reached.
         this.refuseStopped(record, entry)
         signal = AbortSignal.any([spec.input.signal, entry.cancel.signal])
-        const input: TurnInput = { ...spec.input, signal }
+        // A wall-clock budget (a bot dispatch's deadline) stops the attempt when it runs out.
+        const wallMs = spec.binding.policy.budget?.maxWallMs
+        if (wallMs !== undefined) signal = AbortSignal.any([signal, AbortSignal.timeout(Math.max(0, wallMs))])
+        const input: TurnInput = {
+          ...spec.input,
+          signal,
+          ...(spec.session ? { session: spec.session } : {}),
+          ...(spec.instructions ? { instructions: { ...spec.instructions } } : {})
+        }
         minted = this.mintBridge(record, spec)
         // Approvals other than `ask` are answered by the turn's bridge: a turn without one would
-        // ask the user after all, so it does not run.
-        if (!minted && spec.binding.policy.approvals !== 'ask')
+        // ask the user after all, so it does not run. (`grants` under Full access is the permission
+        // mode's own: the runtimes allow without asking, no bridge is needed.)
+        const policy = spec.binding.policy
+        if (!minted && policy.approvals !== 'ask' && !(policy.approvals === 'grants' && policy.permissionMode === 'full'))
           throw harnessAppError({
             code: 'policy_unenforceable',
             message: `This turn cannot refuse or pre-grant tool approvals on ${this.displayName(record)}: it has no turn bridge.`,
@@ -1054,13 +1321,17 @@ export class Harness implements HarnessGateway {
         // The definition authority comes only from the app context (one source for every tool).
         const base: AdapterHost = { ...spec.host }
         delete base.definition
+        delete base.bot
         const host: AdapterHost = {
           ...base,
           ...(minted ? { bridge: minted.bridge } : {}),
           ...(spec.app?.definition ? { definition: spec.app.definition } : {}),
+          ...(spec.app?.bot ? { bot: spec.app.bot } : {}),
           ...(counted ? { budget: counted.budget } : {})
         }
-        const turn = await record.runtime.adapter.startTurn(input, sink, spec.control, host)
+        // An agent definition's turn runs where the instance runs definitions (`definitionAdapter`).
+        const adapter = spec.binding.policy.authority?.kind === 'definition' ? record.runtime.definitionAdapter ?? record.runtime.adapter : record.runtime.adapter
+        const turn = await adapter.startTurn(input, sink, spec.control, host)
         minted?.settle({ status: turn.aborted || signal.aborted ? 'aborted' : 'completed', ...(turn.drain ? { drain: turn.drain } : {}) })
         minted = undefined
         // The adapter ended because the instance was removed or turned off: the thread sees why.
@@ -1107,6 +1378,7 @@ export class Harness implements HarnessGateway {
     const runtime = record.runtime
     if (!runtime.oneShot) harnessFail('unsupported', `${this.displayName(record)} cannot run a single request.`, record.instanceId)
     if (record.stopped) throw this.stopError(record, record.stopped.reason)
+    this.refuseSignedOut(record)
     // The gateway's inactivity bound: every provider event restarts it; past it the request is aborted.
     const idle = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -1152,17 +1424,41 @@ export class Harness implements HarnessGateway {
     const draining = this.stopBarriers.get(record.instanceId)
     if (draining?.size) await Promise.all([...draining])
     this.refuseStopped(record, entry)
+    // Every attempt (first, retry, recovery, continuation) of a retired instance, or one signed out
+    // in Mousse, is refused; retired first, since signing in again would not help.
+    this.refuseRetired(record)
+    this.refuseSignedOut(record)
     if (input.instanceId !== binding.instanceId || input.model !== binding.model)
       harnessFail('protocol', `The turn names ${input.instanceId ?? 'no instance'}/${input.model} but its binding is ${binding.instanceId}/${binding.model}.`, binding.instanceId)
     // The runtime takes its permissions from the input's mode: it must be the binding's policy.
     if (policyMode(input.mode) !== binding.policy.mode)
       harnessFail('protocol', `The turn runs in ${policyMode(input.mode)} mode but its binding is ${binding.policy.mode} mode.`, binding.instanceId)
+    // A stored binding runs on the policy it was made with, or not at all.
+    if (binding.policyDigest !== undefined && binding.policyDigest !== policyDigest(binding.policy))
+      harnessFail('protocol', 'The policy of this turn is not the one its binding was made with.', binding.instanceId)
     // The caps the binding froze (bindings from before snapshots: the live ones).
     const caps = binding.caps ?? this.recordCaps(record)
     // Token and spend limits also need the model's own facts (an output cap, a price).
     const spendModel = hasSpendLimit(binding.policy) ? record.runtime.spendModel?.(binding.model) : undefined
-    const enforceable = checkPolicy(caps, binding.policy, binding.instanceId, spendModel)
+    const enforceable = checkPolicy(caps, binding.policy, binding.instanceId, spendModel, this.policyOptions(record))
     if (!enforceable.ok) throw harnessAppError(enforceable.error)
+    // The runtime takes its permission mode from the input: it must be the binding's.
+    if (binding.policy.permissionMode !== undefined && input.permissionMode !== undefined && input.permissionMode !== binding.policy.permissionMode)
+      harnessFail('protocol', `The turn runs in ${input.permissionMode} permission mode but its binding is ${binding.policy.permissionMode}.`, binding.instanceId)
+    // An instance that approves tools itself runs only in Full access, on every dispatch of a run.
+    const modeCheck = checkPermissionMode(caps, binding.policy, this.displayName(record), binding.instanceId)
+    if (!modeCheck.ok) throw harnessAppError(modeCheck.error)
+    // A definition's authority (roots, script rules, unattended policy, approvals), its own
+    // instructions and a session of its own are honoured only by a runtime whose tools Mousse
+    // controls exactly (PR 4 §4); any other refuses the turn, whatever its policy says.
+    if (binding.policy.authority?.kind === 'definition') this.admitDefinition(spec, caps, record)
+    if ((spec.app?.definition || spec.instructions || spec.session === 'ephemeral') && toolControlLevel(caps) !== 'exact')
+      throw harnessAppError({
+        code: 'policy_unenforceable',
+        message: `${this.displayName(record)} cannot hold an agent definition's workspace and tool limits yet.`,
+        missing: ['toolControl'],
+        instanceId: binding.instanceId
+      })
     const stale = (what: string) => harnessFail('binding_stale', `This run started before ${what} of this provider changed, so it cannot continue on it. Send the message again.`, binding.instanceId)
     if (record.env.homeId !== binding.homeId) stale('the home')
     if (this.counters.get(binding.instanceId).configRevision !== binding.configRevision) stale('the settings')
@@ -1183,14 +1479,51 @@ export class Harness implements HarnessGateway {
       previous.accountGeneration === binding.accountGeneration &&
       binding.accountId !== undefined && previous.accountId === binding.accountId && accountId === binding.accountId
     if (toolControlLevel(caps) === 'uncontrolled') this.toolControlNotice(record, input.threadId, previous)
-    const movedFrom = this.boundMoves.get(binding)
-    if (movedFrom) this.moveNotice(movedFrom, record, input.threadId)
+    const moved = this.boundMoves.get(binding)
+    if (moved) this.moveNotice(moved, record, input.threadId)
+    // A definition turn has a session of its own: the thread's native session is not its to drop.
+    if (binding.policy.authority?.kind === 'definition') return
     if (resumable || (!previous && binding.homeId === DEFAULT_HOME_ID && verified)) return
     try {
       record.runtime.forgetConversation?.(input.threadId)
     } catch (error) {
       console.warn('[harness] could not drop a native session', { instanceId: binding.instanceId, error: errorText(error) })
     }
+  }
+
+  /**
+   * A turn admitted under an agent definition's authority carries that definition (PR 4 §6): a
+   * definition or workflow origin, the registered authority the policy's digest names, the
+   * definition's own instructions and a session of its own. Where the instance's definition limits
+   * are `in_loop` (the waiver that admits its counts and spend), the turn also carries the host's
+   * loop binding, whose limits never exceed the admitted ones. Anything less is refused: a policy
+   * marker alone never selects an unbudgeted path.
+   */
+  private admitDefinition(spec: TurnSpec, caps: HarnessCaps, record: InstanceRecord): void {
+    const { policy } = spec.binding
+    const refuse = (what: string): never => {
+      throw harnessAppError({
+        code: 'policy_unenforceable',
+        message: `This turn does not carry the agent definition it was admitted for (${what}), so it does not run.`,
+        missing: ['toolControl'],
+        instanceId: record.instanceId
+      })
+    }
+    const origin = policy.origin ?? 'interactive'
+    if (origin !== 'definition' && origin !== 'workflow') refuse('its origin')
+    const authority = spec.app?.definition
+    if (!authority) refuse('its authority')
+    if (definitionAuthorityDigest(authority!) !== policy.authority?.digest) refuse('the authority its policy names')
+    if (spec.session !== 'ephemeral' || spec.instructions?.placement !== 'replace') refuse('its instructions and a session of its own')
+    if (definitionLimitsLevel(caps) !== 'in_loop') return
+    const loop = spec.host.definitionLoop
+    if (!loop) refuse('its loop')
+    const admitted = policy.budget ?? {}
+    const own = loop!.budget
+    const within = (limit: number | undefined, value: number | undefined) => limit === undefined || (value !== undefined && value <= limit)
+    if (!within(admitted.maxTurns, own.maxTurns) || !within(admitted.maxToolCalls, own.maxToolCalls) || !within(admitted.maxInputTokens, own.maxInputTokens) ||
+        !within(admitted.maxOutputTokens, own.maxOutputTokens) || !within(admitted.maxUsd, own.maxCostUsd))
+      refuse('limits within the admitted ones')
   }
 
   /** The first turn of a thread on an instance that approves tools itself says so, once. */
@@ -1209,19 +1542,54 @@ export class Harness implements HarnessGateway {
    * A thread pinned to a moved entry continues on the agent; its history is handed over
    * (`history_injected`), and the thread is told once.
    */
-  private moveNotice(movedFrom: string, record: InstanceRecord, threadId: string): void {
+  private moveNotice(moved: { from: string; model?: { from: string; to: string } }, record: InstanceRecord, threadId: string): void {
+    const movedFrom = moved.from
     const key = `moved|${threadId}|${movedFrom}`
     if (this.toolNotices.has(key)) return
     this.toolNotices.add(key)
     const from = this.recordOrUndefined(movedFrom)
+    // A pinned model the agent runs under another name, or not at all, is said.
+    const model = moved.model ? ` It runs ${this.modelName(record.instanceId, moved.model.to)} instead of ${moved.model.from}.` : ''
     try {
-      this.liveHost?.notice?.(threadId, `${from ? this.displayName(from) : movedFrom} moved to ${this.displayName(record)}. This chat continues there with its history handed over.`)
+      this.liveHost?.notice?.(threadId, `${from ? this.displayName(from) : movedFrom} moved to ${this.displayName(record)}. This chat continues there with its history handed over.${model}`)
     } catch (error) {
       console.warn('[harness] notice failed', errorText(error))
     }
   }
 
+  /**
+   * The mode a turn asking for `requested` runs in on this instance: the modes it supports come from
+   * its tool control and from what limits them right now (read at this moment, never cached with the
+   * runtime facts, so an edit to the user's Claude settings applies to the next turn).
+   */
+  private resolvePermissionMode(record: InstanceRecord | undefined, caps: HarnessCaps, requested: PermissionMode, cwd?: string): { effective: EffectivePermissionMode; supported: PermissionMode[] } {
+    const limits = record ? this.permissionLimitsOf(record, cwd) : undefined
+    const supported = supportedPermissionModes(caps, limits)
+    const agent = record ? this.displayName(record) : 'This provider'
+    return { effective: effectivePermissionMode(requested, supported, { agent, ...(limits ? { limits } : {}) }), supported }
+  }
+
+  previewPermissionMode(resolved: ResolvedTurnSelection, requested: PermissionMode, cwd?: string | null): EffectivePermissionMode {
+    const record = resolved.instanceId === PI_DRIVER_ID ? undefined : this.recordOrUndefined(resolved.instanceId)
+    return this.resolvePermissionMode(record, record ? this.recordCaps(record) : resolved.caps, requested, cwd ?? undefined).effective
+  }
+
+  /** What limits the instance's permission modes right now; a runtime that reports nothing is unlimited. */
+  private permissionLimitsOf(record: InstanceRecord, cwd?: string): PermissionLimits | undefined {
+    try {
+      return record.runtime.permissionLimits?.(cwd)
+    } catch (error) {
+      console.warn('[harness] could not read permission limits', { instanceId: record.instanceId, error: errorText(error) })
+      return undefined
+    }
+  }
+
   /** Capabilities of a record's instance at its last known version and current runtime facts. */
+  /** The caps a turn runs on: the instance's, or its definition caps for an agent definition's turn. */
+  private capsFor(record: InstanceRecord, definition: boolean): HarnessCaps {
+    return (definition && record.driver.definitionCaps?.(record.config)) || this.recordCaps(record)
+  }
+
   private recordCaps(record: InstanceRecord): HarnessCaps {
     return record.driver.caps(record.config, this.probes.get(record.instanceId)?.lastGood?.binary?.version, this.currentFacts(record.instanceId))
   }
@@ -1337,9 +1705,9 @@ export class Harness implements HarnessGateway {
     return this.interruptOn(this.refRecord(ref), ref)
   }
 
-  async forkSession(ref: ProviderRef, atTurnOrdinal: number): Promise<ProviderRef | null> {
+  async forkSession(ref: ProviderRef, atTurnOrdinal: number, target?: { threadId: string }): Promise<ProviderRef | null> {
     const adapter = this.refRecord(ref).runtime.adapter
-    return adapter.forkSession ? adapter.forkSession(ref, atTurnOrdinal) : null
+    return adapter.forkSession ? adapter.forkSession(ref, atTurnOrdinal, target) : null
   }
 
   async stopThread(threadId: string): Promise<'stopped' | 'not_active'> {
@@ -1378,9 +1746,13 @@ export class Harness implements HarnessGateway {
           instanceId: binding.instanceId,
           runId: input.runId,
           modeCeiling: app.modeCeiling,
+          accessLevel: app.accessLevel,
           binding: record.driver.mcpTurnBinding ?? 'rotate',
-          // A new runtime, a new epoch: driver, home, signed-in account and settings.
-          generation: [binding.driver, binding.homeId, binding.accountGeneration, binding.configRevision].join('|')
+          // A new runtime, a new epoch: driver, home, signed-in account and settings, and a caller's
+          // policy (a narrower grant must not keep the tool list of the last one). So is a different agent
+          // access level (SPEC §15.1): a runtime caches its tool list, so it takes the new level with a new
+          // bearer. The default level adds nothing, so a profile that never sets one is unchanged.
+          generation: [binding.driver, binding.homeId, binding.accountGeneration, binding.configRevision, ...(binding.policyDigest ? [binding.policyDigest] : []), ...(app.accessLevel && app.accessLevel !== 'lineage' ? [`access:${app.accessLevel}`] : [])].join('|')
         })
       } catch (error) {
         console.warn('Mousse MCP credential could not be minted; the turn runs without Mousse tools', {
@@ -1462,7 +1834,7 @@ export class Harness implements HarnessGateway {
     const current = this.records.get(instanceId)
     const driver = this.drivers.get(resolved.entry.driver)
     if (!driver) return harnessFail('unsupported', `No driver for ${resolved.entry.driver} (instance ${instanceId}).`, instanceId)
-    const config = driver.decodeConfig(resolved.entry.config)
+    const config = driver.decodeConfig(resolved.entry.config, instanceId)
     const key = recordKey(driver, this.counters.get(instanceId).configRevision, config)
     if (current && current.key === key) {
       current.entry = resolved.entry
@@ -1496,7 +1868,7 @@ export class Harness implements HarnessGateway {
   private build(instanceId: string, entry: ProviderInstanceConfig): InstanceRecord {
     const driver = this.drivers.get(entry.driver)
     if (!driver) return harnessFail('unsupported', `No driver for ${entry.driver} (instance ${instanceId}).`, instanceId)
-    const config = driver.decodeConfig(entry.config)
+    const config = driver.decodeConfig(entry.config, instanceId)
     const builtIn = isBuiltInInstance(instanceId, entry.driver)
     const stateDir = instanceStateDir(this.options.profileHome, instanceId)
     const revision = this.counters.get(instanceId).configRevision
@@ -1529,7 +1901,9 @@ export class Harness implements HarnessGateway {
       stateDir,
       questions: this.options.questions,
       findBinary: () => this.findBinary(record),
-      changed: () => this.changed(instanceId)
+      changed: () => this.changed(instanceId),
+      signedOut: () => this.signedOutInMousse(instanceId),
+      saveLaunch: async (patch) => void (await this.configure(instanceId, patch))
     })
     record.runtime.setLiveHost?.(this.liveHost)
     this.records.set(instanceId, record)
@@ -1637,6 +2011,29 @@ export class Harness implements HarnessGateway {
     })
   }
 
+  private async usage(scope: ProviderScope): Promise<ProviderUsage[]> {
+    const entries = this.instanceMap.list()
+    const ids = Object.keys(entries).filter((instanceId) => {
+      const record = this.recordOrUndefined(instanceId)
+      return record?.runtime.usage && !record.stopped && this.scopes.enabled(instanceId, entries[instanceId]!.enabled, scope).effective && record.runtime.configured()
+    })
+    return Promise.all(ids.map(async (instanceId): Promise<ProviderUsage> => {
+      const record = this.record(instanceId, { allowDisabled: true })
+      const named = { id: instanceId, label: this.displayName(record) }
+      const controller = new AbortController()
+      // A runtime that ignores the signal still cannot hold the page up past the deadline.
+      const late = new Promise<never>((_, reject) => controller.signal.addEventListener('abort', () => reject(new Error('The usage did not arrive in time.')), { once: true }))
+      const timer = setTimeout(() => controller.abort(), USAGE_READ_MS)
+      try {
+        return { ...named, ...(await Promise.race([record.runtime.usage!(controller.signal), late])) }
+      } catch (error) {
+        return { ...named, status: 'error', windows: [], message: controller.signal.aborted ? 'The usage did not arrive in time.' : errorText(error) }
+      } finally {
+        clearTimeout(timer)
+      }
+    }))
+  }
+
   /**
    * Single-flight probe of one instance; a timeout keeps the last good values (stale). `handshake`
    * (Add, Recheck, after install) also runs the runtime's start-up check, which records its facts.
@@ -1649,10 +2046,13 @@ export class Harness implements HarnessGateway {
     const run = async () => {
       await Promise.race([this.shellPath, new Promise((resolve) => setTimeout(resolve, SHELL_PATH_WAIT_MS).unref?.())])
       const record = this.record(instanceId, { allowDisabled: true })
-      const override = record.builtIn ? record.runtime.launch?.().binaryPath : record.config.binaryPath
+      const override = record.config.binaryPath
+      // Signed out in Mousse: reported as such without asking the runtime (no CLI status check).
+      const signedOut = this.isSignedOut(record)
       let result = await probeInstance({
         driver: record.driver,
         runtime: record.runtime,
+        ...(signedOut ? { auth: async () => this.signedOutReading(record) } : {}),
         env: { ...record.env, searchPath: [...this.searchPath, ...(record.env.driverSearchPath ?? [])] },
         ...(override ? { override } : {}),
         config: record.config,
@@ -1714,16 +2114,25 @@ export class Harness implements HarnessGateway {
     const installing = Boolean(operation) || runtime.installState?.().installing === true
     const installProgress = operation?.progress ?? (runtime.installState?.().progress ? { message: runtime.installState!().progress! } : undefined)
     const managed = runtime.managed?.()
-    const auth = shown?.auth ?? { state: 'unknown' as const }
+    // Signed out in Mousse wins over a check that started before the sign-out.
+    const auth = this.isSignedOut(record) ? this.signedOutReading(record) : shown?.auth ?? { state: 'unknown' as const }
     const update = this.updateFor(record)
+    const settingsNotice = this.settingsNotices.get(instanceId)
+    const sameAccount = auth.state === 'signed_in' ? this.sameAccountNote(record) : undefined
+    const dropped = this.droppedEnvNote(record)
     const prefs = this.prefs.get(instanceId)
     const listed = runtime.models()
     const models = state?.models
     // The runtime keeps the age of the list it stores; a runtime without that knows this run's refreshes.
     const refreshedAt = runtime.modelsRefreshedAt ? runtime.modelsRefreshedAt() : models?.refreshedAt
+    // Recomputed on every snapshot: the user may edit their Claude settings at any time.
+    const limits = this.permissionLimitsOf(record)
     const signInStep: NextStep | undefined = auth.state === 'signed_out' || auth.state === 'expired'
       ? { action: 'sign_in', label: auth.state === 'expired' ? 'Sign in again' : 'Sign in', ...(auth.signInCommand ? { command: auth.signInCommand } : {}) }
       : undefined
+    // A retired entry runs nothing and keeps asking to move (it offers no sign-in) until it moved.
+    const retired = retiredPrompt(driver, instanceId, record.config)
+    const nextStep: NextStep | undefined = retired ? { action: 'move', label: 'Move', title: retired.title, detail: retired.detail } : signInStep
     return {
       instanceId,
       driver: driver.kind,
@@ -1740,33 +2149,67 @@ export class Harness implements HarnessGateway {
         ...(managed?.checksum ? { checksum: managed.checksum } : {}),
         ...(managed?.advisory ? { advisory: managed.advisory } : {})
       },
-      runs: shown?.runs ?? { state: 'unknown' },
+      runs: retired ? { state: 'no', message: `${retired.title}. ${retired.detail}` } : shown?.runs ?? { state: 'unknown' },
       auth: {
         state: auth.state,
         // Keyed by its salted hash: the vendor's account id never leaves the gateway.
         ...(auth.account?.label ? { account: { id: auth.subject ? this.counters.accountIdentity(record.env.homeId, auth.subject) : 'unknown', label: auth.account.label } } : {}),
         ...(auth.methodLabel ?? driver.methodLabel ? { methodLabel: auth.methodLabel ?? driver.methodLabel } : {}),
-        ...(auth.message ? { message: auth.message } : {}),
+        ...(sameAccount || dropped || auth.message ? { message: [auth.message, sameAccount, dropped].filter(Boolean).join(' ') } : {}),
         canSignOut: Boolean(runtime.signOut) && (auth.state === 'signed_in' || auth.state === 'expired') && (this.ownsSignIn(record) || auth.ownedByMousse === true),
-        ...(runtime.signIn && auth.canSignIn ? { canSignIn: true } : {})
+        ...(runtime.signIn && auth.canSignIn ? { canSignIn: true } : {}),
+        ...(runtime.adoptApiKey ? { canTakeKey: true } : {}),
+        ...(auth.credential ? { credential: auth.credential } : {})
       },
       compatibility: shown?.compatibility ?? compatibilityOf(driver, undefined),
       ...(update ? { update } : {}),
       ...(shown?.binary ? { binary: shown.binary } : {}),
       caps: driver.caps(config, shown?.binary?.version, this.currentFacts(instanceId)),
+      ...(limits ? { permissionLimits: limits } : {}),
       config: this.configView(record),
+      ...this.engineView(record),
       models: {
-        entries: modelsWithPrefs(listed, prefs),
+        // A retired entry offers no model to choose, custom ones included (its prefs are kept).
+        entries: retired ? [] : modelsWithPrefs(listed, prefs),
         source: listed.length ? (models?.live || (runtime.modelsRefreshedAt && refreshedAt) ? 'live' : 'cached') : prefs.custom.length ? 'manifest' : 'none',
-        canAddCustom: driver.customModels,
+        canAddCustom: driver.customModels && !retired,
         ...(refreshedAt ? { refreshedAt } : {}),
         ...(models?.error ? { error: models.error } : {})
       },
       ...(latest ? { checkedAt: latest.checkedAt } : {}),
       stale,
       ...(state?.lastGood ? { lastGoodAt: state.lastGood.checkedAt } : {}),
-      ...(signInStep ? { nextStep: signInStep } : {})
+      ...(nextStep ? { nextStep } : {}),
+      ...(settingsNotice ? { settingsNotice } : {})
     }
+  }
+
+  /**
+   * Variables stored on an instance with its own home that its processes no longer get (they say
+   * where the sign-in lives or pick a credential), so the editor's list does not mislead.
+   */
+  private droppedEnvNote(record: InstanceRecord): string | undefined {
+    if (!record.env.home || !record.config.env) return undefined
+    const names = Object.keys(record.config.env).filter((name) => reservedEnvName(record.driver.kind, name))
+    return names.length
+      ? `Not used: ${names.join(', ')}. This entry signs in to its own account, so Mousse does not pass these variables to it; remove them, or add an entry on your own setup to run with a key.`
+      : undefined
+  }
+
+  /**
+   * "Same account as <name>." when another enabled instance of the driver is signed in to the same
+   * account (a second sign-in that picked the account the first one has). Undefined otherwise.
+   */
+  private sameAccountNote(record: InstanceRecord): string | undefined {
+    const mine = this.probes.get(record.instanceId)?.fingerprint
+    if (!mine) return undefined
+    const names: string[] = []
+    for (const [otherId, entry] of Object.entries(this.instanceMap.list())) {
+      if (otherId === record.instanceId || entry.driver !== record.driver.kind || !entry.enabled) continue
+      const other = this.records.get(otherId)
+      if (other && this.probes.get(otherId)?.fingerprint === mine) names.push(this.displayName(other))
+    }
+    return names.length ? `Same account as ${names.join(' and ')}.` : undefined
   }
 
   /**
@@ -1802,18 +2245,27 @@ export class Harness implements HarnessGateway {
 
   /**
    * Whether Mousse owns the instance's sign-in: a private home, a Mousse-managed agent, or a pi
-   * provider key Mousse stores. The built-in CLIs use the user's own terminal login.
+   * provider key Mousse stores, or a driver whose sign-in is always Mousse's (Antigravity's Google
+   * session, whichever executable runs). The built-in CLIs use the user's own terminal login.
    */
   private ownsSignIn(record: InstanceRecord): boolean {
-    if (record.entry.driver === 'pi') return true
+    if (record.entry.driver === 'pi' || record.driver.ownsSignIn) return true
     if (record.env.home) return true
-    return Boolean(record.runtime.managed?.()) && !record.runtime.launch?.().binaryPath
+    return Boolean(record.runtime.managed?.()) && !record.config.binaryPath
   }
 
-  /** The settings the editor shows: built-in instances read launch settings from `settings.json`. */
+  /** The engine of a driver with several (`pi`): the user's stored choice and the one in effect. */
+  private engineView(record: InstanceRecord): { engine?: InstanceEngine } {
+    const stored = record.entry.config
+    const engine = record.driver.engine?.(record.instanceId, stored)
+    if (!engine) return {}
+    const setting = stored?.engine === 'rpc' || stored?.engine === 'legacy' ? stored.engine : undefined
+    return { engine: { ...(setting ? { setting } : {}), effective: engine.effective, switchable: engine.switchable } }
+  }
+
+  /** The settings the editor shows, all from the instance config. */
   private configView(record: InstanceRecord): InstanceConfigView {
-    const launch = record.builtIn ? record.runtime.launch?.() : undefined
-    const source = launch ?? record.config
+    const source = record.config
     return {
       ...(record.config.displayName ? { displayName: record.config.displayName } : {}),
       home: record.env.home ? 'private' : 'default',
@@ -1846,6 +2298,7 @@ export class Harness implements HarnessGateway {
     const driver = this.drivers.get(input.driver)
     if (!driver) return harnessFail('unsupported', `Mousse cannot add a ${input.driver} instance.`)
     const patch = input.config ?? {}
+    if (patch.engine !== undefined) return harnessFail('unsupported', `${driver.label} takes its engine under Advanced once added.`)
     const entries = this.instanceMap.list()
     const hasOne = Object.values(entries).some((entry) => entry.driver === driver.kind)
     if (hasOne && !driver.multiInstance) return harnessFail('unsupported', `${driver.label} supports one instance in this version.`)
@@ -1864,16 +2317,52 @@ export class Harness implements HarnessGateway {
     if (!useOwnSetup) {
       // An id whose state directory is still on disk (a removal that could not delete it) is taken.
       const taken = new Set(Object.keys(entries))
-      instanceId = addedInstanceId(driver.kind, patch.displayName ?? undefined, taken)
+      instanceId = addedInstanceId(driver.kind, patch.displayName ?? undefined, taken, input.slug)
       while (existsSync(instanceStateDir(this.options.profileHome, instanceId))) {
         taken.add(instanceId)
-        instanceId = addedInstanceId(driver.kind, patch.displayName ?? undefined, taken)
+        instanceId = addedInstanceId(driver.kind, patch.displayName ?? undefined, taken, input.slug)
       }
     }
     const config = useOwnSetup
-      ? this.applyConfigPatch({}, { ...(patch.displayName ? { displayName: patch.displayName } : {}), ...(patch.setup ? { setup: patch.setup } : {}) }, driver)
+      ? this.applyConfigPatch({}, {
+          ...(patch.displayName ? { displayName: patch.displayName } : {}),
+          ...(patch.setup ? { setup: patch.setup } : {}),
+          ...(patch.binaryPath ? { binaryPath: patch.binaryPath } : {}),
+          ...(patch.args?.length ? { args: patch.args } : {}),
+          ...(patch.env && Object.keys(patch.env).length ? { env: patch.env } : {})
+        }, driver)
       : this.applyConfigPatch({ home: driver.privateHome && rule !== 'forbidden' ? 'private' : 'default' }, patch, driver)
-    this.instanceMap.setEntry(instanceId, { driver: driver.kind, enabled: true, config })
+    const entry: ProviderInstanceConfig = { driver: driver.kind, enabled: true, config }
+    // An instance with a vendor mirror starts signed in, takes the launch settings its vendor file
+    // still holds (a re-added built-in keeps them, as the seed does) unless the add set them, and
+    // records the vendor tuple it found in the same write (the marker). When the file cannot be read
+    // now, no marker is written, and the first start that reads it copies the same values.
+    const record = driver.mirrorsVendorFile ? this.build(instanceId, entry) : undefined
+    const mirror = record?.runtime.vendorMirror
+    const vendor = mirror?.read()
+    if (mirror) {
+      if (vendor && vendor !== 'unreadable') {
+        const copied = tupleConfig(vendor, mirror.fields)
+        for (const field of unsetFields(config, mirror.fields)) if (field !== 'signedOut') config[field] = copied[field]
+        config[MIRROR_MARKER_KEY] = mirrorHash(vendor)
+      }
+      config.signedOutInMousse = false
+    }
+    try {
+      this.instanceMap.setEntry(instanceId, entry)
+    } catch (error) {
+      if (record) {
+        this.records.delete(instanceId)
+        void Promise.resolve(record.runtime.stop()).catch(() => {})
+      }
+      throw error
+    }
+    if (record) this.noteStored(record, config)
+    // The vendor file holds other values than the new entry's (its sign-out, or launch settings the add set): mirror them.
+    if (record && mirror && vendor && vendor !== 'unreadable' && mirrorHash(instanceTuple(config, mirror.fields)) !== mirrorHash(vendor)) {
+      const failure = this.mirrorWrite(record, config)
+      if (failure) console.warn('[harness] could not mirror a new instance to its settings file', { instanceId, error: errorText(failure) })
+    }
     mkdirSync(instanceStateDir(this.options.profileHome, instanceId), { recursive: true, mode: 0o700 })
     this.changed(instanceId)
     void this.probe(instanceId, true, { handshake: true })
@@ -1946,41 +2435,302 @@ export class Harness implements HarnessGateway {
     if (record.runtime.pinned && (patch.binaryPath !== undefined || patch.args !== undefined || patch.env !== undefined))
       harnessFail('unsupported', `${this.displayName(record)} runs the Codex Mousse installed for it, with its own settings.`, instanceId)
     const homeRule = privateHomeRule(record.driver, record.config)
+    // A sign-in that decides the home (Claude Code on an API key) stays the one the entry was added
+    // with: the user's own setup never turns into a key entry, nor the other way round.
+    if (patch.loginMethod !== undefined && homeRule !== privateHomeRule(record.driver, { ...record.config, loginMethod: patch.loginMethod || undefined }))
+      harnessFail('unsupported', `${this.displayName(record)} keeps the sign-in it was added with. Add another entry for the other one.`, instanceId)
     if (patch.home === 'private' && homeRule === 'forbidden')
       harnessFail('unsupported', `${this.displayName(record)} cannot use a separate home.`, instanceId)
     if (patch.home === 'default' && homeRule === 'required')
       harnessFail('unsupported', `${this.displayName(record)} always runs in a home of its own.`, instanceId)
-    const stored = record.entry.config ?? {}
-    if (record.builtIn) {
-      // Built-in vendor instances keep their launch settings in their own settings.json.
-      const launch: CliProviderConfigPatch = {
-        ...(patch.binaryPath !== undefined ? { binaryPath: patch.binaryPath } : {}),
-        ...(patch.args !== undefined ? { args: patch.args } : {}),
-        ...(patch.env !== undefined ? { env: patch.env } : {})
-      }
-      if (Object.keys(launch).length) {
-        if (!record.runtime.setLaunch) harnessFail('unsupported', 'This provider has no launch settings.', instanceId)
-        try {
-          await record.runtime.setLaunch(launch)
-        } catch (error) {
-          harnessFail('override_not_found', errorText(error), instanceId)
-        }
-      }
-      const config = { ...stored }
-      if (patch.displayName !== undefined) setOrDelete(config, 'displayName', patch.displayName?.trim() || undefined)
-      if (patch.loginMethod !== undefined) setOrDelete(config, 'loginMethod', patch.loginMethod || undefined)
-      this.instanceMap.setEntry(instanceId, { ...record.entry, config })
-    } else {
-      const config = this.applyConfigPatch(stored, patch, record.driver)
-      this.instanceMap.setEntry(instanceId, { ...record.entry, config })
+    // Only a provider that can run on Pi's agent switches engines (Advanced → Engine).
+    if (patch.engine !== undefined && !record.driver.engine?.(instanceId, record.entry.config ?? {}).switchable)
+      harnessFail('unsupported', `${this.displayName(record)} runs on one engine only.`, instanceId)
+    if (patch.useOlderSettings) return this.useOlderSettings(record)
+    const launch: CliProviderConfigPatch = {
+      ...(patch.binaryPath !== undefined ? { binaryPath: patch.binaryPath } : {}),
+      ...(patch.args !== undefined ? { args: patch.args } : {}),
+      ...(patch.env !== undefined ? { env: patch.env } : {})
     }
+    // An executable that cannot run, or args the runtime cannot pass: nothing is saved.
+    if (Object.keys(launch).length && record.runtime.validateLaunch) {
+      try {
+        record.runtime.validateLaunch(launch)
+      } catch (error) {
+        harnessFail('override_not_found', errorText(error), instanceId)
+      }
+    }
+    // The three-step write: the instance first, then its vendor mirror, then the marker. A write
+    // that stops between them is finished at the next start (`reconcileRow`).
+    const config = this.applyConfigPatch(record.entry.config ?? {}, patch, record.driver)
+    // A change that leaves the mirrored values as they were, on an instance in step with its vendor
+    // file (a new name, a sign-in method), has nothing to mirror, whatever state that file is in.
+    const fields = record.runtime.vendorMirror?.fields ?? []
+    const mirrored = mirrorHash(instanceTuple(config, fields))
+    const unchanged = mirrored === mirrorHash(instanceTuple(record.entry.config, fields)) && storedMarker(config) === mirrored
+    this.storeConfig(record, config)
+    this.settingsNotices.delete(instanceId)
     // A new name changes nothing a turn runs with: the runtime and its sessions stay.
-    if (Object.keys(patch).some((key) => key !== 'displayName')) {
+    const runChanged = Object.keys(patch).some((key) => key !== 'displayName')
+    if (runChanged) {
       this.counters.bumpConfig(instanceId)
-      void this.probe(instanceId, true)
+      if (Object.keys(launch).length) record.runtime.launchChanged?.()
     }
+    const failure = unchanged ? undefined : this.mirrorWrite(record, config)
+    if (runChanged) void this.probe(instanceId, true)
+    this.changed(instanceId)
+    if (failure)
+      harnessFail('protocol', `Saved, but ${this.displayName(record)}'s own settings file was not updated: ${errorText(failure)} Older Mousse versions keep the previous settings until it is.`, instanceId)
+    return this.snapshot(instanceId, { kind: 'device' })
+  }
+
+  /**
+   * "Use the older settings": the vendor file's values (an older Mousse changed them) replace the
+   * instance's, and the marker records them. The vendor file is not written.
+   */
+  private useOlderSettings(record: InstanceRecord): InstanceSnapshot {
+    const { instanceId } = record
+    const mirror = record.runtime.vendorMirror
+    if (!mirror) return harnessFail('unsupported', `${this.displayName(record)} has no older settings to use.`, instanceId)
+    const vendor = mirror.read()
+    if (vendor === 'unreadable') return harnessFail('protocol', `${this.displayName(record)}'s own settings file cannot be read.`, instanceId)
+    const stored = record.entry.config ?? {}
+    const before = instanceTuple(stored, mirror.fields)
+    this.storeConfig(record, { ...stored, ...tupleConfig(vendor, mirror.fields), [MIRROR_MARKER_KEY]: mirrorHash(vendor) })
+    this.settingsNotices.delete(instanceId)
+    this.appliedVendorTuple(record, before, vendor)
+    void this.probe(instanceId, true)
     this.changed(instanceId)
     return this.snapshot(instanceId, { kind: 'device' })
+  }
+
+  /** The instance took the vendor file's tuple: what runs and, when the sign-out moved, the account move on. */
+  private appliedVendorTuple(record: InstanceRecord, before: MirrorTuple, vendor: MirrorTuple): void {
+    const fields = record.runtime.vendorMirror?.fields ?? []
+    const changed = changedFields(before, vendor, fields)
+    if (!changed.length) return
+    this.counters.bumpConfig(record.instanceId)
+    if (changed.some((field) => field !== 'signedOut')) record.runtime.launchChanged?.()
+    if (changed.includes('signedOut')) this.counters.bumpAccount(record.instanceId)
+  }
+
+  // -- Instance config and its vendor mirror ------------------------------------------------------
+
+  /** Whether the instance is signed out in Mousse (its config's flag). */
+  signedOutInMousse(instanceId: string): boolean {
+    const record = this.records.get(instanceId) ?? this.recordOrUndefined(instanceId)
+    return record ? this.isSignedOut(record) : false
+  }
+
+  /** The instance's launch settings, from its config: what its vendor service starts with. */
+  launchFor(instanceId: string): StoredCliConfig {
+    const config = (this.records.get(instanceId) ?? this.recordOrUndefined(instanceId))?.config
+    if (!config) return {}
+    return {
+      ...(config.binaryPath ? { binaryPath: config.binaryPath } : {}),
+      ...(config.args?.length ? { args: [...config.args] } : {}),
+      ...(config.env && Object.keys(config.env).length ? { env: { ...config.env } } : {})
+    }
+  }
+
+  private isSignedOut(record: InstanceRecord): boolean {
+    return record.config.signedOutInMousse === true
+  }
+
+  /** What the card shows for an instance signed out in Mousse. */
+  private signedOutReading(record: InstanceRecord): AuthReading {
+    const methodLabel = record.driver.methodLabel
+    return {
+      state: 'signed_out',
+      ...(methodLabel ? { methodLabel } : {}),
+      message: this.ownsSignIn(record) ? 'Signed out in Mousse.' : `Signed out in Mousse. Your ${record.driver.label} sign-in on this computer is unchanged.`
+    }
+  }
+
+  /** Dispatch on an instance signed out in Mousse is refused before anything starts. */
+  private refuseSignedOut(record: InstanceRecord): void {
+    if (this.isSignedOut(record))
+      harnessFail('signed_out', `${this.displayName(record)} is signed out in Mousse. Sign in again in Settings → Providers.`, record.instanceId)
+  }
+
+  /** An entry a Mousse update retired runs nothing until it moved (a binding from before included). */
+  private refuseRetired(record: InstanceRecord): void {
+    const prompt = retiredPrompt(record.driver, record.instanceId, record.config)
+    if (prompt) throw retiredError(this.displayName(record), prompt, record.instanceId)
+  }
+
+  /** `refuseRetired` for an instance id, turned off or not (an unknown id is left to the caller). */
+  private refuseRetiredId(instanceId: string): void {
+    const entry = this.instanceMap.get(instanceId)
+    const driver = entry && this.drivers.get(entry.driver)
+    if (!driver?.retired?.(instanceId)) return
+    const record = this.recordOrUndefined(instanceId)
+    if (record) this.refuseRetired(record)
+  }
+
+  /** Stores the instance's config (one write) and keeps the record's copy in step with it. */
+  private storeConfig(record: InstanceRecord, config: Record<string, unknown>): void {
+    const entry = { ...(this.instanceMap.list()[record.instanceId] ?? record.entry), config }
+    this.instanceMap.setEntry(record.instanceId, entry)
+    this.noteStored(record, config, entry.enabled)
+  }
+
+  private noteStored(record: InstanceRecord, config: Record<string, unknown>, enabled = record.entry.enabled): void {
+    record.entry = { ...record.entry, enabled, config }
+    record.config = record.driver.decodeConfig(config, record.instanceId)
+    // A newer runtime of the instance reads the same config.
+    const current = this.records.get(record.instanceId)
+    if (current && current !== record) {
+      current.entry = { ...current.entry, enabled, config }
+      current.config = current.driver.decodeConfig(config, current.instanceId)
+    }
+  }
+
+  /** The instance's stored config now (a sign-in may have saved a launch setting meanwhile). */
+  private storedConfig(record: InstanceRecord): Record<string, unknown> {
+    return { ...(this.instanceMap.list()[record.instanceId]?.config ?? record.entry.config ?? {}) }
+  }
+
+  /**
+   * Steps 2 and 3 of a change: the vendor mirror gets the instance's tuple, then the marker records
+   * it. Returns the failure of step 2 (the vendor file cannot be saved): the marker then stays, and
+   * the next start finishes the write. Nothing to do for an instance without a mirror, or when both
+   * sides already hold the tuple.
+   */
+  private mirrorWrite(record: InstanceRecord, config: Record<string, unknown>): unknown {
+    const mirror = record.runtime.vendorMirror
+    if (!mirror) return undefined
+    const tuple = instanceTuple(config, mirror.fields)
+    const hash = mirrorHash(tuple)
+    const vendor = mirror.read()
+    if (storedMarker(config) === hash && vendor !== 'unreadable' && mirrorHash(vendor) === hash) return undefined
+    try {
+      mirror.write(tuple)
+    } catch (error) {
+      return error
+    }
+    try {
+      this.storeConfig(record, { ...config, [MIRROR_MARKER_KEY]: hash })
+    } catch (error) {
+      // Both sides hold the tuple; the next start records the marker (in sync).
+      console.warn('[harness] could not record a mirrored write', { instanceId: record.instanceId, error: errorText(error) })
+    }
+    return undefined
+  }
+
+  /**
+   * Steps 2 and 3 for a sign-out or reconnect. While a conflict with an older version's settings
+   * is open, only the flag goes to the vendor file and the marker stays: the older values survive
+   * for "Use the older settings", and the next start still reports the conflict.
+   */
+  private mirrorSignOut(record: InstanceRecord, config: Record<string, unknown>): unknown {
+    const mirror = record.runtime.vendorMirror
+    if (!mirror || this.settingsNotices.get(record.instanceId)?.kind !== 'older_conflict') return this.mirrorWrite(record, config)
+    if (!mirror.fields.includes('signedOut')) return undefined
+    const vendor = mirror.read()
+    if (vendor === 'unreadable') return new Error("The provider's own settings file cannot be read.")
+    const { signedOut: _previous, ...launch } = vendor
+    try {
+      mirror.write({ ...launch, ...(config.signedOutInMousse === true ? { signedOut: true as const } : {}) })
+    } catch (error) {
+      return error
+    }
+    return undefined
+  }
+
+  /** Sets or clears the instance's sign-out flag with the three-step write. */
+  private setSignedOut(record: InstanceRecord, signedOut: boolean): unknown {
+    const config = { ...this.storedConfig(record), signedOutInMousse: signedOut }
+    this.storeConfig(record, config)
+    return this.mirrorSignOut(record, config)
+  }
+
+  /**
+   * Signs an instance signed out in Mousse in again: the flag clears (and its mirror), and its
+   * account moves on so nothing bound before the sign-out resumes.
+   */
+  private async reconnect(record: InstanceRecord): Promise<void> {
+    const failure = this.setSignedOut(record, false)
+    this.counters.bumpAccount(record.instanceId)
+    if (failure) console.warn('[harness] could not mirror a sign-in to the settings file', { instanceId: record.instanceId, error: errorText(failure) })
+    this.options.onProvidersChanged?.()
+  }
+
+  /**
+   * At start, before any probe: every instance with a vendor mirror is brought in step with it
+   * (`reconcileRow`). An unreadable vendor file is left alone (its card shows the error); an
+   * unreadable instance map skips everything until the next start.
+   */
+  private reconcileVendorMirrors(): void {
+    let entries: Record<string, ProviderInstanceConfig>
+    try {
+      entries = this.instanceMap.list()
+    } catch {
+      return
+    }
+    if (this.instanceMap.storeError()) return
+    for (const [instanceId, entry] of Object.entries(entries)) {
+      if (!this.drivers.get(entry.driver)?.mirrorsVendorFile) continue
+      try {
+        this.reconcile(this.record(instanceId, { allowDisabled: true }))
+      } catch (error) {
+        console.warn('[harness] could not reconcile an instance with its settings file', { instanceId, error: errorText(error) })
+      }
+    }
+  }
+
+  private reconcile(record: InstanceRecord): void {
+    const mirror = record.runtime.vendorMirror
+    if (!mirror) return
+    const vendor = mirror.read()
+    if (vendor === 'unreadable') return
+    const { fields } = mirror
+    const vendorHash = mirrorHash(vendor)
+    let stored = { ...(record.entry.config ?? {}) }
+    const marker = storedMarker(stored)
+    let instance = instanceTuple(stored, fields)
+    let row = reconcileRow(mirrorHash(instance), vendorHash, marker)
+    // A vendor file deleted since the last write (the settings error says "fix or remove the file")
+    // is no older version's change: the instance's values are written back, with no notice.
+    if (marker !== undefined && mirror.exists?.() === false) row = mirrorHash(instance) === vendorHash ? 'in_sync' : 'finish_write'
+    if (row === 'first_copy') {
+      // Only what the instance never set comes over; the vendor file is not changed by the copy.
+      const copied = tupleConfig(vendor, fields)
+      for (const field of unsetFields(stored, fields)) {
+        const key = field === 'signedOut' ? 'signedOutInMousse' : field
+        stored[key] = copied[key]
+      }
+      stored = { ...stored, [MIRROR_MARKER_KEY]: vendorHash }
+      this.storeConfig(record, stored)
+      instance = instanceTuple(stored, fields)
+      row = mirrorHash(instance) === vendorHash ? 'in_sync' : 'finish_write'
+    }
+    switch (row) {
+      case 'in_sync':
+        if (storedMarker(stored) !== vendorHash) this.storeConfig(record, { ...stored, [MIRROR_MARKER_KEY]: vendorHash })
+        return
+      case 'finish_write': {
+        const failure = this.mirrorWrite(record, stored)
+        if (failure) console.warn('[harness] could not finish writing a settings file', { instanceId: record.instanceId, error: errorText(failure) })
+        return
+      }
+      case 'older_changed': {
+        const changed = changedFields(instance, vendor, fields)
+        this.storeConfig(record, { ...stored, ...tupleConfig(vendor, fields), [MIRROR_MARKER_KEY]: vendorHash })
+        this.appliedVendorTuple(record, instance, vendor)
+        this.settingsNotices.set(record.instanceId, {
+          kind: 'older_applied',
+          message: `Settings changed in an older Mousse version were applied: ${fieldLabels(changed)}.`
+        })
+        return
+      }
+      case 'conflict':
+        this.settingsNotices.set(record.instanceId, {
+          kind: 'older_conflict',
+          message: "An older Mousse version changed this provider's settings. Mousse is using this version's."
+        })
+        return
+    }
   }
 
   /** The stored `config` of an added instance after a patch (unknown fields kept). */
@@ -1989,10 +2739,13 @@ export class Harness implements HarnessGateway {
     if (patch.displayName !== undefined) setOrDelete(config, 'displayName', patch.displayName?.trim() || undefined)
     if (patch.home !== undefined) config.home = patch.home
     if (patch.setup !== undefined) config.setup = patch.setup
-    if (patch.binaryPath !== undefined) setOrDelete(config, 'binaryPath', patch.binaryPath?.trim() || undefined)
-    if (patch.args !== undefined) setOrDelete(config, 'args', patch.args.length ? [...patch.args] : undefined)
-    if (patch.env !== undefined) setOrDelete(config, 'env', Object.keys(patch.env).length ? { ...patch.env } : undefined)
+    // A cleared launch setting is stored as `null` ("set to the default"), never deleted, so it is
+    // told apart from one never set (`harness/vendorMirror`).
+    if (patch.binaryPath !== undefined) config.binaryPath = patch.binaryPath?.trim() || null
+    if (patch.args !== undefined) config.args = patch.args.length ? [...patch.args] : null
+    if (patch.env !== undefined) config.env = Object.keys(patch.env).length ? { ...patch.env } : null
     if (patch.loginMethod !== undefined) setOrDelete(config, 'loginMethod', patch.loginMethod || undefined)
+    if (patch.engine !== undefined) setOrDelete(config, 'engine', patch.engine ?? undefined)
     if (patch.source !== undefined) {
       // Only a driver that reads registry sources takes one (it validates every value itself).
       if (driver.decodeConfig({ source: patch.source }).source?.kind !== 'registry')
@@ -2004,38 +2757,123 @@ export class Harness implements HarnessGateway {
     const rule = privateHomeRule(driver, driver.decodeConfig({ ...config, home: undefined }))
     if (rule === 'required') config.home = 'private'
     else if (rule === 'forbidden' && config.home !== undefined) config.home = 'default'
+    // An instance with its own home runs as the account signed in there: its configured variables
+    // cannot point it at another home or hand it another credential (`ownedLaunchEnv`).
+    if (config.home === 'private' && (patch.env !== undefined || patch.home !== undefined)) {
+      for (const name of Object.keys((config.env ?? {}) as Record<string, unknown>)) {
+        const reserved = reservedEnvName(driver.kind, name)
+        if (reserved?.kind === 'home')
+          harnessFail('unsupported', `Mousse sets ${reserved.variable} for this ${driver.label} instance, so it cannot be set here. Remove it from the variables.`)
+        if (reserved)
+          harnessFail('unsupported', `${reserved.variable} is not passed to a ${driver.label} instance with its own home: it signs in to its own account. Remove it from the variables.`)
+      }
+    }
     return config
   }
 
   private async move(fromId: string, toId: string, options: { copyKey?: boolean } = {}): Promise<MoveResult> {
     const from = this.record(fromId, { allowDisabled: true })
     const to = this.record(toId, { allowDisabled: true })
-    const agent = (this.options.foldedInto ?? foldedInto)(piProviderIdOf(fromId))
-    if (fromId === toId || !agent || to.driver.kind !== agent)
+    const providerId = piProviderIdOf(fromId)
+    const agent = (this.options.foldedInto ?? foldedInto)(providerId)
+    // Only an entry of the kind the API moves to takes it: an Anthropic key goes to Claude Code on a
+    // key of its own, in a home of its own (one stored without it runs nothing), never to the user's
+    // own Claude Code.
+    const narrowed = Boolean(foldedTarget(providerId))
+    if (fromId === toId || !agent || to.driver.kind !== agent || !acceptsMove(providerId, to.entry.config) || (narrowed && (to.builtIn || !to.env.home)))
       harnessFail('unsupported', `${this.displayName(from)} cannot move to ${this.displayName(to)}.`, fromId)
     if (from.config.movedTo) harnessFail('unsupported', `${this.displayName(from)} has already moved.`, fromId)
+    // Two moves of one entry (the card's dialog and a chat's, or two windows) never run together:
+    // the second would split the defaults and the pinned chats across two targets.
+    if (this.moving.has(fromId)) harnessFail('unsupported', `${this.displayName(from)} is already being moved.`, fromId)
+    this.moving.add(fromId)
+    try {
+      return await this.moveEntry(from, to, options)
+    } finally {
+      this.moving.delete(fromId)
+    }
+  }
+
+  private async moveEntry(from: InstanceRecord, to: InstanceRecord, options: { copyKey?: boolean }): Promise<MoveResult> {
+    const fromId = from.instanceId
+    const toId = to.instanceId
+    // A retired entry moves only onto a route that works now (signed in on its own, or with the
+    // entry's API key copied over), and its old sign-in goes last, after the move is saved.
+    const retiring = retiredPrompt(from.driver, fromId, from.config) !== undefined
+    // A sign-out of the target started during the move (another window) is never undone by it.
+    const signOutsBefore = this.signOutsStarted.get(toId) ?? 0
+    const signedOutMeanwhile = () => (this.signOutsStarted.get(toId) ?? 0) !== signOutsBefore
+    const signedOutMessage = () => `${this.displayName(to)} was signed out during the move. Nothing moved${options.copyKey ? `, and ${this.displayName(from)} keeps its key` : ''}.`
+    if (retiring && !to.entry.enabled) harnessFail('unsupported', `Turn on ${this.displayName(to)} first, then move ${this.displayName(from)} to it. Nothing moved.`, toId)
+    if (retiring && options.copyKey) {
+      // The key goes only to a target that is installed: a copy cannot make anything else run.
+      await this.probe(toId, true)
+      const install = this.probes.get(toId)?.result?.install
+      if (install === 'not_installed' || install === 'broken')
+        harnessFail('signed_out', `Install ${this.displayName(to)} first, then move ${this.displayName(from)} to it. Nothing moved.`, toId)
+    }
     // The key goes over first: when it cannot, nothing has moved yet.
     if (options.copyKey) {
       const key = await from.runtime.exportApiKey?.()
       if (!key) harnessFail('unsupported', `${this.displayName(from)} has no saved API key to copy.`, fromId)
       if (!to.runtime.adoptApiKey) harnessFail('unsupported', `${this.displayName(to)} cannot take an API key.`, toId)
       await to.runtime.adoptApiKey(key)
-      this.counters.bumpAccount(toId)
-      void this.probe(toId, true)
+      // A sign-out of the target while its key was copied wins: the sign-out stands, nothing moves,
+      // and the old entry keeps its key.
+      if (signedOutMeanwhile()) harnessFail('signed_out', signedOutMessage(), toId)
+      // A key it now holds signs an entry signed out in Mousse in again (and moves its account on).
+      const current = this.recordOrUndefined(toId) ?? to
+      if (this.isSignedOut(current)) await this.reconnect(current)
+      else this.counters.bumpAccount(toId)
+      if (!retiring) void this.probe(toId, true)
     }
-    // Turned off, never deleted: an older build can still turn it back on.
+    if (retiring) {
+      await this.probe(toId, true)
+      // Installed, signed in, and not signed out in Mousse: a chat on it can run now. Otherwise
+      // nothing moves, and the old entry keeps its sign-in (a copied key stays on the target too).
+      const target = this.record(toId, { allowDisabled: true })
+      if (!target.runtime.configured() || this.isSignedOut(target))
+        harnessFail(
+          'signed_out',
+          options.copyKey
+            ? `The API key was saved to ${this.displayName(target)}, but it cannot run yet. Install and sign in to it, then move ${this.displayName(from)} again. Nothing moved, and ${this.displayName(from)} keeps its key.`
+            : `Install and sign in to ${this.displayName(target)} first, then move ${this.displayName(from)} to it. Nothing moved.`,
+          toId
+        )
+    }
+    if (signedOutMeanwhile()) harnessFail('signed_out', signedOutMessage(), toId)
+    // Turned off, never deleted: an older build can still turn it back on. A save that fails throws
+    // here, before anything else changed: the old sign-in is still there and the entry still works.
     this.instanceMap.setEntry(fromId, { ...from.entry, enabled: false, config: { ...(from.entry.config ?? {}), movedTo: toId } })
     const llmProvider = legacyProviderForInstance(toId, to.entry) ?? ''
-    // A model the agent lists keeps its id; any other becomes the agent's default (its first model).
-    const listed = to.runtime.models()
-    const model = (id: string) => (!listed.length || listed.some((entry) => entry.id === id) ? id : listed[0]!.id)
+    const model = (id: string) => this.movedModel(toId, id)
     const rewritten = [
       ...this.options.defaults?.rewrite(fromId, { instanceId: toId, llmProvider, model }) ?? [],
       ...this.scopes.moveDefaults(fromId, toId, model).map(({ projectId, from: before, to: after }) =>
         `Project default (${projectId})${before !== after ? `: ${this.modelName(toId, after)} instead of ${before}` : ''}`)
     ]
+    const oldSignIn = retiring ? await this.dropOldSignIn(from) : undefined
     this.changed(fromId)
-    return { from: fromId, to: toId, rewritten }
+    return { from: fromId, to: toId, rewritten, ...(oldSignIn ? { oldSignIn } : {}) }
+  }
+
+  /**
+   * Deletes the old sign-in of a moved entry, after the move is saved. The sign-in belongs to the
+   * whole device, so it stays while another profile still has an unmoved entry using it. A deletion
+   * that fails leaves the move standing and a stale credential nobody uses.
+   */
+  private async dropOldSignIn(from: InstanceRecord): Promise<NonNullable<MoveResult['oldSignIn']>> {
+    if (this.options.otherProfilesUse?.(from.instanceId)) return 'kept_shared'
+    try {
+      if (!from.runtime.signOut) return 'remains'
+      await from.runtime.signOut()
+      this.counters.bumpAccount(from.instanceId)
+      this.options.onProvidersChanged?.()
+      return 'removed'
+    } catch (error) {
+      console.warn('[harness] the old sign-in of a moved entry could not be deleted', { instanceId: from.instanceId, message: errorText(error) })
+      return 'remains'
+    }
   }
 
   private async setEnabled(instanceId: string, scope: ProviderScope, enabled: boolean | null): Promise<InstanceSnapshot> {
@@ -2056,10 +2894,29 @@ export class Harness implements HarnessGateway {
   private async signOut(instanceId: string): Promise<InstanceSnapshot> {
     const record = this.record(instanceId, { allowDisabled: true })
     if (!record.runtime.signOut) harnessFail('unsupported', 'This provider has no sign-out.', instanceId)
-    await record.runtime.signOut()
+    // Counted first: a move copying a key to this instance meanwhile sees it and stops (`moveEntry`).
+    this.signOutsStarted.set(instanceId, (this.signOutsStarted.get(instanceId) ?? 0) + 1)
+    // 1. The flag first: from here on nothing is admitted on the instance (fail closed).
+    const config = { ...this.storedConfig(record), signedOutInMousse: true }
+    this.storeConfig(record, config)
+    // 2. The runtime's own sign-out (stop turns, drop sessions, revoke what Mousse holds), then the
+    // vendor mirror, even when the runtime's sign-out failed: the flag stays and is mirrored.
+    let failure: unknown
+    try {
+      await record.runtime.signOut()
+    } catch (error) {
+      failure = error
+    }
+    // Read again: a change saved while the runtime signed out (a configure, an install dropping a
+    // manual path) is kept, and goes to the runtime that serves the instance now.
+    const current = this.recordOrUndefined(instanceId)
+    const mirrorFailure = current ? this.mirrorSignOut(current, { ...this.storedConfig(current), signedOutInMousse: true }) : undefined
+    if (mirrorFailure) console.warn('[harness] could not mirror a sign-out to the settings file', { instanceId, error: errorText(mirrorFailure) })
+    // 3. Nothing bound before the sign-out resumes, and the card reads signed out.
     this.counters.bumpAccount(instanceId)
     await this.probe(instanceId, true)
     this.options.onProvidersChanged?.()
+    if (failure) throw failure
     return this.snapshot(instanceId, { kind: 'device' })
   }
 
@@ -2080,6 +2937,8 @@ export class Harness implements HarnessGateway {
       const result = (outcome: ModelRefreshResult['outcome'], message?: string): ModelRefreshResult =>
         ({ instanceId, outcome, ...(message ? { message } : {}), snapshot: this.snapshot(instanceId, { kind: 'device' }) })
       try {
+        const retired = this.retiredSkip(instanceId)
+        if (retired) return result('skipped', retired)
         if (entry.driver === 'pi') {
           pi ??= this.refreshModelsOf(instanceId)
           await pi
@@ -2107,12 +2966,20 @@ export class Harness implements HarnessGateway {
     if (!entry?.enabled) return 'Turned off'
     const record = this.recordOrUndefined(instanceId)
     if (!record || record.stopped) return 'Turned off'
+    const retired = this.retiredSkip(instanceId)
+    if (retired) return retired
     const auth = this.probes.get(instanceId)?.lastGood?.auth.state
     if (auth !== 'signed_in' && auth !== 'not_required') return 'Not signed in'
     if (record.active > 0) return 'A chat is running'
     const installing = record.runtime.installState?.().installing === true || [...this.operations.values()].some((operation) => operation.started.instanceId === instanceId && operation.started.kind !== 'sign_in')
     if (installing) return 'Being installed'
     return undefined
+  }
+
+  /** Why a retired entry's models are left alone, or undefined for any other. */
+  private retiredSkip(instanceId: string): string | undefined {
+    const record = this.recordOrUndefined(instanceId)
+    return record && retiredPrompt(record.driver, instanceId, record.config) ? 'Retired by this update' : undefined
   }
 
   /**
@@ -2126,7 +2993,8 @@ export class Harness implements HarnessGateway {
     const job = this.withModelSlot(async () => {
       if (this.stopped) return
       const record = this.recordOrUndefined(instanceId)
-      if (!record) return
+      // A retired entry's models are never fetched: nothing reads its sign-in.
+      if (!record || this.retiredSkip(instanceId)) return
       if (when) {
         if (!this.probes.get(instanceId)?.result) await this.probe(instanceId, false)
         if (this.stopped || this.modelRefreshSkip(instanceId) || this.modelsAgeMs(record) < when.minAgeMs) return
@@ -2282,10 +3150,29 @@ export class Harness implements HarnessGateway {
   private async signIn(instanceId: string, method?: string): Promise<ProviderOperationStarted> {
     const record = this.record(instanceId, { allowDisabled: true })
     const runtime = record.runtime
-    if (!runtime.signIn) return harnessFail('unsupported', 'This provider has no sign-in.', instanceId)
+    // A retired entry offers no sign-in: its one step is Move.
+    this.refuseRetired(record)
+    // Signed out in Mousse on the user's own sign-in (their CLI's home): reconnecting only clears the
+    // flag. No sign-in runs; when the agent itself is signed out, the card shows its command.
+    const reconnecting = this.isSignedOut(record) && !this.ownsSignIn(record)
+    if (!reconnecting && !runtime.signIn) return harnessFail('unsupported', 'This provider has no sign-in.', instanceId)
     if ([...this.operations.values()].some((entry) => entry.started.instanceId === instanceId && entry.started.kind === 'sign_in'))
       return harnessFail('operation_busy', 'A sign-in is already running for this provider.', instanceId)
     const started: ProviderOperationStarted = { operationId: randomUUID(), instanceId, kind: 'sign_in' }
+    if (reconnecting) {
+      let failure: unknown
+      try {
+        await this.reconnect(record)
+      } catch (error) {
+        failure = error
+      }
+      // Reported after the caller has the operation id, like any sign-in.
+      queueMicrotask(() => {
+        this.emit({ type: 'operation', data: failure ? { ...started, phase: 'failed', error: { code: 'protocol', message: errorText(failure), instanceId } } : { ...started, phase: 'completed' } })
+        void this.probe(instanceId, true)
+      })
+      return started
+    }
     const session = new LoginSessionImpl(started.operationId)
     const operation: Operation = {
       started,
@@ -2304,6 +3191,14 @@ export class Harness implements HarnessGateway {
         .then((result) => {
           if (session.abort.signal.aborted) this.emit({ type: 'operation', data: { ...started, phase: 'cancelled' } })
           else if (result.success) {
+            // A sign-in Mousse owns clears a sign-out only once it succeeded.
+            // Through the record serving the instance now: a config change during the sign-in (a
+            // new home, an executable path) built another runtime, whose mirror is the live one.
+            const current = this.recordOrUndefined(instanceId) ?? record
+            if (this.isSignedOut(current)) {
+              const failure = this.setSignedOut(current, false)
+              if (failure) console.warn('[harness] could not mirror a sign-in to the settings file', { instanceId, error: errorText(failure) })
+            }
             // A completed sign-in may be another account: sessions made before it are not resumed.
             this.counters.bumpAccount(instanceId)
             // Its verification (a `session/new`) may have listed the account's models and modes.

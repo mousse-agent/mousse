@@ -1,15 +1,18 @@
 import type { ExecutionBinding } from '../../shared/harness/types'
+import type { AgentAccessLevel } from '../../shared/settings'
 export type RunStatus =
   | 'queued'
   | 'starting'
   | 'running'
   | 'finalizing'
+  | 'paused'
   | 'completed'
   | 'interrupted'
   | 'failed'
   | 'cancelled'
   | 'uncertain'
 
+/** `paused` is not terminal: the run waits for a usage limit to reset and is not active (SPEC §5). */
 export const TERMINAL_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
   'completed',
   'interrupted',
@@ -23,6 +26,35 @@ export type AttemptStatus =
 
 export type AttemptReason = 'initial' | 'steer_restart' | 'retry' | 'recovery'
 
+/** How a pause ended (`RunPause.endedBy`). Set only once the run has left `paused`. */
+export type RunPauseEnd = 'resume' | 'resume_now' | 'user_message' | 'cancel' | 'stop' | 'deleted'
+
+/** Why a run is `paused` and when it continues (SPEC §5). Stored in `RunOutcome.pause`. */
+export interface RunPause {
+  reason: 'usage_limit'
+  /** ISO time the limit resets: the provider's, or an estimate. */
+  until: string
+  estimated: boolean
+  provider?: string
+  /** The window that was hit (`five_hour`, `weekly`, …). */
+  limitKind?: string
+  /** Automatic resumes in a row on the thread, this pause included. */
+  count: number
+  /** Whether a `run.resume` timer was armed for `until`. */
+  autoResume: boolean
+  /** The message queue item that carries the continue turn (`resume:<runId>`). */
+  resumeItemId?: string
+  resumeRequested?: 'auto' | 'user'
+  /**
+   * The automatic timer fired more than 24 h after `until` (Mousse was off) and was dropped
+   * (`endPause(…, 'stale')`): the run is still `paused`, `autoResume` is off, and only Resume now
+   * continues it. Not an end: `endedBy` stays unset.
+   */
+  stale?: true
+  /** How the pause ended; only on a run that is no longer `paused`. */
+  endedBy?: RunPauseEnd
+}
+
 export interface RunOutcome {
   error?: string
   interruptedBy?: 'user' | 'daemon_restart' | 'provider'
@@ -30,6 +62,10 @@ export interface RunOutcome {
   stopRequested?: boolean
   /** SPEC §16.4: the interrupted run this send continues ("Continue" after a restart). */
   continuationOf?: string
+  /** Set while the run is `paused`, and kept after the pause ended. */
+  pause?: RunPause
+  /** On the run that continues a paused one: whether the timer (`auto`) or a person (`user`) resumed it. */
+  resumedFromPause?: 'auto' | 'user'
   /**
    * SPEC §16.3: how an undo run restored the conversation (`featureGates.canUndoNatively`):
    * `native_rollback` when the provider can roll its own session back, else `checkpoint`.
@@ -55,6 +91,12 @@ export interface RunRecord {
   outcome: RunOutcome | null
   /** Last liveness touch by the executing turn (SPEC §12.4 rule 2). Not a status write. */
   heartbeatAt: string | null
+  /**
+   * The agent access level this run's turn was granted when it started (SPEC §15.1), kept so a run that
+   * continues it (a resume after a pause, a "Continue" after a restart, a provider's own continuation)
+   * is never granted more. Absent on runs from before it was recorded, and on a run whose turn never started.
+   */
+  accessGrant?: AgentAccessLevel
 }
 
 export interface ProviderRef {
@@ -127,6 +169,7 @@ export type EffectKind =
   | 'checkpoint.capture'
   | 'title.generate'
   | 'workspace.cleanup'
+  | 'run.resume'
 
 /** `process_bound` effects die with the daemon; `replay_safe` effects are re-queued on boot. */
 export type EffectClass = 'process_bound' | 'replay_safe'
@@ -150,8 +193,9 @@ export interface EffectKindSpec {
   /**
    * Lane override. Without one the lane is the effect's thread. `control` effects (interrupt,
    * steer, answers) must reach a live turn, so they never queue behind the thread's `turn.start`.
+   * `resume` effects wait for a usage limit to reset and must not hold up the thread's other work.
    */
-  lane?: 'title' | 'control'
+  lane?: 'title' | 'control' | 'resume'
   /** Defaults to `DEFAULT_EFFECT_MAX_ATTEMPTS`. */
   maxAttempts?: number
 }
@@ -196,7 +240,18 @@ export const EFFECT_KIND_SPEC: Record<EffectKind, EffectKindSpec> = {
   },
   'checkpoint.capture': { class: 'replay_safe', timeoutMs: 2 * 60_000, reserved: true },
   'title.generate': { class: 'replay_safe', timeoutMs: 60_000, lane: 'title', reserved: true },
-  'workspace.cleanup': { class: 'replay_safe', timeoutMs: 5 * 60_000, reserved: true }
+  'workspace.cleanup': { class: 'replay_safe', timeoutMs: 5 * 60_000, reserved: true },
+  'run.resume': { class: 'replay_safe', timeoutMs: 60_000, lane: 'resume' }
+}
+
+/** Payload of a `run.resume` effect: continue the paused run `runId` at `until` (or now, for Resume now). */
+export interface RunResumePayload {
+  kind: 'resume'
+  runId: string
+  threadId: string
+  until: string
+  /** A person pressed Resume now: the executor skips the staleness guard. */
+  manual?: true
 }
 
 export interface EffectRecord {
@@ -294,6 +349,11 @@ export interface DelegationRecord {
   completedAt: string | null
   /** The most the child may do (SPEC §15.1); null when the delegation set none. */
   modeCeiling: ModeCeiling | null
+  /**
+   * The agent access level the delegation passes to its child (SPEC §15.1): the caller's effective
+   * level when it started the task. Null on rows from before version 11, which read as `lineage`.
+   */
+  accessLevel: AgentAccessLevel | null
   /** The child's workspace policy (SPEC §14.2); null for a follow-up or a pre-version-6 row. */
   workspace: DelegationWorkspace | null
   /** The requested role (`research`, `review`, `implement`, …); null when none was given. */
@@ -307,6 +367,17 @@ export type DelegationWorkspace = 'isolated' | 'shared'
  * writes, no integration, children stay `plan`); `default` is the thread's ordinary authority.
  */
 export type ModeCeiling = 'plan' | 'default'
+
+/**
+ * The agent behind a change to another thread (SPEC §15.1): the thread and run that called the tool
+ * and the tool call itself. Recorded in the `agent.action` event on the thread that was changed.
+ */
+export interface AgentActor {
+  kind: 'agent'
+  threadId: string
+  runId: string
+  toolCallId: string
+}
 
 export type InboxKind = 'child_result' | 'restart_note' | 'reconcile_notice'
 
@@ -362,6 +433,34 @@ export interface WakeTurnPayload {
 
 export function isWakeTurnPayload(payload: unknown): payload is WakeTurnPayload {
   return Boolean(payload) && typeof payload === 'object' && (payload as { kind?: unknown }).kind === 'wake'
+}
+
+/**
+ * Payload of a bot dispatch's `turn.start` (PR 6 §4). It carries no `input` and no authority: the
+ * prompt and the grant live only in `bots.db`, and the executor rebuilds the turn from there. With
+ * no `input` and a string `kind`, rule 5 never restarts it as an ordinary send, in this build or in
+ * any older one (`strandedQueuedRuns`), so a build without bots never starts a bot run.
+ */
+export interface BotTurnPayload {
+  kind: 'bot'
+  runId: string
+  threadId: string
+  activationId: string
+  dispatchN: number
+}
+
+export function isBotTurnPayload(payload: unknown): payload is BotTurnPayload {
+  if (!payload || typeof payload !== 'object') return false
+  const value = payload as Record<string, unknown>
+  return value.kind === 'bot' && typeof value.runId === 'string' && typeof value.threadId === 'string' &&
+    typeof value.activationId === 'string' && Number.isSafeInteger(value.dispatchN)
+}
+
+/** A `turn.start` payload of a kind this build does not know: refused, never cast to a send. */
+export function hasUnknownTurnPayloadKind(payload: unknown, known: readonly string[]): boolean {
+  if (!payload || typeof payload !== 'object') return false
+  const kind = (payload as { kind?: unknown }).kind
+  return typeof kind === 'string' && !known.includes(kind)
 }
 
 /**

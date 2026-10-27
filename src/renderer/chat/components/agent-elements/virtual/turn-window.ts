@@ -257,6 +257,28 @@ export function pickAnchor<N extends AnchorNode>(
   }
 }
 
+/** Which side of the picked node is held still: its top, or its bottom edge. */
+export type AnchorEdge = "top" | "bottom";
+
+/**
+ * The node `pickAnchor` chooses and the edge of it to hold when no text position
+ * inside it can be held. A node that starts at or below the edge is held by its
+ * top. A node that straddles the edge is held by its bottom: its top does not
+ * move when something inside it grows above the edge (a block that expands
+ * from its placeholder, or the toolbar tail of a row whose content above it
+ * grows), so holding the top lets everything below slide away, while the bottom
+ * moves with all of it.
+ */
+export function pickReadingNode<N extends AnchorNode>(
+  root: N,
+  viewportTop: number,
+): { node: N; edge: AnchorEdge } {
+  const path = pickAnchor(root, viewportTop);
+  const node = path.length > 0 ? path[path.length - 1]! : root;
+  const straddles = node.top < viewportTop && node.bottom > viewportTop;
+  return { node, edge: straddles ? "bottom" : "top" };
+}
+
 export type AnchorDeltaInput =
   | { posBefore: number; posAfter: number }
   | { fallback: { prev: TurnLayout; next: TurnLayout; anchorKey: string } };

@@ -1,5 +1,5 @@
 import { afterEach, expect, it } from 'vitest'
-import { BotRecordAuthorization } from '../../../../src/mms/bots/admission'
+import { BotRecordAuthorization } from '../../../../src/mms/bots/space/admission'
 import { NetSyncSession } from '../../../../src/mms/net/sync/session'
 import { canonicalJson, decodeEnvelope } from '../../../../src/mms/net/sync/codec'
 import { newId, type Envelope, type StreamDescriptor } from '../../../../src/shared/net'

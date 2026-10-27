@@ -139,17 +139,48 @@
   outline-offset: 1px;
 }
 
+.side-card-git-pr-line {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 2px;
+}
+
 .side-card-git-pr {
   display: flex;
   align-items: center;
   gap: 6px;
-  width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
   height: 26px;
-  margin-top: 2px;
   padding: 0 6px;
   border-radius: var(--ui-row-radius);
   font-size: 12px;
   text-align: left;
+}
+
+.side-card-git-pr-external {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: var(--ui-row-radius);
+  background: transparent;
+  color: var(--ui-faint);
+  cursor: pointer;
+}
+
+.side-card-git-pr-external:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.side-card-git-pr-external:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .side-card-git-pr-check {
@@ -360,6 +391,17 @@ button.side-card-git-pr-check-state {
   50% {
     opacity: 0.35;
   }
+}
+
+/* The shared Git action status sits inside the card's own padding, without the panel's rule. */
+.side-card-section .git-operation {
+  padding: 4px 6px 0;
+  border-bottom: 0;
+}
+
+.side-card-git-commit-popover .git-operation {
+  padding: 6px 0 0;
+  border-bottom: 0;
 }
 
 .side-card-git-error {
@@ -847,6 +889,7 @@ button.side-card-git-pr-check-state {
 
 .side-card-git-popover-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 6px;
 }

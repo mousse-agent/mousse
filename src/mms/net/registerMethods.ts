@@ -5,6 +5,7 @@ import {
   type NetLocalMethod
 } from '../../shared/net/local'
 import { isId, NODE_CAPABILITIES, NET_ERRORS, NetError } from '../../shared/net'
+import { isJoinVia } from '../../shared/net/via'
 import { AppError } from '../../shared/errors'
 import { DomainHandlerRegistry, DomainRpcError, domainObject } from '../protocol/domainRegistry'
 
@@ -29,6 +30,22 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
   'net.plus.enrollment.offer': ['name'],
   'net.transport.list': [],
   'net.transport.configure': ['id', 'enabled', 'settings'],
+  'net.transport.action.describe': ['id', 'action', 'settings'],
+  'net.transport.action.apply': ['id', 'action', 'settings'],
+  'net.transport.action.undo': ['id', 'action', 'settings'],
+  'net.routes': [],
+  'net.ssh.check': ['host'],
+  'net.ssh.trust': ['host', 'fingerprint', 'acknowledgeChanged'],
+  'net.ssh.plan': ['host', 'name', 'port'],
+  'net.ssh.list': [],
+  'net.ssh.setup.begin': ['host', 'name', 'port'],
+  'net.ssh.setup.status': ['id'],
+  'net.ssh.setup.cancel': ['id'],
+  'net.ssh.setup.retry': ['id'],
+  'net.ssh.undo': ['id'],
+  'net.ssh.update': ['id'],
+  'net.ssh.rename': ['id', 'endpoint'],
+  'net.ssh.approve': ['node', 'endpoint'],
   'net.init': ['name', 'listen', 'host', 'port', 'passphrase'],
   'net.disable': [],
   'net.status': [],
@@ -40,11 +57,54 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
   'net.recovery.export': ['passphrase'],
   'net.recovery.import': ['file', 'passphrase', 'becomeAuthority'],
   'bridge.invite': ['ttlMs', 'name', 'caps'],
-  'bridge.join': ['invite', 'name', 'passphrase'],
+  'bridge.join': ['invite', 'name', 'passphrase', 'via'],
   'bridge.nodes': [],
   'bridge.revoke': ['node'],
   'bridge.rename': ['node', 'name']
 }
+const SSH_ID = /^[A-Za-z0-9_-]{1,64}$/u
+const FINGERPRINT = /^SHA256:[A-Za-z0-9+/]{43}$/u
+/** Bounded shapes for the remote machine methods; the host and name get their full checks in the bootstrap. */
+function validateSsh(method: NetLocalMethod, params: Record<string, unknown>): void {
+  const bad = (message: string): never => {
+    throw new DomainRpcError('invalid_params', message)
+  }
+  const text = (value: unknown, limit: number) =>
+    typeof value === 'string' && value.length > 0 && value.length <= limit
+  if (['net.ssh.check', 'net.ssh.trust', 'net.ssh.plan', 'net.ssh.setup.begin'].includes(method)) {
+    if (!text(params.host, 253)) bad('A host is required')
+  }
+  if (['net.ssh.plan', 'net.ssh.setup.begin'].includes(method)) {
+    if (!text(params.name, 256)) bad('A device name is required')
+    if (
+      params.port !== undefined &&
+      (!Number.isInteger(params.port) || Number(params.port) < 1 || Number(params.port) > 65535)
+    )
+      bad('The daemon port must be 1–65535')
+  }
+  if (method === 'net.ssh.trust') {
+    if (typeof params.fingerprint !== 'string' || !FINGERPRINT.test(params.fingerprint))
+      bad('A SHA256 host key fingerprint is required')
+    if (params.acknowledgeChanged !== undefined && typeof params.acknowledgeChanged !== 'boolean')
+      bad('acknowledgeChanged must be boolean')
+  }
+  if (
+    [
+      'net.ssh.setup.status',
+      'net.ssh.setup.cancel',
+      'net.ssh.setup.retry',
+      'net.ssh.undo',
+      'net.ssh.update',
+      'net.ssh.rename'
+    ].includes(method) &&
+    (typeof params.id !== 'string' || !SSH_ID.test(params.id))
+  )
+    bad('A remote machine record id is required')
+  if (['net.ssh.rename', 'net.ssh.approve'].includes(method) && !text(params.endpoint, 253))
+    bad('An SSH endpoint is required')
+  if (method === 'net.ssh.approve' && !isId('node', params.node)) bad('A node identity is required')
+}
+
 function validate(method: NetLocalMethod, value: unknown): Record<string, unknown> {
   const params = domainObject(value ?? {}, ['profileId', ...keys[method]])
   if (
@@ -124,15 +184,27 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
     throw new DomainRpcError('invalid_params', 'Name must contain 1–256 characters')
   if (params.listen !== undefined && typeof params.listen !== 'boolean')
     throw new DomainRpcError('invalid_params', 'listen must be boolean')
-  if (params.host !== undefined && (typeof params.host !== 'string' || !isIP(params.host)))
+  if (
+    method === 'net.init' &&
+    params.host !== undefined &&
+    (typeof params.host !== 'string' || !isIP(params.host))
+  )
     throw new DomainRpcError('invalid_params', 'Listener host must be an IP address')
   if (
+    method === 'net.init' &&
     params.port !== undefined &&
     (!Number.isInteger(params.port) || Number(params.port) < 0 || Number(params.port) > 65535)
   )
     throw new DomainRpcError('invalid_params', 'Listener port must be 0–65535')
-  if ((params.host !== undefined || params.port !== undefined) && params.listen !== true)
+  if (
+    method === 'net.init' &&
+    (params.host !== undefined || params.port !== undefined) &&
+    params.listen !== true
+  )
     throw new DomainRpcError('invalid_params', 'host and port require listen')
+  if (method.startsWith('net.ssh.')) validateSsh(method, params)
+  if (params.via !== undefined && (method !== 'bridge.join' || !isJoinVia(params.via)))
+    throw new DomainRpcError('invalid_params', 'via must be ws://127.0.0.1:<port>/mousse-net')
   if (
     params.ttlMs !== undefined &&
     (!Number.isSafeInteger(params.ttlMs) ||
@@ -187,6 +259,21 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
           Buffer.byteLength(JSON.stringify(params.settings)) > 16 * 1024))
   )
     throw new DomainRpcError('invalid_params', 'A bounded transport configuration is required')
+  if (
+    method.startsWith('net.transport.action.') &&
+    (typeof params.id !== 'string' ||
+      !/^[a-z][a-z0-9.-]{0,63}$/.test(params.id) ||
+      typeof params.action !== 'string' ||
+      !/^[a-z][a-z0-9-]{0,31}$/.test(params.action) ||
+      // Undo may leave the settings out and use the stored ones.
+      (params.settings === undefined
+        ? method !== 'net.transport.action.undo'
+        : !params.settings ||
+          typeof params.settings !== 'object' ||
+          Array.isArray(params.settings) ||
+          Buffer.byteLength(JSON.stringify(params.settings)) > 16 * 1024))
+  )
+    throw new DomainRpcError('invalid_params', 'A bounded add-on action request is required')
   return params
 }
 

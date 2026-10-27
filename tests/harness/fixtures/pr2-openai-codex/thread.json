@@ -1,0 +1,5 @@
+{
+  "id": "00000000-0000-4000-8000-00000000c0de",
+  "title": "Pinned ChatGPT chat",
+  "modelOverride": { "instanceId": "pi:openai-codex", "llmProvider": "openai-codex", "model": "gpt-5.1-codex" }
+}

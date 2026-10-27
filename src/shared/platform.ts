@@ -8,7 +8,7 @@ import type { ChatNetworkMethod } from './chatsNetwork'
 import type { NetLocalMethod } from './net/local'
 import type { BridgeHubLocalMethod } from './bridge/types'
 import type { SpacesLocalMethod } from './spaces/local'
-import type { BotsLocalMethod } from './bots/local'
+import type { BotsLocalMethod } from './bots/space/local'
 import type { SpaceArchiveMethod } from './spaces/archive'
 import type { SpeechHostMethod } from './speechRelay'
 

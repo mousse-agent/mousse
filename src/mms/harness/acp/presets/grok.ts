@@ -58,7 +58,8 @@ export const GROK_CAPS: HarnessCaps = Object.freeze({
   contextUsage: 'none',
   toolControl: 'approval_only',
   budgets: 'unsupported',
-  spendLimits: 'unsupported'
+  spendLimits: 'unsupported',
+  definitionLimits: 'none'
 })
 
 export const GROK_QUIRKS: AcpQuirks = Object.freeze({ xaiExtensions: true })

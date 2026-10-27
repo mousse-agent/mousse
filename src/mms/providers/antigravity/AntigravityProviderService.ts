@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { methods } from '@agentclientprotocol/sdk'
 import type { CliProviderConfig, CliProviderConfigPatch, ConfiguredProvider, ProviderLoginOption, ProviderLoginResult } from '../../../shared/providerAuth'
@@ -12,16 +12,19 @@ import { ANTIGRAVITY_AUTH_METHOD, ANTIGRAVITY_LABEL, ANTIGRAVITY_QUIRKS, antigra
 import { keepOption } from '../../harness/acp/permissions'
 import { AcpSessions, type AcpChatInput, type SavedAcpSession } from '../../harness/acp/session'
 import type { LoginSession } from '../LoginSession'
-import { applyCliConfigPatch, requireExecutable, sharedCliVersions, storedCliArgs, storedCliEnv, withUserEnv, type CliVersionCache, type StoredCliConfig } from '../cliConfig'
+import { settingsMirror, type MirrorField, type VendorMirror } from '../../harness/vendorMirror'
+import { requireExecutable, sharedCliVersions, storedCliArgs, storedCliEnv, withUserEnv, type CliVersionCache, type StoredCliConfig } from '../cliConfig'
 import { directLaunch } from '../resolveWindowsShim'
 import { ANTIGRAVITY_RELEASE, antigravityInstallState, cancelAntigravityInstall, installAntigravity, installedAntigravityBinary, onAntigravityInstallEvent, validateManualAntigravityBinary, type AntigravityInstallProgress } from './installation'
 
 export const ANTIGRAVITY_PROVIDER_ID = 'antigravity'
 type ProfileSettings = {
+  /**
+   * The launch settings as an older Mousse reads them: a mirror of the instance config, written
+   * only through `vendorMirror()` and never read for a launch.
+   */
   binaryPath?: string
-  /** Extra arguments for the ACP agent launch. */
   args?: string[]
-  /** Extra environment variables, applied over the environment Mousse prepares. */
   env?: Record<string, string>
   models?: LlmModelOption[]
   /** ISO time `models` was last listed by the agent. */
@@ -35,6 +38,13 @@ const SIGN_IN_REQUIRED_MESSAGE = 'Sign in to Antigravity in Settings before chat
 export interface AntigravityServiceOptions {
   /** Test seam: opens agent connections instead of starting the agent (the ACP process boundary). */
   connect?: AcpConnectionFactory
+  /**
+   * The manual agent path, extra args and variables: the instance config's (the gateway's).
+   * Without it the verified install runs with none.
+   */
+  launch?: () => StoredCliConfig
+  /** Saves launch settings through the gateway's `configure` (an install drops a manual path). */
+  saveLaunch?: (patch: CliProviderConfigPatch) => Promise<void>
 }
 
 /**
@@ -45,6 +55,8 @@ export class AntigravityProviderService {
   private readonly settingsPath: string
   private readonly profileDir: string
   private settings: ProfileSettings
+  /** Set when settings.json exists but cannot be read; blocks every write until the next start. */
+  private settingsError?: string
   private stopped = false
   private readonly loginSessions = new Set<LoginSession>()
   /** Bumped when the launch settings change. */
@@ -59,11 +71,19 @@ export class AntigravityProviderService {
   readonly hooks: { changed?: () => void; installProgress?: (message: string) => void } = {}
 
   constructor(private readonly profileHome: string, private readonly installationHome: string, questions: UserQuestionService,
-    private readonly versions: CliVersionCache = sharedCliVersions, options: AntigravityServiceOptions = {}) {
+    private readonly versions: CliVersionCache = sharedCliVersions, private readonly options: AntigravityServiceOptions = {}) {
     this.profileDir = join(profileHome, 'providers', 'antigravity')
     this.settingsPath = join(this.profileDir, 'settings.json')
-    try { this.settings = JSON.parse(readFileSync(this.settingsPath, 'utf8')) as ProfileSettings }
-    catch { this.settings = {} }
+    this.settings = {}
+    // Only a missing file counts as new settings: an unreadable one is never overwritten.
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(this.settingsPath, 'utf8'))
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object')
+      this.settings = parsed as ProfileSettings
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | undefined)?.code !== 'ENOENT')
+        this.settingsError = `Mousse could not read this profile's Antigravity settings (${this.settingsPath}). Fix or remove the file, then restart Mousse.`
+    }
     this.acp = new AcpSessions({
       label: ANTIGRAVITY_LABEL,
       defaultInstanceId: ANTIGRAVITY_INSTANCE_ID,
@@ -75,8 +95,8 @@ export class AntigravityProviderService {
         profileDir: this.profileDir,
         profileHome,
         binary: () => this.binary(),
-        args: () => storedCliArgs(this.settings),
-        env: (base) => withUserEnv(base, storedCliEnv(this.settings))
+        args: () => storedCliArgs(this.launchSettings()),
+        env: (base) => withUserEnv(base, storedCliEnv(this.launchSettings()))
       }),
       store: {
         saved: (threadId) => this.settings.sessions?.[threadId],
@@ -112,13 +132,33 @@ export class AntigravityProviderService {
   }
 
   private save(): void {
+    if (this.settingsError) return
     mkdirSync(this.profileDir, { recursive: true })
     atomicWriteJsonSync(this.settingsPath, this.settings)
   }
 
+  /** The stored agent path, args and variables: the instance config's, never `settings.json`. */
+  private launchSettings(): StoredCliConfig {
+    return this.options.launch?.() ?? {}
+  }
+
+  /**
+   * The copy of the launch settings in this service's `settings.json` for an older Mousse, read from
+   * and written to the settings loaded now (a sign-in replaces them) and saved through `save()`.
+   */
+  vendorMirror(fields: readonly MirrorField[]): VendorMirror {
+    return settingsMirror(fields, {
+      settings: () => this.settings as Record<string, unknown>,
+      settingsError: () => this.settingsError,
+      save: () => this.save(),
+      exists: () => existsSync(this.settingsPath)
+    })
+  }
+
   private binary(): string | undefined {
-    if (this.settings.binaryPath) {
-      try { return validateManualAntigravityBinary(this.settings.binaryPath) } catch { return undefined }
+    const manual = this.launchSettings().binaryPath
+    if (manual) {
+      try { return validateManualAntigravityBinary(manual) } catch { return undefined }
     }
     return installedAntigravityBinary(this.installationHome)
   }
@@ -140,6 +180,8 @@ export class AntigravityProviderService {
     this.loginSessions.add(session)
     try {
       if (this.stopped) throw new Error('Antigravity provider is stopped')
+      // A sign-in recorded in settings that cannot be saved would be lost at the next start.
+      if (this.settingsError) throw new Error(this.settingsError)
       session.abort.signal.throwIfAborted()
       return await this.runLogin(session, cwd)
     } catch (error) {
@@ -275,41 +317,44 @@ export class AntigravityProviderService {
       this.notifyChanged()
     }
   }
-  /** The stored executable, launch args and variables, as saved (no lookup, no version check). */
-  storedLaunch(): StoredCliConfig {
-    return { ...(this.settings.binaryPath ? { binaryPath: this.settings.binaryPath } : {}), args: storedCliArgs(this.settings), env: storedCliEnv(this.settings) }
-  }
   /** The executable path, launch args and environment set in Settings → Providers. */
   async cliConfig(): Promise<CliProviderConfig> {
     const install = antigravityInstallState(this.installationHome)
     const resolvedBinaryPath = this.binary()
+    const stored = this.launchSettings()
     // The pinned install is verified by hash, so its version is known without starting it.
     const version = resolvedBinaryPath && resolvedBinaryPath === installedAntigravityBinary(this.installationHome)
       ? ANTIGRAVITY_RELEASE.replace(/^agy_acp_server_/, '')
-      : await this.versions.version(resolvedBinaryPath ? directLaunch(resolvedBinaryPath) : undefined, withUserEnv(process.env, storedCliEnv(this.settings)))
+      : await this.versions.version(resolvedBinaryPath ? directLaunch(resolvedBinaryPath) : undefined, withUserEnv(process.env, storedCliEnv(stored)))
     return {
       instanceId: ANTIGRAVITY_INSTANCE_ID,
-      ...(this.settings.binaryPath ? { binaryPath: this.settings.binaryPath } : {}),
+      ...(stored.binaryPath ? { binaryPath: stored.binaryPath } : {}),
       ...(resolvedBinaryPath ? { resolvedBinaryPath } : {}),
       ...(version ? { version } : {}),
-      args: storedCliArgs(this.settings),
-      env: storedCliEnv(this.settings),
+      args: storedCliArgs(stored),
+      env: storedCliEnv(stored),
       // Independent of whether the instance is enabled, which `listConfigured` is not.
       signedIn: this.configured(),
       ...(install.installing ? { installing: true, ...(install.progress ? { installProgress: install.progress } : {}) } : {})
     }
   }
 
+  /** Checks launch settings before the gateway saves them: a manual agent without its helper. */
+  validateLaunch(patch: CliProviderConfigPatch): void {
+    if (typeof patch.binaryPath === 'string') validateManualAntigravityBinary(requireExecutable(patch.binaryPath, 'Antigravity'))
+  }
+
+  /** Why the settings file cannot be used, while that lasts (it is never overwritten then). */
+  settingsProblem(): string | undefined {
+    return this.settingsError
+  }
+
   /**
-   * Saves the launch settings. A thread's agent process is kept between turns, so idle ones close
+   * The launch settings changed. A thread's agent process is kept between turns, so idle ones close
    * now and a busy one is replaced on that thread's next turn (resuming its ACP session).
    */
-  async setCliConfig(patch: CliProviderConfigPatch): Promise<CliProviderConfig> {
-    if (this.stopped) throw new Error('Antigravity provider is stopped')
-    applyCliConfigPatch(this.settings, patch, (path) => validateManualAntigravityBinary(requireExecutable(path, 'Antigravity')))
-    this.save()
+  launchChanged(): void {
     this.relaunchAfterSettingsChange()
-    return this.cliConfig()
   }
 
   /** Idle agent processes close now; a busy one is replaced on that thread's next turn. */
@@ -346,8 +391,8 @@ export class AntigravityProviderService {
       await installAntigravity(this.installationHome, abort.signal, onProgress)
       // A cancel that lands after the download leaves the settings alone.
       abort.signal.throwIfAborted()
-      delete this.settings.binaryPath
-      this.save()
+      // The manual path is dropped from the instance config (and its mirror) through the gateway.
+      if (this.launchSettings().binaryPath && this.options.saveLaunch) await this.options.saveLaunch({ binaryPath: null })
       this.relaunchAfterSettingsChange()
       return await this.cliConfig()
     } catch (error) {

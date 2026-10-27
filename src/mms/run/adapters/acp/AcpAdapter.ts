@@ -103,6 +103,7 @@ export class AcpAdapter implements ProviderAdapter {
       cwd: input.cwd,
       model: input.model,
       ...(plan ? { mode: 'plan' as const } : {}),
+      permissionMode: input.permissionMode,
       prompt: input.prompt,
       images: input.images,
       signal: input.signal,

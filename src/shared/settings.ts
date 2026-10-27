@@ -2,6 +2,7 @@ import type { MousseIntegrationsSettings, SkillModelSettings } from './integrati
 import { MOUSSE_BUILTIN_TOOL_IDS } from './integrations'
 import type { ChatMode } from './types'
 import { getSkillIdFromMode } from './chatMode'
+import { DEFAULT_PERMISSION_MODE, normalizePermissionMode, type PermissionMode } from './permissionMode'
 import { generateRandomUsername } from './randomUsername'
 import { listingServes } from './providerInstances'
 import type { ShortcutOverrides } from './commands'
@@ -51,6 +52,16 @@ export interface NotificationSettings {
   threadCompletionSound: boolean
 }
 
+export interface PermissionSettings {
+  /** Permission mode a thread starts in and uses until it is changed. */
+  defaultMode: PermissionMode
+}
+
+export function normalizePermissionSettings(raw?: Partial<PermissionSettings> | null): PermissionSettings {
+  // Not chosen yet: the default. Chosen but unreadable: the strictest mode.
+  return { defaultMode: raw?.defaultMode === undefined ? DEFAULT_PERMISSION_MODE : normalizePermissionMode(raw.defaultMode) }
+}
+
 export type ContextCompactionTokens = 128000 | 256000 | 384000 | 512000 | 1024000 | 'model-max'
 
 export interface ContextSettings {
@@ -80,6 +91,55 @@ export function resolveContextCompactionTokens(selected: ContextCompactionTokens
   return selected === 'model-max' ? maximum : Math.min(selected, maximum)
 }
 
+/**
+ * What an agent calling the Mousse MCP server may do on threads other than its own and its
+ * delegation lineage (docs/run-engine/SPEC.md §15.1): `lineage` nothing more, `read` list, search and
+ * read other threads, `manage` also change them.
+ */
+export type AgentAccessLevel = 'lineage' | 'read' | 'manage'
+
+export interface AgentAccessSettings {
+  level: AgentAccessLevel
+  /** Projects the level applies to; empty means every project. */
+  projectIds: string[]
+  /** `manage` only: an agent may answer a pending approval on another thread. */
+  answerApprovals: boolean
+}
+
+const AGENT_ACCESS_LEVELS: readonly AgentAccessLevel[] = ['lineage', 'read', 'manage']
+
+export function isAgentAccessLevel(value: unknown): value is AgentAccessLevel {
+  return AGENT_ACCESS_LEVELS.includes(value as AgentAccessLevel)
+}
+
+/** The narrower of two levels; an absent level does not narrow. */
+export function narrowAgentAccess(...levels: Array<AgentAccessLevel | null | undefined>): AgentAccessLevel | undefined {
+  let narrowest: AgentAccessLevel | undefined
+  for (const level of levels) {
+    if (!isAgentAccessLevel(level)) continue
+    if (!narrowest || AGENT_ACCESS_LEVELS.indexOf(level) < AGENT_ACCESS_LEVELS.indexOf(narrowest)) narrowest = level
+  }
+  return narrowest
+}
+
+/**
+ * The setting as the daemon reads it. An absent project list means every project, but a list that is
+ * present and malformed (not an array, or an entry that is not a non-empty string) is a narrowing
+ * that cannot be read, so it fails closed: the level becomes `lineage`, which reaches no other thread,
+ * rather than widening to every project.
+ */
+export function normalizeAgentAccessSettings(raw?: Partial<AgentAccessSettings> | null): AgentAccessSettings {
+  const ids: unknown = raw?.projectIds
+  const malformed =
+    ids !== undefined && ids !== null && (!Array.isArray(ids) || ids.some((id) => typeof id !== 'string' || id.length === 0))
+  if (malformed) return { level: 'lineage', projectIds: [], answerApprovals: false }
+  return {
+    level: isAgentAccessLevel(raw?.level) ? raw.level : 'lineage',
+    projectIds: Array.isArray(ids) ? [...new Set(ids as string[])] : [],
+    answerApprovals: raw?.answerApprovals === true
+  }
+}
+
 export interface MousseSettings {
   profile: {
     username: string
@@ -88,7 +148,9 @@ export interface MousseSettings {
   notifications: NotificationSettings
   /** Keyboard shortcut overrides by command id; only changes are stored, `null` unbinds. */
   shortcuts: ShortcutOverrides
+  permissions: PermissionSettings
   context: ContextSettings
+  agentAccess: AgentAccessSettings
   provider: {
     llmProvider: LlmProviderId
     model: string
@@ -368,7 +430,9 @@ export function getDefaultSettings(): MousseSettings {
       threadCompletionSound: true
     },
     shortcuts: {},
+    permissions: normalizePermissionSettings(),
     context: normalizeContextSettings(),
+    agentAccess: normalizeAgentAccessSettings(),
     provider: {
       llmProvider: '',
       model: ''

@@ -9,6 +9,7 @@ import { EnvelopeAssembler } from './envelopeChunks'
 import { FrameDecoder, encodeFrame, FrameDecodeError, FrameTooLargeError } from './framing'
 import { parseEnvelope } from './validators'
 import {
+  GIT_OPERATIONS_CAPABILITY,
   MMS_PROTOCOL_CHUNK_CAPABILITY,
   MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS,
   MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS,
@@ -51,8 +52,15 @@ const GIT_MUTATION_METHODS: ReadonlySet<string> = new Set([
 export function requestTimeoutFor(method: string): number {
   if (method === 'orchestrator.send' || method === 'bridge.hub.send') return MMS_PROTOCOL_ORCHESTRATOR_SEND_TIMEOUT_MS
   if (method === 'providers.loginOAuth' || method === 'providers.loginApiKey' || method === 'mcp.beginAuth' || method === 'mcp.authenticate') return MMS_PROTOCOL_LOGIN_TIMEOUT_MS
-  if (GIT_MUTATION_METHODS.has(method)) return MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS
+  // Fetches the pull request's head from the network and builds a worktree.
+  if (GIT_MUTATION_METHODS.has(method) || method === 'pullRequests.startThread') return MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS
   return MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS
+}
+
+/** The capability a daemon must have advertised for a connection event type to be believed. */
+function connectionEventCapability(type: ProtocolConnectionEvent['type']): string {
+  if (type === 'mcp.auth-url') return 'integrations.lifecycle.v1'
+  return type === 'git.operation' ? GIT_OPERATIONS_CAPABILITY : 'net.v1'
 }
 
 /** Structured daemon rejection preserved across every local client caller. */
@@ -492,7 +500,7 @@ export class LocalMmsClient implements MmsClient {
       return
     }
     if (env.kind === 'connection_event') {
-      if (!this._hello?.capabilities.includes(env.type === 'mcp.auth-url' ? 'integrations.lifecycle.v1' : 'net.v1')) return
+      if (!this._hello?.capabilities.includes(connectionEventCapability(env.type))) return
       for (const handler of this.connectionEventHandlers) {
         try {
           handler(env)

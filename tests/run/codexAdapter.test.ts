@@ -7,6 +7,7 @@ import { usageLimitError } from '../../src/mms/orchestrator/providerErrors'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { CodexAppServerExitedError } from '../../src/mms/providers/codex/CodexAppServerClient'
 import { CodexTurnFailure } from '../../src/mms/providers/codex/CodexProviderService'
+import { decideUsageLimit } from '../../src/mms/run/pausePolicy'
 import {
   CodexAdapter,
   createCodexProviderService,
@@ -27,7 +28,7 @@ const inn = (frame: unknown): TranscriptFrame => ({ dir: 'in', frame })
 const cue = (frame: unknown): TranscriptFrame => ({ dir: 'cue', frame })
 const note = (method: string, params: unknown): TranscriptFrame => inn({ method, params })
 const text = (value: string) => [{ type: 'text', text: value, text_elements: [] }]
-const WORKSPACE_WRITE = { type: 'workspaceWrite', writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false }
+const SUPERVISED = { type: 'readOnly', networkAccess: false }
 
 /**
  * A new process: `initialize`, the sign-in check and, before the first turn, the check whether the server
@@ -52,8 +53,8 @@ function handshake(firstId = 1, probe = true): TranscriptFrame[] {
 }
 
 const threadParams = (extra: Record<string, unknown> = {}) => ({
-  approvalPolicy: 'on-request',
-  sandbox: 'workspace-write',
+  approvalPolicy: 'untrusted',
+  sandbox: 'read-only',
   model: 'gpt-x',
   modelProvider: 'openai',
   config: { model_provider: 'openai' },
@@ -67,7 +68,7 @@ function threadStart(id: number, params = threadParams(), thread = T): Transcrip
 
 function turnStart(id: number, prompt: string, turn = 'turn-1', extra: Record<string, unknown> = {}): TranscriptFrame[] {
   return [
-    out({ id, method: 'turn/start', params: { threadId: T, input: text(prompt), approvalPolicy: 'on-request', sandboxPolicy: WORKSPACE_WRITE, model: 'gpt-x', ...extra } }),
+    out({ id, method: 'turn/start', params: { threadId: T, input: text(prompt), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x', ...extra } }),
     inn({ id, result: { turn: { id: turn, status: 'inProgress', error: null, items: [] } } }),
     note('turn/started', { threadId: T, turn: { id: turn, status: 'inProgress', error: null } })
   ]
@@ -116,7 +117,7 @@ function service(replay: ReplayTransport, settings: Record<string, unknown> = {}
   chmodSync(binary, 0o755)
   mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
   writeFileSync(settingsPath(), JSON.stringify({ binaryPath: binary, models: [{ id: 'gpt-x', label: 'GPT X' }], ...settings }))
-  const created = createCodexProviderService(home, questions, { launch: replayCodexAppServer(replay) })
+  const created = createCodexProviderService(home, questions, { launch: replayCodexAppServer(replay) }, { launch: () => ({ binaryPath: binary }) })
   services.push(created)
   return created
 }
@@ -132,6 +133,7 @@ function input(overrides: Partial<TurnInput> = {}): TurnInput {
     llmProvider: 'codex',
     modelPinned: true,
     mode: 'agent',
+    permissionMode: 'ask',
     prompt: 'hello',
     messages: [],
     signal: new AbortController().signal,
@@ -181,7 +183,7 @@ function answerQuestions(answer: (request: PendingUserQuestions & { threadId: st
   const asked: Array<PendingUserQuestions & { threadId: string }> = []
   questions.on('pending', (request: PendingUserQuestions & { threadId: string }) => {
     asked.push(request)
-    questions.submitAnswers(request.requestId, answer(request))
+    questions.submitAnswers(request.requestId, answer(request), { kind: 'user' })
   })
   return asked
 }
@@ -366,7 +368,7 @@ describe('CodexAdapter', () => {
       ...message('msg-3', ['three'], 'turn-3'),
       completed('completed', 'turn-3')
     ])
-    const reopened = createCodexProviderService(home, questions, { launch: replayCodexAppServer(resumed) })
+    const reopened = createCodexProviderService(home, questions, { launch: replayCodexAppServer(resumed) }, { launch: () => ({ binaryPath: join(home, 'codex') }) })
     services.push(reopened)
     const third = await new CodexAdapter(() => reopened).startTurn(input({ prompt: 'third', nativeHistory: 'history+two' }), recordingSink(), control(), host())
     resumed.assertDone()
@@ -380,12 +382,12 @@ describe('CodexAdapter', () => {
       inn({ id: 4, error: { code: -32600, message: `no rollout found for thread id ${T}` } }),
       out({ id: 5, method: 'thread/start', params: threadParams() }),
       inn({ id: 5, result: threadResult('thr-2') }),
-      out({ id: 6, method: 'turn/start', params: { threadId: 'thr-2', input: text('Previous conversation (context only; do not repeat earlier actions):\nhistory+three\n\nCurrent request:\nfourth'), approvalPolicy: 'on-request', sandboxPolicy: WORKSPACE_WRITE, model: 'gpt-x' } }),
+      out({ id: 6, method: 'turn/start', params: { threadId: 'thr-2', input: text('Previous conversation (context only; do not repeat earlier actions):\nhistory+three\n\nCurrent request:\nfourth'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
       inn({ id: 6, result: { turn: { id: 'turn-4', status: 'inProgress', error: null } } }),
       note('item/completed', { threadId: 'thr-2', turnId: 'turn-4', item: { type: 'agentMessage', id: 'msg-4', text: 'four' } }),
       note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-4', status: 'completed', error: null } })
     ])
-    const recovering = createCodexProviderService(home, questions, { launch: replayCodexAppServer(broken) })
+    const recovering = createCodexProviderService(home, questions, { launch: replayCodexAppServer(broken) }, { launch: () => ({ binaryPath: join(home, 'codex') }) })
     services.push(recovering)
     const fourth = await new CodexAdapter(() => recovering).startTurn(input({ prompt: 'fourth', nativeHistory: 'history+three' }), recordingSink(), control(), host())
     broken.assertDone()
@@ -461,12 +463,12 @@ describe('CodexAdapter', () => {
       inn({ id: 6, result: threadResult('thr-2') }),
       out({ id: 7, method: 'thread/unsubscribe', params: { threadId: T } }),
       inn({ id: 7, result: { status: 'unsubscribed' } }),
-      out({ id: 8, method: 'turn/start', params: { threadId: 'thr-2', input: text('again'), approvalPolicy: 'on-request', sandboxPolicy: WORKSPACE_WRITE, model: 'gpt-x' } }),
+      out({ id: 8, method: 'turn/start', params: { threadId: 'thr-2', input: text('again'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
       inn({ id: 8, result: { turn: { id: 'turn-2', status: 'inProgress', error: null } } }),
       note('item/completed', { threadId: 'thr-2', turnId: 'turn-2', item: { type: 'agentMessage', id: 'msg-2', text: 'two' } }),
       note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-2', status: 'completed', error: null } }),
       // Same token again: the forked thread is reused as loaded.
-      out({ id: 9, method: 'turn/start', params: { threadId: 'thr-2', input: text('third'), approvalPolicy: 'on-request', sandboxPolicy: WORKSPACE_WRITE, model: 'gpt-x' } }),
+      out({ id: 9, method: 'turn/start', params: { threadId: 'thr-2', input: text('third'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
       inn({ id: 9, result: { turn: { id: 'turn-3', status: 'inProgress', error: null } } }),
       note('item/completed', { threadId: 'thr-2', turnId: 'turn-3', item: { type: 'agentMessage', id: 'msg-3', text: 'three' } }),
       note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-3', status: 'completed', error: null } })
@@ -481,6 +483,109 @@ describe('CodexAdapter', () => {
     replay.assertDone()
     const saved = JSON.parse(readFileSync(settingsPath(), 'utf8')) as { threads: Record<string, { codexThreadId: string }> }
     expect(saved.threads['thread-1'].codexThreadId).toBe('thr-2')
+  })
+
+  it('runs Full access with never-ask approvals and no sandbox, and asks nothing', async () => {
+    const FULL = { type: 'dangerFullAccess' }
+    const replay = transport([
+      ...handshake(),
+      ...threadStart(4, threadParams({ approvalPolicy: 'never', sandbox: 'danger-full-access' })),
+      ...turnStart(5, 'clean up', 'turn-1', { approvalPolicy: 'never', sandboxPolicy: FULL }),
+      // Codex does not ask under `never`; if a request arrives anyway, Mousse accepts without a prompt.
+      inn({ id: 'srv-1', method: 'item/commandExecution/requestApproval', params: { kind: 'command', threadId: T, turnId: 'turn-1', itemId: 'cmd-1', startedAtMs: 0, environmentId: null, command: 'rm -rf build', cwd: '/w', reason: null } }),
+      out({ id: 'srv-1', result: { decision: 'accept' } }),
+      inn({ id: 'srv-2', method: 'item/fileChange/requestApproval', params: { threadId: T, turnId: 'turn-1', itemId: 'patch-1', startedAtMs: 0, reason: null } }),
+      out({ id: 'srv-2', result: { decision: 'accept' } }),
+      ...message('msg-1', ['Done']),
+      completed('completed')
+    ])
+    const codex = service(replay)
+    const asked = answerQuestions(() => ({ permission: 'reject' }))
+    await new CodexAdapter(() => codex).startTurn(input({ prompt: 'clean up', permissionMode: 'full' }), recordingSink(), control(), host())
+    replay.assertDone()
+    expect(asked).toEqual([])
+  })
+
+  it('offers only Allow once and Reject, and accepts or declines with nothing for the session', async () => {
+    const replay = transport([
+      ...handshake(),
+      ...threadStart(4),
+      ...turnStart(5, 'go'),
+      inn({ id: 'srv-1', method: 'item/commandExecution/requestApproval', params: { kind: 'command', threadId: T, turnId: 'turn-1', itemId: 'cmd-1', startedAtMs: 0, environmentId: null, command: 'make', cwd: '/w', reason: null } }),
+      out({ id: 'srv-1', result: { decision: 'accept' } }),
+      ...message('msg-1', ['ok']),
+      completed('completed')
+    ])
+    const codex = service(replay)
+    const asked = answerQuestions(() => ({ permission: 'allow' }))
+    await new CodexAdapter(() => codex).startTurn(input({ prompt: 'go' }), recordingSink(), control(), host())
+    replay.assertDone()
+    expect(asked[0].questions[0].options).toEqual([{ id: 'allow', label: 'Allow once' }, { id: 'reject', label: 'Reject' }])
+  })
+
+  it('asks about a file change only under Ask: Auto-accept edits answers it without a prompt', async () => {
+    const patch = (permissionMode: 'ask' | 'accept_edits') => {
+      const replay = transport([
+        ...handshake(),
+        ...threadStart(4),
+        ...turnStart(5, 'edit'),
+        inn({ id: 'srv-1', method: 'item/fileChange/requestApproval', params: { threadId: T, turnId: 'turn-1', itemId: 'patch-1', startedAtMs: 0, reason: null } }),
+        out({ id: 'srv-1', result: { decision: permissionMode === 'ask' ? 'decline' : 'accept' } }),
+        ...message('msg-1', ['ok']),
+        completed('completed')
+      ])
+      return { replay, run: async () => {
+        const codex = service(replay)
+        const asked = answerQuestions(() => ({ permission: 'reject' }))
+        await new CodexAdapter(() => codex).startTurn(input({ prompt: 'edit', permissionMode }), recordingSink(), control(), host())
+        replay.assertDone()
+        return asked
+      } }
+    }
+    expect(await patch('ask').run()).toHaveLength(1)
+    questions.removeAllListeners('pending')
+    expect(await patch('accept_edits').run()).toEqual([])
+  })
+
+  it('reads a turn without a permission mode as Ask: untrusted approvals, read-only, and an edit is asked about', async () => {
+    const replay = transport([
+      ...handshake(),
+      ...threadStart(4),
+      ...turnStart(5, 'edit'),
+      inn({ id: 'srv-1', method: 'item/fileChange/requestApproval', params: { threadId: T, turnId: 'turn-1', itemId: 'patch-1', startedAtMs: 0, reason: null } }),
+      out({ id: 'srv-1', result: { decision: 'decline' } }),
+      ...message('msg-1', ['ok']),
+      completed('completed')
+    ])
+    const codex = service(replay)
+    const asked = answerQuestions(() => ({ permission: 'reject' }))
+    await new CodexAdapter(() => codex).startTurn(input({ prompt: 'edit', permissionMode: undefined }), recordingSink(), control(), host())
+    replay.assertDone()
+    expect(asked).toHaveLength(1)
+  })
+
+  it('sends the new policy on the turn after a mode change, reopening the loaded thread with it', async () => {
+    const FULL = { type: 'dangerFullAccess' }
+    const replay = transport([
+      ...handshake(),
+      ...threadStart(4),
+      ...turnStart(5, 'one'),
+      ...message('msg-1', ['one']),
+      completed('completed'),
+      out({ id: 6, method: 'thread/fork', params: { threadId: T, excludeTurns: true, ...threadParams({ approvalPolicy: 'never', sandbox: 'danger-full-access' }) } }),
+      inn({ id: 6, result: threadResult('thr-2') }),
+      out({ id: 7, method: 'thread/unsubscribe', params: { threadId: T } }),
+      inn({ id: 7, result: { status: 'unsubscribed' } }),
+      out({ id: 8, method: 'turn/start', params: { threadId: 'thr-2', input: text('two'), approvalPolicy: 'never', sandboxPolicy: FULL, model: 'gpt-x' } }),
+      inn({ id: 8, result: { turn: { id: 'turn-2', status: 'inProgress', error: null, items: [] } } }),
+      note('item/completed', { threadId: 'thr-2', turnId: 'turn-2', item: { type: 'agentMessage', id: 'msg-2', text: 'two' } }),
+      note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-2', status: 'completed', error: null } })
+    ])
+    const codex = service(replay)
+    const adapter = new CodexAdapter(() => codex)
+    await adapter.startTurn(input({ prompt: 'one', permissionMode: 'ask' }), recordingSink(), control(), host())
+    await adapter.startTurn(input({ prompt: 'two', permissionMode: 'full', nativeHistory: 'history+one' }), recordingSink(), control(), host())
+    replay.assertDone()
   })
 
   it('routes command, patch and user-input requests to Mousse questions', async () => {
@@ -521,8 +626,8 @@ describe('CodexAdapter', () => {
   it('runs plan turns read-only and declines approvals without asking', async () => {
     const replay = transport([
       ...handshake(),
-      ...threadStart(4, threadParams({ sandbox: 'read-only' })),
-      ...turnStart(5, 'plan it', 'turn-1', { sandboxPolicy: { type: 'readOnly', networkAccess: false } }),
+      ...threadStart(4, threadParams({ approvalPolicy: 'on-request', sandbox: 'read-only' })),
+      ...turnStart(5, 'plan it', 'turn-1', { approvalPolicy: 'on-request', sandboxPolicy: { type: 'readOnly', networkAccess: false } }),
       inn({ id: 'srv-1', method: 'item/commandExecution/requestApproval', params: { kind: 'command', threadId: T, turnId: 'turn-1', itemId: 'cmd-1', startedAtMs: 0, environmentId: null, command: 'touch x' } }),
       out({ id: 'srv-1', result: { decision: 'decline' } }),
       ...message('msg-1', ['Plan']),
@@ -612,7 +717,7 @@ describe('CodexAdapter', () => {
         inn({ id: 4, result: threadResult() }),
         // The next turn starts a new thread with the history as a preamble.
         ...threadStart(5),
-        out({ id: 6, method: 'turn/start', params: { threadId: T, input: text(`Previous conversation (context only; do not repeat earlier actions):\n${STOPPED}\n\nCurrent request:\nagain`), approvalPolicy: 'on-request', sandboxPolicy: WORKSPACE_WRITE, model: 'gpt-x' } }),
+        out({ id: 6, method: 'turn/start', params: { threadId: T, input: text(`Previous conversation (context only; do not repeat earlier actions):\n${STOPPED}\n\nCurrent request:\nagain`), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
         inn({ id: 6, result: { turn: { id: 'turn-2', status: 'inProgress', error: null, items: [] } } }),
         ...message('msg-2', ['two'], 'turn-2'),
         completed('completed', 'turn-2')
@@ -703,13 +808,62 @@ describe('CodexAdapter', () => {
     expect(committed).toEqual(['history up to the limit'])
   })
 
+  describe('a usage limit reaches the run pause the same way on a managed and on a plain Codex', () => {
+    const resetsAt = new Date(Date.now() + 3_600_000).toISOString()
+    const failing = (failure: Error) =>
+      ({ configured: () => true, chat: async () => { throw failure } }) as unknown as CodexProviderService
+    const turn = (client: CodexProviderService, managed: boolean) =>
+      new CodexAdapter(() => client, managed ? { managed: true } : {}).startTurn(input(), recordingSink(), control(), host()).catch((caught: unknown) => caught)
+    const decide = (error: unknown) =>
+      decideUsageLimit({ error, run: { outcome: {} }, lookup: () => null, cap: 3, autoResume: true, nowMs: Date.now() })
+
+    it('both pause with the provider\'s reset time and window', async () => {
+      const limit = usageLimitError({ provider: 'codex', resetsAt, estimated: false, limitKind: 'five_hour' })
+      const plain = await turn(failing(limit), false)
+      const managed = await turn(failing(usageLimitError({ provider: 'codex', resetsAt, estimated: false, limitKind: 'five_hour' }, new CodexTurnFailure('Usage limit reached', { message: 'Usage limit reached', codexErrorInfo: 'usageLimitExceeded' }))), true)
+
+      // A plain run throws the typed limit; a managed one throws the gateway's code, with the limit as its cause.
+      expect(plain).toMatchObject({ code: 'provider_usage_limit' })
+      expect(managed).toMatchObject({ code: 'rate_limited' })
+      const expected = { action: 'pause', pause: { reason: 'usage_limit', until: resetsAt, estimated: false, provider: 'codex', limitKind: 'five_hour', count: 1, autoResume: true } }
+      expect(decide(plain)).toEqual(expected)
+      expect(decide(managed)).toEqual(expected)
+    })
+
+    it('both pause with an estimate when the provider gave no time', async () => {
+      const managed = await turn(failing(usageLimitError({ provider: 'codex', estimated: true }, new CodexTurnFailure('Usage limit reached', { message: 'Usage limit reached', codexErrorInfo: 'usageLimitExceeded' }))), true)
+      const plain = await turn(failing(usageLimitError({ provider: 'codex', estimated: true })), false)
+      for (const error of [plain, managed]) expect(decide(error)).toMatchObject({ action: 'pause', pause: { estimated: true, provider: 'codex' } })
+    })
+
+    it.each([
+      ['rateLimitExceeded', { message: 'Rate limit reached', codexErrorInfo: 'rateLimitExceeded' }],
+      ['a limit read only from the message of an older server', { message: 'You have hit your usage limit', codexErrorInfo: null }],
+      ['a 429 after Codex gave up retrying', { message: 'Too many requests', codexErrorInfo: { responseTooManyFailedAttempts: { httpStatusCode: 429 } } }]
+    ])('%s pauses on a managed Codex as on a plain one', async (_name, info) => {
+      const cause = () => new CodexTurnFailure(info.message, info as never)
+      const managed = await turn(failing(usageLimitError({ provider: 'codex', resetsAt, estimated: false }, cause())), true)
+      const plain = await turn(failing(usageLimitError({ provider: 'codex', resetsAt, estimated: false }, cause())), false)
+      expect(managed).toMatchObject({ code: 'rate_limited' })
+      expect(decide(managed)).toEqual(decide(plain))
+      expect(decide(managed)).toMatchObject({ action: 'pause', pause: { until: resetsAt, estimated: false } })
+    })
+
+    it('a managed Codex failure that is not a usage limit does not pause', async () => {
+      const overloaded = new CodexTurnFailure('Overloaded', { message: 'Overloaded', codexErrorInfo: 'serverOverloaded' })
+      const managed = await turn(failing(overloaded), true)
+      expect(managed).toMatchObject({ code: 'service_unavailable' })
+      expect(decide(managed)).toBeUndefined()
+    })
+  })
+
   it('interrupts a turn that was stopped before turn/start answered', async () => {
     const controller = new AbortController()
     const replay = transport(
       [
         ...handshake(),
         ...threadStart(4),
-        out({ id: 5, method: 'turn/start', params: { threadId: T, input: text('hello'), approvalPolicy: 'on-request', sandboxPolicy: WORKSPACE_WRITE, model: 'gpt-x' } }),
+        out({ id: 5, method: 'turn/start', params: { threadId: T, input: text('hello'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
         cue({ action: 'stop' }),
         inn({ id: 5, result: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }),
         out({ id: 6, method: 'turn/interrupt', params: { threadId: T, turnId: 'turn-1' } }),

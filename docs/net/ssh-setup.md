@@ -49,7 +49,7 @@ mousse-cli net transport configure ssh --settings-file ssh.json
 
 The host's sshd must allow TCP forwarding to loopback (`AllowTcpForwarding yes`, which is the default). If the daemon is not running, the dial reports "the daemon on `<endpoint>` is not listening on port `<port>`". The usual cause is a reboot with no linger: `loginctl enable-linger <user>` keeps a systemd user service running while nobody is logged in.
 
-To use the route from another computer today, add the host's key to `ssh_known_hosts` (or ssh to it once from a terminal) and write the approval entry shown above. The Devices screen's SSH setup and approve flows will do both from the app.
+To use the route from another computer, approve it under Devices ("SSH route offered"), which checks the host key first and writes the approval for you.
 
 ## Troubleshooting
 
@@ -63,3 +63,47 @@ To use the route from another computer today, add the host's key to `ssh_known_h
 | `uses ProxyJump` / `uses ProxyCommand` | The resolved ssh configuration needs a proxy hop, which is not supported yet. |
 
 A host that needs a browser or interactive step to log in (for example Tailscale SSH "check") cannot be used: `ssh` runs without prompts and its messages are not shown. Use an endpoint that accepts a key or an agent identity.
+
+## Adding a machine from the app
+
+**Settings → Devices → Add device → Remote machine over SSH** sets up a machine you can already `ssh` into. Type a host or a name from your `~/.ssh/config`. The app shows what it will do, runs it, and offers an undo.
+
+You need: a key or agent identity that gets you in without a password, `curl` or `wget`, `sha256sum` or `shasum`, systemd user services, about 500 MB free, the shared libraries the Mousse app links against (GTK, NSS, audio: a bare server image has none, and the check names the missing ones and the `apt-get install` line, with the `t64` package names on Ubuntu 24.04 and Debian 13), and `AllowTcpForwarding` on the machine's sshd. Linux x86_64 machines get Mousse installed. A Mac must already have Mousse. The packaged app keeps its network keys in the OS keyring and never in plain text, so the machine needs a running, unlocked secret service in the user session (on Debian or Ubuntu: `gnome-keyring`, `libsecret-1-0` and `dbus-user-session`; unlocking it without a login is up to you). The launcher and the service unit start the app with `--ozone-platform=headless --disable-gpu --password-store=gnome-libsecret` when there is no display, so a server needs no X server. To check by hand: `ssh <host> 'uname -sm; command -v curl sha256sum systemctl'`.
+
+1. **Host key.** The app asks `ssh` itself for the host's key (so your own `~/.ssh/config` applies) and shows its fingerprint. Nothing is trusted silently: you confirm the fingerprint, and only then does Mousse write that key to its own `ssh_known_hosts`. This step never logs in and never runs a command on the machine. A changed key shows both fingerprints and needs a separate confirmation; a key marked `@revoked` stops. Mousse never edits your `~/.ssh/known_hosts` or a system file.
+2. **Check.** With the key trusted, one read-only script reports the system, any Mousse already there, free disk space and the tools above. A host whose configuration uses `ProxyJump` or `ProxyCommand` is refused with a message saying so (see above). If your key is denied, the app shows the `ssh-copy-id` command. It never asks for a password.
+3. **Plan.** Every change is listed before anything runs. Missing tools, an unrelated `~/.local/bin/mousse-cli` or `mousse-mms.service`, a machine that already belongs to a device set, and a stopped Mousse service that Mousse did not install block it, each with the fix.
+4. **Run.** Every change is written to a journal on this computer first (`<profile>/net/ssh/<id>.json`), so a failed or cancelled run can be retried or undone.
+
+### What runs on the machine
+
+Every command is `exec /bin/sh -c '<script>'` with each value quoted, so a fish or zsh login shell never parses it. Documents and secrets (the invitation, the add-on settings, the checksum line) go on stdin, never in the command line.
+
+| Step | On the machine |
+| --- | --- |
+| Install | Downloads `mousse-cli-<version>-linux-x86_64.AppImage` from the project's GitHub release into `~/.local/share/mousse/cli/<version>/` and checks it against the release's `SHA256SUMS-<version>.txt` (fetched over HTTPS by this computer). If the machine cannot reach GitHub, this computer downloads and verifies the file and sends it over SSH. Unpacks it with `--appimage-extract` and writes the launcher `~/.local/bin/mousse-cli`, a two-line wrapper that sets `ELECTRON_DISABLE_SANDBOX=1`. |
+| Service | `mousse-cli service install --headless` (a systemd user unit, no sudo), then waits for the service. |
+| Linger | `loginctl enable-linger <user>` when it is off. If the machine refuses without an administrator, the step is skipped and the app shows the command to run. |
+| Join | A one-time invitation goes over stdin to `mousse-cli bridge join --name <name> --via ws://127.0.0.1:<port>/mousse-net`. A reverse tunnel (`ssh -R`, with `ExitOnForwardFailure`) lets the machine reach this computer for the join only; pinned TLS and the invitation protect it. |
+| SSH access | `mousse-cli net transport configure ssh --settings-file <private temporary file>` with the endpoint and a fixed loopback port. |
+| Approval | On this computer only: the approval and fingerprint are written to `approvals.json`, the machine's signed routes are adopted, and the first connection is opened. A machine can never approve itself. |
+
+Login shells that cannot take a newline inside single quotes (csh, tcsh) fail on the multi-line scripts with an error from the shell; use sh, bash, zsh or fish as the login shell for the setup.
+
+A machine that already runs Mousse (installed by you) skips Install and Service and is marked external: Mousse never stops, replaces or uninstalls it. A stopped one is not started for you; the app shows the command.
+
+### Undo, update, rename
+
+- **Undo setup** reverses the journaled steps in reverse order, each only while it is still Mousse's and unchanged: the SSH approval, the add-on (restored to what was there before), the device (revoked from this computer), the service and the launcher and install directory that setup created. Setup records a hash of the launcher and of the service unit it wrote; Undo removes them only while they still match, so an edited wrapper or unit is reported and left alone (and the service is left with a changed launcher). Lingering is turned off again only if this setup turned it on. Every invitation the setup issued is resolved from this computer's own records: an unused one is revoked, a used one names the device it admitted and that device is revoked. Anything you changed since is reported and left alone. The machine's data directory (`~/.mousse`) and device identity are never deleted; the app lists the commands if you want them gone.
+- **Update** (only for machines Mousse installed) installs the new version beside the old one, rewrites the launcher, re-runs `service install --headless`, restarts the service and waits for the new version. It never runs `service stop`. If the new version does not answer, the launcher and unit go back to the previous install.
+- **Rename SSH endpoint** changes the address this computer uses. The new address must offer the same host key.
+
+### Clocks
+
+Enrollment and route records are rejected when they are dated in the future, with no allowance for a clock that is behind. Keep the machine's clock synchronized (NTP): with a few tens of milliseconds of difference the join can fail intermittently with `bad_delegation`, `conflict` or `route_unreachable`, and retrying usually works.
+
+### By hand
+
+To undo without the app, on the machine: `mousse-cli net transport configure ssh --disable --settings-file <file>`, `mousse-cli service uninstall`, `rm ~/.local/bin/mousse-cli`, `rm -rf ~/.local/share/mousse/cli`. Then on this computer, revoke the device under Devices and remove its entry from `approvals.json`.
+
+The reverse tunnel for the join also applies any `LocalForward`, `RemoteForward` or `DynamicForward` you configured for that host in `~/.ssh/config` (this is your own configuration for a host you typed, like the `ProxyCommand` note above); `ExitOnForwardFailure` makes a conflicting one fail loudly.

@@ -1,5 +1,6 @@
 import { existsSync } from 'fs'
 import { basename, dirname, join } from 'path'
+import { HEADLESS_DISPLAY_SWITCHES } from '../shared/headlessSwitches'
 
 /** True when this process should run headless mousse-cli (not the GUI). */
 export function detectCliMode(argv: string[] = process.argv): boolean {
@@ -13,9 +14,19 @@ export function detectCliMode(argv: string[] = process.argv): boolean {
   return base === 'mousse-cli' || base === 'mousse-cli.exe'
 }
 
-/** Strip the dual-mode flag so parseArgs only sees CLI arguments. */
+const HEADLESS_SWITCHES: readonly string[] = HEADLESS_DISPLAY_SWITCHES
+
+/**
+ * Strip the dual-mode flag and the display switches so parseArgs only sees CLI arguments. Electron
+ * has already read the switches; left in, `--disable-gpu` would swallow the next word as its value.
+ */
 export function stripCliModeArgs(argv: string[]): string[] {
-  return argv.filter((arg) => arg !== '--cli')
+  return argv.filter((arg) => arg !== '--cli' && !HEADLESS_SWITCHES.includes(arg))
+}
+
+/** The display switches this process was started with, for a daemon it starts. */
+export function headlessSwitchesIn(argv: string[] = process.argv): string[] {
+  return HEADLESS_DISPLAY_SWITCHES.filter((arg) => argv.includes(arg))
 }
 
 /**
@@ -67,7 +78,10 @@ export function resolveCliInvocation(scriptPath?: string): {
     const appEntry = defaultApp ? process.argv[1] : undefined
     return {
       command: process.execPath,
-      argsPrefix: appEntry ? [appEntry, '--cli'] : ['--cli'],
+      // A daemon started from a display-less CLI has no display either.
+      argsPrefix: appEntry
+        ? [appEntry, '--cli', ...headlessSwitchesIn()]
+        : ['--cli', ...headlessSwitchesIn()],
       env: { ...process.env, MOUSSE_CLI: '1' }
     }
   }

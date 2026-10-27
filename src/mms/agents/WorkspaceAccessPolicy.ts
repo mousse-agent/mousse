@@ -37,6 +37,33 @@ export function assertEpisodePath(root: string, input: string): string {
   return target
 }
 
+/**
+ * `assertEpisodePath` across several roots (PR 6 §4): the path, resolved against `base`, must sit
+ * inside one of `roots` with every existing component's real path inside it too (links and
+ * junctions followed). Returns the resolved path and the root that holds it.
+ */
+export function assertInsideRoots(roots: readonly string[], input: string, base: string): { path: string; root: string } {
+  const target = resolve(base, input)
+  for (const root of roots) {
+    let owned: string
+    try {
+      owned = realpathSync.native(root)
+    } catch {
+      continue
+    }
+    // A root named through a link (`/tmp` for `/private/tmp`) holds what lies under either name.
+    const lexical = resolve(root)
+    const candidate = inside(owned, target) ? target : inside(lexical, target) ? resolve(owned, relative(lexical, target)) : undefined
+    if (candidate === undefined) continue
+    try {
+      return { path: assertEpisodePath(owned, candidate), root }
+    } catch {
+      // Lexically inside but a link leads out: try the next root, which may hold the real path.
+    }
+  }
+  throw new Error('Tool path is outside the folders this bot may use')
+}
+
 export function createAgentToolAccess(policy: AgentWorkspacePolicy, root: string,
   writer?: <T>(run: () => Promise<T>) => Promise<T>): AgentToolAccess {
   const allows = (tool: string): boolean => policy.access === 'write' || READ_TOOLS.has(tool) || DELEGATION_TOOLS.has(tool)

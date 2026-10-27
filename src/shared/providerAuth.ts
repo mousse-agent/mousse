@@ -113,12 +113,17 @@ export interface ProviderUsageWindow {
   resetsAt?: string
 }
 
+/** Where ChatGPT shows a plan's usage. The usage page links to it; Mousse never reads it. */
+export const CHATGPT_USAGE_URL = 'https://chatgpt.com/settings/usage'
+
 export interface ProviderUsage {
   id: string
   label: string
   status: 'available' | 'unavailable' | 'error'
   windows: ProviderUsageWindow[]
   message?: string
+  /** Where the provider's own usage page is, when Mousse cannot show the numbers itself. */
+  manageUrl?: string
 }
 
 export interface ProvidersUsageResponse {

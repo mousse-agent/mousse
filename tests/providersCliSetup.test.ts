@@ -3,10 +3,11 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { describeStatus, type InstanceSnapshot } from '../src/shared/harness/status'
 import type { ProviderLoginOption } from '../src/shared/providerAuth'
-import { AgentConnectStep, CustomCommandStep, addChoices, type AddChoice } from '../src/renderer/components/providers/AddProviderDialog'
-import { AccountRow, BinaryRow, PlanUsageRow, SetupRow, UpdateRow, type InstanceActions } from '../src/renderer/components/providers/CliSections'
+import { AgentConnectStep, CustomCommandStep, addChoices, onFoldedKey, type AddChoice } from '../src/renderer/components/providers/AddProviderDialog'
+import { moveTargets } from '../src/renderer/components/providers/MoveProviderDialog'
+import { AccountRow, BinaryRow, SetupRow, UpdateRow, type InstanceActions } from '../src/renderer/components/providers/CliSections'
 import { ProviderModelsSection, bulkVisibilityPatch, capabilityChips, displayModels, modelsSummary, movedOrder, nextOrder } from '../src/renderer/components/providers/ProviderModelsSection'
-import { AgentEditor, allowsCustomModels } from '../src/renderer/components/providers/ProviderEditor'
+import { AgentEditor, ApiEditor, allowsCustomModels, engineSetting } from '../src/renderer/components/providers/ProviderEditor'
 import { ProviderListRow, StatusLine, shortStatus } from '../src/renderer/components/providers/parts'
 import { offersRedirectPaste, refusedText } from '../src/renderer/components/providers/SignInDialog'
 import { commandLabel, modelsFreshness, parseEnvLines, switchStateOf } from '../src/renderer/components/providers/providerView'
@@ -59,14 +60,12 @@ describe('Setup row: the status and its one next step', () => {
     expect(buttons(html)).toEqual(['Sign in'])
   })
 
-  it('signs a managed ChatGPT entry in with Continue with ChatGPT, and links its usage without a meter', () => {
+  it('signs a managed ChatGPT entry in with Continue with ChatGPT, and shows no usage on its card', () => {
     const managed = { driver: 'codex' as const, config: { home: 'private' as const, args: [], env: {}, setup: 'managed' as const } }
     expect(buttons(setupRow({ ...managed, auth: { state: 'signed_out', account: undefined } }))).toEqual(['Continue with ChatGPT'])
-    const usage = renderToStaticMarkup(createElement(PlanUsageRow, { snapshot: snapshot(managed) }))
-    expect(usage).toContain('ChatGPT plan usage')
-    expect(buttons(usage)).toEqual(['Manage usage'])
-    expect(usage).not.toMatch(/meter|progress|%/)
-    expect(renderToStaticMarkup(createElement(PlanUsageRow, { snapshot: snapshot({ driver: 'codex' }) }))).toBe('')
+    // Usage lives on the usage page, never in provider settings.
+    const editor = renderToStaticMarkup(createElement(AgentEditor, { snapshot: snapshot(managed), status: describeStatus(snapshot(managed)), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
+    expect(editor).not.toMatch(/usage/i)
   })
 
   it('offers Sign in for an agent whose account is not checked but that offers its sign-in', () => {
@@ -318,7 +317,8 @@ describe('Add provider choices', () => {
       ['new', 'Cursor'],
       ['new', 'Grok'],
       ['new', 'Custom command'],
-      ['registry', 'More ACP agents…']
+      ['registry', 'More ACP agents…'],
+      ['new', 'Claude Code (API key)']
     ])
   })
 
@@ -346,7 +346,8 @@ describe('Add provider choices', () => {
       ['new', 'Cursor'],
       ['new', 'Grok'],
       ['new', 'Custom command'],
-      ['registry', 'More ACP agents…']
+      ['registry', 'More ACP agents…'],
+      ['new', 'Claude Code (API key)']
     ])
     expect(choices.every((choice) => choice.kind === 'registry' || (choice.kind === 'new' && (choice.driver === 'codex' || choice.existing === undefined)))).toBe(true)
   })
@@ -362,6 +363,26 @@ describe('Add provider choices', () => {
     ])
     expect(choices.filter((choice) => choice.kind === 'api').map((choice) => choice.label)).toEqual(['openai'])
     expect(choices.find((choice) => choice.key === 'new:cursor')).toMatchObject({ label: 'Cursor', group: 'Agents' })
+  })
+
+  it('offers an Anthropic API key as Claude Code on that key, never as a model API, and apart from the user’s own Claude Code', () => {
+    const keyEntry = snapshot({ instanceId: 'claude:api', displayName: 'Claude Code (API key)', config: { home: 'private', args: [], env: {}, loginMethod: 'api_key' } })
+    const choices = addChoices([codex, keyEntry], [loginOption('anthropic'), loginOption('openai')])
+    expect(choices.filter((choice) => choice.kind === 'api').map((choice) => choice.label)).toEqual(['openai'])
+    expect(choices.find((choice) => choice.key === 'new:claude:api')).toMatchObject({ kind: 'new', label: 'Claude Code (API key)', group: 'API keys', driver: 'claude', iconId: 'anthropic', target: { slug: 'api', loginMethod: 'api_key' } })
+    // The key entry is not the user's own Claude Code: that is still offered as itself.
+    expect(choices.find((choice) => choice.key === 'new:claude')).toMatchObject({ label: 'Claude Code', existing: undefined })
+    expect(onFoldedKey(keyEntry)).toBe(true)
+    expect(onFoldedKey(claude)).toBe(false)
+  })
+
+  it('moves pi:anthropic only to Claude Code on an API key', () => {
+    const keyEntry = snapshot({ instanceId: 'claude:api', displayName: 'Claude Code (API key)', config: { home: 'private', args: [], env: {}, loginMethod: 'api_key' } })
+    const anthropic = snapshot({ instanceId: 'pi:anthropic', driver: 'pi', displayName: 'Anthropic' })
+    expect(moveTargets(anthropic, [claude, codex, anthropic])).toEqual([])
+    expect(moveTargets(anthropic, [claude, keyEntry, anthropic]).map((entry) => entry.instanceId)).toEqual(['claude:api'])
+    const moved = snapshot({ instanceId: 'pi:anthropic', driver: 'pi', displayName: 'Anthropic', config: { home: 'default', args: [], env: {}, movedTo: 'claude:api' } })
+    expect(moveTargets(moved, [keyEntry])).toEqual([])
   })
 
   it('shows a provider with several sign-in methods once, with its methods to choose from', () => {
@@ -543,5 +564,41 @@ describe('Agent editor scope', () => {
     const notes = (html: string) => html.split('Applies to this device, in every project.').length - 1
     expect(notes(editor({ kind: 'project', projectId: 'p1' }))).toBe(4)
     expect(notes(editor({ kind: 'device' }))).toBe(0)
+  })
+})
+
+describe('Advanced → Engine of a model API', () => {
+  const api = (overrides: SnapshotOverrides, options: { switchHandler?: boolean } = {}) => {
+    const entry = snapshot({ instanceId: 'pi:openai', driver: 'pi', displayName: 'OpenAI', ...overrides })
+    const onSetEngine = options.switchHandler === false ? undefined : noop
+    return renderToStaticMarkup(createElement(ApiEditor, { snapshot: entry, setup: null, onRemove: noop, onSaveModelPrefs: noop, onRefreshModels: noop, onSetEngine }))
+  }
+  const checked = (html: string) => [...html.matchAll(/role="radio" aria-checked="true"[^>]*>(.*?)<\/button>/g)].map((match) => match[1].replace(/&#x27;/g, "'"))
+
+  it('offers Legacy and New engine, with Legacy (the default) selected when nothing is stored', () => {
+    const html = api({ engine: { effective: 'legacy', switchable: true } })
+    expect(html).toContain('Advanced')
+    expect(html).toContain('Engine')
+    expect(buttons(html).map((label) => label.replace(/&#x27;/g, "'"))).toEqual(expect.arrayContaining(['Legacy', 'New engine']))
+    expect(checked(html)).toEqual(['Legacy'])
+    expect(html.replace(/&#x27;/g, "'")).toContain("New engine runs this provider on Pi's own agent.")
+  })
+
+  it('shows the stored New engine choice', () => {
+    expect(checked(api({ engine: { setting: 'rpc', effective: 'rpc', switchable: true } }))).toEqual(['New engine'])
+  })
+
+  it('has no Engine row for a provider on one engine, another driver, or an older daemon', () => {
+    for (const engine of [{ effective: 'legacy' as const, switchable: false }, undefined]) {
+      const html = api({ engine })
+      expect(html).not.toContain('Engine')
+      expect(html).not.toContain('Advanced')
+    }
+    expect(api({ engine: { effective: 'rpc', switchable: true } }, { switchHandler: false })).not.toContain('Engine')
+  })
+
+  it('stores nothing for the default (Legacy) and rpc for New engine', () => {
+    expect(engineSetting('legacy')).toBeNull()
+    expect(engineSetting('rpc')).toBe('rpc')
   })
 })

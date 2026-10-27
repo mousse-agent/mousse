@@ -1,3 +1,4 @@
+import type { StartPullRequestThreadInput } from '../../shared/pullRequests'
 import { openSubagentParentRow, visibleThreads } from '../../shared/threadLineage'
 import { findUnstartedThread } from '../../shared/threadTitle'
 import { confirmNavigation } from '../services/navigationGuards'
@@ -39,6 +40,20 @@ export async function createAndSelectProjectThread(projectId: string): Promise<v
   // The daemon's threads:updated broadcast can arrive after the first message is sent.
   store.upsertThread(thread)
   await selectThread(thread.id)
+}
+
+/**
+ * Starts a thread from a pull request, opens it, and puts the pull request's title, description and review comments in
+ * its composer for the person to send or edit. The daemon has already created the worktree at the pull request's head.
+ */
+export async function openThreadFromPullRequest(input: StartPullRequestThreadInput): Promise<void> {
+  const store = useAppStore.getState()
+  const result = await window.mousse.pullRequests.startThread(input)
+  store.setThreadsSidebarView('threads')
+  // The daemon's threads:updated broadcast can arrive after the thread is selected.
+  store.upsertThread(result.thread)
+  store.setComposerDraft(result.thread.id, result.seed)
+  await selectThread(result.thread.id)
 }
 
 /** Moves to the next (1) or previous (-1) thread in the sidebar's order, wrapping at the ends. */

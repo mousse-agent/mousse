@@ -202,6 +202,39 @@ describe('ThreadRuntime over the protocol', () => {
     await c2.close()
   })
 
+  it('threads.setPermissionMode stores the mode, records an event and leaves a pending question alone', async () => {
+    const thread = mms.threads.createThread('Mode')
+    const wait = mms.questions.requestAnswers([{ id: 'q1', prompt: 'Choose', options: [{ id: 'a', label: 'A' }] }], thread.id)
+    await vi.waitFor(() => expect(mms.questions.listPendingForThread(thread.id)).toHaveLength(1))
+    const c = await client()
+
+    const result = await c.request<{ thread: { permissionMode?: string } }>('threads.setPermissionMode', { threadId: thread.id, mode: 'ask' })
+    expect(result.thread.permissionMode).toBe('ask')
+    expect(mms.threads.getThread(thread.id)?.permissionMode).toBe('ask')
+    expect(mms.runEngine.listEvents(thread.id).filter((event) => event.type === 'thread.permission_mode'))
+      .toEqual([expect.objectContaining({ payload: expect.objectContaining({ from: null, to: 'ask' }) })])
+    // The question raised under the old mode is still pending and answerable.
+    const pendingId = mms.questions.listPendingForThread(thread.id)[0].requestId
+    expect(mms.questions.listPendingForThread(thread.id)).toHaveLength(1)
+
+    await expect(c.request('threads.setPermissionMode', { threadId: thread.id, mode: 'yolo' })).rejects.toMatchObject({ code: 'invalid_params' })
+    await expect(c.request('threads.setPermissionMode', { threadId: 'missing', mode: 'full' })).rejects.toMatchObject({ code: 'thread_not_found' })
+    await expect(c.request('threads.setPermissionMode', { threadId: thread.id, mode: 'full', extra: true })).rejects.toBeTruthy()
+    expect(mms.threads.getThread(thread.id)?.permissionMode).toBe('ask')
+
+    mms.questions.submitAnswers(pendingId, { q1: 'a' }, { kind: 'user' })
+    await wait
+    await c.close()
+  })
+
+  it('orchestrator.send takes no permission mode: the mode is the thread\'s, never a per-message override', async () => {
+    const thread = mms.threads.createThread('NoOverride')
+    const c = await client()
+    await expect(c.request('orchestrator.send', { threadId: thread.id, content: 'hi', permissionMode: 'full' })).rejects.toBeTruthy()
+    expect(mms.orchestrator.getMessagesForPersistence(thread.id)).toEqual([])
+    await c.close()
+  })
+
   it('answering a question records a visible user message in the transcript', async () => {
     const thread = mms.threads.createThread('QVisible')
     const wait = mms.questions.requestAnswers(

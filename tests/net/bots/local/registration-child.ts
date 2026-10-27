@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { MousseMainService } from '../../../../src/mms/MousseMainService'
-import { BotLocalService } from '../../../../src/mms/bots/BotLocalService'
+import { BotLocalService } from '../../../../src/mms/bots/space/BotLocalService'
 import { decodeEnvelope } from '../../../../src/mms/net/sync/codec'
 import { newId } from '../../../../src/shared/net'
 

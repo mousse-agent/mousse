@@ -19,6 +19,7 @@ export type {
   AgentExecutionResult,
   AgentRuntimeInput,
   AgentRuntimeResult,
+  AgentRuntimePort,
   NativeAgentRuntimePort
 } from '../../shared/agents/execution'
 export {

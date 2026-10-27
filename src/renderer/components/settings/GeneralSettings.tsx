@@ -3,7 +3,9 @@ import type { MousseSettings, MousseSettingsUpdate, SettingsOptions, ThemeId } f
 import type { UpdateState } from '../../../shared/updates'
 import { subscribeToUpdates, updateActions, useUpdateStore } from '../../stores/updateStore'
 import { InstallConfirm } from '../updates/InstallConfirm'
-import { Bell, Download, Info, Loader2, Palette, RefreshCw, RotateCcw } from '../../lib/icons'
+import { Bell, Download, Info, Loader2, Palette, RefreshCw, RotateCcw, ShieldCheck } from '../../lib/icons'
+import { describePermissionMode, PERMISSION_MODES } from '../../../shared/permissionMode'
+import { Select } from '../ui/Select'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 
 /** Set at build time from package.json (electron.vite.config.ts). */
@@ -178,6 +180,21 @@ export function GeneralSettings({
               label="Render math"
               checked={appearance.renderMath}
               onChange={(renderMath) => void onUpdate({ appearance: { ...appearance, renderMath } })}
+            />
+          }
+        />
+      </SettingsGroup>
+
+      <SettingsGroup title="Permissions" icon={ShieldCheck}>
+        <SettingsRow
+          title="Default permission mode"
+          description="What an agent may do in a new chat without asking. Each chat can change it from the composer."
+          control={
+            <Select
+              ariaLabel="Default permission mode"
+              value={settings.permissions.defaultMode}
+              onChange={(defaultMode) => void onUpdate({ permissions: { defaultMode } })}
+              options={PERMISSION_MODES.map((mode) => ({ value: mode, label: describePermissionMode(mode) }))}
             />
           }
         />

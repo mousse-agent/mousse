@@ -97,10 +97,41 @@ export interface PiRequestRequest {
   /** The attempt token of the turn the extension last fetched ('' before the first); informational. */
   attemptToken: string
   kind: 'request'
+  /**
+   * What the request would spend (every `streamSimple` request; Mousse reserves it when the live
+   * turn has token or USD limits). Prices and cap support are Mousse's own, from its catalogue.
+   */
+  spend?: PiSpendRequest
 }
 
-/** `reason`: one of the fixed request-path texts (`messages.ts`), never a number. */
-export type PiRequestResponse = { ok: true } | { ok: false; reason: string }
+/** One request's reservation ask (`harness/pi/reservation.ts` computes every number). */
+export interface PiSpendRequest {
+  /** Upper bound of the input tokens. */
+  inputBound: number | null
+  /** The output cap pi-ai would send as Pi asked for the request; null when it would send none. */
+  wireCap: number | null
+  /** The thinking budget pi-ai adds to the cap (0 when none). */
+  thinkingBudget: number
+  /** The request's model: it must be the turn's. */
+  model: { provider: string; id: string; api: string }
+}
+
+/**
+ * `reason`: one of the fixed request-path texts (`messages.ts`), never a number. `reservation`: the
+ * request is reserved, and must go with exactly `cap` as its wire cap. `spendRequired`: the live
+ * turn reserves and the request came without `spend`; nothing was charged, and it may ask again
+ * with it.
+ */
+export type PiRequestResponse = { ok: true; reservation?: { id: string; cap: number } } | { ok: false; reason: string; spendRequired?: true }
+
+/**
+ * `/pi/settle`, once a reserved request ended: `released` when nothing was sent (refused before
+ * the HTTP call), `used` with its usage (`partial` when it failed or stopped after being sent).
+ */
+export interface PiSettleRequest {
+  reservationId: string
+  outcome: { kind: 'released' } | { kind: 'used'; input: number; output: number; usd: number; partial?: boolean }
+}
 
 /** `/pi/quiesce`: a delegation tool waits here before it runs (no parent mutation authorized or running). */
 export interface PiQuiesceRequest {
@@ -121,4 +152,30 @@ export interface PiGroupRequest {
 export interface PiFatalRequest {
   reason: 'register_provider' | 'catalog'
   message: string
+}
+
+/**
+ * An OAuth credential as Pi stores it in its private `auth.json` (PR 2 §5 "OAuth broker"). `refresh`
+ * is Mousse's opaque handle, never the real refresh token; the other fields are what pi-ai's stock
+ * `toAuth`/`filterModels` read (Copilot's `enterpriseUrl` and `availableModelIds`).
+ */
+export interface PiOAuthCredential {
+  type: 'oauth'
+  access: string
+  /** `mousse:<instanceId>:<nonce>`. */
+  refresh: string
+  expires: number
+  [field: string]: unknown
+}
+
+/** `/pi/credential`: Pi's `refresh` of an OAuth provider; Mousse is the only refresher. */
+export interface PiCredentialRequest {
+  providerId: string
+  /** The `refresh` value Pi holds for the provider. */
+  handle: string
+}
+
+/** Any refusal or failure is a non-2xx answer with no detail. */
+export interface PiCredentialResponse {
+  credential: PiOAuthCredential
 }

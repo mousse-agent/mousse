@@ -9,10 +9,11 @@ import {
   computeWindow,
   keyTargetScrollTop,
   nextScrollTop,
-  pickAnchor,
+  pickReadingNode,
   reconcileWindow,
   stepSettle,
   windowSpacers,
+  type AnchorEdge,
   type AnchorNode,
   type ScrollAlign,
   type TurnLayout,
@@ -46,6 +47,8 @@ type HeldAnchor = {
   /** Position in scroll-content space when it was picked. */
   pos: number;
   key: string;
+  /** The edge of the element that `pos` measures; a text range is always held by its top. */
+  edge: AnchorEdge;
 };
 
 type DomNode = AnchorNode & { el: Element };
@@ -255,7 +258,11 @@ function createEngine(
       if (rect.width !== 0 || rect.height !== 0) {
         return anchorDelta({
           posBefore: held.pos,
-          posAfter: scrollSpace(container, containerTop, rect.top),
+          posAfter: scrollSpace(
+            container,
+            containerTop,
+            held.edge === "bottom" ? rect.bottom : rect.top,
+          ),
         });
       }
     }
@@ -284,21 +291,30 @@ function createEngine(
     if (!rowEl) return null;
     const key = keyOfEl.get(rowEl)!;
     const root = domNode(rowEl, rowEl.getBoundingClientRect(), true);
-    const path = pickAnchor(root, topEdge);
-    const picked = path.length > 0 ? path[path.length - 1]! : root;
+    const { node: picked, edge } = pickReadingNode(root, topEdge);
     const rect = picked.el.getBoundingClientRect();
-    let target: Element | Range = picked.el;
-    let top = rect.top;
     if (rect.top < topEdge) {
       // A tall leaf straddles the edge: hold the text at the edge, so a reflow
       // inside the leaf moves the reading point and not just the leaf's top.
       const range = readingRange(picked.el, rect, topEdge);
       if (range) {
-        target = range;
-        top = range.getBoundingClientRect().top;
+        return {
+          target: range,
+          pos: scrollSpace(container, containerTop, range.getBoundingClientRect().top),
+          key,
+          edge: "top",
+        };
       }
     }
-    return { target, pos: scrollSpace(container, containerTop, top), key };
+    // No text to hold. A node that straddles the edge is held by its bottom, so
+    // growth inside it above the edge (an unrendered block that expands, the
+    // content above a row's toolbar) moves the held position and is corrected.
+    return {
+      target: picked.el,
+      pos: scrollSpace(container, containerTop, edge === "bottom" ? rect.bottom : rect.top),
+      key,
+      edge,
+    };
   };
 
   /**

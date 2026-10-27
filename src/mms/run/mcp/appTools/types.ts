@@ -2,9 +2,12 @@ import type { Tool, ToolCall } from '@earendil-works/pi-ai'
 import type { SkillDescriptor } from '../../../../shared/integrations'
 import type { IntegrationActor } from '../../../../shared/integrations/actor'
 import { APPROVALS_REFUSED_MESSAGE, QUESTIONS_REFUSED_MESSAGE } from '../../../../shared/harness/types'
+import type { PermissionMode } from '../../../../shared/permissionMode'
+import type { AgentAccessLevel } from '../../../../shared/settings'
 import type { ChatMode } from '../../../../shared/types'
 import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
 import type { DefinitionAuthority } from '../../../agentDefinitions/definitionGate'
+import type { BotAuthority } from '../../../../shared/bots/personal/authority'
 import type { BrowserExecutionBinding } from '../../../orchestrator/browser'
 import type { LlmToolEvent, StreamingLlmToolEvent } from '../../../harness/turnEvents'
 import type { ModeCeiling } from '../../types'
@@ -16,10 +19,34 @@ import type { DelegationToolHost } from './delegation'
  * - `actsAsCaller`: acts on the caller's own thread and run (delegation, questions, plans, tasks).
  * - `writesThreads`: writes a thread named by `threadId`; only the caller's thread is allowed.
  * - `startsThreads`: creates threads; refused under a `plan` ceiling.
+ * - `editsWorkspace`: changes the caller's workspace or hands work over to it (integration, merge-back);
+ *   only the caller's own thread, and it asks the thread's user first unless the caller's permission
+ *   mode allows edits.
+ * - `readsOthers`: reads threads other than the caller's own (`thread_read`, `thread_list`, `thread_search`);
+ *   the registry checks the caller's agent access level before the handler runs and the handler
+ *   limits what it returns by `ctx.scope`.
+ * - `managesOthers`: changes threads other than the caller's own; needs the `manage` level.
  */
-export type ToolAccess = 'reads' | 'actsAsCaller' | 'writesThreads' | 'startsThreads'
+export type ToolAccess = 'reads' | 'actsAsCaller' | 'writesThreads' | 'startsThreads' | 'editsWorkspace' | 'readsOthers' | 'managesOthers'
 
-export const ACCESS_CLASSES: ReadonlySet<string> = new Set<ToolAccess>(['reads', 'actsAsCaller', 'writesThreads', 'startsThreads'])
+export const ACCESS_CLASSES: ReadonlySet<string> = new Set<ToolAccess>(['reads', 'actsAsCaller', 'writesThreads', 'startsThreads', 'editsWorkspace', 'readsOthers', 'managesOthers'])
+
+/**
+ * How a caller reaches the thread a `readsOthers` or `managesOthers` call targets: its own thread, a
+ * thread below it in the delegation tree (`descendant`), above it or beside it (`ancestor_or_sibling`),
+ * a thread it launched, or any other thread through its agent access level (`read`, `manage`).
+ */
+export type ToolScope = 'own' | 'descendant' | 'ancestor_or_sibling' | 'launched' | 'read' | 'manage'
+
+/** How a thread other than the caller's is related to it without the access level. */
+export type ThreadRelation = 'descendant' | 'ancestor_or_sibling' | 'launched'
+
+/** Agent access levels from narrowest to widest. */
+export const ACCESS_LEVEL_ORDER: readonly AgentAccessLevel[] = ['lineage', 'read', 'manage']
+
+export function levelAtLeast(level: AgentAccessLevel, needed: AgentAccessLevel): boolean {
+  return ACCESS_LEVEL_ORDER.indexOf(level) >= ACCESS_LEVEL_ORDER.indexOf(needed)
+}
 
 /**
  * What a call does to the parent's work, read by the gate and the writer barrier of runtimes that
@@ -36,6 +63,8 @@ export interface McpCaller {
   runId: string
   provider: string
   modeCeiling: ModeCeiling
+  /** The level the run was granted at turn start; the call-time check narrows it by the profile's setting as it is then. */
+  accessLevel: AgentAccessLevel
 }
 
 /** A mode's permissions as tool selection reads them. */
@@ -62,6 +91,16 @@ export interface AppToolTurn {
   /** What the mode allows, from its descriptor (`ModeRegistry`). */
   modeFacts: ModeFacts
   modeCeiling: ModeCeiling
+  /**
+   * The permission mode an in-process turn runs in (`LlmChatOptions.permissionMode`); an MCP turn's is
+   * read from its run's binding (`ToolRegistryOptions.permissionModeFor`). Absent: no tool asks.
+   */
+  permissionMode?: PermissionMode
+  /**
+   * The agent access level granted to the run, decided at turn start (SPEC §15.1); absent is
+   * `lineage`. The call-time check also narrows it by the profile's setting as it is then.
+   */
+  accessLevel?: AgentAccessLevel
   /** A Mousse subagent implementing a delegated task in the in-process loop (`LlmChatOptions.subagent`). */
   subagent: boolean
   /** The read-only pre-allocation phase of such a subagent (`LlmChatOptions.subagentDiscovery`). */
@@ -88,6 +127,11 @@ export interface AppToolTurn {
    */
   definition?: DefinitionAuthority
   /**
+   * A bot turn (PR 6 §4): every app-tool call is held to the bot's grant before it runs, and its
+   * skills are only the granted ones.
+   */
+  bot?: BotAuthority
+  /**
    * The run refuses everything that would wait for the user (`RunPolicy.approvals: 'never'`):
    * tools that ask for approval or put a question to the user are refused at call time.
    */
@@ -109,6 +153,8 @@ export interface ToolCallContext {
   toolCallId: string
   /** Aborted when the request closes, the caller's run ends or the in-process turn stops. */
   signal: AbortSignal
+  /** Set by the registry's central check for `readsOthers` and `managesOthers` tools. */
+  scope?: ToolScope
   transport: 'mcp' | 'in_process'
   /** In-process calls only: the caller's timeline. */
   timeline?: ToolTimeline
@@ -146,6 +192,8 @@ export type Availability = true | string
 export interface ToolListing {
   readOnly: boolean
   modeCeiling: ModeCeiling
+  /** The caller's effective agent access level; absent is `lineage`, which hides tools that need more. */
+  accessLevel?: AgentAccessLevel
 }
 
 export interface MousseTool {
@@ -154,6 +202,8 @@ export interface MousseTool {
   /** Plain JSON Schema (no TypeBox symbols), byte-identical to `definition`'s parameters. */
   inputSchema: JsonSchema
   access: ToolAccess
+  /** The permission key an `editsWorkspace` tool asks under (`src/shared/permissionKeys.ts`). */
+  permissionKey?: string
   class: ToolClass
   /**
    * A read-only (`shared`) delegated child may call this although it is not a `reads` tool: it
@@ -177,6 +227,22 @@ export interface MousseTool {
   listed?(listing: ToolListing): boolean
   /** The timeline title of a call. */
   describe?(args: Record<string, unknown>): string
+  /**
+   * What a `readsOthers` or `managesOthers` call targets. Default: the thread `args.threadId` names
+   * (the caller's own when absent). `undefined`: the caller's own thread. A target without a
+   * `threadId` is a listing: it needs the class's level and, with a `projectId`, that project.
+   */
+  target?(args: Record<string, unknown>, caller: McpCaller): { threadId?: string; projectId?: string } | undefined
+  /** The lowest agent access level that can use the tool; `tools/list` hides it from callers below. */
+  minLevel?: AgentAccessLevel
+  /** A `managesOthers` tool that also accepts a thread the caller launched, at any level. */
+  launchedOk?: true
+  /**
+   * A tool that takes a thread id the central check does not cover (the check covers `threadId` of a
+   * `readsOthers`, `managesOthers` or `writesThreads` tool) says here, in a few words, where the handler
+   * checks it. Registration refuses such a tool without it.
+   */
+  threadArgChecked?: string
   handler(args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> | ToolOutcome
 }
 
@@ -185,13 +251,15 @@ export type McpToolErrorCode =
   | 'mousse_caller_not_live'
   | 'mousse_ceiling_exceeded'
   | 'mousse_read_only'
+  | 'mousse_conflict'
   | 'mousse_unknown_tool'
 
-/** A refusal the server reports as a JSON-RPC error, not as a tool result. */
+/** A refusal the server reports as a JSON-RPC error, not as a tool result; `details` go into its `data`. */
 export class McpToolError extends Error {
   constructor(
     readonly code: McpToolErrorCode,
-    message: string
+    message: string,
+    readonly details?: Record<string, unknown>
   ) {
     super(`${code}: ${message}`)
     this.name = 'McpToolError'
@@ -199,7 +267,7 @@ export class McpToolError extends Error {
 }
 
 export type ToolLedger = {
-  start(call: ToolCall): string | undefined
+  start(call: ToolCall, options?: { idempotent?: boolean }): string | undefined
   commit(id: string): void
   failed(id: string): void
 }

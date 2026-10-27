@@ -1,9 +1,9 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { createElement } from 'react'
+import { createElement, isValidElement, type ReactElement, type ReactNode } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { GitSectionView } from '../src/renderer/components/sideCard/GitSection'
+import { GitSectionView, PullRequestLink } from '../src/renderer/components/sideCard/GitSection'
 import {
   branchChoices,
   branchLabel,
@@ -16,6 +16,7 @@ import {
   gitErrorCode,
   gitErrorMessage,
   commitMenuState,
+  pullRequestRow,
   relativeTime,
   untrackedFileCount
 } from '../src/renderer/components/sideCard/gitSectionLogic'
@@ -38,6 +39,7 @@ import {
   type GitStatusView
 } from '../src/renderer/stores/gitStatusStore'
 import { anyTurnEnded } from '../src/renderer/lib/turnEnded'
+import { useAppStore } from '../src/renderer/stores/appStore'
 import type { PullRequestComment, PullRequestDetail } from '../src/shared/pullRequests'
 import type {
   GitBranchInfo,
@@ -300,10 +302,10 @@ describe('shared git status store', () => {
     const git = installGit()
     await refreshGitStatus('/repo/a')
     await checkoutGitBranch('/repo/a', 'dev', scope)
-    expect(git.checkout).toHaveBeenCalledWith(scope, 'dev', {})
+    expect(git.checkout).toHaveBeenCalledWith(scope, 'dev', { operationId: expect.any(String) })
     expect(git.status).toHaveBeenCalledTimes(2)
     await commitGitChanges('/repo/a', 'Add things', scope)
-    expect(git.commit).toHaveBeenCalledWith(scope, 'Add things', { amend: false, expectedBranch: 'main' })
+    expect(git.commit).toHaveBeenCalledWith(scope, 'Add things', { amend: false, expectedBranch: 'main', operationId: expect.any(String) })
     expect(git.status).toHaveBeenCalledTimes(3)
   })
 
@@ -311,7 +313,7 @@ describe('shared git status store', () => {
     const git = installGit({ checkout: vi.fn(async () => ({ status: repoStatus(), stashKept: true })) })
     await refreshGitStatus('/repo/a')
     await expect(checkoutGitBranch('/repo/a', 'dev', scope, { dirty: 'stash' })).resolves.toEqual({ stashKept: true })
-    expect(git.checkout).toHaveBeenCalledWith(scope, 'dev', { dirty: 'stash' })
+    expect(git.checkout).toHaveBeenCalledWith(scope, 'dev', { dirty: 'stash', operationId: expect.any(String) })
   })
 
   it('sends each new Git action with its scope, then refreshes once', async () => {
@@ -329,7 +331,7 @@ describe('shared git status store', () => {
     expect(git.discard).toHaveBeenLastCalledWith(threadScope, ['a.ts'])
     await expect(fetchGit('/repo/a', scope)).resolves.toEqual({ behindBefore: 0, behindAfter: 2 })
     await expect(pullGit('/repo/a', scope, { strategy: 'rebase' })).resolves.toEqual({ result: 'fast-forwarded' })
-    expect(git.pull).toHaveBeenLastCalledWith(scope, { strategy: 'rebase' })
+    expect(git.pull).toHaveBeenLastCalledWith(scope, { strategy: 'rebase', operationId: expect.any(String) })
     await abortGitInProgress('/repo/a', 'merge', scope)
     expect(git.abortInProgress).toHaveBeenLastCalledWith(scope, 'merge')
     await createGitBranch('/repo/a', 'topic', scope, { from: 'main', checkout: false })
@@ -850,5 +852,68 @@ describe('git section markup', () => {
     for (const [, , body] of rules) {
       expect(body).not.toMatch(/border-(?:left|right|inline)(?:-width|-color)?\s*:/)
     }
+  })
+})
+
+describe('the pull request row opens the panel', () => {
+  const foundRow = () => {
+    const row = pullRequestRow({ state: 'found', pullRequest: prDetail() }, repoStatus(), prDetail())
+    if (row?.kind !== 'found') throw new Error('expected a found row')
+    return row
+  }
+
+  /** Every button element in a rendered tree, found without a DOM. */
+  const buttonsIn = (node: ReactNode): ReactElement<{ className?: string; onClick?: () => void; 'aria-label'?: string; title?: string }>[] => {
+    if (!isValidElement(node)) return Array.isArray(node) ? node.flatMap(buttonsIn) : []
+    const element = node as ReactElement<{ children?: ReactNode }>
+    const own = element.type === 'button' ? [element as never] : []
+    return [...own, ...buttonsIn(element.props.children)]
+  }
+
+  beforeEach(() => {
+    useAppStore.setState({ mainView: 'git', openedSurfaceKinds: [], activeThreadId: null, mainAreaOpen: false })
+  })
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('opens the Pull request surface from the title and number', () => {
+    const [main] = buttonsIn(PullRequestLink({ row: foundRow() }))
+    expect(main.props.className).toBe('side-card-git-pr')
+    main.props.onClick?.()
+    expect(useAppStore.getState().mainView).toBe('pullRequest')
+    expect(useAppStore.getState().openedSurfaceKinds).toContain('pullRequest')
+  })
+
+  it('has a separate button that opens the pull request on the host in the browser, and leaves the app where it is', () => {
+    const open = vi.fn()
+    vi.stubGlobal('window', { open })
+    const row = foundRow()
+    const buttons = buttonsIn(PullRequestLink({ row }))
+    const external = buttons.find((button) => button.props.className === 'side-card-git-pr-external')
+    expect(external?.props['aria-label']).toBe('Open pull request #7 on GitHub')
+    external?.props.onClick?.()
+    expect(open).toHaveBeenCalledWith(row.url, '_blank', 'noopener,noreferrer')
+    expect(useAppStore.getState().mainView).toBe('git')
+  })
+
+  it('renders both buttons in the side card, the first still named for the pull request', () => {
+    const html = renderToStaticMarkup(createElement(GitSectionView, {
+      threadId: 't1',
+      projectId: 'p1',
+      path: '/repo/a',
+      git: { ...EMPTY_GIT_ENTRY, loaded: true, refresh: async () => undefined, status: repoStatus({ branch: 'feature/retry' }) },
+      pullRequest: { state: 'found', pullRequest: prDetail() },
+      pullRequestDetail: prDetail(),
+      collapsedLabel: null
+    }))
+    expect(html).toContain('side-card-git-pr-line')
+    expect(html).toMatch(/<button[^>]*class="side-card-git-pr"[^>]*aria-label="Pull request #7/)
+    expect(html).toMatch(/<button[^>]*class="side-card-git-pr-external"[^>]*aria-label="Open pull request #7 on GitHub"/)
+  })
+
+  it('marks the external button with a background on hover and focus ring only', () => {
+    const css = readFileSync(resolve(__dirname, '../src/renderer/components/sideCard/gitSection.css'), 'utf8')
+    const rule = /\.side-card-git-pr-external:hover\s*\{([^}]*)\}/.exec(css)
+    expect(rule?.[1]).toMatch(/background:/)
+    expect(rule?.[1]).not.toMatch(/border|shadow/)
   })
 })

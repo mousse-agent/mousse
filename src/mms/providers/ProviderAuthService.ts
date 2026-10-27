@@ -1,8 +1,7 @@
 import { dirname, join } from 'path'
-import type { ApiKeyCredential, Credential, MutableModels } from '@earendil-works/pi-ai'
+import type { ApiKeyCredential, Credential, MutableModels, Provider } from '@earendil-works/pi-ai'
 import { getEnvApiKey, getSupportedThinkingLevels } from '@earendil-works/pi-ai/compat'
 import { getModelEffortLevels } from '../../shared/modelEfforts'
-import { getCursorModelMetadata } from 'pi-cursor-sdk/src/model-discovery'
 import { builtinModels, builtinProviders } from '@earendil-works/pi-ai/providers/all'
 import type { LlmProviderOption } from '../../shared/settings'
 import type {
@@ -13,6 +12,7 @@ import type {
   ProvidersUsageResponse,
   ProviderUsageWindow
 } from '../../shared/providerAuth'
+import { usageText } from './usageText'
 import {
   isSttModelId,
   providerSupportsStt,
@@ -21,21 +21,17 @@ import {
 } from '../../shared/dictation'
 import { isTtsModelId, resolveProviderTtsVoice, type ProviderSpeechRequest, type ProviderSpeechResult } from '../../shared/readAloud'
 import { getMousseHomeDir } from '../data/paths'
+import { piRetiredOf, PI_RETIRED } from '../harness/drivers/pi/retired'
 import {
   CLAUDE_PROVIDER_ID,
   isClaudeSubscriptionToken,
   registerClaudeSdkProvider
 } from './claudeSdkProvider'
-import {
-  CURSOR_PROVIDER_ID,
-  registerCursorPiProvider
-} from './cursorPiProvider'
 import { FileCredentialStore } from './FileCredentialStore'
 import { FileModelsStore } from './FileModelsStore'
 import { LoginSession } from './LoginSession'
 import { enhanceProvidersWithOpenAiCompatibleFetch } from './openAiCompatibleModelFetch'
 import { PiCatalogOverlay } from './piCatalogOverlay'
-import { enhanceOpenAiCodexProvider } from './openAiCodexModelFetch'
 import { getProviderDisplayName as getProductProviderDisplayName } from './providerMetadata'
 import { requestOpenAiSpeech } from './providerSpeech'
 import { requestOpenAiTranscription } from './providerTranscription'
@@ -59,6 +55,32 @@ const AMBIENT_PROVIDERS: Record<string, AmbientProviderInfo> = {
       'Run: gcloud auth application-default login',
       'Set GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION in your environment.'
     ]
+  }
+}
+
+/**
+ * Subscription sign-ins Mousse no longer offers: Claude's belongs to the Claude Code agent. The
+ * retired providers (`PI_RETIRED`) offer no sign-in at all.
+ */
+const RETIRED_OAUTH: ReadonlySet<string> = new Set(['anthropic'])
+
+/**
+ * A provider a Mousse update retired (`PI_RETIRED`): its bundled catalog for display, and no auth.
+ * The stored credential stays until a Move deletes it, but nothing resolves it: no request carries
+ * it and no token is refreshed (`Models.getAuth` reads the provider as not configured).
+ */
+function retiredProvider(provider: Provider): Provider {
+  const refuse = (): never => {
+    throw new Error(`${provider.name} was retired by a Mousse update. Move it in Settings → Providers.`)
+  }
+  return {
+    id: provider.id,
+    name: provider.name,
+    ...(provider.baseUrl ? { baseUrl: provider.baseUrl } : {}),
+    auth: {},
+    getModels: () => provider.getModels(),
+    stream: refuse,
+    streamSimple: refuse
   }
 }
 
@@ -95,13 +117,16 @@ export class ProviderAuthService {
     this.credentials = new FileCredentialStore(authPath)
     this.modelsStore = new FileModelsStore(join(home, 'models-cache.json'))
     this.models = builtinModels({ credentials: this.credentials, modelsStore: this.modelsStore })
+    for (const id of Object.keys(PI_RETIRED)) {
+      const provider = this.models.getProvider(id)
+      if (provider) this.models.setProvider(retiredProvider(provider))
+    }
     enhanceProvidersWithOpenAiCompatibleFetch(this.models.getProviders())
     this.catalogOverlay = new PiCatalogOverlay(join(home, 'pi-catalog-cache.json'))
     for (const provider of this.models.getProviders()) {
-      // Anthropic is replaced by the Claude SDK provider, whose catalog is live.
-      if (provider.id !== CLAUDE_PROVIDER_ID) this.catalogOverlay.attach(provider)
+      // Anthropic is replaced by the Claude SDK provider, whose catalog is live; a retired one fetches nothing.
+      if (provider.id !== CLAUDE_PROVIDER_ID && !piRetiredOf(provider.id)) this.catalogOverlay.attach(provider)
     }
-    enhanceOpenAiCodexProvider(this.models.getProvider('openai-codex'))
   }
 
   /**
@@ -116,7 +141,6 @@ export class ProviderAuthService {
         allowNetwork: false,
         cached: cachedClaude?.models
       })
-      await registerCursorPiProvider(this.models, this.credentials, { allowNetwork: false })
       try {
         await this.models.refresh({ allowNetwork: false })
       } catch {
@@ -279,26 +303,13 @@ export class ProviderAuthService {
 
   private toLlmProviderOption(id: string): LlmProviderOption | null {
     const models = this.models.getModels(id).map((model) => {
-      const metadata = id === CURSOR_PROVIDER_ID ? getCursorModelMetadata(model.id) : undefined
-      const effortSources = metadata ? [metadata, model] : [model]
-      let efforts: string[] | undefined
-      for (const source of effortSources) {
-        efforts =
-          getModelEffortLevels(source) ??
-          ('reasoning' in source && source.reasoning
-            ? getSupportedThinkingLevels(source as typeof model).filter((level) => level !== 'off')
-            : undefined)
-        if (efforts && efforts.length > 0) break
-      }
-
-      const speed = metadata?.supportsFast
-        ? (metadata.fastOverride ?? metadata.defaultFast) ? 'fast' as const : 'slow' as const
-        : undefined
+      const efforts =
+        getModelEffortLevels(model) ??
+        (model.reasoning ? getSupportedThinkingLevels(model).filter((level) => level !== 'off') : undefined)
       return {
         id: model.id,
         label: model.name,
-        ...(efforts && efforts.length > 0 ? { efforts } : {}),
-        ...(speed ? { speed } : {})
+        ...(efforts && efforts.length > 0 ? { efforts } : {})
       }
     })
     if (models.length === 0) return null
@@ -314,13 +325,16 @@ export class ProviderAuthService {
     this.ensureCatalogInitialized()
     return this.models
       .getProviders()
+      // A retired provider offers no model to choose (its entry keeps its Move prompt).
+      .filter((provider) => !piRetiredOf(provider.id))
       .map((provider) => this.toLlmProviderOption(provider.id))
       .filter((provider): provider is LlmProviderOption => provider !== null)
       .sort((a, b) => a.label.localeCompare(b.label))
   }
 
   getConfiguredLlmProviders(): LlmProviderOption[] {
-    const configuredIds = this.credentials.listProviderIds().filter((id) => this.has(id))
+    // A retired provider stays configured (Settings, Move) but offers no model to choose.
+    const configuredIds = this.credentials.listProviderIds().filter((id) => this.has(id) && !piRetiredOf(id))
     if (configuredIds.length === 0) return []
 
     this.ensureCatalogInitialized()
@@ -365,7 +379,7 @@ export class ProviderAuthService {
         })
       }
 
-      if ((!authType || authType === 'oauth') && oauthAuth && id !== 'anthropic') {
+      if ((!authType || authType === 'oauth') && oauthAuth && !RETIRED_OAUTH.has(id)) {
         pushOption({
           id,
           label,
@@ -406,6 +420,8 @@ export class ProviderAuthService {
     if (providerId === 'anthropic') {
       return { success: false, error: 'Claude subscription sign-in belongs to the official Claude Code agent, not the Anthropic Messages provider.' }
     }
+    const retired = this.retiredLoginError(providerId)
+    if (retired) return { success: false, error: retired }
     const provider = this.models.getProvider(providerId)
     const oauthProvider = provider?.auth.oauth
 
@@ -415,7 +431,8 @@ export class ProviderAuthService {
 
     try {
       const credentials = await oauthProvider.login(session.createAuthCallbacks())
-      await this.credentials.modify(providerId, async () => credentials)
+      // Every sign-in gets an id of its own: the account identity of tokens that name none.
+      await this.credentials.modify(providerId, async () => ({ ...credentials, credentialId: crypto.randomUUID() }))
       return { success: true, sessionId: session.sessionId }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -424,6 +441,8 @@ export class ProviderAuthService {
   }
 
   async runApiKeyLogin(session: LoginSession, providerId: string): Promise<ProviderLoginResult> {
+    const retired = this.retiredLoginError(providerId)
+    if (retired) return { success: false, error: retired }
     if (providerId in AMBIENT_PROVIDERS) {
       return this.verifyAmbientProvider(providerId)
     }
@@ -440,9 +459,6 @@ export class ProviderAuthService {
         throw new Error('Claude subscription credentials cannot be used as an Anthropic API key.')
       }
       await this.credentials.modify(providerId, async () => credential)
-      if (providerId === CURSOR_PROVIDER_ID) {
-        await this.refreshDynamicModels()
-      }
       return { success: true, sessionId: session.sessionId }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -461,6 +477,8 @@ export class ProviderAuthService {
   }
 
   async setApiKey(providerId: string, apiKey: string, env?: Record<string, string>): Promise<void> {
+    const retired = this.retiredLoginError(providerId)
+    if (retired) throw new Error(retired)
     const trimmed = apiKey.trim()
     if (!trimmed) {
       throw new Error('API key cannot be empty')
@@ -473,6 +491,15 @@ export class ProviderAuthService {
       key: trimmed,
       ...(env && Object.keys(env).length > 0 ? { env } : {})
     }))
+  }
+
+  /**
+   * A retired provider takes no sign-in: a new one would overwrite the device's stored credential,
+   * which another profile may still use, for an entry that cannot run.
+   */
+  private retiredLoginError(providerId: string): string | undefined {
+    const retired = piRetiredOf(providerId)
+    return retired ? `${this.getProviderDisplayName(providerId)} was retired by a Mousse update. Move it to ${retired.target} in Settings → Providers.` : undefined
   }
 
   async verifyAmbientProvider(providerId: string): Promise<ProviderLoginResult> {
@@ -509,7 +536,12 @@ export class ProviderAuthService {
           windows: [],
           message: 'Anthropic API key usage is billed through Claude Console; quota data is unavailable here.'
         }
-        if (provider.id === 'openai-codex') return this.fetchOpenAiCodexUsage(provider)
+        if (piRetiredOf(provider.id)) return {
+          ...provider,
+          status: 'unavailable' as const,
+          windows: [],
+          message: 'This connection was retired by a Mousse update. Move it in Settings → Providers.'
+        }
         if (provider.id === 'xai') return this.fetchXaiUsage(provider)
         if (provider.id === 'opencode-go') return this.fetchOpenCodeGoUsage(provider)
         return {
@@ -538,27 +570,12 @@ export class ProviderAuthService {
     const usage =
       normalized === 'anthropic'
         ? undefined
-        : normalized === 'openai-codex'
-          ? await this.fetchOpenAiCodexUsage(provider)
-          : normalized === 'xai'
-            ? await this.fetchXaiUsage(provider)
-            : normalized === 'opencode-go'
-              ? await this.fetchOpenCodeGoUsage(provider)
-              : undefined
-    if (!usage) return undefined
-    if (usage.status !== 'available' || usage.windows.length === 0) {
-      const message =
-        'message' in usage && typeof usage.message === 'string'
-          ? usage.message
-          : `Subscription usage is not available for ${label}.`
-      return message
-    }
-    const lines = usage.windows.map((window) => {
-      const usedPercent = Math.max(0, Math.min(100, 100 - window.remainingPercent))
-      const reset = window.resetsAt ? ` (${formatUsageResetCountdown(window.resetsAt)})` : ''
-      return `${window.label}: ${usedPercent}% used${reset}`
-    })
-    return [`${label} usage:`, ...lines.map((line) => `- ${line}`)].join('\n')
+        : normalized === 'xai'
+          ? await this.fetchXaiUsage(provider)
+          : normalized === 'opencode-go'
+            ? await this.fetchOpenCodeGoUsage(provider)
+            : undefined
+    return usage ? usageText(label, usage) : undefined
   }
 
   /** Speaks text with a provider's OpenAI-compatible text-to-speech model. */
@@ -621,31 +638,6 @@ export class ProviderAuthService {
       throw new Error(`${this.getProviderDisplayName(providerId)} session expired. Reconnect it in Settings.`)
     }
     return token
-  }
-
-  private async fetchOpenAiCodexUsage(provider: ConfiguredProvider) {
-    try {
-      const token = await this.refreshOAuthAccess(provider.id)
-      const credential = this.credentials.get(provider.id) as unknown as Record<string, unknown> | undefined
-      const response = await fetch('https://chatgpt.com/backend-api/wham/usage', {
-        headers: {
-          authorization: `Bearer ${token}`,
-          ...(readString(credential ?? {}, 'accountId', 'account_id')
-            ? { 'ChatGPT-Account-Id': readString(credential ?? {}, 'accountId', 'account_id')! }
-            : {})
-        }
-      })
-      if (!response.ok) throw new Error(`Could not load Codex usage (HTTP ${response.status}).`)
-      const body: unknown = await response.json()
-      return { ...provider, status: 'available' as const, windows: parseOpenAiUsage(body) }
-    } catch (error) {
-      return {
-        ...provider,
-        status: 'error' as const,
-        windows: [],
-        message: friendlyUsageMessage(error)
-      }
-    }
   }
 
   private async fetchXaiUsage(provider: ConfiguredProvider) {
@@ -848,40 +840,6 @@ export function parseAnthropicUsage(value: unknown): ProviderUsageWindow[] {
   })
 }
 
-export function parseOpenAiUsage(value: unknown): ProviderUsageWindow[] {
-  const root = object(value)
-  const rateLimit = object(root?.rate_limit ?? root?.rateLimit)
-  if (!rateLimit) return []
-  return ([rateLimit.primary_window ?? rateLimit.primaryWindow, rateLimit.secondary_window ?? rateLimit.secondaryWindow])
-    .flatMap((raw) => {
-      const window = object(raw)
-      const duration =
-        typeof window?.limit_window_seconds === 'number'
-          ? window.limit_window_seconds
-          : window?.window_seconds
-      const remainingPercent = percentRemainingFromUsedPercent(
-        window?.used_percent ?? window?.usedPercent
-      )
-      if (typeof duration !== 'number' || remainingPercent === undefined) return []
-      const weekly = duration >= 6 * 24 * 60 * 60
-      const reset = window?.reset_at ?? window?.resetAt
-      const resetsAt =
-        typeof reset === 'number'
-          ? new Date(reset * 1000).toISOString()
-          : typeof reset === 'string'
-            ? reset
-            : undefined
-      return [
-        {
-          id: weekly ? 'seven_day' : 'five_hour',
-          label: weekly ? 'Weekly' : '5-hour',
-          remainingPercent,
-          resetsAt
-        }
-      ]
-    })
-}
-
 function readNestedNumber(value: unknown, ...keys: string[]): number | undefined {
   let current: unknown = value
   for (const key of keys) {
@@ -1015,22 +973,6 @@ export function parseOpenCodeGoUsage(value: unknown): ProviderUsageWindow[] {
     windows.push({ id, label, remainingPercent, resetsAt })
   }
   return windows
-}
-
-/** Compact countdown down to the minute for channel `/usage` text (`45m`, `5h 12m`, `4d 3h 12m`). */
-export function formatUsageResetCountdown(resetsAt: string): string {
-  const date = new Date(resetsAt)
-  if (Number.isNaN(date.getTime())) return 'reset unknown'
-  const deltaMs = date.getTime() - Date.now()
-  if (deltaMs <= 0) return 'resets soon'
-  const totalMinutes = Math.floor(deltaMs / 60_000)
-  if (totalMinutes < 1) return 'resets soon'
-  if (totalMinutes < 60) return `resets in ${totalMinutes}m`
-  const days = Math.floor(totalMinutes / 1440)
-  const hours = Math.floor((totalMinutes % 1440) / 60)
-  const mins = totalMinutes % 60
-  if (days === 0) return `resets in ${hours}h ${mins}m`
-  return `resets in ${days}d ${hours}h ${mins}m`
 }
 
 function toApiKeyCredential(raw: ApiKeyCredential): ApiKeyCredential {

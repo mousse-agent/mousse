@@ -3,6 +3,21 @@ import { explicitActionGitEnv, nonInteractiveGitEnv } from '../src/mms/git/gitEn
 import { GIT_NULL_DEVICE } from '../src/mms/git/gitNullDevice'
 import { redactGitText } from '../src/shared/gitText'
 
+describe('redactGitText tokens and headers', () => {
+  it.each([
+    ['a fine-grained GitHub token', 'remote: token github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz_0123456789 was used', 'github_pat_'],
+    ['a GitLab token on its own', 'using glpat-xxxxxxxxxxxxxxxxxxxx for the push', 'glpat-xxxx'],
+    ['an Authorization header with any scheme', 'Authorization: token ghs_realsecretvalue', 'realsecretvalue'],
+    ['a Proxy-Authorization header', 'Proxy-Authorization: Negotiate YIIabcdef123456', 'YIIabcdef'],
+    ['an Authorization header in a trace', "> Authorization: AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE/20260101", 'AKIAEXAMPLE'],
+    ['a JWT', 'id eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r', 'eyJzdWIi']
+  ])('hides %s', (_name, text, secret) => {
+    const out = redactGitText(text)
+    expect(out).not.toContain(secret)
+    expect(out).toContain('[redacted]')
+  })
+})
+
 describe('redactGitText', () => {
   it('removes credentials from http, ssh and git URLs and from user:password@host without a scheme', () => {
     expect(redactGitText('fatal: unable to access https://user:token@example.com/org/repo.git/')).toBe('fatal: unable to access https://[redacted]@example.com/org/repo.git/')

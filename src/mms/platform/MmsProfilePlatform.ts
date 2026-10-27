@@ -26,6 +26,7 @@ import { MmsAgentExecutionService } from './MmsAgentExecutionService'
 import { join } from 'node:path'
 import { BrowserArtifactService } from '../browser/BrowserArtifactService'
 import { MmsBrowserService } from '../browser/MmsBrowserService'
+import { readSessionStates, type SessionState } from '../browser/automation/BrowserSessionManager'
 import type { AttachedCommandDispatchPort } from '../browser/AttachedBrowserConnectionBackend'
 
 export interface MmsBrowserPlatformConfig {
@@ -154,6 +155,17 @@ export class MmsProfilePlatform {
 
   getActiveCount(): number {
     return this.chatResources.getActiveCount() + this.chats.getActiveCount() + this.agentRuns.getActiveCount() + (this.browserAssembly?.getActiveCount() ?? 0) + this.browserArtifacts.getActiveCount()
+  }
+
+  /**
+   * Browser sessions with whether each is still open and its thread. Storage cleanup leaves the captures of
+   * an open session alone. It does not build the browser composition (which would end `configureBrowser`):
+   * before that exists, the persisted inventory gives the same answer.
+   */
+  browserSessionStates(staleBefore?: number): Map<string, SessionState> {
+    if (this.browserAssembly) return this.browserAssembly.sessions.sessionStates(staleBefore)
+    const { profileId, integrationContext: { profileRoot } } = this.services
+    return readSessionStates(profileRoot, profileId, staleBefore)
   }
 
   getManagedBrowserActiveCount(): number {

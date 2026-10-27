@@ -6,22 +6,23 @@ import {
   useRef,
   useState
 } from 'react'
-import { Check, ChevronDown, GitBranch, MoreHorizontal, Plus, Search, X } from '../../lib/icons'
+import { Check, ChevronDown, ExternalLink, GitBranch, MoreHorizontal, Plus, Search, X } from '../../lib/icons'
 import { openSurface } from '../../lib/surfaces'
-import { useActiveProjectLocation } from '../../hooks/useActiveProjectPath'
+import { useActiveThreadPullRequest } from '../../hooks/useActiveThreadPullRequest'
 import { useTransientError } from '../../hooks/useTransientError'
-import { useAppStore } from '../../stores/appStore'
 import {
   CommitPushError,
+  OpenPullRequestError,
   commitGitChanges,
   initGitRepository,
   pushGitBranch,
   suggestGitCommitMessage,
-  useGitStatus,
+  type CommitPhase,
   type GitStatusView
 } from '../../stores/gitStatusStore'
-import { createPullRequestForBranch, useGitPullRequestStore, useThreadPullRequest } from '../../stores/pullRequestStore'
-import type { PullRequestDetail, ThreadPullRequestLink } from '../../../shared/pullRequests'
+import { createPullRequestForBranch, useGitPullRequestStore } from '../../stores/pullRequestStore'
+import type { PullRequestDetail, PullRequestPushTarget, PullRequestScope, ThreadPullRequestLink } from '../../../shared/pullRequests'
+import { usePullRequestPushTarget } from './usePullRequestPushTarget'
 import { gitScopeFor } from '../../lib/activeProject'
 import type { GitCommit, GitPullRequestLookup, GitScope } from '../../../shared/types'
 import { Switch } from '../settings/SettingsRow'
@@ -39,6 +40,7 @@ import {
   type BranchResult,
   type CreateBranchInput
 } from './branchActions'
+import { GitOperationStatus } from '../git/GitOperationStatus'
 import { CardPopover } from './CardPopover'
 import { menuRowLabel } from './deviceMenu'
 import { PullRequestCreateForm } from './PullRequestCreateForm'
@@ -54,14 +56,16 @@ import {
   changesSummary,
   chooseAmend,
   clearAmendPrefill,
-  commitButtonLabels,
+  commitFlowButtons,
   commitFormFor,
   commitHint,
   commitMenuState,
+  commitPhaseLabel,
   commitScope,
   diffStatLabel,
   dirtySwitchChoices,
   emptyCommitForm,
+  existingPullRequestNotice,
   forceAmend,
   formatCommitLine,
   gitActionAvailability,
@@ -69,9 +73,10 @@ import {
   gitCollapsedLabel,
   gitErrorCode,
   gitErrorMessage,
+  isGitCancelled,
   localBranchNames,
+  openPullRequestFailedMessage,
   prefillAmendDraft,
-  pullRequestReadThreadId,
   pullRequestRow,
   pullRequestScope,
   pushButtonModel,
@@ -80,6 +85,7 @@ import {
   untrackedFileCount,
   type CommitAvailability,
   type CommitDraft,
+  type CommitFlow,
   type CommitForm,
   type DirtySwitchChoiceId,
   type GitAction,
@@ -436,6 +442,11 @@ interface CommitButtonProps {
   commits: GitCommit[]
   /** The branch has somewhere to push to and is not behind, so the commit can go on to push. */
   pushable: boolean
+  /**
+   * What "Commit, push and open PR" opens the Create PR form for; null when `gitActionAvailability` does not
+   * offer it (behind, diverged, conflicted, a pull request already there, the default branch).
+   */
+  openPullRequest: PullRequestScope | null
   /** What a commit would include here, and why none can be made right now. */
   commitAvailability: CommitAvailability
   /** Another Git action is running, so nothing here may start. */
@@ -444,15 +455,16 @@ interface CommitButtonProps {
   onBegin: () => boolean
   onEnd: () => void
   onActionError: (message: string) => void
+  onNotice: (message: string) => void
 }
 
-/** What a running commit is doing, and whether it goes on to push. */
+/** What a running commit is doing: which button started it, and which step it is at. */
 interface CommitWork {
-  push: boolean
-  phase: 'committing' | 'pushing'
+  flow: CommitFlow
+  phase: CommitPhase
 }
 
-function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, commits, pushable, commitAvailability, lock, onBegin, onEnd, onActionError }: CommitButtonProps) {
+function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, commits, pushable, openPullRequest, commitAvailability, lock, onBegin, onEnd, onActionError, onNotice }: CommitButtonProps) {
   const [open, setOpen] = useState(false)
   const { branch: scopeBranch, head } = commitScope(branch, commits)
   const scope = useMemo(() => ({ branch: scopeBranch, head }), [scopeBranch, head])
@@ -480,7 +492,6 @@ function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, com
   const menu = commitMenuState(commits, fileCount, amendChecked, gitScope.workspaceThreadId !== null)
   const { amend } = menu
   const trimmed = draft.message.trim()
-  const labels = commitButtonLabels(amend)
   const blocked = lock.reason !== null
   const canSubmit = Boolean(trimmed) && !work && !blocked && commitAvailability.blockedReason === null
   // Amend with an empty message starts from the last commit's message, once: clearing it by hand sticks.
@@ -546,27 +557,33 @@ function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, com
     }
   }
 
-  const submit = async (push: boolean) => {
+  const submit = async (flow: CommitFlow) => {
     if (!canSubmit || !onBegin()) return
     dropSuggestion()
-    setWork({ push, phase: 'committing' })
+    setWork({ flow, phase: 'committing' })
     setError(null)
     const finish = () => {
       setForm(emptyCommitForm(scope))
       setOpen(false)
     }
     try {
-      await commitGitChanges(path, trimmed, gitScope, {
+      const result = await commitGitChanges(path, trimmed, gitScope, {
         amend,
-        push,
-        onPhase: (phase) => setWork({ push, phase })
+        push: flow !== 'commit',
+        ...(flow === 'push-pr' && openPullRequest ? { openPullRequest } : {}),
+        onPhase: (phase) => setWork({ flow, phase })
       })
       finish()
+      // The row below shows the pull request the branch already had; a second form would duplicate it.
+      if (result.pullRequest?.kind === 'existing') onNotice(existingPullRequestNotice(result.pullRequest))
     } catch (commitError) {
       if (commitError instanceof CommitPushError) {
         finish()
-        onActionError(pushFailedMessage(commitError.pushError))
-      } else {
+        if (!isGitCancelled(commitError.pushError)) onActionError(pushFailedMessage(commitError.pushError))
+      } else if (commitError instanceof OpenPullRequestError) {
+        finish()
+        onActionError(openPullRequestFailedMessage(commitError))
+      } else if (!isGitCancelled(commitError)) {
         setError(gitErrorMessage(commitError))
       }
     } finally {
@@ -575,8 +592,8 @@ function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, com
     }
   }
 
-  const label = (push: boolean, idle: string) =>
-    work && work.push === push ? (work.phase === 'committing' ? 'Committing…' : 'Pushing…') : idle
+  const flowButtons = commitFlowButtons({ pushable, openPullRequest: openPullRequest !== null, amend })
+  const label = (flow: CommitFlow, idle: string) => (work && work.flow === flow ? commitPhaseLabel(work.phase) : idle)
 
   return (
     <>
@@ -624,7 +641,7 @@ function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, com
           onKeyDown={(event) => {
             if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
               event.preventDefault()
-              void submit(false)
+              void submit('commit')
             }
           }}
         />
@@ -649,6 +666,7 @@ function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, com
             onChange={setAmendChecked}
           />
         </label>
+        {work && <GitOperationStatus path={path} />}
         {error && (
           <p className="side-card-git-error" role="alert" title={error}>
             {error}
@@ -657,24 +675,18 @@ function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, com
         <div className="side-card-git-popover-footer">
           <span className="side-card-git-hint">{commitHint(amend, menu.shortHash, fileCount, commitAvailability)}</span>
           <div className="side-card-git-popover-actions">
-            {pushable && (
+            {flowButtons.map(({ flow, label: idle, quiet }) => (
               <button
+                key={flow}
                 type="button"
-                className="side-card-git-submit side-card-git-submit-quiet"
+                className={quiet ? 'side-card-git-submit side-card-git-submit-quiet' : 'side-card-git-submit'}
+                data-flow={flow}
                 disabled={!canSubmit}
-                onClick={() => void submit(true)}
+                onClick={() => void submit(flow)}
               >
-                {label(true, labels.commitAndPush)}
+                {label(flow, idle)}
               </button>
-            )}
-            <button
-              type="button"
-              className="side-card-git-submit"
-              disabled={!canSubmit}
-              onClick={() => void submit(false)}
-            >
-              {label(false, labels.commit)}
-            </button>
+            ))}
           </div>
         </div>
       </CardPopover>
@@ -716,22 +728,34 @@ function openWeb(url: string) {
   window.open(url, '_blank', 'noopener,noreferrer')
 }
 
-function PullRequestLink({ row }: { row: PullRequestFoundRow }) {
+/** The pull request row: the number and title open the pull request panel; the arrow opens it on the host. */
+export function PullRequestLink({ row }: { row: PullRequestFoundRow }) {
   return (
-    <button
-      type="button"
-      className="side-card-git-pr"
-      title={row.tooltip}
-      aria-label={row.ariaLabel}
-      onClick={() => openWeb(row.url)}
-    >
-      {row.checks === 'passing' && <Check className="side-card-git-pr-check" data-checks="passing" size={13} strokeWidth={2} aria-hidden="true" />}
-      {row.checks === 'failing' && <X className="side-card-git-pr-check" data-checks="failing" size={13} strokeWidth={2} aria-hidden="true" />}
-      {row.checks === 'pending' && <span className="side-card-git-pr-pending" aria-hidden="true" />}
-      <span className="side-card-git-pr-number">{row.number}</span>
-      <span className="side-card-git-pr-title">{row.title}</span>
-      {row.suffix && <span className="side-card-git-pr-suffix">{row.suffix}</span>}
-    </button>
+    <div className="side-card-git-pr-line">
+      <button
+        type="button"
+        className="side-card-git-pr"
+        title={row.tooltip}
+        aria-label={row.ariaLabel}
+        onClick={() => openSurface('pullRequest')}
+      >
+        {row.checks === 'passing' && <Check className="side-card-git-pr-check" data-checks="passing" size={13} strokeWidth={2} aria-hidden="true" />}
+        {row.checks === 'failing' && <X className="side-card-git-pr-check" data-checks="failing" size={13} strokeWidth={2} aria-hidden="true" />}
+        {row.checks === 'pending' && <span className="side-card-git-pr-pending" aria-hidden="true" />}
+        <span className="side-card-git-pr-number">{row.number}</span>
+        <span className="side-card-git-pr-title">{row.title}</span>
+        {row.suffix && <span className="side-card-git-pr-suffix">{row.suffix}</span>}
+      </button>
+      <button
+        type="button"
+        className="side-card-git-pr-external"
+        title="Open on GitHub"
+        aria-label={`Open pull request ${row.number} on GitHub`}
+        onClick={() => openWeb(row.url)}
+      >
+        <ExternalLink size={13} strokeWidth={2} aria-hidden="true" />
+      </button>
+    </div>
   )
 }
 
@@ -810,6 +834,8 @@ interface GitSectionViewProps {
   pullRequestError?: string | null
   /** The pull request the thread is linked to, if any. */
   pullRequestLink?: ThreadPullRequestLink | null
+  /** Where Push goes for a thread linked to a pull request; null when it keeps its usual target. */
+  pullRequestPushTarget?: PullRequestPushTarget | null
   /** When set, the section collapses to this one muted line. */
   collapsedLabel: string | null
   /** The folder is not a repository, so the collapsed section offers to make it one. */
@@ -830,6 +856,7 @@ export function GitSectionView({
   pullRequestDetail = null,
   pullRequestError = null,
   pullRequestLink = null,
+  pullRequestPushTarget = null,
   collapsedLabel,
   canInitialize = false,
   now
@@ -898,7 +925,7 @@ export function GitSectionView({
     try {
       await pushGitBranch(path, scope)
     } catch (error) {
-      setActionError(gitErrorMessage(error))
+      if (!isGitCancelled(error)) setActionError(gitErrorMessage(error))
     } finally {
       end()
     }
@@ -922,7 +949,7 @@ export function GitSectionView({
   const stat = diffStatLabel(git.diffStats, untrackedFileCount(git.status))
   const latest = git.commits[0] ? formatCommitLine(git.commits[0], now ?? Date.now()) : null
   const fileCount = changedFileCount(git.status)
-  const pushButton = pushButtonModel(git.status, git.commits.length, scope)
+  const pushButton = pushButtonModel(git.status, git.commits.length, scope, pullRequestPushTarget)
   const availability = gitActionAvailability(git.status, pullRequest, git.commits.length, scope)
   const prRow = pullRequestRow(pullRequest, git.status, pullRequestDetail, pullRequestLink, workspaceThreadId !== null)
   const createLock = gitActionLock(running, 'pullRequest')
@@ -956,13 +983,17 @@ export function GitSectionView({
           fileCount={fileCount}
           commits={git.commits}
           pushable={availability.offerCommitAndPush}
+          openPullRequest={availability.offerCommitPushAndOpenPr ? createScope : null}
           commitAvailability={availability.commit}
           lock={gitActionLock(running, 'commit')}
           onBegin={() => begin('commit')}
           onEnd={end}
           onActionError={setActionError}
+          onNotice={setNotice}
         />
       </div>
+      {pushButton?.note && <p className="side-card-git-quiet">{pushButton.note}</p>}
+      <GitOperationStatus path={path} />
       <PullRequestCreateForm
         scope={createForm && createForm.path === path && createForm.branch === branch ? createForm : null}
         anchorRef={rowRef}
@@ -1019,12 +1050,8 @@ export function GitSectionView({
 
 /** Branch, pull request, latest commit, commit button and change counts for the folder the thread works on. */
 export function GitSection({ threadId }: SideCardSectionContext) {
-  // The same project the Git panel opens on, including a new chat's composer pick.
-  const location = useActiveProjectLocation()
-  const { projectId, path: projectPath, loading } = location
-  // A project-less thread has no folder of its own to show Git state for.
-  const path = projectId ? projectPath : null
-  const git = useGitStatus(path, projectId)
+  const { location, git, path, projectId, ownThreadId, link, lookup: pullRequest, detail, detailError } = useActiveThreadPullRequest(threadId)
+  const { loading } = location
   const collapse = {
     hasProject: projectId !== null,
     pathPending: loading,
@@ -1033,21 +1060,7 @@ export function GitSection({ threadId }: SideCardSectionContext) {
     status: git.status
   }
   const collapsedLabel = gitCollapsedLabel(collapse)
-  // A thread's own conversation drafts and receives its pull request. A new chat that follows the composer's
-  // project pick has no thread of its own yet; it asks about the project.
-  const threadProjectId = useAppStore((state) => state.threads.find((thread) => thread.id === threadId)?.projectId ?? null)
-  const ownThreadId = threadId && projectId !== null && threadProjectId === projectId ? threadId : null
-  const folderThreadId = pullRequestReadThreadId(ownThreadId, location.workspaceThreadId)
-  const link = useAppStore((state) => (ownThreadId ? state.threads.find((thread) => thread.id === ownThreadId)?.pullRequest ?? null : null))
-  // No branch, or not a repository: nothing to look up. A branch without an upstream is looked up on focus only once it has a pull request.
-  const { lookup: pullRequest, detail, detailError } = useThreadPullRequest({
-    path,
-    branch: git.status?.isRepo ? git.status.branch : null,
-    projectId,
-    threadId: folderThreadId,
-    tracked: git.status?.tracking === 'tracked',
-    link
-  })
+  const pullRequestPushTarget = usePullRequestPushTarget(location.workspaceThreadId, link)
   return (
     <GitSectionView
       threadId={threadId}
@@ -1060,6 +1073,7 @@ export function GitSection({ threadId }: SideCardSectionContext) {
       pullRequestDetail={detail}
       pullRequestError={detailError}
       pullRequestLink={link}
+      pullRequestPushTarget={pullRequestPushTarget}
       collapsedLabel={collapsedLabel}
       canInitialize={canInitRepository(collapse)}
     />

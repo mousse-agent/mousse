@@ -12,7 +12,7 @@ import { ANTIGRAVITY_CAPS } from '../../src/mms/harness/drivers/antigravity'
 import { CLAUDE_CODE_CAPS } from '../../src/mms/harness/drivers/claudeCode'
 import { CODEX_CAPS } from '../../src/mms/harness/drivers/codex'
 import { PI_LEGACY_CAPS } from '../../src/mms/harness/drivers/pi'
-import { checkPolicy, INTERACTIVE_PURPOSES, purposeAllowed, toolControlLevel } from '../../src/mms/harness/policy'
+import { checkPermissionMode, checkPolicy, INTERACTIVE_PURPOSES, purposeAllowed, toolControlLevel } from '../../src/mms/harness/policy'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import type { ProviderAdapter, TurnInput, TurnResult } from '../../src/mms/run/adapters/ProviderAdapter'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
@@ -49,6 +49,20 @@ describe('checkPolicy', () => {
     expect(checkPolicy(caps('uncontrolled'), policy({ approvals }))).toMatchObject({ ok: false, error: { missing: ['toolControl'] } })
   })
 
+  it('accepts pre-granted approvals on an uncontrolled instance only under Full access (it approves its own tools)', () => {
+    expect(checkPolicy(caps('uncontrolled'), policy({ approvals: 'grants', permissionMode: 'full' }))).toEqual({ ok: true })
+    expect(checkPolicy(caps('uncontrolled'), policy({ approvals: 'grants', permissionMode: 'accept_edits' }))).toMatchObject({ ok: false, error: { missing: ['toolControl'] } })
+    expect(checkPolicy(caps('uncontrolled'), policy({ approvals: 'never', permissionMode: 'full' }))).toMatchObject({ ok: false, error: { missing: ['toolControl'] } })
+  })
+
+  it('refuses a recorded permission mode an uncontrolled instance cannot enforce, naming the instance and the modes it supports', () => {
+    const refused = checkPermissionMode(caps('uncontrolled'), { permissionMode: 'ask' }, 'Gemini', 'gemini')
+    expect(refused).toMatchObject({ ok: false, error: { code: 'permission_mode_unenforceable', instanceId: 'gemini', supportedModes: ['full'] } })
+    expect(checkPermissionMode(caps('uncontrolled'), { permissionMode: 'full' }, 'Gemini')).toEqual({ ok: true })
+    // A binding from before permission modes carries none and is not checked.
+    expect(checkPermissionMode(caps('uncontrolled'), {}, 'Gemini')).toEqual({ ok: true })
+  })
+
   it('needs hard budgets for counts, hard budgets and reserved spend for tokens and USD, nothing for wall clock', () => {
     const limits = (budgets: HarnessCaps['budgets'], spendLimits: HarnessCaps['spendLimits'] = 'unsupported'): HarnessCaps => ({ ...caps('exact'), budgets, spendLimits })
     // A model whose output cap the driver bounds, with a price (the model rows are in `policyRules.test.ts`).
@@ -71,7 +85,7 @@ describe('checkPolicy', () => {
     expect(checkPolicy({ ...caps('uncontrolled'), budgets: 'unsupported' }, policy({ budget: { maxWallMs: 60_000 } }))).toEqual({ ok: true })
   })
 
-  it.each(['delegated', 'workflow', 'definition', 'bot'] as const)('refuses an uncontrolled instance for a %s turn', (origin) => {
+  it.each(['delegated', 'workflow', 'definition', 'bot', 'schedule'] as const)('refuses an uncontrolled instance for a %s turn', (origin) => {
     expect(checkPolicy(caps('uncontrolled'), policy({ origin }))).toMatchObject({ ok: false, error: { missing: ['toolControl'] } })
     expect(checkPolicy(caps('approval_only'), policy({ origin }))).toEqual({ ok: true })
   })
@@ -89,7 +103,7 @@ describe('checkPolicy', () => {
 describe('purposes', () => {
   it('allows only the interactive purposes on an uncontrolled instance', () => {
     for (const purpose of INTERACTIVE_PURPOSES) expect(purposeAllowed(caps('uncontrolled'), purpose)).toBe(true)
-    for (const purpose of ['delegate_task', 'definition', 'workflow', 'title', 'bot_reply'])
+    for (const purpose of ['delegate_task', 'definition', 'workflow', 'title', 'bot_reply', 'schedule'])
       expect(purposeAllowed(caps('uncontrolled'), purpose), purpose).toBe(false)
     expect(purposeAllowed(caps('approval_only'), 'delegate_task')).toBe(true)
   })
@@ -143,36 +157,83 @@ describe('the gateway on an uncontrolled instance', () => {
   it('resolves for the composer and refuses delegation, definitions, workflows and titles', () => {
     const { harness } = fixture()
     expect(harness.resolve({ instanceId: 'codex', model: 'm' }, { kind: 'device' }, 'composer').caps.toolControl).toBe('uncontrolled')
-    for (const purpose of ['delegate_task', 'definition', 'workflow'] as const)
+    for (const purpose of ['delegate_task', 'definition', 'workflow', 'schedule'] as const)
       expect(() => harness.resolve({ instanceId: 'codex', model: 'm' }, { kind: 'device' }, purpose)).toThrow(expect.objectContaining({ code: 'policy_unenforceable' }))
     expect(() => harness.resolveStored({ instanceId: 'codex', llmProvider: '', model: 'm' }, { purpose: 'delegate_task' })).toThrow(/approves tools itself/)
+    expect(() => harness.resolveStored({ instanceId: 'codex', llmProvider: '', model: 'm' }, { purpose: 'schedule' })).toThrow(/approves tools itself/)
+  })
+
+  it('binds a scheduled turn with the schedule origin and refuses it on an uncontrolled instance', async () => {
+    const { harness, adapter, spec } = fixture()
+    const resolved = harness.resolveStored({ instanceId: 'codex', llmProvider: '', model: 'm' }, { purpose: 'turn' })
+    const scheduled = await harness.bind(resolved, { mode: 'agent', origin: 'schedule', permissionMode: 'full' })
+    expect(scheduled.policy.origin).toBe('schedule')
+    await expect(harness.startTurn(spec(scheduled, 'job-thread')).result).rejects.toMatchObject({ code: 'policy_unenforceable' })
+    expect(adapter.turns).toEqual([])
   })
 
   it('refuses a delegated child turn, its retry and its continuation, and runs a person’s turn', async () => {
     const { harness, adapter, spec } = fixture()
     const resolved = harness.resolveStored({ instanceId: 'codex', llmProvider: '', model: 'm' }, { purpose: 'turn' })
-    const delegated = await harness.bind(resolved, { mode: 'agent', origin: 'delegated' })
+    const delegated = await harness.bind(resolved, { mode: 'agent', origin: 'delegated', permissionMode: 'full' })
     expect(delegated.policy.origin).toBe('delegated')
     // First dispatch, a retry of the same stored binding, and a continuation that names it as previous.
     await expect(harness.startTurn(spec(delegated, 'child')).result).rejects.toMatchObject({ code: 'policy_unenforceable' })
     await expect(harness.startTurn(spec(structuredClone(delegated), 'child')).result).rejects.toMatchObject({ code: 'policy_unenforceable' })
     await expect(harness.startTurn(spec(structuredClone(delegated), 'child', delegated)).result).rejects.toMatchObject({ code: 'policy_unenforceable' })
-    const workflow = await harness.bind(resolved, { mode: 'agent', origin: 'workflow' })
+    const workflow = await harness.bind(resolved, { mode: 'agent', origin: 'workflow', permissionMode: 'full' })
     await expect(harness.startTurn(spec(workflow, 'step')).result).rejects.toMatchObject({ code: 'policy_unenforceable' })
     expect(adapter.turns).toEqual([])
-    const interactive = await harness.bind(resolved, { mode: 'agent' })
+    const interactive = await harness.bind(resolved, { mode: 'agent', permissionMode: 'full' })
     await expect(harness.startTurn(spec(interactive)).result).resolves.toMatchObject({ text: 'ok' })
     expect(adapter.turns).toHaveLength(1)
+  })
+
+  it('admits Full access with approvals granted, and refuses Ask and Auto-accept edits typed, before any provider is touched', async () => {
+    const { harness, adapter, spec } = fixture()
+    const resolved = harness.resolveStored({ instanceId: 'codex', llmProvider: '', model: 'm' }, { purpose: 'turn' })
+    const full = await harness.bind(resolved, { mode: 'agent', permissionMode: 'full' })
+    expect(full.policy).toMatchObject({ approvals: 'grants', permissionMode: 'full' })
+    await expect(harness.startTurn(spec(full)).result).resolves.toMatchObject({ text: 'ok' })
+    for (const permissionMode of ['ask', 'accept_edits'] as const) {
+      await expect(harness.bind(resolved, { mode: 'agent', permissionMode })).rejects.toMatchObject({
+        code: 'permission_mode_unenforceable',
+        message: expect.stringContaining('Full access')
+      })
+    }
+    expect(adapter.turns).toHaveLength(1)
+  })
+
+  it('refuses a binding that asks, on a retry and on a continuation, as on the first dispatch', async () => {
+    const { harness, adapter, spec } = fixture()
+    const resolved = harness.resolveStored({ instanceId: 'codex', llmProvider: '', model: 'm' }, { purpose: 'turn' })
+    const full = await harness.bind(resolved, { mode: 'agent', permissionMode: 'full' })
+    // A binding recorded for a thread that asked (the instance was approval_only then).
+    const asking = { ...structuredClone(full), policy: { ...full.policy, approvals: 'ask' as const, permissionMode: 'ask' as const } }
+    await expect(harness.startTurn(spec(asking)).result).rejects.toMatchObject({ code: 'permission_mode_unenforceable' })
+    await expect(harness.startTurn(spec(structuredClone(asking))).result).rejects.toMatchObject({ code: 'permission_mode_unenforceable' })
+    await expect(harness.startTurn(spec(structuredClone(asking), 'thread-1', full)).result).rejects.toMatchObject({ code: 'permission_mode_unenforceable' })
+    expect(adapter.turns).toEqual([])
+  })
+
+  it('refuses a turn whose input names another permission mode than its binding', async () => {
+    const { harness, adapter, spec } = fixture()
+    const resolved = harness.resolveStored({ instanceId: 'codex', llmProvider: '', model: 'm' }, { purpose: 'turn' })
+    const full = await harness.bind(resolved, { mode: 'agent', permissionMode: 'full' })
+    const mismatched = spec(full)
+    ;(mismatched.input as { permissionMode?: string }).permissionMode = 'ask'
+    await expect(harness.startTurn(mismatched).result).rejects.toMatchObject({ code: 'protocol' })
+    expect(adapter.turns).toEqual([])
   })
 
   it('tells a thread once that the instance approves tools itself', async () => {
     const { harness, notices, spec } = fixture()
     const resolved = harness.resolveStored({ instanceId: 'codex', llmProvider: '', model: 'm' }, { purpose: 'turn' })
-    const first = await harness.bind(resolved, { mode: 'agent' })
+    const first = await harness.bind(resolved, { mode: 'agent', permissionMode: 'full' })
     await harness.startTurn(spec(first)).result
-    const second = await harness.bind(resolved, { mode: 'agent' })
+    const second = await harness.bind(resolved, { mode: 'agent', permissionMode: 'full' })
     await harness.startTurn(spec(second, 'thread-1', first)).result
-    await harness.startTurn(spec(await harness.bind(resolved, { mode: 'agent' }), 'thread-2')).result
+    await harness.startTurn(spec(await harness.bind(resolved, { mode: 'agent', permissionMode: 'full' }), 'thread-2')).result
     expect(notices).toEqual([['thread-1', 'Test codex approves tools itself.'], ['thread-2', 'Test codex approves tools itself.']])
   })
 })

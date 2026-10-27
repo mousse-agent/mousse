@@ -1,6 +1,6 @@
 import type { ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { accessSync, constants, mkdirSync, readFileSync } from 'node:fs'
+import { accessSync, constants, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, isAbsolute, join, resolve } from 'node:path'
 import { AppError, redactSecrets } from '../../../shared/errors'
@@ -23,8 +23,8 @@ import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
 import { codexMcpConfigOverrides } from '../../run/mcp/attachment'
 import type { LoginSession } from '../LoginSession'
+import { settingsMirror, type MirrorField, type VendorMirror } from '../../harness/vendorMirror'
 import {
-  applyCliConfigPatch,
   cliLaunch,
   requireExecutable,
   sharedCliVersions,
@@ -65,6 +65,8 @@ import {
 } from './protocol'
 import { isUsageLimitInfo, isUsageLimitText, resetFromSnapshot } from './rateLimits'
 import { readUsageLimit, usageLimitError } from '../../orchestrator/providerErrors'
+import { normalizePermissionMode, permissionModeAllows, type PermissionMode } from '../../../shared/permissionMode'
+import { PERMISSION_KEYS } from '../../../shared/permissionKeys'
 import { codexTurnPolicy } from './childPolicy'
 import { DEFAULT_TREE_TIMING, HelperTree, RpcRefused, ThreadStatuses, TreeOff, isWakeUp, type TreePorts, type TreeTiming } from './helperTree'
 import {
@@ -87,12 +89,12 @@ import { QUESTIONS_REFUSED_MESSAGE } from '../../harness/acp/permissions'
 export const CODEX_PROVIDER_ID = 'codex'
 /** How long a live `account/read` result stands before it is checked again. */
 export const CODEX_ACCOUNT_TTL_MS = 5 * 60_000
-/** Model id that leaves the choice to the user's Codex config (`model` in `config.toml`). */
+/**
+ * Model id that leaves the choice to the user's Codex config (`model` in `config.toml`). Chats and
+ * defaults saved with it keep working; it is no longer offered, so an entry lists the models Codex
+ * reports (or none, and "Refresh models").
+ */
 export const CODEX_DEFAULT_MODEL_ID = 'default'
-/** Offered until `model/list` has run once (or when it fails). */
-export const CODEX_FALLBACK_MODELS: LlmModelOption[] = [
-  { id: CODEX_DEFAULT_MODEL_ID, label: 'Codex default (from your Codex config)' }
-]
 /**
  * Codex's built-in provider for OpenAI models, which uses the ChatGPT sign-in. Codex refuses to let
  * any config layer redefine it (`model_providers` cannot contain built-in ids), so pinning it per
@@ -139,17 +141,17 @@ type SavedThread = {
   historyKey?: string
 }
 type Settings = {
-  /** Absolute path chosen in Settings; PATH lookup otherwise. */
+  /**
+   * The launch settings and the sign-out flag as an older Mousse reads them: a mirror of the
+   * instance config, written only through `vendorMirror()` and never read for a launch.
+   */
   binaryPath?: string
-  /** Extra arguments after `codex app-server`. */
   args?: string[]
-  /** Extra environment variables, applied over `codexEnvironment()`. */
   env?: Record<string, string>
+  disconnected?: boolean
   models?: LlmModelOption[]
   /** ISO time `models` was last listed by Codex. */
   modelsRefreshedAt?: string
-  /** Disconnected in Mousse; the terminal sign-in in `~/.codex` stays intact. */
-  disconnected?: boolean
   threads?: Record<string, SavedThread>
 }
 type AccountProbe = CodexAccountReading
@@ -200,6 +202,15 @@ export interface CodexServiceOptions {
   prepareLaunch?: (signal?: AbortSignal) => Promise<CodexLaunchExtras>
   account?: CodexAccountSource
   models?: CodexModelSource
+  /**
+   * The executable, extra `app-server` args and variables: the instance config's (the gateway's).
+   * Without it Codex runs as found, with none.
+   */
+  launch?: () => StoredCliConfig
+  /** Signed out in Mousse (the instance config's flag, the gateway's); default false. */
+  signedOut?: () => boolean
+  /** Saves an executable path entered at sign-in to the instance config (the gateway's `configure`). */
+  saveLaunch?: (patch: CliProviderConfigPatch) => Promise<void>
 }
 
 /** A turn Codex ended as failed, with what it said about why. The message is redacted. */
@@ -291,6 +302,12 @@ export type CodexChatInput = {
   images?: ChatImageAttachment[]
   signal?: AbortSignal
   mode?: 'plan' | 'default'
+  /**
+   * The thread's permission mode for this turn; absent reads as the default (`accept_edits`). It
+   * sets Codex's approval policy and sandbox (`codexTurnPolicy`) and decides which approvals Mousse
+   * answers without asking.
+   */
+  permissionMode?: PermissionMode
   /** Set for a delegated child's turns (first and resumed); see `codexTurnPolicy`. */
   child?: ChildTurnPolicy
   /** The Mousse MCP server for this run (SPEC §15.2); null attaches none. */
@@ -516,6 +533,11 @@ class TurnRun {
   /** The run refuses tools that need approval (`approvals: 'never'`): declined, never asked. */
   get refusesApprovals(): boolean {
     return this.input.approvals === 'never'
+  }
+
+  /** The thread's permission mode this turn runs in. */
+  get permissionMode(): PermissionMode {
+    return normalizePermissionMode(this.input.permissionMode)
   }
 
   get text(): string {
@@ -957,6 +979,8 @@ export class CodexProviderService {
   private modelsEpoch = 0
   /** Model listings in flight; they keep the process open. */
   private listing = 0
+  /** The plan limits as the process last reported them (a read, or a turn's update), for when a read fails. */
+  private lastLimits?: { snapshot: RateLimitSnapshot; at: number; account: string }
   private idleClose?: { timer: ReturnType<typeof setTimeout>; at: number }
   /** Bumped by disconnect; a turn from an older scope does not save its thread. */
   private scope = 0
@@ -1015,9 +1039,33 @@ export class CodexProviderService {
     atomicWriteJsonSync(this.settingsPath, this.settings)
   }
 
+  /** The stored executable, args and variables: the instance config's, never `settings.json`. */
+  private launchSettings(): StoredCliConfig {
+    return this.options.launch?.() ?? {}
+  }
+
+  /** Signed out in Mousse: the instance's flag; the terminal sign-in in `~/.codex` stays intact. */
+  private signedOut(): boolean {
+    return this.options.signedOut?.() === true
+  }
+
+  /**
+   * The copy of `fields` in this service's `settings.json` for an older Mousse, read from and
+   * written to the settings loaded now and saved through `save()`, the file's one writer.
+   */
+  vendorMirror(fields: readonly MirrorField[]): VendorMirror {
+    return settingsMirror(fields, {
+      settings: () => this.settings as Record<string, unknown>,
+      settingsError: () => this.settingsError,
+      save: () => this.save(),
+      exists: () => existsSync(this.settingsPath),
+      signedOutKey: 'disconnected'
+    })
+  }
+
   /** How to start Codex: the chosen or detected executable, with an npm shim resolved. */
   private launchTarget(): CliLaunch | undefined {
-    return cliLaunch(this.settings.binaryPath || (this.dependencies.findBinary ?? findCodexBinary)())
+    return cliLaunch(this.launchSettings().binaryPath || (this.dependencies.findBinary ?? findCodexBinary)())
   }
 
   /** The program that runs (reported as `resolvedBinaryPath`). */
@@ -1039,7 +1087,7 @@ export class CodexProviderService {
    * `status()`); a stale result is refreshed in the background.
    */
   configured(): boolean {
-    if (this.stopped || this.settingsError || this.settings.disconnected || !this.binary()) return false
+    if (this.stopped || this.settingsError || this.signedOut() || !this.binary()) return false
     if (this.probeResult && this.checkDue()) void this.status()
     return this.probeResult?.result.kind === 'signed_in'
   }
@@ -1061,10 +1109,9 @@ export class CodexProviderService {
     }
   }
 
-  /** The listed models, or the Codex default until a listing runs. */
+  /** The listed models; none until a listing has run. */
   models(): LlmModelOption[] {
-    if (this.options.models) return this.settings.models ?? []
-    return this.settings.models?.length ? this.settings.models : CODEX_FALLBACK_MODELS
+    return this.settings.models ?? []
   }
 
   /** When Codex last listed the models, kept with them across restarts. */
@@ -1082,7 +1129,7 @@ export class CodexProviderService {
   }
 
   private checkDue(force = false): boolean {
-    if (this.stopped || this.settingsError || this.settings.disconnected) return false
+    if (this.stopped || this.settingsError || this.signedOut()) return false
     return force || !this.probeResult || Date.now() - this.probeResult.at >= CODEX_ACCOUNT_TTL_MS
   }
 
@@ -1139,7 +1186,7 @@ export class CodexProviderService {
         if (result.kind === 'signed_in' && !this.settings.models?.length && !this.modelDiscoveryStarted) {
           this.modelDiscoveryStarted = true
           void this.refreshModels().catch(() => {
-            /* the fallback model stays available */
+            /* "Refresh models" lists them later */
           })
         }
       })().finally(() => {
@@ -1155,7 +1202,7 @@ export class CodexProviderService {
     if (this.settingsError) return { state: 'error', message: this.settingsError }
     if (!this.binary())
       return { state: 'missing_binary', message: 'Codex CLI not found. Install the Codex CLI, then recheck.' }
-    if (this.settings.disconnected)
+    if (this.signedOut())
       return { state: 'disconnected', message: 'Disconnected in Mousse. The Codex sign-in in your terminal is unchanged.' }
     const probe = this.probeResult
     if (!probe) return { state: 'error', message: 'Mousse has not checked the Codex sign-in yet.' }
@@ -1185,11 +1232,12 @@ export class CodexProviderService {
         })
         checkpoint()
         if (!isAbsolute(binary)) throw new Error('Codex binary path must be absolute')
-        this.settings.binaryPath = binary
+        // Saved to the instance config through the gateway, like any other launch setting.
+        if (!this.options.saveLaunch) throw new Error('Codex executable is unavailable')
+        await this.options.saveLaunch({ binaryPath: binary })
+        checkpoint()
         if (!this.binary()) throw new Error('Codex executable is unavailable')
       }
-      delete this.settings.disconnected
-      this.save()
       for (;;) {
         const status = await this.status({ force: true })
         checkpoint()
@@ -1208,7 +1256,7 @@ export class CodexProviderService {
       try {
         await this.refreshModels()
       } catch {
-        interaction.notify({ type: 'progress', message: 'Signed in. Model discovery is unavailable; your Codex default model is available.' })
+        interaction.notify({ type: 'progress', message: 'Signed in. Models could not be listed yet; use Refresh models to try again.' })
       }
       checkpoint()
       return { success: true, sessionId: session.sessionId }
@@ -1286,6 +1334,30 @@ export class CodexProviderService {
   }
 
   /**
+   * The plan's usage limits (`account/rateLimits/read`), read now from Codex itself: the same
+   * numbers `codex` shows, through the user's own sign-in. When the read fails the last snapshot
+   * Codex sent stands in (`live: false`, with its age); with none, the failure is thrown.
+   */
+  async rateLimits(signal?: AbortSignal): Promise<{ snapshot: RateLimitSnapshot; at: number; live: boolean }> {
+    this.listing += 1
+    try {
+      const conn = await this.connection()
+      const response = await conn.request('account/rateLimits/read', undefined, { timeoutMs: 10_000, signal })
+      const account = this.account()?.subject
+      if (account) this.lastLimits = { snapshot: response.rateLimits, at: Date.now(), account }
+      return { snapshot: response.rateLimits, at: Date.now(), live: true }
+    } catch (error) {
+      // Only the signed-in account's own last snapshot stands in: never another account's limits.
+      const last = this.lastLimits
+      if (signal?.aborted || !last || last.account !== this.account()?.subject) throw error
+      return { snapshot: last.snapshot, at: last.at, live: false }
+    } finally {
+      this.listing -= 1
+      this.closeWhenIdle(CODEX_CHECK_CLOSE_MS)
+    }
+  }
+
+  /**
    * Drops the saved Codex thread of `threadId`, so its next turn starts a new Codex thread with the
    * history in the prompt (the account it was saved under changed).
    */
@@ -1312,53 +1384,48 @@ export class CodexProviderService {
     return { label: plan ? `ChatGPT ${plan}` : 'ChatGPT', ...(email ? { subject: `chatgpt:${email}` } : {}) }
   }
 
-  /** Disconnects this profile in Mousse only; the terminal sign-in is never logged out. */
+  /**
+   * Disconnects this profile in Mousse only; the terminal sign-in is never logged out. The gateway
+   * keeps the signed-out flag in the instance config (and mirrors it to `settings.json`).
+   */
   async logout(): Promise<void> {
     this.scope += 1
-    this.settings.disconnected = true
     this.settings.threads = {}
     this.probeResult = undefined
+    this.lastLimits = undefined
     this.save()
     this.abortInFlight()
     this.app?.conn.close()
   }
 
-  /** The stored executable, launch args and variables, as saved (no lookup, no version check). */
-  storedLaunch(): StoredCliConfig {
-    return { ...(this.settings.binaryPath ? { binaryPath: this.settings.binaryPath } : {}), args: storedCliArgs(this.settings), env: storedCliEnv(this.settings) }
-  }
-
   /** The executable path, launch args and environment set in Settings → Providers. */
   async cliConfig(): Promise<CliProviderConfig> {
     const launch = this.launchTarget()
+    const stored = this.launchSettings()
     return {
       instanceId: CODEX_INSTANCE_ID,
-      ...(this.settings.binaryPath ? { binaryPath: this.settings.binaryPath } : {}),
+      ...(stored.binaryPath ? { binaryPath: stored.binaryPath } : {}),
       ...(launch ? { resolvedBinaryPath: launch.path } : {}),
       version: await (this.dependencies.versions ?? sharedCliVersions).version(launch, this.environment()),
-      args: storedCliArgs(this.settings),
-      env: storedCliEnv(this.settings)
+      args: storedCliArgs(stored),
+      env: storedCliEnv(stored)
     }
   }
 
+  /** Checks launch settings before the gateway saves them: an executable that cannot run. */
+  validateLaunch(patch: CliProviderConfigPatch): void {
+    if (typeof patch.binaryPath === 'string') requireExecutable(patch.binaryPath, 'Codex')
+  }
+
   /**
-   * Saves the launch settings. The app-server process is long-lived, so one started with the old
+   * The launch settings changed. The app-server process is long-lived, so one started with the old
    * settings is replaced: at once when idle, otherwise when its running turns and checks finish.
-   * A changed executable re-checks the sign-in.
    */
-  async setCliConfig(patch: CliProviderConfigPatch): Promise<CliProviderConfig> {
-    if (this.stopped) throw new Error('Codex provider is stopped')
-    if (this.settingsError) throw new Error(this.settingsError)
-    const before = this.binary()
-    applyCliConfigPatch(this.settings, patch, (path) => requireExecutable(path, 'Codex'))
-    this.save()
+  launchChanged(): void {
     this.launchGeneration += 1
-    if (this.app) {
-      if (this.busy()) this.closeWhenIdle(CODEX_CHECK_CLOSE_MS)
-      else this.closeProcess()
-    }
-    if (this.binary() !== before) await this.status({ force: true })
-    return this.cliConfig()
+    if (!this.app) return
+    if (this.busy()) this.closeWhenIdle(CODEX_CHECK_CLOSE_MS)
+    else this.closeProcess()
   }
 
   /**
@@ -1463,7 +1530,7 @@ export class CodexProviderService {
       process = (this.dependencies.launch ?? spawnCodexAppServer)({
         binary: target.command,
         ...(target.args.length ? { entryArgs: target.args } : {}),
-        args: [...storedCliArgs(this.settings), ...(extras?.args ?? [])],
+        args: [...storedCliArgs(this.launchSettings()), ...(extras?.args ?? [])],
         env: { ...this.environment(), ...extras?.env },
         cwd: this.dir
       })
@@ -1515,7 +1582,7 @@ export class CodexProviderService {
   }
 
   private environment(): NodeJS.ProcessEnv {
-    return withUserEnv(this.options.env?.() ?? codexEnvironment(), storedCliEnv(this.settings))
+    return withUserEnv(this.options.env?.() ?? codexEnvironment(), storedCliEnv(this.launchSettings()))
   }
 
   /** Something is using the process: a check, a model listing, or a turn. */
@@ -1596,6 +1663,8 @@ export class CodexProviderService {
     // Account-wide, not tied to a thread: every open run keeps the latest, for a usage limit it may hit.
     const limits = notificationParams(notification, 'account/rateLimits/updated')
     if (limits) {
+      const owner = this.account()?.subject
+      this.lastLimits = owner ? { snapshot: limits.rateLimits, at: Date.now(), account: owner } : undefined
       for (const held of this.turns.values()) held.rateLimits = limits.rateLimits
       return
     }
@@ -1625,10 +1694,13 @@ export class CodexProviderService {
         const approval = request.params as CodexServerRequestMap['item/commandExecution/requestApproval']['params']
         if (!run || run.questionSignal.aborted) return { decision: 'cancel' } satisfies Result<'item/commandExecution/requestApproval'>
         if (run.mode === 'plan' || run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/commandExecution/requestApproval'>
+        // Full access never asks (Codex's own profile does not either; this is the backstop).
+        if (permissionModeAllows(run.permissionMode, 'command')) return { decision: 'accept' } satisfies Result<'item/commandExecution/requestApproval'>
         const command = approval.command ?? (run.item(approval.itemId) as { command?: string } | undefined)?.command ?? 'a command'
         const decision = await this.approve(
           run,
-          `Allow Codex to run this command?\n${command}${approval.cwd ? `\nin ${approval.cwd}` : ''}${approval.reason ? `\n${approval.reason}` : ''}`
+          `Allow Codex to run this command?\n${command}${approval.cwd ? `\nin ${approval.cwd}` : ''}${approval.reason ? `\n${approval.reason}` : ''}`,
+          'command'
         )
         return { decision } satisfies Result<'item/commandExecution/requestApproval'>
       }
@@ -1636,10 +1708,13 @@ export class CodexProviderService {
         const approval = request.params as CodexServerRequestMap['item/fileChange/requestApproval']['params']
         if (!run || run.questionSignal.aborted) return { decision: 'cancel' } satisfies Result<'item/fileChange/requestApproval'>
         if (run.mode === 'plan' || run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/fileChange/requestApproval'>
+        // Edits go ahead under Auto-accept edits and Full access.
+        if (permissionModeAllows(run.permissionMode, 'edit')) return { decision: 'accept' } satisfies Result<'item/fileChange/requestApproval'>
         const changes = (run.item(approval.itemId) as { changes?: Array<{ path: string }> } | undefined)?.changes ?? []
         const decision = await this.approve(
           run,
-          `Allow Codex to edit ${changes.length ? changes.map((change) => change.path).join(', ') : 'files'}?${approval.reason ? `\n${approval.reason}` : ''}`
+          `Allow Codex to edit ${changes.length ? changes.map((change) => change.path).join(', ') : 'files'}?${approval.reason ? `\n${approval.reason}` : ''}`,
+          'edit'
         )
         return { decision } satisfies Result<'item/fileChange/requestApproval'>
       }
@@ -1676,7 +1751,12 @@ export class CodexProviderService {
     }
   }
 
-  private async approve(run: TurnRun, prompt: string): Promise<'accept' | 'acceptForSession' | 'decline' | 'cancel'> {
+  /**
+   * Asks the user about a command or a file change. Mousse answers Codex with `accept` or `decline`
+   * only: Codex's own "for this session" answer is not offered, because Mousse records "Always for
+   * this thread" itself, and Codex would remember its allowance past a stricter mode.
+   */
+  private async approve(run: TurnRun, prompt: string, kind: 'command' | 'edit'): Promise<'accept' | 'decline' | 'cancel'> {
     try {
       const answer = await this.questions.requestAnswers(
         [
@@ -1685,16 +1765,25 @@ export class CodexProviderService {
             prompt,
             options: [
               { id: 'allow', label: 'Allow once' },
-              { id: 'allow_session', label: 'Allow for this session' },
               { id: 'reject', label: 'Reject' }
             ]
           }
         ],
         run.mousseThreadId,
-        { signal: run.questionSignal }
+        {
+          signal: run.questionSignal,
+          approval: {
+            action: kind,
+            permissionKey: kind === 'command' ? PERMISSION_KEYS.codexCommand : PERMISSION_KEYS.codexFileChange,
+            options: [
+              { id: 'allow', decision: 'allow', scope: 'once' },
+              { id: 'reject', decision: 'reject' }
+            ]
+          }
+        }
       )
       if (run.questionSignal.aborted) return 'cancel'
-      return answer.permission === 'allow' ? 'accept' : answer.permission === 'allow_session' ? 'acceptForSession' : 'decline'
+      return answer.permission === 'allow' ? 'accept' : 'decline'
     } catch {
       return run.questionSignal.aborted ? 'cancel' : 'decline'
     }
@@ -1999,8 +2088,11 @@ export class CodexProviderService {
     const mcpToken = input.mcp?.token ?? null
     const overrides = codexMcpConfigOverrides(input.mcp) as ThreadConfig
     const { baseId } = parseThinkingSuffixFromModelId(input.model)
-    const policy = codexTurnPolicy(input.mode ?? 'default', input.child)
-    const childKey = input.child ? (input.child.readOnly ? 'read-only' : 'child') : ''
+    const permissionMode = normalizePermissionMode(input.permissionMode)
+    const policy = codexTurnPolicy(input.mode ?? 'default', input.child, permissionMode)
+    // The policy a loaded thread was opened with: a change of child policy or permission mode reopens it
+    // (Codex applies thread overrides when it loads a thread and ignores them on a loaded one).
+    const childKey = `${input.child ? (input.child.readOnly ? 'read-only' : 'child') : ''}|${policy.approvalPolicy}|${policy.sandbox}`
     const params = {
       cwd,
       approvalPolicy: policy.approvalPolicy,
@@ -2109,7 +2201,7 @@ export class CodexProviderService {
       current.conn = conn
       this.turns.set(codexThreadId, current)
       const { baseId, effort } = parseThinkingSuffixFromModelId(input.model)
-      const policy = codexTurnPolicy(input.mode ?? 'default', input.child)
+      const policy = codexTurnPolicy(input.mode ?? 'default', input.child, current.permissionMode)
       const turnParams = {
         cwd: resolve(input.cwd),
         approvalPolicy: policy.approvalPolicy,
@@ -2466,7 +2558,7 @@ export class CodexProviderService {
   }
 
   private signInMessage(): string {
-    if (this.settings.disconnected) return 'Codex is disconnected. Reconnect it in Settings → Providers.'
+    if (this.signedOut()) return 'Codex is disconnected. Reconnect it in Settings → Providers.'
     if (!this.binary()) return 'Codex CLI not found. Install the Codex CLI, then recheck in Settings → Providers.'
     const probe = this.probeResult?.result
     return probe && probe.kind !== 'signed_in'

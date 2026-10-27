@@ -95,8 +95,7 @@ const CURSOR_SDK = /^(@cursor\/sdk|pi-cursor-sdk)(\/|$)/
 const CURSOR_SDK_IMPORTERS = [/^src\/mms\/harness\/hosts\//]
 /** The legacy `pi:cursor` model API, removed with the pi loop. */
 const CURSOR_SDK_TRANSITIONAL: Record<string, string> = {
-  'src/mms/providers/cursorPiProvider.ts': 'PR 4',
-  'src/mms/providers/ProviderAuthService.ts': 'PR 4'
+  'src/mms/providers/cursorPiProvider.ts': 'PR 4'
 }
 
 // -- Rule 2: driver-name literals at branch sites --------------------------------------------------

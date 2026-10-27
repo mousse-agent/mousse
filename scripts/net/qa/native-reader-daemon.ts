@@ -11,7 +11,7 @@ import {
   loadNativeReader,
   nativeSdkVersion,
   type NativeBotDefinition
-} from '../../../src/mms/bots/runtime'
+} from '../../../src/mms/bots/space/runtime'
 import {
   publishOwnRuntimeRecord,
   removeOwnRuntimeRecord,

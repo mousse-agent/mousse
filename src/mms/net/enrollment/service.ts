@@ -574,6 +574,29 @@ export class EnrollmentService {
         .run(invite)
     )
   }
+  /**
+   * What an invitation became, read from the row written atomically with the admission. A caller
+   * that lost a join reply uses this to learn the exact node that invitation admitted, instead of
+   * matching on a display name (names are not unique).
+   */
+  inviteOutcome(
+    invite: InviteId
+  ):
+    | { state: 'missing' | 'active' | 'revoked' }
+    | { state: 'consumed'; node: NodeId; name: string } {
+    const row = this.options.db.database
+      .prepare('SELECT state, claims FROM net_enrollment_invites WHERE id=?')
+      .get(invite) as { state: string; claims?: string } | undefined
+    if (!row) return { state: 'missing' }
+    if (row.state !== 'consumed') return { state: row.state === 'revoked' ? 'revoked' : 'active' }
+    if (!row.claims) return { state: 'missing' }
+    const claims = parseProtocolJson(Buffer.from(row.claims)) as { node: NodeId; name: string }
+    return { state: 'consumed', node: claims.node, name: claims.name }
+  }
+  consumedInvite(invite: InviteId): { node: NodeId; name: string } | undefined {
+    const outcome = this.inviteOutcome(invite)
+    return outcome.state === 'consumed' ? { node: outcome.node, name: outcome.name } : undefined
+  }
   async prepareNodeJoin(text: string, requestedName?: string): Promise<PreparedNodeJoin> {
     const parsed = parseInvite(text),
       { document, authorization, token } = parsed

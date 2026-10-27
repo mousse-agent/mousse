@@ -4,6 +4,8 @@ import type {
   GitPullRequestLookup,
   PullRequestBaseBranches,
   PullRequestDetail,
+  PullRequestIdentity,
+  PullRequestListItem,
   RepositoryIdentity
 } from '../../shared/pullRequests'
 
@@ -25,8 +27,25 @@ export interface CodeHost {
   getPullRequestDetail(cwd: string, number: number, options?: { force?: boolean }): Promise<PullRequestDetail>
   createPullRequest(cwd: string, input: CreatePullRequestInput): Promise<GitPullRequestInfo>
   listBaseBranches(cwd: string): Promise<PullRequestBaseBranches>
-  /** The remote that points at the folder's repository, else `origin`, else the only remote; null when there is none. */
-  remoteForRepository(cwd: string): Promise<string | null>
+  /**
+   * The remote that points at the folder's repository, else `origin`, else the only remote; null when there is none.
+   * With `identity` it is only a remote whose URL is exactly that repository (same host and `owner/repo`, whatever
+   * the scheme), never a fallback: a fetch or a push must not go to a repository that is merely nearby. With
+   * `push` every URL the remote pushes to (`pushurl`, URL rewrites) must be that repository as well.
+   */
+  remoteForRepository(cwd: string, identity?: RepositoryIdentity, options?: { push?: boolean }): Promise<string | null>
+  /** The open pull requests of the folder's repository, most recently updated first. Cached for 30 seconds per repository. */
+  listPullRequests(cwd: string, options?: { limit?: number; force?: boolean }): Promise<PullRequestListItem[]>
+  /**
+   * Fetches a pull request's head commit into `refs/mousse/pull/<number>/head` of the folder's repository from the remote
+   * whose URL is the pull request's repository, and returns the commit. The head may live in a fork; it is read through the
+   * base repository, so no remote is added. Nothing from the fetched commits runs.
+   */
+  fetchPullRequestHead(cwd: string, pullRequest: PullRequestIdentity): Promise<string>
+  /** Deletes the ref `fetchPullRequestHead` wrote once nothing needs it, only if it still holds `sha`. Never throws. */
+  releasePullRequestHead(cwd: string, pullRequest: PullRequestIdentity, sha: string): Promise<void>
+  /** The default branch name already looked up for this folder, or undefined. Never contacts the host. */
+  cachedDefaultBranch(cwd: string): string | undefined
   /** The account the host's credential belongs to, or null when it cannot be read; cached for 10 minutes per host. */
   viewerLogin(cwd: string): Promise<string | null>
 }

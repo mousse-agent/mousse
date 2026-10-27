@@ -73,7 +73,8 @@ export class RunFsck {
       ...danglingActiveAttempts(db),
       ...eventSequenceFindings(db),
       ...receiptsForUnknownRuns(db),
-      ...multipleActiveRuns(db)
+      ...multipleActiveRuns(db),
+      ...(db.userVersion() >= 10 ? [...pausedRunsWithLiveAttempt(db), ...pausedRunsWithoutTimer(db)] : [])
     ]
     if (db.userVersion() < 2) return findings
     const now = new Date(db.clock()).toISOString()
@@ -319,6 +320,54 @@ function multipleActiveRuns(db: ProfileDatabase): FsckFinding[] {
       severity: 'error' as const,
       message: `Thread ${String(row.thread_id)} has ${Number(row.count)} active runs.`,
       details: { threadId: row.thread_id, runIds: String(row.run_ids).split(' ') }
+    }))
+}
+
+/** A paused run waits for a usage limit; its attempt was interrupted when it paused, so none may still be live. */
+function pausedRunsWithLiveAttempt(db: ProfileDatabase): FsckFinding[] {
+  return db
+    .statement(
+      `SELECT r.run_id, r.thread_id, a.attempt_id, a.status AS attempt_status
+       FROM runs r JOIN run_attempts a ON a.run_id = r.run_id
+       WHERE r.status = 'paused' AND a.status IN ('pending','running')
+       ORDER BY r.run_id, a.ordinal`
+    )
+    .all()
+    .map((row: Row) => ({
+      code: 'paused_run_with_live_attempt',
+      severity: 'error' as const,
+      message: `Run ${String(row.run_id)} is paused but attempt ${String(row.attempt_id)} is ${String(row.attempt_status)}.`,
+      details: { runId: row.run_id, threadId: row.thread_id, attemptId: row.attempt_id, attemptStatus: row.attempt_status }
+    }))
+}
+
+/**
+ * A paused run that promises to continue by itself (`autoResume`) but has no `run.resume` waiting or
+ * running: its timer ended `failed` or `cancelled`, so the banner would say "continues at reset"
+ * and nothing will. Resume now still works. A continue turn already queued for it
+ * (`pause.resumeItemId`) is the queue's to finish and is not a finding.
+ */
+function pausedRunsWithoutTimer(db: ProfileDatabase): FsckFinding[] {
+  return db
+    .statement(
+      `SELECT r.run_id, r.thread_id,
+              json_extract(r.outcome, '$.pause.until') AS until
+       FROM runs r
+       WHERE r.status = 'paused'
+         AND json_extract(r.outcome, '$.pause.autoResume') = 1
+         AND json_extract(r.outcome, '$.pause.resumeItemId') IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM effects e
+           WHERE e.run_id = r.run_id AND e.kind = 'run.resume' AND e.status IN ('pending','running')
+         )
+       ORDER BY r.run_id`
+    )
+    .all()
+    .map((row: Row) => ({
+      code: 'paused_run_without_timer',
+      severity: 'warning' as const,
+      message: `Run ${String(row.run_id)} is paused to resume by itself at ${String(row.until)}, but no run.resume is waiting for it.`,
+      details: { runId: row.run_id, threadId: row.thread_id, until: row.until }
     }))
 }
 

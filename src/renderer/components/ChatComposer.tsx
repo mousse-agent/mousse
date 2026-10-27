@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { ComponentProps, ReactNode } from 'react'
 import { Loader2, Mic, X } from '../lib/icons'
 import { SpeechWave } from '../speech/SpeechWave'
 import type { ProviderWithStatus } from '../lib/providerSnapshots'
@@ -98,6 +98,8 @@ export interface ChatComposerProps {
    * dropped, and picked files get this thread and project on their reference.
    */
   mentionScope?: { scopeKey: string; threadId?: string; projectId?: string }
+  /** The thread's permission mode and how to change it (see `ComposerFooter`). */
+  permission?: ComponentProps<typeof ComposerFooter>['permission']
 }
 
 const MENTION_SEARCH_DEBOUNCE_MS = 120
@@ -160,7 +162,8 @@ export function ChatComposer({
   disableSkillsPicker = false,
   banner,
   searchMentions,
-  mentionScope
+  mentionScope,
+  permission
 }: ChatComposerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const composerInputRef = useRef<HTMLTextAreaElement>(null)
@@ -847,6 +850,7 @@ export function ChatComposer({
         onStartRecording={dictation.start}
         onStopRecording={dictation.stop}
         allowAttachWhileLoading
+        permission={permission}
       />
     </div>
   )

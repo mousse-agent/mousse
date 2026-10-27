@@ -1,6 +1,7 @@
 {
   "comment": "Explicit resource inventory. In-process tests are the unit complement; list new subprocess, multi-profile TLS and browser tests here. Heavy categories share a two-worker project; lightweight processes use three workers. Categories describe the real fixture, not words in its source.",
   "process": [
+    "tests/agentDefinitions/agentChatDefinitionTurn.test.ts",
     "tests/agentLifecycleStatus.test.ts",
     "tests/asyncFileLock.test.ts",
     "tests/browserWindowsSandboxPermissions.test.ts",
@@ -16,6 +17,7 @@
     "tests/gitFoundationRecovery.test.ts",
     "tests/gitFoundationUndo.test.ts",
     "tests/gitFoundationWorkspaceLifecycle.test.ts",
+    "tests/gitProcess.test.ts",
     "tests/gitServiceConfiguredUpstream.test.ts",
     "tests/gitServiceWrites.test.ts",
     "tests/guiMmsController.test.ts",
@@ -31,6 +33,7 @@
     "tests/harness/piRpcLifecycle.test.ts",
     "tests/harness/piRpcProcess.test.ts",
     "tests/harness/piRuntimeProcess.test.ts",
+    "tests/harness/piSpendReservation.test.ts",
     "tests/harness/piToolBudget.test.ts",
     "tests/mmsOwnerLease.test.ts",
     "tests/namedAgentProtocol.test.ts",

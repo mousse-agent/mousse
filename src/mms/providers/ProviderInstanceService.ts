@@ -15,6 +15,8 @@ import {
   type ProviderInstanceMap
 } from '../../shared/providerInstances'
 import type { LlmProviderOption } from '../../shared/settings'
+import { mirrorHash, tupleConfig, MIRROR_MARKER_KEY, type VendorMirror } from '../harness/vendorMirror'
+import { piRetiredOf } from '../harness/drivers/pi/retired'
 import type { ProviderAuthService } from './ProviderAuthService'
 
 /** What a profile stores: `providers.instances` and `providers.instancesSeedVersion`. */
@@ -74,7 +76,15 @@ export class ProviderInstanceService {
   private writeFailed = false
   private readError?: string
 
-  constructor(private readonly options: { store?: ProviderInstanceStore; providerAuth?: PiCatalog } = {}) {}
+  constructor(private readonly options: {
+    store?: ProviderInstanceStore
+    providerAuth?: PiCatalog
+    /**
+     * The vendor mirror of a built-in instance (its service's `settings.json`): a seeded entry starts
+     * with the launch settings and sign-out found there, and the marker that records them.
+     */
+    mirrorFor?: (instanceId: string) => VendorMirror | undefined
+  } = {}) {}
 
   /** Lists a vendor driver's provider in `configuredProviders()` / `llmProviders()`. */
   registerVendor(driver: Exclude<ProviderDriverKind, 'pi'>, listing: VendorProviderListing): this {
@@ -103,7 +113,7 @@ export class ProviderInstanceService {
    */
   list(): ProviderInstanceMap {
     const { stored, readable } = this.readStored()
-    const seeded = seedProviderInstances(stored.instances, this.credentialedPiProviders(), stored.seedVersion)
+    const seeded = this.seed(stored)
     const changed = seeded.added.length > 0 || seeded.upgraded.length > 0 || stored.seedVersion !== seeded.seedVersion
     if (changed && readable) this.writeStored({ instances: seeded.instances, seedVersion: seeded.seedVersion })
     return readProviderInstances(seeded.instances)
@@ -119,7 +129,7 @@ export class ProviderInstanceService {
       throw new Error(`Invalid provider instance id "${instanceId}"`)
     const { stored, readable } = this.readStored()
     if (!readable) throw new Error(this.readError ?? 'The provider instances could not be read')
-    const seeded = seedProviderInstances(stored.instances, this.credentialedPiProviders(), stored.seedVersion)
+    const seeded = this.seed(stored)
     const previous = seeded.instances[instanceId]
     const next: Record<string, unknown> = { ...(isRecord(previous) ? previous : {}), driver: entry.driver, enabled: entry.enabled }
     if (entry.config && Object.keys(entry.config).length) next.config = { ...entry.config }
@@ -132,7 +142,7 @@ export class ProviderInstanceService {
   removeEntry(instanceId: string): void {
     const { stored, readable } = this.readStored()
     if (!readable) throw new Error(this.readError ?? 'The provider instances could not be read')
-    const seeded = seedProviderInstances(stored.instances, this.credentialedPiProviders(), stored.seedVersion)
+    const seeded = this.seed(stored)
     if (!Object.prototype.hasOwnProperty.call(seeded.instances, instanceId)) return
     const { [instanceId]: _removed, ...rest } = seeded.instances
     this.writeStored({ instances: rest, seedVersion: seeded.seedVersion })
@@ -255,9 +265,22 @@ export class ProviderInstanceService {
     return entries
   }
 
+  /** The stored map with its seeds; a vendor seed copies its vendor file's tuple and records the marker. */
+  private seed(stored: StoredProviderInstances): ReturnType<typeof seedProviderInstances> {
+    return seedProviderInstances(stored.instances, this.credentialedPiProviders(), stored.seedVersion, undefined, undefined, (instanceId) => {
+      const mirror = this.options.mirrorFor?.(instanceId)
+      const vendor = mirror?.read()
+      // Unreadable: no marker, so the first start that reads it copies it (without overwriting).
+      if (!mirror || !vendor || vendor === 'unreadable') return undefined
+      return { ...tupleConfig(vendor, mirror.fields), [MIRROR_MARKER_KEY]: mirrorHash(vendor) }
+    })
+  }
+
   private isKnownPiProvider(providerId: string): boolean {
     const auth = this.options.providerAuth
-    if (builtinPiProviders().has(providerId)) return true
+    // A retired provider stays known after its sign-in and registration are gone, so an old
+    // selection naming it follows its Move, or reads retired, never unknown.
+    if (builtinPiProviders().has(providerId) || piRetiredOf(providerId)) return true
     if (auth?.credentials?.listProviderIds().includes(providerId)) return true
     // The pi loop serves any provider the credential service reports as configured.
     try {

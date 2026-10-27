@@ -143,7 +143,8 @@ const out = (frame: unknown): TranscriptFrame => ({ dir: 'out', frame })
 const inn = (frame: unknown): TranscriptFrame => ({ dir: 'in', frame })
 const note = (method: string, params: unknown): TranscriptFrame => inn({ method, params })
 const text = (value: string) => [{ type: 'text', text: value, text_elements: [] }]
-const WORKSPACE_WRITE = { type: 'workspaceWrite', writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false }
+// Ask before acting (the default thread mode): every command and patch asks, in the read-only sandbox.
+const SUPERVISED = { type: 'readOnly', networkAccess: false }
 const NIL_THREAD = '00000000-0000-0000-0000-000000000000'
 
 function handshake(): TranscriptFrame[] {
@@ -159,8 +160,8 @@ function handshake(): TranscriptFrame[] {
 }
 
 const threadParams = (extra: Record<string, unknown> = {}) => ({
-  approvalPolicy: 'on-request',
-  sandbox: 'workspace-write',
+  approvalPolicy: 'untrusted',
+  sandbox: 'read-only',
   model: 'gpt-x',
   modelProvider: 'openai',
   config: { model_provider: 'openai' },
@@ -170,7 +171,7 @@ const threadParams = (extra: Record<string, unknown> = {}) => ({
 /** One turn on `T`: its `turn/start` with exactly `prompt`, a reply and completion. */
 function codexTurn(id: number, prompt: string, turn: string, reply: string): TranscriptFrame[] {
   return [
-    out({ id, method: 'turn/start', params: { threadId: T, input: text(prompt), approvalPolicy: 'on-request', sandboxPolicy: WORKSPACE_WRITE, model: 'gpt-x' } }),
+    out({ id, method: 'turn/start', params: { threadId: T, input: text(prompt), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
     inn({ id, result: { turn: { id: turn, status: 'inProgress', error: null, items: [] } } }),
     note('turn/started', { threadId: T, turn: { id: turn, status: 'inProgress', error: null } }),
     note('item/completed', { threadId: T, turnId: turn, item: { type: 'agentMessage', id: `msg-${turn}`, text: reply } }),
@@ -232,12 +233,12 @@ describe('resumed runtimes keep getting the turn preamble', () => {
       ...codexTurn(8, `${current}/review the last one`, 'turn-4', 'four')
     ])
     const questions = new UserQuestionService()
-    const codex: CodexProviderService = createCodexProviderService(home, questions, { launch: replayCodexAppServer(replay) })
+    const codex: CodexProviderService = createCodexProviderService(home, questions, { launch: replayCodexAppServer(replay) }, { launch: () => ({ binaryPath: binary }) })
     services.push(codex, { stop: () => questions.shutdown() })
     const adapter = new CodexAdapter(() => codex)
     const input = (prompt: string, nativeHistory?: string): TurnInput => ({
       runId: 'run-1', attemptId: 'attempt-1', threadId: 'thread-1', cwd: work, instanceId: 'codex', model: 'gpt-x', llmProvider: 'codex',
-      modelPinned: true, mode: 'agent', prompt, messages: [], signal: new AbortController().signal, ...(nativeHistory ? { nativeHistory } : {})
+      modelPinned: true, mode: 'agent', permissionMode: 'ask', prompt, messages: [], signal: new AbortController().signal, ...(nativeHistory ? { nativeHistory } : {})
     })
     expect((await adapter.startTurn(input('/review the engine'), sink(), control, bridged(preamble, 'GUIDE'))).text).toBe('one')
     expect((await adapter.startTurn(input('/review the adapters', 'history+one'), sink(), control, bridged(preamble, 'GUIDE'))).text).toBe('two')
@@ -282,16 +283,16 @@ describe('resumed runtimes keep getting the turn preamble', () => {
       modelPinned: true, mode: 'agent', prompt, messages: [], signal: new AbortController().signal, ...(nativeHistory ? { nativeHistory } : {})
     })
     const mcp = (token: string) => ({ url: 'http://127.0.0.1:4567/mcp', token })
-    await adapter.startTurn(input('/review the engine'), sink(), control, bridged(preamble, 'GUIDE', mcp('tok-1')))
+    await adapter.startTurn(input('review the engine'), sink(), control, bridged(preamble, 'GUIDE', mcp('tok-1')))
     // A new bearer reopens the session: the process restarts and resumes the saved ACP session.
-    await adapter.startTurn(input('/review the adapters', 'history+'), sink(), control, bridged(preamble, 'GUIDE', mcp('tok-2')))
+    await adapter.startTurn(input('review the adapters', 'history+'), sink(), control, bridged(preamble, 'GUIDE', mcp('tok-2')))
     expect(launch).toHaveBeenCalledTimes(2)
     expect(sent.filter((frame) => frame.method === 'session/new' || frame.method === 'session/resume').map((frame) => frame.method))
       .toEqual(['session/new', 'session/resume'])
     const prompts = sent.filter((frame) => frame.method === 'session/prompt').map((frame) => (frame.params.prompt as Array<{ text: string }>)[0].text)
     expect(prompts).toEqual([
-      `<mousse_orchestration_instructions>\nGUIDE\n</mousse_orchestration_instructions>\n\n${preamble}\n\nCurrent request:\n/review the engine`,
-      `${preamble}\n\nCurrent request:\n/review the adapters`
+      `<mousse_orchestration_instructions>\nGUIDE\n</mousse_orchestration_instructions>\n\n${preamble}\n\nCurrent request:\nreview the engine`,
+      `${preamble}\n\nCurrent request:\nreview the adapters`
     ])
   })
 })

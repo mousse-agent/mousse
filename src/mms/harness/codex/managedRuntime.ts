@@ -1,5 +1,6 @@
 import { mkdirSync } from 'node:fs'
 import { basename, join } from 'node:path'
+import { CHATGPT_USAGE_URL } from '../../../shared/providerAuth'
 import type { LlmModelOption } from '../../../shared/settings'
 import { chatgptTokenCommand, type CliCommand } from '../../run/mcp/attachment'
 import { CODEX_PROVIDER_ID, codexEnvironment, CodexProviderService, type CodexAccountReading } from '../../providers/codex/CodexProviderService'
@@ -24,7 +25,6 @@ export const CHATGPT_API_BASE_URL = 'https://api.openai.com/v1'
 /** Codex kills the helper after this; the helper gives up at 78 s, the broker at 75 s. */
 export const TOKEN_COMMAND_TIMEOUT_MS = 80_000
 export const MANAGED_METHOD_LABEL = 'ChatGPT plan'
-
 /** A TOML value from JSON: JSON strings, numbers and booleans are valid TOML. */
 function toml(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(toml).join(',')}]`
@@ -276,6 +276,9 @@ export function createManagedCodexRuntime(context: DriverContext, deps: ManagedC
       return reading
     },
     identity: async () => auth.identity(),
+    // OpenAI publishes no usage API for ChatGPT plan use and asks apps not to call its web backend,
+    // so Mousse shows no meter: the usage page points to ChatGPT's own.
+    usage: async () => ({ status: 'unavailable', windows: [], message: "ChatGPT shows this plan's usage on its own page.", manageUrl: CHATGPT_USAGE_URL }),
     refreshModels: async () => void (await codex.refreshModels()),
     signIn: (session, _cwd, method) => auth.signIn(session, method),
     signOut: async () => {

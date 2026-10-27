@@ -1,0 +1,7 @@
+{
+  "instances": {
+    "pi:openai-codex": { "driver": "pi", "enabled": true, "config": { "displayName": "ChatGPT" } },
+    "pi:cursor": { "driver": "pi", "enabled": true, "config": { "displayName": "Cursor" } }
+  },
+  "seedVersion": 1
+}

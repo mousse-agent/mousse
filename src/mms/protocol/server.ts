@@ -25,7 +25,9 @@ import {
   MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES,
   MMS_PROTOCOL_MAX_PENDING_REQUESTS,
   MMS_PROTOCOL_VERSION,
+  GIT_OPERATIONS_CAPABILITY,
   PROTOCOL_CAPABILITIES,
+  type ProtocolConnectionEventType,
   type ProtocolEvent,
   type ProtocolClientType,
   type ProtocolHelloOk,
@@ -653,6 +655,9 @@ export class MmsProtocolServer {
     onEmitter(services.channels, 'updated', (snapshot: unknown) => {
       emitToSubscribers(this.ring.push('channels.updated', { snapshot }, undefined))
     })
+    if (services.personalBots) onEmitter(services.personalBots.events, 'changed', (event: unknown) => {
+      emitToSubscribers(this.ring.push('bots.changed', event, undefined))
+    })
     onEmitter(services.channels, 'activity', (event: unknown) => {
       emitToSubscribers(this.ring.push('channels.activity', { event }, undefined))
     })
@@ -962,7 +967,8 @@ export class MmsProtocolServer {
         clientType: session.clientType,
         binding: resolved.binding,
         capabilities: admittedCapabilities ?? session.capabilities,
-        emitConnectionEvent: (type: 'bridge.hub.thread' | 'mcp.auth-url', data: unknown, signal?: AbortSignal) =>
+        lifetime: connectionEventLifetime.signal,
+        emitConnectionEvent: (type: ProtocolConnectionEventType, data: unknown, signal?: AbortSignal) =>
           this.emitConnectionEvent(
             session,
             resolved.binding,
@@ -1221,14 +1227,14 @@ export class MmsProtocolServer {
     session: ClientSession,
     binding: TrustedProfileBinding | undefined,
     lifetime: AbortController,
-    type: 'bridge.hub.thread' | 'mcp.auth-url',
+    type: ProtocolConnectionEventType,
     data: unknown,
     signal?: AbortSignal
   ): Promise<void> {
     const valid = (): boolean =>
       !session.closed &&
       session.authenticated &&
-      session.capabilities.has(type === 'mcp.auth-url' ? INTEGRATION_CAPABILITY : NET_LOCAL_CAPABILITY) &&
+      session.capabilities.has(type === 'mcp.auth-url' ? INTEGRATION_CAPABILITY : type === 'git.operation' ? GIT_OPERATIONS_CAPABILITY : NET_LOCAL_CAPABILITY) &&
       !!binding &&
       session.binding?.profileId === binding.profileId &&
       session.binding.epoch === binding.epoch &&
@@ -1243,7 +1249,7 @@ export class MmsProtocolServer {
         )
       )
     }
-    if (type !== 'bridge.hub.thread' && type !== 'mcp.auth-url') {
+    if (type !== 'bridge.hub.thread' && type !== 'mcp.auth-url' && type !== 'git.operation') {
       return Promise.reject(new DomainRpcError('invalid_params', 'Unsupported connection event'))
     }
     if (session.connectionEventPending >= 8) {

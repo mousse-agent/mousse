@@ -28,7 +28,8 @@ const READERS = {
   contextUsage: ['contextGauge'],
   toolControl: ['toolControlLevel'],
   budgets: ['budgetsLevel'],
-  spendLimits: ['spendLimitLevel']
+  spendLimits: ['spendLimitLevel'],
+  definitionLimits: ['definitionLimitsLevel']
 } satisfies Record<keyof HarnessCaps, string[]>
 const CAPABILITY_KEYS = Object.keys(READERS) as Array<keyof HarnessCaps>
 

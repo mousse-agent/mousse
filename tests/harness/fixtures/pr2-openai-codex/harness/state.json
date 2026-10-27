@@ -1,0 +1,5 @@
+{
+  "instances": {
+    "pi:openai-codex": { "configRevision": 0, "accountGeneration": 0 }
+  }
+}

@@ -34,8 +34,16 @@ import {
   newId,
   isId
 } from '../../shared/net'
-import type { NetDoctor, NetInitInput, NetLocalMethod, NetStatus } from '../../shared/net/local'
 import type {
+  NetAddonActionResult,
+  NetAddonRecords,
+  NetDoctor,
+  NetInitInput,
+  NetLocalMethod,
+  NetStatus
+} from '../../shared/net/local'
+import type {
+  AddonRecordStore,
   Clock,
   Mux,
   SecureChannel,
@@ -55,6 +63,11 @@ import { SqliteQuotaRateLedger } from './store/limits'
 import { FileBlobStore } from './store/blobs'
 import { FileKeyStore, NetIdentityService } from './identity'
 import { ProfileTransports } from './transports/manager'
+import { DirectTransport } from './transports/direct'
+import { inboundPrincipal } from './transports/admission'
+import { parseSshRoute, readSshApproval } from './transports/ssh'
+import { SshBootstrap, type SshBootstrapOptions } from './ssh/bootstrap'
+import { isJoinVia } from '../../shared/net/via'
 import {
   PHONE_ENDPOINTS_METHOD,
   PHONE_WEBRTC_OFFER_METHOD,
@@ -67,7 +80,10 @@ import {
   type PeerConnectionFactory
 } from './transports/phoneWebRtc'
 import { lookup } from 'node:dns/promises'
-import { WEBRTC_SDP_MAX_BYTES } from '../../shared/net/limits'
+import { NET_PROTO_MINOR, WEBRTC_SDP_MAX_BYTES } from '../../shared/net/limits'
+import { isOlderVersion } from '../../shared/net/version'
+import { mousseVersion } from '../appVersion'
+import { PEER_PRESENCE_SCHEMA, PeerPresence, parsePeerInfo, type PeerLink } from './presence'
 import type { TransportConfiguration } from './transports/registry'
 import type { RelayIdentity } from './relay/protocol'
 import { inviteRequiresProtection } from './enrollment/service'
@@ -94,6 +110,8 @@ interface NetConfiguration {
   direct: { enabled: boolean; host: string; port: number }
   routesVersion: number
   transports?: TransportConfiguration[]
+  /** What an add-on action changed outside Mousse, kept so it can be undone. Keyed by add-on. */
+  addonRecords?: Record<string, { action: string; appliedAt: number; record: unknown }>
   preparedForJoin?: boolean
 }
 export interface NetRuntime {
@@ -169,10 +187,17 @@ export class NetService {
   private renewal?: { cancel(): void }
   private rosterListener?: () => void
   private domain?: NetDomainComposition
+  private presenceStore?: PeerPresence
+  private presenceTimer?: { cancel(): void }
+  /** How each session was carried, for the device list; only own-device sessions are recorded. */
+  private readonly sessionLinks = new WeakMap<object, PeerLink>()
   private domainClosing?: Promise<void>
   private domainClosed = false
   private shutdownInFlight?: Promise<void>
   private shutdownComplete = false
+  private sshBootstrap?: SshBootstrap
+  /** Loopback listeners that exist only while a remote machine joins; never persisted. */
+  private readonly enrollmentListeners = new Set<DirectTransport>()
   /** The optional Mousse ID module; absent in builds and tests that leave it out. */
   private readonly hosted?: HostedNet
   constructor(
@@ -182,8 +207,10 @@ export class NetService {
       onChanged?(status: NetStatus): void
       composeRuntime?(runtime: NetRuntime): NetDomainComposition | void
       hosted?: HostedNetModule
-      /** Tests replace the `ssh` executable and the user's known_hosts file. */
-      ssh?: { binary?: string; userKnownHosts?: string }
+      /** Tests replace the `ssh` executable, the user's known_hosts file and the setup's inputs. */
+      ssh?: { binary?: string; userKnownHosts?: string } & Partial<
+        Omit<SshBootstrapOptions, 'binary' | 'userKnownHosts'>
+      >
       /** Tests replace the native WebRTC stack and this computer's addresses. */
       phoneWebRtc?: {
         factory?: PeerConnectionFactory
@@ -207,6 +234,7 @@ export class NetService {
           'CREATE TABLE IF NOT EXISTS net_service_config(singleton INTEGER PRIMARY KEY CHECK(singleton=1),value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS net_peer_routes(node TEXT PRIMARY KEY,signed TEXT NOT NULL)'
         )
       )
+      db.transaction(() => db.database.exec(PEER_PRESENCE_SCHEMA))
       const row = db.database
         .prepare('SELECT value FROM net_service_config WHERE singleton=1')
         .get()
@@ -225,6 +253,21 @@ export class NetService {
         )
           throw new NetError('storage_corrupt')
         if (cfg.preparedForJoin !== undefined && typeof cfg.preparedForJoin !== 'boolean')
+          throw new NetError('storage_corrupt')
+        if (
+          cfg.addonRecords !== undefined &&
+          (!cfg.addonRecords ||
+            typeof cfg.addonRecords !== 'object' ||
+            Array.isArray(cfg.addonRecords) ||
+            Object.entries(cfg.addonRecords).length > 8 ||
+            Object.values(cfg.addonRecords).some(
+              (row) =>
+                !row ||
+                typeof row.action !== 'string' ||
+                !Number.isSafeInteger(row.appliedAt) ||
+                row.appliedAt < 0
+            ))
+        )
           throw new NetError('storage_corrupt')
         if (cfg.transports !== undefined) {
           if (
@@ -350,6 +393,31 @@ export class NetService {
           }
         }
       })
+      // What this device tells its peers about itself; read-only, never journaled. A device
+      // from before this existed answers `forbidden`, which the device list reads as "older".
+      rpc.register({
+        method: 'net.info',
+        capability: 'read',
+        mutating: false,
+        ephemeral: true,
+        validate: (params) => {
+          if (
+            !params ||
+            typeof params !== 'object' ||
+            Array.isArray(params) ||
+            Object.keys(params).length
+          )
+            throw new NetError('bad_request')
+          return params
+        },
+        handle: async () => ({
+          v: 1,
+          version: mousseVersion(),
+          platform: process.platform,
+          arch: process.arch,
+          protoMinor: NET_PROTO_MINOR
+        })
+      })
       this.state = {
         db,
         keys,
@@ -395,6 +463,9 @@ export class NetService {
   }
   async start(): Promise<void> {
     if (!existsSync(join(this.options.profileDir, 'net', 'net.db'))) return
+    await this.bootstrap()
+      .start()
+      .catch(() => {})
     try {
       this.runtime()
       if (this.config.enabled) await this.activateWithHosted()
@@ -408,16 +479,46 @@ export class NetService {
     if (method === 'net.status') return this.status()
     if (method === 'net.plus.status') return this.hosted?.status() ?? hostedNotConfigured()
     if (method === 'net.disable') return this.disable()
+    // What an add-on changed outside Mousse can always be seen and undone, also while networking is off.
+    if (method === 'net.transport.action.undo') return this.undoAddon(params)
+    if (method === 'net.transport.list' && (this.disabled || !this.config.enabled))
+      return this.transportList()
     if (this.disabled) throw new NetError('disabled')
     if (!['net.init', 'bridge.join'].includes(method)) this.assertEnabled()
     if (method.startsWith('bridge.') && method !== 'bridge.join') this.assertFeature('netBridge')
     if (method === 'net.doctor') return this.doctor()
-    if (method === 'net.transport.list')
-      return {
-        manifests: this.createTransports().manifests(),
-        transports: this.status().transports ?? []
-      }
-    if (method === 'bridge.nodes') return this.nodes()
+    if (method === 'net.transport.list') return this.transportList()
+    if (method === 'net.transport.action.describe') {
+      this.requireEnrolled()
+      const { id, action, settings, context } = this.addonAction(params)
+      return this.addonResult(() =>
+        this.exclusiveAddon(id, async () => ({
+          ok: true,
+          changes: (await action.describe(settings, context)).changes
+        }))
+      )
+    }
+    // Outside the serial queue: the external change can take a while, and it touches no other
+    // network setting. One change per add-on at a time instead.
+    if (method === 'net.transport.action.apply') {
+      this.requireEnrolled()
+      const { id, name, action, settings, context } = this.addonAction(params)
+      return this.addonResult(() =>
+        this.exclusiveAddon(id, async () => {
+          const { record } = await action.apply(settings, context)
+          this.config.addonRecords = {
+            ...this.config.addonRecords,
+            [id]: { action: name, appliedAt: this.clock.now(), record }
+          }
+          this.saveConfig()
+          await this.refreshAddon(id)
+          this.emit()
+          return { ok: true }
+        })
+      )
+    }
+    if (method === 'bridge.nodes') return this.nodesView()
+    if (method.startsWith('net.ssh.')) return this.track(this.sshRequest(method, params))
     if (method.startsWith('net.plus.') && !this.hosted) throw hostedUnavailable()
     if (method === 'net.plus.login.cancel') return this.hosted!.cancelLogin()
     if (method === 'net.plus.enrollment.requests') return this.hosted!.enrollmentRequests()
@@ -498,11 +599,22 @@ export class NetService {
             : runtime.enrollment.issueNodeInvite(input)
           return { invite: invite.text, inviteId: invite.invite, expiresAt: invite.expiresAt }
         }
+        case 'net.routes': {
+          this.requireEnrolled()
+          if (!this.routes) await this.activate()
+          const signed = this.signedRoutes()
+          return {
+            signed,
+            routes: (parseProtocolJson(Buffer.from(signed.payload, 'base64url')) as RoutesRecord)
+              .routes
+          }
+        }
         case 'bridge.join':
           return this.join(
             String(params.invite),
             params.name as string | undefined,
-            params.passphrase as string | undefined
+            params.passphrase as string | undefined,
+            params.via as string | undefined
           )
         case 'bridge.revoke': {
           const rt = this.requireEnrolled(),
@@ -686,8 +798,128 @@ export class NetService {
       clock: this.clock,
       profileDir: this.options.profileDir,
       hosted: this.hosted?.transports,
-      identity: () => this.relayIdentity()
+      identity: () => this.relayIdentity(),
+      addonRecords: this.addonRecords()
     })
+  }
+  private addonRecords(): AddonRecordStore {
+    return {
+      get: (id) => this.config.addonRecords?.[id]?.record,
+      remember: (id, record) => this.rememberAddon(id, record),
+      forget: (id) => this.forgetAddon(id)
+    }
+  }
+  /** Saves the record of an add-on that already has one (an action adds the first one itself). */
+  private rememberAddon(id: string, record: unknown, action?: string): void {
+    const row = this.config.addonRecords?.[id]
+    const name = action ?? row?.action
+    if (!name) return
+    this.config.addonRecords = {
+      ...this.config.addonRecords,
+      [id]: { action: name, appliedAt: row?.appliedAt ?? this.clock.now(), record }
+    }
+    this.saveConfig()
+  }
+  private forgetAddon(id: string): void {
+    if (!this.config.addonRecords?.[id]) return
+    const { [id]: _removed, ...rest } = this.config.addonRecords
+    if (Object.keys(rest).length) this.config.addonRecords = rest
+    else delete this.config.addonRecords
+    this.saveConfig()
+  }
+  private transportList() {
+    return {
+      manifests: this.createTransports().manifests(),
+      transports: this.status().transports ?? [],
+      // The saved add-on rows, so a setup can record what it replaced and undo can restore it.
+      saved: this.transportConfigurations().filter((row) => row.id !== HOSTED_RELAY_TRANSPORT),
+      records: structuredClone(this.config.addonRecords ?? {}) satisfies NetAddonRecords,
+      settings: Object.fromEntries(
+        this.transportConfigurations().map((row) => [row.id, row.settings])
+      )
+    }
+  }
+  private readonly addonBusy = new Set<string>()
+  /** One change to an add-on at a time. */
+  private async exclusiveAddon<T>(id: string, work: () => Promise<T>): Promise<T> {
+    if (this.addonBusy.has(id))
+      throw new NetError('conflict', 'Another change to this add-on is still running.')
+    this.addonBusy.add(id)
+    try {
+      return await work()
+    } finally {
+      this.addonBusy.delete(id)
+    }
+  }
+  private async refreshAddon(id: string): Promise<void> {
+    try {
+      await this.transport?.refresh(id)
+    } catch {
+      // The status keeps showing what the add-on last knew.
+    }
+  }
+  private undoAddon(params: Record<string, unknown>): Promise<NetAddonActionResult> {
+    const { id, name, action, settings, context } = this.addonAction(params)
+    return this.addonResult(() =>
+      this.exclusiveAddon(id, async () => {
+        const recorded = this.config.addonRecords?.[id]
+        // Nothing recorded means nothing of Mousse's to undo.
+        if (recorded?.action !== name)
+          return {
+            ok: true,
+            outcome: 'already-removed',
+            message: 'Nothing was recorded, so there was nothing to undo.'
+          }
+        // A refusal or an unreadable answer throws, and the record stays.
+        const result = await action.undo(recorded.record, settings, context)
+        this.forgetAddon(id)
+        await this.refreshAddon(id)
+        this.emit()
+        return { ok: true, ...result }
+      })
+    )
+  }
+  /** Looks up an add-on action and the settings it works with (the stored ones when none are given). */
+  private addonAction(params: Record<string, unknown>) {
+    const id = params.id as string,
+      name = params.action as string,
+      transports = this.createTransports(),
+      action = transports.action(id, name)
+    if (!action) throw new NetError('bad_request', 'Unknown add-on action.')
+    const settings =
+      params.settings ?? this.transportConfigurations().find((row) => row.id === id)?.settings ?? {}
+    transports.validate({ id, enabled: true, settings })
+    return {
+      id,
+      name,
+      action,
+      settings,
+      context: {
+        clock: this.clock,
+        profileDir: this.options.profileDir,
+        record: () => this.config.addonRecords?.[id]?.record,
+        remember: (record: unknown) => this.rememberAddon(id, record, name),
+        forget: () => this.forgetAddon(id),
+        listening: (port: number) => this.transport?.holdsLoopback(id, port) ?? false
+      }
+    }
+  }
+  /** A refusal from the add-on is a result the dialog can show; anything else is a real failure. */
+  private async addonResult(
+    work: () => Promise<NetAddonActionResult>
+  ): Promise<NetAddonActionResult> {
+    try {
+      return await work()
+    } catch (error) {
+      if (!(error instanceof NetError)) throw error
+      const remedy = (error.details as { remedy?: unknown } | undefined)?.remedy
+      return {
+        ok: false,
+        code: error.code,
+        message: error.message,
+        ...(typeof remedy === 'string' ? { remedy } : {})
+      }
+    }
   }
   private async activate(): Promise<void> {
     this.assertEnabled()
@@ -709,6 +941,7 @@ export class NetService {
           ? rt.enrollment.preparedNodeJoin()!.rendezvous
           : undefined,
       identity: () => this.relayIdentity(),
+      addonRecords: this.addonRecords(),
       onChanged: () => {
         if (this.stopped || this.disabled || !this.config.enabled || !this.routes) return
         try {
@@ -1004,7 +1237,7 @@ export class NetService {
                 }
               }
             : undefined,
-          onEnrolled: () => this.transport?.markAuthenticated(raw),
+          onEnrolled: () => this.markAuthenticated(raw),
           normalSession: (secure, mux, context) =>
             this.makeSession(secure, mux, context, raw, { carrier })
         })
@@ -1093,13 +1326,14 @@ export class NetService {
         if (inbound?.node && session.peer.node !== inbound.node) throw new NetError('forbidden')
         if ([...this.sessions].filter((session) => session.state() === 'open').length > 64)
           throw new NetError('rate_limited')
-        if (raw) this.transport?.markAuthenticated(raw)
+        if (raw) this.markAuthenticated(raw)
         inbound?.onAuthenticated?.()
         this.routes?.markSessionOpen(channel)
         this.emit()
       }
     })
     this.sessions.add(session)
+    if (inbound) this.sessionLinks.set(session, { direction: 'in', transport: inbound.carrier })
     session.onClosed((error) => {
       this.sessions.delete(session)
       // Closing a carrier does not prove its async source/provider jobs settled.
@@ -1117,6 +1351,7 @@ export class NetService {
         () => {
           this.lastError = undefined
           this.domain?.onSessionOpened?.(session)
+          this.observePeer(session)
           this.emit()
         },
         () => {}
@@ -1280,6 +1515,7 @@ export class NetService {
       signed = rt.identity.roster()
     if (!signed) return
     const roster = rt.identity.verifySigned<Roster>(signed, root)
+    this.prunePresence(rt, roster)
     for (const row of rt.db.database.prepare('SELECT node,signed FROM net_peer_routes').all()) {
       const node = String(row.node) as NodeId
       if (node === self.node || this.supervisors.has(node)) continue
@@ -1322,6 +1558,11 @@ export class NetService {
             signal
           )
           const session = this.makeSession(result.channel)
+          this.sessionLinks.set(session, {
+            direction: 'out',
+            transport: result.route.transport,
+            address: result.route.address
+          })
           const abort = () => session.close()
           signal.addEventListener('abort', abort, { once: true })
           session.onClosed(() => signal.removeEventListener('abort', abort))
@@ -1543,7 +1784,13 @@ export class NetService {
         .map((session) => session.failServingStream(stream, code))
     )
   }
-  private async join(invite: string, name?: string, passphrase?: string): Promise<unknown> {
+  private async join(
+    invite: string,
+    name?: string,
+    passphrase?: string,
+    via?: string
+  ): Promise<unknown> {
+    if (via !== undefined && !isJoinVia(via)) throw new NetError('bad_request')
     const needsProtection = inviteRequiresProtection(invite),
       rt = this.runtime()
     if (passphrase !== undefined) {
@@ -1588,7 +1835,11 @@ export class NetService {
             node: prepared.authority,
             user: prepared.user,
             transportKey: prepared.authorityTransportKey,
-            routes: routes.routes
+            // A remote machine set up over SSH reaches this computer through its own tunnel first.
+            routes: [
+              ...(via ? [{ transport: 'direct', address: via, priority: 0 }] : []),
+              ...routes.routes
+            ]
           },
           this.shutdownSignal.signal
         )
@@ -1618,7 +1869,9 @@ export class NetService {
     this.adoptRoutes(prepared.routes, prepared.authority)
     this.refreshPeers()
     const authority = this.supervisors.get(prepared.authority)
-    if (authority) await authority.opened
+    // With `via` the joiner may have no route back to the inviter: the inviter dials it over SSH
+    // once it approves that route, so the join does not wait for its own connection to open.
+    if (authority && !via) await authority.opened
     return { user: prepared.user, node: prepared.node, authority: prepared.authority }
   }
   private async transferAuthority(node: NodeId): Promise<unknown> {
@@ -1812,9 +2065,14 @@ export class NetService {
     this.saveConfig()
     this.disabled = true
     this.shutdownSignal.abort()
+    void this.sshBootstrap?.close()
+    // A closed bootstrap refuses everything; enabling again needs a fresh one.
+    this.sshBootstrap = undefined
     this.webrtc?.stop()
     this.transport?.admission.close()
     this.renewal?.cancel()
+    this.presenceTimer?.cancel()
+    this.presenceTimer = undefined
     this.domain?.beginDisable?.()
     for (const gateway of this.gateways) gateway.close()
     for (const supervisor of this.supervisors.values()) supervisor.close()
@@ -1852,6 +2110,187 @@ export class NetService {
     this.emit()
     return result
   }
+  private markAuthenticated(raw: Duplex): void {
+    this.transport?.markAuthenticated(raw)
+    for (const direct of this.enrollmentListeners) direct.markAuthenticated(raw)
+  }
+  /**
+   * A loopback listener for one remote machine's join. Its sockets enter the normal inbound path
+   * (the profile's pre-authentication budget, then the enrollment gateway). It is not part of the
+   * configuration and is closed when the join ends, so there is nothing to restore on undo.
+   */
+  private async openEnrollmentListener(): Promise<{ port: number; close(): Promise<void> }> {
+    this.assertEnabled()
+    this.requireEnrolled()
+    if (!this.routes) await this.activate()
+    const transport = this.transport
+    if (!transport) throw new NetError('route_unreachable')
+    const direct = new DirectTransport({
+      enabled: true,
+      host: '127.0.0.1',
+      port: 0,
+      clock: this.clock
+    })
+    await direct.provision()
+    this.enrollmentListeners.add(direct)
+    try {
+      await direct.listen((raw, info) => {
+        if (this.stopped || this.disabled || !this.config.enabled) {
+          raw.destroy()
+          return
+        }
+        const deadline = transport.admission.reserve(raw, inboundPrincipal(info))
+        if (deadline === undefined) {
+          raw.destroy()
+          return
+        }
+        this.track(this.accept(raw, deadline, 'direct')).catch((error) => {
+          this.lastError = error instanceof NetError ? error.code : 'internal'
+          this.emit()
+        })
+      })
+    } catch (error) {
+      this.enrollmentListeners.delete(direct)
+      await direct.teardown()
+      throw error
+    }
+    const address = direct.status().routes[0]?.address
+    if (!address) {
+      this.enrollmentListeners.delete(direct)
+      await direct.teardown()
+      throw new NetError('route_unreachable')
+    }
+    return {
+      port: Number(new URL(address).port),
+      close: async () => {
+        this.enrollmentListeners.delete(direct)
+        await direct.teardown()
+      }
+    }
+  }
+  private bootstrap(): SshBootstrap {
+    return (this.sshBootstrap ??= new SshBootstrap(
+      {
+        profileDir: this.options.profileDir,
+        inviteNode: async (name) => {
+          const issued = (await this.request('bridge.invite', {
+            name,
+            caps: ['read', 'chat', 'write'],
+            ttlMs: 15 * 60_000
+          })) as { invite: string; inviteId: InviteId }
+          return { invite: issued.invite, inviteId: issued.inviteId }
+        },
+        inviteOutcome: (invite) => this.requireEnrolled().enrollment.inviteOutcome(invite),
+        revokeInvite: (invite) => this.requireEnrolled().enrollment.revokeInvite(invite),
+        revokeNode: async (node) => {
+          await this.request('bridge.revoke', { node })
+        },
+        openEnrollmentListener: () => this.openEnrollmentListener(),
+        adoptRoutes: (signed, node) => {
+          this.adoptRoutes(signed, node)
+          this.refreshPeers()
+        },
+        peerOpen: (node) =>
+          this.status().peers.some((peer) => peer.node === node && peer.state === 'open'),
+        knownNode: (node) => {
+          const rt = this.requireEnrolled()
+          return node !== rt.identity.self()!.node && rt.identity.isKnownNode(node)
+        }
+      },
+      {
+        ...this.options.ssh,
+        binary: () =>
+          this.options.ssh?.binary ??
+          (
+            this.transportConfigurations().find((row) => row.id === 'ssh')?.settings as
+              { binary?: string } | undefined
+          )?.binary,
+        userKnownHosts: this.options.ssh?.userKnownHosts
+      }
+    ))
+  }
+  /** Owner-only methods for adding a remote machine over SSH; a peer can never reach them. */
+  private async sshRequest(
+    method: NetLocalMethod,
+    params: Record<string, unknown>
+  ): Promise<unknown> {
+    const ssh = this.bootstrap()
+    switch (method) {
+      case 'net.ssh.check':
+        return ssh.check(String(params.host))
+      case 'net.ssh.trust':
+        return ssh.trust({
+          host: String(params.host),
+          fingerprint: String(params.fingerprint),
+          acknowledgeChanged: params.acknowledgeChanged === true
+        })
+      case 'net.ssh.plan':
+        return ssh.plan({
+          host: String(params.host),
+          name: String(params.name),
+          port: params.port as number | undefined
+        })
+      case 'net.ssh.list':
+        return ssh.list()
+      case 'net.ssh.setup.status':
+        return ssh.status(String(params.id))
+    }
+    this.requireEnrolled()
+    switch (method) {
+      case 'net.ssh.setup.begin':
+        return ssh.begin({
+          host: String(params.host),
+          name: String(params.name),
+          port: params.port as number | undefined
+        })
+      case 'net.ssh.setup.cancel':
+        return ssh.cancel(String(params.id))
+      case 'net.ssh.setup.retry':
+        return ssh.retry(String(params.id))
+      case 'net.ssh.undo':
+        return ssh.undo(String(params.id))
+      case 'net.ssh.update':
+        return ssh.update(String(params.id))
+      case 'net.ssh.rename':
+        return ssh.rename(String(params.id), String(params.endpoint))
+      case 'net.ssh.approve':
+        return ssh.approve(params.node as NodeId, String(params.endpoint))
+      default:
+        throw new NetError('bad_request')
+    }
+  }
+  /** `bridge.nodes`, plus the ssh route a peer offers that this computer has not approved. */
+  private async nodesView(): Promise<unknown> {
+    const rt = this.requireEnrolled()
+    const view = this.nodes() as { nodes: Array<{ node: NodeId; self: boolean }> }
+    const offers = await Promise.all(
+      view.nodes.map(async (entry) => {
+        if (entry.self) return undefined
+        const row = rt.db.database
+          .prepare('SELECT signed FROM net_peer_routes WHERE node=?')
+          .get(entry.node)
+        if (!row) return undefined
+        try {
+          const signed = parseProtocolJson(Buffer.from(String(row.signed))) as Signed
+          const record = parseProtocolJson(Buffer.from(signed.payload, 'base64url')) as RoutesRecord
+          const route = record.routes.find(
+            (item) => item.transport === 'ssh' && parseSshRoute(item.address)
+          )
+          const endpoint = route && /^ssh:\/\/([^/]+)\//u.exec(route.address)?.[1]
+          if (!endpoint || (await readSshApproval(this.options.profileDir, entry.node)))
+            return undefined
+          return { endpoint }
+        } catch {
+          return undefined
+        }
+      })
+    )
+    return {
+      nodes: view.nodes.map((entry, index) =>
+        offers[index] ? { ...entry, sshOffer: offers[index] } : entry
+      )
+    }
+  }
   private nodes(): unknown {
     const rt = this.requireEnrolled(),
       roster = rt.identity.verifySigned<Roster>(
@@ -1881,9 +2320,175 @@ export class NetService {
         revoked: roster.revoked.some(
           (row) => row.subject === node.subject && row.throughKeyEpoch >= node.keyEpoch
         ),
-        state: this.status().peers.find((peer) => peer.node === node.subject)?.state ?? 'closed'
+        state: this.status().peers.find((peer) => peer.node === node.subject)?.state ?? 'closed',
+        ...this.presenceView(node.subject)
       }))
     }
+  }
+  /** A revoked or replaced device keeps no presence row; every current device keeps its own. */
+  private prunePresence(rt: NetRuntime, roster: Roster): void {
+    try {
+      const live = new Set<NodeId>()
+      for (const signed of roster.nodes) {
+        const delegation = rt.identity.verifySigned<NodeDelegation>(signed, roster.rootKey)
+        if (
+          !roster.revoked.some(
+            (row) => row.subject === delegation.subject && row.throughKeyEpoch >= delegation.keyEpoch
+          )
+        )
+          live.add(delegation.subject)
+      }
+      this.presences().prune(live)
+    } catch {
+      // Presence is a convenience; pruning runs again on the next roster change.
+    }
+  }
+  /** Whether this device may call a read method on its peers; without it `net.info` is refused. */
+  private canRead(): boolean {
+    try {
+      return this.currentNode(this.requireEnrolled().identity.self()!.node).caps.includes('read')
+    } catch {
+      return false
+    }
+  }
+  private presences(): PeerPresence {
+    const db = this.runtime().db
+    if (this.presenceStore?.db !== db) this.presenceStore = new PeerPresence(db, this.clock)
+    return this.presenceStore
+  }
+  /**
+   * What this computer knows about a device beyond its roster entry: version, how it is connected
+   * now, every route tried and when it was last seen. Every field is optional because a device
+   * from before `net.info` reports nothing (its row says so through `olderThanThis`).
+   */
+  private presenceView(node: NodeId): Record<string, unknown> {
+    const rt = this.requireEnrolled(),
+      current = mousseVersion()
+    if (node === rt.identity.self()?.node)
+      return {
+        version: current,
+        platform: process.platform,
+        arch: process.arch,
+        olderThanThis: false,
+        routes: []
+      }
+    let row: ReturnType<PeerPresence['get']>
+    try {
+      row = this.presences().get(node)
+    } catch {
+      // Presence is a convenience; the device list still works without it.
+    }
+    let open: NetSyncSession | undefined
+    for (const session of this.sessions) {
+      try {
+        if (session.state() === 'open' && session.peer.node === node) open = session
+      } catch {
+        // Not authenticated yet.
+      }
+    }
+    const link = open ? (this.sessionLinks.get(open) ?? row?.link) : undefined,
+      error = open ? undefined : this.supervisors.get(node)?.lastError(),
+      lastSeenAt = open ? this.clock.now() : row?.lastSeenAt
+    return {
+      ...(row?.version ? { version: row.version } : {}),
+      ...(row?.platform ? { platform: row.platform } : {}),
+      ...(row?.arch ? { arch: row.arch } : {}),
+      ...(link
+        ? {
+            route: {
+              direction: link.direction,
+              ...(link.transport ? { transport: link.transport } : {}),
+              ...(link.address ? { address: link.address } : {})
+            }
+          }
+        : {}),
+      routes: this.routes?.health(node) ?? [],
+      ...(error ? { error } : {}),
+      ...(lastSeenAt !== undefined ? { lastSeenAt } : {}),
+      // A build with no version has nothing to compare with, so it never calls a peer old. A
+      // "too old to answer" verdict only counts for a device this one is allowed to ask.
+      olderThanThis:
+        current !== '0.0.0' &&
+        !!row &&
+        ((row.legacy && this.canRead()) || isOlderVersion(row.version, current))
+    }
+  }
+  /** Notes an open session with one of the user's own devices and asks it for its version. */
+  private observePeer(session: NetSyncSession): void {
+    const link = this.sessionLinks.get(session)
+    if (!link) return
+    try {
+      const rt = this.runtime(),
+        peer = session.peer
+      if (peer.user !== rt.identity.self()?.user) return
+      this.presences().opened(peer.node, link)
+      this.startPresenceTimer()
+      session.onClosed(() => {
+        try {
+          this.presences().seen(peer.node)
+        } catch {
+          // The service is shutting down.
+        }
+      })
+      // A refused `read` also answers `forbidden`, which would look like an older daemon.
+      if (!this.canRead()) {
+        this.presences().clearLegacy(peer.node)
+        return
+      }
+      // A phone is a browser client with no daemon behind it.
+      if (link.transport === PHONE_WEBRTC_TRANSPORT) return
+      void this.track(this.readPeerInfo(session, peer.node))
+    } catch {
+      // Presence never affects a session.
+    }
+  }
+  /** True once the device has sent a signed routes record: computers always do, phones never. */
+  private publishesRoutes(node: NodeId): boolean {
+    try {
+      return !!this.runtime()
+        .db.database.prepare('SELECT 1 FROM net_peer_routes WHERE node=?')
+        .get(node)
+    } catch {
+      return false
+    }
+  }
+  private async readPeerInfo(session: NetSyncSession, node: NodeId): Promise<void> {
+    try {
+      const info = parsePeerInfo(
+        await session.rpc('net.info', {}, { id: newId('rpc'), deadlineMs: 10_000 })
+      )
+      if (info) this.presences().info(node, info)
+    } catch (error) {
+      // Unknown method: an older daemon. Any other failure (a closed session, a timeout) leaves
+      // what was known before. A phone reached over the relay answers the same way, but it
+      // never publishes routes, so only a device that does can be an older daemon.
+      if (error instanceof NetError && error.code === 'forbidden' && this.publishesRoutes(node)) {
+        try {
+          this.presences().legacy(node)
+        } catch {
+          // The service is shutting down.
+        }
+      }
+    }
+  }
+  /** One timer for every session: keeps "last seen" within a minute while a device is connected. */
+  private startPresenceTimer(): void {
+    if (this.presenceTimer || this.stopped || this.disabled) return
+    this.presenceTimer = this.clock.setTimeout(() => {
+      this.presenceTimer = undefined
+      if (this.stopped || this.disabled) return
+      let connected = false
+      for (const session of this.sessions) {
+        if (session.state() !== 'open' || !this.sessionLinks.has(session)) continue
+        connected = true
+        try {
+          this.presences().seen(session.peer.node)
+        } catch {
+          // Try again on the next tick.
+        }
+      }
+      if (connected) this.startPresenceTimer()
+    }, 60_000)
   }
   private doctor(): NetDoctor {
     const status = this.status()
@@ -1964,9 +2569,11 @@ export class NetService {
     if (this.stopped) return
     this.stopped = true
     this.shutdownSignal.abort()
+    void this.sshBootstrap?.close()
     this.webrtc?.stop()
     this.transport?.admission.close()
     this.renewal?.cancel()
+    this.presenceTimer?.cancel()
     this.rosterListener?.()
     for (const gateway of this.gateways) gateway.close()
     for (const supervisor of this.supervisors.values()) supervisor.close()

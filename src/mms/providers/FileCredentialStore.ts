@@ -106,9 +106,15 @@ export class FileCredentialStore implements CredentialStore {
 
   modify(providerId: string, fn: (current: Credential | undefined) => Promise<Credential | undefined>): Promise<Credential | undefined> {
     return this.enqueue(async () => {
-      const next = await fn(this.get(providerId))
+      const current = this.get(providerId)
+      let next = await fn(current)
       if (next === undefined) return this.get(providerId)
       if (!isCredential(next)) throw this.failure('the replacement credential structure is invalid')
+      // A refreshed sign-in keeps the id Mousse minted for it (the account identity of tokens that
+      // name none); a new sign-in brings its own.
+      const kept = (current as unknown as Record<string, unknown> | undefined)?.credentialId
+      if (next.type === 'oauth' && current?.type === 'oauth' && typeof kept === 'string' && (next as unknown as Record<string, unknown>).credentialId === undefined)
+        next = { ...next, credentialId: kept } as typeof next
       const updated = new Map(this.data)
       updated.set(providerId, structuredClone(next))
       this.persist(updated)

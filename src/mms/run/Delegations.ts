@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { isAgentAccessLevel, type AgentAccessLevel } from '../../shared/settings'
 import { json, str, type Row } from './db/rows'
 import { fail } from './db/RunStoreError'
 import { Inbox } from './Inbox'
@@ -101,6 +102,7 @@ export class Delegations {
     prompt: string
     wake: DelegationWake
     modeCeiling?: ModeCeiling | null
+    accessLevel?: AgentAccessLevel | null
     workspace?: DelegationWorkspace | null
     role?: string | null
   }): DelegationRecord {
@@ -120,6 +122,7 @@ export class Delegations {
         createdAt: this.now(),
         completedAt: null,
         modeCeiling: input.modeCeiling ?? null,
+        accessLevel: input.accessLevel ?? null,
         workspace: input.workspace ?? null,
         role: input.role ?? null
       }
@@ -127,8 +130,8 @@ export class Delegations {
         .statement(
           `INSERT INTO delegations(delegation_id, parent_run_id, parent_thread_id, child_thread_id,
              child_run_id, provider, model, prompt_digest, wake, status, result, created_at, completed_at,
-             mode_ceiling, workspace, role)
-           VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+             mode_ceiling, workspace, role, access_level)
+           VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           record.delegationId,
@@ -146,7 +149,8 @@ export class Delegations {
           null,
           record.modeCeiling,
           record.workspace,
-          record.role
+          record.role,
+          record.accessLevel
         )
       this.recorded(record)
       return record
@@ -322,6 +326,7 @@ function toDelegation(row: Row): DelegationRecord {
     createdAt: String(row.created_at),
     completedAt: str(row.completed_at),
     modeCeiling: row.mode_ceiling === 'plan' || row.mode_ceiling === 'default' ? row.mode_ceiling : null,
+    accessLevel: isAgentAccessLevel(row.access_level) ? row.access_level : null,
     workspace: row.workspace === 'isolated' || row.workspace === 'shared' ? row.workspace : null,
     role: str(row.role)
   }

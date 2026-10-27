@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { accessSync, constants, mkdirSync, readFileSync } from 'node:fs'
+import { accessSync, constants, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
-import type { ModelInfo, Options, PermissionMode, Query, SDKResultMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { ModelInfo, Options, PermissionMode, Query, SDKResultMessage, SDKUserMessage, SettingSource, Settings as SdkSettings } from '@anthropic-ai/claude-agent-sdk'
 import type {
   ClaudeSubscriptionStatus,
   CliProviderConfig,
@@ -14,7 +14,9 @@ import type {
   ProviderUsage
 } from '../../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../../shared/settings'
+import type { CredentialKind } from '../../../shared/harness/status'
 import type { ChatImageAttachment } from '../../../shared/types'
+import { normalizePermissionMode, permissionModeAllows, type PermissionLimits, type PermissionMode as ThreadPermissionMode } from '../../../shared/permissionMode'
 import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
 import { AppError } from '../../../shared/errors'
 import type { ProviderToolEvent } from '../../../shared/agentActivity'
@@ -25,8 +27,8 @@ import { APPROVALS_REFUSED_MESSAGE, QUESTIONS_REFUSED_MESSAGE } from '../../harn
 import { CLAUDE_MOUSSE_TOOL_PREFIX, claudeMcpServers } from '../../run/mcp/attachment'
 import { TURN_TOKEN_KEY } from '../../run/mcp/appTools/registry'
 import type { LoginSession } from '../LoginSession'
+import { settingsMirror, type MirrorField, type VendorMirror } from '../../harness/vendorMirror'
 import {
-  applyCliConfigPatch,
   claudeExtraArgs,
   cliLaunch,
   requireExecutable,
@@ -39,7 +41,7 @@ import {
   type StoredCliConfig
 } from '../cliConfig'
 import { resolveWindowsShim } from '../resolveWindowsShim'
-import { claudeAccountSubject } from './accountSubject'
+import { claudeAccountSubject, claudeBypassDisabled } from './accountSubject'
 import {
   ClaudeMetricsCollector,
   ClaudeNativeEditCounter,
@@ -48,7 +50,7 @@ import {
 } from './metrics'
 import { parseClaudeSubscriptionUsage } from './usage'
 import { claudeMcpToolBlocked, claudeProxiedMcpServer, type ClaudeTurnIntegrations } from './integrations'
-import { claudeChildToolDenial } from './childPolicy'
+import { claudeActionOf, claudeChildToolDenial, claudePermissionKey } from './childPolicy'
 import { CancelInProgress, DEFAULT_LIVE_TIMINGS, LiveSession, type LiveRun, type LiveTimings } from './liveSession'
 import { TurnFrames } from './turnFrames'
 import { readUsageLimit } from '../../orchestrator/providerErrors'
@@ -75,12 +77,13 @@ type Settings = {
   loginPolicy?: 'cli' | 'isolated'
   /** Older versions: a profile-private sign-in completed. Dropped by the migration. */
   signedIn?: boolean
-  /** Disconnected in Mousse; the terminal sign-in stays intact. */
+  /**
+   * The launch settings and the sign-out flag as an older Mousse reads them: a mirror of the
+   * instance config, written only through `vendorMirror()` and never read for a launch.
+   */
   cliDisconnected?: boolean
   binaryPath?: string
-  /** Extra Claude Code launch args (long options only; passed as the SDK's `extraArgs`). */
   args?: string[]
-  /** Extra environment variables, applied over the subscription environment. */
   env?: Record<string, string>
   models?: LlmModelOption[]
   /** ISO time `models` was last listed by Claude Code (absent for the fallback aliases). */
@@ -100,6 +103,12 @@ export type ClaudeSubscriptionChatInput = {
   images?: ChatImageAttachment[]
   signal?: AbortSignal
   mode?: 'plan' | 'default'
+  /**
+   * The thread's permission mode for this turn (`ask`, `accept_edits`, `full`); absent reads as the
+   * default (`accept_edits`). Enforced through Claude Code's own permission mode, the PreToolUse
+   * hook and `canUseTool`; a live query follows it turn by turn.
+   */
+  permissionMode?: ThreadPermissionMode
   /** Set for a delegated child's turns (first and resumed); see `claudeChildToolDenial`. */
   child?: ChildTurnPolicy
   /** The Mousse MCP server for this run (SPEC §15.2); null attaches no server. */
@@ -163,6 +172,8 @@ type TurnContext = {
   editCounter: ClaudeNativeEditCounter
   planTurn: boolean
   restricted: boolean
+  /** The thread's permission mode this turn runs in (already lowered when Claude Code refuses to bypass). */
+  permissionMode: ThreadPermissionMode
 }
 type Dependencies = {
   /**
@@ -194,12 +205,41 @@ type Dependencies = {
    */
   baseEnv?: () => NodeJS.ProcessEnv
   /**
-   * The executable, launch args and variables of an instance whose launch settings live in its
-   * instance config rather than in `settings.json`.
+   * The executable, launch args and variables: the instance config's (the gateway's). Without it
+   * Claude Code runs as found, with no extra args or variables.
    */
   launchConfig?: () => StoredCliConfig
+  /** Signed out in Mousse (the instance config's flag, the gateway's); default false. */
+  signedOut?: () => boolean
+  /** Saves an executable path entered at sign-in to the instance config (the gateway's `configure`). */
+  saveLaunch?: (patch: CliProviderConfigPatch) => Promise<void>
   /** The terminal command that signs this instance in; default `claude auth login`. */
   signInCommand?: string
+  /**
+   * Applied last to every environment Claude Code starts with, after the user's variables and a
+   * turn's integration variables: an API-key instance sets its key here and drops other sign-ins.
+   */
+  finalEnv?: (env: NodeJS.ProcessEnv) => NodeJS.ProcessEnv
+  /**
+   * Replaces `claude auth status` for an instance whose sign-in Mousse holds itself (an API key):
+   * what the instance runs on, read without starting Claude Code.
+   */
+  probe?: (env: NodeJS.ProcessEnv) => AuthProbe
+  /** What a turn says when the instance is not signed in (default: run the sign-in command). */
+  signedOutMessage?: () => string
+  /**
+   * The settings files Claude Code loads (default: all, as in a terminal). An API-key entry leaves out
+   * `user`, its Mousse-owned home, so nothing there can replace the key or its address.
+   */
+  settingSources?: SettingSource[]
+  /** Launch arguments never passed on (an API-key entry: `--settings`, `--setting-sources`). */
+  droppedArgs?: readonly string[]
+  /**
+   * Read before a turn starts, with its folder: flag-tier settings the turn's query starts with (an
+   * API-key entry keeps its key and address over the folder's settings), or why it cannot start
+   * there. A refused turn starts no Claude Code.
+   */
+  turnSettings?: (cwd: string) => Promise<{ settings?: SdkSettings; refuse?: string }>
 }
 /** How `claude auth status` names its sign-in methods, for display. */
 const CLAUDE_AUTH_METHOD_LABELS: Record<string, string> = {
@@ -212,8 +252,29 @@ const CLAUDE_AUTH_METHOD_LABELS: Record<string, string> = {
  * The signed-in account: a display label (plan or sign-in method) and `subject`, a stable id of
  * the account or credential (`claudeAccountSubject`), never shown.
  */
-export type ClaudeAccount = { label?: string; subject?: string }
-type AuthProbe =
+export type ClaudeAccount = { label?: string; subject?: string; credential?: CredentialKind }
+/** Claude Code's cloud routes that sign in with the environment's AWS or Google credentials. */
+const CLAUDE_AMBIENT_PROVIDERS: ReadonlySet<string> = new Set(['bedrock', 'vertex', 'anthropicAws', 'anthropicGoogleCloud'])
+/**
+ * What a signed-in Claude Code runs on, from its own `claude auth status`: a claude.ai sign-in or
+ * its OAuth token is the subscription, an API key or Console sign-in is a key, Bedrock and Vertex
+ * run on the environment's cloud credentials. Anything else (another provider, a gateway, a method
+ * this version does not name) is `unknown`.
+ */
+export function claudeCredentialKind(status: { authMethod?: string; apiProvider?: string }): CredentialKind {
+  if (status.apiProvider && status.apiProvider !== 'firstParty') return CLAUDE_AMBIENT_PROVIDERS.has(status.apiProvider) ? 'ambient' : 'unknown'
+  switch (status.authMethod) {
+    case 'claude.ai':
+    case 'oauth_token':
+      return 'subscription'
+    case 'api_key':
+    case 'console':
+      return 'api_key'
+    default:
+      return 'unknown'
+  }
+}
+export type AuthProbe =
   | { kind: 'signed_in'; account?: ClaudeAccount }
   | { kind: 'signed_out'; message: string }
   | { kind: 'error'; message: string }
@@ -374,6 +435,8 @@ export class ClaudeSubscriptionProviderService {
   private settings: Settings = {}
   /** Set when settings.json exists but cannot be read; blocks migration and every write. */
   private settingsError?: string
+  /** Another service of the instance writes its settings now (`freezeSettings`). */
+  private settingsFrozen = false
   private stopped = false
   private readonly queries = new Map<string, Query>()
   /** Live queries by thread: the Claude processes that outlive a turn. Null disables them (one query per turn). */
@@ -439,7 +502,7 @@ export class ClaudeSubscriptionProviderService {
   }
 
   private save(): void {
-    if (this.settingsError) return
+    if (this.settingsError || this.settingsFrozen) return
     mkdirSync(dirname(this.settingsPath), { recursive: true, mode: 0o700 })
     atomicWriteJsonSync(this.settingsPath, this.settings)
     this.policyStored = true
@@ -459,11 +522,49 @@ export class ClaudeSubscriptionProviderService {
     return (this.dependencies.runAuth ?? runAuth)(launch.command, [...launch.args, ...args], env, signal)
   }
   private environment(): NodeJS.ProcessEnv {
-    return withUserEnv(claudeSubscriptionEnvironment(this.dependencies.baseEnv?.()), storedCliEnv(this.launchSettings()))
+    return this.finalEnv(withUserEnv(claudeSubscriptionEnvironment(this.dependencies.baseEnv?.()), storedCliEnv(this.launchSettings())))
   }
-  /** The stored executable, args and variables: the instance config's, else `settings.json`. */
+  /** The instance's own last word on a process environment (`Dependencies.finalEnv`). */
+  private finalEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+    return this.dependencies.finalEnv?.(env) ?? env
+  }
+  /** The stored executable, args and variables: the instance config's, never `settings.json`. */
   private launchSettings(): StoredCliConfig {
-    return this.dependencies.launchConfig?.() ?? this.settings
+    return this.dependencies.launchConfig?.() ?? {}
+  }
+  /** Signed out in Mousse: the instance's flag; the terminal sign-in stays intact. */
+  private signedOut(): boolean {
+    return this.dependencies.signedOut?.() === true
+  }
+  /**
+   * The copy of `fields` in this service's `settings.json` for an older Mousse. It reads and writes
+   * the settings object loaded now (Recheck replaces it) and saves through `save()`, the file's one writer.
+   */
+  vendorMirror(fields: readonly MirrorField[]): VendorMirror {
+    return settingsMirror(fields, {
+      settings: () => this.settings as Record<string, unknown>,
+      settingsError: () => this.settingsError ?? (this.settingsFrozen ? 'Another Claude service writes these settings now.' : undefined),
+      save: () => this.save(),
+      exists: () => existsSync(this.settingsPath),
+      signedOutKey: 'cliDisconnected'
+    })
+  }
+  /**
+   * `claude` as Mousse starts it, with the environment of its own commands (status, turns): what the
+   * sign-in and sign-out of an instance with its own home run with. Undefined when no executable is found.
+   */
+  authLaunch(): { command: string; args: string[]; env: NodeJS.ProcessEnv } | undefined {
+    const launch = this.launchTarget()
+    return launch ? { command: launch.command, args: [...launch.args], env: this.environment() } : undefined
+  }
+  /**
+   * What `claude auth status` says in this instance's environment now, whatever Mousse recorded (a
+   * disconnect included) and without touching the recorded state. `unknown`: it did not answer.
+   */
+  async authState(): Promise<'signed_in' | 'signed_out' | 'unknown'> {
+    if (!this.binary()) return 'unknown'
+    const result = await this.probe(this.environment())
+    return result.kind === 'signed_in' ? 'signed_in' : result.kind === 'signed_out' ? 'signed_out' : 'unknown'
   }
   /** The terminal command that signs this instance in. */
   private signInCommand(): string {
@@ -479,11 +580,6 @@ export class ClaudeSubscriptionProviderService {
     this.settings.sessions = rest
     this.save()
   }
-  /** The stored executable, launch args and variables, as saved (no lookup, no version check). */
-  storedLaunch(): StoredCliConfig {
-    const stored = this.launchSettings()
-    return { ...(stored.binaryPath ? { binaryPath: stored.binaryPath } : {}), args: storedCliArgs(stored), env: storedCliEnv(stored) }
-  }
   /** The executable path, launch args and environment set in Settings → Providers. */
   async cliConfig(): Promise<CliProviderConfig> {
     const launch = this.launchTarget()
@@ -497,29 +593,19 @@ export class ClaudeSubscriptionProviderService {
     }
   }
   /**
-   * Saves the launch settings. Each turn starts its own Claude Code process, so the next turn uses
-   * them; a changed executable re-checks the sign-in.
+   * Checks launch settings before the gateway saves them: an executable that cannot run, or args
+   * the SDK cannot pass. Each turn starts its own Claude Code process, so the next turn uses them.
    */
-  async setCliConfig(patch: CliProviderConfigPatch): Promise<CliProviderConfig> {
-    if (this.stopped) throw new Error('Claude provider is stopped')
-    if (this.settingsError) throw new Error(this.settingsError)
-    const before = this.binary()
-    applyCliConfigPatch(
-      this.settings,
-      patch,
-      (path) => requireExecutable(path, 'Claude Code'),
-      (args) => void claudeExtraArgs(args)
-    )
-    this.save()
-    if (this.binary() !== before) await this.status({ force: true })
-    return this.cliConfig()
+  validateLaunch(patch: CliProviderConfigPatch): void {
+    if (typeof patch.binaryPath === 'string') requireExecutable(patch.binaryPath, 'Claude Code')
+    if (patch.args) claudeExtraArgs(patch.args)
   }
   /**
    * Synchronous view for routing and listings. It reflects the last live `claude auth status`
    * check (see `status()`).
    */
   configured(): boolean {
-    if (this.stopped || this.settingsError || this.settings.cliDisconnected || !this.binary()) return false
+    if (this.stopped || this.settingsError || this.signedOut() || !this.binary()) return false
     // Refresh a stale result in the background; the first check comes from `status()`.
     if (this.cliProbe && this.checkDue()) void this.status()
     return this.cliProbe?.result.kind === 'signed_in'
@@ -566,6 +652,7 @@ export class ClaudeSubscriptionProviderService {
     env: NodeJS.ProcessEnv,
     signal?: AbortSignal
   ): Promise<AuthProbe> {
+    if (this.dependencies.probe) return this.dependencies.probe(env)
     const unreadable: AuthProbe = {
       kind: 'error',
       message: 'Claude Code did not report its sign-in status. Update the Claude Code CLI and recheck.'
@@ -579,7 +666,7 @@ export class ClaudeSubscriptionProviderService {
       if (typeof stdout !== 'string' || !stdout.trim()) return unreadable
       output = stdout
     }
-    let status: { loggedIn?: unknown; authMethod?: unknown; subscriptionType?: unknown }
+    let status: { loggedIn?: unknown; authMethod?: unknown; apiProvider?: unknown; subscriptionType?: unknown }
     try {
       status = JSON.parse(output) as typeof status
     } catch {
@@ -596,7 +683,9 @@ export class ClaudeSubscriptionProviderService {
     const plan = text(status.subscriptionType)
     const label = plan ? `Claude ${plan[0].toUpperCase()}${plan.slice(1)}` : method && (CLAUDE_AUTH_METHOD_LABELS[method] ?? method)
     const subject = claudeAccountSubject(env)
-    return { kind: 'signed_in', account: { ...(label ? { label } : {}), ...(subject ? { subject } : {}) } }
+    const apiProvider = text(status.apiProvider)
+    const credential = claudeCredentialKind({ ...(method ? { authMethod: method } : {}), ...(apiProvider ? { apiProvider } : {}) })
+    return { kind: 'signed_in', account: { ...(label ? { label } : {}), ...(subject ? { subject } : {}), credential } }
   }
   /** The account of the last live sign-in check, when it was signed in and named one. */
   account(): ClaudeAccount | undefined {
@@ -606,6 +695,13 @@ export class ClaudeSubscriptionProviderService {
   /** The account this instance runs as (`claudeAccountSubject`), read without starting Claude Code. */
   accountSubject(): string | undefined {
     return claudeAccountSubject(this.environment())
+  }
+  /**
+   * Whether the user's Claude settings forbid `bypassPermissions` for a turn in `cwd`
+   * (`claudeBypassDisabled`), read again every time: nothing is cached, and nothing edits the settings.
+   */
+  permissionLimits(cwd?: string): PermissionLimits | undefined {
+    return claudeBypassDisabled(this.environment(), cwd ? { cwd } : {}) ? { bypassDisabled: true } : undefined
   }
   /** Checks the sign-in with the environment the caller captured for its turn. */
   private async authenticated(signal?: AbortSignal, env = this.environment()): Promise<boolean> {
@@ -617,7 +713,7 @@ export class ClaudeSubscriptionProviderService {
   }
   /** A live check is due: the last terminal sign-in result is missing or stale. */
   private checkDue(): boolean {
-    if (this.stopped || this.settingsError || this.settings.cliDisconnected) return false
+    if (this.stopped || this.settingsError || this.signedOut()) return false
     const at = this.cliProbe?.at
     return at === undefined || Date.now() - at >= CLAUDE_AUTH_STATUS_TTL_MS
   }
@@ -666,7 +762,7 @@ export class ClaudeSubscriptionProviderService {
         state: 'missing_binary',
         message: 'Claude Code CLI not found. Install the official Claude Code CLI, then recheck.'
       }
-    if (this.settings.cliDisconnected)
+    if (this.signedOut())
       return {
         state: 'disconnected',
         message: 'Disconnected in Mousse. The Claude sign-in in your terminal is unchanged.'
@@ -702,12 +798,12 @@ export class ClaudeSubscriptionProviderService {
           placeholder: '/home/me/.local/bin/claude'
         })
         if (!isAbsolute(binary)) throw new Error('Claude Code binary path must be absolute')
-        this.settings.binaryPath = binary
+        // Saved to the instance config through the gateway, like any other launch setting.
+        if (!this.dependencies.saveLaunch) throw new Error('Claude Code executable is unavailable')
+        await this.dependencies.saveLaunch({ binaryPath: binary })
         if (!this.binary()) throw new Error('Claude Code executable is unavailable')
       }
       checkpoint()
-      delete this.settings.cliDisconnected
-      this.save()
       while (!(await signedIn())) {
         // Same synchronous segment as the prompt: nothing can cancel in between.
         checkpoint()
@@ -771,12 +867,13 @@ export class ClaudeSubscriptionProviderService {
     cwd: string,
     controller: AbortController,
     env: NodeJS.ProcessEnv = this.environment(),
-    append: string[] = []
+    append: string[] = [],
+    settings?: SdkSettings
   ): Options {
     const launch = this.launchTarget()
     // The append flags travel in `systemPrompt.append` (see claudeLaunchAppendSystemPrompt).
     const extraArgs = claudeExtraArgs(storedCliArgs(this.launchSettings()))
-    for (const name of APPEND_SYSTEM_PROMPT_ARGS) delete extraArgs[name]
+    for (const name of [...APPEND_SYSTEM_PROMPT_ARGS, ...(this.dependencies.droppedArgs ?? [])]) delete extraArgs[name]
     const appendText = append.filter(Boolean).join('\n\n')
     return {
       cwd,
@@ -791,6 +888,8 @@ export class ClaudeSubscriptionProviderService {
       // Claude Code's own system prompt, as in a terminal; Mousse only appends to it.
       systemPrompt: { type: 'preset', preset: 'claude_code', ...(appendText ? { append: appendText } : {}) },
       mcpServers: {},
+      ...(this.dependencies.settingSources ? { settingSources: [...this.dependencies.settingSources] } : {}),
+      ...(settings ? { settings } : {}),
       ...(Object.keys(extraArgs).length ? { extraArgs } : {}),
       includePartialMessages: true
     }
@@ -910,9 +1009,9 @@ export class ClaudeSubscriptionProviderService {
   }
   private signInRequiredMessage(): string {
     if (this.settingsError) return 'Connect Claude Subscription in Settings → Providers first.'
-    if (this.settings.cliDisconnected)
+    if (this.signedOut())
       return 'Claude Subscription is disconnected. Reconnect it in Settings → Providers.'
-    return `Claude Code isn't signed in. Run \`${this.signInCommand()}\` in a terminal, then try again.`
+    return this.dependencies.signedOutMessage?.() ?? `Claude Code isn't signed in. Run \`${this.signInCommand()}\` in a terminal, then try again.`
   }
   private abortInFlight(): void {
     for (const controller of this.controllers) controller.abort()
@@ -1205,7 +1304,12 @@ export class ClaudeSubscriptionProviderService {
                   ? { updatedInput: { ...(event.tool_input as Record<string, unknown>), [TURN_TOKEN_KEY]: turn.input.mcpTurnToken } }
                   : undefined
                 // Restricted turns route every call through canUseTool so its read-only allowlist holds.
-                if (turn.restricted)
+                // So does every command (and, under Ask, every edit) the thread's permission mode
+                // does not allow without asking: the user's own allow rules must not skip Mousse's
+                // check. Other tools (MCP tools, reads) follow Claude Code's own rules.
+                const action = event.hook_event_name === 'PreToolUse' ? claudeActionOf(event.tool_name) : 'read'
+                const modeAsks = (action === 'command' || action === 'edit') && !permissionModeAllows(turn.permissionMode, action)
+                if (turn.restricted || modeAsks)
                   return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask', ...stamp } }
                 return stamp ? { hookSpecificOutput: { hookEventName: 'PreToolUse', ...stamp } } : {}
               }
@@ -1311,18 +1415,37 @@ export class ClaudeSubscriptionProviderService {
           if (turn.restricted) return { behavior: 'allow', updatedInput: args }
           // Only calls Claude Code refuses to auto-approve even in bypass mode arrive here.
           if (input.approvals === 'never') return { behavior: 'deny', message: APPROVALS_REFUSED_MESSAGE }
+          const action = claudeActionOf(toolName)
+          // Reading never asks under Ask or Auto-accept edits: Claude Code reaches here only for what
+          // it does not allow itself, and a read-only built-in changes nothing.
+          if (action === 'read' && turn.permissionMode !== 'full') return { behavior: 'allow', updatedInput: args }
+          // Under Full access a call that reaches here is Claude Code's own refusal to auto-approve
+          // (its safety check), which Mousse cannot skip; the prompt says so. The full command text is
+          // kept up to the cap: the card wraps and scrolls.
+          const what = action === 'command' ? `run a command (${toolName})` : action === 'edit' ? `edit files (${toolName})` : `use ${toolName}`
+          const own = turn.permissionMode === 'full' ? 'Claude Code asks even in Full access: its own safety check.\n' : ''
           const answer = await this.questions.requestAnswers(
             [
               {
                 id: 'permission',
-                prompt: `Allow Claude Code to use ${toolName}?\n${JSON.stringify(args).slice(0, 4000)}`,
+                prompt: `${own}Allow Claude Code to ${what}?\n${JSON.stringify(args).slice(0, 4000)}`,
                 options: [
                   { id: 'allow', label: 'Allow once' },
                   { id: 'reject', label: 'Reject' }
                 ]
               }
             ],
-            input.threadId
+            input.threadId,
+            {
+              approval: {
+                action: action === 'read' ? 'tool' : action,
+                permissionKey: claudePermissionKey(toolName),
+                options: [
+                  { id: 'allow', decision: 'allow', scope: 'once' },
+                  { id: 'reject', decision: 'reject' }
+                ]
+              }
+            }
           )
           if (
             controller.signal.aborted ||
@@ -1351,13 +1474,22 @@ export class ClaudeSubscriptionProviderService {
       }
       input.signal?.throwIfAborted()
     }
+    // The folder's settings are read before anything starts; whether the instance may run is checked
+    // after, so a sign-out while they are read stops the turn here.
+    let turnSettings: SdkSettings | undefined
+    if (this.dependencies.turnSettings) {
+      const policy = await this.dependencies.turnSettings(input.cwd)
+      input.signal?.throwIfAborted()
+      if (policy.refuse) throw new AppError({ code: 'claude_settings_conflict', message: policy.refuse, errorInfo: { category: 'unavailable', retryable: false } })
+      turnSettings = policy.settings
+    }
     if (!this.configured()) throw new AppError({ code: 'claude_subscription_not_connected', message: this.signInRequiredMessage(), errorInfo: { category: 'unavailable', retryable: false } })
     if (this.activeThreads.has(input.threadId))
       throw new Error('A Claude turn is already running for this thread')
     this.activeThreads.add(input.threadId)
     const integrations = input.integrations
     // User MCP servers reference their secrets as `${VAR}`; the values ride in Claude's environment.
-    const env = { ...this.environment(), ...integrations?.env }
+    const env = this.finalEnv({ ...this.environment(), ...integrations?.env })
     // This turn's own controller: it gates the turn's permission prompts and hooks and carries its
     // cancellation. A one-shot query also hands it to the SDK; a live query has a lifetime of its own.
     const controller = new AbortController()
@@ -1447,7 +1579,13 @@ export class ClaudeSubscriptionProviderService {
     // read-only allowlist. A read-only child keeps the default permission mode: plan mode would
     // inject its planning and ExitPlanMode flow into a research or review task.
     const restricted = planTurn || readOnlyChild
-    const turn: TurnContext = { input, controller, integrations, editCounter, planTurn, restricted }
+    // Full access needs Claude Code to allow bypassing permissions. The gateway already lowers the
+    // mode when the user's settings forbid it; reading them again here keeps a settings edit made
+    // since then from ever starting a bypass Claude Code would refuse.
+    const bypassDisabled = claudeBypassDisabled(this.environment(), { cwd: input.cwd })
+    const requestedMode = normalizePermissionMode(input.permissionMode)
+    const threadMode: ThreadPermissionMode = requestedMode === 'full' && bypassDisabled ? 'accept_edits' : requestedMode
+    const turn: TurnContext = { input, controller, integrations, editCounter, planTurn, restricted, permissionMode: threadMode }
     try {
       const signedIn = await this.authenticated(controller.signal, env)
       if (!signedIn)
@@ -1458,8 +1596,13 @@ export class ClaudeSubscriptionProviderService {
       const selected = parseThinkingSuffixFromModelId(input.model)
       const effort = ['low', 'medium', 'high', 'xhigh', 'max'].includes(selected.effort ?? '')
         ? selected.effort as Options['effort'] : undefined
-      // Agent turns run unattended in the thread workspace, like Mousse's other agents.
-      const permissionMode: PermissionMode = planTurn ? 'plan' : readOnlyChild ? 'default' : 'bypassPermissions'
+      // The thread's permission mode, in Claude Code's own terms: Ask asks about everything it would
+      // not allow itself, Auto-accept edits lets edits through, Full access bypasses its checks.
+      const permissionMode: PermissionMode = planTurn
+        ? 'plan'
+        : readOnlyChild
+          ? 'default'
+          : { ask: 'default', accept_edits: 'acceptEdits', full: 'bypassPermissions' }[threadMode] as PermissionMode
       const launchAppend = claudeLaunchAppendSystemPrompt(claudeExtraArgs(storedCliArgs(this.launchSettings())), input.cwd)
       const appendTexts = [input.systemPromptAppend ?? '', ...launchAppend]
       // What a live process is started for (`HARD_PARTS`); a process the turn can reuse already holds the conversation.
@@ -1503,13 +1646,14 @@ export class ClaudeSubscriptionProviderService {
       }
       const buildOptions = (sdkController: AbortController, turnOf: () => TurnContext, isLive: boolean): Options => ({
         // Mousse's instructions first, then the user's own append text.
-        ...this.options(input.cwd, sdkController, env, appendTexts),
+        ...this.options(input.cwd, sdkController, env, appendTexts, turnSettings),
         model: selected.baseId,
         effort,
         resume,
         permissionMode,
-        // A live query can switch to bypass on a later turn even when it starts in plan mode.
-        ...(permissionMode === 'bypassPermissions' || (isLive && !readOnlyChild) ? { allowDangerouslySkipPermissions: true } : {}),
+        // A live query can switch to bypass on a later turn even when it starts in plan or ask mode,
+        // unless Claude Code's settings forbid bypassing permissions at all.
+        ...(permissionMode === 'bypassPermissions' || (isLive && !readOnlyChild && !bypassDisabled) ? { allowDangerouslySkipPermissions: true } : {}),
         // The Mousse server keeps its name: user servers are spread first.
         mcpServers: {
           ...integrations?.mcpServers,
@@ -1541,10 +1685,16 @@ export class ClaudeSubscriptionProviderService {
         if (!live || !wake) throw new Error('Claude has no turn of its own to continue for this thread')
         liveRun = wake
         live.current = turn
+        // The user may have changed the thread's mode since the turn that left this work running: the
+        // process must not carry on in the wider one. If it cannot be switched, the turn fails.
+        if (live.meta.permissionMode !== permissionMode) {
+          await live.setPermissionMode(permissionMode)
+          live.meta.permissionMode = permissionMode
+        }
         metrics.beginQuery(live.sessionId, saved?.usageBaseline)
         liveRun.attach((message) => frames.observe(message))
       } else {
-        const key = { hard, soft: this.launchKey(env, integrations), mode: permissionMode, historyNow }
+        const key = { hard, soft: this.launchKey(env, integrations, turnSettings), mode: permissionMode, historyNow }
         try {
           live = await this.acquireLive(input.threadId, key, resume, (created) => {
             created.current = turn
@@ -1777,7 +1927,7 @@ export class ClaudeSubscriptionProviderService {
     }
   }
   /** What a new process would start with besides the turn's model and folder: launch settings and integrations. */
-  private launchKey(env: NodeJS.ProcessEnv, integrations: ClaudeTurnIntegrations | undefined): string {
+  private launchKey(env: NodeJS.ProcessEnv, integrations: ClaudeTurnIntegrations | undefined, settings?: SdkSettings): string {
     const launch = this.launchTarget()
     return createHash('sha256')
       .update(
@@ -1789,20 +1939,42 @@ export class ClaudeSubscriptionProviderService {
           Object.entries(env).sort(([a], [b]) => (a < b ? -1 : 1)),
           integrations?.mcpServers,
           Object.entries(integrations?.proxiedServers ?? {}).map(([name, proxied]) => [name, proxied.tools]),
-          integrations?.pluginPath
+          integrations?.pluginPath,
+          settings ?? null
         ])
       )
       .digest('hex')
   }
   /**
    * Disconnects this profile. Only Mousse-side state is cleared: the terminal sign-in is shared
-   * with the user's own `claude`, so `claude auth logout` never runs.
+   * with the user's own `claude`, so `claude auth logout` never runs here. (An instance with its own
+   * home signs out in that home first: `claudeCodeDriver`.) The gateway keeps the signed-out flag in
+   * the instance config (and mirrors it to `settings.json`).
    */
   async logout(): Promise<void> {
-    this.settings.cliDisconnected = true
     this.settings.sessions = {}
-    this.save()
+    // Everything running stops first, whatever saving does next: a turn, a warm process and its
+    // helpers, a sign-in. A failed save is reported after.
     this.abortInFlight()
+    this.save()
+  }
+  /**
+   * Another service of this instance writes its settings from now on (its home changed): this one
+   * finishes its turns but never writes the file again, so one file never has two writers.
+   */
+  freezeSettings(): void {
+    this.settingsFrozen = true
+  }
+  /**
+   * Takes the sign-in the CLI now holds as this instance's: ends every turn and live query that
+   * started under the old one, and asks `claude auth status` again with no cached result, whatever
+   * Mousse has flagged (the gateway clears a sign-out flag once the sign-in succeeded). True when
+   * the home reads signed in.
+   */
+  async reconnect(): Promise<boolean> {
+    this.abortInFlight()
+    this.cliProbe = undefined
+    return this.authenticated()
   }
   stop(): void {
     this.stopped = true

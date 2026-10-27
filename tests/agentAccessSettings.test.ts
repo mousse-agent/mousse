@@ -1,0 +1,80 @@
+import { describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
+import { MousseConfigStore } from '../src/mms/config/MousseConfigStore'
+import { SettingsStore } from '../src/mms/settings/SettingsStore'
+import { SETTINGS_CLASSIFICATION } from '../src/shared/profiles/settingsClassification'
+import { asSettingsPartial } from '../src/mms/protocol/validators'
+import { getDefaultSettings, isAgentAccessLevel, narrowAgentAccess, normalizeAgentAccessSettings } from '../src/shared/settings'
+
+describe('agent access settings (SPEC §15.1)', () => {
+  it('defaults to the narrowest level, every project, and no approval answers', () => {
+    expect(normalizeAgentAccessSettings()).toEqual({ level: 'lineage', projectIds: [], answerApprovals: false })
+    expect(getDefaultSettings().agentAccess).toEqual({ level: 'lineage', projectIds: [], answerApprovals: false })
+  })
+
+  it('normalizes an unknown level to lineage, drops non-string and empty project ids, and coerces the toggle to a boolean', () => {
+    expect(normalizeAgentAccessSettings({ level: 'root' as never }).level).toBe('lineage')
+    expect(normalizeAgentAccessSettings({ level: undefined }).level).toBe('lineage')
+    expect(normalizeAgentAccessSettings({ level: 'manage' }).level).toBe('manage')
+    expect(normalizeAgentAccessSettings({ projectIds: ['a', 'b', 'a'] }).projectIds).toEqual(['a', 'b'])
+    expect(normalizeAgentAccessSettings({ level: 'manage', projectIds: [] })).toMatchObject({ level: 'manage', projectIds: [] })
+    expect(normalizeAgentAccessSettings({ answerApprovals: 'yes' as never }).answerApprovals).toBe(false)
+    expect(normalizeAgentAccessSettings({ answerApprovals: true }).answerApprovals).toBe(true)
+    expect(normalizeAgentAccessSettings(null)).toEqual({ level: 'lineage', projectIds: [], answerApprovals: false })
+  })
+
+  it('a malformed project list fails closed to lineage, never to every project', () => {
+    for (const projectIds of ['a', 7, {}, [123], ['a', 7], ['a', ''], [null]]) {
+      expect(normalizeAgentAccessSettings({ level: 'manage', projectIds: projectIds as never, answerApprovals: true }), JSON.stringify(projectIds)).toEqual({
+        level: 'lineage', projectIds: [], answerApprovals: false
+      })
+    }
+    // An absent list is every project, which is what an empty one means.
+    expect(normalizeAgentAccessSettings({ level: 'read' })).toMatchObject({ level: 'read', projectIds: [] })
+  })
+
+  it('the settings protocol refuses a malformed agentAccess patch', () => {
+    expect(asSettingsPartial({ agentAccess: { level: 'read', projectIds: ['p1'], answerApprovals: false } })).toEqual({ agentAccess: { level: 'read', projectIds: ['p1'], answerApprovals: false } })
+    expect(asSettingsPartial({ agentAccess: { projectIds: [] } })).toEqual({ agentAccess: { projectIds: [] } })
+    for (const bad of [{ projectIds: 'p1' }, { projectIds: [123] }, { projectIds: [''] }, { level: 'root' }, { answerApprovals: 'yes' }, { extra: 1 }])
+      expect(() => asSettingsPartial({ agentAccess: bad }), JSON.stringify(bad)).toThrow(/agentAccess/)
+    expect(() => asSettingsPartial({ agentAccess: 'manage' })).toThrow()
+  })
+
+  it('narrows to the narrower level and ignores an absent or unknown one', () => {
+    expect(narrowAgentAccess('manage', 'read')).toBe('read')
+    expect(narrowAgentAccess('read', 'manage', 'lineage')).toBe('lineage')
+    expect(narrowAgentAccess('manage', undefined, null)).toBe('manage')
+    expect(narrowAgentAccess(undefined, null)).toBeUndefined()
+    expect(narrowAgentAccess('bogus' as never, 'read')).toBe('read')
+    expect(isAgentAccessLevel('read')).toBe(true)
+    expect(isAgentAccessLevel('admin')).toBe(false)
+    expect(isAgentAccessLevel(undefined)).toBe(false)
+  })
+
+  it('is a profile setting', () => {
+    expect(SETTINGS_CLASSIFICATION.find((entry) => entry.path === 'settings.agentAccess')).toMatchObject({ scope: 'profile' })
+  })
+
+  it('persists the level, the project list and the toggle through a configuration reload, and normalizes what was stored', () => {
+    const home = mkdtempSync(join(tmpdir(), 'mousse-agent-access-settings-'))
+    try {
+      const settings = new SettingsStore(MousseConfigStore.load(home))
+      expect(settings.get().agentAccess).toEqual({ level: 'lineage', projectIds: [], answerApprovals: false })
+      settings.set({ agentAccess: { level: 'manage', projectIds: ['p1', 'p2'], answerApprovals: true } })
+      let reloaded = new SettingsStore(MousseConfigStore.load(home))
+      expect(reloaded.get().agentAccess).toEqual({ level: 'manage', projectIds: ['p1', 'p2'], answerApprovals: true })
+      // A narrower project list replaces the earlier one rather than merging into it.
+      reloaded.set({ agentAccess: { projectIds: ['p2'] } as never })
+      reloaded = new SettingsStore(MousseConfigStore.load(home))
+      expect(reloaded.get().agentAccess).toEqual({ level: 'manage', projectIds: ['p2'], answerApprovals: true })
+      // A level that is not one of the three reads back as the narrowest.
+      reloaded.set({ agentAccess: { level: 'superuser' } as never })
+      expect(new SettingsStore(MousseConfigStore.load(home)).get().agentAccess.level).toBe('lineage')
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+})

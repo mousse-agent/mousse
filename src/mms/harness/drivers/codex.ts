@@ -1,10 +1,13 @@
 import type { InstallOwner } from '../../../shared/harness/status'
 import type { HarnessCaps } from '../../../shared/harness/types'
+import type { PermissionLimits } from '../../../shared/permissionMode'
 import type { CodexProviderService } from '../../providers/codex/CodexProviderService'
 import { CODEX_CAPABILITIES, CodexAdapter } from '../../run/adapters/codex/CodexAdapter'
 import { cliNames } from '../env'
-import { decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig } from '../driver'
+import { usageWindows } from '../../providers/codex/rateLimits'
+import { decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig, type RuntimeUsage } from '../driver'
 import { createManagedCodexRuntime } from '../codex/managedRuntime'
+import { ALL_MIRROR_FIELDS } from '../vendorMirror'
 
 /** Codex CLI versions Mousse was tested with. */
 export const CODEX_TESTED_VERSIONS = { min: '0.100.0', max: '0.162.999' }
@@ -16,10 +19,22 @@ export const CODEX_CAPS: HarnessCaps = Object.freeze({
   // Codex asks Mousse before each tool under the approval policy Mousse sets.
   toolControl: 'approval_only',
   budgets: 'unsupported',
-  spendLimits: 'unsupported'
+  spendLimits: 'unsupported',
+  definitionLimits: 'none'
 })
 
 const SIGN_IN_COMMAND = 'codex login'
+
+/**
+ * What Codex cannot enforce. Auto-accept edits needs `untrusted` + read-only to apply a patch after
+ * Mousse accepts it while a mutating command still waits for Mousse's answer. That is proven only by
+ * a recorded app-server exchange of both halves, and none is recorded yet (capturing one needs a
+ * signed-in Codex account), so Codex does not offer the mode: a thread set to it asks about edits
+ * as well, and the composer says so. Add the two fixtures, then remove this limit.
+ */
+export const CODEX_PERMISSION_LIMITS: PermissionLimits = Object.freeze({
+  unavailable: Object.freeze({ accept_edits: 'Codex cannot auto-accept edits while asking for commands' })
+})
 
 function readAuth(service: CodexProviderService, status: Awaited<ReturnType<CodexProviderService['status']>>): AuthReading {
   const methodLabel = 'ChatGPT sign-in'
@@ -33,6 +48,21 @@ function readAuth(service: CodexProviderService, status: Awaited<ReturnType<Code
       return { state: 'signed_out', methodLabel, message: status.message, signInCommand: SIGN_IN_COMMAND }
     default:
       return { state: 'unknown', methodLabel, ...(status.message ? { message: status.message } : {}) }
+  }
+}
+
+/**
+ * The plan's limits as Codex reports them to the user's own sign-in (the same numbers the CLI
+ * shows). When Codex cannot be asked now, the last snapshot it sent stands in and says so.
+ */
+async function readUsage(service: CodexProviderService, signal: AbortSignal): Promise<RuntimeUsage> {
+  const limits = await service.rateLimits(signal)
+  const windows = usageWindows(limits.snapshot)
+  if (!windows.length) return { status: 'unavailable', windows: [], message: 'Codex reported no usage limits for this plan.' }
+  return {
+    status: 'available',
+    windows,
+    ...(limits.live ? {} : { message: `Codex could not be reached; these are the limits it last reported (${new Date(limits.at).toISOString()}).` })
   }
 }
 
@@ -71,6 +101,7 @@ export function codexDriver(options: { builtIn: () => CodexProviderService; mana
     userMcp: 'native',
     // Codex passes MCP image content to the model; the ChatGPT models it runs read images.
     mcpImageResults: true,
+    mirrorsVendorFile: true,
     decodeConfig: decodeCodexConfig,
     caps: () => CODEX_CAPS,
     updateCommand: (owner: InstallOwner) => {
@@ -88,8 +119,12 @@ export function codexDriver(options: { builtIn: () => CodexProviderService; mana
         llmProvider: () => service.llmProvider(),
         models: () => service.models(),
         modelsRefreshedAt: () => service.modelsRefreshedAt(),
-        launch: () => service.storedLaunch(),
-        setLaunch: async (patch) => void (await service.setCliConfig(patch)),
+        // The user's own Codex mirrors its launch settings and sign-out to its settings.json for an older Mousse.
+        ...(context.builtIn ? { vendorMirror: service.vendorMirror(ALL_MIRROR_FIELDS) } : {}),
+        validateLaunch: (patch) => service.validateLaunch(patch),
+        launchChanged: () => service.launchChanged(),
+        usage: (signal) => readUsage(service, signal),
+        permissionLimits: () => CODEX_PERMISSION_LIMITS,
         auth: async ({ force }) => readAuth(service, await service.status({ force })),
         refreshModels: async () => {
           await service.status()

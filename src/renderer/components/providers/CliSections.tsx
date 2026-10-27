@@ -5,7 +5,6 @@ import { Download, Plus, RotateCcw, X } from '../../lib/icons'
 import { SettingsRow } from '../settings/SettingsRow'
 import { BrowseButton, CommandBox, RefreshButton, StatusLine, useAsyncAction } from './parts'
 import {
-  CHATGPT_USAGE_URL,
   DRIVER_INFO,
   binaryOverrideOf,
   binarySourceLabel,
@@ -109,12 +108,15 @@ export function SetupRow({
         break
       case 'sign_in':
         if (step.command) {
+          // A sign-in Mousse can run keeps the command beside its button, for when the link does not show.
+          const inApp = snapshot.auth.canSignIn === true
           below = (
             <>
-              <span className="prov-command-hint">Run this in a terminal, then check again.</span>
+              <span className="prov-command-hint">{inApp ? 'Or run this in a terminal, then check again.' : 'Run this in a terminal, then check again.'}</span>
               <CommandBox command={step.command} label="Copy sign-in command" />
             </>
           )
+          if (inApp) control = button('signin', step.label, actions.signIn)
         } else control = button('signin', isManagedSetup(snapshot) ? 'Continue with ChatGPT' : step.label, actions.signIn)
         break
       case 'update':
@@ -132,18 +134,40 @@ export function SetupRow({
   )
 
   return (
+    <>
+      <SettingsRow
+        title="Status"
+        description={withError(progress ?? <StatusLine status={status} />, error)}
+        control={
+          <>
+            {recheck}
+            {control}
+          </>
+        }
+      >
+        {below}
+      </SettingsRow>
+      {snapshot.settingsNotice && <OlderSettingsRow notice={snapshot.settingsNotice} actions={actions} />}
+    </>
+  )
+}
+
+/**
+ * What Mousse found at start in the provider's own settings file, changed by an older Mousse
+ * version: taken over (said once), or kept apart with the choice to use it instead.
+ */
+function OlderSettingsRow({ notice, actions }: { notice: NonNullable<InstanceSnapshot['settingsNotice']>; actions: InstanceActions }) {
+  const { busy, error, run } = useAsyncAction()
+  return (
     <SettingsRow
-      title="Status"
-      description={withError(progress ?? <StatusLine status={status} />, error)}
-      control={
-        <>
-          {recheck}
-          {control}
-        </>
-      }
-    >
-      {below}
-    </SettingsRow>
+      title="Older settings"
+      description={withError(<span className="prov-warning-text">{notice.message}</span>, error)}
+      control={notice.kind === 'older_conflict' && (
+        <button type="button" className="settings-btn" disabled={busy !== null} onClick={() => void run('older', () => actions.configure({ useOlderSettings: true }))}>
+          Use the older settings
+        </button>
+      )}
+    />
   )
 }
 
@@ -166,25 +190,6 @@ export function AccountRow({ snapshot, actions }: { snapshot: InstanceSnapshot; 
             Sign out
           </button>
         ) : undefined
-      }
-    />
-  )
-}
-
-/**
- * A managed ChatGPT entry's usage lives at ChatGPT: a link, never a meter (OpenAI publishes no
- * usage reading for plan use).
- */
-export function PlanUsageRow({ snapshot }: { snapshot: InstanceSnapshot }) {
-  if (!isManagedSetup(snapshot)) return null
-  return (
-    <SettingsRow
-      title="Usage"
-      description="ChatGPT plan usage"
-      control={
-        <button type="button" className="prov-link" onClick={() => void window.mousse.providers.openLoginUrl(CHATGPT_USAGE_URL)}>
-          Manage usage
-        </button>
       }
     />
   )

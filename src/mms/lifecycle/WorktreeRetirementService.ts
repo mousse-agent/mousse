@@ -16,8 +16,8 @@ import { getExternalResourceClaims } from './LifecycleClaims'
 import type { ConversationBranch, ThreadAction } from '../../shared/threadActions'
 
 const hash = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
-export function lifecycleGit(cwd: string, args: string[], input?: string, maxBuffer = 32 * 1024 * 1024): string {
-  return execFileSync('git', args, { cwd, input, encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer, stdio: ['pipe', 'pipe', 'pipe'] }).trimEnd()
+export function lifecycleGit(cwd: string, args: string[], input?: string, maxBuffer = 32 * 1024 * 1024, env?: NodeJS.ProcessEnv): string {
+  return execFileSync('git', args, { cwd, input, ...(env ? { env: { ...process.env, ...env } } : {}), encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer, stdio: ['pipe', 'pipe', 'pipe'] }).trimEnd()
 }
 /** Never treat an unreadable reference as absent, and never dereference an owned symbolic ref. */
 export function readDirectLifecycleRef(cwd: string, ref: string): string | undefined {
@@ -97,6 +97,13 @@ export interface WorktreeReconstructionManifest {
   content: ContentEntry[]
   state: 'prepared' | 'retired' | 'materialized'
 }
+/** Git removed part of a worktree and stopped: files were in use. The folder is left without its `.git` file. */
+export class PartialWorktreeRemovalError extends Error {
+  constructor(readonly worktreePath: string, detail: string) {
+    super(`Worktree was partly removed because files in it were in use; it is rebuilt the next time the thread is used (${detail.split(/\r?\n/)[0]})`)
+    this.name = 'PartialWorktreeRemovalError'
+  }
+}
 export interface RetirementInput { taskId: string; worktreePath: string; branch: string; sourcePath: string; repositoryId?: string; baseSha?: string; resultSha?: string }
 export interface RetirementOwnership { repositoryLease: RepositoryLeaseHandle; taskLease?: ThreadLeaseHandle; cleanupTaskId?: string; cleanupToken?: string; cleanupGeneration?: number }
 
@@ -169,13 +176,24 @@ export class WorktreeRetirementService {
       const shared = getExternalResourceClaims(this.store, excluded).some((resource) => !(resource.peerProfileId === this.store.profileId && excluded.has(resource.ownerTaskId)) && isAbsolute(resource.identity) && (overlaps(resource.identity, manifest.worktreePath) || overlaps(manifest.worktreePath, resource.identity)))
       if (shared) throw new Error('Another task or profile retains this checkout; retirement is blocked')
       this.verifyPins(manifest)
-      lifecycleGit(manifest.commonDir, ['worktree', 'remove', manifest.worktreePath])
+      try { lifecycleGit(manifest.commonDir, ['worktree', 'remove', manifest.worktreePath]) }
+      catch (error) {
+        // On Windows an open handle or a working directory inside the checkout stops Git from deleting one entry
+        // after it has already deleted `.git` and unregistered the worktree. What is left cannot be used or
+        // reconstructed in place; the next restore sets it aside.
+        if (existsSync(manifest.worktreePath) && !existsSync(join(manifest.worktreePath, '.git'))) throw new PartialWorktreeRemovalError(manifest.worktreePath, (error as Error).message)
+        throw error
+      }
       if (existsSync(manifest.worktreePath) || this.registered(manifest)) throw new Error('Git did not retire the exact workspace')
       manifest.state = 'retired'; if (!options.purging) atomicWriteJsonSync(manifestPath, manifest)
       return manifest
     })
   }
-  reconstruct(manifestPath: string): WorktreeReconstructionManifest {
+  /**
+   * `untrusted` is for a checkout of someone else's commits: `prepare` runs on the new worktree before anything is checked
+   * out into it (it puts the safety configuration in place) and `env` goes to the checkout.
+   */
+  reconstruct(manifestPath: string, untrusted?: { prepare(worktreePath: string): void; env: NodeJS.ProcessEnv }): WorktreeReconstructionManifest {
     const manifest = this.load(manifestPath)
     return this.store.withGate(manifest.taskId, () => {
       this.assertOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId)
@@ -186,9 +204,10 @@ export class WorktreeRetirementService {
         if (lifecycleGit(manifest.commonDir, ['rev-parse', `refs/heads/${manifest.branch}`]) !== manifest.resultSha) throw new Error('Retired branch moved; explicit rebase or current-code recall is required')
         mkdirSync(dirname(manifest.worktreePath), { recursive: true })
         lifecycleGit(manifest.commonDir, ['worktree', 'add', '--no-checkout', manifest.worktreePath, manifest.branch])
+        untrusted?.prepare(manifest.worktreePath)
         if (this.checkoutFingerprint(manifest.worktreePath) !== manifest.checkoutFingerprint) throw new Error('Checkout conversion policy changed; reconstruction requires recovery')
         if (manifest.sparse) lifecycleGit(manifest.worktreePath, ['sparse-checkout', 'set', manifest.sparse.cone ? '--cone' : '--no-cone', '--stdin'], manifest.sparse.patterns)
-        lifecycleGit(manifest.worktreePath, ['checkout', 'HEAD'])
+        lifecycleGit(manifest.worktreePath, ['checkout', 'HEAD'], undefined, undefined, untrusted?.env)
         for (const auxiliary of manifest.auxiliary) {
           const target = join(manifest.worktreePath, auxiliary.path)
           assertLifecyclePath(manifest.worktreePath, target); mkdirSync(dirname(target), { recursive: true })
@@ -295,7 +314,8 @@ export class WorktreeRetirementService {
     if (!this.registered({ ...identity, worktreePath: path } as WorktreeReconstructionManifest)) throw new Error('Worktree is not registered')
     return identity
   }
-  private inspectContent(path: string): Pick<WorktreeReconstructionManifest, 'content' | 'auxiliary' | 'sparse'> {
+  /** Throws unless the checkout holds only tracked, exactly reconstructible content. Reads only; writes nothing. */
+  inspectContent(path: string): Pick<WorktreeReconstructionManifest, 'content' | 'auxiliary' | 'sparse'> {
     if (lifecycleGit(path, ['status', '--porcelain=v1', '--untracked-files=all'])) throw new Error('Dirty, conflicted or untracked content requires retention')
     const entries = walkOwnedContent(path, true)
     const tracked = new Map(lifecycleGit(path, ['ls-tree', '-r', '-z', 'HEAD']).split('\0').filter(Boolean).map((line) => { const tab = line.indexOf('\t'), header = line.slice(0, tab).split(' '); return [line.slice(tab + 1), { mode: header[0], sha: header[2] }] }))

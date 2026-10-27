@@ -4,7 +4,7 @@
  * table in the bundled runtime, so an upgrade that adds a key fails until it is listed here.
  *
  * Ambient cloud credentials (`AWS_*`, Google ADC) are not keys and are not listed: they stay in
- * the child's environment.
+ * the child's environment (`PI_AMBIENT_ENV` lists them for locked bot processes).
  */
 export const PI_PROVIDER_ENV_KEYS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   'github-copilot': ['COPILOT_GITHUB_TOKEN'],
@@ -62,4 +62,62 @@ export const PI_ENV_KEYS: readonly string[] = Object.freeze([
 export function piOwnProviderKeys(provider: string): string[] {
   const oauth = new Set(ANTHROPIC_OAUTH_ENV_KEYS)
   return (PI_PROVIDER_ENV_KEYS[provider] ?? []).filter((name) => !oauth.has(name))
+}
+
+/**
+ * The ambient credentials and settings the pinned Pi reads for its cloud providers (pi-ai's
+ * Bedrock and Vertex streams, with the bundled AWS SDK and Google auth library). A locked bot
+ * process on an ambient instance gets exactly its provider's set (`lockedEnv`), and nothing else
+ * under these prefixes: not the AWS retry and defaults switches (the launcher pins retries), not the
+ * test, metadata or external-account switches, and not `GOOGLE_CLOUD_API_KEY`, Vertex's API key,
+ * which is a credential rather than ambient config (an ambient Vertex instance runs on the
+ * application default credentials). Profiles, SSO caches and the default credentials file are read
+ * from the home folder, which every locked environment keeps. A test diffs these sets against the
+ * variables the pinned bundle reads.
+ */
+export const PI_AMBIENT_ENV: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  'amazon-bedrock': Object.freeze([
+    'AWS_PROFILE',
+    'AWS_REGION',
+    'AWS_DEFAULT_REGION',
+    'AWS_ACCESS_KEY_ID',
+    'AWS_SECRET_ACCESS_KEY',
+    'AWS_SESSION_TOKEN',
+    'AWS_CREDENTIAL_EXPIRATION',
+    'AWS_BEARER_TOKEN_BEDROCK',
+    'AWS_CONFIG_FILE',
+    'AWS_SHARED_CREDENTIALS_FILE',
+    'AWS_WEB_IDENTITY_TOKEN_FILE',
+    'AWS_ROLE_ARN',
+    'AWS_ROLE_SESSION_NAME',
+    'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI',
+    'AWS_CONTAINER_CREDENTIALS_FULL_URI',
+    'AWS_CONTAINER_AUTHORIZATION_TOKEN',
+    'AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE',
+    'AWS_LOGIN_CACHE_DIRECTORY',
+    'AWS_ENDPOINT_URL',
+    'AWS_USE_FIPS_ENDPOINT',
+    'AWS_USE_DUALSTACK_ENDPOINT'
+  ]),
+  'google-vertex': Object.freeze([
+    'GOOGLE_APPLICATION_CREDENTIALS',
+    'GOOGLE_CLOUD_PROJECT',
+    'GCLOUD_PROJECT',
+    'GOOGLE_CLOUD_LOCATION',
+    'GOOGLE_CLOUD_QUOTA_PROJECT',
+    'CLOUDSDK_CONFIG'
+  ])
+})
+
+/**
+ * What pi-ai's `getEnvApiKey` returns for Bedrock and Vertex when the environment's cloud
+ * credentials (not a key) sign them in, and what Mousse then stores as their credential. Any other
+ * stored value is a real key (a Vertex API key saved by hand, or found in `GOOGLE_CLOUD_API_KEY`),
+ * which Pi uses as the key.
+ */
+export const PI_AMBIENT_MARKER = '<authenticated>'
+
+/** A Pi provider that can sign in with the environment's cloud credentials instead of a key. */
+export function piAmbientProvider(provider: string): boolean {
+  return Object.hasOwn(PI_AMBIENT_ENV, provider)
 }

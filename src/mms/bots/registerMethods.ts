@@ -1,173 +1,90 @@
-import { AppError } from '../../shared/errors'
-import { BOT_PROFILES, SPACE_ROLES, isId, NetError, NET_ERRORS } from '../../shared/net'
-import {
-  BOTS_LOCAL_CAPABILITY,
-  BOTS_LOCAL_METHODS,
-  type BotsLocalMethod,
-  type BotsLocalParams
-} from '../../shared/bots/local'
-import { DomainHandlerRegistry, domainObject } from '../protocol/domainRegistry'
+import type { BotDefinition } from '../../shared/bots/personal/definition'
+import { BOTS_PERSONAL_CAPABILITY, BOTS_PERSONAL_METHODS, type BotsPersonalMethod } from '../../shared/bots/personal/methods'
+import { DomainHandlerRegistry, DomainRpcError, domainObject } from '../protocol/domainRegistry'
+import { BotEngineError, type BotEngine } from './activation/BotEngine'
+import { BotDefinitionError, isBotId } from './definitions/BotDefinitionStore'
 
-export interface BotsLocalPort {
-  request<K extends BotsLocalMethod>(
-    method: K,
-    params: BotsLocalParams[K]
-  ): unknown | Promise<unknown>
+type Params = Record<string, unknown>
+
+const KEYS: Record<BotsPersonalMethod, readonly string[]> = {
+  'bots.definitions.list': [],
+  'bots.definitions.get': ['botId'],
+  'bots.definitions.save': ['definition', 'expectedDraftHash'],
+  'bots.definitions.publish': ['botId', 'expectedDraftHash'],
+  'bots.definitions.delete': ['botId'],
+  'bots.approve': ['botId', 'manifestDigest'],
+  'bots.revoke': ['botId'],
+  'bots.activate': ['botId', 'input', 'clientRequestId'],
+  'bots.activations.list': ['botId'],
+  'bots.activations.get': ['activationId'],
+  'bots.activations.stop': ['activationId']
 }
-const selection = ['space', 'bot'] as const
-const fields: Record<BotsLocalMethod, readonly string[]> = {
-  'bots.add': ['id', 'space', 'name', 'profile', 'policy'],
-  'bots.list': ['after', 'limit'],
-  'bots.configure': [
-    ...selection,
-    'adapter',
-    'profile',
-    'definitionRevision',
-    'profileDigest',
-    'dailyBudgetUnits',
-    'runCeilingUnits',
-    'maxConcurrent',
-    'runsPerMemberHour',
-    'projectId'
-  ],
-  'bots.qualify': [...selection, 'definitionRevision', 'profileDigest'],
-  'bots.stop': selection,
-  'bots.resume': selection,
-  'bots.grant': ['stream', 'request', 'approved'],
-  'bots.presence': [...selection, 'stream']
+
+const HASH = /^[a-f0-9]{64}$/
+const REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/
+
+function validate(method: BotsPersonalMethod, value: unknown): Params {
+  const p = domainObject(value ?? {}, ['profileId', ...KEYS[method]])
+  const needsBot = KEYS[method].includes('botId') && method !== 'bots.activations.list'
+  if (needsBot && !isBotId(p.botId)) throw new DomainRpcError('invalid_params', 'A bot id is required')
+  if (p.botId !== undefined && !isBotId(p.botId)) throw new DomainRpcError('invalid_params', 'Invalid bot id')
+  for (const key of ['expectedDraftHash', 'manifestDigest'] as const)
+    if (p[key] !== undefined && (typeof p[key] !== 'string' || !HASH.test(p[key] as string))) throw new DomainRpcError('invalid_params', `Invalid ${key}`)
+  if ((method === 'bots.definitions.publish' && p.expectedDraftHash === undefined) || (method === 'bots.approve' && p.manifestDigest === undefined))
+    throw new DomainRpcError('invalid_params', method === 'bots.approve' ? 'The permissions digest is required' : 'The draft hash is required')
+  if (method === 'bots.definitions.save' && (!p.definition || typeof p.definition !== 'object' || Array.isArray(p.definition)))
+    throw new DomainRpcError('invalid_params', 'A bot definition is required')
+  if (method === 'bots.activate') {
+    if (typeof p.input !== 'string' || !p.input.trim() || p.input.length > 64 * 1024) throw new DomainRpcError('invalid_params', 'The bot needs something to do')
+    if (typeof p.clientRequestId !== 'string' || !REQUEST_ID.test(p.clientRequestId)) throw new DomainRpcError('invalid_params', 'A request id is required')
+  }
+  if (KEYS[method].includes('activationId') && (typeof p.activationId !== 'string' || !/^act_[0-9a-f-]{36}$/.test(p.activationId)))
+    throw new DomainRpcError('invalid_params', 'An activation id is required')
+  return p
 }
-const invalid = (): never => {
-  throw new NetError('bad_request')
-}
-function object(value: unknown, keys: readonly string[]): Record<string, unknown> {
-  try {
-    return domainObject(value, keys)
-  } catch {
-    return invalid()
+
+async function handle(method: BotsPersonalMethod, p: Params, bots: BotEngine): Promise<unknown> {
+  switch (method) {
+    case 'bots.definitions.list': return { bots: bots.list() }
+    case 'bots.definitions.get': {
+      const entry = bots.get(p.botId as string)
+      return { ...entry, approval: entry.published ? bots.approval(entry.id) : null }
+    }
+    case 'bots.definitions.save': return bots.save(p.definition as BotDefinition, p.expectedDraftHash as string | undefined)
+    case 'bots.definitions.publish': return { definition: bots.publish(p.botId as string, p.expectedDraftHash as string) }
+    case 'bots.definitions.delete': {
+      await bots.remove(p.botId as string)
+      return { ok: true }
+    }
+    case 'bots.approve': return bots.approve(p.botId as string, p.manifestDigest as string)
+    case 'bots.revoke': return { revoked: bots.revoke(p.botId as string) }
+    case 'bots.activate': return bots.activate({ botId: p.botId as string, input: p.input as string, clientRequestId: p.clientRequestId as string })
+    case 'bots.activations.list': return { activations: bots.listActivations(p.botId as string | undefined) }
+    case 'bots.activations.get': return bots.getActivation(p.activationId as string)
+    case 'bots.activations.stop': return bots.stop(p.activationId as string)
   }
 }
-function text(value: unknown, max: number): value is string {
-  return (
-    typeof value === 'string' &&
-    value.length > 0 &&
-    Buffer.byteLength(value) <= max &&
-    Buffer.from(value).toString() === value &&
-    !/[\x00-\x1f\x7f]/.test(value)
-  )
-}
-function selected(value: Record<string, unknown>): void {
-  if (!isId('space', value.space) || !isId('bot', value.bot)) invalid()
-}
-function integer(value: unknown, max = Number.MAX_SAFE_INTEGER): void {
-  if (!Number.isSafeInteger(value) || Number(value) < 1 || Number(value) > max) invalid()
-}
-export function validateBotsLocal<K extends BotsLocalMethod>(
-  method: K,
-  value: unknown
-): BotsLocalParams[K] {
-  const row = object(value ?? {}, fields[method])
-  if (!['bots.add', 'bots.list', 'bots.grant'].includes(method)) selected(row)
-  if (method === 'bots.add') {
-    if (
-      !isId('rpc', row.id) ||
-      !isId('space', row.space) ||
-      !text(row.name, 256) ||
-      row.name.trim() !== row.name ||
-      !['chat', 'reader'].includes(row.profile as string)
-    )
-      invalid()
-    const policy = object(row.policy, ['steer', 'visibility'])
-    if (!['public', 'private'].includes(policy.visibility as string)) invalid()
-    const steer = object(policy.steer, ['kind', 'roles'])
-    if (!['owner', 'everyone', 'roles'].includes(steer.kind as string)) invalid()
-    if (steer.kind === 'roles') {
-      if (
-        !Array.isArray(steer.roles) ||
-        !steer.roles.length ||
-        steer.roles.length > 3 ||
-        new Set(steer.roles).size !== steer.roles.length ||
-        steer.roles.some((role) => !SPACE_ROLES.includes(role as any))
-      )
-        invalid()
-    } else if (steer.roles !== undefined) invalid()
-  }
-  if (method === 'bots.list') {
-    if (row.after !== undefined) selected(object(row.after, selection))
-    if (row.limit !== undefined) integer(row.limit, 128)
-  }
-  if (method === 'bots.configure' || method === 'bots.qualify') {
-    if (
-      !text(row.definitionRevision, 256) ||
-      typeof row.profileDigest !== 'string' ||
-      !/^[A-Za-z0-9_-]{43}$/.test(row.profileDigest) ||
-      Buffer.from(row.profileDigest, 'base64url').toString('base64url') !== row.profileDigest
-    )
-      invalid()
-  }
-  if (method === 'bots.configure') {
-    if (
-      typeof row.adapter !== 'string' ||
-      !/^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/.test(row.adapter) ||
-      !BOT_PROFILES.includes(row.profile as any)
-    )
-      invalid()
-    for (const field of ['dailyBudgetUnits', 'runCeilingUnits']) integer(row[field])
-    integer(row.maxConcurrent, 32)
-    integer(row.runsPerMemberHour, 1000)
-    if (
-      Number(row.runCeilingUnits) > Number(row.dailyBudgetUnits) ||
-      (row.profile === 'chat' && row.projectId !== undefined) ||
-      (row.profile === 'reader' && row.projectId === undefined)
-    )
-      invalid()
-    if (
-      row.projectId !== undefined &&
-      (typeof row.projectId !== 'string' ||
-        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(row.projectId))
-    )
-      invalid()
-  }
-  if (method === 'bots.presence' || method === 'bots.grant')
-    if (!isId('stream', row.stream)) invalid()
-  if (method === 'bots.grant' && (!isId('event', row.request) || typeof row.approved !== 'boolean'))
-    invalid()
-  return row as unknown as BotsLocalParams[K]
-}
-function publicError(error: unknown): AppError {
-  const code = error instanceof NetError ? error.code : 'internal',
-    info = NET_ERRORS[code]
-  return new AppError(
-    {
-      code,
-      message: info.message,
-      errorInfo: { category: info.category, retryable: info.retryable }
-    },
-    error
-  )
-}
-export function registerBotMethods(
-  registry: DomainHandlerRegistry,
-  forProfile: (id: string) => BotsLocalPort | Promise<BotsLocalPort>
-): void {
-  for (const method of BOTS_LOCAL_METHODS)
-    registry.register({
+
+/** Bind once before server seal. The engine comes from the daemon's admitted profile, never a client path. */
+export function registerPersonalBotMethods(domains: DomainHandlerRegistry, botsForProfile: (profileId: string) => BotEngine | null | Promise<BotEngine | null>): void {
+  for (const method of BOTS_PERSONAL_METHODS) {
+    domains.register({
       method,
       scope: 'profile',
-      capability: BOTS_LOCAL_CAPABILITY,
-      requiredCapabilities: [BOTS_LOCAL_CAPABILITY],
-      validate: (value) => {
+      capability: BOTS_PERSONAL_CAPABILITY,
+      validate: (params) => validate(method, params),
+      async handle(_context, params, binding) {
         try {
-          return validateBotsLocal(method, value)
+          const bots = await botsForProfile(binding!.profileId)
+          // The profile's bots.db could not be opened: bots are unavailable, nothing else is affected.
+          if (!bots) throw new DomainRpcError('bots_unavailable', 'Bots are unavailable in this profile: their data could not be opened.')
+          return await handle(method, params, bots)
         } catch (error) {
-          throw publicError(error)
-        }
-      },
-      handle: async (_ctx, params, binding) => {
-        try {
-          return await (await forProfile(binding!.profileId)).request(method, params)
-        } catch (error) {
-          throw publicError(error)
+          if (error instanceof BotEngineError) throw new DomainRpcError(error.code, error.message, error.details)
+          if (error instanceof BotDefinitionError) throw new DomainRpcError(error.code, error.message)
+          throw error
         }
       }
     })
+  }
 }

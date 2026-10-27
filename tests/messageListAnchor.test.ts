@@ -16,6 +16,7 @@ import {
   nextScrollTop,
   offsetDeltaAbove,
   pickAnchor,
+  pickReadingNode,
   reconcileWindow,
   resolveTurnKey,
   shouldGlide,
@@ -250,6 +251,53 @@ describe('pickAnchor', () => {
   it('returns the row itself when nothing reaches below the edge', () => {
     const row = node('row', -300, -10, [node('a', -300, -100), node('b', -90, -10)])
     expect(pickAnchor(row, 0)).toEqual([])
+  })
+})
+
+describe('pickReadingNode', () => {
+  it('holds the top of the node pickAnchor chooses', () => {
+    const row = node('row', -100, 400, [node('above', -100, -10), node('p1', 20, 60)])
+    const picked = pickReadingNode(row, 0)
+    expect([picked.node.name, picked.edge]).toEqual(['p1', 'top'])
+  })
+
+  it('holds the bottom of the row when only its tail is below the edge', () => {
+    // The toolbar is skipped by the search, so the only thing left below the edge is the row's padding under the last block.
+    const row = node('row', -700, 30, [node('code', -700, -300), node('text', -280, -20)])
+    const picked = pickReadingNode(row, 0)
+    expect([picked.node.name, picked.edge]).toEqual(['row', 'bottom'])
+  })
+
+  it('holds the bottom of the block the search ends in when the edge cuts through it and nothing inside shows', () => {
+    const row = node('row', -900, 40, [node('user', -900, -700), node('answer', -680, 30, [node('p', -680, -300), node('code', -280, -20)])])
+    const picked = pickReadingNode(row, 0)
+    expect([picked.node.name, picked.edge]).toEqual(['answer', 'bottom'])
+  })
+
+  it('holds the bottom of an unrendered block the edge cuts through, not its top', () => {
+    const row = node('row', -300, 500, [node('code', -120, 100), node('after', 124, 160)])
+    const picked = pickReadingNode(row, 0)
+    expect([picked.node.name, picked.edge]).toEqual(['code', 'bottom'])
+  })
+
+  it('keeps the top of a node that starts at the edge', () => {
+    const row = node('row', -300, 500, [node('above', -300, -10), node('p', 0, 40)])
+    const picked = pickReadingNode(row, 0)
+    expect([picked.node.name, picked.edge]).toEqual(['p', 'top'])
+  })
+
+  it('keeps the row top for a row that ends above the edge', () => {
+    const row = node('row', -300, -10, [node('a', -300, -100), node('b', -90, -10)])
+    const picked = pickReadingNode(row, 0)
+    expect([picked.node.name, picked.edge]).toEqual(['row', 'top'])
+  })
+
+  it('follows content that grows above the tail when the row bottom is the position measured', () => {
+    // A block above the tail grows by 220 px: the row top stays, the row bottom moves with the tail.
+    const before = { top: -700, bottom: 30 }
+    const after = { top: -700, bottom: 250 }
+    expect(anchorDelta({ posBefore: before.top, posAfter: after.top })).toBe(0)
+    expect(anchorDelta({ posBefore: before.bottom, posAfter: after.bottom })).toBe(220)
   })
 })
 

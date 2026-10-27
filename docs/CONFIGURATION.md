@@ -30,16 +30,29 @@ Every profile uses the sign-in from your terminal: the same `claude` configurati
 
 Mousse runs your Claude Code exactly as you set it up. Every launch (the sign-in check, model discovery, the usage check and turns) gets the environment Mousse was started with and loads your user, project and local Claude Code settings, as `claude` in a terminal would: the `env` block in `settings.json`, MCP servers, hooks, plugins, skills, permission rules, CLAUDE.md, and AGENTS.md when Claude Code's own settings load it. Turns use Claude Code's own system prompt. Mousse adds only its own pieces on top: its MCP server and orchestration guidance, the MCP servers and skills enabled in Mousse (skills already in `~/.claude/skills` or the project's `.claude/skills` are not added twice), and the permission mode for each turn. The launch arguments and environment variables set in Settings → Providers apply too; text from `--append-system-prompt` and `--append-system-prompt-file` is added after Mousse's guidance.
 
-After connecting, select Claude Subscription and a Claude model in the composer. Agent turns use Claude Code's tools with permission checks bypassed (the equivalent of `--dangerously-skip-permissions`), so tool calls run without approval prompts; only calls Claude Code refuses to auto-approve even in that mode, and its own questions, are shown in the thread. Plan turns stay limited to read-only tools. Plan mode, streamed replies, cancellation and conversation continuity are supported. Claude Code owns its context window; Mousse does not display a fabricated context percentage. Native tool edits follow Claude Code's execution path, as with Antigravity, rather than Mousse's parsed action blocks.
+After connecting, select Claude Subscription and a Claude model in the composer. Agent turns run under the thread's [permission mode](#permission-modes). Full access is the former behavior: Claude Code's tools with permission checks bypassed (the equivalent of `--dangerously-skip-permissions`), so tool calls run without approval prompts; only calls Claude Code refuses to auto-approve even in that mode, and its own questions, are shown in the thread. Plan turns stay limited to read-only tools. Plan mode, streamed replies, cancellation and conversation continuity are supported. Claude Code owns its context window; Mousse does not display a fabricated context percentage. Native tool edits follow Claude Code's execution path, as with Antigravity, rather than Mousse's parsed action blocks.
 
 Account eligibility, usage limits and billing are managed by Claude. Consult [Claude's current subscription/SDK policy](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan) for changes. Disconnect turns Claude Code off in this profile and cancels its running provider work; the sign-in in your terminal is unchanged.
+
+## Permission modes
+
+Every thread has a permission mode: **Ask before acting** (commands and file edits ask), **Auto-accept edits** (edits go ahead, commands ask) or **Full access** (nothing asks). New threads start in the mode set in **Settings → General → Permissions** (default: Auto-accept edits). The composer shows and changes the thread's mode; a change applies from the next turn, the agent is told, and a running turn or a pending approval is not touched. A subagent never exceeds the narrowest mode of the threads it belongs to, and a fork starts in its source's mode.
+
+Each agent enforces the mode with its own controls:
+
+- **Claude Code:** Ask runs Claude Code's `default` mode, Auto-accept edits `acceptEdits`, Full access `bypassPermissions`. Under Ask and Auto-accept edits Mousse also asks before every command (`Bash` and `PowerShell`), and before every edit under Ask, whatever allow rules your own Claude Code settings hold. If your Claude Code settings set `permissions.disableBypassPermissionsMode` to `"disable"` (user, managed, or the project's `.claude/settings.json` and `settings.local.json`; a settings file passed with `--settings` is not read), Full access runs as Auto-accept edits and the composer says so. Mousse never edits your Claude configuration.
+- **Codex:** Ask runs `untrusted` approvals in the read-only sandbox, so every command that is not known to be safe and every patch asks. Full access is Codex's own full-access profile (`never` ask, sandbox off). Auto-accept edits is not offered yet: a thread set to it runs as Ask on Codex, and the composer says so. A rule in your Codex exec policy that prompts is rejected, not asked, under Full access (Codex behavior).
+- **Pi (both the Pi agent and the older Mousse loop):** commands (`bash`) ask under Ask and Auto-accept edits, edits (`edit`, `write`) ask under Ask; integrating a subagent's work asks unless the mode allows edits.
+- **Antigravity and other ACP agents:** the agent's own once-only permission options are asked or answered by the mode; its "always" and "session" options are not offered. An agent that approves tools itself (a generic ACP agent) runs only in Full access; a turn in another mode is refused with the fix named.
+
+Until approval requests are saved (the next change), an approval waits in memory for ten minutes and is lost if the daemon restarts.
 
 ## File format
 
 ```jsonc
 {
   "version": 1,
-  "settings": { /* profile, appearance, integrations */ },
+  "settings": { /* profile, appearance, permissions, integrations */ },
   "providers": { /* orchestrator LLM selection */ },
   "agents": { /* CLI agent defaults */ },
   "scheduled": { "enabled": true, "jobs": [ /* definitions */ ] },
@@ -147,16 +160,37 @@ Job **definitions** only. Runtime fields (`state`, `nextRunAt`, `runHistory`, �
 |-----|------|----------|-------------|
 | `id` | `string` (UUID) | yes | Stable job ID |
 | `name` | `string` | yes | Display name |
-| `prompt` | `string` | yes | Prompt sent to isolated orchestrator run |
-| `schedule` | `JobSchedule` | yes | `once`, `interval`, or cron-style schedule |
+| `prompt` | `string` | yes | Prompt each run sends as a turn; a prompt starting with `/` runs a workflow |
+| `schedule` | `JobSchedule` | yes | `once`, `interval`, cron-style, or `manual` (no clock: runs only when started) |
 | `enabled` | `boolean` | yes | Whether job is eligible to run |
-| `threadId` | `string` | no | Target thread |
-| `projectId` | `string` | no | Target project |
-| `createThread` | `boolean` | no | Create a new thread per run |
+| `threadId` | `string` | no | Run as a turn on this thread, with its history and its own workspace |
+| `projectId` | `string` | no | Project the run works in |
+| `createThread` | `boolean` | no | Kept for older jobs; every run already gets its own thread when no `threadId` is set |
+| `selection` | `{ instanceId, llmProvider, model }` | no | Provider instance and model of every run. Absent: the thread's own model (bound job) or the profile default (per-run thread) |
+| `mode` | `agent` \| `plan` | no | Mode of every run; default `agent` |
+| `workspace` | `{ kind: 'project' }` \| `{ kind: 'newWorktree' }` \| `{ kind: 'worktree', path }` | no | Per-run threads only. `project` (default) works on the project's own checkout and provisions nothing (see the warning below); `newWorktree` gives each run's thread its own worktree (needs a Git project, not `plan` mode); `worktree` runs on the thread that owns that worktree. A job bound to a thread uses that thread's workspace |
+| `createdBy` | `{ threadId, runId? }` | no | The agent that created the job; absent for jobs people create |
 | `repeat.times` | `number` | no | Stop after N successful runs |
 | `createdAt` / `updatedAt` | ISO string | yes | Metadata |
 
-**Runtime-only (not in `mousse.conf`):** `state`, `nextRunAt`, `lastRunAt`, `lastStatus`, `lastError`, `pausedAt`, `pausedReason`, `runHistory`, `repeat.completed`
+**Runtime-only (not in `mousse.conf`):** `state`, `nextRunAt`, `lastRunAt`, `lastStatus`, `lastError`, `pausedAt`, `pausedReason`, `runHistory`, `repeat.completed`, `pendingOccurrence`
+
+### How a run executes
+
+A plain-prompt run is a turn on a thread, admitted by the Run Engine like any message: the run is recorded first, then it starts at once when the thread is idle, or waits as one queue item when it is busy (a running turn, a peer process holding the thread, or a question waiting for an answer, which a scheduled run never answers). The run uses the job's model and mode whatever the thread's own selection is, and never changes the thread's saved model. The run record shows the model the run used, its thread and its run.
+
+- **One run at a time per job.** An occurrence stays outstanding until its run ends, so a job whose run is queued or still working is skipped by later ticks. Different jobs run concurrently.
+- **Run history states.** `queued` while the occurrence waits or runs elsewhere; then `ok`, `error`, `interrupted`, or `uncertain` (the run was cut off while a tool that cannot be repeated was working, so its effects may have happened).
+- **Restart.** The Run Engine owns recovery. A run the daemon had admitted but not started is started once by the engine's own recovery; a run that had started ends `interrupted` (or `uncertain`) and is never run again; an admission that can never start (the daemon stopped between recording the run and queueing it) ends `interrupted: never started`.
+- **Missed runs.** Occurrences missed while the daemon was down run once on the next tick.
+- **Per-run threads.** Each run without a `threadId` gets its own thread. A run on the project's checkout settles its thread when it succeeds (its reply is in the run history, and the thread stays reachable from there), and so does a `[SILENT]` run. A job with `workspace: newWorktree` keeps each run's thread open, because it holds that run's worktree, up to 10 open threads; settle or delete some, or bind the job to a thread.
+- **Bound threads.** A job with a `threadId` adds its prompt and the reply to that thread's history on every run, so a frequent job makes the thread's context grow and compact sooner. The prompt is marked as the job's (`scheduled` on the message), not as typed by a person.
+- **"Run now".** It starts the job at once. While the job's run is in progress or waiting in a queue, it is refused with a message instead of being dropped.
+- **Catch-up.** After the daemon was down, overdue jobs start a few at a time (3 per tick, then the next tick follows within seconds), not all in one second.
+- **Questions and approvals.** A scheduled turn asks for tool approval and questions like any turn. Nobody is likely watching a per-run thread, so a question or approval waits for its timeout (10 minutes; up to an hour for `ask_user`) and is then denied; a person's message on a bound thread dismisses it and stops the run. The job's occurrence and the thread stay held for that time. A scheduled turn has no time limit of its own yet.
+
+> **Warning: `workspace: project` lets an unattended agent edit your own checkout.** The run works in the same folder you work in, with no worktree, no checkpoints and no undo, and two jobs on one project can edit it at the same time. For an agent-mode job in a Git project, use `newWorktree` (`--workspace new-worktree`), or `mode: plan` if the job should not change files.
+- **`manual` jobs.** They have no next run and never complete; "Run now" starts them.
 
 Other scheduled files (unchanged):
 

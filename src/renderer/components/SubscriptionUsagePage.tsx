@@ -66,6 +66,11 @@ export function SubscriptionUsagePage({ onClose }: { onClose: () => void }) {
             )
           })}
           {provider.message && <p className="usage-message">{provider.message}</p>}
+          {provider.manageUrl && (
+            <button type="button" className="settings-btn usage-manage" onClick={() => void window.mousse.providers.openLoginUrl(provider.manageUrl!)}>
+              Manage usage
+            </button>
+          )}
         </div>)}
     </div>
   </section>

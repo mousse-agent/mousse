@@ -56,6 +56,36 @@ describe('Devices loading', () => {
     expect(result.nodes).toHaveLength(1)
   })
 
+  it('keeps what add-on actions changed when the build has no Mousse ID service', async () => {
+    const record = { action: 'serve', appliedAt: 1, record: { servePort: 47890, port: 47891, state: 'applied' } }
+    stub({
+      ...ready,
+      'net.transport.list': async () => ({
+        manifests: [{ id: 'tailscale' }, { id: 'plus-relay' }],
+        records: { tailscale: record },
+        settings: { tailscale: { binary: '/opt/tailscale' } }
+      })
+    })
+    const result = await readDevices(false)
+    expect(result.addons.manifests.map((row) => row.id)).toEqual(['tailscale'])
+    expect(result.addons.records).toEqual({ tailscale: record })
+    expect(result.addons.settings).toEqual({ tailscale: { binary: '/opt/tailscale' } })
+  })
+
+  it('still lists what add-on actions changed while networking is off', async () => {
+    const record = { action: 'serve', appliedAt: 1, record: { servePort: 47890, port: 47891, state: 'applied' } }
+    stub({
+      'net.status': async () => ({ enabled: false, routes: [], peers: [] }),
+      'net.transport.list': async () => ({ manifests: [{ id: 'tailscale' }], records: { tailscale: record } })
+    })
+    expect((await readDevices(false)).addons.records).toEqual({ tailscale: record })
+  })
+
+  it('shows no add-on changes when the service cannot list them while networking is off', async () => {
+    stub({ 'net.status': async () => ({ enabled: false, routes: [], peers: [] }) })
+    expect((await readDevices(false)).addons).toEqual({ manifests: [], records: {}, settings: {} })
+  })
+
   it('returns Mousse ID status when the service is set', async () => {
     stub({ ...ready, 'net.plus.status': async () => ({ configured: true, connected: true }) })
     expect((await readDevices(true)).hosted).toEqual({ configured: true, connected: true })

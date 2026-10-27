@@ -33,9 +33,7 @@ export async function runPiOneShot(models: PiOneShotModels, providerId: string, 
   const reasoning = (spec.effort ?? effort ?? 'off') as ThinkingLevel
   const options = getReasoningStreamOptions(model.api, reasoning, signal, getCacheSessionId(spec.sessionKey), providerId)
   spec.onActivity()
-  const stream = model.api === 'openai-codex-responses'
-    ? models.stream(model, context, options)
-    : models.streamSimple(model, context, options as { reasoning: ThinkingLevel })
+  const stream = models.streamSimple(model, context, options as { reasoning: ThinkingLevel })
   const message = await consumeAssistantStream(stream, {}, { signal, onProgress: () => spec.onActivity() })
   assertAssistantResponseSucceeded(message)
   return { text: message.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('') }

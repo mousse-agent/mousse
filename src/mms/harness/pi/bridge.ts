@@ -4,6 +4,8 @@ import type { AddressInfo, Socket } from 'node:net'
 import type {
   PiBridgeAddress,
   PiCatalogResponse,
+  PiCredentialRequest,
+  PiCredentialResponse,
   PiFatalRequest,
   PiGroupRequest,
   PiGateRequest,
@@ -13,6 +15,7 @@ import type {
   PiReadyRequest,
   PiRequestRequest,
   PiRequestResponse,
+  PiSettleRequest,
   PiTurnResponse
 } from './extension/protocol'
 
@@ -30,11 +33,15 @@ export interface PiBridgeHandlers {
   gate(request: PiGateRequest): Promise<PiGateResponse>
   /** One model request about to be sent: charged to the live turn, or refused. */
   request(request: PiRequestRequest): Promise<PiRequestResponse>
+  /** A reserved request ended: its reservation is settled or released. */
+  settle(request: PiSettleRequest): void
   /** Settles when the request's delegation may run; `signal` aborts when the extension gave up. */
   quiesce(request: PiQuiesceRequest, signal: AbortSignal): Promise<PiQuiesceResponse>
   fatal(request: PiFatalRequest): void
   /** Records a shell's group; resolves once recorded (the command runs only then). */
   group?(request: PiGroupRequest): Promise<void>
+  /** An OAuth provider's refresh; a throw is answered with no detail (the extension raises a fixed text). */
+  credential?(request: PiCredentialRequest): Promise<PiCredentialResponse>
 }
 
 export interface PiBridgeRegistration {
@@ -154,6 +161,9 @@ export class PiBridge {
         return this.reply(res, 200, await handlers.gate(body as unknown as PiGateRequest))
       case 'request':
         return this.reply(res, 200, await handlers.request(body as unknown as PiRequestRequest))
+      case 'settle':
+        handlers.settle(body as unknown as PiSettleRequest)
+        return this.reply(res, 200, {})
       case 'quiesce': {
         const aborted = new AbortController()
         res.on('close', () => {
@@ -165,6 +175,12 @@ export class PiBridge {
         if (!handlers.group) return this.reply(res, 404, { error: 'not found' })
         await handlers.group(body as unknown as PiGroupRequest)
         return this.reply(res, 200, {})
+      case 'credential': {
+        if (!handlers.credential) return this.reply(res, 404, { error: 'not found' })
+        // Never the reason: it may carry upstream text or credential material.
+        const answer = await handlers.credential(body as unknown as PiCredentialRequest).catch(() => undefined)
+        return answer ? this.reply(res, 200, answer) : this.reply(res, 403, { error: 'credential_unavailable' })
+      }
       case 'fatal':
         handlers.fatal(body as unknown as PiFatalRequest)
         return this.reply(res, 200, {})

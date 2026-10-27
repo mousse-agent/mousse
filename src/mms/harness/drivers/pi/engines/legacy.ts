@@ -1,10 +1,12 @@
 import { harnessAppError, type HarnessCaps } from '../../../../../shared/harness/types'
+import type { CredentialKind } from '../../../../../shared/harness/status'
 import type { ConfiguredProvider } from '../../../../../shared/providerAuth'
 import type { LlmProviderOption } from '../../../../../shared/settings'
 import type { ProviderAuthService } from '../../../../providers/ProviderAuthService'
 import { PI_LOOP_CAPABILITIES } from '../../../../run/adapters/pi/PiLoopAdapter'
 import type { ProviderAdapter } from '../../../../run/adapters/ProviderAdapter'
 import type { DriverRuntime } from '../../../driver'
+import { PI_AMBIENT_MARKER, piAmbientProvider } from '../../../pi/envKeys'
 import { runPiOneShot } from '../oneShot'
 
 /** Mousse measures the pi loop's transcript itself and offers Plan mode on it. */
@@ -16,7 +18,11 @@ export const PI_LEGACY_CAPS: HarnessCaps = Object.freeze({
   toolControl: 'exact',
   // Spend is counted after each response; nothing refuses the next request yet.
   budgets: 'observed',
-  spendLimits: 'unsupported'
+  spendLimits: 'unsupported',
+  // A definition's loop runs here under its own limits (`TrustedAgentExecutionOptions`) until PR 4
+  // unit 4d-rpc moves definitions to Pi RPC; 4h then deletes this with the loop. Counts
+  // before each request and tool call, tokens and cost after each response, as always.
+  definitionLimits: 'in_loop'
 })
 
 export type PiCredentials = Partial<Pick<ProviderAuthService,
@@ -39,6 +45,23 @@ export function piInstanceRuntime(instanceId: string, providerId: string, creden
       return false
     }
   }
+  /**
+   * What a signed-in instance runs on, by its stored credential: a subscription sign-in, the
+   * environment's cloud credentials (only Bedrock's or Vertex's ambient marker), or a key. A real key
+   * saved for Bedrock or Vertex is a key; a stored credential that cannot be read is `unknown`.
+   */
+  const piCredential = (provider: ConfiguredProvider | undefined): CredentialKind => {
+    if (provider?.authType === 'oauth') return 'subscription'
+    if (!piAmbientProvider(providerId)) return 'api_key'
+    let key: string | undefined
+    try {
+      key = credentials()?.storedApiKey?.(providerId)
+    } catch {
+      return 'unknown'
+    }
+    if (key === undefined) return 'unknown'
+    return key === PI_AMBIENT_MARKER ? 'ambient' : 'api_key'
+  }
   return {
     adapter,
     configured: signedIn,
@@ -47,9 +70,8 @@ export function piInstanceRuntime(instanceId: string, providerId: string, creden
     models: () => llmProvider()?.models ?? [],
     auth: async () => {
       const provider = configuredProvider()
-      return signedIn()
-        ? { state: 'signed_in', methodLabel: provider?.authType === 'api_key' ? 'API key' : provider?.source ?? 'Sign-in' }
-        : { state: 'signed_out', methodLabel: 'API key or sign-in' }
+      if (!signedIn()) return { state: 'signed_out', methodLabel: 'API key or sign-in' }
+      return { state: 'signed_in', methodLabel: provider?.authType === 'api_key' ? 'API key' : provider?.source ?? 'Sign-in', credential: piCredential(provider) }
     },
     refreshModels: async () => void (await credentials()?.refreshDynamicModels?.()),
     signIn: async (session, _cwd, method) => {

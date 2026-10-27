@@ -8,7 +8,7 @@ import { CHAT_NETWORK_METHODS } from '../../shared/chatsNetwork'
 import { NET_LOCAL_METHODS } from '../../shared/net/local'
 import { BRIDGE_HUB_LOCAL_METHODS } from '../../shared/bridge/types'
 import { SPACES_LOCAL_METHODS } from '../../shared/spaces/local'
-import { BOTS_LOCAL_METHODS } from '../../shared/bots/local'
+import { BOTS_LOCAL_METHODS } from '../../shared/bots/space/local'
 import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
 /**
  * Phase 3 GUI IPC: protocol-backed agent-chat/project/thread/queue + Electron-local UI.
@@ -99,12 +99,14 @@ import type {
   GitCheckoutOptions,
   GitCommitOptions,
   GitDeleteBranchOptions,
+  GitFetchOptions,
   GitPullOptions,
   GitPushOptions,
   GitScope,
   MainView,
   OrchestratorContextUsageInput,
   OrchestratorSendInput,
+  PermissionMode,
   ScheduledJob,
   ThreadActivitySnapshot,
   Thread,
@@ -120,8 +122,13 @@ import type {
   PullRequestDetail,
   PullRequestDraft,
   PullRequestFormInput,
+  PullRequestListItem,
+  PullRequestPushTarget,
   PullRequestRef,
-  PullRequestScope
+  PullRequestScope,
+  ResolvedPullRequestSummary,
+  StartPullRequestThreadInput,
+  StartPullRequestThreadResult
 } from '../../shared/pullRequests'
 import { visibleThreads } from '../../shared/threadLineage'
 import type { ProviderLoginResponse } from '../../shared/providerAuth'
@@ -698,6 +705,8 @@ export function registerGuiIpc(
       return
     }
     if (event.type === 'bridge.hub.thread') win.webContents.send('bridge:thread-part', event.data)
+    // Live output of a Git action: the daemon sent it on this window's own connection, so only this window gets it.
+    if (event.type === 'git.operation') win.webContents.send('git:operation', (event.data as { event?: unknown } | null)?.event)
   })
   guiMms.on('window-event', ({ senderId, event, replay }: { senderId: number; event: ProtocolEvent; replay?: boolean }) => {
     const win = BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.id === senderId)
@@ -1047,6 +1056,15 @@ export function registerGuiIpc(
   )
   registerStorageHandler('threads:inventory', async (_e, threadId?: string) => guiMms.request('threads.inventory', { threadId }))
   registerStorageHandler('threads:configureTrash', async (_e, policy: { graceDays: number; automaticPurge: boolean }) => guiMms.request('threads.configureTrash', policy))
+  registerStorageHandler('storage:policy', async () => guiMms.request('storage.policy', {}))
+  registerStorageHandler('storage:configure', async (_e, policy: unknown) => guiMms.request('storage.configure', { policy }))
+  // A run may purge large trees; it must not hit the 60 s default.
+  registerStorageHandler('storage:cleanupRun', async () => guiMms.request('storage.cleanup.run', {}, 15 * 60_000))
+  registerStorageHandler('storage:cleanupLastReport', async () => guiMms.request('storage.cleanup.lastReport', {}))
+  // The first call on a profile measures it, which can take most of the scan budget.
+  registerStorageHandler('storage:usage', async (_e, options?: { refresh?: boolean }) =>
+    guiMms.request('storage.usage', options?.refresh === true ? { refresh: true } : {}, 120_000)
+  )
 
   registerHandler('projects:list', async () => {
     const res = await guiMms.request<{ projects: unknown[] }>('projects.list')
@@ -1308,6 +1326,14 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(
       'threads.setWorktreeEnabled',
       { threadId, enabled }
+    )
+    broadcast('threads:updated', res.threads)
+    return res.thread
+  })
+  registerHandler('threads:setPermissionMode', async (_e, threadId: string, mode: PermissionMode) => {
+    const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(
+      'threads.setPermissionMode',
+      { threadId, mode }
     )
     broadcast('threads:updated', res.threads)
     return res.thread
@@ -1882,21 +1908,25 @@ export function registerGuiIpc(
       guiMms.request(method, daemonGitParams(scope, toArgs(...(args as A))))
     )
   }
-  gitMutation('git:checkout', 'git.checkout', (branch: string, options?: GitCheckoutOptions) => ({ branch, dirty: options?.dirty }))
-  gitMutation('git:commit', 'git.commit', (message: string, options?: GitCommitOptions) => ({ message, amend: options?.amend, expectedBranch: options?.expectedBranch }))
+  gitMutation('git:checkout', 'git.checkout', (branch: string, options?: GitCheckoutOptions) => ({ branch, dirty: options?.dirty, operationId: options?.operationId }))
+  gitMutation('git:commit', 'git.commit', (message: string, options?: GitCommitOptions) => ({ message, amend: options?.amend, expectedBranch: options?.expectedBranch, operationId: options?.operationId }))
   // A proposal, not a mutation, but it names its folder like one and its error codes (no title model) reach the renderer.
   gitMutation('git:suggestCommitMessage', 'git.suggestCommitMessage', (options?: { expectedBranch?: string }) => ({ expectedBranch: options?.expectedBranch }))
-  gitMutation('git:push', 'git.push', (options?: GitPushOptions) => ({ expectedBranch: options?.expectedBranch }))
+  gitMutation('git:push', 'git.push', (options?: GitPushOptions) => ({ expectedBranch: options?.expectedBranch, operationId: options?.operationId }))
   gitMutation('git:init', 'git.init')
   gitMutation('git:stage', 'git.stage', (input: { paths?: string[]; all?: boolean }) => ({ paths: input?.paths, all: input?.all }))
   gitMutation('git:unstage', 'git.unstage', (input: { paths?: string[]; all?: boolean }) => ({ paths: input?.paths, all: input?.all }))
   gitMutation('git:discard', 'git.discard', (paths: string[]) => ({ paths }))
-  gitMutation('git:fetch', 'git.fetch')
-  gitMutation('git:pull', 'git.pull', (options?: GitPullOptions) => ({ strategy: options?.strategy }))
+  gitMutation('git:fetch', 'git.fetch', (options?: GitFetchOptions) => ({ operationId: options?.operationId }))
+  gitMutation('git:pull', 'git.pull', (options?: GitPullOptions) => ({ strategy: options?.strategy, operationId: options?.operationId }))
   gitMutation('git:abortInProgress', 'git.abortInProgress', (kind: 'merge' | 'rebase') => ({ kind }))
   gitMutation('git:createBranch', 'git.createBranch', (name: string, options?: GitBranchOptions) => ({ name, from: options?.from, checkout: options?.checkout }))
   gitMutation('git:renameBranch', 'git.renameBranch', (name: string, newName: string) => ({ name, newName }))
   gitMutation('git:deleteBranch', 'git.deleteBranch', (name: string, options?: GitDeleteBranchOptions) => ({ name, force: options?.force }))
+  // The daemon only stops an action for the window connection that started it, which is this sender's.
+  registerStorageHandler('git:cancelOperation', async (_e, operationId: string) =>
+    guiMms.request<{ cancelled: boolean }>('git.cancelOperation', { operationId })
+  )
   registerHandler('git:lastCommitMessage', async (_e, projectId?: string, cwd?: string) =>
     gitService.lastCommitMessage(await resolveGitCwd(projectId, cwd))
   )
@@ -1941,6 +1971,31 @@ export function registerGuiIpc(
       ...(typeof ref?.projectId === 'string' ? { projectId: ref.projectId } : {})
     })
     return response.baseBranches
+  })
+  registerStorageHandler('pullRequests:list', async (_e, projectId: string, force?: boolean) => {
+    const response = await guiMms.request<{ pullRequests: PullRequestListItem[] }>('pullRequests.list', {
+      projectId,
+      ...(force === true ? { force } : {})
+    })
+    return response.pullRequests
+  })
+  // The daemon's refusals (wrong repository, closed, already has a thread) carry codes the dialog words itself.
+  registerStorageHandler('pullRequests:resolve', async (_e, projectId: string, reference: string) =>
+    guiMms.request<ResolvedPullRequestSummary>('pullRequests.resolve', { projectId, reference })
+  )
+  registerStorageHandler('pullRequests:startThread', async (_e, input: StartPullRequestThreadInput) => {
+    // The window opens the thread and fills its composer; sending the seed is for clients that have no composer.
+    const response = await guiMms.request<StartPullRequestThreadResult & { thread: Thread; threads: Thread[] }>('pullRequests.startThread', {
+      projectId: input?.projectId,
+      reference: input?.reference,
+      ...(input?.allowClosed === true ? { allowClosed: true } : {}),
+      ...(input?.allowDuplicate === true ? { allowDuplicate: true } : {})
+    })
+    return { thread: response.thread, seed: response.seed, headSha: response.headSha, headMoved: response.headMoved, sent: response.sent, withheld: response.withheld }
+  })
+  registerHandler('pullRequests:pushTarget', async (_e, threadId: string) => {
+    const response = await guiMms.request<{ target: PullRequestPushTarget }>('pullRequests.pushTarget', { threadId })
+    return response.target
   })
   registerHandler('editors:list', async (_e, options?: { refresh?: boolean }) =>
     listEditors(options)

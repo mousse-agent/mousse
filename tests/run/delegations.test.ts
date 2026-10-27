@@ -40,6 +40,53 @@ describe('Delegations (SPEC §14.1)', () => {
     expect(logged.map((event) => (event.payload as DelegationRecord).status)).toEqual(['running'])
   })
 
+  describe('agent access level (SPEC §15.1)', () => {
+    it('stores the level a delegation grants its child, and a delegation that grants none reads back as null', () => {
+      f = delegationFixture()
+      const delegations = new Delegations(f.store, f.engine.inbox)
+      const create = (childThreadId: string, accessLevel?: 'lineage' | 'read' | 'manage' | null) => {
+        const child = f!.store.createRun({ threadId: childThreadId, source: 'delegation' })
+        delegations.createLineage({ threadId: childThreadId, parentThreadId: 'parent', parentRunId: 'run-p', relationship: 'subagent' })
+        return delegations.create({ parentRunId: 'run-p', parentThreadId: 'parent', childThreadId, childRunId: child.runId, prompt: 'x', wake: 'always', ...(accessLevel !== undefined ? { accessLevel } : {}) })
+      }
+      const read = create('c-read', 'read')
+      const manage = create('c-manage', 'manage')
+      const none = create('c-none')
+      expect([read.accessLevel, manage.accessLevel, none.accessLevel]).toEqual(['read', 'manage', null])
+      expect(delegations.get(read.delegationId)!.accessLevel).toBe('read')
+      expect(delegations.listForChildThread('c-manage')[0].accessLevel).toBe('manage')
+      expect(delegations.get(none.delegationId)!.accessLevel).toBeNull()
+      // The row is what the next turn's grant is computed from: it is logged with the delegation event.
+      const logged = f.store.listEvents('parent').filter((event) => event.type === 'delegation.status').map((event) => (event.payload as DelegationRecord).accessLevel)
+      expect(logged).toEqual(['read', 'manage', null])
+    })
+
+    it('a value outside the three levels is never stored, and one read back from a damaged row is null', () => {
+      f = delegationFixture()
+      const delegations = new Delegations(f.store, f.engine.inbox)
+      const child = f.store.createRun({ threadId: 'child', source: 'delegation' })
+      delegations.createLineage({ threadId: 'child', parentThreadId: 'parent', parentRunId: 'run-p', relationship: 'subagent' })
+      expect(() => delegations.create({ parentRunId: 'run-p', parentThreadId: 'parent', childThreadId: 'child', childRunId: child.runId, prompt: 'x', wake: 'always', accessLevel: 'root' as never })).toThrow()
+      const ok = delegations.create({ parentRunId: 'run-p', parentThreadId: 'parent', childThreadId: 'child', childRunId: child.runId, prompt: 'x', wake: 'always', accessLevel: 'read' })
+      f.db.database.exec('PRAGMA ignore_check_constraints = ON')
+      f.db.database.prepare("UPDATE delegations SET access_level = 'root' WHERE delegation_id = ?").run(ok.delegationId)
+      f.db.database.exec('PRAGMA ignore_check_constraints = OFF')
+      expect(delegations.get(ok.delegationId)!.accessLevel).toBeNull()
+    })
+
+    it('survives a reopen of the database', () => {
+      f = delegationFixture()
+      const home = f.profileHome
+      const delegations = new Delegations(f.store, f.engine.inbox)
+      const child = f.store.createRun({ threadId: 'child', source: 'delegation' })
+      delegations.createLineage({ threadId: 'child', parentThreadId: 'parent', parentRunId: 'run-p', relationship: 'subagent' })
+      const made = delegations.create({ parentRunId: 'run-p', parentThreadId: 'parent', childThreadId: 'child', childRunId: child.runId, prompt: 'x', wake: 'always', accessLevel: 'manage' })
+      f.dispose(true)
+      f = delegationFixture({ profileHome: home })
+      expect(new Delegations(f.store, f.engine.inbox).get(made.delegationId)!.accessLevel).toBe('manage')
+    })
+  })
+
   it('changes status by compare-and-set on the previous status', () => {
     const { delegations, delegation } = seeded()
     const id = delegation.delegationId

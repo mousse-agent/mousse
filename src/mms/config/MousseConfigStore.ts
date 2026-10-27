@@ -75,7 +75,9 @@ function splitSettings(full: MousseSettings): {
       appearance: full.appearance,
       notifications: full.notifications,
       shortcuts: full.shortcuts,
+      permissions: full.permissions,
       context: full.context,
+      agentAccess: full.agentAccess,
       integrations: full.integrations,
       title: full.title
     },
@@ -106,6 +108,11 @@ function jobToDefinition(job: ScheduledJob): ScheduledJobDefinition {
     threadId: job.threadId,
     projectId: job.projectId,
     createThread: job.createThread,
+    selection: job.selection,
+    mode: job.mode,
+    workspace: job.workspace,
+    createdBy: job.createdBy,
+    accessCap: job.accessCap,
     repeat: job.repeat?.times
       ? { times: job.repeat.times, completed: job.repeat.completed }
       : undefined,
@@ -516,18 +523,24 @@ export class MousseConfigStore {
       partial.appearance ||
       partial.notifications ||
       partial.shortcuts ||
+      partial.permissions ||
       partial.context ||
+      partial.agentAccess ||
       partial.integrations ||
       partial.title
     ) {
       this.updateSettingsSection({
         ...(partial.context ? { context: partial.context as MousseSettingsSection['context'] } : {}),
+        ...(partial.agentAccess ? { agentAccess: partial.agentAccess as MousseSettingsSection['agentAccess'] } : {}),
         ...(partial.profile ? { profile: partial.profile as MousseSettingsSection['profile'] } : {}),
         ...(partial.appearance
           ? { appearance: partial.appearance as MousseSettingsSection['appearance'] }
           : {}),
         ...(partial.notifications
           ? { notifications: partial.notifications as MousseSettingsSection['notifications'] }
+          : {}),
+        ...(partial.permissions
+          ? { permissions: partial.permissions as MousseSettingsSection['permissions'] }
           : {}),
         ...(partial.integrations
           ? { integrations: partial.integrations as MousseSettingsSection['integrations'] }

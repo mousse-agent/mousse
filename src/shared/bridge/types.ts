@@ -139,6 +139,7 @@ export interface BridgeRemoteParams {
     threadId: string
     requestId: string
   }
+  'storage.usage': Record<string, never>
   'bridge.thread.open': {
     threadId: string
   }
@@ -194,7 +195,8 @@ export const BRIDGE_HUB_LOCAL_METHODS = [
   'bridge.hub.dispatch',
   'bridge.hub.result',
   'bridge.hub.cancel',
-  'bridge.hub.requests'
+  'bridge.hub.requests',
+  'bridge.hub.storage'
 ] as const
 export type BridgeHubLocalMethod = (typeof BRIDGE_HUB_LOCAL_METHODS)[number]
 /** Trusted local ingress uses the already authenticated network capability. */
@@ -287,6 +289,9 @@ export interface BridgeHubLocalParams {
   }
   'bridge.hub.requests': {
     target?: NodeId
+  }
+  'bridge.hub.storage': {
+    target: NodeId
   }
 }
 export type BridgeHubThreadEvent = import('./display').BridgeDisplayPart

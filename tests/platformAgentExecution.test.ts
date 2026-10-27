@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { AssistantMessage, Context } from '@earendil-works/pi-ai'
 import { getDefaultSettings } from '../src/shared/settings'
-import { AgentDefinitionError } from '../src/shared/agents/errors'
 import { defaultAgentSettings } from '../src/shared/agents/defaults'
 import type { ResolvedAgentDefinition } from '../src/shared/agents/types'
 import { AgentExecutionService } from '../src/mms/agentDefinitions/AgentExecutionService'
@@ -93,7 +92,7 @@ function nativeClient(outputs: AssistantMessage[], captured: Context[]) {
 describe('AgentExecutionService', () => {
   it('keeps definition instructions in the system channel and forwards the immutable execution scope', async () => {
     const run = vi.fn(async (input) => ({ text: 'done', usage: { totalTokens: 7 }, history: [] }))
-    const service = new AgentExecutionService({ native: { run } })
+    const service = new AgentExecutionService({ runtime: { run } })
     const result = await service.run({
       profileId: 'profile-1',
       resolved: resolved(),
@@ -121,7 +120,7 @@ describe('AgentExecutionService', () => {
 
   it('rejects cross-profile snapshots before invoking a runtime', async () => {
     const run = vi.fn()
-    const service = new AgentExecutionService({ native: { run } })
+    const service = new AgentExecutionService({ runtime: { run } })
     await expect(service.run({
       profileId: 'profile-other', resolved: resolved(), threadId: 'thread-1', input: 'run'
     })).rejects.toMatchObject({ code: 'PROFILE_MISMATCH' })
@@ -136,21 +135,27 @@ describe('AgentExecutionService', () => {
       })
       return { text: 'unreachable' }
     })
-    const service = new AgentExecutionService({ native: { run } })
+    const service = new AgentExecutionService({ runtime: { run } })
     const pending = service.run({ profileId: 'profile-1', resolved: resolved(), threadId: 't', input: 'wait', signal: controller.signal })
     controller.abort()
     await expect(pending).resolves.toMatchObject({ status: 'cancelled', error: { code: 'ABORTED' } })
   })
 
-  it('refuses a CLI-kind definition, since only the native runtime executes definitions', async () => {
-    const run = vi.fn()
-    const service = new AgentExecutionService({ native: { run } })
-    const refused = service.run({
+  it('sends a CLI-kind definition to the same runtime, held to the same policy (PR 4 §6)', async () => {
+    const run = vi.fn(async () => ({ text: 'ran' }))
+    const service = new AgentExecutionService({ runtime: { run } })
+    const result = await service.run({
       profileId: 'profile-1', resolved: resolved({ runtimeKind: 'codex' }), threadId: 'thread-cli', input: 'fixture input'
     })
-    await expect(refused).rejects.toBeInstanceOf(AgentDefinitionError)
-    await expect(refused).rejects.toMatchObject({ code: 'SETTINGS_UNSUPPORTED', details: { runtimeKind: 'codex' } })
-    expect(run).not.toHaveBeenCalled()
+    expect(result).toMatchObject({ status: 'completed', text: 'ran', runtimeKind: 'codex' })
+    expect(run).toHaveBeenCalledOnce()
+    expect(run.mock.calls[0]![0]).toMatchObject({ runtimeKind: 'codex', policy: { workspace: { mode: expect.any(String) } } })
+  })
+
+  it('refuses a run when no runtime is bound', async () => {
+    await expect(new AgentExecutionService({}).run({
+      profileId: 'profile-1', resolved: resolved({ runtimeKind: 'codex' }), threadId: 'thread-cli', input: 'fixture input'
+    })).rejects.toMatchObject({ code: 'SETTINGS_UNSUPPORTED' })
   })
 
   it('binds native integration discovery and calls to the exact resolved grants', async () => {
@@ -182,7 +187,7 @@ describe('AgentExecutionService', () => {
     ], captured)
     const snapshot = resolved()
     snapshot.settings.limits.maxCostUsd = 0.05
-    const result = await new AgentExecutionService({ native: createNativeAgentRuntime(llm) }).run({
+    const result = await new AgentExecutionService({ runtime: createNativeAgentRuntime(llm) }).run({
       profileId: 'profile-1', resolved: snapshot, threadId: 'thread-cost', projectPath: process.cwd(), input: 'inspect'
     })
     expect(result).toMatchObject({
@@ -202,7 +207,7 @@ describe('AgentExecutionService', () => {
       .mockResolvedValueOnce({ text: 'not json' })
       .mockResolvedValueOnce({ text: '{"other":true}' })
       .mockResolvedValueOnce({ text: '{"verdict":"pass"}' })
-    const service = new AgentExecutionService({ native: { run } })
+    const service = new AgentExecutionService({ runtime: { run } })
     const request = { profileId: 'profile-1', resolved: snapshot, threadId: 'structured', input: 'inspect' }
     await expect(service.run(request)).resolves.toMatchObject({ status: 'failed', error: { code: 'OUTPUT_INVALID', message: expect.stringContaining('valid JSON') } })
     await expect(service.run(request)).resolves.toMatchObject({ status: 'failed', error: { code: 'OUTPUT_INVALID', message: expect.stringContaining('required property') } })
@@ -220,7 +225,7 @@ describe('AgentExecutionService', () => {
     const snapshot = resolved()
     snapshot.grants.builtinTools = [{ id: 'read', source: 'explicit' }]
     snapshot.settings.limits.maxToolCalls = 4
-    const result = await new AgentExecutionService({ native }).run({
+    const result = await new AgentExecutionService({ runtime: native }).run({
       profileId: 'profile-1', resolved: snapshot, threadId: 'thread-native', projectPath: process.cwd(), input: 'inspect'
     })
     expect(result.status).toBe('completed')
@@ -240,7 +245,7 @@ describe('AgentExecutionService', () => {
     ], captured)
     const snapshot = resolved()
     snapshot.settings.limits.maxToolCalls = 0
-    const result = await new AgentExecutionService({ native: createNativeAgentRuntime(llm) }).run({
+    const result = await new AgentExecutionService({ runtime: createNativeAgentRuntime(llm) }).run({
       profileId: 'profile-1', resolved: snapshot, threadId: 'thread-budget', projectPath: process.cwd(), input: 'inspect'
     })
     expect(result.status).toBe('failed')
@@ -269,7 +274,7 @@ describe('AgentExecutionService', () => {
       { has: () => true, credentials: { listProviderIds: () => ['fixture-provider'] }, models } as never
     )
     const controller = new AbortController()
-    const pending = new AgentExecutionService({ native: createNativeAgentRuntime(llm) }).run({
+    const pending = new AgentExecutionService({ runtime: createNativeAgentRuntime(llm) }).run({
       profileId: 'profile-1', resolved: resolved(), threadId: 'thread-cancel', input: 'wait', signal: controller.signal
     })
     await vi.waitFor(() => expect(signals).toHaveLength(1))

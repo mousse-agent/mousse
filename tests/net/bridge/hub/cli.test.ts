@@ -154,7 +154,8 @@ it('validates every Hub local method using exact typed DTOs, including malformed
     'bridge.hub.detach': { ref },
     'bridge.hub.result': { id: run },
     'bridge.hub.cancel': { id: run },
-    'bridge.hub.requests': {}
+    'bridge.hub.requests': {},
+    'bridge.hub.storage': { target }
   }
   for (const [method, value] of Object.entries(valid)) {
     expect(validateBridgeHubLocal(method as any, value)).toEqual(value)

@@ -171,7 +171,7 @@ describe('sync actions', () => {
       { phase: 'running', action: 'fetch' },
       { phase: 'done', action: 'fetch', message: 'Fetched: 2 new commits' }
     ])
-    expect(git.fetch).toHaveBeenCalledWith(project)
+    expect(git.fetch).toHaveBeenCalledWith(project, { operationId: expect.any(String) })
     expect(git.status).toHaveBeenCalledTimes(2)
   })
 
@@ -186,7 +186,7 @@ describe('sync actions', () => {
       { phase: 'running', action: 'pull' },
       { phase: 'done', action: 'pull', message: 'Pulled: merged' }
     ])
-    expect(git.pull).toHaveBeenCalledWith(project, { strategy: 'merge' })
+    expect(git.pull).toHaveBeenCalledWith(project, { strategy: 'merge', operationId: expect.any(String) })
   })
 
   it('a pull that stops on conflicts is reported as done, with what to do next, and the folder is refreshed to show them', async () => {
@@ -248,6 +248,6 @@ describe('sync actions', () => {
   it('fetches in a thread worktree with the thread scope, so the daemon applies its rules', async () => {
     const { git } = install()
     await run({ action: 'fetch' }, thread)
-    expect(git.fetch).toHaveBeenCalledWith(thread)
+    expect(git.fetch).toHaveBeenCalledWith(thread, { operationId: expect.any(String) })
   })
 })

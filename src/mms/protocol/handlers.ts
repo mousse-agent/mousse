@@ -3,9 +3,12 @@ import { validateAppletAppearance } from '../../shared/appletAppearance'
 import { appletJsonBytes, APPLET_STATE_LIMIT } from '../../shared/applets'
 import { ConversationActionService } from '../actions/ConversationActionService'
 import { assertHeldThreadLease, withGitMutationLocks } from '../actions/GitOperationCoordinator'
-import { tryAcquireExecutionLease, heartbeatExecutionLease, releaseExecutionLeaseHandle } from '../queue/ThreadExecutionLease'
+import { tryAcquireExecutionLease, heartbeatExecutionLease, releaseExecutionLeaseHandle, getExecutionLeasePath, leaseBusyMessage, readLeaseOwner } from '../queue/ThreadExecutionLease'
+import { clearCleanupMarker, readCleanupMarker } from '../lifecycle/StorageCleanupService'
 import { enableVersionedLifecycleWriter } from '../queue/ThreadLifecycleAdmission'
 import { assertEpisodePath } from '../agents/WorkspaceAccessPolicy'
+import { isPermissionMode, PERMISSION_MODES } from '../../shared/permissionMode'
+import type { Answerer } from '../run/approvalRights'
 import { buildResourceInventory } from '../lifecycle/ResourceInventory'
 import { assertLifecyclePath } from '../lifecycle/ResourceLifecycleStore'
 /**
@@ -24,10 +27,12 @@ import { PROVIDER_STT_MAX_BYTES } from '../../shared/dictation'
 import { PROVIDER_TTS_MAX_CHARS } from '../../shared/readAloud'
 import type { ExternalEffect, ThreadAction } from '../../shared/threadActions'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
-import type { GitPullRequestInfo, PullRequestDetail, RepositoryIdentity, ThreadPullRequestLink } from '../../shared/pullRequests'
+import type { GitPullRequestInfo, PullRequestDetail, PullRequestPushTarget, RepositoryIdentity, ThreadPullRequestLink } from '../../shared/pullRequests'
 import { PULL_REQUEST_EXISTS, PullRequestReadError } from '../git/GitHubCodeHost'
-import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest } from '../../shared/types'
-import { createErrorProvider } from '../../shared/errors'
+import { PullRequestThreadError, PullRequestThreadService } from '../git/PullRequestThreadService'
+import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest } from '../../shared/types'
+import { AppError, createErrorProvider, knownAppError } from '../../shared/errors'
+import type { GitOperationHandle } from '../git/GitService'
 import { listClaimedQueue } from '../queue/ThreadMessageQueue'
 import { formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
 import type { ModelOverride } from '../../shared/providerInstances'
@@ -39,6 +44,7 @@ import {
   type MousseSettingsUpdate
 } from '../../shared/settings'
 import type { HarnessGateway } from '../harness/gateway'
+import { usageText } from '../providers/usageText'
 import { harnessAppError } from '../../shared/harness/types'
 import {
   asAddInstanceInput,
@@ -78,6 +84,7 @@ import { visibleThreadsFor } from './threadVisibility'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
+import { validateScheduledJobOptions, type ScheduledJobOptionsDeps } from '../scheduled/validateJobOptions'
 import { ActionExecutionError, StaleThreadActionRevisionError, ThreadActionService, type RunThreadActionOptions } from '../actions/ThreadActionService'
 import { UndoService } from '../actions/UndoService'
 import { UndoRetentionService } from '../actions/UndoRetentionService'
@@ -158,6 +165,16 @@ export interface HandlerContext {
 function admittedChatSource(ctx: HandlerContext, fallback: string): string {
   if (!ctx.connection) return fallback === 'gui' || fallback === 'cli' ? 'internal' : fallback
   return ctx.connection.clientType === 'gui' ? 'gui' : ctx.connection.clientType === 'cli' ? 'cli' : 'internal'
+}
+
+/**
+ * Who a protocol request answers a question as: always the user, through the client the request
+ * came in on (a request with no connection of its own arrives over the Bridge). An agent answers
+ * only through its own tools, which name it.
+ */
+function questionAnswerer(ctx: HandlerContext): Answerer {
+  if (!ctx.connection) return { kind: 'user', via: 'bridge' }
+  return { kind: 'user', via: ctx.connection.clientType === 'gui' ? 'gui' : ctx.connection.clientType === 'cli' ? 'cli' : 'internal' }
 }
 
 function rejectUnknownKeys(p: Record<string, unknown>, allowed: readonly string[]): void {
@@ -430,6 +447,7 @@ async function pullRequestBranchContext(
   ctx: HandlerContext,
   p: Record<string, unknown>
 ): Promise<{ root: string; branch: string; originThreadId: string | null; projectId: string | null }> {
+  await materializeRequestedWorkspace(ctx, p)
   const root = pullRequestFolder(ctx, p)
   const branch = asString(p.expectedBranch, 'expectedBranch', 512)
   if (branch.startsWith('-')) throw new DomainRpcError('invalid_params', 'expectedBranch is not a branch name')
@@ -525,6 +543,97 @@ async function linkOriginThread(ctx: HandlerContext, threadId: string | null, ro
   }
 }
 
+/**
+ * Brings a retired worktree back before a handler uses it. A rule or trash retires a checkout but
+ * leaves `workspace.json` ready and keeps a reconstruction manifest, so `restore` rebuilds it
+ * exactly. Restoring rewrites `workspace.json`, which counts as activity for the inactive rule.
+ * Does nothing for a thread that has no workspace or whose checkout is present.
+ */
+async function ensureWorkspaceMaterialized(ctx: HandlerContext, threadId: string, project?: string): Promise<void> {
+  const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
+  const workspace = manager.load()
+  // A folder without its `.git` file is what a retirement that failed partway leaves; `restore` sets it aside and rebuilds.
+  if (!workspace || existsSync(join(workspace.worktreePath, '.git')) || !manager.hasReconstructionManifest()) return
+  // One restore per thread: calls that arrive together (a focus refresh asks for status, files and the pull request at once) share it.
+  const key = ctx.mms.threads.getThreadDir(threadId)
+  const running = restoresInFlight.get(key)
+  if (running) return running
+  const projectPath = project ?? resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
+  if (!projectPath) return
+  const restore = (async () => {
+    await manager.restore(projectPath)
+    clearCleanupMarker(ctx.mms.threads.lifecycleStore, threadId)
+  })().finally(() => { restoresInFlight.delete(key) })
+  restoresInFlight.set(key, restore)
+  return restore
+}
+const restoresInFlight = new Map<string, Promise<void>>()
+
+/** `ensureWorkspaceMaterialized` for a request that names a thread; an unknown thread fails later with its usual error. */
+async function materializeRequestedWorkspace(ctx: HandlerContext, params: Record<string, unknown>): Promise<void> {
+  const threadId = asOptionalString(params.threadId, 256)
+  if (threadId && ctx.mms.threads.getThread(threadId)) await ensureWorkspaceMaterialized(ctx, threadId)
+}
+
+/**
+ * Where Push goes for a thread linked to a pull request: the pull request's own branch, but only when that is provably
+ * the same repository, that is, its head is not in a fork and a remote of this folder points at it. Anything else keeps
+ * Push's usual target, with the reason a client can show.
+ */
+async function pullRequestPushTarget(ctx: HandlerContext, threadId: string, root: string): Promise<PullRequestPushTarget> {
+  const link = ctx.mms.threads.getThread(threadId)?.pullRequest
+  const usual: PullRequestPushTarget = { remote: null, branch: null, reason: null }
+  // Only a thread that was started from the pull request: a link made by hand says nothing about where its branch belongs.
+  if (!link || link.startedFromPullRequest !== true) return usual
+  const repository = `${link.nameWithOwner}${link.host.toLowerCase() === 'github.com' ? '' : ` on ${link.host}`}`
+  const sameRepository = link.isCrossRepository === false && link.headRepository !== null && link.headRepository.toLowerCase() === link.nameWithOwner.toLowerCase()
+  if (!sameRepository) return { ...usual, reason: `The pull request's branch is on a fork (${link.headRepository ?? 'deleted'}); push by hand` }
+  if (!link.headRefName) return { ...usual, reason: 'The pull request has no head branch to push to; push by hand' }
+  // Never straight onto the repository's default branch (a release pull request from develop to main has it as its head).
+  const { defaultBranch } = await ctx.mms.gitService.codeHost.listBaseBranches(root)
+  if (defaultBranch === null) return { ...usual, reason: `The default branch of ${repository} could not be read, so Push cannot tell whether the pull request's branch is safe to update; push by hand` }
+  if (link.headRefName === defaultBranch) return { ...usual, reason: `The pull request's branch is ${repository}'s default branch, which Push never updates; push by hand` }
+  // The remote must fetch from and push to the repository: a `pushurl` can name another one.
+  const remote = await ctx.mms.gitService.codeHost.remoteForRepository(root, { host: link.host, nameWithOwner: link.nameWithOwner }, { push: true })
+  if (!remote) return { ...usual, reason: `No remote of this checkout fetches from and pushes to ${repository}; push by hand` }
+  return { remote, branch: link.headRefName, reason: null }
+}
+
+/** The service that starts threads from pull requests, over this profile's stores. */
+function pullRequestThreadService(ctx: HandlerContext): PullRequestThreadService {
+  return new PullRequestThreadService({
+    codeHost: ctx.mms.gitService.codeHost,
+    projects: ctx.mms.projects,
+    threads: ctx.mms.threads,
+    trashThread: (threadId) => ctx.mms.trashThread(threadId),
+    // Like `threads.create`: a new thread starts on the model last used.
+    prepareThread: (thread) => {
+      const lastUsed = ctx.mms.providerInstances.migrate(lastUsedChatModel(ctx.mms.settings.get()))
+      return lastUsed ? ctx.mms.threads.updateThreadMeta(thread.id, { modelOverride: lastUsed }) : thread
+    },
+    send: async (threadId, content) => {
+      ctx.mms.orchestrator.getOrCreateSession(threadId)
+      const input = await prepareChatInput(ctx, threadId, { content }, {})
+      // `ack`: the call returns once the message is accepted, not when the turn ends.
+      await ctx.mms.orchestrator.send(input, false, { threadId, source: admittedChatSource(ctx, 'protocol'), forceQueue: false, awaitMode: 'ack' })
+    }
+  })
+}
+
+/** A refusal of the pull request thread service keeps its code; a failed read reaches the caller with the host's own message. */
+async function asDomainError<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run()
+  } catch (error) {
+    if (error instanceof PullRequestThreadError) throw new DomainRpcError(error.code, error.message, error.details)
+    if (error instanceof PullRequestReadError) {
+      const code = error.kind === 'not-found' || error.kind === 'rate-limited' ? PULL_REQUEST_READ_CODES[error.kind] : 'pull_request_unavailable'
+      throw new DomainRpcError(code, error.message, { reason: error.kind })
+    }
+    throw error
+  }
+}
+
 async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<string, unknown>): Promise<void> {
   if (!params.threadId) return
   const threadId = asString(params.threadId, 'threadId', 256)
@@ -533,7 +642,7 @@ async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<stri
   if (!project) throw new Error('Task has no project workspace')
   const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
   if (!manager.load()) await manager.provision(threadId, 'main', project)
-  if (!existsSync(manager.load()!.worktreePath) && manager.hasReconstructionManifest()) await manager.restore(project)
+  await ensureWorkspaceMaterialized(ctx, threadId, project)
   if (manager.verify().lifecycle !== 'ready') throw new DomainRpcError('workspace_recovery_required', 'Task workspace requires recovery before mutation')
 }
 
@@ -588,7 +697,7 @@ function gitPaths(root: string, value: unknown): string[] {
 async function runUserThreadGitAction<T>(
   ctx: HandlerContext,
   target: Required<Pick<GitMutationTarget, 'root' | 'directory' | 'workspace'>>,
-  extra: Pick<RunThreadActionOptions, 'onFailure' | 'externalEffects'>,
+  extra: Pick<RunThreadActionOptions, 'onFailure' | 'externalEffects' | 'signal'>,
   mutate: () => Promise<T>
 ): Promise<T> {
   const { root, directory, workspace } = target
@@ -614,8 +723,52 @@ async function runUserThreadGitAction<T>(
  * Runs an action that does not move the thread's branch under the thread's Git locks, like push. Without them
  * it would queue inside GitService ahead of a commit that already holds the repository lease and stall it.
  */
-async function underThreadLocks<T>(target: GitMutationTarget, label: string, run: () => Promise<T>): Promise<T> {
-  return target.directory && target.workspace ? withGitMutationLocks(target.directory, target.root, label, run) : run()
+async function underThreadLocks<T>(target: GitMutationTarget, label: string, run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  return target.directory && target.workspace ? withGitMutationLocks(target.directory, target.root, label, run, signal) : run()
+}
+
+/**
+ * Lets the client that sent a long Git request follow it: its events travel on that connection only, never to
+ * other clients or windows, and only that connection can cancel it. Without an `operationId` nothing is sent.
+ */
+function gitOperationOptions(ctx: HandlerContext, p: Record<string, unknown>): GitOperationOptions {
+  const operationId = asOptionalString(p.operationId, 64)
+  if (!operationId) return {}
+  const send = ctx.connection?.emitConnectionEvent
+  // Best effort: a backed-up connection drops an update, and the request's own answer still carries the outcome.
+  return {
+    operationId,
+    owner: ctx.connection?.id,
+    // The client that started it going away cancels it: nobody could cancel it afterwards, and it would hold the folder.
+    lifetime: ctx.connection?.lifetime,
+    ...(send ? { onEvent: (event) => { void send('git.operation', { event }).catch(() => undefined) } } : {})
+  }
+}
+
+/**
+ * Runs a long Git action that waits for locks of its own before Git runs. The action is registered first, so its
+ * events start and Cancel works while it waits; `signal` is for the waits. Without an `operationId` it just runs.
+ */
+async function followedGitAction<T>(
+  ctx: HandlerContext,
+  p: Record<string, unknown>,
+  root: string,
+  kind: GitOperationKind,
+  run: (request: { operation?: GitOperationHandle }, signal?: AbortSignal) => Promise<T>
+): Promise<T> {
+  const options = gitOperationOptions(ctx, p)
+  if (!options.operationId) return run({})
+  const operation = ctx.mms.gitService.openOperation(root, kind, options)
+  try {
+    const result = await run({ operation }, operation.signal)
+    operation.end()
+    return result
+  } catch (error) {
+    // A cancel that arrives during a lock wait surfaces as that wait's own abort error.
+    const outcome = operation.signal?.aborted && !(error instanceof AppError) ? ctx.mms.gitService.cancelledError() : error
+    operation.end(outcome)
+    throw outcome
+  }
 }
 
 function threadWorktree(target: GitMutationTarget): Required<GitMutationTarget> | null {
@@ -655,6 +808,8 @@ interface ReviewTarget {
 /** Resolves a review scope to the root it reads from and the Git range it compares. */
 async function reviewTarget(ctx: HandlerContext, p: Record<string, unknown>): Promise<ReviewTarget> {
   const scope = asReviewScope(p.scope)
+  // Every scope reads the thread's checkout (the turn and thread scopes run Git in it), so bring it back first.
+  await materializeRequestedWorkspace(ctx, p)
   if (scope.kind === 'worktree') {
     const root = projectRootContext(ctx, p)
     if (!await isGitRepository(root)) return { scope, root, range: { from: null, to: { kind: 'worktree' } }, unavailable: 'Not a Git repository.' }
@@ -711,6 +866,41 @@ function harnessGateway(ctx: HandlerContext): HarnessGateway {
   throw harnessAppError({ code: 'not_implemented', message: 'Provider instances are not available in this build yet.' })
 }
 
+
+/** A scheduled-job request the profile refuses, with a message the person can act on (a plain Error would be hidden). */
+function jobRefused(message: string): AppError {
+  return knownAppError({ code: 'scheduled_job_refused', message }, { category: 'invalid', retryable: false })
+}
+
+/** `validateScheduledJobOptions` with its plain-text refusals made visible to the caller. */
+function checkJobOptions(ctx: HandlerContext, job: Parameters<typeof validateScheduledJobOptions>[0]): ReturnType<typeof validateScheduledJobOptions> {
+  try {
+    return validateScheduledJobOptions(job, scheduledJobOptionsDeps(ctx))
+  } catch (error) {
+    if (error instanceof AppError) throw error
+    throw jobRefused(error instanceof Error ? error.message : String(error))
+  }
+}
+
+/** The profile services the scheduled-job checks read (model, mode and workspace of a job). */
+function scheduledJobOptionsDeps(ctx: HandlerContext): ScheduledJobOptionsDeps {
+  const { threads, projects } = ctx.mms
+  return {
+    overrideFor: (input) => ctx.mms.providerInstances.overrideFor(input),
+    resolveStored: (selection, options) => harnessGateway(ctx).resolveStored(selection, options),
+    getProject: (projectId) => projects.getProject(projectId),
+    getThread: (threadId) => threads.getThread(threadId),
+    listProjectThreads: (projectId) => threads.listAllThreads().filter((thread) => thread.projectId === projectId),
+    loadWorkspace: (threadId) => new ThreadWorkspaceManager(threads.getThreadDir(threadId)).load(),
+    isGitBacked: (projectPath) => {
+      try {
+        return new ThreadWorkspaceManager('').resolveRepository(projectPath).capability.gitBacked
+      } catch {
+        return false
+      }
+    }
+  }
+}
 
 async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
   if (isObject(params) && typeof params.threadId === 'string' &&
@@ -1017,6 +1207,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
     }
+    case 'threads.setPermissionMode': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'mode'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const mode = asString(p.mode, 'mode', 32)
+      if (!isPermissionMode(mode)) throw new DomainRpcError('invalid_params', `mode must be one of ${PERMISSION_MODES.join(', ')}`)
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      // Applies from the next turn; a running turn and a pending question are not touched.
+      const thread = ctx.mms.orchestrator.setThreadPermissionMode(threadId, mode)
+      const threads = ctx.mms.threads.listAllThreads()
+      ctx.emitEvent?.('threads.updated', { threads })
+      return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
+    }
     case 'orchestrator.send': {
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, [
@@ -1050,6 +1253,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         forceQueue,
         clientRequestId,
         awaitMode,
+        actor: questionAnswerer(ctx),
         ...(continuationOfRunId ? { continuationOfRunId, acknowledgeUncertain } : {})
       })
     }
@@ -1254,7 +1458,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const requestId = asString(p.requestId, 'requestId', 256)
       const answers = asAnswersMap(p.answers)
       const pending = ctx.mms.questions.getPending(requestId)
-      const ok = ctx.mms.questions.submitAnswers(requestId, answers)
+      const ok = ctx.mms.questions.submitAnswers(requestId, answers, questionAnswerer(ctx))
       if (ok && pending) {
         // Answers reach the model through the tool result; mirror them as a
         // visible user message so the transcript shows what the user said.
@@ -1269,7 +1473,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const requestId = asString(p.requestId, 'requestId', 256)
       const pending = ctx.mms.questions.getPending(requestId)
-      const ok = ctx.mms.questions.dismiss(requestId)
+      const ok = ctx.mms.questions.dismiss(requestId, questionAnswerer(ctx))
       if (ok && pending) {
         ctx.mms.orchestrator.recordQuestionResponseMessage(
           pending.threadId,
@@ -1409,7 +1613,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         else cwd = assertEpisodePath(metadata.worktreePath, cwd)
       }
       const lease = directory ? tryAcquireExecutionLease(directory, { source: 'task-terminal' }) : undefined
-      if (directory && !lease) throw new DomainRpcError('workspace_busy', 'Task writer is busy; wait for it to finish before opening a terminal')
+      if (directory && !lease) throw new DomainRpcError('workspace_busy', leaseBusyMessage(readLeaseOwner(getExecutionLeasePath(directory)), 'Task writer is busy; wait for it to finish before opening a terminal'))
       const actions = directory && metadata ? new ThreadActionService(directory) : undefined
       const turnId = `terminal:${randomUUID()}`
       const actionOptions = metadata ? { threadId, turnId, conversationBranchId: metadata.conversationBranchId, workspacePath: metadata.worktreePath,
@@ -1535,7 +1739,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'scheduled.create': {
       const p = isObject(params) ? params : {}
       const input = asCreateScheduledJobInput(p.input)
-      const job = ctx.mms.scheduled.createJob(input)
+      // The selection is stored as the profile resolves it; a `worktree` workspace names the thread that owns it.
+      const checked = checkJobOptions(ctx, input)
+      const job = ctx.mms.scheduled.createJob({
+        ...input,
+        ...(checked.selection ? { selection: checked.selection } : {}),
+        ...(checked.threadId ? { threadId: checked.threadId } : {})
+      })
       return { job, jobs: ctx.mms.scheduled.listJobs() }
     }
     case 'scheduled.update': {
@@ -1544,14 +1754,27 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const patch = asScheduledJobPatch(p.patch)
       const existing = ctx.mms.scheduled.getJob(id)
       if (!existing) throw new Error(`Job not found: ${id}`)
+      // Validate the job as it would be after the change; `null` clears a field.
+      const merged = {
+        threadId: patch.threadId === undefined ? existing.threadId : patch.threadId ?? undefined,
+        projectId: patch.projectId === undefined ? existing.projectId : patch.projectId ?? undefined,
+        selection: patch.selection === undefined ? existing.selection : patch.selection ?? undefined,
+        mode: patch.mode === undefined ? existing.mode : patch.mode ?? undefined,
+        workspace: patch.workspace === undefined ? existing.workspace : patch.workspace ?? undefined
+      }
+      const touchesOptions = ['selection', 'mode', 'workspace', 'threadId', 'projectId'].some((key) => (patch as Record<string, unknown>)[key] !== undefined)
+      const checked = touchesOptions ? checkJobOptions(ctx, merged) : {}
       const job = ctx.mms.scheduled.updateJob(id, {
-        name: patch.name,
-        prompt: patch.prompt,
-        schedule: patch.schedule,
-        enabled: patch.enabled,
-        threadId: patch.threadId === null ? undefined : patch.threadId,
-        projectId: patch.projectId === null ? undefined : patch.projectId,
-        createThread: patch.createThread,
+        ...(patch.name !== undefined ? { name: patch.name } : {}),
+        ...(patch.prompt !== undefined ? { prompt: patch.prompt } : {}),
+        ...(patch.schedule !== undefined ? { schedule: patch.schedule } : {}),
+        ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
+        ...(patch.createThread !== undefined ? { createThread: patch.createThread } : {}),
+        ...(patch.threadId !== undefined || checked.threadId ? { threadId: checked.threadId ?? (patch.threadId === null ? undefined : patch.threadId) } : {}),
+        ...(patch.projectId !== undefined ? { projectId: patch.projectId === null ? undefined : patch.projectId } : {}),
+        ...(patch.selection !== undefined ? { selection: patch.selection === null ? undefined : checked.selection ?? patch.selection } : {}),
+        ...(patch.mode !== undefined ? { mode: patch.mode === null ? undefined : patch.mode } : {}),
+        ...(patch.workspace !== undefined ? { workspace: patch.workspace === null ? undefined : patch.workspace } : {}),
         ...(patch.repeat === null
           ? { repeat: undefined }
           : patch.repeat !== undefined
@@ -1587,7 +1810,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'scheduled.run': {
       const p = isObject(params) ? params : {}
       const id = asString(p.id, 'id', 256)
+      // A job with a run in flight or waiting in a queue has one occurrence outstanding; say so instead of reporting a start.
+      const current = ctx.mms.scheduled.getJob(id)
+      if (current?.state === 'running' || current?.runClaim) throw jobRefused(`Job is already running: ${current.name}`)
+      if (current?.pendingOccurrence) {
+        throw jobRefused(`Job already has a run ${current.pendingOccurrence.state === 'queued' ? 'waiting in the queue' : 'in progress'}: ${current.name}. It can run again when that run ends.`)
+      }
       const job = ctx.mms.scheduled.triggerJob(id)
+      // Run now starts within seconds: the scheduler ticks now instead of at the next minute.
+      if (job) ctx.mms.scheduled.wake()
       return { job, jobs: ctx.mms.scheduled.listJobs() }
     }
     case 'scheduled.status':
@@ -1823,22 +2054,28 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
     case 'providers.getUsage': {
       await ctx.mms.claudeSubscription.status()
-      const [usage, claude] = await Promise.all([
+      // Pi providers read the shared pi-ai credentials; agents (Codex) answer for the bound profile.
+      const [usage, claude, agents] = await Promise.all([
         ctx.mms.providerAuth.getUsage(),
         ctx.mms.claudeSubscription.configured()
           ? ctx.mms.claudeSubscription.getUsage(ctx.mms.worktrees.getRepoRoot())
-          : Promise.resolve(undefined)
+          : Promise.resolve(undefined),
+        ctx.mms.harness?.instances.usage({ kind: 'device' }) ?? Promise.resolve([])
       ])
       return {
         ...usage,
-        providers: [...usage.providers, ...(claude ? [claude] : [])],
+        providers: [...usage.providers, ...(claude ? [claude] : []), ...agents],
         fetchedAt: new Date().toISOString()
       }
     }
     case 'providers.getSubscriptionUsage': {
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
-      return { usage: await ctx.mms.providerAuth.getSubscriptionUsage(providerId) }
+      const text = await ctx.mms.providerAuth.getSubscriptionUsage(providerId)
+      if (text !== undefined) return { usage: text }
+      // An agent instance named by its id (`codex`, `codex:work`).
+      const agent = (await ctx.mms.harness?.instances.usage({ kind: 'device' }))?.find((entry) => entry.id === providerId)
+      return { usage: agent ? usageText(agent.label, agent) : undefined }
     }
     case 'providers.synthesizeSpeech': {
       const p = isObject(params) ? params : {}
@@ -2105,12 +2342,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const manager = new ThreadWorkspaceManager(lookup.threadDirectory)
       const stored = manager.load()
       const metadata = stored && lookup.projectPath ? manager.verify(stored) : stored
+      // Never restores: the hover card and the active-project lookup call this for passive reads.
+      const marker = stored && !existsSync(stored.worktreePath) ? readCleanupMarker(ctx.mms.threads.lifecycleStore, lookup.threadId) : undefined
       return {
         metadata,
         execution: lookup.projectPath
           ? manager.executionContext(lookup.projectPath, metadata)
           : manager.unboundExecutionContext(lookup.threadId),
-        journalGeneration: lookup.currentGeneration
+        journalGeneration: lookup.currentGeneration,
+        ...(marker ? { retiredByCleanup: { at: marker.retiredAt, rule: marker.rule } } : {})
       }
     }
     case 'workspace.restore': {
@@ -2128,6 +2368,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'actions.list': {
       const p = isObject(params) ? params : {}
       const operation = threadLookupContext(ctx, p)
+      // The GUI asks for the history of a selected thread; opening one brings its worktree back.
+      await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       new ConversationActionService(operation.threadDirectory).recoverHistoryIfIdle(
         () => ctx.mms.orchestrator.isConversationHistoryBusy(operation.threadId),
         (action, kind) => {
@@ -2173,6 +2415,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'actions.pin': {
       const p = isObject(params) ? params : {}
       const operation = threadOperationContext(ctx, p)
+      await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
       const retention = new UndoRetentionService(operation.threadDirectory)
@@ -2218,6 +2461,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'actions.undoLatest': {
       const p = isObject(params) ? params : {}
       const operation = threadLookupContext(ctx, p)
+      // A workspace Undo needs the checkout; a conversation-only Undo does not.
+      if (operation.projectPath && new ThreadActionService(operation.threadDirectory).latest(new ThreadWorkspaceManager(operation.threadDirectory).load()?.conversationBranchId ?? 'main')?.scope !== 'conversation') await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       const branchId = workspace?.conversationBranchId ?? 'main'
       const expectedTurnId = asOptionalString(p.expectedTurnId, 256)
@@ -2263,6 +2508,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const operation = threadOperationContext(ctx, p)
       const actionId = asString(p.actionId, 'actionId', 256)
+      await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
       const target = new ThreadActionService(operation.threadDirectory).get(actionId)
@@ -2292,6 +2538,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ctx.emitEvent?.('actions.updated', { threadId: operation.threadId, action }, operation.threadId)
         return { action }
       }
+      await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath ?? undefined)
       if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
       const action = await new RedoService(operation.threadDirectory).redoLatest(branchId, workspace.worktreePath, operation.currentGeneration, (original) => {
         if (original.nativeContextStartBoundary) ctx.mms.orchestrator.restoreConversationActionEnd(operation.threadId, original.presentationMessageStart, original.presentationMessageEnd, original.nativeContextBoundary)
@@ -2304,6 +2551,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const sourceBranchId = asOptionalString(p.conversationBranchId, 256) ?? new ThreadWorkspaceManager(operation.threadDirectory).load()?.conversationBranchId ?? 'main'
       const actionId = asString(p.actionId, 'actionId', 256)
       const name = asOptionalString(p.name, 256) ?? 'Alternate'
+      await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
       const action = new ThreadActionService(operation.threadDirectory).get(actionId)
@@ -2322,6 +2570,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const operation = threadOperationContext(ctx, p)
       const branchId = asString(p.conversationBranchId, 'conversationBranchId', 256)
+      await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
       const branches = new ConversationBranchService(operation.threadDirectory)
@@ -2342,6 +2591,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'operations.recover': {
       const p = isObject(params) ? params : {}
       const operation = threadOperationContext(ctx, p)
+      await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
       await new ChildAgentIntegrationService(operation.threadDirectory).recoverPending(workspace.worktreePath)
@@ -2372,6 +2622,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'publish.status': {
       const p = isObject(params) ? params : {}
       const operation = threadOperationContext(ctx, p)
+      await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       return { available: Boolean(workspace?.lifecycle === 'ready'), workspace, sourceSha: workspace?.lifecycle === 'ready' ? workspaceGit(workspace.worktreePath, ['rev-parse', 'HEAD']) : undefined, targetSha: workspaceGit(operation.projectPath, ['rev-parse', 'HEAD']), journalGeneration: operation.currentGeneration }
     }
@@ -2380,17 +2631,20 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // Exact completed-operation replay is checked by PublishService before concurrency validation.
       const operation = threadOperationContext(ctx, { ...p, expectedJournalGeneration: undefined })
       const targetBranch = asString(p.targetBranch, 'targetBranch', 512)
+      await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
       return await new PublishService(operation.threadDirectory).publish(workspace.worktreePath, operation.projectPath, targetBranch, undefined, { expectedSourceSha: asOptionalString(p.expectedSourceSha, 64), expectedTargetSha: asOptionalString(p.expectedTargetSha, 64), expectedJournalRevision: asOptionalBoundedInt(p.expectedJournalGeneration, 'expectedJournalGeneration', { min: 0, max: Number.MAX_SAFE_INTEGER }) ?? operation.currentGeneration, operationId: asOptionalString(p.operationId, 256) })
     }
     case 'files.list': {
       const p = isObject(params) ? params : {}
+      await materializeRequestedWorkspace(ctx, p)
       const root = projectRootContext(ctx, p)
       return { entries: await ctx.mms.fileService.listDir(root, containedPath(root, p.path)) }
     }
     case 'files.read': {
       const p = isObject(params) ? params : {}
+      await materializeRequestedWorkspace(ctx, p)
       const root = projectRootContext(ctx, p)
       const path = requiredContainedPath(root, p.path)
       return { path, content: await ctx.mms.fileService.readFile(root, path) }
@@ -2428,11 +2682,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'files.stat': {
       const p = isObject(params) ? params : {}
+      await materializeRequestedWorkspace(ctx, p)
       const root = projectRootContext(ctx, p)
       return { stat: await ctx.mms.fileService.stat(root, requiredContainedPath(root, p.path)) }
     }
     case 'files.search': {
       const p = isObject(params) ? params : {}
+      await materializeRequestedWorkspace(ctx, p)
       const root = projectRootContext(ctx, p)
       const query = asOptionalString(p.query, 512) ?? ''
       const limit = asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: 200 }) ?? 50
@@ -2463,6 +2719,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'files.grep': {
       const p = isObject(params) ? params : {}
+      await materializeRequestedWorkspace(ctx, p)
       const root = projectRootContext(ctx, p)
       // Not `asString`: a query of spaces is a legitimate search, an empty one is not.
       const query = asOptionalString(p.query, 512)
@@ -2477,20 +2734,24 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'git.status': {
       const p = isObject(params) ? params : {}
+      await materializeRequestedWorkspace(ctx, p)
       return { status: await ctx.mms.gitService.getStatus(projectRootContext(ctx, p)) }
     }
     case 'git.diff': {
       const p = isObject(params) ? params : {}
+      await materializeRequestedWorkspace(ctx, p)
       const root = projectRootContext(ctx, p)
       return { diff: await ctx.mms.gitService.getDiff(root, requiredContainedPath(root, p.path), asOptionalBoolean(p.staged, 'staged') === true) }
     }
     case 'git.log': {
       const p = isObject(params) ? params : {}
       const limit = asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: 100 }) ?? 30
+      await materializeRequestedWorkspace(ctx, p)
       return { commits: await ctx.mms.gitService.getLog(projectRootContext(ctx, p), limit) }
     }
     case 'git.branches': {
       const p = isObject(params) ? params : {}
+      await materializeRequestedWorkspace(ctx, p)
       return { branches: await ctx.mms.gitService.getBranches(projectRootContext(ctx, p)) }
     }
     case 'git.checkout': {
@@ -2498,7 +2759,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const target = await gitMutationTarget(ctx, p, 'task_branch_authoritative')
       const dirty = asOptionalString(p.dirty, 16)
       if (dirty !== undefined && dirty !== 'carry' && dirty !== 'stash') throw new DomainRpcError('invalid_params', 'dirty must be carry or stash')
-      const result = await ctx.mms.gitService.checkout(target.root, asString(p.branch, 'branch', 512), dirty ? { dirty } : {})
+      const result = await ctx.mms.gitService.checkout(target.root, asString(p.branch, 'branch', 512), { ...(dirty ? { dirty } : {}), ...gitOperationOptions(ctx, p) })
       return gitStatusResult(ctx, target.root, { ...result })
     }
     case 'git.commit': {
@@ -2512,8 +2773,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         // The branch is checkpointed: an amend would replace the recorded head, so it is refused before Git runs.
         if (amend) throw gitThreadRules.create('git_amend_in_thread')
         // Everything is committed through the user's hooks as one commit; a rejected commit is recorded, never swept in with --no-verify.
-        await runUserThreadGitAction(ctx, thread, { onFailure: 'record' }, () => ctx.mms.gitService.commit(target.root, message, { all: true, expectedBranch }))
-      } else await ctx.mms.gitService.commit(target.root, message, { amend, expectedBranch })
+        await followedGitAction(ctx, p, target.root, 'commit', (request, signal) =>
+          runUserThreadGitAction(ctx, thread, { onFailure: 'record', signal }, () => ctx.mms.gitService.commit(target.root, message, { all: true, expectedBranch, ...request })))
+      } else await followedGitAction(ctx, p, target.root, 'commit', (request) => ctx.mms.gitService.commit(target.root, message, { amend, expectedBranch, ...request }))
       return gitStatusResult(ctx, target.root)
     }
     case 'git.push': {
@@ -2521,20 +2783,27 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const target = await gitMutationTarget(ctx, p)
       const expectedBranch = asOptionalString(p.expectedBranch, 512)
       const { root, directory, workspace: metadata } = target
-      if (metadata && directory) {
-        await withGitMutationLocks(directory, root, 'user-git-push', async () => {
+      // A thread's own branch goes to its pull request's branch when that is provably the same repository (never a client's choice).
+      const threadId = asOptionalString(p.threadId, 256)
+      const prTarget = metadata && threadId ? await pullRequestPushTarget(ctx, threadId, root) : null
+      const toPullRequest = prTarget?.remote && prTarget.branch ? { toRemote: prTarget.remote, toBranch: prTarget.branch } : {}
+      await followedGitAction(ctx, p, root, 'push', (request, signal) => {
+        if (!metadata || !directory) return ctx.mms.gitService.push(root, { expectedBranch, ...request })
+        return withGitMutationLocks(directory, root, 'user-git-push', async () => {
           const manager = new ThreadWorkspaceManager(directory)
           if (manager.verify().lifecycle !== 'ready' || manager.load()?.headSha !== metadata.headSha) throw new Error('Task revision changed before push; refresh the reviewed revision')
           if (workspaceGit(root, ['status', '--porcelain'])) throw gitThreadRules.create('git_thread_dirty')
-          await ctx.mms.gitService.push(root, { expectedBranch })
-        })
-      } else await ctx.mms.gitService.push(root, { expectedBranch })
+          await ctx.mms.gitService.push(root, { expectedBranch, ...toPullRequest, ...request })
+        }, signal)
+      })
       return gitStatusResult(ctx, root)
     }
     case 'git.suggestCommitMessage': {
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['threadId', 'projectId', 'expectedBranch'])
-      // Reads and proposes only: it never provisions a worktree or touches the repository.
+      // Reads and proposes only: it never provisions a worktree or changes the repository. A worktree that
+      // cleanup retired is restored first, because the draft describes what the folder holds.
+      await materializeRequestedWorkspace(ctx, p)
       const root = pullRequestFolder(ctx, p)
       const threadId = asOptionalString(p.threadId, 256) ?? null
       const expectedBranch = asOptionalString(p.expectedBranch, 512)
@@ -2570,7 +2839,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'git.fetch': {
       const p = isObject(params) ? params : {}
       const target = await gitMutationTarget(ctx, p)
-      const result = await underThreadLocks(target, 'user-git-fetch', () => ctx.mms.gitService.fetch(target.root))
+      const result = await followedGitAction(ctx, p, target.root, 'fetch', (request, signal) => underThreadLocks(target, 'user-git-fetch', () => ctx.mms.gitService.fetch(target.root, request), signal))
       return gitStatusResult(ctx, target.root, { ...result })
     }
     case 'git.pull': {
@@ -2578,7 +2847,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const target = await gitMutationTarget(ctx, p, 'task_branch_authoritative')
       const strategy = asOptionalString(p.strategy, 16) ?? 'ff-only'
       if (strategy !== 'ff-only' && strategy !== 'merge' && strategy !== 'rebase') throw new DomainRpcError('invalid_params', 'strategy must be ff-only, merge or rebase')
-      const result = await ctx.mms.gitService.pull(target.root, { strategy: strategy as GitPullStrategy })
+      const result = await followedGitAction(ctx, p, target.root, 'pull', (request) => ctx.mms.gitService.pull(target.root, { strategy: strategy as GitPullStrategy, ...request }))
       return gitStatusResult(ctx, target.root, { ...result })
     }
     case 'git.abortInProgress': {
@@ -2607,6 +2876,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const target = await gitMutationTarget(ctx, p, 'task_branch_authoritative')
       await ctx.mms.gitService.deleteBranch(target.root, asString(p.name, 'name', 512), { force: asOptionalBoolean(p.force, 'force') === true })
       return gitStatusResult(ctx, target.root)
+    }
+    case 'git.cancelOperation': {
+      const p = isObject(params) ? params : {}
+      // Only the connection that started the action can stop it; anyone else is told it is not running.
+      return { cancelled: ctx.mms.gitService.cancelOperation(asString(p.operationId, 'operationId', 64), ctx.connection?.id) }
     }
     case 'git.init': {
       const p = isObject(params) ? params : {}
@@ -2651,6 +2925,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'pullRequests.get': {
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['threadId', 'projectId', 'branch', 'force'])
+      await materializeRequestedWorkspace(ctx, p)
       const lookup = await ctx.mms.gitService.codeHost.lookupPullRequest(
         pullRequestFolder(ctx, p),
         asOptionalString(p.branch, 512),
@@ -2662,6 +2937,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['threadId', 'projectId', 'number', 'force'])
       const number = asBoundedInt(p.number, 'number', { min: 1, max: Number.MAX_SAFE_INTEGER })
+      await materializeRequestedWorkspace(ctx, p)
       const detail = await readPullRequestDetail(ctx, pullRequestFolder(ctx, p), number, asOptionalBoolean(p.force, 'force') === true)
       return { detail }
     }
@@ -2732,6 +3008,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'pullRequests.baseBranches': {
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['threadId', 'projectId'])
+      await materializeRequestedWorkspace(ctx, p)
       return { baseBranches: await ctx.mms.gitService.codeHost.listBaseBranches(pullRequestFolder(ctx, p)) }
     }
     case 'pullRequests.link': {
@@ -2740,6 +3017,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       const number = asBoundedInt(p.number, 'number', { min: 1, max: Number.MAX_SAFE_INTEGER })
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      await ensureWorkspaceMaterialized(ctx, threadId)
       const root = pullRequestFolder(ctx, { threadId })
       const before = ctx.mms.threads.getThread(threadId)?.pullRequest
       // Any pull request of the folder's repository, by number: the full read names the head and base repositories.
@@ -2753,6 +3031,61 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
+    }
+    case 'pullRequests.list': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['projectId', 'limit', 'force'])
+      const root = pullRequestFolder(ctx, { projectId: p.projectId })
+      const limit = asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: 200 })
+      const pullRequests = await asDomainError(() => ctx.mms.gitService.codeHost.listPullRequests(root, { ...(limit !== undefined ? { limit } : {}), force: asOptionalBoolean(p.force, 'force') === true }))
+      return { pullRequests }
+    }
+    case 'pullRequests.resolve': {
+      // What a pasted number, URL or `gh pr checkout` command names, read in full, before a thread is started from it.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['projectId', 'reference'])
+      const projectId = asString(p.projectId, 'projectId', 256)
+      const resolved = await asDomainError(() => pullRequestThreadService(ctx).resolve(projectId, asString(p.reference, 'reference', 2048)))
+      const { detail } = resolved
+      return {
+        pullRequest: { number: detail.number, title: detail.title, url: detail.url, state: detail.state, isDraft: detail.isDraft, author: detail.author, headRefName: detail.headRefName, isCrossRepository: detail.isCrossRepository },
+        threads: resolved.threads
+      }
+    }
+    case 'pullRequests.startThread': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['projectId', 'number', 'reference', 'send', 'message', 'allowClosed', 'allowDuplicate'])
+      const projectId = asString(p.projectId, 'projectId', 256)
+      if ((p.number === undefined) === (p.reference === undefined)) throw new DomainRpcError('invalid_params', 'Give either number or reference')
+      const reference = p.reference !== undefined
+        ? asString(p.reference, 'reference', 2048)
+        : String(asBoundedInt(p.number, 'number', { min: 1, max: Number.MAX_SAFE_INTEGER }))
+      const send = asOptionalBoolean(p.send, 'send') === true
+      const message = asOptionalString(p.message, 64 * 1024)
+      if (message !== undefined && !send) throw new DomainRpcError('invalid_params', 'message is only sent with send: true')
+      try {
+        const started = await asDomainError(() => pullRequestThreadService(ctx).startThread({
+          projectId,
+          reference,
+          send,
+          ...(message !== undefined ? { message } : {}),
+          allowClosed: asOptionalBoolean(p.allowClosed, 'allowClosed') === true,
+          allowDuplicate: asOptionalBoolean(p.allowDuplicate, 'allowDuplicate') === true
+        }))
+        return { ...started, threads: visibleThreadsFor(ctx.connection, ctx.mms.threads.listAllThreads()) }
+      } finally {
+        // Also after a failure: a thread made and removed, or kept in the trash, must not linger in a client's list.
+        ctx.emitEvent?.('threads.updated', { threads: ctx.mms.threads.listAllThreads() })
+      }
+    }
+    case 'pullRequests.pushTarget': {
+      // Where Push goes for a thread linked to a pull request, and why it keeps its usual target when it does.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const root = pullRequestFolder(ctx, { threadId })
+      const inWorktree = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId)).load() !== undefined
+      return { target: inWorktree ? await pullRequestPushTarget(ctx, threadId, root) : { remote: null, branch: null, reason: null } }
     }
     case 'pullRequests.unlink': {
       const p = isObject(params) ? params : {}
@@ -2809,13 +3142,52 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'threads.purge': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
-      if (p.preview === true) return { preview: await ctx.mms.lifecycle.cleanup.preview(threadId) }
+      if (p.preview === true) {
+        const preview = await ctx.mms.lifecycle.cleanup.preview(threadId)
+        // A display estimate beside the preview; it never enters the preview or its digest.
+        return { preview, reclaim: await ctx.mms.lifecycle.cleanup.reclaimEstimate(preview) }
+      }
       const lifecycle = await ctx.mms.lifecycle.purge({ taskId: threadId, operationId: asString(p.operationId, 'operationId', 256), expectedGeneration: lifecycleExpectedGeneration(p), previewDigest: asOptionalString(p.previewDigest, 128), discard: asOptionalBoolean(p.discard, 'discard'), human: ctx.connection?.clientType === 'gui' })
       return { ok: true, lifecycle }
     }
     case 'threads.configureTrash': {
       const p = isObject(params) ? params : {}
       return { policy: ctx.mms.lifecycle.cleanup.configure({ schemaVersion: 1, graceDays: asBoundedInt(p.graceDays, 'graceDays', { min: 1, max: 3650 }), automaticPurge: asBoolean(p.automaticPurge, 'automaticPurge') }, ctx.connection?.clientType === 'gui') }
+    }
+    case 'storage.policy': {
+      const cleanup = ctx.mms.lifecycle.cleanup
+      return { trash: cleanup.policy(), trashSweepStatus: cleanup.sweepStatus(), policy: ctx.mms.storagePolicy.policy(), clockSuspended: ctx.mms.storageCleanup.clockSuspended() }
+    }
+    case 'storage.configure': {
+      const p = isObject(params) ? params : {}
+      const raw = isObject(p.policy) ? p.policy : {}
+      const worktrees = isObject(raw.worktrees) ? raw.worktrees : {}
+      const browser = isObject(raw.browser) ? raw.browser : {}
+      const days = (value: unknown, name: string): number | null => value === null ? null : asBoundedInt(value, name, { min: 1, max: 3650 })
+      const policy = ctx.mms.storagePolicy.configure({
+        schemaVersion: 1,
+        worktrees: {
+          removeWithDeletedThreads: asBoolean(worktrees.removeWithDeletedThreads, 'removeWithDeletedThreads'),
+          inactiveDays: days(worktrees.inactiveDays, 'inactiveDays'),
+          removeMerged: asBoolean(worktrees.removeMerged, 'removeMerged')
+        },
+        browser: { captureDays: days(browser.captureDays, 'captureDays') }
+      }, ctx.connection?.clientType === 'gui')
+      return { policy }
+    }
+    // Any local client may run it: it only applies rules a person already configured.
+    case 'storage.cleanup.run':
+      return { report: await ctx.mms.storageCleanup.run('manual') }
+    // Dry run: what a run would remove or keep now. Changes nothing, so it is open to any local client too.
+    case 'storage.cleanup.plan':
+      return { plan: await ctx.mms.storageCleanup.plan() }
+    case 'storage.cleanup.lastReport':
+      return { report: ctx.mms.storageCleanup.lastReport() }
+    // Totals by project, thread and kind, from the cache (a scan only on `refresh` or the first call). Ids and names, never a path.
+    // A remote caller's params are validated to `{}`, so only a local client can force a rescan.
+    case 'storage.usage': {
+      const p = isObject(params) ? params : {}
+      return await ctx.mms.storageUsage.measure({ refresh: asOptionalBoolean(p.refresh, 'refresh') === true })
     }
     case 'daemon.shutdown': {
       // Owner-token fencing: connection hello already verified; write uses server token only.

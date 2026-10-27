@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
-import { foldedInto } from '../../../shared/harness/move'
+import { FOLDED_TARGETS, foldedInto, type FoldedTarget } from '../../../shared/harness/move'
 import type { InstanceSnapshot } from '../../../shared/harness/status'
 import type { HarnessDriverKind, InstanceConfigPatch, RegistryAgentView } from '../../../shared/harness/types'
 import type { ProviderLoginOption, ProviderLoginResult } from '../../../shared/providerAuth'
@@ -47,6 +47,8 @@ export type AddChoice =
       existing?: InstanceSnapshot
       /** The setups it can be added with (`DriverInfo.setups`), the recommended one first. */
       setups?: CodexSetup[]
+      /** The agent on a model API's key (`FOLDED_TARGETS`): Claude Code with an Anthropic API key. */
+      target?: FoldedTarget
     }
   | { kind: 'api'; key: string; label: string; iconId: string; group: string; options: ProviderLoginOption[] }
   /** An agent picked from the ACP registry, installed by Mousse as an entry of `driver`. */
@@ -63,13 +65,19 @@ export function methodKey(option: ProviderLoginOption): string {
   return `${option.authType}${option.ambient ? ':ambient' : ''}`
 }
 
+/** An agent entry that runs on a model API's key (`FOLDED_TARGETS`), not on the agent's own sign-in. */
+export function onFoldedKey(snapshot: Pick<InstanceSnapshot, 'driver' | 'config'>): boolean {
+  return Object.entries(FOLDED_TARGETS).some(([providerId, target]) => foldedInto(providerId) === snapshot.driver && snapshot.config?.loginMethod === target.loginMethod)
+}
+
 /** What the dialog offers, from the device snapshots and the model APIs not connected yet. */
 export function addChoices(snapshots: readonly InstanceSnapshot[], loginOptions: readonly ProviderLoginOption[]): AddChoice[] {
   const choices: AddChoice[] = []
   for (const [driver, info] of Object.entries(DRIVER_INFO) as Array<[HarnessDriverKind, (typeof DRIVER_INFO)[HarnessDriverKind]]>) {
     if (info.family !== 'agent') continue
     // Every agent is an entry like any other: offered when there is none yet, or as another account.
-    const existing = snapshots.find((snapshot) => snapshot.driver === driver)
+    // An entry on a model API's key (`claude:api`) is not the agent's own setup.
+    const existing = snapshots.find((snapshot) => snapshot.driver === driver && !onFoldedKey(snapshot))
     if (info.setups) {
       // The user's own CLI is added once; every further entry is managed, with its own sign-in.
       const ownSetup = snapshots.some((snapshot) => snapshot.driver === driver && snapshot.config?.setup !== 'managed')
@@ -99,6 +107,23 @@ export function addChoices(snapshots: readonly InstanceSnapshot[], loginOptions:
     if (info.registry) {
       choices.push({ kind: 'registry', key: `registry:${driver}`, label: info.registry.addLabel, iconId: info.iconId, group: 'Agents', driver })
     }
+  }
+  // A model API that runs as an agent on its key (Anthropic → Claude Code) is added as that entry,
+  // with the key, under API keys; always a new entry with a home of its own.
+  for (const [providerId, target] of Object.entries(FOLDED_TARGETS)) {
+    const driver = foldedInto(providerId)
+    if (!driver) continue
+    choices.push({
+      kind: 'new',
+      key: `new:${driver}:${target.slug}`,
+      label: target.displayName,
+      iconId: providerId,
+      group: API_GROUP.api_key,
+      driver,
+      // Its binary is the agent's: the user's own entry tells where it was found.
+      existing: snapshots.find((snapshot) => snapshot.driver === driver && !onFoldedKey(snapshot)),
+      target
+    })
   }
   // Agents sign in through their own instance; their login options are not model APIs. A model API
   // that now runs as an agent (`FOLDED_INTO_AGENT`) is added as that agent only.
@@ -168,8 +193,8 @@ function WizardSteps({
 }
 
 export interface AddProviderHandlers {
-  /** Adds a new instance; resolves with its id. */
-  add: (driver: HarnessDriverKind, config: InstanceConfigPatch) => Promise<string>
+  /** Adds a new instance (its id from `slug` when given); resolves with its id. */
+  add: (driver: HarnessDriverKind, config: InstanceConfigPatch, slug?: string) => Promise<string>
   onApiConnected: (providerId: string) => Promise<void>
   runLogin: (login: () => Promise<ProviderLoginResult>) => Promise<ProviderLoginResult>
 }
@@ -237,7 +262,10 @@ export function AddProviderDialog({
     setRegistryAgent(null)
     setMethod(choice.kind === 'api' ? methodKey(choice.options[0]!) : '')
     if (choice.kind === 'new' && choice.setups) setSetup(choice.setups[0]!)
-    if (choice.kind === 'new') {
+    if (choice.kind === 'new' && choice.target) {
+      const base = choice.target.displayName
+      setLabel(snapshots.some((snapshot) => snapshot.displayName.trim().toLowerCase() === base.toLowerCase()) ? nextInstanceLabel(base, snapshots) : base)
+    } else if (choice.kind === 'new') {
       const base = DRIVER_INFO[choice.driver].label
       setLabel(choice.existing && !DRIVER_INFO[choice.driver].customCommand ? nextInstanceLabel(base, snapshots) : base)
     }
@@ -489,7 +517,13 @@ export function AddProviderDialog({
         {step === last && selected?.kind === 'new' && !selected.setups && !DRIVER_INFO[selected.driver].customCommand && (
           <div className="prov-wizard-panel">
             <SettingsGroup>
-              {selected.kind === 'new' && selected.existing && (
+              {selected.kind === 'new' && selected.target && (
+                <SettingsRow
+                  title="API key"
+                  description={`${DRIVER_INFO[selected.driver].label} runs on your API key, in a home of its own. Your own ${DRIVER_INFO[selected.driver].label} setup stays as it is. Paste the key after adding.`}
+                />
+              )}
+              {selected.kind === 'new' && selected.existing && !selected.target && (
                 <SettingsRow
                   title="Name"
                   description="A separate account, with its own sign-in. Shown in the provider list and the model picker."
@@ -498,14 +532,23 @@ export function AddProviderDialog({
               )}
               <AgentConnectStep
                 choice={selected}
+                cliLabel={selected.target ? DRIVER_INFO[selected.driver].label : undefined}
                 busy={busy === selected.key}
                 disabled={busy !== null}
                 error={error}
                 onAdd={(binaryPath) =>
                   void run(selected.key, async () => {
+                    const target = selected.target
                     const config: InstanceConfigPatch = {
-                      displayName: label.trim() || DRIVER_INFO[selected.driver].label,
+                      displayName: label.trim() || target?.displayName || DRIVER_INFO[selected.driver].label,
                       ...(binaryPath ? { binaryPath } : {})
+                    }
+                    if (target) {
+                      // On the key, always in a home of its own (the gateway holds it to that too).
+                      config.home = 'private'
+                      config.loginMethod = target.loginMethod
+                      finish(await handlers.add(selected.driver, config, target.slug))
+                      return
                     }
                     // A second instance of an agent is another account, so it gets its own home.
                     if (DRIVER_INFO[selected.driver].multiInstance) config.home = selected.existing ? 'private' : 'default'

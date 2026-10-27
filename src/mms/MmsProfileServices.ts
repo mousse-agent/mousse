@@ -4,6 +4,7 @@ import { join } from 'path'
 import { MousseConfigStore } from './config/MousseConfigStore'
 import { MmsEventBus } from './events'
 import { SettingsStore } from './settings/SettingsStore'
+import { rewriteMovedDefaults } from './settings/movedDefaults'
 import { ProviderAuthService } from './providers/ProviderAuthService'
 import { AppletStore } from './applets/AppletStore'
 import { ClaudeSubscriptionProviderService } from './providers/claudeSubscription/ClaudeSubscriptionProviderService'
@@ -20,10 +21,15 @@ import { codexDriver } from './harness/drivers/codex'
 import { cursorDriver } from './harness/drivers/cursor'
 import { grokDriver } from './harness/drivers/grok'
 import { piDriver } from './harness/drivers/pi'
+import { findPiRuntime, piRpcProfileOptions } from './harness/drivers/pi/profile'
+import { decodeModelPrefs } from './harness/catalog'
+import { piOAuthBroker } from './harness/pi/oauthBroker'
 import { harnessAuthRunner, recordHarnessSpawn } from './harness/spawn'
 import { spawnCodexAppServer } from './providers/codex/CodexAppServerClient'
 import { createCodexProviderService, findCodexBinary, type CodexProviderService } from './providers/codex/CodexProviderService'
-import { CLAUDE_INSTANCE_ID, CODEX_INSTANCE_ID, piInstanceId, piProviderIdOf } from '../shared/providerInstances'
+import { ANTIGRAVITY_INSTANCE_ID, CLAUDE_INSTANCE_ID, CODEX_INSTANCE_ID, piProviderIdOf } from '../shared/providerInstances'
+import { ALL_MIRROR_FIELDS, LAUNCH_MIRROR_FIELDS } from './harness/vendorMirror'
+import type { CliProviderConfigPatch } from '../shared/providerAuth'
 import { ProjectManager } from './data/ProjectManager'
 import { ThreadDataStore } from './data/ThreadDataStore'
 import { backfillSubagentLineage } from './data/subagentLineage'
@@ -32,9 +38,12 @@ import { ProfileDatabase } from './run/db/ProfileDatabase'
 import { McpCredentials } from './run/mcp/McpCredentials'
 import { MousseMcpServer } from './run/mcp/MousseMcpServer'
 import { EffectWorker, type EffectWorkerFibres } from './run/EffectWorker'
-import type { ThreadEvent } from './run/types'
+import { TERMINAL_RUN_STATUSES, type RunRecord, type ThreadEvent } from './run/types'
 import { Reconciler } from './run/Reconciler'
 import { RunEngine } from './run/RunEngine'
+import type { BotEngine } from './bots/activation/BotEngine'
+import { openPersonalBots } from './bots/activation/open'
+import type { BotStore } from './bots/store/BotStore'
 import { RunStore } from './run/RunStore'
 import { ScheduledJobService } from './scheduled/ScheduledJobService'
 import { ScheduledJobStore } from './scheduled/ScheduledJobStore'
@@ -66,13 +75,19 @@ import { mousseIdNetModule } from './net/plus'
 import { BridgeProfileService } from './bridge/BridgeProfileService'
 import { ChatNetworkBindingService } from './chats/network/ChatNetworkBindingService'
 import type { SpaceProfileService } from './spaces/SpaceProfileService'
-import type { BotProfileService } from './bots/BotProfileService'
+import type { BotProfileService } from './bots/space/BotProfileService'
 import { randomUUID } from 'crypto'
 import { DomainHandlerRegistry, DomainRpcError } from './protocol/domainRegistry'
 import type { MmsOptions } from './MmsOptions'
 import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
 import { OwnedWorkBarrier } from './execution/OwnedWorkBarrier'
 import { ResourceLifecycleCoordinator } from './lifecycle/ResourceLifecycleCoordinator'
+import { clearCleanupMarker, StorageCleanupService } from './lifecycle/StorageCleanupService'
+import { StorageUsageService } from './lifecycle/StorageUsageService'
+import { StoragePolicyStore } from './lifecycle/StoragePolicyStore'
+import { StorageSweepClock } from './lifecycle/sweepClock'
+import { threadHasPendingWork } from './lifecycle/threadIdle'
+import { listPendingQueue } from './queue/ThreadMessageQueue'
 import { existsSync } from 'node:fs'
 import { settleThreadMutationOwnership } from './queue/ThreadExecutionLease'
 import type { TaskLifecycleRecord } from '../shared/resourceLifecycle'
@@ -85,6 +100,19 @@ const STORAGE_LIFECYCLE_METHODS = new Set([
   'threads.trash',
   'threads.restore',
   'threads.purge'
+])
+
+/**
+ * Requests that must not make a trash, restore or purge wait or look like other work: the lifecycle calls
+ * themselves, a manual cleanup run (which purges through the same checks) and its dry run, and a
+ * disk usage read, which can run for seconds and only reads. One set serves both the admission wait and
+ * the idle check, so the two cannot disagree.
+ */
+const LIFECYCLE_EXEMPT_METHODS = new Set([
+  ...STORAGE_LIFECYCLE_METHODS,
+  'storage.cleanup.run',
+  'storage.cleanup.plan',
+  'storage.usage'
 ])
 
 /** Long-poll requests that sit open while nothing happens; they are not owned profile work. */
@@ -119,6 +147,11 @@ export class MmsProfileServices {
   readonly threads: ThreadDataStore
   readonly lifecycle: ResourceLifecycleCoordinator
   readonly undoRetention: UndoRetentionSweeper
+  readonly storagePolicy: StoragePolicyStore
+  /** Storage cleanup rules: the one scheduler for worktree retirement and the trash sweep. */
+  readonly storageCleanup: StorageCleanupService
+  /** Disk usage for Settings > Storage, measured in the background and cached. */
+  readonly storageUsage: StorageUsageService
   readonly orchestrator: OrchestratorService
   readonly scheduled: ScheduledJobService
   readonly channels: ChannelService
@@ -170,6 +203,10 @@ export class MmsProfileServices {
   readonly threadRuntimes: ThreadRuntimeManager
   /** Profile Run Engine (`<profileHome>/run/run.db`); Phase 1 dual-writes beside the orchestrator. */
   readonly runEngine: RunEngine
+  /** Personal bots (PR 6 §4). */
+  /** Null when `bots.db` could not be opened: bots are unavailable, every other thread works. */
+  readonly personalBots: BotEngine | null
+  private readonly botStore: BotStore | null
   /** Phase 5 (SPEC §15.1): durable bearer credentials of the Mousse MCP server. */
   readonly mcpCredentials: McpCredentials
   /** Phase 5: Mousse's tools for vendor runtimes over MCP Streamable HTTP on 127.0.0.1. */
@@ -213,6 +250,8 @@ export class MmsProfileServices {
       includeExternalCliConfigs?: boolean
       /** The installation's profiles: an agent install another profile uses counts only while it is listed. */
       listProfiles?: () => Array<{ id: string; displayName?: string }>
+      /** Whether another profile still has an unmoved provider entry `instanceId` (the profile host's answer for a profile it builds). */
+      otherProfilesUse?: (instanceId: string) => boolean
       /**
        * Effect worker fibres per lane class (SPEC §12.3). `turn` caps this profile's concurrent
        * turns (default 8); control fibres keep Stop and steer responsive while turns run.
@@ -235,10 +274,20 @@ export class MmsProfileServices {
     this.events = new MmsEventBus()
     this.settings = new SettingsStore(config)
     this.providerAuth = shared.providerAuth
+    // The built-in instances' launch settings and sign-out live in their instance config (the
+    // gateway's); the vendor services read them from there and save through `configure`.
+    const launchOf = (instanceId: string) => () => this.harnessImpl?.launchFor(instanceId) ?? {}
+    const signedOutOf = (instanceId: string) => () => this.harnessImpl?.signedOutInMousse(instanceId) ?? false
+    const saveLaunchOf = (instanceId: string) => async (patch: CliProviderConfigPatch) => {
+      if (!this.harnessImpl) throw new Error('Providers are not ready yet')
+      await this.harnessImpl.instances.configure(instanceId, patch)
+    }
     this.antigravity = new AntigravityProviderService(
       homeDir,
       shared.installationHome,
-      this.questions
+      this.questions,
+      undefined,
+      { launch: launchOf(ANTIGRAVITY_INSTANCE_ID), saveLaunch: saveLaunchOf(ANTIGRAVITY_INSTANCE_ID) }
     )
     this.antigravity.hooks.changed = () => this.events.emit({ channel: 'providers:changed', data: undefined })
     this.antigravity.hooks.installProgress = (message) =>
@@ -247,7 +296,10 @@ export class MmsProfileServices {
     // gateway (the inherited PATH first, then the login shell's) and start through its spawn path.
     this.claudeSubscription = new ClaudeSubscriptionProviderService(homeDir, this.questions, {
       findBinary: () => this.harnessImpl?.findBinaryFor(CLAUDE_INSTANCE_ID),
-      runAuth: harnessAuthRunner(CLAUDE_INSTANCE_ID)
+      runAuth: harnessAuthRunner(CLAUDE_INSTANCE_ID),
+      launchConfig: launchOf(CLAUDE_INSTANCE_ID),
+      signedOut: signedOutOf(CLAUDE_INSTANCE_ID),
+      saveLaunch: saveLaunchOf(CLAUDE_INSTANCE_ID)
     })
     this.codex = createCodexProviderService(homeDir, this.questions, {
       findBinary: () => this.harnessImpl?.findBinaryFor(CODEX_INSTANCE_ID) ?? findCodexBinary(),
@@ -255,10 +307,20 @@ export class MmsProfileServices {
         recordHarnessSpawn({ instanceId: CODEX_INSTANCE_ID, purpose: 'app-server', command: launch.binary, args: launch.args, env: launch.env })
         return spawnCodexAppServer(launch)
       }
+    }, {
+      launch: launchOf(CODEX_INSTANCE_ID),
+      signedOut: signedOutOf(CODEX_INSTANCE_ID),
+      saveLaunch: saveLaunchOf(CODEX_INSTANCE_ID)
     })
     // Seeded on load; a stored instance is never rewritten.
     this.providerInstances = new ProviderInstanceService({
       providerAuth: this.providerAuth,
+      // A seeded built-in starts with what its vendor file holds (`harness/vendorMirror`).
+      mirrorFor: (instanceId) =>
+        instanceId === CLAUDE_INSTANCE_ID ? this.claudeSubscription.vendorMirror(ALL_MIRROR_FIELDS)
+          : instanceId === CODEX_INSTANCE_ID ? this.codex.vendorMirror(ALL_MIRROR_FIELDS)
+            : instanceId === ANTIGRAVITY_INSTANCE_ID ? this.antigravity.vendorMirror(LAUNCH_MIRROR_FIELDS)
+              : undefined,
       store: {
         read: () => {
           const section = config.getProvidersSection()
@@ -355,7 +417,19 @@ export class MmsProfileServices {
       installationHome: shared.installationHome,
       instanceMap: this.providerInstances,
       drivers: [
-        piDriver({ client: () => this.orchestrator.piChatClient(), credentials: () => this.providerAuth }),
+        piDriver({
+          client: () => this.orchestrator.piChatClient(),
+          credentials: () => this.providerAuth,
+          // `pi:*` instances run on Pi's agent when this build ships its runtime (PR 2 §5).
+          rpc: piRpcProfileOptions({
+            auth: () => this.providerAuth,
+            runtime: findPiRuntime(),
+            customModels: (instanceId) => decodeModelPrefs(config.getProvidersSection().modelPrefs?.[instanceId]).custom,
+            registry: () => this.orchestrator.mcpToolRegistry(),
+            // Mousse stays the only refresher of an OAuth sign-in; Pi gets the access token only.
+            oauth: piOAuthBroker(this.providerAuth)
+          })
+        }),
         claudeCodeDriver({
           builtIn: () => this.claudeSubscription,
           // Skill resolution follows the instance's environment (its own CLAUDE_CONFIG_DIR, if any).
@@ -376,6 +450,10 @@ export class MmsProfileServices {
         grokDriver({ agents: agentInstalls })
       ],
       registry: { search: (query) => agentRegistry.search(query) },
+      // A sign-in the profiles share (the pi-ai credentials) stays while another profile still uses it.
+      // With no host to ask, it is treated as in use: the credential is kept.
+      otherProfilesUse: (instanceId) =>
+        shared.otherProfilesUse?.(instanceId) ?? this.getInstallationHost()?.otherProfilesUse(this.profileId, instanceId) ?? true,
       questions: this.questions,
       prefs: {
         read: () => config.getProvidersSection().modelPrefs,
@@ -384,21 +462,44 @@ export class MmsProfileServices {
       cwd: () => this.worktrees.getRepoRoot(),
       piDisplayName: (providerId) => this.providerAuth.getProviderDisplayName(providerId),
       onProvidersChanged: () => this.events.emit({ channel: 'providers:changed', data: undefined }),
-      // A moved entry's device default follows it to the agent.
+      // A moved entry's device default follows it to the agent; its title model becomes Automatic.
       defaults: {
         rewrite: (from, to) => {
-          const provider = this.settings.get().provider
-          const named = provider.instanceId?.trim() ? provider.instanceId === from : piInstanceId(provider.llmProvider) === from
-          if (!named) return []
-          const model = to.model(provider.model)
-          this.settings.set({ provider: { ...provider, instanceId: to.instanceId, llmProvider: to.llmProvider, model } })
-          return [model === provider.model ? 'Default model' : `Default model: ${model} instead of ${provider.model}`]
+          const { patch, rewritten } = rewriteMovedDefaults(this.settings.get(), from, to)
+          if (patch) this.settings.set(patch)
+          return rewritten
         }
       }
     })
     this.harness = this.harnessImpl
     this.harnessImpl.startModelRefreshSchedule()
     this.orchestrator.setHarness(this.harnessImpl)
+    // Personal bots (PR 6): their own database under `<profileHome>/bots/`, which older builds never open.
+    // A `bots.db` that cannot be opened (corrupt, newer schema) fails closed for bots only: the
+    // profile opens, its other threads work, and bot methods report bots unavailable.
+    const harness = this.harnessImpl
+    const opened = openPersonalBots({
+      profileHome: homeDir,
+      threads: this.threads,
+      runs: () => this.runEngine,
+      harness,
+      notifyEffects: () => this.orchestrator.notifyEffects(),
+      stopThread: (threadId) => this.orchestrator.stopThread(threadId, 'user', { clientRequestId: `bot-stop:${threadId}:${Date.now()}` })
+    })
+    this.botStore = opened?.store ?? null
+    this.personalBots = opened?.engine ?? null
+    const personalBots = this.personalBots
+    if (personalBots) this.orchestrator.setBotThreads(personalBots)
+    // Every bot run that ends is settled, whatever path its turn took (no activation stays running).
+    if (personalBots) this.runEngine.on('event', (event: ThreadEvent) => {
+      if (event.type !== 'run.status') return
+      const run = event.payload as RunRecord
+      if (run.source !== 'bot' || !TERMINAL_RUN_STATUSES.has(run.status)) return
+      setImmediate(() => {
+        try { personalBots.settleRun(run.runId) } catch (error) { console.warn('bot dispatch could not be settled', { runId: run.runId, error: error instanceof Error ? error.message : String(error) }) }
+      })
+    })
+    this.orchestrator.setBotDispatcher(personalBots)
     this.orchestrator.setWorkflowChatExecutor(this.platform.workflowChat)
     this.orchestrator.setFeatureFlags(this.config.get().features)
     this.threadRuntimes = new ThreadRuntimeManager()
@@ -437,6 +538,9 @@ export class MmsProfileServices {
       this.threads,
       this.projects
     )
+    // The Run Engine decides when a scheduled occurrence is over, including after a restart.
+    this.scheduledStore.setRunProbe(this.orchestrator.scheduledRunProbe())
+    this.orchestrator.setScheduledHooks({ onOccurrenceSettled: (event) => this.scheduled.occurrenceSettled(event) })
     this.channels = new ChannelService(
       this.orchestrator,
       this.threads,
@@ -526,7 +630,11 @@ export class MmsProfileServices {
           else this.orchestrator.markThreadDeleted(task.taskId)
         }
       },
+      quiesceDisk: () => this.storageUsage.pause(),
       projectPurged: (record) => {
+        // A permanent delete freed space.
+        this.storageUsage.rescanSoon()
+        clearCleanupMarker(this.threads.lifecycleStore, record.taskId)
         this.threads.projectPurgedIndex(record)
         this.threadRuntimes.disposeRuntime(record.taskId)
         this.orchestrator.markThreadDeleted(record.taskId)
@@ -536,6 +644,31 @@ export class MmsProfileServices {
       }
     })
     this.undoRetention = new UndoRetentionSweeper(this.threads.lifecycleStore)
+    const storageClock = new StorageSweepClock(this.threads.lifecycleStore.root)
+    this.storagePolicy = new StoragePolicyStore(this.threads.lifecycleStore, storageClock, () =>
+      this.storageCleanup.scheduleAfterPolicyChange()
+    )
+    this.storageCleanup = new StorageCleanupService({
+      store: this.threads.lifecycleStore,
+      threads: this.threads,
+      purge: this.lifecycle.cleanup,
+      policy: this.storagePolicy,
+      clock: storageClock,
+      idle: (threadId) => this.threadPendingWork(threadId),
+      installationHome: shared.installationHome,
+      codeHost: this.gitService.codeHost,
+      browserCaptures: { workerArtifactRoot: this.platform.workerArtifactRoot, sessions: (staleBefore) => this.platform.browserSessionStates(staleBefore) },
+      // A run that freed space has made the cached numbers wrong.
+      onRunComplete: (report) => { if (report.counts.removed > 0) this.storageUsage.rescanSoon() },
+      quiesceDisk: () => this.storageUsage.pause()
+    })
+    this.storageUsage = new StorageUsageService({
+      store: this.threads.lifecycleStore,
+      threads: this.threads,
+      projects: this.projects,
+      installationHome: shared.installationHome,
+      busy: () => this.storageCleanup.isRunning()
+    })
     this.wireServiceEvents()
     void opts?.headless
   }
@@ -563,13 +696,7 @@ export class MmsProfileServices {
     const requests = this.requests.snapshot()
     const activeRequests = Object.entries(requests).filter(
       ([key, count]) =>
-        count > 0 &&
-        ![
-          'rpc:threads.delete',
-          'rpc:threads.trash',
-          'rpc:threads.restore',
-          'rpc:threads.purge'
-        ].includes(key)
+        count > 0 && !LIFECYCLE_EXEMPT_METHODS.has(key.replace(/^rpc:/, ''))
     )
     if (activeRequests.length) {
       throw new ResourceLifecycleError(
@@ -585,6 +712,32 @@ export class MmsProfileServices {
     if (['trashed', 'purge-started'].includes(root.state))
       this.threads.lifecycleStore.withCleanupSettlement(taskId, settle)
     else settle()
+  }
+
+  /** Why a thread is not idle for storage cleanup, or undefined. Looks only at what is already loaded. */
+  private threadPendingWork(threadId: string): string | undefined {
+    return threadHasPendingWork(
+      {
+        orchestrator: this.orchestrator,
+        runEngine: this.runEngine,
+        pendingQueueLength: (id) => listPendingQueue(this.threads.loadMessageQueue(id)).length,
+        questions: this.questions,
+        ptyManager: this.ptyManager,
+        threadRuntimes: this.threadRuntimes,
+        executionBusy: (ids) => {
+          try { this.platform.chats.assertLifecycleIdle(new Set(ids)) } catch { return 'A chat is running' }
+          try { this.platform.workflowRuns.assertLifecycleIdle(ids) } catch { return 'A workflow is running or waiting' }
+          return undefined
+        },
+        listThreads: () => this.threads.listAllThreads()
+      },
+      threadId
+    )
+  }
+
+  /** The "Remove worktrees of deleted threads" rule; an unreadable policy keeps today's behaviour. */
+  private removesWorktreesWithDeletedThreads(): boolean {
+    try { return this.storagePolicy.policy().worktrees.removeWithDeletedThreads } catch { return true }
   }
 
   private lifecycleOwnedTasks(taskId: string): TaskLifecycleRecord[] {
@@ -642,9 +795,11 @@ export class MmsProfileServices {
       operationId: this.resolveLifecycleOperationId(taskId, 'trash', operationId),
       expectedGeneration
     })
-    if (record.state === 'trashed') {
+    if (record.state === 'trashed' && this.removesWorktreesWithDeletedThreads()) {
       try {
-        await this.lifecycle.cleanup.retireTrashed(taskId)
+        // The same keep rules as the hourly run (unpublished commits, links, files in use); a checkout that is kept stays until purge.
+        const item = await this.storageCleanup.retireDeletedWorktree(taskId)
+        if (item?.outcome === 'removed') this.storageUsage.rescanSoon()
       } catch (error) {
         this.threads.lifecycleStore.update(taskId, (current) => {
           current.blockedReason = `Checkout retirement retained resources: ${(error as Error).message}`
@@ -704,7 +859,7 @@ export class MmsProfileServices {
         // the move; this wait alone never does. Exclude lifecycle calls consistently
         // with that idle check, avoiding a pair of lifecycle calls waiting on itself.
         const include = (active: string) =>
-          !STORAGE_LIFECYCLE_METHODS.has(active.replace(/^rpc:/, ''))
+          !LIFECYCLE_EXEMPT_METHODS.has(active.replace(/^rpc:/, ''))
         try {
           await this.requests.waitForIdle(2_000, include)
         } catch (error) {
@@ -753,6 +908,8 @@ export class MmsProfileServices {
   /** Close admission synchronously, before any teardown await can admit another request. */
   beginShutdown(): void {
     void this.undoRetention.stop()
+    void this.storageCleanup.stop()
+    void this.storageUsage.stop()
     void this.lifecycle.cleanup.stop()
     this.requests.beginShutdown()
     // Ends open and late window speech waits now, even when Net never started and so never closes
@@ -847,7 +1004,9 @@ export class MmsProfileServices {
     this.questions.markInterruptedByDaemonRestart()
     await this.platform.workflowRuns.startRecovery()
     this.undoRetention.start()
-    this.lifecycle.cleanup.start()
+    // The storage service is the only scheduler; it runs the trash sweep inside its own run.
+    this.storageCleanup.start()
+    this.storageUsage.start()
 
     // Headless-safe: reclaim abandoned claims and drain pending normal work without the GUI.
     // Non-blocking; live peer ownership is never stolen.
@@ -1064,6 +1223,8 @@ export class MmsProfileServices {
     // later owner from even receiving shutdown.
     const cleanups = [
       () => this.undoRetention.stop(),
+      () => this.storageCleanup.stop(),
+      () => this.storageUsage.stop(),
       () => this.lifecycle.cleanup.stop(),
       () => this.platform.dispose(),
       () => this.scheduled.shutdown(),
@@ -1097,6 +1258,10 @@ export class MmsProfileServices {
     this.config.stopWatching()
     try {
       this.orchestrator.setRunEngine(null)
+      this.orchestrator.setBotDispatcher(null)
+      this.orchestrator.setBotThreads(null)
+      this.personalBots?.close()
+      this.botStore?.close()
       this.runEngine.store.db.close()
     } catch (error) {
       console.warn('run engine database close failed', error)

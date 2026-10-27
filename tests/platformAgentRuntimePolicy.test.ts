@@ -47,7 +47,7 @@ function runNative(
     const chat = llm.chat.bind(llm)
     llm.chat = (messages, tools, options, thinking, text) => chat(messages, tools, { ...options, retryDelayMs: extra.retryDelayMs }, thinking, text)
   }
-  const service = new AgentExecutionService({ native: createNativeAgentRuntime(llm) })
+  const service = new AgentExecutionService({ runtime: createNativeAgentRuntime(llm) })
   return {
     captured,
     pending: service.run({
@@ -71,7 +71,7 @@ describe('native agent runtime policy', () => {
     snapshot.settings.output.tone = 'calm'
     snapshot.settings.output.verbosity = 'concise'
     const run = async () => ({ text: 'ok', usage: { totalTokens: 1 }, history: [] })
-    const result = await new AgentExecutionService({ native: { run } }).run({
+    const result = await new AgentExecutionService({ runtime: { run } }).run({
       profileId: 'profile-1',
       resolved: snapshot,
       threadId: 'thread-1',
@@ -87,7 +87,7 @@ describe('native agent runtime policy', () => {
     snapshot.settings.delegation.maxDepth = 2
     snapshot.settings.script.enabled = true
     snapshot.settings.script.executionMode = 'sandboxed'
-    const service = new AgentExecutionService({ native: { run: async () => ({ text: 'nope' }) } })
+    const service = new AgentExecutionService({ runtime: { run: async () => ({ text: 'nope' }) } })
     await expect(service.run({
       profileId: 'profile-1',
       resolved: snapshot,
@@ -113,7 +113,7 @@ describe('native agent runtime policy', () => {
       resolveTarget: () => ({ backend: 'electron-attached' as const, uiTabId: 'tab-1' }),
       dispatch: async () => ({})
     }
-    const service = new AgentExecutionService({ native: { run: async () => ({ text: 'nope' }) } })
+    const service = new AgentExecutionService({ runtime: { run: async () => ({ text: 'nope' }) } })
     await expect(service.run({
       profileId: 'profile-1',
       resolved: snapshot,
@@ -142,7 +142,7 @@ describe('native agent runtime policy', () => {
   })
 
   it('rejects non-finite and negative requested budgets and honors zero', async () => {
-    const service = new AgentExecutionService({ native: { run: async () => ({ text: 'nope' }) } })
+    const service = new AgentExecutionService({ runtime: { run: async () => ({ text: 'nope' }) } })
     await expect(service.run({
       profileId: 'profile-1',
       resolved: resolvedDefinition(),
@@ -173,7 +173,7 @@ describe('native agent runtime policy', () => {
   })
 
   it('rejects unrelated profile and thread snapshots before dispatch', async () => {
-    const service = new AgentExecutionService({ native: { run: async () => ({ text: 'nope' }) } })
+    const service = new AgentExecutionService({ runtime: { run: async () => ({ text: 'nope' }) } })
     await expect(service.run({
       profileId: 'profile-1',
       resolved: resolvedDefinition(),
@@ -532,7 +532,7 @@ describe('native agent runtime policy', () => {
       onStream: (id) => modelsSeen.push(id),
       getModel: (provider, id) => fixtureModel(provider, id)
     })
-    const result = await new AgentExecutionService({ native: createNativeAgentRuntime(llm) }).run({
+    const result = await new AgentExecutionService({ runtime: createNativeAgentRuntime(llm) }).run({
       profileId: 'profile-1',
       resolved: snapshot,
       threadId: 'thread-1',
@@ -613,7 +613,7 @@ describe('runtime policy helpers', () => {
       ref: { providerId: 'fixture-provider', modelId: 'fixture-fallback' },
       available: true, efforts: [], speeds: [], contexts: [], capabilities: [], unavailableReasons: []
     }]
-    await expect(new AgentExecutionService({ native: { run: async () => ({ text: 'nope' }) } }).run({
+    await expect(new AgentExecutionService({ runtime: { run: async () => ({ text: 'nope' }) } }).run({
       profileId: 'profile-1', resolved: snapshot, threadId: 'thread-1', input: 'run'
     })).rejects.toMatchObject({
       code: 'SETTINGS_UNSUPPORTED',

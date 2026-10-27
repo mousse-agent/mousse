@@ -102,6 +102,7 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
     }
     const chatInput = (): ClaudeSubscriptionChatInput => ({
       mode: input.mode === 'plan' ? 'plan' : 'default',
+      permissionMode: input.permissionMode,
       child: input.child,
       continuation: input.continuation,
       continuationId: input.continuationId,

@@ -94,7 +94,10 @@ describe('provider error classification', () => {
       const now = at.getTime()
       expect(boundedResetIso(now / 1000 + 60, now)).toBe('2026-10-01T00:01:00.000Z')
       expect(boundedResetIso('2026-10-01T00:01:00Z', now)).toBe('2026-10-01T00:01:00.000Z')
-      expect(boundedResetIso(now / 1000 - 1, now)).toBeUndefined()
+      // A reset that just passed (or a fast local clock) is not an estimate: shortly from now.
+      expect(boundedResetIso(now / 1000 - 1, now)).toBe('2026-10-01T00:00:30.000Z')
+      expect(boundedResetIso(now / 1000 - 299, now)).toBe('2026-10-01T00:00:30.000Z')
+      expect(boundedResetIso(now / 1000 - 301, now)).toBeUndefined()
       expect(boundedResetIso(now / 1000 + 8 * 86_400 + 1, now)).toBeUndefined()
       expect(boundedResetIso(undefined, now)).toBeUndefined()
       expect(boundedResetIso(Number.NaN, now)).toBeUndefined()

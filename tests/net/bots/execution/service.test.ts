@@ -4,21 +4,21 @@ import { ThreadDataStore } from '../../../../src/mms/data/ThreadDataStore'
 import {
   effectiveBotPolicyDigest,
   type NativeBotDefinition
-} from '../../../../src/mms/bots/runtime'
+} from '../../../../src/mms/bots/space/runtime'
 import { ScriptedBotRuntime } from '../scriptedRuntime'
 import {
   MmsBotMaterializer,
   BotExecutionService,
   deniedBotApprovals
-} from '../../../../src/mms/bots/execution'
+} from '../../../../src/mms/bots/space/execution'
 import { setup } from '../admission/helpers'
 import { cleanup, disposers, profile } from '../../spaces/host/helpers'
 import { SqliteExecutionLedger } from '../../../../src/mms/net/store/executions'
 import { SqliteBudgetLedger } from '../../../../src/mms/net/store/budgets'
 import { SqliteOutbox } from '../../../../src/mms/net/store/outbox'
-import { SqliteCompartmentStore } from '../../../../src/mms/bots/compartments'
-import { SqliteBotRegistry } from '../../../../src/mms/bots/registry'
-import { BotAdmissionService, BotOutbox } from '../../../../src/mms/bots/admission'
+import { SqliteCompartmentStore } from '../../../../src/mms/bots/space/compartments'
+import { SqliteBotRegistry } from '../../../../src/mms/bots/space/registry'
+import { BotAdmissionService, BotOutbox } from '../../../../src/mms/bots/space/admission'
 import { PrivateSpaceService } from '../../../../src/mms/spaces/private'
 import { SqlPrivateStreamKeys } from '../../../../src/mms/net/identity'
 import { createHash } from 'node:crypto'
@@ -89,7 +89,8 @@ async function runtimeFixture(ignoresAbort = false) {
     ...previous(mention),
     ...materializer.plannedIds(mention)
   })
-  const output = f.service.options.output as import('../../../../src/mms/bots/admission').BotOutbox,
+  const output = f.service.options
+      .output as import('../../../../src/mms/bots/space/admission').BotOutbox,
     runner = new BotExecutionService({
       db: f.p.db,
       executions: f.executions,
