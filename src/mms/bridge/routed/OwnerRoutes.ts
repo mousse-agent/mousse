@@ -418,6 +418,7 @@ export class OwnerRoutes {
     let stagedIds: string[] = []
     let consumed = false
     let entered = false
+    let savingLarge = false
     // Where the stream of this computer is before the snapshot is read, so no record is marked as already
     // applied that the snapshot does not hold.
     const head =
@@ -439,6 +440,21 @@ export class OwnerRoutes {
       if (ROUTED_LARGE_READS.includes(method)) {
         this.enterLargeRead(node)
         entered = true
+      }
+      // A save sent staged is a large one (up to 25 MiB): its text, its bytes and the file it replaces are all in memory
+      // together, so a computer saves one at a time. A refusal, not a wait: the caller tries again when the first is done.
+      if (
+        method === 'files.write' &&
+        isPlainObject(params[ROUTED_STAGED_KEY]) &&
+        Object.hasOwn(params[ROUTED_STAGED_KEY] as object, 'content')
+      ) {
+        if (this.largeSaves.has(node))
+          throw new DomainRpcError(
+            'rate_limited',
+            'Another large save from this computer is still being written. Try again when it is done.'
+          )
+        this.largeSaves.add(node)
+        savingLarge = true
       }
       if (params[ROUTED_STAGED_KEY] !== undefined) {
         const unstaged = this.unstage(params, node)
@@ -490,9 +506,11 @@ export class OwnerRoutes {
       // A call that did not use its staged values up gives them back, so they can be sent in a call that does.
       if (stagedIds.length && !consumed) staging?.release(stagedIds)
       if (entered) this.leaveLargeRead(node)
+      if (savingLarge) this.largeSaves.delete(node)
     }
   }
 
+  private readonly largeSaves = new Set<NodeId>()
   private readonly largeReads = new Map<NodeId, number>()
   private enterLargeRead(node: NodeId): void {
     const running = this.largeReads.get(node) ?? 0

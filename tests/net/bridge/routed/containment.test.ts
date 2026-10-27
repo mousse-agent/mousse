@@ -4,6 +4,7 @@
  */
 import { execFileSync, spawnSync } from 'node:child_process'
 import {
+  appendFileSync,
   existsSync,
   linkSync,
   mkdirSync,
@@ -17,6 +18,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { gitControlCache } from '../../../../src/mms/files/gitControl'
 import { dispatchMethod } from '../../../../src/mms/protocol/handlers'
 import { ThreadWorkspaceManager } from '../../../../src/mms/workspace/ThreadWorkspaceManager'
 import { isRoutedPagedReply } from '../../../../src/shared/bridge/routed'
@@ -221,6 +223,8 @@ describe("Git's own files and Mousse's control files", () => {
     const { t, root } = await folderThread(o)
     mkdirSync(join(root, '.githooks'))
     execFileSync('git', ['config', 'core.hooksPath', '.githooks'], { cwd: root })
+    // The setting was made by hand after the first save looked at the repository: the lookup is kept for a few seconds.
+    gitControlCache.forget()
     folderLink(join(root, '.githooks'), join(root, 'tools'))
     for (const path of ['.githooks/pre-commit', 'tools/pre-commit', '.githooks/sub/post-merge'])
       expect(
@@ -238,6 +242,7 @@ describe("Git's own files and Mousse's control files", () => {
     // Git still commits with the setting in place; only a change to the hooks is refused.
     await o.ok('git.commit', { threadId: t.id, message: 'with a hooks folder' })
     execFileSync('git', ['config', '--unset-all', 'core.hooksPath'], { cwd: root })
+    gitControlCache.forget()
     expect(
       await o.ok('files.write', {
         threadId: t.id,
@@ -396,6 +401,163 @@ describe('a Git action started from another computer', () => {
   }, 180_000)
 })
 
+describe('Git configuration inside the folder', () => {
+  it('cannot be written, including the file a repository includes, whichever file is written first', async () => {
+    const o = await routedOwner()
+    const { t, root, path } = await folderThread(o)
+    // The repository includes a file from its working tree (an absolute path: the worktree shares the repository's config).
+    writeFileSync(join(root, 'shared.gitconfig'), '[user]\n  name = shared\n')
+    execFileSync('git', ['config', 'include.path', join(root, 'shared.gitconfig')], { cwd: path })
+    execFileSync(
+      'git',
+      ['config', 'includeIf.gitdir:/nowhere/.path', join(root, 'later.gitconfig')],
+      { cwd: path }
+    )
+    // Ignored, so the worktree stays clean for a save; the repository still reads it.
+    appendFileSync(join(path, '.git', 'info', 'exclude'), 'shared.gitconfig\nlater.gitconfig\n')
+    gitControlCache.forget()
+    mkdirSync(join(root, 'scripts'))
+    const hooks = 'core.hooksPath = scripts\ncore.fsmonitor = scripts/monitor\n'
+    // Hook file first, then the setting that would make it a hook: the second is refused, so the first stays an ordinary file.
+    expect(
+      await o.ok('files.write', {
+        threadId: t.id,
+        path: 'scripts/pre-commit',
+        content: 'echo owned\n'
+      })
+    ).toMatchObject({
+      path: 'scripts/pre-commit'
+    })
+    for (const target of ['shared.gitconfig', 'later.gitconfig'])
+      expect(
+        await o.call('files.write', { threadId: t.id, path: target, content: `[core]\n${hooks}` }),
+        target
+      ).toMatchObject(refused('path_protected'))
+    expect(readFileSync(join(root, 'shared.gitconfig'), 'utf8')).toBe('[user]\n  name = shared\n')
+    expect(existsSync(join(root, 'later.gitconfig'))).toBe(false)
+    // The repository still has no hooks folder: an unset setting prints nothing.
+    expect(
+      spawnSync('git', ['config', '--get', 'core.hooksPath'], {
+        cwd: path,
+        encoding: 'utf8'
+      }).stdout.trim()
+    ).toBe('')
+  }, 180_000)
+
+  it('cannot be written in a repository nested in the folder, hooks folder included', async () => {
+    const o = await routedOwner()
+    const { t, root, path } = await folderThread(o)
+    const nested = join(root, 'vendor', 'lib')
+    mkdirSync(nested, { recursive: true })
+    // The nested repository is the user's own and ignored, so the worktree stays clean for a save.
+    appendFileSync(join(path, '.git', 'info', 'exclude'), 'vendor/\n')
+    execFileSync('git', ['init', '-q'], { cwd: nested })
+    execFileSync('git', ['config', 'core.hooksPath', 'h'], { cwd: nested })
+    mkdirSync(join(nested, 'src'))
+    for (const target of ['vendor/lib/h/pre-commit', 'vendor/lib/.git/hooks/pre-commit'])
+      expect(
+        await o.call('files.write', { threadId: t.id, path: target, content: 'echo owned\n' }),
+        target
+      ).toMatchObject(refused('path_protected'))
+    expect(
+      await o.ok('files.write', { threadId: t.id, path: 'vendor/lib/src/a.ts', content: 'x\n' })
+    ).toMatchObject({
+      path: 'vendor/lib/src/a.ts'
+    })
+  }, 180_000)
+})
+
+describe('files that start programs by themselves', () => {
+  const write = (o: Owner, threadId: string, path: string) =>
+    o.call('files.write', { threadId, path, content: '{}\n' })
+
+  for (const maxMode of ['accept_edits', 'full'] as const)
+    it(`are ${maxMode === 'full' ? 'saved' : 'refused'} from a device whose limit is ${maxMode}, and what a person runs themselves is not held`, async () => {
+      const o = await routedOwner({ maxMode })
+      const { t, root } = await folderThread(o)
+      for (const folder of ['.claude', '.husky', '.cursor', '.codex']) mkdirSync(join(root, folder))
+      const targets = [
+        '.claude/settings.json',
+        '.claude/settings.local.json',
+        '.mcp.json',
+        '.cursor/mcp.json',
+        '.codex/config.toml',
+        '.husky/pre-commit',
+        '.pre-commit-config.yaml',
+        'lefthook.yml'
+      ]
+      for (const target of targets) {
+        const reply = await write(o, t.id, target)
+        if (maxMode === 'full')
+          expect(reply, `${maxMode} ${target}`).toMatchObject({
+            ok: true,
+            result: { path: target }
+          })
+        else expect(reply, `${maxMode} ${target}`).toMatchObject(refused('path_needs_full_access'))
+      }
+      if (maxMode !== 'full') {
+        for (const target of targets) expect(existsSync(join(root, target)), target).toBe(false)
+        expect(
+          o.audit
+            .recent(20, o.f.callerNode)
+            .filter((row) => row.outcome === 'path_needs_full_access')
+        ).toHaveLength(targets.length)
+      }
+      // What a person runs themselves, or behind the tool's own prompt, stays writable at every limit.
+      mkdirSync(join(root, '.vscode'))
+      for (const target of ['package.json', '.vscode/tasks.json', '.envrc', 'Makefile', 'src.ts'])
+        expect(await write(o, t.id, target), `${maxMode} ${target}`).toMatchObject({ ok: true })
+      // Git's own files are refused at every limit.
+      expect(await write(o, t.id, '.git/hooks/pre-commit'), maxMode).toMatchObject(
+        refused('path_protected')
+      )
+    }, 240_000)
+})
+
+describe('saves that are large', () => {
+  it('are written one at a time per computer, and the next is refused, not queued', async () => {
+    const o = await routedOwner({ staging: {} })
+    const { t, root } = await folderThread(o)
+    const stageId = async (value: string) =>
+      ((await o.stage(value)).result as { stage: string }).stage
+    const first = await stageId('x'.repeat(700 * 1024))
+    const second = await stageId('y'.repeat(700 * 1024))
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const real = o.f.mms.fileService.writeFile.bind(o.f.mms.fileService)
+    const writing = vi
+      .spyOn(o.f.mms.fileService, 'writeFile')
+      .mockImplementation(async (...args) => {
+        await held
+        return real(...args)
+      })
+    const running = o.call('files.write', {
+      threadId: t.id,
+      path: 'one.txt',
+      stagedValues: { content: first }
+    })
+    await vi.waitFor(() => expect(writing).toHaveBeenCalledTimes(1), { timeout: 20_000 })
+    expect(
+      await o.call('files.write', {
+        threadId: t.id,
+        path: 'two.txt',
+        stagedValues: { content: second }
+      })
+    ).toMatchObject(refused('rate_limited'))
+    release()
+    expect(await running).toMatchObject({ ok: true, result: { path: 'one.txt' } })
+    // The refused one gave its staged value back, and goes through now.
+    expect(
+      await o.call('files.write', {
+        threadId: t.id,
+        path: 'two.txt',
+        stagedValues: { content: second }
+      })
+    ).toMatchObject({ ok: true })
+    expect(readFileSync(join(root, 'two.txt'), 'utf8')).toHaveLength(700 * 1024)
+  }, 180_000)
+})
+
 describe('opening a folder from another computer', () => {
   /** A user's home folder with the places credentials live, and ordinary folders beside them. */
   function home() {
@@ -411,6 +573,9 @@ describe('opening a folder from another computer', () => {
       '.config/gcloud',
       '.config/nvim',
       '.sshx',
+      '.codex',
+      '.claude',
+      '.cargo',
       'code/project'
     ])
       mkdirSync(join(folder, name), { recursive: true })
@@ -445,6 +610,10 @@ describe('opening a folder from another computer', () => {
       join(folder, '.docker'),
       join(folder, '.config', 'gh'),
       join(folder, '.config', 'gcloud'),
+      // The sign-ins of coding agents and package tools.
+      join(folder, '.codex'),
+      join(folder, '.claude'),
+      join(folder, '.cargo'),
       // The folders that hold them.
       join(folder, '.config'),
       folder,
@@ -484,6 +653,29 @@ describe('opening a folder from another computer', () => {
       join(folder, 'code', 'project')
     ])
       expect(await o.ok('projects.open', { path }), path).toMatchObject({ project: { path } })
+  }, 180_000)
+
+  it('keeps credential folders closed in a project that was registered before, such as the home folder itself', async () => {
+    const o = await routedOwner()
+    const { folder } = home()
+    writeFileSync(join(folder, '.ssh', 'id_ed25519'), 'PRIVATE')
+    writeFileSync(join(folder, '.codex', 'auth.json'), '{"refresh_token":"x"}')
+    writeFileSync(join(folder, 'code', 'project', 'a.txt'), 'fine\n')
+    // The owner's own choice, for local use; from another computer it is not a way into the folders that hold credentials.
+    const project = o.f.mms.projects.openProject(folder)
+    for (const path of ['.ssh/id_ed25519', '.codex/auth.json', '.config/gh'])
+      expect(await o.call('files.read', { projectId: project.id, path }), path).toMatchObject(
+        refused('path_protected')
+      )
+    expect(await o.call('files.list', { projectId: project.id, path: '.ssh' })).toMatchObject(
+      refused('path_protected')
+    )
+    expect(await o.call('files.stat', { projectId: project.id, path: '.codex' })).toMatchObject(
+      refused('path_protected')
+    )
+    expect(
+      await o.ok('files.read', { projectId: project.id, path: 'code/project/a.txt' })
+    ).toMatchObject({ content: 'fine\n' })
   }, 180_000)
 
   it('sees a credential folder through a link, a junction, another case and a short name', async () => {

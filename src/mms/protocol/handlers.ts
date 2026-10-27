@@ -109,8 +109,8 @@ import { ChildAgentIntegrationService } from '../agents/ChildAgentIntegrationSer
 import { ChangeReceiptService } from '../actions/ChangeReceiptService'
 import { PublishService } from '../actions/PublishService'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
-import { lexicalGuard, type PathGuard, type PathIntent } from '../files/pathGuard'
-import { PathContainmentError, routedGuard } from '../files/routedGuard'
+import { lexicalGuard, type GuardedPath, type PathGuard, type PathIntent } from '../files/pathGuard'
+import { PathContainmentError, routedGuardFor } from '../files/routedGuard'
 import { ROUTED_STAGE_ITEM_BYTES } from '../../shared/bridge/routed'
 import { grepWorkspace } from '../files/WorkspaceGrep'
 import { getWorkspaceIndexRegistry } from '../files/WorkspaceIndexRegistry'
@@ -920,7 +920,9 @@ async function gitStatusResult(ctx: HandlerContext, root: string, extra: Record<
  * this computer, and the other callers of this computer, keep to how the path is spelled.
  */
 function guardFor(ctx: HandlerContext): PathGuard {
-  return ctx.connection?.bridgeCaller ? routedGuard : lexicalGuard
+  const caller = ctx.connection?.bridgeCaller
+  // The device's limit decides which files a save may change (those that start programs by themselves need Full access).
+  return caller ? routedGuardFor(caller.maxPermissionMode) : lexicalGuard
 }
 
 /** A refusal of the guard is a result with its own code; any other error is left as it is. */
@@ -3005,11 +3007,20 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       await ensureOwnedTaskWorkspace(ctx, p)
       const root = projectRootContext(ctx, p)
-      // Checked before the action is recorded, so a refused path leaves no action behind.
-      const path = requiredContainedPath(ctx, root, p.path, 'write')
+      const guard = guardFor(ctx)
+      const wanted = asString(p.path, 'path', 4096)
+      // Checked once, before the action is recorded, so a refused path leaves no action behind. What the repository says about
+      // hooks and configuration is looked up first, without blocking the daemon.
+      await guard.prepare?.(root, wanted, 'write').catch(() => undefined)
+      let guarded: GuardedPath
+      try {
+        guarded = guard.resolve(root, wanted, 'write')
+      } catch (error) {
+        throw refusedPath(error)
+      }
+      const path = guarded.relative
       // Another computer sends a large file ahead of the call (a staged value, at most what staging holds); every other caller keeps the 512 KiB limit.
       const content = asString(p.content, 'content', ctx.connection?.bridgeCaller ? ROUTED_STAGE_ITEM_BYTES : 512 * 1024)
-      const guard = guardFor(ctx)
       const threadId = asOptionalString(p.threadId, 256)
       if (threadId) {
         const operation = threadOperationContext(ctx, p)
@@ -3023,7 +3034,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
             workspacePath: root, actor: { kind: 'user' }, expectedJournalRevision: operation.currentGeneration,
             presentationMessageStart: latest?.presentationMessageEnd ?? 0, presentationMessageEnd: latest?.presentationMessageEnd ?? 0,
             nativeContextBoundary: latest?.nativeContextBoundary ?? { messageIndex: 0, compactionGeneration: 0, fidelity: 'legacy' }
-          }, () => ctx.mms.fileService.writeFile(root, path, content, guard)).catch(refusalOfAction)
+          }, () => ctx.mms.fileService.writeFile(root, path, content, guard, guarded)).catch(refusalOfAction)
           // Covers daemon-side writers only: desktop saves and agent edits never reach this method
           // (the search index refreshes on its own 15 s stale rule).
           getWorkspaceIndexRegistry().invalidate(root)
@@ -3031,7 +3042,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           return { path, lineEdits, receiptId: action.receiptId }
         }
       }
-      const lineEdits = await ctx.mms.fileService.writeFile(root, path, content, guard).catch(refusalOfAction)
+      const lineEdits = await ctx.mms.fileService.writeFile(root, path, content, guard, guarded).catch(refusalOfAction)
       getWorkspaceIndexRegistry().invalidate(root)
       return { path, lineEdits }
     }
