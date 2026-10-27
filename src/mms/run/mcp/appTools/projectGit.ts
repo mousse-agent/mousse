@@ -1,5 +1,6 @@
 import { Type, type Tool } from '@earendil-works/pi-ai'
 import { runProjectGitTool } from '../../../git/scopedRead'
+import type { AgentRuntimePolicy } from '../../../../shared/agents/execution'
 import type { AppToolHost } from './host'
 import { disabledInSettings, plainSchema, truncateForDisplay, type AppToolTurn, type Availability, type MousseTool, type ToolOutcome } from './types'
 
@@ -24,6 +25,14 @@ export function projectGitToolDefinitions(): Tool[] {
 }
 
 export { runProjectGitTool, type ProjectGitScope } from '../../../git/scopedRead'
+
+/**
+ * Whether a definition's agent can write in its roots (its workspace, or scripts): then Git
+ * metadata there may be its own, and the git tools do not trust it.
+ */
+export function definitionWritesRoots(policy: Pick<AgentRuntimePolicy, 'workspace' | 'script'>): boolean {
+  return policy.workspace.mode !== 'read_only' || policy.script.enabled
+}
 
 /** Where the git tools may run: in a project, on a Build turn or a definition's turn (its grants decide). */
 function availability(name: string, turn: AppToolTurn): Availability {
@@ -57,8 +66,9 @@ export function projectGitTools(host: AppToolHost): MousseTool[] {
       ctx.timeline?.emit(event, 'start')
       // A definition's reads stay in its roots (the gate holds the project path inside them); any
       // other turn's stay in the project.
-      const roots = ctx.turn.definition ? ctx.turn.definition.policy.workspace.canonicalRoots : [projectPath]
-      const result = await runProjectGitTool(tool.name, args, { projectPath, roots })
+      const definition = ctx.turn.definition?.policy
+      const roots = definition ? definition.workspace.canonicalRoots : [projectPath]
+      const result = await runProjectGitTool(tool.name, args, { projectPath, roots, writable: definition ? definitionWritesRoots(definition) : false })
       ctx.timeline?.emit({ ...event, kind: 'build_tool_result', summary: result.isError ? 'The tool returned an error.' : 'The tool returned successfully.', response: truncateForDisplay(result.text) }, 'complete')
       return result
     }

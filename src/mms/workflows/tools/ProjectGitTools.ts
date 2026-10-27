@@ -87,7 +87,9 @@ export class ProjectGitTools {
     name: string,
     args: Record<string, unknown>,
     projectRoot: string,
-    roots: readonly string[] = [projectRoot]
+    roots: readonly string[] = [projectRoot],
+    /** The agent can write in `roots` (a definition): Git metadata there is not trusted. */
+    writable = false
   ): Promise<{ text: string; isError: boolean }> {
     try {
       switch (name) {
@@ -110,7 +112,7 @@ export class ProjectGitTools {
         }
         case 'git_status':
         case 'git_diff':
-          return await runProjectGitTool(name, args, { projectPath: projectRoot, roots })
+          return await runProjectGitTool(name, args, { projectPath: projectRoot, roots, writable })
         case 'run_command': {
           const command = String(args.command ?? '').trim()
           const cmdArgs = Array.isArray(args.args) ? args.args.map(String) : []

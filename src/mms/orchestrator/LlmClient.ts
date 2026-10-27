@@ -89,6 +89,7 @@ import {
 import { DELEGATION_TOOL_NAMES, delegationToolDefinitions, type DelegationToolHost } from '../run/mcp/appTools/delegation'
 import { PUBLISH_APPLET_TOOL } from '../run/mcp/appTools/applets'
 import { modeFactsFor, offeredDefinitions, prepareSkills, settingsToolEnabled } from '../run/mcp/appTools/assemble'
+import { definitionWritesRoots } from '../run/mcp/appTools/projectGit'
 import { callUserMcpTool, userMcpTool } from '../run/mcp/appTools/userMcp'
 import { questionApproval } from '../run/mcp/appTools/quickActions'
 import type { BrowserRuntimePort } from '../../shared/browser/runtime'
@@ -1699,7 +1700,8 @@ export class LlmClient {
               toolCall.arguments as Record<string, unknown>,
               projectPath,
               // A definition's git reads stay in its roots; any other turn's in the project.
-              trustedAgent?.policy ? trustedAgent.policy.workspace.canonicalRoots : [projectPath]
+              trustedAgent?.policy ? trustedAgent.policy.workspace.canonicalRoots : [projectPath],
+              trustedAgent?.policy ? definitionWritesRoots(trustedAgent.policy) : false
             )
 
         const resultEvent: LlmToolEvent = {

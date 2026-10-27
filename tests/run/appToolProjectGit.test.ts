@@ -4,7 +4,7 @@
  * them in Build mode, as in the pi loop, which keeps its own copies.
  */
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -284,6 +284,151 @@ describe('git_status and git_diff as app tools', () => {
       writeFileSync(join(allowed, 'fresh.txt'), 'fresh content\n')
       const s = await setup({ projectPath: allowed, definition: { policy: policy(allowed), grants: grants('git_diff') } as DefinitionAuthority })
       expect(await s.call('git_diff', { path: 'fresh.txt' })).toMatchObject({ isError: false, text: expect.stringContaining('+fresh content') })
+    })
+  })
+
+  describe('Git metadata the agent could have written is never trusted', () => {
+    const definitionTurn = (allowed: string) => ({ projectPath: allowed, definition: { policy: policy(allowed), grants: grants('git_status', 'git_diff') } as DefinitionAuthority })
+    async function expectNothingRead(allowed: string, secret: string, names: string[]) {
+      const s = await setup(definitionTurn(allowed))
+      for (const path of names) {
+        for (const staged of [false, true]) {
+          const result = await s.call('git_diff', { path, staged })
+          expect(result.text, `${path} ${staged}`).not.toContain(secret)
+          expect(result.isError, `${path} ${staged}`).toBe(true)
+        }
+      }
+      const status = await s.call('git_status', {})
+      expect(status.isError).toBe(true)
+      for (const path of names) expect(status.text).not.toContain(path)
+    }
+    const commit = (top: string): string => execFileSync('git', ['rev-parse', 'HEAD'], { cwd: top, encoding: 'utf8' }).trim()
+
+    it("a .git folder planted in the roots with a commondir pointing at the parent repository (Opus's repro)", async () => {
+      const { top, allowed } = parentRepo()
+      execFileSync('git', ['add', 'secret.txt'], { cwd: top, stdio: 'pipe' })
+      mkdirSync(join(allowed, '.git'))
+      writeFileSync(join(allowed, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+      writeFileSync(join(allowed, '.git', 'commondir'), '../../.git\n')
+      await expectNothingRead(allowed, SECRET, ['secret.txt'])
+    })
+
+    it("a .git folder planted in the roots that borrows the parent's objects (alternates, Opus's repro)", async () => {
+      const { top, allowed } = parentRepo()
+      execFileSync('git', ['add', 'secret.txt'], { cwd: top, stdio: 'pipe' })
+      execFileSync('git', ['commit', '-q', '-m', 'secret'], { cwd: top, stdio: 'pipe' })
+      const planted = join(allowed, '.git')
+      for (const dir of ['objects/info', 'refs/heads']) mkdirSync(join(planted, dir), { recursive: true })
+      writeFileSync(join(planted, 'HEAD'), `${commit(top)}\n`)
+      writeFileSync(join(planted, 'objects', 'info', 'alternates'), `${join(top, '.git', 'objects')}\n`)
+      writeFileSync(join(planted, 'config'), '[core]\n\trepositoryformatversion = 0\n')
+      await expectNothingRead(allowed, SECRET, ['secret.txt'])
+    })
+
+    for (const variant of ['a gitdir back-pointer', 'core.worktree'] as const) {
+      it(`a .git file pointing at a git dir it wrote, with a commondir into another repository and ${variant} (Grok's repro)`, async () => {
+        const foreign = repo()
+        mkdirSync(join(foreign, 'allowed'))
+        writeFileSync(join(foreign, 'allowed', 'a.txt'), 'SECRET FROM UNRELATED REPO\n')
+        writeFileSync(join(foreign, 'allowed', 'hidden-secret-name.txt'), 'SECRET FROM UNRELATED REPO\n')
+        execFileSync('git', ['add', '.'], { cwd: foreign, stdio: 'pipe' })
+        execFileSync('git', ['commit', '-q', '-m', 'foreign'], { cwd: foreign, stdio: 'pipe' })
+        const branch = execFileSync('git', ['symbolic-ref', '--short', 'HEAD'], { cwd: foreign, encoding: 'utf8' }).trim()
+        const pointed = realpathSync.native(mkdtempSync(join(tmpdir(), 'mousse-project-git-pointed-')))
+        dirs.push(pointed)
+        mkdirSync(join(pointed, 'allowed'))
+        writeFileSync(join(pointed, 'allowed', 'a.txt'), 'visible file\n')
+        const fake = join(pointed, 'fake-git')
+        mkdirSync(fake)
+        writeFileSync(join(pointed, '.git'), `gitdir: ${fake}\n`)
+        writeFileSync(join(fake, 'commondir'), `${join(foreign, '.git')}\n`)
+        writeFileSync(join(fake, 'HEAD'), `ref: refs/heads/${branch}\n`)
+        if (variant === 'core.worktree') writeFileSync(join(fake, 'config'), `[core]\n\tworktree = ${pointed.split('\\').join('/')}\n`)
+        else writeFileSync(join(fake, 'gitdir'), `${join(pointed, '.git')}\n`)
+        await expectNothingRead(join(pointed, 'allowed'), 'SECRET FROM UNRELATED REPO', ['a.txt', 'hidden-secret-name.txt'])
+      })
+    }
+  })
+
+  describe('hooks, required filters and line endings', () => {
+    it('the index refresh of git_diff never runs a post-index-change hook', async () => {
+      const root = repo()
+      const outside = realpathSync.native(mkdtempSync(join(tmpdir(), 'mousse-project-git-hook-')))
+      dirs.push(outside)
+      const marker = join(outside, 'hook.marker').split('\\').join('/')
+      const hook = join(root, '.git', 'hooks', 'post-index-change')
+      writeFileSync(hook, `#!/bin/sh\necho ran >> '${marker}'\n`)
+      chmodSync(hook, 0o755)
+      let stamp = Math.floor(Date.now() / 1000) + 100
+      const statDirty = () => {
+        execFileSync('git', ['checkout', '-q', '--', 'a.txt'], { cwd: root, stdio: 'pipe' })
+        rmSync(marker, { force: true })
+        writeFileSync(join(root, 'a.txt'), 'one\n')
+        stamp += 10
+        utimesSync(join(root, 'a.txt'), stamp, stamp)
+      }
+      statDirty()
+      const s = await setup({ projectPath: root, definition: { policy: policy(root), grants: grants('git_status', 'git_diff') } as DefinitionAuthority })
+      expect((await s.call('git_diff', { path: 'a.txt' })).isError).toBe(false)
+      expect((await s.call('git_status', {})).isError).toBe(false)
+      expect(existsSync(marker)).toBe(false)
+      // The probe is real: in the same state again, plain `git diff` refreshes the index and runs the hook.
+      statDirty()
+      execFileSync('git', ['diff'], { cwd: root, stdio: 'pipe' })
+      expect(existsSync(marker)).toBe(true)
+    })
+
+    it('a required filter (as Git LFS sets) neither runs nor fails the read: files are compared as stored', async () => {
+      const root = repo()
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: root, stdio: 'pipe' })
+      writeFileSync(join(root, 'big.bin'), 'version pointer one\n')
+      git('add', 'big.bin')
+      git('commit', '-q', '-m', 'bin')
+      writeFileSync(join(root, '.gitattributes'), '*.bin filter=lfsish\n')
+      git('config', 'filter.lfsish.clean', 'false')
+      git('config', 'filter.lfsish.smudge', 'false')
+      git('config', 'filter.lfsish.required', 'true')
+      writeFileSync(join(root, 'big.bin'), 'version pointer two\n')
+      const s = await setup({ projectPath: root, modeFacts: { readOnly: false, agent: false, build: true } })
+      const status = await s.call('git_status', {})
+      expect(status.isError).toBe(false)
+      expect(status.text).toContain('big.bin')
+      expect(await s.call('git_diff', { path: 'big.bin' })).toMatchObject({ isError: false, text: expect.stringContaining('+version pointer two') })
+    })
+
+    it("Git for Windows' system core.autocrlf still applies: a CRLF file shows only its real change", async () => {
+      const configs = realpathSync.native(mkdtempSync(join(tmpdir(), 'mousse-project-git-config-')))
+      dirs.push(configs)
+      writeFileSync(join(configs, 'system'), '[core]\n\tautocrlf = true\n')
+      writeFileSync(join(configs, 'global'), '')
+      const saved = { system: process.env.GIT_CONFIG_SYSTEM, global: process.env.GIT_CONFIG_GLOBAL }
+      process.env.GIT_CONFIG_SYSTEM = join(configs, 'system')
+      process.env.GIT_CONFIG_GLOBAL = join(configs, 'global')
+      try {
+        const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'mousse-project-git-crlf-')))
+        dirs.push(root)
+        const git = (...args: string[]) => execFileSync('git', ['-c', 'user.email=test@example.invalid', '-c', 'user.name=Test', '-c', 'commit.gpgsign=false', ...args], { cwd: root, stdio: 'pipe' })
+        git('init', '-q')
+        writeFileSync(join(root, 'crlf.txt'), 'l1\r\nl2\r\nl3\r\n')
+        writeFileSync(join(root, 'same.txt'), 'x\r\ny\r\n')
+        git('add', '.')
+        git('commit', '-q', '-m', 'crlf')
+        writeFileSync(join(root, 'crlf.txt'), 'l1\r\nCHANGED\r\nl3\r\n')
+        utimesSync(join(root, 'same.txt'), new Date(Date.now() + 5_000), new Date(Date.now() + 5_000))
+        const s = await setup({ projectPath: root, modeFacts: { readOnly: false, agent: false, build: true } })
+        const diff = await s.call('git_diff', { path: 'crlf.txt' })
+        expect(diff.isError).toBe(false)
+        expect(diff.text).toContain('+CHANGED')
+        expect(diff.text).not.toContain('-l1')
+        expect(diff.text).not.toContain('-l3')
+        const status = JSON.parse((await s.call('git_status', {})).text) as { changes: Array<{ path: string }> }
+        expect(status.changes.map((change) => change.path)).toEqual(['crlf.txt'])
+      } finally {
+        for (const [key, value] of [['GIT_CONFIG_SYSTEM', saved.system], ['GIT_CONFIG_GLOBAL', saved.global]] as const) {
+          if (value === undefined) delete process.env[key]
+          else process.env[key] = value
+        }
+      }
     })
   })
 
