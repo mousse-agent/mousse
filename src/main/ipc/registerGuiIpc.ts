@@ -196,7 +196,8 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   'skills.create', 'skills.update', 'skills.editor', 'skills.enable', 'skills.archive',
   'skills.importPackage', 'skills.exportPackage',
   'mcp.create', 'mcp.update', 'mcp.read', 'mcp.enable', 'mcp.delete',
-  'mcp.testConnection', 'mcp.beginAuth', 'mcp.cancelAuth', 'mcp.revokeAuth'
+  'mcp.testConnection', 'mcp.beginAuth', 'mcp.cancelAuth', 'mcp.revokeAuth',
+  'runs.resumeNow', 'runs.cancelPause'
 ])
 
 class PlatformRequestError extends AppError {
@@ -574,7 +575,8 @@ export function registerGuiIpc(
             notifyThread(event.threadId, 'completed', currentPresentation().getActiveThreadId())
           } else if (state === 'awaiting_input') {
             notifyThread(event.threadId, 'question', currentPresentation().getActiveThreadId())
-          } else if (state === 'idle') {
+          } else if (state === 'idle' || state === 'paused') {
+            // A run that hit a usage limit stopped and waits for the person (or the reset).
             notifyThread(event.threadId, 'idle', currentPresentation().getActiveThreadId())
           }
         }

@@ -453,11 +453,11 @@ export class MmsProtocolServer {
       }
     })
 
-    // A run that hit a usage limit is not running and not finished: the thread rests until the limit
-    // resets (`turn.state` carries the pause).
+    // A run that hit a usage limit is not running and not finished: the thread rests, shown as Paused,
+    // until the limit resets (`turn.state` carries the pause).
     onOrch('turn-paused', (payload: { threadId?: string }) => {
       if (payload.threadId) {
-        services.threadRuntimes.setActivity(payload.threadId, 'idle')
+        services.threadRuntimes.setActivity(payload.threadId, 'paused')
       }
       emitToSubscribers(this.ring.push('turn.paused', payload, payload.threadId))
     })

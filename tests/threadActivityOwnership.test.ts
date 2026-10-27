@@ -163,3 +163,32 @@ describe('turn phase activity', () => {
     expect(isThreadActivityActive(undefined)).toBe(false)
   })
 })
+
+describe('a run paused by a usage limit', () => {
+  it('has its own thread activity: not working, not finished, not idle', () => {
+    expect(turnPhaseActivity('paused')).toBe('paused')
+    expect(turnPhaseActivity('paused', true)).toBe('paused')
+    expect(isThreadActivityActive('paused')).toBe(false)
+  })
+
+  it('stays Paused while owned agents or delegated tasks run, and an idle turn does not hide it', () => {
+    expect(deriveThreadActivity('paused', [{ status: 'running' }], true, true)).toBe('paused')
+    expect(deriveThreadActivity('paused', [])).toBe('paused')
+  })
+
+  it('is published to clients and replaced when the thread works again', () => {
+    const manager = new ThreadRuntimeManager()
+    manager.getOrHydrate('thread-a')
+    const states: string[] = []
+    manager.on('activity', (event: { state: string }) => states.push(event.state))
+
+    manager.setActivity('thread-a', 'processing')
+    manager.setActivity('thread-a', 'paused')
+    expect(manager.getActivity('thread-a')).toBe('paused')
+    expect(manager.getActivitySnapshot()).toEqual({ 'thread-a': 'paused' })
+    manager.setActivity('thread-a', 'processing')
+    manager.setActivity('thread-a', 'idle')
+
+    expect(states).toEqual(['processing', 'paused', 'processing', 'idle'])
+  })
+})

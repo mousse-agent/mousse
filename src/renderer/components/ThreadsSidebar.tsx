@@ -2,9 +2,10 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react'
 
 import type { CSSProperties, KeyboardEvent } from 'react'
 
-import { Archive, CircleCheck, CircleDotDashed, Edit, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, GitPullRequest, ListTree, Loader2, MessageQuestion, MessagesSquare, MessageSquarePlus, Pin, Search } from '../lib/icons'
+import { Archive, CircleCheck, CircleDotDashed, Edit, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, GitPullRequest, ListTree, Loader2, MessageQuestion, MessagesSquare, MessageSquarePlus, Pause, Pin, Search } from '../lib/icons'
 
-import { isThreadActivityActive, type Thread, type ThreadActivityState } from '../../shared/types'
+import { isThreadActivityActive, type Thread, type ThreadActivityState, type TurnPause } from '../../shared/types'
+import { pausedStatusLabel } from '../lib/pausedRun'
 import { findUnstartedThread, isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
 import { sortSidebarThreads } from '../../shared/threadSidebarSort'
 import { openSubagentParentRow, rollUpActivities, visibleThreads } from '../../shared/threadLineage'
@@ -221,6 +222,7 @@ function ThreadCardBody({
   projectName,
   activity,
   startedAt,
+  pause,
   isRenaming,
   renamingName,
   isGeneratingTitle,
@@ -231,6 +233,9 @@ function ThreadCardBody({
   projectName?: string
   activity?: ThreadActivityState
   startedAt?: string
+  /** This thread's own pause (not one a subagent below it is in): when its limit resets. */
+  pause?: TurnPause
+
   isRenaming: boolean
   renamingName: string
   isGeneratingTitle: boolean
@@ -265,6 +270,11 @@ function ThreadCardBody({
             <span className="threads-sidebar-card-status threads-sidebar-card-status-input">
               <MessageQuestion size={12} strokeWidth={2} aria-hidden="true" />
               Input
+            </span>
+          ) : activity === 'paused' ? (
+            <span className="threads-sidebar-card-status threads-sidebar-card-status-paused">
+              <Pause size={12} strokeWidth={2} aria-hidden="true" />
+              {pausedStatusLabel(pause, Date.now())}
             </span>
           ) : activity === 'completed' ? (
             <span className="threads-sidebar-card-status threads-sidebar-card-status-done">
@@ -721,6 +731,20 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
       )
     }
 
+    if (state === 'paused') {
+      const turn = turnStates[threadId]
+      const own = turn?.phase === 'paused' ? turn.pause : undefined
+      const label = pausedStatusLabel(own, Date.now())
+      return (
+        <Pause
+          size={14}
+          strokeWidth={2}
+          className="threads-sidebar-status-icon threads-sidebar-status-icon--paused"
+          aria-label={label}
+        />
+      )
+    }
+
     return null
   }
 
@@ -874,6 +898,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             projectName={thread.projectId ? projects.find((project) => project.id === thread.projectId)?.name : undefined}
             activity={rolledUpActivity[thread.id] ?? threadActivity[thread.id]}
             startedAt={turnStates[thread.id]?.startedAt}
+            pause={turnStates[thread.id]?.phase === 'paused' ? turnStates[thread.id]?.pause : undefined}
             isRenaming={isRenaming}
             renamingName={renaming?.name ?? ''}
             isGeneratingTitle={isGeneratingTitle}

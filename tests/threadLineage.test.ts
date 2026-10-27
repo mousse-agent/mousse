@@ -65,7 +65,12 @@ describe('rollUpActivity', () => {
     ['the parent needing input stays that', { parent: 'awaiting_input', child: 'processing' }, 'awaiting_input'],
     ['a finished child adds nothing', { child: 'completed' }, 'idle'],
     ['the parent own completed state is kept', { parent: 'completed', child: 'idle' }, 'completed'],
-    ['a running parent with an idle child', { parent: 'processing' }, 'processing']
+    ['a running parent with an idle child', { parent: 'processing' }, 'processing'],
+    ['a paused subagent shows the parent as paused', { child: 'paused' }, 'paused'],
+    ['a paused subagent beats the parent waiting on it', { parent: 'waiting', grandchild: 'paused' }, 'paused'],
+    ['a paused subagent beside a running one still shows running', { child: 'paused', grandchild: 'processing' }, 'processing'],
+    ['a question below outranks a pause', { parent: 'paused', grandchild: 'awaiting_input' }, 'awaiting_input'],
+    ['the parent paused by itself stays paused', { parent: 'paused' }, 'paused']
   ])('%s', (_name, activity, expected) => {
     expect(roll(activity)).toBe(expected)
   })

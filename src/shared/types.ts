@@ -1020,9 +1020,10 @@ export interface Thread {
 /**
  * Sidebar status of a thread. `processing` is Working. `waiting` is Waiting: the turn is blocked
  * only on wait tools, or it ended while thread-owned work that reports back is still running.
- * `awaiting_input` is Input: the agent asked the user something.
+ * `awaiting_input` is Input: the agent asked the user something. `paused` is a run stopped by a
+ * provider usage limit that continues when the limit resets: not working, and not finished.
  */
-export type ThreadActivityState = 'idle' | 'processing' | 'waiting' | 'awaiting_input' | 'completed'
+export type ThreadActivityState = 'idle' | 'processing' | 'waiting' | 'awaiting_input' | 'completed' | 'paused'
 
 /** Working or Waiting: the thread's work cycle has not finished yet. */
 export function isThreadActivityActive(state: ThreadActivityState | undefined): boolean {
@@ -1049,6 +1050,8 @@ export interface TurnPause {
   limitKind?: string
   /** Whether the run continues by itself at `until`; false means Resume now is the way on. */
   autoResume: boolean
+  /** The reset passed while Mousse was off for more than a day: the timer was dropped and only Resume now (or a message) continues the run. */
+  stale?: true
 }
 
 export interface TurnState {
@@ -1072,6 +1075,7 @@ export function isTurnActivePhase(phase: TurnPhase): boolean {
 /** Thread activity for a turn phase; `blockedOnWait` marks a tool phase whose calls only wait. */
 export function turnPhaseActivity(phase: TurnPhase, blockedOnWait = false): ThreadActivityState {
   if (phase === 'awaiting_input') return 'awaiting_input'
+  if (phase === 'paused') return 'paused'
   if (isTurnActivePhase(phase)) return phase === 'tool_running' && blockedOnWait ? 'waiting' : 'processing'
   // Keep a finished turn completed until its runtime activity changes.
   if (phase === 'completed') return 'completed'

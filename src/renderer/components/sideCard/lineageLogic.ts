@@ -56,7 +56,8 @@ const RUNNING_LABELS: Record<string, string> = {
   needs_input: 'Needs input',
   queued: 'Queued',
   starting: 'Starting',
-  working: 'Working'
+  working: 'Working',
+  paused: 'Paused'
 }
 
 const FINISHED_LABELS: Record<string, string> = {

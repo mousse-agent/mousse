@@ -1,0 +1,101 @@
+/* A run a usage limit paused: reset time, the limit, and Resume now / Cancel / Stop. Sits where "Run interrupted" does. */
+.chat-run-paused {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  width: min(100%, var(--an-max-width, 680px));
+  box-sizing: border-box;
+  margin: 8px auto;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--warning) 32%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--warning) 7%, transparent);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.chat-run-paused-text {
+  display: flex;
+  flex: 1 1 260px;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.chat-run-paused-head {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  color: var(--text-primary);
+}
+
+.chat-run-paused-head svg {
+  flex-shrink: 0;
+  color: var(--warning);
+}
+
+.chat-run-paused-until {
+  font-weight: 600;
+}
+
+.chat-run-paused-relative {
+  color: var(--text-secondary);
+}
+
+.chat-run-paused-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat-run-paused-btn {
+  min-height: 26px;
+  padding: 3px 11px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.chat-run-paused-btn:hover {
+  background: var(--ui-hover);
+}
+
+.chat-run-paused-btn:active {
+  background: var(--ui-pressed);
+}
+
+.chat-run-paused-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
+.chat-run-paused-btn-primary {
+  border-color: transparent;
+  background: var(--gradient-accent);
+  color: white;
+}
+
+.chat-run-paused-btn-primary:hover {
+  background: var(--gradient-accent);
+  filter: brightness(1.08);
+}
+
+.chat-run-paused-btn[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.chat-run-paused-error {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--danger);
+}

@@ -64,7 +64,7 @@ import { isFencedSource, isPauseHeldSource, isResumeSource } from '../run/delega
 import { deleteRunResults } from '../run/delegation/hold'
 import { decideUsageLimit, usageLimitOf, type UsageLimitDecision } from '../run/pausePolicy'
 import { boundedResetIso, estimatedReset } from './providerErrors'
-import { CONTINUE_TEXT, pausedLine } from '../run/pauseText'
+import { CONTINUE_TEXT, MANUAL_CONTINUE_TEXT, pausedLine } from '../run/pauseText'
 import { currentStopGeneration, runStopGeneration } from '../run/stopGeneration'
 import { buildSubagentView } from '../run/delegation/subagentView'
 import { resolveSubagent, subagentsTitled, type SubagentAddressSources } from '../run/delegation/subagentAddress'
@@ -3673,6 +3673,7 @@ export class OrchestratorService extends EventEmitter {
       until: pause.until,
       estimated: pause.estimated,
       autoResume: pause.autoResume,
+      ...(pause.stale ? { stale: true as const } : {}),
       ...(pause.provider ? { provider: pause.provider } : {}),
       ...(pause.limitKind ? { limitKind: pause.limitKind } : {})
     }
@@ -3706,7 +3707,7 @@ export class OrchestratorService extends EventEmitter {
     if (!engine || !run || run.status !== 'paused' || !run.outcome?.pause) return
     if (!run.outcome.pause.stale) {
       const updated = engine.endPause(runId, 'stale')
-      this.noteInThread(threadId, 'The usage limit reset while Mousse was off. Send a message to continue.')
+      this.noteInThread(threadId, `The usage limit reset while Mousse was off. ${MANUAL_CONTINUE_TEXT}`)
       // Still paused: the display keeps the pause, now without a timer.
       const pause = this.turnPauseOf(updated)
       if (pause) this.setTurnPhase(threadId, 'paused', { turnId: runId, pause })
