@@ -648,3 +648,80 @@ describe('a switch back whose handoff cannot be planned', () => {
     expect(JSON.parse(readFileSync(join(s.dir, 'threads.json'), 'utf8'))[fork.threadId]?.sessionId).not.toBe('branch-1')
   })
 })
+
+describe('a fork whose handoff planning fails after its branch was made', () => {
+  async function setup() {
+    const s = fixture()
+    const priorHome = process.env.MOUSSE_HOME
+    process.env.MOUSSE_HOME = s.dir
+    cleanups.push(() => {
+      if (priorHome === undefined) delete process.env.MOUSSE_HOME
+      else process.env.MOUSSE_HOME = priorHome
+    })
+    session(s.dir, 'parent', s.dir)
+    writeFileSync(join(s.dir, 'threads.json'), JSON.stringify({ source: { sessionId: 'parent', turnLeaves: { sourceTurn: 'leaf' } } }))
+    vi.spyOn(s.internals, 'start').mockResolvedValue(undefined)
+    let branches = 0
+    vi.spyOn(s.internals, 'send').mockImplementation(async (_thread, command) => {
+      if (command.type === 'get_entries') return { entries: [] }
+      if (command.type === 'clone') return { cancelled: false }
+      const id = `branch-${++branches}`
+      session(s.dir, id, s.dir)
+      return { sessionId: id }
+    })
+    const resumed: unknown[] = []
+    vi.spyOn(s.internals, 'processFor').mockImplementation(async (...args: unknown[]) => {
+      resumed.push(args[2])
+      return { thread: {}, resumed: true }
+    })
+    const handOver = vi.spyOn(s.internals as unknown as { handOver(...args: unknown[]): Promise<unknown> }, 'handOver').mockResolvedValue({ thread: {}, resumed: false })
+    vi.spyOn(s.internals, 'runTurn').mockResolvedValue({ text: 'fork reply', aborted: false, providerRef: { provider: 'openai' } })
+    const adapter = piAdapter(() => 'parent answer', { fork: 'native', historyInjection: 'prompt', containment: 'weak' }, 'parent')
+    const base = adapter.startTurn.bind(adapter)
+    let sourceId = ''
+    const received: Array<{ handoffUnplanned?: boolean }> = []
+    adapter.startTurn = async (input, sink, ctl, host) => {
+      if (input.threadId === sourceId) {
+        const result = await base(input, sink, ctl, host)
+        result.providerRef = { ...result.providerRef!, nativeTurnId: 'sourceTurn' }
+        sink.providerRef(result.providerRef)
+        return result
+      }
+      received.push(input)
+      return s.engine.startTurn(input, sink, ctl, host)
+    }
+    const d = phase6Daemon(s.dir, [adapter])
+    cleanups.push(() => d.stop())
+    sourceId = d.store.createThread('Source').id
+    d.orch.setThreadModelOverride(sourceId, PI)
+    expect((await d.orch.send('Parent request', false, { threadId: sourceId, clientRequestId: 'parent' })).error).toBeUndefined()
+    const fork = await d.engine.forkThread({ sourceThreadId: sourceId, clientRequestId: 'fork' })
+    return { s, d, fork, adapter, resumed, handOver, received, branchCount: () => branches }
+  }
+
+  it('resumes the branch made for that turn (Sol round 6)', async () => {
+    const t = await setup()
+    t.adapter.forkSession = (ref, ordinal, target) => t.s.engine.forkSession(ref, ordinal, target)
+    vi.spyOn(t.d.engine.handoffs, 'plan').mockImplementation(() => { throw new Error('handoff planner unavailable') })
+    const result = await t.d.orch.send('Continue', false, { threadId: t.fork.threadId, clientRequestId: 'try-1' })
+    expect(result.error).toBeUndefined()
+    expect(t.branchCount()).toBe(1)
+    expect(t.received[0]?.handoffUnplanned).toBeUndefined()
+    expect(t.resumed).toEqual(['branch-1'])
+    expect(t.handOver).not.toHaveBeenCalled()
+  })
+
+  it('fails the turn, rather than answer without the parent, when an untrusted branch leaves nothing to hand over', async () => {
+    const t = await setup()
+    // A branch from an earlier attempt is pending; this turn's re-fork does not happen, and planning fails.
+    writeFileSync(join(t.s.dir, 'threads.json'), JSON.stringify({ ...JSON.parse(readFileSync(join(t.s.dir, 'threads.json'), 'utf8')), [t.fork.threadId]: { sessionId: 'old-branch', historyFingerprint: 'x', pendingFork: true } }))
+    session(t.s.dir, 'old-branch', t.s.dir)
+    t.adapter.forkSession = async () => null
+    vi.spyOn(t.d.engine.handoffs, 'plan').mockImplementation(() => { throw new Error('handoff planner unavailable') })
+    const result = await t.d.orch.send('Continue', false, { threadId: t.fork.threadId, clientRequestId: 'try-1' })
+    expect(t.received[0]?.handoffUnplanned).toBe(true)
+    expect(result.error?.code).toBe('binding_stale')
+    expect(t.resumed).toEqual([])
+    expect(t.handOver).not.toHaveBeenCalled()
+  })
+})

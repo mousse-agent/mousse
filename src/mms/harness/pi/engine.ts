@@ -1114,6 +1114,11 @@ export class PiRpcEngine implements ProviderAdapter {
       const handedOver = input.historyHandedOver === true
       // Unplanned handoffs: whether a turn ran elsewhere since the branch is unknown, so the branch
       // is not trusted and the raw history is handed over (as before native forks).
+      if (saved?.pendingFork && input.handoffUnplanned === true && !handedOver && !history) {
+        // Nothing to hand over in the branch's place: the fork's own history is empty, and running
+        // without the parent's would answer out of context. The turn fails; the resend plans again.
+        throw harnessAppError({ code: 'binding_stale', message: `${this.options.label} could not prepare this fork's history. Send the message again.`, instanceId: this.options.instanceId })
+      }
       if (saved?.pendingFork && (handedOver || input.handoffUnplanned === true)) {
         // The prompt carries the parent's history: the branch (made before turns elsewhere, or before
         // a re-fork that did not happen) is not resumed beside it.
