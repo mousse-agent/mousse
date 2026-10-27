@@ -586,7 +586,8 @@ export function asAddInstanceInput(v: unknown): AddInstanceInput {
     slug = asString(o.slug, 'slug', 32)
     if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(slug)) throw invalidParams('slug must be lowercase letters, digits and inner dashes')
   }
-  return { driver, ...(Object.keys(config).length > 0 ? { config } : {}), ...(slug ? { slug } : {}) }
+  if (o.signIn !== undefined && o.signIn !== 'ambient') throw invalidParams('signIn must be ambient')
+  return { driver, ...(Object.keys(config).length > 0 ? { config } : {}), ...(slug ? { slug } : {}), ...(o.signIn ? { signIn: 'ambient' as const } : {}) }
 }
 
 /** Device scope takes a boolean; a project may also clear its override with null. */

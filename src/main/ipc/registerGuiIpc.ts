@@ -813,7 +813,9 @@ export function registerGuiIpc(
     }
   })
 
-  guiMms.on('resnapshot', async () => {
+  guiMms.on('resnapshot', async (event?: { reason?: string }) => {
+    // A reconnect may be to a restarted service: provider operations the windows wait on are gone.
+    if (event?.reason?.startsWith('reconnect')) broadcast('providers:serviceRestarted', null)
     const activeId = currentPresentation().getActiveThreadId()
     if (!activeId || !guiMms.connected) return
     try {

@@ -39,7 +39,7 @@ import {
 } from '../chat/components/agent-elements/tools/quick-action-approval'
 import '../chat/components/agent-elements/agent-ui.css'
 import { prepareComposerThread } from '../lib/createComposerThread'
-import { pickerIdFor, pickerProviders, projectScope, useProviderSnapshots } from '../lib/providerSnapshots'
+import { onProviderListingsChanged, pickerIdFor, pickerProviders, projectScope, useProviderSnapshots } from '../lib/providerSnapshots'
 import { sendErrorLine } from '../lib/errorText'
 import { composerThreadActions } from '../lib/composerThreadActions'
 import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending } from '../lib/newThread'
@@ -425,8 +425,16 @@ export function OrchestratorChat() {
     const unsubSettings = window.mousse.settings.onChanged(() => {
       void refreshSelection()
     })
-    const unsubProviders = window.mousse.providers.onSnapshots(() => {
-      void refreshSelection()
+    // A provider change can only change the model catalogue: read that alone, newest reply kept.
+    let catalogRequest = 0
+    const unsubProviders = onProviderListingsChanged(() => {
+      const request = ++catalogRequest
+      void window.mousse.settings
+        .getOptions()
+        .then((options) => {
+          if (request === catalogRequest) setCatalog(options.llmProviders)
+        })
+        .catch(() => undefined)
     })
     const unsubSkills = window.mousse.skills.onChanged(() => {
       void refreshSelection()

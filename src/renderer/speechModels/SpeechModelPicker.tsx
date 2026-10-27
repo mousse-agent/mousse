@@ -2,6 +2,7 @@ import { useEffect, useId, useState, type KeyboardEvent, type ReactNode } from '
 import { localModelBytes, type LocalModelManifest, type LocalModelState, type LocalModelStatus } from '../../shared/localModels'
 import type { LlmProviderOption } from '../../shared/settings'
 import { Check, Download, Loader2, Trash2, X } from '../lib/icons'
+import { onProviderListingsChanged } from '../lib/providerSnapshots'
 import '../styles/read-aloud.css'
 
 /**
@@ -48,18 +49,21 @@ export function useProviderSpeechModels(select: (providers: readonly LlmProvider
   const [models, setModels] = useState<SpeechProviderModel[] | null>(null)
   useEffect(() => {
     let disposed = false
+    // Only the newest read is kept: an older, slower one never overwrites it.
+    let latest = 0
     const load = (): void => {
+      const request = ++latest
       window.mousse.settings
         .getOptions()
         .then((options) => {
-          if (!disposed) setModels(select(options.llmProviders))
+          if (!disposed && request === latest) setModels(select(options.llmProviders))
         })
         .catch(() => {
           if (!disposed) setModels((current) => current ?? [])
         })
     }
     load()
-    const unsubscribe = window.mousse.providers.onSnapshots(load)
+    const unsubscribe = onProviderListingsChanged(load)
     return () => {
       disposed = true
       unsubscribe()

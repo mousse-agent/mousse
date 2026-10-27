@@ -410,6 +410,11 @@ export interface HarnessDriver {
    * deleted, as the old Remove did. Never set for an agent on the user's own sign-in.
    */
   readonly removeSignsOut?: boolean
+  /**
+   * Checks and saves the environment's cloud credentials for the entry `patch` would add, before it
+   * is added (`AddInstanceInput.signIn: 'ambient'`), so a failed check leaves nothing behind.
+   */
+  verifyAmbient?(patch: InstanceConfigPatch): Promise<{ success: boolean; error?: string }>
   /** What the driver offers in Add provider (`providers.catalog.addOptions`), without `added`. */
   addOptions?(): DriverAddOption[]
   /**
@@ -530,4 +535,6 @@ export interface DriverAddOption {
   /** The add input's config (`instances.add({driver, config})`). */
   config: InstanceConfigPatch
   hasSavedKey: boolean
+  /** Mousse runs this provider as that agent (`FOLDED_INTO_AGENT`): Add provider offers the agent instead. */
+  runsAs?: HarnessDriverKind
 }

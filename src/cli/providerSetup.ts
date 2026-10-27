@@ -19,6 +19,11 @@ function addCommand(providerId: string): string {
   return `mousse config providers --provider ${providerId} --api-key …`
 }
 
+/** A provider Mousse runs as an agent is added and keyed in Settings → Providers, as that agent. */
+function runsAsAgent(option: ProviderAddOption): Error {
+  return new Error(`Mousse runs ${option.label} through its agent (${option.runsAs}). Add it, or replace its key, in Settings → Providers.`)
+}
+
 /**
  * `mousse config providers`: adds the provider (adding it again returns the entry, so a second run
  * changes nothing), then saves `apiKey` as its key. `configured` is whether the entry is signed in.
@@ -31,6 +36,7 @@ export async function addProvider(
 ): Promise<{ instanceId: string; configured: boolean }> {
   const option = (options ?? (await providerAddOptions(client))).find((entry) => entry.id === providerId)
   if (!option) throw new Error(`Mousse cannot add the model provider "${providerId}".`)
+  if (option.runsAs) throw runsAsAgent(option)
   const { snapshot } = await client.request<{ snapshot: InstanceSnapshot }>('providers.instances.add', option.add)
   if (apiKey) await client.request('providers.instances.setSecret', { instanceId: snapshot.instanceId, value: apiKey })
   const current = (await deviceSnapshots(client)).find((entry) => entry.instanceId === snapshot.instanceId)
@@ -43,9 +49,9 @@ export async function addProvider(
  */
 export async function setProviderKey(client: ProviderRequester, providerId: string, apiKey: string): Promise<void> {
   const option = (await providerAddOptions(client)).find((entry) => entry.id === providerId)
-  const snapshots = await deviceSnapshots(client)
-  const instanceId = option?.instanceId ?? providerId
-  const entry = snapshots.find((snapshot) => snapshot.instanceId === instanceId)
-  if (!entry) throw new Error(`${option?.label ?? providerId} is not added. Run \`${addCommand(providerId)}\`.`)
+  if (!option) throw new Error(`Mousse has no model provider "${providerId}" that takes an API key.`)
+  const entry = (await deviceSnapshots(client)).find((snapshot) => snapshot.instanceId === option.instanceId)
+  if (!entry && option.runsAs) throw runsAsAgent(option)
+  if (!entry) throw new Error(`${option.label} is not added. Run \`${addCommand(providerId)}\`.`)
   await client.request('providers.instances.setSecret', { instanceId: entry.instanceId, value: apiKey })
 }

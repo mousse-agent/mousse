@@ -10,6 +10,7 @@ import type {
 } from '../../shared/settings'
 import { listingServes, selectionFromListing } from '../../shared/providerInstances'
 import { useAppStore } from '../stores/appStore'
+import { onProviderListingsChanged } from '../lib/providerSnapshots'
 import { ProvidersSettings } from './providers/ProvidersSettings'
 import { SpeechSettings } from '../speech/SpeechSettings'
 import { NetDevicesSection } from './NetDevicesSection'
@@ -155,7 +156,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
   useEffect(() => {
     if (!settingsOpen) return
-    const unsub = window.mousse.providers.onSnapshots(() => {
+    const unsub = onProviderListingsChanged(() => {
       void refreshProviderData()
     })
     return unsub

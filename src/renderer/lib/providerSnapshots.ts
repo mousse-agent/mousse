@@ -1,7 +1,7 @@
 import { useCallback, useEffect } from 'react'
 import { create } from 'zustand'
 import { describeStatus, type InstanceSnapshot, type ProviderSnapshotsEvent, type StatusDescription } from '../../shared/harness/status'
-import type { HarnessCaps, HarnessDriverKind, ProviderOperationEvent, ProviderScope, SignInPrompt } from '../../shared/harness/types'
+import type { HarnessCaps, HarnessDriverKind, ProviderOperationEvent, ProviderOperationStarted, ProviderScope, SignInPrompt } from '../../shared/harness/types'
 import { formatEffortLabel, parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import type { PermissionLimits } from '../../shared/permissionMode'
 import { legacyProviderForInstance } from '../../shared/providerInstances'
@@ -168,22 +168,86 @@ function finished(event: ProviderOperationEvent | undefined): event is FinishedO
   return event?.phase === 'completed' || event?.phase === 'failed' || event?.phase === 'cancelled'
 }
 
+/** What a model listing reads from a snapshot: install progress and check times are left out. */
+function listingSignature(event: ProviderSnapshotsEvent): string {
+  return JSON.stringify(
+    event.snapshots.map((snapshot) => [
+      snapshot.instanceId,
+      snapshot.displayName,
+      snapshot.enabled.effective,
+      snapshot.auth.state,
+      snapshot.install.state,
+      snapshot.models.entries.map((model) => [model.id, model.hidden, model.favorite])
+    ])
+  )
+}
+
+/** How long a burst of snapshot events is gathered before listings are read again. */
+export const LISTING_RELOAD_DELAY_MS = 250
+
+/**
+ * Calls `reload` when what the model listings show may have changed: a snapshots event whose
+ * instances, switches, sign-ins, installs or models differ from the last one of its scope. Bursts
+ * (a probe per instance, a download's progress) are gathered into one call.
+ */
+export function onProviderListingsChanged(reload: () => void, delayMs = LISTING_RELOAD_DELAY_MS): () => void {
+  const last = new Map<string, string>()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const unsubscribe = window.mousse.providers.onSnapshots((event) => {
+    const key = scopeKey(event.scope)
+    const signature = listingSignature(event)
+    if (last.get(key) === signature) return
+    last.set(key, signature)
+    if (timer) clearTimeout(timer)
+    timer = setTimeout(() => {
+      timer = undefined
+      reload()
+    }, delayMs)
+  })
+  return () => {
+    if (timer) clearTimeout(timer)
+    unsubscribe()
+  }
+}
+
+/** Operations someone waits on (`operationOutcome`), so a lost connection can end them. */
+const awaited = new Map<string, ProviderOperationStarted>()
+
 /**
  * Resolves with the operation's last event once it completed, failed or was cancelled. The event
- * may arrive before the call that started the operation returned, so the store is read first.
+ * may arrive before the call that started the operation returned, so the store is read first. An
+ * operation the service can no longer finish (it restarted, or the profile switched) ends as failed.
  */
-export function operationOutcome(operationId: string): Promise<FinishedOperation> {
+export function operationOutcome(started: ProviderOperationStarted): Promise<FinishedOperation> {
   ensureListening()
+  const { operationId } = started
   const current = useProviderSnapshotsStore.getState().operations[operationId]
   if (finished(current)) return Promise.resolve(current)
+  awaited.set(operationId, started)
   return new Promise((resolve) => {
     const unsubscribe = useProviderSnapshotsStore.subscribe((state) => {
       const event = state.operations[operationId]
       if (!finished(event)) return
       unsubscribe()
+      awaited.delete(operationId)
       resolve(event)
     })
   })
+}
+
+/**
+ * Ends every running or awaited operation as failed: the service that ran them restarted (its
+ * operations are gone), or the window moved to another profile. Their dialogs stop waiting.
+ */
+export function failRunningOperations(message: string): void {
+  const { operations } = useProviderSnapshotsStore.getState()
+  const running = new Map<string, ProviderOperationStarted>(awaited)
+  for (const event of Object.values(operations)) {
+    if (event.phase === 'progress' || event.phase === 'prompt') running.set(event.operationId, event)
+  }
+  for (const { operationId, instanceId, kind } of running.values()) {
+    applyOperationEvent({ operationId, instanceId, kind, phase: 'failed', error: { code: 'protocol', message, instanceId } })
+  }
 }
 
 function ensureListening(): void {
@@ -191,10 +255,13 @@ function ensureListening(): void {
   listening = true
   window.mousse.providers.onSnapshots(applySnapshotsEvent)
   window.mousse.providers.onOperation(applyOperationEvent)
+  window.mousse.providers.onServiceRestarted?.(() => failRunningOperations('The connection to the Mousse service was lost. Start the sign-in again.'))
 }
 
 function ensureProfile(profileId: string): void {
   if (useProviderSnapshotsStore.getState().profileId === profileId) return
+  // Operations of the other profile are not reported here any more: whoever waits on one stops.
+  failRunningOperations('The profile changed before the sign-in finished.')
   scopesByKey.clear()
   useProviderSnapshotsStore.setState({ profileId, scopes: {}, operations: {}, prompts: {} })
 }

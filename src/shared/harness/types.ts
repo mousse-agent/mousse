@@ -511,6 +511,11 @@ export interface AddInstanceInput {
   config?: InstanceConfigPatch
   /** The id's slug (`claude:api`), when it should not come from the display name. */
   slug?: string
+  /**
+   * `ambient`: add only once the environment's cloud credentials check out, and save them as the
+   * entry's credential. A failed check adds nothing.
+   */
+  signIn?: 'ambient'
 }
 
 /** How an Add option signs in once added: a pasted key, a browser sign-in, or the environment's credentials. */
@@ -536,6 +541,8 @@ export interface ProviderAddOption {
   added: boolean
   /** A key for it is saved on this device already (shared by the profiles), so no key needs typing. */
   hasSavedKey: boolean
+  /** Mousse runs this provider as that agent (Anthropic → Claude Code): it is added as the agent, not as a model API. */
+  runsAs?: HarnessDriverKind
 }
 
 /** Long provider operations; each returns an operation id at once and reports through events. */
@@ -549,7 +556,16 @@ export interface ProviderOperationStarted {
 
 /** A step of a sign-in that needs the user. Answered with `respondSignIn`. */
 export type SignInPrompt =
-  | { promptId: string; type: 'auth_url'; url: string; instructions?: string; usesCallbackServer: boolean; acceptsRedirectPaste?: boolean }
+  | {
+      promptId: string
+      type: 'auth_url'
+      url: string
+      instructions?: string
+      usesCallbackServer: boolean
+      acceptsRedirectPaste?: boolean
+      /** What the paste field asks for, when the sign-in said (a code or the redirect address). */
+      pasteMessage?: string
+    }
   | { promptId: string; type: 'device_code'; userCode: string; verificationUri: string; expiresInSeconds?: number }
   | { promptId: string; type: 'input'; secret: boolean; message: string; placeholder?: string }
   | { promptId: string; type: 'select'; message: string; options: Array<{ id: string; label: string; description?: string }> }

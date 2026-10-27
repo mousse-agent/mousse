@@ -9,6 +9,7 @@ import {
   applySnapshot,
   loadProviderSnapshots,
   modelPrefsByInstance,
+  onProviderListingsChanged,
   operationOutcome,
   projectScope,
   removeSnapshot,
@@ -104,7 +105,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
   }, [])
   useEffect(() => {
     void loadAddOptions().catch(() => {})
-    return window.mousse.providers.onSnapshots(() => void loadAddOptions().catch(() => {}))
+    return onProviderListingsChanged(() => void loadAddOptions().catch(() => {}))
   }, [loadAddOptions])
 
   // A failed install or update reports here; a failed sign-in stays in its dialog. A sign-in that
@@ -154,8 +155,8 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
   const runSignIn = async (instanceId: string, name: string, method: AddOptionMethod) => {
     const started = await window.mousse.providers.instances.signIn(instanceId, method)
     if (method !== 'ambient') setSignIn({ operationId: started.operationId, name })
-    const outcome = await operationOutcome(started.operationId)
-    if (outcome.phase === 'failed') throw new Error(outcome.error.message)
+    const outcome = await operationOutcome(started)
+    if (outcome.phase === 'failed') throw new Error(outcome.error.message || (method === 'ambient' ? 'Could not verify the credentials.' : 'Sign-in failed.'))
     if (outcome.phase === 'cancelled') throw new Error('Sign-in was cancelled.')
   }
 
@@ -225,13 +226,15 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
       return snapshot.instanceId
     },
     // Add (idempotent: a retry after a failed sign-in finds the entry), then the pasted key or the
-    // sign-in. A credential saved on this device already (by another profile) needs neither.
+    // sign-in. A credential saved on this device already (by another profile) needs neither. Cloud
+    // credentials are checked before the entry is added, so a failed check adds nothing.
     connectApi: async (option, method, apiKey) => {
       const { instances } = window.mousse.providers
-      const added = await instances.add(option.add)
+      const ambient = method === 'ambient' && !option.hasSavedKey
+      const added = await instances.add(ambient ? { ...option.add, signIn: 'ambient' } : option.add)
       applySnapshot(added)
       if (method === 'api_key' && apiKey) applySnapshot(await instances.setSecret(added.instanceId, apiKey))
-      else if (!option.hasSavedKey) await runSignIn(added.instanceId, added.displayName, method)
+      else if (!ambient && !option.hasSavedKey) await runSignIn(added.instanceId, added.displayName, method)
       await loadAddOptions().catch(() => {})
       await loadProviderSnapshots(DEVICE_SCOPE)
       if (scope.kind === 'project') void reload()

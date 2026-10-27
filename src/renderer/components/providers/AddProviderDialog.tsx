@@ -216,6 +216,11 @@ export function AddProviderDialog({
 }) {
   const [query, setQuery] = useState('')
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
+  /**
+   * The choice as it was picked. Adding a model API makes it an entry, so the reloaded options no
+   * longer offer it; the steps after the first keep showing it (a failed sign-in, a retry).
+   */
+  const [picked, setPicked] = useState<AddChoice | null>(null)
   const [step, setStep] = useState(0)
   const [label, setLabel] = useState('')
   const [method, setMethod] = useState('')
@@ -233,6 +238,7 @@ export function AddProviderDialog({
     if (open) return
     setQuery('')
     setSelectedKey(null)
+    setPicked(null)
     setStep(0)
     setError(null)
     setRegistryQuery('')
@@ -246,12 +252,13 @@ export function AddProviderDialog({
     group,
     items: shown.filter((choice) => choice.group === group).sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }))
   })).filter((group) => group.items.length > 0)
-  const selected = choices.find((choice) => choice.key === selectedKey) ?? null
+  const selected = choices.find((choice) => choice.key === selectedKey) ?? (step > 0 && picked?.key === selectedKey ? picked : null)
   /** The sign-in method of a model API: the one chosen in its step, else its first. */
   const apiMethod = selected?.kind === 'api' ? (selected.methods.find((entry) => entry === method) ?? selected.methods[0]!) : undefined
 
   const choose = (choice: AddChoice) => {
     setSelectedKey(choice.key)
+    setPicked(choice)
     setError(null)
     setRegistryAgent(null)
     setMethod(choice.kind === 'api' ? choice.methods[0]! : '')

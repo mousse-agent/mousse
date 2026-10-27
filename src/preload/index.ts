@@ -927,6 +927,12 @@ const api = {
       ipcRenderer.on('providers:snapshots', handler)
       return () => ipcRenderer.removeListener('providers:snapshots', handler)
     },
+    /** The window reconnected to the service: operations it was running are gone. */
+    onServiceRestarted: (cb: () => void): (() => void) => {
+      const handler = () => cb()
+      ipcRenderer.on('providers:serviceRestarted', handler)
+      return () => ipcRenderer.removeListener('providers:serviceRestarted', handler)
+    },
     /** Progress, sign-in prompts and the outcome of install, update and sign-in operations. */
     onOperation: (cb: (event: ProviderOperationEvent) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, event: ProviderOperationEvent) => cb(event)

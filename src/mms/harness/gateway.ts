@@ -630,6 +630,8 @@ interface Operation {
    */
   manualCode?: string
   urlPrompts: string[]
+  /** The browser link the sign-in showed last; a paste field that follows it is shown with it. */
+  lastUrl?: Extract<SignInPrompt, { type: 'auth_url' }>
   prompts: number
   progress?: InstallProgress
   cancel(): boolean
@@ -773,6 +775,8 @@ export class Harness implements HarnessGateway {
     this.instanceMap = options.instanceMap
     for (const driver of options.drivers) {
       if (this.drivers.has(driver.kind)) throw new Error(`A driver for ${driver.kind} is already registered.`)
+      // Add provider's options are added under fixed ids; a driver without them could not say which.
+      if (driver.addOptions && !driver.instanceIdFor) throw new Error(`The ${driver.kind} driver offers Add options but no fixed instance ids (instanceIdFor).`)
       this.drivers.set(driver.kind, driver)
     }
     this.scopes = new HarnessScopeStore(options.profileHome)
@@ -2358,6 +2362,17 @@ export class Harness implements HarnessGateway {
     if (!driver) return harnessFail('unsupported', `Mousse cannot add a ${input.driver} instance.`)
     const patch = input.config ?? {}
     if (patch.engine !== undefined) return harnessFail('unsupported', `${driver.label} takes its engine under Advanced once added.`)
+    if (input.signIn === 'ambient') {
+      // Cloud credentials are checked before anything is written: a failed check adds no entry.
+      if (!driver.instanceIdFor || !driver.verifyAmbient) return harnessFail('unsupported', `${driver.label} has no cloud credentials to check.`)
+      const instanceId = driver.instanceIdFor(patch)
+      await this.removing.get(instanceId)
+      const verified = await driver.verifyAmbient(patch)
+      if (!verified.success) return harnessFail('signed_out', verified.error || 'Could not verify the credentials.', instanceId)
+      const added = await this.addFixed(driver, patch)
+      await this.credentialsChanged(instanceId)
+      return { snapshot: this.snapshot(instanceId, { kind: 'device' }), existed: added.existed }
+    }
     if (driver.instanceIdFor) return this.addFixed(driver, patch)
     if (patch.provider !== undefined) return harnessFail('unsupported', `${driver.label} takes no model provider.`)
     const entries = this.instanceMap.list()
@@ -3386,7 +3401,12 @@ export class Harness implements HarnessGateway {
         .finally(() => {
           this.operations.delete(started.operationId)
           this.deleteRemoved()
-          void this.probe(instanceId, true)
+          // A check already running read the credentials from before the sign-in: wait for it, then
+          // check again, so the entry does not read signed out until the check's lifetime ends.
+          void (async () => {
+            await this.probes.get(instanceId)?.probing
+            await this.probe(instanceId, true)
+          })().catch(() => undefined)
           this.emitSnapshots({ kind: 'device' })
         })
     })
@@ -3408,6 +3428,7 @@ export class Harness implements HarnessGateway {
           ...(operation.manualCode ? { acceptsRedirectPaste: true } : {})
         }
         operation.urlPrompts.push(prompt.promptId)
+        operation.lastUrl = prompt
         break
       case 'device_code':
         prompt = { promptId: promptId(), type: 'device_code', userCode: event.userCode, verificationUri: event.verificationUri, ...(event.expiresInSeconds ? { expiresInSeconds: event.expiresInSeconds } : {}) }
@@ -3417,6 +3438,15 @@ export class Harness implements HarnessGateway {
         operation.prompt = { promptId: prompt.promptId, kind: 'prompt' }
         break
       case 'manual_code':
+        // A paste field after the browser link (pi-ai's OpenRouter): the link is shown again with the
+        // field under it, so "Open again" and "Copy link" stay. Answered as a redirect from that prompt.
+        if (operation.lastUrl) {
+          prompt = { ...operation.lastUrl, promptId: promptId(), acceptsRedirectPaste: true, pasteMessage: event.message }
+          operation.urlPrompts.push(prompt.promptId)
+          operation.manualCode = prompt.promptId
+          operation.lastUrl = prompt
+          break
+        }
         prompt = { promptId: promptId(), type: 'input', secret: false, message: event.message }
         operation.manualCode = prompt.promptId
         break

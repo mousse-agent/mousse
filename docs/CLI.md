@@ -77,7 +77,7 @@ mousse-cli --home /var/lib/mousse service run
 
 ```bash
 # Configure orchestrator provider (secrets -> ~/.mousse/auth.json)
-mousse-cli config providers --provider anthropic --api-key "$ANTHROPIC_API_KEY"
+mousse-cli config providers --provider openrouter --api-key "$OPENROUTER_API_KEY"
 
 # One-shot orchestrator chat (starts daemon if needed)
 mousse-cli -p "Review the repo and suggest improvements"
@@ -128,7 +128,7 @@ mousse-cli service install --headless       # Linux: add ELECTRON_DISABLE_SANDBO
 | `--mode text\|json` | Output format (default: `text`) |
 | `--provider <id>` | Override orchestrator LLM provider for this run |
 | `--model <id>` | Override orchestrator model |
-| `--api-key <key>` | API key for this run only (never written to `mousse.conf`) |
+| `--api-key <key>` | With `--provider`: replaces the saved key of that model provider, which must be added already (`config providers`). The key is saved in `auth.json`, shared by every profile on this device, never in `mousse.conf`. |
 | `-c`, `--continue` | Continue the most recent thread session |
 | `--session <id>` | Use a specific thread/session id |
 | `--home <dir>` | Set `MOUSSE_HOME` (default: `~/.mousse`) |
@@ -313,9 +313,13 @@ Set up orchestrator LLM credentials interactively or via flags:
 
 ```bash
 mousse-cli config providers
-mousse-cli config providers --provider anthropic --api-key "$ANTHROPIC_API_KEY" --model claude-sonnet-4-20250514
-mousse-cli config providers --provider xai --api-key "$XAI_API_KEY" --model grok-4.5
+mousse-cli config providers --provider openrouter --api-key "$OPENROUTER_API_KEY" --model anthropic/claude-sonnet-4.5
+mousse-cli config providers --provider groq --api-key "$GROQ_API_KEY"
 ```
+
+- The provider is added to the profile (running it again changes nothing), then the key is saved.
+- Providers Mousse runs through an agent (Anthropic through Claude Code, xAI through Grok) are added in Settings → Providers, as that agent.
+- Cloud credentials (Amazon Bedrock, Google Vertex) are checked in Settings → Providers.
 
 - Provider and model preferences are stored in `mousse.conf` (`settings.provider`).
 - API keys and OAuth tokens are stored in `~/.mousse/auth.json` via `ProviderAuthService`, never in `mousse.conf`.
