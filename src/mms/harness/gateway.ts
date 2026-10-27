@@ -98,6 +98,7 @@ export type {
   ChildTurnPolicy,
   ProviderMetrics,
   RecoveredContext,
+  ToolHost,
   TurnBridge,
   TurnControl,
   TurnInput,

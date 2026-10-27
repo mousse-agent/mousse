@@ -79,11 +79,17 @@ describe('harness import boundary', () => {
   it('only the Cursor host loads the Cursor SDK', () => {
     const violations: string[] = []
     for (const { path, source } of sources) {
-      if (CURSOR_SDK_IMPORTERS.some((rule) => rule.test(path)) || CURSOR_SDK_TRANSITIONAL[path]) continue
+      if (CURSOR_SDK_IMPORTERS.some((rule) => rule.test(path))) continue
       for (const specifier of specifiers(source)) if (CURSOR_SDK.test(specifier)) violations.push(`${path} → ${specifier}`)
     }
     expect(violations).toEqual([])
-    for (const path of Object.keys(CURSOR_SDK_TRANSITIONAL)) expect(sources.some((entry) => entry.path === path), path).toBe(true)
+  })
+
+  it('nothing imports the deleted in-process Pi loop', () => {
+    const violations: string[] = []
+    for (const { path, source } of sources)
+      for (const specifier of specifiers(source)) if (/(^|\/)orchestrator\/LlmClient$/.test(target(path, specifier))) violations.push(`${path} → ${specifier}`)
+    expect(violations).toEqual([])
   })
 })
 
@@ -93,10 +99,6 @@ describe('harness import boundary', () => {
  */
 const CURSOR_SDK = /^(@cursor\/sdk|pi-cursor-sdk)(\/|$)/
 const CURSOR_SDK_IMPORTERS = [/^src\/mms\/harness\/hosts\//]
-/** The legacy `pi:cursor` model API, removed with the pi loop. */
-const CURSOR_SDK_TRANSITIONAL: Record<string, string> = {
-  'src/mms/providers/cursorPiProvider.ts': 'PR 4'
-}
 
 // -- Rule 2: driver-name literals at branch sites --------------------------------------------------
 
@@ -117,9 +119,7 @@ const BRANCH_SITES = [
  * icons and settings keywords show the vendor.
  */
 const LITERAL_ALLOWLIST: Record<string, string> = {
-  'src/renderer/lib/providerIcons.tsx': 'icons',
-  // The pi loop's prompt for the legacy `pi:cursor` model API (`providerId` is a pi-ai provider).
-  'src/mms/orchestrator/systemPrompt.ts': 'PR 4 (goes with the pi loop)'
+  'src/renderer/lib/providerIcons.tsx': 'icons'
 }
 
 /**
@@ -128,7 +128,10 @@ const LITERAL_ALLOWLIST: Record<string, string> = {
  * stays honest if they move.
  */
 const TRANSITIONAL: Record<string, string> = {
-  'src/mms/run/adapters/': 'PR 2–4 (adapters retired by drivers)',
+  'src/mms/run/adapters/claudeSubscription/': 'PR 5 (adapters retired by drivers)',
+  'src/mms/run/adapters/codex/': 'PR 5 (adapters retired by drivers)',
+  'src/mms/run/adapters/acp/': 'PR 5 (adapters retired by drivers)',
+  'src/mms/run/adapters/cursor/': 'PR 5 (adapters retired by drivers)',
   'src/mms/providers/claudeSubscription/': 'PR 5',
   'src/mms/providers/codex/': 'PR 5',
   'src/mms/providers/antigravity/': 'PR 5'

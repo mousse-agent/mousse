@@ -10,8 +10,8 @@ import { piShellPath } from '../../../pi/settings'
 import { piInstanceRuntime, type PiCredentials } from '../instance'
 
 /**
- * Pi's agent as its own process (PR 2 §4): a `pi:*` instance the user switched to it (Advanced →
- * Engine: New engine), except the legacy-only providers (`../engines.ts`).
+ * Pi's agent as its own process (PR 2 §4): every `pi:*` instance, except the retired providers
+ * (`../retired.ts`).
  *
  * - Containment and tool control are `weak`/`approval_only` (these caps) wherever the evidence suite
  *   has not passed for this platform and Pi version: Mousse sees and can refuse every call, but does
@@ -185,7 +185,7 @@ export function createRpcRuntime(context: DriverContext, providerId: string, lab
     notice: (threadId, { message }) => notice.send(threadId, message),
     ...options.engine
   })
-  // The first turn of the instance on this engine says so, once (PR 2 §5, "Engine notice").
+  // The first turn of the instance on this engine says so, once ("Engine notice").
   const startTurn: PiRpcEngine['startTurn'] = (input, ...rest) => {
     notice.show(input.threadId)
     return engine.startTurn(input, ...rest)
@@ -290,8 +290,10 @@ function credentialChanges(engine: PiRpcEngine, subject: () => string | undefine
 export const ENGINE_NOTICE_FILE = 'engine-notice.json'
 
 /**
- * The one-time notice that an instance now runs on Pi's agent: shown on its first RPC turn and
- * recorded in the instance's state dir, so it never shows again (a removed instance starts over).
+ * The one-time notice that an instance now runs on Pi's agent (the Mousse agent engine, the legacy
+ * loop, was removed): shown on its first turn and recorded in the instance's state dir, so it never
+ * shows again (a removed instance starts over). An instance that was already on Pi's agent showed
+ * the earlier notice, so it sees none.
  */
 function engineNotice(context: DriverContext, label: string): { show(threadId: string): void; send(threadId: string, text: string): void; setHost(host: LiveProcessHost | null): void } {
   let host: LiveProcessHost | null = null
@@ -319,7 +321,7 @@ function engineNotice(context: DriverContext, label: string): { show(threadId: s
         console.warn('[harness] could not record the engine notice', error instanceof Error ? error.message : String(error))
       }
       try {
-        host.notice(threadId, `${label} now runs on Pi's agent, so its tools and replies may differ slightly. To switch back: Providers → ${label} → Advanced → Engine: Legacy.`)
+        host.notice(threadId, `The Mousse agent engine was removed; ${label} now runs on Pi's agent, so its tools and replies may differ slightly.`)
       } catch (error) {
         console.warn('[harness] notice failed', error instanceof Error ? error.message : String(error))
       }
