@@ -15,6 +15,7 @@ import {
   sameReviewFile,
   turnIdOfScope
 } from '../src/shared/chatReferences'
+import { ChatReferencePill } from '../src/renderer/components/ReferencePill'
 import { classifyLink, safeMarkdownUrl } from '../src/renderer/utils/chatLinks'
 
 describe('chat references', () => {
@@ -42,6 +43,35 @@ describe('chat references', () => {
     const parsed = extractChatReferences(`Please inspect this\n\n${block}`)
     expect(parsed.text).toBe('Please inspect this')
     expect(parsed.references).toEqual([expect.objectContaining({ kind: 'thread', threadId: 't1', title: 'Fix parser' })])
+  })
+
+  it('validates and formats folder references with their path', () => {
+    expect(parseChatReference({ kind: 'folder', title: 'src', path: '/repo/src' })).toEqual(
+      expect.objectContaining({ kind: 'folder', title: 'src', path: '/repo/src' })
+    )
+    expect(parseChatReference({ kind: 'folder', title: 'no path' })).toBeNull()
+    const block = formatChatReferences([{ id: 'folder:f1', kind: 'folder', title: 'src', path: '/repo/src' }])
+    expect(block).toContain('- folder: "src"')
+    expect(block).toContain('Path: /repo/src')
+  })
+
+  it('keeps paths with spaces, unicode and punctuation intact through the references block', () => {
+    const path = '/repo/My Docs/ünï #1 (draft)/notes (final).md'
+    const block = formatChatReferences([{ id: 'file:p1', kind: 'file', title: 'notes (final).md', path }])
+    const parsed = extractChatReferences(`Read this\n\n${block}`)
+    expect(parsed.text).toBe('Read this')
+    expect(parsed.references).toEqual([expect.objectContaining({ kind: 'file', path, title: 'notes (final).md' })])
+  })
+
+  it('renders folder and extensionless file pills with their titles', () => {
+    const folder = renderToStaticMarkup(createElement(ChatReferencePill, { reference: { id: 'folder:1', kind: 'folder', title: 'components', path: '/repo/src/components' } }))
+    expect(folder).toContain('components')
+    expect(folder).toContain('composer-reference-link')
+    const extensionless = renderToStaticMarkup(createElement(ChatReferencePill, { reference: { id: 'file:1', kind: 'file', title: 'Makefile', path: '/repo/Makefile' } }))
+    expect(extensionless).toContain('Makefile')
+    // The icon follows the kind, not the extension: a file and a folder draw different icons.
+    const strip = (markup: string) => markup.replace(/>[^<]*</g, '><')
+    expect(strip(folder)).not.toBe(strip(extensionless))
   })
 
   it('rejects malformed payloads, missing resource IDs, and unsafe browser URLs', () => {

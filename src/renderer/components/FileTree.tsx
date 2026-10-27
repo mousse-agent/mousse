@@ -73,14 +73,13 @@ function TreeNode({
         className={`file-tree-row${selectedPath === entry.path ? ' selected' : ''}`}
         style={{ paddingLeft: 8 + depth * 14 }}
         onClick={handleClick}
-        draggable={!isDir}
+        draggable
         onDragStart={(event) => {
-          if (isDir) return
           const absolute = /^(?:[a-zA-Z]:[\\/]|\/)/.test(entry.path)
             ? entry.path
             : `${filesRoot.replace(/[\\/]$/, '')}/${entry.path.replace(/^[\\/]/, '')}`
           setReferenceDragData(event.dataTransfer, {
-            kind: 'file', title: entry.name, path: absolute, threadId: threadId ?? undefined, projectId
+            kind: isDir ? 'folder' : 'file', title: entry.name, path: absolute, threadId: threadId ?? undefined, projectId
           })
         }}
       >

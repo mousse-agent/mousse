@@ -1,4 +1,4 @@
-import { Bot, File, Folder, Globe, MessageSquare, TerminalSquare, X } from '../lib/icons'
+import { Bot, File, Folder, FolderOpen, Globe, MessageSquare, TerminalSquare, X } from '../lib/icons'
 import type { ChatReference } from '../../shared/chatReferences'
 import { formatMousseFileLink, parseChatReference } from '../../shared/chatReferences'
 import { openProjectReference, routeLink } from '../utils/chatLinks'
@@ -9,6 +9,7 @@ import { scopeFromKey } from './review/reviewComments'
 
 const ICONS = {
   file: File,
+  folder: FolderOpen,
   project: Folder,
   thread: MessageSquare,
   terminal: TerminalSquare,
@@ -56,6 +57,14 @@ export function openChatReference(reference: ChatReference): void {
       store.switchToThread(reference.threadId)
       void window.mousse.threads.select(reference.threadId)
     }
+    return
+  }
+  if (reference.kind === 'folder' && reference.path) {
+    if (reference.threadId && reference.threadId !== store.activeThreadId) {
+      store.switchToThread(reference.threadId)
+      void window.mousse.threads.select(reference.threadId)
+    }
+    store.openSurfaceKind('files')
     return
   }
   if (reference.kind === 'review-comment' && reference.path && reference.line && reference.reviewScope && store.activeThreadId) {

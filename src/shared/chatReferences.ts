@@ -1,7 +1,7 @@
 export const MOUSSE_REFERENCE_MIME = 'application/x-mousse-reference'
 export const MOUSSE_FILE_SCHEME = 'mousse-file:'
 
-export type ChatReferenceKind = 'file' | 'project' | 'thread' | 'terminal' | 'browser' | 'agent' | 'review-comment'
+export type ChatReferenceKind = 'file' | 'folder' | 'project' | 'thread' | 'terminal' | 'browser' | 'agent' | 'review-comment'
 
 export interface ChatReference {
   id: string
@@ -30,7 +30,7 @@ export interface ChatReference {
   cwd?: string
 }
 
-const KINDS = new Set<ChatReferenceKind>(['file', 'project', 'thread', 'terminal', 'browser', 'agent', 'review-comment'])
+const KINDS = new Set<ChatReferenceKind>(['file', 'folder', 'project', 'thread', 'terminal', 'browser', 'agent', 'review-comment'])
 const MAX_FIELD = 16_384
 export const REVIEW_COMMENT_MAX_CHARS = 4_096
 const REVIEW_EXCERPT_MAX_INPUT = 8_192
@@ -139,6 +139,7 @@ export function parseChatReference(value: unknown): ChatReference | null {
     if (!reference.path || !reference.line || !reference.comment || !reference.reviewScope) return null
   }
   if (kind === 'file' && !reference.path) return null
+  if (kind === 'folder' && !reference.path) return null
   if (kind === 'project' && !reference.projectId) return null
   if (kind === 'thread' && !reference.threadId) return null
   if (kind === 'terminal' && !reference.tabId) return null
