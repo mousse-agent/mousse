@@ -118,6 +118,11 @@ function remoteFailureCode(text: string): 'git_host_key_unverified' | 'git_auth_
   return null
 }
 
+/** Branches Mousse owns for thread worktrees, whatever the case a client spells them in. */
+function isManagedBranch(name: string): boolean {
+  return name.toLowerCase().startsWith('mousse/')
+}
+
 const CONFLICTED_PAIRS = new Set(['DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU'])
 /** Conflict pairs whose path has no version in HEAD ("us"). */
 const ABSENT_FROM_HEAD_PAIRS = new Set(['DD', 'DU', 'UA'])
@@ -452,7 +457,7 @@ export class GitService {
     return {
       current: summary.current ?? null,
       // Thread, agent and workflow branches live under mousse/ and are managed by the app.
-      branches: summary.all.filter((name) => !name.startsWith('mousse/'))
+      branches: summary.all.filter((name) => !isManagedBranch(name))
     }
   }
 
@@ -753,13 +758,18 @@ export class GitService {
 
   /** A name Git accepts for a branch, and one that cannot be mistaken for an option. */
   private async assertBranchName(cwd: string, name: string): Promise<void> {
-    if (name.startsWith('mousse/')) throw gitErrors.create('git_branch_protected')
+    if (isManagedBranch(name)) throw gitErrors.create('git_branch_protected')
     const checked = name.startsWith('-') ? null : await this.read(cwd, ['check-ref-format', '--branch', name])
     if (checked !== name) throw gitErrors.create('git_branch_invalid')
   }
 
+  /**
+   * Whether a local branch has exactly this name. `rev-parse refs/heads/<name>` is not enough: a loose ref is
+   * a file, so on Windows and macOS it is found whatever the case, while the guards compare names exactly.
+   */
   private async branchExists(cwd: string, name: string): Promise<boolean> {
-    return (await this.read(cwd, ['rev-parse', '--verify', '--quiet', `refs/heads/${name}`])) !== null
+    const listed = await this.read(cwd, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/'])
+    return (listed ?? '').split('\n').includes(name)
   }
 
   async createBranch(cwd: string, name: string, options: GitBranchOptions = {}): Promise<void> {
@@ -777,7 +787,7 @@ export class GitService {
 
   async renameBranch(cwd: string, name: string, newName: string): Promise<void> {
     await this.serialized(cwd, async () => {
-      if (name.startsWith('mousse/')) throw gitErrors.create('git_branch_protected')
+      if (isManagedBranch(name)) throw gitErrors.create('git_branch_protected')
       await this.assertBranchName(cwd, newName)
       if (!await this.branchExists(cwd, name)) throw gitErrors.create('git_ref_not_found')
       if (name !== newName && await this.branchExists(cwd, newName)) throw gitErrors.create('git_branch_exists')
@@ -788,8 +798,10 @@ export class GitService {
 
   async deleteBranch(cwd: string, name: string, options: GitDeleteBranchOptions = {}): Promise<void> {
     await this.serialized(cwd, async () => {
-      if (name.startsWith('mousse/')) throw gitErrors.create('git_branch_protected')
-      if (await this.currentBranch(cwd) === name) throw gitErrors.create('git_branch_current')
+      if (isManagedBranch(name)) throw gitErrors.create('git_branch_protected')
+      // Only an exact name is deleted; a differently cased one could still reach the current or a managed branch.
+      if (!await this.branchExists(cwd, name)) throw gitErrors.create('git_ref_not_found')
+      if ((await this.currentBranch(cwd))?.toLowerCase() === name.toLowerCase()) throw gitErrors.create('git_branch_current')
       const run = await this.runGit(cwd, ['branch', options.force ? '-D' : '-d', '--', name])
       if (run.ok) return
       if (/not fully merged/i.test(run.output)) throw classified('git_branch_unmerged', run)

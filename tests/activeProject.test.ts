@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { resolveActiveProject, type ActiveProjectInput } from '../src/renderer/lib/activeProject'
+import { gitScopeFor, resolveActiveProject, type ActiveProjectInput } from '../src/renderer/lib/activeProject'
 
 describe('active project', () => {
   const projects = [
@@ -15,7 +15,7 @@ describe('active project', () => {
   }
 
   it('keeps the thread own project and folder once the chat has started', () => {
-    expect(resolveActiveProject(base)).toEqual({ projectId: 'p1', path: '/work/one', loading: false })
+    expect(resolveActiveProject(base)).toEqual({ projectId: 'p1', path: '/work/one', loading: false, workspaceThreadId: null })
     // A stale draft for a started thread changes nothing.
     expect(resolveActiveProject({ ...base, draftProjectId: 'p2' })).toMatchObject({ projectId: 'p1', path: '/work/one' })
   })
@@ -24,7 +24,8 @@ describe('active project', () => {
     expect(resolveActiveProject({ ...base, isNewChat: true, draftProjectId: 'p2' })).toEqual({
       projectId: 'p2',
       path: '/work/two',
-      loading: false
+      loading: false,
+      workspaceThreadId: null
     })
   })
 
@@ -37,7 +38,8 @@ describe('active project', () => {
     expect(resolveActiveProject({ ...base, isNewChat: true, draftProjectId: 'gone' })).toEqual({
       projectId: 'gone',
       path: null,
-      loading: false
+      loading: false,
+      workspaceThreadId: null
     })
   })
 
@@ -45,7 +47,8 @@ describe('active project', () => {
     expect(resolveActiveProject({ ...base, isNewChat: true, draftProjectId: undefined, threadProjectId: null })).toEqual({
       projectId: null,
       path: '/work/one',
-      loading: false
+      loading: false,
+      workspaceThreadId: null
     })
   })
 
@@ -55,5 +58,24 @@ describe('active project', () => {
       path: null,
       loading: true
     })
+  })
+
+  it('names the thread when the folder is its own worktree, and never for a new chat', () => {
+    const worktree = { path: '/wt/thread-1', loading: false, workspaceThreadId: 'thread-1' }
+    expect(resolveActiveProject({ ...base, resolved: worktree })).toEqual({
+      projectId: 'p1',
+      path: '/wt/thread-1',
+      loading: false,
+      workspaceThreadId: 'thread-1'
+    })
+    expect(resolveActiveProject({ ...base, isNewChat: true, draftProjectId: 'p2', resolved: worktree }).workspaceThreadId).toBeNull()
+    expect(resolveActiveProject({ ...base, isNewChat: true, draftProjectId: undefined, threadProjectId: null, resolved: worktree }).workspaceThreadId).toBeNull()
+  })
+
+  it('scopes a Git mutation to the project folder or to the thread worktree', () => {
+    const project = resolveActiveProject(base)
+    expect(gitScopeFor(project)).toEqual({ projectId: 'p1', workspaceThreadId: null })
+    const worktree = resolveActiveProject({ ...base, resolved: { path: '/wt/thread-1', loading: false, workspaceThreadId: 'thread-1' } })
+    expect(gitScopeFor(worktree)).toEqual({ projectId: 'p1', workspaceThreadId: 'thread-1' })
   })
 })

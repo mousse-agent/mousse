@@ -111,6 +111,15 @@ export function branchLabel(status: GitStatusSnapshot | null): string {
   return 'No branch'
 }
 
+/** Shown in place of the branch picker while the folder is a thread's own worktree. */
+export const THREAD_BRANCH_LABEL = 'This thread works on its own branch'
+
+/** The daemon's error code for a failed Git action, or null when the failure carries none. */
+export function gitErrorCode(error: unknown): string | null {
+  if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string') return error.code
+  return null
+}
+
 /** Git's own message for an IPC failure, trimmed to its first line without the transport prefix. */
 export function gitErrorMessage(error: unknown): string {
   return ipcErrorLine(error).replace(/^(?:error|fatal):\s*/i, '') || 'Git command failed'
@@ -289,12 +298,16 @@ export interface CommitMenuState {
   shortHash: string | null
 }
 
-export function commitMenuState(commits: readonly GitCommit[], fileCount: number, amendChecked: boolean): CommitMenuState {
-  const canAmend = canAmendCommit(commits)
+/**
+ * `checkpointed` is a thread's own worktree: its history is recorded commit by commit, so the daemon
+ * refuses an amend there and the switch says why instead of failing later.
+ */
+export function commitMenuState(commits: readonly GitCommit[], fileCount: number, amendChecked: boolean, checkpointed = false): CommitMenuState {
+  const canAmend = !checkpointed && canAmendCommit(commits)
   const hasChanges = fileCount > 0
   const forced = canAmend && !hasChanges
   const amendTitle = !canAmend
-    ? commits.length === 0 ? 'No commits yet' : 'The last commit is already pushed'
+    ? checkpointed ? "This thread's branch is checkpointed" : commits.length === 0 ? 'No commits yet' : 'The last commit is already pushed'
     : forced ? 'No changes to commit' : null
   const triggerEnabled = hasChanges || canAmend
   return {

@@ -52,6 +52,9 @@ interface Mock {
   status: ReturnType<typeof vi.fn>
 }
 
+const project = { projectId: 'p1', workspaceThreadId: null }
+const standalone = { projectId: null, workspaceThreadId: null }
+
 const listeners = new Map<string, () => void>()
 const removeEventListener = vi.fn()
 
@@ -59,9 +62,9 @@ const install = (patch: Partial<Mock> = {}): Mock => {
   const git: Mock = {
     pullRequest: vi.fn(async () => lookup(1)),
     createPullRequest: vi.fn(async () => undefined),
-    commit: vi.fn(async () => undefined),
-    init: vi.fn(async () => undefined),
-    push: vi.fn(async () => undefined),
+    commit: vi.fn(async () => ({ status: repoStatus() })),
+    init: vi.fn(async () => ({ status: repoStatus() })),
+    push: vi.fn(async () => ({ status: repoStatus() })),
     status: vi.fn(async () => repoStatus()),
     ...patch
   }
@@ -342,8 +345,8 @@ describe('commit and push through the git store', () => {
   it('commits without pushing and leaves the pull request alone', async () => {
     const git = install()
     await refreshGitStatus('/repo/a')
-    await commitGitChanges('/repo/a', 'Add things', 'p1')
-    expect(git.commit).toHaveBeenCalledWith('Add things', 'p1', '/repo/a', { amend: false })
+    await commitGitChanges('/repo/a', 'Add things', project)
+    expect(git.commit).toHaveBeenCalledWith(project, 'Add things', { amend: false, expectedBranch: 'feature' })
     expect(git.push).not.toHaveBeenCalled()
     expect(git.status).toHaveBeenCalledTimes(2)
     expect(git.pullRequest).not.toHaveBeenCalled()
@@ -353,9 +356,9 @@ describe('commit and push through the git store', () => {
     const git = install()
     await refreshGitStatus('/repo/a')
     const phases: string[] = []
-    await commitGitChanges('/repo/a', 'Reword', 'p1', { amend: true, push: true, onPhase: (phase) => phases.push(phase) })
-    expect(git.commit).toHaveBeenCalledWith('Reword', 'p1', '/repo/a', { amend: true })
-    expect(git.push).toHaveBeenCalledWith('p1', '/repo/a')
+    await commitGitChanges('/repo/a', 'Reword', project, { amend: true, push: true, onPhase: (phase) => phases.push(phase) })
+    expect(git.commit).toHaveBeenCalledWith(project, 'Reword', { amend: true, expectedBranch: 'feature' })
+    expect(git.push).toHaveBeenCalledWith(project, { expectedBranch: 'feature' })
     expect(phases).toEqual(['committing', 'pushing'])
   })
 
@@ -363,7 +366,7 @@ describe('commit and push through the git store', () => {
     const git = install()
     await refreshGitStatus('/repo/a')
     await refreshPullRequest('/repo/a', 'feature')
-    await commitGitChanges('/repo/a', 'Add things', 'p1', { push: true })
+    await commitGitChanges('/repo/a', 'Add things', project, { push: true })
     expect(git.status).toHaveBeenCalledTimes(2)
     // The lookup was fresh, so only a forced refresh fetches it again.
     expect(git.pullRequest).toHaveBeenCalledTimes(2)
@@ -374,7 +377,7 @@ describe('commit and push through the git store', () => {
     const pushError = new Error('rejected: non-fast-forward')
     const git = install({ push: vi.fn(async () => { throw pushError }) })
     await refreshGitStatus('/repo/a')
-    const failure = await commitGitChanges('/repo/a', 'Add things', undefined, { push: true }).catch((error: unknown) => error)
+    const failure = await commitGitChanges('/repo/a', 'Add things', standalone, { push: true }).catch((error: unknown) => error)
     expect(failure).toBeInstanceOf(CommitPushError)
     expect((failure as CommitPushError).pushError).toBe(pushError)
     expect((failure as CommitPushError).message).toBe('rejected: non-fast-forward')
@@ -385,7 +388,7 @@ describe('commit and push through the git store', () => {
   it('does not push or refresh when the commit itself fails', async () => {
     const git = install({ commit: vi.fn(async () => { throw new Error('nothing to commit') }) })
     await refreshGitStatus('/repo/a')
-    await expect(commitGitChanges('/repo/a', 'x', undefined, { push: true })).rejects.toThrow('nothing to commit')
+    await expect(commitGitChanges('/repo/a', 'x', standalone, { push: true })).rejects.toThrow('nothing to commit')
     expect(git.push).not.toHaveBeenCalled()
     expect(git.status).toHaveBeenCalledTimes(1)
   })
@@ -394,8 +397,8 @@ describe('commit and push through the git store', () => {
     const git = install()
     await refreshGitStatus('/repo/a')
     await refreshPullRequest('/repo/a', 'feature')
-    await pushGitBranch('/repo/a', 'p1')
-    expect(git.push).toHaveBeenCalledWith('p1', '/repo/a')
+    await pushGitBranch('/repo/a', project)
+    expect(git.push).toHaveBeenCalledWith(project, { expectedBranch: 'feature' })
     expect(git.status).toHaveBeenCalledTimes(2)
     expect(git.pullRequest).toHaveBeenCalledTimes(2)
     // A push forces the lookup past both the store's age and the daemon's cache.
@@ -405,7 +408,7 @@ describe('commit and push through the git store', () => {
   it('does not refresh after a push that fails', async () => {
     const git = install({ push: vi.fn(async () => { throw new Error('rejected') }) })
     await refreshGitStatus('/repo/a')
-    await expect(pushGitBranch('/repo/a')).rejects.toThrow('rejected')
+    await expect(pushGitBranch('/repo/a', standalone)).rejects.toThrow('rejected')
     expect(git.status).toHaveBeenCalledTimes(1)
     expect(git.pullRequest).not.toHaveBeenCalled()
   })
@@ -418,8 +421,8 @@ describe('commit and push through the git store', () => {
     })
     await refreshGitStatus('/repo/a')
     order.length = 0
-    await initGitRepository('/repo/a', 'p1')
-    expect(git.init).toHaveBeenCalledWith('p1', '/repo/a')
+    await initGitRepository('/repo/a', project)
+    expect(git.init).toHaveBeenCalledWith(project)
     expect(order).toEqual(['init', 'status'])
     expect(git.status).toHaveBeenCalledTimes(2)
   })
@@ -427,14 +430,14 @@ describe('commit and push through the git store', () => {
   it('does not refresh after an init that fails', async () => {
     const git = install({ init: vi.fn(async () => { throw new Error('This folder is already a Git repository.') }) })
     await refreshGitStatus('/repo/a')
-    await expect(initGitRepository('/repo/a')).rejects.toThrow('already a Git repository')
+    await expect(initGitRepository('/repo/a', standalone)).rejects.toThrow('already a Git repository')
     expect(git.status).toHaveBeenCalledTimes(1)
   })
 
   it('skips the pull request refresh when there is no branch', async () => {
     const git = install({ status: vi.fn(async () => repoStatus({ branch: null, tracking: 'detached' })) })
     await refreshGitStatus('/repo/a')
-    await pushGitBranch('/repo/a')
+    await pushGitBranch('/repo/a', standalone)
     expect(git.pullRequest).not.toHaveBeenCalled()
   })
 })

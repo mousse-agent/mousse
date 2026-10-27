@@ -25,7 +25,8 @@ import {
   type GitStatusView
 } from '../../stores/gitStatusStore'
 import { createPullRequestForBranch, usePullRequest } from '../../stores/pullRequestStore'
-import type { GitCommit, GitPullRequestLookup } from '../../../shared/types'
+import { gitScopeFor } from '../../lib/activeProject'
+import type { GitCommit, GitPullRequestLookup, GitScope } from '../../../shared/types'
 import { Switch } from '../settings/SettingsRow'
 import { menuRowLabel } from './deviceMenu'
 import { SideCardSection, type SideCardSectionContext } from './SideCardSection'
@@ -52,6 +53,7 @@ import {
   gitCollapsedLabel,
   gitErrorMessage,
   prefillAmendDraft,
+  THREAD_BRANCH_LABEL,
   pullRequestRow,
   pushButtonModel,
   pushFailedMessage,
@@ -137,10 +139,12 @@ interface BranchPickerProps {
   /** A checkout is running. */
   busy: boolean
   lock: GitActionLock
+  /** The folder is a thread's own worktree: the branch is shown, never switched. */
+  fixed?: boolean
   onPick: (branch: string) => void
 }
 
-function BranchPicker({ status, branches, busy, lock, onPick }: BranchPickerProps) {
+function BranchPicker({ status, branches, busy, lock, fixed = false, onPick }: BranchPickerProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [active, setActive] = useState(0)
@@ -168,6 +172,15 @@ function BranchPicker({ status, branches, busy, lock, onPick }: BranchPickerProp
   useEffect(() => {
     if (open) optionRefs.current[active]?.scrollIntoView({ block: 'nearest' })
   }, [open, active])
+
+  if (fixed) {
+    return (
+      <div className="side-card-git-branch side-card-git-branch-static" title={THREAD_BRANCH_LABEL} aria-label={`Branch ${label}. ${THREAD_BRANCH_LABEL}`}>
+        <GitBranch size={13} strokeWidth={1.8} aria-hidden="true" />
+        <span className="side-card-git-branch-name">{label}</span>
+      </div>
+    )
+  }
 
   return (
     <>
@@ -258,6 +271,8 @@ function BranchPicker({ status, branches, busy, lock, onPick }: BranchPickerProp
 interface CommitButtonProps {
   path: string
   projectId: string | null
+  /** Tells the daemon which folder to commit in, and which rules apply there. */
+  scope: GitScope
   branch: string | null
   fileCount: number
   commits: GitCommit[]
@@ -277,7 +292,7 @@ interface CommitWork {
   phase: 'committing' | 'pushing'
 }
 
-function CommitButton({ path, projectId, branch, fileCount, commits, pushable, lock, onBegin, onEnd, onActionError }: CommitButtonProps) {
+function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, commits, pushable, lock, onBegin, onEnd, onActionError }: CommitButtonProps) {
   const [open, setOpen] = useState(false)
   const { branch: scopeBranch, head } = commitScope(branch, commits)
   const scope = useMemo(() => ({ branch: scopeBranch, head }), [scopeBranch, head])
@@ -302,7 +317,7 @@ function CommitButton({ path, projectId, branch, fileCount, commits, pushable, l
     })
   }, [updateForm])
   const setAmendChecked = useCallback((checked: boolean) => updateForm((value) => chooseAmend(value, checked)), [updateForm])
-  const menu = commitMenuState(commits, fileCount, amendChecked)
+  const menu = commitMenuState(commits, fileCount, amendChecked, gitScope.workspaceThreadId !== null)
   const { amend } = menu
   const trimmed = draft.message.trim()
   const labels = commitButtonLabels(amend)
@@ -350,7 +365,7 @@ function CommitButton({ path, projectId, branch, fileCount, commits, pushable, l
       setOpen(false)
     }
     try {
-      await commitGitChanges(path, trimmed, projectId ?? undefined, {
+      await commitGitChanges(path, trimmed, gitScope, {
         amend,
         push,
         onPhase: (phase) => setWork({ push, phase })
@@ -510,6 +525,8 @@ function PullRequestLink({ row }: { row: PullRequestFoundRow }) {
 interface GitSectionViewProps {
   threadId: string | null
   projectId: string | null
+  /** The thread whose own worktree `path` is, when it is one; its branch is then fixed. */
+  workspaceThreadId?: string | null
   /** Folder Git runs in; null when there is none. */
   path: string | null
   git: GitStatusView
@@ -524,7 +541,8 @@ interface GitSectionViewProps {
 }
 
 /** The section's markup, given its data. `GitSection` supplies the data. */
-export function GitSectionView({ threadId, projectId, path, git, pullRequest = null, collapsedLabel, canInitialize = false, now }: GitSectionViewProps) {
+export function GitSectionView({ threadId, projectId, workspaceThreadId = null, path, git, pullRequest = null, collapsedLabel, canInitialize = false, now }: GitSectionViewProps) {
+  const scope = useMemo(() => gitScopeFor({ projectId, workspaceThreadId }), [projectId, workspaceThreadId])
   const [running, setRunning] = useState<GitAction | null>(null)
   const runningRef = useRef<GitAction | null>(null)
   const [actionError, setActionError] = useTransientError()
@@ -546,7 +564,7 @@ export function GitSectionView({ threadId, projectId, path, git, pullRequest = n
       if (!path || !begin('init')) return
       setActionError(null)
       try {
-        await initGitRepository(path, projectId ?? undefined)
+        await initGitRepository(path, scope)
       } catch (error) {
         setActionError(gitErrorMessage(error))
       } finally {
@@ -582,7 +600,7 @@ export function GitSectionView({ threadId, projectId, path, git, pullRequest = n
     if (!begin('checkout')) return
     setActionError(null)
     try {
-      await checkoutGitBranch(path, branch, projectId ?? undefined)
+      await checkoutGitBranch(path, branch, scope)
     } catch (error) {
       setActionError(gitErrorMessage(error))
     } finally {
@@ -594,7 +612,7 @@ export function GitSectionView({ threadId, projectId, path, git, pullRequest = n
     if (!begin('push')) return
     setActionError(null)
     try {
-      await pushGitBranch(path, projectId ?? undefined)
+      await pushGitBranch(path, scope)
     } catch (error) {
       setActionError(gitErrorMessage(error))
     } finally {
@@ -630,6 +648,7 @@ export function GitSectionView({ threadId, projectId, path, git, pullRequest = n
           branches={git.branches}
           busy={running === 'checkout'}
           lock={gitActionLock(running, 'checkout')}
+          fixed={scope.workspaceThreadId !== null}
           onPick={(name) => void checkout(name)}
         />
         {pushButton && (
@@ -638,6 +657,7 @@ export function GitSectionView({ threadId, projectId, path, git, pullRequest = n
         <CommitButton
           path={path}
           projectId={projectId}
+          scope={scope}
           branch={branch}
           fileCount={fileCount}
           commits={git.commits}
@@ -695,7 +715,8 @@ export function GitSectionView({ threadId, projectId, path, git, pullRequest = n
 /** Branch, pull request, latest commit, commit button and change counts for the folder the thread works on. */
 export function GitSection({ threadId }: SideCardSectionContext) {
   // The same project the Git panel opens on, including a new chat's composer pick.
-  const { projectId, path: projectPath, loading } = useActiveProjectLocation()
+  const location = useActiveProjectLocation()
+  const { projectId, path: projectPath, loading } = location
   // A project-less thread has no folder of its own to show Git state for.
   const path = projectId ? projectPath : null
   const git = useGitStatus(path, projectId)
@@ -723,6 +744,7 @@ export function GitSection({ threadId }: SideCardSectionContext) {
     <GitSectionView
       threadId={threadId}
       projectId={projectId}
+      workspaceThreadId={location.workspaceThreadId}
       path={path}
       git={git}
       pullRequest={pullRequest}

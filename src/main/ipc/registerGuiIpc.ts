@@ -17,6 +17,7 @@ import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
 
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, session, shell } from 'electron'
 import { homedir } from 'os'
+import { daemonGitParams } from './daemonGitParams'
 import { getComputerName } from '../computerName'
 import { randomUUID } from 'node:crypto'
 import type { GuiMmsController } from '../mms/GuiMmsController'
@@ -91,7 +92,13 @@ import type {
   CreateScheduledJobInput,
   FileGrepResponse,
   FileSearchResponse,
+  GitBranchOptions,
+  GitCheckoutOptions,
   GitCommitOptions,
+  GitDeleteBranchOptions,
+  GitPullOptions,
+  GitPushOptions,
+  GitScope,
   MainView,
   OrchestratorContextUsageInput,
   OrchestratorSendInput,
@@ -1826,24 +1833,26 @@ export function registerGuiIpc(
   registerHandler('git:diffStats', async (_e, projectId?: string, cwd?: string) =>
     gitService.getDiffStats(await resolveGitCwd(projectId, cwd))
   )
-  registerHandler(
-    'git:checkout',
-    async (_e, branch: string, projectId?: string, cwd?: string) => {
-      await gitService.checkout(await resolveGitCwd(projectId, cwd), branch)
-    }
-  )
-  registerHandler(
-    'git:commit',
-    async (_e, message: string, projectId?: string, cwd?: string, options?: GitCommitOptions) => {
-      await gitService.commit(await resolveGitCwd(projectId, cwd), message, options)
-    }
-  )
-  registerHandler('git:init', async (_e, projectId?: string, cwd?: string) => {
-    await gitService.init(await resolveGitCwd(projectId, cwd))
-  })
-  registerHandler('git:push', async (_e, projectId?: string, cwd?: string) => {
-    await gitService.push(await resolveGitCwd(projectId, cwd))
-  })
+  // Every Git mutation runs in the daemon, so the thread-worktree rules and the repository lease apply
+  // to the GUI like any other client. Storage handlers keep the daemon's error code across IPC.
+  const gitMutation = <A extends unknown[]>(channel: string, method: string, toArgs: (...args: A) => Record<string, unknown> = () => ({})): void => {
+    registerStorageHandler(channel, async (_e, scope: GitScope, ...args: unknown[]) =>
+      guiMms.request(method, daemonGitParams(scope, toArgs(...(args as A))))
+    )
+  }
+  gitMutation('git:checkout', 'git.checkout', (branch: string, options?: GitCheckoutOptions) => ({ branch, dirty: options?.dirty }))
+  gitMutation('git:commit', 'git.commit', (message: string, options?: GitCommitOptions) => ({ message, amend: options?.amend, expectedBranch: options?.expectedBranch }))
+  gitMutation('git:push', 'git.push', (options?: GitPushOptions) => ({ expectedBranch: options?.expectedBranch }))
+  gitMutation('git:init', 'git.init')
+  gitMutation('git:stage', 'git.stage', (input: { paths?: string[]; all?: boolean }) => ({ paths: input?.paths, all: input?.all }))
+  gitMutation('git:unstage', 'git.unstage', (input: { paths?: string[]; all?: boolean }) => ({ paths: input?.paths, all: input?.all }))
+  gitMutation('git:discard', 'git.discard', (paths: string[]) => ({ paths }))
+  gitMutation('git:fetch', 'git.fetch')
+  gitMutation('git:pull', 'git.pull', (options?: GitPullOptions) => ({ strategy: options?.strategy }))
+  gitMutation('git:abortInProgress', 'git.abortInProgress', (kind: 'merge' | 'rebase') => ({ kind }))
+  gitMutation('git:createBranch', 'git.createBranch', (name: string, options?: GitBranchOptions) => ({ name, from: options?.from, checkout: options?.checkout }))
+  gitMutation('git:renameBranch', 'git.renameBranch', (name: string, newName: string) => ({ name, newName }))
+  gitMutation('git:deleteBranch', 'git.deleteBranch', (name: string, options?: GitDeleteBranchOptions) => ({ name, force: options?.force }))
   registerHandler('git:lastCommitMessage', async (_e, projectId?: string, cwd?: string) =>
     gitService.lastCommitMessage(await resolveGitCwd(projectId, cwd))
   )
