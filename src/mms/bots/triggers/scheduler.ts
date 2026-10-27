@@ -71,9 +71,9 @@ export class BotScheduler {
 
   start(): void {
     if (this.timer) return
-    this.timer = setInterval(() => this.wake(), this.options.intervalMs ?? BOT_SCHEDULE_TICK_MS)
+    this.timer = setInterval(() => { void this.wake() }, this.options.intervalMs ?? BOT_SCHEDULE_TICK_MS)
     this.timer.unref?.()
-    this.wake()
+    void this.wake()
   }
 
   get started(): boolean {
