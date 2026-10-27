@@ -82,7 +82,6 @@ describe('an ACP agent that never answers session/prompt', () => {
     ;(orch as any).llm = {
       getSelectedModelContextLimit: () => ({ limit: 128_000, modelName: 'replay' }),
       getContextInputs: async () => ({ systemPromptText: '', mcpToolsText: '', otherToolsText: '', signature: 'replay' }),
-      generateTitle: async () => 'Silent',
       chat: async () => { throw new Error('ACP turns must not reach the pi loop') }
     }
     const harness = createHarnessGateway({

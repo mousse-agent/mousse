@@ -65,7 +65,6 @@ describe('late-turn steer/send during finalizing', () => {
           otherToolsText: '',
           signature: 'probe-sig'
         }),
-        generateTitle: async () => 'Probe Title',
         chat: async (messages: any, _onTool: unknown, opts: any) => {
           inFlight += 1
           maxInFlight = Math.max(maxInFlight, inFlight)

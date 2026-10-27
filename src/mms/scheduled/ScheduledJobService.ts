@@ -291,20 +291,23 @@ export class ScheduledJobService extends EventEmitter {
   }
 
   /**
-   * An occurrence whose run is working shows `running`, or `needs_answer` while its thread waits for
-   * the person. Admitted or queued occurrences and jobs with nothing pending show their own state.
-   * Derived when listed, never stored.
+   * The current occurrence's thread and whether it waits for the person, from the moment it is claimed:
+   * a claim that is running its turn (`runClaim.threadId`, set once the thread is chosen), else an
+   * admitted or running occurrence the claim handed over. A queued occurrence and a job with nothing
+   * under way show their own state. Derived when listed, never stored.
    */
   private withLiveStatus(job: ScheduledJob): ScheduledJob {
     const pending = job.pendingOccurrence
-    if (!pending || pending.state !== 'running') return job
+    const threadId = (job.state === 'running' ? job.runClaim?.threadId : undefined) ??
+      (pending && pending.state !== 'queued' ? pending.threadId : undefined)
+    if (!threadId) return job
     let waiting = false
     try {
-      waiting = this.questionProbe?.(pending.threadId) ?? false
+      waiting = this.questionProbe?.(threadId) ?? false
     } catch {
       // An unreadable question list shows the occurrence as running.
     }
-    return { ...job, liveStatus: waiting ? 'needs_answer' : 'running' }
+    return { ...job, liveStatus: waiting ? 'needs_answer' : 'running', liveThreadId: threadId }
   }
 
   createJob(input: Parameters<ScheduledJobStore['createJob']>[0]): ScheduledJob {
@@ -317,7 +320,7 @@ export class ScheduledJobService extends EventEmitter {
   updateJob(id: string, patch: Partial<ScheduledJob>, options?: Parameters<ScheduledJobStore['updateJob']>[2]): ScheduledJob | null {
     this.lifecycle.assertAccepting()
     // The live status is derived when listed; a patch that carries it back never stores it.
-    const { liveStatus: _derived, ...stored } = patch
+    const { liveStatus: _status, liveThreadId: _thread, ...stored } = patch
     const job = this.store.updateJob(id, stored, options)
     if (job) this.emitUpdated()
     return job
@@ -731,7 +734,15 @@ export class ScheduledJobService extends EventEmitter {
           }))
         }
         if (job.createThread) {
-          const thread = this.threadStore.ensureExecutionThread(resultKey, `Scheduled: ${job.name}`.slice(0, 120), job.projectId)
+          const name = `Scheduled: ${job.name}`.slice(0, 120)
+          let thread: { id: string }
+          try {
+            thread = this.threadStore.ensureExecutionThread(resultKey, name, job.projectId)
+          } catch (error) {
+            // A job whose project was removed still keeps its result, on a thread outside any project.
+            if (!job.projectId || !/project is unavailable/i.test(error instanceof Error ? error.message : String(error))) throw error
+            thread = this.threadStore.ensureExecutionThread(resultKey, name)
+          }
           deliver(thread.id, result.text)
         } else if (job.threadId) {
           deliver(job.threadId, `[Scheduled: ${job.name}]\n\n${result.text}`)

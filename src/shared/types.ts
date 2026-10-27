@@ -186,8 +186,10 @@ export interface ScheduledJob {
   runClaim?: ScheduledJobRunClaim
   /** Present while an admitted occurrence has not reached a terminal run. */
   pendingOccurrence?: ScheduledJobPendingOccurrence
-  /** The pending occurrence's run is working, or waits for the person's answer; derived when listed, never stored. */
+  /** The current occurrence's run is working, or waits for the person's answer; derived when listed, never stored. */
   liveStatus?: 'running' | 'needs_answer'
+  /** The thread the current occurrence runs on, with `liveStatus`; derived when listed, never stored. */
+  liveThreadId?: string
   /** A signed request starts this job; absent when the job has no webhook. */
   trigger?: { webhook: ScheduledJobWebhookTrigger }
   /** A verified delivery that the next tick starts (one at a time). */

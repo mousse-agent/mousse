@@ -84,7 +84,6 @@ describe('execution bindings', () => {
     ;(orch as any).llm = {
       getSelectedModelContextLimit: () => ({ limit: 128_000, modelName: 'm' }),
       getContextInputs: async () => ({ systemPromptText: '', mcpToolsText: '', otherToolsText: '', signature: 's' }),
-      generateTitle: async () => 'Title',
       chat: async () => { throw new Error('unused') }
     }
     adapter = new GatedClaude()

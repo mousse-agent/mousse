@@ -28,7 +28,6 @@ describe('channel turn input acceptance', () => {
     ;(orch as any).llm = {
       getSelectedModelContextLimit: () => ({ limit: 128_000, modelName: 'probe' }),
       getContextInputs: async () => ({ systemPromptText: '', mcpToolsText: '', otherToolsText: '', signature: 'probe-sig' }),
-      generateTitle: async () => 'Probe Title',
       chat: async () => {
         chatCalls += 1
         return {

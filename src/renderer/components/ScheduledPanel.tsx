@@ -65,9 +65,9 @@ function stateLabel(job: ScheduledJob): string {
 
 const HISTORY_ROWS = 10
 
-/** The thread where the job's occurrence runs now, or where its last recorded run ran. */
+/** The thread where the job's current occurrence runs, else where its last recorded run ran. */
 function runThreadId(job: ScheduledJob): string | undefined {
-  return job.pendingOccurrence?.threadId ?? [...(job.runHistory ?? [])].reverse().find((record) => record.threadId)?.threadId
+  return job.liveThreadId ?? job.pendingOccurrence?.threadId ?? [...(job.runHistory ?? [])].reverse().find((record) => record.threadId)?.threadId
 }
 
 function browserWebhookApi(): WebhookApi {

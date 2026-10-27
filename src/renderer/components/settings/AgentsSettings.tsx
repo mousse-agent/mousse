@@ -28,8 +28,8 @@ export function AgentsSettings({
   // Titles are one request with no tools: only instances (and models) that run one are offered.
   const titleProviders = oneShotProviderOptions(providers)
 
-  // Blank title keys mean "Automatic" (resolveTitleModel picks a connected
-  // model at send time). Show the saved mode, not the resolved fallback.
+  // Blank title keys mean "Automatic": chats are named from their first line, with no model call.
+  // Show the saved mode.
   const titleProvider = settings.title?.llmProvider ?? ''
   const titleModel = settings.title?.model ?? ''
   const titleIsAutomatic = !titleProvider || !titleModel

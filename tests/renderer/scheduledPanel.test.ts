@@ -392,7 +392,9 @@ describe('Scheduled page: rows and history', () => {
     await mount([
       job({ liveStatus: 'needs_answer', pendingOccurrence: { occurrenceKey: 'k', threadId: 't-run', runId: 'r1', state: 'running' } }),
       job({ id: 'job-2', name: 'Working', liveStatus: 'running', pendingOccurrence: { occurrenceKey: 'k', threadId: 't-two', runId: 'r2', state: 'running' } }),
-      job({ id: 'job-3', name: 'Idle' })
+      job({ id: 'job-3', name: 'Idle' }),
+      // Claimed and still inside its turn: no pending occurrence yet, an older run in the history.
+      job({ id: 'job-4', name: 'Claimed', state: 'running', liveStatus: 'needs_answer', liveThreadId: 't-live', runHistory: [{ startedAt: '2026-01-01T00:00:00.000Z', status: 'ok', threadId: 't-old' } as never] })
     ])
     const row = must(document.querySelector('[data-job-id="job-1"]'), 'row')
     expect(row.querySelector('.scheduled-status')?.textContent).toBe('Needs your answer')
@@ -400,6 +402,10 @@ describe('Scheduled page: rows and history', () => {
     const open = must(row.querySelector<HTMLButtonElement>('button[title="Open the run\'s thread"]'), 'open button')
     await act(async () => open.click())
     expect(openThread).toHaveBeenCalledWith('t-run')
+    const claimed = must(document.querySelector('[data-job-id="job-4"]'), 'claimed')
+    expect(claimed.querySelector('.scheduled-status')?.textContent).toBe('Needs your answer')
+    await act(async () => must(claimed.querySelector<HTMLButtonElement>('button[title="Open the run\'s thread"]'), 'claimed open').click())
+    expect(openThread).toHaveBeenLastCalledWith('t-live')
     // A job that never ran has no thread to open.
     expect(must(document.querySelector('[data-job-id="job-3"]'), 'idle').querySelector('button[title="Open the run\'s thread"]')).toBeNull()
   })
