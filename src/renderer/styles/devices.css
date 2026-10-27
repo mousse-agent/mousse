@@ -210,3 +210,12 @@
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.04em;
 }
+
+/* Kind of a device that is not a computer, beside its name. */
+.devices-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  color: var(--text-secondary);
+  font-size: var(--settings-fs-small);
+}

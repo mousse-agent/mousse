@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
-import { AlertTriangle, CircleCheck, Monitor, MonitorSmartphone, MoreHorizontal, Plus, RefreshCw } from '../lib/icons'
+import { AlertTriangle, CircleCheck, Monitor, MonitorSmartphone, MoreHorizontal, Plus, RefreshCw, Smartphone } from '../lib/icons'
 import { RemoteDeviceThreads } from './RemoteDeviceThreads'
 import { Modal } from './ui/Modal'
 import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './settings/SettingsRow'
@@ -215,6 +215,7 @@ export function NetDevicesSection() {
           <SettingsRow
             key={device.node}
             title={device.name}
+            titleAction={device.kind === 'phone' ? <span className="devices-kind" title="Phone"><Smartphone size={13} aria-hidden="true" />Phone</span> : undefined}
             description={deviceLine(device)}
             control={authority && <DeviceMenu name={device.name} disabled={busy} onRevoke={() => setRevoking(device)} />}
           />

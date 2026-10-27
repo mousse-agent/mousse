@@ -17,7 +17,11 @@ try {
       import { useAppStore } from './src/renderer/stores/appStore'
       const subscription = () => () => {}
       const projects = [{id:'a',name:'mousse',path:'/fixture/mousse'}, {id:'b',name:'Other project',path:'/fixture/other'}]
-      window.fixture = { store:useAppStore, calls:[], errors:[], sequence:0 }
+      window.fixture = { store:useAppStore, calls:[], requests:[], opened:[], errors:[], sequence:0 }
+      window.addEventListener('mousse:open-remote-thread', event => fixture.opened.push(event.detail))
+      // Other computers: one connected computer, a phone, and a computer that is offline.
+      const node = (id,name,patch={}) => ({node:id,name,caps:['read','write','chat'],keyEpoch:1,expiresAt:0,self:false,revoked:false,state:'open',kind:'computer',...patch})
+      const remoteProjects = [{id:'r1',name:'mousse',path:'/fixture/mousse'},{id:'r2',name:'servers',path:'/srv/servers'}]
       window.addEventListener('error', event => fixture.errors.push(event.message))
       window.addEventListener('unhandledrejection', event => fixture.errors.push(String(event.reason)))
       const usage = {percent:0,used:0,limit:128000,source:'estimated',categories:[]}
@@ -28,6 +32,14 @@ try {
         providers:{onChanged:subscription}, skills:{list:async()=>({skills:[]}),onChanged:subscription},
         projects:{open:async()=>{fixture.calls.push(['open']);return projects[1]},listThreads:async()=>[]},
         chatReferences:{resolve:async(reference)=>{if(fixture.referenceError)throw new Error('Reference unavailable');return {...reference,metadataPath:'/fixture/meta.json'}}},
+        platformRequest:{request:async(method,params)=>{
+          fixture.requests.push([method,params])
+          const handler=fixture.remote[method]
+          if(!handler) throw {code:'platform_method_not_allowed',message:method}
+          return handler(params)
+        }},
+        subagents:{list:async()=>[],onUpdated:subscription},
+        actions:{list:async()=>({})},
         workspace:{getStatus:async()=>({})},
         app:{getActiveProjectPath:async(id)=>{const project=projects.find(p=>p.id===useAppStore.getState().threads.find(t=>t.id===id)?.projectId);if(fixture.pendingPath)await new Promise(resolve=>fixture.resumePath=resolve);return project?.path ?? null}},
         threads:{
@@ -52,9 +64,24 @@ try {
           sendToThread:async(id,request)=>{fixture.calls.push(['send',id,request.content]);if(fixture.pendingSend && fixture.turnRunning)return {queued:true};if(fixture.pendingSend){fixture.turnRunning=true;await new Promise(resolve=>fixture.resumeSend=()=>{fixture.sendResolved=true;fixture.turnRunning=false;resolve()})}return fixture.sendError ? {requestAcknowledged:false,error:{code:'delivery_rejected',message:'Delivery rejected'}} : {queued:false}}
         }
       }
+      fixture.resetRemote = () => {
+        fixture.requests=[];fixture.opened=[]
+        fixture.nodes=[node('n-self','Studio Mac',{self:true}),node('n-linux','Build Linux'),node('n-phone','Pocket',{kind:'phone'}),node('n-off','Old Mac',{state:'closed'})]
+        fixture.remote={
+          'net.status':()=>({enabled:true,self:{node:'n-self'},keystore:'unlocked'}),
+          'net.transport.list':()=>({manifests:[]}),
+          'bridge.nodes':()=>({nodes:fixture.nodes}),
+          'bridge.hub.projects':({target})=>({projects:target==='n-linux'?remoteProjects:[]}),
+          'bridge.hub.openProject':({path})=>path==='/srv/new'?{ok:true,project:{id:'r3',name:'new',path}}:{ok:false,error:'That folder does not exist on this computer.'},
+          'bridge.hub.create':()=>({thread:{id:'remote-1'}}),
+          'bridge.hub.attach':({ref})=>({ref}),
+          'bridge.hub.send':()=>new Promise(()=>{})
+        }
+      }
+      fixture.resetRemote()
       fixture.reset = (thread=null) => {
-        fixture.calls=[];fixture.selectError=false;fixture.createError=false;fixture.toggleError=false;fixture.pendingCreate=false;fixture.modelError=false;fixture.sendError=false;fixture.referenceError=false;fixture.pendingPath=false;fixture.pendingSend=false;fixture.turnRunning=false;fixture.sendResolved=false;fixture.resumeSend=null;
-        useAppStore.setState({activeThreadId:thread?.id ?? null,threads:thread?[thread]:[],projects,
+        fixture.resetRemote();fixture.calls=[];fixture.selectError=false;fixture.createError=false;fixture.toggleError=false;fixture.pendingCreate=false;fixture.modelError=false;fixture.sendError=false;fixture.referenceError=false;fixture.pendingPath=false;fixture.pendingSend=false;fixture.turnRunning=false;fixture.sendResolved=false;fixture.resumeSend=null;
+        useAppStore.setState({appInfo:fixture.appInfo ?? null,activeThreadId:thread?.id ?? null,threads:thread?[thread]:[],projects,
           profileReady:true,workspaceReady:true,messages:[],loading:false,mainView:'browser',turnStates:{},composerDrafts:{},composerReferences:{},composerWorkspaceDrafts:{},browserElementAttachmentsByThread:{}})
       }
       fixture.reset()
@@ -62,6 +89,9 @@ try {
     ` }, bundle: true, platform: 'browser', format: 'iife', write: false, outfile: join(directory,'fixture.js'),
     jsx: 'automatic', loader: { '.svg':'dataurl','.webp':'dataurl' }, define: {'process.env.NODE_ENV':'"production"'}, minify: true,
     plugins: [{name:'transcript',setup(builder){
+      // Vite `?url` imports (the dictation worklet and its wasm) name assets this fixture never loads.
+      builder.onResolve({filter:/\?url$/},args=>({path:args.path,namespace:'url-stub'}))
+      builder.onLoad({filter:/.*/,namespace:'url-stub'},()=>({loader:'js',contents:'export default ""'}))
       builder.onResolve({filter:/\.svg\?raw$/},args=>({path:resolve(args.resolveDir, args.path.replace('?raw','')),namespace:'raw-svg'}))
       builder.onLoad({filter:/.*/,namespace:'raw-svg'},async args=>({loader:'text',contents:await readFile(args.path,'utf8')}))
       builder.onResolve({filter:/\/chat\/components\/MousseAgentChatShell$/},()=>({path:'shell',namespace:'fixture'}))
@@ -140,7 +170,7 @@ try {
           assert.equal(await evaluate('document.querySelector(".composer-workspace-worktree").getAttribute("aria-pressed")'),'false')
           await click('.composer-workspace-worktree')
           assert.equal(await evaluate('document.querySelector(".composer-input").value'),'Build the feature')
-          assert.equal(await evaluate('document.querySelector(".composer-workspace-device").textContent'),'This computer')
+          assert.equal(await evaluate('document.querySelector(".composer-workspace-device-btn").textContent'),'This computer')
           await send()
           assert.deepEqual((await calls()).map(c=>c[0]),['create','select','send'])
           assert.deepEqual((await calls())[0],['create','a',{worktreeEnabled:true}])
@@ -249,6 +279,69 @@ try {
         await evaluate('fixture.reset()');await pause(120)
         assert.equal(await evaluate('fixture.store.getState().mainView'),'browser')
         console.log('PASS: Files remains selected during a pending project-path lookup')
+        // Another computer: the Run on menu, its project list, Open project on it, and the first send.
+        await evaluate('fixture.appInfo={platform:"linux",repoRoot:"/",llmProvider:"x",deviceName:"Studio Mac"};fixture.reset()');await pause(150)
+        const runOn=async()=>{await click('.composer-workspace-device-btn');return evaluate('Array.from(document.querySelectorAll(".composer-workspace-menu-item")).map(item=>item.textContent)')}
+        const pickDevice=async node=>{
+          await click('.composer-workspace-device-btn')
+          await evaluate('Array.from(document.querySelectorAll(".composer-workspace-menu-item")).find(item=>item.dataset.node==='+JSON.stringify(node)+').click()');await pause(150)
+        }
+        assert.equal(await evaluate('document.querySelector(".composer-workspace-device-btn").textContent'),'Studio Mac')
+        assert.deepEqual(await runOn(),['Studio Mac','Build Linux'])
+        assert.equal(await evaluate('document.querySelector(".composer-workspace-menu [aria-checked=true]").textContent'),'Studio Mac')
+        assert.equal(await evaluate('!!document.querySelector(".composer-workspace-menu-note")'),false)
+        await key('Escape')
+        await choose('a');await click('[aria-label="Start in a worktree"]')
+        await pickDevice('n-linux')
+        assert.equal(await evaluate('document.querySelector(".composer-workspace-device-btn").textContent'),'Build Linux')
+        // The project carries over by path, under the other computer's own id; the worktree choice stays.
+        assert.equal(await evaluate('document.querySelector(".composer-workspace-project").dataset.projectId'),'r1')
+        assert.equal(await evaluate('document.querySelector(".composer-workspace-worktree").getAttribute("aria-pressed")'),'true')
+        await click('.composer-workspace-project')
+        assert.deepEqual(await evaluate('Array.from(document.querySelectorAll(".composer-workspace-menu-item")).map(item=>item.textContent)'),['No project','mousse','servers','Open project…'])
+        await key('Escape')
+        // Picking a project that does not exist here, then returning, drops it.
+        await choose('r2');await pickDevice('')
+        assert.equal(await evaluate('document.querySelector(".composer-workspace-project").dataset.projectId'),'')
+        await pickDevice('n-linux')
+        // Open project on the other computer: a refusal stays inline, a good path selects the project.
+        await choose('__open_project__')
+        assert.equal(await evaluate('(fixture.calls.some(c=>c[0]==="open"))'),false)
+        assert.equal(await evaluate('document.querySelector("[role=dialog] input").getAttribute("aria-label")'),'Folder path on Build Linux')
+        assert.deepEqual(await evaluate('Array.from(document.querySelectorAll(".remote-project-recent")).map(item=>item.textContent)'),['/fixture/mousse','/srv/servers'])
+        await evaluate('document.querySelector(".remote-project-recent").click()');await pause(50)
+        assert.equal(await evaluate('document.querySelector("[role=dialog] input").value'),'/fixture/mousse')
+        await evaluate('(()=>{const input=document.querySelector("[role=dialog] input");const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set;setter.call(input,"/missing");input.dispatchEvent(new Event("input",{bubbles:true}))})()');await pause(50)
+        await click('[role=dialog] footer button')
+        assert.equal(await evaluate('document.querySelector("[role=dialog] [role=alert]").textContent'),'That folder does not exist on this computer.')
+        await evaluate('(()=>{const input=document.querySelector("[role=dialog] input");const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set;setter.call(input,"/srv/new");input.dispatchEvent(new Event("input",{bubbles:true}))})()');await pause(50)
+        await click('[role=dialog] footer button');await pause(100)
+        assert.equal(await evaluate('!!document.querySelector("[role=dialog]")'),false)
+        assert.equal(await evaluate('document.querySelector(".composer-workspace-project").dataset.projectId'),'r3')
+        assert.deepEqual((await evaluate('fixture.requests')).filter(r=>r[0]==='bridge.hub.openProject').map(r=>r[1]),[{target:'n-linux',path:'/missing'},{target:'n-linux',path:'/srv/new'}])
+        // Sending creates the thread on that computer, attaches, then sends, and hands the thread to the view.
+        await prompt('Run this on the server');await send();await pause(150)
+        assert.deepEqual((await evaluate('fixture.requests')).map(r=>r[0]).filter(m=>m.startsWith('bridge.hub.')&&m!=='bridge.hub.projects'&&m!=='bridge.hub.openProject'),['bridge.hub.create','bridge.hub.attach','bridge.hub.send'])
+        assert.deepEqual((await evaluate('fixture.requests')).find(r=>r[0]==='bridge.hub.create')[1],{target:'n-linux',name:'Run this on the server',projectId:'r3',options:{worktreeEnabled:true}})
+        assert.deepEqual(await evaluate('fixture.opened'),[{nodeId:'n-linux',entityId:'remote-1',deviceName:'Build Linux',title:'Run this on the server'}])
+        assert.deepEqual((await calls()).map(c=>c[0]),[])
+        assert.equal(await evaluate('document.querySelector(".composer-input").value'),'')
+        // A computer that dropped offline before the send: say so, fall back to this computer, send nothing.
+        await evaluate('fixture.reset()');await pause(150)
+        await pickDevice('n-linux');await prompt('Too late')
+        await evaluate('fixture.nodes[1].state="closed"');await send();await pause(100)
+        assert.equal(await evaluate('document.querySelector("[role=alert]").textContent'),'Build Linux is not connected')
+        assert.equal(await evaluate('document.querySelector(".composer-workspace-device-btn").textContent'),'Studio Mac')
+        assert.equal(await evaluate('document.querySelector(".composer-input").value'),'Too late')
+        assert.equal((await evaluate('fixture.requests')).some(r=>r[0]==='bridge.hub.create'),false)
+        assert.equal((await calls()).some(c=>c[0]==='create'||c[0]==='send'),false)
+        // With no other computer connected the menu says where to connect one.
+        await evaluate('fixture.reset();fixture.nodes=[fixture.nodes[0]]');await pause(150)
+        assert.deepEqual(await runOn(),['Studio Mac'])
+        assert.equal(await evaluate('document.querySelector(".composer-workspace-menu-note").textContent'),'Connect another computer in Settings > Devices')
+        await key('Escape')
+        console.log('PASS: Run on menu lists connected computers only, carries the project by path, opens a project on the other computer, and starts the chat there')
+        await evaluate('fixture.appInfo=null;fixture.reset()');await pause(100)
         // Draft choices survive both thread switching and profile-local persistence.
         await evaluate('fixture.reset('+JSON.stringify(draft)+');fixture.store.getState().activateProfile("toolbar-profile")');await pause(100)
         await evaluate('fixture.reset('+JSON.stringify(draft)+')');await pause(60)

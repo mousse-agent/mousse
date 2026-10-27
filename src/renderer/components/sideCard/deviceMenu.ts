@@ -1,16 +1,21 @@
+import type { NodeId } from '../../../shared/net'
 import type { Device } from '../../lib/netDevices'
 import type { ComposerWorkspace } from '../../lib/newThread'
 
 export const LOCAL_DEVICE_FALLBACK_NAME = 'This computer'
 
-const REMOTE_NOT_AVAILABLE = 'Not available yet'
+/** The id of the row for this computer; every other row is the device's node id. */
+export const LOCAL_RUN_ON_ID = 'local'
+
+/** Shown under the Run on rows while no other computer is connected, so the feature can be found. */
+export const CONNECT_ANOTHER_COMPUTER_NOTE = 'Connect another computer in Settings > Devices'
 
 export type WorkspaceChoice = 'checkout' | 'worktree'
 
 export interface RunOnOption {
   id: string
   name: string
-  /** Where the thread will run; only this computer today. */
+  /** Where the thread will run. */
   active: boolean
   disabled: boolean
   /** Why the row cannot be picked; shown as its tooltip and accessible name, not as text. */
@@ -26,9 +31,9 @@ export interface WorkspaceOption {
 }
 
 export interface DeviceMenuModel {
-  /** Null when no other device is connected, so the whole group is left out. */
-  runOn: RunOnOption[] | null
-  /** One muted line under the Run on group when some of its rows are dimmed. */
+  /** This computer first, then each connected computer. */
+  runOn: RunOnOption[]
+  /** One muted line under the Run on rows while no other computer is connected. */
   runOnNote?: string
   workspace: WorkspaceOption[]
 }
@@ -38,9 +43,45 @@ export function localDeviceName(deviceName: string | undefined | null): string {
   return deviceName?.trim() || LOCAL_DEVICE_FALLBACK_NAME
 }
 
-/** Devices other than this one that are connected right now. */
+/**
+ * Computers other than this one that are connected right now. A phone cannot run a thread, so
+ * it is left out; a device from a daemon that predates `kind` counts as a computer.
+ */
 export function connectedRemoteDevices(devices: readonly Device[]): Device[] {
-  return devices.filter((device) => !device.self && !device.revoked && device.state === 'open')
+  return devices.filter(
+    (device) => !device.self && !device.revoked && device.state === 'open' && device.kind !== 'phone'
+  )
+}
+
+/** The device a draft names, connected or not, so a stale pick can still be named. */
+export function deviceForNode(devices: readonly Device[], node: NodeId | undefined): Device | undefined {
+  return node ? devices.find((device) => device.node === node && !device.self) : undefined
+}
+
+/** Name on the computer button: the picked computer, or this one. */
+export function runOnLabel(localName: string, devices: readonly Device[], node: NodeId | undefined): string {
+  return node ? deviceForNode(devices, node)?.name ?? 'Unavailable computer' : localName
+}
+
+/** The Run on rows: this computer first, then each connected computer, with the picked one active. */
+export function buildRunOnOptions(input: {
+  localName: string
+  devices: readonly Device[]
+  node?: NodeId
+}): { options: RunOnOption[]; note?: string } {
+  const remote = connectedRemoteDevices(input.devices)
+  return {
+    options: [
+      { id: LOCAL_RUN_ON_ID, name: input.localName, active: !input.node, disabled: false },
+      ...remote.map((device) => ({
+        id: device.node,
+        name: device.name,
+        active: device.node === input.node,
+        disabled: false
+      }))
+    ],
+    note: remote.length === 0 ? CONNECT_ANOTHER_COMPUTER_NOTE : undefined
+  }
 }
 
 /** The workspace choice a draft stands for. A worktree needs a project, as in the composer toolbar. */
@@ -48,15 +89,19 @@ export function activeWorkspaceChoice(workspace: ComposerWorkspace): WorkspaceCh
   return workspace.projectId && workspace.worktreeEnabled ? 'worktree' : 'checkout'
 }
 
-/** The draft to store when a choice is picked; the project is kept. */
+/** The draft to store when a choice is picked; the project and the computer are kept. */
 export function workspaceDraftForChoice(workspace: ComposerWorkspace, choice: WorkspaceChoice): ComposerWorkspace {
-  return { projectId: workspace.projectId, worktreeEnabled: choice === 'worktree' }
+  return {
+    projectId: workspace.projectId,
+    worktreeEnabled: choice === 'worktree',
+    ...(workspace.node ? { node: workspace.node } : {})
+  }
 }
 
 /** True when at least one row would change something if picked. */
 export function hasDeviceChoices(model: DeviceMenuModel): boolean {
   return model.workspace.some((option) => !option.disabled) ||
-    (model.runOn ?? []).some((option) => !option.disabled && !option.active)
+    model.runOn.some((option) => !option.disabled && !option.active)
 }
 
 /** Accessible name of a row: its label, plus why it is unavailable. */
@@ -64,31 +109,19 @@ export function menuRowLabel(label: string, reason: string | undefined): string 
   return reason ? `${label}, ${reason.toLowerCase()}` : label
 }
 
-/**
- * Rows of the new-thread menu. Other devices are listed but cannot be picked
- * yet, because a thread can only start on this computer.
- */
+/** Rows of the new-thread menu: where it runs, and whether it starts in a new worktree. */
 export function buildDeviceMenu(input: {
   localName: string
   devices: readonly Device[]
   workspace: ComposerWorkspace
 }): DeviceMenuModel {
-  const remote = connectedRemoteDevices(input.devices)
   const hasProject = Boolean(input.workspace.projectId)
   const choice = activeWorkspaceChoice(input.workspace)
   const noProject = hasProject ? undefined : 'Needs a project'
+  const runOn = buildRunOnOptions({ localName: input.localName, devices: input.devices, node: input.workspace.node })
   return {
-    runOnNote: remote.length === 0 ? undefined : REMOTE_NOT_AVAILABLE,
-    runOn: remote.length === 0 ? null : [
-      { id: 'local', name: input.localName, active: true, disabled: false },
-      ...remote.map((device) => ({
-        id: device.node,
-        name: device.name,
-        active: false,
-        disabled: true,
-        reason: REMOTE_NOT_AVAILABLE
-      }))
-    ],
+    runOn: runOn.options,
+    runOnNote: runOn.note,
     workspace: [
       { id: 'checkout', label: 'Current checkout', active: choice === 'checkout', disabled: !hasProject, reason: noProject },
       { id: 'worktree', label: 'New worktree', active: choice === 'worktree', disabled: !hasProject, reason: noProject }

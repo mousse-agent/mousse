@@ -1,10 +1,16 @@
+import type { NodeId } from '../../shared/net'
 import { isThreadStarted } from '../../shared/threadTitle'
-import { isTurnActivePhase, type TurnPhase } from '../../shared/types'
+import { isTurnActivePhase, type Project, type TurnPhase } from '../../shared/types'
 
-/** Where a new chat will run: the project it starts in and whether that is a fresh worktree. */
+/**
+ * Where a new chat will run: the project it starts in and whether that is a fresh worktree.
+ * `node` names another of the user's computers; without it the chat runs here, and `projectId`
+ * then names a project of this computer. With it, `projectId` is that computer's own project id.
+ */
 export interface ComposerWorkspace {
   projectId?: string
   worktreeEnabled: boolean
+  node?: NodeId
 }
 
 /**
@@ -26,6 +32,36 @@ export function composerWorkspaceFor(
   thread: { projectId?: string; worktreeEnabled?: boolean } | undefined
 ): ComposerWorkspace {
   return draft ?? { projectId: thread?.projectId, worktreeEnabled: Boolean(thread?.worktreeEnabled) }
+}
+
+/**
+ * The workspace for work that can only run here (quick actions, file context). A draft that
+ * names another computer holds that computer's project ids, so it counts for nothing here.
+ */
+export function localWorkspaceFor(
+  draft: ComposerWorkspace | undefined,
+  thread: { projectId?: string; worktreeEnabled?: boolean } | undefined
+): ComposerWorkspace {
+  return draft?.node ? { worktreeEnabled: false } : composerWorkspaceFor(draft, thread)
+}
+
+/**
+ * The draft after picking where the chat runs. The project carries over only when the new
+ * place has a project at the same path; otherwise the chat starts without a project.
+ */
+export function workspaceForDevice(
+  workspace: ComposerWorkspace,
+  from: readonly Pick<Project, 'id' | 'path'>[],
+  to: readonly Pick<Project, 'id' | 'path'>[],
+  node: NodeId | undefined
+): ComposerWorkspace {
+  const path = from.find((project) => project.id === workspace.projectId)?.path
+  const match = path === undefined ? undefined : to.find((project) => project.path === path)
+  return {
+    projectId: match?.id,
+    worktreeEnabled: Boolean(match && workspace.worktreeEnabled),
+    ...(node ? { node } : {})
+  }
 }
 
 /**
