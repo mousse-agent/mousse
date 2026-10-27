@@ -536,7 +536,8 @@ async function linkOriginThread(ctx: HandlerContext, threadId: string | null, ro
 async function ensureWorkspaceMaterialized(ctx: HandlerContext, threadId: string, project?: string): Promise<void> {
   const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
   const workspace = manager.load()
-  if (!workspace || existsSync(workspace.worktreePath) || !manager.hasReconstructionManifest()) return
+  // A folder without its `.git` file is what a retirement that failed partway leaves; `restore` sets it aside and rebuilds.
+  if (!workspace || existsSync(join(workspace.worktreePath, '.git')) || !manager.hasReconstructionManifest()) return
   // One restore per thread: calls that arrive together (a focus refresh asks for status, files and the pull request at once) share it.
   const key = ctx.mms.threads.getThreadDir(threadId)
   const running = restoresInFlight.get(key)
@@ -732,8 +733,9 @@ interface ReviewTarget {
 /** Resolves a review scope to the root it reads from and the Git range it compares. */
 async function reviewTarget(ctx: HandlerContext, p: Record<string, unknown>): Promise<ReviewTarget> {
   const scope = asReviewScope(p.scope)
+  // Every scope reads the thread's checkout (the turn and thread scopes run Git in it), so bring it back first.
+  await materializeRequestedWorkspace(ctx, p)
   if (scope.kind === 'worktree') {
-    await materializeRequestedWorkspace(ctx, p)
     const root = projectRootContext(ctx, p)
     if (!await isGitRepository(root)) return { scope, root, range: { from: null, to: { kind: 'worktree' } }, unavailable: 'Not a Git repository.' }
     return { scope, root, range: await worktreeRange(root, scope.staged === true) }
@@ -2624,7 +2626,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'git.suggestCommitMessage': {
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['threadId', 'projectId', 'expectedBranch'])
-      // Reads and proposes only: it never provisions a worktree or touches the repository.
+      // Reads and proposes only: it never provisions a worktree or changes the repository. A worktree that
+      // cleanup retired is restored first, because the draft describes what the folder holds.
+      await materializeRequestedWorkspace(ctx, p)
       const root = pullRequestFolder(ctx, p)
       const threadId = asOptionalString(p.threadId, 256) ?? null
       const expectedBranch = asOptionalString(p.expectedBranch, 512)

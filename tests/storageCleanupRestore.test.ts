@@ -79,11 +79,23 @@ describe('a worktree retired by a storage rule comes back on demand', () => {
     ['files.search', { query: 'value' }],
     ['files.grep', { query: 'base' }],
     ['review.files', { scope: { kind: 'worktree' } }],
+    ['review.files', { scope: { kind: 'thread' } }],
     ['actions.list', {}],
     ['publish.status', {}]
   ])('%s restores the checkout it is about to read', async (method, extra) => {
     const { threadId, worktreePath } = await retiredThread()
     await gui.request(method, { threadId, ...extra })
+    expect(existsSync(worktreePath)).toBe(true); expect(existsSync(marker(threadId))).toBe(false)
+  }, 120_000)
+
+  it.each([
+    ['review.files', { scope: { kind: 'turn', turnId: 'no-such-turn' } }],
+    ['review.file', { scope: { kind: 'thread' }, path: 'value.txt' }],
+    ['review.file', { scope: { kind: 'turn', turnId: 'no-such-turn' }, path: 'value.txt' }],
+    ['git.suggestCommitMessage', {}]
+  ])('%s restores the checkout even when the answer itself is an error or "unavailable"', async (method, extra) => {
+    const { threadId, worktreePath } = await retiredThread()
+    await gui.request(method, { threadId, ...extra }).catch(() => undefined)
     expect(existsSync(worktreePath)).toBe(true); expect(existsSync(marker(threadId))).toBe(false)
   }, 120_000)
 
@@ -132,6 +144,9 @@ describe('a worktree retired by a storage rule comes back on demand', () => {
     const { metadata } = await gui.request<{ metadata: { worktreePath: string } }>('workspace.restore', { threadId: thread.id })
     await gui.request('threads.delete', { threadId: thread.id })
     expect(existsSync(metadata.worktreePath)).toBe(false)
+    // The removal went through the storage service, which records it.
+    const history = readFileSync(join(mms.threads.lifecycleStore.root, 'storage-cleanup-history.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+    expect(history).toEqual(expect.arrayContaining([expect.objectContaining({ trigger: 'trash', outcome: 'removed', rule: 'worktree-deleted', threadId: thread.id })]))
   }, 60_000)
 
   it('a manual run over the protocol empties overdue trash: its own request does not make the profile look busy', async () => {
