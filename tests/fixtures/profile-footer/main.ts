@@ -124,7 +124,6 @@ async function main() {
     // Signed in, three profiles: both columns, the device count and the account row.
     await load({ scenario: 'static', account: 'in', profiles: '3' })
     await openMenu()
-    await until("!!document.querySelector('.profile-account-devices')")
     evidence.signedIn = { menu: await menuInfo(), requests: await execute('footerQa.requestLog'), trigger: await execute("document.querySelector('.profile-sidebar-trigger').getAttribute('aria-label')") }
 
     // The keyboard model: column by column, Home/End, Right Arrow into a row's actions, Esc one layer at a time.

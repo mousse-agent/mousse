@@ -13,7 +13,6 @@ export const NET_LOCAL_METHODS = [
   'net.plus.renew',
   'net.plus.allow',
   'net.plus.status',
-  'net.plus.inventory',
   'net.plus.bind',
   'net.plus.connect',
   'net.plus.disconnect',
@@ -93,8 +92,8 @@ export interface PlusStatus {
   registrationId?: string
   generation?: number
   /**
-   * Computers and phones signed in to this account against the plan's limit. Not part of the
-   * local status; `net.plus.inventory` adds it from Mousse ID.
+   * Computers and phones on this account against the plan's limit, read from Mousse ID when this
+   * computer signed in. Display-only; it can be out of date until the next sign-in.
    */
   devices?: { used: number; limit: number }
 }

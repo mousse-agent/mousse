@@ -19,7 +19,6 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
   'net.plus.renew': [],
   'net.plus.allow': ['node', 'ttlMs', 'revoke'],
   'net.plus.status': [],
-  'net.plus.inventory': [],
   'net.plus.bind': ['configuration', 'accountToken'],
   'net.plus.connect': ['accountToken'],
   'net.plus.disconnect': [],

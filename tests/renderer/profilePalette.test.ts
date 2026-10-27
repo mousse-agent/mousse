@@ -1,11 +1,10 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import type { PlusStatus } from '../../src/shared/net/local'
 import { MousseIdAvatar } from '../../src/renderer/components/MousseIdAvatar'
 import { nextProfileColor, paletteColorFor, PROFILE_PALETTE, PROFILE_SWATCHES, profileColor } from '../../src/renderer/lib/profilePalette'
-import { devicesLine, useMousseIdStore } from '../../src/renderer/stores/mousseIdStore'
-import { useAppStore } from '../../src/renderer/stores/appStore'
+import { devicesLine } from '../../src/renderer/stores/mousseIdStore'
 
 const signedIn: PlusStatus = { configured: true, connected: true, accountId: 'acct_ada', email: 'ada@example.com' }
 
@@ -61,50 +60,5 @@ describe('devices line', () => {
     expect(devicesLine(signedIn)).toBeUndefined()
     expect(devicesLine(undefined)).toBeUndefined()
     expect(devicesLine({ configured: true, connected: false, devices: { used: 3, limit: 5 } })).toBeUndefined()
-  })
-})
-
-describe('device count in the Mousse ID store', () => {
-  const globals = globalThis as { window?: unknown }
-  const original = globals.window
-  afterEach(() => {
-    globals.window = original
-    useMousseIdStore.setState({ plus: undefined, profileId: null, loaded: false, runtimeOrigin: '' })
-  })
-
-  function stub(answers: Record<string, () => Promise<unknown>>) {
-    const request = vi.fn((method: string) => (answers[method] ?? (() => Promise.reject(new Error(`unexpected ${method}`))))())
-    globals.window = Object.assign(new EventTarget(), { mousse: { platformRequest: { request } } })
-    return request
-  }
-
-  it('adds the count from the inventory to the signed-in status', async () => {
-    const request = stub({ 'net.plus.inventory': async () => ({ ...signedIn, devices: { used: 3, limit: 5 } }) })
-    useMousseIdStore.setState({ plus: signedIn, profileId: useAppStore.getState().profileId })
-    await useMousseIdStore.getState().loadDevices()
-    expect(request).toHaveBeenCalledWith('net.plus.inventory', {})
-    expect(devicesLine(useMousseIdStore.getState().plus)).toBe('3 of 5 devices')
-  })
-
-  it('does not ask while signed out, and leaves the status alone when the service cannot answer', async () => {
-    const request = stub({ 'net.plus.inventory': () => Promise.reject(new Error('unreachable')) })
-    useMousseIdStore.setState({ plus: { configured: false, connected: false }, profileId: useAppStore.getState().profileId })
-    await useMousseIdStore.getState().loadDevices()
-    expect(request).not.toHaveBeenCalled()
-    useMousseIdStore.setState({ plus: signedIn })
-    await useMousseIdStore.getState().loadDevices()
-    expect(request).toHaveBeenCalledTimes(1)
-    expect(useMousseIdStore.getState().plus).toEqual(signedIn)
-  })
-
-  it('keeps the count across status refreshes of the same account, but not another account', async () => {
-    let status: PlusStatus = signedIn
-    stub({ 'net.status': async () => ({ enabled: false }), 'net.plus.status': async () => status })
-    useMousseIdStore.setState({ plus: { ...signedIn, devices: { used: 2, limit: 3 } }, profileId: useAppStore.getState().profileId, runtimeOrigin: 'https://id.example' })
-    await useMousseIdStore.getState().refresh()
-    expect(devicesLine(useMousseIdStore.getState().plus)).toBe('2 of 3 devices')
-    status = { ...signedIn, accountId: 'acct_other' }
-    await useMousseIdStore.getState().refresh()
-    expect(devicesLine(useMousseIdStore.getState().plus)).toBeUndefined()
   })
 })

@@ -7,7 +7,7 @@ import { nextProfileColor, profileColor } from '../../lib/profilePalette'
 import { beginProfileSwitch } from '../../lib/providerSnapshots'
 import { FloatingPortal, useFloatingPosition } from '../../lib/floatingLayer'
 import { useAppStore } from '../../stores/appStore'
-import { devicesLine, mousseIdName, useMousseId, useMousseIdAvailable, useMousseIdStore } from '../../stores/mousseIdStore'
+import { devicesLine, mousseIdName, useMousseId, useMousseIdAvailable } from '../../stores/mousseIdStore'
 import { openSettingsSection } from '../../lib/settingsNavigation'
 import { MousseIdAvatar } from '../MousseIdAvatar'
 import { ProfileEditDialog, type ProfileEditMode, type ProfileEditValues } from './ProfileEditDialog'
@@ -88,11 +88,6 @@ export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
       window.removeEventListener('focus', refresh)
     }
   }, [profileId])
-
-  // The device count is not part of the local status; ask Mousse ID each time the popover opens.
-  useEffect(() => {
-    if (open && signedIn) void useMousseIdStore.getState().loadDevices()
-  }, [open, signedIn])
 
   useEffect(() => {
     if (!open) setRowMenu(null)

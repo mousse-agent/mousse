@@ -140,8 +140,6 @@ export class HostedNetController implements HostedNet {
           String(params.deviceName),
           params.bindRoot === true
         )
-      case 'net.plus.inventory':
-        return { ...this.service().status(), devices: await this.service().inventory() }
       case 'net.plus.configure':
         return this.service().configure(params.configuration as PlusConfiguration)
       case 'net.plus.login.finish': {

@@ -49,7 +49,7 @@ it('renders the bound profile footer and its two-column popover: stale replies, 
     expect(report.single.menu.profiles).toEqual([expect.objectContaining({ name: 'Adithya', checked: 'true', check: true, dotSize: 12 })])
     expect(report.single.actions).toEqual(['Rename', 'Colour'])
 
-    // Signed in: account on the left, profiles on the right, device count read when the menu opens.
+    // Signed in: account on the left, profiles on the right, device count from the sign-in status.
     const { menu } = report.signedIn
     expect(menu).toMatchObject({ role: 'menu', label: 'Account and profiles', wide: true, heading: 'Profiles', rows: ['Account settings', 'Sign out', 'New profile'] })
     expect(menu.box.width).toBe(460)
@@ -60,7 +60,7 @@ it('renders the bound profile footer and its two-column popover: stale replies, 
     expect(menu.profiles.map((row: any) => [row.name, row.checked, row.check])).toEqual([['Adithya', 'true', true], ['Studio', 'false', false], ['Design', 'false', false]])
     expect(menu.kebabs).toEqual(['Adithya profile actions', 'Studio profile actions', 'Design profile actions'])
     expect(new Set(menu.profiles.map((row: any) => row.dot)).size).toBe(3)
-    expect(report.signedIn.requests).toEqual(['net.status', 'net.plus.status', 'net.plus.inventory'])
+    expect(report.signedIn.requests).toEqual(['net.status', 'net.plus.status'])
     expect(report.signedIn.trigger).toBe('Mousse ID: ada.lovelace, Mousse profile: Adithya')
 
     // Arrow keys run column by column and wrap, Right Arrow opens a row's actions, Esc closes one layer at a time.
@@ -88,8 +88,7 @@ it('renders the bound profile footer and its two-column popover: stale replies, 
     // Signed out: a sign-in row and the empty avatar, no Sign out.
     expect(report.signedOut.menu).toMatchObject({ wide: true, rows: ['Sign in with Mousse ID', 'Account settings', 'New profile'] })
     expect(report.signedOut.menu.identity).toEqual({ avatar: 52, emptyAvatar: true })
-    expect(report.signedOut.requests).not.toContain('net.plus.inventory')
-    expect(report.signedOut.trigger).toBe('Sign in, Mousse profile: Adithya')
+        expect(report.signedOut.trigger).toBe('Sign in, Mousse profile: Adithya')
 
     // Under 560px the columns stack, account first, at the single-column width.
     const narrow = report.narrow

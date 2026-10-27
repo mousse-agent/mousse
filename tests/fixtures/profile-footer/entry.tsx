@@ -35,7 +35,7 @@ window.confirm = (message?: string) => { confirms.push(String(message)); return 
 const find = (id: string) => roster.find(profile => profile.id === id) ?? alpha
 
 const plus = account === 'in'
-  ? { configured: true, connected: true, accountId: 'acct_ada', email: 'ada.lovelace@example.com', plan: 'plus' }
+  ? { configured: true, connected: true, accountId: 'acct_ada', email: 'ada.lovelace@example.com', plan: 'plus', devices: { used: 3, limit: 5 } }
   : { configured: false, connected: false }
 ;(window as any).mousse = {
   ...(account === 'none' ? {} : { mousseId: { config: async () => ({ origin: 'https://id.example' }), startCallback: async () => undefined, cancelCallback: async () => undefined } }),
@@ -44,7 +44,6 @@ const plus = account === 'in'
       requestLog.push(method)
       if (method === 'net.status') return { enabled: false, routes: [], peers: [] }
       if (method === 'net.plus.status') return plus
-      if (method === 'net.plus.inventory') return { ...plus, devices: { used: 3, limit: 5 } }
       throw new Error(`unexpected ${method}`)
     }
   },
