@@ -1679,6 +1679,11 @@ export class LlmClient {
           return toolResult(toolCall, authorized.message, true)
         }
       }
+      // The run may have ended while its approval was pending (reconciled, stopped, taken over):
+      // checked again right before anything runs, never only before the wait.
+      if (trustedAgent && authority.kind === 'run' && authority.active && !authority.active())
+        return toolResult(toolCall, `Run ${authority.runId} is no longer the active run of this thread; the tool was not run.`, true)
+      if (trustedAgent && signal?.aborted) return toolResult(toolCall, 'Tool dispatch cancelled immediately before side effects.', true)
 
       // App tools run through the registry; delegation and applets only where the request has them
       // (see `dispatch`), as before.

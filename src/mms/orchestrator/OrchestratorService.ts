@@ -624,6 +624,8 @@ const DEFINITION_HEARTBEAT_MS = 5_000
 interface DefinitionStop {
   abort: AbortController
   runIds: Set<string>
+  /** The run holds the session's admission for its whole execution. */
+  admitted: boolean
 }
 
 /** What a definition turn takes from its run besides the request. */
@@ -733,9 +735,13 @@ export class OrchestratorService extends EventEmitter {
       const runId = request.runId ?? uuidv4()
       const browser = createDefinitionBrowserBinding({ request: { ...request, runId }, runId, resolved: request.resolved })
       const host = request.host as DefinitionHostBindings | undefined
+      // The session stays admitted for the whole run, across retries and fallback backoffs, so a
+      // message sent meanwhile queues instead of taking the thread between records.
+      const fenced = !session.isTurnRunning()
+      if (fenced) session.turnAdmitted = true
       // The thread's public Stop (`stopThread`, `abortRun`, a `turn.interrupt`) ends the whole run,
       // between records too: it aborts this, which every turn and backoff of the run listens to.
-      const stop: DefinitionStop = { abort: new AbortController(), runIds: new Set() }
+      const stop: DefinitionStop = { abort: new AbortController(), runIds: new Set(), admitted: fenced }
       const stops = this.definitionStops.get(request.threadId) ?? new Set<DefinitionStop>()
       stops.add(stop)
       this.definitionStops.set(request.threadId, stops)
@@ -747,6 +753,13 @@ export class OrchestratorService extends EventEmitter {
       return new AgentExecutionService({ runtime }).run({ ...request, runId, signal: AbortSignal.any(signals) }).finally(() => {
         stops.delete(stop)
         if (!stops.size && this.definitionStops.get(request.threadId) === stops) this.definitionStops.delete(request.threadId)
+        if (fenced) {
+          session.turnAdmitted = false
+          session.abortRequested = false
+        }
+        // What queued behind the run runs once, now that the whole run settled; an agent chat that
+        // lent its lease does this after it releases the lease.
+        if (host?.lease?.kind !== 'borrowed') this.resumeThreadQueue(request.threadId)
       })
     })
   }
@@ -844,20 +857,20 @@ export class OrchestratorService extends EventEmitter {
       lease = owned
     }
     try {
-      if (session.turnAdmitted || session.isTurnRunning()) throw harnessAppError({ code: 'operation_busy', message: "The agent's thread is running other work." })
-      session.turnAdmitted = true
+      // The run's own admission (held across its records) is not another turn's.
+      const fenced = extras.stop?.admitted === true
+      if (session.activeTurn !== null || (session.turnAdmitted && !fenced)) throw harnessAppError({ code: 'operation_busy', message: "The agent's thread is running other work." })
+      if (!fenced) session.turnAdmitted = true
       try {
         return await this.runDefinitionTurn(turn, engine, lease, extras)
       } finally {
-        session.turnAdmitted = false
-        session.abortRequested = false
+        if (!fenced) {
+          session.turnAdmitted = false
+          session.abortRequested = false
+        }
       }
     } finally {
-      if (owned) {
-        releaseExecutionLeaseHandle(owned)
-        // What queued behind the turn runs now; a borrowed lease's owner does this when it releases.
-        this.resumeThreadQueue(turn.threadId)
-      }
+      if (owned) releaseExecutionLeaseHandle(owned)
     }
   }
 
@@ -1072,7 +1085,10 @@ export class OrchestratorService extends EventEmitter {
       })
       const result = await handle.result
       const text = result.text || record.finalText()
-      // A turn its own run lost ends as a cancellation of the definition run, never as its answer.
+      // A turn its own run lost ends as a cancellation of the definition run, never as its answer:
+      // the record is read again now, not only on the last heartbeat.
+      const owned = engine.getRun(runId)
+      if (!lost.signal.aborted && (!owned || TERMINAL_RUN_STATUSES.has(owned.status))) lost.abort(new DOMException('The agent run ended elsewhere.', 'AbortError'))
       if (lost.signal.aborted && !turn.signal.aborted) throw lost.signal.reason
       if (result.aborted || turn.signal.aborted) markTerminal('interrupted', { interruptedBy: 'user' }, text)
       // A limit the loop reached fails the run, as the definition's result does.
@@ -5884,21 +5900,25 @@ export class OrchestratorService extends EventEmitter {
     if (!session) return false
     const active = session.activeTurn
     // A definition run on the thread (it admits the session without an active turn of its own).
-    if (!active && id && this.definitionStops.has(id)) {
-      if (!this.stopDefinitionRuns(id, opts?.runId)) return false
-    } else if (!active && session.turnAdmitted && !session.abortRequested) {
+    // A definition run on the thread is stopped (only the one whose record is `runId`, when given),
+    // and so is an ordinary turn the Stop also reaches: one does not hide the other.
+    let stopped = id ? this.stopDefinitionRuns(id, opts?.runId) : false
+    // The session's admission held by a definition run for its whole execution is not an ordinary turn's.
+    const fencedByDefinition = Boolean(id && [...(this.definitionStops.get(id) ?? [])].some((entry) => entry.admitted))
+    if (!active && session.turnAdmitted && !fencedByDefinition && !session.abortRequested) {
       // Admitted but still in recovery/workspace setup: abort as soon as the turn starts. A turn that has
       // not marked its run starting yet is a queued run, which a Stop cancels by id instead.
-      if (opts?.runId && id && this.runEngine?.getActiveRun(id)?.runId !== opts.runId) return false
-      session.abortRequested = true
-    } else if (!active || active.abort.signal.aborted) {
-      return false
-    } else {
-      if (opts?.runId && active.runId && active.runId !== opts.runId) return false
+      if (!(opts?.runId && id && this.runEngine?.getActiveRun(id)?.runId !== opts.runId)) {
+        session.abortRequested = true
+        stopped = true
+      }
+    } else if (active && !active.abort.signal.aborted && !(opts?.runId && active.runId && active.runId !== opts.runId)) {
       active.pendingSteer = []
       active.promotedSteerIds = []
       active.abort.abort()
+      stopped = true
     }
+    if (!stopped) return false
     if (opts?.clearQueue && id) {
       let clearedRunIds: Array<string | undefined> = []
       let clearedItems: QueuedMessage[] = []

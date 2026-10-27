@@ -255,6 +255,11 @@ function limitOf(error: unknown): AgentExecutionLimit | undefined {
   return limit && typeof limit.kind === 'string' && typeof limit.limit === 'number' ? limit : undefined
 }
 
+/** The thread was taken by other work (`operation_busy`). */
+function isBusy(error: unknown): boolean {
+  return error instanceof AppError && error.code === 'operation_busy'
+}
+
 /** A refusal because the instance cannot hold the definition (as opposed to the model being unreachable). */
 function isPolicyRefusal(refusal: DefinitionRefusal): boolean {
   return refusal.code === 'policy_unenforceable' || Boolean(refusal.missing?.length)
@@ -313,6 +318,8 @@ export function createDefinitionRuntime(port: DefinitionTurnPort): AgentRuntimeP
       })
       let attempt = 0
       let lastError: unknown
+      // The failure that moved the run on (a retry or fallback): kept when a later record cannot start.
+      let moveReason: unknown
       for (let index = 0; index < candidates.length; ) {
         if (input.signal.aborted) throw input.signal.reason ?? new DOMException('Aborted', 'AbortError')
         const ref = candidates[index]!.ref
@@ -366,6 +373,8 @@ export function createDefinitionRuntime(port: DefinitionTurnPort): AgentRuntimeP
             return result(turn.text, turn.history, turn.limit)
           } catch (error) {
             used = addAttemptUsage(used, effects.attemptUsage)
+            // A later record that finds the thread taken keeps the provider failure that moved the run.
+            if (moveReason && isBusy(error)) throw moveReason
             lastError = error
             const limit = limitOf(error)
             if (limit) return result('', [], limit)
@@ -374,6 +383,7 @@ export function createDefinitionRuntime(port: DefinitionTurnPort): AgentRuntimeP
               sameCandidateRetries < fallbackPolicy.retryCount &&
               mayTryAgain(error, fallbackPolicy, true)
             if (retrySame) {
+              moveReason = error
               sameCandidateRetries += 1
               await waitBackoff(fallbackPolicy.backoffMs, input.signal)
               continue
@@ -381,6 +391,7 @@ export function createDefinitionRuntime(port: DefinitionTurnPort): AgentRuntimeP
             const next = index + 1 < candidates.length && mayTryAgain(error, fallbackPolicy, false)
             if (!next) throw error
             trace.push(`Moved from ${ref.instanceId ?? ref.providerId}/${ref.modelId} after: ${errorText(error)}`)
+            moveReason = error
             await waitBackoff(fallbackPolicy.backoffMs, input.signal)
             break
           }
