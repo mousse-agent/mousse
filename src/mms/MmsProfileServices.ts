@@ -161,6 +161,7 @@ export class MmsProfileServices {
   /** The harness gateway: the only way app code reaches agents and providers. */
   harness?: HarnessGateway
   private harnessImpl?: Harness
+  private catalogUnsubscribe?: () => void
   readonly projects: ProjectManager
   readonly applets: AppletStore
   readonly threads: ThreadDataStore
@@ -316,7 +317,7 @@ export class MmsProfileServices {
       undefined,
       { launch: launchOf(ANTIGRAVITY_INSTANCE_ID), saveLaunch: saveLaunchOf(ANTIGRAVITY_INSTANCE_ID) }
     )
-    this.antigravity.hooks.changed = () => this.events.emit({ channel: 'providers:changed', data: undefined })
+    this.antigravity.hooks.changed = () => this.harnessImpl?.vendorStateChanged(ANTIGRAVITY_INSTANCE_ID)
     this.antigravity.hooks.installProgress = (message) =>
       this.events.emit({ channel: 'providers:install', data: { instanceId: 'antigravity', type: 'progress', message } })
     // Every profile uses the terminal Claude sign-in, like Codex. Both find their CLI through the
@@ -350,9 +351,6 @@ export class MmsProfileServices {
               : undefined,
       store: configInstanceStore(config)
     })
-      .registerVendor('antigravity', this.antigravity)
-      .registerVendor('claude', this.claudeSubscription)
-      .registerVendor('codex', this.codex)
     this.providerInstances.list()
     this.providerAccess = createProviderAccess(this.providerAuth, this.providerInstances)
     this.integrationContext = shared.personal
@@ -483,7 +481,6 @@ export class MmsProfileServices {
       },
       cwd: () => this.worktrees.getRepoRoot(),
       piDisplayName: (providerId) => this.providerAuth.getProviderDisplayName(providerId),
-      onProvidersChanged: () => this.events.emit({ channel: 'providers:changed', data: undefined }),
       // A moved entry's device default follows it to the agent; its title model becomes Automatic.
       defaults: {
         rewrite: (from, to) => {
@@ -494,6 +491,8 @@ export class MmsProfileServices {
       }
     })
     this.harness = this.harnessImpl
+    // A background catalogue refresh reaches the pickers as a snapshots event.
+    this.catalogUnsubscribe = this.providerAuth.onCatalogChanged?.(() => this.harnessImpl?.catalogChanged())
     this.harnessImpl.startModelRefreshSchedule()
     this.orchestrator.setHarness(this.harnessImpl)
     // Personal bots (PR 6): their own database under `<profileHome>/bots/`, which older builds never open.
@@ -1553,6 +1552,7 @@ export class MmsProfileServices {
       () => this.stopRunEngine(),
       () => this.net.shutdown(),
       () => this.requests.waitForIdle(),
+      () => this.catalogUnsubscribe?.(),
       () => this.harnessImpl?.stop(),
       () => this.antigravity.stop(),
       () => this.claudeSubscription.stop(),

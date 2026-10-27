@@ -11,7 +11,6 @@ import {
   asCreateScheduledJobInput,
   asCursorMcpConfigPatch,
   asPlainObject,
-  asProviderLoginResponse,
   asScheduledJobPatch,
   asSettingsPartial,
   asStringEnvMap,
@@ -163,18 +162,6 @@ describe('protocol nested validators', () => {
     expect(asStringEnvMap({ FOO: 'bar' }).FOO).toBe('bar')
     expect(() => asStringEnvMap({ 'bad-key': 'x' })).toThrow()
     expect(() => asStringEnvMap({ FOO: 'x'.repeat(5000) })).toThrow()
-  })
-
-  it('strictly validates provider login responses', () => {
-    expect(
-      asProviderLoginResponse({ sessionId: 's1', kind: 'prompt', value: 'secret' })
-    ).toEqual({ sessionId: 's1', kind: 'prompt', value: 'secret' })
-    expect(() => asProviderLoginResponse({ sessionId: 's1', kind: 'execute' })).toThrow(
-      /response.kind/
-    )
-    expect(() =>
-      asProviderLoginResponse({ sessionId: 's1', kind: 'cancel', extra: true })
-    ).toThrow(/unknown field/)
   })
 
   it('validates task status and MCP patch size', () => {

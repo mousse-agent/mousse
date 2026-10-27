@@ -187,18 +187,6 @@ export function bridgeProtocolEvent(
       )
       return true
     }
-    case 'providers.changed': {
-      broadcast(
-        'providers:changed',
-        (event.data as { providers?: unknown })?.providers ?? event.data
-      )
-      return true
-    }
-    case 'providers.login-event': {
-      const data = event.data as { event?: unknown }
-      if (data?.event) broadcast('providers:login:event', data.event)
-      return true
-    }
     case 'providers.install-event': {
       const data = event.data as { event?: unknown }
       if (data?.event) broadcast('providers:install:event', data.event)

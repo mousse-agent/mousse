@@ -153,6 +153,26 @@ describe('daemon protocol across clients', () => {
     await b.close()
   })
 
+  it('a provider change made by one client reaches the others as a snapshots event', async () => {
+    const a = await connect()
+    const b = await connect()
+    await b.subscribe(0)
+    const seen: ProtocolEvent[] = []
+    const unsub = b.onEvent((ev) => {
+      if (ev.type === 'providers.snapshots') seen.push(ev)
+    })
+    const { snapshots } = await a.request<{ snapshots: Array<{ instanceId: string }> }>('providers.snapshots', { scope: { kind: 'device' } })
+    const instanceId = snapshots[0]!.instanceId
+    await a.request('providers.instances.setEnabled', { instanceId, scope: { kind: 'device' }, enabled: false })
+    await new Promise((r) => setTimeout(r, 300))
+    const last = seen.at(-1)?.data as { scope?: { kind?: string }; snapshots?: Array<{ instanceId: string; enabled: { device: boolean } }> } | undefined
+    expect(last?.scope?.kind).toBe('device')
+    expect(last?.snapshots?.find((snapshot) => snapshot.instanceId === instanceId)?.enabled.device).toBe(false)
+    unsub()
+    await a.close()
+    await b.close()
+  })
+
   it('channel snapshot and activity answer after a client disconnects', async () => {
     const c = await connect()
     const snap1 = await c.request<{ snapshot: { platforms?: unknown } }>('channels.getSnapshot')
@@ -184,10 +204,12 @@ describe('daemon protocol across clients', () => {
     await c.close()
   })
 
-  it('providers.listConfigured and settings.getOptions are daemon-backed', async () => {
+  it('provider snapshots, Add provider options and settings.getOptions are daemon-backed', async () => {
     const c = await connect()
-    const providers = await c.request<{ providers: unknown[] }>('providers.listConfigured')
-    expect(Array.isArray(providers.providers)).toBe(true)
+    const snapshots = await c.request<{ snapshots: unknown[] }>('providers.snapshots', { scope: { kind: 'device' } })
+    expect(Array.isArray(snapshots.snapshots)).toBe(true)
+    const addOptions = await c.request<{ options: unknown[] }>('providers.catalog.addOptions')
+    expect(Array.isArray(addOptions.options)).toBe(true)
     const options = await c.request<{ options: { themes: unknown[]; llmProviders: unknown[] } }>('settings.getOptions')
     expect(Array.isArray(options.options.themes)).toBe(true)
     expect(Array.isArray(options.options.llmProviders)).toBe(true)

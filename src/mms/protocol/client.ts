@@ -45,13 +45,26 @@ const GIT_MUTATION_METHODS: ReadonlySet<string> = new Set([
   'git.abortInProgress', 'git.createBranch', 'git.renameBranch', 'git.deleteBranch', 'git.init'
 ])
 
+/** The service refused the hello; `code` says why (`protocol_version`: it speaks another protocol). */
+export class ProtocolHelloError extends Error {
+  constructor(readonly code: string, detail: string) {
+    super(`Hello rejected: ${code}: ${detail}`)
+    this.name = 'ProtocolHelloError'
+  }
+}
+
+/** Whether `error` is a hello the service refused because it speaks another protocol version. */
+export function isProtocolVersionMismatch(error: unknown): boolean {
+  return error instanceof ProtocolHelloError && error.code === 'protocol_version'
+}
+
 /**
  * How long a request may stay open when neither the call nor the client sets a timeout.
  * A client's blanket `requestTimeoutMs` still outranks this, and an explicit `timeoutMs` outranks both.
  */
 export function requestTimeoutFor(method: string): number {
   if (method === 'orchestrator.send') return MMS_PROTOCOL_ORCHESTRATOR_SEND_TIMEOUT_MS
-  if (method === 'providers.loginOAuth' || method === 'providers.loginApiKey' || method === 'mcp.beginAuth' || method === 'mcp.authenticate') return MMS_PROTOCOL_LOGIN_TIMEOUT_MS
+  if (method === 'mcp.beginAuth' || method === 'mcp.authenticate') return MMS_PROTOCOL_LOGIN_TIMEOUT_MS
   // Fetches the pull request's head from the network and builds a worktree.
   if (GIT_MUTATION_METHODS.has(method) || method === 'pullRequests.startThread') return MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS
   return MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS
@@ -253,7 +266,7 @@ export class LocalMmsClient implements MmsClient {
               continue
             }
             if (env.kind === 'hello_err') {
-              fail(new Error(`Hello rejected: ${env.code}: ${env.message}`))
+              fail(new ProtocolHelloError(env.code, env.message))
               return
             }
           }

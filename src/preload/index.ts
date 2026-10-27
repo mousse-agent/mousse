@@ -93,7 +93,7 @@ import type {
   StartPullRequestThreadResult
 } from '../shared/pullRequests'
 import type { ProfileCreateInput, ProfilePublicDto, ProfileUpdateInput } from '../shared/profiles/types'
-import type { LlmProviderOption, MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../shared/settings'
+import type { MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../shared/settings'
 import type { LineEditStatsSnapshot, UsageStatsSnapshot } from '../shared/lineEditStats'
 import type {
   McpConfigSourceDescriptor,
@@ -102,21 +102,14 @@ import type {
   SkillReadResult,
   SkillsRegistrySnapshot
 } from '../shared/integrations'
-import type {
-  AmbientProviderInfo,
-  CliInstallEvent,
-  ConfiguredProvider,
-  ProviderLoginEvent,
-  ProviderLoginOption,
-  ProviderLoginResponse,
-  ProviderLoginResult
-} from '../shared/providerAuth'
+import type { CliInstallEvent } from '../shared/providerAuth'
 import type { InstanceSnapshot, ModelRefreshResult, ProviderSnapshotsEvent } from '../shared/harness/status'
 import type { MoveResult } from '../shared/harness/move'
 import type {
   AddInstanceInput,
   InstanceConfigPatch,
   ModelPrefsPatch,
+  ProviderAddOption,
   ProviderOperationEvent,
   ProviderOperationStarted,
   ProviderScope,
@@ -912,47 +905,18 @@ const api = {
   },
   providers: {
     getUsage: () => ipcRenderer.invoke('providers:getUsage'),
-    listConfigured: (): Promise<ConfiguredProvider[]> =>
-      ipcRenderer.invoke('providers:listConfigured'),
     getSubscriptionUsage: (providerId: string): Promise<string | undefined> =>
       ipcRenderer.invoke('providers:getSubscriptionUsage', providerId),
-    getLoginOptions: (authType?: 'api_key' | 'oauth'): Promise<ProviderLoginOption[]> =>
-      ipcRenderer.invoke('providers:getLoginOptions', authType),
-    refreshModels: (providerId: string): Promise<LlmProviderOption[]> =>
-      ipcRenderer.invoke('providers:refreshModels', providerId),
-    getAmbientInfo: (providerId: string): Promise<AmbientProviderInfo | undefined> =>
-      ipcRenderer.invoke('providers:getAmbientInfo', providerId),
-    setApiKey: (providerId: string, apiKey: string): Promise<void> =>
-      ipcRenderer.invoke('providers:setApiKey', providerId, apiKey),
-    verifyAmbient: (providerId: string): Promise<ProviderLoginResult> =>
-      ipcRenderer.invoke('providers:verifyAmbient', providerId),
-    logout: (providerId: string): Promise<void> =>
-      ipcRenderer.invoke('providers:logout', providerId),
     onInstallEvent: (cb: (event: CliInstallEvent) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, event: CliInstallEvent) => cb(event)
       ipcRenderer.on('providers:install:event', handler)
       return () => ipcRenderer.removeListener('providers:install:event', handler)
     },
-    loginOAuth: (providerId: string): Promise<ProviderLoginResult> =>
-      ipcRenderer.invoke('providers:loginOAuth', providerId),
-    loginApiKey: (providerId: string): Promise<ProviderLoginResult> =>
-      ipcRenderer.invoke('providers:loginApiKey', providerId),
-    respondLogin: (response: ProviderLoginResponse): Promise<void> =>
-      ipcRenderer.invoke('providers:login:respond', response),
-    cancelLogin: (sessionId: string): Promise<void> =>
-      ipcRenderer.invoke('providers:login:cancel', sessionId),
     openLoginUrl: (url: string): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke('providers:openLoginUrl', url),
-    onLoginEvent: (cb: (event: ProviderLoginEvent) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, event: ProviderLoginEvent) => cb(event)
-      ipcRenderer.on('providers:login:event', handler)
-      return () => ipcRenderer.removeListener('providers:login:event', handler)
-    },
-    onChanged: (cb: (providers: ConfiguredProvider[]) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, providers: ConfiguredProvider[]) =>
-        cb(providers)
-      ipcRenderer.on('providers:changed', handler)
-      return () => ipcRenderer.removeListener('providers:changed', handler)
+    /** What Add provider offers: each option's sign-in methods and the exact `instances.add` input. */
+    catalog: {
+      addOptions: (): Promise<ProviderAddOption[]> => ipcRenderer.invoke('providers:catalog:addOptions')
     },
     /** Status of every provider instance in `scope` (device, or a project's overrides on top). */
     snapshots: (scope: ProviderScope): Promise<InstanceSnapshot[]> =>
@@ -962,6 +926,12 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, event: ProviderSnapshotsEvent) => cb(event)
       ipcRenderer.on('providers:snapshots', handler)
       return () => ipcRenderer.removeListener('providers:snapshots', handler)
+    },
+    /** The window reconnected to the service: operations it was running are gone. */
+    onServiceRestarted: (cb: () => void): (() => void) => {
+      const handler = () => cb()
+      ipcRenderer.on('providers:serviceRestarted', handler)
+      return () => ipcRenderer.removeListener('providers:serviceRestarted', handler)
     },
     /** Progress, sign-in prompts and the outcome of install, update and sign-in operations. */
     onOperation: (cb: (event: ProviderOperationEvent) => void): (() => void) => {
@@ -980,6 +950,9 @@ const api = {
     instances: {
       add: (input: AddInstanceInput): Promise<InstanceSnapshot> =>
         ipcRenderer.invoke('providers:instances:add', input),
+      /** Saves or replaces the instance's key (a model API's shared key); resolves with its snapshot. */
+      setSecret: (instanceId: string, value: string): Promise<InstanceSnapshot> =>
+        ipcRenderer.invoke('providers:instances:setSecret', instanceId, value),
       /** Deletes the instance; the user's own CLI and its sign-in are not touched. */
       remove: (instanceId: string): Promise<void> => ipcRenderer.invoke('providers:instances:remove', instanceId),
       configure: (instanceId: string, patch: InstanceConfigPatch): Promise<InstanceSnapshot> =>

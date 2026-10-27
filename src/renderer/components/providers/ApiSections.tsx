@@ -1,46 +1,42 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import type { StatusDescription } from '../../../shared/harness/status'
-import type { ProviderLoginOption } from '../../../shared/providerAuth'
+import type { AddOptionMethod } from '../../../shared/harness/types'
 import { Check, Pencil, X } from '../../lib/icons'
 import { SettingsRow } from '../settings/SettingsRow'
 import { StatusLine, useAsyncAction } from './parts'
 
 /**
  * The Setup row of a model API: replace the key, sign in again, or the cloud credentials it reuses.
- * Removing the provider lives in the editor header. API keys and pi sign-ins still go through the
- * provider login methods (`providers.login*`), which the daemon forwards to the gateway.
+ * Removing the provider lives in the editor header. A pasted key goes through
+ * `providers.instances.setSecret`; a sign-in or guided key through `providers.instances.signIn`.
  */
 export function ApiSetupRow({
-  providerId,
   label,
-  option,
+  method,
+  guidedKey,
+  ambientInstructions,
   status,
   retired,
   onReplaceKey,
   onSignIn
 }: {
-  providerId: string
   label: string
-  option?: ProviderLoginOption
+  /** How the entry signs in: its saved credential's kind, else the first method its Add option offers. */
+  method?: AddOptionMethod
+  /** The key comes from the provider's guided sign-in, not a pasted one. */
+  guidedKey?: boolean
+  /** Where the environment's cloud credentials come from (`ambient`). */
+  ambientInstructions?: readonly string[]
   status: StatusDescription
   /** Its sign-in is going away (the entry has a Move banner): no sign-in or key to set here. */
   retired?: boolean
-  /** Blank runs the guided key prompt. */
+  /** Blank runs the guided key sign-in. */
   onReplaceKey: (apiKey: string) => Promise<void>
   onSignIn: () => Promise<void>
 }) {
   const { busy, error, run } = useAsyncAction()
   const [editingKey, setEditingKey] = useState(false)
   const [key, setKey] = useState('')
-  const [instructions, setInstructions] = useState<string[]>([])
-  const ambient = option?.ambient === true
-  useEffect(() => {
-    if (!ambient) return
-    void window.mousse.providers
-      .getAmbientInfo(providerId)
-      .then((info) => setInstructions(info?.instructions ?? []))
-      .catch(() => {})
-  }, [ambient, providerId])
 
   const saveKey = () =>
     void run('key', async () => {
@@ -51,8 +47,8 @@ export function ApiSetupRow({
   const errorLine = error ? <span className="prov-error">{error}</span> : null
   const statusLine = <StatusLine status={status} />
 
-  if (ambient) {
-    return <SettingsRow title="Cloud credentials" description={errorLine ?? (instructions.join(' ') || statusLine)} />
+  if (method === 'ambient') {
+    return <SettingsRow title="Cloud credentials" description={errorLine ?? (ambientInstructions?.join(' ') || statusLine)} />
   }
 
   // A retired entry: its sign-in stays until it moves, nothing runs on it, and there is no signing in to it again.
@@ -60,7 +56,7 @@ export function ApiSetupRow({
     return <SettingsRow title="Account" description={statusLine} />
   }
 
-  if (option?.authType === 'oauth') {
+  if (method === 'oauth') {
     return (
       <SettingsRow
         title="Account"
@@ -108,7 +104,7 @@ export function ApiSetupRow({
             title="Replace key"
             aria-label="Replace key"
             disabled={busy !== null}
-            onClick={() => (option?.guidedLogin ? void run('key', () => onReplaceKey('')) : setEditingKey(true))}
+            onClick={() => (guidedKey ? void run('key', () => onReplaceKey('')) : setEditingKey(true))}
           >
             <Pencil size={14} />
           </button>

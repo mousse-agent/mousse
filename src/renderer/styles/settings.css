@@ -1326,7 +1326,7 @@ html[data-theme='high-contrast'] .toggle-switch.on::after {
   font-size: var(--settings-fs-small, 12.5px);
 }
 
-/* Provider sign-in dialog (ProviderLoginModal, on ui/Modal): flat content, neutral
+/* Provider sign-in dialog (providers/SignInDialog, on ui/Modal): flat content, neutral
    buttons, one-row choices with a neutral hover. */
 .provider-login-option {
   display: flex;

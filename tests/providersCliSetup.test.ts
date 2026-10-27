@@ -2,7 +2,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { describeStatus, type InstanceSnapshot } from '../src/shared/harness/status'
-import type { ProviderLoginOption } from '../src/shared/providerAuth'
+import type { ProviderAddOption } from '../src/shared/harness/types'
 import { AgentConnectStep, CustomCommandStep, addChoices, onFoldedKey, type AddChoice } from '../src/renderer/components/providers/AddProviderDialog'
 import { moveTargets } from '../src/renderer/components/providers/MoveProviderDialog'
 import { AccountRow, BinaryRow, SetupRow, UpdateRow, type InstanceActions } from '../src/renderer/components/providers/CliSections'
@@ -301,8 +301,16 @@ describe('Sign-out', () => {
   })
 })
 
-const loginOption = (id: string, patch: Partial<ProviderLoginOption> = {}): ProviderLoginOption =>
-  ({ id, label: id, authType: 'api_key', configured: false, ...patch }) as ProviderLoginOption
+const addOption = (id: string, patch: Partial<ProviderAddOption> = {}): ProviderAddOption => ({
+  id,
+  label: id,
+  methods: ['api_key'],
+  add: { driver: 'pi', config: { provider: id } },
+  instanceId: `pi:${id}`,
+  added: false,
+  hasSavedKey: false,
+  ...patch
+})
 
 describe('Add provider choices', () => {
   const claude = snapshot()
@@ -357,14 +365,12 @@ describe('Add provider choices', () => {
     expect(choices.every((choice) => choice.kind === 'registry' || (choice.kind === 'new' && (choice.driver === 'codex' || choice.existing === undefined)))).toBe(true)
   })
 
-  it('lists model APIs not connected yet, without the agents’ own sign-ins', () => {
+  it('lists model APIs not added yet', () => {
     const choices = addChoices([claude, codex], [
-      loginOption('claude-subscription', { authType: 'oauth' }),
-      loginOption('codex', { authType: 'oauth' }),
-      loginOption('openai'),
-      loginOption('anthropic', { configured: true }),
+      addOption('openai'),
+      addOption('anthropic', { added: true }),
       // A model API that now runs as an agent is added as that agent.
-      loginOption('cursor')
+      addOption('cursor')
     ])
     expect(choices.filter((choice) => choice.kind === 'api').map((choice) => choice.label)).toEqual(['openai'])
     expect(choices.find((choice) => choice.key === 'new:cursor')).toMatchObject({ label: 'Cursor', group: 'Agents' })
@@ -372,7 +378,7 @@ describe('Add provider choices', () => {
 
   it('offers an Anthropic API key as Claude Code on that key, never as a model API, and apart from the user’s own Claude Code', () => {
     const keyEntry = snapshot({ instanceId: 'claude:api', displayName: 'Claude Code (API key)', config: { home: 'private', args: [], env: {}, loginMethod: 'api_key' } })
-    const choices = addChoices([codex, keyEntry], [loginOption('anthropic'), loginOption('openai')])
+    const choices = addChoices([codex, keyEntry], [addOption('anthropic'), addOption('openai')])
     expect(choices.filter((choice) => choice.kind === 'api').map((choice) => choice.label)).toEqual(['openai'])
     expect(choices.find((choice) => choice.key === 'new:claude:api')).toMatchObject({ kind: 'new', label: 'Claude Code (API key)', group: 'API keys', driver: 'claude', iconId: 'anthropic', target: { slug: 'api', loginMethod: 'api_key' } })
     // The key entry is not the user's own Claude Code: that is still offered as itself.
@@ -392,17 +398,20 @@ describe('Add provider choices', () => {
 
   it('shows a provider with several sign-in methods once, with its methods to choose from', () => {
     const choices = addChoices([claude, codex], [
-      loginOption('github-copilot', { label: 'GitHub Copilot' }),
-      loginOption('github-copilot', { label: 'GitHub Copilot', authType: 'oauth' }),
-      loginOption('openai', { label: 'OpenAI' })
+      addOption('github-copilot', { label: 'GitHub Copilot', methods: ['api_key', 'oauth'] }),
+      addOption('openai', { label: 'OpenAI' }),
+      addOption('amazon-bedrock', { label: 'Amazon Bedrock', methods: ['ambient'] })
     ])
     const api = choices.filter((choice) => choice.kind === 'api')
     expect(api.map((choice) => [choice.label, choice.group])).toEqual([
       ['GitHub Copilot', 'Subscriptions'],
-      ['OpenAI', 'API keys']
+      ['OpenAI', 'API keys'],
+      ['Amazon Bedrock', 'Cloud credentials']
     ])
     const copilot = api[0] as Extract<(typeof api)[number], { kind: 'api' }>
-    expect(copilot.options.map((option) => option.authType)).toEqual(['oauth', 'api_key'])
+    expect(copilot.methods).toEqual(['oauth', 'api_key'])
+    // The option is passed on as it is: the dialog adds exactly `option.add`.
+    expect(copilot.option.add).toEqual({ driver: 'pi', config: { provider: 'github-copilot' } })
   })
 
   const connect = (choice: AddChoice | undefined) =>

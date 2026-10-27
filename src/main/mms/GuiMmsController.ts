@@ -1,5 +1,5 @@
 import { ERROR_INFO_CAPABILITY } from '../../shared/errors'
-import { assertGuiDaemonCompatible } from './guiDaemonCompatibility'
+import { connectGuiClient } from './guiDaemonCompatibility'
 /**
  * Production Electron-side MMS client lifecycle.
  * Discovers/spawns the standalone daemon, connects via LocalMmsClient, reconnects
@@ -414,8 +414,7 @@ export class GuiMmsController extends EventEmitter {
     if (this.attachedBrowserHost) {
       windowClient.setAttachedBrowserCommandHandler((command, { signal }) => this.attachedBrowserHost!.handleCommand(sender, command, signal))
     }
-    const windowHello = await windowClient.connect()
-    await assertGuiDaemonCompatible(windowClient, windowHello, this.homeDir)
+    await connectGuiClient(windowClient, this.homeDir)
     const bound = await windowClient.request<{ profile: { id: string }; epoch: number }>('profiles.bind', {
       profile: 'default'
     }).catch(async () => {
@@ -684,8 +683,7 @@ export class GuiMmsController extends EventEmitter {
     })
 
     try {
-      const hello = await client.connect()
-      await assertGuiDaemonCompatible(client, hello, this.homeDir)
+      const hello = await connectGuiClient(client, this.homeDir)
 
       this.detachEventHandlers()
       this.client = client

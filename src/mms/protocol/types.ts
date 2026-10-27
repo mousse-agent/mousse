@@ -8,7 +8,12 @@ import type { BrowserWorkerRequest, BrowserWorkerResponse } from '../../shared/b
 export const MMS_PROTOCOL_CHUNK_CAPABILITY = 'envelope-chunks.v1'
 export const MMS_PROTOCOL_CHUNK_BYTES = 256 * 1024
 export const MMS_PROTOCOL_MAX_ENVELOPE_BYTES = 32 * 1024 * 1024
-export const MMS_PROTOCOL_VERSION = 1
+/**
+ * 2: the old provider methods (`providers.listConfigured`, `setApiKey`, `login*`, ...) and the
+ * `providers.changed` / `providers.login-event` events are gone; clients use `providers.instances.*`,
+ * `providers.catalog.addOptions` and `providers.snapshots`.
+ */
+export const MMS_PROTOCOL_VERSION = 2
 export const MMS_PROTOCOL_MAX_FRAME_BYTES = 4 * 1024 * 1024 // 4 MiB
 export const MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS = 60_000
 /** Interactive provider login waits for browser consent or pasted credentials. */
@@ -341,21 +346,10 @@ export const PROTOCOL_METHODS = [
   'settings.get',
   'settings.set',
   'settings.getOptions',
-  'providers.listConfigured',
   'providers.getUsage',
   'providers.getSubscriptionUsage',
   'providers.synthesizeSpeech',
   'providers.transcribeAudio',
-  'providers.getLoginOptions',
-  'providers.refreshModels',
-  'providers.getAmbientInfo',
-  'providers.setApiKey',
-  'providers.verifyAmbient',
-  'providers.logout',
-  'providers.loginOAuth',
-  'providers.loginApiKey',
-  'providers.loginRespond',
-  'providers.loginCancel',
   // Harness gateway: instance snapshots and commands. Long operations return an operation id
   // and report through `providers.operation` events.
   'providers.snapshots',
@@ -527,8 +521,6 @@ export type ProtocolEventType =
   | 'channels.activity'
   | 'stats.lineEdits.updated'
   | 'settings.changed'
-  | 'providers.changed'
-  | 'providers.login-event'
   | 'providers.install-event'
   | 'providers.snapshots'
   | 'providers.operation'
@@ -553,8 +545,6 @@ export type ProtocolEventType =
   | 'channels.updated'
   | 'channels.activity'
   | 'settings.changed'
-  | 'providers.changed'
-  | 'providers.login-event'
   | 'mcp.changed'
   | 'ui.focus-intent'
   | 'ui.document-open'

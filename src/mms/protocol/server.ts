@@ -123,7 +123,6 @@ export class MmsProtocolServer {
   private readonly ring = new EventSequenceRing()
   private readonly profileEventDisposers = new Map<string, Array<() => void>>()
   private profileLifecycleUnsubscribe: (() => void) | null = null
-  private catalogChangedUnsubscribe: (() => void) | null = null
   private accepting = false
   private endpointPath: string | null = null
   private stopping = false
@@ -180,14 +179,6 @@ export class MmsProtocolServer {
         this.disposeProfileEvents(profileId)
       }) ?? null
     }
-    // Catalogs refresh in the background after startup; push results to every client.
-    this.catalogChangedUnsubscribe?.()
-    this.catalogChangedUnsubscribe = this.opts.mms.providerAuth?.onCatalogChanged?.(() => {
-      if (this.stopping || this.stopped) return
-      // The same listing the old methods answer with: providers removed from the profile are left out.
-      const providers = this.opts.mms.providerInstances.configuredProviders()
-      this.emitToSubscribers(this.ring.push('providers.changed', { providers }), null)
-    }) ?? null
     this.accepting = true
 
     try {
@@ -285,8 +276,6 @@ export class MmsProtocolServer {
   private disposeOrchestratorEvents(): void {
     this.profileLifecycleUnsubscribe?.()
     this.profileLifecycleUnsubscribe = null
-    this.catalogChangedUnsubscribe?.()
-    this.catalogChangedUnsubscribe = null
     for (const profileId of [...this.profileEventDisposers.keys()]) {
       this.disposeProfileEvents(profileId)
     }
@@ -347,10 +336,7 @@ export class MmsProtocolServer {
     onEmitter(services.events, 'net:updated', (status: import('../../shared/net').NetStatus) => {
       emitToSubscribers(this.ring.push('net.updated', status))
     })
-    // Sign-in and install changes that happen outside a request (a revoked Google session, a download).
-    onEmitter(services.events, 'providers:changed', () => {
-      emitToSubscribers(this.ring.push('providers.changed', { providers: services.providerInstances.configuredProviders() }))
-    })
+    // Install progress that happens outside a request (a download).
     onEmitter(services.events, 'providers:install', (event: import('../../shared/providerAuth').CliInstallEvent) => {
       emitToSubscribers(this.ring.push('providers.install-event', { event }))
     })

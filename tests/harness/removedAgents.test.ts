@@ -2,7 +2,7 @@
  * PR 5a-1 review round 1: a removed agent is used for nothing, and removing an entry and adding it
  * back keeps the new entry's state folder.
  * - A removed built-in Claude Code or Codex counts as signed out to its own service: no sign-in
- *   check, no usage query, no listing (`providers.getUsage`, `providers.listConfigured`).
+ *   check, no usage query, no listing (`providers.getUsage`, the model pickers' listing).
  * - A removal still waiting for a check to end does not delete the folder of the entry added back
  *   under the same fixed id (an agent's own setup, a model API).
  * No CLI runs: the vendor services find a fake file and their checks and queries are fakes.
@@ -99,27 +99,12 @@ describe('a removed built-in agent', () => {
     expect(profile.codex.configured()).toBe(false)
     const usage = await dispatchMethod(context, 'providers.getUsage', {}) as { providers: Array<{ id: string }> }
     expect(usage.providers).toEqual([])
-    const listed = await dispatchMethod(context, 'providers.listConfigured', {}) as { providers: unknown[] }
-    expect(listed.providers).toEqual([])
+    const listed = await profile.harness.llmProviders({ kind: 'device' })
+    expect(listed.map((option) => option.instanceId)).not.toContain('claude')
+    expect(listed.map((option) => option.instanceId)).not.toContain('codex')
     expect(profile.claudeAuth).not.toHaveBeenCalled()
     expect(profile.claudeQuery).not.toHaveBeenCalled()
     expect(profile.codexAccount).not.toHaveBeenCalled()
-  })
-
-  it('is not offered as a model API sign-in by the old Add dialog, while one that is there and signed out is', async () => {
-    const { profile, context } = profileWithClis()
-    const mms = (context as unknown as { mms: Record<string, unknown> }).mms
-    mms.providerAuth = { getLoginOptions: () => [] }
-    mms.antigravity = profile.antigravity
-    const loginIds = async () => ((await dispatchMethod(context, 'providers.getLoginOptions', { authType: 'oauth' })) as { options: Array<{ id: string }> }).options.map((option) => option.id)
-    // Codex signed out in Mousse but still an entry: its sign-in is offered, as before.
-    await profile.harness.instances.signOut('codex')
-    expect(await loginIds()).toContain('codex')
-    await profile.harness.instances.remove('claude')
-    await profile.harness.instances.remove('codex')
-    const ids = await loginIds()
-    expect(ids).not.toContain('claude-subscription')
-    expect(ids).not.toContain('codex')
   })
 })
 
@@ -215,20 +200,5 @@ describe('a key saved for an entry added back while its removal deletes the old 
     await harness.instances.setSecret('pi:openrouter', 'fixture-new-key')
     expect(credentials.keys.get('openrouter')).toBe('fixture-new-key')
     expect(Object.keys(instances.list())).toEqual(['pi:openrouter'])
-  })
-
-  it('the old Add dialog\'s key waits for the removal too, and brings the entry back with that key', async () => {
-    const { credentials, instances, harness, slow } = piProfile()
-    const context = { mms: { harness, providerInstances: instances, providerAuth: credentials }, globalSequence: () => 0 } as unknown as HandlerContext
-    const removal = harness.instances.remove('pi:openrouter')
-    await vi.waitFor(() => expect(credentials.logout).toHaveBeenCalled())
-    const saved = dispatchMethod(context, 'providers.setApiKey', { providerId: 'openrouter', apiKey: 'fixture-new-key' })
-    await new Promise((resolve) => setTimeout(resolve, 10))
-    expect(credentials.setApiKey).not.toHaveBeenCalled()
-    slow.resolve()
-    await removal
-    await saved
-    expect(credentials.keys.get('openrouter')).toBe('fixture-new-key')
-    expect(instances.isRemoved('pi:openrouter')).toBe(false)
   })
 })

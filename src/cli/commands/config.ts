@@ -1,10 +1,10 @@
-import type { ProviderLoginOption } from '../../shared/providerAuth'
 import type { ParsedArgs } from '../parseArgs'
 import { flagString } from '../parseArgs'
 import { exitWithError, writeOutput } from '../output'
 import { closeMmsContext, openMms } from '../mmsContext'
 import { CONFIG_HELP } from '../help'
 import { promptLine, promptSelect } from './chat'
+import { addProvider, providerAddOptions } from '../providerSetup'
 
 export async function runConfig(args: ParsedArgs): Promise<void> {
   const { globals, subcommand, positional } = args
@@ -63,7 +63,8 @@ export async function runConfig(args: ParsedArgs): Promise<void> {
 
 async function runConfigProviders(args: ParsedArgs): Promise<void> {
   const { globals, flags } = args
-  const ctx = await openMms(globals)
+  // The key is saved below, once the provider is added; the global `--api-key` only replaces one.
+  const ctx = await openMms({ ...globals, apiKey: undefined })
   const client = ctx.client
 
   try {
@@ -71,15 +72,12 @@ async function runConfigProviders(args: ParsedArgs): Promise<void> {
     let model = flagString(flags, 'model') ?? globals.model
     const apiKey = flagString(flags, 'api-key') ?? globals.apiKey
 
+    const options = await providerAddOptions(client)
     if (!providerId) {
-      const optionsRes = await client.request<{ options: ProviderLoginOption[] }>(
-        'providers.getLoginOptions',
-        { authType: 'api_key' }
-      )
       providerId =
         (await promptSelect(
           'Select orchestrator provider:',
-          optionsRes.options.map((o) => ({ id: o.id, label: o.label }))
+          options.filter((o) => o.methods.includes('api_key') && !o.runsAs).map((o) => ({ id: o.id, label: o.label }))
         )) ?? undefined
     }
 
@@ -87,9 +85,7 @@ async function runConfigProviders(args: ParsedArgs): Promise<void> {
       exitWithError('No provider selected. Use --provider.', globals.mode)
     }
 
-    if (apiKey) {
-      await client.request('providers.setApiKey', { providerId, apiKey })
-    }
+    const added = await addProvider(client, providerId!, apiKey, options)
 
     if (!model) {
       model = await promptLine('Default model id (optional): ')
@@ -101,16 +97,13 @@ async function runConfigProviders(args: ParsedArgs): Promise<void> {
       })
     }
 
-    const configured = await client.request<{ providers: { id: string }[] }>(
-      'providers.listConfigured'
-    )
     const settings = await client.request<{ settings: { provider: { model?: string } } }>(
       'settings.get'
     )
     writeOutput(globals.mode, {
       provider: providerId,
       model: model?.trim() || settings.settings.provider.model,
-      configured: configured.providers.some((p) => p.id === providerId)
+      configured: added.configured
     })
   } finally {
     await closeMmsContext(ctx)

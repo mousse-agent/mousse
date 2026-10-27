@@ -25,7 +25,7 @@ import type {
   TurnOrigin
 } from '../../shared/harness/types'
 import type { NeutralTool } from '../../shared/harness/tools'
-import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult } from '../../shared/providerAuth'
+import type { CliProviderConfigPatch } from '../../shared/providerAuth'
 import type { ModelOverride } from '../../shared/providerInstances'
 import type { AgentAccessLevel, LlmProviderOption } from '../../shared/settings'
 import type { ChatMode } from '../../shared/types'
@@ -234,8 +234,6 @@ export interface HarnessGateway {
   llmProviders(scope: ProviderScope): Promise<LlmProviderOption[]>
   /** The same listing from what is known now, without waiting (synchronous readers: channel `/model`). */
   listedLlmProviders(scope: ProviderScope): LlmProviderOption[]
-  /** Old provider methods (`providers.listConfigured`, `loginOAuth`, ...) forward here. */
-  readonly legacy: LegacyProviders
   /** Stops the instances' runtimes and running operations. */
   stop(): void
 }
@@ -280,28 +278,6 @@ export interface ResolvedTurnSelection {
   movedFrom?: string
   /** The model that selection named, when the agent runs another one for it (`movedModel`). */
   movedFromModel?: string
-}
-
-/** The old provider RPCs, served through the instances that replace the vendor branches. */
-export interface LegacyProviders {
-  configuredProviders(): ConfiguredProvider[]
-  /** False when `providerId` is not a vendor instance (the caller then asks the pi credentials). */
-  refreshModels(providerId: string, cwd: string): Promise<boolean>
-  logout(providerId: string): Promise<boolean>
-  /** Undefined when `providerId` is not a vendor instance. */
-  login(providerId: string, session: LoginSession, cwd: string): Promise<ProviderLoginResult> | undefined
-  /**
-   * A pi provider's credentials changed through the old methods (API key, OAuth, logout): its
-   * instance is checked again now and its snapshot published, whatever the probe cache held.
-   */
-  credentialsChanged(providerId: string): Promise<void>
-  /**
-   * The old Add dialog saves a credential for `providerId`: that is an explicit add, so a model API
-   * removed from this profile is added again (its tombstone cleared) through the add path.
-   */
-  explicitAdd(providerId: string): Promise<void>
-  /** Waits for a removal of `providerId`'s entry that is still deleting its key (before a key is saved for it). */
-  removalSettled(providerId: string): Promise<void>
 }
 
 /**
@@ -553,8 +529,6 @@ export interface HarnessGatewayOptions {
   piDisplayName?: (providerId: string) => string
   shellPath?: () => Promise<ShellPathResult>
   probeTimeouts?: Partial<typeof PROBE_TIMEOUTS>
-  /** Old clients refresh their provider lists on this (the `providers:changed` event). */
-  onProvidersChanged?: () => void
   now?: () => number
   /** Newest published CLI versions; looked up in the npm registry at most daily by default. */
   latest?: LatestVersionCache
@@ -656,6 +630,8 @@ interface Operation {
    */
   manualCode?: string
   urlPrompts: string[]
+  /** The browser link the sign-in showed last; a paste field that follows it is shown with it. */
+  lastUrl?: Extract<SignInPrompt, { type: 'auth_url' }>
   prompts: number
   progress?: InstallProgress
   cancel(): boolean
@@ -740,7 +716,6 @@ export class Harness implements HarnessGateway {
   readonly instances: HarnessInstances
   readonly catalog: HarnessCatalog
   readonly registry: HarnessRegistry
-  readonly legacy: LegacyProviders
   readonly instanceMap: ProviderInstanceService
   private readonly drivers = new Map<HarnessDriverKind, HarnessDriver>()
   private readonly records = new Map<string, InstanceRecord>()
@@ -800,6 +775,8 @@ export class Harness implements HarnessGateway {
     this.instanceMap = options.instanceMap
     for (const driver of options.drivers) {
       if (this.drivers.has(driver.kind)) throw new Error(`A driver for ${driver.kind} is already registered.`)
+      // Add provider's options are added under fixed ids; a driver without them could not say which.
+      if (driver.addOptions && !driver.instanceIdFor) throw new Error(`The ${driver.kind} driver offers Add options but no fixed instance ids (instanceIdFor).`)
       this.drivers.set(driver.kind, driver)
     }
     this.scopes = new HarnessScopeStore(options.profileHome)
@@ -816,11 +793,6 @@ export class Harness implements HarnessGateway {
           if (state.result?.install === 'not_installed') state.checkedAtMs = undefined
       })
       .catch(() => {})
-    // Transitional (`configuredProviders`, the old `providers.listConfigured`): deleted in 5a-2.
-    this.instanceMap.setListings((instanceId) => {
-      const record = this.listedRecord(instanceId)
-      return record ? { configuredProvider: () => this.named(record, record.runtime.configuredProvider?.()), llmProvider: () => this.named(record, record.runtime.llmProvider?.()) } : undefined
-    })
     this.instances = {
       snapshots: (scope) => this.snapshots(scope),
       usage: (scope) => this.usage(scope),
@@ -885,70 +857,6 @@ export class Harness implements HarnessGateway {
         return typeof prompt === 'object' && prompt !== null && (prompt as { image?: unknown }).image === true
       },
       addOptions: () => this.addOptions()
-    }
-    this.legacy = {
-      configuredProviders: () => this.instanceMap.configuredProviders(),
-      removalSettled: async (providerId) => {
-        try {
-          await this.removing.get(this.instanceMap.instanceIdForLegacyProvider(providerId))
-        } catch {
-          /* a name no instance maps to has no removal */
-        }
-      },
-      explicitAdd: async (providerId) => {
-        let instanceId: string
-        try {
-          instanceId = this.instanceMap.instanceIdForLegacyProvider(providerId)
-        } catch {
-          return
-        }
-        // Only a removed model API comes back; any other provider is added by its credential, as before.
-        const provider = piProviderIdOf(instanceId)
-        if (!provider || !this.instanceMap.isRemoved(instanceId)) return
-        // A failed add fails the old method: the provider is not reported back when it is not.
-        await this.add({ driver: 'pi', config: { provider } })
-      },
-      refreshModels: async (providerId, cwd) => {
-        const record = this.legacyRecord(providerId)
-        if (!record) return false
-        await record.runtime.refreshModels?.(cwd)
-        this.changed(record.instanceId)
-        return true
-      },
-      logout: async (providerId) => {
-        const record = this.legacyRecord(providerId)
-        if (!record) return false
-        await this.signOut(record.instanceId)
-        return true
-      },
-      login: (providerId, session, cwd) => {
-        const record = this.legacyRecord(providerId)
-        if (!record?.runtime.signIn) return undefined
-        // Reconnecting an instance signed out in Mousse: on the user's own sign-in, only the flag clears.
-        if (this.isSignedOut(record) && !this.ownsSignIn(record))
-          return this.reconnect(record)
-            .then((): ProviderLoginResult => ({ success: true, sessionId: session.sessionId }))
-            .catch((error): ProviderLoginResult => ({ success: false, sessionId: session.sessionId, error: errorText(error) }))
-            .finally(() => void this.probe(record.instanceId, true))
-        return record.runtime.signIn(session, cwd)
-          .then(async (result) => {
-            // Through the record serving the instance now (the sign-in may have changed its config).
-            const current = this.recordOrUndefined(record.instanceId) ?? record
-            if (result.success && this.isSignedOut(current)) await this.reconnect(current)
-            return result
-          })
-          .finally(() => void this.probe(record.instanceId, true))
-      },
-      credentialsChanged: async (providerId) => {
-        let instanceId: string
-        try {
-          instanceId = this.instanceMap.instanceIdForLegacyProvider(providerId)
-        } catch {
-          return
-        }
-        if (this.instanceMap.get(instanceId)?.driver !== 'pi') return
-        await this.credentialsChanged(instanceId)
-      }
     }
     // Before the first probe: launch settings and sign-outs an older Mousse left in vendor files.
     this.reconcileVendorMirrors()
@@ -1098,7 +1006,7 @@ export class Harness implements HarnessGateway {
     const counters = this.counters.get(record.instanceId)
     const facts: RuntimeFacts = { ...report, instanceId: record.instanceId, configRevision: counters.configRevision, accountGeneration: counters.accountGeneration }
     this.stats.delete(facts.binary.path)
-    if (this.facts.set(record.instanceId, facts) && !this.stopped) this.changed(record.instanceId, { legacy: false })
+    if (this.facts.set(record.instanceId, facts) && !this.stopped) this.changed(record.instanceId)
   }
 
   check(resolved: ResolvedTurnSelection, policy: RunPolicy): Enforceability {
@@ -1259,7 +1167,7 @@ export class Harness implements HarnessGateway {
     if (state.result && (state.result.auth.state !== reading.state || state.result.auth.subject !== reading.subject)) {
       state.result = { ...state.result, auth: reading }
       if (!state.result.timedOut) state.lastGood = state.result
-      if (!this.stopped && !state.probing) this.changed(record.instanceId, { legacy: false })
+      if (!this.stopped && !state.probing) this.changed(record.instanceId)
     }
     // Signed out: no account to share with another instance any more.
     if (reading.state === 'signed_out' || reading.state === 'expired') delete state.fingerprint
@@ -2051,17 +1959,6 @@ export class Harness implements HarnessGateway {
     }
   }
 
-  private legacyRecord(providerId: string): InstanceRecord | undefined {
-    let instanceId: string
-    try {
-      instanceId = this.instanceMap.instanceIdForLegacyProvider(providerId)
-    } catch {
-      return undefined
-    }
-    const record = this.recordOrUndefined(instanceId)
-    return record && record.entry.driver !== 'pi' ? record : undefined
-  }
-
   // -- Snapshots and probes ---------------------------------------------------------------------
 
   async snapshots(scope: ProviderScope): Promise<InstanceSnapshot[]> {
@@ -2161,8 +2058,10 @@ export class Harness implements HarnessGateway {
         } catch {
           continue
         }
+        // Only a fixed-id driver offers options: their id is known before they are added.
+        if (instanceId === undefined) continue
         const { config, ...shown } = option
-        options.push({ ...shown, add: { driver: driver.kind, config: { ...config } }, added: instanceId !== undefined && Object.prototype.hasOwnProperty.call(entries, instanceId) })
+        options.push({ ...shown, add: { driver: driver.kind, config: { ...config } }, instanceId, added: Object.prototype.hasOwnProperty.call(entries, instanceId) })
       }
     }
     return options.sort((a, b) => a.label.localeCompare(b.label))
@@ -2253,7 +2152,7 @@ export class Harness implements HarnessGateway {
       })
       .finally(() => {
         state.probing = undefined
-        if (!this.stopped) this.changed(instanceId, { legacy: false })
+        if (!this.stopped) this.changed(instanceId)
         // After the check ends, so what the refresh publishes cannot be taken for part of it.
         if (upgraded) this.refreshAfterUpgrade(instanceId)
       })
@@ -2398,7 +2297,7 @@ export class Harness implements HarnessGateway {
       if (source?.kind !== 'npm' || packages.has(source.package)) continue
       packages.add(source.package)
       void this.latest.refresh(source).then((changed) => {
-        if (changed && !this.stopped) this.changed(instanceId, { legacy: false })
+        if (changed && !this.stopped) this.changed(instanceId)
       })
     }
   }
@@ -2463,6 +2362,19 @@ export class Harness implements HarnessGateway {
     if (!driver) return harnessFail('unsupported', `Mousse cannot add a ${input.driver} instance.`)
     const patch = input.config ?? {}
     if (patch.engine !== undefined) return harnessFail('unsupported', `${driver.label} takes its engine under Advanced once added.`)
+    if (input.signIn === 'ambient') {
+      // Cloud credentials are checked before anything is written: a failed check adds no entry.
+      if (!driver.instanceIdFor || !driver.verifyAmbient) return harnessFail('unsupported', `${driver.label} has no cloud credentials to check.`)
+      const instanceId = driver.instanceIdFor(patch)
+      await this.removing.get(instanceId)
+      // Read before the check: the credential it saves seeds the entry on the next read.
+      const existed = Object.prototype.hasOwnProperty.call(this.instanceMap.list(), instanceId)
+      const verified = await driver.verifyAmbient(patch)
+      if (!verified.success) return harnessFail('signed_out', verified.error || 'Could not verify the credentials.', instanceId)
+      await this.addFixed(driver, patch)
+      await this.credentialsChanged(instanceId)
+      return { snapshot: this.snapshot(instanceId, { kind: 'device' }), existed }
+    }
     if (driver.instanceIdFor) return this.addFixed(driver, patch)
     if (patch.provider !== undefined) return harnessFail('unsupported', `${driver.label} takes no model provider.`)
     const entries = this.instanceMap.list()
@@ -2578,7 +2490,7 @@ export class Harness implements HarnessGateway {
     if (!record.runtime.setSecret) return harnessFail('unsupported', `${this.displayName(record)} takes no API key.`, instanceId)
     await record.runtime.setSecret(value)
     await this.credentialsChanged(instanceId)
-    this.options.onProvidersChanged?.()
+    this.emitSnapshots({ kind: 'device' })
     return this.snapshot(instanceId, { kind: 'device' })
   }
 
@@ -2668,7 +2580,6 @@ export class Harness implements HarnessGateway {
     void this.stopTurns(instanceId, record, 'removed').catch((error) => this.warnStop(record, error))
     this.retire(record)
     this.emitSnapshots({ kind: 'device' })
-    this.options.onProvidersChanged?.()
     // Checks end within their deadlines; stopped turns end as their runtime stops.
     await Promise.all(checks)
     if (signOutFailure)
@@ -2780,6 +2691,22 @@ export class Harness implements HarnessGateway {
     if (!Object.prototype.hasOwnProperty.call(this.instanceMap.list(), instanceId)) return true
     const record = this.records.get(instanceId) ?? this.recordOrUndefined(instanceId)
     return record ? this.isSignedOut(record) : true
+  }
+
+  /**
+   * A vendor service's own state changed outside a request (a sign-in revoked in the background, an
+   * install finished): the instance is checked again and its snapshot published.
+   */
+  vendorStateChanged(instanceId: string): void {
+    if (this.stopped || !this.recordOrUndefined(instanceId)) return
+    void this.probe(instanceId, true)
+      .catch(() => undefined)
+      .then(() => this.emitSnapshots({ kind: 'device' }))
+  }
+
+  /** The model catalogue changed (a background refresh): clients reading the listings read them again. */
+  catalogChanged(): void {
+    this.emitSnapshots({ kind: 'device' })
   }
 
   /** The instance's launch settings, from its config: what its vendor service starts with. */
@@ -2913,7 +2840,7 @@ export class Harness implements HarnessGateway {
     const failure = this.setSignedOut(record, false)
     this.counters.bumpAccount(record.instanceId)
     if (failure) console.warn('[harness] could not mirror a sign-in to the settings file', { instanceId: record.instanceId, error: errorText(failure) })
-    this.options.onProvidersChanged?.()
+    this.emitSnapshots({ kind: 'device' })
   }
 
   /**
@@ -3133,7 +3060,7 @@ export class Harness implements HarnessGateway {
       if (!from.runtime.signOut) return 'remains'
       await from.runtime.signOut()
       this.counters.bumpAccount(from.instanceId)
-      this.options.onProvidersChanged?.()
+      this.emitSnapshots({ kind: 'device' })
       return 'removed'
     } catch (error) {
       console.warn('[harness] the old sign-in of a moved entry could not be deleted', { instanceId: from.instanceId, message: errorText(error) })
@@ -3180,7 +3107,7 @@ export class Harness implements HarnessGateway {
     // 3. Nothing bound before the sign-out resumes, and the card reads signed out.
     this.counters.bumpAccount(instanceId)
     await this.probe(instanceId, true)
-    this.options.onProvidersChanged?.()
+    this.emitSnapshots({ kind: 'device' })
     if (failure) throw failure
     return this.snapshot(instanceId, { kind: 'device' })
   }
@@ -3379,7 +3306,7 @@ export class Harness implements HarnessGateway {
           this.operations.delete(started.operationId)
           this.deleteRemoved()
           void this.probe(instanceId, true, { handshake: true })
-          this.options.onProvidersChanged?.()
+          this.emitSnapshots({ kind: 'device' })
         })
     })
     this.emitSnapshots({ kind: 'device' })
@@ -3476,8 +3403,13 @@ export class Harness implements HarnessGateway {
         .finally(() => {
           this.operations.delete(started.operationId)
           this.deleteRemoved()
-          void this.probe(instanceId, true)
-          this.options.onProvidersChanged?.()
+          // A check already running read the credentials from before the sign-in: wait for it, then
+          // check again, so the entry does not read signed out until the check's lifetime ends.
+          void (async () => {
+            await this.probes.get(instanceId)?.probing
+            await this.probe(instanceId, true)
+          })().catch(() => undefined)
+          this.emitSnapshots({ kind: 'device' })
         })
     })
     return started
@@ -3498,6 +3430,7 @@ export class Harness implements HarnessGateway {
           ...(operation.manualCode ? { acceptsRedirectPaste: true } : {})
         }
         operation.urlPrompts.push(prompt.promptId)
+        operation.lastUrl = prompt
         break
       case 'device_code':
         prompt = { promptId: promptId(), type: 'device_code', userCode: event.userCode, verificationUri: event.verificationUri, ...(event.expiresInSeconds ? { expiresInSeconds: event.expiresInSeconds } : {}) }
@@ -3507,6 +3440,15 @@ export class Harness implements HarnessGateway {
         operation.prompt = { promptId: prompt.promptId, kind: 'prompt' }
         break
       case 'manual_code':
+        // A paste field after the browser link (pi-ai's OpenRouter): the link is shown again with the
+        // field under it, so "Open again" and "Copy link" stay. Answered as a redirect from that prompt.
+        if (operation.lastUrl) {
+          prompt = { ...operation.lastUrl, promptId: promptId(), acceptsRedirectPaste: true, pasteMessage: event.message }
+          operation.urlPrompts.push(prompt.promptId)
+          operation.manualCode = prompt.promptId
+          operation.lastUrl = prompt
+          break
+        }
         prompt = { promptId: promptId(), type: 'input', secret: false, message: event.message }
         operation.manualCode = prompt.promptId
         break
@@ -3549,11 +3491,10 @@ export class Harness implements HarnessGateway {
 
   // -- Events -----------------------------------------------------------------------------------
 
-  private changed(instanceId: string, options: { scope?: ProviderScope; legacy?: boolean } = {}): void {
+  private changed(instanceId: string, options: { scope?: ProviderScope } = {}): void {
     void instanceId
     this.emitSnapshots({ kind: 'device' })
     if (options.scope?.kind === 'project') this.emitSnapshots(options.scope)
-    if (options.legacy !== false) this.options.onProvidersChanged?.()
   }
 
   private emitSnapshots(scope: ProviderScope): void {

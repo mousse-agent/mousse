@@ -258,7 +258,7 @@ describe('retired legacy-only Pi connections', () => {
     expect(profile.providerAuth.getConfiguredLlmProviders().map((option) => option.id)).toEqual([])
     expect(profile.providerAuth.getCatalogLlmProviders().map((option) => option.id)).not.toContain('openai-codex')
     // Settings still lists the entry (it is configured, and has a Move).
-    expect(profile.harness.instanceMap.configuredProviders().map((option) => option.instanceId)).toContain('pi:openai-codex')
+    expect((await profile.harness.instances.snapshots({ kind: 'device' })).map((snapshot) => snapshot.instanceId)).toContain('pi:openai-codex')
     // Refreshing models leaves a retired entry alone.
     const refreshed = await profile.harness.instances.refreshAllModels()
     expect(refreshed.filter((entry) => entry.instanceId.startsWith('pi:')).map((entry) => [entry.instanceId, entry.outcome, entry.message])).toEqual([

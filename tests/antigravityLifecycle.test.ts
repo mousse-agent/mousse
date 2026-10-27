@@ -249,18 +249,14 @@ describe('Antigravity canonical history', () => {
 })
 
 describe('Antigravity profile admission', () => {
-  it('routes personal ACP operations to the bound profile and keeps shared API credentials on the installation', async () => {
+  it('routes personal ACP operations to the bound profile and needs a binding for them', async () => {
     const personal = {} as MmsProfileServices
     const host = { activeProfileCount: () => 2, manager: { get: () => ({ id: 'personal', status: 'active' }) }, getProfileServices: vi.fn(async () => personal) }
     const installation = { getInstallationHost: () => host } as unknown as MmsProfileServices
     const args = { installation, binding: { profileId: 'personal', epoch: 1 }, capabilities: new Set([PROFILES_V1_CAPABILITY]) }
-    for (const method of ['providers.listConfigured', 'providers.getLoginOptions', 'providers.refreshModels', 'providers.loginOAuth', 'providers.logout']) {
+    for (const method of ['providers.catalog.addOptions', 'providers.instances.add', 'providers.instances.setSecret', 'providers.instances.signIn', 'providers.instances.remove']) {
       expect((await resolveBoundServices({ ...args, method })).services, method).toBe(personal)
     }
-    // The old Add dialog's key also adds a removed model API back to the bound profile (PR 5a-1), so
-    // it runs there; the key itself is still saved in the installation's shared credentials.
-    expect((await resolveBoundServices({ ...args, method: 'providers.setApiKey' })).services).toBe(personal)
-    expect((await resolveBoundServices({ ...args, method: 'providers.loginRespond' })).services).toBe(installation)
-    await expect(resolveBoundServices({ ...args, binding: undefined, method: 'providers.loginOAuth' })).rejects.toMatchObject({ code: 'profile_binding_required' })
+    await expect(resolveBoundServices({ ...args, binding: undefined, method: 'providers.instances.signIn' })).rejects.toMatchObject({ code: 'profile_binding_required' })
   })
 })
