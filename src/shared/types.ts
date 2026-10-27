@@ -66,6 +66,54 @@ export interface ScheduledJobRunClaim {
   queueItemId?: string
   /** The run ended before the claim was finalized (a fast drain); finalizing the claim applies it at once. */
   settledResult?: ScheduledOccurrenceResult
+  /** Set when a webhook delivery started this claim (`occurrenceKey` is `webhook:<id>`). */
+  webhookOccurrenceId?: string
+}
+
+/**
+ * A job's webhook trigger. The signing secret lives in the profile secret store under `secretRef`
+ * and is shown once, when the trigger is enabled or rotated; it is never part of a job.
+ */
+export interface ScheduledJobWebhookTrigger {
+  scheme: 'mousse'
+  secretRef: string
+  createdAt: string
+  rotatedAt?: string
+}
+
+/** A verified delivery waiting for the scheduler to start it; its payload is stored under the job's trigger folder. */
+export interface ScheduledJobPendingTrigger {
+  occurrenceId: string
+  receivedAt: string
+}
+
+/**
+ * How a webhook request ended. The first six name the life of an accepted delivery; the rest are requests
+ * that were answered without starting anything. `failed`: the run ended in an error or was interrupted;
+ * `dispatch_failed`: the occurrence never got a run.
+ */
+export type ScheduledWebhookDeliveryOutcome =
+  | 'accepted'
+  | 'queued'
+  | 'completed'
+  | 'failed'
+  | 'dispatch_failed'
+  | 'uncertain'
+  | 'running'
+  | 'pending'
+  | 'paused'
+  | 'replay'
+  | 'rejected_signature'
+  | 'rate_limited'
+  | 'too_large'
+
+export interface ScheduledWebhookDelivery {
+  occurrenceId?: string
+  receivedAt: string
+  outcome: ScheduledWebhookDeliveryOutcome
+  error?: string
+  missingPlaceholders?: string[]
+  bodyBytes: number
 }
 
 /** How an occurrence ended; `uncertain` keeps the engine's "effects may have occurred" text in `error`. */
@@ -121,6 +169,10 @@ export interface ScheduledJob {
   runClaim?: ScheduledJobRunClaim
   /** Present while an admitted occurrence has not reached a terminal run. */
   pendingOccurrence?: ScheduledJobPendingOccurrence
+  /** A signed request starts this job; absent when the job has no webhook. */
+  trigger?: { webhook: ScheduledJobWebhookTrigger }
+  /** A verified delivery that the next tick starts (one at a time). */
+  pendingTrigger?: ScheduledJobPendingTrigger
   createdAt: string
   updatedAt: string
 }

@@ -1,4 +1,10 @@
-import type { CreateScheduledJobInput, JobSchedule, ScheduledJob, ScheduledJobWorkspace } from '../../shared/types'
+import type {
+  CreateScheduledJobInput,
+  JobSchedule,
+  ScheduledJob,
+  ScheduledJobWorkspace,
+  ScheduledWebhookDelivery
+} from '../../shared/types'
 import type { ParsedArgs } from '../parseArgs'
 import { flagBool, flagString } from '../parseArgs'
 import { exitWithError, formatTable, writeOutput } from '../output'
@@ -92,12 +98,90 @@ export async function runSchedule(args: ParsedArgs): Promise<void> {
         writeOutput(globals.mode, res.job)
         break
       }
+      case 'webhook': {
+        const action = positional[0]
+        const id = positional[1]
+        if (!action || !id) exitWithError('schedule webhook requires an action (enable, rotate, disable or deliveries) and a job id.', globals.mode)
+        switch (action) {
+          case 'enable': {
+            const port = flagString(flags, 'port')
+            const res = await client.request<WebhookSecretResult>('scheduled.webhook.enable', { id, ...(port ? { port: Number(port) } : {}) })
+            writeOutput(globals.mode, webhookSecretOutput(res), (data) => formatWebhookSecret(data as WebhookSecretOutput, 'enabled'))
+            break
+          }
+          case 'rotate': {
+            const res = await client.request<WebhookSecretResult>('scheduled.webhook.rotate', { id })
+            writeOutput(globals.mode, webhookSecretOutput(res), (data) => formatWebhookSecret(data as WebhookSecretOutput, 'rotated'))
+            break
+          }
+          case 'disable': {
+            await client.request('scheduled.webhook.disable', { id })
+            writeOutput(globals.mode, { disabled: id })
+            break
+          }
+          case 'deliveries': {
+            const res = await client.request<{ deliveries: ScheduledWebhookDelivery[] }>('scheduled.webhook.deliveries', { id })
+            writeOutput(globals.mode, res.deliveries, (data) => {
+              const rows = data as ScheduledWebhookDelivery[]
+              if (rows.length === 0) return 'No webhook requests yet.'
+              return formatTable([
+                ['RECEIVED', 'OUTCOME', 'BYTES', 'DETAIL'],
+                ...rows.map((row) => [row.receivedAt, row.outcome, String(row.bodyBytes), row.error ?? ''])
+              ])
+            })
+            break
+          }
+          default:
+            exitWithError(`Unknown schedule webhook action: ${action}`, globals.mode)
+        }
+        break
+      }
       default:
         exitWithError(`Unknown schedule subcommand: ${subcommand}`, globals.mode)
     }
   } finally {
     await closeMmsContext(ctx)
   }
+}
+
+interface WebhookSecretResult {
+  job: ScheduledJob
+  /** Absent when the webhook already existed and only the listener's port moved. */
+  secret?: string
+  url: string
+  listening?: boolean
+  error?: string
+  warning?: string
+}
+
+type WebhookSecretOutput = { id: string; url: string; secret?: string; listening?: boolean; error?: string; warning?: string }
+
+/** What `webhook enable|rotate` prints: the secret appears here and nowhere else. */
+function webhookSecretOutput(res: WebhookSecretResult): WebhookSecretOutput {
+  return {
+    id: res.job.id,
+    url: res.url,
+    ...(res.secret ? { secret: res.secret } : {}),
+    ...(res.listening === undefined ? {} : { listening: res.listening }),
+    ...(res.error ? { error: res.error } : {}),
+    ...(res.warning ? { warning: res.warning } : {})
+  }
+}
+
+function formatWebhookSecret(out: WebhookSecretOutput, verb: string): string {
+  return [
+    out.secret ? `Webhook ${verb} for job ${out.id}.` : `Webhook listener updated for job ${out.id}; its secret is unchanged.`,
+    `URL:    ${out.url}`,
+    ...(out.secret
+      ? [
+          `Secret: ${out.secret}`,
+          'This is the only time the secret is shown; store it now. Sign "<unix seconds>.<raw body>" with HMAC-SHA256 and send',
+          'X-Mousse-Timestamp: <unix seconds> and X-Mousse-Signature: sha256=<hex> (see docs/CLI.md).'
+        ]
+      : []),
+    ...(out.listening === false ? [`The listener is not running: ${out.error ?? 'unknown error'}`] : []),
+    ...(out.warning ? [out.warning] : [])
+  ].join('\n')
 }
 
 /**

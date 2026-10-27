@@ -153,6 +153,7 @@ Job **definitions** only. Runtime fields (`state`, `nextRunAt`, `runHistory`, â€
 |-----|------|---------|-------------|
 | `scheduled.enabled` | `boolean` | `true` | When false, MMS/GUI does not start the scheduled ticker |
 | `scheduled.jobs` | `ScheduledJobDefinition[]` | `[]` | Job definitions (see below) |
+| `scheduled.webhooks` | `{ enabled: boolean, port: number }` | off, `18790` | The loopback listener (`127.0.0.1` only) that receives job webhooks. `schedule webhook enable` turns it on; a port given there moves it. It runs only while some job has a webhook (removing the last one stops it and turns it off). If the port is taken, or is one a net transport of the profile uses, the listener does not start and the scheduler status says so; a taken port is retried every 30 seconds |
 
 ### Job definition object
 
@@ -170,10 +171,11 @@ Job **definitions** only. Runtime fields (`state`, `nextRunAt`, `runHistory`, â€
 | `mode` | `agent` \| `plan` | no | Mode of every run; default `agent` |
 | `workspace` | `{ kind: 'project' }` \| `{ kind: 'newWorktree' }` \| `{ kind: 'worktree', path }` | no | Per-run threads only. `project` (default) works on the project's own checkout and provisions nothing (see the warning below); `newWorktree` gives each run's thread its own worktree (needs a Git project, not `plan` mode); `worktree` runs on the thread that owns that worktree. A job bound to a thread uses that thread's workspace |
 | `createdBy` | `{ threadId, runId? }` | no | The agent that created the job; absent for jobs people create |
+| `trigger` | `{ webhook: { scheme: 'mousse', secretRef, createdAt, rotatedAt? } }` | no | Set by `schedule webhook enable`. `secretRef` names the signing secret in `secrets/refs.json` (mode `0600`; on Windows the `secrets` folder is limited to your account and SYSTEM); the secret itself is never in this file |
 | `repeat.times` | `number` | no | Stop after N successful runs |
 | `createdAt` / `updatedAt` | ISO string | yes | Metadata |
 
-**Runtime-only (not in `mousse.conf`):** `state`, `nextRunAt`, `lastRunAt`, `lastStatus`, `lastError`, `pausedAt`, `pausedReason`, `runHistory`, `repeat.completed`, `pendingOccurrence`
+**Runtime-only (not in `mousse.conf`):** `state`, `nextRunAt`, `lastRunAt`, `lastStatus`, `lastError`, `pausedAt`, `pausedReason`, `runHistory`, `repeat.completed`, `pendingOccurrence`, `pendingTrigger`
 
 ### How a run executes
 
@@ -191,6 +193,7 @@ A plain-prompt run is a turn on a thread, admitted by the Run Engine like any me
 
 > **Warning: `workspace: project` lets an unattended agent edit your own checkout.** The run works in the same folder you work in, with no worktree, no checkpoints and no undo, and two jobs on one project can edit it at the same time. For an agent-mode job in a Git project, use `newWorktree` (`--workspace new-worktree`), or `mode: plan` if the job should not change files.
 - **`manual` jobs.** They have no next run and never complete; "Run now" starts them.
+- **Webhook trigger.** A job with a `trigger` is started by `POST /hooks/<job id>` on the webhook listener (see `docs/CLI.md`). A request carries `X-Mousse-Timestamp` (within 5 minutes of the daemon's clock) and `X-Mousse-Signature: sha256=<hex>`, the HMAC-SHA256 of `<timestamp>.<raw body bytes>` under the job's secret, checked in constant time. A signature-valid request leaves a receipt in `scheduled/triggers/<job id>/receipts.json` (synced to disk before the request is answered, and kept until the request's timestamp can no longer pass the 5-minute check, so a captured request cannot be replayed, restarts included; a receipts file that cannot be read makes the job answer `503` until the secret is rotated, and a file full of still-valid receipts makes it answer `429` for a few minutes) and, when accepted, its body in `scheduled/triggers/<job id>/<delivery id>.json` (owner-only: mode `0600`, and on Windows the `triggers` folder is limited to your account and SYSTEM; deleted when the run ends or after a day if nothing references it). A delivery waits for the next scheduler tick, which is woken at once; a job runs one delivery at a time (`409` while one is running, waiting in a queue or pending). A delivery does not move an interval or cron job's own timer. `scheduled/triggers/<job id>/deliveries.json` logs the last 50 accepted deliveries (`accepted`, `queued`, `completed`, `failed`, `dispatch_failed`, `uncertain`) the last 20 refusals of signed requests (`running`, `pending`, `paused`, `replay`, `rate_limited`) and the last 20 requests that failed verification (`rejected_signature`, `too_large`), kept apart so unsigned traffic never pushes the others out. Every write to `scheduled/jobs-runtime.json` is synced to disk. The request body is not part of the run's prompt.
 
 Other scheduled files (unchanged):
 

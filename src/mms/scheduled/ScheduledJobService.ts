@@ -1,8 +1,9 @@
+import { randomBytes } from 'node:crypto'
 import { EventEmitter } from 'events'
 import { v4 as uuidv4 } from 'uuid'
 import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
-import type { SchedulerStatus, ScheduledJob, ScheduledOccurrenceResult } from '../../shared/types'
+import type { SchedulerStatus, ScheduledJob, ScheduledOccurrenceResult, ScheduledWebhookDelivery } from '../../shared/types'
 import { join } from 'node:path'
 import { TERMINAL_RUN_STATUSES } from '../run/types'
 import { isSilentOutput } from './computeNextRun'
@@ -24,6 +25,32 @@ const CATCH_UP_DELAY_MS = 10_000
 
 export interface ScheduledJobRunner {
   runIsolated(prompt: string, ingress?: ScheduledJobIngress): Promise<BackgroundWorkflowTurnResult>
+}
+
+/** How often stored webhook payloads nothing references are swept. */
+const PAYLOAD_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000
+
+/** Where job webhook secrets are kept (the profile secret store). */
+export interface ScheduledWebhookSecrets {
+  write(ref: string, value: string): void
+  delete(ref: string): void
+}
+
+/** A webhook request the job's state or kind cannot take; the message says why and is shown to the person. */
+export class ScheduledWebhookError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ScheduledWebhookError'
+  }
+}
+
+export function webhookSecretRef(jobId: string): string {
+  return `scheduled-webhook-${jobId}`
+}
+
+/** 256 random bits; the whole string is the HMAC key. */
+export function generateWebhookSecret(): string {
+  return `whsec_${randomBytes(32).toString('base64url')}`
 }
 
 /** What the orchestrator reports when a scheduled turn's Run Engine run ends. */
@@ -61,6 +88,10 @@ export class ScheduledJobService extends EventEmitter {
   /** Last successfully observed job counts (survive peer lock contention on status). */
   private lastJobCount = 0
   private lastDueCount = 0
+  private webhookSecrets: ScheduledWebhookSecrets | null = null
+  /** Why the webhook listener is not up (a taken port), shown with the scheduler's errors. */
+  private webhookListenerError: string | null = null
+  private lastPayloadSweepAt = 0
 
   constructor(
     private runner: ScheduledJobRunner,
@@ -71,6 +102,105 @@ export class ScheduledJobService extends EventEmitter {
     super()
     // A claim that died before its run was admitted may leave an empty per-run thread behind.
     this.store.setOrphanedThreadHandler((orphan) => this.discardOrphanedThread(orphan))
+    // A job that is gone (deleted, or its repeat spent) takes its webhook secret with it.
+    this.store.setJobRemovedHandler((job) => {
+      if (job.trigger?.webhook) this.webhookSecrets?.delete(job.trigger.webhook.secretRef)
+    })
+  }
+
+  /** True while the scheduler is started: only then does anything start a webhook delivery. */
+  isRunning(): boolean {
+    return !this.stopped && !this.lifecycle.stopping
+  }
+
+  /** Where webhook secrets live; without it a job cannot get a webhook. */
+  setWebhookSecrets(secrets: ScheduledWebhookSecrets | null): void {
+    this.webhookSecrets = secrets
+  }
+
+  /** The webhook listener could not start (or started again); shown in the scheduler status. */
+  setWebhookListenerError(message: string | null): void {
+    this.webhookListenerError = message
+  }
+
+  /**
+   * Gives a job a webhook trigger and returns its signing secret, the only time it is shown. Refused for a job
+   * that cannot take one (a one-time job, an agent-created job) and for a job that already has one.
+   */
+  enableWebhook(id: string): { job: ScheduledJob; secret: string } {
+    this.lifecycle.assertAccepting()
+    const secrets = this.requireWebhookSecrets()
+    const job = this.store.getJob(id)
+    if (!job) throw new ScheduledWebhookError(`Job not found: ${id}`)
+    if (job.createdBy) throw new ScheduledWebhookError('Agent-created jobs cannot have a webhook trigger.')
+    if (job.schedule.kind === 'once') throw new ScheduledWebhookError('A one-time job runs once and cannot have a webhook; use a manual job for a webhook-only trigger.')
+    if (job.trigger?.webhook) throw new ScheduledWebhookError('This job already has a webhook. Rotate its secret to get a new one.')
+    const secretRef = webhookSecretRef(id)
+    const secret = generateWebhookSecret()
+    secrets.write(secretRef, secret)
+    let updated: ScheduledJob | null
+    try {
+      updated = this.store.setWebhookTrigger(id, { scheme: 'mousse', secretRef, createdAt: new Date().toISOString() })
+    } catch (error) {
+      secrets.delete(secretRef)
+      throw error instanceof Error ? new ScheduledWebhookError(error.message) : error
+    }
+    if (!updated) {
+      secrets.delete(secretRef)
+      throw new ScheduledWebhookError(`Job not found: ${id}`)
+    }
+    this.emitUpdated()
+    return { job: updated, secret }
+  }
+
+  /** Replaces the job's signing secret at once (the old one stops verifying) and returns the new one, shown only now. */
+  rotateWebhook(id: string): { job: ScheduledJob; secret: string } {
+    this.lifecycle.assertAccepting()
+    const secrets = this.requireWebhookSecrets()
+    const trigger = this.store.getJob(id)?.trigger?.webhook
+    if (!trigger) throw new ScheduledWebhookError('This job has no webhook to rotate.')
+    const secret = generateWebhookSecret()
+    secrets.write(trigger.secretRef, secret)
+    const updated = this.store.setWebhookTrigger(id, { ...trigger, rotatedAt: new Date().toISOString() })
+    if (!updated) throw new ScheduledWebhookError(`Job not found: ${id}`)
+    this.emitUpdated()
+    return { job: updated, secret }
+  }
+
+  /** Takes the webhook off the job: requests stop verifying at once, the secret is deleted, a waiting delivery is dropped. */
+  disableWebhook(id: string): ScheduledJob {
+    this.lifecycle.assertAccepting()
+    const secrets = this.requireWebhookSecrets()
+    const trigger = this.store.getJob(id)?.trigger?.webhook
+    if (!trigger) throw new ScheduledWebhookError('This job has no webhook.')
+    const updated = this.store.setWebhookTrigger(id, undefined)
+    if (!updated) throw new ScheduledWebhookError(`Job not found: ${id}`)
+    secrets.delete(trigger.secretRef)
+    this.emitUpdated()
+    return updated
+  }
+
+  /** The job's recent webhook requests and what became of each, newest first. */
+  listWebhookDeliveries(id: string): ScheduledWebhookDelivery[] {
+    if (!this.store.getJob(id)) throw new ScheduledWebhookError(`Job not found: ${id}`)
+    return this.store.listWebhookDeliveries(id)
+  }
+
+  private requireWebhookSecrets(): ScheduledWebhookSecrets {
+    if (!this.webhookSecrets) throw new ScheduledWebhookError('Webhooks are not available in this profile.')
+    return this.webhookSecrets
+  }
+
+  /** Stored webhook payloads nothing references are removed about once a day. */
+  private sweepWebhookPayloadsIfDue(): void {
+    const now = Date.now()
+    if (now - this.lastPayloadSweepAt < PAYLOAD_SWEEP_INTERVAL_MS) return
+    this.lastPayloadSweepAt = now
+    try {
+      this.store.sweepWebhookPayloads(now)
+    } catch {
+      /* the next day's sweep retries; leftover files are harmless */
+    }
   }
 
   start(): void {
@@ -268,7 +398,7 @@ export class ScheduledJobService extends EventEmitter {
         running: this.ticker !== null && !this.stopped,
         lastHeartbeatAt: this.lastHeartbeatAt ?? persisted.heartbeatAt,
         lastSuccessAt: this.lastSuccessAt ?? persisted.successAt,
-        lastTickError: this.lastTickError,
+        lastTickError: this.lastTickError ?? this.webhookListenerError,
         activeJobId,
         activeJobIds,
         jobCount: this.lastJobCount,
@@ -296,7 +426,7 @@ export class ScheduledJobService extends EventEmitter {
 
   private emitUpdated(): void {
     try {
-      this.emit('updated', this.store.listJobs())
+      this.emit('updated', this.listJobs())
     } catch (err) {
       if (err instanceof FileLockBusyError) {
         this.lastTickError = `Scheduler update lock busy: ${err.message}`
@@ -354,6 +484,7 @@ export class ScheduledJobService extends EventEmitter {
 
       // Jobs this process is already running are not claimed again, and a catch-up after downtime starts a few
       // runs per tick, not every overdue job in the same second; the rest stay due and follow shortly.
+      this.sweepWebhookPayloadsIfDue()
       const dueJobs = this.store.claimDueJobs(new Date(), { limit: MAX_STARTS_PER_TICK, skipJobIds: new Set(this.inFlight.keys()) })
       if (dueJobs.length >= MAX_STARTS_PER_TICK) this.scheduleCatchUp()
       for (const job of dueJobs) {

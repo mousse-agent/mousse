@@ -102,6 +102,14 @@ export const SCHEDULE_HELP = `Usage:
   mousse-cli schedule run <id>
   mousse-cli schedule enable <id>
   mousse-cli schedule disable <id>
+  mousse-cli schedule webhook enable <id> [--port <port>]   (on a job that has one, --port moves the listener)
+  mousse-cli schedule webhook rotate <id>
+  mousse-cli schedule webhook disable <id>
+  mousse-cli schedule webhook deliveries <id>
+
+Webhook: "enable" and "rotate" print the URL (127.0.0.1 only) and the signing secret, once. A request is
+POST /hooks/<id> with X-Mousse-Timestamp (unix seconds) and X-Mousse-Signature: sha256=<hex>, the HMAC-SHA256
+of "<timestamp>.<raw body>" under the secret. The body does not reach the job's prompt.
 
 Options for add:
   --instance <id> --model <model>   Provider instance and model every run uses
