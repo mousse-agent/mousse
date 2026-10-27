@@ -7,7 +7,7 @@ import { git as mousseGit } from '../src/mms/actions/git'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { GitService } from '../src/mms/git/GitService'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
-import { clearRepoProgramCache, guardedSimpleGit, repoProgramOverrides, repoProgramProbes, trustExistingProjectsOnce, withoutRepoPrograms, writesThroughFilters } from '../src/mms/git/repoPrograms'
+import { clearRepoProgramCache, guardedSimpleGit, repoProgramOverrides, repoProgramProbes, trustExistingProjectsOnce, trustRepositoryPrograms, withoutRepoPrograms, writesThroughFilters } from '../src/mms/git/repoPrograms'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { actionOptions, gitFoundationFixture } from './fixtures/gitFoundation'
 
@@ -293,6 +293,91 @@ describe('a filter the repository had when the user added it runs; one added or 
     trustExistingProjectsOnce(profile, [f.repo])
     writeFileSync(join(f.repo, 'secrets.env'), 'TOKEN=three\n')
     expect(() => mousseGit(f.repo, ['add', '-A'])).toThrow(/"crypt" filter/)
+  })
+})
+
+const hasLfs = spawnSync('git', ['lfs', 'version']).status === 0
+const hasSafePython = spawnSync('python', ['-c', 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)']).status === 0
+
+describe('round 2: Git LFS programs, an unreadable config, and code loaded from the worktree', () => {
+  /** Git LFS as the user installs it (here in the test's global config, as Git for Windows does in its system config). */
+  function userLfs(): void {
+    const global = process.env.GIT_CONFIG_GLOBAL!
+    writeFileSync(global, `${readFileSync(global, 'utf8')}[filter "lfs"]\n\tclean = git-lfs clean -- %f\n\tsmudge = git-lfs smudge -- %f\n\tprocess = git-lfs filter-process\n\trequired = true\n`)
+  }
+
+  it.skipIf(!hasLfs)('an LFS extension the repository defines runs under plain Git, not in a checkpoint, which refuses the LFS file', () => {
+    userLfs()
+    const plant = (cwd: string) => {
+      // Git LFS splits the command on spaces itself, without quotes (temporary folders have no spaces).
+      plain(cwd, 'config', 'lfs.extension.x.clean', `node ${slash(marker)} ${slash(join(markers, 'lfs-extension'))} cat`)
+      plain(cwd, 'config', 'lfs.extension.x.smudge', 'cat')
+      plain(cwd, 'config', 'lfs.extension.x.priority', '0')
+      writeFileSync(join(cwd, '.gitattributes'), '*.bin filter=lfs diff=lfs merge=lfs -text\n')
+      writeFileSync(join(cwd, 'big.bin'), 'content\n')
+    }
+    const control = repo('control'); plant(control)
+    spawnSync('git', ['add', '-A'], { cwd: control })
+    expect(ran()).toEqual(['lfs-extension'])
+    rmSync(markers, { recursive: true }); mkdirSync(markers)
+
+    const cwd = repo(); plant(cwd)
+    expect(() => mousseGit(cwd, ['add', '-A'])).toThrow(/"lfs" filter/)
+    expect(ran()).toEqual([])
+  })
+
+  it.skipIf(!hasLfs)('an LFS custom transfer agent the repository names runs under plain Git, not in a worktree Mousse creates', () => {
+    userLfs()
+    const plant = (cwd: string) => {
+      writeFileSync(join(cwd, '.gitattributes'), '*.bin filter=lfs diff=lfs merge=lfs -text\n')
+      writeFileSync(join(cwd, 'big.bin'), 'version https://git-lfs.github.com/spec/v1\noid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\nsize 12345\n')
+      plain(cwd, 'add', '-A'); plain(cwd, 'commit', '-qm', 'pointer without its object')
+      plain(cwd, 'config', 'lfs.standalonetransferagent', 'x')
+      plain(cwd, 'config', 'lfs.customtransfer.x.path', 'node')
+      plain(cwd, 'config', 'lfs.customtransfer.x.args', `"${slash(marker)}" "${slash(join(markers, 'transfer'))}"`)
+    }
+    const control = repo('control'); plant(control)
+    spawnSync('git', ['worktree', 'add', join(root, 'control-tree')], { cwd: control })
+    expect(ran()).toEqual(['transfer'])
+    rmSync(markers, { recursive: true }); mkdirSync(markers)
+
+    const cwd = repo(); plant(cwd)
+    try { mousseGit(cwd, ['worktree', 'add', join(root, 'tree')]) } catch { /* the object cannot be fetched */ }
+    expect(ran()).toEqual([])
+  })
+
+  it('a config that cannot be read in full refuses the command instead of running it without the overrides', () => {
+    const cwd = repo()
+    // Harmless entries, enough that the listing is past what Mousse reads.
+    writeFileSync(join(cwd, 'padding.cfg'), `[pad]\n${'\ta = b\n'.repeat(300_000)}`)
+    plain(cwd, 'config', 'include.path', slash(join(cwd, 'padding.cfg')))
+    plain(cwd, 'config', 'filter.z.clean', command('padded-filter', true))
+    writeFileSync(join(cwd, '.gitattributes'), '*.txt filter=z\n')
+    writeFileSync(join(cwd, 'a.txt'), 'changed\n')
+    expect(() => mousseGit(cwd, ['add', '-A'])).toThrow(/could not be read in full/)
+    expect(ran()).toEqual([])
+  }, 60_000)
+
+  it.skipIf(!hasSafePython)("a trusted `python -m` filter does not import a module an agent wrote in the worktree", () => {
+    const plant = (cwd: string) => {
+      plain(cwd, 'config', 'filter.nb.clean', 'python -m json.tool')
+      writeFileSync(join(cwd, '.gitattributes'), '*.ipynb filter=nb\n')
+      mkdirSync(join(cwd, 'json'))
+      const write = `open(${JSON.stringify(slash(join(markers, 'planted-module')))}, 'w').write('ran')\n`
+      writeFileSync(join(cwd, 'json', '__init__.py'), write)
+      writeFileSync(join(cwd, 'json', 'tool.py'), write)
+      writeFileSync(join(cwd, 'n.ipynb'), '{"cells": []}\n')
+    }
+    const control = repo('control'); plant(control)
+    spawnSync('git', ['add', '-A'], { cwd: control })
+    expect(ran()).toEqual(['planted-module'])
+    rmSync(markers, { recursive: true }); mkdirSync(markers)
+
+    const cwd = repo(); plant(cwd)
+    trustRepositoryPrograms(cwd)
+    mousseGit(cwd, ['add', '-A'])
+    expect(ran()).toEqual([])
+    expect(plain(cwd, 'cat-file', '-p', ':n.ipynb')).toContain('"cells"')
   })
 })
 
