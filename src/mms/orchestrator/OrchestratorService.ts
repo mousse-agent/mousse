@@ -3400,6 +3400,8 @@ export class OrchestratorService extends EventEmitter {
       } else {
         engine.markTerminal(id, 'completed')
       }
+      // The run's count record goes with it.
+      this.harness.runSettled?.(id)
     })
     this.staleRuns.delete(runId)
   }

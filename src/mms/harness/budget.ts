@@ -69,6 +69,8 @@ interface RunBudgetState {
  */
 export class TurnBudget {
   private readonly state: RunBudgetState
+  /** The run's record was lost (dropped, settled, or from before a restart): every step is refused. */
+  lost = false
 
   constructor(readonly limits: CountLimits, scope: CounterScope | RunBudgetState) {
     this.state = 'charge' in scope ? { scope } : scope
@@ -80,6 +82,7 @@ export class TurnBudget {
    */
   static lost(limits: CountLimits): TurnBudget {
     const budget = new TurnBudget(limits, { charge: (_kind, limit) => ({ ok: false, count: limit ?? 0, limit: limit ?? 0 }) })
+    budget.lost = true
     budget.state.exhausted = limits.maxTurns !== undefined ? { kind: 'turns', limit: limits.maxTurns } : { kind: 'tool_calls', limit: limits.maxToolCalls ?? 0 }
     return budget
   }
@@ -99,7 +102,13 @@ export class TurnBudget {
 
   private step(kind: CountKind, key: CountLimitKey, limitKind: AgentExecutionLimit['kind']): BudgetDecision {
     if (this.state.exhausted) return { ok: false, limit: this.state.exhausted }
-    const charged = this.state.scope.charge(kind, this.limits[key])
+    const limit = this.limits[key]
+    const charged = this.state.scope.charge(kind, limit)
+    // Narrow, never widen: a scope that counted past the binding's limit is refused all the same.
+    if (charged.ok && limit !== undefined && charged.count > limit) {
+      this.state.exhausted = { kind: limitKind, limit, actual: charged.count - 1 }
+      return { ok: false, limit: this.state.exhausted }
+    }
     if (charged.ok) return { ok: true }
     // The scope's own numbers: the threshold that refused and the count already used.
     this.state.exhausted = { kind: limitKind, limit: charged.limit, actual: charged.count }

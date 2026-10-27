@@ -73,6 +73,15 @@ describe('a shared counter scope (the PR 6 seam)', () => {
     expect(counts.request).toBe(2)
   })
 
+  it('a scope that ignores the binding’s limit still cannot widen it', () => {
+    let count = 0
+    const careless: CounterScope = { charge: () => ({ ok: true, count: ++count }) }
+    const budget = new TurnBudget({ maxTurns: 1 }, careless)
+    expect(budget.request()).toEqual({ ok: true })
+    expect(budget.request()).toEqual({ ok: false, limit: { kind: 'turns', limit: 1, actual: 1 } })
+    expect(budget.toolCall()).toMatchObject({ ok: false })
+  })
+
   it('the binding’s number reaches the run’s own counters too: a looser scope never replaces it', () => {
     const budget = new TurnBudget({ maxTurns: 1 }, new RunCounters())
     expect(budget.request()).toEqual({ ok: true })
@@ -138,6 +147,7 @@ describe('the runs’ count records', () => {
     const recovered = book.acquire('from-before-restart', { maxTurns: 5 }, undefined, { laterAttempt: true }).budget
     expect(recovered.request()).toMatchObject({ ok: false, limit: { kind: 'turns', limit: 5 } })
     expect(recovered.exhausted).not.toHaveProperty('actual')
+    expect(recovered.lost).toBe(true)
     // It stays refused for any further attempt.
     expect(book.acquire('from-before-restart', { maxTurns: 5 }).budget.request()).toMatchObject({ ok: false })
     expect(book.acquire('fresh', { maxTurns: 5 }).budget.request()).toEqual({ ok: true })

@@ -112,6 +112,17 @@ assistant: ${LONG_REPLY}` }, { budget })
     expect(recorder.requests).toHaveLength(1)
   }, 90_000)
 
+  it('a run whose count record was lost is refused with its own reason, not as a reached limit', async () => {
+    const { engine, recorder, project } = await setup()
+    recorder.respond(script([{ text: 'never sent' }]))
+    const turn = harness(project, {}, { budget: TurnBudget.lost({ maxTurns: 5 }) })
+    const error = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host).catch((caught: unknown) => caught) as Error
+    expect(error).toMatchObject({ code: 'budget_exhausted' })
+    expect(error.message).toContain('no longer known')
+    expect(error.message).not.toContain('reached its limit')
+    expect(recorder.connections()).toBe(0)
+  }, 60_000)
+
   it('maxTurns 0: nothing is sent, and the refusal is not retried even with Pi’s retry on', async () => {
     const { engine, recorder, project } = await setup({ retry: RETRY })
     recorder.respond(script([{ text: 'never sent' }]))
