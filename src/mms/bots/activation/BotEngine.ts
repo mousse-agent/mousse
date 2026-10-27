@@ -222,10 +222,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.store.markDeleted(botId)
       return running
     })
-    for (const activation of live) this.cleanup({ ...activation, status: 'cancelled' })
     // Its runs end before its threads move: the trash refuses threads with work running. The stop is
     // bounded, a hung provider stop included; what is still stopping is cleaned up at the next start.
     const quiet = await this.stopAndWait(live)
+    // Scratch folders go only once nothing runs in them (the startup pass removes the rest).
+    if (quiet) for (const activation of live) this.cleanup({ ...activation, status: 'cancelled' })
     this.changed({ botId })
     if (!quiet) throw new BotEngineError('bot_cleanup_failed', 'The bot was deleted, but its last run is still stopping. Its thread moves to the trash when the profile next starts.')
     await this.finishDeletion(botId)
@@ -1501,17 +1502,19 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * with `thread_trashed`, its escalations close, and its dispatch and consults stop. Idempotent,
    * so the index projection runs it again after the move. Restoring never revives an activation.
    */
-  beforeTrash(threadIds: readonly string[]): BotActivationRow[] {
+  beforeTrash(threadIds: readonly string[], options: { retireContexts?: boolean } = {}): BotActivationRow[] {
     // Ordinary threads never touch bots.db, so an unreadable bots.db never blocks their trash.
     const ours = threadIds.filter((threadId) => this.known.has(threadId) || this.roleOrHomeOf(threadId))
     if (!ours.length) return []
     const trashed = new Set(ours)
     const threads = this.store.allThreads()
-    // A trashed context thread is retired: the next consult of its key starts a new one.
-    for (const thread of threads) if (thread.role === 'context' && trashed.has(thread.threadId)) {
-      this.store.retireContextThread(thread.threadId)
-      this.known.delete(thread.threadId)
-    }
+    // A trashed context thread is retired: the next consult of its key starts a new one. During a
+    // trash this waits until the thread has moved (`afterTrash`), so a refused trash resets nothing.
+    if (options.retireContexts !== false)
+      for (const thread of threads) if (thread.role === 'context' && trashed.has(thread.threadId)) {
+        this.store.retireContextThread(thread.threadId)
+        this.known.delete(thread.threadId)
+      }
     const touched = new Set(threads.filter((thread) => trashed.has(thread.threadId) && thread.role !== 'activation').map((thread) => thread.botId))
     const ended = this.store.db.transaction(() => {
       const rows = this.store.activationsWith([...NOT_ENDED]).filter((row) => touched.has(row.botId) || (row.threadId !== null && trashed.has(row.threadId)))
@@ -1541,7 +1544,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   async quiesceForTrash(threadIds: readonly string[]): Promise<boolean> {
     let ended: BotActivationRow[]
     try {
-      ended = this.beforeTrash(threadIds)
+      ended = this.beforeTrash(threadIds, { retireContexts: false })
     } catch (error) {
       console.warn('bot activations could not be ended for the trash', { error: error instanceof Error ? error.message : String(error) })
       return true

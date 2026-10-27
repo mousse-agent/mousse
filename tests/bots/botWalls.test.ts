@@ -3,7 +3,7 @@
  * behind the unknown-call gate; consults run one at a time per context thread; the startup pass
  * settles what a crash left; trashing a bot's thread ends its activation.
  */
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -12,7 +12,7 @@ import { isBotWallAbort } from '../../src/mms/bots/activation/dispatcher'
 import { BotDefinitionStore } from '../../src/mms/bots/definitions/BotDefinitionStore'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import { botManifestDigest, compileBotThread } from '../../src/mms/bots/grants/compile'
-import { BotStore } from '../../src/mms/bots/store/BotStore'
+import { BOTS_MIGRATIONS, BotStore } from '../../src/mms/bots/store/BotStore'
 import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { EffectOutbox } from '../../src/mms/run/EffectOutbox'
@@ -889,5 +889,61 @@ describe('round 2', () => {
     threadStates.set('thread:bot:site-editor', 'active')
     await bots.finishDeletions()
     expect(trashed).toEqual(['thread:bot:site-editor'])
+  })
+})
+
+describe('round 3', () => {
+  it('upgrading keeps the threads of bots deleted before this version: their cleanup counts as done', () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bots-v1-')))
+    try {
+      const v1 = new ProfileDatabase({ profileHome: home, name: 'bots' })
+      v1.migrate(BOTS_MIGRATIONS.slice(0, 1))
+      v1.statement("INSERT INTO bot_registry(bot_id, home_thread_id, created_at, deleted_at) VALUES('old-bot', 'thread:home', 'x', '2026-10-01T00:00:00.000Z')").run()
+      v1.close()
+      const upgraded = new BotStore({ profileHome: home })
+      expect(upgraded.deletedRegistry()).toEqual([])
+      upgraded.close()
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('a trash of a context thread retires it only once it has moved', async () => {
+    const { activation, prepared } = await running()
+    const asked = prepared.authority.consult!({ context: 'docs', question: 'one' })
+    await tick()
+    const consult = store.dispatches(activation.id).find((dispatch) => dispatch.kind === 'consult')!
+    const consultPayload = payloadOf(consult.runId!)
+    bots.prepare(consultPayload)
+    start(consult.runId!)
+    end(consult.runId!, 'completed')
+    bots.settle(consultPayload, { text: 'A' })
+    await asked
+    host.quiesceTimeoutMs = 50
+    await bots.quiesceForTrash([consult.threadId])
+    // The drain ended the activation; the context thread is only retired after the move.
+    expect(store.contextGen('site-editor', 'docs')).toBe(1)
+    expect(bots.roleOf(consult.threadId)).toBe('context')
+    bots.afterTrash([consult.threadId])
+    expect(store.contextGen('site-editor', 'docs')).toBe(2)
+  })
+
+  it('a deleted bot\'s scratch folder stays while its run is still stopping', async () => {
+    const { activation } = await running()
+    host.quiesceTimeoutMs = 100
+    const scratch = store.activation(activation.id)!.scratch!
+    expect(existsSync(scratch)).toBe(true)
+    await expect(bots.remove('site-editor')).rejects.toMatchObject({ code: 'bot_cleanup_failed' })
+    expect(existsSync(scratch)).toBe(true)
+  })
+
+  it('a write folder nested in a read-only folder stays read-only, as the shell sandbox has it', () => {
+    const outer = join(base, 'outer')
+    const inner = join(outer, 'inner')
+    mkdirSync(inner, { recursive: true })
+    const compiled = compileBotThread({ grant: manifest({ tools: ['edit'], workspace: { roots: [outer, inner], access: 'read', rootAccess: { [inner]: 'write' } } }), digest: 'd', thread: {}, scratch: join(profile, 'bots', 'scratch', 'n'), profileHome: profile, temps: [], nativeNames: (tools) => ({ ok: true, names: [...tools] }), remaining: { deadlineMs: 60_000 } })
+    if (!compiled.ok) throw new Error(compiled.error.message)
+    const authority = createBotAuthority({ activationId: 'a', role: 'activation', permissions: compiled.permissions, waiting: () => false, counters: { charge: () => ({ ok: true, count: 1 }) }, time: { deadline: () => 0, signal: new AbortController().signal }, spend: null })
+    expect(authority.check({ kind: 'builtin', tool: 'edit', nativeName: 'edit', args: { path: join(inner, 'a.md') } })).toMatchObject({ ok: false, wall: { kind: 'path', access: 'write' } })
   })
 })

@@ -151,6 +151,8 @@ CREATE TABLE bot_overlays(
 ) STRICT;
 ALTER TABLE bot_dispatches ADD COLUMN send_json TEXT;
 ALTER TABLE bot_registry ADD COLUMN cleaned_at TEXT;
+-- Bots deleted before this version kept their threads on purpose: their cleanup counts as done.
+UPDATE bot_registry SET cleaned_at = deleted_at WHERE deleted_at IS NOT NULL;
 CREATE TABLE bot_contexts(
   bot_id TEXT NOT NULL,
   key TEXT NOT NULL,

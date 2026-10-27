@@ -43,6 +43,7 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
   const mcp: ReadonlySet<`${string}::${string}`> = new Set(permissions.mcp)
   // Without per-folder access every root has the workspace's access.
   const workspace = permissions.workspace ? { ...permissions.workspace, writeRoots: permissions.workspace.writeRoots ?? (permissions.workspace.access === 'write' ? permissions.workspace.roots : []) } : null
+  const readOnlyRoots = workspace ? workspace.roots.filter((root) => !workspace.writeRoots.includes(root)) : []
   const authority: BotAuthority = {
     activationId: input.activationId,
     role: input.role,
@@ -99,13 +100,16 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
       } catch {
         return { ok: false, wall: { kind: 'path', tool: nativeName, path: raw, access } }
       }
-      // Write access is per folder: the path must sit inside a root granted for writing.
+      // Write access is per folder: the path must sit inside a root granted for writing, and not
+      // inside a read-only root (a write folder nested in a read folder stays read-only, as the
+      // shell sandbox denies it too).
       if (writes) {
         try {
           assertInsideRoots(workspace.writeRoots, raw, scratch)
         } catch {
           return { ok: false, wall: { kind: 'path', tool: nativeName, path: raw, access } }
         }
+        if (readOnlyRoots.length && insideAny(readOnlyRoots, raw, scratch)) return { ok: false, wall: { kind: 'path', tool: nativeName, path: raw, access } }
       }
     }
     return { ok: true }
@@ -138,4 +142,13 @@ export function runtimeExpandedPath(raw: string, platform: NodeJS.Platform = pro
 function firstPath(args: Record<string, unknown>): unknown {
   for (const key of PATH_ARGUMENTS) if (typeof args[key] === 'string') return args[key]
   return undefined
+}
+
+function insideAny(roots: readonly string[], raw: string, scratch: string): boolean {
+  try {
+    assertInsideRoots(roots, raw, scratch)
+    return true
+  } catch {
+    return false
+  }
 }

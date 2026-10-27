@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { registerPersonalBotMethods } from '../../src/mms/bots/registerMethods'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
 import { dispatchMethod } from '../../src/mms/protocol/handlers'
+import { releaseExecutionLeaseHandle, tryAcquireExecutionLease } from '../../src/mms/queue/ThreadExecutionLease'
 import type { BotDefinition } from '../../src/shared/bots/personal/definition'
 import type { BotStore } from '../../src/mms/bots/store/BotStore'
 import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
@@ -150,5 +151,43 @@ describe('round 2: deleting a bot through the real request path', () => {
     await services.restoreThread(home, 'owner-restore')
     await bots.finishDeletions()
     expect(services.threads.lifecycleStore.require(home).state).toBe('active')
+  }, 60_000)
+})
+
+describe('round 3: a running bot holding its thread\'s execution lease', () => {
+  it('an accepted trash stops the bot, then trashes the thread', async () => {
+    const { services, bots, activation } = await withBot()
+    const threadId = activation.threadId!
+    const run = services.runEngine.listRuns(threadId)[0]
+    services.runEngine.markStarting(run.runId)
+    services.runEngine.markRunning(run.runId)
+    // The real turn lease, as `executeTurn` holds it; stopping the turn lets go of it and ends the run.
+    let lease = tryAcquireExecutionLease(services.threads.getThreadDir(threadId), { source: 'orchestrator' })
+    expect(lease).not.toBeNull()
+    cleanup.push(() => { if (lease) releaseExecutionLeaseHandle(lease) })
+    let live = true
+    const stop = vi.spyOn(services.orchestrator, 'stopThread').mockImplementation(async () => {
+      live = false
+      if (lease) releaseExecutionLeaseHandle(lease)
+      lease = null
+      services.runEngine.markTerminal(run.runId, 'interrupted', { interruptedBy: 'user' })
+      return undefined as never
+    })
+    vi.spyOn(services.orchestrator, 'getOwnedActivity').mockImplementation(() => (live ? { [`bot-turn:${threadId}`]: 1 } : {}))
+    await services.trashThread(threadId, 'trash-running-bot')
+    expect(stop).toHaveBeenCalled()
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'cancelled', endReason: 'thread_trashed' })
+    expect(services.threads.lifecycleStore.require(threadId).state).toBe('trashed')
+  }, 60_000)
+
+  it('a trash refused by other work leaves the bot running', async () => {
+    const { services, bots, activation } = await withBot()
+    const stop = vi.spyOn(services.orchestrator, 'stopThread')
+    // An ordinary turn elsewhere in the profile: the trash is refused at admission.
+    vi.spyOn(services.orchestrator, 'getOwnedActivity').mockReturnValue({ turn: 1 })
+    await expect(services.trashThread(activation.threadId!, 'refused-trash')).rejects.toMatchObject({ code: 'busy' })
+    expect(stop).not.toHaveBeenCalled()
+    expect(bots.getActivation(activation.id).status).toBe('running')
+    expect(services.threads.lifecycleStore.require(activation.threadId!).state).toBe('active')
   }, 60_000)
 })

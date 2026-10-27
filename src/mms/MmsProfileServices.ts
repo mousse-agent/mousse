@@ -85,6 +85,7 @@ import type { MmsOptions } from './MmsOptions'
 import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
 import { OwnedWorkBarrier } from './execution/OwnedWorkBarrier'
 import { ResourceLifecycleCoordinator } from './lifecycle/ResourceLifecycleCoordinator'
+import { buildResourceInventory } from './lifecycle/ResourceInventory'
 import { clearCleanupMarker, StorageCleanupService } from './lifecycle/StorageCleanupService'
 import { StorageUsageService } from './lifecycle/StorageUsageService'
 import { StoragePolicyStore } from './lifecycle/StoragePolicyStore'
@@ -651,13 +652,10 @@ export class MmsProfileServices {
       assertCanTrash: (record) => this.assertLifecycleIdle(record.taskId),
       drain: async (record) => {
         const owned = this.lifecycleOwnedTasks(record.taskId)
-        // The trash was accepted for exactly these threads (fresh operation, current generation, the
-        // fence installed): only now do the bot activations on them end and their runs stop (PR 6 §4).
-        // A stale, refused or replayed trash never gets here. A stop that does not finish in time is
-        // reported busy and the fence is kept, so nothing live moves.
-        if (this.personalBots && !(await this.personalBots.quiesceForTrash(owned.map((task) => task.taskId))))
-          throw new ResourceLifecycleError('busy', 'Cannot trash thread: the bot working in it is still stopping')
-        for (const task of owned) this.threadRuntimes.assertDeletable(task.taskId)
+        const botThreads = new Set(this.personalBots?.botThreadsAmong(owned.map((task) => task.taskId)) ?? [])
+        // Every check that does not depend on the bot's own turns comes first, so a trash refused by
+        // other work leaves the bot untouched.
+        for (const task of owned) this.threadRuntimes.assertDeletable(task.taskId, { ignoreTurn: botThreads.has(task.taskId) })
         const runs = await this.platform.workflowRuns.runtime.list({ profileId: this.profileId })
         if (
           runs.some(
@@ -671,7 +669,33 @@ export class MmsProfileServices {
             'Cannot trash thread: an owned workflow is still active or waiting'
           )
         }
-        for (const task of owned) settleThreadMutationOwnership(task.location)
+        const inventory = buildResourceInventory(this.threads.lifecycleStore, record)
+        if (inventory.blockers.length)
+          throw new ResourceLifecycleError('ambiguous', `Resource ownership is not established: ${inventory.blockers.join('; ')}`)
+        // The trash was accepted for exactly these threads (fresh operation, current generation) and
+        // passed every other check: only now do the bot activations on them end and their runs stop
+        // (PR 6 §4). A stale, refused or replayed trash never gets here. A stop that does not finish
+        // within its deadline is reported busy and nothing moves; the activations it ended stay ended,
+        // since their stop is already under way. Context threads are retired only after the move.
+        if (this.personalBots && !(await this.personalBots.quiesceForTrash(owned.map((task) => task.taskId))))
+          throw new ResourceLifecycleError('busy', 'Cannot trash thread: the bot working in it is still stopping')
+        // The final proof, now that the bot's turns have ended: no turn, and every lease free. A
+        // stopped bot turn lets go of its lease as it unwinds, so that is waited for briefly.
+        const prove = (): void => {
+          for (const task of owned) this.threadRuntimes.assertDeletable(task.taskId)
+          for (const task of owned) settleThreadMutationOwnership(task.location)
+        }
+        const until = Date.now() + 5_000
+        for (;;) {
+          try {
+            prove()
+            break
+          } catch (error) {
+            const busy = error instanceof Error && (('code' in error && (error as { code?: unknown }).code === 'busy') || error.name === 'LeaseBusyError')
+            if (!botThreads.size || !busy || Date.now() >= until) throw error
+            await new Promise((resolve) => setTimeout(resolve, 50))
+          }
+        }
       },
       settleMutationOwnership: async (record) => {
         const owned = this.lifecycleOwnedTasks(record.taskId)
@@ -800,8 +824,12 @@ export class MmsProfileServices {
     }
     const root = this.threads.lifecycleStore.require(taskId)
     const settle = () => {
-      for (const task of owned)
+      for (const task of owned) {
+        // A bot turn on a thread this trash would stop holds that thread's execution lease. The drain
+        // stops it and then proves ownership, so admission does not refuse the trash for it.
+        if (root.state === 'active' && botThreads.has(task.taskId)) continue
         if (existsSync(task.location)) settleThreadMutationOwnership(task.location)
+      }
     }
     if (['trashed', 'purge-started'].includes(root.state))
       this.threads.lifecycleStore.withCleanupSettlement(taskId, settle)
