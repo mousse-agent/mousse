@@ -40,7 +40,8 @@ export interface RunThreadActionOptions {
  * What a checkpointed action does when its mutation throws. `sweep` (turns) checkpoints whatever
  * the failure left behind. `record` (a user's own Git commit) leaves the index and tree exactly as
  * they were and records the failed action with no commits, so a hook that rejected the commit is
- * never bypassed by a `--no-verify` checkpoint.
+ * never bypassed by a `--no-verify` checkpoint. A commit that succeeded but left files changed
+ * (a hook that rewrites them) is not swept either; see `leftChangesBehind`.
  */
 export type ActionFailurePolicy = 'sweep' | 'record'
 
@@ -271,6 +272,9 @@ export class ThreadActionService {
           }
           throw new ActionExecutionError(action, error)
         }
+        // A user's commit that went through but left files changed (a hook that rewrites them) must not be swept
+        // into a second, unverified commit. The edits stay; recovery records the commit once the tree is clean.
+        if (options.onFailure === 'record' && this.leftChangesBehind(options, action, actions, startSha)) return { result, action }
         this.checkpoint(options.workspacePath, action, 'completed')
         this.replace(actions)
         this.appendCheckpointCompleted(action, 'completed')
@@ -304,13 +308,37 @@ export class ThreadActionService {
     }
   }
 
-  /** Finishes `action` as failed with a receipt whose before and after are the same commit, so `headSha` and `generation` stay consistent. */
-  private recordWithoutCommits(workspacePath: string, action: ThreadAction): void {
+  /** Whether the workspace has changes a checkpoint would commit (`.mousse/` is never part of one). */
+  private hasUncommittedChanges(workspacePath: string): boolean {
+    const top = git(workspacePath, ['rev-parse', '--show-toplevel'])
+    const status = tryGit(top, ['status', '--porcelain', '--untracked-files=all', '--', '.', ':(exclude).mousse/**'])
+    return !status.ok || status.stdout !== ''
+  }
+
+  /**
+   * A `record` action whose mutation succeeded. When files are still changed, nothing is swept:
+   * with HEAD unmoved the action is simply recorded; with HEAD moved the commit landed, so the
+   * journal asks for recovery, which records it once the user has dealt with the leftover edits.
+   */
+  private leftChangesBehind(options: RunThreadActionOptions, action: ThreadAction, actions: ThreadAction[], startSha: string): boolean {
+    if (!this.hasUncommittedChanges(options.workspacePath)) return false
+    if (git(options.workspacePath, ['rev-parse', 'HEAD']) === startSha) {
+      this.recordWithoutCommits(options.workspacePath, action, 'completed')
+      this.replace(actions)
+      this.appendCheckpointCompleted(action, 'completed')
+      return true
+    }
+    this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'recovery_required', details: { actionState: 'completed', startSha, failurePolicy: 'record', error: 'The commit landed and files are still changed' } })
+    return true
+  }
+
+  /** Finishes `action` with a receipt whose before and after are the same commit, so `headSha` and `generation` stay consistent. */
+  private recordWithoutCommits(workspacePath: string, action: ThreadAction, state: 'failed' | 'completed' = 'failed'): void {
     const top = git(workspacePath, ['rev-parse', '--show-toplevel'])
     action.endSha = action.startSha
     action.commits = []
     action.changedPaths = []
-    action.state = 'failed'
+    action.state = state
     action.completedAt = new Date().toISOString()
     const receipt = new ChangeReceiptService(this.threadDirectory).record(top, {
       operationId: action.id, kind: 'checkpoint', actor: action.actor ?? { kind: 'main' },
@@ -358,8 +386,7 @@ export class ThreadActionService {
           if (recordsFailure) {
             // HEAD moved: the commit landed and the process ended before its receipt. A clean tree
             // means the checkpoint only records it; edits a hook left behind need the user's decision.
-            const dirty = tryGit(workspacePath, ['status', '--porcelain'])
-            if (!dirty.ok || dirty.stdout) {
+            if (this.hasUncommittedChanges(workspacePath)) {
               if (entry.state !== 'recovery_required') this.journal.append({ operationId: entry.operationId, operationType: entry.operationType, state: 'recovery_required', details: { actionState: 'completed', startSha: action.startSha, failurePolicy: 'record', error: 'The commit landed with files still changed' } })
               throw new Error('Interrupted commit needs recovery: it landed and the workspace still has uncommitted changes.')
             }
