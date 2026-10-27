@@ -4,8 +4,9 @@ import type { InstanceConfig } from '../../driver'
  * Providers that stay on the legacy pi loop whatever their config says (PR 2 §5):
  * - `openai-codex` until PR 4 (PR 3 offers the move to Codex and keeps it chatting meanwhile);
  * - `cursor` until PR D (Mousse registers it in its own process; Pi's agent has no such provider).
- * Every other provider runs on Pi's agent (`rpc`) by default. The bare `pi` route (no instance)
- * stays on the loop until PR 4.
+ * Every other provider can run on Pi's agent (`rpc`) when the user opts in (Advanced → Engine:
+ * New engine); the default stays the loop until the parity gate passed on real accounts, and a later
+ * PR flips it. The bare `pi` route (no instance) stays on the loop until PR 4.
  */
 export const PI_LEGACY_ONLY: Readonly<Record<string, 'legacy'>> = Object.freeze({ 'openai-codex': 'legacy', cursor: 'legacy' })
 
@@ -21,13 +22,16 @@ export function piEngineSwitchable(providerId: string, rpcAvailable: boolean): b
   return rpcAvailable && Boolean(providerId) && !(providerId in PI_LEGACY_ONLY)
 }
 
+/** The engine new instances run on until the parity gate passes (PR 2 §5). */
+export const PI_DEFAULT_ENGINE: PiEngine = 'legacy'
+
 /**
- * The engine in effect for a provider: `legacy` when the provider is legacy-only, the packaged Pi
- * runtime is missing, or the user chose `legacy` (the rollback switch, removed in PR 4); else `rpc`.
+ * The engine in effect for a provider: `rpc` only when the user opted in (or the default is
+ * `rpc`), the provider can run on it and the packaged Pi runtime is there; else `legacy`.
  */
 export function piEngineFor(providerId: string, stored: PiEngine | undefined, rpcAvailable: boolean): PiEngine {
   if (!piEngineSwitchable(providerId, rpcAvailable)) return 'legacy'
-  return stored === 'legacy' ? 'legacy' : 'rpc'
+  return stored ?? PI_DEFAULT_ENGINE
 }
 
 /** The engine a decoded config runs on (its `engine` is the one in effect once decoded with the instance id). */

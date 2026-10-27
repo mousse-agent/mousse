@@ -105,8 +105,8 @@ describe('openai-codex in the intermediate release', () => {
     const resolved = harness.resolveStored(read('thread.json').modelOverride, { purpose: 'turn' })
     expect(resolved).toMatchObject({ instanceId: 'pi:openai-codex', driver: 'pi', llmProvider: 'openai-codex' })
     expect(resolved.caps).toEqual(PI_LEGACY_CAPS)
-    // Control: in the same profile an API-key provider runs on Pi's agent.
-    harness.instanceMap.setEntry('pi:openai', { driver: 'pi', enabled: true })
+    // Control: in the same profile an API-key provider the user switched runs on Pi's agent.
+    harness.instanceMap.setEntry('pi:openai', { driver: 'pi', enabled: true, config: { engine: 'rpc' } })
     expect(harness.resolveStored({ instanceId: 'pi:openai', llmProvider: 'openai', model: 'gpt-5' }, { purpose: 'turn' }).caps).toEqual(PI_RPC_CAPS)
   })
 

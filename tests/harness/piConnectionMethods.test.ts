@@ -87,10 +87,13 @@ describe('Pi connection methods', () => {
     expect(Object.keys(METHODS).sort()).toEqual([...builtinProviders().map((provider) => provider.id), 'cursor'].sort())
   })
 
-  it('routes each row to its engine', () => {
+  it('routes each row to its engine once the user opts in', () => {
     const driver = piDriver({ client: () => { throw new Error('unused') }, rpc: profile({}) })
-    for (const [id, method] of Object.entries(METHODS))
-      expect(driver.engine?.(`pi:${id}`, undefined).effective, id).toBe(method === 'legacy' ? 'legacy' : 'rpc')
+    for (const [id, method] of Object.entries(METHODS)) {
+      expect(driver.engine?.(`pi:${id}`, { engine: 'rpc' }).effective, id).toBe(method === 'legacy' ? 'legacy' : 'rpc')
+      // The default stays the loop until the parity gate passed.
+      expect(driver.engine?.(`pi:${id}`, undefined).effective, id).toBe('legacy')
+    }
   })
 
   it('keeps pi-ai sign-in for the OAuth rows and only for them', () => {
@@ -147,7 +150,9 @@ describe('Pi connection methods', () => {
     expect(piCredentialSubject('github-copilot', { type: 'oauth', access: 'tid=2;proxy-ep=x', refresh: 'ghu_one' }, {})).toBe(copilot)
     expect(piCredentialSubject('github-copilot', { type: 'oauth', access: 'tid=1;proxy-ep=x', refresh: 'ghu_two' }, {})).not.toBe(copilot)
     expect(piCredentialSubject('amazon-bedrock', undefined, { AWS_PROFILE: 'dev', AWS_REGION: 'us-east-1' })).toMatch(/^ambient:/)
-    expect(piCredentialSubject('amazon-bedrock', undefined, {})).toBeUndefined()
+    // The default credential chain is one subject; a bearer token names its own.
+    expect(piCredentialSubject('amazon-bedrock', undefined, {})).toMatch(/^ambient:/)
+    expect(piCredentialSubject('amazon-bedrock', undefined, { AWS_BEARER_TOKEN_BEDROCK: 'b' })).not.toBe(piCredentialSubject('amazon-bedrock', undefined, {}))
     // Never the secret itself.
     expect(piCredentialSubject('groq', { type: 'api_key', key: 'secret-key' }, {})).not.toContain('secret-key')
   })

@@ -39,10 +39,11 @@ export const PI_NATIVE_TOOLS: NativeToolTable = Object.freeze({
 
 /**
  * The `pi` driver: every `pi:<provider>` instance. Two engines share one stored kind:
- * - `rpc`, Pi's agent as its own process per thread (`harness/pi/engine.ts`): every provider by
- *   default once the profile gave the driver its `rpc` options (the packaged runtime exists);
- * - `legacy`, the in-process pi-ai loop (`LlmClient`), shared by the profile: `openai-codex`,
- *   `cursor`, the bare route, and any instance the user switched back (Advanced → Engine).
+ * - `legacy`, the in-process pi-ai loop (`LlmClient`), shared by the profile: the default, and
+ *   always for `openai-codex`, `cursor` and the bare route;
+ * - `rpc`, Pi's agent as its own process per thread (`harness/pi/engine.ts`), for an instance the
+ *   user switched to it (Advanced → Engine: New engine), once the profile gave the driver its `rpc`
+ *   options (the packaged runtime exists).
  *
  * An instance on the RPC engine, built-in ones included, has a Mousse-owned home under its state
  * dir (Pi's agent dir); one on the legacy loop keeps its home, which the loop does not read.

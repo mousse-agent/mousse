@@ -1,8 +1,9 @@
 /**
- * PR 2 §5: `pi:*` instances run on Pi's agent (the RPC engine) by default once the profile gives the
- * driver its RPC inputs, except the legacy-only providers (`openai-codex`, `cursor`) and the bare
- * route; `engine: 'legacy'` is the user's rollback. The engine is part of the record key and the
- * home, so a binding made on the loop before the switch is `binding_stale` after it.
+ * PR 2 §5: `pi:*` instances stay on the legacy loop by default until the parity gate passes; one the
+ * user switched (`engine: 'rpc'`, Advanced → Engine: New engine) runs on Pi's agent when the profile
+ * gives the driver its RPC inputs. The legacy-only providers (`openai-codex`, `cursor`) and the bare
+ * route never do. The engine is part of the record key and the home, so a binding made on the loop
+ * before a switch is `binding_stale` after it.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -39,7 +40,9 @@ function setup(options: { rpc?: PiRpcDriverOptions; home?: string; stored?: Reco
     'pi:openrouter': { driver: 'pi', enabled: true },
     'pi:openai-codex': { driver: 'pi', enabled: true },
     'pi:cursor': { driver: 'pi', enabled: true },
-    'pi:groq': { driver: 'pi', enabled: true, config: { engine: 'legacy' } }
+    'pi:groq': { driver: 'pi', enabled: true, config: { engine: 'legacy' } },
+    'pi:mistral': { driver: 'pi', enabled: true, config: { engine: 'rpc' } },
+    'pi:openai': { driver: 'pi', enabled: true, config: { engine: 'rpc' } }
   }
   const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
   const harness = testHarness({
@@ -53,17 +56,19 @@ function setup(options: { rpc?: PiRpcDriverOptions; home?: string; stored?: Reco
 }
 
 describe('Pi engine routing', () => {
-  it('runs every provider on Pi’s agent except the legacy-only ones and a rollback', () => {
+  it('keeps the loop by default and runs a provider the user opted in on Pi’s agent', () => {
     const { caps } = setup({ rpc })
-    expect(caps('pi:openrouter')).toBe(PI_RPC_CAPS)
+    expect(caps('pi:openrouter')).toBe(PI_LEGACY_CAPS)
+    expect(caps('pi:groq')).toBe(PI_LEGACY_CAPS)
+    expect(caps('pi:mistral')).toBe(PI_RPC_CAPS)
+    expect(caps('pi:openai')).toBe(PI_RPC_CAPS)
     expect(caps('pi:openai-codex')).toBe(PI_LEGACY_CAPS)
     expect(caps('pi:cursor')).toBe(PI_LEGACY_CAPS)
-    expect(caps('pi:groq')).toBe(PI_LEGACY_CAPS)
   })
 
   it('keeps every instance on the loop when the build ships no runtime', () => {
     const { caps } = setup()
-    expect(caps('pi:openrouter')).toBe(PI_LEGACY_CAPS)
+    expect(caps('pi:mistral')).toBe(PI_LEGACY_CAPS)
   })
 
   it('keeps the bare route on the loop', () => {
@@ -73,7 +78,8 @@ describe('Pi engine routing', () => {
 
   it('reports the engine in effect and whether it can be switched', () => {
     const driver = piDriver({ client: unused, rpc })
-    expect(driver.engine?.('pi:openrouter', undefined)).toEqual({ effective: 'rpc', switchable: true })
+    expect(driver.engine?.('pi:openrouter', undefined)).toEqual({ effective: 'legacy', switchable: true })
+    expect(driver.engine?.('pi:openrouter', { engine: 'rpc' })).toEqual({ effective: 'rpc', switchable: true })
     expect(driver.engine?.('pi:openrouter', { engine: 'legacy' })).toEqual({ effective: 'legacy', switchable: true })
     expect(driver.engine?.('pi:openai-codex', { engine: 'rpc' })).toEqual({ effective: 'legacy', switchable: false })
     expect(driver.engine?.('pi:cursor', undefined)).toEqual({ effective: 'legacy', switchable: false })
@@ -84,13 +90,13 @@ describe('Pi engine routing', () => {
     expect(driver.caps(driver.decodeConfig({ engine: 'rpc' }, 'pi:openai-codex'))).toBe(PI_LEGACY_CAPS)
   })
 
-  it('refuses a retry of a binding made on the loop before the switch', async () => {
+  it('refuses a retry of a binding made on the loop before the user switched to Pi’s agent', async () => {
     const before = setup({ stored: { 'pi:openrouter': { driver: 'pi', enabled: true } } })
     const binding = await before.harness.bind(before.harness.resolveStored({ instanceId: 'pi:openrouter', llmProvider: 'openrouter', model: 'm' }, { purpose: 'turn' }), { mode: 'agent' })
     expect(binding.caps).toEqual(PI_LEGACY_CAPS)
     expect(binding.homeId).toBe('default')
-    // The upgrade: the same profile, now with the runtime.
-    const after = setup({ rpc, home: before.home, stored: { 'pi:openrouter': { driver: 'pi', enabled: true } } })
+    // The switch: the same profile, the instance now on the new engine.
+    const after = setup({ rpc, home: before.home, stored: { 'pi:openrouter': { driver: 'pi', enabled: true, config: { engine: 'rpc' } } } })
     expect(after.caps('pi:openrouter')).toBe(PI_RPC_CAPS)
     const spec: TurnSpec = {
       binding,

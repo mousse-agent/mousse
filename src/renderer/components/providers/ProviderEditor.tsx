@@ -222,20 +222,21 @@ export function ModelsEditorSection({
 }
 
 const ENGINE_OPTIONS = [
-  { value: 'rpc', label: "Pi's agent" },
-  { value: 'legacy', label: 'Legacy' }
+  { value: 'legacy', label: 'Legacy' },
+  { value: 'rpc', label: 'New engine' }
 ] as const satisfies ReadonlyArray<{ value: PiEngine; label: string }>
 
-/** The stored value for a choice: the default stores nothing (`null` clears), Legacy stores `legacy`. */
-export function engineSetting(choice: PiEngine): 'legacy' | null {
-  return choice === 'legacy' ? 'legacy' : null
+/** The stored value for a choice: the default (Legacy) stores nothing (`null` clears), New engine stores `rpc`. */
+export function engineSetting(choice: PiEngine): 'rpc' | null {
+  return choice === 'rpc' ? 'rpc' : null
 }
 
 /**
- * The engine a model API runs on: Pi's agent (the default) or the legacy in-process loop, the
- * rollback until it is removed. The default stores nothing; Legacy stores `engine: 'legacy'`.
+ * The engine a model API runs on: the in-process loop (Legacy, the default) or Pi's own agent (New
+ * engine), which the user opts in to until it becomes the default. Legacy stores nothing; New engine
+ * stores `engine: 'rpc'`.
  */
-export function EngineRow({ snapshot, onSetEngine }: { snapshot: InstanceSnapshot; onSetEngine: (engine: 'legacy' | null) => Promise<void> }) {
+export function EngineRow({ snapshot, onSetEngine }: { snapshot: InstanceSnapshot; onSetEngine: (engine: 'rpc' | null) => Promise<void> }) {
   const change = useAsyncAction()
   const engine = snapshot.engine
   if (!engine?.switchable) return null
@@ -246,7 +247,7 @@ export function EngineRow({ snapshot, onSetEngine }: { snapshot: InstanceSnapsho
       description={
         change.error
           ? <span className="prov-error">{change.error}</span>
-          : 'Legacy is the in-process loop Mousse used before. It goes away in a later release.'
+          : "New engine runs this provider on Pi's own agent. Its tools and replies may differ slightly; switch back to Legacy any time."
       }
       control={
         <Segmented<PiEngine>
@@ -282,7 +283,7 @@ export function ApiEditor({
   onRemove: () => Promise<void>
   onSaveModelPrefs: (patch: ModelPrefsPatch) => Promise<void>
   onRefreshModels: () => Promise<void>
-  onSetEngine?: (engine: 'legacy' | null) => Promise<void>
+  onSetEngine?: (engine: 'rpc' | null) => Promise<void>
 }) {
   return (
     <>

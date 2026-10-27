@@ -554,17 +554,17 @@ describe('Advanced → Engine of a model API', () => {
   }
   const checked = (html: string) => [...html.matchAll(/role="radio" aria-checked="true"[^>]*>(.*?)<\/button>/g)].map((match) => match[1].replace(/&#x27;/g, "'"))
 
-  it("offers Pi's agent and Legacy, with the default selected when nothing is stored", () => {
-    const html = api({ engine: { effective: 'rpc', switchable: true } })
+  it('offers Legacy and New engine, with Legacy (the default) selected when nothing is stored', () => {
+    const html = api({ engine: { effective: 'legacy', switchable: true } })
     expect(html).toContain('Advanced')
     expect(html).toContain('Engine')
-    expect(buttons(html).map((label) => label.replace(/&#x27;/g, "'"))).toEqual(expect.arrayContaining(["Pi's agent", 'Legacy']))
-    expect(checked(html)).toEqual(["Pi's agent"])
-    expect(html).toContain('Legacy is the in-process loop Mousse used before. It goes away in a later release.')
+    expect(buttons(html).map((label) => label.replace(/&#x27;/g, "'"))).toEqual(expect.arrayContaining(['Legacy', 'New engine']))
+    expect(checked(html)).toEqual(['Legacy'])
+    expect(html.replace(/&#x27;/g, "'")).toContain("New engine runs this provider on Pi's own agent.")
   })
 
-  it('shows the stored Legacy choice', () => {
-    expect(checked(api({ engine: { setting: 'legacy', effective: 'legacy', switchable: true } }))).toEqual(['Legacy'])
+  it('shows the stored New engine choice', () => {
+    expect(checked(api({ engine: { setting: 'rpc', effective: 'rpc', switchable: true } }))).toEqual(['New engine'])
   })
 
   it('has no Engine row for a provider on one engine, another driver, or an older daemon', () => {
@@ -576,8 +576,8 @@ describe('Advanced → Engine of a model API', () => {
     expect(api({ engine: { effective: 'rpc', switchable: true } }, { switchHandler: false })).not.toContain('Engine')
   })
 
-  it('stores nothing for the default and legacy for Legacy', () => {
-    expect(engineSetting('rpc')).toBeNull()
-    expect(engineSetting('legacy')).toBe('legacy')
+  it('stores nothing for the default (Legacy) and rpc for New engine', () => {
+    expect(engineSetting('legacy')).toBeNull()
+    expect(engineSetting('rpc')).toBe('rpc')
   })
 })

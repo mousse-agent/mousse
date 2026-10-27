@@ -703,12 +703,12 @@ describe('harness gateway: a driver whose home depends on its setup (managed Cod
 })
 
 describe('harness gateway: the engine of a pi instance (Advanced → Engine)', () => {
-  /** A pi driver with the engine hook: every provider switches but `openai-codex`; stored `legacy` wins. */
+  /** A pi driver with the engine hook: every provider switches but `openai-codex`; the default is `legacy`, stored `rpc` opts in. */
   const piDriver = (): HarnessDriver => ({
     ...adapterDriver(pi()),
     engine: (instanceId, stored) => {
       const switchable = instanceId !== 'pi:openai-codex'
-      return { effective: switchable && stored?.engine !== 'legacy' ? 'rpc' : 'legacy', switchable }
+      return { effective: switchable && stored?.engine === 'rpc' ? 'rpc' : 'legacy', switchable }
     }
   })
   const setup = () => {
@@ -724,17 +724,17 @@ describe('harness gateway: the engine of a pi instance (Advanced → Engine)', (
     return { harness, entry, snapshot }
   }
 
-  it('stores Legacy, clears it back to the default, and shows both in the snapshot', async () => {
+  it('stores the opt-in, clears it back to the default, and shows both in the snapshot', async () => {
     const { harness, entry, snapshot } = setup()
-    expect((await snapshot('pi:openai')).engine).toEqual({ effective: 'rpc', switchable: true })
+    expect((await snapshot('pi:openai')).engine).toEqual({ effective: 'legacy', switchable: true })
 
-    const legacy = await harness.instances.configure('pi:openai', { engine: 'legacy' })
-    expect(entry('pi:openai').config).toMatchObject({ engine: 'legacy' })
-    expect(legacy.engine).toEqual({ setting: 'legacy', effective: 'legacy', switchable: true })
+    const rpc = await harness.instances.configure('pi:openai', { engine: 'rpc' })
+    expect(entry('pi:openai').config).toMatchObject({ engine: 'rpc' })
+    expect(rpc.engine).toEqual({ setting: 'rpc', effective: 'rpc', switchable: true })
 
     const cleared = await harness.instances.configure('pi:openai', { engine: null })
     expect(entry('pi:openai').config ?? {}).not.toHaveProperty('engine')
-    expect(cleared.engine).toEqual({ effective: 'rpc', switchable: true })
+    expect(cleared.engine).toEqual({ effective: 'legacy', switchable: true })
   })
 
   it('refuses the switch for a provider that runs on one engine, and for a driver without engines', async () => {
