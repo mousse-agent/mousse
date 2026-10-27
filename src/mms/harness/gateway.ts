@@ -179,6 +179,7 @@ export interface HarnessGateway {
    * about a change before the turn is admitted.
    */
   previewPermissionMode(resolved: ResolvedTurnSelection, requested: PermissionMode, cwd?: string | null): EffectivePermissionMode
+  /**
    * Whether the instance can enforce `policy` now (its live caps, the model's spend facts, and
    * whether its runtime holds a bot authority), as turn admission will decide: the bot editor's
    * and the bot engine's check before anything is bound.

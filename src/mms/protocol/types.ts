@@ -461,6 +461,7 @@ export const PROTOCOL_CAPABILITIES = [
 
 export type ProtocolEventType =
   | 'net.updated'
+  | 'bots.changed'
   | 'run.event'
   | 'run.stop-requested'
   | 'run.steer-accepted'

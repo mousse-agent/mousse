@@ -102,7 +102,7 @@ export function addedPermissions(wanted: BotManifest, granted: BotManifest | nul
     if (held === undefined) continue
     if (limit === undefined || limit > held) lines.push(budgetLine(key, limit))
   }
-  return lines
+  return unique(lines)
 }
 
 /** Every permission of a manifest, in plain words. */
@@ -114,7 +114,13 @@ export function describeManifest(manifest: BotManifest): BotPermissionLine[] {
   for (const pair of manifest.mcp) lines.push(mcpLine(pair))
   for (const skill of manifest.skills) lines.push({ kind: 'skill', text: `Use the skill *${skill}*` })
   for (const key of BUDGET_KEYS) if (manifest.budget[key] !== undefined) lines.push(budgetLine(key, manifest.budget[key]))
-  return lines
+  return unique(lines)
+}
+
+/** Each line once: a folder's access and a tool on it can say the same thing. */
+function unique(lines: BotPermissionLine[]): BotPermissionLine[] {
+  const seen = new Set<string>()
+  return lines.filter((line) => !seen.has(line.text) && Boolean(seen.add(line.text)))
 }
 
 const TOOL_WORDS: Record<NeutralTool, string> = {

@@ -655,6 +655,9 @@ export class MmsProtocolServer {
     onEmitter(services.channels, 'updated', (snapshot: unknown) => {
       emitToSubscribers(this.ring.push('channels.updated', { snapshot }, undefined))
     })
+    onEmitter(services.personalBots.events, 'changed', (event: unknown) => {
+      emitToSubscribers(this.ring.push('bots.changed', event, undefined))
+    })
     onEmitter(services.channels, 'activity', (event: unknown) => {
       emitToSubscribers(this.ring.push('channels.activity', { event }, undefined))
     })

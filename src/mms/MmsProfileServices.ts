@@ -40,6 +40,9 @@ import { EffectWorker, type EffectWorkerFibres } from './run/EffectWorker'
 import type { ThreadEvent } from './run/types'
 import { Reconciler } from './run/Reconciler'
 import { RunEngine } from './run/RunEngine'
+import { BotEngine } from './bots/activation/BotEngine'
+import { BotDefinitionStore } from './bots/definitions/BotDefinitionStore'
+import { BotStore } from './bots/store/BotStore'
 import { RunStore } from './run/RunStore'
 import { ScheduledJobService } from './scheduled/ScheduledJobService'
 import { ScheduledJobStore } from './scheduled/ScheduledJobStore'
@@ -183,6 +186,9 @@ export class MmsProfileServices {
   readonly threadRuntimes: ThreadRuntimeManager
   /** Profile Run Engine (`<profileHome>/run/run.db`); Phase 1 dual-writes beside the orchestrator. */
   readonly runEngine: RunEngine
+  /** Personal bots (PR 6 §4). */
+  readonly personalBots: BotEngine
+  private readonly botStore: BotStore
   /** Phase 5 (SPEC §15.1): durable bearer credentials of the Mousse MCP server. */
   readonly mcpCredentials: McpCredentials
   /** Phase 5: Mousse's tools for vendor runtimes over MCP Streamable HTTP on 127.0.0.1. */
@@ -453,6 +459,22 @@ export class MmsProfileServices {
     this.harness = this.harnessImpl
     this.harnessImpl.startModelRefreshSchedule()
     this.orchestrator.setHarness(this.harnessImpl)
+    // Personal bots (PR 6): their own database under `<profileHome>/bots/`, which older builds never open.
+    this.botStore = new BotStore({ profileHome: homeDir })
+    const botStore = this.botStore
+    const harness = this.harnessImpl
+    this.personalBots = new BotEngine({
+      profileHome: homeDir,
+      store: botStore,
+      definitions: new BotDefinitionStore(botStore.directory, (botId) => botStore.registry(botId)?.revision ?? null),
+      threads: this.threads,
+      runs: () => this.runEngine,
+      harness,
+      notifyEffects: () => this.orchestrator.notifyEffects(),
+      stopThread: (threadId) => this.orchestrator.stopThread(threadId, 'user', { clientRequestId: `bot-stop:${threadId}:${Date.now()}` })
+    })
+    this.orchestrator.setBotThreads(this.personalBots)
+    this.orchestrator.setBotDispatcher(this.personalBots)
     this.orchestrator.setWorkflowChatExecutor(this.platform.workflowChat)
     this.orchestrator.setFeatureFlags(this.config.get().features)
     this.threadRuntimes = new ThreadRuntimeManager()
@@ -1199,6 +1221,10 @@ export class MmsProfileServices {
     this.config.stopWatching()
     try {
       this.orchestrator.setRunEngine(null)
+      this.orchestrator.setBotDispatcher(null)
+      this.orchestrator.setBotThreads(null)
+      this.personalBots.close()
+      this.botStore.close()
       this.runEngine.store.db.close()
     } catch (error) {
       console.warn('run engine database close failed', error)

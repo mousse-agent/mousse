@@ -68,7 +68,8 @@ import { createHarnessGateway, PI_DRIVER_ID, type AdapterHost, type BindInput, t
 import { piDriver } from '../harness/drivers/pi'
 import { contextGauge, threadTurnOrigin } from '../harness/policy'
 import type { BotThreads } from '../../shared/bots/personal/authority'
-import { isRetriesExhausted, type ExecutionBinding, type HarnessCaps, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
+import type { BotTurnDispatcher, PreparedBotTurn } from '../bots/activation/dispatcher'
+import { isRetriesExhausted, type BindPolicy, type ExecutionBinding, type HarnessCaps, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
 import { acknowledgeRows } from '../run/terminal'
@@ -85,6 +86,9 @@ import {
   TERMINAL_RUN_STATUSES,
   isChildQuestionRow,
   isWakeTurnPayload,
+  hasUnknownTurnPayloadKind,
+  isBotTurnPayload,
+  type BotTurnPayload,
   type ChildQuestionPayload,
   type AgentActor,
   type DelegationRecord,
@@ -497,6 +501,16 @@ function isContinuationTurnPayload(payload: unknown): payload is ContinuationTur
   return Boolean(payload) && typeof payload === 'object' && (payload as { kind?: unknown }).kind === 'continuation'
 }
 
+/** The `turn.start` payload kinds this build runs; any other string `kind` is refused (PR 6 §4). */
+const KNOWN_TURN_PAYLOAD_KINDS: readonly string[] = ['wake', 'integration', 'continuation', 'bot']
+
+/** A bot turn's skills: only the granted ones are listed, and only those may be loaded. */
+function grantedSkills(skills: Pick<AppToolTurn, 'enabledSkills' | 'loadedSkills'>, granted: ReadonlySet<string>): Pick<AppToolTurn, 'enabledSkills' | 'loadedSkills'> {
+  const enabledSkills = skills.enabledSkills.filter((skill) => granted.has(skill.id))
+  const names = new Set(enabledSkills.map((skill) => skill.name))
+  return { enabledSkills, loadedSkills: skills.loadedSkills.filter((loaded) => names.has(loaded.name)) }
+}
+
 /** Who delivers inbox rows while a queue item carries them (no effect: the reconciler leaves them alone). */
 const queueOwner = (itemId: string): string => `queue:${itemId}`
 
@@ -682,6 +696,33 @@ export class OrchestratorService extends EventEmitter {
   /** The profile's bot threads, for the origin of their turns; null: none. */
   setBotThreads(threads: BotThreads | null): void {
     this.botThreads = threads
+  }
+
+  /** The profile's bot engine, which prepares and settles bot dispatches (PR 6 §4); null: none. */
+  private botDispatcher: BotTurnDispatcher | null = null
+
+  setBotDispatcher(dispatcher: BotTurnDispatcher | null): void {
+    this.botDispatcher = dispatcher
+  }
+
+  /** Wakes the effect worker: a `turn.start` was written outside the orchestrator (a bot dispatch). */
+  notifyEffects(): void {
+    this.effectWorker?.notify()
+  }
+
+  /**
+   * Ordinary sends, queued messages, steers and the generic Continue are refused on a bot's
+   * threads: a bot request never runs as a plain turn, and only the Bots tab continues one.
+   */
+  private assertNotBotThread(threadId: string | undefined): void {
+    if (!threadId) return
+    const bot = this.botDispatcher?.ownerOf(threadId)
+    if (bot === undefined) return
+    throw new AppError({
+      code: 'bot_thread_read_only',
+      message: `This thread belongs to the bot ${bot}. Use the Bots tab to continue it.`,
+      errorInfo: { category: 'invalid', retryable: false }
+    })
   }
 
   /** The profile's harness gateway; also the test seam for fake drivers. */
@@ -1663,6 +1704,7 @@ export class OrchestratorService extends EventEmitter {
     const engine = this.requireRunEngine()
     const target = threadId ?? engine.getRun(runId)?.threadId
     if (!target) return { status: 'ignored', reason: 'run_not_found', runId, sequence: 0 }
+    this.assertNotBotThread(target)
     const result = await engine.dispatch({ kind: 'steer', threadId: target, clientRequestId, runId })
     if (result.status === 'accepted' && !result.replayed) {
       this.enqueueControlEffect('turn.steer', target, runId, { runId, threadId: target, text }, () => {
@@ -1819,10 +1861,12 @@ export class OrchestratorService extends EventEmitter {
    * Registers a run's app-tool context (PR 2 §2 "Turn context"). A turn the runtime started itself
    * keeps the token of the turn it continues: calls made across that hand-over were stamped with it.
    */
-  private registerAppTurn(session: ThreadSession, runId: string, mode: ChatMode, continuation: boolean): { turn: AppToolTurn; drop(): void } {
-    const projectPath = session.projectCwd ?? undefined
+  private registerAppTurn(session: ThreadSession, runId: string, mode: ChatMode, continuation: boolean, bot?: PreparedBotTurn): { turn: AppToolTurn; drop(): void } {
+    const projectPath = bot ? undefined : session.projectCwd ?? undefined
     const modeCeiling = this.modeCeilingFor(session.threadId, mode)
-    const accessLevel = this.continuedGrant(runId, session.threadId, this.grantFor(session.threadId, modeCeiling))
+    // A bot is held to its grant, which never reaches other threads: it gets the narrowest access
+    // level whatever the profile's setting, and nothing continues a bot run as a plain turn.
+    const accessLevel: AgentAccessLevel = bot ? 'lineage' : this.continuedGrant(runId, session.threadId, this.grantFor(session.threadId, modeCeiling))
     // Kept on the run, so whatever continues it is never granted more than it was.
     try {
       this.runEngine?.recordAccessGrant(runId, accessLevel)
@@ -1843,6 +1887,8 @@ export class OrchestratorService extends EventEmitter {
       enabledSkills: [],
       loadedSkills: [],
       ...(session.sharedWorkspace ? { toolAccess: createAgentToolAccess(SHARED_READER_POLICY, session.sharedWorkspace.path) } : {}),
+      // A bot turn: every app-tool call is held to the bot's grant (the registry checks it).
+      ...(bot ? { bot: bot.authority } : {}),
       settingsEnabled: (name) => settingsToolEnabled(this.settingsStore.get().integrations?.tools, name)
     }, { continuation })
   }
@@ -1882,7 +1928,8 @@ export class OrchestratorService extends EventEmitter {
       ...(input.onPublishApplet ? { onPublishApplet: input.onPublishApplet } : {}),
       // A run nobody answers: Mousse tools that wait for the user are refused, on every transport.
       ...(input.approvals === 'never' ? { approvals: 'never' as const } : {}),
-      ...skills
+      // A bot lists and loads only the skills it was granted.
+      ...(registered.bot ? grantedSkills(skills, registered.bot.skills) : skills)
     }) ?? registered
     const descriptor = typeof turn.mode === 'string' ? this.modeRegistry.getModeSync(turn.mode, { projectPath: turn.projectPath }) : undefined
     // Agent and Plan run natively in the runtime; another mode's own instructions go into the preamble.
@@ -1894,6 +1941,7 @@ export class OrchestratorService extends EventEmitter {
       ...(turn.accessLevel ? { accessLevel: turn.accessLevel } : {}),
       mcpEligible: Boolean(this.runEngine),
       ...(turn.definition ? { definition: turn.definition } : {}),
+      ...(turn.bot ? { bot: turn.bot } : {}),
       instructions: (mcpAttached) => ({
         sessionInstructions: sessionInstructions({ mcp: mcpAttached, appletGuidance: this.appletStore ? APPLET_GENERATION_GUIDANCE : undefined }),
         turnPreamble: turnPreamble({
@@ -2140,6 +2188,16 @@ export class OrchestratorService extends EventEmitter {
     if (isWakeTurnPayload(effect.payload)) return this.executeWakeEffect(effect, effect.payload, signal)
     if (isIntegrationTurnPayload(effect.payload)) return this.executeIntegrationEffect(effect.payload, signal)
     if (isContinuationTurnPayload(effect.payload)) return this.executeContinuationEffect(effect, effect.payload, signal)
+    if (isBotTurnPayload(effect.payload)) return this.executeBotEffect(effect.payload, signal)
+    // A payload of a kind this build does not know is refused, never cast to a send: a later
+    // kind is as inert here as a bot payload is in a build without bots.
+    if (hasUnknownTurnPayloadKind(effect.payload, KNOWN_TURN_PAYLOAD_KINDS)) {
+      const { runId } = effect.payload as { runId?: unknown }
+      if (typeof runId === 'string') this.markRun(runId, (engine, id) => {
+        if (engine.getRun(id)?.status === 'queued') engine.markTerminal(id, 'cancelled', { error: 'unknown_turn_payload' })
+      })
+      return
+    }
     const stored = effect.payload as TurnStartPayload
     const entry = this.turnResults.get(stored.runId)
     if (entry?.abandoned) return
@@ -2191,6 +2249,56 @@ export class OrchestratorService extends EventEmitter {
       if (!run || (!TERMINAL_RUN_STATUSES.has(run.status) && run.status !== 'queued')) throw error
     } finally {
       if (this.turnResults.get(payload.runId) === entry) this.turnResults.delete(payload.runId)
+    }
+  }
+
+  /**
+   * A bot dispatch's `turn.start` (PR 6 §4): the bot engine rebuilds the turn from `bots.db` and
+   * checks that its grant still holds; only then does the turn start, bound to the compiled policy,
+   * with the activation's authority, counts and spend. A refusal cancels the queued run, and
+   * nothing is sent. The activation thread is new, so the turn starts with no history; anything
+   * else fails it with `bot_state_invalid` before a request.
+   */
+  private async executeBotEffect(payload: BotTurnPayload, signal: AbortSignal): Promise<void> {
+    const engine = this.requireRunEngine()
+    const run = engine.getRun(payload.runId)
+    if (!run || run.status !== 'queued' || run.threadId !== payload.threadId) return
+    const dispatcher = this.botDispatcher
+    const cancel = (error: string): void => {
+      this.markRun(payload.runId, (runs, id) => {
+        if (runs.getRun(id)?.status === 'queued') runs.markTerminal(id, 'cancelled', { error })
+      })
+      dispatcher?.settle(payload, {})
+    }
+    if (!dispatcher) return cancel('bots_unavailable')
+    const prepared = dispatcher.prepare(payload)
+    if ('refused' in prepared) return cancel(prepared.code)
+    const session = this.getOrCreateSession(payload.threadId)
+    // History 'none': a fresh activation thread has no transcript, native context or summary.
+    if (session.deleted || session.turnAdmitted || session.isTurnRunning() || session.messages.length > 0 ||
+        getActiveMessages(session.nativeContext).length > 0 || Boolean(getCompactionSummary(session.nativeContext)))
+      return cancel('bot_state_invalid')
+    let text: string | undefined
+    try {
+      const response = await this.runTurnOnSession(
+        session,
+        { content: prepared.prompt, mode: 'agent' },
+        false,
+        true,
+        {
+          source: 'bot',
+          runId: payload.runId,
+          externalSignal: AbortSignal.any([signal, prepared.authority.time.signal]),
+          modelOverride: this.harness.instanceMap.overrideFor({ instanceId: prepared.selection.instanceId, model: prepared.selection.model }),
+          bot: prepared
+        }
+      )
+      text = response.message
+    } catch (error) {
+      const settled = engine.getRun(payload.runId)
+      if (!settled || (!TERMINAL_RUN_STATUSES.has(settled.status) && settled.status !== 'queued')) throw error
+    } finally {
+      dispatcher.settle(payload, text !== undefined ? { text } : {})
     }
   }
 
@@ -2518,10 +2626,14 @@ export class OrchestratorService extends EventEmitter {
    * run; `resolved` was built from it), else a new one from the resolved selection. Either way it
    * is recorded on the active attempt, so a replacement attempt keeps its run's binding.
    */
-  private async bindTurn(runId: string | undefined, existing: ExecutionBinding | undefined, resolved: ResolvedTurnSelection, mode: ChatMode, origin: () => TurnOrigin, permission: Pick<BindInput, 'permissionMode' | 'cwd'>): Promise<ExecutionBinding> {
+  private async bindTurn(runId: string | undefined, existing: ExecutionBinding | undefined, resolved: ResolvedTurnSelection, mode: ChatMode, origin: () => TurnOrigin, permission: Pick<BindInput, 'permissionMode' | 'cwd'>, policy?: BindPolicy): Promise<ExecutionBinding> {
     const engine = this.runEngine
     // The origin is read only for a new binding: a retry or restart keeps the one its run recorded.
-    const binding = existing ?? await this.harness.bind(resolved, { mode, origin: origin(), ...permission })
+    // A bot dispatch binds the policy its grant compiled to, as a bot, in the strictest mode: its
+    // grant, never a thread's permission mode, decides what it may do.
+    const binding = existing ?? await this.harness.bind(resolved, policy
+      ? { mode, origin: 'bot', policy, permissionMode: 'ask', ...(permission.cwd !== undefined ? { cwd: permission.cwd } : {}) }
+      : { mode, origin: origin(), ...permission })
     if (runId && engine) {
       try {
         return engine.recordExecutionBinding(runId, binding)
@@ -4292,6 +4404,7 @@ export class OrchestratorService extends EventEmitter {
     if (session.deleted) {
       throw new QueueValidationError(`Thread deleted: ${threadId}`)
     }
+    if (!opts?.internal) this.assertNotBotThread(threadId)
     // User-queued first messages leave drafts so the sidebar keeps them. Internal wakes do not.
     if ((opts?.intent ?? 'normal') === 'normal' && !opts?.internal) {
       this.touchUserActivityAndNotify(threadId)
@@ -5360,6 +5473,7 @@ export class OrchestratorService extends EventEmitter {
    * Accepted steers are not enqueued as later normal turns.
    */
   steerActiveTurn(text: string, threadId?: string): boolean {
+    this.assertNotBotThread(threadId ?? this.getBoundThreadId() ?? undefined)
     return this.steerThread(threadId ?? this.getBoundThreadId() ?? undefined, text)
   }
 
@@ -5537,6 +5651,7 @@ export class OrchestratorService extends EventEmitter {
     opts?: OrchestratorSendOptions
   ): Promise<OrchestratorResponse> {
     const threadId = opts?.threadId ?? this.getBoundThreadId()
+    this.assertNotBotThread(threadId ?? undefined)
     if (!threadId) {
       // Legacy unbound path (tests / early boot): use bound session directly.
       return this.runTurnOnSession(this.boundSession, input, reuseLastUser, opts?.source !== 'wake', { source: opts?.source })
@@ -5727,6 +5842,8 @@ export class OrchestratorService extends EventEmitter {
       continuationId?: string
       /** A mode this turn must not exceed (`OrchestratorSendOptions.permissionMode`). */
       permissionMode?: PermissionMode
+      /** A bot dispatch (PR 6 §4): its policy, authority and scratch folder. */
+      bot?: PreparedBotTurn
     }
   ): Promise<OrchestratorResponse> {
     // Admission is synchronous, before any await, so a concurrent send always observes it.
@@ -5883,6 +6000,7 @@ export class OrchestratorService extends EventEmitter {
       subagentNotice?: SubagentNoticeItem[]
       continuationId?: string
       permissionMode?: PermissionMode
+      bot?: PreparedBotTurn
     }
   ): Promise<OrchestratorResponse> {
     const session = this.session
@@ -6148,7 +6266,7 @@ export class OrchestratorService extends EventEmitter {
     this.setTurnPhase(session.threadId, 'thinking', { turnId })
     // The turn's app-tool context (PR 2 §2), registered before the run is active so a call a runtime made
     // while the run was started finds it; the executor completes it before the gateway starts the turn.
-    const appTurn = engineRunId ? this.registerAppTurn(session, engineRunId, mode, opts?.source === 'provider-continuation') : undefined
+    const appTurn = engineRunId ? this.registerAppTurn(session, engineRunId, mode, opts?.source === 'provider-continuation', opts?.bot) : undefined
     this.markRun(engineRunId, (engine, id) => engine.markRunning(id))
     // The run is active: Mousse tool calls Claude made while it was being started act as it.
     if (opts?.continuationId) this.endContinuationHold(opts.continuationId, false, engineRunId ?? null)
@@ -6310,8 +6428,8 @@ export class OrchestratorService extends EventEmitter {
       // The attempt's immutable binding; a retry of the same run keeps the one it already has.
       const binding = await this.bindTurn(engineRunId, runBinding, instance, mode, () => this.turnOrigin(session.threadId, request.workflowInvocationId), {
         permissionMode: this.requestedPermissionMode(session.threadId, opts?.permissionMode),
-        cwd: session.projectCwd
-      })
+        cwd: opts?.bot ? opts.bot.scratch : session.projectCwd
+      }, opts?.bot?.policy)
       // A transcript-native runtime (the pi loop) is sent Mousse's transcript and tools, so Mousse
       // keeps that transcript within the window before the turn. A prompt-injected runtime owns its
       // loop, context and tools and receives prior turns as a prompt preamble.
@@ -6366,7 +6484,8 @@ export class OrchestratorService extends EventEmitter {
         runId: engineRunId ?? turnId,
         attemptId: (engineRunId ? this.runEngine?.getRun(engineRunId)?.activeAttemptId : undefined) ?? turnId,
         threadId: session.threadId,
-        cwd: session.projectCwd ?? null,
+        // A bot works in its activation's private scratch folder, never a root or a project folder.
+        cwd: opts?.bot ? opts.bot.scratch : session.projectCwd ?? null,
         // The bound model: a moved entry's model may run as the agent's own, and a runtime that
         // resolves `default` itself fixed it when the turn was bound (retries and recovery keep it).
         model: binding.model,
@@ -6553,7 +6672,13 @@ export class OrchestratorService extends EventEmitter {
         sink: turnSink,
         control: turnControl,
         host: adapterHost,
-        ...(app ? { app } : {})
+        ...(app ? { app } : {}),
+        // A bot turn: its instructions, and the activation's shared counts and spend.
+        ...(opts?.bot ? {
+          ...(opts.bot.instructions ? { instructions: { text: opts.bot.instructions, placement: 'append' as const } } : {}),
+          counters: opts.bot.authority.counters,
+          ...(opts.bot.authority.spend ? { spend: opts.bot.authority.spend } : {})
+        } : {})
       }).result
       handoffs?.settle(result.aborted || turn.abort.signal.aborted ? 'aborted' : 'completed')
       assistantText = result.text
