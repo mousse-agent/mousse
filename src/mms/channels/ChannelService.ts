@@ -182,6 +182,8 @@ export class ChannelService extends EventEmitter {
   /** A one-time code the owner sends with `/owner <code>` from a direct message (10 minutes, one try). */
   startOwnerClaim(platform: ChannelPlatform): { code: string; expiresAt: string } {
     this.lifecycle.assertAccepting()
+    // A webhook caller names its own user id, so a webhook account can never be confirmed as anyone.
+    if (platform === 'webhook') throw Object.assign(new Error('Webhook senders can\'t be confirmed as the owner.'), { code: 'channel_owner_unconfirmed' })
     const claim = this.ownerClaims.start(platform)
     this.emitUpdated()
     return claim

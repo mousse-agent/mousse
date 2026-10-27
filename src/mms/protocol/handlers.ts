@@ -2057,7 +2057,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     // "This is me" (PR 6 §6): a code shown here, `/owner <code>` from the account, then confirm.
     case 'channels.owner.start': {
       const p = isObject(params) ? params : {}
-      return { claim: ctx.mms.channels.startOwnerClaim(asChannelPlatform(p.platform)) }
+      try {
+        return { claim: ctx.mms.channels.startOwnerClaim(asChannelPlatform(p.platform)) }
+      } catch (error) {
+        if ((error as { code?: unknown }).code === 'channel_owner_unconfirmed')
+          throw knownAppError({ code: 'channel_owner_unconfirmed', message: (error as Error).message }, { category: 'invalid', retryable: false })
+        throw error
+      }
     }
     case 'channels.owner.status': {
       const p = isObject(params) ? params : {}

@@ -920,7 +920,10 @@ function asChannelPlatformConfig(
     'allowAllUsers',
     'homeChatId',
     'webhookPort',
-    'webhookSecret'
+    'webhookSecret',
+    // A saved form sends the owner back as it was read; it is dropped here, because the owner is
+    // set only through "This is me" (`channels.owner.*`).
+    'owner'
   ])
   for (const key of Object.keys(o)) {
     if (!allowed.has(key)) throw new Error(`${name}.${key} is not allowed`)

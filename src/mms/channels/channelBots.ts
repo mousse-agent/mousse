@@ -32,7 +32,8 @@ export const BOT_NO_OWNER_REPLY = 'Confirm your account in Mousse first: Setting
  */
 export function channelAudience(platform: ChannelPlatformConfig | undefined, session: ChannelSession | undefined, message: InboundChannelMessage): 'owner' | 'others' {
   const owner = platform?.owner
-  if (!owner?.userId || !session) return 'others'
+  // A webhook caller names its own user id: nobody on a webhook is the owner.
+  if (!owner?.userId || !session || message.platform === 'webhook') return 'others'
   if (session.chatType !== 'dm' || message.chatType !== 'dm') return 'others'
   if (session.userId === undefined || session.userId !== owner.userId) return 'others'
   return message.userId === owner.userId ? 'owner' : 'others'

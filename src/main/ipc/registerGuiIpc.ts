@@ -1638,6 +1638,22 @@ export function registerGuiIpc(
     })
     return res.activity
   })
+  registerHandler('channels:owner:start', async (_e, platform: ChannelPlatform) => {
+    const res = await guiMms.request<{ claim: unknown }>('channels.owner.start', { platform })
+    return res.claim
+  })
+  registerHandler('channels:owner:status', async (_e, platform: ChannelPlatform) => {
+    const res = await guiMms.request<{ claim: unknown }>('channels.owner.status', { platform })
+    return res.claim
+  })
+  registerHandler('channels:owner:confirm', async (_e, platform: ChannelPlatform, userId: string) => {
+    const res = await guiMms.request<{ config: unknown }>('channels.owner.confirm', { platform, userId })
+    return res.config
+  })
+  registerHandler('channels:owner:clear', async (_e, platform: ChannelPlatform) => {
+    const res = await guiMms.request<{ config: unknown }>('channels.owner.clear', { platform })
+    return res.config
+  })
 
   registerHandler('mcp:listServers', async (_e, projectId?: string) => {
     const projectPath = projectId ? await resolveProjectPath(projectId) : undefined

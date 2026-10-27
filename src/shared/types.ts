@@ -315,6 +315,13 @@ export interface ChannelOwner {
   confirmedAt: string
 }
 
+/** A "This is me" code in progress: when it expires, whether its one attempt was used, and who sent it. */
+export interface ChannelOwnerClaim {
+  expiresAt: string
+  attempted: boolean
+  claimant?: { userId: string; displayName: string }
+}
+
 export interface ChannelConfig {
   platforms: Record<ChannelPlatform, ChannelPlatformConfig>
   filterSilenceNarration: boolean
