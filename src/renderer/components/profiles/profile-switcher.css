@@ -1,0 +1,221 @@
+/* Sidebar footer: the trigger and its popover (account on the left, profiles on the right).
+   Menu surfaces use --ui-menu-radius and --ui-menu-drop from polish.css. */
+
+.profile-switcher.profile-switcher-sidebar {
+  position: relative;
+  display: block;
+  flex: 0 0 auto;
+  min-width: 0;
+  height: var(--titlebar-height);
+  margin: var(--ui-gutter, 8px);
+  padding: 0;
+  -webkit-app-region: no-drag;
+}
+
+.app .profile-sidebar-trigger {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 7px var(--ui-row-x);
+  border: 1px solid var(--ui-line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text-primary) 3%, transparent);
+  box-shadow: var(--ui-specular);
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.app .profile-sidebar-trigger:hover,
+.app .profile-sidebar-trigger[aria-expanded='true'] {
+  border-color: var(--ui-line-strong);
+  background: var(--ui-hover);
+}
+.profile-sidebar-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.profile-sidebar-trigger > svg { flex-shrink: 0; color: var(--text-secondary); }
+.app .profile-sidebar-text { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
+.app .profile-sidebar-text strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; font-weight: 600; }
+.app .profile-sidebar-text > span { color: var(--ui-faint); font-size: 11px; }
+.profile-switcher.profile-sidebar-loading { padding: 14px 9px; color: var(--text-secondary); font-size: 12px; }
+.profile-switcher-sidebar > button:not(.profile-sidebar-trigger) { padding: 8px; font-size: 12px; }
+
+/* Avatars: the profile's own, and the account's (palette colour from profilePalette.ts). */
+.profile-avatar {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  overflow: hidden;
+  border-radius: 50%;
+  background: var(--gradient-accent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.38), 0 0 0 2px rgba(var(--accent-rgb), 0.22);
+  color: white;
+  font-size: 11px;
+  font-weight: 700;
+}
+.profile-avatar-large { width: 52px; height: 52px; font-size: 20px; }
+.profile-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.mousse-id-avatar-empty { background: color-mix(in srgb, var(--text-secondary) 18%, transparent) !important; color: var(--text-secondary); }
+
+/* The popover: one lit surface, two columns split by a hairline. Without a Mousse ID service
+   there is only the profiles column and the surface is 330px wide. */
+.profile-menu {
+  box-sizing: border-box;
+  width: 330px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--ui-menu-radius);
+  background: var(--surface-soft);
+  box-shadow: var(--ui-specular), var(--ui-menu-drop);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.profile-menu.profile-menu-wide { width: 460px; }
+.profile-menu-columns { display: flex; }
+.profile-menu-col { display: flex; flex: 1 1 0; flex-direction: column; gap: 2px; min-width: 0; }
+.profile-menu-col + .profile-menu-col { margin-left: 6px; padding-left: 6px; border-left: 1px solid var(--border); }
+
+.profile-account-identity {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  padding: 14px 8px 12px;
+  text-align: center;
+}
+.profile-account-identity .profile-avatar { margin-bottom: 8px; }
+.profile-account-identity strong { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 600; }
+.profile-account-identity span:not(.profile-avatar) { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-size: 12px; }
+.profile-account-identity .profile-account-devices { color: var(--ui-faint); font-size: 11.5px; }
+
+.profile-menu-heading {
+  padding: 6px var(--ui-menu-row-x) 4px;
+  color: var(--ui-faint);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.profile-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 30px;
+  padding: 5px var(--ui-menu-row-x);
+  border-radius: var(--ui-menu-row-radius);
+  color: var(--text-primary);
+  font-size: 13px;
+  text-align: left;
+}
+.profile-menu-row > svg { flex: 0 0 auto; color: var(--text-secondary); }
+.profile-menu-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profile-menu-row:hover:not(:disabled) { background: var(--ui-hover); }
+.profile-menu-row:focus-visible { outline: none; background: var(--ui-hover); box-shadow: var(--ui-focus-ring); }
+.profile-menu-row:disabled { opacity: 0.45; }
+.profile-menu-row-danger,
+.profile-menu-row-danger > svg { color: var(--danger); }
+
+/* A profile row: colour dot, name, check on the current one, and a kebab shown on hover or focus. */
+.profile-menu-item { display: flex; align-items: center; border-radius: var(--ui-menu-row-radius); }
+.profile-menu-item:hover,
+.profile-menu-item:focus-within { background: var(--ui-hover); }
+.profile-menu-item > .profile-menu-row { flex: 1 1 auto; width: auto; min-width: 0; }
+.profile-menu-item > .profile-menu-row:hover:not(:disabled),
+.profile-menu-item > .profile-menu-row:focus-visible { background: transparent; box-shadow: none; }
+.profile-menu-item > .profile-menu-row:focus-visible { outline: 1px solid var(--ui-line-strong); outline-offset: -1px; }
+.profile-menu-name { flex: 1 1 auto; }
+.profile-dot {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  margin: 0 2px;
+  border-radius: 50%;
+  background: var(--gradient-accent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+.profile-menu-kebab {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  margin-right: 2px;
+  border-radius: var(--ui-menu-row-radius);
+  color: var(--text-secondary);
+  opacity: 0;
+}
+.profile-menu-item:hover .profile-menu-kebab,
+.profile-menu-item:focus-within .profile-menu-kebab,
+.profile-menu-kebab[aria-expanded='true'] { opacity: 1; }
+.profile-menu-kebab:hover:not(:disabled),
+.profile-menu-kebab[aria-expanded='true'] { background: var(--ui-line); color: var(--text-primary); }
+.profile-menu-kebab:focus-visible { outline: 1px solid var(--ui-line-strong); }
+
+.profile-row-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  box-sizing: border-box;
+  min-width: 150px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--ui-menu-radius);
+  background: var(--surface-soft);
+  box-shadow: var(--ui-specular), var(--ui-menu-drop);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.profile-switcher-error { padding: 8px var(--ui-menu-row-x) 4px; color: var(--danger); font-size: 12px; }
+
+/* Narrow windows: account on top, profiles below, still 330px wide. */
+@media (max-width: 559px) {
+  .profile-menu.profile-menu-wide { width: 330px; }
+  .profile-menu-columns { flex-direction: column; }
+  .profile-menu-col + .profile-menu-col { margin-left: 0; margin-top: 6px; padding-left: 0; padding-top: 6px; border-left: 0; border-top: 1px solid var(--border); }
+}
+
+/* New profile / edit profile dialog. It renders outside Settings, so it carries the control tokens it uses. */
+.modal-overlay.profile-edit-overlay {
+  --space-4: 4px;
+  --space-12: 12px;
+  --settings-control-h: 28px;
+  --settings-fs-small: 12.5px;
+}
+.profile-edit-overlay .modal { width: 360px; }
+.profile-edit-form { display: flex; flex-direction: column; gap: 12px; }
+.profile-edit-input {
+  box-sizing: border-box;
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-control-radius);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.profile-edit-input:focus { outline: none; box-shadow: var(--ui-focus-ring); }
+.profile-edit-swatches { display: flex; flex-wrap: wrap; gap: 8px; }
+.profile-edit-swatch {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  color: white;
+}
+.profile-edit-swatch[aria-checked='true'] { box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3), 0 0 0 2px var(--ui-raised), 0 0 0 3.5px var(--text-primary); }
+.profile-edit-swatch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.profile-edit-archive { margin-right: auto; }

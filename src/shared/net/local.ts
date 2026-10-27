@@ -91,6 +91,11 @@ export interface PlusStatus {
   expiresAt?: number
   registrationId?: string
   generation?: number
+  /**
+   * Computers and phones on this account against the plan's limit, read from Mousse ID when this
+   * computer signed in. Display-only; it can be out of date until the next sign-in.
+   */
+  devices?: { used: number; limit: number }
 }
 /** A phone asking to join through Mousse ID, as `net.plus.enrollment.requests` returns it. */
 export interface PlusEnrollmentRequestView {

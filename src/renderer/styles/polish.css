@@ -571,39 +571,6 @@ html .chat-avatar.group[class*='chat-color-'] {
   background: rgba(var(--accent-rgb), 0.1);
 }
 
-/* ---------- Profile footer ---------- */
-.app .profile-switcher.profile-switcher-sidebar {
-  margin: var(--ui-gutter);
-}
-
-.app .profile-sidebar-trigger {
-  gap: 10px;
-  padding: 7px var(--ui-row-x);
-  border: 1px solid var(--ui-line);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--text-primary) 3%, transparent);
-  transition: background 0.15s, border-color 0.15s;
-}
-
-.app .profile-sidebar-trigger:hover,
-.app .profile-sidebar-trigger[aria-expanded='true'] {
-  border-color: var(--ui-line-strong);
-  background: var(--ui-hover);
-}
-
-.app .profile-sidebar-text strong {
-  font-size: 12.5px;
-  font-weight: 600;
-}
-
-.app .profile-sidebar-text > span {
-  color: var(--ui-faint);
-}
-
-.profile-avatar {
-  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.22);
-}
-
 /* ---------- Main pane chrome ---------- */
 .app .main-area > .header {
   border-bottom-color: var(--ui-line);
@@ -906,8 +873,7 @@ html .chat-dialog .chat-primary-button {
 /* ---------- Floating surfaces ---------- */
 html .threads-context-menu,
 html .navigation-rail-menu,
-html .composer-workspace-menu,
-html .profile-menu {
+html .composer-workspace-menu {
   border: 1px solid var(--ui-line-strong);
   border-radius: var(--ui-menu-radius);
   box-shadow: var(--ui-menu-drop);
@@ -1022,17 +988,12 @@ html .thread-hover-card {
 
 html .threads-context-menu,
 html .navigation-rail-menu,
-html .composer-workspace-menu,
-html .profile-menu {
+html .composer-workspace-menu {
   box-shadow: var(--ui-specular), var(--ui-menu-drop);
 }
 
 .app .threads-sidebar-tab.active {
   box-shadow: var(--ui-specular), inset 0 0 0 1px var(--ui-line-strong), 0 1px 3px rgba(0, 0, 0, 0.2);
-}
-
-.app .profile-sidebar-trigger {
-  box-shadow: var(--ui-specular);
 }
 
 .app .navigation-rail-button.active {
@@ -1145,13 +1106,8 @@ html .chat-send-button:disabled {
   box-shadow: none;
 }
 
-html .chat-avatar[class*='chat-color-']:not(.group),
-.profile-avatar {
+html .chat-avatar[class*='chat-color-']:not(.group) {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.38), inset 0 -1px 0 rgba(0, 0, 0, 0.18);
-}
-
-.profile-avatar {
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.38), 0 0 0 2px rgba(var(--accent-rgb), 0.22);
 }
 
 /* Fade the transcript itself to transparency at its visible edges. */

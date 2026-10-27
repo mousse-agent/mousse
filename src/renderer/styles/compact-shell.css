@@ -149,12 +149,6 @@ html:not(.platform-darwin) .app {
 .app .chat-resource-header { padding: 10px; }
 .app .chat-resource-tabs { padding: 5px; gap: 3px; }
 
-.profile-menu { border-radius: 8px; }
-.profile-current-card { min-height: 102px; padding: 14px 14px 10px; gap: 6px; }
-.profile-avatar-large { width: 42px; height: 42px; font-size: 17px; }
-.profile-menu-section { padding: 5px 0; }
-.profile-menu-heading { padding: 5px 12px; font-size: 11px; }
-.profile-menu-row { min-height: 34px; padding: 5px 12px; gap: 7px; font-size: 12px; }
 
 .app .threads-sidebar-scroll {
   display: flex;
