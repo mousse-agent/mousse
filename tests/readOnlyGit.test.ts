@@ -27,7 +27,7 @@ describe('read-only Git for background checks', () => {
   it('asks Git not to take optional locks, so a commit from another terminal is never refused by a background status', () => {
     const cwd = repo()
     expect(readOnlyGit(cwd, ['status', '--porcelain', '--untracked-files=all'])).toBe('?? a.txt')
-    const status = spawned.find((entry) => entry.args[0] === 'status')
+    const status = spawned.find((entry) => entry.args.includes('status'))
     expect(status?.env?.GIT_OPTIONAL_LOCKS).toBe('0')
     expect(status?.env?.PATH ?? status?.env?.Path).toBeDefined() // the rest of the environment is kept
   })
