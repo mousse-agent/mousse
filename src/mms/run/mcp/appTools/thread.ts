@@ -214,6 +214,20 @@ function assertOwnSubagentsOnly(engine: RunEngine, caller: McpCaller, threadId: 
   throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is a subagent of another thread; ${tool} reaches only the subagents below your own thread. Its parent manages it.`)
 }
 
+/**
+ * A personal bot's thread is driven by its owner and its bot engine: its walls, consent and escalation decide what it
+ * does, and its runs end by the engine's own rules. No agent sends to it, steers it or stops it from another thread.
+ */
+function assertNotBotThread(host: AppToolHost, threadId: string, tool: string): void {
+  let role: string | undefined
+  try {
+    role = host.botRole?.(threadId)
+  } catch {
+    role = undefined
+  }
+  if (role) throw new McpToolError('mousse_scope_denied', `Thread ${threadId} belongs to a bot; ${tool} cannot reach it. Its owner continues it from the Bots tab.`)
+}
+
 /** What an accepted Stop or steer returns; every other result is a refusal the caller can act on. */
 function acceptedRunCommand(result: AgentRunCommandResult, expectedRunId: string): { runId: string; sequence: number; replayed: boolean } {
   switch (result.status) {
@@ -473,6 +487,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
         // A subagent is reached through its parent: a message sent to it directly would run untracked.
         if (engine.delegations.getLineage(threadId)?.relationship === 'subagent')
           throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is a subagent; its parent reaches it with continue_subagent, and a message from here would run without its parent hearing the result.`)
+        assertNotBotThread(host, threadId, 'thread_send')
         assertTakesWork(host, threadId)
         const actor = actorOf(ctx)
         const requestKey = `thread_send:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`
@@ -622,6 +637,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
         if (!host.stopRun) return notAvailable('thread_interrupt')
         if (threadId === ctx.caller.threadId) throw new Error('thread_interrupt is for other threads; stop your own work by ending your turn.')
         // A Stop removes work, so an archived thread (which can still have a live or paused run) may be stopped.
+        assertNotBotThread(host, threadId, 'thread_interrupt')
         assertOwnSubagentsOnly(engine, ctx.caller, threadId, 'thread_interrupt')
         const actor = actorOf(ctx)
         const result = acceptedRunCommand(await host.stopRun(threadId, runId, { clientRequestId: `thread_interrupt:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`, actor }), runId)
@@ -652,6 +668,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
         if (typeof args.text !== 'string' || !args.text.trim()) throw new Error('thread_steer requires text')
         if (!host.steerRun) return notAvailable('thread_steer')
         if (threadId === ctx.caller.threadId) throw new Error('thread_steer is for other threads.')
+        assertNotBotThread(host, threadId, 'thread_steer')
         assertOwnSubagentsOnly(engine, ctx.caller, threadId, 'thread_steer')
         assertTakesWork(host, threadId)
         const actor = actorOf(ctx)
