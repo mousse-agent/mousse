@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { linkSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs'
+import { lstat, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { measureTree } from '../src/mms/lifecycle/diskMeasure'
+import { basename, join } from 'node:path'
+import { measureTree, skipKey } from '../src/mms/lifecycle/diskMeasure'
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) })
@@ -64,6 +65,51 @@ describe('measureTree', () => {
   })
 
   it('measures a missing root as nothing', async () => {
-    expect(await measureTree(join(temp(), 'absent'), { mode: 'reclaim', budgetMs: 5000 })).toEqual({ bytes: 0, files: 0, estimated: false, partial: false })
+    expect(await measureTree(join(temp(), 'absent'), { mode: 'reclaim', budgetMs: 5000 })).toEqual({ bytes: 0, files: 0, entries: 0, estimated: false, partial: false, unreadable: 0 })
+  })
+
+  it('stops at the entry budget even when the clock never advances, and says why', async () => {
+    const root = temp()
+    for (let index = 0; index < 30; index++) writeFileSync(join(root, `f${index}.txt`), 'x')
+    const measured = await measureTree(root, { mode: 'usage', budgetMs: 60_000, maxEntries: 10, now: () => 0 })
+    expect(measured).toMatchObject({ partial: true, stopped: 'entries', entries: 10 })
+    expect(measured.files).toBeLessThan(30)
+    const whole = await measureTree(root, { mode: 'usage', budgetMs: 60_000, maxEntries: 1000 })
+    expect(whole).toMatchObject({ partial: false, files: 30 })
+    expect(whole.stopped).toBeUndefined()
+  })
+
+  it('leaves out folders named in skip, however the path is cased on Windows', async () => {
+    const root = temp(); mkdirSync(join(root, 'keep')); mkdirSync(join(root, 'other'))
+    writeFileSync(join(root, 'keep', 'a.txt'), 'x'); writeFileSync(join(root, 'other', 'b.txt'), 'x')
+    const skip = new Set([skipKey(join(root, 'other'))])
+    expect((await measureTree(root, { mode: 'usage', budgetMs: 5000, skip })).files).toBe(1)
+    expect((await measureTree(root, { mode: 'usage', budgetMs: 5000 })).files).toBe(2)
+    if (process.platform === 'win32') expect(skipKey(join(root, 'OTHER'))).toBe(skipKey(join(root, 'other')))
+  })
+
+  it('ignores an entry that disappears during the walk and counts one it cannot read', async () => {
+    const root = temp(); writeFileSync(join(root, 'ok.txt'), 'x'); writeFileSync(join(root, 'gone.txt'), 'x'); writeFileSync(join(root, 'locked.txt'), 'x')
+    const failing = (names: Record<string, string>) => ({
+      readdir: (path: string) => readdir(path),
+      lstat: (async (path: string) => {
+        const error = names[basename(path)]
+        if (error) throw Object.assign(new Error(error), { code: error })
+        return lstat(path)
+      }) as typeof lstat
+    })
+    const vanished = await measureTree(root, { mode: 'usage', budgetMs: 5000, fs: failing({ 'gone.txt': 'ENOENT' }) })
+    expect(vanished).toMatchObject({ files: 2, unreadable: 0, partial: false })
+    const locked = await measureTree(root, { mode: 'usage', budgetMs: 5000, fs: failing({ 'locked.txt': 'EBUSY' }) })
+    expect(locked).toMatchObject({ files: 2, unreadable: 1, partial: true })
+    expect(locked.stopped).toBeUndefined()
+  })
+
+  it.runIf(process.platform === 'win32')('sizes a tree whose paths are longer than the classic 260 characters', async () => {
+    const root = temp(); let deep = root
+    for (let level = 0; level < 8; level++) deep = join(deep, 'segment-'.padEnd(40, 'x') + level)
+    mkdirSync(deep, { recursive: true }); writeFileSync(join(deep, 'deep.txt'), 'x'.repeat(100))
+    expect(deep.length).toBeGreaterThan(300)
+    expect(await measureTree(root, { mode: 'usage', budgetMs: 5000 })).toMatchObject({ files: 1, bytes: 100, unreadable: 0, partial: false })
   })
 })
