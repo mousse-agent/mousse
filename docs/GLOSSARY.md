@@ -23,6 +23,16 @@ Use these terms in issues, PRs, comments, and docs. If you need a term that is n
 - **Background work:** agents and shells a provider started that keep running after the turn that started them ended. Claude keeps one live process per thread so they survive. While a thread has background work it shows Waiting, and a subagent's task waits too.
 - **Continuation run:** a run of a thread that records a turn the provider started on its own, because background work finished and the provider wants to read the report. It opens with a short note and ends at the provider's result.
 - **Workflow:** a published sequence of steps that can run from the canvas, chat, CLI, channels, or schedules.
+- **Bot:** an agent a person sets up once to do one job on its own, within permissions they approved. A personal bot runs only for its owner, on the owner's own providers.
+- **Space bot:** a bot a member adds to a Space, which answers in the Space's chat. Its code lives in `bots/space/`, apart from personal bots.
+- **Grant:** what a bot's owner approved: the tools, folders (read-only or writable), skills and MCP tools the bot may use, and its limits. The bot works inside its grant without asking.
+- **Wall:** the point where a bot needs something its grant does not cover, such as another tool, another folder or more time. Its dispatch ends, and the bot waits for its owner's answer.
+- **Escalation:** a bot asking its owner for something outside its grant on its own initiative. The owner answers it like a wall.
+- **Activation:** one run of a bot, from its trigger (by hand, a schedule or a channel message) to its end. It starts on a fresh thread and may take several dispatches.
+- **Dispatch:** one turn an activation sends to a provider. A wall ends a dispatch; the owner's answer starts the next one on the same thread.
+- **Context thread:** a thread a bot keeps across activations and consults for background, such as notes on a project. The bot's main thread asks it questions; it never acts by itself.
+- **Owner identity:** the account a bot's owner confirmed on a channel, so the bot answers its owner there and nobody else.
+- **Scratch folder:** a private folder Mousse makes for each activation, outside the bot's folders, where its commands run and keep temporary files. Mousse deletes it when the activation ends.
 - **Channel:** an outside chat connection, such as Telegram, Discord, or a webhook, that sends messages to Mousse and gets replies.
 - **Mousse Net:** networking between Mousse installations. It covers Bridge and Spaces.
 - **Bridge:** one person controlling agents on several of their own machines from one place.
