@@ -416,11 +416,19 @@ export class RunStore {
     return row ? toReceipt(row) : null
   }
 
-  /** Every receipt of one command kind, oldest first (boot repair of a command that creates something outside this database). */
-  listReceiptsByKind(commandKind: string): ReceiptRecord[] {
+  /**
+   * The `thread_create` receipts made since `sinceIso` whose thread has no completion marker (an `agent.action` event
+   * `created_thread`), oldest first: what boot repair looks at, in one query that reads no event of a finished creation.
+   */
+  listUnfinishedThreadCreations(sinceIso: string): ReceiptRecord[] {
     return this.db
-      .statement('SELECT * FROM receipts WHERE command_kind = ? ORDER BY created_at, client_request_id')
-      .all(commandKind)
+      .statement(
+        `SELECT * FROM receipts r WHERE r.command_kind = 'thread_create' AND r.created_at >= ?
+           AND NOT EXISTS (SELECT 1 FROM thread_events e WHERE e.thread_id = json_extract(r.result, '$.threadId')
+             AND e.type = 'agent.action' AND json_extract(e.payload, '$.action') = 'created_thread')
+         ORDER BY r.created_at, r.client_request_id`
+      )
+      .all(sinceIso)
       .map(toReceipt)
   }
 

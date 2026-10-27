@@ -59,7 +59,13 @@ export interface AgentCreatedThread {
   threadId: string
   projectId: string
   title: string
+  /** What was asked for and recorded on the thread. */
   workspace: 'project' | 'new_worktree'
+  /**
+   * Where the thread really works: on a Git project a turn that edits gets a worktree of its own, whichever workspace was
+   * asked for; on any other project it works in the project folder.
+   */
+  runsIn: 'own_worktree' | 'project_folder'
   /** The model the thread runs; null: the profile's default. */
   model: { instanceId: string; model: string } | null
   /** The mode the thread's turns run in: no wider than the creator's. */
@@ -168,8 +174,13 @@ export interface AppToolHost extends DelegationToolsHost {
    * the level the caller's credential was granted.
    */
   createThread?(input: AgentThreadRequest, options: { clientRequestId: string; actor: AgentActor; accessLevel: AgentAccessLevel }): Promise<AgentCreatedThread>
-  /** The thread a `clientRequestId` already created in full, found without making anything; undefined when it made none yet. */
-  earlierCreation?(clientRequestId: string): AgentCreatedThread | undefined
+  /**
+   * The key has a stored creation already: a retry finishes that one thread (or its first message) and does not use up a place
+   * under the caller's cap on new threads.
+   */
+  creationStarted?(clientRequestId: string): boolean
+  /** Adds a note row to the thread's transcript (the creator's: what it launched, and on which model). */
+  noteOnThread?(threadId: string, text: string): void
   /** Stops run `runId` of another thread and what is below it, as `actor`'s Stop (`thread_interrupt`). */
   stopRun?(threadId: string, runId: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult>
   /** Steers run `runId` of another thread with `text` as `actor`'s message (`thread_steer`). */

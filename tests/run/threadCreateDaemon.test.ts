@@ -5,15 +5,17 @@
  * message, the hop chain and the per-run cap, and a creation that is retried, raced, or interrupted by a crash at
  * each step.
  */
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readAgentThreadReceipt } from '../../src/mms/orchestrator/agentThreadIntent'
+import { findUnstartedThread, isThreadStarted } from '../../src/shared/threadTitle'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
 import { agentMessageText, TURN_TOKEN_KEY, type AgentCreatedThread } from '../../src/mms/run/mcp/appTools'
-import { THREAD_CREATE_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
+import { THREAD_CREATE_MAX_ACTIVE_PER_THREAD, THREAD_CREATE_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import type { PermissionMode } from '../../src/shared/permissionMode'
@@ -25,23 +27,43 @@ import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 vi.setConfig({ testTimeout: 60_000 })
 
 type Mcp = { url: string; token: string; turnToken?: string }
-type Script = (input: TurnInput, mcp: Mcp | undefined, d: Phase6Daemon) => Promise<string>
+type Script = (input: TurnInput, mcp: Mcp | undefined, d: Phase6Daemon, adapter: VendorAdapter) => Promise<string>
 type Rpc = Awaited<ReturnType<typeof rpc>>
 
 /** A provider stand-in whose script gets the turn's MCP bridge. */
 class VendorAdapter implements ProviderAdapter {
   readonly turns: TurnInput[] = []
-  constructor(readonly driver: ProviderDriverKind, readonly capabilities: ProviderCapabilities, private readonly script: (input: TurnInput, host: AdapterHost) => Promise<string>) {}
+  readonly abortedRuns = new Set<string>()
+  private readonly interruptListeners = new Set<() => void>()
+  constructor(readonly driver: ProviderDriverKind, readonly capabilities: ProviderCapabilities, private readonly script: (input: TurnInput, host: AdapterHost, adapter: VendorAdapter) => Promise<string>) {}
 
   configured(): boolean {
     return true
+  }
+
+  /** Holds the turn until `release` settles or the runtime is interrupted (a Stop), the way a live turn would end. */
+  async hold(input: TurnInput, release: Promise<void>): Promise<void> {
+    await Promise.race([
+      release,
+      new Promise<void>((resolve) => {
+        const listener = (): void => {
+          this.abortedRuns.add(input.runId)
+          this.interruptListeners.delete(listener)
+          resolve()
+        }
+        this.interruptListeners.add(listener)
+        // A Stop aborts the turn of its own run only.
+        if (input.signal.aborted) listener()
+        else input.signal.addEventListener('abort', listener, { once: true })
+      })
+    ])
   }
 
   async startTurn(input: TurnInput, sink: TurnSink, _ctl: TurnControl, host: AdapterHost): Promise<TurnResult> {
     this.turns.push(input)
     const providerRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model }
     sink.providerRef(providerRef)
-    const text = await this.script(input, host)
+    const text = await this.script(input, host, this)
     sink.text({ phase: 'complete', content: text, contentIndex: 0 })
     const native = this.capabilities.historyInjection === 'native'
     if (!native) host.context.nativeHistoryAfterTurn(text)
@@ -60,6 +82,12 @@ class VendorAdapter implements ProviderAdapter {
   async interrupt(): Promise<'interrupted' | 'not_active'> {
     return 'not_active'
   }
+}
+
+function deferred<T = void>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => { resolve = done })
+  return { promise, resolve }
 }
 
 async function rpc(mcp: Mcp, method: string, params: Record<string, unknown>, id = 1) {
@@ -108,9 +136,9 @@ describe('thread_create end to end (SPEC §15.1)', () => {
     process.env.MOUSSE_HOME = home
     mkdirSync(join(home, 'project'))
     let created: Phase6Daemon | undefined
-    const adapter = new VendorAdapter('claude', CLAUDE_SUBSCRIPTION_CAPABILITIES, async (input, host) => {
+    const adapter = new VendorAdapter('claude', CLAUDE_SUBSCRIPTION_CAPABILITIES, async (input, host, self) => {
       const bridge = host.bridge
-      return script(input, bridge?.mcp ? { ...bridge.mcp, turnToken: bridge.turnToken } : undefined, created!)
+      return script(input, bridge?.mcp ? { ...bridge.mcp, turnToken: bridge.turnToken } : undefined, created!, self)
     })
     const d = phase6Daemon(home, [adapter])
     created = d
@@ -122,6 +150,12 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       await d.stop()
     })
     const project = d.projects.openProject(join(home, 'project'))
+    // A Git project (with one commit) for the creations that ask for, or run in, a worktree. The creators live in the plain one.
+    mkdirSync(join(home, 'repo'))
+    const git = (...args: string[]) => execFileSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', ...args], { cwd: join(home!, 'repo'), stdio: 'ignore' })
+    git('init', '-q')
+    git('commit', '-q', '--allow-empty', '-m', 'init')
+    const repo = d.projects.openProject(join(home, 'repo'))
     const thread = (name: string, mode?: PermissionMode) => {
       const made = d.store.createThread(name, project.id)
       d.orch.setThreadModelOverride(made.id, MODEL)
@@ -129,6 +163,7 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       return made
     }
     const parent = thread('Parent')
+    const other = thread('Other work')
     const setProfile = (next: AgentAccessLevel, projectIds: string[] = []): void => {
       ;(d.orch as unknown as { settingsStore: { get(): { agentAccess: unknown } } }).settingsStore.get().agentAccess = { level: next, projectIds, answerApprovals: false }
     }
@@ -141,14 +176,14 @@ describe('thread_create end to end (SPEC §15.1)', () => {
     const turnsOf = (threadId: string) => adapter.turns.filter((turn) => turn.threadId === threadId)
     const run = (threadId: string, prompt: string, clientRequestId: string) => d.orch.send(prompt, false, { threadId, clientRequestId })
     return {
-      d, adapter, credentials, server, project, parent, thread, setProfile, events, marker, messages, launchedBy, turnsOf, run,
+      d, adapter, credentials, server, project, repo, parent, other, thread, setProfile, events, marker, messages, launchedBy, turnsOf, run,
       attach: async () => { await server.start(); d.orch.setMcpAttachment(server) },
       create: (mcp: Mcp, args: Record<string, unknown> = {}) => call(mcp, 'thread_create', { projectId: project.id, ...args })
     }
   }
 
   describe('what the new thread is', () => {
-    it('is made in the project folder on the creator\'s model, launched by the creator and not nested under it, with the creator\'s mode and an audit event and row', async () => {
+    it('is made in the project on the creator\'s model, launched by the creator and not nested under it, with the creator\'s mode, a ceiling below manage, an audit event and a row on both threads', async () => {
       const seen: { result?: AgentCreatedThread } = {}
       const w = world(async (input, mcp) => {
         if (input.threadId === w.parent.id) seen.result = parse<AgentCreatedThread>(await w.create(mcp!, { title: 'Audit the logs', clientRequestId: 'c1' }))
@@ -162,8 +197,8 @@ describe('thread_create end to end (SPEC §15.1)', () => {
 
       const result = seen.result!
       const made = w.d.store.getThread(result.threadId)!
-      expect(result).toMatchObject({ projectId: w.project.id, title: 'Audit the logs', workspace: 'project', permissionMode: 'ask', replayed: false, model: { instanceId: 'claude', model: 'vendor-model' } })
-      expect(made).toMatchObject({ name: 'Audit the logs', projectId: w.project.id, createdByThreadId: w.parent.id, permissionMode: 'ask', accessCeiling: 'manage', modelOverride: { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'vendor-model' } })
+      expect(result).toMatchObject({ projectId: w.project.id, title: 'Audit the logs', workspace: 'project', runsIn: 'project_folder', permissionMode: 'ask', replayed: false, model: { instanceId: 'claude', model: 'vendor-model' } })
+      expect(made).toMatchObject({ name: 'Audit the logs', projectId: w.project.id, createdByThreadId: w.parent.id, permissionMode: 'ask', accessCeiling: 'read', modelOverride: { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'vendor-model' } })
       expect(made.worktreeEnabled).toBeUndefined()
       // Launched, never owned: no lineage, no owner in the lifecycle store, so it is neither nested under nor deleted with the creator.
       expect(made.lineage).toBeUndefined()
@@ -176,16 +211,20 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       expect(w.messages(made.id).filter((message) => message.role === 'system').map((message) => message.content)).toEqual([
         `Changed by an agent in thread «Parent» (${w.parent.id}): created this thread`
       ])
+      // The person watching the creator sees what it chose: the model, the mode and the place.
+      expect(w.messages(w.parent.id).filter((message) => message.role === 'system').map((message) => message.content)).toEqual([
+        `Created thread «Audit the logs» (${made.id}) in project ${w.project.id}: claude / vendor-model, ask mode, the project folder.`
+      ])
       // Nothing ran: no first message was asked for.
       expect(w.d.engine.listRuns(made.id)).toEqual([])
     })
 
-    it('a creator in `full` or the default mode leaves the thread on the profile\'s default; "new_worktree" turns the worktree on; no title gives the default name', async () => {
+    it('stores the creator\'s mode whatever the profile default is, so a default loosened later cannot widen the thread past its creator', async () => {
       const ids: { full?: string } = {}
       const seen: Record<string, AgentCreatedThread> = {}
       const w = world(async (input, mcp) => {
         if (input.threadId === w.parent.id) seen.fromDefault = parse<AgentCreatedThread>(await w.create(mcp!, { clientRequestId: 'd1' }))
-        if (input.threadId === ids.full) seen.fromFull = parse<AgentCreatedThread>(await w.create(mcp!, { workspace: 'new_worktree', clientRequestId: 'f1' }))
+        if (input.threadId === ids.full) seen.fromFull = parse<AgentCreatedThread>(await w.create(mcp!, { clientRequestId: 'f1' }))
         return 'ok'
       })
       const full = w.thread('Full caller', 'full')
@@ -194,14 +233,77 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       await w.run(w.parent.id, GO, 'go-1')
       await w.run(full.id, GO, 'go-2')
 
-      // The profile default is Auto-accept edits: a `full` creator cannot widen it, and a default one leaves it alone.
+      // The profile default is Auto-accept edits: a creator in that mode stores it, and a `full` one cannot widen it.
       for (const result of Object.values(seen)) expect(result.permissionMode).toBe('accept_edits')
+      for (const result of Object.values(seen)) expect(w.d.store.getThread(result.threadId)?.permissionMode).toBe('accept_edits')
       expect(w.d.store.getThread(seen.fromDefault.threadId)).toMatchObject({ name: 'New Thread', createdByThreadId: w.parent.id })
-      expect(w.d.store.getThread(seen.fromDefault.threadId)?.permissionMode).toBeUndefined()
-      expect(w.d.store.getThread(seen.fromDefault.threadId)?.worktreeEnabled).toBeUndefined()
-      expect(w.d.store.getThread(seen.fromFull.threadId)).toMatchObject({ createdByThreadId: full.id, worktreeEnabled: true })
-      expect(w.d.store.getThread(seen.fromFull.threadId)?.permissionMode).toBeUndefined()
-      expect(seen.fromFull.workspace).toBe('new_worktree')
+      // The person loosens the default: the launched threads, their later turns and their forks keep the creator's mode.
+      ;(w.d.orch as unknown as { settingsStore: { get(): { permissions: { defaultMode: string } } } }).settingsStore.get().permissions.defaultMode = 'full'
+      for (const result of Object.values(seen)) expect(w.d.orch.requestedPermissionMode(result.threadId)).toBe('accept_edits')
+    })
+
+    it('is a started thread: listed from the start, and the app\'s New chat never takes it over as an empty draft', async () => {
+      const seen: { made?: AgentCreatedThread } = {}
+      const w = world(async (input, mcp) => {
+        // No title and no message: the shape that looked like an empty draft.
+        if (input.threadId === w.parent.id) seen.made = parse<AgentCreatedThread>(await w.create(mcp!, { clientRequestId: 'bare' }))
+        return 'ok'
+      })
+      await w.attach()
+      await w.run(w.parent.id, GO, 'go')
+      const made = w.d.store.getThread(seen.made!.threadId)!
+      expect(made.name).toBe('New Thread')
+      expect(made.startedAt).toBeDefined()
+      expect(isThreadStarted(made)).toBe(true)
+      // What the app's "New chat" asks: the newest empty draft of the project. This thread is not one.
+      expect(findUnstartedThread(w.d.store.listAllThreads(), w.project.id)).toBeUndefined()
+      // A draft a person already had stays theirs.
+      const draft = w.d.store.createThread('New Thread', w.project.id)
+      expect(findUnstartedThread(w.d.store.listAllThreads(), w.project.id)?.id).toBe(draft.id)
+    })
+
+    it('workspace says what really happens: new_worktree needs a Git project, and the result reports where the thread runs', async () => {
+      const seen: Record<string, Rpc> = {}
+      const w = world(async (input, mcp) => {
+        if (input.threadId !== w.parent.id) return 'ok'
+        seen.plainWorktree = await w.create(mcp!, { workspace: 'new_worktree', clientRequestId: 'pw' })
+        seen.gitWorktree = await call(mcp!, 'thread_create', { projectId: w.repo.id, workspace: 'new_worktree', clientRequestId: 'gw' })
+        seen.gitProject = await call(mcp!, 'thread_create', { projectId: w.repo.id, workspace: 'project', clientRequestId: 'gp' })
+        return 'ok'
+      })
+      await w.attach()
+      await w.run(w.parent.id, GO, 'go')
+
+      // A project that is not a Git repository cannot give a worktree: nothing is created or recorded.
+      expect(refusal(seen.plainWorktree)).toMatch(/needs a Git project/)
+      expect(w.d.engine.store.getReceipt(`thread_create:${w.parent.id}:mcp:pw`)).toBeNull()
+      const worktree = parse<AgentCreatedThread>(seen.gitWorktree)
+      expect(worktree).toMatchObject({ workspace: 'new_worktree', runsIn: 'own_worktree' })
+      expect(w.d.store.getThread(worktree.threadId)?.worktreeEnabled).toBe(true)
+      // On a Git project an editing turn gets a worktree of its own whichever was asked for, and the result says so.
+      const project = parse<AgentCreatedThread>(seen.gitProject)
+      expect(project).toMatchObject({ workspace: 'project', runsIn: 'own_worktree' })
+      expect(w.d.store.getThread(project.threadId)?.worktreeEnabled).toBeUndefined()
+      expect(w.launchedBy(w.parent.id)).toHaveLength(2)
+    })
+
+    it('the first turn runs where the result says: in a worktree on a Git project, in the project folder on any other', async () => {
+      const seen: Record<string, AgentCreatedThread> = {}
+      const w = world(async (input, mcp) => {
+        if (input.threadId !== w.parent.id) return 'ok'
+        seen.plain = parse<AgentCreatedThread>(await w.create(mcp!, { firstMessage: 'Edit the files', clientRequestId: 'run-plain' }))
+        seen.git = parse<AgentCreatedThread>(await call(mcp!, 'thread_create', { projectId: w.repo.id, firstMessage: 'Edit the files', clientRequestId: 'run-git' }))
+        return 'ok'
+      })
+      await w.attach()
+      await w.run(w.parent.id, GO, 'go')
+      for (const made of Object.values(seen)) await waitFor(() => w.d.engine.getRun((made.firstMessage as { runId: string }).runId)?.status === 'completed', 'the first run')
+      const norm = (path: string | null) => (path ?? '').replace(/\\/g, '/').toLowerCase()
+      expect(norm(w.turnsOf(seen.plain.threadId)[0].cwd)).toBe(norm(join(home!, 'project')))
+      expect(seen.plain.runsIn).toBe('project_folder')
+      expect(norm(w.turnsOf(seen.git.threadId)[0].cwd)).toContain(seen.git.threadId.toLowerCase())
+      expect(norm(w.turnsOf(seen.git.threadId)[0].cwd)).not.toBe(norm(join(home!, 'repo')))
+      expect(seen.git.runsIn).toBe('own_worktree')
     })
 
     it('existing_worktree is refused with no thread, no receipt and no event', async () => {
@@ -229,18 +331,34 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       expect(w.launchedBy(w.parent.id)).toEqual([])
       expect(w.d.engine.store.getReceipt(`thread_create:${w.parent.id}:mcp:np`)).toBeNull()
     })
+  })
 
-    it('the level the thread\'s agents get stays with the profile: lowered after the creation, the thread\'s next turn is granted less', async () => {
-      const seen: { made?: AgentCreatedThread } = {}
+  describe('a launched thread cannot launch', () => {
+    it('its agents are granted read at most: thread_create and thread_send are not listed and are refused', async () => {
+      const seen: { made?: AgentCreatedThread; listed?: string[]; create?: Rpc; send?: Rpc } = {}
       const w = world(async (input, mcp) => {
         if (input.threadId === w.parent.id) seen.made = parse<AgentCreatedThread>(await w.create(mcp!, { clientRequestId: 'lv' }))
+        else if (seen.made && input.threadId === seen.made.threadId) {
+          seen.listed = (await rpc(mcp!, 'tools/list', {})).result!.tools!.map((tool) => tool.name)
+          seen.create = await w.create(mcp!, { clientRequestId: 'child-create' })
+          seen.send = await call(mcp!, 'thread_send', { threadId: w.parent.id, content: 'hello' })
+        }
         return 'ok'
       })
       await w.attach()
       await w.run(w.parent.id, GO, 'go')
       const id = seen.made!.threadId
-      await w.run(id, 'first by hand', 'hand-1')
-      expect(w.credentials.listForThread(id).map((row) => row.accessLevel).at(-1)).toBe('manage')
+      await w.run(id, 'work by hand', 'hand-1')
+      // The profile says manage, and a person drives the thread: its agents are still held to read.
+      expect(w.credentials.listForThread(id).map((row) => row.accessLevel).at(-1)).toBe('read')
+      expect(seen.listed).not.toContain('thread_create')
+      expect(seen.listed).not.toContain('thread_send')
+      expect(seen.listed).toContain('thread_wait')
+      for (const reply of [seen.create!, seen.send!]) expect(reply.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
+      expect(w.launchedBy(id)).toEqual([])
+      // The ceiling is stored on the thread, so forks and subagents of it start from it.
+      expect(w.d.store.getThread(id)?.accessCeiling).toBe('read')
+      // And lowering the profile still lowers it further.
       w.setProfile('lineage')
       await w.run(id, 'second by hand', 'hand-2')
       expect(w.credentials.listForThread(id).map((row) => row.accessLevel).at(-1)).toBe('lineage')
@@ -315,35 +433,43 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       expect(w.events(seen.fromAsk.threadId, 'agent.action').map((event) => (event.payload as { action: string }).action)).toEqual(['created_thread', 'sent_message'])
     })
 
-    it('an agent message in a row counts: a chain of creations with first messages ends at the hop limit, before anything is made', async () => {
-      const chain: Array<{ hops: number; made?: AgentCreatedThread; refused?: Rpc; bare?: AgentCreatedThread }> = []
+    it('an agent message in a row counts: a creation at the hop limit is refused before anything is made, and so is one from a run that carries on that chain', async () => {
+      const seen: { refused?: Rpc; bare?: AgentCreatedThread; hopsOf?: Record<string, number | undefined>; continued?: { threadId: string; runId: string } } = {}
       const w = world(async (input, mcp, d) => {
         const hops = d.engine.getRun(input.runId)?.outcome?.agentHops ?? 0
-        const step: (typeof chain)[number] = { hops }
-        const reply = await w.create(mcp!, { firstMessage: `from a run with ${hops}`, clientRequestId: `chain-${hops}` })
-        if (reply.error) {
-          step.refused = reply
-          // The limit is on agent messages: a thread made without one is no hop.
-          step.bare = parse<AgentCreatedThread>(await w.create(mcp!, { clientRequestId: `bare-${hops}` }))
-        } else step.made = parse<AgentCreatedThread>(reply)
-        chain.push(step)
-        return 'ok'
+        if (hops < 3) {
+          // Two agents pass work back and forth: the runs they start have 1, 2 and 3 agent messages behind them.
+          const target = input.threadId === w.parent.id ? w.other.id : w.parent.id
+          await call(mcp!, 'thread_send', { threadId: target, content: `hop from a run with ${hops}` })
+          return 'sent'
+        }
+        seen.continued = { threadId: input.threadId, runId: input.runId }
+        seen.refused = await w.create(mcp!, { firstMessage: 'one more', clientRequestId: 'chain-3' })
+        // The limit is on agent messages: a thread made without one is no hop.
+        seen.bare = parse<AgentCreatedThread>(await w.create(mcp!, { clientRequestId: 'bare-3' }))
+        return 'end'
       })
       await w.attach()
-      // A person starts the chain: its run has no agent hops; the three runs it starts have 1, 2 and 3.
       await w.run(w.parent.id, GO, 'go')
-      await waitFor(() => chain.length === 4, 'the chain to stop', 30_000)
+      await waitFor(() => seen.bare !== undefined, 'the chain to reach the limit', 30_000)
 
-      const byHops = [...chain].sort((a, b) => a.hops - b.hops)
-      expect(byHops.map((step) => step.hops)).toEqual([0, 1, 2, 3])
-      expect(byHops.slice(0, 3).every((step) => step.made?.firstMessage)).toBe(true)
-      const stopped = byHops[3]
-      expect(stopped.refused!.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'agent_hops_exceeded' } })
-      // Refused before the receipt and before any thread: the only thread the fourth creator made is the bare one.
-      const creatorOfFourth = byHops[2].made!.threadId
-      expect(w.launchedBy(creatorOfFourth).map((entry) => entry.id)).toEqual([stopped.bare!.threadId])
-      expect(w.d.engine.store.getReceipt(`thread_create:${creatorOfFourth}:mcp:chain-3`)).toBeNull()
-      expect(byHops.slice(0, 3).map((step) => w.d.engine.getRun((step.made!.firstMessage as { runId: string }).runId)?.outcome?.agentHops)).toEqual([1, 2, 3])
+      expect(seen.refused!.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'agent_hops_exceeded' } })
+      // Refused before the receipt and before any thread: the only thread the run at the limit made is the bare one.
+      expect(w.launchedBy(seen.continued!.threadId).map((entry) => entry.id)).toEqual([seen.bare!.threadId])
+      expect(w.d.engine.store.getReceipt(`thread_create:${seen.continued!.threadId}:mcp:chain-3`)).toBeNull()
+
+      // A provider's own continuation of that run, a wake that delivers a subagent's result and the resume after a usage pause
+      // carry the count on: they are the same chain of agent work, so a creation from them is refused too.
+      const continuation = await w.d.engine.dispatch({ kind: 'send', threadId: seen.continued!.threadId, clientRequestId: 'continuation:hops', source: 'provider-continuation' })
+      if (continuation.status !== 'accepted') throw new Error('the continuation was not accepted')
+      expect(w.d.engine.getRun(continuation.runId)?.outcome).toMatchObject({ agentHops: 3 })
+      expect(w.d.engine.getRun(continuation.runId)?.outcome?.sentByAgent).toBeUndefined()
+      await expect(w.d.orch.mcpToolHost().createThread!({ projectId: w.project.id, workspace: 'project', firstMessage: 'again' }, {
+        clientRequestId: 'chain-continued',
+        actor: { kind: 'agent', threadId: seen.continued!.threadId, runId: continuation.runId, toolCallId: 'mcp:chain-continued' },
+        accessLevel: 'manage'
+      })).rejects.toMatchObject({ code: 'agent_hops_exceeded' })
+      expect(w.d.engine.store.getReceipt('chain-continued')).toBeNull()
     })
   })
 
@@ -360,6 +486,75 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       expect(results.slice(0, THREAD_CREATE_MAX_PER_RUN).every((reply) => !reply.error && !reply.result?.isError)).toBe(true)
       expect(refusal(results.at(-1)!)).toMatch(new RegExp(`limited to ${THREAD_CREATE_MAX_PER_RUN} threads per run`))
       expect(w.launchedBy(w.parent.id)).toHaveLength(THREAD_CREATE_MAX_PER_RUN)
+    })
+  })
+
+  describe('the cap on launched threads that are still working', () => {
+    it('holds across runs of the creator, unlike the per-run count: a fresh run is refused while enough of its launched threads have work', async () => {
+      const replies: Rpc[] = []
+      const w = world(async (input, mcp) => {
+        if (input.threadId !== w.parent.id) return 'ok'
+        // Bare threads: the test gives each one queued work, so no turn occupies the worker.
+        for (let index = 0; index < THREAD_CREATE_MAX_PER_RUN; index += 1) replies.push(await w.create(mcp!, { clientRequestId: `${input.prompt}-${index}` }))
+        return 'ok'
+      })
+      await w.attach()
+      const giveWork = async () => {
+        for (const launched of w.launchedBy(w.parent.id)) {
+          if (w.d.engine.listRuns(launched.id).length) continue
+          const queued = await w.d.engine.dispatch({ kind: 'send', threadId: launched.id, clientRequestId: `work:${launched.id}`, source: 'gui' })
+          if (queued.status !== 'accepted') throw new Error('send rejected')
+        }
+      }
+      // Two runs of the creator, five threads each: ten launched threads have a queued run.
+      await w.run(w.parent.id, 'run-a', 'go-a')
+      await giveWork()
+      await w.run(w.parent.id, 'run-b', 'go-b')
+      await giveWork()
+      expect(replies.every((reply) => !reply.error && !reply.result?.isError)).toBe(true)
+      expect(w.launchedBy(w.parent.id)).toHaveLength(THREAD_CREATE_MAX_ACTIVE_PER_THREAD)
+      // A third run has a fresh per-run count and is still refused: the launched threads have work.
+      replies.length = 0
+      await w.run(w.parent.id, 'run-c', 'go-c')
+      expect(refusal(replies[0])).toMatch(/still working/)
+      expect(replies[0].error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'creation_limit' } })
+      expect(w.launchedBy(w.parent.id)).toHaveLength(THREAD_CREATE_MAX_ACTIVE_PER_THREAD)
+      // Once their work is over the creator may launch again.
+      for (const run of w.d.engine.store.listNonTerminalRuns().filter((entry) => entry.threadId !== w.parent.id)) w.d.engine.markTerminal(run.runId, 'cancelled')
+      replies.length = 0
+      await w.run(w.parent.id, 'run-d', 'go-d')
+      expect(replies.slice(0, THREAD_CREATE_MAX_PER_RUN).every((reply) => !reply.error && !reply.result?.isError)).toBe(true)
+    })
+
+    it('a person\'s Stop of the creator stops the launched threads that run work an agent started, and leaves one a person is working in', async () => {
+      const release = deferred()
+      const seen: { made?: AgentCreatedThread[] } = {}
+      const w = world(async (input, mcp, _d, adapter) => {
+        if (input.threadId === w.parent.id) {
+          seen.made = [
+            parse<AgentCreatedThread>(await w.create(mcp!, { firstMessage: 'Long task A', clientRequestId: 'a' })),
+            parse<AgentCreatedThread>(await w.create(mcp!, { firstMessage: 'Quick task B', clientRequestId: 'b' }))
+          ]
+          return 'launched'
+        }
+        if (input.prompt.includes('Long')) await adapter.hold(input, release.promise)
+        return 'worked'
+      })
+      await w.attach()
+      await w.run(w.parent.id, GO, 'go')
+      const [a, b] = seen.made!
+      const aRun = (a.firstMessage as { runId: string }).runId
+      await waitFor(() => w.d.engine.getRun(aRun)?.status === 'running', 'the launched turn')
+      await waitFor(() => w.d.engine.getRun((b.firstMessage as { runId: string }).runId)?.status === 'completed', 'the quick launched turn')
+      // A person starts working in B: the work there is theirs.
+      await w.d.orch.send('Long job of my own', false, { threadId: b.threadId, clientRequestId: 'person-b', awaitMode: 'ack' })
+      await waitFor(() => w.turnsOf(b.threadId).length === 2, 'the person\'s turn in B')
+
+      await w.d.orch.stopThread(w.parent.id, 'user', { clientRequestId: 'person-stop' })
+      await waitFor(() => w.d.engine.getRun(aRun)?.status !== 'running', 'the launched run to stop')
+      expect(w.adapter.abortedRuns.has(aRun)).toBe(true)
+      expect(w.d.engine.getActiveRun(b.threadId)?.status).toBe('running')
+      release.resolve()
     })
   })
 
@@ -472,7 +667,7 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       const real = store.writeJsonAtomic.bind(store)
       let armed = true
       vi.spyOn(store, 'writeJsonAtomic').mockImplementation((path: string, value: unknown) => {
-        const decided = w.d.engine.store.listReceiptsByKind('thread_create').map((receipt) => readAgentThreadReceipt(receipt)?.intent.threadId)
+        const decided = w.d.engine.store.listUnfinishedThreadCreations('1970-01-01T00:00:00.000Z').map((receipt) => readAgentThreadReceipt(receipt)?.intent.threadId)
         if (armed && path.endsWith(file) && decided.some((id) => id && path.includes(id))) {
           armed = false
           throw new Error(`crash while writing ${file}`)
@@ -552,30 +747,79 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       await expectOneComplete(w, made)
     })
 
-    it('a thread a person already wrote to before the marker is kept: the retry completes it as it is', async () => {
-      vi.spyOn(console, 'warn').mockImplementation(() => undefined)
-      const { w, replies, key } = await crashed((world) => {
-        const store = world.d.engine.store
-        const real = store.appendEvent.bind(store)
-        let armed = true
-        vi.spyOn(store, 'appendEvent').mockImplementation((input) => {
-          if (armed && input.type === 'agent.action' && (input.payload as { action?: string }).action === 'created_thread') {
-            armed = false
-            throw new Error('crash before the marker')
-          }
-          return real(input)
-        })
+    /** A creation cut off before its marker, so a half-made thread exists: files, announced, no marker. */
+    const beforeMarker = (world: World): void => {
+      const store = world.d.engine.store
+      const real = store.appendEvent.bind(store)
+      let armed = true
+      vi.spyOn(store, 'appendEvent').mockImplementation((input) => {
+        if (armed && input.type === 'agent.action' && (input.payload as { action?: string }).action === 'created_thread') {
+          armed = false
+          throw new Error('crash before the marker')
+        }
+        return real(input)
       })
+    }
+
+    it('a thread a person already used before the marker is never adopted: the retry is refused, nothing is sent to it, and boot keeps it', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      const { w, replies, key } = await crashed(beforeMarker)
       const id = readAgentThreadReceipt(w.d.engine.store.getReceipt(key))!.intent.threadId
       // The thread was announced when its files were written, so a person opened it and wrote to it.
       await w.run(id, 'hello from a person', 'person-1')
       ;(w.d.orch as unknown as { recoverAgentThreadCreations(): void }).recoverAgentThreadCreations()
       expect(w.d.store.getThread(id)).toBeDefined()
-      const made = await retry(w, replies)
-      expect(made).toMatchObject({ threadId: id, replayed: false })
-      expect(w.marker(id)).toHaveLength(1)
+      w.d.orch.setThreadPermissionMode(w.parent.id, 'full')
+      await w.run(w.parent.id, 'again', 'go-2')
+      expect(replies.again.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'thread_in_use', threadId: id } })
+      expect(w.marker(id)).toEqual([])
+      expect(w.messages(id).filter((message) => message.role === 'user').map((message) => message.content)).toEqual(['hello from a person'])
+      expect(w.d.engine.listRuns(id)).toHaveLength(1)
       expect(w.launchedBy(w.parent.id)).toHaveLength(1)
-      expect(w.messages(id).filter((message) => message.role === 'user').map((message) => message.content)).toEqual(['hello from a person', agentMessageText(w.parent.id, 'Parent', 'Start here')])
+    })
+
+    it('a thread a person renamed or re-moded is not used up either, though nothing was sent to it', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      const { w, replies, key } = await crashed(beforeMarker)
+      const id = readAgentThreadReceipt(w.d.engine.store.getReceipt(key))!.intent.threadId
+      w.d.store.updateThreadMeta(id, { name: 'My own name' })
+      ;(w.d.orch as unknown as { recoverAgentThreadCreations(): void }).recoverAgentThreadCreations()
+      expect(w.d.store.getThread(id)?.name).toBe('My own name')
+      await w.run(w.parent.id, 'again', 'go-2')
+      expect(replies.again.error).toMatchObject({ data: { conflict: 'thread_in_use' } })
+      expect(w.d.engine.listRuns(id)).toEqual([])
+    })
+
+    describe('after a real restart', () => {
+      /** The daemon dies with a half-made thread; a new one starts over the same home and boots. */
+      const restarted = async (touch?: (d2: Phase6Daemon, id: string) => void) => {
+        const { w, key } = await crashed(beforeMarker)
+        const id = readAgentThreadReceipt(w.d.engine.store.getReceipt(key))!.intent.threadId
+        expect(w.d.store.getThread(id)).toBeDefined()
+        await w.d.crash()
+        const second = phase6Daemon(home!, [new VendorAdapter('claude', CLAUDE_SUBSCRIPTION_CAPABILITIES, async () => 'ok')], { pid: 2 })
+        stops.push(() => second.stop())
+        const discarded: string[] = []
+        second.store.on('discarded', (event: { id: string }) => discarded.push(event.id))
+        touch?.(second, id)
+        second.orch.recoverRunEngineOnBoot()
+        return { second, id, discarded, key }
+      }
+
+      it('discards the unused half thread, tells clients, and keeps the receipt for the creator\'s retry', async () => {
+        const { second, id, discarded, key } = await restarted()
+        expect(second.store.getThread(id)).toBeUndefined()
+        expect(second.store.listAllThreads().some((entry) => entry.id === id)).toBe(false)
+        expect(discarded).toEqual([id])
+        expect(readAgentThreadReceipt(second.engine.store.getReceipt(key))?.intent.threadId).toBe(id)
+      })
+
+      it('keeps a half thread a person renamed, and says nothing to clients', async () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+        const { second, id, discarded } = await restarted((d2, threadId) => { d2.store.updateThreadMeta(threadId, { name: 'Mine now' }) })
+        expect(second.store.getThread(id)?.name).toBe('Mine now')
+        expect(discarded).toEqual([])
+      })
     })
   })
 

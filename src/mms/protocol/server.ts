@@ -373,6 +373,12 @@ export class MmsProtocolServer {
       'updated',
       (thread: { id: string }) => pushThreadsUpdated(thread.id)
     )
+    // An unused thread was discarded after `created` announced it (a creation that did not finish).
+    onEmitter(
+      services.threads,
+      'discarded',
+      (thread: { id: string }) => pushThreadsUpdated(thread.id)
+    )
     // First-send and title rename both need a full list push so the sidebar
     // can show/hide and rename without a rescan.
     onOrch('thread-started', (payload: { threadId: string }) => {

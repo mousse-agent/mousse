@@ -32,6 +32,8 @@ export const THREAD_SEND_MAX_PER_RUN = 20
 const THREAD_SEND_TRACKED_RUNS = 1000
 /** An agent run may create this many threads; the next is refused. */
 export const THREAD_CREATE_MAX_PER_RUN = 5
+/** A creator thread may have this many launched threads working (a queued, running or paused run) at once, however many runs it has; the next creation is refused. */
+export const THREAD_CREATE_MAX_ACTIVE_PER_THREAD = 10
 /** A new thread's title is cut to this many characters. */
 const THREAD_TITLE_MAX_CHARS = 200
 /** The first message of a new thread is held to the size of a message a person could send in one go. */
@@ -535,7 +537,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
     },
     {
       name: 'thread_wait',
-      description: `Wait for a run of another thread to finish (needs the read agent access level; a thread you launched with thread_create or one below you needs none), for at most timeoutMs (default ${THREAD_WAIT_DEFAULT_MS}, up to ${THREAD_WAIT_MAX_MS}). Pass the runId thread_send returned; without one, the run that is active now. Returns status finished (with the run's outcome, and its final text where you may read it), timeout (the run is still going: call again; the wait never interrupts it), paused (a usage limit paused the run and it was still paused when the wait ran out: it resumes by itself, and the result says when to ask again; a wait that is running when it resumes follows it into the run that continues it), idle (no run to wait for) or caller_ended (your own run ended). Wait only when you need the answer this turn; otherwise end your turn and read the thread later.`,
+      description: `Wait for a run of another thread to finish (needs the read agent access level; a thread you launched with thread_create, or one in your delegation lineage, needs none, though you see its final text only for a thread you launched or one below you), for at most timeoutMs (default ${THREAD_WAIT_DEFAULT_MS}, up to ${THREAD_WAIT_MAX_MS}). Pass the runId thread_send returned; without one, the run that is active now. Returns status finished (with the run's outcome, and its final text where you may read it), timeout (the run is still going: call again; the wait never interrupts it), paused (a usage limit paused the run and it was still paused when the wait ran out: it resumes by itself, and the result says when to ask again; a wait that is running when it resumes follows it into the run that continues it), idle (no run to wait for) or caller_ended (your own run ended). Wait only when you need the answer this turn; otherwise end your turn and read the thread later.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -701,13 +703,13 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
     },
     {
       name: 'thread_create',
-      description: `Start a new thread in a project (needs the manage agent access level and a project the profile allows). workspace "project" (default) works in the project's own folder; "new_worktree" gives the thread a worktree of its own, made when it first runs ("existing_worktree" is not supported). instanceId and model name the thread's model together (both must be ones the profile allows); without them the thread uses your own model. The thread runs in a permission mode no wider than yours and is recorded as launched by your thread: you can read it, wait on it and interrupt it afterwards at any level, and it is not nested under yours. firstMessage (with mode agent or plan) is sent to it as a message from you, so it starts at once; it counts toward the limit on agent messages in a row without a person in between. You may create ${THREAD_CREATE_MAX_PER_RUN} threads per run. Pass a clientRequestId and reuse it to retry: the same thread comes back, never a second one. Returns the thread's id, the model and mode it got, and what became of the first message; use thread_wait with its run id to wait for the answer, only when you need it this turn.`,
+      description: `Start a new thread in a project (needs the manage agent access level and a project the profile allows). Where the thread works is decided by the project, not by workspace: on a Git project a turn that edits gets a worktree of its own, and on any other project the thread works in the project folder (the result's runsIn says which). workspace "new_worktree" records the thread as a worktree thread and is refused on a project that is not Git-backed; "project" (default) records it as an ordinary project thread; "existing_worktree" is not supported. instanceId and model name the thread's model together (both must be ones the profile allows, and the person sees your choice); without them the thread uses your own model, or the profile's default when you have none. The thread runs in a permission mode no wider than yours, which a later change of the profile's default does not widen, and its agents may read and wait but never create threads or message others. It is recorded as launched by your thread: you can read it, wait on it and interrupt it afterwards at any level, a person's Stop of your thread also stops it while it runs work you started, and it is not nested under yours. firstMessage (with mode agent or plan) is sent to it as a message from you, so it starts at once; it counts toward the limit on agent messages in a row without a person in between. You may create ${THREAD_CREATE_MAX_PER_RUN} threads per run, and have at most ${THREAD_CREATE_MAX_ACTIVE_PER_THREAD} launched threads working at once. Pass a clientRequestId and reuse it to retry: the same thread comes back, never a second one, and a first message that was not sent is sent. Returns the thread's id, the model, mode and place it got, and what became of the first message; use thread_wait with its run id to wait for the answer, only when you need it this turn.`,
       inputSchema: {
         type: 'object',
         properties: {
           projectId: { type: 'string', description: 'The project to create the thread in (thread_list returns the ones you may use).' },
           title: { type: 'string', description: `The thread's title (up to ${THREAD_TITLE_MAX_CHARS} characters); without one the thread is named "New Thread" and gets a title from its first message.` },
-          workspace: { type: 'string', enum: ['project', 'new_worktree', 'existing_worktree'], description: 'Defaults to project. existing_worktree is refused.' },
+          workspace: { type: 'string', enum: ['project', 'new_worktree', 'existing_worktree'], description: 'Defaults to project. new_worktree needs a Git project. existing_worktree is refused. See the tool description: it does not choose the folder.' },
           instanceId: { type: 'string', description: 'The provider instance; needs model.' },
           model: { type: 'string', description: 'The model id; with instanceId, or on the instance of your own model.' },
           firstMessage: { type: 'string', description: 'Sent to the new thread as your message, so it starts working.' },
@@ -763,24 +765,30 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
         }
         const actor = actorOf(ctx)
         const requestKey = `thread_create:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`
-        try {
-          reserveCreation(actor.runId)
-        } catch (limit) {
-          // A retry of a creation this run already made is answered with that thread, however many it has made.
-          const earlier = host.earlierCreation?.(requestKey)
-          if (earlier) return json({ ...earlier, replayed: true })
-          throw limit
-        }
+        // A key that already has a stored creation is a retry of that one thread: it takes no new place under the cap
+        // (past the cap it still finishes its own thread and first message), and the host refuses it if the thread was
+        // used by a person meanwhile.
+        const retry = host.creationStarted?.(requestKey) === true
+        if (!retry) reserveCreation(actor.runId)
         let created: AgentCreatedThread
         try {
           created = await host.createThread(request, { clientRequestId: requestKey, actor, accessLevel: ctx.caller.accessLevel })
         } catch (error) {
-          releaseCreation(actor.runId)
+          if (!retry) releaseCreation(actor.runId)
           throw sendConflict(error) ?? error
         }
-        // A retry returns the one thread and changes nothing, so it is not another creation.
-        if (created.replayed) releaseCreation(actor.runId)
-        else showAction(host, created.threadId, actor, 'created this thread')
+        // A retry that found the thread complete changes nothing, so it is not another creation.
+        if (!retry && created.replayed) releaseCreation(actor.runId)
+        if (!created.replayed) {
+          showAction(host, created.threadId, actor, 'created this thread')
+          // The person watching this thread sees what its agent launched, and on which model.
+          try {
+            const model = created.model ? `${created.model.instanceId} / ${created.model.model}` : 'the default model'
+            host.noteOnThread?.(ctx.caller.threadId, `Created thread «${created.title}» (${created.threadId}) in project ${created.projectId}: ${model}, ${created.permissionMode} mode, ${created.runsIn === 'own_worktree' ? 'a worktree of its own' : 'the project folder'}${created.firstMessage ? created.firstMessage.sent ? ', first message sent' : ', first message not sent' : ''}.`)
+          } catch (error) {
+            console.warn('the creator\'s note of a launched thread could not be written', { error: error instanceof Error ? error.message : String(error) })
+          }
+        }
         return json(created)
       }
     },

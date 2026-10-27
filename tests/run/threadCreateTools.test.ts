@@ -20,6 +20,7 @@ const created = (threadId: string, patch: Partial<AgentCreatedThread> = {}): Age
   projectId: 'p1',
   title: 'New Thread',
   workspace: 'project',
+  runsIn: 'project_folder',
   model: null,
   permissionMode: 'full',
   replayed: false,
@@ -46,7 +47,8 @@ describe('thread_create (SPEC §15.1)', () => {
       threadMeta: (id) => threads.get(id),
       toolLedger: () => ledger,
       createThread: vi.fn(async () => created(`new-${(made += 1)}`)),
-      earlierCreation: vi.fn(() => undefined),
+      creationStarted: vi.fn(() => false),
+      noteOnThread: vi.fn(),
       stopRun: vi.fn(async (_threadId, runId) => ({ status: 'accepted' as const, runId, sequence: 1, replayed: false })),
       showAgentAction: vi.fn(),
       ...extraHost
@@ -178,20 +180,20 @@ describe('thread_create (SPEC §15.1)', () => {
     it('adds the transcript row only for the call that created the thread, never for a replay', async () => {
       const { call, host, callerRun } = await world({}, {
         createThread: vi.fn()
-          .mockResolvedValueOnce(created('t1'))
-          .mockResolvedValueOnce(created('t1', { replayed: true }))
+          .mockResolvedValueOnce(created('th1'))
+          .mockResolvedValueOnce(created('th1', { replayed: true }))
       })
       await call('manage', { projectId: 'p1', clientRequestId: 'k' })
       await call('manage', { projectId: 'p1', clientRequestId: 'k' })
       expect(host.showAgentAction).toHaveBeenCalledTimes(1)
-      expect(host.showAgentAction).toHaveBeenCalledWith({ threadId: 't1' }, expect.objectContaining({ threadId: 'caller', runId: callerRun.runId }), 'created this thread')
+      expect(host.showAgentAction).toHaveBeenCalledWith({ threadId: 'th1' }, expect.objectContaining({ threadId: 'caller', runId: callerRun.runId }), 'created this thread')
     })
 
     it('a refusal of the host reaches the caller as an error and frees its place under the cap', async () => {
       const { call, host } = await world({}, {
         createThread: vi.fn()
           .mockRejectedValueOnce(Object.assign(new Error('too many in a row'), { code: 'agent_hops_exceeded' }))
-          .mockResolvedValue(created('t1'))
+          .mockResolvedValue(created('th1'))
       })
       const error = await call('manage', { projectId: 'p1', firstMessage: 'go' }).then(() => undefined, (thrown: McpToolError) => thrown)
       expect(error).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'agent_hops_exceeded' } })
@@ -209,14 +211,48 @@ describe('thread_create (SPEC §15.1)', () => {
       expect(host.createThread).toHaveBeenCalledTimes(THREAD_CREATE_MAX_PER_RUN)
     })
 
-    it('a retry of a creation already made is answered with its thread at the cap; a new one is still refused', async () => {
-      const earlier = created('first')
-      const { call, host } = await world({}, { earlierCreation: vi.fn((key: string) => (key === 'thread_create:caller:k-0' ? earlier : undefined)) })
+    it('a retry of a stored creation takes no new place and still reaches the host at the cap, so it can finish its first message; a new key is refused', async () => {
+      const stored = new Set<string>()
+      const { call, host } = await world({}, { creationStarted: vi.fn((key: string) => stored.has(key)) })
       for (let index = 0; index < THREAD_CREATE_MAX_PER_RUN; index += 1) await call('manage', { projectId: 'p1', clientRequestId: `k-${index}` })
-      const retry = await call('manage', { projectId: 'p1', clientRequestId: 'k-0' })
-      expect(JSON.parse(retry.text)).toMatchObject({ threadId: 'first', replayed: true })
+      stored.add('thread_create:caller:k-0')
+      const retry = await call('manage', { projectId: 'p1', firstMessage: 'go', clientRequestId: 'k-0' })
+      expect(retry.isError).toBeUndefined()
       expect((await call('manage', { projectId: 'p1', clientRequestId: 'k-new' })).isError).toBe(true)
-      expect(host.createThread).toHaveBeenCalledTimes(THREAD_CREATE_MAX_PER_RUN)
+      expect(host.createThread).toHaveBeenCalledTimes(THREAD_CREATE_MAX_PER_RUN + 1)
+    })
+
+    it('a failed retry at the cap does not free a place it never took', async () => {
+      let retryStored = false
+      const { call, host } = await world({}, {
+        creationStarted: vi.fn((key: string) => key === 'thread_create:caller:retry' && retryStored),
+        createThread: vi.fn()
+          .mockResolvedValueOnce(created('th0'))
+          .mockResolvedValueOnce(created('th1'))
+          .mockResolvedValueOnce(created('th2'))
+          .mockResolvedValueOnce(created('th3'))
+          .mockResolvedValueOnce(created('th4'))
+          .mockRejectedValueOnce(new Error('the thread was used'))
+      })
+      for (let index = 0; index < THREAD_CREATE_MAX_PER_RUN; index += 1) await call('manage', { projectId: 'p1', clientRequestId: `n-${index}` })
+      retryStored = true
+      expect((await call('manage', { projectId: 'p1', clientRequestId: 'retry' })).isError).toBe(true)
+      expect(host.createThread).toHaveBeenCalledTimes(THREAD_CREATE_MAX_PER_RUN + 1)
+      // Still at the cap: a new creation is refused without asking the host.
+      expect((await call('manage', { projectId: 'p1', clientRequestId: 'new' })).isError).toBe(true)
+      expect(host.createThread).toHaveBeenCalledTimes(THREAD_CREATE_MAX_PER_RUN + 1)
+    })
+
+    it('a creation tells the creator thread which model, mode and place the agent chose, once, and a replay says nothing more', async () => {
+      const { call, host } = await world({}, {
+        createThread: vi.fn()
+          .mockResolvedValueOnce(created('th1', { title: 'Audit', model: { instanceId: 'claude', model: 'sonnet' }, permissionMode: 'ask', runsIn: 'own_worktree' }))
+          .mockResolvedValueOnce(created('th1', { replayed: true }))
+      })
+      await call('manage', { projectId: 'p1', clientRequestId: 'k' })
+      await call('manage', { projectId: 'p1', clientRequestId: 'k' })
+      expect(host.noteOnThread).toHaveBeenCalledTimes(1)
+      expect(host.noteOnThread).toHaveBeenCalledWith('caller', 'Created thread «Audit» (th1) in project p1: claude / sonnet, ask mode, a worktree of its own.')
     })
 
     it('a replayed creation does not use up a place', async () => {
