@@ -1,9 +1,11 @@
 import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
 import { visibleThreads } from '../../../../shared/threadLineage'
+import type { QueuedMessage } from '../../../../shared/types'
+import { QueueAccessError, QueueConflictError } from '../../../queue/ThreadMessageQueue'
 import { readRunResultText } from '../../delegation/hold'
 import type { RunEngine } from '../../RunEngine'
 import { TERMINAL_RUN_STATUSES, type AgentActor, type DelegationRecord, type RunRecord, type ThreadEvent } from '../../types'
-import type { AgentCreatedThread, AgentRunCommandResult, AgentThreadRequest, AppToolHost } from './host'
+import type { AgentCreatedThread, AgentQueueCommand, AgentRunCommandResult, AgentThreadRequest, AppToolHost } from './host'
 import {
   CLIENT_REQUEST_ID_SCHEMA,
   json,
@@ -181,6 +183,63 @@ function requiredId(args: Record<string, unknown>, name: string): string {
   return value
 }
 
+/** The revision the caller read, when it gave one. */
+function optionalRevision(args: Record<string, unknown>): string | undefined {
+  if (args.expectedRevision === undefined) return undefined
+  if (typeof args.expectedRevision !== 'string' || !args.expectedRevision.trim()) throw new Error('expectedRevision must be a non-empty string')
+  return args.expectedRevision
+}
+
+/** A change to a queued message names the queue as the caller last read it. */
+function requiredRevision(args: Record<string, unknown>): string {
+  const revision = optionalRevision(args)
+  if (revision === undefined) throw new Error('expectedRevision is required: read the queue with queue_list and pass its revision.')
+  return revision
+}
+
+/** Why a queue command was refused, as the error the agent can act on: a stale queue or run is a conflict, a limit of its access is a scope denial. */
+function queueFailure(error: unknown): McpToolError | undefined {
+  if (error instanceof QueueConflictError) return new McpToolError('mousse_conflict', error.message, { conflict: error.code, ...error.details })
+  if (error instanceof QueueAccessError) return new McpToolError('mousse_scope_denied', error.message)
+  return sendConflict(error)
+}
+
+/** Who a queued item is from, without the ids a reader has no use for. */
+function originView(origin: QueuedMessage['origin']): Record<string, unknown> | null {
+  if (!origin) return null
+  return origin.kind === 'agent'
+    ? { kind: 'agent', threadId: origin.threadId, runId: origin.runId, ...(origin.hops !== undefined ? { hops: origin.hops } : {}) }
+    : { kind: origin.kind }
+}
+
+/** A queued item as a reader without manage access sees it: where it stands and how big it is, never its text. */
+function queueItemSummary(item: QueuedMessage): Record<string, unknown> {
+  return {
+    id: item.id,
+    order: item.order,
+    intent: item.intent,
+    state: item.state,
+    mode: item.mode ?? null,
+    enqueuedAt: item.enqueuedAt,
+    source: item.source ?? null,
+    contentLength: item.content.length,
+    hasImages: Boolean(item.images?.length),
+    origin: originView(item.origin)
+  }
+}
+
+/** A queued item with its text, for its own thread and for a manager. Images are named, never inlined; internal bookkeeping (notice rows, claims) is left out. */
+function queueItemView(item: QueuedMessage): Record<string, unknown> {
+  const { contentLength: _contentLength, hasImages: _hasImages, ...summary } = queueItemSummary(item)
+  return {
+    ...summary,
+    content: item.content,
+    ...(item.images?.length ? { images: item.images.map((image) => ({ mimeType: image.mimeType })) } : {}),
+    ...(item.permissionMode ? { permissionMode: item.permissionMode } : {}),
+    ...(item.steerRunId ? { steerRunId: item.steerRunId } : {})
+  }
+}
+
 /** Why the engine refused an agent's message because of the state the thread is in, in words for the agent. */
 const SEND_CONFLICTS: Readonly<Record<string, string>> = {
   thread_paused:
@@ -319,6 +378,27 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
     const used = creations.get(runId) ?? 0
     if (used <= 1) creations.delete(runId)
     else creations.set(runId, used - 1)
+  }
+  /** A change to another thread's queue is held to the same rules as a steer or a Stop there: not into another agent's subagent, and not into an archived thread. */
+  const guardOtherThreadQueue = (threadId: string, ctx: ToolCallContext, tool: string, takesWork: boolean): void => {
+    if (threadId === ctx.caller.threadId) return
+    assertOwnSubagentsOnly(engine, ctx.caller, threadId, tool)
+    if (takesWork) assertTakesWork(host, threadId)
+  }
+  /** Runs one queue command as the caller: journaled under a request key scoped to the caller's thread, so a retry returns the first result. */
+  const queueCommand = (tool: string, args: Record<string, unknown>, ctx: ToolCallContext, threadId: string, command: AgentQueueCommand, summary: string): ToolOutcome => {
+    if (!host.queueCommand) return notAvailable(tool)
+    const actor = actorOf(ctx)
+    let result
+    try {
+      result = host.queueCommand(threadId, command, { clientRequestId: `${tool}:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`, actor, level: ctx.level ?? 'lineage' })
+    } catch (error) {
+      throw queueFailure(error) ?? error
+    }
+    // The `agent.action` event is the record; this row is its projection, added only by the call that made the change.
+    if (!result.replayed && result.recorded) showAction(host, threadId, actor, summary)
+    const { item, ...rest } = result
+    return json({ threadId, ...rest, ...(item ? { item: queueItemView(item) } : {}) })
   }
   return [
     {
@@ -794,41 +874,169 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
     },
     {
       name: 'queue_list',
-      description: 'List the messages queued on your thread (they run after the current turn).',
-      inputSchema: { type: 'object', properties: { threadId: { type: 'string', description: 'Your thread only.' } } },
-      threadArgChecked: 'the handler accepts the caller\'s own thread only',
-      access: 'reads',
+      description: 'List the messages queued on a thread (they run after the current turn), with the queue\'s revision: pass it as expectedRevision to the queue tools that change the queue. Defaults to your thread. On your own thread, and on any thread with the manage agent access level, each item carries its text; anywhere else you get its order, state, mode and size only. Items a turn has claimed are listed apart; they can no longer be changed.',
+      inputSchema: { type: 'object', properties: { threadId: { type: 'string', description: 'Defaults to your thread.' } } },
+      access: 'readsOthers',
       class: 'read',
       offered: () => false,
-      handler: (args, ctx) => json({ items: host.listQueue?.(callerThreadOnly(args, ctx.caller)) ?? [] })
+      handler: (args, ctx) => {
+        const threadId = args.threadId === undefined ? ctx.caller.threadId : requiredId(args, 'threadId')
+        if (!host.queueSnapshot) return notAvailable('queue_list')
+        const snapshot = host.queueSnapshot(threadId)
+        // The text of a queued message, and what an image says, is the thread's own and a manager's.
+        const full = (ctx.scope ?? 'own') === 'own' || ctx.scope === 'manage'
+        const view = (item: QueuedMessage): Record<string, unknown> => (full ? queueItemView(item) : queueItemSummary(item))
+        return json({
+          threadId,
+          items: snapshot.items.map(view),
+          claimed: snapshot.claimed.map(view),
+          revision: snapshot.revision,
+          open: snapshot.open,
+          ...(snapshot.blockedReason ? { blockedReason: snapshot.blockedReason } : {})
+        })
+      }
     },
     {
       name: 'queue_enqueue',
-      description: 'Queue a message on your thread; it runs as a new turn after the current one.',
+      description: 'Queue a message on a thread (default: yours); it runs as a new turn after the current one. On another thread (needs the manage agent access level and a project the profile allows) it is labelled as a message from an agent in your thread, not from the user, runs under your permission mode when that is stricter than the thread\'s own, counts toward the few agent messages a thread keeps waiting and toward the limit on agent messages in a row, and needs expectedRevision (from queue_list). Subagents are reached with continue_subagent.',
       inputSchema: {
         type: 'object',
         properties: {
           content: { type: 'string' },
           mode: { type: 'string', enum: ['agent', 'plan'], description: 'Defaults to plan under a plan ceiling, else agent.' },
-          threadId: { type: 'string', description: 'Your thread only.' }
+          threadId: { type: 'string', description: 'Defaults to your thread.' },
+          expectedRevision: { type: 'string', description: 'The queue revision you read (queue_list); required on another thread.' },
+          clientRequestId: CLIENT_REQUEST_ID_SCHEMA
         },
         required: ['content']
       },
-      access: 'writesThreads',
+      access: 'managesOthers',
       class: 'mutation',
       offered: () => false,
       handler: (args, ctx) => {
-        const threadId = callerThreadOnly(args, ctx.caller)
         if (typeof args.content !== 'string' || !args.content.trim()) throw new Error('queue_enqueue requires content')
         if (args.mode !== undefined && args.mode !== 'agent' && args.mode !== 'plan') throw new Error('mode must be agent or plan')
         if (args.mode === 'agent' && ctx.caller.modeCeiling === 'plan')
           throw new McpToolError('mousse_ceiling_exceeded', 'A plan-ceiling caller can only queue plan turns.')
         const mode = (args.mode as 'agent' | 'plan' | undefined) ?? (ctx.caller.modeCeiling === 'plan' ? 'plan' : 'agent')
-        if (!host.enqueue) throw new Error('This Mousse cannot queue messages.')
-        // The queued turn never runs looser than the turn that queued it: a turn another thread's agent
-        // narrowed cannot widen itself by queueing a message on its own thread.
-        const permissionMode = host.permissionModeFor?.(ctx.caller.runId)
-        return json({ item: host.enqueue(threadId, { content: args.content, mode }, { permissionMode: permissionMode ?? 'ask' }) })
+        const threadId = args.threadId === undefined ? ctx.caller.threadId : requiredId(args, 'threadId')
+        const own = threadId === ctx.caller.threadId
+        const expectedRevision = optionalRevision(args)
+        if (!own && expectedRevision === undefined) throw new Error('expectedRevision is required to queue a message on another thread: read the queue with queue_list first.')
+        if (!own) {
+          // A message to a subagent would run without its parent hearing the result.
+          if (engine.delegations.getLineage(threadId)?.relationship === 'subagent')
+            throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is a subagent; its parent reaches it with continue_subagent.`)
+          assertTakesWork(host, threadId)
+        }
+        return queueCommand('queue_enqueue', args, ctx, threadId, { op: 'enqueue', content: args.content, mode, ...(expectedRevision !== undefined ? { expectedRevision } : {}) }, 'queued a message')
+      }
+    },
+    {
+      name: 'queue_edit',
+      description: 'Change the text or chat mode of a message queued on a thread (default: yours) that no turn has started. Needs expectedRevision (queue_list). Your words replace the message: when they go to another thread, or the message is not one you wrote, it becomes a message from an agent in your thread (labelled, under the stricter of its own mode limit and yours; the earlier writer is no longer its author) and counts toward the agent messages a thread keeps waiting. Editing a message a person (or another agent) queued needs the manage agent access level, on your own thread too, and is recorded. You cannot turn a plan turn into an agent turn by editing a message you did not write. A message already steering the running turn cannot be edited.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          threadId: { type: 'string', description: 'Defaults to your thread.' },
+          itemId: { type: 'string' },
+          content: { type: 'string' },
+          mode: { type: 'string', enum: ['agent', 'plan'] },
+          expectedRevision: { type: 'string', description: 'The queue revision you read (queue_list).' },
+          clientRequestId: CLIENT_REQUEST_ID_SCHEMA
+        },
+        required: ['itemId', 'expectedRevision']
+      },
+      access: 'managesOthers',
+      class: 'mutation',
+      offered: () => false,
+      handler: (args, ctx) => {
+        const itemId = requiredId(args, 'itemId')
+        if (args.content !== undefined && (typeof args.content !== 'string' || !args.content.trim())) throw new Error('content must be a non-empty string')
+        if (args.mode !== undefined && args.mode !== 'agent' && args.mode !== 'plan') throw new Error('mode must be agent or plan')
+        if (args.content === undefined && args.mode === undefined) throw new Error('queue_edit needs content or mode')
+        if (args.mode === 'agent' && ctx.caller.modeCeiling === 'plan')
+          throw new McpToolError('mousse_ceiling_exceeded', 'A plan-ceiling caller can only queue plan turns.')
+        const threadId = args.threadId === undefined ? ctx.caller.threadId : requiredId(args, 'threadId')
+        guardOtherThreadQueue(threadId, ctx, 'queue_edit', true)
+        return queueCommand('queue_edit', args, ctx, threadId, {
+          op: 'edit',
+          itemId,
+          ...(args.content !== undefined ? { content: args.content as string } : {}),
+          ...(args.mode !== undefined ? { mode: args.mode as 'agent' | 'plan' } : {}),
+          expectedRevision: requiredRevision(args)
+        }, `edited queued message ${itemId}`)
+      }
+    },
+    {
+      name: 'queue_remove',
+      description: 'Remove a message queued on a thread (default: yours) that no turn has started (needs the manage agent access level for another thread). Needs expectedRevision (queue_list). A message already steering the running turn cannot be removed. Removing a message you did not write on another thread, or a person\'s on yours, is recorded on the thread.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          threadId: { type: 'string', description: 'Defaults to your thread.' },
+          itemId: { type: 'string' },
+          expectedRevision: { type: 'string', description: 'The queue revision you read (queue_list).' },
+          clientRequestId: CLIENT_REQUEST_ID_SCHEMA
+        },
+        required: ['itemId', 'expectedRevision']
+      },
+      access: 'managesOthers',
+      class: 'mutation',
+      offered: () => false,
+      handler: (args, ctx) => {
+        const itemId = requiredId(args, 'itemId')
+        const threadId = args.threadId === undefined ? ctx.caller.threadId : requiredId(args, 'threadId')
+        guardOtherThreadQueue(threadId, ctx, 'queue_remove', false)
+        return queueCommand('queue_remove', args, ctx, threadId, { op: 'remove', itemId, expectedRevision: requiredRevision(args) }, `removed queued message ${itemId}`)
+      }
+    },
+    {
+      name: 'queue_reorder',
+      description: 'Put the pending messages queued on a thread (default: yours) in a new order: orderedIds names every pending item once (needs the manage agent access level for another thread). Needs expectedRevision (queue_list). Reordering changes nothing else about the messages.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          threadId: { type: 'string', description: 'Defaults to your thread.' },
+          orderedIds: { type: 'array', items: { type: 'string' } },
+          expectedRevision: { type: 'string', description: 'The queue revision you read (queue_list).' },
+          clientRequestId: CLIENT_REQUEST_ID_SCHEMA
+        },
+        required: ['orderedIds', 'expectedRevision']
+      },
+      access: 'managesOthers',
+      class: 'mutation',
+      offered: () => false,
+      handler: (args, ctx) => {
+        if (!Array.isArray(args.orderedIds) || args.orderedIds.some((id) => typeof id !== 'string' || !id)) throw new Error('orderedIds must be an array of item ids')
+        const threadId = args.threadId === undefined ? ctx.caller.threadId : requiredId(args, 'threadId')
+        guardOtherThreadQueue(threadId, ctx, 'queue_reorder', false)
+        return queueCommand('queue_reorder', args, ctx, threadId, { op: 'reorder', orderedIds: args.orderedIds as string[], expectedRevision: requiredRevision(args) }, 'reordered the queue')
+      }
+    },
+    {
+      name: 'queue_promote_to_steer',
+      description: 'Turn a queued message into guidance for the turn the thread is running now (default: your thread; needs the manage agent access level for another thread). Name the run you read (expectedRunId) and the queue revision (queue_list): if that run is not the thread\'s active run, or is paused, nothing changes. A message with a mode limit (one an agent sent or edited) joins only a run whose permission mode is no looser than that limit, and your own mode counts too: a running turn cannot be narrowed. The message joins only that run; if the run ends first it goes back to the queue and runs as its own turn.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          threadId: { type: 'string', description: 'Defaults to your thread.' },
+          itemId: { type: 'string' },
+          expectedRevision: { type: 'string', description: 'The queue revision you read (queue_list).' },
+          expectedRunId: { type: 'string', description: 'The run to steer, as you last read it.' },
+          clientRequestId: CLIENT_REQUEST_ID_SCHEMA
+        },
+        required: ['itemId', 'expectedRevision', 'expectedRunId']
+      },
+      access: 'managesOthers',
+      class: 'mutation',
+      offered: () => false,
+      handler: (args, ctx) => {
+        const itemId = requiredId(args, 'itemId')
+        const expectedRunId = requiredId(args, 'expectedRunId')
+        const threadId = args.threadId === undefined ? ctx.caller.threadId : requiredId(args, 'threadId')
+        guardOtherThreadQueue(threadId, ctx, 'queue_promote_to_steer', true)
+        return queueCommand('queue_promote_to_steer', args, ctx, threadId, { op: 'promote', itemId, expectedRevision: requiredRevision(args), expectedRunId }, `sent queued message ${itemId} to the running turn`)
       }
     },
     {

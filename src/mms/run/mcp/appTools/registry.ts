@@ -339,7 +339,7 @@ export class ToolRegistry {
       const refusal = await this.askBeforeEditing(tool, caller, request.signal, args)
       if (refusal) return refusal
     }
-    const ctx: ToolCallContext = { caller, turn, toolCallId: request.toolCallId, signal: request.signal, transport: 'mcp', ...(scope ? { scope } : {}) }
+    const ctx: ToolCallContext = { caller, turn, toolCallId: request.toolCallId, signal: request.signal, transport: 'mcp', level: this.effectiveLevel(caller.accessLevel), ...(scope ? { scope } : {}) }
     const ledger = this.options.toolLedger?.(active)
     const ledgerId = ledger?.start({ type: 'toolCall', id: ctx.toolCallId, name, arguments: args } as ToolCall)
     let outcome: ToolOutcome
@@ -391,6 +391,7 @@ export class ToolRegistry {
       return await tool.handler(args, {
         caller,
         turn,
+        level: this.effectiveLevel(caller.accessLevel),
         ...(scope ? { scope } : {}),
         toolCallId: call.toolCallId,
         signal: call.signal,

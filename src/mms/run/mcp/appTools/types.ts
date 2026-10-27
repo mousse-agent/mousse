@@ -155,6 +155,8 @@ export interface ToolCallContext {
   signal: AbortSignal
   /** Set by the registry's central check for `readsOthers` and `managesOthers` tools. */
   scope?: ToolScope
+  /** The caller's effective agent access level at this call: its grant narrowed by the profile's setting now. */
+  level?: AgentAccessLevel
   transport: 'mcp' | 'in_process'
   /** In-process calls only: the caller's timeline. */
   timeline?: ToolTimeline
