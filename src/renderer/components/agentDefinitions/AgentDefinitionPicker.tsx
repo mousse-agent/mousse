@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { SearchInput } from '../ui/SearchInput'
 import { LiquidGlassOrb } from '../orb/LiquidGlassOrb'
 import {
-  AGENT_RUNTIME_LABELS,
+  savedForLabel,
   isAgentDefinitionClientError,
   type AgentDefinitionsClient,
   type AgentLibraryItem
@@ -66,8 +66,8 @@ export function AgentDefinitionPicker({
             <div className="agent-card__body">
               <h3>{item.name}</h3>
               <p>
-                {AGENT_RUNTIME_LABELS[item.runtimeKind]}
-                {item.publishedRevision ? ' · Published' : ' · Draft only'}
+                {item.publishedRevision ? 'Published' : 'Draft only'}
+                {savedForLabel(item.runtimeKind) ? ` · ${savedForLabel(item.runtimeKind)}` : ''}
               </p>
             </div>
           </button>

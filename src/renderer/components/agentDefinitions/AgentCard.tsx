@@ -1,6 +1,6 @@
 import { LiquidGlassOrb } from '../orb/LiquidGlassOrb'
 import type { AgentLibraryItem } from './client'
-import { AGENT_RUNTIME_LABELS } from './client'
+import { savedForLabel } from './client'
 import { publicationState } from './libraryFilter'
 
 export function AgentCard({
@@ -27,7 +27,7 @@ export function AgentCard({
         <h3>{item.name}</h3>
         <p>{item.purpose || 'No purpose yet'}</p>
         <div className="agent-card__meta">
-          <span className="agent-chip">{AGENT_RUNTIME_LABELS[item.runtimeKind]}</span>
+          {savedForLabel(item.runtimeKind) ? <span className="agent-chip">{savedForLabel(item.runtimeKind)}</span> : null}
           {item.modelLabel ? <span className="agent-chip">{item.modelLabel}</span> : null}
           <span className="agent-chip">{item.enabled ? 'Enabled' : 'Disabled'}</span>
           <span className="agent-chip">

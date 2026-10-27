@@ -34,9 +34,8 @@ export type { AgentLibraryQuery, AgentLibrarySort } from './libraryFilter'
 export { parseAgentImportFile } from './importBundle'
 export {
   collectEditorIssues,
-  collectUnsupportedCliSettingPointers,
   fieldIdForPointer,
   findModelInCatalog,
-  settingUnsupportedReason
+  runsOnLabel
 } from './editorIssues'
 export { createAsyncGate, shouldApplyAsyncResult } from './asyncGate'

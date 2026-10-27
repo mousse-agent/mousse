@@ -2,7 +2,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { AGENT_BUNDLE_MAX_BYTES, defaultAgentSettings } from '../src/shared/agents/defaults'
-import { collectEditorIssues } from '../src/renderer/components/agentDefinitions/editorIssues'
+import { collectEditorIssues, runsOnLabel } from '../src/renderer/components/agentDefinitions/editorIssues'
 import { shouldApplyAsyncResult, createAsyncGate } from '../src/renderer/components/agentDefinitions/asyncGate'
 import { parseAgentImportFile } from '../src/renderer/components/agentDefinitions/importBundle'
 import {
@@ -13,7 +13,7 @@ import {
 import { AgentsLibrary } from '../src/renderer/components/agentDefinitions/AgentsLibrary'
 import type { AgentEditorCatalogs, AgentLibraryItem } from '../src/renderer/components/agentDefinitions/client'
 import { IsolatedAgentDefinitionsClient } from './fixtures/agent-platform/agent-editor-client'
-import { settingUnsupportedReason } from '../src/renderer/components/agentDefinitions/editorIssues'
+import { savedForLabel } from '../src/renderer/components/agentDefinitions/client'
 
 const catalogs: AgentEditorCatalogs = {
   providers: [{ id: 'xai', label: 'xAI', models: [{ id: 'grok-4', label: 'Grok 4' }] }],
@@ -96,19 +96,43 @@ describe('stale async guard', () => {
   })
 })
 
-describe('validation and compatibility', () => {
+describe('validation and where a definition runs', () => {
   it('keeps an unavailable selected model visible and blocks publish/run', () => {
     const settings = defaultAgentSettings({ name: 'A', slug: 'a' })
     settings.primaryModel.ref = { providerId: 'xai', modelId: 'removed-model' }
-    const issues = collectEditorIssues({ runtimeKind: 'mousse', settings, catalogs })
+    const issues = collectEditorIssues({ settings, catalogs })
     expect(issues.some((issue) => issue.message.includes('removed-model'))).toBe(true)
     expect(issues.some((issue) => issue.blocking)).toBe(true)
   })
 
-  it('disables unsupported CLI settings with a precise reason', () => {
-    const reason = settingUnsupportedReason('codex', '/settings/browser')
-    expect(reason).toMatch(/codex does not support/i)
-    expect(settingUnsupportedReason('mousse', '/settings/browser')).toBeNull()
+  it("shows where the definition runs, from the model picker's listing, and an older kind as a chip", () => {
+    const settings = defaultAgentSettings({ name: 'A', slug: 'a' })
+    expect(runsOnLabel(catalogs, settings.primaryModel.ref)).toBeNull()
+    expect(runsOnLabel(catalogs, { providerId: 'xai', modelId: 'grok-4' })).toBe('xAI')
+    const work = { ...catalogs, providers: [{ ...catalogs.providers[0]!, instanceId: 'xai' }, { id: 'xai', instanceId: 'xai:work', label: 'xAI (Work)', models: [{ id: 'grok-4', label: 'Grok 4' }] }] }
+    expect(runsOnLabel(work, { providerId: 'xai', modelId: 'grok-4', instanceId: 'xai:work' })).toBe('xAI (Work)')
+    expect(savedForLabel('codex')).toBe('Saved for Codex')
+    expect(savedForLabel('mousse')).toBeNull()
+  })
+
+  it("shows the gateway's refusal: a refused primary blocks, a refused fallback does not", () => {
+    const settings = defaultAgentSettings({ name: 'A', slug: 'a' })
+    settings.primaryModel.ref = { providerId: 'xai', modelId: 'grok-4' }
+    const refusal = "Claude Code can't enforce this agent's workspace and tool limits yet, so it can't run agent definitions."
+    const issues = collectEditorIssues({
+      settings,
+      catalogs,
+      serverIssues: [
+        { code: 'SETTINGS_UNSUPPORTED', message: refusal, pointer: '/settings/tools/mode', retryable: false },
+        { code: 'SETTINGS_UNSUPPORTED', message: refusal, pointer: '/settings/workspace/mode', retryable: false },
+        { code: 'SETTINGS_UNSUPPORTED', message: `Fallback sonnet will be skipped: ${refusal}`, pointer: '/settings/tools/mode', retryable: false, details: { blocking: false } }
+      ]
+    })
+    // One line per refusal, linked to its first setting.
+    expect(issues).toEqual([
+      { pointer: '/settings/tools/mode', fieldId: 'agent-field-settings-tools-mode', message: refusal, blocking: true },
+      { pointer: '/settings/tools/mode', fieldId: 'agent-field-settings-tools-mode', message: `Fallback sonnet will be skipped: ${refusal}`, blocking: false }
+    ])
   })
 })
 
