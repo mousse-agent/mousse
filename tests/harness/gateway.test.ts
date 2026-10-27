@@ -106,12 +106,11 @@ describe('harness gateway: resolution (absorbs AdapterRegistry)', () => {
     expect((error as RunStoreError).code).toBe('bad_request')
   })
 
-  it('runs an unselected default that names nothing on the pi loop; a blank explicit override is rejected', () => {
+  it('has no bare pi route: a selection naming nothing, or the retired `pi` id, is no_model_selected', () => {
     const { harness } = full()
-    expect(harness.resolveStored({ llmProvider: '', model: '' }, { purpose: 'turn', unselectedDefault: true })).toMatchObject({ instanceId: 'pi', llmProvider: '', driver: 'pi' })
-    expect(harness.resolveStored({ instanceId: 'pi', llmProvider: '', model: '' }, { purpose: 'turn', unselectedDefault: true }).driver).toBe('pi')
     for (const selection of [{ llmProvider: '' }, { instanceId: ' ', llmProvider: ' ' }, { instanceId: 'pi', llmProvider: '' }])
-      expect(codeOf(() => harness.resolveStored({ ...selection, model: 'm' }, { purpose: 'turn' }))).toBe('provider_instance_unknown')
+      for (const options of [{ purpose: 'turn' as const }, { purpose: 'turn' as const, allowDisabled: true }])
+        expect(codeOf(() => harness.resolveStored({ ...selection, model: 'm' }, options))).toBe('no_model_selected')
   })
 
   it('offers only enabled, signed-in vendor instances as configured providers', () => {

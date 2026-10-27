@@ -14,6 +14,7 @@ import {
   type PullRequestDraftInputs
 } from '../src/mms/git/pullRequestDraft'
 import { getDefaultSettings } from '../src/shared/settings'
+import type { OneShotRequest } from '../src/mms/harness/gateway'
 
 const inputs = (patch: Partial<PullRequestDraftInputs> = {}): PullRequestDraftInputs => ({
   branch: 'feature/login-retry',
@@ -176,8 +177,8 @@ describe('OrchestratorService.draftPullRequest', () => {
       ...getDefaultSettings(),
       title: options.titleModel ? { llmProvider: 'openai', model: 'gpt-big' } : getDefaultSettings().title
     }
-    const resolveStored = vi.fn(() => ({ instanceId: 'pi:openai', llmProvider: 'openai' }))
-    const draftPullRequest = vi.fn(options.draft ?? (async () => 'Retry the login\n\nIt retries.'))
+    const draft = options.draft ?? (async () => 'Retry the login\n\nIt retries.')
+    const draftPullRequest = vi.fn(async (_request: OneShotRequest) => ({ text: await draft() }))
     const readBranchSummary = vi.fn(async () => ({
       commits: [{ subject: 'Retry the login', body: '' }],
       stat: ' a.ts | 2 +-',
@@ -185,13 +186,12 @@ describe('OrchestratorService.draftPullRequest', () => {
     }))
     const orch = Object.assign(Object.create(OrchestratorService.prototype), {
       settingsStore: { get: () => settings },
-      harness: { resolveStored },
-      llm: { draftPullRequest },
+      harness: { oneShot: draftPullRequest },
       gitService: { readBranchSummary },
       getMessages: () => [{ role: 'user', content: 'Please retry the login' }],
       threadScope: () => ({})
     }) as OrchestratorService
-    return { orch, draftPullRequest, readBranchSummary, resolveStored }
+    return { orch, draftPullRequest, readBranchSummary }
   }
 
   it('without a title model drafts from the commits and the template, and calls no model', async () => {
@@ -205,25 +205,25 @@ describe('OrchestratorService.draftPullRequest', () => {
   it('asks the title model, with the template, the commits and the conversation in the prompt', async () => {
     const { orch, draftPullRequest } = orchestrator({ titleModel: true })
     expect(await orch.draftPullRequest(params())).toEqual({ title: 'Retry the login', body: 'It retries.', source: 'model' })
-    const [, prompt, threadId, selection] = draftPullRequest.mock.calls[0] as unknown as [string, string, string, unknown]
-    expect(prompt).toContain('## Testing')
-    expect(prompt).toContain('Retry the login')
-    expect(prompt).toContain('User: Please retry the login')
-    expect(threadId).toBe('t1')
-    expect(selection).toEqual({ instanceId: 'pi:openai', llmProvider: 'openai', model: 'gpt-big' })
+    const request = draftPullRequest.mock.calls[0]![0]
+    expect(request.prompt).toContain('## Testing')
+    expect(request.prompt).toContain('Retry the login')
+    expect(request.prompt).toContain('User: Please retry the login')
+    expect(request.sessionKey).toBe('pull-request-draft:t1')
+    expect(request).toMatchObject({ purpose: 'title', task: 'pull_request', selection: { llmProvider: 'openai', model: 'gpt-big' } })
   })
 
   it('resolves the title model in the project of the folder, even without an originating thread', async () => {
-    const { orch, resolveStored } = orchestrator({ titleModel: true })
+    const { orch, draftPullRequest } = orchestrator({ titleModel: true })
     await orch.draftPullRequest(params())
     await orch.draftPullRequest(params({ originThreadId: null }))
-    expect(resolveStored.mock.calls.map((call) => (call as unknown as [unknown, { scope: unknown }])[1].scope)).toEqual([
+    expect(draftPullRequest.mock.calls.map(([request]) => request.scope)).toEqual([
       { kind: 'project', projectId: 'p1' },
       { kind: 'project', projectId: 'p1' }
     ])
-    resolveStored.mockClear()
+    draftPullRequest.mockClear()
     await orch.draftPullRequest(params({ originThreadId: null, projectId: null }))
-    expect((resolveStored.mock.calls[0] as unknown as [unknown, { scope: unknown }])[1].scope).toEqual({ kind: 'device' })
+    expect(draftPullRequest.mock.calls[0]![0].scope).toEqual({ kind: 'device' })
   })
 
   it('falls back to the plain draft when the model fails or answers without a title', async () => {

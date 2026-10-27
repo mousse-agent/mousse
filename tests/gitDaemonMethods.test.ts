@@ -7,7 +7,7 @@ import { withGitMutationLocks } from '../src/mms/actions/GitOperationCoordinator
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { MousseMainService } from '../src/mms/MousseMainService'
-import { LlmClient } from '../src/mms/orchestrator/LlmClient'
+import type { HarnessGateway } from '../src/mms/harness/gateway'
 import { LocalMmsClient, MmsProtocolError, requestTimeoutFor } from '../src/mms/protocol/client'
 import { MmsProtocolServer } from '../src/mms/protocol/server'
 import {
@@ -527,17 +527,18 @@ describe('Git mutations through the daemon', () => {
 
   describe('suggesting a commit message', () => {
     type Suggestion = { message: string; truncated: boolean }
+    /** The gateway's one request with no tools (`oneShot`), which the title model runs on. */
+    const oneShotOf = () => vi.spyOn((mms.orchestrator as unknown as { harness: Pick<HarnessGateway, 'oneShot'> }).harness, 'oneShot')
     /** A chosen title model whose answer is canned; returns the spy on the model call. */
     function withTitleModel(answer = 'Add the files.') {
       mms.settings.set({ title: { llmProvider: 'openai', model: 'gpt-big' } })
-      vi.spyOn((mms.orchestrator as unknown as { harness: { resolveStored: () => unknown } }).harness, 'resolveStored').mockReturnValue({ instanceId: 'pi:openai', llmProvider: 'openai' })
-      return vi.spyOn(LlmClient.prototype, 'generateCommitMessage').mockResolvedValue(answer)
+      return oneShotOf().mockResolvedValue({ text: answer })
     }
-    const promptOf = (ask: ReturnType<typeof withTitleModel>, call = 0) => String(ask.mock.calls[call][1])
+    const promptOf = (ask: ReturnType<typeof withTitleModel>, call = 0) => ask.mock.calls[call]![0].prompt
 
     it('says so with a code when no title model is chosen, and reads nothing', async () => {
       const scope = await projectScope()
-      const ask = vi.spyOn(LlmClient.prototype, 'generateCommitMessage')
+      const ask = oneShotOf()
       write(f.repo, 'a.txt')
       await expect(client.request('git.suggestCommitMessage', scope)).rejects.toMatchObject({ code: 'git_suggest_no_model', errorInfo: { category: 'unavailable' } })
       expect(ask).not.toHaveBeenCalled()
@@ -554,7 +555,7 @@ describe('Git mutations through the daemon', () => {
       expect(result).toEqual({ message: 'Add the staged file\n\nIt is new.', truncated: false })
       expect(promptOf(ask)).toContain('STAGED CONTENT')
       expect(promptOf(ask)).not.toMatch(/UNSTAGED EDIT|UNTRACKED CONTENT|untracked\.txt/)
-      expect(ask.mock.calls[0][2]).toBeUndefined()
+      expect(ask.mock.calls[0]![0].sessionKey).not.toMatch(/^commit-message:t/)
       expect({ head: git(f.repo, 'rev-parse', 'HEAD'), state: porcelain(f.repo) }).toEqual(before)
 
       // With nothing staged the commit stages everything, so that is what is described; new files by name only.
@@ -575,7 +576,7 @@ describe('Git mutations through the daemon', () => {
       await client.request('git.suggestCommitMessage', { threadId: t.threadId })
       expect(promptOf(ask)).toContain('STAGED CONTENT')
       expect(promptOf(ask)).toContain('UNSTAGED EDIT')
-      expect(ask.mock.calls[0][2]).toBe(t.threadId)
+      expect(ask.mock.calls[0]![0].sessionKey).toBe(`commit-message:${t.threadId}`)
       expect({ head: git(t.path, 'rev-parse', 'HEAD'), state: porcelain(t.path) }).toEqual(before)
       // The project's own checkout is a different folder and was not read.
       expect(porcelain(f.repo)).toEqual([])

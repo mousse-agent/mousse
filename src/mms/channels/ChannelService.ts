@@ -1,4 +1,6 @@
 import type { LlmProviderOption } from '../../shared/settings'
+import type { ModelOverride } from '../../shared/providerInstances'
+import type { HarnessCaps } from '../../shared/harness/types'
 import { EventEmitter } from 'events'
 import type {
   ChannelActivityEvent,
@@ -15,6 +17,7 @@ import type { ProviderAuthService } from '../providers/ProviderAuthService'
 import type { AgentRegistry } from '../agents/AgentRegistry'
 import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import { ChannelAuth } from './ChannelAuth'
+import { CHANNEL_POLICY, ChannelApprovalNotices, channelGate } from './channelModels'
 import { ChannelRouter } from './ChannelRouter'
 import { ChannelSessionManager } from './ChannelSessionManager'
 import { ChannelStore, redactConfigForRenderer } from './ChannelStore'
@@ -35,6 +38,11 @@ export interface ChannelServiceOptions {
    * instances and hidden models left out). Default: the credentialed pi-ai providers.
    */
   listModels?: () => LlmProviderOption[]
+  /**
+   * The caps of an instance resolved for a channel turn (`channel_model`); throws when it cannot
+   * run one. Picks the one-time approvals notice for a model chosen with `/model`.
+   */
+  capsOf?: (instanceId: string) => HarnessCaps
 }
 
 function createDefaultAdapter(
@@ -68,6 +76,7 @@ export class ChannelService extends EventEmitter {
   private readonly createAdapter: ChannelAdapterFactory
   private disconnecting: Promise<void> | null = null
   private readonly draining = new Set<Promise<unknown>>()
+  private readonly approvalNotices = new ChannelApprovalNotices()
 
   constructor(
     private orchestrator: OrchestratorService,
@@ -88,7 +97,7 @@ export class ChannelService extends EventEmitter {
       this.auth,
       {
         runChannelTurn: (threadId, text, opts) =>
-          orchestrator.runChannelTurn(threadId, text, threadStore, opts),
+          orchestrator.runChannelTurn(threadId, text, threadStore, { ...opts, approvals: CHANNEL_POLICY.approvals }),
         abortChannelTurn: (threadId) => orchestrator.abortChannelTurn(threadId),
         stopThread: (threadId) => orchestrator.stopThread(threadId, 'channel'),
         steerChannelTurn: (threadId, text) => orchestrator.steerChannelTurn(threadId, text),
@@ -100,6 +109,14 @@ export class ChannelService extends EventEmitter {
         settingsStore: this.settingsStore,
         threadStore: this.threadStore,
         listModels: options?.listModels ?? (() => this.providerAuth.getConfiguredLlmProviders()),
+        channelGate: (threadId, modelOverride) => {
+          const caps = this.turnCaps(threadId, modelOverride, options?.capsOf)
+          const gate = channelGate(caps)
+          if (gate.refusal) return { refusal: gate.refusal }
+          const notice = this.approvalNotices.pending(threadId, caps)
+          return notice ? { notice } : {}
+        },
+        noticeDelivered: (threadId) => this.approvalNotices.delivered(threadId),
         getSubscriptionUsage: (providerId) => this.providerAuth.getSubscriptionUsage(providerId),
         listAgents: this.agentRegistry
           ? () =>
@@ -117,6 +134,19 @@ export class ChannelService extends EventEmitter {
     this.router.on('pairing-updated', () => {
       this.emitUpdated()
     })
+  }
+
+  /** The caps a channel turn on the thread runs on: the `/model` choice, else the thread's selection. */
+  private turnCaps(threadId: string, modelOverride: ModelOverride | undefined, capsOf?: (instanceId: string) => HarnessCaps): HarnessCaps | null {
+    const instanceId = modelOverride?.instanceId
+    if (instanceId && capsOf) {
+      try {
+        return capsOf(instanceId)
+      } catch {
+        return null
+      }
+    }
+    return this.orchestrator.capabilitiesForThread(threadId)
   }
 
   beginShutdown(): void {

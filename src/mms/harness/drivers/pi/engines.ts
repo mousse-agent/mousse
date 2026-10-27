@@ -5,7 +5,7 @@ import type { InstanceConfig } from '../../driver'
  * `cursor` ran only on the legacy loop, and a Mousse update retired them (`retired.ts`: they run
  * nowhere until moved). Every other provider can run on Pi's agent (`rpc`) when the user opts in (Advanced → Engine:
  * New engine); the default stays the loop until the parity gate passed on real accounts, and a later
- * PR flips it. The bare `pi` route (no instance) stays on the loop until PR 4.
+ * PR flips it.
  */
 export const PI_LEGACY_ONLY: Readonly<Record<string, 'legacy'>> = Object.freeze({ 'openai-codex': 'legacy', cursor: 'legacy' })
 

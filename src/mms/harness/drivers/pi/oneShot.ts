@@ -2,8 +2,16 @@ import type { Api, Model, Models, ThinkingLevel } from '@earendil-works/pi-ai'
 import { harnessAppError } from '../../../../shared/harness/types'
 import { parseThinkingSuffixFromModelId } from '../../../../shared/modelVariants'
 import { customModelDefinition } from '../../catalog'
-import type { OneShotSpec } from '../../driver'
+import type { OneShotSpec, OneShotTask } from '../../driver'
+import { piOneShotRunsOn } from './oneShotApis'
 import { assertAssistantResponseSucceeded, consumeAssistantStream, getCacheSessionId, getReasoningStreamOptions } from './stream'
+
+/** What each one-shot task does, for a refusal that names it. */
+const ONE_SHOT_TASK_TEXT: Record<OneShotTask, string> = {
+  title: 'name chats',
+  pull_request: 'draft pull requests',
+  commit_message: 'write commit messages'
+}
 
 /** What a pi one-shot reads of the profile's pi-ai models: the catalogue, credentials and transport. */
 export type PiOneShotModels = Pick<Models, 'getModel' | 'getModels' | 'getAuth' | 'stream' | 'streamSimple'>
@@ -18,11 +26,9 @@ export async function runPiOneShot(models: PiOneShotModels, providerId: string, 
   const model = models.getModel(providerId, baseId) ?? customModel(models, providerId, spec)
   if (!model)
     throw harnessAppError({ code: 'model_unavailable', message: `${baseId} is not a model of this provider. Refresh models or choose another one.` })
-  // pi-ai builds its AWS client without `maxAttempts` and takes no per-call setting, so the AWS SDK
-  // would retry below Mousse in this process. Bedrock one-shots wait until they run in a process
-  // Mousse configures (the Pi RPC child holds Bedrock to one attempt).
-  if (model.api === 'bedrock-converse-stream')
-    throw harnessAppError({ code: 'unsupported', message: 'Bedrock models cannot name chats yet. Choose another model for chat titles, or Automatic.' })
+  // Bedrock's AWS SDK would retry below Mousse in this process (`piOneShotRunsOn`).
+  if (!piOneShotRunsOn(model.api))
+    throw harnessAppError({ code: 'unsupported', message: `Bedrock models cannot ${ONE_SHOT_TASK_TEXT[spec.task ?? 'title']} yet. Choose another title model in Settings → Agents, or Automatic.` })
   // Reading the credentials may refresh a sign-in over the network: the timeout and a stop bound it too.
   if (!(await untilAborted(() => models.getAuth(model), signal)))
     throw harnessAppError({ code: 'signed_out', message: 'This provider is not signed in. Sign in or choose another model.' })

@@ -9,6 +9,7 @@ import { LocalMmsClient, MmsProtocolServer } from '../src/mms/protocol'
 import { WORKFLOW_DEFINITIONS_CAPABILITY } from '../src/shared/workflowPlatform'
 import { WORKFLOW_RUN_CAPABILITY } from '../src/shared/workflowRunPlatform'
 import type { WorkflowBundle, WorkflowNode } from '../src/shared/workflows'
+import { Harness } from '../src/mms/harness/gateway'
 import { LlmClient } from '../src/mms/orchestrator/LlmClient'
 import { ChannelAuth } from '../src/mms/channels/ChannelAuth'
 import { ChannelRouter } from '../src/mms/channels/ChannelRouter'
@@ -228,7 +229,7 @@ describe('background workflow ingress', () => {
           nativeMessages: [...messages, { role: 'assistant', content: 'plain-ok', timestamp: Date.now() }]
         } as Awaited<ReturnType<LlmClient['chat']>>
       })
-      vi.spyOn(LlmClient.prototype, 'generateTitle').mockRejectedValue(new Error('No model title request for explicit workflow execution'))
+      vi.spyOn(Harness.prototype, 'oneShot').mockRejectedValue(new Error('No model title request for explicit workflow execution'))
       await f.publish(f.bob.id, bundle(undefined, published.slug))
       const alice = await f.services(f.alice.id)
       const bob = await f.services(f.bob.id)

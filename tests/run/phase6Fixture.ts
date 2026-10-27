@@ -133,10 +133,13 @@ export async function waitFor(cond: () => boolean, label: string, timeoutMs = 10
 /**
  * A bare `OrchestratorService` over `store` with inert collaborators (no run engine, no providers):
  * tests replace `llm` and drive the queue, admission and event paths. Points `MOUSSE_HOME` at `home`.
+ * The default model is a pi instance (`PI`), so turns run on the pi loop over the replaced `llm`:
+ * a profile with no model has no turn to run (`no_model_selected`).
  */
 export function createOrchestrator(home: string, store: ThreadDataStore): OrchestratorService {
   process.env.MOUSSE_HOME = home
-  const settingsStore = { getSettings: () => getDefaultSettings(), get: () => getDefaultSettings() }
+  const settings = () => ({ ...getDefaultSettings(), provider: { ...getDefaultSettings().provider, ...PI } })
+  const settingsStore = { getSettings: settings, get: settings }
   const providerAuth = { getConnectedProviders: () => [] }
   const orch = new OrchestratorService(
     new AgentRegistry(), new TaskQueue(), new WorktreeManager(home), new PtyManager(),

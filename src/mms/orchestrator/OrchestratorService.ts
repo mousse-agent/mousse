@@ -84,12 +84,13 @@ import { QuickActionTools } from './QuickActionTools'
 import { WebTools } from './WebTools'
 import { stableStringify } from '../run/json'
 import { closeStaleActivity, cutOffActivityOf, formatRestartNote } from '../run/restartNote'
-import { createHarnessGateway, PI_DRIVER_ID, type AdapterHost, type BindInput, type ChildTurnPolicy, type DefinitionLoop, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
+import type { OneShotTask } from '../harness/driver'
+import { createHarnessGateway, type AdapterHost, type BindInput, type ChildTurnPolicy, type DefinitionLoop, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
 import { piDriver } from '../harness/drivers/pi'
 import { contextGauge, policyOrigin, threadTurnOrigin } from '../harness/policy'
 import type { BotThreads } from '../../shared/bots/personal/authority'
 import { isBotWallAbort, type BotTurnDispatcher, type PreparedBotTurn } from '../bots/activation/dispatcher'
-import { harnessAppError, isRetriesExhausted, type BindPolicy, type ExecutionBinding, type HarnessCaps, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
+import { harnessAppError, isRetriesExhausted, onRetiredBareRoute, type BindPolicy, type ExecutionBinding, type HarnessCaps, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
 import { acknowledgeRows } from '../run/terminal'
@@ -1300,6 +1301,8 @@ export class OrchestratorService extends EventEmitter {
   private threadStore: ThreadDataStore | null = null
   /** Optional Run Engine (Phase 1 dual-write bridge). */
   private runEngine: RunEngine | null = null
+  /** Title model refusals already logged (`reportTitleModelRefusal`). */
+  private reportedTitleRefusals?: Set<string>
   private runEngineUnsubscribe: (() => void) | null = null
   /** Runs whose bridge write hit a stale epoch; later marks for that turn are skipped. */
   private readonly staleRuns = new Set<string>()
@@ -4244,11 +4247,9 @@ export class OrchestratorService extends EventEmitter {
     try {
       const bound = opts?.runId ? this.runEngine?.bindingForRun(opts.runId) : undefined
       if (bound) return bound.policy.permissionMode ?? 'accept_edits'
-      const explicit = opts?.modelOverride ?? session.modelOverride
       const instance = this.harness.resolveStored(this.turnSelection(session, mode, opts?.modelOverride), {
         purpose: 'turn',
-        scope: this.threadScope(session.threadId),
-        unselectedDefault: !explicit
+        scope: this.threadScope(session.threadId)
       })
       const effective = this.harness.previewPermissionMode(instance, requested, session.projectCwd)
       return effective.refused ? requested : effective.mode
@@ -4261,7 +4262,7 @@ export class OrchestratorService extends EventEmitter {
   private resolvedForThread(threadId: string): ResolvedTurnSelection {
     const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId)
     const explicit = session?.modelOverride ?? this.threadStore?.getThread(threadId)?.modelOverride
-    return this.harness.resolveStored(explicit ?? this.defaultAgentModel(), { purpose: 'turn', allowDisabled: true, unselectedDefault: !explicit })
+    return this.harness.resolveStored(explicit ?? this.defaultAgentModel(), { purpose: 'turn', allowDisabled: true })
   }
 
   private defaultAgentModel(): ModelOverride {
@@ -4282,7 +4283,7 @@ export class OrchestratorService extends EventEmitter {
    * run; `resolved` was built from it), else a new one from the resolved selection. Either way it
    * is recorded on the active attempt, so a replacement attempt keeps its run's binding.
    */
-  private async bindTurn(runId: string | undefined, existing: ExecutionBinding | undefined, resolved: ResolvedTurnSelection, mode: ChatMode, origin: () => TurnOrigin, permission: Pick<BindInput, 'permissionMode' | 'cwd'>, policy?: BindPolicy, definition = false): Promise<ExecutionBinding> {
+  private async bindTurn(runId: string | undefined, existing: ExecutionBinding | undefined, resolved: ResolvedTurnSelection, mode: ChatMode, origin: () => TurnOrigin, permission: Pick<BindInput, 'permissionMode' | 'cwd' | 'approvals'>, policy?: BindPolicy, definition = false): Promise<ExecutionBinding> {
     const engine = this.runEngine
     // The origin is read only for a new binding: a retry or restart keeps the one its run recorded.
     // A bot dispatch binds the policy its grant compiled to, as a bot; a definition turn binds its
@@ -4299,6 +4300,18 @@ export class OrchestratorService extends EventEmitter {
       }
     }
     return binding
+  }
+
+  /**
+   * How a new binding answers tool approvals. A channel turn passes `never` (`CHANNEL_POLICY`),
+   * whatever the thread's permission mode grants. A provider continuation (a background task the
+   * runtime finished later) keeps `never` when the thread's previous binding had it, since nobody in
+   * the channel can answer either.
+   */
+  private turnApprovals(threadId: string, runId: string | undefined, opts?: { approvals?: RunPolicy['approvals']; source?: string }): Pick<BindInput, 'approvals'> {
+    if (opts?.approvals) return { approvals: opts.approvals }
+    if (opts?.source !== 'provider-continuation' || !runId) return {}
+    return this.runEngine?.previousBinding(threadId, runId)?.policy.approvals === 'never' ? { approvals: 'never' } : {}
   }
 
   /**
@@ -6357,7 +6370,11 @@ export class OrchestratorService extends EventEmitter {
     }
     try {
       return await this.generateTitleText(firstUser.content, firstAssistant?.content, threadId)
-    } catch {
+    } catch (error) {
+      // The chat keeps its first-line title. A failed request is logged; a refused title model was
+      // already reported once (`reportTitleModelRefusal`).
+      if ((error as { code?: unknown } | undefined)?.code !== 'unsupported')
+        console.warn('[titles] the title model could not name the chat', { threadId, error: error instanceof Error ? error.message : String(error) })
       return heuristic
     }
   }
@@ -6366,13 +6383,68 @@ export class OrchestratorService extends EventEmitter {
    * Names a chat with the chosen title model (Automatic never reaches here: it names the chat from
    * its first line). The selection is resolved through the gateway like any other: the instance the
    * picker chose (a legacy record maps to its built-in instance), and exactly that selection runs.
-   * A disabled instance, a hidden model or an agent runtime (titles run on API providers) is
-   * refused by its typed error, never swapped for another provider.
+   * A disabled instance, a hidden model or an instance that cannot run a single request (an agent
+   * runtime, a Bedrock model) is refused by its typed error, never swapped for another provider.
    */
   private async generateTitleText(userRequest: string, firstResponse: string | undefined, threadId: string | undefined): Promise<string> {
-    const title = this.settingsStore.get().title
-    const resolved = this.harness.resolveStored(title, { purpose: 'title', ...(threadId ? { scope: this.threadScope(threadId) } : {}) })
-    return this.llm.generateTitle(userRequest, firstResponse, threadId, { instanceId: resolved.instanceId, llmProvider: resolved.llmProvider, model: title.model })
+    const prompt = [
+      'Write a concise title for this chat (maximum 7 words).',
+      'Return only the title: no quotes, markdown, or ending punctuation.',
+      '',
+      `User request: ${userRequest.slice(0, 4000)}`,
+      ...(firstResponse?.trim() ? [`First response: ${firstResponse.slice(0, 6000)}`] : [])
+    ].join('\n')
+    const text = await this.titleModelText('You name chat threads clearly and specifically.', prompt, {
+      task: 'title',
+      scope: threadId ? this.threadScope(threadId) : undefined,
+      sessionKey: threadId ?? `title:${userRequest}`,
+      maxChars: 400
+    })
+    return text
+      .trim()
+      .replace(/^["'`]+|["'`]+$/g, '')
+      .replace(/[.!?:;]+$/g, '')
+      .replace(/\s+/g, ' ')
+      .slice(0, 80)
+  }
+
+  /**
+   * One request with no tools on the title model the user chose, through the gateway's `oneShot`:
+   * chat titles, pull request drafts and commit messages. The gateway resolves the selection in
+   * `scope`, bounds the wait and never retries; the caller falls back when it throws.
+   */
+  private async titleModelText(system: string, prompt: string, options: { task: OneShotTask; scope: ProviderScope | undefined; sessionKey: string; maxChars: number }): Promise<string> {
+    try {
+      const { text } = await this.harness.oneShot({
+        selection: this.settingsStore.get().title,
+        ...(options.scope ? { scope: options.scope } : {}),
+        purpose: 'title',
+        system,
+        prompt,
+        maxChars: options.maxChars,
+        sessionKey: options.sessionKey,
+        task: options.task
+      })
+      return text
+    } catch (error) {
+      this.reportTitleModelRefusal(error)
+      throw error
+    }
+  }
+
+  /**
+   * A title model the gateway refuses outright (a Bedrock model, an agent runtime) fails every request
+   * the same way. The reason is logged once per kind of refusal, and the thread's title failure event
+   * carries it, rather than a warning on every chat; Settings → Agents shows the stored choice as
+   * unavailable.
+   */
+  private reportTitleModelRefusal(error: unknown): void {
+    if ((error as { code?: unknown } | undefined)?.code !== 'unsupported') return
+    const message = error instanceof Error ? error.message : String(error)
+    this.reportedTitleRefusals ??= new Set()
+    if (this.reportedTitleRefusals.has(message)) return
+    this.reportedTitleRefusals.add(message)
+    console.warn('[titles] the title model cannot run this request', { message })
   }
 
   /**
@@ -6417,16 +6489,13 @@ export class OrchestratorService extends EventEmitter {
     const hasExplicitTitleModel = Boolean(titleSettings.llmProvider?.trim() && titleSettings.model?.trim())
     if (!hasExplicitTitleModel || (!inputs.commits.length && !inputs.patch && !conversation)) return heuristic
     try {
-      const resolved = this.harness.resolveStored(titleSettings, {
-        purpose: 'title',
-        scope: params.projectId ? { kind: 'project', projectId: params.projectId } : params.originThreadId ? this.threadScope(params.originThreadId) : { kind: 'device' }
+      const prompt = buildPullRequestDraftPrompt(inputs)
+      const text = await this.titleModelText(PULL_REQUEST_DRAFT_SYSTEM, prompt, {
+        task: 'pull_request',
+        scope: params.projectId ? { kind: 'project', projectId: params.projectId } : params.originThreadId ? this.threadScope(params.originThreadId) : { kind: 'device' },
+        sessionKey: `pull-request-draft:${params.originThreadId ?? prompt.slice(0, 200)}`,
+        maxChars: 40_000
       })
-      const text = await this.llm.draftPullRequest(
-        PULL_REQUEST_DRAFT_SYSTEM,
-        buildPullRequestDraftPrompt(inputs),
-        params.originThreadId ?? undefined,
-        { instanceId: resolved.instanceId, llmProvider: resolved.llmProvider, model: titleSettings.model }
-      )
       const parsed = parsePullRequestDraft(text)
       return parsed ? { ...parsed, source: 'model' } : heuristic
     } catch {
@@ -6456,16 +6525,13 @@ export class OrchestratorService extends EventEmitter {
     const input = await this.gitService?.describeCommitInput(params.root, { all: params.all })
     if (!input || input.files.length === 0) throw commitSuggestionErrors.create('git_suggest_empty')
     try {
-      const resolved = this.harness.resolveStored(titleSettings, {
-        purpose: 'title',
-        scope: params.projectId ? { kind: 'project', projectId: params.projectId } : params.threadId ? this.threadScope(params.threadId) : { kind: 'device' }
+      const prompt = buildCommitSuggestionPrompt(input, params.branch)
+      const text = await this.titleModelText(COMMIT_SUGGESTION_SYSTEM, prompt, {
+        task: 'commit_message',
+        scope: params.projectId ? { kind: 'project', projectId: params.projectId } : params.threadId ? this.threadScope(params.threadId) : { kind: 'device' },
+        sessionKey: `commit-message:${params.threadId ?? prompt.slice(0, 200)}`,
+        maxChars: 20_000
       })
-      const text = await this.llm.generateCommitMessage(
-        COMMIT_SUGGESTION_SYSTEM,
-        buildCommitSuggestionPrompt(input, params.branch),
-        params.threadId ?? undefined,
-        { instanceId: resolved.instanceId, llmProvider: resolved.llmProvider, model: titleSettings.model }
-      )
       const message = parseCommitSuggestion(text)
       if (!message) throw new Error('The model answered without a commit message')
       return { message, truncated: input.truncated }
@@ -6613,7 +6679,7 @@ export class OrchestratorService extends EventEmitter {
       // The gauge never fails: a selection that cannot be resolved is measured like the pi loop's.
       let caps: HarnessCaps | undefined
       try {
-        caps = this.harness.resolveStored(selectedModel, { purpose: 'composer', allowDisabled: true, unselectedDefault: !modelOverride }).caps
+        caps = this.harness.resolveStored(selectedModel, { purpose: 'composer', allowDisabled: true }).caps
       } catch {
         caps = undefined
       }
@@ -7516,14 +7582,12 @@ export class OrchestratorService extends EventEmitter {
   private assertSendableSelection(session: ThreadSession, input: OrchestratorSendInput, override?: ModelOverride, scheduled = false): void {
     const request = normalizeSendRequest(input)
     if (request.workflowInvocationId) return
-    const explicit = override ?? session.modelOverride
     try {
       this.harness.resolveStored(this.turnSelection(session, request.mode, override), {
         // A scheduled send is checked as one: a thread's own runtime that approves tools itself cannot
         // run it, and that is found out before the prompt is written into the thread.
         purpose: scheduled ? 'schedule' : 'turn',
-        scope: this.threadScope(session.threadId),
-        unselectedDefault: !explicit
+        scope: this.threadScope(session.threadId)
       })
     } catch (error) {
       const code = (error as { code?: unknown } | undefined)?.code
@@ -7797,6 +7861,8 @@ export class OrchestratorService extends EventEmitter {
       permissionMode?: PermissionMode
       /** A bot dispatch (PR 6 §4): its policy, authority and scratch folder. */
       bot?: PreparedBotTurn
+      /** How the turn's binding answers tool approvals; `never` for channel turns (`CHANNEL_POLICY`). */
+      approvals?: RunPolicy['approvals']
     }
   ): Promise<OrchestratorResponse> {
     // One guard where every turn starts: a bot's thread runs only its bot dispatches.
@@ -8025,6 +8091,7 @@ export class OrchestratorService extends EventEmitter {
       continuationId?: string
       permissionMode?: PermissionMode
       bot?: PreparedBotTurn
+      approvals?: RunPolicy['approvals']
     }
   ): Promise<OrchestratorResponse> {
     const session = this.session
@@ -8381,7 +8448,9 @@ export class OrchestratorService extends EventEmitter {
     // A retry or recovery of a run executes the binding its run recorded, never the current
     // selection. Otherwise migrated to the instance shape (SPEC §13.8): `llmProvider` is
     // re-derived from a known instance.
-    const runBinding = engineRunId ? this.runEngine?.bindingForRun(engineRunId) : undefined
+    // A binding made on the retired bare pi route is not kept: the turn resolves the default again.
+    const recordedBinding = engineRunId ? this.runEngine?.bindingForRun(engineRunId) : undefined
+    const runBinding = recordedBinding && !onRetiredBareRoute(recordedBinding.instanceId) ? recordedBinding : undefined
     const selectedModel = runBinding ? this.harness.selectionOf(runBinding) : this.turnSelection(session, mode, opts?.modelOverride)
     if (displayUserMessage && !reuseLastUser) {
       const selection = { provider: selectedModel.llmProvider, model: selectedModel.model }
@@ -8467,8 +8536,7 @@ export class OrchestratorService extends EventEmitter {
       // override, fails the turn here.
       const instance = this.harness.resolveStored(selectedModel, {
         purpose: 'turn',
-        scope: this.threadScope(session.threadId),
-        unselectedDefault: runBinding ? runBinding.instanceId === PI_DRIVER_ID : !(opts?.modelOverride ?? session.modelOverride)
+        scope: this.threadScope(session.threadId)
       })
       // Issue #142: a read-only child is checked on every turn, not only when it was created. Its
       // provider may have been switched, or the user's setup changed, since then.
@@ -8480,7 +8548,8 @@ export class OrchestratorService extends EventEmitter {
       // The attempt's immutable binding; a retry of the same run keeps the one it already has.
       const binding = await this.bindTurn(engineRunId, runBinding, instance, mode, () => opts?.origin ?? this.turnOrigin(session.threadId, request.workflowInvocationId), {
         permissionMode: this.requestedPermissionMode(session.threadId, this.limitedByJob(this.limitedByContinuation(opts?.permissionMode, engineRunId, session.threadId), opts?.schedule)),
-        cwd: opts?.bot ? opts.bot.scratch : session.projectCwd
+        cwd: opts?.bot ? opts.bot.scratch : session.projectCwd,
+        ...this.turnApprovals(session.threadId, engineRunId, opts)
       }, opts?.bot?.policy)
       // A transcript-native runtime (the pi loop) is sent Mousse's transcript and tools, so Mousse
       // keeps that transcript within the window before the turn. A prompt-injected runtime owns its
@@ -10278,6 +10347,8 @@ export class OrchestratorService extends EventEmitter {
       images?: ChatImageAttachment[]
       /** Called once the user's message is stored on the thread; not called if the turn never starts. */
       onUserInputAccepted?: () => void
+      /** Channel turns pass `never` (`CHANNEL_POLICY`): nobody in a channel answers a tool approval. */
+      approvals?: RunPolicy['approvals']
     }
   ): Promise<BackgroundWorkflowTurnResult> {
     return this.lifecycle.run('channel-turn', () => this.runChannelTurnOwned(threadId, content, threadStore, opts))
@@ -10297,6 +10368,8 @@ export class OrchestratorService extends EventEmitter {
       images?: ChatImageAttachment[]
       /** Called once the user's message is stored on the thread; not called if the turn never starts. */
       onUserInputAccepted?: () => void
+      /** Channel turns pass `never` (`CHANNEL_POLICY`): nobody in a channel answers a tool approval. */
+      approvals?: RunPolicy['approvals']
     }
   ): Promise<BackgroundWorkflowTurnResult> {
     // The turn registers itself only when the caller passes no signal. Production callers (ChannelRouter and the
@@ -10416,6 +10489,7 @@ export class OrchestratorService extends EventEmitter {
             : undefined),
           modelOverride: opts?.modelOverride,
           onUserInputAccepted: opts?.onUserInputAccepted,
+          ...(opts?.approvals ? { approvals: opts.approvals } : {}),
           onTurnSettled: (aborted) => {
             wasAborted = aborted
             try {

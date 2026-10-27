@@ -234,6 +234,8 @@ export interface LlmModelOption {
   efforts?: string[]
   /** Effective endpoint speed, including provider defaults. */
   speed?: 'fast' | 'slow'
+  /** `false`: this model cannot run a single request (chat titles) even though its provider can. */
+  oneShot?: false
 }
 
 export interface LlmProviderOption {
@@ -242,6 +244,19 @@ export interface LlmProviderOption {
   instanceId?: string
   label: string
   models: LlmModelOption[]
+  /**
+   * The instance runs a single request with no tools (chat titles, pull request drafts, commit
+   * messages). Set by the gateway on every listing; agent runtimes are `false`.
+   */
+  oneShot?: boolean
+}
+
+/** The title model choices: instances that run one-shots, without the models that cannot. */
+export function oneShotProviderOptions(providers: readonly LlmProviderOption[]): LlmProviderOption[] {
+  return providers
+    .filter((provider) => provider.oneShot === true)
+    .map((provider) => ({ ...provider, models: provider.models.filter((model) => model.oneShot !== false) }))
+    .filter((provider) => provider.models.length > 0)
 }
 
 export interface AgentTypeOption {

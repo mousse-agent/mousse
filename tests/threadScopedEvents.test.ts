@@ -218,7 +218,6 @@ describe('thread-scoped orchestrator conversation events', () => {
       llm: {
         getSelectedModelContextLimit: () => { limit: number }
         getContextInputs: () => Promise<unknown>
-        generateTitle: (content: string) => Promise<string>
         chat: (...args: unknown[]) => Promise<unknown>
       }
     }).llm
@@ -230,7 +229,6 @@ describe('thread-scoped orchestrator conversation events', () => {
     }
     vi.spyOn(llm, 'getSelectedModelContextLimit').mockReturnValue({ limit: 100_000 })
     vi.spyOn(llm, 'getContextInputs').mockResolvedValue(contextInputs)
-    vi.spyOn(llm, 'generateTitle').mockResolvedValue('Channel thread')
     vi.spyOn(llm, 'chat').mockImplementation(async (...args: unknown[]) => {
       const onTool = args[1] as (event: unknown) => void
       const onThinking = args[3] as (event: unknown) => void

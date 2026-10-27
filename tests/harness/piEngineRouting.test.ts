@@ -74,9 +74,10 @@ describe('Pi engine routing', () => {
     expect(caps('pi:mistral')).toBe(PI_LEGACY_CAPS)
   })
 
-  it('keeps the bare route on the loop', () => {
+  it('has no bare route: a selection naming no instance is no_model_selected', () => {
     const { harness } = setup({ rpc })
-    expect(harness.resolveStored({ instanceId: '', llmProvider: '', model: 'm' }, { purpose: 'turn', unselectedDefault: true }).caps).toBe(PI_LEGACY_CAPS)
+    expect(() => harness.resolveStored({ instanceId: '', llmProvider: '', model: 'm' }, { purpose: 'turn' })).toThrow(expect.objectContaining({ code: 'no_model_selected' }))
+    expect(() => harness.resolveStored({ instanceId: 'pi', llmProvider: '', model: 'm' }, { purpose: 'turn' })).toThrow(expect.objectContaining({ code: 'no_model_selected' }))
   })
 
   it('reports the engine in effect and whether it can be switched', () => {

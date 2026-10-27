@@ -57,6 +57,8 @@ export interface RunPause {
 
 export interface RunOutcome {
   error?: string
+  /** The typed reason of `error`, when it has one (`binding_stale` for a run on the retired bare pi route). */
+  errorCode?: string
   /**
    * A scheduled run that failed on a provider usage limit (it is never paused): when the limit resets. The
    * scheduler records the occurrence as waiting and runs the job again then.

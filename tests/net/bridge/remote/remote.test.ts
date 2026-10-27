@@ -341,6 +341,8 @@ describe('P3 real MMS remote Bridge', () => {
       }
     }
     ;(p.mms.orchestrator as unknown as { llm: unknown }).llm = llm
+    // The turn runs on the profile's default model, a pi instance over the replaced loop client.
+    p.mms.settings.set({ provider: { llmProvider: 'openai', model: 'fixture' } })
     const deltas: unknown[] = [],
       adapter = new ThreadStreamAdapter({
         db: p.aDb,

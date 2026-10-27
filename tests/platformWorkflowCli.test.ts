@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { Harness } from '../src/mms/harness/gateway'
 import { randomUUID } from 'node:crypto'
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -97,7 +98,7 @@ describe('structured workflow CLI', () => {
     const gui = new LocalMmsClient({ homeDir: f.homeDir, endpoint: f.endpoint, ownerToken: f.main.getOwnerRecord()!.token, clientType: 'gui', requestedCapabilities: ['profiles-v1', WORKFLOW_RUN_CAPABILITY] })
     try {
       const model = vi.spyOn(LlmClient.prototype, 'chat').mockRejectedValue(new Error('Workflow commands must not ask a model to schedule their graph'))
-      const title = vi.spyOn(LlmClient.prototype, 'generateTitle').mockRejectedValue(new Error('No model title request for explicit workflow execution'))
+      const title = vi.spyOn(Harness.prototype, 'oneShot').mockRejectedValue(new Error('No model title request for explicit workflow execution'))
       const content = bundle()
       content.manifest.inputSchema = { type: 'object', properties: { count: { type: 'integer' } }, required: ['count'], additionalProperties: false }
       const published = await f.publish(content)
