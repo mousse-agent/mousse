@@ -26,7 +26,21 @@ export interface ApprovalAnswer {
   scope?: 'once' | 'always'
 }
 
-export type ApprovalRefusal = 'own_request' | 'not_parent' | 'mode_forbids' | 'agent_no_standing_grant'
+export type ApprovalRefusal = 'own_request' | 'not_parent' | 'mode_forbids' | 'agent_no_standing_grant' | 'bridge_no_standing_grant'
+
+/** The run sources that are a person at their own app or CLI (`RunRecord.source`); anything else is not a person's turn. */
+const PERSON_SOURCES: ReadonlySet<string> = new Set(['gui', 'cli'])
+
+/**
+ * Whether a person started the turn, which is the only kind of turn a standing "Always for this
+ * thread" rule may answer for. A scheduled or webhook-started job, a delegated child, a bot, a workflow
+ * or definition step, and a message another agent (or any internal caller) sent to the thread are
+ * not: no one is watching them, and a rule made for a person's own turn must not run commands for
+ * them. Fails closed: an unknown source is not a person.
+ */
+export function startedByPerson(run: { origin: string; source: string | null | undefined }): boolean {
+  return run.origin === 'interactive' && typeof run.source === 'string' && PERSON_SOURCES.has(run.source)
+}
 
 export type ApprovalRights = { ok: true } | { ok: false; code: ApprovalRefusal }
 
@@ -44,7 +58,11 @@ export function canAnswerApproval(
   answer: ApprovalAnswer,
   lineage: LineageLookup
 ): ApprovalRights {
-  if (answerer.kind === 'user') return { ok: true }
+  if (answerer.kind === 'user') {
+    // A linked device cannot list or revoke rules, so it does not make them either.
+    if (answerer.via === 'bridge' && answer.decision === 'allow' && answer.scope === 'always') return { ok: false, code: 'bridge_no_standing_grant' }
+    return { ok: true }
+  }
   if (request.threadId === answerer.threadId) return { ok: false, code: 'own_request' }
   const link = lineage(request.threadId)
   if (!link || link.parentThreadId !== answerer.threadId || link.relationship !== 'subagent') return { ok: false, code: 'not_parent' }
@@ -60,5 +78,6 @@ export function describeApprovalRefusal(code: ApprovalRefusal): string {
     case 'not_parent': return 'Only the parent of a subagent can answer its approval requests.'
     case 'mode_forbids': return 'Your permission mode would ask the user before this kind of action, so you cannot approve it for your subagent. Ask the user to answer it.'
     case 'agent_no_standing_grant': return 'Only the user can approve an action for the whole thread. Approve it once, or ask the user.'
+    case 'bridge_no_standing_grant': return 'A linked device can allow a request once. "Always for this thread" is made in the app or the CLI, where the rule can be seen and revoked.'
   }
 }

@@ -27,13 +27,28 @@ const request = (requestId: string, extra: Partial<PendingApproval> = {}): Pendi
   ...extra
 })
 
+const withAlways = [
+  options[0]!,
+  { id: 'allow_always', label: 'Always for this thread', decision: 'allow' as const, scope: 'always' as const },
+  options[1]!
+]
+const alwaysRequest = (requestId: string, extra: Partial<PendingApproval> = {}): PendingApproval =>
+  request(requestId, { questions: [{ id: 'permission', prompt: 'Allow Claude Code to run a command (Bash)?\nnpm test', options: withAlways }], ...extra })
+const rule = (id: string, extra: Record<string, unknown> = {}) => ({ id, permissionKey: 'claude:command', action: 'command', summary: 'Allow Claude Code to run a command (Bash)? {"command":"npm test"}', grantedUnder: 'accept_edits', active: true, createdAt: '2026-10-27T00:00:00.000Z', ...extra })
+
 /** A daemon that answers like the real one: the first answer wins, the second learns who did. */
-function fakeDaemon(pending: PendingApproval[]) {
+function fakeDaemon(pending: PendingApproval[], rules: Array<ReturnType<typeof rule>> = []) {
   const settled = new Map<string, { decision: string; via: string }>()
   const calls: Array<{ method: string; params: Record<string, unknown> }> = []
   const client = {
     async request<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
       calls.push({ method, params })
+      if (method === 'threads.approvalRules') return { threadId: params.threadId, rules } as T
+      if (method === 'threads.clearApprovalRules') {
+        const gone = rules.filter((entry) => params.ruleId === undefined || entry.id === params.ruleId)
+        for (const entry of gone) rules.splice(rules.indexOf(entry), 1)
+        return { threadId: params.threadId, removed: gone.length, rules } as T
+      }
       if (method === 'orchestrator.pendingQuestions')
         return { pending: pending.filter((entry) => !settled.has(entry.requestId) && (!params.threadId || entry.threadId === params.threadId)) } as T
       if (method === 'orchestrator.answerQuestions') {
@@ -124,6 +139,46 @@ describe('mousse approvals', () => {
     expect(daemon.calls.at(-1)!.params).toEqual({ requestId: 'req-2', answers: { permission: 'reject', feedback: 'use pnpm' } })
   })
 
+  it('answers with allow_always by its id, lists the option and what it means, and describes the thread\'s rules', async () => {
+    const daemon = fakeDaemon([alwaysRequest('req-1')])
+    await run(daemon, ['approvals'])
+    expect(out).toContain('Options: allow (Allow once), allow_always (Always for this thread), reject (Reject)')
+    expect(out).toContain('allows this exact request again, in this thread')
+    await run(daemon, ['approvals', 'answer', 'req-1', 'allow_always'])
+    expect(daemon.calls.at(-1)).toEqual({ method: 'orchestrator.answerQuestions', params: { requestId: 'req-1', answers: { permission: 'allow_always' } } })
+    expect(out).toContain('Answered: allow_always')
+  })
+
+  it('lists a thread\'s rules and revokes one by the start of its id, or all of them', async () => {
+    const one = 'a'.repeat(64)
+    const two = 'a'.repeat(20) + 'b'.repeat(44)
+    const three = 'c'.repeat(64)
+    const daemon = fakeDaemon([], [rule(one), rule(two, { active: false }), rule(three, { grantedUnder: 'ask' })])
+    await run(daemon, ['approvals', 'rules', 'thread-1'])
+    expect(daemon.calls.at(-1)).toEqual({ method: 'threads.approvalRules', params: { threadId: 'thread-1' } })
+    expect(out).toContain(`${'a'.repeat(12)}  Allow Claude Code to run a command (Bash)?`)
+    expect(out).toContain('paused while this thread is stricter')
+    await run(fakeDaemon([], []), ['approvals', 'rules', 'thread-1'])
+    expect(out).toContain('No "always" rules on this thread.')
+
+    out = ''
+    // Too short, or fitting two rules: nothing is revoked.
+    await expect(run(daemon, ['approvals', 'reset', 'thread-1', 'aaaa'])).rejects.toThrow('exit 1')
+    expect(err).toContain('at least eight characters')
+    await expect(run(daemon, ['approvals', 'reset', 'thread-1', 'a'.repeat(10)])).rejects.toThrow('exit 1')
+    expect(err).toContain('More than one rule starts with')
+    expect(daemon.calls.some((call) => call.method === 'threads.clearApprovalRules')).toBe(false)
+    // One rule, by its id prefix: the daemon gets the whole id.
+    await run(daemon, ['approvals', 'reset', 'thread-1', 'c'.repeat(8)])
+    expect(daemon.calls.at(-1)).toEqual({ method: 'threads.clearApprovalRules', params: { threadId: 'thread-1', ruleId: three } })
+    expect(out).toContain('Revoked 1 rule.')
+    await run(daemon, ['approvals', 'reset', 'thread-1'])
+    expect(daemon.calls.at(-1)).toEqual({ method: 'threads.clearApprovalRules', params: { threadId: 'thread-1' } })
+    expect(out).toContain('Revoked 2 rules.')
+    await expect(run(daemon, ['approvals', 'reset'])).rejects.toThrow('exit 1')
+    expect(err).toContain('requires a thread id')
+  })
+
   it('says who answered first when another client was quicker, and exits non-zero', async () => {
     const daemon = fakeDaemon([request('req-1')])
     daemon.anotherClientAnswers('req-1', 'allow')
@@ -162,6 +217,37 @@ describe('interactive /approve and /deny', () => {
     expect([...daemon.settled.keys()]).toEqual(['req-2'])
     await expect(handleApprovalCommand('/deny req-1 use pnpm', daemon.client, 'thread-1234567890')).resolves.toBe('Answered: reject')
     expect(daemon.calls.at(-1)!.params).toEqual({ requestId: 'req-1', answers: { permission: 'reject', feedback: 'use pnpm' } })
+  })
+
+  it('/approve always allows the request for the thread by the option that declares it, and plain /approve still allows once', async () => {
+    const daemon = fakeDaemon([alwaysRequest('req-1')])
+    await expect(handleApprovalCommand('/approve always', daemon.client, 'thread-1234567890')).resolves.toBe('Answered: allow_always')
+    expect(daemon.calls.at(-1)!.params).toEqual({ requestId: 'req-1', answers: { permission: 'allow_always' } })
+    expect(daemon.settled.get('req-1')).toMatchObject({ decision: 'allow' })
+
+    const plain = fakeDaemon([alwaysRequest('req-2')])
+    await expect(handleApprovalCommand('/approve', plain.client, 'thread-1234567890')).resolves.toBe('Answered: allow')
+    expect(plain.calls.at(-1)!.params).toEqual({ requestId: 'req-2', answers: { permission: 'allow' } })
+  })
+
+  it('/approve always names its request like /approve does, and never answers "the latest"', async () => {
+    const daemon = fakeDaemon([alwaysRequest('req-1'), alwaysRequest('req-2')])
+    await expect(handleApprovalCommand('/approve always', daemon.client, 'thread-1234567890')).resolves.toContain('2 approvals are waiting')
+    expect(daemon.settled.size).toBe(0)
+    await expect(handleApprovalCommand('/approve always req-2', daemon.client, 'thread-1234567890')).resolves.toBe('Answered: allow_always')
+    expect([...daemon.settled.keys()]).toEqual(['req-2'])
+  })
+
+  it('/approve always on a request that does not offer it says so and answers nothing', async () => {
+    const daemon = fakeDaemon([request('req-1')])
+    await expect(handleApprovalCommand('/approve always', daemon.client, 'thread-1234567890')).resolves.toContain('no "always" option')
+    expect(daemon.calls.some((call) => call.method === 'orchestrator.answerQuestions')).toBe(false)
+    // A reason that merely starts with the word is not the keyword.
+    await expect(handleApprovalCommand('/approve alwaysnot', daemon.client, 'thread-1234567890')).resolves.toBe('Answered: allow')
+    // "always" is not a way to deny.
+    const denying = fakeDaemon([alwaysRequest('req-2')])
+    await expect(handleApprovalCommand('/deny always', denying.client, 'thread-1234567890')).resolves.toBe('Answered: reject')
+    expect(denying.calls.at(-1)!.params).toEqual({ requestId: 'req-2', answers: { permission: 'reject', feedback: 'always' } })
   })
 
   it('a prefix that fits more than one request is refused', async () => {

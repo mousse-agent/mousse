@@ -1,0 +1,56 @@
+/* Permissions section: the "Always for this thread" rules of the thread and their revoke buttons. */
+
+.side-card-rules {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.side-card-rule {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.side-card-rule-summary {
+  display: -webkit-box;
+  max-width: 100%;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.side-card-rule-note {
+  margin: 0;
+  color: var(--ui-faint);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.side-card-rule-revoke {
+  margin: 0 0 0 -6px;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: var(--ui-menu-row-radius);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.side-card-rule-revoke:hover {
+  background: var(--ui-hover);
+}
+
+.side-card-rule-revoke:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}

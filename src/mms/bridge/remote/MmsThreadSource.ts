@@ -1,3 +1,4 @@
+import { withoutStandingRules } from '../../orchestrator/UserQuestionService'
 import type { MmsProfileServices } from '../../MmsProfileServices'
 import { mmsJson } from './jsonOutput'
 import { MmsRemoteBackend, remoteThreadEventData } from './MmsBackend'
@@ -66,7 +67,7 @@ export class MmsThreadSource implements ThreadSourcePort {
       if (data?.threadId !== threadId) return
       deliver(
         'questions.updated',
-        { threadId, pending: this.services.questions.listPendingForThread(threadId) },
+        { threadId, pending: this.services.questions.listPendingForThread(threadId).map(withoutStandingRules) },
         true
       )
     }

@@ -158,12 +158,27 @@ export async function answerPermission(
     threadId: scope.threadId,
     title: request.toolCall.title ?? `Allow ${options.label} to run this tool?`,
     options: shown,
-    // The agent's own description of the call is its fingerprint: a request without one has no grant.
-    approval: { action, permissionKey, tool: { name: request.toolCall.kind ?? 'other', input: request.toolCall.rawInput, ...(scope.cwd ? { cwd: scope.cwd } : {}) } }
+    // The agent's own description of the call is its fingerprint, with the call's title: the kind alone names no
+    // tool (a read-only and a destructive MCP tool are both `other`). A request whose `rawInput` is missing or
+    // empty (`{}`, a string) describes nothing, so it has no fingerprint, no grant and no rule.
+    approval: {
+      action,
+      permissionKey,
+      tool: {
+        name: request.toolCall.kind ?? 'other',
+        input: isDescribed(request.toolCall.rawInput) ? { title: request.toolCall.title ?? null, rawInput: request.toolCall.rawInput } : undefined,
+        ...(scope.cwd ? { cwd: scope.cwd } : {})
+      }
+    }
   })
   if (scope.aborted()) return cancelled
   const selected = shown.find((option) => option.optionId === answer)
   return selected ? { outcome: { outcome: 'selected', optionId: selected.optionId } } : cancelled
+}
+
+/** A call description that says something: a non-empty object. */
+function isDescribed(rawInput: unknown): rawInput is Record<string, unknown> {
+  return typeof rawInput === 'object' && rawInput !== null && !Array.isArray(rawInput) && Object.keys(rawInput).length > 0
 }
 
 /** A path the agent may touch: inside the workspace, also after resolving links. */

@@ -7,9 +7,13 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { RequestPermissionRequest } from '@agentclientprotocol/sdk'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { PermissionMode } from '../../src/shared/permissionMode'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
+import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
+import { EffectOutbox } from '../../src/mms/run/EffectOutbox'
+import { RunEngine } from '../../src/mms/run/RunEngine'
+import { RunStore } from '../../src/mms/run/RunStore'
 import {
   answerPermission,
   classifyGenericOption,
@@ -129,6 +133,179 @@ describe('ACP permission requests under a permission mode', () => {
     // The agent's own option ids are mapped to what they mean.
     expect(questions.settle(requestId, { permission: 'once' }, { kind: 'user' })).toEqual({ ok: true, decision: 'allow' })
     await expect(waiter).resolves.toBe('once')
+  })
+})
+
+describe('ACP "Always for this thread" is Mousse\'s own rule, never the agent\'s', () => {
+  const homes: string[] = []
+  afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }) })
+
+  /** A question service bound to a Run Engine that runs each of `threads`; `state.permissionMode` is what their runs are bound to. */
+  async function bound(threads: string[] = ['thread']) {
+    const profileHome = mkdtempSync(join(tmpdir(), 'mousse-acp-always-'))
+    homes.push(profileHome)
+    const db = new ProfileDatabase({ profileHome })
+    const store = new RunStore(db)
+    const engine = new RunEngine({ store, pid: 1, outbox: new EffectOutbox(store) })
+    engine.reconcileOnBoot()
+    const state: { permissionMode: PermissionMode } = { permissionMode: 'ask' }
+    const questions = new UserQuestionService()
+    questions.setApprovalStore({
+      store: engine.approvals,
+      context: (threadId) => {
+        const run = engine.getActiveRun(threadId)
+        return run ? { runId: run.runId, instanceId: 'acp:agent', provider: 'acp', origin: 'interactive', permissionMode: state.permissionMode, approvals: 'ask', startedByPerson: true } : null
+      },
+      effectDelivery: () => false,
+      continuationDue: () => undefined
+    })
+    for (const threadId of threads) {
+      const sent = await engine.dispatch({ kind: 'send', threadId, clientRequestId: `run-${threadId}`, source: 'gui' })
+      if (sent.status !== 'accepted') throw new Error('send rejected')
+      engine.markStarting(sent.runId)
+      engine.markRunning(sent.runId)
+    }
+    const asked: Array<{ threadId: string; options: string[] }> = []
+    let answer = (_options: string[]): string => 'allow_always'
+    questions.on('pending', (event: { requestId: string; threadId: string; questions: Array<{ options: Array<{ id: string }> }> }) => {
+      const ids = event.questions[0]!.options.map((option) => option.id)
+      asked.push({ threadId: event.threadId, options: ids })
+      questions.submitAnswers(event.requestId, { permission: answer(ids) }, { kind: 'user' })
+    })
+    return { engine, questions, state, asked, db, answerWith: (next: (options: string[]) => string) => { answer = next } }
+  }
+  const execute = (rawInput?: unknown): RequestPermissionRequest => ({
+    sessionId: 's',
+    toolCall: { toolCallId: 'c', title: 'Run a command', kind: 'execute', ...(rawInput === undefined ? {} : { rawInput }) },
+    options
+  })
+  const forThread = (threadId: string, permissionMode: PermissionMode = 'ask'): AcpRequestScope => ({ ...scope(permissionMode), threadId })
+
+  it('answers the agent with its own once-only option, records the rule, and answers the same request later without a prompt', async () => {
+    const { questions, asked, engine, db } = await bound()
+    try {
+      const prompter = questionsPrompter(questions)
+      const first = await answerPermission(prompter, forThread('thread'), execute({ command: 'npm test' }), classify)
+      // The agent only ever hears its own once-only allow.
+      expect(first).toEqual(selected('once'))
+      // The card showed the agent's once-only options and Mousse's own "always"; the agent's native always/never are not there.
+      expect(asked).toEqual([{ threadId: 'thread', options: ['once', 'allow_always', 'no'] }])
+      expect(engine.approvals.listRules('thread')).toEqual([expect.objectContaining({ permissionKey: 'acp:execute', action: 'command', grantedUnder: 'ask' })])
+
+      expect(await answerPermission(prompter, forThread('thread'), execute({ command: 'npm test' }), classify)).toEqual(selected('once'))
+      expect(asked).toHaveLength(1)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('never widens to another command, another argument, or an agent that gives no description of the call', async () => {
+    const { questions, asked, db } = await bound()
+    try {
+      const prompter = questionsPrompter(questions)
+      await answerPermission(prompter, forThread('thread'), execute({ command: 'npm test' }), classify)
+      expect(asked).toHaveLength(1)
+      // Declining from here on, so each of these is seen to be asked.
+      questions.removeAllListeners('pending')
+      const seen: string[][] = []
+      questions.on('pending', (event: { requestId: string; questions: Array<{ options: Array<{ id: string }> }> }) => {
+        seen.push(event.questions[0]!.options.map((option) => option.id))
+        questions.submitAnswers(event.requestId, { permission: 'no' }, { kind: 'user' })
+      })
+      for (const rawInput of [{ command: 'npm test --watch' }, { command: 'npm test', cwd: '/elsewhere' }, { command: 'npm  test' }, { cmd: 'npm test' }])
+        expect(await answerPermission(prompter, forThread('thread'), execute(rawInput), classify), JSON.stringify(rawInput)).toEqual(selected('no'))
+      expect(seen).toHaveLength(4)
+      // No description of the call, no fingerprint: asked every time and "always" is not offered.
+      for (let times = 0; times < 2; times += 1) await answerPermission(prompter, forThread('thread'), execute(), classify)
+      expect(seen.slice(4)).toEqual([['once', 'no'], ['once', 'no']])
+    } finally {
+      db.close()
+    }
+  })
+
+  it('names the tool: a rule for one tool never answers another tool of the same kind with the same input', async () => {
+    const { questions, asked, engine, db } = await bound()
+    try {
+      const prompter = questionsPrompter(questions)
+      const tool = (title: string, rawInput: unknown): RequestPermissionRequest => ({ sessionId: 's', toolCall: { toolCallId: 'c', title, kind: 'other', rawInput }, options })
+      // The user says "always" to a read-only tool.
+      await answerPermission(prompter, forThread('thread'), tool('get_issue', { number: 5 }), classify)
+      expect(asked).toHaveLength(1)
+      expect(engine.approvals.listRules('thread')).toHaveLength(1)
+      expect(await answerPermission(prompter, forThread('thread'), tool('get_issue', { number: 5 }), classify)).toEqual(selected('once'))
+      expect(asked).toHaveLength(1)
+      // Another tool, same kind, same input: asked, and no rule is made for it unless the user says so.
+      questions.removeAllListeners('pending')
+      const seen: string[][] = []
+      questions.on('pending', (event: { requestId: string; questions: Array<{ options: Array<{ id: string }> }> }) => {
+        seen.push(event.questions[0]!.options.map((option) => option.id))
+        questions.submitAnswers(event.requestId, { permission: 'no' }, { kind: 'user' })
+      })
+      expect(await answerPermission(prompter, forThread('thread'), tool('close_issue', { number: 5 }), classify)).toEqual(selected('no'))
+      expect(await answerPermission(prompter, forThread('thread'), tool('get_issue', { number: 6 }), classify)).toEqual(selected('no'))
+      expect(seen).toHaveLength(2)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('a call whose description is empty or missing has no fingerprint: asked every time, never "always"', async () => {
+    const { questions, engine, db } = await bound()
+    try {
+      const prompter = questionsPrompter(questions)
+      questions.removeAllListeners('pending')
+      const seen: string[][] = []
+      questions.on('pending', (event: { requestId: string; questions: Array<{ options: Array<{ id: string }> }> }) => {
+        seen.push(event.questions[0]!.options.map((option) => option.id))
+        questions.submitAnswers(event.requestId, { permission: 'no' }, { kind: 'user' })
+      })
+      for (const rawInput of [{}, '', [], 'run it', 42, null, undefined]) {
+        for (let times = 0; times < 2; times += 1)
+          expect(await answerPermission(prompter, forThread('thread'), execute(rawInput), classify), JSON.stringify(rawInput)).toEqual(selected('no'))
+      }
+      expect(seen).toHaveLength(14)
+      expect(seen.every((options) => options.join() === 'once,no')).toBe(true)
+      expect(engine.approvals.listRules('thread')).toEqual([])
+    } finally {
+      db.close()
+    }
+  })
+
+  it('does not carry over to another thread on the same agent, and stops answering once the thread asks about more', async () => {
+    const { questions, asked, state, engine, db } = await bound(['thread', 'other'])
+    try {
+      const prompter = questionsPrompter(questions)
+      state.permissionMode = 'accept_edits'
+      await answerPermission(prompter, forThread('thread', 'accept_edits'), execute({ command: 'npm test' }), classify)
+      expect(engine.approvals.listRules('thread')[0]!.grantedUnder).toBe('accept_edits')
+      expect(asked).toHaveLength(1)
+      // The same agent in another thread asks.
+      await answerPermission(prompter, forThread('other', 'accept_edits'), execute({ command: 'npm test' }), classify)
+      expect(asked.map((entry) => entry.threadId)).toEqual(['thread', 'other'])
+      // Same thread, same request: answered by the rule.
+      await answerPermission(prompter, forThread('thread', 'accept_edits'), execute({ command: 'npm test' }), classify)
+      expect(asked).toHaveLength(2)
+      // The thread now asks about more than when it was granted: the next request asks.
+      state.permissionMode = 'ask'
+      await answerPermission(prompter, forThread('thread', 'ask'), execute({ command: 'npm test' }), classify)
+      expect(asked.map((entry) => entry.threadId)).toEqual(['thread', 'other', 'thread'])
+    } finally {
+      db.close()
+    }
+  })
+
+  it('a simulated agent that remembers a native "allow always" is never offered one', async () => {
+    const { questions, asked, db, answerWith } = await bound()
+    try {
+      // The user would take any "always" they are offered: only Mousse's own is there.
+      answerWith((offered) => offered.find((id) => /always/i.test(id)) ?? 'no')
+      const nativeAlways = { ...execute({ command: 'ls' }), options: [...options, { optionId: 'allow_always_session', name: 'Allow for the session', kind: 'allow_always' as const }] }
+      const result = await answerPermission(questionsPrompter(questions), forThread('thread'), nativeAlways, classify)
+      expect(result).toEqual(selected('once'))
+      expect(asked[0]!.options).toEqual(['once', 'allow_always', 'no'])
+    } finally {
+      db.close()
+    }
   })
 })
 

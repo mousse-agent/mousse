@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { X } from '../lib/icons'
+import { ALWAYS_OPTION_NOTE } from '../../shared/permissionKeys'
 import type { PendingApprovalInfo, PendingUserQuestions, QuestionAnswerOutcome, UserQuestion, UserQuestionAnswers } from '../../shared/types'
 
 interface ComposerQuestionModalProps {
@@ -183,6 +184,9 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss }: Composer
           {pending.approval && approvalNotes(pending.approval).map((note) => (
             <p key={note} className="composer-question-reason">{note}</p>
           ))}
+          {pending.approval && active.options.some((option) => option.scope === 'always') && (
+            <p className="composer-question-reason">{ALWAYS_OPTION_NOTE}</p>
+          )}
           <div className="composer-question-options">
             {active.options.map((option) => {
               const selected = active.allowMultiple

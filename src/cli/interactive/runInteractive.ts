@@ -20,7 +20,7 @@ import {
   DEFAULT_SIGINT_EXIT_WINDOW_MS
 } from './sigintSemantics'
 import { canUsePiTui, loadPiTui } from './piTui'
-import { describeApproval, handleApprovalCommand, type PendingApproval } from './approvals'
+import { alwaysOption, describeApproval, handleApprovalCommand, type PendingApproval } from './approvals'
 
 export interface InteractiveChatOptions {
   client: DaemonClient
@@ -81,7 +81,9 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
       const entry = ev.data as PendingApproval
       if (entry?.approval && entry.requestId) {
         for (const line of describeApproval(entry)) writeLine(line)
-        writeLine(`  /approve ${entry.requestId.slice(0, 8)} to allow once, /deny ${entry.requestId.slice(0, 8)} [reason] to deny`)
+        const short = entry.requestId.slice(0, 8)
+        const always = entry.questions.some((question) => alwaysOption(question)) ? `, /approve always ${short} to allow it for this thread` : ''
+        writeLine(`  /approve ${short} to allow once${always}, /deny ${short} [reason] to deny`)
       }
     }
     if (ev.type === 'turn.started') turnActive = true

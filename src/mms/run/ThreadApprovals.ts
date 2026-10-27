@@ -1,5 +1,5 @@
 import { redactSecrets } from '../../shared/errors'
-import type { PermissionAction } from '../../shared/permissionMode'
+import { isPermissionMode, isStricter, narrowPermissionMode, type PermissionAction, type PermissionMode } from '../../shared/permissionMode'
 import type { UserQuestionAnswers } from '../../shared/types'
 import { canAnswerApproval, type Answerer, type ApprovalRefusal, type LineageLookup } from './approvalRights'
 import { int, json, str, type Row } from './db/rows'
@@ -58,6 +58,8 @@ export interface ApprovalRecord {
   fingerprint: string | null
   questions: ApprovalQuestion[]
   reason: string | null
+  /** The permission mode of the run that asked: what a rule made by answering "always" is granted under. */
+  permissionMode: PermissionMode | null
   answerPath: ApprovalAnswerPath
   uncertain: boolean
   uncertainTools: string[] | null
@@ -76,7 +78,27 @@ export interface ApprovalRecord {
 }
 
 export type NewApproval = Pick<ApprovalRecord, 'requestId' | 'threadId' | 'instanceId' | 'provider' | 'action' | 'permissionKey' | 'questions'> &
-  Partial<Pick<ApprovalRecord, 'runId' | 'fingerprint' | 'reason' | 'answerPath'>>
+  Partial<Pick<ApprovalRecord, 'runId' | 'fingerprint' | 'reason' | 'answerPath' | 'permissionMode'>>
+
+/**
+ * A standing "Always for this thread" rule (SPEC §17.8): one exact request, in one thread. `grantedUnder`
+ * is the permission mode the user was asked under; the rule is ignored while the thread's mode is stricter.
+ */
+export interface ApprovalRule {
+  threadId: string
+  /** The request's fingerprint, which is also the rule's id. */
+  fingerprint: string
+  permissionKey: string
+  action: PermissionAction
+  /** A bounded preview of what was allowed, without credentials. */
+  summary: string
+  grantedUnder: PermissionMode
+  sourceRequestId: string | null
+  createdAt: string
+}
+
+/** The most characters of a rule's preview that are saved. */
+const RULE_SUMMARY_CHARS = 500
 
 /** The answers of one dead run are all in: the continue turn that delivers them is due. */
 export interface ContinuationDue {
@@ -88,7 +110,7 @@ export interface ContinuationDue {
 }
 
 export type SettleOutcome =
-  | { ok: true; decision: ApprovalDecision; scope?: 'once' | 'always'; record: ApprovalRecord; continuationDue?: ContinuationDue }
+  | { ok: true; decision: ApprovalDecision; scope?: 'once' | 'always'; record: ApprovalRecord; continuationDue?: ContinuationDue; rule?: ApprovalRule; siblings?: string[] }
   | {
       ok: false
       reason: 'unknown' | 'already_answered' | 'cancelled' | ApprovalRefusal
@@ -159,6 +181,7 @@ function toRecord(row: Row): ApprovalRecord {
     fingerprint: str(row.fingerprint),
     questions: json<ApprovalQuestion[]>(row.questions) ?? [],
     reason: str(row.reason),
+    permissionMode: isPermissionMode(row.permission_mode) ? row.permission_mode : null,
     answerPath: row.answer_path as ApprovalAnswerPath,
     uncertain: int(row.uncertain) === 1,
     uncertainTools: json<string[]>(row.uncertain_tools),
@@ -175,6 +198,29 @@ function toRecord(row: Row): ApprovalRecord {
     createdAt: String(row.created_at),
     settledAt: str(row.settled_at)
   }
+}
+
+function toRule(row: Row): ApprovalRule {
+  return {
+    threadId: String(row.thread_id),
+    fingerprint: String(row.fingerprint),
+    permissionKey: String(row.permission_key),
+    action: row.action as PermissionAction,
+    summary: String(row.summary),
+    // A mode this build does not know (a later one, after a downgrade) is read as the loosest: the rule then holds
+    // in the fewest modes.
+    grantedUnder: isPermissionMode(row.granted_under) ? row.granted_under : 'full',
+    sourceRequestId: str(row.source_request_id),
+    createdAt: String(row.created_at)
+  }
+}
+
+/**
+ * The question's option that allows the action once (never the "always" one): what the provider is
+ * answered with when the user chose "always", since a provider only knows its own option ids.
+ */
+export function onceAllowOption(questions: readonly ApprovalQuestion[]): ApprovalOption | undefined {
+  return questions[0]?.options.find((option) => option.decision === 'allow' && option.scope !== 'always')
 }
 
 function storedAnswerer(answerer: Answerer): AnsweredBy {
@@ -234,6 +280,7 @@ export class ThreadApprovals {
         fingerprint: input.fingerprint ?? null,
         questions: input.questions,
         reason: input.reason ?? null,
+        permissionMode: input.permissionMode ?? null,
         answerPath: input.answerPath ?? 'live',
         uncertain: false,
         uncertainTools: null,
@@ -253,13 +300,13 @@ export class ThreadApprovals {
       this.db
         .statement(
           `INSERT INTO approval_requests(request_id, thread_id, run_id, instance_id, provider, action, permission_key,
-             fingerprint, questions, reason, answer_path, uncertain, status, created_at)
-           VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending', ?)`
+             fingerprint, questions, reason, permission_mode, answer_path, uncertain, status, created_at)
+           VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending', ?)`
         )
         .run(
           record.requestId, record.threadId, record.runId, record.instanceId, record.provider, record.action,
           record.permissionKey, record.fingerprint, stableStringify(record.questions), record.reason,
-          record.answerPath, record.createdAt
+          record.permissionMode, record.answerPath, record.createdAt
         )
       event(this.store, 'approval.pending', record, { action: record.action, permissionKey: record.permissionKey, answerPath: record.answerPath })
       return record
@@ -322,12 +369,19 @@ export class ThreadApprovals {
     const meaning = meaningOf(row.questions, answers)
     const rights = canAnswerApproval({ threadId: row.threadId, action: row.action, permissionKey: row.permissionKey }, answeredBy, meaning, this.deps.lineage)
     if (!rights.ok) return { ok: false, reason: rights.code }
+    const always = meaning.decision === 'allow' && meaning.scope === 'always'
+    const once = always ? onceAllowOption(row.questions) : undefined
+    // "Always" is Mousse's own option: a request that cannot also be allowed once cannot be answered with it.
+    if (always && !once) return { ok: false, reason: 'unknown' }
     const at = now(this.store)
     const raw = feedbackOf(answers) ?? customAnswerOf(row.questions, answers)
     const feedback = raw ? redactSecrets(raw).slice(0, 2000) : null
     // The provider reads the reason from `feedback`, whether it came as a field or as a typed answer.
     // What is saved and handed on is the redacted text.
     if (feedback) answers = { ...answers, feedback }
+    // The provider only knows its own options: "always" reaches it as the option that allows once. The
+    // rule that makes it "always" is Mousse's (below), never the provider's.
+    if (always && once) answers = { ...answers, [row.questions[0]!.id]: once.id }
     const who = storedAnswerer(answeredBy)
     const result = this.db
       .statement(
@@ -342,12 +396,98 @@ export class ThreadApprovals {
     }
     const record: ApprovalRecord = { ...row, status: 'answered', answers, decision: meaning.decision, decisionScope: meaning.scope ?? null, feedback, answeredBy: who, settledAt: at }
     event(this.store, 'approval.answered', record, { decision: meaning.decision, ...(meaning.scope ? { scope: meaning.scope } : {}), answeredBy: who, answerPath: row.answerPath })
+    // Only a user creates a standing rule, in the same transaction as the answer.
+    const rule = always && answeredBy.kind === 'user' ? this.grantRule(record) : null
+    // Identical requests waiting beside this one (a model's parallel calls) are the same decision: allow them too.
+    const siblings = rule ? this.allowSiblings(record, answeredBy, enqueueDelivery) : []
+    const base = { ok: true as const, decision: meaning.decision, ...(meaning.scope ? { scope: meaning.scope } : {}), record, ...(rule ? { rule } : {}), ...(siblings.length ? { siblings } : {}) }
     if (row.answerPath === 'live') {
       if (enqueueDelivery) this.deps.outbox.enqueue({ threadId: row.threadId, runId: row.runId, kind: 'request.respond', payload: { requestId: row.requestId } })
-      return { ok: true, decision: meaning.decision, ...(meaning.scope ? { scope: meaning.scope } : {}), record }
+      return base
     }
     const due = this.continuationDue(record)
-    return { ok: true, decision: meaning.decision, ...(meaning.scope ? { scope: meaning.scope } : {}), record, ...(due ? { continuationDue: due } : {}) }
+    return { ...base, ...(due ? { continuationDue: due } : {}) }
+  }
+
+  /**
+   * Records "Always for this thread" for the exact request just answered: one rule per thread and
+   * fingerprint. A request without a fingerprint, or saved without the mode it was asked under, makes
+   * none (the answer still allows it once). Asked again under another mode, the rule keeps the
+   * strictest mode it was granted under.
+   */
+  private grantRule(record: ApprovalRecord): ApprovalRule | null {
+    if (!record.fingerprint || !record.permissionMode) return null
+    const existing = this.db.statement('SELECT * FROM approval_rules WHERE thread_id = ? AND fingerprint = ?').get(record.threadId, record.fingerprint)
+    const grantedUnder = existing ? narrowPermissionMode(toRule(existing).grantedUnder, record.permissionMode) : record.permissionMode
+    const flat = redactSecrets(record.questions[0]?.prompt ?? '').replace(/\s+/g, ' ').trim()
+    // A long command is cut in the middle, so the end that tells two commands apart stays visible.
+    const summary = flat.length > RULE_SUMMARY_CHARS ? `${flat.slice(0, 300)} ... ${flat.slice(-(RULE_SUMMARY_CHARS - 306))}` : flat
+    const at = now(this.store)
+    this.db
+      .statement(
+        `INSERT INTO approval_rules(thread_id, fingerprint, permission_key, action, summary, granted_under, source_request_id, created_at)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(thread_id, fingerprint) DO UPDATE SET granted_under = excluded.granted_under, summary = excluded.summary, source_request_id = excluded.source_request_id`
+      )
+      .run(record.threadId, record.fingerprint, record.permissionKey, record.action, summary, grantedUnder, record.requestId, at)
+    const rule: ApprovalRule = {
+      threadId: record.threadId, fingerprint: record.fingerprint, permissionKey: record.permissionKey, action: record.action,
+      summary, grantedUnder, sourceRequestId: record.requestId, createdAt: existing ? toRule(existing).createdAt : at
+    }
+    event(this.store, 'approval.rule_granted', record, { fingerprint: record.fingerprint, permissionKey: record.permissionKey, grantedUnder })
+    return rule
+  }
+
+  /**
+   * Allows (once) the other pending requests of the thread that carry the same fingerprint and key, in
+   * the answering transaction. Only requests whose provider still waits (`live`) and that offer an option
+   * allowing once; a request that already differs in any way has another fingerprint and is left alone.
+   */
+  private allowSiblings(record: ApprovalRecord, answeredBy: Answerer, enqueueDelivery: boolean): string[] {
+    if (!record.fingerprint) return []
+    const done: string[] = []
+    for (const sibling of select(this.store, "status = 'pending' AND thread_id = ? AND fingerprint = ? AND permission_key = ? AND answer_path = 'live' AND request_id != ?", record.threadId, record.fingerprint, record.permissionKey, record.requestId)) {
+      const once = onceAllowOption(sibling.questions)
+      if (!once) continue
+      const outcome = this.settleRow(sibling, { [sibling.questions[0]!.id]: once.id }, answeredBy, enqueueDelivery)
+      if (outcome.ok) done.push(sibling.requestId)
+    }
+    return done
+  }
+
+  /**
+   * The rule that answers a request without asking: this thread's, for exactly this fingerprint and
+   * key. A request without a fingerprint matches nothing. A rule granted under a looser mode than the
+   * thread's current one is ignored (it applies again if the mode loosens).
+   */
+  matchRule(threadId: string, permissionKey: string, fingerprint: string | null, currentMode: PermissionMode): ApprovalRule | null {
+    if (!fingerprint) return null
+    const row = this.db.statement('SELECT * FROM approval_rules WHERE thread_id = ? AND fingerprint = ? AND permission_key = ?').get(threadId, fingerprint, permissionKey)
+    if (!row) return null
+    const rule = toRule(row)
+    return isStricter(currentMode, rule.grantedUnder) ? null : rule
+  }
+
+  /** Records that a rule answered a request, so the thread's history shows why nothing asked. */
+  noteRuleApplied(threadId: string, runId: string | null, rule: ApprovalRule): void {
+    this.store.appendEvent({ threadId, runId, type: 'approval.rule_applied', payload: { fingerprint: rule.fingerprint, permissionKey: rule.permissionKey, grantedUnder: rule.grantedUnder } })
+  }
+
+  /** The thread's standing rules, oldest first. */
+  listRules(threadId: string): ApprovalRule[] {
+    return this.db.statement('SELECT * FROM approval_rules WHERE thread_id = ? ORDER BY created_at, rowid').all(threadId).map(toRule)
+  }
+
+  /** Revokes one rule of the thread (by fingerprint) or all of them. Returns how many were removed. */
+  revokeRules(threadId: string, fingerprint?: string): number {
+    return this.db.transaction(() => {
+      const rules = this.listRules(threadId).filter((rule) => fingerprint === undefined || rule.fingerprint === fingerprint)
+      for (const rule of rules) {
+        this.db.statement('DELETE FROM approval_rules WHERE thread_id = ? AND fingerprint = ?').run(threadId, rule.fingerprint)
+        this.store.appendEvent({ threadId, runId: null, type: 'approval.rule_revoked', payload: { fingerprint: rule.fingerprint, permissionKey: rule.permissionKey } })
+      }
+      return rules.length
+    })
   }
 
   /** The continue turn of a dead run, once none of its requests is still pending. */
@@ -443,9 +583,12 @@ export class ThreadApprovals {
     })
   }
 
-  /** Removes the requests of a deleted thread: their prompts and answers must not outlive its transcript. */
+  /** Removes the requests and rules of a deleted thread: their prompts, answers and standing rules must not outlive its transcript. */
   deleteForThread(threadId: string): number {
-    return this.db.transaction(() => Number(this.db.statement('DELETE FROM approval_requests WHERE thread_id = ?').run(threadId).changes))
+    return this.db.transaction(() => {
+      this.db.statement('DELETE FROM approval_rules WHERE thread_id = ?').run(threadId)
+      return Number(this.db.statement('DELETE FROM approval_requests WHERE thread_id = ?').run(threadId).changes)
+    })
   }
 
   /** The answer reached its waiting provider. */

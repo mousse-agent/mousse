@@ -393,6 +393,21 @@ export interface PendingApprovalInfo {
   total?: number
 }
 
+/** One "Always for this thread" rule, as a client lists it (SPEC §17.8): the exact request it answers, and whether it applies now. */
+export interface ApprovalRuleInfo {
+  /** Names the rule when it is revoked. */
+  id: string
+  permissionKey: string
+  action: 'command' | 'edit' | 'tool'
+  /** A bounded preview of what was allowed, without credentials. */
+  summary: string
+  /** The permission mode the user was asked under; the rule is ignored while the thread's mode is stricter. */
+  grantedUnder: PermissionMode
+  /** False while the thread's mode is stricter than the one the rule was granted under. */
+  active: boolean
+  createdAt: string
+}
+
 export interface PendingUserQuestions {
   requestId: string
   questions: UserQuestion[]

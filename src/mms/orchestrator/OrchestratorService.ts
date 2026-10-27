@@ -123,6 +123,7 @@ import {
   type Agent,
   type AgentOrigin,
   type AgentStatus,
+  type ApprovalRuleInfo,
   type ChatImageAttachment,
   type ChatMode,
   type ChatMessage,
@@ -152,7 +153,7 @@ import {
   normalizePermissionMode,
   type PermissionMode
 } from '../../shared/permissionMode'
-import { describeApprovalRefusal, type Answerer } from '../run/approvalRights'
+import { describeApprovalRefusal, startedByPerson, type Answerer } from '../run/approvalRights'
 import { formatApprovalDecisions } from '../run/approvalNote'
 import type { ApprovalRecord, ContinuationDue } from '../run/ThreadApprovals'
 import { allowsOrchestrationActions, buildModeChangeNotice, chatModeEquals, getChatModeLabel, getLastUserChatMode, normalizeChatMode } from '../../shared/chatMode'
@@ -1641,10 +1642,30 @@ export class OrchestratorService extends EventEmitter {
         const run = engine.getActiveRun(threadId)
         if (!run) return null
         const binding = engine.bindingForRun(run.runId)
-        return { runId: run.runId, instanceId: binding?.instanceId ?? '', provider: binding?.driver ?? '', origin: binding ? policyOrigin(binding.policy) : 'interactive' }
+        const origin = binding ? policyOrigin(binding.policy) : 'interactive'
+        const permissionMode = binding?.policy.permissionMode
+        let currentMode = permissionMode
+        if (permissionMode) {
+          // A rule is checked against the stricter of the run's mode and the thread's own now: a tighter mode applies
+          // to the next turn, but a rule stops answering at once.
+          try { currentMode = narrowPermissionMode(permissionMode, this.requestedPermissionMode(threadId)) } catch { currentMode = 'ask' }
+        }
+        return {
+          runId: run.runId,
+          instanceId: binding?.instanceId ?? '',
+          provider: binding?.driver ?? '',
+          origin,
+          // A binding that records no mode leaves it unknown: no rule is offered, made or matched for it.
+          ...(permissionMode ? { permissionMode } : {}),
+          ...(currentMode ? { currentMode } : {}),
+          approvals: binding?.policy.approvals ?? 'ask',
+          // No binding, no known starter: not a person's turn.
+          startedByPerson: binding !== undefined && startedByPerson({ origin, source: run.source })
+        }
       },
       effectDelivery: () => this.effectsEnabled(),
-      continuationDue: (due, answeredBy) => this.startApprovalContinuation(due, answeredBy)
+      continuationDue: (due, answeredBy) => this.startApprovalContinuation(due, answeredBy),
+      ruleApplied: (threadId, rule) => this.noteProviderNotice(threadId, `Allowed without asking by your "Always for this thread" rule (${rule.summary.slice(0, 200)}). Revoke it in the thread side card.`)
     })
   }
 
@@ -3487,6 +3508,31 @@ export class OrchestratorService extends EventEmitter {
       console.warn('permission mode change could not be recorded as an event', { threadId, error: error instanceof Error ? error.message : String(error) })
     }
     return updated
+  }
+
+  /**
+   * The thread's "Always for this thread" rules (SPEC §17.8), each with whether it applies at the
+   * thread's mode now. A thread without the Run Engine has none.
+   */
+  listApprovalRules(threadId: string): ApprovalRuleInfo[] {
+    const approvals = this.runEngine?.approvals
+    if (!approvals) return []
+    const mode = this.requestedPermissionMode(threadId)
+    return approvals.listRules(threadId).map((rule) => ({
+      id: rule.fingerprint,
+      permissionKey: rule.permissionKey,
+      action: rule.action,
+      summary: rule.summary,
+      grantedUnder: rule.grantedUnder,
+      active: !isStricter(mode, rule.grantedUnder),
+      createdAt: rule.createdAt
+    }))
+  }
+
+  /** Revokes one rule of the thread (by id) or all of them. Only this thread's rules are reachable. */
+  clearApprovalRules(threadId: string, ruleId?: string): { removed: number } {
+    const approvals = this.runEngine?.approvals
+    return { removed: approvals ? approvals.revokeRules(threadId, ruleId) : 0 }
   }
 
   /**

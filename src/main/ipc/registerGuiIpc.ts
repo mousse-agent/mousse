@@ -104,6 +104,7 @@ import type {
   GitPullOptions,
   GitPushOptions,
   GitScope,
+  ApprovalRuleInfo,
   MainView,
   OrchestratorContextUsageInput,
   OrchestratorSendInput,
@@ -1347,6 +1348,14 @@ export function registerGuiIpc(
     )
     broadcast('threads:updated', res.threads)
     return res.thread
+  })
+  registerHandler('threads:approvalRules', async (_e, threadId: string) => {
+    const res = await guiMms.request<{ rules: ApprovalRuleInfo[] }>('threads.approvalRules', { threadId })
+    return res.rules
+  })
+  registerHandler('threads:clearApprovalRules', async (_e, threadId: string, ruleId?: string) => {
+    const res = await guiMms.request<{ rules: ApprovalRuleInfo[] }>('threads.clearApprovalRules', { threadId, ...(ruleId ? { ruleId } : {}) })
+    return res.rules
   })
   registerHandler('threads:settle', async (_e, threadId: string, settled: boolean) => {
     const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(

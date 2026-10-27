@@ -7,7 +7,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { TurnOrigin } from '../../src/shared/harness/types'
+import type { RunPolicy, TurnOrigin } from '../../src/shared/harness/types'
+import type { PermissionMode } from '../../src/shared/permissionMode'
 import { UserQuestionService, type ApprovalTag } from '../../src/mms/orchestrator/UserQuestionService'
 import type { PendingUserQuestions } from '../../src/shared/types'
 import type { TurnInput } from '../../src/mms/run/adapters/ProviderAdapter'
@@ -62,6 +63,15 @@ describe('saved approval requests: the store and the question service', () => {
     engine.reconcileOnBoot()
     const questions = new UserQuestionService()
     const origins = new Map<string, TurnOrigin>()
+    /** The permission mode and approvals policy each thread's run is bound to (the strictest unless a test says otherwise). */
+    const modes = new Map<string, PermissionMode>()
+    const policies = new Map<string, RunPolicy['approvals']>()
+    /** Threads whose run no person started (a scheduled job, a webhook, a subagent, a bot, an agent's message). */
+    const unattended = new Set<string>()
+    /** The thread's own mode now, when it differs from the run's (a tighter mode applies to the next turn). */
+    const currentModes = new Map<string, PermissionMode>()
+    /** Threads whose run binding records no permission mode. */
+    const unknownModes = new Set<string>()
     const continuations: ContinuationDue[] = []
     const mode = { effects: false }
     questions.setLineageSource((threadId) => engine.delegations.getLineage(threadId))
@@ -69,7 +79,9 @@ describe('saved approval requests: the store and the question service', () => {
       store: engine.approvals,
       context: (threadId) => {
         const run = engine.getActiveRun(threadId)
-        return run ? { runId: run.runId, instanceId: 'claude', provider: 'claude', origin: origins.get(threadId) ?? 'interactive' } : null
+        return run
+          ? { runId: run.runId, instanceId: 'claude', provider: 'claude', origin: origins.get(threadId) ?? 'interactive', ...(unknownModes.has(threadId) ? {} : { permissionMode: modes.get(threadId) ?? 'ask' }), ...(currentModes.has(threadId) ? { currentMode: currentModes.get(threadId)! } : {}), approvals: policies.get(threadId) ?? 'ask', startedByPerson: !unattended.has(threadId) }
+          : null
       },
       effectDelivery: () => mode.effects,
       continuationDue: (due) => continuations.push(due)
@@ -78,7 +90,7 @@ describe('saved approval requests: the store and the question service', () => {
     engine.on('event', (event: { type: string; payload: { requestId?: string; reason?: string } }) => {
       if (event.type === 'approval.cancelled' && event.payload.requestId) questions.approvalClosed(event.payload.requestId, event.payload.reason ?? 'withdrawn')
     })
-    return { engine, store, questions, origins, continuations, mode }
+    return { engine, store, questions, origins, modes, currentModes, unattended, unknownModes, policies, continuations, mode }
   }
 
   const running = async (engine: RunEngine, threadId: string, key: string): Promise<RunRecord> => {
@@ -336,6 +348,375 @@ describe('saved approval requests: the store and the question service', () => {
       const approvals = store()
       expect(approvals.settle('missing', { permission: 'allow' }, USER)).toEqual({ ok: false, reason: 'unknown' })
       expect(approvals.settle('r-1', { permission: 'always' }, USER)).toMatchObject({ ok: true, decision: 'allow', scope: 'always' })
+    })
+  })
+
+  describe('"Always for this thread" (SPEC §17.8)', () => {
+    const ALWAYS = 'allow_always'
+    const CWD = '/work/app'
+    const claudeEdit = (input: Record<string, unknown>, cwd = CWD): Tool => ({ name: 'Edit', input, cwd })
+
+    /** A thread `t` with a run that asks under `mode`, as a run bound to that mode does. */
+    const asking = async (mode: PermissionMode = 'accept_edits') => {
+      const f = fixture()
+      f.modes.set('t', mode)
+      await running(f.engine, 't', 'req-1')
+      return f
+    }
+    /** Requests `tool` the way the provider does and says whether the user was asked. A request that was asked stays pending. */
+    const request = (f: ReturnType<typeof fixture>, tool: Tool | undefined, extra: Partial<ApprovalTag> = {}, threadId = 't') => {
+      const before = f.questions.listPendingForThread(threadId).length
+      const approval = tag({ ...(tool ? { tool, ...kindOf(tool) } : {}), ...extra })
+      const outcome: { value?: Record<string, string | string[]>; error?: Error } = {}
+      const promise = f.questions.requestAnswers(prompt(`Allow Claude Code to run ${tool?.name ?? 'something'}?\n${JSON.stringify(tool?.input ?? {})}`), threadId, { approval })
+        .then((value) => { outcome.value = value }, (error: Error) => { outcome.error = error })
+      const pending = f.questions.listPendingForThread(threadId)
+      return { asked: pending.length > before, requestId: pending.at(-1)?.requestId ?? '', optionIds: pending.length > before ? pending.at(-1)!.questions[0]!.options.map((option) => option.id) : [], promise, outcome }
+    }
+    /** Asks and, when asked, withdraws the request again so the test goes on. */
+    const probe = async (f: ReturnType<typeof fixture>, tool: Tool | undefined, extra: Partial<ApprovalTag> = {}, threadId = 't') => {
+      const result = request(f, tool, extra, threadId)
+      if (result.asked) f.questions.dismissAllForThread(threadId)
+      await result.promise
+      return result
+    }
+    /** The user answers "Always for this thread" to a request for `tool`. */
+    const allowAlways = async (f: ReturnType<typeof fixture>, tool: Tool, threadId = 't') => {
+      const result = request(f, tool, {}, threadId)
+      expect(result.asked).toBe(true)
+      expect(f.questions.settle(result.requestId, { permission: ALWAYS }, USER)).toEqual({ ok: true, decision: 'allow' })
+      await result.promise
+      return result
+    }
+    const rules = (f: ReturnType<typeof fixture>, threadId = 't') => f.engine.approvals.listRules(threadId)
+    const eventTypes = (f: ReturnType<typeof fixture>, type: string, threadId = 't') => f.store.listEvents(threadId).filter((event) => event.type === type)
+
+    it('is offered only on a request that names its exact action, can be skipped, and runs where the user is asked', async () => {
+      const f = await asking()
+      const view = request(f, BASH('npm test'))
+      expect(f.questions.getPending(view.requestId)!.questions[0]!.options).toEqual([
+        { id: 'allow', label: 'Allow once', decision: 'allow', scope: 'once' },
+        { id: ALWAYS, label: 'Always for this thread', decision: 'allow', scope: 'always' },
+        { id: 'reject', label: 'Reject', decision: 'reject' }
+      ])
+      f.questions.dismissAllForThread('t')
+      await view.promise
+
+      const offered = async (tool: Tool | undefined, extra: Partial<ApprovalTag> = {}) => (await probe(f, tool, extra)).optionIds.includes(ALWAYS)
+      expect(await offered(BASH('npm test'))).toBe(true)
+      // No fingerprint, no rule: nothing identifies the action.
+      expect(await offered(undefined)).toBe(false)
+      expect(await offered({ name: 'Bash', input: { command: 'npm test' } })).toBe(false)
+      expect(await offered({ name: 'Bash', input: { description: 'no command' }, cwd: CWD })).toBe(false)
+      expect(await offered({ name: 'integrate_delegation', input: { delegationId: 'd1' }, cwd: CWD }, { permissionKey: 'mousse:integrate', action: 'edit' })).toBe(false)
+      // A check the provider will not let Mousse skip is never "always".
+      expect(await offered(BASH('npm test'), { reason: 'Claude Code asks even in Full access: its own safety check.' })).toBe(false)
+      // A run that does not ask (its policy grants) and a thread with no run have nothing to remember.
+      f.policies.set('t', 'grants')
+      expect(await offered(BASH('npm test'))).toBe(false)
+      f.policies.delete('t')
+      expect((await probe(f, BASH('npm test'), {}, 'idle')).optionIds).toEqual(['allow', 'reject'])
+    })
+
+    it('answering it allows the request once for the provider, records one rule with the mode it was granted under, and says so in the thread', async () => {
+      const f = await asking('accept_edits')
+      const first = await allowAlways(f, BASH('npm test'))
+      // The provider only knows its own option.
+      expect(first.outcome.value).toEqual({ permission: 'allow' })
+      const row = f.engine.approvals.get(first.requestId)!
+      expect(row).toMatchObject({ status: 'answered', decision: 'allow', decisionScope: 'always', permissionMode: 'accept_edits', answers: { permission: 'allow' } })
+      expect(rules(f)).toEqual([expect.objectContaining({
+        threadId: 't', fingerprint: row.fingerprint, permissionKey: 'claude:command', action: 'command', grantedUnder: 'accept_edits',
+        sourceRequestId: first.requestId, summary: expect.stringContaining('npm test')
+      })])
+      expect(eventTypes(f, 'approval.rule_granted')).toHaveLength(1)
+      expect(eventTypes(f, 'approval.answered')[0]!.payload).toMatchObject({ decision: 'allow', scope: 'always' })
+    })
+
+    it('then answers that exact request without asking, in the same thread, and records why nothing asked', async () => {
+      const f = await asking()
+      await allowAlways(f, BASH('npm test'))
+      const events: unknown[] = []
+      f.questions.on('pending', (payload) => events.push(payload))
+
+      // A different label for the same command is the same action; so is the same request again, any number of times.
+      for (const tool of [BASH('npm test'), BASH('npm test', { description: 'Run the unit tests' }), BASH('npm test')]) {
+        const again = request(f, tool)
+        expect(again.asked).toBe(false)
+        await again.promise
+        expect(again.outcome.value).toEqual({ permission: 'allow' })
+      }
+      expect(events).toEqual([])
+      expect(f.engine.approvals.listPending('t')).toEqual([])
+      expect(eventTypes(f, 'approval.rule_applied')).toHaveLength(3)
+      // Only the first request is a row: a rule answers without saving a request.
+      expect(f.store.listEvents('t').filter((event) => event.type === 'approval.pending')).toHaveLength(1)
+    })
+
+    it('never widens: another command, folder, argument or tool still asks', async () => {
+      const f = await asking()
+      await allowAlways(f, BASH('npm test'))
+      const nearMisses: Array<[string, Tool]> = [
+        ['an extra argument', BASH('npm test --watch')],
+        ['a longer command', BASH('npm test && rm -rf dist')],
+        ['a command chained before it', BASH('rm -rf dist; npm test')],
+        ['different spacing', BASH('npm  test')],
+        ['different case', BASH('NPM test')],
+        ['a prefix', BASH('npm')],
+        ['another timeout', BASH('npm test', { timeout: 5000 })],
+        ['running in the background', BASH('npm test', { run_in_background: true })],
+        ['another folder', { ...BASH('npm test'), cwd: '/work/other' }],
+        ['a subfolder', { ...BASH('npm test'), cwd: '/work/app/packages/a' }],
+        ['the parent folder', { ...BASH('npm test'), cwd: '/work' }],
+        ['another shell', { name: 'PowerShell', input: { command: 'npm test' }, cwd: CWD }]
+      ]
+      for (const [name, tool] of nearMisses) {
+        const result = await probe(f, tool)
+        expect(result.asked, name).toBe(true)
+      }
+      // Asking about them made no rule.
+      expect(rules(f)).toHaveLength(1)
+    })
+
+    it('a file rule covers that edit only: another path, text, mode or tool asks', async () => {
+      const f = await asking()
+      const edit = { file_path: '/work/app/src/a.ts', old_string: 'a', new_string: 'b' }
+      await allowAlways(f, claudeEdit(edit))
+      // The same edit, with an explicit default, is the same edit.
+      expect((await probe(f, claudeEdit({ ...edit, replace_all: false }))).asked).toBe(false)
+      for (const [name, tool] of [
+        ['another file', claudeEdit({ ...edit, file_path: '/work/app/src/b.ts' })],
+        ['a sibling with the same prefix', claudeEdit({ ...edit, file_path: '/work/app/src/a.ts.bak' })],
+        ['a parent path', claudeEdit({ ...edit, file_path: '/work/app/src/../secrets.env' })],
+        ['other new text', claudeEdit({ ...edit, new_string: 'c' })],
+        ['other old text', claudeEdit({ ...edit, old_string: 'x' })],
+        ['replacing every match', claudeEdit({ ...edit, replace_all: true })],
+        ['another folder', claudeEdit(edit, '/work/other')],
+        ['a whole-file write', { name: 'Write', input: { file_path: edit.file_path, content: 'b' }, cwd: CWD } as Tool]
+      ] as Array<[string, Tool]>)
+        expect((await probe(f, tool)).asked, name).toBe(true)
+      // A command rule never answers an edit, nor an edit rule a command.
+      expect((await probe(f, BASH('npm test'))).asked).toBe(true)
+    })
+
+    it('an action with no fingerprint never matches a rule, whatever rules the thread has', async () => {
+      const f = await asking()
+      await allowAlways(f, BASH('npm test'))
+      expect(f.engine.approvals.matchRule('t', 'claude:command', null, 'full')).toBeNull()
+      for (const [name, tool, extra] of [
+        ['no tool description', undefined, {}],
+        ['no directory', { name: 'Bash', input: { command: 'npm test' } }, {}],
+        ['an input that fails its shape', { name: 'Bash', input: { command: 42 }, cwd: CWD }, {}],
+        ['a Mousse tool', { name: 'integrate_delegation', input: { delegationId: 'd1' }, cwd: CWD }, { permissionKey: 'mousse:integrate', action: 'edit' as const }],
+        ['a check the provider will not skip', BASH('npm test'), { reason: 'its own safety check' }]
+      ] as Array<[string, Tool | undefined, Partial<ApprovalTag>]>) {
+        expect((await probe(f, tool, extra)).asked, name).toBe(true)
+      }
+      // A rule row cannot be matched by the empty fingerprint either.
+      expect(rules(f).every((rule) => rule.fingerprint.length === 64)).toBe(true)
+    })
+
+    it('belongs to its thread: another thread asks, and so do a fork or a subagent, which are other threads', async () => {
+      const f = await asking()
+      await running(f.engine, 'other', 'req-2')
+      f.modes.set('other', 'accept_edits')
+      await allowAlways(f, BASH('npm test'))
+      expect((await probe(f, BASH('npm test'), {}, 'other')).asked).toBe(true)
+      expect(rules(f, 'other')).toEqual([])
+      expect((await probe(f, BASH('npm test'))).asked).toBe(false)
+      // Revoking on one thread leaves the other's rules alone.
+      await allowAlways(f, BASH('npm test'), 'other')
+      expect(f.engine.approvals.revokeRules('t')).toBe(1)
+      expect(rules(f, 'other')).toHaveLength(1)
+      expect((await probe(f, BASH('npm test'), {}, 'other')).asked).toBe(false)
+    })
+
+    it('is ignored while the thread asks about more than it did, and answers again when the mode loosens', async () => {
+      const f = await asking('accept_edits')
+      await allowAlways(f, BASH('npm test'))
+      f.modes.set('t', 'ask')
+      expect((await probe(f, BASH('npm test'))).asked).toBe(true)
+      // The rule is not cleared: it waits.
+      expect(rules(f)).toHaveLength(1)
+      f.modes.set('t', 'accept_edits')
+      expect((await probe(f, BASH('npm test'))).asked).toBe(false)
+      // A rule made under Ask holds at every mode that asks less.
+      const strict = await asking('ask')
+      await allowAlways(strict, BASH('npm test'))
+      expect(rules(strict)[0]!.grantedUnder).toBe('ask')
+      strict.modes.set('t', 'accept_edits')
+      expect((await probe(strict, BASH('npm test'))).asked).toBe(false)
+      // Under Full access the run asks nothing but the checks the provider keeps: a rule does not answer those.
+      strict.modes.set('t', 'full')
+      strict.policies.set('t', 'grants')
+      expect((await probe(strict, BASH('npm test'))).asked).toBe(true)
+    })
+
+    it('asked again under a stricter mode, the rule keeps the stricter grant', async () => {
+      const f = await asking('accept_edits')
+      await allowAlways(f, BASH('npm test'))
+      f.modes.set('t', 'ask')
+      await allowAlways(f, BASH('npm test'))
+      expect(rules(f)).toHaveLength(1)
+      expect(rules(f)[0]!.grantedUnder).toBe('ask')
+      // A later "always" under a looser mode does not loosen it.
+      f.modes.set('t', 'accept_edits')
+      f.engine.approvals.revokeRules('t')
+      await allowAlways(f, BASH('npm test'))
+      expect(rules(f)[0]!.grantedUnder).toBe('accept_edits')
+    })
+
+    it('only a user makes one: a refusal, a typed answer, an agent and a request saved without its mode make none', async () => {
+      const f = await asking()
+      const rejected = request(f, BASH('npm test'))
+      f.questions.settle(rejected.requestId, { permission: 'reject' }, USER)
+      await rejected.promise
+      const typed = request(f, BASH('npm test'))
+      f.questions.settle(typed.requestId, { permission: 'always, please' }, USER)
+      await typed.promise
+      expect(rules(f)).toEqual([])
+      expect(f.engine.approvals.get(typed.requestId)).toMatchObject({ decision: 'reject', decisionScope: null })
+
+      // An agent answering for its subagent may approve once, never "always": the request stays pending.
+      const child = f.engine.approvals
+      const lineage = { parentThreadId: 'parent', relationship: 'subagent' as const }
+      const agentStore = new ThreadApprovals(f.store, { outbox: f.engine.outbox, lineage: (threadId) => (threadId === 't' ? lineage : null) })
+      const asked = request(f, BASH('npm test'))
+      expect(agentStore.settle(asked.requestId, { permission: ALWAYS }, { kind: 'agent', threadId: 'parent', runId: 'run-p', permissionMode: 'full' })).toEqual({ ok: false, reason: 'agent_no_standing_grant' })
+      expect(child.get(asked.requestId)!.status).toBe('pending')
+      expect(rules(f)).toEqual([])
+      f.questions.dismissAllForThread('t')
+      await asked.promise
+
+      // A request saved before the mode was recorded cannot say what the rule was granted under.
+      const legacy = child.create({
+        requestId: 'legacy', threadId: 't', instanceId: 'claude', provider: 'claude', action: 'command', permissionKey: 'claude:command', fingerprint: 'a'.repeat(64),
+        questions: [{ id: 'permission', prompt: 'Run it?', options: [{ id: 'allow', label: 'Allow once', decision: 'allow', scope: 'once' }, { id: ALWAYS, label: 'Always', decision: 'allow', scope: 'always' }, { id: 'reject', label: 'Reject', decision: 'reject' }] }]
+      })
+      expect(child.settle(legacy.requestId, { permission: ALWAYS }, USER)).toMatchObject({ ok: true, decision: 'allow', scope: 'always' })
+      expect(rules(f)).toEqual([])
+    })
+
+    it('two clients answering "always" at once leave one rule, and the loser is told who won', async () => {
+      const f = await asking()
+      const result = request(f, BASH('npm test'))
+      const winner = f.questions.settle(result.requestId, { permission: ALWAYS }, { kind: 'user', via: 'cli' })
+      const loser = f.questions.settle(result.requestId, { permission: 'reject' }, { kind: 'user', via: 'bridge' })
+      expect(winner).toEqual({ ok: true, decision: 'allow' })
+      expect(loser).toEqual({ ok: false, reason: 'already_answered', answeredBy: { kind: 'user', via: 'cli' }, decision: 'allow' })
+      await result.promise
+      expect(rules(f)).toHaveLength(1)
+      expect(eventTypes(f, 'approval.rule_granted')).toHaveLength(1)
+    })
+
+    it('can be revoked one at a time or all at once, after which the request asks again', async () => {
+      const f = await asking()
+      await allowAlways(f, BASH('npm test'))
+      await allowAlways(f, BASH('npm run build'))
+      expect(rules(f)).toHaveLength(2)
+      const first = rules(f).find((rule) => rule.summary.includes('npm test'))!
+      const second = rules(f).find((rule) => rule.summary.includes('npm run build'))!
+      expect(f.engine.approvals.revokeRules('t', 'f'.repeat(64))).toBe(0)
+      expect(f.engine.approvals.revokeRules('t', first.fingerprint)).toBe(1)
+      expect((await probe(f, BASH('npm test'))).asked).toBe(true)
+      expect((await probe(f, BASH('npm run build'))).asked).toBe(false)
+      expect(f.engine.approvals.revokeRules('t')).toBe(1)
+      expect(rules(f)).toEqual([])
+      expect((await probe(f, BASH('npm run build'))).asked).toBe(true)
+      expect(eventTypes(f, 'approval.rule_revoked').map((event) => (event.payload as { fingerprint: string }).fingerprint)).toEqual([first.fingerprint, second.fingerprint])
+      expect(f.engine.approvals.revokeRules('t')).toBe(0)
+    })
+
+    it('asks when the rules cannot be read, rather than answering', async () => {
+      const f = await asking()
+      await allowAlways(f, BASH('npm test'))
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      vi.spyOn(f.engine.approvals, 'matchRule').mockImplementation(() => { throw new Error('database is locked') })
+      expect((await probe(f, BASH('npm test'))).asked).toBe(true)
+    })
+
+    it('answers and is offered only in turns a person started: scheduled, webhook, subagent, bot and agent-sent turns ask as before', async () => {
+      const f = await asking()
+      await allowAlways(f, BASH('npm test'))
+      f.unattended.add('t')
+      // The rule exists and the mode would allow it, but no person started this turn: asked, and no "always" offered.
+      const asked = await probe(f, BASH('npm test'))
+      expect(asked.asked).toBe(true)
+      expect(asked.optionIds).toEqual(['allow', 'reject'])
+      expect((await probe(f, BASH('npm run build'))).optionIds).toEqual(['allow', 'reject'])
+      expect(rules(f)).toHaveLength(1)
+      expect(eventTypes(f, 'approval.rule_applied')).toHaveLength(0)
+      f.unattended.delete('t')
+      expect((await probe(f, BASH('npm test'))).asked).toBe(false)
+    })
+
+    it('is not offered, made or matched when the run\'s binding records no permission mode', async () => {
+      const f = await asking()
+      await allowAlways(f, BASH('npm test'))
+      f.unknownModes.add('t')
+      const result = await probe(f, BASH('npm test'))
+      expect(result.asked).toBe(true)
+      expect(result.optionIds).toEqual(['allow', 'reject'])
+    })
+
+    it('pauses at once when the thread\'s own mode is stricter than the run\'s, which a mode change only applies to the next turn', async () => {
+      const f = await asking('accept_edits')
+      await allowAlways(f, BASH('npm test'))
+      f.currentModes.set('t', 'ask')
+      expect((await probe(f, BASH('npm test'))).asked).toBe(true)
+      f.currentModes.delete('t')
+      expect((await probe(f, BASH('npm test'))).asked).toBe(false)
+    })
+
+    it('answering "always" allows the identical requests waiting beside it, and no other', async () => {
+      const f = await asking()
+      const first = request(f, BASH('npm test'))
+      const twin = request(f, BASH('npm test'))
+      const other = request(f, BASH('npm run build'))
+      expect([first.asked, twin.asked, other.asked]).toEqual([true, true, true])
+      expect(f.questions.settle(first.requestId, { permission: ALWAYS }, USER)).toEqual({ ok: true, decision: 'allow' })
+      await Promise.all([first.promise, twin.promise])
+      expect(twin.outcome.value).toEqual({ permission: 'allow' })
+      expect(f.engine.approvals.get(twin.requestId)).toMatchObject({ status: 'answered', decision: 'allow', decisionScope: 'once', answeredBy: { kind: 'user', via: 'gui' } })
+      expect(f.engine.approvals.get(other.requestId)!.status).toBe('pending')
+      expect(f.questions.listPendingForThread('t').map((entry) => entry.requestId)).toEqual([other.requestId])
+      f.questions.dismissAllForThread('t')
+      await other.promise
+    })
+
+    it('shows the end of a long command, so two that differ only there are told apart', async () => {
+      const f = await asking()
+      const long = (tail: string) => BASH(`echo ${'x'.repeat(900)} ${tail}`)
+      await allowAlways(f, long('one'))
+      await allowAlways(f, long('two'))
+      const summaries = rules(f).map((rule) => rule.summary)
+      expect(summaries).toHaveLength(2)
+      for (const summary of summaries) {
+        expect(summary.length).toBeLessThanOrEqual(500)
+        expect(summary).toContain(' ... ')
+      }
+      expect(summaries.some((summary) => summary.includes('one"}'))).toBe(true)
+      expect(summaries.some((summary) => summary.includes('two"}'))).toBe(true)
+    })
+
+    it('a linked device cannot make a rule: the answer is refused and the request stays pending', async () => {
+      const f = await asking()
+      const result = request(f, BASH('npm test'))
+      expect(f.questions.settle(result.requestId, { permission: ALWAYS }, { kind: 'user', via: 'bridge' })).toEqual({ ok: false, reason: 'bridge_no_standing_grant' })
+      expect(f.engine.approvals.get(result.requestId)!.status).toBe('pending')
+      expect(rules(f)).toEqual([])
+      // It can still allow once.
+      expect(f.questions.settle(result.requestId, { permission: 'allow' }, { kind: 'user', via: 'bridge' })).toEqual({ ok: true, decision: 'allow' })
+      await result.promise
+      expect(rules(f)).toEqual([])
+    })
+
+    it('goes with the thread', async () => {
+      const f = await asking()
+      await allowAlways(f, BASH('npm test'))
+      expect(rules(f)).toHaveLength(1)
+      f.engine.approvals.deleteForThread('t')
+      expect(rules(f)).toEqual([])
     })
   })
 
@@ -610,6 +991,91 @@ describe('approval requests across a daemon restart', () => {
       await second.orch.send('Run the tests now', false, { threadId, clientRequestId: 'next-message' })
       expect(second.orch.getMessages(threadId).filter((message) => message.role === 'assistant').at(-1)!.content).toBe('asked')
       expect(second.engine.approvals.get(requestIds[0]!)!.grantConsumedAt).toBeNull()
+    })
+  })
+
+  describe('"Always for this thread" across a restart', () => {
+    /** Asks each of `tools` in turn on the thread's current run; says which of them the user was asked about. The ones asked are rejected. */
+    const probeTurn = async (daemon: Phase6Daemon, threadId: string, tools: Tool[]): Promise<boolean[]> => {
+      const asked: boolean[] = []
+      for (const tool of tools) {
+        const before = daemon.engine.approvals.listPending(threadId).length
+        const waiting = daemon.questions.requestAnswers(prompt(), threadId, { approval: tag({ tool, ...kindOf(tool) }) })
+        const wasAsked = daemon.engine.approvals.listPending(threadId).length > before
+        asked.push(wasAsked)
+        if (wasAsked) daemon.questions.settle(daemon.engine.approvals.listPending(threadId).at(-1)!.requestId, { permission: 'reject' }, USER)
+        await waiting.catch(() => undefined)
+      }
+      return asked
+    }
+    const NEAR_MISSES = [BASH('npm test --watch'), { ...BASH('npm test'), cwd: '/work/other' }, { name: 'PowerShell', input: { command: 'npm test' }, cwd: '/work/app' }] satisfies Tool[]
+
+    it('a rule survives a daemon restart, answers only that exact request in later turns, and is gone once revoked', async () => {
+      const first = phase6Daemon(home!, [scripted(() => 'unused')], { pid: 1 })
+      const thread = first.store.createThread('Rules')
+      first.orch.setThreadModelOverride(thread.id, PI)
+      const sent = await first.engine.dispatch({ kind: 'send', threadId: thread.id, clientRequestId: 'before-crash', source: 'gui' })
+      if (sent.status !== 'accepted') throw new Error('send rejected')
+      first.engine.markStarting(sent.runId)
+      bindRun(first, first.engine.markRunning(sent.runId))
+      const waiter = first.questions.requestAnswers(prompt(), thread.id, { approval: tag({ tool: BASH('npm test') }) })
+      const requestId = first.questions.listPendingForThread(thread.id)[0]!.requestId
+      expect(first.questions.settle(requestId, { permission: 'allow_always' }, { kind: 'user', via: 'cli' })).toEqual({ ok: true, decision: 'allow' })
+      await expect(waiter).resolves.toEqual({ permission: 'allow' })
+      expect(first.orch.listApprovalRules(thread.id)).toEqual([expect.objectContaining({ permissionKey: 'claude:command', grantedUnder: 'accept_edits', active: true, summary: expect.stringContaining('npm test') })])
+      await first.crash()
+      first.questions.markInterruptedByDaemonRestart()
+
+      let second!: Phase6Daemon
+      const turns: boolean[][] = []
+      const adapter = scripted(async (input) => {
+        turns.push(await probeTurn(second, input.threadId, [BASH('npm test'), ...NEAR_MISSES]))
+        return 'done'
+      })
+      second = boot(adapter)
+      // The rule is still there, as it was written.
+      expect(second.orch.listApprovalRules(thread.id)).toEqual([expect.objectContaining({ permissionKey: 'claude:command', grantedUnder: 'accept_edits', active: true })])
+      await second.orch.send('Run the tests', false, { threadId: thread.id, clientRequestId: 'after-restart', source: 'gui' })
+      expect(turns).toEqual([[false, true, true, true]])
+      expect(second.engine.listEvents(thread.id).filter((event) => event.type === 'approval.rule_applied')).toHaveLength(1)
+
+      // Revoking is the user's: the next turn asks again.
+      expect(second.orch.clearApprovalRules(thread.id)).toEqual({ removed: 1 })
+      await second.orch.send('Run the tests again', false, { threadId: thread.id, clientRequestId: 'after-revoke', source: 'gui' })
+      expect(turns[1]).toEqual([true, true, true, true])
+    })
+
+    it('"always" answered after a restart continues the thread once, and the rule keeps answering the exact request in later turns', async () => {
+      const { threadId, requestIds } = await crashWhileAsking([BASH('npm test')])
+      let second!: Phase6Daemon
+      const turns: boolean[][] = []
+      const adapter = scripted(async (input) => {
+        turns.push(await probeTurn(second, input.threadId, [BASH('npm test'), ...NEAR_MISSES]))
+        return 'done'
+      })
+      second = boot(adapter)
+      expect(second.questions.listPendingForThread(threadId)[0]!.questions[0]!.options.map((option) => option.id)).toEqual(['allow', 'allow_always', 'reject'])
+
+      expect(second.questions.settle(requestIds[0]!, { permission: 'allow_always' }, { kind: 'user', via: 'cli' })).toEqual({ ok: true, decision: 'allow' })
+      await settled(second, threadId, 2)
+      // The continuation: the one-shot grant answered the exact request; nothing else was waved through.
+      expect(turns).toEqual([[false, true, true, true]])
+      expect(second.engine.approvals.get(requestIds[0]!)).toMatchObject({ decision: 'allow', decisionScope: 'always', grantConsumedAt: expect.any(String) })
+      expect(second.orch.listApprovalRules(threadId)).toEqual([expect.objectContaining({ grantedUnder: 'accept_edits', permissionKey: 'claude:command' })])
+      expect(second.engine.approvals.listRules(threadId)[0]!.sourceRequestId).toBe(requestIds[0])
+
+      // A later turn is answered by the rule, not by a grant (the grant was used up).
+      await second.orch.send('Run the tests again', false, { threadId, clientRequestId: 'later', source: 'gui' })
+      expect(turns[1]).toEqual([false, true, true, true])
+      expect(second.engine.listEvents(threadId).filter((event) => event.type === 'approval.rule_applied')).toHaveLength(1)
+    })
+
+    it('a request that is still pending after a restart offers it, and a message that denies it makes no rule', async () => {      const { threadId, requestIds } = await crashWhileAsking([BASH('npm test')])
+      const second = boot(scripted(() => 'redirected'))
+      expect(second.questions.listPendingForThread(threadId)[0]!.questions[0]!.options.find((option) => option.id === 'allow_always')).toEqual({ id: 'allow_always', label: 'Always for this thread', decision: 'allow', scope: 'always' })
+      await second.orch.send('Use pnpm instead', false, { threadId, clientRequestId: 'message-1' })
+      expect(second.engine.approvals.get(requestIds[0]!)).toMatchObject({ status: 'answered', decision: 'reject', decisionScope: null })
+      expect(second.orch.listApprovalRules(threadId)).toEqual([])
     })
   })
 

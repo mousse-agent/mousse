@@ -12,8 +12,9 @@
 
 import { EventEmitter } from 'events'
 import { redactSecrets } from '../../shared/errors'
-import type { TurnOrigin } from '../../shared/harness/types'
-import type { PermissionAction } from '../../shared/permissionMode'
+import type { RunPolicy, TurnOrigin } from '../../shared/harness/types'
+import { ALWAYS_OPTION_ID, ALWAYS_OPTION_LABEL } from '../../shared/permissionKeys'
+import type { PermissionAction, PermissionMode } from '../../shared/permissionMode'
 import type { PendingApprovalInfo, PendingUserQuestions, UserQuestionAnswers } from '../../shared/types'
 import {
   canAnswerApproval,
@@ -28,6 +29,7 @@ import {
   type ApprovalCancelReason,
   type ApprovalQuestion,
   type ApprovalRecord,
+  type ApprovalRule,
   type ContinuationDue,
   type ThreadApprovals
 } from '../run/ThreadApprovals'
@@ -73,6 +75,21 @@ export interface ApprovalContext {
   instanceId: string
   provider: string
   origin: TurnOrigin
+  /**
+   * The permission mode the run asks under (its binding's effective mode): what a standing rule is granted
+   * under. Absent when the binding records none: the rule then cannot say what it was granted under, so none is
+   * offered or made.
+   */
+  permissionMode?: PermissionMode
+  /**
+   * The mode a rule is checked against: the run's mode, or the thread's own when that is stricter now (a change
+   * applies to the next turn, but a rule pauses at once). Defaults to the run's mode, else the strictest.
+   */
+  currentMode?: PermissionMode
+  /** The run's approvals policy: a standing rule only answers where the run asks (`ask`). */
+  approvals: RunPolicy['approvals']
+  /** A person started the turn (`startedByPerson`): the only kind of turn a standing rule may answer or be offered in. */
+  startedByPerson: boolean
 }
 
 export type SettleResult =
@@ -125,6 +142,20 @@ export interface ApprovalBinding {
   effectDelivery(): boolean
   /** Every request of a dead run is answered: the continue turn that carries the answers is due. */
   continuationDue(due: ContinuationDue, answeredBy: Answerer): void
+  /** A standing rule answered a request without asking: the thread says so. */
+  ruleApplied?(threadId: string, rule: ApprovalRule): void
+}
+
+/**
+ * The requests as a linked device sees them: without "Always for this thread". A linked device cannot list or
+ * revoke rules, so it does not make them (`canAnswerApproval` refuses it too).
+ */
+export function withoutStandingRules<T extends { questions: PendingUserQuestions['questions'] }>(pending: T): T {
+  if (!pending.questions.some((question) => question.options?.some((option) => option.scope === 'always'))) return pending
+  return {
+    ...pending,
+    questions: pending.questions.map((question) => ({ ...question, options: question.options?.filter((option) => option.scope !== 'always') ?? [] }))
+  }
 }
 
 function cancelMessage(reason: string): string {
@@ -184,6 +215,8 @@ export class UserQuestionService extends EventEmitter {
     const binding = options.approval && threadId !== '__unbound__' ? this.binding : null
     const context = binding ? this.contextOf(binding, threadId) : null
     let record: ApprovalRecord | null = null
+    // What the card shows and what the request means; "Always for this thread" is added only to a saved request.
+    let shown = { questions, approval: options.approval }
     if (binding && options.approval) {
       const approval = options.approval
       const fingerprint = approval.tool
@@ -202,6 +235,34 @@ export class UserQuestionService extends EventEmitter {
         const first = questions[0]
         if (allow && first) return Promise.resolve({ [first.id]: allow.id })
       }
+      // A standing rule of this thread answers the exact request it was made for, and nothing else: the
+      // fingerprint must match (so a request without one never does), the run must be one that asks, and
+      // a check the provider will not let Mousse skip (`reason`) always asks. The rule only removes the
+      // ask the mode would have made.
+      // Only a turn a person started: a scheduled, webhook, delegated, bot, workflow or agent-sent turn asks as
+      // before, since no one watches it and "the same command" does not mean "the same effect".
+      const eligible = Boolean(context?.runId && fingerprint && !approval.reason && context.approvals === 'ask' && context.startedByPerson && context.permissionMode)
+      if (eligible && context && fingerprint) {
+        try {
+          const rule = binding.store.matchRule(threadId, approval.permissionKey, fingerprint, context.currentMode ?? context.permissionMode ?? 'ask')
+          const allow = approval.options.find((option) => option.decision === 'allow' && option.scope !== 'always')
+          const first = questions[0]
+          if (rule && allow && first) {
+            binding.store.noteRuleApplied(threadId, context.runId, rule)
+            try { binding.ruleApplied?.(threadId, rule) } catch { /* the notice is a courtesy */ }
+            return Promise.resolve({ [first.id]: allow.id })
+          }
+        } catch (error) {
+          // A rule that cannot be read or recorded answers nothing: the user is asked.
+          console.warn('an approval rule could not be checked; asking instead', { threadId, error: error instanceof Error ? error.message : String(error) })
+        }
+      }
+      // The same exact-request condition decides whether "Always for this thread" is offered, and it needs a
+      // way to answer the provider with its own once-only option.
+      const once = approval.options.find((option) => option.decision === 'allow' && option.scope !== 'always')
+      const first = questions[0]
+      const offerAlways = eligible && once !== undefined && first !== undefined && !first.options?.some((option) => option.id === ALWAYS_OPTION_ID)
+      if (offerAlways) shown = withAlwaysOption(questions, approval)
       try {
         record = binding.store.create({
           requestId,
@@ -213,9 +274,11 @@ export class UserQuestionService extends EventEmitter {
           permissionKey: approval.permissionKey,
           fingerprint,
           reason: approval.reason ?? null,
-          questions: storedQuestions(questions, approval.options)
+          permissionMode: context?.permissionMode ?? null,
+          questions: storedQuestions(shown.questions, shown.approval!.options)
         })
       } catch (error) {
+        shown = { questions, approval: options.approval }
         // An approval that cannot be saved still has to be answerable: it falls back to memory.
         console.warn('approval request could not be saved; keeping it in memory', { threadId, error: error instanceof Error ? error.message : String(error) })
       }
@@ -248,15 +311,15 @@ export class UserQuestionService extends EventEmitter {
 
       this.pending.set(requestId, {
         threadId,
-        questions,
-        ...(options.approval ? { approval: options.approval } : {}),
+        questions: shown.questions,
+        ...(shown.approval ? { approval: shown.approval } : {}),
         durable,
         resolve,
         reject,
         ...(timer ? { timer } : {})
       })
       // One `pending` event per request: a client that resubscribes reads the snapshot, not a replay.
-      this.emit('pending', record ? this.viewOf(record) : ({ requestId, threadId, questions } satisfies PendingUserQuestions & { threadId: string }))
+      this.emit('pending', record ? this.viewOf(record) : ({ requestId, threadId, questions: shown.questions } satisfies PendingUserQuestions & { threadId: string }))
     })
   }
 
@@ -318,6 +381,8 @@ export class UserQuestionService extends EventEmitter {
       this.settledWaiters.set(requestId, { threadId: waiting.threadId, resolve: waiting.resolve, reject: waiting.reject })
     }
     this.emit('cleared', { requestId, threadId: outcome.record.threadId })
+    // The identical requests that waited beside this one (parallel calls) were allowed with it.
+    for (const siblingId of outcome.siblings ?? []) this.reconcileRequest(siblingId)
     // Without a worker nothing would run the `request.respond` effect: deliver here.
     if (outcome.record.answerPath === 'live' && !binding.effectDelivery()) this.deliver(requestId)
     if (outcome.continuationDue && options.continuation !== false) binding.continuationDue(outcome.continuationDue, answeredBy)
@@ -652,6 +717,22 @@ export class UserQuestionService extends EventEmitter {
       waiter.reject(new Error('Daemon restarted; pending question interrupted and is not answerable.'))
     }
     return { cleared: n, survivesDaemonRestart: false }
+  }
+}
+
+/**
+ * The request with "Always for this thread" added after the option that allows once. The option is
+ * Mousse's: when it is chosen the provider is answered with its own once-only option (`ThreadApprovals`),
+ * and the rule is recorded in the same transaction.
+ */
+function withAlwaysOption(questions: PendingUserQuestions['questions'], approval: ApprovalTag): { questions: PendingUserQuestions['questions']; approval: ApprovalTag } {
+  const [first, ...rest] = questions
+  if (!first) return { questions, approval }
+  const options = first.options ?? []
+  const at = options.findIndex((option) => approval.options.some((meaning) => meaning.id === option.id && meaning.decision === 'allow' && meaning.scope !== 'always')) + 1
+  return {
+    questions: [{ ...first, options: [...options.slice(0, at), { id: ALWAYS_OPTION_ID, label: ALWAYS_OPTION_LABEL }, ...options.slice(at)] }, ...rest],
+    approval: { ...approval, options: [...approval.options, { id: ALWAYS_OPTION_ID, decision: 'allow', scope: 'always' }] }
   }
 }
 

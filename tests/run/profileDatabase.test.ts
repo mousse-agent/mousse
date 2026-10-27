@@ -414,6 +414,8 @@ describe('ProfileDatabase', () => {
   describe('the pull request update kind of the inbox (the migration that rebuilds it)', () => {
     const kind = RUN_MIGRATIONS.find((migration) => migration.sql.includes("'pr_update'"))!
     const before = RUN_MIGRATIONS.filter((migration) => migration.version < kind.version)
+    // The migrations up to this one: later ones are tested on their own.
+    const through = RUN_MIGRATIONS.filter((migration) => migration.version <= kind.version)
     const insertRow = (database: ProfileDatabase, id: string, rowKind: string, deliveredBy: string | null = null): void => {
       database.database
         .prepare("INSERT INTO inbox(inbox_id, thread_id, run_id, kind, payload, status, created_at, delivered_by) VALUES(?, 't1', NULL, ?, '{\"text\":\"x\"}', ?, '2026-10-12T00:00:00.000Z', ?)")
@@ -442,7 +444,7 @@ describe('ProfileDatabase', () => {
 
       // Fresh: every migration at once.
       const fresh = open()
-      fresh.migrate(RUN_MIGRATIONS)
+      fresh.migrate(through)
       expect(fresh.userVersion()).toBe(kind.version)
       expect(tablesOf(fresh)).toEqual(expect.arrayContaining(['approval_requests', 'approval_requests_thread', 'inbox', 'inbox_thread_status']))
       insertRow(fresh, 'i:pr', 'pr_update')
@@ -453,7 +455,7 @@ describe('ProfileDatabase', () => {
       at11.migrate(upTo(11))
       insertRow(at11, 'i:child', 'child_result', 'effect:a')
       const rows11 = at11.database.prepare('SELECT * FROM inbox ORDER BY inbox_id').all()
-      at11.migrate(RUN_MIGRATIONS)
+      at11.migrate(through)
       expect(at11.userVersion()).toBe(kind.version)
       expect(at11.database.prepare('SELECT * FROM inbox ORDER BY inbox_id').all()).toEqual(rows11)
       insertRow(at11, 'i:pr', 'pr_update')
@@ -467,7 +469,7 @@ describe('ProfileDatabase', () => {
       const approvals = at12.database.prepare('SELECT * FROM approval_requests').all()
       const rows12 = at12.database.prepare('SELECT * FROM inbox ORDER BY inbox_id').all()
       const before12 = tablesOf(at12)
-      at12.migrate(RUN_MIGRATIONS)
+      at12.migrate(through)
       expect(at12.userVersion()).toBe(kind.version)
       expect(at12.database.prepare('SELECT * FROM approval_requests').all()).toEqual(approvals)
       expect(at12.database.prepare('SELECT * FROM inbox ORDER BY inbox_id').all()).toEqual(rows12)
@@ -488,7 +490,7 @@ describe('ProfileDatabase', () => {
       expect(() => insertRow(database, 'i:pr', 'pr_update')).toThrow(/CHECK/)
       const rows = database.database.prepare('SELECT * FROM inbox ORDER BY inbox_id').all()
 
-      database.migrate(RUN_MIGRATIONS)
+      database.migrate(through)
 
       expect(database.userVersion()).toBe(kind.version)
       expect(database.database.prepare('SELECT * FROM inbox ORDER BY inbox_id').all()).toEqual(rows)
@@ -502,6 +504,63 @@ describe('ProfileDatabase', () => {
       expect(() => insertRow(database, 'i:other', 'something_else')).toThrow(/CHECK/)
       // The id is the primary key: a second write of the same delivery cannot slip in.
       expect(() => insertRow(database, 'i:pr', 'pr_update')).toThrow(/UNIQUE|PRIMARY/)
+    })
+  })
+
+  describe('the approval rules table and the request mode column (migration 14)', () => {
+    const migration = RUN_MIGRATIONS.find((candidate) => candidate.sql.includes('CREATE TABLE approval_rules'))!
+    const before = RUN_MIGRATIONS.filter((candidate) => candidate.version < migration.version)
+    const columns = (database: ProfileDatabase, table: string) => database.database.prepare(`PRAGMA table_info(${table})`).all().map((column) => String(column.name))
+    const request = (database: ProfileDatabase, id: string, mode?: string) =>
+      database.database.exec(`INSERT INTO approval_requests(request_id, thread_id, instance_id, provider, action, permission_key, questions, answer_path, status, created_at${mode ? ', permission_mode' : ''})
+        VALUES('${id}', 't1', 'claude', 'claude', 'command', 'claude:command', '[]', 'live', 'pending', '2026-10-12T00:00:02.000Z'${mode ? `, '${mode}'` : ''})`)
+
+    it('comes after the inbox rebuild and leaves a saved request as it was, asked under no recorded mode', () => {
+      expect(migration.version).toBeGreaterThan(13)
+      const database = open()
+      database.migrate(before)
+      request(database, 'old')
+      database.migrate(RUN_MIGRATIONS)
+      expect(database.userVersion()).toBe(RUN_MIGRATIONS.at(-1)!.version)
+      expect(columns(database, 'approval_rules')).toEqual(['thread_id', 'fingerprint', 'permission_key', 'action', 'summary', 'granted_under', 'source_request_id', 'created_at'])
+      expect(columns(database, 'approval_requests').at(-1)).toBe('permission_mode')
+      expect(database.database.prepare("SELECT permission_mode FROM approval_requests WHERE request_id = 'old'").get()).toEqual({ permission_mode: null })
+      expect(database.database.prepare('SELECT COUNT(*) AS n FROM approval_rules').get()).toEqual({ n: 0 })
+    })
+
+    it('has one rule per thread and fingerprint, and constrains the enumerated columns', () => {
+      const database = open()
+      database.migrate(RUN_MIGRATIONS)
+      const rule = (overrides: Record<string, string> = {}) => {
+        const values: Record<string, string> = { thread_id: 't1', fingerprint: 'f1', permission_key: 'claude:command', action: 'command', summary: 'npm test', granted_under: 'ask', created_at: '2026-10-12T00:00:02.000Z', ...overrides }
+        const names = Object.keys(values)
+        database.database.prepare(`INSERT INTO approval_rules(${names.join(', ')}) VALUES(${names.map(() => '?').join(', ')})`).run(...Object.values(values))
+      }
+      expect(() => rule()).not.toThrow()
+      expect(() => rule({ fingerprint: 'f2' })).not.toThrow()
+      expect(() => rule({ thread_id: 't2' })).not.toThrow()
+      expect(() => rule()).toThrow(/UNIQUE|PRIMARY/)
+      for (const bad of [{ granted_under: 'yolo' }, { action: 'delete' }])
+        expect(() => rule({ fingerprint: 'f3', ...bad }), JSON.stringify(bad)).toThrow(/CHECK/)
+      expect(() => database.database.prepare("INSERT INTO approval_rules(thread_id, fingerprint) VALUES('t1', 'f4')").run()).toThrow(/NOT NULL/)
+      request(database, 'r1', 'accept_edits')
+      expect(() => request(database, 'r2', 'yolo')).toThrow(/CHECK/)
+    })
+
+    it('rolls back whole when the commit fails: neither the table nor the column exists, and the next open applies both', () => {
+      let armed = false
+      profileHome = mkdtempSync(join(tmpdir(), 'mousse-run-db-'))
+      db = new ProfileDatabase({ profileHome, fault: (point) => { if (armed && point === 'migration.beforeCommit') throw new Error('injected') } })
+      db.migrate(before)
+      armed = true
+      expect(() => db!.migrate(RUN_MIGRATIONS)).toThrow('injected')
+      armed = false
+      expect(db.userVersion()).toBe(before.at(-1)!.version)
+      expect(columns(db, 'approval_rules')).toEqual([])
+      expect(columns(db, 'approval_requests')).not.toContain('permission_mode')
+      db.migrate(RUN_MIGRATIONS)
+      expect(columns(db, 'approval_rules')).toContain('fingerprint')
+      expect(columns(db, 'approval_requests')).toContain('permission_mode')
     })
   })
 
