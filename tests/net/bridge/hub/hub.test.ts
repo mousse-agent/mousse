@@ -336,6 +336,74 @@ it('delivers the first turn of a remote thread when the hub attaches before it s
   expect(errors).toEqual([])
 })
 
+it('delivers the first turn of a remote thread when the hub attaches after the send has started', async () => {
+  const f = await fixture()
+  ;(f.mms.orchestrator as unknown as { llm: unknown }).llm = {
+    getSelectedModelContextLimit: () => ({ limit: 128000, modelName: 'fixture' }),
+    getContextInputs: async () => ({
+      systemPromptText: '',
+      mcpToolsText: '',
+      otherToolsText: '',
+      signature: 'fixture'
+    }),
+    generateTitle: async () => 'First turn',
+    chat: async (
+      _messages: unknown,
+      _tools: unknown,
+      _options: unknown,
+      _thinking: unknown,
+      onText: (event: unknown) => void
+    ) => {
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      onText({ phase: 'start', content: '', contentIndex: 0 })
+      onText({ phase: 'delta', content: 'first reply', contentIndex: 0 })
+      return {
+        text: 'first reply',
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+        modelName: 'fixture',
+        totalResponseTimeMs: 1,
+        totalTokensUsed: 2,
+        contextInputs: { signature: 'fixture' },
+        toolEvents: [],
+        nativeMessages: []
+      }
+    }
+  }
+  const adapter = f.makeAdapter()
+  await f.connect(adapter.store)
+  const created = (await executeBridgeHubLocal(f.hub(), 'bridge.hub.create', {
+      target: f.targetNode,
+      name: 'Attach after'
+    })) as { thread: { id: string } },
+    ref = { nodeId: f.targetNode, entityId: created.thread.id },
+    updates: any[] = [],
+    errors: string[] = []
+  const sending = executeBridgeHubLocal(f.hub(), 'bridge.hub.send', {
+    ref,
+    content: 'Hello from the first turn',
+    options: { id: newId('rpc') }
+  })
+  await executeBridgeHubLocal(
+    f.hub(),
+    'bridge.hub.attach',
+    { ref },
+    {
+      owner: 'trusted-gui-connection',
+      thread: (event: unknown) => updates.push(event),
+      error: (_ref: unknown, code: string) => errors.push(code)
+    }
+  )
+  await vi.waitFor(() =>
+    expect(updates.some((event) => event.update?.kind === 'snapshot')).toBe(true)
+  )
+  const before = 0
+  const text = () => JSON.stringify(updates.slice(before))
+  await vi.waitFor(() => expect(text()).toContain('Hello from the first turn'))
+  await vi.waitFor(() => expect(text()).toContain('first reply'), { timeout: 5000 })
+  await sending
+  expect(errors).toEqual([])
+})
+
 it('bounds journal aliases/results and supports an unenrolled construction without admitting requests', async () => {
   const f = await fixture()
   await f.connect()

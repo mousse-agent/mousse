@@ -20,7 +20,7 @@ The pick is `ComposerWorkspace.node` in the draft, saved with the other workspac
 - "Open project…" asks for a folder path on that computer, suggests its project paths, and calls `bridge.hub.openProject`. The computer's refusal ("That folder does not exist on this computer.") shows in the dialog.
 - The model picker lists that computer's models (`bridge.hub.composerOptions`) and starts at its default; the pick is stamped on the new thread with `bridge.hub.setModel`.
 - The worktree toggle is sent as `options.worktreeEnabled`.
-- The first send (`startRemoteComposerThread`) stages images (`bridge.hub.stageAttachment`), creates the thread, sets the model, attaches, then sends, and hands the thread to the remote thread view with `openRemoteThread`. If the computer is no longer connected at send time, nothing is created: the draft returns to this computer and the composer shows "<name> is not connected".
+- The first send (`startRemoteComposerThread`) creates the thread, sets the model, opens it in the remote thread view with `openRemoteThread` (which attaches to its display), and sends the message through `submitRemoteMessage`, which stages images and keeps the run for Stop. If the computer is no longer connected at send time, nothing is created: the draft returns to this computer and the composer shows "<name> is not connected".
 
 Quick actions and file context always use this computer's workspace, so they ignore a remote draft (`localWorkspaceFor`).
 

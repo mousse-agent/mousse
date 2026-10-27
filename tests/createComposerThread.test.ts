@@ -153,23 +153,24 @@ describe('composer thread on another computer', () => {
     node, name: 'Studio', caps: ['read', 'write', 'chat'], keyEpoch: 1, expiresAt: 0,
     self: false, revoked: false, state: 'open', kind: 'computer', ...patch
   })
-  function setup(over: { devices?: Device[]; answers?: Record<string, unknown>; visible?: () => boolean } = {}) {
+  const ref = { nodeId: node, entityId: 'remote-thread' }
+  function setup(over: { devices?: Device[]; answers?: Record<string, unknown>; visible?: () => boolean; problem?: string } = {}) {
     const calls: Array<{ method: string; params: any }> = []
+    const order: string[] = []
     const answers: Record<string, unknown> = {
       'bridge.hub.create': { thread: { id: 'remote-thread' } },
       'bridge.hub.setModel': { ok: true },
-      'bridge.hub.attach': { ref: { nodeId: node, entityId: 'remote-thread' } },
-      'bridge.hub.stageAttachment': { ok: true },
-      'bridge.hub.send': { text: 'done' },
       ...over.answers
     }
     const request = vi.fn(async (method: string, params?: unknown) => {
       calls.push({ method, params })
+      order.push(method)
       const answer = answers[method]
       if (answer instanceof Error) throw answer
       return answer
     })
-    const open = vi.fn()
+    const open = vi.fn(() => { order.push('open') })
+    const submit = vi.fn(async () => { order.push('submit') })
     const deps = {
       node,
       devices: async () => over.devices ?? [device()],
@@ -177,28 +178,27 @@ describe('composer thread on another computer', () => {
       worktreeEnabled: true,
       content: 'Fix the parser\nwith care',
       images: [] as Array<{ name: string; mimeType: string; data: string }>,
+      imageProblem: () => over.problem ?? '',
       request: request as never,
       stillVisible: over.visible ?? (() => true),
       openRemoteThread: open,
-      uploadId: (() => { let n = 0; return () => `upload-${++n}-padding` })()
+      submit
     }
-    return { deps, calls, open, request }
+    return { deps, calls, order, open, submit, request }
   }
 
-  it('creates the thread, attaches to it, then sends, and opens the remote thread', async () => {
-    const { deps, calls, open } = setup()
+  it('creates the thread, opens it in the remote thread view, and sends the first message through it', async () => {
+    const { deps, calls, order, open, submit } = setup()
     const started = await startRemoteComposerThread(deps)
-    expect(calls.map((call) => call.method)).toEqual(['bridge.hub.create', 'bridge.hub.attach', 'bridge.hub.send'])
+    expect(calls.map((call) => call.method)).toEqual(['bridge.hub.create'])
     expect(calls[0].params).toEqual({
       target: node, name: 'Fix the parser', projectId: 'project-there', options: { worktreeEnabled: true }
     })
-    const ref = { nodeId: node, entityId: 'remote-thread' }
-    expect(calls[1].params).toEqual({ ref })
-    expect(calls[2].params).toMatchObject({ ref, content: 'Fix the parser\nwith care' })
-    // A turn can last hours, so the send asks for the longest deadline the hub allows.
-    expect(calls[2].params.options.deadlineMs).toBe(86_400_000)
-    expect(started).toMatchObject({ ref, deviceName: 'Studio' })
+    // Opening attaches to the display; the message follows it.
+    expect(order).toEqual(['bridge.hub.create', 'open', 'submit'])
     expect(open).toHaveBeenCalledWith({ ...ref, deviceName: 'Studio', title: 'Fix the parser' })
+    expect(submit).toHaveBeenCalledWith(ref, { content: 'Fix the parser\nwith care', images: [] })
+    expect(started).toMatchObject({ ref, deviceName: 'Studio' })
     await expect(started!.sent).resolves.toBeUndefined()
   })
 
@@ -208,72 +208,45 @@ describe('composer thread on another computer', () => {
     expect(calls[0].params).toEqual({ target: node, name: 'Fix the parser', options: { worktreeEnabled: false } })
   })
 
-  it('stages each image in slices before the thread is created and names them in the send', async () => {
-    const { deps, calls } = setup()
-    const big = 'A'.repeat(48 * 1024 * 2 + 10)
-    await startRemoteComposerThread({
-      ...deps,
-      images: [{ name: 'a.png', mimeType: 'image/png', data: big }, { name: 'b.png', mimeType: 'image/png', data: 'QUJD' }],
-      mode: 'plan'
-    })
-    expect(calls.map((call) => call.method)).toEqual([
-      'bridge.hub.stageAttachment', 'bridge.hub.stageAttachment', 'bridge.hub.stageAttachment', 'bridge.hub.stageAttachment',
-      'bridge.hub.create', 'bridge.hub.attach', 'bridge.hub.send'
-    ])
-    expect(calls.slice(0, 3).map((call) => [call.params.upload, call.params.index, call.params.total, call.params.data.length]))
-      .toEqual([['upload-1-padding', 0, 3, 49152], ['upload-1-padding', 1, 3, 49152], ['upload-1-padding', 2, 3, 10]])
-    expect(calls[3].params).toMatchObject({ upload: 'upload-2-padding', index: 0, total: 1, name: 'b.png', mimeType: 'image/png', data: 'QUJD' })
-    expect(calls[6].params).toMatchObject({ mode: 'plan', attachments: ['upload-1-padding', 'upload-2-padding'] })
-  })
-
-  it('stops before creating anything when the target refuses an image', async () => {
-    const { deps, calls, open } = setup({ answers: { 'bridge.hub.stageAttachment': { ok: false, error: 'The image is too large.' } } })
-    await expect(startRemoteComposerThread({ ...deps, images: [{ name: 'a.png', mimeType: 'image/png', data: 'QUJD' }] }))
-      .rejects.toThrow('The image is too large.')
-    expect(calls.map((call) => call.method)).toEqual(['bridge.hub.stageAttachment'])
-    expect(open).not.toHaveBeenCalled()
-  })
-
-  it('stamps the picked model on the new thread before attaching, from the target\'s own list', async () => {
-    const { deps, calls } = setup()
-    await startRemoteComposerThread({ ...deps, model: { instanceId: 'codex', llmProvider: 'openai', model: 'gpt-x' } })
-    expect(calls.map((call) => call.method)).toEqual(['bridge.hub.create', 'bridge.hub.setModel', 'bridge.hub.attach', 'bridge.hub.send'])
-    expect(calls[1].params).toEqual({
-      ref: { nodeId: node, entityId: 'remote-thread' },
-      model: { instanceId: 'codex', llmProvider: 'openai', model: 'gpt-x' }
-    })
-    const refused = setup({ answers: { 'bridge.hub.setModel': { ok: false, error: 'That model is not available.' } } })
-    await expect(startRemoteComposerThread({ ...refused.deps, model: { instanceId: 'x', model: 'y' } })).rejects.toThrow('That model is not available.')
-    expect(refused.calls.map((call) => call.method)).toEqual(['bridge.hub.create', 'bridge.hub.setModel'])
+  it('hands images to the view for staging and refuses the ones the target cannot take before creating anything', async () => {
+    const image = { name: 'a.png', mimeType: 'image/png', data: 'QUJD' }
+    const ok = setup()
+    await startRemoteComposerThread({ ...ok.deps, images: [image] })
+    expect(ok.submit).toHaveBeenCalledWith(ref, { content: 'Fix the parser\nwith care', images: [image] })
+    const refused = setup({ problem: 'a.png is too large.' })
+    await expect(startRemoteComposerThread({ ...refused.deps, images: [image] })).rejects.toThrow('a.png is too large.')
+    expect(refused.calls).toEqual([])
     expect(refused.open).not.toHaveBeenCalled()
   })
 
-  it('refuses too many or too large images before staging anything', async () => {
-    const many = setup()
-    const image = { name: 'a.png', mimeType: 'image/png', data: 'QUJD' }
-    await expect(startRemoteComposerThread({ ...many.deps, images: Array.from({ length: 17 }, () => image) })).rejects.toThrow('Attach up to 16 images')
-    const large = setup()
-    await expect(startRemoteComposerThread({ ...large.deps, images: [{ ...image, data: 'A'.repeat(3 * 1024 * 1024 + 4) }] })).rejects.toThrow('too large')
-    expect(many.calls).toEqual([])
-    expect(large.calls).toEqual([])
+  it('stamps the picked model on the new thread before the thread opens', async () => {
+    const { deps, calls, order } = setup()
+    await startRemoteComposerThread({ ...deps, model: { instanceId: 'codex', llmProvider: 'openai', model: 'gpt-x' } })
+    expect(order).toEqual(['bridge.hub.create', 'bridge.hub.setModel', 'open', 'submit'])
+    expect(calls[1].params).toEqual({ ref, model: { instanceId: 'codex', llmProvider: 'openai', model: 'gpt-x' } })
+    const refused = setup({ answers: { 'bridge.hub.setModel': { ok: false, error: 'That model is not available.' } } })
+    await expect(startRemoteComposerThread({ ...refused.deps, model: { instanceId: 'x', model: 'y' } })).rejects.toThrow('That model is not available.')
+    expect(refused.open).not.toHaveBeenCalled()
+    expect(refused.submit).not.toHaveBeenCalled()
   })
 
-  it('passes only modes the target knows, and skill modes as they are', async () => {
+  it('passes a skill mode to the view and drops the built-in modes', async () => {
     const plain = setup()
-    await startRemoteComposerThread({ ...plain.deps, mode: 'unknown-mode' })
-    expect(plain.calls[2].params).not.toHaveProperty('mode')
+    await startRemoteComposerThread({ ...plain.deps, mode: 'plan' })
+    expect(plain.submit.mock.calls[0]).toEqual([ref, { content: 'Fix the parser\nwith care', images: [] }])
     const skill = setup()
-    await startRemoteComposerThread({ ...skill.deps, mode: { type: 'skill', skillId: 's1' } })
-    expect(skill.calls[2].params.mode).toEqual({ type: 'skill', skillId: 's1' })
+    await startRemoteComposerThread({ ...skill.deps, mode: { type: 'skill', skillId: 's1' } as never })
+    expect((skill.submit.mock.calls[0] as unknown[])[1]).toMatchObject({ mode: { type: 'skill', skillId: 's1' } })
   })
 
   it('refuses a computer that is not connected before touching it, and names it', async () => {
     for (const devices of [[device({ state: 'closed' })], [device({ kind: 'phone' })], [device({ revoked: true })], []]) {
-      const { deps, calls, open } = setup({ devices })
+      const { deps, calls, open, submit } = setup({ devices })
       const error = await startRemoteComposerThread(deps).catch((cause) => cause)
       expect(error).toBeInstanceOf(RemoteNotConnectedError)
       expect(calls).toEqual([])
       expect(open).not.toHaveBeenCalled()
+      expect(submit).not.toHaveBeenCalled()
     }
     const { deps } = setup({ devices: [device({ state: 'closed' })] })
     await expect(startRemoteComposerThread(deps)).rejects.toThrow('Studio is not connected')
@@ -291,22 +264,17 @@ describe('composer thread on another computer', () => {
     })
     expect(await startRemoteComposerThread(mid.deps)).toBeNull()
     expect(mid.open).not.toHaveBeenCalled()
+    expect(mid.submit).not.toHaveBeenCalled()
     expect(mid.request.mock.calls.map(([method]) => method)).toEqual(['bridge.hub.create'])
   })
 
-  it('does not send when the thread cannot be created or attached', async () => {
+  it('does not open or send when the thread cannot be created', async () => {
     const created = setup({ answers: { 'bridge.hub.create': {} } })
     await expect(startRemoteComposerThread(created.deps)).rejects.toThrow('Studio did not create the chat')
-    const attached = setup({ answers: { 'bridge.hub.attach': new Error('offline') } })
-    await expect(startRemoteComposerThread(attached.deps)).rejects.toThrow('offline')
-    expect(attached.calls.map((call) => call.method)).toEqual(['bridge.hub.create', 'bridge.hub.attach'])
-    expect(attached.open).not.toHaveBeenCalled()
-  })
-
-  it('reports the target\'s refusal of the first message through the send result', async () => {
-    const { deps } = setup({ answers: { 'bridge.hub.send': { text: '', error: 'That skill is not available.' } } })
-    const started = await startRemoteComposerThread(deps)
-    await expect(started!.sent).resolves.toBe('That skill is not available.')
+    const failed = setup({ answers: { 'bridge.hub.create': new Error('offline') } })
+    await expect(startRemoteComposerThread(failed.deps)).rejects.toThrow('offline')
+    expect(failed.open).not.toHaveBeenCalled()
+    expect(failed.submit).not.toHaveBeenCalled()
   })
 
   it('names the thread after the first line, or a default', () => {

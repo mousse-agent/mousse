@@ -1,15 +1,9 @@
 import type { NodeId } from '../../shared/net'
-import type { Thread } from '../../shared/types'
+import type { BridgeRemoteParams } from '../../shared/bridge/types'
 import type { PlatformRequestMethod } from '../../shared/platform'
-import type { Device } from './netDevices'
-import type { RemoteThreadTarget } from './openRemoteThread'
-import {
-  REMOTE_ATTACHMENT_CHUNK_CHARS,
-  REMOTE_ATTACHMENT_MAX_CHARS,
-  REMOTE_MAX_ATTACHMENTS,
-  type BridgeRemoteParams
-} from '../../shared/bridge/types'
+import type { ChatMode, SkillChatMode, Thread } from '../../shared/types'
 import { connectedRemoteDevices } from '../components/sideCard/deviceMenu'
+import type { Device } from './netDevices'
 
 /** Keep an asynchronous blank-composer creation from overriding later navigation. */
 export async function createComposerThread(deps: {
@@ -67,19 +61,19 @@ export interface RemoteImage {
   data: string
 }
 
-/** A turn on the other computer can run for hours; this is the longest the hub allows. */
-const SEND_DEADLINE_MS = 86_400_000
-/** Chat modes the target accepts as plain strings. */
-const REMOTE_MODES = new Set(['agent', 'plan', 'build'])
+/** The thread on the other computer, as the remote thread view takes it. */
+export interface RemoteThreadTarget {
+  nodeId: NodeId
+  entityId: string
+  deviceName?: string
+  title?: string
+}
 
 export interface RemoteComposerThread {
   ref: Pick<RemoteThreadTarget, 'nodeId' | 'entityId'>
   deviceName: string
-  /**
-   * Settles when the first turn ends: with the target's refusal, if it gave one. A rejection
-   * means the message may not have been sent. Not awaited by the composer, which has moved on.
-   */
-  sent: Promise<string | undefined>
+  /** Settles when the first turn ends. Failures are shown by the remote thread view, not thrown. */
+  sent: Promise<void>
 }
 
 /** First line of the message, as the name of a thread the target will title itself. */
@@ -89,10 +83,11 @@ export function remoteThreadName(content: string): string {
 }
 
 /**
- * Starts a chat on another computer from the composer: stages any images, creates the thread in
- * the picked project, attaches to its display stream, and only then sends, so the first turn's
- * events are not lost. Resolves with the thread, or null when the user moved on before it was
- * created. Throws `RemoteNotConnectedError` when the computer is not connected.
+ * Starts a chat on another computer from the composer: checks the computer is connected, creates
+ * the thread in the picked project with the picked model, opens it in the remote thread view
+ * (which attaches to its display stream), then sends the first message through the view, which
+ * stages images and keeps the run for Stop. Resolves with the thread, or null when the user moved
+ * on before it was created. Throws `RemoteNotConnectedError` when the computer is not connected.
  */
 export async function startRemoteComposerThread(deps: {
   node: NodeId
@@ -102,43 +97,24 @@ export async function startRemoteComposerThread(deps: {
   worktreeEnabled: boolean
   content: string
   images: readonly RemoteImage[]
-  mode?: string | { type: 'skill'; skillId: string }
+  /** Only a skill mode travels; the built-in modes are not offered for another computer. */
+  mode?: ChatMode
   /** The model picked for the chat, from the target's own list; its default applies without one. */
   model?: BridgeRemoteParams['threads.setModel']['model']
+  /** Why the target cannot take these images, or an empty string. */
+  imageProblem: (images: readonly RemoteImage[]) => string
   request: Request
   stillVisible: () => boolean
   openRemoteThread: (target: RemoteThreadTarget) => void
-  uploadId?: () => string
+  submit: (ref: RemoteComposerThread['ref'], input: { content: string; images: readonly RemoteImage[]; mode?: SkillChatMode }) => Promise<void>
 }): Promise<RemoteComposerThread | null> {
   const devices = await deps.devices()
   const device = devices.find((entry) => entry.node === deps.node && !entry.self)
   const deviceName = device?.name ?? 'That computer'
   if (!device || !connectedRemoteDevices(devices).some((entry) => entry.node === deps.node))
     throw new RemoteNotConnectedError(deviceName)
-  if (!deps.stillVisible()) return null
-
-  if (deps.images.length > REMOTE_MAX_ATTACHMENTS)
-    throw new Error(`Attach up to ${REMOTE_MAX_ATTACHMENTS} images to a chat on another computer.`)
-  if (deps.images.some((image) => image.data.length > REMOTE_ATTACHMENT_MAX_CHARS))
-    throw new Error('An image is too large to send to another computer.')
-  const uploads: string[] = []
-  for (const image of deps.images) {
-    const upload = deps.uploadId?.() ?? `up-${crypto.randomUUID()}`
-    const total = Math.max(1, Math.ceil(image.data.length / REMOTE_ATTACHMENT_CHUNK_CHARS))
-    for (let index = 0; index < total; index += 1) {
-      const staged = await deps.request<{ ok?: boolean; error?: string } | undefined>('bridge.hub.stageAttachment', {
-        target: deps.node,
-        upload,
-        index,
-        total,
-        name: image.name,
-        mimeType: image.mimeType,
-        data: image.data.slice(index * REMOTE_ATTACHMENT_CHUNK_CHARS, (index + 1) * REMOTE_ATTACHMENT_CHUNK_CHARS)
-      })
-      if (staged?.ok === false) throw new Error(staged.error || `${deviceName} did not accept the image`)
-    }
-    uploads.push(upload)
-  }
+  const problem = deps.imageProblem(deps.images)
+  if (problem) throw new Error(problem)
   if (!deps.stillVisible()) return null
 
   const created = await deps.request<{ thread?: { id?: string } }>('bridge.hub.create', {
@@ -156,17 +132,9 @@ export async function startRemoteComposerThread(deps: {
     const picked = await deps.request<{ ok?: boolean; error?: string } | undefined>('bridge.hub.setModel', { ref, model: deps.model })
     if (picked?.ok === false) throw new Error(picked.error || `${deviceName} did not accept that model`)
   }
-  // Attach first: the display stream then carries the first turn from its first event.
-  await deps.request('bridge.hub.attach', { ref })
-  const mode = typeof deps.mode === 'string' ? (REMOTE_MODES.has(deps.mode) ? deps.mode : undefined) : deps.mode
-  const sent = deps.request<{ error?: unknown } | undefined>('bridge.hub.send', {
-    ref,
-    content: deps.content,
-    ...(mode ? { mode } : {}),
-    ...(uploads.length ? { attachments: uploads } : {}),
-    options: { deadlineMs: SEND_DEADLINE_MS }
-  }).then((result) => typeof result?.error === 'string' && result.error ? result.error : undefined)
-  // A message the target never started is reported by the caller; a still-running turn is not an error.
+  // Opening attaches to the thread's display; the first message goes right after, so its events arrive.
   deps.openRemoteThread({ ...ref, deviceName, title: remoteThreadName(deps.content) })
+  const mode = deps.mode && typeof deps.mode === 'object' ? deps.mode : undefined
+  const sent = deps.submit(ref, { content: deps.content, images: deps.images, ...(mode ? { mode } : {}) })
   return { ref, deviceName, sent }
 }

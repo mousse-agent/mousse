@@ -37,7 +37,7 @@ import {
 import '../chat/components/agent-elements/agent-ui.css'
 import type { NodeId } from '../../shared/net'
 import { RemoteNotConnectedError, prepareComposerThread, startRemoteComposerThread } from '../lib/createComposerThread'
-import { openRemoteThread } from '../lib/openRemoteThread'
+import { openRemoteThread, remoteImageProblem, remoteThreadKey, submitRemoteMessage } from '../lib/remoteThreadStore'
 import { openRemoteProject, readRunOnDevices, remoteErrorMessage, workspaceOnDevice } from '../lib/remoteComputers'
 import { useRemoteComposerOptions, useRemoteProjects, useRunOnDevices } from '../hooks/useRunOnDevices'
 import { localDeviceName, runOnLabel } from './sideCard/deviceMenu'
@@ -792,20 +792,19 @@ export function OrchestratorChat() {
           content: text,
           images,
           mode: skillMode ?? chatMode,
+          imageProblem: remoteImageProblem,
           model: selectedProviderId && selectedModelId
             ? { ...selectionFor(selectedProviderId), model: selectedModelId }
             : undefined,
           request: (method, params) => window.mousse.platformRequest.request(method, params),
           stillVisible,
-          openRemoteThread
+          openRemoteThread,
+          submit: (ref, input) => submitRemoteMessage(remoteThreadKey(ref), input)
         })
         if (!started) return
+        // The remote thread view shows the turn and any refusal of it.
         clearComposer(false)
         releaseComposerUrls()
-        void started.sent.then(
-          (refusal) => { if (refusal) setSendError(refusal) },
-          (error) => { if (!/^Request timeout/.test(String(error?.message))) setSendError(remoteErrorMessage(error, started.deviceName)) }
-        )
       } catch (error) {
         if (!(error instanceof RemoteNotConnectedError)) throw error
         // Back to this computer, with its own projects, so another send cannot reach a stale target.

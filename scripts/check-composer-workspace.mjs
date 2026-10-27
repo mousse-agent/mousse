@@ -15,10 +15,10 @@ try {
       import { OrchestratorChat } from './src/renderer/components/OrchestratorChat'
       import { MainViewTabs } from './src/renderer/components/MainViewTabs'
       import { useAppStore } from './src/renderer/stores/appStore'
+      import { useRemoteThreads } from './src/renderer/lib/remoteThreadStore'
       const subscription = () => () => {}
       const projects = [{id:'a',name:'mousse',path:'/fixture/mousse'}, {id:'b',name:'Other project',path:'/fixture/other'}]
-      window.fixture = { store:useAppStore, calls:[], requests:[], opened:[], errors:[], sequence:0 }
-      window.addEventListener('mousse:open-remote-thread', event => fixture.opened.push(event.detail))
+      window.fixture = { store:useAppStore, remoteThreads:useRemoteThreads, calls:[], requests:[], errors:[], sequence:0 }
       // Other computers: one connected computer, a phone, and a computer that is offline.
       const node = (id,name,patch={}) => ({node:id,name,caps:['read','write','chat'],keyEpoch:1,expiresAt:0,self:false,revoked:false,state:'open',kind:'computer',...patch})
       const remoteProjects = [{id:'r1',name:'mousse',path:'/fixture/mousse'},{id:'r2',name:'servers',path:'/srv/servers'}]
@@ -32,6 +32,7 @@ try {
         providers:{onChanged:subscription}, skills:{list:async()=>({skills:[]}),onChanged:subscription},
         projects:{open:async()=>{fixture.calls.push(['open']);return projects[1]},listThreads:async()=>[]},
         chatReferences:{resolve:async(reference)=>{if(fixture.referenceError)throw new Error('Reference unavailable');return {...reference,metadataPath:'/fixture/meta.json'}}},
+        bridge:{onThreadPart:subscription},
         platformRequest:{request:async(method,params)=>{
           fixture.requests.push([method,params])
           const handler=fixture.remote[method]
@@ -65,7 +66,7 @@ try {
         }
       }
       fixture.resetRemote = () => {
-        fixture.requests=[];fixture.opened=[]
+        fixture.requests=[]
         fixture.nodes=[node('n-self','Studio Mac',{self:true}),node('n-linux','Build Linux'),node('n-phone','Pocket',{kind:'phone'}),node('n-off','Old Mac',{state:'closed'})]
         fixture.remote={
           'net.status':()=>({enabled:true,self:{node:'n-self'},keystore:'unlocked'}),
@@ -323,12 +324,15 @@ try {
         await click('.composer-workspace-worktree')
         assert.equal(await evaluate('document.querySelector(".composer-workspace-worktree").getAttribute("aria-pressed")'),'true')
         assert.deepEqual((await evaluate('fixture.requests')).filter(r=>r[0]==='bridge.hub.openProject').map(r=>r[1]),[{target:'n-linux',path:'/missing'},{target:'n-linux',path:'/srv/new'}])
-        // Sending creates the thread on that computer, attaches, then sends, and hands the thread to the view.
+        // Sending creates the thread on that computer, sets its model, and hands it to the remote thread view, which attaches and sends.
         await prompt('Run this on the server');await send();await pause(150)
-        assert.deepEqual((await evaluate('fixture.requests')).map(r=>r[0]).filter(m=>m.startsWith('bridge.hub.')&&m!=='bridge.hub.projects'&&m!=='bridge.hub.openProject'&&m!=='bridge.hub.composerOptions'),['bridge.hub.create','bridge.hub.setModel','bridge.hub.attach','bridge.hub.send'])
+        assert.deepEqual((await evaluate('fixture.requests')).map(r=>r[0]).filter(m=>m.startsWith('bridge.hub.')&&m!=='bridge.hub.projects'&&m!=='bridge.hub.openProject'&&m!=='bridge.hub.composerOptions').sort(),['bridge.hub.attach','bridge.hub.create','bridge.hub.send','bridge.hub.setModel'])
         assert.deepEqual((await evaluate('fixture.requests')).find(r=>r[0]==='bridge.hub.setModel')[1],{ref:{nodeId:'n-linux',entityId:'remote-1'},model:{llmProvider:'remote-llm',model:'r-model'}})
         assert.deepEqual((await evaluate('fixture.requests')).find(r=>r[0]==='bridge.hub.create')[1],{target:'n-linux',name:'Run this on the server',projectId:'r3',options:{worktreeEnabled:true}})
-        assert.deepEqual(await evaluate('fixture.opened'),[{nodeId:'n-linux',entityId:'remote-1',deviceName:'Build Linux',title:'Run this on the server'}])
+        // The remote thread view takes the thread over, and the first message goes through it with a run id for Stop.
+        assert.deepEqual(await evaluate('(()=>{const s=fixture.remoteThreads.getState();const e=s.entries[s.activeKey];return [s.activeKey,e.deviceName,e.title,e.sending,/^rpc_/.test(String(e.run))]})()'),['n-linux:remote-1','Build Linux','Run this on the server',true,true])
+        const sendCall=(await evaluate('fixture.requests')).find(r=>r[0]==='bridge.hub.send')[1]
+        assert.deepEqual([sendCall.ref,sendCall.content,sendCall.options.deadlineMs],[{nodeId:'n-linux',entityId:'remote-1'},'Run this on the server',1800000])
         assert.deepEqual((await calls()).map(c=>c[0]),[])
         assert.equal(await evaluate('document.querySelector(".composer-input").value'),'')
         // A computer that dropped offline before the send: say so, fall back to this computer, send nothing.
