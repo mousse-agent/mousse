@@ -1,9 +1,10 @@
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { realpathSync, writeFileSync } from 'node:fs'
-import { HeadlessAgentRunner } from '../../../src/mms/terminals/HeadlessAgentRunner'
+import { ProcessLifecycleController, createDefaultProcessTreeSignaler } from '../../../src/mms/terminals/processLifecycle'
 import { captureDarwinProcessTree, loadDarwinProcess } from '../../../src/mms/terminals/darwinProcess'
 import { quoteForShell, heartbeatPath, pidPath, readOwnedPidFile, waitForHeartbeat, waitUntilPidGone } from '../../../tests/fixtures/agent-platform/process-lifecycle/ownedTemp'
+import { spawnOwnedShell } from '../../../tests/fixtures/agent-platform/process-lifecycle/ownedShell'
 
 async function main(): Promise<void> {
   const directory = realpathSync(process.env.MOUSSE_OWNED_PROCESS_QA_DIRECTORY!)
@@ -14,13 +15,14 @@ async function main(): Promise<void> {
     app!.setPath('userData', join(directory, 'electron-data')); app!.disableHardwareAcceleration()
     await app!.whenReady(); app!.dock?.hide()
   }
-  const runner = new HeadlessAgentRunner(), unrelated = new HeadlessAgentRunner(), native = loadDarwinProcess()
-  const spawn = async (owner: HeadlessAgentRunner, name: string, stubborn: boolean) => {
+  const owned = () => new ProcessLifecycleController('pty', createDefaultProcessTreeSignaler())
+  const runner = owned(), unrelated = owned(), native = loadDarwinProcess()
+  const spawn = async (owner: ProcessLifecycleController, name: string, stubborn: boolean) => {
     const beats = join(directory, name)
-    owner.spawn(name, directory, `${quoteForShell(process.execPath)} ${quoteForShell(heartbeat)}`, { env: {
+    spawnOwnedShell(owner, name, directory, `${quoteForShell(process.execPath)} ${quoteForShell(heartbeat)}`, {
       ELECTRON_RUN_AS_NODE: '1', LIFECYCLE_HEARTBEAT_DIR: beats, LIFECYCLE_ROLE: 'child',
       LIFECYCLE_HEARTBEAT_MS: '40', LIFECYCLE_SPAWN_GRANDCHILD: '1', LIFECYCLE_GRANDCHILD_IGNORE_STOP: stubborn ? '1' : '0'
-    } })
+    })
     await waitForHeartbeat(heartbeatPath(beats, 'child')); await waitForHeartbeat(heartbeatPath(beats, 'grandchild'))
     return { child: readOwnedPidFile(pidPath(beats, 'child')), grandchild: readOwnedPidFile(pidPath(beats, 'grandchild')) }
   }

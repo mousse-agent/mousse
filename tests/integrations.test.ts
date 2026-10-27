@@ -8,10 +8,8 @@ import {
   redactMcpServerConfig
 } from '../src/mms/integrations/mcp/McpRegistry'
 import { toProviderSafeToolName } from '../src/mms/integrations/mcp/toolNames'
-import { prepareGeneratedMcpConfig, renderMcpConfig } from '../src/mms/integrations/agents/AgentConfigManager'
 import { SkillsRegistry } from '../src/mms/integrations/skills/SkillsRegistry'
 import type { McpConfigPathDescriptor } from '../src/mms/data/paths'
-import type { McpServerConfig } from '../src/shared/integrations'
 
 describe('MCP config parsing', () => {
   it('parses and redacts Cursor-compatible stdio config', () => {
@@ -130,58 +128,6 @@ Use this skill for reviews.
     } finally {
       await rm(root, { recursive: true, force: true })
     }
-  })
-})
-
-describe('Agent config rendering', () => {
-  it('extracts generated secrets into stable, collision-safe environment variables', () => {
-    const server = (id: string, name: string, token: string): McpServerConfig => ({
-      id,
-      name,
-      source: 'cursor-project',
-      scope: 'project',
-      transport: 'stdio',
-      status: 'configured',
-      command: 'node',
-      env: { TOKEN: token }
-    })
-    const generated = prepareGeneratedMcpConfig([
-      server('cursor-project:second', 'second', 'second-secret'),
-      server('cursor-project:first', 'first', 'first-secret')
-    ])
-
-    expect(Object.values(generated.env)).toEqual(expect.arrayContaining(['first-secret', 'second-secret']))
-    expect(generated.servers.flatMap((entry) => Object.values(entry.env ?? {}))).toEqual(
-      expect.arrayContaining([
-        '${env:TOKEN_CURSOR_PROJECT_FIRST}',
-        '${env:TOKEN_CURSOR_PROJECT_SECOND}'
-      ])
-    )
-    expect(JSON.stringify(generated.servers)).not.toContain('secret')
-  })
-
-  it('renders selected servers for each supported CLI standard', () => {
-    const servers: McpServerConfig[] = [
-      {
-        id: 'cursor-project:echo',
-        name: 'echo',
-        source: 'cursor-project',
-        scope: 'project',
-        transport: 'stdio',
-        status: 'configured',
-        command: 'node',
-        args: ['echo.js'],
-        env: { TOKEN: 'literal-secret' }
-      }
-    ]
-
-    const claudeConfig = renderMcpConfig('claude-code', servers)
-    expect(claudeConfig).toContain('"mcpServers"')
-    expect(claudeConfig).toContain('${env:TOKEN}')
-    expect(claudeConfig).not.toContain('literal-secret')
-    expect(renderMcpConfig('cursor-agents-cli', servers)).toContain('"mcpServers"')
-    expect(renderMcpConfig('codex', servers)).toContain('[mcp_servers.echo]')
-    expect(renderMcpConfig('opencode', servers)).toContain('"mcp"')
   })
 })
 

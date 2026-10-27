@@ -116,8 +116,6 @@ import { AgentRegistry } from '../agents/AgentRegistry'
 import { TaskQueue } from '../tasks/TaskQueue'
 import { WorktreeManager } from '../worktree/WorktreeManager'
 import { PtyManager } from '../terminals/PtyManager'
-import { HeadlessAgentRunner } from '../terminals/HeadlessAgentRunner'
-import { MacroEngine } from '../macros/MacroEngine'
 import { filterActionsForChatMode, parseActions, rejectOrchestrationAction, stripActionBlocks } from './actions'
 import { LlmClient, type LlmChatOptions } from './LlmClient'
 import type { DelegateTaskInput, DelegationToolCall, DelegationToolHost, NamedAgentToolRequest, SubagentRef } from '../run/mcp/appTools/delegation'
@@ -136,7 +134,6 @@ import type { ProviderAuthService } from '../providers/ProviderAuthService'
 import { ProviderInstanceService } from '../providers/ProviderInstanceService'
 import type { McpManager } from '../integrations/mcp/McpManager'
 import type { SkillsRegistry } from '../integrations/skills/SkillsRegistry'
-import type { AgentConfigManager } from '../integrations/agents/AgentConfigManager'
 import type { FileService } from '../files/FileService'
 import type { GitService } from '../git/GitService'
 import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
@@ -879,13 +876,10 @@ export class OrchestratorService extends EventEmitter {
     tasks: TaskQueue,
     private worktrees: WorktreeManager,
     private ptyManager: PtyManager,
-    private headlessRunner: HeadlessAgentRunner,
-    private macros: MacroEngine,
     private settingsStore: SettingsStore,
     private providerAuth: ProviderAuthService,
     private mcpManager?: McpManager,
     private skillsRegistry?: SkillsRegistry,
-    private agentConfigManager?: AgentConfigManager,
     private fileService?: FileService,
     private gitService?: GitService,
     private lineEditStats?: LineEditStatsStore,
@@ -925,15 +919,6 @@ export class OrchestratorService extends EventEmitter {
       (payload, threadId) => this.presentPlanCard(payload, threadId),
       { questions: this.questions, modeRegistry: this.modeRegistry, customModel: (provider, modelId) => this.customPiModel(provider, modelId) }
     )
-
-    this.headlessRunner.on('exit', ({ agentId, exitCode }) => {
-      const owner = this.agentOwner(agentId)
-      if (owner && owner !== this.session) {
-        this.sessionAls.run(owner, () => this.handleHeadlessExit(agentId, exitCode))
-        return
-      }
-      this.handleHeadlessExit(agentId, exitCode)
-    })
   }
 
   /**
@@ -944,20 +929,6 @@ export class OrchestratorService extends EventEmitter {
     for (const session of new Set([this.boundSession, ...this.sessions.values()]))
       if (session.agents.get(agentId)) return session
     return undefined
-  }
-
-  /**
-   * A legacy headless agent's process ended. Completion used to be read from a progress file;
-   * that protocol is retired (SPEC §14.5), so an exit is terminal: a non-zero code fails the agent,
-   * a clean exit leaves it interrupted with its worktree retained for inspection.
-   */
-  private handleHeadlessExit(agentId: string, exitCode: number | null): void {
-    const agent = this.agents.get(agentId)
-    if (!agent || agent.executionMode !== 'headless') return
-    if (agent.status !== 'starting' && agent.status !== 'running') return
-    if (exitCode === null) return
-    if (exitCode !== 0) this.reportGuiAgentTerminalState(agentId, `Headless agent exited with code ${exitCode}.`, 'failed')
-    else this.reportGuiAgentTerminalState(agentId, 'Headless agent exited; its worktree is retained for inspection.', 'interrupted')
   }
 
   setPersistCallback(fn: (threadId?: string | null) => void): void {
@@ -6824,36 +6795,6 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  private reportGuiAgentTerminalState(
-    agentId: string,
-    reason: string,
-    status: 'failed' | 'interrupted'
-  ): void {
-    const owner = this.agentOwner(agentId)
-    if (owner && owner !== this.session) {
-      this.sessionAls.run(owner, () => this.reportGuiAgentTerminalState(agentId, reason, status))
-      return
-    }
-    const agent = this.agents.get(agentId)
-    if (!agent) return
-    if (isTerminalAgentStatus(agent.status) || agent.status === 'merging') return
-
-    const message =
-      reason.trim() ||
-      (status === 'failed'
-        ? 'GUI subagent failed with no reason supplied.'
-        : 'GUI subagent session was interrupted.')
-    this.agents.updateStatus(agentId, status)
-
-    const task = this.tasks.findByAgentId(agentId)
-    if (task) {
-      this.tasks.updateProgress(task.id, { message })
-      this.tasks.updateStatus(task.id, status)
-    }
-
-    this.addSystemMessage(`[Agent ${agentId.slice(0, 8)} ${status}] ${message}`)
-  }
-
   /**
    * An automatic follow-up for this thread (e.g. a `complete_task` outcome) is a stored
    * `reconcile_notice` inbox row; reconciler rule 4 wakes the thread for it (SPEC §14.3). Without
@@ -7095,11 +7036,9 @@ export class OrchestratorService extends EventEmitter {
     const task = this.tasks.findByAgentId(agent.id)
 
     // Stop all writers before cleanup or Git operations. A legacy GUI session has no live turn
-    // to stop; only headless processes and terminals can still be writing.
-    if (agent.executionMode === 'headless' && agent.processId) {
-      this.headlessRunner.kill(agent.processId)
-      logs.push(`[headless] Stopped agent ${agent.id.slice(0, 8)}`)
-    } else if (agent.executionMode !== 'gui' && agent.ptyId) {
+    // to stop, and no headless agent process can exist since that launcher was retired; only
+    // terminals can still be writing.
+    if (agent.executionMode !== 'gui' && agent.executionMode !== 'headless' && agent.ptyId) {
       this.ptyManager.kill(agent.ptyId)
       logs.push(`[terminal] Closed agent ${agent.id.slice(0, 8)}`)
     }
@@ -7107,11 +7046,6 @@ export class OrchestratorService extends EventEmitter {
     if (merge) {
       const result = await this.integrateAgentResult(agent)
       if (result.success) {
-        // Cleanup is intentionally after successful merge/removal. A plain Stop or failed
-        // merge must leave the recoverable worktree byte-for-byte intact.
-        if (this.agentConfigManager) {
-          logs.push(...(await this.agentConfigManager.cleanup(agent.id)))
-        }
         logs.push(`[merge] Merged ${agent.branch}`)
         this.agents.updateStatus(agent.id, 'completed')
         if (task) {

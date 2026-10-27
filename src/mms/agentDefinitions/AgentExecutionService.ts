@@ -233,9 +233,8 @@ export class AgentExecutionService {
       conversation: runtimeContext.conversation,
       fallbacks: structuredClone(resolved.settings.fallbacks)
     }
-    const runtime = resolved.runtimeKind === 'mousse'
-      ? this.bindings.native
-      : this.bindings.cli?.[resolved.runtimeKind]
+    // Only the native runtime executes definitions; the CLI-process runner was retired.
+    const runtime = resolved.runtimeKind === 'mousse' ? this.bindings.native : undefined
     if (!runtime) {
       request.signal?.removeEventListener('abort', forwardAbort)
       throw new AgentDefinitionError('SETTINGS_UNSUPPORTED', `No execution adapter is registered for ${resolved.runtimeKind}.`, {

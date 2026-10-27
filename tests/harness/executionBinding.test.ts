@@ -11,7 +11,6 @@ import { AgentRegistry } from '../../src/mms/agents/AgentRegistry'
 import { ProjectManager } from '../../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../../src/mms/data/ThreadDataStore'
 import { decodeInstanceConfig } from '../../src/mms/harness/driver'
-import type { MacroEngine } from '../../src/mms/macros/MacroEngine'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
@@ -22,7 +21,6 @@ import { RunEngine } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import { TaskQueue } from '../../src/mms/tasks/TaskQueue'
-import { HeadlessAgentRunner } from '../../src/mms/terminals/HeadlessAgentRunner'
 import { PtyManager } from '../../src/mms/terminals/PtyManager'
 import { WorktreeManager } from '../../src/mms/worktree/WorktreeManager'
 import type { Harness } from '../../src/mms/harness/gateway'
@@ -79,8 +77,8 @@ describe('execution bindings', () => {
     process.env.MOUSSE_HOME = home
     store = new ThreadDataStore(new ProjectManager())
     orch = new OrchestratorService(
-      new AgentRegistry(), new TaskQueue(), new WorktreeManager(home), new PtyManager(), new HeadlessAgentRunner(),
-      { listProviders: () => [] } as unknown as MacroEngine, { get: () => getDefaultSettings() } as never, {} as never
+      new AgentRegistry(), new TaskQueue(), new WorktreeManager(home), new PtyManager(),
+      { get: () => getDefaultSettings() } as never, {} as never
     )
     orch.setThreadStore(store)
     ;(orch as any).llm = {

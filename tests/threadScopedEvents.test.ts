@@ -95,37 +95,6 @@ describe('thread-scoped orchestrator conversation events', () => {
     expect(added).toEqual([])
   })
 
-  // The delegation batch and its queued wake are retired (SPEC §14.5): a legacy agent's failure is
-  // routed to its owning thread and wakes nothing.
-  it('routes background subagent failure through the owning thread without a wake', async () => {
-    const selected = store.createThread('Selected')
-    const background = store.createThread('Background')
-    orch.bindThread(selected.id, [], undefined, [])
-    const owner = orch.getOrCreateSession(background.id)
-    const agent = owner.agents.create({
-      cliType: 'mousse',
-      worktreePath: '/tmp/background-agent',
-      branch: 'mousse/agent-background',
-      executionMode: 'headless',
-      status: 'running',
-      task: 'background task'
-    })
-    owner.tasks.create('background task', agent.id)
-    const internal = orch as unknown as { scheduleQueueDrain: (session: typeof owner) => void }
-    const drainSpy = vi.spyOn(internal, 'scheduleQueueDrain').mockImplementation(() => undefined)
-
-    const internalRunner = orch as unknown as { headlessRunner: { emit: (event: 'exit', payload: { agentId: string; exitCode: number }) => boolean } }
-    internalRunner.headlessRunner.emit('exit', { agentId: agent.id, exitCode: 2 })
-    await new Promise((resolve) => setTimeout(resolve, 150))
-
-    expect(owner.agents.get(agent.id)?.status).toBe('failed')
-    expect(owner.tasks.findByAgentId(agent.id)?.status).toBe('failed')
-    expect(orch.getMessages(background.id).some((message) => message.content.includes('Headless agent exited with code 2.'))).toBe(true)
-    expect(orch.getMessages(selected.id)).toEqual([])
-    expect(owner.queue).toEqual([])
-    expect(drainSpy).not.toHaveBeenCalled()
-  })
-
   // Automatic notices (e.g. a complete_task outcome) are stored inbox rows on the thread that
   // produced them; reconciler rule 4 wakes that thread (SPEC §14.3).
   it('stores automatic notices in the inbox of their originating threads', async () => {

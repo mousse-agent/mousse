@@ -677,28 +677,6 @@ export interface PtyCreateResult {
   ptyId: string
 }
 
-export interface MacroStep {
-  type: 'delay' | 'paste' | 'key' | 'type'
-  ms?: number
-  key?: string
-  text?: string
-  usePrompt?: boolean
-}
-
-export interface MacroHeadlessConfig {
-  command: string
-  args: string[]
-  appendPrompt?: boolean
-}
-
-export interface MacroConfig {
-  name: string
-  cliType: CliType
-  cliCommand: string
-  steps: MacroStep[]
-  headless?: MacroHeadlessConfig
-}
-
 export interface Project {
   id: string
   name: string

@@ -1,6 +1,5 @@
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import type { McpServerConfig } from '../../../shared/integrations'
 import type { McpAttachment } from './MousseMcpServer'
 
 /** Name of the Mousse server in every runtime's MCP configuration; tools appear as `mcp__mousse__*`. */
@@ -116,25 +115,6 @@ export function acpMcpServers(
     args: bridge.args,
     env: Object.entries(bridge.env).map(([name, value]) => ({ name, value }))
   }]
-}
-
-/**
- * The Mousse server as an integration `McpServerConfig` for CLI children (`AgentConfigManager`).
- * Every supported CLI (claude-code, codex, opencode, cursor) takes Streamable HTTP; the
- * materialiser moves the literal `Authorization` header into an environment variable.
- */
-export function mousseMcpServerConfig(attachment: McpAttachment): McpServerConfig {
-  return {
-    id: MOUSSE_MCP_SERVER_NAME,
-    name: MOUSSE_MCP_SERVER_NAME,
-    source: 'mousse',
-    scope: 'generated',
-    transport: 'http',
-    status: 'configured',
-    enabled: true,
-    url: attachment.url,
-    headers: { Authorization: bearerHeader(attachment) }
-  }
 }
 
 /**

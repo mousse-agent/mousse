@@ -4,7 +4,6 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentRegistry } from '../src/mms/agents/AgentRegistry'
-import { MacroEngine } from '../src/mms/macros/MacroEngine'
 import {
   buildCompleteTaskFailureWake,
   buildCompleteTaskSuccessWake,
@@ -15,7 +14,6 @@ import {
 import { buildOrchestratorSystemPrompt, DELEGATION_PROMPT } from '../src/mms/orchestrator/systemPrompt'
 import { LEGACY_AGENT_PROGRESS_FILE, MOUSSE_CONTROL_FILE_PATHS } from '../src/mms/worktree/controlFiles'
 import { TaskQueue } from '../src/mms/tasks/TaskQueue'
-import { HeadlessAgentRunner } from '../src/mms/terminals/HeadlessAgentRunner'
 import { PtyManager } from '../src/mms/terminals/PtyManager'
 import { WorktreeManager } from '../src/mms/worktree/WorktreeManager'
 import {
@@ -57,20 +55,11 @@ function createOrchestrator(root: string): {
   agents: AgentRegistry
   tasks: TaskQueue
   worktrees: WorktreeManager
-  headlessRunner: HeadlessAgentRunner
 } {
   const agents = new AgentRegistry()
   const tasks = new TaskQueue()
   const worktrees = new WorktreeManager(root)
   const ptyManager = new PtyManager()
-  const headlessRunner = new HeadlessAgentRunner()
-  const macros = {
-    listProviders: () => ['mousse', 'codex'],
-    isHeadlessEnabled: () => false,
-    getHeadlessShellCommand: () => 'echo',
-    getCliCommand: () => 'echo',
-    runPtyMacro: async () => ({ log: [] as string[] })
-  } as unknown as MacroEngine
   const settingsStore = {
     getSettings: () => getDefaultSettings()
   }
@@ -83,12 +72,10 @@ function createOrchestrator(root: string): {
     tasks,
     worktrees,
     ptyManager,
-    headlessRunner,
-    macros,
     settingsStore as never,
     providerAuth as never
   )
-  return { orchestrator, agents, tasks, worktrees, headlessRunner }
+  return { orchestrator, agents, tasks, worktrees }
 }
 
 function seedRunningGuiAgent(
@@ -206,90 +193,13 @@ describe('cancellation vs completed', () => {
   })
 })
 
-describe('legacy agent failure propagation', () => {
-  it('marks agent and task failed with the exit reason and does not remove the worktree', async () => {
-    const root = makeTempRoot()
-    const { agents, tasks, worktrees, headlessRunner } = createOrchestrator(root)
-    await worktrees.init()
-    const wt = await worktrees.createWorktree('22222222-2222-2222-2222-222222222222')
-    const { agent } = seedRunningGuiAgent(agents, tasks, {
-      worktreePath: wt.path,
-      branch: wt.branch,
-      executionMode: 'headless'
-    })
-
-    headlessRunner.emit('exit', { agentId: agent.id, exitCode: 7 })
-
-    expect(agents.get(agent.id)?.status).toBe('failed')
-    const task = tasks.findByAgentId(agent.id)
-    expect(task?.status).toBe('failed')
-    expect(task?.progressMessage).toBe('Headless agent exited with code 7.')
-    expect(existsSync(wt.path)).toBe(true)
-    // A second exit is a no-op for terminal agents.
-    headlessRunner.emit('exit', { agentId: agent.id, exitCode: 9 })
-    expect(task?.progressMessage).toBe('Headless agent exited with code 7.')
-  })
-})
-
-describe('headless agent exit handling', () => {
-  function seedHeadless(agents: AgentRegistry, tasks: TaskQueue, worktreePath: string): Agent {
-    const agent = agents.create({
-      cliType: 'codex',
-      worktreePath,
-      branch: 'mousse/agent-headless1',
-      executionMode: 'headless',
-      status: 'running',
-      task: 'Headless work'
-    })
-    tasks.updateStatus(tasks.create(agent.task, agent.id).id, 'in_progress')
-    return agent
-  }
-
-  // SPEC §14.5 retired the progress-file protocol: an exit is terminal and the file is not read.
-  it('leaves an agent that exits 0 interrupted with its worktree retained, ignoring any progress file', () => {
-    const root = makeTempRoot()
-    const { agents, tasks, headlessRunner } = createOrchestrator(root)
-    const agent = seedHeadless(agents, tasks, root)
-    mkdirSync(join(root, '.mousse'), { recursive: true })
-    writeFileSync(join(root, LEGACY_AGENT_PROGRESS_FILE), JSON.stringify({ status: 'completed', summary: 'done' }))
-
-    headlessRunner.emit('exit', { agentId: agent.id, exitCode: 0 })
-
-    expect(agents.get(agent.id)?.status).toBe('interrupted')
-    expect(tasks.findByAgentId(agent.id)?.status).toBe('interrupted')
-    expect(tasks.findByAgentId(agent.id)?.progressMessage).toBe('Headless agent exited; its worktree is retained for inspection.')
-    expect(existsSync(root)).toBe(true)
-  })
-
-  it('ignores an exit without a code', () => {
-    const root = makeTempRoot()
-    const { agents, tasks, headlessRunner } = createOrchestrator(root)
-    const agent = seedHeadless(agents, tasks, root)
-    headlessRunner.emit('exit', { agentId: agent.id, exitCode: null })
-    expect(agents.get(agent.id)?.status).toBe('running')
-  })
-
-  it('still fails on a non-zero exit and ignores settled agents', () => {
-    const root = makeTempRoot()
-    const { agents, tasks, headlessRunner } = createOrchestrator(root)
-    const agent = seedHeadless(agents, tasks, root)
-    headlessRunner.emit('exit', { agentId: agent.id, exitCode: 3 })
-    expect(tasks.findByAgentId(agent.id)?.progressMessage).toBe('Headless agent exited with code 3.')
-
-    const ready = seedHeadless(agents, tasks, root)
-    agents.updateStatus(ready.id, 'ready')
-    headlessRunner.emit('exit', { agentId: ready.id, exitCode: 0 })
-    expect(agents.get(ready.id)?.status).toBe('ready')
-  })
-})
-
 describe('legacy agent settlement', () => {
   // The delegation batch and its timer-driven parent wake are gone (SPEC §14.5): delegated work is
   // a child thread whose completion is a stored inbox row. Settling a legacy agent changes its
   // status and wakes nothing.
-  it('settles failed and cancelled legacy agents without a batch wake', async () => {
+  it('settles legacy agents, headless ones included, without a batch wake', async () => {
     const root = makeTempRoot()
-    const { orchestrator, agents, tasks, headlessRunner } = createOrchestrator(root)
+    const { orchestrator, agents, tasks } = createOrchestrator(root)
     expect(isDelegationSettledStatus('ready')).toBe(true)
     expect(isDelegationSettledStatus('failed')).toBe(true)
     expect(isDelegationSettledStatus('cancelled')).toBe(true)
@@ -298,10 +208,12 @@ describe('legacy agent settlement', () => {
     const second = seedRunningGuiAgent(agents, tasks, { worktreePath: '/batch-2', branch: 'mousse/agent-batch002' })
     const sendSpy = vi.spyOn(orchestrator, 'send').mockResolvedValue({ message: 'ok', actions: [] })
 
-    headlessRunner.emit('exit', { agentId: first.agent.id, exitCode: 1 })
+    // No headless process can exist any more, so stopping a headless agent only sets its state.
+    const firstLogs = await orchestrator.stopAgent(first.agent.id, false)
     await orchestrator.stopAgent(second.agent.id, false)
 
-    expect(agents.get(first.agent.id)?.status).toBe('failed')
+    expect(firstLogs.some((line) => line.startsWith('[headless]'))).toBe(false)
+    expect(agents.get(first.agent.id)?.status).toBe('cancelled')
     expect(agents.get(second.agent.id)?.status).toBe('cancelled')
     expect(sendSpy).not.toHaveBeenCalled()
     sendSpy.mockRestore()

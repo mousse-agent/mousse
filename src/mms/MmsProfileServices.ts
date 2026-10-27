@@ -44,12 +44,9 @@ import { AgentRegistry } from './agents/AgentRegistry'
 import { TaskQueue } from './tasks/TaskQueue'
 import { WorktreeManager } from './worktree/WorktreeManager'
 import { PtyManager } from './terminals/PtyManager'
-import { HeadlessAgentRunner } from './terminals/HeadlessAgentRunner'
-import { MacroEngine } from './macros/MacroEngine'
 import { McpRegistry } from './integrations/mcp/McpRegistry'
 import { McpManager } from './integrations/mcp/McpManager'
 import { SkillsRegistry } from './integrations/skills/SkillsRegistry'
-import { AgentConfigManager } from './integrations/agents/AgentConfigManager'
 import { FileService } from './files/FileService'
 import { GitService } from './git/GitService'
 import { LineEditStatsStore } from './stats/LineEditStatsStore'
@@ -163,12 +160,9 @@ export class MmsProfileServices {
 
   readonly worktrees: WorktreeManager
   readonly ptyManager: PtyManager
-  readonly headlessRunner: HeadlessAgentRunner
-  readonly macros: MacroEngine
   readonly mcpRegistry: McpRegistry
   readonly mcpManager: McpManager
   readonly skillsRegistry: SkillsRegistry
-  readonly agentConfigManager: AgentConfigManager
   readonly fileService: FileService
   readonly gitService: GitService
   readonly lineEditStats: LineEditStatsStore
@@ -292,12 +286,6 @@ export class MmsProfileServices {
     this.mcpManager = new McpManager(this.mcpRegistry, this.settings, opts?.openExternal, {
       context: this.integrationContext
     })
-    this.agentConfigManager = new AgentConfigManager(
-      this.mcpRegistry,
-      this.skillsRegistry,
-      this.settings,
-      { generatedConfigRoot: join(homeDir, 'agent-configs') }
-    )
     this.fileService = new FileService()
     this.gitService = new GitService()
     this.lineEditStats = new LineEditStatsStore(homeDir)
@@ -307,7 +295,6 @@ export class MmsProfileServices {
     this.agents = new AgentRegistry()
     this.tasks = new TaskQueue()
     this.ptyManager = new PtyManager()
-    this.headlessRunner = new HeadlessAgentRunner()
 
     const terminalSink: TerminalSendSink =
       opts?.onTerminalEvent ??
@@ -315,10 +302,6 @@ export class MmsProfileServices {
         this.events.broadcast(channel, data)
       })
     this.ptyManager.setSendSink(terminalSink)
-    this.headlessRunner.setSendSink(terminalSink)
-
-    const macrosDir = WorktreeManager.resolveMacrosPath()
-    this.macros = new MacroEngine(macrosDir, this.settings)
 
     this.projects = new ProjectManager(homeDir)
     this.threads = new ThreadDataStore(this.projects, homeDir, {
@@ -335,13 +318,10 @@ export class MmsProfileServices {
       this.tasks,
       this.worktrees,
       this.ptyManager,
-      this.headlessRunner,
-      this.macros,
       this.settings,
       this.providerAuth,
       this.mcpManager,
       this.skillsRegistry,
-      this.agentConfigManager,
       this.fileService,
       this.gitService,
       this.lineEditStats,
@@ -564,7 +544,8 @@ export class MmsProfileServices {
       platform: this.platform.getActiveCount(),
       scheduled: this.scheduled.getActiveCount(),
       channels: this.channels.getActiveCount(),
-      headless: this.headlessRunner.getActiveCount(),
+      // Headless CLI agents are retired; the key stays for protocol stability.
+      headless: 0,
       mcp: this.mcpManager.getActiveCount()
     }
     const activeExecution = Object.entries(activity).filter(([, count]) => count > 0)
@@ -754,7 +735,8 @@ export class MmsProfileServices {
       ...this.orchestrator.getOwnedActivity(),
       scheduledTicks: this.scheduled.getActiveCount(),
       ptyProcesses: this.ptyManager.getActiveCount(),
-      headlessProcesses: this.headlessRunner.getActiveCount(),
+      // Headless CLI agents are retired; the key stays for protocol stability.
+      headlessProcesses: 0,
       agentRuns: this.platform.getActiveCount() + (this.chatNetwork?.activeCount() ?? 0),
       mcpWork: this.mcpManager.getActiveCount(),
       channelWork: this.channels.getActiveCount(),
@@ -778,7 +760,6 @@ export class MmsProfileServices {
     this.orchestrator.beginShutdown()
     this.scheduled.beginShutdown()
     this.ptyManager.beginShutdown()
-    this.headlessRunner.beginShutdown()
   }
 
   /** Installation host; only MousseMainService returns a live host. */
@@ -1089,7 +1070,6 @@ export class MmsProfileServices {
       () => this.claudeSubscription.stop(),
       () => this.codex.stop(),
       () => this.ptyManager.shutdown(),
-      () => this.headlessRunner.shutdown(),
       () => this.mcpManager.shutdown()
     ]
     const results = await Promise.allSettled(

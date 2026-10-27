@@ -133,10 +133,6 @@ export function getOpenCodeProjectConfigPaths(projectPath: string): string[] {
   return [join(projectPath, 'opencode.json'), join(projectPath, '.opencode', 'opencode.json')]
 }
 
-export function getGeneratedAgentConfigRoot(agentId: string): string {
-  return join(getMousseHomeDir(), 'agent-configs', agentId)
-}
-
 export interface McpConfigPathDescriptor {
   source: McpConfigSource
   scope: IntegrationScope

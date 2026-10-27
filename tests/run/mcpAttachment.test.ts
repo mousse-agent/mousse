@@ -1,17 +1,14 @@
 /**
  * Phase 5 attachment per adapter (docs/run-engine/SPEC.md §15.2): Claude's SDK `mcpServers`, the
- * ACP `session/new|resume` `mcpServers` (HTTP or the stdio bridge), and CLI children's materialised
- * `mousse` entry. Nothing is attached without `AdapterHost.mcp`.
+ * ACP `session/new|resume` `mcpServers` (HTTP or the stdio bridge). Nothing is attached without
+ * `AdapterHost.mcp`.
  */
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { AgentConfigManager } from '../../src/mms/integrations/agents/AgentConfigManager'
-import type { McpRegistry } from '../../src/mms/integrations/mcp/McpRegistry'
-import type { SkillsRegistry } from '../../src/mms/integrations/skills/SkillsRegistry'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { AntigravityProviderService } from '../../src/mms/providers/antigravity/AntigravityProviderService'
 import {
@@ -24,7 +21,6 @@ import { ClaudeSubscriptionAdapter, type ClaudeSubscriptionClient } from '../../
 import type { AdapterHost, TurnInput, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
 import { acpMcpServers, claudeMcpServers, MOUSSE_MCP_TOKEN_ENV } from '../../src/mms/run/mcp/attachment'
 import { mousseOrchestrationInstructions } from '../../src/mms/run/mcp/instructions'
-import type { SettingsStore } from '../../src/mms/settings/SettingsStore'
 
 const MCP = { url: 'http://127.0.0.1:4567/mcp', token: 'tok-secret' }
 const homes: string[] = []
@@ -366,33 +362,5 @@ describe('Antigravity attachment', () => {
     expect(prompts(sent)).toEqual(['plain'])
     expect(acpMcpServers(null, { http: true })).toEqual([])
     await antigravity.stop()
-  })
-})
-
-describe('CLI children (AgentConfigManager)', () => {
-  const manager = (mcpEnabled = false) => new AgentConfigManager(
-    { discover: async () => ({ servers: [], sources: [], diagnostics: [] }) } as unknown as McpRegistry,
-    { discover: async () => ({ skills: [], sources: [], diagnostics: [] }) } as unknown as SkillsRegistry,
-    { get: () => ({ integrations: { mcp: { enabled: mcpEnabled, enableForAgents: {} }, skills: { enabled: false, enableForAgents: {} } } }) } as unknown as SettingsStore
-  )
-
-  it('materialises a mousse http entry with the token moved into env, and removes it on cleanup', async () => {
-    const root = tempHome('mousse-mcp-cli-')
-    const worktree = join(root, 'worktree')
-    mkdirSync(worktree)
-    const configs = manager()
-    const result = await configs.prepare('agent-1', 'claude-code', worktree, root, undefined, { mousse: MCP })
-    const written = readFileSync(join(worktree, '.mcp.json'), 'utf8')
-    expect(written).not.toContain(MCP.token)
-    const entry = JSON.parse(written).mcpServers.mousse
-    expect(entry).toMatchObject({ url: MCP.url, transport: 'http' })
-    const reference = /^\$\{env:(\w+)\}$/.exec(entry.headers.Authorization)!
-    expect(result.env[reference[1]]).toBe('Bearer tok-secret')
-    await configs.cleanup('agent-1')
-    expect(() => readFileSync(join(worktree, '.mcp.json'), 'utf8')).toThrow()
-
-    const none = await manager().prepare('agent-2', 'claude-code', worktree, root)
-    expect(none.generatedFiles).toEqual([])
-    expect(() => readFileSync(join(worktree, '.mcp.json'), 'utf8')).toThrow()
   })
 })

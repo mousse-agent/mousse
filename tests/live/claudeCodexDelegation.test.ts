@@ -14,7 +14,6 @@ import { describe, expect, it } from 'vitest'
 import { AgentRegistry } from '../../src/mms/agents/AgentRegistry'
 import { ProjectManager } from '../../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../../src/mms/data/ThreadDataStore'
-import type { MacroEngine } from '../../src/mms/macros/MacroEngine'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { ClaudeSubscriptionProviderService } from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
@@ -31,7 +30,6 @@ import { MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import { RunEngine } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
 import { TaskQueue } from '../../src/mms/tasks/TaskQueue'
-import { HeadlessAgentRunner } from '../../src/mms/terminals/HeadlessAgentRunner'
 import { PtyManager } from '../../src/mms/terminals/PtyManager'
 import { WorktreeManager } from '../../src/mms/worktree/WorktreeManager'
 import { getDefaultSettings } from '../../src/shared/settings'
@@ -81,9 +79,9 @@ describe.skipIf(!live)('live: Claude and Codex delegate to each other over the M
     const store = new ThreadDataStore(projects, home)
     const settings = getDefaultSettings()
     const orch = new OrchestratorService(
-      new AgentRegistry(), new TaskQueue(), new WorktreeManager(project), new PtyManager(), new HeadlessAgentRunner(),
-      { listProviders: () => [] } as unknown as MacroEngine, { get: () => settings } as never, {} as never,
-      undefined, undefined, undefined, undefined, undefined, undefined, projects, { questions }
+      new AgentRegistry(), new TaskQueue(), new WorktreeManager(project), new PtyManager(),
+      { get: () => settings } as never, {} as never,
+      undefined, undefined, undefined, undefined, undefined, projects, { questions }
     )
     orch.setThreadStore(store)
     // Claude Code uses the terminal sign-in.
