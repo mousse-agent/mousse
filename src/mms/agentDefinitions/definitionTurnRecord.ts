@@ -2,7 +2,7 @@ import type { AgentExecutionHistoryEntry } from '../../shared/agents/execution'
 import type { EffectiveAgentGrants } from '../../shared/agents/types'
 import type { IntegrationActor } from '../../shared/integrations/actor'
 import type { StreamingLlmTextEvent, StreamingLlmToolEvent } from '../harness/turnEvents'
-import type { ProviderMetrics, TurnUsage } from '../run/adapters/ProviderAdapter'
+import type { ProviderMetrics, TurnResult } from '../harness/gateway'
 
 /**
  * What a definition turn did, from its own events (PR 4 §6 "Result"): the assistant text by content
@@ -49,7 +49,7 @@ export class DefinitionTurnRecord {
     return entries
   }
 
-  usage(usage: TurnUsage | undefined): { inputTokens: number; outputTokens: number; costUsd: number } {
+  usage(usage: TurnResult['usage'] | undefined): { inputTokens: number; outputTokens: number; costUsd: number } {
     return { inputTokens: usage?.input ?? 0, outputTokens: usage?.output ?? 0, costUsd: this.cost }
   }
 

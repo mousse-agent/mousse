@@ -60,7 +60,7 @@ describe('definitions through the gateway', () => {
     captured = []
     runtime = installExactDefinitionRuntime({ orchestrator: orch, providerId: PROVIDER, profileHome: home, captured, outputs })
     registry = new AgentDefinitionRegistry({ profileId, profileRoot: join(home, 'profile') })
-    const integrations = new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write', 'ask_user'] })
+    const integrations = new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write', 'ask_user', 'bash'] })
     const entry = (instanceId?: string) => ({ ref: { providerId: PROVIDER, modelId: MODEL, ...(instanceId ? { instanceId } : {}) }, available: true, efforts: [], speeds: [], contexts: [], capabilities: ['tools'], unavailableReasons: [] })
     resolver = new AgentResolver({ registry, integrationLookup: integrations, modelLookup: new StaticAgentModelLookup([entry(), entry(`pi:${PROVIDER}`), entry(APPROVAL_ONLY_INSTANCE)] as never) })
   })
@@ -79,7 +79,7 @@ describe('definitions through the gateway', () => {
     settings.tools = { mode: 'explicit', allowlist: ['read', 'write', 'ask_user'] }
     mutate(settings)
     const draft = registry.createDraft({ runtimeKind, settings, systemPrompt: 'DEFINITION_SYSTEM_PROMPT' })
-    const published = registry.publish(draft.id, draft.draftHash, { integrationLookup: new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write', 'ask_user'] }) })
+    const published = registry.publish(draft.id, draft.draftHash, { integrationLookup: new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write', 'ask_user', 'bash'] }) })
     return { id: draft.id, revision: published.revision }
   }
 
@@ -183,6 +183,34 @@ describe('definitions through the gateway', () => {
     expect((actor as { skillIds?: string[] }).skillIds ?? []).not.toContain('secret-skill')
   })
 
+  it('holds the script rule and a read-only workspace even for granted tools', async () => {
+    const stored = publish('mousse', `pi:${PROVIDER}`, (settings) => {
+      settings.tools = { mode: 'explicit', allowlist: ['read', 'write', 'bash'] }
+      settings.workspace.mode = 'read_only'
+      settings.script.enabled = false
+    })
+    const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })
+    expect(resolved.grants.builtinTools.map((grant) => grant.id)).toEqual(expect.arrayContaining(['write', 'bash']))
+    const thread = store.createThread('script and read-only')
+    outputs.push(call('bash', { command: 'echo hi > script.txt' }), call('write', { path: 'ro.txt', content: 'x' }), say('done'))
+    const result = await orch.runAgentDefinition(request(resolved, thread.id))
+    expect(result.status).toBe('completed')
+    const results = captured.at(-1)!.messages.filter((message) => message.role === 'toolResult').map((message) => JSON.stringify(message.content))
+    expect(results).toHaveLength(2)
+    expect(results[0]).toContain('Workspace is read-only; bash is blocked by /settings/workspace/mode.')
+    expect(results[1]).toContain('Workspace is read-only; write is blocked by /settings/workspace/mode.')
+    expect(existsSync(join(work, 'ro.txt'))).toBe(false)
+    // A writable workspace with scripts off still refuses a granted bash.
+    const scripts = publish('mousse', `pi:${PROVIDER}`, (settings) => {
+      settings.identity.slug = 'scripts-off'
+      settings.tools = { mode: 'explicit', allowlist: ['read', 'write', 'bash'] }
+      settings.script.enabled = false
+    })
+    outputs.push(call('bash', { command: 'echo hi' }), say('done'))
+    expect((await orch.runAgentDefinition(request(resolver.resolve({ definitionId: scripts.id, revision: scripts.revision }), store.createThread('scripts off').id))).status).toBe('completed')
+    expect(JSON.stringify(captured.at(-1)!.messages)).toContain('Script execution is disabled by /settings/script/enabled.')
+  })
+
   it('applies the unattended policy without asking anyone', async () => {
     const approve = vi.fn<AgentRuntimeToolApprovalCallback>(async (approval) => ({ status: 'approved', digest: approval.argumentDigest }))
     for (const behavior of ['deny', 'skip', 'fail'] as const) {
@@ -218,6 +246,32 @@ describe('definitions through the gateway', () => {
     expect(approvals).toHaveLength(2)
     expect(existsSync(join(work, 'stale.txt'))).toBe(false)
     expect(readFileSync(join(work, 'approved.txt'), 'utf8')).toBe('exact bytes')
+  })
+
+  it('a definition run cut off by a restart ends interrupted at boot and is never resumed, so its counts are never needed again', async () => {
+    const stored = publish('mousse', `pi:${PROVIDER}`)
+    const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })
+    const thread = store.createThread('restart')
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const blocked = installExactDefinitionRuntime({ orchestrator: orch, providerId: PROVIDER, profileHome: home, captured, next: async () => { await gate; return say('late') } })
+    try {
+      const pending = orch.runAgentDefinition(request(resolved, thread.id))
+      await vi.waitFor(() => expect(blocked.turns).toHaveLength(1))
+      // Its one turn ran with the default 32/64 limits on a first attempt of its own record.
+      expect(engine.bindingForRun(blocked.turns[0]!.input.runId)?.policy.budget).toEqual({ maxTurns: 32, maxToolCalls: 64 })
+      // The next daemon's boot: the record ends interrupted, and nothing is dispatched again.
+      const rebooted = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home })) })
+      rebooted.reconcileOnBoot()
+      expect(rebooted.getRun(blocked.turns[0]!.input.runId)?.status).toBe('interrupted')
+      rebooted.store.db.close()
+      release()
+      await pending
+      expect(blocked.turns).toHaveLength(1)
+    } finally {
+      release()
+      blocked.harness.stop()
+    }
   })
 
   it('an owned lease that another holds fails the turn as busy, and never queues it', async () => {

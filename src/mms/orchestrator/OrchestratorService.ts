@@ -826,7 +826,14 @@ export class OrchestratorService extends EventEmitter {
       this.markRun(runId, (runs, id) => runs.markTerminal(id, status, outcome, { resultText }))
       this.harness.runSettled?.(runId)
     }
-    this.markRunStarting(runId)
+    try {
+      this.markRunStarting(runId)
+    } catch (error) {
+      // Another run holds the thread (or this one was cancelled meanwhile): the record never stays queued.
+      this.markRun(runId, (runs, id) => { if (runs.getRun(id)?.status === 'queued') runs.markTerminal(id, 'cancelled', { error: error instanceof Error ? error.message : String(error) }) })
+      this.harness.runSettled?.(runId)
+      throw harnessAppError({ code: 'operation_busy', message: "The agent's thread is running other work." })
+    }
     const authority: DefinitionAuthority = {
       policy: turn.policy,
       grants: turn.grants,
