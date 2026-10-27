@@ -121,7 +121,7 @@ export function NetDevicesSection() {
     catch (cause) { if (alive.current) { setError(String((cause as Error)?.message ?? cause)); if (method === 'net.disable') { setDevices([]); setManifests([]); await reload().catch(() => undefined) } } }
     finally { if (alive.current) { setBusy(false); setPassphrase('') } }
   }
-  const transport = (transportId: string, enabled: boolean, settings: Record<string, unknown>) => action('net.transport.configure', { id: transportId, enabled, settings })
+  const transport = (transportId: string, enabled: boolean, settings?: Record<string, unknown>) => action('net.transport.configure', { id: transportId, enabled, ...(settings ? { settings } : {}) })
 
   const self = status?.self
   const selfDevice = devices.find((device) => device.self)
@@ -243,8 +243,8 @@ export function NetDevicesSection() {
                         : ssh ? (sshReady ? { endpoint: sshEndpoint.trim(), port: sshPortNumber } : undefined)
                           : undefined
               const canEnable = !!enableSettings && (!cloudflare || namedReady) && (!relay || !!relayAddress)
-              const sshLive = /^ssh:\/\/([^/]+)\/127\.0\.0\.1:(\d+)$/.exec(live?.routes[0]?.address ?? '')
-              const disableSettings = cloudflare ? { mode: 'quick' } : relay ? { address: relayAddress || live?.routes[0]?.address || '' } : ssh ? (sshLive ? { endpoint: sshLive[1], port: Number(sshLive[2]) } : { endpoint: sshEndpoint.trim(), port: sshPortNumber }) : {}
+              // Switching SSH off keeps the saved settings, which the screen may not have (a listener that failed to start has no route and the form starts empty).
+              const disableSettings = cloudflare ? { mode: 'quick' } : relay ? { address: relayAddress || live?.routes[0]?.address || '' } : ssh ? undefined : {}
               const label = manifest.id === 'direct' ? 'Local listener' : manifest.id === 'tailscale' ? 'Tailscale' : relay ? 'Relay' : ssh ? 'SSH (for devices that can ssh here)' : manifest.displayName
               return [
                 <SettingsRow

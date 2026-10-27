@@ -2,28 +2,41 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { NodeId } from '../../../src/shared/net'
 
-export type FakeSshMode =
-  'forward' | 'slow' | 'hang' | 'denied' | 'banner' | 'prohibited' | 'refused'
+export type FakeSshMode = 'forward' | 'slow' | 'hang' | 'denied' | 'prohibited' | 'refused'
 
 export interface FakeSsh {
   binary: string
-  /** One JSON argv per spawn. */
+  /** One JSON argv per connecting spawn. */
   log: string
+  /** One JSON argv per `-G` spawn, which prints configuration and never connects. */
+  configLog: string
   pid: string
 }
 
 /**
  * A stand-in for `ssh -W`: it checks the host against the `UserKnownHostsFile` option the way
  * `StrictHostKeyChecking=yes` would, then connects a TCP socket to the `-W` target and pipes stdio.
- * Other modes print what OpenSSH prints for the failure they name. It never reaches a real host.
+ * `-G` prints `config` (what the user's `~/.ssh/config` resolves to) and exits. Other modes print
+ * what OpenSSH prints for the failure they name. It never reaches a real host.
  */
-export async function fakeSsh(where: string, mode: FakeSshMode, name = 'ssh'): Promise<FakeSsh> {
+export async function fakeSsh(
+  where: string,
+  mode: FakeSshMode,
+  name = 'ssh',
+  config: string[] = ['hostname box.example.com']
+): Promise<FakeSsh> {
   const binary = join(where, name),
     log = join(where, `${name}.log`),
+    configLog = join(where, `${name}.config.log`),
     pid = join(where, `${name}.pid`)
   const code = `
 const fs = require('fs'), net = require('net')
 const args = process.argv.slice(2)
+if (args.includes('-G')) {
+  fs.appendFileSync(${JSON.stringify(configLog)}, JSON.stringify(args) + '\\n')
+  process.stdout.write(${JSON.stringify(config.join('\n') + '\n')})
+  process.exit(0)
+}
 fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + '\\n')
 fs.writeFileSync(${JSON.stringify(pid)}, String(process.pid))
 fs.writeFileSync(${JSON.stringify(log + '.env')}, JSON.stringify({ askpass: Object.keys(process.env).filter((key) => key.toUpperCase().startsWith('SSH_ASKPASS')) }))
@@ -40,7 +53,6 @@ const known = files.some((file) => {
 if (!known) fail('Host key verification failed.')
 const mode = ${JSON.stringify(mode)}
 if (mode === 'denied') fail('me@box: Permission denied (publickey).')
-if (mode === 'banner') fail('Please authenticate at https://login.example.com/a/abc123\\nPermission denied (keyboard-interactive).')
 if (mode === 'prohibited') fail('channel 0: open failed: administratively prohibited: open failed\\nstdio forwarding failed')
 if (mode === 'refused') fail('channel 0: open failed: connect failed: Connection refused\\nstdio forwarding failed')
 if (mode === 'hang') setInterval(() => {}, 1000)
@@ -54,7 +66,7 @@ else setTimeout(() => {
 }, mode === 'slow' ? 3000 : 0)
 `
   await writeFile(binary, `#!${process.execPath}\n${code}`, { mode: 0o700 })
-  return { binary, log, pid }
+  return { binary, log, configLog, pid }
 }
 
 /** The line `StrictHostKeyChecking=yes` needs before the fake lets the connection through. */

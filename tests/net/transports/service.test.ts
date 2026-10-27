@@ -8,6 +8,9 @@ import { SyncSupervisor } from '../../../src/mms/net/sync/supervisor'
 import type { NodeId } from '../../../src/shared/net'
 import type { NetRuntime } from '../../../src/mms/net/NetService'
 import { NetError, newId } from '../../../src/shared/net'
+import { registerNetMethods } from '../../../src/mms/net/registerMethods'
+import { DomainHandlerRegistry } from '../../../src/mms/protocol/domainRegistry'
+import type { HandlerContext } from '../../../src/mms/protocol/handlers'
 import { approve, fakeSsh, trustHost } from './fakeSsh'
 import { sshKnownHostsPath } from '../../../src/mms/net/transports/ssh'
 
@@ -218,6 +221,56 @@ it.each(['sync', 'async'] as const)(
     expect(calls).toBe(3)
   }
 )
+
+it('switches off an ssh add-on that failed to start using the saved settings', async () => {
+  const a = profile()
+  await a.net.request('net.init', {})
+  const registry = new DomainHandlerRegistry()
+  registerNetMethods(registry, () => a.net)
+  const context = {
+    connection: {
+      id: 'local-owner',
+      binding: { profileId: 'selected-profile', epoch: 1 },
+      capabilities: new Set(['net.v1'])
+    }
+  } as unknown as HandlerContext
+  type Rows = {
+    transports: Array<{ id: string; enabled: boolean; state: string; routes: unknown[] }>
+  }
+  const configure = (params: Record<string, unknown>) =>
+    registry.dispatch(context, 'net.transport.configure', {
+      profileId: 'selected-profile',
+      ...params
+    }) as Promise<Rows>
+  // The fixed port is taken, as after a restart: the add-on stays enabled but has no route.
+  const busy = createServer()
+  await new Promise<void>((resolve) => busy.listen(0, '127.0.0.1', resolve))
+  cleanups.push(() => new Promise<void>((resolve) => busy.close(() => resolve())))
+  const settings = {
+    endpoint: 'me@box.example.com:2222',
+    port: (busy.address() as { port: number }).port,
+    binary: '/opt/openssh/ssh'
+  }
+  expect(
+    (await configure({ id: 'ssh', enabled: true, settings })).transports.find(
+      (row) => row.id === 'ssh'
+    )
+  ).toMatchObject({ enabled: true, state: 'failed', routes: [] })
+  // The screen was reopened: it has no form state, so it sends no settings.
+  expect(
+    (await configure({ id: 'ssh', enabled: false })).transports.find((row) => row.id === 'ssh')
+  ).toMatchObject({ enabled: false, state: 'disabled', routes: [] })
+  const saved = (a.net as unknown as { config: { transports: Array<{ id: string }> } }).config
+    .transports
+  expect(saved.find((row) => row.id === 'ssh')).toEqual({ id: 'ssh', enabled: false, settings })
+  // Settings may be omitted only to switch something off that is configured.
+  await expect(configure({ id: 'ssh', enabled: true })).rejects.toMatchObject({
+    code: 'bad_request'
+  })
+  await expect(configure({ id: 'relay', enabled: false })).rejects.toMatchObject({
+    code: 'bad_request'
+  })
+})
 
 it('reaches a device that listens only on ssh, and serves rpc in both directions over one session', async () => {
   const where = mkdtempSync(join(tmpdir(), 'mousse-net-ssh-service-')),

@@ -53,14 +53,21 @@ async function directory() {
   cleanup.push(() => rm(value, { recursive: true, force: true }))
   return value
 }
-async function fake(where: string, mode: FakeSshMode = 'forward', name = 'ssh') {
-  const value = await fakeSsh(where, mode, name)
+async function fake(where: string, mode: FakeSshMode = 'forward', name = 'ssh', config?: string[]) {
+  const value = await fakeSsh(where, mode, name, config)
   fixtures.binaries.add(value.binary)
   return value
 }
 async function spawns(ssh: FakeSsh): Promise<string[][]> {
   if (!existsSync(ssh.log)) return []
   return (await readFile(ssh.log, 'utf8'))
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as string[])
+}
+async function configChecks(ssh: FakeSsh): Promise<string[][]> {
+  if (!existsSync(ssh.configLog)) return []
+  return (await readFile(ssh.configLog, 'utf8'))
     .split('\n')
     .filter(Boolean)
     .map((line) => JSON.parse(line) as string[])
@@ -106,9 +113,9 @@ function route(endpoint: string, port: number): Route {
 }
 const ENDPOINT = 'me@box.example.com:2222'
 
-async function setup(mode: FakeSshMode = 'forward', clock?: FakeClock) {
+async function setup(mode: FakeSshMode = 'forward', clock?: FakeClock, config?: string[]) {
   const where = await directory(),
-    ssh = await fake(where, mode),
+    ssh = await fake(where, mode, 'ssh', config),
     node = newId('node') as NodeId,
     knownHosts = sshKnownHostsPath(where),
     userKnownHosts = join(where, 'home', '.ssh', 'known_hosts')
@@ -251,6 +258,8 @@ describe('ssh dialing', () => {
       'BatchMode=yes',
       'StrictHostKeyChecking=yes',
       'UpdateHostKeys=no',
+      'CheckHostIP=no',
+      'VerifyHostKeyDNS=no',
       'PasswordAuthentication=no',
       'KbdInteractiveAuthentication=no',
       'ForwardAgent=no',
@@ -270,6 +279,8 @@ describe('ssh dialing', () => {
       `UserKnownHostsFile="${slashed(t.knownHosts)}" "${slashed(t.userKnownHosts)}"`
     )
     expect(argv).toContain('-T')
+    // The configuration check sees exactly the options the dial runs with.
+    expect(await configChecks(t.ssh)).toEqual([['-G', ...argv]])
     expect(argv.slice(-8)).toEqual([
       '-l',
       'me',
@@ -291,11 +302,11 @@ describe('ssh dialing', () => {
       sshDialArguments({ endpoint, port: 4000, knownHosts, userKnownHosts }).find((argument) =>
         argument.startsWith('UserKnownHostsFile=')
       )
-    // `%` would be read as a token such as %d or %h.
-    expect(value('/p/100%/ssh_known_hosts', '/h/.ssh/known_hosts')).toBe(
-      'UserKnownHostsFile="/p/100%%/ssh_known_hosts" "/h/.ssh/known_hosts"'
+    expect(value('/p/a b/ssh_known_hosts', '/h/.ssh/known_hosts')).toBe(
+      'UserKnownHostsFile="/p/a b/ssh_known_hosts" "/h/.ssh/known_hosts"'
     )
-    for (const hostile of ['/p/a"b', '/p/${HOME}', '/p/a\nb', '/p/a\rb'])
+    // `%` is a token in OpenSSH 8.4 and later and literal before it; there is no escaping that is right for both.
+    for (const hostile of ['/p/100%/x', '/p/%d/x', '/p/a"b', '/p/${HOME}', '/p/a\nb', '/p/a\rb'])
       expect(() => value(hostile, '/h/.ssh/known_hosts'), hostile).toThrow()
   })
   it('gives ssh no askpass helper to prompt for a password with', async () => {
@@ -309,6 +320,52 @@ describe('ssh dialing', () => {
     const raw = await t.dialer.dial(route(ENDPOINT, daemon.port), open(), { peer: t.node })
     cleanup.push(() => raw.destroy())
     expect(JSON.parse(await readFile(`${t.ssh.log}.env`, 'utf8'))).toEqual({ askpass: [] })
+  })
+  it.each([
+    ['ProxyJump', ['hostname box.example.com', 'proxyjump bastion.example.com']],
+    ['ProxyJump', ['proxyjump me@one.example.com:2222,two.example.com']],
+    ['ProxyCommand', ['proxycommand cloudflared access ssh --hostname box.example.com']],
+    ['ProxyCommand', ['ProxyCommand ssh -W %h:%p bastion']]
+  ])(
+    'refuses a %s configuration before any connecting ssh runs, so no jump hop can prompt or write known_hosts',
+    async (directive, config) => {
+      // ssh starts a jump host as a separate ssh that keeps the user's own settings (no BatchMode,
+      // no strict host keys, their known_hosts), so a configuration that needs one is not dialed.
+      const clock = new FakeClock(),
+        t = await setup('forward', clock, config),
+        daemon = await listener()
+      await approve(t.where, { [t.node]: ENDPOINT })
+      await trustHost(t.knownHosts, 'box.example.com', 2222)
+      const attempt = () => t.dialer.dial(route(ENDPOINT, daemon.port), open(), { peer: t.node })
+      await expect(attempt()).rejects.toMatchObject({
+        code: 'route_unreachable',
+        message: expect.stringContaining(directive)
+      })
+      expect(await spawns(t.ssh)).toEqual([])
+      expect(await configChecks(t.ssh)).toHaveLength(1)
+      // The refusal does not fix itself: the configuration is not re-read, and run, for a minute.
+      clock.advance(10_000)
+      await expect(attempt()).rejects.toMatchObject({ message: expect.stringMatching(/Waiting/) })
+      expect(await configChecks(t.ssh)).toHaveLength(1)
+      clock.advance(50_000)
+      await expect(attempt()).rejects.toMatchObject({ message: expect.stringContaining(directive) })
+      expect(await configChecks(t.ssh)).toHaveLength(2)
+      expect(await spawns(t.ssh)).toEqual([])
+    }
+  )
+  it('dials when the configuration sets no proxy', async () => {
+    const t = await setup('forward', undefined, [
+        'hostname box.example.com',
+        'proxyjump none',
+        'proxycommand none',
+        'proxyusefdpass no'
+      ]),
+      daemon = await listener()
+    await approve(t.where, { [t.node]: ENDPOINT })
+    await trustHost(t.knownHosts, 'box.example.com', 2222)
+    const raw = await t.dialer.dial(route(ENDPOINT, daemon.port), open(), { peer: t.node })
+    cleanup.push(() => raw.destroy())
+    expect(await spawns(t.ssh)).toHaveLength(1)
   })
   it('uses the key from either known_hosts file', async () => {
     const t = await setup(),
@@ -395,8 +452,7 @@ describe('ssh dialing', () => {
   it.each([
     ['prohibited', /AllowTcpForwarding/],
     ['refused', /daemon on me@box\.example\.com:2222 is not listening on port 4000/],
-    ['denied', /Permission denied/],
-    ['banner', /https:\/\/login\.example\.com\/a\/abc123/]
+    ['denied', /Permission denied/]
   ] as const)('maps %s from ssh stderr to a route_unreachable detail', async (mode, detail) => {
     const t = await setup(mode)
     await approve(t.where, { [t.node]: ENDPOINT })

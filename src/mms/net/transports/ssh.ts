@@ -41,6 +41,10 @@ const SPAWN_FLOOR_MS = 10_000
 const REFUSED_FLOOR_MS = 60_000
 const STDERR_TAIL_BYTES = 2048
 const APPROVALS_MAX_BYTES = 256 * 1024
+/** `ssh -G` only reads configuration; a hung `Match exec` must not hold the dial. */
+const CONFIG_TIMEOUT_MS = 5_000
+const CONFIG_MAX_BYTES = 64 * 1024
+const MISSING_SSH = 'The ssh command was not found. Install OpenSSH to reach this device.'
 
 export interface SshSettings {
   endpoint: string
@@ -124,12 +128,17 @@ export async function readSshApproval(
 
 /**
  * Paths go inside a quoted `ssh_config` argument. Forward slashes avoid its backslash escapes on
- * Windows; `%` is doubled because ssh expands `%d`-style tokens, and `${` would expand a variable.
+ * Windows. `%` and `${` are refused: OpenSSH 8.4 and later expand tokens and variables in this
+ * option and older versions do not, so no single escaping is right for every client.
  */
 function configPath(path: string): string {
   const value = process.platform === 'win32' ? path.replace(/\\/g, '/') : path
-  if (/["\\\r\n]|\$\{/u.test(value)) throw new NetError('bad_request')
-  return value.replace(/%/g, '%%')
+  if (/["\\\r\n%]|\$\{/u.test(value))
+    throw new NetError(
+      'bad_request',
+      'A known_hosts path contains a character ssh cannot take in an option.'
+    )
+  return value
 }
 
 export function sshDialArguments(input: {
@@ -148,6 +157,13 @@ export function sshDialArguments(input: {
     `UserKnownHostsFile="${configPath(input.knownHosts)}" "${configPath(input.userKnownHosts)}"`,
     '-o',
     'UpdateHostKeys=no',
+    // With StrictHostKeyChecking=yes ssh still appends `<ip> <key>` lines to the first known_hosts
+    // file when CheckHostIP is on (the default before OpenSSH 8.5); Mousse's file is never written.
+    '-o',
+    'CheckHostIP=no',
+    // A key must come from a known_hosts file, never from a DNS record.
+    '-o',
+    'VerifyHostKeyDNS=no',
     '-o',
     'PasswordAuthentication=no',
     '-o',
@@ -188,7 +204,6 @@ export function sshDialArguments(input: {
 /** What the last lines `ssh` printed mean for the person reading the device row. */
 export function describeSshFailure(stderr: string, endpoint: string, port: number): string {
   const text = stderr.replace(/[^\x20-\x7e\n]/g, ' ')
-  const url = /https:\/\/[^\s"'<>]+/.exec(text)?.[0]
   let detail: string
   if (/Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED/i.test(text))
     detail = `Host key verification failed for ${endpoint}. Confirm its host key under Devices.`
@@ -213,7 +228,7 @@ export function describeSshFailure(stderr: string, endpoint: string, port: numbe
       ? `SSH to ${endpoint} failed: ${last.slice(0, 200)}`
       : `SSH to ${endpoint} closed before the daemon answered.`
   }
-  return url && !detail.includes(url) ? `${detail} ${url}` : detail
+  return detail
 }
 
 /** ws only needs a duplex byte stream, plus the socket knobs it calls unconditionally. */
@@ -317,26 +332,101 @@ export class SshDialer {
     if (this.floor.size >= 64)
       for (const [key, until] of this.floor) if (until <= now) this.floor.delete(key)
     this.floor.set(approval.endpoint, now + SPAWN_FLOOR_MS)
-    return this.open(approval.endpoint, endpoint, advertised.port, signal)
-  }
-  private open(
-    name: string,
-    endpoint: SshEndpoint,
-    port: number,
-    signal: AbortSignal
-  ): Promise<Duplex> {
     const args = sshDialArguments({
       endpoint,
-      port,
+      port: advertised.port,
       knownHosts: this.options.knownHosts,
       userKnownHosts: this.options.userKnownHosts ?? join(homedir(), '.ssh', 'known_hosts')
     })
     const { binary } = this.options
+    const command = (typeof binary === 'function' ? binary() : binary) ?? 'ssh'
     // Mousse never asks for a password: no askpass helper may be reached from a background dial.
     const env = cleanEnvironment()
     for (const key of Object.keys(env))
       if (key.toUpperCase().startsWith('SSH_ASKPASS')) delete env[key]
-    const child = spawn((typeof binary === 'function' ? binary() : binary) ?? 'ssh', args, {
+    await this.refuseProxy(command, args, env, approval.endpoint, signal)
+    return this.open(approval.endpoint, advertised.port, signal, command, args, env)
+  }
+  /**
+   * `-o` options reach only the destination ssh. A `ProxyJump` or `ProxyCommand` starts another
+   * process that keeps the user's own settings: it could prompt for a password or a new host key
+   * on a terminal and write the user's known_hosts. Mousse refuses such a configuration until
+   * every hop can be held to the same policy. `ssh -G` prints the resolved configuration without
+   * connecting.
+   */
+  private async refuseProxy(
+    command: string,
+    args: string[],
+    env: NodeJS.ProcessEnv,
+    name: string,
+    signal: AbortSignal
+  ): Promise<void> {
+    const child = spawn(command, ['-G', ...args], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      env
+    })
+    let out = '',
+      err = ''
+    child.stdout!.on('data', (chunk: Buffer) => {
+      if (out.length < CONFIG_MAX_BYTES) out += chunk.toString('utf8')
+    })
+    child.stderr!.on('data', (chunk: Buffer) => {
+      err = (err + chunk.toString('utf8')).slice(-STDERR_TAIL_BYTES)
+    })
+    child.stdout!.on('error', () => {})
+    child.stderr!.on('error', () => {})
+    const outcome = await new Promise<'done' | 'missing' | 'timeout' | 'aborted'>((resolve) => {
+      const timer = setTimeout(() => resolve('timeout'), CONFIG_TIMEOUT_MS)
+      const abort = () => resolve('aborted')
+      signal.addEventListener('abort', abort, { once: true })
+      const end = (value: 'done' | 'missing') => {
+        clearTimeout(timer)
+        signal.removeEventListener('abort', abort)
+        resolve(value)
+      }
+      child.once('close', () => end('done'))
+      child.once('error', (error: NodeJS.ErrnoException) =>
+        end(error.code === 'ENOENT' ? 'missing' : 'done')
+      )
+    })
+    if (outcome === 'timeout' || outcome === 'aborted') stopChild(child)
+    if (outcome === 'aborted') throw new NetError('cancelled', undefined, { cause: signal.reason })
+    if (outcome === 'missing') throw new NetError('route_unreachable', MISSING_SSH)
+    if (outcome === 'timeout')
+      throw new NetError(
+        'route_unreachable',
+        `ssh took too long to read its configuration for ${name}.`
+      )
+    if (child.exitCode !== 0)
+      throw new NetError('route_unreachable', describeSshFailure(err, name, 0))
+    for (const line of out.split('\n')) {
+      const [key = '', ...rest] = line.trim().split(/\s+/u)
+      const directive =
+        key.toLowerCase() === 'proxyjump'
+          ? 'ProxyJump'
+          : key.toLowerCase() === 'proxycommand'
+            ? 'ProxyCommand'
+            : undefined
+      const value = rest.join(' ').toLowerCase()
+      if (!directive || !value || value === 'none') continue
+      // The configuration does not change on its own, and each check runs the user's `Match exec`.
+      this.floor.set(name, this.clock.monotonic() + REFUSED_FLOOR_MS)
+      throw new NetError(
+        'route_unreachable',
+        `The ssh configuration for ${name} uses ${directive}, which Mousse cannot run under its host key and password policy yet. Reach the host without a jump host or proxy command.`
+      )
+    }
+  }
+  private open(
+    name: string,
+    port: number,
+    signal: AbortSignal,
+    command: string,
+    args: string[],
+    env: NodeJS.ProcessEnv
+  ): Promise<Duplex> {
+    const child = spawn(command, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
       env
@@ -369,9 +459,7 @@ export class SshDialer {
           this.floor.set(name, this.clock.monotonic() + REFUSED_FLOOR_MS)
         return new NetError(
           'route_unreachable',
-          missing
-            ? 'The ssh command was not found. Install OpenSSH to reach this device.'
-            : describeSshFailure(tail, name, port)
+          missing ? MISSING_SSH : describeSshFailure(tail, name, port)
         )
       }
       const finish = (error?: NetError) => {

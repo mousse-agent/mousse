@@ -161,6 +161,8 @@ export class ProfileTransports {
     for (const configuration of checked) {
       try {
         const transport = await this.registry.configure(configuration)
+        // A failure belongs to the enabled configuration; switching it off clears it.
+        if (!configuration.enabled) this.errors.delete(configuration.id)
         const prior = this.observed.get(configuration.id)
         if (prior?.transport === transport) continue
         prior?.off()
