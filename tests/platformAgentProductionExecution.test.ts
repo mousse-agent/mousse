@@ -87,8 +87,11 @@ describe('native Agent Editor Try Run production host', () => {
       const published = await a.agents.publish({ profileId: f.alice.id, id: created.id, expectedDraftHash: created.draftHash })
       await a.agents.saveDraft({ profileId: f.alice.id, id: created.id, expectedDraftHash: created.draftHash,
         settings: settings('Pinned Agent', f.modelRef), systemPrompt: 'CHANGED_DRAFT' })
+      const runs = vi.spyOn(f.services.orchestrator, 'runAgentDefinition')
       const result = await a.agents.tryRun({ profileId: f.alice.id, id: created.id, revision: published.revision, prompt: 'write the fixture' })
       expect(result).toMatchObject({ ok: true, status: 'completed', summary: 'pinned answer' })
+      // The person who started the Try Run watches it: without this mark the run is unattended (#299).
+      expect(runs.mock.calls.map(([request]) => request.host?.attended)).toEqual([true])
       expect(result.trace.some((entry) => entry.message.includes(published.revision))).toBe(true)
       expect(result.trace.some((entry) => entry.message.includes('isolated scratch'))).toBe(true)
       const runRoot = join(f.services.getProfileHomeDir(), 'agent-runs', result.runId!)

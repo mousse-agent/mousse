@@ -560,8 +560,6 @@ export class MmsWorkflowAgents {
       workspaceRoots: [workspace.cwd],
       ...(workspace.kind === 'git-worktree' ? { dedicatedWorktreeRoot: workspace.cwd } : {}),
       approveToolRequest: (approval) => this.approve(approval),
-      // A workflow node runs unattended, whoever started the workflow (its source may be `cli`).
-      unattended: true,
       ...(this.browserRuntime ? { browserRuntime: this.browserRuntime } : {})
     }
     try {

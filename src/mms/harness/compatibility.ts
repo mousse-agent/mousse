@@ -92,3 +92,13 @@ export function hasContainmentEvidence(query: EvidenceQuery, table: readonly Con
     (!('cliVersion' in query) || record.cliVersion === query.cliVersion) &&
     (query.items ?? []).every((item) => record.items.includes(item)))
 }
+
+/**
+ * Whether this platform has shell-containment evidence: a record holding the contained shell (Pi
+ * RPC's item 10), for any version. Where it has none (Windows; macOS until a Mac run), an agent
+ * definition's shell command asks a person first on every runtime, the loop included, and an
+ * unattended definition runs none (`prepareTrustedToolDispatch`'s `uncontainedShell`).
+ */
+export function platformShellContained(platform: NodeJS.Platform = process.platform, table: readonly ContainmentEvidence[] = CONTAINMENT_EVIDENCE): boolean {
+  return hasContainmentEvidence({ driver: 'pi', kind: 'tools', platform, items: [10] }, table)
+}

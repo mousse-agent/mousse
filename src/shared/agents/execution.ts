@@ -118,9 +118,9 @@ export interface AgentRuntimePolicy {
   fallbacks: AgentRuntimeFallbackPolicy
   fallbackModels: ResolvedAgentDefinition['model']['fallbacks']
   /**
-   * Nobody watches this run as it goes (`definitionRunUnattended`: a schedule, a channel, a workflow
-   * node, a bridge dispatch). Where the runtime's shell is not contained, its shell commands are
-   * refused rather than asked about. Absent: a person started it.
+   * Nobody watches this run as it goes (`definitionRunUnattended`: every run whose host does not
+   * mark it attended, and every schedule, channel or workflow run). Where the platform's shell is not
+   * contained, its shell commands are refused rather than asked about. Absent: a person watches it.
    */
   unattended?: true
 }
@@ -162,10 +162,11 @@ export interface AgentRuntimeHostBindings {
    */
   approveToolRequest?: AgentRuntimeToolApprovalCallback
   /**
-   * The run was not started by a person who watches it, whatever its source says (a workflow node
-   * started from the CLI, a bridge dispatch from a peer): `AgentRuntimePolicy.unattended`.
+   * A person watches this run and can answer its questions where they are asked (Try Run in the
+   * editor, an agent chat's reply). Absent: the run is unattended (`AgentRuntimePolicy.unattended`),
+   * so a host that forgets the mark refuses the uncontained shell rather than waiting on nobody.
    */
-  unattended?: boolean
+  attended?: boolean
 }
 
 export interface AgentRuntimeAttachment {

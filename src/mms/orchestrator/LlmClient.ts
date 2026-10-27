@@ -33,9 +33,11 @@ import type { EffectiveAgentGrants } from '../../shared/agents/types'
 import {
   authorizeTrustedToolDispatch,
   canonicalizeBuiltinToolName,
+  isShellTool,
   isToolPermittedByPolicy,
   prepareTrustedToolDispatch
 } from '../agentDefinitions/runtimePolicy'
+import { platformShellContained } from '../harness/compatibility'
 
 import type { ChatMode } from '../../shared/types'
 
@@ -260,6 +262,12 @@ export interface TrustedAgentExecutionOptions {
   policy?: AgentRuntimePolicy
   approveToolRequest?: AgentRuntimeToolApprovalCallback
   effects?: AgentRuntimeEffectTracker
+  /**
+   * Whether this platform's shell is contained (default `platformShellContained()`). Where it is
+   * not, a definition's shell command asks a person first, bound to the exact command, and an
+   * unattended run runs none, on this loop as on Pi's agent.
+   */
+  shellContained?: boolean
 }
 
 
@@ -1560,13 +1568,15 @@ export class LlmClient {
 
       if (trustedAgent?.policy) {
         const isMcp = mcpTools.some((tool) => tool.providerName === toolCall.name)
+        const uncontainedShell = !isMcp && isShellTool(toolCall.name) && !(trustedAgent.shellContained ?? platformShellContained())
         const prepared = prepareTrustedToolDispatch({
           policy: trustedAgent.policy,
           grants: trustedAgent.grants,
           toolName: toolCall.name,
           args: (toolCall.arguments ?? {}) as Record<string, unknown>,
           isMcp,
-          projectPath
+          projectPath,
+          ...(uncontainedShell ? { uncontainedShell } : {})
         })
         const authorized = await authorizeTrustedToolDispatch({
           prepared,

@@ -17,7 +17,7 @@ import { getExecutionLeasePath, isExecutionLeaseHeld, readLeaseOwner, releaseExe
 import { isOwnerLive } from '../queue/processLiveness'
 import { canonicalJson, sha256Hex } from '../../shared/agents/hashes'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
-import { assertRuntimeSettingsSupported } from '../agentDefinitions/runtimePolicy'
+import { approvalTooLongReason, assertRuntimeSettingsSupported } from '../agentDefinitions/runtimePolicy'
 import type { DefinitionHostBindings } from '../agentDefinitions/definitionRuntime'
 import { ChatStore, type ChatRecord } from './ChatStore'
 import { ThreadActionService, type RunThreadActionOptions } from '../actions/ThreadActionService'
@@ -349,6 +349,8 @@ export class AgentChatService {
         // The chat holds the backing thread's lease for the whole response: each agent's turn borrows it.
         const host: AgentRuntimeHostWithBrowser & DefinitionHostBindings = { workspaceRoots: [workspaceRoot], lease: { kind: 'borrowed', handle: owned.lease },
           approveToolRequest: (request) => this.approve(chatId, owned, executionId, request, signal),
+          // The chat's person watches the reply and answers its questions in the chat.
+          attended: true,
           ...(this.browserRuntime ? { browserRuntime: this.browserRuntime } : {}) }
         assertRuntimeSettingsSupported(resolved, host)
         const history = this.history(record.conversation, agent, message.id)
@@ -451,7 +453,8 @@ export class AgentChatService {
     if (request.profileId !== this.profileId || request.threadId !== record.conversation.threadId || request.runId !== executionId || request.definitionId !== owned.agentId
       || request.definitionRevision !== record.conversation.participants.find((participant) => participant.id === owned.agentId)?.definitionRevision || signal.aborted) return { status: 'cancelled' as const }
     const json = canonicalJson(request.arguments)
-    if (Buffer.byteLength(json, 'utf8') > 6 * 1024 || sha256Hex(json) !== request.argumentDigest) return { status: 'denied' as const }
+    if (Buffer.byteLength(json, 'utf8') > 6 * 1024) return { status: 'denied' as const, reason: approvalTooLongReason(request) }
+    if (sha256Hex(json) !== request.argumentDigest) return { status: 'denied' as const }
     const approvalId = randomUUID(), path = join(this.store.root, `approval-${approvalId}.json`)
     const audit = { version: 1, profileId: this.profileId, chatId, approvalId, request, state: 'pending' }
     this.store.assertRoot(); atomicWriteJsonSync(path, audit)

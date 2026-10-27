@@ -238,3 +238,53 @@ describe('callInProcess authorities', () => {
     expect(toolLedger).not.toHaveBeenCalled()
   })
 })
+
+// #299: the same shell rule on Mousse's loop as on Pi's agent. Where the platform's shell is not
+// contained, a definition's shell command asks a person first, bound to the exact command, and an
+// unattended run runs none; definitions routed to the loop (browser, spend limits, the legacy
+// engine) are held to it too.
+describe('a trusted definition run’s shell on the loop where the shell is not contained', () => {
+  const root = process.cwd()
+  const shellPolicy = (overrides: Record<string, unknown> = {}) => ({
+    profileId: 'default', threadId: 'thread-1', runId: 'r1', definitionId: 'def-1', definitionRevision: 'rev-1', source: 'editor',
+    workspace: { mode: 'thread_worktree', canonicalRoots: [root] },
+    script: { enabled: true, allowFilesystem: true, allowNetwork: false, executionMode: 'workspace', interpreters: [] },
+    approval: { askUser: true, policy: 'inherit', unattendedBehavior: 'pause' },
+    memoryScope: 'off', includeCurrentThread: false, includeProjectInstructions: false, attachmentPolicy: 'none',
+    fallbacks: { enabled: false, retryOn: [], allowHigherCost: false, retryCount: 0, backoffMs: 0 }, fallbackModels: [],
+    ...overrides
+  })
+  const shellCall = () => toolUse({ name: 'bash', arguments: { command: 'echo loop-shell' } })
+
+  it('asks a person before the command, under grants that ask nothing, and runs nothing it was refused', async () => {
+    const h = harness([shellCall(), done()])
+    const asked: Array<{ toolName: string; arguments: Record<string, unknown> }> = []
+    const agent = { ...trusted({ grants: grants('bash'), policy: shellPolicy() }), shellContained: false,
+      approveToolRequest: async (request: { toolName: string; arguments: Record<string, unknown> }) => (asked.push(request), { status: 'denied' as const, reason: 'not this one' }) }
+    const result = await h.chat({ trustedAgent: agent as never, projectPath: root })
+    expect(asked.map((request) => [request.toolName, request.arguments])).toEqual([['bash', { command: 'echo loop-shell' }]])
+    expect(toolResults(result.nativeMessages).map((message) => [message.isError, text(message)])).toEqual([[true, 'not this one']])
+    expect(agent.effects.dispatched).toBe(false)
+  })
+
+  it('an unattended run is refused, and nobody is asked', async () => {
+    const h = harness([shellCall(), done()])
+    const asked: unknown[] = []
+    const agent = { ...trusted({ grants: grants('bash'), policy: shellPolicy({ source: 'workflow', unattended: true }) }), shellContained: false,
+      approveToolRequest: async (request: unknown) => (asked.push(request), { status: 'approved' as const }) }
+    const result = await h.chat({ trustedAgent: agent as never, projectPath: root })
+    expect(asked).toEqual([])
+    expect(text(toolResults(result.nativeMessages)[0]!)).toContain("Shell commands can't run in an unattended agent run")
+    expect(agent.effects.dispatched).toBe(false)
+  })
+
+  it('where the shell is contained, the run’s own rules decide: nobody is asked', async () => {
+    const h = harness([shellCall(), done()])
+    const asked: unknown[] = []
+    const agent = { ...trusted({ grants: grants('bash'), policy: shellPolicy({ source: 'workflow', unattended: true }) }), shellContained: true,
+      approveToolRequest: async (request: unknown) => (asked.push(request), { status: 'denied' as const }) }
+    const result = await h.chat({ trustedAgent: agent as never, projectPath: root })
+    expect(asked).toEqual([])
+    expect(text(toolResults(result.nativeMessages)[0]!)).not.toContain('Shell commands')
+  })
+})

@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { AgentDefinitionError } from '../../shared/agents/errors'
 import type { AgentExecutionResult, AgentRuntimeContextSnapshot, AgentRuntimeToolApprovalRequest } from '../../shared/agents/execution'
 import type { AgentDefinitionDomainServices, DefinitionTryRunResult } from '../agentDefinitions/registerMethods'
-import { assertRuntimeSettingsSupported } from '../agentDefinitions/runtimePolicy'
+import { approvalTooLongReason, assertRuntimeSettingsSupported } from '../agentDefinitions/runtimePolicy'
 import type { BrowserRuntimePort } from '../../shared/browser/runtime'
 import type { AgentRuntimeHostWithBrowser } from '../orchestrator/browser'
 import type { MmsProfileServices } from '../MmsProfileServices'
@@ -80,6 +80,8 @@ export class MmsAgentExecutionService {
     const host: AgentRuntimeHostWithBrowser = {
       workspaceRoots: [realpathSync(workspace)],
       approveToolRequest: (request: AgentRuntimeToolApprovalRequest) => this.approve(runRoot, request),
+      // The person who started the Try Run watches it, and answers its questions in the panel.
+      attended: true,
       ...(this.browserRuntime ? { browserRuntime: this.browserRuntime } : {})
     }
     assertRuntimeSettingsSupported(resolved, host)
@@ -138,11 +140,13 @@ export class MmsAgentExecutionService {
     const approvalId = randomUUID(), path = join(runRoot, `approval-${approvalId}.json`)
     this.assertRoot(); assertOwnedPath(this.root, path)
     const argumentsJson = canonicalJson(request.arguments)
-    if (Buffer.byteLength(argumentsJson, 'utf8') > APPROVAL_ARGUMENT_MAX_BYTES || sha256Hex(argumentsJson) !== request.argumentDigest) {
+    const tooLong = Buffer.byteLength(argumentsJson, 'utf8') > APPROVAL_ARGUMENT_MAX_BYTES
+    if (tooLong || sha256Hex(argumentsJson) !== request.argumentDigest) {
+      const reason = tooLong ? approvalTooLongReason(request) : 'Tool arguments were not safely reviewable in full.'
       atomicWriteJsonSync(path, { version: 1, approvalId, request: { canonicalToolName: request.canonicalToolName,
         argumentDigest: request.argumentDigest, threadId: request.threadId, runId: request.runId }, state: 'denied',
-        reason: 'Tool arguments were not safely reviewable in full.', decidedAt: new Date().toISOString() })
-      return { status: 'denied' as const }
+        reason, decidedAt: new Date().toISOString() })
+      return { status: 'denied' as const, reason }
     }
     atomicWriteJsonSync(path, { version: 1, approvalId, request, state: 'pending' })
     try {

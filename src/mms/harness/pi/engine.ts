@@ -30,6 +30,7 @@ import { PiBridge, type PiBridgeRegistration } from './bridge'
 import { DescendantTracker, OwnedGroups } from './descendants'
 import { WriterEpisode, type PiToolClass } from './episode'
 import { authorizeDefinitionCall, recordAuthorizedCall, withoutTransportFields } from '../../agentDefinitions/definitionGate'
+import { isShellTool } from '../../agentDefinitions/runtimePolicy'
 import { canonicalizeBuiltinToolName } from '../../agentDefinitions/runtimePolicy'
 import type { ToolCall } from '@earendil-works/pi-ai'
 import type { AgentExecutionLimit } from '../../../shared/agents/execution'
@@ -74,8 +75,6 @@ const BUILTIN_CLASSES: Record<string, PiToolClass> = {
   read: 'read', grep: 'read', find: 'read', ls: 'read',
   edit: 'mutation', write: 'mutation', bash: 'mutation', powershell: 'mutation'
 }
-/** Pi's built-ins that run a shell command. */
-const SHELL_BUILTINS: ReadonlySet<string> = new Set(['bash', 'powershell'])
 export const PI_READ_ONLY_BUILTINS: readonly string[] = ['read', 'grep', 'find', 'ls']
 export const PI_ALL_BUILTINS: readonly string[] = ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls']
 /** How long the writer waits for a dead process's tree and its sweep (the Windows sweep alone can take 20 s). */
@@ -1114,7 +1113,7 @@ export class PiRpcEngine implements ProviderAdapter {
     if (definition) {
       // Where Pi's shell is not contained (`weak`: a no-shell record), a shell command asks a person
       // first whatever the grants say, bound to these exact arguments, and an unattended run runs none.
-      const uncontainedShell = builtin && SHELL_BUILTINS.has(request.toolName) && this.capabilities.containment !== 'strong'
+      const uncontainedShell = builtin && isShellTool(request.toolName) && this.capabilities.containment !== 'strong'
       // The arguments checked (and approved) are the ones the tool runs with.
       const decided = await authorizeDefinitionCall(definition, { toolName: request.toolName, args: input, projectPath: thread.cwd, signal: turn.input.signal, ...(uncontainedShell ? { uncontainedShell } : {}) })
       if (!decided.allowed) return { allow: false, reason: decided.message }

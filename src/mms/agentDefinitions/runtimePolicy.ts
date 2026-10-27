@@ -60,17 +60,36 @@ export function isUnattendedSource(source: AgentExecutionSource): boolean {
 }
 
 /**
- * Whether nobody watches a definition run as it goes (`AgentRuntimePolicy.unattended`): a schedule,
- * a channel, a workflow node, or a run its host marks so (a workflow node started from the CLI, a
- * bridge dispatch). Wider than `isUnattendedSource`, which keeps its approval rules unchanged.
+ * Whether nobody watches a definition run as it goes (`AgentRuntimePolicy.unattended`). Fails
+ * closed: only a run whose host marks it attended (`AgentRuntimeHostBindings.attended`: Try Run, an
+ * agent chat's reply) is watched, and never one from a schedule, a channel or a workflow, whatever
+ * its host says. Every other run (a workflow node, a bridge dispatch, any host added later) is
+ * unattended. Wider than `isUnattendedSource`, whose approval rules do not change.
  */
-export function definitionRunUnattended(source: AgentExecutionSource, host?: Pick<AgentRuntimeHostBindings, 'unattended'>): boolean {
-  return isUnattendedSource(source) || source === 'workflow' || host?.unattended === true
+export function definitionRunUnattended(source: AgentExecutionSource, host?: Pick<AgentRuntimeHostBindings, 'attended'>): boolean {
+  return isUnattendedSource(source) || source === 'workflow' || host?.attended !== true
+}
+
+/** Built-in tools that run a shell command (any runtime's name for them). */
+const SHELL_TOOL_NAMES: ReadonlySet<string> = new Set(['bash', 'powershell'])
+
+/** Whether a built-in call runs a shell command (`bash`, its `run_command` alias, `powershell`). */
+export function isShellTool(toolName: string): boolean {
+  return SHELL_TOOL_NAMES.has(canonicalizeBuiltinToolName(toolName))
 }
 
 /** Why an unattended definition run's shell command is refused where the shell is not contained. */
 export const UNATTENDED_SHELL_REFUSAL =
   "Shell commands can't run in an unattended agent run (a schedule, a workflow or a dispatch) on this platform: Mousse cannot contain the shell here, so a person must approve each command, and nobody is watching this run."
+
+/**
+ * Why a host refused to ask about a call whose arguments are too long to show a person in full: the
+ * model reads it, so it splits the call instead of retrying the same one.
+ */
+export function approvalTooLongReason(request: Pick<AgentRuntimeToolApprovalRequest, 'classification'>): string {
+  const what = request.classification === 'script' ? 'command' : 'tool call'
+  return `This ${what} is too long to show for approval in full, so it was not run. Split it into shorter steps.`
+}
 
 /** Why a definition run's shell command is refused when nobody can be asked about it. */
 export const SHELL_APPROVAL_UNAVAILABLE =

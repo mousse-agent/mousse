@@ -54,9 +54,7 @@ export function mmsDispatchRuntime(options: {
         host: {
           workspaceRoots: [canonical],
           dedicatedWorktreeRoot: canonical,
-          approveToolRequest: options.approveToolRequest,
-          // A peer's dispatch: nobody here watches it.
-          unattended: true
+          approveToolRequest: options.approveToolRequest
         },
         context: {
           profileId: options.profileId,
