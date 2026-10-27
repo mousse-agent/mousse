@@ -72,6 +72,23 @@ describe('Reconciler', () => {
     expect(store.maxSeq('t')).toBe(seq)
   })
 
+  it('rules 2, 3 and 5 leave a paused run and its waiting timer alone, however long it waits', async () => {
+    const { store, outbox, engine, reconciler, advance } = setup()
+    const run = await runningRun(engine)
+    const queued = await engine.dispatch({ kind: 'send', threadId: 't', clientRequestId: 'req-queued', source: 'gui' })
+    if (queued.status !== 'accepted') throw new Error('send rejected')
+    const until = new Date(T0 + 3_600_000).toISOString()
+    engine.pauseRun({ runId: run.runId, pause: { reason: 'usage_limit', until, estimated: false, count: 1, autoResume: true }, resumeAt: until })
+
+    advance(30 * 60_000)
+    const report = reconciler.runOnce()
+
+    expect([report.expiredLeases, report.staleRuns, report.forcedInterrupts, report.queuedStarts, report.strandedCancelled]).toEqual([[], [], [], [], []])
+    expect(store.getRun(run.runId)).toMatchObject({ status: 'paused' })
+    expect(store.getRun(queued.runId)!.status).toBe('queued')
+    expect(outbox.listForRun(run.runId).map((effect) => [effect.kind, effect.status])).toEqual([['run.resume', 'pending']])
+  })
+
   it('a rule that throws does not skip the rest; the failure is an event naming the rule (L1)', async () => {
     const { store, outbox, engine, reconciler, advance } = setup()
     const run = await runningRun(engine)

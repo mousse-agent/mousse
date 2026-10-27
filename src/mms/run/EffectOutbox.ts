@@ -63,7 +63,7 @@ export class EffectOutbox {
     this.kindSpec = { ...EFFECT_KIND_SPEC, ...(options.kindSpec ?? {}) }
     this.now = options.now ?? (() => new Date(store.db.clock()).toISOString())
     this.allowReservedKinds = options.allowReservedKinds === true
-    const lanes = (['title', 'control'] as const)
+    const lanes = (['title', 'control', 'resume'] as const)
       .map((lane) => ({
         lane,
         kinds: (Object.keys(this.kindSpec) as EffectKind[])
@@ -77,9 +77,9 @@ export class EffectOutbox {
         .join('')}ELSE 'thread' END)`
     // A candidate is claimable only when nothing else in its lane is live: no running row with an
     // unexpired lease, and no earlier pending row, even one waiting out a backoff or a deferral
-    // (SPEC §12.3: a lane is FIFO). Each thread has three lanes: the thread lane (turns and
+    // (SPEC §12.3: a lane is FIFO). Each thread has four lanes: the thread lane (turns and
     // replay-safe work), the control lane (interrupt, steer and answers, which must reach a live
-    // turn) and the title lane.
+    // turn), the title lane and the resume lane (a `run.resume` timer waiting for a usage limit).
     this.claimSql = `UPDATE effects SET status = 'running', attempts = attempts + 1,
         lease_owner = :owner, updated_at = :now,
         lease_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', :now,

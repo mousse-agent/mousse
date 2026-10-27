@@ -158,6 +158,15 @@ export class Inbox {
       .map(toInbox)
   }
 
+  /**
+   * Gives back the rows the run `runId` delivered (`listDeliveredByRun`): delivered -> pending, not
+   * counted as a delivery attempt. The paused turn's rows go back before the continue turn carries
+   * them. Joins the caller's transaction. Returns the ids that moved.
+   */
+  releaseRunDeliveries(runId: string): string[] {
+    return this.db.transaction(() => this.release(this.listDeliveredByRun(runId).map((row) => row.inboxId)))
+  }
+
   /** Delivered rows that a queue item carries (`queue:<itemId>`), oldest first. */
   listDeliveredByQueue(): InboxRecord[] {
     return this.db

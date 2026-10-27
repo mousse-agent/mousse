@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events'
 import type { ExecutionBinding } from '../../shared/harness/types'
 import { DaemonEpoch } from './DaemonEpoch'
 import { CommandRejection, fail, reject, RunStoreError } from './db/RunStoreError'
-import { isFencedSource, isFollowUpSource } from './delegation/sources'
+import { isFencedSource, isFollowUpSource, isResumeSource } from './delegation/sources'
 import { cancelAcknowledgedWakes, recoverWakesOnBoot } from './delegation/wake'
 import { Delegations } from './Delegations'
 import { EffectOutbox } from './EffectOutbox'
@@ -25,11 +25,15 @@ import {
   type DelegationRecord,
   type DelegationWake,
   type DelegationWorkspace,
+  type EffectRecord,
   type ModeCeiling,
   type ProviderRef,
   type ReceiptRecord,
   type RunOutcome,
+  type RunPause,
+  type RunPauseEnd,
   type RunRecord,
+  type RunResumePayload,
   type RunStatus,
   type ThreadEvent,
   type TransferRecord
@@ -74,7 +78,14 @@ export interface SendDelegation {
 }
 
 export type CommandResult =
-  | { status: 'accepted'; runId: string; sequence: number; replayed: boolean }
+  | {
+      status: 'accepted'
+      runId: string
+      sequence: number
+      replayed: boolean
+      /** A send that ended the thread's pause in its transaction: the paused run, and the resume item it had (SPEC §5). */
+      endedPause?: { runId: string; resumeItemId?: string }
+    }
   | { status: 'rejected'; reason: string; sequence: number; replayed?: boolean }
   | {
       status: 'ignored'
@@ -119,7 +130,7 @@ export interface StopResult {
   generations: Record<string, number>
   /** Runs that were active: `stopRequested` is set and a `turn.interrupt` is queued; the caller aborts them locally. */
   activeRuns: Array<{ threadId: string; runId: string }>
-  /** Queued runs that ended `cancelled`. */
+  /** Queued runs that ended `cancelled`, and paused runs whose pause the Stop ended. */
   cancelledRuns: Array<{ threadId: string; runId: string }>
   /** Delegations that were `running` and are `cancelled` now, deepest first. */
   delegations: string[]
@@ -373,6 +384,14 @@ export class RunEngine extends EventEmitter {
       const active = this.store.getActiveRun(run.threadId)
       if (active && active.runId !== run.runId)
         fail('conflict', `Thread ${run.threadId} already has active run ${active.runId}.`)
+      // A person's message that was queued before the pause ends it by starting. Work started on the
+      // thread's behalf never runs beside a pause: refused here, so its executor defers and the
+      // pause and its timer stay intact.
+      const paused = this.store.getPausedRun(run.threadId)
+      if (paused) {
+        if (isFencedSource(run.source)) fail('conflict', `Thread ${run.threadId} is paused by run ${paused.runId}.`)
+        this.endPause(paused.runId, 'user_message')
+      }
       const attemptId =
         run.activeAttemptId ??
         this.store.createAttempt({ runId: run.runId, reason: 'initial' }).attemptId
@@ -415,8 +434,10 @@ export class RunEngine extends EventEmitter {
   }
 
   /**
-   * Any non-terminal status -> terminal. The active attempt mirrors the run status. `resultText`
-   * is the run's final assistant text; a delegated child run publishes it (SPEC §14.1).
+   * Any non-terminal status except `paused` -> terminal. The active attempt mirrors the run status.
+   * `resultText` is the run's final assistant text; a delegated child run publishes it (SPEC §14.1).
+   * A pause ends only through `endPause`, which also cancels its timer: ending a paused run here
+   * would leave a `run.resume` pending that holds up every later resume on the thread.
    */
   markTerminal(
     runId: string,
@@ -424,9 +445,142 @@ export class RunEngine extends EventEmitter {
     outcome?: RunOutcome,
     options: { resultText?: string; notice?: TerminalNotice } = {}
   ): RunRecord {
-    return this.mark(runId, false, (run, expectedEpoch) =>
-      this.writeTerminal(run, expectedEpoch, status, outcome, options.resultText, options.notice)
-    )
+    return this.mark(runId, false, (run, expectedEpoch) => {
+      if (run.status === 'paused') fail('conflict', `Run ${run.runId} is paused; end the pause with endPause.`)
+      return this.writeTerminal(run, expectedEpoch, status, outcome, options.resultText, options.notice)
+    })
+  }
+
+  /**
+   * running|finalizing -> paused (SPEC §5): the turn hit a usage limit and waits for it to reset. The
+   * run stays non-terminal (its subagent work stays busy, its delegation `running`) but is no longer
+   * active, so the thread accepts a person's message. The attempt is `interrupted`. With `resumeAt`
+   * the `run.resume` effect that continues the run is enqueued in the same transaction. A run being
+   * stopped is refused (`bad_request`): the Stop wins the race.
+   */
+  pauseRun(input: { runId: string; pause: RunPause; resumeAt?: string }): RunRecord {
+    return this.mark(input.runId, false, (run, expectedEpoch) => {
+      requireStatus(run, ['running', 'finalizing'])
+      if (run.outcome?.stopRequested) fail('bad_request', `Run ${run.runId} is being stopped; it cannot be paused.`)
+      const other = this.store.getPausedRun(run.threadId)
+      if (other) fail('conflict', `Thread ${run.threadId} is already paused by run ${other.runId}.`)
+      const next = this.store.casRunStatus({
+        runId: run.runId,
+        expectedEpoch,
+        status: 'paused',
+        patch: { outcome: { ...(run.outcome ?? {}), pause: input.pause } }
+      })
+      const attempt = next.activeAttemptId ? this.store.getAttempt(next.activeAttemptId) : null
+      if (attempt && (attempt.status === 'pending' || attempt.status === 'running'))
+        this.store.setAttemptStatus({ attemptId: attempt.attemptId, status: 'interrupted', completedAt: this.now() })
+      if (input.resumeAt) {
+        this.cancelDeadResumeTimers(run.threadId, run.runId)
+        this.enqueueResume(next, input.pause.until, input.resumeAt)
+      }
+      return next
+    })
+  }
+
+  /**
+   * A pending `run.resume` of a run that is no longer paused can only be left behind by a bug; the
+   * resume lane is first-in, first-out, so it would hold up this thread's real timers. Cancelled
+   * before a new one is armed. Joins the caller's transaction.
+   */
+  private cancelDeadResumeTimers(threadId: string, exceptRunId: string): void {
+    const now = this.now()
+    for (const effect of this.outbox.listForThread(threadId, { status: 'pending' })) {
+      if (effect.kind !== 'run.resume' || effect.runId === exceptRunId) continue
+      const owner = effect.runId ? this.store.getRun(effect.runId) : null
+      if (!owner || owner.status !== 'paused') this.outbox.cancel(effect.effectId, now, 'run_not_paused')
+    }
+  }
+
+  /**
+   * Resume now (or the timer's own request): continue the paused run. Only a run that is `paused`
+   * (a `stale` pause still is); anything else is refused `conflict`, so a press on a banner that has
+   * not caught up with a hand-over or Cancel gets feedback. The thread's pending `run.resume` timer is
+   * replaced by one available now with `manual` set; a manual one already pending or running is left
+   * alone and returned. An automatic timer that is running does not absorb the press: it acts on its
+   * own payload, so it may rule the pause stale and end with nothing live. A manual timer is queued
+   * behind it (the resume lane is first-in, first-out); if the running one hands the run over, the
+   * manual one finds the pause ended and does nothing. Returns the effect.
+   */
+  requestResume(runId: string, manual: boolean): EffectRecord {
+    return this.store.db.transaction(() => {
+      const run = this.store.getRun(runId)
+      if (!run || run.status !== 'paused') reject('conflict', `Run ${runId} is not paused.`)
+      const effects = this.outbox.listForRun(runId).filter((effect) => effect.kind === 'run.resume')
+      const running = effects.find((effect) => effect.status === 'running')
+      if (running && (!manual || (running.payload as RunResumePayload).manual === true)) return running
+      const pending = effects.filter((effect) => effect.status === 'pending')
+      const manualPending = pending.find((effect) => (effect.payload as RunResumePayload).manual === true)
+      if (manualPending) return manualPending
+      const now = this.now()
+      for (const effect of pending) this.outbox.cancel(effect.effectId, now, 'resume_requested')
+      return this.enqueueResume(run, run.outcome?.pause?.until ?? now, now, manual)
+    })
+  }
+
+  /**
+   * Ends the pause of a `paused` run (SPEC §5). `resume` and `resume_now` hand the run over to its
+   * continuation: `interrupted` by `provider`. `user_message`, `cancel`, `stop` and `deleted` end it
+   * `cancelled` by `user`. `stale` is not an end: the reset passed long ago (the executor's 24 h rule,
+   * SPEC §5), so the automatic timer is dropped and the run stays `paused` with `autoResume` off and
+   * `pause.stale` set; only Resume now continues it. A pending `run.resume` is cancelled (for `stale`
+   * only automatic ones: a Resume now already queued stays); a running one never is (its executor
+   * settles itself and checks the run again). The terminal write publishes a subagent's result as for
+   * any run. Joins the caller's transaction.
+   */
+  endPause(runId: string, endedBy: RunPauseEnd | 'stale'): RunRecord {
+    return this.store.db.transaction(() => {
+      const run = this.store.getRun(runId)
+      if (!run || run.status !== 'paused' || !run.outcome?.pause) reject('conflict', `Run ${runId} is not paused.`)
+      const now = this.now()
+      for (const effect of this.outbox.listForRun(runId)) {
+        if (effect.kind !== 'run.resume' || effect.status !== 'pending') continue
+        if (endedBy === 'stale' && (effect.payload as RunResumePayload).manual === true) continue
+        this.outbox.cancel(effect.effectId, now, endedBy)
+      }
+      if (endedBy === 'stale') return this.updatePause(runId, { autoResume: false, stale: true })
+      const pause: RunPause = { ...run.outcome.pause, endedBy }
+      const handedOver = endedBy === 'resume' || endedBy === 'resume_now'
+      const next = this.writeTerminal(
+        run,
+        run.epoch,
+        handedOver ? 'interrupted' : 'cancelled',
+        handedOver
+          ? { interruptedBy: 'provider', pause }
+          : { interruptedBy: 'user', error: 'Paused by a usage limit; cancelled.', pause }
+      )
+      this.epochs.delete(runId)
+      return next
+    })
+  }
+
+  /** Changes fields of a paused run's `pause` (the resume item the executor wrote, `autoResume` after a stale timer). */
+  updatePause(runId: string, patch: Partial<RunPause>): RunRecord {
+    return this.store.db.transaction(() => {
+      const run = this.store.getRun(runId)
+      if (!run || run.status !== 'paused' || !run.outcome?.pause) reject('conflict', `Run ${runId} is not paused.`)
+      const next = this.store.casRunOutcome({
+        runId,
+        expectedEpoch: run.epoch,
+        outcomePatch: { pause: { ...run.outcome.pause, ...patch } }
+      })
+      if (this.epochs.has(runId)) this.epochs.set(runId, next.epoch)
+      return next
+    })
+  }
+
+  private enqueueResume(run: RunRecord, until: string, availableAt: string, manual = false): EffectRecord {
+    const payload: RunResumePayload = {
+      kind: 'resume',
+      runId: run.runId,
+      threadId: run.threadId,
+      until,
+      ...(manual ? { manual: true as const } : {})
+    }
+    return this.outbox.enqueue({ threadId: run.threadId, runId: run.runId, kind: 'run.resume', payload, availableAt })
   }
 
   /**
@@ -770,6 +924,12 @@ export class RunEngine extends EventEmitter {
       const activeRuns: StopResult['activeRuns'] = []
       const cancelledRuns: StopResult['cancelledRuns'] = []
       for (const run of this.store.listNonTerminalRuns().filter((entry) => depths.has(entry.threadId))) {
+        // A paused run has no turn to abort: the Stop ends the pause, and with it the timer.
+        if (run.status === 'paused') {
+          this.endPause(run.runId, 'stop')
+          cancelledRuns.push({ threadId: run.threadId, runId: run.runId })
+          continue
+        }
         if (run.status === 'queued') {
           if (this.survivesStop(run, request.clearQueue === true)) continue
           if (this.cancelQueuedRunInTransaction(run, request.reason, { interruptedBy: 'user' }, claimed))
@@ -847,7 +1007,7 @@ export class RunEngine extends EventEmitter {
     const run = this.store.getRun(runId)
     const ignored = { status: 'ignored' as const, replayed: false, threadId, threads: [threadId], generations: {}, activeRuns: [], cancelledRuns: [], delegations: [], acknowledgedRows: [] }
     if (!run || run.threadId !== threadId) return { ...ignored, reason: 'run_not_found' }
-    if (ACTIVE_STATUSES.has(run.status)) return null
+    if (ACTIVE_STATUSES.has(run.status) || run.status === 'paused') return null
     return {
       ...ignored,
       runId,
@@ -1070,7 +1230,7 @@ export class RunEngine extends EventEmitter {
     if (!run || TERMINAL_RUN_STATUSES.has(run.status)) return
     if (run.status === 'queued' && this.cancelQueuedRun(run, 'delegation_cancelled', { interruptedBy: 'user' })) return
     const current = this.store.getRun(run.runId)
-    if (!current || !ACTIVE_STATUSES.has(current.status)) return
+    if (!current || !(ACTIVE_STATUSES.has(current.status) || current.status === 'paused')) return
     const result = await this.dispatch({
       kind: 'stop',
       threadId: run.threadId,
@@ -1401,16 +1561,27 @@ export class RunEngine extends EventEmitter {
   private commitSend(command: Extract<RunCommand, { kind: 'send' }>, tracked?: SendDelegation): CommandResult {
     const { store } = this
     return store.db.transaction((): CommandResult => {
+      const paused = store.getPausedRun(command.threadId)
+      const resuming = isResumeSource(command.source)
+      // Not stored, like every refusal below: the sender decides what to do next.
+      const refuse = (reason: string): CommandResult => ({ status: 'rejected', reason, sequence: store.maxSeq(command.threadId) })
+      // Work started on the thread's behalf never runs beside a pause; only the resume itself does, and
+      // only for the pause it was queued for (it may have ended meanwhile).
+      if (paused && isFencedSource(command.source) && !resuming) return refuse('thread_paused')
+      if (resuming && (!paused || command.continuationOfRunId !== paused.runId)) return refuse('pause_ended')
       const refusal = this.continuationRefusal(command)
       // Not stored: the same `continue:<runId>` request succeeds once the user acknowledges.
-      if (refusal) return { status: 'rejected', reason: refusal, sequence: store.maxSeq(command.threadId) }
+      if (refusal) return refuse(refusal)
       if (command.delegation) this.checkFollowUp(command.threadId, command.delegation)
+      const continuationOf = command.continuationOfRunId
       const run = store.createRun({
         threadId: command.threadId,
         source: command.source,
         clientRequestId: command.clientRequestId,
         userMessageId: command.userMessageId,
-        ...(command.continuationOfRunId ? { outcome: { continuationOf: command.continuationOfRunId } } : {})
+        ...(continuationOf
+          ? { outcome: { continuationOf, ...(resuming ? { resumedFromPause: command.source === 'resume' ? 'auto' as const : 'user' as const } : {}) } }
+          : {})
       })
       if (tracked)
         this.delegations.create({
@@ -1426,9 +1597,15 @@ export class RunEngine extends EventEmitter {
           workspace: tracked.workspace,
           role: tracked.role
         })
+      // The replacement exists before the pause ends, so a subagent's task stays `running` across the hand-over.
+      let endedPause: { runId: string; resumeItemId?: string } | undefined
+      if (paused) {
+        endedPause = { runId: paused.runId, ...(paused.outcome?.pause?.resumeItemId ? { resumeItemId: paused.outcome.pause.resumeItemId } : {}) }
+        this.endPause(paused.runId, !resuming ? 'user_message' : command.source === 'resume' ? 'resume' : 'resume_now')
+      }
       const sequence = store.maxSeq(command.threadId)
-      this.putReceipt(command, 'accepted', { runId: run.runId, sequence })
-      return { status: 'accepted', runId: run.runId, sequence, replayed: false }
+      this.putReceipt(command, 'accepted', { runId: run.runId, sequence, ...(endedPause ? { endedPause } : {}) })
+      return { status: 'accepted', runId: run.runId, sequence, replayed: false, ...(endedPause ? { endedPause } : {}) }
     })
   }
 
@@ -1454,6 +1631,8 @@ export class RunEngine extends EventEmitter {
     if (!command.continuationOfRunId) return null
     const source = this.store.getRun(command.continuationOfRunId)
     if (!source || source.threadId !== command.threadId) return 'continuation_not_found'
+    // The continue turn of a pause is the one send that names a run that has not ended yet.
+    if (source.status === 'paused' && isResumeSource(command.source)) return null
     if (!TERMINAL_RUN_STATUSES.has(source.status)) return 'continuation_source_active'
     if (source.status === 'uncertain' && !command.acknowledgeUncertain) return 'uncertain_not_acknowledged'
     return null
@@ -1465,6 +1644,13 @@ export class RunEngine extends EventEmitter {
     return store.db.transaction((): CommandResult => {
       const run = store.getRun(runId)
       const activeRunId = store.getActiveRun(threadId)?.runId ?? null
+      // A Stop that names the paused run ends the pause: there is no turn to signal and nothing to mark.
+      if (kind === 'stop' && run?.threadId === threadId && run.status === 'paused') {
+        this.endPause(runId, 'stop')
+        const sequence = store.maxSeq(threadId)
+        this.putReceipt(command, 'accepted', { runId, sequence })
+        return { status: 'accepted', runId, sequence, replayed: false }
+      }
       if (!run || run.threadId !== threadId || activeRunId !== runId) {
         const reason = 'run_not_active'
         store.appendEvent({
@@ -1603,10 +1789,17 @@ function replay(receipt: ReceiptRecord): CommandResult {
     sequence?: number
     reason?: string
     activeRunId?: string | null
+    endedPause?: { runId: string; resumeItemId?: string }
   }
   const sequence = stored.sequence ?? 0
   if (receipt.status === 'accepted')
-    return { status: 'accepted', runId: stored.runId ?? '', sequence, replayed: true }
+    return {
+      status: 'accepted',
+      runId: stored.runId ?? '',
+      sequence,
+      replayed: true,
+      ...(stored.endedPause ? { endedPause: stored.endedPause } : {})
+    }
   if (receipt.status === 'rejected')
     return { status: 'rejected', reason: stored.reason ?? 'rejected', sequence, replayed: true }
   return {

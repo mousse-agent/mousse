@@ -7,6 +7,7 @@ import { usageLimitError } from '../../src/mms/orchestrator/providerErrors'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { CodexAppServerExitedError } from '../../src/mms/providers/codex/CodexAppServerClient'
 import { CodexTurnFailure } from '../../src/mms/providers/codex/CodexProviderService'
+import { decideUsageLimit } from '../../src/mms/run/pausePolicy'
 import {
   CodexAdapter,
   createCodexProviderService,
@@ -701,6 +702,55 @@ describe('CodexAdapter', () => {
     const error = await new CodexAdapter(() => client, { managed: true }).startTurn(input(), recordingSink(), control(), withHistory).catch((caught: unknown) => caught)
     expect(error).toMatchObject({ code: 'rate_limited' })
     expect(committed).toEqual(['history up to the limit'])
+  })
+
+  describe('a usage limit reaches the run pause the same way on a managed and on a plain Codex', () => {
+    const resetsAt = new Date(Date.now() + 3_600_000).toISOString()
+    const failing = (failure: Error) =>
+      ({ configured: () => true, chat: async () => { throw failure } }) as unknown as CodexProviderService
+    const turn = (client: CodexProviderService, managed: boolean) =>
+      new CodexAdapter(() => client, managed ? { managed: true } : {}).startTurn(input(), recordingSink(), control(), host()).catch((caught: unknown) => caught)
+    const decide = (error: unknown) =>
+      decideUsageLimit({ error, run: { outcome: {} }, lookup: () => null, cap: 3, autoResume: true, nowMs: Date.now() })
+
+    it('both pause with the provider\'s reset time and window', async () => {
+      const limit = usageLimitError({ provider: 'codex', resetsAt, estimated: false, limitKind: 'five_hour' })
+      const plain = await turn(failing(limit), false)
+      const managed = await turn(failing(usageLimitError({ provider: 'codex', resetsAt, estimated: false, limitKind: 'five_hour' }, new CodexTurnFailure('Usage limit reached', { message: 'Usage limit reached', codexErrorInfo: 'usageLimitExceeded' }))), true)
+
+      // A plain run throws the typed limit; a managed one throws the gateway's code, with the limit as its cause.
+      expect(plain).toMatchObject({ code: 'provider_usage_limit' })
+      expect(managed).toMatchObject({ code: 'rate_limited' })
+      const expected = { action: 'pause', pause: { reason: 'usage_limit', until: resetsAt, estimated: false, provider: 'codex', limitKind: 'five_hour', count: 1, autoResume: true } }
+      expect(decide(plain)).toEqual(expected)
+      expect(decide(managed)).toEqual(expected)
+    })
+
+    it('both pause with an estimate when the provider gave no time', async () => {
+      const managed = await turn(failing(usageLimitError({ provider: 'codex', estimated: true }, new CodexTurnFailure('Usage limit reached', { message: 'Usage limit reached', codexErrorInfo: 'usageLimitExceeded' }))), true)
+      const plain = await turn(failing(usageLimitError({ provider: 'codex', estimated: true })), false)
+      for (const error of [plain, managed]) expect(decide(error)).toMatchObject({ action: 'pause', pause: { estimated: true, provider: 'codex' } })
+    })
+
+    it.each([
+      ['rateLimitExceeded', { message: 'Rate limit reached', codexErrorInfo: 'rateLimitExceeded' }],
+      ['a limit read only from the message of an older server', { message: 'You have hit your usage limit', codexErrorInfo: null }],
+      ['a 429 after Codex gave up retrying', { message: 'Too many requests', codexErrorInfo: { responseTooManyFailedAttempts: { httpStatusCode: 429 } } }]
+    ])('%s pauses on a managed Codex as on a plain one', async (_name, info) => {
+      const cause = () => new CodexTurnFailure(info.message, info as never)
+      const managed = await turn(failing(usageLimitError({ provider: 'codex', resetsAt, estimated: false }, cause())), true)
+      const plain = await turn(failing(usageLimitError({ provider: 'codex', resetsAt, estimated: false }, cause())), false)
+      expect(managed).toMatchObject({ code: 'rate_limited' })
+      expect(decide(managed)).toEqual(decide(plain))
+      expect(decide(managed)).toMatchObject({ action: 'pause', pause: { until: resetsAt, estimated: false } })
+    })
+
+    it('a managed Codex failure that is not a usage limit does not pause', async () => {
+      const overloaded = new CodexTurnFailure('Overloaded', { message: 'Overloaded', codexErrorInfo: 'serverOverloaded' })
+      const managed = await turn(failing(overloaded), true)
+      expect(managed).toMatchObject({ code: 'service_unavailable' })
+      expect(decide(managed)).toBeUndefined()
+    })
   })
 
   it('interrupts a turn that was stopped before turn/start answered', async () => {

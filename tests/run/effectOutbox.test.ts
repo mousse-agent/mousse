@@ -176,6 +176,33 @@ describe('EffectOutbox', () => {
     expect(outbox.claimNext('o', at(4))!.effectId).toBe(title2.effectId)
   })
 
+  it('keeps a waiting run.resume in a lane of its own: it never blocks the thread lane, and the thread lane never blocks it', () => {
+    const { store, outbox } = open()
+    const run = store.createRun({ threadId: 't', source: 'gui' })
+    const timer = outbox.enqueue({ threadId: 't', runId: run.runId, kind: 'run.resume', payload: { kind: 'resume' }, availableAt: at(3_600_000) })
+    const turn = outbox.enqueue({ threadId: 't', kind: 'turn.start' })
+    // The timer is pending and earlier than the turn, but a pending row in another lane blocks nothing.
+    expect(outbox.claimNext('o', T0)!.effectId).toBe(turn.effectId)
+    expect(outbox.claimNext('o', T0)).toBeNull()
+    // It is claimable at its time even while a turn holds the thread lane.
+    expect(outbox.claimNext('o', at(3_600_000))!.effectId).toBe(timer.effectId)
+    expect(outbox.get(turn.effectId)!.status).toBe('running')
+  })
+
+  it('gives run.resume a deterministic id per run, replay-safe, and an own lane class', () => {
+    const { store, outbox } = open()
+    const run = store.createRun({ threadId: 't', source: 'gui' })
+    const first = outbox.enqueue({ threadId: 't', runId: run.runId, kind: 'run.resume', availableAt: at(1_000) })
+    const second = outbox.enqueue({ threadId: 't', runId: run.runId, kind: 'run.resume', availableAt: at(2_000) })
+    expect([first.effectId, second.effectId]).toEqual([`effect:${run.runId}:run.resume:1`, `effect:${run.runId}:run.resume:2`])
+    expect(first).toMatchObject({ class: 'replay_safe', timeoutMs: 60_000, availableAt: at(1_000), status: 'pending' })
+    // Only the replay-safe worker fibres claim it.
+    expect(outbox.claimNext('o', at(5_000), { lanes: ['turn', 'control'] })).toBeNull()
+    expect(outbox.claimNext('o', at(5_000), { lanes: ['replaySafe'] })!.effectId).toBe(first.effectId)
+    // A fixed id replays: the effect is left as it is.
+    expect(outbox.enqueue({ effectId: first.effectId, threadId: 't', runId: run.runId, kind: 'run.resume' }).status).toBe('running')
+  })
+
   it('runs interrupt, steer and answers in a control lane beside a running turn', () => {
     const { outbox } = open()
     const turn = outbox.enqueue({ threadId: 't', kind: 'turn.start' })

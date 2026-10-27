@@ -237,6 +237,40 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     expect(second.store.listEvents('t').filter((event) => event.type === 'restart.note')).toEqual([])
   })
 
+  it('leaves a paused run and its pending run.resume alone, and re-queues a running one (usage-limit pause)', async () => {
+    const pause = { reason: 'usage_limit', until: '2026-10-12T00:30:00.000Z', estimated: false, count: 1, autoResume: true } as const
+    const first = daemon(10)
+    const waiting = await running(first.engine, 't', 'req-1')
+    first.engine.pauseRun({ runId: waiting.runId, pause, resumeAt: pause.until })
+    const due = await running(first.engine, 'u', 'req-2')
+    first.engine.pauseRun({ runId: due.runId, pause: { ...pause, until: '2026-10-12T00:00:00.000Z' }, resumeAt: '2026-10-12T00:00:00.000Z' })
+    // The second timer is due and an executor holds it when the daemon crashes; the first is still waiting.
+    const claimed = first.engine.outbox.claimNext(first.engine.leaseOwner, '2026-10-12T00:10:00.000Z')
+    expect(claimed).toMatchObject({ kind: 'run.resume', runId: due.runId, status: 'running' })
+    const waitingTimer = first.engine.outbox.listForRun(waiting.runId).find((effect) => effect.kind === 'run.resume')!
+    // No shutdown(): the daemon crashed.
+
+    const second = daemon(20)
+
+    expect(second.boot).toEqual({ interrupted: [], uncertain: [], epoch: 2, orphanedChildren: [], recoveredWakes: [], strandedQueued: [] })
+    for (const run of [waiting, due]) {
+      expect(second.store.getRun(run.runId)).toMatchObject({ status: 'paused', epoch: second.store.getRun(run.runId)!.epoch })
+      expect(second.store.getAttempt(second.store.getRun(run.runId)!.activeAttemptId!)!.status).toBe('interrupted')
+      expect(second.store.getPausedRun(run.threadId)!.runId).toBe(run.runId)
+      expect(second.store.getActiveRun(run.threadId)).toBeNull()
+      expect(second.store.listEvents(run.threadId).filter((event) => event.type === 'restart.note')).toEqual([])
+    }
+    expect(second.engine.outbox.get(waitingTimer.effectId)).toMatchObject({ status: 'pending', availableAt: pause.until })
+    expect(second.engine.outbox.get(claimed!.effectId)).toMatchObject({ status: 'pending', leaseOwner: null })
+
+    // A clean shutdown of the next daemon leaves them paused as well.
+    second.engine.shutdown()
+    const third = daemon(30)
+    expect(third.boot.interrupted).toEqual([])
+    expect(third.store.getPausedRun('t')!.runId).toBe(waiting.runId)
+    expect(third.engine.outbox.get(waitingTimer.effectId)!.status).toBe('pending')
+  })
+
   it('touches the run heartbeat without bumping the epoch or writing an event', async () => {
 
     const { engine, store } = daemon(10)

@@ -87,6 +87,33 @@ export function cancelAcknowledgedWakes(
   return cancelled
 }
 
+/**
+ * A paused thread takes no wake: every wake run that has not been claimed yet is cancelled with its
+ * `turn.start`, and the rows it delivered are pending again, so the continue turn can carry them.
+ * Joins the caller's transaction. Returns the cancelled wake runs.
+ */
+export function cancelQueuedWakes(store: RunStore, outbox: EffectOutbox, now: string, threadId: string): string[] {
+  const inbox = new Inbox(store)
+  const cancelled: string[] = []
+  store.db.transaction(() => {
+    for (const effect of pendingWakeEffects(store, threadId)) {
+      const payload = effect.payload as WakeTurnPayload
+      outbox.cancel(effect.effectId, now, 'thread_paused')
+      const run = store.getRun(payload.runId)
+      if (run?.status === 'queued') writeTerminalRun(store, run, run.epoch, 'cancelled', undefined, now)
+      inbox.release(payload.inboxIds, effect.effectId)
+      store.appendEvent({
+        threadId: effect.threadId,
+        runId: payload.runId,
+        type: 'reconcile.wake_cancelled',
+        payload: { effectId: effect.effectId, runId: payload.runId, inboxIds: payload.inboxIds, reason: 'thread_paused' }
+      })
+      cancelled.push(payload.runId)
+    }
+  })
+  return cancelled
+}
+
 /** The thread has a wake run waiting to start (its `turn.start` pending, deferred or claimed). */
 function hasQueuedWake(store: RunStore, threadId: string): boolean {
   return Boolean(
@@ -201,6 +228,8 @@ export function wakeThreads(
       store.db.transaction(() => {
         const rows = inbox.listPending(threadId)
         if (rows.length === 0) return
+        // A paused thread is busy for wakes: the rows wait, and the resume item carries them (SPEC §14.3).
+        if (store.getPausedRun(threadId)) return
         const active = store.getActiveRun(threadId)
         if (!active) {
           if (hasQueuedWake(store, threadId)) return

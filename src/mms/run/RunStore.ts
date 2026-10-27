@@ -327,6 +327,18 @@ export class RunStore {
     return rows.length ? toRun(rows[0]) : null
   }
 
+  /**
+   * The thread's `paused` run (SPEC §5), or null. A paused run is not active: the thread accepts a
+   * person's message. At most one exists; more than one is an invariant violation and raises `conflict`.
+   */
+  getPausedRun(threadId: string): RunRecord | null {
+    const rows = this.db
+      .statement(`SELECT * FROM runs WHERE thread_id = ? AND status = 'paused' ORDER BY ordinal LIMIT 2`)
+      .all(threadId)
+    if (rows.length > 1) fail('conflict', `Thread ${threadId} has more than one paused run.`)
+    return rows.length ? toRun(rows[0]) : null
+  }
+
   /** Runs waiting to start on this thread, oldest first. */
   listQueuedRuns(threadId: string): RunRecord[] {
     return this.db

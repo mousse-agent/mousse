@@ -18,6 +18,12 @@ export interface ProfileDatabaseOptions {
 export interface Migration {
   version: number
   sql: string
+  /**
+   * The migration rebuilds a table other tables refer to: it runs with foreign keys off, every
+   * reference is checked before the commit, and foreign keys are on again afterwards. Refused inside
+   * a transaction (SQLite ignores `PRAGMA foreign_keys` there).
+   */
+  foreignKeys?: 'off'
 }
 
 // SQLite primary result codes (node:sqlite reports extended codes in `errcode`).
@@ -183,17 +189,44 @@ export class ProfileDatabase {
       )
     for (const migration of migrations) {
       if (migration.version <= current) continue
-      this.transaction(() => {
-        this.database.exec(migration.sql)
-        this.database.exec(
-          'CREATE TABLE IF NOT EXISTS run_schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL) STRICT'
+      if (migration.foreignKeys === 'off') this.applyWithForeignKeysOff(migration)
+      else this.transaction(() => this.applyMigration(migration))
+    }
+  }
+
+  private applyMigration(migration: Migration): void {
+    this.database.exec(migration.sql)
+    if (migration.foreignKeys === 'off') {
+      const dangling = this.database.prepare('PRAGMA foreign_key_check').all()
+      if (dangling.length)
+        fail(
+          'internal',
+          `Migration ${migration.version} left ${dangling.length} invalid foreign key reference(s); it was rolled back.`
         )
-        this.database
-          .prepare('INSERT INTO run_schema_migrations(version, applied_at) VALUES(?, ?)')
-          .run(migration.version, new Date(this.clock()).toISOString())
-        this.checkpoint('migration.beforeCommit')
-        this.database.exec(`PRAGMA user_version=${migration.version}`)
-      })
+    }
+    this.database.exec(
+      'CREATE TABLE IF NOT EXISTS run_schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL) STRICT'
+    )
+    this.database
+      .prepare('INSERT INTO run_schema_migrations(version, applied_at) VALUES(?, ?)')
+      .run(migration.version, new Date(this.clock()).toISOString())
+    this.checkpoint('migration.beforeCommit')
+    this.database.exec(`PRAGMA user_version=${migration.version}`)
+  }
+
+  /**
+   * A table rebuild: dropping the old table with foreign keys on would delete or reject the rows that
+   * refer to it, and `PRAGMA foreign_keys` does nothing inside a transaction, so it is switched off
+   * first and on again whatever happens. A rollback leaves the old schema, rows and `user_version`.
+   */
+  private applyWithForeignKeysOff(migration: Migration): void {
+    if (this.depth)
+      fail('bad_request', `Migration ${migration.version} turns foreign keys off and cannot run inside a transaction.`)
+    this.database.exec('PRAGMA foreign_keys=OFF')
+    try {
+      this.transaction(() => this.applyMigration(migration))
+    } finally {
+      this.database.exec('PRAGMA foreign_keys=ON')
     }
   }
 

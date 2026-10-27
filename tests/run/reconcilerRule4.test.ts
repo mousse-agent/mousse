@@ -43,6 +43,39 @@ describe('Reconciler rule 4: a child result wakes its parent (SPEC §14.3)', () 
     expect(accepted.replayed).toBe(false)
   })
 
+  describe('a paused parent', () => {
+    const pause = { reason: 'usage_limit', until: '2026-10-12T01:00:00.000Z', estimated: false, count: 1, autoResume: true } as const
+
+    it('is busy: the row stays pending, with no wake and no steer, until the pause ends', async () => {
+      const { f, parent } = await childFinished({ parentStaysActive: true })
+      f.engine.pauseRun({ runId: parent.runId, pause, resumeAt: pause.until })
+      const row = f.engine.inbox.listPending('parent')[0]
+      const effects = f.outbox.listForThread('parent').length
+
+      for (let pass = 0; pass < 2; pass++) expect(f.reconciler.runOnce().wakes).toEqual({ wakes: [], steers: [], cancelled: [], restored: [] })
+
+      expect(f.engine.inbox.get(row.inboxId)).toMatchObject({ status: 'pending', deliveredBy: null })
+      expect(f.outbox.listForThread('parent')).toHaveLength(effects)
+      expect(f.engine.listRuns('parent')).toHaveLength(1)
+
+      f.engine.endPause(parent.runId, 'cancel')
+      expect(f.reconciler.runOnce().wakes.wakes).toHaveLength(1)
+    })
+
+    it('does not give back a row a queued continue turn holds (owner queue:<itemId>)', async () => {
+      const { f, parent } = await childFinished({ parentStaysActive: true })
+      f.engine.pauseRun({ runId: parent.runId, pause, resumeAt: pause.until })
+      const row = f.engine.inbox.listPending('parent')[0]
+      f.engine.inbox.markDelivered([row.inboxId], `queue:resume:${parent.runId}`)
+
+      f.advance(2 * 3_600_000)
+      for (let pass = 0; pass < 2; pass++) f.reconciler.runOnce()
+
+      expect(f.engine.inbox.get(row.inboxId)).toMatchObject({ status: 'delivered', deliveredBy: `queue:resume:${parent.runId}` })
+      expect(f.engine.getRun(parent.runId)!.status).toBe('paused')
+    })
+  })
+
   it('active native-steer parent: the notice is steered into the live run', async () => {
     const { f, parent, accepted } = await childFinished({ parentStaysActive: true })
     const report = f.reconciler.runOnce().wakes
