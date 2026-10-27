@@ -966,6 +966,8 @@ export class CodexProviderService {
   private modelsEpoch = 0
   /** Model listings in flight; they keep the process open. */
   private listing = 0
+  /** The plan limits as the process last reported them (a read, or a turn's update), for when a read fails. */
+  private lastLimits?: { snapshot: RateLimitSnapshot; at: number }
   private idleClose?: { timer: ReturnType<typeof setTimeout>; at: number }
   /** Bumped by disconnect; a turn from an older scope does not save its thread. */
   private scope = 0
@@ -1320,6 +1322,27 @@ export class CodexProviderService {
   }
 
   /**
+   * The plan's usage limits (`account/rateLimits/read`), read now from Codex itself: the same
+   * numbers `codex` shows, through the user's own sign-in. When the read fails the last snapshot
+   * Codex sent stands in (`live: false`, with its age); with none, the failure is thrown.
+   */
+  async rateLimits(signal?: AbortSignal): Promise<{ snapshot: RateLimitSnapshot; at: number; live: boolean }> {
+    this.listing += 1
+    try {
+      const conn = await this.connection()
+      const response = await conn.request('account/rateLimits/read', undefined, { timeoutMs: 10_000, signal })
+      this.lastLimits = { snapshot: response.rateLimits, at: Date.now() }
+      return { ...this.lastLimits, live: true }
+    } catch (error) {
+      if (signal?.aborted || !this.lastLimits) throw error
+      return { ...this.lastLimits, live: false }
+    } finally {
+      this.listing -= 1
+      this.closeWhenIdle(CODEX_CHECK_CLOSE_MS)
+    }
+  }
+
+  /**
    * Drops the saved Codex thread of `threadId`, so its next turn starts a new Codex thread with the
    * history in the prompt (the account it was saved under changed).
    */
@@ -1624,6 +1647,7 @@ export class CodexProviderService {
     // Account-wide, not tied to a thread: every open run keeps the latest, for a usage limit it may hit.
     const limits = notificationParams(notification, 'account/rateLimits/updated')
     if (limits) {
+      this.lastLimits = { snapshot: limits.rateLimits, at: Date.now() }
       for (const held of this.turns.values()) held.rateLimits = limits.rateLimits
       return
     }

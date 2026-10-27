@@ -17,14 +17,16 @@ const INSTALLATION_METHODS = new Set([
   'providers.logout',
   'providers.setApiKey',
   'providers.deleteApiKey',
-  'providers.getUsage',
   'gui.devtoolsPoll',
   'gui.devtoolsRespond'
 ])
 
 // These responses also contain profile-local ACP credentials/catalog state.
 // The pi-ai credential service remains shared between profile service instances.
+// The usage methods answer for the profile's own agents (its Codex entries) next to the shared pi-ai
+// providers, so each profile sees only its own.
 const PROFILE_PROVIDER_METHODS = new Set([
+  'providers.getUsage', 'providers.getSubscriptionUsage',
   'providers.listConfigured', 'providers.getLoginOptions', 'providers.refreshModels',
   'providers.loginOAuth', 'providers.logout',
   'providers.snapshots', 'providers.instances.add', 'providers.instances.remove',

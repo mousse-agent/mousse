@@ -39,6 +39,7 @@ import {
   type MousseSettingsUpdate
 } from '../../shared/settings'
 import type { HarnessGateway } from '../harness/gateway'
+import { usageText } from '../providers/usageText'
 import { harnessAppError } from '../../shared/harness/types'
 import {
   asAddInstanceInput,
@@ -1853,22 +1854,28 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
     case 'providers.getUsage': {
       await ctx.mms.claudeSubscription.status()
-      const [usage, claude] = await Promise.all([
+      // Pi providers read the shared pi-ai credentials; agents (Codex) answer for the bound profile.
+      const [usage, claude, agents] = await Promise.all([
         ctx.mms.providerAuth.getUsage(),
         ctx.mms.claudeSubscription.configured()
           ? ctx.mms.claudeSubscription.getUsage(ctx.mms.worktrees.getRepoRoot())
-          : Promise.resolve(undefined)
+          : Promise.resolve(undefined),
+        ctx.mms.harness?.instances.usage({ kind: 'device' }) ?? Promise.resolve([])
       ])
       return {
         ...usage,
-        providers: [...usage.providers, ...(claude ? [claude] : [])],
+        providers: [...usage.providers, ...(claude ? [claude] : []), ...agents],
         fetchedAt: new Date().toISOString()
       }
     }
     case 'providers.getSubscriptionUsage': {
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
-      return { usage: await ctx.mms.providerAuth.getSubscriptionUsage(providerId) }
+      const text = await ctx.mms.providerAuth.getSubscriptionUsage(providerId)
+      if (text !== undefined) return { usage: text }
+      // An agent instance named by its id (`codex`, `codex:work`).
+      const agent = (await ctx.mms.harness?.instances.usage({ kind: 'device' }))?.find((entry) => entry.id === providerId)
+      return { usage: agent ? usageText(agent.label, agent) : undefined }
     }
     case 'providers.synthesizeSpeech': {
       const p = isObject(params) ? params : {}

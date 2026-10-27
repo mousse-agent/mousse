@@ -48,9 +48,6 @@ export interface DriverInfo {
   setups?: boolean
 }
 
-/** Where ChatGPT shows a plan's usage; Mousse links to it and never reads it. */
-export const CHATGPT_USAGE_URL = 'https://chatgpt.com/settings/usage'
-
 /** The entry runs Mousse's own Codex download with Sign in with ChatGPT. */
 export function isManagedSetup(snapshot: InstanceSnapshot): boolean {
   return snapshot.config?.setup === 'managed'

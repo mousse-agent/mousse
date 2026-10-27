@@ -721,3 +721,39 @@ describe('a usage limit on a Codex turn', () => {
     expect(server.messages.filter((message) => message.method === 'turn/start').map((message) => (message.params as { threadId: string }).threadId)).toEqual(['thr-1', 'thr-1'])
   })
 })
+
+describe('plan usage limits for the usage page', () => {
+  const window = (usedPercent: number, windowDurationMins: number, resetsAt: number) => ({ usedPercent, windowDurationMins, resetsAt })
+  const limits = (used: number) => ({ primary: window(used, 300, 1_900_000_000), secondary: window(used / 2, 10_080, 1_900_100_000), rateLimitReachedType: null })
+
+  it('reads account/rateLimits/read from Codex through its app-server', async () => {
+    const server = scriptedServer((message) => (message.method === 'account/rateLimits/read' ? { result: { rateLimits: limits(40) } } : chatgpt))
+    const service = create(server)
+    const read = await service.rateLimits()
+    expect(read).toMatchObject({ live: true, snapshot: limits(40) })
+    expect(server.methods()).toContain('account/rateLimits/read')
+  })
+
+  it('when a read fails, the last snapshot Codex sent stands in, marked as not live', async () => {
+    let failing = false
+    const server = scriptedServer((message) => {
+      if (message.method !== 'account/rateLimits/read') return chatgpt
+      return failing ? { error: { code: -32000, message: 'rate limits are unavailable' } } : { result: { rateLimits: limits(10) } }
+    })
+    const service = create(server)
+    expect(await service.rateLimits()).toMatchObject({ live: true, snapshot: limits(10) })
+    // A turn's account update is kept too, and is newer than the read.
+    await service.status({ force: true })
+    server.processes.at(-1)!.stdout.write(JSON.stringify({ method: 'account/rateLimits/updated', params: { rateLimits: limits(55) } }) + '\n')
+    await vi.waitFor(async () => {
+      failing = true
+      const stale = await service.rateLimits()
+      expect(stale).toMatchObject({ live: false, snapshot: limits(55) })
+    })
+  })
+
+  it('with nothing to fall back on, a failed read is thrown', async () => {
+    const server = scriptedServer((message) => (message.method === 'account/rateLimits/read' ? { error: { code: -32601, message: 'method not found' } } : chatgpt))
+    await expect(create(server).rateLimits()).rejects.toThrow(/method not found/)
+  })
+})

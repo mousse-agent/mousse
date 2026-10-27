@@ -1751,9 +1751,11 @@ export class Harness implements HarnessGateway {
       const record = this.record(instanceId, { allowDisabled: true })
       const named = { id: instanceId, label: this.displayName(record) }
       const controller = new AbortController()
+      // A runtime that ignores the signal still cannot hold the page up past the deadline.
+      const late = new Promise<never>((_, reject) => controller.signal.addEventListener('abort', () => reject(new Error('The usage did not arrive in time.')), { once: true }))
       const timer = setTimeout(() => controller.abort(), USAGE_READ_MS)
       try {
-        return { ...named, ...(await record.runtime.usage!(controller.signal)) }
+        return { ...named, ...(await Promise.race([record.runtime.usage!(controller.signal), late])) }
       } catch (error) {
         return { ...named, status: 'error', windows: [], message: controller.signal.aborted ? 'The usage did not arrive in time.' : errorText(error) }
       } finally {
