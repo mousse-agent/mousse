@@ -6,7 +6,7 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { PI, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 let home: string | undefined
@@ -59,6 +59,80 @@ describe('turns from another computer', () => {
     // The drained message ran at its limit, not at the thread's Full access.
     expect(modeOf(queued.runId!)).toBe('accept_edits')
     expect(modeOf(first.runId!)).toBe('full')
+  })
+
+  /** A thread at Full access whose first turn is held, so the test decides what the turn reads. */
+  async function holdingThread() {
+    const gate = deferred()
+    daemon = phase6Daemon(home!, [piAdapter(async (input) => (input.prompt === 'first' ? (await gate.promise, 'one') : 'done'))])
+    const thread = daemon.store.createThread('Steered')
+    daemon.orch.setThreadModelOverride(thread.id, PI)
+    daemon.orch.setThreadPermissionMode(thread.id, 'full')
+    const modeOf = (runId: string) => daemon!.engine.bindingForRun(runId)?.policy.permissionMode
+    const first = await daemon.orch.send('first', false, { threadId: thread.id, source: 'gui', awaitMode: 'ack' })
+    await waitFor(() => modeOf(first.runId!) !== undefined, 'the first turn to bind')
+    const followUps = () => daemon!.engine.listRuns(thread.id).filter((run) => run.runId !== first.runId)
+    return { gate, thread, first, modeOf, followUps }
+  }
+
+  it('runs a steer the turn never reads at the device limit, not at the thread’s Full access', async () => {
+    const { gate, thread, followUps, modeOf } = await holdingThread()
+    expect(daemon!.orch.steerThreadOrEnqueueExternal(thread.id, 'device text', { source: 'gui', permissionMode: 'ask' })).toMatchObject({ steered: true })
+    gate.resolve()
+    await waitFor(() => followUps().some((run) => run.status === 'completed'), 'the follow-up turn to finish')
+    const [followUp] = followUps()
+    expect(followUp.source).toBe('steer-followup')
+    expect(modeOf(followUp.runId)).toBe('ask')
+  })
+
+  it('does the same for a steer that names the running run', async () => {
+    const { gate, thread, first, followUps, modeOf } = await holdingThread()
+    expect(await daemon!.orch.steerRun(first.runId!, 'device text', 'steer-1', thread.id, undefined, undefined, 'accept_edits')).toMatchObject({ status: 'accepted' })
+    // The steer effect is delivered by the worker; give it a moment to reach the turn before the turn ends.
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    gate.resolve()
+    await waitFor(() => followUps().some((run) => run.status === 'completed'), 'the follow-up turn to finish')
+    expect(modeOf(followUps()[0].runId)).toBe('accept_edits')
+  })
+
+  it('does the same for a steer that arrives after its run ended', async () => {
+    const { gate, thread, first, followUps, modeOf } = await holdingThread()
+    gate.resolve()
+    await waitFor(() => daemon!.engine.getRun(first.runId!)?.status === 'completed', 'the first turn to finish')
+    // What the steer effect does for a run that is already over: the text waits as a turn of its own.
+    ;(daemon!.orch as unknown as { executeTurnSteerEffect(effect: unknown): void }).executeTurnSteerEffect({
+      effectId: 'effect-late',
+      payload: { runId: first.runId, threadId: thread.id, text: 'late device text', deviceLimit: 'ask' }
+    })
+    await waitFor(() => followUps().some((run) => run.status === 'completed'), 'the late turn to finish')
+    expect(modeOf(followUps()[0].runId)).toBe('ask')
+  })
+
+  it('leaves a message the owner queued no looser than the limit once a device edits it', async () => {
+    const { gate, thread, followUps, modeOf } = await holdingThread()
+    const queued = await daemon!.orch.send('owner text', false, { threadId: thread.id, source: 'gui' })
+    expect(queued.queueItem!.permissionMode).toBeUndefined()
+    const edited = daemon!.orch.editQueuedItem(thread.id, queued.queueItem!.id, { content: 'device text' }, { permissionMode: 'accept_edits', sentFrom: { node: 'nod_laptop' } })
+    expect(edited).toMatchObject({ content: 'device text', permissionMode: 'accept_edits', sentFrom: { node: 'nod_laptop' } })
+    // An owner’s own edit changes nothing about the limit.
+    const own = await daemon!.orch.send('own', false, { threadId: thread.id, source: 'gui' })
+    expect(daemon!.orch.editQueuedItem(thread.id, own.queueItem!.id, { content: 'own, edited' }).permissionMode).toBeUndefined()
+    gate.resolve()
+    await waitFor(() => followUps().length === 2 && followUps().every((run) => run.status === 'completed'), 'both queued turns to finish')
+    expect(modeOf(queued.runId!)).toBe('accept_edits')
+    expect(modeOf(own.runId!)).toBe('full')
+  })
+
+  it('retries a failed request under the limit it was sent with', async () => {
+    daemon = phase6Daemon(home!, [piAdapter(() => 'ok')])
+    const thread = daemon.store.createThread('Retry')
+    const session = daemon.orch.getOrCreateSession(thread.id)
+    session.failedConnectionRequest = { content: 'retry me' }
+    session.failedConnectionLimit = 'ask'
+    const run = vi.spyOn(daemon.orch as unknown as { runTurnOnSession(...args: unknown[]): Promise<unknown> }, 'runTurnOnSession').mockResolvedValue({ message: '', actions: [] })
+    expect(daemon.orch.retryLastConnection(thread.id)).toBe(true)
+    expect(run).toHaveBeenCalledWith(session, { content: 'retry me' }, true, true, { permissionMode: 'ask' })
+    expect(session.failedConnectionLimit).toBeNull()
   })
 
   it('cannot loosen the thread: a device allowed Full access still runs in a stricter thread mode', async () => {

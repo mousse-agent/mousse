@@ -935,6 +935,8 @@ export interface QueuedMessage {
   stopGeneration?: number
   /** A mode this turn must not exceed, set by a daemon-side sender (a scheduled job); it only tightens. */
   permissionMode?: PermissionMode
+  /** The other computer of the user this message was sent or last edited from (a routed call); absent for this computer's own. */
+  sentFrom?: ThreadSentFrom
   /**
    * The run a promoted item (`steering`) was promoted into. Only that run's steer drain takes the text, and
    * only when the run's mode is no stricter than the item's own; any other run that meets the item reverts it
