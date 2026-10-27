@@ -2,7 +2,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { AGENT_BUNDLE_MAX_BYTES, defaultAgentSettings } from '../src/shared/agents/defaults'
-import { collectEditorIssues, runsOnLabel } from '../src/renderer/components/agentDefinitions/editorIssues'
+import { collectEditorIssues, editorRuntimeIssues, runsOnLabel } from '../src/renderer/components/agentDefinitions/editorIssues'
 import { shouldApplyAsyncResult, createAsyncGate } from '../src/renderer/components/agentDefinitions/asyncGate'
 import { parseAgentImportFile } from '../src/renderer/components/agentDefinitions/importBundle'
 import {
@@ -118,14 +118,15 @@ describe('validation and where a definition runs', () => {
   it("shows the gateway's refusal: a refused primary blocks, a refused fallback does not", () => {
     const settings = defaultAgentSettings({ name: 'A', slug: 'a' })
     settings.primaryModel.ref = { providerId: 'xai', modelId: 'grok-4' }
+    const CLAUDE = { providerId: 'claude-subscription', modelId: 'sonnet' }
     const refusal = "Claude Code can't enforce this agent's workspace and tool limits yet, so it can't run agent definitions."
     const issues = collectEditorIssues({
       settings,
       catalogs,
       serverIssues: [
-        { code: 'SETTINGS_UNSUPPORTED', message: refusal, pointer: '/settings/tools/mode', retryable: false },
-        { code: 'SETTINGS_UNSUPPORTED', message: refusal, pointer: '/settings/workspace/mode', retryable: false },
-        { code: 'SETTINGS_UNSUPPORTED', message: `Fallback sonnet will be skipped: ${refusal}`, pointer: '/settings/tools/mode', retryable: false, details: { blocking: false } }
+        { code: 'SETTINGS_UNSUPPORTED', message: refusal, pointer: '/settings/tools/mode', retryable: false, details: { model: CLAUDE } },
+        { code: 'SETTINGS_UNSUPPORTED', message: refusal, pointer: '/settings/workspace/mode', retryable: false, details: { model: CLAUDE } },
+        { code: 'SETTINGS_UNSUPPORTED', message: `Fallback sonnet will be skipped: ${refusal}`, pointer: '/settings/tools/mode', retryable: false, details: { model: CLAUDE, blocking: false, at: '/settings/fallbacks/models/0' } }
       ]
     })
     // One line per refusal, linked to its first setting.
@@ -133,6 +134,33 @@ describe('validation and where a definition runs', () => {
       { pointer: '/settings/tools/mode', fieldId: 'agent-field-settings-tools-mode', message: refusal, blocking: true },
       { pointer: '/settings/tools/mode', fieldId: 'agent-field-settings-tools-mode', message: `Fallback sonnet will be skipped: ${refusal}`, blocking: false }
     ])
+  })
+})
+
+describe('issues that are not the same issue stay apart', () => {
+  it('keeps one line per model refusal, and the same generic text at two settings as two lines', () => {
+    const settings = defaultAgentSettings({ name: 'A', slug: 'a' })
+    settings.primaryModel.ref = { providerId: 'xai', modelId: 'grok-4' }
+    const incomplete = 'Primary model is not configured.'
+    const issues = collectEditorIssues({ settings, catalogs, serverIssues: [
+      { code: 'MODEL_CAPABILITY_MISSING', message: incomplete, pointer: '/settings/fallbacks/models/0', retryable: false },
+      { code: 'MODEL_CAPABILITY_MISSING', message: incomplete, pointer: '/settings/fallbacks/models/1', retryable: false }
+    ] })
+    expect(issues.map((issue) => issue.pointer)).toEqual(['/settings/fallbacks/models/0', '/settings/fallbacks/models/1'])
+  })
+})
+
+describe('the gateway check in the editor', () => {
+  const saved = defaultAgentSettings({ name: 'A', slug: 'a' })
+  const refusal = { code: 'SETTINGS_UNSUPPORTED' as const, message: 'refused', pointer: '/settings/tools/mode', retryable: false }
+  it('waits for the answer for the saved draft, and hides it while the settings have unsaved edits', () => {
+    expect(editorRuntimeIssues({ answer: null, draftHash: 'd1', settings: saved, savedSettings: saved })).toEqual({ checked: false })
+    // An answer for an older draft does not count.
+    expect(editorRuntimeIssues({ answer: { draftHash: 'd0', issues: [refusal] }, draftHash: 'd1', settings: saved, savedSettings: saved })).toEqual({ checked: false })
+    expect(editorRuntimeIssues({ answer: { draftHash: 'd1', issues: [refusal] }, draftHash: 'd1', settings: saved, savedSettings: saved })).toEqual({ checked: true, serverIssues: [refusal] })
+    // Another model picked but not saved: the saved draft's answer is not shown under it.
+    const edited = { ...saved, primaryModel: { ...saved.primaryModel, ref: { providerId: 'xai', modelId: 'grok-4' } } }
+    expect(editorRuntimeIssues({ answer: { draftHash: 'd1', issues: [refusal] }, draftHash: 'd1', settings: edited, savedSettings: saved })).toEqual({ checked: true })
   })
 })
 

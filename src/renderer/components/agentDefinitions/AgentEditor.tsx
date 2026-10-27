@@ -18,7 +18,7 @@ import {
   type AgentEditorCatalogs
 } from './client'
 import { DraftConflictDialog, UnsavedChangesDialog } from './dialogs'
-import { collectEditorIssues, fieldIdForPointer, runsOnLabel } from './editorIssues'
+import { collectEditorIssues, editorRuntimeIssues, fieldIdForPointer, runsOnLabel } from './editorIssues'
 import { downloadJson } from './importBundle'
 import { registerNavigationGuard } from '../../services/navigationGuards'
 
@@ -143,7 +143,8 @@ export function AgentEditor({
   }, [dirty, onRequestAttention])
   useEffect(() => () => { navigationDecision.current?.(false) }, [])
   // Where the saved draft would run (the gateway's check of its models' instances), read again for
-  // every saved draft. It covers the saved settings, so it is shown while edits are unsaved too.
+  // every saved draft. It answers for the saved settings only, so it is hidden while the settings
+  // have unsaved edits (a model picked but not saved would contradict it), and Publish waits for it.
   const [runtimeIssues, setRuntimeIssues] = useState<{ draftHash: string; issues: AgentDefinitionIssue[] } | null>(null)
   const recordId = record?.id
   const recordDraftHash = record?.draftHash
@@ -152,11 +153,11 @@ export function AgentEditor({
     let current = true
     client.validate({ profileId, id: recordId, expectedDraftHash: recordDraftHash, runtimeOnly: true })
       .then((result) => { if (current) setRuntimeIssues({ draftHash: recordDraftHash, issues: result.issues }) })
-      // The check is advisory here: a run is checked again before it starts.
-      .catch(() => { if (current) setRuntimeIssues(null) })
+      // Unanswered, the check does not hold Publish: the daemon checks again when it publishes or runs.
+      .catch(() => { if (current) setRuntimeIssues({ draftHash: recordDraftHash, issues: [] }) })
     return () => { current = false }
   }, [client, profileId, recordId, recordDraftHash])
-  const serverIssues = runtimeIssues && runtimeIssues.draftHash === recordDraftHash ? runtimeIssues.issues : undefined
+  const { checked: runtimeChecked, serverIssues } = editorRuntimeIssues({ answer: runtimeIssues, draftHash: recordDraftHash, settings: draft?.settings, savedSettings: baseline?.settings })
   const issues = useMemo(
     () =>
       draft
@@ -165,7 +166,7 @@ export function AgentEditor({
     [catalogs, draft, serverIssues]
   )
   const blocking = issues.filter((issue) => issue.blocking)
-  const canPublish = Boolean(record && draft && !dirty && blocking.length === 0)
+  const canPublish = Boolean(record && draft && !dirty && runtimeChecked && blocking.length === 0)
   const canRun = Boolean(record && draft && !dirty && blocking.length === 0)
 
   const requestLeave = (action: () => void) => {

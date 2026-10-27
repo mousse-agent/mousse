@@ -59,8 +59,14 @@ export function collectEditorIssues(input: {
     })
   }
 
+  // Issue lines are de-duplicated by key: a gateway refusal of one model names every setting
+  // involved, so it is one line (code, model and where the model is set), linked to its first
+  // setting; any other issue is one line per setting and message.
+  const keys = issues.map((issue) => `${issue.pointer}:${issue.message}`)
   for (const issue of input.serverIssues ?? []) {
     const pointer = issue.pointer ?? '/settings'
+    const model = issue.details?.model
+    keys.push(model ? `${issue.code}:${JSON.stringify(model)}:${String(issue.details?.at ?? '')}` : `${pointer}:${issue.message}`)
     issues.push({
       pointer,
       fieldId: fieldIdForPointer(pointer),
@@ -74,14 +80,29 @@ export function collectEditorIssues(input: {
     })
   }
 
-  // One line per message: a refusal names every setting involved, and links to the first.
   const seen = new Set<string>()
-  return issues.filter((issue) => {
-    const key = issue.message
+  return issues.filter((_issue, index) => {
+    const key = keys[index]!
     if (seen.has(key)) return false
     seen.add(key)
     return true
   })
+}
+
+/**
+ * The gateway check's issues the editor shows (PR 4 §6): the check answered for the saved draft
+ * (`checked`, which Publish waits for), and its issues only while the settings have no unsaved
+ * edits, since they answer for the saved settings (a model picked but not saved would contradict them).
+ */
+export function editorRuntimeIssues(input: {
+  answer: { draftHash: string; issues: AgentDefinitionIssue[] } | null
+  draftHash: string | undefined
+  settings: AgentDefinitionSettings | undefined
+  savedSettings: AgentDefinitionSettings | undefined
+}): { checked: boolean; serverIssues?: AgentDefinitionIssue[] } {
+  const checked = Boolean(input.answer && input.draftHash && input.answer.draftHash === input.draftHash)
+  const edited = JSON.stringify(input.settings) !== JSON.stringify(input.savedSettings)
+  return checked && !edited ? { checked, serverIssues: input.answer!.issues } : { checked }
 }
 
 export function slugFromName(name: string): string {
