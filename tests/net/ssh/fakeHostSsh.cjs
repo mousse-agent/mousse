@@ -193,9 +193,19 @@ function run(input) {
       out('@@unit\n' + (state.unitExists || state.serviceInstalled ? 'yes' : '') + '\n')
       out('@@df\n/dev/sda1 100 100 ' + (state.freeKb ?? 9000000) + ' 1% /\n')
       out('@@linger\n' + (state.linger ? 'Linger=' + state.linger : '') + '\n')
+      out('@@release\n' + (state.release || 'ubuntu 24.04') + '\n')
+      out('@@keyring\n' + (state.keyring || 'running') + '\n')
+      out('@@libs\n')
+      if (state.noLdconfig) out('noldconfig\n')
+      else for (const lib of state.missingLibs || []) out('missing:' + lib + '\n')
       out('@@end\n')
       return process.exit(0)
     }
+    case 'check-libs':
+      out('release=' + (state.release || 'ubuntu 24.04') + '\n')
+      // What `ldd` finds missing after unpacking (it can differ from the probe's package list).
+      for (const lib of state.unpackMissingLibs || state.missingLibs || []) out(lib + '\n')
+      return process.exit(0)
     case 'install-fetch':
       if (state.noGithub) fail('curl: (6) Could not resolve host: github.com', 21)
       if (!script.includes("--proto '=https'") && !script.includes('--proto "=https"') && !script.includes('=https')) fail('not https', 1)
@@ -325,6 +335,9 @@ function run(input) {
       mutate()
       return process.exit(0)
     }
+    case 'service-reset':
+      state.resetFailed = true
+      return process.exit(0)
     case 'undo-install':
       state.extracted = false
       state.removedInstall = true

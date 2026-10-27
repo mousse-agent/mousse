@@ -14,7 +14,8 @@ export function getSystemdUnitPath(homeDir: string): string {
 export function buildSystemdUnitContent(
   cliPath: string,
   homeDir: string,
-  environment: Record<string, string> = {}
+  environment: Record<string, string> = {},
+  execArguments: readonly string[] = []
 ): string {
   const extra = Object.entries(environment)
     .map(([key, value]) => `Environment=${key}=${value}
@@ -25,7 +26,7 @@ Description=Mousse Main Service
 After=network.target
 
 [Service]
-ExecStart=${cliPath} service run
+ExecStart=${cliPath} service run${execArguments.map((arg) => ` ${arg}`).join('')}
 Restart=on-failure
 Environment=MOUSSE_HOME=${homeDir}
 ${extra}
@@ -77,14 +78,15 @@ export async function installLinuxSystemdStartup(
   cliPath: string,
   homeDir: string,
   environment: Record<string, string> = {},
-  userHome: string = os.homedir()
+  userHome: string = os.homedir(),
+  execArguments: readonly string[] = []
 ): Promise<void> {
   await assertSystemdAvailable()
 
   const unitPath = getSystemdUnitPath(userHome)
   const unitDir = path.posix.dirname(unitPath)
   await fs.mkdir(unitDir, { recursive: true })
-  await fs.writeFile(unitPath, buildSystemdUnitContent(cliPath, homeDir, environment), 'utf8')
+  await fs.writeFile(unitPath, buildSystemdUnitContent(cliPath, homeDir, environment, execArguments), 'utf8')
 
   const reloadArgs = buildSystemctlDaemonReloadArgs()
   const reloadResult = await runCommand('systemctl', reloadArgs)

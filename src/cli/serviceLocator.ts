@@ -41,6 +41,7 @@ export async function installMmsStartup(opts: {
   cliPath: string
   homeDir: string
   environment?: Record<string, string>
+  execArguments?: readonly string[]
 }): Promise<void> {
   const startup = await loadMmsStartup()
   return startup.installStartup(opts)

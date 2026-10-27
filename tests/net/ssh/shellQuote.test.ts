@@ -11,6 +11,7 @@ import {
   parseSections,
   probeScript,
   reconcileInstallScript,
+  removeInstallScript,
   removeLauncherScript,
   uploadScript,
   verifyExtractScript,
@@ -133,8 +134,21 @@ describe('remote scripts', () => {
     expect(text).toContain(
       'exec "/home/me/.local/share/mousse/cli/0.1.2/squashfs-root/mousse-cli" "$@"'
     )
+    // No display: Electron would stop at "Missing X server"; the switches are added only then.
+    expect(text).toContain('if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then')
+    expect(text).toContain(
+      'set -- "$@" --ozone-platform=headless --disable-gpu --password-store=gnome-libsecret'
+    )
     expect(launcherOwner(text)).toBe('ssh_abc')
     expect(launcherOwner('#!/bin/sh\necho mine\n')).toBeUndefined()
+  })
+
+  it('removes the install directory and then only empty parents', () => {
+    const script = removeInstallScript('/home/me/.local/share/mousse/cli/0.1.2')
+    expect(script).toContain("rm -rf -- '/home/me/.local/share/mousse/cli/0.1.2'")
+    expect(script).toContain("rmdir -- '/home/me/.local/share/mousse/cli' 2>/dev/null || true")
+    expect(script).toContain("rmdir -- '/home/me/.local/share/mousse' 2>/dev/null || true")
+    expect(script).not.toContain('rm -rf -- /home/me/.local/share/mousse/cli/')
   })
 
   it('splits probe output into sections', () => {

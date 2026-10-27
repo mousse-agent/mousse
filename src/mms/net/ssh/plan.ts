@@ -16,6 +16,8 @@ export const PREREQUISITE = {
   disk: 'At least 500 MB free in the home directory',
   release: 'A release build of Mousse on this computer',
   home: 'A plain home directory path',
+  libraries: 'Libraries the Mousse app needs (GTK, NSS, audio)',
+  keyring: 'A secret service for the Mousse key store (gnome-keyring)',
   launcher: 'No unrelated file at ~/.local/bin/mousse-cli',
   unit: 'No unrelated mousse-mms service unit'
 } as const

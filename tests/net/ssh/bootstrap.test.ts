@@ -6,6 +6,7 @@ import type { NodeId } from '../../../src/shared/net'
 import { sshApprovalsPath } from '../../../src/mms/net/transports/ssh'
 import { SshBootstrap, validDeviceName } from '../../../src/mms/net/ssh/bootstrap'
 import { isOlderVersion } from '../../../src/mms/net/ssh/plan'
+import { librariesRemedy } from '../../../src/mms/net/ssh/scripts'
 import { bed, fingerprint, hashedLine, KEY_A, KEY_B, KEY_RSA, type Bed } from './bed'
 
 const fixtures = vi.hoisted(() => ({ binaries: new Set<string>() }))
@@ -385,6 +386,7 @@ describe('setup', () => {
     expect(order.filter((step) => !['probe', 'service-status'].includes(step))).toEqual([
       'install-fetch',
       'install-verify',
+      'check-libs',
       'install-launcher',
       'service-install',
       'cat-file',
@@ -1079,5 +1081,100 @@ describe('approve checks the device the machine reports', () => {
     expect(wrong.detail).toMatch(/different device/)
     expect(existsSync(sshApprovalsPath(b.profileDir))).toBe(false)
     expect((await ssh.approve(node, 'box')).approved).toBe(true)
+  })
+})
+
+describe('a bare server image lacks the libraries Electron needs', () => {
+  const missing = ['libnspr4.so', 'libnss3.so', 'libgtk-3.so.0', 'libasound.so.2']
+
+  it('is a blocked prerequisite with the packages to install, before anything is changed', async () => {
+    const b = await make({ missingLibs: missing })
+    const { ssh, check } = await probed(b)
+    const item = check.prerequisites.find((entry) =>
+      /Libraries the Mousse app needs/.test(entry.name)
+    )
+    expect(item).toMatchObject({ ok: false })
+    expect(item?.remedy).toContain('libnspr4.so')
+    expect(item?.remedy).toContain(
+      'sudo apt-get install -y libnspr4 libnss3 libgtk-3-0t64 libasound2t64'
+    )
+    expect(check.ok).toBe(false)
+    expect(ssh.plan({ host: 'box', name: 'x' }).blocked?.map((entry) => entry.name)).toContain(
+      'Libraries the Mousse app needs (GTK, NSS, audio)'
+    )
+    expect((await ssh.begin({ host: 'box', name: 'x' })).error).toMatch(/Cannot start/)
+    expect(await b.steps()).toEqual(['probe'])
+  })
+
+  it('does not block a machine that already runs Mousse', async () => {
+    const b = await make({
+      externalCli: '/opt/m/mousse-cli',
+      serviceInstalled: true,
+      running: true,
+      missingLibs: missing
+    })
+    const { check } = await probed(b)
+    expect(check.prerequisites.find((entry) => /Libraries/.test(entry.name))).toBeUndefined()
+  })
+
+  it('is only a hint when ldconfig cannot be read, and the check after unpacking decides', async () => {
+    const b = await make({ noLdconfig: true, unpackMissingLibs: ['libgbm.so.1'] })
+    const { ssh, check } = await probed(b)
+    expect(check.prerequisites.find((entry) => /Libraries/.test(entry.name))).toMatchObject({
+      ok: true,
+      indeterminate: true
+    })
+    const { id } = await ssh.begin({ host: 'box', name: 'x' })
+    const status = await finish(ssh, id!)
+    // The failure names the library now, not a service that would not start.
+    expect(status.phase).toBe('failed')
+    expect(status.error).toMatch(/libgbm\.so\.1/)
+    expect(status.error).toMatch(/apt-get install -y libgbm1/)
+    expect(librariesRemedy(['libasound.so.2'], 'ubuntu 22.04')).toContain('install -y libasound2.')
+    expect(librariesRemedy(['libasound.so.2'], 'ubuntu 22.04')).not.toContain('t64')
+    expect(librariesRemedy(['libasound.so.2'], 'debian 13')).toContain('libasound2t64')
+    expect(librariesRemedy(['libgbm.so.1'], 'ubuntu 24.04')).toContain('libgbm1')
+    const order = await b.steps()
+    expect(order).toContain('check-libs')
+    expect(order).not.toContain('install-launcher')
+    expect(order).not.toContain('service-install')
+  })
+})
+
+describe('the packaged app keeps its keys in the OS keyring', () => {
+  it('blocks the plan when the machine has no secret service, with the install line', async () => {
+    const b = await make({ keyring: 'none' })
+    const { ssh, check } = await probed(b)
+    const item = check.prerequisites.find((entry) => /secret service/.test(entry.name))
+    expect(item).toMatchObject({ ok: false })
+    expect(item?.remedy).toContain('gnome-keyring')
+    expect(ssh.plan({ host: 'box', name: 'x' }).blocked?.map((entry) => entry.name)).toContain(
+      'A secret service for the Mousse key store (gnome-keyring)'
+    )
+    expect(await b.steps()).toEqual(['probe'])
+  })
+
+  it('is only a hint when the service is activatable or cannot be asked', async () => {
+    for (const keyring of ['activatable', 'nobusctl']) {
+      const b = await make({ keyring })
+      const { check } = await probed(b)
+      expect(check.prerequisites.find((entry) => /secret service/.test(entry.name))).toMatchObject({
+        ok: true,
+        indeterminate: true
+      })
+    }
+  })
+
+  it('says what a locked key store means when the join reports it', async () => {
+    const b = await make({
+      joinFails: '{"code":"keystore_locked","error":"The key store is locked."}'
+    })
+    const { ssh } = await probed(b)
+    const { id } = await ssh.begin({ host: 'box', name: 'x' })
+    const status = await finish(ssh, id!)
+    expect(status.phase).toBe('failed')
+    expect(status.error).toMatch(/OS keyring/)
+    expect(status.error).not.toMatch(/Joining failed/)
+    expect(b.stub.revokedInvites).toHaveLength(1)
   })
 })

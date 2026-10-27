@@ -12,6 +12,7 @@ import {
   uninstallMmsStartup
 } from '../serviceLocator'
 import { resolveCliPathForInstall } from '../cliLaunch'
+import { HEADLESS_DISPLAY_SWITCHES } from '../../shared/headlessSwitches'
 import {
   canonicalizeHome,
   pollUntilRuntimeReady,
@@ -390,7 +391,13 @@ async function installService(
     homeDir,
     // The service shows no windows, so Chromium's sandbox protects nothing it uses; an unpacked
     // headless build has no setuid helper and would not start without the opt-out.
-    ...(headless ? { environment: { ELECTRON_DISABLE_SANDBOX: '1' } } : {})
+    ...(headless
+      ? {
+          environment: { ELECTRON_DISABLE_SANDBOX: '1' },
+          // No display either: the daemon would stop at "Missing X server or $DISPLAY".
+          execArguments: HEADLESS_DISPLAY_SWITCHES
+        }
+      : {})
   })
   const status = await getMmsStartupStatus()
   writeOutput(mode, { ...status, installed: true })

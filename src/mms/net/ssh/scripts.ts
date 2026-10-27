@@ -1,3 +1,4 @@
+import { HEADLESS_DISPLAY_SWITCHES } from '../../../shared/headlessSwitches'
 import { q } from './shellQuote'
 
 /**
@@ -45,6 +46,10 @@ export function launcherContent(manifestId: string, installDir: string): string 
     '#!/bin/sh',
     `${LAUNCHER_MARKER} ${manifestId}`,
     'export ELECTRON_DISABLE_SANDBOX=1',
+    // A server has no display; Electron reads these switches before any Mousse code runs.
+    'if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then',
+    `  set -- "$@" ${HEADLESS_DISPLAY_SWITCHES.join(' ')}`,
+    'fi',
     `exec "${installDir}/squashfs-root/mousse-cli" "$@"`,
     ''
   ].join('\n')
@@ -54,6 +59,69 @@ export function launcherContent(manifestId: string, installDir: string): string 
 export function launcherOwner(content: string): string | undefined {
   const match = new RegExp(`^${LAUNCHER_MARKER} ([A-Za-z0-9_-]+)$`, 'mu').exec(content)
   return match?.[1]
+}
+
+/**
+ * Shared libraries the packaged Electron CLI links against (what `ldd` reports on a bare Ubuntu
+ * server), with the Debian and Ubuntu package that provides each. A server image has none of the
+ * GTK, NSS or audio libraries, and without them the CLI cannot even print its version.
+ */
+export const ELECTRON_LIBRARIES: ReadonlyArray<{ soname: string; package: string }> = [
+  { soname: 'libnspr4.so', package: 'libnspr4' },
+  { soname: 'libnss3.so', package: 'libnss3' },
+  { soname: 'libnssutil3.so', package: 'libnss3' },
+  { soname: 'libsmime3.so', package: 'libnss3' },
+  { soname: 'libatk-1.0.so.0', package: 'libatk1.0-0' },
+  { soname: 'libatk-bridge-2.0.so.0', package: 'libatk-bridge2.0-0' },
+  { soname: 'libatspi.so.0', package: 'libatspi2.0-0' },
+  { soname: 'libcups.so.2', package: 'libcups2' },
+  { soname: 'libcairo.so.2', package: 'libcairo2' },
+  { soname: 'libgtk-3.so.0', package: 'libgtk-3-0' },
+  { soname: 'libpango-1.0.so.0', package: 'libpango-1.0-0' },
+  { soname: 'libX11.so.6', package: 'libx11-6' },
+  { soname: 'libXcomposite.so.1', package: 'libxcomposite1' },
+  { soname: 'libXdamage.so.1', package: 'libxdamage1' },
+  { soname: 'libXext.so.6', package: 'libxext6' },
+  { soname: 'libXfixes.so.3', package: 'libxfixes3' },
+  { soname: 'libXrandr.so.2', package: 'libxrandr2' },
+  { soname: 'libgbm.so.1', package: 'libgbm1' },
+  { soname: 'libxcb.so.1', package: 'libxcb1' },
+  { soname: 'libxkbcommon.so.0', package: 'libxkbcommon0' },
+  { soname: 'libasound.so.2', package: 'libasound2' }
+]
+
+/** Debian and Ubuntu renamed these when 64-bit time_t arrived: Debian 13 and Ubuntu 24.04. */
+const T64_PACKAGES = new Set([
+  'libatk1.0-0',
+  'libatk-bridge2.0-0',
+  'libatspi2.0-0',
+  'libcups2',
+  'libgtk-3-0',
+  'libasound2'
+])
+/** `ID VERSION_ID` from the machine's /etc/os-release, e.g. `ubuntu 24.04`. */
+export function usesT64Names(release: string | undefined): boolean {
+  const [id = '', version = ''] = (release ?? '').trim().split(/\s+/u)
+  const major = Number(version.split('.')[0])
+  return (id === 'ubuntu' && major >= 24) || (id === 'debian' && major >= 13)
+}
+
+/** What to run on the machine for the libraries that are missing (Debian and Ubuntu names). */
+export function librariesRemedy(missing: string[], release?: string): string {
+  const t64 = usesT64Names(release)
+  const packages = [
+    ...new Set(
+      missing.flatMap((soname) =>
+        ELECTRON_LIBRARIES.filter((lib) => lib.soname === soname).map((lib) =>
+          t64 && T64_PACKAGES.has(lib.package) ? `${lib.package}t64` : lib.package
+        )
+      )
+    )
+  ]
+  const list = missing.join(', ')
+  return packages.length
+    ? `Install the libraries Electron needs (missing: ${list}). On Debian or Ubuntu: sudo apt-get install -y ${packages.join(' ')}. Elsewhere, install the packages that provide them.`
+    : `Install the libraries Electron needs (missing: ${list}).`
 }
 
 /** Read-only facts about the machine in one round trip; nothing here changes it. */
@@ -84,6 +152,13 @@ export function probeScript(): string {
     `echo '${SECTION}unit'; if test -e "$HOME/.config/systemd/user/mousse-mms.service"; then echo yes; fi`,
     `echo '${SECTION}df'; df -Pk "$HOME" 2>/dev/null | tail -n 1`,
     `echo '${SECTION}linger'; if command -v loginctl >/dev/null 2>&1; then loginctl show-user "$(id -un)" -p Linger 2>/dev/null; fi`,
+    `echo '${SECTION}release'; (. /etc/os-release 2>/dev/null && echo "$ID $VERSION_ID")`,
+    // The packaged app keeps its network keys in the OS keyring and never falls back to plain text.
+    `echo '${SECTION}keyring'`,
+    `if command -v busctl >/dev/null 2>&1; then if busctl --user list --no-pager 2>/dev/null | grep -q org.freedesktop.secrets; then echo running; elif busctl --user list --activatable --no-pager 2>/dev/null | grep -q org.freedesktop.secrets; then echo activatable; else echo none; fi; else echo nobusctl; fi`,
+    `echo '${SECTION}libs'`,
+    `ld=$(command -v ldconfig 2>/dev/null); if test -z "$ld" && test -x /sbin/ldconfig; then ld=/sbin/ldconfig; fi`,
+    `if test -z "$ld"; then echo noldconfig; else cache=$("$ld" -p 2>/dev/null); for l in ${ELECTRON_LIBRARIES.map((lib) => lib.soname).join(' ')}; do case "$cache" in *"$l"*) ;; *) echo "missing:$l";; esac; done; fi`,
     `echo '${SECTION}end'`,
     'true',
     ''
@@ -188,6 +263,17 @@ export function listInstallsScript(root: string): string {
   return ['# mousse:list-installs', `ls -1 ${q(root)} 2>/dev/null || true`, ''].join('\n')
 }
 
+/** Read-only: the libraries the unpacked CLI cannot find, one name per line. */
+export function missingLibrariesScript(directory: string): string {
+  return [
+    '# mousse:check-libs',
+    `cd ${q(`${directory}/squashfs-root`)}`,
+    `(. /etc/os-release 2>/dev/null && echo "release=$ID $VERSION_ID")`,
+    `if command -v ldd >/dev/null 2>&1; then ldd ./mousse-cli 2>/dev/null | awk '/not found/ {print $1}'; fi`,
+    ''
+  ].join('\n')
+}
+
 export function cliScript(step: string, cli: string, args: string[]): string {
   return [`# mousse:${step}`, `${q(cli)} ${args.map(q).join(' ')}`, ''].join('\n')
 }
@@ -249,7 +335,26 @@ export function removeLauncherScript(path: string, manifestId: string): string {
 
 /** Removes an install directory; the path was checked against `installDirectory()`'s shape first. */
 export function removeInstallScript(directory: string): string {
-  return ['# mousse:undo-install', `rm -rf -- ${q(directory)}`, ''].join('\n')
+  // The install root and the `mousse` data folder above it go too, but only while empty (`rmdir`),
+  // so the machine ends up as it was without touching anything else there.
+  const root = directory.slice(0, directory.lastIndexOf('/'))
+  const parent = root.slice(0, root.lastIndexOf('/'))
+  return [
+    '# mousse:undo-install',
+    `rm -rf -- ${q(directory)}`,
+    `rmdir -- ${q(root)} 2>/dev/null || true`,
+    `rmdir -- ${q(parent)} 2>/dev/null || true`,
+    ''
+  ].join('\n')
+}
+
+/** A removed unit keeps its `failed` state in the user manager until it is reset. */
+export function resetFailedScript(): string {
+  return [
+    '# mousse:service-reset',
+    'systemctl --user reset-failed mousse-mms 2>/dev/null || true',
+    ''
+  ].join('\n')
 }
 
 export function startServiceScript(unit: 'systemd' | 'launchd'): string {

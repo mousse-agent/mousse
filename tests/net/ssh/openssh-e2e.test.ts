@@ -16,6 +16,19 @@ import { newId, type NodeId } from '../../../src/shared/net'
  * tests were written for the reviewer's and the author's machines and have not been run in CI.
  */
 const enabled = process.env.MOUSSE_SSH_E2E === '1'
+/**
+ * Where to point the checks. Defaults to the developer's own sshd on `localhost`. To use a throwaway
+ * machine (a container) instead, without touching `~/.ssh`:
+ * - `MOUSSE_SSH_E2E_HOST`: `[user@]host[:port]`;
+ * - `MOUSSE_SSH_E2E_BINARY`: the `ssh` to run, with `HOME` set to a throwaway directory whose `.ssh/config`
+ *   names the key (an OpenSSH that reads `HOME`);
+ * - `MOUSSE_SSH_E2E_USER_KNOWN_HOSTS` and `MOUSSE_SSH_E2E_SSH_DIR`: throwaway files in place of `~/.ssh`
+ *   (the key directory is looked at for `id_*` and `ssh-add` is not run);
+ * - `MOUSSE_SSH_E2E_EXPECT_FORWARDING_REFUSED=1` when that sshd has `AllowTcpForwarding no`.
+ * The join and dial test needs a member that runs on this computer, so it runs against `localhost` only.
+ */
+const target = process.env.MOUSSE_SSH_E2E_HOST || 'localhost'
+const refused = process.env.MOUSSE_SSH_E2E_EXPECT_FORWARDING_REFUSED === '1'
 const cleanup: Array<() => Promise<unknown> | unknown> = []
 afterEach(async () => {
   for (const close of cleanup.splice(0).reverse()) await close()
@@ -40,33 +53,43 @@ function bootstrapFor(profileDir: string, node: () => NodeId | undefined): SshBo
       peerOpen: () => false,
       knownNode: (candidate) => candidate === node()
     },
-    { binary: () => undefined }
+    {
+      binary: () => process.env.MOUSSE_SSH_E2E_BINARY || undefined,
+      userKnownHosts: process.env.MOUSSE_SSH_E2E_USER_KNOWN_HOSTS || undefined,
+      ...(process.env.MOUSSE_SSH_E2E_SSH_DIR
+        ? {
+            sshDirectory: process.env.MOUSSE_SSH_E2E_SSH_DIR,
+            sshAdd: join(process.env.MOUSSE_SSH_E2E_SSH_DIR, 'no-ssh-add')
+          }
+        : {})
+    }
   )
   cleanup.push(() => ssh.close())
   return ssh
 }
 
 it.skipIf(!enabled)(
-  'reads the host key and passes the forwarding probe against localhost',
+  'reads the host key and detects the forwarding result with the real ssh',
   async () => {
     const ssh = bootstrapFor(await profile('mousse-ssh-e2e-'), () => undefined)
-    const first = await ssh.check('localhost')
+    const first = await ssh.check(target)
     expect(first.phase).toBe('untrusted')
     expect(first.hostKey?.fingerprint).toMatch(/^SHA256:/)
-    const trusted = await ssh.trust({ host: 'localhost', fingerprint: first.hostKey!.fingerprint })
+    const trusted = await ssh.trust({ host: target, fingerprint: first.hostKey!.fingerprint })
     expect(trusted.ok).toBe(true)
-    const probed = await ssh.check('localhost')
+    const probed = await ssh.check(target)
     expect(probed.phase).toBe('probed')
+    expect(probed.auth).toBe('ok')
     // `connect failed` (forwarding allowed, port 1 closed) is the pass signal, and it is only
     // logged at INFO, which the probe asks for.
     const forwarding = probed.prerequisites.find((item) => /TCP forwarding/.test(item.name))
-    expect(forwarding?.ok).toBe(true)
+    expect(forwarding?.ok).toBe(!refused)
     expect(forwarding?.indeterminate).toBeUndefined()
   },
   60_000
 )
 
-it.skipIf(!enabled)(
+it.skipIf(!enabled || target !== 'localhost')(
   'joins through a real reverse tunnel, then the authority dials the member over a real ssh -W',
   async () => {
     const authorityDir = await profile('mousse-ssh-e2e-a-'),

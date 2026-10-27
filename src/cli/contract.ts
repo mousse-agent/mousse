@@ -34,6 +34,7 @@ export interface MmsStartupModule {
     cliPath: string
     homeDir: string
     environment?: Record<string, string>
+    execArguments?: readonly string[]
   }): Promise<void>
   uninstallStartup(): Promise<void>
   startupStatus(): Promise<{ installed: boolean; detail: string }>

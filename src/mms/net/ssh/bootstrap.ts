@@ -59,7 +59,9 @@ import {
   launcherContent,
   launcherOwner,
   launcherPath,
+  librariesRemedy,
   lingerDisableScript,
+  missingLibrariesScript,
   lingerEnableScript,
   lingerShowScript,
   listInstallsScript,
@@ -69,6 +71,7 @@ import {
   reconcileInstallScript,
   removeInstallScript,
   removeLauncherScript,
+  resetFailedScript,
   restartServiceScript,
   startServiceScript,
   unitPath,
@@ -556,6 +559,8 @@ export class SshBootstrap {
           ok: Number.isFinite(availableKb) && availableKb >= 500 * 1024,
           remedy: 'Free some disk space in the home directory (the unpacked app is about 400 MB).'
         },
+        libraries(s.get('libs'), s.get('release')),
+        keyring(s.get('keyring')),
         {
           name: PREREQUISITE.launcher,
           ok: launcherText.trim() === '',
@@ -1159,6 +1164,18 @@ export class SshBootstrap {
           const version = m.cli.version!,
             directory = m.cli.installDir!
           await this.installAsset(ctx, version, directory, String(scratch))
+          // A server image has none of Electron's libraries; say so now, not as a service failure.
+          const libraries = await ctx.remote.run(missingLibrariesScript(directory), {
+            timeoutMs: 60_000
+          })
+          const lines = libraries.stdout
+            .split('\n')
+            .map((line) => line.trim())
+            .filter(Boolean)
+          const release = lines.find((line) => line.startsWith('release='))?.slice(8)
+          const missing = lines.filter((line) => !line.startsWith('release='))
+          if (libraries.code === 0 && missing.length)
+            throw new Error(librariesRemedy(missing, release))
           ctx.state.progress = 'Writing the launcher'
           const text = launcherContent(m.id, directory)
           await this.must(ctx, writeLauncherScript(launcher(m)), 'Writing the launcher', {
@@ -1308,6 +1325,10 @@ export class SshBootstrap {
           if (reported !== undefined)
             throw new Interrupted(
               'The machine says it joined, but this computer did not see the invitation used. Nothing was approved; check Devices.'
+            )
+          if (/keystore_locked|key store is locked/iu.test(`${result.stdout}${result.stderr}`))
+            throw new Error(
+              'The Mousse app on the machine cannot store its keys: it needs an unlocked OS keyring (a secret service such as gnome-keyring) in the user session.'
             )
           if (result.missing) throw new Error(MISSING_SSH)
           if (/sshd refused|remote port forwarding failed/iu.test(result.stderr))
@@ -1623,6 +1644,7 @@ export class SshBootstrap {
               cliScript('service-uninstall', cli, ['service', 'uninstall', '--json']),
               'Removing the service'
             )
+            await ctx.remote.run(resetFailedScript(), { timeoutMs: 30_000 })
             done(step, 'The service was removed.')
             break
           }
@@ -1926,6 +1948,32 @@ export class SshBootstrap {
     })
     return { ...check, approved: true }
   }
+}
+
+/** The probe's library section: what `ldconfig -p` does not list of what the CLI links against. */
+function libraries(section: string | undefined, release: string | undefined): SshPrerequisite {
+  const lines = (section ?? '').split('\n').map((line) => line.trim())
+  const missing = lines.filter((line) => line.startsWith('missing:')).map((line) => line.slice(8))
+  if (missing.length)
+    return { name: PREREQUISITE.libraries, ok: false, remedy: librariesRemedy(missing, release) }
+  // Without ldconfig there is nothing to read; the check after unpacking is the one that decides.
+  const unknown = section === undefined || lines.includes('noldconfig')
+  return { name: PREREQUISITE.libraries, ok: true, ...(unknown ? { indeterminate: true } : {}) }
+}
+
+/** Where the packaged app keeps its keys: the OS keyring, through the user's D-Bus session. */
+function keyring(section: string | undefined): SshPrerequisite {
+  const state = (section ?? '').trim()
+  if (state === 'running') return { name: PREREQUISITE.keyring, ok: true }
+  if (state === 'none')
+    return {
+      name: PREREQUISITE.keyring,
+      ok: false,
+      remedy:
+        'The Mousse app keeps its network keys in the OS keyring and never in plain text, so joining fails without one. Install a secret service and unlock it for this user, for example on Debian or Ubuntu: sudo apt-get install -y gnome-keyring libsecret-1-0 dbus-user-session.'
+    }
+  // Activatable but maybe locked, or no busctl to ask: the join reports it if it cannot be used.
+  return { name: PREREQUISITE.keyring, ok: true, indeterminate: true }
 }
 
 function sha256(text: string): string {

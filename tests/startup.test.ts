@@ -133,6 +133,18 @@ describe('linux systemd startup generation', () => {
     )
   })
 
+  it('adds the display switches after service run when asked', () => {
+    expect(buildSystemdUnitContent(cliPath, homeDir)).toContain(`ExecStart=${cliPath} service run\n`)
+    const content = buildSystemdUnitContent(cliPath, homeDir, {}, [
+      '--ozone-platform=headless',
+      '--disable-gpu',
+      '--password-store=gnome-libsecret'
+    ])
+    expect(content).toContain(
+      `ExecStart=${cliPath} service run --ozone-platform=headless --disable-gpu --password-store=gnome-libsecret\n`
+    )
+  })
+
   it('builds systemctl arg arrays', () => {
     expect(buildSystemctlDaemonReloadArgs()).toEqual(['--user', 'daemon-reload'])
     expect(buildSystemctlEnableNowArgs()).toEqual([
