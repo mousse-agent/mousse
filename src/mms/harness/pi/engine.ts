@@ -26,7 +26,7 @@ import { COMMAND_DEADLINE_MS, INTERRUPT_DEADLINE_MS, READY_DEADLINE_MS } from '.
 import { PiBridge, type PiBridgeRegistration } from './bridge'
 import { DescendantTracker, OwnedGroups } from './descendants'
 import { WriterEpisode, type PiToolClass } from './episode'
-import { authorizeDefinitionCall, definitionRefusal } from '../../agentDefinitions/definitionGate'
+import { authorizeDefinitionCall, recordAuthorizedCall } from '../../agentDefinitions/definitionGate'
 import type { AgentExecutionLimit } from '../../../shared/agents/execution'
 import { ANTHROPIC_OAUTH_REFUSED, BUDGET_EXHAUSTED, CREDENTIAL_UNAVAILABLE, GATE_REFUSALS, GATE_UNAVAILABLE, REQUEST_REFUSED } from './extension/messages'
 import { PI_BRIDGE_ENV, type PiCatalogProvider, type PiGateRequest, type PiGateResponse, type PiReadyRequest, type PiRequestResponse, type PiTurnResponse, type PiTurnTool } from './extension/protocol'
@@ -715,10 +715,10 @@ export class PiRpcEngine implements ProviderAdapter {
     const kind = turn.classes.get(request.toolName) ?? 'mutation'
     const access = turn.input.child?.readOnly ? turn.host.tools.toolAccess : undefined
     const builtin = Object.hasOwn(BUILTIN_CLASSES, request.toolName)
-    const definition = builtin ? turn.host.definition : undefined
+    const definition = turn.host.definition
     let input = request.input
     let rewritten: Record<string, unknown> | undefined
-    if (access || definition) {
+    if (access || (definition && builtin)) {
       input = { ...request.input }
       const argument = PI_PATH_ARGUMENTS[request.toolName]
       if (argument) {
@@ -738,13 +738,8 @@ export class PiRpcEngine implements ProviderAdapter {
         return { allow: false, reason: error instanceof Error ? error.message : GATE_REFUSALS.denied }
       }
     }
-    // A definition run's app and MCP tools: refused here when the definition refuses them outright,
-    // so a refused call is never charged (as a refused built-in is not). The registry checks them
-    // again, with approval, when they execute.
-    if (!builtin && turn.host.definition) {
-      const refusal = definitionRefusal(turn.host.definition, { toolName: request.toolName, args: input, projectPath: thread.cwd })
-      if (refusal) return { allow: false, reason: refusal }
-    }
+    // A definition run: every call, built-in or app/MCP, is authorized in full (approval included)
+    // before it is charged, so a refused call never costs a tool call.
     if (definition) {
       // The arguments checked (and approved) are the ones the tool runs with.
       const decided = await authorizeDefinitionCall(definition, { toolName: request.toolName, args: input, projectPath: thread.cwd, signal: turn.input.signal })
@@ -760,6 +755,9 @@ export class PiRpcEngine implements ProviderAdapter {
       turn.refusal ??= BUDGET_EXHAUSTED
       return { allow: false, reason: GATE_REFUSALS.budget }
     }
+    // An app or MCP tool runs through the Mousse MCP registry, which takes this authorization
+    // instead of asking for approval a second time.
+    if (definition && !builtin) recordAuthorizedCall(definition, request.toolCallId, input)
     return rewritten ? { allow: true, input: rewritten } : { allow: true }
   }
 
@@ -1265,7 +1263,10 @@ export class PiRpcEngine implements ProviderAdapter {
   private requestError(message: string, turn: PiTurn): Error {
     if (message.includes(BUDGET_EXHAUSTED)) {
       const limit = turn.host.budget?.exhausted
-      return harnessAppError({ code: 'budget_exhausted', message: limitMessage(limit), ...(limit ? { limit } : {}), instanceId: this.options.instanceId })
+      const text = turn.host.budget?.lost
+        ? "This run's earlier usage is no longer known (Mousse restarted, or the run had already ended), so it cannot continue under its limits."
+        : limitMessage(limit)
+      return harnessAppError({ code: 'budget_exhausted', message: text, ...(limit ? { limit } : {}), instanceId: this.options.instanceId })
     }
     if (message.includes(REQUEST_REFUSED) || message.includes(GATE_UNAVAILABLE))
       return protocolError(this.options.instanceId, `${this.options.label} could not get Mousse's approval for a model request, so nothing was sent.`)

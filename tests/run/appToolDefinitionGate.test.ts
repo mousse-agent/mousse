@@ -3,7 +3,7 @@
  * `tools/call`), the same trusted-dispatch checks the in-process loop applies.
  */
 import { afterEach, describe, expect, it } from 'vitest'
-import type { DefinitionAuthority } from '../../src/mms/agentDefinitions/definitionGate'
+import { recordAuthorizedCall, type DefinitionAuthority } from '../../src/mms/agentDefinitions/definitionGate'
 import type { AgentRuntimePolicy, AgentRuntimeToolApprovalRequest } from '../../src/shared/agents/execution'
 import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
@@ -59,5 +59,22 @@ describe('app tools under a definition’s authority (MCP)', () => {
     digest = (request) => request.argumentDigest
     expect((await s.registry.call('create_task', { description: 'second' }, s.ctx())).isError).toBe(false)
     expect(asked.map((request) => request.arguments)).toEqual([{ description: 'first' }, { description: 'second' }])
+  })
+
+  it('a call the runtime’s gate authorized is revalidated at dispatch without asking again, once, and only with the same arguments', async () => {
+    const asked: AgentRuntimeToolApprovalRequest[] = []
+    const definition: DefinitionAuthority = { policy: policy({ policy: 'always' }), grants: grants('create_task'), approve: async (request) => (asked.push(request), { status: 'denied', reason: 'asked again' }) }
+    const s = await setup(definition)
+    // The registry's call id is the MCP server's `mcp:<clientRequestId>`.
+    const ctx = (callId: string) => ({ ...s.ctx(), toolCallId: `mcp:${callId}` })
+    recordAuthorizedCall(definition, 'call-1', { description: 'approved' })
+    expect((await s.registry.call('create_task', { description: 'approved' }, ctx('call-1'))).isError).toBe(false)
+    expect(asked).toEqual([])
+    // Taken once: the same id again goes through approval (denied here).
+    expect(await s.registry.call('create_task', { description: 'approved' }, ctx('call-1'))).toEqual({ text: 'asked again', isError: true })
+    // Other arguments than the authorized ones: approval again.
+    recordAuthorizedCall(definition, 'call-2', { description: 'approved' })
+    expect(await s.registry.call('create_task', { description: 'changed' }, ctx('call-2'))).toEqual({ text: 'asked again', isError: true })
+    expect(asked).toHaveLength(2)
   })
 })

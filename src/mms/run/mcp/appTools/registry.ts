@@ -1,6 +1,6 @@
 import type { ToolCall } from '@earendil-works/pi-ai'
 import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
-import { authorizeDefinitionCall } from '../../../agentDefinitions/definitionGate'
+import { authorizeDefinitionCall, definitionRefusal, takeAuthorizedCall } from '../../../agentDefinitions/definitionGate'
 import type { ModeCeiling } from '../../types'
 import type { AppToolTurns } from './turns'
 import { callerThreadOnly } from './thread'
@@ -207,9 +207,21 @@ export class ToolRegistry {
     const unattended = unattendedRefusal(tool, turn)
     if (unattended) return { text: unattended, isError: true }
     // A definition run: its grants, policy and approvals hold for every call, as in the in-process loop.
+    // A call the runtime's gate already authorized in full (approval included, before it was
+    // charged) is revalidated without asking again; any other call is authorized here.
     if (turn.definition) {
-      const decision = await authorizeDefinitionCall(turn.definition, { toolName: name, args, ...(turn.projectPath ? { projectPath: turn.projectPath } : {}), signal: request.signal })
-      if (!decision.allowed) return { text: decision.message, isError: true }
+      const callId = request.toolCallId.startsWith('mcp:') ? request.toolCallId.slice('mcp:'.length) : request.toolCallId
+      // The call id travels in the arguments on some transports; it is not part of the call.
+      const checked = { ...args }
+      delete checked.clientRequestId
+      const projectPath = turn.projectPath ? { projectPath: turn.projectPath } : {}
+      if (takeAuthorizedCall(turn.definition, callId, checked)) {
+        const refusal = definitionRefusal(turn.definition, { toolName: name, args: checked, ...projectPath })
+        if (refusal) return { text: refusal, isError: true }
+      } else {
+        const decision = await authorizeDefinitionCall(turn.definition, { toolName: name, args: checked, ...projectPath, signal: request.signal })
+        if (!decision.allowed) return { text: decision.message, isError: true }
+      }
     }
     const ctx: ToolCallContext = { caller, turn, toolCallId: request.toolCallId, signal: request.signal, transport: 'mcp' }
     const ledger = this.options.toolLedger?.(active)

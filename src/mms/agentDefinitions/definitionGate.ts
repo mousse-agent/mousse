@@ -1,7 +1,7 @@
 import type { AgentRuntimePolicy, AgentRuntimeToolApprovalCallback } from '../../shared/agents/execution'
 import type { EffectiveAgentGrants } from '../../shared/agents/types'
 import type { McpToolDescriptor } from '../../shared/integrations'
-import { authorizeTrustedToolDispatch, canonicalizeBuiltinToolName, prepareTrustedToolDispatch } from './runtimePolicy'
+import { authorizeTrustedToolDispatch, canonicalizeBuiltinToolName, digestToolArguments, prepareTrustedToolDispatch } from './runtimePolicy'
 
 /**
  * A definition's authority over each tool call of its run, when the run is on a runtime with its
@@ -48,6 +48,32 @@ export function definitionRefusal(authority: DefinitionAuthority, call: { toolNa
     ...(call.projectPath ? { projectPath: call.projectPath } : {})
   })
   return prepared.allowed ? undefined : prepared.message ?? 'Tool dispatch denied.'
+}
+
+/**
+ * Calls a runtime's tool gate already authorized in full (approval included) for app or MCP tools
+ * that run later through the Mousse MCP registry: by call id, the digest of the authorized
+ * arguments. The registry takes each once, so approval is asked once per call.
+ */
+const AUTHORIZED = new WeakMap<DefinitionAuthority, Map<string, string>>()
+
+/** The gate authorized `callId` with `args` in full; the registry's dispatch may take it once. */
+export function recordAuthorizedCall(authority: DefinitionAuthority, callId: string, args: Record<string, unknown>): void {
+  let calls = AUTHORIZED.get(authority)
+  if (!calls) AUTHORIZED.set(authority, (calls = new Map()))
+  calls.set(callId, digestToolArguments(args))
+}
+
+/**
+ * At dispatch: whether `callId` was authorized in full with exactly these arguments. The record is
+ * taken (one dispatch per authorization).
+ */
+export function takeAuthorizedCall(authority: DefinitionAuthority, callId: string, args: Record<string, unknown>): boolean {
+  const calls = AUTHORIZED.get(authority)
+  const digest = calls?.get(callId)
+  if (digest === undefined) return false
+  calls!.delete(callId)
+  return digest === digestToolArguments(args)
 }
 
 /**

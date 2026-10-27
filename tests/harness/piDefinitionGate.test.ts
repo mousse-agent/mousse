@@ -1,8 +1,13 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { DefinitionAuthority } from '../../src/mms/agentDefinitions/definitionGate'
 import { RunCounters, TurnBudget } from '../../src/mms/harness/budget'
+import { ToolRegistry, type MousseTool } from '../../src/mms/run/mcp/appTools/registry'
+import { AppToolTurns } from '../../src/mms/run/mcp/appTools/turns'
+import { appTurn } from '../run/appToolsFixture'
 import type { AgentRuntimePolicy, AgentRuntimeToolApprovalRequest } from '../../src/shared/agents/execution'
 import type { EffectiveAgentGrants } from '../../src/shared/agents/types'
 import { harness, script, setup } from './piRpcEngineFixture'
@@ -154,5 +159,88 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
     // The refused app tool cost nothing: the one allowed call was the granted write.
     expect(readFileSync(join(project, 'granted.txt'), 'utf8')).toBe('ok')
     expect(counters.toolCalls).toBe(1)
+  }, 90_000)
+
+  /**
+   * A definition run whose app tool `create_task` runs through the real Mousse tool registry behind
+   * a local MCP endpoint, with `maxToolCalls: 1`. The model calls `create_task`, then `write`.
+   */
+  async function appToolRun(approve: (request: AgentRuntimeToolApprovalRequest) => { status: 'approved' | 'denied'; digest?: string; reason?: string }) {
+    const { engine, recorder, project } = await setup(cleanups, {
+      mousseTools: () => [{ name: 'create_task', description: 'Create a task', inputSchema: { type: 'object', properties: { description: { type: 'string' } } }, class: 'mutation' }]
+    })
+    const asked: AgentRuntimeToolApprovalRequest[] = []
+    const definition: DefinitionAuthority = {
+      policy: policy(project, { approval: { policy: 'always' } }),
+      grants: grants('create_task', 'write'),
+      approve: async (request) => (asked.push(request), approve(request))
+    }
+    const turns = new AppToolTurns()
+    turns.register(appTurn({ threadId: 't1', runId: 'r1', turnToken: 'tt', projectPath: project, definition }))
+    const ran: unknown[] = []
+    const registry = new ToolRegistry({ activeRunId: () => 'r1', turns })
+    registry.register({ name: 'create_task', description: 'Create a task', inputSchema: {}, access: 'actsAsCaller', class: 'mutation', handler: async (args) => (ran.push(args), { text: 'created' }) } as unknown as MousseTool)
+    // A minimal MCP endpoint: the call id as the MCP server derives it from `clientRequestId`.
+    const server = createServer(async (req, res) => {
+      let body = ''
+      for await (const chunk of req) body += chunk
+      const call = JSON.parse(body) as { id: string; params: { name: string; arguments: Record<string, unknown> } }
+      const { clientRequestId, ...args } = call.params.arguments
+      const outcome = await registry.call(call.params.name, args, {
+        credential: { threadId: 't1', runId: 'r1', provider: 'pi', modeCeiling: 'default', binding: 'per_call', current: () => true },
+        toolCallId: `mcp:${String(clientRequestId)}`,
+        signal: new AbortController().signal
+      })
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: call.id, result: { content: [{ type: 'text', text: outcome.text }], isError: outcome.isError } }))
+    })
+    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done))
+    cleanups.push(() => new Promise<void>((done) => server.close(() => done())))
+    recorder.respond(script([
+      { tool: { name: 'create_task', args: { description: 'a task' } } },
+      { tool: { name: 'write', args: { path: 'allowed.txt', content: 'ok' } } },
+      { text: 'done' }
+    ]))
+    const counters = new RunCounters()
+    const turn = harness(project, {}, {
+      definition,
+      budget: new TurnBudget({ maxToolCalls: 1 }, counters),
+      bridge: { mcp: { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`, token: 'fake' }, turnToken: 'tt', sessionInstructions: '', turnPreamble: '', userMcp: 'proxy' }
+    })
+    const result = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host).catch((caught: unknown) => caught)
+    return { result, asked, ran, counters, project }
+  }
+
+  it('an app tool whose approval is denied costs no tool call, and is asked once', async () => {
+    const { result, asked, ran, counters, project } = await appToolRun((request) =>
+      request.toolName === 'create_task' ? { status: 'denied', reason: 'No task please' } : { status: 'approved', digest: request.argumentDigest })
+    expect(asked.map((request) => request.toolName)).toEqual(['create_task', 'write'])
+    expect(ran).toEqual([])
+    // The one allowed call was the approved write.
+    expect(readFileSync(join(project, 'allowed.txt'), 'utf8')).toBe('ok')
+    expect(counters.toolCalls).toBe(1)
+    expect(result).toMatchObject({ text: 'done' })
+  }, 90_000)
+
+  it('an app tool approved with a stale digest costs no tool call', async () => {
+    const { result, ran, counters, project } = await appToolRun((request) =>
+      request.toolName === 'create_task' ? { status: 'approved', digest: 'stale' } : { status: 'approved', digest: request.argumentDigest })
+    expect(ran).toEqual([])
+    expect(readFileSync(join(project, 'allowed.txt'), 'utf8')).toBe('ok')
+    expect(counters.toolCalls).toBe(1)
+    expect(result).toMatchObject({ text: 'done' })
+  }, 90_000)
+
+  it('an approved app tool is asked once, runs once with the approved arguments, and uses the call', async () => {
+    const { result, asked, ran, counters, project } = await appToolRun((request) => ({ status: 'approved', digest: request.argumentDigest }))
+    // Each call was asked once, at the gate (the registry took that authorization at dispatch);
+    // the write was approved and then refused by the limit, before it ran.
+    expect(asked.map((request) => request.toolName)).toEqual(['create_task', 'write'])
+    expect(asked[0].arguments).toEqual({ description: 'a task' })
+    expect(ran).toEqual([{ description: 'a task' }])
+    expect(counters.toolCalls).toBe(1)
+    // The write past the limit never ran, and the run ended on the limit.
+    expect(existsSync(join(project, 'allowed.txt'))).toBe(false)
+    expect(result).toMatchObject({ code: 'budget_exhausted', details: { limit: { kind: 'tool_calls', limit: 1, actual: 1 } } })
   }, 90_000)
 })
