@@ -407,6 +407,7 @@ export const PROTOCOL_METHODS = [
   'github.createRepository',
   'github.cloneRepository',
   'pullRequests.get',
+  'pullRequests.detail',
   'pullRequests.draft',
   'pullRequests.create',
   'pullRequests.baseBranches',

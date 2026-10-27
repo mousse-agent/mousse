@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
@@ -7,7 +7,8 @@ import { LocalMmsClient } from '../src/mms/protocol/client'
 import { PROTOCOL_METHODS } from '../src/mms/protocol/types'
 import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
 import type { GitPullRequestInfo, GitPullRequestLookup, Thread } from '../src/shared/types'
-import { PULL_REQUEST_EXISTS } from '../src/mms/git/GitHubCodeHost'
+import { parsePullRequestDetail, PULL_REQUEST_EXISTS, PullRequestReadError } from '../src/mms/git/GitHubCodeHost'
+import type { PullRequestDetail } from '../src/shared/pullRequests'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
 
 const info = (patch: Partial<GitPullRequestInfo> = {}): GitPullRequestInfo => ({
@@ -20,6 +21,16 @@ const info = (patch: Partial<GitPullRequestInfo> = {}): GitPullRequestInfo => ({
   baseRefName: 'main',
   checks: 'passing',
   checkCounts: { passed: 1, failed: 0, pending: 0, waiting: 0, total: 1 },
+  ...patch
+})
+
+/** A pull request read in full, from the recorded `gh pr view` output. */
+const detailOf = (patch: Partial<PullRequestDetail> = {}): PullRequestDetail => ({
+  ...parsePullRequestDetail(
+    { host: 'github.com', nameWithOwner: 'acme/app', number: 7 },
+    readFileSync(new URL('./fixtures/github/pr-view.json', import.meta.url), 'utf8'),
+    []
+  )!,
   ...patch
 })
 
@@ -58,7 +69,7 @@ describe('pull request methods through the daemon protocol', () => {
   const normalized = (path: unknown) => String(path).replace(/\\/g, '/').toLowerCase()
 
   it('lists the methods', () => {
-    for (const method of ['pullRequests.get', 'pullRequests.draft', 'pullRequests.create', 'pullRequests.baseBranches', 'pullRequests.link', 'pullRequests.unlink']) {
+    for (const method of ['pullRequests.get', 'pullRequests.detail', 'pullRequests.draft', 'pullRequests.create', 'pullRequests.baseBranches', 'pullRequests.link', 'pullRequests.unlink']) {
       expect(PROTOCOL_METHODS).toContain(method)
     }
   })
@@ -83,6 +94,7 @@ describe('pull request methods through the daemon protocol', () => {
 
   it('rejects unknown keys, both ids, and no id', async () => {
     const spy = lookupSpy()
+    const detail = vi.spyOn(mms.gitService.codeHost, 'getPullRequestDetail').mockResolvedValue(detailOf())
     const project = mms.projects.openProject(f.repo)
     const thread = mms.threads.createThread('Task A', project.id)
     await expect(client.request('pullRequests.get', { projectId: project.id, cwd: '/tmp' })).rejects.toThrow(/cwd is not allowed/)
@@ -97,6 +109,13 @@ describe('pull request methods through the daemon protocol', () => {
     await expect(client.request('pullRequests.draft', { projectId: project.id, expectedBranch: 'feature', originThreadId: 'missing' })).rejects.toThrow(/not found/i)
     await expect(client.request('pullRequests.baseBranches', { projectId: project.id, extra: 1 })).rejects.toThrow(/extra is not allowed/)
     await expect(client.request('pullRequests.link', { threadId: thread.id, number: 1, branch: 'x' })).rejects.toThrow(/branch is not allowed/)
+    await expect(client.request('pullRequests.detail', { projectId: project.id, number: 7, cwd: '/tmp' })).rejects.toThrow(/cwd is not allowed/)
+    await expect(client.request('pullRequests.detail', { projectId: project.id, threadId: thread.id, number: 7 })).rejects.toThrow(/either threadId or projectId/)
+    await expect(client.request('pullRequests.detail', { number: 7 })).rejects.toThrow(/projectId or threadId is required/)
+    await expect(client.request('pullRequests.detail', { projectId: project.id })).rejects.toThrow(/number/)
+    await expect(client.request('pullRequests.detail', { projectId: project.id, number: 0 })).rejects.toThrow(/number/)
+    await expect(client.request('pullRequests.detail', { threadId: 'missing', number: 7 })).rejects.toThrow(/not found/i)
+    expect(detail).not.toHaveBeenCalled()
     await expect(client.request('pullRequests.unlink', { threadId: thread.id, number: 1 })).rejects.toThrow(/number is not allowed/)
     await expect(client.request('pullRequests.unlink', { threadId: 'missing' })).rejects.toThrow(/not found/i)
     await expect(client.request('pullRequests.get', { threadId: 'missing' })).rejects.toThrow(/not found/i)
@@ -388,25 +407,75 @@ describe('pull request methods through the daemon protocol', () => {
     })
   })
 
+  const detailSpy = (detail: PullRequestDetail = detailOf()) =>
+    vi.spyOn(mms.gitService.codeHost, 'getPullRequestDetail').mockResolvedValue(detail)
+
+  describe('reading a pull request in full', () => {
+    it('reads in the project folder for a projectId and in the thread\'s own worktree for a threadId', async () => {
+      const spy = detailSpy()
+      const project = mms.projects.openProject(f.repo)
+      const thread = mms.threads.createThread('Task A', project.id)
+      const workspace = await new WorkspaceResolver(mms.threads.getThreadDir(thread.id), thread.id, f.repo).resolve('agent')
+
+      const answer = await client.request<{ detail: PullRequestDetail }>('pullRequests.detail', { projectId: project.id, number: 7 })
+      await client.request('pullRequests.detail', { threadId: thread.id, number: 7, force: true })
+
+      expect(answer.detail).toMatchObject({ number: 7, reviewDecision: 'changes_requested', headSha: '0123456789abcdef0123456789abcdef01234567' })
+      expect(answer.detail.checkRuns.map((check) => check.name)).toEqual(['build', 'test', 'lint', 'docs', 'ci/deploy-preview'])
+      expect(normalized(spy.mock.calls[0][0])).toBe(normalized(f.repo))
+      expect(spy.mock.calls[0].slice(1)).toEqual([7, { force: false }])
+      expect(normalized(spy.mock.calls[1][0])).toBe(normalized(workspace.workspacePath))
+      expect(spy.mock.calls[1].slice(1)).toEqual([7, { force: true }])
+    })
+
+    it('answers a failed read with the host\'s own message and the kind of failure as the code', async () => {
+      const project = mms.projects.openProject(f.repo)
+      const host = vi.spyOn(mms.gitService.codeHost, 'getPullRequestDetail')
+      host.mockRejectedValueOnce(new PullRequestReadError('GraphQL: Could not resolve to a PullRequest with the number of 7. — pull request #7 is not in acme/app on github.com, or signed in to github.com as octocat, which cannot see it.', 'not-found'))
+      const missing = await client.request('pullRequests.detail', { projectId: project.id, number: 7 }).catch((error: unknown) => error as { code?: string; message: string })
+      expect(missing).toMatchObject({ code: 'pull_request_not_found' })
+      expect((missing as Error).message).toContain('signed in to github.com as octocat')
+
+      host.mockRejectedValueOnce(new PullRequestReadError('GraphQL: API rate limit exceeded for user ID 1.', 'rate-limited'))
+      expect(await client.request('pullRequests.detail', { projectId: project.id, number: 7 }).catch((error: unknown) => error)).toMatchObject({
+        code: 'pull_request_rate_limited',
+        message: 'GraphQL: API rate limit exceeded for user ID 1.'
+      })
+
+      host.mockRejectedValueOnce(new PullRequestReadError('To get started with GitHub CLI, please run:  gh auth login — not signed in to github.com for /repo.', 'unauthenticated'))
+      expect(await client.request('pullRequests.detail', { projectId: project.id, number: 7 }).catch((error: unknown) => error)).toMatchObject({
+        code: 'pull_request_unavailable',
+        message: expect.stringContaining('gh auth login')
+      })
+
+      // A failure the host did not classify still arrives with its words, not as "something went wrong".
+      host.mockRejectedValueOnce(new Error('HTTP 502: Bad Gateway'))
+      expect(await client.request('pullRequests.detail', { projectId: project.id, number: 7 }).catch((error: unknown) => error)).toMatchObject({
+        code: 'pull_request_unavailable',
+        message: 'HTTP 502: Bad Gateway'
+      })
+    })
+  })
+
   it('links a pull request to a thread, and unlinks it, announcing each change', async () => {
-    lookupSpy()
-    vi.spyOn(mms.gitService.codeHost, 'repositoryIdentity').mockResolvedValue({ host: 'github.com', nameWithOwner: 'acme/app' })
+    const spy = detailSpy()
     const project = mms.projects.openProject(f.repo)
     const thread = mms.threads.createThread('Task A', project.id)
 
-    const linked = await client.request<{ thread: Thread }>('pullRequests.link', { threadId: thread.id, number: 12 })
+    const linked = await client.request<{ thread: Thread }>('pullRequests.link', { threadId: thread.id, number: 7 })
     expect(linked.thread.pullRequest).toMatchObject({
-      number: 12,
-      url: 'https://github.com/acme/app/pull/12',
+      number: 7,
+      url: 'https://github.com/acme/app/pull/7',
       host: 'github.com',
       nameWithOwner: 'acme/app',
-      headRefName: 'feature',
+      headRefName: 'feature/retry',
       baseRefName: 'main',
       headRepository: 'acme/app',
       isCrossRepository: false
     })
+    expect(spy.mock.calls[0].slice(1)).toEqual([7, { force: true }])
     expect(Date.parse(linked.thread.pullRequest!.linkedAt)).not.toBeNaN()
-    expect(mms.threads.getThread(thread.id)?.pullRequest?.number).toBe(12)
+    expect(mms.threads.getThread(thread.id)?.pullRequest?.number).toBe(7)
     await vi.waitFor(() => expect(events.filter((event) => event.type === 'threads.updated').length).toBeGreaterThan(0))
 
     const before = events.filter((event) => event.type === 'threads.updated').length
@@ -416,42 +485,40 @@ describe('pull request methods through the daemon protocol', () => {
     await vi.waitFor(() => expect(events.filter((event) => event.type === 'threads.updated').length).toBeGreaterThan(before))
   })
 
-  it('refuses to link a number that is not the thread\'s branch\'s pull request, and links nothing', async () => {
-    lookupSpy({ state: 'found', pullRequest: info({ number: 12 }) })
+  it('links a pull request from a fork, with its head and base repositories, whichever branch the thread is on', async () => {
+    detailSpy(detailOf({ number: 12, headRepository: 'forker/app', isCrossRepository: true, headRefName: 'fix-typo' }))
     const project = mms.projects.openProject(f.repo)
     const thread = mms.threads.createThread('Task A', project.id)
-    await expect(client.request('pullRequests.link', { threadId: thread.id, number: 99 })).rejects.toThrow(/#99/)
-    vi.restoreAllMocks()
-    lookupSpy({ state: 'none', isDefaultBranch: false })
-    await expect(client.request('pullRequests.link', { threadId: thread.id, number: 12 })).rejects.toThrow(/#12/)
+    const linked = await client.request<{ thread: Thread }>('pullRequests.link', { threadId: thread.id, number: 12 })
+    expect(linked.thread.pullRequest).toMatchObject({ number: 12, headRepository: 'forker/app', isCrossRepository: true, headRefName: 'fix-typo', nameWithOwner: 'acme/app' })
+  })
+
+  it('links nothing when the pull request cannot be found or read, and says why in the host\'s words', async () => {
+    const project = mms.projects.openProject(f.repo)
+    const thread = mms.threads.createThread('Task A', project.id)
+    const host = vi.spyOn(mms.gitService.codeHost, 'getPullRequestDetail')
+    host.mockRejectedValueOnce(new PullRequestReadError('GraphQL: Could not resolve to a PullRequest with the number of 99.', 'not-found'))
+    await expect(client.request('pullRequests.link', { threadId: thread.id, number: 99 })).rejects.toThrow(/number of 99/)
+    host.mockRejectedValueOnce(new PullRequestReadError('You are not logged in to github.com', 'unauthenticated'))
+    await expect(client.request('pullRequests.link', { threadId: thread.id, number: 12 })).rejects.toThrow(/not logged in to github\.com/)
     await expect(client.request('pullRequests.link', { threadId: 'missing', number: 12 })).rejects.toThrow(/not found/i)
     expect(mms.threads.getThread(thread.id)?.pullRequest).toBeUndefined()
   })
 
-  it('gives the real reason when the branch lookup is unavailable, instead of a wrong-number error', async () => {
-    lookupSpy({ state: 'unavailable', reason: 'unauthenticated', message: 'You are not logged in to github.com' })
-    const project = mms.projects.openProject(f.repo)
-    const thread = mms.threads.createThread('Task A', project.id)
-    await expect(client.request('pullRequests.link', { threadId: thread.id, number: 12 })).rejects.toThrow(/not logged in to github\.com/)
-    expect(mms.threads.getThread(thread.id)?.pullRequest).toBeUndefined()
-  })
-
   it('does not overwrite an unlink that landed while the link was being read', async () => {
-    vi.spyOn(mms.gitService.codeHost, 'repositoryIdentity').mockResolvedValue({ host: 'github.com', nameWithOwner: 'acme/app' })
     const project = mms.projects.openProject(f.repo)
     const thread = mms.threads.createThread('Task A', project.id)
-    lookupSpy()
-    await client.request('pullRequests.link', { threadId: thread.id, number: 12 })
+    detailSpy()
+    await client.request('pullRequests.link', { threadId: thread.id, number: 7 })
 
     vi.restoreAllMocks()
-    vi.spyOn(mms.gitService.codeHost, 'repositoryIdentity').mockResolvedValue({ host: 'github.com', nameWithOwner: 'acme/app' })
     let release: () => void = () => undefined
     const gate = new Promise<void>((resolve) => { release = resolve })
-    const spy = vi.spyOn(mms.gitService.codeHost, 'lookupPullRequest').mockImplementation(async () => {
+    const spy = vi.spyOn(mms.gitService.codeHost, 'getPullRequestDetail').mockImplementation(async () => {
       await gate
-      return { state: 'found', pullRequest: info() }
+      return detailOf()
     })
-    const relink = client.request('pullRequests.link', { threadId: thread.id, number: 12 })
+    const relink = client.request('pullRequests.link', { threadId: thread.id, number: 7 })
     const rejected = expect(relink).rejects.toThrow(/changed while/)
     await vi.waitFor(() => expect(spy).toHaveBeenCalled())
     await client.request('pullRequests.unlink', { threadId: thread.id })
@@ -460,13 +527,12 @@ describe('pull request methods through the daemon protocol', () => {
     expect(mms.threads.getThread(thread.id)?.pullRequest).toBeUndefined()
   })
 
-  it('looks the branch up in the thread\'s worktree when linking', async () => {
-    const spy = lookupSpy()
-    vi.spyOn(mms.gitService.codeHost, 'repositoryIdentity').mockResolvedValue({ host: 'github.com', nameWithOwner: 'acme/app' })
+  it('reads the pull request in the thread\'s worktree when linking', async () => {
+    const spy = detailSpy()
     const project = mms.projects.openProject(f.repo)
     const thread = mms.threads.createThread('Task A', project.id)
     const workspace = await new WorkspaceResolver(mms.threads.getThreadDir(thread.id), thread.id, f.repo).resolve('agent')
-    await client.request('pullRequests.link', { threadId: thread.id, number: 12 })
+    await client.request('pullRequests.link', { threadId: thread.id, number: 7 })
     expect(normalized(spy.mock.calls[0][0])).toBe(normalized(workspace.workspacePath))
     expect(spy.mock.calls[0][2]).toEqual({ force: true })
   })

@@ -23,8 +23,8 @@ import { PROVIDER_STT_MAX_BYTES } from '../../shared/dictation'
 import { PROVIDER_TTS_MAX_CHARS } from '../../shared/readAloud'
 import type { ExternalEffect, ThreadAction } from '../../shared/threadActions'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
-import type { GitPullRequestInfo, RepositoryIdentity, ThreadPullRequestLink } from '../../shared/pullRequests'
-import { PULL_REQUEST_EXISTS } from '../git/GitHubCodeHost'
+import type { GitPullRequestInfo, PullRequestDetail, RepositoryIdentity, ThreadPullRequestLink } from '../../shared/pullRequests'
+import { PULL_REQUEST_EXISTS, PullRequestReadError } from '../git/GitHubCodeHost'
 import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest } from '../../shared/types'
 import { createErrorProvider } from '../../shared/errors'
 import { listClaimedQueue } from '../queue/ThreadMessageQueue'
@@ -471,6 +471,40 @@ function threadPullRequestLink(identity: RepositoryIdentity, pullRequest: GitPul
     headRepository: identity.nameWithOwner,
     isCrossRepository: false,
     linkedAt: new Date().toISOString()
+  }
+}
+
+/** The link a thread keeps to a pull request, from the host's full read of it (head and base repositories included). */
+function threadPullRequestLinkFromDetail(detail: PullRequestDetail): ThreadPullRequestLink {
+  return {
+    number: detail.number,
+    url: detail.url,
+    host: detail.identity.host,
+    nameWithOwner: detail.identity.nameWithOwner,
+    headRefName: detail.headRefName,
+    baseRefName: detail.baseRefName,
+    headRepository: detail.headRepository,
+    isCrossRepository: detail.isCrossRepository,
+    linkedAt: new Date().toISOString()
+  }
+}
+
+const PULL_REQUEST_READ_CODES = {
+  'not-found': 'pull_request_not_found',
+  'rate-limited': 'pull_request_rate_limited'
+} as const
+
+/**
+ * Reads one pull request. A failed read reaches the caller as a domain error carrying the host's own
+ * message (a plain error would reach a client as "something went wrong"), with the kind of failure as its code.
+ */
+async function readPullRequestDetail(ctx: HandlerContext, root: string, number: number, force: boolean): Promise<PullRequestDetail> {
+  try {
+    return await ctx.mms.gitService.codeHost.getPullRequestDetail(root, number, { force })
+  } catch (error) {
+    const kind = error instanceof PullRequestReadError ? error.kind : 'error'
+    const code = kind === 'not-found' || kind === 'rate-limited' ? PULL_REQUEST_READ_CODES[kind] : 'pull_request_unavailable'
+    throw new DomainRpcError(code, error instanceof Error ? error.message : String(error), { number, reason: kind })
   }
 }
 
@@ -2609,6 +2643,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       )
       return { lookup }
     }
+    case 'pullRequests.detail': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'projectId', 'number', 'force'])
+      const number = asBoundedInt(p.number, 'number', { min: 1, max: Number.MAX_SAFE_INTEGER })
+      const detail = await readPullRequestDetail(ctx, pullRequestFolder(ctx, p), number, asOptionalBoolean(p.force, 'force') === true)
+      return { detail }
+    }
     case 'pullRequests.draft': {
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['threadId', 'projectId', 'originThreadId', 'expectedBranch', 'base'])
@@ -2685,23 +2726,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const number = asBoundedInt(p.number, 'number', { min: 1, max: Number.MAX_SAFE_INTEGER })
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       const root = pullRequestFolder(ctx, { threadId })
-      const codeHost = ctx.mms.gitService.codeHost
       const before = ctx.mms.threads.getThread(threadId)?.pullRequest
-      // The lookup is what the host reports for the thread's own branch; a pull request from any other branch needs the detail read.
-      const lookup = await codeHost.lookupPullRequest(root, undefined, { force: true })
-      if (lookup.state === 'unavailable') {
-        throw new DomainRpcError('pull_request_unavailable', lookup.message, { threadId, number, reason: lookup.reason })
-      }
-      if (lookup.state !== 'found' || lookup.pullRequest.number !== number) {
-        throw new DomainRpcError('pull_request_not_found', `Pull request #${number} is not the pull request of this thread's branch`, { threadId, number })
-      }
-      const identity = await codeHost.repositoryIdentity(root)
+      // Any pull request of the folder's repository, by number: the full read names the head and base repositories.
+      const detail = await readPullRequestDetail(ctx, root, number, true)
       // An unlink or another link that landed while the host was being read wins; this one answers a state that is gone.
       const now = ctx.mms.threads.getThread(threadId)?.pullRequest
       if (now?.number !== before?.number || now?.linkedAt !== before?.linkedAt) {
         throw new DomainRpcError('pull_request_link_changed', "The thread's pull request link changed while it was being read; try again", { threadId, number })
       }
-      const thread = ctx.mms.threads.updateThreadMeta(threadId, { pullRequest: threadPullRequestLink(identity, lookup.pullRequest) })
+      const thread = ctx.mms.threads.updateThreadMeta(threadId, { pullRequest: threadPullRequestLinkFromDetail(detail) })
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: visibleThreadsFor(ctx.connection, threads) }

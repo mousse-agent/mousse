@@ -117,6 +117,7 @@ import { isThreadActivityActive } from '../../shared/types'
 import type {
   CreatePullRequestResult,
   PullRequestBaseBranches,
+  PullRequestDetail,
   PullRequestDraft,
   PullRequestFormInput,
   PullRequestRef,
@@ -1900,6 +1901,15 @@ export function registerGuiIpc(
       ...(force === true ? { force } : {})
     })
     return response.lookup
+  })
+  registerHandler('pullRequests:detail', async (_e, ref: PullRequestRef | undefined, number: number, force?: boolean) => {
+    const response = await guiMms.request<{ detail: PullRequestDetail }>('pullRequests.detail', {
+      ...(typeof ref?.threadId === 'string' ? { threadId: ref.threadId } : {}),
+      ...(typeof ref?.projectId === 'string' ? { projectId: ref.projectId } : {}),
+      number,
+      ...(force === true ? { force } : {})
+    })
+    return response.detail
   })
   registerHandler('pullRequests:draft', async (_e, scope: PullRequestScope, base?: string) => {
     const response = await guiMms.request<{ title: string; body: string; base: string; source: 'model' | 'heuristic' }>(
