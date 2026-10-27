@@ -179,6 +179,25 @@ sign-in check, chat) runs `grok --permission-mode default agent --no-leader stdi
   families: Settings refuses them, a stored one is dropped at launch, and the entry says which ones
   are not used. The variable names were checked against the text of Codex 0.162's program file,
   which was not run.
+- Launch arguments are applied as given, except `-c` / `--config` overrides of `openai_base_url`,
+  `chatgpt_base_url`, `sqlite_home`, `log_dir`, `cli_auth_credentials_store`, `model_provider` and
+  `model_providers`: they win over the home's `config.toml` and would move the sign-in or the state,
+  send the account's token to another address, or route a chat elsewhere. Settings refuses them, a
+  stored one is dropped at launch, and the entry says which ones are not used. The sign-in and
+  sign-out commands run without the entry's arguments.
+- Every message of a private entry about its sign-in names Settings → Providers, never plain
+  `codex login`, which would sign in the user's own `~/.codex`. The command to copy sets `CODEX_HOME`
+  and `CODEX_SQLITE_HOME`; a terminal's own variables are not cleaned (the in-app sign-in is the one
+  that runs on a closed environment). On Windows a profile path with `%` or `"` cannot be quoted for
+  `cmd`, so no command is shown and the entry says what to set.
+- **Versions.** `--device-auth`, the home's state variable and the per-home credential store were
+  checked only against Codex 0.162.1; the lowest tested version is 0.100.0. If Codex is older, the
+  sign-in fails with the terminal's exit code or the credential-store message.
+- **Not verified.** MCP servers that sign in with OAuth keep their tokens in the operating system's
+  credential store under the server's name and address, not per home: an MCP server with the same
+  name and address in two homes may share a token on macOS and Windows, and `codex mcp logout` in
+  one removes it for the other. Set `mcp_oauth_credentials_store = "file"` in the config.toml of the
+  private home to keep them per home. Check on macOS and Windows before relying on separate MCP sign-ins.
 - **Sign in** runs `codex login --device-auth` there, starting in the home folder, and shows the link
   and one-time code Codex prints (only the lines under its own sign-in steps, once complete). Every
   Codex process of the home is ended first, because a running one keeps the account it started with
@@ -196,6 +215,13 @@ sign-in check, chat) runs `grok --permission-mode default agent --no-leader stdi
 - The home starts empty: the user's own `~/.codex` (its `config.toml`, MCP servers, instructions and
   sessions) is not shared with it, and the entry keeps its own settings and saved chats in its own
   folder. A chat saved under one entry never resumes on another.
+- **What stays after removal.** Codex writes its state database, logs, sessions and history into the
+  home as soon as it starts there, and `codex logout` removes only the sign-in. So a removed entry
+  that ever ran leaves `<profile>/harness/<id>/home` with its chat records on disk (not just the
+  sign-in); delete the folder by hand to remove them. Removal waits for the entry's app-server to
+  exit (up to ten seconds) before it deletes the rest.
+- Two entries signed in with the same email show "Same account as …" even when they are different
+  workspaces of that email: Codex reports the email and plan, not the workspace.
 - Two entries signed in to the same account say so ("Same account as …").
 
 ## Notes

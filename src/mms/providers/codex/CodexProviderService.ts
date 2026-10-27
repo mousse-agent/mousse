@@ -212,6 +212,12 @@ export interface CodexServiceOptions {
   signedOut?: () => boolean
   /** Saves an executable path entered at sign-in to the instance config (the gateway's `configure`). */
   saveLaunch?: (patch: CliProviderConfigPatch) => Promise<void>
+  /**
+   * For an instance with a home of its own: the sentence that tells the user how to sign it in, used
+   * in every message about the sign-in. Without it the messages tell the user to run plain `codex
+   * login`, which would sign in their own home instead of this one.
+   */
+  ownSignIn?: string
 }
 
 /** A turn Codex ended as failed, with what it said about why. The message is redacted. */
@@ -353,9 +359,10 @@ export interface CodexChatResult {
 }
 
 /**
- * The environment of the app-server process. It reuses the terminal sign-in: `CODEX_HOME` is
- * never set (an inherited one is kept, as the terminal `codex` would use it), so `~/.codex` and
- * its ChatGPT tokens are shared. API keys and OpenAI routing variables are always removed so a
+ * The environment of the app-server process of the built-in entry. It reuses the terminal sign-in:
+ * `CODEX_HOME` is not set here (an inherited one is kept, as the terminal `codex` would use it), so
+ * `~/.codex` and its ChatGPT tokens are shared. An entry with a home of its own sets it before this
+ * runs (`harness/env.ts` `ownedLaunchEnv`). API keys and OpenAI routing variables are always removed so a
  * turn can never bill an API key instead of the subscription, and variables a parent Codex
  * session sets for its own sandbox do not leak in.
  */
@@ -394,18 +401,23 @@ export function findCodexBinary(env: NodeJS.ProcessEnv = process.env): string | 
 
 const historyKey = (history: string): string => createHash('sha256').update(history).digest('hex')
 
-function classifyAccount(response: AccountReadResponse): AccountProbe {
+/**
+ * What the account check says. `ownSignIn` is the instruction for an instance with a home of its own
+ * (`CodexServiceOptions.ownSignIn`): plain `codex login` there would sign in the user's own home.
+ */
+function classifyAccount(response: AccountReadResponse, ownSignIn?: string): AccountProbe {
   const account = response.account
   if (account?.type === 'chatgpt') return { kind: 'signed_in', planType: account.planType, email: account.email }
   if (account)
     return {
       kind: 'signed_out',
-      message:
-        'Codex in your terminal is signed in without a ChatGPT account. Mousse only uses a ChatGPT sign-in, so turns never bill an API key. Run `codex login` in a terminal, then recheck.'
+      message: ownSignIn
+        ? `This account's Codex is signed in without a ChatGPT account. Mousse only uses a ChatGPT sign-in, so turns never bill an API key. ${ownSignIn}`
+        : 'Codex in your terminal is signed in without a ChatGPT account. Mousse only uses a ChatGPT sign-in, so turns never bill an API key. Run `codex login` in a terminal, then recheck.'
     }
   return {
     kind: 'signed_out',
-    message: 'Codex in your terminal is not signed in. Run `codex login` in a terminal, then recheck.'
+    message: ownSignIn ? `This account is not signed in. ${ownSignIn}` : 'Codex in your terminal is not signed in. Run `codex login` in a terminal, then recheck.'
   }
 }
 
@@ -1156,7 +1168,7 @@ export class CodexProviderService {
 
   /** `account/read` on `conn`; a ChatGPT answer marks that process as verified. */
   private async readAccount(conn: CodexConnection, signal?: AbortSignal): Promise<AccountProbe> {
-    const result = classifyAccount(await conn.request('account/read', { refreshToken: false }, { timeoutMs: 15_000, signal }))
+    const result = classifyAccount(await conn.request('account/read', { refreshToken: false }, { timeoutMs: 15_000, signal }), this.options.ownSignIn)
     if (this.app?.conn === conn) this.app.verified = result.kind === 'signed_in'
     return result
   }
@@ -1211,7 +1223,10 @@ export class CodexProviderService {
     if (!this.binary())
       return { state: 'missing_binary', message: 'Codex CLI not found. Install the Codex CLI, then recheck.' }
     if (this.signedOut())
-      return { state: 'disconnected', message: 'Disconnected in Mousse. The Codex sign-in in your terminal is unchanged.' }
+      return {
+        state: 'disconnected',
+        message: this.options.ownSignIn ? `Signed out in Mousse. ${this.options.ownSignIn}` : 'Disconnected in Mousse. The Codex sign-in in your terminal is unchanged.'
+      }
     const probe = this.probeResult
     if (!probe) return { state: 'error', message: 'Mousse has not checked the Codex sign-in yet.' }
     const checkedAt = new Date(probe.at).toISOString()
@@ -2655,7 +2670,9 @@ export class CodexProviderService {
     const probe = this.probeResult?.result
     return probe && probe.kind !== 'signed_in'
       ? probe.message
-      : 'Codex in your terminal is not signed in. Run `codex login` in a terminal, then try again.'
+      : this.options.ownSignIn
+        ? `This account is not signed in. ${this.options.ownSignIn}`
+        : 'Codex in your terminal is not signed in. Run `codex login` in a terminal, then try again.'
   }
 }
 

@@ -9,7 +9,7 @@ import { spawnCodexAppServer, type CodexLaunch, type CodexProcess } from '../../
 import { codexEnvironment, CodexProviderService } from '../../providers/codex/CodexProviderService'
 import type { LoginSession } from '../../providers/LoginSession'
 import { CODEX_CAPABILITIES, CodexAdapter } from '../../run/adapters/codex/CodexAdapter'
-import { cliNames, ownedLaunchEnv, ownedUserEnv } from '../env'
+import { cliNames, ownedLaunchEnv, ownedUserArgs, ownedUserEnv } from '../env'
 import { usageWindows } from '../../providers/codex/rateLimits'
 import { decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig, type RuntimeUsage } from '../driver'
 import { createManagedCodexRuntime } from '../codex/managedRuntime'
@@ -35,19 +35,34 @@ export const CODEX_CAPS: HarnessCaps = Object.freeze({
 const SIGN_IN_COMMAND = 'codex login'
 
 /**
- * The terminal command that signs an instance with its own home in, the home passed as `CODEX_HOME`.
- * On Windows it runs through `cmd /c`, which works the same pasted into Command Prompt or
- * PowerShell and leaves the terminal's own environment unchanged.
+ * The terminal command that signs an instance with its own home in, the home passed as `CODEX_HOME`
+ * (and `CODEX_SQLITE_HOME`, as Mousse's own processes have it). On Windows it runs through `cmd /c`,
+ * which works the same pasted into Command Prompt or PowerShell and leaves the terminal's own
+ * environment unchanged; each value is quoted so `&` or `^` in the path stay text. A path with `%`
+ * or `"` cannot be quoted for `cmd` (`%` expands inside quotes): there is no command to copy then,
+ * and the caller says what to set instead. The terminal's own variables (a key, another route) are
+ * not cleaned: Mousse's in-app sign-in is the one that runs on a closed environment.
  */
-export function codexSignInCommand(home: string | undefined, platform: NodeJS.Platform = process.platform): string {
+export function codexSignInCommand(home: string | undefined, platform: NodeJS.Platform = process.platform): string | undefined {
   if (!home) return SIGN_IN_COMMAND
-  return platform === 'win32'
-    ? `cmd /c "set CODEX_HOME=${home}&& codex login --device-auth"`
-    : `CODEX_HOME='${home.replace(/'/g, `'\\''`)}' codex login --device-auth`
+  if (platform === 'win32') {
+    if (/[%"]/.test(home)) return undefined
+    return `cmd /c "set "CODEX_HOME=${home}"&& set "CODEX_SQLITE_HOME=${home}"&& codex login --device-auth"`
+  }
+  const quoted = `'${home.replace(/'/g, `'\\''`)}'`
+  return `CODEX_HOME=${quoted} CODEX_SQLITE_HOME=${quoted} codex login --device-auth`
+}
+
+/** The same sign-in as steps, for a home whose path has no command to copy (`codexSignInCommand`). */
+export function codexSignInSteps(home: string): string {
+  return `set CODEX_HOME and CODEX_SQLITE_HOME to ${home}, then run codex login --device-auth`
 }
 
 /** How long a sign-in may take before Mousse ends it: a little after the one-time code expires (15 minutes). */
 export const CODEX_SIGN_IN_TIMEOUT_MS = 16 * 60_000
+
+/** How long removing an entry waits for its app-servers to exit before it goes on without them. */
+export const CODEX_STOP_WAIT_MS = 10_000
 
 /** How long a terminal that printed its success may take to exit before it is ended (it is writing its files). */
 export const CODEX_SUCCESS_GRACE_MS = 5_000
@@ -59,22 +74,44 @@ const SIGN_IN_COLUMNS = 1000
 export const CODEX_NOT_STORED_MESSAGE =
   'Codex did not store the sign-in in this account\'s home. If Codex keeps its sign-in in the operating system\'s credential store, set `cli_auth_credentials_store = "file"` in the config.toml of that home, then sign in again.'
 
+/** How long the dialog waits for a code before it says what to do instead (the command to copy). */
+export const CODEX_NO_CODE_NOTICE_MS = 30_000
+
+/** What Codex's device sign-in link looks like: the device page, never an update or install notice. */
+const DEVICE_LINK = /\/codex\/device\b/i
+/** A line that is only a one-time code: letters and digits, hyphenated or with a digit, never a plain word. */
+const CODE_LINE = /^(?=.*[-0-9])[A-Za-z0-9-]{4,24}$/
+
 /**
- * The link and one-time code of Codex's device sign-in, read from the terminal's output: the link
- * under "Open this link" and the code under "Enter this one-time code", each only once its line is
- * complete (a half-printed code is never shown). A link printed before that step (an update
- * notice) is not taken for the sign-in link.
+ * The link and one-time code of Codex's device sign-in, read from the terminal's output: the device
+ * link under the last "Open this link" and the code under "Enter this one-time code" (on that line or
+ * the next one), each only once its line is complete (a half-printed code is never shown). A cursor
+ * move counts as a line break, as a terminal that redraws instead of printing lines needs. Only a
+ * link to the device page counts, so a notice or an earlier link is never taken for it.
  */
 export function codexDeviceCode(transcript: string): { url: string; userCode: string } | undefined {
-  const text = terminalText(transcript)
-  const step = text.search(/open this link/i)
+  const text = terminalText(transcript.replace(/\x1b\[[0-9;]*[HfdEBFG]/g, '\n')).replace(/\r\n?/g, '\n')
+  // The last line has no end yet: it may be half printed.
+  const lines = text.split('\n').slice(0, -1)
+  let step = -1
+  lines.forEach((line, index) => {
+    if (/open this link/i.test(line)) step = index
+  })
   if (step < 0) return undefined
-  const after = text.slice(step)
-  const url = transcriptLinks(after)[0]
-  if (!url || !new RegExp(`${url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[ \\t]*\\r?\\n`).test(after)) return undefined
-  const afterLink = after.slice(after.indexOf(url) + url.length)
-  const code = /one-time code[\s\S]{0,120}?\b([A-Z0-9]{3,10}(?:-[A-Z0-9]{3,10})+)[ \t]*\r?\n/.exec(afterLink)?.[1]
-  return code ? { url, userCode: code } : undefined
+  let url: string | undefined
+  let codeAt = -1
+  for (let index = step; index < lines.length; index += 1) {
+    url ??= transcriptLinks(lines[index]!).find((link) => DEVICE_LINK.test(link))
+    if (url && /one-time code/i.test(lines[index]!)) {
+      codeAt = index
+      break
+    }
+  }
+  if (!url || codeAt < 0) return undefined
+  const inline = lines[codeAt]!.replace(/^.*one-time code/i, '').trim()
+  if (CODE_LINE.test(inline)) return { url, userCode: inline }
+  const next = lines.slice(codeAt + 1).find((line) => line.trim())?.trim()
+  return next && CODE_LINE.test(next) ? { url, userCode: next } : undefined
 }
 
 /**
@@ -92,7 +129,8 @@ export const CODEX_PERMISSION_LIMITS: PermissionLimits = Object.freeze({
 
 /** An added instance with its own home: the command that signs it in, and whether Mousse can do it. */
 interface OwnedSignIn {
-  command: string
+  /** Absent when the home's path cannot be quoted for a command to copy (`codexSignInCommand`). */
+  command: string | undefined
   inApp: boolean
 }
 
@@ -110,8 +148,12 @@ function readAuth(service: CodexProviderService, status: Awaited<ReturnType<Code
         return {
           state: 'signed_out',
           methodLabel,
-          message: owned.inApp ? 'Not signed in. Choose Sign in to sign this account in.' : 'Not signed in. Run the command below in a terminal, then check again.',
-          signInCommand: owned.command,
+          message: owned.inApp
+            ? 'Not signed in. Choose Sign in to sign this account in.'
+            : owned.command
+              ? 'Not signed in. Run the command below in a terminal, then check again.'
+              : 'Not signed in. Mousse cannot open a sign-in terminal here, and this account\'s folder name has a character that cannot go in a copied command. Move the Mousse profile to a folder without % or " in its path, or sign in on a computer where Mousse can open a terminal.',
+          ...(owned.command ? { signInCommand: owned.command } : {}),
           ...(owned.inApp ? { canSignIn: true } : {})
         }
       return { state: 'signed_out', methodLabel, message: status.message, signInCommand: SIGN_IN_COMMAND }
@@ -157,6 +199,8 @@ export interface CodexDriverOptions {
   pty?: { available: () => boolean; spawn?: PtySpawn }
   /** Test seam: how long a sign-in may take (default `CODEX_SIGN_IN_TIMEOUT_MS`). */
   signInTimeoutMs?: number
+  /** Test seam: how long the dialog waits for a code before it says what to do instead (default `CODEX_NO_CODE_NOTICE_MS`). */
+  noCodeNoticeMs?: number
   /** Test seam: starts the app-server of an added instance (default: the real process). */
   launch?: (launch: CodexLaunch) => CodexProcess
   /** Test seam: the platform the sign-in command is written for (default `process.platform`). */
@@ -167,8 +211,8 @@ export interface CodexDriverOptions {
 interface OwnedService {
   service: CodexProviderService
   home: string | undefined
-  /** The newest runtime's context, which the service reads. */
-  context: DriverContext
+  /** Holds the newest runtime's context, which the service reads at every use: replace `current.context`, never the holder. */
+  current: { context: DriverContext }
   users: number
 }
 
@@ -274,7 +318,8 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
       owned.delete(context.instanceId)
       entry = undefined
     }
-    if (entry) entry.context = context
+    // A runtime built for a changed config takes the service over: every read goes to its context from now on.
+    if (entry) entry.current.context = context
     else {
       // Every read goes to the newest runtime's context: its config, environment and binary lookup.
       const current = { context }
@@ -293,9 +338,11 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
           launch: (): StoredCliConfig => launchOf(live()),
           signedOut: () => live().signedOut(),
           saveLaunch: (patch) => live().saveLaunch(patch),
-          // A home that is a link would run another account's sign-in: nothing starts in it.
           ...(privateHome
             ? {
+                // Plain `codex login` would sign in the user's own home: every message names this account's sign-in instead.
+                ownSignIn: 'Sign this account in from Settings → Providers.',
+                // A home that is a link would run another account's sign-in: nothing starts in it.
                 prepareLaunch: async () => {
                   const problem = ownedHomeProblem(privateHome, live().profileHome)
                   if (problem) throw new Error(problem)
@@ -305,7 +352,7 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
             : {})
         }),
         home: privateHome,
-        context,
+        current,
         users: 0
       }
       owned.set(context.instanceId, entry)
@@ -343,6 +390,7 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
       let run: PtyRun | undefined
       let timer: ReturnType<typeof setTimeout> | undefined
       let grace: ReturnType<typeof setTimeout> | undefined
+      let noCode: ReturnType<typeof setTimeout> | undefined
       /** Ends the terminal; one that already printed its success is left to finish writing its files first. */
       const stopRun = () => {
         if (!sawSuccess) run?.cancel()
@@ -369,6 +417,13 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
           }
         })
         activeRun = run
+        // Output Mousse cannot read leaves the dialog with nothing to copy: it says what to do instead.
+        noCode = setTimeout(() => {
+          if (shown) return
+          const steps = signInCommand ? `run ${signInCommand}` : codexSignInSteps(privateHome!)
+          session.emitEvent({ sessionId: session.sessionId, type: 'progress', message: `Codex has not shown a sign-in code yet. If nothing appears, cancel and, in a terminal, ${steps}; then check this account again.` })
+        }, options.noCodeNoticeMs ?? CODEX_NO_CODE_NOTICE_MS)
+        noCode.unref?.()
         session.abort.signal.addEventListener('abort', stopRun, { once: true })
         timer = setTimeout(() => {
           timedOut = true
@@ -381,6 +436,7 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
         } finally {
           clearTimeout(timer)
           clearTimeout(grace)
+          clearTimeout(noCode)
           session.abort.signal.removeEventListener('abort', stopRun)
           activeRun = undefined
         }
@@ -415,7 +471,7 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
           session.abort.signal.throwIfAborted()
           const answer = await interaction.prompt({
             type: 'select',
-            message: `Mousse cannot open a sign-in terminal here. Run this in a terminal, then choose Check sign-in: ${signInCommand}`,
+            message: `Mousse cannot open a sign-in terminal here. In a terminal, ${signInCommand ? `run ${signInCommand}` : codexSignInSteps(privateHome!)}, then choose Check sign-in.`,
             options: [
               { id: 'check', label: 'Check sign-in' },
               { id: 'cancel', label: 'Cancel' }
@@ -472,18 +528,26 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
       },
       signIn: privateHome ? signInInTerminal : (session, cwd) => service.login(session, cwd),
       signOut: privateHome ? signOutOfHome : () => service.logout(),
+      // Settles once the app-servers of the service have exited (Windows keeps files of a running
+      // process locked, and the gateway deletes a removed entry's files only then); a process that
+      // does not exit does not hold the removal for ever.
       stop: () => {
-        if (stopped) return
+        if (stopped) return Promise.resolve()
         stopped = true
         user.users -= 1
         // A config change retires this runtime just before it builds the next one, which takes the
         // service over: it stops only when no runtime took it by then.
-        queueMicrotask(() => {
-          if (user.users > 0) return
-          if (owned.get(context.instanceId) === user) owned.delete(context.instanceId)
-          // A sign-in terminal this runtime started ends with the instance, not with a config change.
-          activeRun?.cancel()
-          user.service.stop()
+        return new Promise<void>((resolve) => {
+          queueMicrotask(() => {
+            if (user.users > 0) return resolve()
+            if (owned.get(context.instanceId) === user) owned.delete(context.instanceId)
+            // A sign-in terminal this runtime started ends with the instance, not with a config change.
+            activeRun?.cancel()
+            user.service.stop()
+            const timer = setTimeout(resolve, CODEX_STOP_WAIT_MS)
+            timer.unref?.()
+            void user.service.processesExited().then(() => resolve(), () => resolve())
+          })
         })
       }
     }
@@ -495,13 +559,17 @@ function environmentOf(from: DriverContext): NodeJS.ProcessEnv {
   return codexEnvironment(from.env.home ? ownedLaunchEnv('codex', from.env, from.config.env) : from.env.env)
 }
 
-/** The launch settings of an added instance: an entry with its own home never applies variables that choose its sign-in. */
+/**
+ * The launch settings of an added instance: an entry with its own home never applies variables or
+ * `-c` overrides that move its sign-in or state, or send it elsewhere (`env.ts` rules).
+ */
 function launchOf(from: DriverContext): StoredCliConfig {
   const config = from.config
   const configured = from.env.home ? ownedUserEnv('codex', config.env) : config.env
+  const args = from.env.home ? ownedUserArgs('codex', config.args) : config.args
   return {
     ...(config.binaryPath ? { binaryPath: config.binaryPath } : {}),
-    ...(config.args ? { args: config.args } : {}),
+    ...(args ? { args } : {}),
     ...(configured && Object.keys(configured).length ? { env: configured } : {})
   }
 }

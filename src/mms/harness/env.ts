@@ -50,7 +50,8 @@ export const HOME_VARIABLES: Partial<Record<HarnessDriverKind, string>> = {
 /**
  * Credentials a driver reads from the environment ahead of its home. An instance with its own home
  * does not inherit them from Mousse's environment, or it would sign in as the user's own account
- * whatever its home holds. Variables set on the instance itself still apply.
+ * whatever its home holds. Variables set on the instance itself still apply, except for a driver
+ * with `OwnedEnvRules` (Claude Code, Codex), which refuses the credential families there too.
  */
 export const INHERITED_CREDENTIALS: Partial<Record<HarnessDriverKind, readonly string[]>> = {
   claude: [
@@ -120,6 +121,12 @@ interface OwnedEnvRules {
   reserved: readonly string[]
   /** The variables Mousse sets to point the driver at the instance's home. */
   fixed(home: string): Record<string, string>
+  /**
+   * Configuration keys a launch argument (`-c key=value`) cannot set: they move the sign-in or the
+   * state out of the home, send the account's token to another address, or pick another route.
+   * A key matches itself and every key under it (`model_providers` covers `model_providers.x.env_key`).
+   */
+  reservedConfig?: readonly string[]
 }
 
 const CLAUDE_OWNED_ENV: OwnedEnvRules = {
@@ -158,7 +165,11 @@ const CODEX_OWNED_ENV: OwnedEnvRules = {
   reserved: ['CODEX_*', 'OPENAI_*', 'CHATGPT_*', 'AZURE_*', 'AWS_*', ...(INHERITED_CREDENTIALS.codex ?? [])],
   // The sign-in file and the OS credential item are named after this folder, and the state database
   // stays in it, so one instance never reads or writes another account's files.
-  fixed: (home) => ({ CODEX_HOME: home, CODEX_SQLITE_HOME: home })
+  fixed: (home) => ({ CODEX_HOME: home, CODEX_SQLITE_HOME: home }),
+  // `-c` overrides win over the home's own config file. Where the sign-in is stored (the login
+  // command runs without the entry's arguments, so it would store it another way), where state and
+  // logs go, the addresses a token is sent to, and the model providers a turn could be routed through.
+  reservedConfig: ['openai_base_url', 'chatgpt_base_url', 'sqlite_home', 'log_dir', 'cli_auth_credentials_store', 'model_provider', 'model_providers']
 }
 
 const OWNED_ENV_RULES: Partial<Record<HarnessDriverKind, OwnedEnvRules>> = { claude: CLAUDE_OWNED_ENV, codex: CODEX_OWNED_ENV }
@@ -176,6 +187,47 @@ export function reservedEnvName(driver: HarnessDriverKind, name: string): { kind
   if (fixed) return { kind: 'home', variable: fixed }
   if (matchesVariable(rules.inherit, name)) return undefined
   return matchesVariable(rules.reserved, name) ? { kind: 'credential', variable: name } : undefined
+}
+
+/**
+ * The configuration overrides in launch arguments (`-c key=value`, `--config key=value`,
+ * `--config=key=value`, `-ckey=value`), with where each sits in `args` and how many arguments it takes.
+ */
+function configOverrides(args: readonly string[]): Array<{ key: string; at: number; length: number }> {
+  const found: Array<{ key: string; at: number; length: number }> = []
+  const keyOf = (text: string) => text.split('=')[0]!.trim().replace(/^['"]+|['"]+$/g, '').toLowerCase()
+  for (let at = 0; at < args.length; at += 1) {
+    const arg = args[at]!
+    if (arg === '-c' || arg === '--config') {
+      if (at + 1 < args.length) found.push({ key: keyOf(args[at + 1]!), at, length: 2 })
+      at += 1
+    } else if (/^--config=/.test(arg)) found.push({ key: keyOf(arg.slice('--config='.length)), at, length: 1 })
+    else if (/^-c.+/.test(arg)) found.push({ key: keyOf(arg.slice(2).replace(/^=/, '')), at, length: 1 })
+  }
+  return found
+}
+
+const reservedConfigKey = (rules: OwnedEnvRules, key: string): boolean =>
+  (rules.reservedConfig ?? []).some((name) => key === name || key.startsWith(`${name}.`))
+
+/**
+ * The configuration keys among `args` that an instance with its own home cannot set
+ * (`OwnedEnvRules.reservedConfig`), in the order given. Empty for a driver without rules.
+ */
+export function reservedLaunchKeys(driver: HarnessDriverKind, args: readonly string[] | undefined): string[] {
+  const rules = OWNED_ENV_RULES[driver]
+  if (!rules?.reservedConfig || !args) return []
+  return configOverrides(args).filter((entry) => reservedConfigKey(rules, entry.key)).map((entry) => entry.key)
+}
+
+/** The launch arguments of an instance with its own home, without the overrides Mousse reserves. */
+export function ownedUserArgs(driver: HarnessDriverKind, args: readonly string[] | undefined): string[] | undefined {
+  const rules = OWNED_ENV_RULES[driver]
+  if (!args || !rules?.reservedConfig) return args ? [...args] : undefined
+  const drop = new Set<number>()
+  for (const entry of configOverrides(args))
+    if (reservedConfigKey(rules, entry.key)) for (let offset = 0; offset < entry.length; offset += 1) drop.add(entry.at + offset)
+  return args.filter((_, index) => !drop.has(index))
 }
 
 /** The configured variables of an instance with its own home, without the ones Mousse reserves. */

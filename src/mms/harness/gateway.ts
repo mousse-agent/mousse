@@ -54,7 +54,7 @@ import { LoginSession as LoginSessionImpl } from '../providers/LoginSession'
 import { fail } from '../run/db/RunStoreError'
 import { hidesModel, modelsWithPrefs, ModelPrefsService, visibleProviderOption, type ModelPrefsStore } from './catalog'
 import { privateHomeRule, type AuthReading, type DriverRuntime, type HarnessDriver, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type OneShotTask } from './driver'
-import { DEFAULT_HOME_ID, findOnPath, instanceEnv, reservedEnvName, type InstanceEnv } from './env'
+import { DEFAULT_HOME_ID, findOnPath, instanceEnv, reservedEnvName, reservedLaunchKeys, type InstanceEnv } from './env'
 import { addedInstanceId, defaultInstanceId, InstanceCounterStore, instanceStateDir, isBuiltInInstance } from './instances'
 import { LatestVersionCache } from './latest'
 import { RuntimeFactsStore } from './facts'
@@ -2219,11 +2219,14 @@ export class Harness implements HarnessGateway {
    * where the sign-in lives or pick a credential), so the editor's list does not mislead.
    */
   private droppedEnvNote(record: InstanceRecord): string | undefined {
-    if (!record.env.home || !record.config.env) return undefined
-    const names = Object.keys(record.config.env).filter((name) => reservedEnvName(record.driver.kind, name))
-    return names.length
-      ? `Not used: ${names.join(', ')}. This entry signs in to its own account, so Mousse does not pass these variables to it; remove them, or add an entry on your own setup to run with a key.`
-      : undefined
+    if (!record.env.home) return undefined
+    const names = Object.keys(record.config.env ?? {}).filter((name) => reservedEnvName(record.driver.kind, name))
+    const keys = reservedLaunchKeys(record.driver.kind, record.config.args)
+    const parts = [
+      ...(names.length ? [`Not used: ${names.join(', ')}. This entry signs in to its own account, so Mousse does not pass these variables to it; remove them, or add an entry on your own setup to run with a key.`] : []),
+      ...(keys.length ? [`Not used: the launch arguments that set ${keys.join(', ')}. They would move this account's sign-in or state, or send it somewhere else; remove them.`] : [])
+    ]
+    return parts.length ? parts.join(' ') : undefined
   }
 
   /**
@@ -2789,6 +2792,11 @@ export class Harness implements HarnessGateway {
     else if (rule === 'forbidden' && config.home !== undefined) config.home = 'default'
     // An instance with its own home runs as the account signed in there: its configured variables
     // cannot point it at another home or hand it another credential (`ownedLaunchEnv`).
+    if (config.home === 'private' && (patch.args !== undefined || patch.home !== undefined)) {
+      const [key] = reservedLaunchKeys(driver.kind, Array.isArray(config.args) ? (config.args as string[]) : undefined)
+      if (key)
+        harnessFail('unsupported', `The launch argument that sets ${key} is not passed to a ${driver.label} instance with its own home: it would move this account's sign-in or state, or send it somewhere else. Remove it from the arguments.`)
+    }
     if (config.home === 'private' && (patch.env !== undefined || patch.home !== undefined)) {
       for (const name of Object.keys((config.env ?? {}) as Record<string, unknown>)) {
         const reserved = reservedEnvName(driver.kind, name)

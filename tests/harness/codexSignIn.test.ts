@@ -15,9 +15,9 @@ import { format } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ProviderOperationEvent } from '../../src/shared/harness/types'
 import type { DriverContext, DriverRuntime } from '../../src/mms/harness/driver'
-import { CODEX_NOT_STORED_MESSAGE, codexDeviceCode, codexDriver, codexSignInCommand, decodeCodexConfig } from '../../src/mms/harness/drivers/codex'
+import { CODEX_NOT_STORED_MESSAGE, codexDeviceCode, codexDriver, codexSignInCommand, codexSignInSteps, decodeCodexConfig } from '../../src/mms/harness/drivers/codex'
 import { createHarnessGateway, type TurnSpec } from '../../src/mms/harness/gateway'
-import { instanceEnv, ownedLaunchEnv, ownedUserEnv, reservedEnvName } from '../../src/mms/harness/env'
+import { instanceEnv, ownedLaunchEnv, ownedUserArgs, ownedUserEnv, reservedEnvName, reservedLaunchKeys } from '../../src/mms/harness/env'
 import { instanceStateDir, InstanceCounterStore } from '../../src/mms/harness/instances'
 import { ownedHomeProblem } from '../../src/mms/harness/ownedHome'
 import type { PtySpawn } from '../../src/mms/harness/pty'
@@ -207,6 +207,7 @@ type Message = { id?: number | string; method?: string; params?: unknown }
 function appServers() {
   const launches: Array<{ env: NodeJS.ProcessEnv; cwd: string | undefined; args: string[] }> = []
   const processes: Array<EventEmitter & CodexProcess> = []
+  const control = { hold: false, held: [] as Array<() => void> }
   const launch = (spec: CodexLaunch): CodexProcess => {
     launches.push({ env: spec.env, cwd: spec.cwd, args: spec.args })
     const stdout = new PassThrough()
@@ -220,7 +221,9 @@ function appServers() {
       kill(signal: NodeJS.Signals = 'SIGTERM') {
         if (process.signalCode) return false
         process.signalCode = signal
-        setImmediate(() => process.emit('exit', null, signal))
+        // A process that is slow to exit (`hold`): it exits when the test says so.
+        if (control.hold) control.held.push(() => process.emit('exit', null, signal))
+        else setImmediate(() => process.emit('exit', null, signal))
         return true
       }
     })
@@ -236,7 +239,8 @@ function appServers() {
         if (message.method === 'initialize') reply = { result: { userAgent: 'test', codexHome: spec.env.CODEX_HOME, platformFamily: 'unix', platformOs: 'macos' } }
         else if (message.method === 'account/read') {
           const account = accountOf(spec.env.CODEX_HOME)
-          reply = { result: { account: account ? { type: 'chatgpt', email: `${account}@example.test`, planType: 'plus' } : null, requiresOpenaiAuth: true } }
+          // `api-key`: signed in, but with a key and not a ChatGPT account.
+          reply = { result: { account: account === 'api-key' ? { type: 'apiKey' } : account ? { type: 'chatgpt', email: `${account}@example.test`, planType: 'plus' } : null, requiresOpenaiAuth: true } }
         } else if (message.method === 'model/list') reply = { result: { data: [{ id: 'gpt-test', displayName: 'GPT Test', hidden: false, supportedReasoningEfforts: [] }], nextCursor: null } }
         else reply = { error: { code: -32000, message: 'replay ends here' } }
         stdout.write(JSON.stringify({ id: message.id, ...(reply as object) }) + '\n')
@@ -246,7 +250,13 @@ function appServers() {
     return process as unknown as CodexProcess
   }
   const running = () => processes.filter((entry) => entry.signalCode === null && entry.exitCode === null).length
-  return { launch, launches, processes, running }
+  /** From now on a killed process exits only when `release` is called. */
+  const hold = () => void (control.hold = true)
+  const release = () => {
+    control.hold = false
+    for (const exit of control.held.splice(0)) exit()
+  }
+  return { launch, launches, processes, running, hold, release }
 }
 
 const WORK = 'codex:work'
@@ -264,6 +274,7 @@ interface WorldOptions {
   /** A sign-in terminal runs (default); false: none runs here. */
   terminal?: boolean
   signInTimeoutMs?: number
+  noCodeNoticeMs?: number
   /** A managed entry's runtime (default: none is stored, so none is built). */
   managed?: (context: DriverContext) => DriverRuntime
 }
@@ -302,7 +313,8 @@ function world(options: WorldOptions = {}) {
         pty: { available: () => options.terminal !== false, spawn: terminal.spawn },
         launch: servers.launch,
         ...(options.managed ? { managed: options.managed } : {}),
-        ...(options.signInTimeoutMs ? { signInTimeoutMs: options.signInTimeoutMs } : {})
+        ...(options.signInTimeoutMs ? { signInTimeoutMs: options.signInTimeoutMs } : {}),
+        ...(options.noCodeNoticeMs ? { noCodeNoticeMs: options.noCodeNoticeMs } : {})
       })
     ]
   })
@@ -371,6 +383,16 @@ async function turn(w: World, instanceId: string, purpose: 'turn' | 'delegate_ta
   await w.harness.startTurn(spec).result.catch(() => undefined)
 }
 
+
+/**
+ * Waits until the background model listing of each signed-in instance has saved its settings (a
+ * check starts it and does not wait), so a test that reads or compares those files does not race it.
+ */
+async function settled(w: World, ...instanceIds: string[]): Promise<void> {
+  const file = (instanceId: string) => (instanceId === 'codex' ? join(w.profileHome, 'providers', 'codex', 'settings.json') : join(instanceStateDir(w.profileHome, instanceId), 'settings.json'))
+  await vi.waitFor(() => expect(instanceIds.filter((instanceId) => !existsSync(file(instanceId)))).toEqual([]), { timeout: 5_000 })
+}
+
 const accountGeneration = (w: World, instanceId: string) =>
   new InstanceCounterStore(w.profileHome).get(instanceId).accountGeneration
 
@@ -406,7 +428,7 @@ describe('sign in from the app', () => {
     // The same output twice still shows one code.
     terminal.print(DEVICE_OUTPUT)
     terminal.print(DEVICE_OUTPUT)
-    await vi.waitFor(() => expect(signIn.prompts().some((prompt) => prompt.type === 'device_code')).toBe(true))
+    await vi.waitFor(() => expect(signIn.prompts().some((prompt) => prompt.type === 'device_code')).toBe(true), { timeout: 5_000 })
     const codes = signIn.prompts().filter((prompt) => prompt.type === 'device_code')
     expect(codes).toHaveLength(1)
     expect(codes[0]).toMatchObject({ userCode: 'ABCD-EFGHI', verificationUri: 'https://auth.openai.com/codex/device', expiresInSeconds: 900 })
@@ -443,13 +465,49 @@ describe('sign in from the app', () => {
     expect(codexDeviceCode(DEVICE_OUTPUT)).toEqual({ url: 'https://auth.openai.com/codex/device', userCode: 'ABCD-EFGHI' })
     // Behind terminal colours and cursor codes.
     expect(codexDeviceCode(DEVICE_OUTPUT.replace('ABCD-EFGHI', '\x1b[94mABCD-EFGHI\x1b[0m').replace('https', '\x1b]8;;x\x07https'))).toMatchObject({ userCode: 'ABCD-EFGHI' })
-    // An update notice before the step is not the sign-in link.
+    // An update notice before the step is not the sign-in link, even one that says "Open this link" itself.
     expect(codexDeviceCode('Update available! https://github.com/example/releases/latest\r\n' + DEVICE_OUTPUT)?.url).toBe('https://auth.openai.com/codex/device')
+    const notice = 'Update available. Open this link for the notes\r\nhttps://example.com/notes\r\n'
+    expect(codexDeviceCode(notice + DEVICE_OUTPUT)).toEqual({ url: 'https://auth.openai.com/codex/device', userCode: 'ABCD-EFGHI' })
+    expect(codexDeviceCode(notice)).toBeUndefined()
+    // Only the device page counts as the link.
+    expect(codexDeviceCode(DEVICE_OUTPUT.replace('auth.openai.com/codex/device', 'example.com/login'))).toBeUndefined()
     // Half a code, half a link, or the step without a code: nothing yet.
     expect(codexDeviceCode(DEVICE_OUTPUT.slice(0, DEVICE_OUTPUT.indexOf('EFGHI')))).toBeUndefined()
     expect(codexDeviceCode(DEVICE_OUTPUT.slice(0, DEVICE_OUTPUT.indexOf('/codex/device') + 5))).toBeUndefined()
     expect(codexDeviceCode('Update available! https://github.com/example/releases/latest\r\n')).toBeUndefined()
     expect(codexDeviceCode('')).toBeUndefined()
+  })
+
+  it('reads a lower-case or unhyphenated code, a code on the step\'s own line, and a terminal that redraws instead of printing lines', () => {
+    const device = 'https://auth.openai.com/codex/device'
+    expect(codexDeviceCode(DEVICE_OUTPUT.replace('ABCD-EFGHI', 'abcd-efghi'))?.userCode).toBe('abcd-efghi')
+    expect(codexDeviceCode(DEVICE_OUTPUT.replace('ABCD-EFGHI', 'ABCD1234'))?.userCode).toBe('ABCD1234')
+    expect(codexDeviceCode(DEVICE_OUTPUT.replace('(expires in 15 minutes)\r\n   ABCD-EFGHI', 'ABCD-EFGHI'))).toMatchObject({ userCode: 'ABCD-EFGHI' })
+    // A plain word after the step is not a code.
+    expect(codexDeviceCode(DEVICE_OUTPUT.replace('ABCD-EFGHI', 'Waiting'))).toBeUndefined()
+    // Cursor moves where the line breaks would be (a terminal that repaints its screen).
+    const redrawn =
+      '\x1b[2J\x1b[1;1HFollow these steps to sign in with ChatGPT:\x1b[3;1H1. Open this link in your browser and sign in' +
+      `\x1b[4;4H${device}\x1b[6;1H2. Enter this one-time code (expires in 15 minutes)\x1b[7;4H\x1b[94mABCD-EFGHI\x1b[0m\x1b[9;1H`
+    expect(codexDeviceCode(redrawn)).toEqual({ url: device, userCode: 'ABCD-EFGHI' })
+  })
+
+  it('says what to do instead when no code has shown after a while: cancel, and run the command in a terminal', async () => {
+    const w = world({ noCodeNoticeMs: 30 })
+    await w.harness.instances.recheck(WORK)
+    const events: ProviderOperationEvent[] = []
+    stops.push(w.harness.instances.subscribe((event) => void (event.type === 'operation' && events.push(event.data))))
+    const signIn = await startSignIn(w, WORK)
+    const terminal = await signIn.terminal()
+    // Output Mousse cannot read.
+    terminal.print('A screen of text with no sign-in steps in it\r\n')
+    await vi.waitFor(() => expect(events.some((event) => event.phase === 'progress' && /has not shown a sign-in code/.test(event.message ?? ''))).toBe(true), { timeout: 5_000 })
+    const notice = events.find((event) => event.phase === 'progress')!
+    expect(notice.message).toContain('codex login --device-auth')
+    expect(notice.message).toContain(w.homeOf(WORK))
+    await w.harness.instances.respondSignIn(signIn.started.operationId, { kind: 'cancel' })
+    await signIn.settled()
   })
 
   it('cancel ends the terminal and its tree, and a late success changes nothing', async () => {
@@ -459,7 +517,7 @@ describe('sign in from the app', () => {
     const signIn = await startSignIn(w, WORK)
     const terminal = await signIn.terminal()
     terminal.print(DEVICE_OUTPUT)
-    await vi.waitFor(() => expect(signIn.prompts().length).toBeGreaterThan(0))
+    await vi.waitFor(() => expect(signIn.prompts().length).toBeGreaterThan(0), { timeout: 5_000 })
     expect(await w.harness.instances.respondSignIn(signIn.started.operationId, { kind: 'cancel' })).toBe(true)
     expect((await signIn.settled()).phase).toBe('cancelled')
     expect(terminal.kills).toBeGreaterThan(0)
@@ -476,7 +534,7 @@ describe('sign in from the app', () => {
     const signIn = await startSignIn(w, WORK)
     const terminal = await signIn.terminal()
     terminal.print(DEVICE_OUTPUT + 'Successfully logged in\r\n')
-    await vi.waitFor(() => expect(signIn.prompts().length).toBeGreaterThan(0))
+    await vi.waitFor(() => expect(signIn.prompts().length).toBeGreaterThan(0), { timeout: 5_000 })
     await w.harness.instances.respondSignIn(signIn.started.operationId, { kind: 'cancel' })
     // Not killed while it writes its files: it gets time to exit by itself.
     await new Promise((resolve) => setTimeout(resolve, 30))
@@ -531,7 +589,7 @@ describe('sign in from the app', () => {
     expect(snapshot.nextStep?.command).toContain('codex login --device-auth')
     // Starting one anyway spawns no terminal: it waits for the sign-in made in the user's own.
     const signIn = await startSignIn(w, WORK)
-    await vi.waitFor(() => expect(signIn.prompts().some((prompt) => prompt.type === 'select')).toBe(true))
+    await vi.waitFor(() => expect(signIn.prompts().some((prompt) => prompt.type === 'select')).toBe(true), { timeout: 5_000 })
     expect(w.terminals).toHaveLength(0)
     expect(JSON.stringify(signIn.prompts())).toContain(JSON.stringify(w.homeOf(WORK)).slice(1, -1))
     // The user ran it: the next check starts a new Codex process and finds the account.
@@ -786,10 +844,24 @@ describe('instance environment', () => {
 
   it('the sign-in command passes the home as an environment value that Command Prompt, PowerShell and a shell all read', () => {
     const home = 'C:\\Users\\me\\Mousse Profiles\\p one\\harness\\codex_work\\home'
-    expect(codexSignInCommand(home, 'win32')).toBe(`cmd /c "set CODEX_HOME=${home}&& codex login --device-auth"`)
-    expect(codexSignInCommand('/home/me/Mousse Profiles/it\'s/home', 'linux')).toBe(`CODEX_HOME='/home/me/Mousse Profiles/it'\\''s/home' codex login --device-auth`)
+    expect(codexSignInCommand(home, 'win32')).toBe(`cmd /c "set "CODEX_HOME=${home}"&& set "CODEX_SQLITE_HOME=${home}"&& codex login --device-auth"`)
+    expect(codexSignInCommand('/home/me/Mousse Profiles/it\'s/home', 'linux')).toBe(
+      `CODEX_HOME='/home/me/Mousse Profiles/it'\\''s/home' CODEX_SQLITE_HOME='/home/me/Mousse Profiles/it'\\''s/home' codex login --device-auth`
+    )
     // The user's own Codex signs in as it always did.
     expect(codexSignInCommand(undefined, 'win32')).toBe('codex login')
+  })
+
+  it('a Windows path with & or ^ stays text inside the quotes; one with % or a quote has no command to copy and says what to set', () => {
+    const home = 'C:\\Users\\A&B\\Mousse^Profiles\\harness\\codex_work\\home'
+    const command = codexSignInCommand(home, 'win32')!
+    // `cmd` reads `&` as a separator only outside quotes: both values are quoted whole.
+    expect(command).toContain(`set "CODEX_HOME=${home}"&&`)
+    expect(command).toContain(`set "CODEX_SQLITE_HOME=${home}"&&`)
+    for (const unsafe of ['C:\\Users\\100%\\home', 'C:\\Users\\%USERNAME%\\home', 'C:\\Users\\a"b\\home']) expect(codexSignInCommand(unsafe, 'win32'), unsafe).toBeUndefined()
+    // On other systems the same paths are quoted for the shell.
+    expect(codexSignInCommand('/home/100%/a"b&c', 'linux')).toBe(`CODEX_HOME='/home/100%/a"b&c' CODEX_SQLITE_HOME='/home/100%/a"b&c' codex login --device-auth`)
+    expect(codexSignInSteps(home)).toContain(home)
   })
 
   it('a profile path with a space runs the sign-in from that home, passed as an argument-free environment value', async () => {
@@ -828,7 +900,7 @@ describe('two Codex accounts', () => {
     const signIn = await startSignIn(w, HOME)
     const terminal = await signIn.terminal()
     terminal.print(DEVICE_OUTPUT)
-    await vi.waitFor(() => expect(signIn.prompts().some((prompt) => prompt.type === 'device_code')).toBe(true))
+    await vi.waitFor(() => expect(signIn.prompts().some((prompt) => prompt.type === 'device_code')).toBe(true), { timeout: 5_000 })
     terminal.exit(1)
     const failed = await signIn.settled()
     const snapshots = JSON.stringify(await w.harness.instances.snapshots({ kind: 'device' }))
@@ -846,6 +918,7 @@ describe('two Codex accounts', () => {
     // Three app-servers, one per instance: no process is shared.
     expect(spawned.filter((entry) => entry.purpose === 'app-server').map((entry) => entry.instanceId).sort()).toEqual(expect.arrayContaining(['codex', WORK, HOME]))
     // Settings and saved threads live in their own folders.
+    await settled(w, WORK, HOME)
     expect(existsSync(join(instanceStateDir(w.profileHome, WORK), 'settings.json'))).toBe(true)
     expect(existsSync(join(instanceStateDir(w.profileHome, HOME), 'settings.json'))).toBe(true)
     expect(instanceStateDir(w.profileHome, WORK)).not.toBe(instanceStateDir(w.profileHome, HOME))
@@ -891,6 +964,7 @@ describe('two Codex accounts', () => {
     const counters = () => JSON.parse(readFileSync(join(w.profileHome, 'harness', 'state.json'), 'utf8')).instances[WORK]
     const files = (dir: string) => Object.fromEntries(readdirSync(dir).map((name) => [name, readFileSync(join(dir, name), 'utf8')]))
     const homeBefore = files(w.homeOf(WORK))
+    await settled(w, WORK, 'codex')
     const settingsBefore = readFileSync(join(instanceStateDir(w.profileHome, WORK), 'settings.json'), 'utf8')
     const countersBefore = counters()
     const launchesBefore = w.servers.launches.filter((launched) => launched.env.CODEX_HOME === w.homeOf(WORK)).length
@@ -938,12 +1012,13 @@ describe('two Codex accounts', () => {
     const workDir = instanceStateDir(w.profileHome, WORK)
     const homeDir = instanceStateDir(w.profileHome, HOME)
     const workBefore = tree(workDir)
+    await settled(w, 'codex', WORK, HOME)
     const ownSettings = join(w.profileHome, 'providers', 'codex', 'settings.json')
     const ownBefore = existsSync(ownSettings) ? readFileSync(ownSettings, 'utf8') : undefined
     expect(Object.keys(tree(homeDir))).toEqual(expect.arrayContaining(['settings.json', 'home/auth.json']))
 
     await w.harness.instances.remove(HOME)
-    await vi.waitFor(() => expect(existsSync(join(homeDir, 'settings.json'))).toBe(false))
+    await vi.waitFor(() => expect(existsSync(join(homeDir, 'settings.json'))).toBe(false), { timeout: 5_000 })
     // Its Mousse state is gone; the sign-in in its home stays (signing out removes it).
     expect(Object.keys(tree(homeDir))).toEqual(['home/auth.json'])
     // The other account and the user's own Codex are untouched.
@@ -962,7 +1037,7 @@ describe('two Codex accounts', () => {
     await w.harness.instances.remove(WORK)
     expect((await signIn.settled()).phase).toBe('cancelled')
     expect(terminal.kills).toBeGreaterThan(0)
-    await vi.waitFor(() => expect(w.servers.running()).toBe(0))
+    await vi.waitFor(() => expect(w.servers.running()).toBe(0), { timeout: 5_000 })
   })
 
   it('tells the user when two instances are signed in to the same account, and not when they differ', async () => {
@@ -1013,6 +1088,7 @@ describe('an added entry on the user\'s own home', () => {
     const w = ownHomeWorld()
     await w.harness.instances.recheck(OWN_HOME)
     await w.harness.instances.recheck('codex')
+    await settled(w, OWN_HOME)
     expect(existsSync(join(instanceStateDir(w.profileHome, OWN_HOME), 'settings.json'))).toBe(true)
     expect(w.servers.launches.every((launched) => launched.cwd === instanceStateDir(w.profileHome, OWN_HOME))).toBe(true)
     expect(w.builtInServers.launches.every((launched) => launched.cwd !== instanceStateDir(w.profileHome, OWN_HOME))).toBe(true)
@@ -1204,5 +1280,199 @@ describe('the service of a Codex account', () => {
     live.freezeSettings()
     await live.logout()
     expect(existsSync(settings)).toBe(false)
+  })
+})
+
+describe('what a signed-out private entry tells the user', () => {
+  /** Plain `codex login` signs in the user's own `~/.codex`, which is the one thing this entry must never suggest. */
+  const NEVER = /codex login(?! --device-auth)|in your terminal/i
+
+  it('never says to run plain `codex login`: not on the card, not in a check, not in the error of a chat', async () => {
+    const w = world()
+    // Never signed in.
+    const card = await w.harness.instances.recheck(WORK)
+    expect(card.auth.state).toBe('signed_out')
+    const everywhere = [card.auth.message ?? '', JSON.stringify(card.nextStep ?? {})]
+    // A chat on it: whichever layer refuses it, its words are this account's.
+    const refusal = await (async () => {
+      try {
+        const resolved = w.harness.resolveStored({ instanceId: WORK, llmProvider: '', model: 'gpt-test' }, { purpose: 'turn' })
+        const spec = turnSpec(WORK, await w.harness.bind(resolved, { mode: 'agent' }), tempDir('mousse-cwd'))
+        await w.harness.startTurn(spec).result
+        return ''
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error)
+      }
+    })()
+    expect(refusal).not.toBe('')
+    everywhere.push(refusal)
+    // The same card, after Mousse signed it out.
+    writeSignIn(w.homeOf(WORK), 'acct-work')
+    await w.harness.instances.recheck(WORK)
+    const out = await w.harness.instances.signOut(WORK)
+    everywhere.push(out.auth.message ?? '', JSON.stringify(out.nextStep ?? {}))
+    for (const text of everywhere) expect(text).not.toMatch(NEVER)
+    // Where a command to copy is shown, it carries the home.
+    expect(card.nextStep?.command).toContain('CODEX_HOME')
+  })
+
+  it('the service names this account\'s sign-in in every message when it has a home of its own, and the built-in keeps its wording', async () => {
+    const make = (ownSignIn: string | undefined, signedOut = false) => {
+      const dir = tempDir('mousse-codex-messages')
+      const servers = appServers()
+      const service = new CodexProviderService(dir, new UserQuestionService(), { findBinary: () => fakeCodex(), launch: servers.launch }, {
+        dir: join(dir, 'state'),
+        env: () => ({ CODEX_HOME: join(dir, 'home') }),
+        signedOut: () => signedOut,
+        ...(ownSignIn ? { ownSignIn } : {})
+      })
+      stops.push(() => service.stop())
+      return { dir, service }
+    }
+    const chatError = async (service: CodexProviderService, dir: string) =>
+      service.chat({ threadId: 't', cwd: dir, model: 'gpt-test', prompt: 'hi', onText: () => {} }).then(() => '', (error: Error) => error.message)
+    const own = 'Sign this account in from Settings → Providers.'
+
+    // Not signed in.
+    const signedOutEntry = make(own)
+    const status = await signedOutEntry.service.status({ force: true })
+    expect(status.message).toBe(`This account is not signed in. ${own}`)
+    const notSignedInChat = await chatError(signedOutEntry.service, signedOutEntry.dir)
+    expect(notSignedInChat).toContain(own)
+    // Signed in with a key and not a ChatGPT account.
+    const keyEntry = make(own)
+    writeSignIn(join(keyEntry.dir, 'home'), 'api-key')
+    const keyStatus = await keyEntry.service.status({ force: true })
+    expect(keyStatus.message).toContain(own)
+    const keyChat = await chatError(keyEntry.service, keyEntry.dir)
+    expect(keyChat).toContain(own)
+    // Signed out in Mousse.
+    const flagged = make(own, true)
+    const flaggedStatus = await flagged.service.status({ force: true })
+    expect(flaggedStatus.message).toBe(`Signed out in Mousse. ${own}`)
+    for (const text of [status.message ?? '', keyStatus.message ?? '', notSignedInChat, keyChat, flaggedStatus.message ?? '']) expect(text).not.toMatch(NEVER)
+
+    // The user's own entry runs on the terminal sign-in and says so, as before.
+    const builtIn = make(undefined)
+    expect((await builtIn.service.status({ force: true })).message).toBe('Codex in your terminal is not signed in. Run `codex login` in a terminal, then recheck.')
+    expect(await chatError(builtIn.service, builtIn.dir)).toContain('Run `codex login` in a terminal')
+    expect((await make(undefined, true).service.status()).message).toBe('Disconnected in Mousse. The Codex sign-in in your terminal is unchanged.')
+  })
+})
+
+describe('changing the settings of a live entry', () => {
+  it('a saved change of variables or arguments reaches the next check, sign-in and sign-out, and a removed one stops applying', async () => {
+    const w = world({ stored: (binary) => ({ codex: { driver: 'codex', enabled: true }, [WORK]: privateEntry('Work', binary, { env: { KEEP_ME: '1' }, args: ['--first'] }) }) })
+    writeSignIn(w.homeOf(WORK), 'acct-work')
+    await w.harness.instances.recheck(WORK)
+    const last = () => w.servers.launches.at(-1)!
+    expect(last().env.KEEP_ME).toBe('1')
+    expect(last().args).toContain('--first')
+
+    // A new variable and a new argument replace the old; the next process is started with them, not the first snapshot.
+    await w.harness.instances.configure(WORK, { env: { KEEP_ME: '2' }, args: ['--second'] })
+    await w.harness.instances.recheck(WORK)
+    await turn(w, WORK)
+    expect(last().env.KEEP_ME).toBe('2')
+    expect(last().args).toContain('--second')
+    expect(last().args).not.toContain('--first')
+    expect(w.servers.launches.length).toBeGreaterThanOrEqual(2)
+
+    // Removed: nothing of them is applied any more, by the check, the sign-in or the sign-out.
+    await w.harness.instances.configure(WORK, { env: {}, args: [] })
+    await w.harness.instances.recheck(WORK)
+    expect(last().env.KEEP_ME).toBeUndefined()
+    expect(last().args).toEqual([])
+    const signIn = await startSignIn(w, WORK)
+    const terminal = await signIn.terminal()
+    expect(terminal.env.KEEP_ME).toBeUndefined()
+    terminal.exit(1)
+    await signIn.settled()
+    await w.harness.instances.signOut(WORK)
+    const logout = w.spawns.filter((spawned) => spawned.purpose === 'auth' && spawned.args.at(-1) === 'logout').at(-1)!
+    expect(logout.env.KEEP_ME).toBeUndefined()
+    // Still its own home, whatever was reconfigured.
+    expect(logout.env.CODEX_HOME).toBe(w.homeOf(WORK))
+    expect(last().env.CODEX_HOME).toBe(w.homeOf(WORK))
+  })
+
+  it('a new executable path is the one the sign-out runs', async () => {
+    const w = world()
+    writeSignIn(w.homeOf(WORK), 'acct-work')
+    await w.harness.instances.recheck(WORK)
+    const other = fakeCodex()
+    await w.harness.instances.configure(WORK, { binaryPath: other })
+    await w.harness.instances.signOut(WORK)
+    const logout = w.spawns.filter((spawned) => spawned.purpose === 'auth' && spawned.args.at(-1) === 'logout').at(-1)!
+    // The fake is a script behind a shim on Windows: its folder is on the command line either way.
+    const folder = other.slice(0, Math.max(other.lastIndexOf('/'), other.lastIndexOf('\\')))
+    expect([logout.command, ...logout.args].some((part) => part.startsWith(folder))).toBe(true)
+  })
+})
+
+describe('launch arguments that choose where an account lives', () => {
+  const FORMS: string[][] = [
+    ['-c', 'sqlite_home="C:/Users/me/.codex"'],
+    ['--config', 'openai_base_url=https://proxy.example.test'],
+    ['--config=chatgpt_base_url="https://proxy.example.test"'],
+    ['-ccli_auth_credentials_store="keyring"'],
+    ['-c', 'log_dir=/tmp/logs'],
+    ['-c', 'model_providers.x.env_key="KEY"'],
+    ['-c', 'MODEL_PROVIDER="x"'],
+    ['--verbose', '-c', ' "sqlite_home" = "x"']
+  ]
+
+  it.each(FORMS.map((args) => [args.join(' '), args] as const))('Settings refuses %s on a private home, on configure and on add, and the user\'s own Codex may set it', async (_name, args) => {
+    const w = world()
+    await expect(w.harness.instances.configure(WORK, { args })).rejects.toMatchObject({ code: 'unsupported' })
+    await expect(w.harness.instances.add({ driver: 'codex', config: { setup: 'existing', displayName: 'Other', args } })).rejects.toMatchObject({ code: 'unsupported' })
+    await expect(w.harness.instances.configure('codex', { args })).resolves.toBeDefined()
+  })
+
+  it('moving an entry that carries one to a private home is refused too', async () => {
+    const w = world()
+    const own = await w.harness.instances.add({ driver: 'codex', config: { setup: 'existing', displayName: 'On mine', home: 'default', args: ['-c', 'sqlite_home="x"'] } })
+    await expect(w.harness.instances.configure(own.instanceId, { home: 'private' })).rejects.toMatchObject({ code: 'unsupported' })
+  })
+
+  it('other arguments are welcome, stored reserved ones are dropped at launch, and the editor says so', async () => {
+    const w = world({ stored: (binary) => ({ codex: { driver: 'codex', enabled: true }, [WORK]: privateEntry('Work', binary, { args: ['-c', 'sqlite_home="C:/Users/me/.codex"', '-c', 'model="gpt-x"', '--verbose', '--config=log_dir=/tmp/x'] }) }) })
+    writeSignIn(w.homeOf(WORK), 'acct-work')
+    const snapshot = await w.harness.instances.recheck(WORK)
+    const launched = w.servers.launches.at(-1)!
+    expect(launched.args).toEqual(['-c', 'model="gpt-x"', '--verbose'])
+    expect(launched.env.CODEX_SQLITE_HOME).toBe(w.homeOf(WORK))
+    expect(snapshot.auth.message).toContain('Not used: the launch arguments that set sqlite_home, log_dir.')
+    const patched = await w.harness.instances.configure(WORK, { args: ['-c', 'model="gpt-y"'] })
+    expect(patched.config?.args).toEqual(['-c', 'model="gpt-y"'])
+    expect((await w.harness.instances.recheck(WORK)).auth.message).toBeUndefined()
+  })
+
+  it('reads every spelling and leaves a driver without rules alone', () => {
+    expect(reservedLaunchKeys('codex', ['-c', 'a=1', '--config', 'Sqlite_Home=x', '--config=log_dir=y', '-copenai_base_url=z', '-c'])).toEqual(['sqlite_home', 'log_dir', 'openai_base_url'])
+    expect(ownedUserArgs('codex', ['--a', '-c', 'sqlite_home=x', '-c', 'model=y', '--config=log_dir=z', '--b'])).toEqual(['--a', '-c', 'model=y', '--b'])
+    expect(ownedUserArgs('codex', undefined)).toBeUndefined()
+    // `-c` means something else for Claude Code (continue): never touched.
+    expect(reservedLaunchKeys('claude', ['-c', 'sqlite_home=x'])).toEqual([])
+    expect(ownedUserArgs('claude', ['-c', 'sqlite_home=x'])).toEqual(['-c', 'sqlite_home=x'])
+  })
+})
+
+describe('removing an entry whose app-server is slow to exit', () => {
+  it('keeps its files until the process has exited, then deletes them', async () => {
+    const w = world()
+    writeSignIn(w.homeOf(WORK), 'acct-work')
+    await w.harness.instances.recheck(WORK)
+    await settled(w, WORK)
+    const settings = join(instanceStateDir(w.profileHome, WORK), 'settings.json')
+    expect(existsSync(settings)).toBe(true)
+    await vi.waitFor(() => expect(w.servers.running()).toBeGreaterThan(0), { timeout: 5_000 })
+    w.servers.hold()
+    await w.harness.instances.remove(WORK)
+    // The process was told to stop but is still running: Windows would not let its folder go.
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(existsSync(settings)).toBe(true)
+    w.servers.release()
+    await vi.waitFor(() => expect(existsSync(settings)).toBe(false), { timeout: 5_000 })
   })
 })
