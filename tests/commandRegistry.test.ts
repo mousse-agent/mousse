@@ -18,6 +18,7 @@ import {
   type CommandsBridge
 } from '../src/renderer/commands/commandRegistry'
 import { attachCommandShortcuts } from '../src/renderer/commands/useCommandShortcuts'
+import { useRemoteThreads } from '../src/renderer/lib/remoteThreadStore'
 import { useAppStore } from '../src/renderer/stores/appStore'
 import { bindingFor, resolveBinding, type CommandId, type KeyInput } from '../src/shared/commands'
 
@@ -675,5 +676,64 @@ describe('commands started outside the renderer', () => {
     deliver('palette.open', 'guest')
     release()
     expect(palette).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('two views that register the same command', () => {
+  it('asks the newest enabled handler and goes back to the one before it when that one goes away', () => {
+    stubWindow()
+    const older = vi.fn()
+    const newer = vi.fn()
+    registerCommand('thread.new', { run: older })
+    let enabled = true
+    const unregister = registerCommand('thread.new', { run: newer, enabled: () => enabled })
+
+    expect(runCommand('thread.new', 'menu')).toBe(true)
+    expect(newer).toHaveBeenCalledTimes(1)
+    // The newer view is not the one in use: the older one answers.
+    enabled = false
+    expect(runCommand('thread.new', 'menu')).toBe(true)
+    expect(older).toHaveBeenCalledTimes(1)
+    enabled = true
+    // Leaving the newer view must not take the command from the older one that is still mounted.
+    unregister()
+    expect(runCommand('thread.new', 'menu')).toBe(true)
+    expect(older).toHaveBeenCalledTimes(2)
+    expect(newer).toHaveBeenCalledTimes(1)
+  })
+
+  it('is not registered once every view has gone, or while all of them are disabled', () => {
+    stubWindow()
+    const off = [registerCommand('thread.new', { run: vi.fn(), enabled: () => false }), registerCommand('thread.new', { run: vi.fn(), enabled: () => false })]
+    expect(runCommand('thread.new', 'menu')).toBe(false)
+    off.forEach((unregister) => unregister())
+    expect(useCommandRegistry.getState().handlers.has('thread.new')).toBe(false)
+  })
+})
+
+describe('commands while a thread on another computer is shown', () => {
+  const showRemote = (entry: Record<string, unknown>) =>
+    useRemoteThreads.setState({ entries: { remote: { key: 'remote', ...entry } as never }, order: ['remote'], activeKey: 'remote' })
+  afterEach(() => useRemoteThreads.setState({ entries: {}, order: [], activeKey: null }))
+
+  it('runs Stop while the remote thread works, even when the local thread behind it is idle', () => {
+    stubWindow()
+    useAppStore.setState({ turnStates: { 'thread-1': { threadId: 'thread-1', phase: 'idle' } as never } })
+    const stop = vi.fn()
+    registerCommand('run.stop', { run: stop })
+    expect(runCommand('run.stop', 'menu')).toBe(false)
+    showRemote({ sending: true })
+    expect(runCommand('run.stop', 'menu')).toBe(true)
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not run Stop for an idle remote thread because the local thread behind it is working', () => {
+    stubWindow()
+    const stop = vi.fn()
+    registerCommand('run.stop', { run: stop })
+    expect(runCommand('run.stop', 'menu')).toBe(true)
+    showRemote({ sending: false })
+    expect(runCommand('run.stop', 'menu')).toBe(false)
+    expect(stop).toHaveBeenCalledTimes(1)
   })
 })

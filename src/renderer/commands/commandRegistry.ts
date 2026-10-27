@@ -14,6 +14,7 @@ import {
   type ShortcutOverrides
 } from '../../shared/commands'
 import { hasOpenDialog } from '../components/ui/Modal'
+import { shownRemoteThread } from '../lib/remoteThreadStore'
 import { useAppStore } from '../stores/appStore'
 import { commandContextFromDom, type ClosestTarget } from './commandContext'
 
@@ -40,14 +41,43 @@ export const useCommandRegistry = create<CommandRegistryState>(() => ({
   overlays: []
 }))
 
-/** Registers a handler for a command; the returned function removes it, unless a later one replaced it. */
+/** The handlers registered for one command, oldest first; a later one is asked first. */
+interface StackedHandler extends CommandHandler {
+  stack: readonly CommandHandler[]
+}
+
+const handlersOf = (handler: CommandHandler | undefined): readonly CommandHandler[] =>
+  handler ? ((handler as Partial<StackedHandler>).stack ?? [handler]) : []
+
+const isEnabled = (handler: CommandHandler): boolean => handler.enabled?.() ?? true
+
+function stacked(stack: readonly CommandHandler[]): CommandHandler {
+  if (stack.length === 1) return stack[0]!
+  const handler: StackedHandler = {
+    stack,
+    run: () => [...stack].reverse().find(isEnabled)?.run(),
+    enabled: () => stack.some(isEnabled)
+  }
+  return handler
+}
+
+/**
+ * Registers a handler for a command; the returned function removes it. Two views can be mounted at
+ * once (a hidden thread and the one shown): the newest enabled handler runs, and when it goes away
+ * the one before it answers again.
+ */
 export function registerCommand(id: CommandId, handler: CommandHandler): () => void {
-  useCommandRegistry.setState((state) => ({ handlers: new Map(state.handlers).set(id, handler) }))
+  useCommandRegistry.setState((state) => ({
+    handlers: new Map(state.handlers).set(id, stacked([...handlersOf(state.handlers.get(id)), handler]))
+  }))
   return () =>
     useCommandRegistry.setState((state) => {
-      if (state.handlers.get(id) !== handler) return state
+      const current = handlersOf(state.handlers.get(id))
+      const remaining = current.filter((entry) => entry !== handler)
+      if (remaining.length === current.length) return state
       const handlers = new Map(state.handlers)
-      handlers.delete(id)
+      if (remaining.length) handlers.set(id, stacked(remaining))
+      else handlers.delete(id)
       return { handlers }
     })
 }
@@ -128,6 +158,12 @@ export function currentContext(source: CommandSource, target?: ClosestTarget | n
   })
   // Until the app info arrives the preload still knows the platform.
   if (!context.platform && typeof window !== 'undefined') context.platform = window.mousse?.platform ?? ''
+  // The thread shown may be on another computer; the local thread behind it is not what a command acts on.
+  const remote = shownRemoteThread()
+  if (remote) {
+    context.threadOpen = true
+    context.runActive = remote.running
+  }
   // A palette row or menu click has no focus to judge, so it counts as being in the Files panel.
   if (source !== 'key') context.inFilesPanel = true
   return source === 'guest' ? { ...context, inTextInput: true } : context
