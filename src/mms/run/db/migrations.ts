@@ -364,5 +364,29 @@ CREATE INDEX approval_requests_run ON approval_requests(run_id, status);
 -- Read at every turn start: the requests a run was started to deliver.
 CREATE INDEX approval_requests_continuation ON approval_requests(continuation_run_id);
 `
+  },
+  {
+    version: 13,
+    // SQLite cannot change a CHECK in place, so `inbox` is rebuilt (SQLite's "other kinds of ALTER TABLE"
+    // procedure). Nothing references it, and its index goes with the dropped table and is made again.
+    sql: `
+-- A watched pull request tells its thread about finished checks and new reviews (issue #176): the
+-- kind list adds 'pr_update'. Columns are those of version 3 plus delivered_by (version 7).
+CREATE TABLE inbox_new(
+  inbox_id   TEXT PRIMARY KEY,
+  thread_id  TEXT NOT NULL,
+  run_id     TEXT,
+  kind       TEXT NOT NULL CHECK(kind IN ('child_result','restart_note','reconcile_notice','pr_update')),
+  payload    TEXT NOT NULL,
+  status     TEXT NOT NULL CHECK(status IN ('pending','delivered','acknowledged')),
+  created_at TEXT NOT NULL,
+  delivered_by TEXT
+) STRICT;
+INSERT INTO inbox_new(inbox_id, thread_id, run_id, kind, payload, status, created_at, delivered_by)
+  SELECT inbox_id, thread_id, run_id, kind, payload, status, created_at, delivered_by FROM inbox;
+DROP TABLE inbox;
+ALTER TABLE inbox_new RENAME TO inbox;
+CREATE INDEX inbox_thread_status ON inbox(thread_id, status);
+`
   }
 ]

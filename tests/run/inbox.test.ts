@@ -148,6 +148,19 @@ describe('Inbox (SPEC §14.1)', () => {
       expect(planned.text).toContain('call task_status with delegation:5 for the rest')
     })
 
+    it('prints the text of a pull request update as written, and waits pending like any notice', () => {
+      f = delegationFixture()
+      const text = 'Update on pull request #7 (https://github.com/acme/app/pull/7) at abcdef0.\n\nChecks failed\nQuoted from GitHub:\n> build'
+      const appended = f.engine.inbox.append({ threadId: 't', kind: 'pr_update', inboxId: 'inbox:pr-update:t:1:0', payload: { text, number: 7, headSha: 'abcdef0', changes: ['checks_failed'] } })
+      expect(appended).toMatchObject({ inboxId: 'inbox:pr-update:t:1:0', kind: 'pr_update', status: 'pending' })
+      expect(f.engine.inbox.listPending('t').map((row) => row.inboxId)).toEqual(['inbox:pr-update:t:1:0'])
+      expect(formatInboxNotice(appended)).toBe(text)
+      expect(formatWakeNotice([appended, { ...appended, inboxId: 'x', payload: { text: 'second' } }])).toBe(`${text}\n\nsecond`)
+      // The same delivery written again is refused by the primary key, not duplicated.
+      expect(() => f!.engine.inbox.append({ threadId: 't', kind: 'pr_update', inboxId: 'inbox:pr-update:t:1:0', payload: { text } })).toThrow()
+      expect(f.engine.inbox.listForThread('t')).toHaveLength(1)
+    })
+
     it('reports a failed task with its error, and joins other rows after a blank line', () => {
       const failed = row('delegation:2', { runStatus: 'interrupted', error: 'daemon restart' }, 'd')
       expect(formatInboxNotice(failed, titles)).toBe('Subagent "Docs writer" (thread d) ended task delegation:2 (interrupted).\ndaemon restart\nFull result above.')

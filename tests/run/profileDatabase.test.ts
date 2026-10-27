@@ -407,6 +407,48 @@ describe('ProfileDatabase', () => {
     })
   })
 
+  describe('the pull request update kind of the inbox (the migration that rebuilds it)', () => {
+    const kind = RUN_MIGRATIONS.find((migration) => migration.sql.includes("'pr_update'"))!
+    const before = RUN_MIGRATIONS.filter((migration) => migration.version < kind.version)
+    const insertRow = (database: ProfileDatabase, id: string, rowKind: string, deliveredBy: string | null = null): void => {
+      database.database
+        .prepare("INSERT INTO inbox(inbox_id, thread_id, run_id, kind, payload, status, created_at, delivered_by) VALUES(?, 't1', NULL, ?, '{\"text\":\"x\"}', ?, '2026-10-12T00:00:00.000Z', ?)")
+        .run(id, rowKind, deliveredBy ? 'delivered' : 'pending', deliveredBy)
+    }
+
+    it('is the last migration and comes after the one that added delivered_by', () => {
+      expect(kind.version).toBe(RUN_MIGRATIONS.at(-1)!.version)
+      expect(kind.version).toBeGreaterThan(7)
+    })
+
+    it('keeps rows of every kind, their delivered_by and the index, and then accepts pr_update', () => {
+      const database = open()
+      database.migrate(before)
+      expect(database.userVersion()).toBe(kind.version - 1)
+      insertRow(database, 'i:child', 'child_result', 'effect:a')
+      insertRow(database, 'i:restart', 'restart_note')
+      insertRow(database, 'i:notice', 'reconcile_notice', 'queue:q1')
+      // Before the rebuild the CHECK refuses the new kind.
+      expect(() => insertRow(database, 'i:pr', 'pr_update')).toThrow(/CHECK/)
+      const rows = database.database.prepare('SELECT * FROM inbox ORDER BY inbox_id').all()
+
+      database.migrate(RUN_MIGRATIONS)
+
+      expect(database.userVersion()).toBe(kind.version)
+      expect(database.database.prepare('SELECT * FROM inbox ORDER BY inbox_id').all()).toEqual(rows)
+      expect(database.database.prepare('SELECT delivered_by FROM inbox WHERE inbox_id = ?').get('i:child')).toEqual({ delivered_by: 'effect:a' })
+      expect(database.database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'inbox_thread_status'").all()).toHaveLength(1)
+      expect(database.database.prepare("SELECT name FROM sqlite_master WHERE name = 'inbox_new'").all()).toEqual([])
+      expect(database.database.prepare('PRAGMA table_info(inbox)').all().map((column) => column.name)).toEqual([
+        'inbox_id', 'thread_id', 'run_id', 'kind', 'payload', 'status', 'created_at', 'delivered_by'
+      ])
+      insertRow(database, 'i:pr', 'pr_update')
+      expect(() => insertRow(database, 'i:other', 'something_else')).toThrow(/CHECK/)
+      // The id is the primary key: a second write of the same delivery cannot slip in.
+      expect(() => insertRow(database, 'i:pr', 'pr_update')).toThrow(/UNIQUE|PRIMARY/)
+    })
+  })
+
   it('refuses a symlinked run directory', () => {
     profileHome = mkdtempSync(join(tmpdir(), 'mousse-run-db-'))
     const elsewhere = join(profileHome, 'elsewhere')
