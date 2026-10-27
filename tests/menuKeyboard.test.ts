@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { nextMenuIndex } from '../src/renderer/hooks/useMenuKeyboard'
+import { nextMenuIndex, nextPaletteIndex } from '../src/renderer/hooks/useMenuKeyboard'
 
 describe('nextMenuIndex', () => {
   it('moves and wraps with the arrow keys', () => {
@@ -23,5 +23,30 @@ describe('nextMenuIndex', () => {
     expect(nextMenuIndex('Escape', 0, 3)).toBeUndefined()
     expect(nextMenuIndex('ArrowDown', -1, 0)).toBeUndefined()
     expect(nextMenuIndex('End', -1, 0)).toBeUndefined()
+  })
+})
+
+describe('nextPaletteIndex', () => {
+  it('moves with the arrows like a menu, wrapping at the ends', () => {
+    expect(nextPaletteIndex('ArrowDown', 2, 3)).toBe(0)
+    expect(nextPaletteIndex('ArrowUp', 0, 3)).toBe(2)
+  })
+
+  it('jumps with Home and End', () => {
+    expect(nextPaletteIndex('Home', 7, 20)).toBe(0)
+    expect(nextPaletteIndex('End', 3, 20)).toBe(19)
+  })
+
+  it('moves a page of eight with PageUp and PageDown and stops at the ends', () => {
+    expect(nextPaletteIndex('PageDown', 3, 20)).toBe(11)
+    expect(nextPaletteIndex('PageDown', 15, 20)).toBe(19)
+    expect(nextPaletteIndex('PageUp', 11, 20)).toBe(3)
+    expect(nextPaletteIndex('PageUp', 2, 20)).toBe(0)
+  })
+
+  it('ignores other keys and never moves in an empty list', () => {
+    expect(nextPaletteIndex('a', 0, 3)).toBeUndefined()
+    expect(nextPaletteIndex('PageDown', 0, 0)).toBeUndefined()
+    expect(nextPaletteIndex('ArrowDown', 0, 0)).toBeUndefined()
   })
 })
