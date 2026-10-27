@@ -109,12 +109,21 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
  * would use: a home folder (`~`, `~user`; Claude Code and Pi expand it), Pi's leading `@`, a
  * variable (`$HOME`, `${HOME}`, `%USERPROFILE%`), or on Windows Claude Code's `/c/...` drive form.
  * Such a path is refused rather than expanded here: the bot names its folders by their real paths.
+ *
+ * So is any spelling a runtime or the file system reads differently from Node's `resolve`:
+ * - whitespace around the path (Claude Code's resolver starts with JS `trim()`, so `' ../x'` or
+ *   `'<root>\\.. '` would leave the folder that `resolve` keeps it in);
+ * - a NUL or other control character;
+ * - a segment ending in a space or a dot other than `.` and `..` themselves (`'.. '`, `'x.'`),
+ *   which Windows drops when it opens the path.
  */
 export function runtimeExpandedPath(raw: string, platform: NodeJS.Platform = process.platform): boolean {
-  const trimmed = raw.trimStart()
-  if (/^[~@]/.test(trimmed)) return true
-  if (/\$(\{|[A-Za-z_])/.test(trimmed)) return true
-  if (platform === 'win32' && (/%[^%\\/]+%/.test(trimmed) || /^\/[A-Za-z](\/|$)/.test(trimmed))) return true
+  if (raw !== raw.trim()) return true
+  if (/[\u0000-\u001f\u007f]/.test(raw)) return true
+  if (raw.split(/[\\/]/).some((segment) => segment !== '.' && segment !== '..' && /[ .]$/.test(segment))) return true
+  if (/^[~@]/.test(raw)) return true
+  if (/\$(\{|[A-Za-z_])/.test(raw)) return true
+  if (platform === 'win32' && (/%[^%\\/]+%/.test(raw) || /^\/[A-Za-z](\/|$)/.test(raw))) return true
   return false
 }
 

@@ -211,6 +211,30 @@ describe('locked Claude Code against the real pinned CLI', () => {
     expect(readFileSync(join(run.outside, 'secret.txt'), 'utf8')).toBe('TOP-SECRET-VALUE')
   }, 120_000)
 
+  it.skipIf(!hasBinary)('a path padded with whitespace or ending in a space or dot never leaves the folders (review r2: Claude Code trims paths)', async () => {
+    const run = await lockedRun(({ root, outside, userHome }) => [
+      { name: 'Grep', input: { pattern: 'SECRET', path: ` ${outside}`, output_mode: 'content' } },
+      { name: 'Grep', input: { pattern: 'SECRET', path: join(root, '.. '), output_mode: 'content' } },
+      { name: 'Grep', input: { pattern: 'SECRET', path: '.. ', output_mode: 'content' } },
+      { name: 'Grep', input: { pattern: 'SECRET', path: '..\n', output_mode: 'content' } },
+      { name: 'Grep', input: { pattern: 'SECRET', path: `\n${outside}\n`, output_mode: 'content' } },
+      { name: 'Grep', input: { pattern: 'SECRET', path: ' ../outside', output_mode: 'content' } },
+      { name: 'Grep', input: { pattern: 'SECRET', path: '\t../outside', output_mode: 'content' } },
+      { name: 'Glob', input: { pattern: '*', path: ` ${userHome}` } },
+      { name: 'Glob', input: { pattern: '*.txt', path: ' ../outside' } },
+      { name: 'Glob', input: { pattern: '*.txt', path: '\t../outside' } },
+      { name: 'Glob', input: { pattern: '*', path: join(root, '.. ') } },
+      { name: 'Read', input: { file_path: join(root, 'a.txt') } }
+    ])
+    expect(run.text).toContain('done')
+    expect(run.results).not.toContain('TOP-SECRET-VALUE')
+    expect(run.results).not.toContain('HOME-SECRET-VALUE')
+    expect(run.results).not.toContain('secret.txt')
+    expect(run.results).toContain('inside text')
+    // Only the inside Read ran.
+    expect(run.rows).toEqual([{ name: 'Read', status: 'committed', idempotent: true }])
+  }, 120_000)
+
   it.skipIf(!hasBinary)('a gate that throws denies the call: nothing runs, even a read Claude Code would allow in its working folder', async () => {
     const run = await lockedRun(({ scratch }) => [
       { name: 'Read', input: { file_path: join(scratch, 'scratch-note.txt') } },

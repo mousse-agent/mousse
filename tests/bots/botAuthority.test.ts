@@ -5,7 +5,7 @@
  */
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createBotAuthority, runtimeExpandedPath } from '../../src/mms/bots/authority/botAuthority'
 import { botManifestDigest, compileBotThread, type CompileInput } from '../../src/mms/bots/grants/compile'
@@ -287,7 +287,19 @@ describe('paths a runtime rewrites before it opens them (PR 6 review M1)', () =>
       expect(runtimeExpandedPath(path, 'linux'), path).toBe(true)
     for (const path of ['%USERPROFILE%\\x', '/c/Users/x', '/C'])
       expect([path, runtimeExpandedPath(path, 'win32'), runtimeExpandedPath(path, 'linux')], path).toEqual([path, true, false])
-    for (const path of ['/srv/site/a~b', 'notes@2.md', 'cost$.txt', 'a/b'])
+    for (const path of ['/srv/site/a~b', 'notes@2.md', 'cost$.txt', 'a/b', '.', '..', '../x', 'a/./b', '.hidden/x', 'file.txt'])
       expect(runtimeExpandedPath(path, 'win32'), path).toBe(false)
+  })
+
+  it('a path padded with whitespace, holding a control character, or with a segment ending in a space or dot is walled (review r2)', () => {
+    // Claude Code's resolver trims (JS `trim`, every Unicode space); Windows drops trailing spaces and dots.
+    const padded = [' /etc', '/etc ', '\t../outside', ' ../outside', '..\n', '.. ', `${root}${sep}.. `, `\n${base}\n`, ' /etc', '﻿/etc', 'a\u0000b', 'a\u001fb', 'sub/.. /x', 'x.', 'dir./a', 'a /b', '...']
+    for (const path of padded) expect(runtimeExpandedPath(path, 'linux'), JSON.stringify(path)).toBe(true)
+    const bot = authorityFor()
+    const claude = { search: ['Glob', 'Grep'], read: ['Read'] }
+    for (const path of [` ${base}`, `${root}${sep}.. `, ' ../secret.txt', '\t..', '.. ', `\n${base}\n`]) {
+      expect(checkBuiltinCall(bot, claude, 'Grep', { pattern: 'x', path }), JSON.stringify(path)).toMatchObject({ ok: false, wall: { kind: 'path' } })
+      expect(checkBuiltinCall(bot, PI_NATIVE_TOOLS, 'read', { path }), JSON.stringify(path)).toMatchObject({ ok: false, wall: { kind: 'path' } })
+    }
   })
 })
