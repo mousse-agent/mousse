@@ -10,6 +10,7 @@ import { botAppToolRefusal } from '../../../../shared/bots/personal/walls'
 import type { McpToolDescriptor } from '../../../../shared/integrations'
 import type { IntegrationActor } from '../../../../shared/integrations/actor'
 import type { McpToolCallResult } from '../../../../shared/integrations/results'
+import type { McpManager } from '../../../integrations/mcp/McpManager'
 import type { ModeCeiling } from '../../types'
 import type { AppToolTurns } from './turns'
 import { callerThreadOnly } from './thread'
@@ -126,6 +127,15 @@ export interface UserMcpProxy {
   call(providerName: string, args: Record<string, unknown>, projectPath: string | undefined, signal: AbortSignal, actor: IntegrationActor): Promise<McpToolCallResult>
 }
 
+/** `UserMcpProxy` over the profile's MCP manager. */
+export function userMcpProxy(manager: Pick<McpManager, 'getEnabledTools' | 'isToolCallAllowed' | 'callTool'>): UserMcpProxy {
+  return {
+    list: (projectPath, actor) => manager.getEnabledTools(projectPath, actor),
+    allowed: (name, projectPath, actor) => manager.isToolCallAllowed(name, projectPath, actor),
+    call: (name, args, projectPath, signal, actor) => manager.callTool(name, args, projectPath, signal, actor)
+  }
+}
+
 /** A user MCP tool as a runtime is sent it: its own name and schema, effects unknown (`mutation`). */
 export type UserMcpListing = Pick<MousseTool, 'name' | 'description' | 'inputSchema' | 'class'>
 
@@ -196,6 +206,11 @@ function notLive(message: string): McpToolError {
  */
 export class ToolRegistry {
   private readonly tools = new Map<string, MousseTool>()
+  /**
+   * The user MCP tools each run's turn was offered, by the name it was offered them under: a call
+   * resolves from here and never lists again (a new listing may name a tool differently).
+   */
+  private readonly offeredUserMcp = new Map<string, { turn: AppToolTurn; tools: Map<string, McpToolDescriptor> }>()
 
   constructor(private readonly options: ToolRegistryOptions) {}
 
@@ -296,7 +311,26 @@ export class ToolRegistry {
       }
     }
     const readOnly = this.options.readOnlyThread?.(threadId) === true
-    return tools.filter((tool) => !this.tools.has(tool.providerName) && (!readOnly || turn.toolAccess?.allows(tool.providerName) === true))
+    const offered = tools.filter((tool) => !this.tools.has(tool.providerName) && (!readOnly || turn.toolAccess?.allows(tool.providerName) === true))
+    this.rememberOffered(runId!, turn, offered)
+    return offered
+  }
+
+  /** Keeps what `runId`'s turn was offered (added to an earlier listing of the same turn), and drops ended runs'. */
+  private rememberOffered(runId: string, turn: AppToolTurn, tools: readonly McpToolDescriptor[]): void {
+    for (const [id, entry] of this.offeredUserMcp) if (this.options.turns?.get(id) !== entry.turn) this.offeredUserMcp.delete(id)
+    const current = this.offeredUserMcp.get(runId)
+    const map = current?.turn === turn ? current.tools : new Map<string, McpToolDescriptor>()
+    for (const tool of tools) map.set(tool.providerName, tool)
+    this.offeredUserMcp.set(runId, { turn, tools: map })
+  }
+
+  /** The user MCP tool `name` as the run's current turn was offered it, without listing again. */
+  private offeredTool(runId: string, turn: AppToolTurn, name: string): McpToolDescriptor | undefined {
+    const entry = this.offeredUserMcp.get(runId)
+    if (entry?.turn === turn) return entry.tools.get(name)
+    // A definition's tools are fixed for its run: what it was granted, never listed again.
+    return turn.definition?.mcpTools?.find((tool) => tool.providerName === name && !this.tools.has(name))
   }
 
   /** `userMcpForTurn` as a runtime is sent the tools. */
@@ -457,9 +491,10 @@ export class ToolRegistry {
    * the actor's grant at call time and the run's tool ledger.
    */
   private async callUserMcp(name: string, args: Record<string, unknown>, at: CallSite): Promise<ToolOutcome> {
-    const { threadId, active, turn, request } = at
+    const { active, turn, request } = at
     const proxy = this.options.userMcp!
-    const tool = (await this.userMcpForTurn(threadId, active)).find((entry) => entry.providerName === name)
+    if (turn.bot) throw new McpToolError('mousse_unknown_tool', `No Mousse tool named ${name}.`)
+    const tool = this.offeredTool(active, turn, name)
     if (!tool) throw new McpToolError('mousse_unknown_tool', `No Mousse tool named ${name}.`)
     if (turn.definition) {
       const refused = await this.authorizeDefinition(name, args, at)
