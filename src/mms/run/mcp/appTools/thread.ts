@@ -1,11 +1,12 @@
-import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
+import { ALWAYS_OPTION_ID, PERMISSION_KEYS } from '../../../../shared/permissionKeys'
 import { visibleThreads } from '../../../../shared/threadLineage'
-import type { QueuedMessage } from '../../../../shared/types'
+import type { QueuedMessage, UserQuestionAnswers } from '../../../../shared/types'
+import { describeApprovalRefusal } from '../../approvalRights'
 import { QueueAccessError, QueueConflictError } from '../../../queue/ThreadMessageQueue'
 import { readRunResultText } from '../../delegation/hold'
 import type { RunEngine } from '../../RunEngine'
 import { TERMINAL_RUN_STATUSES, type AgentActor, type DelegationRecord, type RunRecord, type ThreadEvent } from '../../types'
-import type { AgentCreatedThread, AgentQueueCommand, AgentQueueResult, AgentRunCommandResult, AgentThreadRequest, AppToolHost } from './host'
+import type { AgentCreatedThread, AgentQueueCommand, AgentQueueResult, AgentRunCommandResult, AgentThreadRequest, AppToolHost, ApprovalRequestInfo } from './host'
 import {
   CLIENT_REQUEST_ID_SCHEMA,
   json,
@@ -338,6 +339,32 @@ function acceptedRunCommand(result: AgentRunCommandResult, expectedRunId: string
         { conflict: 'run_not_active', expectedRunId, activeRunId: result.activeRunId, ...(result.runStatus ? { runStatus: result.runStatus } : {}) }
       )
   }
+}
+
+/** The most characters of one answer an agent may give (the reason it rejects with). */
+const APPROVAL_ANSWER_MAX_CHARS = 2000
+
+/** `answers` of `approval_respond`: question ids mapped to an option id, a list of them, or text. */
+function approvalAnswers(value: unknown): UserQuestionAnswers {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('answers must be an object that maps each question id to the chosen option id')
+  const entries = Object.entries(value as Record<string, unknown>)
+  if (entries.length === 0 || entries.length > 20) throw new Error('answers must name between 1 and 20 questions')
+  const out: UserQuestionAnswers = {}
+  for (const [id, answer] of entries) {
+    const ok = typeof answer === 'string' ? answer.length <= APPROVAL_ANSWER_MAX_CHARS : Array.isArray(answer) && answer.length <= 20 && answer.every((item) => typeof item === 'string' && item.length <= APPROVAL_ANSWER_MAX_CHARS)
+    if (!ok) throw new Error(`answers.${id} must be an option id, a list of option ids or text of at most ${APPROVAL_ANSWER_MAX_CHARS} characters`)
+    out[id] = answer as string | string[]
+  }
+  return out
+}
+
+/** Whether `answers` choose an option that makes a standing rule ("always for this thread"), whatever id the option has. */
+function chosenStandingRule(request: ApprovalRequestInfo, answers: UserQuestionAnswers): boolean {
+  return request.questions.some((question) => {
+    const raw = answers[question.id]
+    const chosen = Array.isArray(raw) ? raw : raw === undefined ? [] : [raw]
+    return chosen.some((id) => id === ALWAYS_OPTION_ID || question.options.some((option) => option.id === id && option.scope === 'always'))
+  })
 }
 
 /** The transcript row of a change the call made; the `agent.action` event is the record, so a row that fails to write is not an error. */
@@ -791,6 +818,73 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
         const result = acceptedRunCommand(await host.steerRun(threadId, runId, args.text, { clientRequestId: `thread_steer:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`, actor }), runId)
         if (!result.replayed) showAction(host, threadId, actor, `steered run ${runId}`)
         return json({ threadId, ...result })
+      }
+    },
+    {
+      name: 'approval_respond',
+      description: `Answer a pending approval of another thread (a command, a file change or a tool its agent asked to run), as the user would. Needs the manage agent access level, a project the profile allows AND the profile's switch "Agents may answer approvals on other threads", which is off by default; a refusal names what is missing. You can approve only what your own permission mode would allow without asking, never your own thread's request (nor one of a thread in your lineage other than your direct subagents', which answer_subagent covers), and never "always for this thread": approve once or reject. Read the request first with thread_list (with manage it lists each thread's pending requests with their option ids), then answer with the question id and the option id. The thread's transcript shows "Approved by an agent in thread ..." and the user sees who answered. A plain question for the user (ask_user) cannot be answered here. If a person or another agent answered first you get already_answered with who decided what, and nothing changes.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          threadId: { type: 'string', description: 'The thread the approval belongs to; not your own.' },
+          requestId: { type: 'string', description: 'The request id from thread_list.' },
+          answers: {
+            type: 'object',
+            description: 'The question id of the request mapped to the chosen option id (an approval has one question). Text that is no option rejects the request and is given to its agent as the reason.',
+            additionalProperties: { oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] }
+          },
+          clientRequestId: CLIENT_REQUEST_ID_SCHEMA
+        },
+        required: ['threadId', 'requestId', 'answers']
+      },
+      access: 'managesOthers',
+      class: 'mutation',
+      minLevel: 'manage',
+      offered: () => false,
+      handler: (args, ctx) => {
+        const threadId = requiredId(args, 'threadId')
+        const requestId = requiredId(args, 'requestId')
+        const answers = approvalAnswers(args.answers)
+        if (!host.approvalRequest || !host.answerApproval) return notAvailable('approval_respond')
+        if (threadId === ctx.caller.threadId) throw new Error("approval_respond answers the approvals of other threads; the user answers your own thread's.")
+        assertNotBotThread(host, threadId, 'approval_respond')
+        const request = host.approvalRequest(requestId)
+        if (!request) return json({ ok: false, reason: 'unknown', threadId, requestId, message: `No approval ${requestId} exists.` })
+        if (request.threadId !== threadId)
+          throw new McpToolError('mousse_conflict', `Request ${requestId} is not an approval of thread ${threadId}. Read the thread's pending requests again.`, { conflict: 'request_not_pending', requestId, threadId })
+        // Only the user answers a plain question: the answer rule governs approvals, so a question is refused before anything is settled.
+        if (!request.approval)
+          throw new McpToolError('mousse_scope_denied', `Request ${requestId} is a question for the user, not an approval; only the user answers it.`)
+        // "Always for this thread" is the user's: it is refused before the call as well as by the rule.
+        if (chosenStandingRule(request, answers))
+          throw new McpToolError('mousse_scope_denied', 'An agent cannot approve "always for this thread"; approve once or reject.')
+        const result = host.answerApproval(threadId, requestId, answers, {
+          clientRequestId: `approval_respond:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`,
+          actor: actorOf(ctx),
+          accessLevel: ctx.caller.accessLevel
+        })
+        if (result.ok) return json({ ok: true, threadId, requestId, decision: result.decision, ...(result.replayed ? { replayed: true } : {}) })
+        switch (result.reason) {
+          case 'client_request_id_conflict':
+            throw new McpToolError('mousse_conflict', 'That clientRequestId was already used to answer another approval; use a fresh one for each new answer.', { conflict: 'client_request_id_conflict', requestId })
+          case 'already_answered':
+            return json({
+              ok: false,
+              reason: 'already_answered',
+              threadId,
+              requestId,
+              ...(result.decision ? { decision: result.decision } : {}),
+              ...(result.answeredBy ? { answeredBy: result.answeredBy.kind === 'agent' ? { kind: 'agent', threadId: result.answeredBy.threadId, runId: result.answeredBy.runId } : result.answeredBy } : {}),
+              message: 'Someone else answered first; nothing was changed.'
+            })
+          case 'cancelled':
+            return json({ ok: false, reason: 'cancelled', threadId, requestId, ...(result.cancelReason ? { cancelReason: result.cancelReason } : {}), message: 'The request was closed before it was answered.' })
+          case 'unknown':
+            return json({ ok: false, reason: 'unknown', threadId, requestId, message: `No approval ${requestId} exists.` })
+          default:
+            // The rule refused this agent: the request stays pending for the user.
+            return { text: JSON.stringify({ ok: false, reason: result.reason, threadId, requestId, message: describeApprovalRefusal(result.reason) }), isError: true }
+        }
       }
     },
     {
