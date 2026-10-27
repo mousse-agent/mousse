@@ -6613,7 +6613,9 @@ export class OrchestratorService extends EventEmitter {
     const callerMode = this.runPermissionMode(actor.runId)
     if (command.op !== 'remove' && command.op !== 'reorder') this.assertNotBotThread(threadId)
     if (command.op === 'enqueue') this.assertQueueOpen(threadId)
-    // Who wrote the item: this agent (its own note on its own thread, or a message it sent) or someone else.
+    // Who wrote the item: this agent (its own note on its own thread, or a message it sent) or someone else. Source
+    // `mcp` is only ever set by the daemon for an agent's tool call: a protocol client's source is replaced by its
+    // client type (`admittedChatSource`), so a person's message cannot pass for an agent's own note.
     const authoredBy = (item: QueuedMessage): boolean =>
       item.origin ? item.origin.kind === 'agent' && item.origin.threadId === actor.threadId : item.source === 'mcp' && !cross
     const agentItems = (items: QueuedMessage[]): number => listPendingQueue(items).filter((item) => item.origin?.kind === 'agent').length
