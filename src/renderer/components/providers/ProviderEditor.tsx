@@ -1,9 +1,9 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import type { InstanceSnapshot, StatusDescription } from '../../../shared/harness/status'
+import type { InstanceSnapshot, PiEngine, StatusDescription } from '../../../shared/harness/status'
 import type { ModelPrefsPatch, ProviderOperationEvent } from '../../../shared/harness/types'
 import { ChevronRight } from '../../lib/icons'
 import { ProviderIcon } from '../../lib/providerIcons'
-import { SettingsAdvanced, SettingsRow } from '../settings/SettingsRow'
+import { Segmented, SettingsAdvanced, SettingsRow } from '../settings/SettingsRow'
 import { AccountRow, ArgsRow, BinaryRow, EnvRow, ExecutableRow, HomeRow, PlanUsageRow, SetupRow, UpdateRow, type InstanceActions } from './CliSections'
 import { ProviderModelsSection, modelsSummary } from './ProviderModelsSection'
 import { EditorSection, RemoveButton, useAsyncAction } from './parts'
@@ -221,7 +221,50 @@ export function ModelsEditorSection({
   )
 }
 
-/** The editor of a model API: header, its Setup row (and Move, where it now runs as an agent), then Models. */
+const ENGINE_OPTIONS = [
+  { value: 'rpc', label: "Pi's agent" },
+  { value: 'legacy', label: 'Legacy' }
+] as const satisfies ReadonlyArray<{ value: PiEngine; label: string }>
+
+/** The stored value for a choice: the default stores nothing (`null` clears), Legacy stores `legacy`. */
+export function engineSetting(choice: PiEngine): 'legacy' | null {
+  return choice === 'legacy' ? 'legacy' : null
+}
+
+/**
+ * The engine a model API runs on: Pi's agent (the default) or the legacy in-process loop, the
+ * rollback until it is removed. The default stores nothing; Legacy stores `engine: 'legacy'`.
+ */
+export function EngineRow({ snapshot, onSetEngine }: { snapshot: InstanceSnapshot; onSetEngine: (engine: 'legacy' | null) => Promise<void> }) {
+  const change = useAsyncAction()
+  const engine = snapshot.engine
+  if (!engine?.switchable) return null
+  const value: PiEngine = engine.setting ?? engine.effective
+  return (
+    <SettingsRow
+      title="Engine"
+      description={
+        change.error
+          ? <span className="prov-error">{change.error}</span>
+          : 'Legacy is the in-process loop Mousse used before. It goes away in a later release.'
+      }
+      control={
+        <Segmented<PiEngine>
+          ariaLabel="Engine"
+          value={value}
+          options={ENGINE_OPTIONS}
+          disabled={change.busy !== null}
+          onChange={(next) => void change.run('engine', () => onSetEngine(engineSetting(next)))}
+        />
+      }
+    />
+  )
+}
+
+/**
+ * The editor of a model API: header, its Setup row (and Move, where it now runs as an agent), then
+ * Models, and the engine under Advanced where the provider can switch it.
+ */
 export function ApiEditor({
   snapshot,
   setup,
@@ -229,7 +272,8 @@ export function ApiEditor({
   removeHint,
   onRemove,
   onSaveModelPrefs,
-  onRefreshModels
+  onRefreshModels,
+  onSetEngine
 }: {
   snapshot: InstanceSnapshot
   setup: ReactNode
@@ -238,6 +282,7 @@ export function ApiEditor({
   onRemove: () => Promise<void>
   onSaveModelPrefs: (patch: ModelPrefsPatch) => Promise<void>
   onRefreshModels: () => Promise<void>
+  onSetEngine?: (engine: 'legacy' | null) => Promise<void>
 }) {
   return (
     <>
@@ -247,6 +292,13 @@ export function ApiEditor({
         {move}
       </EditorSection>
       <ModelsEditorSection snapshot={snapshot} onSave={onSaveModelPrefs} onRefresh={onRefreshModels} />
+      {onSetEngine && snapshot.engine?.switchable && (
+        <SettingsAdvanced>
+          <EditorSection title="Runtime" description={deviceWideNote(snapshot)}>
+            <EngineRow snapshot={snapshot} onSetEngine={onSetEngine} />
+          </EditorSection>
+        </SettingsAdvanced>
+      )}
     </>
   )
 }

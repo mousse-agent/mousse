@@ -6,7 +6,7 @@ import type { ProviderLoginOption } from '../src/shared/providerAuth'
 import { AgentConnectStep, CustomCommandStep, addChoices, type AddChoice } from '../src/renderer/components/providers/AddProviderDialog'
 import { AccountRow, BinaryRow, PlanUsageRow, SetupRow, UpdateRow, type InstanceActions } from '../src/renderer/components/providers/CliSections'
 import { ProviderModelsSection, bulkVisibilityPatch, capabilityChips, displayModels, modelsSummary, movedOrder, nextOrder } from '../src/renderer/components/providers/ProviderModelsSection'
-import { AgentEditor, allowsCustomModels } from '../src/renderer/components/providers/ProviderEditor'
+import { AgentEditor, ApiEditor, allowsCustomModels, engineSetting } from '../src/renderer/components/providers/ProviderEditor'
 import { ProviderListRow, StatusLine, shortStatus } from '../src/renderer/components/providers/parts'
 import { offersRedirectPaste, refusedText } from '../src/renderer/components/providers/SignInDialog'
 import { commandLabel, modelsFreshness, parseEnvLines, switchStateOf } from '../src/renderer/components/providers/providerView'
@@ -543,5 +543,41 @@ describe('Agent editor scope', () => {
     const notes = (html: string) => html.split('Applies to this device, in every project.').length - 1
     expect(notes(editor({ kind: 'project', projectId: 'p1' }))).toBe(4)
     expect(notes(editor({ kind: 'device' }))).toBe(0)
+  })
+})
+
+describe('Advanced → Engine of a model API', () => {
+  const api = (overrides: SnapshotOverrides, options: { switchHandler?: boolean } = {}) => {
+    const entry = snapshot({ instanceId: 'pi:openai', driver: 'pi', displayName: 'OpenAI', ...overrides })
+    const onSetEngine = options.switchHandler === false ? undefined : noop
+    return renderToStaticMarkup(createElement(ApiEditor, { snapshot: entry, setup: null, onRemove: noop, onSaveModelPrefs: noop, onRefreshModels: noop, onSetEngine }))
+  }
+  const checked = (html: string) => [...html.matchAll(/role="radio" aria-checked="true"[^>]*>(.*?)<\/button>/g)].map((match) => match[1].replace(/&#x27;/g, "'"))
+
+  it("offers Pi's agent and Legacy, with the default selected when nothing is stored", () => {
+    const html = api({ engine: { effective: 'rpc', switchable: true } })
+    expect(html).toContain('Advanced')
+    expect(html).toContain('Engine')
+    expect(buttons(html).map((label) => label.replace(/&#x27;/g, "'"))).toEqual(expect.arrayContaining(["Pi's agent", 'Legacy']))
+    expect(checked(html)).toEqual(["Pi's agent"])
+    expect(html).toContain('Legacy is the in-process loop Mousse used before. It goes away in a later release.')
+  })
+
+  it('shows the stored Legacy choice', () => {
+    expect(checked(api({ engine: { setting: 'legacy', effective: 'legacy', switchable: true } }))).toEqual(['Legacy'])
+  })
+
+  it('has no Engine row for a provider on one engine, another driver, or an older daemon', () => {
+    for (const engine of [{ effective: 'legacy' as const, switchable: false }, undefined]) {
+      const html = api({ engine })
+      expect(html).not.toContain('Engine')
+      expect(html).not.toContain('Advanced')
+    }
+    expect(api({ engine: { effective: 'rpc', switchable: true } }, { switchHandler: false })).not.toContain('Engine')
+  })
+
+  it('stores nothing for the default and legacy for Legacy', () => {
+    expect(engineSetting('rpc')).toBeNull()
+    expect(engineSetting('legacy')).toBe('legacy')
   })
 })

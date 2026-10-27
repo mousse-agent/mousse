@@ -273,6 +273,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
           }
           onSaveModelPrefs={onSaveModelPrefs}
           onRefreshModels={refreshModels(snapshot)}
+          onSetEngine={(engine) => actionsFor(snapshot).configure({ engine })}
         />
       )
     }

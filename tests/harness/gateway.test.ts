@@ -13,6 +13,7 @@ import { instanceStateDir } from '../../src/mms/harness/instances'
 import { LatestVersionCache } from '../../src/mms/harness/latest'
 import { observeHarnessSpawns } from '../../src/mms/harness/spawn'
 import { describeStatus } from '../../src/shared/harness/status'
+import { asInstanceConfigPatch } from '../../src/mms/protocol/validators'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 
 const pi = (): PiLoopAdapter => new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } }))
@@ -698,5 +699,57 @@ describe('harness gateway: a driver whose home depends on its setup (managed Cod
     await waitFor(() => events.some((event) => event.type === 'operation' && event.data.phase === 'completed'))
     const completed = events.find((event) => event.type === 'operation' && event.data.phase === 'completed')
     expect(completed?.type === 'operation' ? completed.data : undefined).toMatchObject({ phase: 'completed', warning: 'Your previous sign-in is still waiting to be revoked.' })
+  })
+})
+
+describe('harness gateway: the engine of a pi instance (Advanced → Engine)', () => {
+  /** A pi driver with the engine hook: every provider switches but `openai-codex`; stored `legacy` wins. */
+  const piDriver = (): HarnessDriver => ({
+    ...adapterDriver(pi()),
+    engine: (instanceId, stored) => {
+      const switchable = instanceId !== 'pi:openai-codex'
+      return { effective: switchable && stored?.engine !== 'legacy' ? 'rpc' : 'legacy', switchable }
+    }
+  })
+  const setup = () => {
+    let stored: unknown
+    let seedVersion: number | undefined
+    const source = new ProviderInstanceService({
+      store: { read: () => ({ instances: stored, seedVersion }), write: (next) => { stored = next.instances; seedVersion = next.seedVersion } },
+      providerAuth: { credentials: { listProviderIds: () => ['openai', 'openai-codex'] } }
+    })
+    const harness = testHarness({ drivers: [piDriver(), adapterDriver(fake('claude'))], instances: source, profileHome: home() })
+    const entry = (id: string) => (stored as Record<string, { config?: Record<string, unknown> }>)[id]
+    const snapshot = async (id: string) => (await harness.instances.snapshots({ kind: 'device' })).find((item) => item.instanceId === id)!
+    return { harness, entry, snapshot }
+  }
+
+  it('stores Legacy, clears it back to the default, and shows both in the snapshot', async () => {
+    const { harness, entry, snapshot } = setup()
+    expect((await snapshot('pi:openai')).engine).toEqual({ effective: 'rpc', switchable: true })
+
+    const legacy = await harness.instances.configure('pi:openai', { engine: 'legacy' })
+    expect(entry('pi:openai').config).toMatchObject({ engine: 'legacy' })
+    expect(legacy.engine).toEqual({ setting: 'legacy', effective: 'legacy', switchable: true })
+
+    const cleared = await harness.instances.configure('pi:openai', { engine: null })
+    expect(entry('pi:openai').config ?? {}).not.toHaveProperty('engine')
+    expect(cleared.engine).toEqual({ effective: 'rpc', switchable: true })
+  })
+
+  it('refuses the switch for a provider that runs on one engine, and for a driver without engines', async () => {
+    const { harness, entry, snapshot } = setup()
+    await expect(harness.instances.configure('pi:openai-codex', { engine: 'legacy' })).rejects.toMatchObject({ code: 'unsupported' })
+    expect(entry('pi:openai-codex')?.config ?? {}).not.toHaveProperty('engine')
+    expect((await snapshot('pi:openai-codex')).engine).toEqual({ effective: 'legacy', switchable: false })
+
+    await expect(harness.instances.configure('claude', { engine: 'legacy' })).rejects.toMatchObject({ code: 'unsupported' })
+    expect((await snapshot('claude')).engine).toBeUndefined()
+  })
+
+  it('takes rpc, legacy or null over the protocol, and nothing else', () => {
+    expect(asInstanceConfigPatch({ engine: 'legacy' })).toEqual({ engine: 'legacy' })
+    expect(asInstanceConfigPatch({ engine: null })).toEqual({ engine: null })
+    expect(() => asInstanceConfigPatch({ engine: 'fast' })).toThrow(/engine must be rpc\|legacy\|null/)
   })
 })

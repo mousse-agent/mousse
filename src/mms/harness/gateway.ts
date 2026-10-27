@@ -38,7 +38,7 @@ import type { ModeCeiling, ProviderRef } from '../run/types'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import type { InstanceConfigView, NextStep, UpdateAffordance } from '../../shared/harness/status'
+import type { InstanceConfigView, InstanceEngine, NextStep, UpdateAffordance } from '../../shared/harness/status'
 import { foldedInto, type MoveResult } from '../../shared/harness/move'
 import { harnessAppError, type HarnessErrorCode, type ModelPrefs, type SignInPrompt } from '../../shared/harness/types'
 import type { ProviderLoginEvent } from '../../shared/providerAuth'
@@ -806,7 +806,7 @@ export class Harness implements HarnessGateway {
       if (selection.model && hidesModel(this.prefs.get(resolved.instanceId), selection.model))
         harnessFail('model_hidden', `${this.modelName(resolved.instanceId, selection.model)} is hidden. Show it in Settings → Providers or choose another model.`, resolved.instanceId)
     }
-    const config = driver.decodeConfig(resolved.entry.config)
+    const config = driver.decodeConfig(resolved.entry.config, resolved.instanceId)
     const version = this.probes.get(resolved.instanceId)?.lastGood?.binary?.version
     const caps = driver.caps(config, version, this.currentFacts(resolved.instanceId))
     // An instance that approves tools itself runs only turns a person drives; reading or stopping
@@ -1512,7 +1512,7 @@ export class Harness implements HarnessGateway {
     const current = this.records.get(instanceId)
     const driver = this.drivers.get(resolved.entry.driver)
     if (!driver) return harnessFail('unsupported', `No driver for ${resolved.entry.driver} (instance ${instanceId}).`, instanceId)
-    const config = driver.decodeConfig(resolved.entry.config)
+    const config = driver.decodeConfig(resolved.entry.config, instanceId)
     const key = recordKey(driver, this.counters.get(instanceId).configRevision, config)
     if (current && current.key === key) {
       current.entry = resolved.entry
@@ -1546,7 +1546,7 @@ export class Harness implements HarnessGateway {
   private build(instanceId: string, entry: ProviderInstanceConfig): InstanceRecord {
     const driver = this.drivers.get(entry.driver)
     if (!driver) return harnessFail('unsupported', `No driver for ${entry.driver} (instance ${instanceId}).`, instanceId)
-    const config = driver.decodeConfig(entry.config)
+    const config = driver.decodeConfig(entry.config, instanceId)
     const builtIn = isBuiltInInstance(instanceId, entry.driver)
     const stateDir = instanceStateDir(this.options.profileHome, instanceId)
     const revision = this.counters.get(instanceId).configRevision
@@ -1806,6 +1806,7 @@ export class Harness implements HarnessGateway {
       ...(shown?.binary ? { binary: shown.binary } : {}),
       caps: driver.caps(config, shown?.binary?.version, this.currentFacts(instanceId)),
       config: this.configView(record),
+      ...this.engineView(record),
       models: {
         entries: modelsWithPrefs(listed, prefs),
         source: listed.length ? (models?.live || (runtime.modelsRefreshedAt && refreshedAt) ? 'live' : 'cached') : prefs.custom.length ? 'manifest' : 'none',
@@ -1861,6 +1862,15 @@ export class Harness implements HarnessGateway {
     return Boolean(record.runtime.managed?.()) && !record.runtime.launch?.().binaryPath
   }
 
+  /** The engine of a driver with several (`pi`): the user's stored choice and the one in effect. */
+  private engineView(record: InstanceRecord): { engine?: InstanceEngine } {
+    const stored = record.entry.config
+    const engine = record.driver.engine?.(record.instanceId, stored)
+    if (!engine) return {}
+    const setting = stored?.engine === 'rpc' || stored?.engine === 'legacy' ? stored.engine : undefined
+    return { engine: { ...(setting ? { setting } : {}), effective: engine.effective, switchable: engine.switchable } }
+  }
+
   /** The settings the editor shows: built-in instances read launch settings from `settings.json`. */
   private configView(record: InstanceRecord): InstanceConfigView {
     const launch = record.builtIn ? record.runtime.launch?.() : undefined
@@ -1897,6 +1907,7 @@ export class Harness implements HarnessGateway {
     const driver = this.drivers.get(input.driver)
     if (!driver) return harnessFail('unsupported', `Mousse cannot add a ${input.driver} instance.`)
     const patch = input.config ?? {}
+    if (patch.engine !== undefined) return harnessFail('unsupported', `${driver.label} takes its engine under Advanced once added.`)
     const entries = this.instanceMap.list()
     const hasOne = Object.values(entries).some((entry) => entry.driver === driver.kind)
     if (hasOne && !driver.multiInstance) return harnessFail('unsupported', `${driver.label} supports one instance in this version.`)
@@ -2002,6 +2013,9 @@ export class Harness implements HarnessGateway {
     if (patch.home === 'default' && homeRule === 'required')
       harnessFail('unsupported', `${this.displayName(record)} always runs in a home of its own.`, instanceId)
     const stored = record.entry.config ?? {}
+    // Only a provider that can run on Pi's agent switches engines (Advanced → Engine).
+    if (patch.engine !== undefined && !record.driver.engine?.(instanceId, stored).switchable)
+      harnessFail('unsupported', `${this.displayName(record)} runs on one engine only.`, instanceId)
     if (record.builtIn) {
       // Built-in vendor instances keep their launch settings in their own settings.json.
       const launch: CliProviderConfigPatch = {
@@ -2020,6 +2034,7 @@ export class Harness implements HarnessGateway {
       const config = { ...stored }
       if (patch.displayName !== undefined) setOrDelete(config, 'displayName', patch.displayName?.trim() || undefined)
       if (patch.loginMethod !== undefined) setOrDelete(config, 'loginMethod', patch.loginMethod || undefined)
+      if (patch.engine !== undefined) setOrDelete(config, 'engine', patch.engine ?? undefined)
       this.instanceMap.setEntry(instanceId, { ...record.entry, config })
     } else {
       const config = this.applyConfigPatch(stored, patch, record.driver)
@@ -2044,6 +2059,7 @@ export class Harness implements HarnessGateway {
     if (patch.args !== undefined) setOrDelete(config, 'args', patch.args.length ? [...patch.args] : undefined)
     if (patch.env !== undefined) setOrDelete(config, 'env', Object.keys(patch.env).length ? { ...patch.env } : undefined)
     if (patch.loginMethod !== undefined) setOrDelete(config, 'loginMethod', patch.loginMethod || undefined)
+    if (patch.engine !== undefined) setOrDelete(config, 'engine', patch.engine ?? undefined)
     if (patch.source !== undefined) {
       // Only a driver that reads registry sources takes one (it validates every value itself).
       if (driver.decodeConfig({ source: patch.source }).source?.kind !== 'registry')
