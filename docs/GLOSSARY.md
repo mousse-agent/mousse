@@ -39,6 +39,7 @@ Use these terms in issues, PRs, comments, and docs. If you need a term that is n
 - **Remote thread:** a thread that runs on another of the user's computers through Bridge; the local app shows it but the target computer owns it.
 - **Works on threads:** the signed permission (the `settings` capability in a device's delegation) that lets one of the user's computers act on threads that run on another of their computers. Only computers get it; phones never do, and a phone keeps the smaller phone API.
 - **Let my other computers work on this computer's threads:** the switch on the computer that runs a thread (`mousse-cli bridge threads on|off`). While it is off, which is the default, that computer answers none of the thread actions that other computers send it, whoever holds Works on threads.
+- **Qualified id:** the name of a thread or project on another of the user's computers, `<nodeId>:<id>`. A thread or project on this computer keeps its plain id.
 - **Block (a device):** a setting on one computer that refuses every Bridge call, stream and request from one other device, at once. It is kept on that computer only, needs no authority, and is undone with Unblock.
 - **Highest permission mode (for a device):** the most permissive permission mode a person on another computer can run a turn or create an "Always" rule in on this computer. A new computer starts at Auto-accept edits.
 - **Space:** a group chat for a project. Members add their own bots, which run on the owner's machine with the owner's keys.
