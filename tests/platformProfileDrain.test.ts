@@ -154,19 +154,25 @@ describe('profile drain and durable scheduler ownership', () => {
     const jobs = [0, 1].map((index) => store.createJob({ name: `Owned ${index}`, prompt: 'fixture', threadId: target.id,
       schedule: { kind: 'once', runAt: new Date(Date.now() + 60_000).toISOString() }, repeat: { times: 2, completed: 0 } }))
     for (const job of jobs) store.updateJob(job.id, { nextRunAt: '2000-01-01T00:00:00.000Z', state: 'scheduled' })
-    const entered = deferred(), release = deferred()
-    const runner = vi.fn(async () => { entered.resolve(); await release.promise; return { text: 'Must not append after shutdown', silent: false } })
+    const release = deferred()
+    // Due jobs run concurrently, so both are in flight when the shutdown begins.
+    const bothEntered = deferred()
+    const runner = vi.fn(async () => {
+      if (runner.mock.calls.length === jobs.length) bothEntered.resolve()
+      await release.promise
+      return { text: 'Must not append after shutdown', silent: false }
+    })
     const service = new ScheduledJobService({ runIsolated: runner }, store, threads, projects)
     try {
-      service.start(); await entered.promise
+      service.start(); await bothEntered.promise
       const first = service.shutdown({ timeoutMs: 10 })
       expect(service.shutdown()).toBe(first)
       await expect(first).rejects.toMatchObject({ code: 'profile_busy' })
-      expect(service.getActiveCount()).toBe(1)
+      expect(service.getActiveCount()).toBe(jobs.length)
       expect(() => service.start()).toThrow('shutting down')
       expect(store.getJob(jobs[0].id)?.runClaim).toBeDefined()
       release.resolve(); await service.shutdown()
-      expect(runner).toHaveBeenCalledTimes(1)
+      expect(runner).toHaveBeenCalledTimes(jobs.length)
       expect(threads.loadThreadData(target.id).messages).toHaveLength(0)
       for (const job of jobs) {
         expect(store.getJob(job.id)).toMatchObject({ state: 'error', enabled: false, lastStatus: 'interrupted', repeat: { completed: 0 }, nextRunAt: null })

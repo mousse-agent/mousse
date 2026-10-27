@@ -522,6 +522,9 @@ export class MmsProfileServices {
       this.threads,
       this.projects
     )
+    // The Run Engine decides when a scheduled occurrence is over, including after a restart.
+    this.scheduledStore.setRunProbe(this.orchestrator.scheduledRunProbe())
+    this.orchestrator.setScheduledHooks({ onOccurrenceSettled: (event) => this.scheduled.occurrenceSettled(event) })
     this.channels = new ChannelService(
       this.orchestrator,
       this.threads,

@@ -294,8 +294,15 @@ describe('background workflow ingress', () => {
       aliceChannel.sent.length = 0
       await aliceChannel.inbound('just a prompt', 'msg-plain')
       expect(aliceChannel.sent.at(-1)).toBe('plain-ok')
-      const plain = await alice.orchestrator.runIsolatedScheduledJob('just a prompt')
+      // A plain prompt is a turn on a per-run thread, through the same path as the channel's.
+      const plainAt = new Date().toISOString()
+      const plain = await alice.orchestrator.runIsolatedScheduledJob('just a prompt', {
+        jobId: 'plain-job', occurrenceAt: plainAt, occurrenceKey: plainAt, jobName: 'Plain prompt'
+      })
+      expect(plain.error).toBeUndefined()
       expect(plain.text).toBe('plain-ok')
+      expect(plain.threadId).toBeTruthy()
+      expect(plain.runId).toBeTruthy()
       expect(model).toHaveBeenCalled()
     } finally { await f.close() }
   }, 30_000)
