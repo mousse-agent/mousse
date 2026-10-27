@@ -13,10 +13,13 @@ export type CommandId =
   | 'thread.next'
   | 'thread.previous'
   | 'threads.search'
+  | 'chat.findInThread'
   | 'run.stop'
   | 'sideCard.toggle'
   | 'terminal.open'
   | 'composer.focus'
+  | 'files.quickOpen'
+  | 'files.textSearch'
   | 'surface.browser'
   | 'surface.terminal'
   | 'surface.files'
@@ -54,6 +57,11 @@ export interface CommandContext {
   runActive: boolean
   mainAreaOpen: boolean
   projectsMode: boolean
+  /**
+   * Whether the key press came from inside the Files panel. A run that is not a key press (palette,
+   * menu) is always `true`: it has no focus to judge. Absent where no one has built it.
+   */
+  inFilesPanel?: boolean
 }
 
 export interface CommandDefinition {
@@ -78,6 +86,7 @@ export interface CommandDefinition {
 const MOD = 'CommandOrControl'
 const mainAreaInProjects = (ctx: CommandContext): boolean => ctx.mainAreaOpen && ctx.projectsMode
 const threadIsOpen = (ctx: CommandContext): boolean => ctx.threadOpen
+const inFilesPanel = (ctx: CommandContext): boolean => ctx.inFilesPanel === true
 
 function surfaceCommand(id: CommandId, title: string, letter: string): CommandDefinition {
   return {
@@ -164,6 +173,20 @@ export const COMMANDS: readonly CommandDefinition[] = [
     guest: 'allow'
   },
   {
+    // The transcript's own find bar. A text field may be focused (the composer); a terminal or the
+    // browser surface keeps the key, and the handler also leaves Monaco its own find widget.
+    id: 'chat.findInThread',
+    title: 'Find in thread',
+    category: 'Thread',
+    searchTerms: ['search', 'text', 'messages', 'transcript'],
+    defaultBinding: `${MOD}+F`,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'deny',
+    guest: 'deny',
+    when: threadIsOpen
+  },
+  {
     id: 'run.stop',
     title: 'Stop run',
     category: 'Thread',
@@ -209,6 +232,32 @@ export const COMMANDS: readonly CommandDefinition[] = [
     terminal: 'allow',
     guest: 'allow',
     when: threadIsOpen
+  },
+  {
+    // Only while the key is typed inside the Files panel (its tree, search box or editor): Ctrl/Cmd+P
+    // elsewhere, such as the composer, is left to whatever the page does with it.
+    id: 'files.quickOpen',
+    title: 'Quick open file',
+    category: 'Go',
+    searchTerms: ['files', 'find', 'file', 'name', 'open'],
+    defaultBinding: `${MOD}+P`,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'deny',
+    guest: 'deny',
+    when: inFilesPanel
+  },
+  {
+    id: 'files.textSearch',
+    title: 'Search in files',
+    category: 'Go',
+    searchTerms: ['files', 'find', 'grep', 'text', 'contents'],
+    defaultBinding: `${MOD}+Shift+F`,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'deny',
+    guest: 'deny',
+    when: inFilesPanel
   },
   surfaceCommand('surface.browser', 'Open Browser', 'B'),
   surfaceCommand('surface.terminal', 'Open Terminal', 'T'),
@@ -669,9 +718,19 @@ export const RESERVED_BINDINGS: readonly ReservedBinding[] = [
   { match: `${MOD}+R`, reason: 'Reloads the window in development builds', hard: false },
   { match: `${MOD}+Shift+R`, reason: 'Reloads the window in development builds', hard: false },
   { match: `${MOD}+Shift+I`, reason: 'Opens developer tools in development builds', hard: false },
-  { match: `${MOD}+F`, reason: 'Reserved for Find in thread (chat.findInThread)', hard: false },
-  { match: `${MOD}+P`, reason: 'Reserved for Files quick open (files.quickOpen)', hard: false },
-  { match: `${MOD}+Shift+F`, reason: 'Reserved for Files text search (files.textSearch)', hard: false },
+  {
+    match: `${MOD}+F`,
+    reason: 'Reserved for Find in thread (chat.findInThread)',
+    hard: false,
+    except: ['chat.findInThread']
+  },
+  { match: `${MOD}+P`, reason: 'Reserved for Files quick open (files.quickOpen)', hard: false, except: ['files.quickOpen'] },
+  {
+    match: `${MOD}+Shift+F`,
+    reason: 'Reserved for Files text search (files.textSearch)',
+    hard: false,
+    except: ['files.textSearch']
+  },
   {
     match: `${MOD}+S`,
     reason: 'Saves in editors and in the browser page',

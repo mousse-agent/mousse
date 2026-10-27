@@ -597,3 +597,123 @@ describe('GitService stash and switch keeps the staged part', () => {
     expect(porcelain(cwd)).toEqual(['MM base.txt'])
   })
 })
+
+describe('GitService describeCommitInput', () => {
+  const lines = (count: number, label: string) => Array.from({ length: count }, (_, index) => `${label} line ${index} with some padding text`).join('\n') + '\n'
+
+  it('describes the staged changes only, and nothing outside the staged set', async () => {
+    const cwd = repo()
+    write(cwd, 'tracked.txt', 'tracked\n'); git(cwd, 'add', 'tracked.txt'); git(cwd, 'commit', '-m', 'add tracked')
+    write(cwd, 'base.txt', 'staged edit\n'); git(cwd, 'add', 'base.txt')
+    write(cwd, 'staged-new.txt', 'staged new file\n'); git(cwd, 'add', 'staged-new.txt')
+    write(cwd, 'tracked.txt', 'UNSTAGED SECRET EDIT\n')
+    write(cwd, 'untracked.txt', 'UNTRACKED SECRET\n')
+    write(cwd, '.gitignore', 'ignored.log\n'); write(cwd, 'ignored.log', 'IGNORED SECRET\n')
+    const input = await new GitService().describeCommitInput(cwd)
+    expect(input.files.sort()).toEqual(['base.txt', 'staged-new.txt'])
+    expect(input.untracked).toEqual([])
+    expect(input.diff).toContain('+staged edit')
+    expect(input.diff).toContain('+staged new file')
+    expect(input.stat).toContain('base.txt')
+    for (const text of [input.diff, input.stat]) expect(text).not.toMatch(/SECRET|tracked\.txt|ignored\.log|\.gitignore/)
+    expect(input.truncated).toBe(false)
+  })
+
+  it('without anything staged describes the working tree, names untracked files without reading them, and skips ignored ones', async () => {
+    const cwd = repo()
+    write(cwd, 'base.txt', 'working edit\n')
+    write(cwd, 'fresh.txt', 'FRESH CONTENT\n')
+    write(cwd, '.gitignore', 'ignored.log\n'); write(cwd, 'ignored.log', 'IGNORED SECRET\n')
+    const input = await new GitService().describeCommitInput(cwd)
+    expect(input.diff).toContain('+working edit')
+    expect(input.untracked.sort()).toEqual(['.gitignore', 'fresh.txt'])
+    expect(input.files).toEqual(expect.arrayContaining(['base.txt', 'fresh.txt', '.gitignore']))
+    expect(input.files).not.toContain('ignored.log')
+    for (const text of [input.diff, input.stat]) expect(text).not.toMatch(/FRESH CONTENT|IGNORED/)
+  })
+
+  it('with `all` ignores the index, describes everything the commit takes, and leaves out .mousse', async () => {
+    const cwd = repo()
+    write(cwd, 'a.txt', 'staged a\n'); git(cwd, 'add', 'a.txt')
+    write(cwd, 'base.txt', 'unstaged b\n')
+    write(cwd, '.mousse/state.json', '{"internal":true}\n'); write(cwd, 'new.txt')
+    const input = await new GitService().describeCommitInput(cwd, { all: true })
+    expect(input.files.sort()).toEqual(['a.txt', 'base.txt', 'new.txt'])
+    expect(input.diff).toContain('+staged a')
+    expect(input.diff).toContain('+unstaged b')
+    expect(`${input.diff}${input.stat}${input.files.join()}`).not.toContain('.mousse')
+  })
+
+  it('shows a binary file as "Binary files differ" and never its bytes', async () => {
+    const cwd = repo()
+    writeFileSync(join(cwd, 'logo.bin'), Buffer.concat([Buffer.from([0, 1, 2, 255]), Buffer.from('BINARY-PAYLOAD'.repeat(50))]))
+    write(cwd, 'base.txt', 'edit\n'); git(cwd, 'add', '.')
+    const input = await new GitService().describeCommitInput(cwd)
+    expect(input.files.sort()).toEqual(['base.txt', 'logo.bin'])
+    expect(input.diff).toMatch(/Binary files .*logo\.bin differ/)
+    expect(input.diff).not.toContain('BINARY-PAYLOAD')
+    expect(input.diff).toContain('+edit')
+  })
+
+  it('caps the patch at the byte limit at a line boundary and keeps every file in the summary', async () => {
+    const cwd = repo()
+    for (let index = 0; index < 12; index++) write(cwd, `file${String(index).padStart(2, '0')}.txt`, lines(70, `f${index}`))
+    git(cwd, 'add', '.')
+    const input = await new GitService().describeCommitInput(cwd)
+    expect(Buffer.byteLength(input.diff)).toBeLessThanOrEqual(20_000)
+    expect(input.truncated).toBe(true)
+    expect(input.diff.startsWith('diff --git ')).toBe(true)
+    expect(input.diff.split('\n').every((line) => line === '' || /^(diff --git |index |new file mode|--- |\+\+\+ |@@ |\+f\d+ line \d+ with some padding text$|\(cut\)$)/.test(line))).toBe(true)
+    expect(input.files).toHaveLength(12)
+    for (let index = 0; index < 12; index++) expect(input.stat).toContain(`file${String(index).padStart(2, '0')}.txt`)
+    const small = await new GitService().describeCommitInput(cwd, { maxBytes: 3_000 })
+    expect(Buffer.byteLength(small.diff)).toBeLessThanOrEqual(3_000)
+  })
+
+  it('leaves a file that changed a great many lines, or a very large patch, out of the patch but names it', async () => {
+    const cwd = repo()
+    write(cwd, 'generated.json', lines(1_500, 'gen')); write(cwd, 'wide.txt', `${'x'.repeat(30_000)}\n`)
+    write(cwd, 'base.txt', 'small edit\n'); git(cwd, 'add', '.')
+    const input = await new GitService().describeCommitInput(cwd)
+    expect(input.files.sort()).toEqual(['base.txt', 'generated.json', 'wide.txt'])
+    expect(input.stat).toContain('generated.json')
+    expect(input.diff).toContain('+small edit')
+    expect(input.diff).not.toContain('gen line')
+    expect(input.diff).not.toContain('xxxxxxxxxx')
+    expect(input.truncated).toBe(true)
+  })
+
+  it('caps the list of names', async () => {
+    const cwd = repo()
+    for (let index = 0; index < 250; index++) write(cwd, `many/f${index}.txt`, `${index}\n`)
+    git(cwd, 'add', '.')
+    const input = await new GitService().describeCommitInput(cwd)
+    expect(input.files).toHaveLength(200)
+    expect(input.truncated).toBe(true)
+  })
+
+  it('redacts credentials in what it reads', async () => {
+    const cwd = repo()
+    write(cwd, 'config.txt', 'remote = https://user:hunter2@example.com/repo.git\n'); git(cwd, 'add', 'config.txt')
+    const input = await new GitService().describeCommitInput(cwd)
+    expect(input.diff).not.toContain('hunter2')
+  })
+
+  it('works from a project folder inside the repository, before the first commit, and outside a repository', async () => {
+    const cwd = repo()
+    write(cwd, 'app/inner.txt', 'inner\n'); write(cwd, 'outer.txt', 'outer\n'); git(cwd, 'add', '.')
+    const fromSubfolder = await new GitService().describeCommitInput(join(cwd, 'app'))
+    expect(fromSubfolder.files.sort()).toEqual(['app/inner.txt', 'outer.txt'])
+    expect(fromSubfolder.diff).toContain('+inner')
+
+    const fresh = mkdtempSync(join(tmpdir(), 'mousse-git-writes-')); roots.push(fresh)
+    git(fresh, 'init', '-b', 'main')
+    write(fresh, 'first.txt', 'first\n'); git(fresh, 'add', 'first.txt'); write(fresh, 'later.txt')
+    const unborn = await new GitService().describeCommitInput(fresh)
+    expect(unborn.files).toEqual(['first.txt'])
+    expect(unborn.diff).toContain('+first')
+
+    const plain = mkdtempSync(join(tmpdir(), 'mousse-git-writes-')); roots.push(plain)
+    expect((await new GitService().describeCommitInput(plain)).files).toEqual([])
+  })
+})

@@ -8,10 +8,12 @@ import simpleGit, { type SimpleGit, type StatusResult } from 'simple-git'
 import { redactGitText } from '../../shared/gitText'
 import { holdsRepositoryMutation } from '../actions/GitOperationCoordinator'
 import type { CodeHost } from './CodeHost'
+import { COMMIT_SUGGESTION_LIMITS, EMPTY_COMMIT_INPUT, fitPatch, parseNumstat, type CommitInput } from './commitSuggestion'
 import { explicitActionGitEnv } from './gitEnv'
 import { IN_PROGRESS_GIT_MARKERS } from './gitMarkers'
 import { GitHubCodeHost } from './GitHubCodeHost'
 import { GitHubService } from './GitHubService'
+import { PULL_REQUEST_DRAFT_LIMITS, type DraftCommit } from './pullRequestDraft'
 import { resolveRepositoryIdentity } from './RepositoryIdentity'
 import { acquireRepositoryLease, RepositoryLeaseAbortedError } from './RepositoryLease'
 import type {
@@ -116,6 +118,11 @@ function remoteFailureCode(text: string): 'git_host_key_unverified' | 'git_auth_
   if (/Authentication failed|could not read Username|Permission denied \(publickey\)|terminal prompts disabled|returned error: 40[13]/i.test(text)) return 'git_auth_failed'
   if (/Could not resolve host|Connection refused|unable to access|Failed to connect/i.test(text)) return 'git_remote_unreachable'
   return null
+}
+
+/** Branches Mousse owns for thread worktrees, whatever the case a client spells them in. */
+function isManagedBranch(name: string): boolean {
+  return name.toLowerCase().startsWith('mousse/')
 }
 
 const CONFLICTED_PAIRS = new Set(['DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU'])
@@ -312,6 +319,62 @@ function failure(code: GitErrorCode, run: GitRun): AppError {
   return text ? new AppError({ code, message: text, errorInfo: fixed.errorInfo }) : fixed
 }
 
+export interface BranchSummary {
+  commits: DraftCommit[]
+  stat: string
+  patch: string
+}
+
+/** How long a read of a branch's history may take before it is given up. */
+const SUMMARY_READ_MS = 30_000
+
+/** After a read is given up, how long to wait for the process to end before settling anyway. */
+const SUMMARY_KILL_SETTLE_MS = 5_000
+
+/**
+ * The first `maxBytes` of a read-only Git command's output; one that fails for another reason yields
+ * nothing. Memory stays bounded: output past the limit is read and dropped. The read settles only once
+ * the process has closed, so Git never still holds the repository's folder when it resolves (a kill does
+ * not wait for exit, and on Windows the `git` on PATH is a launcher around the real process). A command
+ * that runs past the time limit is stopped, with its whole process tree on Windows.
+ */
+function readBoundedGit(cwd: string, args: readonly string[], maxBytes: number): Promise<string> {
+  return new Promise((resolvePromise) => {
+    const child = spawn('git', args, {
+      cwd,
+      env: { ...process.env, ...englishMessagesEnv(), GIT_OPTIONAL_LOCKS: '0' },
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true
+    })
+    const chunks: Buffer[] = []
+    let size = 0
+    let truncated = false
+    let done = false
+    let backstop: NodeJS.Timeout | undefined
+    const finish = (ok: boolean): void => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      if (backstop) clearTimeout(backstop)
+      resolvePromise(ok || truncated ? Buffer.concat(chunks).subarray(0, maxBytes).toString('utf8') : '')
+    }
+    const timer = setTimeout(() => {
+      if (process.platform === 'win32' && child.pid) spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }).on('error', () => undefined)
+      else child.kill()
+      // Close ends the read; the backstop only covers a process that never closes its pipes.
+      backstop = setTimeout(() => finish(false), SUMMARY_KILL_SETTLE_MS)
+    }, SUMMARY_READ_MS)
+    child.stdout.on('data', (chunk: Buffer) => {
+      if (size >= maxBytes) return
+      chunks.push(chunk)
+      size += chunk.length
+      if (size >= maxBytes) truncated = true
+    })
+    child.on('error', () => finish(false))
+    child.on('close', (code) => finish(code === 0))
+  })
+}
+
 export class GitService {
   /** Profile-scoped GitHub CLI integration alongside the existing Git operations. */
   readonly github = new GitHubService()
@@ -452,7 +515,7 @@ export class GitService {
     return {
       current: summary.current ?? null,
       // Thread, agent and workflow branches live under mousse/ and are managed by the app.
-      branches: summary.all.filter((name) => !name.startsWith('mousse/'))
+      branches: summary.all.filter((name) => !isManagedBranch(name))
     }
   }
 
@@ -743,23 +806,125 @@ export class GitService {
     })
   }
 
-  private async currentBranch(cwd: string): Promise<string | null> {
+  /** The checked-out branch, or null for a detached HEAD. */
+  async currentBranch(cwd: string): Promise<string | null> {
     return (await this.read(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD'])) || null
   }
 
-  private async assertBranch(cwd: string, expected: string | undefined): Promise<void> {
+  /**
+   * The remote and branch a local branch is set to push to and track, or null when it has none (an
+   * unpublished branch, or one that tracks a local branch).
+   */
+  async branchUpstream(cwd: string, branch: string): Promise<{ remote: string; branch: string } | null> {
+    if (!branch || branch.startsWith('-')) return null
+    const remote = await this.read(cwd, ['config', '--get', `branch.${branch}.remote`])
+    const merge = await this.read(cwd, ['config', '--get', `branch.${branch}.merge`])
+    if (!remote || remote === '.' || !merge?.startsWith('refs/heads/')) return null
+    return { remote, branch: merge.slice('refs/heads/'.length) }
+  }
+
+  /** Refuses with `git_branch_changed` when `expected` is given and HEAD is on another branch. */
+  async assertBranch(cwd: string, expected: string | undefined): Promise<void> {
     if (expected !== undefined && await this.currentBranch(cwd) !== expected) throw gitErrors.create('git_branch_changed')
+  }
+
+  /**
+   * What a branch adds to its base, for describing it: its commits, a diffstat and the patch. Always read
+   * from the named branch's ref, never from HEAD, and bounded in size. The base is its remote-tracking
+   * branch when there is one, else the local branch; with neither, nothing is read.
+   */
+  async readBranchSummary(
+    cwd: string,
+    { branch, base, remote }: { branch: string; base: string; remote: string | null }
+  ): Promise<BranchSummary> {
+    const none: BranchSummary = { commits: [], stat: '', patch: '' }
+    if (!branch || !base || branch.startsWith('-') || base.startsWith('-') || (remote?.startsWith('-') ?? false)) return none
+    const head = `refs/heads/${branch}`
+    let from: string | null = null
+    for (const ref of [...(remote ? [`refs/remotes/${remote}/${base}`] : []), `refs/heads/${base}`]) {
+      if (await this.read(cwd, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]) !== null) {
+        from = ref
+        break
+      }
+    }
+    if (!from || await this.read(cwd, ['rev-parse', '--verify', '--quiet', `${head}^{commit}`]) === null) return none
+    // No external diff driver or text conversion: a repository's configuration must not run programs here.
+    const diff = ['diff', '--no-color', '--no-ext-diff', '--no-textconv']
+    const [log, stat, patch] = await Promise.all([
+      readBoundedGit(cwd, ['log', '--no-color', '--max-count=50', '--format=%x1e%s%x1f%b', `${from}..${head}`], 2 * PULL_REQUEST_DRAFT_LIMITS.commits),
+      readBoundedGit(cwd, [...diff, '--stat=100', `${from}...${head}`], 2 * PULL_REQUEST_DRAFT_LIMITS.stat),
+      readBoundedGit(cwd, [...diff, '--unified=3', `${from}...${head}`], 2 * PULL_REQUEST_DRAFT_LIMITS.patch)
+    ])
+    const commits = log.split('\x1e').filter((entry) => entry.trim()).map((entry) => {
+      const [subject = '', ...body] = entry.split('\x1f')
+      return { subject: subject.trim(), body: body.join('\x1f').trim() }
+    })
+    return { commits, stat: stat.trim(), patch }
+  }
+
+  /**
+   * The changes the next commit would take, reduced for describing them to a model. Staged changes when
+   * any are staged, otherwise the working tree against HEAD with untracked files named only; `all` is a
+   * commit that takes everything whatever the index holds (a thread's worktree), leaving out `.mousse/`.
+   * Nothing outside that set is read, ignored files are never listed, and what is read is bounded: a patch
+   * of `maxBytes` at most, binary files as "Binary files differ", files that changed a great many lines
+   * left out of the patch (they stay in the summary), and each list capped.
+   */
+  async describeCommitInput(cwd: string, options: { all?: boolean; maxBytes?: number } = {}): Promise<CommitInput> {
+    if (!await this.isRepo(cwd)) return EMPTY_COMMIT_INPUT
+    const limits = COMMIT_SUGGESTION_LIMITS
+    const maxBytes = options.maxBytes ?? limits.diff
+    // From the top, like the commit: paths and pathspecs below are relative to it, not to a project subfolder.
+    const top = await this.toplevel(cwd)
+    const staged = !options.all && await readBoundedGit(top, ['diff', '--cached', '--name-only', '-z'], 64) !== ''
+    const against = staged || !await this.hasHead(top) ? ['--cached'] : ['HEAD']
+    // A repository's configuration must not run programs here: no external diff driver, no text conversion.
+    const diff = ['diff', '--no-color', '--no-ext-diff', '--no-textconv']
+    const scope = options.all ? [':(exclude).mousse/**'] : []
+
+    const numstatLimit = 64 * 1024
+    const numstatRaw = await readBoundedGit(top, [...diff, '--numstat', '-z', ...against, '--', '.', ...scope], numstatLimit)
+    const entries = parseNumstat(numstatRaw)
+    const huge = entries.filter((entry) => (entry.added ?? 0) + (entry.deleted ?? 0) > limits.hugeFileLines)
+    const excluded = huge.slice(0, limits.excludedFiles).map((entry) => `:(exclude,literal)${entry.path}`)
+
+    const patchLimit = 3 * maxBytes
+    const [statRaw, patchRaw, untrackedRaw] = await Promise.all([
+      readBoundedGit(top, [...diff, '--stat=120', `--stat-count=${limits.excludedFiles}`, ...against, '--', '.', ...scope], 2 * limits.stat),
+      readBoundedGit(top, [...diff, '--unified=3', ...against, '--', '.', ...scope, ...excluded], patchLimit),
+      // Only a commit that stages everything takes new files; the index alone never does.
+      staged ? Promise.resolve('') : readBoundedGit(top, ['ls-files', '--others', '--exclude-standard', '-z'], numstatLimit)
+    ])
+    const patch = fitPatch(patchRaw, { maxBytes, perFileBytes: Math.floor(maxBytes / 2), readCut: Buffer.byteLength(patchRaw) >= patchLimit - 4 })
+    const tracked = entries.map((entry) => entry.path)
+    const untracked = untrackedRaw.split('\0').filter((path) => path && !(options.all && (path === '.mousse' || path.startsWith('.mousse/'))))
+    const statCut = Buffer.byteLength(statRaw) >= 2 * limits.stat - 4
+    const statLines = statRaw.split('\n')
+    const stat = statCut ? statLines.slice(0, -1).join('\n') : statRaw
+    const files = [...tracked, ...untracked]
+    return {
+      diff: redactGitText(patch.text),
+      stat: redactGitText(stat.trim()),
+      truncated: patch.truncated || huge.length > 0 || statCut || files.length > limits.files || Buffer.byteLength(numstatRaw) >= numstatLimit - 4,
+      files: files.slice(0, limits.files),
+      untracked: untracked.slice(0, limits.files)
+    }
   }
 
   /** A name Git accepts for a branch, and one that cannot be mistaken for an option. */
   private async assertBranchName(cwd: string, name: string): Promise<void> {
-    if (name.startsWith('mousse/')) throw gitErrors.create('git_branch_protected')
+    if (isManagedBranch(name)) throw gitErrors.create('git_branch_protected')
     const checked = name.startsWith('-') ? null : await this.read(cwd, ['check-ref-format', '--branch', name])
     if (checked !== name) throw gitErrors.create('git_branch_invalid')
   }
 
+  /**
+   * Whether a local branch has exactly this name. `rev-parse refs/heads/<name>` is not enough: a loose ref is
+   * a file, so on Windows and macOS it is found whatever the case, while the guards compare names exactly.
+   */
   private async branchExists(cwd: string, name: string): Promise<boolean> {
-    return (await this.read(cwd, ['rev-parse', '--verify', '--quiet', `refs/heads/${name}`])) !== null
+    const listed = await this.read(cwd, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/'])
+    return (listed ?? '').split('\n').includes(name)
   }
 
   async createBranch(cwd: string, name: string, options: GitBranchOptions = {}): Promise<void> {
@@ -777,7 +942,7 @@ export class GitService {
 
   async renameBranch(cwd: string, name: string, newName: string): Promise<void> {
     await this.serialized(cwd, async () => {
-      if (name.startsWith('mousse/')) throw gitErrors.create('git_branch_protected')
+      if (isManagedBranch(name)) throw gitErrors.create('git_branch_protected')
       await this.assertBranchName(cwd, newName)
       if (!await this.branchExists(cwd, name)) throw gitErrors.create('git_ref_not_found')
       if (name !== newName && await this.branchExists(cwd, newName)) throw gitErrors.create('git_branch_exists')
@@ -788,8 +953,10 @@ export class GitService {
 
   async deleteBranch(cwd: string, name: string, options: GitDeleteBranchOptions = {}): Promise<void> {
     await this.serialized(cwd, async () => {
-      if (name.startsWith('mousse/')) throw gitErrors.create('git_branch_protected')
-      if (await this.currentBranch(cwd) === name) throw gitErrors.create('git_branch_current')
+      if (isManagedBranch(name)) throw gitErrors.create('git_branch_protected')
+      // Only an exact name is deleted; a differently cased one could still reach the current or a managed branch.
+      if (!await this.branchExists(cwd, name)) throw gitErrors.create('git_ref_not_found')
+      if ((await this.currentBranch(cwd))?.toLowerCase() === name.toLowerCase()) throw gitErrors.create('git_branch_current')
       const run = await this.runGit(cwd, ['branch', options.force ? '-D' : '-d', '--', name])
       if (run.ok) return
       if (/not fully merged/i.test(run.output)) throw classified('git_branch_unmerged', run)

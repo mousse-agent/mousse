@@ -5,6 +5,8 @@ import {
   bindingFor,
   commandAllowedInContext,
   getCommand,
+  isCommandId,
+  reservedMatches,
   resolveBindings,
   type CommandContext,
   type CommandId,
@@ -110,6 +112,8 @@ export function currentContext(source: CommandSource, target?: ClosestTarget | n
   })
   // Until the app info arrives the preload still knows the platform.
   if (!context.platform && typeof window !== 'undefined') context.platform = window.mousse?.platform ?? ''
+  // A palette row or menu click has no focus to judge, so it counts as being in the Files panel.
+  if (source !== 'key') context.inFilesPanel = true
   return source === 'guest' ? { ...context, inTextInput: true } : context
 }
 
@@ -143,6 +147,77 @@ export function runCommand(id: CommandId, source: CommandSource, target?: Closes
   if (!isCommandRegistered(id)) return false
   if (!commandAllowedInContext(command, currentContext(source, target))) return false
   return invokeCommand(id)
+}
+
+/** What the preload offers for commands started outside the renderer (the menu, the browser surface). */
+export interface CommandsBridge {
+  onRun(cb: (run: { id: CommandId; source: 'menu' | 'guest' }) => void): () => void
+  setGuestShortcuts(shortcuts: GuestShortcutEntry[]): unknown
+}
+
+export interface GuestShortcutEntry {
+  binding: string
+  id: CommandId
+}
+
+/**
+ * The chords the browser surface may hand to the renderer: the resolved binding of each command that
+ * is registered and enabled, allowed from the browser surface, and eligible in the current context
+ * with a text field focused. Reserved chords are never listed; nothing is while the recorder listens.
+ */
+export function guestShortcutEntries(): GuestShortcutEntry[] {
+  if (useCommandRegistry.getState().recording) return []
+  const context = currentContext('guest')
+  const entries: GuestShortcutEntry[] = []
+  for (const [binding, ids] of currentBindings(useAppStore.getState().shortcuts, context.platform)) {
+    const id = ids.find((candidate) => {
+      const command = getCommand(candidate)
+      return (
+        command.guest === 'allow' &&
+        isCommandRegistered(candidate) &&
+        commandAllowedInContext(command, context) &&
+        reservedMatches(binding, context.platform, candidate).length === 0
+      )
+    })
+    if (id) entries.push({ binding, id })
+  }
+  return entries
+}
+
+/**
+ * Connects the registry to the main process: a command chosen in the application menu or typed in the
+ * browser surface runs through `runCommand`, and the chords the browser surface may forward are
+ * published whenever handlers, overrides or the context change. Returns what disconnects it.
+ */
+export function attachCommandBridge(bridge: CommandsBridge | undefined): () => void {
+  if (!bridge) return () => undefined
+  const stopRun = bridge.onRun(({ id, source }) => {
+    if (isCommandId(id)) runCommand(id, source)
+  })
+  let published = ''
+  let scheduled = false
+  const publish = (): void => {
+    scheduled = false
+    const entries = guestShortcutEntries()
+    const next = JSON.stringify(entries)
+    if (next === published) return
+    published = next
+    void Promise.resolve(bridge.setGuestShortcuts(entries)).catch(() => undefined)
+  }
+  // Many store updates arrive together; one publish follows them.
+  const schedule = (): void => {
+    if (scheduled) return
+    scheduled = true
+    queueMicrotask(publish)
+  }
+  const stopRegistry = useCommandRegistry.subscribe(schedule)
+  const stopApp = useAppStore.subscribe(schedule)
+  schedule()
+  return () => {
+    stopRun()
+    stopRegistry()
+    stopApp()
+  }
 }
 
 /** The binding of every command under the bound profile's overrides; null where unbound. */

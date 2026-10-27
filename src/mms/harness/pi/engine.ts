@@ -1,0 +1,1197 @@
+import { execFile } from 'node:child_process'
+import { createHash, randomUUID } from 'node:crypto'
+import { mkdirSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { promisify } from 'node:util'
+import { isRetryableAssistantError } from '@earendil-works/pi-ai'
+import { AppError } from '../../../shared/errors'
+import { harnessAppError } from '../../../shared/harness/types'
+import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
+import { atomicWriteJsonSync } from '../../data/AtomicFs'
+import { normalizeProviderError } from '../../orchestrator/providerErrors'
+import type {
+  AdapterHost,
+  ModelInfo,
+  ProviderAdapter,
+  ProviderCapabilities,
+  TurnControl,
+  TurnInput,
+  TurnResult,
+  TurnSink
+} from '../../run/adapters/ProviderAdapter'
+import type { ProviderRef } from '../../run/types'
+import type { InstanceEnv } from '../env'
+import { killTree } from '../spawn'
+import { COMMAND_DEADLINE_MS, INTERRUPT_DEADLINE_MS, READY_DEADLINE_MS } from '../supervise'
+import { PiBridge, type PiBridgeRegistration } from './bridge'
+import { DescendantTracker, OwnedGroups } from './descendants'
+import { WriterEpisode, type PiToolClass } from './episode'
+import { ANTHROPIC_OAUTH_REFUSED, CREDENTIAL_UNAVAILABLE, GATE_REFUSALS } from './extension/messages'
+import { PI_BRIDGE_ENV, type PiCatalogProvider, type PiGateRequest, type PiGateResponse, type PiReadyRequest, type PiTurnResponse, type PiTurnTool } from './extension/protocol'
+import { piLaunch, startPiProcess, type PiLaunch, type PiProcess, type PiRuntimePaths, type PiThinkingLevel } from './launch'
+import { PI_PATH_ARGUMENTS, piResolvePath, piResolveReadPath } from './paths'
+import type { PiRpcEvent, PiRpcExit, PiRpcRequest } from './rpcClient'
+import { preparePiHome, type PiSettingsInput } from './settings'
+
+/**
+ * The Pi RPC engine (PR 2 §4): each thread of a `pi:*` instance runs on its own Pi process
+ * (`--mode rpc`), started through the launcher with Mousse's extension, kept warm between turns.
+ *
+ * A process serves a turn only after its extension reported ready with every available model
+ * guarded and the AWS SDK pinned to one attempt; any failure to get there (an exit, a failed
+ * provider registration, a missing report within the deadline) kills the tree before `prompt`.
+ * Tool calls pass the gate (`/pi/gate`): only the turn's active tools, for the turn's attempt, with
+ * the writer episode and its barrier. The engine never retries: Pi's own retry (as `settings.json`
+ * configures it) is mapped to the status line and, when exhausted, to `retriesExhausted`.
+ *
+ * Every ref the engine reports names its turn exactly (`nativeTurnId`), from the first one on: a
+ * steer, Stop or kill reaches that turn's process or nothing, never another thread's.
+ */
+
+const execFileAsync = promisify(execFile)
+
+/** Pi's built-in tools by class. */
+const BUILTIN_CLASSES: Record<string, PiToolClass> = {
+  read: 'read', grep: 'read', find: 'read', ls: 'read',
+  edit: 'mutation', write: 'mutation', bash: 'mutation', powershell: 'mutation'
+}
+export const PI_READ_ONLY_BUILTINS: readonly string[] = ['read', 'grep', 'find', 'ls']
+export const PI_ALL_BUILTINS: readonly string[] = ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls']
+/** How long the writer waits for a dead process's tree and its sweep (the Windows sweep alone can take 20 s). */
+export const CLEANUP_DEADLINE_MS = 30_000
+/** How long a thread's process stays after its turn ended (successfully or not). */
+export const PI_WARM_MS = 10 * 60_000
+/** How long Pi may take to accept a prompt: its preflight can run a compaction (a model request). */
+export const PI_PROMPT_DEADLINE_MS = 120_000
+/** Pi's thinking levels (`--thinking`); Mousse efforts map onto them. */
+const THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh'])
+
+export interface PiEngineCatalog {
+  provider: PiCatalogProvider
+  revision: number
+}
+
+/** A Mousse tool the engine offers Pi for a turn (from the Mousse MCP server's listing). */
+export interface PiMousseTool {
+  name: string
+  description: string
+  inputSchema: Record<string, unknown>
+  class: PiToolClass
+}
+
+export interface PiRpcEngineOptions {
+  instanceId: string
+  /** The pi-ai provider id of the instance. */
+  provider: string
+  label: string
+  capabilities: ProviderCapabilities
+  env: () => InstanceEnv
+  stateDir: string
+  runtime: () => PiRuntimePaths
+  catalog: () => PiEngineCatalog
+  /** The stored key of the instance; it reaches Pi only in the factory's catalogue answer. */
+  apiKey?: () => string | undefined
+  /** Variables configured on the instance (ids only; the launcher refuses credentials). */
+  extraEnv?: () => Readonly<Record<string, string>> | undefined
+  /** Git Bash on Windows. */
+  shellPath?: () => string | undefined
+  compaction?: () => boolean
+  /** Mousse's tools for a thread, with their class (the gate and the barrier read it). */
+  mousseTools?: (threadId: string) => PiMousseTool[]
+  warmMs?: number
+  readyDeadlineMs?: number
+  commandDeadlineMs?: number
+  promptDeadlineMs?: number
+  /** Test seams. */
+  settings?: Pick<PiSettingsInput, 'retry'>
+  host?: { execPath: string; versions: Partial<NodeJS.ProcessVersions> }
+  adjustLaunch?: (launch: Extract<PiLaunch, { runs: 'yes' }>) => Extract<PiLaunch, { runs: 'yes' }>
+  /** Every RPC command sent (tests check that no `bash` command is ever sent). */
+  onCommand?: (type: string) => void
+  /** Test seam: runs inside the cleanup after a Pi process died (tests hold it). */
+  sweepHook?: () => Promise<void>
+  /** Test seam: delays the answer to the extension's turn request (inside Pi's prompt preflight). */
+  holdTurn?: () => Promise<void>
+  /** Every Pi process started, by pid (tests watch processes come and go). */
+  onSpawn?: (pid: number, threadId: string) => void
+  /** Variables for a test build of the extension (`MOUSSE_PI_TEST_*`). */
+  testEnv?: Readonly<Record<`MOUSSE_PI_TEST_${string}`, string>>
+}
+
+interface SavedThread {
+  sessionId: string
+  historyFingerprint?: string
+  instructionsHash?: string
+}
+
+/** A Pi process failed before or during a turn in a way Mousse must not paper over. */
+function protocolError(instanceId: string, message: string): AppError {
+  return harnessAppError({ code: 'protocol', message, instanceId })
+}
+
+/** The crash rule: a turn whose process died under it ends interrupted, once. */
+function interruptedError(message: string): AppError {
+  return new AppError({ code: 'interrupted', message, errorInfo: { category: 'unavailable', retryable: false } })
+}
+
+function fingerprint(text: string): string {
+  return createHash('sha256').update(text).digest('hex')
+}
+
+function textOf(message: unknown): string {
+  const content = (message as { content?: unknown })?.content
+  if (!Array.isArray(content)) return ''
+  return content.filter((block): block is { type: 'text'; text: string } => block?.type === 'text' && typeof block.text === 'string').map((block) => block.text).join('')
+}
+
+function linesOf(text: unknown): number {
+  return typeof text === 'string' && text ? text.split('\n').length : 0
+}
+
+/** Resolves after `promise` settles or `ms` passes, whichever is first. */
+function within(promise: Promise<unknown>, ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms)
+    timer.unref?.()
+    void promise.then(() => resolve(), () => resolve()).finally(() => clearTimeout(timer))
+  })
+}
+
+/**
+ * Windows keeps a dead parent's pid in its children's `ParentProcessId`, so the descendants of a Pi
+ * that died on its own can still be found and killed (POSIX reparents them; there the group kill
+ * of `killTree` is the best effort). Only processes started after Pi are considered, so a reused
+ * pid is never followed.
+ */
+async function killOrphans(pid: number, startedAt: number): Promise<void> {
+  if (process.platform !== 'win32') return
+  // Asynchronous throughout: the daemon's event loop never waits on the sweep.
+  const listed = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId) $([int64]($_.CreationDate.ToUniversalTime() - [datetime]\'1970-01-01\').TotalMilliseconds)" }'],
+  { encoding: 'utf8', windowsHide: true, timeout: 10_000 }).catch(() => undefined)
+  if (!listed?.stdout) return
+  const table = listed.stdout.split(/\r?\n/).map((line) => line.trim().split(' ').map(Number)).filter((row) => row.length === 3 && row.every(Number.isFinite))
+  const found = new Set<number>()
+  let frontier = [pid]
+  while (frontier.length) {
+    const next: number[] = []
+    for (const [child, parent, created] of table) {
+      if (!frontier.includes(parent) || found.has(child) || created + 1000 < startedAt) continue
+      found.add(child)
+      next.push(child)
+    }
+    frontier = next
+  }
+  await Promise.allSettled([...found].map((child) => execFileAsync('taskkill', ['/PID', String(child), '/T', '/F'], { windowsHide: true, timeout: 10_000 })))
+}
+
+/** One turn on a process: the attempt, its tools, the episode and the event state. */
+class PiTurn {
+  readonly episode: WriterEpisode
+  readonly classes = new Map<string, PiToolClass>()
+  readonly active: Set<string>
+  /** `running` until `agent_end`; `ending` after it (a steer then waits); `retrying` during a backoff; `stopping` after Stop. */
+  phase: 'running' | 'ending' | 'retrying' | 'stopping' = 'running'
+  pendingError: string | undefined
+  retryExhaustedError: AppError | undefined
+  /** Pi's retry limit, as its last `auto_retry_start` stated it. */
+  maxRetries = 0
+  lastText = ''
+  /** Pi acknowledged the prompt (its preflight ended); before that, Stop must kill the process. */
+  promptAccepted = false
+  progressed = false
+  readonly startedAt = Date.now()
+  readonly openTools = new Map<string, { name: string; mousse: boolean }>()
+  readonly steers: Array<{ text: string; token?: string }> = []
+  usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+  text = new Map<number, string>()
+  thinking = ''
+  settled!: () => void
+  failed!: (error: unknown) => void
+  readonly done: Promise<void>
+
+  constructor(
+    /** Names this turn in every ref it reports (`nativeTurnId`). */
+    readonly key: string,
+    /**
+     * Stamped on every Mousse MCP call of the turn (`_mousse_turn`): the turn token the app-tool
+     * registry registered for this run, so a call of an earlier turn is refused.
+     */
+    readonly attemptToken: string,
+    readonly input: TurnInput,
+    readonly sink: TurnSink,
+    readonly ctl: TurnControl,
+    readonly host: AdapterHost,
+    readonly tools: PiMousseTool[],
+    builtins: readonly string[]
+  ) {
+    for (const tool of tools) this.classes.set(tool.name, tool.class)
+    for (const name of builtins) this.classes.set(name, BUILTIN_CLASSES[name] ?? 'mutation')
+    this.active = new Set([...builtins, ...tools.map((tool) => tool.name)])
+    const access = host.tools.toolAccess
+    // The parent's writer, held for the whole episode (`runWriter` through the turn's tool access).
+    const writer = !input.child?.readOnly && access
+      ? (released: Promise<void>) => new Promise<void>((acquired, refused) => {
+          access.execute('pi_writer_episode', {}, () => {
+            acquired()
+            return released
+          }).catch(refused)
+        })
+      : undefined
+    this.episode = new WriterEpisode(writer ? { acquire: writer } : {})
+    this.done = new Promise<void>((resolve, reject) => {
+      this.settled = resolve
+      this.failed = reject
+    })
+    // A turn that ended through one path must not also reject unobserved through another.
+    this.done.catch(() => {})
+  }
+
+  progress(): void {
+    if (!this.progressed) {
+      this.progressed = true
+      this.sink.progress()
+    }
+    this.ctl.heartbeat()
+  }
+}
+
+/** A thread's Pi process. */
+class PiThreadProcess {
+  ready = false
+  readyReport: PiReadyRequest | undefined
+  fatal: string | undefined
+  /** The Pi process itself is gone (its descendants may not be yet). */
+  dead = false
+  /** Mousse killed it (its tree went with it); otherwise its death was unexpected. */
+  killed = false
+  /** Stopped or killed: a start in progress spawns nothing more, and the thread is never reused. */
+  cancelled = false
+  /** The start in progress, awaited by a Stop that cancelled it. */
+  starting: Promise<unknown> | undefined
+  /** POSIX: Pi's descendants, recorded while it runs (its shells run in groups of their own). */
+  descendants: DescendantTracker | undefined
+  tracking: ReturnType<typeof setInterval> | undefined
+  /** POSIX: the shells' process groups the extension reported, verified as Mousse's. */
+  groups = new OwnedGroups()
+  exit: PiRpcExit | undefined
+  turn: PiTurn | undefined
+  warm: ReturnType<typeof setTimeout> | undefined
+  sessionId: string | undefined
+  /** The stored key it was started with (a rotated key restarts it). */
+  keyFingerprint = ''
+  readonly startedAt = Date.now()
+  readonly readyWaiters = new Set<() => void>()
+  readonly failures = new Set<(reason: string) => void>()
+  process: PiProcess | undefined
+  registration: PiBridgeRegistration | undefined
+
+  constructor(readonly threadId: string, readonly cwd: string, public model: string, public thinking: PiThinkingLevel) {}
+
+  get alive(): boolean {
+    return !this.exit && !this.dead && !this.fatal
+  }
+
+  /** Settles once the process and everything holding its output are gone. */
+  get closed(): Promise<unknown> {
+    // The sweep is created when the process exits (an explicit kill included), so it is read after.
+    return (this.process?.client.exited ?? Promise.resolve()).then(() => this.sweep)
+  }
+
+  /** The orphan sweep after an unexpected death (Windows). */
+  sweep: Promise<void> | undefined
+
+  fail(reason: string): void {
+    if (!this.fatal) this.fatal = reason
+    for (const listener of [...this.failures]) listener(reason)
+  }
+}
+
+/** A turn between its first ref and its process: Stop and kill find it by its key. */
+interface StartingTurn {
+  threadId: string
+  thread?: PiThreadProcess
+  turn?: PiTurn
+  cancelled: boolean
+}
+
+export class PiRpcEngine implements ProviderAdapter {
+  readonly driver = 'pi' as const
+  readonly capabilities: ProviderCapabilities
+  private readonly bridge = new PiBridge()
+  private readonly threads = new Map<string, PiThreadProcess>()
+  /** Every turn by its key, from its first ref to its end. */
+  private readonly turns = new Map<string, StartingTurn>()
+  /** Processes killed or dead whose tree has not finished closing; `stop()` waits for them. */
+  private readonly closing = new Set<PiThreadProcess>()
+  private readonly starts = new Set<Promise<unknown>>()
+  private stopped = false
+
+  constructor(private readonly options: PiRpcEngineOptions) {
+    this.capabilities = options.capabilities
+  }
+
+  describe(_model: string): ModelInfo {
+    return { contextUsage: 'reported' }
+  }
+
+  // -- Saved sessions ------------------------------------------------------------------------------
+
+  private get savedPath(): string {
+    return join(this.options.stateDir, 'threads.json')
+  }
+
+  private saved(): Record<string, SavedThread> {
+    try {
+      const parsed = JSON.parse(readFileSync(this.savedPath, 'utf8')) as unknown
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, SavedThread>) : {}
+    } catch {
+      return {}
+    }
+  }
+
+  private save(threadId: string, entry: SavedThread | undefined): void {
+    const all = this.saved()
+    if (entry) all[threadId] = entry
+    else delete all[threadId]
+    mkdirSync(this.options.stateDir, { recursive: true, mode: 0o700 })
+    atomicWriteJsonSync(this.savedPath, all, { mode: 0o600 })
+  }
+
+  /** The thread's next turn starts a new Pi session with the history handed over. */
+  forgetConversation(threadId: string): void {
+    this.save(threadId, undefined)
+    const thread = this.threads.get(threadId)
+    if (thread && !thread.turn) this.kill(thread)
+  }
+
+  // -- Processes ----------------------------------------------------------------------------------
+
+  /** Kills the thread's whole tree; it stays tracked (for `stop()`) until it closed. */
+  private kill(thread: PiThreadProcess): Promise<unknown> {
+    thread.cancelled = true
+    if (thread.tracking) clearInterval(thread.tracking)
+    if (thread.warm) clearTimeout(thread.warm)
+    thread.warm = undefined
+    thread.registration?.close()
+    if (this.threads.get(thread.threadId) === thread) this.threads.delete(thread.threadId)
+    if (!thread.process) return Promise.resolve()
+    if (!thread.exit) {
+      if (!thread.dead && !thread.killed) {
+        thread.killed = true
+        killTree(thread.process.child)
+      }
+      this.closing.add(thread)
+      void thread.closed.finally(() => this.closing.delete(thread))
+    }
+    return thread.closed
+  }
+
+  /** The turn a ref names: by its key, else by its native session. Never any other thread's. */
+  private target(ref: ProviderRef): { entry?: StartingTurn; thread?: PiThreadProcess } {
+    if (ref.nativeTurnId) {
+      const entry = this.turns.get(ref.nativeTurnId)
+      return entry ? { entry, ...(entry.thread ? { thread: entry.thread } : {}) } : {}
+    }
+    if (ref.sessionId) {
+      const thread = [...this.threads.values()].find((candidate) => candidate.sessionId === ref.sessionId)
+      return thread ? { thread } : {}
+    }
+    return {}
+  }
+
+  /** Kills the processes serving `ref` (the gateway's deadline); its live turn ends. */
+  terminate(ref: ProviderRef): void {
+    const { entry, thread } = this.target(ref)
+    if (entry) entry.cancelled = true
+    if (thread) void this.kill(thread)
+  }
+
+  /** Kills every process, a process still starting included; settles once all of them closed. */
+  async stop(): Promise<void> {
+    this.stopped = true
+    // Killed first: a process still starting fails its ready wait at once instead of at its deadline.
+    const killed = [...this.threads.values()].map((thread) => this.kill(thread))
+    await Promise.allSettled([...this.starts])
+    const closed = [...killed, ...[...this.threads.values()].map((thread) => this.kill(thread))]
+    await Promise.allSettled([...closed, ...[...this.closing].map((thread) => thread.closed)])
+    this.bridge.stop()
+  }
+
+  private thinkingFor(model: string): { modelId: string; thinking: PiThinkingLevel } {
+    const { baseId, effort } = parseThinkingSuffixFromModelId(model)
+    const thinking = (effort && THINKING_LEVELS.has(effort) ? effort : effort === 'max' ? 'xhigh' : 'off') as PiThinkingLevel
+    return { modelId: baseId, thinking }
+  }
+
+  /**
+   * One RPC command under a deadline: past it the process is killed and its session forgotten.
+   * `signal` (the turn's) cancels the wait.
+   */
+  private send<T>(thread: PiThreadProcess, command: PiRpcRequest, deadlineMs = this.options.commandDeadlineMs ?? COMMAND_DEADLINE_MS, signal?: AbortSignal): Promise<T> {
+    this.options.onCommand?.(command.type)
+    const process = thread.process
+    if (!process) return Promise.reject(protocolError(this.options.instanceId, `${this.options.label} is not running.`))
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        // Rejected first, so the race ends with the deadline and not with the aborted command.
+        reject(protocolError(this.options.instanceId, `${this.options.label} did not answer ${command.type} in time.`))
+        controller.abort()
+        this.save(thread.threadId, undefined)
+        void this.kill(thread)
+      }, deadlineMs)
+      timer.unref?.()
+    })
+    const onAbort = () => controller.abort()
+    signal?.addEventListener('abort', onAbort, { once: true })
+    if (signal?.aborted) controller.abort()
+    return Promise.race([process.client.send(command, { signal: controller.signal }) as unknown as Promise<T>, deadline]).finally(() => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+    })
+  }
+
+  /** The thread's process for this turn: the warm one, or a new one that reported ready. */
+  private async processFor(input: TurnInput, cwd: string, resume: string | undefined, starting: StartingTurn): Promise<{ thread: PiThreadProcess; resumed: boolean }> {
+    const { modelId, thinking } = this.thinkingFor(input.model)
+    const keyFingerprint = fingerprint(this.options.apiKey?.() ?? '')
+    const existing = this.threads.get(input.threadId)
+    if (existing && existing.alive && existing.ready && existing.cwd === cwd && !existing.turn && resume && existing.sessionId === resume && existing.keyFingerprint === keyFingerprint) {
+      starting.thread = existing
+      if (existing.warm) clearTimeout(existing.warm)
+      existing.warm = undefined
+      if (existing.model !== modelId) {
+        await this.send(existing, { type: 'set_model', provider: this.options.provider, modelId })
+        existing.model = modelId
+      }
+      if (existing.thinking !== thinking) {
+        await this.send(existing, { type: 'set_thinking_level', level: thinking })
+        existing.thinking = thinking
+      }
+      return { thread: existing, resumed: true }
+    }
+    // A rotated key, another workspace or a stale session: a new process.
+    if (existing) await within(this.kill(existing), INTERRUPT_DEADLINE_MS)
+    // Stopped while the old process went: no replacement.
+    if (starting.cancelled || this.stopped) throw protocolError(this.options.instanceId, `${this.options.label} was stopped while it started.`)
+    const thread = new PiThreadProcess(input.threadId, cwd, modelId, thinking)
+    thread.keyFingerprint = keyFingerprint
+    starting.thread = thread
+    this.threads.set(input.threadId, thread)
+    const started = this.start(thread, resume, () => starting.cancelled)
+    thread.starting = started
+    this.starts.add(started)
+    try {
+      await started
+    } finally {
+      this.starts.delete(started)
+    }
+    if (starting.cancelled) {
+      await within(this.kill(thread), CLEANUP_DEADLINE_MS)
+      throw protocolError(this.options.instanceId, `${this.options.label} was stopped while it started.`)
+    }
+    return { thread, resumed: Boolean(resume) }
+  }
+
+  private async start(thread: PiThreadProcess, sessionId: string | undefined, cancelled: () => boolean = () => false): Promise<void> {
+    const stopping = () => protocolError(this.options.instanceId, `${this.options.label} is stopping.`)
+    if (this.stopped) throw stopping()
+    await this.bridge.start()
+    if (this.stopped || thread.cancelled || cancelled()) throw stopping()
+    const env = this.options.env()
+    if (!env.home) throw protocolError(this.options.instanceId, 'Pi runs only with its Mousse-owned home.')
+    const shellPath = this.options.shellPath?.()
+    preparePiHome(env.home, {
+      ...(shellPath ? { shellPath } : {}),
+      ...(this.options.compaction ? { compaction: this.options.compaction() } : {}),
+      ...(this.options.settings?.retry ? { retry: this.options.settings.retry } : {})
+    })
+    const registration = this.bridge.register({
+      catalog: async (first) => {
+        const catalog = this.options.catalog()
+        const key = first ? this.options.apiKey?.() : undefined
+        return { provider: catalog.provider, catalogRevision: catalog.revision, ...(key ? { apiKey: key } : {}) }
+      },
+      ready: (report) => {
+        thread.readyReport = report
+        for (const waiter of [...thread.readyWaiters]) waiter()
+      },
+      turn: async () => {
+        await this.options.holdTurn?.()
+        return this.turnFor(thread)
+      },
+      gate: (request) => this.gate(thread, request),
+      quiesce: async (request, signal) => {
+        const turn = thread.turn
+        if (!turn || turn.attemptToken !== request.attemptToken) return { ok: false, reason: GATE_REFUSALS.denied }
+        try {
+          await turn.episode.quiesce(request.toolCallId, signal)
+          return { ok: true }
+        } catch (error) {
+          return { ok: false, reason: error instanceof Error ? error.message : GATE_REFUSALS.denied }
+        }
+      },
+      group: async ({ pgid, ended }) => {
+        if (!Number.isInteger(pgid) || pgid <= 1) throw new Error('bad group')
+        // A group that cannot be verified is refused: the shell then runs nothing.
+        if (ended) await thread.groups.ended()
+        else await thread.groups.record(pgid)
+      },
+      fatal: (request) => {
+        thread.fail(`${request.reason}: ${request.message}`)
+        void this.kill(thread)
+      }
+    })
+    thread.registration = registration
+    const extraEnv = this.options.extraEnv?.()
+    const launched = piLaunch({
+      env,
+      runtime: this.options.runtime(),
+      stateDir: this.options.stateDir,
+      provider: this.options.provider,
+      model: thread.model,
+      thinking: thread.thinking,
+      ...(sessionId ? { sessionId } : {}),
+      ...(extraEnv ? { extraEnv } : {}),
+      engineEnv: { ...(this.options.testEnv ?? {}), [PI_BRIDGE_ENV]: JSON.stringify(registration.address) } as Record<`MOUSSE_PI_${string}`, string>,
+      ...(this.options.host ? { host: this.options.host } : {})
+    })
+    if (launched.runs !== 'yes') {
+      registration.close()
+      if (this.threads.get(thread.threadId) === thread) this.threads.delete(thread.threadId)
+      throw harnessAppError({ code: 'wont_run', message: launched.reason, instanceId: this.options.instanceId })
+    }
+    const launch = this.options.adjustLaunch ? this.options.adjustLaunch(launched) : launched
+    // Checked again right before the spawn: Stop may have come while the home was prepared.
+    if (this.stopped || thread.cancelled || cancelled()) {
+      registration.close()
+      if (this.threads.get(thread.threadId) === thread) this.threads.delete(thread.threadId)
+      throw stopping()
+    }
+    const started = startPiProcess(env, launch, {
+      cwd: thread.cwd,
+      handlers: {
+        event: (event) => this.event(thread, event),
+        exit: (exit) => this.closed(thread, exit)
+      }
+    })
+    thread.process = started
+    if (started.child.pid) this.options.onSpawn?.(started.child.pid, thread.threadId)
+    // The process itself is gone: its descendants are killed now, before its output closes.
+    started.child.once('exit', () => this.died(thread))
+    if (this.stopped || thread.cancelled) {
+      thread.killed = false
+      void this.kill(thread)
+      throw stopping()
+    }
+    if (process.platform !== 'win32' && started.child.pid) {
+      // Recorded while Pi runs: after Pi's death its shells are reparented and untraceable.
+      const tracker = new DescendantTracker(started.child.pid)
+      thread.descendants = tracker
+      thread.tracking = setInterval(() => {
+        if (thread.turn?.openTools.size) void tracker.snapshot()
+        if (thread.groups.size) void thread.groups.refresh().catch(() => {})
+      }, 1000)
+      thread.tracking.unref?.()
+    }
+    await this.awaitReady(thread)
+  }
+
+  /**
+   * Ready: the extension's report (every provider guarded, the AWS pins seen), then every model Pi
+   * offers belongs to a guarded provider. Anything else kills the tree; no prompt was sent.
+   */
+  private async awaitReady(thread: PiThreadProcess): Promise<void> {
+    const deadlineMs = this.options.readyDeadlineMs ?? READY_DEADLINE_MS
+    const failed = (message: string): never => {
+      void this.kill(thread)
+      throw protocolError(this.options.instanceId, message)
+    }
+    try {
+      await new Promise<void>((resolve, reject) => {
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const done = (error?: Error) => {
+          clearTimeout(timer)
+          thread.readyWaiters.delete(onReady)
+          thread.failures.delete(onFailure)
+          if (error) reject(error)
+          else resolve()
+        }
+        const onReady = () => done()
+        const onFailure = (reason: string) => done(new Error(reason))
+        if (thread.fatal) return done(new Error(thread.fatal))
+        if (thread.exit || thread.dead) return done(new Error('exited'))
+        if (thread.readyReport) return done()
+        thread.readyWaiters.add(onReady)
+        thread.failures.add(onFailure)
+        timer = setTimeout(() => done(new Error(`no ready report within ${Math.round(deadlineMs / 1000)} seconds`)), deadlineMs)
+        timer.unref?.()
+      })
+    } catch (error) {
+      const stderr = thread.process?.stderr().trim().split('\n').slice(-5).join('\n')
+      if (stderr) console.warn('[harness] Pi did not start', { instanceId: this.options.instanceId, stderr })
+      failed(`${this.options.label} could not start (${error instanceof Error ? error.message : String(error)}).`)
+    }
+    const report = thread.readyReport!
+    if (report.aws.maxAttempts !== '1' || report.aws.retryMode !== 'standard')
+      failed(`${this.options.label} started without Mousse's AWS retry settings.`)
+    const { models } = await this.send<{ models: Array<{ provider: string }> }>(thread, { type: 'get_available_models' })
+    const guarded = new Set(report.guarded)
+    const unguarded = [...new Set(models.map((model) => model.provider))].filter((provider) => !guarded.has(provider))
+    if (unguarded.length) failed(`${this.options.label} offered models Mousse cannot guard (${unguarded.join(', ')}).`)
+    if (thread.fatal) failed(`${this.options.label} could not register its providers.`)
+    const state = await this.send<{ sessionId?: string }>(thread, { type: 'get_state' })
+    thread.sessionId = state.sessionId
+    thread.ready = true
+  }
+
+  // -- Turns --------------------------------------------------------------------------------------
+
+  private turnFor(thread: PiThreadProcess): PiTurnResponse {
+    const turn = thread.turn
+    const catalogRevision = this.options.catalog().revision
+    if (!turn) return { attemptToken: '', sessionInstructions: '', tools: [], activeBuiltins: [], mcp: null, catalogRevision }
+    const tools: PiTurnTool[] = turn.tools.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.inputSchema, class: tool.class }))
+    return {
+      attemptToken: turn.attemptToken,
+      sessionInstructions: turn.host.bridge?.sessionInstructions ?? '',
+      tools,
+      activeBuiltins: [...turn.active].filter((name) => name in BUILTIN_CLASSES),
+      mcp: turn.host.bridge?.mcp ?? null,
+      catalogRevision
+    }
+  }
+
+  /**
+   * Default deny: the turn's active tools, for its attempt, under the writer barrier. A read-only
+   * child's file tools are checked on the path Pi would open (Pi's own resolution: `@`, `~`,
+   * `file://`, Git Bash drive paths), and Pi is handed that checked absolute path to run on.
+   */
+  private async gate(thread: PiThreadProcess, request: PiGateRequest): Promise<PiGateResponse> {
+    const turn = thread.turn
+    if (!turn || turn.attemptToken !== request.attemptToken || turn.phase === 'stopping') return { allow: false, reason: GATE_REFUSALS.denied }
+    if (!turn.active.has(request.toolName)) return { allow: false, reason: `${GATE_REFUSALS.denied}: ${request.toolName} is not available in this turn` }
+    const kind = turn.classes.get(request.toolName) ?? 'mutation'
+    const access = turn.host.tools.toolAccess
+    let rewritten: Record<string, unknown> | undefined
+    if (turn.input.child?.readOnly && access) {
+      const argument = PI_PATH_ARGUMENTS[request.toolName]
+      const input = { ...request.input }
+      if (argument) {
+        const raw = input[argument.key] ?? argument.fallback
+        if (typeof raw !== 'string') return { allow: false, reason: `${GATE_REFUSALS.denied}: ${request.toolName} needs a path` }
+        const home = this.options.env().env.HOME ?? this.options.env().env.USERPROFILE
+        // `read` opens a variant of a missing path when one exists: the gate checks that one.
+        const resolved = (request.toolName === 'read' ? piResolveReadPath : piResolvePath)(raw, thread.cwd, home ? { home } : {})
+        input[argument.key] = resolved
+        rewritten = { [argument.key]: resolved }
+      }
+      try {
+        await access.execute(request.toolName, input, async () => undefined)
+      } catch (error) {
+        return { allow: false, reason: error instanceof Error ? error.message : GATE_REFUSALS.denied }
+      }
+    }
+    const decision = await turn.episode.authorize(request.toolCallId, kind)
+    return decision.allow && rewritten ? { allow: true, input: rewritten } : decision
+  }
+
+  async startTurn(input: TurnInput, sink: TurnSink, ctl: TurnControl, host: AdapterHost): Promise<TurnResult> {
+    const key = randomUUID()
+    const ref: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model, nativeTurnId: key }
+    sink.providerRef(ref)
+    const starting: StartingTurn = { threadId: input.threadId, cancelled: false }
+    this.turns.set(key, starting)
+    const startedAt = Date.now()
+    // Stop during a cold start: the starting process is killed and the turn ends aborted.
+    const onEarlyAbort = () => {
+      starting.cancelled = true
+      if (!starting.turn && starting.thread) void this.kill(starting.thread)
+    }
+    input.signal.addEventListener('abort', onEarlyAbort, { once: true })
+    try {
+      const cwd = input.cwd ?? join(this.options.stateDir, 'chats', fingerprint(input.threadId).slice(0, 16))
+      mkdirSync(cwd, { recursive: true })
+      const history = input.nativeHistory ?? ''
+      const saved = this.saved()[input.threadId]
+      const resume = saved && saved.historyFingerprint === fingerprint(history) ? saved.sessionId : undefined
+      let started: { thread: PiThreadProcess; resumed: boolean }
+      try {
+        if (input.signal.aborted || starting.cancelled) throw new Error('aborted')
+        started = await this.processFor(input, cwd, resume, starting)
+      } catch (error) {
+        if (input.signal.aborted || starting.cancelled) return this.abortedResult(input, ref, startedAt)
+        throw error
+      }
+      return await this.runTurn(started.thread, started.resumed, key, starting, ref, input, sink, ctl, host, history)
+    } finally {
+      input.signal.removeEventListener('abort', onEarlyAbort)
+      this.turns.delete(key)
+    }
+  }
+
+  private abortedResult(input: TurnInput, ref: ProviderRef, startedAt: number): TurnResult {
+    const contextKey = `${input.llmProvider}:${input.model}`
+    return {
+      text: '', aborted: true, modelName: input.model, totalResponseTimeMs: Date.now() - startedAt,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextSignature: contextKey, contextModelKey: contextKey, nativeMessages: [], providerRef: ref
+    }
+  }
+
+  private async runTurn(
+    thread: PiThreadProcess, resumed: boolean, key: string, starting: StartingTurn, baseRef: ProviderRef,
+    input: TurnInput, sink: TurnSink, ctl: TurnControl, host: AdapterHost, history: string
+  ): Promise<TurnResult> {
+    const ref: ProviderRef = { ...baseRef, ...(thread.sessionId ? { sessionId: thread.sessionId } : {}) }
+    if (thread.sessionId) sink.providerRef(ref)
+    const builtins = !input.cwd ? [] : input.mode === 'plan' || input.child?.readOnly ? PI_READ_ONLY_BUILTINS : PI_ALL_BUILTINS
+    const tools = host.bridge?.mcp ? this.options.mousseTools?.(input.threadId) ?? [] : []
+    const turn = new PiTurn(key, host.bridge?.turnToken ?? key, input, sink, ctl, host, tools, builtins)
+    thread.turn = turn
+    starting.turn = turn
+    const onAbort = () => void this.stopTurn(thread, turn)
+    input.signal.addEventListener('abort', onAbort, { once: true })
+    let failure: unknown
+    try {
+      if (input.signal.aborted) throw new Error('aborted')
+      const handoff = !resumed && history ? `Previous conversation (context only; do not repeat earlier actions):\n${history}\n\nCurrent request:\n` : ''
+      const preamble = host.bridge?.turnPreamble ? `${host.bridge.turnPreamble}\n\n` : ''
+      let message = `${handoff}${preamble}${input.prompt || '(image attachment)'}`
+      // A leading `/` would run a Pi extension command instead of reaching the model.
+      if (message.startsWith('/')) message = ` ${message}`
+      const images = (input.images ?? []).map((image) => ({ type: 'image' as const, data: image.data, mimeType: image.mimeType }))
+      // Pi answers a prompt after its preflight (auth, compaction, extensions): bounded, and Stop cancels the wait.
+      await this.send(thread, { type: 'prompt', message, ...(images.length ? { images } : {}) }, this.options.promptDeadlineMs ?? PI_PROMPT_DEADLINE_MS, input.signal)
+      turn.promptAccepted = true
+      await turn.done
+    } catch (error) {
+      failure = error
+    } finally {
+      input.signal.removeEventListener('abort', onAbort)
+    }
+    const stopped = input.signal.aborted || turn.phase === 'stopping'
+    if (stopped && failure !== undefined && !thread.dead) await turn.done.catch(() => {})
+    // A process that died keeps the episode (and the writer) until its tree is gone.
+    if (thread.dead || thread.exit) await within(thread.closed, CLEANUP_DEADLINE_MS)
+    turn.episode.close()
+    if (thread.turn === turn) thread.turn = undefined
+    // Every ended turn, failed or not, leaves its process for the warm period only.
+    if (thread.alive) {
+      thread.warm = setTimeout(() => void this.kill(thread), this.options.warmMs ?? PI_WARM_MS)
+      thread.warm.unref?.()
+    }
+    if (failure !== undefined && !stopped) {
+      if (thread.fatal) throw protocolError(this.options.instanceId, `${this.options.label} could not register its providers, so the turn was stopped before any request.`)
+      throw failure
+    }
+    // Context for the gauge, from Pi's own measurement.
+    let context: { input: number; cacheRead: number; cacheWrite: number; contextWindow?: number; modelName?: string } | undefined
+    if (thread.alive && !stopped) {
+      try {
+        const stats = await this.send<{ contextUsage?: { tokens: number | null; contextWindow: number } }>(thread, { type: 'get_session_stats' })
+        if (stats.contextUsage?.tokens != null)
+          context = { input: stats.contextUsage.tokens, cacheRead: 0, cacheWrite: 0, contextWindow: stats.contextUsage.contextWindow, modelName: thread.model }
+      } catch {
+        // The gauge waits for the next turn.
+      }
+    }
+    sink.providerMetrics({ totalResponseTimeMs: Date.now() - turn.startedAt, totalTokensUsed: turn.usage.input + turn.usage.output, ...(context ? { context } : {}) })
+    const text = turn.lastText
+    if (!stopped) {
+      const committed = host.context.nativeHistoryAfterTurn(text)
+      if (thread.sessionId) this.save(input.threadId, { sessionId: thread.sessionId, historyFingerprint: fingerprint(committed), instructionsHash: fingerprint(host.bridge?.sessionInstructions ?? '') })
+    } else if (thread.sessionId && thread.alive && host.context.nativeHistoryNow) {
+      this.save(input.threadId, { sessionId: thread.sessionId, historyFingerprint: fingerprint(host.context.nativeHistoryNow()) })
+    }
+    const contextKey = `${input.llmProvider}:${input.model}`
+    return {
+      text,
+      aborted: stopped,
+      modelName: input.model,
+      totalResponseTimeMs: Date.now() - turn.startedAt,
+      totalTokensUsed: turn.usage.input + turn.usage.output,
+      usage: turn.usage,
+      contextSignature: contextKey,
+      contextModelKey: contextKey,
+      nativeMessages: [],
+      providerRef: ref
+    }
+  }
+
+  /**
+   * Stop: fence steers, clear Pi's queue (returning what it held once), revoke the episode, abort.
+   * Past the deadline the tree is killed, and the turn ends only once it is gone.
+   */
+  private async stopTurn(thread: PiThreadProcess, turn: PiTurn): Promise<'interrupted' | 'not_active'> {
+    if (turn.phase === 'stopping') return 'interrupted'
+    turn.phase = 'stopping'
+    turn.episode.revoke()
+    if (!thread.alive) {
+      await within(thread.closed, INTERRUPT_DEADLINE_MS)
+      turn.settled()
+      return 'interrupted'
+    }
+    if (!turn.promptAccepted) {
+      // Pi runs an accepted-later prompt detached from `abort` (its preflight: compaction,
+      // `before_agent_start`): the process goes, and its session with the half-started prompt.
+      this.save(thread.threadId, undefined)
+      this.returnSteers(turn)
+      await within(this.kill(thread), CLEANUP_DEADLINE_MS)
+      turn.settled()
+      return 'interrupted'
+    }
+    try {
+      const cleared = await this.send<{ steering: string[]; followUp: string[] }>(thread, { type: 'clear_queue' })
+      for (const text of [...cleared.steering, ...cleared.followUp]) {
+        const index = turn.steers.findIndex((steer) => steer.text === text)
+        const steer = index >= 0 ? turn.steers.splice(index, 1)[0] : undefined
+        turn.ctl.returnSteer?.(text, steer?.token)
+      }
+      // `abort` also cancels a pending retry backoff.
+      await this.send(thread, { type: 'abort' }, INTERRUPT_DEADLINE_MS)
+    } catch {
+      // The command deadline killed the tree: the writer is released only once it is gone, and the
+      // steers Pi still held come back once.
+      this.returnSteers(turn)
+      await within(this.kill(thread), CLEANUP_DEADLINE_MS)
+    }
+    turn.settled()
+    return 'interrupted'
+  }
+
+  /** Hands back, once, every steer the turn sent Pi that Pi did not take. */
+  private returnSteers(turn: PiTurn): void {
+    for (const steer of turn.steers.splice(0)) turn.ctl.returnSteer?.(steer.text, steer.token)
+  }
+
+  async interrupt(ref: ProviderRef): Promise<'interrupted' | 'not_active'> {
+    const { entry, thread } = this.target(ref)
+    if (entry && !entry.turn) {
+      // Still starting: the start is cancelled and its process killed.
+      entry.cancelled = true
+      if (entry.thread) await within(this.kill(entry.thread), INTERRUPT_DEADLINE_MS)
+      return 'interrupted'
+    }
+    const turn = entry?.turn ?? thread?.turn
+    const owner = entry?.thread ?? thread
+    if (!turn || !owner || owner.turn !== turn) return 'not_active'
+    return this.stopTurn(owner, turn)
+  }
+
+  /**
+   * Stop for a thread (also on its deletion): its live turn, then its whole tree, warm or not,
+   * background work included. Settles once the tree is gone.
+   */
+  async stopThread(threadId: string): Promise<'stopped' | 'not_active'> {
+    const starting = [...this.turns.values()].filter((entry) => entry.threadId === threadId && !entry.turn)
+    for (const entry of starting) entry.cancelled = true
+    const thread = this.threads.get(threadId) ?? starting.find((entry) => entry.thread)?.thread
+    if (!thread) return starting.length ? 'stopped' : 'not_active'
+    if (thread.turn) await this.stopTurn(thread, thread.turn)
+    await within(this.kill(thread), INTERRUPT_DEADLINE_MS)
+    // A start still in progress spawns nothing more; one that already spawned is killed with its tree.
+    if (thread.starting) {
+      await within(thread.starting, INTERRUPT_DEADLINE_MS)
+      await within(this.kill(thread), INTERRUPT_DEADLINE_MS)
+    }
+    return 'stopped'
+  }
+
+  async steer(ref: ProviderRef, text: string): Promise<'delivered' | 'not_active'> {
+    const { entry, thread } = this.target(ref)
+    const turn = entry?.turn ?? thread?.turn
+    const owner = entry?.thread ?? thread
+    // After `agent_end` (or during a retry backoff, or before the process is up) a steer becomes the next prompt.
+    if (!turn || !owner || owner.turn !== turn || turn.phase !== 'running') return 'not_active'
+    try {
+      await this.send(owner, { type: 'steer', message: text })
+      turn.steers.push({ text })
+      return 'delivered'
+    } catch {
+      return 'not_active'
+    }
+  }
+
+  /** Native fork is not wired yet: a fork uses the portable handoff. */
+  async forkSession(_ref: ProviderRef, _atTurnOrdinal: number): Promise<ProviderRef | null> {
+    return null
+  }
+
+  // -- Events -------------------------------------------------------------------------------------
+
+  /** The Pi process exited (its output may stay open while descendants hold it). */
+  private died(thread: PiThreadProcess): void {
+    if (thread.dead) return
+    thread.dead = true
+    thread.registration?.close()
+    if (thread.warm) clearTimeout(thread.warm)
+    if (this.threads.get(thread.threadId) === thread) this.threads.delete(thread.threadId)
+    const child = thread.process?.child
+    if (thread.tracking) clearInterval(thread.tracking)
+    // An unexpected death: whatever Pi started is found and killed (a kill by Mousse took the tree,
+    // and the recorded shell groups go too).
+    if (child && !thread.killed) {
+      try {
+        killTree(child)
+      } catch {
+        // Best effort: the orphan sweep follows.
+      }
+    }
+    if (child?.pid && !thread.sweep) thread.sweep = this.sweep(thread, child.pid, !thread.killed)
+    // Set before tracking: `closed` includes the sweep.
+    this.closing.add(thread)
+    void thread.closed.finally(() => this.closing.delete(thread))
+    for (const listener of [...thread.failures]) listener(`exited with code ${child?.exitCode ?? child?.signalCode ?? 'unknown'}`)
+    const turn = thread.turn
+    if (!turn) return
+    // The crash rule: open tools end interrupted once, waiting delegations reject.
+    for (const [callId, tool] of turn.openTools)
+      turn.sink.tool({ kind: tool.mousse ? 'mcp_tool_call' : 'build_tool_result', phase: 'complete', callId, title: `Tool ${tool.name}`, summary: 'Interrupted: the agent stopped.', details: [] })
+    turn.openTools.clear()
+    turn.episode.revoke()
+    this.returnSteers(turn)
+    if (turn.phase === 'stopping' || turn.input.signal.aborted) turn.settled()
+    else if (thread.fatal) turn.failed(protocolError(this.options.instanceId, `${this.options.label} could not register its providers, so the turn was stopped before any request.`))
+    else turn.failed(interruptedError(`${this.options.label} stopped unexpectedly during the turn (exit code ${child?.exitCode ?? 'none'}${child?.signalCode ? `, ${child.signalCode}` : ''}).`))
+  }
+
+  /**
+   * After Pi's death: the shell groups it reported (POSIX), the descendants recorded as a backup,
+   * and on Windows the orphans found by their parent id (only after an unexpected death).
+   */
+  private async sweep(thread: PiThreadProcess, pid: number, unexpected: boolean): Promise<void> {
+    try {
+      await this.options.sweepHook?.()
+      await Promise.all([
+        thread.groups.kill(),
+        unexpected ? killOrphans(pid, thread.startedAt) : undefined,
+        unexpected ? thread.descendants?.killRecorded() : undefined
+      ])
+    } catch {
+      // Best effort.
+    }
+  }
+
+  /** The process and everything holding its output are gone. */
+  private closed(thread: PiThreadProcess, exit: PiRpcExit): void {
+    thread.exit = exit
+    this.died(thread)
+    // Tracking ends with `thread.closed` (the pipes and the orphan sweep), not here.
+    thread.turn?.episode.crashed()
+  }
+
+  private event(thread: PiThreadProcess, event: PiRpcEvent): void {
+    if (event.type === 'extension_ui_request') {
+      // Every dialog is cancelled; fire-and-forget requests need no answer.
+      if (['select', 'confirm', 'input', 'editor'].includes(String(event.method)))
+        thread.process?.client.respond({ type: 'extension_ui_response', id: String(event.id), cancelled: true })
+      return
+    }
+    if (event.type === 'extension_error') {
+      // A provider registration that failed at bind left a built-in unguarded: fatal before any prompt.
+      if (event.event === 'register_provider') {
+        thread.fail(`register_provider: ${String(event.error)}`)
+        void this.kill(thread)
+      }
+      return
+    }
+    const turn = thread.turn
+    if (!turn) return
+    this.turnEvent(thread, turn, event)
+  }
+
+  private turnEvent(thread: PiThreadProcess, turn: PiTurn, event: PiRpcEvent): void {
+    const { sink } = turn
+    switch (event.type) {
+      case 'turn_start':
+        if (turn.phase !== 'stopping') turn.phase = 'running'
+        return
+      case 'turn_end': {
+        // Steers Mousse holds join the live turn at its next step.
+        if (turn.phase !== 'running') return
+        const entry = turn.ctl.drainSteerEntry?.()
+        if (entry) {
+          turn.steers.push(entry)
+          this.send(thread, { type: 'steer', message: entry.text }).catch(() => {
+            const index = turn.steers.indexOf(entry)
+            if (index >= 0) turn.steers.splice(index, 1)
+            turn.ctl.returnSteer?.(entry.text, entry.token)
+          })
+        }
+        return
+      }
+      case 'message_start': {
+        const message = event.message as { role?: string }
+        if (message?.role === 'assistant') {
+          turn.text = new Map()
+          turn.thinking = ''
+        } else if (message?.role === 'user' && turn.steers.length) {
+          const text = textOf(message)
+          const index = turn.steers.findIndex((steer) => text.includes(steer.text))
+          if (index >= 0) {
+            const [steer] = turn.steers.splice(index, 1)
+            turn.ctl.steerTaken?.(steer.token)
+            sink.steerAccepted(steer.text)
+          }
+        }
+        return
+      }
+      case 'message_update':
+        return this.streamUpdate(turn, event.assistantMessageEvent as { type: string; contentIndex: number; delta?: string; content?: string } | undefined)
+      case 'message_end': {
+        const message = event.message as { role?: string; usage?: Record<string, number>; stopReason?: string; errorMessage?: string }
+        if (message?.role !== 'assistant') return
+        // Every attempt's usage, failed ones included: they can be billable.
+        const usage = message.usage ?? {}
+        const reported = { input: usage.input ?? 0, output: usage.output ?? 0, cacheRead: usage.cacheRead ?? 0, cacheWrite: usage.cacheWrite ?? 0 }
+        if (reported.input || reported.output || reported.cacheRead || reported.cacheWrite) {
+          sink.usage(reported)
+          turn.usage = { input: turn.usage.input + reported.input, output: turn.usage.output + reported.output, cacheRead: turn.usage.cacheRead + reported.cacheRead, cacheWrite: turn.usage.cacheWrite + reported.cacheWrite }
+        }
+        if (message.stopReason === 'error') {
+          turn.pendingError = message.errorMessage || 'The provider request failed'
+          return
+        }
+        if (message.stopReason === 'aborted') return
+        turn.pendingError = undefined
+        const text = textOf(message)
+        if (text.trim()) turn.lastText = text
+        return
+      }
+      case 'tool_execution_start': {
+        void thread.descendants?.snapshot()
+        void thread.groups.refresh().catch(() => {})
+        const name = String(event.toolName)
+        const mousse = !(name in BUILTIN_CLASSES)
+        turn.openTools.set(String(event.toolCallId), { name, mousse })
+        turn.progress()
+        sink.tool({
+          kind: mousse ? 'mcp_tool_call' : 'build_tool_call',
+          phase: 'start',
+          callId: String(event.toolCallId),
+          title: `Tool ${name}`,
+          summary: mousse ? name : 'Called a local project tool (Pi coding agent).',
+          details: [`Tool: ${name}`],
+          response: JSON.stringify(event.args ?? {}, null, 2)
+        })
+        return
+      }
+      case 'tool_execution_update':
+        void thread.descendants?.snapshot()
+        void thread.groups.refresh().catch(() => {})
+        turn.ctl.heartbeat()
+        return
+      case 'tool_execution_end': {
+        const callId = String(event.toolCallId)
+        const name = String(event.toolName)
+        const open = turn.openTools.get(callId)
+        turn.openTools.delete(callId)
+        turn.episode.ended(callId)
+        const failed = event.isError === true
+        sink.tool({
+          kind: open?.mousse ? 'mcp_tool_call' : 'build_tool_result',
+          phase: 'complete',
+          callId,
+          title: `Tool ${name}`,
+          summary: failed ? 'The tool returned an error.' : 'The tool returned successfully.',
+          details: [`Tool: ${name}`],
+          response: textOf(event.result).slice(0, 4000)
+        })
+        if (!failed && (name === 'edit' || name === 'write')) {
+          const args = (event.args ?? {}) as { content?: string; newText?: string; edits?: Array<{ newText?: string }> }
+          const lines = name === 'write' ? linesOf(args.content) : linesOf(args.newText) + (args.edits ?? []).reduce((sum, edit) => sum + linesOf(edit.newText), 0)
+          if (lines) sink.lineEdits(lines)
+        }
+        return
+      }
+      case 'auto_retry_start':
+        // Pi dropped the failed attempt from its context; its partial output is superseded.
+        turn.pendingError = undefined
+        turn.maxRetries = Number(event.maxAttempts) || turn.maxRetries
+        if (turn.phase !== 'stopping') turn.phase = 'retrying'
+        sink.retry(Number(event.attempt) || 1)
+        return
+      case 'auto_retry_end': {
+        if (event.success === true || turn.phase === 'stopping' || event.finalError === 'Retry cancelled') return
+        // Exhausted only when the last attempt was the last allowed one; a later attempt that failed
+        // for another reason (a refusal, an auth error) keeps its own classification.
+        if (!turn.maxRetries || (Number(event.attempt) || 0) < turn.maxRetries) return
+        if (!isRetryableAssistantError({ stopReason: 'error', errorMessage: String(event.finalError ?? '') } as Parameters<typeof isRetryableAssistantError>[0])) return
+        const cause = new Error(String(event.finalError ?? 'The provider request failed'))
+        const normalized = normalizeProviderError(cause, this.options.provider)
+        turn.retryExhaustedError = new AppError({
+          code: normalized.code,
+          message: normalized.message,
+          errorInfo: normalized.errorInfo,
+          details: { ...((normalized.details as Record<string, unknown> | undefined) ?? {}), retriesExhausted: true }
+        }, cause)
+        return
+      }
+      case 'compaction_start':
+        sink.compaction('start')
+        return
+      case 'compaction_end':
+        sink.compaction(event.result ? 'complete' : 'unchanged')
+        return
+      case 'agent_end':
+        if (turn.phase === 'running') turn.phase = 'ending'
+        return
+      case 'agent_settled':
+        if (turn.phase === 'stopping') return turn.settled()
+        if (turn.pendingError && this.mousseRefusal(turn.pendingError)) return turn.failed(this.requestError(turn.pendingError))
+        if (turn.retryExhaustedError) return turn.failed(turn.retryExhaustedError)
+        if (turn.pendingError) return turn.failed(this.requestError(turn.pendingError))
+        return turn.settled()
+      default:
+        return
+    }
+  }
+
+  private streamUpdate(turn: PiTurn, update: { type: string; contentIndex: number; delta?: string; content?: string } | undefined): void {
+    if (!update) return
+    const { sink } = turn
+    turn.progress()
+    switch (update.type) {
+      case 'text_start':
+        turn.text.set(update.contentIndex, '')
+        return sink.text({ phase: 'start', content: '', contentIndex: update.contentIndex })
+      case 'text_delta': {
+        if (!turn.text.has(update.contentIndex)) sink.text({ phase: 'start', content: '', contentIndex: update.contentIndex })
+        const content = `${turn.text.get(update.contentIndex) ?? ''}${update.delta ?? ''}`
+        turn.text.set(update.contentIndex, content)
+        return sink.text({ phase: 'delta', content, contentIndex: update.contentIndex })
+      }
+      case 'text_end': {
+        const content = update.content ?? turn.text.get(update.contentIndex) ?? ''
+        turn.text.set(update.contentIndex, content)
+        return sink.text({ phase: 'complete', content, contentIndex: update.contentIndex })
+      }
+      case 'thinking_start':
+        turn.thinking = ''
+        return sink.thinking({ phase: 'start', content: '' })
+      case 'thinking_delta':
+        turn.thinking += update.delta ?? ''
+        return sink.thinking({ phase: 'delta', content: turn.thinking })
+      case 'thinking_end':
+        turn.thinking = update.content ?? turn.thinking
+        return sink.thinking({ phase: 'complete', content: turn.thinking })
+      default:
+        return
+    }
+  }
+
+  private mousseRefusal(message: string): boolean {
+    return message.includes(ANTHROPIC_OAUTH_REFUSED) || message.includes(CREDENTIAL_UNAVAILABLE)
+  }
+
+  /** A failed request's error: Mousse's own refusals by kind, anything else as a provider error. */
+  private requestError(message: string): Error {
+    if (message.includes(ANTHROPIC_OAUTH_REFUSED))
+      return harnessAppError({ code: 'auth_expired', message: `${this.options.label} will not send a Claude subscription credential. Use an Anthropic API key here, or Claude Code for a Claude subscription.`, instanceId: this.options.instanceId })
+    if (message.includes(CREDENTIAL_UNAVAILABLE))
+      return harnessAppError({ code: 'signed_out', message: `${this.options.label} has no usable credential. Sign in again from Providers.`, instanceId: this.options.instanceId })
+    return normalizeProviderError(new Error(message), this.options.provider)
+  }
+}

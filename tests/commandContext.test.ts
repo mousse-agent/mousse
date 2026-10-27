@@ -74,8 +74,16 @@ describe('commandContextFromDom app state', () => {
       threadOpen: true,
       runActive: true,
       mainAreaOpen: true,
-      projectsMode: true
+      projectsMode: true,
+      inFilesPanel: false
     })
+  })
+
+  it('knows a key typed inside the Files panel, including in its text fields', () => {
+    expect(commandContextFromDom(element('.files-panel'), state(), noOverlay).inFilesPanel).toBe(true)
+    expect(commandContextFromDom(element('textarea', '.files-panel'), state(), noOverlay)).toMatchObject({ inFilesPanel: true, inTextInput: true })
+    expect(commandContextFromDom(element('textarea'), state(), noOverlay)).toMatchObject({ inFilesPanel: false, inTextInput: true })
+    expect(commandContextFromDom(null, state(), noOverlay).inFilesPanel).toBe(false)
   })
 
   it('has no run active for an idle or finished turn', () => {

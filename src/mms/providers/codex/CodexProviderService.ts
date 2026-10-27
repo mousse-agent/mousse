@@ -7,7 +7,6 @@ import { AppError, redactSecrets } from '../../../shared/errors'
 import { CODEX_INSTANCE_ID } from '../../../shared/providerInstances'
 import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
 import type { ProviderToolEvent } from '../../../shared/agentActivity'
-import { recordSubagentCall, toolResultText } from '../../../shared/subagentTools'
 import type {
   CliProviderConfig,
   CliProviderConfigPatch,
@@ -68,6 +67,18 @@ import { isUsageLimitInfo, isUsageLimitText, resetFromSnapshot } from './rateLim
 import { readUsageLimit, usageLimitError } from '../../orchestrator/providerErrors'
 import { codexTurnPolicy } from './childPolicy'
 import { DEFAULT_TREE_TIMING, HelperTree, RpcRefused, ThreadStatuses, TreeOff, isWakeUp, type TreePorts, type TreeTiming } from './helperTree'
+import {
+  closeEvent,
+  codexToolEvent,
+  editedLines,
+  helperEnd,
+  helperNote,
+  helperStart,
+  planStart,
+  planSteps,
+  planUpdate,
+  type HelperEnd
+} from './codexActivity'
 import { NativeHelpers, type StrayThread } from './nativeHelpers'
 import { readCodexUserSetup, type CodexUserSetup } from './userSetup'
 import type { ChildTurnPolicy } from '../../run/adapters/ProviderAdapter'
@@ -378,65 +389,6 @@ function classifyAccount(response: AccountReadResponse): AccountProbe {
   }
 }
 
-function toolEvent(item: ThreadItem, phase: 'start' | 'complete'): CodexToolEvent | undefined {
-  switch (item.type) {
-    case 'commandExecution': {
-      const command = (item as { command?: string }).command ?? 'command'
-      return { phase, callId: item.id, title: command.length > 200 ? `${command.slice(0, 200)}…` : command, toolName: 'shell' }
-    }
-    case 'fileChange': {
-      const changes = (item as { changes?: Array<{ path: string }> }).changes ?? []
-      const paths = changes.map((change) => change.path)
-      return { phase, callId: item.id, title: paths.length ? `Edit ${paths.join(', ')}` : 'Edit files', toolName: 'apply_patch' }
-    }
-    case 'mcpToolCall': {
-      const call = item as {
-        server?: string
-        tool?: string
-        status?: string
-        arguments?: unknown
-        result?: { content?: unknown; structuredContent?: unknown } | null
-        error?: unknown
-      }
-      const toolName = `mcp__${call.server}__${call.tool}`
-      // Mousse's subagent tools keep a bounded record of the call, so the app can tell which task a row is.
-      const record = recordSubagentCall(
-        toolName,
-        call.arguments,
-        phase === 'start'
-          ? {}
-          : {
-              text: toolResultText(call.result?.content) ?? (call.result?.structuredContent ? JSON.stringify(call.result.structuredContent) : undefined),
-              isError: call.status === 'failed' || Boolean(call.error)
-            }
-      )
-      return { phase, callId: item.id, title: `${call.server}.${call.tool}`, toolName, ...(record ? { record } : {}) }
-    }
-    case 'dynamicToolCall':
-      return { phase, callId: item.id, title: (item as { tool?: string }).tool ?? 'tool', toolName: (item as { tool?: string }).tool }
-    case 'webSearch':
-      return { phase, callId: item.id, title: 'Web search', toolName: 'web_search' }
-    case 'imageView':
-      return { phase, callId: item.id, title: 'View image', toolName: 'view_image' }
-    default:
-      return undefined
-  }
-}
-
-/** Lines a completed patch added or removed. */
-function editedLines(item: ThreadItem): number {
-  const changes = (item as { changes?: Array<{ kind?: { type?: string }; diff?: string }> }).changes ?? []
-  let lines = 0
-  for (const change of changes) {
-    const diff = change.diff ?? ''
-    if (change.kind?.type === 'add' || change.kind?.type === 'delete') lines += diff ? diff.split('\n').filter(Boolean).length : 0
-    else
-      for (const line of diff.split('\n'))
-        if ((line.startsWith('+') && !line.startsWith('+++')) || (line.startsWith('-') && !line.startsWith('---'))) lines += 1
-  }
-  return lines
-}
-
 function usageDelta(start: TokenUsageBreakdown, end: TokenUsageBreakdown): TokenUsageBreakdown {
   const keys: Array<keyof TokenUsageBreakdown> = [
     'totalTokens',
@@ -456,6 +408,26 @@ function promptSide(usage: TokenUsageBreakdown): { input: number; cacheRead: num
   return { input: Math.max(0, (usage.inputTokens ?? 0) - cacheRead - cacheWrite), cacheRead, cacheWrite }
 }
 
+/** A call that is open on the timeline. */
+interface OpenCall {
+  callId: string
+  title: string
+  toolName?: string
+  /** The turn's plan: it has no completion of its own. */
+  plan?: boolean
+  /** The helper thread a `subagent` row stands for. */
+  helper?: string
+}
+
+/** The current episode of a native helper's work. */
+interface HelperRow {
+  callId: string
+  episode: number
+  open: boolean
+  description?: string
+  agentType?: string
+}
+
 /** One Mousse chat on one Codex thread: the turns it starts and what they stream. */
 class TurnRun {
   turnId: string | undefined
@@ -466,7 +438,14 @@ class TurnRun {
   private thinking = ''
   private lastReasoningItem: string | undefined
   private readonly items = new Map<string, ThreadItem>()
-  private readonly openTools = new Map<string, CodexToolEvent>()
+  /** Calls open on the timeline, by the call id the timeline knows: what closing one needs. */
+  private readonly openTools = new Map<string, OpenCall>()
+  /** One row per native helper thread (and per episode of work it is sent), by helper thread id. */
+  private readonly helperRows = new Map<string, HelperRow>()
+  /** Helpers named by more work before the tracker lists them as running: their row opens when they do. */
+  private readonly awaitingWork = new Set<string>()
+  /** Turns whose plan row was opened (a plan row is never reopened once it ended). */
+  private readonly plans = new Set<string>()
   private usageStart: TokenUsageBreakdown | undefined
   private usageEnd: { total: TokenUsageBreakdown; last: TokenUsageBreakdown; window: number | null } | undefined
   private retries = 0
@@ -666,9 +645,157 @@ class TurnRun {
     this.input.onText(this.text)
   }
 
-  closeTools(): void {
-    for (const event of this.openTools.values()) this.input.onTool?.({ ...event, phase: 'complete' })
+  /**
+   * Ends every call Codex never reported a result for, so no row outlives its turn and none ends as done
+   * by default: `stop` (the turn was stopped or failed) closes every row as stopped, helpers and the plan
+   * included, even a helper that settled just before the abort was seen. `no_result` (the turn settled and
+   * the call has no result) closes a call as `No result reported`, except the plan (it has no completion of
+   * its own) and a helper the run waited for and the tracker no longer lists as running.
+   */
+  closeTools(reason: 'stop' | 'no_result'): void {
+    const running = new Set(this.helpers.running())
+    for (const call of this.openTools.values()) {
+      const done = reason === 'no_result' && (call.plan || (call.helper !== undefined && !running.has(call.helper)))
+      this.input.onTool?.(closeEvent(call, done ? 'done' : reason))
+    }
     this.openTools.clear()
+    for (const row of this.helperRows.values()) row.open = false
+  }
+
+  /** A call opens on the timeline; `call` is what closing it later needs. */
+  private openCall(event: ProviderToolEvent, extra: Pick<OpenCall, 'plan' | 'helper'> = {}): void {
+    this.openTools.set(event.callId, { callId: event.callId, title: event.title, ...(event.toolName ? { toolName: event.toolName } : {}), ...extra })
+    this.input.onTool?.(event)
+  }
+
+  /** Streamed output of a running command; a command that is not open (it ended, or never started) takes none. */
+  private streamOutput(callId: string, delta: string): void {
+    const open = this.openTools.get(callId)
+    if (!open || !delta) return
+    this.input.onTool?.({ phase: 'update', callId, title: open.title, ...(open.toolName ? { toolName: open.toolName } : {}), activity: { kind: 'command', output: delta } })
+  }
+
+  /** The turn's plan: one row per turn, opened by its first update, done when the turn completes. */
+  private planUpdated(turnId: string, plan: unknown): void {
+    const steps = planSteps(plan)
+    if (!steps.length) return
+    const callId = `plan:${turnId}`
+    if (this.openTools.has(callId)) this.input.onTool?.(planUpdate(callId, steps))
+    else if (!this.plans.has(turnId)) {
+      this.plans.add(turnId)
+      this.openCall(planStart(callId, steps), { plan: true })
+    }
+  }
+
+  private finishPlan(turnId: string): void {
+    const callId = `plan:${turnId}`
+    const open = this.openTools.get(callId)
+    if (!open) return
+    this.openTools.delete(callId)
+    this.input.onTool?.(closeEvent(open, 'done'))
+  }
+
+  // ---- native helpers ---------------------------------------------------------------------------
+
+  /**
+   * An item of this thread that names native helpers: a launch opens the helper's row (the item that
+   * launched it only says so, it does not end it), a report of its end closes it, and the tracker then
+   * says whether the helper runs again (more work after its row closed opens a new episode).
+   */
+  private noteHelperItem(item: ThreadItem): void {
+    const note = helperNote(item)
+    if (note) {
+      for (const launched of note.launched) if (!launched.reuse) this.openHelper(launched.threadId, launched)
+      for (const ended of note.ended) this.endHelper(ended.threadId, ended.outcome)
+    }
+    this.helpers.noteItem(item as never)
+    if (!note) return
+    // More work for a helper this run has no row for (one an earlier run launched) shows a row only once the
+    // tracker says it runs: a helper that already ended has nothing to show.
+    for (const launched of note.launched)
+      if (launched.reuse) {
+        if (this.helperRows.has(launched.threadId) || this.helpers.running().includes(launched.threadId)) this.openHelper(launched.threadId, launched, 'More work')
+        else this.awaitingWork.add(launched.threadId)
+      }
+    for (const threadId of new Set([...note.launched, ...note.ended].map((entry) => entry.threadId))) this.syncHelper(threadId)
+  }
+
+  private openHelper(threadId: string, details: { description?: string; agentType?: string }, summary?: string): void {
+    const row = this.helperRows.get(threadId)
+    if (!row) {
+      const callId = `helper:${threadId}`
+      this.helperRows.set(threadId, { callId, episode: 1, open: true, ...details })
+      this.openCall(helperStart(callId, threadId, { ...details, ...(summary ? { summary } : {}) }), { helper: threadId })
+      return
+    }
+    // A second item naming a running helper can know more about it (the prompt, the model).
+    const more = (details.description && !row.description) || (details.agentType && !row.agentType)
+    if (!row.open || !more) return
+    row.description ??= details.description
+    row.agentType ??= details.agentType
+    this.input.onTool?.(helperStart(row.callId, threadId, details))
+  }
+
+  /** Stop was requested (it may reach the turn's own handler a moment later), or the chat was aborted. */
+  private stopRequested(): boolean {
+    return this.interruptRequested || this.signal.aborted
+  }
+
+  private endHelper(threadId: string, how: HelperEnd): void {
+    const row = this.helperRows.get(threadId)
+    if (!row?.open) return
+    row.open = false
+    this.openTools.delete(row.callId)
+    // Stop interrupts the helpers and their end can be reported before the abort reaches the turn's own
+    // handler: a helper that ends once Stop was requested was stopped, whatever it reports.
+    this.input.onTool?.(helperEnd(row.callId, how === 'done' && this.stopRequested() ? 'interrupted' : how))
+  }
+
+  /** Brings a helper's row in line with the tracker: closed when the helper stopped running, a new episode when it runs again. */
+  private syncHelper(threadId: string): void {
+    const row = this.helperRows.get(threadId)
+    const running = this.helpers.running().includes(threadId)
+    if (!row) {
+      if (running && this.awaitingWork.delete(threadId)) this.openHelper(threadId, {}, 'More work')
+      return
+    }
+    if (row.open && !running) this.endHelper(threadId, 'done')
+    else if (!row.open && running) {
+      const episode = row.episode + 1
+      const callId = `helper:${threadId}#${episode}`
+      Object.assign(row, { callId, episode, open: true })
+      this.openCall(helperStart(callId, threadId, { ...(row.agentType ? { agentType: row.agentType } : {}), summary: 'More work' }), { helper: threadId })
+    }
+  }
+
+  /**
+   * A notification of a native helper's own thread (after the tracker read it): the helper's row follows
+   * its turns, and its commands, patches and tool calls nest under the row. A muted run shows nothing.
+   */
+  helperNotification(threadId: string, notification: CodexNotification): void {
+    if (this.muted) return
+    const completed = notificationParams(notification, 'turn/completed')
+    if (completed && completed.turn.status !== 'completed') {
+      const how = completed.turn.status === 'interrupted' ? 'interrupted' : completed.turn.status === 'failed' ? 'failed' : undefined
+      if (how) this.endHelper(threadId, how)
+    }
+    this.syncHelper(threadId)
+    const parentCallId = this.helperRows.get(threadId)?.callId
+    const output = notificationParams(notification, 'item/commandExecution/outputDelta')
+    if (output) {
+      this.streamOutput(`${threadId}:${output.itemId}`, output.delta)
+      return
+    }
+    const started = notificationParams(notification, 'item/started')
+    const finished = notificationParams(notification, 'item/completed')
+    const item = (started ?? finished)?.item
+    if (!item) return
+    // Item ids are unique per thread only. A helper's own helpers are not tracked, so their spawns stay out.
+    const event = item.type === 'collabAgentToolCall' || item.type === 'subAgentActivity' ? undefined : codexToolEvent(item, started ? 'start' : 'complete')
+    if (!event) return
+    const callId = `${threadId}:${item.id}`
+    if (started) this.openCall({ ...event, callId, ...(parentCallId ? { parentCallId } : {}) })
+    else if (this.openTools.delete(callId)) this.input.onTool?.({ ...event, callId })
   }
 
   handle(notification: CodexNotification): void {
@@ -686,6 +813,9 @@ class TurnRun {
     const completed = notificationParams(notification, 'turn/completed')
     if (completed) {
       this.completedTurns.set(completed.turn.id, completed.turn)
+      // A stopped or failed turn leaves its plan open for `closeTools`, which ends it as stopped.
+      // Nor does a turn that completed after Stop was requested: Stop ends what it shows.
+      if (!this.muted && completed.turn.status === 'completed' && !this.stopRequested()) this.finishPlan(completed.turn.id)
       if (this.adoptedTurn === completed.turn.id) {
         this.adoptedTurn = undefined
         // Mousse's own turn may be running by now; it keeps its turn open, and this one's end is not its news.
@@ -722,27 +852,36 @@ class TurnRun {
       this.input.onThinking?.(this.thinking)
       return
     }
+    const output = notificationParams(notification, 'item/commandExecution/outputDelta')
+    if (output) {
+      this.streamOutput(output.itemId, output.delta)
+      return
+    }
+    const plan = notificationParams(notification, 'turn/plan/updated')
+    if (plan) {
+      this.planUpdated(plan.turnId, plan.plan)
+      return
+    }
     const itemStarted = notificationParams(notification, 'item/started')
     if (itemStarted) {
       const { item } = itemStarted
-      this.helpers.noteItem(item as never)
+      this.noteHelperItem(item)
       this.items.set(item.id, item)
       if (item.type === 'agentMessage' && !this.parts.has(item.id)) {
         this.order.push(item.id)
         this.parts.set(item.id, (item as { text?: string }).text ?? '')
       }
-      const event = toolEvent(item, 'start')
+      const event = codexToolEvent(item, 'start')
       if (event) {
-        this.openTools.set(item.id, event)
         this.input.onToolNotification?.({ phase: 'start', callId: event.callId, toolName: event.toolName })
-        this.input.onTool?.(event)
+        this.openCall(event)
       }
       return
     }
     const itemCompleted = notificationParams(notification, 'item/completed')
     if (itemCompleted) {
       const { item } = itemCompleted
-      this.helpers.noteItem(item as never)
+      this.noteHelperItem(item)
       this.items.set(item.id, item)
       if (item.type === 'agentMessage') {
         const text = (item as { text?: string }).text ?? ''
@@ -752,13 +891,9 @@ class TurnRun {
           this.input.onText(this.text)
         }
       }
-      const settled = toolEvent(item, 'complete')
+      const settled = codexToolEvent(item, 'complete')
       if (settled) this.input.onToolNotification?.({ phase: 'complete', callId: settled.callId, toolName: settled.toolName })
-      const open = this.openTools.get(item.id)
-      if (open) {
-        this.openTools.delete(item.id)
-        this.input.onTool?.({ ...open, ...toolEvent(item, 'complete'), phase: 'complete' })
-      }
+      if (settled && this.openTools.delete(item.id)) this.input.onTool?.(settled)
       if (item.type === 'fileChange' && (item as { status?: string }).status === 'completed') {
         const lines = editedLines(item)
         if (lines) this.input.onLineEdits?.(lines)
@@ -1463,6 +1598,7 @@ export class CodexProviderService {
     const tracker = owner?.helpers ?? [...this.orphans].find((helpers) => helpers.has(threadId))
     if (tracker) {
       tracker.handle(notification)
+      owner?.helperNotification(threadId, notification)
       // A stopped tracker is kept only while a helper still lacks its turn id, whichever path resolved it.
       if (!tracker.awaitingTurn()) this.orphans.delete(tracker)
       return
@@ -2107,7 +2243,7 @@ export class CodexProviderService {
       if (afterCap) await this.stopAbandoned(current, conn, signal)
       if (abandoned) current.addNote(abandoned)
       this.release(current)
-      current.closeTools()
+      current.closeTools('no_result')
       if (scope === this.scope) {
         this.settings.threads = { ...this.settings.threads, [input.threadId]: { codexThreadId, cwd: resolve(input.cwd), instanceId: input.instanceId ?? CODEX_INSTANCE_ID } }
         this.save()
@@ -2125,7 +2261,7 @@ export class CodexProviderService {
       // under it are interrupted until they are at rest (or the sweep's deadline), after the chat has
       // already been rejected. The run is released when that ends.
       if (run) void this.startSweep(run)
-      run?.closeTools()
+      run?.closeTools('stop')
       const stopped = signal.aborted && input.signal?.aborted
       // The thread exists on the server: the adapter may fingerprint it (`commitInterrupted`).
       if ((stopped || readUsageLimit(error)) && run && scope === this.scope) this.interruptedThreads.set(input.threadId, run.codexThreadId)

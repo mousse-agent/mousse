@@ -7,7 +7,7 @@ const directory = process.env.MOUSSE_TURN_WINDOW_DIRECTORY!
 app.setPath('userData', join(directory, 'electron-user-data'))
 app.disableHardwareAcceleration()
 app.on('window-all-closed', () => {})
-setTimeout(() => app.exit(1), 100000).unref()
+setTimeout(() => app.exit(1), 150000).unref()
 const delay = (ms: number) => new Promise(done => setTimeout(done, ms))
 
 async function main() {
@@ -157,7 +157,46 @@ async function main() {
     await execute('qa.frames(20)')
     const interrupted = { at: interruptedAt, later: await scrollTop(), top: await execute<number | null>('qa.promptTop(300)') }
 
-    // 7. Short threads render every row; the thread that grows past 40 turns switches over.
+    // 7. Find: a match in a turn that is not mounted is found in the message data and landed on, and Enter and Shift+Enter wrap.
+    const pressKey = async (name: string, options: { shift?: boolean } = {}) => {
+      const base = { key: name, code: name, windowsVirtualKeyCode: name === 'Enter' ? 13 : 27, modifiers: options.shift ? 8 : 0 }
+      await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...base })
+      await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', { type: 'keyUp', ...base })
+      await execute('qa.frames(2)')
+    }
+    // The count changes at once; the match is landed on a few frames later.
+    const landed = (count: string, turn: number) =>
+      `qa.findCount() === ${JSON.stringify(count)} && qa.isMounted(${turn}) && qa.activeMatch() !== null && qa.activeMatch().turn === "u-${turn}" && qa.activeInView()`
+    const findState = () => execute('({ count: qa.findCount(), match: qa.activeMatch(), turns: qa.mountedTurns(), last: qa.isMounted(999), endGap: qa.endGap() })')
+    await execute('qa.mount(1000)')
+    await delay(300)
+    await execute('qa.frames(4)')
+    const findOpened = await execute<boolean>('qa.openFind()')
+    const findFocusFrames = await waitFrames('qa.findFocused()', 30)
+    await execute('qa.setFindQuery("anchor-123-0")')
+    const findFarFrames = await waitFrames(landed('1 of 1', 123), 150)
+    const findFar = await findState()
+    // "sentinel-u99" is in turn 99 and turns 990-999: eleven matches, the nearest one below the reader first.
+    await execute('qa.setFindQuery("sentinel-u99")')
+    const findManyFrames = await waitFrames('/ of 11$/.test(qa.findCount() ?? "") && qa.activeInView()', 150)
+    const findMany = await findState()
+    for (let step = 0; step < 12; step += 1) {
+      if ((await execute<string>('qa.findCount()')) === '11 of 11') break
+      await pressKey('Enter')
+    }
+    await waitFrames(landed('11 of 11', 999), 150)
+    const findLast = await findState()
+    await pressKey('Enter')
+    const findWrapFrames = await waitFrames(landed('1 of 11', 99), 150)
+    const findWrapped = await findState()
+    await pressKey('Enter', { shift: true })
+    const findBackFrames = await waitFrames(landed('11 of 11', 999), 150)
+    const findBack = await findState()
+    await pressKey('Escape')
+    await execute('qa.frames(3)')
+    const findClosed = await execute('({ open: qa.findOpen(), highlights: qa.highlightCount() })')
+
+    // 8. Short threads render every row; the thread that grows past 40 turns switches over.
     await execute('qa.mount(40)')
     await execute('qa.frames(3)')
     const small = await execute('({ windowed: qa.windowed(), mounted: qa.mountedTurns(), spacers: qa.spacers() })')
@@ -170,6 +209,10 @@ async function main() {
     writeFileSync(join(directory, 'evidence.json'), JSON.stringify({
       t200, t1000, mounted200, opened, positions, hold, held, up, down, afterSweeps, followGaps, leftEnd, readingAfterStream,
       jumpFrames, jumped, turnFrames, afterTurn, markerFrames, marker, interrupted, small, grown,
+      find: {
+        opened: findOpened, focusFrames: findFocusFrames, farFrames: findFarFrames, far: findFar, manyFrames: findManyFrames, many: findMany,
+        last: findLast, wrapFrames: findWrapFrames, wrapped: findWrapped, backFrames: findBackFrames, back: findBack, closed: findClosed,
+      },
       pageErrors: await execute('qa.errors()').catch(() => []), rendererErrors,
     }))
   } finally {

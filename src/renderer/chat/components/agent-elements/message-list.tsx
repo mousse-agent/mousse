@@ -66,6 +66,8 @@ import {
   type RowItem,
 } from "./virtual/turn-window";
 import { useTurnWindow } from "./virtual/use-turn-window";
+import { FindInThreadBar } from "./find/FindInThreadBar";
+import { useThreadFind } from "./find/use-thread-find";
 import "../../../styles/prompt-visibility.css";
 
 export type MessageListProps = {
@@ -88,6 +90,12 @@ export type MessageListProps = {
    * the fullscreen lightbox preview. Set to false to disable previews.
    */
   enableImagePreview?: boolean;
+  /**
+   * When true, Ctrl/Cmd+F opens a find bar over the transcript that searches
+   * the whole thread, including turns that are not mounted. Off by default:
+   * only the list the app shows as its open thread turns it on.
+   */
+  enableFind?: boolean;
   slots?: {
     UserMessage?: React.ComponentType<{
       message: UIMessage;
@@ -259,7 +267,7 @@ function TurnWorkStatus({
         : formatWorkedFor(elapsedMs);
   if (!label) return null;
   return (
-    <div className="turn-work">
+    <div className="turn-work" data-find-ignore>
       <div className="turn-work-label">{label}</div>
       <div className="turn-work-rule" aria-hidden="true" />
     </div>
@@ -514,6 +522,7 @@ function MessageToolbar({
   const visible = isVisible || metadataOpen || reading;
   return (
     <div
+      data-find-ignore
       className={cn(
         "relative flex items-center gap-1 pt-1 text-sm text-an-foreground-muted/70 opacity-0 transition-opacity duration-100 pointer-events-none",
         heightClass,
@@ -812,6 +821,7 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
   return (
     <div
       data-testid="prompt-markers"
+      data-find-ignore
       className={cn("chat-prompt-rail", visible && "is-active", previewId && "is-previewing")}
       onMouseLeave={(event) => {
         const focused = document.activeElement;
@@ -864,6 +874,7 @@ export const MessageList = memo(function MessageList({
   suppressQuestionTool = false,
   initialScrollBehavior = "bottom",
   enableImagePreview = true,
+  enableFind = false,
   slots,
   classNames,
   toolRenderers,
@@ -1326,6 +1337,26 @@ export const MessageList = memo(function MessageList({
     onProgrammaticScroll: markProgrammaticScroll,
   });
   virtualizationRef.current = virtualization;
+  // Find reads the message data, so it covers the turns that are not mounted.
+  const findTurns = useMemo(
+    () =>
+      turns.map((turn, index) => ({
+        key: resolveTurnKey(turn, index, turnKeyAliasRef.current),
+        userMsg: turn.userMsg,
+        assistantMsgs: turn.assistantMsgs,
+      })),
+    [turns],
+  );
+  const find = useThreadFind({
+    enabled: enableFind && typeof window !== "undefined",
+    turns: findTurns,
+    isStreaming,
+    containerRef: chatContainerRef,
+    rowsRef,
+    virtualization,
+    onNavigate: () => dispatchFollow({ type: "navigate" }),
+    onProgrammaticScroll: markProgrammaticScroll,
+  });
   const rowItems: RowItem[] = windowed
     ? windowRowItems(turns.length, virtualization.window)
     : turns.map((_, index) => ({ kind: "row", index }));
@@ -1735,11 +1766,13 @@ export const MessageList = memo(function MessageList({
       scrollAnimRef={promptScrollAnimRef}
       layout={markerLayout}
     />
+    {find.barProps && <FindInThreadBar {...find.barProps} />}
     {showJumpButton && (
       <button
         type="button"
         onClick={handleJumpToLatest}
         aria-label="Go to latest"
+        data-find-ignore
         className={cn(
           "chat-jump absolute left-1/2 z-10 -translate-x-1/2",
           "inline-flex items-center justify-center",
@@ -1851,6 +1884,9 @@ function AssistantParts({
             <div
               key={`${msg.id}-text-${i}`}
               className="group/assistant-text text-[16px]"
+              data-find-text
+              data-message-id={msg.id}
+              data-part-index={i}
             >
               <Markdown
                 content={text}

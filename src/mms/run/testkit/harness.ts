@@ -10,7 +10,7 @@ import type { ProviderAdapter } from '../adapters/ProviderAdapter'
 import type { McpTurnBinding } from '../mcp/appTools/registry'
 
 /** The turn binding each real driver declares (`harness/drivers/*`), for test drivers of the same kind. */
-const TURN_BINDINGS: Partial<Record<ProviderAdapter['driver'], McpTurnBinding>> = { claude: 'per_call', codex: 'drained_turn', antigravity: 'drained_turn', acp: 'drained_turn' }
+const TURN_BINDINGS: Partial<Record<ProviderAdapter['driver'], McpTurnBinding>> = { claude: 'per_call', codex: 'drained_turn', antigravity: 'drained_turn', acp: 'drained_turn', pi: 'per_call' }
 
 /**
  * Test drivers over a plain `ProviderAdapter` (scripted, fake or replay adapters), so run-engine

@@ -191,7 +191,14 @@ export const UserMessage = memo(function UserMessage({
         </div>
       )}
       {text && (
-        <p className="leading-6 whitespace-pre-wrap wrap-break-word">{text}</p>
+        <p
+          className="leading-6 whitespace-pre-wrap wrap-break-word"
+          data-find-text
+          data-message-id={message.id}
+          data-part-index="0"
+        >
+          {text}
+        </p>
       )}
       </div>
     </div>

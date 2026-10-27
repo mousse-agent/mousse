@@ -21,6 +21,7 @@ export function AgentChat({
   lastTurnNotice,
   initialScrollBehavior,
   enableImagePreview,
+  enableFind,
   suggestions,
   emptyStatePosition = "default",
   emptySuggestionsPlacement = "input",
@@ -163,6 +164,7 @@ export function AgentChat({
           showCopyToolbar={showCopyToolbar}
           initialScrollBehavior={initialScrollBehavior}
           enableImagePreview={enableImagePreview}
+          enableFind={enableFind}
           suppressQuestionTool={Boolean(pendingQuestion)}
         />
       )}

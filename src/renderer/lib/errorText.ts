@@ -3,7 +3,10 @@ import { PROVIDER_INSTANCE_ERROR_CODES } from '../../shared/providerInstances'
 
 /** The message of a thrown value, whatever its type. */
 export function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
+  if (error instanceof Error) return error.message
+  // Errors that crossed the preload bridge as plain `{ code, message }` objects.
+  if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string') return error.message
+  return String(error)
 }
 
 /**

@@ -6,7 +6,7 @@ import { claudeCodeDriver, claudeSignInCommand } from '../../src/mms/harness/dri
 import { spawnCursorHost } from '../../src/mms/harness/cursor/hostClient'
 import { cursorDriver } from '../../src/mms/harness/drivers/cursor'
 import { grokDriver } from '../../src/mms/harness/drivers/grok'
-import { piLegacyDriver } from '../../src/mms/harness/drivers/piLegacy'
+import { piDriver } from '../../src/mms/harness/drivers/pi'
 import { createHarnessGateway, type TurnSpec } from '../../src/mms/harness/gateway'
 import { instanceStateDir } from '../../src/mms/harness/instances'
 import { instanceEnv } from '../../src/mms/harness/env'
@@ -79,7 +79,7 @@ describe('two Claude Code instances', () => {
       questions,
       shellPath: async () => ({ entries: [], source: 'failed' }),
       drivers: [
-        piLegacyDriver({ client: () => ({ chat: async () => { throw new Error('unused') } }) }),
+        piDriver({ client: () => ({ chat: async () => { throw new Error('unused') } }) }),
         claudeCodeDriver({
           builtIn: () => builtIn,
           integrations: (env) => {

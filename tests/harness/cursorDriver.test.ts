@@ -13,7 +13,7 @@ import { CursorHostCallError, CursorHostClient } from '../../src/mms/harness/cur
 import { CursorSessions } from '../../src/mms/harness/cursor/session'
 import { cursorDriver } from '../../src/mms/harness/drivers/cursor'
 import { isCursorAuthFailure, redactCursorText } from '../../src/mms/harness/hosts/cursorProtocol'
-import { piLegacyDriver } from '../../src/mms/harness/drivers/piLegacy'
+import { piDriver } from '../../src/mms/harness/drivers/pi'
 import type { Harness, TurnSpec } from '../../src/mms/harness/gateway'
 import { instanceStateDir } from '../../src/mms/harness/instances'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
@@ -146,7 +146,7 @@ describe('moving pi:cursor to Cursor', () => {
     const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
     const harness = testHarness({
       drivers: [
-        piLegacyDriver({
+        piDriver({
           client: () => ({ chat: async () => { throw new Error('unused') } }),
           credentials: () => ({ has: () => true, storedApiKey: (id: string) => (id === 'cursor' ? 'pi-cursor-key' : undefined), getConfiguredProviders: () => [], getConfiguredLlmProviders: () => [] })
         }),

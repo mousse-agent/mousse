@@ -175,7 +175,7 @@ export function TurnEditSummary({ messages, turnId }: { messages: UIMessage[]; t
   const countLabel = `${summary.files.length} changed file${summary.files.length === 1 ? "" : "s"}`;
 
   return (
-    <section className="turn-edits" aria-label={countLabel}>
+    <section className="turn-edits" aria-label={countLabel} data-find-ignore>
       <div className="turn-edits-head">
         <button
           type="button"
