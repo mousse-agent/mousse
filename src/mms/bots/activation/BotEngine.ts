@@ -695,7 +695,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         const status = this.store.activation(row.id)?.status
         if (status === 'paused') return { kind: 'paused' }
         if (status === 'waiting_grant') return { kind: 'waiting' }
-        if (controller.signal.aborted || (status !== 'running' && status !== 'waiting_grant')) return { kind: 'ended' }
+        if (controller.signal.aborted || status !== 'running') return { kind: 'ended' }
         return undefined
       },
       counters: input.counters,
