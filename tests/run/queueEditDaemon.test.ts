@@ -213,10 +213,10 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       expect(verdict(seen.promote)).toBe('ok')
       expect(verdict(seen.removeOwn)).toBe('ok')
       const actions = w.events(w.parent.id, 'agent.action').map((event) => (event.payload as { action: string }).action)
-      // Changes to a message the agent wrote itself leave no audit row; a change to a person's message always does.
-      // With manage the agent rewrote the person's message first, so it is the agent's own from then on.
-      if (level === 'manage') expect(actions).toEqual(['edited_queued_message'])
-      else expect(actions).toEqual(['reordered_queue', 'promoted_queued_message'])
+      // Changes to a message the agent wrote itself leave no audit row (a removal always does, with the removed text); a change
+      // to a person's message always does. With manage the agent rewrote the person's message first, so it is the agent's own then.
+      if (level === 'manage') expect(actions).toEqual(['edited_queued_message', 'removed_queued_message'])
+      else expect(actions).toEqual(['reordered_queue', 'promoted_queued_message', 'removed_queued_message'])
       // Without manage the person's text is untouched (it was promoted into the turn as it was typed).
       const edited = parse(seen.promote) as { outcome: string }
       expect(edited.outcome).toBe('promoted')
@@ -437,8 +437,11 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
 
       // The retries, with other arguments, return what the commands did; neither changes the queue again.
       const host2 = d2.orch.mcpToolHost()
-      expect(command(host2, 'queue_edit:caller:1', 'something else entirely', a.id)).toMatchObject({ outcome: 'edited', itemId: a.id, replayed: true, revision: first.revision })
-      expect(command(host2, 'queue_edit:caller:2', 'something else entirely', b.id)).toMatchObject({ outcome: 'edited', itemId: b.id, replayed: true })
+      expect(command(host2, 'queue_edit:caller:1', 'a, rewritten', a.id)).toMatchObject({ outcome: 'edited', itemId: a.id, replayed: true, revision: first.revision })
+      expect(command(host2, 'queue_edit:caller:2', 'b, rewritten', b.id)).toMatchObject({ outcome: 'edited', itemId: b.id, replayed: true })
+      // The same key with other fields is a mistake, not a retry: nothing is replayed and nothing changes.
+      expect(() => command(host2, 'queue_edit:caller:1', 'something else entirely', a.id)).toThrow(expect.objectContaining({ code: 'request_conflict' }))
+      expect(() => command(host2, 'queue_edit:caller:1', 'a, rewritten', b.id)).toThrow(expect.objectContaining({ code: 'request_conflict' }))
       expect(readDurableQueue(d2.store, w.other.id).map((item) => item.content)).toEqual([
         agentMessageText(w.parent.id, 'Parent', 'a, rewritten'),
         agentMessageText(w.parent.id, 'Parent', 'b, rewritten')
@@ -463,8 +466,9 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       expect(item[0]).toMatchObject({ source: 'mcp', permissionMode: 'ask', origin: { kind: 'agent', threadId: w.parent.id } })
       expect(item[0].content).toBe(agentMessageText(w.parent.id, 'Parent', 'remember this'))
       // A retry (a second daemon is the same caller) returns that very item, however the arguments are retyped.
-      const again = d2.orch.mcpToolHost().queueCommand!(w.other.id, { op: 'enqueue', content: 'retyped', mode: 'agent', expectedRevision: 'whatever' }, { clientRequestId: 'queue_enqueue:caller:1', actor, level: 'manage' })
+      const again = d2.orch.mcpToolHost().queueCommand!(w.other.id, { op: 'enqueue', content: 'remember this', mode: 'agent', expectedRevision: 'whatever' }, { clientRequestId: 'queue_enqueue:caller:1', actor, level: 'manage' })
       expect(again).toMatchObject({ replayed: true, outcome: 'enqueued', item: { id: item[0].id } })
+      expect(() => d2.orch.mcpToolHost().queueCommand!(w.other.id, { op: 'enqueue', content: 'retyped', mode: 'agent', expectedRevision: 'whatever' }, { clientRequestId: 'queue_enqueue:caller:1', actor, level: 'manage' })).toThrow(expect.objectContaining({ code: 'request_conflict' }))
       expect(readDurableQueue(d2.store, w.other.id)).toHaveLength(1)
     })
   })
@@ -483,7 +487,7 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       await waitFor(() => w.turnsOf(threadId).length === 1, 'the held turn')
     }
 
-    it('a queued agent message keeps its sender and mode limit through a person\'s edit and a reorder; another agent\'s edit makes it that agent\'s, never under a looser mode; it runs under the limit it carries', async () => {
+    it('a queued agent message keeps its sender and mode limit through a reorder; a person\'s edit makes it the person\'s, another agent\'s edit makes it that agent\'s, never under a looser mode; it runs under the limit it carries', async () => {
       const release = deferred()
       const seen: Record<string, Response> = {}
       const ids: Record<string, string> = {}
@@ -518,10 +522,12 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       expect(queued).toMatchObject({ source: 'mcp', permissionMode: 'ask', origin: { kind: 'agent', threadId: askCaller.id, hops: 1 } })
       expect(queued.content).toBe(agentMessageText(askCaller.id, 'Ask caller', 'run the migration'))
 
-      // A person's edit changes the words only: whose message it is and what it may do stay.
-      const edited = w.d.orch.editQueuedItem(target.id, ids.item, { content: `${queued.content}\n\n(and keep a backup)` })
-      expect(edited).toMatchObject({ source: 'mcp', permissionMode: 'ask', origin: queued.origin })
-      expect(w.queue(target.id).find((item) => item.id === ids.item)).toMatchObject({ permissionMode: 'ask', origin: queued.origin })
+      // A person's new words make it the person's message: no agent origin (so no hop, no hold, no clearing by a Stop), but the
+      // limit it carried stays.
+      const edited = w.d.orch.editQueuedItem(target.id, ids.item, { content: 'run the migration, and keep a backup' })
+      expect(edited).toMatchObject({ content: 'run the migration, and keep a backup', permissionMode: 'ask' })
+      expect(edited.origin).toBeUndefined()
+      expect(w.queue(target.id).find((item) => item.id === ids.item)?.origin).toBeUndefined()
 
       await w.d.orch.send(GO, false, { threadId: fullCaller.id, clientRequestId: 'go-full' })
       expect(verdict(seen.reorder)).toBe('ok')
@@ -827,6 +833,349 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       expect(seen.during).toMatchObject({ id: item.id, state: 'pending', intent: 'normal', permissionMode: 'ask', origin: { kind: 'agent', threadId: w.parent.id } })
       expect((seen.during as QueuedMessage).steerRunId).toBeUndefined()
       expect(w.turnsOf(w.other.id)[1]).toMatchObject({ prompt: 'checked against run A', permissionMode: 'ask', fromAgent: true })
+    })
+  })
+
+  describe('what an agent queues on its own thread is the agent\'s message', () => {
+    const PAUSE = { reason: 'usage_limit' as const, until: '2099-01-01T00:00:00.000Z', estimated: true, count: 1, autoResume: false }
+    type World = ReturnType<typeof world>
+    const actorOf = (w: World, runId: string) => ({ kind: 'agent' as const, threadId: w.other.id, runId, toolCallId: 'mcp:t' })
+    const drain = (w: World) => (w.d.orch as unknown as { scheduleQueueDrain(session: unknown): void }).scheduleQueueDrain(w.d.orch.getOrCreateSession(w.other.id))
+    /** A run of `other` that an agent's message started, `hops` messages deep. */
+    const agentRun = (w: World, hops: number) => w.d.engine.store.createRun({ threadId: w.other.id, source: 'mcp', outcome: { sentByAgent: true, agentHops: hops } })
+    const pausedRun = async (w: World) => {
+      const sent = await w.d.engine.dispatch({ kind: 'send', threadId: w.other.id, clientRequestId: 'paused-run', source: 'gui' })
+      if (sent.status !== 'accepted') throw new Error('send rejected')
+      w.d.engine.markStarting(sent.runId)
+      w.d.engine.markRunning(sent.runId)
+      w.d.engine.pauseRun({ runId: sent.runId, pause: PAUSE })
+      return sent.runId
+    }
+
+    it('carries the writing run\'s hop count and mode limit, counts in the cap of three, waits behind a usage pause, and runs as an agent\'s run; an agent at its hop limit cannot start a fresh chain through its own queue', async () => {
+      const w = world(async () => 'ok')
+      await w.attach()
+      const writer = agentRun(w, 2)
+      const host = w.d.orch.mcpToolHost()
+      const enqueue = (content: string, key: string, runId = writer.runId) => host.queueCommand!(w.other.id, { op: 'enqueue', content, mode: 'agent' }, { clientRequestId: key, actor: actorOf(w, runId), level: 'lineage' })
+      const paused = await pausedRun(w)
+
+      const first = enqueue('note to myself', 'k1')
+      expect(first).toMatchObject({ outcome: 'enqueued', item: { content: 'note to myself', source: 'mcp', permissionMode: 'ask', origin: { kind: 'agent', threadId: w.other.id, runId: writer.runId, hops: 3 } } })
+      // A run that is the third agent message in a row cannot queue another, on its own thread too.
+      const third = agentRun(w, 3)
+      expect(() => enqueue('one hop too many', 'k5', third.runId)).toThrow(expect.objectContaining({ code: 'agent_hops_exceeded' }))
+      enqueue('second note', 'k2')
+      enqueue('third note', 'k3')
+      // The cap of three queued agent messages counts them, whoever's thread they are on.
+      expect(() => enqueue('fourth note', 'k4')).toThrow(expect.objectContaining({ code: 'agent_queue_full' }))
+      expect(w.queue(w.other.id).map((item) => item.content)).toEqual(['note to myself', 'second note', 'third note'])
+
+      // Behind a usage pause only a person's message goes on: the notes wait, and the pause stays.
+      drain(w)
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      expect(w.turnsOf(w.other.id)).toEqual([])
+      expect(w.d.engine.getRun(paused)).toMatchObject({ status: 'paused' })
+      expect(w.queue(w.other.id)).toHaveLength(3)
+
+      w.d.engine.endPause(paused, 'cancel')
+      drain(w)
+      await waitFor(() => w.turnsOf(w.other.id).length === 3, 'the three notes to run', 30_000)
+      // Each runs as an agent's message with the limit it carries, and its run counts the hops that led to it.
+      expect(w.turnsOf(w.other.id)[0]).toMatchObject({ prompt: 'note to myself', fromAgent: true, permissionMode: 'ask' })
+      const noteRun = w.d.engine.listRuns(w.other.id).find((run) => run.outcome?.sentByAgent && run.outcome.agentHops === 3 && run.status !== 'queued' && run.runId !== third.runId && run.runId !== writer.runId)!
+      expect(noteRun).toBeDefined()
+      // The chain does not restart: what the note's turn sends is the fourth agent message in a row, and is refused.
+      expect(() => host.queueCommand!(w.parent.id, { op: 'enqueue', content: 'start over', mode: 'agent', expectedRevision: host.queueSnapshot!(w.parent.id).revision }, { clientRequestId: 'k6', actor: actorOf(w, noteRun.runId), level: 'manage' }))
+        .toThrow(expect.objectContaining({ code: 'agent_hops_exceeded' }))
+    })
+
+    it('is held while the user has a question or approval waiting, and a person\'s Stop clears it, leaving what a person queued', async () => {
+      const release = deferred()
+      const w = world(async (input, _mcp, _d, adapter) => {
+        if (input.prompt === 'hold') {
+          await adapter.hold(input, release.promise)
+          return 'held'
+        }
+        return 'ok'
+      })
+      await w.attach()
+      const host = w.d.orch.mcpToolHost()
+      const writer = agentRun(w, 0)
+      const enqueue = (content: string, key: string) => host.queueCommand!(w.other.id, { op: 'enqueue', content, mode: 'agent' }, { clientRequestId: key, actor: actorOf(w, writer.runId), level: 'lineage' })
+
+      // A question waits on the thread: the note stays queued, at startup too.
+      const questions = (w.d.orch as unknown as { questions: { requestAnswers(questions: unknown, threadId: string, options: unknown): Promise<unknown>; listPendingForThread(threadId: string): Array<{ requestId: string }>; submitAnswers(requestId: string, answers: unknown): boolean } }).questions
+      const asked = questions.requestAnswers([{ id: 'q', prompt: 'Which?', options: [{ id: 'a', label: 'A' }] }], w.other.id, {})
+      enqueue('note while asked', 'k1')
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      expect(w.turnsOf(w.other.id)).toEqual([])
+      expect(w.queue(w.other.id).map((item) => item.state)).toEqual(['pending'])
+      questions.submitAnswers(questions.listPendingForThread(w.other.id)[0].requestId, { q: 'a' })
+      await asked
+      drain(w)
+      await waitFor(() => w.turnsOf(w.other.id).length === 1, 'the note to run once the answer is in', 30_000)
+      await waitFor(() => w.queue(w.other.id).length === 0, 'the queue to empty')
+
+      // A running turn, a note and a person's message queued behind it; the person presses Stop.
+      await w.d.orch.send('hold', false, { threadId: w.other.id, clientRequestId: 'hold', awaitMode: 'ack' })
+      await waitFor(() => w.turnsOf(w.other.id).length === 2, 'the held turn')
+      enqueue('a note to clear', 'k2')
+      const person = w.typed(w.other.id, 'a message I typed')
+      expect(w.queue(w.other.id).map((item) => item.origin?.kind)).toEqual(['agent', undefined])
+      await w.d.orch.stopThread(w.other.id, 'user')
+      await waitFor(() => w.queue(w.other.id).every((item) => item.origin === undefined), 'the note to be cleared')
+      expect(w.queue(w.other.id).map((item) => item.id)).toEqual([person.id])
+      release.resolve()
+    })
+
+    it('an own note edited by its writer carries the editing run\'s hop count too, and a message with no agent origin is never taken for the agent\'s own whatever its source says', async () => {
+      const w = world(async () => 'ok')
+      await w.attach()
+      const host = w.d.orch.mcpToolHost()
+      const paused = await pausedRun(w)
+      const early = agentRun(w, 0)
+      const late = agentRun(w, 2)
+      const note = host.queueCommand!(w.other.id, { op: 'enqueue', content: 'first words', mode: 'agent' }, { clientRequestId: 'e1', actor: actorOf(w, early.runId), level: 'lineage' })
+      expect(w.queue(w.other.id)[0].origin).toMatchObject({ hops: 1 })
+      host.queueCommand!(w.other.id, { op: 'edit', itemId: note.itemId, content: 'better words', expectedRevision: host.queueSnapshot!(w.other.id).revision }, { clientRequestId: 'e2', actor: actorOf(w, late.runId), level: 'lineage' })
+      expect(w.queue(w.other.id)[0]).toMatchObject({ content: 'better words', origin: { kind: 'agent', threadId: w.other.id, runId: late.runId, hops: 3 } })
+      // A message a person typed whose source says `mcp` (only a label) is still a person's: no edit below manage.
+      const lookalike = w.d.orch.enqueueForThread(w.other.id, { content: 'typed, labelled mcp' }, { source: 'mcp' })
+      expect(() => host.queueCommand!(w.other.id, { op: 'edit', itemId: lookalike.id, content: 'mine', expectedRevision: host.queueSnapshot!(w.other.id).revision }, { clientRequestId: 'e3', actor: actorOf(w, early.runId), level: 'lineage' }))
+        .toThrow(expect.objectContaining({ name: 'QueueAccessError' }))
+      expect(() => host.queueCommand!(w.other.id, { op: 'remove', itemId: lookalike.id, expectedRevision: host.queueSnapshot!(w.other.id).revision }, { clientRequestId: 'e4', actor: actorOf(w, early.runId), level: 'lineage' }))
+        .toThrow(expect.objectContaining({ name: 'QueueAccessError' }))
+      w.d.engine.endPause(paused, 'cancel')
+    })
+  })
+
+  describe('an agent cannot replace a person\'s queue by removing, reordering or promoting into a question', () => {
+    it('removing a message the agent did not write needs manage, on its own thread too; every removal records the text it took out, and a lineage reader never sees it', async () => {
+      const seen: Record<string, Response> = {}
+      const ids: Record<string, string> = {}
+      const run = async (level: AgentAccessLevel) => {
+        const w = world(async (input, mcp) => {
+          if (input.threadId !== w.parent.id || input.prompt !== GO) return 'ok'
+          const rev = async () => (await list(mcp!)).revision
+          seen.own = await call(mcp!, 'queue_enqueue', { content: 'my own note' })
+          ids.own = (parse(seen.own) as { item: { id: string } }).item.id
+          ids.person = w.typed(w.parent.id, 'stop doing X, and do not push').id
+          seen.person = await call(mcp!, 'queue_remove', { itemId: ids.person, expectedRevision: await rev() })
+          seen.removeOwn = await call(mcp!, 'queue_remove', { itemId: ids.own, expectedRevision: await rev(), clientRequestId: 'rm-1' })
+          ids.left = w.queue(w.parent.id).map((item) => item.id).join(',')
+          return 'ok'
+        }, level)
+        await w.attach()
+        await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
+        return w
+      }
+      const lineage = await run('lineage')
+      expect(seen.person.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
+      expect(seen.person.error!.message).toMatch(/Removing a message a person queued needs the "manage" agent access level/)
+      // The person's message is untouched. The agent's own note went, and the removal is recorded with its text.
+      expect(ids.left).toBe(ids.person)
+      const removal = lineage.events(lineage.parent.id, 'agent.action').filter((event) => (event.payload as { action: string }).action === 'removed_queued_message')
+      expect(removal).toEqual([expect.objectContaining({ payload: expect.objectContaining({ itemId: ids.own, removedText: 'my own note', wasOrigin: 'agent' }) })])
+      expect(parse(seen.removeOwn)).toMatchObject({ outcome: 'removed', removedText: 'my own note' })
+      expect(lineage.messages(lineage.parent.id).some((message) => message.role === 'system' && message.content.includes('removed queued message') && message.content.includes('my own note'))).toBe(true)
+
+      const manage = await run('manage')
+      expect(verdict(seen.person)).toBe('ok')
+      expect(ids.left).toBe('')
+      const taken = manage.events(manage.parent.id, 'agent.action').filter((event) => (event.payload as { action: string }).action === 'removed_queued_message')
+      // The person can read what was removed, from the event and the transcript, and put it back.
+      expect(taken[0].payload).toMatchObject({ itemId: ids.person, removedText: 'stop doing X, and do not push', wasOrigin: 'gui' })
+      expect(manage.messages(manage.parent.id).some((message) => message.role === 'system' && message.content.includes('stop doing X, and do not push'))).toBe(true)
+    })
+
+    it('putting anything ahead of a message the agent did not write needs manage; moving its own messages behind others\' or among themselves is free', async () => {
+      const seen: Record<string, Response> = {}
+      const ids: Record<string, string> = {}
+      const w = world(async (input, mcp) => {
+        if (input.threadId !== w.parent.id || input.prompt !== GO) return 'ok'
+        const rev = async () => (await list(mcp!)).revision
+        ids.a = (parse(await call(mcp!, 'queue_enqueue', { content: 'note a' })) as { item: { id: string } }).item.id
+        ids.person = w.typed(w.parent.id, 'typed by the user').id
+        ids.b = (parse(await call(mcp!, 'queue_enqueue', { content: 'note b' })) as { item: { id: string } }).item.id
+        // [a, person, b]: b ahead of the person's message would postpone it; a behind it, or a and b swapped, would not.
+        seen.ahead = await call(mcp!, 'queue_reorder', { orderedIds: [ids.a, ids.b, ids.person], expectedRevision: await rev() })
+        seen.personFirst = await call(mcp!, 'queue_reorder', { orderedIds: [ids.person, ids.a, ids.b], expectedRevision: await rev() })
+        seen.swap = await call(mcp!, 'queue_reorder', { orderedIds: [ids.person, ids.b, ids.a], expectedRevision: await rev() })
+        // Now [person, b, a]: moving a to the front puts it ahead of the person's message.
+        seen.front = await call(mcp!, 'queue_reorder', { orderedIds: [ids.a, ids.person, ids.b], expectedRevision: await rev() })
+        return 'ok'
+      }, 'lineage')
+      await w.attach()
+      await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
+      expect(seen.ahead.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
+      expect(seen.ahead.error!.message).toMatch(/ahead of one a person or another agent queued needs the "manage"/)
+      expect(verdict(seen.personFirst)).toBe('ok')
+      expect(verdict(seen.swap)).toBe('ok')
+      expect(verdict(seen.front)).toBe('mousse_scope_denied')
+      expect(w.queue(w.parent.id).map((item) => item.id)).toEqual([ids.person, ids.b, ids.a])
+
+      // With manage the same reorder goes through, and is recorded because it moves past a person's message.
+      const m = world(async (input, mcp) => {
+        if (input.threadId !== m.parent.id || input.prompt !== GO) return 'ok'
+        const first = (parse(await call(mcp!, 'queue_enqueue', { content: 'note a' })) as { item: { id: string } }).item.id
+        const person = m.typed(m.parent.id, 'typed by the user').id
+        seen.managed = await call(mcp!, 'queue_reorder', { orderedIds: [person, first].reverse(), expectedRevision: (await list(mcp!)).revision })
+        return 'ok'
+      }, 'manage')
+      await m.attach()
+      await m.d.orch.send(GO, false, { threadId: m.parent.id, clientRequestId: 'go' })
+      expect(verdict(seen.managed)).toBe('ok')
+      expect(m.events(m.parent.id, 'agent.action').map((event) => (event.payload as { action: string }).action)).toEqual(['reordered_queue'])
+    })
+
+    it('a promotion refuses while the user has a question or approval waiting; a steer an agent caused is not handed to the provider while one waits, and goes once it is answered', async () => {
+      const release = deferred()
+      const seen: Record<string, Response> = {}
+      const ids: Record<string, string> = {}
+      const w = world(async (input, mcp, d, adapter) => {
+        if (input.prompt === 'hold') {
+          await adapter.hold(input, release.promise)
+          return 'held'
+        }
+        if (input.threadId === w.parent.id && input.prompt === GO)
+          seen.promote = await call(mcp!, 'queue_promote_to_steer', { threadId: w.other.id, itemId: ids.typed, expectedRevision: (await list(mcp!, w.other.id)).revision, expectedRunId: d.engine.getActiveRun(w.other.id)!.runId })
+        return 'ok'
+      })
+      await w.attach()
+      await w.d.orch.send('hold', false, { threadId: w.other.id, clientRequestId: 'hold', awaitMode: 'ack' })
+      await waitFor(() => w.turnsOf(w.other.id).length === 1, 'the held turn')
+      ids.typed = w.typed(w.other.id, 'typed by the user').id
+      const questions = (w.d.orch as unknown as { questions: { requestAnswers(questions: unknown, threadId: string, options: unknown): Promise<unknown>; listPendingForThread(threadId: string): Array<{ requestId: string }>; submitAnswers(requestId: string, answers: unknown): boolean } }).questions
+      const asked = questions.requestAnswers([{ id: 'q', prompt: 'Allow it?', options: [{ id: 'a', label: 'Allow' }] }], w.other.id, {})
+      await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
+      expect(seen.promote.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'questions_pending' } })
+      expect(w.queue(w.other.id)).toEqual([expect.objectContaining({ id: ids.typed, state: 'pending', intent: 'normal' })])
+      expect(questions.listPendingForThread(w.other.id)).toHaveLength(1)
+
+      // The question was raised after the promotion: the steer waits in the turn instead of reaching a provider that would settle it.
+      const session = w.d.orch.getOrCreateSession(w.other.id)
+      const turn = session.activeTurn!
+      turn.pendingSteer.push({ text: 'a promoted message', itemId: 'item-x', byAgent: true }, { text: 'from an agent', origin: { kind: 'agent', threadId: w.parent.id, runId: 'run:p', hops: 1 }, permissionMode: 'ask' }, { text: 'what I typed' })
+      const drainSteer = (w.d.orch as unknown as { drainSteerForSession(session: unknown, turn: unknown): { entries: Array<{ text: string }> } | undefined }).drainSteerForSession
+      expect(drainSteer.call(w.d.orch, session, turn)?.entries.map((entry) => entry.text)).toEqual(['what I typed'])
+      expect(turn.pendingSteer.map((entry) => entry.text)).toEqual(['a promoted message', 'from an agent'])
+      expect(questions.listPendingForThread(w.other.id)).toHaveLength(1)
+      // Answered: nothing is lost, and the held steers are taken in order.
+      questions.submitAnswers(questions.listPendingForThread(w.other.id)[0].requestId, { q: 'a' })
+      await asked
+      expect(drainSteer.call(w.d.orch, session, turn)?.entries.map((entry) => entry.text)).toEqual(['a promoted message', 'from an agent'])
+      release.resolve()
+    })
+  })
+
+  describe('a promoted message put back, a Plan thread, and the journal\'s upkeep', () => {
+    it('a promoted message the turn never read comes back with its own chat mode and its images, also when it is queued again from its entry', async () => {
+      const release = deferred()
+      const seen: Record<string, Response> = {}
+      const ids: Record<string, string> = {}
+      const w = world(async (input, mcp, d, adapter) => {
+        if (input.prompt === 'hold') {
+          await adapter.hold(input, release.promise)
+          return 'held'
+        }
+        if (input.threadId === w.parent.id && input.prompt === GO)
+          seen.promote = await call(mcp!, 'queue_promote_to_steer', { threadId: w.other.id, itemId: ids.item, expectedRevision: (await list(mcp!, w.other.id)).revision, expectedRunId: d.engine.getActiveRun(w.other.id)!.runId })
+        return 'ok'
+      })
+      await w.attach()
+      await w.d.orch.send('hold', false, { threadId: w.other.id, clientRequestId: 'hold', awaitMode: 'ack' })
+      await waitFor(() => w.turnsOf(w.other.id).length === 1, 'the held turn')
+      const image = { data: 'aGk=', mimeType: 'image/png' }
+      ids.item = w.d.orch.enqueueForThread(w.other.id, { content: 'only plan the cleanup', mode: 'plan', images: [image] }, { source: 'gui' }).id
+      await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
+      expect(verdict(seen.promote)).toBe('ok')
+      const session = w.d.orch.getOrCreateSession(w.other.id)
+      // The entry carries what the message was, for the case the item is gone when the turn ends.
+      expect(session.activeTurn!.pendingSteer).toEqual([expect.objectContaining({ itemId: ids.item, mode: 'plan', images: [image], byAgent: true })])
+      const entry = session.activeTurn!.pendingSteer[0]
+      const settle = (w.d.orch as unknown as { settleUnreadItems(session: unknown, entries: unknown[], mode: string): void }).settleUnreadItems
+      // An acknowledgement dropped the item while its drain was out: the entry queues it again.
+      w.d.orch.removeQueuedItem(w.other.id, ids.item)
+      settle.call(w.d.orch, session, [entry], 'agent')
+      expect(w.queue(w.other.id)).toEqual([expect.objectContaining({ content: 'only plan the cleanup', mode: 'plan', images: [image], state: 'pending' })])
+      release.resolve()
+    })
+
+    it('an agent that rewrites a message on a thread a person keeps in Plan leaves it a plan message', async () => {
+      const release = deferred()
+      const seen: Record<string, Response> = {}
+      const ids: Record<string, string> = {}
+      const w = world(async (input, mcp, _d, adapter) => {
+        if (input.prompt === 'hold') {
+          await adapter.hold(input, release.promise)
+          return 'held'
+        }
+        if (input.threadId === w.parent.id && input.prompt === GO)
+          seen.edit = await call(mcp!, 'queue_edit', { threadId: w.other.id, itemId: ids.item, content: 'now implement it', expectedRevision: (await list(mcp!, w.other.id)).revision })
+        return 'ok'
+      })
+      await w.attach()
+      // The person keeps the thread in Plan, and queues a message in agent mode while a turn runs.
+      await w.d.orch.send({ content: 'hold', mode: 'plan' }, false, { threadId: w.other.id, clientRequestId: 'hold', awaitMode: 'ack' })
+      await waitFor(() => w.turnsOf(w.other.id).length === 1, 'the held turn')
+      ids.item = w.d.orch.enqueueForThread(w.other.id, { content: 'typed in agent mode', mode: 'agent' }, { source: 'gui' }).id
+      await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
+      expect(verdict(seen.edit)).toBe('ok')
+      expect(w.queue(w.other.id)[0]).toMatchObject({ mode: 'plan', origin: { kind: 'agent', threadId: w.parent.id } })
+      release.resolve()
+    })
+
+    it('a request id reused with other fields is refused, not replayed, through the tool', async () => {
+      const release = deferred()
+      const seen: Record<string, Response> = {}
+      const ids: Record<string, string> = {}
+      const w = world(async (input, mcp, _d, adapter) => {
+        if (input.prompt === 'hold') {
+          await adapter.hold(input, release.promise)
+          return 'held'
+        }
+        if (input.threadId !== w.parent.id || input.prompt !== GO) return 'ok'
+        const rev = async () => (await list(mcp!, w.other.id)).revision
+        seen.first = await call(mcp!, 'queue_remove', { threadId: w.other.id, itemId: ids.x, expectedRevision: await rev(), clientRequestId: 'rm-1' })
+        // Another message, the same request id: the agent must not believe it is gone.
+        seen.other = await call(mcp!, 'queue_remove', { threadId: w.other.id, itemId: ids.y, expectedRevision: await rev(), clientRequestId: 'rm-1' })
+        seen.retry = await call(mcp!, 'queue_remove', { threadId: w.other.id, itemId: ids.x, expectedRevision: await rev(), clientRequestId: 'rm-1' })
+        return 'ok'
+      })
+      await w.attach()
+      await w.d.orch.send('hold', false, { threadId: w.other.id, clientRequestId: 'hold', awaitMode: 'ack' })
+      await waitFor(() => w.turnsOf(w.other.id).length === 1, 'the held turn')
+      ids.x = w.typed(w.other.id, 'x').id
+      ids.y = w.typed(w.other.id, 'y').id
+      await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
+      expect(verdict(seen.first)).toBe('ok')
+      expect(seen.other.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'request_conflict' } })
+      expect(parse(seen.retry)).toMatchObject({ itemId: ids.x, replayed: true })
+      expect(w.queue(w.other.id).map((item) => item.id)).toEqual([ids.y])
+      release.resolve()
+    })
+
+    it('the bot wall holds in the queue command itself, for every operation, also on the bot\'s own thread', async () => {
+      const w = world(async () => 'ok')
+      await w.attach()
+      const host = w.d.orch.mcpToolHost()
+      const typed = w.typed(w.other.id, 'a message')
+      const second = w.typed(w.other.id, 'another')
+      ;(w.d.orch as unknown as { botDispatcher: { ownerOf(threadId: string): string | undefined } }).botDispatcher = { ownerOf: (id) => (id === w.other.id ? 'bot-1' : undefined) }
+      const actor = { kind: 'agent' as const, threadId: w.parent.id, runId: 'run:p', toolCallId: 'mcp:t' }
+      const own = { kind: 'agent' as const, threadId: w.other.id, runId: 'run:b', toolCallId: 'mcp:t' }
+      const rev = () => host.queueSnapshot!(w.other.id).revision
+      for (const [who, level] of [[actor, 'manage'], [own, 'lineage']] as const) {
+        for (const command of [
+          { op: 'remove', itemId: typed.id, expectedRevision: rev() },
+          { op: 'reorder', orderedIds: [second.id, typed.id], expectedRevision: rev() },
+          { op: 'edit', itemId: typed.id, content: 'x', expectedRevision: rev() },
+          { op: 'enqueue', content: 'x', mode: 'agent' }
+        ] as const)
+          expect(() => host.queueCommand!(w.other.id, command, { clientRequestId: `k-${who.threadId}-${command.op}`, actor: who, level }), `${who.threadId} ${command.op}`).toThrow(expect.objectContaining({ code: 'bot_thread_read_only' }))
+      }
+      expect(w.queue(w.other.id).map((item) => item.id)).toEqual([typed.id, second.id])
     })
   })
 

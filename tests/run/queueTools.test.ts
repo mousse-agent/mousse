@@ -68,7 +68,7 @@ describe('the queue tools (SPEC §15.1)', () => {
     const call = (granted: AgentAccessLevel, name: string, args: Record<string, unknown> = {}, extra: Partial<Parameters<typeof request>[0]> = {}) =>
       registry.call(name, args, as(granted, extra))
     const denied = (promise: Promise<unknown>) => promise.then(() => undefined, (error: McpToolError) => error)
-    return { fx, registry, state, threads, ledger, answer, queue, call, denied, callerRun, ...fake }
+    return { fx, registry, turns, request, state, threads, ledger, answer, queue, call, denied, callerRun, ...fake }
   }
 
   describe('on the caller\'s own thread, at every level', () => {
@@ -241,6 +241,32 @@ describe('the queue tools (SPEC §15.1)', () => {
       answer.result = () => ({ outcome: 'edited', itemId: 'i1', revision: 'rev-2', replayed: false, effectsSettled: true })
       await call('manage', 'queue_edit', args)
       expect(host.showAgentAction).toHaveBeenCalledTimes(1)
+    })
+
+    it('the transcript row of a removal carries the text that was removed, cut for the row; an ancestor or a lineage reader of the event never sees it', async () => {
+      const { call, answer, host, fx, registry, turns, request, callerRun } = await world()
+      answer.result = () => ({ outcome: 'removed', itemId: 'i1', revision: 'rev-2', replayed: false, effectsSettled: true, recorded: true, removedText: 'stop doing X, and do not push' })
+      await call('manage', 'queue_remove', { itemId: 'i1', expectedRevision: 'rev-1', threadId: 'target' })
+      expect(host.showAgentAction).toHaveBeenLastCalledWith({ threadId: 'target' }, expect.anything(), 'removed queued message i1: "stop doing X, and do not push"')
+      answer.result = () => ({ outcome: 'removed', itemId: 'i1', revision: 'rev-2', replayed: false, effectsSettled: true, recorded: true, removedText: 'x'.repeat(2000) })
+      await call('manage', 'queue_remove', { itemId: 'i1', expectedRevision: 'rev-1', threadId: 'target' })
+      const row = vi.mocked(host.showAgentAction!).mock.calls.at(-1)![2]
+      expect(row.length).toBeLessThan(700)
+      expect(row.endsWith('…"')).toBe(true)
+      // The event holds the text for the thread's own reader; a descendant reading its ancestor's events gets the record without it.
+      fx.engine.store.appendEvent({ threadId: 'caller', type: 'agent.action', payload: { action: 'removed_queued_message', itemId: 'i1', removedText: 'a secret removed message', actorThreadId: 'other', actorRunId: 'run:o' } })
+      const child = await fx.delegate(callerRun.runId, 'call-child')
+      fx.engine.markStarting(child.childRunId)
+      fx.engine.markRunning(child.childRunId)
+      turns.register(appTurn({ threadId: child.childThreadId, runId: child.childRunId }))
+      const read = JSON.parse((await registry.call('thread_read', { threadId: 'caller' }, request({ threadId: child.childThreadId, runId: child.childRunId }))).text) as { events: Array<{ type: string; payload: Record<string, unknown> }> }
+      const seen = read.events.filter((event) => event.type === 'agent.action')
+      expect(seen).toHaveLength(1)
+      expect(seen[0].payload).toMatchObject({ action: 'removed_queued_message', itemId: 'i1' })
+      expect(JSON.stringify(read)).not.toContain('a secret removed message')
+      // The caller itself reads its own events whole.
+      const own = JSON.parse((await call('lineage', 'thread_read', {})).text) as { events: Array<{ type: string; payload: Record<string, unknown> }> }
+      expect(own.events.find((event) => event.type === 'agent.action')?.payload.removedText).toBe('a secret removed message')
     })
 
     it('a result carries the queue item without image data, and whether the effects have settled', async () => {

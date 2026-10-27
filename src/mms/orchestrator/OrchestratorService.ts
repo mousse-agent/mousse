@@ -75,6 +75,7 @@ import { stopStrategy } from '../run/CommandPolicy'
 import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, LAUNCHED_THREAD_ACCESS_CEILING, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { THREAD_CREATE_MAX_ACTIVE_PER_THREAD } from '../run/mcp/appTools/thread'
+import { createHash } from 'node:crypto'
 import { QueueCommands, type QueueIntent } from '../run/QueueCommands'
 import type { PlannedQueueCommand, QueueEffects } from '../queue/queueJournal'
 import { modeFactsFor, prepareSkills, sessionInstructions, settingsToolEnabled, turnPreamble } from '../run/mcp/appTools/assemble'
@@ -561,6 +562,25 @@ export const AGENT_QUEUE_MAX_PER_THREAD = 3
 /** The origin an agent's message is stored with: who sent it, and how many agent hops led to it. */
 function agentOriginOf(agent: Pick<AgentOrigin, 'threadId' | 'runId' | 'hops'>): AgentOrigin {
   return { kind: 'agent', threadId: agent.threadId, runId: agent.runId, ...(agent.hops !== undefined ? { hops: agent.hops } : {}) }
+}
+
+/** The longest removed message an `agent.action` event keeps whole. */
+const REMOVED_TEXT_MAX_CHARS = 8_000
+
+/**
+ * Whether the new order puts any message ahead of one `own` does not count as the agent's that it was behind before: the
+ * agent postpones that message by it.
+ */
+function putsAheadOfOthers(items: QueuedMessage[], orderedIds: readonly string[], authored: (item: QueuedMessage) => boolean): boolean {
+  const pending = listPendingQueue(items).filter((item) => !item.internal)
+  const before = pending.map((item) => item.id)
+  for (const other of pending) {
+    if (authored(other)) continue
+    const wasAhead = new Set(before.slice(0, before.indexOf(other.id)))
+    const nowAhead = orderedIds.slice(0, orderedIds.indexOf(other.id))
+    if (nowAhead.some((id) => !wasAhead.has(id))) return true
+  }
+  return false
 }
 
 /** The stricter of two modes either of which may be absent; undefined when both are (no limit at all). */
@@ -6392,9 +6412,9 @@ export class OrchestratorService extends EventEmitter {
    * promotion's queue change and this call: the run it was checked against cannot end in between. A turn that
    * is not the run the item is bound to refuses the text; the promotion is then reverted.
    */
-  private deliverPromotedItem(session: ThreadSession, item: QueuedMessage, steerRunId: string | undefined): boolean {
+  private deliverPromotedItem(session: ThreadSession, item: QueuedMessage, steerRunId: string | undefined, byAgent = false): boolean {
     const threadId = session.threadId
-    const steered = this.steerThread(threadId, item.content, undefined, undefined, item.origin?.kind === 'agent' ? item.origin : undefined, item.permissionMode, { id: item.id, ...(steerRunId ? { runId: steerRunId } : {}) })
+    const steered = this.steerThread(threadId, item.content, undefined, undefined, item.origin?.kind === 'agent' ? item.origin : undefined, item.permissionMode, { id: item.id, ...(steerRunId ? { runId: steerRunId } : {}), ...(item.mode ? { mode: item.mode } : {}), ...(item.images?.length ? { images: item.images } : {}), ...(byAgent ? { byAgent } : {}) })
     if (steered) {
       // The item stays queued as steering until the turn's steer drain consumes its content. Dropping it here
       // would lose the message when the turn is aborted (which discards pendingSteer) before the next drain.
@@ -6453,21 +6473,29 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * A person's edit of a queued message (the app, the CLI): its text and chat mode. Who wrote the message and the
-   * mode limit it carries stay as they are, so an edit never changes whose message it is or what it may do.
-   * `expectedRevision` is checked under the queue lock; a message already steering a turn or started is refused.
+   * A person's edit of a queued message (the app, the CLI): its text and chat mode. The mode limit the message carries
+   * stays (an edit never lets it do more). New text from a person makes it the person's message: an agent's origin and its
+   * label no longer apply, so it counts as no agent hop, is not held behind a pause or a question, and a person's Stop keeps
+   * it; the queued run made for the agent's message is cancelled and the message gets its own when it drains. A change of
+   * chat mode alone leaves it the agent's. `expectedRevision` is checked under the queue lock; a message already steering a
+   * turn or started is refused.
    */
   editQueuedItem(threadId: string, itemId: string, patch: { content?: string; mode?: ChatMode }, opts?: { expectedRevision?: string }): QueuedMessage {
     const session = this.getOrCreateSession(threadId)
     let edited: QueuedMessage | undefined
+    let droppedRun: string | undefined
     const edit = (items: QueuedMessage[]): QueuedMessage[] => {
       assertQueueRevision(items, opts?.expectedRevision)
-      const result = editQueuedMessage(items, itemId, { content: patch.content, mode: patch.mode })
+      const current = items.find((entry) => entry.id === itemId)
+      const takesOver = patch.content !== undefined && current?.origin?.kind === 'agent'
+      const result = editQueuedMessage(items, itemId, { content: patch.content, mode: patch.mode, ...(takesOver ? { origin: null, dropRun: true } : {}) })
       edited = result.item
+      droppedRun = takesOver ? current?.runId : undefined
       return result.items
     }
     session.queue = this.threadStore ? mutateDurableQueue(this.threadStore, threadId, edit) : edit(session.queue)
     this.emitQueueUpdated(threadId, session.queue)
+    this.cancelQueuedRuns([droppedRun])
     return edited!
   }
 
@@ -6523,8 +6551,13 @@ export class OrchestratorService extends EventEmitter {
     const journal = store?.getQueueJournal()
     if (!store || !journal) return
     try {
+      // Old finished entries go; so do the entries of a thread that no longer exists (nothing is left for them to finish).
+      journal.commands.prune()
       for (const threadId of journal.commands.unfinishedThreadIds()) {
-        if (!store.getThread(threadId)) continue
+        if (!store.getThread(threadId)) {
+          journal.commands.deleteForThread(threadId)
+          continue
+        }
         try {
           repairQueueJournal(store, threadId)
         } catch (error) {
@@ -6611,13 +6644,12 @@ export class OrchestratorService extends EventEmitter {
     const { actor } = options
     const cross = threadId !== actor.threadId
     const callerMode = this.runPermissionMode(actor.runId)
-    if (command.op !== 'remove' && command.op !== 'reorder') this.assertNotBotThread(threadId)
+    // A bot's thread is driven by its owner and its bot engine: no queue command of an agent reaches it, its own turn included.
+    this.assertNotBotThread(threadId)
     if (command.op === 'enqueue') this.assertQueueOpen(threadId)
-    // Who wrote the item: this agent (its own note on its own thread, or a message it sent) or someone else. Source
-    // `mcp` is only ever set by the daemon for an agent's tool call: a protocol client's source is replaced by its
-    // client type (`admittedChatSource`), so a person's message cannot pass for an agent's own note.
-    const authoredBy = (item: QueuedMessage): boolean =>
-      item.origin ? item.origin.kind === 'agent' && item.origin.threadId === actor.threadId : item.source === 'mcp' && !cross
+    // Who wrote the item: this agent (its origin names its thread: an own note or a message it sent) or someone else. A
+    // label such as the item's source never decides it: only the origin the daemon stamped on the message does.
+    const authoredBy = (item: QueuedMessage): boolean => item.origin?.kind === 'agent' && item.origin.threadId === actor.threadId
     const agentItems = (items: QueuedMessage[]): number => listPendingQueue(items).filter((item) => item.origin?.kind === 'agent').length
     const full = (): never => {
       throw new DomainRpcError('agent_queue_full', `Thread ${threadId} already has ${AGENT_QUEUE_MAX_PER_THREAD} messages from agents waiting; try again later.`)
@@ -6631,30 +6663,31 @@ export class OrchestratorService extends EventEmitter {
     const notSteering = (item: QueuedMessage): void => {
       if (item.state === 'steering') throw new QueueConflictError('item_steering', `Queue item ${item.id} is already steering the running turn.`, { itemId: item.id })
     }
-    // The mode an own-thread item is held to: the agent's own when stricter than the thread's, so a narrowed turn
-    // cannot widen itself by writing to its own queue.
-    const ownLimit = (): PermissionMode | undefined => (isStricter(callerMode, this.requestedPermissionMode(threadId)) ? callerMode : undefined)
     const base = { threadId, actor, cancelRunIds: [] as string[], releaseInboxIds: [] as string[] }
     let delivered: { item: QueuedMessage; steerRunId: string | undefined } | undefined
+    let removed: QueuedMessage | undefined
+    // What the agent supplied (not the revision it read): the same key with other fields is a mistake, not a retry.
+    const fingerprint = createHash('sha256')
+      .update(JSON.stringify([command.op, threadId, 'itemId' in command ? command.itemId : null, 'content' in command ? command.content ?? null : null, 'mode' in command ? command.mode ?? null : null, 'orderedIds' in command ? command.orderedIds : null, 'expectedRunId' in command ? command.expectedRunId : null]))
+      .digest('hex')
+      .slice(0, 16)
     const outcome = runDurableQueueCommand(store, threadId, options.clientRequestId, (items): PlannedQueueCommand => {
       assertQueueRevision(items, command.expectedRevision)
       switch (command.op) {
         case 'enqueue': {
-          let content = command.content
-          let origin: AgentOrigin | undefined
-          let permissionMode: PermissionMode | undefined = ownLimit()
-          if (cross) {
-            // Another thread's queue: the same limits as a message sent to it (`thread_send`).
-            if (agentItems(items) >= AGENT_QUEUE_MAX_PER_THREAD) full()
-            const sender = this.withAgentHops(actor)
-            content = agentMessageText(sender.threadId, this.titleOf(sender.threadId), command.content)
-            origin = agentOriginOf(sender)
-            permissionMode = callerMode
-          }
+          // Every message an agent queues is the agent's, on its own thread too: it carries the writing run's hop count and
+          // mode limit, counts in the cap of three, is held behind a pause and a waiting question, is cleared by a person's
+          // Stop and runs as an agent's run (so an agent at its hop limit cannot start a fresh chain through its own queue).
+          // On another thread the text is labelled too; on its own an agent reads its own note as written.
+          if (agentItems(items) >= AGENT_QUEUE_MAX_PER_THREAD) full()
+          const sender = this.withAgentHops(actor)
+          const content = cross ? agentMessageText(sender.threadId, this.titleOf(sender.threadId), command.content) : command.content
+          const origin = agentOriginOf(sender)
+          const permissionMode: PermissionMode = callerMode
           // A thread a person keeps in Plan takes another agent's message as a plan turn, whatever mode it asked for.
           const mode: 'agent' | 'plan' = cross && this.lastChatModeOf(threadId) === 'plan' ? 'plan' : command.mode
           const request = normalizeSendRequest({ content, mode })
-          const { item } = enqueueMessage(items, { threadId, content: request.content, mode: request.mode, source: 'mcp', ...(permissionMode ? { permissionMode } : {}), ...(origin ? { origin } : {}) })
+          const { item } = enqueueMessage(items, { threadId, content: request.content, mode: request.mode, source: 'mcp', permissionMode, origin })
           return {
             intent: { ...base, op: 'enqueue', itemId: item.id, item, expectedRevision: command.expectedRevision },
             ...(cross ? { audit: { action: 'queued_message', details: { itemId: item.id, length: command.content.length } } } : {})
@@ -6678,21 +6711,18 @@ export class OrchestratorService extends EventEmitter {
           let cancelRunIds: string[] = []
           if (command.mode !== undefined) patch.mode = command.mode
           if (command.content !== undefined) {
-            if (cross || !authored) {
-              // The words are the agent's from here on: labelled, stored as its own, run under the stricter mode.
-              if (item.origin?.kind !== 'agent' && agentItems(items) >= AGENT_QUEUE_MAX_PER_THREAD) full()
-              const sender = this.withAgentHops(actor)
-              patch.content = agentMessageText(sender.threadId, this.titleOf(sender.threadId), command.content)
-              patch.origin = agentOriginOf(sender)
-              patch.permissionMode = strictestMode(item.permissionMode, callerMode)
-              // Its queued run was made for the earlier writer: it gets a fresh one, with this sender's count, when it drains.
-              patch.dropRun = true
-              if (item.runId) cancelRunIds = [item.runId]
-            } else {
-              patch.content = command.content
-              const limit = strictestMode(item.permissionMode, ownLimit())
-              if (limit) patch.permissionMode = limit
-            }
+            // The words are the agent's from here on, with this run's hop count: stored as its own, run under the stricter mode.
+            // Another writer's message, or any message on another thread, is labelled; an agent's own note on its own thread is not.
+            if (item.origin?.kind !== 'agent' && agentItems(items) >= AGENT_QUEUE_MAX_PER_THREAD) full()
+            const sender = this.withAgentHops(actor)
+            patch.content = cross || !authored ? agentMessageText(sender.threadId, this.titleOf(sender.threadId), command.content) : command.content
+            patch.origin = agentOriginOf(sender)
+            patch.permissionMode = strictestMode(item.permissionMode, callerMode)
+            // Its queued run was made for the earlier writer: it gets a fresh one, with this sender's count, when it drains.
+            patch.dropRun = true
+            if (item.runId) cancelRunIds = [item.runId]
+            // A thread a person keeps in Plan takes another agent's words as a plan turn, whatever mode the message had.
+            if (cross && this.lastChatModeOf(threadId) === 'plan') patch.mode = 'plan'
           }
           if (patch.content === undefined && patch.mode === undefined) throw new QueueValidationError('queue_edit needs content or mode.')
           return {
@@ -6704,6 +6734,10 @@ export class OrchestratorService extends EventEmitter {
           const item = found(items, command.itemId)
           notSteering(item)
           if (item.workflowInvocationId) throw new QueueValidationError('A workflow command can only be removed from the app.')
+          // Removing a message nobody told this agent it wrote would replace a person's words as surely as editing it: manage.
+          if (!authoredBy(item) && options.level !== 'manage')
+            throw new QueueAccessError(`Removing a message ${item.origin ? 'another agent' : 'a person'} queued needs the "manage" agent access level (yours is "${options.level}").`)
+          removed = item
           return {
             intent: {
               ...base,
@@ -6714,12 +6748,17 @@ export class OrchestratorService extends EventEmitter {
               releaseInboxIds: item.inboxIds ?? [],
               ...(item.workflowInvocationId ? { abandonWorkflowInvocationId: item.workflowInvocationId } : {})
             },
-            ...(cross || !authoredBy(item) ? { audit: { action: 'removed_queued_message', details: { itemId: item.id } } } : {})
+            // Every removal is recorded with the text that was removed, so a person can see and recover it.
+            audit: { action: 'removed_queued_message', details: { itemId: item.id, length: item.content.length, removedText: item.content.slice(0, REMOVED_TEXT_MAX_CHARS), ...(item.content.length > REMOVED_TEXT_MAX_CHARS ? { removedTextCut: true } : {}), wasOrigin: item.origin?.kind ?? (item.source ?? 'person') } }
           }
         }
         case 'reorder': {
           // Validated now (a permutation of the pending items); the same function applies it.
           reorderQueuedMessages(items, command.orderedIds)
+          // Putting anything ahead of a message the agent did not write (it was behind it) postpones that message as surely as
+          // removing it replaces it: manage. Moving the agent's own messages behind others', or among themselves, is free.
+          if (options.level !== 'manage' && putsAheadOfOthers(items, command.orderedIds, authoredBy))
+            throw new QueueAccessError(`Putting a message ahead of one a person or another agent queued needs the "manage" agent access level (yours is "${options.level}").`)
           const touchesOthers = listPendingQueue(items).some((item) => !item.internal && !authoredBy(item))
           return {
             intent: { ...base, op: 'reorder', itemId: command.orderedIds[0] ?? '', orderedIds: command.orderedIds, expectedRevision: command.expectedRevision },
@@ -6731,6 +6770,10 @@ export class OrchestratorService extends EventEmitter {
           notSteering(item)
           if (item.workflowInvocationId) throw new QueueValidationError('A workflow command cannot be promoted to steering input')
           if (item.inboxIds?.length) throw new QueueValidationError('A queued subagent result is delivered as its own turn; it cannot be sent as a steer.')
+          // A live provider settles the questions and approvals the user is being asked as the user when it takes a steer, and
+          // an agent's promotion must never do that: it waits until the user has answered.
+          if (this.questions.listPendingForThread(threadId).length > 0)
+            throw new QueueConflictError('questions_pending', `Thread ${threadId} is waiting for the user to answer a question or approval; a steer would settle it for them. Promote the message after they have answered.`, { itemId: item.id })
           // Under the queue lock, against the run the engine has now: the text joins that run or nothing changes.
           const bind = this.checkPromotion(threadId, item, { expectedRunId: command.expectedRunId, permissionCeiling: callerMode })
           const session = this.getOrCreateSession(threadId)
@@ -6753,7 +6796,7 @@ export class OrchestratorService extends EventEmitter {
           }
         }
       }
-    })
+    }, fingerprint)
     const session = this.getOrCreateSession(threadId)
     session.queue = outcome.items
     this.emitQueueUpdated(threadId, session.queue)
@@ -6767,10 +6810,19 @@ export class OrchestratorService extends EventEmitter {
       // No `await` since the checks above: the run is still the one the promotion was checked against.
       if (command.op === 'promote' && delivered && result.outcome === 'promoted') {
         const promoted = outcome.items.find((entry) => entry.id === delivered!.item.id)
-        if (promoted) this.deliverPromotedItem(session, promoted, delivered.steerRunId)
+        if (promoted) this.deliverPromotedItem(session, promoted, delivered.steerRunId, true)
       }
     }
-    return { ...result, replayed: outcome.replayed, effectsSettled: outcome.effectsSettled }
+    // The journal keeps the id of an enqueued message, never its text: the message is shown as it is in the queue now (a retry
+    // after a turn took it has only the id). The text of a removed message goes back to the caller once and is in the event.
+    const item = command.op === 'enqueue' ? outcome.items.find((entry) => entry.id === result.itemId) : undefined
+    return {
+      ...result,
+      ...(item ? { item } : {}),
+      ...(removed && !outcome.replayed ? { removedText: removed.content } : {}),
+      replayed: outcome.replayed,
+      effectsSettled: outcome.effectsSettled
+    }
   }
 
   async generateThreadTitle(messages: ChatMessage[], threadId?: string): Promise<string> {
@@ -7746,7 +7798,9 @@ export class OrchestratorService extends EventEmitter {
         next = enqueueMessage(next, {
           threadId,
           content: entry.text,
-          mode,
+          // The message as it was: its own chat mode (a plan turn stays one) and its images, not the thread's latest mode.
+          mode: entry.mode ?? mode,
+          ...(entry.images?.length ? { images: entry.images } : {}),
           source: 'steer-followup',
           ...(entry.permissionMode ? { permissionMode: entry.permissionMode } : {}),
           ...(entry.origin ? { origin: entry.origin } : {})
@@ -7801,7 +7855,7 @@ export class OrchestratorService extends EventEmitter {
    * `item`: the queue item this steer is (a promotion), and the run it was checked against. A steer for another
    * run than `item.runId` is refused, so a promotion never reaches a turn it was not checked against.
    */
-  steerThread(threadId: string | undefined, text: string, subagentNotice?: SubagentNoticeItem[], carried?: { inboxIds: string[]; effectId: string }, origin?: AgentOrigin, permissionMode?: PermissionMode, item?: { id: string; runId?: string }): boolean {
+  steerThread(threadId: string | undefined, text: string, subagentNotice?: SubagentNoticeItem[], carried?: { inboxIds: string[]; effectId: string }, origin?: AgentOrigin, permissionMode?: PermissionMode, item?: { id: string; runId?: string; mode?: ChatMode; images?: ChatImageAttachment[]; byAgent?: boolean }): boolean {
     const trimmed = text.trim()
     if (!trimmed || !threadId) return false
     // Nothing is steered into a bot's turn: it runs exactly what its dispatch sent.
@@ -7816,7 +7870,7 @@ export class OrchestratorService extends EventEmitter {
       // id and what it carried, so a turn that never reads it runs it as a turn of its own with the same limits.
       session.activeTurn.pendingSteer.push({
         text: trimmed,
-        ...(item ? { itemId: item.id } : {}),
+        ...(item ? { itemId: item.id, ...(item.mode ? { mode: item.mode } : {}), ...(item.images?.length ? { images: item.images } : {}), ...(item.byAgent ? { byAgent: true as const } : {}) } : {}),
         ...(origin ? { origin } : {}),
         ...(origin || permissionMode ? { permissionMode: permissionMode ?? 'ask' } : {})
       })
@@ -9584,11 +9638,17 @@ export class OrchestratorService extends EventEmitter {
   ): { entries: SteerEntry[]; carried: NonNullable<ActiveTurnControl['carriedSteers']> } | undefined {
     const entries: SteerEntry[] = []
     let carried: NonNullable<ActiveTurnControl['carriedSteers']> = []
-    if (turn.pendingSteer.length > 0) {
-      entries.push(...turn.pendingSteer)
+    // A live provider settles the questions and approvals the user is being asked as the user when it takes a steer
+    // (it rejects them to read it). Nothing an agent caused (its own steer, a message it promoted) may do that: it waits in
+    // the turn's steer buffer until the user has answered.
+    const asking = this.questions.listPendingForThread(session.threadId).length > 0
+    const held = asking ? turn.pendingSteer.filter((entry) => entry.origin || entry.byAgent) : []
+    const taking = held.length ? turn.pendingSteer.filter((entry) => !held.includes(entry)) : turn.pendingSteer
+    if (taking.length > 0) {
+      entries.push(...taking)
       // Remembered whole by the caller until the provider has taken the text (`returnSteer`).
       carried = [...(turn.carriedSteers ?? [])]
-      turn.pendingSteer = []
+      turn.pendingSteer = held
       // The model reads them now: the rows their steers carried are delivered to this run.
       for (const entry of turn.carriedSteers ?? []) this.runEngine?.inbox.markSteerTaken(entry.inboxIds, entry.effectId)
       turn.carriedSteers = []
@@ -9602,7 +9662,9 @@ export class OrchestratorService extends EventEmitter {
       (item) =>
         item.intent === 'steer' &&
         (item.state === 'pending' || item.state === 'steering') &&
-        !session.drainedExternalSteerIds.has(item.id)
+        !session.drainedExternalSteerIds.has(item.id) &&
+        !held.some((entry) => entry.itemId === item.id) &&
+        !(asking && item.origin?.kind === 'agent')
     )
     const revert: string[] = []
     for (const item of externalSteers) {
@@ -9614,7 +9676,9 @@ export class OrchestratorService extends EventEmitter {
         text: item.content,
         itemId: item.id,
         ...(item.permissionMode ? { permissionMode: item.permissionMode } : {}),
-        ...(item.origin?.kind === 'agent' ? { origin: item.origin } : {})
+        ...(item.origin?.kind === 'agent' ? { origin: item.origin } : {}),
+        ...(item.mode ? { mode: item.mode } : {}),
+        ...(item.images?.length ? { images: item.images } : {})
       })
       session.drainedExternalSteerIds.add(item.id)
     }

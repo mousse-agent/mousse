@@ -64,26 +64,28 @@ export type QueueCommandResult = Record<string, unknown>
  * removed, a reorder already in force and a promotion already steering change nothing, which a recovered entry
  * relies on. `outcome` is what the command reports.
  */
-export function applyIntent(items: QueuedMessage[], intent: QueueIntent, ctx: { activeRunId: string | null }): { items: QueuedMessage[]; result: QueueCommandResult } {
-  const done = (next: QueuedMessage[], result: QueueCommandResult): { items: QueuedMessage[]; result: QueueCommandResult } => ({
+export function applyIntent(items: QueuedMessage[], intent: QueueIntent, ctx: { activeRunId: string | null }): AppliedIntent {
+  const done = (next: QueuedMessage[], result: QueueCommandResult, skipped = false): AppliedIntent => ({
     items: next,
-    result: { ...result, itemId: intent.itemId, revision: queueRevision(next) }
+    result: { ...result, itemId: intent.itemId, revision: queueRevision(next) },
+    ...(skipped ? { skipped } : {})
   })
   switch (intent.op) {
     case 'enqueue': {
+      // The result keeps the item's id, never its text: the text lives in the queue, and in the entry until it is applied.
       if (!intent.item) return done(items, { outcome: 'enqueued' })
       const present = items.find((item) => item.id === intent.item!.id)
-      const next = present ? items : sortQueue([...items, intent.item])
-      return done(next, { outcome: 'enqueued', item: present ?? intent.item })
+      return done(present ? items : sortQueue([...items, intent.item]), { outcome: 'enqueued' })
     }
     case 'edit': {
       const present = items.find((item) => item.id === intent.itemId)
-      if (!present || !intent.patch) return done(items, { outcome: 'edited' })
+      if (!present || !intent.patch) return done(items, { outcome: 'edited' }, true)
       try {
         return done(editQueuedMessage(items, intent.itemId, intent.patch).items, { outcome: 'edited' })
       } catch {
-        // The item moved on (claimed or steering) since the entry was written: nothing left to edit.
-        return done(items, { outcome: 'edited' })
+        // The item moved on (claimed or steering) since the entry was written: nothing was edited, so the run it still
+        // owns is not cancelled either.
+        return done(items, { outcome: 'edited' }, true)
       }
     }
     case 'remove':
@@ -109,6 +111,13 @@ export function applyIntent(items: QueuedMessage[], intent: QueueIntent, ctx: { 
       return done(promoted.items.map((entry) => (entry.id === steer.id ? steer : entry)), { outcome: 'promoted', steerRunId: intent.steerRunId ?? null })
     }
   }
+}
+
+export interface AppliedIntent {
+  items: QueuedMessage[]
+  result: QueueCommandResult
+  /** The change found nothing to change (an edit of an item that is gone or already started): its effects must not run. */
+  skipped?: boolean
 }
 
 /** A demoted item runs as its own turn later: the run it had is cancelled with the promotion, so it gets a fresh one when it drains. */
@@ -138,6 +147,8 @@ function finishCommand(journal: QueueJournal, row: QueueCommandRow, result: Queu
     console.warn('the effects of a queue command could not be committed; they are retried', { commandKey: row.commandKey, error: error instanceof Error ? error.message : String(error) })
     try {
       commands.markEffectsPending(row, result)
+      // A few tries, and then it is left alone: an entry that can never finish must not be retried by every change.
+      commands.recordFailure(row.commandKey, error instanceof Error ? error.message : String(error))
     } catch (marking) {
       console.warn('a queue command could not be marked for repair', { commandKey: row.commandKey, error: marking instanceof Error ? marking.message : String(marking) })
     }
@@ -172,19 +183,31 @@ export function recoverQueueJournal(store: QueueStoreLike, threadId: string, ite
   for (const row of unfinished) {
     try {
       let result = row.result ?? {}
+      let finishing = row
       if (row.status === 'pending') {
         const applied = applyIntent(current, row.intent, { activeRunId: journal.effects.activeRunId(threadId) })
         current = normalizeQueuedMessages(applied.items, threadId)
         store.saveMessageQueue(threadId, current)
         result = applied.result
+        // An edit that found nothing to edit cancels no run: the item still owns the one it has.
+        if (applied.skipped) finishing = { ...row, intent: { ...row.intent, cancelRunIds: [] } }
       }
-      finishCommand(journal, row, result)
+      finishCommand(journal, finishing, result)
     } catch (error) {
-      console.warn('an unfinished queue command could not be finished', { commandKey: row.commandKey, error: error instanceof Error ? error.message : String(error) })
+      const message = error instanceof Error ? error.message : String(error)
+      console.warn('an unfinished queue command could not be finished', { commandKey: row.commandKey, error: message })
+      let failed = false
       try {
-        journal.effects.scheduleRepair(threadId)
+        failed = journal.commands.recordFailure(row.commandKey, message)
       } catch {
-        /* Boot repairs it as well. */
+        /* The next change tries again. */
+      }
+      if (!failed) {
+        try {
+          journal.effects.scheduleRepair(threadId)
+        } catch {
+          /* Boot repairs it as well. */
+        }
       }
     }
   }
@@ -220,7 +243,9 @@ export function runQueueCommand(
   threadId: string,
   commandKey: string,
   loaded: QueuedMessage[],
-  plan: (items: QueuedMessage[], ctx: { activeRunId: string | null }) => PlannedQueueCommand
+  plan: (items: QueuedMessage[], ctx: { activeRunId: string | null }) => PlannedQueueCommand,
+  /** The agent-supplied fields of the command: a key that comes back with other fields is a mistake of the caller, not a retry. */
+  fingerprint?: string
 ): QueueCommandOutcome {
   const journal = store.getQueueJournal()
   if (!journal) throw new Error('Agent queue commands need the run engine.')
@@ -230,13 +255,17 @@ export function runQueueCommand(
   if (existing) {
     // The same request id for another command is a mistake of the caller, not a retry.
     if (existing.threadId !== threadId) throw new QueueConflictError('request_conflict', 'This clientRequestId was already used for a change to another thread.')
+    if (fingerprint !== undefined && existing.intent.fingerprint !== undefined && existing.intent.fingerprint !== fingerprint)
+      throw new QueueConflictError('request_conflict', 'This clientRequestId was already used for a different command; use a new one for a new command, and the same one only to retry.', { itemId: existing.intent.itemId })
     if (existing.status === 'pending') throw new Error('An earlier attempt of this command is still being finished; try again.')
+    if (existing.status === 'failed' && !existing.result)
+      throw new QueueConflictError('command_failed', 'An earlier attempt of this command could not be finished and was given up; read the queue and send it again with a new clientRequestId.', { itemId: existing.intent.itemId })
     return { result: existing.result ?? {}, effectsSettled: existing.status === 'applied', replayed: true, items }
   }
   const activeRunId = journal.effects.activeRunId(threadId)
   const planned = plan(items, { activeRunId })
   journal.commands.db.transaction(() => {
-    journal.commands.insertPending(commandKey, planned.intent)
+    journal.commands.insertPending(commandKey, fingerprint !== undefined ? { ...planned.intent, fingerprint } : planned.intent)
     if (planned.audit) journal.effects.audit(planned.intent, planned.audit)
   })
   const applied = applyIntent(items, planned.intent, { activeRunId })

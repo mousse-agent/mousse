@@ -55,10 +55,11 @@ export function runDurableQueueCommand(
   store: ThreadDataStore,
   threadId: string,
   commandKey: string,
-  plan: (items: QueuedMessage[], ctx: { activeRunId: string | null }) => PlannedQueueCommand
+  plan: (items: QueuedMessage[], ctx: { activeRunId: string | null }) => PlannedQueueCommand,
+  fingerprint?: string
 ): QueueCommandOutcome {
   const threadDir = store.getThreadDir(threadId)
-  return withQueueMutationLock(threadDir, () => runQueueCommand(store, threadId, commandKey, store.loadMessageQueue(threadId), plan))
+  return withQueueMutationLock(threadDir, () => runQueueCommand(store, threadId, commandKey, store.loadMessageQueue(threadId), plan, fingerprint))
 }
 
 export function readDurableQueue(store: ThreadDataStore, threadId: string): QueuedMessage[] {

@@ -427,6 +427,17 @@ describe('editing, the queue revision and a promotion bound to a run', () => {
       expect(editQueuedMessage([owned], first.id, { content: 'x' }).item.runId).toBe('run-queued')
     })
 
+    it('a null origin makes the message a person\'s again, keeps the mode limit, and drops the run made for the agent message', () => {
+      const { items, first } = seed()
+      const agentOwned = editQueuedMessage([{ ...first, runId: 'run-queued' }, items[1]], first.id, { origin: agent, permissionMode: 'ask' }).items
+      const result = editQueuedMessage(agentOwned, first.id, { content: 'new words from a person', origin: null, dropRun: true })
+      expect(result.item.origin).toBeUndefined()
+      expect(result.item).toMatchObject({ content: 'new words from a person', permissionMode: 'ask' })
+      expect(result.item.runId).toBeUndefined()
+      // Without a null the origin stays.
+      expect(editQueuedMessage(agentOwned, first.id, { content: 'x' }).item.origin).toEqual(agent)
+    })
+
     it('is idempotent against its own effect', () => {
       const { items, first } = seed()
       const patch = { content: 'once', origin: agent, permissionMode: 'ask' as const, dropRun: true }

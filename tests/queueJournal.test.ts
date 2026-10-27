@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { QueuedMessage } from '../src/shared/types'
 import { ProfileDatabase } from '../src/mms/run/db/ProfileDatabase'
 import { RUN_MIGRATIONS } from '../src/mms/run/db/migrations'
-import { QueueCommands, type QueueIntent } from '../src/mms/run/QueueCommands'
+import { QUEUE_COMMAND_MAX_ATTEMPTS, QUEUE_COMMAND_RETENTION_MS, QueueCommands, type QueueIntent } from '../src/mms/run/QueueCommands'
 import { enqueueMessage, listPendingQueue, normalizeQueuedMessages, claimNextNormal } from '../src/mms/queue/ThreadMessageQueue'
 import { recoverQueueJournal, runQueueCommand, type QueueEffects, type QueueJournal, type QueueStoreLike } from '../src/mms/queue/queueJournal'
 
@@ -82,6 +82,7 @@ describe('queue command journal', () => {
     rmSync(home, { recursive: true, force: true })
   })
 
+  const repairsSoFar = (): number => repairs
   const command = (key: string, plan: Parameters<typeof runQueueCommand>[4]) => runQueueCommand(store, THREAD, key, store.loadMessageQueue(THREAD), plan)
   const edit = (itemId: string, content: string): Parameters<typeof runQueueCommand>[4] => () => ({
     intent: { ...base, op: 'edit', itemId, patch: { content, origin: { kind: 'agent', threadId: 'caller', runId: 'run-caller', hops: 1 }, permissionMode: 'ask' } }
@@ -126,19 +127,21 @@ describe('queue command journal', () => {
     expect(effectLog).toHaveLength(1)
   })
 
-  it('an enqueue replays its original item after a turn claimed it', () => {
+  it('an enqueue replays its item id after a turn claimed it, and the stored result holds no message text', () => {
     const planned = () => command('queue_enqueue:caller:1', (items) => {
       const { item } = enqueueMessage(items, { threadId: THREAD, content: 'run this later', source: 'mcp', permissionMode: 'ask' })
       return { intent: { ...base, op: 'enqueue', itemId: item.id, item } }
     })
     const first = planned()
-    const item = first.result.item as QueuedMessage
+    const item = file[0]
+    expect(first.result.itemId).toBe(item.id)
+    expect(JSON.stringify(first.result)).not.toContain('run this later')
+    expect(db.statement('SELECT result FROM queue_commands').get()).toEqual({ result: expect.not.stringContaining('run this later') })
     expect(listPendingQueue(file).map((entry) => entry.id)).toEqual([item.id])
     file = claimNextNormal(file, { ownerPid: process.pid, ownerToken: 'tok' }).items
     file = file.filter((entry) => entry.id !== item.id)
     const again = planned()
-    expect(again).toMatchObject({ replayed: true })
-    expect(again.result.item).toMatchObject({ id: item.id, content: 'run this later', permissionMode: 'ask' })
+    expect(again).toMatchObject({ replayed: true, result: { outcome: 'enqueued', itemId: item.id } })
     expect(file).toEqual([])
   })
 
@@ -285,6 +288,89 @@ describe('queue command journal', () => {
     expect(rowOf('queue_remove:caller:1')).toMatchObject({ status: 'applied' })
     const plan = db.database.prepare("EXPLAIN QUERY PLAN SELECT * FROM queue_commands WHERE thread_id = ? AND status IN ('pending','effects_pending')").all(THREAD).map((step) => String(step.detail)).join(' ')
     expect(plan).toContain('queue_commands_thread_status')
+  })
+
+  it('an edit recovered after its item moved on edits nothing and cancels no run: the item keeps the run it owns', () => {
+    file = seed(2)
+    const [a, b] = file
+    // `a` is steering now (a later promotion), `b` is gone: the entries of two earlier edits are still pending.
+    file = [{ ...a, runId: 'run-a', intent: 'steer', state: 'steering' }]
+    for (const [key, item] of [['k:a', a], ['k:b', b]] as const)
+      new QueueCommands(db).insertPending(key, { ...base, op: 'edit', itemId: item.id, patch: { content: 'late', dropRun: true }, cancelRunIds: [`run-${item.id}`] })
+    recoverQueueJournal(store, THREAD, store.loadMessageQueue(THREAD))
+    // The entries are finished, but no run was named for cancelling.
+    expect(effectLog).toHaveLength(2)
+    expect(effectLog.every((line) => line.endsWith(':cancel=:release='))).toBe(true)
+    expect(file[0]).toMatchObject({ id: a.id, runId: 'run-a', content: 'message 0' })
+    expect(rowOf('k:a')).toMatchObject({ status: 'applied' })
+    expect(rowOf('k:b')).toMatchObject({ status: 'applied' })
+  })
+
+  it('an entry that keeps failing is tried a few times and then left alone: it no longer blocks or retries on every change, and its key says so', () => {
+    file = seed(2)
+    const target = file[0]
+    new QueueCommands(db).insertPending('queue_edit:caller:1', { ...base, op: 'edit', itemId: target.id, patch: { content: 'never lands' } })
+    store.failSave = 1000
+    const unrelated = (key: string) => command(key, (items) => {
+      const { item } = enqueueMessage(items, { threadId: THREAD, content: key })
+      return { intent: { ...base, op: 'enqueue', itemId: item.id, item } }
+    })
+    // The file cannot be written, so every change meets the entry again until it is given up.
+    for (let attempt = 1; attempt <= QUEUE_COMMAND_MAX_ATTEMPTS; attempt += 1) {
+      expect(rowOf('queue_edit:caller:1')).toMatchObject({ status: 'pending', attempts: attempt - 1 })
+      expect(() => recoverQueueJournal(store, THREAD, store.loadMessageQueue(THREAD))).not.toThrow()
+    }
+    expect(rowOf('queue_edit:caller:1')).toMatchObject({ status: 'failed', attempts: QUEUE_COMMAND_MAX_ATTEMPTS })
+    // Given up: a change to the queue goes through without retrying it (the first save it makes is its own).
+    store.failSave = 0
+    const saves = store.saves
+    unrelated('queue_enqueue:caller:2')
+    expect(store.saves).toBe(saves + 1)
+    expect(rowOf('queue_edit:caller:1')).toMatchObject({ status: 'failed' })
+    // And a retry of that key is told it was given up, so it can be sent again under a new key.
+    expect(() => command('queue_edit:caller:1', () => { throw new Error('no plan') })).toThrow(expect.objectContaining({ code: 'command_failed' }))
+  })
+
+  it('effects that can never commit stop being retried too, and a retry of the key still gets the result with the effects marked unsettled', () => {
+    file = seed(1)
+    const target = file[0]
+    failEffects = 1000
+    const first = command('queue_remove:caller:1', () => ({ intent: { ...base, op: 'remove', itemId: target.id, cancelRunIds: ['run-old'] } }))
+    expect(first.effectsSettled).toBe(false)
+    for (let attempt = 1; attempt < QUEUE_COMMAND_MAX_ATTEMPTS; attempt += 1) recoverQueueJournal(store, THREAD, store.loadMessageQueue(THREAD))
+    expect(rowOf('queue_remove:caller:1')).toMatchObject({ status: 'failed' })
+    const repairs = repairsSoFar()
+    recoverQueueJournal(store, THREAD, store.loadMessageQueue(THREAD))
+    expect(repairsSoFar()).toBe(repairs)
+    expect(command('queue_remove:caller:1', () => { throw new Error('no plan') })).toMatchObject({ replayed: true, effectsSettled: false, result: { outcome: 'removed' } })
+  })
+
+  it('a request key that comes back with other fields is a conflict, not a replay; the same fields (and another revision) are a retry', () => {
+    file = seed(2)
+    const [a, b] = file
+    const plan = (itemId: string): Parameters<typeof runQueueCommand>[4] => () => ({ intent: { ...base, op: 'remove', itemId } })
+    runQueueCommand(store, THREAD, 'queue_remove:caller:1', store.loadMessageQueue(THREAD), plan(a.id), 'fp-a')
+    expect(() => runQueueCommand(store, THREAD, 'queue_remove:caller:1', store.loadMessageQueue(THREAD), plan(b.id), 'fp-b')).toThrow(expect.objectContaining({ code: 'request_conflict' }))
+    expect(file.map((item) => item.id)).toEqual([b.id])
+    expect(runQueueCommand(store, THREAD, 'queue_remove:caller:1', store.loadMessageQueue(THREAD), plan(a.id), 'fp-a')).toMatchObject({ replayed: true, result: { outcome: 'removed', itemId: a.id } })
+  })
+
+  it('finished entries are pruned after their retention, and the entries of a deleted thread go; recent and unfinished ones stay', () => {
+    const commands = new QueueCommands(db)
+    const now = Date.now()
+    const insert = (key: string, thread: string, status: string, ageMs: number) =>
+      db.statement('INSERT INTO queue_commands(command_key, thread_id, intent, status, created_at, applied_at) VALUES(?, ?, ?, ?, ?, ?)')
+        .run(key, thread, '{}', status, new Date(now - ageMs).toISOString(), status === 'pending' ? null : new Date(now - ageMs).toISOString())
+    const day = 24 * 60 * 60 * 1000
+    insert('old-applied', THREAD, 'applied', QUEUE_COMMAND_RETENTION_MS + day)
+    insert('old-failed', THREAD, 'failed', QUEUE_COMMAND_RETENTION_MS + day)
+    insert('new-applied', THREAD, 'applied', day)
+    insert('old-pending', THREAD, 'pending', QUEUE_COMMAND_RETENTION_MS + day)
+    expect(commands.prune(now)).toBe(2)
+    expect(db.statement('SELECT command_key FROM queue_commands ORDER BY command_key').all()).toEqual([{ command_key: 'new-applied' }, { command_key: 'old-pending' }])
+    insert('gone-1', 'thread-gone', 'applied', day)
+    expect(commands.deleteForThread('thread-gone')).toBe(1)
+    expect(commands.get('new-applied')).not.toBeNull()
   })
 
   it('a store without a journal never recovers and refuses an agent command', () => {

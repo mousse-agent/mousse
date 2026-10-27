@@ -115,6 +115,8 @@ export interface AgentQueueResult {
   revision: string
   /** The queued item, for an enqueue. */
   item?: QueuedMessage
+  /** The text of the message a removal took out of the queue, on the call that removed it (the `agent.action` event keeps it too). */
+  removedText?: string
   /** An `agent.action` event on the thread records the change (a change to another thread's queue, or to a message the agent did not write). */
   recorded?: boolean
   /** The change had been made before: nothing new happened. */

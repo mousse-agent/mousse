@@ -2,7 +2,9 @@ import type { PermissionMode } from '../../shared/permissionMode'
 import type {
   Agent,
   AgentOrigin,
+  ChatImageAttachment,
   ChatMessage,
+  ChatMode,
   NativeLlmContext,
   QueuedMessage,
   Task,
@@ -27,6 +29,11 @@ export interface SteerEntry {
   itemId?: string
   permissionMode?: PermissionMode
   origin?: AgentOrigin
+  /** The promoted item's chat mode and images, so a steer the turn never reads comes back as the message it was. */
+  mode?: ChatMode
+  images?: ChatImageAttachment[]
+  /** An agent promoted the item: nothing here may settle a question or approval the user has been asked. */
+  byAgent?: true
 }
 
 export interface ActiveTurnControl {

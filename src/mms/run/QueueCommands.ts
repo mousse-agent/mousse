@@ -13,7 +13,13 @@ import type { AgentActor } from './types'
 
 export type QueueOp = 'enqueue' | 'edit' | 'remove' | 'reorder' | 'promote'
 
-export type QueueCommandStatus = 'pending' | 'effects_pending' | 'applied'
+export type QueueCommandStatus = 'pending' | 'effects_pending' | 'applied' | 'failed'
+
+/** An entry that cannot be finished is tried this many times, and then left alone (`failed`). */
+export const QUEUE_COMMAND_MAX_ATTEMPTS = 5
+
+/** Finished entries are kept this long (a retry of a request this old is not a retry), then pruned. */
+export const QUEUE_COMMAND_RETENTION_MS = 14 * 24 * 60 * 60 * 1000
 
 /** The complete change, including the side effects the item implies, captured before anything is stripped from it. */
 export interface QueueIntent {
@@ -40,6 +46,8 @@ export interface QueueIntent {
   /** Notice rows the item holds, given back when it is removed. */
   releaseInboxIds: string[]
   abandonWorkflowInvocationId?: string
+  /** The agent-supplied fields of the command (not the revision it read): a request id reused for other fields is not a retry. */
+  fingerprint?: string
 }
 
 export interface QueueCommandRow {
@@ -48,6 +56,7 @@ export interface QueueCommandRow {
   intent: QueueIntent
   status: QueueCommandStatus
   result: Record<string, unknown> | null
+  attempts: number
   createdAt: string
   appliedAt: string | null
 }
@@ -58,6 +67,7 @@ function toRow(row: Record<string, unknown>): QueueCommandRow {
     threadId: String(row.thread_id),
     intent: JSON.parse(String(row.intent)) as QueueIntent,
     status: String(row.status) as QueueCommandStatus,
+    attempts: Number(row.attempts ?? 0),
     result: typeof row.result === 'string' ? (JSON.parse(row.result) as Record<string, unknown>) : null,
     createdAt: String(row.created_at),
     appliedAt: typeof row.applied_at === 'string' ? row.applied_at : null
@@ -65,8 +75,8 @@ function toRow(row: Record<string, unknown>): QueueCommandRow {
 }
 
 /** What is kept of a change once it is applied: enough to tell a retry from a reused request id, no text. */
-function compact(intent: QueueIntent): Pick<QueueIntent, 'op' | 'threadId' | 'itemId' | 'cancelRunIds' | 'releaseInboxIds'> {
-  return { op: intent.op, threadId: intent.threadId, itemId: intent.itemId, cancelRunIds: [], releaseInboxIds: [] }
+function compact(intent: QueueIntent): Pick<QueueIntent, 'op' | 'threadId' | 'itemId' | 'cancelRunIds' | 'releaseInboxIds' | 'fingerprint'> {
+  return { op: intent.op, threadId: intent.threadId, itemId: intent.itemId, cancelRunIds: [], releaseInboxIds: [], ...(intent.fingerprint ? { fingerprint: intent.fingerprint } : {}) }
 }
 
 export class QueueCommands {
@@ -109,5 +119,31 @@ export class QueueCommands {
   /** The change is in the queue file but an effect did not commit; the result is fixed and the effects are retried. */
   markEffectsPending(row: QueueCommandRow, result: Record<string, unknown>): void {
     this.db.statement("UPDATE queue_commands SET status = 'effects_pending', result = ? WHERE command_key = ?").run(stableStringify(result), row.commandKey)
+  }
+
+  /**
+   * An attempt to finish the entry failed. After `QUEUE_COMMAND_MAX_ATTEMPTS` the entry is `failed`: no later change
+   * to the thread's queue retries it, and a retry of its key is told so. Returns whether it is now failed.
+   */
+  recordFailure(commandKey: string, message: string): boolean {
+    this.db
+      .statement(
+        `UPDATE queue_commands SET attempts = attempts + 1, last_error = ?,
+           status = CASE WHEN attempts + 1 >= ? THEN 'failed' ELSE status END
+         WHERE command_key = ? AND status IN ('pending','effects_pending')`
+      )
+      .run(message.slice(0, 500), QUEUE_COMMAND_MAX_ATTEMPTS, commandKey)
+    return this.get(commandKey)?.status === 'failed'
+  }
+
+  /** Removes finished and failed entries older than the retention. Returns how many. */
+  prune(now: number = this.db.clock()): number {
+    const before = new Date(now - QUEUE_COMMAND_RETENTION_MS).toISOString()
+    return Number(this.db.statement("DELETE FROM queue_commands WHERE status IN ('applied','failed') AND COALESCE(applied_at, created_at) < ?").run(before).changes)
+  }
+
+  /** Removes every entry of a thread that no longer exists. Returns how many. */
+  deleteForThread(threadId: string): number {
+    return Number(this.db.statement('DELETE FROM queue_commands WHERE thread_id = ?').run(threadId).changes)
   }
 }

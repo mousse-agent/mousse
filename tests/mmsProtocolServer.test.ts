@@ -1061,11 +1061,18 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
     expect(first).toMatchObject({ open: true, claimed: [], revision: expect.stringMatching(/^[0-9a-f]{16}$/) })
     expect(first.items.map((item) => item.content)).toEqual(['a', 'b'])
 
-    // The edit changes the words and chat mode only: the agent that wrote the message and its limit stay.
-    const edited = await client.request<{ item: { content: string; mode?: string; origin?: unknown; permissionMode?: string }; items: unknown[] }>('queue.edit', {
-      threadId: thread.id, itemId: a.id, content: 'a, edited', mode: 'plan', expectedRevision: first.revision
+    // A change of chat mode alone leaves the message the agent's, with its limit.
+    const moded = await client.request<{ item: { mode?: string; origin?: unknown; permissionMode?: string } }>('queue.edit', {
+      threadId: thread.id, itemId: a.id, mode: 'plan', expectedRevision: first.revision
     })
-    expect(edited.item).toMatchObject({ content: 'a, edited', mode: 'plan', permissionMode: 'ask', origin: { kind: 'agent', threadId: 'other' } })
+    expect(moded.item).toMatchObject({ mode: 'plan', permissionMode: 'ask', origin: { kind: 'agent', threadId: 'other' } })
+    // New words from a person make it the person's message: no agent origin, but the limit it carried stays.
+    const afterMode = await list()
+    const edited = await client.request<{ item: { content: string; mode?: string; origin?: unknown; permissionMode?: string }; items: unknown[] }>('queue.edit', {
+      threadId: thread.id, itemId: a.id, content: 'a, edited', expectedRevision: afterMode.revision
+    })
+    expect(edited.item).toMatchObject({ content: 'a, edited', mode: 'plan', permissionMode: 'ask' })
+    expect(edited.item.origin).toBeUndefined()
     const second = await list()
     expect(second.revision).not.toBe(first.revision)
 

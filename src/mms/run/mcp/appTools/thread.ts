@@ -5,7 +5,7 @@ import { QueueAccessError, QueueConflictError } from '../../../queue/ThreadMessa
 import { readRunResultText } from '../../delegation/hold'
 import type { RunEngine } from '../../RunEngine'
 import { TERMINAL_RUN_STATUSES, type AgentActor, type DelegationRecord, type RunRecord, type ThreadEvent } from '../../types'
-import type { AgentCreatedThread, AgentQueueCommand, AgentRunCommandResult, AgentThreadRequest, AppToolHost } from './host'
+import type { AgentCreatedThread, AgentQueueCommand, AgentQueueResult, AgentRunCommandResult, AgentThreadRequest, AppToolHost } from './host'
 import {
   CLIENT_REQUEST_ID_SCHEMA,
   json,
@@ -23,6 +23,8 @@ const THREAD_MESSAGES_DEFAULT_LIMIT = 50
 const THREAD_MESSAGES_MAX_LIMIT = 200
 /** Each message of `thread_read` view `messages` is cut to this many characters. */
 const THREAD_MESSAGE_MAX_CHARS = 4096
+/** A removed message's text is cut to this many characters in the transcript row (the event keeps more). */
+const REMOVED_TEXT_ROW_CHARS = 600
 const THREAD_LIST_DEFAULT_LIMIT = 100
 const THREAD_LIST_MAX_LIMIT = 500
 const THREAD_SEARCH_DEFAULT_LIMIT = 50
@@ -81,13 +83,22 @@ function lineageView(events: ThreadEvent[], callerThreadId: string, scope: ToolS
       if (lineageVisible(event.type) || event.type === 'delegation.status') out.push(readProjection(event))
       continue
     }
-    if (lineageVisible(event.type)) out.push(event)
+    // The text a removal took out of a queue is for the thread's own reader and a manager, not for a lineage relative.
+    if (event.type === 'agent.action') out.push(withoutRemovedText(event))
+    else if (lineageVisible(event.type)) out.push(event)
     else if (event.type === 'delegation.status') {
       const delegation = event.payload as DelegationRecord
       out.push(delegation.childThreadId === callerThreadId ? event : { ...event, payload: { ...delegation, result: null } })
     }
   }
   return out
+}
+
+function withoutRemovedText(event: ThreadEvent): ThreadEvent {
+  const payload = event.payload as Record<string, unknown> | null
+  if (!payload || typeof payload !== 'object' || !('removedText' in payload)) return event
+  const { removedText: _removedText, removedTextCut: _removedTextCut, ...rest } = payload
+  return { ...event, payload: rest }
 }
 
 /** Who may read the final text of a run: the caller itself, a manager, and the owner of a descendant or launched thread. */
@@ -387,7 +398,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
     if (takesWork) assertTakesWork(host, threadId)
   }
   /** Runs one queue command as the caller: journaled under a request key scoped to the caller's thread, so a retry returns the first result. */
-  const queueCommand = (tool: string, args: Record<string, unknown>, ctx: ToolCallContext, threadId: string, command: AgentQueueCommand, summary: string): ToolOutcome => {
+  const queueCommand = (tool: string, args: Record<string, unknown>, ctx: ToolCallContext, threadId: string, command: AgentQueueCommand, summary: string | ((result: AgentQueueResult) => string)): ToolOutcome => {
     if (!host.queueCommand) return notAvailable(tool)
     const actor = actorOf(ctx)
     let result
@@ -397,7 +408,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
       throw queueFailure(error) ?? error
     }
     // The `agent.action` event is the record; this row is its projection, added only by the call that made the change.
-    if (!result.replayed && result.recorded) showAction(host, threadId, actor, summary)
+    if (!result.replayed && result.recorded) showAction(host, threadId, actor, typeof summary === 'function' ? summary(result) : summary)
     const { item, ...rest } = result
     return json({ threadId, ...rest, ...(item ? { item: queueItemView(item) } : {}) })
   }
@@ -899,7 +910,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
     },
     {
       name: 'queue_enqueue',
-      description: 'Queue a message on a thread (default: yours); it runs as a new turn after the current one. On another thread (needs the manage agent access level and a project the profile allows) it is labelled as a message from an agent in your thread, not from the user, runs under your permission mode when that is stricter than the thread\'s own, counts toward the few agent messages a thread keeps waiting and toward the limit on agent messages in a row, and needs expectedRevision (from queue_list). Subagents are reached with continue_subagent.',
+      description: 'Queue a message on a thread (default: yours); it runs as a new turn after the current one. It is stored as an agent\'s message wherever it goes: it carries your run\'s count of agent messages in a row and your permission mode as its limit, counts toward the few agent messages a thread keeps waiting, waits behind a usage pause or a question the user has not answered, and a person\'s Stop clears it. On another thread (needs the manage agent access level and a project the profile allows) it is labelled as a message from an agent in your thread, not from the user, runs under your permission mode when that is stricter than the thread\'s own, counts toward the few agent messages a thread keeps waiting and toward the limit on agent messages in a row, and needs expectedRevision (from queue_list). Subagents are reached with continue_subagent.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -972,7 +983,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
     },
     {
       name: 'queue_remove',
-      description: 'Remove a message queued on a thread (default: yours) that no turn has started (needs the manage agent access level for another thread). Needs expectedRevision (queue_list). A message already steering the running turn cannot be removed. Removing a message you did not write on another thread, or a person\'s on yours, is recorded on the thread.',
+      description: 'Remove a message queued on a thread (default: yours) that no turn has started (needs the manage agent access level for another thread). Removing a message you did not write (a person\'s, or another agent\'s) needs the manage level on your own thread too. Needs expectedRevision (queue_list). A message already steering the running turn cannot be removed. Every removal is recorded on the thread with the text that was removed, so a person can see and recover it.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -990,12 +1001,12 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
         const itemId = requiredId(args, 'itemId')
         const threadId = args.threadId === undefined ? ctx.caller.threadId : requiredId(args, 'threadId')
         guardOtherThreadQueue(threadId, ctx, 'queue_remove', false)
-        return queueCommand('queue_remove', args, ctx, threadId, { op: 'remove', itemId, expectedRevision: requiredRevision(args) }, `removed queued message ${itemId}`)
+        return queueCommand('queue_remove', args, ctx, threadId, { op: 'remove', itemId, expectedRevision: requiredRevision(args) }, (result) => `removed queued message ${itemId}${result.removedText !== undefined ? `: "${result.removedText.length > REMOVED_TEXT_ROW_CHARS ? `${result.removedText.slice(0, REMOVED_TEXT_ROW_CHARS)}…` : result.removedText}"` : ''}`)
       }
     },
     {
       name: 'queue_reorder',
-      description: 'Put the pending messages queued on a thread (default: yours) in a new order: orderedIds names every pending item once (needs the manage agent access level for another thread). Needs expectedRevision (queue_list). Reordering changes nothing else about the messages.',
+      description: 'Put the pending messages queued on a thread (default: yours) in a new order: orderedIds names every pending item once (needs the manage agent access level for another thread). Putting a message ahead of one you did not write needs the manage level on your own thread too; moving your own messages behind others\' is always allowed. Needs expectedRevision (queue_list). Reordering changes nothing else about the messages.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1018,7 +1029,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
     },
     {
       name: 'queue_promote_to_steer',
-      description: 'Turn a queued message into guidance for the turn the thread is running now (default: your thread; needs the manage agent access level for another thread). Name the run you read (expectedRunId) and the queue revision (queue_list): if that run is not the thread\'s active run, or is paused, nothing changes. A message with a mode limit (one an agent sent or edited) joins only a run whose permission mode is no looser than that limit, and your own mode counts too: a running turn cannot be narrowed. The message joins only that run; if the run ends first it goes back to the queue and runs as its own turn.',
+      description: 'Turn a queued message into guidance for the turn the thread is running now (default: your thread; needs the manage agent access level for another thread). Refused while the user has a question or approval waiting on the thread: a steer would settle it for them.Name the run you read (expectedRunId) and the queue revision (queue_list): if that run is not the thread\'s active run, or is paused, nothing changes. A message with a mode limit (one an agent sent or edited) joins only a run whose permission mode is no looser than that limit, and your own mode counts too: a running turn cannot be narrowed. The message joins only that run; if the run ends first it goes back to the queue and runs as its own turn.',
       inputSchema: {
         type: 'object',
         properties: {

@@ -64,9 +64,11 @@ export type QueueConflictCode =
   | 'run_not_active'
   | 'run_paused'
   | 'ceiling_exceeded'
+  | 'questions_pending'
   | 'run_not_ready'
   | 'item_started'
   | 'request_conflict'
+  | 'command_failed'
 
 export class QueueConflictError extends Error {
   constructor(
@@ -358,8 +360,8 @@ export function reorderQueuedMessages(
 export interface QueuedMessagePatch {
   content?: string
   mode?: ChatMode
-  /** Who the edited text is from: set when an agent wrote it, so the item never passes for a person's. */
-  origin?: AgentOrigin
+  /** Who the edited text is from: set when an agent wrote it, so the item never passes for a person's; null when a person rewrote an agent's message and it is theirs now. */
+  origin?: AgentOrigin | null
   /** A mode the edited item must not exceed; it can only tighten what the item already had. */
   permissionMode?: PermissionMode
   /**
@@ -403,9 +405,10 @@ export function editQueuedMessage(
     content = patch.content.trim()
     if (!content && !(current.images && current.images.length > 0)) throw new QueueValidationError('Queued message content is required.')
   }
-  const { runId: _runId, ...rest } = current
+  const { runId: _runId, ...withoutRun } = current
+  const { origin: _origin, ...withoutOrigin } = patch.dropRun ? withoutRun : current
   const item: QueuedMessage = {
-    ...(patch.dropRun ? rest : current),
+    ...(patch.origin === null ? withoutOrigin : patch.dropRun ? withoutRun : current),
     content,
     ...(patch.mode !== undefined ? { mode: normalizeChatMode(patch.mode) } : {}),
     ...(patch.origin ? { origin: patch.origin } : {}),
