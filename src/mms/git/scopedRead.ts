@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { englishMessagesEnv } from './gitProcess'
 import { GIT_NULL_DEVICE } from './gitNullDevice'
 import { nonInteractiveGitEnv } from './gitEnv'
+import { touchesGitMetadata } from '../agents/gitMetadata'
 
 /**
  * The agent tools' `git_status` and `git_diff` (the Mousse MCP server's app tools and the legacy
@@ -13,15 +14,18 @@ import { nonInteractiveGitEnv } from './gitEnv'
  * - The repository is found once, from the project path, and checked before anything is read: a
  *   `.git` folder is its own repository (no `commondir`); a `.git` file is a linked worktree the
  *   common repository registered (`<common>/worktrees/<name>`) or a submodule checkout its
- *   repository names. When the agent can write in its roots, metadata it could have written is not
- *   trusted: a repository nested in the roots inside a larger one, a git dir or common dir inside
- *   the roots (other than the folder's own `.git`), alternates there, or a `.git` at another root
- *   refuse the read. Every later call names that repository (`GIT_DIR`, `GIT_WORK_TREE`) and never
+ *   repository names. Every later call names that repository (`GIT_DIR`, `GIT_WORK_TREE`) and never
  *   searches again.
+ * - The agent's file tools never change Git metadata (`agents/gitMetadata`), so with scripts off
+ *   the repository's settings, hooks, object store and worktree records are the user's. When the
+ *   agent can write in its roots, a git dir, common dir or object store there outside any `.git`
+ *   is files it could have written, and the read is refused. (With scripts on, the agent runs
+ *   commands itself, Git included: the git tools give it nothing more.)
  * - Paths are file names, never Git pathspecs (`--literal-pathspecs`), and are checked by their real
  *   path (junctions and symlinks followed): a diff takes one file inside the roots; a status lists
  *   only entries whose real path is inside them.
- * - Git runs with `core.fsmonitor` off, no hooks, every configured filter emptied and not
+ * - Git runs with `core.fsmonitor` off, no hooks (the hooks folder and every event, config-defined
+ *   hooks included), every configured filter emptied and not
  *   required, no external diff or textconv, submodules ignored, no system config (its line-ending
  *   settings passed as data), no lazy fetch, no network protocol and no prompt; the host's `GIT_*`
  *   variables are dropped, except where its config files are.
@@ -41,10 +45,23 @@ export interface ProjectGitScope {
 
 interface GitResult { code: number | null; stdout: string; stderr: string }
 
+/**
+ * Every hook event in githooks(5). Each is turned off by name as well as through `core.hooksPath`,
+ * which does not reach hooks defined in config.
+ */
+const HOOK_EVENTS = [
+  'applypatch-msg', 'pre-applypatch', 'post-applypatch', 'pre-commit', 'pre-merge-commit', 'prepare-commit-msg',
+  'commit-msg', 'post-commit', 'pre-rebase', 'post-checkout', 'post-merge', 'pre-push', 'pre-receive', 'update',
+  'proc-receive', 'post-receive', 'post-update', 'reference-transaction', 'push-to-checkout', 'pre-auto-gc',
+  'post-rewrite', 'sendemail-validate', 'fsmonitor-watchman', 'p4-changelist', 'p4-prepare-changelist',
+  'p4-post-changelist', 'p4-pre-submit', 'post-index-change'
+]
+
 /** Settings on every read: none of them can start a program or reach the network. */
 const SAFE_CONFIG = [
   '-c', 'core.fsmonitor=false',
   '-c', `core.hooksPath=${GIT_NULL_DEVICE}`,
+  ...HOOK_EVENTS.flatMap((event) => ['-c', `hook.${event}.enabled=false`]),
   '-c', 'core.quotepath=false',
   '-c', 'diff.submodule=short',
   '-c', 'status.submoduleSummary=false',
@@ -98,17 +115,22 @@ class Refused extends Error {}
  * that cannot be overridden safely refuses the read.
  */
 async function filterOverrides(repo: Repo): Promise<string[]> {
-  const run = await git(repo.top, ['config', '-z', '--name-only', '--get-regexp', '^filter\\..+\\.(clean|smudge|process|required)$'], repo)
+  const run = await git(repo.top, ['config', '-z', '--name-only', '--get-regexp', '^(filter\\..+\\.(clean|smudge|process|required)|hook\\..+\\.(command|event|enabled))$'], repo)
   if (run.code === 1) return []
   if (run.code !== 0) throw new Refused(run.stderr.trim() || 'The repository config could not be read.')
-  const names = new Set<string>()
+  const filters = new Set<string>()
+  const hooks = new Set<string>()
   for (const key of run.stdout.split('\0')) {
     if (!key) continue
-    const match = /^filter\.(.+)\.(?:clean|smudge|process|required)$/i.exec(key.trim())
-    if (!match || /[=\n\r\0]/.test(match[1]!)) throw new Refused('The repository configures a file filter that cannot be turned off for this read.')
-    names.add(match[1]!)
+    const match = /^(filter|hook)\.(.+)\.(?:clean|smudge|process|required|command|event|enabled)$/i.exec(key.trim())
+    if (!match || /[=\n\r\0]/.test(match[2]!)) throw new Refused('The repository configures a filter or hook that cannot be turned off for this read.')
+    ;(match[1]!.toLowerCase() === 'filter' ? filters : hooks).add(match[2]!)
   }
-  return [...names].flatMap((name) => ['-c', `filter.${name}.clean=`, '-c', `filter.${name}.smudge=`, '-c', `filter.${name}.process=`, '-c', `filter.${name}.required=false`])
+  return [
+    ...[...filters].flatMap((name) => ['-c', `filter.${name}.clean=`, '-c', `filter.${name}.smudge=`, '-c', `filter.${name}.process=`, '-c', `filter.${name}.required=false`]),
+    // A hook defined in config (`[hook "x"] command = …`) is also turned off by its own name.
+    ...[...hooks].flatMap((name) => ['-c', `hook.${name}.enabled=false`])
+  ]
 }
 
 /**
@@ -188,9 +210,8 @@ const NOT_OWNED = "The project's .git does not belong to this folder's repositor
  * - a `.git` file is a linked worktree its common repository registered
  *   (`<common>/worktrees/<name>`, whose `gitdir` names this file back), or a submodule checkout whose
  *   repository's `core.worktree` is this folder;
- * - when the agent can write in its roots: no git dir, common dir or alternate inside them (but the
- *   folder's own `.git`), no repository nested in a larger one at or inside them, and no `.git` at
- *   another root.
+ * - when the agent can write in its roots: no git dir, common dir or borrowed object store that its
+ *   file tools could write (inside the roots and outside any `.git`).
  */
 async function checkRepository(scope: ProjectGitScope, top: string, gitDir: string, commonDir: string, canonicalRoots: string[]): Promise<void> {
   const dotGit = join(top, '.git')
@@ -213,20 +234,15 @@ async function checkRepository(scope: ProjectGitScope, top: string, gitDir: stri
     if (!linked && !submodule) throw new Refused(NOT_OWNED)
   } else throw new Refused(NOT_OWNED)
   if (!scope.writable) return
-  const inWritable = (path: string): boolean => canonicalRoots.some((root) => inside(root, canonical(path)) !== null)
-  const untrusted = "Git metadata inside the agent's folders could be its own, so this repository is not read."
-  // The repository's own `.git` folder may sit in the roots (a project that is the repository); any
-  // other git dir or common dir there, or an object store borrowed from there, is metadata the agent could have written.
-  if (!own && (inWritable(gitDir) || inWritable(commonDir))) throw new Refused(untrusted)
-  const borrowed = alternates(canonical(commonDir))
-  if (borrowed.some((target) => inWritable(target)) || (own && inWritable(gitDir) && borrowed.length)) throw new Refused(untrusted)
-  // A repository whose folder is in the roots, nested in a larger one: its `.git` could be the agent's.
-  if (inWritable(top) && dirname(top) !== top) {
-    const outer = await git(dirname(top), ['rev-parse', '--show-toplevel'])
-    if (outer.code === 0 && outer.stdout.trim()) throw new Refused(untrusted)
+  // An agent's file tools never change Git metadata (`agents/gitMetadata`: any `.git` folder or
+  // file), so a git dir inside one is the user's. A git dir, common dir or borrowed object store
+  // elsewhere in the roots is files the agent can write, and is not trusted.
+  const agentWritable = (path: string): boolean => {
+    const real = canonical(path)
+    return canonicalRoots.some((root) => inside(root, real) !== null) && !touchesGitMetadata(real, real)
   }
-  // A `.git` at another root is another repository, never this one's.
-  if (canonicalRoots.some((root) => !sameFile(root, top) && existsSync(join(root, '.git')))) throw new Refused(untrusted)
+  if (agentWritable(gitDir) || agentWritable(commonDir) || alternates(canonical(commonDir)).some(agentWritable))
+    throw new Refused('Git metadata the agent can write (outside a .git folder) is not trusted, so this repository is not read.')
 }
 
 interface Worktree {
@@ -251,7 +267,10 @@ async function worktree(scope: ProjectGitScope): Promise<Worktree | null> {
   await checkRepository(scope, top, gitDirLine, commonLine, canonicalRoots)
   const repo: Repo = { gitDir: canonical(gitDirLine), top }
   const roots = canonicalRoots.map((root) => inside(top, root)).filter((root): root is string => root !== null)
-  return { repo, top, roots: [...new Set(roots)], canonicalRoots, settings: [...await filterOverrides(repo), ...await lineEndingSettings(repo)] }
+  // A definition that can write reads no excludes file named in config (it could name any file, and
+  // answer guesses by which untracked files it hides); the repository's `.gitignore` files apply.
+  const excludes = scope.writable ? ['-c', `core.excludesFile=${GIT_NULL_DEVICE}`] : []
+  return { repo, top, roots: [...new Set(roots)], canonicalRoots, settings: [...await filterOverrides(repo), ...await lineEndingSettings(repo), ...excludes] }
 }
 
 /** A real path inside one of the canonical roots. */

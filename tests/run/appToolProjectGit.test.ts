@@ -313,18 +313,6 @@ describe('git_status and git_diff as app tools', () => {
       await expectNothingRead(allowed, SECRET, ['secret.txt'])
     })
 
-    it("a .git folder planted in the roots that borrows the parent's objects (alternates, Opus's repro)", async () => {
-      const { top, allowed } = parentRepo()
-      execFileSync('git', ['add', 'secret.txt'], { cwd: top, stdio: 'pipe' })
-      execFileSync('git', ['commit', '-q', '-m', 'secret'], { cwd: top, stdio: 'pipe' })
-      const planted = join(allowed, '.git')
-      for (const dir of ['objects/info', 'refs/heads']) mkdirSync(join(planted, dir), { recursive: true })
-      writeFileSync(join(planted, 'HEAD'), `${commit(top)}\n`)
-      writeFileSync(join(planted, 'objects', 'info', 'alternates'), `${join(top, '.git', 'objects')}\n`)
-      writeFileSync(join(planted, 'config'), '[core]\n\trepositoryformatversion = 0\n')
-      await expectNothingRead(allowed, SECRET, ['secret.txt'])
-    })
-
     for (const variant of ['a gitdir back-pointer', 'core.worktree'] as const) {
       it(`a .git file pointing at a git dir it wrote, with a commondir into another repository and ${variant} (Grok's repro)`, async () => {
         const foreign = repo()
@@ -351,32 +339,45 @@ describe('git_status and git_diff as app tools', () => {
   })
 
   describe('hooks, required filters and line endings', () => {
-    it('the index refresh of git_diff never runs a post-index-change hook', async () => {
-      const root = repo()
-      const outside = realpathSync.native(mkdtempSync(join(tmpdir(), 'mousse-project-git-hook-')))
-      dirs.push(outside)
-      const marker = join(outside, 'hook.marker').split('\\').join('/')
-      const hook = join(root, '.git', 'hooks', 'post-index-change')
-      writeFileSync(hook, `#!/bin/sh\necho ran >> '${marker}'\n`)
-      chmodSync(hook, 0o755)
-      let stamp = Math.floor(Date.now() / 1000) + 100
-      const statDirty = () => {
-        execFileSync('git', ['checkout', '-q', '--', 'a.txt'], { cwd: root, stdio: 'pipe' })
-        rmSync(marker, { force: true })
-        writeFileSync(join(root, 'a.txt'), 'one\n')
-        stamp += 10
-        utimesSync(join(root, 'a.txt'), stamp, stamp)
-      }
-      statDirty()
-      const s = await setup({ projectPath: root, definition: { policy: policy(root), grants: grants('git_status', 'git_diff') } as DefinitionAuthority })
-      expect((await s.call('git_diff', { path: 'a.txt' })).isError).toBe(false)
-      expect((await s.call('git_status', {})).isError).toBe(false)
-      expect(existsSync(marker)).toBe(false)
-      // The probe is real: in the same state again, plain `git diff` refreshes the index and runs the hook.
-      statDirty()
-      execFileSync('git', ['diff'], { cwd: root, stdio: 'pipe' })
-      expect(existsSync(marker)).toBe(true)
-    })
+    for (const source of ['the hooks folder', "the repository's core.hooksPath", 'a hook defined in config'] as const) {
+      it(`the index refresh of git_diff never runs a post-index-change hook from ${source}`, async () => {
+        const root = repo()
+        const outside = realpathSync.native(mkdtempSync(join(tmpdir(), 'mousse-project-git-hook-')))
+        dirs.push(outside)
+        const marker = join(outside, 'hook.marker').split('\\').join('/')
+        const script = `#!/bin/sh\necho ran >> '${marker}'\n`
+        const git = (...args: string[]) => execFileSync('git', args, { cwd: root, stdio: 'pipe' })
+        if (source === 'the hooks folder') {
+          writeFileSync(join(root, '.git', 'hooks', 'post-index-change'), script)
+          chmodSync(join(root, '.git', 'hooks', 'post-index-change'), 0o755)
+        } else if (source === "the repository's core.hooksPath") {
+          mkdirSync(join(outside, 'hooks'))
+          writeFileSync(join(outside, 'hooks', 'post-index-change'), script)
+          chmodSync(join(outside, 'hooks', 'post-index-change'), 0o755)
+          git('config', 'core.hooksPath', join(outside, 'hooks').split('\\').join('/'))
+        } else {
+          git('config', 'hook.evil.command', `echo ran >> '${marker}'`)
+          git('config', 'hook.evil.event', 'post-index-change')
+        }
+        let stamp = Math.floor(Date.now() / 1000) + 100
+        const statDirty = () => {
+          git('checkout', '-q', '--', 'a.txt')
+          rmSync(marker, { force: true })
+          writeFileSync(join(root, 'a.txt'), 'one\n')
+          stamp += 10
+          utimesSync(join(root, 'a.txt'), stamp, stamp)
+        }
+        statDirty()
+        const s = await setup({ projectPath: root, definition: { policy: policy(root), grants: grants('git_status', 'git_diff') } as DefinitionAuthority })
+        expect((await s.call('git_diff', { path: 'a.txt' })).isError).toBe(false)
+        expect((await s.call('git_status', {})).isError).toBe(false)
+        expect(existsSync(marker)).toBe(false)
+        // The probe is real: in the same state again, plain `git diff` refreshes the index and runs the hook.
+        statDirty()
+        git('diff')
+        expect(existsSync(marker)).toBe(true)
+      })
+    }
 
     it('a required filter (as Git LFS sets) neither runs nor fails the read: files are compared as stored', async () => {
       const root = repo()
@@ -429,6 +430,36 @@ describe('git_status and git_diff as app tools', () => {
           else process.env[key] = value
         }
       }
+    })
+  })
+
+  describe('a definition that can write, in a repository inside another one', () => {
+    it('a thread worktree under a repository (as Mousse keeps them) is read', async () => {
+      const top = repo()
+      const worktree = join(top, '.mousse', 'worktrees', 'agents', 'x')
+      execFileSync('git', ['worktree', 'add', '-q', worktree], { cwd: top, stdio: 'pipe' })
+      writeFileSync(join(worktree, 'a.txt'), 'worktree change\n')
+      const s = await setup({ projectPath: worktree, definition: { policy: policy(worktree), grants: grants('git_status', 'git_diff') } as DefinitionAuthority })
+      expect(await s.call('git_diff', { path: 'a.txt' })).toMatchObject({ isError: false, text: expect.stringContaining('+worktree change') })
+      expect(JSON.parse((await s.call('git_status', {})).text)).toMatchObject({ isRepo: true, changes: [expect.objectContaining({ path: 'a.txt' })] })
+    })
+
+    it('a project inside a folder that is itself a repository (a home folder kept in Git) is read', async () => {
+      const home = repo()
+      const project = join(home, 'code', 'proj')
+      mkdirSync(project, { recursive: true })
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: project, stdio: 'pipe' })
+      git('init', '-q')
+      git('config', 'user.email', 'test@example.invalid')
+      git('config', 'user.name', 'Test')
+      git('config', 'commit.gpgsign', 'false')
+      writeFileSync(join(project, 'p.txt'), 'one\n')
+      git('add', 'p.txt')
+      git('commit', '-q', '-m', 'p')
+      writeFileSync(join(project, 'p.txt'), 'two\n')
+      const s = await setup({ projectPath: project, definition: { policy: policy(project), grants: grants('git_status', 'git_diff') } as DefinitionAuthority })
+      expect(await s.call('git_diff', { path: 'p.txt' })).toMatchObject({ isError: false, text: expect.stringContaining('+two') })
+      expect(JSON.parse((await s.call('git_status', {})).text).changes.map((change: { path: string }) => change.path)).toEqual(['p.txt'])
     })
   })
 
