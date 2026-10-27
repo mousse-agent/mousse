@@ -282,16 +282,16 @@ describe('resumed runtimes keep getting the turn preamble', () => {
       modelPinned: true, mode: 'agent', prompt, messages: [], signal: new AbortController().signal, ...(nativeHistory ? { nativeHistory } : {})
     })
     const mcp = (token: string) => ({ url: 'http://127.0.0.1:4567/mcp', token })
-    await adapter.startTurn(input('/review the engine'), sink(), control, bridged(preamble, 'GUIDE', mcp('tok-1')))
+    await adapter.startTurn(input('review the engine'), sink(), control, bridged(preamble, 'GUIDE', mcp('tok-1')))
     // A new bearer reopens the session: the process restarts and resumes the saved ACP session.
-    await adapter.startTurn(input('/review the adapters', 'history+'), sink(), control, bridged(preamble, 'GUIDE', mcp('tok-2')))
+    await adapter.startTurn(input('review the adapters', 'history+'), sink(), control, bridged(preamble, 'GUIDE', mcp('tok-2')))
     expect(launch).toHaveBeenCalledTimes(2)
     expect(sent.filter((frame) => frame.method === 'session/new' || frame.method === 'session/resume').map((frame) => frame.method))
       .toEqual(['session/new', 'session/resume'])
     const prompts = sent.filter((frame) => frame.method === 'session/prompt').map((frame) => (frame.params.prompt as Array<{ text: string }>)[0].text)
     expect(prompts).toEqual([
-      `<mousse_orchestration_instructions>\nGUIDE\n</mousse_orchestration_instructions>\n\n${preamble}\n\nCurrent request:\n/review the engine`,
-      `${preamble}\n\nCurrent request:\n/review the adapters`
+      `<mousse_orchestration_instructions>\nGUIDE\n</mousse_orchestration_instructions>\n\n${preamble}\n\nCurrent request:\nreview the engine`,
+      `${preamble}\n\nCurrent request:\nreview the adapters`
     ])
   })
 })
