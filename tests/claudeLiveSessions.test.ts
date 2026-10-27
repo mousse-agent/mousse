@@ -23,7 +23,7 @@ afterEach(() => {
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
 })
 
-function fixture(timings: Partial<LiveTimings> = {}, cli = new FakeClaudeCli()) {
+function fixture(timings: Partial<LiveTimings> = {}, cli = new FakeClaudeCli(), usageLimitHoldMs?: number) {
   const home = mkdtempSync(join(tmpdir(), 'claude-live-test-'))
   homes.push(home)
   const binary = join(home, 'claude')
@@ -35,6 +35,7 @@ function fixture(timings: Partial<LiveTimings> = {}, cli = new FakeClaudeCli()) 
   const service = new ClaudeSubscriptionProviderService(home, questions, {
     query: cli.query,
     live: { noticeDelayMs: 10, ...timings },
+    usageLimitHoldMs,
     runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
   })
   const host = { backgroundWork: vi.fn<(threadId: string, active: boolean) => void>(), continuationStarted: vi.fn<NonNullable<ClaudeLiveHost['continuationStarted']>>(), notice: vi.fn<NonNullable<ClaudeLiveHost['notice']>>() }
@@ -2212,4 +2213,76 @@ describe('closing the service', () => {
 
 beforeEach(() => {
   vi.useRealTimers()
+})
+
+describe('a plan usage limit', () => {
+  const rejected = (extra: Record<string, unknown> = {}) => ({
+    type: 'rate_limit_event',
+    rate_limit_info: { status: 'rejected', rateLimitType: 'five_hour', resetsAt: Math.floor(Date.now() / 1000) + 3600, ...extra },
+    uuid: 'event',
+    session_id: SESSION
+  })
+
+  it('a rejected window and then an error result end the turn with the typed limit', async () => {
+    const f = fixture()
+    f.cli.reply = (message, process) => process.emit(rejected(), resultFrame({ uuids: [String(message.uuid)], error: 'limit' }))
+    const error = await f.chat().catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ code: 'provider_usage_limit', details: { provider: 'claude', limitKind: 'five_hour', estimated: false } })
+  })
+
+  it('a rejected window and then a success is no error', async () => {
+    const f = fixture()
+    f.cli.reply = (message, process) => {
+      process.emit(rejected())
+      process.answer(String(message.uuid), 'covered by extra usage')
+    }
+    expect(await f.chat()).toBe('covered by extra usage')
+  })
+
+  it('a window Claude Code can cover with extra usage is not a limit', async () => {
+    const f = fixture()
+    f.cli.reply = (message, process) => process.emit(rejected({ overageStatus: 'allowed' }), resultFrame({ uuids: [String(message.uuid)], error: 'boom' }))
+    const error = await f.chat().catch((caught: unknown) => caught)
+    expect(error).not.toMatchObject({ code: 'provider_usage_limit' })
+    expect((error as Error).message).toBe('boom')
+  })
+
+  it('a turn Claude Code holds after a rejected window is interrupted by Mousse and fails with the limit', async () => {
+    const f = fixture({}, new FakeClaudeCli(), 150)
+    f.cli.reply = (message, process) => {
+      process.emit(rejected())
+      process.onInterrupt = (self) => self.emit(resultFrame({ uuids: [String(message.uuid)], error: 'interrupted', terminalReason: 'aborted_streaming' }))
+    }
+    const error = await f.chat({ history: 'H1' }).catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ code: 'provider_usage_limit', details: { limitKind: 'five_hour' } })
+    expect(f.cli.last.interrupts).toBe(1)
+    // The process keeps the session: the next turn runs on it and reads only its own result.
+    f.service.commitFailed('thread', 'H1 + request')
+    f.cli.reply = (message, process) => process.answer(String(message.uuid), 'continued')
+    expect(await f.chat({ history: 'H1 + request' })).toBe('continued')
+    expect(f.cli.processes).toHaveLength(1)
+  })
+
+  it('a user Stop during the hold cancels the turn; Mousse does not end it as a limit', async () => {
+    const f = fixture({}, new FakeClaudeCli(), 600)
+    f.cli.reply = (_message, process) => process.emit(rejected())
+    const stop = new AbortController()
+    const turn = f.chat({ signal: stop.signal })
+    await inputs(f.cli, 1)
+    await later(150)
+    stop.abort()
+    const error = await turn.catch((caught: unknown) => caught)
+    expect(error).not.toMatchObject({ code: 'provider_usage_limit' })
+  })
+
+  it('a rejected window that arrives with no turn open is dropped', async () => {
+    const f = fixture()
+    await f.turn()
+    f.cli.last.emit(rejected())
+    await later(30)
+    f.cli.reply = (message, process) => process.emit(resultFrame({ uuids: [String(message.uuid)], error: 'boom' }))
+    const error = await f.chat({ history: '' }).catch((caught: unknown) => caught)
+    expect(error).not.toMatchObject({ code: 'provider_usage_limit' })
+    expect((error as Error).message).toBe('boom')
+  })
 })

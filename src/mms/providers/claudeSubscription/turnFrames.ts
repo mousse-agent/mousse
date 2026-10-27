@@ -2,6 +2,7 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { ProviderToolEvent } from '../../../shared/agentActivity'
 import { recordSubagentCall, toolResultText } from '../../../shared/subagentTools'
 import type { ClaudeMetricsCollector } from './metrics'
+import { observeRateLimit, RejectedWindows } from './usageLimit'
 
 /** Where a turn's frames are reported; the slice of the chat input the stream needs. */
 export interface TurnFrameSink {
@@ -23,6 +24,8 @@ export class TurnFrames {
   private readonly toolInputs = new Map<string, unknown>()
   /** Where the text of the current segment starts (a steer starts a new one); a result fills it in when it streamed nothing. */
   segmentStart = 0
+  /** The plan windows Claude Code rejected during this turn (a one-shot query; a live run keeps its own). */
+  readonly rateLimits = new RejectedWindows()
 
   constructor(
     private readonly sink: TurnFrameSink,
@@ -42,6 +45,7 @@ export class TurnFrames {
 
   observe(message: SDKMessage): void {
     this.metrics.observe(message)
+    observeRateLimit(message, this.rateLimits)
     this.sessionId = message.session_id || this.sessionId
     if (message.type === 'stream_event') {
       const event = message.event

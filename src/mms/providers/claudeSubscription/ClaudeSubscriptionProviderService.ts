@@ -50,6 +50,7 @@ import { claudeMcpToolBlocked, claudeProxiedMcpServer, type ClaudeTurnIntegratio
 import { claudeChildToolDenial } from './childPolicy'
 import { CancelInProgress, DEFAULT_LIVE_TIMINGS, LiveSession, type LiveRun, type LiveTimings } from './liveSession'
 import { TurnFrames } from './turnFrames'
+import { USAGE_LIMIT_HOLD_MS, usageLimitFromResult, usageLimitFromWindows, type RejectedWindows } from './usageLimit'
 import type { ChildTurnPolicy } from '../../run/adapters/ProviderAdapter'
 
 export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
@@ -160,6 +161,8 @@ type Dependencies = {
    * for tests.
    */
   live?: false | Partial<LiveTimings>
+  /** How long a turn Claude Code holds after a rejected plan window runs before Mousse ends it (tests). */
+  usageLimitHoldMs?: number
   query?: (input: { prompt: string | AsyncIterable<SDKUserMessage>; options: Options }) => Query
   runAuth?: (
     binary: string,
@@ -926,6 +929,9 @@ export class ClaudeSubscriptionProviderService {
   commitInterrupted(threadId: string, history: string): void {
     this.liveCommits.delete(threadId)
     this.recordBoundary(threadId, history)
+    this.fingerprintInterruptedSession(threadId, history)
+  }
+  private fingerprintInterruptedSession(threadId: string, history: string): void {
     const sessionId = this.interruptedSessions.get(threadId)
     this.interruptedSessions.delete(threadId)
     const saved = this.settings.sessions?.[threadId]
@@ -936,9 +942,11 @@ export class ClaudeSubscriptionProviderService {
   /**
    * A turn failed (not a stop) after its message reached Claude. `history` is the canonical history as
    * the failed turn left it, which is what the next request will carry unless something is undone first.
+   * A turn a usage limit ended also leaves its session resumable, like a stopped one.
    */
   commitFailed(threadId: string, history: string): void {
     this.recordBoundary(threadId, history)
+    this.fingerprintInterruptedSession(threadId, history)
   }
   private recordBoundary(threadId: string, history: string): void {
     const live = this.live.get(threadId)
@@ -1404,6 +1412,17 @@ export class ClaudeSubscriptionProviderService {
         void query.interrupt().catch(() => cancel())
       }
     }
+    // Claude Code holds a turn after a rejected plan window and may never answer it: past the hold
+    // time Mousse interrupts the turn itself. The turn's own controller stays untouched, so a user
+    // Stop remains distinct, and the result that follows is read as the usage limit.
+    const endHeldTurn = () => {
+      const seen = liveRun ? liveRun.rateLimits : frames.rateLimits
+      if (seen.hold || controller.signal.aborted || (liveRun && (liveRun.settled || liveRun.abandoned || liveRun.resultSeen))) return
+      if (!seen.held(Date.now(), this.dependencies.usageLimitHoldMs ?? USAGE_LIMIT_HOLD_MS)) return
+      seen.hold = true
+      if (live && liveRun) void live.interrupt().catch(() => undefined)
+      else if (query) void query.interrupt().catch(() => cancel())
+    }
     const planTurn = input.mode === 'plan'
     const readOnlyChild = input.child?.readOnly === true
     // Plan turns and read-only children route every call through the hook and canUseTool's
@@ -1487,10 +1506,11 @@ export class ClaudeSubscriptionProviderService {
       // A steer collected before the live run exists would have nowhere to go, so a live turn starts
       // polling only once its message is pushed.
       const startSteering = (): void => {
-        if (!input.drainSteer || steerTimer) return
+        if (steerTimer) return
         steerTimer = setInterval(() => {
           try {
             collectSteer()
+            endHeldTurn()
           } catch {
             cancel()
           }
@@ -1581,7 +1601,7 @@ export class ClaudeSubscriptionProviderService {
         controller.signal.throwIfAborted()
         const result = outcome.result
         if (result) {
-          const failure = resultFailure(result)
+          const failure = claudeResultFailure(result, liveRun.rateLimits)
           if (failure) throw failure
           if (frames.segmentEmpty && 'result' in result) {
             frames.text += result.result
@@ -1618,10 +1638,10 @@ export class ClaudeSubscriptionProviderService {
               frames.observe(message)
               if (message.type === 'result') {
                 if (
-                  (message.subtype !== 'success' || message.is_error) &&
+                  (message.subtype !== 'success' || message.is_error || frames.rateLimits.hold) &&
                   !(interruptRequested && steers.length)
                 )
-                  throw resultFailure(message)
+                  throw claudeResultFailure(message, frames.rateLimits)
                 if (frames.text.length === turnTextLength && 'result' in message) {
                   frames.text += message.result
                   input.onText(frames.text)
@@ -1630,6 +1650,8 @@ export class ClaudeSubscriptionProviderService {
               }
             }
           } catch (error) {
+            // The query may end with an error of its own after the interrupt that ended a held turn.
+            if (frames.rateLimits.hold && !controller.signal.aborted && !(error instanceof AppError && error.code === 'provider_usage_limit')) throw usageLimitFromWindows(frames.rateLimits)
             // The SDK throws after the error result an interrupt produces; a steer resumes from here.
             if (!(interruptRequested && steers.length) || controller.signal.aborted) throw error
           }
@@ -1693,8 +1715,9 @@ export class ClaudeSubscriptionProviderService {
       try {
         const baseline = metrics.snapshot()
         const sessionId = frames.sessionId
-        // A turn the user stopped once the SDK had a session: the adapter may fingerprint it (`commitInterrupted`).
-        const stopped = !success && sessionId !== undefined && input.signal?.aborted === true
+        // A turn the user stopped, or that a usage limit ended, once the SDK had a session: its request is in
+        // that session, and the adapter may fingerprint it (`commitInterrupted`, `commitFailed`).
+        const stopped = !success && sessionId !== undefined && (input.signal?.aborted === true || (liveRun ? liveRun.rateLimits : frames.rateLimits).recorded)
         const savedSessionId = baseline?.sessionId ?? (stopped ? sessionId : undefined)
         if (savedSessionId && this.configured()) {
           const current = this.settings.sessions?.[input.threadId]
@@ -1760,6 +1783,11 @@ export class ClaudeSubscriptionProviderService {
     this.closeLive()
     this.readyToCommit.clear()
   }
+}
+
+/** `resultFailure`, except that a plan usage limit (or a turn Mousse ended because Claude Code held it) is a `provider_usage_limit`. */
+function claudeResultFailure(message: SDKResultMessage, seen: RejectedWindows): Error | undefined {
+  return usageLimitFromResult(message, seen) ?? resultFailure(message)
 }
 
 /** The error a result frame stands for, or undefined when the turn succeeded. */
