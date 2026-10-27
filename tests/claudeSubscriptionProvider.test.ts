@@ -6,6 +6,10 @@ import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ClaudeSubscriptionProviderService, claudeModelOptions } from '../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
+import { ProfileDatabase } from '../src/mms/run/db/ProfileDatabase'
+import { EffectOutbox } from '../src/mms/run/EffectOutbox'
+import { RunEngine } from '../src/mms/run/RunEngine'
+import { RunStore } from '../src/mms/run/RunStore'
 import { readUsageLimit } from '../src/mms/orchestrator/providerErrors'
 
 const homes: string[] = []
@@ -488,6 +492,108 @@ describe('Claude Subscription native provider', () => {
     it('says a call that still reaches the prompt under Full access is Claude Code\'s own safety check', async () => {
       const { prompts } = await probe('full', ['Bash'])
       expect(prompts[0].prompt).toMatch(/^Claude Code asks even in Full access: its own safety check\./)
+    })
+
+    describe('"Always for this thread"', () => {
+      /** Binds the question service to a Run Engine that runs the test's thread (`thread`) as a profile does. */
+      async function bind(questions: UserQuestionService, initialMode: 'ask' | 'accept_edits' | 'full', initialApprovals: 'ask' | 'grants') {
+        /** What the run's binding says; a test changes it between turns, as a mode change does. */
+        const state = { permissionMode: initialMode, approvals: initialApprovals }
+        const profileHome = mkdtempSync(join(tmpdir(), 'claude-approvals-'))
+        homes.push(profileHome)
+        const db = new ProfileDatabase({ profileHome })
+        const store = new RunStore(db)
+        const engine = new RunEngine({ store, pid: 1, outbox: new EffectOutbox(store) })
+        engine.reconcileOnBoot()
+        questions.setApprovalStore({
+          store: engine.approvals,
+          context: (threadId) => {
+            const run = engine.getActiveRun(threadId)
+            return run ? { runId: run.runId, instanceId: 'claude-subscription', provider: 'claude', origin: 'interactive', ...state } : null
+          },
+          effectDelivery: () => false,
+          continuationDue: () => undefined
+        })
+        const sent = await engine.dispatch({ kind: 'send', threadId: 'thread', clientRequestId: 'claude-run', source: 'gui' })
+        if (sent.status !== 'accepted') throw new Error('send rejected')
+        engine.markStarting(sent.runId)
+        engine.markRunning(sent.runId)
+        return { engine, state, close: () => db.close() }
+      }
+
+      it('is offered on a Bash prompt, answers the same command again, and still asks for another command or another shell', async () => {
+        const decisions: Array<[string, string]> = []
+        const { service, home, questions } = fixture((input) => {
+          const q = fakeQuery()
+          q[Symbol.asyncIterator] = async function* () {
+            const ask = async (tool: string, command: string) => {
+              decisions.push([`${tool}: ${command}`, (await input.options.canUseTool!(tool, { command }, { signal: new AbortController().signal } as never)).behavior])
+            }
+            await ask('Bash', 'npm test')
+            await ask('Bash', 'npm test')
+            await ask('Bash', 'npm test --watch')
+            await ask('PowerShell', 'npm test')
+            yield result as never
+          }
+          return q
+        })
+        const { engine, close } = await bind(questions, 'accept_edits', 'ask')
+        try {
+          const prompts: Array<{ prompt: string; options: string[] }> = []
+          questions.on('pending', ({ requestId, questions: asked }) => {
+            prompts.push({ prompt: asked[0].prompt, options: asked[0].options.map((option) => option.id) })
+            const always = asked[0].prompt.includes('(Bash)') && asked[0].prompt.endsWith('{"command":"npm test"}')
+            questions.submitAnswers(requestId, { permission: always ? 'allow_always' : 'reject' }, { kind: 'user' })
+          })
+          await service.chat(chatInput(home, 'accept_edits'))
+          expect(decisions).toEqual([
+            ['Bash: npm test', 'allow'],
+            ['Bash: npm test', 'allow'],
+            ['Bash: npm test --watch', 'deny'],
+            ['PowerShell: npm test', 'deny']
+          ])
+          // The repeat was answered by the rule: three prompts for four calls, each offering "always".
+          expect(prompts).toHaveLength(3)
+          expect(prompts.every((entry) => entry.options.join() === 'allow,allow_always,reject')).toBe(true)
+          expect(engine.approvals.listRules('thread')).toEqual([expect.objectContaining({ permissionKey: 'claude:command', grantedUnder: 'accept_edits' })])
+        } finally {
+          close()
+        }
+      })
+
+      it('offers no "always" on Claude Code\'s own safety prompt under Full access, and a rule made under Ask does not answer it', async () => {
+        const decisions: string[] = []
+        const { service, home, questions } = fixture((input) => {
+          const q = fakeQuery()
+          q[Symbol.asyncIterator] = async function* () {
+            decisions.push((await input.options.canUseTool!('Bash', { command: 'npm test' }, { signal: new AbortController().signal } as never)).behavior)
+            yield result as never
+          }
+          return q
+        })
+        const { engine, state, close } = await bind(questions, 'ask', 'ask')
+        try {
+          const prompts: Array<{ prompt: string; options: string[] }> = []
+          questions.on('pending', ({ requestId, questions: asked }) => {
+            prompts.push({ prompt: asked[0].prompt, options: asked[0].options.map((option) => option.id) })
+            questions.submitAnswers(requestId, { permission: asked[0].options.some((option) => option.id === 'allow_always') ? 'allow_always' : 'reject' }, { kind: 'user' })
+          })
+          // Under Ask the user says "always" to this command...
+          await service.chat(chatInput(home, 'ask'))
+          expect(decisions).toEqual(['allow'])
+          expect(engine.approvals.listRules('thread')).toHaveLength(1)
+          // ...and later the thread runs under Full access, where only Claude Code's own check can still ask.
+          state.permissionMode = 'full'
+          state.approvals = 'grants'
+          await service.chat(chatInput(home, 'full'))
+          expect(decisions).toEqual(['allow', 'deny'])
+          expect(prompts).toHaveLength(2)
+          expect(prompts[1]!.prompt).toMatch(/^Claude Code asks even in Full access: its own safety check\./)
+          expect(prompts[1]!.options).toEqual(['allow', 'reject'])
+        } finally {
+          close()
+        }
+      })
     })
 
     it('runs Full access as Auto-accept edits when the project\'s Claude Code settings forbid bypassing permissions', async () => {

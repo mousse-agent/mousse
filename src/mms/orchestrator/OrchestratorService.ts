@@ -123,6 +123,7 @@ import {
   type Agent,
   type AgentOrigin,
   type AgentStatus,
+  type ApprovalRuleInfo,
   type ChatImageAttachment,
   type ChatMode,
   type ChatMessage,
@@ -1641,7 +1642,15 @@ export class OrchestratorService extends EventEmitter {
         const run = engine.getActiveRun(threadId)
         if (!run) return null
         const binding = engine.bindingForRun(run.runId)
-        return { runId: run.runId, instanceId: binding?.instanceId ?? '', provider: binding?.driver ?? '', origin: binding ? policyOrigin(binding.policy) : 'interactive' }
+        return {
+          runId: run.runId,
+          instanceId: binding?.instanceId ?? '',
+          provider: binding?.driver ?? '',
+          origin: binding ? policyOrigin(binding.policy) : 'interactive',
+          // No binding, no recorded mode: ask (the strictest), and never a run that skips asking.
+          permissionMode: binding?.policy.permissionMode ?? 'ask',
+          approvals: binding?.policy.approvals ?? 'ask'
+        }
       },
       effectDelivery: () => this.effectsEnabled(),
       continuationDue: (due, answeredBy) => this.startApprovalContinuation(due, answeredBy)
@@ -3487,6 +3496,31 @@ export class OrchestratorService extends EventEmitter {
       console.warn('permission mode change could not be recorded as an event', { threadId, error: error instanceof Error ? error.message : String(error) })
     }
     return updated
+  }
+
+  /**
+   * The thread's "Always for this thread" rules (SPEC §17.8), each with whether it applies at the
+   * thread's mode now. A thread without the Run Engine has none.
+   */
+  listApprovalRules(threadId: string): ApprovalRuleInfo[] {
+    const approvals = this.runEngine?.approvals
+    if (!approvals) return []
+    const mode = this.requestedPermissionMode(threadId)
+    return approvals.listRules(threadId).map((rule) => ({
+      id: rule.fingerprint,
+      permissionKey: rule.permissionKey,
+      action: rule.action,
+      summary: rule.summary,
+      grantedUnder: rule.grantedUnder,
+      active: !isStricter(mode, rule.grantedUnder),
+      createdAt: rule.createdAt
+    }))
+  }
+
+  /** Revokes one rule of the thread (by id) or all of them. Only this thread's rules are reachable. */
+  clearApprovalRules(threadId: string, ruleId?: string): { removed: number } {
+    const approvals = this.runEngine?.approvals
+    return { removed: approvals ? approvals.revokeRules(threadId, ruleId) : 0 }
   }
 
   /**

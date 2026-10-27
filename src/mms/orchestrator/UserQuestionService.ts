@@ -12,8 +12,9 @@
 
 import { EventEmitter } from 'events'
 import { redactSecrets } from '../../shared/errors'
-import type { TurnOrigin } from '../../shared/harness/types'
-import type { PermissionAction } from '../../shared/permissionMode'
+import type { RunPolicy, TurnOrigin } from '../../shared/harness/types'
+import { ALWAYS_OPTION_ID, ALWAYS_OPTION_LABEL } from '../../shared/permissionKeys'
+import type { PermissionAction, PermissionMode } from '../../shared/permissionMode'
 import type { PendingApprovalInfo, PendingUserQuestions, UserQuestionAnswers } from '../../shared/types'
 import {
   canAnswerApproval,
@@ -73,6 +74,10 @@ export interface ApprovalContext {
   instanceId: string
   provider: string
   origin: TurnOrigin
+  /** The permission mode the run asks under (its binding's effective mode): what a standing rule is granted and checked against. */
+  permissionMode: PermissionMode
+  /** The run's approvals policy: a standing rule only answers where the run asks (`ask`). */
+  approvals: RunPolicy['approvals']
 }
 
 export type SettleResult =
@@ -184,6 +189,8 @@ export class UserQuestionService extends EventEmitter {
     const binding = options.approval && threadId !== '__unbound__' ? this.binding : null
     const context = binding ? this.contextOf(binding, threadId) : null
     let record: ApprovalRecord | null = null
+    // What the card shows and what the request means; "Always for this thread" is added only to a saved request.
+    let shown = { questions, approval: options.approval }
     if (binding && options.approval) {
       const approval = options.approval
       const fingerprint = approval.tool
@@ -202,6 +209,31 @@ export class UserQuestionService extends EventEmitter {
         const first = questions[0]
         if (allow && first) return Promise.resolve({ [first.id]: allow.id })
       }
+      // A standing rule of this thread answers the exact request it was made for, and nothing else: the
+      // fingerprint must match (so a request without one never does), the run must be one that asks, and
+      // a check the provider will not let Mousse skip (`reason`) always asks. The rule only removes the
+      // ask the mode would have made.
+      const eligible = Boolean(context?.runId && fingerprint && !approval.reason && context.approvals === 'ask')
+      if (eligible && context && fingerprint) {
+        try {
+          const rule = binding.store.matchRule(threadId, approval.permissionKey, fingerprint, context.permissionMode)
+          const allow = approval.options.find((option) => option.decision === 'allow' && option.scope !== 'always')
+          const first = questions[0]
+          if (rule && allow && first) {
+            binding.store.noteRuleApplied(threadId, context.runId, rule)
+            return Promise.resolve({ [first.id]: allow.id })
+          }
+        } catch (error) {
+          // A rule that cannot be read or recorded answers nothing: the user is asked.
+          console.warn('an approval rule could not be checked; asking instead', { threadId, error: error instanceof Error ? error.message : String(error) })
+        }
+      }
+      // The same exact-request condition decides whether "Always for this thread" is offered, and it needs a
+      // way to answer the provider with its own once-only option.
+      const once = approval.options.find((option) => option.decision === 'allow' && option.scope !== 'always')
+      const first = questions[0]
+      const offerAlways = eligible && once !== undefined && first !== undefined && !first.options?.some((option) => option.id === ALWAYS_OPTION_ID)
+      if (offerAlways) shown = withAlwaysOption(questions, approval)
       try {
         record = binding.store.create({
           requestId,
@@ -213,9 +245,11 @@ export class UserQuestionService extends EventEmitter {
           permissionKey: approval.permissionKey,
           fingerprint,
           reason: approval.reason ?? null,
-          questions: storedQuestions(questions, approval.options)
+          permissionMode: context?.permissionMode ?? null,
+          questions: storedQuestions(shown.questions, shown.approval!.options)
         })
       } catch (error) {
+        shown = { questions, approval: options.approval }
         // An approval that cannot be saved still has to be answerable: it falls back to memory.
         console.warn('approval request could not be saved; keeping it in memory', { threadId, error: error instanceof Error ? error.message : String(error) })
       }
@@ -248,15 +282,15 @@ export class UserQuestionService extends EventEmitter {
 
       this.pending.set(requestId, {
         threadId,
-        questions,
-        ...(options.approval ? { approval: options.approval } : {}),
+        questions: shown.questions,
+        ...(shown.approval ? { approval: shown.approval } : {}),
         durable,
         resolve,
         reject,
         ...(timer ? { timer } : {})
       })
       // One `pending` event per request: a client that resubscribes reads the snapshot, not a replay.
-      this.emit('pending', record ? this.viewOf(record) : ({ requestId, threadId, questions } satisfies PendingUserQuestions & { threadId: string }))
+      this.emit('pending', record ? this.viewOf(record) : ({ requestId, threadId, questions: shown.questions } satisfies PendingUserQuestions & { threadId: string }))
     })
   }
 
@@ -652,6 +686,22 @@ export class UserQuestionService extends EventEmitter {
       waiter.reject(new Error('Daemon restarted; pending question interrupted and is not answerable.'))
     }
     return { cleared: n, survivesDaemonRestart: false }
+  }
+}
+
+/**
+ * The request with "Always for this thread" added after the option that allows once. The option is
+ * Mousse's: when it is chosen the provider is answered with its own once-only option (`ThreadApprovals`),
+ * and the rule is recorded in the same transaction.
+ */
+function withAlwaysOption(questions: PendingUserQuestions['questions'], approval: ApprovalTag): { questions: PendingUserQuestions['questions']; approval: ApprovalTag } {
+  const [first, ...rest] = questions
+  if (!first) return { questions, approval }
+  const options = first.options ?? []
+  const at = options.findIndex((option) => approval.options.some((meaning) => meaning.id === option.id && meaning.decision === 'allow' && meaning.scope !== 'always')) + 1
+  return {
+    questions: [{ ...first, options: [...options.slice(0, at), { id: ALWAYS_OPTION_ID, label: ALWAYS_OPTION_LABEL }, ...options.slice(at)] }, ...rest],
+    approval: { ...approval, options: [...approval.options, { id: ALWAYS_OPTION_ID, decision: 'allow', scope: 'always' }] }
   }
 }
 

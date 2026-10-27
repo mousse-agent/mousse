@@ -6,6 +6,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { usageLimitError } from '../../src/mms/orchestrator/providerErrors'
 import { UserQuestionService, type ApprovalTag } from '../../src/mms/orchestrator/UserQuestionService'
 import { approvalFingerprint } from '../../src/mms/run/approvalFingerprint'
+import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
+import { EffectOutbox } from '../../src/mms/run/EffectOutbox'
+import { RunEngine } from '../../src/mms/run/RunEngine'
+import { RunStore } from '../../src/mms/run/RunStore'
 import { CodexAppServerExitedError } from '../../src/mms/providers/codex/CodexAppServerClient'
 import { CodexTurnFailure } from '../../src/mms/providers/codex/CodexProviderService'
 import { decideUsageLimit } from '../../src/mms/run/pausePolicy'
@@ -670,6 +674,79 @@ describe('CodexAdapter', () => {
       expect(plain).toMatch(/^[0-9a-f]{64}$/)
       expect(rooted).not.toBe(plain)
       expect(otherRoot).not.toBe(rooted)
+    })
+  })
+
+  describe('"Always for this thread" on Codex approvals', () => {
+    const command = (id: string, text: string, cwd = '/w'): TranscriptFrame[] => [
+      inn({ id: `srv-${id}`, method: 'item/commandExecution/requestApproval', params: { kind: 'command', threadId: T, turnId: 'turn-1', itemId: `cmd-${id}`, startedAtMs: 0, environmentId: null, command: text, cwd, reason: null } })
+    ]
+    const reply = (id: string, decision: string): TranscriptFrame => out({ id: `srv-${id}`, result: { decision } })
+    /** The question service bound to a Run Engine that runs `thread-1`, as a profile binds it. */
+    const bound = async (mode: 'ask' | 'accept_edits' = 'ask') => {
+      const db = new ProfileDatabase({ profileHome: home })
+      const store = new RunStore(db)
+      const engine = new RunEngine({ store, pid: 1, outbox: new EffectOutbox(store) })
+      engine.reconcileOnBoot()
+      questions.setLineageSource((threadId) => engine.delegations.getLineage(threadId))
+      questions.setApprovalStore({
+        store: engine.approvals,
+        context: (threadId) => {
+          const run = engine.getActiveRun(threadId)
+          return run ? { runId: run.runId, instanceId: 'codex', provider: 'codex', origin: 'interactive', permissionMode: mode, approvals: 'ask' } : null
+        },
+        effectDelivery: () => false,
+        continuationDue: () => undefined
+      })
+      const sent = await engine.dispatch({ kind: 'send', threadId: 'thread-1', clientRequestId: 'codex-run', source: 'gui' })
+      if (sent.status !== 'accepted') throw new Error('send rejected')
+      engine.markStarting(sent.runId)
+      engine.markRunning(sent.runId)
+      return { engine, close: () => db.close() }
+    }
+
+    it('answers the exact command again without asking, and still asks for another command, folder or file change', async () => {
+      const { engine, close } = await bound()
+      try {
+        const replay = transport([
+          ...handshake(), ...threadStart(4), ...turnStart(5, 'go'),
+          ...command('1', 'make test'), reply('1', 'accept'),
+          ...command('2', 'make test'), reply('2', 'accept'),
+          ...command('3', 'make test --watch'), reply('3', 'decline'),
+          ...command('4', 'make test', '/elsewhere'), reply('4', 'decline'),
+          ...message('msg-1', ['ok']), completed('completed')
+        ])
+        const codex = service(replay)
+        const asked = answerQuestions((request) => ({ permission: request.questions[0]!.options.some((option) => option.id === 'allow_always') && request.questions[0]!.prompt.includes('make test\n') && !request.questions[0]!.prompt.includes('elsewhere') ? 'allow_always' : 'reject' }))
+        await new CodexAdapter(() => codex).startTurn(input({ prompt: 'go' }), recordingSink(), control(), host())
+        replay.assertDone()
+        // The first, the longer command and the other folder were asked; the repeat of the first was not.
+        expect(asked.map((request) => request.questions[0]!.prompt.split('\n')[1])).toEqual(['make test', 'make test --watch', 'make test'])
+        expect(asked[0]!.questions[0]!.options.map((option) => option.id)).toEqual(['allow', 'allow_always', 'reject'])
+        expect(engine.approvals.listRules('thread-1')).toEqual([expect.objectContaining({ permissionKey: 'codex:command', grantedUnder: 'ask' })])
+      } finally {
+        close()
+      }
+    })
+
+    it('a command Codex gave no text for is asked every time and offers no "always"', async () => {
+      const { engine, close } = await bound()
+      try {
+        const noText = (id: string): TranscriptFrame[] => [
+          inn({ id: `srv-${id}`, method: 'item/commandExecution/requestApproval', params: { kind: 'command', threadId: T, turnId: 'turn-1', itemId: `cmd-${id}`, startedAtMs: 0, environmentId: null } }),
+          reply(id, 'decline')
+        ]
+        const replay = transport([...handshake(), ...threadStart(4), ...turnStart(5, 'go'), ...noText('1'), ...noText('2'), ...message('msg-1', ['ok']), completed('completed')])
+        const codex = service(replay)
+        const asked = answerQuestions(() => ({ permission: 'reject' }))
+        await new CodexAdapter(() => codex).startTurn(input({ prompt: 'go' }), recordingSink(), control(), host())
+        replay.assertDone()
+        expect(asked).toHaveLength(2)
+        expect(asked.map((request) => request.questions[0]!.options.map((option) => option.id))).toEqual([['allow', 'reject'], ['allow', 'reject']])
+        expect(engine.approvals.listRules('thread-1')).toEqual([])
+      } finally {
+        close()
+      }
     })
   })
 
