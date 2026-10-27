@@ -1,6 +1,6 @@
 import type { BrowserRuntimePort } from '../../../../shared/browser/runtime'
 import type { PermissionMode } from '../../../../shared/permissionMode'
-import type { AgentAccessSettings } from '../../../../shared/settings'
+import type { AgentAccessLevel, AgentAccessSettings } from '../../../../shared/settings'
 import type { ApprovalTag } from '../../../orchestrator/UserQuestionService'
 import type { ChatMessage, DocumentOpenPayload, PendingUserQuestions, Thread, UserQuestionAnswers } from '../../../../shared/types'
 import type { DevGuiTools } from '../../../devgui/DevGuiTools'
@@ -38,6 +38,42 @@ export interface AgentSendResult {
   replayed: boolean
   /** The mode the message was sent in: Plan when the thread is kept in Plan, whatever the sender asked for. */
   mode?: 'agent' | 'plan'
+}
+
+/** What `thread_create` asks for, checked for shape by the tool. */
+export interface AgentThreadRequest {
+  projectId: string
+  title?: string
+  /** `project`: the project's own folder. `new_worktree`: a worktree of its own, made when the thread first runs. */
+  workspace: 'project' | 'new_worktree'
+  /** Both together name the thread's model; neither: the caller's own selection. */
+  instanceId?: string
+  model?: string
+  firstMessage?: string
+  /** Mode of the first message; defaults to agent. */
+  mode?: 'agent' | 'plan'
+}
+
+/** A thread an agent created, as the creation decided it (never as the retry's arguments say). */
+export interface AgentCreatedThread {
+  threadId: string
+  projectId: string
+  title: string
+  /** What was asked for and recorded on the thread. */
+  workspace: 'project' | 'new_worktree'
+  /**
+   * Where the thread really works: on a Git project a turn that edits gets a worktree of its own, whichever workspace was
+   * asked for; on any other project it works in the project folder.
+   */
+  runsIn: 'own_worktree' | 'project_folder'
+  /** The model the thread runs; null: the profile's default. */
+  model: { instanceId: string; model: string } | null
+  /** The mode the thread's turns run in: no wider than the creator's. */
+  permissionMode: PermissionMode
+  /** The first message: what became of it. Absent when none was asked for. */
+  firstMessage?: ({ sent: true } & AgentSendResult) | { sent: false; reason: string }
+  /** The same `clientRequestId` created this thread before; nothing new was made. */
+  replayed: boolean
 }
 
 /** What a Stop or a steer an agent asked for did to the run it named. */
@@ -129,6 +165,22 @@ export interface AppToolHost extends DelegationToolsHost {
    * when the key made none. A retry past the send cap is answered with it.
    */
   earlierSend?(threadId: string, clientRequestId: string): AgentSendResult | undefined
+  /**
+   * Creates a thread for `actor` (`thread_create`): in the project's folder or its own worktree, on the model
+   * asked for or the caller's, with a permission mode no wider than the caller's, recorded as launched by the
+   * caller's thread (never nested under it), and optionally with a first message sent as the caller's. The
+   * creation is decided and recorded before anything exists, so a retry with the same `clientRequestId` finishes
+   * or returns that one thread, whatever the caller's run or the settings look like by then. `accessLevel` is
+   * the level the caller's credential was granted.
+   */
+  createThread?(input: AgentThreadRequest, options: { clientRequestId: string; actor: AgentActor; accessLevel: AgentAccessLevel }): Promise<AgentCreatedThread>
+  /**
+   * The key has a stored creation already: a retry finishes that one thread (or its first message) and does not use up a place
+   * under the caller's cap on new threads.
+   */
+  creationStarted?(clientRequestId: string): boolean
+  /** Adds a note row to the thread's transcript (the creator's: what it launched, and on which model). */
+  noteOnThread?(threadId: string, text: string): void
   /** Stops run `runId` of another thread and what is below it, as `actor`'s Stop (`thread_interrupt`). */
   stopRun?(threadId: string, runId: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult>
   /** Steers run `runId` of another thread with `text` as `actor`'s message (`thread_steer`). */

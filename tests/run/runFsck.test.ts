@@ -195,6 +195,19 @@ describe('RunFsck', () => {
     expect(codes()).toEqual(['receipt_unknown_run'])
   })
 
+  it('a thread_create receipt names a thread, not a run, and is not a finding', () => {
+    const store = seed()
+    store.putReceipt({
+      clientRequestId: 'thread_create:t:mcp:k',
+      threadId: 't',
+      commandKind: 'thread_create',
+      status: 'accepted',
+      result: { threadId: 'new', fingerprint: '[]', intent: {} },
+      createdAt: '2026-10-12T00:00:00.000Z'
+    })
+    expect(codes()).toEqual([])
+  })
+
   it('multiple_active_runs: two active runs on one thread', () => {
     const store = seed()
     const a = store.createRun({ threadId: 't', source: 'gui' })

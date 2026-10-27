@@ -17,7 +17,7 @@ import { webTools } from './web'
 export * from './types'
 export * from './registry'
 export * from './turns'
-export type { AgentActionDetails, AgentRunCommandResult, AgentSendResult, AppToolHost, ThreadSearchHit } from './host'
+export type { AgentActionDetails, AgentCreatedThread, AgentRunCommandResult, AgentSendResult, AgentThreadRequest, AppToolHost, ThreadSearchHit } from './host'
 export { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX, agentMessageText } from './agentMessage'
 export {
   delegationToolDefinitions,

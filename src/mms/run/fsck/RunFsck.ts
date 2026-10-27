@@ -276,12 +276,13 @@ function eventSequenceFindings(db: ProfileDatabase): FsckFinding[] {
   return findings
 }
 
+/** A `thread_create` receipt records the launch of a thread, not a run, so it names none (SPEC §15.1). */
 function receiptsForUnknownRuns(db: ProfileDatabase): FsckFinding[] {
   const findings: FsckFinding[] = []
   const rows = db
     .statement(
       `SELECT client_request_id, thread_id, command_kind, result FROM receipts
-       WHERE status = 'accepted' ORDER BY created_at, client_request_id`
+       WHERE status = 'accepted' AND command_kind <> 'thread_create' ORDER BY created_at, client_request_id`
     )
     .all()
   const exists = db.statement('SELECT 1 AS found FROM runs WHERE run_id = ?')

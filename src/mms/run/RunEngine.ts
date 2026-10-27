@@ -4,6 +4,7 @@ import { isStricter, type PermissionMode } from '../../shared/permissionMode'
 import { narrowAgentAccess, type AgentAccessLevel } from '../../shared/settings'
 import { DaemonEpoch } from './DaemonEpoch'
 import { CommandRejection, fail, reject, RunStoreError } from './db/RunStoreError'
+import { inheritedAgentHops } from './agentHops'
 import { isFencedSource, isFollowUpSource, isResumeSource } from './delegation/sources'
 import { cancelAcknowledgedWakes, recoverWakesOnBoot } from './delegation/wake'
 import { Delegations } from './Delegations'
@@ -1718,10 +1719,14 @@ export class RunEngine extends EventEmitter {
       if (command.bindDelivery && this.approvals.deliverableCount(command.bindDelivery.requestIds) === 0) return refuse('approvals_already_delivered')
       const settlement = command.settleApprovals ? this.approvals.settleForSend(command.threadId, command.settleApprovals) : null
       const continuationOf = command.continuationOfRunId
+      // A run that carries on agent work (a provider's continuation, the resume after a pause) keeps the count of agent
+      // messages in a row; it is not itself an agent's message.
+      const carriedHops = command.actor ? undefined : inheritedAgentHops(store, command.threadId, command.source, continuationOf)
       const outcome: RunOutcome = {
         ...(continuationOf ? { continuationOf, ...(resuming ? { resumedFromPause: command.source === 'resume' ? 'auto' as const : 'user' as const } : {}) } : {}),
         // Remembered with the run, so a message an agent sent is still known as one when it starts later.
-        ...(command.actor ? { sentByAgent: true as const, agentHops: command.actor.hops ?? 1 } : {})
+        ...(command.actor ? { sentByAgent: true as const, agentHops: command.actor.hops ?? 1 } : {}),
+        ...(carriedHops !== undefined ? { agentHops: carriedHops } : {})
       }
       const run = store.createRun({
         threadId: command.threadId,

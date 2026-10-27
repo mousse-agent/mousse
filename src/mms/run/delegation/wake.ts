@@ -4,6 +4,7 @@ import { RunStoreError } from '../db/RunStoreError'
 import { Delegations } from '../Delegations'
 import { toEffect, type EffectOutbox } from '../EffectOutbox'
 import { Inbox } from '../Inbox'
+import { inheritedAgentHops } from '../agentHops'
 import type { RunStore } from '../RunStore'
 import { writeTerminalRun } from '../terminal'
 import {
@@ -234,7 +235,14 @@ export function wakeThreads(
         const active = store.getActiveRun(threadId)
         if (!active) {
           if (hasQueuedWake(store, threadId)) return
-          const run = store.createRun({ threadId, source: 'wake', clientRequestId: `wake:${rows[0].inboxId}` })
+          // The wake carries on the work that delegated: a chain of agent messages is not reset by it (SPEC §15.1).
+          const carriedHops = inheritedAgentHops(store, threadId, 'wake')
+          const run = store.createRun({
+            threadId,
+            source: 'wake',
+            clientRequestId: `wake:${rows[0].inboxId}`,
+            ...(carriedHops !== undefined ? { outcome: { agentHops: carriedHops } } : {})
+          })
           const payload: WakeTurnPayload = {
             kind: 'wake',
             threadId,

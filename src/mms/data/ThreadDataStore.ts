@@ -273,6 +273,16 @@ export class ThreadDataStore extends EventEmitter {
     projectId?: string,
     projectPath?: string,
     opts?: {
+      /**
+       * The id the thread gets, for a command that decided it before creating anything and may have to
+       * finish creating it after a crash. An id that already names a thread is refused.
+       */
+      id?: string
+      /**
+       * The thread counts as started from the first write: it is listed, and the app's "New chat" never reuses it as an
+       * empty draft. For a thread something other than a person's first message creates.
+       */
+      started?: boolean
       worktreeEnabled?: boolean
       lineage?: ThreadLineage
       modelOverride?: ModelOverride
@@ -286,9 +296,10 @@ export class ThreadDataStore extends EventEmitter {
       scheduledJobId?: string
     }
   ): Thread {
+    const id = opts?.id ?? uuidv4()
+    if (opts?.id && this.getThread(opts.id)) throw new Error(`Thread ${opts.id} already exists`)
     this.invalidateListCache()
     const now = new Date().toISOString()
-    const id = uuidv4()
     const meta: ThreadMeta = {
       id,
       name,
@@ -297,6 +308,7 @@ export class ThreadDataStore extends EventEmitter {
       updatedAt: now,
       order: this.nextThreadOrder(projectId, projectPath)
     }
+    if (opts?.started === true) meta.startedAt = now
     if (opts?.worktreeEnabled === true) meta.worktreeEnabled = true
     if (opts?.lineage) meta.lineage = structuredClone(opts.lineage)
     if (opts?.createdByThreadId) meta.createdByThreadId = opts.createdByThreadId
@@ -352,6 +364,8 @@ export class ThreadDataStore extends EventEmitter {
     if (!meta.projectId) this.removeFromStandaloneIndex(id)
     rmSync(threadDir, { recursive: true, force: true })
     this.invalidateListCache()
+    // `created` announced it; clients must hear it is gone.
+    this.emit('discarded', { id })
   }
 
   /**

@@ -77,7 +77,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     // The fake host offers no browser, skills, quick actions, web or dev GUI: only the tools it can serve are listed.
     expect(names).toEqual(['answer_subagent', 'ask_user', 'continue_subagent', 'create_task', 'delegate_task', 'integrate_delegation', 'list_subagents', 'list_tasks',
       'present_plan', 'publish_applet', 'queue_enqueue', 'queue_list', 'task_cancel', 'task_status', 'thread_fork',
-      'thread_interrupt', 'thread_merge_back', 'thread_read', 'update_task'])
+      'thread_interrupt', 'thread_merge_back', 'thread_read', 'thread_wait', 'update_task'])
 
     const read = await rpc(server.url, attachment.token, call(4, 'thread_read'))
     expect(read.body.result.isError).toBeUndefined()

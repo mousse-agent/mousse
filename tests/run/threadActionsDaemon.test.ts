@@ -933,7 +933,7 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
   })
 
   describe('callers that are capped', () => {
-    it('a thread a channel drives is held at lineage: the four tools are not listed, are refused if called, and nothing reaches the target', async () => {
+    it('a thread a channel drives is held at lineage: send and steer are not listed; they and wait are refused for an unrelated thread, and nothing reaches the target', async () => {
       const seen: Record<string, unknown> = {}
       const w = world(async (_input, mcp) => {
         seen.listed = await names(mcp!)
@@ -947,7 +947,9 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       w.d.store.updateThreadMeta(w.parent.id, { accessCeiling: 'lineage' })
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
       expect(w.credentials.listForThread(w.parent.id).map((row) => row.accessLevel)).toEqual(['lineage'])
-      for (const name of ['thread_send', 'thread_steer', 'thread_wait']) expect(seen.listed as string[], name).not.toContain(name)
+      for (const name of ['thread_send', 'thread_steer', 'thread_create']) expect(seen.listed as string[], name).not.toContain(name)
+      // Waiting is listed at every level (a thread the caller launched or one below it needs no level); an unrelated thread is still refused.
+      expect(seen.listed as string[]).toContain('thread_wait')
       for (const key of ['send', 'steer', 'wait']) expect((seen[key] as Awaited<ReturnType<typeof rpc>>).error, key).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
       expect(w.d.engine.listRuns(w.other.id)).toEqual([])
       expect(w.d.engine.tools.listForRun(w.latestRun(w.parent.id).runId).filter((entry) => /^thread_(send|steer|wait)$/.test(entry.tool))).toEqual([])
