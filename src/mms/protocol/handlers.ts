@@ -1,3 +1,4 @@
+import type { StorageCleanupPlanToken } from '../../shared/storage'
 import { validateAppletAppearance } from '../../shared/appletAppearance'
 import { appletJsonBytes, APPLET_STATE_LIMIT } from '../../shared/applets'
 import { ConversationActionService } from '../actions/ConversationActionService'
@@ -849,6 +850,21 @@ function buildSendInput(
     return req
   }
   return content
+}
+
+function badPlan(message: string): AppError {
+  return knownAppError({ code: 'storage_plan_invalid', message }, { category: 'invalid', retryable: false })
+}
+
+/** The token a dry run issued, as a client returns it. Anything else is refused rather than guessed. */
+function asPlanToken(value: unknown): StorageCleanupPlanToken {
+  const raw = isObject(value) ? value : {}
+  const time = (input: unknown, name: string): number => {
+    if (typeof input !== 'number' || !Number.isFinite(input) || input < 0) throw badPlan(`Invalid plan ${name}`)
+    return input
+  }
+  if (!Array.isArray(raw.keys) || raw.keys.length > 20_000 || raw.keys.some((key) => typeof key !== 'string' || key.length === 0 || key.length > 512)) throw badPlan('Invalid plan keys')
+  return { issuedAt: time(raw.issuedAt, 'time'), expiresAt: time(raw.expiresAt, 'expiry'), policyDigest: asString(raw.policyDigest, 'policyDigest', 128), keys: raw.keys as string[] }
 }
 
 function lifecycleExpectedGeneration(params: Record<string, unknown>): number | undefined {
@@ -3243,7 +3259,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'storage.policy': {
       const cleanup = ctx.mms.lifecycle.cleanup
-      return { trash: cleanup.policy(), trashSweepStatus: cleanup.sweepStatus(), policy: ctx.mms.storagePolicy.policy(), clockSuspended: ctx.mms.storageCleanup.clockSuspended() }
+      return { trash: cleanup.policy(), trashSweepStatus: cleanup.sweepStatus(), policy: ctx.mms.storagePolicy.policy(), clockSuspended: ctx.mms.storageCleanup.clockSuspended(), reviewRecommended: ctx.mms.storagePolicy.reviewPending() }
+    }
+    // The notice about the recommended rules is dismissed; the rules stay as they are.
+    case 'storage.reviewDismiss': {
+      ctx.mms.storagePolicy.dismissReview(ctx.connection?.clientType === 'gui')
+      return { reviewRecommended: false }
     }
     case 'storage.configure': {
       const p = isObject(params) ? params : {}
@@ -3263,11 +3284,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       return { policy }
     }
     // Any local client may run it: it only applies rules a person already configured.
-    case 'storage.cleanup.run':
-      return { report: await ctx.mms.storageCleanup.run('manual') }
+    // With a `token` from the dry run it removes only what that plan named, and only if it is still eligible.
+    case 'storage.cleanup.run': {
+      const p = isObject(params) ? params : {}
+      return { report: await ctx.mms.storageCleanup.run('manual', p.token === undefined ? undefined : { plan: asPlanToken(p.token) }) }
+    }
     // Dry run: what a run would remove or keep now. Changes nothing, so it is open to any local client too.
+    // The token is what a confirmed run is bounded by.
     case 'storage.cleanup.plan':
-      return { plan: await ctx.mms.storageCleanup.plan() }
+      return await ctx.mms.storageCleanup.planWithToken()
     case 'storage.cleanup.lastReport':
       return { report: ctx.mms.storageCleanup.lastReport() }
     // Totals by project, thread and kind, from the cache (a scan only on `refresh` or the first call). Ids and names, never a path.

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { STORAGE_POLICY_DEFAULTS, storagePolicyHasRule, type StoragePolicy } from '../src/shared/storage'
+import { STORAGE_POLICY_DEFAULTS, STORAGE_POLICY_EXISTING_INSTALL, storagePolicyHasRule, type StoragePolicy } from '../src/shared/storage'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
 import { StoragePolicyStore } from '../src/mms/lifecycle/StoragePolicyStore'
 import { StorageSweepClock, STORAGE_CLOCK_BACKWARD_TOLERANCE_MS } from '../src/mms/lifecycle/sweepClock'
@@ -75,10 +75,10 @@ describe('StoragePolicyStore', () => {
   it('changes its digest when a rule changes and not when nothing does', () => {
     const f = fixture()
     const defaults = f.policy.digest()
-    f.policy.configure(valid(), true)
+    f.policy.configure(valid({ inactiveDays: 45 }), true)
     const saved = f.policy.digest()
     expect(saved).not.toBe(defaults)
-    f.policy.configure(valid(), true); expect(f.policy.digest()).toBe(saved)
+    f.policy.configure(valid({ inactiveDays: 45 }), true); expect(f.policy.digest()).toBe(saved)
     f.policy.configure(valid({ inactiveDays: 31 }), true); expect(f.policy.digest()).not.toBe(saved)
   })
 
@@ -117,9 +117,9 @@ describe('policy snapshot', () => {
     const f = fixture()
     const before = f.policy.snapshot()
     expect(before).toEqual({ policy: STORAGE_POLICY_DEFAULTS, digest: f.policy.digest() })
-    f.policy.configure(valid(), true)
+    f.policy.configure(valid({ inactiveDays: 45 }), true)
     const after = f.policy.snapshot()
-    expect(after.policy).toEqual(valid()); expect(after.digest).not.toBe(before.digest); expect(after.digest).toBe(f.policy.digest())
+    expect(after.policy).toEqual(valid({ inactiveDays: 45 })); expect(after.digest).not.toBe(before.digest); expect(after.digest).toBe(f.policy.digest())
     expect(before.policy).toEqual(STORAGE_POLICY_DEFAULTS) // an earlier snapshot is not changed by a later save
   })
 })
@@ -178,3 +178,57 @@ describe('storagePolicyHasRule', () => {
 })
 
 const HOUR_MS = 3_600_000
+
+describe('first start after the recommended rules arrive', () => {
+  it('gives a profile that was in use what it had before, saved, with a review pending', () => {
+    const f = fixture()
+    expect(f.policy.initialize(() => true)).toBe('existing')
+    expect(f.policy.policy()).toEqual(STORAGE_POLICY_EXISTING_INSTALL)
+    expect(JSON.parse(readFileSync(join(f.store.root, 'storage-policy.json'), 'utf8'))).toEqual(STORAGE_POLICY_EXISTING_INSTALL)
+    expect(STORAGE_POLICY_EXISTING_INSTALL.worktrees).toEqual({ removeWithDeletedThreads: true, inactiveDays: null, removeMerged: false })
+    expect(STORAGE_POLICY_EXISTING_INSTALL.browser.captureDays).toBeNull()
+    expect(f.policy.reviewPending()).toBe(true)
+  })
+
+  it('gives a new profile the recommended rules, saved, with nothing to review', () => {
+    const f = fixture()
+    expect(f.policy.initialize(() => false)).toBe('new')
+    expect(f.policy.policy()).toEqual(STORAGE_POLICY_DEFAULTS)
+    expect(existsSync(join(f.store.root, 'storage-policy.json'))).toBe(true)
+    expect(f.policy.reviewPending()).toBe(false)
+  })
+
+  it('is decided once: a later thread, a second call and a restart change nothing', () => {
+    const f = fixture()
+    let used = false
+    expect(f.policy.initialize(() => used)).toBe('new'); used = true
+    expect(f.policy.initialize(() => used)).toBe('present')
+    expect(new StoragePolicyStore(f.store, f.clock).policy()).toEqual(STORAGE_POLICY_DEFAULTS)
+    const existing = fixture(); existing.policy.initialize(() => true)
+    expect(existing.policy.initialize(() => false)).toBe('present')
+    expect(existing.policy.policy()).toEqual(STORAGE_POLICY_EXISTING_INSTALL)
+  })
+
+  it('never replaces a policy that was already saved', () => {
+    const f = fixture(); f.policy.configure(valid({ inactiveDays: 45 }), true)
+    expect(f.policy.initialize(() => true)).toBe('present')
+    expect(f.policy.policy()).toEqual(valid({ inactiveDays: 45 })); expect(f.policy.reviewPending()).toBe(false)
+  })
+
+  it('ends the review when the person saves a policy or dismisses the notice, and only a person can dismiss', () => {
+    const saved = fixture(); saved.policy.initialize(() => true)
+    saved.policy.configure(valid(), true); expect(saved.policy.reviewPending()).toBe(false)
+    const dismissed = fixture(); dismissed.policy.initialize(() => true)
+    expect(() => dismissed.policy.dismissReview(false)).toThrow(); expect(dismissed.policy.reviewPending()).toBe(true)
+    dismissed.policy.dismissReview(true); expect(dismissed.policy.reviewPending()).toBe(false)
+    expect(dismissed.policy.policy()).toEqual(STORAGE_POLICY_EXISTING_INSTALL)
+  })
+
+  it('dismissing the notice does not lift a clock pause, which only saving a policy does', () => {
+    const f = fixture(); f.policy.initialize(() => true)
+    f.clockState.now -= 600_000; f.clock.check()
+    expect(f.clock.suspended()).toBe(true)
+    f.policy.dismissReview(true); expect(f.clock.suspended()).toBe(true)
+    f.policy.configure(valid(), true); expect(f.clock.suspended()).toBe(false)
+  })
+})

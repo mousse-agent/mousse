@@ -1250,6 +1250,9 @@ export class MmsProfileServices {
     await this.platform.workflowRuns.startRecovery()
     this.undoRetention.start()
     this.pullRequestWatch.start()
+    // A profile with no storage policy gets one now: what it had before for a profile in use, the recommended rules for a new one.
+    try { this.storagePolicy.initialize(() => this.threads.lifecycleStore.list().length > 0 || this.threads.listAllThreads().length > 0) }
+    catch { /* The policy is read again by every run; one that cannot be written is reported there. */ }
     // The storage service is the only scheduler; it runs the trash sweep inside its own run.
     this.storageCleanup.start()
     this.storageUsage.start()

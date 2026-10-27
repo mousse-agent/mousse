@@ -665,9 +665,11 @@ const api = {
     }
   },
   storage: {
-    policy: (): Promise<{ trash: import('../shared/resourceLifecycle').TrashRetentionPolicy; trashSweepStatus: { suspended: boolean; reason?: string }; policy: import('../shared/storage').StoragePolicy; clockSuspended: boolean }> => storageInvoke('storage:policy'),
+    policy: (): Promise<{ trash: import('../shared/resourceLifecycle').TrashRetentionPolicy; trashSweepStatus: { suspended: boolean; reason?: string }; policy: import('../shared/storage').StoragePolicy; clockSuspended: boolean; reviewRecommended?: boolean }> => storageInvoke('storage:policy'),
+    reviewDismiss: (): Promise<{ reviewRecommended: false }> => storageInvoke('storage:reviewDismiss'),
     configure: (policy: import('../shared/storage').StoragePolicy): Promise<{ policy: import('../shared/storage').StoragePolicy }> => storageInvoke('storage:configure', policy),
-    cleanupRun: (): Promise<{ report: import('../shared/storage').StorageCleanupReport }> => storageInvoke('storage:cleanupRun'),
+    cleanupPlan: (): Promise<{ plan: import('../shared/storage').StorageCleanupPlanItem[]; token: import('../shared/storage').StorageCleanupPlanToken }> => storageInvoke('storage:cleanupPlan'),
+    cleanupRun: (token?: import('../shared/storage').StorageCleanupPlanToken): Promise<{ report: import('../shared/storage').StorageCleanupReport }> => storageInvoke('storage:cleanupRun', token),
     cleanupLastReport: (): Promise<{ report: import('../shared/storage').StorageCleanupReport | null }> => storageInvoke('storage:cleanupLastReport'),
     usage: (options?: { refresh?: boolean }): Promise<import('../shared/storage').StorageUsageSnapshot> => storageInvoke('storage:usage', options)
   },

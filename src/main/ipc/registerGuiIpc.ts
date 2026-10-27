@@ -1069,9 +1069,12 @@ export function registerGuiIpc(
   registerStorageHandler('threads:inventory', async (_e, threadId?: string) => guiMms.request('threads.inventory', { threadId }))
   registerStorageHandler('threads:configureTrash', async (_e, policy: { graceDays: number; automaticPurge: boolean }) => guiMms.request('threads.configureTrash', policy))
   registerStorageHandler('storage:policy', async () => guiMms.request('storage.policy', {}))
+  registerStorageHandler('storage:reviewDismiss', async () => guiMms.request('storage.reviewDismiss', {}))
   registerStorageHandler('storage:configure', async (_e, policy: unknown) => guiMms.request('storage.configure', { policy }))
+  // The dry run measures what a run would remove, so it can take as long as the scan phase of a run.
+  registerStorageHandler('storage:cleanupPlan', async () => guiMms.request('storage.cleanup.plan', {}, 5 * 60_000))
   // A run may purge large trees; it must not hit the 60 s default.
-  registerStorageHandler('storage:cleanupRun', async () => guiMms.request('storage.cleanup.run', {}, 15 * 60_000))
+  registerStorageHandler('storage:cleanupRun', async (_e, token?: unknown) => guiMms.request('storage.cleanup.run', token === undefined ? {} : { token }, 15 * 60_000))
   registerStorageHandler('storage:cleanupLastReport', async () => guiMms.request('storage.cleanup.lastReport', {}))
   // The first call on a profile measures it, which can take most of the scan budget.
   registerStorageHandler('storage:usage', async (_e, options?: { refresh?: boolean }) =>

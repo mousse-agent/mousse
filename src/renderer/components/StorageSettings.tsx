@@ -1,30 +1,42 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { errorDiagnostic, knownAppError, normalizeAppError, parseErrorInfo, type AppErrorShape } from '../../shared/errors'
 import type { TaskLifecycleRecord, TrashRetentionPolicy } from '../../shared/resourceLifecycle'
-import { Select } from './ui/Select'
-import { Trash2 } from '../lib/icons'
+import { storagePolicyHasRule, type StoragePolicy } from '../../shared/storage'
+import { parseStoragePolicy, parseStoragePolicyReply } from '../../shared/storageReply'
 import { trashCount } from '../lib/trashInventory'
-import { SettingsGroup, SettingsRow } from './settings/SettingsRow'
+import { setStorageReviewPending } from '../lib/storageReview'
+import { RecommendedRulesNotice, recommendedPolicy } from './storage/RecommendedRules'
+import { StorageCleanupSection } from './storage/StorageCleanupSection'
+import { StoragePolicyRows } from './storage/StoragePolicyRows'
+import { StorageUsageSection } from './storage/StorageUsageSection'
 import '../styles/storage.css'
-
-const PRESET_DAYS = [7, 30, 90]
 
 export function StorageSettings() {
   const [records, setRecords] = useState<TaskLifecycleRecord[]>([])
-  const [policy, setPolicy] = useState<TrashRetentionPolicy>()
-  const [suspended, setSuspended] = useState(false)
+  const [trash, setTrash] = useState<TrashRetentionPolicy>()
+  const [trashPaused, setTrashPaused] = useState(false)
+  const [policy, setPolicy] = useState<StoragePolicy>()
+  const [storagePaused, setStoragePaused] = useState(false)
+  const [reviewRecommended, setReviewRecommended] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [usageKey, setUsageKey] = useState(0)
   const mounted = useRef(true)
   const busyRef = useRef(false)
   const inFlight = useRef<Promise<void> | null>(null)
   const reload = useCallback((): Promise<void> => {
     if (inFlight.current) return inFlight.current
-    const request = window.mousse.threads.inventory().then((result) => {
+    const request = Promise.all([window.mousse.threads.inventory(), window.mousse.storage.policy()]).then(([inventory, stored]) => {
+      // A reply that does not look like a policy is refused before it reaches a control.
+      const reply = parseStoragePolicyReply(stored)
       if (!mounted.current) return
-      setRecords(result.lifecycles)
-      setPolicy(result.trashPolicy)
-      setSuspended(result.trashSweepStatus.suspended)
+      setRecords(inventory.lifecycles)
+      setTrash(reply.trash)
+      setTrashPaused(reply.trashSweepStatus.suspended)
+      setPolicy(reply.policy)
+      setStoragePaused(reply.clockSuspended)
+      setReviewRecommended(reply.reviewRecommended)
+      setStorageReviewPending(reply.reviewRecommended)
     }).finally(() => { if (inFlight.current === request) inFlight.current = null })
     inFlight.current = request
     return request
@@ -72,53 +84,38 @@ export function StorageSettings() {
       if (mounted.current) setBusy(false)
     }
   }
-  const savePolicy = (next: TrashRetentionPolicy) => void run(async () => {
-    setPolicy(next)
+  const saveTrash = (next: TrashRetentionPolicy) => void run(async () => {
+    setTrash(next)
     await window.mousse.threads.configureTrash(next)
   })
-  const choosePolicy = (value: string) => {
-    if (!policy) return
-    savePolicy(value === 'never' ? { ...policy, automaticPurge: false } : { ...policy, automaticPurge: true, graceDays: Number(value) })
-  }
+  // Saving also lifts a clock pause on the time-based rules, so Resume is the same call with the same values.
+  const savePolicy = (next: StoragePolicy) => void run(async () => {
+    setPolicy(next)
+    const saved = await window.mousse.storage.configure(next)
+    if (mounted.current) setPolicy(parseStoragePolicy(saved.policy))
+  })
 
-  const inTrash = trashCount(records)
-  const selectValue = !policy ? '' : policy.automaticPurge ? String(policy.graceDays) : 'never'
-  const customDays = policy?.automaticPurge && !PRESET_DAYS.includes(policy.graceDays) ? policy.graceDays : undefined
-  const autoPaused = Boolean(policy?.automaticPurge && suspended)
+  // Dismissing leaves every rule as it is; turning the recommended rules on is an ordinary save.
+  const dismissReview = () => void run(async () => { await window.mousse.storage.reviewDismiss() })
+  const hasRule = Boolean(policy && trash && storagePolicyHasRule(policy, trash))
 
   return <section className="settings-section storage-settings">
-    <SettingsGroup title="Trash" icon={Trash2}>
-      <SettingsRow
-        data-testid="storage-auto-empty"
-        title="Empty trash automatically"
-        htmlFor="storage-auto-empty-select"
-        description={autoPaused ? 'Paused after a system clock change.' : trashDescription(inTrash)}
-        control={<>
-          {autoPaused && policy && <button type="button" className="settings-btn" disabled={busy} onClick={() => savePolicy(policy)}>Resume</button>}
-          <Select
-            id="storage-auto-empty-select"
-            data-testid="storage-auto-empty-select"
-            value={selectValue}
-            disabled={busy || !policy}
-            placeholder="Loading…"
-            onChange={choosePolicy}
-            options={[
-              { value: 'never', label: 'Never' },
-              ...PRESET_DAYS.map((days) => ({ value: String(days), label: `After ${days} days` })),
-              ...(customDays !== undefined ? [{ value: String(customDays), label: `After ${customDays} ${customDays === 1 ? 'day' : 'days'}` }] : [])
-            ]}
-          />
-        </>}
-      />
-    </SettingsGroup>
+    {reviewRecommended && policy && <RecommendedRulesNotice busy={busy} onTurnOn={() => savePolicy(recommendedPolicy(policy))} onDismiss={dismissReview} />}
+    <StoragePolicyRows
+      trash={trash}
+      policy={policy}
+      trashPaused={Boolean(trash?.automaticPurge && trashPaused)}
+      storagePaused={storagePaused}
+      busy={busy}
+      trashCount={trashCount(records)}
+      onTrash={saveTrash}
+      onPolicy={savePolicy}
+      onResumeTrash={() => { if (trash) saveTrash(trash) }}
+      onResumeStorage={() => { if (policy) savePolicy(policy) }}
+    />
     {error && <p className="storage-error" role="alert">{error}</p>}
+
+    <StorageUsageSection refreshKey={usageKey} />
+    <StorageCleanupSection hasRule={hasRule} onDone={() => { setUsageKey((key) => key + 1); void reload().catch(showRefreshError) }} />
   </section>
-}
-
-const UNPUBLISHED_NOTE = 'Unpublished work is never deleted automatically.'
-
-/** Where trash is reviewed now: the sidebar. */
-export function trashDescription(count: number): string {
-  if (count === 0) return `No threads in trash. ${UNPUBLISHED_NOTE}`
-  return `${count} ${count === 1 ? 'thread' : 'threads'} in trash · restore or delete them from Recently deleted in the sidebar. ${UNPUBLISHED_NOTE}`
 }

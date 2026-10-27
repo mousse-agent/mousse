@@ -1,8 +1,302 @@
-/* Storage settings. Layout rules: see settings.css. Trash review lives in the sidebar (threads-sidebar.css). */
+/* Storage settings: policy rows, disk usage and cleanup. Layout rules: see settings.css. Trash review lives in the sidebar (threads-sidebar.css). */
 
 .storage-settings .storage-error {
   margin: var(--space-8) 0 0;
   font-size: var(--settings-fs-small);
   color: var(--danger);
   overflow-wrap: anywhere;
+}
+
+.storage-settings .modal {
+  width: 640px;
+}
+
+/* Rule descriptions: what a rule deletes, what it never deletes. */
+.storage-rule-line {
+  display: block;
+}
+
+.storage-rule-line + .storage-rule-line {
+  margin-top: var(--space-4);
+}
+
+.storage-rule-line strong {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.storage-custom-days {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.storage-days-input {
+  text-align: right;
+}
+
+.storage-settings .settings-item-control > .storage-error {
+  margin: 0;
+}
+
+.storage-empty {
+  margin: 0;
+  padding: var(--settings-row-y) 0;
+}
+
+/* Disk usage */
+.storage-usage-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-8);
+  font-size: var(--settings-fs-small);
+}
+
+.storage-usage {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-24);
+  padding: var(--settings-row-y) var(--settings-surface-x);
+}
+
+.storage-usage-chart {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-8);
+  width: 176px;
+}
+
+.storage-donut-track,
+.storage-donut-arc {
+  fill: none;
+}
+
+.storage-donut-track {
+  stroke: var(--ui-line);
+}
+
+.storage-usage-total {
+  margin: 0;
+  font-size: var(--settings-fs-small);
+  font-variant-numeric: tabular-nums;
+}
+
+.storage-legend {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--settings-fs-small);
+}
+
+.storage-legend li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+.storage-legend-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.storage-swatch {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+}
+
+.storage-table {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-collapse: collapse;
+  font-size: var(--settings-fs-small);
+}
+
+.storage-table th,
+.storage-table td {
+  padding: var(--space-4) var(--space-8);
+  text-align: left;
+  font-weight: 400;
+  vertical-align: middle;
+  overflow-wrap: anywhere;
+}
+
+.storage-table thead th {
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--ui-line);
+}
+
+.storage-table tbody tr:hover {
+  background: var(--ui-hover);
+}
+
+.storage-table .storage-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.storage-sort,
+.storage-row-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.storage-row-link {
+  color: var(--text-primary);
+  text-decoration: underline;
+  text-decoration-color: var(--ui-line-strong);
+  text-underline-offset: 3px;
+}
+
+.storage-row-link:hover {
+  text-decoration-color: currentColor;
+}
+
+.storage-sort:focus-visible,
+.storage-row-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+.storage-notes,
+.storage-unavailable {
+  margin: 0;
+  padding: var(--space-8) var(--settings-surface-x);
+  list-style: none;
+  font-size: var(--settings-fs-small);
+}
+
+.storage-notes li + li,
+.storage-unavailable li + li {
+  margin-top: var(--space-4);
+}
+
+@media (max-width: 720px) {
+  .storage-usage {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .storage-usage-chart {
+    align-self: center;
+  }
+}
+
+/* Cleanup */
+.storage-last-run {
+  padding: var(--settings-row-y) var(--settings-surface-x);
+  font-size: var(--settings-fs-small);
+}
+
+.storage-last-run p,
+.storage-plan p {
+  margin: 0;
+}
+
+.storage-last-run p + p,
+.storage-plan p + p {
+  margin-top: var(--space-4);
+}
+
+.storage-last-run-list,
+.storage-plan-kept {
+  margin-top: var(--space-8);
+}
+
+.storage-last-run-list > summary,
+.storage-plan-kept > summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+
+.storage-result-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  margin: var(--space-8) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.storage-result-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-wrap: anywhere;
+}
+
+.storage-plan {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  font-size: var(--settings-fs-small);
+}
+
+.storage-plan-summary {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* The one-time notice about the recommended rules */
+.storage-review-notice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-12);
+  margin-bottom: var(--space-24);
+  padding: var(--space-12) var(--space-16);
+  border-radius: var(--ui-control-radius);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  font-size: var(--settings-fs-small);
+}
+
+.storage-review-notice p {
+  margin: 0;
+}
+
+.storage-review-text {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.storage-review-actions {
+  display: flex;
+  gap: var(--space-8);
+}
+
+.storage-review-rules {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+  font-size: var(--settings-fs-small);
+}
+
+.storage-review-rules p {
+  margin: 0;
+}
+
+.storage-notice {
+  margin: 0;
+  padding: var(--space-8) var(--settings-surface-x);
+  font-size: var(--settings-fs-small);
 }
