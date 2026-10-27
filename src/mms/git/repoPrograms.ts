@@ -120,6 +120,30 @@ const PROGRAM_KEYS: ReadonlyArray<readonly [RegExp, string]> = [
 
 const CREDENTIAL_HELPER = /^credential\.(.+\.)?helper$/
 
+/**
+ * Programs Git LFS (a filter the user installed, often from Git for Windows' system config) reads
+ * from the repository's config and starts itself. An LFS extension the repository defines also
+ * empties the `lfs` filter, so writes through it are refused rather than stored unfiltered.
+ */
+const LFS_PROGRAM_KEYS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/^lfs\.extension\..+\.(clean|smudge)$/, ''],
+  [/^lfs\.customtransfer\..+\.(path|args)$/, ''],
+  [/^lfs\.(.+\.)?standalonetransferagent$/, '']
+]
+const LFS_EXTENSION = /^lfs\.extension\..+\.(clean|smudge)$/
+
+/**
+ * Set for Mousse's own Git commands and every filter they start: Python does not import modules from
+ * the current folder (`python -m nbstripout` would load an `nbstripout.py` an agent wrote in the
+ * worktree), and Windows does not look up a bare program name (`git`) in the current folder first.
+ */
+export const SAFE_LOOKUP_ENV: Readonly<Record<string, string>> = { PYTHONSAFEPATH: '1', NoDefaultCurrentDirectoryInExePath: '1' }
+
+/** `env` (the process's own by default) with {@link SAFE_LOOKUP_ENV}, for a Git command Mousse runs by itself. */
+export function repoProgramEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return { ...env, ...SAFE_LOOKUP_ENV }
+}
+
 /** Keys whose repository value cannot be overridden from the command line; such a repository is refused. */
 const UNOVERRIDABLE = /^core\.gitproxy$/
 
@@ -187,8 +211,12 @@ export function repoProgramOverrides(entries: readonly ConfigEntry[], record: Re
     // The user's own value, or one that names no program (a pinned empty filter, for one): nothing to undo.
     if (trusted(entry) || !entry.value) continue
     if (UNOVERRIDABLE.test(entry.key)) throw new RepoProgramError(`This repository's own config sets ${entry.key}, which Mousse cannot turn off, so it does not run Git here.`)
-    const rule = PROGRAM_KEYS.find(([pattern]) => pattern.test(entry.key))
+    const rule = [...PROGRAM_KEYS, ...LFS_PROGRAM_KEYS].find(([pattern]) => pattern.test(entry.key))
     if (!rule) continue
+    if (LFS_EXTENSION.test(entry.key) && !emptiedFilters.has('lfs')) {
+      emptiedFilters.add('lfs')
+      for (const part of ['clean', 'smudge', 'process']) overrides.push(`filter.lfs.${part}=`)
+    }
     const own = lastTrusted(entry.key)
     overrides.push(setting(entry.key, own ?? rule[1]))
     const filter = /^filter\.(.+)\.(clean|smudge|process)$/.exec(entry.key)
@@ -240,10 +268,14 @@ function remember(key: string, paths: Iterable<string>, programs: RepoPrograms):
   cache.set(key, { watched: [...new Set(paths)].map((path) => [path, signature(path)] as const), programs })
 }
 
-function bareGit(cwd: string, args: string[]): { ok: boolean; stdout: string } {
-  const result = spawnSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } })
-  return { ok: !result.error && result.status === 0, stdout: result.error ? '' : result.stdout ?? '' }
+/** `failed` is set when Git could not be run or read in full (a timeout, output past the limit). */
+function bareGit(cwd: string, args: string[]): { ok: boolean; stdout: string; failed: boolean } {
+  const result = spawnSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, ...SAFE_LOOKUP_ENV, GIT_OPTIONAL_LOCKS: '0' } })
+  return { ok: !result.error && result.status === 0, stdout: result.error ? '' : result.stdout ?? '', failed: Boolean(result.error) }
 }
+
+const UNREADABLE = "This repository's Git config could not be read in full (it may be very large or include a file that cannot be read), so Mousse does not run Git here."
+
 
 /**
  * The repository's programs, read from its config. Cached until a file that could change the answer
@@ -258,13 +290,15 @@ function programsFor(cwd: string): RepoPrograms {
   cache.delete(key)
   probes += 1
   const where = bareGit(key, ['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir', '--show-toplevel'])
+  if (where.failed) throw new RepoProgramError(UNREADABLE)
   // Not a repository: nothing of a repository's own can run. Remembered until a `.git` appears above it.
   if (!where.ok) {
     remember(key, [key, ...dotGitsUpFrom(key)], NONE)
     return NONE
   }
+  // Without the listing, nothing can be overridden: refuse rather than run the repository's programs.
   const listing = bareGit(key, ['config', '--null', '--show-scope', '--show-origin', '--list'])
-  if (!listing.ok) return NONE
+  if (!listing.ok) throw new RepoProgramError(UNREADABLE)
   const entries = parseConfig(listing.stdout)
   const [gitDir, commonDir, top] = where.stdout.split(/\r?\n/).map((line) => line.trim())
   const programs = repoProgramOverrides(entries, commonDir ? readRepoTrust(commonDir) : null)
@@ -367,7 +401,14 @@ const UNSAFE_ALLOWED = {
   allowUnsafeGpgProgram: true,
   allowUnsafePack: true,
   allowUnsafeCredentialHelper: true,
-  allowUnsafeProtocolOverride: true
+  allowUnsafeProtocolOverride: true,
+  // The instance's environment is the process's own (plus SAFE_LOOKUP_ENV), never a caller's; simple-git
+  // would otherwise refuse a GIT_CONFIG_GLOBAL, EDITOR, PAGER or askpass the user set.
+  allowUnsafeConfigPaths: true,
+  allowUnsafeConfigEnvCount: true,
+  allowUnsafeGitProxy: true,
+  allowUnsafeTemplateDir: true,
+  allowUnsafePager: true
 } as const
 
 /**
@@ -389,7 +430,7 @@ export function guardedSimpleGit(cwd: string, options: Partial<Omit<SimpleGitOpt
       return (...parameters: unknown[]) => {
         // Only `raw` takes free-form arguments; every other method used here only reads.
         const args = key === 'raw' ? parameters.flat().filter((value): value is string => typeof value === 'string') : []
-        const instance = forCommand(args) as unknown as Record<string, (...values: unknown[]) => unknown>
+        const instance = forCommand(args).env(repoProgramEnv()) as unknown as Record<string, (...values: unknown[]) => unknown>
         return instance[key]!(...parameters)
       }
     }

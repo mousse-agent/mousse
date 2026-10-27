@@ -5,7 +5,7 @@ import { setImmediate as yieldToEventLoop } from 'node:timers/promises'
 import { promisify } from 'node:util'
 import { lowerPath } from '../../shared/fuzzyPath'
 import { SKIP_DIR_NAMES } from './pathGuard'
-import { withoutRepoPrograms } from '../git/repoPrograms'
+import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
 
 export type WorkspaceIndexFallbackReason = 'not-a-repo' | 'git-missing' | 'git-too-old'
 
@@ -225,6 +225,7 @@ async function listWithGit(root: string, collector: IndexCollector, signal: Abor
     }
     const child = spawn('git', args, {
       cwd: root,
+      env: repoProgramEnv(),
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'ignore']
     })

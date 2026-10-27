@@ -19,7 +19,7 @@ import { GitHubService } from './GitHubService'
 import { PULL_REQUEST_DRAFT_LIMITS, type DraftCommit } from './pullRequestDraft'
 import { resolveRepositoryIdentity } from './RepositoryIdentity'
 import { acquireRepositoryLease, RepositoryLeaseAbortedError } from './RepositoryLease'
-import { guardedSimpleGit, NO_DIFF_PROGRAMS, withoutRepoPrograms } from './repoPrograms'
+import { guardedSimpleGit, NO_DIFF_PROGRAMS, repoProgramEnv, SAFE_LOOKUP_ENV, withoutRepoPrograms } from './repoPrograms'
 import type {
   GitBranchInfo,
   GitBranchOptions,
@@ -315,7 +315,7 @@ function readBoundedGit(cwd: string, args: readonly string[], maxBytes: number):
     }
     const child = spawn('git', guarded, {
       cwd,
-      env: { ...process.env, ...englishMessagesEnv(), GIT_OPTIONAL_LOCKS: '0' },
+      env: repoProgramEnv({ ...process.env, ...englishMessagesEnv(), GIT_OPTIONAL_LOCKS: '0' }),
       stdio: ['ignore', 'pipe', 'ignore'],
       windowsHide: true
     })
@@ -376,7 +376,7 @@ export class GitService {
    */
   private runGit(cwd: string, args: readonly string[], options?: GitRunOptions & { userAction?: boolean }): Promise<GitRun> {
     const { userAction, ...run } = options ?? {}
-    return runGit(cwd, withoutRepoPrograms(cwd, args, { userAction }), run)
+    return runGit(cwd, withoutRepoPrograms(cwd, args, { userAction }), userAction ? run : { ...run, env: { ...run.env, ...SAFE_LOOKUP_ENV } })
   }
 
   /**

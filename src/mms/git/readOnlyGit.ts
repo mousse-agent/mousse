@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { withoutRepoPrograms } from './repoPrograms'
+import { repoProgramEnv, withoutRepoPrograms } from './repoPrograms'
 
 export interface GitRun { status: number | null; stdout: string; stderr: string }
 
@@ -16,7 +16,7 @@ export function runReadOnlyGit(cwd: string, args: string[]): GitRun {
     windowsHide: true,
     timeout: 30_000,
     maxBuffer: 32 * 1024 * 1024,
-    env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_NO_LAZY_FETCH: '1' }
+    env: repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_NO_LAZY_FETCH: '1' })
   })
   if (result.error) throw result.error
   return { status: result.status, stdout: result.stdout, stderr: result.stderr }

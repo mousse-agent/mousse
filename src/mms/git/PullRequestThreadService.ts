@@ -20,7 +20,7 @@ import type { CodeHost } from './CodeHost'
 import { PullRequestReadError } from './GitHubCodeHost'
 import { acquireRepositoryLease } from './RepositoryLease'
 import { resolveRepositoryIdentity } from './RepositoryIdentity'
-import { withoutRepoPrograms } from './repoPrograms'
+import { repoProgramEnv, withoutRepoPrograms } from './repoPrograms'
 
 /** A refusal with a code a client can show copy for; the daemon turns it into its own error type. */
 export class PullRequestThreadError extends Error {
@@ -52,7 +52,7 @@ export interface ResolvedPullRequest {
 }
 
 function git(cwd: string, args: string[]): string {
-  return execFileSync('git', withoutRepoPrograms(cwd, args), { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+  return execFileSync('git', withoutRepoPrograms(cwd, args), { cwd, env: repoProgramEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 }
 
 function sameRepository(link: Pick<ThreadPullRequestLink, 'host' | 'nameWithOwner' | 'number'>, identity: PullRequestIdentity): boolean {

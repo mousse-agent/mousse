@@ -32,7 +32,7 @@ import {
 import { WorktreeIdentity } from '../worktree/WorktreeIdentity'
 import { ThreadWorkspaceManager } from './ThreadWorkspaceManager'
 import { WorkspaceResolver } from './WorkspaceResolver'
-import { withoutRepoPrograms } from '../git/repoPrograms'
+import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
 
 export interface WorkflowWorkspaceOwner {
   profileId: string
@@ -85,7 +85,7 @@ interface AgentWorkspaceRecord {
 const occupancyTails = new Map<string, Promise<unknown>>()
 
 function git(cwd: string, args: string[]): string {
-  return execFileSync('git', withoutRepoPrograms(cwd, args), { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+  return execFileSync('git', withoutRepoPrograms(cwd, args), { cwd, env: repoProgramEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 }
 
 function canonicalPath(path: string): string {

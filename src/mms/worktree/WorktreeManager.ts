@@ -4,7 +4,7 @@ import { spawn } from 'child_process'
 import { GIT_NULL_DEVICE } from '../git/gitNullDevice'
 import { basename, dirname, join, relative, resolve, sep } from 'path'
 import simpleGit, { SimpleGit } from 'simple-git'
-import { guardedSimpleGit, HOOK_EVENTS, withoutRepoPrograms } from '../git/repoPrograms'
+import { guardedSimpleGit, HOOK_EVENTS, repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
 import { RepositoryContext } from './RepositoryContext'
 import { WorktreeIdentity } from './WorktreeIdentity'
 import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
@@ -395,7 +395,7 @@ export class WorktreeManager {
 
 function runGitWithInput(cwd: string, args: string[], input: string): Promise<void> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn('git', withoutRepoPrograms(cwd, args), { cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+    const child = spawn('git', withoutRepoPrograms(cwd, args), { cwd, env: repoProgramEnv(), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
     let stderr = ''
     child.stderr.setEncoding('utf8')
     child.stderr.on('data', (chunk: string) => { stderr += chunk })

@@ -4,7 +4,7 @@ import { mkdirSync, realpathSync, writeFileSync, unlinkSync, readFileSync } from
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { withoutRepoPrograms } from './repoPrograms'
+import { repoProgramEnv, withoutRepoPrograms } from './repoPrograms'
 
 export type RepositoryMutationCapability =
   | { allowed: true }
@@ -39,7 +39,7 @@ export interface ResolveRepositoryIdentityOptions {
 
 function git(cwd: string, ...args: string[]): string | null {
   try {
-    return execFileSync('git', withoutRepoPrograms(cwd, args), { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    return execFileSync('git', withoutRepoPrograms(cwd, args), { cwd, env: repoProgramEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
   } catch { return null }
 }
 function canonical(path: string): string { try { return realpathSync(path) } catch { return resolve(path) } }

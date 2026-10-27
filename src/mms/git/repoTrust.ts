@@ -6,7 +6,8 @@ import { getMousseHomeDir } from '../data/paths'
 /**
  * The filter drivers a repository's own config defined when the user added it to Mousse (or, for a
  * project added before this existed, when Mousse first started after the upgrade). git-crypt,
- * `git lfs install --local` and nbstripout live there. Mousse's own Git commands run such a filter
+ * `git lfs install --local` and nbstripout live there, and so do Git LFS's own programs (extensions,
+ * custom transfer agents). Mousse's own Git commands run such a filter
  * only while its name and exact command match this record; one added or changed later (by an agent
  * that can write the repository's config, for one) stays emptied, and writes through it are refused.
  *
@@ -21,7 +22,7 @@ export interface RepoTrustRecord {
 }
 
 /** Keys recorded; `required` is kept for the record, it runs nothing. */
-export const TRUSTED_FILTER_KEY = /^filter\..+\.(clean|smudge|process|required)$/
+export const TRUSTED_FILTER_KEY = /^(filter\..+\.(clean|smudge|process|required)|lfs\.extension\..+\.(clean|smudge)|lfs\.customtransfer\..+\.(path|args)|lfs\.(.+\.)?standalonetransferagent)$/
 
 function canonical(path: string): string {
   let real = resolve(path)

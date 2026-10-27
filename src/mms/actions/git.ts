@@ -1,6 +1,6 @@
 import { createErrorProvider } from '../../shared/errors'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { filterRefusal, withoutRepoPrograms } from '../git/repoPrograms'
+import { filterRefusal, repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
 
 /**
  * Git for Mousse's own actions (checkpoints, restore, undo, revert): no program the repository
@@ -11,7 +11,7 @@ export function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): strin
   try {
     return execFileSync('git', withoutRepoPrograms(cwd, args), {
       cwd,
-      env: env ? { ...process.env, ...env } : process.env,
+      env: repoProgramEnv(env ? { ...process.env, ...env } : process.env),
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe']
     }).trim()
@@ -29,7 +29,7 @@ export function tryGit(cwd: string, args: string[], env?: NodeJS.ProcessEnv): { 
   } catch (error) {
     return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) }
   }
-  const result = spawnSync('git', guarded, { cwd, encoding: 'utf8', env: env ? { ...process.env, ...env } : process.env })
+  const result = spawnSync('git', guarded, { cwd, encoding: 'utf8', env: repoProgramEnv(env ? { ...process.env, ...env } : process.env) })
   const stderr = result.stderr.trim()
   return { ok: result.status === 0, stdout: result.stdout.trim(), stderr: (result.status !== 0 && filterRefusal(stderr)) || stderr }
 }

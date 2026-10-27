@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { withoutRepoPrograms } from './repoPrograms'
+import { repoProgramEnv, withoutRepoPrograms } from './repoPrograms'
 
 export interface ExecutableResult {
   stdout: string
@@ -27,7 +27,7 @@ export const execRunner: ExecutableRunner = (executable, args, options) =>
       argv,
       {
         cwd: options?.cwd,
-        ...(options?.env ? { env: { ...process.env, ...options.env } } : {}),
+        ...(executable === 'git' ? { env: repoProgramEnv({ ...process.env, ...options?.env }) } : options?.env ? { env: { ...process.env, ...options.env } } : {}),
         windowsHide: true,
         encoding: 'utf8',
         timeout: options?.timeoutMs ?? 60_000,

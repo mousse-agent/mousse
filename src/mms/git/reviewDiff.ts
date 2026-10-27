@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process'
 import { createReadStream } from 'node:fs'
 import { lstat, open, readlink, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative } from 'node:path'
-import { guardedSimpleGit, NO_DIFF_PROGRAMS, withoutRepoPrograms } from './repoPrograms'
+import { guardedSimpleGit, NO_DIFF_PROGRAMS, repoProgramEnv, withoutRepoPrograms } from './repoPrograms'
 import {
   EMPTY_TREE_SHA,
   REVIEW_MAX_COUNTED_UNTRACKED,
@@ -112,7 +112,7 @@ export function parseNumstatZ(output: string): NumstatEntry[] {
 
 function hashEmptyTree(cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = execFile('git', withoutRepoPrograms(cwd, ['hash-object', '-t', 'tree', '--stdin']), { cwd, encoding: 'utf8' }, (error, stdout) => {
+    const child = execFile('git', withoutRepoPrograms(cwd, ['hash-object', '-t', 'tree', '--stdin']), { cwd, env: repoProgramEnv(), encoding: 'utf8' }, (error, stdout) => {
       if (error) reject(error)
       else resolve(stdout.trim())
     })
