@@ -2731,8 +2731,9 @@ html[data-theme='high-contrast'] .model-picker-row.selected {
   background: var(--ui-hover);
 }
 
+/* Segments shrink to fit when the gaps and minimum widths would overflow a full bar. */
 .context-usage-bar-segment {
-  flex-shrink: 0;
+  flex-shrink: 1;
   min-width: 3px;
   border-radius: 2px;
   transition: width 0.2s;

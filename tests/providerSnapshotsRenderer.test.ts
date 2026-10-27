@@ -127,6 +127,8 @@ describe('composer picker from snapshots', () => {
     expect(modelDisplayName('claude-subscription', 'sonnet:low')).toBe('Claude Sonnet · Low')
     expect(modelDisplayName('claude-subscription', 'claude-haiku-5-5')).toBe('Claude Haiku 5.5')
     expect(modelDisplayName('claude-subscription', 'claude-sonnet-4-5-20250929:high')).toBe('Claude Sonnet 4.5 · High')
+    expect(modelDisplayName('claude-subscription', 'opus:fast')).toBe('Claude Opus (fast)')
+    expect(modelDisplayName('claude-subscription', 'opus@1m:high')).toBe('Claude Opus (1m) · High')
     expect(modelDisplayName('codex', 'gpt-5.3-codex:xhigh')).toBe('gpt-5.3-codex · XHigh')
     expect(sendErrorLine({ code: 'model_hidden', message: 'Haiku 4.5 is hidden.' })).toBe('Haiku 4.5 is hidden.')
     expect(sendErrorLine({ code: 'internal_error', message: 'Boom' })).toBe('[internal_error] Boom')
