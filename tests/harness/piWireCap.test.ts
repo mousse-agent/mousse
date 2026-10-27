@@ -142,6 +142,21 @@ describe('the wire-cap mirror (pinned pi-ai 0.85.1)', () => {
     }
   })
 
+  it.each(MODELS.map((entry) => [entry.api, entry.id, entry] as const))('%s %s: a branch summary’s request (cap 4096, no effort) and a compaction’s (cap 13107, the session’s effort) are sized like any other', async (_api, _id, target) => {
+    // Pi's branch summary asks `min(4096, model.maxTokens)` with no reasoning; a compaction asks
+    // `0.8 × reserveTokens` with the session's thinking level (`branch-summarization.js:219`,
+    // `compaction.js:441-489`).
+    for (const [maxTokens, reasoning] of [[4_096, undefined], [13_107, 'high'], [13_107, undefined]] as Array<[number, PiReasoning | undefined]>) {
+      const ctx = context()
+      const natural = wirePlan(target, ctx, maxTokens, reasoning)
+      const cap = Math.max(grantFloor(natural.thinkingBudget), Math.floor(natural.wireCap! / 2))
+      if (cap > natural.wireCap!) continue
+      const params = await piPayload(target, ctx, sizedMaxTokens(cap, natural), reasoning)
+      expect(hookCap(target.api, params), `${maxTokens} ${reasoning}`).toBe(cap)
+      if (natural.thinkingBudget) expect(hookThinkingBudget(target.api, params)).toBe(natural.thinkingBudget)
+    }
+  })
+
   it('a context near full clamps the wire cap: below the effort’s budget plus the answer room, pi-ai would cut the budget', async () => {
     const target = model('anthropic-messages', { id: 'claude-sonnet-4-5', contextWindow: 40_000 })
     // ~30k tokens of context: 40k − 30k − 4096 leaves under 16384 + 1024 for `high`.

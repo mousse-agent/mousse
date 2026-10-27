@@ -72,8 +72,6 @@ export interface PiTurnResponse {
   mcp: { url: string; token: string } | null
   /** Re-register the instance provider when it changed since the factory's catalogue. */
   catalogRevision: number
-  /** The turn's run has token or USD limits: every request asks for a reservation (`spend`). */
-  reserve?: boolean
 }
 
 /** `/pi/gate`, at every `tool_call`. */
@@ -99,7 +97,10 @@ export interface PiRequestRequest {
   /** The attempt token of the turn the extension last fetched ('' before the first); informational. */
   attemptToken: string
   kind: 'request'
-  /** What the request would spend, when the turn reserves (`PiTurnResponse.reserve`). */
+  /**
+   * What the request would spend (every `streamSimple` request; Mousse reserves it when the live
+   * turn has token or USD limits). Prices and cap support are Mousse's own, from its catalogue.
+   */
   spend?: PiSpendRequest
 }
 
@@ -111,7 +112,8 @@ export interface PiSpendRequest {
   wireCap: number | null
   /** The thinking budget pi-ai adds to the cap (0 when none). */
   thinkingBudget: number
-  model: { provider: string; id: string; api: string; capHonouring: boolean; cost: { input: number; output: number; cacheRead: number; cacheWrite: number } }
+  /** The request's model: it must be the turn's. */
+  model: { provider: string; id: string; api: string }
 }
 
 /**

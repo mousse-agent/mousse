@@ -84,8 +84,11 @@ export interface SpendRequest {
   wireCap: number
   /** The smallest cap the request may go with (its thinking budget plus answer room, or 256). */
   floor: number
-  /** USD per token. */
-  price: { input: number; output: number; cacheWrite: number }
+  /**
+   * USD per token, at the highest rate any token of the request can be billed (`input`: input,
+   * cache read or cache write, over every tier; `output`: likewise).
+   */
+  price: { input: number; output: number }
 }
 
 /** Granted: `cap` is the wire cap the request must carry (reserved in full). */
@@ -98,7 +101,10 @@ export type ReserveResult = { ok: true; id: string; cap: number } | { ok: false;
  */
 export type SpendOutcome = { kind: 'released' } | { kind: 'used'; input: number; output: number; usd: number; partial?: boolean }
 
-/** `overshoot`: output tokens the provider produced above the cap it was sent. */
+/**
+ * `overshoot`: how far the request went over what was reserved for it, in the limit's units
+ * (output tokens above the cap it was sent, input tokens above its bound, or USD).
+ */
 export type SettleResult = { ok: true } | { ok: false; limit: AgentExecutionLimit; overshoot: number }
 
 /** Token and USD spend that may be shared across runs. Each call is atomic. */
@@ -136,7 +142,7 @@ export class RunSpend implements SpendScope {
     const used = this.used()
     if (limits.maxInputTokens !== undefined && request.inputBound > limits.maxInputTokens - used.input)
       return { ok: false, limit: { kind: 'input_tokens', limit: limits.maxInputTokens, actual: used.input } }
-    const inputUsd = request.inputBound * Math.max(request.price.input, request.price.cacheWrite)
+    const inputUsd = request.inputBound * request.price.input
     let cap = request.wireCap
     let bound: 'output_tokens' | 'cost_usd' = 'output_tokens'
     if (limits.maxUsd !== undefined) {
@@ -175,8 +181,10 @@ export class RunSpend implements SpendScope {
     this.committed.input += at(outcome.input, held.input)
     this.committed.output += at(outcome.output, held.output)
     this.committed.usd += at(outcome.usd, held.usd)
-    const overshoot = outcome.output - held.output
-    if (overshoot > 0) return { ok: false, limit: { kind: 'output_tokens', limit: held.output, actual: outcome.output }, overshoot }
+    if (outcome.output > held.output) return { ok: false, limit: { kind: 'output_tokens', limit: held.output, actual: outcome.output }, overshoot: outcome.output - held.output }
+    if (outcome.input > held.input) return { ok: false, limit: { kind: 'input_tokens', limit: held.input, actual: outcome.input }, overshoot: outcome.input - held.input }
+    // Rounding aside: the reservation was taken at the highest rates.
+    if (outcome.usd > held.usd * (1 + 1e-9) + 1e-12) return { ok: false, limit: { kind: 'cost_usd', limit: held.usd, actual: outcome.usd }, overshoot: outcome.usd - held.usd }
     return { ok: true }
   }
 }
@@ -188,7 +196,7 @@ interface RunBudgetState {
   scope: CounterScope
   spend: SpendScope
   exhausted?: AgentExecutionLimit
-  /** Output tokens a provider produced above its cap, when that ended the run. */
+  /** How far a request went over its reservation, when that ended the run (in `exhausted`'s units). */
   overshoot?: number
 }
 
@@ -239,7 +247,7 @@ export class TurnBudget {
     return this.state.exhausted
   }
 
-  /** Output tokens a provider produced above the cap it was sent, when that ended the run. */
+  /** How far a request went over its reservation, when that ended the run (in `exhausted`'s units). */
   get overshoot(): number | undefined {
     return this.state.overshoot
   }
@@ -257,7 +265,7 @@ export class TurnBudget {
     return reserved
   }
 
-  /** Ends a reservation. A provider that went over its cap ends the run (every later step is refused). */
+  /** Ends a reservation. A request that went over its reservation ends the run (every later step is refused). */
   settle(id: string, outcome: SpendOutcome): SettleResult {
     const settled = this.state.spend.settle(id, outcome)
     if (!settled.ok && this.state.overshoot === undefined) {

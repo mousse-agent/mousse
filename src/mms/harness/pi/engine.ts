@@ -30,7 +30,7 @@ import { authorizeDefinitionCall, recordAuthorizedCall, withoutTransportFields }
 import type { AgentExecutionLimit } from '../../../shared/agents/execution'
 import { ANTHROPIC_OAUTH_REFUSED, BUDGET_EXHAUSTED, CREDENTIAL_UNAVAILABLE, GATE_REFUSALS, GATE_UNAVAILABLE, REQUEST_REFUSED, SPEND_CAP_MISMATCH } from './extension/messages'
 import { PI_BRIDGE_ENV, type PiCatalogProvider, type PiGateRequest, type PiGateResponse, type PiReadyRequest, type PiRequestRequest, type PiRequestResponse, type PiSettleRequest, type PiTurnResponse, type PiTurnTool } from './extension/protocol'
-import { addsThinkingBudget, capHonouring, grantFloor, perToken, thinkingBudgetFor, type PiReasoning } from './reservation'
+import { addsThinkingBudget, capHonouring, grantFloor, multipleCandidates, reservationRates, thinkingBudgetFor, type PiReasoning } from './reservation'
 import type { SpendModelFacts } from '../policy'
 import type { TurnBudget } from '../budget'
 import { piLaunch, startPiProcess, type PiLaunch, type PiProcess, type PiRuntimePaths, type PiThinkingLevel } from './launch'
@@ -151,6 +151,8 @@ function interruptedError(message: string): AppError {
 
 /** What a turn that hit a limit says. */
 function limitMessage(limit: AgentExecutionLimit | undefined, overshoot?: number): string {
+  if (overshoot !== undefined && limit?.kind === 'input_tokens') return `The provider counted ${overshoot} more input token${overshoot === 1 ? '' : 's'} than Mousse reserved for the request, so this run stopped.`
+  if (overshoot !== undefined && limit?.kind === 'cost_usd') return `The request cost $${overshoot.toFixed(6)} more than Mousse reserved for it, so this run stopped.`
   if (overshoot !== undefined) return `The provider exceeded its output cap by ${overshoot} token${overshoot === 1 ? '' : 's'}, so this run stopped.`
   if (limit?.kind === 'turns') return `This run reached its limit of ${limit.limit} model request${limit.limit === 1 ? '' : 's'}, so the next one was not sent.`
   if (limit?.kind === 'tool_calls') return `This run reached its limit of ${limit.limit} tool call${limit.limit === 1 ? '' : 's'}, so it stopped before the next step.`
@@ -463,14 +465,15 @@ export class PiRpcEngine implements ProviderAdapter {
     if (!entry) return undefined
     const level = piThinkingLevel(effort)
     const reasoning = level === 'off' || !entry.reasoning ? undefined : (level as PiReasoning)
-    const cost = entry.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+    const rates = reservationRates(entry.api, entry.cost)
     return {
       label: entry.name || entry.id,
-      outputCap: capHonouring(entry),
-      priced: [cost.input, cost.output, cost.cacheRead, cost.cacheWrite].some((price) => typeof price === 'number' && price > 0),
+      outputCap: capHonouring(entry) && !multipleCandidates(entry),
+      // A USD limit needs both an input and an output price (held at their highest rates).
+      priced: rates !== undefined,
       effort: reasoning ?? 'off',
       smallestCap: grantFloor(addsThinkingBudget(entry, reasoning) ? thinkingBudgetFor(reasoning!) : 0),
-      outputUsdPerToken: perToken(cost.output)
+      ...(rates ? { outputUsdPerToken: rates.output } : {})
     }
   }
 
@@ -718,8 +721,7 @@ export class PiRpcEngine implements ProviderAdapter {
       tools,
       activeBuiltins: [...turn.active].filter((name) => Object.hasOwn(BUILTIN_CLASSES, name)),
       mcp: turn.host.bridge?.mcp ?? null,
-      catalogRevision,
-      ...(turn.host.budget?.reserves ? { reserve: true } : {})
+      catalogRevision
     }
   }
 
@@ -728,8 +730,9 @@ export class PiRpcEngine implements ProviderAdapter {
    * retries): refused outside a live turn and after Stop; under a count limit it is charged to the
    * run, and refused once the run's turn limit (or an earlier limit) is reached. Under a token or
    * USD limit it is then reserved: the grant is the wire cap it must carry, at most the one it asked
-   * for; a request that cannot show its spend (no bound, no cap, a model whose cap is not honoured)
-   * is refused.
+   * for. The model must be the turn's, and its cap support and prices are read from Mousse's own
+   * catalogue, never from the request; a request that cannot show its spend (no bound, no cap, a
+   * model whose cap is not honoured, no price under a USD limit) is refused.
    */
   private admitRequest(thread: PiThreadProcess, request: Partial<PiRequestRequest> = {}): PiRequestResponse {
     const turn = thread.turn
@@ -746,16 +749,21 @@ export class PiRpcEngine implements ProviderAdapter {
     if (!budget?.reserves) return { ok: true }
     const spend = request.spend
     const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0
-    if (!spend || spend.model?.capHonouring !== true || !finite(spend.inputBound) || !finite(spend.wireCap) || !finite(spend.thinkingBudget)) {
+    const modelId = parseThinkingSuffixFromModelId(turn.input.model).baseId
+    const entry = this.options.catalog().provider.models.find((candidate) => candidate.id === modelId)
+    const rates = entry ? reservationRates(entry.api, entry.cost) : undefined
+    const refuse = (): PiRequestResponse => {
       turn.refusal ??= REQUEST_REFUSED
       return { ok: false, reason: REQUEST_REFUSED }
     }
-    const cost = spend.model.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+    if (!spend || !entry || spend.model?.provider !== this.options.provider || spend.model.id !== modelId || spend.model.api !== entry.api) return refuse()
+    if (!capHonouring(entry) || multipleCandidates(entry) || !finite(spend.inputBound) || !finite(spend.wireCap) || !finite(spend.thinkingBudget)) return refuse()
+    if (budget.limits.maxUsd !== undefined && !rates) return refuse()
     const reserved = budget.reserve({
       inputBound: spend.inputBound,
       wireCap: spend.wireCap,
       floor: grantFloor(spend.thinkingBudget),
-      price: { input: perToken(cost.input), output: perToken(cost.output), cacheWrite: perToken(cost.cacheWrite) }
+      price: rates ?? { input: 0, output: 0 }
     })
     if (!reserved.ok) {
       turn.refusal ??= BUDGET_EXHAUSTED
@@ -766,9 +774,10 @@ export class PiRpcEngine implements ProviderAdapter {
   }
 
   /**
-   * A reserved request ended. A provider that went over the cap it was sent ends the run: the turn
-   * fails `budget_exhausted` with the overshoot, and every later step is refused. A reservation that
-   * is never settled (the process died mid-request) stays charged in full.
+   * A reserved request ended. A request that went over its reservation (output above the cap it was
+   * sent, input above its bound, or cost above what was held) ends the run: the turn fails
+   * `budget_exhausted` with the overshoot, and every later step is refused. A reservation that is
+   * never settled (the process died mid-request) stays charged in full.
    */
   private settleRequest(thread: PiThreadProcess, request: PiSettleRequest): void {
     const held = thread.reservations.get(request.reservationId)

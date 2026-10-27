@@ -89,6 +89,13 @@ function reply(output = 5) {
   }
 }
 
+/** Every request answered 503 with an OpenAI error body. */
+function script503(_request: RecordedRequest, res: ServerResponse): void {
+  const body = JSON.stringify({ error: { message: 'Service unavailable', type: 'server_error' } })
+  res.writeHead(503, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) })
+  res.end(body)
+}
+
 /** The cap and thinking budget at each API's HTTP body path (Google's are under `generationConfig`). */
 function bodyCaps(api: string, body: Record<string, any>): { cap?: number; thinking?: number } {
   switch (api) {
@@ -253,21 +260,34 @@ describe('spend reservation in the real Pi child (Pi RPC engine)', () => {
     expect(recorder.requests).toHaveLength(1)
   }, 60_000)
 
+  /**
+   * A long reply (enough to summarize) whose output usage is near the window below, so Pi compacts
+   * after it (or before the next prompt). Its input usage stays within the request's bound.
+   */
+  const BIG_USAGE = (_request: RecordedRequest, res: ServerResponse) =>
+    sse(res, [
+      { id: 'c', object: 'chat.completion.chunk', choices: [{ index: 0, delta: { role: 'assistant', content: 'large answer '.repeat(10_000) } }] },
+      { id: 'c', object: 'chat.completion.chunk', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 190_000, total_tokens: 190_010 } }
+    ])
+  /** Pi compacts past `contextWindow − reserveTokens` (16,384): 183,616 here. */
+  const SMALL_WINDOW = { contextWindow: 200_000, maxTokens: 200_000 }
+
+  /** The first request gets `first`, every later one a plain reply. */
+  function firstThen(first: (request: RecordedRequest, res: ServerResponse) => void) {
+    let calls = 0
+    return {
+      handler: (request: RecordedRequest, res: ServerResponse) => (calls++ === 0 ? first(request, res) : reply()(request, res)),
+      reset: () => void (calls = 0)
+    }
+  }
+
   it('a compaction is reserved like any request, and refused at the limit with nothing sent', async () => {
     const log = join((await import('node:os')).tmpdir(), `mousse-spend-${process.pid}-compact-${Date.now()}.log`)
     cleanups.push(async () => (await import('node:fs')).rmSync(log, { force: true }))
-    const { engine, recorder, project } = await setup({ testEnv: { MOUSSE_PI_TEST_PAYLOAD_LOG: log }, modelPatch: { contextWindow: 128_000 } })
-    // Usage near the window: Pi compacts after the reply, a second (summary) request.
-    let calls = 0
-    recorder.respond((request, res) => {
-      calls += 1
-      if (calls > 1) return reply()(request, res)
-      sse(res, [
-        { id: 'c', object: 'chat.completion.chunk', choices: [{ index: 0, delta: { role: 'assistant', content: 'large answer '.repeat(10_000) } }] },
-        { id: 'c', object: 'chat.completion.chunk', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 120_000, completion_tokens: 3_000, total_tokens: 123_000 } }
-      ])
-    })
-    const roomy = spending({ maxOutputTokens: 100_000 })
+    const { engine, recorder, project } = await setup({ testEnv: { MOUSSE_PI_TEST_PAYLOAD_LOG: log }, modelPatch: SMALL_WINDOW })
+    const replies = firstThen(BIG_USAGE)
+    recorder.respond(replies.handler)
+    const roomy = spending({ maxOutputTokens: 1_000_000 })
     const turn = harness(project, { model: 'gpt-4.1' }, { budget: roomy.budget })
     await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
     expect(recorder.requests).toHaveLength(2)
@@ -276,16 +296,112 @@ describe('spend reservation in the real Pi child (Pi RPC engine)', () => {
     for (const entry of hooks) expect(hookCap(entry.api, entry.params)).toBeLessThanOrEqual(entry.cap)
     const summary = JSON.parse(recorder.requests[1].body) as Record<string, number>
     expect(summary.max_completion_tokens ?? summary.max_tokens).toBe(roomy.grants[1])
+    expect(roomy.settled).toEqual(['used', 'used'])
 
-    // The same turn with only the first reply's output left: the summary request is refused.
-    calls = 0
+    // The same turn with 100 output tokens left after the reply: the summary request is refused.
+    replies.reset()
     const before = recorder.requests.length
-    const tight = spending({ maxOutputTokens: 3_200 })
+    const tight = spending({ maxOutputTokens: 190_100 })
     const again = harness(project, { model: 'gpt-4.1', runId: 'r2', threadId: 't2' }, { budget: tight.budget })
     await expect(engine.startTurn(again.input, again.sink, again.ctl, again.host)).rejects.toMatchObject({ code: 'budget_exhausted', details: { limit: { kind: 'output_tokens' } } })
     expect(recorder.requests.length - before).toBe(1)
-    expect(tight.grants).toEqual([3_200, -1])
+    expect(tight.grants).toEqual([190_100, -1])
   }, 120_000)
+
+  it('a pre-prompt compaction (before before_agent_start) in a fresh process is reserved for the live turn', async () => {
+    let compaction = false
+    const { engine, recorder, project } = await setup({ modelPatch: SMALL_WINDOW, compaction: () => compaction })
+    recorder.respond(firstThen(BIG_USAGE).handler)
+    const first = harness(project, { model: 'gpt-4.1' })
+    await engine.startTurn(first.input, first.sink, first.ctl, first.host)
+    expect(recorder.requests).toHaveLength(1)
+    // The session resumes in a new process, now with compaction on: Pi compacts before the prompt.
+    const threads = (engine as unknown as { threads: Map<string, unknown>; kill(thread: unknown): Promise<void> })
+    await threads.kill(threads.threads.get('t1'))
+    compaction = true
+    const run = spending({ maxOutputTokens: 1_000_000 })
+    const second = harness(project, { model: 'gpt-4.1', runId: 'r2', attemptId: 'a2', nativeHistory: `user: Say hello\nassistant: ${first.committed.at(-1)}` }, { budget: run.budget })
+    expect((await engine.startTurn(second.input, second.sink, second.ctl, second.host)).text).toBe('hi')
+    // The summary, then the prompt: both reserved and settled.
+    expect(recorder.requests).toHaveLength(3)
+    expect(run.grants).toHaveLength(2)
+    expect(run.grants.every((cap) => cap > 0)).toBe(true)
+    expect(run.settled).toEqual(['used', 'used'])
+  }, 120_000)
+
+  it('an unbudgeted turn after a budgeted one on the warm process: its pre-prompt compaction is not reserved and goes', async () => {
+    const { engine, recorder, project } = await setup({ modelPatch: SMALL_WINDOW, compaction: () => false })
+    recorder.respond(firstThen(BIG_USAGE).handler)
+    const budgeted = spending({ maxOutputTokens: 1_000_000 })
+    const first = harness(project, { model: 'gpt-4.1' }, { budget: budgeted.budget })
+    await engine.startTurn(first.input, first.sink, first.ctl, first.host)
+    expect(budgeted.grants).toHaveLength(1)
+    const threads = (engine as unknown as { threads: Map<string, { process: { client: { send(command: Record<string, unknown>): Promise<unknown> } } }> }).threads
+    await threads.get('t1')!.process.client.send({ type: 'set_auto_compaction', enabled: true })
+    const second = harness(project, { model: 'gpt-4.1', runId: 'r2', attemptId: 'a2', nativeHistory: `user: Say hello\nassistant: ${first.committed.at(-1)}` })
+    expect((await engine.startTurn(second.input, second.sink, second.ctl, second.host)).text).toBe('hi')
+    // Same process: the compaction and the prompt went, with no reservation asked of the first run.
+    expect(threads.get('t1')).toBeDefined()
+    expect(recorder.requests).toHaveLength(3)
+    expect(budgeted.grants).toHaveLength(1)
+  }, 120_000)
+
+  it('a sent request is never refunded without proof it was not billed', async () => {
+    const { engine, recorder, project } = await setup()
+    const run = (runId: string) => spending({ maxOutputTokens: 6_000 })
+    // A complete reply that reports no usage (`supportsUsageInStreaming: false` servers): kept in full.
+    recorder.respond((_request, res) => sse(res, [
+      { id: 'c', object: 'chat.completion.chunk', choices: [{ index: 0, delta: { role: 'assistant', content: 'hi' } }] },
+      { id: 'c', object: 'chat.completion.chunk', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }
+    ]))
+    const noUsage = run('r1')
+    const a = harness(project, { model: 'gpt-4.1', runId: 'r1', threadId: 'u1' }, { budget: noUsage.budget })
+    expect((await engine.startTurn(a.input, a.sink, a.ctl, a.host)).text).toBe('hi')
+    expect(noUsage.settled).toEqual(['used'])
+    expect(noUsage.ledger.committed.output).toBe(noUsage.grants[0])
+
+    // An HTTP 200 whose stream drops before its first chunk: kept.
+    recorder.respond((_request, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.flushHeaders()
+      setTimeout(() => res.socket?.destroy(), 20)
+    })
+    const dropped = run('r2')
+    const b = harness(project, { model: 'gpt-4.1', runId: 'r2', threadId: 'u2' }, { budget: dropped.budget })
+    await expect(engine.startTurn(b.input, b.sink, b.ctl, b.host)).rejects.toBeTruthy()
+    expect(dropped.settled).toEqual(['used'])
+    expect(dropped.ledger.committed.output).toBe(dropped.grants[0])
+
+    // A stream that drops after some content: kept.
+    recorder.respond((_request, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write(`data: ${JSON.stringify({ id: 'c', object: 'chat.completion.chunk', choices: [{ index: 0, delta: { role: 'assistant', content: 'partial' } }] })}\n\n`)
+      setTimeout(() => res.socket?.destroy(), 20)
+    })
+    const midway = run('r3')
+    const c = harness(project, { model: 'gpt-4.1', runId: 'r3', threadId: 'u3' }, { budget: midway.budget })
+    await expect(engine.startTurn(c.input, c.sink, c.ctl, c.host)).rejects.toBeTruthy()
+    expect(midway.ledger.committed.output).toBe(midway.grants[0])
+
+    // A definite error status (503): released.
+    recorder.respond(script503)
+    const refused = run('r4')
+    const d = harness(project, { model: 'gpt-4.1', runId: 'r4', threadId: 'u4' }, { budget: refused.budget })
+    await expect(engine.startTurn(d.input, d.sink, d.ctl, d.host)).rejects.toBeTruthy()
+    expect(refused.settled).toEqual(['released'])
+    expect(refused.ledger.used()).toEqual({ input: 0, output: 0, usd: 0 })
+  }, 120_000)
+
+  it('a payload hook that asks for two completions trips the final check, with nothing sent', async () => {
+    const { engine, recorder, project } = await setup({ testEnv: { MOUSSE_PI_TEST_PAYLOAD_PATCH: JSON.stringify({ n: 2 }) } })
+    recorder.respond(reply())
+    const run = spending({ maxOutputTokens: 4_000 })
+    const turn = harness(project, { model: 'gpt-4.1' }, { budget: run.budget })
+    const error = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host).catch((caught: unknown) => caught) as Error
+    expect(error.message).toContain('did not match its reservation')
+    expect(recorder.connections()).toBe(0)
+    expect(run.settled).toEqual(['released'])
+  }, 60_000)
 
   it('Bedrock always 503 with Pi’s retry: one reservation per HTTP request, each released', async () => {
     const { engine, project, bedrock } = await setup({ retry: { enabled: true, maxRetries: 2, baseDelayMs: 10, provider: { maxRetries: 0 } } })

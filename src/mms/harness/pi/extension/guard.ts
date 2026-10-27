@@ -1,5 +1,5 @@
 import { createAssistantMessageEventStream, lazyStream, type Api, type AssistantMessage, type AssistantMessageEventStream, type Model, type Provider, type ProviderStreams } from '@earendil-works/pi-ai'
-import { hookCap } from '../reservation'
+import { hookCandidates, hookCap } from '../reservation'
 import { ANTHROPIC_OAUTH_REFUSED, LOGIN_REFUSED, SPEND_CAP_MISMATCH } from './messages'
 
 /**
@@ -145,7 +145,16 @@ export function isGuarded(provider: unknown): boolean {
 }
 
 type PayloadHook = (params: unknown, model: Model<Api>) => unknown
-type RequestOptions = { apiKey?: unknown; headers?: Record<string, unknown>; env?: Record<string, unknown>; maxRetries?: number; maxTokens?: number; onPayload?: PayloadHook; [CHARGED]?: true }
+type ResponseHook = (response: { status: number; headers: Record<string, string> }, model: Model<Api>) => unknown
+type FetchFunction = (input: unknown, init?: unknown) => Promise<{ status: number }>
+type RequestOptions = { apiKey?: unknown; headers?: Record<string, unknown>; env?: Record<string, unknown>; maxRetries?: number; maxTokens?: number; onPayload?: PayloadHook; onResponse?: ResponseHook; fetch?: FetchFunction; [CHARGED]?: true }
+
+/**
+ * APIs whose SDK client takes `options.fetch`, so the response status is seen for every answer.
+ * Bedrock reports error statuses through `onResponse`; Google reports none, so a failed Google
+ * request keeps its reservation.
+ */
+const FETCH_APIS = new Set(['anthropic-messages', 'openai-completions', 'openai-responses'])
 
 /** Checks one request; returns the options it may go out with (`maxRetries: 0`), or null when refused. */
 function admit(model: Model<Api>, providerHeaders: Record<string, unknown> | undefined, options: RequestOptions | undefined): RequestOptions | null {
@@ -168,18 +177,30 @@ function refused(model: Model<Api>): AssistantMessageEventStream {
 }
 
 /**
- * How a reserved request ended. Nothing sent (the payload check refused it, or setup failed):
- * released. A failure with no content and no usage (the provider answered an error status): also
- * released. Otherwise its usage, and a failed or stopped request keeps at least its reservation.
+ * How a reserved request ended; never less than it may have been billed.
+ * - Nothing sent (the payload check refused it, or setup failed): released.
+ * - The provider answered with an error status (a non-2xx response was seen): released.
+ * - A complete reply with its usage: that usage.
+ * - Anything else (a failure, a stop, a dropped stream, a reply without usage): its usage, but at
+ *   least the reservation, since what the provider billed is not known.
  */
-function outcomeOf(message: AssistantMessage | undefined, sent: boolean): RequestOutcome {
-  if (!sent || !message) return { kind: 'released' }
-  const usage = message.usage
+function outcomeOf(message: AssistantMessage | undefined, sent: boolean, status: number | undefined): RequestOutcome {
+  if (!sent) return { kind: 'released' }
+  if (status !== undefined && (status < 200 || status >= 300)) return { kind: 'released' }
+  const usage = message?.usage
   const input = (usage?.input ?? 0) + (usage?.cacheRead ?? 0) + (usage?.cacheWrite ?? 0)
   const output = usage?.output ?? 0
-  const failed = message.stopReason === 'error' || message.stopReason === 'aborted'
-  if (message.stopReason === 'error' && !message.content?.length && !input && !output) return { kind: 'released' }
-  return { kind: 'used', input, output, usd: usage?.cost?.total ?? 0, ...(failed ? { partial: true } : {}) }
+  const complete = (message?.stopReason === 'stop' || message?.stopReason === 'length' || message?.stopReason === 'toolUse') && input > 0 && output > 0
+  return { kind: 'used', input, output, usd: usage?.cost?.total ?? 0, ...(complete ? {} : { partial: true }) }
+}
+
+/** A stream that ends at once with `message`'s error (the forwarding itself failed). */
+function failedMessage(model: Model<Api>, error: unknown): AssistantMessage {
+  return {
+    role: 'assistant', content: [], api: model.api, provider: model.provider, model: model.id,
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: 'error', errorMessage: error instanceof Error ? error.message : String(error), timestamp: Date.now()
+  } as AssistantMessage
 }
 
 /**
@@ -189,7 +210,11 @@ function outcomeOf(message: AssistantMessage | undefined, sent: boolean): Reques
  */
 function reservedStream(original: (model: Model<Api>, input: unknown, options?: RequestOptions) => AssistantMessageEventStream, model: Model<Api>, input: unknown, options: RequestOptions, grant: RequestGrant, gate: RequestGate, observer?: GuardObserver): AssistantMessageEventStream {
   let sent = false
+  // The HTTP status, where it can be seen: every answer through `fetch`, a success through `onResponse`.
+  let status: number | undefined
   const before = options.onPayload
+  const afterResponse = options.onResponse
+  const priorFetch = options.fetch
   const inner = original(model, input, {
     ...options,
     maxTokens: grant.maxTokens,
@@ -198,28 +223,47 @@ function reservedStream(original: (model: Model<Api>, input: unknown, options?: 
       const chained = before ? await before(params, payloadModel) : undefined
       if (chained !== undefined) next = chained
       const cap = hookCap(model.api, next)
-      if (cap === undefined || cap > grant.cap) throw new Error(SPEND_CAP_MISMATCH)
+      // One completion per request: each candidate is capped separately.
+      if (cap === undefined || cap > grant.cap || hookCandidates(model.api, next) !== 1) throw new Error(SPEND_CAP_MISMATCH)
       observer?.payload?.(model, next, grant)
       sent = true
       return next
-    }
+    },
+    onResponse: async (response, responseModel) => {
+      status = response.status
+      await afterResponse?.(response, responseModel)
+    },
+    ...(FETCH_APIS.has(model.api)
+      ? {
+          fetch: async (request: unknown, init?: unknown) => {
+            const response = await (priorFetch ?? (globalThis.fetch as unknown as FetchFunction))(request, init)
+            status = response.status
+            return response
+          }
+        }
+      : {})
   })
   const outer = createAssistantMessageEventStream()
   void (async () => {
     let settled = false
+    const settle = async (message: AssistantMessage | undefined) => {
+      if (settled) return
+      settled = true
+      await gate.settle(grant, outcomeOf(message, sent, status))
+    }
     try {
       for await (const event of inner) {
-        if (!settled && (event.type === 'done' || event.type === 'error')) {
-          settled = true
-          await gate.settle(grant, outcomeOf(event.type === 'done' ? event.message : event.error, sent))
-        }
+        if (event.type === 'done' || event.type === 'error') await settle(event.type === 'done' ? event.message : event.error)
         outer.push(event)
       }
       const result = await inner.result()
-      if (!settled) await gate.settle(grant, outcomeOf(result, sent))
+      await settle(result)
       outer.end(result)
-    } catch {
-      outer.end()
+    } catch (error) {
+      const message = failedMessage(model, error)
+      await settle(message)
+      outer.push({ type: 'error', reason: 'error', error: message })
+      outer.end(message)
     }
   })()
   return outer

@@ -43,6 +43,8 @@ export interface SetupOptions {
   /** The mock provider's models instead of the one OpenAI-compatible model (`url`: the recorder's). */
   models?: (url: string) => unknown[]
   extraEnv?: Record<string, string>
+  /** Pi's threshold compaction, read when a process starts (default on). */
+  compaction?: () => boolean
 }
 
 /** An engine on a fresh scratch dir with a recorder; `cleanups` gets what to undo, in order. */
@@ -81,6 +83,7 @@ export async function setup(cleanups: Array<() => unknown>, options: SetupOption
     readyDeadlineMs: 15_000,
     ...(options.testEnv ? { testEnv: options.testEnv } : {}),
     ...(options.extraEnv ? { extraEnv: () => options.extraEnv } : {}),
+    ...(options.compaction ? { compaction: options.compaction } : {}),
     ...(options.adjustLaunch ? { adjustLaunch: options.adjustLaunch } : {}),
     ...(options.holdTurn ? { holdTurn: options.holdTurn } : {}),
     ...(options.mousseTools ? { mousseTools: options.mousseTools } : {}),

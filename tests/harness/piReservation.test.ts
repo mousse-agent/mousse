@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import type { Api, Context, Model } from '@earendil-works/pi-ai'
 import { budgetLimitsOf, RunCounterBook, RunCounters, RunSpend, TurnBudget, type SpendRequest } from '../../src/mms/harness/budget'
-import { grantFloor, IMAGE_TOKEN_CEILING, INPUT_OVERHEAD_TOKENS, inputBound, MIN_ANSWER_TOKENS, MIN_GRANT_TOKENS, perToken, thinkingBudgetFor, wirePlan } from '../../src/mms/harness/pi/reservation'
+import { grantFloor, hookCandidates, IMAGE_TOKEN_CEILING, INPUT_OVERHEAD_TOKENS, inputBound, MIN_ANSWER_TOKENS, MIN_GRANT_TOKENS, multipleCandidates, perToken, reservationRates, thinkingBudgetFor, wirePlan } from '../../src/mms/harness/pi/reservation'
 
 // PR 4 §16 `reservation.test.ts`: the input bound, the grant from the run's ledger, and the refusal
 // thresholds (256 without thinking; the thinking budget plus 1024 with it, after the context clamp).
 
-const FREE = { input: 0, output: 0, cacheWrite: 0 }
+const FREE = { input: 0, output: 0 }
 const ask = (patch: Partial<SpendRequest> = {}): SpendRequest => ({ inputBound: 1_000, wireCap: 8_000, floor: MIN_GRANT_TOKENS, price: FREE, ...patch })
 
 describe('the input bound', () => {
@@ -26,10 +26,43 @@ describe('the input bound', () => {
     expect(inputBound(image, 'mistral-conversations')).toBeUndefined()
   })
 
+  it('counts anything shaped like an image outside user and tool-result content in full', () => {
+    const data = 'A'.repeat(1_000_000)
+    // A tool call's arguments go to the provider as text (`JSON.stringify(arguments)`).
+    const call: Context = { messages: [{ role: 'assistant', content: [{ type: 'toolCall', id: 'c', name: 'paint', arguments: { type: 'image', data, mimeType: 'image/png' } }], api: 'openai-completions', provider: 'p', model: 'm', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: 'toolUse', timestamp: 1 }] as never }
+    expect(inputBound(call, 'openai-completions')).toBeGreaterThan(data.length)
+    const schema: Context = { messages: [], tools: [{ name: 't', description: 'd', parameters: { default: { type: 'image', data } } as never }] }
+    expect(inputBound(schema, 'anthropic-messages')).toBeGreaterThan(data.length)
+  })
+
   it('pi-ai prices are per million tokens', () => {
     expect(perToken(15)).toBeCloseTo(0.000015)
     expect(perToken(0)).toBe(0)
     expect(perToken(undefined)).toBe(0)
+  })
+
+  it('reserves at the highest rate any token can be billed: one-hour cache writes, cache reads, tiers, the Responses priority tier', () => {
+    const base = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }
+    // A one-hour cache write is billed at twice input (pi-ai `calculateCost`).
+    expect(reservationRates('anthropic-messages', base)).toEqual({ input: perToken(6), output: perToken(15) })
+    expect(reservationRates('anthropic-messages', { ...base, cacheRead: 9 })!.input).toBe(perToken(9))
+    // A request-wide tier above 200k input applies to the whole request: its rates are held.
+    expect(reservationRates('anthropic-messages', { ...base, tiers: [{ inputTokensAbove: 200_000, input: 6, output: 22.5, cacheRead: 0.6, cacheWrite: 7.5 }] as never })).toEqual({ input: perToken(12), output: perToken(22.5) })
+    expect(reservationRates('openai-responses', { input: 1, output: 8, cacheRead: 0.1, cacheWrite: 0 })).toEqual({ input: perToken(2) * 2.5, output: perToken(8) * 2.5 })
+    // Without both an input and an output price there is no bound.
+    expect(reservationRates('anthropic-messages', { input: 3, output: 0, cacheRead: 0, cacheWrite: 0 })).toBeUndefined()
+    expect(reservationRates('anthropic-messages', { input: 0, output: 15, cacheRead: 0, cacheWrite: 0 })).toBeUndefined()
+    expect(reservationRates('anthropic-messages', undefined)).toBeUndefined()
+  })
+
+  it('one completion per request: n and candidateCount above one are seen, in the payload and in a model’s defaults', () => {
+    expect(hookCandidates('openai-completions', { max_tokens: 10 })).toBe(1)
+    expect(hookCandidates('openai-completions', { n: 2 })).toBe(2)
+    expect(hookCandidates('google-generative-ai', { config: { candidateCount: 3 } })).toBe(3)
+    expect(hookCandidates('openai-completions', { n: 'two' })).toBe(Number.POSITIVE_INFINITY)
+    expect(multipleCandidates({ samplingParams: { n: 2 } })).toBe(true)
+    expect(multipleCandidates({ samplingParams: { n: 1, temperature: 0 } })).toBe(false)
+    expect(multipleCandidates({})).toBe(false)
   })
 })
 
@@ -40,14 +73,14 @@ describe('the grant', () => {
     expect(spend.used()).toMatchObject({ input: 1_000, output: 8_000 })
   })
 
-  it('lowers the cap to what is left of the output limit and of the USD limit (input at the higher of input and cache-write price)', () => {
+  it('lowers the cap to what is left of the output limit and of the USD limit (input at its held rate)', () => {
     const spend = new RunSpend()
     expect(spend.reserve(ask(), { maxOutputTokens: 3_000 })).toMatchObject({ ok: true, cap: 3_000 })
     expect(spend.reserve(ask(), { maxOutputTokens: 3_500 })).toMatchObject({ ok: true, cap: 500 })
     expect(spend.reserve(ask(), { maxOutputTokens: 3_755 })).toMatchObject({ ok: false, limit: { kind: 'output_tokens', limit: 3_755, actual: 3_500 } })
 
     const priced = new RunSpend()
-    const price = { input: perToken(3), output: perToken(15), cacheWrite: perToken(3.75) }
+    const price = reservationRates('anthropic-messages', { input: 1.875, output: 15, cacheRead: 0, cacheWrite: 3.75 })!
     // $0.10: input 1,000 × $3.75/M = $0.00375, leaving $0.09625 / $15/M = 6,416 output tokens.
     const granted = priced.reserve(ask({ price }), { maxUsd: 0.1 })
     expect(granted).toMatchObject({ ok: true, cap: 6_416 })
@@ -108,6 +141,20 @@ describe('settling', () => {
     const spend = new RunSpend()
     spend.reserve(ask(), { maxOutputTokens: 8_200 })
     expect(spend.reserve(ask(), { maxOutputTokens: 8_200 })).toMatchObject({ ok: false, limit: { actual: 8_000 } })
+  })
+
+  it('input above its bound, or cost above what was held, is an overshoot too', () => {
+    const spend = new RunSpend()
+    const price = { input: perToken(3), output: perToken(15) }
+    const first = spend.reserve(ask({ price }), {})
+    if (!first.ok) throw new Error('refused')
+    expect(spend.settle(first.id, { kind: 'used', input: 1_200, output: 10, usd: 0 })).toMatchObject({ ok: false, limit: { kind: 'input_tokens', limit: 1_000, actual: 1_200 }, overshoot: 200 })
+    const second = spend.reserve(ask({ price }), {})
+    if (!second.ok) throw new Error('refused')
+    expect(spend.settle(second.id, { kind: 'used', input: 900, output: 10, usd: 1 })).toMatchObject({ ok: false, limit: { kind: 'cost_usd' } })
+    const third = spend.reserve(ask({ price }), {})
+    if (!third.ok) throw new Error('refused')
+    expect(spend.settle(third.id, { kind: 'used', input: 1_000, output: 8_000, usd: 1_000 * perToken(3) + 8_000 * perToken(15) })).toEqual({ ok: true })
   })
 
   it('an overshoot ends the run: the budget refuses every later step and keeps the overshoot', () => {

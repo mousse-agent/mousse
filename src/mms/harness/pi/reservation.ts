@@ -14,7 +14,14 @@ import type { Api, Context, Model } from '@earendil-works/pi-ai'
  * Re-check on every Pi upgrade (PR 4 §13): `MIN_ANSWER_TOKENS` (exported by `simple-options.js`,
  * and written as a literal 1024 in `anthropic-messages.js` and `bedrock-converse-stream.js:409`),
  * `CONTEXT_SAFETY_TOKENS`, the default thinking budgets, the estimator, the Bedrock adaptive-model
- * names, `supportsMaxOutputTokens` and each API's hook path (`hookCap`).
+ * names, `supportsMaxOutputTokens`, each API's hook path (`hookCap`) and candidate count
+ * (`hookCandidates`), and `calculateCost` (tiers, one-hour cache writes) and the Responses service
+ * tier multipliers (`reservationRates`). `piWireCap.test.ts` compares the mirror with the `pi-ai`
+ * package; the child runs pi-coding-agent's bundled copy of the same version, which the real-child
+ * suite (`piSpendReservation.test.ts`) covers.
+ *
+ * Not mirrored: Google's thinking budget is sent beside `maxOutputTokens`, not added to it, so a
+ * small grant on a thinking Gemini model may leave little room for the answer. It never overspends.
  */
 
 /** Tokens pi-ai always leaves for the answer under a shared thinking ceiling (`MIN_ANSWER_TOKENS`). */
@@ -197,21 +204,73 @@ export function sizedMaxTokens(cap: number, plan: Pick<WirePlan, 'thinkingBudget
 
 /**
  * An upper bound of the request's input tokens: the UTF-8 bytes of its system prompt, messages and
- * tool schemas (a byte-level tokenizer emits at most one token per byte) with image data left out,
- * plus a ceiling per image and a fixed overhead. Undefined when the API has no image ceiling.
+ * tool schemas (a byte-level tokenizer emits at most one token per byte), plus a ceiling per image
+ * and a fixed overhead. Only the image content blocks of user and tool-result messages are counted
+ * by the ceiling instead of their bytes; anything else shaped like one (a tool call's arguments, a
+ * schema value) is counted in full. Undefined when the API has no image ceiling.
  */
 export function inputBound(context: Pick<Context, 'systemPrompt' | 'messages' | 'tools'>, api: string): number | undefined {
   const ceiling = IMAGE_TOKEN_CEILING[api]
   if (ceiling === undefined) return undefined
   let images = 0
-  const text = JSON.stringify([context.systemPrompt ?? '', context.messages, context.tools ?? []], (_key, value: unknown) => {
-    if (value && typeof value === 'object' && (value as { type?: unknown }).type === 'image' && typeof (value as { data?: unknown }).data === 'string') {
-      images += 1
-      return { type: 'image', mimeType: (value as { mimeType?: unknown }).mimeType }
+  const messages = context.messages.map((message) => {
+    if ((message.role !== 'user' && message.role !== 'toolResult') || !Array.isArray(message.content)) return message
+    return {
+      ...message,
+      content: (message.content as Array<{ type?: unknown; mimeType?: unknown }>).map((block) => {
+        if (block?.type !== 'image') return block
+        images += 1
+        return { type: 'image', mimeType: block.mimeType }
+      })
     }
-    return value
   })
+  const text = JSON.stringify([context.systemPrompt ?? '', messages, context.tools ?? []])
   return Buffer.byteLength(text, 'utf8') + images * ceiling + INPUT_OVERHEAD_TOKENS
+}
+
+/**
+ * How many completions the hook parameters ask for (`n` on OpenAI chat completions, Google's
+ * `candidateCount`); 1 when unset. Each is capped separately, so more than one multiplies the cap.
+ */
+export function hookCandidates(api: string, params: unknown): number {
+  const value = params && typeof params === 'object' ? (params as Record<string, unknown>) : {}
+  const config = value.config && typeof value.config === 'object' ? (value.config as Record<string, unknown>) : {}
+  const count = api === 'google-generative-ai' ? config.candidateCount : value.n
+  return count === undefined || count === null ? 1 : typeof count === 'number' && Number.isFinite(count) ? count : Number.POSITIVE_INFINITY
+}
+
+/** Whether a model's own sampling defaults ask for more than one completion per request. */
+export function multipleCandidates(model: { samplingParams?: Record<string, unknown> }): boolean {
+  const params = model.samplingParams ?? {}
+  return [params.n, params.candidateCount, params.candidate_count].some((count) => count !== undefined && count !== null && count !== 1)
+}
+
+/** A model price as pi-ai holds it (USD per million tokens), with its request-wide tiers. */
+export interface ModelPrice {
+  input?: number
+  output?: number
+  cacheRead?: number
+  cacheWrite?: number
+  tiers?: Array<{ input?: number; output?: number; cacheRead?: number; cacheWrite?: number }>
+}
+
+/** The highest price multiplier pi-ai applies after a response (`openai-responses` priority tier). */
+const SERVICE_TIER_MULTIPLIER: Readonly<Record<string, number>> = Object.freeze({ 'openai-responses': 2.5 })
+
+/**
+ * The rates a reservation is held at, in USD per token: the highest any input-side token can be
+ * billed (input, cache read, cache write, or a one-hour cache write at twice input) and the highest
+ * output rate, over the base price and every tier, times the API's highest service-tier
+ * multiplier. Undefined when the model has no input or no output price (a USD limit cannot be held).
+ */
+export function reservationRates(api: string, cost: ModelPrice | undefined): { input: number; output: number } | undefined {
+  const levels = [cost ?? {}, ...(cost?.tiers ?? [])]
+  const rate = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0)
+  const input = Math.max(...levels.flatMap((level) => [rate(level.input), rate(level.cacheRead), rate(level.cacheWrite), 2 * rate(level.input)]))
+  const output = Math.max(...levels.map((level) => rate(level.output)))
+  if (!(rate(cost?.input) > 0) || !(rate(cost?.output) > 0)) return undefined
+  const multiplier = SERVICE_TIER_MULTIPLIER[api] ?? 1
+  return { input: perToken(input) * multiplier, output: perToken(output) * multiplier }
 }
 
 /**
