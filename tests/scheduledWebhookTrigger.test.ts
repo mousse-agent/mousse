@@ -473,6 +473,17 @@ describe('scheduled job webhook trigger', () => {
       expect(b.calls[0].ingress.jobId).toBe(job.id)
     })
 
+    it('hands a delivery\'s run the job\'s permission mode and ceiling, which no request can change', async () => {
+      const b = await boot({ start: true })
+      const { job, secret } = webhookJob(b, { prompt: 'Summarize the repository', permissionMode: 'ask', permissionCeiling: 'accept_edits' })
+      // A body or header that names a mode changes nothing: the run gets what the job holds.
+      const body = JSON.stringify({ permissionMode: 'full', permissionCeiling: 'full' })
+      expect((await signedPost(b.port(), job.id, body, { secret, headers: { 'X-Permission-Mode': 'full' } })).status).toBe(202)
+      await until(() => b.calls.length === 1, 'the run')
+
+      expect(b.calls[0].ingress).toMatchObject({ permissionMode: 'ask', permissionCeiling: 'accept_edits' })
+    })
+
     it('fills placeholders from the body of a real signed request, and the headers and the secret are not reachable', async () => {
       const b = await boot({ start: true })
       const { job, secret } = webhookJob(b, {
