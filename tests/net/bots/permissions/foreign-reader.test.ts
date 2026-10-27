@@ -21,7 +21,7 @@ import {
   effectiveBotPolicyDigest,
   nativeSdkVersion,
   type NativeBotDefinition
-} from '../../../../src/mms/bots/runtime'
+} from '../../../../src/mms/bots/space/runtime'
 import { ScriptedBotRuntime, readerScript } from '../scriptedRuntime'
 import { decodeEnvelope } from '../../../../src/mms/net/sync/codec'
 import { newId, type StreamId } from '../../../../src/shared/net'
@@ -35,7 +35,7 @@ import {
   loadNativeReader,
   type NativeReaderModule,
   type NativeReaderQualification
-} from '../../../../src/mms/bots/runtime/NativeReader'
+} from '../../../../src/mms/bots/space/runtime/NativeReader'
 let nativeReader: NativeReaderModule, readerQualification: NativeReaderQualification
 beforeAll(async () => {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'reader-approval-native-')))
@@ -53,7 +53,7 @@ beforeAll(async () => {
   }
   if (!headers) throw Error('Node headers unavailable; actual reader qualification cannot run')
   const { buildNativeReader } = await import(
-      new URL('../../../../src/mms/bots/runtime/buildNativeReader.mjs', import.meta.url).href
+      new URL('../../../../src/mms/bots/space/runtime/buildNativeReader.mjs', import.meta.url).href
     ),
     artifact = buildNativeReader({ headers, outfile: join(directory, 'reader.node') })
   readerQualification = {

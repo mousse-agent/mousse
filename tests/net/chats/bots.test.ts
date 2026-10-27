@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { existsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { cleanup, profile } from './helpers'
-import { effectiveBotPolicyDigest } from '../../../src/mms/bots/runtime'
+import { effectiveBotPolicyDigest } from '../../../src/mms/bots/space/runtime'
 import { newId, type SpaceId } from '../../../src/shared/net'
 
 afterEach(async()=>{for(const close of cleanup.splice(0).reverse())await close()})

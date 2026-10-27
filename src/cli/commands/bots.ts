@@ -2,8 +2,8 @@ import type { ParsedArgs } from '../parseArgs'
 import { connectDaemonClient, type DaemonClient } from '../daemonClient'
 import { writeOutput } from '../output'
 import { NetError } from '../../shared/net'
-import type { BotsLocalMethod, BotsLocalParams } from '../../shared/bots/local'
-import { validateBotsLocal } from '../../mms/bots/registerMethods'
+import type { BotsLocalMethod, BotsLocalParams } from '../../shared/bots/space/local'
+import { validateBotsLocal } from '../../mms/bots/space/registerMethods'
 import { netCliFailure } from './net'
 
 export const BOTS_SUBCOMMANDS = [

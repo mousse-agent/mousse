@@ -1,5 +1,5 @@
 import { afterEach, expect, it } from 'vitest'
-import { BotRecordAuthorization } from '../../../../src/mms/bots/admission'
+import { BotRecordAuthorization } from '../../../../src/mms/bots/space/admission'
 import { SpaceHostService } from '../../../../src/mms/spaces/host'
 import { NetSyncSession } from '../../../../src/mms/net/sync/session'
 import { canonicalJson } from '../../../../src/mms/net/sync/codec'

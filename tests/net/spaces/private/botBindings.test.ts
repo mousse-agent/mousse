@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { afterEach, expect, it } from 'vitest'
-import { BotOutbox, BotRecordAuthorization } from '../../../../src/mms/bots/admission'
+import { BotOutbox, BotRecordAuthorization } from '../../../../src/mms/bots/space/admission'
 import { SqlPrivateStreamKeys } from '../../../../src/mms/net/identity'
 import { NetSyncSession } from '../../../../src/mms/net/sync/session'
 import { canonicalJson, decodeEnvelope } from '../../../../src/mms/net/sync/codec'

@@ -3,7 +3,7 @@ import type { TerminalSendSink } from './terminals/PtyManager'
 import type { MmsOwnerKind } from './ownership/MmsOwnerLease'
 import type { MmsProfileServices } from './MmsProfileServices'
 import type { NetRuntime, NetService } from './net/NetService'
-import type { NativeBotComposition } from './bots/BotProfileService'
+import type { NativeBotComposition } from './bots/space/BotProfileService'
 import type { BotRuntimeAdapter } from './net/contracts'
 
 export interface MmsOptions {

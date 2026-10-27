@@ -7,7 +7,7 @@ import { MousseMainService } from '../../../../src/mms/MousseMainService'
 import { MmsProtocolServer } from '../../../../src/mms/protocol/server'
 import { LocalMmsClient } from '../../../../src/mms/protocol/client'
 import { newId } from '../../../../src/shared/net'
-import type { BotsLocalParams } from '../../../../src/shared/bots/local'
+import type { BotsLocalParams } from '../../../../src/shared/bots/space/local'
 
 it('registers actual owner bot IPC with trusted profile binding, exact DTOs and inactive production qualification', async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'bots-owner-ipc-'))),

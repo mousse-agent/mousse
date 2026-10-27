@@ -10,12 +10,12 @@ import { ProviderAuthService } from '../../../../src/mms/providers/ProviderAuthS
 import { DomainHandlerRegistry } from '../../../../src/mms/protocol/domainRegistry'
 import { NetService } from '../../../../src/mms/net/NetService'
 import { BridgeProfileService } from '../../../../src/mms/bridge/BridgeProfileService'
-import { BotProfileService } from '../../../../src/mms/bots/BotProfileService'
+import { BotProfileService } from '../../../../src/mms/bots/space/BotProfileService'
 import {
   effectiveBotPolicyDigest,
   nativeSdkVersion,
   type NativeBotDefinition
-} from '../../../../src/mms/bots/runtime'
+} from '../../../../src/mms/bots/space/runtime'
 import { ScriptedBotRuntime } from '../scriptedRuntime'
 import { decodeEnvelope } from '../../../../src/mms/net/sync/codec'
 import { newId, type SpaceId, type StreamId, type BotId } from '../../../../src/shared/net'

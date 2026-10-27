@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Lock, RefreshCw } from '../../lib/icons'
 import type { ChatAsideProjection, ChatAsideSendInput, ChatAsideSendResult, ChatNetworkProjection, ChatWorkProjection } from '../../../shared/chatsNetwork'
-import type { BotsLocalResults } from '../../../shared/bots/local'
+import type { BotsLocalResults } from '../../../shared/bots/space/local'
 import type { BotId, BotPermissionRequest, Envelope, StreamId } from '../../../shared/net'
 import type { SpacesLocalResults } from '../../../shared/spaces/local'
 import { useChatsStore } from '../../stores/chatsStore'

@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest'
 import { DomainHandlerRegistry } from '../../../../src/mms/protocol/domainRegistry'
-import { registerBotMethods } from '../../../../src/mms/bots/registerMethods'
+import { registerBotMethods } from '../../../../src/mms/bots/space/registerMethods'
 import type { HandlerContext } from '../../../../src/mms/protocol/handlers'
 import { NET_ERRORS, NetError, newId } from '../../../../src/shared/net'
 

@@ -1,4 +1,9 @@
+import { createHash } from 'node:crypto'
+import type { BotThreadRole } from '../../shared/bots/personal/authority'
+import type { CredentialKind, InstanceSnapshot } from '../../shared/harness/status'
+import type { NeutralTool } from '../../shared/harness/tools'
 import type { Enforceability, HarnessCaps, RunPolicy, TurnOrigin } from '../../shared/harness/types'
+import { stableStringify } from '../run/json'
 
 /**
  * Capability readers for the keys the gateway adds to the run engine's eight (SPEC §13.2: every
@@ -47,6 +52,18 @@ export const INTERACTIVE_PURPOSES: ReadonlySet<string> = new Set(['composer', 'd
 /** Whether a purpose may run on an instance with these caps. */
 export function purposeAllowed(caps: Partial<Pick<HarnessCaps, 'toolControl'>>, purpose: string): boolean {
   return toolControlLevel(caps) !== 'uncontrolled' || INTERACTIVE_PURPOSES.has(purpose)
+}
+
+/**
+ * Who a thread's turn runs for (PR 6 §2): any bot thread is `bot`, ahead of its lineage, so a
+ * consult of a context thread never binds as `delegated`; then a workflow step; then a delegated
+ * child (`subagent` lineage); else the person.
+ */
+export function threadTurnOrigin(thread: { botRole?: BotThreadRole; workflow?: boolean; lineage?: string }): TurnOrigin {
+  if (thread.botRole) return 'bot'
+  if (thread.workflow) return 'workflow'
+  if (thread.lineage === 'subagent') return 'delegated'
+  return 'interactive'
 }
 
 /** The origin of a policy; bindings recorded before origins existed are interactive. */
@@ -112,19 +129,29 @@ function spendModelGap(budget: NonNullable<RunPolicy['budget']>, model: SpendMod
  *   driver can bound (`model`); a USD limit also needs a priced model. A model gap is
  *   `spendLimits` with a `reason`;
  * - a wall-clock budget needs nothing: the gateway enforces it everywhere;
+ * - a host authority (a definition's or a bot's grants, roots and rules) needs `exact` tool
+ *   control: only a runtime whose every tool call Mousse decides can be held to it;
  * - pre-granted or no approvals need at least `approval_only`;
+ * - approvals answered by the host (`approve: 'host'`) are refused on every instance for now:
+ *   nothing answers them yet, and the turn would otherwise ask the person;
  * - a turn nobody watches (delegated, workflow, definition, bot) needs more than `uncontrolled`,
  *   for its first dispatch and every retry, continuation and steer.
  */
+/** Why a policy with `approve: 'host'` is refused until a runtime answers approvals for the host. */
+export const HOST_APPROVALS_UNAVAILABLE = 'No runtime answers approvals for the host yet.'
+
 export function checkPolicy(caps: HarnessCaps, policy: RunPolicy, instanceId?: string, model?: SpendModelFacts): Enforceability {
   const missing: Array<keyof HarnessCaps> = []
   const control = toolControlLevel(caps)
   if (policy.mode === 'plan' && !planModeAvailable(caps)) missing.push('planMode')
-  const needsExact = Boolean(policy.tools)
+  const needsExact = Boolean(policy.tools) || Boolean(policy.authority)
   const budget = policy.budget ?? {}
   const needsSpend = hasSpendLimit(policy)
   const needsHardBudget = needsSpend || budget.maxTurns !== undefined || budget.maxToolCalls !== undefined
   const needsApprovals = policy.approvals === 'grants' || policy.approvals === 'never'
+  // Nothing answers approvals for the host yet (PR 6's locked runtimes and bot engine will): until
+  // then a policy that asks for it is refused rather than left to ask the person.
+  const hostApprovals = policy.approve === 'host'
   const unattended = policyOrigin(policy) !== 'interactive'
   if ((needsExact && control !== 'exact') || (needsApprovals && control === 'uncontrolled') || (unattended && control === 'uncontrolled'))
     missing.push('toolControl')
@@ -133,6 +160,10 @@ export function checkPolicy(caps: HarnessCaps, policy: RunPolicy, instanceId?: s
   if (needsSpend) {
     if (spendLimitLevel(caps) !== 'reserved') missing.push('spendLimits')
     else if ((reason = spendModelGap(budget, model))) missing.push('spendLimits')
+  }
+  if (hostApprovals) {
+    reason = [reason, HOST_APPROVALS_UNAVAILABLE].filter(Boolean).join(' ')
+    if (!missing.includes('toolControl')) missing.push('toolControl')
   }
   if (!missing.length) return { ok: true }
   return {
@@ -145,4 +176,52 @@ export function checkPolicy(caps: HarnessCaps, policy: RunPolicy, instanceId?: s
       ...(instanceId ? { instanceId } : {})
     }
   }
+}
+
+/**
+ * A binding's policy, deep-frozen (PR 6 §2): the attempt and its retries and steers run on exactly
+ * this, whatever the caller does with its own object afterwards.
+ */
+export function freezePolicy(policy: RunPolicy): RunPolicy {
+  return deepFreeze(structuredClone(policy))
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === 'object') {
+    for (const item of Object.values(value)) deepFreeze(item)
+    Object.freeze(value)
+  }
+  return value
+}
+
+/** SHA-256 (hex) of a policy's canonical JSON (keys sorted, absent members dropped). */
+export function policyDigest(policy: RunPolicy): string {
+  return createHash('sha256').update(stableStringify(policy)).digest('hex')
+}
+
+/**
+ * What an instance runs on, for the approval dialog's "Runs on" line and, later, the API-key rule
+ * for bots that serve other people. Only a signed-in instance has a kind; the driver tells it from
+ * what it already knows (`AuthReading.credential`), never from another check.
+ */
+export function credentialKind(snapshot: Pick<InstanceSnapshot, 'auth'>): CredentialKind {
+  return snapshot.auth.state === 'signed_in' ? snapshot.auth.credential ?? 'unknown' : 'unknown'
+}
+
+/**
+ * The native names of `tools` on a driver (`HarnessDriver.nativeToolNames`), or the neutral tools it
+ * has no name for. Fails closed: a runtime without a mapping maps nothing.
+ */
+export function mapNeutralTools(
+  nativeToolNames: ((neutral: NeutralTool) => readonly string[]) | undefined,
+  tools: readonly NeutralTool[]
+): { ok: true; names: string[] } | { ok: false; unmapped: NeutralTool[] } {
+  const names: string[] = []
+  const unmapped: NeutralTool[] = []
+  for (const tool of tools) {
+    const native = nativeToolNames?.(tool) ?? []
+    if (!native.length) unmapped.push(tool)
+    for (const name of native) if (!names.includes(name)) names.push(name)
+  }
+  return unmapped.length ? { ok: false, unmapped } : { ok: true, names }
 }

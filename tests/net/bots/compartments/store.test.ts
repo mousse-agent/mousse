@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { NetDatabase } from '../../../../src/mms/net/store/database'
 import { SqliteExecutionLedger } from '../../../../src/mms/net/store/executions'
-import { SqliteCompartmentStore } from '../../../../src/mms/bots/compartments'
+import { SqliteCompartmentStore } from '../../../../src/mms/bots/space/compartments'
 import { newId } from '../../../../src/shared/net'
 const cleanup: Array<() => void> = []
 afterEach(() => {

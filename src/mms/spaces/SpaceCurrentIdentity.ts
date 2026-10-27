@@ -24,7 +24,7 @@ import {
   type StreamHead,
   type UserId
 } from '../../shared/net'
-import type { AdmissionInput } from '../bots/admission'
+import type { AdmissionInput } from '../bots/space/admission'
 import type { MetaProjection, SpaceHostService } from './host'
 
 interface CurrentRequest {

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { afterEach, expect, it } from 'vitest'
-import { BotLocalService } from '../../../../src/mms/bots/BotLocalService'
-import { BotProfileService } from '../../../../src/mms/bots/BotProfileService'
+import { BotLocalService } from '../../../../src/mms/bots/space/BotLocalService'
+import { BotProfileService } from '../../../../src/mms/bots/space/BotProfileService'
 import { PrivateSpaceService } from '../../../../src/mms/spaces/private'
 import { SqlPrivateStreamKeys } from '../../../../src/mms/net/identity'
 import { ProjectManager } from '../../../../src/mms/data/ProjectManager'
@@ -12,7 +12,7 @@ import { setup } from '../admission/helpers'
 import { NetError, newId } from '../../../../src/shared/net'
 
 afterEach(cleanup)
-function configuration(row: import('../../../../src/mms/bots/registry').LocalBot) {
+function configuration(row: import('../../../../src/mms/bots/space/registry').LocalBot) {
   return {
     space: row.space,
     bot: row.bot,

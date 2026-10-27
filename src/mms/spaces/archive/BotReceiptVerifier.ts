@@ -10,7 +10,7 @@ import {
 import type { IdentityService, StreamStore } from '../../net/contracts'
 import { NetDatabase, json } from '../../net/store/database'
 import { canonicalJson, decodeEnvelope } from '../../net/sync/codec'
-import { BotRecordAuthorization, type BotOutputBinding } from '../../bots/admission/authorization'
+import { BotRecordAuthorization, type BotOutputBinding } from '../../bots/space/admission/authorization'
 import type { MetaProjection } from '../host/meta'
 import type { PrivateState } from '../private'
 import type { ArchiveHistoryPlacement } from './history'

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { BotRecordAuthorization } from '../../../../src/mms/bots/admission'
+import { BotRecordAuthorization } from '../../../../src/mms/bots/space/admission'
 import { decodeEnvelope } from '../../../../src/mms/net/sync/codec'
 import { cleanup, peer } from '../../spaces/host/helpers'
 import { setup } from './helpers'

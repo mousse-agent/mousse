@@ -1,5 +1,5 @@
 import { afterEach, expect, it } from 'vitest'
-import { BotPresenceReceiver } from '../../../../src/mms/bots/presence'
+import { BotPresenceReceiver } from '../../../../src/mms/bots/space/presence'
 import { canonicalJson } from '../../../../src/mms/net/sync/codec'
 import { newId, type PresenceMessage } from '../../../../src/shared/net'
 import { profile, peer, trust, signed, cleanup } from '../../spaces/host/helpers'

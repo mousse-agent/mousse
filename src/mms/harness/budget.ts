@@ -1,4 +1,6 @@
 import type { AgentExecutionLimit } from '../../shared/agents/execution'
+import type { ChargeResult, CountKind, CountLimitKey, CounterScope } from '../../shared/harness/counters'
+import type { ReserveResult, SettleResult, SpendLimits, SpendOutcome, SpendRequest, SpendScope } from '../../shared/harness/spend'
 import type { RunPolicy } from '../../shared/harness/types'
 
 /**
@@ -19,25 +21,11 @@ import type { RunPolicy } from '../../shared/harness/types'
  * stays charged in full.
  */
 
-export type CountKind = 'request' | 'tool'
-export type CountLimitKey = 'maxTurns' | 'maxToolCalls'
-
-/** One charge: counted (`count` is the count now), or refused at `limit` with `count` already used. */
-export type ChargeResult = { ok: true; count: number } | { ok: false; count: number; limit: number }
-
-/** Counts that may be shared across runs. One call is one atomic compare-and-increment. */
-export interface CounterScope {
-  /**
-   * Counts one `kind` unless its count already reached `limit` (the binding's own number) or the
-   * scope's own allowance for it, whichever is lower: then nothing is counted and the step is
-   * refused, with the count and the threshold that refused. Without `limit` only the scope's own
-   * allowance applies.
-   */
-  charge(kind: CountKind, limit?: number): ChargeResult
-}
+// The scopes' types are shared with PR 6's bot authority (`shared/bots/personal/authority.ts`).
+export type { ChargeResult, CountKind, CountLimitKey, CounterScope } from '../../shared/harness/counters'
+export type { ReserveResult, SettleResult, SpendLimits, SpendOutcome, SpendRequest, SpendScope } from '../../shared/harness/spend'
 
 export type CountLimits = Pick<NonNullable<RunPolicy['budget']>, 'maxTurns' | 'maxToolCalls'>
-export type SpendLimits = Pick<NonNullable<RunPolicy['budget']>, 'maxInputTokens' | 'maxOutputTokens' | 'maxUsd'>
 /** The limits a runtime enforces step by step: counts, and token and USD spend. */
 export type BudgetLimits = CountLimits & SpendLimits
 
@@ -74,49 +62,6 @@ export class RunCounters implements CounterScope {
     else this.toolCalls += 1
     return { ok: true, count: count + 1 }
   }
-}
-
-/** One request's reservation ask, as the runtime computed it. */
-export interface SpendRequest {
-  /** Upper bound of the request's input tokens. */
-  inputBound: number
-  /** The output cap the request would carry on the wire as the runtime asked for it. */
-  wireCap: number
-  /** The smallest cap the request may go with (its thinking budget plus answer room, or 256). */
-  floor: number
-  /**
-   * USD per token, at the highest rate any token of the request can be billed (`input`: input,
-   * cache read or cache write, over every tier; `output`: likewise).
-   */
-  price: { input: number; output: number }
-}
-
-/** Granted: `cap` is the wire cap the request must carry (reserved in full). */
-export type ReserveResult = { ok: true; id: string; cap: number } | { ok: false; limit: AgentExecutionLimit }
-
-/**
- * How a reservation ends: `released` when nothing was sent; `used` with the request's usage
- * (`partial` when it failed or was stopped after it was sent: each amount is then at least the
- * reservation, since what the provider did is not known).
- */
-export type SpendOutcome = { kind: 'released' } | { kind: 'used'; input: number; output: number; usd: number; partial?: boolean }
-
-/**
- * `overshoot`: how far the request went over what was reserved for it, in the limit's units
- * (output tokens above the cap it was sent, input tokens above its bound, or USD).
- */
-export type SettleResult = { ok: true } | { ok: false; limit: AgentExecutionLimit; overshoot: number }
-
-/** Token and USD spend that may be shared across runs. Each call is atomic. */
-export interface SpendScope {
-  /**
-   * Reserves the request's input bound and the largest wire cap that fits what is left under
-   * `limits` (the binding's own) and the scope's own allowance, at most `request.wireCap`; refuses
-   * when the input alone does not fit or the cap would fall under `request.floor`.
-   */
-  reserve(request: SpendRequest, limits: SpendLimits): ReserveResult
-  /** Ends a reservation; an unknown or settled id is ignored. */
-  settle(id: string, outcome: SpendOutcome): SettleResult
 }
 
 interface SpendAmounts { input: number; output: number; usd: number }

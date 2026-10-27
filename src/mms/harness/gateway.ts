@@ -2,10 +2,12 @@ import type { InstanceSnapshot, ModelRefreshResult, ProviderSnapshotsEvent } fro
 import type {
   AddInstanceInput,
   BinaryFingerprint,
+  BindPolicy,
   CustomModel,
   ExecutionBinding,
   HarnessCaps,
   HarnessDriverKind,
+  HarnessError,
   InstanceConfigPatch,
   InstanceModel,
   ModelPrefsPatch,
@@ -20,6 +22,7 @@ import type {
   SignInResponse,
   TurnOrigin
 } from '../../shared/harness/types'
+import type { NeutralTool } from '../../shared/harness/tools'
 import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult } from '../../shared/providerAuth'
 import type { ModelOverride } from '../../shared/providerInstances'
 import type { LlmProviderOption } from '../../shared/settings'
@@ -55,7 +58,7 @@ import { addedInstanceId, defaultInstanceId, InstanceCounterStore, instanceState
 import { LatestVersionCache } from './latest'
 import { RuntimeFactsStore } from './facts'
 import { questionsPrompter, refusingPrompter } from './acp/permissions'
-import { checkPolicy, hasSpendLimit, purposeAllowed, toolControlLevel } from './policy'
+import { checkPolicy, freezePolicy, hasSpendLimit, mapNeutralTools, policyDigest, purposeAllowed, toolControlLevel } from './policy'
 import { budgetLimitsOf, RunCounterBook, type CounterScope, type SpendScope } from './budget'
 import type { DefinitionAuthority } from '../agentDefinitions/definitionGate'
 import { HarnessScopeStore } from './scope'
@@ -135,8 +138,18 @@ export interface HarnessGateway {
    * so a sign-in changed in a terminal since the last turn moves the account generation on before
    * the binding records it. That reading serves the `startTurn` of this binding once; any other
    * dispatch (a stored binding: retry, recovery) reads the account again.
+   *
+   * `policy` is the caller's part of the binding's policy (tools, approvals, budget, authority);
+   * `approvals` alone is its shorthand, and `policy.approvals` wins. The binding freezes the policy
+   * and, when the caller gave one, records its digest (`ExecutionBinding.policyDigest`). Retries and
+   * steers reuse the binding; a continuation binds anew.
    */
-  bind(resolved: ResolvedTurnSelection, input: { mode: ChatMode; effort?: string; origin?: TurnOrigin; approvals?: RunPolicy['approvals'] }): Promise<ExecutionBinding>
+  bind(resolved: ResolvedTurnSelection, input: BindInput): Promise<ExecutionBinding>
+  /**
+   * The instance's own names for neutral built-in tools (PR 6 §2), for an exact allowlist; refused
+   * with `policy_unenforceable` when the runtime has no tool for one of them.
+   */
+  nativeToolNames(instanceId: string, tools: readonly NeutralTool[]): { ok: true; names: string[] } | { ok: false; error: HarnessError & { code: 'policy_unenforceable' } }
   /** The selection a binding runs: a retry or recovery of a run executes its binding, never the current selection. */
   selectionOf(binding: ExecutionBinding): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'>
   /**
@@ -169,6 +182,16 @@ export interface HarnessGateway {
   readonly legacy: LegacyProviders
   /** Stops the instances' runtimes and running operations. */
   stop(): void
+}
+
+/** `HarnessGateway.bind`: the turn's mode, effort and origin, and the caller's part of its policy. */
+export interface BindInput {
+  mode: ChatMode
+  effort?: string
+  origin?: TurnOrigin
+  /** Shorthand for `policy.approvals`. */
+  approvals?: RunPolicy['approvals']
+  policy?: BindPolicy
 }
 
 export interface ResolveStoredOptions {
@@ -876,7 +899,7 @@ export class Harness implements HarnessGateway {
     if (this.facts.set(record.instanceId, facts) && !this.stopped) this.changed(record.instanceId, { legacy: false })
   }
 
-  async bind(resolved: ResolvedTurnSelection, input: { mode: ChatMode; effort?: string; origin?: TurnOrigin; approvals?: RunPolicy['approvals'] }): Promise<ExecutionBinding> {
+  async bind(resolved: ResolvedTurnSelection, input: BindInput): Promise<ExecutionBinding> {
     const record = resolved.instanceId === PI_DRIVER_ID ? undefined : this.recordOrUndefined(resolved.instanceId)
     const accountId = record ? await this.currentAccount(record) : undefined
     const counters = this.counters.get(resolved.instanceId)
@@ -891,6 +914,12 @@ export class Harness implements HarnessGateway {
       if (!concrete) harnessFail('model_unavailable', `${this.displayName(record)} has no models listed. Refresh models, then try again.`, record.instanceId)
       model = concrete
     }
+    const policy = freezePolicy({
+      ...input.policy,
+      mode: policyMode(input.mode),
+      approvals: input.policy?.approvals ?? input.approvals ?? 'ask',
+      origin: input.origin ?? 'interactive'
+    })
     const binding: ExecutionBinding = {
       instanceId: resolved.instanceId,
       driver: resolved.driver,
@@ -900,7 +929,8 @@ export class Harness implements HarnessGateway {
       ...(accountId ? { accountId } : {}),
       model,
       ...(input.effort ? { effort: input.effort } : {}),
-      policy: { mode: policyMode(input.mode), approvals: input.approvals ?? 'ask', origin: input.origin ?? 'interactive' },
+      policy,
+      ...(input.policy ? { policyDigest: policyDigest(policy) } : {}),
       caps: { ...caps },
       factsRevision: record ? this.facts.revision(record.instanceId) : 0,
       ...(binary ? { binary: { ...binary } } : {})
@@ -908,6 +938,15 @@ export class Harness implements HarnessGateway {
     this.boundAccounts.set(binding, accountId ? { accountId } : {})
     if (resolved.movedFrom) this.boundMoves.set(binding, resolved.movedFrom)
     return binding
+  }
+
+  nativeToolNames(instanceId: string, tools: readonly NeutralTool[]): { ok: true; names: string[] } | { ok: false; error: HarnessError & { code: 'policy_unenforceable' } } {
+    const record = this.record(instanceId)
+    const driver = record.driver
+    const mapped = mapNeutralTools(driver.nativeToolNames ? (neutral) => driver.nativeToolNames!(neutral, record.config) : undefined, tools)
+    if (mapped.ok) return mapped
+    const reason = `${this.displayName(record)} has no tool for ${mapped.unmapped.join(', ')}.`
+    return { ok: false, error: { code: 'policy_unenforceable', message: `This provider cannot enforce the requested restrictions (toolControl). ${reason}`, missing: ['toolControl'], reason, instanceId } }
   }
 
   selectionOf(binding: ExecutionBinding): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'> {
@@ -1164,6 +1203,9 @@ export class Harness implements HarnessGateway {
     // The runtime takes its permissions from the input's mode: it must be the binding's policy.
     if (policyMode(input.mode) !== binding.policy.mode)
       harnessFail('protocol', `The turn runs in ${policyMode(input.mode)} mode but its binding is ${binding.policy.mode} mode.`, binding.instanceId)
+    // A stored binding runs on the policy it was made with, or not at all.
+    if (binding.policyDigest !== undefined && binding.policyDigest !== policyDigest(binding.policy))
+      harnessFail('protocol', 'The policy of this turn is not the one its binding was made with.', binding.instanceId)
     // The caps the binding froze (bindings from before snapshots: the live ones).
     const caps = binding.caps ?? this.recordCaps(record)
     // Token and spend limits also need the model's own facts (an output cap, a price).
@@ -1386,8 +1428,9 @@ export class Harness implements HarnessGateway {
           runId: input.runId,
           modeCeiling: app.modeCeiling,
           binding: record.driver.mcpTurnBinding ?? 'rotate',
-          // A new runtime, a new epoch: driver, home, signed-in account and settings.
-          generation: [binding.driver, binding.homeId, binding.accountGeneration, binding.configRevision].join('|')
+          // A new runtime, a new epoch: driver, home, signed-in account and settings, and a caller's
+          // policy (a narrower grant must not keep the tool list of the last one).
+          generation: [binding.driver, binding.homeId, binding.accountGeneration, binding.configRevision, ...(binding.policyDigest ? [binding.policyDigest] : [])].join('|')
         })
       } catch (error) {
         console.warn('Mousse MCP credential could not be minted; the turn runs without Mousse tools', {
@@ -1755,7 +1798,8 @@ export class Harness implements HarnessGateway {
         ...(auth.methodLabel ?? driver.methodLabel ? { methodLabel: auth.methodLabel ?? driver.methodLabel } : {}),
         ...(auth.message ? { message: auth.message } : {}),
         canSignOut: Boolean(runtime.signOut) && (auth.state === 'signed_in' || auth.state === 'expired') && (this.ownsSignIn(record) || auth.ownedByMousse === true),
-        ...(runtime.signIn && auth.canSignIn ? { canSignIn: true } : {})
+        ...(runtime.signIn && auth.canSignIn ? { canSignIn: true } : {}),
+        ...(auth.credential ? { credential: auth.credential } : {})
       },
       compatibility: shown?.compatibility ?? compatibilityOf(driver, undefined),
       ...(update ? { update } : {}),

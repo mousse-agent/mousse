@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { SqliteBotRegistry } from '../../../../src/mms/bots/registry'
+import { SqliteBotRegistry } from '../../../../src/mms/bots/space/registry'
 import { SqliteBudgetLedger } from '../../../../src/mms/net/store/budgets'
 import { profile, cleanup, peer } from '../../spaces/host/helpers'
 import { newId, type BotProfile } from '../../../../src/shared/net'

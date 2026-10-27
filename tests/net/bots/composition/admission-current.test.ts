@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { setup } from '../admission/helpers'
 import { cleanup } from '../../spaces/host/helpers'
 import { decodeEnvelope } from '../../../../src/mms/net/sync/codec'
-import { BotRecordAuthorization } from '../../../../src/mms/bots/admission'
+import { BotRecordAuthorization } from '../../../../src/mms/bots/space/admission'
 import { peer } from '../../spaces/host/helpers'
 import { NetError, newId } from '../../../../src/shared/net'
 

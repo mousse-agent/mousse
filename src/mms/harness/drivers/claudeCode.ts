@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type { InstallOwner } from '../../../shared/harness/status'
+import type { NativeToolTable } from '../../../shared/harness/tools'
 import type { HarnessCaps } from '../../../shared/harness/types'
 import type { StoredCliConfig } from '../../providers/cliConfig'
 import {
@@ -25,6 +26,22 @@ export const CLAUDE_CODE_CAPS: HarnessCaps = Object.freeze({
   toolControl: 'approval_only',
   budgets: 'unsupported',
   spendLimits: 'unsupported'
+})
+
+/**
+ * Claude Code's built-ins for each neutral tool (PR 6 §2). Every name exists in the pinned SDK's
+ * `ToolInputSchemas` (`toolNames` test); the other built-ins have no neutral name and are never
+ * granted.
+ */
+export const CLAUDE_NATIVE_TOOLS: NativeToolTable = Object.freeze({
+  read: ['Read'],
+  list: ['Glob'],
+  search: ['Glob', 'Grep'],
+  edit: ['Edit'],
+  write: ['Write'],
+  shell: ['Bash'],
+  web_fetch: ['WebFetch'],
+  web_search: ['WebSearch']
 })
 
 /**
@@ -53,7 +70,8 @@ function readAuth(service: ClaudeSubscriptionProviderService, status: Awaited<Re
   switch (status.state) {
     case 'connected': {
       const account = service.account()
-      return { state: 'signed_in', methodLabel, ...(account?.label ? { account: { label: account.label } } : {}), ...(account?.subject ? { subject: account.subject } : {}) }
+      // What it runs on, as `claude auth status` said in this same check: never another one.
+      return { state: 'signed_in', methodLabel, credential: account?.credential ?? 'unknown', ...(account?.label ? { account: { label: account.label } } : {}), ...(account?.subject ? { subject: account.subject } : {}) }
     }
     case 'signed_out':
       return { state: 'signed_out', methodLabel, message: status.message, signInCommand }
@@ -91,6 +109,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     mcpImageResults: true,
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: true }),
     caps: () => CLAUDE_CODE_CAPS,
+    nativeToolNames: (neutral) => CLAUDE_NATIVE_TOOLS[neutral] ?? [],
     updateCommand: (owner: InstallOwner) => {
       if (owner === 'npm') return 'npm install -g @anthropic-ai/claude-code@latest'
       if (owner === 'brew') return 'brew upgrade claude-code'
