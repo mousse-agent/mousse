@@ -1,5 +1,5 @@
 import { ProfileDatabase, type Migration, type ProfileDatabaseFault } from '../../run/db/ProfileDatabase'
-import type { BotActivationStatus, BotManifest } from '../../../shared/bots/personal/definition'
+import type { BotActivationStatus, BotActivationTrigger, BotManifest } from '../../../shared/bots/personal/definition'
 import { canonicalManifest } from '../../../shared/bots/personal/manifest'
 import type { ActivationLimits } from './scopes'
 import type { BotThreadRole } from '../../../shared/bots/personal/authority'
@@ -160,6 +160,21 @@ CREATE TABLE bot_contexts(
   PRIMARY KEY(bot_id, key)
 ) STRICT;
 `
+  },
+  {
+    // 6d: when each schedule of a bot runs next (the schedule as it was read, so an edit restarts
+    // it), and the last state a channel activation told its chat about (each state is posted once).
+    version: 3,
+    sql: `
+CREATE TABLE bot_schedule_state(
+  bot_id TEXT NOT NULL,
+  schedule_id TEXT NOT NULL,
+  spec_json TEXT NOT NULL,
+  next_run_at TEXT,
+  PRIMARY KEY(bot_id, schedule_id)
+) STRICT;
+ALTER TABLE bot_activations ADD COLUMN reply_status TEXT;
+`
   }
 ]
 
@@ -183,7 +198,7 @@ export interface BotActivationRow {
   botId: string
   revision: string
   grantDigest: string
-  trigger: { kind: 'manual'; input: string }
+  trigger: BotActivationTrigger
   idempotencyKey: string
   status: BotActivationStatus
   threadId: string | null
@@ -682,6 +697,48 @@ export class BotStore {
   activationsWith(statuses: readonly BotActivationStatus[]): BotActivationRow[] {
     const marks = statuses.map(() => '?').join(', ')
     return this.all(`SELECT * FROM bot_activations WHERE status IN (${marks}) ORDER BY created_at, id`, ...statuses).map(activationOf)
+  }
+
+  // -- Schedules and channel replies (6d) -------------------------------------------------------
+
+  scheduleStates(botId: string): Array<{ scheduleId: string; spec: string; nextRunAt: string | null }> {
+    return this.all('SELECT * FROM bot_schedule_state WHERE bot_id = ? ORDER BY schedule_id', botId).map((row) => ({
+      scheduleId: row.schedule_id as string,
+      spec: row.spec_json as string,
+      nextRunAt: str(row.next_run_at)
+    }))
+  }
+
+  putScheduleState(botId: string, scheduleId: string, spec: string, nextRunAt: string | null): void {
+    this.run(
+      'INSERT INTO bot_schedule_state(bot_id, schedule_id, spec_json, next_run_at) VALUES(?, ?, ?, ?) ON CONFLICT(bot_id, schedule_id) DO UPDATE SET spec_json = excluded.spec_json, next_run_at = excluded.next_run_at',
+      botId, scheduleId, spec, nextRunAt
+    )
+  }
+
+  dropScheduleState(botId: string, scheduleId?: string): void {
+    if (scheduleId === undefined) this.run('DELETE FROM bot_schedule_state WHERE bot_id = ?', botId)
+    else this.run('DELETE FROM bot_schedule_state WHERE bot_id = ? AND schedule_id = ?', botId, scheduleId)
+  }
+
+  /**
+   * Inserts an activation unless its idempotency key exists already; true when it was inserted.
+   * A repeated schedule occurrence only finds the activation it made before.
+   */
+  insertActivationOnce(row: Parameters<BotStore['insertActivation']>[0], limits: ActivationLimits): boolean {
+    const inserted = this.run(
+      'INSERT OR IGNORE INTO bot_activations(id, bot_id, revision, grant_digest, trigger_json, idempotency_key, status, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)',
+      row.id, row.botId, row.revision, row.grantDigest, JSON.stringify(row.trigger), row.idempotencyKey, row.status, row.createdAt
+    )
+    if (!inserted) return false
+    this.run('INSERT INTO bot_counters(activation_id, limits_json) VALUES(?, ?)', row.id, JSON.stringify(limits))
+    this.run('INSERT INTO bot_spend(activation_id) VALUES(?)', row.id)
+    return true
+  }
+
+  /** Claims telling the chat about `status` (compare-and-set): false when it was told already. */
+  claimReply(activationId: string, status: string): boolean {
+    return this.run('UPDATE bot_activations SET reply_status = ? WHERE id = ? AND (reply_status IS NULL OR reply_status <> ?)', status, activationId, status) > 0
   }
 
   setAutoRestarts(id: string, count: number): void {

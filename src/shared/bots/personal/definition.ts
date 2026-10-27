@@ -93,9 +93,38 @@ export interface BotDefinition {
   /** Context threads it consults (6c-2); at most 8. */
   context: BotThreadSpec[]
   permissions: BotManifest
-  /** Only manual activation in this release. */
-  triggers: { manual: true }
+  /** Manual activation always; schedules on the bot itself (6d). Channels attach from the chat (`/bot`). */
+  triggers: { manual: true; schedules?: BotSchedule[] }
 }
+
+/**
+ * A schedule of a bot (PR 6 §6): each occurrence is one activation with `prompt` as its input.
+ * Occurrences missed while Mousse was closed collapse into one catch-up occurrence.
+ */
+export interface BotSchedule {
+  /** Stable within the bot: `[a-z0-9][a-z0-9-]{0,31}`. */
+  id: string
+  /** Every `minutes`, or a five-field cron expression in local time. */
+  when: { kind: 'interval'; minutes: number } | { kind: 'cron'; expr: string }
+  prompt: string
+}
+
+/** Most schedules one bot may have. */
+export const MAX_BOT_SCHEDULES = 8
+
+/** Where a channel activation replies (the chat the owner wrote from). */
+export interface BotChannelReplyTo {
+  platform: 'telegram' | 'discord' | 'webhook'
+  chatId: string
+  threadId?: string
+  messageId?: string
+}
+
+/** What started an activation: the Bots tab, a schedule occurrence, or the owner's channel DM. */
+export type BotActivationTrigger =
+  | { kind: 'manual'; input: string }
+  | { kind: 'schedule'; input: string; scheduleId: string; occurrenceAt: string }
+  | { kind: 'channel'; input: string; replyTo: BotChannelReplyTo }
 
 /** The default active time of one activation: 15 minutes. */
 export const DEFAULT_BOT_ACTIVE_MS = 15 * 60_000
@@ -117,7 +146,7 @@ export interface BotActivationSummary {
   revision: string
   status: BotActivationStatus
   threadId: string | null
-  trigger: { kind: 'manual'; input: string }
+  trigger: BotActivationTrigger
   createdAt: string
   endedAt: string | null
   endReason: string | null
