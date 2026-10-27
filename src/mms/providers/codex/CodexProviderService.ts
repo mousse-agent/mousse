@@ -87,12 +87,12 @@ import { QUESTIONS_REFUSED_MESSAGE } from '../../harness/acp/permissions'
 export const CODEX_PROVIDER_ID = 'codex'
 /** How long a live `account/read` result stands before it is checked again. */
 export const CODEX_ACCOUNT_TTL_MS = 5 * 60_000
-/** Model id that leaves the choice to the user's Codex config (`model` in `config.toml`). */
+/**
+ * Model id that leaves the choice to the user's Codex config (`model` in `config.toml`). Chats and
+ * defaults saved with it keep working; it is no longer offered, so an entry lists the models Codex
+ * reports (or none, and "Refresh models").
+ */
 export const CODEX_DEFAULT_MODEL_ID = 'default'
-/** Offered until `model/list` has run once (or when it fails). */
-export const CODEX_FALLBACK_MODELS: LlmModelOption[] = [
-  { id: CODEX_DEFAULT_MODEL_ID, label: 'Codex default (from your Codex config)' }
-]
 /**
  * Codex's built-in provider for OpenAI models, which uses the ChatGPT sign-in. Codex refuses to let
  * any config layer redefine it (`model_providers` cannot contain built-in ids), so pinning it per
@@ -1096,10 +1096,9 @@ export class CodexProviderService {
     }
   }
 
-  /** The listed models, or the Codex default until a listing runs. */
+  /** The listed models; none until a listing has run. */
   models(): LlmModelOption[] {
-    if (this.options.models) return this.settings.models ?? []
-    return this.settings.models?.length ? this.settings.models : CODEX_FALLBACK_MODELS
+    return this.settings.models ?? []
   }
 
   /** When Codex last listed the models, kept with them across restarts. */
@@ -1174,7 +1173,7 @@ export class CodexProviderService {
         if (result.kind === 'signed_in' && !this.settings.models?.length && !this.modelDiscoveryStarted) {
           this.modelDiscoveryStarted = true
           void this.refreshModels().catch(() => {
-            /* the fallback model stays available */
+            /* "Refresh models" lists them later */
           })
         }
       })().finally(() => {
@@ -1244,7 +1243,7 @@ export class CodexProviderService {
       try {
         await this.refreshModels()
       } catch {
-        interaction.notify({ type: 'progress', message: 'Signed in. Model discovery is unavailable; your Codex default model is available.' })
+        interaction.notify({ type: 'progress', message: 'Signed in. Models could not be listed yet; use Refresh models to try again.' })
       }
       checkpoint()
       return { success: true, sessionId: session.sessionId }

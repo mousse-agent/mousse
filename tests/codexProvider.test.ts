@@ -9,7 +9,6 @@ import { LoginSession } from '../src/mms/providers/LoginSession'
 import type { CodexLaunch, CodexProcess } from '../src/mms/providers/codex/CodexAppServerClient'
 import {
   CODEX_ACCOUNT_TTL_MS,
-  CODEX_FALLBACK_MODELS,
   CODEX_MODEL_PROVIDER,
   CodexProviderService,
   CodexTurnFailure,
@@ -232,7 +231,7 @@ describe('CodexProviderService', () => {
     expect(service.configured()).toBe(false)
   })
 
-  it('lists models from model/list across pages, falling back to the Codex default model', async () => {
+  it('lists models from model/list across pages, and lists none until one has run', async () => {
     const server = scriptedServer((message) => {
       if (message.method === 'account/read') return chatgpt
       if (message.method !== 'model/list') return { result: {} }
@@ -262,7 +261,8 @@ describe('CodexProviderService', () => {
     const unlisted = new CodexProviderService(mkdtempSync(join(tmpdir(), 'mousse-codex-empty-')), questions, { launch: fresh.launch, findBinary: () => binary })
     services.push(unlisted)
     await unlisted.status()
-    expect(unlisted.llmProvider()?.models).toEqual(CODEX_FALLBACK_MODELS)
+    // No invented default: an entry that has not listed shows "Refresh models" until it has.
+    expect(unlisted.llmProvider()?.models).toEqual([])
   })
 
   it('disconnects in Mousse only: never sends account/logout and keeps reporting disconnected', async () => {
