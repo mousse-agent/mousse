@@ -22,13 +22,14 @@ const pi = new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unuse
 const claude: ProviderAdapter = { driver: 'claude', capabilities: pi.capabilities, configured: () => true, startTurn: async () => { throw new Error('unused') }, interrupt: async () => 'not_active' }
 const signedIn: AuthReading = { state: 'signed_in' }
 
-function setup() {
+function setup(probe: { authMs?: number } = {}) {
   let nowMs = 1_000_000
   const auth = vi.fn(async (): Promise<AuthReading> => signedIn)
   const instances = new ProviderInstanceService({ store: { read: () => ({ instances: { claude: { driver: 'claude', enabled: true } }, seedVersion: 1 }), write: () => {} } })
   const harness = testHarness({
     instances,
     now: () => nowMs,
+    ...(probe.authMs ? { probeTimeouts: { authMs: probe.authMs } } : {}),
     drivers: [adapterDriver(claude, { runtime: { auth, llmProvider: () => ({ id: 'claude-subscription', label: 'Claude Code', models: [{ id: 'sonnet', label: 'Sonnet' }] }) } })]
   })
   const events: HarnessGatewayEvent[] = []
@@ -56,6 +57,26 @@ describe('the first-check wait on settings.getOptions', () => {
     expect(settled).toBe(false)
     first.resolve(signedIn)
     expect((await pending).map((option) => option.instanceId)).toEqual(['claude'])
+  })
+
+  it('a first check that timed out is waited for again on the next read, not after the probe TTL', async () => {
+    const { auth, options } = setup({ authMs: 300 })
+    // The first sign-in check never answers: the read ends at the check's deadline.
+    auth.mockImplementationOnce(() => new Promise<AuthReading>(() => {}))
+    await options()
+    expect(auth).toHaveBeenCalledTimes(1)
+    // The next read checks again at once and waits for that answer.
+    const second = deferred<AuthReading>()
+    auth.mockImplementationOnce(() => second.promise)
+    let settled = false
+    const pending = options().then(() => { settled = true })
+    await vi.waitFor(() => expect(auth).toHaveBeenCalledTimes(2), { interval: 1 })
+    expect(settled).toBe(false)
+    second.resolve(signedIn)
+    await pending
+    // Answered now: a third read within the TTL checks nothing.
+    await options()
+    expect(auth).toHaveBeenCalledTimes(2)
   })
 
   it('a later read uses the cache and a refresh arrives as a snapshot event', async () => {

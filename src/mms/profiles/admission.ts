@@ -15,7 +15,6 @@ const INSTALLATION_METHODS = new Set([
   'providers.login',
   'providers.loginStatus',
   'providers.logout',
-  'providers.setApiKey',
   'providers.deleteApiKey',
   'gui.devtoolsPoll',
   'gui.devtoolsRespond'

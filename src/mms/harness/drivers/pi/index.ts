@@ -69,6 +69,21 @@ function piAddOptions(credentials: PiCredentials | undefined): DriverAddOption[]
 }
 
 /**
+ * A provider an entry can be added for: one Add provider offers, one with a saved credential, or
+ * one the model catalogue registers (a custom provider with no sign-in of its own), so whatever
+ * could be removed can be added back.
+ */
+function piProviderKnown(credentials: PiCredentials | undefined, providerId: string): boolean {
+  if (piAddOptions(credentials).some((option) => option.id === providerId)) return true
+  try {
+    if (credentials?.has?.(providerId)) return true
+    return credentials?.models?.getProviders().some((provider) => provider.id === providerId) ?? false
+  } catch {
+    return false
+  }
+}
+
+/**
  * The `pi` driver: every `pi:<provider>` instance. Two engines share one stored kind:
  * - `legacy`, the in-process pi-ai loop (`LlmClient`), shared by the profile: the default, and
  *   always for the bare route (`openai-codex` and `cursor` are retired: `retired.ts`);
@@ -95,7 +110,7 @@ export function piDriver(options: { client: () => PiChatClient; credentials?: ()
     instanceIdFor: (patch) => {
       const providerId = patch.provider?.trim()
       if (!providerId) throw harnessAppError({ code: 'unsupported', message: 'Choose the model provider to add.' })
-      if (piRetiredOf(providerId) || !piAddOptions(credentials()).some((option) => option.id === providerId))
+      if (piRetiredOf(providerId) || !piProviderKnown(credentials(), providerId))
         throw harnessAppError({ code: 'unsupported', message: `Mousse cannot add the model provider "${providerId}".` })
       return piInstanceId(providerId)
     },

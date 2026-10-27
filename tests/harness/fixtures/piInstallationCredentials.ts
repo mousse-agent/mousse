@@ -28,6 +28,9 @@ export class PiInstallationCredentials {
   })
   readonly refreshDynamicModels = vi.fn(async () => {})
   readonly credentials = { listProviderIds: () => [...this.keys.keys()] }
+  /** Providers the model catalogue registers without a sign-in of their own (a custom `models.json` one). */
+  readonly customProviders: string[] = []
+  readonly models = { getProviders: () => this.customProviders.map((id) => ({ id })) }
 
   has = (providerId: string): boolean => this.keys.has(providerId)
   getProviderDisplayName = (providerId: string): string => LABELS[providerId] ?? providerId

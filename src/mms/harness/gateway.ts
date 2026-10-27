@@ -529,6 +529,11 @@ export const ONE_SHOT_INACTIVITY_MS = 60_000
 export const USAGE_READ_MS = 15_000
 /** How long turn admission waits for the account check; past it the account counts as unknown. */
 export const TURN_ACCOUNT_CHECK_MS = 10_000
+/**
+ * The longest a listing (`snapshots`, `llmProviders`) waits for first checks: past an ordinary
+ * check's own deadlines (shell path, version, sign-in), and a bound for a forced one.
+ */
+export const FIRST_CHECK_WAIT_MS = 35_000
 
 export interface HarnessGatewayOptions {
   /** Test seam only: what bot runtimes still lack (default `BOT_RUNTIME_GAPS`: bots are refused). */
@@ -880,8 +885,8 @@ export class Harness implements HarnessGateway {
         // Only a removed model API comes back; any other provider is added by its credential, as before.
         const provider = piProviderIdOf(instanceId)
         if (!provider || !this.instanceMap.isRemoved(instanceId)) return
-        // The credential is saved already; the old method still answers as it did when the add fails.
-        await this.add({ driver: 'pi', config: { provider } }).catch((error) => console.warn('[harness] could not add a removed provider back', { instanceId, error: errorText(error) }))
+        // A failed add fails the old method: the provider is not reported back when it is not.
+        await this.add({ driver: 'pi', config: { provider } })
       },
       refreshModels: async (providerId, cwd) => {
         const record = this.legacyRecord(providerId)
@@ -2061,13 +2066,30 @@ export class Harness implements HarnessGateway {
     const entries = this.instanceMap.list()
     const firstChecks: Array<Promise<void>> = []
     for (const instanceId of ids) {
+      if (!entries[instanceId]?.enabled) continue
       const state = this.probes.get(instanceId)
-      const due = !state?.checkedAtMs || this.now() - state.checkedAtMs >= PROBE_TTL_MS
-      if (!due || !entries[instanceId]?.enabled) continue
+      // A first check that timed out answered nothing: it is checked (and waited for) again on the
+      // next read, not after the probe TTL.
+      const unanswered = !state?.result || (state.result.timedOut === true && !state.lastGood)
+      const due = unanswered || !state?.checkedAtMs || this.now() - state.checkedAtMs >= PROBE_TTL_MS
+      if (!due) continue
       const probing = this.probe(instanceId, false)
-      if (!state?.result) firstChecks.push(probing)
+      if (unanswered) firstChecks.push(probing)
     }
-    await Promise.all(firstChecks)
+    if (!firstChecks.length) return
+    // Each phase of an ordinary check has its own deadline; a forced one (after Add or an install)
+    // also checks the installed files, which has none. The wait ends at this deadline either way,
+    // and a check still running reports as a snapshots event when it ends.
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, FIRST_CHECK_WAIT_MS)
+      timer.unref?.()
+    })
+    try {
+      await Promise.race([Promise.all(firstChecks), deadline])
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   async llmProviders(scope: ProviderScope): Promise<LlmProviderOption[]> {
@@ -2478,6 +2500,9 @@ export class Harness implements HarnessGateway {
       throw error
     }
     if (record) this.noteStored(record, config)
+    // A removal of this id still waiting to delete its state folder (the own-setup ids are fixed:
+    // `claude`, `codex`, ...) is called off: the new entry uses that folder.
+    this.removals.delete(instanceId)
     // The vendor file holds other values than the new entry's (its sign-out, or launch settings the add set): mirror them.
     if (record && mirror && vendor && vendor !== 'unreadable' && mirrorHash(instanceTuple(config, mirror.fields)) !== mirrorHash(vendor)) {
       const failure = this.mirrorWrite(record, config)
@@ -2553,13 +2578,6 @@ export class Harness implements HarnessGateway {
     // touched; a model API's saved key is deleted (`removeSignsOut`).
     const record = this.record(instanceId, { allowDisabled: true })
     const state = this.probes.get(instanceId)
-    if (record.driver.removeSignsOut && record.runtime.signOut) {
-      try {
-        await record.runtime.signOut()
-      } catch (error) {
-        harnessFail('operation_busy', `${this.displayName(record)} could not be removed: ${errorText(error)} Try removing it again.`, instanceId)
-      }
-    }
     // Sign-ins Mousse keeps in the instance's folder go first, with what used them stopped and
     // their tokens revoked; the folder is deleted only after that. When it fails the entry stays,
     // so removing it again retries.
@@ -2576,8 +2594,9 @@ export class Harness implements HarnessGateway {
     } catch (error) {
       console.warn('[harness] could not release an install', { instanceId, error: errorText(error) })
     }
-    this.records.delete(instanceId)
+    // The entry and its tombstone are written first: when that write fails nothing else changes.
     this.instanceMap.removeEntry(instanceId)
+    this.records.delete(instanceId)
     this.prefs.remove(instanceId)
     this.scopes.forgetInstance(instanceId)
     this.counters.forget(instanceId)
@@ -2598,6 +2617,17 @@ export class Harness implements HarnessGateway {
         this.deleteRemoved()
       })]
     })
+    // Then the saved key of a model API is deleted (it is shared by the profiles). The entry stays
+    // removed whatever happens; a failure is reported once the removal is done. An Add of the same
+    // id meanwhile calls off the folder's deletion above.
+    let signOutFailure: unknown
+    if (record.driver.removeSignsOut && record.runtime.signOut) {
+      try {
+        await record.runtime.signOut()
+      } catch (error) {
+        signOutFailure = error
+      }
+    }
     // Chats running on it stop (on this runtime and on any older one still finishing turns); the
     // directory waits for them to end.
     void this.stopTurns(instanceId, record, 'removed').catch((error) => this.warnStop(record, error))
@@ -2606,6 +2636,8 @@ export class Harness implements HarnessGateway {
     this.options.onProvidersChanged?.()
     // Checks end within their deadlines; stopped turns end as their runtime stops.
     await Promise.all(checks)
+    if (signOutFailure)
+      harnessFail('protocol', `${this.displayName(record)} was removed, but its saved key could not be deleted: ${errorText(signOutFailure)}`, instanceId)
   }
 
   private async configure(instanceId: string, patch: InstanceConfigPatch): Promise<InstanceSnapshot> {
@@ -2704,10 +2736,15 @@ export class Harness implements HarnessGateway {
 
   // -- Instance config and its vendor mirror ------------------------------------------------------
 
-  /** Whether the instance is signed out in Mousse (its config's flag). */
+  /**
+   * Whether the instance is signed out in Mousse (its config's flag). An instance that is not an
+   * entry of the profile (removed, or never added) counts as signed out too, so its vendor service
+   * neither checks its sign-in nor runs anything for it (usage, models).
+   */
   signedOutInMousse(instanceId: string): boolean {
+    if (!Object.prototype.hasOwnProperty.call(this.instanceMap.list(), instanceId)) return true
     const record = this.records.get(instanceId) ?? this.recordOrUndefined(instanceId)
-    return record ? this.isSignedOut(record) : false
+    return record ? this.isSignedOut(record) : true
   }
 
   /** The instance's launch settings, from its config: what its vendor service starts with. */

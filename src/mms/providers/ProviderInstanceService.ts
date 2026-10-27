@@ -183,12 +183,11 @@ export class ProviderInstanceService {
     const next: Record<string, unknown> = { ...(isRecord(previous) ? previous : {}), driver: entry.driver, enabled: entry.enabled }
     if (entry.config && Object.keys(entry.config).length) next.config = { ...entry.config }
     else delete next.config
-    this.writeStored({
+    this.writeExplicit({
       instances: { ...seeded.instances, [instanceId]: next },
       seedVersion: seeded.seedVersion,
       removed: tombstoned ? removed.filter((id) => id !== instanceId) : removed
     })
-    if (this.writeFailed) throw new Error('Mousse could not save the provider instances')
   }
 
   /**
@@ -201,8 +200,19 @@ export class ProviderInstanceService {
     const seeded = this.seed(stored)
     const removed = removedIds(stored.removed)
     const { [instanceId]: _removed, ...rest } = seeded.instances
-    this.writeStored({ instances: rest, seedVersion: seeded.seedVersion, removed: removed.includes(instanceId) ? removed : [...removed, instanceId] })
-    if (this.writeFailed) throw new Error('Mousse could not save the provider instances')
+    this.writeExplicit({ instances: rest, seedVersion: seeded.seedVersion, removed: removed.includes(instanceId) ? removed : [...removed, instanceId] })
+  }
+
+  /**
+   * A change the caller asked for (an entry, a removal): when it cannot be saved it throws and the
+   * working copy stays as it was, so nothing looks changed that is not (unlike derivable seeds).
+   */
+  private writeExplicit(state: ProviderInstanceState): void {
+    const before = this.memory
+    this.writeStored(state)
+    if (!this.writeFailed) return
+    this.memory = before
+    throw new Error('Mousse could not save the provider instances')
   }
 
   /** Why the stored instance map could not be read, while that lasts. */

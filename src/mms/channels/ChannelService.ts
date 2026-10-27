@@ -36,10 +36,10 @@ export type ChannelAdapterFactory = (
 export interface ChannelServiceOptions {
   createAdapter?: ChannelAdapterFactory
   /**
-   * Models `/model` offers, after the profile's instance scope and model prefs (disabled
-   * instances and hidden models left out). Default: the credentialed pi-ai providers.
+   * Models `/model` offers, after the profile's instance scope and model prefs (disabled and
+   * removed instances and hidden models left out). Required: there is no unguarded default.
    */
-  listModels?: () => LlmProviderOption[]
+  listModels: () => LlmProviderOption[]
   /**
    * The caps of an instance resolved for a channel turn (`channel_model`); throws when it cannot
    * run one. Picks the one-time approvals notice for a model chosen with `/model`.
@@ -132,7 +132,7 @@ export class ChannelService extends EventEmitter {
       {
         settingsStore: this.settingsStore,
         threadStore: this.threadStore,
-        listModels: options.listModels ?? (() => this.providerAuth.getConfiguredLlmProviders()),
+        listModels: options.listModels,
         channelGate: (threadId, modelOverride) => {
           const caps = this.turnCaps(threadId, modelOverride, options.capsOf)
           const gate = channelGate(caps)

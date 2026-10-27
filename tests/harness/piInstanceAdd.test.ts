@@ -9,6 +9,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { piDriver } from '../../src/mms/harness/drivers/pi'
 import type { HarnessGatewayEvent } from '../../src/mms/harness/gateway'
+import { dispatchMethod, type HandlerContext } from '../../src/mms/protocol/handlers'
 import { ProviderInstanceService, type StoredProviderInstances } from '../../src/mms/providers/ProviderInstanceService'
 import { testHarness } from '../../src/mms/run/testkit/harness'
 import { PiInstallationCredentials } from './fixtures/piInstallationCredentials'
@@ -161,5 +162,68 @@ describe('catalog.addOptions', () => {
     // Each option's `add` is exactly what `instances.add` takes.
     for (const option of options) await a.harness.instances.add(option.add)
     expect(Object.keys(a.instances.list()).sort()).toEqual(['pi:amazon-bedrock', 'pi:openai', 'pi:opencode-go', 'pi:openrouter'])
+  })
+})
+
+describe('review round 1', () => {
+  it('a failed tombstone write leaves the provider and its shared key as they were', async () => {
+    const credentials = new PiInstallationCredentials()
+    credentials.keys.set('openrouter', 'fixture-key')
+    let state: StoredProviderInstances = { instances: {}, seedVersion: 1 }
+    let failWrites = false
+    const instances = new ProviderInstanceService({
+      store: {
+        read: () => ({ ...state }),
+        write: (next) => {
+          if (failWrites) throw new Error('fixture: mousse.conf is locked')
+          state = { ...next }
+        }
+      },
+      providerAuth: credentials
+    })
+    const harness = testHarness({ instances, drivers: [piDriver({ client: () => ({ chat: async () => { throw new Error('unused') } }) as never, credentials: () => credentials as never })] })
+    cleanups.push(() => harness.stop())
+    expect(Object.keys(instances.list())).toEqual(['pi:openrouter'])
+    failWrites = true
+    await expect(harness.instances.remove('pi:openrouter')).rejects.toThrow(/could not save/)
+    expect(credentials.logout).not.toHaveBeenCalled()
+    expect(credentials.keys.get('openrouter')).toBe('fixture-key')
+    expect(instances.isRemoved('pi:openrouter')).toBe(false)
+    // Removing it again once the file can be written finishes the removal.
+    failWrites = false
+    await harness.instances.remove('pi:openrouter')
+    expect(credentials.has('openrouter')).toBe(false)
+    expect(state.removed).toEqual(['pi:openrouter'])
+  })
+
+  it('a custom provider with no sign-in of its own can be added back after its removal', async () => {
+    const credentials = new PiInstallationCredentials()
+    credentials.customProviders.push('fixture-custom')
+    credentials.keys.set('fixture-custom', 'fixture-key')
+    const a = profile(credentials)
+    expect(Object.keys(a.instances.list())).toEqual(['pi:fixture-custom'])
+    await a.harness.instances.remove('pi:fixture-custom')
+    credentials.keys.set('fixture-custom', 'fixture-key-again')
+    expect(a.instances.list()).toEqual({})
+    expect((await a.harness.instances.addInstance({ driver: 'pi', config: { provider: 'fixture-custom' } })).existed).toBe(false)
+    expect(Object.keys(a.instances.list())).toEqual(['pi:fixture-custom'])
+  })
+
+  it('settings.getOptions offers no speech model of a provider removed from the profile', async () => {
+    const credentials = new PiInstallationCredentials()
+    credentials.keys.set('openai', 'fixture-key')
+    credentials.getConfiguredLlmProviders = () => [...credentials.keys.keys()].map((id) => ({ id, label: id, models: [{ id: 'gpt-4o-mini-tts', label: 'TTS' }, { id: 'whisper-1', label: 'Whisper' }] }))
+    const a = profile(credentials)
+    const b = profile(credentials)
+    await a.harness.instances.remove('pi:openai')
+    // Another profile saves the shared key again.
+    await b.harness.instances.setSecret('pi:openai', 'fixture-key-b')
+    const optionsOf = async (p: ReturnType<typeof profile>) => {
+      const context = { mms: { harness: p.harness, providerAuth: { init: async () => {}, getCatalogLlmProviders: () => [] } }, globalSequence: () => 0 } as unknown as HandlerContext
+      return ((await dispatchMethod(context, 'settings.getOptions', {})) as { options: { llmProviders: Array<{ instanceId?: string; models: Array<{ id: string }> }> } }).options.llmProviders
+    }
+    const speechModels = (listed: Awaited<ReturnType<typeof optionsOf>>) => listed.flatMap((option) => option.models.map((model) => model.id)).filter((id) => /tts|whisper/.test(id))
+    expect(speechModels(await optionsOf(a))).toEqual([])
+    expect(speechModels(await optionsOf(b))).toEqual(['gpt-4o-mini-tts', 'whisper-1'])
   })
 })
