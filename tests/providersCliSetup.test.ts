@@ -322,13 +322,18 @@ describe('Add provider choices', () => {
     ])
   })
 
-  it('offers ChatGPT subscription managed or on the user’s Codex CLI, and only managed once their CLI is added', () => {
+  it('offers ChatGPT subscription managed or on the user’s Codex CLI, and the CLI again as another account once theirs is added', () => {
     const managed = snapshot({ instanceId: 'codex:work', driver: 'codex', displayName: 'Work', config: { home: 'private', args: [], env: {}, setup: 'managed' } })
+    const another = snapshot({ instanceId: 'codex:work', driver: 'codex', displayName: 'Work', config: { home: 'private', args: [], env: {}, setup: 'existing' } })
     const pick = (snapshots: Parameters<typeof addChoices>[0]) => addChoices(snapshots, []).find((choice) => choice.key === 'new:codex')
+    // The first entry on the CLI is the user's own setup; any further one is another account.
     expect(pick([claude])).toMatchObject({ label: 'ChatGPT subscription', setups: ['managed', 'existing'] })
-    expect(pick([claude, codex])).toMatchObject({ label: 'ChatGPT subscription', setups: ['managed'] })
+    expect(pick([claude])).not.toHaveProperty('ownSetup')
+    expect(pick([claude, codex])).toMatchObject({ label: 'ChatGPT subscription', setups: ['managed', 'existing'], ownSetup: true })
     expect(pick([claude, managed])).toMatchObject({ label: 'ChatGPT subscription · another account', setups: ['managed', 'existing'] })
-    expect(pick([claude, codex, managed])).toMatchObject({ label: 'ChatGPT subscription · another account', setups: ['managed'] })
+    expect(pick([claude, managed])).not.toHaveProperty('ownSetup')
+    expect(pick([claude, codex, managed])).toMatchObject({ label: 'ChatGPT subscription · another account', setups: ['managed', 'existing'], ownSetup: true })
+    expect(pick([claude, codex, another])).toMatchObject({ setups: ['managed', 'existing'], ownSetup: true })
   })
 
   it('always offers a Custom command, never as another account', () => {
