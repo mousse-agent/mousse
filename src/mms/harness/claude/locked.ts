@@ -1,8 +1,7 @@
 import { execFile, spawn as nodeSpawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { isAbsolute, join } from 'node:path'
-import type { Options, ResolvedSettings, SandboxSettings, SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk'
+import { isAbsolute } from 'node:path'
+import type { Options, SandboxSettings, SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk'
 import type { ToolCall } from '@earendil-works/pi-ai'
 import type { BotAuthority } from '../../../shared/bots/personal/authority'
 import { botAppToolRefusal, checkBuiltinCall, wallMessage } from '../../../shared/bots/personal/walls'
@@ -90,30 +89,8 @@ export function claudeLockedHoldsBots(platform: NodeJS.Platform, managedPolicy: 
 }
 
 /** What `resolveSettings` reports: whether any managed (policy) tier is present, whatever its origin. */
-export function claudeManagedPolicyIn(resolved: Pick<ResolvedSettings, 'sources'>): boolean {
+export function claudeManagedPolicyIn(resolved: { sources: ReadonlyArray<{ source: string }> }): boolean {
   return resolved.sources.some((source) => source.source === 'managed')
-}
-
-/**
- * Whether an organisation's Claude Code policy applies to a locked entry, read with the SDK's own
- * resolver (`settingSources: []`: only the policy tier): `managed-settings.json` and its
- * `managed-settings.d` drop-ins, the server-managed cache, macOS MDM, the Windows HKLM and HKCU
- * policy, and a configured `policyHelper` (which the resolver does not run, but whose configuration
- * is itself policy). The entry's own home may hold a server-managed cache the resolver does not read
- * (`remote-settings.json`), so that counts too. A resolver that fails counts as a policy: nothing is
- * claimed that Mousse cannot see past.
- */
-export async function claudeManagedPolicy(
-  resolve: (options: { cwd: string; settingSources: [] }) => Promise<Pick<ResolvedSettings, 'sources'>>,
-  input: { cwd: string; home?: string; exists?: (path: string) => boolean }
-): Promise<boolean> {
-  const exists = input.exists ?? existsSync
-  if (input.home && exists(join(input.home, 'remote-settings.json'))) return true
-  try {
-    return claudeManagedPolicyIn(await resolve({ cwd: input.cwd, settingSources: [] }))
-  } catch {
-    return true
-  }
 }
 
 /** Why a locked entry refuses a bot under an organisation's policy. */
@@ -150,6 +127,11 @@ export interface ClaudeLockedTurn {
   systemPrompt: string
   /** Each Claude Code process of the turn, as it starts (its active-time supervision). */
   onProcess?(pid: number): void
+  /**
+   * True once an organisation policy is there that the turn's admission did not see (a
+   * server-managed policy the CLI fetched at its own start): every call is then denied.
+   */
+  policyAppeared?(): boolean
 }
 
 /** The built-ins a locked turn offers, and every other built-in, turned off. */
@@ -276,6 +258,7 @@ export class ClaudeLockedGate {
 
   /** The authority's own decision on a call, with no side effect. */
   private decide(toolName: string, args: Record<string, unknown>): Decision & { classified?: Classified } {
+    if (this.turn.policyAppeared?.()) return { ok: false, reason: CLAUDE_MANAGED_POLICY_REFUSAL }
     const authority = this.turn.authority
     const classified = this.classify(toolName)
     switch (classified.kind) {

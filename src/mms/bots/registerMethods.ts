@@ -48,6 +48,7 @@ async function handle(method: BotsPersonalMethod, p: Params, bots: BotEngine): P
     case 'bots.definitions.list': return { bots: bots.list() }
     case 'bots.definitions.get': {
       const entry = bots.get(p.botId as string)
+      if (entry.published) await bots.refreshRuntimes(entry.id)
       return { ...entry, approval: entry.published ? bots.approval(entry.id) : null }
     }
     case 'bots.definitions.save': return bots.save(p.definition as BotDefinition, p.expectedDraftHash as string | undefined)
@@ -56,7 +57,10 @@ async function handle(method: BotsPersonalMethod, p: Params, bots: BotEngine): P
       await bots.remove(p.botId as string)
       return { ok: true }
     }
-    case 'bots.approve': return bots.approve(p.botId as string, p.manifestDigest as string)
+    case 'bots.approve': {
+      await bots.refreshRuntimes(p.botId as string)
+      return bots.approve(p.botId as string, p.manifestDigest as string)
+    }
     case 'bots.revoke': return { revoked: bots.revoke(p.botId as string) }
     case 'bots.activate': return bots.activate({ botId: p.botId as string, input: p.input as string, clientRequestId: p.clientRequestId as string })
     case 'bots.activations.list': return { activations: bots.listActivations(p.botId as string | undefined) }

@@ -187,6 +187,12 @@ export interface HarnessGateway {
    */
   checkPolicy(instanceId: string, policy: RunPolicy, model?: string): Enforceability
   /**
+   * Reads again, now, what the instance's bot checks depend on beyond its config
+   * (`HarnessDriver.readPolicyFacts`: a locked Claude entry's organisation policy). The bot engine
+   * awaits it before approval and dispatch; a failure leaves the entry claiming nothing.
+   */
+  refreshPolicyFacts(instanceId: string): Promise<void>
+  /**
    * Whether the resolved instance can enforce `policy` (`checkPolicy`, with the model's own spend
    * facts), without binding or starting anything: the typed `policy_unenforceable` refusal admission
    * would raise, for callers that check a candidate before they run it (definitions, PR 4 §6).
@@ -941,7 +947,7 @@ export class Harness implements HarnessGateway {
         harnessFail('model_hidden', `${this.modelName(resolved.instanceId, selection.model)} is hidden. Show it in Settings → Providers or choose another model.`, resolved.instanceId)
     }
     const version = this.probes.get(resolved.instanceId)?.lastGood?.binary?.version
-    const caps = (options.definition && driver.definitionCaps?.(config)) || driver.caps(config, version, this.currentFacts(resolved.instanceId))
+    const caps = (options.definition && driver.definitionCaps?.(config)) || driver.caps(config, version, this.currentFacts(resolved.instanceId), resolved.instanceId)
     // An instance that approves tools itself runs only turns a person drives; reading or stopping
     // work already running (`allowDisabled`) is never refused.
     if (!options.allowDisabled && !purposeAllowed(caps, options.purpose))
@@ -1127,6 +1133,16 @@ export class Harness implements HarnessGateway {
     return { ok: false, error: { code: 'policy_unenforceable', message: `This provider cannot enforce the requested restrictions (toolControl). ${reason}`, missing: ['toolControl'], reason, instanceId } }
   }
 
+  async refreshPolicyFacts(instanceId: string): Promise<void> {
+    const record = this.recordOrUndefined(instanceId)
+    if (!record?.driver.readPolicyFacts) return
+    try {
+      await record.driver.readPolicyFacts(record.config, record.instanceId)
+    } catch (error) {
+      console.warn('[harness] could not read the instance\'s policy facts', { instanceId, error: errorText(error) })
+    }
+  }
+
   checkPolicy(instanceId: string, policy: RunPolicy, model?: string): Enforceability {
     let record: InstanceRecord
     try {
@@ -1141,7 +1157,7 @@ export class Harness implements HarnessGateway {
 
   private policyOptions(record: InstanceRecord): CheckPolicyOptions {
     return {
-      hostApprovals: record.driver.botAuthority?.(record.config) === true,
+      hostApprovals: record.driver.botAuthority?.(record.config, record.instanceId) === true,
       ...(this.options.botRuntimeGaps ? { botRuntimeGaps: this.options.botRuntimeGaps } : {})
     }
   }
@@ -1293,6 +1309,8 @@ export class Harness implements HarnessGateway {
             missing: ['toolControl'],
             instanceId: spec.binding.instanceId
           })
+        // A bot turn's runtime reads its policy facts again first: admission decides on a fresh reading.
+        if (botPolicy) await this.refreshPolicyFacts(record.instanceId)
         await this.admitTurn(record, spec, entry)
         // Admission awaits; the fence is checked again right before the runtime is reached.
         this.refuseStopped(record, entry)
@@ -1591,7 +1609,7 @@ export class Harness implements HarnessGateway {
   }
 
   private recordCaps(record: InstanceRecord): HarnessCaps {
-    return record.driver.caps(record.config, this.probes.get(record.instanceId)?.lastGood?.binary?.version, this.currentFacts(record.instanceId))
+    return record.driver.caps(record.config, this.probes.get(record.instanceId)?.lastGood?.binary?.version, this.currentFacts(record.instanceId), record.instanceId)
   }
 
   /** A native cancel with the gateway's deadline: past it the runtime's processes are killed. */
@@ -2164,7 +2182,7 @@ export class Harness implements HarnessGateway {
       compatibility: shown?.compatibility ?? compatibilityOf(driver, undefined),
       ...(update ? { update } : {}),
       ...(shown?.binary ? { binary: shown.binary } : {}),
-      caps: driver.caps(config, shown?.binary?.version, this.currentFacts(instanceId)),
+      caps: driver.caps(config, shown?.binary?.version, this.currentFacts(instanceId), instanceId),
       ...(limits ? { permissionLimits: limits } : {}),
       config: this.configView(record),
       ...this.engineView(record),

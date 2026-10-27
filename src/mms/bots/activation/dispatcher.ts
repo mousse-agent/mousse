@@ -12,6 +12,11 @@ export interface BotTurnDispatcher {
    * and starts the dispatch's active time. A refusal cancels the queued run; nothing is sent.
    */
   prepare(payload: BotTurnPayload): PreparedBotTurn | { refused: string; code: string }
+  /**
+   * Reads again, now, what the dispatch's runtime check depends on (its policy facts), so
+   * `prepare` decides on a fresh reading. Never throws.
+   */
+  refresh?(payload: BotTurnPayload): Promise<void>
   /** The dispatch's run ended (the executor saw it terminal); `text` is the final message, if any. */
   settle(payload: BotTurnPayload, outcome: { text?: string }): void
   /** The bot's name when `threadId` is one of its threads: ordinary sends there are refused. */

@@ -1,4 +1,4 @@
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type { InstallOwner } from '../../../shared/harness/status'
 import type { HarnessCaps } from '../../../shared/harness/types'
@@ -28,8 +28,9 @@ import {
   type ClaudeApiKeyChecker
 } from '../claude/apiKey'
 import { cliNames, findOnPath, lockedEnv, ownedLaunchEnv, ownedUserEnv } from '../env'
-import { CLAUDE_LOCKED_PROFILE, CLAUDE_MANAGED_POLICY_REFUSAL, CLAUDE_NATIVE_TOOLS, claudeLockedCaps, claudeLockedHoldsBots, claudeManagedPolicy, claudeSandboxFact } from '../claude/locked'
-import { hasContainmentEvidence } from '../compatibility'
+import { CLAUDE_LOCKED_PROFILE, CLAUDE_MANAGED_POLICY_REFUSAL, CLAUDE_NATIVE_TOOLS, claudeLockedCaps, claudeLockedHoldsBots, claudeSandboxFact } from '../claude/locked'
+import { readClaudeManagedPolicy, type ManagedPolicyReadInput } from '../claude/managedPolicy'
+import { CONTAINMENT_EVIDENCE, hasContainmentEvidence, type ContainmentEvidence } from '../compatibility'
 import { CLAUDE_INSTANCE_ID } from '../../../shared/providerInstances'
 import { decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig } from '../driver'
 import { ownedHomeProblem } from '../ownedHome'
@@ -55,6 +56,9 @@ export const CLAUDE_CODE_CAPS: HarnessCaps = Object.freeze({
 export { CLAUDE_NATIVE_TOOLS } from '../claude/locked'
 
 /** A locked entry (PR 6 §3): it runs bots only, in a home of its own, under the locked profile. */
+/** How long a "no policy" reading of a locked entry is trusted before it counts as unknown again. */
+export const CLAUDE_POLICY_TRUST_MS = 30_000
+
 export function claudeLocked(config: Pick<InstanceConfig, 'profile' | 'home'>): boolean {
   return config.profile === CLAUDE_LOCKED_PROFILE && config.home === 'private'
 }
@@ -108,17 +112,18 @@ export interface ClaudeCodeDriverOptions {
   resolveSettings?: SettingsResolver
   /** Test seam: the platform a locked entry's caps and evidence are read for (default `process.platform`). */
   platform?: NodeJS.Platform
-  /**
-   * Test seam: whether an organisation's Claude Code policy applies (default: the SDK's resolver,
-   * `claudeManagedPolicy`, read again when each locked turn starts and kept for the caps).
-   */
+  /** Test seam: whether an organisation's Claude Code policy applies, fixed (default: read per entry). */
   managedPolicy?: () => boolean
+  /** Test seam: the fresh policy reading of one entry (default `readClaudeManagedPolicy`). */
+  readPolicy?: (input: ManagedPolicyReadInput) => Promise<boolean>
+  /** Test seam: the containment evidence (default `CONTAINMENT_EVIDENCE`). */
+  evidence?: readonly ContainmentEvidence[]
   /** Each Claude Code process a locked entry's bot turn starts (its active-time supervision). */
   onLockedProcess?: (pid: number, threadId: string) => void
 }
 
 /** The SDK's `resolveSettings`: the settings a turn's folder gives Claude Code, without starting it. */
-export type SettingsResolver = (options: { cwd: string; settingSources: Array<'project' | 'local'> | [] }) => Promise<Pick<ResolvedSettings, 'sources'>>
+export type SettingsResolver = (options: { cwd: string; settingSources: Array<'project' | 'local'> }) => Promise<Pick<ResolvedSettings, 'sources'>>
 
 const sdkResolveSettings: SettingsResolver = async (options) => (await import('@anthropic-ai/claude-agent-sdk')).resolveSettings(options)
 
@@ -180,18 +185,35 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
    */
   const owned = new Map<string, OwnedService>()
   const platform = options.platform ?? process.platform
-  const resolveSettings = options.resolveSettings ?? sdkResolveSettings
+  const evidence = options.evidence ?? CONTAINMENT_EVIDENCE
+  /** The locked entries whose runtime is bound: where their policy is read. */
+  const lockedEntries = new Map<string, { home?: string; cwd: () => string }>()
   /**
-   * The last reading of the organisation's policy, for the synchronous caps; unknown until a locked
-   * entry reads it, and unknown counts as present.
+   * The last policy reading of each locked entry, for the synchronous caps and `botAuthority`. A
+   * reading is the entry's own (another entry's home may hold a server-managed policy), and a "no
+   * policy" reading is trusted only for `CLAUDE_POLICY_TRUST_MS`: every bot check point (approval,
+   * dispatch, turn admission) reads it again first, and the turn reads it once more before it starts.
+   * Unread, stale or unreadable counts as present.
    */
-  let managedReading: boolean | undefined
-  const managedPolicy = options.managedPolicy ?? (() => managedReading !== false)
-  /** Reads the policy now, as a locked turn starts in `cwd` with the entry's `home`. */
-  const readManaged = async (cwd: string, home?: string): Promise<boolean> => {
+  const readings = new Map<string, { managed: boolean; at: number }>()
+  const managedFor = (instanceId?: string): boolean => {
     if (options.managedPolicy) return options.managedPolicy()
-    managedReading = await claudeManagedPolicy(resolveSettings, { cwd, ...(home ? { home } : {}) })
-    return managedReading
+    const reading = instanceId === undefined ? undefined : readings.get(instanceId)
+    return !reading || reading.managed || Date.now() - reading.at > CLAUDE_POLICY_TRUST_MS
+  }
+  /** Reads the entry's policy now, in a fresh process (`readClaudeManagedPolicy`). */
+  const readManaged = async (instanceId: string): Promise<boolean> => {
+    if (options.managedPolicy) return options.managedPolicy()
+    const entry = lockedEntries.get(instanceId)
+    if (!entry) return true
+    let managed: boolean
+    try {
+      managed = await (options.readPolicy ?? readClaudeManagedPolicy)({ cwd: entry.cwd(), platform, ...(entry.home ? { home: entry.home } : {}) })
+    } catch {
+      managed = true
+    }
+    readings.set(instanceId, { managed, at: Date.now() })
+    return managed
   }
   return {
     kind: 'claude',
@@ -219,11 +241,14 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     // An API-key entry has a home of its own: the user's own Claude Code runs exactly as they set it up.
     // So does a locked entry: a bot never runs in the user's own Claude Code setup.
     privateHomeFor: (config) => (claudeRunsOnApiKey(config) || config.profile === CLAUDE_LOCKED_PROFILE ? 'required' : 'allowed'),
-    caps: (config, installedVersion) =>
-      claudeLocked(config) ? claudeLockedCaps(CLAUDE_CODE_CAPS, { platform, ...(installedVersion ? { cliVersion: installedVersion } : {}), managedPolicy: managedPolicy() }) : CLAUDE_CODE_CAPS,
+    caps: (config, installedVersion, _facts, instanceId) =>
+      claudeLocked(config) ? claudeLockedCaps(CLAUDE_CODE_CAPS, { platform, ...(installedVersion ? { cliVersion: installedVersion } : {}), managedPolicy: managedFor(instanceId), evidence }) : CLAUDE_CODE_CAPS,
     // Only a locked entry holds a bot to its grant, and only once its gate and ledger have evidence on
     // this platform (`CONTAINMENT_EVIDENCE`) and no organisation policy applies; no record exists yet.
-    botAuthority: (config) => claudeLocked(config) && claudeLockedHoldsBots(platform, managedPolicy()),
+    botAuthority: (config, instanceId) => claudeLocked(config) && claudeLockedHoldsBots(platform, managedFor(instanceId), evidence),
+    readPolicyFacts: async (config, instanceId) => {
+      if (claudeLocked(config)) await readManaged(instanceId)
+    },
     nativeToolNames: (neutral) => CLAUDE_NATIVE_TOOLS[neutral] ?? [],
     updateCommand: (owner: InstallOwner) => {
       if (owner === 'npm') return 'npm install -g @anthropic-ai/claude-code@latest'
@@ -448,18 +473,26 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
 
       const integrations = options.integrations?.(env) ?? null
       const lockedEntry = !shared && claudeLocked(context.config)
+      if (lockedEntry) {
+        // Its policy is read as soon as the runtime is bound, so the entry's caps can say what it holds.
+        lockedEntries.set(context.instanceId, { ...(context.env.home ? { home: context.env.home } : {}), cwd: () => service.standaloneWorkspace('locked-policy') })
+        void readManaged(context.instanceId).then(() => context.changed(), () => undefined)
+      }
       const adapter = new ClaudeSubscriptionAdapter(() => service, () => integrations, lockedEntry
         ? {
             // Read again as each turn starts: the policy, the CLI version's gate-and-ledger evidence, and
             // for shell the sandbox and its evidence for this version here.
             admit: async () => {
-              if (await readManaged(service.standaloneWorkspace('locked-policy'), context.env.home)) return { ok: false, reason: CLAUDE_MANAGED_POLICY_REFUSAL }
+              if (await readManaged(context.instanceId)) return { ok: false, reason: CLAUDE_MANAGED_POLICY_REFUSAL }
               const version = (await service.cliConfig()).version
-              if (version === undefined || !hasContainmentEvidence({ driver: 'claude', kind: 'tools', platform, cliVersion: version }))
+              if (version === undefined || !hasContainmentEvidence({ driver: 'claude', kind: 'tools', platform, cliVersion: version }, evidence))
                 return { ok: false, reason: `Mousse has no evidence that Claude Code ${version ?? '(unknown version)'} holds a bot to its permissions here.` }
               const sandbox = claudeSandboxFact(platform, (name) => Boolean(findOnPath([name], context.env))) === 'available'
-              return { ok: true, shellContained: sandbox && hasContainmentEvidence({ driver: 'claude', kind: 'sandbox', platform, cliVersion: version }) }
+              return { ok: true, shellContained: sandbox && hasContainmentEvidence({ driver: 'claude', kind: 'sandbox', platform, cliVersion: version }, evidence) }
             },
+            // A server-managed policy Claude Code fetched at its own start (the first turn of a new
+            // home) lands in the home's cache: from then on every call of the turn is denied.
+            policyAppeared: () => Boolean(context.env.home) && existsSync(join(context.env.home!, 'remote-settings.json')),
             ...(options.onLockedProcess ? { onProcess: options.onLockedProcess } : {})
           }
         : undefined)

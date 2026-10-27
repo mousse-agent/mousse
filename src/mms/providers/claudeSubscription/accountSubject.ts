@@ -7,7 +7,7 @@ import { join } from 'node:path'
 const CLAUDE_DIRECT_CREDENTIALS = ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN']
 
 /** Where Claude Code reads policy settings, by platform (they apply over the user's). */
-function managedSettingsPaths(platform: NodeJS.Platform): string[] {
+export function managedSettingsPaths(platform: NodeJS.Platform): string[] {
   if (platform === 'win32') return ['C:\\Program Files\\ClaudeCode\\managed-settings.json', 'C:\\ProgramData\\ClaudeCode\\managed-settings.json']
   if (platform === 'darwin') return ['/Library/Application Support/ClaudeCode/managed-settings.json']
   return ['/etc/claude-code/managed-settings.json']

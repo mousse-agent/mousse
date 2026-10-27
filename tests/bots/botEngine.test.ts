@@ -164,6 +164,28 @@ describe('approval', () => {
     })
   })
 
+  it('approval and dispatch read the runtime\'s policy facts again first, so a runtime that only knows them after a reading can hold the bot (review r2)', async () => {
+    publish()
+    // A runtime that can hold a bot only on a fresh reading (a locked Claude entry's policy).
+    let fresh = false
+    const refreshed: string[] = []
+    engineHost.harness.refreshPolicyFacts = async (instanceId) => {
+      refreshed.push(instanceId)
+      fresh = true
+    }
+    check = () => (fresh ? { ok: true } : { ok: false, error: { code: 'policy_unenforceable', message: 'no', missing: ['toolControl'], reason: 'Not read yet.' } })
+    expect(() => approve()).toThrow(expect.objectContaining({ code: 'policy_unenforceable' }))
+    await bots.refreshRuntimes('site-editor')
+    expect(refreshed).toEqual(['pi:openrouter'])
+    expect(approve()).toMatchObject({ digest: botManifestDigest(manifest()) })
+    const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'c1' })
+    const payload = turnStart(store.dispatch(activation.id, 1)!.runId!)
+    fresh = false
+    expect(bots.prepare(payload)).toMatchObject({ code: 'policy_unenforceable' })
+    await bots.refresh(payload)
+    expect(refreshed).toEqual(['pi:openrouter', 'pi:openrouter'])
+  })
+
   it('shell is never approvable on this build', () => {
     publish({ tools: ['read', 'shell'] })
     expect(bots.approval('site-editor').threads[0]).toMatchObject({ ok: false, reason: expect.stringContaining('sandbox') })

@@ -30,6 +30,8 @@ import { retryContextOverflowOnce } from '../shared/retryContextOverflow'
  */
 export interface ClaudeLockedProfile {
   admit(): Promise<{ ok: true; shellContained: boolean } | { ok: false; reason: string }>
+  /** An organisation policy arrived while the turn runs (`ClaudeLockedTurn.policyAppeared`). */
+  policyAppeared?(): boolean
   onProcess?(pid: number, threadId: string): void
 }
 
@@ -91,6 +93,7 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
     if (!admitted.ok) throw refuse(admitted.reason)
     const shellContained = admitted.shellContained
     const onProcess = this.locked.onProcess
+    const policyAppeared = this.locked.policyAppeared?.bind(this.locked)
     return {
       authority: bot,
       ...(host.tools.toolLedger ? { ledger: host.tools.toolLedger } : {}),
@@ -100,7 +103,8 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       shellContained,
       temps: systemTempDirs(),
       systemPrompt: host.bridge?.sessionInstructions ?? '',
-      ...(onProcess ? { onProcess: (pid: number) => onProcess(pid, input.threadId) } : {})
+      ...(onProcess ? { onProcess: (pid: number) => onProcess(pid, input.threadId) } : {}),
+      ...(policyAppeared ? { policyAppeared } : {})
     }
   }
 
