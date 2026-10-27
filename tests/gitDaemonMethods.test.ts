@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
+import { withGitMutationLocks } from '../src/mms/actions/GitOperationCoordinator'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { MousseMainService } from '../src/mms/MousseMainService'
@@ -17,7 +18,8 @@ import {
 } from '../src/mms/protocol/types'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
-import type { GitStatusSnapshot } from '../src/shared/types'
+import { parseEnvelope } from '../src/mms/protocol/validators'
+import type { GitOperationEvent, GitStatusSnapshot } from '../src/shared/types'
 import { actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
 
 type Status = { status: GitStatusSnapshot }
@@ -630,5 +632,170 @@ describe('Git mutations through the daemon', () => {
       expect(result.status.ahead).toBe(0)
       expect(git(origin, 'rev-parse', branchOf(f.repo))).toBe(second)
     }, 60_000)
+
+    describe('live output and cancel', () => {
+      const blocksUntil = (sentinel: string) => `const t = setInterval(() => { if (require('node:fs').existsSync(${JSON.stringify(sentinel)})) { clearInterval(t); process.exit(0) } }, 25)`
+      const hangs = (pidFile: string) => `const { spawn } = require('node:child_process'); const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, process.pid + ',' + child.pid); setInterval(() => {}, 1000)`
+      const alive = (pid: number) => { try { process.kill(pid, 0); return true } catch { return false } }
+      const allDead = (pidFile: string) => vi.waitFor(() => expect(readFileSync(pidFile, 'utf8').split(',').map(Number).some(alive)).toBe(false), { timeout: 10_000, interval: 100 })
+      /** Connection events need the profile binding every desktop window makes. */
+      let me: LocalMmsClient
+      const bound = async (): Promise<LocalMmsClient> => {
+        const bound = new LocalMmsClient({ homeDir: f.home, endpoint, ownerToken, clientType: 'gui', requestedCapabilities: ['profiles-v1'] })
+        extraClients.push(bound)
+        await bound.connect()
+        await bound.request('profiles.bind', { profile: mms.getInstallationHost()!.getDefaultProfileId() })
+        return bound
+      }
+      beforeEach(async () => { me = await bound() })
+      /** What a client hears on its own connection about Git actions. */
+      function listen(who: LocalMmsClient): GitOperationEvent[] {
+        const heard: GitOperationEvent[] = []
+        who.onConnectionEvent((event) => { if (event.type === 'git.operation') heard.push((event.data as { event: GitOperationEvent }).event) })
+        return heard
+      }
+      async function bystander(): Promise<{ client: LocalMmsClient; heard: unknown[] }> {
+        const other = await bound()
+        const heard: unknown[] = []
+        other.onConnectionEvent((event) => heard.push(event))
+        other.onEvent((event) => { if (event.type.startsWith('git')) heard.push(event) })
+        await other.subscribe(0)
+        return { client: other, heard }
+      }
+      const wait = (ready: () => boolean) => vi.waitFor(() => expect(ready()).toBe(true), { timeout: 15_000, interval: 25 })
+
+      it('sends the output of a push to the client that started it while it is still running, and to nobody else', async () => {
+        const scope = await projectScope(); const origin = withRemote()
+        const sentinel = join(f.root, 'go')
+        installHook(blocksUntil(sentinel), 'pre-push')
+        const other = await bystander()
+        const mine = listen(me)
+        write(f.repo, 'live.txt'); git(f.repo, 'add', '.'); git(f.repo, 'commit', '-qm', 'live')
+        let settled = false
+        const pushing = me.request<Status>('git.push', { ...scope, operationId: 'daemon-push-1' }).finally(() => { settled = true })
+        await wait(() => mine.some((event) => event.phase === 'hook'))
+        // The hook is still running: the event arrived before the request was answered.
+        expect(settled).toBe(false)
+        expect(mine[0]).toMatchObject({ phase: 'started', kind: 'push', operationId: 'daemon-push-1', cancellable: true })
+        writeFileSync(sentinel, '')
+        await pushing
+        await wait(() => mine.at(-1)?.phase === 'done')
+        expect(mine.map((event) => event.phase)).toEqual(expect.arrayContaining(['started', 'hook', 'done']))
+        expect(mine.filter((event) => event.phase === 'hook').map((event) => event.hook)).toEqual([{ name: 'pre-push' }, { name: 'pre-push', exitCode: 0 }])
+        expect(git(origin, 'rev-parse', branchOf(f.repo))).toBe(git(f.repo, 'rev-parse', 'HEAD'))
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        expect(other.heard).toEqual([])
+      }, 60_000)
+
+      it('sends nothing for a request that names no operation', async () => {
+        const scope = await projectScope(); withRemote()
+        const mine = listen(me)
+        write(f.repo, 'quiet.txt'); git(f.repo, 'add', '.'); git(f.repo, 'commit', '-qm', 'quiet')
+        await me.request('git.push', scope)
+        expect(mine).toEqual([])
+      })
+
+      it('cancels a push during its hook for the client that started it only, and stops everything the hook started', async () => {
+        const scope = await projectScope(); const origin = withRemote()
+        const pidFile = join(f.root, 'pids')
+        installHook(hangs(pidFile), 'pre-push')
+        const remoteHead = git(origin, 'rev-parse', branchOf(f.repo))
+        const other = await bystander()
+        const mine = listen(me)
+        write(f.repo, 'cancel.txt'); git(f.repo, 'add', '.'); git(f.repo, 'commit', '-qm', 'cancel me')
+        const pushing = me.request('git.push', { ...scope, operationId: 'daemon-push-2' }).then(() => null, (error: unknown) => error)
+        await wait(() => mine.some((event) => event.phase === 'hook'))
+        await expect(other.client.request('git.cancelOperation', { operationId: 'daemon-push-2' })).resolves.toEqual({ cancelled: false })
+        await expect(me.request('git.cancelOperation', { operationId: 'unknown' })).resolves.toEqual({ cancelled: false })
+        await expect(me.request('git.cancelOperation', {})).rejects.toMatchObject({ code: 'invalid_params' })
+        await expect(me.request('git.cancelOperation', { operationId: 'daemon-push-2' })).resolves.toEqual({ cancelled: true })
+        expect(await pushing).toMatchObject({ code: 'git_cancelled' })
+        await wait(() => mine.at(-1)?.phase === 'cancelled')
+        expect(git(origin, 'rev-parse', branchOf(f.repo))).toBe(remoteHead)
+        await allDead(pidFile)
+        expect(other.heard).toEqual([])
+        // The folder is free again.
+        rmSync(join(f.root, 'hooks', 'pre-push'))
+        await me.request('git.push', scope)
+        expect(git(origin, 'rev-parse', branchOf(f.repo))).toBe(git(f.repo, 'rev-parse', 'HEAD'))
+      }, 60_000)
+
+      it('cancels a commit in a thread worktree: nothing is committed or swept, the index stays, and the action is recorded as failed', async () => {
+        const t = await threadScope()
+        const pidFile = join(f.root, 'pids')
+        installHook(hangs(pidFile))
+        write(t.path, 'a.txt'); write(t.path, 'b.txt'); git(t.path, 'add', 'a.txt')
+        const before = git(t.path, 'rev-parse', 'HEAD'), state = porcelain(t.path)
+        const mine = listen(me)
+        const committing = me.request('git.commit', { threadId: t.threadId, message: 'cancelled', operationId: 'daemon-commit-1' }).then(() => null, (error: unknown) => error)
+        await wait(() => mine.some((event) => event.phase === 'hook'))
+        await me.request('git.cancelOperation', { operationId: 'daemon-commit-1' })
+        expect(await committing).toMatchObject({ code: 'git_cancelled' })
+        await allDead(pidFile)
+        expect(git(t.path, 'rev-parse', 'HEAD')).toBe(before)
+        expect(git(t.path, 'log', '--format=%s', '-1')).not.toContain('mousse: checkpoint')
+        expect(staged(t.path)).toEqual(['a.txt'])
+        expect(porcelain(t.path)).toEqual(state)
+        const action = new ThreadActionService(t.directory).list().at(-1)!
+        expect(action).toMatchObject({ state: 'failed', commits: [], startSha: before, endSha: before })
+        const receipt = new ChangeReceiptService(t.directory).list().find((item) => item.id === action.receiptId)!
+        expect(receipt.beforeSha).toBe(receipt.afterSha)
+        // The journal recorded the end, so a restart has nothing to recover and the next action is admitted.
+        expect(new ThreadJournal(t.directory).latestByOperation().get(action.id)?.state).toBe('completed')
+        await new ThreadActionService(t.directory).recoverPending(t.path)
+        expect(git(t.path, 'rev-parse', 'HEAD')).toBe(before)
+        expect(porcelain(t.path)).toEqual(state)
+        rmSync(join(f.root, 'hooks', 'pre-commit'))
+        await me.request('git.commit', { threadId: t.threadId, message: 'works now' })
+        expect(porcelain(t.path)).toEqual([])
+        expect(git(t.path, 'show', '--name-only', '--format=', 'HEAD').split('\n').filter(Boolean).sort()).toEqual(['a.txt', 'b.txt'])
+      }, 60_000)
+
+      it('cancels an action that still waits for its thread locks: Cancel works from the start and answers at once', async () => {
+        const t = await threadScope()
+        const mine = listen(me)
+        let release: () => void = () => undefined
+        const held = withGitMutationLocks(t.directory, t.path, 'test-holder', () => new Promise<void>((resolve) => { release = resolve }))
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        try {
+          const fetching = me.request('git.fetch', { threadId: t.threadId, operationId: 'daemon-queued' }).then(() => null, (error: unknown) => error)
+          // Registered before the locks are free: the started event arrives and Cancel is accepted.
+          await wait(() => mine.some((event) => event.phase === 'started'))
+          await expect(me.request('git.cancelOperation', { operationId: 'daemon-queued' })).resolves.toEqual({ cancelled: true })
+          expect(await fetching).toMatchObject({ code: 'git_cancelled' })
+          await wait(() => mine.at(-1)?.phase === 'cancelled')
+        } finally {
+          release()
+          await held
+        }
+      }, 60_000)
+
+      it('cancels a pull in its download when the connection that started it closes, and frees the folder', async () => {
+        const scope = await projectScope(); withRemote()
+        const pidFile = join(f.root, 'pids')
+        const script = join(f.root, 'uploadpack.cjs')
+        writeFileSync(script, hangs(pidFile))
+        git(f.repo, 'config', 'remote.origin.uploadpack', `node "${script.replace(/\\/g, '/')}"`)
+        const mineBefore = listen(me)
+        const pulling = me.request('git.pull', { ...scope, operationId: 'daemon-pull-gone' }).then(() => null, (error: unknown) => error)
+        await wait(() => existsSync(pidFile) && mineBefore.some((event) => event.phase === 'started'))
+        // The window goes away (closed, or reloaded onto a new connection) with the pull still downloading.
+        extraClients.splice(extraClients.indexOf(me), 1)
+        await me.close()
+        await pulling
+        await allDead(pidFile)
+        // Nobody holds the folder any more, and a new connection can use the same id.
+        git(f.repo, 'config', '--unset', 'remote.origin.uploadpack')
+        const fresh = await bound()
+        await expect(fresh.request('git.pull', { ...scope, operationId: 'daemon-pull-gone' })).resolves.toMatchObject({ result: 'up-to-date' })
+        await expect(fresh.request('git.cancelOperation', { operationId: 'daemon-pull-gone' })).resolves.toEqual({ cancelled: false })
+      }, 60_000)
+
+      it('accepts the connection event only for the types the daemon sends', () => {
+        const event = { kind: 'connection_event', type: 'git.operation', profileId: 'p', profileEpoch: 1, data: { event: { phase: 'started' } } }
+        expect(parseEnvelope(event)).toMatchObject({ kind: 'connection_event', type: 'git.operation' })
+        expect(parseEnvelope({ ...event, type: 'git.other' })).toBeNull()
+      })
+    })
   })
 })

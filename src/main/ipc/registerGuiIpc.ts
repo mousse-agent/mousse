@@ -99,6 +99,7 @@ import type {
   GitCheckoutOptions,
   GitCommitOptions,
   GitDeleteBranchOptions,
+  GitFetchOptions,
   GitPullOptions,
   GitPushOptions,
   GitScope,
@@ -698,6 +699,8 @@ export function registerGuiIpc(
       return
     }
     if (event.type === 'bridge.hub.thread') win.webContents.send('bridge:thread-part', event.data)
+    // Live output of a Git action: the daemon sent it on this window's own connection, so only this window gets it.
+    if (event.type === 'git.operation') win.webContents.send('git:operation', (event.data as { event?: unknown } | null)?.event)
   })
   guiMms.on('window-event', ({ senderId, event, replay }: { senderId: number; event: ProtocolEvent; replay?: boolean }) => {
     const win = BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.id === senderId)
@@ -1875,21 +1878,25 @@ export function registerGuiIpc(
       guiMms.request(method, daemonGitParams(scope, toArgs(...(args as A))))
     )
   }
-  gitMutation('git:checkout', 'git.checkout', (branch: string, options?: GitCheckoutOptions) => ({ branch, dirty: options?.dirty }))
-  gitMutation('git:commit', 'git.commit', (message: string, options?: GitCommitOptions) => ({ message, amend: options?.amend, expectedBranch: options?.expectedBranch }))
+  gitMutation('git:checkout', 'git.checkout', (branch: string, options?: GitCheckoutOptions) => ({ branch, dirty: options?.dirty, operationId: options?.operationId }))
+  gitMutation('git:commit', 'git.commit', (message: string, options?: GitCommitOptions) => ({ message, amend: options?.amend, expectedBranch: options?.expectedBranch, operationId: options?.operationId }))
   // A proposal, not a mutation, but it names its folder like one and its error codes (no title model) reach the renderer.
   gitMutation('git:suggestCommitMessage', 'git.suggestCommitMessage', (options?: { expectedBranch?: string }) => ({ expectedBranch: options?.expectedBranch }))
-  gitMutation('git:push', 'git.push', (options?: GitPushOptions) => ({ expectedBranch: options?.expectedBranch }))
+  gitMutation('git:push', 'git.push', (options?: GitPushOptions) => ({ expectedBranch: options?.expectedBranch, operationId: options?.operationId }))
   gitMutation('git:init', 'git.init')
   gitMutation('git:stage', 'git.stage', (input: { paths?: string[]; all?: boolean }) => ({ paths: input?.paths, all: input?.all }))
   gitMutation('git:unstage', 'git.unstage', (input: { paths?: string[]; all?: boolean }) => ({ paths: input?.paths, all: input?.all }))
   gitMutation('git:discard', 'git.discard', (paths: string[]) => ({ paths }))
-  gitMutation('git:fetch', 'git.fetch')
-  gitMutation('git:pull', 'git.pull', (options?: GitPullOptions) => ({ strategy: options?.strategy }))
+  gitMutation('git:fetch', 'git.fetch', (options?: GitFetchOptions) => ({ operationId: options?.operationId }))
+  gitMutation('git:pull', 'git.pull', (options?: GitPullOptions) => ({ strategy: options?.strategy, operationId: options?.operationId }))
   gitMutation('git:abortInProgress', 'git.abortInProgress', (kind: 'merge' | 'rebase') => ({ kind }))
   gitMutation('git:createBranch', 'git.createBranch', (name: string, options?: GitBranchOptions) => ({ name, from: options?.from, checkout: options?.checkout }))
   gitMutation('git:renameBranch', 'git.renameBranch', (name: string, newName: string) => ({ name, newName }))
   gitMutation('git:deleteBranch', 'git.deleteBranch', (name: string, options?: GitDeleteBranchOptions) => ({ name, force: options?.force }))
+  // The daemon only stops an action for the window connection that started it, which is this sender's.
+  registerStorageHandler('git:cancelOperation', async (_e, operationId: string) =>
+    guiMms.request<{ cancelled: boolean }>('git.cancelOperation', { operationId })
+  )
   registerHandler('git:lastCommitMessage', async (_e, projectId?: string, cwd?: string) =>
     gitService.lastCommitMessage(await resolveGitCwd(projectId, cwd))
   )

@@ -271,6 +271,11 @@ export function gitErrorCode(error: unknown): string | null {
   return null
 }
 
+/** The user pressed Cancel on a long action and it stopped. That is an outcome, not a failure to report. */
+export function isGitCancelled(error: unknown): boolean {
+  return gitErrorCode(error) === 'git_cancelled'
+}
+
 /** Git's own message for an IPC failure, trimmed to its first line without the transport prefix. */
 export function gitErrorMessage(error: unknown): string {
   return ipcErrorLine(error).replace(/^(?:error|fatal):\s*/i, '') || 'Git command failed'

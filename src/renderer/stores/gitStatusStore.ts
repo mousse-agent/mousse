@@ -18,6 +18,7 @@ import type {
 import { errorText } from '../lib/errorText'
 import { anyTurnEnded } from '../lib/turnEnded'
 import { useAppStore } from './appStore'
+import { trackGitOperation } from './gitOperationStore'
 import { refreshPullRequest } from './pullRequestStore'
 
 /**
@@ -171,7 +172,7 @@ async function refreshAfterMutation(path: string, scope: GitScope): Promise<void
 /** Switch branches, then refresh. Rejects with Git's message when the checkout fails. */
 export async function checkoutGitBranch(path: string, branch: string, scope: GitScope, options: GitCheckoutOptions = {}): Promise<GitCheckoutResult> {
   try {
-    const result = await window.mousse.git.checkout(scope, branch, options)
+    const result = await trackGitOperation(path, 'checkout', (operationId) => window.mousse.git.checkout(scope, branch, { ...options, operationId }))
     return { stashKept: result.stashKept }
   } finally {
     // A failed stash-and-switch can already have taken the changes out of the working tree.
@@ -209,7 +210,7 @@ export async function discardGitPaths(path: string, paths: readonly string[], sc
 /** Fetch the branch's remote and say how far behind it is now. */
 export async function fetchGit(path: string, scope: GitScope): Promise<GitFetchResult> {
   try {
-    const result = await window.mousse.git.fetch(scope)
+    const result = await trackGitOperation(path, 'fetch', (operationId) => window.mousse.git.fetch(scope, { operationId }))
     return { behindBefore: result.behindBefore, behindAfter: result.behindAfter }
   } finally {
     await refreshAfterMutation(path, scope)
@@ -219,7 +220,7 @@ export async function fetchGit(path: string, scope: GitScope): Promise<GitFetchR
 /** Pull the upstream into the branch; `conflicted` leaves the merge or rebase for the user. */
 export async function pullGit(path: string, scope: GitScope, options: GitPullOptions = {}): Promise<GitPullResult> {
   try {
-    const result = await window.mousse.git.pull(scope, options)
+    const result = await trackGitOperation(path, 'pull', (operationId) => window.mousse.git.pull(scope, { ...options, operationId }))
     return { result: result.result }
   } finally {
     // A conflicted pull rejects nothing, but a failed one may still have changed the folder.
@@ -298,12 +299,12 @@ export async function commitGitChanges(
   // The branch the user was looking at; the daemon refuses if HEAD is on another one by then.
   const expectedBranch = useGitStatusStore.getState().entries[path]?.status?.branch ?? undefined
   options.onPhase?.('committing')
-  await git.commit(scope, message, { amend: options.amend === true, expectedBranch })
+  await trackGitOperation(path, 'commit', (operationId) => git.commit(scope, message, { amend: options.amend === true, expectedBranch, operationId }))
   let pushError: CommitPushError | null = null
   if (options.push) {
     options.onPhase?.('pushing')
     try {
-      await git.push(scope, { expectedBranch })
+      await trackGitOperation(path, 'push', (operationId) => git.push(scope, { expectedBranch, operationId }))
     } catch (error) {
       pushError = new CommitPushError(error)
     }
@@ -326,7 +327,7 @@ export async function suggestGitCommitMessage(path: string, scope: GitScope): Pr
 /** Push the current branch (publishing it when it has no upstream), then refresh. Rejects with Git's message. */
 export async function pushGitBranch(path: string, scope: GitScope): Promise<void> {
   const expectedBranch = useGitStatusStore.getState().entries[path]?.status?.branch ?? undefined
-  await window.mousse.git.push(scope, { expectedBranch })
+  await trackGitOperation(path, 'push', (operationId) => window.mousse.git.push(scope, { expectedBranch, operationId }))
   await refreshAfterMutation(path, scope)
   await refreshBranchPullRequest(path, refreshProjectId(scope))
 }

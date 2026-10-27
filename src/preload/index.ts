@@ -33,7 +33,9 @@ import type {
   GitCommitSuggestion,
   GitDeleteBranchOptions,
   GitDiffStats,
+  GitFetchOptions,
   GitFetchResult,
+  GitOperationEvent,
   GitMutationResult,
   GitPullOptions,
   GitPullRequestLookup,
@@ -479,10 +481,19 @@ const api = {
       storageInvoke('git:unstage', scope, input),
     discard: (scope: GitScope, paths: string[]): Promise<GitMutationResult> =>
       storageInvoke('git:discard', scope, paths),
-    fetch: (scope: GitScope): Promise<GitMutationResult<GitFetchResult>> =>
-      storageInvoke('git:fetch', scope),
+    fetch: (scope: GitScope, options?: GitFetchOptions): Promise<GitMutationResult<GitFetchResult>> =>
+      storageInvoke('git:fetch', scope, options),
     pull: (scope: GitScope, options?: GitPullOptions): Promise<GitMutationResult<GitPullResult>> =>
       storageInvoke('git:pull', scope, options),
+    /** Live output of the Git actions this window started. */
+    onOperation: (cb: (event: GitOperationEvent) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: GitOperationEvent): void => cb(payload)
+      ipcRenderer.on('git:operation', handler)
+      return () => ipcRenderer.removeListener('git:operation', handler)
+    },
+    /** Stops a push, pull, fetch or commit this window started, with everything Git started for it. */
+    cancelOperation: (operationId: string): Promise<{ cancelled: boolean }> =>
+      storageInvoke('git:cancelOperation', operationId),
     abortInProgress: (scope: GitScope, kind: 'merge' | 'rebase'): Promise<GitMutationResult> =>
       storageInvoke('git:abortInProgress', scope, kind),
     createBranch: (scope: GitScope, name: string, options?: GitBranchOptions): Promise<GitMutationResult> =>
