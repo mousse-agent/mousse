@@ -53,6 +53,56 @@ describe('definitionRuntime', () => {
     expect(p.checks.map((check) => check.ref.modelId)).toEqual(['primary'])
   })
 
+  it('a primary that cannot be reached (its provider turned off) moves to a fallback, as a failed attempt does', async () => {
+    const p = port({
+      refuse: (check) => check.ref.modelId === 'primary' ? { code: 'instance_disabled', message: 'Provider instance "pi:p" is turned off for this project.' } : undefined,
+      turn: async (request) => ok(`ran ${request.ref.modelId}`)
+    })
+    const result = await run(new AgentExecutionService({ runtime: createDefinitionRuntime(p.value) }))
+    expect(result).toMatchObject({ status: 'completed', text: 'ran second' })
+    expect(result.trace?.some((entry) => entry.includes('turned off'))).toBe(true)
+    // Without fallbacks the run fails with that reason.
+    const alone = port({ refuse: () => ({ code: 'instance_disabled', message: 'Provider instance "pi:p" is turned off for this project.' }), turn: async () => ok('x') })
+    const failed = await run(new AgentExecutionService({ runtime: createDefinitionRuntime(alone.value) }), definition([]))
+    expect(failed).toMatchObject({ status: 'failed', error: { code: 'SETTINGS_UNSUPPORTED' } })
+    expect(failed.error!.message).toContain('turned off')
+    expect(alone.turns).toEqual([])
+  })
+
+  it('reports the usage of every record, failed ones included', async () => {
+    const p = port({
+      turn: async (request) => {
+        if (request.ref.modelId === 'primary') {
+          request.effects.attemptUsage = { inputTokens: 40, outputTokens: 5, costUsd: 0.02, turns: 1, toolCalls: 0 }
+          throw new Error('provider unavailable')
+        }
+        request.effects.attemptUsage = { inputTokens: 7, outputTokens: 2, costUsd: 0.01, turns: 1, toolCalls: 0 }
+        return { text: 'fallback', history: [], usage: { inputTokens: 7, outputTokens: 2, costUsd: 0.01 } }
+      }
+    })
+    const result = await run(new AgentExecutionService({ runtime: createDefinitionRuntime(p.value) }))
+    expect(result.status).toBe('completed')
+    expect(result.usage).toMatchObject({ inputTokens: 47, outputTokens: 7, totalTokens: 54 })
+    expect(result.usage.costUsd).toBeCloseTo(0.03)
+    // The fallback ran with the turns the primary left.
+    expect(p.turns[1]!.remaining.maxTurns).toBe(31)
+  })
+
+  it('a limit the earlier records used up ends the run with their usage reported', async () => {
+    const resolved = definition([second])
+    resolved.settings.limits.maxTurns = 1
+    const p = port({
+      turn: async (request) => {
+        request.effects.attemptUsage = { inputTokens: 40, outputTokens: 5, costUsd: 0, turns: 1, toolCalls: 0 }
+        throw new Error('provider unavailable')
+      }
+    })
+    const result = await run(new AgentExecutionService({ runtime: createDefinitionRuntime(p.value) }), resolved)
+    expect(result).toMatchObject({ status: 'failed', error: { code: 'BUDGET_EXCEEDED', details: { limit: { kind: 'turns', limit: 1 } } } })
+    expect(result.usage).toMatchObject({ inputTokens: 40, outputTokens: 5 })
+    expect(p.turns).toHaveLength(1)
+  })
+
   it('maps count and spend gaps to the limits they concern', async () => {
     const p = port({ refuse: () => ({ code: 'policy_unenforceable', message: 'no', missing: ['budgets', 'spendLimits'] }), turn: async () => ok('x') })
     const resolved = definition([])

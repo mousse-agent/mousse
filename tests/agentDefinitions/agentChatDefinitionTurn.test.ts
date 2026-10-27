@@ -124,11 +124,12 @@ describe.each(DEFINITION_ENGINES)('agent chats on definition turns (%s)', (kind)
     expect(f.engine.listRuns(chat.threadId).map((run) => [run.source, run.status])).toEqual([['definition', 'completed'], ['definition', 'completed']])
   })
 
-  it('a composer send to the backing thread during a reply never starts a turn beside it', async () => {
+  it('a composer send to the backing thread during a reply waits for the response, then runs once', async () => {
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
     const f = await fixture(kind, { next: async () => { await gate; return say('done') } })
     const chat = await f.service.create({ kind: 'direct', agentIds: [f.alice] })
+    f.orch.setThreadModelOverride(chat.threadId, { instanceId: 'pi:alpha', llmProvider: 'alpha', model: ENGINE_MODEL })
     f.service.send({ chatId: chat.id, text: 'take your time' })
     await vi.waitFor(() => expect(f.runtime.turns).toHaveLength(1))
     const sent = await f.orch.send('from the composer', false, { threadId: chat.threadId, awaitMode: 'ack', clientRequestId: 'composer-1' })
@@ -137,6 +138,9 @@ describe.each(DEFINITION_ENGINES)('agent chats on definition turns (%s)', (kind)
     release()
     await f.service.waitForIdle()
     expect(f.service.get(chat.id).run?.state).toBe('completed')
+    // Once the chat released the thread, the queued message runs, once.
+    await vi.waitFor(() => expect(f.orch.listQueue(chat.threadId)).toEqual([]), { timeout: 5_000, interval: 25 })
+    await vi.waitFor(() => expect(f.runtime.turns.filter((turn) => turn.input.prompt === 'from the composer')).toHaveLength(1), { timeout: 5_000, interval: 25 })
   })
 
   it('a group reply hands over to the mentioned agent on another provider, with one checkpoint per reply', async () => {

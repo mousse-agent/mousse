@@ -39,7 +39,8 @@ export interface DefinitionEngine {
   /** Raw requests the recorder received (legacy only). */
   requests: Array<{ authorization: string | undefined; body: Record<string, unknown> }>
   setNext(next: ((context: Context, signal: AbortSignal) => Promise<AssistantMessage>) | undefined): void
-  install(orchestrator: OrchestratorService, profileHome: string): Harness
+  /** `engine: 'rpc'`: the Pi connections are set to the new engine (legacy only; Pi itself never starts). */
+  install(orchestrator: OrchestratorService, profileHome: string, options?: { engine?: 'rpc' }): Harness
   close(): Promise<void>
 }
 
@@ -164,8 +165,9 @@ export async function createDefinitionEngine(kind: DefinitionEngineKind, provide
   return {
     kind, providerAuth: providerAuth as never, turns, outputs, captured, requests,
     setNext: (value) => { custom = value },
-    install: (orchestrator, profileHome) => {
-      const pi = piDriver({ client: () => orchestrator.piChatClient(), credentials: () => providerAuth as never })
+    install: (orchestrator, profileHome, options = {}) => {
+      const never = (): never => { throw new Error('Pi RPC must not start for a definition turn') }
+      const pi = piDriver({ client: () => orchestrator.piChatClient(), credentials: () => providerAuth as never, ...(options.engine === 'rpc' ? { rpc: { runtime: never, catalog: never } } : {}) })
       // The real loop adapter, with every turn it is given recorded.
       const recorded = {
         ...pi,
@@ -181,7 +183,7 @@ export async function createDefinitionEngine(kind: DefinitionEngineKind, provide
         }
       }
       let stored: unknown = {
-        ...Object.fromEntries(providers.map((provider) => [`pi:${provider}`, { driver: 'pi', enabled: true }])),
+        ...Object.fromEntries(providers.map((provider) => [`pi:${provider}`, { driver: 'pi', enabled: true, ...(options.engine === 'rpc' ? { config: { engine: 'rpc' } } : {}) }])),
         [APPROVAL_ONLY_INSTANCE]: { driver: 'claude', enabled: true }
       }
       const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (state) => { stored = state.instances } } })

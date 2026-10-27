@@ -24,6 +24,9 @@ import { providerResponse } from '../fixtures/agent-platform/agent-runtime-polic
 import { APPROVAL_ONLY_INSTANCE } from '../fixtures/agent-platform/exactDefinitionRuntime'
 import { createDefinitionEngine, DEFINITION_ENGINES, ENGINE_MODEL, FAKE_KEY, type DefinitionEngine } from '../fixtures/agent-platform/definitionEngines'
 import type { Harness } from '../../src/mms/harness/gateway'
+import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
+import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
+import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 
 // PR 4 §6 / §16 `definitionService`, through the real AgentExecutionService, orchestrator, gateway
 // and run engine, on each runtime that holds definitions: the real legacy Pi engine (where they run
@@ -65,7 +68,7 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     registry = new AgentDefinitionRegistry({ profileId, profileRoot: join(home, 'profile') })
     const integrations = new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write', 'ask_user', 'bash'] })
     const entry = (instanceId?: string) => ({ ref: { providerId: PROVIDER, modelId: MODEL, ...(instanceId ? { instanceId } : {}) }, available: true, efforts: [], speeds: [], contexts: [], capabilities: ['tools'], unavailableReasons: [] })
-    resolver = new AgentResolver({ registry, integrationLookup: integrations, modelLookup: new StaticAgentModelLookup([entry(), entry(`pi:${PROVIDER}`), entry(APPROVAL_ONLY_INSTANCE)] as never) })
+    resolver = new AgentResolver({ registry, integrationLookup: integrations, modelLookup: new StaticAgentModelLookup([entry(), entry(`pi:${PROVIDER}`), entry(APPROVAL_ONLY_INSTANCE), entry('stubborn')] as never) })
   })
 
   afterEach(async () => {
@@ -283,6 +286,187 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     } finally {
       release()
     }
+  })
+
+  it('a Pi connection set to the new engine still runs definitions on the loop (no regression)', async () => {
+    if (kind !== 'legacy') return
+    harness.stop()
+    harness = defs.install(orch, home, { engine: 'rpc' })
+    // Its chats run on Pi RPC, which only asks for approval…
+    expect(harness.resolveStored({ instanceId: `pi:${PROVIDER}`, llmProvider: PROVIDER, model: MODEL }, { purpose: 'turn' }).caps.toolControl).toBe('approval_only')
+    // …while a definition, a workflow node, a chat reply or a dispatch runs on the loop, as on master.
+    const stored = publish('mousse', `pi:${PROVIDER}`)
+    const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })
+    const thread = store.createThread('rpc engine')
+    defs.outputs.push(call('write', { path: 'on-rpc-instance.txt', content: 'loop' }), say('ran on the loop'))
+    const result = await orch.runAgentDefinition(request(resolved, thread.id))
+    expect(result).toMatchObject({ status: 'completed', text: 'ran on the loop' })
+    expect(readFileSync(join(work, 'on-rpc-instance.txt'), 'utf8')).toBe('loop')
+    expect(defs.requests).toHaveLength(2)
+    expect(engine.bindingForRun(engine.listRuns(thread.id)[0]!.runId)?.caps).toMatchObject({ toolControl: 'exact', definitionLimits: 'in_loop' })
+  })
+
+  for (const how of ['stopThread', 'abortRun'] as const) {
+    it(`a public Stop (${how}) ends the definition run: no tool after it, cancelled, and its record interrupted`, async () => {
+      const stored = publish('mousse', `pi:${PROVIDER}`)
+      const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })
+      const thread = store.createThread(`stop ${how}`)
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => { release = resolve })
+      defs.setNext(async () => { await gate; return call('write', { path: 'after-stop.txt', content: 'x' }) })
+      const pending = orch.runAgentDefinition(request(resolved, thread.id))
+      await vi.waitFor(() => expect(defs.captured).toHaveLength(1))
+      const runId = engine.listRuns(thread.id)[0]!.runId
+      if (how === 'stopThread') expect((await orch.stopThread(thread.id, 'user')).ok).toBe(true)
+      else expect(await orch.abortRun(runId, 'stop-1')).toMatchObject({ status: 'accepted' })
+      release()
+      const result = await pending
+      expect(result.status).toBe('cancelled')
+      expect(existsSync(join(work, 'after-stop.txt'))).toBe(false)
+      expect(engine.getRun(runId)?.status).toBe('interrupted')
+    })
+  }
+
+  it('beats for its run while the model is quiet, so the reconciler leaves a live definition alone', async () => {
+    const { Reconciler } = await import('../../src/mms/run/reconciler')
+    let clock = Date.now()
+    const now = () => new Date(clock).toISOString()
+    const timed = new RunEngine({ store: engine.store, now })
+    orch.setRunEngine(timed)
+    ;(orch as unknown as { definitionHeartbeatMs: number }).definitionHeartbeatMs = 20
+    const stored = publish('mousse', `pi:${PROVIDER}`)
+    const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })
+    const thread = store.createThread('quiet model')
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    defs.setNext(async () => { await gate; return say('late answer') })
+    const pending = orch.runAgentDefinition(request(resolved, thread.id))
+    try {
+      await vi.waitFor(() => expect(defs.turns).toHaveLength(1))
+      const runId = timed.listRuns(thread.id)[0]!.runId
+      // 15 s of silence, a beat, then 15 s more: 30 s since the start, 15 s since the last beat.
+      clock += 15_000
+      await vi.waitFor(() => expect(timed.getRun(runId)?.heartbeatAt).toBe(now()))
+      clock += 15_000
+      new Reconciler({ store: timed.store, outbox: timed.outbox, tools: timed.tools, now }).runOnce()
+      expect(timed.getRun(runId)?.status).toBe('running')
+    } finally {
+      release()
+    }
+    expect((await pending).status).toBe('completed')
+  })
+
+  it('a turn whose run was ended elsewhere stops and never reports an answer', async () => {
+    const stored = publish('mousse', `pi:${PROVIDER}`)
+    const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })
+    const thread = store.createThread('lost run')
+    ;(orch as unknown as { definitionHeartbeatMs: number }).definitionHeartbeatMs = 20
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    defs.setNext(async () => { await gate; return call('write', { path: 'after-loss.txt', content: 'x' }) })
+    const pending = orch.runAgentDefinition(request(resolved, thread.id))
+    await vi.waitFor(() => expect(defs.turns).toHaveLength(1))
+    const runId = engine.listRuns(thread.id)[0]!.runId
+    engine.markTerminal(runId, 'interrupted', { interruptedBy: 'provider', error: 'no terminal event' })
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    release()
+    expect((await pending).status).toBe('cancelled')
+    expect(existsSync(join(work, 'after-loss.txt'))).toBe(false)
+  })
+
+  it('a definition marker alone never admits an ordinary turn, whatever its origin', async () => {
+    const noop = () => {}
+    const sink = { text: noop, thinking: noop, tool: noop, nativeMessages: noop, compaction: noop, retry: noop, progress: noop, usage: noop, providerRef: noop, steerAccepted: noop, providerMetrics: noop, lineEdits: noop }
+    for (const origin of ['interactive', 'bot', 'schedule', 'definition'] as const) {
+      const resolved = harness.resolveStored({ instanceId: `pi:${PROVIDER}`, llmProvider: PROVIDER, model: MODEL }, { purpose: 'turn', definition: true })
+      const binding = await harness.bind(resolved, { mode: 'agent', origin, policy: { approvals: 'grants', tools: { allow: ['read'] }, authority: { kind: 'definition', digest: 'd'.repeat(64) }, budget: { maxTurns: 0, maxInputTokens: 0, maxOutputTokens: 0, maxUsd: 0 } } })
+      defs.outputs.push(say('unbudgeted plain chat'))
+      const threadId = store.createThread(origin).id
+      const turn = harness.startTurn({
+        binding,
+        input: { runId: `foreign-${origin}`, attemptId: `foreign-${origin}:1`, threadId, cwd: work, model: binding.model, instanceId: binding.instanceId, llmProvider: PROVIDER, modelPinned: true, mode: 'agent', prompt: 'plain', messages: [{ role: 'user', content: 'plain', timestamp: Date.now() }], signal: new AbortController().signal },
+        sink, control: { drainSteer: () => undefined, heartbeat: noop },
+        host: { tools: {}, context: { recoverOverflow: () => null, prepareNativeContext: () => null, nativeHistoryAfterTurn: () => '' } },
+        app: { turnToken: 't', modeCeiling: 'default', mcpEligible: false, instructions: () => ({ sessionInstructions: '', turnPreamble: '' }) }
+      })
+      await expect(turn.result).rejects.toMatchObject({ code: 'policy_unenforceable' })
+    }
+    expect(defs.turns).toEqual([])
+    if (kind === 'legacy') expect(defs.requests).toEqual([])
+  })
+
+  it('runs granted tools under the host writer and records them in the run ledger', async () => {
+    const stored = publish('mousse', `pi:${PROVIDER}`)
+    const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })
+    // A writer the run lost: the write never happens.
+    const lost = vi.fn(async () => { throw new Error('writer authority lost') })
+    defs.outputs.push(call('write', { path: 'no-writer.txt', content: 'bypassed' }), say('done'))
+    const refused = await orch.runAgentDefinition(request(resolved, store.createThread('writer').id, { host: { workspaceRoots: [work], writer: lost } as never }))
+    expect(refused.status).toBe('completed')
+    expect(lost).toHaveBeenCalled()
+    expect(existsSync(join(work, 'no-writer.txt'))).toBe(false)
+    // The lease's own writer runs it, and the run's ledger has the call.
+    const thread = store.createThread('ledger')
+    defs.outputs.push(call('write', { path: 'ledgered.txt', content: 'x' }), say('done'))
+    const ledgered = await orch.runAgentDefinition(request(resolved, thread.id))
+    expect(ledgered.error).toBeUndefined()
+    expect(ledgered.status).toBe('completed')
+    expect(readFileSync(join(work, 'ledgered.txt'), 'utf8')).toBe('x')
+    if (kind === 'legacy') expect(engine.tools.listForRun(engine.listRuns(thread.id)[0]!.runId).map((tool) => [tool.tool, tool.status])).toEqual([['write', 'committed']])
+  })
+
+  it('a definition that reaches its limit fails, in its result and its run record alike', async () => {
+    if (kind !== 'legacy') return
+    const stored = publish('mousse', `pi:${PROVIDER}`, (settings) => { settings.limits.maxTurns = 1 })
+    const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })
+    const thread = store.createThread('limited')
+    defs.outputs.push(call('write', { path: 'limited.txt', content: 'side effect' }))
+    const result = await orch.runAgentDefinition(request(resolved, thread.id))
+    expect(result).toMatchObject({ status: 'failed', error: { code: 'BUDGET_EXCEEDED', details: { limit: { kind: 'turns', limit: 1 } } } })
+    expect(engine.listRuns(thread.id)[0]!.status).toBe('failed')
+    expect(result.usage.totalTokens).toBeGreaterThan(0)
+  })
+
+  it('a message queued on the thread during a definition runs once the definition releases it', async () => {
+    const stored = publish('mousse', `pi:${PROVIDER}`)
+    const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })
+    const thread = store.createThread('queue drain')
+    orch.setThreadModelOverride(thread.id, { instanceId: `pi:${PROVIDER}`, llmProvider: PROVIDER, model: MODEL })
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    defs.setNext(async () => { await gate; return say('definition done') })
+    const pending = orch.runAgentDefinition(request(resolved, thread.id))
+    await vi.waitFor(() => expect(defs.turns).toHaveLength(1))
+    const sent = await orch.send('queued composer', false, { threadId: thread.id, awaitMode: 'ack' })
+    expect(sent.queued).toBe(true)
+    defs.setNext(async () => say('composer reply'))
+    release()
+    expect((await pending).status).toBe('completed')
+    await vi.waitFor(() => expect(orch.listQueue(thread.id)).toEqual([]), { timeout: 5_000, interval: 25 })
+    await vi.waitFor(() => expect(defs.turns.map((turn) => turn.input.prompt)).toContain('queued composer'), { timeout: 5_000, interval: 25 })
+  })
+
+  it('the gateway ends a definition turn whose runtime ignores the time budget', async () => {
+    harness.stop()
+    // A runtime that holds definitions but only stops when interrupted, never on its signal.
+    let finish: ((aborted: boolean) => void) | undefined
+    const stubborn: ProviderAdapter = {
+      driver: 'codex',
+      capabilities: { steer: 'none', interrupt: true, rollback: 'none', fork: 'portable', events: 'rich', containment: 'strong', historyInjection: 'prompt', mcp: true, childPolicy: 'enforced' },
+      configured: () => true,
+      startTurn: (input, sink) => new Promise((resolve) => {
+        sink.providerRef({ provider: 'p', instanceId: input.instanceId, model: input.model })
+        finish = (aborted) => resolve({ text: '', aborted, modelName: input.model, totalResponseTimeMs: 1, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextSignature: 's', nativeMessages: [], providerRef: { provider: 'p' } })
+      }),
+      interrupt: async () => { finish?.(true); return 'interrupted' }
+    }
+    let stored: unknown = { stubborn: { driver: 'codex', enabled: true } }
+    harness = testHarness({ drivers: [adapterDriver(stubborn, { toolControl: 'exact', budgets: 'hard' })], instances: new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (state) => { stored = state.instances } } }), profileHome: home })
+    orch.setHarness(harness)
+    const definition = publish('mousse', 'stubborn', (settings) => { settings.limits.maxElapsedMs = 200 })
+    const resolved = resolver.resolve({ definitionId: definition.id, revision: definition.revision })
+    const result = await orch.runAgentDefinition(request(resolved, store.createThread('deadline').id))
+    expect(result).toMatchObject({ status: 'failed', error: { code: 'BUDGET_EXCEEDED', details: { limit: { kind: 'elapsed_ms', limit: 200 } } } })
   })
 
   it('an owned lease that another holds fails the turn as busy, and never queues it', async () => {

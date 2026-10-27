@@ -118,7 +118,8 @@ export function installExactDefinitionRuntime(options: ExactRuntimeOptions): Exa
         if (!calls.length) return result(false)
         for (const call of calls) {
           sink.tool({ kind: 'build_tool_call', title: call.name, summary: call.name, details: [], phase: 'start', callId: call.id })
-          const outcome = await runTool(call, input, host)
+          // A failed tool is the call's error result, as a runtime reports it.
+          const outcome = await runTool(call, input, host).catch((error: unknown) => ({ text: error instanceof Error ? error.message : String(error), isError: true }))
           sink.tool({ kind: 'build_tool_result', title: call.name, summary: outcome.text.slice(0, 200), details: [], phase: 'complete', callId: call.id })
           messages.push({ role: 'toolResult', toolCallId: call.id, toolName: call.name, content: [{ type: 'text', text: outcome.text }], isError: Boolean(outcome.isError), timestamp: Date.now() })
           if (input.signal.aborted) return result(true)
