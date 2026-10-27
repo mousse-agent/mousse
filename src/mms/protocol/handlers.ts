@@ -30,7 +30,7 @@ import type { GitPullRequestInfo, PullRequestDetail, PullRequestPushTarget, Repo
 import { PULL_REQUEST_EXISTS, PullRequestReadError } from '../git/GitHubCodeHost'
 import { PullRequestThreadError, PullRequestThreadService } from '../git/PullRequestThreadService'
 import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest } from '../../shared/types'
-import { AppError, createErrorProvider } from '../../shared/errors'
+import { AppError, createErrorProvider, knownAppError } from '../../shared/errors'
 import type { GitOperationHandle } from '../git/GitService'
 import { listClaimedQueue } from '../queue/ThreadMessageQueue'
 import { formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
@@ -83,6 +83,7 @@ import { visibleThreadsFor } from './threadVisibility'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
+import { validateScheduledJobOptions, type ScheduledJobOptionsDeps } from '../scheduled/validateJobOptions'
 import { ActionExecutionError, StaleThreadActionRevisionError, ThreadActionService, type RunThreadActionOptions } from '../actions/ThreadActionService'
 import { UndoService } from '../actions/UndoService'
 import { UndoRetentionService } from '../actions/UndoRetentionService'
@@ -864,6 +865,41 @@ function harnessGateway(ctx: HandlerContext): HarnessGateway {
   throw harnessAppError({ code: 'not_implemented', message: 'Provider instances are not available in this build yet.' })
 }
 
+
+/** A scheduled-job request the profile refuses, with a message the person can act on (a plain Error would be hidden). */
+function jobRefused(message: string): AppError {
+  return knownAppError({ code: 'scheduled_job_refused', message }, { category: 'invalid', retryable: false })
+}
+
+/** `validateScheduledJobOptions` with its plain-text refusals made visible to the caller. */
+function checkJobOptions(ctx: HandlerContext, job: Parameters<typeof validateScheduledJobOptions>[0]): ReturnType<typeof validateScheduledJobOptions> {
+  try {
+    return validateScheduledJobOptions(job, scheduledJobOptionsDeps(ctx))
+  } catch (error) {
+    if (error instanceof AppError) throw error
+    throw jobRefused(error instanceof Error ? error.message : String(error))
+  }
+}
+
+/** The profile services the scheduled-job checks read (model, mode and workspace of a job). */
+function scheduledJobOptionsDeps(ctx: HandlerContext): ScheduledJobOptionsDeps {
+  const { threads, projects } = ctx.mms
+  return {
+    overrideFor: (input) => ctx.mms.providerInstances.overrideFor(input),
+    resolveStored: (selection, options) => harnessGateway(ctx).resolveStored(selection, options),
+    getProject: (projectId) => projects.getProject(projectId),
+    getThread: (threadId) => threads.getThread(threadId),
+    listProjectThreads: (projectId) => threads.listAllThreads().filter((thread) => thread.projectId === projectId),
+    loadWorkspace: (threadId) => new ThreadWorkspaceManager(threads.getThreadDir(threadId)).load(),
+    isGitBacked: (projectPath) => {
+      try {
+        return new ThreadWorkspaceManager('').resolveRepository(projectPath).capability.gitBacked
+      } catch {
+        return false
+      }
+    }
+  }
+}
 
 async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
   if (isObject(params) && typeof params.threadId === 'string' &&
@@ -1688,7 +1724,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'scheduled.create': {
       const p = isObject(params) ? params : {}
       const input = asCreateScheduledJobInput(p.input)
-      const job = ctx.mms.scheduled.createJob(input)
+      // The selection is stored as the profile resolves it; a `worktree` workspace names the thread that owns it.
+      const checked = checkJobOptions(ctx, input)
+      const job = ctx.mms.scheduled.createJob({
+        ...input,
+        ...(checked.selection ? { selection: checked.selection } : {}),
+        ...(checked.threadId ? { threadId: checked.threadId } : {})
+      })
       return { job, jobs: ctx.mms.scheduled.listJobs() }
     }
     case 'scheduled.update': {
@@ -1697,14 +1739,27 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const patch = asScheduledJobPatch(p.patch)
       const existing = ctx.mms.scheduled.getJob(id)
       if (!existing) throw new Error(`Job not found: ${id}`)
+      // Validate the job as it would be after the change; `null` clears a field.
+      const merged = {
+        threadId: patch.threadId === undefined ? existing.threadId : patch.threadId ?? undefined,
+        projectId: patch.projectId === undefined ? existing.projectId : patch.projectId ?? undefined,
+        selection: patch.selection === undefined ? existing.selection : patch.selection ?? undefined,
+        mode: patch.mode === undefined ? existing.mode : patch.mode ?? undefined,
+        workspace: patch.workspace === undefined ? existing.workspace : patch.workspace ?? undefined
+      }
+      const touchesOptions = ['selection', 'mode', 'workspace', 'threadId', 'projectId'].some((key) => (patch as Record<string, unknown>)[key] !== undefined)
+      const checked = touchesOptions ? checkJobOptions(ctx, merged) : {}
       const job = ctx.mms.scheduled.updateJob(id, {
-        name: patch.name,
-        prompt: patch.prompt,
-        schedule: patch.schedule,
-        enabled: patch.enabled,
-        threadId: patch.threadId === null ? undefined : patch.threadId,
-        projectId: patch.projectId === null ? undefined : patch.projectId,
-        createThread: patch.createThread,
+        ...(patch.name !== undefined ? { name: patch.name } : {}),
+        ...(patch.prompt !== undefined ? { prompt: patch.prompt } : {}),
+        ...(patch.schedule !== undefined ? { schedule: patch.schedule } : {}),
+        ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
+        ...(patch.createThread !== undefined ? { createThread: patch.createThread } : {}),
+        ...(patch.threadId !== undefined || checked.threadId ? { threadId: checked.threadId ?? (patch.threadId === null ? undefined : patch.threadId) } : {}),
+        ...(patch.projectId !== undefined ? { projectId: patch.projectId === null ? undefined : patch.projectId } : {}),
+        ...(patch.selection !== undefined ? { selection: patch.selection === null ? undefined : checked.selection ?? patch.selection } : {}),
+        ...(patch.mode !== undefined ? { mode: patch.mode === null ? undefined : patch.mode } : {}),
+        ...(patch.workspace !== undefined ? { workspace: patch.workspace === null ? undefined : patch.workspace } : {}),
         ...(patch.repeat === null
           ? { repeat: undefined }
           : patch.repeat !== undefined
@@ -1740,7 +1795,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'scheduled.run': {
       const p = isObject(params) ? params : {}
       const id = asString(p.id, 'id', 256)
+      // A job with a run in flight or waiting in a queue has one occurrence outstanding; say so instead of reporting a start.
+      const current = ctx.mms.scheduled.getJob(id)
+      if (current?.state === 'running' || current?.runClaim) throw jobRefused(`Job is already running: ${current.name}`)
+      if (current?.pendingOccurrence) {
+        throw jobRefused(`Job already has a run ${current.pendingOccurrence.state === 'queued' ? 'waiting in the queue' : 'in progress'}: ${current.name}. It can run again when that run ends.`)
+      }
       const job = ctx.mms.scheduled.triggerJob(id)
+      // Run now starts within seconds: the scheduler ticks now instead of at the next minute.
+      if (job) ctx.mms.scheduled.wake()
       return { job, jobs: ctx.mms.scheduled.listJobs() }
     }
     case 'scheduled.status':

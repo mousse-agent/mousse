@@ -4,9 +4,9 @@ import { knownAppError, parseErrorInfo } from '../../shared/errors'
  * Untrusted frame fields must not drive file/tool access before validation.
  */
 
-import type { ChatImageAttachment, ChatMode } from '../../shared/types'
+import type { ChatImageAttachment, ChatMode, ScheduledJobWorkspace } from '../../shared/types'
 import type { ProviderLoginResponse } from '../../shared/providerAuth'
-import { PROVIDER_DRIVER_KINDS } from '../../shared/providerInstances'
+import { PROVIDER_DRIVER_KINDS, type ModelOverride } from '../../shared/providerInstances'
 import { isAgentAccessLevel } from '../../shared/settings'
 import {
   RESERVED_AGENT_IDS,
@@ -727,16 +727,18 @@ export function asIsoDateString(v: unknown, name: string): string {
 }
 
 export function asJobSchedule(v: unknown, name = 'schedule'): {
-  kind: 'once' | 'interval' | 'cron'
+  kind: 'once' | 'interval' | 'cron' | 'manual'
   runAt?: string
   minutes?: number
   expr?: string
 } {
   const o = asPlainObject(v, name)
   const kind = o.kind
-  if (kind !== 'once' && kind !== 'interval' && kind !== 'cron') {
-    throw new Error(`${name}.kind must be once|interval|cron`)
+  if (kind !== 'once' && kind !== 'interval' && kind !== 'cron' && kind !== 'manual') {
+    throw new Error(`${name}.kind must be once|interval|cron|manual`)
   }
+  // No clock: the job runs only when it is started.
+  if (kind === 'manual') return { kind }
   if (kind === 'once') {
     const runAt = asIsoDateString(o.runAt, `${name}.runAt`)
     return { kind, runAt }
@@ -760,7 +762,33 @@ export type CreateScheduledJobInputValidated = {
   threadId?: string
   projectId?: string
   createThread?: boolean
+  selection?: ModelOverride
+  mode?: 'agent' | 'plan'
+  workspace?: ScheduledJobWorkspace
   repeat?: { times?: number }
+}
+
+/** The provider instance and model a job runs on. The instance and model are checked against the profile later. */
+export function asJobSelection(v: unknown, name = 'selection'): ModelOverride {
+  const o = asPlainObject(v, name)
+  const instanceId = asOptionalString(o.instanceId, 256)
+  // An empty provider is the stored shape of a selection that names only its instance.
+  const llmProvider = o.llmProvider === undefined || o.llmProvider === '' ? undefined : asString(o.llmProvider, `${name}.llmProvider`, 256)
+  const model = asString(o.model, `${name}.model`, 512)
+  if (!instanceId && !llmProvider) throw new Error(`${name}.instanceId or ${name}.llmProvider is required`)
+  return { ...(instanceId ? { instanceId } : {}), llmProvider: llmProvider ?? '', model }
+}
+
+export function asJobMode(v: unknown, name = 'mode'): 'agent' | 'plan' {
+  if (v !== 'agent' && v !== 'plan') throw new Error(`${name} must be agent|plan`)
+  return v
+}
+
+export function asJobWorkspace(v: unknown, name = 'workspace'): ScheduledJobWorkspace {
+  const o = asPlainObject(v, name)
+  if (o.kind === 'project' || o.kind === 'newWorktree') return { kind: o.kind }
+  if (o.kind === 'worktree') return { kind: 'worktree', path: asString(o.path, `${name}.path`, 4096) }
+  throw new Error(`${name}.kind must be project|newWorktree|worktree`)
 }
 
 export function asCreateScheduledJobInput(v: unknown): CreateScheduledJobInputValidated {
@@ -775,6 +803,9 @@ export function asCreateScheduledJobInput(v: unknown): CreateScheduledJobInputVa
   const projectId = asOptionalString(o.projectId, 256)
   if (projectId) input.projectId = projectId
   if (o.createThread !== undefined) input.createThread = asBoolean(o.createThread, 'createThread')
+  if (o.selection !== undefined) input.selection = asJobSelection(o.selection)
+  if (o.mode !== undefined) input.mode = asJobMode(o.mode)
+  if (o.workspace !== undefined) input.workspace = asJobWorkspace(o.workspace)
   if (o.repeat !== undefined) {
     const r = asPlainObject(o.repeat, 'repeat')
     const times = asOptionalBoundedInt(r.times, 'repeat.times', { min: 1, max: 10_000 })
@@ -788,6 +819,9 @@ export function asCreateScheduledJobInput(v: unknown): CreateScheduledJobInputVa
     'threadId',
     'projectId',
     'createThread',
+    'selection',
+    'mode',
+    'workspace',
     'repeat'
   ])
   for (const key of Object.keys(o)) {
@@ -804,6 +838,9 @@ export function asScheduledJobPatch(v: unknown): {
   threadId?: string | null
   projectId?: string | null
   createThread?: boolean
+  selection?: ModelOverride | null
+  mode?: 'agent' | 'plan' | null
+  workspace?: ScheduledJobWorkspace | null
   repeat?: { times?: number } | null
 } {
   const o = asPlainObject(v, 'patch')
@@ -815,6 +852,9 @@ export function asScheduledJobPatch(v: unknown): {
     'threadId',
     'projectId',
     'createThread',
+    'selection',
+    'mode',
+    'workspace',
     'repeat'
   ])
   for (const key of Object.keys(o)) {
@@ -830,6 +870,13 @@ export function asScheduledJobPatch(v: unknown): {
   if (o.projectId === null) patch.projectId = null
   else if (o.projectId !== undefined) patch.projectId = asString(o.projectId, 'projectId', 256)
   if (o.createThread !== undefined) patch.createThread = asBoolean(o.createThread, 'createThread')
+  // `null` clears the field: the job goes back to the default.
+  if (o.selection === null) patch.selection = null
+  else if (o.selection !== undefined) patch.selection = asJobSelection(o.selection)
+  if (o.mode === null) patch.mode = null
+  else if (o.mode !== undefined) patch.mode = asJobMode(o.mode)
+  if (o.workspace === null) patch.workspace = null
+  else if (o.workspace !== undefined) patch.workspace = asJobWorkspace(o.workspace)
   if (o.repeat === null) patch.repeat = null
   else if (o.repeat !== undefined) {
     const r = asPlainObject(o.repeat, 'repeat')
