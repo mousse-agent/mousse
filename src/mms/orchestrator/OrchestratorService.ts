@@ -74,7 +74,7 @@ import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/
 import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { stopStrategy } from '../run/CommandPolicy'
-import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry } from '../run/mcp/appTools'
+import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type AgentApprovalResult, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, LAUNCHED_THREAD_ACCESS_CEILING, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { THREAD_CREATE_MAX_ACTIVE_PER_THREAD } from '../run/mcp/appTools/thread'
 import { createHash } from 'node:crypto'
@@ -169,8 +169,8 @@ import {
   type PermissionMode
 } from '../../shared/permissionMode'
 import { describeApprovalRefusal, startedByPerson, type Answerer } from '../run/approvalRights'
-import { formatApprovalDecisions } from '../run/approvalNote'
-import type { ApprovalRecord, ContinuationDue } from '../run/ThreadApprovals'
+import { describeApproval, formatApprovalDecisions } from '../run/approvalNote'
+import { agentNoteOf, type ApprovalRecord, type ContinuationDue } from '../run/ThreadApprovals'
 import { allowsOrchestrationActions, buildModeChangeNotice, chatModeEquals, getChatModeLabel, getLastUserChatMode, normalizeChatMode } from '../../shared/chatMode'
 import { AgentRegistry } from '../agents/AgentRegistry'
 import { TaskQueue } from '../tasks/TaskQueue'
@@ -277,7 +277,7 @@ import {
   runDurableQueueCommand
 } from '../queue/durableQueue'
 import { ThreadSession, type ActiveTurnControl, type SteerEntry } from './ThreadSession'
-import { userQuestionService as defaultUserQuestionService, UserQuestionService } from './UserQuestionService'
+import { userQuestionService as defaultUserQuestionService, UserQuestionService, withoutStandingRules } from './UserQuestionService'
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
 import { ConnectionRetriesExhaustedError } from './connectionRetry'
 import { AppError, errorDiagnostic, normalizeAppError, serializeAppError, type AppErrorShape } from '../../shared/errors'
@@ -1870,7 +1870,7 @@ export class OrchestratorService extends EventEmitter {
     const engine = this.runEngine
     if (!engine || !runId) return undefined
     try {
-      const text = formatApprovalDecisions(engine.approvals.listDeliveredToRun(runId))
+      const text = formatApprovalDecisions(engine.approvals.listDeliveredToRun(runId), (threadId) => this.titleOf(threadId))
       return text || undefined
     } catch (error) {
       console.warn('approval decisions could not be read', { runId, error: error instanceof Error ? error.message : String(error) })
@@ -2990,7 +2990,147 @@ export class OrchestratorService extends EventEmitter {
       noteOnThread: (threadId, text) => this.noteAgentLaunch(threadId, text),
       stopRun: (threadId, runId, options) => this.stopRunAsAgent(threadId, runId, options),
       steerRun: (threadId, runId, text, options) => this.steerRunAsAgent(threadId, runId, text, options),
+      approvalRequest: (requestId) => this.approvalRequestInfo(requestId),
+      answerApproval: (threadId, requestId, answers, options) => this.answerApprovalAsAgent(threadId, requestId, answers, options),
       ...(this.scheduledJobs ? { schedules: { ...this.scheduledJobs, limits: (caller) => this.scheduledCreatorLimits(caller), startedByPerson: (caller) => this.runStartedByPerson(caller) } } : {})
+    }
+  }
+
+  /** A request in any state, for `approval_respond` to check before it answers. */
+  private approvalRequestInfo(requestId: string): ApprovalRequestInfo | undefined {
+    const view = this.questions.getRequest(requestId)
+    if (!view) return undefined
+    return { requestId, threadId: view.threadId, status: view.status, approval: view.approval !== undefined, questions: view.questions }
+  }
+
+  /**
+   * `approval_respond`: an agent answers an approval of another thread (SPEC §17). It goes through the settlement every
+   * client uses, so the rule `canAnswerApproval` decides (the agent's own permission mode bounds what it may approve,
+   * "always" and its own thread are refused, a thread of its own lineage is only its direct subagents'), one answer wins
+   * and the loser is told who did. What the profile allows is read here, at the moment of the answer: the agent's
+   * granted level narrowed by the setting and by the thread's own cap, the switch for answering approvals, and the
+   * project list, so lowering any of them applies to a turn that is already running.
+   *
+   * The command key is saved as a receipt before the answer. A retry names the same request; the same key for another
+   * request is a conflict. A retry that finds its own answer (same thread and tool call) is `replayed`, never a loss.
+   */
+  private answerApprovalAsAgent(
+    threadId: string,
+    requestId: string,
+    answers: UserQuestionAnswers,
+    options: { clientRequestId: string; actor: AgentActor; accessLevel: AgentAccessLevel }
+  ): AgentApprovalResult {
+    const engine = this.requireRunEngine()
+    const request = this.questions.getRequest(requestId)
+    if (!request || request.threadId !== threadId) return { ok: false, reason: 'unknown' }
+    const { actor } = options
+    const key = options.clientRequestId
+    const earlier = engine.store.getReceipt(key)
+    if (earlier) {
+      const named = (earlier.result as { requestId?: unknown } | null)?.requestId
+      if (earlier.commandKind !== 'approval_respond' || named !== requestId) return { ok: false, reason: 'client_request_id_conflict' }
+    } else {
+      // Filed under the caller's thread and run, as its key says (`approval_respond:<caller thread>:<call>`), like the
+      // other receipts of a command a thread's run issued; the approval it names is in `result`.
+      engine.store.putReceipt({ clientRequestId: key, threadId: actor.threadId, commandKind: 'approval_respond', status: 'accepted', result: { requestId, threadId, runId: actor.runId }, createdAt: new Date().toISOString() })
+    }
+    // A turn a person started is the person's to answer: they may be reading the card. A request that is already
+    // answered or closed is settled below so the loser learns who won.
+    const asking = engine.approvals.get(requestId)
+    if (asking?.status === 'pending' && this.askedInPersonTurn(asking.runId)) return { ok: false, reason: 'person_turn' }
+    let level: AgentAccessLevel
+    try {
+      // The most the thread may have whatever the profile says (a bot or channel thread is lineage) narrows what the credential was granted.
+      level = narrowAgentAccess(this.effectiveAccess(options.accessLevel), this.staticAccessCeiling(actor.threadId)) ?? 'lineage'
+    } catch {
+      level = 'lineage'
+    }
+    const answerer: Answerer = {
+      kind: 'agent',
+      threadId: actor.threadId,
+      runId: actor.runId,
+      toolCallId: actor.toolCallId,
+      // The mode of the run, and of its thread now when that is stricter: a tighter mode applies to the next turn, but an
+      // answer for another thread acts like a rule and stops at once, as a rule does.
+      permissionMode: this.answeringMode(actor),
+      access: {
+        level,
+        answerApprovals: this.agentAccessSettings().answerApprovals,
+        projectAllowed: (id) => {
+          const projectIds = this.agentAccessSettings().projectIds
+          if (projectIds.length === 0) return true
+          const projectId = this.threadStore?.getThread(id)?.projectId
+          return projectId !== undefined && projectIds.includes(projectId)
+        }
+      }
+    }
+    const settled = this.questions.settle(requestId, answers, answerer)
+    if (settled.ok) {
+      this.showApprovalAnswer(threadId, actor, settled.decision ?? 'reject', requestId, answers)
+      return { ok: true, decision: settled.decision ?? 'reject', replayed: false }
+    }
+    switch (settled.reason) {
+      case 'already_answered': {
+        const by = settled.answeredBy
+        // The same call, retried: this agent's own answer, found again (the thread and the call id together, since
+        // the call id of a retry carries no caller).
+        if (by?.kind === 'agent' && by.threadId === actor.threadId && by.toolCallId === actor.toolCallId && settled.decision)
+          return { ok: true, decision: settled.decision, replayed: true }
+        return { ok: false, reason: 'already_answered', ...(by ? { answeredBy: by } : {}), ...(settled.decision ? { decision: settled.decision } : {}) }
+      }
+      case 'cancelled':
+        return { ok: false, reason: 'cancelled', ...(settled.cancelReason ? { cancelReason: settled.cancelReason } : {}) }
+      case 'unknown':
+      case 'answerer_required':
+        return { ok: false, reason: 'unknown' }
+      default:
+        return { ok: false, reason: settled.reason }
+    }
+  }
+
+  /** The mode an answering agent is held to: its run's, narrowed by its thread's own mode now; `ask` when that cannot be read. */
+  private answeringMode(actor: AgentActor): PermissionMode {
+    try {
+      return narrowPermissionMode(this.runPermissionMode(actor.runId), this.requestedPermissionMode(actor.threadId))
+    } catch {
+      return 'ask'
+    }
+  }
+
+  /**
+   * Whether a person started the run that asked (`startedByPerson`): a request with no run to name is not. An unreadable
+   * run counts as a person's, so a failure refuses rather than allows.
+   */
+  private askedInPersonTurn(runId: string | null): boolean {
+    if (!runId) return false
+    try {
+      const engine = this.requireRunEngine()
+      const run = engine.getRun(runId)
+      if (!run) return false
+      const binding = engine.bindingForRun(runId)
+      return startedByPerson({ origin: binding ? policyOrigin(binding.policy) : 'interactive', source: run.source })
+    } catch {
+      return true
+    }
+  }
+
+  /**
+   * The transcript row of an agent's answer, shown only for the call that won it. It is no message from the user:
+   * the person reads who decided, in which thread, and what about. The `approval.answered` event (with the agent's
+   * thread, run and call) is the record.
+   */
+  private showApprovalAnswer(threadId: string, actor: AgentActor, decision: 'allow' | 'reject', requestId: string, answers: UserQuestionAnswers): void {
+    try {
+      const record = this.requireRunEngine().approvals.get(requestId)
+      // What was approved, as the card showed it (the command or the path): redacted, on one line and capped.
+      const asked = record ? describeApproval(record) : ''
+      const note = record && decision === 'reject' ? agentNoteOf(record.questions, answers) : ''
+      const session = this.getOrCreateSession(threadId)
+      this.sessionAls.run(session, () => this.addSystemMessage(
+        `${decision === 'allow' ? 'Approved' : 'Rejected'} by an agent in thread «${this.titleOf(actor.threadId) ?? actor.threadId}» (${actor.threadId})${asked ? `: ${asked}` : ''}${note ? ` Its note: "${note}"` : ''}`
+      ))
+    } catch (error) {
+      console.warn('the transcript row of an agent\'s approval answer could not be written', { threadId, error: error instanceof Error ? error.message : String(error) })
     }
   }
 
@@ -3404,7 +3544,8 @@ export class OrchestratorService extends EventEmitter {
     } catch {
       /* An unreadable queue file counts as empty here; the queue tools report it. */
     }
-    return { queuedCount, pendingQuestions: this.questions.listPendingForThread(threadId) }
+    // An agent never makes a standing rule, so the requests it reads do not offer "Always for this thread".
+    return { queuedCount, pendingQuestions: this.questions.listPendingForThread(threadId).map(withoutStandingRules) }
   }
 
   /**

@@ -33,6 +33,7 @@ const PHASE5_TOOLS: Record<string, string> = {
   thread_create: 'managesOthers',
   thread_interrupt: 'managesOthers',
   thread_steer: 'managesOthers',
+  approval_respond: 'managesOthers',
   queue_list: 'readsOthers',
   queue_enqueue: 'managesOthers',
   queue_edit: 'managesOthers',

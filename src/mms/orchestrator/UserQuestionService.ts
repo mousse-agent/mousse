@@ -343,7 +343,7 @@ export class UserQuestionService extends EventEmitter {
       const meaning = this.approvalMeaning(pending, answers)
       decision = meaning.decision
       const rights = canAnswerApproval(
-        { threadId: pending.threadId, action: pending.approval.action, permissionKey: pending.approval.permissionKey },
+        { threadId: pending.threadId, action: pending.approval.action, permissionKey: pending.approval.permissionKey, reason: pending.approval.reason },
         answeredBy,
         meaning,
         this.lineage
@@ -492,7 +492,7 @@ export class UserQuestionService extends EventEmitter {
     if (!pending) return false
     if (pending.approval && answeredBy) {
       const rights = canAnswerApproval(
-        { threadId: pending.threadId, action: pending.approval.action, permissionKey: pending.approval.permissionKey },
+        { threadId: pending.threadId, action: pending.approval.action, permissionKey: pending.approval.permissionKey, reason: pending.approval.reason },
         answeredBy,
         { decision: 'reject' },
         this.lineage

@@ -1069,6 +1069,87 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
     })
   })
 
+  describe('approval_respond and the questions-pending guard of a promotion', () => {
+    const approvalTag = { action: 'command', permissionKey: 'claude:command', options: [{ id: 'allow', decision: 'allow', scope: 'once' }, { id: 'reject', decision: 'reject' }], tool: { name: 'Bash', input: { command: 'npm test' }, cwd: '/work/app' } }
+    const approvalQuestion = [{ id: 'permission', prompt: 'Allow Claude Code to run a command (Bash)?\nnpm test', options: [{ id: 'allow', label: 'Allow once' }, { id: 'reject', label: 'Reject' }] }]
+
+    /** A target whose held turn was started by `source`, with a typed message queued, and a caller that may answer approvals. */
+    const setup = async (source: 'gui' | 'mcp', script: Script) => {
+      const release = deferred()
+      const w = world(async (input, mcp, d, adapter) => {
+        if (input.prompt === 'hold') {
+          await adapter.hold(input, release.promise)
+          return 'held'
+        }
+        return input.threadId === w.parent.id && input.prompt === GO ? script(input, mcp, d, adapter) : 'ok'
+      })
+      ;(w.d.orch as unknown as { settingsStore: { get(): { agentAccess: unknown } } }).settingsStore.get().agentAccess = { level: 'manage', projectIds: [], answerApprovals: true }
+      w.d.orch.setThreadPermissionMode(w.parent.id, 'full')
+      await w.attach()
+      await w.d.orch.send('hold', false, { threadId: w.other.id, clientRequestId: 'hold', awaitMode: 'ack', source })
+      await waitFor(() => w.turnsOf(w.other.id).length === 1, 'the held turn')
+      return { w, release, item: w.typed(w.other.id, 'typed by the user').id }
+    }
+    const respond = (mcp: Mcp, threadId: string, requestId: string, key: string) =>
+      call(mcp, 'approval_respond', { threadId, requestId, answers: { permission: 'allow' }, clientRequestId: key })
+    const promote = async (mcp: Mcp, d: Phase6Daemon, threadId: string, itemId: string) =>
+      call(mcp, 'queue_promote_to_steer', { threadId, itemId, expectedRevision: (await list(mcp, threadId)).revision, expectedRunId: d.engine.getActiveRun(threadId)!.runId })
+
+    it('no way round it where the user is asked: a turn a person started and a plain question stay the user\'s, so the promotion keeps refusing', async () => {
+      const seen: Record<string, Response> = {}
+      const ids: Record<string, string> = {}
+      const { w, release, item } = await setup('gui', async (_input, mcp, d) => {
+        seen.promoteBefore = await promote(mcp!, d, w.other.id, ids.item!)
+        // Answering the approval is the other way to clear the question; a person's turn is refused.
+        seen.answerPerson = await respond(mcp!, w.other.id, ids.approval!, 'k-person')
+        seen.promoteAfter = await promote(mcp!, d, w.other.id, ids.item!)
+        // And a plain question is no approval at all.
+        seen.answerPlain = await respond(mcp!, w.other.id, ids.plain!, 'k-plain')
+        return 'ok'
+      })
+      ids.item = item
+      const approval = w.d.questions.requestAnswers(approvalQuestion, w.other.id, { approval: approvalTag as never })
+      approval.catch(() => undefined)
+      ids.approval = w.d.questions.listPendingForThread(w.other.id).at(-1)!.requestId
+      const plain = w.d.questions.requestAnswers([{ id: 'q', prompt: 'Which one?', options: [{ id: 'a', label: 'A' }] }], w.other.id)
+      plain.catch(() => undefined)
+      ids.plain = w.d.questions.listPendingForThread(w.other.id).at(-1)!.requestId
+      await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
+
+      expect(conflictOf(seen.promoteBefore!)).toBe('questions_pending')
+      expect(JSON.parse(seen.answerPerson!.result!.content![0]!.text)).toMatchObject({ ok: false, reason: 'person_turn' })
+      expect(conflictOf(seen.promoteAfter!)).toBe('questions_pending')
+      expect(verdict(seen.answerPlain!)).toBe('mousse_scope_denied')
+      expect(w.d.questions.listPendingForThread(w.other.id)).toHaveLength(2)
+      expect(w.queue(w.other.id)).toEqual([expect.objectContaining({ id: item, state: 'pending', intent: 'normal' })])
+      release.resolve()
+    })
+
+    it('where no person is asking, an agent that may answer clears the approval and then promotes: each step within its own limits, and recorded', async () => {
+      const seen: Record<string, Response> = {}
+      const ids: Record<string, string> = {}
+      const { w, release, item } = await setup('mcp', async (_input, mcp, d) => {
+        seen.promoteBefore = await promote(mcp!, d, w.other.id, ids.item!)
+        seen.answer = await respond(mcp!, w.other.id, ids.approval!, 'k-answer')
+        seen.promoteAfter = await promote(mcp!, d, w.other.id, ids.item!)
+        return 'ok'
+      })
+      ids.item = item
+      const approval = w.d.questions.requestAnswers(approvalQuestion, w.other.id, { approval: approvalTag as never })
+      ids.approval = w.d.questions.listPendingForThread(w.other.id).at(-1)!.requestId
+      await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
+
+      expect(conflictOf(seen.promoteBefore!)).toBe('questions_pending')
+      expect(JSON.parse(seen.answer!.result!.content![0]!.text)).toMatchObject({ ok: true, decision: 'allow' })
+      await approval
+      expect(verdict(seen.promoteAfter!)).toBe('ok')
+      // Both are on the record: the answer by the approval's own event, the promotion by the thread's agent action.
+      expect(w.events(w.other.id, 'approval.answered')).toHaveLength(1)
+      expect(w.events(w.other.id, 'agent.action').map((event) => (event.payload as { action: string }).action)).toContain('promoted_queued_message')
+      release.resolve()
+    })
+  })
+
   describe('a promoted message put back, a Plan thread, and the journal\'s upkeep', () => {
     it('a promoted message the turn never read comes back with its own chat mode and its images, also when it is queued again from its entry', async () => {
       const release = deferred()

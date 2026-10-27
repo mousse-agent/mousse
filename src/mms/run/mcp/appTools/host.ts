@@ -3,7 +3,7 @@ import type { PermissionMode } from '../../../../shared/permissionMode'
 import type { ModelOverride } from '../../../../shared/providerInstances'
 import type { AgentAccessLevel, AgentAccessSettings } from '../../../../shared/settings'
 import type { ApprovalTag } from '../../../orchestrator/UserQuestionService'
-import type { ChatMessage, CreateScheduledJobInput, DocumentOpenPayload, PendingUserQuestions, QueuedMessage, ScheduledJob, Thread, UserQuestionAnswers } from '../../../../shared/types'
+import type { ChatMessage, CreateScheduledJobInput, DocumentOpenPayload, PendingUserQuestions, QueuedMessage, ScheduledJob, Thread, UserQuestion, UserQuestionAnswers } from '../../../../shared/types'
 import type { ScheduledJobOptionsInput } from '../../../scheduled/validateJobOptions'
 import type { DevGuiTools } from '../../../devgui/DevGuiTools'
 import type { SkillsRegistry } from '../../../integrations/skills/SkillsRegistry'
@@ -11,7 +11,9 @@ import type { ThreadSearchOptions } from '../../../data/ThreadDataStore'
 import type { QuickActionTools } from '../../../orchestrator/QuickActionTools'
 import type { WebTools } from '../../../orchestrator/WebTools'
 import type { TaskQueue } from '../../../tasks/TaskQueue'
+import type { ApprovalRefusal } from '../../approvalRights'
 import type { RunEngine } from '../../RunEngine'
+import type { AnsweredBy } from '../../ThreadApprovals'
 import type { AgentActor, ModeCeiling } from '../../types'
 import type { DelegationToolsHost } from './delegation'
 import type { LiveRunGate } from './registry'
@@ -124,6 +126,31 @@ export interface AgentQueueResult {
   /** The side effects (ending the queued run the item owned, giving its notice rows back) are committed. False for a result returned while they are still being retried. */
   effectsSettled: boolean
 }
+
+/** A request that waits for an answer (or was answered), as `approval_respond` reads it before answering. */
+export interface ApprovalRequestInfo {
+  requestId: string
+  /** The thread that asked. */
+  threadId: string
+  status: 'pending' | 'answered' | 'cancelled'
+  /** A saved approval (a command, a file change, a tool), whose answers the rule `canAnswerApproval` governs; false for a plain question for the user (`ask_user`). */
+  approval: boolean
+  questions: UserQuestion[]
+}
+
+/** What an agent's answer to an approval did. Everything but a conflicting key is a value the caller can act on. */
+export type AgentApprovalResult =
+  /** Settled by this call (`replayed: false`), or by an earlier call with the same `clientRequestId` (`replayed: true`). */
+  | { ok: true; decision: 'allow' | 'reject'; replayed: boolean }
+  /** Someone else (a person at a client, or another agent) answered first; the request is theirs. */
+  | { ok: false; reason: 'already_answered'; answeredBy?: AnsweredBy; decision?: 'allow' | 'reject' }
+  /** The request was closed before anyone answered (its run ended, its thread was stopped or deleted). */
+  | { ok: false; reason: 'cancelled'; cancelReason?: string }
+  | { ok: false; reason: 'unknown' }
+  /** The same `clientRequestId` was already used for another approval. */
+  | { ok: false; reason: 'client_request_id_conflict' }
+  /** The rule refused this agent (`canAnswerApproval`); the request stays pending. */
+  | { ok: false; reason: ApprovalRefusal }
 
 /**
  * What the scheduled-job tools need from the profile (`schedule_*`). Every method acts as the daemon, so the tools
@@ -271,4 +298,20 @@ export interface AppToolHost extends DelegationToolsHost {
   steerRun?(threadId: string, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult>
   /** The profile's scheduled jobs (`schedule_*`); absent: the host registers no schedule tools. */
   schedules?: AgentScheduleHost
+  /** The request `requestId` in any state, or undefined when nobody asked it. */
+  approvalRequest?(requestId: string): ApprovalRequestInfo | undefined
+  /**
+   * Answers an approval of another thread as `actor` (`approval_respond`) through the one settlement the app,
+   * the CLI and `answer_subagent` use: the rule `canAnswerApproval` decides, one answer wins and the loser learns
+   * who did. `accessLevel` is the level the caller's credential was granted; the host narrows it by the profile's
+   * setting and the thread's own cap as they are now and reads the profile's switch and project list there too.
+   * The call is recorded as a receipt under `clientRequestId` before it answers, so a retry is told from another
+   * caller's answer. A winning answer is shown in the target thread's transcript ("Approved by an agent in thread …").
+   */
+  answerApproval?(
+    threadId: string,
+    requestId: string,
+    answers: UserQuestionAnswers,
+    options: { clientRequestId: string; actor: AgentActor; accessLevel: AgentAccessLevel }
+  ): AgentApprovalResult
 }

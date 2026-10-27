@@ -85,14 +85,15 @@ describe('Settings > Agents > Agent access', () => {
   })
 
   it('changing the level saves the whole setting, and the daemon reads it for new turns', () => {
+    // A stored switch below Manage reads as off (it cannot be on while the level is lower), so raising never turns it on.
     const { updates } = show({ level: 'read', projectIds: ['p2'], answerApprovals: true })
     pickLevel('Manage')
-    // The project list and the approvals switch travel with the level, so a save never drops them.
+    // The project list travels with the level, so a save never drops it.
     expect(updates).toHaveBeenCalledTimes(1)
-    expect(updates).toHaveBeenCalledWith({ agentAccess: { level: 'manage', projectIds: ['p2'], answerApprovals: true } })
+    expect(updates).toHaveBeenCalledWith({ agentAccess: { level: 'manage', projectIds: ['p2'], answerApprovals: false } })
     expect(trigger().textContent).toContain('Manage')
     expect(text()).toContain('full events and messages of other threads')
-    expect(savedByDaemon()).toEqual({ level: 'manage', projectIds: ['p2'], answerApprovals: true })
+    expect(savedByDaemon()).toEqual({ level: 'manage', projectIds: ['p2'], answerApprovals: false })
 
     pickLevel('Lineage only')
     expect(savedByDaemon().level).toBe('lineage')
@@ -168,6 +169,53 @@ describe('Settings > Agents > Agent access', () => {
     click(row('Removed project'))
     expect(savedByDaemon().projectIds).toEqual(['p1'])
     expect(rows().map((entry) => entry.textContent)).not.toContain('Removed project')
+  })
+
+  describe('answering approvals on other threads', () => {
+    const answerSwitch = () => host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Agents may answer approvals on other threads"]')
+    const on = () => answerSwitch()!.getAttribute('aria-checked') === 'true'
+
+    it('is offered only at the Manage level, off for a profile that never touched it, with a clear warning', () => {
+      for (const level of ['lineage', 'read'] as const) {
+        show({ level })
+        expect(answerSwitch(), level).toBeNull()
+      }
+      show({ level: 'manage' })
+      expect(answerSwitch()).not.toBeNull()
+      expect(on()).toBe(false)
+      expect(normalizeAgentAccessSettings(getDefaultSettings().agentAccess).answerApprovals).toBe(false)
+      expect(text()).toContain('Use with care.')
+      expect(text()).toContain('approve a command, a file change or a tool that another thread asked to run')
+      expect(text()).toContain('never its own thread')
+      expect(text()).toContain('Off by default')
+    })
+
+    it('saves the whole setting when switched, and the daemon reads it back', () => {
+      const { updates } = show({ level: 'manage', projectIds: ['p2'] })
+      click(answerSwitch()!)
+      expect(updates).toHaveBeenCalledTimes(1)
+      expect(updates).toHaveBeenCalledWith({ agentAccess: { level: 'manage', projectIds: ['p2'], answerApprovals: true } })
+      expect(on()).toBe(true)
+      expect(savedByDaemon()).toEqual({ level: 'manage', projectIds: ['p2'], answerApprovals: true })
+      click(answerSwitch()!)
+      expect(savedByDaemon().answerApprovals).toBe(false)
+    })
+
+    it('is switched off when the level is lowered from Manage, so raising it again does not bring the permission back', () => {
+      show({ level: 'manage', answerApprovals: true })
+      expect(on()).toBe(true)
+      pickLevel('Read')
+      expect(savedByDaemon()).toEqual({ level: 'read', projectIds: [], answerApprovals: false })
+      pickLevel('Manage')
+      expect(on()).toBe(false)
+      expect(savedByDaemon().answerApprovals).toBe(false)
+    })
+
+    it('a project pick keeps the switch as it is', () => {
+      show({ level: 'manage', answerApprovals: true })
+      click(row('Beta'))
+      expect(savedByDaemon()).toEqual({ level: 'manage', projectIds: ['p2'], answerApprovals: true })
+    })
   })
 
   it('shows the threads whose level stays capped, at every level', () => {

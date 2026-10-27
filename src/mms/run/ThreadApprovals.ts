@@ -42,10 +42,10 @@ export interface ApprovalQuestion {
   allowMultiple?: boolean
 }
 
-/** Who answered, as stored (an agent's permission mode is not kept). */
+/** Who answered, as stored (an agent's permission mode and access are not kept; the tool call that answered is, when there was one). */
 export type AnsweredBy =
   | { kind: 'user'; via?: 'gui' | 'cli' | 'bridge' | 'internal' }
-  | { kind: 'agent'; threadId: string; runId: string }
+  | { kind: 'agent'; threadId: string; runId: string; toolCallId?: string }
 
 export interface ApprovalRecord {
   requestId: string
@@ -169,6 +169,26 @@ function customAnswerOf(questions: readonly ApprovalQuestion[], answers: UserQue
   return chosen.slice(0, 2000)
 }
 
+/** The most characters of an agent's note on a rejection that reach the asking agent and the thread. */
+export const AGENT_NOTE_CHARS = 200
+
+/**
+ * What an agent wrote with its answer (a `feedback` field, or text typed instead of an option), redacted, on one line
+ * and capped: the only free text an agent can attach to an answer. Empty when it wrote none.
+ */
+export function agentNoteOf(questions: readonly ApprovalQuestion[], answers: UserQuestionAnswers): string {
+  const raw = feedbackOf(answers) ?? customAnswerOf(questions, answers)
+  return raw ? redactSecrets(raw).replace(/\s+/g, ' ').trim().slice(0, AGENT_NOTE_CHARS) : ''
+}
+
+/**
+ * What the asking agent is told when another agent rejects its request. Never the user's words: it says an agent
+ * decided, in which thread, and gives the agent's note only as a quotation.
+ */
+export function agentRejectionFeedback(agentThreadId: string, note: string): string {
+  return `Rejected by an agent in thread ${agentThreadId}, not by the user.${note ? ` Its note: "${note}"` : ''}`
+}
+
 function toRecord(row: Row): ApprovalRecord {
   return {
     requestId: String(row.request_id),
@@ -226,7 +246,7 @@ export function onceAllowOption(questions: readonly ApprovalQuestion[]): Approva
 function storedAnswerer(answerer: Answerer): AnsweredBy {
   return answerer.kind === 'user'
     ? { kind: 'user', ...(answerer.via ? { via: answerer.via } : {}) }
-    : { kind: 'agent', threadId: answerer.threadId, runId: answerer.runId }
+    : { kind: 'agent', threadId: answerer.threadId, runId: answerer.runId, ...(answerer.toolCallId ? { toolCallId: answerer.toolCallId } : {}) }
 }
 
 const now = (store: RunStore): string => new Date(store.db.clock()).toISOString()
@@ -367,15 +387,28 @@ export class ThreadApprovals {
       return { ok: false, reason: 'already_answered', ...(row.answeredBy ? { answeredBy: row.answeredBy } : {}), ...(row.decision ? { decision: row.decision } : {}) }
     if (row.status === 'cancelled') return { ok: false, reason: 'cancelled', ...(row.cancelReason ? { cancelReason: row.cancelReason } : {}) }
     const meaning = meaningOf(row.questions, answers)
-    const rights = canAnswerApproval({ threadId: row.threadId, action: row.action, permissionKey: row.permissionKey }, answeredBy, meaning, this.deps.lineage)
+    const rights = canAnswerApproval({ threadId: row.threadId, action: row.action, permissionKey: row.permissionKey, reason: row.reason }, answeredBy, meaning, this.deps.lineage)
     if (!rights.ok) return { ok: false, reason: rights.code }
     const always = meaning.decision === 'allow' && meaning.scope === 'always'
     const once = always ? onceAllowOption(row.questions) : undefined
     // "Always" is Mousse's own option: a request that cannot also be allowed once cannot be answered with it.
     if (always && !once) return { ok: false, reason: 'unknown' }
     const at = now(this.store)
-    const raw = feedbackOf(answers) ?? customAnswerOf(row.questions, answers)
-    const feedback = raw ? redactSecrets(raw).slice(0, 2000) : null
+    let feedback: string | null
+    if (answeredBy.kind === 'agent') {
+      // An agent's words never reach the asking agent as the user's: the reason is fixed, says an agent decided, and
+      // carries the agent's own note only as a short quotation. An allow carries none.
+      const note = agentNoteOf(row.questions, answers)
+      const { feedback: _dropped, ...rest } = answers
+      answers = rest
+      const typed = customAnswerOf(row.questions, answers)
+      const rejectId = typed ? answersFor(row.questions, 'reject') : {}
+      if (typed && Object.keys(rejectId).length) answers = { ...answers, ...rejectId }
+      feedback = meaning.decision === 'reject' ? agentRejectionFeedback(answeredBy.threadId, note) : null
+    } else {
+      const raw = feedbackOf(answers) ?? customAnswerOf(row.questions, answers)
+      feedback = raw ? redactSecrets(raw).slice(0, 2000) : null
+    }
     // The provider reads the reason from `feedback`, whether it came as a field or as a typed answer.
     // What is saved and handed on is the redacted text.
     if (feedback) answers = { ...answers, feedback }
@@ -514,7 +547,7 @@ export class ThreadApprovals {
     return this.db.transaction(() => {
       const pending = this.listPending(threadId)
       for (const row of pending) {
-        const rights = canAnswerApproval({ threadId: row.threadId, action: row.action, permissionKey: row.permissionKey }, send.answeredBy, { decision: 'reject' }, this.deps.lineage)
+        const rights = canAnswerApproval({ threadId: row.threadId, action: row.action, permissionKey: row.permissionKey, reason: row.reason }, send.answeredBy, { decision: 'reject' }, this.deps.lineage)
         if (!rights.ok) return { refused: true }
       }
       const denied: string[] = []
