@@ -32,7 +32,9 @@ const CLAUDE_MODELS = [
 async function twoClaudes(work: { enabled: boolean } = { enabled: true }) {
   let stored: unknown = {
     claude: { driver: 'claude', enabled: true },
-    'claude:work': { driver: 'claude', enabled: work.enabled, config: { displayName: 'Work' } }
+    'claude:work': { driver: 'claude', enabled: work.enabled, config: { displayName: 'Work' } },
+    // An entry the user moved to Work: turned off, its selections run on Work.
+    'claude:old': { driver: 'claude', enabled: false, config: { movedTo: 'claude:work' } }
   }
   const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
   const harness = testHarness({ drivers: [adapterDriver(pi), adapterDriver(claude, { mcp: true, runtime: { models: () => CLAUDE_MODELS } })], instances })
@@ -191,6 +193,14 @@ describe('agent definition model', () => {
     expect(lookup.resolve({ providerId: 'claude-subscription', modelId: 'opus' })).toMatchObject({ available: true, efforts: [], capabilities: ['tools'] })
     // A model the instance does not list is not in the catalogue.
     expect(lookup.resolve({ providerId: 'claude-subscription', modelId: 'absent' })).toBeNull()
+    // A ref on an entry that moved names, for the run, the model the entry it moved to runs.
+    expect(lookup.resolve({ providerId: 'claude-subscription', modelId: 'claude-legacy', instanceId: 'claude:old' })).toMatchObject({
+      available: true, ref: { instanceId: 'claude:work', modelId: 'sonnet' }
+    })
+    // An instance that lists nothing (signed out): unavailable, saying to sign in again.
+    const none = await twoClaudes()
+    const empty = new SharedAgentModelLookup(() => ({ resolveStored: none.harness.resolveStored.bind(none.harness), catalog: { ...none.harness.catalog, models: () => [] } }))
+    expect(empty.resolve({ providerId: 'claude-subscription', modelId: 'sonnet' })).toMatchObject({ available: false, unavailableCode: 'signed_out', unavailableReasons: [expect.stringMatching(/signed out.*Sign in again/)] })
     // No gateway yet: nothing resolves.
     expect(new SharedAgentModelLookup(() => undefined).resolve({ providerId: 'claude-subscription', modelId: 'sonnet' })).toBeNull()
   })

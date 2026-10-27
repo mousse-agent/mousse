@@ -39,9 +39,22 @@ export class SharedAgentModelLookup implements AgentModelLookup {
         ...(typeof code === 'string' ? { unavailableCode: code } : {})
       }
     }
-    const resolvedRef: AgentModelRef = { ...ref, instanceId: resolved.instanceId, providerId: resolved.llmProvider }
-    const models = harness.catalog.models(resolved.instanceId, { kind: 'device' }).filter((entry) => !entry.hidden)
-    // The model the instance runs for the ref (an entry that moved names the agent's own model).
+    // An entry that moved runs the agent's own model for the ref: the ref the run sends names that
+    // model on the instance it moved to, so the run never sends the old id there.
+    const resolvedRef: AgentModelRef = {
+      ...ref, instanceId: resolved.instanceId, providerId: resolved.llmProvider,
+      ...(resolved.movedFrom ? { modelId: parseThinkingSuffixFromModelId(resolved.model).baseId } : {})
+    }
+    const listed = harness.catalog.models(resolved.instanceId, { kind: 'device' })
+    // An instance that lists nothing is signed out (or not set up yet): say so, not "not in the catalog".
+    if (!listed.length) {
+      return {
+        ref: resolvedRef, available: false, efforts: [], speeds: [], contexts: [], capabilities: [],
+        unavailableReasons: [`${resolved.instanceId} is signed out or lists no models. Sign in again in Settings → Providers.`],
+        unavailableCode: 'signed_out'
+      }
+    }
+    const models = listed.filter((entry) => !entry.hidden)
     const wanted = resolved.model || ref.modelId
     const baseId = parseThinkingSuffixFromModelId(wanted).baseId
     const model = models.find((entry) => entry.id === wanted) ?? models.find((entry) => entry.id === baseId)
@@ -59,7 +72,6 @@ export class SharedAgentModelLookup implements AgentModelLookup {
       ref: resolvedRef, label: model.label, available: true,
       efforts: model.capabilities.efforts.length ? [...model.capabilities.efforts] : family?.efforts ?? [],
       speeds: family?.speeds ?? [], contexts: family?.contexts ?? [],
-      ...(model.capabilities.contextWindow !== undefined ? { contextWindow: model.capabilities.contextWindow } : {}),
       capabilities, unavailableReasons: []
     }
   }
