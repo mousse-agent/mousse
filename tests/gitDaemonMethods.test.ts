@@ -198,16 +198,156 @@ describe('Git mutations through the daemon', () => {
     })
   })
 
+  describe('paths and branch names', () => {
+    /** A project in a subfolder of the repository, with a same-named untracked file inside and outside it. */
+    async function subfolderProject() {
+      const sub = join(f.repo, 'sub')
+      mkdirSync(sub)
+      write(sub, 'keep.txt'); git(f.repo, 'add', '.'); git(f.repo, 'commit', '-qm', 'sub base')
+      const project = mms.projects.openProject(sub)
+      write(f.repo, 'victim.txt', 'outside\n'); write(sub, 'victim.txt', 'inside\n')
+      return { sub, scope: { projectId: project.id } }
+    }
+
+    it('names files the way status does and never reaches a namesake outside a subfolder project', async () => {
+      const { sub, scope } = await subfolderProject()
+      const status = await client.request<Status>('git.status', scope)
+      expect(status.status.changes.map((change) => change.path).sort()).toEqual(['sub/victim.txt', 'victim.txt'])
+      // The bare name is the file at the top of the repository, which is outside this project.
+      for (const method of ['git.discard', 'git.stage', 'git.unstage']) {
+        await expect(client.request(method, { ...scope, paths: ['victim.txt'] }), method).rejects.toMatchObject({ code: 'git_path_outside' })
+        await expect(client.request(method, { ...scope, paths: [join(f.repo, 'victim.txt')] }), method).rejects.toMatchObject({ code: 'git_path_outside' })
+        await expect(client.request(method, { ...scope, paths: ['sub'] }), method).rejects.toMatchObject({ code: 'git_path_outside' })
+      }
+      expect(readFileSync(join(f.repo, 'victim.txt'), 'utf8')).toBe('outside\n')
+      expect(readFileSync(join(sub, 'victim.txt'), 'utf8')).toBe('inside\n')
+      expect(staged(f.repo)).toEqual([])
+
+      await client.request('git.stage', { ...scope, paths: ['sub/victim.txt'] })
+      expect(staged(f.repo)).toEqual(['sub/victim.txt'])
+      await client.request('git.unstage', { ...scope, paths: ['sub/victim.txt'] })
+      expect(staged(f.repo)).toEqual([])
+      await client.request('git.discard', { ...scope, paths: ['sub/victim.txt'] })
+      expect(existsSync(join(sub, 'victim.txt'))).toBe(false)
+      expect(readFileSync(join(f.repo, 'victim.txt'), 'utf8')).toBe('outside\n')
+
+      // An absolute path to a file inside the project is converted to the same name.
+      write(sub, 'second.txt')
+      await client.request('git.discard', { ...scope, paths: [join(sub, 'second.txt')] })
+      expect(existsSync(join(sub, 'second.txt'))).toBe(false)
+      expect(readFileSync(join(f.repo, 'victim.txt'), 'utf8')).toBe('outside\n')
+    })
+
+    it('deletes and renames only a branch named exactly, so a changed case cannot reach the current or a managed branch', async () => {
+      const scope = await projectScope()
+      const current = branchOf(f.repo)
+      const shouted = current.toUpperCase()
+      await expect(client.request('git.deleteBranch', { ...scope, name: shouted, force: true })).rejects.toMatchObject({ code: 'git_ref_not_found' })
+      await expect(client.request('git.deleteBranch', { ...scope, name: current })).rejects.toMatchObject({ code: 'git_branch_current' })
+      expect(branchOf(f.repo)).toBe(current)
+      expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(f.baseSha)
+
+      git(f.repo, 'branch', 'mousse/thread/ghost')
+      for (const name of ['Mousse/thread/ghost', 'MOUSSE/THREAD/GHOST', 'mousse/thread/ghost']) {
+        await expect(client.request('git.deleteBranch', { ...scope, name, force: true }), name).rejects.toMatchObject({ code: 'git_branch_protected' })
+        await expect(client.request('git.renameBranch', { ...scope, name, newName: 'taken' }), name).rejects.toMatchObject({ code: 'git_branch_protected' })
+      }
+      await expect(client.request('git.createBranch', { ...scope, name: 'Mousse/new', checkout: false })).rejects.toMatchObject({ code: 'git_branch_protected' })
+      expect(git(f.repo, 'branch', '--list', 'mousse/thread/ghost')).toContain('ghost')
+
+      git(f.repo, 'branch', 'topic')
+      await expect(client.request('git.renameBranch', { ...scope, name: 'TOPIC', newName: 'moved' })).rejects.toMatchObject({ code: 'git_ref_not_found' })
+      await expect(client.request('git.deleteBranch', { ...scope, name: 'Topic' })).rejects.toMatchObject({ code: 'git_ref_not_found' })
+      expect(git(f.repo, 'branch', '--list', 'topic')).toContain('topic')
+      await client.request('git.deleteBranch', { ...scope, name: 'topic' })
+      expect(git(f.repo, 'branch', '--list', 'topic')).toBe('')
+    })
+  })
+
   describe('a thread worktree', () => {
     it('refuses pull and the branch actions as authoritative', async () => {
       const t = await threadScope()
       for (const [method, extra] of [
         ['git.pull', {}], ['git.checkout', { branch: 'master' }], ['git.createBranch', { name: 'x' }], ['git.renameBranch', { name: 'a', newName: 'b' }],
-        ['git.deleteBranch', { name: 'x' }], ['git.abortInProgress', { kind: 'merge' }]
+        ['git.deleteBranch', { name: 'x' }]
       ] as const) {
         await expect(client.request(method, { threadId: t.threadId, ...extra }), method).rejects.toMatchObject({ code: 'task_branch_authoritative', errorInfo: { category: 'denied' } })
       }
       expect(git(t.path, 'rev-parse', 'HEAD')).toBe(f.baseSha)
+    })
+
+    it('refuses without creating the thread worktree first', async () => {
+      const project = mms.projects.openProject(f.repo)
+      const thread = mms.threads.createThread('No worktree yet', project.id)
+      const directory = mms.threads.getThreadDir(thread.id)
+      for (const [method, extra, code] of [
+        ['git.pull', {}, 'task_branch_authoritative'], ['git.checkout', { branch: 'x' }, 'task_branch_authoritative'], ['git.createBranch', { name: 'x' }, 'task_branch_authoritative'],
+        ['git.renameBranch', { name: 'a', newName: 'b' }, 'task_branch_authoritative'], ['git.deleteBranch', { name: 'x' }, 'task_branch_authoritative'],
+        ['git.stage', { all: true }, 'thread_worktree_checkpointed'], ['git.unstage', { all: true }, 'thread_worktree_checkpointed']
+      ] as const) {
+        await expect(client.request(method, { threadId: thread.id, ...extra }), method).rejects.toMatchObject({ code })
+      }
+      expect(new ThreadWorkspaceManager(directory).load()).toBeUndefined()
+    })
+
+    it('gives up a merge a terminal started, back to the recorded head', async () => {
+      const t = await threadScope()
+      git(f.repo, 'checkout', '-q', '-b', 'side'); write(f.repo, 'value.txt', 'side\n'); git(f.repo, 'commit', '-qam', 'side change'); git(f.repo, 'checkout', '-q', '-')
+      write(t.path, 'value.txt', 'thread\n')
+      await client.request('git.commit', { threadId: t.threadId, message: 'thread change' })
+      const head = git(t.path, 'rev-parse', 'HEAD')
+      expect(() => git(t.path, 'merge', 'side')).toThrow()
+      const waiting = await client.request<Status>('git.status', { threadId: t.threadId })
+      expect(waiting.status.inProgress).toBe('merge')
+      const result = await client.request<Status>('git.abortInProgress', { threadId: t.threadId, kind: 'merge' })
+      expect(result.status.inProgress ?? null).toBeNull()
+      expect(git(t.path, 'rev-parse', 'HEAD')).toBe(head)
+      expect(porcelain(t.path)).toEqual([])
+      await client.request('files.write', { threadId: t.threadId, path: 'next.txt', content: 'next\n' })
+    })
+
+    it('fetches in a thread worktree under the thread locks, so a queued commit is not held up behind it', async () => {
+      const t = await threadScope()
+      withRemote()
+      const result = await client.request<Status & { behindBefore: number }>('git.fetch', { threadId: t.threadId })
+      expect(result.behindBefore).toBe(0)
+      write(t.path, 'a.txt')
+      const [fetched, committed] = await Promise.all([
+        client.request('git.fetch', { threadId: t.threadId }),
+        client.request('git.commit', { threadId: t.threadId, message: 'during fetch' })
+      ])
+      expect(fetched).toBeDefined()
+      expect(committed).toBeDefined()
+      expect(git(t.path, 'log', '--format=%s', '-1')).toBe('during fetch')
+      expect(porcelain(t.path)).toEqual([])
+    }, 60_000)
+
+    it('refuses to sweep what a hook rewrote after a successful commit, and records the commit once the tree is clean', async () => {
+      const t = await threadScope()
+      installHook("require('node:fs').writeFileSync('a.txt', 'formatted by the hook\\n')")
+      write(t.path, 'a.txt', 'a\n'); git(t.path, 'add', 'a.txt')
+      const before = git(t.path, 'rev-parse', 'HEAD')
+      await client.request('git.commit', { threadId: t.threadId, message: 'with formatter' })
+      // One commit, with the staged content; the hook's edit stays in the tree and is not committed unverified.
+      const landed = git(t.path, 'rev-parse', 'HEAD')
+      expect(git(t.path, 'log', '--format=%s', `${before}..HEAD`).split('\n')).toEqual(['with formatter'])
+      expect(git(t.path, 'show', 'HEAD:a.txt')).toBe('a')
+      // The helper trims the first line, so the leading space of " M" may be gone.
+      expect(porcelain(t.path)).toEqual([expect.stringMatching(/^ ?M a\.txt$/)])
+      const action = new ThreadActionService(t.directory).list().at(-1)!
+      expect(new ThreadJournal(t.directory).latestByOperation().get(action.id)?.state).toBe('recovery_required')
+      await expect(client.request('git.commit', { threadId: t.threadId, message: 'again' })).rejects.toThrow(/recovery/i)
+      expect(git(t.path, 'rev-parse', 'HEAD')).toBe(landed)
+
+      // The user deals with the leftover edit, then recovery records the commit without another one.
+      git(t.path, 'checkout', '--', 'a.txt')
+      await client.request('operations.recover', { threadId: t.threadId })
+      const recovered = new ThreadActionService(t.directory).list().find((item) => item.id === action.id)!
+      expect(recovered).toMatchObject({ state: 'completed', commits: [landed] })
+      expect(new ThreadJournal(t.directory).latestByOperation().get(action.id)?.state).toBe('completed')
+      expect(git(t.path, 'rev-parse', 'HEAD')).toBe(landed)
+      expect(new ThreadWorkspaceManager(t.directory).load()!.headSha).toBe(landed)
+      await client.request('files.write', { threadId: t.threadId, path: 'next.txt', content: 'next\n' })
     })
 
     it('refuses stage and unstage because the next checkpoint would sweep the index anyway', async () => {
@@ -326,6 +466,47 @@ describe('Git mutations through the daemon', () => {
         await expect(client.request('git.commit', { threadId: scenario.t.threadId, message: 'rejected' })).rejects.toMatchObject({ code: 'git_commit_failed' })
         expect(new ChangeReceiptService(scenario.t.directory).list()).toHaveLength(1)
         await expectFinishedFailed(scenario)
+      })
+
+      /** A commit that lands and then reports a failure, as a crash or a failing post-commit step would. */
+      function commitThenFail(only?: string) {
+        vi.spyOn(mms.gitService, 'commit').mockImplementationOnce(async (cwd: string) => {
+          git(cwd, 'add', only ?? '-A'); git(cwd, 'commit', '-qm', 'landed')
+          throw new Error('stopped after the commit landed')
+        })
+      }
+
+      it('records a commit that landed before the failure once the tree is clean, without sweeping', async () => {
+        const t = await threadScope()
+        write(t.path, 'a.txt')
+        const before = git(t.path, 'rev-parse', 'HEAD')
+        commitThenFail()
+        await expect(client.request('git.commit', { threadId: t.threadId, message: 'x' })).rejects.toThrow()
+        const landed = git(t.path, 'rev-parse', 'HEAD')
+        expect(landed).not.toBe(before)
+        const action = new ThreadActionService(t.directory).list().at(-1)!
+        expect(new ThreadJournal(t.directory).latestByOperation().get(action.id)?.state).toBe('recovery_required')
+        await new ThreadActionService(t.directory).recoverPending(t.path)
+        const recovered = new ThreadActionService(t.directory).list().find((item) => item.id === action.id)!
+        expect(recovered).toMatchObject({ state: 'completed', commits: [landed], startSha: before, endSha: landed })
+        expect(new ThreadJournal(t.directory).latestByOperation().get(action.id)?.state).toBe('completed')
+        expect(git(t.path, 'log', '--format=%s', `${before}..HEAD`).split('\n')).toEqual(['landed'])
+        expect(new ThreadWorkspaceManager(t.directory).load()!.headSha).toBe(landed)
+      })
+
+      it('asks for recovery, and sweeps nothing, when a commit landed and files are still changed', async () => {
+        const t = await threadScope()
+        write(t.path, 'a.txt'); write(t.path, 'b.txt')
+        const before = git(t.path, 'rev-parse', 'HEAD')
+        commitThenFail('a.txt')
+        await expect(client.request('git.commit', { threadId: t.threadId, message: 'x' })).rejects.toThrow()
+        const landed = git(t.path, 'rev-parse', 'HEAD')
+        const action = new ThreadActionService(t.directory).list().at(-1)!
+        await expect(new ThreadActionService(t.directory).recoverPending(t.path)).rejects.toThrow(/needs recovery/)
+        expect(git(t.path, 'rev-parse', 'HEAD')).toBe(landed)
+        expect(git(t.path, 'log', '--format=%s', `${before}..HEAD`).split('\n')).toEqual(['landed'])
+        expect(porcelain(t.path)).toEqual(['?? b.txt'])
+        expect(new ThreadJournal(t.directory).latestByOperation().get(action.id)?.state).toBe('recovery_required')
       })
 
       it('still sweeps an interrupted turn, which has no failure policy', async () => {

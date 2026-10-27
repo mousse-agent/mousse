@@ -169,21 +169,31 @@ async function refreshAfterMutation(path: string, scope: GitScope): Promise<void
 
 /** Switch branches, then refresh. Rejects with Git's message when the checkout fails. */
 export async function checkoutGitBranch(path: string, branch: string, scope: GitScope, options: GitCheckoutOptions = {}): Promise<GitCheckoutResult> {
-  const result = await window.mousse.git.checkout(scope, branch, options)
-  await refreshAfterMutation(path, scope)
-  return { stashKept: result.stashKept }
+  try {
+    const result = await window.mousse.git.checkout(scope, branch, options)
+    return { stashKept: result.stashKept }
+  } finally {
+    // A failed stash-and-switch can already have taken the changes out of the working tree.
+    await refreshAfterMutation(path, scope)
+  }
 }
 
 /** Stage these paths, or everything. */
 export async function stageGitPaths(path: string, paths: readonly string[] | 'all', scope: GitScope): Promise<void> {
-  await window.mousse.git.stage(scope, paths === 'all' ? { all: true } : { paths: [...paths] })
-  await refreshAfterMutation(path, scope)
+  try {
+    await window.mousse.git.stage(scope, paths === 'all' ? { all: true } : { paths: [...paths] })
+  } finally {
+    await refreshAfterMutation(path, scope)
+  }
 }
 
 /** Take these paths out of the index, or everything. */
 export async function unstageGitPaths(path: string, paths: readonly string[] | 'all', scope: GitScope): Promise<void> {
-  await window.mousse.git.unstage(scope, paths === 'all' ? { all: true } : { paths: [...paths] })
-  await refreshAfterMutation(path, scope)
+  try {
+    await window.mousse.git.unstage(scope, paths === 'all' ? { all: true } : { paths: [...paths] })
+  } finally {
+    await refreshAfterMutation(path, scope)
+  }
 }
 
 /** Throw away the changes to these paths; untracked files are deleted. The caller confirms first. */
@@ -197,9 +207,12 @@ export async function discardGitPaths(path: string, paths: readonly string[], sc
 
 /** Fetch the branch's remote and say how far behind it is now. */
 export async function fetchGit(path: string, scope: GitScope): Promise<GitFetchResult> {
-  const result = await window.mousse.git.fetch(scope)
-  await refreshAfterMutation(path, scope)
-  return { behindBefore: result.behindBefore, behindAfter: result.behindAfter }
+  try {
+    const result = await window.mousse.git.fetch(scope)
+    return { behindBefore: result.behindBefore, behindAfter: result.behindAfter }
+  } finally {
+    await refreshAfterMutation(path, scope)
+  }
 }
 
 /** Pull the upstream into the branch; `conflicted` leaves the merge or rebase for the user. */
@@ -223,18 +236,27 @@ export async function abortGitInProgress(path: string, kind: 'merge' | 'rebase',
 }
 
 export async function createGitBranch(path: string, name: string, scope: GitScope, options: GitBranchOptions = {}): Promise<void> {
-  await window.mousse.git.createBranch(scope, name, options)
-  await refreshAfterMutation(path, scope)
+  try {
+    await window.mousse.git.createBranch(scope, name, options)
+  } finally {
+    await refreshAfterMutation(path, scope)
+  }
 }
 
 export async function renameGitBranch(path: string, name: string, newName: string, scope: GitScope): Promise<void> {
-  await window.mousse.git.renameBranch(scope, name, newName)
-  await refreshAfterMutation(path, scope)
+  try {
+    await window.mousse.git.renameBranch(scope, name, newName)
+  } finally {
+    await refreshAfterMutation(path, scope)
+  }
 }
 
 export async function deleteGitBranch(path: string, name: string, scope: GitScope, options: GitDeleteBranchOptions = {}): Promise<void> {
-  await window.mousse.git.deleteBranch(scope, name, options)
-  await refreshAfterMutation(path, scope)
+  try {
+    await window.mousse.git.deleteBranch(scope, name, options)
+  } finally {
+    await refreshAfterMutation(path, scope)
+  }
 }
 
 export interface CommitGitOptions {

@@ -304,11 +304,30 @@ describe('shared git status store', () => {
     expect(git.status).toHaveBeenCalledTimes(2)
   })
 
-  it('does not refresh after a checkout that fails', async () => {
+  it('refreshes after a checkout that fails, since a stash-and-switch may have taken the changes away', async () => {
     const git = installGit({ checkout: vi.fn(async () => { throw new Error('local changes would be overwritten') }) })
     await refreshGitStatus('/repo/a')
-    await expect(checkoutGitBranch('/repo/a', 'dev', scope)).rejects.toThrow('overwritten')
-    expect(git.status).toHaveBeenCalledTimes(1)
+    await expect(checkoutGitBranch('/repo/a', 'dev', scope, { dirty: 'stash' })).rejects.toThrow('overwritten')
+    expect(git.status).toHaveBeenCalledTimes(2)
+  })
+
+  it('refreshes after any other new Git action that fails', async () => {
+    const fail = () => vi.fn(async () => { throw new Error('refused') })
+    const git = installGit({ stage: fail(), unstage: fail(), fetch: fail(), createBranch: fail(), renameBranch: fail(), deleteBranch: fail() })
+    await refreshGitStatus('/repo/a')
+    let refreshes = 1
+    for (const run of [
+      () => stageGitPaths('/repo/a', ['a.ts'], scope),
+      () => unstageGitPaths('/repo/a', 'all', scope),
+      () => fetchGit('/repo/a', scope),
+      () => createGitBranch('/repo/a', 'topic', scope),
+      () => renameGitBranch('/repo/a', 'topic', 'topic-2', scope),
+      () => deleteGitBranch('/repo/a', 'topic', scope)
+    ]) {
+      await expect(run()).rejects.toThrow('refused')
+      refreshes += 1
+      expect(git.status).toHaveBeenCalledTimes(refreshes)
+    }
   })
 
   it('refreshes retained paths when the window regains focus, and stops after release', async () => {
