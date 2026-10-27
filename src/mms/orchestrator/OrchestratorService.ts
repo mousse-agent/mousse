@@ -72,7 +72,7 @@ import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/
 import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { stopStrategy } from '../run/CommandPolicy'
-import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type AgentCreatedThread, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type AppToolHost, type AppToolTurn, type McpCaller, type ToolRegistry } from '../run/mcp/appTools'
+import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type AgentCreatedThread, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type AppToolHost, type AppToolTurn, type McpCaller, type ToolRegistry } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, LAUNCHED_THREAD_ACCESS_CEILING, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { THREAD_CREATE_MAX_ACTIVE_PER_THREAD } from '../run/mcp/appTools/thread'
 import { modeFactsFor, prepareSkills, sessionInstructions, settingsToolEnabled, turnPreamble } from '../run/mcp/appTools/assemble'
@@ -762,6 +762,11 @@ export class OrchestratorService extends EventEmitter {
 
   /** The scheduler hears when a scheduled turn's run ends, wherever (and by whomever) the turn was drained. */
   setScheduledHooks(hooks: ScheduledTurnHooks | undefined): void { this.scheduledHooks = hooks }
+
+  private scheduledJobs?: Omit<AgentScheduleHost, 'limits' | 'startedByPerson'>
+
+  /** The profile's scheduled jobs, for the agents' `schedule_*` tools; without them the tools are not registered. */
+  setScheduledJobs(jobs: Omit<AgentScheduleHost, 'limits' | 'startedByPerson'> | undefined): void { this.scheduledJobs = jobs }
 
   private browserRuntime?: BrowserRuntimePort
   private mainAgentBrowser?: BrowserExecutionBinding
@@ -2633,6 +2638,37 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * What a job created or changed by an agent's run may be granted: the access level the run holds (its grant narrowed by
+   * the profile's setting now) and the permission mode it is bound to. A run that is not a person's turn (a channel,
+   * a bot, a scheduled run, a workflow or a definition) gets the narrowest of both, and so does any run whose
+   * origin cannot be read, so a job made by an unattended agent is never wider than that agent was.
+   */
+  private scheduledCreatorLimits(caller: { threadId: string; runId: string; accessLevel: AgentAccessLevel }): { accessCap: AgentAccessLevel; permissionCeiling: PermissionMode } {
+    const person = this.runStartedByPerson(caller)
+    return {
+      accessCap: person ? this.effectiveAccess(caller.accessLevel) : 'lineage',
+      permissionCeiling: person ? this.runPermissionMode(caller.runId) : 'ask'
+    }
+  }
+
+  /**
+   * Whether a person started the run: the run's source and its binding's origin say so (`startedByPerson`, the rule that
+   * decides who a standing approval rule may answer). Fails closed on a missing run, a missing binding, a bot's thread
+   * and anything that cannot be read.
+   */
+  private runStartedByPerson(caller: { threadId: string; runId: string }): boolean {
+    try {
+      if (this.botThreads?.roleOf(caller.threadId)) return false
+      const engine = this.runEngine
+      const run = engine?.getRun(caller.runId)
+      const binding = engine?.bindingForRun(caller.runId)
+      return Boolean(run && binding) && startedByPerson({ origin: policyOrigin(binding!.policy), source: run!.source })
+    } catch {
+      return false
+    }
+  }
+
+  /**
    * A scheduled run is never granted more than the cap recorded on it when it was admitted (the job
    * creator's level), whatever the profile or its thread allow now. A scheduled run with none recorded
    * is `lineage`; any other run is returned as it is.
@@ -2846,7 +2882,8 @@ export class OrchestratorService extends EventEmitter {
       creationStarted: (clientRequestId) => this.agentCreationStarted(clientRequestId),
       noteOnThread: (threadId, text) => this.noteAgentLaunch(threadId, text),
       stopRun: (threadId, runId, options) => this.stopRunAsAgent(threadId, runId, options),
-      steerRun: (threadId, runId, text, options) => this.steerRunAsAgent(threadId, runId, text, options)
+      steerRun: (threadId, runId, text, options) => this.steerRunAsAgent(threadId, runId, text, options),
+      ...(this.scheduledJobs ? { schedules: { ...this.scheduledJobs, limits: (caller) => this.scheduledCreatorLimits(caller), startedByPerson: (caller) => this.runStartedByPerson(caller) } } : {})
     }
   }
 

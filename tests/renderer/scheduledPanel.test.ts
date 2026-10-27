@@ -82,6 +82,11 @@ function makeApi(state: { jobs: ScheduledJob[] }) {
     pause: vi.fn(async () => null),
     resume: vi.fn(async () => null),
     run: vi.fn(async () => null),
+    extend: vi.fn(async () => null),
+    settings: {
+      get: vi.fn(async () => ({ agentJobs: false })),
+      setAgentJobs: vi.fn(async (agentJobs: boolean) => ({ agentJobs }))
+    },
     webhook: {
       enable: vi.fn(),
       rotate: vi.fn(),
@@ -801,6 +806,65 @@ describe('Scheduled page: keyboard', () => {
     expect(document.querySelector('[role="dialog"]')).toBeNull()
     await frame()
     expect(document.activeElement).toBe(button('Webhook for Nightly'))
+  })
+})
+
+describe('Scheduled page: jobs agents create', () => {
+  const agentsToggle = () => control<HTMLInputElement>('Agents may create jobs')
+
+  it('shows "Agents may create jobs" off by default and saves the choice', async () => {
+    const h = await mount([])
+    expect(agentsToggle().checked).toBe(false)
+    await click(agentsToggle())
+    expect(h.api.scheduled.settings.setAgentJobs).toHaveBeenCalledWith(true)
+    expect(agentsToggle().checked).toBe(true)
+    await click(agentsToggle())
+    expect(h.api.scheduled.settings.setAgentJobs).toHaveBeenLastCalledWith(false)
+    expect(agentsToggle().checked).toBe(false)
+  })
+
+  it('shows the setting as the profile has it, and says why when the choice is refused', async () => {
+    const h = await mount([])
+    expect(h.api.scheduled.settings.get).toHaveBeenCalledTimes(1)
+    h.api.scheduled.settings.setAgentJobs.mockRejectedValueOnce(new Error("Error invoking remote method 'scheduled:settings:set': Error: Not saved"))
+    await click(agentsToggle())
+    expect(alerts().join(' ')).toContain('Not saved')
+    expect(agentsToggle().checked).toBe(false)
+  })
+
+  it('shows when an agent\'s job ends, lets a person extend it, and says why a job is paused', async () => {
+    const future = new Date(Date.now() + 3 * 24 * 3_600_000).toISOString()
+    const h = await mount([
+      job({ id: 'job-agent', name: 'Agent made', createdBy: { threadId: 't1' }, expiresAt: future }),
+      job({ id: 'job-off', name: 'Paused by the setting', createdBy: { threadId: 't1' }, state: 'paused', enabled: false, pausedReason: 'Agents may create jobs is off, so jobs agents created do not run.' }),
+      job({ id: 'job-person', name: 'Person made' })
+    ])
+    const row = (id: string) => must(document.querySelector<HTMLElement>(`[data-job-id="${id}"]`), id)
+    expect(row('job-agent').querySelector('[data-meta="expires"]')?.textContent).toContain('Ends')
+    expect(row('job-person').querySelector('[data-meta="expires"]')).toBeNull()
+    expect(row('job-off').querySelector('[data-meta="paused-reason"]')?.textContent).toContain('Agents may create jobs is off')
+    expect(row('job-agent').querySelector('[data-meta="paused-reason"]')).toBeNull()
+    await click(must([...row('job-agent').querySelectorAll('button')].find((item) => item.textContent === 'Extend 7 days'), 'extend button'))
+    expect(h.api.scheduled.extend).toHaveBeenCalledWith('job-agent')
+  })
+
+  it('labels a job an agent created, and its run records, and leaves a person\'s job unlabelled', async () => {
+    await mount([
+      job({
+        id: 'job-agent',
+        name: 'Agent made',
+        createdBy: { threadId: 't1', runId: 'r1' },
+        runHistory: [{ runAt: NOW, status: 'ok', agentCreated: true }]
+      }),
+      job({ id: 'job-person', name: 'Person made', runHistory: [{ runAt: NOW, status: 'ok' }] })
+    ])
+    const rowOf = (name: string) => must(document.querySelector<HTMLElement>(`[data-job-id="${name}"]`), name)
+    expect(rowOf('job-agent').querySelector('[data-meta="agent"]')?.textContent).toBe('Created by an agent')
+    expect(rowOf('job-person').querySelector('[data-meta="agent"]')).toBeNull()
+    await click(must(rowOf('job-agent').querySelector<HTMLElement>('[data-row-button]'), 'row'))
+    expect(rowOf('job-agent').querySelector('.scheduled-history [data-meta="agent"]')?.textContent).toBe('Job created by an agent')
+    await click(must(rowOf('job-person').querySelector<HTMLElement>('[data-row-button]'), 'row'))
+    expect(rowOf('job-person').querySelector('.scheduled-history [data-meta="agent"]')).toBeNull()
   })
 })
 

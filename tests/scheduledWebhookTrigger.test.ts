@@ -1044,6 +1044,63 @@ describe('scheduled job webhook trigger', () => {
       expect(log.url).toBe(`http://127.0.0.1:${port}/hooks/${id}`)
     })
 
+    it('"Agents may create jobs" is off by default, is chosen over the protocol, and refuses anything else', async () => {
+      expect(await client.request('scheduled.settings.get')).toEqual({ settings: { agentJobs: false } })
+      expect(await client.request('scheduled.settings.set', { agentJobs: true })).toEqual({ settings: { agentJobs: true } })
+      expect(await client.request('scheduled.settings.get')).toEqual({ settings: { agentJobs: true } })
+      expect(mms.config.agentJobsEnabled()).toBe(true)
+      await expect(client.request('scheduled.settings.set', { agentJobs: 'yes' })).rejects.toThrow()
+      await expect(client.request('scheduled.settings.set', { agentJobs: false, other: 1 })).rejects.toThrow(/not allowed/)
+      expect(mms.config.agentJobsEnabled()).toBe(true)
+      expect(await client.request('scheduled.settings.set', { agentJobs: false })).toEqual({ settings: { agentJobs: false } })
+    })
+
+    it('turning "Agents may create jobs" off pauses the jobs agents made with a reason, leaves a person\'s alone, and turning it on does not resume them; a person extends an ended one', async () => {
+      await client.request('scheduled.settings.set', { agentJobs: true })
+      const schedules = mms.orchestrator.mcpToolHost().schedules!
+      const agent = schedules.create({ name: 'By an agent', prompt: 'x', schedule: { kind: 'interval', minutes: 30 }, createdBy: { threadId: 'agent-thread' }, expiresAt: new Date(Date.now() + 3_600_000).toISOString() })
+      const person = await client.request<{ job: { id: string } }>('scheduled.create', { input: { name: 'By a person', prompt: 'x', schedule: { kind: 'manual' } } })
+      await client.request('scheduled.settings.set', { agentJobs: false })
+      const after = (id: string) => client.request<{ job: { state: string; enabled: boolean; pausedReason?: string } }>('scheduled.get', { id }).then((res) => res.job)
+      expect(await after(agent.id)).toMatchObject({ state: 'paused', enabled: false, pausedReason: expect.stringContaining('Agents may create jobs is off') })
+      expect(await after(person.job.id)).toMatchObject({ state: 'scheduled', enabled: true })
+      await client.request('scheduled.settings.set', { agentJobs: true })
+      expect(await after(agent.id)).toMatchObject({ state: 'paused', enabled: false })
+
+      // Extending is a person's call over the protocol, and a job that ended starts again.
+      // (An extension does not resume a job that is paused: a person does that.)
+      expect((await client.request<{ job: { state: string } }>('scheduled.extend', { id: agent.id })).job.state).toBe('paused')
+      const ended = schedules.create({ name: 'Ran out of time', prompt: 'x', schedule: { kind: 'interval', minutes: 30 }, createdBy: { threadId: 'agent-thread' }, expiresAt: new Date(Date.now() - 1000).toISOString() })
+      mms.scheduled.updateJob(ended.id, { state: 'completed', nextRunAt: null })
+      const extended = await client.request<{ job: { state: string; expiresAt: string } }>('scheduled.extend', { id: ended.id, days: 2 })
+      expect(extended.job.state).toBe('scheduled')
+      expect(Date.parse(extended.job.expiresAt)).toBeGreaterThan(Date.now() + 36 * 3_600_000)
+      await expect(client.request('scheduled.extend', { id: 'no-such-job' })).rejects.toThrow(/not found/)
+      await expect(client.request('scheduled.extend', { id: ended.id, days: 0 })).rejects.toThrow()
+    })
+
+    it('the agents\' schedule tools are wired to the profile: the setting switches them, the profile checks a job, and a run wakes the scheduler', async () => {
+      const schedules = mms.orchestrator.mcpToolHost().schedules!
+      expect(schedules).toBeDefined()
+      expect(schedules.enabled()).toBe(false)
+      // The owner adds who started a run: a run that does not exist was not a person's.
+      expect(schedules.startedByPerson({ threadId: 'no-thread', runId: 'no-run' })).toBe(false)
+      await client.request('scheduled.settings.set', { agentJobs: true })
+      expect(schedules.enabled()).toBe(true)
+      // The profile's own checks: a model it does not have, and a new worktree with no project.
+      expect(() => schedules.validate({ workspace: { kind: 'newWorktree' } })).toThrow(/needs a project/)
+      expect(() => schedules.validate({ selection: { instanceId: 'no-such-instance', llmProvider: '', model: 'x' } })).toThrow()
+      const job = schedules.create({ name: 'By an agent', prompt: 'x', schedule: { kind: 'manual' }, createdBy: { threadId: 'agent-thread', runId: 'r1' }, accessCap: 'read', permissionCeiling: 'ask' })
+      expect((await client.request<{ job: { createdBy?: unknown; accessCap?: string; permissionCeiling?: string } }>('scheduled.get', { id: job.id })).job).toMatchObject({ createdBy: { threadId: 'agent-thread' }, accessCap: 'read', permissionCeiling: 'ask' })
+      const wake = vi.spyOn(mms.scheduled, 'wake').mockImplementation(() => undefined)
+      expect(schedules.trigger(job.id)?.nextRunAt).toBeTruthy()
+      expect(wake).not.toHaveBeenCalled()
+      schedules.wake()
+      expect(wake).toHaveBeenCalledTimes(1)
+      expect(schedules.pause(job.id, 'Paused by an agent')?.state).toBe('paused')
+      expect(schedules.list().map((entry) => entry.id)).toEqual([job.id])
+    })
+
     it('refuses to enable a one-time job and reports a listener that cannot bind', async () => {
       const once = await client.request<{ job: { id: string } }>('scheduled.create', { input: { name: 'once', prompt: 'x', schedule: { kind: 'once', runAt: new Date(Date.now() + 3600_000).toISOString() } } })
       await expect(client.request('scheduled.webhook.enable', { id: once.job.id })).rejects.toThrow(/manual/)

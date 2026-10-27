@@ -3,6 +3,7 @@ import type { ModelOverride } from '../../shared/providerInstances'
 import type { ScheduledJob, Thread } from '../../shared/types'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
 import { pathsEqual } from '../profiles/pathSafety'
+import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 
 /** What the validator needs to know about the profile; the protocol handler wires the real services in. */
 export interface ScheduledJobOptionsDeps {
@@ -16,6 +17,38 @@ export interface ScheduledJobOptionsDeps {
   listProjectThreads(projectId: string): Thread[]
   loadWorkspace(threadId: string): ThreadWorkspaceMetadata | undefined
   isGitBacked(projectPath: string): boolean
+}
+
+/** The profile services behind `ScheduledJobOptionsDeps`; the protocol handlers and the agent tools wire the same ones. */
+export interface ScheduledJobOptionsSources {
+  providerInstances: { overrideFor: ScheduledJobOptionsDeps['overrideFor'] }
+  /** The harness gateway; throws when the profile has not composed it yet. */
+  harness(): { resolveStored: ScheduledJobOptionsDeps['resolveStored'] }
+  projects: { getProject(projectId: string): { id: string; path: string } | undefined }
+  threads: {
+    getThread(threadId: string): Thread | undefined
+    listAllThreads(): Thread[]
+    getThreadDir(threadId: string): string
+  }
+}
+
+export function scheduledJobOptionsDepsFrom(sources: ScheduledJobOptionsSources): ScheduledJobOptionsDeps {
+  const { threads, projects } = sources
+  return {
+    overrideFor: (input) => sources.providerInstances.overrideFor(input),
+    resolveStored: (selection, options) => sources.harness().resolveStored(selection, options),
+    getProject: (projectId) => projects.getProject(projectId),
+    getThread: (threadId) => threads.getThread(threadId),
+    listProjectThreads: (projectId) => threads.listAllThreads().filter((thread) => thread.projectId === projectId),
+    loadWorkspace: (threadId) => new ThreadWorkspaceManager(threads.getThreadDir(threadId)).load(),
+    isGitBacked: (projectPath) => {
+      try {
+        return new ThreadWorkspaceManager('').resolveRepository(projectPath).capability.gitBacked
+      } catch {
+        return false
+      }
+    }
+  }
 }
 
 /** The fields of a job these checks read; the caller passes the job as it would be after the change. */

@@ -86,9 +86,10 @@ import { visibleThreadsFor } from './threadVisibility'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
-import { validateScheduledJobOptions, type ScheduledJobOptionsDeps } from '../scheduled/validateJobOptions'
+import { scheduledJobOptionsDepsFrom, validateScheduledJobOptions, type ScheduledJobOptionsDeps } from '../scheduled/validateJobOptions'
 import { isExecutableJobEdit, JobPermissionRefused, permissionAboveCeiling, permissionsAfterEdit } from '../scheduled/jobPermission'
 import { ScheduledWebhookError } from '../scheduled/ScheduledJobService'
+import { runNowRefusal } from '../scheduled/runNowRefusal'
 import { ActionExecutionError, StaleThreadActionRevisionError, ThreadActionService, type RunThreadActionOptions } from '../actions/ThreadActionService'
 import { UndoService } from '../actions/UndoService'
 import { UndoRetentionService } from '../actions/UndoRetentionService'
@@ -934,22 +935,12 @@ function checkJobOptions(ctx: HandlerContext, job: Parameters<typeof validateSch
 
 /** The profile services the scheduled-job checks read (model, mode and workspace of a job). */
 function scheduledJobOptionsDeps(ctx: HandlerContext): ScheduledJobOptionsDeps {
-  const { threads, projects } = ctx.mms
-  return {
-    overrideFor: (input) => ctx.mms.providerInstances.overrideFor(input),
-    resolveStored: (selection, options) => harnessGateway(ctx).resolveStored(selection, options),
-    getProject: (projectId) => projects.getProject(projectId),
-    getThread: (threadId) => threads.getThread(threadId),
-    listProjectThreads: (projectId) => threads.listAllThreads().filter((thread) => thread.projectId === projectId),
-    loadWorkspace: (threadId) => new ThreadWorkspaceManager(threads.getThreadDir(threadId)).load(),
-    isGitBacked: (projectPath) => {
-      try {
-        return new ThreadWorkspaceManager('').resolveRepository(projectPath).capability.gitBacked
-      } catch {
-        return false
-      }
-    }
-  }
+  return scheduledJobOptionsDepsFrom({
+    providerInstances: ctx.mms.providerInstances,
+    harness: () => harnessGateway(ctx),
+    projects: ctx.mms.projects,
+    threads: ctx.mms.threads
+  })
 }
 
 async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
@@ -1917,10 +1908,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const id = asString(p.id, 'id', 256)
       // A job with a run in flight or waiting in a queue has one occurrence outstanding; say so instead of reporting a start.
       const current = ctx.mms.scheduled.getJob(id)
-      if (current?.state === 'running' || current?.runClaim) throw jobRefused(`Job is already running: ${current.name}`)
-      if (current?.pendingOccurrence) {
-        throw jobRefused(`Job already has a run ${current.pendingOccurrence.state === 'queued' ? 'waiting in the queue' : 'in progress'}: ${current.name}. It can run again when that run ends.`)
-      }
+      const refusal = current ? runNowRefusal(current) : undefined
+      if (refusal) throw jobRefused(refusal)
       const job = ctx.mms.scheduled.triggerJob(id)
       // Run now starts within seconds: the scheduler ticks now instead of at the next minute.
       if (job) ctx.mms.scheduled.wake()
@@ -1928,6 +1917,25 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'scheduled.status':
       return { status: ctx.mms.scheduled.getStatus() }
+    case 'scheduled.settings.get':
+      return { settings: { agentJobs: ctx.mms.config.agentJobsEnabled() } }
+    case 'scheduled.settings.set': {
+      const p = isObject(params) ? params : {}
+      for (const key of Object.keys(p)) if (key !== 'agentJobs') throw jobRefused(`${key} is not allowed`)
+      const agentJobs = asBoolean(p.agentJobs, 'agentJobs')
+      ctx.mms.config.updateScheduledSection({ agentJobs })
+      // Off means the jobs agents made stop now, visibly paused; turning it on again does not restart them.
+      if (!agentJobs) ctx.mms.scheduled.pauseAgentJobs()
+      return { settings: { agentJobs: ctx.mms.config.agentJobsEnabled() } }
+    }
+    case 'scheduled.extend': {
+      const p = isObject(params) ? params : {}
+      const id = asString(p.id, 'id', 256)
+      const days = p.days === undefined ? undefined : asBoundedInt(p.days, 'days', { min: 1, max: 365 })
+      const job = ctx.mms.scheduled.extendJob(id, days)
+      if (!job) throw jobRefused(`Job not found: ${id}`)
+      return { job, jobs: ctx.mms.scheduled.listJobs() }
+    }
     // The secret is in the `enable` and `rotate` answers only; no other method returns it.
     case 'scheduled.webhook.enable': {
       const p = isObject(params) ? params : {}

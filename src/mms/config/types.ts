@@ -53,6 +53,8 @@ export interface ScheduledConfigSection {
   jobs: ScheduledJobDefinition[]
   /** The loopback listener for job webhooks; off until a job's webhook is enabled. */
   webhooks?: { enabled: boolean; port: number }
+  /** Agents may list, create, change, pause and run jobs through the Mousse tools; off until a person turns it on. */
+  agentJobs?: boolean
 }
 
 /** Static job fields stored in mousse.conf (runtime state lives under ~/.mousse/scheduled/). */
@@ -72,6 +74,7 @@ export interface ScheduledJobDefinition {
   permissionCeiling?: ScheduledJob['permissionCeiling']
   createdBy?: ScheduledJob['createdBy']
   accessCap?: ScheduledJob['accessCap']
+  expiresAt?: ScheduledJob['expiresAt']
   trigger?: ScheduledJob['trigger']
   repeat?: { times: number; completed?: number }
   createdAt: string

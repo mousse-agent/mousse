@@ -116,6 +116,7 @@ function jobToDefinition(job: ScheduledJob): ScheduledJobDefinition {
     permissionCeiling: job.permissionCeiling,
     createdBy: job.createdBy,
     accessCap: job.accessCap,
+    expiresAt: job.expiresAt,
     trigger: job.trigger,
     repeat: job.repeat?.times
       ? { times: job.repeat.times, completed: job.repeat.completed }
@@ -289,7 +290,8 @@ export class MousseConfigStore {
       scheduled: {
         enabled: raw.scheduled?.enabled ?? base.scheduled.enabled,
         jobs: raw.scheduled?.jobs ?? base.scheduled.jobs,
-        ...(raw.scheduled?.webhooks ? { webhooks: raw.scheduled.webhooks } : {})
+        ...(raw.scheduled?.webhooks ? { webhooks: raw.scheduled.webhooks } : {}),
+        ...(typeof raw.scheduled?.agentJobs === 'boolean' ? { agentJobs: raw.scheduled.agentJobs } : {})
       },
       channels: deepMerge(
         base.channels as unknown as Record<string, unknown>,
@@ -501,7 +503,15 @@ export class MousseConfigStore {
     if (partial.webhooks !== undefined) {
       this.conf.scheduled.webhooks = { ...partial.webhooks }
     }
+    if (partial.agentJobs !== undefined) {
+      this.conf.scheduled.agentJobs = partial.agentJobs === true
+    }
     this.persist()
+  }
+
+  /** Whether agents may use the scheduled-job tools (`scheduled.agentJobs`, off by default). Cheap: read at every tool call. */
+  agentJobsEnabled(): boolean {
+    return this.conf.scheduled.agentJobs === true
   }
 
   updateChannelsSection(config: ChannelConfig): void {

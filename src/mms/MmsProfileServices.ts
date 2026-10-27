@@ -51,6 +51,7 @@ import { ScheduledJobService, ScheduledWebhookError } from './scheduled/Schedule
 import { ScheduledJobStore } from './scheduled/ScheduledJobStore'
 import { ScheduledWebhookServer, scheduledWebhookPort } from './scheduled/ScheduledWebhookServer'
 import { WebhookSecretCache } from './scheduled/webhookSecretCache'
+import { scheduledJobOptionsDepsFrom, validateScheduledJobOptions } from './scheduled/validateJobOptions'
 import { ChannelService } from './channels/ChannelService'
 import { ChannelStore } from './channels/ChannelStore'
 import { AgentRegistry } from './agents/AgentRegistry'
@@ -592,6 +593,27 @@ export class MmsProfileServices {
     } catch (error) {
       console.warn('scheduled job permission ceilings could not be stamped; jobs without one follow their thread\'s mode', error instanceof Error ? error.message : String(error))
     }
+    // Agents' schedule tools: the same checks and store the protocol uses, behind `scheduled.agentJobs` (off by default).
+    const jobOptionDeps = scheduledJobOptionsDepsFrom({
+      providerInstances: this.providerInstances,
+      harness: () => {
+        if (!this.harnessImpl) throw new Error('Providers are not ready yet')
+        return this.harnessImpl
+      },
+      projects: this.projects,
+      threads: this.threads
+    })
+    this.orchestrator.setScheduledJobs({
+      enabled: () => config.agentJobsEnabled(),
+      list: () => this.scheduled.listJobs(),
+      get: (id) => this.scheduled.getJob(id),
+      validate: (job) => validateScheduledJobOptions(job, jobOptionDeps),
+      create: (input) => this.scheduled.createJob(input),
+      update: (id, patch) => this.scheduled.updateJob(id, patch),
+      pause: (id, reason) => this.scheduled.pauseJob(id, reason),
+      trigger: (id) => this.scheduled.triggerJob(id),
+      wake: () => this.scheduled.wake()
+    })
     // Job webhooks: secrets live in this profile's secret file, never in the process environment. The listener
     // looks them up in a small in-memory table that is rebuilt on any scheduler change, so a request costs no file work.
     const webhookSecrets = createProfileSecretAdapter({ profileRoot: homeDir, inheritProcessEnv: false })

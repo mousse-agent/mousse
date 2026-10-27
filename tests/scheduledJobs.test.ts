@@ -74,6 +74,38 @@ describe('ScheduledJobStore', () => {
     rmSync(tempHome, { recursive: true, force: true })
   })
 
+  it('keeps who created a job, the creating call\'s key and the limits its runs carry through a reload', () => {
+    const job = store.createJob({
+      name: 'By an agent',
+      prompt: 'Report',
+      schedule: { kind: 'manual' },
+      createdBy: { threadId: 'agent-thread', runId: 'run-1', requestId: 'schedule_create:agent-thread:req-1' },
+      accessCap: 'read',
+      permissionCeiling: 'ask'
+    })
+    const reloaded = new ScheduledJobStore(MousseConfigStore.load(tempHome)).getJob(job.id)
+    expect(reloaded).toMatchObject({
+      createdBy: { threadId: 'agent-thread', runId: 'run-1', requestId: 'schedule_create:agent-thread:req-1' },
+      accessCap: 'read',
+      permissionCeiling: 'ask'
+    })
+  })
+
+  it('has "Agents may create jobs" off until a person turns it on, and keeps the choice', () => {
+    const config = MousseConfigStore.load(tempHome)
+    expect(config.agentJobsEnabled()).toBe(false)
+    config.updateScheduledSection({ agentJobs: true })
+    expect(MousseConfigStore.load(tempHome).agentJobsEnabled()).toBe(true)
+    config.updateScheduledSection({ agentJobs: false })
+    expect(MousseConfigStore.load(tempHome).agentJobsEnabled()).toBe(false)
+    // Other changes to the section leave the choice alone, and a value that is not a boolean never turns it on.
+    config.updateScheduledSection({ agentJobs: true })
+    config.updateScheduledSection({ enabled: true })
+    expect(MousseConfigStore.load(tempHome).agentJobsEnabled()).toBe(true)
+    config.set('scheduled.agentJobs', 'true')
+    expect(config.agentJobsEnabled()).toBe(false)
+  })
+
   it('creates, pauses, resumes, and deletes jobs atomically', () => {
     const job = store.createJob({
       name: 'Test job',
@@ -863,6 +895,7 @@ describe('scheduled job fields, manual jobs and occurrences', () => {
 describe('ScheduledJobService concurrency and occurrences', () => {
   let originalHome: string | undefined
   let tempHome: string
+  let config: MousseConfigStore
   let store: ScheduledJobStore
   const services: ScheduledJobService[] = []
 
@@ -870,7 +903,10 @@ describe('ScheduledJobService concurrency and occurrences', () => {
     originalHome = process.env.MOUSSE_HOME
     tempHome = mkdtempSync(join(tmpdir(), 'mousse-scheduled-service-'))
     process.env.MOUSSE_HOME = tempHome
-    store = new ScheduledJobStore(MousseConfigStore.load(tempHome))
+    config = MousseConfigStore.load(tempHome)
+    // Jobs agents created run only while agents may create jobs; the tests that say otherwise turn it off.
+    config.updateScheduledSection({ agentJobs: true })
+    store = new ScheduledJobStore(config)
   })
 
   afterEach(async () => {
@@ -1014,6 +1050,162 @@ describe('ScheduledJobService concurrency and occurrences', () => {
     await vi.waitFor(() => expect(store.getJob(job.id)?.lastStatus).toBe('error'))
     expect(store.getJob(job.id)?.lastError).toBe('Agent-created jobs cannot run workflows')
     expect(runner).not.toHaveBeenCalled()
+  })
+
+  it('labels every run record of an agent-created job as the agent\'s, whichever way the run ends, and no record of a person\'s', async () => {
+    // Three jobs: a tick starts at most three.
+    const mine = due('Agent made ok', { createdBy: { threadId: 'agent-thread', runId: 'r1' } })
+    const slash = due('Agent made slash', { prompt: '/workflow run ship', createdBy: { threadId: 'agent-thread', runId: 'r1' } })
+    const person = due('Person made')
+    serviceOf({ runIsolated: async () => ({ text: 'fine', silent: false, transcriptWritten: true }) }).start()
+    await vi.waitFor(() => {
+      for (const job of [mine, slash, person]) expect(store.getJob(job.id)?.runHistory?.length).toBeGreaterThan(0)
+    })
+    expect(store.getJob(mine.id)?.runHistory?.map((record) => [record.status, record.agentCreated])).toEqual([['ok', true]])
+    expect(store.getJob(slash.id)?.runHistory?.map((record) => [record.status, record.agentCreated])).toEqual([['error', true]])
+    expect(store.getJob(person.id)?.runHistory?.[0]).toMatchObject({ status: 'ok' })
+    expect(store.getJob(person.id)?.runHistory?.[0].agentCreated).toBeUndefined()
+    // Saved with the label, not only shown with it.
+    const reloaded = new ScheduledJobStore(MousseConfigStore.load(tempHome))
+    expect(reloaded.getJob(mine.id)?.runHistory?.[0].agentCreated).toBe(true)
+  })
+
+  it('labels a queued occurrence of an agent-created job', async () => {
+    const job = due('Agent queued', { createdBy: { threadId: 'agent-thread' } })
+    serviceOf({
+      runIsolated: async (_prompt, ingress) => {
+        ingress!.onThreadChosen!('thread-1')
+        ingress!.onAdmitted!('run-1')
+        return { status: 'queued', text: '', silent: false, threadId: 'thread-1', runId: 'run-1', queueItemId: 'item-1', transcriptWritten: true }
+      }
+    }).start()
+    await vi.waitFor(() => expect(store.getJob(job.id)?.runHistory?.[0]).toMatchObject({ status: 'queued', agentCreated: true }))
+  })
+
+  describe('jobs agents created while "Agents may create jobs" is off', () => {
+    it('are paused with a visible reason by the next tick and do not run, while a person\'s job runs', async () => {
+      config.updateScheduledSection({ agentJobs: false })
+      const runner = vi.fn(async () => ({ text: 'ran', silent: false, transcriptWritten: true }))
+      const agent = due('Agent made', { createdBy: { threadId: 'agent-thread', runId: 'r1' } })
+      const person = due('Person made')
+      serviceOf({ runIsolated: runner }).start()
+      await vi.waitFor(() => expect(store.getJob(person.id)?.lastStatus).toBe('ok'))
+      expect(runner).toHaveBeenCalledTimes(1)
+      expect(runner).toHaveBeenCalledWith('Person made', expect.anything())
+      expect(store.getJob(agent.id)).toMatchObject({ state: 'paused', enabled: false, pausedReason: expect.stringContaining('Agents may create jobs is off') })
+      expect(store.getJob(agent.id)?.runHistory).toEqual([])
+    })
+
+    it('stay paused when the setting is turned on again, until a person resumes them', async () => {
+      config.updateScheduledSection({ agentJobs: false })
+      const runner = vi.fn(async () => ({ text: 'ran', silent: false, transcriptWritten: true }))
+      const agent = due('Agent made', { createdBy: { threadId: 'agent-thread', runId: 'r1' } })
+      expect(store.claimDueJobs()).toEqual([])
+      expect(store.getJob(agent.id)?.state).toBe('paused')
+      config.updateScheduledSection({ agentJobs: true })
+      expect(store.claimDueJobs()).toEqual([])
+      expect(store.getJob(agent.id)).toMatchObject({ state: 'paused', enabled: false })
+      store.resumeJob(agent.id)
+      store.updateJob(agent.id, { nextRunAt: PAST, state: 'scheduled' })
+      expect(store.claimDueJobs().map((job) => job.id)).toEqual([agent.id])
+      void runner
+    })
+
+    it('are paused at once by pauseAgentJobs, a running one when its run ends, and a person\'s job never', () => {
+      const running = due('Running', { createdBy: { threadId: 'agent-thread' } })
+      expect(store.claimDueJobs().map((job) => job.id)).toEqual([running.id])
+      const idle = due('Idle', { createdBy: { threadId: 'agent-thread' } })
+      const person = due('Person made')
+      expect(store.pauseAgentJobs()).toBe(2)
+      expect(store.getJob(person.id)).toMatchObject({ enabled: true, state: 'scheduled' })
+      expect(store.getJob(idle.id)).toMatchObject({ enabled: false, state: 'paused', pausedReason: expect.stringContaining('Agents may create jobs is off') })
+      // The run in flight is not cut off: it keeps its claim and settles as paused.
+      expect(store.getJob(running.id)).toMatchObject({ enabled: false, state: 'running' })
+      expect(store.getJob(running.id)?.runClaim).toBeDefined()
+      expect(store.pauseAgentJobs()).toBe(0)
+    })
+  })
+
+  describe('a job an agent created ends when its time runs out', () => {
+    it('is not run once it has ended, and says why', async () => {
+      const runner = vi.fn(async () => ({ text: 'ran', silent: false, transcriptWritten: true }))
+      const ended = due('Ended', { createdBy: { threadId: 'agent-thread' }, expiresAt: new Date(Date.now() - 1000).toISOString() })
+      const live = due('Live', { createdBy: { threadId: 'agent-thread' }, expiresAt: new Date(Date.now() + 3_600_000).toISOString() })
+      serviceOf({ runIsolated: runner }).start()
+      await vi.waitFor(() => expect(store.getJob(live.id)?.lastStatus).toBe('ok'))
+      expect(runner).toHaveBeenCalledTimes(1)
+      expect(store.getJob(ended.id)).toMatchObject({ state: 'completed', nextRunAt: null, lastError: expect.stringContaining('ends after 7 days') })
+      expect(store.getJob(ended.id)?.runHistory).toEqual([])
+    })
+
+    it('a person extends it: a recurring job starts again, a finished one-time job stays finished', () => {
+      const recurring = due('Recurring', { createdBy: { threadId: 'agent-thread' }, expiresAt: new Date(Date.now() - 1000).toISOString() })
+      const once = store.createJob({ name: 'Once', prompt: 'x', schedule: { kind: 'once', runAt: new Date(Date.now() + 60_000).toISOString() }, createdBy: { threadId: 'agent-thread' }, expiresAt: new Date(Date.now() - 1000).toISOString() })
+      store.updateJob(once.id, { state: 'completed', nextRunAt: null })
+      store.claimDueJobs()
+      expect(store.getJob(recurring.id)?.state).toBe('completed')
+      const extended = store.extendJob(recurring.id, 3)
+      expect(extended).toMatchObject({ state: 'scheduled', lastError: undefined })
+      expect(Date.parse(extended!.expiresAt!)).toBeGreaterThan(Date.now() + 2 * 24 * 3_600_000)
+      expect(extended!.nextRunAt).toBeTruthy()
+      expect(store.extendJob(once.id)?.state).toBe('completed')
+      expect(store.extendJob('no-such-job')).toBeNull()
+    })
+
+    it('a job with no end (a person\'s) never ends', () => {
+      const person = due('Person made')
+      expect(store.claimDueJobs().map((job) => job.id)).toEqual([person.id])
+    })
+  })
+
+  describe('a job whose thread is gone', () => {
+    const withThreads = (runIsolated: ScheduledJobRunner['runIsolated']) => {
+      const threads = new ThreadDataStore(new ProjectManager())
+      const service = new ScheduledJobService({ runIsolated }, store, threads)
+      services.push(service)
+      return { service, threads }
+    }
+
+    it('pauses once with a reason instead of failing on every tick', async () => {
+      const runner = vi.fn(async () => ({ text: 'ran', silent: false, transcriptWritten: true }))
+      const { service } = withThreads(runner)
+      const bound = due('Bound to a deleted thread', { threadId: 'deleted-thread' })
+      service.start()
+      await vi.waitFor(() => expect(store.getJob(bound.id)?.state).toBe('paused'))
+      expect(store.getJob(bound.id)).toMatchObject({ enabled: false, pausedReason: 'Its thread was deleted', lastStatus: 'error', lastError: 'Its thread was deleted' })
+      expect(runner).not.toHaveBeenCalled()
+      await service.wake()
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(store.getJob(bound.id)?.runHistory).toHaveLength(1)
+    })
+
+    it('pauses a job bound to an archived thread, and a job whose creator thread was deleted', async () => {
+      const runner = vi.fn(async () => ({ text: 'ran', silent: false, transcriptWritten: true }))
+      const { service, threads } = withThreads(runner)
+      const archivedThread = threads.createThread('Archived')
+      threads.setThreadSettled(archivedThread.id, true)
+      const live = threads.createThread('Alive')
+      const archived = due('Archived target', { threadId: archivedThread.id })
+      const orphan = due('Orphaned', { createdBy: { threadId: 'deleted-thread' } })
+      const fine = due('Fine', { createdBy: { threadId: live.id } })
+      service.start()
+      await vi.waitFor(() => expect(store.getJob(fine.id)?.lastStatus, store.getJob(fine.id)?.lastError).toBe('ok'))
+      await vi.waitFor(() => {
+        expect(store.getJob(archived.id)?.state).toBe('paused')
+        expect(store.getJob(orphan.id)?.state).toBe('paused')
+      })
+      expect(store.getJob(archived.id)?.pausedReason).toBe('Its thread was archived')
+      expect(store.getJob(orphan.id)?.pausedReason).toBe('The thread that created it was deleted')
+      expect(runner).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('hands a job\'s permission ceiling, access cap and name to the run, so the run is bound by them', async () => {
+    const ingresses: Array<Record<string, unknown>> = []
+    const job = due('Capped', { createdBy: { threadId: 'agent-thread' }, accessCap: 'read', permissionCeiling: 'accept_edits' })
+    serviceOf({ runIsolated: async (_prompt, ingress) => { ingresses.push({ ...ingress }); return { text: 'ok', silent: false, transcriptWritten: true } } }).start()
+    await vi.waitFor(() => expect(store.getJob(job.id)?.lastStatus).toBe('ok'))
+    expect(ingresses[0]).toMatchObject({ accessCap: 'read', permissionCeiling: 'accept_edits', jobName: 'Capped' })
   })
 
   it('does not apply the slash rule to a job a person created', async () => {

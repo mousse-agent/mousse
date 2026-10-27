@@ -56,6 +56,7 @@ import type {
   ScheduledJobPatch,
   ScheduledWebhookDeliveryLog,
   ScheduledWebhookGrant,
+  ScheduledSettings,
   SchedulerStatus,
   ChannelActivityEvent,
   ChannelConfig,
@@ -835,6 +836,11 @@ const api = {
       ipcRenderer.invoke('scheduled:resume', id),
     run: (id: string): Promise<ScheduledJob | null> => ipcRenderer.invoke('scheduled:run', id),
     status: (): Promise<SchedulerStatus> => ipcRenderer.invoke('scheduled:status'),
+    extend: (id: string): Promise<ScheduledJob | null> => ipcRenderer.invoke('scheduled:extend', id),
+    settings: {
+      get: (): Promise<ScheduledSettings> => ipcRenderer.invoke('scheduled:settings:get'),
+      setAgentJobs: (agentJobs: boolean): Promise<ScheduledSettings> => ipcRenderer.invoke('scheduled:settings:set', agentJobs)
+    },
     onUpdated: (cb: (jobs: ScheduledJob[]) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, jobs: ScheduledJob[]) => cb(jobs)
       ipcRenderer.on('scheduled:updated', handler)
