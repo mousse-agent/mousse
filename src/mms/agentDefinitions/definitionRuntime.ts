@@ -87,29 +87,34 @@ export interface DefinitionCheck {
 }
 
 /**
+ * Whether a definition needs the instance's own definition loop while it exists: its browser (the
+ * loop binds the definition's browser itself; the app-tool browser on Pi's agent has no definition
+ * coverage yet). Settings that are not known need it too. Such a definition runs on the loop
+ * (`PolicyAuthority.loop`, `HarnessDriver.definitionCaps`), never refused for it.
+ */
+export function definitionNeedsLoop(features: AgentRuntimeFeatures | undefined): boolean {
+  return !features || features.browserMode !== 'disabled'
+}
+
+/**
  * The definition settings, besides its tools and limits, that an instance with `caps` cannot hold
  * (PR 4 4d-rpc). A runtime that runs the definition's own loop (`definitionLimits: 'in_loop'`, the
- * legacy engine) holds them all, as it always has. Any other runtime (Pi's agent):
- * - JSON and schema output: held. Their rules and the schema are in the definition's system prompt,
- *   which replaces the runtime's own verbatim, and the reply is validated by the run owner
- *   (`AgentExecutionService`) whatever ran it;
- * - memory: `off` and `thread` are held (the entries are in the system prompt); any other scope
- *   (persistent memory) is refused;
- * - the browser: refused. The legacy loop binds the definition's browser itself; the app-tool
- *   browser on Pi's agent has no definition coverage yet;
- * - delegation: refused (no runtime runs child definitions; Pi's agent is never offered a
- *   delegation tool for a definition's turn either).
+ * legacy engine) holds them all, as it always has. Any other runtime (Pi's agent) holds what the
+ * loop holds in the same way:
+ * - JSON and schema output: their rules and the schema are in the definition's system prompt, sent
+ *   as written, and the reply is validated by the run owner (`AgentExecutionService`) whatever ran it;
+ * - memory, any scope: the entries are in the system prompt, as on the loop;
+ * - delegation settings: no runtime runs child definitions (the loop refuses a delegation tool, and
+ *   Pi's agent is never offered one in a definition's turn);
+ * - the browser: not held, so a definition with one runs on the loop (`definitionNeedsLoop`); on a
+ *   runtime without a loop it is refused. Settings that are not known are refused the same way.
  */
 export function definitionFeatureGaps(caps: Pick<HarnessCaps, 'definitionLimits'>, features: AgentRuntimeFeatures | undefined): AgentRuntimeUnsupportedSetting[] {
-  if (caps.definitionLimits === 'in_loop' || !features) return []
-  const gaps: AgentRuntimeUnsupportedSetting[] = []
+  if (caps.definitionLimits === 'in_loop') return []
+  if (!features) return [{ pointer: '/settings', reason: "This agent's settings were not checked against this provider, so it does not run here." }]
   if (features.browserMode !== 'disabled')
-    gaps.push({ pointer: '/settings/browser/mode', reason: "The browser is not available to agent definitions on this provider's engine yet. Turn the browser off, or use the legacy engine." })
-  if (features.memoryScope !== 'off' && features.memoryScope !== 'thread')
-    gaps.push({ pointer: '/settings/memory/scope', reason: 'Persistent agent memory is not available on this provider.' })
-  if (features.delegation)
-    gaps.push({ pointer: '/settings/delegation/maxConcurrentChildren', reason: 'Child agent delegation is not available on this provider.' })
-  return gaps
+    return [{ pointer: '/settings/browser/mode', reason: "The browser is not available to agent definitions on this provider's engine yet. Turn the browser off, or use the legacy engine." }]
+  return []
 }
 
 /** A refusal for the gaps `definitionFeatureGaps` found, or undefined. */
@@ -188,7 +193,7 @@ export function definitionToolNames(grants: EffectiveAgentGrants, extra: readonl
  * approvals as granted (the definition's own approval rules answer them), and the run's count and
  * spend limits. `maxElapsedMs` stays with `AgentExecutionService`, which aborts the run.
  */
-export function definitionRunPolicy(request: Pick<DefinitionCheck, 'origin' | 'grants' | 'budget' | 'definition'>, toolNames: readonly string[] = []): RunPolicy {
+export function definitionRunPolicy(request: Pick<DefinitionCheck, 'origin' | 'grants' | 'budget' | 'definition' | 'features'>, toolNames: readonly string[] = []): RunPolicy {
   const { budget } = request
   return {
     mode: 'default',
@@ -197,7 +202,12 @@ export function definitionRunPolicy(request: Pick<DefinitionCheck, 'origin' | 'g
     tools: { allow: definitionToolNames(request.grants, toolNames) },
     // The definition's authority (grants, roots and rules) is registered with the turn's app tools;
     // the policy names it, so only an `exact` runtime admits the turn.
-    authority: { kind: 'definition', digest: definitionAuthorityDigest({ policy: { definitionId: request.definition.id, definitionRevision: request.definition.revision }, grants: request.grants } as Pick<DefinitionAuthority, 'policy' | 'grants'>) },
+    authority: {
+      kind: 'definition',
+      digest: definitionAuthorityDigest({ policy: { definitionId: request.definition.id, definitionRevision: request.definition.revision }, grants: request.grants } as Pick<DefinitionAuthority, 'policy' | 'grants'>),
+      // A definition that needs the instance's definition loop runs there (`definitionNeedsLoop`).
+      ...(definitionNeedsLoop(request.features) ? { loop: true as const } : {})
+    },
     budget: {
       maxTurns: budget.maxTurns,
       maxToolCalls: budget.maxToolCalls,
@@ -392,7 +402,10 @@ export function createDefinitionRuntime(port: DefinitionTurnPort): AgentRuntimeP
         for (;;) {
           attempt += 1
           const remaining = remainingBudget(input.budget, used, Date.now() - started)
-          const exhausted = exhaustedBefore(remaining, input.budget, used)
+          // A runtime that charges the run's shared counters (Pi's agent) reports no turns of its own:
+          // the counters say when the turn limit is used up, so no further record starts a runtime.
+          const exhausted = exhaustedBefore(remaining, input.budget, used) ??
+            (counters.requests >= input.budget.maxTurns ? { kind: 'turns' as const, limit: input.budget.maxTurns, actual: counters.requests } : undefined)
           if (exhausted) return result('', [], exhausted)
           effects.attemptUsage = emptyAttemptUsage()
           try {

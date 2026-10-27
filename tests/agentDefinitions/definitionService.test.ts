@@ -544,8 +544,8 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     defs.outputs.push(call('thread_read', { threadId: stranger.id }), say('done'))
     const result = await orch.runAgentDefinition(request(resolved, thread.id))
     expect(result.status).toBe('completed')
-    // The record carries the profile's grant…
-    expect(engine.listRuns(thread.id)[0]!.accessGrant).toBe('manage')
+    // The record carries `lineage`, a definition's level on every runtime, not the profile's…
+    expect(engine.listRuns(thread.id)[0]!.accessGrant).toBe('lineage')
     // …but the loop's in-process call to another thread still reaches nothing, as on master (its tools act at
     // `lineage`, and the loop has no tools that read other threads).
     const results = defs.captured.at(-1)!.messages.filter((message) => message.role === 'toolResult').map((message) => JSON.stringify(message.content))
@@ -656,6 +656,35 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     limited = true
     const stopped = await orch.runAgentDefinition(request(resolved, store.createThread('usage-limit').id))
     expect(stopped).toMatchObject({ usage: { inputTokens: 150, outputTokens: 30, costUsd: 0.375 } })
+  })
+
+  it('on an instance that runs definitions itself, a browser definition still runs on its definition loop, chosen per definition', async () => {
+    harness.stop()
+    const ran: string[] = []
+    const adapterNamed = (name: string): ProviderAdapter => ({
+      driver: 'codex',
+      capabilities: { steer: 'none', interrupt: true, rollback: 'none', fork: 'portable', events: 'rich', containment: 'strong', historyInjection: 'prompt', mcp: true, childPolicy: 'enforced' },
+      configured: () => true,
+      startTurn: async (input, sink) => {
+        ran.push(name)
+        sink.providerRef({ provider: 'p', instanceId: input.instanceId, model: input.model })
+        return { text: name, aborted: false, modelName: input.model, totalResponseTimeMs: 1, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextSignature: 's', nativeMessages: [], providerRef: { provider: 'p' } }
+      },
+      interrupt: async () => 'not_active'
+    })
+    // As the Pi driver declares on an RPC connection with evidence: the runtime for most
+    // definitions, its loop (with the loop's caps) for one that needs it.
+    const base = adapterDriver(adapterNamed('runtime'), { toolControl: 'exact', budgets: 'hard', runtime: { definitionAdapter: adapterNamed('loop') } })
+    const driver = { ...base, definitionCaps: (config: never, needs?: { loop?: boolean }) => ({ ...base.caps(config), ...(needs?.loop ? { definitionLimits: 'in_loop' as const } : {}) }) }
+    let stored: unknown = { routed: { driver: 'codex', enabled: true }, routed2: { driver: 'codex', enabled: true } }
+    harness = testHarness({ drivers: [driver], instances: new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (state) => { stored = state.instances } } }), profileHome: home })
+    orch.setHarness(harness)
+    const plain = resolver.resolve((({ id, revision }) => ({ definitionId: id, revision }))(publish('mousse', 'routed')))
+    expect(await orch.runAgentDefinition(request(plain, store.createThread('plain').id))).toMatchObject({ status: 'completed' })
+    const browsing = resolver.resolve((({ id, revision }) => ({ definitionId: id, revision }))(publish('mousse', 'routed2', (settings) => { settings.browser.mode = 'structured' })))
+    const browserRuntime = { resolveTarget: async () => null, dispatch: async () => ({}) }
+    expect(await orch.runAgentDefinition(request(browsing, store.createThread('browsing').id, { host: { workspaceRoots: [work], browserRuntime } as never }))).toMatchObject({ status: 'completed' })
+    expect(ran).toEqual(['runtime', 'loop'])
   })
 
   it('an owned lease that another holds fails the turn as busy, and never queues it', async () => {

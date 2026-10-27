@@ -45,6 +45,7 @@ import {
   createDefinitionRuntime,
   definitionMessages,
   definitionFeatureRefusal,
+  definitionNeedsLoop,
   definitionRunPolicy,
   type DefinitionCheck,
   type DefinitionHostBindings,
@@ -919,7 +920,7 @@ export class OrchestratorService extends EventEmitter {
    */
   checkDefinitionTurn(check: DefinitionCheck): DefinitionRefusal | undefined {
     try {
-      const resolved = this.harness.resolveStored(this.definitionSelection(check.ref), { purpose: check.origin, scope: this.threadScope(check.threadId), definition: true })
+      const resolved = this.harness.resolveStored(this.definitionSelection(check.ref), { purpose: check.origin, scope: this.threadScope(check.threadId), definition: { loop: definitionNeedsLoop(check.features) } })
       const verdict = this.harness.check(resolved, definitionRunPolicy(check))
       // Its output, browser, memory and delegation settings, where the runtime does not run its loop.
       if (verdict.ok) return definitionFeatureRefusal(resolved.caps, check.features)
@@ -1014,7 +1015,7 @@ export class OrchestratorService extends EventEmitter {
 
   private async runDefinitionTurn(turn: DefinitionTurnRequest, engine: RunEngine, lease: ThreadLeaseHandle, extras: DefinitionTurnExtras): Promise<DefinitionTurnResult> {
     const { threadId } = turn
-    const resolved = this.harness.resolveStored(this.definitionSelection(turn.ref), { purpose: turn.origin, scope: this.threadScope(threadId), definition: true })
+    const resolved = this.harness.resolveStored(this.definitionSelection(turn.ref), { purpose: turn.origin, scope: this.threadScope(threadId), definition: { loop: definitionNeedsLoop(turn.features) } })
     // The user's MCP tools the definition was granted, by the name the runtime calls them.
     const mcpTools = this.mcpManager && turn.grants.mcpTools.length
       ? (await this.mcpManager.getEnabledTools(turn.projectPath, definitionActor(turn.grants)))
@@ -1052,9 +1053,10 @@ export class OrchestratorService extends EventEmitter {
       mcpTools
     }
     const projectPath = turn.projectPath
-    // Held to the profile's agent access level like any run (SPEC §15.1), and the grant is kept on the run.
+    // A definition acts at `lineage`, as on the loop, whatever the profile's agent access level
+    // (SPEC §15.1); the grant is kept on the run.
     const modeCeiling = this.modeCeilingFor(threadId, 'agent')
-    const accessLevel = this.grantFor(threadId, modeCeiling)
+    const accessLevel: AgentAccessLevel = 'lineage'
     try {
       engine.recordAccessGrant(runId, accessLevel)
     } catch (error) {
@@ -1131,6 +1133,10 @@ export class OrchestratorService extends EventEmitter {
         const token = writers.issue(`definition:${runId}`, { version: 1, workspace: 'shared', access: 'write' })
         return <T>(run: () => Promise<T>): Promise<T> => writers.runWriter(token, run)
       })()
+      // The definition's prompt as written. A runtime other than the loop gets its granted skills after
+      // it, as the loop adds them itself (`Granted skill <name>`); nothing else of Mousse's is added.
+      const loadedSkills = resolved.caps.definitionLimits === 'in_loop' ? [] : this.appToolTurns.get(runId)?.loadedSkills ?? []
+      const systemPrompt = [turn.systemPrompt, ...loadedSkills.map((skill) => `Granted skill ${skill.name}:\n${skill.content}`)].filter(Boolean).join('\n\n')
       // Prior turns only, as a runtime that takes history in its prompt reads them.
       const preamble = turn.conversation.length ? nativeAgentHistory(createNativeContext(definitionMessages(turn.conversation, '').slice(0, -1))) : ''
       const input: TurnInput = {
@@ -1167,6 +1173,11 @@ export class OrchestratorService extends EventEmitter {
         // that runs under the definition's limits reports its own (`effects.attemptUsage`).
         usage: (reported) => {
           if (loopUsed) return
+          // In the usage statistics too, as the loop records its own.
+          this.lineEditStats?.recordUsage({
+            timestamp: new Date().toISOString(), provider: resolved.llmProvider, model: binding.model,
+            input: reported.input, output: reported.output, cacheRead: reported.cacheRead, cacheWrite: reported.cacheWrite
+          })
           const used = turn.effects.attemptUsage
           turn.effects.attemptUsage = {
             ...used,
@@ -1205,7 +1216,7 @@ export class OrchestratorService extends EventEmitter {
         control,
         host,
         app: context,
-        instructions: { text: turn.systemPrompt, placement: 'replace' },
+        instructions: { text: systemPrompt, placement: 'replace' },
         session: 'ephemeral',
         counters: turn.counters,
         spend: turn.spend
@@ -2867,7 +2878,8 @@ export class OrchestratorService extends EventEmitter {
       mcpEligible: Boolean(this.runEngine),
       ...(turn.definition ? { definition: turn.definition } : {}),
       ...(turn.bot ? { bot: turn.bot } : {}),
-      instructions: (mcpAttached) => ({
+      // A definition's turn runs on its own prompt and its granted skills only (`runDefinitionTurn`).
+      instructions: (mcpAttached) => turn.definition ? { sessionInstructions: '', turnPreamble: '' } : ({
         sessionInstructions: sessionInstructions({ mcp: mcpAttached, appletGuidance: this.appletStore ? APPLET_GENERATION_GUIDANCE : undefined }),
         turnPreamble: withBotInstructions(input.botInstructions, turnPreamble({
           loadedSkills: turn.loadedSkills,

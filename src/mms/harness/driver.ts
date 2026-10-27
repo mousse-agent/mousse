@@ -420,7 +420,7 @@ export interface HarnessDriver {
    * runtime than its chats (`DriverRuntime.definitionAdapter`): a Pi connection on the RPC engine
    * runs definitions on Mousse's loop until Pi RPC can hold them (PR 4 unit 4d-rpc). Absent: `caps`.
    */
-  definitionCaps?(config: InstanceConfig): HarnessCaps
+  definitionCaps?(config: InstanceConfig, needs?: { loop?: boolean }): HarnessCaps
   /**
    * Arguments that make the executable print its version; `null` when it has no such flag (the
    * probe then skips the version check and the handshake decides whether it runs). Default

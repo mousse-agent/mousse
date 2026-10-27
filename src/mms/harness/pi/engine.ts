@@ -971,13 +971,13 @@ export class PiRpcEngine implements ProviderAdapter {
     const catalogRevision = this.options.catalog().revision
     if (!turn) return { attemptToken: '', sessionInstructions: '', tools: [], activeBuiltins: [], mcp: null, catalogRevision }
     const tools: PiTurnTool[] = turn.tools.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.inputSchema, class: tool.class }))
-    const sessionInstructions = turn.host.bridge?.sessionInstructions ?? ''
-    // An agent definition's system prompt replaces Pi's; Mousse's own tool instructions follow it.
+    // An agent definition's system prompt (with its granted skills, as the loop sends them) replaces
+    // Pi's as written: none of Mousse's chat instructions (orchestration, applets) is added.
     const instructions = turn.input.instructions?.placement === 'replace' ? turn.input.instructions.text : undefined
     return {
       attemptToken: turn.attemptToken,
-      sessionInstructions: instructions === undefined ? sessionInstructions : '',
-      ...(instructions !== undefined ? { systemPrompt: [instructions, sessionInstructions].filter(Boolean).join('\n\n') } : {}),
+      sessionInstructions: instructions === undefined ? turn.host.bridge?.sessionInstructions ?? '' : '',
+      ...(instructions !== undefined ? { systemPrompt: instructions } : {}),
       tools,
       activeBuiltins: [...turn.active].filter((name) => Object.hasOwn(BUILTIN_CLASSES, name)),
       mcp: turn.host.bridge?.mcp ?? null,
@@ -1113,8 +1113,10 @@ export class PiRpcEngine implements ProviderAdapter {
       // The arguments checked (and approved) are the ones the tool runs with.
       const decided = await authorizeDefinitionCall(definition, { toolName: request.toolName, args: input, projectPath: thread.cwd, signal: turn.input.signal })
       if (!decided.allowed) return { allow: false, reason: decided.message }
-      // Stopped while the approval was pending: nothing runs.
+      // Stopped while the approval was pending, or the run is no longer the thread's active run (it
+      // ended elsewhere, or another took the thread): nothing runs, as on the loop and the MCP path.
       if (thread.turn !== turn || (turn.phase as PiTurn['phase']) === 'stopping') return { allow: false, reason: GATE_REFUSALS.denied }
+      if (turn.host.tools.runActive?.() === false) return { allow: false, reason: `${GATE_REFUSALS.denied}: the run is no longer active` }
     }
     // The thread's permission mode: a command (and, under Ask, an edit) asks the user first. A definition
     // run and a bot run are held to their own grants above and never ask a person.
@@ -1125,6 +1127,12 @@ export class PiRpcEngine implements ProviderAdapter {
     }
     const decision = await turn.episode.authorize(request.toolCallId, kind)
     if (!decision.allow) return decision
+    // A definition's call is checked once more right before it is charged and runs (the writer wait
+    // above can be long): a run that is no longer the thread's active one runs nothing.
+    if (definition && (turn.host.tools.runActive?.() === false || thread.turn !== turn || (turn.phase as PiTurn['phase']) === 'stopping')) {
+      turn.episode.ended(request.toolCallId)
+      return { allow: false, reason: `${GATE_REFUSALS.denied}: the run is no longer active` }
+    }
     const counted = turn.host.budget?.toolCall() ?? { ok: true }
     if (!counted.ok) {
       turn.episode.ended(request.toolCallId)
@@ -1134,10 +1142,11 @@ export class PiRpcEngine implements ProviderAdapter {
     // An app or MCP tool runs through the Mousse MCP registry, which takes this authorization
     // instead of asking for approval a second time.
     if (definition && !builtin) recordAuthorizedCall(definition, { turnToken: turn.attemptToken, toolName: request.toolName, callId: request.toolCallId, args: input })
-    // A bot's built-in is in the run's tool ledger before it runs (`started`, then `committed` or
-    // `failed` from its end event), by its neutral class's idempotency: an `edit` cut off without
-    // an outcome is then found and shown to the owner. No row, no call.
-    if (bot && builtin) {
+    // A bot's or a definition's built-in is in the run's tool ledger before it runs (`started`, then
+    // `committed` or `failed` from its end event), by its neutral class's idempotency: an `edit`
+    // cut off without an outcome is then found and shown to the owner. A bot: no row, no call. A
+    // definition: the same wherever the host keeps a ledger (the orchestrator always does).
+    if ((bot || (definition && turn.host.tools.toolLedger)) && builtin) {
       const ledger = turn.host.tools.toolLedger
       const neutral = neutralToolsOf(PI_NATIVE_TOOLS, request.toolName)
       const row = ledger?.start({ type: 'toolCall', id: request.toolCallId, name: request.toolName, arguments: input } as ToolCall, { idempotent: neutral.length > 0 && neutral.every(neutralToolIdempotent) })
@@ -1326,7 +1335,8 @@ export class PiRpcEngine implements ProviderAdapter {
     try {
       if (input.signal.aborted) throw new Error('aborted')
       const handoff = !resumed && history ? `Previous conversation (context only; do not repeat earlier actions):\n${history}\n\nCurrent request:\n` : ''
-      const preamble = host.bridge?.turnPreamble ? `${host.bridge.turnPreamble}\n\n` : ''
+      // A definition's message is its own: no chat preamble (applets, the Mousse tools usable now).
+      const preamble = host.bridge?.turnPreamble && !host.definition ? `${host.bridge.turnPreamble}\n\n` : ''
       let message = `${handoff}${preamble}${input.prompt || '(image attachment)'}`
       // A leading `/` would run a Pi extension command instead of reaching the model.
       if (message.startsWith('/')) message = ` ${message}`

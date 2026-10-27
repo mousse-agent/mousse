@@ -78,14 +78,15 @@ export function piDriver(options: { client: () => PiChatClient; credentials?: ()
     nativeToolNames: (neutral, config) => (piEngineOf(config, Boolean(options.rpc)) === 'rpc' ? PI_NATIVE_TOOLS[neutral] ?? [] : []),
     // Agent definitions run on Pi's agent where its evidence suite passed (a fresh process and
     // session per turn, the definition's system prompt, its exact tools and limits: PR 4 4d-rpc).
-    // Everywhere else, and on the legacy engine, they run on Mousse's loop as they always have, so
-    // nothing regresses on a platform without evidence.
-    definitionCaps: (config) => (definitionsOnRpc(config) ? piRpcCaps(piRpcEvidenceOf(options.rpc!)) : PI_LEGACY_CAPS),
+    // Everywhere else, on the legacy engine, and for a definition that needs the loop (its browser),
+    // they run on Mousse's loop as they always have, so nothing regresses.
+    definitionCaps: (config, needs) => (definitionsOnRpc(config) && !needs?.loop ? piRpcCaps(piRpcEvidenceOf(options.rpc!)) : PI_LEGACY_CAPS),
     create(context: DriverContext): DriverRuntime {
       const providerId = piProviderIdOf(context.instanceId) ?? ''
       if (providerId && piEngineFor(providerId, piEngineOf(context.config, Boolean(options.rpc)), Boolean(options.rpc)) === 'rpc') {
         const runtime = createRpcRuntime(context, providerId, context.config.displayName ?? credentials()?.getProviderDisplayName?.(providerId) ?? providerId, credentials, options.rpc!)
-        return definitionsOnRpc(context.config) ? runtime : { ...runtime, definitionAdapter: adapter }
+        // The loop stays for definitions whose caps are the loop's (`definitionCaps`): the gateway picks per turn.
+        return { ...runtime, definitionAdapter: adapter }
       }
       return piInstanceRuntime(context.instanceId, providerId, credentials, adapter)
     }
