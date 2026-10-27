@@ -20,7 +20,7 @@ describe('the tool-call limit in the real Pi child (Pi RPC engine)', () => {
       { tool: { name: 'write', args: { path: 'second.txt', content: 'two' } } },
       { text: 'never sent' }
     ]))
-    const counters = new RunCounters({ maxToolCalls: 1 })
+    const counters = new RunCounters()
     const turn = harness(project, {}, { budget: new TurnBudget({ maxToolCalls: 1 }, counters) })
     const error = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host).catch((caught: unknown) => caught)
     expect(error).toMatchObject({ code: 'budget_exhausted', details: { limit: { kind: 'tool_calls', limit: 1 } } })
@@ -37,7 +37,7 @@ describe('the tool-call limit in the real Pi child (Pi RPC engine)', () => {
       { tools: [1, 2, 3].map((n) => ({ name: 'write', args: { path: `batch-${n}.txt`, content: String(n) } })) },
       { text: 'never sent' }
     ]))
-    const turn = harness(project, {}, { budget: new TurnBudget({ maxToolCalls: 2 }, new RunCounters({ maxToolCalls: 2 })) })
+    const turn = harness(project, {}, { budget: new TurnBudget({ maxToolCalls: 2 }, new RunCounters()) })
     await expect(engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)).rejects.toMatchObject({ code: 'budget_exhausted', details: { limit: { kind: 'tool_calls', limit: 2 } } })
     const written = [1, 2, 3].filter((n) => existsSync(join(project, `batch-${n}.txt`)))
     expect(written).toHaveLength(2)

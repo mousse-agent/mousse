@@ -5528,6 +5528,8 @@ export class OrchestratorService extends EventEmitter {
       if (runTerminalMarked) return
       runTerminalMarked = true
       this.markRun(engineRunId, (engine, id) => engine.markTerminal(id, status, outcome, { resultText }))
+      // The run's count record goes with it: no later attempt starts from fresh counts.
+      this.harness.runSettled?.(engineRunId ?? turnId)
     }
     // C2: a run that cannot be marked starting (cancelled meanwhile, or held by another turn) is
     // not this turn's to run; it ends here, before any provider I/O.

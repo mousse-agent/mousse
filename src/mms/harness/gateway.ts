@@ -103,6 +103,11 @@ export interface HarnessGateway {
    */
   startTurn(spec: TurnSpec): TurnHandle
   /**
+   * The run reached its final state (the `turn.start` executor marked it terminal): its count
+   * record is dropped, and an attempt of it that still arrives is refused every step.
+   */
+  runSettled?(runId: string): void
+  /**
    * One model request with no tools (a chat title), on an instance whose driver runs one-shots
    * (`HarnessDriver.oneShot`). Resolves the selection like a turn for `purpose` (scope, hidden models,
    * disabled instances); agent runtimes are refused with `unsupported`. Ends with `timeout` after
@@ -952,6 +957,10 @@ export class Harness implements HarnessGateway {
 
   // -- Turns ------------------------------------------------------------------------------------
 
+  runSettled(runId: string): void {
+    this.runCounters.settle(runId)
+  }
+
   startTurn(spec: TurnSpec): TurnHandle {
     const record = this.turnRecord(spec.binding)
     let ref: ProviderRef | undefined
@@ -984,6 +993,7 @@ export class Harness implements HarnessGateway {
     const result = (async () => {
       let outcome: 'ok' | 'aborted' | 'failed' = 'failed'
       let minted: ReturnType<Harness['mintBridge']>
+      let counted: { release(): void } | undefined
       let signal = spec.input.signal
       try {
         await this.admitTurn(record, spec, entry)
@@ -1003,10 +1013,12 @@ export class Harness implements HarnessGateway {
           })
         // A count limit travels as the run's budget; only a `hard` runtime passed admission with one.
         const limits = countLimitsOf(spec.binding.policy)
+        const budget = limits ? this.runCounters.acquire(input.runId, limits, spec.counters) : undefined
+        counted = budget
         const host: AdapterHost = {
           ...spec.host,
           ...(minted ? { bridge: minted.bridge } : {}),
-          ...(limits ? { budget: this.runCounters.budgetFor(input.runId, limits, spec.counters) } : {})
+          ...(budget ? { budget: budget.budget } : {})
         }
         const turn = await record.runtime.adapter.startTurn(input, sink, spec.control, host)
         minted?.settle({ status: turn.aborted || signal.aborted ? 'aborted' : 'completed', ...(turn.drain ? { drain: turn.drain } : {}) })
@@ -1020,6 +1032,7 @@ export class Harness implements HarnessGateway {
         if (this.cancelledByStop(spec, entry)) throw entry.cancel.signal.reason
         throw error
       } finally {
+        counted?.release()
         ended = true
         record.turns.delete(key)
         record.active -= 1
