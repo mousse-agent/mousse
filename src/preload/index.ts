@@ -24,10 +24,20 @@ import type {
   FileGrepResponse,
   FileSearchResponse,
   GitBranchInfo,
+  GitBranchOptions,
+  GitCheckoutOptions,
+  GitCheckoutResult,
   GitCommit,
   GitCommitOptions,
+  GitDeleteBranchOptions,
   GitDiffStats,
+  GitFetchResult,
+  GitMutationResult,
+  GitPullOptions,
   GitPullRequestLookup,
+  GitPullResult,
+  GitPushOptions,
+  GitScope,
   GitStatusSnapshot,
   MainView,
   OrchestratorResponse,
@@ -442,14 +452,33 @@ const api = {
       ipcRenderer.invoke('git:branches', projectId, cwd),
     diffStats: (projectId?: string, cwd?: string): Promise<GitDiffStats> =>
       ipcRenderer.invoke('git:diffStats', projectId, cwd),
-    checkout: (branch: string, projectId?: string, cwd?: string): Promise<void> =>
-      ipcRenderer.invoke('git:checkout', branch, projectId, cwd),
-    commit: (message: string, projectId?: string, cwd?: string, options?: GitCommitOptions): Promise<void> =>
-      ipcRenderer.invoke('git:commit', message, projectId, cwd, options),
-    push: (projectId?: string, cwd?: string): Promise<void> =>
-      ipcRenderer.invoke('git:push', projectId, cwd),
-    init: (projectId?: string, cwd?: string): Promise<void> =>
-      ipcRenderer.invoke('git:init', projectId, cwd),
+    // Mutations run in the daemon and reject with `{ code, message, details }` (storage handlers).
+    checkout: (scope: GitScope, branch: string, options?: GitCheckoutOptions): Promise<GitMutationResult<GitCheckoutResult>> =>
+      storageInvoke('git:checkout', scope, branch, options),
+    commit: (scope: GitScope, message: string, options?: GitCommitOptions): Promise<GitMutationResult> =>
+      storageInvoke('git:commit', scope, message, options),
+    push: (scope: GitScope, options?: GitPushOptions): Promise<GitMutationResult> =>
+      storageInvoke('git:push', scope, options),
+    init: (scope: GitScope): Promise<GitMutationResult> =>
+      storageInvoke('git:init', scope),
+    stage: (scope: GitScope, input: { paths: string[] } | { all: true }): Promise<GitMutationResult> =>
+      storageInvoke('git:stage', scope, input),
+    unstage: (scope: GitScope, input: { paths: string[] } | { all: true }): Promise<GitMutationResult> =>
+      storageInvoke('git:unstage', scope, input),
+    discard: (scope: GitScope, paths: string[]): Promise<GitMutationResult> =>
+      storageInvoke('git:discard', scope, paths),
+    fetch: (scope: GitScope): Promise<GitMutationResult<GitFetchResult>> =>
+      storageInvoke('git:fetch', scope),
+    pull: (scope: GitScope, options?: GitPullOptions): Promise<GitMutationResult<GitPullResult>> =>
+      storageInvoke('git:pull', scope, options),
+    abortInProgress: (scope: GitScope, kind: 'merge' | 'rebase'): Promise<GitMutationResult> =>
+      storageInvoke('git:abortInProgress', scope, kind),
+    createBranch: (scope: GitScope, name: string, options?: GitBranchOptions): Promise<GitMutationResult> =>
+      storageInvoke('git:createBranch', scope, name, options),
+    renameBranch: (scope: GitScope, name: string, newName: string): Promise<GitMutationResult> =>
+      storageInvoke('git:renameBranch', scope, name, newName),
+    deleteBranch: (scope: GitScope, name: string, options?: GitDeleteBranchOptions): Promise<GitMutationResult> =>
+      storageInvoke('git:deleteBranch', scope, name, options),
     lastCommitMessage: (projectId?: string, cwd?: string): Promise<string | null> =>
       ipcRenderer.invoke('git:lastCommitMessage', projectId, cwd),
     createPullRequest: (projectId?: string, cwd?: string): Promise<void> =>

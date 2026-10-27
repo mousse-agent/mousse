@@ -13,15 +13,26 @@ import {
   diffStatLabel,
   formatCommitLine,
   gitCollapsedLabel,
+  gitErrorCode,
   gitErrorMessage,
+  commitMenuState,
   relativeTime,
   untrackedFileCount
 } from '../src/renderer/components/sideCard/gitSectionLogic'
 import {
   EMPTY_GIT_ENTRY,
+  abortGitInProgress,
   checkoutGitBranch,
   commitGitChanges,
+  createGitBranch,
+  deleteGitBranch,
+  discardGitPaths,
+  fetchGit,
+  pullGit,
   refreshGitStatus,
+  renameGitBranch,
+  stageGitPaths,
+  unstageGitPaths,
   retainGitPath,
   useGitStatusStore,
   type GitStatusView
@@ -35,6 +46,9 @@ import type {
   TurnState,
   TurnStateSnapshot
 } from '../src/shared/types'
+
+const scope = { projectId: 'project-1', workspaceThreadId: null }
+const threadScope = { projectId: 'project-1', workspaceThreadId: 'thread-1' }
 
 const repoStatus = (patch: Partial<GitStatusSnapshot> = {}): GitStatusSnapshot => ({
   isRepo: true,
@@ -66,6 +80,15 @@ interface GitMock {
   checkout: ReturnType<typeof vi.fn>
   commit: ReturnType<typeof vi.fn>
   push: ReturnType<typeof vi.fn>
+  stage: ReturnType<typeof vi.fn>
+  unstage: ReturnType<typeof vi.fn>
+  discard: ReturnType<typeof vi.fn>
+  fetch: ReturnType<typeof vi.fn>
+  pull: ReturnType<typeof vi.fn>
+  abortInProgress: ReturnType<typeof vi.fn>
+  createBranch: ReturnType<typeof vi.fn>
+  renameBranch: ReturnType<typeof vi.fn>
+  deleteBranch: ReturnType<typeof vi.fn>
 }
 
 const installGit = (patch: Partial<GitMock> = {}): GitMock => {
@@ -74,9 +97,18 @@ const installGit = (patch: Partial<GitMock> = {}): GitMock => {
     log: vi.fn(async () => [commit()]),
     branches: vi.fn(async (): Promise<GitBranchInfo> => ({ current: 'main', branches: ['main', 'dev'] })),
     diffStats: vi.fn(async (): Promise<GitDiffStats> => ({ additions: 4, deletions: 1, filesChanged: 2 })),
-    checkout: vi.fn(async () => undefined),
-    commit: vi.fn(async () => undefined),
-    push: vi.fn(async () => undefined),
+    checkout: vi.fn(async () => ({ status: repoStatus() })),
+    commit: vi.fn(async () => ({ status: repoStatus() })),
+    push: vi.fn(async () => ({ status: repoStatus() })),
+    stage: vi.fn(async () => ({ status: repoStatus() })),
+    unstage: vi.fn(async () => ({ status: repoStatus() })),
+    discard: vi.fn(async () => ({ status: repoStatus() })),
+    fetch: vi.fn(async () => ({ status: repoStatus(), behindBefore: 0, behindAfter: 2 })),
+    pull: vi.fn(async () => ({ status: repoStatus(), result: 'fast-forwarded' })),
+    abortInProgress: vi.fn(async () => ({ status: repoStatus() })),
+    createBranch: vi.fn(async () => ({ status: repoStatus() })),
+    renameBranch: vi.fn(async () => ({ status: repoStatus() })),
+    deleteBranch: vi.fn(async () => ({ status: repoStatus() })),
     ...patch
   }
   vi.stubGlobal('window', {
@@ -222,18 +254,60 @@ describe('shared git status store', () => {
   it('refreshes after a checkout and after a commit', async () => {
     const git = installGit()
     await refreshGitStatus('/repo/a')
-    await checkoutGitBranch('/repo/a', 'dev')
-    expect(git.checkout).toHaveBeenCalledWith('dev', undefined, '/repo/a')
+    await checkoutGitBranch('/repo/a', 'dev', scope)
+    expect(git.checkout).toHaveBeenCalledWith(scope, 'dev', {})
     expect(git.status).toHaveBeenCalledTimes(2)
-    await commitGitChanges('/repo/a', 'Add things', 'project-1')
-    expect(git.commit).toHaveBeenCalledWith('Add things', 'project-1', '/repo/a', { amend: false })
+    await commitGitChanges('/repo/a', 'Add things', scope)
+    expect(git.commit).toHaveBeenCalledWith(scope, 'Add things', { amend: false, expectedBranch: 'main' })
     expect(git.status).toHaveBeenCalledTimes(3)
+  })
+
+  it('passes the dirty-switch choice to the daemon and reports a kept stash', async () => {
+    const git = installGit({ checkout: vi.fn(async () => ({ status: repoStatus(), stashKept: true })) })
+    await refreshGitStatus('/repo/a')
+    await expect(checkoutGitBranch('/repo/a', 'dev', scope, { dirty: 'stash' })).resolves.toEqual({ stashKept: true })
+    expect(git.checkout).toHaveBeenCalledWith(scope, 'dev', { dirty: 'stash' })
+  })
+
+  it('sends each new Git action with its scope, then refreshes once', async () => {
+    const git = installGit()
+    await refreshGitStatus('/repo/a')
+    await stageGitPaths('/repo/a', ['a.ts', 'b.ts'], scope)
+    expect(git.stage).toHaveBeenLastCalledWith(scope, { paths: ['a.ts', 'b.ts'] })
+    await stageGitPaths('/repo/a', 'all', scope)
+    expect(git.stage).toHaveBeenLastCalledWith(scope, { all: true })
+    await unstageGitPaths('/repo/a', ['a.ts'], scope)
+    expect(git.unstage).toHaveBeenLastCalledWith(scope, { paths: ['a.ts'] })
+    await unstageGitPaths('/repo/a', 'all', scope)
+    expect(git.unstage).toHaveBeenLastCalledWith(scope, { all: true })
+    await discardGitPaths('/repo/a', ['a.ts'], threadScope)
+    expect(git.discard).toHaveBeenLastCalledWith(threadScope, ['a.ts'])
+    await expect(fetchGit('/repo/a', scope)).resolves.toEqual({ behindBefore: 0, behindAfter: 2 })
+    await expect(pullGit('/repo/a', scope, { strategy: 'rebase' })).resolves.toEqual({ result: 'fast-forwarded' })
+    expect(git.pull).toHaveBeenLastCalledWith(scope, { strategy: 'rebase' })
+    await abortGitInProgress('/repo/a', 'merge', scope)
+    expect(git.abortInProgress).toHaveBeenLastCalledWith(scope, 'merge')
+    await createGitBranch('/repo/a', 'topic', scope, { from: 'main', checkout: false })
+    expect(git.createBranch).toHaveBeenLastCalledWith(scope, 'topic', { from: 'main', checkout: false })
+    await renameGitBranch('/repo/a', 'topic', 'topic-2', scope)
+    expect(git.renameBranch).toHaveBeenLastCalledWith(scope, 'topic', 'topic-2')
+    await deleteGitBranch('/repo/a', 'topic-2', scope, { force: true })
+    expect(git.deleteBranch).toHaveBeenLastCalledWith(scope, 'topic-2', { force: true })
+    // The first load plus one refresh for each of the eleven actions.
+    expect(git.status).toHaveBeenCalledTimes(12)
+  })
+
+  it('refreshes after a discard that fails, since part of it may have run', async () => {
+    const git = installGit({ discard: vi.fn(async () => { throw new Error('busy') }) })
+    await refreshGitStatus('/repo/a')
+    await expect(discardGitPaths('/repo/a', ['a.ts'], scope)).rejects.toThrow('busy')
+    expect(git.status).toHaveBeenCalledTimes(2)
   })
 
   it('does not refresh after a checkout that fails', async () => {
     const git = installGit({ checkout: vi.fn(async () => { throw new Error('local changes would be overwritten') }) })
     await refreshGitStatus('/repo/a')
-    await expect(checkoutGitBranch('/repo/a', 'dev')).rejects.toThrow('overwritten')
+    await expect(checkoutGitBranch('/repo/a', 'dev', scope)).rejects.toThrow('overwritten')
     expect(git.status).toHaveBeenCalledTimes(1)
   })
 
@@ -405,6 +479,24 @@ describe('git section formatting', () => {
     expect(branchLabel(null)).toBe('No branch')
   })
 
+  it('reads the daemon error code and message from an error that crossed the preload bridge', () => {
+    const crossed = { name: 'StorageRequestError', code: 'git_checkout_dirty', message: 'Uncommitted changes would be overwritten by the switch.' }
+    expect(gitErrorCode(crossed)).toBe('git_checkout_dirty')
+    expect(gitErrorMessage(crossed)).toBe('Uncommitted changes would be overwritten by the switch.')
+    expect(gitErrorCode(new Error('plain'))).toBeNull()
+    expect(gitErrorCode('text')).toBeNull()
+    expect(gitErrorCode(null)).toBeNull()
+  })
+
+  it('disables amend with its reason in a thread worktree', () => {
+    const commits = [commit()]
+    expect(commitMenuState(commits, 2, false).amendDisabled).toBe(false)
+    const checkpointed = commitMenuState(commits, 2, true, true)
+    expect(checkpointed).toMatchObject({ canAmend: false, amend: false, amendDisabled: true, amendTitle: "This thread's branch is checkpointed" })
+    // No changes and nothing else to commit: the trigger stays off instead of forcing an amend.
+    expect(commitMenuState(commits, 0, false, true)).toMatchObject({ triggerEnabled: false, amend: false })
+  })
+
   it('reduces a git failure to one readable line', () => {
     const raw = new Error(
       "Error invoking remote method 'git:checkout': Error: error: Your local changes to the following files would be overwritten by checkout:\n\tsrc/a.ts\nPlease commit your changes"
@@ -502,6 +594,22 @@ describe('git section markup', () => {
       collapsedLabel: props.collapsedLabel,
       now: Date.parse('2026-10-24T10:05:00Z')
     }))
+
+  it('shows a thread worktree branch as a label instead of a picker', () => {
+    const html = renderToStaticMarkup(createElement(GitSectionView, {
+      threadId: 't1',
+      projectId: 'p1',
+      workspaceThreadId: 't1',
+      path: '/wt/t1',
+      git: view({ status: repoStatus({ branch: 'mousse/thread/t1' }), commits: [commit()], branches: { current: 'mousse/thread/t1', branches: ['mousse/thread/t1'] } }),
+      collapsedLabel: null,
+      now: Date.parse('2026-10-24T10:05:00Z')
+    }))
+    expect(html).toContain('side-card-git-branch-static')
+    expect(html).toContain('This thread works on its own branch')
+    expect(html).toContain('mousse/thread/t1')
+    expect(html).not.toMatch(/<button[^>]*class="side-card-git-branch"/)
+  })
 
   it('renders only the quiet line when the folder is not a repository', () => {
     const html = render({

@@ -1103,6 +1103,19 @@ export interface GitCheckoutResult {
   stashKept?: boolean
 }
 
+/**
+ * Which folder a Git mutation belongs to, as the daemon needs it. A thread working in its own
+ * worktree names the thread (the daemon applies the thread rules there); any other folder names its project.
+ */
+export interface GitScope {
+  projectId: string | null
+  /** Set only when the folder is the thread's own ready worktree. */
+  workspaceThreadId: string | null
+}
+
+/** What a daemon Git mutation answers: the folder's fresh status, plus the action's own result. */
+export type GitMutationResult<T extends object = object> = { status: GitStatusSnapshot } & T
+
 export type GitPullStrategy = 'ff-only' | 'merge' | 'rebase'
 
 export interface GitPullOptions {
