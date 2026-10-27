@@ -3,6 +3,7 @@ import { BrowserPanel } from './BrowserPanel'
 import { FilesPanel } from './FilesPanel'
 import { GitPanel } from './GitPanel'
 import { ReviewPanel } from './review/ReviewPanel'
+import { PullRequestPanel } from './PullRequestPanel'
 import { DocumentPanel } from './DocumentPanel'
 import { KeepMounted, KeepMountedStack } from './KeepMounted'
 import { useAppStore } from '../stores/appStore'
@@ -38,6 +39,7 @@ export function MainViewPanel() {
     switch (mainView) {
       case 'git': return <GitPanel />
       case 'review': return <ReviewPanel />
+      case 'pullRequest': return <PullRequestPanel />
       case 'documents': return <DocumentPanel />
       default: return null
     }

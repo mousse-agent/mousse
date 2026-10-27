@@ -2,7 +2,7 @@ import type { AgentActivityItem } from './agentActivity'
 import type { ModelOverride } from './providerInstances'
 import type { ThreadPullRequestLink } from './pullRequests'
 export type { GitPullRequestInfo, GitPullRequestLookup, PullRequestCheckState } from './pullRequests'
-export type MainView = 'browser' | 'terminal' | 'files' | 'git' | 'review' | 'documents'
+export type MainView = 'browser' | 'terminal' | 'files' | 'git' | 'review' | 'pullRequest' | 'documents'
 
 export type ScheduledJobState = 'scheduled' | 'running' | 'paused' | 'completed' | 'error'
 

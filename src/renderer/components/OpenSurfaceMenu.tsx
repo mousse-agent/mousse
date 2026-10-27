@@ -1,6 +1,6 @@
 import { formatBinding } from '../../shared/commands'
 import { useCommandBindings, useCommands } from '../commands/commandRegistry'
-import { Bot, Eye, FileText, FolderOpen, GitBranch, Globe, Terminal } from '../lib/icons'
+import { Bot, Eye, FileText, FolderOpen, GitBranch, GitPullRequest, Globe, Terminal } from '../lib/icons'
 import { SURFACE_CHOICES, openSurface, type SurfaceChoice } from '../lib/surfaces'
 import { useAppStore } from '../stores/appStore'
 
@@ -10,6 +10,7 @@ const ICONS = {
   files: FolderOpen,
   git: GitBranch,
   review: Eye,
+  pullRequest: GitPullRequest,
   agents: Bot,
   documents: FileText
 } as const
