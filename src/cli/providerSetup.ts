@@ -37,7 +37,9 @@ export async function addProvider(
   const option = (options ?? (await providerAddOptions(client))).find((entry) => entry.id === providerId)
   if (!option) throw new Error(`Mousse cannot add the model provider "${providerId}".`)
   if (option.runsAs) throw runsAsAgent(option)
-  const { snapshot } = await client.request<{ snapshot: InstanceSnapshot }>('providers.instances.add', option.add)
+  // Cloud credentials (no key to paste) are checked before the entry is added; a failed check adds nothing.
+  const ambient = !apiKey && option.methods.includes('ambient') && !option.methods.includes('api_key')
+  const { snapshot } = await client.request<{ snapshot: InstanceSnapshot }>('providers.instances.add', ambient ? { ...option.add, signIn: 'ambient' } : option.add)
   if (apiKey) await client.request('providers.instances.setSecret', { instanceId: snapshot.instanceId, value: apiKey })
   const current = (await deviceSnapshots(client)).find((entry) => entry.instanceId === snapshot.instanceId)
   return { instanceId: snapshot.instanceId, configured: current?.auth.state === 'signed_in' }

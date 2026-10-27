@@ -77,7 +77,7 @@ async function runConfigProviders(args: ParsedArgs): Promise<void> {
       providerId =
         (await promptSelect(
           'Select orchestrator provider:',
-          options.filter((o) => o.methods.includes('api_key')).map((o) => ({ id: o.id, label: o.label }))
+          options.filter((o) => o.methods.includes('api_key') && !o.runsAs).map((o) => ({ id: o.id, label: o.label }))
         )) ?? undefined
     }
 

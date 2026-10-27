@@ -319,7 +319,7 @@ mousse-cli config providers --provider groq --api-key "$GROQ_API_KEY"
 
 - The provider is added to the profile (running it again changes nothing), then the key is saved.
 - Providers Mousse runs through an agent (Anthropic through Claude Code, xAI through Grok) are added in Settings → Providers, as that agent.
-- Cloud credentials (Amazon Bedrock, Google Vertex) are checked in Settings → Providers.
+- Cloud credentials (Amazon Bedrock, Google Vertex) take no key: `--provider amazon-bedrock` checks the environment's credentials and adds the provider only when they are found.
 
 - Provider and model preferences are stored in `mousse.conf` (`settings.provider`).
 - API keys and OAuth tokens are stored in `~/.mousse/auth.json` via `ProviderAuthService`, never in `mousse.conf`.

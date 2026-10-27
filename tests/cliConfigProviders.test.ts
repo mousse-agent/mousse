@@ -64,6 +64,16 @@ describe('mousse config providers', () => {
   })
 })
 
+describe('mousse config providers for cloud credentials', () => {
+  it('checks them before adding, and adds nothing when they are missing', async () => {
+    const d = daemon()
+    d.credentials.verifyAmbientProvider.mockResolvedValueOnce({ success: false, error: 'Amazon Bedrock credentials were not detected in the environment.' } as never)
+    await expect(addProvider(d.client, 'amazon-bedrock', undefined)).rejects.toThrow('Amazon Bedrock credentials were not detected in the environment.')
+    expect(d.instances.list()).toEqual({})
+    expect(await addProvider(d.client, 'amazon-bedrock', undefined)).toEqual({ instanceId: 'pi:amazon-bedrock', configured: true })
+  })
+})
+
 describe('the global --api-key', () => {
   it('replaces the key of an added provider', async () => {
     const d = daemon()
@@ -84,5 +94,22 @@ describe('the global --api-key', () => {
     expect(d.calls).not.toContain('providers.instances.setSecret')
     expect(d.instances.isRemoved('pi:openrouter')).toBe(true)
     expect(d.credentials.keys.has('openrouter')).toBe(false)
+  })
+})
+
+describe('providers Mousse runs through an agent', () => {
+  it('are not added as model APIs, and the global --api-key points to Settings', async () => {
+    const d = daemon()
+    const listed = d.credentials.getLoginOptions
+    d.credentials.getLoginOptions = () => [...listed(), { id: 'anthropic', label: 'Anthropic', authType: 'api_key', configured: false }]
+    await expect(addProvider(d.client, 'anthropic', 'fixture-key')).rejects.toThrow('Mousse runs Anthropic through its agent (claude). Add it, or replace its key, in Settings → Providers.')
+    await expect(setProviderKey(d.client, 'anthropic', 'fixture-key')).rejects.toThrow('Mousse runs Anthropic through its agent (claude).')
+    expect(d.calls).not.toContain('providers.instances.add')
+    expect(d.credentials.setApiKey).not.toHaveBeenCalled()
+  })
+
+  it('an id that is no model provider says so', async () => {
+    const d = daemon()
+    await expect(setProviderKey(d.client, 'claude-subscription', 'fixture-key')).rejects.toThrow('Mousse has no model provider "claude-subscription" that takes an API key.')
   })
 })

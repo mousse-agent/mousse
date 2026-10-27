@@ -2367,11 +2367,13 @@ export class Harness implements HarnessGateway {
       if (!driver.instanceIdFor || !driver.verifyAmbient) return harnessFail('unsupported', `${driver.label} has no cloud credentials to check.`)
       const instanceId = driver.instanceIdFor(patch)
       await this.removing.get(instanceId)
+      // Read before the check: the credential it saves seeds the entry on the next read.
+      const existed = Object.prototype.hasOwnProperty.call(this.instanceMap.list(), instanceId)
       const verified = await driver.verifyAmbient(patch)
       if (!verified.success) return harnessFail('signed_out', verified.error || 'Could not verify the credentials.', instanceId)
-      const added = await this.addFixed(driver, patch)
+      await this.addFixed(driver, patch)
       await this.credentialsChanged(instanceId)
-      return { snapshot: this.snapshot(instanceId, { kind: 'device' }), existed: added.existed }
+      return { snapshot: this.snapshot(instanceId, { kind: 'device' }), existed }
     }
     if (driver.instanceIdFor) return this.addFixed(driver, patch)
     if (patch.provider !== undefined) return harnessFail('unsupported', `${driver.label} takes no model provider.`)

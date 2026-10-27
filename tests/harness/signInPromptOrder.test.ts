@@ -2,21 +2,18 @@
  * PR 5a-2 review r1 (M3): pi-ai's OpenRouter sign-in sends the browser link first and the paste
  * field after it. The sign-in dialog shows the latest prompt of an operation, so the field must
  * arrive with the link: the link is sent again with the paste field under it, and a pasted answer
- * on that prompt finishes the sign-in. A flow that sends the field first is unchanged.
+ * on that prompt finishes the sign-in. A flow that sends the field first is unchanged. The dialog
+ * side is `tests/renderer/signInDialogLink.test.ts`.
  */
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createElement } from 'react'
-import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { HarnessGatewayEvent } from '../../src/mms/harness/gateway'
 import type { LoginSession } from '../../src/mms/providers/LoginSession'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
-import { SignInDialog } from '../../src/renderer/components/providers/SignInDialog'
-import { applyOperationEvent, clearOperation } from '../../src/renderer/lib/providerSnapshots'
 import type { SignInPrompt } from '../../src/shared/harness/types'
 
 const homes: string[] = []
@@ -75,26 +72,5 @@ describe('a paste field that follows the browser link (OpenRouter order)', () =>
     expect(await harness.instances.respondSignIn(started.operationId, { promptId: field!.promptId, kind: 'input', value: 'fixture-code' })).toBe(true)
     await expect.poll(finished).toBe(true)
     harness.stop()
-  })
-})
-
-describe('the sign-in dialog on that prompt', () => {
-  it('keeps the link, Open again and Copy link, with the paste fallback under them', () => {
-    applyOperationEvent({
-      operationId: 'op-order',
-      instanceId: 'pi:openrouter',
-      kind: 'sign_in',
-      phase: 'prompt',
-      prompt: { promptId: 'op-order:2', type: 'auth_url', url: 'https://openrouter.example/auth', usesCallbackServer: true, acceptsRedirectPaste: true, pasteMessage: PASTE }
-    })
-    try {
-      const html = renderToStaticMarkup(createElement(SignInDialog, { operationId: 'op-order', name: 'OpenRouter', onClose: () => {} }))
-      expect(html).toContain('Open sign-in page again')
-      expect(html).toContain('Copy link')
-      expect(html).toContain('Waiting for you to finish in the browser')
-      expect(html).toContain('Browser didn&#x27;t return here?')
-    } finally {
-      clearOperation('op-order')
-    }
   })
 })
