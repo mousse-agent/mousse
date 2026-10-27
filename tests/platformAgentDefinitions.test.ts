@@ -14,6 +14,7 @@ import {
   StaticAgentModelLookup
 } from '../src/mms/agentDefinitions'
 import type { AgentDefinitionSettings, AgentRuntimeKind } from '../src/shared/agents/types'
+import { assertRuntimeSettingsSupported } from '../src/mms/agentDefinitions/runtimePolicy'
 
 const tempRoots: string[] = []
 
@@ -360,7 +361,7 @@ describe('model capability and stored runtime kinds', () => {
     const { registry } = createServices('profile-a', tempProfileRoot('cli'))
     const settings = {
       ...nativeSettings('codex-bot'),
-      browser: { mode: 'native' as const, allowedDomains: ['example.com'], traceRetention: 'run' as const }
+      browser: { mode: 'native' as const, allowedDomains: [], traceRetention: 'run' as const }
     }
     // Saved, kind kept: the run's instance (the model ref's) decides, as for any definition.
     const saved = registry.createDraft({ runtimeKind: 'codex', settings, systemPrompt: 'CLI prompt' })
@@ -387,7 +388,7 @@ describe('model capability and stored runtime kinds', () => {
         expectedDraftHash: switched.draftHash,
         runtimeKind: 'mousse',
         settings: {
-          browser: { mode: 'native', allowedDomains: ['example.com'], traceRetention: 'run' }
+          browser: { mode: 'native', allowedDomains: [], traceRetention: 'run' }
         }
       })
     ).not.toThrow()
@@ -400,6 +401,18 @@ describe('model capability and stored runtime kinds', () => {
         runtimeKind: 'invalid-runtime' as AgentRuntimeKind
       })
     ).toThrow(/Unknown runtime kind/)
+  })
+
+  it('refuses saving browser allowed domains, which nothing enforces yet; empty means no restriction', () => {
+    const { registry } = createServices('profile-a', tempProfileRoot('domains'))
+    const browser = { mode: 'structured' as const, allowedDomains: ['example.com'], traceRetention: 'none' as const }
+    const refused = /Allowed domains aren't enforced yet, so a list can't be saved/
+    expect(() => registry.createDraft({ settings: { ...nativeSettings('domains-new'), browser }, systemPrompt: 'Hi' })).toThrow(refused)
+    const draft = registry.createDraft({ settings: { ...nativeSettings('domains'), browser: { ...browser, allowedDomains: [] } }, systemPrompt: 'Hi' })
+    expect(() => registry.saveDraft(draft.id, { expectedDraftHash: draft.draftHash, settings: { browser } })).toThrow(refused)
+    // A list stored before this refused it is refused at run time too, never run as if it held.
+    // …with the reason in the message every run surface shows (a workflow, a schedule, an agent chat).
+    expect(() => assertRuntimeSettingsSupported({ settings: { ...draft.settings, browser } } as never, undefined)).toThrow(refused)
   })
 })
 

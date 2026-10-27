@@ -6,6 +6,7 @@ import { AppError } from '../../src/shared/errors'
 import { resolvedDefinition } from '../fixtures/agent-platform/agent-runtime-policy/helpers'
 import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
 import type { TurnInput } from '../../src/mms/run/adapters/ProviderAdapter'
+import type { AgentRuntimeInput } from '../../src/shared/agents/execution'
 
 // PR 4 §6 / §16 `definitionRuntime`: candidates are checked before they run, fallbacks only before
 // a tool started, runtime-retried failures are never retried on the same candidate, and the time
@@ -221,6 +222,21 @@ describe('definitionRuntime', () => {
     await vi.waitFor(() => expect(p.turns).toHaveLength(1))
     controller.abort()
     expect(await pending).toMatchObject({ status: 'cancelled', error: { code: 'ABORTED' } })
+  })
+})
+
+describe('a definition run without its settings', () => {
+  it('is refused before any candidate is checked or run: it never falls back to the loop', async () => {
+    const p = port({ turn: async () => ok('must not run') })
+    const resolved = definition([])
+    const input = {
+      runId: 'r', profileId: resolved.profileId, threadId: 't', runtimeKind: 'mousse', model: resolved.model, systemPrompt: 's', userMessage: 'go',
+      grants: resolved.grants, budget: { maxTurns: 1, maxToolCalls: 1, maxElapsedMs: 0 }, signal: new AbortController().signal,
+      policy: { definitionId: resolved.definitionId, definitionRevision: resolved.revision, source: 'editor', fallbacks: { enabled: false, retryOn: [], allowHigherCost: false, retryCount: 0, backoffMs: 0 }, fallbackModels: [] }
+    } as unknown as AgentRuntimeInput
+    await expect(createDefinitionRuntime(p.value).run(input)).rejects.toMatchObject({ code: 'SETTINGS_UNSUPPORTED', pointer: '/settings', message: expect.stringContaining("settings were not passed to its runtime") })
+    expect(p.checks).toEqual([])
+    expect(p.turns).toEqual([])
   })
 })
 

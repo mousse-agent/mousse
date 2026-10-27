@@ -28,6 +28,7 @@ import { createDefinitionEngine, DEFINITION_ENGINES, ENGINE_MODEL, FAKE_KEY, typ
 import type { Harness } from '../../src/mms/harness/gateway'
 import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
 import { harnessAppError } from '../../src/shared/harness/types'
+import { definitionCheckIssues } from '../../src/mms/agentDefinitions/definitionRuntime'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import type { BrowserRuntimePort } from '../../src/shared/browser/runtime'
@@ -44,6 +45,7 @@ const MODEL = ENGINE_MODEL
 const OTHER = 'other'
 const call = (name: string, args: Record<string, unknown>, id = `${name}-1`) => providerResponse([{ type: 'toolCall', id, name, arguments: args }], 'toolUse')
 const say = (text: string) => providerResponse([{ type: 'text', text }], 'stop')
+const mcpServer = { bearerForTurn: () => ({ url: 'http://127.0.0.1:9/mcp', token: 'fake-bearer', tokenHash: 'fake-hash' }), turnEnded: () => undefined, revokeThread: () => {} }
 
 describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind) => {
   let home: string
@@ -71,6 +73,8 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     orch.setThreadStore(store)
     engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home })) })
     orch.setRunEngine(engine)
+    // A running Mousse MCP server: every turn gets a bearer (a definition's app tools need one).
+    orch.setMcpAttachment(mcpServer)
     harness = defs.install(orch, home)
     registry = new AgentDefinitionRegistry({ profileId, profileRoot: join(home, 'profile') })
     const integrations = new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write', 'edit', 'ask_user', 'bash', 'thread_read', 'git_status', 'git_diff'] })
@@ -912,9 +916,22 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
       expect(result).toMatchObject({ status: 'failed', error: { message: expect.stringContaining('Browser runtime is not bound') } })
       expect(seen.ran).toEqual([])
     })
+
+    it('without an MCP bearer for the turn it is refused before the turn, never run without its browser', async () => {
+      const seen = { results: [] as Array<{ text: string; isError?: boolean }>, ran: [] as string[] }
+      install(mcpRuntime([], seen, 'runtime'), noLoop)
+      const browser = localBrowser('profile')
+      orch.setBrowserRuntime(browser.runtime)
+      // The Mousse MCP server is not running: no bearer can be issued.
+      orch.setMcpAttachment(null)
+      const resolved = browsing(['browser_open'])
+      const result = await orch.runAgentDefinition(request(resolved, store.createThread('no bearer').id, { host: { workspaceRoots: [work], browserRuntime: browser.runtime } as never }))
+      expect(result).toMatchObject({ status: 'failed', error: { message: expect.stringContaining("This agent's tools (browser_open) could not be connected for this run") } })
+      expect(seen.ran).toEqual([])
+    })
   })
 
-  it('a definition whose spend limit only the loop can hold runs on the loop instead of being refused', async () => {
+  it('a definition whose spend limit the runtime cannot reserve is refused at publish, Try Run and run time, saying what to change; never moved to the loop', async () => {
     harness.stop()
     const ran: string[] = []
     const adapterNamed = (name: string): ProviderAdapter => ({
@@ -928,17 +945,23 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
       },
       interrupt: async () => 'not_active'
     })
-    // A runtime that holds counts but cannot reserve spend for this model (an unpriced one), with the loop beside it.
-    const base = adapterDriver(adapterNamed('runtime'), { toolControl: 'exact', budgets: 'hard', spendLimits: 'unsupported', runtime: { definitionAdapter: adapterNamed('loop') } })
+    // A runtime that reserves spend, with the loop beside it, on a model without a price.
+    const base = adapterDriver(adapterNamed('runtime'), { toolControl: 'exact', budgets: 'hard', spendLimits: 'reserved', runtime: { definitionAdapter: adapterNamed('loop'), spendModel: () => ({ label: 'Local model', outputCap: true, priced: false }) } })
     const driver = { ...base, definitionCaps: (config: never, needs?: { loop?: boolean }) => ({ ...base.caps(config), ...(needs?.loop ? { definitionLimits: 'in_loop' as const } : {}) }) }
     let stored: unknown = { spend: { driver: 'codex', enabled: true }, spend2: { driver: 'codex', enabled: true } }
     harness = testHarness({ drivers: [driver], instances: new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (state) => { stored = state.instances } } }), profileHome: home })
     orch.setHarness(harness)
     const plain = resolver.resolve((({ id, revision }) => ({ definitionId: id, revision }))(publish('mousse', 'spend')))
     expect(await orch.runAgentDefinition(request(plain, store.createThread('counts only').id))).toMatchObject({ status: 'completed', text: 'runtime' })
+    const editorCheck = (resolved: ResolvedAgentDefinition) => definitionCheckIssues(orch, { threadId: '', definition: { id: resolved.definitionId, revision: resolved.revision }, settings: resolved.settings, grants: resolved.grants })
+    expect(editorCheck(plain)).toEqual([])
     const limited = resolver.resolve((({ id, revision }) => ({ definitionId: id, revision }))(publish('mousse', 'spend2', (settings) => { settings.limits.maxCostUsd = 1 })))
-    expect(await orch.runAgentDefinition(request(limited, store.createThread('cost limited').id))).toMatchObject({ status: 'completed', text: 'loop' })
-    expect(ran).toEqual(['runtime', 'loop'])
+    const said = "This agent's token or cost limits can't be held on this model. Local model has no price, so a cost limit cannot be held. Set a price for the model, or use a token limit instead."
+    // Publish (and the editor) refuse it, by the same check.
+    expect(editorCheck(limited)).toMatchObject([{ code: 'SETTINGS_UNSUPPORTED', message: said, pointer: '/settings/limits/maxCostUsd' }])
+    // Try Run and every other run refuse it before any turn.
+    expect(await orch.runAgentDefinition(request(limited, store.createThread('cost limited').id))).toMatchObject({ status: 'failed', error: { code: 'SETTINGS_UNSUPPORTED', message: said } })
+    expect(ran).toEqual(['runtime'])
   })
 
   it('an owned lease that another holds fails the turn as busy, and never queues it', async () => {

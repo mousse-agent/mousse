@@ -65,13 +65,13 @@ describe('Pi budgets policy', () => {
     expect(check('claude-sonnet-4-5:high', { maxUsd: 1 })).toEqual({ ok: true })
 
     // `supportsMaxOutputTokens: false` drops the cap on openai-responses only; openai-completions always sends one.
-    expect(check('proxy', { maxOutputTokens: 1_000 })).toMatchObject({ ok: false, error: { missing: ['spendLimits'], reason: 'Proxy cannot cap its output, so token and cost limits cannot be held.' } })
+    expect(check('proxy', { maxOutputTokens: 1_000 })).toMatchObject({ ok: false, error: { missing: ['spendLimits'], reason: 'Proxy does not always send its output cap, so token and cost limits cannot be held. Pick a model that reports its output cap, or remove the token and cost limits.' } })
     expect(check('local', { maxOutputTokens: 1_000 })).toEqual({ ok: true })
-    expect(check('local', { maxUsd: 1 })).toMatchObject({ ok: false, error: { reason: 'Local has no price, so a cost limit cannot be held.' } })
+    expect(check('local', { maxUsd: 1 })).toMatchObject({ ok: false, error: { reason: 'Local has no price, so a cost limit cannot be held. Set a price for the model, or use a token limit instead.' } })
     expect(check('mistral', { maxInputTokens: 1_000 })).toMatchObject({ ok: false, error: { missing: ['spendLimits'] } })
     // A price on one side only is no price; two completions per request double the cap.
-    expect(check('input-only', { maxUsd: 1 })).toMatchObject({ ok: false, error: { reason: 'Input only has no price, so a cost limit cannot be held.' } })
-    expect(check('twice', { maxOutputTokens: 1_000 })).toMatchObject({ ok: false, error: { reason: 'Twice cannot cap its output, so token and cost limits cannot be held.' } })
+    expect(check('input-only', { maxUsd: 1 })).toMatchObject({ ok: false, error: { reason: 'Input only has no price, so a cost limit cannot be held. Set a price for the model, or use a token limit instead.' } })
+    expect(check('twice', { maxOutputTokens: 1_000 })).toMatchObject({ ok: false, error: { reason: 'Twice does not always send its output cap, so token and cost limits cannot be held. Pick a model that reports its output cap, or remove the token and cost limits.' } })
   })
 
   it('a request is reserved at Mousse’s own catalogue prices for the turn’s model; any other model, or a model without prices under a USD limit, is refused', () => {
