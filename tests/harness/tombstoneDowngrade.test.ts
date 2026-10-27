@@ -67,7 +67,9 @@ describe('a tombstone across a downgrade', () => {
     await b.harness.instances.add({ driver: 'pi', config: { provider: 'openrouter' } })
     await b.harness.instances.setSecret('pi:openrouter', 'fixture-key-b')
 
-    // An older build runs on A and writes its seed the way it always did (shallow merge).
+    // An older build runs on A and writes its seed the way it always did. Simulated: the fixture is
+    // the instance entry a pre-5a-1 build seeds, written through `updateProvidersSection`'s shallow
+    // merge, which this PR does not change.
     const older = MousseConfigStore.load(homeA)
     const section = older.getProvidersSection()
     older.updateProvidersSection({
