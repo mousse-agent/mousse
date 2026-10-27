@@ -158,6 +158,46 @@ sign-in check, chat) runs `grok --permission-mode default agent --no-leader stdi
   (2.0.0); check a second sign-in on macOS does not replace the user's own before relying on it.
 - Two entries signed in to the same account say so ("Same account as …").
 
+## Codex, a second account
+
+| OS | Sign-in | State |
+|---|---|---|
+| Windows x64 | `codex login --device-auth` in a pseudo-terminal, in the instance's own home | tested with a fake CLI, a fake terminal and a fake app-server; real sign-in not run (manual smoke pending) |
+| Windows arm64 | no `node-pty` prebuild: the page shows the command to copy | untested |
+| macOS arm64, Linux x64, Linux arm64 | as Windows x64 | untested: no machine in this PR's runs |
+
+- Add provider → ChatGPT subscription → Use my Codex CLI, once the user's own Codex is added, adds
+  another account on the same `codex` with a home of its own. (A managed entry, which downloads its
+  own Codex and signs in with ChatGPT inside Mousse, is a separate setup and is unchanged.) An
+  added entry may also be put on the user's own home; it then runs as the built-in does, with the
+  terminal sign-in.
+- An added entry with its own home runs every process (status, chats, sign-in, sign-out) with
+  `CODEX_HOME` and `CODEX_SQLITE_HOME` set to that home. `HOME` is not changed. Nothing in the
+  `CODEX_*` (except `CODEX_CA_CERTIFICATE`), `OPENAI_*`, `CHATGPT_*`, `AZURE_*` or `AWS_*` families,
+  and no bare `ACCESS_TOKEN`, is inherited from Mousse's environment (no key, token, route, login
+  server or cloud credential of the user's). Variables set on the entry apply on top, except those
+  families: Settings refuses them, a stored one is dropped at launch, and the entry says which ones
+  are not used. The variable names were checked against the text of Codex 0.162's program file,
+  which was not run.
+- **Sign in** runs `codex login --device-auth` there, starting in the home folder, and shows the link
+  and one-time code Codex prints (only the lines under its own sign-in steps, once complete). Every
+  Codex process of the home is ended first, because a running one keeps the account it started with
+  and would write it back over the new sign-in. It counts only once a new Codex process in that home
+  says it is signed in; a sign-in that is not finished in sixteen minutes (the code expires after
+  fifteen) is ended. If Codex says it signed in but the home does not hold it, Mousse says Codex may
+  be keeping it in the operating system's credential store and how to switch to a file. The link and
+  code are shown to the user and never logged or stored.
+- **Sign out** ends the home's Codex processes, runs `codex logout` there, and counts only when a new
+  Codex process in that home then says signed out. A command that cannot start, fails or changes
+  nothing is an error. The user's own Codex entry keeps the terminal sign-in and is never signed
+  out by Mousse.
+- Starting Codex, signing in and signing out all refuse a home that is, or sits under, a link or
+  junction: they would act on another account's folder.
+- The home starts empty: the user's own `~/.codex` (its `config.toml`, MCP servers, instructions and
+  sessions) is not shared with it, and the entry keeps its own settings and saved chats in its own
+  folder. A chat saved under one entry never resumes on another.
+- Two entries signed in to the same account say so ("Same account as …").
+
 ## Notes
 
 - A Custom command runs without a shell. A name without a path is looked up on PATH; a `.cmd`
