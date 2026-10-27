@@ -455,7 +455,9 @@ describe('background work', () => {
     expect(await continuation).toBe('wake text')
     expect(process.permissionModes).toEqual(['default'])
     // The next ordinary turn in that mode does not switch again.
-    await f.turn({ prompt: 'again', permissionMode: 'ask' })
+    f.cli.reply = (message, live) => live.answer(String(message.uuid), 'ok')
+    f.service.commitConversation('thread', '')
+    expect(await f.chat({ prompt: 'again', permissionMode: 'ask', history: '' })).toBe('ok')
     expect(process.permissionModes).toEqual(['default'])
   })
 

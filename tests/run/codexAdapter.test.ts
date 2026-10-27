@@ -717,7 +717,7 @@ describe('CodexAdapter', () => {
         inn({ id: 4, result: threadResult() }),
         // The next turn starts a new thread with the history as a preamble.
         ...threadStart(5),
-        out({ id: 6, method: 'turn/start', params: { threadId: T, input: text(`Previous conversation (context only; do not repeat earlier actions):\n${STOPPED}\n\nCurrent request:\nagain`), approvalPolicy: 'on-request', sandboxPolicy: WORKSPACE_WRITE, model: 'gpt-x' } }),
+        out({ id: 6, method: 'turn/start', params: { threadId: T, input: text(`Previous conversation (context only; do not repeat earlier actions):\n${STOPPED}\n\nCurrent request:\nagain`), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
         inn({ id: 6, result: { turn: { id: 'turn-2', status: 'inProgress', error: null, items: [] } } }),
         ...message('msg-2', ['two'], 'turn-2'),
         completed('completed', 'turn-2')

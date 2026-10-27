@@ -359,7 +359,7 @@ describe('execution bindings', () => {
     expect(adapter.turns).toHaveLength(1)
     expect(adapter.turns[0]).toMatchObject({ instanceId: 'claude', model: 'bound-model', mode: 'agent' })
     expect(engine.store.getAttempt(retryAttempt!)?.executionBinding).toEqual(bound)
-    expect(bound.policy).toEqual({ mode: 'default', approvals: 'ask', permissionMode: 'accept_edits', origin: 'interactive' })
+    expect(bound.policy).toEqual({ mode: 'default', approvals: 'ask', permissionMode: 'ask', origin: 'interactive' })
   })
 
   it('a turn on a runtime that resolves `default` runs and records the bound model, and recovery keeps it', async () => {
@@ -398,7 +398,7 @@ describe('execution bindings', () => {
     const thread = store.createThread('plan retry')
     orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })
     const bound = await harness.bind(harness.resolveStored({ instanceId: 'claude', llmProvider: '', model: 'sonnet' }, { purpose: 'turn' }), { mode: 'plan' })
-    expect(bound.policy).toEqual({ mode: 'plan', approvals: 'ask', permissionMode: 'accept_edits', origin: 'interactive' })
+    expect(bound.policy).toEqual({ mode: 'plan', approvals: 'ask', permissionMode: 'ask', origin: 'interactive' })
     const markStarting = engine.markStarting.bind(engine)
     engine.markStarting = (runId) => {
       const run = markStarting(runId)

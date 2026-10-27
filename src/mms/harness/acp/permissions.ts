@@ -120,6 +120,9 @@ export function questionsPrompter(questions: UserQuestionService): PermissionPro
   }
 }
 
+/** The run's approvals policy; a preset that has a launch flag for it (Grok) maps it there. Permission modes decide what is asked. */
+export type PermissionApprovals = 'ask' | 'grants' | 'never'
+
 /**
  * `session/request_permission`, under the turn's permission mode. Full access answers with the
  * agent's once-only allow option without asking; Auto-accept edits does the same for a tool call

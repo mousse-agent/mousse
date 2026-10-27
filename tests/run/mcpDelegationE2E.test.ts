@@ -27,7 +27,7 @@ async function callTool(mcp: Mcp, name: string, args: Record<string, unknown>, i
     body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: mcp.turnToken ? { ...args, [TURN_TOKEN_KEY]: mcp.turnToken } : args } })
   })
   const body = await response.json() as { result?: { content: Array<{ text: string }>; isError?: boolean }; error?: { code: number; message: string; data?: { reason: string } } }
-  return { status: response.status, body, value: body.result ? JSON.parse(body.result.content[0].text) : undefined }
+  return { status: response.status, body, value: body.result && !body.result.isError ? JSON.parse(body.result.content[0].text) : undefined }
 }
 
 /** A vendor runtime that reaches Mousse only over MCP; `script` is its model. */
@@ -216,7 +216,7 @@ describe('Mousse MCP delegation end to end (SPEC §15)', () => {
     const child = new ChildPiAdapter()
     const { orch, engine, store, stop } = phase6Daemon(home, [vendor, child])
     const credentials = new McpCredentials(engine.store)
-    const server = new MousseMcpServer({ credentials, registry: createMousseToolRegistry({ engine, host: orch.mcpToolHost() }) })
+    const server = new MousseMcpServer({ credentials, registry: orch.mcpToolRegistry() })
     await server.start()
     orch.setMcpAttachment(server)
     stops.push(async () => {

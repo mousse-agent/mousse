@@ -187,7 +187,7 @@ describe('Claude subscription attachment', () => {
   it('Mousse\'s PreToolUse hook stamps each Mousse call with the turn token (per_call), and nothing else', async () => {
     const options: Options[] = []
     const { home, questions, service: claude } = service(({ options: o }) => { options.push(o); return finished(o) })
-    questions.on('pending', ({ requestId }: { requestId: string }) => questions.submitAnswers(requestId, { permission: 'reject' }))
+    questions.on('pending', ({ requestId }: { requestId: string }) => questions.submitAnswers(requestId, { permission: 'reject' }, { kind: 'user' }))
     await claude.chat({ threadId: 't', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn(), mcp: MCP, mcpTurnToken: 'turn-7' })
     await claude.chat({ threadId: 't2', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn(), mcp: MCP, mcpTurnToken: 'turn-8', mode: 'plan' })
     await claude.chat({ threadId: 't3', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn() })

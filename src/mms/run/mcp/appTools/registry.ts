@@ -284,11 +284,11 @@ export class ToolRegistry {
       const unattended = unattendedRefusal(tool, turn)
       if (unattended) return { text: unattended, isError: true }
       const caller: McpCaller = { threadId: turn.threadId, runId: turn.runId, provider: 'in_process', modeCeiling: turn.modeCeiling }
-      // A trusted caller (a definition, bot or scheduled run) had its grants checked before dispatch; a
-      // run's own loop asks the user as any other runtime does.
-      if (tool.access === 'editsWorkspace' && authority.kind === 'run') {
+      // A trusted definition had its grants checked before dispatch; the loop of a person's thread asks
+      // the user as any other runtime does, with or without a run.
+      if (tool.access === 'editsWorkspace' && !turn.trusted) {
         callerThreadOnly(args, caller)
-        const refusal = await this.askBeforeEditing(tool, { ...caller, runId: authority.runId }, call.signal, turn.permissionMode)
+        const refusal = await this.askBeforeEditing(tool, { ...caller, runId: authority.kind === 'run' ? authority.runId : turn.runId }, call.signal, turn.permissionMode)
         if (refusal) return refusal
       }
       return await tool.handler(args, {

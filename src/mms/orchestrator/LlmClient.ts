@@ -42,7 +42,7 @@ import type { ChatMode } from '../../shared/types'
 import { normalizeChatMode } from '../../shared/chatMode'
 import { isToolAllowedForMode } from '../../shared/modes'
 import { permissionModeAllows, type PermissionMode } from '../../shared/permissionMode'
-import { PERMISSION_KEYS, piPermissionKey, piToolAction } from '../../shared/permissionKeys'
+import { piPermissionKey, piToolAction } from '../../shared/permissionKeys'
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
 
 import { resolveModelForMode, resolveTitleModel, normalizeContextSettings, resolveContextCompactionTokens } from '../../shared/settings'
@@ -479,6 +479,8 @@ export class LlmClient {
         },
         askUser: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
         dismissQuestions: (threadId) => this.questions.dismissAllForThread(threadId),
+        // The turn carries its permission mode (`AppToolTurn.permissionMode`); a tool that edits the workspace asks here.
+        askApproval: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
         presentPlan: (threadId, payload) => this.onPresentPlan?.(payload, threadId),
         openDocument: (payload) => this.onOpenDocument?.(payload),
         tasks: () => tasks ?? null,
@@ -1753,7 +1755,7 @@ export class LlmClient {
         // and `tests/piLoopApprovals.test.ts` is pointed at that route.
         const permissionAction = permissionMode !== undefined ? piToolAction(toolCall.name) : null
         if (permissionAction) {
-          const refusal = await this.askPermission(toolCall, permissionMode!, permissionAction, piPermissionKey(permissionAction), threadId, signal)
+          const refusal = await this.askPermission(toolCall, permissionMode!, permissionAction, piPermissionKey(permissionAction), appTurn?.threadId || undefined, signal)
           if (refusal) return refusal
         }
 
