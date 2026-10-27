@@ -69,6 +69,7 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
       process.answer(String(message.uuid), 'Started the build.')
     }
     const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+      launchConfig: () => ({ binaryPath: binary }),
       query: cli.query,
       // A test can hold the sign-in check every turn makes before it pushes its prompt.
       runAuth: vi.fn(async () => {

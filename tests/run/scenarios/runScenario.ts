@@ -217,6 +217,7 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
     const service = new ClaudeSubscriptionProviderService(home, questions, {
       // A replayed transcript is one query per turn, so the scenarios keep the one-shot path.
       live: false,
+      launchConfig: () => ({ binaryPath: binary }),
       query: replaySdkQuery(transport),
       runAuth: async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })
     })
@@ -238,7 +239,7 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
     mkdirSync(providerDir, { recursive: true })
     writeFileSync(join(providerDir, 'settings.json'), JSON.stringify({ binaryPath: binary, models: [{ id: 'gpt-replay-codex', label: 'Replay' }] }))
     // Replace the app-server process only; the client, service and adapter run for real.
-    const service = createCodexProviderService(home, questions, { launch: replayCodexAppServer(transport) })
+    const service = createCodexProviderService(home, questions, { launch: replayCodexAppServer(transport) }, { launch: () => ({ binaryPath: binary }) })
     stops.push(() => service.stop())
     services.codex = service
   }

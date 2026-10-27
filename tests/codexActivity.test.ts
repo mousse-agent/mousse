@@ -281,7 +281,7 @@ describe('the activity fixture through the Codex adapter', () => {
     chmodSync(binary, 0o755)
     mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
     writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: binary, models: [{ id: 'gpt-x', label: 'GPT X' }] }))
-    const service = createCodexProviderService(home, questions, { launch: replayCodexAppServer(replay) })
+    const service = createCodexProviderService(home, questions, { launch: replayCodexAppServer(replay) }, { launch: () => ({ binaryPath: binary }) })
     services.push(service)
     const tools: StreamingLlmToolEvent[] = []
     const sink = new Proxy({}, { get: (_target, name) => (name === 'tool' ? (event: StreamingLlmToolEvent) => tools.push(event) : () => undefined) }) as TurnSink
@@ -442,7 +442,7 @@ describe('Codex activity against a scripted app-server', () => {
   }
 
   function create(s: ReturnType<typeof server>, dependencies: Record<string, unknown> = {}): CodexProviderService {
-    const service = new CodexProviderService(home, questions, { launch: s.launch, ...dependencies })
+    const service = new CodexProviderService(home, questions, { launch: s.launch, ...dependencies }, { launch: () => ({ binaryPath: join(home, 'codex') }) })
     services.push(service)
     return service
   }
