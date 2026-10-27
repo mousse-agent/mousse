@@ -84,10 +84,24 @@ export interface CodexInstallationOptions {
 /** App-servers running from a version folder in this process; their files are never deleted. */
 const leases = new Map<string, number>()
 /**
- * Version folders whose last full check (`verify`) failed, with why, in this process. Such a
- * folder stays broken, and never runs, until a later check passes or a reinstall replaces it.
+ * A version folder whose last full check (`verify`) failed records why beside it
+ * (`<version>.check-failed.json`), for every process and across restarts. Such a folder stays
+ * broken, and never runs, until a later check passes or a reinstall replaces it.
  */
-const failedChecks = new Map<string, string>()
+const failedCheckFile = (root: string): string => `${root}.check-failed.json`
+
+function readFailedCheck(root: string): string | undefined {
+  const record = readJson(failedCheckFile(root))
+  return record && typeof record.reason === 'string' && record.reason ? record.reason : undefined
+}
+
+function writeFailedCheck(root: string, reason: string): void {
+  atomicWriteJsonSync(failedCheckFile(root), { reason })
+}
+
+function clearFailedCheck(root: string): void {
+  rmSync(failedCheckFile(root), { force: true })
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -188,7 +202,7 @@ export class CodexInstallation {
   installed(): CodexInstalled | undefined {
     const inspected = this.inspect()
     if (!inspected || inspected.installed.broken) return inspected?.installed
-    const failed = failedChecks.get(inspected.root)
+    const failed = readFailedCheck(inspected.root)
     return failed ? { ...inspected.installed, broken: failed } : inspected.installed
   }
 
@@ -229,8 +243,8 @@ export class CodexInstallation {
     if (!inspected) return 'Codex is not installed.'
     if (inspected.installed.broken) return inspected.installed.broken
     const problem = await this.check(inspected.root, release, signal)
-    if (problem) failedChecks.set(inspected.root, problem)
-    else failedChecks.delete(inspected.root)
+    if (problem) writeFailedCheck(inspected.root, problem)
+    else clearFailedCheck(inspected.root)
     return problem
   }
 
@@ -337,7 +351,7 @@ export class CodexInstallation {
         onProgress({ message: `Checking Codex ${release.version}` })
         if (!(await this.check(root, release, abort))) {
           await withLock(join(this.dir, LOCK_FILE), () => this.activate(release), { signal: abort, timeoutMs: LOCK_WAIT_MS })
-          failedChecks.delete(root)
+          clearFailedCheck(root)
           return { path: this.binaryOf(root, release), version: release.version }
         }
       }
@@ -356,7 +370,7 @@ export class CodexInstallation {
           await renameWithRetry(runtime, root, this.platform)
         }, { signal: abort, timeoutMs: LOCK_WAIT_MS })
         await withLock(join(this.dir, LOCK_FILE), () => this.activate(release), { signal: abort, timeoutMs: LOCK_WAIT_MS })
-        failedChecks.delete(root)
+        clearFailedCheck(root)
       } finally {
         rmSync(staging, { recursive: true, force: true })
       }
@@ -424,7 +438,7 @@ export class CodexInstallation {
         throw new Error('Mousse could not delete the Codex files. Close anything using them, then try again.')
       }
       if (existsSync(root)) throw new Error('Mousse could not delete the Codex files. Close anything using them, then try again.')
-      failedChecks.delete(root)
+      clearFailedCheck(root)
       return { removed: true, bytes: installed.bytes ?? 0 }
     }, { timeoutMs: LOCK_WAIT_MS })
   }
