@@ -248,12 +248,13 @@ export function switchStateOf(snapshot: Pick<InstanceSnapshot, 'enabled'>, scope
 export type ModelsFreshness = { kind: 'updated'; at: number } | { kind: 'cached' }
 
 /**
- * Nothing for a provider that is off or not signed in, or lists no models: its list is not in
- * question. A list with no known update time is the cached one (the built-in aliases or the last
+ * Nothing for a model API (pi): it keeps its own 5-minute cycle, so its list is never "cached" in
+ * a way worth a line. Nothing for an agent that is off or not signed in, or lists no models: its
+ * list is not in question. A list with no known update time is the cached one (the built-in aliases or the last
  * list the agent gave), unless a refresh found it live.
  */
 export function modelsFreshness(snapshot: InstanceSnapshot): ModelsFreshness | null {
-  if (!snapshot.enabled.device) return null
+  if (isApiInstance(snapshot) || !snapshot.enabled.device) return null
   if (snapshot.auth.state !== 'signed_in' && snapshot.auth.state !== 'not_required') return null
   if (!snapshot.models.entries.length) return null
   const at = snapshot.models.refreshedAt ? Date.parse(snapshot.models.refreshedAt) : NaN

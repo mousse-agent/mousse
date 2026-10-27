@@ -255,6 +255,13 @@ describe('Model list freshness', () => {
     expect(row(entry)).toContain('Models: cached list')
   })
 
+  it('says nothing for a model API, which keeps its own refresh cycle', () => {
+    const api = snapshot({ instanceId: 'pi:openai', driver: 'pi', displayName: 'OpenAI', models: { ...listed, source: 'cached' } })
+    expect(modelsFreshness(api)).toBeNull()
+    expect(modelsFreshness({ ...api, models: { ...api.models, refreshedAt: new Date(NOW - 3_600_000).toISOString() } })).toBeNull()
+    expect(row(api)).not.toContain('Models')
+  })
+
   it('says nothing for a provider that is off, not signed in, lists nothing, or whose list is not a refreshable one', () => {
     expect(modelsFreshness(snapshot({ models: { ...listed, source: 'cached' }, enabled: { device: false, effective: false, setBy: 'device' } }))).toBeNull()
     expect(modelsFreshness(snapshot({ models: { ...listed, source: 'cached' }, auth: { state: 'signed_out' } }))).toBeNull()
