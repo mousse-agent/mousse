@@ -45,7 +45,6 @@ import {
   createDefinitionRuntime,
   definitionMessages,
   definitionFeatureRefusal,
-  definitionNeedsLoop,
   definitionRunPolicy,
   type DefinitionCheck,
   type DefinitionHostBindings,
@@ -910,21 +909,12 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * Where a definition runs on its instance: the instance's definition runtime, or its definition
-   * loop while one exists for a definition that needs it. That is one whose settings are not known
-   * (`definitionNeedsLoop`), or one whose token or USD limits only the loop can hold
-   * (a cost limit on an unpriced model, a model that does not always send its output cap), which
-   * ran on the loop before Pi RPC held definitions.
+   * loop where the instance runs definitions there (a connection on the legacy engine, a platform
+   * without an evidence record; 4h deletes the loop). A token or USD limit the runtime cannot
+   * reserve is refused by the check, never moved to the loop.
    */
-  private placeDefinition(check: DefinitionCheck): { resolved: ResolvedTurnSelection; loop: boolean } {
-    const selection = this.definitionSelection(check.ref)
-    const options = { purpose: check.origin, scope: this.threadScope(check.threadId) }
-    const loop = definitionNeedsLoop(check.features)
-    const resolved = this.harness.resolveStored(selection, { ...options, definition: { loop } })
-    if (loop || resolved.caps.definitionLimits === 'in_loop') return { resolved, loop }
-    const verdict = this.harness.check(resolved, definitionRunPolicy(check, [], false))
-    if (verdict.ok || !verdict.error.missing?.length || !verdict.error.missing.every((missing) => missing === 'spendLimits')) return { resolved, loop }
-    const onLoop = this.harness.resolveStored(selection, { ...options, definition: { loop: true } })
-    return onLoop.caps.definitionLimits === 'in_loop' ? { resolved: onLoop, loop: true } : { resolved, loop }
+  private placeDefinition(check: DefinitionCheck): ResolvedTurnSelection {
+    return this.harness.resolveStored(this.definitionSelection(check.ref), { purpose: check.origin, scope: this.threadScope(check.threadId), definition: true })
   }
 
   /** The stored selection a definition's model ref names: its instance, else its provider's built-in one. */
@@ -939,11 +929,14 @@ export class OrchestratorService extends EventEmitter {
    */
   checkDefinitionTurn(check: DefinitionCheck): DefinitionRefusal | undefined {
     try {
-      const { resolved, loop } = this.placeDefinition(check)
-      const verdict = this.harness.check(resolved, definitionRunPolicy(check, [], loop))
+      const resolved = this.placeDefinition(check)
+      const verdict = this.harness.check(resolved, definitionRunPolicy(check))
       // Its output, browser, memory and delegation settings, where the runtime does not run its loop.
       if (verdict.ok) return definitionFeatureRefusal(resolved.caps, check.features)
-      const { code, message, missing, reason } = verdict.error
+      const { code, missing, reason } = verdict.error
+      // A token or USD limit the runtime cannot reserve: why, and what to change (`spendModelGap`).
+      const spendOnly = reason && missing?.length === 1 && missing[0] === 'spendLimits'
+      const message = spendOnly ? `This agent's token or cost limits can't be held on this model. ${reason}` : verdict.error.message
       return { code, message, ...(missing ? { missing } : {}), ...(reason ? { reason } : {}) }
     } catch (error) {
       const normalized = normalizeAppError(error, 'definition_model_unavailable')
@@ -1034,13 +1027,13 @@ export class OrchestratorService extends EventEmitter {
 
   private async runDefinitionTurn(turn: DefinitionTurnRequest, engine: RunEngine, lease: ThreadLeaseHandle, extras: DefinitionTurnExtras): Promise<DefinitionTurnResult> {
     const { threadId } = turn
-    const { resolved, loop } = this.placeDefinition(turn)
+    const resolved = this.placeDefinition(turn)
     // The user's MCP tools the definition was granted, by the name the runtime calls them.
     const mcpTools = this.mcpManager && turn.grants.mcpTools.length
       ? (await this.mcpManager.getEnabledTools(turn.projectPath, definitionActor(turn.grants)))
           .filter((tool) => definitionToolGranted(tool.providerName, turn.grants, [tool]))
       : []
-    const policy = definitionRunPolicy(turn, mcpTools.map((tool) => tool.providerName), loop)
+    const policy = definitionRunPolicy(turn, mcpTools.map((tool) => tool.providerName))
     const verdict = this.harness.check(resolved, policy)
     if (!verdict.ok) throw harnessAppError(verdict.error)
     const featureRefusal = definitionFeatureRefusal(resolved.caps, turn.features, resolved.instanceId)
@@ -1235,6 +1228,11 @@ export class OrchestratorService extends EventEmitter {
         }
       }
       if (signal.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError')
+      // The granted app tools (the browser, `ask_user`, …) reach a runtime other than the loop only
+      // over the Mousse MCP server: without its bearer the turn is refused, never run without them.
+      const allowed = new Set(tools?.allow ?? [])
+      const requiredTools = resolved.caps.definitionLimits === 'in_loop' ? [] : this.mcpToolRegistry().listForTurn(threadId, runId)
+        .filter((tool) => allowed.has(tool.name) && tool.class !== 'delegation').map((tool) => tool.name)
       handle = this.harness.startTurn({
         binding,
         attemptOrdinal: 1,
@@ -1242,7 +1240,7 @@ export class OrchestratorService extends EventEmitter {
         sink,
         control,
         host,
-        app: context,
+        app: requiredTools.length ? { ...context, requiredTools } : context,
         instructions: { text: systemPrompt, placement: 'replace' },
         session: 'ephemeral',
         counters: turn.counters,

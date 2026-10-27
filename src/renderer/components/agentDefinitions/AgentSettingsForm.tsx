@@ -617,7 +617,7 @@ export function AgentSettingsForm({
             ))}
           </select>
         </Field>
-        <Field id="browser-domains" label="Allowed domains" hint="One host per line.">
+        <Field id="browser-domains" label="Allowed domains" hint="Not enforced yet, so leave it empty (no restriction).">
           <textarea
             id="browser-domains-input"
             rows={3}

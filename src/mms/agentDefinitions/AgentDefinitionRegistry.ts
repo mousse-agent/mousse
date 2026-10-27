@@ -35,6 +35,7 @@ import {
   toManifest
 } from '../../shared/agents/schema'
 import { assertBundleSize, assertSafeBundlePath } from '../../shared/agents/pathSafety'
+import { BROWSER_ALLOWED_DOMAINS_UNSUPPORTED } from './runtimePolicy'
 import { grantDependencyHashes, resolveEffectiveGrants } from '../../shared/agents/grants'
 import type { AgentIntegrationLookup } from '../../shared/agents/types'
 import { resolveWithinProfileRoot } from './pathSafety'
@@ -98,6 +99,7 @@ export class AgentDefinitionRegistry {
       : defaultRuntimeKind()
     const settings = mergeSettings(defaultAgentSettings(input.settings.identity), input.settings)
     this.assertUniqueSlug(settings.identity.slug)
+    this.assertSavableSettings(settings)
     const systemPrompt = assertSystemPrompt(input.systemPrompt ?? '')
     const visual = parseVisualMetadata(input.visual)
     const flags: AgentLibraryFlags = {
@@ -175,6 +177,7 @@ export class AgentDefinitionRegistry {
     if (settings.identity.slug !== current.settings.identity.slug) {
       this.assertUniqueSlug(settings.identity.slug, id)
     }
+    this.assertSavableSettings(settings)
     const systemPrompt = assertSystemPrompt(input.systemPrompt ?? current.systemPrompt)
     const visual = input.visual !== undefined ? parseVisualMetadata(input.visual) : current.visual
     const flags: AgentLibraryFlags = {
@@ -219,6 +222,7 @@ export class AgentDefinitionRegistry {
         }
       )
     }
+    this.assertSavableSettings(current.settings)
     const dependencyHashes = options.dependencyHashes
       ? { ...options.dependencyHashes }
       : options.integrationLookup
@@ -412,6 +416,15 @@ export class AgentDefinitionRegistry {
       systemPrompt,
       visual
     })
+  }
+
+  private assertSavableSettings(settings: AgentDefinitionRecord['settings']): void {
+    // Nothing enforces a browser domain list yet, so none is kept as if it were (#299).
+    if (settings.browser.allowedDomains.length > 0) {
+      throw new AgentDefinitionError('SETTINGS_UNSUPPORTED', BROWSER_ALLOWED_DOMAINS_UNSUPPORTED, {
+        pointer: '/settings/browser/allowedDomains'
+      })
+    }
   }
 
   private assertUniqueSlug(slug: string, exceptId?: string): void {

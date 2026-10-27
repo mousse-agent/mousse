@@ -40,7 +40,8 @@ import type { DefinitionHostBindings } from '../agentDefinitions/definitionRunti
 import { StaticAgentIntegrationLookup } from '../agentDefinitions/lookups'
 import {
   classifyTrustedTool,
-  collectUnsupportedRuntimeSettings
+  collectUnsupportedRuntimeSettings,
+  unsupportedSettingsMessage
 } from '../agentDefinitions/runtimePolicy'
 import { atomicWriteJsonSync, durableExclusiveWriteSync } from '../data/AtomicFs'
 import { DomainRpcError } from '../protocol/domainRegistry'
@@ -498,7 +499,7 @@ export class MmsWorkflowAgents {
     if (unsupported.length === 0) return
     throw new AgentDefinitionError(
       'SETTINGS_UNSUPPORTED',
-      `Agent runtime cannot authoritatively implement ${unsupported.map((item) => item.pointer).join(', ')}.`,
+      unsupportedSettingsMessage(unsupported),
       {
         details: {
           pointers: unsupported.map((item) => item.pointer),

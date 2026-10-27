@@ -180,6 +180,12 @@ function collectHostRoots(
 }
 
 /**
+ * Why a browser domain list is refused: no browser navigation checks it yet, so a list would only
+ * look like a restriction. Empty means no restriction.
+ */
+export const BROWSER_ALLOWED_DOMAINS_UNSUPPORTED = "Allowed domains aren't enforced yet, so a list can't be saved. Leave it empty (no restriction)."
+
+/**
  * The definition's settings Mousse cannot implement, and the host bindings it lacks, whatever runs
  * the definition. Every stored `runtimeKind` is held to the same rules (PR 4 §6); what depends on
  * the instance the model ref names (exact tool control, hard counts, reserved spend) is checked by
@@ -192,6 +198,14 @@ export function collectUnsupportedRuntimeSettings(
   const settings = resolved.settings
   const unsupported: AgentRuntimeUnsupportedSetting[] = []
 
+  // A list stored before saving refused it: refused, never run as if it held.
+  if (settings.browser.allowedDomains.length > 0) {
+    unsupported.push({
+      pointer: '/settings/browser/allowedDomains',
+      reason: BROWSER_ALLOWED_DOMAINS_UNSUPPORTED,
+      hostBinding: 'Remove the allowed domains until browser navigation enforces them.'
+    })
+  }
   if (settings.browser.mode !== 'disabled') {
     if (!readHostBrowserRuntime(host)) {
       unsupported.push({
@@ -311,6 +325,11 @@ export function collectUnsupportedRuntimeSettings(
   return unsupported
 }
 
+/** The refusal of settings Mousse cannot implement: the settings, then why, so every surface shows the reason. */
+export function unsupportedSettingsMessage(unsupported: readonly AgentRuntimeUnsupportedSetting[]): string {
+  return [`Agent runtime cannot authoritatively implement ${unsupported.map((item) => item.pointer).join(', ')}.`, ...new Set(unsupported.map((item) => item.reason))].join(' ')
+}
+
 export function assertRuntimeSettingsSupported(
   resolved: ResolvedAgentDefinition,
   host: AgentRuntimeHostBindings | undefined
@@ -319,7 +338,7 @@ export function assertRuntimeSettingsSupported(
   if (unsupported.length === 0) return
   throw new AgentDefinitionError(
     'SETTINGS_UNSUPPORTED',
-    `Agent runtime cannot authoritatively implement ${unsupported.map((item) => item.pointer).join(', ')}.`,
+    unsupportedSettingsMessage(unsupported),
     {
       details: {
         pointers: unsupported.map((item) => item.pointer),
