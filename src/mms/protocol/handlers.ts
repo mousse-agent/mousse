@@ -87,6 +87,7 @@ import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { validateScheduledJobOptions, type ScheduledJobOptionsDeps } from '../scheduled/validateJobOptions'
+import { isExecutableJobEdit, permissionAboveCeiling, permissionsAfterEdit } from '../scheduled/jobPermission'
 import { ScheduledWebhookError } from '../scheduled/ScheduledJobService'
 import { ActionExecutionError, StaleThreadActionRevisionError, ThreadActionService, type RunThreadActionOptions } from '../actions/ThreadActionService'
 import { UndoService } from '../actions/UndoService'
@@ -1799,8 +1800,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const input = asCreateScheduledJobInput(p.input)
       // The selection is stored as the profile resolves it; a `worktree` workspace names the thread that owns it.
       const checked = checkJobOptions(ctx, input)
+      // The job's ceiling is the mode its creator holds now (the target thread's, else the profile's). It comes
+      // from the daemon, never from the request, and the job's own mode may not exceed it.
+      const permissionCeiling = ctx.mms.orchestrator.scheduledCreatorCeiling(checked.threadId ?? input.threadId)
+      const tooWide = permissionAboveCeiling(input.permissionMode, permissionCeiling)
+      if (tooWide) throw jobRefused(tooWide)
       const job = ctx.mms.scheduled.createJob({
         ...input,
+        permissionCeiling,
         ...(checked.selection ? { selection: checked.selection } : {}),
         ...(checked.threadId ? { threadId: checked.threadId } : {})
       })
@@ -1825,7 +1832,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
       const touchesOptions = ['selection', 'mode', 'workspace', 'threadId', 'projectId'].some((key) => (patch as Record<string, unknown>)[key] !== undefined)
       const checked = touchesOptions ? checkJobOptions(ctx, merged) : {}
+      // An edit never raises the job's ceiling above what the editor holds now; see `permissionsAfterEdit`.
+      const permissions = permissionsAfterEdit({
+        stored: existing,
+        editor: ctx.mms.orchestrator.scheduledCreatorCeiling(checked.threadId ?? merged.threadId),
+        patchMode: patch.permissionMode,
+        executable: isExecutableJobEdit(patch)
+      })
+      if (!permissions.ok) throw jobRefused(permissions.error)
       const job = ctx.mms.scheduled.updateJob(id, {
+        ...(permissions.changed ? { permissionMode: permissions.permissionMode, permissionCeiling: permissions.permissionCeiling } : {}),
         ...(patch.name !== undefined ? { name: patch.name } : {}),
         ...(patch.prompt !== undefined ? { prompt: patch.prompt } : {}),
         ...(patch.schedule !== undefined ? { schedule: patch.schedule } : {}),

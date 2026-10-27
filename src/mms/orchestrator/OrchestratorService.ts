@@ -205,6 +205,7 @@ import { lineageForChild } from '../data/subagentLineage'
 import { WorkspaceResolver, unprovisionedContext } from '../workspace/WorkspaceResolver'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { findWorktreeOwner } from '../scheduled/validateJobOptions'
+import { jobPermissionRequest } from '../scheduled/jobPermission'
 import { occurrenceResultOfRun, scheduledReceiptId, type ScheduledRunProbe } from '../scheduled/ScheduledJobStore'
 import { UndoService } from '../actions/UndoService'
 import { CodeRevertService } from '../actions/CodeRevertService'
@@ -488,6 +489,8 @@ export interface ScheduledTurnHooks {
     error?: string
     /** The model the run's binding used, so a run that waited in the queue records what ran. */
     selection?: ModelOverride
+    /** The permission mode the run's binding enforced. */
+    permissionMode?: PermissionMode
   }): void
 }
 
@@ -3486,6 +3489,21 @@ export class OrchestratorService extends EventEmitter {
   private limitedByContinuation(limit: PermissionMode | undefined, runId: string | undefined, threadId: string): PermissionMode | undefined {
     const continued = this.continuedPermissionMode(runId, threadId)
     return continued === undefined ? limit : narrowPermissionMode(limit, continued)
+  }
+
+  /**
+   * The mode a person holds when they create or edit a scheduled job: the mode of the thread the job is
+   * bound to (its own, never above its lineage's ceiling), else the mode threads start in. Whatever
+   * cannot be read asks. The job's ceiling is this value; no request carries one.
+   */
+  scheduledCreatorCeiling(threadId?: string): PermissionMode {
+    try {
+      if (threadId && this.threadStore?.getThread(threadId)) return this.requestedPermissionMode(threadId)
+      return normalizePermissionMode(this.settingsStore.get().permissions.defaultMode)
+    } catch (error) {
+      console.warn('scheduled job ceiling could not be read; asking', { threadId, error: error instanceof Error ? error.message : String(error) })
+      return 'ask'
+    }
   }
 
   /**
@@ -7110,9 +7128,13 @@ export class OrchestratorService extends EventEmitter {
       text = text || 'Done.'
     }
     let selection: ModelOverride | undefined
+    let permissionMode: PermissionMode | undefined
     try {
       const bound = this.runEngine?.bindingForRun(runId)
-      if (bound) selection = { ...this.harness.selectionOf(bound) }
+      if (bound) {
+        selection = { ...this.harness.selectionOf(bound) }
+        permissionMode = bound.policy.permissionMode
+      }
     } catch {
       // A binding that cannot be read leaves the record without a model; the outcome still reports.
     }
@@ -7124,7 +7146,8 @@ export class OrchestratorService extends EventEmitter {
         status: result.status,
         ...(text !== undefined ? { text } : {}),
         ...(result.error ? { error: result.error } : {}),
-        ...(selection ? { selection } : {})
+        ...(selection ? { selection } : {}),
+        ...(permissionMode ? { permissionMode } : {})
       })
     } catch (error) {
       logDebug('OrchestratorService', 'scheduled occurrence observer failed', error, { runId })
@@ -9350,6 +9373,9 @@ export class OrchestratorService extends EventEmitter {
       throw error
     }
     const selection = ingress.selection
+    // The stricter of the job's mode and its ceiling (nothing when the job has neither). The turn builder narrows
+    // it by the thread's own mode and lineage, on the direct, queued and recovered paths alike, so it only tightens.
+    const permissionMode = jobPermissionRequest(ingress)
     const schedule = { jobId: ingress.jobId, occurrenceKey, ...(ingress.jobName ? { jobName: ingress.jobName } : {}) }
     let response: OrchestratorResponse
     try {
@@ -9358,6 +9384,7 @@ export class OrchestratorService extends EventEmitter {
         source: 'schedule',
         clientRequestId: scheduledReceiptId(ingress.jobId, occurrenceKey),
         modelOverride: selection,
+        ...(permissionMode ? { permissionMode } : {}),
         origin: 'schedule',
         preemptQuestions: false,
         queueOrigin: { kind: 'schedule', jobId: ingress.jobId, occurrenceKey, ...(ingress.jobName ? { jobName: ingress.jobName } : {}), ...(selection ? { selection } : {}) },
@@ -9384,6 +9411,7 @@ export class OrchestratorService extends EventEmitter {
       threadId,
       ...(runId ? { runId } : {}),
       ...(bound ? { selection: { ...this.harness.selectionOf(bound) } } : {}),
+      ...(bound?.policy.permissionMode ? { permissionMode: bound.policy.permissionMode } : {}),
       transcriptWritten: true
     }
     if (response.replayed) return { ...base, text: '', silent: false, status: 'replayed' }

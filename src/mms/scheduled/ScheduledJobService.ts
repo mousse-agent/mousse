@@ -64,6 +64,8 @@ export interface ScheduledOccurrenceSettled {
   error?: string
   /** The model the run's binding used. */
   selection?: ScheduledRunDetails['selection']
+  /** The permission mode the run's binding enforced. */
+  permissionMode?: ScheduledRunDetails['permissionMode']
 }
 
 export class ScheduledJobService extends EventEmitter {
@@ -345,7 +347,7 @@ export class ScheduledJobService extends EventEmitter {
         event.jobId,
         event.occurrenceKey,
         { status: event.status, text: event.text, error: event.error, silent },
-        { runId: event.runId, ...(event.selection ? { selection: event.selection } : {}) }
+        { runId: event.runId, ...(event.selection ? { selection: event.selection } : {}), ...(event.permissionMode ? { permissionMode: event.permissionMode } : {}) }
       )
       // A finished run on the project's checkout leaves nothing to keep open: its reply is in the run record and
       // the thread stays reachable from it. A new-worktree thread holds the run's work, so it stays open.
@@ -621,6 +623,8 @@ export class ScheduledJobService extends EventEmitter {
         selection: job.selection,
         mode: job.mode,
         workspace: job.workspace,
+        permissionMode: job.permissionMode,
+        permissionCeiling: job.permissionCeiling,
         accessCap: job.accessCap,
         claim: { threadId: claim?.threadId, runId: claim?.runId },
         resumeWaiting: job.runClaim?.resumedWaiting === true,
@@ -660,6 +664,7 @@ export class ScheduledJobService extends EventEmitter {
             ...(result.queueItemId ? { queueItemId: result.queueItemId } : {}),
             ...(result.selection ? { selection: result.selection } : {}),
             mode: job.mode ?? 'agent',
+            ...(result.permissionMode ? { permissionMode: result.permissionMode } : {}),
             ...(job.workspace ? { workspace: job.workspace } : {}),
             ...missingDetails
           }

@@ -68,6 +68,8 @@ export interface ScheduledJobDefinition {
   selection?: ScheduledJob['selection']
   mode?: ScheduledJob['mode']
   workspace?: ScheduledJob['workspace']
+  permissionMode?: ScheduledJob['permissionMode']
+  permissionCeiling?: ScheduledJob['permissionCeiling']
   createdBy?: ScheduledJob['createdBy']
   accessCap?: ScheduledJob['accessCap']
   trigger?: ScheduledJob['trigger']

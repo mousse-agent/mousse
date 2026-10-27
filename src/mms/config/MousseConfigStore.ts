@@ -111,6 +111,8 @@ function jobToDefinition(job: ScheduledJob): ScheduledJobDefinition {
     selection: job.selection,
     mode: job.mode,
     workspace: job.workspace,
+    permissionMode: job.permissionMode,
+    permissionCeiling: job.permissionCeiling,
     createdBy: job.createdBy,
     accessCap: job.accessCap,
     trigger: job.trigger,
