@@ -5,11 +5,11 @@
 > The definition, policy digest, reader dispatcher and native reader remain. The text
 > below describes the bounds a harness-backed bot runtime has to meet, not current behavior.
 
-`NativeBotRuntime` used the former `LlmClient` tool loop through its host-owned
-`runtimeContext` port. It does not use the ordinary thread's prompt, Skills, MCP,
-project instructions, browser, tools, provider session or transcript. Root composes
-admission, materialization, output publication, compartment storage and terminal
-accounting; a transcript never authorizes another execution.
+A harness-backed bot runtime reaches the model through its host-owned `runtimeContext`
+port. It does not use the ordinary thread's prompt, Skills, MCP, project instructions,
+browser, tools, provider session or transcript. Root composes admission,
+materialization, output publication, compartment storage and terminal accounting; a
+transcript never authorizes another execution.
 
 The constructor requires a fixed definition, actual profile/installation identity,
 the compartment and durable execution-binding ports, a current-authorization gate,

@@ -2292,11 +2292,6 @@ export class Harness implements HarnessGateway {
     }
   }
 
-  /**
-   * Whether Mousse owns the instance's sign-in: a private home, a Mousse-managed agent, or a pi
-   * provider key Mousse stores, or a driver whose sign-in is always Mousse's (Antigravity's Google
-   * session, whichever executable runs). The built-in CLIs use the user's own terminal login.
-   */
   /** Each driver's own migration of its stored instances (`HarnessDriver.upgrade`), once at start. */
   private upgradeDrivers(): void {
     let entries: Array<[string, { driver: string; config?: Record<string, unknown> }]> = []
@@ -2319,6 +2314,11 @@ export class Harness implements HarnessGateway {
     }
   }
 
+  /**
+   * Whether Mousse owns the instance's sign-in: a private home, a Mousse-managed agent, or a pi
+   * provider key Mousse stores, or a driver whose sign-in is always Mousse's (Antigravity's Google
+   * session, whichever executable runs). The built-in CLIs use the user's own terminal login.
+   */
   private ownsSignIn(record: InstanceRecord): boolean {
     if (record.entry.driver === 'pi' || record.driver.ownsSignIn) return true
     if (record.env.home) return true
