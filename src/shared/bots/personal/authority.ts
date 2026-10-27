@@ -1,6 +1,6 @@
 import type { CounterScope } from '../../harness/counters'
+import type { SpendScope } from '../../harness/spend'
 import type { NeutralTool } from '../../harness/tools'
-import type { Usage } from '../../transcript'
 
 /**
  * The contracts of a personal bot's authority (PR 6 §2 and §4). A bot activation's runs are held to
@@ -66,7 +66,11 @@ export interface BotAuthority {
   /** The activation's request and tool-call counts: one atomic row, shared by its main run and consults. */
   counters: CounterScope
   time: ActiveTimeScope
-  /** The activation's spend ledger; null until token and USD limits can be reserved (no such limit is offered then). */
+  /**
+   * The activation's token and USD ledger (`committed + reserved`, shared by its main run and
+   * consults): the gateway's spend scope, so a turn hands it over as `TurnSpec.spend`. Null when
+   * the bot has no token or USD limit.
+   */
   spend: SpendScope | null
 }
 
@@ -76,27 +80,4 @@ export interface ActiveTimeScope {
   deadline(): number
   /** Aborts when the main dispatch ends, for any reason. */
   signal: AbortSignal
-}
-
-export type SpendLimitKey = 'maxInputTokens' | 'maxOutputTokens' | 'maxUsd'
-
-/** A model's prices, in USD per million tokens. */
-export interface Prices {
-  input: number
-  output: number
-  cacheRead: number
-  cacheWrite: number
-}
-
-/** One durable `committed + reserved` ledger per activation, shared by its main run and consults. */
-export interface SpendScope {
-  /**
-   * Reserves a request's most it could cost before it is sent: `inputBound` tokens in and up to
-   * `wireCap` out. Granted with the output cap that fits what is left, or refused at a limit.
-   */
-  reserve(request: { runId: string; inputBound: number; wireCap: number; prices: Prices }):
-    | { ok: true; reservationId: string; grantedWireCap: number }
-    | { ok: false; limit: SpendLimitKey }
-  /** Replaces the reservation with the request's actual usage, once. */
-  settle(reservationId: string, usage: Usage): void
 }
