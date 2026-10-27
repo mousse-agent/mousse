@@ -10,7 +10,6 @@ import { describe, expect, it, vi } from 'vitest'
 import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
 import { SharedAgentModelLookup } from '../../src/mms/platform/SharedAgentModelLookup'
-import type { ProviderAuthService } from '../../src/mms/providers/ProviderAuthService'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
 import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
@@ -23,6 +22,12 @@ import type { OneShotSpec } from '../../src/mms/harness/driver'
 const pi = new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } }))
 const claude: ProviderAdapter = { driver: 'claude', capabilities: pi.capabilities, configured: () => true, startTurn: async () => { throw new Error('unused') }, interrupt: async () => 'not_active' }
 
+/** What the Claude runtime lists: Sonnet takes images and has a long window; Opus states neither. */
+const CLAUDE_MODELS = [
+  { id: 'sonnet', label: 'Sonnet', efforts: ['low', 'high'], images: true as const, contextWindow: 200_000 },
+  { id: 'opus', label: 'Opus' }
+]
+
 /** Built-in Claude and a second account, both enabled; Work hides `opus`. */
 async function twoClaudes(work: { enabled: boolean } = { enabled: true }) {
   let stored: unknown = {
@@ -30,7 +35,7 @@ async function twoClaudes(work: { enabled: boolean } = { enabled: true }) {
     'claude:work': { driver: 'claude', enabled: work.enabled, config: { displayName: 'Work' } }
   }
   const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
-  const harness = testHarness({ drivers: [adapterDriver(pi), adapterDriver(claude)], instances })
+  const harness = testHarness({ drivers: [adapterDriver(pi), adapterDriver(claude, { mcp: true, runtime: { models: () => CLAUDE_MODELS } })], instances })
   await harness.instances.setModelPrefs('claude:work', { hidden: ['opus'] })
   return { harness, instances }
 }
@@ -152,16 +157,6 @@ describe('skill model', () => {
 })
 
 describe('agent definition model', () => {
-  /** A pi catalog that also lists Claude models, so the lookup reaches its catalog step. */
-  const providerAuth = {
-    models: {
-      getModels: () => [
-        { id: 'sonnet', name: 'Sonnet', reasoning: true, input: ['text'], api: 'anthropic-messages', contextWindow: 200_000 },
-        { id: 'opus', name: 'Opus', reasoning: true, input: ['text'], api: 'anthropic-messages', contextWindow: 200_000 }
-      ]
-    }
-  } as unknown as ProviderAuthService
-
   it('the stored ref keeps its instance', () => {
     expect(parseModelRef({ providerId: 'claude-subscription', modelId: 'sonnet', instanceId: ' claude:work ' }, '/ref')).toEqual({ providerId: 'claude-subscription', modelId: 'sonnet', instanceId: 'claude:work' })
     expect(parseModelRef({ providerId: 'claude-subscription', modelId: 'sonnet' }, '/ref')).toEqual({ providerId: 'claude-subscription', modelId: 'sonnet' })
@@ -170,20 +165,34 @@ describe('agent definition model', () => {
 
   it('resolves on the instance the picker chose, and a legacy ref on the built-in instance', async () => {
     const { harness } = await twoClaudes()
-    const lookup = new SharedAgentModelLookup(providerAuth, () => harness)
+    const lookup = new SharedAgentModelLookup(() => harness)
     expect(lookup.resolve({ providerId: 'claude-subscription', modelId: 'sonnet', instanceId: 'claude:work' })?.ref.instanceId).toBe('claude:work')
     expect(lookup.resolve({ providerId: 'claude-subscription', modelId: 'sonnet' })?.ref.instanceId).toBe('claude')
   })
 
   it('a disabled instance or hidden model is unavailable with its code', async () => {
     const off = (await twoClaudes({ enabled: false })).harness
-    const disabled = new SharedAgentModelLookup(providerAuth, () => off)
+    const disabled = new SharedAgentModelLookup(() => off)
     expect(disabled.resolve({ providerId: 'claude-subscription', modelId: 'sonnet', instanceId: 'claude:work' })).toMatchObject({ available: false, unavailableCode: 'provider_instance_disabled' })
     const on = (await twoClaudes()).harness
-    const hidden = new SharedAgentModelLookup(providerAuth, () => on)
+    const hidden = new SharedAgentModelLookup(() => on)
     expect(hidden.resolve({ providerId: 'claude-subscription', modelId: 'opus', instanceId: 'claude:work' })).toMatchObject({ available: false, unavailableCode: 'model_hidden' })
     // The built-in instance does not hide it.
     expect(hidden.resolve({ providerId: 'claude-subscription', modelId: 'opus' })).toMatchObject({ available: true })
+  })
+
+  it("reads the model's facts from the gateway catalogue of the ref's instance", async () => {
+    const { harness } = await twoClaudes()
+    const lookup = new SharedAgentModelLookup(() => harness)
+    // `tools` comes from the driver serving Mousse's tools; vision and the window from the listing.
+    expect(lookup.resolve({ providerId: 'claude-subscription', modelId: 'sonnet', instanceId: 'claude:work' })).toMatchObject({
+      available: true, label: 'Sonnet', efforts: ['low', 'high'], capabilities: ['reasoning', 'vision', 'tools', 'long_context']
+    })
+    expect(lookup.resolve({ providerId: 'claude-subscription', modelId: 'opus' })).toMatchObject({ available: true, efforts: [], capabilities: ['tools'] })
+    // A model the instance does not list is not in the catalogue.
+    expect(lookup.resolve({ providerId: 'claude-subscription', modelId: 'absent' })).toBeNull()
+    // No gateway yet: nothing resolves.
+    expect(new SharedAgentModelLookup(() => undefined).resolve({ providerId: 'claude-subscription', modelId: 'sonnet' })).toBeNull()
   })
 })
 

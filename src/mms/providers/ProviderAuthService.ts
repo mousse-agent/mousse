@@ -311,7 +311,9 @@ export class ProviderAuthService {
         id: model.id,
         label: model.name,
         ...(efforts && efforts.length > 0 ? { efforts } : {}),
-        ...(piOneShotRunsOn(model.api) ? {} : { oneShot: false as const })
+        ...(piOneShotRunsOn(model.api) ? {} : { oneShot: false as const }),
+        ...(model.input.includes('image') ? { images: true as const } : {}),
+        ...(model.contextWindow > 0 ? { contextWindow: model.contextWindow } : {})
       }
     })
     if (models.length === 0) return null

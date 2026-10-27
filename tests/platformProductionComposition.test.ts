@@ -234,7 +234,7 @@ describe('production platform composition through framed MMS', () => {
       expect(native.listProfileBuiltinToolIds()).toEqual(['read'])
       const pinned = await client.agents.publish({ profileId: f.alice.id, id: created.id, expectedDraftHash: created.draftHash })
       expect(pinned.revision).toBe(created.semanticHash)
-      const lookup = new SharedAgentModelLookup(services.providerAuth)
+      const lookup = new SharedAgentModelLookup(() => services.harness)
       expect(lookup.resolve({ providerId: provider.id, modelId: 'absent-fixture-model' })).toBeNull()
       expect(lookup.resolve(settings.primaryModel.ref)?.capabilities).not.toContain('browser_native')
       const current = services.settings.get().integrations
