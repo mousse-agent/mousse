@@ -28,7 +28,7 @@ import { fileWorkspaceScope } from '../src/renderer/stores/filesStore'
 import { formatChatReferences, parseChatReference } from '../src/shared/chatReferences'
 import { parseActions, stripActionBlocks, filterActionsForChatMode } from '../src/mms/orchestrator/actions'
 import { buildOrchestratorSystemPrompt } from '../src/mms/orchestrator/systemPrompt'
-import { BuildModeTools } from '../src/mms/orchestrator/BuildModeTools'
+import { ProjectGitTools } from '../src/mms/workflows/tools/ProjectGitTools'
 import { FileService } from '../src/mms/files/FileService'
 import { GitService } from '../src/mms/git/GitService'
 import { mkdir, mkdtemp, writeFile, rm } from 'fs/promises'
@@ -519,10 +519,10 @@ describe('composer mentions', () => {
   })
 })
 
-describe('BuildModeTools', () => {
+describe('ProjectGitTools', () => {
   it('runs commands in the project root and blocks dangerous commands', async () => {
     const root = await mkdtemp(join(tmpdir(), 'mousse-build-'))
-    const tools = new BuildModeTools(new FileService(), new GitService())
+    const tools = new ProjectGitTools(new FileService(), new GitService())
 
     try {
       await writeFile(join(root, 'marker.txt'), 'hello', 'utf-8')
@@ -540,11 +540,11 @@ describe('BuildModeTools', () => {
   })
 })
 
-describe('PiCodingTools', () => {
+describe('ProjectFileTools', () => {
   it('exposes the full Pi SDK tool set and executes read/edit/grep/find/ls', async () => {
-    const { PiCodingTools } = await import('../src/mms/orchestrator/PiCodingTools')
+    const { ProjectFileTools } = await import('../src/mms/workflows/tools/ProjectFileTools')
     const root = await mkdtemp(join(tmpdir(), 'mousse-pi-tools-'))
-    const tools = new PiCodingTools()
+    const tools = new ProjectFileTools()
 
     try {
       await writeFile(join(root, 'marker.txt'), 'hello world\nsecond line\n', 'utf-8')

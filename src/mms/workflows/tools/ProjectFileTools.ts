@@ -2,11 +2,11 @@ import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { Tool } from '@earendil-works/pi-ai'
-import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
-import { countLineEdits } from '../../shared/lineEditStats'
+import type { LineEditStatsStore } from '../../stats/LineEditStatsStore'
+import { countLineEdits } from '../../../shared/lineEditStats'
 import { readFile } from 'fs/promises'
-import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
-import { resolveToolPath, sanitizeToolArgs } from './toolPathSafety'
+import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../../modes/ModeRegistry'
+import { resolveToolPath, sanitizeToolArgs } from '../../orchestrator/toolPathSafety'
 
 /**
  * Pi coding-agent built-in tools (read, bash, edit, write, grep, find, ls).
@@ -115,7 +115,7 @@ function contentToText(content: Array<{ type: string; text?: string }>): string 
     .join('\n')
 }
 
-export class PiCodingTools {
+export class ProjectFileTools {
   private toolsByCwd = new Map<string, Record<PiToolName, AgentToolLike>>()
 
   constructor(private lineEditStats?: LineEditStatsStore) {}

@@ -65,8 +65,8 @@ import type { FileService } from '../files/FileService'
 
 import type { GitService } from '../git/GitService'
 
-import { BuildModeTools } from './BuildModeTools'
-import { PiCodingTools, piToolSetForMode } from './PiCodingTools'
+import { ProjectGitTools } from '../workflows/tools/ProjectGitTools'
+import { ProjectFileTools, piToolSetForMode } from '../workflows/tools/ProjectFileTools'
 import { DevGuiTools } from '../devgui/DevGuiTools'
 import { QuickActionTools, type CreatedQuickAction } from './QuickActionTools'
 import { userQuestionService as defaultUserQuestionService, UserQuestionService } from './UserQuestionService'
@@ -422,9 +422,9 @@ export class LlmClient {
   private readonly questions: UserQuestionService
   private readonly modeRegistry: ModeRegistry
 
-  private buildTools: BuildModeTools
+  private buildTools: ProjectGitTools
 
-  private piCodingTools: PiCodingTools
+  private piCodingTools: ProjectFileTools
 
   /** The app tools (plans, tasks, skills, browser, quick actions, web, dev GUI, applets, delegation) over this client's dependencies. */
   private readonly appTools: { registry: ToolRegistry; families: Record<AppToolFamily, string[]> }
@@ -475,8 +475,8 @@ export class LlmClient {
     this.modeRegistry = runtime?.modeRegistry ?? defaultModeRegistry
     this.browserRuntime = runtime?.browserRuntime
 
-    this.buildTools = new BuildModeTools(fileService!, gitService!, lineEditStats)
-    this.piCodingTools = new PiCodingTools(lineEditStats)
+    this.buildTools = new ProjectGitTools(fileService!, gitService!, lineEditStats)
+    this.piCodingTools = new ProjectFileTools(lineEditStats)
 
     // The same modules the Mousse MCP server serves, over this client's own dependencies.
     this.appTools = createAppToolRegistry({

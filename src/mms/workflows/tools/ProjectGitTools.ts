@@ -1,9 +1,9 @@
 import { spawn } from 'child_process'
 import { Type, type Tool } from '@earendil-works/pi-ai'
-import type { FileService } from '../files/FileService'
-import type { GitService } from '../git/GitService'
-import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
-import { isFilesystemWideBashCommand } from './toolPathSafety'
+import type { FileService } from '../../files/FileService'
+import type { GitService } from '../../git/GitService'
+import type { LineEditStatsStore } from '../../stats/LineEditStatsStore'
+import { isFilesystemWideBashCommand } from '../../orchestrator/toolPathSafety'
 
 const COMMAND_TIMEOUT_MS = 120_000
 const MAX_COMMAND_OUTPUT = 32_000
@@ -18,7 +18,7 @@ const BLOCKED_COMMAND_PATTERNS = [
   /\breboot\b/i
 ]
 
-export class BuildModeTools {
+export class ProjectGitTools {
   constructor(
     private fileService: FileService,
     private gitService: GitService,
@@ -44,7 +44,7 @@ export class BuildModeTools {
     ]
   }
 
-  /** @deprecated Prefer Pi SDK tools via PiCodingTools; kept for tests/legacy. */
+  /** @deprecated Prefer Pi SDK tools via ProjectFileTools; kept for tests/legacy. */
   getToolDefinitions(): Tool[] {
     return [
       {
