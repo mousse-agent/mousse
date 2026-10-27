@@ -13,6 +13,15 @@ import { isPermissionMode, type PermissionMode } from '../../shared/permissionMo
 import { WORKFLOW_UUID_PATTERN } from '../../shared/workflows'
 
 export interface EnqueueMessageInput {
+  /**
+   * A fixed id for an item that must exist once however often it is written (the continue message of a
+   * paused run). An item with this id already on the queue is returned unchanged.
+   */
+  id?: string
+  /** Puts the item ahead of every pending item; claimed items keep their order. */
+  atFront?: boolean
+  /** The paused run this item continues (`QueuedMessage.continuationOfRunId`). */
+  continuationOfRunId?: string
   threadId: string
   content: string
   workflowInvocationId?: string
@@ -46,6 +55,12 @@ export class QueueValidationError extends Error {
 function nextOrder(items: QueuedMessage[]): number {
   if (items.length === 0) return 0
   return Math.max(...items.map((item) => item.order)) + 1
+}
+
+/** One slot before every item, so a pending item written there is the next one claimed. */
+function frontOrder(items: QueuedMessage[]): number {
+  if (items.length === 0) return 0
+  return Math.min(...items.map((item) => item.order)) - 1
 }
 
 function normalizeClaim(raw: unknown): QueuedMessageClaim | undefined {
@@ -141,6 +156,7 @@ export function normalizeQueuedMessages(raw: unknown, threadId?: string): Queued
       source: typeof item.source === 'string' ? item.source : undefined,
       internal: item.internal === true ? true : undefined,
       ...(typeof item.runId === 'string' && item.runId ? { runId: item.runId } : {}),
+      ...(typeof item.continuationOfRunId === 'string' && item.continuationOfRunId ? { continuationOfRunId: item.continuationOfRunId } : {}),
       ...(Array.isArray(item.inboxIds) && item.inboxIds.length && item.inboxIds.every((id) => typeof id === 'string') ? { inboxIds: item.inboxIds } : {}),
       ...(Array.isArray(item.subagentNotice) && item.subagentNotice.length ? { subagentNotice: item.subagentNotice } : {}),
       ...(typeof item.stopGeneration === 'number' && Number.isSafeInteger(item.stopGeneration) && item.stopGeneration >= 0 ? { stopGeneration: item.stopGeneration } : {}),
@@ -189,20 +205,26 @@ export function enqueueMessage(
     }
   }
 
+  if (input.id) {
+    const existing = items.find((item) => item.id === input.id)
+    if (existing) return { items, item: existing }
+  }
+
   const item: QueuedMessage = {
-    id: uuidv4(),
+    id: input.id || uuidv4(),
     threadId: input.threadId,
     content: input.content,
     workflowInvocationId: input.workflowInvocationId,
     mode: input.mode !== undefined ? normalizeChatMode(input.mode) : undefined,
     images: input.images?.filter((img) => img.data && img.mimeType),
     enqueuedAt: new Date().toISOString(),
-    order: nextOrder(items),
+    order: input.atFront ? frontOrder(items) : nextOrder(items),
     intent: input.intent ?? 'normal',
     state: 'pending',
     source: input.source,
     internal: input.internal === true ? true : undefined,
     ...(input.runId ? { runId: input.runId } : {}),
+    ...(input.continuationOfRunId ? { continuationOfRunId: input.continuationOfRunId } : {}),
     ...(input.inboxIds?.length ? { inboxIds: input.inboxIds } : {}),
     ...(input.subagentNotice?.length ? { subagentNotice: input.subagentNotice } : {}),
     ...(input.stopGeneration !== undefined ? { stopGeneration: input.stopGeneration } : {}),

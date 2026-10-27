@@ -313,3 +313,41 @@ describe('ThreadMessageQueue domain', () => {
     expect(result.items).toHaveLength(0)
   })
 })
+
+describe('ThreadMessageQueue fixed ids and the front of the queue (the continue message of a paused run)', () => {
+  const owner = { ownerPid: process.pid, ownerToken: 'drain' }
+
+  it('an item with a fixed id is written once: a second write returns the first unchanged', () => {
+    const first = enqueueMessage(enqueueMessage([], { threadId: 't1', content: 'queued' }).items, { threadId: 't1', id: 'resume:run:1', content: 'Continue where you left off.', internal: true, inboxIds: ['row-1'] })
+    const again = enqueueMessage(first.items, { threadId: 't1', id: 'resume:run:1', content: 'different', inboxIds: ['row-2'] })
+    expect(again.item).toBe(first.item)
+    expect(again.items).toBe(first.items)
+    expect(again.item).toMatchObject({ id: 'resume:run:1', inboxIds: ['row-1'] })
+    expect(again.items).toHaveLength(2)
+  })
+
+  it('a front insert is the next pending item, leaves claimed items where they are, and works on an empty queue', () => {
+    expect(enqueueMessage([], { threadId: 't1', id: 'solo', content: 'only', atFront: true }).item.order).toBe(0)
+
+    let items = enqueueMessage([], { threadId: 't1', content: 'a' }).items
+    items = enqueueMessage(items, { threadId: 't1', content: 'b' }).items
+    const claimed = claimNextNormal(items, owner)
+    items = enqueueMessage(claimed.items, { threadId: 't1', id: 'resume:run:1', content: 'continue', atFront: true, continuationOfRunId: 'run:1' }).items
+
+    expect(listPendingQueue(items).map((item) => item.content)).toEqual(['continue', 'b'])
+    // The claimed item keeps its own order value.
+    expect(items.find((item) => item.id === claimed.claimed!.id)).toMatchObject({ state: 'claimed', order: claimed.claimed!.order })
+    expect(claimNextNormal(items, { ...owner, ownerToken: 'next' }).claimed).toMatchObject({ id: 'resume:run:1', continuationOfRunId: 'run:1' })
+  })
+
+  it('keeps the continued run through normalization, and reordering the rest still works with a negative slot', () => {
+    let items = enqueueMessage([], { threadId: 't1', content: 'a' }).items
+    items = enqueueMessage(items, { threadId: 't1', content: 'b' }).items
+    items = enqueueMessage(items, { threadId: 't1', id: 'resume:run:1', content: 'continue', atFront: true, internal: true, continuationOfRunId: 'run:1' }).items
+    const [a, b] = items.filter((item) => !item.internal)
+
+    expect(normalizeQueuedMessages(JSON.parse(JSON.stringify(items)), 't1').find((item) => item.id === 'resume:run:1')).toMatchObject({ continuationOfRunId: 'run:1', order: -1 })
+    const reordered = reorderQueuedMessages(items, [b.id, a.id])
+    expect(listPendingQueue(reordered).map((item) => item.content)).toEqual(['continue', 'b', 'a'])
+  })
+})

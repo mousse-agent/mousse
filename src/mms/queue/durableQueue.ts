@@ -19,13 +19,22 @@ import { withQueueMutationLock } from './ThreadExecutionLease'
 export function mutateDurableQueue(
   store: ThreadDataStore,
   threadId: string,
-  mutator: (items: QueuedMessage[]) => QueuedMessage[]
+  mutator: (items: QueuedMessage[]) => QueuedMessage[],
+  options?: {
+    /**
+     * Runs after the queue was saved and before the queue lock is released: what must happen only once
+     * the saved queue is on disk (marking inbox rows as owned by an item that just became durable) and
+     * before any drain can claim the item. If it throws the save stays; the caller repeats the step.
+     */
+    afterSave?: (saved: QueuedMessage[]) => void
+  }
 ): QueuedMessage[] {
   const threadDir = store.getThreadDir(threadId)
   return withQueueMutationLock(threadDir, () => {
     const current = store.loadMessageQueue(threadId)
     const next = normalizeQueuedMessages(mutator(current), threadId)
     store.saveMessageQueue(threadId, next)
+    options?.afterSave?.(next)
     return next
   })
 }
