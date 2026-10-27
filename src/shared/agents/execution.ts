@@ -117,6 +117,12 @@ export interface AgentRuntimePolicy {
   maxContextTokens?: number
   fallbacks: AgentRuntimeFallbackPolicy
   fallbackModels: ResolvedAgentDefinition['model']['fallbacks']
+  /**
+   * Nobody watches this run as it goes (`definitionRunUnattended`: a schedule, a channel, a workflow
+   * node, a bridge dispatch). Where the runtime's shell is not contained, its shell commands are
+   * refused rather than asked about. Absent: a person started it.
+   */
+  unattended?: true
 }
 
 export interface AgentRuntimeToolApprovalRequest {
@@ -155,6 +161,11 @@ export interface AgentRuntimeHostBindings {
    * Revalidated after the await, immediately before side effects.
    */
   approveToolRequest?: AgentRuntimeToolApprovalCallback
+  /**
+   * The run was not started by a person who watches it, whatever its source says (a workflow node
+   * started from the CLI, a bridge dispatch from a peer): `AgentRuntimePolicy.unattended`.
+   */
+  unattended?: boolean
 }
 
 export interface AgentRuntimeAttachment {

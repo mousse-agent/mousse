@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { HarnessCaps } from '../../../../../shared/harness/types'
-import { hasContainmentEvidence, PI_RPC_EVIDENCE_ITEMS, type ContainmentEvidence } from '../../../compatibility'
+import { hasContainmentEvidence, PI_RPC_EVIDENCE_ITEMS, PI_RPC_NO_SHELL_ITEMS, type ContainmentEvidence } from '../../../compatibility'
 import type { DriverContext, DriverRuntime, LiveProcessHost } from '../../../driver'
 import { PiRpcEngine, type PiEngineCatalog, type PiMousseTool, type PiRpcEngineOptions } from '../../../pi/engine'
 import type { PiRuntimePaths } from '../../../pi/launch'
@@ -16,7 +16,8 @@ import { piInstanceRuntime, type PiCredentials } from './legacy'
  * - Containment and tool control are `weak`/`approval_only` (these caps) wherever the evidence suite
  *   has not passed for this platform and Pi version: Mousse sees and can refuse every call, but does
  *   not run the tools. Where it passed they are `strong`/`exact` (`piRpcCaps`), and the engine runs
- *   agent definitions.
+ *   agent definitions. Where it passed without the contained shell (a no-shell record) they are
+ *   `weak`/`exact`: the engine runs agent definitions, and a definition's shell asks a person first.
  * - `budgets: 'hard'`: every model request is charged through the guarded request wrapper
  *   (`/pi/request`) and every tool call at the gate, and the next one is refused before it starts
  *   once a turn or tool-call limit is reached.
@@ -56,21 +57,47 @@ export interface PiRpcEvidenceInput {
 }
 
 /**
- * Whether the evidence suite passed on this platform for this Pi (`compatibility.ts`): every item,
- * for this exact version. Without it the engine stays `weak`/`approval_only` and runs no definition.
+ * What the evidence suite proved on this platform for this exact Pi version (`compatibility.ts`):
+ * every item, the contained shell included (`shell`); every item but the contained shell
+ * (`no_shell`, a no-shell record); or nothing (`none`).
  */
-export function piRpcHasEvidence(input: PiRpcEvidenceInput): boolean {
-  if (!input.piVersion) return false
-  return hasContainmentEvidence({ driver: 'pi', kind: 'tools', platform: input.platform, cliVersion: input.piVersion, items: PI_RPC_EVIDENCE_ITEMS }, input.evidence)
+export type PiRpcEvidenceLevel = 'shell' | 'no_shell' | 'none'
+
+export function piRpcEvidenceLevel(input: PiRpcEvidenceInput): PiRpcEvidenceLevel {
+  if (!input.piVersion) return 'none'
+  const query = { driver: 'pi', kind: 'tools', platform: input.platform, cliVersion: input.piVersion } as const
+  if (hasContainmentEvidence({ ...query, items: PI_RPC_EVIDENCE_ITEMS }, input.evidence)) return 'shell'
+  if (hasContainmentEvidence({ ...query, items: PI_RPC_NO_SHELL_ITEMS }, input.evidence)) return 'no_shell'
+  return 'none'
 }
 
-/** The engine's caps here: `strong`/`exact` only where the evidence suite passed (PR 2 §4, S7). */
+/**
+ * Whether the engine runs agent definitions here: a record with or without the contained shell.
+ * Without one the engine stays `weak`/`approval_only` and runs no definition.
+ */
+export function piRpcHasEvidence(input: PiRpcEvidenceInput): boolean {
+  return piRpcEvidenceLevel(input) !== 'none'
+}
+
+/**
+ * The engine's caps here (PR 2 §4, S7): `strong`/`exact` where every item passed, `weak`/`exact`
+ * where every item but the contained shell did, else `weak`/`approval_only`.
+ */
 export function piRpcCaps(input: PiRpcEvidenceInput): HarnessCaps {
-  return piRpcHasEvidence(input) ? PI_RPC_EXACT_CAPS : PI_RPC_CAPS
+  const level = piRpcEvidenceLevel(input)
+  return level === 'shell' ? PI_RPC_EXACT_CAPS : level === 'no_shell' ? PI_RPC_NO_SHELL_CAPS : PI_RPC_CAPS
 }
 
 /** The engine's caps where its evidence suite passed. */
 export const PI_RPC_EXACT_CAPS: HarnessCaps = Object.freeze({ ...PI_RPC_CAPS, containment: 'strong', toolControl: 'exact' })
+
+/**
+ * The engine's caps where its evidence suite passed without the contained shell: Mousse decides
+ * every call (`exact`), but Pi's shell runs uncontained (`weak`). So a definition's shell command
+ * asks a person first, bound to the exact command, and an unattended definition runs none
+ * (`PiRpcEngine.gate`). Checkpoint restore still reviews the diff, as `weak` containment does.
+ */
+export const PI_RPC_NO_SHELL_CAPS: HarnessCaps = Object.freeze({ ...PI_RPC_CAPS, toolControl: 'exact' })
 
 /** The pinned Pi's version, read from the packaged runtime once; undefined when it cannot be read. */
 export function piRuntimeVersion(root: string): string | undefined {

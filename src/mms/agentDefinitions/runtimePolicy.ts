@@ -59,6 +59,23 @@ export function isUnattendedSource(source: AgentExecutionSource): boolean {
   return source === 'schedule' || source === 'channel'
 }
 
+/**
+ * Whether nobody watches a definition run as it goes (`AgentRuntimePolicy.unattended`): a schedule,
+ * a channel, a workflow node, or a run its host marks so (a workflow node started from the CLI, a
+ * bridge dispatch). Wider than `isUnattendedSource`, which keeps its approval rules unchanged.
+ */
+export function definitionRunUnattended(source: AgentExecutionSource, host?: Pick<AgentRuntimeHostBindings, 'unattended'>): boolean {
+  return isUnattendedSource(source) || source === 'workflow' || host?.unattended === true
+}
+
+/** Why an unattended definition run's shell command is refused where the shell is not contained. */
+export const UNATTENDED_SHELL_REFUSAL =
+  "Shell commands can't run in an unattended agent run (a schedule, a workflow or a dispatch) on this platform: Mousse cannot contain the shell here, so a person must approve each command, and nobody is watching this run."
+
+/** Why a definition run's shell command is refused when nobody can be asked about it. */
+export const SHELL_APPROVAL_UNAVAILABLE =
+  'Shell commands ask a person first on this platform, because Mousse cannot contain the shell here, and this run has no way to ask.'
+
 export function resolveExistingCanonical(pathValue: string): string {
   const resolved = resolve(normalizeOsPath(pathValue))
   return existsSync(resolved) ? realpathSync(resolved) : resolved
@@ -342,7 +359,8 @@ export function compileRuntimePolicy(input: {
       retryCount: settings.recovery.retryCount,
       backoffMs: settings.recovery.backoffMs
     },
-    fallbackModels: structuredClone(resolved.model.fallbacks)
+    fallbackModels: structuredClone(resolved.model.fallbacks),
+    ...(definitionRunUnattended(input.source, host) ? { unattended: true as const } : {})
   })
 }
 
@@ -373,6 +391,8 @@ export interface TrustedToolDispatchPreparation {
   allowed: boolean
   message?: string
   needsApproval: boolean
+  /** The approval is a person's, for a shell command the runtime cannot contain (`uncontainedShell`). */
+  shellAsk?: true
   classification: AgentRuntimeToolClassification
   canonicalToolName: string
   workspacePaths: string[]
@@ -387,6 +407,11 @@ export function prepareTrustedToolDispatch(input: {
   args: Record<string, unknown>
   isMcp: boolean
   projectPath?: string
+  /**
+   * The call runs a shell the runtime cannot contain (`PI_RPC_NO_SHELL_CAPS`): it always needs a
+   * person's approval, and an unattended run (`AgentRuntimePolicy.unattended`) refuses it.
+   */
+  uncontainedShell?: boolean
 }): TrustedToolDispatchPreparation {
   const canonicalToolName = canonicalizeBuiltinToolName(input.toolName)
   const classification = classifyTrustedTool(input.toolName, input.isMcp)
@@ -461,8 +486,15 @@ export function prepareTrustedToolDispatch(input: {
     }
   }
 
+  // A shell command the runtime cannot contain (Pi's agent on a no-shell record) asks a person
+  // first, whatever the definition's approval settings say, and the approval is bound to its exact
+  // arguments (the digest). A run nobody watches runs none.
+  const shellAsk = input.uncontainedShell === true
+  if (shellAsk && input.policy.unattended) return deny(UNATTENDED_SHELL_REFUSAL)
+
   const needsApproval =
-    input.policy.approval.policy === 'always' && classification !== 'ask'
+    shellAsk
+    || (input.policy.approval.policy === 'always' && classification !== 'ask')
     || (unattended && input.policy.approval.policy === 'inherit' && mutating && input.policy.approval.unattendedBehavior === 'pause')
 
   const approvalRequest: AgentRuntimeToolApprovalRequest = {
@@ -482,6 +514,7 @@ export function prepareTrustedToolDispatch(input: {
   return {
     allowed: true,
     needsApproval,
+    ...(shellAsk ? { shellAsk: true as const } : {}),
     classification,
     canonicalToolName,
     workspacePaths,
@@ -507,6 +540,7 @@ export async function authorizeTrustedToolDispatch(input: {
 
   if (input.prepared.needsApproval) {
     if (!input.approveToolRequest) {
+      if (input.prepared.shellAsk) return deny(SHELL_APPROVAL_UNAVAILABLE)
       return deny(
         'Tool dispatch requires host approval; auto-approve is never defaulted (/settings/approval/policy).'
       )

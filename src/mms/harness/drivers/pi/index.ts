@@ -8,7 +8,7 @@ import { PI_NATIVE_TOOLS } from '../../pi/nativeTools'
 import { piRetiredOf, piRetiredPrompt } from './retired'
 
 export { PI_LEGACY_CAPS, type PiCredentials } from './engines/legacy'
-export { PI_RPC_CAPS, PI_RPC_EXACT_CAPS, piRpcCaps, piRpcHasEvidence, type PiRpcDriverOptions } from './engines/rpc'
+export { PI_RPC_CAPS, PI_RPC_EXACT_CAPS, PI_RPC_NO_SHELL_CAPS, piRpcCaps, piRpcEvidenceLevel, piRpcHasEvidence, type PiRpcDriverOptions, type PiRpcEvidenceLevel } from './engines/rpc'
 export { PI_LEGACY_ONLY, piEngineFor, piEngineOf } from './engines'
 export { PI_NATIVE_TOOLS } from '../../pi/nativeTools'
 export { PI_RETIRED, piRetiredOf } from './retired'
@@ -41,7 +41,7 @@ export function piDriver(options: { client: () => PiChatClient; credentials?: ()
   // One loop adapter for every legacy pi instance: the loop resolves the provider per turn.
   const adapter = new PiLoopAdapter(options.client)
   const credentials = () => options.credentials?.()
-  /** Definitions run on the RPC engine: the instance is on it, and its evidence passed here. */
+  /** Definitions run on the RPC engine: the instance is on it, and its evidence (with or without the shell) passed here. */
   const definitionsOnRpc = (config: InstanceConfig): boolean =>
     piEngineOf(config, Boolean(options.rpc)) === 'rpc' && piRpcHasEvidence(piRpcEvidenceOf(options.rpc!))
   return {
@@ -76,8 +76,10 @@ export function piDriver(options: { client: () => PiChatClient; credentials?: ()
     // The RPC engine's gate holds Pi's built-ins to a bot turn's authority (`/pi/gate`).
     botAuthority: (config) => piEngineOf(config, Boolean(options.rpc)) === 'rpc',
     nativeToolNames: (neutral, config) => (piEngineOf(config, Boolean(options.rpc)) === 'rpc' ? PI_NATIVE_TOOLS[neutral] ?? [] : []),
-    // Agent definitions run on Pi's agent where its evidence suite passed (a fresh process and
-    // session per turn, the definition's system prompt, its exact tools and limits: PR 4 4d-rpc).
+    // Agent definitions run on Pi's agent where its evidence suite passed, with or without the
+    // contained shell (a fresh process and session per turn, the definition's system prompt, its
+    // exact tools and limits: PR 4 4d-rpc). Without the contained shell (a no-shell record), a
+    // definition's shell command asks a person first and an unattended one runs none.
     // Everywhere else, on the legacy engine, and for a definition that needs the loop (its browser),
     // they run on Mousse's loop as they always have, so nothing regresses.
     definitionCaps: (config, needs) => (definitionsOnRpc(config) && !needs?.loop ? piRpcCaps(piRpcEvidenceOf(options.rpc!)) : PI_LEGACY_CAPS),

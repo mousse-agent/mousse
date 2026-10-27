@@ -45,6 +45,8 @@ export interface SetupOptions {
   extraEnv?: Record<string, string>
   /** Pi's threshold compaction, read when a process starts (default on). */
   compaction?: () => boolean
+  /** The engine's caps (default `PI_RPC_CAPS`: weak containment, so a definition's shell asks first). */
+  capabilities?: PiRpcEngineOptions['capabilities']
 }
 
 /** An engine on a fresh scratch dir with a recorder; `cleanups` gets what to undo, in order. */
@@ -66,7 +68,7 @@ export async function setup(cleanups: Array<() => unknown>, options: SetupOption
     instanceId: 'pi:mock',
     provider: 'mock',
     label: 'Mock',
-    capabilities: PI_RPC_CAPS,
+    capabilities: options.capabilities ?? PI_RPC_CAPS,
     env: () => env,
     stateDir,
     runtime: () => ({ root: piPackage, entry: join(piPackage, 'dist/bundle/rpc-entry.js'), extension }),

@@ -74,6 +74,8 @@ const BUILTIN_CLASSES: Record<string, PiToolClass> = {
   read: 'read', grep: 'read', find: 'read', ls: 'read',
   edit: 'mutation', write: 'mutation', bash: 'mutation', powershell: 'mutation'
 }
+/** Pi's built-ins that run a shell command. */
+const SHELL_BUILTINS: ReadonlySet<string> = new Set(['bash', 'powershell'])
 export const PI_READ_ONLY_BUILTINS: readonly string[] = ['read', 'grep', 'find', 'ls']
 export const PI_ALL_BUILTINS: readonly string[] = ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls']
 /** How long the writer waits for a dead process's tree and its sweep (the Windows sweep alone can take 20 s). */
@@ -1110,8 +1112,11 @@ export class PiRpcEngine implements ProviderAdapter {
     // A definition run: every call, built-in or app/MCP, is authorized in full (approval included)
     // before it is charged, so a refused call never costs a tool call.
     if (definition) {
+      // Where Pi's shell is not contained (`weak`: a no-shell record), a shell command asks a person
+      // first whatever the grants say, bound to these exact arguments, and an unattended run runs none.
+      const uncontainedShell = builtin && SHELL_BUILTINS.has(request.toolName) && this.capabilities.containment !== 'strong'
       // The arguments checked (and approved) are the ones the tool runs with.
-      const decided = await authorizeDefinitionCall(definition, { toolName: request.toolName, args: input, projectPath: thread.cwd, signal: turn.input.signal })
+      const decided = await authorizeDefinitionCall(definition, { toolName: request.toolName, args: input, projectPath: thread.cwd, signal: turn.input.signal, ...(uncontainedShell ? { uncontainedShell } : {}) })
       if (!decided.allowed) return { allow: false, reason: decided.message }
       // Stopped while the approval was pending, or the run is no longer the thread's active run (it
       // ended elsewhere, or another took the thread): nothing runs, as on the loop and the MCP path.

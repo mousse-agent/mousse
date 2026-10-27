@@ -11,8 +11,12 @@ import type { HarnessDriverKind } from '../../shared/harness/types'
  *   so a `shell` grant may run there and containment is `strong`.
  *
  * Pi's RPC engine (`driver: 'pi'`, `cliVersion`: the pinned `@earendil-works/pi-coding-agent`) has
- * one kind, `tools`, with its own numbering (`PI_RPC_EVIDENCE_ITEMS`): a record holding every item
- * makes the engine `exact`/`strong` on that platform and lets it run agent definitions.
+ * one kind, `tools`, with its own numbering (`PI_RPC_EVIDENCE_ITEMS`), in two forms:
+ * - a record holding every item makes the engine `exact`/`strong` on that platform: it runs agent
+ *   definitions, their shell included;
+ * - a no-shell record (`PI_RPC_NO_SHELL_ITEMS`: every item but the contained shell) makes it
+ *   `exact`/`weak`: it runs agent definitions, but a definition's shell command asks a person
+ *   first, and an unattended definition runs none.
  */
 export type ContainmentEvidenceKind = 'tools' | 'sandbox'
 
@@ -46,6 +50,13 @@ export interface ContainmentEvidence {
  *    the turn, tool-call, token and cost limits.
  */
 export const PI_RPC_EVIDENCE_ITEMS: readonly number[] = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+
+/**
+ * A no-shell record's items: every Pi RPC item but the contained shell (10), for a platform where
+ * Pi's `bash` runs uncontained (Windows; macOS until a Mac run). Mousse still decides every call,
+ * so tool control is `exact`, but containment stays `weak`.
+ */
+export const PI_RPC_NO_SHELL_ITEMS: readonly number[] = Object.freeze(PI_RPC_EVIDENCE_ITEMS.filter((item) => item !== 10))
 
 /**
  * Every record so far.
