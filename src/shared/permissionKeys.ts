@@ -16,6 +16,12 @@ export const PERMISSION_KEYS = {
   mousseMergeBack: 'mousse:merge_back'
 } as const
 
+/** The option an approval card adds so a user can allow the same request again in this thread. */
+export const ALWAYS_OPTION_ID = 'allow_always'
+export const ALWAYS_OPTION_LABEL = 'Always for this thread'
+/** What the option does and does not do, shown next to it. */
+export const ALWAYS_OPTION_NOTE = 'Always for this thread answers only this exact request again, in this thread, while its permission mode is no stricter than now. Other commands, folders and tools still ask. You can revoke it in the thread side card.'
+
 /** Key of any other Claude tool. */
 export function claudeToolKey(toolName: string): string {
   return `claude:tool:${toolName}`

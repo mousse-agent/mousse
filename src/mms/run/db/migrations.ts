@@ -389,5 +389,30 @@ DROP TABLE inbox;
 ALTER TABLE inbox_new RENAME TO inbox;
 CREATE INDEX inbox_thread_status ON inbox(thread_id, status);
 `
+  },
+  {
+    version: 14,
+    sql: `
+-- "Always for this thread" (SPEC §17.8): a standing rule that answers one exact request again, in one
+-- thread. It is keyed by the request's fingerprint (instance, directory, key, tool, whole input), so it
+-- never widens to another command, folder or tool; a request without a fingerprint cannot match. Only a
+-- user creates one. It is ignored while the thread's permission mode is stricter than the one it was
+-- granted under, and goes with the thread.
+CREATE TABLE approval_rules(
+  thread_id TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  permission_key TEXT NOT NULL,
+  action TEXT NOT NULL CHECK(action IN ('command','edit','tool')),
+  summary TEXT NOT NULL,
+  granted_under TEXT NOT NULL CHECK(granted_under IN ('ask','accept_edits','full')),
+  source_request_id TEXT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(thread_id, fingerprint)
+) STRICT;
+
+-- The permission mode the request was asked under: what a rule created by answering it is granted under.
+-- NULL on requests saved before version 14 (they create no rule).
+ALTER TABLE approval_requests ADD COLUMN permission_mode TEXT CHECK(permission_mode IS NULL OR permission_mode IN ('ask','accept_edits','full'));
+`
   }
 ]
