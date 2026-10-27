@@ -252,10 +252,10 @@ describe('RunEngine delegation (SPEC §14.1-§14.2)', () => {
       const parent = await f.runningRun('parent')
       const first = await f.delegate(parent.runId, 'call-1', { workspace: 'shared', role: 'review', instanceId: 'pi:openai', model: 'gpt-x' })
       f.finish(first.childRunId, 'first')
-      const sent = await followUp(f, parent.runId, { workspace: 'shared', role: 'review', provider: 'pi:openai', model: 'gpt-x', modeCeiling: 'plan' })
+      const sent = await followUp(f, parent.runId, { workspace: 'shared', role: 'review', provider: 'pi:openai', model: 'gpt-x', modeCeiling: 'plan', accessLevel: 'read' })
       if (sent.status !== 'accepted') throw new Error('send rejected')
       const task = f.engine.delegations.getByChildRun(sent.runId)!
-      expect(task).toMatchObject({ parentThreadId: 'parent', parentRunId: parent.runId, childThreadId: 'child-1', status: 'running', workspace: 'shared', role: 'review', provider: 'pi:openai', model: 'gpt-x', modeCeiling: 'plan' })
+      expect(task).toMatchObject({ parentThreadId: 'parent', parentRunId: parent.runId, childThreadId: 'child-1', status: 'running', workspace: 'shared', role: 'review', provider: 'pi:openai', model: 'gpt-x', modeCeiling: 'plan', accessLevel: 'read' })
       expect(task.delegationId).not.toBe(first.delegationId)
       f.finish(sent.runId, 'second')
       expect(f.engine.delegations.get(task.delegationId)!.result!.text).toBe('second')
@@ -306,14 +306,14 @@ describe('RunEngine delegation (SPEC §14.1-§14.2)', () => {
     it.each(['gui', 'cli', 'channel', 'internal'])('a %s message gets a delegation row tied to the parent\'s latest run, with the subagent\'s policy', async (source) => {
       f = delegationFixture()
       const parent = await f.runningRun('parent')
-      const first = await f.delegate(parent.runId, 'call-1', { workspace: 'shared', role: 'review', modeCeiling: 'plan' })
+      const first = await f.delegate(parent.runId, 'call-1', { workspace: 'shared', role: 'review', modeCeiling: 'plan', accessLevel: 'read' })
       f.finish(first.childRunId, 'first')
       f.engine.markTerminal(parent.runId, 'completed')
       const latest = await f.runningRun('parent')
       const sent = await send(f, source)
       if (sent.status !== 'accepted') throw new Error('send rejected')
       expect(f.engine.delegations.getByChildRun(sent.runId)).toMatchObject({
-        parentThreadId: 'parent', parentRunId: latest.runId, status: 'running', wake: 'always', workspace: 'shared', role: 'review', modeCeiling: 'plan'
+        parentThreadId: 'parent', parentRunId: latest.runId, status: 'running', wake: 'always', workspace: 'shared', role: 'review', modeCeiling: 'plan', accessLevel: 'read'
       })
       f.finish(sent.runId, 'answer')
       expect(f.engine.inbox.listPending('parent').map((row) => (row.payload as { result: { text: string } }).result.text)).toEqual(['first', 'answer'])

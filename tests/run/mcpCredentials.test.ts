@@ -212,6 +212,61 @@ describe('McpCredentials (SPEC §15.1)', () => {
     })
   })
 
+  describe('agent access level (SPEC §15.1)', () => {
+    it('stores the level a credential was granted and reports it on resolve and in the summaries', () => {
+      const { credentials } = setup()
+      const read = credentials.mint({ threadId: 't1', runId: 'r1', provider: 'p', modeCeiling: 'default', accessLevel: 'read' })
+      expect(credentials.resolve(read.token)).toMatchObject({ accessLevel: 'read' })
+      expect(credentials.listForThread('t1').map((row) => row.accessLevel)).toEqual(['read'])
+    })
+
+    it('an absent or unknown level is the most restrictive one, never a wider one', () => {
+      const { db, credentials } = setup()
+      const absent = credentials.mint({ threadId: 't1', runId: 'r1', provider: 'p', modeCeiling: 'default' })
+      const unknown = credentials.mint({ threadId: 't1', runId: 'r2', provider: 'p', modeCeiling: 'default', accessLevel: 'root' as never })
+      expect(credentials.resolve(absent.token)?.accessLevel).toBe('lineage')
+      expect(credentials.resolve(unknown.token)?.accessLevel).toBe('lineage')
+      // A row of a database from before the column existed takes the column default.
+      db.database.prepare(`INSERT INTO credentials(token_hash, thread_id, run_id, provider, mode_ceiling, created_at, revoked_at, last_seen_at)
+        VALUES('legacy', 't9', 'r9', 'p', 'default', '2026-10-12T00:00:00.000Z', NULL, '2026-10-12T00:00:00.000Z')`).run()
+      expect(db.database.prepare("SELECT access_level FROM credentials WHERE token_hash = 'legacy'").get()).toEqual({ access_level: 'lineage' })
+      // The database itself refuses a level that is not one of the three.
+      expect(() => db.database.prepare("UPDATE credentials SET access_level = 'root' WHERE token_hash = 'legacy'").run()).toThrow()
+      // And a stored value outside the three reads back as the narrowest even if the check were bypassed.
+      db.database.exec('PRAGMA ignore_check_constraints = ON')
+      db.database.prepare("UPDATE credentials SET access_level = 'root' WHERE token_hash = ?").run(absent.tokenHash)
+      db.database.exec('PRAGMA ignore_check_constraints = OFF')
+      expect(credentials.resolve(absent.token)?.accessLevel).toBe('lineage')
+      expect(() => credentials.bearerForTurn(turn({ accessLevel: 'root' as never }))).not.toThrow()
+      expect(credentials.listForThread('t1').at(-1)?.accessLevel).toBe('lineage')
+    })
+
+    it('bearerForTurn re-points a reused credential at the level its next turn was granted, narrower or wider', () => {
+      const { credentials } = setup()
+      const first = credentials.bearerForTurn(turn({ accessLevel: 'manage' }))
+      expect(credentials.resolve(first.token)).toMatchObject({ runId: 'r1', accessLevel: 'manage' })
+      const narrower = credentials.bearerForTurn(turn({ runId: 'r2', accessLevel: 'read' }))
+      expect(narrower).toMatchObject({ token: first.token, reused: true })
+      expect(credentials.resolve(first.token)).toMatchObject({ runId: 'r2', accessLevel: 'read' })
+      // A turn that names no level takes the most restrictive one: the grant is never carried over.
+      credentials.bearerForTurn(turn({ runId: 'r3' }))
+      expect(credentials.resolve(first.token)).toMatchObject({ runId: 'r3', accessLevel: 'lineage' })
+      credentials.bearerForTurn(turn({ runId: 'r4', accessLevel: 'manage' }))
+      expect(credentials.resolve(first.token)).toMatchObject({ runId: 'r4', accessLevel: 'manage' })
+    })
+
+    it('the granted level survives a reopen of the database', () => {
+      const home = mkdtempSync(join(tmpdir(), 'mousse-mcp-credentials-'))
+      homes.push(home)
+      const first = new ProfileDatabase({ profileHome: home })
+      const minted = new McpCredentials(new RunStore(first)).mint({ threadId: 't', runId: 'r', provider: 'p', modeCeiling: 'default', accessLevel: 'manage' })
+      first.close()
+      const second = new ProfileDatabase({ profileHome: home })
+      databases.push(second)
+      expect(new McpCredentials(new RunStore(second)).resolve(minted.token)).toMatchObject({ runId: 'r', accessLevel: 'manage' })
+    })
+  })
+
   it('survives a reopen of the database (durable, unlike an in-memory registry)', () => {
     const home = mkdtempSync(join(tmpdir(), 'mousse-mcp-credentials-'))
     homes.push(home)

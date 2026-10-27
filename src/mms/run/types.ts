@@ -1,4 +1,5 @@
 import type { ExecutionBinding } from '../../shared/harness/types'
+import type { AgentAccessLevel } from '../../shared/settings'
 export type RunStatus =
   | 'queued'
   | 'starting'
@@ -342,6 +343,11 @@ export interface DelegationRecord {
   completedAt: string | null
   /** The most the child may do (SPEC §15.1); null when the delegation set none. */
   modeCeiling: ModeCeiling | null
+  /**
+   * The agent access level the delegation passes to its child (SPEC §15.1): the caller's effective
+   * level when it started the task. Null on rows from before version 11, which read as `lineage`.
+   */
+  accessLevel: AgentAccessLevel | null
   /** The child's workspace policy (SPEC §14.2); null for a follow-up or a pre-version-6 row. */
   workspace: DelegationWorkspace | null
   /** The requested role (`research`, `review`, `implement`, …); null when none was given. */
@@ -355,6 +361,17 @@ export type DelegationWorkspace = 'isolated' | 'shared'
  * writes, no integration, children stay `plan`); `default` is the thread's ordinary authority.
  */
 export type ModeCeiling = 'plan' | 'default'
+
+/**
+ * The agent behind a change to another thread (SPEC §15.1): the thread and run that called the tool
+ * and the tool call itself. Recorded in the `agent.action` event on the thread that was changed.
+ */
+export interface AgentActor {
+  kind: 'agent'
+  threadId: string
+  runId: string
+  toolCallId: string
+}
 
 export type InboxKind = 'child_result' | 'restart_note' | 'reconcile_notice'
 

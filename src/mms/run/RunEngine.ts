@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events'
 import type { ExecutionBinding } from '../../shared/harness/types'
+import type { AgentAccessLevel } from '../../shared/settings'
 import { DaemonEpoch } from './DaemonEpoch'
 import { CommandRejection, fail, reject, RunStoreError } from './db/RunStoreError'
 import { isFencedSource, isFollowUpSource, isResumeSource } from './delegation/sources'
@@ -70,6 +71,8 @@ export interface SendDelegation {
   wake: DelegationWake
   /** The follow-up's ceiling: the caller's authority narrowed by the subagent's own policy. */
   modeCeiling?: ModeCeiling
+  /** The follow-up's access level, narrowed the same way. */
+  accessLevel?: AgentAccessLevel
   /** The subagent's workspace policy, role and selection, copied from its first task. */
   workspace?: DelegationWorkspace | null
   role?: string | null
@@ -174,6 +177,8 @@ export interface DelegationRequest {
   title?: string
   /** The most the child may do (SPEC §15.1); the caller has already checked it against its own. */
   modeCeiling?: ModeCeiling
+  /** The agent access level the child is granted (SPEC §15.1); the caller has already narrowed it by its own. */
+  accessLevel?: AgentAccessLevel
 }
 
 export interface DelegationAccepted {
@@ -1142,6 +1147,7 @@ export class RunEngine extends EventEmitter {
       prompt: input.prompt,
       wake: input.wake,
       modeCeiling: input.modeCeiling,
+      accessLevel: input.accessLevel,
       workspace: input.workspace,
       role: input.role
     })
@@ -1551,6 +1557,7 @@ export class RunEngine extends EventEmitter {
       prompt: command.prompt ?? '',
       wake: 'always',
       modeCeiling: first.modeCeiling ?? undefined,
+      accessLevel: first.accessLevel ?? undefined,
       workspace: first.workspace,
       role: first.role,
       provider: first.provider,
@@ -1594,6 +1601,7 @@ export class RunEngine extends EventEmitter {
           prompt: tracked.prompt,
           wake: tracked.wake,
           modeCeiling: tracked.modeCeiling,
+          accessLevel: tracked.accessLevel,
           workspace: tracked.workspace,
           role: tracked.role
         })
