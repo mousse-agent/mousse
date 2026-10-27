@@ -13,7 +13,7 @@ import { NO_HOOKS_PATH } from './gitNullDevice'
  * Git LFS (installed globally or by Git for Windows), credential helpers and signing keep working.
  *
  * Every command gets `-c` settings that:
- * - turn hooks off (`core.hooksPath` to the null device, {@link NO_HOOKS_PATH}, and every event's config-defined hooks), so a
+ * - turn hooks off (`core.hooksPath` to a folder that cannot exist, {@link NO_HOOKS_PATH}, and every event's config-defined hooks), so a
  *   husky-style relative hooks path, a `post-commit` that `--no-verify` does not skip, or a `.git` file
  *   pointing at a planted hooks folder never runs;
  * - turn `core.fsmonitor` off, refuse the `ext::` protocol and keep Git out of submodules, where the
