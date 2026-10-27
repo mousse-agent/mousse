@@ -77,7 +77,7 @@ function normalizeOrigin(raw: unknown): QueuedMessage['origin'] {
   if (kind === 'agent') {
     const agent = raw as Partial<AgentOrigin>
     if (typeof agent.threadId !== 'string' || !agent.threadId || typeof agent.runId !== 'string' || !agent.runId) return undefined
-    return { kind: 'agent', threadId: agent.threadId, runId: agent.runId }
+    return { kind: 'agent', threadId: agent.threadId, runId: agent.runId, ...(typeof agent.hops === 'number' && Number.isSafeInteger(agent.hops) && agent.hops >= 0 ? { hops: agent.hops } : {}) }
   }
   const origin = raw as Partial<Extract<NonNullable<QueuedMessage['origin']>, { kind: 'schedule' }>>
   if (origin.kind !== 'schedule') return undefined

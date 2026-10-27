@@ -828,6 +828,11 @@ export interface AgentOrigin {
   kind: 'agent'
   threadId: string
   runId: string
+  /**
+   * How many agent messages in a row led to this one without a person in between (the sender's own count
+   * plus one). A message that would pass the limit is refused, so a chain of agents cannot run unwatched.
+   */
+  hops?: number
 }
 
 export interface ContextUsageCategory {
