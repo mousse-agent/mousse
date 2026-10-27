@@ -11,18 +11,24 @@ import {
 import {
   PULL_REQUEST_MAX_AGE_MS,
   closeCreatePullRequestForm,
+  composeThreadPullRequest,
   createPullRequestForBranch,
   draftPullRequestFor,
   loadPullRequestBaseBranches,
   openCreatePullRequestForm,
+  findsByBranch,
+  openFoundNumber,
+  pullRequestDetailKey,
   pullRequestKey,
   refreshPullRequest,
+  refreshPullRequestDetail,
   retainPullRequest,
+  retainPullRequestDetail,
   setPullRequestTracked,
   submitCreatePullRequest,
   useGitPullRequestStore
 } from '../src/renderer/stores/pullRequestStore'
-import type { GitPullRequestInfo, PullRequestScope } from '../src/shared/pullRequests'
+import type { GitPullRequestInfo, PullRequestDetail, PullRequestScope } from '../src/shared/pullRequests'
 import type { GitPullRequestLookup, GitStatusSnapshot, TurnState } from '../src/shared/types'
 
 const lookup = (number: number): GitPullRequestLookup => ({
@@ -39,6 +45,28 @@ const lookup = (number: number): GitPullRequestLookup => ({
 })
 
 const lookupInfo = (number: number): GitPullRequestInfo => (lookup(number) as { pullRequest: GitPullRequestInfo }).pullRequest
+
+const detail = (number: number, patch: Partial<PullRequestDetail> = {}): PullRequestDetail => ({
+  ...lookupInfo(number),
+  identity: { host: 'github.com', nameWithOwner: 'acme/app', number },
+  body: '',
+  author: 'ada',
+  headRefName: 'feature',
+  baseRefName: 'main',
+  headSha: 'abc1234',
+  headRepository: 'acme/app',
+  baseRepository: 'acme/app',
+  isCrossRepository: false,
+  reviewDecision: 'approved',
+  reviews: [],
+  comments: [],
+  commentsTruncated: false,
+  checkRuns: [{ name: 'build', state: 'passing', url: 'https://github.com/acme/app/actions/runs/1' }],
+  updatedAt: '2026-10-26T12:00:00Z',
+  mergedAt: null,
+  closedAt: null,
+  ...patch
+})
 
 const scope = (patch: Partial<PullRequestScope> = {}): PullRequestScope => ({
   threadId: 't1',
@@ -61,6 +89,7 @@ const repoStatus = (patch: Partial<GitStatusSnapshot> = {}): GitStatusSnapshot =
 
 interface Mock {
   pullRequest: ReturnType<typeof vi.fn>
+  detail: ReturnType<typeof vi.fn>
   create: ReturnType<typeof vi.fn>
   draft: ReturnType<typeof vi.fn>
   baseBranches: ReturnType<typeof vi.fn>
@@ -79,6 +108,7 @@ const removeEventListener = vi.fn()
 const install = (patch: Partial<Mock> = {}): Mock => {
   const git: Mock = {
     pullRequest: vi.fn(async () => lookup(1)),
+    detail: vi.fn(async (_ref: unknown, number: number) => detail(number)),
     create: vi.fn(async () => ({ pullRequest: lookupInfo(2), existing: false })),
     draft: vi.fn(async () => ({ title: 'T', body: 'B', base: 'main', source: 'heuristic' })),
     baseBranches: vi.fn(async () => ({ defaultBranch: 'main', branches: ['main'] })),
@@ -88,10 +118,10 @@ const install = (patch: Partial<Mock> = {}): Mock => {
     status: vi.fn(async () => repoStatus()),
     ...patch
   }
-  const { pullRequest, create, draft, baseBranches, ...gitMethods } = git
+  const { pullRequest, detail: readDetail, create, draft, baseBranches, ...gitMethods } = git
   vi.stubGlobal('window', {
     mousse: {
-      pullRequests: { get: pullRequest, create, draft, baseBranches },
+      pullRequests: { get: pullRequest, detail: readDetail, create, draft, baseBranches },
       git: {
         ...gitMethods,
         log: vi.fn(async () => []),
@@ -109,7 +139,7 @@ const entry = (path: string, branch: string) => useGitPullRequestStore.getState(
 
 describe('pull request store', () => {
   beforeEach(() => {
-    useGitPullRequestStore.setState({ entries: {} })
+    useGitPullRequestStore.setState({ entries: {}, details: {} })
     useGitStatusStore.setState({ entries: {} })
     listeners.clear()
     removeEventListener.mockClear()
@@ -245,9 +275,9 @@ describe('pull request store', () => {
     expect(removeEventListener).toHaveBeenCalledTimes(1)
   })
 
-  it('looks an untracked branch up on mount but not on focus or when a run ends', async () => {
+  it('looks an untracked branch with no pull request up on mount but not on focus or when a run ends', async () => {
     vi.useFakeTimers()
-    const git = install()
+    const git = install({ pullRequest: vi.fn(async () => ({ state: 'none', isDefaultBranch: false })) })
     const turn = (phase: TurnState['phase']): TurnState => ({ threadId: 't1', turnId: 'x', phase, updatedAt: '2026-10-26T10:00:00Z' })
     useAppStore.setState({ turnStates: { t1: turn('streaming') } })
     const release = retainPullRequest('/repo/a', 'feature', 'p1')
@@ -285,6 +315,48 @@ describe('pull request store', () => {
     useAppStore.setState({ turnStates: {} })
   })
 
+  it('keeps refreshing a branch that already found a pull request on focus and when a run ends, with or without an upstream', async () => {
+    vi.useFakeTimers()
+    const git = install()
+    const turn = (phase: TurnState['phase']): TurnState => ({ threadId: 't1', turnId: 'x', phase, updatedAt: '2026-10-26T10:00:00Z' })
+    useAppStore.setState({ turnStates: { t1: turn('streaming') } })
+    const release = retainPullRequest('/repo/a', 'feature', 'p1')
+    // Pushed without `-u`: the branch has no upstream, but the lookup found its pull request.
+    setPullRequestTracked('/repo/a', 'feature', false)
+    await refreshPullRequest('/repo/a', 'feature', { projectId: 'p1' })
+    expect(entry('/repo/a', 'feature').lookup).toMatchObject({ state: 'found' })
+    vi.advanceTimersByTime(PULL_REQUEST_MAX_AGE_MS + 1)
+    listeners.get('focus')?.()
+    await vi.waitFor(() => expect(git.pullRequest).toHaveBeenCalledTimes(2))
+    await vi.advanceTimersByTimeAsync(0)
+    vi.advanceTimersByTime(PULL_REQUEST_MAX_AGE_MS + 1)
+    useAppStore.setState({ turnStates: { t1: turn('completed') } })
+    await vi.waitFor(() => expect(git.pullRequest).toHaveBeenCalledTimes(3))
+    release()
+    useAppStore.setState({ turnStates: {} })
+  })
+
+  it('stops refreshing a pull request that was merged, and a branch with none and no upstream', async () => {
+    vi.useFakeTimers()
+    const merged = (): GitPullRequestLookup => ({ state: 'found', pullRequest: { ...lookupInfo(4), state: 'merged' } })
+    const none = (): GitPullRequestLookup => ({ state: 'none', isDefaultBranch: false })
+    const git = install({
+      pullRequest: vi.fn(async (_ref: unknown, branch: unknown) => (branch === 'merged' ? merged() : none()))
+    })
+    const releaseMerged = retainPullRequest('/repo/a', 'merged', 'p1')
+    const releaseNone = retainPullRequest('/repo/a', 'none', 'p1')
+    setPullRequestTracked('/repo/a', 'merged', false)
+    setPullRequestTracked('/repo/a', 'none', false)
+    await Promise.all([refreshPullRequest('/repo/a', 'merged'), refreshPullRequest('/repo/a', 'none')])
+    expect(git.pullRequest).toHaveBeenCalledTimes(2)
+    vi.advanceTimersByTime(PULL_REQUEST_MAX_AGE_MS + 1)
+    listeners.get('focus')?.()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(git.pullRequest).toHaveBeenCalledTimes(2)
+    releaseMerged()
+    releaseNone()
+  })
+
   it('does not schedule a refresh for the next focus when Create PR opens the form', async () => {
     const git = install()
     const release = retainPullRequest('/repo/a', 'feature', 'p1')
@@ -295,6 +367,186 @@ describe('pull request store', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(git.pullRequest).toHaveBeenCalledTimes(1)
     release()
+  })
+})
+
+describe('pull request detail', () => {
+  const detailEntry = (path: string, number: number) => useGitPullRequestStore.getState().details[pullRequestDetailKey(path, number)]
+
+  beforeEach(() => {
+    useGitPullRequestStore.setState({ entries: {}, details: {} })
+    useGitStatusStore.setState({ entries: {} })
+    listeners.clear()
+    removeEventListener.mockClear()
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  it('shares one read between concurrent requests, asks as the thread when given one, and keys by folder and number', async () => {
+    const git = install()
+    await Promise.all([
+      refreshPullRequestDetail('/repo/a', 7, { threadId: 't1' }),
+      refreshPullRequestDetail('/repo/a', 7),
+      refreshPullRequestDetail('/repo/a', 7, { projectId: 'p1' })
+    ])
+    expect(git.detail).toHaveBeenCalledTimes(1)
+    expect(git.detail).toHaveBeenCalledWith({ threadId: 't1' }, 7)
+    expect(detailEntry('/repo/a', 7).detail).toMatchObject({ number: 7, reviewDecision: 'approved' })
+    await refreshPullRequestDetail('/repo/b', 7, { projectId: 'p1' })
+    await refreshPullRequestDetail('/repo/a', 8)
+    expect(git.detail).toHaveBeenCalledTimes(3)
+    expect(Object.keys(useGitPullRequestStore.getState().details)).toHaveLength(3)
+  })
+
+  it('treats a detail under 60 seconds old as fresh, forces past it, and queues one more read behind one in flight', async () => {
+    vi.useFakeTimers()
+    const git = install()
+    await refreshPullRequestDetail('/repo/a', 7)
+    vi.advanceTimersByTime(PULL_REQUEST_MAX_AGE_MS - 1000)
+    await refreshPullRequestDetail('/repo/a', 7)
+    expect(git.detail).toHaveBeenCalledTimes(1)
+    vi.advanceTimersByTime(2000)
+    await refreshPullRequestDetail('/repo/a', 7)
+    expect(git.detail).toHaveBeenCalledTimes(2)
+
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    git.detail.mockImplementationOnce(async () => { await gate; return detail(7) })
+    const first = refreshPullRequestDetail('/repo/a', 7, { force: true })
+    const forced = refreshPullRequestDetail('/repo/a', 7, { force: true })
+    const forcedAgain = refreshPullRequestDetail('/repo/a', 7, { force: true })
+    release?.()
+    await Promise.all([first, forced, forcedAgain])
+    expect(git.detail).toHaveBeenCalledTimes(4)
+    expect(git.detail.mock.calls.map((call) => call[2])).toEqual([undefined, undefined, true, true])
+  })
+
+  it('keeps unchanged data by reference, so what shows it does not render again, and replaces it when it changed', async () => {
+    const git = install()
+    await refreshPullRequestDetail('/repo/a', 7)
+    const first = detailEntry('/repo/a', 7)
+    await refreshPullRequestDetail('/repo/a', 7, { force: true })
+    const second = detailEntry('/repo/a', 7)
+    expect(second.detail).toBe(first.detail)
+    expect(second.fetchedAt).toBeGreaterThanOrEqual(first.fetchedAt)
+    git.detail.mockResolvedValueOnce(detail(7, { reviewDecision: 'changes_requested' }))
+    await refreshPullRequestDetail('/repo/a', 7, { force: true })
+    expect(detailEntry('/repo/a', 7).detail).not.toBe(first.detail)
+    expect(detailEntry('/repo/a', 7).detail?.reviewDecision).toBe('changes_requested')
+  })
+
+  it('shows the host\'s message when a read fails, keeps the detail already shown, and clears the message on the next good read', async () => {
+    const git = install()
+    git.detail.mockRejectedValueOnce(new Error("Error invoking remote method 'pullRequests:detail': DomainRpcError: GraphQL: Could not resolve to a PullRequest with the number of 7. — signed in to github.com as octocat, which cannot see it."))
+    await expect(refreshPullRequestDetail('/repo/a', 7)).resolves.toBeUndefined()
+    expect(detailEntry('/repo/a', 7)).toMatchObject({
+      detail: null,
+      error: 'GraphQL: Could not resolve to a PullRequest with the number of 7. — signed in to github.com as octocat, which cannot see it.'
+    })
+    await refreshPullRequestDetail('/repo/a', 7, { force: true })
+    expect(detailEntry('/repo/a', 7)).toMatchObject({ error: null, detail: { number: 7 } })
+    git.detail.mockRejectedValueOnce(new Error('HTTP 502: Bad Gateway'))
+    await refreshPullRequestDetail('/repo/a', 7, { force: true })
+    expect(detailEntry('/repo/a', 7)).toMatchObject({ error: 'HTTP 502: Bad Gateway', detail: { number: 7 } })
+  })
+
+  it('refreshes retained details with the lookups on focus and when a run ends, until merged, and stops after release', async () => {
+    vi.useFakeTimers()
+    const git = install()
+    const turn = (phase: TurnState['phase']): TurnState => ({ threadId: 't1', turnId: 'x', phase, updatedAt: '2026-10-26T10:00:00Z' })
+    useAppStore.setState({ turnStates: { t1: turn('streaming') } })
+    const release = retainPullRequestDetail('/repo/a', 7, 'p1', 't1')
+    await refreshPullRequestDetail('/repo/a', 7)
+    listeners.get('focus')?.()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(git.detail).toHaveBeenCalledTimes(1)
+    vi.advanceTimersByTime(PULL_REQUEST_MAX_AGE_MS + 1)
+    listeners.get('focus')?.()
+    await vi.waitFor(() => expect(git.detail).toHaveBeenCalledTimes(2))
+    // The retained reader's thread is the one it asks as.
+    expect(git.detail.mock.calls[1][0]).toEqual({ threadId: 't1' })
+    await vi.advanceTimersByTimeAsync(0)
+    vi.advanceTimersByTime(PULL_REQUEST_MAX_AGE_MS + 1)
+    useAppStore.setState({ turnStates: { t1: turn('completed') } })
+    await vi.waitFor(() => expect(git.detail).toHaveBeenCalledTimes(3))
+    await vi.advanceTimersByTimeAsync(0)
+
+    // A merged pull request is final and is left alone.
+    git.detail.mockResolvedValueOnce(detail(7, { state: 'merged' }))
+    vi.advanceTimersByTime(PULL_REQUEST_MAX_AGE_MS + 1)
+    listeners.get('focus')?.()
+    await vi.waitFor(() => expect(git.detail).toHaveBeenCalledTimes(4))
+    await vi.advanceTimersByTimeAsync(0)
+    vi.advanceTimersByTime(PULL_REQUEST_MAX_AGE_MS + 1)
+    listeners.get('focus')?.()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(git.detail).toHaveBeenCalledTimes(4)
+
+    expect(removeEventListener).not.toHaveBeenCalled()
+    release()
+    release()
+    expect(removeEventListener).toHaveBeenCalledTimes(1)
+    useAppStore.setState({ turnStates: {} })
+  })
+
+  it('keeps the window listener while either a lookup or a detail is retained', () => {
+    install()
+    const win = (globalThis as unknown as { window: { addEventListener: ReturnType<typeof vi.fn> } }).window
+    const releaseLookup = retainPullRequest('/repo/a', 'feature')
+    const releaseDetail = retainPullRequestDetail('/repo/a', 7)
+    expect(win.addEventListener).toHaveBeenCalledTimes(1)
+    releaseLookup()
+    expect(removeEventListener).not.toHaveBeenCalled()
+    releaseDetail()
+    expect(removeEventListener).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('what the side card reads for a thread', () => {
+  const link = { number: 7 }
+  const entryOf = (patch: Partial<{ detail: PullRequestDetail | null; error: string | null }> = {}) => ({ detail: detail(7), error: null, fetchedAt: 1, ...patch })
+
+  it('reads a linked pull request by its number, and the branch only when there is no link or the link cannot be read', () => {
+    expect(findsByBranch(null, null)).toBe(true)
+    expect(findsByBranch(link.number, null)).toBe(false)
+    expect(findsByBranch(link.number, entryOf())).toBe(false)
+    expect(findsByBranch(link.number, entryOf({ detail: null, error: 'HTTP 502' }))).toBe(true)
+    // A failed refresh that kept an earlier detail still has the pull request.
+    expect(findsByBranch(link.number, entryOf({ error: 'HTTP 502' }))).toBe(false)
+  })
+
+  it('reads only an open pull request found by the branch in full', () => {
+    expect(openFoundNumber(lookup(7))).toBe(7)
+    expect(openFoundNumber({ state: 'found', pullRequest: { ...lookupInfo(7), state: 'merged' } })).toBeNull()
+    expect(openFoundNumber({ state: 'found', pullRequest: { ...lookupInfo(7), state: 'closed' } })).toBeNull()
+    expect(openFoundNumber({ state: 'none', isDefaultBranch: false })).toBeNull()
+    expect(openFoundNumber(null)).toBeNull()
+  })
+
+  it('builds the row\'s pull request from the linked detail, and shows nothing until it has been read', () => {
+    const loaded = composeThreadPullRequest({ linkNumber: 7, linkedEntry: entryOf(), lookup: null, foundEntry: null })
+    expect(loaded).toMatchObject({ linked: true, detailError: null, detail: { number: 7 }, lookup: { state: 'found', pullRequest: { number: 7 } } })
+    expect(composeThreadPullRequest({ linkNumber: 7, linkedEntry: null, lookup: null, foundEntry: null })).toEqual({
+      lookup: null, detail: null, detailError: null, linked: true
+    })
+  })
+
+  it('shows the host\'s message for a linked pull request that could not be read, next to what the branch found', () => {
+    const failed = entryOf({ detail: null, error: 'GraphQL: Could not resolve to a PullRequest' })
+    expect(composeThreadPullRequest({ linkNumber: 7, linkedEntry: failed, lookup: null, foundEntry: null })).toEqual({
+      lookup: null, detail: null, detailError: 'GraphQL: Could not resolve to a PullRequest', linked: false
+    })
+    const found = composeThreadPullRequest({ linkNumber: 7, linkedEntry: failed, lookup: lookup(8), foundEntry: entryOf({ detail: detail(8) }) })
+    expect(found).toMatchObject({ linked: false, lookup: { pullRequest: { number: 8 } }, detail: { number: 8 }, detailError: null })
+  })
+
+  it('uses the branch lookup and its detail for a thread with no link', () => {
+    const view = composeThreadPullRequest({ linkNumber: null, linkedEntry: null, lookup: lookup(7), foundEntry: entryOf() })
+    expect(view).toMatchObject({ linked: false, lookup: { state: 'found' }, detail: { number: 7 }, detailError: null })
+    const unread = composeThreadPullRequest({ linkNumber: null, linkedEntry: null, lookup: lookup(7), foundEntry: entryOf({ detail: null, error: 'HTTP 502: Bad Gateway' }) })
+    expect(unread).toMatchObject({ lookup: { state: 'found' }, detail: null, detailError: 'HTTP 502: Bad Gateway' })
   })
 })
 

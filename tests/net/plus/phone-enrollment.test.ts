@@ -45,7 +45,8 @@ async function fixture(grantExtras: Record<string, unknown> = {}) {
     connectorToken = 'PROFILE_ONLY_CONNECTOR_SECRET_'.repeat(3),
     calls: Array<{ method: string; path: string; auth: string | null; body: any }> = [],
     mailbox: unknown[] = [],
-    reject: { status?: number } = {}
+    reject: { status?: number } = {},
+    inventory: { body: unknown; status: number } = { body: { devices: { used: 3, limit: 5 } }, status: 200 }
   const fakeFetch: typeof fetch = async (url, input) => {
     const path = new URL(String(url)).pathname,
       method = input?.method ?? 'GET',
@@ -108,6 +109,11 @@ async function fixture(grantExtras: Record<string, unknown> = {}) {
       })
     if (path === '/v1/net/registrations/registration-one/enrollment-requests')
       return Response.json({ requests: mailbox })
+    // Only an account actor may read the inventory; the connector token is refused.
+    if (path === '/v1/net/inventory')
+      return new Headers(input?.headers).get('authorization')?.startsWith('Bearer nl_')
+        ? Response.json(inventory.body, { status: inventory.status })
+        : Response.json({ error: { code: 'forbidden' } }, { status: 403 })
     if (reject.status && /\/enrollment-(requests\/[^/]+\/(approve|deny)|offers)$/.test(path))
       return Response.json({ error: { code: 'rejected' } }, { status: reject.status })
     if (/\/enrollment-requests\/[^/]+\/(approve|deny)$/.test(path))
@@ -128,7 +134,7 @@ async function fixture(grantExtras: Record<string, unknown> = {}) {
     })
   })
   const { accountId: _account, ...publicConfiguration } = configuration
-  return { service, calls, mailbox, reject, connectorToken, publicConfiguration }
+  return { service, calls, mailbox, reject, inventory, connectorToken, publicConfiguration }
 }
 
 describe('Mousse ID phone mailbox', () => {
@@ -206,6 +212,38 @@ describe('Mousse ID phone mailbox', () => {
       ]
     ])
     expect(mailboxCalls.every((row) => row.auth === `Bearer ${p.connectorToken}`)).toBe(true)
+  })
+
+  it('reads the account device count once at sign-in with the account token and keeps it with the account details', async () => {
+    const p = await fixture({ email: 'ada@example.test' })
+    const pending = await p.service.beginLogin(p.publicConfiguration, 'Desk', true)
+    const status = await p.service.finishLogin(pending.id)
+    expect(status).toMatchObject({ connected: true, email: 'ada@example.test', devices: { used: 3, limit: 5 } })
+    const reads = p.calls.filter((row) => row.path === '/v1/net/inventory')
+    expect(reads.map((row) => [row.method, row.auth])).toEqual([['GET', `Bearer nl_${'a'.repeat(40)}`]])
+    // The count is stored, but the account token is not.
+    expect(p.service.status().devices).toEqual({ used: 3, limit: 5 })
+    expect(JSON.stringify(p.service.status())).not.toContain('nl_')
+    expect(p.calls.some((row) => row.path === '/v1/net/inventory' && row.auth === `Bearer ${p.connectorToken}`)).toBe(false)
+  })
+
+  it('signs in without a count when the inventory fails or is malformed, and drops an old count', async () => {
+    const p = await fixture()
+    for (const [body, status] of [[{}, 200], [{ devices: 3 }, 200], [{ devices: { used: -1, limit: 5 } }, 200], [{ devices: { used: 1.5, limit: 5 } }, 200], [{ devices: { used: '3', limit: 5 } }, 200], [{ devices: { used: 3 } }, 200], [{ error: {} }, 500]] as const) {
+      p.inventory.body = body
+      p.inventory.status = status
+      const pending = await p.service.beginLogin(p.publicConfiguration, 'Desk', false)
+      const result = await p.service.finishLogin(pending.id)
+      expect(result.connected, JSON.stringify(body)).toBe(true)
+      expect(result).not.toHaveProperty('devices')
+    }
+    p.inventory.body = { devices: { used: 2, limit: 3 } }
+    p.inventory.status = 200
+    let pending = await p.service.beginLogin(p.publicConfiguration, 'Desk', false)
+    expect((await p.service.finishLogin(pending.id)).devices).toEqual({ used: 2, limit: 3 })
+    p.inventory.status = 500
+    pending = await p.service.beginLogin(p.publicConfiguration, 'Desk', false)
+    expect(await p.service.finishLogin(pending.id)).not.toHaveProperty('devices')
   })
 
   it('maps decided, expired and over-quota mailbox answers', async () => {

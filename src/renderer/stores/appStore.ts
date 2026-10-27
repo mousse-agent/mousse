@@ -143,6 +143,9 @@ interface AppState {
   /** Whether the full-width thread area measured wide enough for the side card. Null until measured. */
   sideCardFits: boolean | null
   setSideCardFits: (sideCardFits: boolean | null) => void
+  /** The side card is open as an overlay in a narrow thread area. Temporary: not persisted, closed again by `shouldCloseSideCardOverlay`. */
+  sideCardOverlayOpen: boolean
+  setSideCardOverlayOpen: (sideCardOverlayOpen: boolean) => void
   activeThreadId: string | null
   projects: Project[]
   threads: Thread[]
@@ -373,6 +376,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   mainAreaOpen: false,
   sideCardOn: true,
   sideCardFits: null,
+  sideCardOverlayOpen: false,
   activeThreadId: null,
   projects: [],
   threads: [],
@@ -471,6 +475,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   setMainAreaOpen: (mainAreaOpen) => set({ mainAreaOpen }),
   setSideCardOn: (sideCardOn) => set({ sideCardOn }),
   setSideCardFits: (sideCardFits) => set({ sideCardFits }),
+  setSideCardOverlayOpen: (sideCardOverlayOpen) => set({ sideCardOverlayOpen }),
   setTurnState: (state) => set((s) => ({ turnStates: { ...s.turnStates, [state.threadId]: state } })),
   setTurnSnapshot: (snap) => set({ turnStates: snap }),
   setActiveThreadId: (activeThreadId) => set({ activeThreadId }),
@@ -832,4 +837,26 @@ useAppStore.subscribe((state, previous) => {
   if (state.profileId !== previous.profileId || personalWorkspaceKeys.some((key) => state[key] !== previous[key])) {
     savePersonalWorkspace(state)
   }
+})
+
+/**
+ * The side card overlay is temporary: it closes when the thread area widens
+ * enough to dock the card (the card's switch stays on), when the thread changes,
+ * when the app panel opens, and when a view without a thread replaces the
+ * conversation. A narrow window therefore never opens it by itself.
+ */
+export function shouldCloseSideCardOverlay(state: AppState, previous: AppState): boolean {
+  if (!state.sideCardOverlayOpen) return false
+  return state.sideCardFits !== false
+    || state.mainAreaOpen
+    || state.activeThreadId !== previous.activeThreadId
+    || state.settingsOpen
+    || state.usageOpen
+    || state.scheduledOpen
+    || state.channelsOpen
+    || state.sidebarMode === 'chats'
+}
+
+useAppStore.subscribe((state, previous) => {
+  if (shouldCloseSideCardOverlay(state, previous)) state.setSideCardOverlayOpen(false)
 })

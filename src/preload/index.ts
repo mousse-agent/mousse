@@ -30,6 +30,7 @@ import type {
   GitCheckoutResult,
   GitCommit,
   GitCommitOptions,
+  GitCommitSuggestion,
   GitDeleteBranchOptions,
   GitDiffStats,
   GitFetchResult,
@@ -67,6 +68,7 @@ import type {
 import type {
   CreatePullRequestResult,
   PullRequestBaseBranches,
+  PullRequestDetail,
   PullRequestDraft,
   PullRequestFormInput,
   PullRequestRef,
@@ -91,7 +93,7 @@ import type {
   ProviderLoginResponse,
   ProviderLoginResult
 } from '../shared/providerAuth'
-import type { InstanceSnapshot, ProviderSnapshotsEvent } from '../shared/harness/status'
+import type { InstanceSnapshot, ModelRefreshResult, ProviderSnapshotsEvent } from '../shared/harness/status'
 import type { MoveResult } from '../shared/harness/move'
 import type {
   AddInstanceInput,
@@ -465,6 +467,8 @@ const api = {
       storageInvoke('git:checkout', scope, branch, options),
     commit: (scope: GitScope, message: string, options?: GitCommitOptions): Promise<GitMutationResult> =>
       storageInvoke('git:commit', scope, message, options),
+    suggestCommitMessage: (scope: GitScope, options?: { expectedBranch?: string }): Promise<GitCommitSuggestion> =>
+      storageInvoke('git:suggestCommitMessage', scope, options),
     push: (scope: GitScope, options?: GitPushOptions): Promise<GitMutationResult> =>
       storageInvoke('git:push', scope, options),
     init: (scope: GitScope): Promise<GitMutationResult> =>
@@ -493,6 +497,8 @@ const api = {
   pullRequests: {
     get: (ref: PullRequestRef, branch: string, force?: boolean): Promise<GitPullRequestLookup> =>
       ipcRenderer.invoke('pullRequests:get', ref, branch, force),
+    detail: (ref: PullRequestRef, number: number, force?: boolean): Promise<PullRequestDetail> =>
+      ipcRenderer.invoke('pullRequests:detail', ref, number, force),
     draft: (scope: PullRequestScope, base?: string): Promise<PullRequestDraft> =>
       ipcRenderer.invoke('pullRequests:draft', scope, base),
     create: (scope: PullRequestScope, input: PullRequestFormInput): Promise<CreatePullRequestResult> =>
@@ -903,6 +909,9 @@ const api = {
         ipcRenderer.invoke('providers:instances:move', instanceId, toInstanceId, options),
       refreshModels: (instanceId: string): Promise<InstanceSnapshot> =>
         ipcRenderer.invoke('providers:instances:refreshModels', instanceId),
+      /** Refreshes every enabled provider's model list; each result carries the new snapshot or why it was skipped or failed. */
+      refreshAllModels: (): Promise<ModelRefreshResult[]> =>
+        ipcRenderer.invoke('providers:instances:refreshAllModels'),
       /** Each present field replaces the stored one. */
       setModelPrefs: (instanceId: string, patch: ModelPrefsPatch): Promise<InstanceSnapshot> =>
         ipcRenderer.invoke('providers:instances:setModelPrefs', instanceId, patch)

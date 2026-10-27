@@ -1,15 +1,7 @@
 import { createHash } from 'node:crypto'
-import {
-  Type,
-  type Api,
-  type Message,
-  type Tool,
-  type ToolCall,
-  type ToolResultMessage
-} from '@earendil-works/pi-ai'
+import { Type, type Tool, type ToolCall, type ToolResultMessage } from '@earendil-works/pi-ai'
 import type { SettingsStore } from '../../settings/SettingsStore'
 import type { ProviderAuthService } from '../../providers/ProviderAuthService'
-import { LlmClient } from '../../orchestrator/LlmClient'
 import type {
   BotRuntimeAdapter,
   BotRunRequest,
@@ -18,20 +10,10 @@ import type {
   CompartmentStore,
   BotExecutionBinding
 } from '../../net/contracts'
-import { NetError, isId, type Base64Url, type BotProfile } from '../../../shared/net'
+import { NetError, type Base64Url, type BotProfile } from '../../../shared/net'
 import { canonicalJson } from '../../net/sync/codec'
-import {
-  GuardedProvider,
-  billingMatches,
-  nativeSdkVersion,
-  type BillingQualification
-} from './GuardedProvider'
-import {
-  NativeReader,
-  nativeReaderQualified,
-  type NativeReaderModule,
-  type NativeReaderQualification
-} from './NativeReader'
+import type { BillingQualification } from './GuardedProvider'
+import type { NativeReader, NativeReaderModule, NativeReaderQualification } from './NativeReader'
 const readerNames = ['safe_read', 'safe_list', 'safe_search'] as const
 export type ReaderTool = (typeof readerNames)[number]
 export interface NativeBotDefinition {
@@ -278,235 +260,32 @@ export class ReaderToolPort {
     }
   }
 }
+/**
+ * Bots have no model path since the app's own agent loop was retired. The adapter keeps its
+ * fixed definition and policy digest for the bot registry, and refuses every profile until
+ * a harness-backed runtime replaces it.
+ */
 export class NativeBotRuntime implements BotRuntimeAdapter {
   readonly id = 'mousse'
-  private readonly definition: NativeBotDefinition
-  private qualified = true
-  private running = new Map<string, AbortController>()
-  constructor(private readonly options: NativeBotRuntimeOptions) {
-    this.definition = structuredClone(options.definition)
-    integer(this.definition.maxModelCalls, 128)
-    integer(this.definition.maxToolCalls, 1024)
-    integer(this.definition.maxElapsedMs, 3600000)
+  constructor(options: NativeBotRuntimeOptions) {
+    const definition = structuredClone(options.definition)
+    integer(definition.maxModelCalls, 128)
+    integer(definition.maxToolCalls, 1024)
+    integer(definition.maxElapsedMs, 3600000)
     if (
-      !this.definition.revision ||
-      !this.definition.systemPrompt ||
-      Buffer.byteLength(this.definition.systemPrompt) > 65536 ||
-      !['always', 'never'].includes(this.definition.approval) ||
-      new Set(this.definition.readerTools).size !== this.definition.readerTools.length ||
-      this.definition.readerTools.some((name) => !readerNames.includes(name))
+      !definition.revision ||
+      !definition.systemPrompt ||
+      Buffer.byteLength(definition.systemPrompt) > 65536 ||
+      !['always', 'never'].includes(definition.approval) ||
+      new Set(definition.readerTools).size !== definition.readerTools.length ||
+      definition.readerTools.some((name) => !readerNames.includes(name))
     )
       throw new NetError('profile_unsupported')
   }
-  supports(profile: BotProfile): boolean {
-    const d = this.definition,
-      model = this.options.providerAuth.models.getModel(d.billing.provider, d.billing.model)
-    if (
-      this.options.sdkVersion !== nativeSdkVersion() ||
-      !this.qualified ||
-      !this.options.qualification.active(profile) ||
-      !billingMatches(model, d.billing, this.options.sdkVersion)
-    )
-      return false
-    if (profile === 'chat') return true
-    if (profile === 'reader') {
-      const q = this.options.reader?.qualification
-      return Boolean(
-        q &&
-        this.options.reader &&
-        nativeReaderQualified(this.options.reader.module, q) &&
-        this.options.reader.deniedRoots.length
-      )
-    }
+  supports(_profile: BotProfile): boolean {
     return false
   }
-  async run(request: BotRunRequest, events: BotRunEvents): Promise<BotRunResult> {
-    request = Object.freeze({ ...request })
-    if (!this.supports(request.profile)) throw new NetError('profile_unsupported')
-    if (request.signal.aborted) throw new NetError('cancelled')
-    if (this.running.has(request.execution)) throw new NetError('conflict')
-    this.validate(request)
-    const abort = new AbortController(),
-      deadline = AbortSignal.timeout(this.definition.maxElapsedMs),
-      signal = AbortSignal.any([request.signal, deadline, abort.signal]),
-      current = () => {
-        if (!this.supports(request.profile)) {
-          abort.abort()
-          throw new NetError('profile_unsupported')
-        }
-        if (signal.aborted) throw new NetError('cancelled')
-        this.validate(request)
-        this.options.assertCurrent(request)
-      }
-    this.running.set(request.execution, abort)
-    let reader: NativeReader | undefined
-    const guard = new GuardedProvider(
-      this.options.providerAuth,
-      this.definition.billing,
-      this.options.sdkVersion,
-      request.spend,
-      signal,
-      current,
-      (evidence) => this.invalidate('provider_charge_unqualified', evidence),
-      this.definition.maxModelCalls
-    )
-    try {
-      current()
-      const history = this.options.compartments.history(request.compartment, 100),
-        messages: Message[] = history.map((turn) =>
-          turn.role === 'user'
-            ? { role: 'user', content: turn.text, timestamp: turn.ts }
-            : {
-                role: 'assistant',
-                content: [{ type: 'text', text: turn.text }],
-                api: this.definition.billing.api,
-                provider: this.definition.billing.provider,
-                model: this.definition.billing.model,
-                stopReason: 'stop',
-                usage: {
-                  input: 0,
-                  output: 0,
-                  cacheRead: 0,
-                  cacheWrite: 0,
-                  totalTokens: 0,
-                  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
-                },
-                timestamp: turn.ts
-              }
-        )
-      messages.push({ role: 'user', content: request.prompt, timestamp: Date.now() })
-      if (request.profile === 'reader')
-        reader = new NativeReader(
-          this.options.reader!.module,
-          request.projectRoot!,
-          [this.options.installationHome, ...this.options.reader!.deniedRoots],
-          signal
-        )
-      const tools = reader ? readerToolDefinitions(this.definition.readerTools) : [],
-        port = reader
-          ? new ReaderToolPort(reader, this.definition, request, events, current, signal, () =>
-              abort.abort()
-            )
-          : undefined,
-        llm = new LlmClient(this.options.settings, guard.auth)
-      const result = await llm.chat(
-        messages,
-        undefined,
-        {
-          llmProvider: this.definition.billing.provider,
-          model: this.definition.billing.model,
-          signal,
-          threadId: request.backingThreadId,
-          runtimeContext: {
-            systemPrompt: this.definition.systemPrompt,
-            tools,
-            executeTool: async (call) => {
-              current()
-              if (!port) throw new NetError('forbidden')
-              return port.execute(call)
-            }
-          }
-        },
-        undefined,
-        (event) => {
-          current()
-          events.onProgress(event.content)
-        }
-      )
-      await guard.settled()
-      if (guard.failure) throw guard.failure
-      current()
-      if (result.aborted) throw new NetError('cancelled')
-      return { text: result.text, spentUnits: guard.spentUnits }
-    } catch (error) {
-      const failure = guard.failure ?? (signal.aborted ? new NetError('cancelled') : error)
-      if (failure instanceof NetError)
-        throw new NetError(failure.code, failure.message, {
-          cause: failure,
-          details: {
-            ...(failure.details && typeof failure.details === 'object' ? failure.details : {}),
-            quiesced: true
-          }
-        })
-      throw failure
-    } finally {
-      try {
-        let timer: ReturnType<typeof setTimeout> | undefined
-        await Promise.race([
-          guard.settled(),
-          new Promise<never>((_, reject) => {
-            timer = setTimeout(() => {
-              this.invalidate('provider_did_not_stop')
-              reject(
-                new NetError(
-                  'outcome_uncertain',
-                  'Provider did not stop before the drain deadline.',
-                  { details: { quiesced: false } }
-                )
-              )
-            }, 5000)
-          })
-        ]).finally(() => {
-          if (timer) clearTimeout(timer)
-        })
-      } finally {
-        reader?.close()
-        this.running.delete(request.execution)
-      }
-    }
-  }
-  /** Local fencing precedes persistence; even a failing journal write must stop every active run. */
-  private invalidate(code: string, evidence?: Record<string, unknown>): void {
-    this.qualified = false
-    try {
-      this.options.qualification.invalidate(code, evidence)
-    } finally {
-      for (const controller of this.running.values()) controller.abort()
-    }
-  }
-  private validate(request: BotRunRequest): void {
-    if (
-      !isId('execution', request.execution) ||
-      !isId('bot', request.bot) ||
-      !isId('space', request.space) ||
-      !isId('stream', request.outputStream) ||
-      !request.backingThreadId ||
-      !request.workspaceId ||
-      typeof request.prompt !== 'string' ||
-      Buffer.byteLength(request.prompt) > 65536 ||
-      !Number.isSafeInteger(request.spendCeilingUnits) ||
-      request.spendCeilingUnits < 1 ||
-      request.definitionRevision !== this.definition.revision ||
-      request.profileDigest !== effectiveBotPolicyDigest(this.definition, request.profile) ||
-      (request.profile === 'chat' && request.projectRoot !== undefined) ||
-      (request.profile === 'reader' && !request.projectRoot)
-    )
-      throw new NetError('forbidden')
-    const b = this.options.executionBinding(request.execution),
-      c = this.options.compartments.binding(request.compartment)
-    if (
-      !b ||
-      !c ||
-      b.profileId !== this.options.profileId ||
-      c.profileId !== this.options.profileId ||
-      b.space !== request.space ||
-      c.space !== request.space ||
-      b.bot !== request.bot ||
-      c.bot !== request.bot ||
-      b.compartment !== request.compartment ||
-      b.stream !== request.outputStream ||
-      b.backingThreadId !== request.backingThreadId ||
-      b.workspaceId !== request.workspaceId ||
-      b.definitionRevision !== request.definitionRevision ||
-      b.profileDigest !== request.profileDigest ||
-      b.visibilityEpoch !== request.visibilityEpoch ||
-      c.visibilityEpoch !== request.visibilityEpoch ||
-      b.participantHash !== request.participantHash ||
-      c.participantHash !== request.participantHash ||
-      (c.privateStream !== undefined && c.privateStream !== request.outputStream) ||
-      (c.privateStream === undefined &&
-        (request.visibilityEpoch !== undefined || request.participantHash !== undefined))
-    )
-      throw new NetError('forbidden')
+  async run(_request: BotRunRequest, _events: BotRunEvents): Promise<BotRunResult> {
+    throw new NetError('profile_unsupported')
   }
 }

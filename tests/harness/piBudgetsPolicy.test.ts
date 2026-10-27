@@ -6,14 +6,21 @@ import type { RunPolicy } from '../../src/shared/harness/types'
 const policy = (budget: RunPolicy['budget']): RunPolicy => ({ mode: 'default', approvals: 'ask', budget })
 
 describe('Pi budgets policy', () => {
-  it('refuses count limits for budgets and spend limits for both keys, on both engines', () => {
+  it('the legacy loop refuses count limits; both engines refuse token and cost limits', () => {
+    expect(PI_LEGACY_CAPS.budgets).toBe('observed')
+    expect(checkPolicy(PI_LEGACY_CAPS, policy({ maxTurns: 3 }))).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['budgets'] } })
+    expect(checkPolicy(PI_LEGACY_CAPS, policy({ maxUsd: 1 }))).toMatchObject({ ok: false, error: { missing: ['budgets', 'spendLimits'] } })
     for (const caps of [PI_LEGACY_CAPS, PI_RPC_CAPS]) {
-      expect(caps.budgets).toBe('observed')
       expect(caps.spendLimits).toBe('unsupported')
-      expect(checkPolicy(caps, policy({ maxTurns: 3 }))).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['budgets'] } })
-      expect(checkPolicy(caps, policy({ maxUsd: 1 }))).toMatchObject({ ok: false, error: { missing: ['budgets', 'spendLimits'] } })
       expect(checkPolicy(caps, policy({ maxWallMs: 60_000 }))).toEqual({ ok: true })
     }
+    expect(checkPolicy(PI_RPC_CAPS, policy({ maxUsd: 1 }))).toMatchObject({ ok: false, error: { missing: ['spendLimits'] } })
+  })
+
+  it('the RPC engine holds turn and tool-call counts hard', () => {
+    expect(PI_RPC_CAPS.budgets).toBe('hard')
+    expect(checkPolicy(PI_RPC_CAPS, policy({ maxTurns: 3 }))).toEqual({ ok: true })
+    expect(checkPolicy(PI_RPC_CAPS, policy({ maxToolCalls: 2 }))).toEqual({ ok: true })
   })
 
   it('declares the RPC caps only for an instance whose config asks for the RPC engine', () => {

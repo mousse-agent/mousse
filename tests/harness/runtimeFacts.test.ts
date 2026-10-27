@@ -32,7 +32,7 @@ class Finishing implements ProviderAdapter {
  * An agent whose `initialize` answer depends on its launch arguments: `--plan` advertises a Plan
  * mode. A sign-in teaches it the account's modes. Each handshake is counted.
  */
-function factsDriver(handshakes: string[]): HarnessDriver {
+function factsDriver(handshakes: string[], refreshes: string[] = []): HarnessDriver {
   return {
     kind: 'claude',
     label: 'Facts agent',
@@ -74,6 +74,7 @@ function factsDriver(handshakes: string[]): HarnessDriver {
           return { success: true, sessionId: session.sessionId }
         },
         refreshModels: async () => {
+          refreshes.push(context.instanceId)
           report = { ...report!, modes: [], source: 'session' }
         },
         stop: () => {}
@@ -100,8 +101,9 @@ describe('runtime facts', () => {
     let stored: unknown = Object.fromEntries(Object.entries(entries).map(([id, args]) => [id, { driver: 'claude', enabled: true, config: { binaryPath: binary, args } }]))
     const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
     const handshakes: string[] = []
+    const refreshes: string[] = []
     let clock = Date.now()
-    const harness = testHarness({ drivers: [factsDriver(handshakes)], instances, profileHome: home, now: () => clock })
+    const harness = testHarness({ drivers: [factsDriver(handshakes, refreshes)], instances, profileHome: home, now: () => clock })
     harnesses.push(harness)
     const caps = (instanceId: string) => harness.resolveStored({ instanceId, llmProvider: '', model: 'm' }, { purpose: 'turn' }).caps
     const spec = (binding: TurnSpec['binding']): TurnSpec => ({
@@ -111,7 +113,7 @@ describe('runtime facts', () => {
       control: {} as TurnSpec['control'],
       host: {} as TurnSpec['host']
     })
-    return { home, harness, binary, handshakes, caps, spec, tick: (ms: number) => { clock += ms } }
+    return { home, harness, binary, handshakes, refreshes, caps, spec, tick: (ms: number) => { clock += ms } }
   }
 
   it('checks a changed executable that no longer starts once, and not again after a restart', async () => {
@@ -183,10 +185,11 @@ describe('runtime facts', () => {
   })
 
   it('drops the facts of an executable replaced in place and refuses a retry on the old binding', async () => {
-    const { harness, binary, handshakes, caps, spec, tick } = fixture({ 'claude:one': ['--plan'] })
+    const { harness, binary, handshakes, refreshes, caps, spec, tick } = fixture({ 'claude:one': ['--plan'] })
     await harness.instances.recheck('claude:one')
     const binding = await harness.bind(harness.resolveStored({ instanceId: 'claude:one', llmProvider: '', model: 'm' }, { purpose: 'turn' }), { mode: 'agent' })
     expect(binding.binary?.path).toBe(binary)
+    expect(refreshes).toEqual([])
     // A self-update writes a new program at the same path; the next periodic check sees it.
     writeFileSync(binary, 'agent v2, a little longer')
     tick(11 * 60_000)
@@ -196,6 +199,9 @@ describe('runtime facts', () => {
     // A start-up check was queued; it records the new program's facts.
     await vi.waitFor(() => expect(caps('claude:one').planMode).toBe(true))
     expect(handshakes).toEqual(['claude:one', 'claude:one'])
+    // The new program's models are listed once, without disturbing the facts its check recorded.
+    await vi.waitFor(() => expect(refreshes).toEqual(['claude:one']))
+    expect(caps('claude:one').planMode).toBe(true)
     await expect(harness.startTurn(spec(binding)).result).rejects.toMatchObject({ code: 'binding_stale' })
   })
 })

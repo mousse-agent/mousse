@@ -67,7 +67,6 @@ export default function App() {
   const railPageOpen = useAppStore((s) => s.scheduledOpen || s.channelsOpen)
   const workspaceReady = useAppStore((s) => s.workspaceReady)
   const sidebarMode = useAppStore((s) => s.sidebarMode)
-  const [sideCardReserved, setSideCardReserved] = useState(false)
   const threadsSidebarView = useAppStore((s) => s.threadsSidebarView)
   useEffect(() => {
     if (!profileReady) return
@@ -560,7 +559,7 @@ export default function App() {
 
         <aside
           ref={sidebarRef}
-          className={`sidebar${!mainAreaOpen ? ' sidebar-full' : ''}${sideCardReserved ? ' sidebar-side-card' : ''}`}
+          className={`sidebar${!mainAreaOpen ? ' sidebar-full' : ''}`}
           style={sidebarMode === 'chats' && !usageOpen ? { display: 'none' } : mainAreaOpen ? { width: `${sidebarWidth}%` } : undefined}
         >
           {usageOpen && <SubscriptionUsagePage key={profileId} onClose={() => setUsageOpen(false)} />}
@@ -569,7 +568,7 @@ export default function App() {
 
           </KeepMounted>
           {remoteThreadOpen && !usageOpen && <div className="keep-mounted-pane"><RemoteThreadView /></div>}
-          <ThreadSideCard onReservedChange={setSideCardReserved} />
+          <ThreadSideCard />
           <QuickActionEditorHost />
         </aside>
 

@@ -298,6 +298,16 @@
   text-overflow: ellipsis;
 }
 
+/* The model list's age, quieter than the status above it. */
+.prov-item-models {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: var(--settings-fs-small);
+  line-height: 1.45;
+  color: var(--text-secondary);
+  opacity: 0.8;
+}
+
 /* The editor's status: the colour carries the tone. */
 .prov-editor .prov-status-text.is-ready {
   color: var(--success);

@@ -117,6 +117,7 @@ import { isThreadActivityActive } from '../../shared/types'
 import type {
   CreatePullRequestResult,
   PullRequestBaseBranches,
+  PullRequestDetail,
   PullRequestDraft,
   PullRequestFormInput,
   PullRequestRef,
@@ -1883,6 +1884,8 @@ export function registerGuiIpc(
   }
   gitMutation('git:checkout', 'git.checkout', (branch: string, options?: GitCheckoutOptions) => ({ branch, dirty: options?.dirty }))
   gitMutation('git:commit', 'git.commit', (message: string, options?: GitCommitOptions) => ({ message, amend: options?.amend, expectedBranch: options?.expectedBranch }))
+  // A proposal, not a mutation, but it names its folder like one and its error codes (no title model) reach the renderer.
+  gitMutation('git:suggestCommitMessage', 'git.suggestCommitMessage', (options?: { expectedBranch?: string }) => ({ expectedBranch: options?.expectedBranch }))
   gitMutation('git:push', 'git.push', (options?: GitPushOptions) => ({ expectedBranch: options?.expectedBranch }))
   gitMutation('git:init', 'git.init')
   gitMutation('git:stage', 'git.stage', (input: { paths?: string[]; all?: boolean }) => ({ paths: input?.paths, all: input?.all }))
@@ -1905,6 +1908,15 @@ export function registerGuiIpc(
       ...(force === true ? { force } : {})
     })
     return response.lookup
+  })
+  registerHandler('pullRequests:detail', async (_e, ref: PullRequestRef | undefined, number: number, force?: boolean) => {
+    const response = await guiMms.request<{ detail: PullRequestDetail }>('pullRequests.detail', {
+      ...(typeof ref?.threadId === 'string' ? { threadId: ref.threadId } : {}),
+      ...(typeof ref?.projectId === 'string' ? { projectId: ref.projectId } : {}),
+      number,
+      ...(force === true ? { force } : {})
+    })
+    return response.detail
   })
   registerHandler('pullRequests:draft', async (_e, scope: PullRequestScope, base?: string) => {
     const response = await guiMms.request<{ title: string; body: string; base: string; source: 'model' | 'heuristic' }>(
@@ -2208,6 +2220,7 @@ export function registerGuiIpc(
   const removeInstanceInstall = instanceCommand('providers.instances.removeInstall', 'result')
   const searchRegistry = instanceCommand('providers.registry.search', 'agents')
   const refreshInstanceModels = instanceCommand('providers.instances.refreshModels', 'snapshot')
+  const refreshAllInstanceModels = instanceCommand('providers.instances.refreshAllModels', 'results')
   const setInstanceModelPrefs = instanceCommand('providers.instances.setModelPrefs', 'snapshot')
   // The daemon validates every payload.
   registerHandler('providers:instances:add', async (_e, input: Record<string, unknown>) => addInstance(input))
@@ -2235,6 +2248,7 @@ export function registerGuiIpc(
   registerHandler('providers:registry:search', async (_e, query: unknown) => searchRegistry({ query: typeof query === 'string' ? query : '' }))
   registerHandler('providers:instances:refreshModels', async (_e, instanceId: string) =>
     refreshInstanceModels({ instanceId }))
+  registerHandler('providers:instances:refreshAllModels', async () => refreshAllInstanceModels({}))
   registerHandler('providers:instances:setModelPrefs', async (_e, instanceId: string, patch: unknown) =>
     setInstanceModelPrefs({ instanceId, patch }))
   registerHandler('dialog:pickExecutable', async (event, request: unknown) => {

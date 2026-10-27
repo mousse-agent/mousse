@@ -1,14 +1,8 @@
 import { afterEach, expect, it, vi } from 'vitest'
+import type { BotRuntimeAdapter } from '../../../../src/mms/net/contracts'
+import { ScriptedBotRuntime } from '../scriptedRuntime'
 import { join } from 'node:path'
 import { existsSync } from 'node:fs'
-import {
-  createAssistantMessageEventStream,
-  type Model,
-  type Provider,
-  type AssistantMessage,
-  type Context,
-  type StreamOptions
-} from '@earendil-works/pi-ai'
 import { SpaceCurrentIdentity } from '../../../../src/mms/spaces/SpaceCurrentIdentity'
 import { BotProfileService } from '../../../../src/mms/bots/BotProfileService'
 import {
@@ -59,82 +53,19 @@ async function fixture(
     p = f.p,
     auth = new ProviderAuthService(join(p.path, 'profile-bot-auth.json'))
   disposers.push(() => auth.stop())
-  const contexts: Context[] = [],
-    signals: AbortSignal[] = [],
-    model: Model<'anthropic-messages'> = {
-      id: 'fixture',
-      name: 'Fixture',
-      api: 'anthropic-messages',
-      provider: 'profile-bot-fixture',
-      baseUrl: 'https://invalid.test',
-      reasoning: false,
-      input: ['text'],
-      cost: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 },
-      contextWindow: 10000,
-      maxTokens: 1000
-    }
-  let release: () => void = () => {}
-  const ignoreAbort = options.ignoreAbort
-  const stream = (
-    _model: Model<'anthropic-messages'>,
-    context: Context,
-    options: StreamOptions = {}
-  ) => {
-    contexts.push(structuredClone(context))
-    signals.push(options.signal!)
-    const result = createAssistantMessageEventStream(),
-      message: AssistantMessage = {
-        role: 'assistant',
-        api: model.api,
-        provider: model.provider,
-        model: model.id,
-        content: [{ type: 'text', text: 'Exact profile answer' }],
-        stopReason: 'stop',
-        timestamp: Date.now(),
-        usage: {
-          input: 10,
-          output: 10,
-          cacheRead: 0,
-          cacheWrite: 0,
-          totalTokens: 20,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 10 / 1000000 }
-        }
-      }
-    release = () => {
-      result.push({ type: 'done', reason: 'stop', message })
-      result.end(message)
-    }
-    if (options.signal && !ignoreAbort)
-      options.signal.addEventListener('abort', release, { once: true })
-    if (!paused) queueMicrotask(release)
-    return result
-  }
-  const provider: Provider<'anthropic-messages'> = {
-    id: model.provider,
-    name: 'Fixture',
-    auth: {
-      apiKey: {
-        name: 'Fixture',
-        resolve: async () => ({ auth: { apiKey: 'deterministic-profile-fixture' } })
-      }
-    },
-    getModels: () => [model],
-    stream,
-    streamSimple: stream
-  }
-  auth.models.setProvider(provider)
-  await auth.credentials.modify(provider.id, async () => ({
-    type: 'api_key',
-    key: 'deterministic-profile-fixture'
-  }))
+  const runtime = new ScriptedBotRuntime({
+    answer: 'Exact profile answer',
+    paused: options.paused,
+    stubborn: options.ignoreAbort
+  })
   const definition: NativeBotDefinition = {
       revision: 'native-v1',
       systemPrompt: 'Only the exact bot compartment.',
       billing: {
-        provider: model.provider,
-        model: model.id,
-        api: model.api,
-        modelDigest: modelDigest(model),
+        provider: 'profile-bot-fixture',
+        model: 'fixture',
+        api: 'anthropic-messages',
+        modelDigest: 'fixture-digest',
         sdkVersion: nativeSdkVersion(),
         platform: process.platform,
         nodeVersion: process.versions.node,
@@ -297,7 +228,9 @@ async function fixture(
     spaces: port,
     threads,
     projects,
-    native,
+    ...(options.qualification
+      ? { trustedQaAdapters: new Map<string, BotRuntimeAdapter>([['mousse', runtime]]) }
+      : { native }),
     ...(options.scopedAdmission
       ? {
           prepareAdmission: (input) => current.prepareAdmission(input),
@@ -338,8 +271,9 @@ async function fixture(
     port,
     authority,
     privateService,
-    contexts,
-    signals,
+    contexts: runtime.runs,
+    signals: runtime.signals,
+    runtime,
     threads,
     native,
     projects,
@@ -349,7 +283,7 @@ async function fixture(
     setBlocked(value: boolean) {
       blocked = value
     },
-    release: () => release()
+    release: () => runtime.release()
   }
 }
 it('keeps actual native production qualification inactive and rejects snapshots before all effects', async () => {
@@ -386,8 +320,8 @@ it('runs the actual native model only after real TLS acceptance, with isolated a
   expect(accepted.state).toBe('sent')
   expect(f.authority.executionBinding(f.space.space, id!)?.trigger).toBe(input.record.id)
   expect(f.contexts).toHaveLength(1)
-  expect(f.contexts[0].tools).toBeUndefined()
-  expect(f.contexts[0].systemPrompt).toBe(f.native.definition.systemPrompt)
+  expect(f.contexts[0].profile).toBe('chat')
+  expect(f.contexts[0].prompt).toBe('Public mention')
   expect(f.budgets.remaining(f.bot, f.space.space, f.p.clock.now())).toBe(990)
   expect(
     existsSync(
@@ -842,7 +776,7 @@ it('fences accepted work paused before start even after a second mention refresh
     }
     await refresh(space)
   })
-  const model = vi.spyOn(f.bots.native!, 'run'),
+  const model = vi.spyOn(f.runtime, 'run'),
     tool = vi.spyOn(ReaderToolPort.prototype, 'execute')
   const delivery = f.bots.receiveStored(first.record, f.p.store.getStream(first.stream)!)[0]
   await vi.waitFor(() => expect(paused).toBe(true))

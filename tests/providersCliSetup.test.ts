@@ -1,6 +1,6 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { describeStatus, type InstanceSnapshot } from '../src/shared/harness/status'
 import type { ProviderLoginOption } from '../src/shared/providerAuth'
 import { AgentConnectStep, CustomCommandStep, addChoices, type AddChoice } from '../src/renderer/components/providers/AddProviderDialog'
@@ -9,7 +9,8 @@ import { ProviderModelsSection, bulkVisibilityPatch, capabilityChips, displayMod
 import { AgentEditor, allowsCustomModels } from '../src/renderer/components/providers/ProviderEditor'
 import { ProviderListRow, StatusLine, shortStatus } from '../src/renderer/components/providers/parts'
 import { offersRedirectPaste, refusedText } from '../src/renderer/components/providers/SignInDialog'
-import { commandLabel, parseEnvLines, switchStateOf } from '../src/renderer/components/providers/providerView'
+import { commandLabel, modelsFreshness, parseEnvLines, switchStateOf } from '../src/renderer/components/providers/providerView'
+import { ProvidersSettings } from '../src/renderer/components/providers/ProvidersSettings'
 import { model, snapshot, type SnapshotOverrides } from './providerSnapshotFixture'
 
 const noop = async () => undefined
@@ -226,6 +227,59 @@ describe('List row and editor status', () => {
     const html = row(snapshot(), { label: 'Update Claude Code to v2.2.0', onClick: () => undefined })
     expect(html).not.toContain('prov-version')
     expect(labels(html)).toContain('Update Claude Code to v2.2.0')
+  })
+})
+
+describe('Model list freshness', () => {
+  const NOW = Date.parse('2026-10-27T12:00:00.000Z')
+  const listed = { entries: [model('a')] }
+  afterEach(() => vi.useRealTimers())
+  const row = (entry: InstanceSnapshot) => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(NOW)
+    return renderToStaticMarkup(createElement(ProviderListRow, {
+      iconId: 'claude', name: entry.displayName, status: describeStatus(entry), models: modelsFreshness(entry),
+      toggle: switchStateOf(entry, { kind: 'device' }), selected: false, onSelect: () => undefined, onToggle: noop
+    }))
+  }
+
+  it('says when the list was updated, from the time the daemon kept with it', () => {
+    const entry = snapshot({ models: { ...listed, source: 'live', refreshedAt: new Date(NOW - 2 * 3_600_000).toISOString() } })
+    expect(modelsFreshness(entry)).toEqual({ kind: 'updated', at: NOW - 2 * 3_600_000 })
+    expect(row(entry)).toContain('Models updated 2 h ago')
+  })
+
+  it('calls a list with no update time the cached list', () => {
+    const entry = snapshot({ models: { ...listed, source: 'cached' } })
+    expect(modelsFreshness(entry)).toEqual({ kind: 'cached' })
+    expect(row(entry)).toContain('Models: cached list')
+  })
+
+  it('says nothing for a model API, which keeps its own refresh cycle', () => {
+    const api = snapshot({ instanceId: 'pi:openai', driver: 'pi', displayName: 'OpenAI', models: { ...listed, source: 'cached' } })
+    expect(modelsFreshness(api)).toBeNull()
+    expect(modelsFreshness({ ...api, models: { ...api.models, refreshedAt: new Date(NOW - 3_600_000).toISOString() } })).toBeNull()
+    expect(row(api)).not.toContain('Models')
+  })
+
+  it('says nothing for a provider that is off, not signed in, lists nothing, or whose list is not a refreshable one', () => {
+    expect(modelsFreshness(snapshot({ models: { ...listed, source: 'cached' }, enabled: { device: false, effective: false, setBy: 'device' } }))).toBeNull()
+    expect(modelsFreshness(snapshot({ models: { ...listed, source: 'cached' }, auth: { state: 'signed_out' } }))).toBeNull()
+    expect(modelsFreshness(snapshot({ models: { entries: [], source: 'none' } }))).toBeNull()
+    expect(modelsFreshness(snapshot({ models: { ...listed, source: 'manifest' } }))).toBeNull()
+    expect(row(snapshot({ models: { entries: [], source: 'none' } }))).not.toContain('Models')
+  })
+})
+
+describe('Providers page toolbar', () => {
+  it('offers Refresh models beside Refresh provider status', () => {
+    const html = renderToStaticMarkup(createElement(ProvidersSettings, {
+      settings: {} as never, refreshProviderData: async () => ({ opts: {} as never }), updateSettings: async () => undefined, ensureValidProviderSelection: async (next) => next
+    }))
+    expect(html).toContain('title="Refresh provider status"')
+    expect(html).toContain('title="Refresh models"')
+    expect(html.indexOf('title="Refresh provider status"')).toBeLessThan(html.indexOf('title="Refresh models"'))
+    expect(html).toContain('<span>Refresh models</span>')
   })
 })
 

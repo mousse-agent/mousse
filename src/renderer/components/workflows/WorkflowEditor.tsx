@@ -1,6 +1,7 @@
 import { Archive, Copy, Download, Redo2, Undo2, Code2, Network, Wand2, Play, ListTree, History, CircleCheck } from '../../lib/icons'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { WorkflowBundle, WorkflowDiagnostic, WorkflowEditorDocument, WorkflowManifest, WorkflowNode } from '../../../shared/workflows'
+import { useCommands } from '../../commands/commandRegistry'
 import type { AgentDefinitionsClient } from '../agentDefinitions/client'
 import { assetText, upsertAsset } from './assets'
 import { createAsyncGate, shouldApplyAsyncResult } from './asyncGate'
@@ -17,6 +18,7 @@ import {
 } from './client'
 import { createWorkflowNode } from './defaultNode'
 import { DraftConflictDialog, UnsavedChangesDialog } from './dialogs'
+import { workflowLocalKey } from './editorKeys'
 import {
   addEdgeToManifest,
   canvasPositionsToEditor,
@@ -340,55 +342,55 @@ export function WorkflowEditor({
     setDraft((current) => (current ? { ...current, manifest: parsed.manifest } : current))
   }
 
+  const duplicateSelected = () => {
+    if (!selectedId) return
+    updateDraft((current) => {
+      const duplicated = duplicateNodes(current.manifest, [selectedId], newNodeId)
+      return { ...current, manifest: duplicated.manifest }
+    })
+  }
+
+  const deleteSelected = () => {
+    if (!selectedId) return
+    updateDraft((current) => ({ ...current, manifest: removeNodes(current.manifest, [selectedId]) }))
+    setSelectedId(null)
+  }
+
+  // Save, duplicate and delete are registry commands, so they can be rebound and are listed in
+  // Settings > Shortcuts. They run only while this editor is the one on screen.
+  useCommands([
+    { id: 'workflow.save', run: () => void saveDraft(), enabled: () => active },
+    { id: 'workflow.duplicate', run: duplicateSelected, enabled: () => active && Boolean(selectedId && draft) },
+    { id: 'workflow.delete', run: deleteSelected, enabled: () => active && Boolean(selectedId) && view === 'canvas' }
+  ])
+
+  // Undo, redo and the arrow nudges stay here: they are the Edit-menu chords and fixed keys.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      const meta = event.ctrlKey || event.metaKey
-      if (meta && event.key.toLowerCase() === 's') {
-        event.preventDefault()
-        void saveDraft()
-      }
-      if (meta && event.key.toLowerCase() === 'z') {
+      const action = workflowLocalKey(event, { hasSelection: Boolean(selectedId), canvasView: view === 'canvas' })
+      if (!action) return
+      if (action.type === 'undo' || action.type === 'redo') {
         event.preventDefault()
         setDraft((current) => {
           if (!current) return current
-          const result = event.shiftKey ? history.redo(current) : history.undo(current)
+          const result = action.type === 'redo' ? history.redo(current) : history.undo(current)
           if (!result) return current
           setHistory(result.history)
           setSourceText(stringifyManifest(result.next.manifest))
           return result.next
         })
-      }
-      if (meta && event.key.toLowerCase() === 'y') {
+      } else if (action.type === 'delete') {
+        deleteSelected()
+      } else if (selectedId) {
         event.preventDefault()
-        setDraft((current) => {
-          if (!current) return current
-          const result = history.redo(current)
-          if (!result) return current
-          setHistory(result.history)
-          return result.next
-        })
-      }
-      if (meta && event.key.toLowerCase() === 'd' && selectedId && draft) {
-        event.preventDefault()
-        updateDraft((current) => {
-          const duplicated = duplicateNodes(current.manifest, [selectedId], newNodeId)
-          return { ...current, manifest: duplicated.manifest }
-        })
-      }
-      if ((event.key === 'Delete' || event.key === 'Backspace') && selectedId && view === 'canvas' && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement)) {
-        updateDraft((current) => ({ ...current, manifest: removeNodes(current.manifest, [selectedId]) }))
-        setSelectedId(null)
-      }
-      if (event.shiftKey && selectedId && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
-        event.preventDefault()
-        const dx = event.key === 'ArrowLeft' ? -16 : event.key === 'ArrowRight' ? 16 : 0
-        const dy = event.key === 'ArrowUp' ? -16 : event.key === 'ArrowDown' ? 16 : 0
-        updateDraft((current) => ({ ...current, editor: nudgePosition(current.editor, selectedId, dx, dy) }), false)
+        updateDraft((current) => ({ ...current, editor: nudgePosition(current.editor, selectedId, action.dx, action.dy) }), false)
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  })
+    // The handlers below read state only through setters and these values.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [history, selectedId, view, readOnly])
 
   if (loading && !draft) {
     return (

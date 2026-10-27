@@ -24,10 +24,14 @@ import { ProviderIcon, normalizeProviderId } from '../lib/providerIcons'
 import { instanceBadges, knownModelLabel } from '../lib/providerSnapshots'
 import { listingKey, listingServes } from '../../shared/providerInstances'
 import { useAppStore } from '../stores/appStore'
-import { useCommandOverlay } from '../commands/commandRegistry'
+import { useCommandBindings, useCommandOverlay, useCommands } from '../commands/commandRegistry'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { favoriteKey, useModelFavorites, type ModelFavoriteKey } from '../lib/modelFavorites'
 import type { StatusDescription } from '../../shared/harness/status'
+import { formatBinding, type CommandId } from '../../shared/commands'
+
+/** The commands behind Ctrl/Cmd+1-5, in list order. */
+const MODEL_PICK_COMMANDS: readonly CommandId[] = ['model.pick1', 'model.pick2', 'model.pick3', 'model.pick4', 'model.pick5']
 
 interface ModelFamilyMenuProps {
   /** `status` (from the instance snapshot) is shown on the rows of a provider that is not ready. */
@@ -414,22 +418,25 @@ function ProfileModelFamilyMenu({
     favorites.toggle({ id: entry.providerId, instanceId: entry.instanceId }, entry.family)
   }
 
+  const bindings = useCommandBindings()
+  const platform = useAppStore((state) => state.appInfo?.platform) ?? ''
+
+  // Ctrl/Cmd+1-5 pick the nth listed model. The registry runs them while this picker is the topmost
+  // overlay; a slot with no model is disabled, so the key goes on to the focused element.
+  useCommands(
+    MODEL_PICK_COMMANDS.map((id, index) => ({
+      id,
+      run: () => {
+        const entry = filteredEntries[index]
+        if (entry) selectEntry(entry)
+      },
+      enabled: () => Boolean(filteredEntries[index])
+    }))
+  )
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') return
-
-      const mod = event.ctrlKey || event.metaKey
-      if (mod && !event.altKey && !event.shiftKey) {
-        const digit = Number(event.key)
-        if (digit >= 1 && digit <= 5) {
-          const entry = filteredEntries[digit - 1]
-          if (entry) {
-            event.preventDefault()
-            selectEntry(entry)
-          }
-          return
-        }
-      }
 
       // Focused controls own their keyboard activation, including effort chips,
       // favorites, provider filters, and model rows.
@@ -492,7 +499,8 @@ function ProfileModelFamilyMenu({
   const renderEntry = (entry: FlatModelEntry, index: number) => {
     const selected = isEntrySelected(entry)
     const isFavorite = isEntryFavorite(entry)
-    const shortcut = index < 5 ? `Ctrl+${index + 1}` : null
+    const binding = index < MODEL_PICK_COMMANDS.length ? bindings[MODEL_PICK_COMMANDS[index]] : null
+    const shortcut = binding ? formatBinding(binding, platform) : null
     const isHighlighted = index === highlightIndex
     const isActive =
       activeFamily?.entry.listing === entry.listing &&

@@ -62,6 +62,22 @@ export function useCommand(id: CommandId, run: () => void, enabled?: () => boole
   )
 }
 
+/** `useCommand` for a fixed list of commands, such as the five surface letters or the five model slots. */
+export function useCommands(commands: ReadonlyArray<{ id: CommandId; run: () => void; enabled?: () => boolean }>): void {
+  const latest = useRef(commands)
+  latest.current = commands
+  const key = commands.map((command) => command.id).join(',')
+  useEffect(() => {
+    const unregister = latest.current.map((command, index) =>
+      registerCommand(command.id, {
+        run: () => latest.current[index]?.run(),
+        enabled: () => latest.current[index]?.enabled?.() ?? true
+      })
+    )
+    return () => unregister.forEach((off) => off())
+  }, [key])
+}
+
 /** Marks an overlay as topmost; the returned function removes it. */
 export function pushOverlay(scope: OverlayScope): () => void {
   useCommandRegistry.setState((state) => ({ overlays: [...state.overlays, scope] }))
@@ -112,6 +128,8 @@ export function currentContext(source: CommandSource, target?: ClosestTarget | n
   })
   // Until the app info arrives the preload still knows the platform.
   if (!context.platform && typeof window !== 'undefined') context.platform = window.mousse?.platform ?? ''
+  // A palette row or menu click has no focus to judge, so it counts as being in the Files panel.
+  if (source !== 'key') context.inFilesPanel = true
   return source === 'guest' ? { ...context, inTextInput: true } : context
 }
 

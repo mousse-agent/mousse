@@ -2,8 +2,10 @@ import { PanelLeft, PanelRightClose, PanelRightOpen, SidebarRight } from '../lib
 import { WindowCaptionButtons } from './WindowCaptionButtons'
 import { IconButton } from './IconButton'
 import {
+  applySideCardToggle,
   nextSideCardToggleState,
   sideCardButtonTitle,
+  useSideCardMode,
   useSideCardUnavailable,
   useSideCardVisible
 } from './sideCard/sideCardLogic'
@@ -22,15 +24,13 @@ export function TitleBar() {
   const setThreadsSidebarOpen = useAppStore((s) => s.setThreadsSidebarOpen)
   const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
   const setMainAreaOpen = useAppStore((s) => s.setMainAreaOpen)
-  const sideCardOn = useAppStore((s) => s.sideCardOn)
-  const setSideCardOn = useAppStore((s) => s.setSideCardOn)
   const sideCardVisible = useSideCardVisible()
+  const sideCardMode = useSideCardMode()
   const sideCardUnavailable = useSideCardUnavailable()
 
   const toggleSideCard = () => {
-    const next = nextSideCardToggleState(sideCardVisible, { sideCardOn, mainAreaOpen })
-    if (next.mainAreaOpen !== mainAreaOpen) setMainAreaOpen(next.mainAreaOpen)
-    if (next.sideCardOn !== sideCardOn) setSideCardOn(next.sideCardOn)
+    const { sideCardOn, mainAreaOpen, sideCardOverlayOpen } = useAppStore.getState()
+    applySideCardToggle(nextSideCardToggleState(sideCardVisible, { sideCardOn, mainAreaOpen, sideCardOverlayOpen }, sideCardMode))
   }
 
   return (

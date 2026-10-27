@@ -1,5 +1,6 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useAppStore } from '../../stores/appStore'
+import { useDialogFocus } from '../ui/Modal'
 import { ActionsSection } from './ActionsSection'
 import { DeviceSection } from './DeviceSection'
 import { GitSection } from './GitSection'
@@ -8,22 +9,14 @@ import { RemoteDeviceSection } from './RemoteDeviceSection'
 import { useRemoteThreads } from '../../lib/remoteThreadStore'
 import {
   sideCardFitsThreadWidth,
+  sideCardReservedWidth,
   threadsSidebarReservedWidth,
   threadViewWidth,
+  useSideCardMode,
   useSideCardVisible
 } from './sideCardLogic'
 import { useSideCardPresence } from './useSideCardPresence'
 import './sideCard.css'
-
-interface ThreadSideCardProps {
-  /**
-   * Called with whether the thread view should leave room for the card on its
-   * right. The owner of the thread view applies the padding, so the transcript
-   * is never hidden under the card. It turns true as the card starts to fade in
-   * and false as it starts to fade out; the padding transition follows.
-   */
-  onReservedChange?: (reserved: boolean) => void
-}
 
 interface SideCardSectionsProps {
   threadId: string | null
@@ -47,9 +40,16 @@ export function SideCardSections({ threadId, projectId }: SideCardSectionsProps)
  * pane, within the workspace: its layer fills that pane, and the workspace is
  * measured to decide whether there is room. Opening the app panel fades the card
  * out in place instead of letting it jump into the narrower pane.
+ *
+ * Docked, the card writes `--side-card-reserved` (px) on the pane so the
+ * conversation column and the composer step aside for it while the scroller
+ * keeps the pane's full width. In a thread area too narrow for that the same
+ * card is an overlay: it slides in over the conversation with a scrim, takes
+ * focus, closes on Escape or a click on the scrim, and reserves nothing.
  */
-export function ThreadSideCard({ onReservedChange }: ThreadSideCardProps) {
+export function ThreadSideCard() {
   const visible = useSideCardVisible()
+  const overlay = useSideCardMode() === 'overlay'
   const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
   const setSideCardFits = useAppStore((s) => s.setSideCardFits)
   const threadId = useAppStore((s) => s.activeThreadId)
@@ -57,6 +57,7 @@ export function ThreadSideCard({ onReservedChange }: ThreadSideCardProps) {
   const projectId = useAppStore((s) => s.threads.find((thread) => thread.id === s.activeThreadId)?.projectId ?? null)
 
   const layerRef = useRef<HTMLDivElement>(null)
+  const cardRef = useRef<HTMLElement>(null)
   // The thread view's width with the app panel closed: the whole workspace less
   // the threads sidebar that stays beside it. Opening the panel narrows the aside
   // the card sits in, so the aside says nothing about whether the card fits; the
@@ -98,9 +99,28 @@ export function ThreadSideCard({ onReservedChange }: ThreadSideCardProps) {
 
   const { mounted, shown, reserved } = useSideCardPresence(visible, launched)
 
+  // Written on the pane, not passed up: the width follows the window while it is
+  // resized, and nothing above the pane needs to render for it.
+  const reservedWidth = !overlay && reserved && threadWidth !== null ? sideCardReservedWidth(threadWidth) : 0
+  useLayoutEffect(() => {
+    layerRef.current?.parentElement?.style.setProperty('--side-card-reserved', `${reservedWidth}px`)
+  }, [reservedWidth])
+  useLayoutEffect(() => {
+    const pane = layerRef.current?.parentElement
+    return () => {
+      pane?.style.removeProperty('--side-card-reserved')
+    }
+  }, [])
+
+  const closeOverlay = useCallback(() => useAppStore.getState().setSideCardOverlayOpen(false), [])
+  // Focus moves into the overlay once it has faded in and returns to the control that opened it
+  // when it starts to fade out. Docked, the card is a plain part of the page.
+  useDialogFocus(cardRef, overlay && shown, closeOverlay)
+  // The dialog helper lands on the first control, which would draw a focus ring on a row the user
+  // did not pick. The card itself takes focus instead; Tab moves on to its first control.
   useEffect(() => {
-    onReservedChange?.(reserved)
-  }, [onReservedChange, reserved])
+    if (overlay && shown) cardRef.current?.focus({ preventScroll: true })
+  }, [overlay, shown])
 
   // Pin the layer to the full thread width so the fading card stays where it was.
   // The aside lifts above the incoming app panel while a card is mounted there
@@ -109,11 +129,22 @@ export function ThreadSideCard({ onReservedChange }: ThreadSideCardProps) {
   return (
     <div
       ref={layerRef}
-      className="thread-side-card-layer"
+      className={`thread-side-card-layer${overlay ? ' thread-side-card-layer--overlay' : ''}`}
       style={pinned ? { right: 'auto', width: threadWidth } : undefined}
     >
+      {mounted && overlay && (
+        <div className="thread-side-card-scrim" data-shown={shown} aria-hidden="true" onClick={closeOverlay} />
+      )}
       {mounted && (
-        <section className="thread-side-card" aria-label="Thread details" data-shown={shown} inert={!shown}>
+        <section
+          ref={cardRef}
+          className="thread-side-card"
+          aria-label="Thread details"
+          role={overlay ? 'dialog' : undefined}
+          tabIndex={overlay ? -1 : undefined}
+          data-shown={shown}
+          inert={!shown}
+        >
           {remote ? <RemoteDeviceSection entry={remote} /> : <SideCardSections threadId={threadId} projectId={projectId} />}
         </section>
       )}

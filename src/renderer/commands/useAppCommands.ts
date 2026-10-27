@@ -1,3 +1,4 @@
+import { applySideCardToggle, deriveSideCardState, nextSideCardToggleState } from '../components/sideCard/sideCardLogic'
 import { openSurface } from '../lib/surfaces'
 import { createAndSelectThread, selectAdjacentThread } from '../lib/threadActions'
 import { useAppStore } from '../stores/appStore'
@@ -16,8 +17,11 @@ export function useAppCommands(): void {
   useCommand('thread.previous', () => void selectAdjacentThread(-1))
   useCommand('threads.search', () => useAppStore.getState().setThreadSearchOpen(true))
   useCommand('sideCard.toggle', () => {
-    const { sideCardOn, setSideCardOn } = useAppStore.getState()
-    setSideCardOn(!sideCardOn)
+    const state = useAppStore.getState()
+    const { visible, mode } = deriveSideCardState(state)
+    // In a narrow window the card is an overlay: the command opens or closes it, and leaves the switch alone.
+    if (mode === 'overlay') applySideCardToggle(nextSideCardToggleState(visible, state, mode))
+    else state.setSideCardOn(!state.sideCardOn)
   })
   useCommand('terminal.open', () => openSurface('terminal'))
 }

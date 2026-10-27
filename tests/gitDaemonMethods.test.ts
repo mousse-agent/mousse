@@ -6,6 +6,7 @@ import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { MousseMainService } from '../src/mms/MousseMainService'
+import { LlmClient } from '../src/mms/orchestrator/LlmClient'
 import { LocalMmsClient, MmsProtocolError, requestTimeoutFor } from '../src/mms/protocol/client'
 import { MmsProtocolServer } from '../src/mms/protocol/server'
 import {
@@ -519,6 +520,92 @@ describe('Git mutations through the daemon', () => {
         expect(git(t.path, 'show', '--name-only', '--format=', 'HEAD').split('\n').filter(Boolean)).toEqual(['turn-output.txt'])
         expect(porcelain(t.path)).toEqual([])
       })
+    })
+  })
+
+  describe('suggesting a commit message', () => {
+    type Suggestion = { message: string; truncated: boolean }
+    /** A chosen title model whose answer is canned; returns the spy on the model call. */
+    function withTitleModel(answer = 'Add the files.') {
+      mms.settings.set({ title: { llmProvider: 'openai', model: 'gpt-big' } })
+      vi.spyOn((mms.orchestrator as unknown as { harness: { resolveStored: () => unknown } }).harness, 'resolveStored').mockReturnValue({ instanceId: 'pi:openai', llmProvider: 'openai' })
+      return vi.spyOn(LlmClient.prototype, 'generateCommitMessage').mockResolvedValue(answer)
+    }
+    const promptOf = (ask: ReturnType<typeof withTitleModel>, call = 0) => String(ask.mock.calls[call][1])
+
+    it('says so with a code when no title model is chosen, and reads nothing', async () => {
+      const scope = await projectScope()
+      const ask = vi.spyOn(LlmClient.prototype, 'generateCommitMessage')
+      write(f.repo, 'a.txt')
+      await expect(client.request('git.suggestCommitMessage', scope)).rejects.toMatchObject({ code: 'git_suggest_no_model', errorInfo: { category: 'unavailable' } })
+      expect(ask).not.toHaveBeenCalled()
+    })
+
+    it('in a project folder sends the staged changes only and leaves the repository as it was', async () => {
+      const scope = await projectScope()
+      const ask = withTitleModel('Add the staged file.\n\nIt is new.')
+      write(f.repo, 'staged.txt', 'STAGED CONTENT\n'); git(f.repo, 'add', 'staged.txt')
+      write(f.repo, 'value.txt', 'UNSTAGED EDIT\n'); write(f.repo, 'untracked.txt', 'UNTRACKED CONTENT\n')
+      const before = { head: git(f.repo, 'rev-parse', 'HEAD'), state: porcelain(f.repo) }
+
+      const result = await client.request<Suggestion>('git.suggestCommitMessage', { ...scope, expectedBranch: branchOf(f.repo) })
+      expect(result).toEqual({ message: 'Add the staged file\n\nIt is new.', truncated: false })
+      expect(promptOf(ask)).toContain('STAGED CONTENT')
+      expect(promptOf(ask)).not.toMatch(/UNSTAGED EDIT|UNTRACKED CONTENT|untracked\.txt/)
+      expect(ask.mock.calls[0][2]).toBeUndefined()
+      expect({ head: git(f.repo, 'rev-parse', 'HEAD'), state: porcelain(f.repo) }).toEqual(before)
+
+      // With nothing staged the commit stages everything, so that is what is described; new files by name only.
+      git(f.repo, 'reset', '-q')
+      await client.request('git.suggestCommitMessage', scope)
+      expect(promptOf(ask, 1)).toMatch(/UNSTAGED EDIT/)
+      expect(promptOf(ask, 1)).toContain('- untracked.txt')
+      expect(promptOf(ask, 1)).not.toContain('UNTRACKED CONTENT')
+    })
+
+    it('in a thread worktree sends every change, as the commit there takes every change, and names the thread', async () => {
+      const t = await threadScope()
+      const ask = withTitleModel()
+      write(t.path, 'staged.txt', 'STAGED CONTENT\n'); git(t.path, 'add', 'staged.txt')
+      write(t.path, 'value.txt', 'UNSTAGED EDIT\n')
+      const before = { head: git(t.path, 'rev-parse', 'HEAD'), state: porcelain(t.path) }
+
+      await client.request('git.suggestCommitMessage', { threadId: t.threadId })
+      expect(promptOf(ask)).toContain('STAGED CONTENT')
+      expect(promptOf(ask)).toContain('UNSTAGED EDIT')
+      expect(ask.mock.calls[0][2]).toBe(t.threadId)
+      expect({ head: git(t.path, 'rev-parse', 'HEAD'), state: porcelain(t.path) }).toEqual(before)
+      // The project's own checkout is a different folder and was not read.
+      expect(porcelain(f.repo)).toEqual([])
+    })
+
+    it('does not create a thread worktree, and with no changes has nothing to describe', async () => {
+      const project = mms.projects.openProject(f.repo)
+      const thread = mms.threads.createThread('No worktree yet', project.id)
+      const ask = withTitleModel()
+      await expect(client.request('git.suggestCommitMessage', { threadId: thread.id })).rejects.toMatchObject({ code: 'git_suggest_empty' })
+      expect(new ThreadWorkspaceManager(mms.threads.getThreadDir(thread.id)).load()).toBeUndefined()
+      expect(ask).not.toHaveBeenCalled()
+    })
+
+    it('answers with a fixed failure when the model fails', async () => {
+      const scope = await projectScope()
+      const ask = withTitleModel()
+      ask.mockRejectedValue(new Error('upstream exploded'))
+      write(f.repo, 'a.txt')
+      await expect(client.request('git.suggestCommitMessage', scope)).rejects.toMatchObject({ code: 'git_suggest_failed' })
+    })
+
+    it('rejects a caller folder, both ids, no id, an unknown thread and a branch that moved', async () => {
+      const scope = await projectScope()
+      const ask = withTitleModel()
+      write(f.repo, 'a.txt')
+      await expect(client.request('git.suggestCommitMessage', { ...scope, cwd: '/tmp' })).rejects.toThrow(/cwd is not allowed/)
+      await expect(client.request('git.suggestCommitMessage', { ...scope, threadId: 't' })).rejects.toThrow(/either threadId or projectId/)
+      await expect(client.request('git.suggestCommitMessage', {})).rejects.toThrow(/projectId or threadId is required/)
+      await expect(client.request('git.suggestCommitMessage', { threadId: 'missing' })).rejects.toThrow(/not found/i)
+      await expect(client.request('git.suggestCommitMessage', { ...scope, expectedBranch: 'not-the-branch' })).rejects.toMatchObject({ code: 'git_branch_changed' })
+      expect(ask).not.toHaveBeenCalled()
     })
   })
 

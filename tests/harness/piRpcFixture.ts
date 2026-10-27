@@ -26,7 +26,7 @@ export interface Scratch {
 
 export function scratchDir(prefix = 'mousse-pi-rpc-'): Scratch {
   const dir = mkdtempSync(join(tmpdir(), prefix))
-  return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }) }
+  return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }) }
 }
 
 const builds = new Map<string, Promise<string>>()

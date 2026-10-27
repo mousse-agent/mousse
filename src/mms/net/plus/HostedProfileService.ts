@@ -28,7 +28,7 @@ interface Stored {
   deferredRoute?: Stored['pending']
   managedSpaceRoutes?: Record<string, { user: UserId; expiresAt: number }>
   /** Display-only account details from the sign-in grant. Never used for authorization. */
-  account?: { email?: string; plan?: string }
+  account?: { email?: string; plan?: string; devices?: { used: number; limit: number } }
   pending?: {
     ticket?: string
     purpose: ChallengeStatement['purpose']
@@ -45,6 +45,15 @@ export interface PlusEnrollmentRequest {
   transportFingerprint: string
   createdAt: number
   expiresAt: number
+}
+/** `devices` of Mousse ID's inventory: whole numbers, with room for a plan's limit. */
+function checkedDeviceCount(value: unknown): { used: number; limit: number } {
+  const row = value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
+  const count = (item: unknown) => (Number.isSafeInteger(item) && (item as number) >= 0 && (item as number) <= 100000 ? (item as number) : undefined)
+  const used = count(row.used)
+  const limit = count(row.limit)
+  if (used === undefined || limit === undefined) throw new NetError('bad_request')
+  return { used, limit }
 }
 const MAILBOX_ID = /^[A-Za-z0-9_-]{1,128}$/
 function checkedEnrollmentRequest(value: unknown, now: number): PlusEnrollmentRequest | undefined {
@@ -420,6 +429,7 @@ export class HostedProfileService {
           audience: stored.configuration.audience,
           ...(stored.account?.email ? { email: stored.account.email } : {}),
           ...(stored.account?.plan ? { plan: stored.account.plan } : {}),
+          ...(stored.account?.devices ? { devices: stored.account.devices } : {}),
           ...(stored.registration
             ? {
                 registrationId: stored.registration.id,
@@ -674,7 +684,37 @@ export class HostedProfileService {
     stored.connectorToken = result.connectorToken
     delete stored.pending
     this.save(stored)
+    await this.recordDevices(stored, accountToken)
     return this.status()
+  }
+  /**
+   * Reads how many computers and phones the account has, once, while the account token is at hand
+   * (only an account actor may read Mousse ID's inventory). The count is display-only, so a failure
+   * never fails sign-in: the count is dropped and the line is left out.
+   */
+  private async recordDevices(stored: Stored, accountToken: string): Promise<void> {
+    let devices: { used: number; limit: number } | undefined
+    try {
+      const result = await this.request<{ devices?: unknown }>(
+        'GET',
+        stored.configuration,
+        '/v1/net/inventory',
+        accountToken
+      )
+      devices = checkedDeviceCount(result?.devices)
+    } catch {
+      devices = undefined
+    }
+    if (!devices && !stored.account?.devices) return
+    try {
+      const { devices: _previous, ...rest } = stored.account ?? {}
+      const account = { ...rest, ...(devices ? { devices } : {}) }
+      if (Object.keys(account).length) stored.account = account
+      else delete stored.account
+      this.save(stored)
+    } catch {
+      // The registration is already saved; only the display line is lost.
+    }
   }
   async renew(): Promise<PlusStatus> {
     const replayed = this.read()?.pending

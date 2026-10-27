@@ -1317,6 +1317,13 @@ export class RunEngine extends EventEmitter {
     return this.store.getRun(runId)
   }
 
+  /** The ordinal of the run's active attempt (1 for its first), or undefined when it has none. */
+  activeAttemptOrdinal(runId: string): number | undefined {
+    const run = this.store.getRun(runId)
+    const attempt = run?.activeAttemptId ? this.store.getAttempt(run.activeAttemptId) : null
+    return attempt?.ordinal
+  }
+
   getActiveRun(threadId: string): RunRecord | null {
     return this.store.getActiveRun(threadId)
   }

@@ -67,6 +67,13 @@ export function mousseIdName(plus?: PlusStatus): string {
   return local || 'Mousse ID'
 }
 
+/** "3 of 5 devices", or nothing until Mousse ID has reported the count. */
+export function devicesLine(plus?: PlusStatus): string | undefined {
+  const devices = plus?.devices
+  if (!plus?.connected || !devices) return undefined
+  return `${devices.used} of ${devices.limit} ${devices.limit === 1 ? 'device' : 'devices'}`
+}
+
 let current: { controller: AbortController; callbackId?: string } | undefined
 let refreshing: { profileId: string; promise: Promise<void> } | undefined
 let runtimeOriginLoad: Promise<void> | undefined

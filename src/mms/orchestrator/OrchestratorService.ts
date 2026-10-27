@@ -55,7 +55,7 @@ import { DevGuiTools } from '../devgui/DevGuiTools'
 import { QuickActionTools } from './QuickActionTools'
 import { WebTools } from './WebTools'
 import { stableStringify } from '../run/json'
-import { formatRestartNote } from '../run/restartNote'
+import { closeStaleActivity, cutOffActivityOf, formatRestartNote } from '../run/restartNote'
 import { createHarnessGateway, PI_DRIVER_ID, type AdapterHost, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
 import { piDriver } from '../harness/drivers/pi'
 import { contextGauge } from '../harness/policy'
@@ -144,6 +144,12 @@ import {
   parsePullRequestDraft,
   type PullRequestDraftInputs
 } from '../git/pullRequestDraft'
+import {
+  COMMIT_SUGGESTION_SYSTEM,
+  buildCommitSuggestionPrompt,
+  commitSuggestionErrors,
+  parseCommitSuggestion
+} from '../git/commitSuggestion'
 import { readPullRequestTemplate } from '../git/pullRequestTemplate'
 import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
 import type { ProjectManager } from '../data/ProjectManager'
@@ -389,6 +395,9 @@ export interface StopThreadOutcome extends Partial<StopResult> {
 export const WAKE_BUSY_DEFER_MS = 5_000
 
 /** Send refusals reported with their reason as the error code (SPEC §16.4). */
+/** Thrown inside the thread write to leave the file untouched when the stale rows no longer need closing. */
+class StaleActivitySkipped extends Error {}
+
 const CONTINUATION_REFUSALS: ReadonlySet<string> = new Set([
   'continuation_not_found',
   'continuation_source_active',
@@ -1735,6 +1744,7 @@ export class OrchestratorService extends EventEmitter {
       turnToken: turn.turnToken,
       modeCeiling: turn.modeCeiling,
       mcpEligible: Boolean(this.runEngine),
+      ...(turn.definition ? { definition: turn.definition } : {}),
       instructions: (mcpAttached) => ({
         sessionInstructions: sessionInstructions({ mcp: mcpAttached, appletGuidance: this.appletStore ? APPLET_GENERATION_GUIDANCE : undefined }),
         turnPreamble: turnPreamble({
@@ -3349,7 +3359,8 @@ export class OrchestratorService extends EventEmitter {
     if (!engine || !runId) return
     try {
       const note = engine.takeRestartNote(threadId, runId)
-      if (note) this.addSystemMessage(formatRestartNote(note))
+      // The saved items of the cut-off runs, so the note also names Claude and Codex work the tool ledger never saw.
+      if (note) this.addSystemMessage(formatRestartNote({ ...note, cutOffActivity: cutOffActivityOf(this.messages, note.runIds) }))
     } catch (error) {
       console.warn('run engine restart note failed', { runId, error: error instanceof Error ? error.message : String(error) })
     }
@@ -3408,6 +3419,8 @@ export class OrchestratorService extends EventEmitter {
       } else {
         engine.markTerminal(id, 'completed')
       }
+      // The run's count record goes with it.
+      this.harness.runSettled?.(id)
     })
     this.staleRuns.delete(runId)
   }
@@ -3609,6 +3622,7 @@ export class OrchestratorService extends EventEmitter {
         data.tasks,
         this.harness.instanceMap.migrate(this.threadStore.getThread(threadId)?.modelOverride)
       )
+      this.closeStaleActivity(session)
       if (this.projectManager) {
         const projectPath = resolveThreadProjectPath(this.projectManager, this.threadStore, threadId)
         session.projectCwd = resolveProjectWorkingDirectory(projectPath)
@@ -3688,6 +3702,7 @@ export class OrchestratorService extends EventEmitter {
         undefined,
         this.harness.instanceMap.migrate(this.threadStore?.getThread(threadId)?.modelOverride)
       )
+      this.closeStaleActivity(this.boundSession)
     }
 
     this.recoverApplets(threadId, this.boundSession.messages)
@@ -3763,6 +3778,68 @@ export class OrchestratorService extends EventEmitter {
       nativeContext ?? migrateLegacyContext(messages),
       queue
     )
+  }
+
+  /**
+   * Ends the activity items a previous daemon left `running` on a session that was just loaded.
+   * With no live turn, a `running` item is always stale (every turn ends its items), so they are
+   * tagged `daemon_restart` and the restart note can name them whenever the next turn starts.
+   *
+   * The disk is authoritative, not the snapshot the session was loaded from: the rows are closed
+   * against the saved thread under the data write lock, which also re-checks the lease, and the
+   * session then takes the saved rows. A row another process finished meanwhile stays finished,
+   * with its output and times; a lease held by another live process (a CLI turn running now)
+   * leaves everything as it is. Nothing is written when no saved row is still `running`, so a
+   * second hydration, or one from an older snapshot, writes nothing and changes nothing.
+   */
+  private closeStaleActivity(session: ThreadSession): void {
+    if (session.isTurnRunning()) return
+    const stale = new Set(session.messages.filter((message) => message.activity?.status === 'running').map((message) => message.id))
+    if (!stale.size) return
+    const store = this.threadStore
+    if (!store || session.threadId === '__unbound__') {
+      const closed = closeStaleActivity(session.messages, new Date().toISOString())
+      session.messages = session.messages.map((message) => closed.get(message.id) ?? message)
+      return
+    }
+    const threadId = session.threadId
+    try {
+      const threadDir = store.getThreadDir(threadId)
+      if (isLeaseHeldByLivePeer(threadDir).held) return
+      let saved = store.loadThreadData(threadId).messages
+      if (saved.some((message) => stale.has(message.id) && message.activity?.status === 'running')) {
+        saved = store.mutateThreadData(threadId, (current) => {
+          // Under the write lock: a peer may have taken the thread, or finished rows, since the read above.
+          if (isLeaseHeldByLivePeer(threadDir).held) throw new StaleActivitySkipped()
+          const closed = closeStaleActivity(current.messages.filter((message) => stale.has(message.id)), new Date().toISOString())
+          if (!closed.size) throw new StaleActivitySkipped()
+          return { messages: current.messages.map((message) => closed.get(message.id) ?? message) }
+        }).messages
+      }
+      // The session takes the saved version of each row it held as running. A row the disk does not
+      // have (a caller's own messages) is closed from the snapshot.
+      const byId = new Map(saved.map((message) => [message.id, message]))
+      const leftover = closeStaleActivity(session.messages.filter((message) => stale.has(message.id) && !byId.has(message.id)), new Date().toISOString())
+      session.messages = session.messages.map((message) => (stale.has(message.id) ? (byId.get(message.id) ?? leftover.get(message.id) ?? message) : message))
+    } catch (error) {
+      if (error instanceof StaleActivitySkipped) {
+        // Nothing was written, so the session must not diverge from the disk either.
+        this.adoptSavedActivity(session, stale)
+        return
+      }
+      // Opening the thread must not fail; the rows stay as loaded and the next hydration retries.
+      console.warn('stale activity could not be closed', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /** The session takes the saved version of the rows it held as `running`, when the disk has them. */
+  private adoptSavedActivity(session: ThreadSession, ids: ReadonlySet<string>): void {
+    try {
+      const byId = new Map(this.threadStore!.loadThreadData(session.threadId).messages.map((message) => [message.id, message]))
+      session.messages = session.messages.map((message) => (ids.has(message.id) ? (byId.get(message.id) ?? message) : message))
+    } catch {
+      // Unreadable: the rows stay as loaded.
+    }
   }
 
   /** Reattach only bundles already durably published by this exact completed turn. */
@@ -4130,6 +4207,46 @@ export class OrchestratorService extends EventEmitter {
       return parsed ? { ...parsed, source: 'model' } : heuristic
     } catch {
       return heuristic
+    }
+  }
+
+  /**
+   * Writes a commit message for what the next commit in `root` would take, with the title model. Only a
+   * title model the user chose is used (Automatic never reaches a model, as for chat titles): without one
+   * this refuses with `git_suggest_no_model` before reading anything, so the caller can say so. The model
+   * is resolved in the folder's project, so an instance turned off there is never used. Nothing is written
+   * to the repository; the message is a proposal the user edits.
+   */
+  async generateCommitMessage(params: {
+    root: string
+    /** The commit takes every change, as in a thread's worktree; else staged changes when there are any. */
+    all: boolean
+    /** The folder's project; the title model is resolved in its scope. */
+    projectId: string | null
+    /** The thread whose worktree this is, when it is one; names the provider's cache session. */
+    threadId: string | null
+    branch?: string | null
+  }): Promise<{ message: string; truncated: boolean }> {
+    const titleSettings = this.settingsStore.get().title
+    if (!titleSettings.llmProvider?.trim() || !titleSettings.model?.trim()) throw commitSuggestionErrors.create('git_suggest_no_model')
+    const input = await this.gitService?.describeCommitInput(params.root, { all: params.all })
+    if (!input || input.files.length === 0) throw commitSuggestionErrors.create('git_suggest_empty')
+    try {
+      const resolved = this.harness.resolveStored(titleSettings, {
+        purpose: 'title',
+        scope: params.projectId ? { kind: 'project', projectId: params.projectId } : params.threadId ? this.threadScope(params.threadId) : { kind: 'device' }
+      })
+      const text = await this.llm.generateCommitMessage(
+        COMMIT_SUGGESTION_SYSTEM,
+        buildCommitSuggestionPrompt(input, params.branch),
+        params.threadId ?? undefined,
+        { instanceId: resolved.instanceId, llmProvider: resolved.llmProvider, model: titleSettings.model }
+      )
+      const message = parseCommitSuggestion(text)
+      if (!message) throw new Error('The model answered without a commit message')
+      return { message, truncated: input.truncated }
+    } catch (error) {
+      throw commitSuggestionErrors.create('git_suggest_failed', error)
     }
   }
 
@@ -5596,6 +5713,8 @@ export class OrchestratorService extends EventEmitter {
       if (runTerminalMarked) return
       runTerminalMarked = true
       this.markRun(engineRunId, (engine, id) => engine.markTerminal(id, status, outcome, { resultText }))
+      // The run's count record goes with it: no later attempt starts from fresh counts.
+      this.harness.runSettled?.(engineRunId ?? turnId)
     }
     // C2: a run that cannot be marked starting (cancelled meanwhile, or held by another turn) is
     // not this turn's to run; it ends here, before any provider I/O.
@@ -6021,9 +6140,11 @@ export class OrchestratorService extends EventEmitter {
         }
       }
       const previous = engineRunId ? this.runEngine?.previousBinding(session.threadId, engineRunId, binding.instanceId) : undefined
+      const attemptOrdinal = engineRunId ? this.runEngine?.activeAttemptOrdinal(engineRunId) : undefined
       const result = await this.harness.startTurn({
         binding,
         ...(previous ? { previous } : {}),
+        ...(attemptOrdinal ? { attemptOrdinal } : {}),
         input: turnInput,
         sink: turnSink,
         control: turnControl,
@@ -7391,6 +7512,7 @@ export class OrchestratorService extends EventEmitter {
         data.tasks,
         opts?.modelOverride ?? threadStore.getThread(threadId)?.modelOverride
       )
+      this.closeStaleActivity(session)
       try {
         const projectPath = this.projectManager
           ? resolveThreadProjectPath(this.projectManager, threadStore, threadId)
@@ -7600,6 +7722,7 @@ export class OrchestratorService extends EventEmitter {
         data.tasks,
         thread.modelOverride
       )
+      this.closeStaleActivity(session)
       const message = [...session.messages].reverse().find(
         (entry) => entry.role === 'assistant' && entry.workflowRun?.runId === run.runId
       )

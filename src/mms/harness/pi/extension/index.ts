@@ -18,8 +18,8 @@ import {
 } from '@earendil-works/pi-ai/compat'
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all'
 import { createBashToolDefinition, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent'
-import { guardProvider, guardStreams, isGuarded, type GuardObserver } from './guard'
-import { GATE_REFUSALS } from './messages'
+import { guardProvider, guardStreams, isGuarded, type GuardObserver, type RequestGate } from './guard'
+import { BUDGET_EXHAUSTED, GATE_REFUSALS, GATE_UNAVAILABLE, REQUEST_REFUSED } from './messages'
 import { containedBashOperations } from './shell'
 
 /** The input key the app-tool registry reads a `per_call` runtime's turn token from (`registry.ts`). */
@@ -33,6 +33,8 @@ import {
   type PiGateResponse,
   type PiQuiesceResponse,
   type PiReadyRequest,
+  type PiRequestRequest,
+  type PiRequestResponse,
   type PiTurnResponse,
   type PiTurnTool
 } from './protocol'
@@ -52,6 +54,9 @@ import {
  *   per turn, delegation tools sequential), the active built-ins, the session instructions.
  * - **Gate.** Every `tool_call` is allowed only by `/pi/gate` for the turn's attempt token; an
  *   unreachable gate blocks.
+ * - **Requests (PR 4 §5a).** Every model request the guard admits, compactions, summaries and Pi's
+ *   own retries included, is charged first through `/pi/request`; a refusal or an unreachable
+ *   endpoint ends it with a fixed text Pi does not retry, before any network I/O.
  */
 
 /**
@@ -190,20 +195,38 @@ export default async function mousseExtension(pi: ExtensionAPI): Promise<void> {
 
   pi.registerCommand(MOUSSE_EXTENSION_MARKER, { description: "Mousse's extension is loaded (does nothing)", handler: async () => {} })
 
+  // The turn fetched last (`before_agent_start`); its token goes with each request charge.
+  let turn: PiTurnResponse | undefined
+  // Mousse charges every request to the live turn before it goes, or refuses it. The text thrown
+  // is always one of the fixed ones, never the transport's (Pi would retry "fetch failed").
+  const gate: RequestGate = {
+    request: async () => {
+      const body: PiRequestRequest = { attemptToken: turn?.attemptToken ?? '', kind: 'request' }
+      let answer: PiRequestResponse
+      try {
+        answer = await call<PiRequestResponse>('request', body)
+      } catch {
+        throw new Error(GATE_UNAVAILABLE)
+      }
+      if (answer?.ok === true) return
+      throw new Error(answer?.ok === false && answer.reason === BUDGET_EXHAUSTED ? BUDGET_EXHAUSTED : REQUEST_REFUSED)
+    }
+  }
+
   // The global api registry, for any composition that falls through to it (and Pi's llama.cpp
   // provider, which streams through it).
   registerBuiltInApiProviders()
-  for (const entry of getApiProviders()) registerApiProvider(guardStreams({ api: entry.api, stream: entry.stream, streamSimple: entry.streamSimple }, undefined, observer) as never)
+  for (const entry of getApiProviders()) registerApiProvider(guardStreams({ api: entry.api, stream: entry.stream, streamSimple: entry.streamSimple }, undefined, observer, gate) as never)
 
   let catalog = await call<PiCatalogResponse>('catalog', {})
   const builtins = new Map(builtinProviders().map((provider) => [provider.id, provider]))
   // Every built-in, guarded; the instance's provider with Mousse's catalogue and key. Queued now and
   // flushed before the session's options resolve, so `--model` finds Mousse's model.
-  for (const provider of builtins.values()) if (provider.id !== catalog.provider.id) pi.registerProvider(guardProvider(provider, observer))
-  pi.registerProvider(guardProvider(instanceProvider(catalog, builtins), observer))
+  for (const provider of builtins.values()) if (provider.id !== catalog.provider.id) pi.registerProvider(guardProvider(provider, observer, gate))
+  pi.registerProvider(guardProvider(instanceProvider(catalog, builtins), observer, gate))
   /** An invalid registration (an empty id), for the failure tests only. */
   const broken = (provider: Provider): Provider => Object.assign(Object.create(provider) as Provider, { id: '' })
-  if (failRegistration === 'factory') pi.registerProvider(broken(guardProvider(instanceProvider(catalog, builtins), observer)))
+  if (failRegistration === 'factory') pi.registerProvider(broken(guardProvider(instanceProvider(catalog, builtins), observer, gate)))
   const key = catalog.apiKey
 
   const fatal = async (body: PiFatalRequest): Promise<void> => {
@@ -226,7 +249,7 @@ export default async function mousseExtension(pi: ExtensionAPI): Promise<void> {
     for (const id of ids) {
       if (isGuarded(registry.getRegisteredNativeProvider(id))) continue
       const current = registry.getProvider(id)
-      if (current) await registerNow(guardProvider(current, observer))
+      if (current) await registerNow(guardProvider(current, observer, gate))
     }
     const guarded = [...ids].filter((id) => isGuarded(registry.getRegisteredNativeProvider(id)))
     const ready: PiReadyRequest = {
@@ -239,7 +262,6 @@ export default async function mousseExtension(pi: ExtensionAPI): Promise<void> {
 
   // The turn's tools, registered when new or changed.
   const registered = new Map<string, string>()
-  let turn: PiTurnResponse | undefined
   const registerTool = (tool: PiTurnTool): void => {
     const signature = JSON.stringify([tool.description, tool.parameters, tool.class])
     if (registered.get(tool.name) === signature) return
@@ -279,7 +301,7 @@ export default async function mousseExtension(pi: ExtensionAPI): Promise<void> {
       // A new catalogue: the instance's provider is registered again in full, never one model.
       const next = await call<PiCatalogResponse>('catalog', {})
       catalog = { ...next, apiKey: next.apiKey ?? key }
-      const provider = guardProvider(instanceProvider(catalog, builtins), observer)
+      const provider = guardProvider(instanceProvider(catalog, builtins), observer, gate)
       await registerNow(failRegistration === 'revision' ? broken(provider) : provider)
     }
     for (const tool of turn.tools) registerTool(tool)

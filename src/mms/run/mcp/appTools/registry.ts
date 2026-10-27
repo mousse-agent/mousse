@@ -1,5 +1,6 @@
 import type { ToolCall } from '@earendil-works/pi-ai'
 import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
+import { authorizeDefinitionCall, definitionRefusal, takeAuthorizedCall, withoutTransportFields } from '../../../agentDefinitions/definitionGate'
 import type { ModeCeiling } from '../../types'
 import type { AppToolTurns } from './turns'
 import { callerThreadOnly } from './thread'
@@ -193,6 +194,8 @@ export class ToolRegistry {
     const attemptToken = args[ATTEMPT_TOKEN_KEY]
     delete args[TURN_TOKEN_KEY]
     delete args[ATTEMPT_TOKEN_KEY]
+    // The token the call is bound to: the attempt's when it carries one, else the turn's.
+    const boundToken = turn.attemptToken !== undefined && attemptToken !== undefined ? turn.attemptToken : turn.turnToken
     if (credential.binding === 'per_call') {
       const tagged = turn.attemptToken !== undefined && attemptToken !== undefined
         ? attemptToken === turn.attemptToken
@@ -205,6 +208,25 @@ export class ToolRegistry {
     if (availability !== true) return { text: availability, isError: true }
     const unattended = unattendedRefusal(tool, turn)
     if (unattended) return { text: unattended, isError: true }
+    // A definition run: its grants, policy and approvals hold for every call, as in the in-process loop.
+    // A call the runtime's gate already authorized in full (approval included, before it was
+    // charged) is revalidated without asking again; any other call is authorized here.
+    if (turn.definition) {
+      const callId = request.toolCallId.startsWith('mcp:') ? request.toolCallId.slice('mcp:'.length) : request.toolCallId
+      // Transport fields are not part of the call, here as at the gate.
+      const checked = withoutTransportFields(args)
+      const projectPath = turn.projectPath ? { projectPath: turn.projectPath } : {}
+      // A per-call runtime's gate authorized this exact call (turn, tool, call id, arguments).
+      const handedOver = credential.binding === 'per_call' && takeAuthorizedCall(turn.definition, { turnToken: boundToken, toolName: name, callId, args: checked })
+      if (handedOver) {
+        const refusal = definitionRefusal(turn.definition, { toolName: name, args: checked, ...projectPath })
+        if (refusal) return { text: refusal, isError: true }
+        if (request.signal.aborted) return { text: 'Tool dispatch cancelled immediately before side effects.', isError: true }
+      } else {
+        const decision = await authorizeDefinitionCall(turn.definition, { toolName: name, args: checked, ...projectPath, signal: request.signal })
+        if (!decision.allowed) return { text: decision.message, isError: true }
+      }
+    }
     const ctx: ToolCallContext = { caller, turn, toolCallId: request.toolCallId, signal: request.signal, transport: 'mcp' }
     const ledger = this.options.toolLedger?.(active)
     const ledgerId = ledger?.start({ type: 'toolCall', id: ctx.toolCallId, name, arguments: args } as ToolCall)

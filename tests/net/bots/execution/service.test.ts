@@ -1,24 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { join } from 'node:path'
-import {
-  createAssistantMessageEventStream,
-  type Model,
-  type Provider,
-  type AssistantMessage,
-  type Context
-} from '@earendil-works/pi-ai'
-import { ProviderAuthService } from '../../../../src/mms/providers/ProviderAuthService'
-import { SettingsStore } from '../../../../src/mms/settings/SettingsStore'
-import { MousseConfigStore } from '../../../../src/mms/config/MousseConfigStore'
 import { ProjectManager } from '../../../../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../../../../src/mms/data/ThreadDataStore'
 import {
-  NativeBotRuntime,
   effectiveBotPolicyDigest,
-  nativeSdkVersion,
-  modelDigest,
   type NativeBotDefinition
 } from '../../../../src/mms/bots/runtime'
+import { ScriptedBotRuntime } from '../scriptedRuntime'
 import {
   MmsBotMaterializer,
   BotExecutionService,
@@ -38,80 +25,30 @@ import { createHash } from 'node:crypto'
 import { canonicalJson, decodeEnvelope } from '../../../../src/mms/net/sync/codec'
 import { newId } from '../../../../src/shared/net'
 afterEach(cleanup)
-async function runtimeFixture(unknown = false, ignoresAbort = false, units = 10) {
+async function runtimeFixture(ignoresAbort = false) {
   const f = await setup(),
-    auth = new ProviderAuthService(join(f.p.path, 'auth.json'))
-  disposers.push(() => auth.stop())
-  let calls = 0,
-    release: () => void = () => {}
-  const contexts: Context[] = []
-  const model: Model<'anthropic-messages'> = {
-    id: 'fixture',
-    name: 'Fixture',
-    api: 'anthropic-messages',
-    provider: 'bot-ledger-fixture',
-    baseUrl: 'https://invalid.test',
-    reasoning: false,
-    input: ['text'],
-    cost: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 },
-    contextWindow: 10000,
-    maxTokens: 1000
-  }
-  const fixtureStream = (_model: Model<'anthropic-messages'>, context: Context) => {
-      contexts.push(structuredClone(context))
-      calls++
-      const stream = createAssistantMessageEventStream(),
-        message: AssistantMessage = {
-          role: 'assistant',
-          api: model.api,
-          provider: model.provider,
-          model: model.id,
-          content: [{ type: 'text', text: 'Scoped bot answer' }],
-          stopReason: 'stop',
-          timestamp: Date.now(),
-          usage: {
-            input: 10,
-            output: 10,
-            cacheRead: 0,
-            cacheWrite: 0,
-            totalTokens: unknown ? 0 : 20,
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: units / 1000000 }
-          }
-        }
-      release = () => {
-        stream.push({ type: 'done', reason: 'stop', message })
-        stream.end(message)
+    contexts: Array<{ prompt: string; history: string[] }> = [],
+    runtime = new ScriptedBotRuntime({
+      answer: 'Scoped bot answer',
+      paused: ignoresAbort,
+      stubborn: ignoresAbort,
+      script: async ({ request }) => {
+        contexts.push({
+          prompt: request.prompt,
+          history: f.compartments.history(request.compartment, 100).map((turn) => turn.text)
+        })
+        return 'Scoped bot answer'
       }
-      if (!ignoresAbort) queueMicrotask(release)
-      return stream
-    },
-    provider: Provider<'anthropic-messages'> = {
-      id: model.provider,
-      name: 'Fixture',
-      auth: {
-        apiKey: {
-          name: 'Fixture',
-          resolve: async () => ({ auth: { apiKey: 'deterministic-fixture' } })
-        }
-      },
-      getModels: () => [model],
-      stream: fixtureStream,
-      streamSimple: fixtureStream
-    }
-  auth.models.setProvider(provider)
-  await auth.credentials.modify(provider.id, async () => ({
-    type: 'api_key',
-    key: 'deterministic-fixture'
-  }))
+    })
   const definition: NativeBotDefinition = {
       revision: 'v1',
       systemPrompt: 'Only compartment history. No local context.',
       billing: {
-        provider: model.provider,
-        model: model.id,
-        api: model.api,
-        modelDigest: modelDigest(model),
-        sdkVersion: nativeSdkVersion(),
+        provider: 'bot-ledger-fixture',
+        model: 'fixture',
+        api: 'anthropic-messages',
+        modelDigest: 'fixture-digest',
+        sdkVersion: 'fixture',
         platform: process.platform,
         nodeVersion: process.versions.node,
         runtimeVersion: 'mousse-net-native-v1',
@@ -133,23 +70,11 @@ async function runtimeFixture(unknown = false, ignoresAbort = false, units = 10)
     })
   projects.setThreadStore(threads)
   const materializer = new MmsBotMaterializer({
-      profileId: 'profile-a',
-      profileHome: f.p.path,
-      threads,
-      projects
-    }),
-    runtime = new NativeBotRuntime({
-      profileId: 'profile-a',
-      installationHome: f.p.path,
-      settings: new SettingsStore(MousseConfigStore.load(f.p.path)),
-      providerAuth: auth,
-      sdkVersion: nativeSdkVersion(),
-      definition,
-      compartments: f.compartments,
-      executionBinding: (id) => f.executions.get(id)?.binding,
-      assertCurrent: (request) => f.service.assertExecutionCurrent(request.execution),
-      qualification: { active: () => true, invalidate: () => f.registry.invalidate(f.bot) }
-    })
+    profileId: 'profile-a',
+    profileHome: f.p.path,
+    threads,
+    projects
+  })
   f.adapters.set('fixture', runtime)
   f.registry.configure(
     {
@@ -182,13 +107,14 @@ async function runtimeFixture(unknown = false, ignoresAbort = false, units = 10)
     runner,
     threads,
     contexts,
-    release: () => release(),
+    runtime,
+    release: () => runtime.release(),
     get calls() {
-      return calls
+      return runtime.runs.length
     }
   }
 }
-describe('actual native MMS bot execution with durable admission, spend, history and outcomes', () => {
+describe('bot execution with durable admission, spend, history and outcomes', () => {
   it('does not start a model after terminal host rejection of its accepted receipt', async () => {
     const f = await runtimeFixture(),
       record = f.service.admit(f.message()).record,
@@ -205,7 +131,7 @@ describe('actual native MMS bot execution with durable admission, spend, history
     expect(f.outbox.list(record.binding!.stream)).toHaveLength(1)
   })
   it('cancels an already dispatched provider on acceptance rejection while reconciling its proven terminal charge', async () => {
-    const f = await runtimeFixture(false, true),
+    const f = await runtimeFixture(true),
       record = f.service.admit(f.message()).record,
       accepted = f.outbox
         .list(record.binding!.stream)
@@ -280,19 +206,6 @@ describe('actual native MMS bot execution with durable admission, spend, history
     expect(f.service.admit(input).kind).toBe('duplicate')
     await expect(f.runner.start(result.id)).rejects.toMatchObject({ code: 'conflict' })
     expect(f.calls).toBe(1)
-  })
-  it('keeps unknown provider calls reserved and exposes uncertain with no context append/retry', async () => {
-    const f = await runtimeFixture(true),
-      record = f.service.admit(f.message()).record,
-      result = await f.runner.start(record.id)
-    expect(result.state).toBe('uncertain')
-    expect(f.calls).toBe(1)
-    expect(f.p.db.database.prepare('SELECT spent FROM net_budget_calls').get()!.spent).toBeNull()
-    expect(f.budgets.remaining(f.bot, f.space.space, f.p.clock.now())).toBe(940)
-    expect(f.compartments.history(record.binding!.compartment, 100)).toEqual([])
-    expect(
-      f.p.db.database.prepare('SELECT active FROM net_bot_admission_slots').get()!.active
-    ).toBe(0)
   })
   it('recovers accepted/running rows without running any model and preserves unrelated Bridge admission', async () => {
     const f = await runtimeFixture(),
@@ -463,7 +376,7 @@ describe('actual native MMS bot execution with durable admission, spend, history
   })
 
   it('retains capacity while the actual provider ignores abort and refuses a false stop acknowledgement', async () => {
-    const f = await runtimeFixture(false, true),
+    const f = await runtimeFixture(true),
       record = f.service.admit(f.message()).record,
       run = f.runner.start(record.id)
     await vi.waitFor(() => expect(f.calls).toBe(1))
@@ -488,21 +401,4 @@ describe('actual native MMS bot execution with durable admission, spend, history
     )
     expect(f.calls).toBe(1)
   }, 10000)
-
-  it('retains exact unexpected billing evidence while suspending qualification and holding the reservation', async () => {
-    const f = await runtimeFixture(false, false, 61),
-      record = f.service.admit(f.message()).record,
-      result = await f.runner.start(record.id)
-    expect(result.state).toBe('uncertain')
-    expect(f.calls).toBe(1)
-    expect(f.registry.get(f.space.space, f.bot)!.qualified).toBe(false)
-    expect(
-      JSON.parse(
-        f.p.db.database.prepare('SELECT evidence FROM net_bot_failure_evidence').get()!
-          .evidence as string
-      )
-    ).toMatchObject({ maximumUnits: 60, reportedUnits: 61, quiesced: true })
-    expect(f.p.db.database.prepare('SELECT spent FROM net_budget_calls').get()!.spent).toBeNull()
-    expect(f.budgets.remaining(f.bot, f.space.space, f.p.clock.now())).toBe(940)
-  })
 })

@@ -4,6 +4,7 @@ import type { MmsOwnerKind } from './ownership/MmsOwnerLease'
 import type { MmsProfileServices } from './MmsProfileServices'
 import type { NetRuntime, NetService } from './net/NetService'
 import type { NativeBotComposition } from './bots/BotProfileService'
+import type { BotRuntimeAdapter } from './net/contracts'
 
 export interface MmsOptions {
   homeDir?: string
@@ -30,4 +31,10 @@ export interface MmsOptions {
     runtime: NetRuntime
     net: NetService
   }): ReadonlyMap<string, NativeBotComposition>
+  /** Tests only: scripted bot runtimes. Production never sets this. */
+  trustedQaBotAdapters?(context: {
+    services: MmsProfileServices
+    runtime: NetRuntime
+    net: NetService
+  }): ReadonlyMap<string, BotRuntimeAdapter>
 }

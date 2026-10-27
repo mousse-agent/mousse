@@ -85,6 +85,8 @@ const ctx = (over: Partial<CommandContext> = {}): CommandContext => ({
   runActive: true,
   mainAreaOpen: true,
   projectsMode: true,
+  // The Files panel is showing, so its quick open and text search commands are eligible too.
+  inFilesPanel: true,
   ...over
 })
 

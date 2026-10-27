@@ -4,6 +4,14 @@ import { describe, expect, it } from 'vitest'
 
 const css = readFileSync(resolve(process.cwd(), 'src/renderer/styles/app.css'), 'utf8')
 const globalCss = readFileSync(resolve(process.cwd(), 'src/renderer/styles/global.css'), 'utf8')
+const sideCardCss = readFileSync(resolve(process.cwd(), 'src/renderer/components/sideCard/sideCard.css'), 'utf8')
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+
+/** The declaration blocks whose selector list mentions `selector`. */
+const rulesFor = (source: string, selector: string) =>
+  [...source.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .filter((match) => match[1]!.includes(selector))
+    .map((match) => ({ selector: match[1]!.trim(), body: match[2]! }))
 
 describe('chat layout styles', () => {
   it('allows the chat flex containers to shrink so messages remain scrollable', () => {
@@ -78,5 +86,41 @@ describe('chat layout styles', () => {
     expect(quickActionTool).toMatch(/codeHighlighter/)
     expect(quickActionTool).toMatch(/```bash/)
     expect(quickActionTool).toMatch(/an-code-no-header/)
+  })
+
+  it('keeps the scrollbar at the pane edge when the side card is reserved', () => {
+    // The card's clearance used to be padding on the pane, which inset the scroller
+    // and left its scrollbar floating left of a strip under the card. It now
+    // narrows only the content column and the composer, through a px variable the
+    // card writes, so the scroller keeps the pane's full width.
+    expect(sideCardCss).not.toMatch(/\.keep-mounted-pane\s*\{[^}]*padding/)
+    expect(sideCardCss).not.toMatch(/sidebar-side-card/)
+    const column = rulesFor(sideCardCss, '.an-message-list > div').filter((rule) => rule.body.includes('--side-card-reserved'))
+    expect(column).toHaveLength(1)
+    expect(column[0]!.selector).toContain('.chat-input-area')
+    expect(column[0]!.body).not.toMatch(/padding/)
+    // Nothing in the reservation targets the scroller itself, or its parents, with an inset.
+    for (const selector of ['.an-message-list', '.an-message-list-wrap', '.keep-mounted-pane', '.chat']) {
+      for (const rule of rulesFor(sideCardCss, selector)) {
+        if (rule.selector.includes('.an-message-list > div')) continue
+        expect(rule.body, rule.selector).not.toMatch(/(padding|margin)-right/)
+      }
+    }
+  })
+
+  it('animates the reserved column unless motion is reduced', () => {
+    const column = rulesFor(sideCardCss, '.an-message-list > div')
+    const reduced = sideCardCss.slice(sideCardCss.indexOf('prefers-reduced-motion'))
+    expect(column[0]!.body).toMatch(/transition:\s*width/)
+    expect(reduced).toMatch(/\.an-message-list > div[\s\S]*?transition:\s*none/)
+  })
+
+  it('slides the overlay card in from the right with a scrim, and drops the slide for reduced motion', () => {
+    const [overlayCard] = rulesFor(sideCardCss, '.thread-side-card-layer--overlay .thread-side-card').filter((rule) => rule.selector === '.thread-side-card-layer--overlay .thread-side-card')
+    expect(overlayCard!.body).toMatch(/transform:\s*translateX\(calc\(100% \+ var\(--side-card-gutter\)\)\)/)
+    expect(overlayCard!.body).toMatch(/width:\s*min\(var\(--side-card-width\), calc\(100% - 2 \* var\(--side-card-gutter\)\)\)/)
+    expect(sideCardCss).toMatch(/\.thread-side-card-scrim\s*\{[^}]*position:\s*absolute/)
+    const reduced = sideCardCss.slice(sideCardCss.indexOf('prefers-reduced-motion'))
+    expect(reduced).toMatch(/\.thread-side-card\.thread-side-card\.thread-side-card\[data-shown\]\s*\{[^}]*transform:\s*none/)
   })
 })

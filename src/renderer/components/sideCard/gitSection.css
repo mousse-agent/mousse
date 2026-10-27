@@ -131,6 +131,9 @@
 .side-card-git-init:focus-visible,
 .side-card-git-changes:focus-visible,
 .side-card-git-option:focus-visible,
+.side-card-git-option-more:focus-visible,
+.side-card-git-option-action:focus-visible,
+.side-card-git-new-branch:focus-visible,
 .side-card-git-submit:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
@@ -189,6 +192,152 @@
   flex: none;
   color: var(--ui-faint);
   font-size: 11px;
+}
+
+.side-card-git-pr-review {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 6px 0 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.side-card-git-pr-verdict[data-tone='passing'] {
+  color: var(--success);
+}
+
+.side-card-git-pr-verdict[data-tone='failing'] {
+  color: var(--danger);
+}
+
+.side-card-git-pr-verdict[data-tone='pending'] {
+  color: var(--text-secondary);
+}
+
+.side-card-git-pr-comments {
+  color: var(--ui-faint);
+}
+
+.side-card-git-pr-checks-toggle,
+.side-card-git-pr-check-state {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.side-card-git-pr-checks-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 22px;
+  margin-top: 2px;
+  padding: 0 6px;
+  border-radius: var(--ui-row-radius);
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.side-card-git-pr-checks-toggle:hover,
+button.side-card-git-pr-check-state:hover {
+  background: var(--ui-hover);
+}
+
+.side-card-git-pr-checks-toggle:focus-visible,
+button.side-card-git-pr-check-state:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.side-card-git-pr-checks-label {
+  flex: 1 1 auto;
+}
+
+.side-card-git-pr-checks-count {
+  flex: none;
+  color: var(--ui-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.side-card-git-pr-check-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.side-card-git-pr-check-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+  padding: 0 6px;
+  font-size: 11px;
+}
+
+.side-card-git-pr-check-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ui-faint);
+}
+
+.side-card-git-pr-check-row[data-tone='passing'] .side-card-git-pr-check-dot {
+  background: var(--success);
+}
+
+.side-card-git-pr-check-row[data-tone='failing'] .side-card-git-pr-check-dot {
+  background: var(--danger);
+}
+
+.side-card-git-pr-check-row[data-tone='pending'] .side-card-git-pr-check-dot {
+  animation: side-card-git-pr-pulse 1.6s ease-in-out infinite;
+}
+
+.side-card-git-pr-check-row[data-tone='waiting'] .side-card-git-pr-check-dot,
+.side-card-git-pr-check-row[data-tone='skipped'] .side-card-git-pr-check-dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--ui-faint);
+}
+
+.side-card-git-pr-check-name {
+  overflow: hidden;
+  flex: 1 1 auto;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-card-git-pr-check-state {
+  flex: none;
+  padding: 1px 4px;
+  border-radius: var(--ui-row-radius);
+  color: var(--text-secondary);
+}
+
+button.side-card-git-pr-check-state {
+  cursor: pointer;
+}
+
+.side-card-git-pr-hint,
+.side-card-git-pr-error {
+  margin: 2px 0 0;
+  padding: 0 6px;
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.side-card-git-pr-hint {
+  color: var(--ui-faint);
+}
+
+.side-card-git-pr-error {
+  color: var(--danger);
 }
 
 .side-card-git-pr-create {
@@ -388,6 +537,174 @@
   background: var(--ui-pressed);
 }
 
+/* A row is the branch button plus its "…" button, which sits over the row's right padding. */
+.side-card-git-option-row {
+  position: relative;
+}
+
+.side-card-git-option-row[data-menu='true'] .side-card-git-option {
+  padding-right: 30px;
+}
+
+.side-card-git-option-more {
+  position: absolute;
+  top: 2px;
+  right: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: var(--ui-menu-row-radius);
+  background: transparent;
+  color: var(--text-secondary);
+  opacity: 0;
+  cursor: pointer;
+}
+
+.side-card-git-option-row:hover .side-card-git-option-more,
+.side-card-git-option-row[data-active='true'] .side-card-git-option-more,
+.side-card-git-option-more:focus-visible,
+.side-card-git-option-more[aria-expanded='true'] {
+  opacity: 1;
+}
+
+.side-card-git-option-more:hover,
+.side-card-git-option-more[aria-expanded='true'] {
+  background: var(--ui-pressed);
+}
+
+.side-card-git-option-menu {
+  display: flex;
+  gap: 4px;
+  padding: 2px 0 4px var(--ui-menu-row-x);
+}
+
+.side-card-git-option-action {
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--ui-menu-row-radius);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.side-card-git-option-action:hover:not(:disabled) {
+  background: var(--ui-hover);
+}
+
+.side-card-git-option-action:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.side-card-git-picker-footer {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--ui-line);
+}
+
+.side-card-git-new-branch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 26px;
+  padding: 0 var(--ui-menu-row-x);
+  border: 0;
+  border-radius: var(--ui-menu-row-radius);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.side-card-git-new-branch:hover {
+  background: var(--ui-hover);
+}
+
+.side-card-git-new-branch svg {
+  flex: none;
+  color: var(--text-secondary);
+}
+
+.side-card-git-branch-popover {
+  width: min(300px, calc(100vw - 16px));
+  padding: 8px;
+}
+
+.side-card-git-branch-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.side-card-git-branch-input {
+  box-sizing: border-box;
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-row-radius);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+}
+
+.side-card-git-branch-input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.side-card-git-branch-from {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-secondary);
+}
+
+.side-card-git-branch-from select {
+  min-width: 0;
+  max-width: 220px;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-row-radius);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+}
+
+.side-card-git-branch-message {
+  margin: 0 0 8px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.side-card-git-branch-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.side-card-git-branch-popover .side-card-git-error {
+  margin: 0;
+}
+
+.side-card-git-notice {
+  margin: 4px 6px 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
 .side-card-git-empty {
   margin: 0;
   padding: 8px var(--ui-menu-row-x);
@@ -420,6 +737,21 @@
 
 .side-card-git-commit-popover .side-card-git-error {
   margin: 6px 0 0;
+}
+
+.side-card-git-suggest-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+
+.side-card-git-suggest {
+  height: 24px;
+  padding: 0 10px;
+}
+
+.side-card-git-suggest[aria-busy='true'] {
+  cursor: progress;
 }
 
 .side-card-git-pr-popover {
@@ -563,6 +895,10 @@
    read as hidden when focus moves into them. */
 @media (prefers-reduced-motion: reduce) {
   .side-card-git-pr-pending {
+    animation: none;
+  }
+
+  .side-card-git-pr-check-row[data-tone='pending'] .side-card-git-pr-check-dot {
     animation: none;
   }
 

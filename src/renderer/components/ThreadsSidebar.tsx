@@ -1281,7 +1281,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
       </div>
 
-      <ProfileSwitcher variant="sidebar" onSwitched={(profile) => useAppStore.getState().activateProfile(profile.id)} />
+      <ProfileSwitcher onSwitched={(profile) => useAppStore.getState().activateProfile(profile.id)} />
 
       {contextMenu && (
 

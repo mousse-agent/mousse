@@ -31,7 +31,8 @@ const PROFILE_PROVIDER_METHODS = new Set([
   'providers.instances.configure', 'providers.instances.setEnabled', 'providers.instances.install',
   'providers.instances.cancelInstall', 'providers.instances.update',
   'providers.instances.signIn', 'providers.instances.respondSignIn', 'providers.instances.signOut',
-  'providers.instances.recheck', 'providers.instances.refreshModels', 'providers.instances.setModelPrefs',
+  'providers.instances.recheck', 'providers.instances.refreshModels', 'providers.instances.refreshAllModels',
+  'providers.instances.setModelPrefs',
   'providers.instances.move', 'providers.instances.removeInstall', 'providers.registry.search'
 ])
 

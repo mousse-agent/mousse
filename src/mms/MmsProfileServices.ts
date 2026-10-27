@@ -397,6 +397,7 @@ export class MmsProfileServices {
       }
     })
     this.harness = this.harnessImpl
+    this.harnessImpl.startModelRefreshSchedule()
     this.orchestrator.setHarness(this.harnessImpl)
     this.orchestrator.setWorkflowChatExecutor(this.platform.workflowChat)
     this.orchestrator.setFeatureFlags(this.config.get().features)
@@ -458,7 +459,12 @@ export class MmsProfileServices {
           services: this,
           runtime,
           net: this.net,
-          nativeAdapters: opts?.nativeBotAdapters?.({ services: this, runtime, net: this.net })
+          nativeAdapters: opts?.nativeBotAdapters?.({ services: this, runtime, net: this.net }),
+          trustedQaAdapters: opts?.trustedQaBotAdapters?.({
+            services: this,
+            runtime,
+            net: this.net
+          })
         })
         const composition = this.bridgeService.composition()
         return {

@@ -172,6 +172,52 @@ describe('the keyboard dispatcher', () => {
     expect(browser).toHaveBeenCalledTimes(1)
   })
 
+  it('runs the Files shortcuts only for a key typed inside the Files panel', () => {
+    const field = (...matching: string[]): FakeElement => ({
+      closest: (selector) => (selector.split(',').some((part) => matching.includes(part.trim())) ? {} : null)
+    })
+    const composer = field('textarea')
+    const searchBox = field('input', '.files-panel')
+    const editor = field('textarea', '.files-panel')
+    const treeRow = field('.files-panel')
+    const { win, doc } = stubWindow(composer)
+    attachCommandShortcuts(win as never)
+    const quickOpen = vi.fn()
+    const textSearch = vi.fn()
+    registerCommand('files.quickOpen', { run: quickOpen })
+    registerCommand('files.textSearch', { run: textSearch })
+    const ctrlP = { key: 'p', code: 'KeyP', ctrlKey: true }
+    const ctrlShiftF = { key: 'F', code: 'KeyF', ctrlKey: true, shiftKey: true }
+
+    // In the composer, an editable field outside the panel, the keys are not taken over.
+    expect(keydown(win, ctrlP).defaultPrevented).toBe(false)
+    expect(keydown(win, ctrlShiftF).defaultPrevented).toBe(false)
+    expect(quickOpen).not.toHaveBeenCalled()
+    expect(textSearch).not.toHaveBeenCalled()
+
+    // In the panel's own text fields and tree they are.
+    for (const focused of [searchBox, editor, treeRow]) {
+      doc.activeElement = focused
+      expect(keydown(win, ctrlP).defaultPrevented).toBe(true)
+      expect(keydown(win, ctrlShiftF).defaultPrevented).toBe(true)
+    }
+    expect(quickOpen).toHaveBeenCalledTimes(3)
+    expect(textSearch).toHaveBeenCalledTimes(3)
+
+    // Ctrl+F is still Find in thread's chord, and no Files command answers it.
+    const find = vi.fn()
+    registerCommand('chat.findInThread', { run: find })
+    keydown(win, { key: 'f', code: 'KeyF', ctrlKey: true })
+    expect(find).toHaveBeenCalledTimes(1)
+    expect(textSearch).toHaveBeenCalledTimes(3)
+
+    // Ctrl+K stays the palette's, from inside the panel too.
+    const palette = vi.fn()
+    registerCommand('palette.open', { run: palette })
+    keydown(win, { key: 'k', code: 'KeyK', ctrlKey: true })
+    expect(palette).toHaveBeenCalledTimes(1)
+  })
+
   it('follows the model picker: its chords run, the global ones stand down', () => {
     const { win } = stubWindow()
     attachCommandShortcuts(win as never)
@@ -256,6 +302,22 @@ describe('runCommand', () => {
     setRecording(false)
     expect(runCommand('thread.new', 'menu')).toBe(true)
     expect(run).toHaveBeenCalledTimes(1)
+  })
+
+  it('runs the Files commands from the palette or a menu, which have no focus to judge', () => {
+    stubWindow({ closest: () => null })
+    const quickOpen = vi.fn()
+    const textSearch = vi.fn()
+    registerCommand('files.quickOpen', { run: quickOpen })
+    registerCommand('files.textSearch', { run: textSearch })
+    expect(runCommand('files.quickOpen', 'palette')).toBe(true)
+    expect(runCommand('files.textSearch', 'menu')).toBe(true)
+    expect(quickOpen).toHaveBeenCalledTimes(1)
+    expect(textSearch).toHaveBeenCalledTimes(1)
+    // The same command from a key with focus outside the panel is refused.
+    expect(runCommand('files.quickOpen', 'key')).toBe(false)
+    // The browser surface never forwards them.
+    expect(runCommand('files.quickOpen', 'guest')).toBe(false)
   })
 
   it('is refused for a menu click while a dialog is open, and for an unregistered command', () => {

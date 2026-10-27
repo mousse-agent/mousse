@@ -6,6 +6,7 @@ import type {
   GitCheckoutOptions,
   GitCheckoutResult,
   GitCommit,
+  GitCommitSuggestion,
   GitDeleteBranchOptions,
   GitDiffStats,
   GitFetchResult,
@@ -310,6 +311,16 @@ export async function commitGitChanges(
   await refreshGitStatus(path, { force: true, quiet: true, projectId })
   if (pushError) throw pushError
   if (options.push) await refreshBranchPullRequest(path, projectId)
+}
+
+/**
+ * A proposed message for what the next commit takes. Nothing changes in the repository, so there is no
+ * refresh. Rejects with the daemon's code, `git_suggest_no_model` among them.
+ */
+export async function suggestGitCommitMessage(path: string, scope: GitScope): Promise<GitCommitSuggestion> {
+  const expectedBranch = useGitStatusStore.getState().entries[path]?.status?.branch ?? undefined
+  const suggestion = await window.mousse.git.suggestCommitMessage(scope, { expectedBranch })
+  return { message: suggestion.message, truncated: suggestion.truncated }
 }
 
 /** Push the current branch (publishing it when it has no upstream), then refresh. Rejects with Git's message. */

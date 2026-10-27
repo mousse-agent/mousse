@@ -1,0 +1,22 @@
+{
+  "number": 3,
+  "title": "Draft with no checks",
+  "url": "https://github.com/acme/app/pull/3",
+  "state": "OPEN",
+  "isDraft": true,
+  "body": "Work in progress",
+  "author": { "login": "ada" },
+  "baseRefName": "main",
+  "headRefName": "wip",
+  "headRefOid": "1111111111111111111111111111111111111111",
+  "headRepository": { "id": "R_1", "name": "app" },
+  "headRepositoryOwner": { "id": "U_1", "login": "acme" },
+  "isCrossRepository": false,
+  "reviewDecision": "",
+  "updatedAt": "2026-10-26T12:00:00Z",
+  "mergedAt": null,
+  "closedAt": null,
+  "reviews": [],
+  "comments": [],
+  "statusCheckRollup": []
+}

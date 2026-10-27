@@ -58,6 +58,7 @@ async function loaded(gate: (request: PiGateRequest) => ReturnType<PiBridgeHandl
     ready: (request) => void ready.push(request),
     turn: async () => TURN,
     gate,
+    request: async () => ({ ok: true }),
     quiesce: async () => ({ ok: true }),
     fatal: () => {}
   })

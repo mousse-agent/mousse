@@ -1,13 +1,21 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type {
-  CreatePullRequestInput,
-  GitPullRequestInfo,
-  GitPullRequestLookup,
-  PullRequestBaseBranches,
-  PullRequestCheckState,
-  RepositoryIdentity
+import {
+  pullRequestIdentityKey,
+  type CreatePullRequestInput,
+  type GitPullRequestInfo,
+  type GitPullRequestLookup,
+  type PullRequestBaseBranches,
+  type PullRequestCheck,
+  type PullRequestCheckState,
+  type PullRequestComment,
+  type PullRequestDetail,
+  type PullRequestIdentity,
+  type PullRequestReview,
+  type PullRequestReviewDecision,
+  type PullRequestReviewVerdict,
+  type RepositoryIdentity
 } from '../../shared/pullRequests'
 import type { CodeHost } from './CodeHost'
 import {
@@ -15,7 +23,8 @@ import {
   defaultRunner,
   isMissingExecutable,
   processMessage,
-  type ExecutableRunner
+  type ExecutableRunner,
+  type GhFailureKind
 } from './ghRunner'
 
 const FAILED_CONCLUSIONS = new Set(['FAILURE', 'TIMED_OUT', 'CANCELLED', 'STARTUP_FAILURE'])
@@ -127,6 +136,246 @@ function parsePullRequest(data: unknown): GitPullRequestInfo | null {
 export function classifyPullRequestFailure(message: string): 'none' | 'not-github' | 'unauthenticated' | 'error' {
   const kind = classifyGhFailure(message)
   return kind === 'rate-limited' || kind === 'not-found' ? 'error' : kind
+}
+
+const PULL_REQUEST_DETAIL_FIELDS = [
+  'number', 'title', 'url', 'state', 'isDraft', 'body', 'author', 'baseRefName', 'headRefName', 'headRefOid',
+  'headRepository', 'headRepositoryOwner', 'isCrossRepository', 'reviewDecision', 'reviews', 'comments',
+  'statusCheckRollup', 'updatedAt', 'mergedAt', 'closedAt'
+].join(',')
+
+/** Longest conversation comment or review body kept; the full text stays on the host. */
+const VIEW_BODY_CHARS = 4_000
+/** Longest pull request description kept. */
+const PULL_REQUEST_BODY_CHARS = 20_000
+/** Longest line comment body kept. */
+const LINE_COMMENT_BODY_CHARS = 2_000
+const LINE_COMMENT_PAGE_SIZE = 100
+/** Pages of line comments read, newest first: at most this many times a page of 100. */
+const LINE_COMMENT_MAX_PAGES = 5
+
+/**
+ * Caps the bodies of `gh pr view` with gh's own `--jq`, so a busy pull request cannot outgrow the runner's
+ * output limit whatever its authors wrote. A cut body is flagged `bodyTruncated`.
+ */
+export const PULL_REQUEST_VIEW_JQ = [
+  `.body |= .[:${PULL_REQUEST_BODY_CHARS}]`,
+  `.comments |= map(.bodyTruncated = ((.body | length) > ${VIEW_BODY_CHARS}) | .body |= .[:${VIEW_BODY_CHARS}])`,
+  `.reviews |= map(.bodyTruncated = ((.body | length) > ${VIEW_BODY_CHARS}) | .body |= .[:${VIEW_BODY_CHARS}])`
+].join(' | ')
+
+/**
+ * Projects a page of line comments to what Mousse shows, with gh's own `--jq`: no diff hunks and bodies cut at
+ * 2,000 characters, so a page of 100 stays far below the runner's 1 MiB output limit.
+ */
+export const LINE_COMMENT_JQ = `[.[] | {id, path, line, start_line, side, created_at, updated_at, in_reply_to_id, html_url, author_association, user: {login: .user.login}, body: .body[:${LINE_COMMENT_BODY_CHARS}], body_truncated: (.body | length > ${LINE_COMMENT_BODY_CHARS})}]`
+
+/** Why a pull request read failed; `message` is the host's own, with the folder, host and account added where they explain it. */
+export class PullRequestReadError extends Error {
+  constructor(message: string, readonly kind: Exclude<GhFailureKind, 'none'> | 'gh-missing') {
+    super(message)
+    this.name = 'PullRequestReadError'
+  }
+}
+
+function text(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+function login(value: unknown): string {
+  return value && typeof value === 'object' && typeof (value as { login?: unknown }).login === 'string' && (value as { login: string }).login
+    ? (value as { login: string }).login
+    : 'ghost'
+}
+
+/** The state one check shows. Skipped and neutral runs are neither passing nor failing, so they are named apart. */
+function checkItemState(item: Record<string, unknown>): PullRequestCheck['state'] {
+  const conclusion = upper(item.conclusion)
+  const status = upper(item.status)
+  const state = upper(item.state)
+  if (FAILED_CONCLUSIONS.has(conclusion) || FAILED_STATES.has(state)) return 'failing'
+  if (conclusion === WAITING_CONCLUSION) return 'waiting'
+  if ((status && status !== 'COMPLETED') || PENDING_STATES.has(state)) return 'pending'
+  if (conclusion === 'SKIPPED' || conclusion === 'NEUTRAL') return 'skipped'
+  return 'passing'
+}
+
+/** Each check of gh's statusCheckRollup (check runs and status contexts) with its state and link. */
+export function parseCheckRuns(rollup: unknown): PullRequestCheck[] {
+  const checks: PullRequestCheck[] = []
+  for (const entry of Array.isArray(rollup) ? rollup : []) {
+    if (!entry || typeof entry !== 'object') continue
+    const item = entry as Record<string, unknown>
+    const name = text(item.name) || text(item.context) || 'Check'
+    const url = text(item.detailsUrl) || text(item.targetUrl)
+    const workflowName = text(item.workflowName)
+    checks.push({ name, state: checkItemState(item), url: url || null, ...(workflowName ? { workflowName } : {}) })
+  }
+  return checks
+}
+
+/** The host's review decision; an empty one (no review required, none given) is null. */
+export function parseReviewDecision(value: unknown): PullRequestReviewDecision | null {
+  const decision = upper(value)
+  if (decision === 'APPROVED') return 'approved'
+  if (decision === 'CHANGES_REQUESTED') return 'changes_requested'
+  if (decision === 'REVIEW_REQUIRED') return 'review_required'
+  return null
+}
+
+function reviewVerdict(value: unknown): PullRequestReviewVerdict {
+  const state = upper(value)
+  if (state === 'APPROVED') return 'approved'
+  if (state === 'CHANGES_REQUESTED') return 'changes_requested'
+  if (state === 'DISMISSED') return 'dismissed'
+  if (state === 'PENDING') return 'pending'
+  return 'commented'
+}
+
+function parseReviews(value: unknown, pullRequestUrl: string): PullRequestReview[] {
+  const reviews: PullRequestReview[] = []
+  for (const entry of Array.isArray(value) ? value : []) {
+    if (!entry || typeof entry !== 'object') continue
+    const item = entry as Record<string, unknown>
+    const id = text(item.id)
+    if (!id) continue
+    reviews.push({
+      id,
+      author: login(item.author),
+      authorAssociation: text(item.authorAssociation) || 'NONE',
+      state: reviewVerdict(item.state),
+      body: text(item.body),
+      bodyTruncated: item.bodyTruncated === true,
+      submittedAt: text(item.submittedAt) || null,
+      edited: item.includesCreatedEdit === true,
+      url: text(item.url) || pullRequestUrl
+    })
+  }
+  return reviews
+}
+
+function parseConversationComments(value: unknown, pullRequestUrl: string): PullRequestComment[] {
+  const comments: PullRequestComment[] = []
+  for (const entry of Array.isArray(value) ? value : []) {
+    if (!entry || typeof entry !== 'object') continue
+    const item = entry as Record<string, unknown>
+    const id = text(item.id)
+    if (!id) continue
+    comments.push({
+      id,
+      author: login(item.author),
+      authorAssociation: text(item.authorAssociation) || 'NONE',
+      body: text(item.body),
+      bodyTruncated: item.bodyTruncated === true,
+      createdAt: text(item.createdAt),
+      edited: item.includesCreatedEdit === true,
+      url: text(item.url) || pullRequestUrl,
+      path: null,
+      line: null,
+      startLine: null,
+      side: null,
+      inReplyTo: null
+    })
+  }
+  return comments
+}
+
+function numberOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+/** Parses one page of `gh api …/pulls/<n>/comments --jq <LINE_COMMENT_JQ>`; null when it is not a list. */
+export function parseLineCommentPage(stdout: string, pullRequestUrl = ''): PullRequestComment[] | null {
+  let data: unknown
+  try {
+    data = JSON.parse(stdout)
+  } catch {
+    return null
+  }
+  if (!Array.isArray(data)) return null
+  const comments: PullRequestComment[] = []
+  for (const entry of data) {
+    if (!entry || typeof entry !== 'object') continue
+    const item = entry as Record<string, unknown>
+    const rawId = typeof item.id === 'number' || typeof item.id === 'string' ? String(item.id) : ''
+    if (!rawId) continue
+    const created = text(item.created_at)
+    const updated = text(item.updated_at)
+    const parent = typeof item.in_reply_to_id === 'number' || typeof item.in_reply_to_id === 'string' ? String(item.in_reply_to_id) : null
+    comments.push({
+      id: rawId,
+      author: login(item.user),
+      authorAssociation: text(item.author_association) || 'NONE',
+      body: text(item.body),
+      bodyTruncated: item.body_truncated === true,
+      createdAt: created,
+      edited: Boolean(created && updated && Date.parse(updated) > Date.parse(created)),
+      url: text(item.html_url) || pullRequestUrl,
+      path: text(item.path) || null,
+      line: numberOrNull(item.line),
+      startLine: numberOrNull(item.start_line),
+      side: item.side === 'LEFT' || item.side === 'RIGHT' ? item.side : null,
+      inReplyTo: parent
+    })
+  }
+  return comments
+}
+
+function repositoryOf(owner: unknown, repository: unknown): string | null {
+  const ownerName = owner && typeof owner === 'object' ? text((owner as { login?: unknown }).login) : ''
+  const name = repository && typeof repository === 'object' ? text((repository as { name?: unknown }).name) : ''
+  return ownerName && name ? `${ownerName}/${name}` : null
+}
+
+/**
+ * Parses `gh pr view --json <detail fields>` and the line comment pages read newest first (each as
+ * `parseLineCommentPage` reads them). `commentsTruncated` says the last page was full, so older line
+ * comments exist. Null when the view is not a pull request.
+ */
+export function parsePullRequestDetail(
+  identity: PullRequestIdentity,
+  viewJson: string,
+  commentPages: readonly string[],
+  commentsTruncated = false
+): PullRequestDetail | null {
+  const info = parsePullRequestJson(viewJson)
+  if (!info) return null
+  const value = JSON.parse(viewJson) as Record<string, unknown>
+  const line: PullRequestComment[] = []
+  for (const page of commentPages) {
+    const parsed = parseLineCommentPage(page, info.url)
+    if (!parsed) return null
+    line.push(...parsed)
+  }
+  // Pages come newest first; display is oldest first, with conversation comments in between by their time.
+  line.reverse()
+  const comments = [...parseConversationComments(value.comments, info.url), ...line]
+    .map((comment, index) => {
+      const at = Date.parse(comment.createdAt)
+      return { comment, index, at: Number.isNaN(at) ? Infinity : at }
+    })
+    .sort((a, b) => (a.at === b.at ? a.index - b.index : a.at < b.at ? -1 : 1))
+    .map(({ comment }) => comment)
+  return {
+    ...info,
+    headRefName: info.headRefName ?? '',
+    baseRefName: info.baseRefName ?? '',
+    identity,
+    body: text(value.body),
+    author: login(value.author),
+    headSha: text(value.headRefOid),
+    headRepository: repositoryOf(value.headRepositoryOwner, value.headRepository),
+    baseRepository: identity.nameWithOwner,
+    isCrossRepository: value.isCrossRepository === true,
+    reviewDecision: parseReviewDecision(value.reviewDecision),
+    reviews: parseReviews(value.reviews, info.url),
+    comments,
+    commentsTruncated,
+    checkRuns: parseCheckRuns(value.statusCheckRollup),
+    updatedAt: text(value.updatedAt),
+    mergedAt: text(value.mergedAt) || null,
+    closedAt: text(value.closedAt) || null
+  }
 }
 
 /** Parses `gh repo view --json nameWithOwner,url`; the host is the host of the repository's web URL. */
@@ -307,6 +556,7 @@ export class GitHubCodeHost implements CodeHost {
   private readonly defaultBranches = new Map<string, string>()
   private readonly identities: ReadCache<RepositoryIdentity>
   private readonly lookups: ReadCache<GitPullRequestLookup>
+  private readonly details: ReadCache<PullRequestDetail>
   private readonly viewers: ReadCache<string>
 
   constructor(
@@ -315,6 +565,7 @@ export class GitHubCodeHost implements CodeHost {
   ) {
     this.identities = new ReadCache(IDENTITY_TTL_MS, clock)
     this.lookups = new ReadCache(LOOKUP_TTL_MS, clock)
+    this.details = new ReadCache(LOOKUP_TTL_MS, clock)
     this.viewers = new ReadCache(IDENTITY_TTL_MS, clock)
   }
 
@@ -389,6 +640,89 @@ export class GitHubCodeHost implements CodeHost {
     if (kind === 'not-github') return { state: 'unavailable', reason: 'not-github', message }
     if (kind === 'unauthenticated') return { state: 'unavailable', reason: 'unauthenticated', message }
     return { state: 'unavailable', reason: 'error', message }
+  }
+
+  /**
+   * One pull request with its reviews, comments and checks. The line comments are read newest first, at most
+   * five pages of 100, so a busy pull request shows its latest ones; every read of them is projected and capped
+   * by gh itself. Shared by every folder of the repository for 30 seconds; `force` only skips a value younger than that.
+   */
+  async getPullRequestDetail(cwd: string, number: number, options: { force?: boolean } = {}): Promise<PullRequestDetail> {
+    if (!Number.isSafeInteger(number) || number < 1) throw new PullRequestReadError('Unsupported pull request number.', 'error')
+    const probe = await this.probeGh()
+    if (!probe.ok) throw new PullRequestReadError(probe.message, probe.reason)
+
+    let identity: RepositoryIdentity
+    try {
+      identity = await this.repositoryIdentity(cwd)
+    } catch (error) {
+      throw await this.detailFailure(cwd, null, number, error)
+    }
+    const pullRequest: PullRequestIdentity = { ...identity, number }
+    return this.details.read(
+      pullRequestIdentityKey(pullRequest),
+      () => this.readDetail(cwd, pullRequest).catch(async (error: unknown) => {
+        throw error instanceof PullRequestReadError ? error : await this.detailFailure(cwd, identity, number, error)
+      }),
+      // A failure that asking again would only repeat is kept briefly, so a signed-out or limited host is not hammered.
+      { force: options.force, cacheError: (error) => error instanceof PullRequestReadError && (error.kind === 'unauthenticated' || error.kind === 'not-github' || error.kind === 'rate-limited') }
+    )
+  }
+
+  private async readDetail(cwd: string, pullRequest: PullRequestIdentity): Promise<PullRequestDetail> {
+    const { stdout: view } = await this.runExecutable(
+      'gh',
+      ['pr', 'view', String(pullRequest.number), '--json', PULL_REQUEST_DETAIL_FIELDS, '--jq', PULL_REQUEST_VIEW_JQ],
+      { cwd }
+    )
+    const [owner, repository] = pullRequest.nameWithOwner.split('/')
+    const endpoint = `repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/pulls/${pullRequest.number}/comments`
+    const pages: string[] = []
+    let lastCount = 0
+    for (let page = 1; page <= LINE_COMMENT_MAX_PAGES; page++) {
+      const { stdout } = await this.runExecutable(
+        'gh',
+        [
+          'api', '--hostname', pullRequest.host,
+          `${endpoint}?sort=created&direction=desc&per_page=${LINE_COMMENT_PAGE_SIZE}&page=${page}`,
+          '--jq', LINE_COMMENT_JQ
+        ],
+        { cwd }
+      )
+      const parsed = parseLineCommentPage(stdout)
+      if (!parsed) throw new PullRequestReadError('GitHub CLI returned an unexpected comments response.', 'error')
+      pages.push(stdout)
+      lastCount = parsed.length
+      if (lastCount < LINE_COMMENT_PAGE_SIZE) break
+    }
+    const truncated = pages.length === LINE_COMMENT_MAX_PAGES && lastCount === LINE_COMMENT_PAGE_SIZE
+    const detail = parsePullRequestDetail(pullRequest, view, pages, truncated)
+    if (!detail) throw new PullRequestReadError('GitHub CLI returned an unexpected pull request response.', 'error')
+    return detail
+  }
+
+  /** A failed detail read with the host's own message, plus where and as whom it failed when that explains it. */
+  private async detailFailure(cwd: string, identity: RepositoryIdentity | null, number: number, error: unknown): Promise<PullRequestReadError> {
+    if (error instanceof PullRequestReadError) return error
+    if (isMissingExecutable(error)) return new PullRequestReadError('GitHub CLI (gh) was not found. Install it to see pull requests.', 'gh-missing')
+    const message = processMessage(error)
+    const kind = classifyGhFailure(message)
+    const first = message.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? message
+    if (kind === 'not-found') {
+      const viewer = identity ? await this.viewerLogin(cwd) : null
+      const where = identity ? `${identity.nameWithOwner} on ${identity.host}` : cwd
+      const account = identity
+        ? viewer
+          ? `signed in to ${identity.host} as ${viewer}, which cannot see it`
+          : `the account signed in to ${identity.host} may not see it`
+        : 'the signed-in account may not see it'
+      return new PullRequestReadError(`${first} — pull request #${number} is not in ${where}, or ${account}.`, 'not-found')
+    }
+    if (kind === 'unauthenticated') {
+      return new PullRequestReadError(`${first} — not signed in${identity ? ` to ${identity.host}` : ''} for ${cwd}.`, 'unauthenticated')
+    }
+    if (kind === 'not-github') return new PullRequestReadError(`${first} — ${cwd} is not a GitHub repository.`, 'not-github')
+    return new PullRequestReadError(message, kind === 'none' ? 'error' : kind)
   }
 
   async createPullRequest(cwd: string, input: CreatePullRequestInput): Promise<GitPullRequestInfo> {
