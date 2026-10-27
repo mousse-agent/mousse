@@ -478,7 +478,12 @@ export class MmsProfileServices {
           services: this,
           runtime,
           net: this.net,
-          nativeAdapters: opts?.nativeBotAdapters?.({ services: this, runtime, net: this.net })
+          nativeAdapters: opts?.nativeBotAdapters?.({ services: this, runtime, net: this.net }),
+          trustedQaAdapters: opts?.trustedQaBotAdapters?.({
+            services: this,
+            runtime,
+            net: this.net
+          })
         })
         const composition = this.bridgeService.composition()
         return {

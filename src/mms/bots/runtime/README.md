@@ -1,6 +1,11 @@
 # Native bot runtime
 
-`NativeBotRuntime` uses the existing `LlmClient` tool loop through its host-owned
+> **Status.** `NativeBotRuntime` has no model path: the app's own agent loop is retired,
+> so `supports()` is `false` for every profile and `run()` throws `profile_unsupported`.
+> The definition, policy digest, reader dispatcher and native reader remain. The text
+> below describes the bounds a harness-backed bot runtime has to meet, not current behavior.
+
+`NativeBotRuntime` used the former `LlmClient` tool loop through its host-owned
 `runtimeContext` port. It does not use the ordinary thread's prompt, Skills, MCP,
 project instructions, browser, tools, provider session or transcript. Root composes
 admission, materialization, output publication, compartment storage and terminal
