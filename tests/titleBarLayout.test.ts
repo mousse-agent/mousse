@@ -11,9 +11,9 @@ describe('title bar layout', () => {
   })
 
   it('keeps the bar and drag surface sized from the shared height with compact controls', () => {
-    expect(appStyles).toMatch(/\.titlebar\s*\{[\s\S]*?height:\s*var\(--titlebar-height\)/)
+    expect(appStyles).toMatch(/\.titlebar\s*\{[^}]*?height:\s*var\(--theme-titlebar-height,\s*var\(--titlebar-height\)\)/)
     expect(appStyles).toMatch(/\.titlebar-drag\s*\{[\s\S]*?height:\s*100%/)
-    expect(appStyles).toMatch(/\.icon-btn-titlebar\s*\{[\s\S]*?width:\s*34px[\s\S]*?height:\s*34px/)
+    expect(appStyles).toMatch(/\.icon-btn-titlebar\s*\{[^}]*?width:\s*32px[^}]*?height:\s*32px/)
   })
 
   it('uses native app-region drag on the title bar (not JS setBounds drag)', () => {
