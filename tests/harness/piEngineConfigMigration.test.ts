@@ -8,13 +8,15 @@
  * - A connection that was on the legacy engine shows a one-time notice on its first turn; one that was
  *   already on Pi's agent (its notice already recorded) shows none.
  * - Without Pi's runtime in the build, a turn is refused with the reason instead of crashing.
+ * - A binding made on the loop froze the loop's caps; they read as the instance's live caps.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { DriverContext } from '../../src/mms/harness/driver'
-import { PI_RPC_CAPS, piDriver } from '../../src/mms/harness/drivers/pi'
+import { PI_RPC_CAPS, PI_RPC_EXACT_CAPS, piDriver } from '../../src/mms/harness/drivers/pi'
+import { loopCaps } from '../../src/mms/harness/gateway'
 import { ENGINE_NOTICE_FILE, createRpcRuntime } from '../../src/mms/harness/drivers/pi/engines/rpc'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import type { TurnInput } from '../../src/mms/run/adapters/ProviderAdapter'
@@ -91,6 +93,16 @@ describe('stored Pi engine setting', () => {
     const runtime = piDriver({ credentials }).create({ instanceId: 'pi:openrouter', config: { home: 'default' } } as unknown as DriverContext)
     await expect(runtime.adapter.startTurn({ instanceId: 'pi:openrouter' } as TurnInput, {} as never, {} as never, {} as never))
       .rejects.toMatchObject({ code: 'unsupported', message: expect.stringContaining('no Pi runtime') })
+  })
+})
+
+describe('bindings made on the loop', () => {
+  it('reads caps frozen on the loop as stale, and current caps as current', () => {
+    const frozen = { ...PI_RPC_EXACT_CAPS, historyInjection: 'native', contextUsage: 'measured', budgets: 'observed', spendLimits: 'unsupported', definitionLimits: 'in_loop' }
+    expect(loopCaps(frozen as never)).toBe(true)
+    expect(loopCaps({ ...PI_RPC_EXACT_CAPS, definitionLimits: 'none' } as never)).toBe(false)
+    expect(loopCaps(PI_RPC_EXACT_CAPS)).toBe(false)
+    expect(loopCaps(PI_RPC_CAPS)).toBe(false)
   })
 })
 

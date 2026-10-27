@@ -19,7 +19,7 @@ const TURN_BINDINGS: Partial<Record<ProviderAdapter['driver'], McpTurnBinding>> 
  */
 export function adapterDriver(adapter: ProviderAdapter, extra: Partial<HarnessCaps> & { runtime?: Partial<DriverRuntime>; mcpTurnBinding?: McpTurnBinding } = {}): HarnessDriver {
   const { runtime, mcpTurnBinding, ...caps } = extra
-  const contextUsage: HarnessCaps['contextUsage'] = adapter.describe ? adapter.describe('').contextUsage : 'measured'
+  const contextUsage: HarnessCaps['contextUsage'] = adapter.describe ? adapter.describe('').contextUsage : 'none'
   return {
     kind: adapter.driver,
     label: `Test ${adapter.driver}`,

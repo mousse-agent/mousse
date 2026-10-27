@@ -1423,8 +1423,9 @@ export class Harness implements HarnessGateway {
     // A stored binding runs on the policy it was made with, or not at all.
     if (binding.policyDigest !== undefined && binding.policyDigest !== policyDigest(binding.policy))
       harnessFail('protocol', 'The policy of this turn is not the one its binding was made with.', binding.instanceId)
-    // The caps the binding froze (bindings from before snapshots: the live ones).
-    const caps = binding.caps ?? this.recordCaps(record)
+    // The caps the binding froze (bindings from before snapshots, and snapshots of the deleted
+    // in-process Pi loop, which no longer runs anything: the live ones).
+    const caps = binding.caps && !loopCaps(binding.caps) ? binding.caps : this.recordCaps(record)
     // Token and spend limits also need the model's own facts (an output cap, a price).
     const spendModel = hasSpendLimit(binding.policy) ? record.runtime.spendModel?.(binding.model) : undefined
     const enforceable = checkPolicy(caps, binding.policy, binding.instanceId, spendModel, this.policyOptions(record))
@@ -3533,6 +3534,15 @@ function alwaysPrivate(driver: HarnessDriver, config: InstanceConfig): boolean {
 /** Driver, revision and home: a change in any builds a new runtime (and a new epoch). */
 function recordKey(driver: HarnessDriver, revision: number, config: InstanceConfig): string {
   return `${driver.kind}|${revision}|${config.home}`
+}
+
+/**
+ * Caps frozen by a binding made on the deleted in-process Pi loop (PR 4 unit 4h): its own keys and
+ * values (`definitionLimits`, a `measured` gauge, `native` history), never declared by a runtime now.
+ */
+export function loopCaps(caps: HarnessCaps): boolean {
+  const stored = caps as unknown as Record<string, unknown>
+  return stored.definitionLimits === 'in_loop' || stored.contextUsage === 'measured' || stored.historyInjection === 'native'
 }
 
 function setOrDelete(target: Record<string, unknown>, key: string, value: unknown): void {

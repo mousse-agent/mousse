@@ -40,11 +40,10 @@ export interface HarnessCaps {
   /** The composer offers Plan mode for this instance. */
   planMode: boolean
   /**
-   * Context gauge source: `measured` when Mousse measures the transcript itself (the pi loop),
-   * `reported` when the runtime reports its context and window, `none` when it publishes neither
-   * (the gauge is hidden rather than fabricated).
+   * Context gauge source: `reported` when the runtime reports its context and window, `none` when
+   * it publishes neither (the gauge is hidden rather than fabricated).
    */
-  contextUsage: 'measured' | 'reported' | 'none'
+  contextUsage: 'reported' | 'none'
   /**
    * How far Mousse controls which tools the runtime runs: `exact` (Mousse runs the tools: an exact
    * allowlist holds), `approval_only` (the runtime asks Mousse before each tool, with its permission
