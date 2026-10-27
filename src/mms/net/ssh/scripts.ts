@@ -118,7 +118,7 @@ export function fetchScript(input: { directory: string; asset: string; url: stri
     'if command -v curl >/dev/null 2>&1; then',
     `  curl -fL --proto '=https' --retry 2 --connect-timeout 20 --max-time 900 -o ${q(input.asset)} ${q(input.url)} || exit 21`,
     'elif command -v wget >/dev/null 2>&1; then',
-    `  wget -q --https-only -O ${q(input.asset)} ${q(input.url)} || exit 21`,
+    `  wget -q -O ${q(input.asset)} ${q(input.url)} || exit 21`,
     'else',
     '  exit 21',
     'fi',
@@ -147,7 +147,7 @@ export function verifyExtractScript(input: { directory: string; asset: string })
     'cat > SHA256SUMS.line',
     'if command -v sha256sum >/dev/null 2>&1; then sha256sum -c SHA256SUMS.line; else shasum -a 256 -c SHA256SUMS.line; fi',
     `chmod +x ${q(input.asset)}`,
-    `./${input.asset} --appimage-extract >/dev/null`,
+    `${q(`./${input.asset}`)} --appimage-extract >/dev/null`,
     ''
   ].join('\n')
 }
@@ -221,6 +221,13 @@ export function configureAddonScript(input: { cli: string; disable?: boolean }):
 
 export function lingerShowScript(user: string): string {
   return ['# mousse:linger-show', `loginctl show-user ${q(user)} -p Linger`, ''].join('\n')
+}
+export function lingerDisableScript(user: string): string {
+  return ['# mousse:linger-disable', `loginctl disable-linger ${q(user)}`, ''].join('\n')
+}
+/** Prints a small file (a launcher or a unit) so this computer can compare it with what it wrote. */
+export function catFileScript(path: string): string {
+  return ['# mousse:cat-file', `f=${q(path)}`, 'if test -f "$f"; then cat "$f"; fi', ''].join('\n')
 }
 export function lingerEnableScript(user: string): string {
   return ['# mousse:linger-enable', `loginctl enable-linger ${q(user)}`, ''].join('\n')

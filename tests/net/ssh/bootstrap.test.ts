@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { NodeId } from '../../../src/shared/net'
 import { sshApprovalsPath } from '../../../src/mms/net/transports/ssh'
 import { SshBootstrap, validDeviceName } from '../../../src/mms/net/ssh/bootstrap'
+import { isOlderVersion } from '../../../src/mms/net/ssh/plan'
 import { bed, fingerprint, hashedLine, KEY_A, KEY_B, KEY_RSA, type Bed } from './bed'
 
 const fixtures = vi.hoisted(() => ({ binaries: new Set<string>() }))
@@ -386,8 +387,10 @@ describe('setup', () => {
       'install-verify',
       'install-launcher',
       'service-install',
+      'cat-file',
       'linger-enable',
       'join',
+      'net-status',
       'transports',
       'addon-configure',
       'routes'
@@ -436,7 +439,8 @@ describe('setup', () => {
     const b = await make()
     const { ssh } = await probed(b)
     const before = (await b.calls()).length
-    for (const name of ['a\\b', 'line\nbreak', ' padded', '']) {
+    // A leading dash would be read as a flag by the machine's own CLI parser (`--home=/tmp/x`).
+    for (const name of ['a\\b', 'line\nbreak', ' padded', '', '--home=/tmp/x', '-h']) {
       expect(validDeviceName(name)).toBe(false)
       expect((await ssh.begin({ host: 'box', name })).error).toBeTruthy()
     }
@@ -478,7 +482,7 @@ describe('setup', () => {
     const { ssh } = await probed(b)
     const { id } = await ssh.begin({ host: 'box', name: 'x' })
     const status = await finish(ssh, id!)
-    expect(status.phase).toBe('done')
+    expect(status.phase, status.error).toBe('done')
     expect(status.lingerCommand).toBe('sudo loginctl enable-linger me')
     expect(status.steps.find((step) => step.step === 'linger')?.state).toBe('skipped')
   })
@@ -670,9 +674,81 @@ describe('crashes and retries are recoverable from the journal', () => {
     const status = await finish(ssh, id!)
     expect(status.phase).toBe('interrupted')
     expect(status.node).toBeUndefined()
+    // The invitation did admit a device, so Undo never says nothing was added: it reports the
+    // contradiction, revokes nothing on its own and keeps the record.
     const undone = await ssh.undo(id!)
     expect(b.stub.revokedNodes).toEqual([])
-    expect(undone.report.some((item) => /No device was added/.test(item.detail))).toBe(true)
+    expect(undone.ok).toBe(false)
+    expect(
+      undone.report.some((item) => item.result === 'left' && item.detail.includes(stranger))
+    ).toBe(true)
+    expect(undone.report.some((item) => /No device was added|never used/.test(item.detail))).toBe(
+      false
+    )
+    expect((await ssh.list()).records).toHaveLength(1)
+  })
+
+  it('undo right after a join crash revokes the admitted device, without any retry', async () => {
+    const { b, id } = await crashAt('join.afterRemote')
+    const ssh = b.make()
+    await ssh.start()
+    // The crash left the manifest with the invitation id and no node.
+    const text = JSON.parse(await readFile(join(b.profileDir, 'net', 'ssh', `${id}.json`), 'utf8'))
+    expect(text.node).toBeUndefined()
+    expect(text.inviteIds).toHaveLength(1)
+    const node = (await b.host()).node as NodeId
+    const undone = await ssh.undo(id)
+    expect(b.stub.revokedNodes).toEqual([node])
+    expect(
+      undone.report.some((item) => item.step.includes('Join') && item.result === 'undone')
+    ).toBe(true)
+    expect(undone.ok).toBe(true)
+    expect((await ssh.list()).records).toEqual([])
+  })
+
+  it('undo after a cancelled join revokes the invitation still in flight', async () => {
+    const b = await make({ hangOn: 'join' })
+    const { ssh } = await probed(b)
+    const { id } = await ssh.begin({ host: 'box', name: 'x' })
+    for (let i = 0; i < 400 && !(await b.steps()).includes('join'); i++)
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    expect((await ssh.cancel(id!)).phase).toBe('cancelled')
+    const undone = await ssh.undo(id!)
+    expect(b.stub.revokedInvites).toEqual([b.stub.invites[0]!.id])
+    expect(undone.report.some((item) => /unused invitation was revoked/.test(item.detail))).toBe(
+      true
+    )
+    expect(b.stub.revokedNodes).toEqual([])
+  })
+
+  it('takes the node id from the invitation row, and stops when the machine names another device', async () => {
+    const stranger = ('nod_' + 'y'.repeat(26)) as NodeId
+    const b = await make({ reportNode: stranger })
+    const { ssh } = await probed(b)
+    const { id } = await ssh.begin({ host: 'box', name: 'x' })
+    const status = await finish(ssh, id!)
+    expect(status.phase).toBe('interrupted')
+    expect(status.error).toMatch(/different device/)
+    // No approval for the machine's claim, and nothing adopted.
+    expect(existsSync(sshApprovalsPath(b.profileDir))).toBe(false)
+    expect(b.stub.adopted).toEqual([])
+    expect(await b.steps()).not.toContain('addon-configure')
+    // Undo revokes what the invitation admitted (the real node), never the claimed one.
+    const real = (await b.host()).node as NodeId
+    await ssh.undo(id!)
+    expect(b.stub.revokedNodes).not.toContain(stranger)
+    expect(b.stub.revokedNodes).toEqual([real])
+  })
+
+  it('a join that printed a node while this computer saw no admission is not trusted', async () => {
+    const b = await make()
+    const { ssh } = await probed(b)
+    b.stub.host.inviteOutcome = () => ({ state: 'active' })
+    const { id } = await ssh.begin({ host: 'box', name: 'x' })
+    const status = await finish(ssh, id!)
+    expect(status.phase).toBe('interrupted')
+    expect(existsSync(sshApprovalsPath(b.profileDir))).toBe(false)
+    expect(b.stub.revokedInvites).toHaveLength(1)
   })
 
   it('service: a crash after the unit was installed is reconciled from the host', async () => {
@@ -808,5 +884,200 @@ describe('update, rename and approve', () => {
     })
     expect((await ssh.approve(node, 'box')).approved).toBe(true)
     expect(await readFile(b.userKnownHosts, 'utf8')).toBe(original)
+  })
+})
+
+describe('undo compares the launcher, the unit and linger with what setup wrote', () => {
+  async function setUp(overrides = {}) {
+    const b = await make(overrides)
+    const { ssh } = await probed(b)
+    const { id } = await ssh.begin({ host: 'box', name: 'x' })
+    expect((await finish(ssh, id!)).phase).toBe('done')
+    return { b, ssh, id: id! }
+  }
+
+  it('leaves a wrapper that was edited with its marker kept, and the service and install with it', async () => {
+    const { b, ssh, id } = await setUp()
+    const before = (await b.host()).launcher as string
+    await b.patch({ launcher: before + 'echo added by the user\n' })
+    const result = await ssh.undo(id)
+    expect(result.ok).toBe(false)
+    expect(result.report.filter((item) => item.result === 'left')).toHaveLength(2)
+    const host = await b.host()
+    expect(host.launcher).toContain('added by the user')
+    expect(host.serviceInstalled).toBe(true)
+    expect(host.removedInstall).toBeUndefined()
+    expect(await b.steps()).not.toContain('service-uninstall')
+    expect((await ssh.list()).records).toHaveLength(1)
+  })
+
+  it('leaves a wrapper repointed to another install with its marker retained', async () => {
+    const { b, ssh, id } = await setUp()
+    const before = (await b.host()).launcher as string
+    await b.patch({ launcher: before.replace('/cli/0.1.2/', '/cli/9.9.9/') })
+    const result = await ssh.undo(id)
+    expect(result.ok).toBe(false)
+    expect((await b.host()).launcher).toContain('/cli/9.9.9/')
+    expect((await b.host()).serviceInstalled).toBe(true)
+  })
+
+  it('leaves a service unit that was edited and removes nothing it does not own', async () => {
+    const { b, ssh, id } = await setUp()
+    await b.patch({ unit: '[Service]\nExecStart=/usr/local/bin/my-own-service\n' })
+    const result = await ssh.undo(id)
+    expect(result.ok).toBe(false)
+    expect(result.report.find((item) => item.result === 'left')?.detail).toMatch(/unit was changed/)
+    expect(await b.steps()).not.toContain('service-uninstall')
+    expect((await b.host()).serviceInstalled).toBe(true)
+  })
+
+  it('turns linger off again only when this setup turned it on', async () => {
+    const { b, ssh, id } = await setUp()
+    expect((await b.host()).linger).toBe('yes')
+    const result = await ssh.undo(id)
+    expect(result.ok).toBe(true)
+    expect((await b.host()).linger).toBe('no')
+    expect(result.report.some((item) => /Lingering was turned off/.test(item.detail))).toBe(true)
+  })
+
+  it('leaves linger alone when it was already on, and when it was refused', async () => {
+    const on = await setUp({ linger: 'yes' })
+    await on.ssh.undo(on.id)
+    expect((await on.b.host()).linger).toBe('yes')
+    expect(await on.b.steps()).not.toContain('linger-disable')
+    const refused = await setUp({ lingerFails: true })
+    await refused.ssh.undo(refused.id)
+    expect(await refused.b.steps()).not.toContain('linger-disable')
+  })
+})
+
+describe('one operation at a time, and serialized writes', () => {
+  it('accepts exactly one of two setups started together', async () => {
+    const b = await make()
+    const { ssh } = await probed(b)
+    const results = await Promise.all([
+      ssh.begin({ host: 'box', name: 'one' }),
+      ssh.begin({ host: 'box', name: 'two' })
+    ])
+    expect(results.filter((result) => result.id)).toHaveLength(1)
+    expect(results.filter((result) => result.error)).toHaveLength(1)
+    const accepted = results.find((result) => result.id)!
+    expect((await finish(ssh, accepted.id!)).phase).toBe('done')
+    expect((await ssh.list()).records).toHaveLength(1)
+    expect(b.stub.invites).toHaveLength(1)
+  })
+
+  it('refuses a retry or an undo while a setup is running', async () => {
+    const b = await make({ hangOn: 'service-install' })
+    const { ssh } = await probed(b)
+    const { id } = await ssh.begin({ host: 'box', name: 'x' })
+    await expect(ssh.undo(id!)).rejects.toMatchObject({ code: 'conflict' })
+    await expect(ssh.retry(id!)).rejects.toMatchObject({ code: 'conflict' })
+    await ssh.cancel(id!)
+  })
+
+  it('keeps both approvals when two are written together', async () => {
+    const b = await make()
+    const first = ('nod_' + 'a'.repeat(26)) as NodeId,
+      second = ('nod_' + 'b'.repeat(26)) as NodeId
+    b.stub.known.add(first)
+    b.stub.known.add(second)
+    const ssh = b.make()
+    const check = await ssh.approve(first, 'box')
+    await ssh.trust({ host: 'box', fingerprint: check.hostKey!.fingerprint })
+    const results = await Promise.all([ssh.approve(first, 'box'), ssh.approve(second, 'box')])
+    expect(results.every((result) => result.approved)).toBe(true)
+    expect(Object.keys(await approvals(b)).sort()).toEqual([first, second])
+  })
+})
+
+describe('what the machine already has is never overwritten blind', () => {
+  const before = { id: 'ssh', enabled: true, settings: { endpoint: 'old', port: 41000 } }
+  it.each([
+    ['a failed listing', { transportsFail: true }],
+    ['a CLI that cannot list its saved add-ons', { noSaved: true }]
+  ])('stops with nothing changed after %s', async (_name, fault) => {
+    const b = await make({
+      externalCli: '/opt/m/mousse-cli',
+      serviceInstalled: true,
+      running: true,
+      transports: [before],
+      ...fault
+    })
+    const { ssh } = await probed(b)
+    const { id } = await ssh.begin({ host: 'box', name: 'x' })
+    const status = await finish(ssh, id!)
+    expect(status.phase).toBe('failed')
+    expect(status.error).toMatch(/nothing was changed/)
+    expect((await b.host()).transports).toEqual([before])
+    expect(await b.steps()).not.toContain('addon-configure')
+  })
+
+  it('blocks an external CLI older than this build, with the remedy', async () => {
+    const b = await make({
+      externalCli: '/opt/m/mousse-cli',
+      serviceInstalled: true,
+      running: true,
+      cliVersion: '0.1.0'
+    })
+    const { ssh } = await probed(b)
+    const blocked = ssh.plan({ host: 'box', name: 'x' }).blocked!
+    expect(blocked[0]).toMatchObject({
+      name: expect.stringMatching(/0\.1\.0.*older.*0\.1\.2/),
+      remedy: expect.stringMatching(/Update Mousse/)
+    })
+    expect((await ssh.begin({ host: 'box', name: 'x' })).error).toMatch(/Cannot start/)
+  })
+
+  it('orders versions with a prerelease before its release', () => {
+    expect(isOlderVersion('0.1.0', '0.1.2')).toBe(true)
+    expect(isOlderVersion('0.1.2', '0.1.2')).toBe(false)
+    expect(isOlderVersion('0.1.3', '0.1.2')).toBe(false)
+    expect(isOlderVersion('0.1.2-nightly.20261022.17', '0.1.2')).toBe(true)
+    expect(isOlderVersion('0.1.2', '0.1.2-nightly.1')).toBe(false)
+    expect(isOlderVersion('weird', '0.1.2')).toBe(false)
+  })
+})
+
+describe('the forwarding probe can see a refusal', () => {
+  it('asks for INFO logging, because OpenSSH logs the refusal reason there', async () => {
+    const b = await make({ forward: 'prohibited' })
+    const { check } = await probed(b)
+    const forward = (await b.calls()).find((call) => call.kind === 'forward')!
+    expect(forward.args).toContain('LogLevel=INFO')
+    expect(check.prerequisites.find((item) => /TCP forwarding/.test(item.name))).toMatchObject({
+      ok: false
+    })
+  })
+
+  it('every other run stays at ERROR, where only "stdio forwarding failed" is printed', async () => {
+    const b = await make()
+    await probed(b)
+    const runsOnly = (await b.calls()).filter((call) => call.kind === 'run')
+    for (const call of runsOnly) expect(call.args).toContain('LogLevel=ERROR')
+  })
+})
+
+describe('approve checks the device the machine reports', () => {
+  it('refuses a machine that reports another device and approves the matching one', async () => {
+    const node = ('nod_' + 'a'.repeat(26)) as NodeId
+    const b = await make({
+      externalCli: '/opt/m/mousse-cli',
+      serviceInstalled: true,
+      running: true,
+      enrolled: true,
+      node
+    })
+    const other = ('nod_' + 'b'.repeat(26)) as NodeId
+    b.stub.known.add(node)
+    b.stub.known.add(other)
+    const ssh = b.make()
+    const first = await ssh.approve(node, 'box')
+    await ssh.trust({ host: 'box', fingerprint: first.hostKey!.fingerprint })
+    const wrong = await ssh.approve(other, 'box')
+    expect(wrong.approved).toBe(false)
+    expect(wrong.detail).toMatch(/different device/)
+    expect(existsSync(sshApprovalsPath(b.profileDir))).toBe(false)
+    expect((await ssh.approve(node, 'box')).approved).toBe(true)
   })
 })

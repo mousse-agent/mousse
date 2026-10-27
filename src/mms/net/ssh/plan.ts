@@ -20,6 +20,23 @@ export const PREREQUISITE = {
   unit: 'No unrelated mousse-mms service unit'
 } as const
 
+/** True when `version` sorts before `than` (numeric parts, then a prerelease before its release). */
+export function isOlderVersion(version: string, than: string): boolean {
+  const parse = (value: string) => {
+    const match = /^(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/u.exec(value)
+    return match
+      ? { parts: [Number(match[1]), Number(match[2]), Number(match[3])], pre: match[4] }
+      : undefined
+  }
+  const a = parse(version),
+    b = parse(than)
+  if (!a || !b) return false
+  for (let index = 0; index < 3; index++)
+    if (a.parts[index] !== b.parts[index]) return a.parts[index]! < b.parts[index]!
+  if (a.pre === undefined) return false
+  return b.pre === undefined ? true : a.pre < b.pre
+}
+
 /** The port the host's daemon listens on, stable per host so the plan and the run agree. */
 export function defaultDaemonPort(host: string): number {
   let hash = 2166136261
@@ -67,6 +84,18 @@ export function buildPlan(
         remedy: item.remedy ?? 'Fix this on the machine and check again.'
       })
   const installed = check.installed
+  // An older CLI has no `--via`, `--headless`, `net routes` or saved add-on list: setup would get as
+  // far as installing a service and then fail at the join.
+  if (
+    installed?.cli.owner === 'external' &&
+    installed.cli.version &&
+    input.version !== '0.0.0' &&
+    isOlderVersion(installed.cli.version, input.version)
+  )
+    blocked.push({
+      name: `Mousse on the machine (${installed.cli.version}) is older than this computer (${input.version})`,
+      remedy: `Update Mousse on the machine to ${input.version} or newer, then check again.`
+    })
   if (installed?.service.owner === 'external' && installed.service.state === 'stopped')
     blocked.push({
       name: 'The Mousse service on the machine is stopped',

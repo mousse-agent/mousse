@@ -203,6 +203,8 @@ export interface SshCheckResult {
   installed?: SshInstalledView
   /** The host already belongs to a device set. */
   enrolled?: boolean
+  /** The device id a running Mousse on the machine reports for itself. */
+  hostNode?: string
   /** `loginctl` linger for the user: whether a user service survives logout. */
   linger?: 'yes' | 'no'
   prerequisites: SshPrerequisite[]

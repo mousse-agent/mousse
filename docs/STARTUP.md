@@ -45,7 +45,9 @@ in it names Mousse's data directory.
 Linux unit. An unpacked headless build has no setuid Chromium sandbox helper and, on recent
 Linux, user namespaces are restricted for unprivileged users, so it would not start without
 the opt-out. The service shows no windows and runs no renderer, so the sandbox protects
-nothing it uses. Adding a machine from the app uses this flag.
+nothing it uses. The daemon removes the variable from its own environment right after it
+starts, so terminals, agents and tools it launches do not inherit it. Adding a machine from the
+app uses this flag.
 
 ---
 

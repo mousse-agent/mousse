@@ -83,8 +83,10 @@ if (state.auth === 'denied') fail('me@box: Permission denied (publickey).')
 
 if (args.includes('-W')) {
   append('calls.log', { kind: 'forward', args })
-  if (state.forward === 'prohibited') fail('channel 0: open failed: administratively prohibited: open failed\nstdio forwarding failed')
-  fail('channel 0: open failed: connect failed: Connection refused\nstdio forwarding failed')
+  // Like OpenSSH: the reason is logged at INFO, and at LogLevel=ERROR only the fatal line survives.
+  const verbose = args.includes('LogLevel=INFO') || args.includes('LogLevel=DEBUG')
+  const reason = state.forward === 'prohibited' ? 'administratively prohibited: open failed' : 'connect failed: Connection refused'
+  fail((verbose ? 'channel 0: open failed: ' + reason + '\n' : '') + 'stdio forwarding failed')
 }
 
 // ---- the remote login shell
@@ -184,7 +186,7 @@ function run(input) {
       out('@@path\n' + (state.pathCli || '') + '\n')
       out('@@app\n\n')
       out('@@cli\n' + cliPath() + '\n')
-      out('@@version\n' + (cliPath() ? 'mousse-cli ' + (state.cliVersion || '0.1.0') : '') + '\n')
+      out('@@version\n' + (cliPath() ? 'mousse-cli ' + (state.cliVersion || '0.1.2') : '') + '\n')
       out('@@service\n' + (cliPath() ? JSON.stringify({ running: !!state.running, version: state.cliVersion, startup: { installed: !!state.serviceInstalled } }) : '') + '\n')
       if (state.running) out('@@net\n' + JSON.stringify(state.enrolled ? { self: { node: state.node } } : {}) + '\n')
       out('@@tools\n' + t.join('\n') + '\n')
@@ -228,6 +230,10 @@ function run(input) {
       state.serviceInstalled = true
       state.running = !state.serviceStopped
       state.unitUsedEnv = sandboxOk()
+      state.unit =
+        '[Service]\nExecStart=' +
+        (/exec "([^"]+)"/.exec(state.launcher || '')?.[1] || cliPath()) +
+        ' service run\n'
       mutate()
       return process.exit(0)
     case 'service-status':
@@ -247,6 +253,16 @@ function run(input) {
       return process.exit(0)
     case 'service-restart':
       state.running = !(state.brokenVersions || []).includes(launcherVersion())
+      mutate()
+      return process.exit(0)
+    case 'cat-file': {
+      const path = /f='([^']*)'/.exec(script)?.[1] || ''
+      if (path.endsWith('mousse-cli')) out(state.launcher || '')
+      else if (path.endsWith('.service')) out(state.unit || '')
+      return process.exit(0)
+    }
+    case 'linger-disable':
+      state.linger = 'no'
       mutate()
       return process.exit(0)
     case 'linger-show':
@@ -276,12 +292,13 @@ function run(input) {
       state.node = state.nextNode
       mutate()
       if (state.dropJoinReply) process.exit(255)
-      out(JSON.stringify({ user: 'usr_x', node: state.node, authority: 'nod_auth' }) + '\n')
+      out(JSON.stringify({ user: 'usr_x', node: state.reportNode || state.node, authority: 'nod_auth' }) + '\n')
       return process.exit(0)
     }
     case 'transports':
       requireCli()
-      out(JSON.stringify({ manifests: [], saved: state.transports || [] }) + '\n')
+      if (state.transportsFail) fail('cli broke', 1)
+      out(JSON.stringify(state.noSaved ? { manifests: [] } : { manifests: [], saved: state.transports || [] }) + '\n')
       return process.exit(0)
     case 'addon-configure': {
       requireCli()

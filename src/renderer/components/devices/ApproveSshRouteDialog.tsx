@@ -11,7 +11,7 @@ type Approval = SshCheckResult & { approved: boolean }
  * A device offers a route over SSH that this computer has not approved. Checking it reads the
  * host key; an unknown or changed key is confirmed here before the route is approved.
  */
-export function ApproveSshRouteDialog({ node, name, endpoint, onClose, onDone }: {
+export function ApproveSshRouteDialog({ node, name, endpoint: offered, onClose, onDone }: {
   node: NodeId
   name: string
   endpoint: string
@@ -19,6 +19,9 @@ export function ApproveSshRouteDialog({ node, name, endpoint, onClose, onDone }:
   onDone: () => void
 }) {
   const { busy, error, setError, call } = useDaemonCall()
+  // The device's own address may mean another host, or nothing, on this computer: it can be changed.
+  const [typed, setTyped] = useState(offered)
+  const endpoint = typed.trim()
   const [result, setResult] = useState<Approval>()
   const approve = async () => {
     setResult(undefined)
@@ -39,11 +42,15 @@ export function ApproveSshRouteDialog({ node, name, endpoint, onClose, onDone }:
   const btn = 'settings-btn devices-dialog-btn'
   const footer = result?.approved ? <button type="button" className={`${btn} primary`} onClick={onClose}>Done</button>
     : confirming || stopped ? undefined
-      : <button type="button" className={`${btn} primary`} disabled={busy} onClick={() => void approve()}>{result ? 'Retry' : 'Check'}</button>
+      : <button type="button" className={`${btn} primary`} disabled={busy || !endpoint} onClick={() => void approve()}>{result ? 'Retry' : 'Check and approve'}</button>
   return (
     <Modal open title={`Use SSH route to ${name}`} onClose={onClose} footer={footer}>
       <div className="devices-dialog">
-        <p>{name} can be reached over SSH at <code className="devices-code">{endpoint}</code>. Mousse checks the host key before it uses this route.</p>
+        <p>{name} offers an SSH address. Use an address that reaches it from this computer, then Mousse checks the host key and the login before it approves the route.</p>
+        <label className="devices-field">
+          <span>SSH address</span>
+          <input value={typed} maxLength={253} spellCheck={false} disabled={busy || !!result?.approved} onChange={(event) => { setTyped(event.target.value); setResult(undefined); setError('') }} />
+        </label>
         {busy && !result && <p role="status" className="settings-muted">Checking the remote machine…</p>}
         {result?.approved && <p role="status" className="settings-status-ok">This computer now reaches {name} over SSH.</p>}
         {result && !result.approved && result.problem && (

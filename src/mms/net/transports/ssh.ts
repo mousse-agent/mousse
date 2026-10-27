@@ -150,6 +150,11 @@ export function sshPolicyOptions(input: {
   knownHosts: string
   userKnownHosts: string
   clearForwardings: boolean
+  /**
+   * `ERROR` keeps ssh quiet. OpenSSH prints a refused channel (`administratively prohibited`,
+   * `connect failed`) at INFO, so only the forwarding probe, which has no session to leak, asks for it.
+   */
+  logLevel?: 'ERROR' | 'INFO'
 }): string[] {
   return [
     '-o',
@@ -186,7 +191,7 @@ export function sshPolicyOptions(input: {
     '-o',
     'ControlPath=none',
     '-o',
-    'LogLevel=ERROR',
+    `LogLevel=${input.logLevel ?? 'ERROR'}`,
     '-o',
     'ConnectTimeout=10',
     '-o',
@@ -209,6 +214,7 @@ export function sshDialArguments(input: {
   port: number
   knownHosts: string
   userKnownHosts: string
+  logLevel?: 'ERROR' | 'INFO'
 }): string[] {
   const { endpoint } = input
   return [
@@ -235,11 +241,15 @@ export function describeSshFailure(stderr: string, endpoint: string, port: numbe
     detail = `Connection timed out reaching ${endpoint}.`
   else if (/Could not resolve hostname/i.test(text))
     detail = `Could not resolve the host name of ${endpoint}.`
-  // OpenSSH prefixes both channel failures with `open failed`, so only the reason tells them apart.
+  // At LogLevel=ERROR the only line OpenSSH prints for a refused forward is `stdio forwarding failed`:
+  // the reason (`administratively prohibited` or `connect failed`) is logged at INFO and is dropped.
+  // With a log level that shows it, only the reason tells the two apart.
   else if (/administratively prohibited/i.test(text))
     detail = `sshd on ${endpoint} does not allow TCP forwarding (AllowTcpForwarding).`
   else if (/connect failed/i.test(text))
     detail = `The daemon on ${endpoint} is not listening on port ${port}.`
+  else if (/stdio forwarding failed/i.test(text))
+    detail = `ssh to ${endpoint} could not open the forward to the daemon on port ${port}: sshd may forbid TCP forwarding (AllowTcpForwarding), or the daemon is not listening.`
   else {
     const last = text
       .split('\n')

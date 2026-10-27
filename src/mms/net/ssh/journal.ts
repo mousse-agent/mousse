@@ -33,7 +33,12 @@ export interface SshManifest {
   daemonPort: number
   home: string
   node?: NodeId
+  /** The latest invitation. */
   inviteId?: InviteId
+  /** Every invitation this record issued; Undo resolves each of them, never just the latest. */
+  inviteIds?: InviteId[]
+  /** `uname -s` of the machine, for the platform's service commands. */
+  os?: string
   phase: SshSetupPhase
   error?: string
   cli: {
@@ -44,10 +49,22 @@ export interface SshManifest {
     installDir?: string
     /** The previous launcher text, when a Mousse launcher was replaced. */
     launcherBefore?: string | null
+    /** SHA-256 of the launcher text this record wrote; Undo removes it only while it still matches. */
+    launcherSha?: string
+    /** An update's target directory, saved before the launcher switches so Undo can find it. */
+    updateTarget?: string
   }
-  service: { owner: Exclude<SshOwner, 'none'>; unitPath?: string; unitExistedBefore: boolean }
+  service: {
+    owner: Exclude<SshOwner, 'none'>
+    unitPath?: string
+    unitExistedBefore: boolean
+    /** SHA-256 of the unit text right after `service install`. */
+    unitSha?: string
+  }
   lingerBefore?: 'yes' | 'no'
   lingerSkipped?: boolean
+  /** Setup turned lingering on (it was off), so Undo turns it off again. */
+  lingerEnabled?: boolean
   /** The host's previous `ssh` add-on row (`null`: there was none). */
   transportBefore?: { enabled: boolean; settings: unknown } | null
   hostKey: { hostname: string; fingerprint: string }
@@ -137,7 +154,14 @@ export interface ApprovalRow extends SshApproval {
 
 /** `approvals.json` is written only here, by this computer's own owner-facing methods. */
 export class ApprovalStore {
+  /** Writes are read-modify-write; one at a time so two approvals never lose each other. */
+  private queue: Promise<unknown> = Promise.resolve()
   constructor(private readonly profileDir: string) {}
+  private serial<T>(work: () => Promise<T>): Promise<T> {
+    const result = this.queue.then(work, work)
+    this.queue = result.catch(() => {})
+    return result
+  }
   async read(): Promise<Record<string, ApprovalRow>> {
     try {
       const value = JSON.parse(await readFile(sshApprovalsPath(this.profileDir), 'utf8')) as unknown
@@ -148,14 +172,18 @@ export class ApprovalStore {
       return {}
     }
   }
-  async set(node: NodeId, row: ApprovalRow): Promise<void> {
-    const all = await this.read()
-    await writeJsonAtomic(sshApprovalsPath(this.profileDir), { ...all, [node]: row })
+  set(node: NodeId, row: ApprovalRow): Promise<void> {
+    return this.serial(async () => {
+      const all = await this.read()
+      await writeJsonAtomic(sshApprovalsPath(this.profileDir), { ...all, [node]: row })
+    })
   }
-  async remove(node: NodeId): Promise<void> {
-    const all = await this.read()
-    if (!Object.hasOwn(all, node)) return
-    delete all[node]
-    await writeJsonAtomic(sshApprovalsPath(this.profileDir), all)
+  remove(node: NodeId): Promise<void> {
+    return this.serial(async () => {
+      const all = await this.read()
+      if (!Object.hasOwn(all, node)) return
+      delete all[node]
+      await writeJsonAtomic(sshApprovalsPath(this.profileDir), all)
+    })
   }
 }

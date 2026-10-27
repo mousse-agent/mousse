@@ -88,11 +88,13 @@ Every command is `exec /bin/sh -c '<script>'` with each value quoted, so a fish 
 | SSH access | `mousse-cli net transport configure ssh --settings-file <private temporary file>` with the endpoint and a fixed loopback port. |
 | Approval | On this computer only: the approval and fingerprint are written to `approvals.json`, the machine's signed routes are adopted, and the first connection is opened. A machine can never approve itself. |
 
+Login shells that cannot take a newline inside single quotes (csh, tcsh) fail on the multi-line scripts with an error from the shell; use sh, bash, zsh or fish as the login shell for the setup.
+
 A machine that already runs Mousse (installed by you) skips Install and Service and is marked external: Mousse never stops, replaces or uninstalls it. A stopped one is not started for you; the app shows the command.
 
 ### Undo, update, rename
 
-- **Undo setup** reverses the journaled steps in reverse order, each only while it is still Mousse's and unchanged: the SSH approval, the add-on (restored to what was there before), the device (revoked from this computer), the service and the launcher and install directory that setup created. Anything you changed since is reported and left alone. The machine's data directory (`~/.mousse`) and device identity are never deleted; the app lists the commands if you want them gone.
+- **Undo setup** reverses the journaled steps in reverse order, each only while it is still Mousse's and unchanged: the SSH approval, the add-on (restored to what was there before), the device (revoked from this computer), the service and the launcher and install directory that setup created. Setup records a hash of the launcher and of the service unit it wrote; Undo removes them only while they still match, so an edited wrapper or unit is reported and left alone (and the service is left with a changed launcher). Lingering is turned off again only if this setup turned it on. Every invitation the setup issued is resolved from this computer's own records: an unused one is revoked, a used one names the device it admitted and that device is revoked. Anything you changed since is reported and left alone. The machine's data directory (`~/.mousse`) and device identity are never deleted; the app lists the commands if you want them gone.
 - **Update** (only for machines Mousse installed) installs the new version beside the old one, rewrites the launcher, re-runs `service install --headless`, restarts the service and waits for the new version. It never runs `service stop`. If the new version does not answer, the launcher and unit go back to the previous install.
 - **Rename SSH endpoint** changes the address this computer uses. The new address must offer the same host key.
 

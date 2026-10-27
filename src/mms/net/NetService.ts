@@ -2064,6 +2064,8 @@ export class NetService {
     this.disabled = true
     this.shutdownSignal.abort()
     void this.sshBootstrap?.close()
+    // A closed bootstrap refuses everything; enabling again needs a fresh one.
+    this.sshBootstrap = undefined
     this.webrtc?.stop()
     this.transport?.admission.close()
     this.renewal?.cancel()

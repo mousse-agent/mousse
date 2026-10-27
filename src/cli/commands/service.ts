@@ -119,6 +119,10 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
   // Production daemon only (tests pass skipSignals): persist diagnostics and
   // register crash handlers. Handlers are never installed by library modules.
   if (!opts.skipSignals) {
+    // The unit sets this for a headless Electron build, which Chromium has already read at startup.
+    // Dropping it keeps terminals, agents and tools the daemon starts from inheriting it, so any
+    // Electron app they launch keeps its renderer sandbox.
+    delete process.env.ELECTRON_DISABLE_SANDBOX
     installDaemonDiagnostics({ homeDir, shutdown })
     process.on('SIGINT', () => {
       void shutdown('SIGINT')

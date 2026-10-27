@@ -49,6 +49,7 @@ import {
   assetName,
   assetUrl,
   checksumsUrl,
+  catFileScript,
   cliScript,
   configureAddonScript,
   fetchScript,
@@ -58,6 +59,7 @@ import {
   launcherContent,
   launcherOwner,
   launcherPath,
+  lingerDisableScript,
   lingerEnableScript,
   lingerShowScript,
   listInstallsScript,
@@ -152,6 +154,8 @@ export function validDeviceName(name: unknown): name is string {
     typeof name === 'string' &&
     name.length > 0 &&
     name.trim() === name &&
+    // `--name <value>` is parsed by the CLI's own flag parser: a leading dash would read as a flag.
+    !name.startsWith('-') &&
     Array.from(name).length <= 64 &&
     !/[\x00-\x1f\x7f\\]/u.test(name)
   )
@@ -234,6 +238,19 @@ export class SshBootstrap {
       user: context.userKnownHosts,
       global: resolved.globalKnownHosts
     }
+  }
+  /** Writes to `ssh_known_hosts` read, change and replace the file; one at a time. */
+  private writes: Promise<unknown> = Promise.resolve()
+  private serialized<T>(work: () => Promise<T>): Promise<T> {
+    const result = this.writes.then(work, work)
+    this.writes = result.catch(() => {})
+    return result
+  }
+  /** Takes the one-operation guard synchronously, before any await, or says it is taken. */
+  private reserve(): boolean {
+    if (this.closed || this.busy || this.runs.size) return false
+    this.busy = true
+    return true
   }
   private crash(point: string): void {
     try {
@@ -563,7 +580,14 @@ export class SshBootstrap {
       arch,
       home,
       installed,
-      ...(net?.self ? { enrolled: true } : {}),
+      ...(net?.self
+        ? {
+            enrolled: true,
+            ...(typeof (net.self as { node?: unknown }).node === 'string'
+              ? { hostNode: (net.self as { node: string }).node }
+              : {})
+          }
+        : {}),
       ...(lingerText ? { linger: lingerText } : {}),
       prerequisites
     }
@@ -585,7 +609,9 @@ export class SshBootstrap {
         endpoint,
         port: FORWARDING_PROBE_PORT,
         knownHosts: context.knownHosts,
-        userKnownHosts: context.userKnownHosts
+        userKnownHosts: context.userKnownHosts,
+        // The refusal reason is logged at INFO; this run has no session, so nothing else leaks.
+        logLevel: 'INFO'
       }),
       { stdin, timeoutMs: 15_000, signal }
     ).catch(() => undefined)
@@ -643,10 +669,12 @@ export class SshBootstrap {
         state: 'changed',
         detail: 'The host key changed. Confirm the change explicitly to replace the saved key.'
       }
-    await writeTrustedKey(
-      sshKnownHostsPath(this.host.profileDir),
-      entry.offered,
-      judgement.state === 'changed'
+    await this.serialized(() =>
+      writeTrustedKey(
+        sshKnownHostsPath(this.host.profileDir),
+        entry.offered,
+        judgement.state === 'changed'
+      )
     )
     return { ok: true, state: 'trusted' }
   }
@@ -659,7 +687,9 @@ export class SshBootstrap {
     const judgement = await judgeHostKey(entry.offered, this.files(entry.resolved))
     if (judgement.state !== 'trusted')
       throw new NetError('conflict', 'The host key is not trusted.')
-    await writeTrustedKey(sshKnownHostsPath(this.host.profileDir), entry.offered, false)
+    await this.serialized(() =>
+      writeTrustedKey(sshKnownHostsPath(this.host.profileDir), entry.offered, false)
+    )
     return entry
   }
 
@@ -681,7 +711,7 @@ export class SshBootstrap {
           {
             name: 'Device name',
             remedy:
-              'Use 1–64 characters, without control characters, a backslash or surrounding spaces.'
+              'Use 1–64 characters, without control characters, a backslash, a leading dash or surrounding spaces.'
           }
         ]
       }
@@ -733,14 +763,28 @@ export class SshBootstrap {
   // ---------------------------------------------------------------- setup
 
   async begin(input: { host: string; name: string; port?: number }): Promise<SshBeginResult> {
-    if (this.closed || this.busy || this.runs.size)
+    // Reserved before the first await: two requests entering together cannot both start.
+    if (!this.reserve())
       return { error: 'Another remote machine operation is running. Wait for it to finish.' }
+    try {
+      return await this.beginReserved(input)
+    } finally {
+      this.busy = false
+    }
+  }
+
+  private async beginReserved(input: {
+    host: string
+    name: string
+    port?: number
+  }): Promise<SshBeginResult> {
     const check = this.fresh(input.host)
     if (!check || check.phase !== 'probed' || !check.resolved || !check.home || !check.installed)
       return { error: 'Check the machine first.' }
     if (!validDeviceName(input.name))
       return {
-        error: 'The device name must be 1–64 characters without control characters or a backslash.'
+        error:
+          'The device name must be 1–64 characters without control characters, a backslash or a leading dash.'
       }
     const port = input.port ?? defaultDaemonPort(input.host)
     const plan = buildPlan(check, { name: input.name, port, version: this.version() })
@@ -764,6 +808,7 @@ export class SshBootstrap {
       name: input.name,
       daemonPort: port,
       home,
+      ...(check.os ? { os: check.os } : {}),
       phase: 'running',
       cli: managedCli
         ? {
@@ -799,11 +844,15 @@ export class SshBootstrap {
   }
 
   async retry(id: string): Promise<SshSetupStatus> {
-    const m = await this.manifests.read(id)
-    if (!m) throw new NetError('bad_request')
-    if (this.closed || this.busy || this.runs.size || m.phase === 'done' || m.phase === 'running')
-      throw new NetError('conflict')
-    this.launch(m, (ctx) => this.execute(ctx))
+    if (!this.reserve()) throw new NetError('conflict')
+    try {
+      const m = await this.manifests.read(id)
+      if (!m) throw new NetError('bad_request')
+      if (m.phase === 'done' || m.phase === 'running') throw new NetError('conflict')
+      this.launch(m, (ctx) => this.execute(ctx))
+    } finally {
+      this.busy = false
+    }
     return this.status(id)
   }
 
@@ -940,7 +989,9 @@ export class SshBootstrap {
     const listing = await this.cliJson(ctx, 'transports', ['net', 'transports'])
     if (!listing) return undefined
     const saved = listing.saved
-    if (!Array.isArray(saved)) return null
+    // A CLI that does not list its saved add-ons cannot show what setup would overwrite: unknown,
+    // never "none".
+    if (!Array.isArray(saved)) return undefined
     const row = saved.find((item) => (item as { id?: unknown })?.id === 'ssh') as
       { enabled: boolean; settings: unknown } | undefined
     return row ? { enabled: row.enabled, settings: row.settings } : null
@@ -1033,6 +1084,17 @@ export class SshBootstrap {
     )
   }
 
+  /** A small file on the machine, or `undefined` when it cannot be read. */
+  private async readRemoteFile(ctx: RunContext, path: string): Promise<string | undefined> {
+    try {
+      const result = await ctx.remote.run(catFileScript(path), { timeoutMs: 30_000 })
+      return result.code === 0 ? result.stdout : undefined
+    } catch (error) {
+      if (error instanceof NetError && error.code === 'cancelled') throw error
+      return undefined
+    }
+  }
+
   private async waitForService(ctx: RunContext): Promise<void> {
     const deadline = Date.now() + (this.options.serviceWaitMs ?? 30_000)
     let started = false
@@ -1044,7 +1106,9 @@ export class SshBootstrap {
         (status?.startup as { installed?: boolean } | undefined)?.installed === true
       ) {
         started = true
-        await ctx.remote.run(startServiceScript('systemd'), { timeoutMs: 30_000 })
+        await ctx.remote.run(startServiceScript(ctx.m.os === 'Darwin' ? 'launchd' : 'systemd'), {
+          timeoutMs: 30_000
+        })
       }
       if (Date.now() >= deadline)
         throw new Error('The Mousse service did not start within 30 seconds.')
@@ -1096,10 +1160,15 @@ export class SshBootstrap {
             directory = m.cli.installDir!
           await this.installAsset(ctx, version, directory, String(scratch))
           ctx.state.progress = 'Writing the launcher'
+          const text = launcherContent(m.id, directory)
           await this.must(ctx, writeLauncherScript(launcher(m)), 'Writing the launcher', {
-            stdin: launcherContent(m.id, directory)
+            stdin: text
           })
-          return { after: { launcher: launcher(m), installDir: directory } }
+          // Undo removes the launcher only while it still hashes to what was written here.
+          m.cli.launcherSha = sha256(text)
+          return {
+            after: { launcher: launcher(m), installDir: directory, launcherSha: m.cli.launcherSha }
+          }
         }
       },
       {
@@ -1122,7 +1191,13 @@ export class SshBootstrap {
             'Installing the service'
           )
           await this.waitForService(ctx)
-          return { after: { unitPath: ctx.m.service.unitPath } }
+          // What `service install` wrote; Undo uninstalls the service only while the unit still matches.
+          const unit = await this.readRemoteFile(
+            ctx,
+            ctx.m.service.unitPath ?? unitPath(ctx.m.home)
+          )
+          if (unit !== undefined) ctx.m.service.unitSha = sha256(unit)
+          return { after: { unitPath: ctx.m.service.unitPath, unitSha: ctx.m.service.unitSha } }
         }
       },
       {
@@ -1141,7 +1216,10 @@ export class SshBootstrap {
             timeoutMs: 60_000
           })
           if (ctx.signal.aborted) throw new NetError('cancelled')
-          if (result.code === 0) return { after: { linger: 'yes' } }
+          if (result.code === 0) {
+            ctx.m.lingerEnabled = true
+            return { after: { linger: 'yes' } }
+          }
           // Over SSH there is no seat session, so polkit may ask for an administrator. Not fatal.
           ctx.m.lingerSkipped = true
           await ctx.save()
@@ -1154,20 +1232,23 @@ export class SshBootstrap {
         resource: (m) => `invite:${m.name}`,
         reconcile: async (ctx) => {
           const { m } = ctx
-          if (!m.inviteId) return false
-          const outcome = this.host.inviteOutcome(m.inviteId)
-          if (outcome.state === 'consumed') {
-            await this.recoverNode(ctx, outcome)
-            return true
+          // Every invitation this record issued, not just the latest: an older one can be the one used.
+          for (const invite of issuedInvites(m)) {
+            const outcome = this.host.inviteOutcome(invite)
+            if (outcome.state === 'consumed') {
+              await this.recoverNode(ctx, outcome)
+              return true
+            }
+            // Not redeemed: the join did not happen. The next run issues a fresh invitation.
+            if (outcome.state === 'active') this.host.revokeInvite(invite)
           }
-          // Not redeemed: the join did not happen. The next run issues a fresh invitation.
-          if (outcome.state === 'active') this.host.revokeInvite(m.inviteId)
           return false
         },
         run: async (ctx, _scratch, record) => {
           const { m } = ctx
           const issued = await this.host.inviteNode(m.name)
           // The invitation id is on disk before its text leaves this computer.
+          m.inviteIds = [...issuedInvites(m), issued.inviteId]
           m.inviteId = issued.inviteId
           record.before = { inviteId: issued.inviteId }
           await ctx.save()
@@ -1201,21 +1282,33 @@ export class SshBootstrap {
               continue
             break
           }
-          const joined = result.code === 0 ? lastJson(result.stdout) : undefined
-          if (joined && isId('node', joined.node)) {
-            m.node = joined.node as NodeId
-            return { after: { node: m.node }, result: 'Joined.' }
-          }
-          // A lost reply is recognised by the invitation row, never by the display name.
+          // The machine's command has returned, and nothing about the admission is recorded yet.
+          this.crash('join.afterRemote')
+          // The node id comes from this computer's own invitation row, written atomically with the
+          // admission, never from what the machine prints (it could name any device). Its output is
+          // only a cross-check, and a mismatch stops the setup. A lost reply is handled the same way.
+          const reported = result.code === 0 ? lastJson(result.stdout)?.node : undefined
           const outcome = this.host.inviteOutcome(issued.inviteId)
           if (outcome.state === 'consumed') {
+            if (reported !== undefined && reported !== outcome.node)
+              throw new Interrupted(
+                'The machine reported a different device than the one this invitation admitted. Nothing was approved or revoked automatically; check Devices.'
+              )
             await this.recoverNode(ctx, outcome)
             return {
               after: { node: m.node },
-              result: 'Joined; the reply was lost and the node was recovered.'
+              result:
+                result.code === 0
+                  ? 'Joined.'
+                  : 'Joined; the reply was lost and the node was recovered.'
             }
           }
+          // An unused invitation is revoked either way, so nothing can redeem it later.
           if (outcome.state === 'active') this.host.revokeInvite(issued.inviteId)
+          if (reported !== undefined)
+            throw new Interrupted(
+              'The machine says it joined, but this computer did not see the invitation used. Nothing was approved; check Devices.'
+            )
           if (result.missing) throw new Error(MISSING_SSH)
           if (/sshd refused|remote port forwarding failed/iu.test(result.stderr))
             throw new Error(
@@ -1230,7 +1323,13 @@ export class SshBootstrap {
         resource: () => 'transport:ssh',
         prepare: async (ctx) => {
           const row = await this.sshRow(ctx)
-          ctx.m.transportBefore = row === undefined ? null : row
+          // A failed or unreadable listing is not "no add-on": writing over an unknown state could
+          // not be undone, so nothing is changed.
+          if (row === undefined)
+            throw new Error(
+              'Could not read the SSH settings the machine already has, so nothing was changed. Try again.'
+            )
+          ctx.m.transportBefore = row
           return { before: { transportBefore: ctx.m.transportBefore } }
         },
         reconcile: async (ctx) => {
@@ -1306,19 +1405,113 @@ export class SshBootstrap {
   /**
    * Reverses the journaled steps in reverse order, each only while its resource is still Mousse's
    * and unchanged since setup, including `pending` steps whose host state shows the change was made.
-   * Anything the user changed is reported and left alone. The machine's data directory and device
-   * identity are never deleted; the result lists the commands to remove them.
+   * The launcher and the service unit are compared with what setup wrote (hashes recorded when it
+   * wrote them); anything the user changed is reported and left alone. Every invitation the record
+   * issued is resolved from this computer's own rows, so a device admitted by a join whose reply or
+   * record was lost is still revoked. The machine's data directory and device identity are never
+   * deleted; the result lists the commands to remove them.
    */
   async undo(id: string): Promise<SshUndoResult> {
-    const m = await this.manifests.read(id)
-    if (!m) throw new NetError('bad_request')
-    if (this.closed || this.busy || this.runs.size) throw new NetError('conflict')
-    this.busy = true
+    if (!this.reserve()) throw new NetError('conflict')
     try {
+      const m = await this.manifests.read(id)
+      if (!m) throw new NetError('bad_request')
       return await this.undoLocked(m)
     } finally {
       this.busy = false
     }
+  }
+
+  /** The directory is this record's own install, under the install root and nowhere else. */
+  private ownedInstall(m: SshManifest, directory: string | undefined): string | undefined {
+    if (!directory || directory.includes('..')) return undefined
+    const pattern = new RegExp(
+      `^${m.home.replace(/[.+*?^${}()|[\]\\]/g, '\\$&')}/${INSTALL_RELATIVE.replace(/\./g, '\\.')}/[0-9A-Za-z.+-]+$`,
+      'u'
+    )
+    return pattern.test(directory) ? directory : undefined
+  }
+
+  /** Is the launcher still what this record wrote? `unknown` when the machine did not answer. */
+  private async launcherState(ctx: RunContext): Promise<'ours' | 'changed' | 'absent' | 'unknown'> {
+    const { m } = ctx
+    const text = await this.readRemoteFile(ctx, launcherPath(m.home))
+    if (text === undefined) return 'unknown'
+    if (text.trim() === '') return 'absent'
+    const accepted = new Set<string>()
+    if (m.cli.launcherSha) accepted.add(m.cli.launcherSha)
+    for (const directory of [m.cli.installDir, m.cli.updateTarget])
+      if (directory) accepted.add(sha256(launcherContent(m.id, directory)))
+    return accepted.has(sha256(text)) ? 'ours' : 'changed'
+  }
+
+  private async unitState(ctx: RunContext): Promise<'ours' | 'changed' | 'absent' | 'unknown'> {
+    const { m } = ctx
+    const text = await this.readRemoteFile(ctx, m.service.unitPath ?? unitPath(m.home))
+    if (text === undefined) return 'unknown'
+    if (text.trim() === '') return 'absent'
+    if (m.service.unitSha) return sha256(text) === m.service.unitSha ? 'ours' : 'changed'
+    // A crash before the hash was recorded: the unit must at least run this record's binary.
+    const ours = [m.cli.installDir, m.cli.updateTarget].some(
+      (directory) =>
+        !!directory && text.includes(`ExecStart=${directory}/squashfs-root/mousse-cli service run`)
+    )
+    return ours ? 'ours' : 'changed'
+  }
+
+  /**
+   * Resolves every invitation this record issued. An unused one is revoked (and read again, since
+   * the join may finish in between); a used one names the exact device it admitted, which is revoked
+   * unless the machine reports a different identity.
+   */
+  private async undoJoin(
+    ctx: RunContext,
+    step: string,
+    report: SshUndoResult['report'],
+    commands: string[]
+  ): Promise<void> {
+    const { m } = ctx
+    const admitted = new Set<NodeId>(m.node ? [m.node] : [])
+    let unresolved = false,
+      revokedInvite = false
+    for (const invite of issuedInvites(m)) {
+      let outcome = this.host.inviteOutcome(invite)
+      if (outcome.state === 'active') {
+        this.host.revokeInvite(invite)
+        revokedInvite = true
+        outcome = this.host.inviteOutcome(invite)
+      }
+      if (outcome.state === 'consumed') admitted.add(outcome.node)
+      else if (outcome.state === 'missing') unresolved = true
+    }
+    if (admitted.size) {
+      const status = await this.cliJson(ctx, 'net-status', ['net', 'status'])
+      const self = (status?.self as { node?: string } | undefined)?.node
+      for (const node of admitted) {
+        if (self && self !== node && node !== m.node) {
+          report.push({
+            step,
+            result: 'left',
+            detail: `The invitation admitted device ${node}, but the machine reports ${self}. Nothing was revoked automatically.`
+          })
+          commands.push(
+            `mousse-cli bridge revoke ${node}   # on this computer, if ${node} is the machine`
+          )
+          continue
+        }
+        await this.host.revokeNode(node)
+        report.push({ step, result: 'undone', detail: `The device ${node} was revoked.` })
+      }
+    } else if (unresolved) {
+      report.push({
+        step,
+        result: 'left',
+        detail:
+          'An invitation this setup issued can no longer be looked up, so a device it admitted cannot be ruled out. Check Devices.'
+      })
+    } else if (revokedInvite) {
+      report.push({ step, result: 'undone', detail: 'The unused invitation was revoked.' })
+    } else report.push({ step, result: 'skipped', detail: 'The invitation was never used.' })
   }
 
   private async undoLocked(m: SshManifest): Promise<SshUndoResult> {
@@ -1340,6 +1533,10 @@ export class SshBootstrap {
     const skipped = (step: string, detail: string) =>
       report.push({ step, result: 'skipped', detail })
     const cli = m.cli.path
+    const path = launcherPath(m.home)
+    // Compared once, before anything is removed: the service goes only if the launcher is unchanged too.
+    let launcher: Awaited<ReturnType<SshBootstrap['launcherState']>> | undefined
+    const launcherNow = async () => (launcher ??= await this.launcherState(ctx))
     for (const record of [...m.steps].reverse()) {
       const step = STEP_TITLES[record.step] ?? record.step
       try {
@@ -1379,28 +1576,46 @@ export class SshBootstrap {
             )
             break
           }
-          case 'join': {
-            if (m.node) {
-              await this.host.revokeNode(m.node)
-              done(step, 'The device was revoked.')
-            } else if (m.inviteId && this.host.inviteOutcome(m.inviteId).state === 'active') {
-              this.host.revokeInvite(m.inviteId)
-              done(step, 'The unused invitation was revoked.')
-            } else skipped(step, 'No device was added.')
+          case 'join':
+            await this.undoJoin(ctx, step, report, commands)
+            break
+          case 'linger': {
+            // Only a journaled off-to-on change made by this setup is turned off again.
+            if (!m.lingerEnabled || m.lingerBefore !== 'no') {
+              skipped(step, 'Lingering was not changed by this setup.')
+              break
+            }
+            const shown = await ctx.remote.run(lingerShowScript(m.resolved.user), {
+              timeoutMs: 30_000
+            })
+            if (!/Linger=yes/u.test(shown.stdout)) {
+              skipped(step, 'Lingering is already off.')
+              break
+            }
+            await this.must(ctx, lingerDisableScript(m.resolved.user), 'Turning lingering off')
+            done(step, 'Lingering was turned off again.')
             break
           }
-          case 'linger':
-            skipped(step, 'Lingering is left as it is.')
-            break
           case 'service': {
             if (m.service.owner !== 'managed') {
               skipped(step, 'Mousse did not install this service, so it is left alone.')
               break
             }
-            const status = await this.cliJson(ctx, 'service-status', ['service', 'status'])
-            if (!status) throw new Error('The machine did not answer.')
-            if ((status.startup as { installed?: boolean } | undefined)?.installed !== true) {
+            const unit = await this.unitState(ctx)
+            if (unit === 'unknown') throw new Error('The machine did not answer.')
+            if (unit === 'absent') {
               skipped(step, 'The service is no longer installed.')
+              break
+            }
+            const wrapper = await launcherNow()
+            if (unit === 'changed' || wrapper === 'changed' || wrapper === 'unknown') {
+              left(
+                step,
+                unit === 'changed'
+                  ? 'The service unit was changed since setup, so it is left alone.'
+                  : 'The launcher was changed since setup, so the service is left alone.',
+                'mousse-cli service uninstall'
+              )
               break
             }
             await this.must(
@@ -1416,38 +1631,45 @@ export class SshBootstrap {
               skipped(step, 'Mousse did not install this program, so it is left alone.')
               break
             }
-            const directory = m.cli.installDir
-            const expected = new RegExp(
-              `^${m.home.replace(/[.+*?^${}()|[\]\\]/g, '\\$&')}/${INSTALL_RELATIVE.replace(/\./g, '\\.')}/[0-9A-Za-z.+-]+$`,
-              'u'
+            const directories = [m.cli.installDir, m.cli.updateTarget].filter(
+              (directory): directory is string => !!directory
             )
-            const path = launcherPath(m.home)
-            if (!expected.test(directory) || directory.includes('..')) {
+            if (directories.some((directory) => !this.ownedInstall(m, directory))) {
               left(
                 step,
                 'The install directory in the record looks wrong, so it is left alone.',
-                `rm -rf ${directory}`
+                `rm -rf ${directories.join(' ')}`
               )
               break
             }
-            const removed = await ctx.remote.run(removeLauncherScript(path, m.id), {
-              timeoutMs: 30_000
-            })
-            if (removed.code === 3) {
+            const manual = `rm -f ${path} && rm -rf ${directories.join(' ')}`
+            const wrapper = await launcherNow()
+            if (wrapper === 'unknown') throw new Error('The machine did not answer.')
+            if (wrapper === 'changed') {
               left(
                 step,
                 'The launcher was changed since setup, so it and the install directory are left alone.',
-                `rm -f ${path} && rm -rf ${directory}`
+                manual
               )
               break
             }
-            if (removed.code !== 0)
-              throw new Error(tail(removed.stderr) || 'The machine did not answer.')
-            if (m.cli.launcherBefore)
-              await this.must(ctx, writeLauncherScript(path), 'Restoring the previous launcher', {
-                stdin: m.cli.launcherBefore
+            if (wrapper === 'ours') {
+              const removed = await ctx.remote.run(removeLauncherScript(path, m.id), {
+                timeoutMs: 30_000
               })
-            await this.must(ctx, removeInstallScript(directory), 'Removing the install directory')
+              if (removed.code === 3) {
+                left(step, 'The launcher was changed since setup, so it is left alone.', manual)
+                break
+              }
+              if (removed.code !== 0)
+                throw new Error(tail(removed.stderr) || 'The machine did not answer.')
+              if (m.cli.launcherBefore)
+                await this.must(ctx, writeLauncherScript(path), 'Restoring the previous launcher', {
+                  stdin: m.cli.launcherBefore
+                })
+            }
+            for (const directory of directories)
+              await this.must(ctx, removeInstallScript(directory), 'Removing the install directory')
             done(step, 'The launcher and the install directory were removed.')
             break
           }
@@ -1465,7 +1687,7 @@ export class SshBootstrap {
             'mousse-cli net transport configure ssh --disable --settings-file <file>'
           )
         else if (record.step === 'install' && m.cli.installDir)
-          left(step, detail, `rm -f ${launcherPath(m.home)} && rm -rf ${m.cli.installDir}`)
+          left(step, detail, `rm -f ${path} && rm -rf ${m.cli.installDir}`)
         else left(step, detail)
       }
     }
@@ -1491,7 +1713,9 @@ export class SshBootstrap {
       )
     )
       return
-    await removeTrustedName(sshKnownHostsPath(this.host.profileDir), m.hostKey.hostname)
+    await this.serialized(() =>
+      removeTrustedName(sshKnownHostsPath(this.host.profileDir), m.hostKey.hostname)
+    )
   }
 
   // ---------------------------------------------------------------- update
@@ -1500,10 +1724,20 @@ export class SshBootstrap {
    * Updates a machine Mousse installed, in this order and with no `service stop`: install the new
    * version beside the old one, rewrite the launcher, re-run `service install --headless` so the
    * unit follows it, restart, then wait for the new version to answer. On failure the launcher and
-   * the unit go back to the previous install, which is kept until the new one is verified. A machine
-   * Mousse did not install gets the command to run instead.
+   * the unit go back to the previous install, which is kept until the new one is verified. The
+   * target directory is journaled before the launcher switches, so a crash cannot strand it. A
+   * machine Mousse did not install gets the command to run instead.
    */
   async update(id: string): Promise<SshUpdateResult> {
+    if (!this.reserve()) throw new NetError('conflict')
+    try {
+      return await this.updateReserved(id)
+    } finally {
+      this.busy = false
+    }
+  }
+
+  private async updateReserved(id: string): Promise<SshUpdateResult> {
     const m = await this.manifests.read(id)
     if (!m) throw new NetError('bad_request')
     const version = this.version()
@@ -1521,8 +1755,6 @@ export class SshBootstrap {
         detail: 'A development build cannot install a release on another machine.'
       }
     if (m.cli.version === version) return { ok: true, version, detail: 'Already up to date.' }
-    if (this.closed || this.busy || this.runs.size) throw new NetError('conflict')
-    this.busy = true
     const controller = new AbortController()
     const ctx: RunContext = {
       m,
@@ -1535,14 +1767,16 @@ export class SshBootstrap {
     const next = installDirectory(m.home, version)
     const path = launcherPath(m.home)
     const switchTo = async (directory: string) => {
-      await this.must(ctx, writeLauncherScript(path), 'Writing the launcher', {
-        stdin: launcherContent(m.id, directory)
-      })
+      const text = launcherContent(m.id, directory)
+      await this.must(ctx, writeLauncherScript(path), 'Writing the launcher', { stdin: text })
+      m.cli.launcherSha = sha256(text)
       await this.must(
         ctx,
         cliScript('service-install', path, ['service', 'install', '--headless']),
         'Updating the service'
       )
+      const unit = await this.readRemoteFile(ctx, m.service.unitPath ?? unitPath(m.home))
+      if (unit !== undefined) m.service.unitSha = sha256(unit)
       await this.must(ctx, restartServiceScript(), 'Restarting the service')
     }
     const waitFor = async (expected: string) => {
@@ -1557,6 +1791,9 @@ export class SshBootstrap {
     }
     try {
       const checksum = await this.checksumLine(version, ctx.signal)
+      // Journaled before anything is written there, so Undo finds the directory after a crash.
+      m.cli.updateTarget = next
+      await ctx.save()
       await this.installAsset(ctx, version, next, checksum)
       try {
         await switchTo(next)
@@ -1564,10 +1801,18 @@ export class SshBootstrap {
       } catch (error) {
         // Back to the previous install, which is still on disk.
         await switchTo(previous.dir).catch(() => undefined)
+        const removed = await ctx.remote
+          .run(removeInstallScript(next), { timeoutMs: 60_000 })
+          .catch(() => undefined)
+        if (removed?.code === 0) {
+          delete m.cli.updateTarget
+          await ctx.save()
+        }
         throw error
       }
       m.cli.installDir = next
       m.cli.version = version
+      delete m.cli.updateTarget
       await ctx.save()
       // Keep the new and the previous install; remove older ones.
       const listing = await ctx.remote.run(listInstallsScript(`${m.home}/${INSTALL_RELATIVE}`), {
@@ -1586,8 +1831,6 @@ export class SshBootstrap {
         version,
         detail: `The update failed and the previous version was restored: ${messageOf(error)}`
       }
-    } finally {
-      this.busy = false
     }
   }
 
@@ -1595,6 +1838,18 @@ export class SshBootstrap {
 
   /** The alias or host changed: update the record, the approval and the machine's own add-on settings. */
   async rename(id: string, endpoint: string): Promise<{ ok: boolean; detail?: string }> {
+    if (!this.reserve()) throw new NetError('conflict')
+    try {
+      return await this.renameReserved(id, endpoint)
+    } finally {
+      this.busy = false
+    }
+  }
+
+  private async renameReserved(
+    id: string,
+    endpoint: string
+  ): Promise<{ ok: boolean; detail?: string }> {
     const m = await this.manifests.read(id)
     if (!m || !m.node) throw new NetError('bad_request')
     if (!parseSshEndpoint(endpoint))
@@ -1612,8 +1867,6 @@ export class SshBootstrap {
     if (judgement.state !== 'trusted')
       return { ok: false, detail: 'Confirm the host key of the new endpoint first.' }
     await this.ensureLine(endpoint)
-    if (this.closed || this.busy || this.runs.size) throw new NetError('conflict')
-    this.busy = true
     try {
       const controller = new AbortController()
       const ctx: RunContext = {
@@ -1638,14 +1891,13 @@ export class SshBootstrap {
       return { ok: true }
     } catch (error) {
       return { ok: false, detail: messageOf(error) }
-    } finally {
-      this.busy = false
     }
   }
 
   /**
    * A device that advertises an ssh route this computer did not set up: the same two phases, and
-   * the approval is written only after the host key is trusted and a login works.
+   * the approval is written only after the host key is trusted, a login works and the machine
+   * reports the device it is being approved for.
    */
   async approve(node: NodeId, endpoint: string): Promise<SshCheckResult & { approved: boolean }> {
     if (!this.host.knownNode(node)) throw new NetError('bad_request')
@@ -1658,6 +1910,13 @@ export class SshBootstrap {
       (forwarding && !forwarding.ok && !forwarding.indeterminate)
     )
       return { ...check, approved: false }
+    // A running Mousse on the machine names its device; a different one is not the device asked for.
+    if (check.hostNode && check.hostNode !== node)
+      return {
+        ...check,
+        approved: false,
+        detail: `${endpoint} reached a machine that reports a different device than the one you are approving. Nothing was saved.`
+      }
     const entry = await this.ensureLine(endpoint)
     await this.approvals.set(node, {
       endpoint,
@@ -1667,6 +1926,14 @@ export class SshBootstrap {
     })
     return { ...check, approved: true }
   }
+}
+
+function sha256(text: string): string {
+  return createHash('sha256').update(text).digest('hex')
+}
+/** The latest invitation plus every earlier one the journal kept. */
+function issuedInvites(m: SshManifest): InviteId[] {
+  return [...new Set([...(m.inviteIds ?? []), ...(m.inviteId ? [m.inviteId] : [])])]
 }
 
 function sameSettings(left: unknown, right: { endpoint: string; port: number }): boolean {
