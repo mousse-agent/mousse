@@ -7,7 +7,7 @@ import { Modal } from '../ui/Modal'
 import { SettingsRow } from '../settings/SettingsRow'
 import { MoveBannerView } from './MoveBanner'
 import { CommandBox, useAsyncAction } from './parts'
-import { DRIVER_INFO } from './providerView'
+import { DRIVER_INFO, isManagedSetup } from './providerView'
 import { SignInDialog } from './SignInDialog'
 
 /**
@@ -38,10 +38,9 @@ export function isMoveReady(target: InstanceSnapshot): boolean {
   return target.install.state === 'installed' && target.auth.state === 'signed_in'
 }
 
-/** How a target is named in the dialog: how it runs. */
+/** How a target runs, under its name in the dialog. */
 function targetDescription(target: InstanceSnapshot): string {
-  if (target.driver !== 'codex') return ''
-  return target.config?.setup === 'managed' ? 'Managed by Mousse, signs in with ChatGPT' : 'Your installed Codex CLI'
+  return isManagedSetup(target) ? 'Managed by Mousse, signs in with ChatGPT' : 'Your installed CLI, with its own sign-in'
 }
 
 /**

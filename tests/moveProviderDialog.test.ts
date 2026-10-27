@@ -82,7 +82,7 @@ describe('the Move dialog for such an entry', () => {
   it('shows the terminal command for the user’s own Codex, with Check again', () => {
     const target = existing({ auth: { state: 'signed_out', account: undefined }, nextStep: { action: 'sign_in', label: 'Sign in', command: 'codex login' } })
     const html = dialog(chatgpt(), [target])
-    expect(html).toContain('Your installed Codex CLI')
+    expect(html).toContain('Your installed CLI, with its own sign-in')
     expect(html).toContain('codex login')
     expect(buttons(html).map((entry) => entry.label)).toContain('Check again')
     expect(disabled(html, 'Move')).toBe(true)
