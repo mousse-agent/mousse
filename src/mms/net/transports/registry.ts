@@ -1,9 +1,11 @@
 import Ajv from 'ajv'
 import { isDeepStrictEqual } from 'node:util'
 import type {
+  AddonRecordStore,
   Clock,
   Transport,
   TransportAddon,
+  TransportAddonAction,
   TransportManifest,
   TransportStatus
 } from '../contracts'
@@ -22,8 +24,17 @@ export class TransportRegistry {
   >()
   private readonly active = new Map<string, Transport>()
   private readonly configurations = new Map<string, TransportConfiguration>()
+  /** Last status of a transport that failed to start, so its reason stays visible. */
+  private readonly failures = new Map<string, TransportStatus>()
   private pending: Promise<unknown> = Promise.resolve()
-  constructor(private readonly context: { clock: Clock; profileDir: string }) {}
+  constructor(
+    private readonly context: {
+      clock: Clock
+      profileDir: string
+      /** What add-on actions changed outside Mousse. */
+      records?: AddonRecordStore
+    }
+  ) {}
   register(addon: TransportAddon): void {
     const { manifest } = addon
     if (
@@ -43,7 +54,21 @@ export class TransportRegistry {
     this.entries.set(manifest.id, { addon, validate })
   }
   manifests(): TransportManifest[] {
-    return [...this.entries.values()].map(({ addon }) => structuredClone(addon.manifest))
+    return [...this.entries.values()].map(({ addon }) => ({
+      ...structuredClone(addon.manifest),
+      ...(addon.actions
+        ? {
+            actions: Object.entries(addon.actions).map(([id, action]) => ({
+              id,
+              title: action.title
+            }))
+          }
+        : {})
+    }))
+  }
+  action(id: string, name: string): TransportAddonAction | undefined {
+    const actions = this.entries.get(id)?.addon.actions
+    return actions && Object.hasOwn(actions, name) ? actions[name] : undefined
   }
   validate(configuration: TransportConfiguration): TransportConfiguration {
     const entry = this.entries.get(configuration.id)
@@ -72,10 +97,17 @@ export class TransportRegistry {
         await prior.teardown()
       }
       this.configurations.set(checked.id, checked)
+      this.failures.delete(checked.id)
       if (!checked.enabled) return undefined
       const transport = this.entries
         .get(checked.id)!
-        .addon.create(structuredClone(checked.settings), this.context)
+        .addon.create(structuredClone(checked.settings), {
+          clock: this.context.clock,
+          profileDir: this.context.profileDir,
+          record: () => this.context.records?.get(checked.id),
+          remember: (record) => this.context.records?.remember(checked.id, record),
+          forget: () => this.context.records?.forget(checked.id)
+        })
       if (transport.id !== checked.id)
         throw new NetError('internal', 'Transport factory returned the wrong identifier.')
       try {
@@ -83,6 +115,7 @@ export class TransportRegistry {
         this.active.set(checked.id, transport)
         return transport
       } catch (error) {
+        this.failures.set(checked.id, transport.status())
         await transport.teardown().catch(() => {})
         throw error
       }
@@ -94,16 +127,23 @@ export class TransportRegistry {
   transports(): Transport[] {
     return [...this.active.values()]
   }
+  holdsLoopback(id: string, port: number): boolean {
+    return this.active.get(id)?.holdsLoopback?.(port) === true
+  }
+  async refresh(id: string): Promise<void> {
+    await this.active.get(id)?.refresh?.()
+  }
   configuration(): TransportConfiguration[] {
     return [...this.configurations.values()].map((value) => structuredClone(value))
   }
   statuses(): Array<{ id: string; status: TransportStatus }> {
     return [...this.configurations.values()].map((config) => ({
       id: config.id,
-      status: this.active.get(config.id)?.status() ?? {
-        state: config.enabled ? 'failed' : 'disabled',
-        routes: []
-      }
+      status: this.active.get(config.id)?.status() ??
+        (config.enabled ? this.failures.get(config.id) : undefined) ?? {
+          state: config.enabled ? 'failed' : 'disabled',
+          routes: []
+        }
     }))
   }
   async teardown(): Promise<void> {

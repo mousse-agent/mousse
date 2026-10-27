@@ -29,6 +29,9 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
   'net.plus.enrollment.offer': ['name'],
   'net.transport.list': [],
   'net.transport.configure': ['id', 'enabled', 'settings'],
+  'net.transport.action.describe': ['id', 'action', 'settings'],
+  'net.transport.action.apply': ['id', 'action', 'settings'],
+  'net.transport.action.undo': ['id', 'action', 'settings'],
   'net.init': ['name', 'listen', 'host', 'port', 'passphrase'],
   'net.disable': [],
   'net.status': [],
@@ -187,6 +190,21 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
           Buffer.byteLength(JSON.stringify(params.settings)) > 16 * 1024))
   )
     throw new DomainRpcError('invalid_params', 'A bounded transport configuration is required')
+  if (
+    method.startsWith('net.transport.action.') &&
+    (typeof params.id !== 'string' ||
+      !/^[a-z][a-z0-9.-]{0,63}$/.test(params.id) ||
+      typeof params.action !== 'string' ||
+      !/^[a-z][a-z0-9-]{0,31}$/.test(params.action) ||
+      // Undo may leave the settings out and use the stored ones.
+      (params.settings === undefined
+        ? method !== 'net.transport.action.undo'
+        : !params.settings ||
+          typeof params.settings !== 'object' ||
+          Array.isArray(params.settings) ||
+          Buffer.byteLength(JSON.stringify(params.settings)) > 16 * 1024))
+  )
+    throw new DomainRpcError('invalid_params', 'A bounded add-on action request is required')
   return params
 }
 

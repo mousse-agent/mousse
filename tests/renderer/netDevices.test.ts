@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
+  bindSettings,
   deviceLine,
   isIncompatible,
   lastSeenLabel,
   routeDetails,
   routeLabel,
+  serveSettings,
   updateInstructions,
   type Device
 } from '../../src/renderer/lib/netDevices'
@@ -20,6 +22,24 @@ const device = (patch: Partial<Device> = {}): Device => ({
   revoked: false,
   state: 'open',
   ...patch
+})
+
+describe('Tailscale settings for Serve', () => {
+  const saved = { binary: 'C:\\Program Files\\Tailscale\\tailscale.exe', port: 47000 }
+  it('keeps the saved binary when Serve is turned on and when it is turned off', () => {
+    expect(serveSettings(saved, 47890, 47890)).toEqual({
+      binary: saved.binary,
+      mode: 'serve',
+      port: 47890,
+      servePort: 47890
+    })
+    expect(bindSettings({ ...saved, mode: 'serve', servePort: 47890 })).toEqual(saved)
+  })
+  it('starts from nothing when no settings are saved', () => {
+    expect(serveSettings(undefined, 1, 2)).toEqual({ mode: 'serve', port: 1, servePort: 2 })
+    expect(bindSettings(undefined)).toEqual({})
+    expect(bindSettings([1])).toEqual({})
+  })
 })
 
 describe('lastSeenLabel', () => {
