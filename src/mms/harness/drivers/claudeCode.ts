@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from 'node:fs'
+import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type { InstallOwner } from '../../../shared/harness/status'
 import type { HarnessCaps } from '../../../shared/harness/types'
@@ -29,7 +29,7 @@ import {
 } from '../claude/apiKey'
 import { cliNames, findOnPath, lockedEnv, ownedLaunchEnv, ownedUserEnv } from '../env'
 import { CLAUDE_LOCKED_PROFILE, CLAUDE_MANAGED_POLICY_REFUSAL, CLAUDE_NATIVE_TOOLS, claudeLockedCaps, claudeLockedHoldsBots, claudeSandboxFact } from '../claude/locked'
-import { readClaudeManagedPolicy, type ManagedPolicyReadInput } from '../claude/managedPolicy'
+import { readClaudeManagedPolicy, remoteSettingsHoldPolicy, type ManagedPolicyReadInput } from '../claude/managedPolicy'
 import { CONTAINMENT_EVIDENCE, hasContainmentEvidence, type ContainmentEvidence } from '../compatibility'
 import { CLAUDE_INSTANCE_ID } from '../../../shared/providerInstances'
 import { decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig } from '../driver'
@@ -58,6 +58,12 @@ export { CLAUDE_NATIVE_TOOLS } from '../claude/locked'
 /** A locked entry (PR 6 §3): it runs bots only, in a home of its own, under the locked profile. */
 /** How long a "no policy" reading of a locked entry is trusted before it counts as unknown again. */
 export const CLAUDE_POLICY_TRUST_MS = 30_000
+
+/**
+ * A reading this recent is the one a check point uses instead of reading again: one bot turn reads
+ * the policy once (at dispatch), and its admission and start, moments later, use that reading.
+ */
+export const CLAUDE_POLICY_REREAD_MS = 2_000
 
 export function claudeLocked(config: Pick<InstanceConfig, 'profile' | 'home'>): boolean {
   return config.profile === CLAUDE_LOCKED_PROFILE && config.home === 'private'
@@ -201,19 +207,36 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     const reading = instanceId === undefined ? undefined : readings.get(instanceId)
     return !reading || reading.managed || Date.now() - reading.at > CLAUDE_POLICY_TRUST_MS
   }
-  /** Reads the entry's policy now, in a fresh process (`readClaudeManagedPolicy`). */
+  /** Readings in progress, by entry: a check point that comes while one runs waits for it. */
+  const pending = new Map<string, Promise<boolean>>()
+  /**
+   * The entry's policy, read now in a fresh process (`readClaudeManagedPolicy`), unless a reading
+   * finished within `CLAUDE_POLICY_REREAD_MS` or is running: then that one.
+   */
   const readManaged = async (instanceId: string): Promise<boolean> => {
     if (options.managedPolicy) return options.managedPolicy()
     const entry = lockedEntries.get(instanceId)
     if (!entry) return true
-    let managed: boolean
+    const recent = readings.get(instanceId)
+    if (recent && Date.now() - recent.at <= CLAUDE_POLICY_REREAD_MS) return recent.managed
+    const running = pending.get(instanceId)
+    if (running) return running
+    const reading = (async () => {
+      let managed: boolean
+      try {
+        managed = await (options.readPolicy ?? readClaudeManagedPolicy)({ cwd: entry.cwd(), platform, ...(entry.home ? { home: entry.home } : {}) })
+      } catch {
+        managed = true
+      }
+      readings.set(instanceId, { managed, at: Date.now() })
+      return managed
+    })()
+    pending.set(instanceId, reading)
     try {
-      managed = await (options.readPolicy ?? readClaudeManagedPolicy)({ cwd: entry.cwd(), platform, ...(entry.home ? { home: entry.home } : {}) })
-    } catch {
-      managed = true
+      return await reading
+    } finally {
+      pending.delete(instanceId)
     }
-    readings.set(instanceId, { managed, at: Date.now() })
-    return managed
   }
   return {
     kind: 'claude',
@@ -492,7 +515,8 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
             },
             // A server-managed policy Claude Code fetched at its own start (the first turn of a new
             // home) lands in the home's cache: from then on every call of the turn is denied.
-            policyAppeared: () => Boolean(context.env.home) && existsSync(join(context.env.home!, 'remote-settings.json')),
+            // Claude Code's own empty sentinel (no server-managed settings) is no policy.
+            policyAppeared: () => Boolean(context.env.home) && remoteSettingsHoldPolicy(context.env.home!),
             ...(options.onLockedProcess ? { onProcess: options.onLockedProcess } : {})
           }
         : undefined)

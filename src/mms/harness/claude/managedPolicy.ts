@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { userInfo } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -55,6 +55,56 @@ function darwinPolicyFiles(): string[] {
   return ['/Library/Managed Preferences/com.anthropic.claudecode.plist', ...(user ? [`/Library/Managed Preferences/${user}/com.anthropic.claudecode.plist`] : [])]
 }
 
+/** The largest server-managed cache Claude Code reads; a larger one is not read, so it counts. */
+const REMOTE_SETTINGS_MAX_BYTES = 8 * 1024 * 1024
+
+export interface RemoteSettingsFiles {
+  size(path: string): number
+  read(path: string): string
+}
+
+const realFiles: RemoteSettingsFiles = {
+  size: (path) => statSync(path).size,
+  read: (path) => readFileSync(path, 'utf8')
+}
+
+/**
+ * Whether the entry's server-managed cache (`<home>/remote-settings.json`) holds a policy. Claude
+ * Code writes the empty object `{}` there when the organisation has no server-managed settings
+ * (its 404 sentinel), and drops `$`-prefixed keys (`$schema`) when it reads the file; so no file,
+ * `{}`, or an object of `$`-prefixed keys only, is no policy. Any other key, a file that is not a
+ * JSON object, one over Claude Code's size limit, or one that cannot be read, is a policy.
+ */
+export function remoteSettingsHoldPolicy(home: string, files: RemoteSettingsFiles = realFiles): boolean {
+  const path = join(home, 'remote-settings.json')
+  let text: string
+  try {
+    if (files.size(path) > REMOTE_SETTINGS_MAX_BYTES) return true
+    text = files.read(path)
+  } catch (error) {
+    return (error as { code?: unknown }).code !== 'ENOENT'
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return true
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return true
+  return Object.keys(parsed).some((key) => !key.startsWith('$'))
+}
+
+/** Windows' own `reg.exe`, by its full path, as the SDK runs it (never one found on PATH). */
+function regExe(env: NodeJS.ProcessEnv): string {
+  const root = env.SystemRoot ?? env.SYSTEMROOT ?? env.windir ?? env.WINDIR ?? 'C:\\Windows'
+  return `${root}\\System32\\reg.exe`
+}
+
+/** Whether `stdout` of `reg query <key>` lists the subkey `name` (a line ending in `\\<name>`). */
+function listsSubkey(stdout: string, name: string): boolean {
+  return new RegExp(`\\\\${name}\\s*$`, 'im').test(stdout)
+}
+
 export interface ManagedPolicyReadInput {
   /** The entry's own home (`CLAUDE_CONFIG_DIR`): its server-managed cache is read there. */
   home?: string
@@ -63,6 +113,8 @@ export interface ManagedPolicyReadInput {
   platform?: NodeJS.Platform
   run?: PolicyCommandRunner
   exists?: (path: string) => boolean
+  /** How the entry's server-managed cache is read (default: from disk). */
+  files?: RemoteSettingsFiles
   /** The SDK's entry module (default: the pinned one). */
   sdk?: () => string
   /** The environment of the resolver's process (default: Mousse's own). */
@@ -72,10 +124,11 @@ export interface ManagedPolicyReadInput {
 
 /**
  * Reads the policy now. True when any source holds a policy or could not be read:
- * - the entry's server-managed cache (`<home>/remote-settings.json`);
+ * - the entry's server-managed cache (`remoteSettingsHoldPolicy`: Claude Code's empty sentinel is none);
  * - `managed-settings.json` and its `managed-settings.d` drop-ins, by their presence;
  * - macOS MDM (the managed-preferences plists) and the Windows HKLM and HKCU `Policies\ClaudeCode`
- *   keys, read directly (a key that cannot be listed counts);
+ *   keys, read directly. A `Policies` key is absent only when its parent's listing, which always
+ *   works, does not name it; any listing that fails counts as a policy;
  * - the SDK's resolver in a new process, for every other source it knows.
  */
 export async function readClaudeManagedPolicy(input: ManagedPolicyReadInput): Promise<boolean> {
@@ -83,15 +136,21 @@ export async function readClaudeManagedPolicy(input: ManagedPolicyReadInput): Pr
   const exists = input.exists ?? existsSync
   const run = input.run ?? defaultRunner
   const timeoutMs = input.timeoutMs ?? 15_000
-  if (input.home && exists(join(input.home, 'remote-settings.json'))) return true
+  if (input.home && remoteSettingsHoldPolicy(input.home, input.files)) return true
   for (const file of managedSettingsPaths(platform)) if (exists(file) || exists(join(dirname(file), 'managed-settings.d'))) return true
   if (platform === 'darwin' && darwinPolicyFiles().some((file) => exists(file))) return true
   if (platform === 'win32') {
+    const env = input.env ?? process.env
+    const reg = regExe(env)
     for (const hive of ['HKLM', 'HKCU']) {
-      // The `Policies` key exists on every Windows; one that cannot be listed is not proof of absence.
-      const listed = await run('reg', ['query', `${hive}\\SOFTWARE\\Policies`], { env: input.env ?? process.env, timeoutMs })
+      // `reg` exits 1 both for a missing key and for one it may not read, so a missing `Policies`
+      // key is told apart by listing `SOFTWARE`, which every profile has and anyone may list.
+      const parent = await run(reg, ['query', `${hive}\\SOFTWARE`], { env, timeoutMs })
+      if (parent.code !== 0) return true
+      if (!listsSubkey(parent.stdout, 'Policies')) continue
+      const listed = await run(reg, ['query', `${hive}\\SOFTWARE\\Policies`], { env, timeoutMs })
       if (listed.code !== 0) return true
-      if (/\\ClaudeCode\s*$/im.test(listed.stdout)) return true
+      if (listsSubkey(listed.stdout, 'ClaudeCode')) return true
     }
   }
   let sdk: string

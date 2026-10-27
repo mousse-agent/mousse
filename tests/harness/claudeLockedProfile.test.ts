@@ -26,12 +26,12 @@ import {
   type ClaudeLockedTurn
 } from '../../src/mms/harness/claude/locked'
 import { CONTAINMENT_EVIDENCE, hasContainmentEvidence, type ContainmentEvidence } from '../../src/mms/harness/compatibility'
-import { readClaudeManagedPolicy, type PolicyCommandRunner } from '../../src/mms/harness/claude/managedPolicy'
+import { readClaudeManagedPolicy, remoteSettingsHoldPolicy, type PolicyCommandRunner } from '../../src/mms/harness/claude/managedPolicy'
 import { checkPolicy } from '../../src/mms/harness/policy'
 import type { DriverContext, InstanceConfig } from '../../src/mms/harness/driver'
 import type { RunPolicy } from '../../src/shared/harness/types'
 import { decodeInstanceConfig } from '../../src/mms/harness/driver'
-import { CLAUDE_CODE_CAPS, CLAUDE_POLICY_TRUST_MS, claudeCodeDriver, claudeLocked } from '../../src/mms/harness/drivers/claudeCode'
+import { CLAUDE_CODE_CAPS, CLAUDE_POLICY_REREAD_MS, CLAUDE_POLICY_TRUST_MS, claudeCodeDriver, claudeLocked } from '../../src/mms/harness/drivers/claudeCode'
 import { instanceEnv, lockedEnv } from '../../src/mms/harness/env'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { ClaudeSubscriptionProviderService } from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
@@ -342,15 +342,20 @@ describe('locked Claude Code: who runs bots', () => {
 
   it('reads the policy fresh every time, in a new process, and anything it cannot read counts (review r2)', async () => {
     const noFiles = () => false
+    const missing = { size: () => { throw Object.assign(new Error('no file'), { code: 'ENOENT' }) }, read: () => '' }
+    // `reg query` listings, by key; `SOFTWARE` always lists `Policies` on a normal profile.
     const clean: Record<string, { code: number | null; stdout: string }> = {
-      'reg HKLM': { code: 0, stdout: 'HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\r\n' },
-      'reg HKCU': { code: 0, stdout: 'HKEY_CURRENT_USER\\SOFTWARE\\Policies\\Microsoft\r\n' },
+      'HKLM\\SOFTWARE': { code: 0, stdout: 'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\r\n' },
+      'HKLM\\SOFTWARE\\Policies': { code: 0, stdout: 'HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\r\n' },
+      'HKCU\\SOFTWARE': { code: 0, stdout: 'HKEY_CURRENT_USER\\SOFTWARE\\Microsoft\r\nHKEY_CURRENT_USER\\SOFTWARE\\Policies\r\n' },
+      'HKCU\\SOFTWARE\\Policies': { code: 0, stdout: 'HKEY_CURRENT_USER\\SOFTWARE\\Policies\\Microsoft\r\n' },
       resolve: { code: 0, stdout: JSON.stringify({ sources: [] }) }
     }
     const runner = (answers: typeof clean) => {
       const calls: string[] = []
       const run: PolicyCommandRunner = async (command, args, options) => {
-        const key = command === 'reg' ? `reg ${args[1].split('\\')[0]}` : 'resolve'
+        const key = /reg\.exe$/i.test(command) ? args[1] : 'resolve'
+        if (key !== 'resolve') expect(command).toMatch(/System32[\\/]reg\.exe$/)
         calls.push(key)
         if (key === 'resolve') {
           expect(args.slice(-2)).toEqual(['/sdk.mjs', '/w'])
@@ -362,23 +367,51 @@ describe('locked Claude Code: who runs bots', () => {
     }
     const read = (answers: typeof clean, platform: NodeJS.Platform = 'win32', exists: (path: string) => boolean = noFiles) => {
       const { run, calls } = runner(answers)
-      return readClaudeManagedPolicy({ cwd: '/w', home: '/h', platform, run, exists, sdk: () => '/sdk.mjs' }).then((managed) => ({ managed, calls }))
+      return readClaudeManagedPolicy({ cwd: '/w', home: '/h', platform, run, exists, files: missing, sdk: () => '/sdk.mjs', env: { SystemRoot: 'C:\\Windows' } }).then((managed) => ({ managed, calls }))
     }
-    expect(await read(clean)).toEqual({ managed: false, calls: ['reg HKLM', 'reg HKCU', 'resolve'] })
+    expect(await read(clean)).toEqual({ managed: false, calls: ['HKLM\\SOFTWARE', 'HKLM\\SOFTWARE\\Policies', 'HKCU\\SOFTWARE', 'HKCU\\SOFTWARE\\Policies', 'resolve'] })
     // Nothing is kept between readings: a policy that appears after a clean reading is seen by the next one.
-    expect((await read({ ...clean, 'reg HKCU': { code: 0, stdout: 'HKEY_CURRENT_USER\\SOFTWARE\\Policies\\ClaudeCode\r\n' } })).managed).toBe(true)
+    expect((await read({ ...clean, 'HKCU\\SOFTWARE\\Policies': { code: 0, stdout: 'HKEY_CURRENT_USER\\SOFTWARE\\Policies\\ClaudeCode\r\n' } })).managed).toBe(true)
     expect((await read({ ...clean, resolve: { code: 0, stdout: JSON.stringify({ sources: [{ source: 'managed', policyOrigin: 'plist' }] }) } })).managed).toBe(true)
-    // A key that cannot be listed (access denied), a resolver that fails or prints nonsense: a policy.
-    expect((await read({ ...clean, 'reg HKLM': { code: 1, stdout: '' } })).managed).toBe(true)
+    // A profile with no `Policies` key at all (its parent's listing does not name it): no policy there.
+    const noUserPolicies = { ...clean, 'HKCU\\SOFTWARE': { code: 0, stdout: 'HKEY_CURRENT_USER\\SOFTWARE\\Microsoft\r\n' } }
+    expect(await read(noUserPolicies)).toEqual({ managed: false, calls: ['HKLM\\SOFTWARE', 'HKLM\\SOFTWARE\\Policies', 'HKCU\\SOFTWARE', 'resolve'] })
+    // Any listing that fails (access denied looks like "not found" from `reg`'s exit code): a policy.
+    expect((await read({ ...clean, 'HKLM\\SOFTWARE\\Policies': { code: 1, stdout: '' } })).managed).toBe(true)
+    expect((await read({ ...clean, 'HKCU\\SOFTWARE': { code: 1, stdout: '' } })).managed).toBe(true)
+    expect((await read({ ...noUserPolicies, 'HKCU\\SOFTWARE': { code: null, stdout: '' } })).managed).toBe(true)
+    // A resolver that fails or prints nonsense: a policy.
     expect((await read({ ...clean, resolve: { code: 2, stdout: '' } })).managed).toBe(true)
     expect((await read({ ...clean, resolve: { code: null, stdout: '' } })).managed).toBe(true)
     expect((await read({ ...clean, resolve: { code: 0, stdout: 'not json' } })).managed).toBe(true)
-    // Files: the entry's server-managed cache, a drop-in folder with no main file, macOS MDM.
+    // Files: a drop-in folder with no main file, macOS MDM.
     const only = (suffix: string) => (path: string) => path.replace(/\\/g, '/').endsWith(suffix)
-    expect((await read(clean, 'linux', only('/h/remote-settings.json'))).managed).toBe(true)
     expect((await read(clean, 'linux', only('/etc/claude-code/managed-settings.d'))).managed).toBe(true)
     expect((await read(clean, 'darwin', only('/Library/Managed Preferences/com.anthropic.claudecode.plist'))).managed).toBe(true)
     expect(await read(clean, 'linux')).toEqual({ managed: false, calls: ['resolve'] })
+  })
+
+  it('reads the entry\'s server-managed cache: Claude Code\'s empty sentinel is no policy, anything else is (review r3)', () => {
+    const home = temp('claude-locked-remote-')
+    const write = (text: string) => writeFileSync(join(home, 'remote-settings.json'), text)
+    expect(remoteSettingsHoldPolicy(home)).toBe(false)
+    write('{}')
+    expect(remoteSettingsHoldPolicy(home)).toBe(false)
+    write('{ "$schema": "https://json.schemastore.org/claude-code-settings.json", "$comment": "x" }\n')
+    expect(remoteSettingsHoldPolicy(home)).toBe(false)
+    for (const text of ['{"env":{"X":"1"}}', '{"$schema":"s","hooks":{}}', '{"permissions":{"allow":["Read"]}}', '[]', 'null', '"x"', '{', 'not json', ''])
+      expect([text, remoteSettingsHoldPolicy(home, { size: () => text.length, read: () => text })]).toEqual([text, true])
+    // Unreadable, or over Claude Code's size limit: a policy. Missing: none.
+    const failing = (code: string) => ({ size: () => 10, read: () => { throw Object.assign(new Error(code), { code }) } })
+    expect(remoteSettingsHoldPolicy(home, failing('EACCES'))).toBe(true)
+    expect(remoteSettingsHoldPolicy(home, failing('EISDIR'))).toBe(true)
+    expect(remoteSettingsHoldPolicy(home, failing('ENOENT'))).toBe(false)
+    expect(remoteSettingsHoldPolicy(home, { size: () => 9 * 1024 * 1024, read: () => '{}' })).toBe(true)
+    // The reader uses the same rule.
+    const reader = (text?: string) => readClaudeManagedPolicy({ cwd: '/w', home, platform: 'linux', exists: () => false, sdk: () => '/sdk.mjs',
+      files: text === undefined ? { size: () => { throw Object.assign(new Error('x'), { code: 'ENOENT' }) }, read: () => '' } : { size: () => text.length, read: () => text },
+      run: async () => ({ code: 0, stdout: JSON.stringify({ sources: [] }) }) })
+    return Promise.all([reader('{}'), reader('{"$schema":"s"}'), reader('{"env":{}}'), reader('{oops'), reader()]).then((results) => expect(results).toEqual([false, false, true, true, false]))
   })
 
   it.skipIf(process.platform !== 'win32')('the real resolver runs in its own process and reads no policy on a clean machine', async () => {
@@ -417,23 +450,47 @@ describe('locked Claude Code: its policy reading outside a turn (review r2)', ()
     checkPolicy(driver.caps(lockedConfig, '2.1.0', undefined, instanceId), botPolicy, instanceId, undefined, { hostApprovals: driver.botAuthority!(lockedConfig, instanceId) === true, botRuntimeGaps: [] })
 
   it('a locked entry with no policy and tools evidence holds a bot at approval and dispatch, without the managedPolicy seam', async () => {
-    const reads: Array<string | undefined> = []
-    const driver = claudeCodeDriver({ evidence: evidence(), readPolicy: async (input) => { reads.push(input.home); return false } })
-    // Nothing read yet: nothing claimed.
-    expect(gatewayCheck(driver, 'claude-bots').ok).toBe(false)
-    const { context, runtime, home } = boundEntry(driver, 'claude-bots')
-    // Binding the runtime reads its policy and tells the gateway.
-    await vi.waitFor(() => expect(context.changed).toHaveBeenCalled())
-    expect(reads).toEqual([home])
-    expect(driver.caps(lockedConfig, '2.1.0', undefined, 'claude-bots').toolControl).toBe('exact')
-    expect(driver.botAuthority!(lockedConfig, 'claude-bots')).toBe(true)
-    // Approval and dispatch: each reads again first (`readPolicyFacts`), then the check passes.
-    await driver.readPolicyFacts!(lockedConfig, 'claude-bots')
-    expect(gatewayCheck(driver, 'claude-bots')).toEqual({ ok: true })
-    await driver.readPolicyFacts!(lockedConfig, 'claude-bots')
-    expect(gatewayCheck(driver, 'claude-bots')).toEqual({ ok: true })
-    expect(reads.length).toBe(3)
-    runtime.stop?.()
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const reads: Array<string | undefined> = []
+      const driver = claudeCodeDriver({ evidence: evidence(), readPolicy: async (input) => { reads.push(input.home); return false } })
+      // Nothing read yet: nothing claimed.
+      expect(gatewayCheck(driver, 'claude-bots').ok).toBe(false)
+      const { context, runtime, home } = boundEntry(driver, 'claude-bots')
+      // Binding the runtime reads its policy and tells the gateway.
+      await vi.waitFor(() => expect(context.changed).toHaveBeenCalled())
+      expect(reads).toEqual([home])
+      expect(driver.caps(lockedConfig, '2.1.0', undefined, 'claude-bots').toolControl).toBe('exact')
+      expect(driver.botAuthority!(lockedConfig, 'claude-bots')).toBe(true)
+      // Approval: read again first (`readPolicyFacts`), then the check passes.
+      vi.setSystemTime(Date.now() + CLAUDE_POLICY_REREAD_MS + 1)
+      await driver.readPolicyFacts!(lockedConfig, 'claude-bots')
+      expect(gatewayCheck(driver, 'claude-bots')).toEqual({ ok: true })
+      expect(reads.length).toBe(2)
+      // Dispatch, later: read again, then the gateway's admission moments after uses that same
+      // reading (one reading per bot turn), and the check passes each time.
+      vi.setSystemTime(Date.now() + 10_000)
+      await driver.readPolicyFacts!(lockedConfig, 'claude-bots')
+      expect(gatewayCheck(driver, 'claude-bots')).toEqual({ ok: true })
+      await driver.readPolicyFacts!(lockedConfig, 'claude-bots')
+      expect(gatewayCheck(driver, 'claude-bots')).toEqual({ ok: true })
+      expect(reads.length).toBe(3)
+      runtime.stop?.()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('check points that come while a reading runs wait for it: one reading', async () => {
+    let release: (value: boolean) => void = () => {}
+    let reads = 0
+    const driver = claudeCodeDriver({ evidence: evidence(), readPolicy: () => { reads += 1; return new Promise<boolean>((resolve) => { release = resolve }) } })
+    boundEntry(driver, 'claude-c')
+    const waiting = [driver.readPolicyFacts!(lockedConfig, 'claude-c'), driver.readPolicyFacts!(lockedConfig, 'claude-c')]
+    release(false)
+    await Promise.all(waiting)
+    expect(reads).toBe(1)
+    expect(driver.botAuthority!(lockedConfig, 'claude-c')).toBe(true)
   })
 
   it('one entry\'s reading never answers for another, and a stale or policy reading claims nothing', async () => {
@@ -450,7 +507,7 @@ describe('locked Claude Code: its policy reading outside a turn (review r2)', ()
       // A "no policy" reading is trusted for a short while only.
       vi.setSystemTime(Date.now() + CLAUDE_POLICY_TRUST_MS + 1)
       expect(driver.botAuthority!(lockedConfig, 'claude-a')).toBe(false)
-      // A policy that appeared is seen by the next reading.
+      // A policy that appeared is seen by the next reading (past the re-read window).
       policy = true
       await driver.readPolicyFacts!(lockedConfig, 'claude-a')
       expect(driver.botAuthority!(lockedConfig, 'claude-a')).toBe(false)
@@ -460,13 +517,23 @@ describe('locked Claude Code: its policy reading outside a turn (review r2)', ()
     }
   })
 
-  it('a server-managed policy that lands during a turn denies its every later call', () => {
+  it('a server-managed policy that lands during a turn denies its every later call; Claude Code\'s empty sentinel does not (review r3)', () => {
     const root = temp('claude-locked-root-')
     const scratch = temp('claude-locked-scratch-')
-    let landed = false
-    const gate = new ClaudeLockedGate({ authority: authorityFor(['read'], { root, scratch }), cwd: scratch, shellContained: false, temps: [], systemPrompt: '', policyAppeared: () => landed }, false)
+    const home = temp('claude-locked-home-')
+    // As the driver wires it: the entry's own cache, read by the same rule.
+    const gate = new ClaudeLockedGate({ authority: authorityFor(['read'], { root, scratch }), cwd: scratch, shellContained: false, temps: [], systemPrompt: '', policyAppeared: () => remoteSettingsHoldPolicy(home) }, false)
     expect(gate.preToolUse('Read', { file_path: join(root, 'a') }).ok).toBe(true)
-    landed = true
+    // The CLI saves its sentinel mid-turn: the organisation has no settings, and the turn goes on.
+    writeFileSync(join(home, 'remote-settings.json'), '{}')
+    expect(gate.preToolUse('Read', { file_path: join(root, 'a') }).ok).toBe(true)
+    expect(gate.canUse('Read', { file_path: join(root, 'a') }, 'tu-1').ok).toBe(false) // no ledger here: refused for that reason only
+    writeFileSync(join(home, 'remote-settings.json'), '{"$schema":"s"}')
+    expect(gate.preToolUse('Read', { file_path: join(root, 'a') }).ok).toBe(true)
+    // A real policy lands: every later call is denied.
+    writeFileSync(join(home, 'remote-settings.json'), '{"hooks":{"SessionStart":[]}}')
+    expect(gate.preToolUse('Read', { file_path: join(root, 'a') })).toEqual({ ok: false, reason: CLAUDE_MANAGED_POLICY_REFUSAL })
+    writeFileSync(join(home, 'remote-settings.json'), '{"env":')
     expect(gate.preToolUse('Read', { file_path: join(root, 'a') })).toEqual({ ok: false, reason: CLAUDE_MANAGED_POLICY_REFUSAL })
   })
 })
