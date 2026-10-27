@@ -11,14 +11,6 @@ import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { randomUUID, createHash } from 'node:crypto'
 import { afterEach, beforeAll, expect, it, vi } from 'vitest'
-import {
-  createAssistantMessageEventStream,
-  type Model,
-  type Provider,
-  type AssistantMessage,
-  type Context,
-  type StreamOptions
-} from '@earendil-works/pi-ai'
 import { MmsProfileServices } from '../../../../src/mms/MmsProfileServices'
 import { MousseConfigStore } from '../../../../src/mms/config/MousseConfigStore'
 import { ProviderAuthService } from '../../../../src/mms/providers/ProviderAuthService'
@@ -28,9 +20,9 @@ import { BridgeProfileService } from '../../../../src/mms/bridge/BridgeProfileSe
 import {
   effectiveBotPolicyDigest,
   nativeSdkVersion,
-  modelDigest,
   type NativeBotDefinition
 } from '../../../../src/mms/bots/runtime'
+import { ScriptedBotRuntime, readerScript } from '../scriptedRuntime'
 import { decodeEnvelope } from '../../../../src/mms/net/sync/codec'
 import { newId, type StreamId } from '../../../../src/shared/net'
 
@@ -91,94 +83,15 @@ async function profile(options: { native?: boolean } = {}) {
     }
   )
   cleanup.push(() => services.stop())
-  const contexts: Context[] = [],
-    signals: AbortSignal[] = []
-  let release = () => {}
-  const model: Model<'anthropic-messages'> = {
-    id: 'central-fixture',
-    name: 'Fixture',
-    api: 'anthropic-messages',
-    provider: 'central-fixture',
-    baseUrl: 'https://invalid.test',
-    reasoning: false,
-    input: ['text'],
-    cost: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 },
-    contextWindow: 10000,
-    maxTokens: 1000
-  }
-  const stream = (
-    _model: Model<'anthropic-messages'>,
-    context: Context,
-    request: StreamOptions = {}
-  ) => {
-    contexts.push(structuredClone(context))
-    signals.push(request.signal!)
-    const result = createAssistantMessageEventStream()
-    const message: AssistantMessage = {
-      role: 'assistant',
-      api: model.api,
-      provider: model.provider,
-      model: model.id,
-      content:
-        contexts.length === 1
-          ? [
-              {
-                type: 'toolCall',
-                id: 'bounded-read',
-                name: 'safe_read',
-                arguments: { path: 'canary.txt' }
-              }
-            ]
-          : [{ type: 'text', text: 'Approved reader exact answer' }],
-      stopReason: contexts.length === 1 ? 'toolUse' : 'stop',
-      timestamp: Date.now(),
-      usage: {
-        input: 10,
-        output: 10,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 20,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 10 / 1000000 }
-      }
-    }
-    release = () => {
-      result.push({
-        type: 'done',
-        reason: message.stopReason === 'toolUse' ? 'toolUse' : 'stop',
-        message
-      })
-      result.end(message)
-    }
-    request.signal?.addEventListener('abort', release, { once: true })
-    queueMicrotask(release)
-    return result
-  }
-  const provider: Provider<'anthropic-messages'> = {
-    id: model.provider,
-    name: 'Fixture',
-    auth: {
-      apiKey: {
-        name: 'Fixture',
-        resolve: async () => ({ auth: { apiKey: 'deterministic-central-fixture' } })
-      }
-    },
-    getModels: () => [model],
-    stream,
-    streamSimple: stream
-  }
-  auth.models.setProvider(provider)
-  await auth.credentials.modify(provider.id, async () => ({
-    type: 'api_key',
-    key: 'deterministic-central-fixture'
-  }))
+  const contexts: Array<{ tools?: string[]; toolResult?: string }> = []
   const definition: NativeBotDefinition = {
     revision: 'central-v1',
     systemPrompt: 'Only the central bot compartment.',
     billing: {
-      provider: model.provider,
-      model: model.id,
-      api: model.api,
-      modelDigest: modelDigest(model),
+      provider: 'central-fixture',
+      model: 'fixture',
+      api: 'anthropic-messages',
+      modelDigest: 'fixture-digest',
       sdkVersion: nativeSdkVersion(),
       platform: process.platform,
       nodeVersion: process.versions.node,
@@ -195,6 +108,20 @@ async function profile(options: { native?: boolean } = {}) {
     maxElapsedMs: 60000
   }
   let bridge!: BridgeProfileService
+  const scripted = new ScriptedBotRuntime({
+    profiles: ['reader'],
+    maximumUnits: 60,
+    script: readerScript({
+      module: nativeReader,
+      deniedRoots: [home],
+      installationHome: home,
+      definition,
+      path: 'canary.txt',
+      answer: 'Approved reader exact answer',
+      current: (request) => bridge.bots.admission.assertExecutionCurrent(request.execution),
+      record: (step) => contexts.push(step)
+    })
+  })
   const net = new NetService({
     profileDir: home,
     composeRuntime: (runtime) => {
@@ -202,25 +129,7 @@ async function profile(options: { native?: boolean } = {}) {
         services,
         runtime,
         net,
-        nativeAdapters: options.native
-          ? new Map([
-              [
-                'mousse',
-                {
-                  settings: services.settings,
-                  providerAuth: auth,
-                  sdkVersion: nativeSdkVersion(),
-                  definition,
-                  reader: {
-                    module: nativeReader,
-                    qualification: readerQualification,
-                    deniedRoots: [home]
-                  },
-                  qualification: { active: (profile) => profile === 'reader', invalidate: () => {} }
-                }
-              ]
-            ])
-          : undefined
+        trustedQaAdapters: options.native ? new Map([['mousse', scripted]]) : undefined
       })
       return bridge.composition()
     }
@@ -243,9 +152,9 @@ async function profile(options: { native?: boolean } = {}) {
       return bridge
     },
     contexts,
-    signals,
+    signals: scripted.signals,
     definition,
-    release: () => release()
+    release: () => scripted.release()
   }
 }
 
@@ -346,7 +255,7 @@ it.each(['approve', 'removed-during-current-proof', 'archive-during-current-proo
     await executor.bridge.spaces.client.subscribe(stream)
     expect(executor.bridge.spaces.store.getById(stream, request)).toBeDefined()
     expect(executor.contexts).toHaveLength(1)
-    expect(executor.contexts[0].tools?.map((tool) => tool.name)).toEqual(['safe_read'])
+    expect(executor.contexts[0].tools).toEqual(['safe_read'])
     expect(JSON.stringify(executor.contexts)).not.toContain('APPROVED READER CANARY')
     const human = sender.net.runtime().identity.self()!.user
     expect(rt.identity.roster(human) === undefined).toBe(true)

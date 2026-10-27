@@ -2,20 +2,12 @@ import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { expect, it, vi } from 'vitest'
-import {
-  createAssistantMessageEventStream,
-  type Model,
-  type Provider,
-  type AssistantMessage,
-  type Context,
-  type StreamOptions
-} from '@earendil-works/pi-ai'
 import { BotLocalService } from '../../../../src/mms/bots/BotLocalService'
-import type { MmsOptions } from '../../../../src/mms/MmsOptions'
+import type { BotRuntimeAdapter } from '../../../../src/mms/net/contracts'
+import { ScriptedBotRuntime } from '../../bots/scriptedRuntime'
 import { MousseMainService } from '../../../../src/mms/MousseMainService'
 import {
   effectiveBotPolicyDigest,
-  modelDigest,
   nativeSdkVersion,
   type NativeBotDefinition
 } from '../../../../src/mms/bots/runtime'
@@ -26,7 +18,13 @@ import {
 } from '../../../../src/mms/spaces/archive'
 import { canonicalJson } from '../../../../src/mms/net/sync/codec'
 import { signedDocument, decodeBase64 } from '../../../../src/mms/net/identity/crypto'
-import { newId, type StoredRecord, type StreamId, type Roster } from '../../../../src/shared/net'
+import {
+  NetError,
+  newId,
+  type StoredRecord,
+  type StreamId,
+  type Roster
+} from '../../../../src/shared/net'
 import { decodeEnvelope } from '../../../../src/mms/net/sync/codec'
 
 it.each(['public', 'private', 'private-trigger', 'foreign-public', 'late-opt-in'] as const)(
@@ -36,78 +34,25 @@ it.each(['public', 'private', 'private-trigger', 'foreign-public', 'late-opt-in'
       mode === 'public' || mode === 'foreign-public' || mode === 'late-opt-in'
         ? 'public'
         : 'private'
-    const root = realpathSync(mkdtempSync(join(tmpdir(), 'archive-native-receipts-'))),
-      contexts: Context[] = [],
-      model: Model<'anthropic-messages'> = {
-        id: 'archive-fixture',
-        name: 'Archive fixture',
-        api: 'anthropic-messages',
-        provider: 'archive-fixture',
-        baseUrl: 'https://invalid.test',
-        reasoning: false,
-        input: ['text'],
-        cost: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 },
-        contextWindow: 10000,
-        maxTokens: 1000
-      }
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'archive-native-receipts-')))
     let unknownCharge = false
-    const stream = (
-      _model: Model<'anthropic-messages'>,
-      context: Context,
-      _options: StreamOptions = {}
-    ) => {
-      contexts.push(structuredClone(context))
-      const result = createAssistantMessageEventStream(),
-        message: AssistantMessage = {
-          role: 'assistant',
-          api: model.api,
-          provider: model.provider,
-          model: model.id,
-          content: [{ type: 'text', text: 'Original actual Native archive answer' }],
-          stopReason: 'stop',
-          timestamp: Date.now(),
-          usage: {
-            input: 10,
-            output: 10,
-            cacheRead: 0,
-            cacheWrite: 0,
-            totalTokens: 20,
-            cost: {
-              input: 0,
-              output: 0,
-              cacheRead: 0,
-              cacheWrite: 0,
-              total: unknownCharge ? Number.NaN : 10 / 1000000
-            }
-          }
-        }
-      queueMicrotask(() => {
-        result.push({ type: 'done', reason: 'stop', message })
-        result.end(message)
-      })
-      return result
-    }
-    const provider: Provider<'anthropic-messages'> = {
-      id: model.provider,
-      name: 'Archive fixture',
-      auth: {
-        apiKey: {
-          name: 'Archive fixture',
-          resolve: async () => ({ auth: { apiKey: 'task-owned-deterministic-fixture' } })
-        }
-      },
-      getModels: () => [model],
-      stream,
-      streamSimple: stream
-    }
+    const scripted = new ScriptedBotRuntime({
+      answer: 'Original actual Native archive answer',
+      script: async () => {
+        // A dispatched call without proven charge evidence stays reserved and ends uncertain.
+        if (unknownCharge)
+          throw new NetError('outcome_uncertain', 'Provider usage is not a proven charge.')
+        return 'Original actual Native archive answer'
+      }
+    })
     const definition: NativeBotDefinition = {
       revision: 'archive-native-v1',
       systemPrompt: 'Immutable local archive fixture.',
       billing: {
-        provider: model.provider,
-        model: model.id,
-        api: model.api,
-        modelDigest: modelDigest(model),
+        provider: 'archive-fixture',
+        model: 'fixture',
+        api: 'anthropic-messages',
+        modelDigest: 'fixture-digest',
         sdkVersion: nativeSdkVersion(),
         platform: process.platform,
         nodeVersion: process.versions.node,
@@ -124,33 +69,16 @@ it.each(['public', 'private', 'private-trigger', 'foreign-public', 'late-opt-in'
       maxElapsedMs: 30000
     }
     let daemonStarted = false
-    const nativeBotAdapters = vi.fn(
-      ({ services }: Parameters<NonNullable<MmsOptions['nativeBotAdapters']>>[0]) => {
-        if (mode === 'late-opt-in') expect(daemonStarted).toBe(true)
-        services.providerAuth.models.setProvider(provider)
-        return new Map([
-          [
-            'mousse',
-            {
-              settings: services.settings,
-              providerAuth: services.providerAuth,
-              sdkVersion: nativeSdkVersion(),
-              definition,
-              qualification: {
-                active: (profile: string) => profile === 'chat',
-                invalidate: () => {}
-              }
-            }
-          ]
-        ])
-      }
-    )
+    const trustedQaBotAdapters = vi.fn((): ReadonlyMap<string, BotRuntimeAdapter> => {
+      if (mode === 'late-opt-in') expect(daemonStarted).toBe(true)
+      return new Map([['mousse', scripted]])
+    })
     const main = await MousseMainService.create({
       homeDir: join(root, 'home'),
       repoRoot: root,
       headless: true,
       requireOwnership: false,
-      nativeBotAdapters
+      trustedQaBotAdapters
     })
     let member: MousseMainService | undefined,
       signForeign: ((bytes: Uint8Array) => Uint8Array) | undefined
@@ -158,20 +86,15 @@ it.each(['public', 'private', 'private-trigger', 'foreign-public', 'late-opt-in'
       if (mode === 'late-opt-in') {
         await main.start()
         daemonStarted = true
-        expect(nativeBotAdapters).not.toHaveBeenCalled()
+        expect(trustedQaBotAdapters).not.toHaveBeenCalled()
         expect(() => main.bridge).toThrow(/disabled/)
         expect(() => main.spaces).toThrow(/disabled/)
         expect(() => main.bots).toThrow(/disabled/)
         expect(() => main.archives).toThrow(/disabled/)
       }
       await main.net.request('net.init', { listen: true, port: 0 })
-      expect(nativeBotAdapters).toHaveBeenCalledTimes(1)
-      expect(main.bots.nativeRuntimes.get('mousse')?.supports('chat')).toBe(true)
+      expect(trustedQaBotAdapters).toHaveBeenCalledTimes(1)
       await main.net.request('net.protect', { passphrase: 'task-owned-native-archive' })
-      await main.providerAuth.credentials.modify(provider.id, async () => ({
-        type: 'api_key',
-        key: 'task-owned-deterministic-fixture'
-      }))
       const rt = main.net.runtime(),
         spaces = main.spaces,
         space = spaces.host.create({ name: 'Actual Native receipt archive' }),
@@ -262,7 +185,7 @@ it.each(['public', 'private', 'private-trigger', 'foreign-public', 'late-opt-in'
       expect(receipts.map((record) => decodeEnvelope(record.envelope).envelope.type)).toContain(
         'bot.run.completed'
       )
-      expect(contexts).toHaveLength(1)
+      expect(scripted.runs).toHaveLength(1)
       if (member) {
         const keys = member.net.runtime().keys
         signForeign = (bytes) => keys.signAsNode(bytes)
@@ -580,7 +503,7 @@ it.each(['public', 'private', 'private-trigger', 'foreign-public', 'late-opt-in'
         expect(spaces.store.getById(output, decodeEnvelope(record.envelope).envelope.id)).toEqual(
           record
         )
-      expect(contexts).toHaveLength(1)
+      expect(scripted.runs).toHaveLength(1)
       expect(rt.db.database.prepare('SELECT count(*) AS n FROM net_budget_calls').get()!.n).toBe(
         oldCalls
       )
