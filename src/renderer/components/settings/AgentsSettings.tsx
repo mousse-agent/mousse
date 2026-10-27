@@ -1,6 +1,8 @@
 import type { MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../../../shared/settings'
 import { CONTEXT_COMPACTION_OPTIONS, normalizeContextSettings, type ContextCompactionTokens } from '../../../shared/settings'
 import { piProviderIdOf } from '../../../shared/providerInstances'
+import type { Project } from '../../../shared/types'
+import { AgentAccessSettings } from './AgentAccessSettings'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { SettingsModelPicker } from './SettingsModelPicker'
 import { Select } from '../ui/Select'
@@ -8,16 +10,18 @@ import { Brain, Layers, RotateCcw } from '../../lib/icons'
 
 /**
  * Settings > Agents: the default model and chat title model, plus context
- * compaction. Replaces the old Models, Context and
+ * compaction, and how far agents may reach into other threads. Replaces the old Models, Context and
  * per-CLI Agents pages; their stored keys are left untouched.
  */
 export function AgentsSettings({
   settings,
   options,
+  projects,
   updateSettings
 }: {
   settings: MousseSettings
   options: SettingsOptions
+  projects: readonly Project[]
   updateSettings: (partial: MousseSettingsUpdate) => Promise<void>
 }) {
   const providers = options.llmProviders
@@ -120,6 +124,8 @@ export function AgentsSettings({
           </>}
         />
       </SettingsGroup>
+
+      <AgentAccessSettings settings={settings} projects={projects} updateSettings={updateSettings} />
     </section>
   )
 }

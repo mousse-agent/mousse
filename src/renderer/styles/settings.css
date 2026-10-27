@@ -723,6 +723,87 @@ html[data-theme='high-contrast'] .settings-seg button.on {
   box-shadow: none;
 }
 
+/* Agent access: the project checklist and the capped-thread list. A checked row is a background
+   fill only (no edge bar); the check mark is the second cue. */
+.agent-access-projects {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 240px;
+  overflow-y: auto;
+  margin-top: calc(-1 * var(--space-4));
+}
+
+.agent-access-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  width: 100%;
+  min-height: var(--settings-control-h);
+  padding: 0 var(--space-8);
+  border-radius: var(--ui-control-radius);
+  font-size: var(--settings-fs-small);
+  color: var(--text-primary);
+  text-align: left;
+  transition: background-color 0.15s;
+}
+
+.agent-access-row:hover {
+  background: var(--ui-hover);
+}
+
+.agent-access-row.on {
+  background: var(--ui-selected);
+}
+
+.agent-access-row[aria-disabled='true'] {
+  cursor: default;
+}
+
+.agent-access-row:focus-visible {
+  outline: 1px solid var(--ui-line-strong);
+  outline-offset: 0;
+}
+
+.agent-access-check {
+  display: inline-flex;
+  flex: 0 0 14px;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+}
+
+.agent-access-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-access-caps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agent-access-cap {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  column-gap: var(--space-16);
+  font-size: var(--settings-fs-small);
+  color: var(--text-secondary);
+}
+
+.agent-access-cap-level {
+  flex-shrink: 0;
+  color: var(--text-primary);
+}
+
 /* Pills that switch independent options in one row (agent exposure). */
 .settings-chip {
   display: inline-flex;
