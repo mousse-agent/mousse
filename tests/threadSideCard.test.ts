@@ -277,9 +277,9 @@ describe('thread side card rendering', () => {
     seed({ activeThreadId: 'thread-1' })
     const html = renderToStaticMarkup(createElement(SideCardSections, { threadId: 'thread-1', projectId: null }))
     const titles = [...html.matchAll(/side-card-section-title">([^<]+)</g)].map((match) => match[1])
-    // Without a project folder Git collapses to one quiet line between Device and Actions, and
+    // Without a project folder Git collapses to one quiet line between Device and Actions (after Permissions), and
     // without subagents Lineage collapses to one quiet line at the end; neither keeps its heading.
-    expect(titles).toEqual(['Device', 'Actions'])
+    expect(titles).toEqual(['Device', 'Permissions', 'Actions'])
     expect(html.indexOf('lineage-collapsed')).toBeGreaterThan(html.indexOf('>Actions<'))
     expect(html.indexOf('side-card-git-collapsed')).toBeGreaterThan(html.indexOf('>Device<'))
     expect(html.indexOf('side-card-git-collapsed')).toBeLessThan(html.indexOf('>Actions<'))
