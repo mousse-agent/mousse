@@ -391,6 +391,11 @@ export const PROTOCOL_METHODS = [
   'github.status',
   'github.createRepository',
   'github.cloneRepository',
+  'pullRequests.get',
+  'pullRequests.create',
+  'pullRequests.baseBranches',
+  'pullRequests.link',
+  'pullRequests.unlink',
 
   'daemon.shutdown',
   'events.subscribe',

@@ -14,6 +14,7 @@ import {
   pullRequestKey,
   refreshPullRequest,
   retainPullRequest,
+  setPullRequestTracked,
   useGitPullRequestStore
 } from '../src/renderer/stores/pullRequestStore'
 import type { GitPullRequestLookup, GitStatusSnapshot, TurnState } from '../src/shared/types'
@@ -27,7 +28,7 @@ const lookup = (number: number): GitPullRequestLookup => ({
     state: 'open',
     isDraft: false,
     checks: 'passing',
-    checkCounts: { passed: 1, failed: 0, pending: 0, total: 1 }
+    checkCounts: { passed: 1, failed: 0, pending: 0, waiting: 0, total: 1 }
   }
 })
 
@@ -64,10 +65,12 @@ const install = (patch: Partial<Mock> = {}): Mock => {
     status: vi.fn(async () => repoStatus()),
     ...patch
   }
+  const { pullRequest, ...gitMethods } = git
   vi.stubGlobal('window', {
     mousse: {
+      pullRequests: { get: pullRequest },
       git: {
-        ...git,
+        ...gitMethods,
         log: vi.fn(async () => []),
         branches: vi.fn(async () => ({ current: 'feature', branches: ['feature'] })),
         diffStats: vi.fn(async () => ({ additions: 0, deletions: 0, filesChanged: 0 }))
@@ -101,20 +104,38 @@ describe('pull request store', () => {
       refreshPullRequest('/repo/a', 'feature')
     ])
     expect(git.pullRequest).toHaveBeenCalledTimes(1)
-    expect(git.pullRequest).toHaveBeenCalledWith('p1', '/repo/a', 'feature')
+    expect(git.pullRequest).toHaveBeenCalledWith({ projectId: 'p1' }, 'feature')
     expect(entry('/repo/a', 'feature').lookup).toEqual(lookup(1))
+  })
+
+  it('asks the daemon about the thread when the reader has one, and about the project otherwise', async () => {
+    const git = install()
+    await refreshPullRequest('/repo/a', 'feature', { projectId: 'p1', threadId: 't1' })
+    await refreshPullRequest('/repo/b', 'feature', { projectId: 'p1' })
+    await refreshPullRequest('/repo/c', 'feature')
+    expect(git.pullRequest).toHaveBeenNthCalledWith(1, { threadId: 't1' }, 'feature')
+    expect(git.pullRequest).toHaveBeenNthCalledWith(2, { projectId: 'p1' }, 'feature')
+    expect(git.pullRequest).toHaveBeenNthCalledWith(3, {}, 'feature')
+  })
+
+  it('borrows the retained reader\'s thread when a refresh names none', async () => {
+    const git = install()
+    const release = retainPullRequest('/repo/a', 'feature', 'p1', 't1')
+    await refreshPullRequest('/repo/a', 'feature', { force: true, projectId: 'p1' })
+    expect(git.pullRequest).toHaveBeenCalledWith({ threadId: 't1' }, 'feature', true)
+    release()
   })
 
   it('asks about the branch of the entry it stores the result under', async () => {
     const git = install({
-      pullRequest: vi.fn(async (_projectId: unknown, _path: unknown, branch: unknown) => lookup(branch === 'other' ? 2 : 1))
+      pullRequest: vi.fn(async (_ref: unknown, branch: unknown) => lookup(branch === 'other' ? 2 : 1))
     })
     await Promise.all([
       refreshPullRequest('/repo/a', 'feature', { projectId: 'p1' }),
       refreshPullRequest('/repo/a', 'other', { projectId: 'p1' })
     ])
-    expect(git.pullRequest).toHaveBeenCalledWith('p1', '/repo/a', 'feature')
-    expect(git.pullRequest).toHaveBeenCalledWith('p1', '/repo/a', 'other')
+    expect(git.pullRequest).toHaveBeenCalledWith({ projectId: 'p1' }, 'feature')
+    expect(git.pullRequest).toHaveBeenCalledWith({ projectId: 'p1' }, 'other')
     expect(entry('/repo/a', 'feature').lookup).toEqual(lookup(1))
     expect(entry('/repo/a', 'other').lookup).toEqual(lookup(2))
   })
@@ -130,7 +151,7 @@ describe('pull request store', () => {
     expect(Object.keys(useGitPullRequestStore.getState().entries)).toHaveLength(3)
   })
 
-  it('treats a lookup under 30 seconds old as fresh, and refetches after that', async () => {
+  it('treats a lookup under 60 seconds old as fresh, and refetches after that', async () => {
     vi.useFakeTimers()
     const git = install()
     await refreshPullRequest('/repo/a', 'feature')
@@ -140,7 +161,7 @@ describe('pull request store', () => {
     vi.advanceTimersByTime(2000)
     await refreshPullRequest('/repo/a', 'feature')
     expect(git.pullRequest).toHaveBeenCalledTimes(2)
-    expect(PULL_REQUEST_MAX_AGE_MS).toBe(30_000)
+    expect(PULL_REQUEST_MAX_AGE_MS).toBe(60_000)
   })
 
   it('refetches when forced, and queues exactly one more fetch behind one in flight', async () => {
@@ -158,6 +179,15 @@ describe('pull request store', () => {
     await Promise.all([first, forced, forcedAgain])
     expect(git.pullRequest).toHaveBeenCalledTimes(2)
     expect(entry('/repo/a', 'feature').lookup).toEqual(lookup(2))
+    // Only the fetch queued behind the first skips the daemon's cache.
+    expect(git.pullRequest.mock.calls.map((call) => call[2])).toEqual([undefined, true])
+  })
+
+  it('has the daemon skip its cache for a forced refresh only', async () => {
+    const git = install()
+    await refreshPullRequest('/repo/a', 'feature')
+    await refreshPullRequest('/repo/a', 'feature', { force: true })
+    expect(git.pullRequest.mock.calls.map((call) => call[2])).toEqual([undefined, true])
   })
 
   it('keeps the lookup on screen when a refresh fails, and reports an error when there was none', async () => {
@@ -190,6 +220,28 @@ describe('pull request store', () => {
     releaseTwo()
     releaseTwo()
     expect(removeEventListener).toHaveBeenCalledTimes(1)
+  })
+
+  it('looks an untracked branch up on mount but not on focus or when a run ends', async () => {
+    vi.useFakeTimers()
+    const git = install()
+    const turn = (phase: TurnState['phase']): TurnState => ({ threadId: 't1', turnId: 'x', phase, updatedAt: '2026-10-26T10:00:00Z' })
+    useAppStore.setState({ turnStates: { t1: turn('streaming') } })
+    const release = retainPullRequest('/repo/a', 'feature', 'p1')
+    setPullRequestTracked('/repo/a', 'feature', false)
+    await refreshPullRequest('/repo/a', 'feature', { projectId: 'p1' })
+    expect(git.pullRequest).toHaveBeenCalledTimes(1)
+    vi.advanceTimersByTime(PULL_REQUEST_MAX_AGE_MS + 1)
+    listeners.get('focus')?.()
+    useAppStore.setState({ turnStates: { t1: turn('completed') } })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(git.pullRequest).toHaveBeenCalledTimes(1)
+    // Pushing the branch gives it an upstream, and then focus looks it up again.
+    setPullRequestTracked('/repo/a', 'feature', true)
+    listeners.get('focus')?.()
+    await vi.waitFor(() => expect(git.pullRequest).toHaveBeenCalledTimes(2))
+    release()
+    useAppStore.setState({ turnStates: {} })
   })
 
   it('refreshes retained branches when a run ends, throttled by the max age', async () => {
@@ -315,7 +367,7 @@ describe('commit and push through the git store', () => {
     expect(git.status).toHaveBeenCalledTimes(2)
     // The lookup was fresh, so only a forced refresh fetches it again.
     expect(git.pullRequest).toHaveBeenCalledTimes(2)
-    expect(git.pullRequest).toHaveBeenLastCalledWith('p1', '/repo/a', 'feature')
+    expect(git.pullRequest).toHaveBeenLastCalledWith({ projectId: 'p1' }, 'feature', true)
   })
 
   it('refreshes the status, then rejects with the push failure when only the push fails', async () => {
@@ -346,6 +398,8 @@ describe('commit and push through the git store', () => {
     expect(git.push).toHaveBeenCalledWith('p1', '/repo/a')
     expect(git.status).toHaveBeenCalledTimes(2)
     expect(git.pullRequest).toHaveBeenCalledTimes(2)
+    // A push forces the lookup past both the store's age and the daemon's cache.
+    expect(git.pullRequest).toHaveBeenLastCalledWith({ projectId: 'p1' }, 'feature', true)
   })
 
   it('does not refresh after a push that fails', async () => {

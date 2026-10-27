@@ -103,6 +103,7 @@ import type {
   UserQuestionAnswers
 } from '../../shared/types'
 import { isThreadActivityActive } from '../../shared/types'
+import type { PullRequestRef } from '../../shared/pullRequests'
 import { visibleThreads } from '../../shared/threadLineage'
 import type { ProviderLoginResponse } from '../../shared/providerAuth'
 import type {
@@ -1822,9 +1823,15 @@ export function registerGuiIpc(
   registerHandler('git:lastCommitMessage', async (_e, projectId?: string, cwd?: string) =>
     gitService.lastCommitMessage(await resolveGitCwd(projectId, cwd))
   )
-  registerHandler('git:pullRequest', async (_e, projectId?: string, cwd?: string, branch?: string) =>
-    gitService.github.getPullRequest(await resolveGitCwd(projectId, cwd), typeof branch === 'string' ? branch : undefined)
-  )
+  registerHandler('pullRequests:get', async (_e, ref: PullRequestRef | undefined, branch?: string, force?: boolean) => {
+    const response = await guiMms.request<{ lookup: unknown }>('pullRequests.get', {
+      ...(typeof ref?.threadId === 'string' ? { threadId: ref.threadId } : {}),
+      ...(typeof ref?.projectId === 'string' ? { projectId: ref.projectId } : {}),
+      ...(typeof branch === 'string' ? { branch } : {}),
+      ...(force === true ? { force } : {})
+    })
+    return response.lookup
+  })
   registerHandler('git:createPullRequest', async (_e, projectId?: string, cwd?: string) => {
     await gitService.github.createPullRequest(await resolveGitCwd(projectId, cwd))
   })

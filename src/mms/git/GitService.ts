@@ -7,8 +7,10 @@ import { dirname, join, resolve, sep } from 'node:path'
 import simpleGit, { type SimpleGit, type StatusResult } from 'simple-git'
 import { redactGitText } from '../../shared/gitText'
 import { holdsRepositoryMutation } from '../actions/GitOperationCoordinator'
+import type { CodeHost } from './CodeHost'
 import { explicitActionGitEnv } from './gitEnv'
 import { IN_PROGRESS_GIT_MARKERS } from './gitMarkers'
+import { GitHubCodeHost } from './GitHubCodeHost'
 import { GitHubService } from './GitHubService'
 import { resolveRepositoryIdentity } from './RepositoryIdentity'
 import { acquireRepositoryLease, RepositoryLeaseAbortedError } from './RepositoryLease'
@@ -313,6 +315,8 @@ function failure(code: GitErrorCode, run: GitRun): AppError {
 export class GitService {
   /** Profile-scoped GitHub CLI integration alongside the existing Git operations. */
   readonly github = new GitHubService()
+  /** Pull request reads and creation; callers depend on the interface, not on GitHub. */
+  readonly codeHost: CodeHost = new GitHubCodeHost()
   private readonly mutations = new Map<string, Promise<void>>()
 
   constructor(private readonly options: { /** Overrides how long a commit may stay silent; for tests. */ commitSilenceMs?: number } = {}) {}
