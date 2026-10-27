@@ -458,7 +458,12 @@ describe('agent access level (SPEC §15.1)', () => {
       threadMeta: (id) => threads.get(id),
       listThreads: () => [...threads.values()],
       listProjects: () => [{ id: 'p1', name: 'One' }, { id: 'p2', name: 'Two' }],
-      searchThreads: (query, limit) => hits.filter((hit) => hit.threadName.toLowerCase().includes(query.toLowerCase()) || hit.snippet?.includes(query)).slice(0, limit),
+      searchThreads: (query, limit, options) =>
+        hits
+          .filter((hit) => !options?.allow || options.allow(threads.get(hit.threadId) ?? thread(hit.threadId, { projectId: hit.projectId })))
+          .filter((hit) => !options?.titlesOnly || hit.matchType !== 'message')
+          .filter((hit) => hit.threadName.toLowerCase().includes(query.toLowerCase()) || hit.snippet?.includes(query))
+          .slice(0, limit),
       threadMessages: (id) => messages.get(id) ?? [],
       threadActivity: (id) => activity.get(id) ?? { queuedCount: 0, pendingQuestions: [] },
       toolLedger: () => ledger,
@@ -496,6 +501,45 @@ describe('agent access level (SPEC §15.1)', () => {
     // An unknown or absent grant lists nothing extra.
     expect(registry.listForThread('parent', 'default', 'root' as never).map((tool) => tool.name)).not.toContain('thread_list')
     expect(registry.listForThread('parent').map((tool) => tool.name)).not.toContain('thread_list')
+  })
+
+  describe('registration guard for tools that take a thread id', () => {
+    const tool = (name: string, access: string, properties: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+      ({ name, description: name, inputSchema: { type: 'object', properties }, access, class: 'read', handler: () => ({ text: '' }), ...extra }) as never
+    const id = { type: 'string' }
+
+    it.each([
+      ['a reads tool with threadId', 'reads', { threadId: id }],
+      ['an actsAsCaller tool with threadId', 'actsAsCaller', { threadId: id }],
+      ['a startsThreads tool with sourceThreadId', 'startsThreads', { sourceThreadId: id }],
+      ['a readsOthers tool with a second thread id', 'readsOthers', { threadId: id, otherThreadId: id }],
+      ['a managesOthers tool with threadIds', 'managesOthers', { threadIds: { type: 'array', items: id } }],
+      ['a writesThreads tool with forkThreadId', 'writesThreads', { threadId: id, forkThreadId: id }],
+      ['a thread id nested in an array of objects', 'reads', { targets: { type: 'array', items: { type: 'object', properties: { parentThreadId: id } } } }]
+    ])('refuses %s', (_name, access, properties) => {
+      const registry = new ToolRegistry({ activeRunId: () => 'run-1' })
+      expect(() => registry.register(tool('t', access, properties))).toThrow(/takes a thread id .* the access check does not cover/)
+    })
+
+    it('accepts the tools the check covers, a tool that says where it checks, and a tool with no thread input', () => {
+      const registry = new ToolRegistry({ activeRunId: () => 'run-1' })
+      registry.register(tool('reads_others', 'readsOthers', { threadId: id }))
+      registry.register(tool('manages_others', 'managesOthers', { threadId: id }))
+      registry.register(tool('writes_own', 'writesThreads', { threadId: id }))
+      registry.register(tool('declared', 'reads', { threadId: id, sourceThreadId: id }, { threadArgChecked: 'the handler accepts the caller\'s own thread only' }))
+      registry.register(tool('plain', 'reads', { query: id, projectId: id }))
+      expect(() => registry.register(tool('blank', 'reads', { threadId: id }, { threadArgChecked: '  ' }))).toThrow(/does not cover/)
+    })
+
+    it('every tool of the Mousse registry passes it, so a new one must declare how it checks a thread', async () => {
+      const { registry } = await world()
+      for (const registered of registry.list()) {
+        const names = JSON.stringify(registered.inputSchema).match(/"\w*[tT]hreadIds?"\s*:/g) ?? []
+        if (names.length) expect(['readsOthers', 'managesOthers', 'writesThreads'].includes(registered.access) || Boolean(registered.threadArgChecked), registered.name).toBe(true)
+      }
+      expect(registry.get('queue_list')!.threadArgChecked).toBeTruthy()
+      expect(registry.get('thread_fork')!.threadArgChecked).toBeTruthy()
+    })
   })
 
   it('every access class registers, and the new tools carry the class and level the plan names', async () => {
@@ -759,6 +803,90 @@ describe('agent access level (SPEC §15.1)', () => {
     expect((await call('parent', 'manage', 'thread_search', { query: '  ' })).isError).toBe(true)
     expect((await call('parent', 'manage', 'thread_search', { query: 'x'.repeat(513) })).isError).toBe(true)
     expect((await call('parent', 'manage', 'thread_search', { query: 'work', limit: 201 })).isError).toBe(true)
+  })
+
+  it('thread_search hands the caller\'s project list and titles-only to the host, to apply before its limit', async () => {
+    const seen: Array<{ limit: number; titlesOnly?: boolean; maxMessageThreads?: number; allow?: (thread: Thread) => boolean }> = []
+    const { call, state } = await world({ level: 'read', projectIds: ['p1'] }, { searchThreads: (_query, limit, options) => { seen.push({ limit, ...options }); return [] } })
+    await call('parent', 'read', 'thread_search', { query: 'work', limit: 5 })
+    expect(seen[0]).toMatchObject({ limit: 5, titlesOnly: true })
+    const allow = seen[0].allow!
+    expect(allow(thread('in-list', { projectId: 'p1' }))).toBe(true)
+    expect(allow(thread('elsewhere', { projectId: 'p2' }))).toBe(false)
+    expect(allow(thread('loose', { projectId: undefined }))).toBe(false)
+    // A thread the caller launched is searchable whatever the list says.
+    expect(allow(thread('mine', { projectId: 'p2', createdByThreadId: 'parent' }))).toBe(true)
+    state.profile = profile({ level: 'manage', projectIds: ['p1'] })
+    await call('parent', 'manage', 'thread_search', { query: 'work' })
+    expect(seen[1]).toMatchObject({ limit: 50, titlesOnly: false, maxMessageThreads: 100 })
+  })
+
+  it('what read returns of a thread is a trimmed copy: no error text, request ids, provider sessions, homes or prompts', async () => {
+    const { fx, read, state, threads, strangerRun } = await world({ level: 'read' })
+    const child = await fx.delegate(strangerRun.runId, 'call-1', { prompt: 'a private prompt', instanceId: 'claude', model: 'secret-model' })
+    threads.set(child.childThreadId, thread(child.childThreadId))
+    fx.store.appendEvent({
+      threadId: 'stranger',
+      runId: strangerRun.runId,
+      type: 'attempt.created',
+      payload: {
+        attemptId: 'attempt-1', runId: strangerRun.runId, ordinal: 1, reason: 'initial', status: 'running', startedAt: '2026-10-12T00:00:00.000Z', completedAt: null,
+        providerRef: { provider: 'claude', sessionId: 'sess-secret' },
+        executionBinding: { homeId: 'C:\\Users\\someone\\.claude', accountGeneration: 'acct-secret' }
+      }
+    })
+    fx.store.appendEvent({ threadId: 'stranger', runId: strangerRun.runId, type: 'restart.note', payload: { note: 'secret restart detail' } })
+    fx.store.appendEvent({ threadId: 'stranger', runId: strangerRun.runId, type: 'agent.action', payload: { action: 'sent_message', actorThreadId: 'other', actorRunId: 'r', toolCallId: 'tc-secret', summary: 'a summary' } })
+    fx.engine.markTerminal(strangerRun.runId, 'failed', { error: 'boom at C:\\Users\\someone\\project\\secret.ts' })
+    const trimmed = await read('parent', 'read', { threadId: 'stranger' })
+    const text = JSON.stringify(trimmed.events)
+    for (const secret of ['sess-secret', 'someone', 'acct-secret', 'boom at', 'secret restart detail', 'tc-secret', 'a summary', 'a private prompt', 'secret-model', 'claude', 'promptDigest']) expect(text, secret).not.toContain(secret)
+    // What it keeps: which run, in what state, when.
+    const statuses = (trimmed.events as Array<{ type: string; payload: Record<string, unknown> }>).filter((event) => event.type === 'run.status')
+    expect(statuses.at(-1)!.payload).toMatchObject({ runId: strangerRun.runId, ordinal: 1, status: 'failed' })
+    expect(statuses.at(-1)!.payload).not.toHaveProperty('clientRequestId')
+    expect(trimmed.events.find((event: { type: string; payload: { attemptId?: string } }) => event.type === 'attempt.created' && event.payload.attemptId === 'attempt-1').payload).toEqual({
+      attemptId: 'attempt-1', runId: strangerRun.runId, ordinal: 1, reason: 'initial', status: 'running', startedAt: '2026-10-12T00:00:00.000Z', completedAt: null
+    })
+    expect(trimmed.events.find((event: { type: string }) => event.type === 'agent.action').payload).toEqual({ action: 'sent_message', actorThreadId: 'other', actorRunId: 'r' })
+    // A manager still sees the whole record.
+    state.profile = profile({ level: 'manage' })
+    const full = JSON.stringify((await read('parent', 'manage', { threadId: 'stranger' })).events)
+    for (const secret of ['sess-secret', 'boom at', 'secret restart detail']) expect(full, secret).toContain(secret)
+  })
+
+  it('a call during a provider-started continuation run is accepted for another thread at the granted level, and refused below it', async () => {
+    const state = { profile: profile({ level: 'manage' }) }
+    fx = delegationFixture()
+    const first = await fx.runningRun('parent')
+    await fx.runningRun('stranger')
+    fx.engine.markTerminal(first.runId, 'completed')
+    const ledger = { start: vi.fn(() => 'inv'), commit: vi.fn(), failed: vi.fn() }
+    const fake = fakeAppToolHost({ agentAccess: () => state.profile, threadMeta: (id) => thread(id), toolLedger: () => ledger })
+    let release!: (gate: { runId: string | null }) => void
+    const gate = new Promise<{ runId: string | null }>((resolve) => { release = resolve })
+    fake.host.awaitLiveRun = () => gate
+    const { registry, turns, request } = appToolRegistry(fx.engine, fake.host)
+    const previous = turns.register(appTurn({ threadId: 'parent', runId: first.runId }))
+    const asCredential = (accessLevel: AgentAccessLevel) => {
+      const built = request({ threadId: 'parent', runId: first.runId, binding: 'per_call', provider: 'claude' })
+      return { ...built, credential: { ...built.credential, accessLevel } }
+    }
+    const args = { threadId: 'stranger', [TURN_TOKEN_KEY]: previous.turn.turnToken }
+    // The credential still names the run that ended; the provider's own turn is about to become active.
+    const manager = registry.call('thread_read', { ...args }, asCredential('manage'))
+    const reader = registry.call('thread_read', { ...args, view: 'messages' }, asCredential('read'))
+    const lineage = registry.call('thread_list', { [TURN_TOKEN_KEY]: previous.turn.turnToken }, asCredential('lineage')).catch((error) => error)
+    const continuation = await fx.runningRun('parent')
+    turns.register(appTurn({ threadId: 'parent', runId: continuation.runId }), { continuation: true })
+    release({ runId: continuation.runId })
+    const read = JSON.parse((await manager).text)
+    expect(read).toMatchObject({ threadId: 'stranger', scope: 'manage' })
+    // The same continuation run: a credential granted read is still refused the transcript, and lineage the listing.
+    await expect(reader).rejects.toMatchObject({ code: 'mousse_scope_denied' })
+    expect((await lineage).code).toBe('mousse_scope_denied')
+    // The listing refused by the central check never reached the ledger; the two thread_read calls did, under the continuation run.
+    expect(ledger.start).toHaveBeenCalledTimes(2)
   })
 
   it('a tool whose host method is absent answers "not available in this host"', async () => {

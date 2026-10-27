@@ -1,6 +1,7 @@
 import type { ModelOverride } from '../../shared/providerInstances'
 import type { PermissionMode } from '../../shared/permissionMode'
 import { createErrorProvider } from '../../shared/errors'
+import { isAgentAccessLevel, narrowAgentAccess, type AgentAccessLevel } from '../../shared/settings'
 import {
   existsSync,
   mkdirSync,
@@ -58,6 +59,8 @@ interface ThreadMeta {
   lineage?: ThreadLineage
   /** The thread whose agent launched this one with `thread_create`; not a subagent relation. */
   createdByThreadId?: string
+  /** See `Thread.accessCeiling`. */
+  accessCeiling?: AgentAccessLevel
   workspaceBinding?: SubagentWorkspaceBinding
   /** Opt-in isolated git worktree. OFF by default; undefined treated as false. */
   worktreeEnabled?: boolean
@@ -154,6 +157,18 @@ function validateNativeContext(value: unknown, filePath: string): NativeLlmConte
 export function executionThreadId(executionKey: string): string {
   if (!executionKey || executionKey.length > 1024) throw new Error('Invalid execution thread key')
   return uuidv5('mousse-execution-thread:' + executionKey, uuidv5.URL)
+}
+
+/** What `searchThreads` is asked to do for a caller that may see only part of the profile. */
+export interface ThreadSearchOptions {
+  /** Subagent threads fold under their parent (see `visibleThreads`). */
+  hideSubagents?: boolean
+  /** Only threads this accepts are searched, applied before the limit. */
+  allow?: (thread: Thread) => boolean
+  /** Match titles and project names only; no transcript is read. */
+  titlesOnly?: boolean
+  /** Read transcripts of at most this many threads (the most recently updated first). */
+  maxMessageThreads?: number
 }
 
 export class ThreadDataStore extends EventEmitter {
@@ -265,6 +280,8 @@ export class ThreadDataStore extends EventEmitter {
       ownerThreadId?: string
       /** Never `ownerThreadId`: a launched thread is neither nested under nor deleted with its creator. */
       createdByThreadId?: string
+      /** See `Thread.accessCeiling`. */
+      accessCeiling?: AgentAccessLevel
     }
   ): Thread {
     this.invalidateListCache()
@@ -281,6 +298,7 @@ export class ThreadDataStore extends EventEmitter {
     if (opts?.worktreeEnabled === true) meta.worktreeEnabled = true
     if (opts?.lineage) meta.lineage = structuredClone(opts.lineage)
     if (opts?.createdByThreadId) meta.createdByThreadId = opts.createdByThreadId
+    if (isAgentAccessLevel(opts?.accessCeiling)) meta.accessCeiling = opts.accessCeiling
     if (opts?.modelOverride) meta.modelOverride = structuredClone(opts.modelOverride)
     if (opts?.permissionMode) meta.permissionMode = opts.permissionMode
     if (opts?.workspaceBinding) meta.workspaceBinding = structuredClone(opts.workspaceBinding)
@@ -533,10 +551,22 @@ export class ThreadDataStore extends EventEmitter {
 
   private nameGuard: ((thread: Thread, name: string) => void) | null = null
 
+  /**
+   * Narrows the thread's access ceiling to `level` (never widens it; see `Thread.accessCeiling`), without
+   * touching `updatedAt`. Returns the ceiling now in force.
+   */
+  capAccessCeiling(id: string, level: AgentAccessLevel): AgentAccessLevel {
+    const thread = this.getThread(id)
+    if (!thread) throw new Error(`Thread not found: ${id}`)
+    const next = narrowAgentAccess(isAgentAccessLevel(thread.accessCeiling) ? thread.accessCeiling : undefined, level) ?? level
+    if (thread.accessCeiling !== next) this.updateThreadMeta(id, { accessCeiling: next }, { touch: false })
+    return next
+  }
+
   /** `touch: false` keeps `updatedAt`, for repairs that must not reorder the sidebar. */
   updateThreadMeta(
     id: string,
-    partial: Partial<Pick<Thread, 'name' | 'modelOverride' | 'permissionMode' | 'worktreeEnabled' | 'lineage' | 'createdByThreadId' | 'workspaceBinding' | 'pullRequest'>>,
+    partial: Partial<Pick<Thread, 'name' | 'modelOverride' | 'permissionMode' | 'worktreeEnabled' | 'lineage' | 'createdByThreadId' | 'accessCeiling' | 'workspaceBinding' | 'pullRequest'>>,
     opts: { touch?: boolean } = {}
   ): Thread {
     const thread = this.getThread(id)
@@ -1409,7 +1439,7 @@ export class ThreadDataStore extends EventEmitter {
    * fold under their parent (see `visibleThreads`); it applies before `limit`, so hidden threads
    * never use up result slots.
    */
-  searchThreads(query: string, limit = 50, options: { hideSubagents?: boolean } = {}): Array<{
+  searchThreads(query: string, limit = 50, options: ThreadSearchOptions = {}): Array<{
     threadId: string
     threadName: string
     projectId?: string
@@ -1435,7 +1465,14 @@ export class ThreadDataStore extends EventEmitter {
     const projects = this.projectManager.listProjects()
     const projectNameById = new Map(projects.map((p) => [p.id, p.name]))
     const inventory = this.listAllThreads()
-    const threads = options.hideSubagents ? visibleThreads(inventory) : inventory
+    let threads = options.hideSubagents ? visibleThreads(inventory) : inventory
+    // Who may see a thread is decided before anything is matched, so excluded threads never use up
+    // result slots or message scans.
+    if (options.allow) threads = threads.filter((thread) => options.allow!(thread))
+    // Bounded scans read the transcripts of the most recently updated threads only.
+    const scanBudget = options.maxMessageThreads ?? Number.POSITIVE_INFINITY
+    if (Number.isFinite(scanBudget) && !options.titlesOnly) threads = [...threads].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    let scanned = 0
 
     for (const thread of threads) {
       if (thread.settledAt) continue
@@ -1465,6 +1502,8 @@ export class ThreadDataStore extends EventEmitter {
         })
       }
 
+      if (options.titlesOnly || scanned >= scanBudget) continue
+      scanned += 1
       try {
         const messages = this.readJsonFile<Array<{ id: string; content: string }>>(
           join(this.getThreadDir(thread.id), 'messages.json'),

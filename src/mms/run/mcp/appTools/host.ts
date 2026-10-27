@@ -5,6 +5,7 @@ import type { ApprovalTag } from '../../../orchestrator/UserQuestionService'
 import type { ChatMessage, DocumentOpenPayload, PendingUserQuestions, Thread, UserQuestionAnswers } from '../../../../shared/types'
 import type { DevGuiTools } from '../../../devgui/DevGuiTools'
 import type { SkillsRegistry } from '../../../integrations/skills/SkillsRegistry'
+import type { ThreadSearchOptions } from '../../../data/ThreadDataStore'
 import type { QuickActionTools } from '../../../orchestrator/QuickActionTools'
 import type { WebTools } from '../../../orchestrator/WebTools'
 import type { TaskQueue } from '../../../tasks/TaskQueue'
@@ -76,8 +77,12 @@ export interface AppToolHost extends DelegationToolsHost {
   listThreads?(): Thread[]
   /** The profile's projects. */
   listProjects?(): Array<{ id: string; name: string }>
-  /** Matches over thread names, project names and messages; subagent threads are not searched. */
-  searchThreads?(query: string, limit: number): ThreadSearchHit[]
+  /**
+   * Matches over thread names, project names and messages; subagent threads are not searched. `allow`
+   * (which threads the caller may see) and `titlesOnly` are applied before the limit and before any
+   * transcript is read.
+   */
+  searchThreads?(query: string, limit: number, options?: Pick<ThreadSearchOptions, 'allow' | 'titlesOnly' | 'maxMessageThreads'>): ThreadSearchHit[]
   /** The thread's visible transcript. */
   threadMessages?(threadId: string): ChatMessage[]
   /** What waits on a thread: its queued messages and unanswered questions. */

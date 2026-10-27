@@ -247,10 +247,45 @@ describe('RunEngine delegation (SPEC §14.1-§14.2)', () => {
       delegation: { parentThreadId: 'parent', parentRunId, prompt: 'again', wake: 'always', ...overrides }
     })
 
+    it('a follow-up row is never wider than any earlier task of the subagent, whatever the send carries', async () => {
+      f = delegationFixture()
+      const parent = await f.runningRun('parent')
+      const first = await f.delegate(parent.runId, 'call-1', { workspace: 'shared', role: 'review', accessLevel: 'manage' })
+      f.finish(first.childRunId, 'first')
+      const levels = () => f!.engine.delegations.listForChildThread('child-1').map((task) => task.accessLevel)
+      const send = async (id: string, accessLevel?: 'lineage' | 'read' | 'manage') => {
+        const sent = await f!.engine.dispatch({
+          kind: 'send', threadId: 'child-1', clientRequestId: id, source: 'delegation', prompt: 'again',
+          delegation: { parentThreadId: 'parent', parentRunId: parent.runId, prompt: 'again', wake: 'always', workspace: 'shared', role: 'review', ...(accessLevel ? { accessLevel } : {}) }
+        })
+        if (sent.status !== 'accepted') throw new Error('send rejected')
+        f!.finish(sent.runId, id)
+        return sent
+      }
+      await send('narrow', 'read')
+      // Carrying a wider level (or none) cannot restore what the earlier task narrowed.
+      await send('wider', 'manage')
+      await send('none')
+      expect(levels()).toEqual(['manage', 'read', 'read', 'read'])
+    })
+
+    it('a follow-up a person types takes the narrowest level the subagent has been given, not its first', async () => {
+      f = delegationFixture()
+      const parent = await f.runningRun('parent')
+      const first = await f.delegate(parent.runId, 'call-1', { workspace: 'shared', role: 'review', accessLevel: 'manage' })
+      f.finish(first.childRunId, 'first')
+      const narrowed = await followUp(f, parent.runId, { workspace: 'shared', role: 'review', accessLevel: 'read' })
+      if (narrowed.status !== 'accepted') throw new Error('send rejected')
+      f.finish(narrowed.runId, 'second')
+      const sent = await f.engine.dispatch({ kind: 'send', threadId: 'child-1', clientRequestId: 'typed', source: 'gui', prompt: 'and again' })
+      if (sent.status !== 'accepted') throw new Error('send rejected')
+      expect(f.engine.delegations.getByChildRun(sent.runId)).toMatchObject({ accessLevel: 'read' })
+    })
+
     it('writes the run and its delegation row in one commit, copying the subagent\'s policy', async () => {
       f = delegationFixture()
       const parent = await f.runningRun('parent')
-      const first = await f.delegate(parent.runId, 'call-1', { workspace: 'shared', role: 'review', instanceId: 'pi:openai', model: 'gpt-x' })
+      const first = await f.delegate(parent.runId, 'call-1', { workspace: 'shared', role: 'review', instanceId: 'pi:openai', model: 'gpt-x', accessLevel: 'manage' })
       f.finish(first.childRunId, 'first')
       const sent = await followUp(f, parent.runId, { workspace: 'shared', role: 'review', provider: 'pi:openai', model: 'gpt-x', modeCeiling: 'plan', accessLevel: 'read' })
       if (sent.status !== 'accepted') throw new Error('send rejected')

@@ -231,6 +231,12 @@ export interface MousseTool {
   minLevel?: AgentAccessLevel
   /** A `managesOthers` tool that also accepts a thread the caller launched, at any level. */
   launchedOk?: true
+  /**
+   * A tool that takes a thread id the central check does not cover (the check covers `threadId` of a
+   * `readsOthers`, `managesOthers` or `writesThreads` tool) says here, in a few words, where the handler
+   * checks it. Registration refuses such a tool without it.
+   */
+  threadArgChecked?: string
   handler(args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> | ToolOutcome
 }
 

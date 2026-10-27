@@ -133,6 +133,33 @@ export interface ToolRegistryOptions {
   access?: ToolAccessPolicy
 }
 
+/** Every property name an input schema declares, at any depth. */
+function schemaPropertyNames(schema: unknown, depth = 0): string[] {
+  if (!schema || typeof schema !== 'object' || depth > 8) return []
+  const out: string[] = []
+  for (const [key, value] of Object.entries(schema as Record<string, unknown>)) {
+    if (key === 'properties' && value && typeof value === 'object' && !Array.isArray(value)) {
+      for (const [name, inner] of Object.entries(value as Record<string, unknown>)) out.push(name, ...schemaPropertyNames(inner, depth + 1))
+    } else out.push(...schemaPropertyNames(value, depth + 1))
+  }
+  return out
+}
+
+/**
+ * The thread-id inputs of a tool the central check does not cover. The check reads `threadId` of a
+ * `readsOthers`, `managesOthers`, `writesThreads` or `editsWorkspace` tool; any other input that names a thread
+ * (`sourceThreadId`, `threadIds`, ...) and `threadId` of any other class must be declared as checked
+ * by the handler (`threadArgChecked`), so a new tool cannot read another thread by accident.
+ */
+function uncoveredThreadArgs(tool: MousseTool): string[] {
+  if (tool.threadArgChecked?.trim()) return []
+  const covered = tool.access === 'readsOthers' || tool.access === 'managesOthers' || tool.access === 'writesThreads' || tool.access === 'editsWorkspace'
+  return [...new Set(schemaPropertyNames(tool.inputSchema))].filter((name) => {
+    if (!/^(?:\w*ThreadIds?|threadIds?)$/i.test(name)) return false
+    return !(name === 'threadId' && covered)
+  })
+}
+
 function notLive(message: string): McpToolError {
   return new McpToolError('mousse_caller_not_live', message)
 }
@@ -155,6 +182,11 @@ export class ToolRegistry {
       throw new Error(`Mousse tool ${tool.name} has no access class (reads | actsAsCaller | writesThreads | startsThreads | editsWorkspace)`)
     if (!TOOL_CLASSES.has(tool.class as string)) throw new Error(`Mousse tool ${tool.name} has no class (read | mutation | delegation)`)
     if (typeof tool.handler !== 'function') throw new Error(`Mousse tool ${tool.name} has no handler`)
+    const uncovered = uncoveredThreadArgs(tool)
+    if (uncovered.length)
+      throw new Error(
+        `Mousse tool ${tool.name} takes a thread id (${uncovered.join(', ')}) that the access check does not cover: make it readsOthers, managesOthers, writesThreads or editsWorkspace (for threadId), or say where it is checked with threadArgChecked`
+      )
     if (this.tools.has(tool.name)) throw new Error(`Mousse tool ${tool.name} is already registered`)
     this.tools.set(tool.name, tool)
     return this

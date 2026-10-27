@@ -187,9 +187,9 @@ export class MousseMcpServer implements McpAttachmentProvider {
     )
     const { registry, credentials } = this.options
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      // Stable for the thread (its ceiling, not the turn's mode), so a list a runtime cached stays valid.
-      // Tools that need a wider agent access level than the credential holds now are left out; the
-      // call-time check refuses them in any case.
+      // For the thread's ceiling, not the turn's mode, and for the credential's agent access level as it
+      // is now. A runtime that caches the list gets a new bearer when the level changes (the level is part
+      // of the runtime generation), and the call-time check refuses a tool the list left out in any case.
       tools: registry.listForThread(resolved.threadId, 'default', (credentials.current(resolved.tokenHash) ?? resolved).accessLevel).map((tool) => ({
         name: tool.name,
         description: tool.description,

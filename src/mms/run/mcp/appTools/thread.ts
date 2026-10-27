@@ -25,6 +25,8 @@ const THREAD_LIST_MAX_LIMIT = 500
 const THREAD_SEARCH_DEFAULT_LIMIT = 50
 const THREAD_SEARCH_MAX_LIMIT = 200
 const THREAD_SEARCH_MAX_QUERY_CHARS = 512
+/** A `manage` search reads the transcripts of this many threads at most (the most recently updated). */
+const THREAD_SEARCH_MESSAGE_THREADS = 100
 /** Lineage walks stop here; deeper chains are treated as unrelated. */
 const LINEAGE_MAX_DEPTH = 64
 
@@ -53,6 +55,11 @@ function lineageView(events: ThreadEvent[], callerThreadId: string, scope: ToolS
   const out: ThreadEvent[] = []
   for (const event of events) {
     if (event.type === 'run.result' && scope === 'read') continue
+    // Through the `read` level alone (any thread of the allowed projects), only a trimmed copy.
+    if (scope === 'read') {
+      if (lineageVisible(event.type) || event.type === 'delegation.status') out.push(readProjection(event))
+      continue
+    }
     if (lineageVisible(event.type)) out.push(event)
     else if (event.type === 'delegation.status') {
       const delegation = event.payload as DelegationRecord
@@ -60,6 +67,41 @@ function lineageView(events: ThreadEvent[], callerThreadId: string, scope: ToolS
     }
   }
   return out
+}
+
+/**
+ * What the `read` level sees of an event: ids, status and times. Never an error text, a request id, a
+ * prompt digest, a provider session or the home and account a run was bound to; an event type this does
+ * not know keeps no payload.
+ */
+function readProjection(event: ThreadEvent): ThreadEvent {
+  const payload = (event.payload && typeof event.payload === 'object' ? event.payload : {}) as Record<string, unknown>
+  const pick = (...keys: string[]): Record<string, unknown> =>
+    Object.fromEntries(keys.filter((key) => payload[key] !== undefined).map((key) => [key, payload[key]]))
+  switch (event.type) {
+    case 'run.created':
+    case 'run.status': {
+      const outcome = payload.outcome as { interruptedBy?: unknown } | null | undefined
+      return {
+        ...event,
+        payload: {
+          ...pick('runId', 'threadId', 'ordinal', 'status', 'source', 'requestedAt', 'startedAt', 'completedAt'),
+          ...(outcome?.interruptedBy ? { outcome: { interruptedBy: outcome.interruptedBy } } : {})
+        }
+      }
+    }
+    case 'attempt.created':
+    case 'attempt.status':
+      return { ...event, payload: pick('attemptId', 'runId', 'ordinal', 'reason', 'status', 'startedAt', 'completedAt') }
+    case 'delegation.status':
+      return { ...event, payload: pick('delegationId', 'parentThreadId', 'childThreadId', 'status', 'createdAt', 'completedAt') }
+    case 'thread.lineage':
+      return { ...event, payload: pick('threadId', 'parentThreadId', 'rootThreadId', 'relationship') }
+    case 'agent.action':
+      return { ...event, payload: pick('action', 'actorThreadId', 'actorRunId') }
+    default:
+      return { ...event, payload: null }
+  }
 }
 
 /** How `targetThreadId` sits in the caller's delegation tree: below it, above it, or neither. */
@@ -257,7 +299,13 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
         const manage = ctx.scope === 'manage'
         const projectIds = allowedProjectIds()
         // Message matches (and so their existence) are transcript content: a manager's.
-        const results = host.searchThreads(args.query, THREAD_SEARCH_MAX_LIMIT)
+        // Who may be seen, and titles only below manage, are decided by the host before it applies the limit
+        // or reads any transcript; transcripts are scanned for the most recent threads only.
+        const results = host.searchThreads(args.query, limit, {
+          allow: (found) => inProjects(projectIds, found.projectId) || found.createdByThreadId === ctx.caller.threadId,
+          titlesOnly: !manage,
+          maxMessageThreads: THREAD_SEARCH_MESSAGE_THREADS
+        })
           .filter((hit) => manage || hit.matchType !== 'message')
           .filter((hit) => inProjects(projectIds, hit.projectId) || host.threadMeta?.(hit.threadId)?.createdByThreadId === ctx.caller.threadId)
           .slice(0, limit)
@@ -269,6 +317,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
       name: 'queue_list',
       description: 'List the messages queued on your thread (they run after the current turn).',
       inputSchema: { type: 'object', properties: { threadId: { type: 'string', description: 'Your thread only.' } } },
+      threadArgChecked: 'the handler accepts the caller\'s own thread only',
       access: 'reads',
       class: 'read',
       offered: () => false,
@@ -314,6 +363,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
         }
       },
       access: 'startsThreads',
+      threadArgChecked: 'the handler accepts the caller\'s own thread or its lineage as the source',
       class: 'mutation',
       offered: () => false,
       handler: async (args, ctx) => {
@@ -327,6 +377,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
           throw new Error("seedFrom must be 'checkpoint' or 'current_head'")
         const forked = await engine.forkThread({
           sourceThreadId,
+          // The fork keeps the limits of the agent that makes it (SPEC §15.1).
+          accessLevel: ctx.caller.accessLevel,
           atRunOrdinal,
           title: args.title as string | undefined,
           seedFrom: args.seedFrom as 'checkpoint' | 'current_head' | undefined,
@@ -350,6 +402,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
       // it asks unless the run's permission mode allows edits.
       access: 'editsWorkspace',
       permissionKey: PERMISSION_KEYS.mousseMergeBack,
+      threadArgChecked: 'the handler accepts the caller's own fork only',
       class: 'mutation',
       offered: () => false,
       handler: async (args, ctx) => {
