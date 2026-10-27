@@ -79,19 +79,21 @@ describe('Pi RPC’s evidence gate', () => {
     expect(piRpcCaps({ platform: 'darwin', piVersion: version, evidence: [record({ environment: 'wsl2' })] })).toBe(PI_RPC_CAPS)
   })
 
-  it('the shipped records: exact on Linux (from WSL2), no-shell on Windows, for this Pi only', () => {
+  it('the shipped records: exact on Linux (from WSL2) and macOS, no-shell on Windows, for this Pi only', () => {
     expect(CONTAINMENT_EVIDENCE.filter((entry) => entry.driver === 'pi').map(({ platform, environment, cliVersion, items }) => ({ platform, environment, cliVersion, items }))).toEqual([
       { platform: 'linux', environment: 'wsl2', cliVersion: version, items: PI_RPC_EVIDENCE_ITEMS },
-      { platform: 'win32', environment: undefined, cliVersion: version, items: PI_RPC_NO_SHELL_ITEMS }
+      { platform: 'win32', environment: undefined, cliVersion: version, items: PI_RPC_NO_SHELL_ITEMS },
+      { platform: 'darwin', environment: undefined, cliVersion: version, items: PI_RPC_EVIDENCE_ITEMS }
     ])
     expect(piRpcCaps({ platform: 'linux', piVersion: version, evidence: CONTAINMENT_EVIDENCE })).toBe(PI_RPC_EXACT_CAPS)
     expect(piRpcCaps({ platform: 'win32', piVersion: version, evidence: CONTAINMENT_EVIDENCE })).toBe(PI_RPC_NO_SHELL_CAPS)
-    for (const platform of ['linux', 'win32'] as const)
+    expect(piRpcCaps({ platform: 'darwin', piVersion: version, evidence: CONTAINMENT_EVIDENCE })).toBe(PI_RPC_EXACT_CAPS)
+    for (const platform of ['linux', 'win32', 'darwin'] as const)
       expect(piRpcCaps({ platform, piVersion: '0.86.0', evidence: CONTAINMENT_EVIDENCE })).toBe(PI_RPC_CAPS)
   })
 
-  it('the shipped records claim nothing on macOS', () => {
-    expect(piRpcCaps({ platform: 'darwin', piVersion: version, evidence: CONTAINMENT_EVIDENCE })).toBe(PI_RPC_CAPS)
+  it('the shipped records claim nothing on a platform without a record', () => {
+    expect(piRpcCaps({ platform: 'freebsd', piVersion: version, evidence: CONTAINMENT_EVIDENCE })).toBe(PI_RPC_CAPS)
   })
 
   it('with evidence, an RPC instance runs definitions itself; without it, and on the legacy engine, they stay on the loop', () => {

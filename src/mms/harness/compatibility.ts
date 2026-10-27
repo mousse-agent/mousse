@@ -53,7 +53,7 @@ export const PI_RPC_EVIDENCE_ITEMS: readonly number[] = Object.freeze([1, 2, 3, 
 
 /**
  * A no-shell record's items: every Pi RPC item but the contained shell (10), for a platform where
- * Pi's `bash` runs uncontained (Windows; macOS until a Mac run). Mousse still decides every call,
+ * Pi's `bash` runs uncontained (Windows). Mousse still decides every call,
  * so tool control is `exact`, but containment stays `weak`.
  */
 export const PI_RPC_NO_SHELL_ITEMS: readonly number[] = Object.freeze(PI_RPC_EVIDENCE_ITEMS.filter((item) => item !== 10))
@@ -65,12 +65,13 @@ export const PI_RPC_NO_SHELL_ITEMS: readonly number[] = Object.freeze(PI_RPC_EVI
  * - Pi RPC: Linux, from runs in WSL2 (a real Linux kernel in a VM on Windows, accepted as Linux
  *   evidence): items 1–9 and 10 on their own files, 11 and 12 again at the final change.
  *   Windows (native Windows 11, x64): a no-shell record, items 1–9, 11 and 12 on their own files
- *   (Pi's shell runs uncontained there, so item 10 does not apply). macOS needs a run on a Mac;
- *   until then it has none, and without a record definitions run on the loop.
+ *   (Pi's shell runs uncontained there, so item 10 does not apply). macOS (macOS 26.6.2 on Apple
+ *   silicon): items 1–12 on their own files.
  */
 export const CONTAINMENT_EVIDENCE: readonly ContainmentEvidence[] = Object.freeze([
   Object.freeze({ driver: 'pi', kind: 'tools', cliVersion: '0.85.1', platform: 'linux', environment: 'wsl2', items: PI_RPC_EVIDENCE_ITEMS, recordedAt: '2026-10-27T13:38:46Z' }),
-  Object.freeze({ driver: 'pi', kind: 'tools', cliVersion: '0.85.1', platform: 'win32', items: PI_RPC_NO_SHELL_ITEMS, recordedAt: '2026-10-27T14:41:24Z' })
+  Object.freeze({ driver: 'pi', kind: 'tools', cliVersion: '0.85.1', platform: 'win32', items: PI_RPC_NO_SHELL_ITEMS, recordedAt: '2026-10-27T14:41:24Z' }),
+  Object.freeze({ driver: 'pi', kind: 'tools', cliVersion: '0.85.1', platform: 'darwin', items: PI_RPC_EVIDENCE_ITEMS, recordedAt: '2026-10-27T17:25:23Z' })
 ] satisfies ContainmentEvidence[])
 
 export interface EvidenceQuery {
@@ -95,7 +96,7 @@ export function hasContainmentEvidence(query: EvidenceQuery, table: readonly Con
 
 /**
  * Whether this platform has shell-containment evidence: a record holding the contained shell (Pi
- * RPC's item 10), for any version. Where it has none (Windows; macOS until a Mac run), an agent
+ * RPC's item 10), for any version. Where it has none (Windows), an agent
  * definition's shell command asks a person first on every runtime, the loop included, and an
  * unattended definition runs none (`prepareTrustedToolDispatch`'s `uncontainedShell`).
  */

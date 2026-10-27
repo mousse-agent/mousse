@@ -88,9 +88,10 @@ describe('a definition’s shell where the platform’s shell is not contained',
 })
 
 describe('which platforms have shell-containment evidence', () => {
-  it('Linux has it (its full Pi record); Windows (a no-shell record) and macOS (none) do not', () => {
+  it('Linux and macOS have it (their full Pi records); Windows (a no-shell record) and a platform without a record do not', () => {
     expect(platformShellContained('linux', CONTAINMENT_EVIDENCE)).toBe(true)
     expect(platformShellContained('win32', CONTAINMENT_EVIDENCE)).toBe(false)
-    expect(platformShellContained('darwin', CONTAINMENT_EVIDENCE)).toBe(false)
+    expect(platformShellContained('darwin', CONTAINMENT_EVIDENCE)).toBe(true)
+    expect(platformShellContained('freebsd', CONTAINMENT_EVIDENCE)).toBe(false)
   })
 })
