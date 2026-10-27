@@ -62,6 +62,12 @@ export interface RunOutcome {
   stopRequested?: boolean
   /** SPEC §16.4: the interrupted run this send continues ("Continue" after a restart). */
   continuationOf?: string
+  /**
+   * The agent access level this run's turn was granted when it started (SPEC §15.1), kept so a run that
+   * continues it (a resume after a pause, a "Continue" after a restart, a provider's own continuation)
+   * is never granted more. Absent on runs from before it was recorded, and on a run whose turn never started.
+   */
+  accessGrant?: AgentAccessLevel
   /** Set while the run is `paused`, and kept after the pause ended. */
   pause?: RunPause
   /** On the run that continues a paused one: whether the timer (`auto`) or a person (`user`) resumed it. */

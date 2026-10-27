@@ -1758,6 +1758,33 @@ export class OrchestratorService extends EventEmitter {
     )
   }
 
+  /**
+   * A run that continues another (the resume after a usage-limit pause, whether the timer or a person
+   * made it, a "Continue" after a restart, or a turn a provider started itself) is never granted more
+   * than the run it continues, whatever the setting says now. The earlier run's grant is the one recorded
+   * when its turn started; one that was never recorded, or a continuation whose original cannot be read,
+   * is `lineage`.
+   */
+  private continuedGrant(runId: string, threadId: string, grant: AgentAccessLevel): AgentAccessLevel {
+    try {
+      const engine = this.runEngine
+      const run = engine?.getRun(runId)
+      if (!engine || !run) return grant
+      let earlier: RunRecord | null | undefined
+      if (run.outcome?.continuationOf) {
+        earlier = engine.getRun(run.outcome.continuationOf)
+        if (!earlier) return 'lineage'
+      } else if (run.source === 'provider-continuation') {
+        earlier = engine.listRuns(threadId).filter((candidate) => candidate.ordinal < run.ordinal).sort((a, b) => b.ordinal - a.ordinal)[0]
+      }
+      if (!earlier) return grant
+      const held = earlier.outcome?.accessGrant
+      return narrowAgentAccess(grant, isAgentAccessLevel(held) ? held : 'lineage') ?? 'lineage'
+    } catch {
+      return 'lineage'
+    }
+  }
+
   /** The delegation tools of an in-process turn, holding the grant its registered turn was given at its start. */
   private turnDelegationTools(session: ThreadSession, runId: string, mode: ChatMode, granted: AgentAccessLevel | undefined): DelegationToolHost {
     const ceiling = this.modeCeilingFor(session.threadId, mode)
@@ -1795,13 +1822,20 @@ export class OrchestratorService extends EventEmitter {
   private registerAppTurn(session: ThreadSession, runId: string, mode: ChatMode, continuation: boolean): { turn: AppToolTurn; drop(): void } {
     const projectPath = session.projectCwd ?? undefined
     const modeCeiling = this.modeCeilingFor(session.threadId, mode)
+    const accessLevel = this.continuedGrant(runId, session.threadId, this.grantFor(session.threadId, modeCeiling))
+    // Kept on the run, so whatever continues it is never granted more than it was.
+    try {
+      this.runEngine?.recordAccessGrant(runId, accessLevel)
+    } catch (error) {
+      console.warn('The access grant of the run could not be recorded', { runId, error: error instanceof Error ? error.message : String(error) })
+    }
     return this.appToolTurns.register({
       threadId: session.threadId,
       runId,
       mode,
       modeFacts: modeFactsFor(this.modeRegistry, mode, projectPath),
       modeCeiling,
-      accessLevel: this.grantFor(session.threadId, modeCeiling),
+      accessLevel,
       subagent: false,
       discovery: false,
       projectPath,

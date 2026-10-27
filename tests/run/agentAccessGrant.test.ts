@@ -339,6 +339,75 @@ describe('agent access grant (SPEC §15.1)', () => {
     expect(grant(d, out[0].childThreadId)).toBe('lineage')
   }, 30_000)
 
+  describe('a run that continues another is never granted more than the run it continues', () => {
+    const pauseOf = { reason: 'usage_limit' as const, until: '2099-01-01T00:00:00.000Z', estimated: false, count: 1, autoResume: false }
+    /** A run of `threadId` that is paused, as a turn that hit a usage limit leaves it; `grant` is what its turn was granted. */
+    const pausedRun = async (d: Phase6Daemon, threadId: string, grant?: AgentAccessLevel) => {
+      const sent = await d.engine.dispatch({ kind: 'send', threadId, clientRequestId: `paused:${threadId}`, source: 'gui' })
+      if (sent.status !== 'accepted') throw new Error('send rejected')
+      d.engine.markStarting(sent.runId)
+      d.engine.markRunning(sent.runId)
+      if (grant) d.engine.recordAccessGrant(sent.runId, grant)
+      return d.engine.pauseRun({ runId: sent.runId, pause: pauseOf })
+    }
+
+    it('records the grant of each turn on its run, narrower for a plan turn', async () => {
+      const { d, project } = daemon(async () => undefined)
+      setProfile(d, 'manage')
+      const thread = d.store.createThread('Recorder', project.id)
+      const normal = await d.orch.send('Hello', false, { threadId: thread.id, clientRequestId: 'normal' })
+      const plan = await d.orch.send({ content: 'Plan it', mode: 'plan' }, false, { threadId: thread.id, clientRequestId: 'plan' })
+      expect(d.engine.getRun(normal.runId!)?.outcome?.accessGrant).toBe('manage')
+      expect(d.engine.getRun(plan.runId!)?.outcome?.accessGrant).toBe('read')
+      // A run's recorded grant only ever narrows.
+      expect(d.engine.recordAccessGrant(normal.runId!, 'manage')).toBeUndefined()
+    })
+
+    it.each([['resume', 'the timer'], ['resume_now', 'a person']])('a paused run resumed by %s (%s) keeps the run\'s grant when the setting has risen', async (source) => {
+      const out: Started[] = []
+      const { d, project } = daemon(async (delegation) => {
+        out.push(await delegate(delegation, `after-${source}`))
+      })
+      setProfile(d, 'lineage')
+      const thread = d.store.createThread('Paused', project.id)
+      const paused = await pausedRun(d, thread.id, 'lineage')
+      // The setting is raised while the run waits for the limit to reset.
+      setProfile(d, 'manage')
+      expect(grant(d, thread.id)).toBe('manage')
+      const response = await d.orch.send('Delegate it', false, { threadId: thread.id, clientRequestId: `resume:${paused.runId}`, source, continuationOfRunId: paused.runId })
+      const continued = d.engine.getRun(response.runId!)!
+      expect(continued.outcome).toMatchObject({ continuationOf: paused.runId, accessGrant: 'lineage' })
+      // What the continuing turn delegates carries the paused run's level, not the setting's.
+      expect(levelsOf(d, thread.id)).toEqual(['lineage'])
+      await finished(d, out[0])
+      expect(grant(d, out[0].childThreadId)).toBe('lineage')
+      // The thread's next ordinary turn is granted what the setting says by then.
+      const next = await d.orch.send('Hello again', false, { threadId: thread.id, clientRequestId: 'next' })
+      expect(d.engine.getRun(next.runId!)?.outcome?.accessGrant).toBe('manage')
+    }, 60_000)
+
+    it('a Continue after a restart is held to the interrupted run\'s grant, and a run whose grant was never recorded is lineage', async () => {
+      const { d, project } = daemon(async () => undefined)
+      setProfile(d, 'lineage')
+      const thread = d.store.createThread('Interrupted', project.id)
+      const first = await d.orch.send('Hello', false, { threadId: thread.id, clientRequestId: 'first' })
+      expect(d.engine.getRun(first.runId!)?.outcome?.accessGrant).toBe('lineage')
+      setProfile(d, 'manage')
+      const continued = await d.orch.send('Continue where you left off.', false, { threadId: thread.id, clientRequestId: 'continue-first', continuationOfRunId: first.runId })
+      expect(d.engine.getRun(continued.runId!)?.outcome?.accessGrant).toBe('lineage')
+      // A run that was cut off before its turn recorded anything gives its continuation nothing wider.
+      const orphan = d.store.createThread('Cut off early', project.id)
+      const early = await d.engine.dispatch({ kind: 'send', threadId: orphan.id, clientRequestId: 'early', source: 'gui' })
+      if (early.status !== 'accepted') throw new Error('send rejected')
+      d.engine.markStarting(early.runId)
+      d.engine.markRunning(early.runId)
+      d.engine.markTerminal(early.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+      const after = await d.orch.send('Continue where you left off.', false, { threadId: orphan.id, clientRequestId: 'continue-early', continuationOfRunId: early.runId })
+      expect(d.engine.getRun(after.runId!)?.outcome?.accessGrant).toBe('lineage')
+      expect(grant(d, orphan.id)).toBe('manage')
+    }, 60_000)
+  })
+
   describe('the read tools over the real store', () => {
     const NOW = '2026-10-12T00:00:00.000Z'
     const withMessages = (d: Phase6Daemon, threadId: string, texts: string[]) =>

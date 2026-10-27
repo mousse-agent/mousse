@@ -575,6 +575,22 @@ export class RunEngine extends EventEmitter {
     })
   }
 
+  /**
+   * Records the agent access level the run's turn was granted (`RunOutcome.accessGrant`), once and only
+   * ever narrower: a second call keeps the narrower of the two. A terminal run is left as it is.
+   */
+  recordAccessGrant(runId: string, level: AgentAccessLevel): RunRecord | undefined {
+    return this.store.db.transaction(() => {
+      const run = this.store.getRun(runId)
+      if (!run || TERMINAL_RUN_STATUSES.has(run.status)) return undefined
+      const next = narrowAgentAccess(run.outcome?.accessGrant, level) ?? level
+      if (run.outcome?.accessGrant === next) return run
+      const updated = this.store.casRunOutcome({ runId, expectedEpoch: run.epoch, outcomePatch: { accessGrant: next } })
+      if (this.epochs.has(runId)) this.epochs.set(runId, updated.epoch)
+      return updated
+    })
+  }
+
   /** Changes fields of a paused run's `pause` (the resume item the executor wrote, `autoResume` after a stale timer). */
   updatePause(runId: string, patch: Partial<RunPause>): RunRecord {
     return this.store.db.transaction(() => {
