@@ -312,7 +312,6 @@ describe('P3 real MMS remote Bridge', () => {
         otherToolsText: '',
         signature: 'fixture'
       }),
-      generateTitle: async () => 'Owned turn',
       chat: async (
         _messages: unknown,
         _tools: unknown,
