@@ -1,0 +1,193 @@
+/**
+ * PR 4 §4 `HarnessGateway.oneShot`: one model request with no tools (chat titles), resolved like a
+ * turn for its purpose. The pi driver makes one pi-ai request in Mousse's process; the gateway owns
+ * a 60 s inactivity timeout and never retries; hidden models, turned-off instances and agent runtimes
+ * (`oneShot` absent) are refused with their typed errors.
+ */
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createAssistantMessageEventStream, type AssistantMessage, type AssistantMessageEventStream, type Context, type Model } from '@earendil-works/pi-ai'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { ONE_SHOT_INACTIVITY_MS, type Harness, type OneShotRequest } from '../../src/mms/harness/gateway'
+import { piLegacyDriver } from '../../src/mms/harness/drivers/piLegacy'
+import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
+import { CODEX_CAPABILITIES } from '../../src/mms/run/adapters/codex/CodexAdapter'
+import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
+import { testHarness } from '../../src/mms/run/testkit/harness'
+
+const homes: string[] = []
+const harnesses: Harness[] = []
+afterEach(() => {
+  vi.useRealTimers()
+  for (const harness of harnesses.splice(0)) harness.stop()
+  for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
+})
+
+const MODEL = { id: 'gpt-x', name: 'GPT X', api: 'openai-responses', provider: 'openai', baseUrl: 'http://127.0.0.1:1', reasoning: true, input: ['text'], cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000, maxTokens: 100 } as unknown as Model<'openai-responses'>
+
+const reply = (text: string): AssistantMessage => ({
+  role: 'assistant', api: MODEL.api, provider: MODEL.provider, model: MODEL.id, content: [{ type: 'text', text }], stopReason: 'stop', timestamp: 0,
+  usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }
+})
+
+/** pi-ai models whose `streamSimple` is scripted per test; every request is recorded. */
+function piModels() {
+  const requests: Array<{ model: Model<never>; context: Context; options: Record<string, unknown> }> = []
+  let script: (stream: AssistantMessageEventStream, signal?: AbortSignal) => void = (stream) => {
+    const message = reply('A clear title')
+    stream.push({ type: 'text_delta', contentIndex: 0, delta: 'A clear title', partial: message })
+    stream.push({ type: 'done', reason: 'stop', message })
+    stream.end(message)
+  }
+  const models = {
+    getModel: (provider: string, id: string) => (provider === 'openai' && id === MODEL.id ? MODEL : undefined),
+    getModels: () => [MODEL],
+    getAuth: async () => ({ apiKey: 'sk-test' }),
+    stream: vi.fn(),
+    streamSimple: vi.fn((model: Model<never>, context: Context, options: Record<string, unknown>) => {
+      requests.push({ model, context, options })
+      const stream = createAssistantMessageEventStream()
+      queueMicrotask(() => script(stream, options.signal as AbortSignal | undefined))
+      return stream
+    })
+  }
+  return { models, requests, respond: (next: typeof script) => { script = next } }
+}
+
+/** A Codex-like agent runtime: runs turns only. */
+const agent: ProviderAdapter = {
+  driver: 'codex',
+  capabilities: { ...CODEX_CAPABILITIES },
+  configured: () => true,
+  startTurn: async () => { throw new Error('unused') },
+  interrupt: async () => 'not_active'
+}
+
+function setup() {
+  const home = mkdtempSync(join(tmpdir(), 'mousse-one-shot-'))
+  homes.push(home)
+  const pi = piModels()
+  const credentials = {
+    has: () => true,
+    getConfiguredProviders: () => [{ id: 'openai', label: 'OpenAI', authType: 'api_key' as const }],
+    getConfiguredLlmProviders: () => [{ id: 'openai', label: 'OpenAI', models: [{ id: MODEL.id, label: 'GPT X' }] }],
+    models: pi.models
+  }
+  let stored: unknown = { 'pi:openai': { driver: 'pi', enabled: true }, codex: { driver: 'codex', enabled: true } }
+  const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
+  const harness = testHarness({
+    adapters: [agent],
+    drivers: [piLegacyDriver({ client: () => ({ chat: async () => { throw new Error('unused') } }), credentials: () => credentials as never })],
+    instances,
+    profileHome: home
+  })
+  harnesses.push(harness)
+  const request = (patch: Partial<OneShotRequest> = {}): OneShotRequest => ({
+    selection: { instanceId: 'pi:openai', llmProvider: 'openai', model: `${MODEL.id}:low` },
+    purpose: 'title',
+    system: 'You name chats.',
+    prompt: 'User request: fix the login bug',
+    maxChars: 80,
+    sessionKey: 'thread-1',
+    ...patch
+  })
+  return { harness, pi, request }
+}
+
+describe('gateway.oneShot on the pi driver', () => {
+  it('makes one pi-ai request with no tools and returns its text', async () => {
+    const s = setup()
+    expect(await s.harness.oneShot(s.request())).toEqual({ text: 'A clear title' })
+    expect(s.pi.requests).toHaveLength(1)
+    const [sent] = s.pi.requests
+    expect(sent.model.id).toBe(MODEL.id)
+    expect(sent.context).toEqual({ systemPrompt: 'You name chats.', messages: [expect.objectContaining({ role: 'user', content: 'User request: fix the login bug' })] })
+    expect(sent.context.tools).toBeUndefined()
+    // The effort suffix becomes the reasoning level; the thread id reaches the provider only hashed.
+    expect(sent.options).toMatchObject({ reasoning: 'low', sessionId: expect.stringMatching(/^mousse-[0-9a-f]{48}$/) })
+    expect(JSON.stringify(sent.options)).not.toContain('thread-1')
+  })
+
+  it('cuts the text to maxChars', async () => {
+    const s = setup()
+    expect(await s.harness.oneShot(s.request({ maxChars: 7 }))).toEqual({ text: 'A clear' })
+  })
+
+  it('reports a provider failure and does not retry', async () => {
+    const s = setup()
+    s.pi.respond((stream) => {
+      const failed = { ...reply(''), stopReason: 'error' as const, errorMessage: '401 invalid api key' }
+      stream.push({ type: 'error', reason: 'error', error: failed })
+      stream.end(failed)
+    })
+    await expect(s.harness.oneShot(s.request())).rejects.toThrow()
+    expect(s.pi.requests).toHaveLength(1)
+  })
+
+  it('ends with `timeout` after 60 s without a provider event, and aborts the request', async () => {
+    vi.useFakeTimers()
+    const s = setup()
+    let aborted = false
+    s.pi.respond((_stream, signal) => signal?.addEventListener('abort', () => { aborted = true }))
+    const pending = s.harness.oneShot(s.request())
+    const settled = expect(pending).rejects.toMatchObject({ code: 'timeout' })
+    await vi.advanceTimersByTimeAsync(ONE_SHOT_INACTIVITY_MS - 1)
+    expect(aborted).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    await settled
+    expect(aborted).toBe(true)
+    expect(ONE_SHOT_INACTIVITY_MS).toBe(60_000)
+    expect(s.pi.requests).toHaveLength(1)
+  })
+
+  it('restarts the timeout on every provider event', async () => {
+    vi.useFakeTimers()
+    const s = setup()
+    s.pi.respond((stream) => {
+      const message = reply('Slow title')
+      setTimeout(() => stream.push({ type: 'text_delta', contentIndex: 0, delta: 'Slow', partial: message }), 50_000)
+      setTimeout(() => {
+        stream.push({ type: 'done', reason: 'stop', message })
+        stream.end(message)
+      }, 100_000)
+    })
+    const pending = s.harness.oneShot(s.request())
+    await vi.advanceTimersByTimeAsync(100_000)
+    await expect(pending).resolves.toEqual({ text: 'Slow title' })
+  })
+
+  it('a caller stop is not reported as a timeout', async () => {
+    const s = setup()
+    s.pi.respond(() => {})
+    const stop = new AbortController()
+    const pending = s.harness.oneShot(s.request({ signal: stop.signal }))
+    await Promise.resolve()
+    stop.abort()
+    await expect(pending).rejects.not.toMatchObject({ code: 'timeout' })
+  })
+})
+
+describe('gateway.oneShot refusals', () => {
+  it('refuses a hidden model', async () => {
+    const s = setup()
+    await s.harness.instances.setModelPrefs('pi:openai', { hide: [MODEL.id] })
+    await expect(s.harness.oneShot(s.request())).rejects.toMatchObject({ code: 'model_hidden' })
+    expect(s.pi.requests).toHaveLength(0)
+  })
+
+  it('refuses an instance turned off on the device or for the project', async () => {
+    const s = setup()
+    await s.harness.instances.setEnabled('pi:openai', { kind: 'project', projectId: 'p1' }, false)
+    await expect(s.harness.oneShot(s.request({ scope: { kind: 'project', projectId: 'p1' } }))).rejects.toMatchObject({ code: 'instance_disabled' })
+    await s.harness.instances.setEnabled('pi:openai', { kind: 'device' }, false)
+    await expect(s.harness.oneShot(s.request())).rejects.toMatchObject({ code: 'instance_disabled' })
+    expect(s.pi.requests).toHaveLength(0)
+  })
+
+  it('refuses an agent runtime (`oneShot` absent) with `unsupported`', async () => {
+    const s = setup()
+    await expect(s.harness.oneShot(s.request({ selection: { instanceId: 'codex', llmProvider: 'codex', model: 'gpt-5' } }))).rejects.toMatchObject({ code: 'unsupported' })
+    expect(s.pi.requests).toHaveLength(0)
+  })
+})

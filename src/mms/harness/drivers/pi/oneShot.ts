@@ -1,0 +1,43 @@
+import type { Api, Model, Models, ThinkingLevel } from '@earendil-works/pi-ai'
+import { harnessAppError } from '../../../../shared/harness/types'
+import { parseThinkingSuffixFromModelId } from '../../../../shared/modelVariants'
+import { customModelDefinition } from '../../catalog'
+import type { OneShotSpec } from '../../driver'
+import { assertAssistantResponseSucceeded, consumeAssistantStream, getCacheSessionId, getReasoningStreamOptions } from './stream'
+
+/** What a pi one-shot reads of the profile's pi-ai models: the catalogue, credentials and transport. */
+export type PiOneShotModels = Pick<Models, 'getModel' | 'getModels' | 'getAuth' | 'stream' | 'streamSimple'>
+
+/**
+ * One pi-ai request with no tools, in Mousse's process (a chat title): the provider's catalogue model
+ * (or the user's custom model on the provider's transport), its credentials as `ProviderAuthService`
+ * keeps and refreshes them, and the reply's text. Not a loop: one request, no retry.
+ */
+export async function runPiOneShot(models: PiOneShotModels, providerId: string, spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }> {
+  const { baseId, effort } = parseThinkingSuffixFromModelId(spec.model)
+  const model = models.getModel(providerId, baseId) ?? customModel(models, providerId, spec)
+  if (!model)
+    throw harnessAppError({ code: 'model_unavailable', message: `${baseId} is not a model of this provider. Refresh models or choose another one.` })
+  if (!(await models.getAuth(model)))
+    throw harnessAppError({ code: 'signed_out', message: 'This provider is not signed in. Sign in or choose another model.' })
+  signal.throwIfAborted()
+  const context = {
+    systemPrompt: spec.system,
+    messages: [{ role: 'user' as const, content: spec.prompt, timestamp: Date.now() }]
+  }
+  const reasoning = (spec.effort ?? effort ?? 'off') as ThinkingLevel
+  const options = getReasoningStreamOptions(model.api, reasoning, signal, getCacheSessionId(spec.sessionKey), providerId)
+  spec.onActivity()
+  const stream = model.api === 'openai-codex-responses'
+    ? models.stream(model, context, options)
+    : models.streamSimple(model, context, options as { reasoning: ThinkingLevel })
+  const message = await consumeAssistantStream(stream, {}, { signal, onProgress: () => spec.onActivity() })
+  assertAssistantResponseSucceeded(message)
+  return { text: message.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('') }
+}
+
+/** A custom model added to the provider runs with the transport of the provider's first listed model. */
+function customModel(models: PiOneShotModels, providerId: string, spec: OneShotSpec): Model<Api> | undefined {
+  const template = spec.customModel ? models.getModels(providerId)[0] : undefined
+  return spec.customModel && template ? customModelDefinition(template, spec.customModel) : undefined
+}

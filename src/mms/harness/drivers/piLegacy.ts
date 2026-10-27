@@ -4,7 +4,9 @@ import type { LlmProviderOption } from '../../../shared/settings'
 import { piProviderIdOf } from '../../../shared/providerInstances'
 import type { ProviderAuthService } from '../../providers/ProviderAuthService'
 import { PI_LOOP_CAPABILITIES, PiLoopAdapter, type PiChatClient } from '../../run/adapters/pi/PiLoopAdapter'
+import { harnessAppError } from '../../../shared/harness/types'
 import { decodeInstanceConfig, type DriverContext, type DriverRuntime, type HarnessDriver } from '../driver'
+import { runPiOneShot } from './pi/oneShot'
 
 /** Mousse measures the pi loop's transcript itself and offers Plan mode on it. */
 export const PI_LEGACY_CAPS: HarnessCaps = Object.freeze({
@@ -19,7 +21,7 @@ export const PI_LEGACY_CAPS: HarnessCaps = Object.freeze({
 })
 
 export type PiCredentials = Partial<Pick<ProviderAuthService,
-  'getConfiguredProviders' | 'getConfiguredLlmProviders' | 'has' | 'logout' | 'runOAuthLogin' | 'runApiKeyLogin' | 'refreshDynamicModels' | 'getProviderDisplayName' | 'storedApiKey'
+  'getConfiguredProviders' | 'getConfiguredLlmProviders' | 'has' | 'logout' | 'runOAuthLogin' | 'runApiKeyLogin' | 'refreshDynamicModels' | 'getProviderDisplayName' | 'storedApiKey' | 'models'
 >>
 
 /**
@@ -39,6 +41,8 @@ export function piLegacyDriver(options: { client: () => PiChatClient; credential
     canInstall: false,
     // The loop runs a custom model with its provider's transport (`customModelDefinition`).
     customModels: true,
+    // Chat titles: one pi-ai request in Mousse's process (`runPiOneShot`).
+    oneShot: true,
     methodLabel: 'API key or sign-in',
     // The pi loop calls the app tools in process and proxies the user's MCP servers.
     userMcp: 'proxy',
@@ -78,6 +82,11 @@ export function piLegacyDriver(options: { client: () => PiChatClient; credential
         },
         signOut: async () => void (await credentials()?.logout?.(providerId)),
         exportApiKey: async () => credentials()?.storedApiKey?.(providerId),
+        oneShot: (spec, signal) => {
+          const models = credentials()?.models
+          if (!models) throw harnessAppError({ code: 'signed_out', message: 'Mousse has no provider credentials loaded yet.', instanceId: context.instanceId })
+          return runPiOneShot(models, providerId, spec, signal)
+        },
         stop: () => {}
       }
     }
