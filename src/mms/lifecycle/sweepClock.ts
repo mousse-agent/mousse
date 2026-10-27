@@ -50,6 +50,17 @@ export class StorageSweepClock {
     return { suspended: false, forwardJumpMs: Math.max(0, now - previous) }
   }
 
+  /**
+   * What `check()` would answer now, without persisting a suspension or moving the sample. A dry run
+   * uses it so that it decides like the run that follows and still writes nothing.
+   */
+  peek(): StorageClockCheck {
+    if (this.persistedSuspension()) return { suspended: true, reason: STORAGE_CLOCK_SUSPENDED_REASON }
+    const now = this.now(), previous = this.lastWall ?? now
+    if (now < previous - STORAGE_CLOCK_BACKWARD_TOLERANCE_MS) return { suspended: true, reason: STORAGE_CLOCK_SUSPENDED_REASON }
+    return { suspended: false, forwardJumpMs: Math.max(0, now - previous) }
+  }
+
   /** Clears the suspension and re-samples the clock. Called when the storage policy is saved. */
   resume(): void {
     assertLifecyclePath(this.root, this.path)

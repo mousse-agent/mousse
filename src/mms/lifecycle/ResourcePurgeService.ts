@@ -160,7 +160,12 @@ export class ResourcePurgeService {
     }
     return outcomes
   }
-  async retireTrashed(taskId: string): Promise<void> {
+  /**
+   * Retires the checkouts of a trashed thread. `recheck` runs for each checkout under the cleanup
+   * reservation and the repository lease, just before it is removed; a returned reason keeps that
+   * checkout. Automatic rules use it to repeat their location and content checks at that point.
+   */
+  async retireTrashed(taskId: string, options: { recheck?: (worktreePath: string) => string | undefined } = {}): Promise<void> {
     await this.withOwnership(taskId, async () => {
       const record = this.store.require(taskId), token = record.cleanupOwner!.token
       if (record.state !== 'trashed') return
@@ -171,7 +176,7 @@ export class ResourcePurgeService {
         if (!existsSync(item.identity)) continue
         try {
           const lease = await acquireRepositoryLease(resolveRepositoryIdentity(item.identity, { requireMutationCapability: true }), { signal: AbortSignal.timeout(10_000) })
-          try { this.assertReservation(taskId, token, record.generation); new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: taskId, cleanupToken: token, cleanupGeneration: record.generation }).retire(item.manifestPath) } finally { lease.release() }
+          try { this.assertReservation(taskId, token, record.generation); const refusal = options.recheck?.(item.identity); if (refusal) throw new Error(refusal); new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: taskId, cleanupToken: token, cleanupGeneration: record.generation }).retire(item.manifestPath) } finally { lease.release() }
         } catch (error) { retained.push(`Checkout retained: ${(error as Error).message}`) }
       }
       this.store.update(taskId, (current) => { if (retained.length) current.blockedReason = retained.join('; '); else delete current.blockedReason })
@@ -205,15 +210,24 @@ export class ResourcePurgeService {
     const current = this.store.require(taskId)
     if (current.cleanupOwner?.token !== token || current.cleanupOwner.pid !== process.pid || current.cleanupOwner.processInstanceId !== PROCESS_INSTANCE_ID || current.generation !== generation || !['trashed', 'purge-started', 'purged'].includes(current.state)) throw new Error('Cleanup reservation or lifecycle generation changed')
   }
-  private async previewOwned(taskId: string): Promise<LifecyclePurgePreview> {
+  /**
+   * What a permanent deletion would do, computed without ownership, leases, lifecycle-record writes,
+   * reconstruction manifests or Git refs. For a dry run only: the result is never signed for use.
+   */
+  async previewReadOnly(taskId: string): Promise<LifecyclePurgePreview> {
+    return this.previewOwned(taskId, true)
+  }
+  private async previewOwned(taskId: string, readOnly = false): Promise<LifecyclePurgePreview> {
     const record = this.store.require(taskId)
-    const reservation = record.cleanupOwner!.token
+    const reservation = record.cleanupOwner?.token ?? ''
+    if (!readOnly && !reservation) throw new Error('Cleanup reservation is missing')
     if (record.state === 'purge-started' || record.state === 'purged') {
       if (!record.purge) throw new Error('Purge state has no external recovery ledger')
       return record.purge
     }
     if (record.state !== 'trashed') throw new Error('Only a trashed task can be permanently deleted')
-    this.hooks.assertIdle(taskId)
+    // A dry run does not hydrate runtimes; the caller asks the cheap idle lookup instead.
+    if (!readOnly) this.hooks.assertIdle(taskId)
     const tasks = this.owned(taskId), ownedIds = new Set(tasks.map((task) => task.taskId))
     const preview: LifecyclePurgePreview = { schemaVersion: 1, taskId, generation: record.generation, digest: '', items: [], ownedTaskIds: [...ownedIds].sort(), blockers: [], retained: [], exclusiveBytes: 0 }
     let peers: ReturnType<ResourcePurgeService['peers']>
@@ -233,6 +247,22 @@ export class ResourcePurgeService {
           const source = sources.find((source) => basename(source.path) === 'agent-episodes.json') ?? sources.find((source) => ['workspace.json', 'agents.json', 'mousse-agent-sessions.json'].includes(basename(source.path))) ?? sources.find((source) => source.path.includes('workflow'))
           if (!source) throw new Error('Workspace has no supported owner source')
           const branch = lifecycleGit(resource.identity, ['branch', '--show-current'])
+          if (readOnly) {
+            // No repository lease and no `prepare`, which writes a manifest and Git refs: judge the checkout by
+            // what `prepare` would refuse. The item is for display only; it is never signed or acted on.
+            const discard = this.retirement.inspectForDiscard({ taskId: resource.ownerTaskId, sourcePath: source.path, worktreePath: resource.identity, branch, repositoryId: resource.repositoryId })
+            repositories.set(discard.repositoryId, discard.commonDir)
+            let retained: string | undefined
+            try { this.retirement.inspectContent(resource.identity) } catch (error) { retained = (error as Error).message }
+            let discardRequired = Boolean(retained) || resource.claims.some((claim) => ['pending-integration', 'conflict'].includes(claim.kind))
+            for (const source of inventory.sources.filter((source) => resource.sourceIds.includes(source.id) && basename(source.path) === 'workspace.json')) {
+              const workspace = JSON.parse(readFileSync(source.path, 'utf8')) as { headSha?: string; integrationTarget?: { baseSha?: string } }
+              if (workspace.headSha !== workspace.integrationTarget?.baseSha) discardRequired = true
+            }
+            preview.items.push({ id: resource.id, kind: 'worktree', identity: resource.identity, ownerTaskId: resource.ownerTaskId, commonDir: discard.commonDir, expectedValue: discard.resultSha, discardRequired, ...(discardRequired ? { reason: retained ?? 'This result may contain unpublished work' } : {}), status: 'pending' })
+            preview.exclusiveBytes += discard.content.reduce((sum, entry) => sum + entry.bytes, 0)
+            continue
+          }
           const identity = resolveRepositoryIdentity(resource.identity, { requireMutationCapability: true })
           const lease = await acquireRepositoryLease(identity, { signal: AbortSignal.timeout(10_000) })
           try {
