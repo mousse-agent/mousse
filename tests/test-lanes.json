@@ -150,6 +150,7 @@
     "tests/renderer/networkTaskPicker-electron.test.ts",
     "tests/renderer/profile-footer-electron.test.ts",
     "tests/renderer/profileReady-startup-electron.test.ts",
+    "tests/renderer/recently-deleted-electron.test.ts",
     "tests/renderer/sidebar-motion-electron.test.ts",
     "tests/renderer/turn-window-electron.test.ts",
     "tests/resourceLifecycleFullShell.test.ts"

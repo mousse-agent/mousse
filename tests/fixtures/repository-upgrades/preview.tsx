@@ -86,9 +86,7 @@ Object.assign(window, { mousse: { threads: {
         trashSweepStatus: { reason: 'Fixture cleanup status' } }
     } finally { probes.inventoryActive -= 1 }
   },
-  configureTrash: async (policy: { graceDays: number; automaticPurge: boolean }) => { if (probes.actionFailure) throw probes.actionFailure; probes.savedGraceDays = policy.graceDays; probes.savedAutomaticPurge = policy.automaticPurge },
-  delete: async () => { if (probes.actionFailure) throw probes.actionFailure; probes.state = 'trashed' },
-  restore: async () => { if (probes.actionFailure) throw probes.actionFailure; probes.state = 'active' }
+  configureTrash: async (policy: { graceDays: number; automaticPurge: boolean }) => { if (probes.actionFailure) throw probes.actionFailure; probes.savedGraceDays = policy.graceDays; probes.savedAutomaticPurge = policy.automaticPurge }
 } } })
 const unsubscribe = () => () => {}
 Object.assign(window.mousse, {
