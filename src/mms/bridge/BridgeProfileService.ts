@@ -1,6 +1,6 @@
 import type { MmsProfileServices } from '../MmsProfileServices'
 import type { NetDomainComposition, NetRuntime, NetService } from '../net/NetService'
-import type { Clock, SyncSession } from '../net/contracts'
+import type { BotRuntimeAdapter, Clock, SyncSession } from '../net/contracts'
 import { systemClock } from '../net/clock'
 import { NodeStreamAuthority } from '../net/sync/nodeAuthority'
 import { NetError, type Roster, type PresenceMessage, type BotId } from '../../shared/net'
@@ -54,6 +54,8 @@ export class BridgeProfileService {
       dispatchRuntime?: DispatchRuntime
       /** Trusted local immutable definitions and billing/containment evidence; never received over IPC or Sync. */
       nativeAdapters?: ReadonlyMap<string, NativeBotComposition>
+      /** Tests only: scripted bot runtimes. Production never sets this. */
+      trustedQaAdapters?: ReadonlyMap<string, BotRuntimeAdapter>
     }
   ) {
     const { services, runtime: rt, net } = options
@@ -113,6 +115,7 @@ export class BridgeProfileService {
       threads: services.threads,
       projects: services.projects,
       nativeAdapters: options.nativeAdapters,
+      trustedQaAdapters: options.trustedQaAdapters,
       prepareAdmission: (input) => this.currentIdentity.prepareAdmission(input),
       preparePrivateAudience: (space, participants) =>
         this.currentIdentity.preparePrivateAudience(space, participants),

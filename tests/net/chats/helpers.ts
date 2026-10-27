@@ -12,8 +12,9 @@ import { StaticAgentIntegrationLookup } from '../../../src/mms/agentDefinitions/
 import { defaultAgentSettings } from '../../../src/shared/agents/defaults'
 import { registerChatMethods } from '../../../src/mms/chats/registerMethods'
 import { registerChatNetworkMethods } from '../../../src/mms/chats/network/registerMethods'
-import { nativeSdkVersion, modelDigest, type NativeBotDefinition } from '../../../src/mms/bots/runtime'
+import { nativeSdkVersion, type NativeBotDefinition } from '../../../src/mms/bots/runtime'
 import { newId } from '../../../src/shared/net'
+import { ScriptedBotRuntime } from '../bots/scriptedRuntime'
 import { portableRepository } from '../../../src/mms/bridge/dispatch'
 import { git } from '../../../src/mms/bridge/dispatch/git'
 import type { ChatTaskSelectionInput } from '../../../src/shared/chatsNetwork'
@@ -39,10 +40,13 @@ export async function profile(input: { home?: string; profileId?: string; initia
   const provider: Provider<'anthropic-messages'> = { id: model.provider, name: 'Fixture', auth: { apiKey: { name: 'Fixture', resolve: async () => ({ auth: { apiKey: 'deterministic-unpaid-chats-fixture' } }) } }, getModels: () => [model], stream, streamSimple: stream }
   auth.models.setProvider(provider)
   await auth.credentials.modify(provider.id, async () => ({ type: 'api_key', key: 'deterministic-unpaid-chats-fixture' }))
-  const definition=(name:string):NativeBotDefinition=>({revision:`chats-${name}-v1`,systemPrompt:`NET ${name} ONLY`,billing:{provider:model.provider,model:model.id,api:model.api,modelDigest:modelDigest(model),sdkVersion:nativeSdkVersion(),platform:process.platform,nodeVersion:process.versions.node,runtimeVersion:'mousse-net-native-v1',maximumUnits:60,maxOutputTokens:50,maxRequestBytes:65536,evidence:'Deterministic zero-cost local SDK fixture only; no paid-provider qualification.'},readerTools:[],approval:'always',maxModelCalls:2,maxToolCalls:1,maxElapsedMs:30000})
+  const definition=(name:string):NativeBotDefinition=>({revision:`chats-${name}-v1`,systemPrompt:`NET ${name} ONLY`,billing:{provider:model.provider,model:model.id,api:model.api,modelDigest:'fixture-digest',sdkVersion:nativeSdkVersion(),platform:process.platform,nodeVersion:process.versions.node,runtimeVersion:'mousse-net-native-v1',maximumUnits:60,maxOutputTokens:50,maxRequestBytes:65536,evidence:'Deterministic zero-cost local SDK fixture only; no paid-provider qualification.'},readerTools:[],approval:'always',maxModelCalls:2,maxToolCalls:1,maxElapsedMs:30000})
+  // Bots have no model path: scripted runtimes record each run's prompt and compartment history.
+  const botRuns: Array<{ adapter: string; prompt: string; history: string[] }> = [], botRuntimes = new Map<string, ScriptedBotRuntime>()
   const definitions=new Map([['qa-public',definition('PUBLIC')],['qa-private',definition('PRIVATE')]])
+  for (const adapter of definitions.keys()) botRuntimes.set(adapter, new ScriptedBotRuntime({ id: adapter, answer: 'LOCAL ONLY ANSWER', profiles: ['chat'], script: async ({ request }) => { botRuns.push({ adapter, prompt: request.prompt, history: services.bots.compartments.history(request.compartment, 100).map(turn => turn.text) }); return 'LOCAL ONLY ANSWER' } }))
   const services = new MmsProfileServices(MousseConfigStore.load(home), { homeDir: home, repoRoot: home, headless: true, requireOwnership: false,
-    nativeBotAdapters:input.native?context=>new Map([...definitions].map(([adapter,definition])=>[adapter,{settings:context.services.settings,providerAuth:auth,sdkVersion:nativeSdkVersion(),definition,qualification:{active:profile=>profile==='chat',invalidate:()=>{}}}])):undefined }, null, home,
+    trustedQaBotAdapters:input.native?()=>botRuntimes:undefined }, null, home,
     { providerAuth: auth, domains, installationHome: home, profileId, allowLegacyProjectData: false })
   cleanup.push(() => services.stop())
   registerChatMethods(domains, () => services.platform.chats, () => services.chatNetwork)
@@ -62,7 +66,7 @@ export async function profile(input: { home?: string; profileId?: string; initia
     registry.publish(draft.id, draft.draftHash, { integrationLookup: new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write'] }) })
     return services.platform.chats.create({ kind: 'group', name: 'Publishable Group', agentIds: [draft.id] })
   }
-  return { home, profileId, services, domains, contexts, createGroup, definitions, release: () => release() }
+  return { home, profileId, services, domains, contexts, botRuns, botRuntimes, createGroup, definitions, release: () => release() }
 }
 
 // Two linked same-user profiles plus a published Group and a task selection for the target.

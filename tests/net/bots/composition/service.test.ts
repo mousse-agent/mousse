@@ -3,14 +3,6 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { afterEach, expect, it, vi } from 'vitest'
-import {
-  createAssistantMessageEventStream,
-  type Model,
-  type Provider,
-  type AssistantMessage,
-  type Context,
-  type StreamOptions
-} from '@earendil-works/pi-ai'
 import { MmsProfileServices } from '../../../../src/mms/MmsProfileServices'
 import { MousseMainService } from '../../../../src/mms/MousseMainService'
 import { MousseConfigStore } from '../../../../src/mms/config/MousseConfigStore'
@@ -22,9 +14,9 @@ import { BotProfileService } from '../../../../src/mms/bots/BotProfileService'
 import {
   effectiveBotPolicyDigest,
   nativeSdkVersion,
-  modelDigest,
   type NativeBotDefinition
 } from '../../../../src/mms/bots/runtime'
+import { ScriptedBotRuntime } from '../scriptedRuntime'
 import { decodeEnvelope } from '../../../../src/mms/net/sync/codec'
 import { newId, type SpaceId, type StreamId, type BotId } from '../../../../src/shared/net'
 
@@ -52,80 +44,19 @@ async function profile(options: { native?: boolean; paused?: boolean; stubborn?:
     }
   )
   cleanup.push(() => services.stop())
-  const contexts: Context[] = [],
-    signals: AbortSignal[] = []
-  let release = () => {}
-  const model: Model<'anthropic-messages'> = {
-    id: 'central-fixture',
-    name: 'Fixture',
-    api: 'anthropic-messages',
-    provider: 'central-fixture',
-    baseUrl: 'https://invalid.test',
-    reasoning: false,
-    input: ['text'],
-    cost: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 },
-    contextWindow: 10000,
-    maxTokens: 1000
-  }
-  const stream = (
-    _model: Model<'anthropic-messages'>,
-    context: Context,
-    request: StreamOptions = {}
-  ) => {
-    contexts.push(structuredClone(context))
-    signals.push(request.signal!)
-    const result = createAssistantMessageEventStream()
-    const message: AssistantMessage = {
-      role: 'assistant',
-      api: model.api,
-      provider: model.provider,
-      model: model.id,
-      content: [{ type: 'text', text: 'Central exact answer' }],
-      stopReason: 'stop',
-      timestamp: Date.now(),
-      usage: {
-        input: 10,
-        output: 10,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 20,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 10 / 1000000 }
-      }
-    }
-    release = () => {
-      result.push({ type: 'done', reason: 'stop', message })
-      result.end(message)
-    }
-    if (!options.stubborn) request.signal?.addEventListener('abort', release, { once: true })
-    if (!options.paused) queueMicrotask(release)
-    return result
-  }
-  const provider: Provider<'anthropic-messages'> = {
-    id: model.provider,
-    name: 'Fixture',
-    auth: {
-      apiKey: {
-        name: 'Fixture',
-        resolve: async () => ({ auth: { apiKey: 'deterministic-central-fixture' } })
-      }
-    },
-    getModels: () => [model],
-    stream,
-    streamSimple: stream
-  }
-  auth.models.setProvider(provider)
-  await auth.credentials.modify(provider.id, async () => ({
-    type: 'api_key',
-    key: 'deterministic-central-fixture'
-  }))
+  const scripted = new ScriptedBotRuntime({
+    answer: 'Central exact answer',
+    paused: options.paused,
+    stubborn: options.stubborn
+  })
   const definition: NativeBotDefinition = {
     revision: 'central-v1',
     systemPrompt: 'Only the central bot compartment.',
     billing: {
-      provider: model.provider,
-      model: model.id,
-      api: model.api,
-      modelDigest: modelDigest(model),
+      provider: 'central-fixture',
+      model: 'fixture',
+      api: 'anthropic-messages',
+      modelDigest: 'fixture-digest',
       sdkVersion: nativeSdkVersion(),
       platform: process.platform,
       nodeVersion: process.versions.node,
@@ -149,20 +80,7 @@ async function profile(options: { native?: boolean; paused?: boolean; stubborn?:
         services,
         runtime,
         net,
-        nativeAdapters: options.native
-          ? new Map([
-              [
-                'mousse',
-                {
-                  settings: services.settings,
-                  providerAuth: auth,
-                  sdkVersion: nativeSdkVersion(),
-                  definition,
-                  qualification: { active: (profile) => profile === 'chat', invalidate: () => {} }
-                }
-              ]
-            ])
-          : undefined
+        trustedQaAdapters: options.native ? new Map([['mousse', scripted]]) : undefined
       })
       return bridge.composition()
     }
@@ -178,10 +96,10 @@ async function profile(options: { native?: boolean; paused?: boolean; stubborn?:
     get bridge() {
       return bridge
     },
-    contexts,
-    signals,
+    contexts: scripted.runs,
+    signals: scripted.signals,
     definition,
-    release: () => release()
+    release: () => scripted.release()
   }
 }
 
@@ -284,8 +202,8 @@ it.each(['public', 'private'] as const)(
     const execution = rt.executions.find({ scope: created.space, target: bot, trigger: id })!,
       output = execution.binding!.stream
     expect(host.contexts).toHaveLength(1)
-    expect(host.contexts[0].tools).toBeUndefined()
-    expect(host.contexts[0].systemPrompt).toBe(host.definition.systemPrompt)
+    expect(host.contexts[0].profile).toBe('chat')
+    expect(host.contexts[0].prompt).toContain('Only this original mention')
     const acceptance = rt.outbox
       .list(output)
       .find((entry) => decodeEnvelope(entry.envelope).envelope.type === 'bot.run.accepted')!
