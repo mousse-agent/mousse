@@ -293,6 +293,8 @@ it('records on the target which device started a thread, and its project there',
 
 it('delivers the first turn of a remote thread when the hub attaches before it sends', async () => {
   const f = await fixture()
+  // The turn runs on the profile's default model, a pi instance over the replaced loop client.
+  f.mms.settings.set({ provider: { llmProvider: 'openai', model: 'fixture' } })
   ;(f.mms.orchestrator as unknown as { llm: unknown }).llm = {
     getSelectedModelContextLimit: () => ({ limit: 128000, modelName: 'fixture' }),
     getContextInputs: async () => ({
@@ -359,6 +361,8 @@ it('delivers the first turn of a remote thread when the hub attaches before it s
 
 it('delivers the first turn of a remote thread when the hub attaches after the send has started', async () => {
   const f = await fixture()
+  // The turn runs on the profile's default model, a pi instance over the replaced loop client.
+  f.mms.settings.set({ provider: { llmProvider: 'openai', model: 'fixture' } })
   ;(f.mms.orchestrator as unknown as { llm: unknown }).llm = {
     getSelectedModelContextLimit: () => ({ limit: 128000, modelName: 'fixture' }),
     getContextInputs: async () => ({
