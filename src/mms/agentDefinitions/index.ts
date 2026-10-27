@@ -8,22 +8,6 @@ export type { AgentDefinitionRegistryOptions } from './AgentDefinitionRegistry'
 export { AgentResolver } from './AgentResolver'
 export type { AgentResolverOptions } from './AgentResolver'
 export { AgentExecutionService, createAgentExecutionService } from './AgentExecutionService'
-export {
-  buildQualifiedCliInvocation,
-  buildSupportedCliInvocation,
-  createCliProcessRuntime,
-  createQualifiedCliProcessRuntime,
-  inspectCliCapabilities,
-  CliCapabilityError
-} from './cliRuntime'
-export type {
-  CliCapabilityIssue,
-  CliCapabilityReport,
-  CliProcessInvocation,
-  CliProcessRuntimeOptions,
-  QualifiedCliProcessRuntimeOptions,
-  SupportedCliInvocationOptions
-} from './cliRuntime'
 export { createNativeAgentRuntime } from './nativeRuntime'
 export type {
   AgentExecutionBindings,
@@ -35,11 +19,8 @@ export type {
   AgentExecutionResult,
   AgentRuntimeInput,
   AgentRuntimeResult,
-  NativeAgentRuntimePort,
-  CliAgentRuntimePort
+  NativeAgentRuntimePort
 } from '../../shared/agents/execution'
-export { AgentExecutionMaterializer } from '../integrations/agents/AgentExecutionMaterializer'
-export type { AgentExecutionMaterialization, AgentExecutionMaterializationInput } from '../integrations/agents/AgentExecutionMaterializer'
 export {
   BUILTIN_CLI_ENGINE_IDS,
   describeRuntimeAgentLink,
@@ -56,7 +37,7 @@ export type { StaticIntegrationState, StaticModelEntry } from './lookups'
 export interface AgentDefinitionServices {
   registry: AgentDefinitionRegistry
   resolver: AgentResolver
-  /** Present when the host explicitly composes native or CLI execution bindings. */
+  /** Present when the host explicitly composes native execution bindings. */
   execution?: AgentExecutionService
 }
 

@@ -7,7 +7,6 @@ import type { Message } from '@earendil-works/pi-ai'
 import { AgentRegistry } from '../../src/mms/agents/AgentRegistry'
 import { ProjectManager } from '../../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../../src/mms/data/ThreadDataStore'
-import type { MacroEngine } from '../../src/mms/macros/MacroEngine'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
 import type { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
@@ -30,7 +29,6 @@ import { RunEngine } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
 import type { ProviderRef } from '../../src/mms/run/types'
 import { TaskQueue } from '../../src/mms/tasks/TaskQueue'
-import { HeadlessAgentRunner } from '../../src/mms/terminals/HeadlessAgentRunner'
 import { PtyManager } from '../../src/mms/terminals/PtyManager'
 import { WorktreeManager } from '../../src/mms/worktree/WorktreeManager'
 import { getDefaultSettings } from '../../src/shared/settings'
@@ -137,18 +135,11 @@ export async function waitFor(cond: () => boolean, label: string, timeoutMs = 10
  */
 export function createOrchestrator(home: string, store: ThreadDataStore): OrchestratorService {
   process.env.MOUSSE_HOME = home
-  const macros = {
-    listProviders: () => ['mousse'],
-    isHeadlessEnabled: () => false,
-    getHeadlessShellCommand: () => 'echo',
-    getCliCommand: () => 'echo',
-    runPtyMacro: async () => ({ log: [] as string[] })
-  } as unknown as MacroEngine
   const settingsStore = { getSettings: () => getDefaultSettings(), get: () => getDefaultSettings() }
   const providerAuth = { getConnectedProviders: () => [] }
   const orch = new OrchestratorService(
-    new AgentRegistry(), new TaskQueue(), new WorktreeManager(home), new PtyManager(), new HeadlessAgentRunner(),
-    macros, settingsStore as never, providerAuth as never
+    new AgentRegistry(), new TaskQueue(), new WorktreeManager(home), new PtyManager(),
+    settingsStore as never, providerAuth as never
   )
   orch.setThreadStore(store)
   return orch
@@ -160,9 +151,9 @@ export function phase6Daemon(home: string, adapters: ProviderAdapter[], options:
   const store = new ThreadDataStore(projects)
   const settings = { ...getDefaultSettings(), provider: { ...getDefaultSettings().provider, ...PI } }
   const orch = new OrchestratorService(
-    new AgentRegistry(), new TaskQueue(), new WorktreeManager(home), new PtyManager(), new HeadlessAgentRunner(),
-    { listProviders: () => [] } as unknown as MacroEngine, { get: () => settings } as never, {} as never,
-    undefined, undefined, undefined, undefined, undefined, undefined, projects
+    new AgentRegistry(), new TaskQueue(), new WorktreeManager(home), new PtyManager(),
+    { get: () => settings } as never, {} as never,
+    undefined, undefined, undefined, undefined, undefined, projects
   )
   orch.setThreadStore(store)
   ;(orch as any).llm = {

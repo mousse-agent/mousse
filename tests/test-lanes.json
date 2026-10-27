@@ -24,7 +24,6 @@
     "tests/harness/codexManagedWire.test.ts",
     "tests/harness/cursorHost.test.ts",
     "tests/harness/piRuntimeProcess.test.ts",
-    "tests/headlessCommand.test.ts",
     "tests/mmsOwnerLease.test.ts",
     "tests/namedAgentProtocol.test.ts",
     "tests/net/bots/local/registration-crash.test.ts",

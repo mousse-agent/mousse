@@ -8,7 +8,6 @@ import { buildOrchestratorSystemPrompt } from '../src/mms/orchestrator/systemPro
 import { appendProjectAgentInstructions } from '../src/mms/orchestrator/projectInstructions'
 import { AgentExecutionService } from '../src/mms/agentDefinitions/AgentExecutionService'
 import { createNativeAgentRuntime } from '../src/mms/agentDefinitions/nativeRuntime'
-import { createCliProcessRuntime } from '../src/mms/agentDefinitions/cliRuntime'
 import { userMessage } from '../src/mms/orchestrator/nativeContext'
 import {
   nativeClient, providerResponse, resolvedDefinition
@@ -100,25 +99,6 @@ describe('project AGENTS.md system instructions', () => {
     expect(captured[0]?.systemPrompt).toContain('You are a reviewer.')
     expect(captured[0]?.systemPrompt?.split('NAMED AGENT PROJECT INSTRUCTIONS')).toHaveLength(2)
     expect(captured[0]?.messages).toEqual([expect.objectContaining({ role: 'user', content: 'inspect' })])
-  })
-
-  it('passes the instruction file to the CLI adapter system channel rather than user input', async () => {
-    const root = project('CLI PROJECT INSTRUCTIONS')
-    const cli = createCliProcessRuntime({
-      resolveInvocation: (input) => ({
-        command: process.execPath,
-        args: ['-e', "let s=''; process.stdin.on('data',c=>s+=c); process.stdin.on('end',()=>process.stdout.write(JSON.stringify({system:process.env.PROJECT_SYSTEM,input:s})))"],
-        cwd: input.projectPath, env: { PROJECT_SYSTEM: input.systemPrompt }
-      })
-    })
-    const result = await new AgentExecutionService({ cli: { codex: cli } }).run({
-      profileId: 'profile-1', resolved: resolvedDefinition({ runtimeKind: 'codex' }),
-      threadId: 'cli-thread', projectPath: root, input: 'inspect'
-    })
-    expect(result.status).toBe('completed')
-    expect(JSON.parse(result.text)).toEqual({
-      system: expect.stringContaining('CLI PROJECT INSTRUCTIONS'), input: 'inspect'
-    })
   })
 
   it('uses the validated workspace root when the host omits projectPath', async () => {

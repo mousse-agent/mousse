@@ -11,7 +11,6 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { AgentRegistry } from '../../src/mms/agents/AgentRegistry'
 import { ProjectManager } from '../../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../../src/mms/data/ThreadDataStore'
-import type { MacroEngine } from '../../src/mms/macros/MacroEngine'
 import type { DelegationToolHost } from '../../src/mms/run/mcp/appTools/delegation'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
 import { subagentPreamble } from '../../src/mms/run/delegation/guidance'
@@ -24,7 +23,6 @@ import { Reconciler } from '../../src/mms/run/Reconciler'
 import { RunEngine } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
 import { TaskQueue } from '../../src/mms/tasks/TaskQueue'
-import { HeadlessAgentRunner } from '../../src/mms/terminals/HeadlessAgentRunner'
 import { PtyManager } from '../../src/mms/terminals/PtyManager'
 import { WorktreeManager } from '../../src/mms/worktree/WorktreeManager'
 import { getDefaultSettings } from '../../src/shared/settings'
@@ -75,9 +73,9 @@ function daemon(home: string, script: Script, pid: number) {
   const store = new ThreadDataStore(projects)
   const settings = { ...getDefaultSettings(), provider: { ...getDefaultSettings().provider, llmProvider: 'openai', model: 'gpt-replay' } }
   const orch = new OrchestratorService(
-    new AgentRegistry(), new TaskQueue(), new WorktreeManager(home), new PtyManager(), new HeadlessAgentRunner(),
-    { listProviders: () => [] } as unknown as MacroEngine, { get: () => settings } as never, {} as never,
-    undefined, undefined, undefined, undefined, undefined, undefined, projects
+    new AgentRegistry(), new TaskQueue(), new WorktreeManager(home), new PtyManager(),
+    { get: () => settings } as never, {} as never,
+    undefined, undefined, undefined, undefined, undefined, projects
   )
   orch.setThreadStore(store)
   ;(orch as any).llm = {

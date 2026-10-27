@@ -311,22 +311,6 @@ const DEFAULT_AGENT_HEADLESS: Record<AgentTypeId, boolean> = {
   'cursor-agents-cli': true
 }
 
-export function appendAgentModelFlag(
-  baseCommand: string,
-  cliType: AgentTypeId,
-  model: string
-): string {
-  if (cliType === 'mousse') return baseCommand
-  const trimmed = model.trim()
-  if (!trimmed) return baseCommand
-
-  const quoted = trimmed.includes(' ') ? `"${trimmed.replace(/"/g, '\\"')}"` : trimmed
-  if (cliType === 'codex') {
-    return `${baseCommand} -m ${quoted}`
-  }
-  return `${baseCommand} --model ${quoted}`
-}
-
 export const THEME_OPTIONS: ThemeOption[] = [
   { id: 'system', label: 'System', scheme: 'system' },
   { id: 'blacksphere-plus', label: 'mousse dark', scheme: 'dark' },

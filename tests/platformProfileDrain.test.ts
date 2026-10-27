@@ -371,7 +371,7 @@ describe('profile drain and durable scheduler ownership', () => {
     const bobServices = await host.getProfileServices(bob.id)
     const spawnTree = async (services: MmsProfileServices, label: string) => {
       const beats = join(services.getProfileHomeDir(), `${label}-beats`)
-      services.headlessRunner.spawn(label, services.getProfileHomeDir(), heartbeatCommand(), {
+      services.ptyManager.create(label, services.getProfileHomeDir(), heartbeatCommand(), {
         env: {
           LIFECYCLE_HEARTBEAT_DIR: beats,
           LIFECYCLE_ROLE: 'child',
@@ -379,8 +379,8 @@ describe('profile drain and durable scheduler ownership', () => {
           LIFECYCLE_SPAWN_GRANDCHILD: '1'
         }
       })
-      await waitForHeartbeat(heartbeatPath(beats, 'child'))
-      await waitForHeartbeat(heartbeatPath(beats, 'grandchild'))
+      await waitForHeartbeat(heartbeatPath(beats, 'child'), 2, 20_000)
+      await waitForHeartbeat(heartbeatPath(beats, 'grandchild'), 2, 20_000)
       return {
         child: readOwnedPidFile(pidPath(beats, 'child')),
         grandchild: readOwnedPidFile(pidPath(beats, 'grandchild'))
@@ -388,16 +388,17 @@ describe('profile drain and durable scheduler ownership', () => {
     }
 
     const bobTree = await spawnTree(bobServices, 'profile-tree')
-    expect(bobServices.getOwnedActivity().headlessProcesses).toBe(1)
+    expect(bobServices.getOwnedActivity().ptyProcesses).toBe(1)
     await host.remove(bob.id, bob.revision)
     await waitUntilPidGone(bobTree.child, 'removed profile child')
     await waitUntilPidGone(bobTree.grandchild, 'removed profile grandchild')
 
     const defaultTree = await spawnTree(main, 'installation-tree')
-    expect(main.getOwnedActivity().headlessProcesses).toBe(1)
+    expect(main.getOwnedActivity().ptyProcesses).toBe(1)
     await main.stop()
     await waitUntilPidGone(defaultTree.child, 'installation child')
     await waitUntilPidGone(defaultTree.grandchild, 'installation grandchild')
+    expect(main.getOwnedActivity().ptyProcesses).toBe(0)
     expect(main.getOwnedActivity().headlessProcesses).toBe(0)
   }, 60_000)
 

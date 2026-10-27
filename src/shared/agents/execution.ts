@@ -266,14 +266,8 @@ export interface NativeAgentRuntimePort {
   run(input: AgentRuntimeInput): Promise<AgentRuntimeResult>
 }
 
-/** Root binds this to the existing CLI process/config runner. */
-export interface CliAgentRuntimePort {
-  run(input: AgentRuntimeInput): Promise<AgentRuntimeResult>
-}
-
 export interface AgentExecutionBindings {
   native?: NativeAgentRuntimePort
-  cli?: Partial<Record<Exclude<AgentRuntimeKind, 'mousse'>, CliAgentRuntimePort>>
   now?: () => number
   id?: () => string
   /** Default host authority when a request does not supply its own. */

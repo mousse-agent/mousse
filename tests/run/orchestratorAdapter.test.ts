@@ -9,7 +9,6 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AgentRegistry } from '../../src/mms/agents/AgentRegistry'
 import { ProjectManager } from '../../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../../src/mms/data/ThreadDataStore'
-import type { MacroEngine } from '../../src/mms/macros/MacroEngine'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
 import { testHarness } from '../../src/mms/run/testkit/harness'
 import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
@@ -26,7 +25,6 @@ import { EffectWorker } from '../../src/mms/run/EffectWorker'
 import { RunEngine } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
 import { TaskQueue } from '../../src/mms/tasks/TaskQueue'
-import { HeadlessAgentRunner } from '../../src/mms/terminals/HeadlessAgentRunner'
 import { PtyManager } from '../../src/mms/terminals/PtyManager'
 import { WorktreeManager } from '../../src/mms/worktree/WorktreeManager'
 import { getDefaultSettings } from '../../src/shared/settings'
@@ -79,8 +77,6 @@ describe('adapter-based turn.start', () => {
       new TaskQueue(),
       new WorktreeManager(home),
       new PtyManager(),
-      new HeadlessAgentRunner(),
-      { listProviders: () => [] } as unknown as MacroEngine,
       { get: () => getDefaultSettings() } as never,
       {} as never
     )

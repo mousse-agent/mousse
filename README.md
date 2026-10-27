@@ -35,7 +35,6 @@ Think of it as a **control plane** for agentic development: one chat on the left
 | **Orchestrator chat** | Pi-style LLM plans, delegates child threads with `delegate_task`, and runs tool calls |
 | **Terminal multiplexer** | Tabbed [xterm.js](https://xtermjs.org/) panes backed by [node-pty](https://github.com/microsoft/node-pty) |
 | **Git worktrees** | One isolated worktree per agent; merge on task completion |
-| **Per-CLI configs** | JSON command and headless configs (`macros/*.json`) that define how each CLI is launched and how prompts are delivered |
 | **MCP integration** | Discovers standard MCP configs; exposes selected tools to the orchestrator |
 | **Agent Skills** | Loads `SKILL.md` folders from Cursor, Claude, Codex, and OpenCode conventions |
 | **Provider auth** | API key and OAuth login via Settings — credentials stored locally in `~/.mousse/` |
@@ -132,7 +131,6 @@ Further documentation:
 ```
 mousse/
 ├── docs/                  # Architecture and implementation notes
-├── macros/                # Per-CLI command/headless JSON configs
 ├── resources/             # App icons
 ├── src/
 │   ├── main/              # Electron main process (thin shell over MMS)

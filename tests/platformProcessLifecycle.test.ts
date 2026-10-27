@@ -1,19 +1,16 @@
 import { tryAcquireExecutionLease, releaseExecutionLeaseHandle, heartbeatExecutionLease } from '../src/mms/queue/ThreadExecutionLease'
 import { assertHeldThreadLease } from '../src/mms/actions/GitOperationCoordinator'
-import { EventEmitter } from 'node:events'
-import { PassThrough } from 'node:stream'
 import { mkdtempSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { ChildProcess } from 'node:child_process'
-import { HeadlessAgentRunner } from '../src/mms/terminals/HeadlessAgentRunner'
 import { PtyManager } from '../src/mms/terminals/PtyManager'
 import { WorkerHandle } from '../src/mms/terminals/WorkerHandle'
 import {
   ProcessLifecycleController,
   ProcessAdmissionError,
   ProcessShutdownError,
+  createDefaultProcessTreeSignaler,
   windowsTaskkillArgs,
   type OwnedTreeSignal
 } from '../src/mms/terminals/processLifecycle'
@@ -28,6 +25,7 @@ import {
   waitForHeartbeat,
   waitUntilPidGone
 } from './fixtures/agent-platform/process-lifecycle/ownedTemp'
+import { spawnOwnedShell } from './fixtures/agent-platform/process-lifecycle/ownedShell'
 
 const originalMousseHome = process.env.MOUSSE_HOME
 const tempRoots: string[] = []
@@ -65,27 +63,6 @@ function heartbeatEnv(dir: string, extra: Record<string, string> = {}): Record<s
   }
 }
 
-function failingSpawnChild(): ChildProcess {
-  const stdout = new PassThrough()
-  const stderr = new PassThrough()
-  const proc = new EventEmitter() as ChildProcess
-  Object.assign(proc, {
-    pid: undefined,
-    stdout,
-    stderr,
-    stdin: null,
-    kill: () => false
-  })
-  queueMicrotask(() => {
-    const error = Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' })
-    proc.emit('error', error)
-    stdout.end()
-    stderr.end()
-    proc.emit('close')
-  })
-  return proc
-}
-
 beforeEach(() => {
   const home = mkdtempSync(join(realpathSync.native(tmpdir()), 'mousse-process-lifecycle-home-'))
   trackRoot(home)
@@ -118,7 +95,7 @@ afterEach(async () => {
 
 describe('WorkerHandle exit/close publication', () => {
   it('publishes exit and close exactly once and never synthesizes them from a kill call', async () => {
-    const handle = new WorkerHandle('h1', 'agent-a', 'headless')
+    const handle = new WorkerHandle('h1', 'agent-a', 'pty')
     expect(handle.alive).toBe(true)
     expect(handle.closed).toBe(false)
     const first = handle.recordExit(1, 'SIGTERM')
@@ -147,106 +124,43 @@ describe('owned tree signaling', () => {
   })
 })
 
-describe('HeadlessAgentRunner real process lifecycle', () => {
-  it('shutdown waits for the owned PowerShell/node tree and stops heartbeats', async () => {
+describe('ProcessLifecycleController real process lifecycle', () => {
+  it('shutdown waits for an owned shell/node tree and stops heartbeats', async () => {
     const root = trackRoot(makeLifecycleTempRoot())
     const beats = join(root, 'beats')
-    const runner = trackRunner(new HeadlessAgentRunner())
-    const processId = runner.spawn('agent-tree', root, heartbeatCommand(), {
-      env: heartbeatEnv(beats, { LIFECYCLE_SPAWN_GRANDCHILD: '1' })
-    })
-    expect(processId).not.toBe(String(process.pid))
+    const controller = trackRunner(new ProcessLifecycleController('pty', createDefaultProcessTreeSignaler()))
+    spawnOwnedShell(controller, 'agent-tree', root, heartbeatCommand(), heartbeatEnv(beats, { LIFECYCLE_SPAWN_GRANDCHILD: '1' }))
     await waitForHeartbeat(heartbeatPath(beats, 'child'))
     await waitForHeartbeat(heartbeatPath(beats, 'grandchild'))
     const childPid = readOwnedPidFile(pidPath(beats, 'child'))
     const grandchildPid = readOwnedPidFile(pidPath(beats, 'grandchild'))
     expect(childPid).not.toBe(process.pid)
     expect(grandchildPid).not.toBe(process.pid)
-    expect(runner.getActiveCount()).toBe(1)
-    expect(runner.list()).toHaveLength(1)
+    expect(controller.getActiveCount()).toBe(1)
 
-    runner.beginShutdown()
-    expect(() =>
-      runner.spawn('agent-tree', root, heartbeatCommand(), { env: heartbeatEnv(beats) })
-    ).toThrow(ProcessAdmissionError)
-    const first = runner.shutdown({ timeoutMs: 20_000 })
-    const second = runner.shutdown({ timeoutMs: 20_000 })
+    controller.beginShutdown()
+    expect(() => spawnOwnedShell(controller, 'agent-late', root, heartbeatCommand(), heartbeatEnv(beats))).toThrow(ProcessAdmissionError)
+    const first = controller.shutdown({ timeoutMs: 20_000 })
+    const second = controller.shutdown({ timeoutMs: 20_000 })
     expect(second).toBe(first)
     await first
-    await second
-    await runner.shutdown({ timeoutMs: 1_000 })
+    await controller.shutdown({ timeoutMs: 1_000 })
 
-    expect(runner.getActiveCount()).toBe(0)
-    expect(runner.has(processId)).toBe(false)
-    await waitUntilPidGone(childPid, 'headless child')
-    await waitUntilPidGone(grandchildPid, 'headless grandchild')
+    expect(controller.getActiveCount()).toBe(0)
+    await waitUntilPidGone(childPid, 'owned child')
+    await waitUntilPidGone(grandchildPid, 'owned grandchild')
     const childLines = heartbeatLineCount(heartbeatPath(beats, 'child'))
     const grandLines = heartbeatLineCount(heartbeatPath(beats, 'grandchild'))
     await waitMs(350)
     expect(heartbeatLineCount(heartbeatPath(beats, 'child'))).toBe(childLines)
     expect(heartbeatLineCount(heartbeatPath(beats, 'grandchild'))).toBe(grandLines)
-    expect(() =>
-      runner.spawn('agent-tree', root, heartbeatCommand(), { env: heartbeatEnv(beats) })
-    ).toThrow(ProcessAdmissionError)
   }, 40_000)
-
-  it('keeps ownership after kill() until the process actually exits', async () => {
-    const root = trackRoot(makeLifecycleTempRoot())
-    const beats = join(root, 'beats')
-    const runner = trackRunner(new HeadlessAgentRunner())
-    const exits: Array<{ processId: string; exitCode: number | null }> = []
-    runner.on('exit', (payload) => exits.push(payload))
-    const processId = runner.spawn('agent-kill', root, heartbeatCommand(), {
-      env: heartbeatEnv(beats, { LIFECYCLE_SPAWN_GRANDCHILD: '1' })
-    })
-    await waitForHeartbeat(heartbeatPath(beats, 'child'))
-    await waitForHeartbeat(heartbeatPath(beats, 'grandchild'))
-    const childPid = readOwnedPidFile(pidPath(beats, 'child'))
-    const grandchildPid = readOwnedPidFile(pidPath(beats, 'grandchild'))
-
-    runner.kill(processId)
-    expect(runner.has(processId)).toBe(false)
-    expect(runner.list()).toHaveLength(0)
-    expect(runner.getHandle(processId)).toBeUndefined()
-    expect(runner.getActiveCount()).toBe(1)
-
-    await runner.shutdown({ timeoutMs: 20_000 })
-    expect(runner.getActiveCount()).toBe(0)
-    expect(exits.filter((event) => event.processId === processId)).toHaveLength(1)
-    await waitUntilPidGone(childPid, 'killed headless child')
-    await waitUntilPidGone(grandchildPid, 'killed headless grandchild')
-    const lines = heartbeatLineCount(heartbeatPath(beats, 'child'))
-    await waitMs(350)
-    expect(heartbeatLineCount(heartbeatPath(beats, 'child'))).toBe(lines)
-  }, 40_000)
-
-  it('does not invent successful exit metadata for a natural early exit', async () => {
-    const root = trackRoot(makeLifecycleTempRoot())
-    const runner = trackRunner(new HeadlessAgentRunner())
-    const exits: Array<{
-      processId: string
-      exitCode: number | null
-      signal: string | null
-      exit: { error?: string }
-    }> = []
-    runner.on('exit', (payload) => exits.push(payload))
-    const command = process.platform === 'win32' ? "Write-Output 'early-exit'" : "printf 'early-exit\\n'"
-    const processId = runner.spawn('agent-early', root, command)
-    const deadline = Date.now() + 15_000
-    while (runner.getActiveCount() > 0 && Date.now() < deadline) await waitMs(50)
-    await runner.shutdown({ timeoutMs: 5_000 })
-    expect(runner.getActiveCount()).toBe(0)
-    expect(exits).toHaveLength(1)
-    expect(exits[0].processId).toBe(processId)
-    expect(exits[0].exit.error).toBeUndefined()
-    expect(exits[0].exitCode).toBe(0)
-  }, 25_000)
 })
 
-describe('HeadlessAgentRunner injected transport edges', () => {
+describe('injected transport edges', () => {
   it('does not capture or signal a reusable parent PID after exit while its pipes remain open', async () => {
-    const handle = new WorkerHandle('exited-open-pipes', 'agent-tree', 'headless')
-    const runner = trackRunner(new HeadlessAgentRunner({ treeSignaler: {
+    const handle = new WorkerHandle('exited-open-pipes', 'agent-tree', 'pty')
+    const runner = trackRunner(new PtyManager({ treeSignaler: {
       capture() { throw new Error('Cannot capture an exited parent') },
       signal() { throw new Error('Cannot signal an exited parent') }
     } }))
@@ -260,11 +174,11 @@ describe('HeadlessAgentRunner injected transport edges', () => {
   })
 
   it('retains captured descendants through timeout and retries without recapturing a dead parent PID', async () => {
-    const handle = new WorkerHandle('captured-timeout', 'agent-tree', 'headless')
+    const handle = new WorkerHandle('captured-timeout', 'agent-tree', 'pty')
     let alive = true
     let allowExit = false
     let captures = 0
-    const runner = trackRunner(new HeadlessAgentRunner({ treeSignaler: {
+    const runner = trackRunner(new PtyManager({ treeSignaler: {
       capture() {
         captures += 1
         return { isAlive: () => alive, signal: () => { if (allowExit) alive = false } }
@@ -288,9 +202,9 @@ describe('HeadlessAgentRunner injected transport edges', () => {
 
   it('captures the descendant tree before local termination can reparent it', async () => {
     const events: string[] = []
-    const handle = new WorkerHandle('capture-first', 'agent-tree', 'headless')
+    const handle = new WorkerHandle('capture-first', 'agent-tree', 'pty')
     let descendantsAttached = true
-    const runner = trackRunner(new HeadlessAgentRunner({
+    const runner = trackRunner(new PtyManager({
       treeSignaler: {
         signal() {
           events.push(descendantsAttached ? 'captured-descendants' : 'lost-descendants')
@@ -314,8 +228,8 @@ describe('HeadlessAgentRunner injected transport edges', () => {
     let finishTreeSignal!: () => void
     const treeSignal = new Promise<void>((resolve) => { finishTreeSignal = resolve })
     const signals: OwnedTreeSignal[] = []
-    const handle = new WorkerHandle('parent-exits-first', 'agent-tree', 'headless')
-    const runner = trackRunner(new HeadlessAgentRunner({
+    const handle = new WorkerHandle('parent-exits-first', 'agent-tree', 'pty')
+    const runner = trackRunner(new PtyManager({
       treeSignaler: {
         signal(_pid, mode) {
           signals.push(mode)
@@ -342,29 +256,10 @@ describe('HeadlessAgentRunner injected transport edges', () => {
     expect(signals).toEqual(['term'])
   })
 
-  it('treats spawn error as observed failure, not a successful drain from kill', async () => {
-    const root = trackRoot(makeLifecycleTempRoot())
-    const runner = trackRunner(
-      new HeadlessAgentRunner({
-        spawn: () => failingSpawnChild()
-      })
-    )
-    const exits: Array<{ exit: { error?: string; code: number | null } }> = []
-    runner.on('exit', (payload) => exits.push(payload))
-    const processId = runner.spawn('agent-fail', root, heartbeatCommand())
-    expect(runner.getActiveCount()).toBe(1)
-    await runner.shutdown({ timeoutMs: 5_000 })
-    expect(runner.getActiveCount()).toBe(0)
-    expect(exits).toHaveLength(1)
-    expect(exits[0].exit.error).toMatch(/ENOENT|spawn/)
-    expect(exits[0].exit.code).toBeNull()
-    expect(processId).toEqual(expect.any(String))
-  })
-
   it('retains a failed tree signal for diagnosis and safely retries while the handle is alive', async () => {
-    const handle = new WorkerHandle('retry-tree', 'agent-retry', 'headless')
+    const handle = new WorkerHandle('retry-tree', 'agent-retry', 'pty')
     let allowSignal = false
-    const runner = trackRunner(new HeadlessAgentRunner({
+    const runner = trackRunner(new PtyManager({
       treeSignaler: {
         signal() {
           if (!allowSignal) return Promise.reject(new Error('tree signal unavailable'))
@@ -392,22 +287,21 @@ describe('HeadlessAgentRunner injected transport edges', () => {
 
   it('fails closed on timeout, shares the in-flight operation, and retains ownership to retry', async () => {
     const signals: OwnedTreeSignal[] = []
-    const handle = new WorkerHandle('injected-timeout', 'agent-injected', 'headless')
+    const handle = new WorkerHandle('injected-timeout', 'agent-injected', 'pty')
+    // The controller itself: the in-flight drain it shares is the operation under test.
     const runner = trackRunner(
-      new HeadlessAgentRunner({
-        treeSignaler: {
-          signal(_pid, mode) {
-            signals.push(mode)
-          }
+      new ProcessLifecycleController('pty', {
+        signal(_pid, mode) {
+          signals.push(mode)
         }
       })
     )
-    runner.adoptTransportForTests({
-      handle,
-      pid: undefined,
-      signal: (force) => {
-        signals.push(force ? 'kill' : 'term')
-      }
+    const adopt = (owned: WorkerHandle, signalLocal?: (force: boolean) => void) => {
+      runner.assertAdmits('create')
+      runner.track({ id: owned.id, agentId: owned.agentId, kind: 'pty', pid: undefined, handle: owned, signaled: false, signalLocal })
+    }
+    adopt(handle, (force) => {
+      signals.push(force ? 'kill' : 'term')
     })
     expect(runner.getActiveCount()).toBe(1)
 
@@ -442,27 +336,7 @@ describe('HeadlessAgentRunner injected transport edges', () => {
     handle.recordClose()
     await runner.shutdown({ timeoutMs: 1_000 })
     expect(runner.getActiveCount()).toBe(0)
-    expect(() =>
-      runner.adoptTransportForTests({
-        handle: new WorkerHandle('reopen', 'agent-injected', 'headless')
-      })
-    ).toThrow(ProcessAdmissionError)
-  })
-
-  it('synchronous spawn throw leaves no owned worker and does not report drained from a kill', async () => {
-    const runner = trackRunner(
-      new HeadlessAgentRunner({
-        spawn: () => {
-          throw Object.assign(new Error('spawn EACCES'), { code: 'EACCES' })
-        }
-      })
-    )
-    expect(() =>
-      runner.spawn('agent-throw', trackRoot(makeLifecycleTempRoot()), heartbeatCommand())
-    ).toThrow(/EACCES/)
-    expect(runner.getActiveCount()).toBe(0)
-    await runner.shutdown({ timeoutMs: 500 })
-    expect(runner.getActiveCount()).toBe(0)
+    expect(() => adopt(new WorkerHandle('reopen', 'agent-injected', 'pty'))).toThrow(ProcessAdmissionError)
   })
 })
 
@@ -564,15 +438,14 @@ describe.skipIf(process.platform === 'win32')('POSIX non-cooperative child', () 
   it('retains a captured SIGTERM-ignoring descendant after parent exit, then escalates on retry', async () => {
     const root = trackRoot(makeLifecycleTempRoot())
     const beats = join(root, 'beats')
-    const runner = trackRunner(new HeadlessAgentRunner())
-    const processId = runner.spawn('agent-orphan', root, heartbeatCommand(), {
-      env: heartbeatEnv(beats, { LIFECYCLE_SPAWN_GRANDCHILD: '1', LIFECYCLE_GRANDCHILD_IGNORE_STOP: '1' })
-    })
+    const runner = trackRunner(new ProcessLifecycleController('pty', createDefaultProcessTreeSignaler()))
+    spawnOwnedShell(runner, 'agent-orphan', root, heartbeatCommand(),
+      heartbeatEnv(beats, { LIFECYCLE_SPAWN_GRANDCHILD: '1', LIFECYCLE_GRANDCHILD_IGNORE_STOP: '1' }))
     await waitForHeartbeat(heartbeatPath(beats, 'child'))
     await waitForHeartbeat(heartbeatPath(beats, 'grandchild'))
     const childPid = readOwnedPidFile(pidPath(beats, 'child'))
     const grandchildPid = readOwnedPidFile(pidPath(beats, 'grandchild'))
-    runner.kill(processId)
+    runner.signalWorker('agent-orphan', false)
     await waitUntilPidGone(childPid, 'cooperative parent')
     await waitMs(150)
     expect(runner.getActiveCount()).toBe(1)
@@ -590,10 +463,8 @@ describe.skipIf(process.platform === 'win32')('POSIX non-cooperative child', () 
   it('does not report drained while SIGTERM is ignored, then force-kills the owned pid', async () => {
     const root = trackRoot(makeLifecycleTempRoot())
     const beats = join(root, 'beats')
-    const runner = trackRunner(new HeadlessAgentRunner())
-    runner.spawn('agent-ignore', root, heartbeatCommand(), {
-      env: heartbeatEnv(beats, { LIFECYCLE_IGNORE_STOP: '1' })
-    })
+    const runner = trackRunner(new ProcessLifecycleController('pty', createDefaultProcessTreeSignaler()))
+    spawnOwnedShell(runner, 'agent-ignore', root, heartbeatCommand(), heartbeatEnv(beats, { LIFECYCLE_IGNORE_STOP: '1' }))
     await waitForHeartbeat(heartbeatPath(beats, 'child'))
     const childPid = readOwnedPidFile(pidPath(beats, 'child'))
     await runner.shutdown({ timeoutMs: 8_000 })

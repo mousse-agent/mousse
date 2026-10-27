@@ -50,18 +50,6 @@ const ALLOWED_IMPORTERS = [
   /^src\/mms\/MmsProfileServices\.ts$/
 ]
 
-/** Listed exceptions, each with the PR that removes it. */
-const IMPORT_EXCEPTIONS: Record<string, string> = {
-  // Headless CLI-agent path: spawns claude/codex outside spawnHarness (PR 4).
-  'src/mms/macros/headlessCommand.ts': 'PR 4',
-  'src/mms/integrations/agents/AgentConfigManager.ts': 'PR 4',
-  'src/mms/platform/MmsAgentExecutionService.ts': 'PR 4'
-}
-
-function isMacroProvider(path: string): boolean {
-  return /^src\/mms\/macros\/providers\/\w+MacroProvider\.ts$/.test(path)
-}
-
 describe('harness import boundary', () => {
   const sources = files('src').map((path) => ({ path, source: readFileSync(join(repoRoot, path), 'utf8') }))
 
@@ -73,7 +61,7 @@ describe('harness import boundary', () => {
   it('no application code imports vendor SDKs, vendor services or adapters', () => {
     const violations: string[] = []
     for (const { path, source } of sources) {
-      if (ALLOWED_IMPORTERS.some((rule) => rule.test(path)) || IMPORT_EXCEPTIONS[path] || isMacroProvider(path)) continue
+      if (ALLOWED_IMPORTERS.some((rule) => rule.test(path))) continue
       for (const specifier of specifiers(source)) {
         const resolved = target(path, specifier)
         if (FORBIDDEN.some((rule) => rule.test(resolved))) violations.push(`${path} → ${specifier}`)
@@ -86,10 +74,6 @@ describe('harness import boundary', () => {
     const orchestrator = sources.find(({ path }) => path === 'src/mms/orchestrator/OrchestratorService.ts')!
     const vendor = specifiers(orchestrator.source).filter((specifier) => /providers\/(claudeSubscription|codex|antigravity)|run\/adapters\/(?!shared\/)/.test(specifier))
     expect(vendor).toEqual([])
-  })
-
-  it('every listed exception still exists', () => {
-    for (const path of Object.keys(IMPORT_EXCEPTIONS)) expect(sources.some((entry) => entry.path === path), path).toBe(true)
   })
 
   it('only the Cursor host loads the Cursor SDK', () => {
@@ -131,11 +115,10 @@ const BRANCH_SITES = [
 
 /**
  * Files allowed to compare driver names, with the reason or the PR that removes the entry:
- * icons and settings keywords show the vendor; the headless CLI-agent files are PR 4's.
+ * icons and settings keywords show the vendor.
  */
 const LITERAL_ALLOWLIST: Record<string, string> = {
   'src/renderer/lib/providerIcons.tsx': 'icons',
-  'src/cli/commands/agents.ts': 'PR 4 (headless CLI agents)',
   // The pi loop's prompt for the legacy `pi:cursor` model API (`providerId` is a pi-ai provider).
   'src/mms/orchestrator/systemPrompt.ts': 'PR 4 (goes with the pi loop)'
 }

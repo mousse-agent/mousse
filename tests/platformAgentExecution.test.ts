@@ -5,7 +5,6 @@ import { AgentDefinitionError } from '../src/shared/agents/errors'
 import { defaultAgentSettings } from '../src/shared/agents/defaults'
 import type { ResolvedAgentDefinition } from '../src/shared/agents/types'
 import { AgentExecutionService } from '../src/mms/agentDefinitions/AgentExecutionService'
-import { buildSupportedCliInvocation, createCliProcessRuntime } from '../src/mms/agentDefinitions/cliRuntime'
 import { createNativeAgentRuntime } from '../src/mms/agentDefinitions/nativeRuntime'
 import { LlmClient } from '../src/mms/orchestrator/LlmClient'
 
@@ -143,44 +142,15 @@ describe('AgentExecutionService', () => {
     await expect(pending).resolves.toMatchObject({ status: 'cancelled', error: { code: 'ABORTED' } })
   })
 
-  it('uses a real local CLI process with system/config data supplied by the invocation builder', async () => {
-    const script = "let s=''; process.stdin.on('data',c=>s+=c); process.stdin.on('end',()=>process.stdout.write(JSON.stringify({system:process.env.FIXTURE_SYSTEM,input:s})))"
-    const cli = createCliProcessRuntime({
-      resolveInvocation: (input) => ({ command: process.execPath, args: ['-e', script], cwd: input.projectPath, env: { FIXTURE_SYSTEM: input.systemPrompt } })
+  it('refuses a CLI-kind definition, since only the native runtime executes definitions', async () => {
+    const run = vi.fn()
+    const service = new AgentExecutionService({ native: { run } })
+    const refused = service.run({
+      profileId: 'profile-1', resolved: resolved({ runtimeKind: 'codex' }), threadId: 'thread-cli', input: 'fixture input'
     })
-    const service = new AgentExecutionService({ cli: { codex: cli } })
-    const result = await service.run({
-      profileId: 'profile-1', resolved: resolved({ runtimeKind: 'codex' }), threadId: 'thread-cli', projectPath: process.cwd(), input: 'fixture input'
-    })
-    expect(result.status).toBe('completed')
-    expect(JSON.parse(result.text)).toEqual(expect.objectContaining({
-      system: expect.stringContaining('You are a reviewer.'),
-      input: 'fixture input'
-    }))
-    expect(result.history.some((entry) => entry.role === 'system')).toBe(false)
-    expect(result.history[0]).toEqual(expect.objectContaining({ role: 'user', content: 'fixture input' }))
-  })
-
-  it('builds documented instruction channels for each external runtime', () => {
-    const base = {
-      runId: 'run', profileId: 'profile-1', threadId: 'thread', projectPath: process.cwd(),
-      runtimeKind: 'claude-code' as const,
-      model: resolved().model,
-      systemPrompt: 'SYSTEM ONLY', userMessage: 'USER ONLY', grants: resolved().grants,
-      budget: { maxTurns: 3, maxToolCalls: 4, maxElapsedMs: 1000 }, signal: new AbortController().signal
-    }
-    expect(buildSupportedCliInvocation(base, { mcpConfigPath: 'C:/tmp/mcp.json', claudeMcpToolNames: { 'docs/read': 'mcp__docs__read' } })).toEqual(expect.objectContaining({
-      command: 'claude', promptMode: 'stdin', args: expect.arrayContaining(['--bare', '--system-prompt', 'SYSTEM ONLY', '--max-turns', '3', '--tools', 'Read', 'mcp__docs__read', '--strict-mcp-config', '--mcp-config', 'C:/tmp/mcp.json'])
-    }))
-    expect(buildSupportedCliInvocation({ ...base, runtimeKind: 'codex' }, {}).args).toEqual(
-      expect.arrayContaining(['exec', '-c', 'developer_instructions="SYSTEM ONLY"'])
-    )
-    const openCode = buildSupportedCliInvocation({ ...base, runtimeKind: 'opencode' }, {})
-    expect(openCode.args).toEqual(expect.arrayContaining(['run', '--agent', 'mousse']))
-    expect(JSON.parse(openCode.env!.OPENCODE_CONFIG_CONTENT).agent.mousse.prompt).toBe('SYSTEM ONLY')
-    expect(() => buildSupportedCliInvocation({ ...base, runtimeKind: 'cursor-agents-cli' }, {})).toThrow(/rules file/)
-    expect(() => buildSupportedCliInvocation(base, { mcpConfigPath: 'C:/tmp/mcp.json' })).toThrow(/tool mapping/)
-    expect(buildSupportedCliInvocation({ ...base, runtimeKind: 'cursor-agents-cli' }, { cursorRulesPath: 'C:/tmp/rules.mdc' }).args).not.toContain('--force')
+    await expect(refused).rejects.toBeInstanceOf(AgentDefinitionError)
+    await expect(refused).rejects.toMatchObject({ code: 'SETTINGS_UNSUPPORTED', details: { runtimeKind: 'codex' } })
+    expect(run).not.toHaveBeenCalled()
   })
 
   it('binds native integration discovery and calls to the exact resolved grants', async () => {
@@ -220,17 +190,6 @@ describe('AgentExecutionService', () => {
       usage: { totalTokens: 9, inputTokens: 7, outputTokens: 2, costUsd: 0.06 }
     })
     expect(captured).toHaveLength(2)
-  })
-
-  it('bounds combined CLI process output', async () => {
-    const cli = createCliProcessRuntime({
-      maxOutputBytes: 8,
-      resolveInvocation: () => ({ command: process.execPath, args: ['-e', "process.stdout.write('0123456789')"], promptMode: 'argument' })
-    })
-    const result = await new AgentExecutionService({ cli: { codex: cli } }).run({
-      profileId: 'profile-1', resolved: resolved({ runtimeKind: 'codex' }), threadId: 'bounded', input: 'input'
-    })
-    expect(result).toMatchObject({ status: 'failed', error: { code: 'RUNTIME_ERROR', message: expect.stringContaining('output limit') } })
   })
 
   it('fails closed when structured output is not valid JSON or misses its schema', async () => {

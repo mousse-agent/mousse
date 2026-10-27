@@ -49,9 +49,6 @@ asarUnpack:
   - node_modules/@cursor/sdk-*/**
   - out/main/cursorHost.js
 npmRebuild: false
-extraResources:
-  - from: macros
-    to: macros
 win:
   target:
     - target: portable

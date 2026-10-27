@@ -11,7 +11,6 @@ import type { Message } from '@earendil-works/pi-ai'
 import { AgentRegistry } from '../../../src/mms/agents/AgentRegistry'
 import { ProjectManager } from '../../../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../../../src/mms/data/ThreadDataStore'
-import type { MacroEngine } from '../../../src/mms/macros/MacroEngine'
 import { OrchestratorService } from '../../../src/mms/orchestrator/OrchestratorService'
 import { UserQuestionService } from '../../../src/mms/orchestrator/UserQuestionService'
 import { AntigravityProviderService } from '../../../src/mms/providers/antigravity/AntigravityProviderService'
@@ -39,7 +38,6 @@ import { Reconciler } from '../../../src/mms/run/Reconciler'
 import { replaySdkQuery } from '../../../src/mms/run/testkit/sdkQueryReplay'
 import type { AttemptRecord, DelegationRecord, EffectKind, EffectRecord, HandoffRecord, RunRecord, TransferRecord } from '../../../src/mms/run/types'
 import { TaskQueue } from '../../../src/mms/tasks/TaskQueue'
-import { HeadlessAgentRunner } from '../../../src/mms/terminals/HeadlessAgentRunner'
 import { PtyManager } from '../../../src/mms/terminals/PtyManager'
 import { WorktreeManager } from '../../../src/mms/worktree/WorktreeManager'
 import { getDefaultSettings } from '../../../src/shared/settings'
@@ -132,11 +130,8 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
     new TaskQueue(),
     new WorktreeManager(home),
     new PtyManager(),
-    new HeadlessAgentRunner(),
-    { listProviders: () => [] } as unknown as MacroEngine,
     { get: () => settings } as never,
     {} as never,
-    undefined,
     undefined,
     undefined,
     undefined,

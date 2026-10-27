@@ -5,8 +5,7 @@ import { describe, expect, it } from 'vitest'
 import { SkillsRegistry } from '../src/mms/integrations/skills/SkillsRegistry'
 import { McpRegistry } from '../src/mms/integrations/mcp/McpRegistry'
 import { SkillLifecycleService } from '../src/mms/integrations/skills/SkillLifecycleService'
-import { getMcpTarget, getSkillTargets } from '../src/mms/integrations/agents/AgentConfigManager'
-import { getNativeSkillRoots, getProjectMousseMcpConfigPath, getProjectMousseSkillRoot } from '../src/mms/integrations/nativePaths'
+import { getNativeSkillRoots } from '../src/mms/integrations/nativePaths'
 import { createLegacySingleProfileContext } from '../src/mms/integrations/profileContext'
 import { parseCodexMcpServersToml } from '../src/mms/integrations/mcp/McpRegistry'
 import { tomlSubsetDiagnostics } from '../src/mms/integrations/mcp/tomlDiagnostics'
@@ -16,9 +15,6 @@ describe('I01 native discovery alignment', () => {
   it('discovers the same .mousse/skills and .mousse/mcp.json paths the native writer uses', async () => {
     const { root, project, context } = await makeTempProfile()
     try {
-      expect(getSkillTargets('mousse', project)).toEqual([getProjectMousseSkillRoot(project)])
-      expect(getMcpTarget('mousse', project)).toBe(getProjectMousseMcpConfigPath(project))
-
       await writeNativeSkill(project, 'native-review')
       await writeNativeMcp(project, 'native-echo')
 

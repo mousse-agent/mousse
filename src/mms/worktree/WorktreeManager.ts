@@ -3,7 +3,6 @@ import { symlink } from 'fs/promises'
 import { spawn } from 'child_process'
 import { GIT_NULL_DEVICE } from '../git/gitNullDevice'
 import { basename, dirname, join, relative, resolve, sep } from 'path'
-import { fileURLToPath } from 'url'
 import simpleGit, { SimpleGit } from 'simple-git'
 import { RepositoryContext } from './RepositoryContext'
 import { WorktreeIdentity } from './WorktreeIdentity'
@@ -389,23 +388,6 @@ export class WorktreeManager {
     } catch {
       return []
     }
-  }
-
-  static resolveMacrosPath(): string {
-    const moduleDir = dirname(fileURLToPath(import.meta.url))
-    const candidates = [
-      process.env.MOUSSE_MACROS_PATH,
-      process.resourcesPath ? join(process.resourcesPath, 'macros') : undefined,
-      resolve(moduleDir, '../../../macros'),
-      resolve(moduleDir, '../../../../macros'),
-      resolve(process.cwd(), 'macros')
-    ].filter((value): value is string => Boolean(value))
-
-    for (const candidate of candidates) {
-      if (existsSync(candidate)) return candidate
-    }
-
-    return resolve(process.cwd(), 'macros')
   }
 }
 

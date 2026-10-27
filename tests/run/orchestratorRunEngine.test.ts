@@ -12,7 +12,6 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AgentRegistry } from '../../src/mms/agents/AgentRegistry'
 import { ProjectManager } from '../../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../../src/mms/data/ThreadDataStore'
-import type { MacroEngine } from '../../src/mms/macros/MacroEngine'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { EffectWorker } from '../../src/mms/run/EffectWorker'
@@ -22,7 +21,6 @@ import { RunEngine } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
 import type { EffectKind, EffectRecord, ThreadEvent } from '../../src/mms/run/types'
 import { TaskQueue } from '../../src/mms/tasks/TaskQueue'
-import { HeadlessAgentRunner } from '../../src/mms/terminals/HeadlessAgentRunner'
 import { PtyManager } from '../../src/mms/terminals/PtyManager'
 import { WorktreeManager } from '../../src/mms/worktree/WorktreeManager'
 import { getDefaultSettings } from '../../src/shared/settings'
@@ -34,8 +32,6 @@ function createOrchestrator(home: string, store: ThreadDataStore): OrchestratorS
     new TaskQueue(),
     new WorktreeManager(home),
     new PtyManager(),
-    new HeadlessAgentRunner(),
-    { listProviders: () => [] } as unknown as MacroEngine,
     { get: () => getDefaultSettings() } as never,
     {} as never
   )

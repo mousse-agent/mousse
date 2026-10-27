@@ -236,10 +236,6 @@
       {
         "from": "resources/icon.png",
         "to": "icon.png"
-      },
-      {
-        "from": "macros",
-        "to": "macros"
       }
     ],
     "win": {
