@@ -29,7 +29,7 @@ const retiredCursor = snapshot({
   nextStep: { action: 'move', label: 'Move', title: 'Retired by this update', detail: 'Move to Cursor to keep chatting. Your chats stay.' }
 })
 const agent = (overrides: Parameters<typeof snapshot>[0] = {}) =>
-  snapshot({ instanceId: 'cursor', driver: 'cursor', displayName: 'Cursor agent', auth: { state: 'signed_out', account: undefined, canSignIn: true }, ...overrides })
+  snapshot({ instanceId: 'cursor', driver: 'cursor', displayName: 'Cursor agent', auth: { state: 'signed_out', account: undefined, canSignIn: true, canTakeKey: true }, ...overrides })
 
 function show(target: ReturnType<typeof agent>) {
   act(() => root.render(createElement(MoveProviderDialog, { snapshot: retiredCursor, targets: [target], agentLabel: 'Cursor', onMove: noop as never, onSignIn: noop, onRecheck: noop, onClose: () => {} })))

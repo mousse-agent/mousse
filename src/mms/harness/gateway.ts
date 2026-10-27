@@ -801,6 +801,10 @@ export class Harness implements HarnessGateway {
         // A runtime that cannot run a model by id does not offer adding one.
         if (patch.custom?.length && !record.driver.customModels)
           harnessFail('unsupported', `${record.driver.label} runs only the models it lists; custom models cannot be added.`, instanceId)
+        // A retired entry takes no new custom model (the ones it has stay stored).
+        const retired = retiredPrompt(record.driver, instanceId, record.config)
+        const stored = new Set(this.prefs.get(instanceId).custom.map((model) => model.id))
+        if (retired && patch.custom?.some((model) => !stored.has(model.id))) throw retiredError(this.displayName(record), retired, instanceId)
         this.prefs.set(instanceId, patch)
         this.changed(instanceId)
         return this.snapshot(instanceId, { kind: 'device' })
@@ -812,7 +816,11 @@ export class Harness implements HarnessGateway {
     }
     this.registry = { search: (query) => options.registry?.search(query) ?? Promise.resolve([]) }
     this.catalog = {
-      models: (instanceId) => modelsWithPrefs(this.record(instanceId, { allowDisabled: true }).runtime.models(), this.prefs.get(instanceId)),
+      models: (instanceId) => {
+        const record = this.record(instanceId, { allowDisabled: true })
+        // A retired entry offers no model to choose, custom ones included (its prefs are kept).
+        return retiredPrompt(record.driver, instanceId, record.config) ? [] : modelsWithPrefs(record.runtime.models(), this.prefs.get(instanceId))
+      },
       customModel: (instanceId, modelId) => {
         const prefs = this.prefs.get(instanceId)
         return hidesModel(prefs, modelId) ? undefined : prefs.custom.find((model) => model.id === modelId)
@@ -2079,9 +2087,10 @@ export class Harness implements HarnessGateway {
       config: this.configView(record),
       ...this.engineView(record),
       models: {
-        entries: modelsWithPrefs(listed, prefs),
+        // A retired entry offers no model to choose, custom ones included (its prefs are kept).
+        entries: retired ? [] : modelsWithPrefs(listed, prefs),
         source: listed.length ? (models?.live || (runtime.modelsRefreshedAt && refreshedAt) ? 'live' : 'cached') : prefs.custom.length ? 'manifest' : 'none',
-        canAddCustom: driver.customModels,
+        canAddCustom: driver.customModels && !retired,
         ...(refreshedAt ? { refreshedAt } : {}),
         ...(models?.error ? { error: models.error } : {})
       },

@@ -14,13 +14,14 @@ import { ProviderAuthService } from '../../src/mms/providers/ProviderAuthService
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import { LoginSession } from '../../src/mms/providers/LoginSession'
 import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
-import { moveDefaultsRewrite } from '../../src/mms/settings/moveDefaults'
+import { rewriteMovedDefaults } from '../../src/mms/settings/movedDefaults'
 import { SettingsStore } from '../../src/mms/settings/SettingsStore'
 import type { ProviderAdapter, TurnResult } from '../../src/mms/run/adapters/ProviderAdapter'
 import { CODEX_CAPABILITIES } from '../../src/mms/run/adapters/codex/CodexAdapter'
 import { adapterDriver } from '../../src/mms/run/testkit/harness'
 import { FOLDED_INTO_AGENT } from '../../src/shared/harness/move'
 import { describeStatus } from '../../src/shared/harness/status'
+import { pickerProviders } from '../../src/renderer/lib/providerSnapshots'
 import { FakeIssuer, plainCodec } from './chatgpt/fakeIssuer'
 import { signIn } from './chatgpt/signInFlow'
 
@@ -87,7 +88,9 @@ interface UpgradeOptions {
   /** The stored ChatGPT sign-in expired before the upgrade (a refresh would be due). */
   expired?: boolean
   /** The Cursor agent: signed out in Mousse before, unable to run even with a key, or its install broken. */
-  cursor?: { signedOutInMousse?: boolean; runs?: boolean; broken?: boolean }
+  cursor?: { signedOutInMousse?: boolean; runs?: boolean; broken?: boolean; holdAdoption?: Promise<void> }
+  /** Custom models the user added under the ChatGPT entry before the upgrade. */
+  custom?: boolean
 }
 
 /** The fixture's profile after the upgrade: the real credential store and pi driver, fake agents. */
@@ -125,7 +128,11 @@ async function upgraded(options: UpgradeOptions = {}) {
     cancel: () => false
   } as unknown as CodexInstallation
   const adopted: string[] = []
+  let adopting = 0
   const chats: unknown[] = []
+  let prefsStored: Record<string, unknown> = options.custom
+    ? { 'pi:openai-codex': { hidden: [], order: [], favorites: [], custom: [{ id: 'gpt-custom', label: 'My GPT', capabilities: { efforts: [], images: false } }] } }
+    : {}
   const harness: Harness = createHarnessGateway({
     profileHome: home,
     installationHome: home,
@@ -154,13 +161,27 @@ async function upgraded(options: UpgradeOptions = {}) {
           configured: () => options.cursor?.runs !== false && adopted.length > 0,
           models: () => [{ id: 'composer-1', label: 'Composer 1' }],
           auth: async () => (adopted.length ? { state: 'signed_in', methodLabel: 'API key' } : { state: 'signed_out' }),
-          adoptApiKey: async (key: string) => void adopted.push(key),
+          // The real agent checks the key with Cursor before it saves it: a test may hold that reply.
+          adoptApiKey: async (key: string) => {
+            adopting += 1
+            await options.cursor?.holdAdoption
+            adopted.push(key)
+          },
+          signOut: async () => void adopted.splice(0),
           ...(options.cursor?.broken ? { managed: () => ({ path: join(home, 'cursor-host'), broken: 'host.js' }) as never } : {})
         }
       })
     ],
-    // What the profile itself rewrites on a Move.
-    defaults: moveDefaultsRewrite(settings)
+    // Model preferences stored before the upgrade.
+    prefs: { read: () => prefsStored, write: (next) => void (prefsStored = next) },
+    // What the profile itself rewrites on a Move (as `MmsProfileServices` wires it).
+    defaults: {
+      rewrite: (from, to) => {
+        const { patch, rewritten } = rewriteMovedDefaults(settings.get(), from, to)
+        if (patch) settings.set(patch)
+        return rewritten
+      }
+    }
   })
   cleanups.push(() => harness.stop())
   return {
@@ -171,6 +192,8 @@ async function upgraded(options: UpgradeOptions = {}) {
     adopted,
     chats,
     stored: () => instances,
+    prefs: () => prefsStored,
+    moveWaiting: () => adopting > 0,
     settings: () => settings.get(),
     authFile: () => JSON.parse(readFileSync(join(home, 'auth.json'), 'utf8')) as Record<string, any>,
     authUnchanged: () => readFileSync(join(home, 'auth.json'), 'utf8') === authBefore
@@ -331,7 +354,7 @@ describe('retired legacy-only Pi connections', () => {
     })
 
     const result = await profile.harness.instances.move('pi:openai-codex', MANAGED)
-    expect(result).toMatchObject({ from: 'pi:openai-codex', to: MANAGED, oldSignIn: 'removed', rewritten: ['Default model', 'Title model: Automatic'] })
+    expect(result).toMatchObject({ from: 'pi:openai-codex', to: MANAGED, oldSignIn: 'removed', rewritten: ['Default model', 'Chat titles: Automatic'] })
     const model = read('thread.json').modelOverride.model
     // The default follows the entry; the title model becomes Automatic (Codex cannot name chats).
     expect(profile.settings().provider).toMatchObject({ instanceId: MANAGED, model })
@@ -388,5 +411,47 @@ describe('retired legacy-only Pi connections', () => {
     await expect(profile.harness.instances.move('pi:cursor', CURSOR, { copyKey: true })).rejects.toMatchObject({ code: 'signed_out', message: expect.stringContaining('Install') })
     expect(profile.adopted).toEqual([])
     expect(profile.authFile().cursor).toBeDefined()
+  })
+
+  it('custom models added under a retired entry are kept but offered nowhere, and no new one is taken', async () => {
+    const profile = await upgraded({ custom: true })
+    const snapshots = await settledSnapshots(profile)
+    const snapshot = snapshots.find((entry) => entry.instanceId === 'pi:openai-codex')!
+    expect(snapshot.models.entries).toEqual([])
+    expect(snapshot.models.canAddCustom).toBe(false)
+    expect(profile.harness.catalog.models('pi:openai-codex', device)).toEqual([])
+    // The composer's own picker, from the snapshots and the pi listings.
+    const picked = pickerProviders(snapshots, profile.harness.instanceMap.llmProviders())
+    expect(picked.map((provider) => provider.instanceId)).not.toContain('pi:openai-codex')
+    // A new custom model is refused; the stored one stays for older versions and history.
+    await expect(
+      profile.harness.instances.setModelPrefs('pi:openai-codex', { custom: [{ id: 'gpt-other', label: 'Other', capabilities: { efforts: [], images: false } }] })
+    ).rejects.toMatchObject({ code: 'provider_retired' })
+    expect(profile.prefs()['pi:openai-codex']).toMatchObject({ custom: [{ id: 'gpt-custom' }] })
+    expect(refusal(() => profile.harness.resolveStored({ instanceId: 'pi:openai-codex', llmProvider: 'openai-codex', model: 'gpt-custom' }, { purpose: 'turn' }))).toMatchObject({ code: 'provider_retired' })
+    expect(requests).toEqual([])
+  })
+
+  it('a sign-out of the Cursor agent while its key is copied wins: the sign-out stands, nothing moves, and the old key stays', async () => {
+    let release!: () => void
+    const holdAdoption = new Promise<void>((resolve) => (release = resolve))
+    const profile = await upgraded({ cursor: { holdAdoption } })
+    const moving = profile.harness.instances.move('pi:cursor', CURSOR, { copyKey: true })
+    const settled = moving.then(() => 'moved', (error: unknown) => error)
+    // The Move waits for Cursor's answer about the key; meanwhile the user signs the agent out.
+    await vi.waitFor(() => {
+      if (!profile.moveWaiting()) throw new Error('the move has not reached the key copy yet')
+    })
+    const signedOut = await profile.harness.instances.signOut(CURSOR)
+    expect(signedOut.auth.state).toBe('signed_out')
+    release()
+    expect(await settled).toMatchObject({ code: 'signed_out', message: expect.stringContaining('signed out during the move') })
+    // The sign-out stands, the old entry is not moved, and it keeps its key.
+    expect((profile.stored()[CURSOR] as { config?: Record<string, unknown> }).config?.signedOutInMousse).toBe(true)
+    const target = (await profile.harness.instances.snapshots(device)).find((entry) => entry.instanceId === CURSOR)!
+    expect(target.auth.state).toBe('signed_out')
+    expect(profile.stored()['pi:cursor']).toEqual(read('instances.json').instances['pi:cursor'])
+    expect(profile.authFile().cursor).toBeDefined()
+    expect(requests).toEqual([])
   })
 })

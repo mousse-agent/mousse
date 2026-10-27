@@ -38,9 +38,9 @@ function withInstance<T extends { instanceId?: unknown }>(selection: T): T {
   return (id ? { ...rest, instanceId: id } : rest) as T
 }
 
-/** An update that picks a model by provider name alone (no instance). */
+/** An update that picks a model by provider name alone (no instance, or one cleared to blank). */
 function namesProviderOnly(selection: { llmProvider?: unknown; instanceId?: unknown } | undefined): boolean {
-  return Boolean(selection) && selection!.llmProvider !== undefined && selection!.instanceId === undefined
+  return Boolean(selection) && selection!.llmProvider !== undefined && (selection!.instanceId === undefined || selection!.instanceId === '')
 }
 
 function normalizeSettings(settings: MousseSettings): MousseSettings {

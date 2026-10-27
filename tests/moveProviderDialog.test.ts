@@ -135,10 +135,18 @@ describe('the Move dialog for such an entry', () => {
 
   it('a retired entry with an API key may copy it: Move is ready without signing the target in first', () => {
     const retiredKey = snapshot({ instanceId: 'pi:cursor', driver: 'pi', displayName: 'Cursor', auth: { state: 'signed_in', account: undefined, methodLabel: 'API key' }, nextStep: { ...movePrompt, detail: 'Move to Cursor to keep chatting. Your chats stay.' } })
-    const target = snapshot({ instanceId: 'cursor', driver: 'cursor', displayName: 'Cursor agent', auth: { state: 'signed_out', account: undefined, canSignIn: true } })
+    const target = snapshot({ instanceId: 'cursor', driver: 'cursor', displayName: 'Cursor agent', auth: { state: 'signed_out', account: undefined, canSignIn: true, canTakeKey: true } })
     const html = renderToStaticMarkup(createElement(MoveProviderDialog, { snapshot: retiredKey, targets: [target], agentLabel: 'Cursor', onMove: noop as never, onSignIn: noop, onRecheck: noop, onClose: () => {} }))
     expect(html).toContain('Use the same API key for Cursor')
     // Unticked, the target must be signed in first.
+    expect(disabled(html, 'Move')).toBe(true)
+  })
+
+  it('offers the key only to a target that can take one: a ChatGPT entry on an API key moving to Codex gets no box', () => {
+    const keyed = chatgpt({ auth: { state: 'signed_in', account: undefined, methodLabel: 'API key' } })
+    const html = dialog(keyed, [managed({ auth: { state: 'signed_out', account: undefined, canSignIn: true } })])
+    expect(html).not.toContain('same API key')
+    expect(html).toContain('Continue with ChatGPT')
     expect(disabled(html, 'Move')).toBe(true)
   })
 
