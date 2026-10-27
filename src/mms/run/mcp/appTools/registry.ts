@@ -7,6 +7,7 @@ import {
   ACCESS_CLASSES,
   McpToolError,
   TOOL_CLASSES,
+  unattendedRefusal,
   type AppToolTurn,
   type McpCaller,
   type MousseTool,
@@ -159,9 +160,9 @@ export class ToolRegistry {
     })
   }
 
-  /** The tools an in-process loop offers this turn, in registration order. */
+  /** The tools an in-process loop offers this turn, in registration order (none that a `never` run refuses). */
   offeredFor(turn: AppToolTurn): MousseTool[] {
-    return this.list().filter((tool) => (tool.offered ? tool.offered(turn) : tool.available?.(turn) ?? true) === true)
+    return this.list().filter((tool) => (tool.offered ? tool.offered(turn) : tool.available?.(turn) ?? true) === true && !unattendedRefusal(tool, turn))
   }
 
   /**
@@ -202,6 +203,8 @@ export class ToolRegistry {
     this.authorize(tool, args, caller, this.options.readOnlyThread?.(threadId) === true)
     const availability = tool.available?.(turn) ?? true
     if (availability !== true) return { text: availability, isError: true }
+    const unattended = unattendedRefusal(tool, turn)
+    if (unattended) return { text: unattended, isError: true }
     const ctx: ToolCallContext = { caller, turn, toolCallId: request.toolCallId, signal: request.signal, transport: 'mcp' }
     const ledger = this.options.toolLedger?.(active)
     const ledgerId = ledger?.start({ type: 'toolCall', id: ctx.toolCallId, name, arguments: args } as ToolCall)
@@ -238,6 +241,8 @@ export class ToolRegistry {
       }
       const availability = tool.available?.(turn) ?? true
       if (availability !== true) return { text: availability, isError: true }
+      const unattended = unattendedRefusal(tool, turn)
+      if (unattended) return { text: unattended, isError: true }
       const caller: McpCaller = { threadId: turn.threadId, runId: turn.runId, provider: 'in_process', modeCeiling: turn.modeCeiling }
       return await tool.handler(args, {
         caller,

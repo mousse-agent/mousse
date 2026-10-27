@@ -10,6 +10,7 @@ import type {
   WriteTextFileRequest,
   WriteTextFileResponse
 } from '@agentclientprotocol/sdk'
+import { APPROVALS_REFUSED_MESSAGE } from '../../../shared/harness/types'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
 
 /**
@@ -21,6 +22,8 @@ import type { UserQuestionService } from '../../orchestrator/UserQuestionService
 export interface AcpRequestScope {
   threadId?: string
   cwd?: string
+  /** The turn's approvals policy, from its prompter: `never` refuses writes and questions without asking. */
+  readonly approvals?: 'never'
   /** The turn was stopped, or the connection closed. */
   aborted(): boolean
   throwIfAborted(): void
@@ -71,8 +74,20 @@ export const classifyGenericOption: ClassifyOption = (option) => {
  * questions (`DriverContext.questions`); a turn bridge replaces only this.
  */
 export interface PermissionPrompter {
+  /**
+   * `never`: the run refuses every tool that needs approval (`RunPolicy.approvals`), so a runtime
+   * answers each request with its denial and never calls `choose`. Absent: ask.
+   */
+  readonly approvals?: 'never'
   /** The chosen option id; undefined when the user picked nothing (dismissed, timed out). */
   choose(request: { threadId: string; title: string; options: ClassifiedOption[] }): Promise<string | undefined>
+}
+
+export { APPROVALS_REFUSED_MESSAGE, QUESTIONS_REFUSED_MESSAGE } from '../../../shared/harness/types'
+
+/** The prompter of a run whose policy is `approvals: 'never'`: nobody is asked, every request is denied. */
+export function refusingPrompter(): PermissionPrompter {
+  return { approvals: 'never', choose: async () => undefined }
 }
 
 export function questionsPrompter(questions: UserQuestionService): PermissionPrompter {
@@ -93,8 +108,9 @@ export type PermissionApprovals = 'ask' | 'grants' | 'never'
 
 /**
  * `session/request_permission`. The user picks one of the options the preset shows; `grants`
- * allows and `never` rejects with a once-only option, never an "always" one. Anything else, an
- * answer that matches no shown option, or a stopped turn is `cancelled`.
+ * allows and `never` rejects with a once-only option, never an "always" one (`never` also comes
+ * from a refusing prompter). Anything else, an answer that matches no shown option, or a stopped
+ * turn is `cancelled`.
  */
 export async function answerPermission(
   prompter: PermissionPrompter,
@@ -105,7 +121,7 @@ export async function answerPermission(
   const cancelled: RequestPermissionResponse = { outcome: { outcome: 'cancelled' } }
   const shown = request.options.map(options.classify).filter((option): option is ClassifiedOption => option !== null)
   if (scope.aborted() || !scope.threadId || !shown.length) return cancelled
-  const approvals = options.approvals ?? 'ask'
+  const approvals = options.approvals ?? prompter.approvals ?? 'ask'
   if (approvals !== 'ask') {
     const kind: PermissionOptionKind = approvals === 'grants' ? 'allow_once' : 'reject_once'
     const pick = shown.find((option) => option.kind === kind)
@@ -159,6 +175,7 @@ export async function writeWorkspaceFile(
 ): Promise<WriteTextFileResponse> {
   const path = workspacePath(scope, request.path)
   if (!scope.threadId) throw new Error('ACP file write has no thread')
+  if (scope.approvals === 'never') throw new Error(APPROVALS_REFUSED_MESSAGE)
   const answer = await questions.requestAnswers([{
     id: 'write', prompt: `Allow ${label} to write ${relative(scope.cwd!, path)}?`,
     options: [{ id: 'allow', label: 'Allow this edit' }, { id: 'reject', label: 'Reject' }]

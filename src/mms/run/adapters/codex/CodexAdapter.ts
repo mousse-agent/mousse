@@ -169,6 +169,7 @@ export class CodexAdapter implements ProviderAdapter {
       // developer instructions.
       mcp: host.bridge?.mcp ?? null,
       developerInstructions: host.bridge?.sessionInstructions || undefined,
+      ...(host.bridge?.permission?.approvals === 'never' ? { approvals: 'never' as const } : {}),
       drainSteer: () => ctl.drainSteer(),
       onSteer: (text) => {
         progress()

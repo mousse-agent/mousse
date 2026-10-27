@@ -11,6 +11,7 @@ import { PassThrough } from 'node:stream'
 import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
+import { QUESTIONS_REFUSED_MESSAGE } from '../src/mms/harness/acp/permissions'
 import { claudeChildToolDenial } from '../src/mms/providers/claudeSubscription/childPolicy'
 import type { ClaudeTurnIntegrations } from '../src/mms/providers/claudeSubscription/integrations'
 import { ClaudeSubscriptionProviderService, type ClaudeSubscriptionChatInput } from '../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
@@ -334,6 +335,34 @@ describe('Codex children', () => {
     expect(reply(98)).toMatchObject({ result: { decision: 'decline' } })
     expect(reply(97)).toMatchObject({ result: { action: 'decline' } })
     expect(reply(96)).toMatchObject({ result: { permissions: {} } })
+    expect(asked).not.toHaveBeenCalled()
+    asked.mockRestore()
+  })
+
+  it('a run with `approvals: never` declines every approval without asking (PR 4 §4)', async () => {
+    const s = server({ approvalRequests: true })
+    const asked = vi.spyOn(questions, 'requestAnswers')
+    await chat(create(s), { approvals: 'never' })
+    const reply = (id: number) => s.messages.find((message) => message.id === id)
+    await vi.waitFor(() => expect(reply(96)).toBeTruthy())
+    expect(reply(99)).toMatchObject({ result: { decision: 'decline' } })
+    expect(reply(98)).toMatchObject({ result: { decision: 'decline' } })
+    expect(asked).not.toHaveBeenCalled()
+    asked.mockRestore()
+  })
+
+  it('a run with `approvals: never` refuses Codex questions to the user without asking (PR 4 §4)', async () => {
+    const s = server({
+      onTurnStart: (send) => {
+        send({ id: 95, method: 'item/tool/requestUserInput', params: { threadId: 'thr-1', turnId: 'turn-1', itemId: 'ask-1', questions: [{ id: 'q', header: 'File', question: 'Which file?', options: [{ label: 'a.ts' }] }] } })
+        setTimeout(() => send({ method: 'turn/completed', params: { threadId: 'thr-1', turn: { id: 'turn-1', status: 'completed', error: null } } }), 20)
+      }
+    })
+    const asked = vi.spyOn(questions, 'requestAnswers')
+    await chat(create(s), { approvals: 'never' })
+    const reply = (id: number) => s.messages.find((message) => message.id === id)
+    await vi.waitFor(() => expect(reply(95)).toBeTruthy())
+    expect(reply(95)).toMatchObject({ error: { message: QUESTIONS_REFUSED_MESSAGE } })
     expect(asked).not.toHaveBeenCalled()
     asked.mockRestore()
   })

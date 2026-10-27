@@ -42,6 +42,8 @@ export function quickActionTools(host: AppToolHost): MousseTool[] {
     definition: () => tool,
     access: 'actsAsCaller',
     class: 'mutation',
+    // Each quick action needs the user's approval.
+    asksUser: 'approval',
     listed: () => Boolean(host.quickActions),
     available: (turn) => (turn.settingsEnabled(tool.name) ? true : disabledInSettings(tool.name)),
     offered: (turn) => !turn.subagent && turn.settingsEnabled(tool.name) && Boolean(host.quickActions),

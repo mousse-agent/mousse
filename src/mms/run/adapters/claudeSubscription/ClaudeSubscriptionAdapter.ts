@@ -121,6 +121,7 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       // Claude Code loads the project's instruction files itself, as in a terminal (CLAUDE.md, and
       // AGENTS.md as its own settings decide), so Mousse appends only its own session instructions.
       systemPromptAppend: host.bridge?.sessionInstructions || undefined,
+      ...(host.bridge?.permission?.approvals === 'never' ? { approvals: 'never' as const } : {}),
       integrations,
       drainSteer: () => ctl.drainSteer(),
       drainSteerEntry: ctl.drainSteerEntry ? () => ctl.drainSteerEntry!() : undefined,

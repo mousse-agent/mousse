@@ -79,7 +79,8 @@ import {
   type InProcessAuthority,
   type ToolOutcome,
   type ToolRegistry,
-  type ToolTimeline
+  type ToolTimeline,
+  unattendedRefusal
 } from '../run/mcp/appTools'
 import { DELEGATION_TOOL_NAMES, delegationToolDefinitions, type DelegationToolHost } from '../run/mcp/appTools/delegation'
 import { PUBLISH_APPLET_TOOL } from '../run/mcp/appTools/applets'
@@ -178,6 +179,8 @@ export interface LlmChatOptions {
    * Uses coding tools without orchestration instructions.
    */
   subagent?: boolean
+  /** `never`: Mousse tools that wait for the user (approvals, questions) are refused (`RunPolicy.approvals`). */
+  approvals?: 'never'
 
   /** Read-only pre-allocation phase; declares its edit surface through a native tool. */
   subagentDiscovery?: {
@@ -667,8 +670,15 @@ export class LlmClient {
       runId: options.runId ?? '',
       ...(options.onPublishApplet && !subagent ? { onPublishApplet: options.onPublishApplet } : {}),
       ...(options.delegation ? { delegation: options.delegation } : {}),
-      ...(options.toolAccess ? { toolAccess: options.toolAccess } : {})
+      ...(options.toolAccess ? { toolAccess: options.toolAccess } : {}),
+      ...(options.approvals === 'never' ? { approvals: 'never' as const } : {})
     }
+    // A run nobody answers is not offered the Mousse tools that wait for the user (they are refused if called).
+    if (appTurn?.approvals === 'never')
+      tools = tools.filter((tool) => {
+        const appTool = this.appTools.registry.get(tool.name)
+        return !appTool || !unattendedRefusal(appTool, appTurn)
+      })
     if (options.onPublishApplet && !runtimeContext && !subagent) {
       tools = [...tools, PUBLISH_APPLET_TOOL]
       systemPrompt += options.appletInstructions ?? ''
