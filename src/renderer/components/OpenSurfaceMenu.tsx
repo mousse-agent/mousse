@@ -1,4 +1,5 @@
-import { useEffect } from 'react'
+import { formatBinding } from '../../shared/commands'
+import { useCommandBindings, useCommands } from '../commands/commandRegistry'
 import { Bot, Eye, FileText, FolderOpen, GitBranch, Globe, Terminal } from '../lib/icons'
 import { SURFACE_CHOICES, openSurface, type SurfaceChoice } from '../lib/surfaces'
 import { useAppStore } from '../stores/appStore'
@@ -41,6 +42,8 @@ function SurfaceChoiceButton({
   onPick?: () => void
 }) {
   const Icon = ICONS[choice.id]
+  const binding = useCommandBindings()[choice.commandId]
+  const platform = useAppStore((state) => state.appInfo?.platform) ?? ''
   return (
     <button
       type="button"
@@ -54,27 +57,17 @@ function SurfaceChoiceButton({
         <Icon size={16} strokeWidth={1.8} />
         {choice.label}
       </span>
-      <kbd className="surface-menu-key">{choice.shortcut}</kbd>
+      {binding && <kbd className="surface-menu-key">{formatBinding(binding, platform)}</kbd>}
     </button>
   )
 }
 
+/**
+ * The empty main area. While it is on screen the surface commands are registered, so B/T/F/D/R (or
+ * whatever the profile bound) open a surface; the registry applies the text-field and overlay rules.
+ */
 export function OpenSurfacePicker() {
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.metaKey || event.ctrlKey || event.altKey) return
-      const store = useAppStore.getState()
-      if (!store.mainAreaOpen || store.sidebarMode !== 'projects') return
-      const target = event.target
-      if (target instanceof HTMLElement && target.closest('input, textarea, [contenteditable="true"]')) return
-      const choice = SURFACE_CHOICES.find((entry) => entry.shortcut.toLowerCase() === event.key.toLowerCase())
-      if (!choice) return
-      event.preventDefault()
-      openSurface(choice.id)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  useCommands(SURFACE_CHOICES.map((choice) => ({ id: choice.commandId, run: () => openSurface(choice.id) })))
 
   return (
     <div className="surface-picker">

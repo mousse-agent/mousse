@@ -7,6 +7,9 @@ type AppSnapshot = ReturnType<typeof useAppStore.getState>
 /** The part of the store the command rules read. */
 export type CommandStateSlice = Pick<AppSnapshot, 'activeThreadId' | 'turnStates' | 'mainAreaOpen' | 'sidebarMode' | 'appInfo'>
 
+/** Elements that take typed text. Monaco and xterm both focus a textarea, so this covers them too. */
+export const TEXT_FIELD_SELECTOR = 'input, textarea, [contenteditable="true"]'
+
 /** What a `Node`-like target must answer: monaco and xterm both focus a textarea, so `closest` finds them. */
 export interface ClosestTarget {
   closest(selector: string): unknown
@@ -34,7 +37,7 @@ export function commandContextFromDom(
   const phase = state.activeThreadId ? state.turnStates[state.activeThreadId]?.phase : undefined
   return {
     platform: state.appInfo?.platform ?? '',
-    inTextInput: Boolean(target?.closest('input, textarea, [contenteditable="true"]')),
+    inTextInput: Boolean(target?.closest(TEXT_FIELD_SELECTOR)),
     inTerminal: Boolean(target?.closest('.xterm')),
     overlay: overlays.modalOpen ? 'modal' : (stack[stack.length - 1] ?? null),
     threadOpen: state.activeThreadId !== null,
