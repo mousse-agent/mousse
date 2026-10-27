@@ -189,21 +189,48 @@ export function remoteForIdentity(remotes: readonly GitRemote[], identity: Repos
 const LOOKUP_TTL_MS = 30_000
 const IDENTITY_TTL_MS = 10 * 60_000
 const AVAILABILITY_TTL_MS = 60_000
+/** How long a failure that will not fix itself (not on GitHub, signed out, rate limited) is remembered. */
+const NEGATIVE_TTL_MS = 30_000
+/** A client's `force` cannot reach the host more often than this for one entry. */
+const FORCE_MIN_AGE_MS = 5_000
+
+/** Failures worth remembering briefly: asking again at once only repeats them. */
+function isLastingFailure(message: string): boolean {
+  const kind = classifyGhFailure(message)
+  return kind === 'not-github' || kind === 'unauthenticated' || kind === 'rate-limited'
+}
 
 /**
  * Reads shared between callers. A fresh value answers without a command; concurrent callers
  * join one read, `force` included, which only skips a fresh value. Failures are never kept.
  */
 class ReadCache<T> {
-  private readonly values = new Map<string, { at: number; value: T }>()
+  private readonly values = new Map<string, { at: number; ttlMs: number; result: { value: T } | { error: unknown } }>()
   private readonly flights = new Map<string, Promise<T>>()
 
   constructor(private readonly ttlMs: number, private readonly clock: () => number) {}
 
-  read(key: string, load: () => Promise<T>, options: { force?: boolean; cacheable?: (value: T) => boolean } = {}): Promise<T> {
-    if (!options.force) {
-      const hit = this.values.get(key)
-      if (hit && this.clock() - hit.at < this.ttlMs) return Promise.resolve(hit.value)
+  /**
+   * `cacheable` decides whether a value is kept; `shortLived` keeps one only briefly (a failure
+   * that will not fix itself, such as a folder that is not on GitHub); `cacheError` does the same
+   * for a thrown error. `force` skips a stored value only once it is `FORCE_MIN_AGE_MS` old.
+   */
+  read(
+    key: string,
+    load: () => Promise<T>,
+    options: {
+      force?: boolean
+      cacheable?: (value: T) => boolean
+      shortLived?: (value: T) => boolean
+      cacheError?: (error: unknown) => boolean
+    } = {}
+  ): Promise<T> {
+    const hit = this.values.get(key)
+    if (hit) {
+      const age = this.clock() - hit.at
+      if (age < (options.force ? Math.min(hit.ttlMs, FORCE_MIN_AGE_MS) : hit.ttlMs)) {
+        return 'error' in hit.result ? Promise.reject(hit.result.error) : Promise.resolve(hit.result.value)
+      }
     }
     const joined = this.flights.get(key)
     if (joined) return joined
@@ -212,12 +239,17 @@ class ReadCache<T> {
         // A read that was invalidated while it ran describes the state before the change.
         if (this.flights.get(key) === started) {
           this.flights.delete(key)
-          if (!options.cacheable || options.cacheable(value)) this.values.set(key, { at: this.clock(), value })
+          if (!options.cacheable || options.cacheable(value)) {
+            this.values.set(key, { at: this.clock(), ttlMs: options.shortLived?.(value) ? NEGATIVE_TTL_MS : this.ttlMs, result: { value } })
+          }
         }
         return value
       },
       (error: unknown) => {
-        if (this.flights.get(key) === started) this.flights.delete(key)
+        if (this.flights.get(key) === started) {
+          this.flights.delete(key)
+          if (options.cacheError?.(error)) this.values.set(key, { at: this.clock(), ttlMs: NEGATIVE_TTL_MS, result: { error } })
+        }
         throw error
       }
     )
@@ -260,7 +292,7 @@ export class GitHubCodeHost implements CodeHost {
       const identity = parseRepositoryIdentity(stdout)
       if (!identity) throw new Error('GitHub CLI returned an unexpected repository response.')
       return identity
-    })
+    }, { cacheError: (error) => isLastingFailure(processMessage(error)) })
   }
 
   /**
@@ -288,7 +320,12 @@ export class GitHubCodeHost implements CodeHost {
     return this.lookups.read(
       `${repositoryPrefix(identity)}${branch}`,
       () => this.readLookup(cwd, branch),
-      { force: options.force, cacheable: (lookup) => lookup.state !== 'unavailable' }
+      {
+        force: options.force,
+        // An unavailable lookup is kept only when asking again would fail the same way.
+        cacheable: (lookup) => lookup.state !== 'unavailable' || isLastingFailure(lookup.message),
+        shortLived: (lookup) => lookup.state === 'unavailable'
+      }
     )
   }
 
@@ -395,7 +432,7 @@ export class GitHubCodeHost implements CodeHost {
         const login = stdout.trim()
         if (!login) throw new Error('GitHub CLI did not report the signed-in account.')
         return login
-      })
+      }, { cacheError: (error) => isLastingFailure(processMessage(error)) })
     } catch {
       return null
     }

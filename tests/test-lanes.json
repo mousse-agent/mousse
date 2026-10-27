@@ -56,6 +56,7 @@
     "tests/platformWorkflowCrossFeature.test.ts",
     "tests/platformWorkflowDurabilityMatrix.test.ts",
     "tests/platformWorkflowSubworkflowRecovery.test.ts",
+    "tests/pullRequestsProtocol.test.ts",
     "tests/platformWorkflowWorkspace.test.ts",
     "tests/providerCredentialVaultRuntime.test.ts",
     "tests/receiptRefRelease.test.ts",

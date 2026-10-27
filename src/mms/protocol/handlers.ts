@@ -2367,12 +2367,21 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       const root = pullRequestFolder(ctx, { threadId })
       const codeHost = ctx.mms.gitService.codeHost
+      const before = ctx.mms.threads.getThread(threadId)?.pullRequest
       // The lookup is what the host reports for the thread's own branch; a pull request from any other branch needs the detail read.
       const lookup = await codeHost.lookupPullRequest(root, undefined, { force: true })
+      if (lookup.state === 'unavailable') {
+        throw new DomainRpcError('pull_request_unavailable', lookup.message, { threadId, number, reason: lookup.reason })
+      }
       if (lookup.state !== 'found' || lookup.pullRequest.number !== number) {
         throw new DomainRpcError('pull_request_not_found', `Pull request #${number} is not the pull request of this thread's branch`, { threadId, number })
       }
       const identity = await codeHost.repositoryIdentity(root)
+      // An unlink or another link that landed while the host was being read wins; this one answers a state that is gone.
+      const now = ctx.mms.threads.getThread(threadId)?.pullRequest
+      if (now?.number !== before?.number || now?.linkedAt !== before?.linkedAt) {
+        throw new DomainRpcError('pull_request_link_changed', "The thread's pull request link changed while it was being read; try again", { threadId, number })
+      }
       const { pullRequest } = lookup
       const thread = ctx.mms.threads.updateThreadMeta(threadId, {
         pullRequest: {

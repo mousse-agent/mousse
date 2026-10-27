@@ -218,13 +218,16 @@ describe('GitHubCodeHost.lookupPullRequest', () => {
   })
 
   it('caches the default branch per folder', async () => {
+    let now = 1_000_000
     const run = runner({ pr: async () => ok('[]') })
-    const host = new GitHubCodeHost(run)
-    // Forced, so each lookup reaches gh even though the repository's answer is fresh.
+    const host = new GitHubCodeHost(run, () => now)
+    // Forced and past the force floor, so each lookup reaches gh even though the repository's answer is fresh.
     await host.lookupPullRequest('/repo', undefined, { force: true })
+    now += 5_001
     await host.lookupPullRequest('/repo', undefined, { force: true })
     const defaultBranchCalls = () => run.mock.calls.filter((call) => call[1][0] === 'repo' && call[1].includes('defaultBranchRef'))
     expect(defaultBranchCalls()).toHaveLength(1)
+    now += 5_001
     await host.lookupPullRequest('/other', undefined, { force: true })
     expect(defaultBranchCalls()).toHaveLength(2)
   })
@@ -275,20 +278,22 @@ describe('GitHubCodeHost shared read cache', () => {
     expect(prListCalls(run)).toHaveLength(1)
   })
 
-  it('lets force join a read in flight, and only skips a fresh value', async () => {
+  it('lets force join a read in flight, and only skips a value older than the force floor', async () => {
+    let now = 1_000_000
     let release: () => void = () => undefined
     const gate = new Promise<void>((resolve) => { release = resolve })
     const run = runner({ pr: async () => { await gate; return ok(`[${prJson}]`) } })
-    const host = new GitHubCodeHost(run)
+    const host = new GitHubCodeHost(run, () => now)
     const first = host.lookupPullRequest('/repo')
     const forced = host.lookupPullRequest('/repo', undefined, { force: true })
     await vi.waitFor(() => expect(prListCalls(run)).toHaveLength(1))
     release()
     await Promise.all([first, forced])
     expect(prListCalls(run)).toHaveLength(1)
-    // The value is fresh now: an ordinary call is answered, a forced one reads again.
+    // The value is fresh now: an ordinary call is answered, a forced one reads again once it is 5 s old.
     await host.lookupPullRequest('/repo')
     expect(prListCalls(run)).toHaveLength(1)
+    now += 5_001
     await host.lookupPullRequest('/repo', undefined, { force: true })
     expect(prListCalls(run)).toHaveLength(2)
   })
@@ -313,6 +318,51 @@ describe('GitHubCodeHost shared read cache', () => {
     expect(await host.lookupPullRequest('/repo')).toMatchObject({ state: 'unavailable', reason: 'error' })
     fail = false
     expect(await host.lookupPullRequest('/repo')).toMatchObject({ state: 'found' })
+  })
+
+  it('remembers a folder that is not on GitHub, or a signed-out host, for 30 seconds', async () => {
+    let now = 1_000_000
+    const run = runner({ identity: () => { throw failure('none of the git remotes point to a known GitHub host') } })
+    const host = new GitHubCodeHost(run, () => now)
+    expect(await host.lookupPullRequest('/repo')).toMatchObject({ state: 'unavailable', reason: 'not-github' })
+    expect(await host.lookupPullRequest('/repo')).toMatchObject({ state: 'unavailable', reason: 'not-github' })
+    expect(await host.viewerLogin('/repo')).toBeNull()
+    const identityCalls = () => run.mock.calls.filter((call) => call[1].includes('nameWithOwner,url')).length
+    expect(identityCalls()).toBe(1)
+    now += 30_001
+    await host.lookupPullRequest('/repo')
+    expect(identityCalls()).toBe(2)
+  })
+
+  it('remembers a rate-limited or signed-out lookup briefly, and any other failure not at all', async () => {
+    let now = 1_000_000
+    let message = 'API rate limit exceeded for user'
+    const run = runner({ pr: async () => { throw failure(message) } })
+    const host = new GitHubCodeHost(run, () => now)
+    expect(await host.lookupPullRequest('/repo')).toMatchObject({ state: 'unavailable', reason: 'error' })
+    await host.lookupPullRequest('/repo')
+    expect(prListCalls(run)).toHaveLength(1)
+    now += 30_001
+    message = 'HTTP 502: Bad Gateway'
+    await host.lookupPullRequest('/repo')
+    await host.lookupPullRequest('/repo')
+    expect(prListCalls(run)).toHaveLength(3)
+  })
+
+  it('does not let force reach gh more than once every 5 seconds for one branch', async () => {
+    let now = 1_000_000
+    const run = runner()
+    const host = new GitHubCodeHost(run, () => now)
+    await host.lookupPullRequest('/repo', undefined, { force: true })
+    await host.lookupPullRequest('/repo', undefined, { force: true })
+    expect(prListCalls(run)).toHaveLength(1)
+    now += 5_001
+    await host.lookupPullRequest('/repo', undefined, { force: true })
+    expect(prListCalls(run)).toHaveLength(2)
+    // A new pull request is never hidden by the floor: creating one forgets earlier reads.
+    await host.createPullRequest('/repo', { title: 't', body: '', base: 'main', draft: false, head: 'feature' })
+    await host.lookupPullRequest('/repo', undefined, { force: true })
+    expect(prListCalls(run)).toHaveLength(3)
   })
 
   it('shares entries between folders of one repository', async () => {
@@ -565,7 +615,7 @@ describe('GitHubCodeHost.viewerLogin', () => {
 
   it('is null when the login cannot be read, and tries again next time', async () => {
     let fail = true
-    const run = runner({ api: async () => { if (fail) throw failure('gh auth login'); return ok('octocat\n') } })
+    const run = runner({ api: async () => { if (fail) throw failure('HTTP 502: Bad Gateway'); return ok('octocat\n') } })
     const host = new GitHubCodeHost(run)
     expect(await host.viewerLogin('/repo')).toBeNull()
     fail = false

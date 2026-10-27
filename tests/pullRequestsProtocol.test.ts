@@ -151,6 +151,38 @@ describe('pull request methods through the daemon protocol', () => {
     expect(mms.threads.getThread(thread.id)?.pullRequest).toBeUndefined()
   })
 
+  it('gives the real reason when the branch lookup is unavailable, instead of a wrong-number error', async () => {
+    lookupSpy({ state: 'unavailable', reason: 'unauthenticated', message: 'You are not logged in to github.com' })
+    const project = mms.projects.openProject(f.repo)
+    const thread = mms.threads.createThread('Task A', project.id)
+    await expect(client.request('pullRequests.link', { threadId: thread.id, number: 12 })).rejects.toThrow(/not logged in to github\.com/)
+    expect(mms.threads.getThread(thread.id)?.pullRequest).toBeUndefined()
+  })
+
+  it('does not overwrite an unlink that landed while the link was being read', async () => {
+    vi.spyOn(mms.gitService.codeHost, 'repositoryIdentity').mockResolvedValue({ host: 'github.com', nameWithOwner: 'acme/app' })
+    const project = mms.projects.openProject(f.repo)
+    const thread = mms.threads.createThread('Task A', project.id)
+    lookupSpy()
+    await client.request('pullRequests.link', { threadId: thread.id, number: 12 })
+
+    vi.restoreAllMocks()
+    vi.spyOn(mms.gitService.codeHost, 'repositoryIdentity').mockResolvedValue({ host: 'github.com', nameWithOwner: 'acme/app' })
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const spy = vi.spyOn(mms.gitService.codeHost, 'lookupPullRequest').mockImplementation(async () => {
+      await gate
+      return { state: 'found', pullRequest: info() }
+    })
+    const relink = client.request('pullRequests.link', { threadId: thread.id, number: 12 })
+    const rejected = expect(relink).rejects.toThrow(/changed while/)
+    await vi.waitFor(() => expect(spy).toHaveBeenCalled())
+    await client.request('pullRequests.unlink', { threadId: thread.id })
+    release()
+    await rejected
+    expect(mms.threads.getThread(thread.id)?.pullRequest).toBeUndefined()
+  })
+
   it('looks the branch up in the thread\'s worktree when linking', async () => {
     const spy = lookupSpy()
     vi.spyOn(mms.gitService.codeHost, 'repositoryIdentity').mockResolvedValue({ host: 'github.com', nameWithOwner: 'acme/app' })
