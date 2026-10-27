@@ -3,7 +3,8 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { describeStatus, type InstanceSnapshot } from '../src/shared/harness/status'
 import type { ProviderLoginOption } from '../src/shared/providerAuth'
-import { AgentConnectStep, CustomCommandStep, addChoices, type AddChoice } from '../src/renderer/components/providers/AddProviderDialog'
+import { AgentConnectStep, CustomCommandStep, addChoices, onFoldedKey, type AddChoice } from '../src/renderer/components/providers/AddProviderDialog'
+import { moveTargets } from '../src/renderer/components/providers/MoveProviderDialog'
 import { AccountRow, BinaryRow, SetupRow, UpdateRow, type InstanceActions } from '../src/renderer/components/providers/CliSections'
 import { ProviderModelsSection, bulkVisibilityPatch, capabilityChips, displayModels, modelsSummary, movedOrder, nextOrder } from '../src/renderer/components/providers/ProviderModelsSection'
 import { AgentEditor, ApiEditor, allowsCustomModels, engineSetting } from '../src/renderer/components/providers/ProviderEditor'
@@ -316,7 +317,8 @@ describe('Add provider choices', () => {
       ['new', 'Cursor'],
       ['new', 'Grok'],
       ['new', 'Custom command'],
-      ['registry', 'More ACP agents…']
+      ['registry', 'More ACP agents…'],
+      ['new', 'Claude Code (API key)']
     ])
   })
 
@@ -344,7 +346,8 @@ describe('Add provider choices', () => {
       ['new', 'Cursor'],
       ['new', 'Grok'],
       ['new', 'Custom command'],
-      ['registry', 'More ACP agents…']
+      ['registry', 'More ACP agents…'],
+      ['new', 'Claude Code (API key)']
     ])
     expect(choices.every((choice) => choice.kind === 'registry' || (choice.kind === 'new' && (choice.driver === 'codex' || choice.existing === undefined)))).toBe(true)
   })
@@ -360,6 +363,26 @@ describe('Add provider choices', () => {
     ])
     expect(choices.filter((choice) => choice.kind === 'api').map((choice) => choice.label)).toEqual(['openai'])
     expect(choices.find((choice) => choice.key === 'new:cursor')).toMatchObject({ label: 'Cursor', group: 'Agents' })
+  })
+
+  it('offers an Anthropic API key as Claude Code on that key, never as a model API, and apart from the user’s own Claude Code', () => {
+    const keyEntry = snapshot({ instanceId: 'claude:api', displayName: 'Claude Code (API key)', config: { home: 'private', args: [], env: {}, loginMethod: 'api_key' } })
+    const choices = addChoices([codex, keyEntry], [loginOption('anthropic'), loginOption('openai')])
+    expect(choices.filter((choice) => choice.kind === 'api').map((choice) => choice.label)).toEqual(['openai'])
+    expect(choices.find((choice) => choice.key === 'new:claude:api')).toMatchObject({ kind: 'new', label: 'Claude Code (API key)', group: 'API keys', driver: 'claude', iconId: 'anthropic', target: { slug: 'api', loginMethod: 'api_key' } })
+    // The key entry is not the user's own Claude Code: that is still offered as itself.
+    expect(choices.find((choice) => choice.key === 'new:claude')).toMatchObject({ label: 'Claude Code', existing: undefined })
+    expect(onFoldedKey(keyEntry)).toBe(true)
+    expect(onFoldedKey(claude)).toBe(false)
+  })
+
+  it('moves pi:anthropic only to Claude Code on an API key', () => {
+    const keyEntry = snapshot({ instanceId: 'claude:api', displayName: 'Claude Code (API key)', config: { home: 'private', args: [], env: {}, loginMethod: 'api_key' } })
+    const anthropic = snapshot({ instanceId: 'pi:anthropic', driver: 'pi', displayName: 'Anthropic' })
+    expect(moveTargets(anthropic, [claude, codex, anthropic])).toEqual([])
+    expect(moveTargets(anthropic, [claude, keyEntry, anthropic]).map((entry) => entry.instanceId)).toEqual(['claude:api'])
+    const moved = snapshot({ instanceId: 'pi:anthropic', driver: 'pi', displayName: 'Anthropic', config: { home: 'default', args: [], env: {}, movedTo: 'claude:api' } })
+    expect(moveTargets(moved, [keyEntry])).toEqual([])
   })
 
   it('shows a provider with several sign-in methods once, with its methods to choose from', () => {

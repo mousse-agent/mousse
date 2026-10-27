@@ -28,7 +28,8 @@ function profile(): { services: MmsProfileServices; stored: () => Record<string,
   let stored: unknown
   let seedVersion: number | undefined
   const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion }), write: (next) => { stored = next.instances; seedVersion = next.seedVersion } } })
-  const harness = testHarness({ adapters: [pi, claude], instances, profileHome: home })
+  // Claude Code takes further entries (an API-key one among them), as the real driver does.
+  const harness = testHarness({ adapters: [pi], drivers: [{ ...adapterDriver(claude), multiInstance: true, privateHome: true }], instances, profileHome: home })
   return { services: { harness, providerInstances: instances } as unknown as MmsProfileServices, stored: () => (stored ?? {}) as Record<string, unknown> }
 }
 
@@ -119,5 +120,19 @@ describe('provider methods on two profiles', () => {
     expect(await textOf(personal, 'codex')).toContain('20% used')
     expect(await textOf(work, 'codex')).toContain('85% used')
     expect(await textOf(work, 'nobody')).toBeUndefined()
+  })
+
+  it('adds Claude Code on an API key as claude:api in the bound profile only', async () => {
+    const personal = profile()
+    const work = profile()
+    const context = (services: MmsProfileServices) => ({ mms: services, globalSequence: () => 0 }) as unknown as HandlerContext
+    const added = await dispatchMethod(context(work.services), 'providers.instances.add', {
+      driver: 'claude',
+      slug: 'api',
+      config: { displayName: 'Claude Code (API key)', home: 'private', loginMethod: 'api_key' }
+    }) as { snapshot: { instanceId: string } }
+    expect(added.snapshot.instanceId).toBe('claude:api')
+    expect(work.stored()['claude:api']).toMatchObject({ driver: 'claude', config: { home: 'private', loginMethod: 'api_key' } })
+    expect(personal.stored()['claude:api']).toBeUndefined()
   })
 })

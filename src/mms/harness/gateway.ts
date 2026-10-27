@@ -39,7 +39,7 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import type { InstanceConfigView, InstanceEngine, NextStep, UpdateAffordance } from '../../shared/harness/status'
-import { foldedInto, movePromptOf, type MoveResult } from '../../shared/harness/move'
+import { acceptsMove, foldedInto, foldedTarget, movePromptOf, type MoveResult } from '../../shared/harness/move'
 import { harnessAppError, type HarnessErrorCode, type ModelPrefs, type SignInPrompt } from '../../shared/harness/types'
 import type { ProviderLoginEvent, ProviderUsage } from '../../shared/providerAuth'
 import {
@@ -245,6 +245,8 @@ export interface ResolvedTurnSelection {
   caps: HarnessCaps
   /** The selection named an entry that moved to this instance (`config.movedTo`). */
   movedFrom?: string
+  /** The model that selection named, when the agent runs another one for it (`movedModel`). */
+  movedFromModel?: string
 }
 
 /** The old provider RPCs, served through the instances that replace the vendor branches. */
@@ -685,7 +687,7 @@ export class Harness implements HarnessGateway {
   /** Each run's own request and tool-call counts (`budgets: 'hard'`), shared by its attempts. */
   private readonly runCounters = new RunCounterBook()
   /** Bindings made for a selection that named a moved entry: their thread is told once. */
-  private readonly boundMoves = new WeakMap<ExecutionBinding, string>()
+  private readonly boundMoves = new WeakMap<ExecutionBinding, { from: string; model?: { from: string; to: string } }>()
   private readonly operations = new Map<string, Operation>()
   /** What this start's reconcile found about a vendor file an older Mousse changed, per instance. */
   private readonly settingsNotices = new Map<string, NonNullable<InstanceSnapshot['settingsNotice']>>()
@@ -898,13 +900,35 @@ export class Harness implements HarnessGateway {
         missing: ['toolControl'],
         instanceId: resolved.instanceId
       })
-    // A moved entry's model runs on the agent when it lists it; otherwise the agent's first model.
-    let model = selection.model
-    if (target) {
-      const listed = this.recordOrUndefined(target)?.runtime.models() ?? []
-      if (listed.length && !listed.some((entry) => entry.id === model)) model = listed[0]!.id
+    const model = target ? this.movedModel(target, selection.model) : selection.model
+    return {
+      instanceId: resolved.instanceId,
+      llmProvider: resolved.llmProvider,
+      driver: driver.kind,
+      model,
+      caps,
+      ...(target ? { movedFrom: named } : {}),
+      ...(target && model !== selection.model ? { movedFromModel: selection.model } : {})
     }
-    return { instanceId: resolved.instanceId, llmProvider: resolved.llmProvider, driver: driver.kind, model, caps, ...(target ? { movedFrom: named } : {}) }
+  }
+
+  /**
+   * The agent's model for a model of an entry that moved to it: the same id when the agent has it
+   * (its listing or a custom model of the user's), else the agent's own name for it
+   * (`DriverRuntime.movedModel`, a family alias), else the agent's default (its first model). A
+   * reasoning effort (`:high`) stays when the model it lands on takes it. The move lists every
+   * default whose model changed, and a moved thread is told once.
+   */
+  private movedModel(instanceId: string, model: string): string {
+    const runtime = this.recordOrUndefined(instanceId)?.runtime
+    if (!runtime) return model
+    const available = this.catalog.models(instanceId, { kind: 'device' })
+    if (!available.length) return model
+    const { baseId, effort } = parseThinkingSuffixFromModelId(model)
+    const find = (id: string | undefined) => (id ? available.find((entry) => entry.id === id) : undefined)
+    const landed = find(model) ?? find(baseId) ?? find(runtime.movedModel?.(baseId)) ?? available.find((entry) => !entry.hidden) ?? available[0]!
+    if (landed.id === model) return model
+    return effort && landed.capabilities.efforts.includes(effort) ? `${landed.id}:${effort}` : landed.id
   }
 
   /** The entry an instance moved to (one hop), when that entry still exists. */
@@ -1025,7 +1049,8 @@ export class Harness implements HarnessGateway {
       ...(binary ? { binary: { ...binary } } : {})
     }
     this.boundAccounts.set(binding, accountId ? { accountId } : {})
-    if (resolved.movedFrom) this.boundMoves.set(binding, resolved.movedFrom)
+    if (resolved.movedFrom)
+      this.boundMoves.set(binding, { from: resolved.movedFrom, ...(resolved.movedFromModel ? { model: { from: resolved.movedFromModel, to: resolved.model } } : {}) })
     return binding
   }
 
@@ -1335,8 +1360,8 @@ export class Harness implements HarnessGateway {
       previous.accountGeneration === binding.accountGeneration &&
       binding.accountId !== undefined && previous.accountId === binding.accountId && accountId === binding.accountId
     if (toolControlLevel(caps) === 'uncontrolled') this.toolControlNotice(record, input.threadId, previous)
-    const movedFrom = this.boundMoves.get(binding)
-    if (movedFrom) this.moveNotice(movedFrom, record, input.threadId)
+    const moved = this.boundMoves.get(binding)
+    if (moved) this.moveNotice(moved, record, input.threadId)
     if (resumable || (!previous && binding.homeId === DEFAULT_HOME_ID && verified)) return
     try {
       record.runtime.forgetConversation?.(input.threadId)
@@ -1361,13 +1386,16 @@ export class Harness implements HarnessGateway {
    * A thread pinned to a moved entry continues on the agent; its history is handed over
    * (`history_injected`), and the thread is told once.
    */
-  private moveNotice(movedFrom: string, record: InstanceRecord, threadId: string): void {
+  private moveNotice(moved: { from: string; model?: { from: string; to: string } }, record: InstanceRecord, threadId: string): void {
+    const movedFrom = moved.from
     const key = `moved|${threadId}|${movedFrom}`
     if (this.toolNotices.has(key)) return
     this.toolNotices.add(key)
     const from = this.recordOrUndefined(movedFrom)
+    // A pinned model the agent runs under another name, or not at all, is said.
+    const model = moved.model ? ` It runs ${this.modelName(record.instanceId, moved.model.to)} instead of ${moved.model.from}.` : ''
     try {
-      this.liveHost?.notice?.(threadId, `${from ? this.displayName(from) : movedFrom} moved to ${this.displayName(record)}. This chat continues there with its history handed over.`)
+      this.liveHost?.notice?.(threadId, `${from ? this.displayName(from) : movedFrom} moved to ${this.displayName(record)}. This chat continues there with its history handed over.${model}`)
     } catch (error) {
       console.warn('[harness] notice failed', errorText(error))
     }
@@ -2126,10 +2154,10 @@ export class Harness implements HarnessGateway {
     if (!useOwnSetup) {
       // An id whose state directory is still on disk (a removal that could not delete it) is taken.
       const taken = new Set(Object.keys(entries))
-      instanceId = addedInstanceId(driver.kind, patch.displayName ?? undefined, taken)
+      instanceId = addedInstanceId(driver.kind, patch.displayName ?? undefined, taken, input.slug)
       while (existsSync(instanceStateDir(this.options.profileHome, instanceId))) {
         taken.add(instanceId)
-        instanceId = addedInstanceId(driver.kind, patch.displayName ?? undefined, taken)
+        instanceId = addedInstanceId(driver.kind, patch.displayName ?? undefined, taken, input.slug)
       }
     }
     const config = useOwnSetup
@@ -2244,6 +2272,10 @@ export class Harness implements HarnessGateway {
     if (record.runtime.pinned && (patch.binaryPath !== undefined || patch.args !== undefined || patch.env !== undefined))
       harnessFail('unsupported', `${this.displayName(record)} runs the Codex Mousse installed for it, with its own settings.`, instanceId)
     const homeRule = privateHomeRule(record.driver, record.config)
+    // A sign-in that decides the home (Claude Code on an API key) stays the one the entry was added
+    // with: the user's own setup never turns into a key entry, nor the other way round.
+    if (patch.loginMethod !== undefined && homeRule !== privateHomeRule(record.driver, { ...record.config, loginMethod: patch.loginMethod || undefined }))
+      harnessFail('unsupported', `${this.displayName(record)} keeps the sign-in it was added with. Add another entry for the other one.`, instanceId)
     if (patch.home === 'private' && homeRule === 'forbidden')
       harnessFail('unsupported', `${this.displayName(record)} cannot use a separate home.`, instanceId)
     if (patch.home === 'default' && homeRule === 'required')
@@ -2564,8 +2596,13 @@ export class Harness implements HarnessGateway {
   private async move(fromId: string, toId: string, options: { copyKey?: boolean } = {}): Promise<MoveResult> {
     const from = this.record(fromId, { allowDisabled: true })
     const to = this.record(toId, { allowDisabled: true })
-    const agent = (this.options.foldedInto ?? foldedInto)(piProviderIdOf(fromId))
-    if (fromId === toId || !agent || to.driver.kind !== agent)
+    const providerId = piProviderIdOf(fromId)
+    const agent = (this.options.foldedInto ?? foldedInto)(providerId)
+    // Only an entry of the kind the API moves to takes it: an Anthropic key goes to Claude Code on a
+    // key of its own, in a home of its own (one stored without it runs nothing), never to the user's
+    // own Claude Code.
+    const narrowed = Boolean(foldedTarget(providerId))
+    if (fromId === toId || !agent || to.driver.kind !== agent || !acceptsMove(providerId, to.entry.config) || (narrowed && (to.builtIn || !to.env.home)))
       harnessFail('unsupported', `${this.displayName(from)} cannot move to ${this.displayName(to)}.`, fromId)
     if (from.config.movedTo) harnessFail('unsupported', `${this.displayName(from)} has already moved.`, fromId)
     // Two moves of one entry (the card's dialog and a chat's, or two windows) never run together:
@@ -2598,16 +2635,17 @@ export class Harness implements HarnessGateway {
       if (!key) harnessFail('unsupported', `${this.displayName(from)} has no saved API key to copy.`, fromId)
       if (!to.runtime.adoptApiKey) harnessFail('unsupported', `${this.displayName(to)} cannot take an API key.`, toId)
       await to.runtime.adoptApiKey(key)
-      this.counters.bumpAccount(toId)
+      // A key it now holds signs an entry signed out in Mousse in again (and moves its account on).
+      const current = this.recordOrUndefined(toId) ?? to
+      if (this.isSignedOut(current)) await this.reconnect(current)
+      else this.counters.bumpAccount(toId)
       void this.probe(toId, true)
     }
     // Turned off, never deleted: an older build can still turn it back on. A save that fails throws
     // here, before anything else changed: the old sign-in is still there and the entry still works.
     this.instanceMap.setEntry(fromId, { ...from.entry, enabled: false, config: { ...(from.entry.config ?? {}), movedTo: toId } })
     const llmProvider = legacyProviderForInstance(toId, to.entry) ?? ''
-    // A model the agent lists keeps its id; any other becomes the agent's default (its first model).
-    const listed = to.runtime.models()
-    const model = (id: string) => (!listed.length || listed.some((entry) => entry.id === id) ? id : listed[0]!.id)
+    const model = (id: string) => this.movedModel(toId, id)
     const rewritten = [
       ...this.options.defaults?.rewrite(fromId, { instanceId: toId, llmProvider, model }) ?? [],
       ...this.scopes.moveDefaults(fromId, toId, model).map(({ projectId, from: before, to: after }) =>

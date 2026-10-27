@@ -588,7 +588,12 @@ export function asAddInstanceInput(v: unknown): AddInstanceInput {
   const o = asPlainObject(v, 'params')
   const driver = asHarnessDriverKind(o.driver)
   const config = asInstanceConfigPatch(o.config, 'config')
-  return Object.keys(config).length > 0 ? { driver, config } : { driver }
+  let slug: string | undefined
+  if (o.slug !== undefined) {
+    slug = asString(o.slug, 'slug', 32)
+    if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(slug)) throw invalidParams('slug must be lowercase letters, digits and inner dashes')
+  }
+  return { driver, ...(Object.keys(config).length > 0 ? { config } : {}), ...(slug ? { slug } : {}) }
 }
 
 /** Device scope takes a boolean; a project may also clear its override with null. */

@@ -475,6 +475,8 @@ export type RemoveInstallResult =
 export interface AddInstanceInput {
   driver: HarnessDriverKind
   config?: InstanceConfigPatch
+  /** The id's slug (`claude:api`), when it should not come from the display name. */
+  slug?: string
 }
 
 /** Long provider operations; each returns an operation id at once and reports through events. */
