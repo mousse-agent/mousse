@@ -1,0 +1,554 @@
+{
+  "actions.activateBranch": {
+    "version": 1,
+    "digest": "3ae0d709302579fb"
+  },
+  "actions.configureRetention": {
+    "version": 1,
+    "digest": "8f08d2afefad6f96"
+  },
+  "actions.fork": {
+    "version": 1,
+    "digest": "f348edfcdb28ab57"
+  },
+  "actions.getAffectedFiles": {
+    "version": 1,
+    "digest": "9920bfae2d57da2a"
+  },
+  "actions.list": {
+    "version": 1,
+    "digest": "5682d15e453fd69e"
+  },
+  "actions.pin": {
+    "version": 1,
+    "digest": "848093950edc556a"
+  },
+  "actions.redo": {
+    "version": 1,
+    "digest": "f57f8729cac80201"
+  },
+  "actions.revertCode": {
+    "version": 1,
+    "digest": "bc4765c2cd461886"
+  },
+  "actions.sweepRetention": {
+    "version": 1,
+    "digest": "5682d15e453fd69e"
+  },
+  "actions.undoLatest": {
+    "version": 1,
+    "digest": "ea939c52269a6638"
+  },
+  "activity.get": {
+    "version": 1,
+    "digest": "2a27f073e7829290"
+  },
+  "activity.snapshot": {
+    "version": 1,
+    "digest": "e1b2634dfa7c5469"
+  },
+  "agents.list": {
+    "version": 1,
+    "digest": "2a27f073e7829290"
+  },
+  "agents.stop": {
+    "version": 1,
+    "digest": "fe26769caa4421d4"
+  },
+  "applets.export": {
+    "version": 1,
+    "digest": "8891331cbc055e2f"
+  },
+  "applets.get": {
+    "version": 1,
+    "digest": "0e698fe2a6c79b61"
+  },
+  "applets.state.get": {
+    "version": 1,
+    "digest": "0e698fe2a6c79b61"
+  },
+  "applets.state.save": {
+    "version": 1,
+    "digest": "402ff47a04e385f6"
+  },
+  "chatReferences.resolve": {
+    "version": 1,
+    "digest": "55286740fccc87da"
+  },
+  "composer.options": {
+    "version": 1,
+    "digest": "2a27f073e7829290"
+  },
+  "files.grep": {
+    "version": 1,
+    "digest": "0eb1d41a311a2b47"
+  },
+  "files.list": {
+    "version": 1,
+    "digest": "a9f0f4ffe811bccd"
+  },
+  "files.read": {
+    "version": 1,
+    "digest": "1ccca53cbbe58375"
+  },
+  "files.readAsset": {
+    "version": 1,
+    "digest": "654615c0ceab0f4f"
+  },
+  "files.search": {
+    "version": 1,
+    "digest": "1b098c3cb6018928"
+  },
+  "files.stat": {
+    "version": 1,
+    "digest": "1ccca53cbbe58375"
+  },
+  "files.write": {
+    "version": 1,
+    "digest": "681d92b9abb1a881"
+  },
+  "git.abortInProgress": {
+    "version": 1,
+    "digest": "52d0d38816c25d26"
+  },
+  "git.branches": {
+    "version": 1,
+    "digest": "be5c180f1cc0b52d"
+  },
+  "git.cancelOperation": {
+    "version": 1,
+    "digest": "1bca6e15005304df"
+  },
+  "git.checkout": {
+    "version": 1,
+    "digest": "f53d0aa6063bfdc2"
+  },
+  "git.commit": {
+    "version": 1,
+    "digest": "96584e3584c54c4f"
+  },
+  "git.createBranch": {
+    "version": 1,
+    "digest": "d5a870ef7586addb"
+  },
+  "git.deleteBranch": {
+    "version": 1,
+    "digest": "1ffa67e37f9c66d4"
+  },
+  "git.diff": {
+    "version": 1,
+    "digest": "6e076d207c54682f"
+  },
+  "git.diffStats": {
+    "version": 1,
+    "digest": "be5c180f1cc0b52d"
+  },
+  "git.discard": {
+    "version": 1,
+    "digest": "3589b8bc6e1f063d"
+  },
+  "git.fetch": {
+    "version": 1,
+    "digest": "2491700da58ef245"
+  },
+  "git.init": {
+    "version": 1,
+    "digest": "0b514123a517746d"
+  },
+  "git.lastCommitMessage": {
+    "version": 1,
+    "digest": "be5c180f1cc0b52d"
+  },
+  "git.log": {
+    "version": 1,
+    "digest": "4218d5ceaace1817"
+  },
+  "git.pull": {
+    "version": 1,
+    "digest": "5dbdd6744ec94efa"
+  },
+  "git.push": {
+    "version": 1,
+    "digest": "32a20763b1e57bc3"
+  },
+  "git.renameBranch": {
+    "version": 1,
+    "digest": "0814058e14a91abf"
+  },
+  "git.stage": {
+    "version": 1,
+    "digest": "5258b6f22a1a17a8"
+  },
+  "git.status": {
+    "version": 1,
+    "digest": "be5c180f1cc0b52d"
+  },
+  "git.suggestCommitMessage": {
+    "version": 1,
+    "digest": "ce4d427495bbe3f9"
+  },
+  "git.unstage": {
+    "version": 1,
+    "digest": "5258b6f22a1a17a8"
+  },
+  "github.status": {
+    "version": 1,
+    "digest": "e1b2634dfa7c5469"
+  },
+  "operations.abort": {
+    "version": 1,
+    "digest": "7d475c79cab80f79"
+  },
+  "operations.get": {
+    "version": 1,
+    "digest": "7d475c79cab80f79"
+  },
+  "operations.recover": {
+    "version": 1,
+    "digest": "5682d15e453fd69e"
+  },
+  "orchestrator.abort": {
+    "version": 1,
+    "digest": "ca4448f42d042129"
+  },
+  "orchestrator.answerQuestions": {
+    "version": 1,
+    "digest": "59854b7c16497a61"
+  },
+  "orchestrator.contextUsage": {
+    "version": 1,
+    "digest": "ebb1f4dc92e36fb9"
+  },
+  "orchestrator.dismissQuestions": {
+    "version": 1,
+    "digest": "561d0ba0df9fd5f7"
+  },
+  "orchestrator.isTurnActive": {
+    "version": 1,
+    "digest": "2a27f073e7829290"
+  },
+  "orchestrator.pendingQuestions": {
+    "version": 1,
+    "digest": "2a27f073e7829290"
+  },
+  "orchestrator.retry": {
+    "version": 1,
+    "digest": "2a27f073e7829290"
+  },
+  "orchestrator.send": {
+    "version": 1,
+    "digest": "db7ccd03ce16ac0a"
+  },
+  "orchestrator.steer": {
+    "version": 1,
+    "digest": "3be8452e1c054740"
+  },
+  "projects.list": {
+    "version": 1,
+    "digest": "e1b2634dfa7c5469"
+  },
+  "projects.match": {
+    "version": 1,
+    "digest": "b88f5b6d1fd03a15"
+  },
+  "projects.open": {
+    "version": 1,
+    "digest": "999e7395ea13b6e6"
+  },
+  "projects.pin": {
+    "version": 1,
+    "digest": "2f201305d9b6a7be"
+  },
+  "projects.remove": {
+    "version": 1,
+    "digest": "0b514123a517746d"
+  },
+  "projects.rename": {
+    "version": 1,
+    "digest": "10c6fd7389bbd96b"
+  },
+  "providers.snapshots": {
+    "version": 1,
+    "digest": "232e8492957800bd"
+  },
+  "pty.isAlive": {
+    "version": 1,
+    "digest": "357d5db91b806bcd"
+  },
+  "pty.list": {
+    "version": 1,
+    "digest": "2a27f073e7829290"
+  },
+  "pty.lookup": {
+    "version": 1,
+    "digest": "357d5db91b806bcd"
+  },
+  "pty.outputSince": {
+    "version": 1,
+    "digest": "6f8b3a1534b78dbb"
+  },
+  "pty.scrollback": {
+    "version": 1,
+    "digest": "aceac561b42d6004"
+  },
+  "publish.start": {
+    "version": 1,
+    "digest": "0a492aa0d1f08d3b"
+  },
+  "publish.status": {
+    "version": 1,
+    "digest": "5682d15e453fd69e"
+  },
+  "pullRequests.baseBranches": {
+    "version": 1,
+    "digest": "be5c180f1cc0b52d"
+  },
+  "pullRequests.create": {
+    "version": 1,
+    "digest": "5f247d85d6753935"
+  },
+  "pullRequests.detail": {
+    "version": 1,
+    "digest": "8de2008992f3a07b"
+  },
+  "pullRequests.draft": {
+    "version": 1,
+    "digest": "3b83029cc0ced4ee"
+  },
+  "pullRequests.get": {
+    "version": 1,
+    "digest": "615e87d46ebbbf0f"
+  },
+  "pullRequests.link": {
+    "version": 1,
+    "digest": "bc7f3e7614bcf8b4"
+  },
+  "pullRequests.list": {
+    "version": 1,
+    "digest": "4a3795e203814b78"
+  },
+  "pullRequests.pushTarget": {
+    "version": 1,
+    "digest": "2a27f073e7829290"
+  },
+  "pullRequests.resolve": {
+    "version": 1,
+    "digest": "6b347f38c497e10c"
+  },
+  "pullRequests.startThread": {
+    "version": 1,
+    "digest": "849069a63c4901c0"
+  },
+  "pullRequests.unlink": {
+    "version": 1,
+    "digest": "2a27f073e7829290"
+  },
+  "pullRequests.watch": {
+    "version": 1,
+    "digest": "4bcc011389a86ed9"
+  },
+  "pullRequests.watchStatus": {
+    "version": 1,
+    "digest": "2a27f073e7829290"
+  },
+  "queue.edit": {
+    "version": 1,
+    "digest": "7f454c248b159a64"
+  },
+  "queue.enqueue": {
+    "version": 1,
+    "digest": "702da21dc9e90453"
+  },
+  "queue.list": {
+    "version": 1,
+    "digest": "2a27f073e7829290"
+  },
+  "queue.promoteToSteer": {
+    "version": 1,
+    "digest": "2356256a52e2d640"
+  },
+  "queue.remove": {
+    "version": 1,
+    "digest": "d1ec647bb236cf35"
+  },
+  "queue.reorder": {
+    "version": 1,
+    "digest": "5f3aa347f2d9c8ad"
+  },
+  "review.file": {
+    "version": 1,
+    "digest": "d40f7d8ef72c110a"
+  },
+  "review.files": {
+    "version": 1,
+    "digest": "dd946eaa04f957e3"
+  },
+  "runs.cancelPause": {
+    "version": 1,
+    "digest": "09a87e17128c1172"
+  },
+  "runs.events": {
+    "version": 1,
+    "digest": "4b77b5cb8d463564"
+  },
+  "runs.get": {
+    "version": 1,
+    "digest": "09a87e17128c1172"
+  },
+  "runs.list": {
+    "version": 1,
+    "digest": "3a29bbd63021d2fa"
+  },
+  "runs.resumeNow": {
+    "version": 1,
+    "digest": "09a87e17128c1172"
+  },
+  "skills.list": {
+    "version": 1,
+    "digest": "e1b2634dfa7c5469"
+  },
+  "skills.read": {
+    "version": 1,
+    "digest": "5539dc1c60cdd943"
+  },
+  "subagents.list": {
+    "version": 1,
+    "digest": "2a27f073e7829290"
+  },
+  "subagents.stopAll": {
+    "version": 1,
+    "digest": "2a27f073e7829290"
+  },
+  "tasks.create": {
+    "version": 1,
+    "digest": "6f4db1b89159fd76"
+  },
+  "tasks.list": {
+    "version": 1,
+    "digest": "2a27f073e7829290"
+  },
+  "tasks.update": {
+    "version": 1,
+    "digest": "ae0ab127e121dfb9"
+  },
+  "thread.fork": {
+    "version": 1,
+    "digest": "97b6aa68346e085a"
+  },
+  "thread.mergeBack": {
+    "version": 1,
+    "digest": "c5edc663eb7e7571"
+  },
+  "thread.snapshot": {
+    "version": 1,
+    "digest": "2a27f073e7829290"
+  },
+  "threads.approvalRules": {
+    "version": 1,
+    "digest": "2a27f073e7829290"
+  },
+  "threads.clearApprovalRules": {
+    "version": 1,
+    "digest": "e2af3a0680e25499"
+  },
+  "threads.create": {
+    "version": 1,
+    "digest": "8c29741dbc687abf"
+  },
+  "threads.delete": {
+    "version": 1,
+    "digest": "d536a70a70cc7c8c"
+  },
+  "threads.get": {
+    "version": 1,
+    "digest": "2a27f073e7829290"
+  },
+  "threads.inventory": {
+    "version": 1,
+    "digest": "2a27f073e7829290"
+  },
+  "threads.list": {
+    "version": 1,
+    "digest": "0b514123a517746d"
+  },
+  "threads.pin": {
+    "version": 1,
+    "digest": "7529c8f73f963ecc"
+  },
+  "threads.regenerateTitle": {
+    "version": 1,
+    "digest": "2a27f073e7829290"
+  },
+  "threads.rename": {
+    "version": 1,
+    "digest": "9779ecb28c4ca43c"
+  },
+  "threads.restore": {
+    "version": 1,
+    "digest": "d536a70a70cc7c8c"
+  },
+  "threads.search": {
+    "version": 1,
+    "digest": "70c38e267069982a"
+  },
+  "threads.setModel": {
+    "version": 1,
+    "digest": "d0a0070c3a0aa90f"
+  },
+  "threads.setPermissionMode": {
+    "version": 1,
+    "digest": "4ec36e005f81decc"
+  },
+  "threads.settle": {
+    "version": 1,
+    "digest": "6be729e5bd94f2af"
+  },
+  "threads.setWorktreeEnabled": {
+    "version": 1,
+    "digest": "d45007f32a42eb40"
+  },
+  "threads.trash": {
+    "version": 1,
+    "digest": "d536a70a70cc7c8c"
+  },
+  "workflowRuns.answer": {
+    "version": 1,
+    "digest": "1846cbdbdbc3fd53"
+  },
+  "workflowRuns.approve": {
+    "version": 1,
+    "digest": "7f61050aa652e299"
+  },
+  "workflowRuns.cancel": {
+    "version": 1,
+    "digest": "e49751b04bc739e8"
+  },
+  "workflowRuns.get": {
+    "version": 1,
+    "digest": "09a87e17128c1172"
+  },
+  "workflowRuns.list": {
+    "version": 1,
+    "digest": "f9e2661f18124778"
+  },
+  "workflowRuns.pause": {
+    "version": 1,
+    "digest": "09a87e17128c1172"
+  },
+  "workflowRuns.resume": {
+    "version": 1,
+    "digest": "09a87e17128c1172"
+  },
+  "workflowRuns.trace": {
+    "version": 1,
+    "digest": "5183d74689ef0a7d"
+  },
+  "workspace.getStatus": {
+    "version": 1,
+    "digest": "5682d15e453fd69e"
+  },
+  "workspace.restore": {
+    "version": 1,
+    "digest": "f57f8729cac80201"
+  }
+}
