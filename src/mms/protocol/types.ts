@@ -237,6 +237,8 @@ export const PROTOCOL_METHODS = [
   'threads.approvalRules',
   'threads.clearApprovalRules',
   'thread.snapshot',
+  'thread.messages',
+  'thread.messageImage',
   'orchestrator.send',
   'orchestrator.abort',
   'orchestrator.steer',

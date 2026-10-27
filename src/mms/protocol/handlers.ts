@@ -84,6 +84,8 @@ import {
   isObject
 } from './validators'
 import { PROTOCOL_CAPABILITIES, PROTOCOL_METHODS, MMS_PROTOCOL_VERSION } from './types'
+import { imageAt, messagesBefore, withoutImageBytes } from './transcriptPaging'
+import { ROUTED_MESSAGES_PAGE_BYTES } from '../../shared/bridge/routed'
 import { buildSubagentView } from '../run/delegation/subagentView'
 import { visibleThreadsFor } from './threadVisibility'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
@@ -189,6 +191,10 @@ function questionAnswerer(ctx: HandlerContext): Answerer {
   if (caller) return { kind: 'user', via: 'bridge', node: caller.node, maxPermissionMode: caller.maxPermissionMode }
   return { kind: 'user', via: ctx.connection.clientType === 'gui' ? 'gui' : ctx.connection.clientType === 'cli' ? 'cli' : 'internal' }
 }
+
+/** Messages `thread.messages` returns when the caller names no limit, and the most it will. */
+const MESSAGES_PAGE_DEFAULT = 100
+const MESSAGES_PAGE_MAX = 500
 
 function rejectUnknownKeys(p: Record<string, unknown>, allowed: readonly string[]): void {
   for (const key of Object.keys(p)) if (!allowed.includes(key)) throw new DomainRpcError('invalid_params', `${key} is not allowed`)
@@ -1305,6 +1311,35 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         turnSnapshot: ctx.mms.orchestrator.getTurnSnapshot(),
         revision: ctx.globalSequence()
       }
+    }
+    case 'thread.messages': {
+      // A page of the messages before one, for a reader that was given only the newest part of a long transcript.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'before', 'limit'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const before = asString(p.before, 'before', 256)
+      const limit = asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: MESSAGES_PAGE_MAX }) ?? MESSAGES_PAGE_DEFAULT
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      const page = messagesBefore(ctx.mms.orchestrator.getMessages(threadId), before, limit, ROUTED_MESSAGES_PAGE_BYTES)
+      if (!page) throw new DomainRpcError('message_not_found', 'That message is not in this thread.', { threadId, before })
+      // Images are loaded one at a time when they are shown (`thread.messageImage`).
+      return { messages: page.messages.map(withoutImageBytes), ...(page.earlier ? { earlier: page.earlier } : {}) }
+    }
+    case 'thread.messageImage': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'messageId', 'queueItemId', 'index'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const index = asBoundedInt(p.index, 'index', { min: 0, max: 255 })
+      const messageId = asOptionalString(p.messageId, 256)
+      const queueItemId = asOptionalString(p.queueItemId, 256)
+      if ((messageId === undefined) === (queueItemId === undefined)) throw new DomainRpcError('invalid_params', 'Name a messageId or a queueItemId.')
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      const owner = messageId !== undefined
+        ? ctx.mms.orchestrator.getMessages(threadId).find((message) => message.id === messageId)
+        : ctx.mms.orchestrator.listQueue(threadId).find((item) => item.id === queueItemId)
+      const image = imageAt(owner, index)
+      if (!image) throw new DomainRpcError('image_not_found', 'There is no such image.', { threadId, ...(messageId !== undefined ? { messageId } : { queueItemId }), index })
+      return image
     }
     case 'threads.regenerateTitle': {
       const p = isObject(params) ? params : {}

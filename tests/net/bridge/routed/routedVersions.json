@@ -130,9 +130,9 @@
     "security": "23c8269058d1b9db"
   },
   "files.write": {
-    "version": 1,
-    "digest": "681d92b9abb1a881",
-    "security": "ceacd93869361a7a"
+    "version": 2,
+    "digest": "deeb1b534049ea69",
+    "security": "4ad9001de2441ed0"
   },
   "git.abortInProgress": {
     "version": 1,
@@ -295,14 +295,14 @@
     "security": "926c4af141d1208d"
   },
   "orchestrator.send": {
-    "version": 1,
-    "digest": "db7ccd03ce16ac0a",
-    "security": "926c4af141d1208d"
+    "version": 2,
+    "digest": "603f2c1520163ce5",
+    "security": "1447c39a3cdfbf97"
   },
   "orchestrator.steer": {
-    "version": 1,
-    "digest": "3be8452e1c054740",
-    "security": "56bf730c16aa9cd1"
+    "version": 2,
+    "digest": "2f736d5f6a66cf4a",
+    "security": "da503b52b5c83a71"
   },
   "projects.list": {
     "version": 1,
@@ -440,14 +440,14 @@
     "security": "04f7c680ffd36337"
   },
   "queue.edit": {
-    "version": 1,
-    "digest": "7f454c248b159a64",
-    "security": "926c4af141d1208d"
+    "version": 2,
+    "digest": "c566e5d7295522f9",
+    "security": "b4dd46cdf246cfd1"
   },
   "queue.enqueue": {
-    "version": 1,
-    "digest": "702da21dc9e90453",
-    "security": "926c4af141d1208d"
+    "version": 2,
+    "digest": "298e9361e4548d6f",
+    "security": "1447c39a3cdfbf97"
   },
   "queue.list": {
     "version": 1,
@@ -548,6 +548,16 @@
     "version": 1,
     "digest": "c5edc663eb7e7571",
     "security": "156247cbbde05777"
+  },
+  "thread.messageImage": {
+    "version": 1,
+    "digest": "1649e85030d13b65",
+    "security": "04f7c680ffd36337"
+  },
+  "thread.messages": {
+    "version": 1,
+    "digest": "e362d70d862a7cfc",
+    "security": "04f7c680ffd36337"
   },
   "thread.snapshot": {
     "version": 1,

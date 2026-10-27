@@ -262,6 +262,8 @@ export async function fixture(
     targetKeys,
     targetIdentity,
     targetStore,
+    targetBlobs,
+    callerKeys,
     targetRpc,
     targetLedger,
     targetArtifacts,

@@ -6,6 +6,8 @@ import {
   ROUTED_FORBIDDEN_KEYS,
   ROUTED_LOCAL_METHODS,
   ROUTED_METHODS,
+  ROUTED_STAGED_KEY,
+  ROUTED_TRANSPORT_METHODS,
   classifyRoutedMethod,
   routedKeysAt,
   routedVersions,
@@ -47,7 +49,9 @@ function securityOf(row: RoutedRow): string {
     absolutePath: row.absolutePath ?? false,
     threadIds: row.threadIds ?? ['threadId'],
     owned: Object.entries(row.owned ?? {}).sort(([a], [b]) => a.localeCompare(b)),
-    routeOnly: [...(row.routeOnly ?? [])].sort()
+    routeOnly: [...(row.routeOnly ?? [])].sort(),
+    // Which values a caller may send ahead of the call is part of what the row lets through.
+    ...(row.stageable?.length ? { stageable: [...row.stageable].sort() } : {})
   })
 }
 
@@ -186,10 +190,38 @@ describe('the routed method table', () => {
     }
   })
 
-  it('advertises one version per row', () => {
+  it('advertises one version per row and per transport method', () => {
     const versions = routedVersions()
-    expect(Object.keys(versions).sort()).toEqual(Object.keys(ROUTED_METHODS).sort())
+    expect(Object.keys(versions).sort()).toEqual(
+      [...Object.keys(ROUTED_METHODS), ...Object.keys(ROUTED_TRANSPORT_METHODS)].sort()
+    )
     expect(Object.values(versions).every((v) => v >= 1)).toBe(true)
+    // A transport method never shares a name with a protocol method, so `routed.<name>` is unambiguous.
+    for (const name of Object.keys(ROUTED_TRANSPORT_METHODS))
+      expect(ROUTED_METHODS[name], name).toBeUndefined()
+  })
+
+  it('lets only the rows that carry large values stage them, and never a key the row lacks', () => {
+    const staging = Object.entries(ROUTED_METHODS).filter(([, row]) => row.stageable)
+    expect(staging.map(([method]) => method).sort()).toEqual([
+      'files.write',
+      'orchestrator.send',
+      'orchestrator.steer',
+      'queue.edit',
+      'queue.enqueue'
+    ])
+    for (const [method, row] of staging) {
+      // The key is new at version 2, so an owner at version 1 is never sent it.
+      expect(row.keys, method).toContain(ROUTED_STAGED_KEY)
+      expect(row.since?.[ROUTED_STAGED_KEY], method).toBe(2)
+      expect(routedKeysAt(row, 1), method).not.toContain(ROUTED_STAGED_KEY)
+      for (const key of row.stageable!) expect(row.keys, `${method} stages ${key}`).toContain(key)
+      // Only content-like values are staged, never an id, a path or a mode.
+      for (const key of row.stageable!)
+        expect(['content', 'images', 'text'], `${method} stages ${key}`).toContain(key)
+    }
+    for (const [method, row] of Object.entries(ROUTED_METHODS))
+      if (!row.stageable) expect(row.keys, method).not.toContain(ROUTED_STAGED_KEY)
   })
 
   it('matches the versions on record, and a changed row needs a new version', () => {
@@ -220,7 +252,8 @@ describe('the routed method table', () => {
       ['absolutePath', { absolutePath: true }],
       ['owned', { owned: { content: 'run' } }],
       ['routeOnly', { routeOnly: ['content'] }],
-      ['threadIds', { threadIds: ['path'] }]
+      ['threadIds', { threadIds: ['path'] }],
+      ['stageable', { stageable: ['path'] }]
     ]
     for (const [column, edit] of edits)
       expect(
