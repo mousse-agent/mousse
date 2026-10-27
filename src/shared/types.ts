@@ -204,6 +204,37 @@ export interface CreateScheduledJobInput {
   repeat?: { times?: number }
 }
 
+/** The edits the Scheduled page sends; `null` clears a field so the job goes back to its default. */
+export interface ScheduledJobPatch {
+  name?: string
+  prompt?: string
+  schedule?: JobSchedule
+  threadId?: string | null
+  projectId?: string | null
+  createThread?: boolean
+  selection?: ModelOverride | null
+  mode?: 'agent' | 'plan' | null
+  workspace?: ScheduledJobWorkspace | null
+}
+
+/**
+ * What enabling or rotating a webhook answers. `secret` is in this answer and no other: the page shows it once
+ * and drops it. Enabling a webhook that already exists issues no secret.
+ */
+export interface ScheduledWebhookGrant {
+  job: ScheduledJob
+  secret?: string
+  url: string
+  listening?: boolean
+  error?: string
+  warning?: string
+}
+
+export interface ScheduledWebhookDeliveryLog {
+  deliveries: ScheduledWebhookDelivery[]
+  url: string
+}
+
 export interface ThreadSearchResult {
   threadId: string
   threadName: string

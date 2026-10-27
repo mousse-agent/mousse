@@ -1027,8 +1027,10 @@ describe('scheduled job webhook trigger', () => {
       const other = await client.request<{ job: { id: string } }>('scheduled.create', { input: { name: 'other', prompt: 'x', schedule: { kind: 'manual' } } })
       await client.request('scheduled.webhook.enable', { id: other.job.id })
       expect((await signedPost(port, id, '{"x":2}', { secret: rotated.secret })).status).toBe(401)
-      const log = await client.request<{ deliveries: ScheduledWebhookDelivery[] }>('scheduled.webhook.deliveries', { id })
+      const log = await client.request<{ deliveries: ScheduledWebhookDelivery[]; url: string }>('scheduled.webhook.deliveries', { id })
       expect(log.deliveries.some((row) => row.outcome === 'accepted' || row.outcome === 'completed')).toBe(true)
+      // The log also names the address senders post to, for a page opened after the secret was shown.
+      expect(log.url).toBe(`http://127.0.0.1:${port}/hooks/${id}`)
     })
 
     it('refuses to enable a one-time job and reports a listener that cannot bind', async () => {

@@ -108,7 +108,9 @@ import type {
   OrchestratorContextUsageInput,
   OrchestratorSendInput,
   PermissionMode,
-  ScheduledJob,
+  ScheduledJobPatch,
+  ScheduledWebhookDeliveryLog,
+  ScheduledWebhookGrant,
   ThreadActivitySnapshot,
   Thread,
   ThreadActivityState,
@@ -1507,11 +1509,34 @@ export function registerGuiIpc(
   })
   registerHandler(
     'scheduled:update',
-    async (_e, id: string, patch: Partial<ScheduledJob>) => {
+    async (_e, id: string, patch: ScheduledJobPatch) => {
       const res = await guiMms.request<{ job: unknown }>('scheduled.update', { id, patch })
       return res.job
     }
   )
+  // The secret is in the enable and rotate answers only. It is passed on untouched and never kept or logged here.
+  const webhookGrant = (res: ScheduledWebhookGrant): ScheduledWebhookGrant => ({
+    job: res.job,
+    url: res.url,
+    ...(res.secret ? { secret: res.secret } : {}),
+    ...(res.listening === undefined ? {} : { listening: res.listening }),
+    ...(res.error ? { error: res.error } : {}),
+    ...(res.warning ? { warning: res.warning } : {})
+  })
+  registerHandler('scheduled:webhook:enable', async (_e, id: string) =>
+    webhookGrant(await guiMms.request<ScheduledWebhookGrant>('scheduled.webhook.enable', { id }))
+  )
+  registerHandler('scheduled:webhook:rotate', async (_e, id: string) =>
+    webhookGrant(await guiMms.request<ScheduledWebhookGrant>('scheduled.webhook.rotate', { id }))
+  )
+  registerHandler('scheduled:webhook:disable', async (_e, id: string) => {
+    const res = await guiMms.request<{ job: unknown }>('scheduled.webhook.disable', { id })
+    return res.job
+  })
+  registerHandler('scheduled:webhook:deliveries', async (_e, id: string) => {
+    const res = await guiMms.request<ScheduledWebhookDeliveryLog>('scheduled.webhook.deliveries', { id })
+    return { deliveries: res.deliveries, url: res.url }
+  })
   registerHandler('scheduled:delete', async (_e, id: string) => {
     const res = await guiMms.request<{ ok: boolean }>('scheduled.delete', { id })
     return res.ok
