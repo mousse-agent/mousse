@@ -880,7 +880,8 @@ export class Harness implements HarnessGateway {
         // Only a removed model API comes back; any other provider is added by its credential, as before.
         const provider = piProviderIdOf(instanceId)
         if (!provider || !this.instanceMap.isRemoved(instanceId)) return
-        await this.add({ driver: 'pi', config: { provider } })
+        // The credential is saved already; the old method still answers as it did when the add fails.
+        await this.add({ driver: 'pi', config: { provider } }).catch((error) => console.warn('[harness] could not add a removed provider back', { instanceId, error: errorText(error) }))
       },
       refreshModels: async (providerId, cwd) => {
         const record = this.legacyRecord(providerId)
@@ -2501,7 +2502,9 @@ export class Harness implements HarnessGateway {
     const config: Record<string, unknown> = {}
     if (patch.displayName?.trim()) config.displayName = patch.displayName.trim()
     this.instanceMap.setEntry(instanceId, { driver: driver.kind, enabled: true, ...(Object.keys(config).length ? { config } : {}) }, { revive: true })
-    // A runtime still held from before the removal is not reused.
+    // A runtime still held from before the removal is not reused, and the removal's pending
+    // deletion of the state directory (the same fixed path) is called off: the new entry uses it.
+    this.removals.delete(instanceId)
     const stale = this.records.get(instanceId)
     if (stale) {
       this.records.delete(instanceId)

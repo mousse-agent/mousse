@@ -229,6 +229,7 @@ describe('P3 real MMS remote Bridge', () => {
     expect(p.mms.threads.listAllThreads()).toHaveLength(1)
     for (const method of [
       'providers.setApiKey',
+      'providers.instances.setSecret',
       'provider.login',
       'settings.set',
       'pty.create',
