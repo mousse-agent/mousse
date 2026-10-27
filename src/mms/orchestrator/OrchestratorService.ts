@@ -1341,6 +1341,11 @@ export class OrchestratorService extends EventEmitter {
     })
   }
 
+  /** Whether a thread belongs to a bot (only its own dispatches run there; a chat cannot bind to it). */
+  isBotThread(threadId: string): boolean {
+    return this.botThreadRefusal(threadId) !== undefined
+  }
+
   /** Cancels a queued run that would start a turn on a bot's thread outside its bot dispatch. */
   private refuseOnBotThread(runId: string, threadId: string): boolean {
     if (!this.botThreadRefusal(threadId)) return false
@@ -11150,6 +11155,10 @@ export class OrchestratorService extends EventEmitter {
       if (!threadStore.getThread(threadId)) {
         return { text: '', silent: false, error: `Thread not found: ${threadId}` }
       }
+      // A chat bound to a bot's thread (`/threads`) never writes into it: only the bot's own
+      // dispatches run there, and a channel reaches the bot through `/bot` (PR 6 §6).
+      const botRefusal = this.botThreadRefusal(threadId)
+      if (botRefusal) return { text: '', silent: false, error: botRefusal.message }
       // A person outside Mousse drives this thread (a paired chat user, a webhook caller): agents in it
       // reach no other thread through the profile's setting, now or in any later turn, and what they
       // delegate inherits the limit (SPEC §15.1).

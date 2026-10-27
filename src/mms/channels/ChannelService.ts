@@ -5,6 +5,7 @@ import { EventEmitter } from 'events'
 import type {
   ChannelActivityEvent,
   ChannelConfig,
+  ChannelOwner,
   ChannelPlatform,
   ChannelsSnapshot,
   ChannelStatus,
@@ -17,6 +18,7 @@ import type { ProviderAuthService } from '../providers/ProviderAuthService'
 import type { AgentRegistry } from '../agents/AgentRegistry'
 import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import { ChannelAuth } from './ChannelAuth'
+import { ChannelOwnerClaims, type ChannelBots } from './channelBots'
 import { CHANNEL_POLICY, ChannelApprovalNotices, channelGate } from './channelModels'
 import { ChannelRouter } from './ChannelRouter'
 import { ChannelSessionManager } from './ChannelSessionManager'
@@ -43,6 +45,10 @@ export interface ChannelServiceOptions {
    * run one. Picks the one-time approvals notice for a model chosen with `/model`.
    */
   capsOf?: (instanceId: string) => HarnessCaps
+  /** The profile's personal bots; absent when bots are unavailable. */
+  bots?: ChannelBots
+  /** "This is me" codes (tests pass a clock). */
+  ownerClaims?: ChannelOwnerClaims
 }
 
 function createDefaultAdapter(
@@ -61,6 +67,9 @@ function createDefaultAdapter(
   }
 }
 
+/** How long a failed bot reply waits before it is sent again (times the attempt). */
+const BOT_REPLY_RETRY_MS = 30_000
+
 function isProfileDraining(error: unknown): boolean {
   return Boolean(error && typeof error === 'object' && (error as { code?: string }).code === 'profile_draining')
 }
@@ -77,6 +86,9 @@ export class ChannelService extends EventEmitter {
   private disconnecting: Promise<void> | null = null
   private readonly draining = new Set<Promise<unknown>>()
   private readonly approvalNotices = new ChannelApprovalNotices()
+  private readonly ownerClaims: ChannelOwnerClaims
+  private readonly bots: ChannelBots | undefined
+  private unsubscribeBots: (() => void) | undefined
 
   constructor(
     private orchestrator: OrchestratorService,
@@ -89,8 +101,15 @@ export class ChannelService extends EventEmitter {
   ) {
     super()
     this.createAdapter = options?.createAdapter ?? createDefaultAdapter
+    this.ownerClaims = options?.ownerClaims ?? new ChannelOwnerClaims()
+    this.bots = options?.bots
     this.auth = new ChannelAuth(this.store.getPairingDirectory())
-    this.sessionManager = new ChannelSessionManager(this.store, threadStore, (override) => orchestrator.migrateModelOverride(override) ?? override)
+    this.sessionManager = new ChannelSessionManager(
+      this.store,
+      threadStore,
+      (override) => orchestrator.migrateModelOverride(override) ?? override,
+      (threadId) => orchestrator.isBotThread(threadId)
+    )
     this.router = new ChannelRouter(
       this.store,
       this.sessionManager,
@@ -117,6 +136,9 @@ export class ChannelService extends EventEmitter {
           return notice ? { notice } : {}
         },
         noticeDelivered: (threadId) => this.approvalNotices.delivered(threadId),
+        ...(this.bots ? { bots: this.bots } : {}),
+        ownerClaims: this.ownerClaims,
+        ownerClaimReceived: () => this.emitUpdated(),
         getSubscriptionUsage: (providerId) => this.providerAuth.getSubscriptionUsage(providerId),
         listAgents: this.agentRegistry
           ? () =>
@@ -134,6 +156,109 @@ export class ChannelService extends EventEmitter {
     this.router.on('pairing-updated', () => {
       this.emitUpdated()
     })
+    // A channel activation tells its chat what it ended with (or that it waits for approval).
+    this.unsubscribeBots = this.bots?.onChanged((event) => {
+      if (event.activationId) this.sendBotReply(event.activationId)
+    })
+  }
+
+  /** Posts what a channel activation has to say now; each state is claimed once, only while its chat is reachable. */
+  private sendBotReply(activationId: string): void {
+    if (!this.bots || this.lifecycle.stopping) return
+    let reply: ReturnType<ChannelBots['channelReply']>
+    try {
+      // Only to a reachable chat, and only while the account that wrote is still the owner: after
+      // "Forget" or an owner change, earlier activations no longer post to the old owner's DM.
+      reply = this.bots.channelReply(activationId, {
+        canSend: (replyTo) => !this.lifecycle.stopping &&
+          this.adapters.get(replyTo.platform)?.getStatus().state === 'connected' &&
+          replyTo.userId !== undefined && this.store.getOwners()[replyTo.platform]?.userId === replyTo.userId
+      })
+    } catch (error) {
+      console.warn('[channels] bot reply could not be read', error)
+      return
+    }
+    if (!reply) return
+    const claimed = reply
+    const failed = (error?: unknown) => {
+      if (error !== undefined && !isProfileDraining(error)) console.error('[channels] bot reply failed:', error)
+      // The claim goes back, and the reply is tried again later (at most three times in a row).
+      try { claimed.release() } catch { /* the next change or connect tries again */ }
+      this.retryBotReply(activationId)
+    }
+    void this.router.deliverBotReply(claimed.replyTo, claimed.text).then((sent) => {
+      if (sent) this.replyRetries.delete(activationId)
+      else failed()
+    }, failed)
+  }
+
+  private readonly replyRetries = new Map<string, number>()
+
+  private retryBotReply(activationId: string): void {
+    if (this.lifecycle.stopping) return
+    const tries = (this.replyRetries.get(activationId) ?? 0) + 1
+    if (tries > 3) {
+      this.replyRetries.delete(activationId)
+      return
+    }
+    this.replyRetries.set(activationId, tries)
+    const timer = setTimeout(() => this.sendBotReply(activationId), BOT_REPLY_RETRY_MS * tries)
+    timer.unref?.()
+  }
+
+  /** Replies channel activations still owe a chat on `platform`, once it is connected. */
+  private sweepBotReplies(): void {
+    if (!this.bots) return
+    let ids: string[] = []
+    try { ids = this.bots.recentChannelActivations() } catch { return }
+    for (const id of ids) this.sendBotReply(id)
+  }
+
+  // -- "This is me" (PR 6 §6) -------------------------------------------------------------------
+
+  /** Each platform's confirmed owner. */
+  getOwners(): Partial<Record<ChannelPlatform, ChannelOwner>> {
+    return this.store.getOwners()
+  }
+
+  /** A one-time code the owner sends with `/owner <code>` from a direct message (10 minutes, one try per account). */
+  startOwnerClaim(platform: ChannelPlatform): { code: string; expiresAt: string } {
+    this.lifecycle.assertAccepting()
+    // A webhook caller names its own user id, so a webhook account can never be confirmed as anyone.
+    if (platform === 'webhook') throw Object.assign(new Error('Webhook senders can\'t be confirmed as the owner.'), { code: 'channel_owner_unconfirmed' })
+    const claim = this.ownerClaims.start(platform)
+    this.emitUpdated()
+    return claim
+  }
+
+  /** The claim in progress: when it expires, and the account that sent the code, if one did. */
+  ownerClaimStatus(platform: ChannelPlatform): ReturnType<ChannelOwnerClaims['status']> {
+    return this.ownerClaims.status(platform)
+  }
+
+  /** "Is this your account?" — yes: stores the account that sent the code as the platform's owner. */
+  confirmOwner(platform: ChannelPlatform, userId: string): Partial<Record<ChannelPlatform, ChannelOwner>> {
+    this.lifecycle.assertAccepting()
+    const owner = this.ownerClaims.confirm(platform, userId)
+    if (!owner) throw Object.assign(new Error('No account sent that code, or the code expired. Start again.'), { code: 'channel_owner_unconfirmed' })
+    const owners = this.store.setOwner(platform, owner)
+    this.emitUpdated()
+    return owners
+  }
+
+  /** "No" or "Cancel": ends the claim in progress, so its code stops working; a stored owner stays. */
+  cancelOwnerClaim(platform: ChannelPlatform): void {
+    this.ownerClaims.cancel(platform)
+    this.emitUpdated()
+  }
+
+  /** Forgets the platform's owner (and any claim in progress): its bots answer nobody until one is confirmed. */
+  clearOwner(platform: ChannelPlatform): Partial<Record<ChannelPlatform, ChannelOwner>> {
+    this.lifecycle.assertAccepting()
+    this.ownerClaims.cancel(platform)
+    const owners = this.store.setOwner(platform, undefined)
+    this.emitUpdated()
+    return owners
   }
 
   /** The caps a channel turn on the thread runs on: the `/model` choice, else the thread's selection. */
@@ -150,6 +275,8 @@ export class ChannelService extends EventEmitter {
   }
 
   beginShutdown(): void {
+    this.unsubscribeBots?.()
+    this.unsubscribeBots = undefined
     this.lifecycle.beginShutdown()
     this.router.beginShutdown()
     this.trackDrain(this.disconnectAdapters())
@@ -181,7 +308,7 @@ export class ChannelService extends EventEmitter {
     const directoryUpdatedAt = this.lifecycle.stopping
       ? undefined
       : this.store.rebuildDirectoryFromSessions(sessions)
-    return { config, sessions, statuses, directoryUpdatedAt }
+    return { config, sessions, statuses, directoryUpdatedAt, owners: this.store.getOwners() }
   }
 
   getConfig(): ChannelConfig {
@@ -195,13 +322,13 @@ export class ChannelService extends EventEmitter {
     const mergedPlatforms = { ...current.platforms }
     if (patch.platforms) {
       for (const platform of Object.keys(patch.platforms) as ChannelPlatform[]) {
-        const incoming = patch.platforms[platform]
+        const incoming = patch.platforms[platform] ?? {}
         const existing = mergedPlatforms[platform]
         const next = { ...existing, ...incoming }
-        if (incoming?.token?.includes('•')) {
+        if (incoming.token?.includes('•')) {
           next.token = existing.token
         }
-        if (incoming?.webhookSecret?.includes('•')) {
+        if (incoming.webhookSecret?.includes('•')) {
           next.webhookSecret = existing.webhookSecret
         }
         mergedPlatforms[platform] = next
@@ -371,6 +498,7 @@ export class ChannelService extends EventEmitter {
       await adapter.disconnect()
       return
     }
+    this.sweepBotReplies()
     if (this.lifecycle.stopping) {
       this.adapters.delete(platform)
       await adapter.disconnect()

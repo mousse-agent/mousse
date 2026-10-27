@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { MAX_BOT_CONTEXT_THREADS, type BotDefinition, type BotThreadSpec } from '../../../shared/bots/personal/definition'
+import { MAX_BOT_CONTEXT_THREADS, MAX_BOT_SCHEDULES, type BotDefinition, type BotThreadSpec } from '../../../shared/bots/personal/definition'
 import { canonicalManifest, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import { stableStringify } from '../../run/json'
+import { scheduleProblem } from '../triggers/scheduler'
 
 /**
  * Bot definitions (PR 6 §4), stored like agent definitions: a draft, and published revisions named
@@ -42,8 +43,19 @@ export function definitionProblem(definition: BotDefinition): string | undefined
     if (keys.has(context.key)) return 'Each thread needs its own key.'
     keys.add(context.key)
   }
-  if (!definition.triggers || definition.triggers.manual !== true || Object.keys(definition.triggers).some((key) => key !== 'manual'))
-    return 'Only manual activation is available yet.'
+  if (!definition.triggers || definition.triggers.manual !== true || Object.keys(definition.triggers).some((key) => key !== 'manual' && key !== 'schedules'))
+    return 'A bot is started by hand, by its schedules or from a channel.'
+  const schedules = definition.triggers.schedules
+  if (schedules !== undefined) {
+    if (!Array.isArray(schedules) || schedules.length > MAX_BOT_SCHEDULES) return `A bot can have at most ${MAX_BOT_SCHEDULES} schedules.`
+    const ids = new Set<string>()
+    for (const schedule of schedules) {
+      const problem = scheduleProblem(schedule)
+      if (problem) return problem
+      if (ids.has(schedule.id)) return 'Each schedule needs its own id.'
+      ids.add(schedule.id)
+    }
+  }
   return manifestProblem(definition.permissions)
 }
 

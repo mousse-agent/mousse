@@ -60,6 +60,7 @@ import type {
   SchedulerStatus,
   ChannelActivityEvent,
   ChannelConfig,
+  ChannelOwnerClaim,
   ChannelPlatform,
   ChannelsSnapshot,
   PairingRequest,
@@ -876,6 +877,19 @@ const api = {
       ipcRenderer.invoke('channels:sendTest', platform, chatId, text, threadId),
     getActivity: (limit?: number): Promise<ChannelActivityEvent[]> =>
       ipcRenderer.invoke('channels:getActivity', limit),
+    /** "This is me": the code, its status, and the confirmation that stores the owner. */
+    owner: {
+      start: (platform: ChannelPlatform): Promise<{ code: string; expiresAt: string }> =>
+        ipcRenderer.invoke('channels:owner:start', platform),
+      status: (platform: ChannelPlatform): Promise<ChannelOwnerClaim | null> =>
+        ipcRenderer.invoke('channels:owner:status', platform),
+      confirm: (platform: ChannelPlatform, userId: string): Promise<unknown> =>
+        ipcRenderer.invoke('channels:owner:confirm', platform, userId),
+      cancel: (platform: ChannelPlatform): Promise<void> =>
+        ipcRenderer.invoke('channels:owner:cancel', platform),
+      clear: (platform: ChannelPlatform): Promise<unknown> =>
+        ipcRenderer.invoke('channels:owner:clear', platform)
+    },
     onUpdated: (cb: (snapshot: ChannelsSnapshot) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, snapshot: ChannelsSnapshot) => cb(snapshot)
       ipcRenderer.on('channels:updated', handler)

@@ -2054,6 +2054,42 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           : undefined
       return { activity: ctx.mms.channels.getRecentActivity(limit) }
     }
+    // "This is me" (PR 6 §6): a code shown here, `/owner <code>` from the account, then confirm.
+    case 'channels.owner.start': {
+      const p = isObject(params) ? params : {}
+      try {
+        return { claim: ctx.mms.channels.startOwnerClaim(asChannelPlatform(p.platform)) }
+      } catch (error) {
+        if ((error as { code?: unknown }).code === 'channel_owner_unconfirmed')
+          throw knownAppError({ code: 'channel_owner_unconfirmed', message: (error as Error).message }, { category: 'invalid', retryable: false })
+        throw error
+      }
+    }
+    case 'channels.owner.status': {
+      const p = isObject(params) ? params : {}
+      return { claim: ctx.mms.channels.ownerClaimStatus(asChannelPlatform(p.platform)) }
+    }
+    case 'channels.owner.confirm': {
+      const p = isObject(params) ? params : {}
+      const platform = asChannelPlatform(p.platform)
+      const userId = asString(p.userId, 'userId', 256)
+      try {
+        return { owners: ctx.mms.channels.confirmOwner(platform, userId) }
+      } catch (error) {
+        if ((error as { code?: unknown }).code === 'channel_owner_unconfirmed')
+          throw knownAppError({ code: 'channel_owner_unconfirmed', message: (error as Error).message }, { category: 'invalid', retryable: false })
+        throw error
+      }
+    }
+    case 'channels.owner.cancel': {
+      const p = isObject(params) ? params : {}
+      ctx.mms.channels.cancelOwnerClaim(asChannelPlatform(p.platform))
+      return { ok: true }
+    }
+    case 'channels.owner.clear': {
+      const p = isObject(params) ? params : {}
+      return { owners: ctx.mms.channels.clearOwner(asChannelPlatform(p.platform)) }
+    }
     // ── MCP / skills ──────────────────────────────────────────────────────
     case 'mcp.listServers': {
       const p = isObject(params) ? params : {}

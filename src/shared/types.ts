@@ -304,6 +304,25 @@ export interface ChannelPlatformConfig {
   webhookSecret?: string
 }
 
+/**
+ * The account confirmed as a platform's owner (Settings → Channels → "This is me"). Personal bots
+ * answer only this account, in a direct message. Never inferred from allowed users or pairing.
+ * Stored in `channels/owners.json`, outside the channel config, so older builds never see it.
+ */
+export interface ChannelOwner {
+  userId: string
+  displayName: string
+  confirmedAt: string
+}
+
+/** A "This is me" code in progress: when it expires, whether its one attempt was used, and who sent it. */
+export interface ChannelOwnerClaim {
+  expiresAt: string
+  /** Accounts that sent a wrong code (each has one attempt). */
+  failedAttempts: number
+  claimant?: { userId: string; displayName: string }
+}
+
 export interface ChannelConfig {
   platforms: Record<ChannelPlatform, ChannelPlatformConfig>
   filterSilenceNarration: boolean
@@ -324,6 +343,8 @@ export interface ChannelSession {
   createdAt: string
   /** Session model; `instanceId` is absent on sessions saved before provider instances existed. */
   modelOverride?: ModelOverride
+  /** The personal bot this DM talks to (`/bot <name>`); its messages activate the bot instead of a chat turn. */
+  botId?: string
 }
 
 export interface ChannelDirectoryEntry {
@@ -346,6 +367,8 @@ export interface ChannelsSnapshot {
   sessions: ChannelSession[]
   statuses: ChannelStatus[]
   directoryUpdatedAt?: string
+  /** Each platform's confirmed owner ("This is me"); absent from older daemons. */
+  owners?: Partial<Record<ChannelPlatform, ChannelOwner>>
 }
 
 export interface PairingRequest {

@@ -129,4 +129,16 @@ describe('channel turn input acceptance', () => {
     expect(result.transcriptWritten).toBe(true)
     expect(orch.getMessages(thread.id).some((m) => m.workflowRun?.runId === 'run-1')).toBe(true)
   }, 30_000)
+
+  it('refuses a channel turn on a bot\'s thread before storing the message (PR 6 §6)', async () => {
+    const thread = store.createThread('Bot thread')
+    // A chat bound to a bot's thread (through /threads) reaches the bot only through /bot.
+    orch.setBotDispatcher({ ownerOf: (threadId: string) => (threadId === thread.id ? 'Site editor' : undefined) } as never)
+    const accepted = vi.fn()
+    const result = await orch.runChannelTurn(thread.id, 'hello', store, { onUserInputAccepted: accepted })
+    expect(result.error).toMatch(/belongs to the bot Site editor/)
+    expect(orch.getMessages(thread.id)).toEqual([])
+    expect(accepted).not.toHaveBeenCalled()
+    expect(chatCalls).toBe(0)
+  }, 30_000)
 })

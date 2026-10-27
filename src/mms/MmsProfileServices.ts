@@ -44,6 +44,7 @@ import { Reconciler } from './run/Reconciler'
 import { RunEngine } from './run/RunEngine'
 import type { BotEngine } from './bots/activation/BotEngine'
 import { openPersonalBots } from './bots/activation/open'
+import { BotScheduler } from './bots/triggers/scheduler'
 import type { BotStore } from './bots/store/BotStore'
 import { RunStore } from './run/RunStore'
 import { jobPermissionRequest } from './scheduled/jobPermission'
@@ -55,6 +56,7 @@ import { scheduledJobOptionsDepsFrom, validateScheduledJobOptions } from './sche
 import { ChannelService } from './channels/ChannelService'
 import { channelModelOptions } from './channels/channelModels'
 import { ChannelStore } from './channels/ChannelStore'
+import type { ChannelBots } from './channels/channelBots'
 import { AgentRegistry } from './agents/AgentRegistry'
 import { TaskQueue } from './tasks/TaskQueue'
 import { WorktreeManager } from './worktree/WorktreeManager'
@@ -219,6 +221,7 @@ export class MmsProfileServices {
   /** Personal bots (PR 6 §4). */
   /** Null when `bots.db` could not be opened: bots are unavailable, every other thread works. */
   readonly personalBots: BotEngine | null
+  private readonly botScheduler: BotScheduler | null
   private readonly botStore: BotStore | null
   /** Phase 5 (SPEC §15.1): durable bearer credentials of the Mousse MCP server. */
   readonly mcpCredentials: McpCredentials
@@ -524,7 +527,9 @@ export class MmsProfileServices {
       runs: () => this.runEngine,
       harness,
       notifyEffects: () => this.orchestrator.notifyEffects(),
-      stopThread: (threadId) => this.orchestrator.stopThread(threadId, 'user', { clientRequestId: `bot-stop:${threadId}:${Date.now()}` })
+      stopThread: (threadId) => this.orchestrator.stopThread(threadId, 'user', { clientRequestId: `bot-stop:${threadId}:${Date.now()}` }),
+      // A published schedule is read at once; before the scheduler started this does nothing.
+      schedulesChanged: () => { void this.botScheduler?.wake() }
     })
     this.botStore = opened?.store ?? null
     this.personalBots = opened?.engine ?? null
@@ -540,6 +545,8 @@ export class MmsProfileServices {
       })
     })
     this.orchestrator.setBotDispatcher(personalBots)
+    // Bot schedules tick only after the bot startup pass (`startOwned`).
+    this.botScheduler = personalBots ? new BotScheduler({ tick: (now) => personalBots.tickSchedules(now) }) : null
     this.orchestrator.setWorkflowChatExecutor(this.platform.workflowChat)
     this.orchestrator.setFeatureFlags(this.config.get().features)
     this.threadRuntimes = new ThreadRuntimeManager()
@@ -632,6 +639,7 @@ export class MmsProfileServices {
       accepted: () => this.scheduled.wake()
     })
     const channelCapsOf = (instanceId: string) => harness.resolve({ instanceId, model: '' }, { kind: 'device' }, 'channel_model').caps
+    const bots = this.personalBots
     this.channels = new ChannelService(
       this.orchestrator,
       this.threads,
@@ -643,7 +651,20 @@ export class MmsProfileServices {
         // `/model` lists what a channel turn can run on and hold `CHANNEL_POLICY` (disabled
         // instances and hidden models already left the listing); nothing is picked by name.
         listModels: () => channelModelOptions(this.providerInstances.llmProviders(), channelCapsOf),
-        capsOf: channelCapsOf
+        capsOf: channelCapsOf,
+        // Personal bots answer their owner's DMs (PR 6 §6); without bots.db the channel has none.
+        ...(bots ? {
+          bots: {
+            findByName: (name: string) => bots.findByName(name),
+            activateFromChannel: (input) => bots.activateFromChannel(input),
+            channelReply: (activationId, options) => bots.channelReply(activationId, options),
+            recentChannelActivations: () => bots.recentChannelActivations(),
+            onChanged: (listener) => {
+              bots.events.on('changed', listener)
+              return () => { bots.events.off('changed', listener) }
+            }
+          } satisfies ChannelBots
+        } : {})
       }
     )
 
@@ -1089,6 +1110,7 @@ export class MmsProfileServices {
     this.platform.beginShutdown()
     this.orchestrator.beginShutdown()
     this.scheduled.beginShutdown()
+    this.botScheduler?.stop()
     this.webhooksClosed = true
     if (this.webhookRetryTimer) clearTimeout(this.webhookRetryTimer)
     this.webhookRetryTimer = null
@@ -1277,6 +1299,8 @@ export class MmsProfileServices {
 
     if (this.config.getScheduledSection().enabled) {
       this.scheduled.start()
+      // Bot schedules follow the same switch: with the scheduler off, nothing starts on its own.
+      this.botScheduler?.start()
     }
     await this.channels.startEnabled()
     await this.net.start()
