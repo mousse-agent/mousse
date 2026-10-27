@@ -26,7 +26,7 @@ import { MmsAgentExecutionService } from './MmsAgentExecutionService'
 import { join } from 'node:path'
 import { BrowserArtifactService } from '../browser/BrowserArtifactService'
 import { MmsBrowserService } from '../browser/MmsBrowserService'
-import { readOpenSessionIds } from '../browser/automation/BrowserSessionManager'
+import { readSessionStates, type SessionState } from '../browser/automation/BrowserSessionManager'
 import type { AttachedCommandDispatchPort } from '../browser/AttachedBrowserConnectionBackend'
 
 export interface MmsBrowserPlatformConfig {
@@ -158,14 +158,14 @@ export class MmsProfilePlatform {
   }
 
   /**
-   * Browser sessions that are not closed. Storage cleanup leaves their captures alone. It does not build
-   * the browser composition (which would end `configureBrowser`): before that exists, the persisted
-   * inventory gives the same answer.
+   * Browser sessions with whether each is still open and its thread. Storage cleanup leaves the captures of
+   * an open session alone. It does not build the browser composition (which would end `configureBrowser`):
+   * before that exists, the persisted inventory gives the same answer.
    */
-  openBrowserSessionIds(): ReadonlySet<string> {
-    if (this.browserAssembly) return this.browserAssembly.sessions.openSessionIds()
+  browserSessionStates(staleBefore?: number): Map<string, SessionState> {
+    if (this.browserAssembly) return this.browserAssembly.sessions.sessionStates(staleBefore)
     const { profileId, integrationContext: { profileRoot } } = this.services
-    return readOpenSessionIds(profileRoot, profileId)
+    return readSessionStates(profileRoot, profileId, staleBefore)
   }
 
   getManagedBrowserActiveCount(): number {

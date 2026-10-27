@@ -83,11 +83,13 @@ export class BrowserSessionManager {
   }
 
   /**
-   * Ids of every session that is not closed, including ones left disconnected by a restart: their
-   * captures may still be needed. Host-side only (storage cleanup); it exposes ids, nothing else.
+   * Every session with whether it is still open and its thread, for storage cleanup (host-side only; ids,
+   * nothing else). A session that is not closed counts as open, including one left disconnected by a
+   * restart, unless it has been disconnected since before `staleBefore`: no worker is left to close it
+   * (the worker answers "Unknown browser session"), and a capture that old was imported when it was taken.
    */
-  openSessionIds(): Set<string> {
-    return new Set([...this.sessions.values()].filter((entry) => entry.record.lifecycle !== 'closed').map((entry) => entry.record.id))
+  sessionStates(staleBefore?: number): Map<string, SessionState> {
+    return sessionStatesOf([...this.sessions.values()].map((entry) => entry.record), staleBefore)
   }
 
   /** A bounded, already-authorized observation for the viewer; never persisted page content. */
@@ -203,7 +205,9 @@ export class BrowserSessionManager {
   async close(context: BrowserToolContext, sessionId: string): Promise<BrowserToolOutput> {
     this.authorize(context, undefined, 'browser.session', 'external', { sessionId })
     const entry = this.requireOwned(sessionId, context.execution)
-    await this.call(context.execution.profileId, 'session.close', { sessionId }, this.signal(context))
+    // A worker that no longer knows the session (it restarted or crashed) has nothing left to close.
+    try { await this.call(context.execution.profileId, 'session.close', { sessionId }, this.signal(context)) }
+    catch (error) { if (!isUnknownSession(error)) throw error }
     entry.record = { ...entry.record, lifecycle: 'closed', humanHandoff: entry.record.humanHandoff ? { ...entry.record.humanHandoff, state: 'closed', updatedAt: new Date().toISOString() } : undefined, updatedAt: new Date().toISOString() }
     this.observations.delete(sessionId)
     this.persist()
@@ -321,8 +325,13 @@ export class BrowserSessionManager {
         const updatedAt = new Date().toISOString()
         entry.record = { ...entry.record, lifecycle: 'closed', updatedAt,
           ...(entry.record.humanHandoff ? { humanHandoff: { ...entry.record.humanHandoff, state: 'closed', updatedAt } } : {}) }
-      } catch {
+      } catch (error) {
         const updatedAt = new Date().toISOString()
+        if (isUnknownSession(error)) {
+          entry.record = { ...entry.record, lifecycle: 'closed', updatedAt,
+            ...(entry.record.humanHandoff ? { humanHandoff: { ...entry.record.humanHandoff, state: 'closed', updatedAt } } : {}) }
+          return
+        }
         const handoff = entry.record.humanHandoff
         entry.record = { ...entry.record, lifecycle: 'disconnected', updatedAt,
           ...(handoff && (handoff.state === 'requesting' || handoff.state === 'waiting-human')
@@ -447,23 +456,40 @@ export class BrowserSessionManager {
   }
 }
 
+export interface SessionState { open: boolean; threadId?: string }
+
+function sessionStatesOf(records: BrowserSessionRecord[], staleBefore?: number): Map<string, SessionState> {
+  const states = new Map<string, SessionState>()
+  for (const record of records) {
+    const stale = record.lifecycle === 'disconnected' && staleBefore !== undefined && Date.parse(record.updatedAt) < staleBefore
+    states.set(record.id, { open: record.lifecycle !== 'closed' && !stale, ...(record.threadId ? { threadId: record.threadId } : {}) })
+  }
+  return states
+}
+
 /**
- * The same answer as `BrowserSessionManager.openSessionIds()`, read from the persisted inventory, for a
+ * The same answer as `BrowserSessionManager.sessionStates()`, read from the persisted inventory, for a
  * profile whose browser composition has not been built in this process. Throws when the inventory is
  * unreadable so the caller treats every session as open.
  */
-export function readOpenSessionIds(profileRoot: string, profileId: string): Set<string> {
+export function readSessionStates(profileRoot: string, profileId: string, staleBefore?: number): Map<string, SessionState> {
   const stateFile = assertOwnedPath(profileRoot, join(profileRoot, 'browser', 'automation-sessions.json'), 'browser automation inventory')
-  if (!existsSync(stateFile)) return new Set()
+  if (!existsSync(stateFile)) return new Map()
   let raw: unknown
   try { raw = JSON.parse(readFileSync(stateFile, 'utf8')) as unknown } catch { throw new Error(`Browser automation inventory is corrupt: ${stateFile}`) }
   if (!Array.isArray(raw)) throw new Error(`Browser automation inventory is corrupt: ${stateFile}`)
-  const open = new Set<string>()
+  const records: BrowserSessionRecord[] = []
   for (const item of raw) {
     if (!isStoredSession(item, profileId)) throw new Error(`Browser automation inventory is corrupt: ${stateFile}`)
-    if (item.record.lifecycle !== 'closed') open.add(item.record.id)
+    // As `load()` does: nothing that was live before this process started is still connected.
+    records.push({ ...item.record, lifecycle: item.record.lifecycle === 'closed' ? 'closed' : 'disconnected' })
   }
-  return open
+  return sessionStatesOf(records, staleBefore)
+}
+
+/** The worker answered `session_closed`: it has no such session, so there is nothing to close there. */
+function isUnknownSession(error: unknown): boolean {
+  return error instanceof BrowserAutomationError && error.code === 'session_closed'
 }
 
 function isIdentifier(value: string): boolean {

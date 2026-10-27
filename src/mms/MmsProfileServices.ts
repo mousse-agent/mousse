@@ -638,7 +638,7 @@ export class MmsProfileServices {
       idle: (threadId) => this.threadPendingWork(threadId),
       installationHome: shared.installationHome,
       codeHost: this.gitService.codeHost,
-      browserCaptures: { workerArtifactRoot: this.platform.workerArtifactRoot, openSessionIds: () => this.platform.openBrowserSessionIds() }
+      browserCaptures: { workerArtifactRoot: this.platform.workerArtifactRoot, sessions: (staleBefore) => this.platform.browserSessionStates(staleBefore) }
     })
     this.wireServiceEvents()
     void opts?.headless
