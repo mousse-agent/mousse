@@ -28,6 +28,8 @@ export interface PiOAuthGrant {
   expires: number
   /** The provider's extra fields (`PROVIDER_FIELDS`). */
   fields: Record<string, unknown>
+  /** The account claim (`oauthSubject`), when the credential has one: a refresh never changes it. */
+  subject?: string
 }
 
 /** The engine's OAuth option (`PiRpcEngineOptions.oauth`). */
@@ -53,7 +55,8 @@ export function oauthGrant(providerId: string, credential: unknown): PiOAuthGran
   if (typeof access !== 'string' || !access || typeof expires !== 'number' || !Number.isFinite(expires)) return undefined
   const fields: Record<string, unknown> = {}
   for (const name of PROVIDER_FIELDS[providerId] ?? []) if (stored[name] !== undefined) fields[name] = structuredClone(stored[name])
-  return { access, expires, fields }
+  const subject = oauthSubject(stored, providerId)
+  return { access, expires, fields, ...(subject ? { subject } : {}) }
 }
 
 /** `ProviderAuthService` as the engine's OAuth source; the profile passes one to every `pi:*` instance. */
@@ -89,12 +92,23 @@ export function piOAuthHandle(instanceId: string): string {
  * answered, with the vault's copy after Mousse's refresh. Any refusal throws (the bridge answers
  * with no detail).
  */
-export function piCredentialHandler(input: { provider: string; handle: string; source: PiOAuthSource }): (request: PiCredentialRequest) => Promise<PiCredentialResponse> {
+export function piCredentialHandler(input: {
+  provider: string
+  /** The handle now valid for the asking process; undefined once its credential epoch ended. */
+  handle: () => string | undefined
+  source: PiOAuthSource
+  /** Whether the refreshed credential may go to the asking process (still its account and epoch). */
+  accept?: (next: PiOAuthGrant) => boolean
+}): (request: PiCredentialRequest) => Promise<PiCredentialResponse> {
   return async (request) => {
-    if (request?.providerId !== input.provider || typeof request.handle !== 'string' || request.handle !== input.handle) throw new Error('refused')
+    const handle = input.handle()
+    if (!handle || request?.providerId !== input.provider || typeof request.handle !== 'string' || request.handle !== handle) throw new Error('refused')
     const next = await input.source.refresh(input.provider)
+    // Checked again after the wait: a sign-out or another account meanwhile refuses the answer.
+    if (input.handle() !== handle) throw new Error('refused')
     if (!next) throw new Error('signed out')
-    return { credential: piOAuthCredential(next, input.handle) }
+    if (input.accept && !input.accept(next)) throw new Error('refused')
+    return { credential: piOAuthCredential(next, handle) }
   }
 }
 

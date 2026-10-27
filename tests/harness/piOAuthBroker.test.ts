@@ -127,13 +127,16 @@ describe('the OAuth broker, Mousse side', () => {
     }))
     const broker = piOAuthBroker(vault)
     const handle = piOAuthHandle('pi:github-copilot')
-    const handler = piCredentialHandler({ provider: 'github-copilot', handle, source: broker })
+    const handler = piCredentialHandler({ provider: 'github-copilot', handle: () => handle, source: broker })
     const grants = Array.from({ length: 3 }, () => broker.refresh('github-copilot'))
     const answers = Array.from({ length: 3 }, () => handler({ providerId: 'github-copilot', handle }))
     open()
     const expires = (await grants[0])!.expires
     expect(getAuth).toHaveBeenCalledTimes(1)
-    expect(await Promise.all(grants)).toEqual(Array(3).fill({ access: 'tid=new;proxy-ep=proxy.mousse.test;', expires, fields: { enterpriseUrl: 'ghe.mousse.test', availableModelIds: ['gpt-5.4'] } }))
+    // Copilot's subject: its stored GitHub token, which the refresh kept.
+    const subject = (await grants[0])!.subject
+    expect(subject).toMatch(/^github:/)
+    expect(await Promise.all(grants)).toEqual(Array(3).fill({ access: 'tid=new;proxy-ep=proxy.mousse.test;', expires, fields: { enterpriseUrl: 'ghe.mousse.test', availableModelIds: ['gpt-5.4'] }, subject }))
     expect(await Promise.all(answers)).toEqual(Array(3).fill({ credential: { type: 'oauth', access: 'tid=new;proxy-ep=proxy.mousse.test;', refresh: handle, expires, enterpriseUrl: 'ghe.mousse.test', availableModelIds: ['gpt-5.4'] } }))
     // A later refresh starts a new one.
     await broker.refresh('github-copilot')
@@ -142,14 +145,15 @@ describe('the OAuth broker, Mousse side', () => {
     // The subject: the JWT `sub`, unchanged by a refresh that rotates every token.
     const kimi = { type: 'oauth', access: jwt({ sub: 'user-7', exp: 1 }), refresh: 'r1', expires: 1 }
     const kimiVault = fakeVault({ 'kimi-coding': kimi }, (current) => ({ ...current, access: jwt({ sub: 'user-7', exp: 2 }), refresh: 'r2', expires: 2 }))
-    const subject = oauthSubject(kimiVault.vault.credentials.get('kimi-coding'))
+    const kimiSubject = oauthSubject(kimiVault.vault.credentials.get('kimi-coding'))
     kimiVault.open()
     await piOAuthBroker(kimiVault.vault).refresh('kimi-coding')
     const refreshed = kimiVault.vault.credentials.get('kimi-coding') as Record<string, unknown>
     expect(refreshed.access).not.toBe(kimi.access)
-    expect(subject).toBe('sub:user-7')
-    expect(oauthSubject(refreshed)).toBe(subject)
-    // Else the account id pi-ai stores, else a `credentialId`; Copilot's tokens carry neither.
+    expect(kimiSubject).toBe('sub:user-7')
+    expect(oauthSubject(refreshed)).toBe(kimiSubject)
+    // Else the account id pi-ai stores, else a `credentialId`; Copilot's tokens carry neither (its
+    // GitHub token names it only when the provider is given).
     expect(oauthSubject({ type: 'oauth', access: 'opaque', accountId: 'acct-1' })).toBe('account:acct-1')
     expect(oauthSubject({ type: 'oauth', access: 'opaque', credentialId: 'c-1' })).toBe('credential:c-1')
     expect(oauthSubject(before)).toBeUndefined()
@@ -162,7 +166,7 @@ describe('the OAuth broker, Mousse side', () => {
     const source = piOAuthBroker(vault)
     const refresh = vi.spyOn(source, 'refresh')
     const handle = piOAuthHandle('pi:github-copilot')
-    const handler = piCredentialHandler({ provider: 'github-copilot', handle, source })
+    const handler = piCredentialHandler({ provider: 'github-copilot', handle: () => handle, source })
     const refused: PiCredentialRequest[] = [
       { providerId: 'github-copilot', handle: piOAuthHandle('pi:github-copilot-work') },
       { providerId: 'github-copilot', handle: piOAuthHandle('pi:github-copilot') },
@@ -213,7 +217,7 @@ describe('the OAuth broker, extension side', () => {
     const { vault, open } = fakeVault({ 'github-copilot': copilotCredential('tid=old;proxy-ep=proxy.mousse.test;') }, (current) => ({ ...current, access: 'tid=new;proxy-ep=proxy.mousse.test;', expires: Date.now() + HOUR }))
     open()
     const handle = piOAuthHandle('pi:github-copilot')
-    const { provider, providers, registration } = await loaded(piCredentialHandler({ provider: 'github-copilot', handle, source: piOAuthBroker(vault) }))
+    const { provider, providers, registration } = await loaded(piCredentialHandler({ provider: 'github-copilot', handle: () => handle, source: piOAuthBroker(vault) }))
     const copilot = provider('github-copilot')
     const stock = builtinProviders().find((entry) => entry.id === 'github-copilot')!
     expect(copilot.auth.oauth!.name).toBe(stock.auth.oauth!.name)
@@ -304,7 +308,7 @@ async function child(options: { provider: PiCatalogProvider; model: string; gran
   cleanups.push(() => bridge.stop())
   const handle = piOAuthHandle(`pi:${options.provider.id}`)
   const credentialRequests: PiCredentialRequest[] = []
-  const handler = piCredentialHandler({ provider: options.provider.id, handle, source: options.source })
+  const handler = piCredentialHandler({ provider: options.provider.id, handle: () => handle, source: options.source })
   const registration = bridge.register({
     catalog: async () => ({ provider: options.provider, catalogRevision: 1 }),
     ready: () => {},

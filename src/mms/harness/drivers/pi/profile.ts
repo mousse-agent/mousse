@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -24,7 +24,7 @@ import type { PiRpcDriverOptions } from './engines/rpc'
 /** What the inputs read of `ProviderAuthService`. */
 export type PiProfileAuth = Pick<ProviderAuthService, 'has' | 'storedApiKey'> & {
   models: Pick<ProviderAuthService['models'], 'getModels'>
-  credentials: Pick<ProviderAuthService['credentials'], 'get'>
+  credentials: Pick<ProviderAuthService['credentials'], 'get'> & Partial<Pick<ProviderAuthService['credentials'], 'modify'>>
 }
 
 export interface PiProfileInputs {
@@ -63,14 +63,15 @@ function sha256(text: string): string {
 
 /** Providers whose credential is the machine's own cloud sign-in (profile and region decide the account). */
 const AMBIENT: Readonly<Record<string, readonly string[]>> = Object.freeze({
-  'amazon-bedrock': ['AWS_PROFILE', 'AWS_REGION', 'AWS_DEFAULT_REGION', 'AWS_ACCESS_KEY_ID'],
+  'amazon-bedrock': ['AWS_PROFILE', 'AWS_REGION', 'AWS_DEFAULT_REGION', 'AWS_ACCESS_KEY_ID', 'AWS_BEARER_TOKEN_BEDROCK'],
   'google-vertex': ['GOOGLE_CLOUD_PROJECT', 'GCLOUD_PROJECT', 'GOOGLE_CLOUD_LOCATION', 'GOOGLE_APPLICATION_CREDENTIALS']
 })
 
 /**
  * The stable subject of the credential `providerId` runs with, already one-way: `apikey:<hash>` for
  * a stored or own-environment key, `oauth:<hash>` of a claim a refresh keeps, `ambient:<hash>` of
- * the cloud profile and region; undefined when none can be established (the history is handed over).
+ * the cloud profile and region (with none set, the default credential chain, one subject); undefined
+ * when none can be established (the history is then handed over on every turn).
  */
 export function piCredentialSubject(providerId: string, credential: Record<string, unknown> | undefined, env: NodeJS.ProcessEnv): string | undefined {
   if (credential?.type === 'api_key' && typeof credential.key === 'string' && credential.key) return `apikey:${sha256(credential.key)}`
@@ -80,8 +81,7 @@ export function piCredentialSubject(providerId: string, credential: Record<strin
   }
   const ambient = AMBIENT[providerId]
   if (ambient) {
-    const parts = ambient.map((name) => env[name] ?? '')
-    return parts.some(Boolean) ? `ambient:${sha256(parts.join('|'))}` : undefined
+    return `ambient:${sha256(`${providerId}|${ambient.map((name) => env[name] ?? '').join('|')}`)}`
   }
   for (const name of PI_PROVIDER_ENV_KEYS[providerId] ?? []) {
     const value = env[name]
@@ -126,7 +126,18 @@ export function piRpcProfileOptions(inputs: PiProfileInputs): PiRpcDriverOptions
       return Object.fromEntries(Object.entries(env as Record<string, unknown>).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
     },
     ...(inputs.oauth ? { oauth: inputs.oauth } : {}),
-    identity: (providerId) => piCredentialSubject(providerId, credential(providerId), inputs.env ?? process.env),
+    identity: async (providerId) => {
+      const env = inputs.env ?? process.env
+      const subject = piCredentialSubject(providerId, credential(providerId), env)
+      if (subject || credential(providerId)?.type !== 'oauth') return subject
+      // A sign-in whose token names no account (an opaque or never-expiring token, and one stored
+      // before Mousse minted ids) gets a credential id now; refreshes keep it (`FileCredentialStore`).
+      await inputs.auth()?.credentials.modify?.(providerId, async (current) => {
+        const stored = current as unknown as Record<string, unknown> | undefined
+        return stored?.type === 'oauth' && !stored.credentialId ? ({ ...stored, credentialId: randomUUID() } as unknown as typeof current) : undefined
+      })
+      return piCredentialSubject(providerId, credential(providerId), env)
+    },
     ...(inputs.registry
       ? {
           mousseTools: (threadId: string): PiMousseTool[] => inputs.registry!().listForThread(threadId).map((tool) => ({

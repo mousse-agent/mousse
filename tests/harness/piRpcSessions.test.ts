@@ -175,15 +175,22 @@ describe('Pi RPC sessions with the real Pi child', () => {
     await run(engine, harness(project, { threadId: 'legacy', runId: 'r2', prompt: 'And then?', nativeHistory: `pi-loop history\nuser: Say hello\nassistant: Seeded reply` }))
     expect(sent(recorder.requests.at(-1)).slice(-3)).toEqual(['user: Say hello', 'assistant: Seeded reply', 'user: And then?'])
     expect(notices).toHaveLength(1)
+    // Forking the seeded session at another thinking level leaves the source file as it was.
+    const sourceFile = join(stateDir, 'sessions', readdirSync(join(stateDir, 'sessions')).find((entry) => entry.endsWith(`_${result.providerRef.sessionId}.jsonl`))!)
+    const before = readFileSync(sourceFile, 'utf8')
+    const fork = await engine.forkSession({ ...(result.providerRef as ProviderRef), model: `${(result.providerRef as ProviderRef).model}:high` }, 1, { threadId: 'seed-fork' })
+    expect(fork?.sessionId).toBeTruthy()
+    expect(readFileSync(sourceFile, 'utf8')).toBe(before)
   }, 120_000)
 
   it('a seed Pi does not load as written falls back to the preamble', async () => {
     const corrupted: string[] = []
     const { engine, recorder, project, stateDir, notices } = await setup({
-      // Only the header and the first message survive: Pi loads it, `get_messages` disagrees.
+      // Only the header, the model and thinking entries and the first message survive: Pi loads it,
+      // `get_messages` disagrees.
       onSeed: (file) => {
         corrupted.push(file)
-        writeFileSync(file, `${readFileSync(file, 'utf8').split('\n').slice(0, 2).join('\n')}\n`)
+        writeFileSync(file, `${readFileSync(file, 'utf8').split('\n').slice(0, 4).join('\n')}\n`)
       }
     })
     recorder.respond(replies(['Preamble reply']))

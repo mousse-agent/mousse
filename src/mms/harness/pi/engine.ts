@@ -156,6 +156,11 @@ interface SavedThread {
   leafId?: string
   /** The leaf entry each completed turn left, by the turn's key (`nativeTurnId`): a fork's branch point. */
   turnLeaves?: Record<string, string>
+  /**
+   * A native fork's branch, bound to the fork's thread before its first turn. The gateway's fence
+   * keeps it (the thread has no binding of its own yet); a credential change drops it.
+   */
+  pendingFork?: true
 }
 
 /** A session Mousse wrote from a thread's transcript, and the roles Pi must report back for it. */
@@ -462,7 +467,13 @@ export class PiRpcEngine implements ProviderAdapter {
    * process of the instance shares its agent dir (and so the file); a handle from another instance
    * or an earlier run of Mousse is refused.
    */
-  private readonly oauthHandle: string
+  private oauthHandle: string
+  /** Moves on with every credential change; a start or refresh across one is refused. */
+  private credentialEpoch = 0
+  /** The account claim of the credential the processes were given (when it has one). */
+  private oauthSubject: string | undefined
+  /** Threads already told their history went into a new session (once per thread). */
+  private readonly historyNoticed = new Set<string>()
 
   constructor(private readonly options: PiRpcEngineOptions) {
     this.capabilities = options.capabilities
@@ -490,17 +501,62 @@ export class PiRpcEngine implements ProviderAdapter {
 
   private save(threadId: string, entry: SavedThread | undefined): void {
     const all = this.saved()
+    const previous = all[threadId]?.sessionId
     if (entry) all[threadId] = entry
     else delete all[threadId]
     mkdirSync(this.options.stateDir, { recursive: true, mode: 0o700 })
     atomicWriteJsonSync(this.savedPath, all, { mode: 0o600 })
+    // A session no thread maps to is never resumed or forked again: its file goes (best effort: a
+    // process still closing may hold it open on Windows).
+    if (previous && previous !== entry?.sessionId && !Object.values(all).some((other) => other.sessionId === previous)) {
+      const file = sessionFileOf(this.sessionsDir, previous)
+      if (file) {
+        try {
+          rmSync(file, { force: true })
+        } catch {
+          // Held open: it stays, unreferenced.
+        }
+      }
+    }
   }
 
-  /** The thread's next turn starts a new Pi session with the history handed over. */
+  /**
+   * The thread's next turn starts a new Pi session with the history handed over. A native fork's
+   * branch waiting for its first turn is kept: it was made for this thread under the current
+   * credential (a credential change drops it, `retireCredentials`).
+   */
   forgetConversation(threadId: string): void {
-    this.save(threadId, undefined)
+    if (!this.saved()[threadId]?.pendingFork) this.save(threadId, undefined)
     const thread = this.threads.get(threadId)
     if (thread && !thread.turn) this.kill(thread)
+  }
+
+  /**
+   * The provider's credential changed (sign-in, sign-out, another account): every process goes,
+   * with the handle it held, so none refreshes into the next account; Pi's `auth.json` is removed
+   * once they closed (a refresh answered just before cannot write it back), and pending forks made
+   * under the old credential are dropped.
+   */
+  async retireCredentials(): Promise<void> {
+    this.credentialEpoch += 1
+    this.oauthHandle = piOAuthHandle(this.options.instanceId)
+    this.oauthSubject = undefined
+    const closing = [...this.threads.values()].map((thread) => this.kill(thread))
+    this.removeAuthFile()
+    await within(Promise.allSettled([...closing, ...[...this.closing].map((thread) => thread.closed)]), CLEANUP_DEADLINE_MS)
+    this.removeAuthFile()
+    for (const [threadId, entry] of Object.entries(this.saved())) if (entry.pendingFork) this.save(threadId, undefined)
+  }
+
+  /** Pi's private `auth.json` (an OAuth access token) is removed. */
+  private removeAuthFile(): void {
+    const home = this.options.env().home
+    if (!home || !this.options.oauth) return
+    try {
+      writePiAuth(home, this.options.provider, undefined)
+    } catch (error) {
+      console.warn('[harness] could not remove the Pi auth file', { instanceId: this.options.instanceId, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   // -- Processes ----------------------------------------------------------------------------------
@@ -554,6 +610,8 @@ export class PiRpcEngine implements ProviderAdapter {
     const closed = [...killed, ...[...this.threads.values()].map((thread) => this.kill(thread))]
     await Promise.allSettled([...closed, ...[...this.closing].map((thread) => thread.closed)])
     this.bridge.stop()
+    // The access token does not outlive the engine on disk.
+    this.removeAuthFile()
   }
 
   /**
@@ -669,11 +727,33 @@ export class PiRpcEngine implements ProviderAdapter {
       ...(this.options.compaction ? { compaction: this.options.compaction() } : {}),
       ...(this.options.settings?.retry ? { retry: this.options.settings.retry } : {})
     })
+    const epoch = this.credentialEpoch
     const grant = await this.options.oauth?.credential(this.options.provider)
     if (this.stopped || thread.cancelled || cancelled()) throw stopping()
+    // The credential changed while it was read: this start does not get it.
+    if (epoch !== this.credentialEpoch) throw protocolError(this.options.instanceId, `${this.options.label}'s sign-in changed while it started.`)
+    if (grant) this.oauthSubject ??= grant.subject
     writePiAuth(env.home, this.options.provider, grant ? piOAuthCredential(grant, this.oauthHandle) : undefined)
     const registration = this.bridge.register({
-      ...(this.options.oauth ? { credential: piCredentialHandler({ provider: this.options.provider, handle: this.oauthHandle, source: this.options.oauth }) } : {}),
+      ...(this.options.oauth
+        ? {
+            credential: piCredentialHandler({
+              provider: this.options.provider,
+              source: this.options.oauth,
+              // The handle of this process's credential epoch; a credential change replaces it.
+              handle: () => (epoch === this.credentialEpoch ? this.oauthHandle : undefined),
+              // A refresh that returns another account's credential retires every process.
+              accept: (next) => {
+                if (epoch !== this.credentialEpoch) return false
+                if (this.oauthSubject && next.subject && next.subject !== this.oauthSubject) {
+                  void this.retireCredentials()
+                  return false
+                }
+                return true
+              }
+            })
+          }
+        : {}),
       catalog: async (first) => {
         const catalog = this.options.catalog()
         const key = first ? this.options.apiKey?.() : undefined
@@ -986,6 +1066,12 @@ export class PiRpcEngine implements ProviderAdapter {
       const warm = this.threads.get(input.threadId)
       const warmOnIt = warm?.alive && warm.cwd === cwd && warm.sessionId === resume
       if (resume && !warmOnIt && !prepareSession(this.sessionsDir, resume, cwd)) resume = undefined
+      if (saved?.pendingFork && !resume) {
+        // A fork's first turn has no history of its own: running it on a new session would lose the
+        // parent's. The branch is dropped, so the retry forks again or hands the history over.
+        this.save(input.threadId, undefined)
+        throw harnessAppError({ code: 'binding_stale', message: `${this.options.label} could not open this fork's session. Send the message again.`, instanceId: this.options.instanceId })
+      }
       let started: { thread: PiThreadProcess; resumed: boolean }
       try {
         if (input.signal.aborted || starting.cancelled) throw new Error('aborted')
@@ -1239,7 +1325,7 @@ export class PiRpcEngine implements ProviderAdapter {
       // Pi writes a branch once it holds a reply; one it did not write cannot be resumed.
       if (!sessionId || sessionId === ref.sessionId || !sessionFileOf(this.sessionsDir, sessionId)) return null
       // The fork's thread has no history of its own before its first turn, which resumes the branch.
-      this.save(target.threadId, { sessionId, historyFingerprint: fingerprint('') })
+      this.save(target.threadId, { sessionId, historyFingerprint: fingerprint(''), pendingFork: true })
       return { provider: ref.provider, ...(ref.instanceId ? { instanceId: ref.instanceId } : {}), model: ref.model, sessionId }
     } finally {
       await within(this.kill(thread), CLEANUP_DEADLINE_MS)
@@ -1304,9 +1390,19 @@ export class PiRpcEngine implements ProviderAdapter {
       ids.add(id)
       return id
     }
-    const lines: Array<Record<string, unknown>> = [{ type: 'session', version: 3, id: sessionId, timestamp, cwd: resolvePath(cwd) }]
+    // The model and thinking level, as Pi records them in every session it creates: a session
+    // without a thinking entry gets one appended when Pi next opens it (a fork would write it into
+    // this, the source session).
+    const { modelId, thinking } = this.thinkingFor(input.model)
+    const modelEntry = entryId()
+    const thinkingEntry = entryId()
+    const lines: Array<Record<string, unknown>> = [
+      { type: 'session', version: 3, id: sessionId, timestamp, cwd: resolvePath(cwd) },
+      { type: 'model_change', id: modelEntry, parentId: null, timestamp, provider: this.options.provider, modelId },
+      { type: 'thinking_level_change', id: thinkingEntry, parentId: modelEntry, timestamp, thinkingLevel: thinking }
+    ]
     const roles: string[] = []
-    let parentId: string | null = null
+    let parentId: string | null = thinkingEntry
     let firstKeptEntryId: string | undefined
     for (const message of messages) {
       const id = entryId()
@@ -1339,6 +1435,8 @@ export class PiRpcEngine implements ProviderAdapter {
 
   /** The thread is told its history was handed to a new session (`history_injected`). */
   private historyNotice(threadId: string): void {
+    if (this.historyNoticed.has(threadId)) return
+    this.historyNoticed.add(threadId)
     try {
       this.options.notice?.(threadId, { code: 'history_injected', message: `${this.options.label} started a new session for this chat, with the chat history handed over.` })
     } catch (error) {

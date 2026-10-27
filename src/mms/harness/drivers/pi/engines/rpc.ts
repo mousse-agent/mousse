@@ -9,8 +9,8 @@ import { piShellPath } from '../../../pi/settings'
 import { piInstanceRuntime, type PiCredentials } from './legacy'
 
 /**
- * Pi's agent as its own process (PR 2 §4): every `pi:*` instance but the legacy-only providers
- * (`../engines.ts`), unless the user switched it back (Advanced → Engine).
+ * Pi's agent as its own process (PR 2 §4): a `pi:*` instance the user switched to it (Advanced →
+ * Engine: New engine), except the legacy-only providers (`../engines.ts`).
  *
  * - Containment and tool control stay `weak`/`approval_only` until the evidence suite passes on the
  *   whole execution profile: Mousse sees and can refuse every call, but does not run the tools.
@@ -62,7 +62,7 @@ export interface PiRpcDriverOptions {
    * The stable subject of the credential the instance runs with (`apikey:`, `oauth:`, `ambient:`;
    * already one-way), for the gateway's account fence; undefined when it cannot be established.
    */
-  identity?(providerId: string): string | undefined
+  identity?(providerId: string): string | undefined | Promise<string | undefined>
   /** Mousse's OAuth credentials for pi-ai's OAuth providers (`piOAuthBroker(providerAuth)`); Mousse is the only refresher. */
   oauth?: PiOAuthSource
   /** Test seams passed through to the engine. */
@@ -119,6 +119,25 @@ export function createRpcRuntime(context: DriverContext, providerId: string, lab
     spendModel: (model) => engine.spendModel(model),
     setLiveHost: (host) => notice.setHost(host),
     ...(options.identity ? { identity: async () => options.identity!(providerId) } : {}),
+    // A sign-in, a sign-out or any other credential change retires every process with the
+    // credential it held, and Pi's auth.json with them.
+    ...(base.signIn
+      ? {
+          signIn: async (...args: Parameters<NonNullable<DriverRuntime['signIn']>>) => {
+            const result = await base.signIn!(...args)
+            await engine.retireCredentials()
+            return result
+          }
+        }
+      : {}),
+    signOut: async () => {
+      try {
+        await base.signOut?.()
+      } finally {
+        await engine.retireCredentials()
+      }
+    },
+    credentialsChanged: () => engine.retireCredentials(),
     forgetConversation: (threadId) => engine.forgetConversation(threadId),
     terminate: (ref) => engine.terminate(ref),
     stop: () => engine.stop()

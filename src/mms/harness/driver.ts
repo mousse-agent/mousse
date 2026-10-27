@@ -200,6 +200,11 @@ export interface DriverRuntime {
   modelsRefreshedAt?(): string | undefined
   signIn?(session: LoginSession, cwd: string, method?: string): Promise<ProviderLoginResult>
   signOut?(): Promise<void>
+  /**
+   * The instance's credential changed outside its own sign-in and sign-out (another surface set a
+   * key or signed in): a runtime holding credentials in its processes retires them.
+   */
+  credentialsChanged?(): Promise<void>
   /** The API key this entry runs with, for a move that copies it (model APIs with a saved key). */
   exportApiKey?(): Promise<string | undefined>
   /** Saves `apiKey` as this entry's own credential (a move that copies the old entry's key). */

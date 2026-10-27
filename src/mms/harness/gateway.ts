@@ -766,6 +766,9 @@ export class Harness implements HarnessGateway {
           return
         }
         if (this.instanceMap.get(instanceId)?.driver !== 'pi') return
+        // Processes started with the old credential stop holding it (Pi's agent: its auth.json too).
+        const record = this.records.get(instanceId)
+        await record?.runtime.credentialsChanged?.().catch((error) => console.warn('[harness] could not retire old credentials', { instanceId, error: errorText(error) }))
         // A check already running read the old credentials: wait for it, then check again.
         await this.probes.get(instanceId)?.probing
         await this.probe(instanceId, true)
