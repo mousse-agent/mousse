@@ -781,6 +781,7 @@ export class Harness implements HarnessGateway {
       if (driver.addOptions && !driver.instanceIdFor) throw new Error(`The ${driver.kind} driver offers Add options but no fixed instance ids (instanceIdFor).`)
       this.drivers.set(driver.kind, driver)
     }
+    this.upgradeDrivers()
     this.scopes = new HarnessScopeStore(options.profileHome)
     this.counters = new InstanceCounterStore(options.profileHome)
     this.facts = new RuntimeFactsStore(options.profileHome)
@@ -2296,6 +2297,28 @@ export class Harness implements HarnessGateway {
    * provider key Mousse stores, or a driver whose sign-in is always Mousse's (Antigravity's Google
    * session, whichever executable runs). The built-in CLIs use the user's own terminal login.
    */
+  /** Each driver's own migration of its stored instances (`HarnessDriver.upgrade`), once at start. */
+  private upgradeDrivers(): void {
+    let entries: Array<[string, { driver: string; config?: Record<string, unknown> }]> = []
+    try {
+      entries = Object.entries(this.instanceMap.list()) as typeof entries
+    } catch (error) {
+      console.warn('[harness] could not read the instances to upgrade', errorText(error))
+      return
+    }
+    for (const driver of this.drivers.values()) {
+      if (!driver.upgrade) continue
+      try {
+        driver.upgrade({
+          profileHome: this.options.profileHome,
+          instances: entries.filter(([, entry]) => entry.driver === driver.kind).map(([instanceId, entry]) => ({ instanceId, config: entry.config }))
+        })
+      } catch (error) {
+        console.warn('[harness] driver upgrade failed', { driver: driver.kind, error: errorText(error) })
+      }
+    }
+  }
+
   private ownsSignIn(record: InstanceRecord): boolean {
     if (record.entry.driver === 'pi' || record.driver.ownsSignIn) return true
     if (record.env.home) return true

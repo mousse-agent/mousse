@@ -5,19 +5,20 @@
  *   Pi's agent, and its snapshot shows no engine setting.
  * - The first write of the instance's config drops `engine` and keeps everything else, so an older
  *   Mousse reading the file sees only keys it knows.
- * - A connection that was on the legacy engine shows a one-time notice on its first turn; one that was
- *   already on Pi's agent (its notice already recorded) shows none.
+ * - At the first start, every connection that ran on the legacy engine gets a one-time notice on its
+ *   first turn; one already on Pi's agent, one added later and one on a fresh install get none.
  * - Without Pi's runtime in the build, a turn is refused with the reason instead of crashing.
  * - A binding made on the loop froze the loop's caps; they read as the instance's live caps.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { DriverContext } from '../../src/mms/harness/driver'
 import { PI_RPC_CAPS, PI_RPC_EXACT_CAPS, piDriver } from '../../src/mms/harness/drivers/pi'
 import { loopCaps } from '../../src/mms/harness/gateway'
-import { ENGINE_NOTICE_FILE, createRpcRuntime } from '../../src/mms/harness/drivers/pi/engines/rpc'
+import { ENGINE_NOTICE_DUE_FILE, LOOP_REMOVAL_MARKER, createRpcRuntime } from '../../src/mms/harness/drivers/pi/engines/rpc'
+import { instanceStateDir } from '../../src/mms/harness/instances'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import type { TurnInput } from '../../src/mms/run/adapters/ProviderAdapter'
 import { testHarness } from '../../src/mms/run/testkit/harness'
@@ -129,18 +130,37 @@ describe('the one-time notice', () => {
     return { notices, turn }
   }
 
-  it('tells a connection that was on the legacy engine once', async () => {
-    const stateDir = scratch()
+  it('marks the connections that ran on the loop once per profile, and tells each once', async () => {
+    const { harness } = profile({ engine: 'legacy' })
+    const home = (harness as unknown as { options: { profileHome: string } }).options.profileHome
+    const stateDir = instanceStateDir(home, 'pi:openrouter')
+    expect(existsSync(join(stateDir, ENGINE_NOTICE_DUE_FILE))).toBe(true)
+    expect(existsSync(join(home, 'harness', LOOP_REMOVAL_MARKER))).toBe(true)
     const { notices, turn } = runtimeIn(stateDir)
     await turn('a')
     await turn('b')
     expect(notices).toEqual(["The Mousse agent engine was removed; OpenRouter now runs on Pi's agent, so its tools and replies may differ slightly."])
+    expect(existsSync(join(stateDir, ENGINE_NOTICE_DUE_FILE))).toBe(false)
   })
 
-  it('says nothing to a connection already on Pi\'s agent', async () => {
-    const stateDir = scratch()
-    mkdirSync(stateDir, { recursive: true })
-    writeFileSync(join(stateDir, ENGINE_NOTICE_FILE), JSON.stringify({ engine: 'rpc', shownAt: '2026-10-01T00:00:00.000Z' }))
+  it("says nothing to a connection already on Pi's agent", async () => {
+    const { harness } = profile({ engine: 'rpc' })
+    const home = (harness as unknown as { options: { profileHome: string } }).options.profileHome
+    const { notices, turn } = runtimeIn(instanceStateDir(home, 'pi:openrouter'))
+    await turn('a')
+    expect(notices).toEqual([])
+  })
+
+  it('says nothing on a fresh install, nor to a connection added after the first start', async () => {
+    const dir = scratch()
+    const empty = testHarness({ profileHome: dir, instances: new ProviderInstanceService({ store: { read: () => ({ instances: {}, seedVersion: 1 }), write: () => {} } as never }), drivers: [piDriver({ credentials })] })
+    cleanups.push(() => empty.stop())
+    expect(existsSync(join(dir, 'harness', LOOP_REMOVAL_MARKER))).toBe(true)
+    // The next start sees a connection added meanwhile: it never ran on the loop.
+    const later = testHarness({ profileHome: dir, instances: new ProviderInstanceService({ store: { read: () => ({ instances: { 'pi:openrouter': { driver: 'pi', enabled: true, config: {} } }, seedVersion: 1 }), write: () => {} } as never }), drivers: [piDriver({ credentials })] })
+    cleanups.push(() => later.stop())
+    const stateDir = instanceStateDir(dir, 'pi:openrouter')
+    expect(existsSync(join(stateDir, ENGINE_NOTICE_DUE_FILE))).toBe(false)
     const { notices, turn } = runtimeIn(stateDir)
     await turn('a')
     expect(notices).toEqual([])

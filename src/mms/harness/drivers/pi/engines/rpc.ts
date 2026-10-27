@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import type { HarnessCaps } from '../../../../../shared/harness/types'
 import { hasContainmentEvidence, PI_RPC_EVIDENCE_ITEMS, PI_RPC_NO_SHELL_ITEMS, type ContainmentEvidence } from '../../../compatibility'
 import type { DriverContext, DriverRuntime, LiveProcessHost } from '../../../driver'
@@ -7,6 +7,7 @@ import { PiRpcEngine, type PiEngineCatalog, type PiMousseTool, type PiRpcEngineO
 import type { PiRuntimePaths } from '../../../pi/launch'
 import type { PiOAuthSource } from '../../../pi/oauthBroker'
 import { piShellPath } from '../../../pi/settings'
+import { instanceStateDir } from '../../../instances'
 import { piInstanceRuntime, type PiCredentials } from '../instance'
 
 /**
@@ -292,16 +293,43 @@ function credentialChanges(engine: PiRpcEngine, subject: () => string | undefine
 /** File in the instance's state dir that records the engine notice was shown. */
 export const ENGINE_NOTICE_FILE = 'engine-notice.json'
 
+/** File in the instance's state dir of a connection that ran on the deleted loop: its notice is due. */
+export const ENGINE_NOTICE_DUE_FILE = 'engine-notice-due.json'
+
+/** File in the profile's harness dir: the connections on the loop were marked (`markLoopConnections`). */
+export const LOOP_REMOVAL_MARKER = 'pi-loop-removed.json'
+
 /**
- * The one-time notice that an instance now runs on Pi's agent (the Mousse agent engine, the legacy
- * loop, was removed): shown on its first turn and recorded in the instance's state dir, so it never
- * shows again (a removed instance starts over). An instance that was already on Pi's agent showed
- * the earlier notice, so it sees none.
+ * Once per profile, at the first start after the loop was deleted (PR 4 unit 4h): every `pi:*`
+ * connection whose stored engine was not `rpc` ran on the loop, so its notice becomes due. A profile
+ * that had none (a fresh install) and every connection added later get no notice.
+ */
+export function markLoopConnections(profileHome: string, instances: ReadonlyArray<{ instanceId: string; config: Record<string, unknown> | undefined }>): void {
+  const marker = join(profileHome, 'harness', LOOP_REMOVAL_MARKER)
+  if (existsSync(marker)) return
+  for (const { instanceId, config } of instances) {
+    if (config?.engine === 'rpc') continue
+    const dir = instanceStateDir(profileHome, instanceId)
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    writeFileSync(join(dir, ENGINE_NOTICE_DUE_FILE), `${JSON.stringify({ engine: config?.engine ?? 'legacy' })}
+`, { mode: 0o600 })
+  }
+  mkdirSync(dirname(marker), { recursive: true, mode: 0o700 })
+  writeFileSync(marker, `${JSON.stringify({ at: new Date().toISOString() })}
+`, { mode: 0o600 })
+}
+
+/**
+ * The one-time notice that a connection that ran on the deleted loop now runs on Pi's agent: shown
+ * on its first turn when it is due (`markLoopConnections`) and recorded in the instance's state dir,
+ * so it never shows again. A connection that was already on Pi's agent, a new one and one on a fresh
+ * install see none.
  */
 function engineNotice(context: DriverContext, label: string): { show(threadId: string): void; send(threadId: string, text: string): void; setHost(host: LiveProcessHost | null): void } {
   let host: LiveProcessHost | null = null
   const path = join(context.stateDir, ENGINE_NOTICE_FILE)
-  let shown = existsSync(path)
+  const due = join(context.stateDir, ENGINE_NOTICE_DUE_FILE)
+  let shown = existsSync(path) || !existsSync(due)
   return {
     send: (threadId, text) => {
       try {
@@ -320,6 +348,7 @@ function engineNotice(context: DriverContext, label: string): { show(threadId: s
         mkdirSync(context.stateDir, { recursive: true, mode: 0o700 })
         writeFileSync(path, `${JSON.stringify({ engine: 'rpc', shownAt: new Date().toISOString() })}
 `, { mode: 0o600 })
+        rmSync(due, { force: true })
       } catch (error) {
         console.warn('[harness] could not record the engine notice', error instanceof Error ? error.message : String(error))
       }

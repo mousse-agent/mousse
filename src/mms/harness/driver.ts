@@ -414,6 +414,11 @@ export interface HarnessDriver {
    */
   decodeConfig(raw: Record<string, unknown> | undefined, instanceId?: string): InstanceConfig
   /**
+   * Once when the gateway starts, before any runtime is built: the driver's own migration of what
+   * it keeps for its instances (their stored configs as read).
+   */
+  upgrade?(input: { profileHome: string; instances: Array<{ instanceId: string; config: Record<string, unknown> | undefined }> }): void
+  /**
    * The Move prompt of an instance a Mousse update retired (`pi`: `drivers/pi/retired.ts`), else
    * undefined. A retired instance keeps its record and sign-in, runs nothing, and moves on.
    */

@@ -1,14 +1,14 @@
 /**
- * PR 2 §5 "Engine notice" (PR 4h text): the first turn of each `pi:*` instance tells the thread,
- * once, that the Mousse agent engine was removed and the provider now runs on Pi's agent; it is
- * recorded in the instance's state dir and not shown again, also after a restart.
+ * PR 2 §5 "Engine notice" (PR 4h text): the first turn of a `pi:*` connection that ran on the deleted
+ * loop (its notice due: `markLoopConnections`) tells the thread, once, that the Mousse agent engine
+ * was removed; it is recorded in the instance's state dir and not shown again, also after a restart.
  */
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { DriverContext } from '../../src/mms/harness/driver'
-import { ENGINE_NOTICE_FILE, createRpcRuntime } from '../../src/mms/harness/drivers/pi/engines/rpc'
+import { ENGINE_NOTICE_DUE_FILE, ENGINE_NOTICE_FILE, createRpcRuntime } from '../../src/mms/harness/drivers/pi/engines/rpc'
 import type { TurnInput } from '../../src/mms/run/adapters/ProviderAdapter'
 
 const dirs: string[] = []
@@ -17,6 +17,11 @@ afterEach(() => {
 })
 
 const unused = () => { throw new Error('unused') }
+
+function due(stateDir: string): string {
+  writeFileSync(join(stateDir, ENGINE_NOTICE_DUE_FILE), '{"engine":"legacy"}')
+  return stateDir
+}
 
 function runtimeIn(stateDir: string) {
   const context = {
@@ -45,7 +50,7 @@ function runtimeIn(stateDir: string) {
 
 describe('Pi engine notice', () => {
   it('shows once per instance and survives a restart', async () => {
-    const stateDir = mkdtempSync(join(tmpdir(), 'mousse-pi-notice-'))
+    const stateDir = due(mkdtempSync(join(tmpdir(), 'mousse-pi-notice-')))
     dirs.push(stateDir)
     const first = runtimeIn(stateDir)
     await first.turn('thread-a')
@@ -55,6 +60,7 @@ describe('Pi engine notice', () => {
       text: "The Mousse agent engine was removed; OpenRouter now runs on Pi's agent, so its tools and replies may differ slightly."
     }])
     expect(existsSync(join(stateDir, ENGINE_NOTICE_FILE))).toBe(true)
+    expect(existsSync(join(stateDir, ENGINE_NOTICE_DUE_FILE))).toBe(false)
     await first.runtime.stop()
     const restarted = runtimeIn(stateDir)
     await restarted.turn('thread-c')
@@ -63,7 +69,7 @@ describe('Pi engine notice', () => {
   })
 
   it('waits for a live host before it counts as shown', async () => {
-    const stateDir = mkdtempSync(join(tmpdir(), 'mousse-pi-notice-'))
+    const stateDir = due(mkdtempSync(join(tmpdir(), 'mousse-pi-notice-')))
     dirs.push(stateDir)
     const headless = runtimeIn(stateDir)
     headless.runtime.setLiveHost?.(null)

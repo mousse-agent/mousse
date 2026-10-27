@@ -4,7 +4,7 @@ import { foldedInto } from '../../../../shared/harness/move'
 import type { ProviderAdapter } from '../../../run/adapters/ProviderAdapter'
 import { decodeInstanceConfig, type DriverAddOption, type DriverContext, type DriverRuntime, type HarnessDriver } from '../../driver'
 import { piInstanceRuntime, type PiCredentials } from './instance'
-import { createRpcRuntime, PI_RPC_CAPS, piRpcCaps, piRpcEvidenceOf, type PiRpcDriverOptions } from './engines/rpc'
+import { createRpcRuntime, markLoopConnections, PI_RPC_CAPS, piRpcCaps, piRpcEvidenceOf, type PiRpcDriverOptions } from './engines/rpc'
 import { PI_NATIVE_TOOLS } from '../../pi/nativeTools'
 import { piRetiredOf, piRetiredPrompt } from './retired'
 
@@ -142,6 +142,8 @@ export function piDriver(options: { credentials?: () => PiCredentials | undefine
     // Pi's agent reaches the user's MCP servers through Mousse's MCP server.
     userMcp: 'proxy',
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),
+    // The connections that ran on the deleted loop get a one-time notice on their first turn.
+    upgrade: ({ profileHome, instances }) => markLoopConnections(profileHome, instances),
     retired: (instanceId) => {
       const retired = piRetiredOf(piProviderIdOf(instanceId))
       return retired ? piRetiredPrompt(retired) : undefined
