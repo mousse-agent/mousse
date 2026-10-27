@@ -4,6 +4,7 @@ import type {
   BridgeHubLocalParams,
   BridgeHubCreateOptions,
   BridgeHubRequestOptions,
+  BridgeRemoteParams,
   BridgeDisplayEvent,
   BridgeEntityRef
 } from '../../../shared/bridge'
@@ -71,7 +72,13 @@ export function validateBridgeHubLocal<M extends BridgeHubLocalMethod>(
       ['projectId', 'options']
     ],
     'bridge.hub.openProject': [['target', 'path'], ['options']],
-    'bridge.hub.send': [['ref', 'content'], ['options']],
+    'bridge.hub.composerOptions': [['target'], ['threadId', 'options']],
+    'bridge.hub.setModel': [['ref', 'model'], ['options']],
+    'bridge.hub.stageAttachment': [
+      ['target', 'upload', 'index', 'total', 'name', 'mimeType', 'data'],
+      ['options']
+    ],
+    'bridge.hub.send': [['ref', 'content'], ['mode', 'attachments', 'options']],
     'bridge.hub.steer': [['ref', 'run', 'text'], ['options']],
     'bridge.hub.abort': [['ref', 'run'], ['options']],
     'bridge.hub.attach': [['ref'], []],
@@ -105,10 +112,23 @@ export function validateBridgeHubLocal<M extends BridgeHubLocalMethod>(
       ...(row.projectId === undefined ? {} : { projectId: row.projectId })
     })
   if (method === 'bridge.hub.openProject') validateHubParams('projects.open', { path: row.path })
+  if (method === 'bridge.hub.composerOptions')
+    validateHubParams(
+      'composer.options',
+      row.threadId === undefined ? {} : { threadId: row.threadId }
+    )
+  if (method === 'bridge.hub.setModel')
+    validateHubParams('threads.setModel', { threadId: ref(row.ref).entityId, model: row.model })
+  if (method === 'bridge.hub.stageAttachment') {
+    const { target: _target, options: _options, ...chunk } = row
+    validateHubParams('attachments.stage', chunk)
+  }
   if (method === 'bridge.hub.send')
     validateHubParams('orchestrator.send', {
       threadId: ref(row.ref).entityId,
-      content: row.content
+      content: row.content,
+      ...(row.mode === undefined ? {} : { mode: row.mode }),
+      ...(row.attachments === undefined ? {} : { attachments: row.attachments })
     })
   if (method === 'bridge.hub.steer')
     validateHubParams('orchestrator.steer', {
@@ -148,8 +168,19 @@ export async function executeBridgeHubLocal(
       return hub.create(row.target, row.name, row.options, row.projectId)
     case 'bridge.hub.openProject':
       return hub.openProject(row.target, row.path, row.options)
+    case 'bridge.hub.composerOptions':
+      return hub.composerOptions(row.target, row.threadId, row.options)
+    case 'bridge.hub.setModel':
+      return hub.setModel(row.ref, row.model, row.options)
+    case 'bridge.hub.stageAttachment': {
+      const { target, options, ...chunk } = row
+      return hub.stageAttachment(target, chunk as BridgeRemoteParams['attachments.stage'], options)
+    }
     case 'bridge.hub.send':
-      return hub.send(row.ref, row.content, row.options)
+      return hub.send(row.ref, row.content, row.options, undefined, {
+        ...(row.mode === undefined ? {} : { mode: row.mode }),
+        ...(row.attachments === undefined ? {} : { attachments: row.attachments })
+      })
     case 'bridge.hub.steer':
       return hub.steer(row.ref, row.run, row.text, row.options)
     case 'bridge.hub.abort':
