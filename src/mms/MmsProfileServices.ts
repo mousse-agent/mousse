@@ -10,7 +10,7 @@ import { AppletStore } from './applets/AppletStore'
 import { ClaudeSubscriptionProviderService } from './providers/claudeSubscription/ClaudeSubscriptionProviderService'
 import { ClaudeIntegrationResolver } from './providers/claudeSubscription/integrations'
 import { AntigravityProviderService } from './providers/antigravity/AntigravityProviderService'
-import { ProviderInstanceService } from './providers/ProviderInstanceService'
+import { configInstanceStore, ProviderInstanceService } from './providers/ProviderInstanceService'
 import { createProviderAccess, type ProviderAccess } from './providers/providerAccess'
 import { createHarnessGateway, type Harness, type HarnessGateway } from './harness/gateway'
 import { antigravityDriver } from './harness/drivers/antigravity'
@@ -348,16 +348,7 @@ export class MmsProfileServices {
           : instanceId === CODEX_INSTANCE_ID ? this.codex.vendorMirror(ALL_MIRROR_FIELDS)
             : instanceId === ANTIGRAVITY_INSTANCE_ID ? this.antigravity.vendorMirror(LAUNCH_MIRROR_FIELDS)
               : undefined,
-      store: {
-        read: () => {
-          const section = config.getProvidersSection()
-          return { instances: section.instances, seedVersion: section.instancesSeedVersion, removed: section.removedInstances }
-        },
-        // One write: the entries and the tombstones never disagree on disk. An older build merges
-        // its own writes over this section and keeps `removedInstances` as it is.
-        write: ({ instances, seedVersion, removed }) =>
-          config.updateProvidersSection({ instances, instancesSeedVersion: seedVersion, removedInstances: removed.length ? removed : undefined })
-      }
+      store: configInstanceStore(config)
     })
       .registerVendor('antigravity', this.antigravity)
       .registerVendor('claude', this.claudeSubscription)

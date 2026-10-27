@@ -42,6 +42,23 @@ export interface ProviderInstanceStore {
   write(state: ProviderInstanceState): void
 }
 
+/** The instance store over a profile's config `providers` section (`instances`, the seed version and the tombstones). */
+export function configInstanceStore(config: {
+  getProvidersSection(): { instances?: unknown; instancesSeedVersion?: unknown; removedInstances?: unknown }
+  updateProvidersSection(partial: { instances: Record<string, unknown>; instancesSeedVersion: number; removedInstances: string[] | undefined }): void
+}): ProviderInstanceStore {
+  return {
+    read: () => {
+      const section = config.getProvidersSection()
+      return { instances: section.instances, seedVersion: section.instancesSeedVersion, removed: section.removedInstances }
+    },
+    // One write: the entries and the tombstones never disagree on disk. An older build merges its
+    // own writes over this section and keeps `removedInstances` as it is.
+    write: ({ instances, seedVersion, removed }) =>
+      config.updateProvidersSection({ instances, instancesSeedVersion: seedVersion, removedInstances: removed.length ? removed : undefined })
+  }
+}
+
 /** What the provider RPCs list for a vendor driver, from that driver's provider service. */
 export interface VendorProviderListing {
   configuredProvider(): ConfiguredProvider | undefined
