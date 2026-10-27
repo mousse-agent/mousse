@@ -6,6 +6,7 @@ import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { LocalMmsClient } from '../src/mms/protocol/client'
 import { PROTOCOL_METHODS } from '../src/mms/protocol/types'
 import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
+import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import type { GitPullRequestInfo, GitPullRequestLookup, Thread } from '../src/shared/types'
 import { parsePullRequestDetail, PULL_REQUEST_EXISTS, PullRequestReadError } from '../src/mms/git/GitHubCodeHost'
 import type { PullRequestDetail } from '../src/shared/pullRequests'
@@ -535,5 +536,240 @@ describe('pull request methods through the daemon protocol', () => {
     await client.request('pullRequests.link', { threadId: thread.id, number: 7 })
     expect(normalized(spy.mock.calls[0][0])).toBe(normalized(workspace.workspacePath))
     expect(spy.mock.calls[0][2]).toEqual({ force: true })
+  })
+
+  describe('starting a thread from a pull request, and pushing to its branch', () => {
+    const identity = { host: 'github.com', nameWithOwner: 'acme/app' }
+    const link = (patch: Partial<NonNullable<Thread['pullRequest']>> = {}): NonNullable<Thread['pullRequest']> => ({
+      number: 7,
+      url: 'https://github.com/acme/app/pull/7',
+      host: 'github.com',
+      nameWithOwner: 'acme/app',
+      headRefName: 'fix-thing',
+      baseRefName: 'main',
+      headRepository: 'acme/app',
+      isCrossRepository: false,
+      linkedAt: '2026-10-20T10:00:00Z',
+      startedFromPullRequest: true,
+      ...patch
+    })
+
+    beforeEach(() => {
+      vi.spyOn(mms.gitService.codeHost, 'repositoryIdentity').mockResolvedValue(identity)
+      vi.spyOn(mms.gitService.codeHost, 'listBaseBranches').mockResolvedValue({ defaultBranch: 'main', branches: ['main'] })
+    })
+
+    it('lists the methods and rejects unknown keys and bad parameters', async () => {
+      for (const method of ['pullRequests.list', 'pullRequests.resolve', 'pullRequests.startThread', 'pullRequests.pushTarget']) expect(PROTOCOL_METHODS).toContain(method)
+      const list = vi.spyOn(mms.gitService.codeHost, 'listPullRequests').mockResolvedValue([])
+      const project = mms.projects.openProject(f.repo)
+      const thread = mms.threads.createThread('Task A', project.id)
+      await expect(client.request('pullRequests.list', { projectId: project.id, cwd: '/tmp' })).rejects.toThrow(/cwd is not allowed/)
+      await expect(client.request('pullRequests.list', { threadId: thread.id })).rejects.toThrow(/threadId is not allowed/)
+      await expect(client.request('pullRequests.list', {})).rejects.toThrow(/projectId or threadId is required/)
+      await expect(client.request('pullRequests.list', { projectId: project.id, limit: 0 })).rejects.toThrow(/limit/)
+      await expect(client.request('pullRequests.resolve', { projectId: project.id })).rejects.toThrow(/reference/)
+      await expect(client.request('pullRequests.resolve', { projectId: project.id, reference: '7', extra: 1 })).rejects.toThrow(/extra is not allowed/)
+      await expect(client.request('pullRequests.startThread', { projectId: project.id })).rejects.toThrow(/either number or reference/)
+      await expect(client.request('pullRequests.startThread', { projectId: project.id, number: 7, reference: '7' })).rejects.toThrow(/either number or reference/)
+      await expect(client.request('pullRequests.startThread', { projectId: project.id, number: 0 })).rejects.toThrow(/number/)
+      await expect(client.request('pullRequests.startThread', { projectId: project.id, number: 7, message: 'hi' })).rejects.toThrow(/only sent with send/)
+      await expect(client.request('pullRequests.startThread', { projectId: project.id, number: 7, cwd: '/tmp' })).rejects.toThrow(/cwd is not allowed/)
+      await expect(client.request('pullRequests.startThread', { projectId: 'missing', number: 7 })).rejects.toMatchObject({ code: 'project_not_found' })
+      await expect(client.request('pullRequests.pushTarget', { threadId: thread.id, projectId: project.id })).rejects.toThrow(/projectId is not allowed/)
+      expect(list).not.toHaveBeenCalled()
+    })
+
+    it('lists the open pull requests in the project folder and names why a list failed', async () => {
+      const rows = [{ number: 9, title: 'New', url: 'https://github.com/acme/app/pull/9', isDraft: false, author: 'bob', headRefName: 'new', isCrossRepository: false, updatedAt: '2026-10-20T10:00:00Z' }]
+      const list = vi.spyOn(mms.gitService.codeHost, 'listPullRequests').mockResolvedValue(rows)
+      const project = mms.projects.openProject(f.repo)
+      expect(await client.request('pullRequests.list', { projectId: project.id, limit: 20, force: true })).toEqual({ pullRequests: rows })
+      expect(normalized(list.mock.calls[0][0])).toBe(normalized(f.repo))
+      expect(list.mock.calls[0][1]).toEqual({ limit: 20, force: true })
+      list.mockRejectedValueOnce(new PullRequestReadError('API rate limit exceeded', 'rate-limited'))
+      await expect(client.request('pullRequests.list', { projectId: project.id })).rejects.toMatchObject({ code: 'pull_request_rate_limited', message: 'API rate limit exceeded' })
+    })
+
+    it('resolves a pasted reference: refuses another repository, reads the pull request, and names threads on it', async () => {
+      const detail = detailSpy()
+      const project = mms.projects.openProject(f.repo)
+      const resolved = await client.request<{ pullRequest: { number: number; title: string }; threads: unknown[] }>('pullRequests.resolve', { projectId: project.id, reference: 'https://github.com/acme/app/pull/7/files' })
+      expect(resolved.pullRequest).toMatchObject({ number: 7, state: 'open' })
+      expect(resolved.threads).toEqual([])
+      expect(detail.mock.calls[0][1]).toBe(7)
+      await expect(client.request('pullRequests.resolve', { projectId: project.id, reference: 'https://github.com/other/app/pull/7' })).rejects.toMatchObject({ code: 'pull_request_wrong_repository' })
+      await expect(client.request('pullRequests.resolve', { projectId: project.id, reference: 'banana' })).rejects.toMatchObject({ code: 'invalid_params' })
+      detail.mockRejectedValueOnce(new PullRequestReadError('Could not resolve to a PullRequest with the number of 99.', 'not-found'))
+      await expect(client.request('pullRequests.resolve', { projectId: project.id, reference: '99' })).rejects.toMatchObject({ code: 'pull_request_not_found' })
+      expect(detail).toHaveBeenCalledTimes(2)
+      mms.threads.updateThreadMeta(mms.threads.createThread('Works on it', project.id).id, { pullRequest: link() })
+      expect((await client.request<{ threads: Array<{ name: string }> }>('pullRequests.resolve', { projectId: project.id, reference: '7' })).threads.map((entry) => entry.name)).toEqual(['Works on it'])
+    })
+
+    it('starts a thread at the fetched head, tells every client, and refuses a pull request that already has one', async () => {
+      const head = git(f.repo, 'rev-parse', 'HEAD')
+      detailSpy(detailOf({ headSha: head, headRefName: 'fix-thing' }))
+      const fetch = vi.spyOn(mms.gitService.codeHost, 'fetchPullRequestHead').mockResolvedValue(head)
+      const project = mms.projects.openProject(f.repo)
+      events.length = 0
+
+      const started = await client.request<{ thread: Thread; threads: Thread[]; seed: string; headSha: string; headMoved: boolean; sent: boolean }>('pullRequests.startThread', { projectId: project.id, number: 7 })
+      expect(started).toMatchObject({ headSha: head, headMoved: false, sent: false })
+      expect(started.thread.pullRequest).toMatchObject({ number: 7, nameWithOwner: 'acme/app', headRefName: 'fix-thing' })
+      expect(started.threads.some((thread) => thread.id === started.thread.id)).toBe(true)
+      expect(normalized(fetch.mock.calls[0][0])).toBe(normalized(f.repo))
+      expect(fetch.mock.calls[0][1]).toEqual({ host: 'github.com', nameWithOwner: 'acme/app', number: 7 })
+      expect(events.some((event) => event.type === 'threads.updated')).toBe(true)
+      const workspace = new ThreadWorkspaceManager(mms.threads.getThreadDir(started.thread.id)).load()!
+      expect(git(workspace.worktreePath, 'rev-parse', 'HEAD')).toBe(head)
+
+      await expect(client.request('pullRequests.startThread', { projectId: project.id, reference: '#7' })).rejects.toMatchObject({ code: 'pull_request_thread_exists', details: { threadId: started.thread.id } })
+      await expect(client.request('pullRequests.startThread', { projectId: project.id, reference: '7', allowDuplicate: true })).resolves.toMatchObject({ sent: false })
+    })
+
+    it('sends the seed and message as the first message only when asked', async () => {
+      const head = git(f.repo, 'rev-parse', 'HEAD')
+      detailSpy(detailOf({ headSha: head, author: 'maint', authorAssociation: 'MEMBER', reviews: [], comments: [] }))
+      vi.spyOn(mms.gitService.codeHost, 'fetchPullRequestHead').mockResolvedValue(head)
+      const send = vi.spyOn(mms.orchestrator, 'send').mockResolvedValue({} as never)
+      const project = mms.projects.openProject(f.repo)
+      const started = await client.request<{ thread: Thread; seed: string; sent: boolean }>('pullRequests.startThread', { projectId: project.id, number: 7, send: true, message: 'Fix the review comments.' })
+      expect(started.sent).toBe(true)
+      expect(send).toHaveBeenCalledTimes(1)
+      expect(send.mock.calls[0][0]).toBe(`${started.seed}\n\nFix the review comments.`)
+      expect(send.mock.calls[0][2]).toMatchObject({ threadId: started.thread.id, awaitMode: 'ack' })
+    })
+
+    it('does not send a seed that quotes strangers, and returns it with the reason', async () => {
+      const head = git(f.repo, 'rev-parse', 'HEAD')
+      detailSpy(detailOf({ headSha: head, author: 'stranger', authorAssociation: 'NONE', reviews: [], comments: [] }))
+      vi.spyOn(mms.gitService.codeHost, 'fetchPullRequestHead').mockResolvedValue(head)
+      const send = vi.spyOn(mms.orchestrator, 'send').mockResolvedValue({} as never)
+      const project = mms.projects.openProject(f.repo)
+      const started = await client.request<{ seed: string; sent: boolean; withheld: string }>('pullRequests.startThread', { projectId: project.id, number: 7, send: true })
+      expect(started.sent).toBe(false)
+      expect(started.withheld).toMatch(/not owners, members or collaborators \(stranger\)/)
+      expect(started.seed).toContain('Quoted from GitHub:')
+      expect(send).not.toHaveBeenCalled()
+    })
+
+    it('tells every client the thread list changed even when the start failed', async () => {
+      detailSpy()
+      vi.spyOn(mms.gitService.codeHost, 'fetchPullRequestHead').mockRejectedValue(new Error('offline'))
+      const project = mms.projects.openProject(f.repo)
+      events.length = 0
+      await expect(client.request('pullRequests.startThread', { projectId: project.id, number: 7 })).rejects.toMatchObject({ code: 'pull_request_fetch_failed' })
+      await vi.waitFor(() => expect(events.some((event) => event.type === 'threads.updated')).toBe(true))
+    })
+
+    it('leaves nothing behind and says why when the pull request cannot be fetched', async () => {
+      detailSpy()
+      vi.spyOn(mms.gitService.codeHost, 'fetchPullRequestHead').mockRejectedValue(new Error("No remote of this checkout points at github.com/acme/app, the pull request's repository."))
+      const project = mms.projects.openProject(f.repo)
+      const before = mms.threads.listAllThreads().length
+      await expect(client.request('pullRequests.startThread', { projectId: project.id, number: 7 })).rejects.toMatchObject({ code: 'pull_request_fetch_failed', message: /No remote of this checkout points at github\.com\/acme\/app/ })
+      expect(mms.threads.listAllThreads()).toHaveLength(before)
+    })
+
+    describe('Push', () => {
+      /** A thread with its own worktree, linked to a pull request. */
+      async function linkedWorktreeThread(patch: Partial<NonNullable<Thread['pullRequest']>> = {}) {
+        const project = mms.projects.openProject(f.repo)
+        const thread = mms.threads.createThread('Linked', project.id)
+        await new WorkspaceResolver(mms.threads.getThreadDir(thread.id), thread.id, f.repo).resolve('agent')
+        mms.threads.updateThreadMeta(thread.id, { pullRequest: link(patch) })
+        return { project, thread, branch: `mousse/thread/${thread.id}/main` }
+      }
+      const addRemote = (name: string, url: string) => git(f.repo, 'remote', 'add', name, url)
+
+      it('goes to the pull request\'s branch on the remote that is its repository', async () => {
+        addRemote('origin', 'git@github.com:me/app.git')
+        addRemote('upstream', 'https://github.com/acme/app.git')
+        const { thread, branch } = await linkedWorktreeThread()
+        const push = vi.spyOn(mms.gitService, 'push').mockResolvedValue()
+        await client.request('git.push', { threadId: thread.id, expectedBranch: branch })
+        expect(push.mock.calls[0][1]).toMatchObject({ expectedBranch: branch, toRemote: 'upstream', toBranch: 'fix-thing' })
+        expect(await client.request('pullRequests.pushTarget', { threadId: thread.id })).toEqual({ target: { remote: 'upstream', branch: 'fix-thing', reason: null } })
+      })
+
+      it('keeps the usual push, and says why, when the head is on a fork or no remote is that repository', async () => {
+        addRemote('origin', 'git@github.com:me/app.git')
+        const push = vi.spyOn(mms.gitService, 'push').mockResolvedValue()
+        const noRemote = await linkedWorktreeThread()
+        await client.request('git.push', { threadId: noRemote.thread.id, expectedBranch: noRemote.branch })
+        expect(push.mock.calls[0][1]).not.toHaveProperty('toRemote')
+        expect(push.mock.calls[0][1]).not.toHaveProperty('toBranch')
+        expect(await client.request('pullRequests.pushTarget', { threadId: noRemote.thread.id })).toEqual({
+          target: { remote: null, branch: null, reason: 'No remote of this checkout fetches from and pushes to acme/app; push by hand' }
+        })
+
+        addRemote('upstream', 'https://github.com/acme/app.git')
+        const fork = await linkedWorktreeThread({ headRepository: 'bob/app', isCrossRepository: true })
+        await client.request('git.push', { threadId: fork.thread.id, expectedBranch: fork.branch })
+        expect(push.mock.calls[1][1]).not.toHaveProperty('toRemote')
+        expect(await client.request('pullRequests.pushTarget', { threadId: fork.thread.id })).toEqual({
+          target: { remote: null, branch: null, reason: "The pull request's branch is on a fork (bob/app); push by hand" }
+        })
+        // A head whose repository was deleted is not provably this one either.
+        const gone = await linkedWorktreeThread({ headRepository: null, isCrossRepository: true })
+        expect((await client.request<{ target: { reason: string } }>('pullRequests.pushTarget', { threadId: gone.thread.id })).target.reason).toMatch(/fork \(deleted\)/)
+      })
+
+      it('keeps the usual push for a link made by hand, which says nothing about where the thread\'s branch belongs', async () => {
+        addRemote('upstream', 'https://github.com/acme/app.git')
+        const push = vi.spyOn(mms.gitService, 'push').mockResolvedValue()
+        const byHand = await linkedWorktreeThread({ startedFromPullRequest: undefined })
+        await client.request('git.push', { threadId: byHand.thread.id, expectedBranch: byHand.branch })
+        expect(push.mock.calls[0][1]).not.toHaveProperty('toRemote')
+        expect(await client.request('pullRequests.pushTarget', { threadId: byHand.thread.id })).toEqual({ target: { remote: null, branch: null, reason: null } })
+      })
+
+      it('keeps the usual push when the remote fetches from the repository but pushes somewhere else', async () => {
+        addRemote('upstream', 'https://github.com/acme/app.git')
+        git(f.repo, 'remote', 'set-url', '--push', 'upstream', 'https://github.com/me/app.git')
+        const push = vi.spyOn(mms.gitService, 'push').mockResolvedValue()
+        const { thread, branch } = await linkedWorktreeThread()
+        await client.request('git.push', { threadId: thread.id, expectedBranch: branch })
+        expect(push.mock.calls[0][1]).not.toHaveProperty('toRemote')
+        expect(await client.request('pullRequests.pushTarget', { threadId: thread.id })).toEqual({
+          target: { remote: null, branch: null, reason: 'No remote of this checkout fetches from and pushes to acme/app; push by hand' }
+        })
+        // A push URL that is the repository again makes it usable.
+        git(f.repo, 'remote', 'set-url', '--push', 'upstream', 'git@github.com:acme/app.git')
+        expect(await client.request('pullRequests.pushTarget', { threadId: thread.id })).toEqual({ target: { remote: 'upstream', branch: 'fix-thing', reason: null } })
+      })
+
+      it('never pushes to the repository\'s default branch, nor when it cannot tell which that is', async () => {
+        addRemote('upstream', 'https://github.com/acme/app.git')
+        const push = vi.spyOn(mms.gitService, 'push').mockResolvedValue()
+        const release = await linkedWorktreeThread({ headRefName: 'main', baseRefName: 'release' })
+        await client.request('git.push', { threadId: release.thread.id, expectedBranch: release.branch })
+        expect(push.mock.calls[0][1]).not.toHaveProperty('toRemote')
+        expect((await client.request<{ target: { reason: string } }>('pullRequests.pushTarget', { threadId: release.thread.id })).target.reason).toMatch(/default branch, which Push never updates/)
+
+        vi.mocked(mms.gitService.codeHost.listBaseBranches).mockResolvedValue({ defaultBranch: null, branches: [] })
+        const unknown = await linkedWorktreeThread()
+        expect((await client.request<{ target: { reason: string } }>('pullRequests.pushTarget', { threadId: unknown.thread.id })).target.reason).toMatch(/could not be read/)
+      })
+
+      it('is the usual push for a thread without a link and for a thread on the project\'s checkout', async () => {
+        addRemote('upstream', 'https://github.com/acme/app.git')
+        const push = vi.spyOn(mms.gitService, 'push').mockResolvedValue()
+        const project = mms.projects.openProject(f.repo)
+        const plain = mms.threads.createThread('Plain', project.id)
+        await new WorkspaceResolver(mms.threads.getThreadDir(plain.id), plain.id, f.repo).resolve('agent')
+        await client.request('git.push', { threadId: plain.id, expectedBranch: `mousse/thread/${plain.id}/main` })
+        expect(push.mock.calls[0][1]).not.toHaveProperty('toRemote')
+        expect(await client.request('pullRequests.pushTarget', { threadId: plain.id })).toEqual({ target: { remote: null, branch: null, reason: null } })
+
+        // On the project's own checkout nothing is redirected, linked or not.
+        const onCheckout = mms.threads.createThread('On checkout', project.id)
+        mms.threads.updateThreadMeta(onCheckout.id, { pullRequest: link() })
+        expect(await client.request('pullRequests.pushTarget', { threadId: onCheckout.id })).toEqual({ target: { remote: null, branch: null, reason: null } })
+        await client.request('git.push', { projectId: project.id })
+        expect(push.mock.calls[1][1]).not.toHaveProperty('toRemote')
+      })
+    })
   })
 })

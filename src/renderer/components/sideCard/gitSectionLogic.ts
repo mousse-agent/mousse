@@ -1,6 +1,7 @@
 import type {
   PullRequestCheck,
   PullRequestDetail,
+  PullRequestPushTarget,
   PullRequestReviewDecision,
   PullRequestScope,
   ThreadPullRequestLink
@@ -554,6 +555,8 @@ export interface PushButtonModel {
   title: string
   /** Why the button is disabled right now; absent when it can be used. */
   disabledReason?: string
+  /** Why Push does not go to the pull request's branch ("push by hand"); absent when it does or there is no pull request. */
+  note?: string
 }
 
 /** Whether the branch has somewhere to push to: an upstream, or a remote to publish to. */
@@ -671,17 +674,28 @@ const PROJECT_SCOPE = { workspaceThreadId: null } as const
 export function pushButtonModel(
   status: GitStatusSnapshot | null,
   commitCount: number,
-  scope: Pick<GitScope, 'workspaceThreadId'> = PROJECT_SCOPE
+  scope: Pick<GitScope, 'workspaceThreadId'> = PROJECT_SCOPE,
+  /** Where Push goes for a thread linked to a pull request; null when it keeps its usual target. */
+  pullRequestTarget: PullRequestPushTarget | null = null
 ): PushButtonModel | null {
   if (!status || !canPush(status)) return null
   const { push } = gitActionAvailability(status, null, commitCount, scope)
   const disabled = push.enabled || push.reason === null ? {} : { disabledReason: push.reason }
+  const target = pullRequestTarget?.remote && pullRequestTarget.branch ? `${pullRequestTarget.remote}/${pullRequestTarget.branch}` : null
+  const note = pullRequestTarget?.reason ? { note: pullRequestTarget.reason } : {}
   if (status.tracking === 'tracked' && status.ahead > 0) {
     const noun = status.ahead === 1 ? '1 commit' : `${status.ahead} commits`
-    return { label: 'Push', count: status.ahead, title: status.upstream ? `Push ${noun} to ${status.upstream}` : `Push ${noun}`, ...disabled }
+    const destination = target ?? status.upstream
+    return { label: 'Push', count: status.ahead, title: destination ? `Push ${noun} to ${destination}` : `Push ${noun}`, ...note, ...disabled }
   }
   if (status.tracking === 'none' && commitCount > 0) {
-    return { label: 'Publish', count: null, title: 'Push this branch and track it on the remote', ...disabled }
+    return {
+      label: 'Publish',
+      count: null,
+      title: target ? `Push this branch to ${target}, the pull request's branch` : 'Push this branch and track it on the remote',
+      ...note,
+      ...disabled
+    }
   }
   return null
 }

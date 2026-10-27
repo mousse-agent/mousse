@@ -12,6 +12,7 @@ import {
   type PullRequestComment,
   type PullRequestDetail,
   type PullRequestIdentity,
+  type PullRequestListItem,
   type PullRequestReview,
   type PullRequestReviewDecision,
   type PullRequestReviewVerdict,
@@ -132,6 +133,39 @@ function parsePullRequest(data: unknown): GitPullRequestInfo | null {
   }
 }
 
+const PULL_REQUEST_LIST_FIELDS = 'number,title,url,state,isDraft,author,headRefName,headRepositoryOwner,isCrossRepository,updatedAt'
+const PULL_REQUEST_LIST_LIMIT = 50
+const PULL_REQUEST_LIST_LIMIT_MAX = 200
+
+/** Parses `gh pr list --json …` into list rows, most recently updated first; null when the output is not a list. */
+export function parsePullRequestListItems(stdout: string): PullRequestListItem[] | null {
+  let data: unknown
+  try {
+    data = JSON.parse(stdout)
+  } catch {
+    return null
+  }
+  if (!Array.isArray(data)) return null
+  const items: PullRequestListItem[] = []
+  for (const entry of data) {
+    if (!entry || typeof entry !== 'object') continue
+    const value = entry as Record<string, unknown>
+    if (!Number.isSafeInteger(value.number) || (value.number as number) < 1 || typeof value.url !== 'string' || !value.url) continue
+    if (upper(value.state) !== 'OPEN') continue
+    items.push({
+      number: value.number as number,
+      title: text(value.title),
+      url: value.url,
+      isDraft: value.isDraft === true,
+      author: login(value.author),
+      headRefName: text(value.headRefName),
+      isCrossRepository: value.isCrossRepository === true,
+      updatedAt: text(value.updatedAt)
+    })
+  }
+  return items.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt) || b.number - a.number)
+}
+
 /** Classifies a failed `gh pr view` by its error text; rate limits and missing pull requests are plain errors here. */
 export function classifyPullRequestFailure(message: string): 'none' | 'not-github' | 'unauthenticated' | 'error' {
   const kind = classifyGhFailure(message)
@@ -139,7 +173,7 @@ export function classifyPullRequestFailure(message: string): 'none' | 'not-githu
 }
 
 const PULL_REQUEST_DETAIL_FIELDS = [
-  'number', 'title', 'url', 'state', 'isDraft', 'body', 'author', 'baseRefName', 'headRefName', 'headRefOid',
+  'number', 'title', 'url', 'state', 'isDraft', 'body', 'author', 'authorAssociation', 'baseRefName', 'headRefName', 'headRefOid',
   'headRepository', 'headRepositoryOwner', 'isCrossRepository', 'reviewDecision', 'reviews', 'comments',
   'statusCheckRollup', 'updatedAt', 'mergedAt', 'closedAt'
 ].join(',')
@@ -363,6 +397,7 @@ export function parsePullRequestDetail(
     identity,
     body: text(value.body),
     author: login(value.author),
+    authorAssociation: text(value.authorAssociation) || 'NONE',
     headSha: text(value.headRefOid),
     headRepository: repositoryOf(value.headRepositoryOwner, value.headRepository),
     baseRepository: identity.nameWithOwner,
@@ -412,6 +447,16 @@ export function parseRemotes(output: string): GitRemote[] {
   return remotes
 }
 
+/** The push URLs of `git remote -v` by remote name: `pushurl` and URL rewrites applied, one entry per URL. */
+export function parsePushUrls(output: string): Map<string, string[]> {
+  const urls = new Map<string, string[]>()
+  for (const line of output.split(/\r?\n/)) {
+    const match = /^(\S+)\s+(\S+)\s+\(push\)$/.exec(line.trim())
+    if (match) urls.set(match[1], [...(urls.get(match[1]) ?? []), match[2]])
+  }
+  return urls
+}
+
 function hostWithoutPort(host: string): string {
   return host.toLowerCase().replace(/:\d+$/, '')
 }
@@ -441,14 +486,34 @@ export function parseRemoteUrl(url: string): RepositoryIdentity | null {
 }
 
 /** The remote whose URL is the repository: same host and `owner/repo`, ignoring case, scheme and `.git`. */
-export function remoteForIdentity(remotes: readonly GitRemote[], identity: RepositoryIdentity): string | null {
-  const matches = remotes.filter((remote) => {
-    const parsed = parseRemoteUrl(remote.url)
+export function remoteForIdentity(remotes: readonly GitRemote[], identity: RepositoryIdentity, pushUrls?: ReadonlyMap<string, readonly string[]>): string | null {
+  const isRepository = (url: string): boolean => {
+    const parsed = parseRemoteUrl(url)
     return parsed !== null
       && hostWithoutPort(parsed.host) === hostWithoutPort(identity.host)
       && parsed.nameWithOwner.toLowerCase() === identity.nameWithOwner.toLowerCase()
+  }
+  // With `pushUrls` the remote must also push to the repository: every push URL it has (a `pushurl` can name another one).
+  const matches = remotes.filter((remote) => {
+    if (!isRepository(remote.url)) return false
+    if (!pushUrls) return true
+    const pushes = pushUrls.get(remote.name) ?? []
+    return pushes.length > 0 && pushes.every(isRepository)
   })
   return (matches.find((remote) => remote.name === 'origin') ?? matches[0])?.name ?? null
+}
+
+const FETCH_TIMEOUT_MS = 5 * 60_000
+
+/** Git's own words for a failed fetch, with a hint for the two failures a bare message does not explain. */
+function fetchFailureText(error: unknown): string {
+  const message = processMessage(error)
+  const stopped = Boolean(error && typeof error === 'object' && ((error as { killed?: unknown }).killed === true || (error as { code?: unknown }).code === 'ETIMEDOUT'))
+  if (stopped) return `The fetch did not finish in ${FETCH_TIMEOUT_MS / 60_000} minutes and was stopped. ${message}`
+  if (/fsck|badObject|bad object|invalid (?:tree|commit|tag|object)|malformed|zeroPadded|badTimezone|object .* is corrupt/i.test(message)) {
+    return `Git rejected objects in this pull request as malformed (its checks run on every fetched object). ${message}`
+  }
+  return message
 }
 
 const LOOKUP_TTL_MS = 30_000
@@ -557,6 +622,7 @@ export class GitHubCodeHost implements CodeHost {
   private readonly identities: ReadCache<RepositoryIdentity>
   private readonly lookups: ReadCache<GitPullRequestLookup>
   private readonly details: ReadCache<PullRequestDetail>
+  private readonly lists: ReadCache<PullRequestListItem[]>
   private readonly viewers: ReadCache<string>
 
   constructor(
@@ -566,6 +632,7 @@ export class GitHubCodeHost implements CodeHost {
     this.identities = new ReadCache(IDENTITY_TTL_MS, clock)
     this.lookups = new ReadCache(LOOKUP_TTL_MS, clock)
     this.details = new ReadCache(LOOKUP_TTL_MS, clock)
+    this.lists = new ReadCache(LOOKUP_TTL_MS, clock)
     this.viewers = new ReadCache(IDENTITY_TTL_MS, clock)
   }
 
@@ -763,7 +830,10 @@ export class GitHubCodeHost implements CodeHost {
 
     // Whatever was read before the pull request existed no longer describes the branch.
     const identity = await this.repositoryIdentity(cwd).catch(() => null)
-    if (identity) this.lookups.invalidatePrefix(repositoryPrefix(identity))
+    if (identity) {
+      this.lookups.invalidatePrefix(repositoryPrefix(identity))
+      this.lists.invalidatePrefix(repositoryPrefix(identity))
+    }
 
     // The pull request exists even when it cannot be read back, so a failed read must not look like a failed create.
     const readBack = await this.runExecutable('gh', ['pr', 'view', String(number), '--json', PULL_REQUEST_FIELDS], { cwd })
@@ -807,10 +877,15 @@ export class GitHubCodeHost implements CodeHost {
     }
   }
 
-  /** The remote that points at this folder's repository, else `origin`, else the only remote. */
-  async remoteForRepository(cwd: string): Promise<string | null> {
+  /**
+   * The remote that points at the repository: with `repository`, only a remote whose URL is exactly it; without, this
+   * folder's own repository, else `origin`, else the only remote.
+   */
+  async remoteForRepository(cwd: string, repository?: RepositoryIdentity, options: { push?: boolean } = {}): Promise<string | null> {
     try {
-      const remotes = parseRemotes((await this.runExecutable('git', ['remote', '-v'], { cwd })).stdout)
+      const listing = (await this.runExecutable('git', ['remote', '-v'], { cwd })).stdout
+      const remotes = parseRemotes(listing)
+      if (repository) return remoteForIdentity(remotes, repository, options.push ? parsePushUrls(listing) : undefined)
       const identity = await this.repositoryIdentity(cwd).catch(() => null)
       return (identity ? remoteForIdentity(remotes, identity) : null)
         ?? remotes.find((remote) => remote.name === 'origin')?.name
@@ -818,6 +893,76 @@ export class GitHubCodeHost implements CodeHost {
     } catch {
       return null
     }
+  }
+
+  /** The open pull requests of the folder's repository, most recently updated first; shared by every folder of the repository for 30 seconds. */
+  async listPullRequests(cwd: string, options: { limit?: number; force?: boolean } = {}): Promise<PullRequestListItem[]> {
+    const limit = Math.min(Math.max(Math.trunc(options.limit ?? PULL_REQUEST_LIST_LIMIT) || PULL_REQUEST_LIST_LIMIT, 1), PULL_REQUEST_LIST_LIMIT_MAX)
+    const probe = await this.probeGh()
+    if (!probe.ok) throw new PullRequestReadError(probe.message, probe.reason)
+    let identity: RepositoryIdentity
+    try {
+      identity = await this.repositoryIdentity(cwd)
+    } catch (error) {
+      throw await this.listFailure(cwd, null, error)
+    }
+    return this.lists.read(
+      `${repositoryPrefix(identity)}list\u0000${limit}`,
+      async () => {
+        try {
+          const { stdout } = await this.runExecutable('gh', ['pr', 'list', '--state', 'open', '--limit', String(limit), '--json', PULL_REQUEST_LIST_FIELDS], { cwd })
+          const items = parsePullRequestListItems(stdout)
+          if (!items) throw new PullRequestReadError('GitHub CLI returned an unexpected pull request list.', 'error')
+          return items
+        } catch (error) {
+          throw await this.listFailure(cwd, identity, error)
+        }
+      },
+      { force: options.force, cacheError: (error) => error instanceof PullRequestReadError && (error.kind === 'unauthenticated' || error.kind === 'not-github' || error.kind === 'rate-limited') }
+    )
+  }
+
+  /** A failed list read with the host's own message; the shared reasons are named as for a detail read. */
+  private async listFailure(cwd: string, identity: RepositoryIdentity | null, error: unknown): Promise<PullRequestReadError> {
+    if (error instanceof PullRequestReadError) return error
+    const failure = await this.detailFailure(cwd, identity, 0, error)
+    if (failure.kind !== 'not-found') return failure
+    return new PullRequestReadError(`${identity ? identity.nameWithOwner : cwd} has no pull requests that can be listed: ${processMessage(error)}`, 'not-found')
+  }
+
+  async fetchPullRequestHead(cwd: string, pullRequest: PullRequestIdentity): Promise<string> {
+    if (!Number.isSafeInteger(pullRequest.number) || pullRequest.number < 1) throw new Error('Unsupported pull request number.')
+    const repository = `${pullRequest.host}/${pullRequest.nameWithOwner}`
+    const remote = await this.remoteForRepository(cwd, pullRequest)
+    if (!remote) {
+      throw new Error(`No remote of this checkout points at ${repository}, the pull request's repository. (A remote that reaches it through an SSH host alias is not recognised; add one with its ordinary URL.)`)
+    }
+    // Git forbids a leading dash in a remote name; one in the configuration must not read as an option.
+    if (remote.startsWith('-') || !/^[\w./-]+$/.test(remote)) throw new Error(`The remote "${remote}" has a name that cannot be used here.`)
+    const source = `refs/pull/${pullRequest.number}/head`
+    const destination = `refs/mousse/pull/${pullRequest.number}/head`
+    try {
+      // The head is read through the base repository, into a ref of Mousse's own: no remote is added, no branch is
+      // touched and the working tree stays as it is (FETCH_HEAD too). Objects are checked on the way in, submodules are
+      // not followed, a credential prompt cannot wait for a person, and a large pull request gets five minutes.
+      await this.runExecutable(
+        'git',
+        ['-c', 'transfer.fsckObjects=true', 'fetch', '--no-tags', '--no-recurse-submodules', '--no-write-fetch-head', '--', remote, `+${source}:${destination}`],
+        { cwd, env: { GIT_TERMINAL_PROMPT: '0' }, timeoutMs: FETCH_TIMEOUT_MS }
+      )
+    } catch (error) {
+      throw new Error(`Could not fetch ${source} from ${remote} (${repository}): ${fetchFailureText(error)}`)
+    }
+    const { stdout } = await this.runExecutable('git', ['rev-parse', '--verify', '--quiet', `${destination}^{commit}`], { cwd })
+    const sha = stdout.trim()
+    if (!/^[0-9a-f]{40,64}$/.test(sha)) throw new Error(`Fetching ${source} from ${remote} did not produce a commit.`)
+    return sha
+  }
+
+  async releasePullRequestHead(cwd: string, pullRequest: PullRequestIdentity, sha: string): Promise<void> {
+    if (!Number.isSafeInteger(pullRequest.number) || pullRequest.number < 1 || !/^[0-9a-f]{40,64}$/.test(sha)) return
+    // Only when the ref still holds this commit: a start that fetched a newer head meanwhile keeps its own.
+    await this.runExecutable('git', ['update-ref', '-d', `refs/mousse/pull/${pullRequest.number}/head`, sha], { cwd }).catch(() => undefined)
   }
 
   /**

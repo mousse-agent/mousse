@@ -3,6 +3,8 @@ import { walkOwnedContent, WorktreeRetirementService } from '../lifecycle/Worktr
 import { getThreadLifecycleGate } from '../queue/ThreadLifecycleAdmission'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync } from 'node:fs'
+import { nonInteractiveGitEnv } from '../git/gitEnv'
+import { safeWorktreeGit } from '../worktree/WorktreeManager'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
@@ -25,6 +27,58 @@ import type {
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+}
+
+function tryGit(cwd: string, args: string[]): { ok: boolean; stdout: string } {
+  try {
+    return { ok: true, stdout: git(cwd, args) }
+  } catch {
+    return { ok: false, stdout: '' }
+  }
+}
+
+/**
+ * The `-c` overrides for Git commands that touch someone else's commits: the repository's existing safe-checkout set
+ * (no hooks, no file system monitor, every configured filter driver cleared) plus no submodule recursion.
+ */
+async function untrustedSafety(repositoryRoot: string): Promise<string[]> {
+  const { safety } = await safeWorktreeGit(repositoryRoot)
+  return [...safety, '-c', 'submodule.recurse=false']
+}
+
+/**
+ * Makes the overrides part of the worktree's own configuration, so every Git command run there (a checkpoint
+ * commit, the side card's Commit and Push, an agent's shell) is bound by them. A relative `core.hooksPath` or
+ * a `.gitattributes` filter would otherwise act on the checkout's own files. Refuses when Git cannot keep
+ * configuration per worktree, rather than leaving the worktree unprotected.
+ */
+function pinUntrustedWorktree(primaryCheckoutPath: string, worktreePath: string, safety: readonly string[]): void {
+  if (tryGit(primaryCheckoutPath, ['config', '--get', 'core.worktree']).stdout) {
+    throw new Error('This repository sets core.worktree, so a worktree cannot hold its own safety configuration.')
+  }
+  git(primaryCheckoutPath, ['config', 'extensions.worktreeConfig', 'true'])
+  for (let index = 0; index < safety.length; index++) {
+    if (safety[index] !== '-c') continue
+    const setting = safety[index + 1]
+    const equals = setting.indexOf('=')
+    git(worktreePath, ['config', '--worktree', setting.slice(0, equals), setting.slice(equals + 1)])
+  }
+  const scope = tryGit(worktreePath, ['config', '--show-scope', '--get', 'core.hooksPath'])
+  if (!scope.ok || !scope.stdout.startsWith('worktree')) {
+    throw new Error('This Git does not keep configuration per worktree; a worktree of a pull request cannot be made safely.')
+  }
+}
+
+/** `git worktree add` for commits from someone else: nothing they carry runs, no LFS content is fetched, and the safety stays pinned. */
+async function addUntrustedWorktree(primaryCheckoutPath: string, addArguments: string[], worktreePath: string): Promise<void> {
+  const safety = await untrustedSafety(primaryCheckoutPath)
+  execFileSync('git', [...safety, 'worktree', 'add', ...addArguments], {
+    cwd: primaryCheckoutPath,
+    env: { ...process.env, ...nonInteractiveGitEnv(), GIT_LFS_SKIP_SMUDGE: '1' },
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe']
+  })
+  pinUntrustedWorktree(primaryCheckoutPath, worktreePath, safety)
 }
 
 function canonicalPath(path: string): string {
@@ -104,7 +158,15 @@ export class ThreadWorkspaceManager {
      * Commit the new worktree starts at instead of the primary checkout's HEAD (a thread fork seeded
      * from its source's checkpoint, SPEC §16.2). Integration still targets the primary HEAD.
      */
-    startSha?: string
+    startSha?: string,
+    /**
+     * `untrusted`: `startSha` is a commit from someone else (a pull request's head). Nothing it carries may run,
+     * on the checkout or in any Git command run in the worktree afterwards: hooks (a relative `core.hooksPath`
+     * is looked up in the checkout), filter, smudge and process drivers its `.gitattributes` selects, Git LFS
+     * (no smudge, so its `.lfsconfig` is never read) and the file system monitor are switched off in the
+     * worktree's own configuration, and the workspace is marked so a restore does the same.
+     */
+    options: { untrusted?: boolean } = {}
   ): Promise<ThreadWorkspaceMetadata> {
     const existing = this.load()
     if (existing?.lifecycle === 'ready') return this.verify(existing)
@@ -151,9 +213,11 @@ export class ThreadWorkspaceManager {
         baseSha: head,
         headSha: head,
         lifecycle: 'provisioning',
-        lastVerifiedAt: new Date().toISOString()
+        lastVerifiedAt: new Date().toISOString(),
+        ...(options.untrusted ? { untrusted: true as const } : {})
       } satisfies ThreadWorkspaceMetadata)
-      git(repository.primaryCheckoutPath, ['worktree', 'add', '-b', branch, worktreePath, head])
+      if (options.untrusted) await addUntrustedWorktree(repository.primaryCheckoutPath, ['-b', branch, worktreePath, head], worktreePath)
+      else git(repository.primaryCheckoutPath, ['worktree', 'add', '-b', branch, worktreePath, head])
       git(repository.primaryCheckoutPath, ['update-ref', retainedRef, head])
       const metadata: ThreadWorkspaceMetadata = {
         schemaVersion: 1,
@@ -171,7 +235,8 @@ export class ThreadWorkspaceManager {
         baseSha: head,
         headSha: head,
         lifecycle: 'ready',
-        lastVerifiedAt: new Date().toISOString()
+        lastVerifiedAt: new Date().toISOString(),
+        ...(options.untrusted ? { untrusted: true as const } : {})
       }
       atomicWriteJsonSync(this.workspacePath, metadata)
       this.journal.append({
@@ -231,7 +296,9 @@ export class ThreadWorkspaceManager {
         const manifestPath = retirement.pathFor(metadata.threadId, metadata.worktreePath)
         const manifest = retirement.load(manifestPath)
         if (manifest.branch !== metadata.branch || manifest.resultSha !== metadata.headSha || manifest.repositoryId !== metadata.repositoryId) throw new Error('Retired workspace manifest disagrees with authoritative task binding')
-        retirement.reconstruct(manifestPath)
+        // The worktree's own configuration went with the worktree: for someone else's commits it is put back before anything is checked out.
+        const safety = metadata.untrusted ? await untrustedSafety(repository.gitTopLevel) : undefined
+        retirement.reconstruct(manifestPath, safety ? { prepare: (path) => pinUntrustedWorktree(repository.gitTopLevel, path, safety), env: { ...nonInteractiveGitEnv(), GIT_LFS_SKIP_SMUDGE: '1' } } : undefined)
         const restored = this.verify(metadata)
         if (restored.lifecycle !== 'ready') throw new Error('Reconstructed task workspace failed verification')
         atomicWriteJsonSync(this.workspacePath, restored)
@@ -241,7 +308,8 @@ export class ThreadWorkspaceManager {
       const branchHead = git(repository.gitTopLevel, ['rev-parse', '--verify', metadata.branch])
       if (retained !== branchHead) throw new Error('Workspace branch and retained ref disagree; manual recovery is required.')
       mkdirSync(dirname(metadata.worktreePath), { recursive: true })
-      git(repository.gitTopLevel, ['worktree', 'add', metadata.worktreePath, metadata.branch])
+      if (metadata.untrusted) await addUntrustedWorktree(repository.gitTopLevel, [metadata.worktreePath, metadata.branch], metadata.worktreePath)
+      else git(repository.gitTopLevel, ['worktree', 'add', metadata.worktreePath, metadata.branch])
       const restored = this.verify(metadata)
       atomicWriteJsonSync(this.workspacePath, restored)
       this.finishProvisionRecovery(restored)

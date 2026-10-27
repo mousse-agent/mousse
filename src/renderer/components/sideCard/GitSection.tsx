@@ -21,7 +21,8 @@ import {
   type GitStatusView
 } from '../../stores/gitStatusStore'
 import { createPullRequestForBranch, useGitPullRequestStore } from '../../stores/pullRequestStore'
-import type { PullRequestDetail, PullRequestScope, ThreadPullRequestLink } from '../../../shared/pullRequests'
+import type { PullRequestDetail, PullRequestPushTarget, PullRequestScope, ThreadPullRequestLink } from '../../../shared/pullRequests'
+import { usePullRequestPushTarget } from './usePullRequestPushTarget'
 import { gitScopeFor } from '../../lib/activeProject'
 import type { GitCommit, GitPullRequestLookup, GitScope } from '../../../shared/types'
 import { Switch } from '../settings/SettingsRow'
@@ -833,6 +834,8 @@ interface GitSectionViewProps {
   pullRequestError?: string | null
   /** The pull request the thread is linked to, if any. */
   pullRequestLink?: ThreadPullRequestLink | null
+  /** Where Push goes for a thread linked to a pull request; null when it keeps its usual target. */
+  pullRequestPushTarget?: PullRequestPushTarget | null
   /** When set, the section collapses to this one muted line. */
   collapsedLabel: string | null
   /** The folder is not a repository, so the collapsed section offers to make it one. */
@@ -853,6 +856,7 @@ export function GitSectionView({
   pullRequestDetail = null,
   pullRequestError = null,
   pullRequestLink = null,
+  pullRequestPushTarget = null,
   collapsedLabel,
   canInitialize = false,
   now
@@ -945,7 +949,7 @@ export function GitSectionView({
   const stat = diffStatLabel(git.diffStats, untrackedFileCount(git.status))
   const latest = git.commits[0] ? formatCommitLine(git.commits[0], now ?? Date.now()) : null
   const fileCount = changedFileCount(git.status)
-  const pushButton = pushButtonModel(git.status, git.commits.length, scope)
+  const pushButton = pushButtonModel(git.status, git.commits.length, scope, pullRequestPushTarget)
   const availability = gitActionAvailability(git.status, pullRequest, git.commits.length, scope)
   const prRow = pullRequestRow(pullRequest, git.status, pullRequestDetail, pullRequestLink, workspaceThreadId !== null)
   const createLock = gitActionLock(running, 'pullRequest')
@@ -988,6 +992,7 @@ export function GitSectionView({
           onNotice={setNotice}
         />
       </div>
+      {pushButton?.note && <p className="side-card-git-quiet">{pushButton.note}</p>}
       <GitOperationStatus path={path} />
       <PullRequestCreateForm
         scope={createForm && createForm.path === path && createForm.branch === branch ? createForm : null}
@@ -1055,6 +1060,7 @@ export function GitSection({ threadId }: SideCardSectionContext) {
     status: git.status
   }
   const collapsedLabel = gitCollapsedLabel(collapse)
+  const pullRequestPushTarget = usePullRequestPushTarget(location.workspaceThreadId, link)
   return (
     <GitSectionView
       threadId={threadId}
@@ -1067,6 +1073,7 @@ export function GitSection({ threadId }: SideCardSectionContext) {
       pullRequestDetail={detail}
       pullRequestError={detailError}
       pullRequestLink={link}
+      pullRequestPushTarget={pullRequestPushTarget}
       collapsedLabel={collapsedLabel}
       canInitialize={canInitRepository(collapse)}
     />

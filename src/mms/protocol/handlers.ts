@@ -26,8 +26,9 @@ import { PROVIDER_STT_MAX_BYTES } from '../../shared/dictation'
 import { PROVIDER_TTS_MAX_CHARS } from '../../shared/readAloud'
 import type { ExternalEffect, ThreadAction } from '../../shared/threadActions'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
-import type { GitPullRequestInfo, PullRequestDetail, RepositoryIdentity, ThreadPullRequestLink } from '../../shared/pullRequests'
+import type { GitPullRequestInfo, PullRequestDetail, PullRequestPushTarget, RepositoryIdentity, ThreadPullRequestLink } from '../../shared/pullRequests'
 import { PULL_REQUEST_EXISTS, PullRequestReadError } from '../git/GitHubCodeHost'
+import { PullRequestThreadError, PullRequestThreadService } from '../git/PullRequestThreadService'
 import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest } from '../../shared/types'
 import { AppError, createErrorProvider } from '../../shared/errors'
 import type { GitOperationHandle } from '../git/GitService'
@@ -570,6 +571,65 @@ const restoresInFlight = new Map<string, Promise<void>>()
 async function materializeRequestedWorkspace(ctx: HandlerContext, params: Record<string, unknown>): Promise<void> {
   const threadId = asOptionalString(params.threadId, 256)
   if (threadId && ctx.mms.threads.getThread(threadId)) await ensureWorkspaceMaterialized(ctx, threadId)
+}
+
+/**
+ * Where Push goes for a thread linked to a pull request: the pull request's own branch, but only when that is provably
+ * the same repository, that is, its head is not in a fork and a remote of this folder points at it. Anything else keeps
+ * Push's usual target, with the reason a client can show.
+ */
+async function pullRequestPushTarget(ctx: HandlerContext, threadId: string, root: string): Promise<PullRequestPushTarget> {
+  const link = ctx.mms.threads.getThread(threadId)?.pullRequest
+  const usual: PullRequestPushTarget = { remote: null, branch: null, reason: null }
+  // Only a thread that was started from the pull request: a link made by hand says nothing about where its branch belongs.
+  if (!link || link.startedFromPullRequest !== true) return usual
+  const repository = `${link.nameWithOwner}${link.host.toLowerCase() === 'github.com' ? '' : ` on ${link.host}`}`
+  const sameRepository = link.isCrossRepository === false && link.headRepository !== null && link.headRepository.toLowerCase() === link.nameWithOwner.toLowerCase()
+  if (!sameRepository) return { ...usual, reason: `The pull request's branch is on a fork (${link.headRepository ?? 'deleted'}); push by hand` }
+  if (!link.headRefName) return { ...usual, reason: 'The pull request has no head branch to push to; push by hand' }
+  // Never straight onto the repository's default branch (a release pull request from develop to main has it as its head).
+  const { defaultBranch } = await ctx.mms.gitService.codeHost.listBaseBranches(root)
+  if (defaultBranch === null) return { ...usual, reason: `The default branch of ${repository} could not be read, so Push cannot tell whether the pull request's branch is safe to update; push by hand` }
+  if (link.headRefName === defaultBranch) return { ...usual, reason: `The pull request's branch is ${repository}'s default branch, which Push never updates; push by hand` }
+  // The remote must fetch from and push to the repository: a `pushurl` can name another one.
+  const remote = await ctx.mms.gitService.codeHost.remoteForRepository(root, { host: link.host, nameWithOwner: link.nameWithOwner }, { push: true })
+  if (!remote) return { ...usual, reason: `No remote of this checkout fetches from and pushes to ${repository}; push by hand` }
+  return { remote, branch: link.headRefName, reason: null }
+}
+
+/** The service that starts threads from pull requests, over this profile's stores. */
+function pullRequestThreadService(ctx: HandlerContext): PullRequestThreadService {
+  return new PullRequestThreadService({
+    codeHost: ctx.mms.gitService.codeHost,
+    projects: ctx.mms.projects,
+    threads: ctx.mms.threads,
+    trashThread: (threadId) => ctx.mms.trashThread(threadId),
+    // Like `threads.create`: a new thread starts on the model last used.
+    prepareThread: (thread) => {
+      const lastUsed = ctx.mms.providerInstances.migrate(lastUsedChatModel(ctx.mms.settings.get()))
+      return lastUsed ? ctx.mms.threads.updateThreadMeta(thread.id, { modelOverride: lastUsed }) : thread
+    },
+    send: async (threadId, content) => {
+      ctx.mms.orchestrator.getOrCreateSession(threadId)
+      const input = await prepareChatInput(ctx, threadId, { content }, {})
+      // `ack`: the call returns once the message is accepted, not when the turn ends.
+      await ctx.mms.orchestrator.send(input, false, { threadId, source: admittedChatSource(ctx, 'protocol'), forceQueue: false, awaitMode: 'ack' })
+    }
+  })
+}
+
+/** A refusal of the pull request thread service keeps its code; a failed read reaches the caller with the host's own message. */
+async function asDomainError<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run()
+  } catch (error) {
+    if (error instanceof PullRequestThreadError) throw new DomainRpcError(error.code, error.message, error.details)
+    if (error instanceof PullRequestReadError) {
+      const code = error.kind === 'not-found' || error.kind === 'rate-limited' ? PULL_REQUEST_READ_CODES[error.kind] : 'pull_request_unavailable'
+      throw new DomainRpcError(code, error.message, { reason: error.kind })
+    }
+    throw error
+  }
 }
 
 async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<string, unknown>): Promise<void> {
@@ -2645,13 +2705,17 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const target = await gitMutationTarget(ctx, p)
       const expectedBranch = asOptionalString(p.expectedBranch, 512)
       const { root, directory, workspace: metadata } = target
+      // A thread's own branch goes to its pull request's branch when that is provably the same repository (never a client's choice).
+      const threadId = asOptionalString(p.threadId, 256)
+      const prTarget = metadata && threadId ? await pullRequestPushTarget(ctx, threadId, root) : null
+      const toPullRequest = prTarget?.remote && prTarget.branch ? { toRemote: prTarget.remote, toBranch: prTarget.branch } : {}
       await followedGitAction(ctx, p, root, 'push', (request, signal) => {
         if (!metadata || !directory) return ctx.mms.gitService.push(root, { expectedBranch, ...request })
         return withGitMutationLocks(directory, root, 'user-git-push', async () => {
           const manager = new ThreadWorkspaceManager(directory)
           if (manager.verify().lifecycle !== 'ready' || manager.load()?.headSha !== metadata.headSha) throw new Error('Task revision changed before push; refresh the reviewed revision')
           if (workspaceGit(root, ['status', '--porcelain'])) throw gitThreadRules.create('git_thread_dirty')
-          await ctx.mms.gitService.push(root, { expectedBranch, ...request })
+          await ctx.mms.gitService.push(root, { expectedBranch, ...toPullRequest, ...request })
         }, signal)
       })
       return gitStatusResult(ctx, root)
@@ -2889,6 +2953,61 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
+    }
+    case 'pullRequests.list': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['projectId', 'limit', 'force'])
+      const root = pullRequestFolder(ctx, { projectId: p.projectId })
+      const limit = asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: 200 })
+      const pullRequests = await asDomainError(() => ctx.mms.gitService.codeHost.listPullRequests(root, { ...(limit !== undefined ? { limit } : {}), force: asOptionalBoolean(p.force, 'force') === true }))
+      return { pullRequests }
+    }
+    case 'pullRequests.resolve': {
+      // What a pasted number, URL or `gh pr checkout` command names, read in full, before a thread is started from it.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['projectId', 'reference'])
+      const projectId = asString(p.projectId, 'projectId', 256)
+      const resolved = await asDomainError(() => pullRequestThreadService(ctx).resolve(projectId, asString(p.reference, 'reference', 2048)))
+      const { detail } = resolved
+      return {
+        pullRequest: { number: detail.number, title: detail.title, url: detail.url, state: detail.state, isDraft: detail.isDraft, author: detail.author, headRefName: detail.headRefName, isCrossRepository: detail.isCrossRepository },
+        threads: resolved.threads
+      }
+    }
+    case 'pullRequests.startThread': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['projectId', 'number', 'reference', 'send', 'message', 'allowClosed', 'allowDuplicate'])
+      const projectId = asString(p.projectId, 'projectId', 256)
+      if ((p.number === undefined) === (p.reference === undefined)) throw new DomainRpcError('invalid_params', 'Give either number or reference')
+      const reference = p.reference !== undefined
+        ? asString(p.reference, 'reference', 2048)
+        : String(asBoundedInt(p.number, 'number', { min: 1, max: Number.MAX_SAFE_INTEGER }))
+      const send = asOptionalBoolean(p.send, 'send') === true
+      const message = asOptionalString(p.message, 64 * 1024)
+      if (message !== undefined && !send) throw new DomainRpcError('invalid_params', 'message is only sent with send: true')
+      try {
+        const started = await asDomainError(() => pullRequestThreadService(ctx).startThread({
+          projectId,
+          reference,
+          send,
+          ...(message !== undefined ? { message } : {}),
+          allowClosed: asOptionalBoolean(p.allowClosed, 'allowClosed') === true,
+          allowDuplicate: asOptionalBoolean(p.allowDuplicate, 'allowDuplicate') === true
+        }))
+        return { ...started, threads: visibleThreadsFor(ctx.connection, ctx.mms.threads.listAllThreads()) }
+      } finally {
+        // Also after a failure: a thread made and removed, or kept in the trash, must not linger in a client's list.
+        ctx.emitEvent?.('threads.updated', { threads: ctx.mms.threads.listAllThreads() })
+      }
+    }
+    case 'pullRequests.pushTarget': {
+      // Where Push goes for a thread linked to a pull request, and why it keeps its usual target when it does.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const root = pullRequestFolder(ctx, { threadId })
+      const inWorktree = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId)).load() !== undefined
+      return { target: inWorktree ? await pullRequestPushTarget(ctx, threadId, root) : { remote: null, branch: null, reason: null } }
     }
     case 'pullRequests.unlink': {
       const p = isObject(params) ? params : {}

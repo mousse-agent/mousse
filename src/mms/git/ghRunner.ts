@@ -8,7 +8,7 @@ export interface ExecutableResult {
 export type ExecutableRunner = (
   executable: string,
   args: readonly string[],
-  options?: { cwd?: string }
+  options?: { cwd?: string; /** Added to the process environment. */ env?: Record<string, string>; /** Longer than the default minute, for a download. */ timeoutMs?: number }
 ) => Promise<ExecutableResult>
 
 export const execRunner: ExecutableRunner = (executable, args, options) =>
@@ -18,9 +18,10 @@ export const execRunner: ExecutableRunner = (executable, args, options) =>
       [...args],
       {
         cwd: options?.cwd,
+        ...(options?.env ? { env: { ...process.env, ...options.env } } : {}),
         windowsHide: true,
         encoding: 'utf8',
-        timeout: 60_000,
+        timeout: options?.timeoutMs ?? 60_000,
         maxBuffer: 1024 * 1024
       },
       (error, stdout, stderr) => {

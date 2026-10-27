@@ -148,6 +148,8 @@ export interface PullRequestDetail extends GitPullRequestInfo {
   identity: PullRequestIdentity
   body: string
   author: string
+  /** How the author relates to the repository, as the host says it: `OWNER`, `MEMBER`, `COLLABORATOR`, `NONE`, ... */
+  authorAssociation: string
   headRefName: string
   baseRefName: string
   headSha: string
@@ -168,6 +170,127 @@ export interface PullRequestDetail extends GitPullRequestInfo {
   closedAt: string | null
 }
 
+/** One open pull request in the project's list, with what is needed to pick one to start a thread from. */
+export interface PullRequestListItem {
+  number: number
+  title: string
+  url: string
+  isDraft: boolean
+  author: string
+  headRefName: string
+  /** The head branch lives in another repository (a fork). */
+  isCrossRepository: boolean
+  updatedAt: string
+}
+
+/** A pull request named by the user: a number, or a URL or `gh pr checkout` command that also names a repository. */
+export interface PullRequestReference {
+  number: number
+  /** Present when the text named a repository (a URL). */
+  host?: string
+  nameWithOwner?: string
+}
+
+const PULL_REQUEST_REFERENCE_MAX = 2048
+const POSITIVE_INTEGER = /^[1-9]\d{0,14}$/
+
+/**
+ * Reads a pull request from what a user pastes: `123`, `#123`, `https://<host>/<owner>/<repo>/pull/123`
+ * (with anything after the number, such as `/files`), or `gh pr checkout 123` with a number or URL. Only
+ * `http(s)` URLs without credentials count and the number must be a positive integer; anything else is
+ * null. Whether the repository is the project's is a separate check (`pullRequestReferenceMismatch`).
+ */
+export function parsePullRequestReference(text: string): PullRequestReference | null {
+  let value = text.trim()
+  if (!value || value.length > PULL_REQUEST_REFERENCE_MAX) return null
+  const command = /^gh\s+pr\s+checkout\s+(\S+)$/i.exec(value)
+  if (command) value = command[1]
+  const plain = /^#?(\d+)$/.exec(value)
+  if (plain) return POSITIVE_INTEGER.test(plain[1]) ? { number: Number(plain[1]) } : null
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return null
+  }
+  if ((url.protocol !== 'https:' && url.protocol !== 'http:') || url.username || url.password || !url.hostname) return null
+  const [owner, repository, kind, number] = url.pathname.split('/').filter((segment, index) => index > 0 || segment !== '').map((segment) => {
+    try {
+      return decodeURIComponent(segment)
+    } catch {
+      return ''
+    }
+  })
+  if (!owner || !repository || kind !== 'pull' || number === undefined || !POSITIVE_INTEGER.test(number)) return null
+  if ([owner, repository].some((segment) => /[\s\\/]/.test(segment))) return null
+  return { number: Number(number), host: url.host.toLowerCase(), nameWithOwner: `${owner}/${repository}` }
+}
+
+/**
+ * Why a reference cannot be started from the project whose repository is `identity`; null when it can. A bare
+ * number always belongs to the project's repository. A URL must name its host and `owner/repo`, compared
+ * ignoring case.
+ */
+export function pullRequestReferenceMismatch(reference: PullRequestReference, identity: RepositoryIdentity): string | null {
+  if (reference.host === undefined || reference.nameWithOwner === undefined) return null
+  if (reference.host.toLowerCase() === identity.host.toLowerCase() && reference.nameWithOwner.toLowerCase() === identity.nameWithOwner.toLowerCase()) return null
+  return `That pull request belongs to ${reference.host}/${reference.nameWithOwner}, not this project's repository (${identity.host}/${identity.nameWithOwner}).`
+}
+
+/** What the start dialog shows for the pull request a pasted reference names. */
+export interface PullRequestSummary {
+  number: number
+  title: string
+  url: string
+  state: GitPullRequestInfo['state']
+  isDraft: boolean
+  author: string
+  headRefName: string
+  isCrossRepository: boolean
+}
+
+export interface ResolvedPullRequestSummary {
+  pullRequest: PullRequestSummary
+  /** Threads that already work on this pull request (not archived). */
+  threads: Array<{ id: string; name: string }>
+}
+
+export interface StartPullRequestThreadInput {
+  projectId: string
+  /** A number, or a URL or `gh pr checkout` command naming the pull request. */
+  reference: string
+  /** Send the seed (and `message`) as the thread's first message; the GUI puts the seed in the composer instead. */
+  send?: boolean
+  message?: string
+  /** Allow a merged or closed pull request. */
+  allowClosed?: boolean
+  /** Start even though another thread already works on this pull request. */
+  allowDuplicate?: boolean
+}
+
+/** What starting a thread from a pull request returns beside the thread itself. */
+export interface StartPullRequestThreadResult {
+  /** The message the thread starts from: the pull request's title, description and open review comments. */
+  seed: string
+  /** The commit the thread's worktree starts at. */
+  headSha: string
+  /** The pull request's head moved between the host's answer and the fetch, so the thread starts at the newer commit. */
+  headMoved: boolean
+  /** True when the seed was sent as the thread's first message. */
+  sent: boolean
+  /** Why a requested send did not happen (the text is from people who are not owners, members or collaborators, or the send failed); null otherwise. */
+  withheld: string | null
+}
+
+/** Where a thread's Push goes and why, when the thread is linked to a pull request. */
+export interface PullRequestPushTarget {
+  /** The local remote and the branch Push updates; null when Push keeps its usual target. */
+  remote: string | null
+  branch: string | null
+  /** Why Push keeps its usual target ("push by hand"); null when the pull request's branch is the target. */
+  reason: string | null
+}
+
 /** A thread's link to a pull request, set when it creates one, starts from one, or watches one. */
 export interface ThreadPullRequestLink {
   number: number
@@ -179,5 +302,7 @@ export interface ThreadPullRequestLink {
   headRepository: string | null
   isCrossRepository: boolean
   linkedAt: string
+  /** The thread was started from this pull request, so its worktree begins at the pull request's head and Push may go to its branch. */
+  startedFromPullRequest?: true
   watch?: 'off' | 'notify' | 'act'
 }
