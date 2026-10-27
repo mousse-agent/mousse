@@ -2,8 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Editor, { type BeforeMount, type OnMount } from '@monaco-editor/react'
 import type { Monaco } from '@monaco-editor/react'
 import type { editor } from 'monaco-editor'
-import { AlertTriangle, Eye, Pencil, X } from '../lib/icons'
+import { AlertTriangle, Eye, Pencil, Search, X } from '../lib/icons'
+import { useCommand } from '../commands/commandRegistry'
 import { useFilesRoot } from '../hooks/useActiveProjectPath'
+import type { FileGrepMatch } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
 import { CODE_FONT } from '../lib/typography'
 import { fileWorkspaceScope, useFileWorkspaceStore } from '../stores/filesStore'
@@ -12,6 +14,8 @@ import { isAssetView, isBinaryContent, languageForPath, viewKindForPath, type Fi
 import { applyEditorTheme, MOUSSE_EDITOR_THEME } from '../utils/monacoTheme'
 import { MarkdownDocumentEditor } from './editors/MarkdownDocumentEditor'
 import { FileTree, FileTreeToolbar } from './FileTree'
+import { FilesSearch, type FilesSearchOpenRequest } from './FilesSearch'
+import { openLineDetail, type FilesSearchMode } from './filesSearchState'
 import { ResizablePanelSidebar } from './ResizablePanelSidebar'
 import { ensureProjectReferenceThread } from '../utils/chatLinks'
 import './filesPanel.css'
@@ -88,6 +92,40 @@ export function FilesPanel() {
   const previousActiveKey = useRef<string | null>(null)
   const selectedKeyRef = useRef<string | null>(null)
   const openRequestSequence = useRef(0)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchRequest, setSearchRequest] = useState<FilesSearchOpenRequest>({ mode: 'files', nonce: 0 })
+  const searchReturnFocus = useRef<HTMLElement | null>(null)
+
+  const openSearch = useCallback((mode: FilesSearchMode) => {
+    const active = document.activeElement
+    if (active instanceof HTMLElement && !active.closest('.files-search')) searchReturnFocus.current = active
+    setSearchOpen(true)
+    setSearchRequest((current) => ({ mode, nonce: current.nonce + 1 }))
+  }, [])
+  const closeSearch = useCallback(() => {
+    setSearchOpen(false)
+    const previous = searchReturnFocus.current
+    searchReturnFocus.current = null
+    if (previous?.isConnected) previous.focus()
+  }, [])
+  // Ctrl/Cmd+P and Ctrl/Cmd+Shift+F come through the command registry, which only lets a key typed inside this
+  // panel through. The panel stays mounted while another surface shows, so it must also be on screen.
+  const panelShowing = useCallback(() => {
+    const panel = panelRef.current
+    return Boolean(panel) && (typeof panel!.checkVisibility === 'function' ? panel!.checkVisibility() : true)
+  }, [])
+  useCommand('files.quickOpen', () => openSearch('files'), panelShowing)
+  useCommand('files.textSearch', () => openSearch('text'), panelShowing)
+
+  const openSearchedFile = useCallback((path: string, closeAfter: boolean) => {
+    openFile(scope, normalizeWorkspacePath(path, filesRoot))
+    if (closeAfter) closeSearch()
+  }, [closeSearch, filesRoot, openFile, scope])
+  const openSearchedLine = useCallback((match: FileGrepMatch) => {
+    // The listener below turns the position into a Monaco reveal; the column is UTF-16, as Monaco counts.
+    window.dispatchEvent(new CustomEvent('mousse:open-file', { detail: openLineDetail(match, activeThreadId) }))
+  }, [activeThreadId])
 
   const fileKey = useCallback((path: string) => `${scope}\0${path}`, [scope])
   const selectedKey = selectedPath ? fileKey(selectedPath) : null
@@ -408,9 +446,19 @@ export function FilesPanel() {
   const supportsPreview = selected?.kind === 'html'
 
   return (
-    <div className="files-panel">
+    <div className="files-panel" ref={panelRef}>
       <ResizablePanelSidebar className="files-sidebar" defaultWidth={260}>
-        <div className="panel-toolbar"><span className="panel-toolbar-label">Explorer</span><FileTreeToolbar onRefresh={() => setRefreshKey((key) => key + 1)} /></div>
+        <div className="panel-toolbar">
+          <span className="panel-toolbar-label">Explorer</span>
+          <div className="files-toolbar-actions">
+            <button type="button" className={`btn btn-ghost btn-sm${searchOpen ? ' active' : ''}`} aria-pressed={searchOpen}
+              aria-label="Search files" title="Search files (quick open or text)"
+              onClick={() => (searchOpen ? closeSearch() : openSearch('files'))}><Search size={14} strokeWidth={2} /></button>
+            <FileTreeToolbar onRefresh={() => setRefreshKey((key) => key + 1)} />
+          </div>
+        </div>
+        {searchOpen && <FilesSearch openRequest={searchRequest} scopeKey={scope} projectId={projectId} threadId={activeThreadId}
+          onOpenFile={openSearchedFile} onOpenLine={openSearchedLine} onClose={closeSearch} />}
         <FileTree filesRoot={filesRoot} rootLabel={rootLabel} threadId={activeThreadId} selectedPath={selectedPath}
           onSelectFile={(path) => openFile(scope, normalizeWorkspacePath(path, filesRoot))} refreshKey={refreshKey} />
       </ResizablePanelSidebar>

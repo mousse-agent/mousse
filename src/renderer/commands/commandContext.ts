@@ -40,6 +40,7 @@ export function commandContextFromDom(
     threadOpen: state.activeThreadId !== null,
     runActive: phase !== undefined && isTurnActivePhase(phase),
     mainAreaOpen: state.mainAreaOpen,
-    projectsMode: state.sidebarMode === 'projects'
+    projectsMode: state.sidebarMode === 'projects',
+    inFilesPanel: Boolean(target?.closest('.files-panel'))
   }
 }

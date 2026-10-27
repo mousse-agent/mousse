@@ -90,7 +90,7 @@ export function splitMentionPath(path: string, positions: number[]): { name: Pat
   }
 }
 
-function MarkedText({ segments }: { segments: PathSegment[] }) {
+export function MarkedText({ segments }: { segments: PathSegment[] }) {
   return (
     <>
       {segments.map((segment, index) => (segment.match ? <mark key={index}>{segment.text}</mark> : segment.text))}
