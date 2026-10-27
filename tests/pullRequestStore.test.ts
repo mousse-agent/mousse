@@ -659,7 +659,7 @@ describe('commit and push through the git store', () => {
     const git = install()
     await refreshGitStatus('/repo/a')
     await commitGitChanges('/repo/a', 'Add things', project)
-    expect(git.commit).toHaveBeenCalledWith(project, 'Add things', { amend: false, expectedBranch: 'feature' })
+    expect(git.commit).toHaveBeenCalledWith(project, 'Add things', { amend: false, expectedBranch: 'feature', operationId: expect.any(String) })
     expect(git.push).not.toHaveBeenCalled()
     expect(git.status).toHaveBeenCalledTimes(2)
     expect(git.pullRequest).not.toHaveBeenCalled()
@@ -670,8 +670,8 @@ describe('commit and push through the git store', () => {
     await refreshGitStatus('/repo/a')
     const phases: string[] = []
     await commitGitChanges('/repo/a', 'Reword', project, { amend: true, push: true, onPhase: (phase) => phases.push(phase) })
-    expect(git.commit).toHaveBeenCalledWith(project, 'Reword', { amend: true, expectedBranch: 'feature' })
-    expect(git.push).toHaveBeenCalledWith(project, { expectedBranch: 'feature' })
+    expect(git.commit).toHaveBeenCalledWith(project, 'Reword', { amend: true, expectedBranch: 'feature', operationId: expect.any(String) })
+    expect(git.push).toHaveBeenCalledWith(project, { expectedBranch: 'feature', operationId: expect.any(String) })
     expect(phases).toEqual(['committing', 'pushing'])
   })
 
@@ -711,7 +711,7 @@ describe('commit and push through the git store', () => {
     await refreshGitStatus('/repo/a')
     await refreshPullRequest('/repo/a', 'feature')
     await pushGitBranch('/repo/a', project)
-    expect(git.push).toHaveBeenCalledWith(project, { expectedBranch: 'feature' })
+    expect(git.push).toHaveBeenCalledWith(project, { expectedBranch: 'feature', operationId: expect.any(String) })
     expect(git.status).toHaveBeenCalledTimes(2)
     expect(git.pullRequest).toHaveBeenCalledTimes(2)
     // A push forces the lookup past both the store's age and the daemon's cache.
@@ -786,8 +786,8 @@ describe('commit, push and open PR through the git store', () => {
     const result = await commitGitChanges('/repo/a', 'Add things', project, { openPullRequest: projectForm(), onPhase: (phase) => phases.push(phase) })
     expect(order).toEqual(['commit', 'push', 'status', 'lookup'])
     expect(phases).toEqual(['committing', 'pushing', 'opening-pr'])
-    expect(git.commit).toHaveBeenCalledWith(project, 'Add things', { amend: false, expectedBranch: 'feature' })
-    expect(git.push).toHaveBeenCalledWith(project, { expectedBranch: 'feature' })
+    expect(git.commit).toHaveBeenCalledWith(project, 'Add things', { amend: false, expectedBranch: 'feature', operationId: expect.any(String) })
+    expect(git.push).toHaveBeenCalledWith(project, { expectedBranch: 'feature', operationId: expect.any(String) })
     expect(git.pullRequest).toHaveBeenCalledWith({ projectId: 'p1' }, 'feature', true)
     expect(result).toEqual({ pullRequest: { kind: 'form' } })
     // The same form the Create PR row opens, for the folder, branch and thread of the click; nothing is created here.
@@ -799,7 +799,7 @@ describe('commit, push and open PR through the git store', () => {
     const git = noLookupInstall()
     await refreshGitStatus('/repo/a')
     await commitGitChanges('/repo/a', 'Reword', project, { amend: true, openPullRequest: projectForm() })
-    expect(git.commit).toHaveBeenCalledWith(project, 'Reword', { amend: true, expectedBranch: 'feature' })
+    expect(git.commit).toHaveBeenCalledWith(project, 'Reword', { amend: true, expectedBranch: 'feature', operationId: expect.any(String) })
     expect(formOf()).toEqual(projectForm())
   })
 
@@ -809,8 +809,8 @@ describe('commit, push and open PR through the git store', () => {
     const form = scope({ path: '/repo/a', threadId: 't1', originThreadId: 't1' })
     const result = await commitGitChanges('/repo/a', 'Add things', worktree, { openPullRequest: form })
     expect(git.commit).toHaveBeenCalledTimes(1)
-    expect(git.commit).toHaveBeenCalledWith(worktree, 'Add things', { amend: false, expectedBranch: 'feature' })
-    expect(git.push).toHaveBeenCalledWith(worktree, { expectedBranch: 'feature' })
+    expect(git.commit).toHaveBeenCalledWith(worktree, 'Add things', { amend: false, expectedBranch: 'feature', operationId: expect.any(String) })
+    expect(git.push).toHaveBeenCalledWith(worktree, { expectedBranch: 'feature', operationId: expect.any(String) })
     expect(git.pullRequest).toHaveBeenLastCalledWith({ threadId: 't1' }, 'feature', true)
     expect(result).toEqual({ pullRequest: { kind: 'form' } })
     expect(formOf()).toEqual(form)
@@ -862,7 +862,8 @@ describe('commit, push and open PR through the git store', () => {
     ['the branch has diverged', failure('git_pull_diverged', 'This branch has diverged from its upstream.')],
     ['there is no remote to push to', failure('git_no_remote', 'Add a remote before pushing.')],
     ['the branch has no upstream', failure('git_no_upstream', 'This branch has no upstream. Push it first to set one.')],
-    ['the remote refused the push', failure('git_push_rejected_by_remote', 'The remote refused this push.')]
+    ['the remote refused the push', failure('git_push_rejected_by_remote', 'The remote refused this push.')],
+    ['the push was cancelled', failure('git_cancelled', 'Cancelled.')]
   ])('stops at a push refused because %s: the commit stays, nothing is looked up or opened', async (_name, pushError) => {
     const git = noLookupInstall({ push: vi.fn(async () => { throw pushError }) })
     await refreshGitStatus('/repo/a')
