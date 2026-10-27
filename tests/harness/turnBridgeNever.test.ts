@@ -22,6 +22,10 @@ import { ClaudeSubscriptionAdapter, CLAUDE_SUBSCRIPTION_CAPABILITIES, type Claud
 import { CodexAdapter, type CodexClient } from '../../src/mms/run/adapters/codex/CodexAdapter'
 import type { AdapterHost, ProviderAdapter, TurnBridge, TurnInput, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
 import { testHarness } from '../../src/mms/run/testkit/harness'
+import { methods, PROTOCOL_VERSION, type AgentApp } from '@agentclientprotocol/sdk'
+import { AcpSessions, type SavedAcpSession } from '../../src/mms/harness/acp/session'
+import { NO_QUIRKS } from '../../src/mms/harness/acp/quirks'
+import { inProcessAgent } from '../../src/mms/run/testkit/acpAgent'
 import { QuickActionTools } from '../../src/mms/orchestrator/QuickActionTools'
 import { createAppToolRegistry, type AppToolTurn } from '../../src/mms/run/mcp/appTools'
 import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
@@ -329,5 +333,66 @@ describe('Mousse tools that wait for the user', () => {
     await expect(adapter.startTurn(piInput, sink(), control, host(refusingPrompter()))).rejects.toThrow('stop here')
     await expect(adapter.startTurn(piInput, sink(), control, host(questionsPrompter(new UserQuestionService())))).rejects.toThrow('stop here')
     expect(seen.map((options) => options.approvals)).toEqual(['never', undefined])
+  })
+})
+
+describe('an ACP session carries the turn prompter\'s approvals to client file writes', () => {
+  async function writeThroughSession(prompter: PermissionPrompter) {
+    const cwd = tempHome('mousse-never-acp-session-')
+    const questions = new UserQuestionService()
+    const asked = vi.spyOn(questions, 'requestAnswers').mockResolvedValue({ write: 'allow' })
+    const agent = inProcessAgent((app: AgentApp) => {
+      app
+        .onRequest(methods.agent.initialize, () => ({ protocolVersion: PROTOCOL_VERSION, agentCapabilities: {}, authMethods: [] }))
+        .onRequest(methods.agent.session.new, () => ({ sessionId: 'native-1' }))
+        .onRequest(methods.agent.session.prompt, async (c) => {
+          await c.client.request(methods.client.fs.writeTextFile, { sessionId: 'native-1', path: join(cwd, 'new.txt'), content: 'x' }).catch(() => undefined)
+          return { stopReason: 'end_turn' as const }
+        })
+    })
+    const saved = new Map<string, SavedAcpSession>()
+    const sessions = new AcpSessions({
+      label: 'Agent',
+      defaultInstanceId: 'acp:fake',
+      questions,
+      connect: agent.connect,
+      quirks: { ...NO_QUIRKS, clientFs: true },
+      store: { saved: (id) => saved.get(id), setSaved: (id, value) => (value ? saved.set(id, value) : saved.delete(id)), models: () => [], setModels: noop },
+      launchGeneration: () => 0,
+      signInGeneration: () => 0,
+      markSignedOut: noop,
+      signInRequiredMessage: 'Sign in first'
+    })
+    try {
+      await sessions.chat({ threadId: 'thread-1', cwd, model: 'default', prompt: 'write', onText: noop, prompter })
+    } finally {
+      sessions.stop()
+    }
+    return { asked, written: existsSync(join(cwd, 'new.txt')) }
+  }
+
+  it('refuses without asking under `never`', async () => {
+    const { asked, written } = await writeThroughSession(refusingPrompter())
+    expect(asked).not.toHaveBeenCalled()
+    expect(written).toBe(false)
+  })
+
+  it('asks under `ask`', async () => {
+    const { asked, written } = await writeThroughSession(questionsPrompter(new UserQuestionService()))
+    expect(asked).toHaveBeenCalledOnce()
+    expect(written).toBe(true)
+  })
+})
+
+describe('Mousse tools that wait for the user are not offered under `never`', () => {
+  it('the registry offers them only when the run may ask', () => {
+    const fixture = fakeAppToolHost()
+    const quickActions = new QuickActionTools(async () => true, () => {})
+    const { registry: tools } = createAppToolRegistry({ host: { ...fixture.host, quickActions } })
+    const offered = (approvals?: 'never') => tools.offeredFor({ ...appTurn({ threadId: 'thread-1', runId: 'run-1', ...(approvals ? { approvals } : {}) }), turnToken: '' } as AppToolTurn).map((tool) => tool.name)
+    expect(offered()).toEqual(expect.arrayContaining(['ask_user', 'create_quick_action']))
+    expect(offered('never')).not.toContain('ask_user')
+    expect(offered('never')).not.toContain('create_quick_action')
+    expect(offered('never')).toContain('create_task')
   })
 })

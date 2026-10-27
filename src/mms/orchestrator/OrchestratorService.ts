@@ -46,7 +46,7 @@ import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/
 import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { stopStrategy } from '../run/CommandPolicy'
-import { AppToolTurns, createAppToolRegistry, McpToolError, type AppToolHost, type AppToolTurn, type McpCaller, type ToolRegistry } from '../run/mcp/appTools'
+import { AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type AppToolHost, type AppToolTurn, type McpCaller, type ToolRegistry } from '../run/mcp/appTools'
 import { modeFactsFor, prepareSkills, sessionInstructions, settingsToolEnabled, turnPreamble } from '../run/mcp/appTools/assemble'
 import { questionApproval } from '../run/mcp/appTools/quickActions'
 import { APPLET_GENERATION_GUIDANCE } from '../../shared/appletGuidance'
@@ -1745,6 +1745,8 @@ export class OrchestratorService extends EventEmitter {
       // A Plan turn cannot start threads; everything else listed is usable when available now.
       .filter((tool) => !(turn.modeCeiling === 'plan' && tool.access === 'startsThreads'))
       .filter((tool) => (tool.available?.(turn) ?? true) === true)
+      // A run nobody answers does not offer the tools that wait for the user (they are refused if called).
+      .filter((tool) => !unattendedRefusal(tool, turn))
       // A screenshot is refused when it cannot reach the model; the preamble does not offer it.
       .filter((tool) => !(tool.name === 'browser_screenshot' && turn.browser && !turn.browser.vision))
       .map((tool) => tool.name)

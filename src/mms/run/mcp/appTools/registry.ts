@@ -160,9 +160,9 @@ export class ToolRegistry {
     })
   }
 
-  /** The tools an in-process loop offers this turn, in registration order. */
+  /** The tools an in-process loop offers this turn, in registration order (none that a `never` run refuses). */
   offeredFor(turn: AppToolTurn): MousseTool[] {
-    return this.list().filter((tool) => (tool.offered ? tool.offered(turn) : tool.available?.(turn) ?? true) === true)
+    return this.list().filter((tool) => (tool.offered ? tool.offered(turn) : tool.available?.(turn) ?? true) === true && !unattendedRefusal(tool, turn))
   }
 
   /**

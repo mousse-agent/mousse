@@ -237,3 +237,30 @@ describe('Bedrock one-shots', () => {
     }
   })
 })
+
+describe('runPiOneShot cancellation', () => {
+  it('a pre-cancelled one-shot never starts the credential read, so its failure cannot go unhandled', async () => {
+    const getAuth = vi.fn(async () => { throw new Error('offline credential refresh failed') })
+    const model = { id: 'offline', provider: 'openai', api: 'openai-responses' }
+    const models = { getModel: () => model, getModels: () => [model], getAuth, stream: vi.fn(), streamSimple: vi.fn() }
+    await expect(runPiOneShot(models as never, 'openai', { model: model.id, system: '', prompt: '', onActivity: () => {} }, AbortSignal.abort()))
+      .rejects.toMatchObject({ name: 'AbortError' })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(getAuth).not.toHaveBeenCalled()
+    expect(models.streamSimple).not.toHaveBeenCalled()
+  })
+
+  it('a credential read that fails after a stop is handled', async () => {
+    let fail: (error: Error) => void = () => {}
+    const getAuth = vi.fn(() => new Promise((_resolve, reject) => { fail = reject }))
+    const model = { id: 'offline', provider: 'openai', api: 'openai-responses' }
+    const models = { getModel: () => model, getModels: () => [model], getAuth, stream: vi.fn(), streamSimple: vi.fn() }
+    const stop = new AbortController()
+    const pending = runPiOneShot(models as never, 'openai', { model: model.id, system: '', prompt: '', onActivity: () => {} }, stop.signal)
+    stop.abort()
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    fail(new Error('offline credential refresh failed'))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(models.streamSimple).not.toHaveBeenCalled()
+  })
+})

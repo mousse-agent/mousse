@@ -79,7 +79,8 @@ import {
   type InProcessAuthority,
   type ToolOutcome,
   type ToolRegistry,
-  type ToolTimeline
+  type ToolTimeline,
+  unattendedRefusal
 } from '../run/mcp/appTools'
 import { DELEGATION_TOOL_NAMES, delegationToolDefinitions, type DelegationToolHost } from '../run/mcp/appTools/delegation'
 import { PUBLISH_APPLET_TOOL } from '../run/mcp/appTools/applets'
@@ -672,6 +673,12 @@ export class LlmClient {
       ...(options.toolAccess ? { toolAccess: options.toolAccess } : {}),
       ...(options.approvals === 'never' ? { approvals: 'never' as const } : {})
     }
+    // A run nobody answers is not offered the Mousse tools that wait for the user (they are refused if called).
+    if (appTurn?.approvals === 'never')
+      tools = tools.filter((tool) => {
+        const appTool = this.appTools.registry.get(tool.name)
+        return !appTool || !unattendedRefusal(appTool, appTurn)
+      })
     if (options.onPublishApplet && !runtimeContext && !subagent) {
       tools = [...tools, PUBLISH_APPLET_TOOL]
       systemPrompt += options.appletInstructions ?? ''

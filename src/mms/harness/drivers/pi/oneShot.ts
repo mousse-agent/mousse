@@ -24,7 +24,7 @@ export async function runPiOneShot(models: PiOneShotModels, providerId: string, 
   if (model.api === 'bedrock-converse-stream')
     throw harnessAppError({ code: 'unsupported', message: 'Bedrock models cannot name chats yet. Choose another model for chat titles, or Automatic.' })
   // Reading the credentials may refresh a sign-in over the network: the timeout and a stop bound it too.
-  if (!(await untilAborted(models.getAuth(model), signal)))
+  if (!(await untilAborted(() => models.getAuth(model), signal)))
     throw harnessAppError({ code: 'signed_out', message: 'This provider is not signed in. Sign in or choose another model.' })
   const context = {
     systemPrompt: spec.system,
@@ -41,13 +41,24 @@ export async function runPiOneShot(models: PiOneShotModels, providerId: string, 
   return { text: message.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('') }
 }
 
-/** `promise`, or an `AbortError` as soon as `signal` aborts (the promise itself is left to settle). */
-function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+/**
+ * `start()`, or an `AbortError` as soon as `signal` aborts. Nothing starts once `signal` has aborted,
+ * and a started promise always has a handler, so a failure after the abort is never unhandled.
+ */
+function untilAborted<T>(start: () => Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'))
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => reject(new DOMException('Aborted', 'AbortError'))
     signal.addEventListener('abort', onAbort, { once: true })
-    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
+    let promise: Promise<T>
+    try {
+      promise = start()
+    } catch (error) {
+      signal.removeEventListener('abort', onAbort)
+      reject(error)
+      return
+    }
+    void promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
   })
 }
 
