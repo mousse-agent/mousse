@@ -28,8 +28,8 @@ import { NO_QUIRKS } from '../../src/mms/harness/acp/quirks'
 import { inProcessAgent } from '../../src/mms/run/testkit/acpAgent'
 import { QuickActionTools } from '../../src/mms/orchestrator/QuickActionTools'
 import { createAppToolRegistry, type AppToolTurn } from '../../src/mms/run/mcp/appTools'
-import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
-import { appTurn, fakeAppToolHost } from '../run/appToolsFixture'
+import { appToolRegistry, appTurn, fakeAppToolHost } from '../run/appToolsFixture'
+import { delegationFixture, type DelegationFixture } from '../run/delegationFixture'
 import type { RunPolicy } from '../../src/shared/harness/types'
 
 const homes: string[] = []
@@ -288,14 +288,21 @@ describe('Codex', () => {
 })
 
 describe('Mousse tools that wait for the user', () => {
-  function registry() {
+  let fx: DelegationFixture | undefined
+  afterEach(() => {
+    fx?.dispose()
+    fx = undefined
+  })
+  async function registry() {
+    fx = delegationFixture()
+    const run = await fx.runningRun('thread-1')
     const fixture = fakeAppToolHost()
     const approve = vi.fn(async () => true)
     const quickActions = new QuickActionTools(approve, () => {})
-    const { registry: tools } = createAppToolRegistry({ host: { ...fixture.host, quickActions } })
+    const { registry: tools, turns, request } = appToolRegistry(fx.engine, { ...fixture.host, quickActions })
     const call = (name: string, args: Record<string, unknown>, approvals?: 'never') => {
-      const turn = { ...appTurn({ threadId: 'thread-1', runId: '', trusted: true, ...(approvals ? { approvals } : {}) }), turnToken: '' } as AppToolTurn
-      return tools.callInProcess(name, args, { kind: 'trusted' }, { turn, toolCallId: 'call-1', signal: new AbortController().signal })
+      turns.register(appTurn({ threadId: 'thread-1', runId: run.runId, ...(approvals ? { approvals } : {}) }))
+      return tools.call(name, args, request({ threadId: 'thread-1', runId: run.runId }))
     }
     return { askUser: fixture.host.askUser, approve, call }
   }
@@ -303,7 +310,7 @@ describe('Mousse tools that wait for the user', () => {
   const action = { label: 'Build', kind: 'bash', payload: 'npm run build' }
 
   it('are refused before they ask under `never`', async () => {
-    const r = registry()
+    const r = await registry()
     expect(await r.call('ask_user', question, 'never')).toEqual({ text: QUESTIONS_REFUSED_MESSAGE, isError: true })
     expect(await r.call('create_quick_action', action, 'never')).toEqual({ text: APPROVALS_REFUSED_MESSAGE, isError: true })
     expect(r.askUser).not.toHaveBeenCalled()
@@ -313,26 +320,11 @@ describe('Mousse tools that wait for the user', () => {
   })
 
   it('still ask under `ask`', async () => {
-    const r = registry()
+    const r = await registry()
     expect(await r.call('ask_user', question)).toMatchObject({ isError: false })
     expect(await r.call('create_quick_action', action)).toMatchObject({ isError: false })
     expect(r.askUser).toHaveBeenCalledOnce()
     expect(r.approve).toHaveBeenCalledOnce()
-  })
-
-  it('the pi loop is told `never` from the bridge, and nothing under `ask`', async () => {
-    const seen: Array<{ approvals?: string }> = []
-    const adapter = new PiLoopAdapter(() => ({
-      chat: async (_messages, _onTool, options = {}) => {
-        seen.push(options)
-        throw new Error('stop here')
-      }
-    }))
-    const control = { drainSteer: () => undefined, heartbeat: noop }
-    const piInput = turnInput({ instanceId: 'pi:openai', llmProvider: 'openai' })
-    await expect(adapter.startTurn(piInput, sink(), control, host(refusingPrompter()))).rejects.toThrow('stop here')
-    await expect(adapter.startTurn(piInput, sink(), control, host(questionsPrompter(new UserQuestionService())))).rejects.toThrow('stop here')
-    expect(seen.map((options) => options.approvals)).toEqual(['never', undefined])
   })
 })
 

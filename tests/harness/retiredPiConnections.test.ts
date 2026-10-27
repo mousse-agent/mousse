@@ -129,7 +129,6 @@ async function upgraded(options: UpgradeOptions = {}) {
   } as unknown as CodexInstallation
   const adopted: string[] = []
   let adopting = 0
-  const chats: unknown[] = []
   let prefsStored: Record<string, unknown> = options.custom
     ? { 'pi:openai-codex': { hidden: [], order: [], favorites: [], custom: [{ id: 'gpt-custom', label: 'My GPT', capabilities: { efforts: [], images: false } }] } }
     : {}
@@ -140,11 +139,7 @@ async function upgraded(options: UpgradeOptions = {}) {
     questions: new UserQuestionService(),
     shellPath: async () => ({ entries: [], source: 'failed' }),
     drivers: [
-      piDriver({
-        // The legacy loop: nothing may reach it on a retired entry.
-        client: () => ({ chat: async (...args: unknown[]) => void chats.push(args) }) as never,
-        credentials: () => providerAuth
-      }),
+      piDriver({ credentials: () => providerAuth }),
       codexDriver({
         builtIn: () => {
           throw new Error('the user’s own Codex is not part of this profile')
@@ -190,7 +185,6 @@ async function upgraded(options: UpgradeOptions = {}) {
     providerAuth,
     holder,
     adopted,
-    chats,
     stored: () => instances,
     prefs: () => prefsStored,
     moveWaiting: () => adopting > 0,
@@ -295,7 +289,6 @@ describe('retired legacy-only Pi connections', () => {
     // A binding made before the upgrade (a retried or recovered attempt) does not run either.
     const binding = await harness.bind(harness.resolveStored(pinned, { purpose: 'turn', allowDisabled: true }), { mode: 'agent' })
     await expect(harness.startTurn(turnSpec(binding)).result).rejects.toMatchObject({ code: 'provider_retired' })
-    expect(profile.chats).toEqual([])
     // Asked directly, the credential store resolves no auth for it: no token is read or refreshed.
     const model = profile.providerAuth.models.getModels('openai-codex')[0]!
     expect(await profile.providerAuth.models.getAuth(model)).toBeUndefined()
@@ -311,7 +304,6 @@ describe('retired legacy-only Pi connections', () => {
     harness.instanceMap.setEntry('pi:openai-codex', { driver: 'pi', enabled: false, config: { displayName: 'ChatGPT', signedOutInMousse: true } })
     expect(refusal(() => harness.resolveStored(pinned, { purpose: 'turn' }))).toMatchObject({ code: 'provider_retired' })
     await expect(harness.startTurn(turnSpec(binding)).result).rejects.toMatchObject({ code: 'provider_retired' })
-    expect(profile.chats).toEqual([])
   })
 
   it('offers no sign-in: the gateway and the credential service (the protocol and CLI path) refuse it, and the stored sign-in stays', async () => {

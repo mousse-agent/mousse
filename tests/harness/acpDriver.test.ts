@@ -133,7 +133,7 @@ describe('the generic ACP driver', () => {
     const resolved = harness.resolveStored({ instanceId: 'acp:fake-agent', llmProvider: '', model: 'default' }, { purpose: 'turn' })
     expect(resolved.llmProvider).toBe('')
     expect(() => harness.resolveStored({ instanceId: 'acp:fake-agent', llmProvider: '', model: 'default' }, { purpose: 'delegate_task' })).toThrow(/approves tools itself/)
-    const binding = await harness.bind(resolved, { mode: 'agent' })
+    const binding = await harness.bind(resolved, { mode: 'agent', permissionMode: 'full' })
     await expect(harness.startTurn(spec(binding)).result).resolves.toMatchObject({ text: 'hello' })
     expect(calls.filter((call) => call.startsWith('prompt'))).toHaveLength(1)
     expect(notices).toEqual(['Fake agent approves tools itself.'])
@@ -143,11 +143,11 @@ describe('the generic ACP driver', () => {
     const { harness, calls, spec } = fixture()
     await harness.instances.add({ driver: 'acp', config: { displayName: 'Fake agent', binaryPath: process.execPath } })
     const resolved = () => harness.resolveStored({ instanceId: 'acp:fake-agent', llmProvider: '', model: 'default' }, { purpose: 'turn' })
-    const first = await harness.bind(resolved(), { mode: 'agent' })
+    const first = await harness.bind(resolved(), { mode: 'agent', permissionMode: 'full' })
     // Mousse cannot read which account an arbitrary agent runs as.
     expect(first.accountId).toBeUndefined()
     await harness.startTurn(spec(first)).result
-    const second = await harness.bind(resolved(), { mode: 'agent' })
+    const second = await harness.bind(resolved(), { mode: 'agent', permissionMode: 'full' })
     await harness.startTurn(spec(second, first)).result
     expect(calls.filter((call) => call === 'session/new')).toHaveLength(2)
     const prompted = calls.filter((call) => call.startsWith('prompt'))

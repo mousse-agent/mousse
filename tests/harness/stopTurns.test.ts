@@ -510,11 +510,11 @@ function claudeRig(options: {
     stopCalls,
     turnQueries,
     resolves: () => resolves,
-    /** A turn of `claude:work` in a project folder (the real service needs one). */
+    /** A turn of `claude:work` in a project folder (the real service needs one), under Full access as recorded. */
     startWithCwd: async (threadId: string, attemptId: string, prompt?: string) => {
-      const binding = await harness.bind(harness.resolveStored({ instanceId: 'claude:work', llmProvider: '', model: 'sonnet' }, { purpose: 'turn' }), { mode: 'agent' })
+      const binding = await harness.bind(harness.resolveStored({ instanceId: 'claude:work', llmProvider: '', model: 'sonnet' }, { purpose: 'turn' }), { mode: 'agent', permissionMode: 'full' })
       const spec = turnSpec('claude:work', binding, { threadId, attemptId, cwd, ...(prompt ? { prompt } : {}) })
-      return harness.startTurn({ ...spec, input: { ...spec.input, model: 'sonnet' } })
+      return harness.startTurn({ ...spec, input: { ...spec.input, model: 'sonnet', permissionMode: 'full' } })
     },
     stop: () => {
       harness.stop()

@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
-import { PI_LEGACY_CAPS, piDriver } from '../../src/mms/harness/drivers/pi'
+import { PI_RPC_CAPS, piDriver } from '../../src/mms/harness/drivers/pi'
 import { configInstanceStore, ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import { PiStubAdapter } from '../support/piStub'
 import { testHarness } from '../../src/mms/run/testkit/harness'
@@ -89,7 +89,7 @@ describe('a tombstone across a downgrade', () => {
     expect((await next.harness.llmProviders(device)).map((option) => option.instanceId)).toEqual([])
     expect(next.harness.catalog.addOptions().find((option) => option.id === 'openrouter')).toMatchObject({ added: false, hasSavedKey: true })
     // A thread pinned to it runs nothing.
-    await expect(next.harness.bind({ instanceId: 'pi:openrouter', llmProvider: 'openrouter', driver: 'pi', model: 'openrouter-model', caps: PI_LEGACY_CAPS }, { mode: 'default' }))
+    await expect(next.harness.bind({ instanceId: 'pi:openrouter', llmProvider: 'openrouter', driver: 'pi', model: 'openrouter-model', caps: PI_RPC_CAPS }, { mode: 'default' }))
       .rejects.toMatchObject({ code: 'instance_unknown' })
     expect(() => next.harness.resolveStored({ instanceId: 'pi:openrouter', llmProvider: 'openrouter', model: 'openrouter-model' }, { purpose: 'turn' })).toThrow()
     expect(startTurn).not.toHaveBeenCalled()

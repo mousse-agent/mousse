@@ -88,10 +88,11 @@ describe('Pi RPC engine with the real Pi child', () => {
   it('an allowed write runs once, and the thread’s next turn reuses the warm process', async () => {
     const { engine, recorder, project, spawned } = await setup()
     recorder.respond(script([{ tool: { name: 'write', args: { path: 'ok.txt', content: 'hi' } } }, { text: 'written' }, { text: 'again' }]))
-    const first = harness(project)
+    // Full access: the write runs without asking.
+    const first = harness(project, { permissionMode: 'full' })
     expect((await engine.startTurn(first.input, first.sink, first.ctl, first.host)).text).toBe('written')
     expect(existsSync(join(project, 'ok.txt'))).toBe(true)
-    const second = harness(project, { nativeHistory: 'user: Say hello\nassistant: written', runId: 'r2' })
+    const second = harness(project, { permissionMode: 'full', nativeHistory: 'user: Say hello\nassistant: written', runId: 'r2' })
     expect((await engine.startTurn(second.input, second.sink, second.ctl, second.host)).text).toBe('again')
     // The same process served both turns.
     expect(spawned).toHaveLength(1)

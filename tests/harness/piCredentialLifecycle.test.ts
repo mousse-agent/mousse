@@ -48,7 +48,7 @@ function runtimeIn(dir: string, source: PiOAuthSource, signIn = vi.fn(async () =
   const home = join(dir, 'home')
   mkdirSync(home, { recursive: true })
   const logout = vi.fn(async () => {})
-  const context = { instanceId: 'pi:openrouter', builtIn: true, config: { home: 'default', engine: 'rpc' }, env: { instanceId: 'pi:openrouter', homeId: 'x', home, env: {} }, profileHome: dir, installationHome: dir, stateDir: dir, questions: {}, findBinary: () => undefined, changed: () => {} } as unknown as DriverContext
+  const context = { instanceId: 'pi:openrouter', builtIn: true, config: { home: 'default' }, env: { instanceId: 'pi:openrouter', homeId: 'x', home, env: {} }, profileHome: dir, installationHome: dir, stateDir: dir, questions: {}, findBinary: () => undefined, changed: () => {} } as unknown as DriverContext
   const runtime = createRpcRuntime(context, 'openrouter', 'OpenRouter', () => ({ logout, runOAuthLogin: signIn, runApiKeyLogin: signIn }) as never, { runtime: unused, catalog: unused, oauth: source })
   cleanups.push(() => runtime.stop())
   const authFile = join(home, 'auth.json')
@@ -116,7 +116,7 @@ describe('Pi’s auth.json ends with the sign-in', () => {
   it('is removed by the gateway’s sign-out of the instance', async () => {
     const dir = scratch()
     const logout = vi.fn(async () => {})
-    const instances = new ProviderInstanceService({ store: { read: () => ({ instances: { 'pi:openrouter': { driver: 'pi', enabled: true, config: { engine: 'rpc' } } }, seedVersion: 1 }), write: () => {} } })
+    const instances = new ProviderInstanceService({ store: { read: () => ({ instances: { 'pi:openrouter': { driver: 'pi', enabled: true, config: {} } }, seedVersion: 1 }), write: () => {} } })
     const source: PiOAuthSource = { credential: async () => undefined, refresh: async () => undefined }
     const harness = testHarness({ profileHome: dir, instances, drivers: [piDriver({ credentials: () => ({ has: () => true, getConfiguredProviders: () => [], getConfiguredLlmProviders: () => [], logout }) as never, rpc: { runtime: unused, catalog: unused, oauth: source } })] })
     cleanups.push(() => harness.stop())
@@ -162,7 +162,7 @@ describe('stable identities for tokens that name no account', () => {
 
 describe('native forks through the gateway', () => {
   function gateway(dir: string) {
-    const instances = new ProviderInstanceService({ store: { read: () => ({ instances: { 'pi:openrouter': { driver: 'pi', enabled: true, config: { engine: 'rpc' } } }, seedVersion: 1 }), write: () => {} } })
+    const instances = new ProviderInstanceService({ store: { read: () => ({ instances: { 'pi:openrouter': { driver: 'pi', enabled: true, config: {} } }, seedVersion: 1 }), write: () => {} } })
     const harness = testHarness({ profileHome: dir, instances, drivers: [piDriver({ credentials: () => ({ has: () => true, getConfiguredProviders: () => [], getConfiguredLlmProviders: () => [] }) as never, rpc: { runtime: unused, catalog: unused, identity: () => 'oauth:fake-A' } })] })
     cleanups.push(() => harness.stop())
     return harness

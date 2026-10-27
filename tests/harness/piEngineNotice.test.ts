@@ -1,7 +1,7 @@
 /**
- * PR 2 §5 "Engine notice": the first RPC turn of each `pi:*` instance tells the thread, once, that
- * the provider now runs on Pi's agent and how to switch back; it is recorded in the instance's state
- * dir and not shown again, also after a restart.
+ * PR 2 §5 "Engine notice" (PR 4h text): the first turn of each `pi:*` instance tells the thread,
+ * once, that the Mousse agent engine was removed and the provider now runs on Pi's agent; it is
+ * recorded in the instance's state dir and not shown again, also after a restart.
  */
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -22,7 +22,7 @@ function runtimeIn(stateDir: string) {
   const context = {
     instanceId: 'pi:openrouter',
     builtIn: true,
-    config: { home: 'default', engine: 'rpc' },
+    config: { home: 'default' },
     // No home: the engine refuses to start, after the notice decision (nothing is spawned).
     env: { instanceId: 'pi:openrouter', homeId: 'x', env: {} },
     profileHome: stateDir,
@@ -52,7 +52,7 @@ describe('Pi engine notice', () => {
     await first.turn('thread-b')
     expect(first.notices).toEqual([{
       threadId: 'thread-a',
-      text: "OpenRouter now runs on Pi's agent, so its tools and replies may differ slightly. To switch back: Providers → OpenRouter → Advanced → Engine: Legacy."
+      text: "The Mousse agent engine was removed; OpenRouter now runs on Pi's agent, so its tools and replies may differ slightly."
     }])
     expect(existsSync(join(stateDir, ENGINE_NOTICE_FILE))).toBe(true)
     await first.runtime.stop()

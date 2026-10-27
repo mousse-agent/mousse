@@ -27,8 +27,7 @@ const DRIVERS: HarnessDriver[] = [
 
 describe('MCP turn binding (PR 2 §2)', () => {
   it.each(DRIVERS.map((driver) => [driver.kind, driver] as const))('%s declares a turn binding when it attaches the Mousse MCP server', (_kind, driver) => {
-    // Any engine the driver can run (Pi: the legacy loop, or Pi's agent with `engine: 'rpc'`).
-    const attaches = [undefined, { engine: 'rpc' }].some((raw) => driver.caps(driver.decodeConfig(raw)).mcp)
+    const attaches = driver.caps(driver.decodeConfig(undefined)).mcp
     if (attaches) expect(['per_call', 'drained_turn', 'rotate']).toContain(driver.mcpTurnBinding)
     else expect(driver.mcpTurnBinding).toBeUndefined()
   })

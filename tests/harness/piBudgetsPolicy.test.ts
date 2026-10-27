@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { PI_LEGACY_CAPS, PI_RPC_CAPS, piDriver } from '../../src/mms/harness/drivers/pi'
+import { PI_RPC_CAPS, piDriver } from '../../src/mms/harness/drivers/pi'
 import { checkPolicy } from '../../src/mms/harness/policy'
 import { PiRpcEngine, type PiRpcEngineOptions } from '../../src/mms/harness/pi/engine'
 import { RunCounters, TurnBudget, type BudgetLimits } from '../../src/mms/harness/budget'
@@ -8,30 +8,15 @@ import type { RunPolicy } from '../../src/shared/harness/types'
 const policy = (budget: RunPolicy['budget']): RunPolicy => ({ mode: 'default', approvals: 'ask', budget })
 
 describe('Pi budgets policy', () => {
-  it('the legacy loop refuses count, token and cost limits; the RPC engine reserves token and cost limits', () => {
-    expect(PI_LEGACY_CAPS.budgets).toBe('observed')
-    expect(checkPolicy(PI_LEGACY_CAPS, policy({ maxTurns: 3 }))).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['budgets'] } })
-    expect(checkPolicy(PI_LEGACY_CAPS, policy({ maxUsd: 1 }))).toMatchObject({ ok: false, error: { missing: ['budgets', 'spendLimits'] } })
-    expect(PI_LEGACY_CAPS.spendLimits).toBe('unsupported')
+  it('the RPC engine reserves token and cost limits, and a definition stays refused there until it earns `exact`', () => {
     expect(PI_RPC_CAPS.spendLimits).toBe('reserved')
-    for (const caps of [PI_LEGACY_CAPS, PI_RPC_CAPS]) expect(checkPolicy(caps, policy({ maxWallMs: 60_000 }))).toEqual({ ok: true })
+    expect(checkPolicy(PI_RPC_CAPS, policy({ maxWallMs: 60_000 }))).toEqual({ ok: true })
     // Without the model's facts nothing is assumed.
     expect(checkPolicy(PI_RPC_CAPS, policy({ maxUsd: 1 }))).toMatchObject({ ok: false, error: { missing: ['spendLimits'] } })
-  })
-
-  it("the legacy loop admits an agent definition's own limits, which it holds in its loop, and nothing else's (PR 4 4d)", () => {
     const definition: RunPolicy = {
       ...policy({ maxTurns: 32, maxToolCalls: 64, maxInputTokens: 1_000, maxOutputTokens: 500, maxUsd: 1 }),
       approvals: 'grants', origin: 'definition', tools: { allow: ['read'] }, authority: { kind: 'definition', digest: 'd'.repeat(64) }
     }
-    expect(PI_LEGACY_CAPS.definitionLimits).toBe('in_loop')
-    expect(checkPolicy(PI_LEGACY_CAPS, definition)).toEqual({ ok: true })
-    // A bot's authority, or the same limits with no authority, are still refused on the loop.
-    expect(checkPolicy(PI_LEGACY_CAPS, { ...definition, authority: { kind: 'bot', digest: 'd'.repeat(64) } })).toMatchObject({ ok: false, error: { missing: expect.arrayContaining(['budgets', 'spendLimits']) } })
-    const { authority: _authority, ...plain } = definition
-    expect(checkPolicy(PI_LEGACY_CAPS, plain)).toMatchObject({ ok: false, error: { missing: ['budgets', 'spendLimits'] } })
-    // Pi RPC only asks for approval: a definition stays refused there until it earns `exact`.
-    expect(PI_RPC_CAPS.definitionLimits).toBe('none')
     expect(checkPolicy(PI_RPC_CAPS, definition)).toMatchObject({ ok: false, error: { missing: expect.arrayContaining(['toolControl']) } })
   })
 
@@ -103,20 +88,17 @@ describe('Pi budgets policy', () => {
     expect(checkPolicy(PI_RPC_CAPS, policy({ maxToolCalls: 2 }))).toEqual({ ok: true })
   })
 
-  it('declares the RPC caps only for an instance whose config asks for the RPC engine', () => {
+  it('declares the RPC caps for every instance, in a home of its own', () => {
     const unused = () => { throw new Error('unused') }
-    const rpc = { runtime: unused, catalog: unused }
-    const driver = piDriver({ rpc })
-    // A private home only for the RPC engine: legacy instances keep their home id (and bindings).
-    const privateHome = driver.alwaysPrivateHome as (config: ReturnType<typeof driver.decodeConfig>) => boolean
-    expect(privateHome(driver.decodeConfig({ engine: 'rpc' }))).toBe(true)
-    expect(privateHome(driver.decodeConfig({}))).toBe(false)
+    const driver = piDriver({ rpc: { runtime: unused, catalog: unused } })
+    expect(driver.alwaysPrivateHome).toBe(true)
     expect(driver.mcpTurnBinding).toBe('per_call')
-    expect(driver.caps(driver.decodeConfig({ engine: 'rpc' }))).toBe(PI_RPC_CAPS)
-    expect(driver.caps(driver.decodeConfig({}))).toBe(PI_LEGACY_CAPS)
-    expect(driver.caps(driver.decodeConfig({ engine: 'nonsense' }))).toBe(PI_LEGACY_CAPS)
-    // Without the profile's RPC options every instance stays on the legacy loop.
-    const legacyOnly = piDriver()
-    expect(legacyOnly.caps(legacyOnly.decodeConfig({ engine: 'rpc' }))).toBe(PI_LEGACY_CAPS)
+    // No packaged runtime to read a version from, so no evidence: approval only.
+    expect(driver.caps(driver.decodeConfig({}))).toBe(PI_RPC_CAPS)
+    // A stored engine from before is ignored.
+    expect(driver.caps(driver.decodeConfig({ engine: 'legacy' }))).toBe(PI_RPC_CAPS)
+    // Without the profile's RPC options the caps are the same; every turn is refused.
+    const noRuntime = piDriver()
+    expect(noRuntime.caps(noRuntime.decodeConfig({}))).toBe(PI_RPC_CAPS)
   })
 })

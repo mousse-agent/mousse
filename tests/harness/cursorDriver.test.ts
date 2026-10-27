@@ -75,7 +75,7 @@ function setup(connect: NonNullable<NonNullable<Parameters<typeof cursorDriver>[
     } as unknown as TurnSpec['host']
   })
   const turn = async (threadId: string, options: Parameters<typeof spec>[2] = {}) => {
-    const binding = await harness.bind(harness.resolveStored({ instanceId: INSTANCE, llmProvider: '', model: 'default' }, { purpose: 'turn' }), { mode: 'agent' })
+    const binding = await harness.bind(harness.resolveStored({ instanceId: INSTANCE, llmProvider: '', model: 'default' }, { purpose: 'turn' }), { mode: 'agent', permissionMode: 'full' })
     return harness.startTurn(spec(threadId, binding, options))
   }
   const state = () => JSON.parse(readFileSync(join(stateDir, 'cursor.json'), 'utf8')) as { sessions: Record<string, { agentId: string; runIds: string[]; historyKey?: string }> }

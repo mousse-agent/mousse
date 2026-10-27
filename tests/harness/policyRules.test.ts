@@ -150,8 +150,9 @@ describe('the schedule purpose and origin on the gateway', () => {
   it('a schedule-origin binding is refused at admission on an uncontrolled instance', async () => {
     const { harness, runtime, spec } = fixture({ toolControl: 'uncontrolled' })
     const resolved = harness.resolveStored({ instanceId: 'codex', llmProvider: '', model: 'm' }, { purpose: 'turn' })
-    const binding = await harness.bind(resolved, { mode: 'agent', origin: 'schedule' })
-    expect(binding.policy).toMatchObject({ origin: 'schedule', approvals: 'ask' })
+    // Full access: the only mode an instance that approves tools itself takes.
+    const binding = await harness.bind(resolved, { mode: 'agent', origin: 'schedule', permissionMode: 'full' })
+    expect(binding.policy).toMatchObject({ origin: 'schedule', approvals: 'grants' })
     await expect(harness.startTurn(spec(binding)).result).rejects.toMatchObject({ code: 'policy_unenforceable' })
     expect(runtime.turns).toHaveLength(0)
     harness.stop()

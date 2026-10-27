@@ -41,11 +41,11 @@ describe('neutral tool names', () => {
     expect(mapNeutralTools(undefined, [])).toEqual({ ok: true, names: [] })
   })
 
-  it('maps Pi\'s tools on its RPC engine only: the legacy loop runs Mousse\'s own tools', () => {
+  it('maps Pi\'s tools where this build has Pi\'s runtime, and none without it', () => {
     const driver = piDriver({ rpc: {} as PiRpcDriverOptions })
-    expect(driver.nativeToolNames!('search', { home: 'private', engine: 'rpc' })).toEqual(['find', 'grep'])
-    expect(driver.nativeToolNames!('search', { home: 'default' })).toEqual([])
-    expect(driver.nativeToolNames!('web_fetch', { home: 'private', engine: 'rpc' })).toEqual([])
+    expect(driver.nativeToolNames!('search', { home: 'private' })).toEqual(['find', 'grep'])
+    expect(driver.nativeToolNames!('web_fetch', { home: 'private' })).toEqual([])
+    expect(piDriver().nativeToolNames!('search', { home: 'private' })).toEqual([])
   })
 
   it('the gateway refuses a tool the instance has no name for with policy_unenforceable', () => {

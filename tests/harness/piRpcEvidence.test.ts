@@ -1,16 +1,14 @@
-import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { CONTAINMENT_EVIDENCE, PI_RPC_EVIDENCE_ITEMS, PI_RPC_NO_SHELL_ITEMS, type ContainmentEvidence } from '../../src/mms/harness/compatibility'
-import type { DriverContext } from '../../src/mms/harness/driver'
-import { PI_LEGACY_CAPS, PI_RPC_CAPS, PI_RPC_EXACT_CAPS, PI_RPC_NO_SHELL_CAPS, piDriver, piRpcCaps, piRpcEvidenceLevel, type PiRpcDriverOptions } from '../../src/mms/harness/drivers/pi'
+import { PI_RPC_CAPS, PI_RPC_EXACT_CAPS, PI_RPC_NO_SHELL_CAPS, piDriver, piRpcCaps, piRpcEvidenceLevel, type PiRpcDriverOptions } from '../../src/mms/harness/drivers/pi'
 import { piRuntimeVersion } from '../../src/mms/harness/drivers/pi/engines/rpc'
 import { checkPolicy } from '../../src/mms/harness/policy'
 import { definitionFeatureGaps, definitionRunPolicy } from '../../src/mms/agentDefinitions/definitionRuntime'
 
 // PR 4 4d-rpc: Pi RPC is `exact`/`strong`, and runs agent definitions, on a platform whose evidence
 // record for the pinned Pi holds every item; `exact`/`weak` with a no-shell record (every item but the
-// contained shell), and it runs definitions there too. Everywhere else definitions stay on the loop.
+// contained shell), and it runs definitions there too. Everywhere else definitions are refused.
 
 const piRoot = resolve(__dirname, '..', '..', 'node_modules/@earendil-works/pi-coding-agent')
 const version = piRuntimeVersion(piRoot)!
@@ -32,7 +30,7 @@ describe('Pi RPC’s evidence gate', () => {
 
   it('is exact only with a full record for this platform and this Pi', () => {
     expect(piRpcCaps({ platform: 'linux', piVersion: version, evidence: [record()] })).toBe(PI_RPC_EXACT_CAPS)
-    expect(PI_RPC_EXACT_CAPS).toMatchObject({ toolControl: 'exact', containment: 'strong', budgets: 'hard', spendLimits: 'reserved', definitionLimits: 'none' })
+    expect(PI_RPC_EXACT_CAPS).toMatchObject({ toolControl: 'exact', containment: 'strong', budgets: 'hard', spendLimits: 'reserved' })
     for (const input of [
       { platform: 'darwin' as const, piVersion: version, evidence: [record()] },
       { platform: 'win32' as const, piVersion: version, evidence: [record()] },
@@ -61,12 +59,8 @@ describe('Pi RPC’s evidence gate', () => {
   })
 
   it('with a no-shell record, definitions run on Pi RPC and pass admission; bots stay refused', () => {
-    const rpc = { engine: 'rpc' as const }
     const noShell = driver('win32', [record({ platform: 'win32', items: PI_RPC_NO_SHELL_ITEMS })])
-    expect(noShell.caps(rpc)).toBe(PI_RPC_NO_SHELL_CAPS)
-    expect(noShell.definitionCaps!(rpc)).toBe(PI_RPC_NO_SHELL_CAPS)
-    expect(noShell.definitionCaps!(rpc, { loop: true })).toBe(PI_LEGACY_CAPS)
-    expect(noShell.definitionCaps!({})).toBe(PI_LEGACY_CAPS)
+    expect(noShell.caps({})).toBe(PI_RPC_NO_SHELL_CAPS)
     // Interactive and unattended definition turns are admitted: shell is decided per call, at the gate.
     expect(checkPolicy(PI_RPC_NO_SHELL_CAPS, definitionPolicy)).toEqual({ ok: true })
     expect(checkPolicy(PI_RPC_NO_SHELL_CAPS, { ...definitionPolicy, origin: 'workflow' })).toEqual({ ok: true })
@@ -96,41 +90,21 @@ describe('Pi RPC’s evidence gate', () => {
     expect(piRpcCaps({ platform: 'freebsd', piVersion: version, evidence: CONTAINMENT_EVIDENCE })).toBe(PI_RPC_CAPS)
   })
 
-  it('with evidence, an RPC instance runs definitions itself; without it, and on the legacy engine, they stay on the loop', () => {
-    const rpc = { engine: 'rpc' as const }
+  it('with evidence, an instance runs definitions itself; without it, they are refused', () => {
     const proven = driver('linux', [record()])
-    expect(proven.caps(rpc)).toBe(PI_RPC_EXACT_CAPS)
-    expect(proven.definitionCaps!(rpc)).toBe(PI_RPC_EXACT_CAPS)
-    expect(proven.definitionCaps!({})).toBe(PI_LEGACY_CAPS)
-    expect(checkPolicy(proven.definitionCaps!(rpc), definitionPolicy)).toEqual({ ok: true })
+    expect(proven.caps({})).toBe(PI_RPC_EXACT_CAPS)
+    expect(checkPolicy(proven.caps({}), definitionPolicy)).toEqual({ ok: true })
 
     const unproven = driver('darwin', [record()])
-    expect(unproven.caps(rpc)).toBe(PI_RPC_CAPS)
-    expect(unproven.definitionCaps!(rpc)).toBe(PI_LEGACY_CAPS)
-    // Definitions keep running on the loop there, as before.
-    expect(checkPolicy(unproven.definitionCaps!(rpc), definitionPolicy)).toEqual({ ok: true })
-    expect(checkPolicy(unproven.caps(rpc), definitionPolicy)).toMatchObject({ ok: false, error: { missing: expect.arrayContaining(['toolControl']) } })
-  })
-
-  it('a definition that needs the loop (its settings not known) keeps the loop where the evidence passed, and every RPC runtime keeps the loop adapter for it', () => {
-    const rpc = { engine: 'rpc' as const }
-    expect(driver('linux', [record()]).definitionCaps!(rpc, { loop: true })).toBe(PI_LEGACY_CAPS)
-    expect(driver('linux', [record()]).definitionCaps!(rpc, { loop: false })).toBe(PI_RPC_EXACT_CAPS)
-    const context = (stateDir: string) => ({ instanceId: 'pi:x', stateDir, config: { engine: 'rpc' }, env: { env: {}, home: join(stateDir, 'home') } }) as unknown as DriverContext
-    const stateDir = join(tmpdir(), `mousse-pi-evidence-${process.pid}`)
-    const proven = driver('linux', [record()]).create(context(stateDir))
-    const unproven = driver('darwin', [record()]).create(context(stateDir))
-    expect(proven.definitionAdapter).toBeDefined()
-    expect(unproven.definitionAdapter).toBeDefined()
-    void proven.stop?.()
-    void unproven.stop?.()
+    expect(unproven.caps({})).toBe(PI_RPC_CAPS)
+    expect(checkPolicy(unproven.caps({}), definitionPolicy)).toMatchObject({ ok: false, error: { missing: expect.arrayContaining(['toolControl']) } })
   })
 })
 
 describe('definition settings Pi RPC must hold', () => {
   const features = { outputFormat: 'markdown' as const, browserMode: 'disabled' as const, memoryScope: 'off' as const, delegation: false }
 
-  it('holds what the loop holds the same way (output formats, any memory, delegation settings, the browser); refuses settings it was not given', () => {
+  it('holds output formats, any memory, delegation settings and the browser; refuses settings it was not given', () => {
     expect(definitionFeatureGaps(PI_RPC_EXACT_CAPS, { ...features, outputFormat: 'schema', memoryScope: 'thread' })).toEqual([])
     expect(definitionFeatureGaps(PI_RPC_EXACT_CAPS, { ...features, outputFormat: 'json', memoryScope: 'profile_agent', delegation: true })).toEqual([])
     // The browser is held as Mousse app tools: a runtime that cannot attach Mousse's MCP server cannot hold it.
@@ -141,14 +115,8 @@ describe('definition settings Pi RPC must hold', () => {
     expect(definitionFeatureGaps(PI_RPC_EXACT_CAPS, undefined).map((gap) => gap.pointer)).toEqual(['/settings'])
   })
 
-  it('no definition is routed to the loop by its settings: a browser definition runs on Pi RPC, and settings not given are refused everywhere', () => {
+  it('a browser definition runs on Pi RPC under the definition’s authority', () => {
     const policy = definitionRunPolicy({ origin: 'definition', grants: { skills: [], mcpTools: [], builtinTools: [], denied: [] }, budget: { maxTurns: 1, maxToolCalls: 1, maxElapsedMs: 0 } as never, definition: { id: 'd', revision: 'r' }, features: { ...features, browserMode: 'structured' } })
     expect(policy.authority).toMatchObject({ kind: 'definition' })
-    expect(policy.authority).not.toHaveProperty('loop')
-    expect(definitionFeatureGaps(PI_LEGACY_CAPS, undefined).map((gap) => gap.pointer)).toEqual(['/settings'])
-  })
-
-  it('the loop holds them all, as it always has', () => {
-    expect(definitionFeatureGaps(PI_LEGACY_CAPS, { outputFormat: 'schema', browserMode: 'structured', memoryScope: 'thread', delegation: true })).toEqual([])
   })
 })
