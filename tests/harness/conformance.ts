@@ -2,8 +2,10 @@ import { expect } from 'vitest'
 import type { ScenarioResult } from '../run/scenarios/runScenario'
 
 /** The driver each replay adapter's runs must be bound to, and the instance a scenario selects. */
-export const REPLAY_DRIVERS: Record<string, { driver: string; instanceId: string }> = {
+export const REPLAY_DRIVERS: Record<string, { driver: string; instanceId: string; homeId?: string }> = {
   pi: { driver: 'pi', instanceId: 'pi:openai' },
+  // The same instance on the Pi RPC engine: its own Mousse-owned home (Pi's agent dir).
+  'pi-rpc': { driver: 'pi', instanceId: 'pi:openai', homeId: 'private:pi:openai' },
   'claude-subscription': { driver: 'claude', instanceId: 'claude' },
   antigravity: { driver: 'antigravity', instanceId: 'antigravity' },
   codex: { driver: 'codex', instanceId: 'codex' },
@@ -36,7 +38,7 @@ export function assertHarnessConformance(result: ScenarioResult, options: { stop
   expect(binding).toMatchObject({
     instanceId: expected.instanceId,
     driver: expected.driver,
-    homeId: 'default',
+    homeId: expected.homeId ?? 'default',
     accountGeneration: 0,
     configRevision: 0,
     policy: { mode: 'default', approvals: 'ask' }
