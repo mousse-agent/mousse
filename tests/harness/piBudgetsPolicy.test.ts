@@ -19,6 +19,22 @@ describe('Pi budgets policy', () => {
     expect(checkPolicy(PI_RPC_CAPS, policy({ maxUsd: 1 }))).toMatchObject({ ok: false, error: { missing: ['spendLimits'] } })
   })
 
+  it("the legacy loop admits an agent definition's own limits, which it holds in its loop, and nothing else's (PR 4 4d)", () => {
+    const definition: RunPolicy = {
+      ...policy({ maxTurns: 32, maxToolCalls: 64, maxInputTokens: 1_000, maxOutputTokens: 500, maxUsd: 1 }),
+      approvals: 'grants', origin: 'definition', tools: { allow: ['read'] }, authority: { kind: 'definition', digest: 'd'.repeat(64) }
+    }
+    expect(PI_LEGACY_CAPS.definitionLimits).toBe('in_loop')
+    expect(checkPolicy(PI_LEGACY_CAPS, definition)).toEqual({ ok: true })
+    // A bot's authority, or the same limits with no authority, are still refused on the loop.
+    expect(checkPolicy(PI_LEGACY_CAPS, { ...definition, authority: { kind: 'bot', digest: 'd'.repeat(64) } })).toMatchObject({ ok: false, error: { missing: expect.arrayContaining(['budgets', 'spendLimits']) } })
+    const { authority: _authority, ...plain } = definition
+    expect(checkPolicy(PI_LEGACY_CAPS, plain)).toMatchObject({ ok: false, error: { missing: ['budgets', 'spendLimits'] } })
+    // Pi RPC only asks for approval: a definition stays refused there until it earns `exact`.
+    expect(PI_RPC_CAPS.definitionLimits).toBe('none')
+    expect(checkPolicy(PI_RPC_CAPS, definition)).toMatchObject({ ok: false, error: { missing: expect.arrayContaining(['toolControl']) } })
+  })
+
   it('the RPC engine’s model facts: a cap-honouring API, a price, and the smallest request at the effort; one that can never fit is refused at admission', () => {
     const cost = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }
     const models = [

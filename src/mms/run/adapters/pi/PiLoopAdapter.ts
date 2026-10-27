@@ -11,6 +11,8 @@ import type {
   TurnSink
 } from '../ProviderAdapter'
 import { retryContextOverflowOnce } from '../shared/retryContextOverflow'
+import { harnessAppError } from '../../../../shared/harness/types'
+import { parseThinkingSuffixFromModelId } from '../../../../shared/modelVariants'
 
 /** The slice of `LlmClient` the pi loop drives. */
 export type PiChatClient = Pick<LlmClient, 'chat'>
@@ -45,6 +47,9 @@ export class PiLoopAdapter implements ProviderAdapter {
     ctl: TurnControl,
     host: AdapterHost
   ): Promise<TurnResult> {
+    // An agent definition's turn (PR 4 §6): its authority, instructions and a session of its own come
+    // together, or the turn is refused before anything runs; it is never run as a plain chat.
+    if (host.definition || host.definitionLoop || input.instructions || input.session === 'ephemeral') return this.definitionTurn(input, sink, ctl, host)
     const providerRef: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model }
     sink.providerRef(providerRef)
     // Output or tool side effects make a replay after context overflow unsafe.
@@ -131,6 +136,82 @@ export class PiLoopAdapter implements ProviderAdapter {
         cacheRead: result.usage.cacheRead,
         cacheWrite: result.usage.cacheWrite
       },
+      contextSignature: result.contextInputs.signature,
+      contextModelKey: result.contextInputs.modelKey,
+      nativeMessages: result.nativeMessages,
+      providerRef
+    }
+  }
+
+  /**
+   * An agent definition's turn on this loop: the loop runs as a trusted agent (`TrustedAgentExecutionOptions`),
+   * as definitions always have, on the run's own client. The system prompt is the definition's (the
+   * runtime's own is replaced), the tools are its effective grants, every call goes through its
+   * authority (grants, `askUser`, script and path rules, unattended policy, approvals and their
+   * re-checks), and its counts are refused before each request and call. Everything here comes from
+   * the gateway (`definition`, from the turn's app context) or the host (`definitionLoop`); a turn
+   * that lacks any part is refused before anything runs.
+   */
+  private async definitionTurn(input: TurnInput, sink: TurnSink, ctl: TurnControl, host: AdapterHost): Promise<TurnResult> {
+    const definition = host.definition
+    const loop = host.definitionLoop
+    if (!definition || !loop || input.session !== 'ephemeral' || input.instructions?.placement !== 'replace')
+      throw harnessAppError({
+        code: 'policy_unenforceable',
+        message: "This turn does not carry everything an agent definition needs (its authority, its instructions and a session of its own), so it does not run.",
+        missing: ['toolControl'],
+        instanceId: input.instanceId
+      })
+    const providerRef: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model }
+    sink.providerRef(providerRef)
+    const { baseId, effort } = parseThinkingSuffixFromModelId(input.model)
+    const result = await loop.client().chat(
+      structuredClone(input.messages),
+      (event) => {
+        sink.tool(event)
+        ctl.heartbeat()
+      },
+      {
+        mode: 'agent',
+        llmProvider: input.llmProvider,
+        model: baseId,
+        ...(effort ? { effort } : {}),
+        ...(input.cwd ? { projectPath: input.cwd } : {}),
+        threadId: input.threadId,
+        // The run's record, its tool ledger, its live-run guard and the host's writer, as every turn has.
+        runId: input.runId,
+        ...(host.tools.toolAccess ? { toolAccess: host.tools.toolAccess } : {}),
+        ...(host.tools.toolLedger ? { toolLedger: host.tools.toolLedger } : {}),
+        ...(host.tools.runActive ? { runActive: host.tools.runActive } : {}),
+        signal: input.signal,
+        actor: loop.actor,
+        trustedAgent: {
+          systemPrompt: input.instructions.text,
+          grants: definition.grants,
+          budget: loop.budget,
+          policy: definition.policy,
+          ...(definition.approve ? { approveToolRequest: definition.approve } : {}),
+          effects: loop.effects
+        }
+      },
+      (event) => {
+        sink.thinking(event)
+        ctl.heartbeat()
+      },
+      (event) => {
+        sink.text(event)
+        ctl.heartbeat()
+      }
+    )
+    if (result.limitExceeded) loop.limitReached(result.limitExceeded)
+    return {
+      text: result.text,
+      aborted: Boolean(result.aborted),
+      modelName: result.modelName,
+      totalResponseTimeMs: result.totalResponseTimeMs,
+      totalTokensUsed: result.totalTokensUsed,
+      tokensPerSecond: result.tokensPerSecond,
+      usage: { input: result.usage.input, output: result.usage.output, cacheRead: result.usage.cacheRead, cacheWrite: result.usage.cacheWrite },
       contextSignature: result.contextInputs.signature,
       contextModelKey: result.contextInputs.modelKey,
       nativeMessages: result.nativeMessages,

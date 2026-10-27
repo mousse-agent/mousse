@@ -1162,6 +1162,11 @@ export class PiRpcEngine implements ProviderAdapter {
   }
 
   async startTurn(input: TurnInput, sink: TurnSink, ctl: TurnControl, host: AdapterHost): Promise<TurnResult> {
+    // A definition turn (a session of its own, its own instructions) needs a fresh short-lived
+    // process and the instructions applied in `before_agent_start`; neither exists yet, and the
+    // engine is not `exact`, so the gateway never sends one. Refused here too, before anything runs.
+    if (input.session === 'ephemeral' || input.instructions)
+      throw harnessAppError({ code: 'policy_unenforceable', message: "Pi's agent cannot run an agent definition's turn yet.", missing: ['toolControl'], instanceId: this.options.instanceId })
     const key = randomUUID()
     const ref: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model, nativeTurnId: key }
     sink.providerRef(ref)

@@ -206,11 +206,15 @@ describe('native Agent Editor Try Run production host', () => {
         expect(rejection).toMatchObject({ code: 'SETTINGS_UNSUPPORTED' })
         expect(JSON.stringify(rejection)).toContain(pointer)
       }
+      // A CLI-kind definition is held to the same rules as any other (PR 4 §6): its unsupported
+      // settings are refused the same way, before anything is sent.
       const cliSettings = settings('CLI Agent', f.modelRef)
       cliSettings.recovery = defaultAgentSettings({ name: 'CLI Agent', slug: 'cli-agent' }).recovery
+      cliSettings.workspace.mode = 'dedicated_child_worktree'
       const cli = await a.agents.create({ profileId: f.alice.id, runtimeKind: 'codex', settings: cliSettings, systemPrompt: 'unsupported' })
-      await expect(a.agents.tryRun({ profileId: f.alice.id, id: cli.id, expectedDraftHash: cli.draftHash, prompt: 'must not spawn' }))
-        .rejects.toMatchObject({ code: 'SETTINGS_UNSUPPORTED' })
+      const cliRejection = await a.agents.tryRun({ profileId: f.alice.id, id: cli.id, expectedDraftHash: cli.draftHash, prompt: 'must not dispatch' }).catch((error: unknown) => error)
+      expect(cliRejection).toMatchObject({ code: 'SETTINGS_UNSUPPORTED' })
+      expect(JSON.stringify(cliRejection)).toContain('/settings/workspace/mode')
       expect(f.captured).toEqual([])
     } finally { await f.close() }
   }, 30_000)

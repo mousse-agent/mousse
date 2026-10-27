@@ -18,6 +18,7 @@ import { isOwnerLive } from '../queue/processLiveness'
 import { canonicalJson, sha256Hex } from '../../shared/agents/hashes'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { assertRuntimeSettingsSupported } from '../agentDefinitions/runtimePolicy'
+import type { DefinitionHostBindings } from '../agentDefinitions/definitionRuntime'
 import { ChatStore, type ChatRecord } from './ChatStore'
 import { ThreadActionService, type RunThreadActionOptions } from '../actions/ThreadActionService'
 import { git, tryGit } from '../actions/git'
@@ -282,17 +283,17 @@ export class AgentChatService {
   private roster(): ChatAgent[] {
     return this.options.registry.list({ archived: false }).filter((entry) => entry.publishedRevision).map((entry) => {
       const published = this.options.registry.getRevision(entry.id, entry.publishedRevision!)
-      const available = entry.enabled && published.runtimeKind === 'mousse'
+      const available = entry.enabled
       return { id: entry.id, name: published.settings.identity.name, slug: published.settings.identity.slug,
         purpose: published.settings.identity.purpose, definitionRevision: published.revision, deviceId: this.device.id, available,
-        ...(!available ? { unavailableReason: !entry.enabled ? 'Enable this agent before chatting' : 'This chat requires a native Mousse agent' } : {}) }
+        ...(!available ? { unavailableReason: 'Enable this agent before chatting' } : {}) }
     }).sort((a, b) => a.name.localeCompare(b.name))
   }
   private assertAgent(participant: ChatParticipant): void {
     const definition = this.options.registry.get(participant.definitionId!)
     if (!definition.flags.enabled || definition.flags.archived || participant.deviceId !== this.device.id) throw new DomainRpcError('agent_unavailable', `${participant.name} is unavailable on this device`)
-    const published = this.options.registry.getRevision(participant.definitionId!, participant.definitionRevision!)
-    if (published.runtimeKind !== 'mousse') throw new DomainRpcError('agent_unavailable', 'External agents are not bound to the chat runtime')
+    // The pinned revision must still exist; what runs it is the model ref's instance, checked at run time.
+    this.options.registry.getRevision(participant.definitionId!, participant.definitionRevision!)
   }
   private workspace(record: ChatRecord): string {
     const thread = this.options.services.threads.getThread(record.conversation.threadId)
@@ -345,7 +346,8 @@ export class AgentChatService {
           task: message.text, applicationRules: this.chatRules(record.conversation, agent) })
         this.assertResolved(resolved, agent)
         const executionId = randomUUID()
-        const host: AgentRuntimeHostWithBrowser = { workspaceRoots: [workspaceRoot],
+        // The chat holds the backing thread's lease for the whole response: each agent's turn borrows it.
+        const host: AgentRuntimeHostWithBrowser & DefinitionHostBindings = { workspaceRoots: [workspaceRoot], lease: { kind: 'borrowed', handle: owned.lease },
           approveToolRequest: (request) => this.approve(chatId, owned, executionId, request, signal),
           ...(this.browserRuntime ? { browserRuntime: this.browserRuntime } : {}) }
         assertRuntimeSettingsSupported(resolved, host)
@@ -419,6 +421,8 @@ export class AgentChatService {
         finally {
           this.active.delete(chatId)
           if (!releaseExecutionLeaseHandle(owned.lease)) throw new Error('Chat execution lost its backing thread lease')
+          // What queued on the backing thread during the response runs now that the chat released it.
+          this.options.services.orchestrator.resumeThreadQueue?.(owned.threadId)
         }
       }
     }

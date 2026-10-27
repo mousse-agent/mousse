@@ -141,7 +141,7 @@ async function runBrowserNative(input: {
   if (input.bindExecution !== false) {
     llm.bindBrowserExecution(createDefinitionBrowserBinding({ request, runId, resolved: snapshot }))
   }
-  const service = new AgentExecutionService({ native: createNativeAgentRuntime(llm) })
+  const service = new AgentExecutionService({ runtime: createNativeAgentRuntime(llm) })
   const result = await service.run(request)
   return { result, captured, recorded, snapshot, runId }
 }
@@ -322,7 +322,7 @@ describe('native browser runtime binding', () => {
     const llm = nativeClient([
       providerResponse([{ type: 'text', text: 'should not run' }], 'stop')
     ], captured)
-    const service = new AgentExecutionService({ native: createNativeAgentRuntime(llm) })
+    const service = new AgentExecutionService({ runtime: createNativeAgentRuntime(llm) })
     await expect(service.run({
       profileId: 'profile-1',
       resolved: snapshot,
@@ -347,7 +347,7 @@ describe('native browser runtime binding', () => {
       providerResponse([{ type: 'text', text: 'no browser' }], 'stop')
     ], captured)
     llm.setBrowserRuntime(recorded.port)
-    const result = await new AgentExecutionService({ native: createNativeAgentRuntime(llm) }).run({
+    const result = await new AgentExecutionService({ runtime: createNativeAgentRuntime(llm) }).run({
       profileId: 'profile-1',
       resolved: snapshot,
       threadId: 'thread-1',
@@ -473,7 +473,7 @@ describe('native browser runtime binding', () => {
       signal: abort.signal
     }
     llm.bindBrowserExecution(createDefinitionBrowserBinding({ request, runId: 'run-cancelled', resolved: snapshot }))
-    const cancelled = await new AgentExecutionService({ native: createNativeAgentRuntime(llm) }).run(request)
+    const cancelled = await new AgentExecutionService({ runtime: createNativeAgentRuntime(llm) }).run(request)
     expect(cancelled.status).toBe('cancelled')
     expect(captured).toEqual([])
     expect(recorded.dispatches).toEqual([])
@@ -534,14 +534,15 @@ describe('native browser runtime binding', () => {
     expect(recorded.dispatches).toEqual([])
   })
 
-  it('keeps CLI browser mode unsupported even when a native port is present', () => {
+  it('holds a CLI-kind definition to the same browser rules as any other (PR 4 §6)', () => {
     const snapshot = browserSnapshot()
     snapshot.runtimeKind = 'codex'
-    const unsupported = collectUnsupportedRuntimeSettings(snapshot, {
-      browserRuntime: recordingPort([]).port
-    } as never)
+    // With the host's port, structured mode is supported whatever the stored kind.
+    expect(collectUnsupportedRuntimeSettings(snapshot, { browserRuntime: recordingPort([]).port } as never)).toEqual([])
+    // Without it, browser mode is refused for the same reason as a native definition.
+    const unsupported = collectUnsupportedRuntimeSettings(snapshot, {} as never)
     expect(unsupported.map((item) => item.pointer)).toContain('/settings/browser/mode')
-    expect(unsupported.find((item) => item.pointer === '/settings/browser/mode')?.reason).toMatch(/CLI/)
+    expect(unsupported.find((item) => item.pointer === '/settings/browser/mode')?.reason).not.toMatch(/CLI/)
   })
 
   it('rejects persistent workspace and trace-retention settings even with an injected runtime', () => {

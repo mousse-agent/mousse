@@ -176,6 +176,8 @@ export interface OneShotSpec {
 export interface DriverRuntime {
   /** The turn runtime of this instance. */
   readonly adapter: ProviderAdapter
+  /** Runs agent definitions' turns, when they do not run on `adapter` (`HarnessDriver.definitionCaps`). */
+  readonly definitionAdapter?: ProviderAdapter
   /**
    * One request with no tools (`HarnessDriver.oneShot`). Throws the provider's failure; `signal`
    * aborts it (the caller stopped, or the gateway's inactivity timeout).
@@ -401,6 +403,12 @@ export interface HarnessDriver {
    * refine what a preset cannot know statically: fork, plan mode, models.
    */
   caps(config: InstanceConfig, installedVersion?: string, facts?: RuntimeFacts): HarnessCaps
+  /**
+   * The caps an agent definition's turn runs on, when the instance runs definitions on another
+   * runtime than its chats (`DriverRuntime.definitionAdapter`): a Pi connection on the RPC engine
+   * runs definitions on Mousse's loop until Pi RPC can hold them (PR 4 unit 4d-rpc). Absent: `caps`.
+   */
+  definitionCaps?(config: InstanceConfig): HarnessCaps
   /**
    * Arguments that make the executable print its version; `null` when it has no such flag (the
    * probe then skips the version check and the handshake decides whether it runs). Default

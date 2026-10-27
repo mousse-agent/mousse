@@ -44,6 +44,14 @@ export function spendLimitLevel(caps: Partial<Pick<HarnessCaps, 'spendLimits'>>)
 }
 
 /**
+ * Whether the instance runs an agent definition's loop itself under the definition's own limits
+ * (the legacy engine). Caps without the key read as `none`.
+ */
+export function definitionLimitsLevel(caps: Partial<Pick<HarnessCaps, 'definitionLimits'>>): HarnessCaps['definitionLimits'] {
+  return caps.definitionLimits ?? 'none'
+}
+
+/**
  * Purposes a person drives turn by turn. Only these may resolve an `uncontrolled` instance: every
  * other purpose (delegation, definitions, workflows, scheduled jobs, titles, and any purpose added
  * later) runs without a person watching each tool.
@@ -130,6 +138,8 @@ function spendModelGap(budget: NonNullable<RunPolicy['budget']>, model: SpendMod
  *   driver can bound (`model`); a USD limit also needs a priced model. A model gap is
  *   `spendLimits` with a `reason`;
  * - a wall-clock budget needs nothing: the gateway enforces it everywhere;
+ * - a definition authority's counts and token and USD limits are also admitted on an instance
+ *   that runs the definition's loop under them (`definitionLimits: 'in_loop'`, the legacy engine);
  * - a host authority (a definition's or a bot's grants, roots and rules) needs `exact` tool
  *   control: only a runtime whose every tool call Mousse decides can be held to it;
  * - pre-granted or no approvals need at least `approval_only` (pre-granted under Full access is what
@@ -184,9 +194,14 @@ export function checkPolicy(caps: HarnessCaps, policy: RunPolicy, instanceId?: s
   const unattended = policyOrigin(policy) !== 'interactive'
   if ((needsExact && control !== 'exact') || (needsApprovals && control === 'uncontrolled') || (unattended && control === 'uncontrolled'))
     missing.push('toolControl')
-  if (needsHardBudget && budgetsLevel(caps) !== 'hard') missing.push('budgets')
+  // A definition on a runtime that runs its loop under the definition's own limits (the legacy
+  // engine) is held to them there, as definitions always were (`HarnessCaps.definitionLimits`).
+  // PR 4 unit 4d-rpc moves definitions to Pi RPC; 4h then deletes this waiver with the loop.
+  const inLoop = policy.authority?.kind === 'definition' && (policy.origin === 'definition' || policy.origin === 'workflow') &&
+    definitionLimitsLevel(caps) === 'in_loop'
+  if (needsHardBudget && budgetsLevel(caps) !== 'hard' && !inLoop) missing.push('budgets')
   let reason: string | undefined
-  if (needsSpend) {
+  if (needsSpend && !inLoop) {
     if (spendLimitLevel(caps) !== 'reserved') missing.push('spendLimits')
     else if ((reason = spendModelGap(budget, model))) missing.push('spendLimits')
   }

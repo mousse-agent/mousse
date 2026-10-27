@@ -18,7 +18,11 @@ export const PI_LEGACY_CAPS: HarnessCaps = Object.freeze({
   toolControl: 'exact',
   // Spend is counted after each response; nothing refuses the next request yet.
   budgets: 'observed',
-  spendLimits: 'unsupported'
+  spendLimits: 'unsupported',
+  // A definition's loop runs here under its own limits (`TrustedAgentExecutionOptions`) until PR 4
+  // unit 4d-rpc moves definitions to Pi RPC; 4h then deletes this with the loop. Counts
+  // before each request and tool call, tokens and cost after each response, as always.
+  definitionLimits: 'in_loop'
 })
 
 export type PiCredentials = Partial<Pick<ProviderAuthService,

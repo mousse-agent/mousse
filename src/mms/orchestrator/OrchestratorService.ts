@@ -11,7 +11,7 @@ import { TaskWriterAuthority } from '../agents/TaskWriterAuthority'
 import { createAgentToolAccess } from '../agents/WorkspaceAccessPolicy'
 import type { AgentWorkspacePolicy } from '../../shared/agentEpisodes'
 import { AsyncLocalStorage } from 'async_hooks'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { readFileSync } from 'node:fs'
 import {
@@ -40,8 +40,21 @@ import {
 } from '../platform/MmsWorkflowChat'
 import { DomainRpcError } from '../protocol/domainRegistry'
 import { AgentExecutionService } from '../agentDefinitions/AgentExecutionService'
-import { createNativeAgentRuntime } from '../agentDefinitions/nativeRuntime'
-import type { AgentExecutionRequest, AgentExecutionResult } from '../../shared/agents/execution'
+import {
+  createDefinitionRuntime,
+  definitionMessages,
+  definitionRunPolicy,
+  type DefinitionCheck,
+  type DefinitionHostBindings,
+  type DefinitionRefusal,
+  type DefinitionTurnRequest,
+  type DefinitionTurnResult
+} from '../agentDefinitions/definitionRuntime'
+import { definitionToolGranted, type DefinitionAuthority } from '../agentDefinitions/definitionGate'
+import { DefinitionTurnRecord, definitionActor } from '../agentDefinitions/definitionTurnRecord'
+import type { AgentExecutionLimit, AgentExecutionRequest, AgentExecutionResult } from '../../shared/agents/execution'
+import type { EffectiveAgentGrants } from '../../shared/agents/types'
+import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import { EventEmitter } from 'events'
 import { nativeAgentAssistantMessage, nativeAgentHistory } from '../providers/nativeAgentHistory'
 import { v4 as uuidv4 } from 'uuid'
@@ -64,12 +77,12 @@ import { QuickActionTools } from './QuickActionTools'
 import { WebTools } from './WebTools'
 import { stableStringify } from '../run/json'
 import { closeStaleActivity, cutOffActivityOf, formatRestartNote } from '../run/restartNote'
-import { createHarnessGateway, PI_DRIVER_ID, type AdapterHost, type BindInput, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
+import { createHarnessGateway, PI_DRIVER_ID, type AdapterHost, type BindInput, type ChildTurnPolicy, type DefinitionLoop, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
 import { piDriver } from '../harness/drivers/pi'
 import { contextGauge, threadTurnOrigin } from '../harness/policy'
 import type { BotThreads } from '../../shared/bots/personal/authority'
 import type { BotTurnDispatcher, PreparedBotTurn } from '../bots/activation/dispatcher'
-import { isRetriesExhausted, type BindPolicy, type ExecutionBinding, type HarnessCaps, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
+import { harnessAppError, isRetriesExhausted, type BindPolicy, type ExecutionBinding, type HarnessCaps, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
 import { acknowledgeRows } from '../run/terminal'
@@ -215,6 +228,7 @@ import {
   createLeaseToken,
   heartbeatExecutionLease,
   isLeaseHeldByLivePeer,
+  readLeaseOwner,
   releaseExecutionLeaseHandle,
   tryAcquireExecutionLease,
   tryReclaimStaleLease,
@@ -603,6 +617,23 @@ const HEARTBEAT_TURN_PHASES: ReadonlySet<TurnPhase> = new Set<TurnPhase>([
   'queued', 'thinking', 'streaming', 'tool_running', 'awaiting_input', 'finalizing'
 ])
 const RUN_HEARTBEAT_THROTTLE_MS = 5_000
+/** How often a live definition turn beats for its run (well inside the reconciler's quiet window). */
+const DEFINITION_HEARTBEAT_MS = 5_000
+
+/** A definition run's Stop: its abort, and the run records its turns made (for a Stop by run id). */
+interface DefinitionStop {
+  abort: AbortController
+  runIds: Set<string>
+  /** The run holds the session's admission for its whole execution. */
+  admitted: boolean
+}
+
+/** What a definition turn takes from its run besides the request. */
+interface DefinitionTurnExtras {
+  host?: DefinitionHostBindings
+  browser?: BrowserExecutionBinding
+  stop?: DefinitionStop
+}
 
 /**
  * The durable copy of a send input. Image data stays in memory: `turn.start` is process-bound,
@@ -691,46 +722,391 @@ export class OrchestratorService extends EventEmitter {
     this.mainAgentBrowser = binding
   }
 
-  /** Definition runs share the existing provider/tool loop and profile shutdown owner. */
+  /**
+   * Definition runs go through the harness gateway (PR 4 §6), owned by the profile's shutdown
+   * barrier. Every stored `runtimeKind` runs the same way: the instance is the model ref's, and an
+   * instance that cannot hold the definition's limits refuses the run with a typed reason.
+   */
   runAgentDefinition(request: AgentExecutionRequest): Promise<AgentExecutionResult> {
     return this.lifecycle.run('definition-agent', () => {
       if (!this.threadStore?.getThread(request.threadId)) throw new Error('Agent execution thread is unavailable')
       const session = this.getOrCreateSession(request.threadId)
       if (session.deleted) throw new Error('Agent execution thread was deleted')
-      return this.sessionAls.run(session, () => {
-        // LlmClient binds TaskControlTools at construction. Definition runs use a
-        // newly admitted thread, so reusing the GUI client's instance would let
-        // the run observe or mutate the constructor's original task queue.
-        const runId = request.runId ?? uuidv4()
-        const browserRuntime = readHostBrowserRuntime(request.host) ?? this.browserRuntime
-        const llm = new LlmClient(
-          this.settingsStore,
-          this.providerAuth,
-          this.mcpManager,
-          this.skillsRegistry,
-          () => request.projectPath ?? session.projectCwd ?? this.worktrees.getRepoRoot(),
-          this.fileService,
-          this.gitService,
-          this.lineEditStats,
-          (payload) => this.emit('document-opened', payload),
-          session.tasks,
-          (action) => this.emit('quick-action-created', action),
-          (payload, threadId) => this.presentPlanCard(payload, threadId),
-          { questions: this.questions, modeRegistry: this.modeRegistry, browserRuntime, customModel: (provider, modelId) => this.customPiModel(provider, modelId) }
-        )
-        const browser = createDefinitionBrowserBinding({
-          request: { ...request, runId },
-          runId,
-          resolved: request.resolved
-        })
-        llm.bindBrowserExecution(browser)
-        return new AgentExecutionService({ native: createNativeAgentRuntime(llm) }).run({
-          ...request,
-          runId,
-          signal: request.signal ? AbortSignal.any([request.signal, this.lifecycle.signal]) : this.lifecycle.signal
-        })
+      const runId = request.runId ?? uuidv4()
+      const browser = createDefinitionBrowserBinding({ request: { ...request, runId }, runId, resolved: request.resolved })
+      const host = request.host as DefinitionHostBindings | undefined
+      // The session stays admitted for the whole run, across retries and fallback backoffs, so a
+      // message sent meanwhile queues instead of taking the thread between records.
+      const fenced = !session.isTurnRunning()
+      if (fenced) session.turnAdmitted = true
+      // The thread's public Stop (`stopThread`, `abortRun`, a `turn.interrupt`) ends the whole run,
+      // between records too: it aborts this, which every turn and backoff of the run listens to.
+      const stop: DefinitionStop = { abort: new AbortController(), runIds: new Set(), admitted: fenced }
+      const stops = this.definitionStops.get(request.threadId) ?? new Set<DefinitionStop>()
+      stops.add(stop)
+      this.definitionStops.set(request.threadId, stops)
+      const runtime = createDefinitionRuntime({
+        checkDefinitionTurn: (check) => this.checkDefinitionTurn(check),
+        executeDefinitionTurn: (turn) => this.executeDefinitionTurn(turn, { ...(host ? { host } : {}), ...(browser ? { browser } : {}), stop })
+      })
+      const signals = [this.lifecycle.signal, stop.abort.signal, ...(request.signal ? [request.signal] : [])]
+      return new AgentExecutionService({ runtime }).run({ ...request, runId, signal: AbortSignal.any(signals) }).finally(() => {
+        stops.delete(stop)
+        if (!stops.size && this.definitionStops.get(request.threadId) === stops) this.definitionStops.delete(request.threadId)
+        if (fenced) {
+          session.turnAdmitted = false
+          session.abortRequested = false
+        }
+        // What queued behind the run runs once, now that the whole run settled; an agent chat that
+        // lent its lease does this after it releases the lease.
+        if (host?.lease?.kind !== 'borrowed') this.resumeThreadQueue(request.threadId)
       })
     })
+  }
+
+  /**
+   * Aborts the definition runs of a thread (only the one whose record is `runId`, when given), as a
+   * public Stop does. True when one was running.
+   */
+  private stopDefinitionRuns(threadId: string, runId?: string): boolean {
+    let stopped = false
+    for (const stop of this.definitionStops.get(threadId) ?? []) {
+      if (stop.abort.signal.aborted || (runId && !stop.runIds.has(runId))) continue
+      stop.abort.abort(new DOMException('The agent run was stopped.', 'AbortError'))
+      stopped = true
+    }
+    return stopped
+  }
+
+  /**
+   * The thread's queue runs again after a definition run released the thread: a message that queued
+   * behind it (a composer send, a remote or MCP enqueue) is drained once, now that nothing holds the
+   * thread. An agent chat calls this after it releases the lease its replies borrowed.
+   */
+  resumeThreadQueue(threadId: string): void {
+    const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId)
+    if (!session || session.deleted || session.turnAdmitted || session.isTurnRunning()) return
+    this.effectWorker?.notify()
+    session.drainAfterSettle = false
+    try {
+      this.scheduleQueueDrain(session)
+    } catch (error) {
+      logDebug('OrchestratorService', 'queue drain after a definition run failed to schedule', error, { threadId })
+    }
+  }
+
+  /** The stored selection a definition's model ref names: its instance, else its provider's built-in one. */
+  private definitionSelection(ref: DefinitionCheck['ref']): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'> {
+    const model = ref.effort && !parseThinkingSuffixFromModelId(ref.modelId).effort ? `${ref.modelId}:${ref.effort}` : ref.modelId
+    return { ...(ref.instanceId ? { instanceId: ref.instanceId } : {}), llmProvider: ref.providerId, model }
+  }
+
+  /**
+   * Whether a definition candidate can run, without running it (PR 4 §6): its instance resolves for
+   * the definition's purpose, and the gateway can enforce the definition's policy on it.
+   */
+  checkDefinitionTurn(check: DefinitionCheck): DefinitionRefusal | undefined {
+    try {
+      const resolved = this.harness.resolveStored(this.definitionSelection(check.ref), { purpose: check.origin, scope: this.threadScope(check.threadId), definition: true })
+      const verdict = this.harness.check(resolved, definitionRunPolicy(check))
+      if (verdict.ok) return undefined
+      const { code, message, missing, reason } = verdict.error
+      return { code, message, ...(missing ? { missing } : {}), ...(reason ? { reason } : {}) }
+    } catch (error) {
+      const normalized = normalizeAppError(error, 'definition_model_unavailable')
+      const details = normalized.details as { missing?: DefinitionRefusal['missing']; reason?: string } | undefined
+      return { code: normalized.code, message: normalized.message, ...(details?.missing ? { missing: details.missing } : {}), ...(details?.reason ? { reason: details.reason } : {}) }
+    }
+  }
+
+  /**
+   * One model turn of a definition run (PR 4 §6), next to `executeTurn`: the same binding, app-tool
+   * registration, turn bridge and run marks, without what the host owns (the queue, the thread's
+   * messages, workspace resolution, checkpoints, titles and `nativeContext`).
+   *
+   * - Lease: `borrowed` (agent chats) is checked live and never taken, stored or released; `own`
+   *   (Try Run, workflow nodes, bridge dispatch) is taken here or the turn fails `operation_busy`,
+   *   never queued, and released once. Either way a composer send to the thread queues meanwhile.
+   * - Writer: the host's (`DefinitionHostBindings.writer`), else the lease's own.
+   * - Run record: `definition:<runId>:<attempt>`, with no `turn.start` effect, so the run engine
+   *   never retries or recovers it; retries and fallbacks are `definitionRuntime`'s, each a new record.
+   * - Session: one of its own (`ephemeral`), the definition's system prompt replacing the runtime's
+   *   instructions, and the bounded conversation as messages and as a preamble.
+   * - Result: the text, and a history built from the turn's own events.
+   */
+  async executeDefinitionTurn(turn: DefinitionTurnRequest, extras: DefinitionTurnExtras = {}): Promise<DefinitionTurnResult> {
+    const engine = this.runEngine
+    // The definition's authority over app and MCP tools lives on the run's app-tool turn, which needs a run.
+    if (!engine) throw harnessAppError({ code: 'unsupported', message: 'Agent definitions need the run engine to hold their tools to their grants.' })
+    if (!this.threadStore?.getThread(turn.threadId)) throw new Error('Agent execution thread is unavailable')
+    const session = this.getOrCreateSession(turn.threadId)
+    if (session.deleted) throw new Error('Agent execution thread was deleted')
+    const threadDir = this.resolveThreadDir(turn.threadId)
+    if (!threadDir) throw new Error('Agent execution thread directory is unavailable')
+    const mode = extras.host?.lease ?? { kind: 'own' as const }
+    let owned: ThreadLeaseHandle | null = null
+    let lease: ThreadLeaseHandle
+    if (mode.kind === 'borrowed') {
+      // The host holds the thread's lease for the run: it must be live and this thread's.
+      const live = resolve(mode.handle.threadDir) === resolve(threadDir) && readLeaseOwner(mode.handle.lockPath)?.token === mode.handle.owner.token
+      if (!live) throw harnessAppError({ code: 'operation_busy', message: "The agent's thread is not held for this run." })
+      lease = mode.handle
+    } else {
+      owned = tryAcquireExecutionLease(threadDir, { source: 'definition' })
+      if (!owned) throw harnessAppError({ code: 'operation_busy', message: "The agent's thread is running other work." })
+      lease = owned
+    }
+    try {
+      // The run's own admission (held across its records) is not another turn's.
+      const fenced = extras.stop?.admitted === true
+      if (session.activeTurn !== null || (session.turnAdmitted && !fenced)) throw harnessAppError({ code: 'operation_busy', message: "The agent's thread is running other work." })
+      if (!fenced) session.turnAdmitted = true
+      try {
+        return await this.runDefinitionTurn(turn, engine, lease, extras)
+      } finally {
+        if (!fenced) {
+          session.turnAdmitted = false
+          session.abortRequested = false
+        }
+      }
+    } finally {
+      if (owned) releaseExecutionLeaseHandle(owned)
+    }
+  }
+
+  /**
+   * The chat client a definition's loop runs on (the legacy engine): one of the run's own, so it
+   * sees the definition thread's task queue and browser binding, never the GUI client's.
+   */
+  private definitionChatClient(turn: DefinitionTurnRequest, extras: DefinitionTurnExtras): Pick<LlmClient, 'chat'> {
+    const session = this.getOrCreateSession(turn.threadId)
+    const llm = new LlmClient(
+      this.settingsStore,
+      this.providerAuth,
+      this.mcpManager,
+      this.skillsRegistry,
+      () => turn.projectPath ?? session.projectCwd ?? this.worktrees.getRepoRoot(),
+      this.fileService,
+      this.gitService,
+      this.lineEditStats,
+      (payload) => this.emit('document-opened', payload),
+      session.tasks,
+      (action) => this.emit('quick-action-created', action),
+      (payload, threadId) => this.presentPlanCard(payload, threadId),
+      { questions: this.questions, modeRegistry: this.modeRegistry, browserRuntime: readHostBrowserRuntime(extras.host) ?? this.browserRuntime, customModel: (provider, modelId) => this.customPiModel(provider, modelId) }
+    )
+    if (extras.browser) llm.bindBrowserExecution(extras.browser)
+    return { chat: (...args) => this.sessionAls.run(session, () => llm.chat(...args)) }
+  }
+
+  private async runDefinitionTurn(turn: DefinitionTurnRequest, engine: RunEngine, lease: ThreadLeaseHandle, extras: DefinitionTurnExtras): Promise<DefinitionTurnResult> {
+    const { threadId } = turn
+    const resolved = this.harness.resolveStored(this.definitionSelection(turn.ref), { purpose: turn.origin, scope: this.threadScope(threadId), definition: true })
+    // The user's MCP tools the definition was granted, by the name the runtime calls them.
+    const mcpTools = this.mcpManager && turn.grants.mcpTools.length
+      ? (await this.mcpManager.getEnabledTools(turn.projectPath, definitionActor(turn.grants)))
+          .filter((tool) => definitionToolGranted(tool.providerName, turn.grants, [tool]))
+      : []
+    const policy = definitionRunPolicy(turn, mcpTools.map((tool) => tool.providerName))
+    const verdict = this.harness.check(resolved, policy)
+    if (!verdict.ok) throw harnessAppError(verdict.error)
+    if (turn.signal.aborted) throw turn.signal.reason ?? new DOMException('Aborted', 'AbortError')
+    const dispatched = await engine.dispatch({ kind: 'send', threadId, clientRequestId: `definition:${turn.runId}:${turn.attempt}`, source: 'definition' })
+    if (dispatched.status !== 'accepted') throw harnessAppError({ code: 'operation_busy', message: "The agent's turn could not be recorded." })
+    const runId = dispatched.runId
+    extras.stop?.runIds.add(runId)
+    let terminal = false
+    const markTerminal = (status: 'completed' | 'interrupted' | 'failed', outcome?: { error?: string; interruptedBy?: 'user' }, resultText?: string): void => {
+      if (terminal) return
+      terminal = true
+      this.markRun(runId, (runs, id) => runs.markTerminal(id, status, outcome, { resultText }))
+      this.harness.runSettled?.(runId)
+    }
+    try {
+      this.markRunStarting(runId)
+    } catch (error) {
+      // Another run holds the thread (or this one was cancelled meanwhile): the record never stays queued.
+      this.markRun(runId, (runs, id) => { if (runs.getRun(id)?.status === 'queued') runs.markTerminal(id, 'cancelled', { error: error instanceof Error ? error.message : String(error) }) })
+      this.harness.runSettled?.(runId)
+      throw harnessAppError({ code: 'operation_busy', message: "The agent's thread is running other work." })
+    }
+    const authority: DefinitionAuthority = {
+      policy: turn.policy,
+      grants: turn.grants,
+      ...(turn.approve ? { approve: turn.approve } : {}),
+      mcpTools
+    }
+    const projectPath = turn.projectPath
+    // Held to the profile's agent access level like any run (SPEC §15.1), and the grant is kept on the run.
+    const modeCeiling = this.modeCeilingFor(threadId, 'agent')
+    const accessLevel = this.grantFor(threadId, modeCeiling)
+    try {
+      engine.recordAccessGrant(runId, accessLevel)
+    } catch (error) {
+      console.warn('The access grant of the run could not be recorded', { runId, error: error instanceof Error ? error.message : String(error) })
+    }
+    const app = this.appToolTurns.register({
+      threadId,
+      runId,
+      mode: 'agent',
+      modeFacts: modeFactsFor(this.modeRegistry, 'agent', projectPath),
+      modeCeiling,
+      accessLevel,
+      subagent: false,
+      discovery: false,
+      ...(projectPath ? { projectPath } : {}),
+      actor: definitionActor(turn.grants),
+      enabledSkills: [],
+      loadedSkills: [],
+      settingsEnabled: (name) => settingsToolEnabled(this.settingsStore.get().integrations?.tools, name),
+      definition: authority
+    }, { continuation: false })
+    const record = new DefinitionTurnRecord()
+    // The turn's own end: the run's record left this process's hands (reconciled, or ended elsewhere).
+    const lost = new AbortController()
+    const signal = AbortSignal.any([turn.signal, lost.signal])
+    // Liveness for the run engine's reconciler while the turn is quiet (a slow model, a tool, an
+    // approval): the record has no effect of its own, so nothing else beats for it.
+    const beat = setInterval(() => {
+      const current = engine.getRun(runId)
+      if (!current || TERMINAL_RUN_STATUSES.has(current.status)) {
+        lost.abort(new DOMException('The agent run ended elsewhere.', 'AbortError'))
+        return
+      }
+      try {
+        engine.heartbeat(runId)
+      } catch (error) {
+        console.warn('definition run heartbeat failed', { runId, error: error instanceof Error ? error.message : String(error) })
+      }
+    }, this.definitionHeartbeatMs)
+    beat.unref?.()
+    // A runtime that runs the definition's loop itself (the legacy engine) runs it on a client of the
+    // run's own, under the limits left, and reports the limit that ended it.
+    let loopLimit: AgentExecutionLimit | undefined
+    let loopUsed = false
+    const definitionLoop: DefinitionLoop = {
+      client: () => {
+        loopUsed = true
+        return this.definitionChatClient(turn, extras)
+      },
+      budget: turn.remaining,
+      effects: turn.effects,
+      actor: definitionActor(turn.grants),
+      limitReached: (limit) => { loopLimit = limit }
+    }
+    let handle: ReturnType<HarnessGateway['startTurn']> | undefined
+    const interrupt = (): void => { void handle?.interrupt().catch(() => {}) }
+    signal.addEventListener('abort', interrupt, { once: true })
+    try {
+      this.markRun(runId, (runs, id) => runs.markRunning(id))
+      const { tools, approvals, budget, authority } = policy
+      const binding = await this.bindTurn(runId, undefined, resolved, 'agent', () => turn.origin, { cwd: projectPath ?? null, permissionMode: 'ask' }, { approvals, ...(tools ? { tools } : {}), ...(budget ? { budget } : {}), ...(authority ? { authority } : {}) }, true)
+      const context = await this.completeAppTurn(app.turn, {
+        promptRuntime: handoffDelivery(resolved.caps) === 'prompt_preamble',
+        ...(extras.browser ? { browser: extras.browser } : {}),
+        userContent: turn.userMessage,
+        instanceId: resolved.instanceId,
+        model: binding.model,
+        approvals: 'grants',
+        grants: turn.grants
+      })
+      // The host's writer (a workflow node's mutation lease), else the lease's own.
+      const writer = extras.host?.writer ?? (() => {
+        const writers = new TaskWriterAuthority(lease)
+        const token = writers.issue(`definition:${runId}`, { version: 1, workspace: 'shared', access: 'write' })
+        return <T>(run: () => Promise<T>): Promise<T> => writers.runWriter(token, run)
+      })()
+      // Prior turns only, as a runtime that takes history in its prompt reads them.
+      const preamble = turn.conversation.length ? nativeAgentHistory(createNativeContext(definitionMessages(turn.conversation, '').slice(0, -1))) : ''
+      const input: TurnInput = {
+        runId,
+        attemptId: engine.getRun(runId)?.activeAttemptId ?? runId,
+        threadId,
+        cwd: projectPath ?? null,
+        model: binding.model,
+        instanceId: resolved.instanceId,
+        llmProvider: resolved.llmProvider,
+        modelPinned: true,
+        mode: 'agent',
+        // The definition's own approval rules decide its calls; the runtime is never told to allow more.
+        permissionMode: binding.policy.permissionMode ?? 'ask',
+        prompt: turn.userMessage,
+        messages: definitionMessages(turn.conversation, turn.userMessage),
+        nativeHistory: preamble,
+        signal
+      }
+      const sink: TurnSink = {
+        text: (event) => record.text(event),
+        thinking: () => {},
+        tool: (event) => {
+          // From the first tool on, the turn has effects: no retry and no fallback.
+          if (event.phase === 'start' && event.kind !== 'skill_loaded') turn.onDispatched()
+          record.tool(event)
+        },
+        nativeMessages: () => {},
+        compaction: () => {},
+        retry: () => {},
+        progress: () => {},
+        usage: () => {},
+        providerRef: (ref) => this.markRun(runId, (runs, id) => { runs.recordProviderRef(id, ref) }),
+        steerAccepted: () => {},
+        providerMetrics: (metrics) => record.metrics(metrics),
+        lineEdits: (lines) => this.lineEditStats?.record('orchestrator', lines)
+      }
+      const control: TurnControl = { drainSteer: () => undefined, heartbeat: () => this.heartbeatRun(runId) }
+      const host: AdapterHost = {
+        definitionLoop,
+        tools: {
+          ...(extras.browser ? { browser: extras.browser } : {}),
+          toolAccess: { allows: () => true, execute: (_name, _args, run) => writer(run) },
+          toolLedger: this.toolLedgerFor(runId),
+          runActive: () => this.runEngine?.getActiveRun(threadId)?.runId === runId
+        },
+        context: {
+          recoverOverflow: () => null,
+          prepareNativeContext: () => null,
+          nativeHistoryAfterTurn: () => preamble,
+          nativeHistoryNow: () => preamble
+        }
+      }
+      if (signal.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError')
+      handle = this.harness.startTurn({
+        binding,
+        attemptOrdinal: 1,
+        input,
+        sink,
+        control,
+        host,
+        app: context,
+        instructions: { text: turn.systemPrompt, placement: 'replace' },
+        session: 'ephemeral',
+        counters: turn.counters,
+        spend: turn.spend
+      })
+      const result = await handle.result
+      const text = result.text || record.finalText()
+      // A turn its own run lost ends as a cancellation of the definition run, never as its answer:
+      // the record is read again now, not only on the last heartbeat.
+      const owned = engine.getRun(runId)
+      if (!lost.signal.aborted && (!owned || TERMINAL_RUN_STATUSES.has(owned.status))) lost.abort(new DOMException('The agent run ended elsewhere.', 'AbortError'))
+      if (lost.signal.aborted && !turn.signal.aborted) throw lost.signal.reason
+      if (result.aborted || turn.signal.aborted) markTerminal('interrupted', { interruptedBy: 'user' }, text)
+      // A limit the loop reached fails the run, as the definition's result does.
+      else if (loopLimit) markTerminal('failed', { error: `The agent reached its ${loopLimit.kind} limit (${loopLimit.limit}).` }, text)
+      else markTerminal('completed', undefined, text)
+      const usage = loopUsed
+        ? { inputTokens: turn.effects.attemptUsage.inputTokens, outputTokens: turn.effects.attemptUsage.outputTokens, costUsd: turn.effects.attemptUsage.costUsd }
+        : record.usage(result.usage)
+      return { text, history: record.history(turn.userMessage, text), usage, ...(loopLimit ? { limit: loopLimit } : {}) }
+    } catch (error) {
+      if (signal.aborted) markTerminal('interrupted', { interruptedBy: 'user' })
+      else markTerminal('failed', { error: error instanceof Error ? error.message : String(error) })
+      throw error
+    } finally {
+      clearInterval(beat)
+      signal.removeEventListener('abort', interrupt)
+      app.drop()
+    }
   }
 
   /** Called by the admitted definition-run owner, including during final shutdown persistence. */
@@ -863,6 +1239,8 @@ export class OrchestratorService extends EventEmitter {
   private readonly staleRuns = new Set<string>()
   /** `WAKE_BUSY_DEFER_MS`; tests shorten it. */
   private readonly wakeBusyDeferMs = WAKE_BUSY_DEFER_MS
+  /** `DEFINITION_HEARTBEAT_MS`; tests shorten it. */
+  private readonly definitionHeartbeatMs = DEFINITION_HEARTBEAT_MS
   /** Phase 2b: the worker that executes `turn.*` effects. Null keeps direct turn starts. */
   private effectWorker: EffectWorker | null = null
   /** Phase 5: mints a Mousse MCP credential per MCP-capable turn. Null attaches nothing. */
@@ -870,6 +1248,8 @@ export class OrchestratorService extends EventEmitter {
   private mcpRegistry?: ToolRegistry
   /** The app-tool context of each running turn (PR 2 §2), for the Mousse MCP server's calls. */
   readonly appToolTurns = new AppToolTurns()
+  /** The definition runs of each thread, for its public Stop (`stopDefinitionRuns`). */
+  private readonly definitionStops = new Map<string, Set<DefinitionStop>>()
   /** Pending results of `turn.start` effects, keyed by runId (SPEC §12.7). */
   private readonly turnResults = new Map<string, TurnResult>()
   /**
@@ -2052,7 +2432,7 @@ export class OrchestratorService extends EventEmitter {
    */
   private async completeAppTurn(
     registered: AppToolTurn,
-    input: { promptRuntime: boolean; browser?: AppToolTurn['browser']; onPublishApplet?: AppToolTurn['onPublishApplet']; userContent: string; instanceId: string; model: string; approvals: RunPolicy['approvals']; botInstructions?: string }
+    input: { promptRuntime: boolean; browser?: AppToolTurn['browser']; onPublishApplet?: AppToolTurn['onPublishApplet']; userContent: string; instanceId: string; model: string; approvals: RunPolicy['approvals']; botInstructions?: string; grants?: EffectiveAgentGrants }
   ): Promise<TurnAppContext> {
     let skills: Pick<AppToolTurn, 'enabledSkills' | 'loadedSkills'> = { enabledSkills: [], loadedSkills: [] }
     if (input.promptRuntime) {
@@ -2063,7 +2443,9 @@ export class OrchestratorService extends EventEmitter {
           projectPath: registered.projectPath,
           mode: registered.mode,
           userContent: input.userContent,
-          actor: registered.actor
+          actor: registered.actor,
+          // A definition loads only the skills it was granted.
+          ...(input.grants ? { grants: input.grants } : {})
         })
       } catch (error) {
         // Skills are optional for a runtime with its own loop: a broken registry cannot block the turn.
@@ -2790,13 +3172,14 @@ export class OrchestratorService extends EventEmitter {
    * run; `resolved` was built from it), else a new one from the resolved selection. Either way it
    * is recorded on the active attempt, so a replacement attempt keeps its run's binding.
    */
-  private async bindTurn(runId: string | undefined, existing: ExecutionBinding | undefined, resolved: ResolvedTurnSelection, mode: ChatMode, origin: () => TurnOrigin, permission: Pick<BindInput, 'permissionMode' | 'cwd'>, policy?: BindPolicy): Promise<ExecutionBinding> {
+  private async bindTurn(runId: string | undefined, existing: ExecutionBinding | undefined, resolved: ResolvedTurnSelection, mode: ChatMode, origin: () => TurnOrigin, permission: Pick<BindInput, 'permissionMode' | 'cwd'>, policy?: BindPolicy, definition = false): Promise<ExecutionBinding> {
     const engine = this.runEngine
     // The origin is read only for a new binding: a retry or restart keeps the one its run recorded.
-    // A bot dispatch binds the policy its grant compiled to, as a bot, in the strictest mode: its
-    // grant, never a thread's permission mode, decides what it may do.
+    // A bot dispatch binds the policy its grant compiled to, as a bot; a definition turn binds its
+    // definition's policy with its own origin. Either way in the strictest mode: the grant or the
+    // definition's own approval rules, never a thread's permission mode, decide what it may do.
     const binding = existing ?? await this.harness.bind(resolved, policy
-      ? { mode, origin: 'bot', policy, permissionMode: 'ask', ...(permission.cwd !== undefined ? { cwd: permission.cwd } : {}) }
+      ? { mode, origin: definition ? origin() : 'bot', policy, permissionMode: 'ask', ...(permission.cwd !== undefined ? { cwd: permission.cwd } : {}) }
       : { mode, origin: origin(), ...permission })
     if (runId && engine) {
       try {
@@ -5516,19 +5899,26 @@ export class OrchestratorService extends EventEmitter {
       : this.boundSession
     if (!session) return false
     const active = session.activeTurn
-    if (!active && session.turnAdmitted && !session.abortRequested) {
+    // A definition run on the thread (it admits the session without an active turn of its own).
+    // A definition run on the thread is stopped (only the one whose record is `runId`, when given),
+    // and so is an ordinary turn the Stop also reaches: one does not hide the other.
+    let stopped = id ? this.stopDefinitionRuns(id, opts?.runId) : false
+    // The session's admission held by a definition run for its whole execution is not an ordinary turn's.
+    const fencedByDefinition = Boolean(id && [...(this.definitionStops.get(id) ?? [])].some((entry) => entry.admitted))
+    if (!active && session.turnAdmitted && !fencedByDefinition && !session.abortRequested) {
       // Admitted but still in recovery/workspace setup: abort as soon as the turn starts. A turn that has
       // not marked its run starting yet is a queued run, which a Stop cancels by id instead.
-      if (opts?.runId && id && this.runEngine?.getActiveRun(id)?.runId !== opts.runId) return false
-      session.abortRequested = true
-    } else if (!active || active.abort.signal.aborted) {
-      return false
-    } else {
-      if (opts?.runId && active.runId && active.runId !== opts.runId) return false
+      if (!(opts?.runId && id && this.runEngine?.getActiveRun(id)?.runId !== opts.runId)) {
+        session.abortRequested = true
+        stopped = true
+      }
+    } else if (active && !active.abort.signal.aborted && !(opts?.runId && active.runId && active.runId !== opts.runId)) {
       active.pendingSteer = []
       active.promotedSteerIds = []
       active.abort.abort()
+      stopped = true
     }
+    if (!stopped) return false
     if (opts?.clearQueue && id) {
       let clearedRunIds: Array<string | undefined> = []
       let clearedItems: QueuedMessage[] = []

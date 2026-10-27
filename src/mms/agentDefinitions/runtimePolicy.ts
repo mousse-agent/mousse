@@ -142,22 +142,21 @@ function collectHostRoots(
   return intersectPermittedRoots(unique, settings.workspace.permittedRoots)
 }
 
+/**
+ * The definition's settings Mousse cannot implement, and the host bindings it lacks, whatever runs
+ * the definition. Every stored `runtimeKind` is held to the same rules (PR 4 §6); what depends on
+ * the instance the model ref names (exact tool control, hard counts, reserved spend) is checked by
+ * the runtime against the gateway (`definitionRuntime`), never here.
+ */
 export function collectUnsupportedRuntimeSettings(
   resolved: ResolvedAgentDefinition,
   host: AgentRuntimeHostBindings | undefined
 ): AgentRuntimeUnsupportedSetting[] {
   const settings = resolved.settings
   const unsupported: AgentRuntimeUnsupportedSetting[] = []
-  const native = resolved.runtimeKind === 'mousse'
 
   if (settings.browser.mode !== 'disabled') {
-    if (!native) {
-      unsupported.push({
-        pointer: '/settings/browser/mode',
-        reason: 'CLI adapters do not receive native browser tool dispatch.',
-        hostBinding: 'CLI permission/config materializers must not claim a managed browser worker; that work is outside this runtime.'
-      })
-    } else if (!readHostBrowserRuntime(host)) {
+    if (!readHostBrowserRuntime(host)) {
       unsupported.push({
         pointer: '/settings/browser/mode',
         reason: 'Browser mode requires an injected BrowserRuntimePort before provider dispatch.',
@@ -171,14 +170,14 @@ export function collectUnsupportedRuntimeSettings(
         hostBinding: 'Root must keep /settings/browser/mode at "structured" for this generic tool loop, or bind a qualified computer-use adapter separately.'
       })
     }
-    if (native && settings.browser.workspaceId) {
+    if (settings.browser.workspaceId) {
       unsupported.push({
         pointer: '/settings/browser/workspaceId',
         reason: 'Persistent browser workspaces are not implemented by this native runtime.',
         hostBinding: 'Root must omit workspaceId; attached GUI tabs retain existing storage, and managed persistence is not claimed here.'
       })
     }
-    if (native && settings.browser.traceRetention !== 'none') {
+    if (settings.browser.traceRetention !== 'none') {
       unsupported.push({
         pointer: '/settings/browser/traceRetention',
         reason: 'Browser trace retention is not implemented by this native runtime.',
@@ -248,7 +247,6 @@ export function collectUnsupportedRuntimeSettings(
     })
   }
   if (
-    native &&
     settings.fallbacks.enabled &&
     resolved.model.fallbacks.length > 0 &&
     !settings.fallbacks.allowHigherCost
@@ -272,36 +270,6 @@ export function collectUnsupportedRuntimeSettings(
       reason: 'approval.policy "always" requires a host approval callback; auto-approve is never defaulted.',
       hostBinding: 'AgentRuntimeHostBindings.approveToolRequest'
     })
-  }
-  if (!native) {
-    if (settings.fallbacks.enabled) {
-      unsupported.push({
-        pointer: '/settings/fallbacks/enabled',
-        reason: 'CLI process adapters do not implement model fallback or aggregate retry accounting.',
-        hostBinding: 'A qualified CLI coordinator must select and account for fallback attempts before enabling this setting.'
-      })
-    }
-    if (settings.workspace.mode === 'read_only') {
-      unsupported.push({
-        pointer: '/settings/workspace/mode',
-        reason: 'CLI adapters do not receive native tool-dispatch enforcement for read-only workspace policy.',
-        hostBinding: 'CLI permission/config materializers must enforce workspace mode; that work is outside this runtime.'
-      })
-    }
-    if (settings.script.enabled) {
-      unsupported.push({
-        pointer: '/settings/script/enabled',
-        reason: 'CLI adapters do not receive native script-dispatch enforcement.',
-        hostBinding: 'CLI permission/config materializers must enforce script policy; that work is outside this runtime.'
-      })
-    }
-    if (settings.approval.policy !== 'inherit') {
-      unsupported.push({
-        pointer: '/settings/approval/policy',
-        reason: 'CLI adapters do not receive native approval-dispatch enforcement.',
-        hostBinding: 'CLI permission/config materializers must enforce approval policy; that work is outside this runtime.'
-      })
-    }
   }
   return unsupported
 }

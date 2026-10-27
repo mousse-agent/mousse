@@ -233,17 +233,23 @@ export class AgentExecutionService {
       conversation: runtimeContext.conversation,
       fallbacks: structuredClone(resolved.settings.fallbacks)
     }
-    // Only the native runtime executes definitions; the CLI-process runner was retired.
-    const runtime = resolved.runtimeKind === 'mousse' ? this.bindings.native : undefined
+    // Every stored runtimeKind runs on the one runtime; the instance comes from the model ref, and
+    // what that instance cannot enforce is refused there (`gateway.check`), never relaxed.
+    const runtime = this.bindings.runtime
     if (!runtime) {
       request.signal?.removeEventListener('abort', forwardAbort)
-      throw new AgentDefinitionError('SETTINGS_UNSUPPORTED', `No execution adapter is registered for ${resolved.runtimeKind}.`, {
+      throw new AgentDefinitionError('SETTINGS_UNSUPPORTED', 'No agent runtime is bound to this profile.', {
         details: { runtimeKind: resolved.runtimeKind }
       })
     }
+    let deadlineHit = false
     const deadline = budget.maxElapsedMs > 0
       ? setTimeout(
-          () => controller.abort(new DOMException('Agent execution exceeded its time budget.', 'TimeoutError')),
+          () => {
+            // The run's own time budget ran out (not the caller's abort): a limit, not a cancellation.
+            deadlineHit = true
+            controller.abort(new DOMException('Agent execution exceeded its time budget.', 'TimeoutError'))
+          },
           budget.maxElapsedMs
         )
       : undefined
@@ -260,17 +266,21 @@ export class AgentExecutionService {
       if (controller.signal.aborted) throw new DOMException('Aborted', 'AbortError')
       const result = await runtime.run(input)
       const elapsedMs = Math.max(0, this.now() - started)
-      if (controller.signal.aborted) {
+      const trace = result.trace?.length ? { trace: [...result.trace] } : {}
+      // The time budget ran out: a limit, not a cancellation.
+      const limit = result.limit ?? (deadlineHit ? { kind: 'elapsed_ms' as const, limit: budget.maxElapsedMs } : undefined)
+      if (controller.signal.aborted && !limit) {
         return {
           ...base,
           status: 'cancelled',
           text: result.text ?? '',
           history: historyWithDefaults(input, result, this.now),
           usage: { ...result.usage, elapsedMs },
-          error: { code: 'ABORTED', message: 'Agent execution was cancelled.', retryable: false }
+          error: { code: 'ABORTED', message: 'Agent execution was cancelled.', retryable: false },
+          ...trace
         }
       }
-      if (result.limit) {
+      if (limit) {
         return {
           ...base,
           status: 'failed',
@@ -279,10 +289,11 @@ export class AgentExecutionService {
           usage: { ...result.usage, elapsedMs },
           error: {
             code: 'BUDGET_EXCEEDED',
-            message: `Agent execution exceeded its ${result.limit.kind} limit (${result.limit.limit}).`,
+            message: `Agent execution exceeded its ${limit.kind} limit (${limit.limit}).`,
             retryable: false,
-            details: { limit: result.limit }
-          }
+            details: { limit }
+          },
+          ...trace
         }
       }
       const outputError = validateStructuredOutput(resolved.settings, result.text)
@@ -293,7 +304,8 @@ export class AgentExecutionService {
           text: result.text,
           history: historyWithDefaults(input, result, this.now),
           usage: { ...result.usage, elapsedMs },
-          error: { code: 'OUTPUT_INVALID', message: outputError, retryable: true }
+          error: { code: 'OUTPUT_INVALID', message: outputError, retryable: true },
+          ...trace
         }
       }
       return {
@@ -301,10 +313,22 @@ export class AgentExecutionService {
         status: 'completed',
         text: result.text,
         history: historyWithDefaults(input, result, this.now),
-        usage: { ...result.usage, elapsedMs }
+        usage: { ...result.usage, elapsedMs },
+        ...trace
       }
     } catch (error) {
       const elapsedMs = Math.max(0, this.now() - started)
+      if (deadlineHit) {
+        const limit = { kind: 'elapsed_ms' as const, limit: budget.maxElapsedMs }
+        return {
+          ...base,
+          status: 'failed',
+          text: '',
+          history: historyWithDefaults(input, { text: '', history: extractHistory(error) }, this.now),
+          usage: { elapsedMs },
+          error: { code: 'BUDGET_EXCEEDED', message: `Agent execution exceeded its elapsed_ms limit (${limit.limit}).`, retryable: false, details: { limit } }
+        }
+      }
       const cancelled = isAbort(error, controller.signal)
       const cliCapability = cliCapabilityDetails(error)
       if (!cancelled && cliCapability) {

@@ -46,7 +46,8 @@ export const CLAUDE_CODE_CAPS: HarnessCaps = Object.freeze({
   // Claude Code asks Mousse through its permission callback under the mode Mousse sets.
   toolControl: 'approval_only',
   budgets: 'unsupported',
-  spendLimits: 'unsupported'
+  spendLimits: 'unsupported',
+  definitionLimits: 'none'
 })
 
 /**

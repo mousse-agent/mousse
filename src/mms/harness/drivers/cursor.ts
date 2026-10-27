@@ -33,7 +33,8 @@ export const CURSOR_CAPS: HarnessCaps = Object.freeze({
   contextUsage: 'none',
   toolControl: 'uncontrolled',
   budgets: 'unsupported',
-  spendLimits: 'unsupported'
+  spendLimits: 'unsupported',
+  definitionLimits: 'none'
 })
 
 /**

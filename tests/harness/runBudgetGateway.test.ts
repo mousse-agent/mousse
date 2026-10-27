@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { DefinitionAuthority } from '../../src/mms/agentDefinitions/definitionGate'
 import type { TurnSpec } from '../../src/mms/harness/gateway'
+import type { HarnessCaps } from '../../src/shared/harness/types'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import type { AdapterHost, ProviderAdapter, TurnInput, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
@@ -21,7 +22,7 @@ afterEach(() => {
 const noop = () => {}
 const sink = (): TurnSink => ({ text: noop, thinking: noop, tool: noop, nativeMessages: noop, compaction: noop, retry: noop, progress: noop, usage: noop, providerRef: noop, steerAccepted: noop, providerMetrics: noop, lineEdits: noop })
 
-function setup() {
+function setup(caps: Partial<HarnessCaps> = {}) {
   const home = mkdtempSync(join(tmpdir(), 'mousse-budget-gw-'))
   homes.push(home)
   const hosts: AdapterHost[] = []
@@ -40,7 +41,7 @@ function setup() {
   }
   let stored: unknown
   const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored }), write: (next) => { stored = next.instances } } })
-  const harness = testHarness({ drivers: [adapterDriver(adapter, { budgets: 'hard' })], instances, profileHome: home })
+  const harness = testHarness({ drivers: [adapterDriver(adapter, { budgets: 'hard', ...caps })], instances, profileHome: home })
   const turn = async (runId: string, patch: Partial<TurnSpec> & { maxTurns?: number } = {}) => {
     const { maxTurns = 1, ...rest } = patch
     const bound = await harness.bind(harness.resolveStored({ instanceId: 'claude', llmProvider: '', model: 'm' }, { purpose: 'turn' }), { mode: 'agent' })
@@ -82,11 +83,20 @@ describe('count budgets through the gateway', () => {
   })
 
   it('the runtime gets a definition authority only from the app context, never from the caller’s host', async () => {
-    const s = setup()
+    // Only a runtime whose tools Mousse controls exactly is given a definition (PR 4 4d).
+    const s = setup({ toolControl: 'exact' })
     const fromApp = authority('from-app')
     expect((await s.turn('run-a', { app: app(fromApp), maxTurns: 9 })).host.definition).toBe(fromApp)
     const smuggled = await s.turn('run-b', { app: app(), maxTurns: 9, host: { tools: {}, definition: authority('from-host'), context: { recoverOverflow: () => null, prepareNativeContext: () => null, nativeHistoryAfterTurn: () => '' } } })
     expect(smuggled.host.definition).toBeUndefined()
+    s.harness.stop()
+  })
+
+  it('refuses a definition turn, its own instructions or a session of its own on a runtime that only asks for approval', async () => {
+    const s = setup()
+    for (const patch of [{ app: app(authority('a')) }, { app: app(), instructions: { text: 'x', placement: 'replace' as const } }, { app: app(), session: 'ephemeral' as const }]) {
+      await expect(s.turn('run-refused', { ...patch, maxTurns: 9 })).rejects.toMatchObject({ code: 'policy_unenforceable', details: { missing: ['toolControl'] } })
+    }
     s.harness.stop()
   })
 })
