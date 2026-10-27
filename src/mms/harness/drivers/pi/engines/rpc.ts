@@ -40,7 +40,8 @@ export const PI_RPC_CAPS: HarnessCaps = Object.freeze({
   contextUsage: 'reported',
   toolControl: 'approval_only',
   budgets: 'hard',
-  spendLimits: 'reserved'
+  spendLimits: 'reserved',
+  definitionLimits: 'none'
 })
 
 /** What the RPC engine needs from the profile. */

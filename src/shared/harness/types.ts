@@ -65,6 +65,15 @@ export interface HarnessCaps {
    * what is left. They also need `budgets: 'hard'`.
    */
   spendLimits: 'reserved' | 'unsupported'
+  /**
+   * `in_loop`: the runtime runs an agent definition's whole loop itself, under the definition's own
+   * limits, as definitions have always run (Mousse's in-process loop, the legacy Pi engine): the turn
+   * and tool-call counts refuse the next request or call before it starts, and the token and cost
+   * limits are checked after each response. A definition authority's limits are then admitted
+   * without `hard` budgets or `reserved` spend; nothing else is. `none` everywhere else (and for
+   * caps from before the key existed). Goes with that loop (PR 4 4h).
+   */
+  definitionLimits: 'in_loop' | 'none'
 }
 
 /**
@@ -77,7 +86,7 @@ export type RunCapabilities = Pick<
 >
 
 export const HARNESS_CAP_KEYS = [
-  'steer', 'interrupt', 'rollback', 'fork', 'events', 'containment', 'historyInjection', 'mcp', 'childPolicy', 'planMode', 'contextUsage', 'toolControl', 'budgets', 'spendLimits'
+  'steer', 'interrupt', 'rollback', 'fork', 'events', 'containment', 'historyInjection', 'mcp', 'childPolicy', 'planMode', 'contextUsage', 'toolControl', 'budgets', 'spendLimits', 'definitionLimits'
 ] as const satisfies ReadonlyArray<keyof HarnessCaps>
 
 /** What a caller picks to run an agent. */

@@ -19,7 +19,8 @@ export const CODEX_CAPS: HarnessCaps = Object.freeze({
   // Codex asks Mousse before each tool under the approval policy Mousse sets.
   toolControl: 'approval_only',
   budgets: 'unsupported',
-  spendLimits: 'unsupported'
+  spendLimits: 'unsupported',
+  definitionLimits: 'none'
 })
 
 const SIGN_IN_COMMAND = 'codex login'

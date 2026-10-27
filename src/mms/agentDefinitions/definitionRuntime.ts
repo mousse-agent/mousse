@@ -7,6 +7,7 @@ import type {
   AgentExecutionLimit,
   AgentExecutionSource,
   AgentRuntimeHostBindings,
+  AgentRuntimeEffectTracker,
   AgentRuntimeInput,
   AgentRuntimePolicy,
   AgentRuntimePort,
@@ -21,8 +22,10 @@ import { RunCounters, RunSpend, type CounterScope, type SpendScope } from '../ha
 import { userMessage } from '../orchestrator/nativeContext'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import {
+  addAttemptUsage,
   classifyProviderFailure,
   emptyAttemptUsage,
+  remainingBudget,
   errorText,
   isAbortError,
   orderedFallbackModels,
@@ -99,6 +102,12 @@ export interface DefinitionTurnRequest extends DefinitionCheck {
   signal: AbortSignal
   /** The first tool of the turn started: from then on there is no retry and no fallback. */
   onDispatched(): void
+  /**
+   * The run's effect tracker, and the definition's limits left for this record: a runtime that runs
+   * the definition's loop itself (the legacy engine) holds the turn to them and reports its usage there.
+   */
+  effects: AgentRuntimeEffectTracker
+  remaining: AgentExecutionBudget
 }
 
 export interface DefinitionTurnResult {
@@ -245,6 +254,16 @@ function limitOf(error: unknown): AgentExecutionLimit | undefined {
   return limit && typeof limit.kind === 'string' && typeof limit.limit === 'number' ? limit : undefined
 }
 
+/** A limit the earlier records already used up: the next record never starts. */
+function exhaustedBefore(remaining: AgentExecutionBudget, original: AgentExecutionBudget, used: ReturnType<typeof emptyAttemptUsage>): AgentExecutionLimit | undefined {
+  if (original.maxElapsedMs > 0 && remaining.maxElapsedMs <= 0) return { kind: 'elapsed_ms', limit: original.maxElapsedMs }
+  if (remaining.maxTurns <= 0) return { kind: 'turns', limit: original.maxTurns, actual: used.turns }
+  if (original.maxInputTokens !== undefined && remaining.maxInputTokens! <= 0) return { kind: 'input_tokens', limit: original.maxInputTokens, actual: used.inputTokens }
+  if (original.maxOutputTokens !== undefined && remaining.maxOutputTokens! <= 0) return { kind: 'output_tokens', limit: original.maxOutputTokens, actual: used.outputTokens }
+  if (original.maxCostUsd !== undefined && remaining.maxCostUsd! <= 0) return { kind: 'cost_usd', limit: original.maxCostUsd, actual: used.costUsd }
+  return undefined
+}
+
 /** The definition runtime over the gateway's turn code (`DefinitionTurnPort`). */
 export function createDefinitionRuntime(port: DefinitionTurnPort): AgentRuntimePort {
   return {
@@ -278,6 +297,8 @@ export function createDefinitionRuntime(port: DefinitionTurnPort): AgentRuntimeP
       })
       let attempt = 0
       let lastError: unknown
+      // What earlier records used, as a loop that runs under the definition's limits reports it.
+      let used = emptyAttemptUsage()
       for (let index = 0; index < candidates.length; ) {
         if (input.signal.aborted) throw input.signal.reason ?? new DOMException('Aborted', 'AbortError')
         const ref = candidates[index]!.ref
@@ -293,6 +314,10 @@ export function createDefinitionRuntime(port: DefinitionTurnPort): AgentRuntimeP
         let sameCandidateRetries = 0
         for (;;) {
           attempt += 1
+          const remaining = remainingBudget(input.budget, used, Date.now() - started)
+          const exhausted = exhaustedBefore(remaining, input.budget, used)
+          if (exhausted) return result('', [], exhausted)
+          effects.attemptUsage = emptyAttemptUsage()
           try {
             const turn = await port.executeDefinitionTurn({
               ...check,
@@ -307,13 +332,17 @@ export function createDefinitionRuntime(port: DefinitionTurnPort): AgentRuntimeP
               counters,
               spend,
               signal: input.signal,
-              onDispatched: () => { effects.dispatched = true }
+              onDispatched: () => { effects.dispatched = true },
+              effects,
+              remaining
             })
+            used = addAttemptUsage(used, effects.attemptUsage)
             usage.inputTokens += turn.usage.inputTokens
             usage.outputTokens += turn.usage.outputTokens
             usage.costUsd += turn.usage.costUsd
             return result(turn.text, turn.history, turn.limit)
           } catch (error) {
+            used = addAttemptUsage(used, effects.attemptUsage)
             lastError = error
             const limit = limitOf(error)
             if (limit) return result('', [], limit)

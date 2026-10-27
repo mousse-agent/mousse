@@ -2,7 +2,9 @@ import type { AssistantMessage, Message } from '../../../shared/transcript'
 import type { ProviderDriverKind } from '../../../shared/providerInstances'
 import type { PermissionMode } from '../../../shared/permissionMode'
 import type { ChatImageAttachment, ChatMode } from '../../../shared/types'
-import type { LlmChatOptions, ToolLoopSafetyOptions } from '../../orchestrator/LlmClient'
+import type { LlmChatOptions, LlmClient, ToolLoopSafetyOptions } from '../../orchestrator/LlmClient'
+import type { AgentExecutionBudget, AgentExecutionLimit, AgentRuntimeEffectTracker } from '../../../shared/agents/execution'
+import type { IntegrationActor } from '../../../shared/integrations/actor'
 import type { StreamingLlmTextEvent, StreamingLlmThinkingEvent, StreamingLlmToolEvent } from '../../harness/turnEvents'
 import type { NativeMessageCheckpoint } from '../../orchestrator/nativeContext'
 import type { ChildPreflightContext, SubagentRefusal } from '../policy/featureGates'
@@ -329,6 +331,13 @@ export interface AdapterHost {
    * MCP tools against the same object.
    */
   bot?: BotAuthority
+  /**
+   * What a runtime that runs a definition's loop itself (`HarnessCaps.definitionLimits: 'in_loop'`,
+   * the legacy engine) needs beside `definition`: the run's own chat client (its own task queue and
+   * browser binding), the limits left for this turn, and the effect tracker. Host-minted for a
+   * definition turn only; other runtimes ignore it.
+   */
+  definitionLoop?: DefinitionLoop
   context: {
     /** Safe-boundary compaction inside a long tool loop; absent when compaction is disabled. */
     toolLoopSafety?: ToolLoopSafetyOptions
@@ -357,6 +366,19 @@ export interface AdapterHost {
      */
     nativeHistoryNow?(): string
   }
+}
+
+/** `AdapterHost.definitionLoop`. */
+export interface DefinitionLoop {
+  /** A chat client of the definition run's own, made on first use. */
+  client(): Pick<LlmClient, 'chat'>
+  /** The definition's limits left for this turn (counts, tokens, cost, time). */
+  budget: AgentExecutionBudget
+  effects: AgentRuntimeEffectTracker
+  /** Only the definition's granted skills and MCP tools are visible to the loop. */
+  actor: IntegrationActor
+  /** The loop reports the limit that ended the turn, if one did. */
+  limitReached(limit: AgentExecutionLimit): void
 }
 
 /** Per-model facts the orchestrator needs outside a turn (SPEC §13.1 `describe`). */

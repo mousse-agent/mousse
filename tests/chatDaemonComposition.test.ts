@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import type { DefinitionTurnRequest } from '../src/mms/agentDefinitions/definitionRuntime'
+import type { Context } from '@earendil-works/pi-ai'
 import { describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
@@ -9,10 +9,9 @@ import { LocalMmsClient, MmsProtocolServer } from '../src/mms/protocol'
 import { defaultAgentSettings } from '../src/shared/agents/defaults'
 import { CHAT_CAPABILITY, type ChatConversation, type ChatsSnapshot } from '../src/shared/chats'
 import type { ChatResourceSnapshot, ChatSharedFile, ChatSharedFileWriteResult } from '../src/shared/chatResources'
+import { providerResponse, streamOf } from './fixtures/agent-platform/agent-runtime-policy/helpers'
 
-// Real profile composition, framed transport and filesystem. Definition turns go through the gateway
-// (PR 4 §6); no runtime of this profile can hold a definition yet, so the model turn itself is
-// scripted at `executeDefinitionTurn` (the gateway path has its own tests in agentDefinitions/).
+// Real profile composition, framed transport, LLM loop and filesystem; provider I/O is deterministic.
 describe('Chats daemon composition', () => {
   it('binds persistent chats, actual provider history and shared resources to the authenticated profile and client', async () => {
     vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
@@ -27,13 +26,13 @@ describe('Chats daemon composition', () => {
       const services = await main.getProfileServices(alice.id)
       const provider = services.providerAuth.models.getProviders().find((entry) => services.providerAuth.models.getModels(entry.id).length > 0)!
       const model = services.providerAuth.models.getModels(provider.id)[0]!
-      const captured: DefinitionTurnRequest[] = []
+      vi.spyOn(services.providerAuth, 'has').mockReturnValue(true)
+      vi.spyOn(services.providerAuth.models, 'getAuth').mockResolvedValue({ apiKey: 'fixture' } as never)
+      const captured: Context[] = []
       const outputs = ['@forge review this', 'Reviewed.', 'I remember the review.']
-      vi.spyOn(services.orchestrator, 'checkDefinitionTurn').mockReturnValue(undefined)
-      vi.spyOn(services.orchestrator, 'executeDefinitionTurn').mockImplementation(async (turn) => {
-        captured.push({ ...turn, conversation: structuredClone(turn.conversation) })
-        const text = outputs.shift()!
-        return { text, history: [{ role: 'user', content: turn.userMessage, at: new Date().toISOString() }, { role: 'assistant', content: text, at: new Date().toISOString() }], usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 } }
+      vi.spyOn(services.providerAuth.models, 'streamSimple').mockImplementation((_model, context) => {
+        captured.push(structuredClone(context))
+        return streamOf(providerResponse([{ type: 'text', text: outputs.shift()! }], 'stop')) as never
       })
       const ids = ['scout', 'forge'].map((slug) => {
         const settings = defaultAgentSettings({ name: slug === 'scout' ? 'Scout' : 'Forge', slug })
@@ -59,10 +58,9 @@ describe('Chats daemon composition', () => {
       expect(completed.messages.map((entry) => entry.participantId)).toEqual(['self', ids[0], ids[1]])
       expect(completed.run?.state).toBe('completed')
       expect(captured[1]!.systemPrompt).toContain('Participants: You, Scout (@scout), Forge (@forge)')
-      expect(captured[1]!.ref).toMatchObject({ providerId: provider.id, modelId: model.id })
       await one.request('chats.send', { chatId: chat.id, text: '@scout remember?' })
       await services.platform.chats.waitForIdle()
-      expect(JSON.stringify(captured[2]!.conversation)).toContain('Reviewed.')
+      expect(JSON.stringify(captured[2]!.messages)).toContain('Reviewed.')
       await expect(foreign.request('chats.get', { chatId: chat.id })).rejects.toMatchObject({ code: 'chat_not_found' })
       await expect(one.request('chats.snapshot', { profileId: bob.id })).rejects.toMatchObject({ code: 'profile_mismatch' })
       const binding = services.platform.chats.resourceBinding(chat.id)

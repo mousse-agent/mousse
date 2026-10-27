@@ -27,7 +27,7 @@ export class DefinitionTurnRecord {
     // Text streamed before a tool call is an assistant message of its own.
     if (event.phase === 'start') this.flush()
     if (event.phase !== 'complete' || event.kind === 'skill_loaded') return
-    this.entries.push({ role: 'tool', name: event.title, content: event.summary, at: new Date().toISOString() })
+    this.entries.push({ role: 'tool', name: event.title, content: event.response ?? event.summary, at: new Date().toISOString() })
   }
 
   metrics(metrics: ProviderMetrics): void {

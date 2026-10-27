@@ -97,6 +97,7 @@ export const PI_DRIVER_ID = 'pi'
 export type {
   AdapterHost,
   ChildTurnPolicy,
+  DefinitionLoop,
   ProviderMetrics,
   RecoveredContext,
   TurnBridge,

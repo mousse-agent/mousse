@@ -52,7 +52,7 @@ import {
 } from '../agentDefinitions/definitionRuntime'
 import { definitionToolGranted, type DefinitionAuthority } from '../agentDefinitions/definitionGate'
 import { DefinitionTurnRecord, definitionActor } from '../agentDefinitions/definitionTurnRecord'
-import type { AgentExecutionRequest, AgentExecutionResult } from '../../shared/agents/execution'
+import type { AgentExecutionLimit, AgentExecutionRequest, AgentExecutionResult } from '../../shared/agents/execution'
 import type { EffectiveAgentGrants } from '../../shared/agents/types'
 import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import { EventEmitter } from 'events'
@@ -77,7 +77,7 @@ import { QuickActionTools } from './QuickActionTools'
 import { WebTools } from './WebTools'
 import { stableStringify } from '../run/json'
 import { closeStaleActivity, cutOffActivityOf, formatRestartNote } from '../run/restartNote'
-import { createHarnessGateway, PI_DRIVER_ID, type AdapterHost, type BindInput, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
+import { createHarnessGateway, PI_DRIVER_ID, type AdapterHost, type BindInput, type ChildTurnPolicy, type DefinitionLoop, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
 import { piDriver } from '../harness/drivers/pi'
 import { contextGauge, threadTurnOrigin } from '../harness/policy'
 import type { BotThreads } from '../../shared/bots/personal/authority'
@@ -804,6 +804,31 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /**
+   * The chat client a definition's loop runs on (the legacy engine): one of the run's own, so it
+   * sees the definition thread's task queue and browser binding, never the GUI client's.
+   */
+  private definitionChatClient(turn: DefinitionTurnRequest, extras: { host?: DefinitionHostBindings; browser?: BrowserExecutionBinding }): Pick<LlmClient, 'chat'> {
+    const session = this.getOrCreateSession(turn.threadId)
+    const llm = new LlmClient(
+      this.settingsStore,
+      this.providerAuth,
+      this.mcpManager,
+      this.skillsRegistry,
+      () => turn.projectPath ?? session.projectCwd ?? this.worktrees.getRepoRoot(),
+      this.fileService,
+      this.gitService,
+      this.lineEditStats,
+      (payload) => this.emit('document-opened', payload),
+      session.tasks,
+      (action) => this.emit('quick-action-created', action),
+      (payload, threadId) => this.presentPlanCard(payload, threadId),
+      { questions: this.questions, modeRegistry: this.modeRegistry, browserRuntime: readHostBrowserRuntime(extras.host) ?? this.browserRuntime, customModel: (provider, modelId) => this.customPiModel(provider, modelId) }
+    )
+    if (extras.browser) llm.bindBrowserExecution(extras.browser)
+    return { chat: (...args) => this.sessionAls.run(session, () => llm.chat(...args)) }
+  }
+
   private async runDefinitionTurn(turn: DefinitionTurnRequest, engine: RunEngine, lease: ThreadLeaseHandle, extras: { host?: DefinitionHostBindings; browser?: BrowserExecutionBinding }): Promise<DefinitionTurnResult> {
     const { threadId } = turn
     const resolved = this.harness.resolveStored(this.definitionSelection(turn.ref), { purpose: turn.origin, scope: this.threadScope(threadId) })
@@ -866,6 +891,20 @@ export class OrchestratorService extends EventEmitter {
       definition: authority
     }, { continuation: false })
     const record = new DefinitionTurnRecord()
+    // A runtime that runs the definition's loop itself (the legacy engine) runs it on a client of the
+    // run's own, under the limits left, and reports the limit that ended it.
+    let loopLimit: AgentExecutionLimit | undefined
+    let loopUsed = false
+    const definitionLoop: DefinitionLoop = {
+      client: () => {
+        loopUsed = true
+        return this.definitionChatClient(turn, extras)
+      },
+      budget: turn.remaining,
+      effects: turn.effects,
+      actor: definitionActor(turn.grants),
+      limitReached: (limit) => { loopLimit = limit }
+    }
     let handle: ReturnType<HarnessGateway['startTurn']> | undefined
     const interrupt = (): void => { void handle?.interrupt().catch(() => {}) }
     turn.signal.addEventListener('abort', interrupt, { once: true })
@@ -927,6 +966,7 @@ export class OrchestratorService extends EventEmitter {
       }
       const control: TurnControl = { drainSteer: () => undefined, heartbeat: () => this.heartbeatRun(runId) }
       const host: AdapterHost = {
+        definitionLoop,
         tools: {
           ...(extras.browser ? { browser: extras.browser } : {}),
           toolAccess: { allows: () => true, execute: (_name, _args, run) => writer(run) },
@@ -958,7 +998,10 @@ export class OrchestratorService extends EventEmitter {
       const text = result.text || record.finalText()
       if (result.aborted || turn.signal.aborted) markTerminal('interrupted', { interruptedBy: 'user' }, text)
       else markTerminal('completed', undefined, text)
-      return { text, history: record.history(turn.userMessage, text), usage: record.usage(result.usage) }
+      const usage = loopUsed
+        ? { inputTokens: turn.effects.attemptUsage.inputTokens, outputTokens: turn.effects.attemptUsage.outputTokens, costUsd: turn.effects.attemptUsage.costUsd }
+        : record.usage(result.usage)
+      return { text, history: record.history(turn.userMessage, text), usage, ...(loopLimit ? { limit: loopLimit } : {}) }
     } catch (error) {
       if (turn.signal.aborted) markTerminal('interrupted', { interruptedBy: 'user' })
       else markTerminal('failed', { error: error instanceof Error ? error.message : String(error) })
