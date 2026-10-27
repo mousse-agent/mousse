@@ -313,11 +313,13 @@ describe('CodexAdapter', () => {
       { provider: 'codex', instanceId: 'codex', model: 'gpt-x', sessionId: T, nativeTurnId: 'turn-1' }
     ])
     const tools = sink.calls.filter(([name]) => name === 'tool').map(([, event]) => event)
+    const diff = '@@\n-old\n+new\n+more'
+    const changes = [{ path: 'a.ts', change: 'update', diff, added: 2, removed: 1 }]
     expect(tools).toEqual([
-      { kind: 'mcp_tool_call', phase: 'start', callId: 'cmd-1', title: 'ls', summary: 'shell', details: [], activity: { toolName: 'shell' } },
-      { kind: 'mcp_tool_call', phase: 'complete', callId: 'cmd-1', title: 'ls', summary: 'shell', details: [], activity: { toolName: 'shell' } },
-      { kind: 'mcp_tool_call', phase: 'start', callId: 'patch-1', title: 'Edit a.ts', summary: 'apply_patch', details: [], activity: { toolName: 'apply_patch' } },
-      { kind: 'mcp_tool_call', phase: 'complete', callId: 'patch-1', title: 'Edit a.ts', summary: 'apply_patch', details: [], activity: { toolName: 'apply_patch' } }
+      { kind: 'mcp_tool_call', phase: 'start', callId: 'cmd-1', title: 'ls', summary: 'shell', details: [], activity: { toolName: 'shell', kind: 'command', command: 'ls' } },
+      { kind: 'mcp_tool_call', phase: 'complete', callId: 'cmd-1', title: 'ls', summary: 'shell', details: [], activity: { toolName: 'shell', kind: 'command', exitCode: 0, status: 'done' } },
+      { kind: 'mcp_tool_call', phase: 'start', callId: 'patch-1', title: 'Edit a.ts', summary: 'apply_patch', details: [], activity: { toolName: 'apply_patch', kind: 'file_change', changes } },
+      { kind: 'mcp_tool_call', phase: 'complete', callId: 'patch-1', title: 'Edit a.ts', summary: 'apply_patch', details: [], activity: { toolName: 'apply_patch', kind: 'file_change', changes, status: 'done' } }
     ])
     expect(sink.calls.find(([name]) => name === 'lineEdits')?.[1]).toBe(3)
     expect(sink.calls.filter(([name]) => name === 'thinking').map(([, event]) => event)).toEqual([
