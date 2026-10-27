@@ -9,6 +9,7 @@ import {
   validateRoutedParams
 } from '../../../../src/mms/bridge/routed/OwnerRoutes'
 import { MmsRemoteBackend } from '../../../../src/mms/bridge/remote/MmsBackend'
+import { PullRequestThreadService } from '../../../../src/mms/git/PullRequestThreadService'
 import { SqliteBridgeAudit } from '../../../../src/mms/net/store/audit'
 import { SqliteNodePolicy } from '../../../../src/mms/net/store/nodePolicy'
 import { systemClock } from '../../../../src/mms/net/clock'
@@ -335,8 +336,8 @@ describe('reads and refusals', () => {
     ])
   }, 60_000)
 
-  it('keeps an unexpected failure uncertain, and records nothing as completed for it', async () => {
-    const { f, thread } = await owner()
+  it('keeps an unexpected failure uncertain, audits it as uncertain, and records nothing as completed for it', async () => {
+    const { f, thread, audit } = await owner()
     const t = thread()
     vi.spyOn(f.mms.threads, 'updateThreadMeta').mockImplementation(() => {
       throw new TypeError('this is a bug, not a refusal')
@@ -354,7 +355,43 @@ describe('reads and refusals', () => {
       .prepare("SELECT state FROM net_executions WHERE target='routed.threads.rename'")
       .get() as { state: string }
     expect(row.state).toBe('uncertain')
+    // It may have made its change, so the audit says so.
+    expect(audit.recent(5, f.callerNode)).toEqual([
+      expect.objectContaining({ method: 'threads.rename', outcome: 'uncertain', kind: 'change' })
+    ])
     vi.restoreAllMocks()
+  }, 60_000)
+
+  it('answers the checks a handler makes before it changes anything as typed refusals, not as unknown outcomes', async () => {
+    const { call, thread } = await owner()
+    const t = thread()
+    expect(await call('agents.stop', { threadId: t.id, agentId: 'no-such-agent' })).toMatchObject({
+      ok: false,
+      error: { code: 'agent_not_found' }
+    })
+    expect(await call('queue.remove', { threadId: t.id, itemId: 'no-such-item' })).toMatchObject({
+      ok: false,
+      error: { code: 'queue_item_not_found' }
+    })
+    expect(
+      await call('actions.getAffectedFiles', { threadId: t.id, actionId: 'nope' })
+    ).toMatchObject({
+      ok: false,
+      error: {
+        code: expect.stringMatching(/workspace_not_ready|thread_has_no_folder|action_not_found/)
+      }
+    })
+    expect(await call('operations.abort', { threadId: t.id, operationId: 'nope' })).toMatchObject({
+      ok: false
+    })
+    expect(
+      await call('applets.get', { threadId: t.id, appletId: 'a', revisionId: 'b' })
+    ).toMatchObject({ ok: false, error: { code: 'applet_unavailable' } })
+    expect(
+      await call('threads.setWorktreeEnabled', { threadId: t.id, enabled: true })
+    ).toMatchObject({
+      ok: true
+    })
   }, 60_000)
 
   it('reports which errors are refusals', () => {
@@ -471,26 +508,27 @@ describe('a routed call runs as a person on another computer', () => {
     ])
   }, 60_000)
 
-  it('runs a /workflow command as a window would, because the connection holds the workflow capability', async () => {
-    const { ok, thread, f } = await owner()
+  it('refuses a /workflow command from another computer, because a device limit cannot bind a workflow', async () => {
+    const { call, thread, f } = await owner({ maxMode: 'ask' })
     const t = thread()
     const prepare = vi
       .spyOn(f.mms.platform.workflowChat!, 'prepare')
       .mockResolvedValue({ content: '/review', workflowInvocationId: 'invocation-1' } as never)
-    vi.spyOn(f.mms.orchestrator, 'send').mockResolvedValue({
-      message: '',
-      actions: [],
-      runId: 'run-2',
-      accepted: true
-    } as never)
-    expect((await ok('orchestrator.send', { threadId: t.id, content: '/review' })).runId).toBe(
-      'run-2'
-    )
+    const send = vi.spyOn(f.mms.orchestrator, 'send')
+    const enqueue = vi.spyOn(f.mms.orchestrator, 'enqueueForThread')
+    for (const method of ['orchestrator.send', 'queue.enqueue'])
+      expect(await call(method, { threadId: t.id, content: '/review' })).toMatchObject({
+        ok: false,
+        error: { code: 'workflow_not_available_remotely' }
+      })
+    // It was prepared as a window would, then refused before anything was sent or queued.
     expect(prepare).toHaveBeenCalledWith(
       t.id,
       expect.objectContaining({ content: '/review' }),
       'gui'
     )
+    expect(send).not.toHaveBeenCalled()
+    expect(enqueue).not.toHaveBeenCalled()
     vi.restoreAllMocks()
   }, 60_000)
 
@@ -589,11 +627,128 @@ describe('the profile barrier and the audit', () => {
     await call('threads.rename', { threadId: 'missing', name: 'x' })
     await ok('threads.get', { threadId: t.id })
     const rows = audit.recent(10, f.callerNode)
-    expect(rows.map((row) => [row.method, row.outcome]).reverse()).toEqual([
-      ['threads.rename', 'ok'],
-      ['threads.rename', 'thread_not_found']
+    expect(rows.map((row) => [row.method, row.outcome, row.kind]).reverse()).toEqual([
+      ['threads.rename', 'ok', 'change'],
+      ['threads.rename', 'thread_not_found', 'refused']
     ])
     expect(rows[1]).toMatchObject({ thread: t.id, node: f.callerNode })
     expect(audit.reads(f.callerNode)).toEqual([expect.objectContaining({ calls: 1 })])
   }, 60_000)
+
+  it('does not let refused reads push a device’s earlier changes out of the audit', async () => {
+    const { ok, call, thread, audit, f } = await owner()
+    const t = thread()
+    await ok('threads.rename', { threadId: t.id, name: 'Renamed' })
+    for (let attempt = 0; attempt < 300; attempt++)
+      expect(await call('threads.get', { threadId: 'nope' })).toMatchObject({ ok: false })
+    // The change is still there, and the refused reads are only counted.
+    expect(audit.recent(1000, f.callerNode).map((row) => row.method)).toEqual(['threads.rename'])
+    expect(audit.reads(f.callerNode)).toEqual([expect.objectContaining({ calls: 300 })])
+  }, 120_000)
+
+  it('audits a refused projects.open as refused, and the folder it opened by project', async () => {
+    const { call, ok, audit, f } = await owner()
+    const refused = await call('projects.open', { path: f.targetPath })
+    expect(refused).toMatchObject({ ok: false, error: { code: 'project_refused' } })
+    const folder = repo()
+    const opened = await ok('projects.open', { path: folder })
+    const [success, refusal] = audit.recent(5, f.callerNode)
+    expect(success).toMatchObject({
+      method: 'projects.open',
+      outcome: 'ok',
+      kind: 'change',
+      project: opened.project.id
+    })
+    expect(refusal).toMatchObject({
+      method: 'projects.open',
+      outcome: 'project_refused',
+      kind: 'refused',
+      project: expect.stringMatching(/^path:[0-9a-f]{12}$/)
+    })
+    // The path itself is not kept.
+    expect(JSON.stringify(audit.recent(5, f.callerNode))).not.toContain(f.targetPath)
+  }, 120_000)
+})
+
+describe('a device’s mode limit holds for every way its text can run', () => {
+  it('leaves a message the owner queued no looser than the limit once the device edits it, and drops the queue from the reply', async () => {
+    const { ok, thread, f } = await owner({ maxMode: 'accept_edits' })
+    const t = thread()
+    f.mms.orchestrator.setThreadPermissionMode(t.id, 'full')
+    const item = f.mms.orchestrator.enqueueForThread(
+      t.id,
+      { content: 'owner text' },
+      { source: 'gui' }
+    )
+    expect(item.permissionMode).toBeUndefined()
+    const edited = await ok('queue.edit', {
+      threadId: t.id,
+      itemId: item.id,
+      content: 'device text'
+    })
+    expect(edited.items).toBeUndefined()
+    expect(edited.item).toMatchObject({
+      content: 'device text',
+      permissionMode: 'accept_edits',
+      sentFrom: { node: f.callerNode }
+    })
+    expect(f.mms.orchestrator.listQueue(t.id).find((entry) => entry.id === item.id)).toMatchObject({
+      content: 'device text',
+      permissionMode: 'accept_edits',
+      sentFrom: { node: f.callerNode }
+    })
+    expect(f.mms.threads.getThread(t.id)!.sentFrom).toEqual({ node: f.callerNode })
+    // A queue write answers with the item only; the caller reads the queue from queue.list.
+    const more = await ok('queue.enqueue', { threadId: t.id, content: 'another' })
+    expect(Object.keys(more).sort()).toEqual(['item'])
+    expect(more.item).toMatchObject({
+      permissionMode: 'accept_edits',
+      sentFrom: { node: f.callerNode }
+    })
+    expect((await ok('queue.list', { threadId: t.id })).items).toHaveLength(2)
+  }, 60_000)
+
+  it('sends the first message of a thread started from a pull request under the limit, naming the computer', async () => {
+    const { ok, f } = await owner({ maxMode: 'accept_edits' })
+    const path = repo()
+    const project = f.mms.projects.openProject(path)
+    const send = vi
+      .spyOn(f.mms.orchestrator, 'send')
+      .mockResolvedValue({ message: '', actions: [], runId: 'run-pr', accepted: true } as never)
+    vi.spyOn(PullRequestThreadService.prototype, 'startThread').mockImplementation(async function (
+      this: unknown,
+      input
+    ) {
+      const deps = (
+        this as {
+          deps: {
+            threads: typeof f.mms.threads
+            prepareThread(thread: unknown): { id: string } & Record<string, unknown>
+            send(id: string, content: string): Promise<void>
+          }
+        }
+      ).deps
+      const created = deps.threads.createThread('From a pull request', input.projectId, path, {})
+      const prepared = deps.prepareThread(created)
+      if (input.send) await deps.send(prepared.id, input.message ?? 'Look at this pull request')
+      return { thread: prepared } as never
+    })
+    const started = await ok('pullRequests.startThread', {
+      projectId: project.id,
+      number: 7,
+      send: true,
+      message: 'run something'
+    })
+    expect(started.threads).toBeUndefined()
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(send.mock.calls[0][2]).toMatchObject({
+      source: 'gui',
+      awaitMode: 'ack',
+      permissionMode: 'accept_edits',
+      sentFrom: { node: f.callerNode },
+      actor: { kind: 'user', via: 'bridge', node: f.callerNode }
+    })
+    expect(f.mms.threads.getThread(started.thread.id)!.startedFrom).toEqual({ node: f.callerNode })
+    vi.restoreAllMocks()
+  }, 120_000)
 })

@@ -495,6 +495,11 @@ export const ROUTED_LEDGER_RESULT_MAX_BYTES = 16 * 1024
  * its lists itself, and the ledger keeps small results.
  */
 export const ROUTED_LOCAL_LIST_FIELDS = ['threads', 'all', 'projects'] as const
+/**
+ * A queue write returns the whole queue beside the item it changed (with any image data). The caller
+ * gets the queue from `queue.updated` or `queue.list`, so a routed `queue.*` write drops it too.
+ */
+export const ROUTED_QUEUE_LIST_FIELD = 'items'
 
 /** The Net method a routed row is registered as. */
 export const routedNetMethod = (method: string): string => `routed.${method}`

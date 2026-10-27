@@ -63,6 +63,17 @@ describe('events raised by a routed call', () => {
     expect(mms.protocolSequence()).toBe(second!.sequence)
   }, 60_000)
 
+  it('cannot be claimed by a client: a hello that says it is a bridge connection is refused', async () => {
+    const claimed = new LocalMmsClient({
+      homeDir: home,
+      ownerToken: mms.getOwnerLease()!.owner.token,
+      endpoint: server.endpoint!,
+      clientType: 'bridge' as never
+    })
+    await expect(claimed.connect()).rejects.toBeTruthy()
+    await claimed.close().catch(() => undefined)
+  }, 60_000)
+
   it('tell in-daemon watchers about a changed thread list, as an event raised by a window does', async () => {
     const lists: unknown[] = []
     mms.events.on('threads:updated', (data) => lists.push(data))

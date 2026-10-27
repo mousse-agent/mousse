@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { isAbsolute, win32 } from 'node:path'
 import { NetError, type NodeId } from '../../../shared/net'
 import type { NodeCapability } from '../../../shared/net'
@@ -5,6 +6,7 @@ import {
   ROUTED_FORBIDDEN_KEYS,
   ROUTED_LEDGER_RESULT_MAX_BYTES,
   ROUTED_LOCAL_LIST_FIELDS,
+  ROUTED_QUEUE_LIST_FIELD,
   ROUTED_METHODS,
   routedNetMethod,
   type RoutedReply,
@@ -191,34 +193,48 @@ export class OwnerRoutes {
     const node = context.caller.node
     const named = params[row.threadIds?.[0] ?? 'threadId']
     const thread = typeof named === 'string' ? named : undefined
-    const project = typeof params.projectId === 'string' ? params.projectId : undefined
+    let project = typeof params.projectId === 'string' ? params.projectId : undefined
+    // `projects.open` names a path of the owner's disk: the audit keeps the project it opened, or a short
+    // hash of the path it was refused, never the path itself.
+    if (method === 'projects.open' && typeof params.path === 'string')
+      project = `path:${createHash('sha256').update(params.path).digest('hex').slice(0, 12)}`
     try {
-      if (context.signal.aborted) throw new NetError('cancelled')
+      // Nothing has run yet: a call that was cancelled before it started is a refusal, not an unknown outcome.
+      if (context.signal.aborted)
+        throw new DomainRpcError('cancelled', 'The request was cancelled before it started.')
       await this.assertOwned(method, row, params)
       const result = await this.dispatch(method, row, params, context)
+      if (method === 'projects.open')
+        project = (result as { project?: { id?: string } }).project?.id ?? project
       const reply: RoutedReply = {
         ok: true,
-        result: row.durable ? withoutLocalLists(result) : result
+        result: row.durable ? withoutLocalLists(method, result) : result
       }
       const bytes = byteLength(reply)
       // A read keeps nothing on disk and has no artifact to carry a larger reply (paging is a later change).
       if (!row.durable && bytes > REPLY_MAX_BYTES) throw new NetError('too_large')
-      if (row.durable) audit.record({ node, method, thread, project, outcome: 'ok' })
+      if (row.durable)
+        audit.record({ node, method, thread, project, outcome: 'ok', kind: 'change' })
       else audit.countRead(node, bytes)
       return reply
     } catch (error) {
       const refusal = refusalOf(error)
       if (!refusal) {
         // Not something the handler refused on purpose: it may have made part of its change. The ledger
-        // records `outcome_uncertain` for a durable call, and the owner keeps the diagnostic.
+        // records `outcome_uncertain` for a durable call, the audit says so, and the owner keeps the diagnostic.
         if (!(error instanceof NetError))
           console.error(
             'Routed request failed',
             errorDiagnostic(normalizeAppError(error, 'handler_error'), method)
           )
+        if (row.durable)
+          audit.record({ node, method, thread, project, outcome: 'uncertain', kind: 'change' })
         throw error
       }
-      audit.record({ node, method, thread, project, outcome: refusal.code })
+      // A refused read is only counted: a device cannot fill the audit with reads it knows will fail.
+      if (row.durable)
+        audit.record({ node, method, thread, project, outcome: refusal.code, kind: 'refused' })
+      else audit.countRead(node, 0)
       return { ok: false, error: refusal }
     }
   }
@@ -314,11 +330,21 @@ export class OwnerRoutes {
     if (method === 'orchestrator.send') forwarded.await = 'ack'
     if (row.via === 'backend') {
       // The backend answers without the request barrier of the protocol handlers; hold it here.
-      return await services.runOwnedRequest(routedNetMethod(method), () =>
+      const result = await services.runOwnedRequest(routedNetMethod(method), () =>
         this.backend.execute(method as BridgeOrdinaryMethod, forwarded, {
           node: context.caller.node
         })
       )
+      if (method !== 'projects.open') return result
+      // A folder the backend will not register answers `{ ok: false, error }` inside a successful result so a
+      // phone sees the reason; here it is a refusal like any other.
+      const opened = result as { ok?: boolean; error?: string; project?: unknown }
+      if (opened.ok === false)
+        throw new DomainRpcError(
+          'project_refused',
+          opened.error ?? 'That folder cannot be opened from another computer.'
+        )
+      return { project: opened.project }
     }
     return mmsJson(await dispatchMethod(this.handlerContext(context), method, forwarded))
   }
@@ -370,10 +396,11 @@ export class OwnerRoutes {
 
 const byteLength = (value: unknown): number => Buffer.byteLength(JSON.stringify(value) ?? '')
 
-function withoutLocalLists(result: unknown): unknown {
+function withoutLocalLists(method: string, result: unknown): unknown {
   if (!isPlainObject(result)) return result
   const kept: Record<string, unknown> = { ...result }
   for (const key of ROUTED_LOCAL_LIST_FIELDS) delete kept[key]
+  if (method.startsWith('queue.')) delete kept[ROUTED_QUEUE_LIST_FIELD]
   return kept
 }
 

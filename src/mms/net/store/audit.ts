@@ -2,6 +2,12 @@ import type { NodeId } from '../../../shared/net'
 import type { Clock } from '../contracts'
 import type { NetDatabase } from './database'
 
+/**
+ * `change`: a routed call that changed something here, or may have (`uncertain`).
+ * `refused`: a call that was admitted and then refused (the thread was gone, the limit forbade it...).
+ */
+export type BridgeAuditKind = 'change' | 'refused'
+
 /** One call another computer made on this one, as the Devices screen shows it. */
 export interface BridgeAuditEntry {
   at: number
@@ -10,8 +16,9 @@ export interface BridgeAuditEntry {
   method: string
   thread?: string
   project?: string
-  /** `ok`, or the reason the call was refused here (`thread_not_found`, `forbidden`, ...). */
+  /** `ok`, `uncertain`, or the reason the call was refused here (`thread_not_found`, ...). */
   outcome: string
+  kind: BridgeAuditKind
 }
 
 /** What a computer read from this one in one hour: how many calls and how many bytes of results. */
@@ -22,12 +29,20 @@ export interface BridgeReadTotal {
   bytes: number
 }
 
-/** Rows of `bridge_audit` kept; the oldest go first. */
-export const BRIDGE_AUDIT_MAX_ROWS = 20_000
+/**
+ * What a device did is kept per device and per kind, so the device cannot push its own record out:
+ * - A change row is deleted only when it is older than this AND beyond the newest `CHANGE_ROWS_PER_NODE`
+ *   rows of that device. A flood of refusals never touches it, and replacing it takes that many real changes.
+ * - Refusals have a small budget of their own, newest first.
+ * - Refused reads are never rows (they are counted with the reads), so a device cannot make refusals for free.
+ */
+export const BRIDGE_AUDIT_CHANGE_ROWS_PER_NODE = 20_000
+export const BRIDGE_AUDIT_CHANGE_KEEP_MS = 30 * 24 * 60 * 60 * 1000
+export const BRIDGE_AUDIT_REFUSED_ROWS_PER_NODE = 1_000
 /** Hourly read totals are kept this long. */
 export const BRIDGE_READ_TOTALS_KEEP_MS = 30 * 24 * 60 * 60 * 1000
 const HOUR_MS = 60 * 60 * 1000
-const PRUNE_EVERY = 500
+const PRUNE_EVERY = 50
 
 /**
  * What other computers did on this one (`bridge_audit`), and how much they read (`bridge_audit_reads`).
@@ -48,17 +63,18 @@ export class SqliteBridgeAudit {
         this.db.charge(1, 192)
         this.db.database
           .prepare(
-            'INSERT INTO bridge_audit(at,node,method,thread,project,outcome) VALUES(?,?,?,?,?,?)'
+            'INSERT INTO bridge_audit(at,node,kind,method,thread,project,outcome) VALUES(?,?,?,?,?,?,?)'
           )
           .run(
             this.clock.now(),
             entry.node,
+            entry.kind,
             entry.method.slice(0, 96),
             entry.thread?.slice(0, 256) ?? null,
             entry.project?.slice(0, 256) ?? null,
             entry.outcome.slice(0, 96)
           )
-        if (++this.inserts % PRUNE_EVERY === 0) this.prune()
+        if (++this.inserts % PRUNE_EVERY === 0) this.prune(entry.node)
       })
     } catch {
       // The audit never decides whether a call runs.
@@ -82,22 +98,20 @@ export class SqliteBridgeAudit {
   }
 
   recent(limit = 100, node?: NodeId): BridgeAuditEntry[] {
+    const columns = 'at,node,kind,method,thread,project,outcome'
     const rows = (
       node
         ? this.db.database
-            .prepare(
-              'SELECT at,node,method,thread,project,outcome FROM bridge_audit WHERE node=? ORDER BY id DESC LIMIT ?'
-            )
+            .prepare(`SELECT ${columns} FROM bridge_audit WHERE node=? ORDER BY id DESC LIMIT ?`)
             .all(node, limit)
         : this.db.database
-            .prepare(
-              'SELECT at,node,method,thread,project,outcome FROM bridge_audit ORDER BY id DESC LIMIT ?'
-            )
+            .prepare(`SELECT ${columns} FROM bridge_audit ORDER BY id DESC LIMIT ?`)
             .all(limit)
     ) as Array<Record<string, unknown>>
     return rows.map((row) => ({
       at: Number(row.at),
       node: row.node as NodeId,
+      kind: row.kind as BridgeAuditKind,
       method: String(row.method),
       ...(row.thread === null ? {} : { thread: String(row.thread) }),
       ...(row.project === null ? {} : { project: String(row.project) }),
@@ -125,13 +139,25 @@ export class SqliteBridgeAudit {
     }))
   }
 
-  /** Keeps the newest rows and the recent hourly totals. Runs inside the insert that triggers it. */
-  prune(): void {
+  /** Applies both budgets to one device. Runs inside the insert that triggers it. */
+  prune(node: NodeId): void {
     this.db.database
       .prepare(
-        'DELETE FROM bridge_audit WHERE id <= (SELECT COALESCE(MAX(id),0) FROM bridge_audit) - ?'
+        'DELETE FROM bridge_audit WHERE node=? AND kind=? AND id IN (SELECT id FROM bridge_audit WHERE node=? AND kind=? ORDER BY id DESC LIMIT -1 OFFSET ?)'
       )
-      .run(BRIDGE_AUDIT_MAX_ROWS)
+      .run(node, 'refused', node, 'refused', BRIDGE_AUDIT_REFUSED_ROWS_PER_NODE)
+    this.db.database
+      .prepare(
+        'DELETE FROM bridge_audit WHERE node=? AND kind=? AND at<? AND id IN (SELECT id FROM bridge_audit WHERE node=? AND kind=? ORDER BY id DESC LIMIT -1 OFFSET ?)'
+      )
+      .run(
+        node,
+        'change',
+        this.clock.now() - BRIDGE_AUDIT_CHANGE_KEEP_MS,
+        node,
+        'change',
+        BRIDGE_AUDIT_CHANGE_ROWS_PER_NODE
+      )
     this.db.database
       .prepare('DELETE FROM bridge_audit_reads WHERE hour < ?')
       .run(Math.floor((this.clock.now() - BRIDGE_READ_TOTALS_KEEP_MS) / HOUR_MS))

@@ -20,22 +20,41 @@ afterEach(cleanup)
 
 const VERSIONS_FILE = fileURLToPath(new URL('./routedVersions.json', import.meta.url))
 
-type Snapshot = Record<string, { version: number; digest: string }>
+type Snapshot = Record<string, { version: number; digest: string; security: string }>
+
+const short = (value: unknown): string =>
+  createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 16)
 
 /** The keys of a row at its current version, in one stable text. */
 function digestOf(row: RoutedRow): string {
   const keys = routedKeysAt(row, row.version)
     .map((key) => `${key}@${row.since?.[key] ?? 1}`)
     .sort()
-  return createHash('sha256')
-    .update(JSON.stringify({ keys, required: [...(row.required ?? [])].sort() }))
-    .digest('hex')
-    .slice(0, 16)
+  return short({ keys, required: [...(row.required ?? [])].sort() })
+}
+
+/**
+ * The columns that decide who may call a row and what it may touch. Changing one is not a change of keys
+ * and needs no new version, but it must be a deliberate edit of `routedVersions.json`, so a reviewer sees it.
+ */
+function securityOf(row: RoutedRow): string {
+  return short({
+    capability: row.capability,
+    durable: row.durable,
+    target: row.target,
+    via: row.via,
+    terminal: row.terminal ?? false,
+    absolutePath: row.absolutePath ?? false,
+    threadIds: row.threadIds ?? ['threadId'],
+    owned: Object.entries(row.owned ?? {}).sort(([a], [b]) => a.localeCompare(b)),
+    routeOnly: [...(row.routeOnly ?? [])].sort()
+  })
 }
 
 /**
  * What is wrong with `table` compared with the versions on record: a row whose keys changed without
- * a higher version, a row that went back to an older version, and rows that are not on record.
+ * a higher version, a row that went back to an older version, a row whose security columns changed,
+ * and rows that are not on record.
  */
 export function routedVersionProblems(
   table: Readonly<Record<string, RoutedRow>>,
@@ -53,6 +72,10 @@ export function routedVersionProblems(
       )
     else if (row.version > recorded.version)
       problems.push(`${method} is at version ${row.version}: update routedVersions.json`)
+    else if (securityOf(row) !== recorded.security)
+      problems.push(
+        `${method} changed its capability, target, ownership or other security columns: review it and update routedVersions.json`
+      )
   }
   for (const method of Object.keys(snapshot))
     if (!table[method]) problems.push(`${method} is on record but no longer a row`)
@@ -63,7 +86,10 @@ const snapshotOf = (table: Readonly<Record<string, RoutedRow>>): Snapshot =>
   Object.fromEntries(
     Object.entries(table)
       .sort(([a], [b]) => a.localeCompare(b))
-      .map(([method, row]) => [method, { version: row.version, digest: digestOf(row) }])
+      .map(([method, row]) => [
+        method,
+        { version: row.version, digest: digestOf(row), security: securityOf(row) }
+      ])
   )
 
 describe('the routed method table', () => {
@@ -184,6 +210,23 @@ describe('the routed method table', () => {
     expect(routedVersionProblems(changed, recorded)).toEqual([
       expect.stringContaining('queue.list changed its keys without a new version')
     ])
+    // The columns that make a row safe are on record too: each change needs a deliberate update of the record.
+    const row = ROUTED_METHODS['files.write']
+    const edits: Array<[string, Partial<RoutedRow>]> = [
+      ['capability', { capability: 'read' }],
+      ['target', { target: 'project' }],
+      ['via', { via: 'backend' }],
+      ['terminal', { terminal: true }],
+      ['absolutePath', { absolutePath: true }],
+      ['owned', { owned: { content: 'run' } }],
+      ['routeOnly', { routeOnly: ['content'] }],
+      ['threadIds', { threadIds: ['path'] }]
+    ]
+    for (const [column, edit] of edits)
+      expect(
+        routedVersionProblems({ ...ROUTED_METHODS, 'files.write': { ...row, ...edit } }, recorded),
+        column
+      ).toEqual([expect.stringContaining('files.write changed its capability')])
     // Raising the version is noticed until the record is updated, and a key that says which version added it is fine.
     const bumped = {
       ...ROUTED_METHODS,

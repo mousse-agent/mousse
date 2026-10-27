@@ -1,554 +1,692 @@
 {
   "actions.activateBranch": {
     "version": 1,
-    "digest": "3ae0d709302579fb"
+    "digest": "3ae0d709302579fb",
+    "security": "ceacd93869361a7a"
   },
   "actions.configureRetention": {
     "version": 1,
-    "digest": "8f08d2afefad6f96"
+    "digest": "8f08d2afefad6f96",
+    "security": "ceacd93869361a7a"
   },
   "actions.fork": {
     "version": 1,
-    "digest": "f348edfcdb28ab57"
+    "digest": "f348edfcdb28ab57",
+    "security": "ceacd93869361a7a"
   },
   "actions.getAffectedFiles": {
     "version": 1,
-    "digest": "9920bfae2d57da2a"
+    "digest": "9920bfae2d57da2a",
+    "security": "04f7c680ffd36337"
   },
   "actions.list": {
     "version": 1,
-    "digest": "5682d15e453fd69e"
+    "digest": "5682d15e453fd69e",
+    "security": "04f7c680ffd36337"
   },
   "actions.pin": {
     "version": 1,
-    "digest": "848093950edc556a"
+    "digest": "848093950edc556a",
+    "security": "ceacd93869361a7a"
   },
   "actions.redo": {
     "version": 1,
-    "digest": "f57f8729cac80201"
+    "digest": "f57f8729cac80201",
+    "security": "ceacd93869361a7a"
   },
   "actions.revertCode": {
     "version": 1,
-    "digest": "bc4765c2cd461886"
+    "digest": "bc4765c2cd461886",
+    "security": "ceacd93869361a7a"
   },
   "actions.sweepRetention": {
     "version": 1,
-    "digest": "5682d15e453fd69e"
+    "digest": "5682d15e453fd69e",
+    "security": "ceacd93869361a7a"
   },
   "actions.undoLatest": {
     "version": 1,
-    "digest": "ea939c52269a6638"
+    "digest": "ea939c52269a6638",
+    "security": "ceacd93869361a7a"
   },
   "activity.get": {
     "version": 1,
-    "digest": "2a27f073e7829290"
+    "digest": "2a27f073e7829290",
+    "security": "04f7c680ffd36337"
   },
   "activity.snapshot": {
     "version": 1,
-    "digest": "e1b2634dfa7c5469"
+    "digest": "e1b2634dfa7c5469",
+    "security": "2455464eaace895f"
   },
   "agents.list": {
     "version": 1,
-    "digest": "2a27f073e7829290"
+    "digest": "2a27f073e7829290",
+    "security": "04f7c680ffd36337"
   },
   "agents.stop": {
     "version": 1,
-    "digest": "fe26769caa4421d4"
+    "digest": "fe26769caa4421d4",
+    "security": "926c4af141d1208d"
   },
   "applets.export": {
     "version": 1,
-    "digest": "8891331cbc055e2f"
+    "digest": "8891331cbc055e2f",
+    "security": "04f7c680ffd36337"
   },
   "applets.get": {
     "version": 1,
-    "digest": "0e698fe2a6c79b61"
+    "digest": "0e698fe2a6c79b61",
+    "security": "04f7c680ffd36337"
   },
   "applets.state.get": {
     "version": 1,
-    "digest": "0e698fe2a6c79b61"
+    "digest": "0e698fe2a6c79b61",
+    "security": "04f7c680ffd36337"
   },
   "applets.state.save": {
     "version": 1,
-    "digest": "402ff47a04e385f6"
+    "digest": "402ff47a04e385f6",
+    "security": "926c4af141d1208d"
   },
   "chatReferences.resolve": {
     "version": 1,
-    "digest": "55286740fccc87da"
+    "digest": "55286740fccc87da",
+    "security": "2455464eaace895f"
   },
   "composer.options": {
     "version": 1,
-    "digest": "2a27f073e7829290"
+    "digest": "2a27f073e7829290",
+    "security": "4f2aa5f92e3a87e6"
   },
   "files.grep": {
     "version": 1,
-    "digest": "0eb1d41a311a2b47"
+    "digest": "0eb1d41a311a2b47",
+    "security": "23c8269058d1b9db"
   },
   "files.list": {
     "version": 1,
-    "digest": "a9f0f4ffe811bccd"
+    "digest": "a9f0f4ffe811bccd",
+    "security": "23c8269058d1b9db"
   },
   "files.read": {
     "version": 1,
-    "digest": "1ccca53cbbe58375"
+    "digest": "1ccca53cbbe58375",
+    "security": "23c8269058d1b9db"
   },
   "files.readAsset": {
     "version": 1,
-    "digest": "654615c0ceab0f4f"
+    "digest": "654615c0ceab0f4f",
+    "security": "23c8269058d1b9db"
   },
   "files.search": {
     "version": 1,
-    "digest": "1b098c3cb6018928"
+    "digest": "1b098c3cb6018928",
+    "security": "23c8269058d1b9db"
   },
   "files.stat": {
     "version": 1,
-    "digest": "1ccca53cbbe58375"
+    "digest": "1ccca53cbbe58375",
+    "security": "23c8269058d1b9db"
   },
   "files.write": {
     "version": 1,
-    "digest": "681d92b9abb1a881"
+    "digest": "681d92b9abb1a881",
+    "security": "ceacd93869361a7a"
   },
   "git.abortInProgress": {
     "version": 1,
-    "digest": "52d0d38816c25d26"
+    "digest": "52d0d38816c25d26",
+    "security": "6f012c3ca58ce7c5"
   },
   "git.branches": {
     "version": 1,
-    "digest": "be5c180f1cc0b52d"
+    "digest": "be5c180f1cc0b52d",
+    "security": "23c8269058d1b9db"
   },
   "git.cancelOperation": {
     "version": 1,
-    "digest": "1bca6e15005304df"
+    "digest": "1bca6e15005304df",
+    "security": "ceacd93869361a7a"
   },
   "git.checkout": {
     "version": 1,
-    "digest": "f53d0aa6063bfdc2"
+    "digest": "f53d0aa6063bfdc2",
+    "security": "6f012c3ca58ce7c5"
   },
   "git.commit": {
     "version": 1,
-    "digest": "96584e3584c54c4f"
+    "digest": "96584e3584c54c4f",
+    "security": "6f012c3ca58ce7c5"
   },
   "git.createBranch": {
     "version": 1,
-    "digest": "d5a870ef7586addb"
+    "digest": "d5a870ef7586addb",
+    "security": "6f012c3ca58ce7c5"
   },
   "git.deleteBranch": {
     "version": 1,
-    "digest": "1ffa67e37f9c66d4"
+    "digest": "1ffa67e37f9c66d4",
+    "security": "6f012c3ca58ce7c5"
   },
   "git.diff": {
     "version": 1,
-    "digest": "6e076d207c54682f"
+    "digest": "6e076d207c54682f",
+    "security": "23c8269058d1b9db"
   },
   "git.diffStats": {
     "version": 1,
-    "digest": "be5c180f1cc0b52d"
+    "digest": "be5c180f1cc0b52d",
+    "security": "23c8269058d1b9db"
   },
   "git.discard": {
     "version": 1,
-    "digest": "3589b8bc6e1f063d"
+    "digest": "3589b8bc6e1f063d",
+    "security": "6f012c3ca58ce7c5"
   },
   "git.fetch": {
     "version": 1,
-    "digest": "2491700da58ef245"
+    "digest": "2491700da58ef245",
+    "security": "6f012c3ca58ce7c5"
   },
   "git.init": {
     "version": 1,
-    "digest": "0b514123a517746d"
+    "digest": "0b514123a517746d",
+    "security": "de3ef6c62fff7e7d"
   },
   "git.lastCommitMessage": {
     "version": 1,
-    "digest": "be5c180f1cc0b52d"
+    "digest": "be5c180f1cc0b52d",
+    "security": "23c8269058d1b9db"
   },
   "git.log": {
     "version": 1,
-    "digest": "4218d5ceaace1817"
+    "digest": "4218d5ceaace1817",
+    "security": "23c8269058d1b9db"
   },
   "git.pull": {
     "version": 1,
-    "digest": "5dbdd6744ec94efa"
+    "digest": "5dbdd6744ec94efa",
+    "security": "6f012c3ca58ce7c5"
   },
   "git.push": {
     "version": 1,
-    "digest": "32a20763b1e57bc3"
+    "digest": "32a20763b1e57bc3",
+    "security": "6f012c3ca58ce7c5"
   },
   "git.renameBranch": {
     "version": 1,
-    "digest": "0814058e14a91abf"
+    "digest": "0814058e14a91abf",
+    "security": "6f012c3ca58ce7c5"
   },
   "git.stage": {
     "version": 1,
-    "digest": "5258b6f22a1a17a8"
+    "digest": "5258b6f22a1a17a8",
+    "security": "6f012c3ca58ce7c5"
   },
   "git.status": {
     "version": 1,
-    "digest": "be5c180f1cc0b52d"
+    "digest": "be5c180f1cc0b52d",
+    "security": "23c8269058d1b9db"
   },
   "git.suggestCommitMessage": {
     "version": 1,
-    "digest": "ce4d427495bbe3f9"
+    "digest": "ce4d427495bbe3f9",
+    "security": "6f012c3ca58ce7c5"
   },
   "git.unstage": {
     "version": 1,
-    "digest": "5258b6f22a1a17a8"
+    "digest": "5258b6f22a1a17a8",
+    "security": "6f012c3ca58ce7c5"
   },
   "github.status": {
     "version": 1,
-    "digest": "e1b2634dfa7c5469"
+    "digest": "e1b2634dfa7c5469",
+    "security": "2455464eaace895f"
   },
   "operations.abort": {
     "version": 1,
-    "digest": "7d475c79cab80f79"
+    "digest": "7d475c79cab80f79",
+    "security": "ceacd93869361a7a"
   },
   "operations.get": {
     "version": 1,
-    "digest": "7d475c79cab80f79"
+    "digest": "7d475c79cab80f79",
+    "security": "04f7c680ffd36337"
   },
   "operations.recover": {
     "version": 1,
-    "digest": "5682d15e453fd69e"
+    "digest": "5682d15e453fd69e",
+    "security": "ceacd93869361a7a"
   },
   "orchestrator.abort": {
     "version": 1,
-    "digest": "ca4448f42d042129"
+    "digest": "ca4448f42d042129",
+    "security": "56bf730c16aa9cd1"
   },
   "orchestrator.answerQuestions": {
     "version": 1,
-    "digest": "59854b7c16497a61"
+    "digest": "59854b7c16497a61",
+    "security": "074bdce0c6e26440"
   },
   "orchestrator.contextUsage": {
     "version": 1,
-    "digest": "ebb1f4dc92e36fb9"
+    "digest": "ebb1f4dc92e36fb9",
+    "security": "04f7c680ffd36337"
   },
   "orchestrator.dismissQuestions": {
     "version": 1,
-    "digest": "561d0ba0df9fd5f7"
+    "digest": "561d0ba0df9fd5f7",
+    "security": "074bdce0c6e26440"
   },
   "orchestrator.isTurnActive": {
     "version": 1,
-    "digest": "2a27f073e7829290"
+    "digest": "2a27f073e7829290",
+    "security": "04f7c680ffd36337"
   },
   "orchestrator.pendingQuestions": {
     "version": 1,
-    "digest": "2a27f073e7829290"
+    "digest": "2a27f073e7829290",
+    "security": "04f7c680ffd36337"
   },
   "orchestrator.retry": {
     "version": 1,
-    "digest": "2a27f073e7829290"
+    "digest": "2a27f073e7829290",
+    "security": "926c4af141d1208d"
   },
   "orchestrator.send": {
     "version": 1,
-    "digest": "db7ccd03ce16ac0a"
+    "digest": "db7ccd03ce16ac0a",
+    "security": "926c4af141d1208d"
   },
   "orchestrator.steer": {
     "version": 1,
-    "digest": "3be8452e1c054740"
+    "digest": "3be8452e1c054740",
+    "security": "56bf730c16aa9cd1"
   },
   "projects.list": {
     "version": 1,
-    "digest": "e1b2634dfa7c5469"
+    "digest": "e1b2634dfa7c5469",
+    "security": "2455464eaace895f"
   },
   "projects.match": {
     "version": 1,
-    "digest": "b88f5b6d1fd03a15"
+    "digest": "b88f5b6d1fd03a15",
+    "security": "4f2aa5f92e3a87e6"
   },
   "projects.open": {
     "version": 1,
-    "digest": "999e7395ea13b6e6"
+    "digest": "999e7395ea13b6e6",
+    "security": "26bfa1eda1a22097"
   },
   "projects.pin": {
     "version": 1,
-    "digest": "2f201305d9b6a7be"
+    "digest": "2f201305d9b6a7be",
+    "security": "de3ef6c62fff7e7d"
   },
   "projects.remove": {
     "version": 1,
-    "digest": "0b514123a517746d"
+    "digest": "0b514123a517746d",
+    "security": "de3ef6c62fff7e7d"
   },
   "projects.rename": {
     "version": 1,
-    "digest": "10c6fd7389bbd96b"
+    "digest": "10c6fd7389bbd96b",
+    "security": "de3ef6c62fff7e7d"
   },
   "providers.snapshots": {
     "version": 1,
-    "digest": "232e8492957800bd"
+    "digest": "232e8492957800bd",
+    "security": "2455464eaace895f"
   },
   "pty.isAlive": {
     "version": 1,
-    "digest": "357d5db91b806bcd"
+    "digest": "357d5db91b806bcd",
+    "security": "bc60125b4460c3cf"
   },
   "pty.list": {
     "version": 1,
-    "digest": "2a27f073e7829290"
+    "digest": "2a27f073e7829290",
+    "security": "93fe361153e38aaa"
   },
   "pty.lookup": {
     "version": 1,
-    "digest": "357d5db91b806bcd"
+    "digest": "357d5db91b806bcd",
+    "security": "bc60125b4460c3cf"
   },
   "pty.outputSince": {
     "version": 1,
-    "digest": "6f8b3a1534b78dbb"
+    "digest": "6f8b3a1534b78dbb",
+    "security": "bc60125b4460c3cf"
   },
   "pty.scrollback": {
     "version": 1,
-    "digest": "aceac561b42d6004"
+    "digest": "aceac561b42d6004",
+    "security": "bc60125b4460c3cf"
   },
   "publish.start": {
     "version": 1,
-    "digest": "0a492aa0d1f08d3b"
+    "digest": "0a492aa0d1f08d3b",
+    "security": "ceacd93869361a7a"
   },
   "publish.status": {
     "version": 1,
-    "digest": "5682d15e453fd69e"
+    "digest": "5682d15e453fd69e",
+    "security": "04f7c680ffd36337"
   },
   "pullRequests.baseBranches": {
     "version": 1,
-    "digest": "be5c180f1cc0b52d"
+    "digest": "be5c180f1cc0b52d",
+    "security": "23c8269058d1b9db"
   },
   "pullRequests.create": {
     "version": 1,
-    "digest": "5f247d85d6753935"
+    "digest": "5f247d85d6753935",
+    "security": "db8939d97d846841"
   },
   "pullRequests.detail": {
     "version": 1,
-    "digest": "8de2008992f3a07b"
+    "digest": "8de2008992f3a07b",
+    "security": "23c8269058d1b9db"
   },
   "pullRequests.draft": {
     "version": 1,
-    "digest": "3b83029cc0ced4ee"
+    "digest": "3b83029cc0ced4ee",
+    "security": "db8939d97d846841"
   },
   "pullRequests.get": {
     "version": 1,
-    "digest": "615e87d46ebbbf0f"
+    "digest": "615e87d46ebbbf0f",
+    "security": "23c8269058d1b9db"
   },
   "pullRequests.link": {
     "version": 1,
-    "digest": "bc7f3e7614bcf8b4"
+    "digest": "bc7f3e7614bcf8b4",
+    "security": "ceacd93869361a7a"
   },
   "pullRequests.list": {
     "version": 1,
-    "digest": "4a3795e203814b78"
+    "digest": "4a3795e203814b78",
+    "security": "066fa977e9dd8084"
   },
   "pullRequests.pushTarget": {
     "version": 1,
-    "digest": "2a27f073e7829290"
+    "digest": "2a27f073e7829290",
+    "security": "ceacd93869361a7a"
   },
   "pullRequests.resolve": {
     "version": 1,
-    "digest": "6b347f38c497e10c"
+    "digest": "6b347f38c497e10c",
+    "security": "066fa977e9dd8084"
   },
   "pullRequests.startThread": {
     "version": 1,
-    "digest": "849069a63c4901c0"
+    "digest": "849069a63c4901c0",
+    "security": "33563a9a1f06aab9"
   },
   "pullRequests.unlink": {
     "version": 1,
-    "digest": "2a27f073e7829290"
+    "digest": "2a27f073e7829290",
+    "security": "ceacd93869361a7a"
   },
   "pullRequests.watch": {
     "version": 1,
-    "digest": "4bcc011389a86ed9"
+    "digest": "4bcc011389a86ed9",
+    "security": "ceacd93869361a7a"
   },
   "pullRequests.watchStatus": {
     "version": 1,
-    "digest": "2a27f073e7829290"
+    "digest": "2a27f073e7829290",
+    "security": "04f7c680ffd36337"
   },
   "queue.edit": {
     "version": 1,
-    "digest": "7f454c248b159a64"
+    "digest": "7f454c248b159a64",
+    "security": "926c4af141d1208d"
   },
   "queue.enqueue": {
     "version": 1,
-    "digest": "702da21dc9e90453"
+    "digest": "702da21dc9e90453",
+    "security": "926c4af141d1208d"
   },
   "queue.list": {
     "version": 1,
-    "digest": "2a27f073e7829290"
+    "digest": "2a27f073e7829290",
+    "security": "04f7c680ffd36337"
   },
   "queue.promoteToSteer": {
     "version": 1,
-    "digest": "2356256a52e2d640"
+    "digest": "2356256a52e2d640",
+    "security": "926c4af141d1208d"
   },
   "queue.remove": {
     "version": 1,
-    "digest": "d1ec647bb236cf35"
+    "digest": "d1ec647bb236cf35",
+    "security": "926c4af141d1208d"
   },
   "queue.reorder": {
     "version": 1,
-    "digest": "5f3aa347f2d9c8ad"
+    "digest": "5f3aa347f2d9c8ad",
+    "security": "926c4af141d1208d"
   },
   "review.file": {
     "version": 1,
-    "digest": "d40f7d8ef72c110a"
+    "digest": "d40f7d8ef72c110a",
+    "security": "23c8269058d1b9db"
   },
   "review.files": {
     "version": 1,
-    "digest": "dd946eaa04f957e3"
+    "digest": "dd946eaa04f957e3",
+    "security": "23c8269058d1b9db"
   },
   "runs.cancelPause": {
     "version": 1,
-    "digest": "09a87e17128c1172"
+    "digest": "09a87e17128c1172",
+    "security": "56bf730c16aa9cd1"
   },
   "runs.events": {
     "version": 1,
-    "digest": "4b77b5cb8d463564"
+    "digest": "4b77b5cb8d463564",
+    "security": "04f7c680ffd36337"
   },
   "runs.get": {
     "version": 1,
-    "digest": "09a87e17128c1172"
+    "digest": "09a87e17128c1172",
+    "security": "ade27276cc757950"
   },
   "runs.list": {
     "version": 1,
-    "digest": "3a29bbd63021d2fa"
+    "digest": "3a29bbd63021d2fa",
+    "security": "04f7c680ffd36337"
   },
   "runs.resumeNow": {
     "version": 1,
-    "digest": "09a87e17128c1172"
+    "digest": "09a87e17128c1172",
+    "security": "56bf730c16aa9cd1"
   },
   "skills.list": {
     "version": 1,
-    "digest": "e1b2634dfa7c5469"
+    "digest": "e1b2634dfa7c5469",
+    "security": "2455464eaace895f"
   },
   "skills.read": {
     "version": 1,
-    "digest": "5539dc1c60cdd943"
+    "digest": "5539dc1c60cdd943",
+    "security": "2455464eaace895f"
   },
   "subagents.list": {
     "version": 1,
-    "digest": "2a27f073e7829290"
+    "digest": "2a27f073e7829290",
+    "security": "04f7c680ffd36337"
   },
   "subagents.stopAll": {
     "version": 1,
-    "digest": "2a27f073e7829290"
+    "digest": "2a27f073e7829290",
+    "security": "926c4af141d1208d"
   },
   "tasks.create": {
     "version": 1,
-    "digest": "6f4db1b89159fd76"
+    "digest": "6f4db1b89159fd76",
+    "security": "926c4af141d1208d"
   },
   "tasks.list": {
     "version": 1,
-    "digest": "2a27f073e7829290"
+    "digest": "2a27f073e7829290",
+    "security": "04f7c680ffd36337"
   },
   "tasks.update": {
     "version": 1,
-    "digest": "ae0ab127e121dfb9"
+    "digest": "ae0ab127e121dfb9",
+    "security": "926c4af141d1208d"
   },
   "thread.fork": {
     "version": 1,
-    "digest": "97b6aa68346e085a"
+    "digest": "97b6aa68346e085a",
+    "security": "1752fa5bd745efcc"
   },
   "thread.mergeBack": {
     "version": 1,
-    "digest": "c5edc663eb7e7571"
+    "digest": "c5edc663eb7e7571",
+    "security": "156247cbbde05777"
   },
   "thread.snapshot": {
     "version": 1,
-    "digest": "2a27f073e7829290"
+    "digest": "2a27f073e7829290",
+    "security": "04f7c680ffd36337"
   },
   "threads.approvalRules": {
     "version": 1,
-    "digest": "2a27f073e7829290"
+    "digest": "2a27f073e7829290",
+    "security": "04f7c680ffd36337"
   },
   "threads.clearApprovalRules": {
     "version": 1,
-    "digest": "e2af3a0680e25499"
+    "digest": "e2af3a0680e25499",
+    "security": "926c4af141d1208d"
   },
   "threads.create": {
     "version": 1,
-    "digest": "8c29741dbc687abf"
+    "digest": "8c29741dbc687abf",
+    "security": "38223490f704a80a"
   },
   "threads.delete": {
     "version": 1,
-    "digest": "d536a70a70cc7c8c"
+    "digest": "d536a70a70cc7c8c",
+    "security": "ceacd93869361a7a"
   },
   "threads.get": {
     "version": 1,
-    "digest": "2a27f073e7829290"
+    "digest": "2a27f073e7829290",
+    "security": "04f7c680ffd36337"
   },
   "threads.inventory": {
     "version": 1,
-    "digest": "2a27f073e7829290"
+    "digest": "2a27f073e7829290",
+    "security": "2455464eaace895f"
   },
   "threads.list": {
     "version": 1,
-    "digest": "0b514123a517746d"
+    "digest": "0b514123a517746d",
+    "security": "2455464eaace895f"
   },
   "threads.pin": {
     "version": 1,
-    "digest": "7529c8f73f963ecc"
+    "digest": "7529c8f73f963ecc",
+    "security": "ceacd93869361a7a"
   },
   "threads.regenerateTitle": {
     "version": 1,
-    "digest": "2a27f073e7829290"
+    "digest": "2a27f073e7829290",
+    "security": "ceacd93869361a7a"
   },
   "threads.rename": {
     "version": 1,
-    "digest": "9779ecb28c4ca43c"
+    "digest": "9779ecb28c4ca43c",
+    "security": "ceacd93869361a7a"
   },
   "threads.restore": {
     "version": 1,
-    "digest": "d536a70a70cc7c8c"
+    "digest": "d536a70a70cc7c8c",
+    "security": "ceacd93869361a7a"
   },
   "threads.search": {
     "version": 1,
-    "digest": "70c38e267069982a"
+    "digest": "70c38e267069982a",
+    "security": "2455464eaace895f"
   },
   "threads.setModel": {
     "version": 1,
-    "digest": "d0a0070c3a0aa90f"
+    "digest": "d0a0070c3a0aa90f",
+    "security": "926c4af141d1208d"
   },
   "threads.setPermissionMode": {
     "version": 1,
-    "digest": "4ec36e005f81decc"
+    "digest": "4ec36e005f81decc",
+    "security": "926c4af141d1208d"
   },
   "threads.settle": {
     "version": 1,
-    "digest": "6be729e5bd94f2af"
+    "digest": "6be729e5bd94f2af",
+    "security": "ceacd93869361a7a"
   },
   "threads.setWorktreeEnabled": {
     "version": 1,
-    "digest": "d45007f32a42eb40"
+    "digest": "d45007f32a42eb40",
+    "security": "ceacd93869361a7a"
   },
   "threads.trash": {
     "version": 1,
-    "digest": "d536a70a70cc7c8c"
+    "digest": "d536a70a70cc7c8c",
+    "security": "ceacd93869361a7a"
   },
   "workflowRuns.answer": {
     "version": 1,
-    "digest": "1846cbdbdbc3fd53"
+    "digest": "1846cbdbdbc3fd53",
+    "security": "098a92091035a5fa"
   },
   "workflowRuns.approve": {
     "version": 1,
-    "digest": "7f61050aa652e299"
+    "digest": "7f61050aa652e299",
+    "security": "098a92091035a5fa"
   },
   "workflowRuns.cancel": {
     "version": 1,
-    "digest": "e49751b04bc739e8"
+    "digest": "e49751b04bc739e8",
+    "security": "098a92091035a5fa"
   },
   "workflowRuns.get": {
     "version": 1,
-    "digest": "09a87e17128c1172"
+    "digest": "09a87e17128c1172",
+    "security": "8b7d92b23781a6fa"
   },
   "workflowRuns.list": {
     "version": 1,
-    "digest": "f9e2661f18124778"
+    "digest": "f9e2661f18124778",
+    "security": "60219ce49c8ee245"
   },
   "workflowRuns.pause": {
     "version": 1,
-    "digest": "09a87e17128c1172"
+    "digest": "09a87e17128c1172",
+    "security": "098a92091035a5fa"
   },
   "workflowRuns.resume": {
     "version": 1,
-    "digest": "09a87e17128c1172"
+    "digest": "09a87e17128c1172",
+    "security": "098a92091035a5fa"
   },
   "workflowRuns.trace": {
     "version": 1,
-    "digest": "5183d74689ef0a7d"
+    "digest": "5183d74689ef0a7d",
+    "security": "8b7d92b23781a6fa"
   },
   "workspace.getStatus": {
     "version": 1,
-    "digest": "5682d15e453fd69e"
+    "digest": "5682d15e453fd69e",
+    "security": "04f7c680ffd36337"
   },
   "workspace.restore": {
     "version": 1,
-    "digest": "f57f8729cac80201"
+    "digest": "f57f8729cac80201",
+    "security": "ceacd93869361a7a"
   }
 }
