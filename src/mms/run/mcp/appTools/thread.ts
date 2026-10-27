@@ -3,7 +3,7 @@ import { visibleThreads } from '../../../../shared/threadLineage'
 import { readRunResultText } from '../../delegation/hold'
 import type { RunEngine } from '../../RunEngine'
 import { TERMINAL_RUN_STATUSES, type AgentActor, type DelegationRecord, type RunRecord, type ThreadEvent } from '../../types'
-import type { AgentRunCommandResult, AppToolHost } from './host'
+import type { AgentCreatedThread, AgentRunCommandResult, AgentThreadRequest, AppToolHost } from './host'
 import {
   CLIENT_REQUEST_ID_SCHEMA,
   json,
@@ -30,6 +30,12 @@ const THREAD_SEARCH_MAX_QUERY_CHARS = 512
 export const THREAD_SEND_MAX_PER_RUN = 20
 /** The counts of `thread_send` are kept for this many runs, the oldest dropped first. */
 const THREAD_SEND_TRACKED_RUNS = 1000
+/** An agent run may create this many threads; the next is refused. */
+export const THREAD_CREATE_MAX_PER_RUN = 5
+/** A new thread's title is cut to this many characters. */
+const THREAD_TITLE_MAX_CHARS = 200
+/** The first message of a new thread is held to the size of a message a person could send in one go. */
+const THREAD_FIRST_MESSAGE_MAX_CHARS = 100_000
 /** `thread_wait` waits this long unless told otherwise (MCP clients give up on a call after about a minute) and never longer than the cap. */
 export const THREAD_WAIT_DEFAULT_MS = 45_000
 export const THREAD_WAIT_MAX_MS = 300_000
@@ -297,6 +303,21 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
     if (used <= 1) sends.delete(runId)
     else sends.set(runId, used - 1)
   }
+  /** Threads each run has created, kept like the send counts. */
+  const creations = new Map<string, number>()
+  const reserveCreation = (runId: string): void => {
+    const used = creations.get(runId) ?? 0
+    if (used >= THREAD_CREATE_MAX_PER_RUN)
+      throw new Error(`thread_create is limited to ${THREAD_CREATE_MAX_PER_RUN} threads per run; finish the work in the threads you made, or end your turn.`)
+    creations.delete(runId)
+    creations.set(runId, used + 1)
+    while (creations.size > THREAD_SEND_TRACKED_RUNS) creations.delete(creations.keys().next().value as string)
+  }
+  const releaseCreation = (runId: string): void => {
+    const used = creations.get(runId) ?? 0
+    if (used <= 1) creations.delete(runId)
+    else creations.set(runId, used - 1)
+  }
   return [
     {
       name: 'thread_read',
@@ -514,7 +535,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
     },
     {
       name: 'thread_wait',
-      description: `Wait for a run of another thread to finish, for at most timeoutMs (default ${THREAD_WAIT_DEFAULT_MS}, up to ${THREAD_WAIT_MAX_MS}). Pass the runId thread_send returned; without one, the run that is active now. Returns status finished (with the run's outcome, and its final text where you may read it), timeout (the run is still going: call again; the wait never interrupts it), paused (a usage limit paused the run and it was still paused when the wait ran out: it resumes by itself, and the result says when to ask again; a wait that is running when it resumes follows it into the run that continues it), idle (no run to wait for) or caller_ended (your own run ended). Wait only when you need the answer this turn; otherwise end your turn and read the thread later.`,
+      description: `Wait for a run of another thread to finish (needs the read agent access level; a thread you launched with thread_create or one below you needs none), for at most timeoutMs (default ${THREAD_WAIT_DEFAULT_MS}, up to ${THREAD_WAIT_MAX_MS}). Pass the runId thread_send returned; without one, the run that is active now. Returns status finished (with the run's outcome, and its final text where you may read it), timeout (the run is still going: call again; the wait never interrupts it), paused (a usage limit paused the run and it was still paused when the wait ran out: it resumes by itself, and the result says when to ask again; a wait that is running when it resumes follows it into the run that continues it), idle (no run to wait for) or caller_ended (your own run ended). Wait only when you need the answer this turn; otherwise end your turn and read the thread later.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -526,7 +547,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
       },
       access: 'readsOthers',
       class: 'read',
-      minLevel: 'read',
+      // No `minLevel`: the central check lets a caller wait on a thread it launched or one below it at any
+      // level, so the tool is listed at every level (as `thread_interrupt` is); another thread needs `read`.
       offered: () => false,
       handler: async (args, ctx) => {
         const threadId = requiredId(args, 'threadId')
@@ -675,6 +697,91 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
         const result = acceptedRunCommand(await host.steerRun(threadId, runId, args.text, { clientRequestId: `thread_steer:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`, actor }), runId)
         if (!result.replayed) showAction(host, threadId, actor, `steered run ${runId}`)
         return json({ threadId, ...result })
+      }
+    },
+    {
+      name: 'thread_create',
+      description: `Start a new thread in a project (needs the manage agent access level and a project the profile allows). workspace "project" (default) works in the project's own folder; "new_worktree" gives the thread a worktree of its own, made when it first runs ("existing_worktree" is not supported). instanceId and model name the thread's model together (both must be ones the profile allows); without them the thread uses your own model. The thread runs in a permission mode no wider than yours and is recorded as launched by your thread: you can read it, wait on it and interrupt it afterwards at any level, and it is not nested under yours. firstMessage (with mode agent or plan) is sent to it as a message from you, so it starts at once; it counts toward the limit on agent messages in a row without a person in between. You may create ${THREAD_CREATE_MAX_PER_RUN} threads per run. Pass a clientRequestId and reuse it to retry: the same thread comes back, never a second one. Returns the thread's id, the model and mode it got, and what became of the first message; use thread_wait with its run id to wait for the answer, only when you need it this turn.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          projectId: { type: 'string', description: 'The project to create the thread in (thread_list returns the ones you may use).' },
+          title: { type: 'string', description: `The thread's title (up to ${THREAD_TITLE_MAX_CHARS} characters); without one the thread is named "New Thread" and gets a title from its first message.` },
+          workspace: { type: 'string', enum: ['project', 'new_worktree', 'existing_worktree'], description: 'Defaults to project. existing_worktree is refused.' },
+          instanceId: { type: 'string', description: 'The provider instance; needs model.' },
+          model: { type: 'string', description: 'The model id; with instanceId, or on the instance of your own model.' },
+          firstMessage: { type: 'string', description: 'Sent to the new thread as your message, so it starts working.' },
+          mode: { type: 'string', enum: ['agent', 'plan'], description: 'The mode of firstMessage; defaults to agent.' },
+          clientRequestId: CLIENT_REQUEST_ID_SCHEMA
+        },
+        required: ['projectId']
+      },
+      access: 'managesOthers',
+      class: 'mutation',
+      minLevel: 'manage',
+      offered: () => false,
+      // A new thread has no id yet: the project is what the central check holds the caller to.
+      target: (args) => ({ projectId: typeof args.projectId === 'string' && args.projectId ? args.projectId : undefined }),
+      handler: async (args, ctx) => {
+        if (!host.createThread) return notAvailable('thread_create')
+        const projectId = requiredId(args, 'projectId')
+        // A bot's thread acts for a person outside Mousse; its owner continues it from the Bots tab, and it starts no threads.
+        let botRole: string | undefined
+        try {
+          botRole = host.botRole?.(ctx.caller.threadId)
+        } catch {
+          botRole = undefined
+        }
+        if (botRole || ctx.turn.bot) throw new McpToolError('mousse_scope_denied', 'A thread that belongs to a bot cannot create threads.')
+        // Defence in depth: a plan ceiling is held to `read` and never gets here.
+        if (ctx.caller.modeCeiling === 'plan') throw new McpToolError('mousse_ceiling_exceeded', 'A plan-ceiling caller cannot start threads.')
+        if (args.title !== undefined && typeof args.title !== 'string') throw new Error('title must be a string')
+        const title = typeof args.title === 'string' ? args.title.trim() : ''
+        if (title.length > THREAD_TITLE_MAX_CHARS) throw new Error(`title must be at most ${THREAD_TITLE_MAX_CHARS} characters`)
+        if (args.workspace !== undefined && args.workspace !== 'project' && args.workspace !== 'new_worktree' && args.workspace !== 'existing_worktree')
+          throw new Error("workspace must be 'project', 'new_worktree' or 'existing_worktree'")
+        if (args.workspace === 'existing_worktree')
+          throw new Error('workspace "existing_worktree" is not supported: a thread cannot take over a worktree it did not make. Use "new_worktree" for a worktree of its own, or "project" for the project\'s folder. No thread was created.')
+        const workspace: 'project' | 'new_worktree' = args.workspace === 'new_worktree' ? 'new_worktree' : 'project'
+        for (const key of ['instanceId', 'model'] as const)
+          if (args[key] !== undefined && (typeof args[key] !== 'string' || !(args[key] as string).trim())) throw new Error(`${key} must be a non-empty string`)
+        const instanceId = typeof args.instanceId === 'string' ? args.instanceId.trim() : undefined
+        const model = typeof args.model === 'string' ? args.model.trim() : undefined
+        if (instanceId && !model) throw new Error('instanceId needs model: name the model on that instance.')
+        if (args.firstMessage !== undefined && (typeof args.firstMessage !== 'string' || !args.firstMessage.trim())) throw new Error('firstMessage must be a non-empty string')
+        if (typeof args.firstMessage === 'string' && args.firstMessage.length > THREAD_FIRST_MESSAGE_MAX_CHARS)
+          throw new Error(`firstMessage must be at most ${THREAD_FIRST_MESSAGE_MAX_CHARS} characters`)
+        if (args.mode !== undefined && args.mode !== 'agent' && args.mode !== 'plan') throw new Error('mode must be agent or plan')
+        if (args.mode !== undefined && args.firstMessage === undefined) throw new Error('mode is the mode of firstMessage: give a firstMessage, or leave mode out.')
+        const request: AgentThreadRequest = {
+          projectId,
+          ...(title ? { title } : {}),
+          workspace,
+          ...(instanceId ? { instanceId } : {}),
+          ...(model ? { model } : {}),
+          ...(typeof args.firstMessage === 'string' ? { firstMessage: args.firstMessage, mode: (args.mode as 'agent' | 'plan' | undefined) ?? 'agent' } : {})
+        }
+        const actor = actorOf(ctx)
+        const requestKey = `thread_create:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`
+        try {
+          reserveCreation(actor.runId)
+        } catch (limit) {
+          // A retry of a creation this run already made is answered with that thread, however many it has made.
+          const earlier = host.earlierCreation?.(requestKey)
+          if (earlier) return json({ ...earlier, replayed: true })
+          throw limit
+        }
+        let created: AgentCreatedThread
+        try {
+          created = await host.createThread(request, { clientRequestId: requestKey, actor, accessLevel: ctx.caller.accessLevel })
+        } catch (error) {
+          releaseCreation(actor.runId)
+          throw sendConflict(error) ?? error
+        }
+        // A retry returns the one thread and changes nothing, so it is not another creation.
+        if (created.replayed) releaseCreation(actor.runId)
+        else showAction(host, created.threadId, actor, 'created this thread')
+        return json(created)
       }
     },
     {

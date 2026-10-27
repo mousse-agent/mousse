@@ -145,8 +145,8 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
     it('tools/list shows each caller only what its level can use', async () => {
       const { registry, state } = await world()
       const names = (granted: AgentAccessLevel) => registry.listForThread('caller', 'default', granted).map((tool) => tool.name).filter((name) => /^thread_(send|wait|steer|interrupt)$/.test(name)).sort()
-      // A tool a caller may use on a thread it launched is listed at every level.
-      expect(names('lineage')).toEqual(['thread_interrupt'])
+      // A tool a caller may use on a thread it launched or one below it (waiting, stopping) is listed at every level.
+      expect(names('lineage')).toEqual(['thread_interrupt', 'thread_wait'])
       expect(names('read')).toEqual(['thread_interrupt', 'thread_wait'])
       expect(names('manage')).toEqual(['thread_interrupt', 'thread_send', 'thread_steer', 'thread_wait'])
       state.profile = profile({ level: 'read' })

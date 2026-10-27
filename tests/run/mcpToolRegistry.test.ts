@@ -30,6 +30,7 @@ const PHASE5_TOOLS: Record<string, string> = {
   thread_read: 'readsOthers',
   thread_wait: 'readsOthers',
   thread_send: 'managesOthers',
+  thread_create: 'managesOthers',
   thread_interrupt: 'managesOthers',
   thread_steer: 'managesOthers',
   queue_list: 'reads',

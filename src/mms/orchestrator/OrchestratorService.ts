@@ -68,7 +68,8 @@ import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/
 import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { stopStrategy } from '../run/CommandPolicy'
-import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type AgentRunCommandResult, type AgentSendResult, type AppToolHost, type AppToolTurn, type McpCaller, type ToolRegistry } from '../run/mcp/appTools'
+import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type AgentCreatedThread, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type AppToolHost, type AppToolTurn, type McpCaller, type ToolRegistry } from '../run/mcp/appTools'
+import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, agentThreadFingerprint, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { modeFactsFor, prepareSkills, sessionInstructions, settingsToolEnabled, turnPreamble } from '../run/mcp/appTools/assemble'
 import { questionApproval } from '../run/mcp/appTools/quickActions'
 import { APPLET_GENERATION_GUIDANCE } from '../../shared/appletGuidance'
@@ -1181,6 +1182,8 @@ export class OrchestratorService extends EventEmitter {
   private harness: HarnessGateway
   /** The profile's bot threads (`bots.db`): a turn on one binds with origin `bot`. */
   private botThreads: BotThreads | null = null
+  /** `thread_create` calls in flight by key, so two calls with one key make one thread. */
+  private readonly agentCreations = new Map<string, { fingerprint: string; task: Promise<AgentCreatedThread> }>()
 
   /** The profile's bot threads, for the origin of their turns; null: none. */
   setBotThreads(threads: BotThreads | null): void {
@@ -2060,6 +2063,7 @@ export class OrchestratorService extends EventEmitter {
     }
     this.recoverQueuedRows()
     this.recoverOrphanedFollowUps()
+    this.recoverAgentThreadCreations()
     return interrupted
   }
 
@@ -2779,6 +2783,8 @@ export class OrchestratorService extends EventEmitter {
       showAgentAction: (target, actor, summary) => this.showAgentAction(target.threadId, actor, summary),
       sendToThread: (threadId, input, options) => this.sendToThreadAsAgent(threadId, input, options),
       earlierSend: (threadId, clientRequestId) => this.earlierAgentSend(threadId, clientRequestId),
+      createThread: (input, options) => this.createThreadAsAgent(input, options),
+      earlierCreation: (clientRequestId) => this.earlierAgentCreation(clientRequestId),
       stopRun: (threadId, runId, options) => this.stopRunAsAgent(threadId, runId, options),
       steerRun: (threadId, runId, text, options) => this.steerRunAsAgent(threadId, runId, text, options)
     }
@@ -2859,6 +2865,246 @@ export class OrchestratorService extends EventEmitter {
     const result = receipt.result as { runId?: unknown; sequence?: unknown } | null
     if (typeof result?.runId !== 'string' || typeof result.sequence !== 'number') return undefined
     return { runId: result.runId, sequence: result.sequence, queued: engine.getRun(result.runId)?.status === 'queued', replayed: true }
+  }
+
+  /**
+   * `thread_create`: an agent starts a thread (SPEC §15.1). Decided first, made second: the whole launch (id,
+   * project, title, workspace, model, mode, level, first message) is validated and written to the command's
+   * receipt before any file exists, and every later step, in this call, in a retry or after a restart, is
+   * made from that stored intent. The thread is complete once its `agent.action` event exists; a retry
+   * finishes a thread a crash left half made (discarding what was made, which no one has used) or returns the
+   * complete one. Two calls with one key make one thread.
+   */
+  private createThreadAsAgent(
+    input: AgentThreadRequest,
+    options: { clientRequestId: string; actor: AgentActor; accessLevel: AgentAccessLevel }
+  ): Promise<AgentCreatedThread> {
+    const key = options.clientRequestId
+    const fingerprint = agentThreadFingerprint(input)
+    const running = this.agentCreations.get(key)
+    if (running) {
+      if (running.fingerprint !== fingerprint) return Promise.reject(this.creationKeyConflict(key))
+      // The second of two calls with one key made nothing: it is told it is a replay.
+      return running.task.then((made) => ({ ...made, replayed: true }))
+    }
+    const entry = { fingerprint, task: undefined as unknown as Promise<AgentCreatedThread> }
+    entry.task = this.createThreadAsAgentOnce(input, fingerprint, options).finally(() => this.agentCreations.delete(key))
+    this.agentCreations.set(key, entry)
+    return entry.task
+  }
+
+  private creationKeyConflict(key: string): McpToolError {
+    return new McpToolError('mousse_conflict', `clientRequestId ${key} was already used for a different thread_create call; use a new one for a different thread.`, { conflict: 'client_request_id_conflict' })
+  }
+
+  private async createThreadAsAgentOnce(
+    input: AgentThreadRequest,
+    fingerprint: string,
+    options: { clientRequestId: string; actor: AgentActor; accessLevel: AgentAccessLevel }
+  ): Promise<AgentCreatedThread> {
+    const engine = this.requireRunEngine()
+    if (!this.threadStore || !this.projectManager) throw new Error('Creating threads needs the thread store and the project manager.')
+    // A bot's thread acts for a person outside Mousse and starts no threads.
+    if (this.botThreads?.roleOf(options.actor.threadId)) throw new McpToolError('mousse_scope_denied', 'A thread that belongs to a bot cannot create threads.')
+    const key = options.clientRequestId
+    const stored = engine.store.getReceipt(key)
+    let intent: AgentThreadIntent
+    if (stored) {
+      const earlier = readAgentThreadReceipt(stored)
+      if (!earlier || stored.threadId !== options.actor.threadId || earlier.fingerprint !== fingerprint) throw this.creationKeyConflict(key)
+      intent = earlier.intent
+    } else {
+      // Everything that can refuse does so here, before anything is recorded or made.
+      intent = this.planAgentThread(input, options)
+      engine.store.putReceipt({
+        clientRequestId: key,
+        threadId: options.actor.threadId,
+        commandKind: AGENT_THREAD_COMMAND,
+        status: 'accepted',
+        result: { threadId: intent.threadId, fingerprint, intent },
+        createdAt: new Date().toISOString()
+      })
+    }
+    const replayed = engine.store.hasAgentAction(intent.threadId, AGENT_THREAD_CREATED_ACTION)
+    if (!replayed) this.makeAgentThread(intent)
+    let firstMessage: AgentCreatedThread['firstMessage']
+    if (intent.firstMessage) firstMessage = await this.sendFirstMessage(intent, `${key}:first`)
+    return this.agentCreated(intent, firstMessage, replayed)
+  }
+
+  /** The launch an agent asked for, checked against the project, the profile and the caller's own limits. Throws what it refuses. */
+  private planAgentThread(input: AgentThreadRequest, options: { actor: AgentActor; accessLevel: AgentAccessLevel }): AgentThreadIntent {
+    const project = this.projectManager?.getProject(input.projectId)
+    if (!project) throw new Error(`Project ${input.projectId} was not found.`)
+    const modelOverride = this.agentThreadModel(input, options.actor.threadId, project.id)
+    // The thread runs no wider than its creator: the creator's mode when it is stricter than the profile's default
+    // (else the thread follows the default), and a level ceiling of the creator's own effective level.
+    const callerMode = this.runPermissionMode(options.actor.runId)
+    const profileMode = normalizePermissionMode(this.settingsStore.get().permissions.defaultMode)
+    // The first message counts as the next agent message in a row: a creation cannot start a chain the limit would stop.
+    if (input.firstMessage !== undefined) this.withAgentHops(options.actor)
+    return {
+      threadId: uuidv4(),
+      projectPath: project.path,
+      title: input.title?.trim() || 'New Thread',
+      worktreeEnabled: input.workspace === 'new_worktree',
+      modelOverride,
+      permissionMode: isStricter(callerMode, profileMode) ? callerMode : null,
+      accessCeiling: this.effectiveAccess(options.accessLevel),
+      createdByThreadId: options.actor.threadId,
+      actor: options.actor,
+      request: input,
+      firstMessage: input.firstMessage === undefined ? null : { content: input.firstMessage, mode: input.mode ?? 'agent' }
+    }
+  }
+
+  /**
+   * The model a new thread gets. Neither `instanceId` nor `model`: the caller's own selection, if it has one and
+   * the new thread's project allows it. A model alone is on the caller's instance (else the default one). Both
+   * go through the checks `threads.setModel` makes: the instance must exist and be enabled, and the model must be
+   * visible to the project. Null: no selection is stored and the thread follows the profile's default.
+   */
+  private agentThreadModel(input: AgentThreadRequest, callerThreadId: string, projectId: string): ModelOverride | null {
+    const scope = { kind: 'project', projectId } as const
+    const callerThread = this.threadStore?.getThread(callerThreadId)
+    const inherited = this.harness.instanceMap.migrate(this.getOrCreateSession(callerThreadId).modelOverride ?? callerThread?.modelOverride)
+    if (!input.model) {
+      if (!inherited) return null
+      try {
+        this.harness.resolveStored(inherited, { purpose: 'composer', scope })
+      } catch (error) {
+        throw new Error(`Your own model is not available in this project (${error instanceof Error ? error.message : String(error)}); name an instanceId and model that are.`)
+      }
+      return structuredClone(inherited)
+    }
+    const instanceId = input.instanceId ?? this.harness.instanceMap.instanceIdOf(inherited ?? this.defaultAgentModel())
+    // An unknown or disabled instance, a hidden model and an instance the project turned off are refused here.
+    const override = this.harness.instanceMap.overrideFor({ instanceId, model: input.model })
+    this.harness.resolveStored(override, { purpose: 'composer', scope })
+    return override
+  }
+
+  /**
+   * Makes the thread of a stored intent and writes its completion marker. A thread a crash left half made
+   * (files without the marker) is discarded and made again, unless a person already wrote to it, in which case
+   * it is the thread and only the marker is missing.
+   */
+  private makeAgentThread(intent: AgentThreadIntent): void {
+    const engine = this.requireRunEngine()
+    const store = this.threadStore!
+    let adopt = false
+    if (store.getThread(intent.threadId)) {
+      if (this.agentThreadInUse(intent.threadId)) adopt = true
+      else {
+        try {
+          store.discardUnusedThread(intent.threadId)
+        } catch (error) {
+          if (!store.loadThreadData(intent.threadId).messages.length) throw error
+          adopt = true
+        }
+      }
+    }
+    if (!adopt) {
+      store.createThread(intent.title, intent.request.projectId, intent.projectPath, {
+        id: intent.threadId,
+        worktreeEnabled: intent.worktreeEnabled,
+        ...(intent.modelOverride ? { modelOverride: intent.modelOverride } : {}),
+        ...(intent.permissionMode ? { permissionMode: intent.permissionMode } : {}),
+        // Launched by the caller's thread, never owned by it: it is neither nested under it nor deleted with it.
+        createdByThreadId: intent.createdByThreadId,
+        accessCeiling: intent.accessCeiling
+      })
+    }
+    // The marker: a thread is complete only once this event exists. Ids and names, never the message.
+    engine.store.appendEvent({
+      threadId: intent.threadId,
+      runId: null,
+      type: 'agent.action',
+      payload: {
+        action: AGENT_THREAD_CREATED_ACTION,
+        actorThreadId: intent.actor.threadId,
+        actorRunId: intent.actor.runId,
+        toolCallId: intent.actor.toolCallId,
+        projectId: intent.request.projectId,
+        workspace: intent.request.workspace,
+        instanceId: intent.modelOverride?.instanceId ?? null,
+        model: intent.modelOverride?.model ?? null,
+        permissionMode: intent.permissionMode,
+        hasFirstMessage: intent.firstMessage !== null
+      }
+    })
+  }
+
+  /**
+   * Someone already uses a thread an agent was creating: it is open in this daemon or has a run. (A thread is
+   * announced to clients when its files are written, before its marker, so a person may have written to it.)
+   */
+  private agentThreadInUse(threadId: string): boolean {
+    if (this.sessions.has(threadId)) return true
+    return (this.runEngine?.listRuns(threadId, { limit: 1 }).length ?? 0) > 0
+  }
+
+  /**
+   * The first message, sent as the creator's through `thread_send`'s own path: labelled, under the creator's mode,
+   * counted as an agent message in a row. Keyed on the creation's key, so a retry returns the first result. A message
+   * that cannot be sent leaves the thread made; the result says why and a retry sends it.
+   */
+  private async sendFirstMessage(intent: AgentThreadIntent, key: string): Promise<NonNullable<AgentCreatedThread['firstMessage']>> {
+    try {
+      const sent = this.earlierAgentSend(intent.threadId, key)
+        ?? await this.sendToThreadAsAgent(intent.threadId, intent.firstMessage!, { clientRequestId: key, actor: intent.actor })
+      return { sent: true, ...sent }
+    } catch (error) {
+      return { sent: false, reason: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  private agentCreated(intent: AgentThreadIntent, firstMessage: AgentCreatedThread['firstMessage'], replayed: boolean): AgentCreatedThread {
+    const override = intent.modelOverride
+    return {
+      threadId: intent.threadId,
+      projectId: intent.request.projectId,
+      title: intent.title,
+      workspace: intent.request.workspace,
+      model: override ? { instanceId: override.instanceId ?? this.harness.instanceMap.instanceIdOf(override), model: override.model } : null,
+      permissionMode: intent.permissionMode ?? normalizePermissionMode(this.settingsStore.get().permissions.defaultMode),
+      ...(firstMessage ? { firstMessage } : {}),
+      replayed
+    }
+  }
+
+  /** A creation this key already made in full, found without making anything (a retry the caller's budget would refuse). */
+  private earlierAgentCreation(clientRequestId: string): AgentCreatedThread | undefined {
+    const engine = this.requireRunEngine()
+    const stored = readAgentThreadReceipt(engine.store.getReceipt(clientRequestId))
+    if (!stored || !engine.store.hasAgentAction(stored.intent.threadId, AGENT_THREAD_CREATED_ACTION)) return undefined
+    const earlier = stored.intent.firstMessage ? this.earlierAgentSend(stored.intent.threadId, `${clientRequestId}:first`) : undefined
+    return this.agentCreated(stored.intent, earlier ? { sent: true, ...earlier } : undefined, true)
+  }
+
+  /**
+   * Boot: a thread an agent was creating when the daemon died has files but no completion marker. While no one has
+   * written to it, it is discarded, so no half-made launched thread is ever listed; the creator's retry makes it
+   * again from the stored intent. Nothing is made here.
+   */
+  private recoverAgentThreadCreations(): void {
+    const engine = this.runEngine
+    const store = this.threadStore
+    if (!engine || !store) return
+    try {
+      for (const receipt of engine.store.listReceiptsByKind(AGENT_THREAD_COMMAND)) {
+        const stored = readAgentThreadReceipt(receipt)
+        if (!stored || engine.store.hasAgentAction(stored.intent.threadId, AGENT_THREAD_CREATED_ACTION)) continue
+        if (!store.getThread(stored.intent.threadId) || this.agentThreadInUse(stored.intent.threadId)) continue
+        try {
+          store.discardUnusedThread(stored.intent.threadId)
+        } catch (error) {
+          console.warn('a half-made thread an agent created was kept', { threadId: stored.intent.threadId, error: error instanceof Error ? error.message : String(error) })
+        }
+      }
+    } catch (error) {
+      console.warn('threads agents were creating could not be repaired', { error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   /** `thread_interrupt`: the one Stop (`stopThread`), asked for by an agent, aimed at one run. */
