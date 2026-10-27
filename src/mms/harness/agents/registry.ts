@@ -5,7 +5,9 @@
  */
 import { mkdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname } from 'node:path'
-import type { RegistryAgentView, RegistryChecksum } from '../../../shared/harness/types'
+import { RESERVED_AGENT_IDS, reservedAgentMessage, type RegistryAgentView, type RegistryChecksum } from '../../../shared/harness/types'
+
+export { RESERVED_AGENT_IDS, reservedAgentMessage }
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import { HOME_VARIABLES, isInheritedCredential } from '../env'
 
@@ -289,11 +291,13 @@ export function agentView(agent: RegistryAgent, keys: readonly RegistryPlatform[
     ...(agent.website ? { website: agent.website } : {}),
     ...(agent.repository ? { repository: agent.repository } : {})
   }
+  // Listed, so a search for it finds why; never added.
+  const reserved = RESERVED_AGENT_IDS.has(agent.id) ? { unsupported: reservedAgentMessage(agent.id) } : {}
   if (resolved.kind === 'uvx')
     return { ...base, distribution: 'uvx', checksum: 'none', package: resolved.spec.package, args: resolved.spec.args, env: resolved.spec.env, unsupported: `Python (uvx) agents are not supported yet. Add it as a Custom command running uvx ${resolved.spec.package}.` }
   if (resolved.kind === 'npx')
     // npm checks every package against the npm registry's integrity hashes.
-    return { ...base, distribution: 'npx', checksum: 'registry', package: resolved.spec.package, args: resolved.spec.args, env: resolved.spec.env }
+    return { ...base, distribution: 'npx', checksum: 'registry', package: resolved.spec.package, args: resolved.spec.args, env: resolved.spec.env, ...reserved }
   const checksum: RegistryChecksum = resolved.target.sha256 ? 'registry' : 'none'
   return {
     ...base,
@@ -302,7 +306,8 @@ export function agentView(agent: RegistryAgent, keys: readonly RegistryPlatform[
     artifactUrl: resolved.target.archive,
     args: resolved.target.args,
     env: resolved.target.env,
-    ...(resolved.archive ? {} : { unsupported: 'Mousse installs zip and tar.gz downloads only.' })
+    ...(resolved.archive ? {} : { unsupported: 'Mousse installs zip and tar.gz downloads only.' }),
+    ...reserved
   }
 }
 

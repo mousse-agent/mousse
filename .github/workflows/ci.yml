@@ -112,6 +112,8 @@ jobs:
           # Release builds give a failed test two more tries: timing-sensitive process tests
           # occasionally fail on shared runners. A test that fails every try still blocks.
           RETRY: ${{ inputs.full-suite && '--retry=2' || '' }}
+          # The managed-Codex wire gate needs the pinned Codex download; it runs locally before merge.
+          MOUSSE_CODEX_WIRE: skip
         run: xvfb-run --auto-servernum --server-args='-screen 0 1280x900x24' dbus-run-session -- npm test -- --maxWorkers=2 --shard=${{ matrix.shard }}/5 $RETRY
 
   windows:

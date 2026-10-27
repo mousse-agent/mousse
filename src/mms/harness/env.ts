@@ -54,7 +54,7 @@ export const HOME_VARIABLES: Partial<Record<HarnessDriverKind, string>> = {
  */
 export const INHERITED_CREDENTIALS: Partial<Record<HarnessDriverKind, readonly string[]>> = {
   claude: ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'],
-  codex: ['CODEX_API_KEY', 'OPENAI_API_KEY'],
+  codex: ['CODEX_API_KEY', 'OPENAI_API_KEY', 'ACCESS_TOKEN', 'CODEX_ACCESS_TOKEN', 'OPENAI_BASE_URL'],
   pi: PI_ENV_KEYS,
   // Cursor has no home of its own: its host always runs with the instance's key and never sees this.
   cursor: ['CURSOR_API_KEY'],

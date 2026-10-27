@@ -127,7 +127,11 @@ export function SignInDialog({ operationId, name, onClose }: { operationId: stri
                       After signing in, copy the full address from the browser&apos;s address bar and paste it here. The page may say it
                       can&apos;t be reached, which is expected.
                     </p>
+                    <label className="provider-login-label" htmlFor="provider-signin-redirect">
+                      Paste the address your browser ended on
+                    </label>
                     <input
+                      id="provider-signin-redirect"
                       className="provider-login-input"
                       type="text"
                       value={value}

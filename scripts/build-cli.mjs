@@ -62,6 +62,19 @@ export function getCursorHostBuildOptions(projectRoot = root) {
   }
 }
 
+/** The ChatGPT token helper on its own (`out/cli/chatgpt-token.js`): Node built-ins only. */
+export function getChatgptTokenBuildOptions(projectRoot = root) {
+  return {
+    entryPoints: [resolve(projectRoot, 'src/cli/fastpath/chatgptTokenMain.ts')],
+    outfile: resolve(projectRoot, 'out/cli/chatgpt-token.js'),
+    bundle: true,
+    platform: 'node',
+    format: 'esm',
+    target: 'node20',
+    sourcemap: false
+  }
+}
+
 /**
  * One-shot CLI build, or watch mode for development.
  * @param {{ watch?: boolean, onRebuild?: (error: Error | null) => void, log?: boolean, reuse?: boolean }} [opts]
@@ -78,6 +91,7 @@ export async function buildCli(opts = {}) {
     const worker = await buildBrowserWorker(root, { reuse })
     const cli = await cachedBuild(options, { projectRoot: root, name: 'cli', reuse })
     await cachedBuild(getCursorHostBuildOptions(root), { projectRoot: root, name: 'cursor-host', reuse })
+    await cachedBuild(getChatgptTokenBuildOptions(root), { projectRoot: root, name: 'chatgpt-token', reuse })
     if (log) console.log(`${cli.reused ? 'Reused' : 'Built'} ${outfile}`)
     return { cliReused: cli.reused, workerReused: worker.reused }
   }
@@ -105,6 +119,7 @@ export async function buildCli(opts = {}) {
   await ctx.watch()
   // The host rarely changes; it is built once when watching starts.
   await cachedBuild(getCursorHostBuildOptions(root), { projectRoot: root, name: 'cursor-host' })
+  await cachedBuild(getChatgptTokenBuildOptions(root), { projectRoot: root, name: 'chatgpt-token' })
   const browserOptions = getBrowserWorkerBuildOptions(root)
   let browserContext
   try {

@@ -36,7 +36,15 @@ export interface InstanceConfig {
   source?: AcpSource
   /** The entry this one moved to (`instances.move`): turned off, and its threads continue there. */
   movedTo?: string
+  /**
+   * How a driver with several setups runs this entry (Codex: `managed`, Mousse's own download and
+   * sign-in, or `existing`, the user's Codex CLI). Chosen when the entry is added; fixed after.
+   */
+  setup?: 'managed' | 'existing'
 }
+
+/** Whether an entry runs in a Mousse-owned home: it must, it may, or it must not. */
+export type PrivateHomeRule = 'required' | 'allowed' | 'forbidden'
 
 /** Progress of an install: a line to show, and bytes when a download knows them. */
 export interface InstallProgress {
@@ -125,6 +133,12 @@ export interface DriverRuntime {
   llmProvider?(): LlmProviderOption | undefined
   /** Models as the runtime last listed them (or its fallback aliases). */
   models(): LlmModelOption[]
+  /**
+   * The model a turn on `model` runs, fixed when the turn is bound (a `default` becomes the first
+   * listed model), so a retry or recovery runs the same one whatever the listing says later.
+   * Undefined when no model is listed. Without it, the binding keeps `model` as selected.
+   */
+  concreteModel?(model: string): string | undefined
   /** The stored launch settings (built-in vendor instances: their `settings.json`). */
   launch?(): StoredCliConfig
   /** Saves launch settings of a built-in instance; added instances are configured by the gateway. */
@@ -153,6 +167,11 @@ export interface DriverRuntime {
   /** A Mousse-managed install and its known version. */
   managed?(): ManagedInstall | undefined
   /**
+   * The runtime runs only Mousse's own install, at the version Mousse ships: no binary on PATH is
+   * ever used, and an update is a newer version Mousse ships, not the vendor's latest.
+   */
+  pinned?(): { version: string }
+  /**
    * Checks every installed file against its install record (Recheck, Add, after install); a
    * mismatch shows through `managed().broken`.
    */
@@ -161,6 +180,12 @@ export interface DriverRuntime {
   removeInstall?(options: { force: boolean }): Promise<RemoveInstallResult>
   /** The instance is being removed: it lets go of shared installs (its files stay unless deleted). */
   release?(): Promise<void>
+  /**
+   * The instance is being removed: deletes the sign-ins Mousse keeps for it, after stopping
+   * everything that used them, and revokes them. It resolves only once nothing in the instance's
+   * folder is needed any more; when it throws, the instance is kept so removing it again retries.
+   */
+  deleteCredentials?(): Promise<void>
   /** Validates an override path beyond "exists and runs" (throws when invalid). */
   validateOverride?(path: string): void
   /** Forget the native session of a thread so its next turn hands history over instead. */
@@ -206,6 +231,12 @@ export interface HarnessDriver {
   /** Supports a Mousse-owned home (`InstanceConfig.home = private`). */
   readonly privateHome: boolean
   /**
+   * Whether an entry with `config` runs in a Mousse-owned home, when that depends on the config
+   * (Codex: a managed entry always does, the user's own Codex never). Without it, `privateHome`
+   * decides: `allowed` or `forbidden`.
+   */
+  privateHomeFor?(config: InstanceConfig): PrivateHomeRule
+  /**
    * Every instance, built-in ones included, runs with a Mousse-owned home under its state dir,
    * whatever its config says (a runtime Mousse hosts itself and never points at the user's home).
    */
@@ -246,6 +277,11 @@ export interface HarnessDriver {
   create(context: DriverContext): DriverRuntime
   /** The command that updates a binary installed by `owner`, when there is one. */
   updateCommand?(owner: InstallOwner): string | undefined
+}
+
+/** The private-home rule of an entry with `config` (see `HarnessDriver.privateHomeFor`). */
+export function privateHomeRule(driver: Pick<HarnessDriver, 'privateHome' | 'privateHomeFor'>, config: InstanceConfig): PrivateHomeRule {
+  return driver.privateHomeFor?.(config) ?? (driver.privateHome ? 'allowed' : 'forbidden')
 }
 
 /** Shared lenient decoder for the fields every driver understands. */

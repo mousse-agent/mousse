@@ -148,7 +148,7 @@ const LITERAL_ALLOWLIST: Record<string, string> = {
 const TRANSITIONAL: Record<string, string> = {
   'src/mms/run/adapters/': 'PR 2–4 (adapters retired by drivers)',
   'src/mms/providers/claudeSubscription/': 'PR 5',
-  'src/mms/providers/codex/': 'PR 3',
+  'src/mms/providers/codex/': 'PR 5',
   'src/mms/providers/antigravity/': 'PR 5'
 }
 

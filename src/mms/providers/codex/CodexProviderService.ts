@@ -1,3 +1,4 @@
+import type { ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { accessSync, constants, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -18,6 +19,7 @@ import type {
 import type { LlmModelOption, LlmProviderOption } from '../../../shared/settings'
 import type { ChatImageAttachment } from '../../../shared/types'
 import { mousseVersion } from '../../appVersion'
+import { killTree } from '../../harness/spawn'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
 import { codexMcpConfigOverrides } from '../../run/mcp/attachment'
@@ -45,6 +47,7 @@ import {
 } from './CodexAppServerClient'
 import {
   RPC_METHOD_NOT_FOUND,
+  codexHttpStatus,
   notificationParams,
   type AccountReadResponse,
   type CodexNotification,
@@ -56,6 +59,7 @@ import {
   type ThreadConfig,
   type ThreadItem,
   type TokenUsageBreakdown,
+  type TurnError,
   type UserInput
 } from './protocol'
 import { codexTurnPolicy } from './childPolicy'
@@ -130,12 +134,71 @@ type Settings = {
   disconnected?: boolean
   threads?: Record<string, SavedThread>
 }
-type AccountProbe =
-  | { kind: 'signed_in'; planType: string; email: string | null }
+type AccountProbe = CodexAccountReading
+
+/** An account check's answer: `label`/`subject` override what `account()` derives from plan and email. */
+export type CodexAccountReading =
+  | { kind: 'signed_in'; planType: string; email: string | null; label?: string; subject?: string }
   | { kind: 'signed_out'; message: string }
   | { kind: 'error'; message: string }
 
 export type { CodexStatus }
+
+/** Where the account the app-server runs as is read from, instead of `account/read`. */
+export interface CodexAccountSource {
+  read(signal?: AbortSignal): Promise<CodexAccountReading>
+}
+
+/** Where the models are listed from, instead of `model/list`. */
+export interface CodexModelSource {
+  list(signal?: AbortSignal): Promise<LlmModelOption[]>
+}
+
+/** What one app-server launch adds, and what ends with that process. */
+export interface CodexLaunchExtras {
+  /** Appended after the stored launch args. */
+  args: string[]
+  env?: Record<string, string>
+  /**
+   * Called once, when that process has actually exited (or never started). A closed or lost
+   * connection is not enough: the process may still run, with whatever it cached.
+   */
+  onExit(): void
+}
+
+/**
+ * How one Codex instance runs. Every field is optional: without them the service is the built-in
+ * instance (the terminal sign-in, `<profileHome>/providers/codex`, `account/read`, `model/list`).
+ */
+export interface CodexServiceOptions {
+  /** Mousse's state for this instance (settings, saved threads, standalone workspaces). */
+  dir?: string
+  /** The app-server's environment before the stored launch variables. */
+  env?: () => NodeJS.ProcessEnv
+  clientInfo?: { name: string; title: string }
+  /** The provider every thread runs on, pinned in the request, the config layer and the response check. */
+  modelProvider?: string
+  /** Runs before each app-server launch. A rejection fails that launch. */
+  prepareLaunch?: (signal?: AbortSignal) => Promise<CodexLaunchExtras>
+  account?: CodexAccountSource
+  models?: CodexModelSource
+}
+
+/** A turn Codex ended as failed, with what it said about why. The message is redacted. */
+export class CodexTurnFailure extends Error {
+  readonly codexErrorInfo: TurnError['codexErrorInfo']
+  readonly additionalDetails: string | null
+  readonly httpStatus?: number
+
+  constructor(message: string, error: TurnError | undefined) {
+    super(message)
+    this.name = 'CodexTurnFailure'
+    this.codexErrorInfo = error?.codexErrorInfo ?? null
+    this.additionalDetails = typeof error?.additionalDetails === 'string' ? error.additionalDetails : null
+    const status = codexHttpStatus(error?.codexErrorInfo)
+    if (status !== undefined) this.httpStatus = status
+  }
+}
 
 export type CodexServiceDependencies = {
   /** Starts the app-server process; tests and the replay kit substitute it. */
@@ -155,6 +218,31 @@ export type CodexServiceDependencies = {
   helperTiming?: Partial<TreeTiming>
   /** `codex --version` lookups (tests). */
   versions?: CliVersionCache
+  /**
+   * How `stopAll` ends a process (tests): after a normal close, the wait before the whole tree is
+   * killed, then the wait for its exit before `stopAll` gives up and rejects.
+   */
+  stopTiming?: { killAfterMs?: number; exitDeadlineMs?: number }
+  /** Kills a process and everything it started (tests substitute it; it may throw). */
+  killTree?: (process: CodexProcess) => void
+}
+
+/** `stopAll`: a closed process gets this long before its tree is killed. */
+export const CODEX_STOP_KILL_AFTER_MS = 3_000
+/** `stopAll`: after the tree kill, how long the exit may take before the stop fails. */
+export const CODEX_STOP_EXIT_DEADLINE_MS = 5_000
+
+/** A launched app-server, tracked from spawn to its actual exit. */
+interface LiveProcess {
+  process: CodexProcess
+  conn: CodexConnection
+  exited: Promise<void>
+  done: boolean
+}
+
+function defaultKillTree(process: CodexProcess): void {
+  if (process.pid) killTree(process as unknown as ChildProcess)
+  else process.kill('SIGKILL')
 }
 
 export type CodexToolEvent = ProviderToolEvent
@@ -372,7 +460,8 @@ class TurnRun {
   private usageStart: TokenUsageBreakdown | undefined
   private usageEnd: { total: TokenUsageBreakdown; last: TokenUsageBreakdown; window: number | null } | undefined
   private retries = 0
-  lastError: string | undefined
+  /** The last `error` notification Codex gave up on (`willRetry: false`). */
+  lastError: TurnError | undefined
   interruptRequested = false
   /** A `turn/start` is on its way; its turn id is not known yet. */
   startInFlight = false
@@ -670,7 +759,7 @@ class TurnRun {
     const error = notificationParams(notification, 'error')
     if (error) {
       if (error.willRetry) this.input.onRetry?.(++this.retries)
-      else this.lastError = error.error.message
+      else this.lastError = error.error
     }
   }
 }
@@ -694,6 +783,8 @@ export class CodexProviderService {
     ready: Promise<CodexConnection>
     verified: boolean
     generation: number
+    /** Resolves when the process has exited (or never started). */
+    exited: Promise<void>
     /** What this process last said about every thread (a broadcast, whichever thread a run holds). */
     statuses: ThreadStatuses
     /**
@@ -708,6 +799,8 @@ export class CodexProviderService {
   private probeResult?: { at: number; result: AccountProbe }
   private probing?: Promise<void>
   private modelDiscoveryStarted = false
+  /** Bumped by `clearModels`: a listing started before it is not saved. */
+  private modelsEpoch = 0
   /** Model listings in flight; they keep the process open. */
   private listing = 0
   private idleClose?: { timer: ReturnType<typeof setTimeout>; at: number }
@@ -734,12 +827,23 @@ export class CodexProviderService {
   /** Mousse MCP tokens handed to Codex; never echoed into errors or status messages. */
   private readonly secrets = new Set<string>()
 
+  private readonly modelProvider: string
+  /** A launch being prepared (`prepareLaunch`); callers arriving meanwhile share it. */
+  private launching?: Promise<CodexConnection>
+  /** Bumped by `stopAll`: a launch prepared before it never starts. */
+  private launchEpoch = 0
+  private readonly preparing = new Set<AbortController>()
+  /** Every app-server this service started that has not exited yet, attached or not. */
+  private readonly processes = new Set<LiveProcess>()
+
   constructor(
     private readonly profileHome: string,
     private readonly questions: UserQuestionService,
-    private readonly dependencies: CodexServiceDependencies = {}
+    private readonly dependencies: CodexServiceDependencies = {},
+    private readonly options: CodexServiceOptions = {}
   ) {
-    this.dir = join(profileHome, 'providers', CODEX_PROVIDER_ID)
+    this.dir = options.dir ?? join(profileHome, 'providers', CODEX_PROVIDER_ID)
+    this.modelProvider = options.modelProvider ?? CODEX_MODEL_PROVIDER
     this.settingsPath = join(this.dir, 'settings.json')
     try {
       const parsed: unknown = JSON.parse(readFileSync(this.settingsPath, 'utf8'))
@@ -805,6 +909,7 @@ export class CodexProviderService {
 
   /** The listed models, or the Codex default until a listing runs. */
   models(): LlmModelOption[] {
+    if (this.options.models) return this.settings.models ?? []
     return this.settings.models?.length ? this.settings.models : CODEX_FALLBACK_MODELS
   }
 
@@ -813,7 +918,7 @@ export class CodexProviderService {
     return {
       id: CODEX_PROVIDER_ID,
       label: 'Codex',
-      models: this.settings.models?.length ? this.settings.models : CODEX_FALLBACK_MODELS
+      models: this.models()
     }
   }
 
@@ -824,6 +929,7 @@ export class CodexProviderService {
 
   private async probe(): Promise<AccountProbe> {
     try {
+      if (this.options.account) return await this.options.account.read()
       const conn = await this.connection()
       return await this.readAccount(conn)
     } catch (error) {
@@ -850,7 +956,8 @@ export class CodexProviderService {
     const conn = await this.connection()
     signal.throwIfAborted()
     if (this.app?.conn === conn && this.app.verified) return conn
-    const result = await this.readAccount(conn, signal)
+    const result = this.options.account ? await this.options.account.read(signal) : await this.readAccount(conn, signal)
+    if (this.options.account && this.app?.conn === conn) this.app.verified = result.kind === 'signed_in'
     this.probeResult = { at: Date.now(), result }
     if (result.kind !== 'signed_in')
       throw new AppError({ code: 'codex_not_connected', message: this.signInMessage(), errorInfo: { category: 'unavailable', retryable: false } })
@@ -951,8 +1058,29 @@ export class CodexProviderService {
     }
   }
 
+  /**
+   * Forgets the listed models (the account changed: its plan may list others). A listing that
+   * ends after this was asked for the old account and is not saved.
+   */
+  clearModels(): void {
+    this.modelsEpoch += 1
+    this.modelDiscoveryStarted = false
+    if (!this.settings.models) return
+    delete this.settings.models
+    this.save()
+  }
+
   /** Lists the account's models (`model/list`, every page) and stores them for the picker. */
   async refreshModels(): Promise<LlmModelOption[]> {
+    if (this.options.models) {
+      const epoch = this.modelsEpoch
+      const listed = await this.options.models.list()
+      if (!listed.length) throw new Error('Codex returned no models')
+      if (epoch !== this.modelsEpoch) throw new Error('The account changed while its models were listed. Refresh models again.')
+      this.settings.models = listed
+      this.save()
+      return listed
+    }
     this.listing += 1
     try {
       const conn = await this.connection()
@@ -1014,6 +1142,8 @@ export class CodexProviderService {
   account(): { label?: string; subject?: string } | undefined {
     const result = this.probeResult?.result
     if (result?.kind !== 'signed_in') return undefined
+    if (result.label !== undefined || result.subject !== undefined)
+      return { ...(result.label ? { label: result.label } : {}), ...(result.subject ? { subject: result.subject } : {}) }
     const email = result.email?.trim().toLowerCase()
     // Codex reports the plan in lower case (`plus`, `pro`); the page names it as ChatGPT does.
     const plan = result.planType ? `${result.planType[0]!.toUpperCase()}${result.planType.slice(1)}` : ''
@@ -1069,16 +1199,65 @@ export class CodexProviderService {
     return this.cliConfig()
   }
 
+  /**
+   * Stops every app-server process of this service and waits until it has exited, so nothing keeps
+   * running with what that process cached (a token of a sign-in that changed). Running chats fail;
+   * a launch being prepared never starts. The service stays usable: the next use starts a new
+   * process, which checks its account again.
+   */
+  async stopAll(reason: string): Promise<void> {
+    this.launchEpoch += 1
+    for (const preparing of this.preparing) preparing.abort(new Error(reason))
+    this.abortInFlight(reason)
+    this.probeResult = undefined
+    if (this.app) this.app.verified = false
+    // A launch being prepared never starts (the epoch moved on), and a spawned process is tracked
+    // from its spawn: one still initializing is closed with the rest at once, never awaited.
+    await this.stopProcesses([...this.processes])
+  }
+
+  /** Resolves once every process this service started has exited (a stopped service's last ones included). */
+  async processesExited(): Promise<void> {
+    await Promise.all([...this.processes].map((entry) => entry.exited))
+  }
+
+  /**
+   * Closes `live` (the attached process and detached ones still shutting down), kills each tree
+   * that has not exited after the grace, and waits for every exit. Rejects when a kill throws or a
+   * process is still running at the deadline: the caller must not assume it stopped.
+   */
+  private async stopProcesses(live: LiveProcess[]): Promise<void> {
+    if (!live.length) return
+    const timing = this.dependencies.stopTiming ?? {}
+    const killAfterMs = timing.killAfterMs ?? CODEX_STOP_KILL_AFTER_MS
+    const deadlineMs = timing.exitDeadlineMs ?? CODEX_STOP_EXIT_DEADLINE_MS
+    // `lost` fails the runs on the attached one; a detached one is closed again (harmless).
+    for (const entry of live) entry.conn.close()
+    const failures: string[] = []
+    await Promise.all(live.map(async (entry) => {
+      if (await exitWithin(entry.exited, killAfterMs)) return
+      try {
+        (this.dependencies.killTree ?? defaultKillTree)(entry.process)
+      } catch (error) {
+        failures.push(`the kill failed (${error instanceof Error ? error.message : String(error)})`)
+        return
+      }
+      if (!(await exitWithin(entry.exited, deadlineMs))) failures.push('it did not exit in time')
+    }))
+    if (failures.length) throw new Error(`Codex could not be stopped: ${failures.join('; ')}.`)
+  }
+
   stop(): void {
     this.stopped = true
+    for (const preparing of this.preparing) preparing.abort(new Error('Codex provider is stopped'))
     if (this.idleClose) clearTimeout(this.idleClose.timer)
     this.idleClose = undefined
     this.abortInFlight()
     this.app?.conn.close()
   }
 
-  private abortInFlight(): void {
-    for (const controller of this.controllers) controller.abort(new Error('Codex was disconnected'))
+  private abortInFlight(reason = 'Codex was disconnected'): void {
+    for (const controller of this.controllers) controller.abort(new Error(reason))
     for (const threadId of this.activeThreads) this.questions.dismissAllForThread(threadId)
     this.readyToCommit.clear()
   }
@@ -1091,22 +1270,75 @@ export class CodexProviderService {
     if (this.app && !this.app.conn.signal.aborted) return this.app.ready
     const target = this.launchTarget()
     if (!target) return Promise.reject(new Error('Codex CLI not found. Install the Codex CLI first.'))
-    mkdirSync(this.dir, { recursive: true, mode: 0o700 })
-    const process = (this.dependencies.launch ?? spawnCodexAppServer)({
-      binary: target.command,
-      ...(target.args.length ? { entryArgs: target.args } : {}),
-      args: storedCliArgs(this.settings),
-      env: this.environment(),
-      cwd: this.dir
-    })
+    const prepare = this.options.prepareLaunch
+    if (!prepare) return this.launch(target)
+    if (this.launching) return this.launching
+    const epoch = this.launchEpoch
+    const preparing = new AbortController()
+    this.preparing.add(preparing)
+    const launching = prepare(preparing.signal)
+      .then((extras) => {
+        // A stop while the launch was prepared wins: what it prepared is released, nothing starts.
+        if (this.stopped || epoch !== this.launchEpoch) {
+          extras.onExit()
+          throw new Error(this.stopped ? 'Codex provider is stopped' : 'Codex was restarted')
+        }
+        return this.launch(target, extras)
+      })
+      .finally(() => {
+        this.preparing.delete(preparing)
+        if (this.launching === launching) this.launching = undefined
+      })
+    this.launching = launching
+    return launching
+  }
+
+  /** Starts the app-server process and initializes it. */
+  private launch(target: CliLaunch, extras?: CodexLaunchExtras): Promise<CodexConnection> {
+    let process: CodexProcess
+    try {
+      mkdirSync(this.dir, { recursive: true, mode: 0o700 })
+      process = (this.dependencies.launch ?? spawnCodexAppServer)({
+        binary: target.command,
+        ...(target.args.length ? { entryArgs: target.args } : {}),
+        args: [...storedCliArgs(this.settings), ...(extras?.args ?? [])],
+        env: { ...this.environment(), ...extras?.env },
+        cwd: this.dir
+      })
+    } catch (error) {
+      extras?.onExit()
+      return Promise.reject(error)
+    }
     const conn = new CodexAppServerClient(process, { defaultTimeoutMs: this.dependencies.requestTimeoutMs, secrets: () => this.secrets })
+    // A spawn `error` with no pid means the process never started; otherwise only `exit` counts.
+    const exited = new Promise<void>((done) => {
+      if (process.exitCode !== null || process.signalCode !== null) return done()
+      process.once('exit', () => done())
+      process.once('error', () => {
+        if (!process.pid) done()
+      })
+    })
+    const live: LiveProcess = { process, conn, exited, done: false }
+    this.processes.add(live)
+    void exited.then(() => {
+      live.done = true
+      this.processes.delete(live)
+      // Its leases (token broker, install files) end only now, when nothing of it runs.
+      extras?.onExit()
+    })
+    // A connection that ended on its own (output closed) leaves a process nobody can use: it is
+    // closed too, and still tracked until it exits.
+    conn.signal.addEventListener('abort', () => {
+      if (!live.done) conn.close()
+    }, { once: true })
     const statuses = new ThreadStatuses()
     conn.onNotification((notification) => this.route(notification, statuses))
     conn.setServerRequestHandler((request) => this.serve(request))
     conn.signal.addEventListener('abort', () => this.lost(conn, conn.signal.reason), { once: true })
+    const clientInfo = this.options.clientInfo ?? { name: 'mousse', title: 'Mousse' }
     const ready = conn
       .request('initialize', {
-        clientInfo: { name: 'mousse', title: 'Mousse', version: mousseVersion() },
+        clientInfo: { ...clientInfo, version: mousseVersion() },
         // Experimental API: `thread/list` filters by ancestor. It also stops the server dropping experimental
         // notifications and keeps extra fields on approval requests; Mousse ignores both.
         capabilities: { experimentalApi: true, requestAttestation: false }
@@ -1116,12 +1348,12 @@ export class CodexProviderService {
         return conn
       })
     ready.catch(() => conn.close())
-    this.app = { conn, ready, verified: false, generation: this.launchGeneration, statuses }
+    this.app = { conn, ready, verified: false, generation: this.launchGeneration, exited, statuses }
     return ready
   }
 
   private environment(): NodeJS.ProcessEnv {
-    return withUserEnv(codexEnvironment(), storedCliEnv(this.settings))
+    return withUserEnv(this.options.env?.() ?? codexEnvironment(), storedCliEnv(this.settings))
   }
 
   /** Something is using the process: a check, a model listing, or a turn. */
@@ -1604,8 +1836,8 @@ export class CodexProviderService {
       sandbox: policy.sandbox,
       ...(baseId !== CODEX_DEFAULT_MODEL_ID ? { model: baseId } : {}),
       // Pinned twice: the request field and the config layer above user and workspace config.
-      modelProvider: CODEX_MODEL_PROVIDER,
-      config: { ...overrides, model_provider: CODEX_MODEL_PROVIDER },
+      modelProvider: this.modelProvider,
+      config: { ...overrides, model_provider: this.modelProvider },
       ...(input.developerInstructions ? { developerInstructions: input.developerInstructions } : {})
     }
     // A Codex thread belongs to the instance that started it; another instance starts fresh.
@@ -1630,7 +1862,7 @@ export class CodexProviderService {
         // The attachment, cwd or child policy changed while the thread is loaded. A resume would
         // keep the old config, so fork it: Codex loads the history into a new thread with the new
         // config, and the old thread is released.
-        const forked = chatgptProvider(await conn.request('thread/fork', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, { signal }))
+        const forked = pinnedProvider(this.modelProvider, await conn.request('thread/fork', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, { signal }))
         this.loaded.delete(saved.codexThreadId)
         this.loaded.set(forked.thread.id, { mcpToken, cwd, childKey, instructionsHash })
         await conn.request('thread/unsubscribe', { threadId: saved.codexThreadId }, { signal, timeoutMs: 5_000 }).catch(() => undefined)
@@ -1638,19 +1870,19 @@ export class CodexProviderService {
         return { codexThreadId: forked.thread.id, model: forked.model, continued: true }
       }
       try {
-        const resumed = chatgptProvider(await conn.request('thread/resume', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, { signal }))
+        const resumed = pinnedProvider(this.modelProvider, await conn.request('thread/resume', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, { signal }))
         this.loaded.set(resumed.thread.id, { mcpToken, cwd, childKey, instructionsHash })
         return { codexThreadId: resumed.thread.id, model: resumed.model, continued: true }
       } catch (error) {
         signal.throwIfAborted()
         conn.signal.throwIfAborted()
         if (!(error instanceof CodexRpcError)) throw error
-        const fresh = chatgptProvider(await conn.request('thread/start', params, { signal }))
+        const fresh = pinnedProvider(this.modelProvider, await conn.request('thread/start', params, { signal }))
         this.loaded.set(fresh.thread.id, { mcpToken, cwd, childKey, instructionsHash })
         return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false }
       }
     }
-    const fresh = chatgptProvider(await conn.request('thread/start', params, { signal }))
+    const fresh = pinnedProvider(this.modelProvider, await conn.request('thread/start', params, { signal }))
     this.loaded.set(fresh.thread.id, { mcpToken, cwd, childKey, instructionsHash })
     return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false }
   }
@@ -1814,8 +2046,7 @@ export class CodexProviderService {
         await Promise.race([steering, aborted])
         collectSteer()
         await Promise.race([steering, aborted])
-        if (lastTurn.status === 'failed')
-          throw new Error(this.redact(lastTurn.error?.message ?? current.lastError ?? 'Codex turn failed'))
+        if (lastTurn.status === 'failed') throw this.turnFailure(lastTurn.error, current.lastError)
         if (lastTurn.status === 'interrupted') {
           signal.throwIfAborted()
           throw new Error('Codex interrupted the turn')
@@ -1920,7 +2151,7 @@ export class CodexProviderService {
   private throwAdoptedFailure(run: TurnRun, signal: AbortSignal): void {
     const turn = run.adoptedFailure
     if (!turn) return
-    if (turn.status === 'failed') throw new Error(this.redact(turn.error?.message ?? run.lastError ?? 'Codex turn failed'))
+    if (turn.status === 'failed') throw this.turnFailure(turn.error, run.lastError)
     signal.throwIfAborted()
     throw new Error('Codex interrupted the turn')
   }
@@ -2025,6 +2256,18 @@ export class CodexProviderService {
     return { expired, cancel: () => clearTimeout(timer) }
   }
 
+  /**
+   * The failure of a turn Codex ended as failed, its texts redacted: the turn's own error, with the
+   * kind of the last error Codex gave up on when the turn's names none.
+   */
+  private turnFailure(turnError: TurnError | null | undefined, lastError: TurnError | undefined): CodexTurnFailure {
+    const error = turnError ? { ...turnError, codexErrorInfo: turnError.codexErrorInfo ?? lastError?.codexErrorInfo ?? null } : lastError
+    return new CodexTurnFailure(this.redact(error?.message || 'Codex turn failed'), error ? {
+      ...error,
+      additionalDetails: typeof error.additionalDetails === 'string' ? this.redact(error.additionalDetails) : null
+    } : undefined)
+  }
+
   private redact(text: string): string {
     return redactSecrets(text, this.secrets)
   }
@@ -2039,13 +2282,13 @@ export class CodexProviderService {
   }
 }
 
-/** Refuses a thread whose effective provider is not the ChatGPT-backed built-in one. */
-function chatgptProvider<T extends { modelProvider?: string }>(response: T): T {
-  if (response.modelProvider !== CODEX_MODEL_PROVIDER)
+/** Refuses a thread whose effective provider is not the one Mousse pinned (`expected`). */
+function pinnedProvider<T extends { modelProvider?: string }>(expected: string, response: T): T {
+  if (response.modelProvider !== expected)
     throw new AppError({
       code: 'codex_provider_not_chatgpt',
       // Static text: the provider name comes from the process and could carry anything.
-      message: 'Codex chose a model provider other than your ChatGPT sign-in; Mousse only runs Codex on it.',
+      message: 'Codex chose another model provider than the one Mousse set; Mousse only runs Codex on that one.',
       errorInfo: { category: 'unavailable', retryable: false }
     })
   return response
@@ -2053,6 +2296,17 @@ function chatgptProvider<T extends { modelProvider?: string }>(response: T): T {
 
 function textInput(text: string): UserInput {
   return { type: 'text', text, text_elements: [] }
+}
+
+/** Whether `exited` settles within `ms`. */
+function exitWithin(exited: Promise<void>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  return Promise.race([
+    exited.then(() => true),
+    new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), ms)
+    })
+  ]).finally(() => clearTimeout(timer))
 }
 
 /** `promise`, or the signal's reason once it aborts first (the promise itself keeps running). */
@@ -2069,7 +2323,8 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 export function createCodexProviderService(
   profileHome: string,
   questions: UserQuestionService,
-  deps: CodexServiceDependencies = {}
+  deps: CodexServiceDependencies = {},
+  options: CodexServiceOptions = {}
 ): CodexProviderService {
-  return new CodexProviderService(profileHome, questions, deps)
+  return new CodexProviderService(profileHome, questions, deps, options)
 }

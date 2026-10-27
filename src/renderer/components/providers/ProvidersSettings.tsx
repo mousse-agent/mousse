@@ -97,12 +97,16 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
     return window.mousse.providers.onChanged(() => void loadLoginOptions().catch(() => {}))
   }, [loadLoginOptions])
 
-  // A failed install or update reports here; a failed sign-in stays in its dialog.
+  // A failed install or update reports here; a failed sign-in stays in its dialog. A sign-in that
+  // finished with a warning (its old sign-in still waits to be revoked) says so here once its
+  // dialog has closed.
   useEffect(
     () =>
       useProviderSnapshotsStore.subscribe((state, previous) => {
         for (const event of Object.values(state.operations)) {
-          if (event.phase !== 'failed' || event.kind === 'sign_in' || previous.operations[event.operationId] === event) continue
+          if (previous.operations[event.operationId] === event) continue
+          if (event.phase === 'completed' && event.kind === 'sign_in' && event.warning) setPageNotice(event.warning)
+          if (event.phase !== 'failed' || event.kind === 'sign_in') continue
           setPageError(event.error.message)
         }
       }),

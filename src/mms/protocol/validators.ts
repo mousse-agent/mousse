@@ -7,16 +7,18 @@ import { knownAppError, parseErrorInfo } from '../../shared/errors'
 import type { ChatImageAttachment, ChatMode } from '../../shared/types'
 import type { ProviderLoginResponse } from '../../shared/providerAuth'
 import { PROVIDER_DRIVER_KINDS } from '../../shared/providerInstances'
-import type {
-  AddInstanceInput,
-  CustomModel,
-  HarnessDriverKind,
-  InstanceConfigPatch,
-  ModelCapabilities,
-  ModelPrefsPatch,
-  ProviderScope,
-  RegistrySourcePatch,
-  SignInResponse
+import {
+  RESERVED_AGENT_IDS,
+  reservedAgentMessage,
+  type AddInstanceInput,
+  type CustomModel,
+  type HarnessDriverKind,
+  type InstanceConfigPatch,
+  type ModelCapabilities,
+  type ModelPrefsPatch,
+  type ProviderScope,
+  type RegistrySourcePatch,
+  type SignInResponse
 } from '../../shared/harness/types'
 import { parseCliConfigPatch } from '../providers/cliConfig'
 import {
@@ -533,7 +535,7 @@ function asNullableTrimmed(v: unknown, name: string, maxLen: number): string | n
 export function asInstanceConfigPatch(v: unknown, name = 'patch'): InstanceConfigPatch {
   if (v === undefined || v === null) return {}
   const o = asPlainObject(v, name)
-  assertKnownKeys(o, name, ['displayName', 'home', 'binaryPath', 'args', 'env', 'loginMethod', 'source'])
+  assertKnownKeys(o, name, ['displayName', 'home', 'binaryPath', 'args', 'env', 'loginMethod', 'source', 'setup'])
   // binaryPath, args and env share the CLI launch-settings limits.
   const patch: InstanceConfigPatch = { ...parseCliConfigPatch({ binaryPath: o.binaryPath, args: o.args, env: o.env }) }
   if (o.displayName !== undefined) patch.displayName = asNullableTrimmed(o.displayName, `${name}.displayName`, 80)
@@ -543,6 +545,10 @@ export function asInstanceConfigPatch(v: unknown, name = 'patch'): InstanceConfi
     patch.home = o.home
   }
   if (o.source !== undefined) patch.source = asRegistrySource(o.source, `${name}.source`)
+  if (o.setup !== undefined) {
+    if (o.setup !== 'managed' && o.setup !== 'existing') throw invalidParams(`${name}.setup must be managed|existing`)
+    patch.setup = o.setup
+  }
   return patch
 }
 
@@ -556,6 +562,7 @@ function asRegistrySource(v: unknown, name: string): RegistrySourcePatch {
   if (o.kind !== 'registry') throw invalidParams(`${name}.kind must be registry`)
   const agentId = asString(o.agentId, `${name}.agentId`, 64)
   if (!REGISTRY_AGENT_ID.test(agentId)) throw invalidParams(`${name}.agentId is not a registry agent id`)
+  if (RESERVED_AGENT_IDS.has(agentId)) throw invalidParams(reservedAgentMessage(agentId))
   const version = asString(o.version, `${name}.version`, 64)
   if (!REGISTRY_VERSION.test(version)) throw invalidParams(`${name}.version is not a registry version`)
   if (o.distribution !== 'binary' && o.distribution !== 'npx') throw invalidParams(`${name}.distribution must be binary|npx`)

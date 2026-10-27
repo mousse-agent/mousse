@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { describeStatus, type InstanceSnapshot } from '../src/shared/harness/status'
 import type { ProviderLoginOption } from '../src/shared/providerAuth'
 import { AgentConnectStep, CustomCommandStep, addChoices, type AddChoice } from '../src/renderer/components/providers/AddProviderDialog'
-import { AccountRow, BinaryRow, SetupRow, UpdateRow, type InstanceActions } from '../src/renderer/components/providers/CliSections'
+import { AccountRow, BinaryRow, PlanUsageRow, SetupRow, UpdateRow, type InstanceActions } from '../src/renderer/components/providers/CliSections'
 import { ProviderModelsSection, bulkVisibilityPatch, capabilityChips, displayModels, modelsSummary, movedOrder, nextOrder } from '../src/renderer/components/providers/ProviderModelsSection'
 import { AgentEditor, allowsCustomModels } from '../src/renderer/components/providers/ProviderEditor'
 import { ProviderListRow, StatusLine, shortStatus } from '../src/renderer/components/providers/parts'
@@ -56,6 +56,16 @@ describe('Setup row: the status and its one next step', () => {
     const html = setupRow({ driver: 'antigravity', auth: { state: 'signed_out', account: undefined } })
     expect(html).toContain('Not signed in')
     expect(buttons(html)).toEqual(['Sign in'])
+  })
+
+  it('signs a managed ChatGPT entry in with Continue with ChatGPT, and links its usage without a meter', () => {
+    const managed = { driver: 'codex' as const, config: { home: 'private' as const, args: [], env: {}, setup: 'managed' as const } }
+    expect(buttons(setupRow({ ...managed, auth: { state: 'signed_out', account: undefined } }))).toEqual(['Continue with ChatGPT'])
+    const usage = renderToStaticMarkup(createElement(PlanUsageRow, { snapshot: snapshot(managed) }))
+    expect(usage).toContain('ChatGPT plan usage')
+    expect(buttons(usage)).toEqual(['Manage usage'])
+    expect(usage).not.toMatch(/meter|progress|%/)
+    expect(renderToStaticMarkup(createElement(PlanUsageRow, { snapshot: snapshot({ driver: 'codex' }) }))).toBe('')
   })
 
   it('offers Sign in for an agent whose account is not checked but that offers its sign-in', () => {
@@ -248,7 +258,23 @@ describe('Add provider choices', () => {
 
   it('offers a second Claude Code account and skips single-instance agents already in the list, on or off', () => {
     const choices = addChoices([claude, codex, antigravity], [])
-    expect(choices.map((choice) => [choice.kind, choice.label])).toEqual([['new', 'Claude Code · another account'], ['new', 'Cursor'], ['new', 'Custom command'], ['registry', 'More ACP agents…']])
+    expect(choices.map((choice) => [choice.kind, choice.label])).toEqual([
+      ['new', 'Claude Code · another account'],
+      ['new', 'ChatGPT subscription'],
+      ['new', 'Cursor'],
+      ['new', 'Grok'],
+      ['new', 'Custom command'],
+      ['registry', 'More ACP agents…']
+    ])
+  })
+
+  it('offers ChatGPT subscription managed or on the user’s Codex CLI, and only managed once their CLI is added', () => {
+    const managed = snapshot({ instanceId: 'codex:work', driver: 'codex', displayName: 'Work', config: { home: 'private', args: [], env: {}, setup: 'managed' } })
+    const pick = (snapshots: Parameters<typeof addChoices>[0]) => addChoices(snapshots, []).find((choice) => choice.key === 'new:codex')
+    expect(pick([claude])).toMatchObject({ label: 'ChatGPT subscription', setups: ['managed', 'existing'] })
+    expect(pick([claude, codex])).toMatchObject({ label: 'ChatGPT subscription', setups: ['managed'] })
+    expect(pick([claude, managed])).toMatchObject({ label: 'ChatGPT subscription · another account', setups: ['managed', 'existing'] })
+    expect(pick([claude, codex, managed])).toMatchObject({ label: 'ChatGPT subscription · another account', setups: ['managed'] })
   })
 
   it('always offers a Custom command, never as another account', () => {
@@ -261,12 +287,14 @@ describe('Add provider choices', () => {
     const choices = addChoices([codex], [])
     expect(choices.map((choice) => [choice.kind, choice.label])).toEqual([
       ['new', 'Claude Code'],
+      ['new', 'ChatGPT subscription'],
       ['new', 'Antigravity'],
       ['new', 'Cursor'],
+      ['new', 'Grok'],
       ['new', 'Custom command'],
       ['registry', 'More ACP agents…']
     ])
-    expect(choices.every((choice) => choice.kind === 'registry' || (choice.kind === 'new' && choice.existing === undefined))).toBe(true)
+    expect(choices.every((choice) => choice.kind === 'registry' || (choice.kind === 'new' && (choice.driver === 'codex' || choice.existing === undefined)))).toBe(true)
   })
 
   it('lists model APIs not connected yet, without the agents’ own sign-ins', () => {
@@ -432,6 +460,22 @@ describe('Cursor in the agent editor', () => {
     expect(html).not.toContain('Not found')
     expect(html).not.toContain('Environment')
     expect(html).not.toContain('executable path')
+  })
+})
+
+describe('Agent editor for a managed ChatGPT entry', () => {
+  it('shows no executable, launch arguments or variables: the daemon refuses them', () => {
+    const render = (setup: 'managed' | 'existing') => {
+      const entry = snapshot({ instanceId: 'codex:work', driver: 'codex', config: { home: setup === 'managed' ? 'private' : 'default', args: [], env: {}, setup } })
+      return renderToStaticMarkup(createElement(AgentEditor, { snapshot: entry, status: describeStatus(entry), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
+    }
+    const managed = render('managed')
+    expect(managed).not.toContain('Launch arguments')
+    expect(managed).not.toContain('Variables')
+    expect(managed).not.toContain('executable path')
+    const own = render('existing')
+    expect(own).toContain('Launch arguments')
+    expect(own).toContain('Variables')
   })
 })
 

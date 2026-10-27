@@ -5,6 +5,7 @@ import { join } from 'path'
 
 import { detectCliMode, stripCliModeArgs } from '../cli/cliLaunch'
 import { configureElectronContext, finishElectronCli } from '../cli/electronContext'
+import { isChatgptTokenArgv } from '../cli/fastpath/chatgptToken'
 import { resolveMousseHome } from '../cli/paths'
 import { stopRunningDaemon } from '../cli/daemonShutdown'
 import { canonicalizeHome, SERVICE_STOP_TIMEOUT_MS } from '../cli/mmsRuntime'
@@ -86,10 +87,18 @@ function electronCliArgv(): string[] {
 }
 
 const isCliMode = detectCliMode(process.argv)
-configureElectronContext(app, isCliMode ? electronCliArgv() : [])
+// Codex runs the ChatGPT token command for every token it needs: it answers before Electron is
+// ready, without the CLI's module graph, a vault context or a dock icon.
+const isChatgptTokenCommand = isCliMode && isChatgptTokenArgv(electronCliArgv())
+if (!isChatgptTokenCommand) configureElectronContext(app, isCliMode ? electronCliArgv() : [])
 
-// Packaged / dual-mode headless CLI — no GUI, no single-instance lock (GUI may already be open).
-if (isCliMode) {
+if (isChatgptTokenCommand) {
+  app.dock?.hide()
+  void import('../cli/fastpath/chatgptToken')
+    .then(({ runChatgptToken }) => runChatgptToken(electronCliArgv()))
+    .then((code) => app.exit(code), () => app.exit(1))
+} else if (isCliMode) {
+  // Packaged / dual-mode headless CLI — no GUI, no single-instance lock (GUI may already be open).
   app.whenReady().then(async () => {
     try {
       // Propagate the packaged version into the long-running daemon and HTTP discovery.

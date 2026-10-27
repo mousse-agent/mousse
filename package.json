@@ -20,6 +20,7 @@
     "dev:mms": "node scripts/dev-mms.mjs",
     "build": "node scripts/ensure-electron.mjs && node scripts/ensure-native-executables.mjs && node scripts/build-net-native-reader.mjs && electron-vite build && node scripts/build-cli.mjs",
     "build:cli": "node scripts/build-cli.mjs",
+    "codex:pin": "node scripts/codex-pin.mjs",
     "build:browser-worker": "node scripts/build-browser-worker.mjs",
     "build:pi-runtime": "node scripts/build-pi-runtime.mjs",
     "check:pi-runtime": "node scripts/check-pi-runtime-install.mjs",

@@ -1,8 +1,11 @@
+import { harnessAppError, type HarnessError } from '../../../../shared/harness/types'
 import {
+  CodexTurnFailure,
   type CodexChatInput,
   type CodexChatResult,
   type CodexProviderService
 } from '../../../providers/codex/CodexProviderService'
+import { codexErrorKind } from '../../../providers/codex/protocol'
 import type { ChildPreflightContext, SubagentRefusal } from '../../policy/featureGates'
 import type { ProviderRef } from '../../types'
 import type {
@@ -27,6 +30,42 @@ export type CodexClient = Pick<
   CodexProviderService,
   'chat' | 'commitConversation' | 'standaloneWorkspace' | 'configured' | 'interrupt' | 'steer' | 'userSetup'
 > & Partial<Pick<CodexProviderService, 'commitInterrupted'>>
+
+/** How Codex 0.162.1 begins the message of a turn its `auth.command` failed (wire test). */
+const TOKEN_COMMAND_FAILED = 'provider auth command '
+
+/**
+ * The harness error of a turn a managed Codex (Sign in with ChatGPT) ended as failed. The adapter
+ * never retries: Codex has already retried transient failures itself, and the gateway decides
+ * the rest. A context overflow is returned unchanged (the overflow recovery reads it), and so is
+ * anything that is not a `CodexTurnFailure`.
+ */
+export function codexHarnessError(error: unknown, instanceId?: string): unknown {
+  if (!(error instanceof CodexTurnFailure)) return error
+  const kind = codexErrorKind(error.codexErrorInfo)
+  if (kind === 'contextWindowExceeded') return error
+  // Codex 0.162.1 reports an HTTP failure as its status alone (`httpConnectionFailed`); the
+  // upstream `error.code` (`subscription_sharing_*`) is not passed on in any field (wire test), so
+  // the mapping reads the kind and the status only.
+  const status = error.httpStatus
+  const fail = (code: HarnessError['code'], message: string): unknown =>
+    harnessAppError({ code, message, ...(instanceId ? { instanceId } : {}) })
+  // The token helper failed (signed out, the account changed, Mousse not running): Codex says so
+  // in its own words, with no kind or status, and retries without a bearer until it gives up.
+  if (kind === 'other' && status === undefined && error.message.startsWith(TOKEN_COMMAND_FAILED))
+    return fail('auth_expired', 'Mousse could not give Codex a ChatGPT token. Sign in again in Settings → Providers.')
+  if (kind === 'unauthorized' || status === 401)
+    return fail('auth_expired', 'ChatGPT did not accept this sign-in. Sign in again in Settings → Providers.')
+  if (kind === 'usageLimitExceeded' || status === 429)
+    return fail('rate_limited', 'Usage limit reached for your ChatGPT plan. It resets later; see Manage usage on chatgpt.com.')
+  if (status === 403)
+    return fail('not_eligible', "ChatGPT refused this request for this account or plan. Check the plan, or sign in with another account.")
+  if (kind === 'serverOverloaded' || status === 503)
+    return fail('service_unavailable', 'ChatGPT is unavailable or busy right now. Try again in a moment.')
+  if (kind === 'badRequest' || status === 400)
+    return fail('unsupported', 'ChatGPT did not accept this request.')
+  return fail('protocol', `Codex ended the turn with an error: ${error.message}`)
+}
 
 /**
  * `steer: 'native'`: `turn/steer` adds the text to the running turn. Checked live against
@@ -60,7 +99,11 @@ export class CodexAdapter implements ProviderAdapter {
   readonly driver = 'codex' as const
   readonly capabilities = CODEX_CAPABILITIES
 
-  constructor(private readonly service: () => CodexClient | null) {}
+  /** `managed`: a Codex Mousse runs on a Sign in with ChatGPT connection, whose failures map to harness errors. */
+  constructor(
+    private readonly service: () => CodexClient | null,
+    private readonly options: { managed?: boolean } = {}
+  ) {}
 
   /** Codex reports token usage and the model's context window. */
   describe(_model: string): ModelInfo {
@@ -174,7 +217,7 @@ export class CodexAdapter implements ProviderAdapter {
       // A stopped turn keeps its Codex thread: the next turn resumes it (the stopped request is in it).
       // A turn that failed leaves the record as it was.
       if (input.signal.aborted && host.context.nativeHistoryNow) service.commitInterrupted?.(input.threadId, host.context.nativeHistoryNow())
-      throw error
+      throw this.options.managed && !input.signal.aborted ? codexHarnessError(error, input.instanceId) : error
     }
     const totalResponseTimeMs = Date.now() - startedAt
     const usage = {

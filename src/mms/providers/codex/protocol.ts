@@ -133,6 +133,46 @@ export type TurnStatus = 'completed' | 'interrupted' | 'failed' | 'inProgress'
 export interface TurnError {
   message: string
   additionalDetails?: string | null
+  codexErrorInfo?: CodexErrorInfo | null
+}
+
+/**
+ * What kind of failure ended a turn, as the app-server names it: a bare kind (`usageLimitExceeded`,
+ * `unauthorized`, `serverOverloaded`, `badRequest`, …) or a one-key object whose value may carry the
+ * upstream HTTP status (`{ "responseStreamFailed": { "httpStatusCode": 503 } }`). Kinds are read
+ * leniently: an unknown one reads as itself and maps like any other unknown failure.
+ */
+export type CodexErrorKind =
+  | 'contextWindowExceeded'
+  | 'usageLimitExceeded'
+  | 'serverOverloaded'
+  | 'httpConnectionFailed'
+  | 'responseStreamConnectionFailed'
+  | 'responseStreamDisconnected'
+  | 'responseTooManyFailedAttempts'
+  | 'internalServerError'
+  | 'unauthorized'
+  | 'badRequest'
+  | 'threadRollbackFailed'
+  | 'sandboxError'
+  | 'other'
+export type CodexErrorInfo = CodexErrorKind | string | { [kind: string]: { httpStatusCode?: number | null } | null | undefined }
+
+/** The kind of a `codexErrorInfo` (a bare string, or the single key of an object variant). */
+export function codexErrorKind(info: unknown): string | undefined {
+  if (typeof info === 'string') return info || undefined
+  if (!info || typeof info !== 'object' || Array.isArray(info)) return undefined
+  const keys = Object.keys(info)
+  return keys.length === 1 ? keys[0] : undefined
+}
+
+/** The upstream HTTP status an object variant of `codexErrorInfo` carries, when it is a valid one. */
+export function codexHttpStatus(info: unknown): number | undefined {
+  if (!info || typeof info !== 'object' || Array.isArray(info)) return undefined
+  const kind = codexErrorKind(info)
+  const detail = kind ? (info as Record<string, unknown>)[kind] : undefined
+  const status = detail && typeof detail === 'object' ? (detail as { httpStatusCode?: unknown }).httpStatusCode : undefined
+  return typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined
 }
 export interface CodexTurn {
   id: string

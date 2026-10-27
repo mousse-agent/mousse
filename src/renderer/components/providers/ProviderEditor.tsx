@@ -4,11 +4,11 @@ import type { ModelPrefsPatch, ProviderOperationEvent } from '../../../shared/ha
 import { ChevronRight } from '../../lib/icons'
 import { ProviderIcon } from '../../lib/providerIcons'
 import { SettingsAdvanced, SettingsRow } from '../settings/SettingsRow'
-import { AccountRow, ArgsRow, BinaryRow, EnvRow, ExecutableRow, HomeRow, SetupRow, UpdateRow, type InstanceActions } from './CliSections'
+import { AccountRow, ArgsRow, BinaryRow, EnvRow, ExecutableRow, HomeRow, PlanUsageRow, SetupRow, UpdateRow, type InstanceActions } from './CliSections'
 import { ProviderModelsSection, modelsSummary } from './ProviderModelsSection'
 import { EditorSection, RemoveButton, useAsyncAction } from './parts'
 import { DownloadedFilesRow, RegistrySourceRow, RemoveWithFilesButton, type RemoveOptions } from './RegistryAgents'
-import { DRIVER_INFO, formatVersion, iconIdOf } from './providerView'
+import { DRIVER_INFO, formatVersion, iconIdOf, isManagedSetup } from './providerView'
 
 /**
  * Provider setup is per machine: only the on/off switch has a project override. In
@@ -123,6 +123,7 @@ export function AgentEditor({
   const info = DRIVER_INFO[snapshot.driver]
   const source = snapshot.config?.source?.kind === 'registry' ? snapshot.config.source : undefined
   const downloaded = snapshot.install.downloaded
+  const managed = isManagedSetup(snapshot)
   return (
     <>
       <EditorHeader
@@ -131,7 +132,9 @@ export function AgentEditor({
         removeHint={
           !onRemove
             ? undefined
-            : snapshot.config?.home === 'private'
+            : managed
+              ? 'Deletes this provider and its ChatGPT sign-in. The downloaded Codex stays unless you delete it too.'
+              : snapshot.config?.home === 'private'
               ? `Deletes this provider from Mousse. The sign-in Mousse kept for it stays${snapshot.config.homePath ? ` at ${snapshot.config.homePath}` : ''}; sign out first if you want it removed.`
               : info.bundled
                 ? 'Deletes this provider and the sign-in Mousse kept for it. Add it again any time.'
@@ -146,6 +149,7 @@ export function AgentEditor({
         <SetupRow snapshot={snapshot} status={status} operation={operation?.kind === 'update' ? undefined : operation} actions={actions} />
         {source && <RegistrySourceRow snapshot={snapshot} source={source} actions={actions} />}
         <AccountRow snapshot={snapshot} actions={actions} />
+        <PlanUsageRow snapshot={snapshot} />
       </EditorSection>
       <ModelsEditorSection snapshot={snapshot} onSave={onSaveModelPrefs} onRefresh={onRefreshModels} />
       <SettingsAdvanced>
@@ -156,13 +160,14 @@ export function AgentEditor({
             <>
               <UpdateRow snapshot={snapshot} operation={operation} actions={actions} />
               {downloaded && <DownloadedFilesRow snapshot={snapshot} bytes={downloaded.bytes} onRemoveInstall={actions.removeInstall} />}
-              <ExecutableRow snapshot={snapshot} label={info.label} onSave={(binaryPath) => actions.configure({ binaryPath })} />
-              <ArgsRow snapshot={snapshot} onSave={(args) => actions.configure({ args })} />
+              {/* A managed entry runs only the Codex Mousse downloaded, with Mousse's own settings. */}
+              {!managed && <ExecutableRow snapshot={snapshot} label={info.label} onSave={(binaryPath) => actions.configure({ binaryPath })} />}
+              {!managed && <ArgsRow snapshot={snapshot} onSave={(args) => actions.configure({ args })} />}
               <HomeRow snapshot={snapshot} />
             </>
           )}
         </EditorSection>
-        {!info.bundled && (
+        {!info.bundled && !managed && (
           <EditorSection title="Environment" description={deviceWideNote(snapshot)}>
             <EnvRow snapshot={snapshot} onSave={(env) => actions.configure({ env })} />
           </EditorSection>

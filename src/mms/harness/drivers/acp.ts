@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { methods } from '@agentclientprotocol/sdk'
-import type { HarnessCaps, HarnessDriverKind, RuntimeFacts } from '../../../shared/harness/types'
+import { RESERVED_AGENT_IDS, type HarnessCaps, type HarnessDriverKind, type RuntimeFacts } from '../../../shared/harness/types'
 import type { ProviderLoginResult } from '../../../shared/providerAuth'
 import type { LlmModelOption } from '../../../shared/settings'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
@@ -108,7 +108,8 @@ export function acpSourceOf(config: InstanceConfig): AcpSource | undefined {
 /** A stored registry source, or undefined when any of its values could not be a path segment. */
 export function decodeRegistrySource(source: Record<string, unknown>): RegistrySource | undefined {
   const { agentId, version, distribution, receiptHash, consent } = source
-  if (typeof agentId !== 'string' || !REGISTRY_AGENT_ID.test(agentId)) return undefined
+  // A reserved id (Mousse's own managed runtimes) is never a registry source.
+  if (typeof agentId !== 'string' || !REGISTRY_AGENT_ID.test(agentId) || RESERVED_AGENT_IDS.has(agentId)) return undefined
   if (typeof version !== 'string' || !REGISTRY_VERSION.test(version)) return undefined
   if (distribution !== 'binary' && distribution !== 'npx') return undefined
   const accepted = isRecord(consent) && typeof consent.version === 'string' && typeof consent.artifactUrl === 'string'

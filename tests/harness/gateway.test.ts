@@ -8,7 +8,7 @@ import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
 import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import type { HarnessGatewayEvent } from '../../src/mms/harness/gateway'
-import { decodeInstanceConfig, type HarnessDriver } from '../../src/mms/harness/driver'
+import { decodeInstanceConfig, type DriverRuntime, type HarnessDriver } from '../../src/mms/harness/driver'
 import { instanceStateDir } from '../../src/mms/harness/instances'
 import { LatestVersionCache } from '../../src/mms/harness/latest'
 import { observeHarnessSpawns } from '../../src/mms/harness/spawn'
@@ -565,3 +565,121 @@ async function waitFor(condition: () => boolean, timeoutMs = 2_000): Promise<voi
     await new Promise((resolve) => setTimeout(resolve, 5))
   }
 }
+
+describe('harness gateway: a driver whose home depends on its setup (managed Codex)', () => {
+  /** A Codex-like driver: `managed` must run in a private home, the user's own setup never does. */
+  const setupDriver = (runtime: Partial<DriverRuntime> = {}): HarnessDriver => {
+    const base = adapterDriver(fake('codex'), { runtime })
+    return {
+      ...base,
+      multiInstance: true,
+      privateHome: true,
+      privateHomeFor: (config) => (config.setup === 'managed' ? 'required' : 'forbidden'),
+      decodeConfig: (raw) => {
+        const managed = raw?.setup === 'managed'
+        const config = decodeInstanceConfig(raw, { privateHome: managed })
+        return managed ? { ...config, setup: 'managed', home: 'private' } : config
+      }
+    }
+  }
+  const empty = () => instances({})
+
+  it('a managed entry is added with a private home and never as the own setup; the own setup never gets one', async () => {
+    const harness = testHarness({ drivers: [adapterDriver(pi()), setupDriver()], instances: empty(), profileHome: home() })
+    const managed = await harness.instances.add({ driver: 'codex', config: { setup: 'managed', home: 'default' } })
+    expect(managed).toMatchObject({ builtIn: false, config: { home: 'private', setup: 'managed' } })
+    expect(managed.instanceId).not.toBe('codex')
+    // Only one entry runs on the user's own setup (the seeded `codex`); another managed one is fine.
+    await expect(harness.instances.add({ driver: 'codex', config: { setup: 'existing' } })).rejects.toMatchObject({ code: 'unsupported' })
+    expect(await harness.instances.add({ driver: 'codex', config: { setup: 'managed', displayName: 'Second' } })).toMatchObject({ config: { home: 'private' } })
+    // Removed and added back, the user's own Codex takes its usual id and their home, beside the managed ones.
+    await harness.instances.remove('codex')
+    const own = await harness.instances.add({ driver: 'codex', config: { setup: 'existing', home: 'private' } })
+    expect(own).toMatchObject({ instanceId: 'codex', builtIn: true, config: { home: 'default' } })
+  })
+
+  it('patching the home against the setup, or the setup itself, fails unsupported', async () => {
+    const harness = testHarness({ drivers: [adapterDriver(pi()), setupDriver()], instances: empty(), profileHome: home() })
+    const managed = await harness.instances.add({ driver: 'codex', config: { setup: 'managed' } })
+    await expect(harness.instances.configure(managed.instanceId, { home: 'default' })).rejects.toMatchObject({ code: 'unsupported' })
+    await expect(harness.instances.configure(managed.instanceId, { setup: 'existing' })).rejects.toMatchObject({ code: 'unsupported' })
+    // The built-in entry is the user's own setup; it never becomes a managed one.
+    await expect(harness.instances.configure('codex', { setup: 'managed' })).rejects.toMatchObject({ code: 'unsupported' })
+    expect((await harness.instances.configure('codex', { setup: 'existing', displayName: 'Mine' })).displayName).toBe('Mine')
+  })
+
+  it('a runtime pinned to the Mousse install refuses launch settings', async () => {
+    const harness = testHarness({ drivers: [adapterDriver(pi()), setupDriver({ pinned: () => ({ version: '0.162.1' }) })], instances: empty(), profileHome: home() })
+    const managed = await harness.instances.add({ driver: 'codex', config: { setup: 'managed' } })
+    for (const patch of [{ binaryPath: '/usr/bin/codex' }, { args: ['--x'] }, { env: { A: '1' } }])
+      await expect(harness.instances.configure(managed.instanceId, patch)).rejects.toMatchObject({ code: 'unsupported' })
+  })
+
+  it('an added existing-setup entry cannot be patched to a private home', async () => {
+    const source = instances({ 'codex:mine': { driver: 'codex', enabled: true, config: { setup: 'existing' } } })
+    const harness = testHarness({ drivers: [adapterDriver(pi()), setupDriver()], instances: source, profileHome: home() })
+    await expect(harness.instances.configure('codex:mine', { home: 'private' })).rejects.toMatchObject({ code: 'unsupported' })
+  })
+
+  it('binding fixes `default` to the first listed model; a reordered listing changes nothing already bound', async () => {
+    let listing = ['gpt-a', 'gpt-b']
+    const harness = testHarness({
+      drivers: [adapterDriver(pi()), setupDriver({ models: () => listing.map((id) => ({ id, label: id })), concreteModel: (model) => (model === 'default' ? listing[0] : model) })],
+      instances: empty(),
+      profileHome: home()
+    })
+    const { instanceId } = await harness.instances.add({ driver: 'codex', config: { setup: 'managed' } })
+    const resolved = harness.resolveStored({ instanceId, llmProvider: '', model: 'default' }, { purpose: 'turn' })
+    const bound = await harness.bind(resolved, { mode: 'agent' })
+    expect(bound.model).toBe('gpt-a')
+    listing = ['gpt-b', 'gpt-a']
+    expect(harness.selectionOf(bound).model).toBe('gpt-a')
+    expect((await harness.bind(resolved, { mode: 'agent' })).model).toBe('gpt-b')
+    listing = []
+    await expect(harness.bind(resolved, { mode: 'agent' })).rejects.toMatchObject({ code: 'model_unavailable' })
+    expect((await harness.bind(harness.resolveStored({ instanceId, llmProvider: '', model: 'gpt-x' }, { purpose: 'turn' }), { mode: 'agent' })).model).toBe('gpt-x')
+  })
+
+  it('removal awaits the credential deletion before the folder goes, and keeps the entry when it fails', async () => {
+    const profileHome = home()
+    let fail = true
+    let instanceId = ''
+    const order: string[] = []
+    const harness = testHarness({
+      drivers: [adapterDriver(pi()), setupDriver({
+        deleteCredentials: async () => {
+          order.push(`delete:${existsSync(join(instanceStateDir(profileHome, instanceId), 'chatgpt.db'))}`)
+          await new Promise((resolve) => setTimeout(resolve, 20))
+          if (fail) throw new Error('The chats could not be stopped.')
+          order.push('deleted')
+        }
+      })],
+      instances: empty(),
+      profileHome
+    })
+    instanceId = (await harness.instances.add({ driver: 'codex', config: { setup: 'managed' } })).instanceId
+    writeFileSync(join(instanceStateDir(profileHome, instanceId), 'chatgpt.db'), '')
+    await expect(harness.instances.remove(instanceId)).rejects.toMatchObject({ code: 'operation_busy' })
+    expect(Object.keys(harness.instanceMap.list())).toContain(instanceId)
+    expect(existsSync(join(instanceStateDir(profileHome, instanceId), 'chatgpt.db'))).toBe(true)
+    fail = false
+    await harness.instances.remove(instanceId)
+    expect(order).toEqual(['delete:true', 'delete:true', 'deleted'])
+    await waitFor(() => !existsSync(instanceStateDir(profileHome, instanceId)))
+  })
+
+  it('a sign-in that succeeded with a warning reports it on completion', async () => {
+    const harness = testHarness({
+      drivers: [adapterDriver(pi()), setupDriver({ signIn: async () => ({ success: true, warning: 'Your previous sign-in is still waiting to be revoked.' }) })],
+      instances: empty(),
+      profileHome: home()
+    })
+    const { instanceId } = await harness.instances.add({ driver: 'codex', config: { setup: 'managed' } })
+    const events: HarnessGatewayEvent[] = []
+    harness.instances.subscribe((event) => events.push(event))
+    await harness.instances.signIn(instanceId)
+    await waitFor(() => events.some((event) => event.type === 'operation' && event.data.phase === 'completed'))
+    const completed = events.find((event) => event.type === 'operation' && event.data.phase === 'completed')
+    expect(completed?.type === 'operation' ? completed.data : undefined).toMatchObject({ phase: 'completed', warning: 'Your previous sign-in is still waiting to be revoked.' })
+  })
+})

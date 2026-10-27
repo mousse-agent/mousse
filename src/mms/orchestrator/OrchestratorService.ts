@@ -5805,8 +5805,9 @@ export class OrchestratorService extends EventEmitter {
         attemptId: (engineRunId ? this.runEngine?.getRun(engineRunId)?.activeAttemptId : undefined) ?? turnId,
         threadId: session.threadId,
         cwd: session.projectCwd ?? null,
-        // The resolved model: a moved entry's model may run as the agent's own.
-        model: instance.model,
+        // The bound model: a moved entry's model may run as the agent's own, and a runtime that
+        // resolves `default` itself fixed it when the turn was bound (retries and recovery keep it).
+        model: binding.model,
         instanceId: instance.instanceId,
         llmProvider: instance.llmProvider,
         modelPinned: Boolean(modelOverride),
