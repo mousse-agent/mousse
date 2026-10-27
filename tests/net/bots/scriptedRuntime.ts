@@ -66,10 +66,20 @@ export class ScriptedBotRuntime implements BotRuntimeAdapter {
     this.signals.push(request.signal)
     if (!this.supports(request.profile)) throw new NetError('profile_unsupported')
     if (request.signal.aborted) throw new NetError('cancelled')
+    // The reported spend is exactly what this run settled, whoever settled it.
+    let spent = 0
+    const spend: BotSpendPort = {
+      authorizeCall: (maximumUnits) => request.spend.authorizeCall(maximumUnits),
+      settleCall: async (id, spentUnits) => {
+        await request.spend.settleCall(id, spentUnits)
+        spent += spentUnits
+      },
+      remainingUnits: () => request.spend.remainingUnits()
+    }
     const units = this.options.units ?? 10,
       call = this.options.spendInScript
         ? { id: 'script-owned' }
-        : await request.spend.authorizeCall(this.options.maximumUnits ?? 60)
+        : await spend.authorizeCall(this.options.maximumUnits ?? 60)
     // A real provider answers after some latency, never within the same tick; concurrent
     // mentions rely on that gap for their outbox flushes to interleave as in production.
     if (!this.options.paused) await new Promise<void>((resolve) => setTimeout(resolve, 10))
@@ -86,7 +96,7 @@ export class ScriptedBotRuntime implements BotRuntimeAdapter {
         })
         if (this.options.stubborn) {
           // A runtime that cannot stop reports unproven quiescence; its late usage still settles.
-          late = held.then(() => request.spend.settleCall(call.id, units))
+          late = held.then(() => spend.settleCall(call.id, units))
           late.catch(() => undefined)
           await Promise.race([
             held,
@@ -111,12 +121,12 @@ export class ScriptedBotRuntime implements BotRuntimeAdapter {
         } else await held
       }
       const text = this.options.script
-        ? await this.options.script({ request, events, spend: request.spend })
+        ? await this.options.script({ request, events, spend })
         : (this.options.answer ?? 'Scripted answer')
       // Known terminal spend is settled even when the run was cancelled meanwhile.
-      if (!this.options.spendInScript) await (late ?? request.spend.settleCall(call.id, units))
+      if (!this.options.spendInScript) await (late ?? spend.settleCall(call.id, units))
       if (request.signal.aborted) throw new NetError('cancelled')
-      return { text, spentUnits: units }
+      return { text, spentUnits: spent }
     } catch (error) {
       const failure = error instanceof NetError ? error : new NetError('outcome_uncertain')
       if (failure.details && typeof failure.details === 'object' && 'quiesced' in failure.details)
@@ -160,7 +170,7 @@ export function readerScript(options: ReaderScriptOptions) {
   const actions: readonly ReaderAction[] = options.actions ?? [
     { name: 'safe_read', arguments: { path: options.path ?? '' } }
   ]
-  return async ({ request, events }: ScriptedRunContext): Promise<string> => {
+  return async ({ request, events, spend }: ScriptedRunContext): Promise<string> => {
     const abort = new AbortController(),
       signal = AbortSignal.any([request.signal, abort.signal]),
       current = () => {
@@ -170,10 +180,10 @@ export function readerScript(options: ReaderScriptOptions) {
       modelStep = async (step: { tools?: string[]; toolResults?: unknown[] }) => {
         current()
         const call = options.spend
-          ? await request.spend.authorizeCall(options.spend.maximumUnits)
+          ? await spend.authorizeCall(options.spend.maximumUnits)
           : undefined
         options.record(step)
-        if (call) await request.spend.settleCall(call.id, options.spend!.units)
+        if (call) await spend.settleCall(call.id, options.spend!.units)
       },
       tools = readerToolDefinitions(options.definition.readerTools).map((t) => t.name)
     await modelStep({ tools })
