@@ -120,6 +120,13 @@ it('stages an image and sends it with the message, which the target stores with 
       chunk(f.targetNode, 'upload-image-0001')
     )
   ).toMatchObject({ ok: true, received: 1, total: 1 })
+  // The journal keeps a finished slice's hash, not its image data.
+  const staged = f
+    .callerDb()
+    .database.prepare("SELECT record FROM net_bridge_hub_requests WHERE method='attachments.stage'")
+    .all() as Array<{ record: string }>
+  expect(staged).toHaveLength(1)
+  expect(JSON.parse(staged[0].record).params.data).toBe('')
   await executeBridgeHubLocal(f.hub(), 'bridge.hub.send', {
     ref,
     content: 'What is in this picture?',

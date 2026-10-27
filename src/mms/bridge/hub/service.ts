@@ -90,6 +90,14 @@ const fail = (code: NetErrorCode): never => {
 const same = (a: unknown, b: unknown): boolean => json(a) === json(b)
 const hash = (value: unknown): string =>
   createHash('sha256').update(canonicalJson(value)).digest('hex')
+/**
+ * An image slice is up to 48 KiB of base64 and the journal is never pruned, so a finished
+ * `attachments.stage` keeps only its hash (retries are matched on `hash`, not on params).
+ */
+function dropStagedData(request: { method: string; params: unknown }): void {
+  if (request.method === 'attachments.stage' && request.params && typeof request.params === 'object')
+    request.params = { ...(request.params as object), data: '' } as typeof request.params
+}
 /** Trusted local caller journal. A sent mutation is never resubmitted by recovery. */
 export class BridgeHub {
   private readonly clock: Clock
@@ -471,6 +479,7 @@ export class BridgeHub {
       this.options.db.transaction(() => {
         request.state = 'completed'
         request.wireResult = value
+        dropStagedData(request)
         delete request.error
         request.updatedAt = this.clock.now()
         this.save(request)
@@ -489,6 +498,7 @@ export class BridgeHub {
         this.options.db.transaction(() => {
           request.state = 'failed'
           request.error = error.code
+          dropStagedData(request)
           request.updatedAt = this.clock.now()
           this.save(request)
         })
