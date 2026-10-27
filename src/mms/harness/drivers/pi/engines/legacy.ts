@@ -83,7 +83,10 @@ export function piInstanceRuntime(instanceId: string, providerId: string, creden
         return { ...(await auth.verifyAmbientProvider(providerId)), sessionId: session.sessionId }
       }
       if (!auth?.runOAuthLogin || !auth.runApiKeyLogin) return { success: false, error: 'Sign-in is not available' }
-      return method === 'api_key' ? auth.runApiKeyLogin(session, providerId) : auth.runOAuthLogin(session, providerId)
+      const result = await (method === 'api_key' ? auth.runApiKeyLogin(session, providerId) : auth.runOAuthLogin(session, providerId))
+      // A new sign-in may unlock models listed only for it (as the old sign-in methods refreshed them).
+      if (result.success) await auth.refreshDynamicModels?.().catch(() => undefined)
+      return result
     },
     signOut: async () => void (await credentials()?.logout?.(providerId)),
     // The key is installation-scoped, as the old Add dialog saved it: every profile with this entry uses it.

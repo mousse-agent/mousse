@@ -219,17 +219,6 @@ describe('ProviderInstanceService', () => {
     expect(instances.migrate({ llmProvider: 'whatever', model: 'x' })).toEqual({ llmProvider: 'whatever', model: 'x' })
     expect(instances.migrate(undefined)).toBeUndefined()
   })
-
-  it('lists configured providers from one instance map, with instance ids (transitional, until 5a-2)', () => {
-    const { instances } = service({ 'pi:openrouter': { driver: 'pi', enabled: false }, antigravity: { driver: 'antigravity', enabled: false } }, ['openai', 'openrouter'])
-    instances
-      .registerVendor('claude', { configuredProvider: () => ({ id: 'claude-subscription', label: 'Claude', authType: 'oauth' }), llmProvider: () => ({ id: 'claude-subscription', label: 'Claude', models: [] }) })
-      .registerVendor('antigravity', { configuredProvider: () => ({ id: 'antigravity', label: 'Antigravity', authType: 'oauth' }), llmProvider: () => undefined })
-    expect(instances.configuredProviders().map((provider) => [provider.id, provider.instanceId])).toEqual([
-      ['openai', 'pi:openai'],
-      ['claude-subscription', 'claude']
-    ])
-  })
 })
 
 describe('removed instances (tombstones)', () => {
@@ -269,7 +258,6 @@ describe('removed instances (tombstones)', () => {
     expect(codeOf(() => instances.resolve('pi:openrouter'))).toBe('provider_instance_unknown')
     expect(codeOf(() => instances.overrideFor({ instanceId: 'pi:openrouter', model: 'm' }))).toBe('provider_instance_unknown')
     expect(instances.migrate({ instanceId: 'pi:openrouter', llmProvider: 'openrouter', model: 'm' })).toEqual({ instanceId: 'pi:openrouter', llmProvider: 'openrouter', model: 'm' })
-    expect(instances.configuredProviders().map((provider) => provider.instanceId)).not.toContain('pi:openrouter')
     expect(store.writes).toBe(0)
     expect((store.value as Record<string, unknown>)['pi:openrouter']).toBe(stale)
   })

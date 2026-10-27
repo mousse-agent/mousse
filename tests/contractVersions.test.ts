@@ -6,7 +6,7 @@ describe('contract versions', () => {
   // Update this list in the same PR and call the bump out in its description (docs/releases.md).
   it('lists every contract at its current version', () => {
     expect(CONTRACT_VERSIONS).toEqual({
-      daemonProtocol: 1,
+      daemonProtocol: 2,
       daemonOwnerLease: 1,
       netProtocol: '1.0',
       netEnvelope: 1,

@@ -16,7 +16,7 @@ import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { GuiMmsController } from '../src/main/mms/GuiMmsController'
 import { PresentationState } from '../src/main/mms/PresentationState'
 import { bridgeProtocolEvent, broadcastThreadSnapshot } from '../src/main/mms/protocolEventBridge'
-import type { ProtocolEvent } from '../src/mms/protocol/types'
+import { MMS_PROTOCOL_VERSION, type ProtocolEvent } from '../src/mms/protocol/types'
 import { bootstrapPresentation } from '../src/main/ipc/registerGuiIpc'
 
 describe('GuiMmsController lifecycle', () => {
@@ -123,12 +123,12 @@ describe('GuiMmsController lifecycle', () => {
         let frame: unknown
         while ((frame = decoder.shift()) !== null) {
           const request = frame as { kind: string; id?: string; method?: string }
-          if (request.kind === 'hello') socket.write(encodeFrame({ kind: 'hello_ok', protocolVersion: 1, serverVersion: '0.1.1', instanceId: 'legacy-daemon', capabilities: [], globalSequence: 0 }))
+          if (request.kind === 'hello') socket.write(encodeFrame({ kind: 'hello_ok', protocolVersion: MMS_PROTOCOL_VERSION, serverVersion: '0.1.1', instanceId: 'legacy-daemon', capabilities: [], globalSequence: 0 }))
           else if (request.kind === 'req') {
             requests.push(request.method!)
             socket.write(encodeFrame(mode === 'failed'
               ? { kind: 'res', id: request.id, ok: false, error: { code: 'method_not_allowed', message: 'Old service' } }
-              : { kind: 'res', id: request.id, ok: true, result: { protocolVersion: 1, methods: mode === 'malformed' ? 'invalid' : ['health', 'capabilities'], capabilities: [] } }))
+              : { kind: 'res', id: request.id, ok: true, result: { protocolVersion: MMS_PROTOCOL_VERSION, methods: mode === 'malformed' ? 'invalid' : ['health', 'capabilities'], capabilities: [] } }))
           }
         }
       })

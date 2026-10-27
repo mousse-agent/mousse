@@ -181,8 +181,11 @@ export class AgentResolver {
     const primaryProfile = this.lookupModel(settings.primaryModel.ref, '/settings/primaryModel/ref', modelLookup, issues)
     const fallbacks: AgentModelCapabilityProfile[] = []
     if (settings.fallbacks.enabled) {
+      // A fallback that cannot be reached now (signed out, turned off, refused for definitions) is
+      // reported without blocking, and left out: the run skips it, and the primary runs as before.
       settings.fallbacks.models.forEach((ref, index) => {
-        fallbacks.push(this.lookupModel(ref, `/settings/fallbacks/models/${index}`, modelLookup, issues))
+        const profile = this.lookupModel(ref, `/settings/fallbacks/models/${index}`, modelLookup, issues, true)
+        if (profile.available) fallbacks.push(profile)
       })
     }
     const capabilityOverrides: Partial<Record<AgentCapabilityKind, AgentModelCapabilityProfile>> = {}
@@ -193,8 +196,11 @@ export class AgentResolver {
         ref,
         `/settings/primaryModel/capabilityOverrides/${capability}`,
         modelLookup,
-        issues
+        issues,
+        true
       )
+      // Likewise an override model that cannot be reached: reported, not used, never blocking.
+      if (!profile.available) continue
       if (!profile.capabilities.includes(capability)) {
         issues.push({
           code: 'MODEL_CAPABILITY_MISSING',
@@ -242,7 +248,8 @@ export class AgentResolver {
     dependencyHashes = liveHashes
 
     const blocking = issues.filter(
-      (issue) => issue.code === 'MODEL_CAPABILITY_MISSING' || issue.code === 'DEPENDENCY_MISSING' || issue.code === 'SETTINGS_UNSUPPORTED'
+      (issue) => issue.details?.blocking !== false &&
+        (issue.code === 'MODEL_CAPABILITY_MISSING' || issue.code === 'DEPENDENCY_MISSING' || issue.code === 'SETTINGS_UNSUPPORTED')
     )
     if (blocking.length > 0) {
       const first = blocking[0]
@@ -287,8 +294,13 @@ export class AgentResolver {
     ref: AgentModelRef,
     pointer: string,
     lookup: AgentModelLookup,
-    issues: AgentDefinitionIssue[]
+    issues: AgentDefinitionIssue[],
+    /** A fallback or override model: when it cannot be reached, its issue does not block. */
+    optional = false
   ): AgentModelCapabilityProfile {
+    // The issues of a model that cannot be reached; an optional one is skipped, not blocking.
+    const unreachable = (issue: AgentDefinitionIssue): AgentDefinitionIssue =>
+      optional ? { ...issue, details: { ...issue.details, blocking: false } } : issue
     if (!ref.providerId || !ref.modelId) {
       const missing: AgentModelCapabilityProfile = {
         ref,
@@ -299,13 +311,13 @@ export class AgentResolver {
         capabilities: [],
         unavailableReasons: ['Model reference is incomplete.']
       }
-      issues.push({
+      issues.push(unreachable({
         code: 'MODEL_CAPABILITY_MISSING',
-        message: 'Primary model is not configured.',
+        message: optional ? `Model reference at ${pointer} is incomplete.` : 'Primary model is not configured.',
         pointer,
         retryable: false,
         details: { ref }
-      })
+      }))
       return missing
     }
     const profile = lookup.resolve(ref)
@@ -319,16 +331,16 @@ export class AgentResolver {
         capabilities: [],
         unavailableReasons: ['Model is not present in the injected catalog.']
       }
-      issues.push({
+      issues.push(unreachable({
         code: 'MODEL_CAPABILITY_MISSING',
         message: `Model ${formatModelRef(ref)} is not present in the injected catalog.`,
         pointer,
         retryable: false,
         details: { ref }
-      })
+      }))
       return missing
     }
-    issues.push(...validateCapability(ref, profile, pointer))
+    issues.push(...validateCapability(ref, profile, pointer).map((issue) => (profile.available ? issue : unreachable(issue))))
     return profile
   }
 }

@@ -1,5 +1,4 @@
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all'
-import type { ConfiguredProvider } from '../../shared/providerAuth'
 import {
   instanceIdForLegacyProvider,
   legacyProviderForInstance,
@@ -10,11 +9,9 @@ import {
   readProviderInstances,
   seedProviderInstances,
   type ModelOverride,
-  type ProviderDriverKind,
   type ProviderInstanceConfig,
   type ProviderInstanceMap
 } from '../../shared/providerInstances'
-import type { LlmProviderOption } from '../../shared/settings'
 import { mirrorHash, tupleConfig, MIRROR_MARKER_KEY, type VendorMirror } from '../harness/vendorMirror'
 import { piRetiredOf } from '../harness/drivers/pi/retired'
 import type { ProviderAuthService } from './ProviderAuthService'
@@ -59,12 +56,6 @@ export function configInstanceStore(config: {
   }
 }
 
-/** What the provider RPCs list for a vendor driver, from that driver's provider service. */
-export interface VendorProviderListing {
-  configuredProvider(): ConfiguredProvider | undefined
-  llmProvider(): LlmProviderOption | undefined
-}
-
 export interface ResolvedProviderInstance {
   instanceId: string
   entry: ProviderInstanceConfig
@@ -72,7 +63,7 @@ export interface ResolvedProviderInstance {
   llmProvider: string
 }
 
-type PiCatalog = Partial<Pick<ProviderAuthService, 'getConfiguredProviders' | 'getConfiguredLlmProviders' | 'has'>> & {
+type PiCatalog = Partial<Pick<ProviderAuthService, 'has'>> & {
   credentials?: { listProviderIds(): string[] }
   models?: { getProviders(): ReadonlyArray<{ id: string }> }
 }
@@ -107,9 +98,6 @@ function builtinPiProviders(): ReadonlySet<string> {
 export class ProviderInstanceService {
   /** Last state read from (or written to) the store; the working copy after a failed read. */
   private memory: StoredProviderInstances = {}
-  private readonly vendors = new Map<ProviderDriverKind, VendorProviderListing>()
-  /** Per-instance listings (the harness gateway); replaces the one-listing-per-driver map. */
-  private instanceListing?: (instanceId: string, entry: ProviderInstanceConfig) => VendorProviderListing | undefined
   private writeFailed = false
   private readError?: string
 
@@ -122,21 +110,6 @@ export class ProviderInstanceService {
      */
     mirrorFor?: (instanceId: string) => VendorMirror | undefined
   } = {}) {}
-
-  /** Lists a vendor driver's provider in `configuredProviders()`. Transitional: deleted in 5a-2 with the old provider methods. */
-  registerVendor(driver: Exclude<ProviderDriverKind, 'pi'>, listing: VendorProviderListing): this {
-    this.vendors.set(driver, listing)
-    return this
-  }
-
-  /**
-   * Lists every enabled vendor instance from its own runtime in `configuredProviders()` (several
-   * instances of one driver each get an entry). Transitional: deleted in 5a-2.
-   */
-  setListings(listing: (instanceId: string, entry: ProviderInstanceConfig) => VendorProviderListing | undefined): this {
-    this.instanceListing = listing
-    return this
-  }
 
   /**
    * The effective instance map. Seeds the profile's stored map with any instance it lacks and
@@ -283,47 +256,6 @@ export class ProviderInstanceService {
     } catch {
       return override
     }
-  }
-
-  /**
-   * Signed-in providers for Settings: credentialed pi-ai providers, then each enabled vendor
-   * instance; removed ones are left out. The model pickers list through `HarnessGateway.llmProviders`.
-   * Transitional: deleted in 5a-2 with the old provider methods.
-   */
-  configuredProviders(): ConfiguredProvider[] {
-    const instances = this.list()
-    const pi = (this.options.providerAuth?.getConfiguredProviders?.() ?? [])
-      .map((provider) => ({ ...provider, instanceId: piInstanceId(provider.id) }))
-      .filter((provider) => instances[provider.instanceId]?.enabled !== false && !this.isRemoved(provider.instanceId))
-    return [...pi, ...this.vendorEntries(instances, (listing) => listing.configuredProvider())]
-  }
-
-  /** One entry per vendor driver (v1 has one instance per driver), from its first enabled instance. */
-  private vendorEntries<T extends { id: string }>(
-    instances: ProviderInstanceMap,
-    pick: (listing: VendorProviderListing) => T | undefined
-  ): Array<T & { instanceId: string }> {
-    const entries: Array<T & { instanceId: string }> = []
-    const perInstance = this.instanceListing
-    if (perInstance) {
-      for (const [instanceId, entry] of Object.entries(instances)) {
-        if (entry.driver === 'pi' || !entry.enabled) continue
-        const listing = perInstance(instanceId, entry)
-        const value = listing ? pick(listing) : undefined
-        if (value) entries.push({ ...value, instanceId })
-      }
-      return entries
-    }
-    const listed = new Set<ProviderDriverKind>()
-    for (const [instanceId, entry] of Object.entries(instances)) {
-      if (entry.driver === 'pi' || !entry.enabled || listed.has(entry.driver)) continue
-      const listing = this.vendors.get(entry.driver)
-      if (!listing) continue
-      listed.add(entry.driver)
-      const value = pick(listing)
-      if (value) entries.push({ ...value, instanceId })
-    }
-    return entries
   }
 
   /**

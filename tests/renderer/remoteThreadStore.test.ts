@@ -306,6 +306,10 @@ describe('send, steer, stop', () => {
     expect(calls.find((call) => call.method === 'bridge.hub.send')!.params.options.deadlineMs).toBe(24 * 60 * 60_000)
     // The turn may well be running; the display says so, and no error is claimed.
     expect(entry()).toMatchObject({ notice: '', sending: false })
+    // The same when the local daemon connection stops waiting for the answer.
+    responses['bridge.hub.send'] = () => { throw new Error('Request timeout: bridge.hub.send') }
+    await submitRemoteMessage(key, { content: 'Another long task' })
+    expect(entry()).toMatchObject({ notice: '', sending: false })
   })
 
   it('tells the user when a running turn is not theirs to steer', async () => {

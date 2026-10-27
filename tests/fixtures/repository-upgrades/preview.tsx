@@ -103,7 +103,7 @@ Object.assign(window.mousse, {
   platformRequest: { request: async () => { throw new Error('The fixture has no network') } },
   settings: { get: async () => getDefaultSettings(), getOptions: async () => ({ llmProviders: [] }), onChanged: unsubscribe },
   skills: { list: async () => ({ skills: [] }), onChanged: unsubscribe },
-  providers: { onChanged: unsubscribe },
+  providers: { onSnapshots: unsubscribe, onOperation: unsubscribe, snapshots: async () => [] },
   queue: { list: async () => [], onUpdated: unsubscribe },
   actions: { list: async () => ({ actions: [], receipts: [], journalGeneration: 0 }) },
   orchestrator: {

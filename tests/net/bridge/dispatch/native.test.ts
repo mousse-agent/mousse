@@ -62,6 +62,8 @@ it('runs a pinned published agent through the actual MMS native provider/tool li
         .find((entry) => services.providerAuth.models.getModels(entry.id).length > 0)!,
       model = services.providerAuth.models.getModels(provider.id)[0]
     vi.spyOn(services.providerAuth, 'has').mockReturnValue(true)
+    // Its stored sign-in: the gateway catalogue lists the models of signed-in instances.
+    vi.spyOn(services.providerAuth.credentials, 'listProviderIds').mockReturnValue([provider.id])
     vi.spyOn(services.providerAuth.models, 'getAuth').mockResolvedValue({
       apiKey: 'fixture'
     } as never)

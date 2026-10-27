@@ -3,6 +3,7 @@ import type { CounterScope } from '../../../shared/harness/counters'
 import type { SpendScope } from '../../../shared/harness/spend'
 import type { NeutralTool } from '../../../shared/harness/tools'
 import { assertInsideRoots } from '../../agents/WorkspaceAccessPolicy'
+import { touchesGitMetadata } from '../../agents/gitMetadata'
 import type { BotPermissions } from '../grants/compile'
 
 /**
@@ -89,6 +90,8 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     for (const raw of paths) {
       // A path the runtime itself expands is read only after this check: never inside a root.
       if (runtimeExpandedPath(raw)) return { ok: false, wall: { kind: 'path', tool: nativeName, path: raw, access } }
+      // Git metadata is never a file tool's to change, in the scratch folder or a root (`agents/gitMetadata`).
+      if (writes && touchesGitMetadata(raw, scratch)) return { ok: false, wall: { kind: 'path', tool: nativeName, path: raw, access } }
       try {
         assertInsideRoots([scratch], raw, scratch)
         continue

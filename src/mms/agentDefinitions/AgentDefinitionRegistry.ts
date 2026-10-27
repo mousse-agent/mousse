@@ -35,7 +35,6 @@ import {
   toManifest
 } from '../../shared/agents/schema'
 import { assertBundleSize, assertSafeBundlePath } from '../../shared/agents/pathSafety'
-import { collectUnsupportedCliSettings } from '../../shared/agents/compatibility'
 import { grantDependencyHashes, resolveEffectiveGrants } from '../../shared/agents/grants'
 import type { AgentIntegrationLookup } from '../../shared/agents/types'
 import { resolveWithinProfileRoot } from './pathSafety'
@@ -99,7 +98,6 @@ export class AgentDefinitionRegistry {
       : defaultRuntimeKind()
     const settings = mergeSettings(defaultAgentSettings(input.settings.identity), input.settings)
     this.assertUniqueSlug(settings.identity.slug)
-    this.assertCliSettings(runtimeKind, settings)
     const systemPrompt = assertSystemPrompt(input.systemPrompt ?? '')
     const visual = parseVisualMetadata(input.visual)
     const flags: AgentLibraryFlags = {
@@ -177,7 +175,6 @@ export class AgentDefinitionRegistry {
     if (settings.identity.slug !== current.settings.identity.slug) {
       this.assertUniqueSlug(settings.identity.slug, id)
     }
-    this.assertCliSettings(runtimeKind, settings)
     const systemPrompt = assertSystemPrompt(input.systemPrompt ?? current.systemPrompt)
     const visual = input.visual !== undefined ? parseVisualMetadata(input.visual) : current.visual
     const flags: AgentLibraryFlags = {
@@ -222,7 +219,6 @@ export class AgentDefinitionRegistry {
         }
       )
     }
-    this.assertCliSettings(current.runtimeKind, current.settings)
     const dependencyHashes = options.dependencyHashes
       ? { ...options.dependencyHashes }
       : options.integrationLookup
@@ -416,16 +412,6 @@ export class AgentDefinitionRegistry {
       systemPrompt,
       visual
     })
-  }
-
-  private assertCliSettings(runtimeKind: AgentRuntimeKind, settings: AgentDefinitionRecord['settings']): void {
-    const unsupported = collectUnsupportedCliSettings(runtimeKind, settings)
-    if (unsupported.length === 0) return
-    throw new AgentDefinitionError(
-      'SETTINGS_UNSUPPORTED',
-      `Runtime ${runtimeKind} does not support ${unsupported.join(', ')}.`,
-      { details: { runtimeKind, pointers: unsupported } }
-    )
   }
 
   private assertUniqueSlug(slug: string, exceptId?: string): void {

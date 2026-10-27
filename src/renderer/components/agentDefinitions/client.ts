@@ -60,6 +60,8 @@ export interface AgentValidateRequest {
   profileId: string
   id?: string
   expectedDraftHash?: string
+  /** Only where the saved draft would run (`gateway.check()`); starts no integration. */
+  runtimeOnly?: boolean
 }
 
 export interface AgentValidateResult {
@@ -133,4 +135,12 @@ export const AGENT_RUNTIME_LABELS: Record<AgentRuntimeKind, string> = {
   codex: 'Codex',
   opencode: 'OpenCode',
   'cursor-agents-cli': 'Cursor Agents CLI'
+}
+
+/**
+ * The read-only chip of a definition saved for an older CLI kind ("Saved for Codex"); null for
+ * Mousse's. Every kind runs on its model's provider; saving it again saves it for Mousse.
+ */
+export function savedForLabel(runtimeKind: AgentRuntimeKind): string | null {
+  return runtimeKind === 'mousse' ? null : `Saved for ${AGENT_RUNTIME_LABELS[runtimeKind]}`
 }

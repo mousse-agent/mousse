@@ -1,5 +1,6 @@
 import { harnessAppError, type AddOptionMethod } from '../../../../shared/harness/types'
 import { piInstanceId, piProviderIdOf } from '../../../../shared/providerInstances'
+import { foldedInto } from '../../../../shared/harness/move'
 import { PiLoopAdapter, type PiChatClient } from '../../../run/adapters/pi/PiLoopAdapter'
 import { decodeInstanceConfig, type DriverAddOption, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig } from '../../driver'
 import { PI_LEGACY_CAPS, piInstanceRuntime, type PiCredentials } from './engines/legacy'
@@ -58,7 +59,8 @@ function piAddOptions(credentials: PiCredentials | undefined): DriverAddOption[]
         methods: [],
         ...(ambient ? { ambientInfo: { label: ambient.label, instructions: [...ambient.instructions] } } : {}),
         config: { provider: option.id },
-        hasSavedKey
+        hasSavedKey,
+        ...(foldedInto(option.id) ? { runsAs: foldedInto(option.id) } : {})
       }
       byId.set(option.id, entry)
     }
@@ -116,6 +118,12 @@ export function piDriver(options: { client: () => PiChatClient; credentials?: ()
     },
     // Removing a model API deletes its saved key, as Remove always did.
     removeSignsOut: true,
+    verifyAmbient: async (patch) => {
+      const providerId = patch.provider?.trim()
+      const auth = credentials()
+      if (!providerId || !auth?.verifyAmbientProvider) return { success: false, error: 'Mousse has no provider credentials loaded yet.' }
+      return auth.verifyAmbientProvider(providerId)
+    },
     addOptions: () => piAddOptions(credentials()),
     privateHome: false,
     // Pi's agent dir is the instance's state-dir home. The legacy loop reads no home, so its

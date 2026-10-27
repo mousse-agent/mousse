@@ -44,7 +44,8 @@ Global options:
   --json                     JSON output (workflow progress uses one event per line)
   --provider <id>             Override orchestrator LLM provider
   --model <id>                Override orchestrator model
-  --api-key <key>             API key for this run (not stored in mousse.conf)
+  --api-key <key>             With --provider: replace the saved key of that added model provider
+                              (shared by every profile on this device). Add one with config providers
   -c, --continue              Continue the most recent thread session
   --session <id>              Use a specific thread/session id
   --home <dir>                MOUSSE_HOME directory (default: ~/.mousse)

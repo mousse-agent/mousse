@@ -438,7 +438,7 @@ async function findRun(entry: RemoteThreadEntry): Promise<RpcId | undefined> {
 }
 
 /** A wait that ran out says nothing about the turn: the display shows whether it is still running. */
-const isWaitTimeout = (cause: unknown): boolean => /deadline_exceeded|outcome_uncertain/.test(messageOf(cause))
+const isWaitTimeout = (cause: unknown): boolean => /deadline_exceeded|outcome_uncertain|Request timeout/.test(messageOf(cause))
 
 export interface RemoteSubmit {
   content: string

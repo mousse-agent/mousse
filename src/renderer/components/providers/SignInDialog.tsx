@@ -123,12 +123,14 @@ export function SignInDialog({ operationId, name, onClose }: { operationId: stri
                   </button>
                 ) : (
                   <>
-                    <p className="provider-login-hint">
-                      After signing in, copy the full address from the browser&apos;s address bar and paste it here. The page may say it
-                      can&apos;t be reached, which is expected.
-                    </p>
+                    {!prompt.pasteMessage && (
+                      <p className="provider-login-hint">
+                        After signing in, copy the full address from the browser&apos;s address bar and paste it here. The page may say it
+                        can&apos;t be reached, which is expected.
+                      </p>
+                    )}
                     <label className="provider-login-label" htmlFor="provider-signin-redirect">
-                      Paste the address your browser ended on
+                      {prompt.pasteMessage ?? 'Paste the address your browser ended on'}
                     </label>
                     <input
                       id="provider-signin-redirect"
@@ -136,7 +138,7 @@ export function SignInDialog({ operationId, name, onClose }: { operationId: stri
                       type="text"
                       value={value}
                       autoFocus
-                      placeholder="http://localhost:…"
+                      placeholder={prompt.pasteMessage ? 'Code or address' : 'http://localhost:…'}
                       onChange={(change) => setValue(change.target.value)}
                       onKeyDown={(key) => {
                         if (key.key === 'Enter' && value.trim()) respond({ promptId: prompt.promptId, kind: 'redirect_url', value: value.trim() })

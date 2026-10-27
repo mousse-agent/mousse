@@ -1,6 +1,5 @@
 import type { ReactNode } from 'react'
-import { fieldIdForPointer, settingUnsupportedReason } from './editorIssues'
-import type { AgentRuntimeKind } from '../../../shared/agents/types'
+import { fieldIdForPointer } from './editorIssues'
 
 export function Field({
   id,
@@ -31,30 +30,20 @@ export function Field({
 
 export function SettingGroup({
   pointer,
-  runtimeKind,
   title,
   lead,
   children
 }: {
   pointer: string
-  runtimeKind: AgentRuntimeKind
   title: string
   lead?: string
   children: ReactNode
 }) {
-  const reason = settingUnsupportedReason(runtimeKind, pointer)
   return (
     <section className="agent-setting-group" id={fieldIdForPointer(pointer)} data-setting={pointer}>
       <h3>{title}</h3>
       {lead ? <p className="agent-setting-lead">{lead}</p> : null}
-      {reason ? (
-        <p className="agent-setting-disabled" role="note">
-          {reason}
-        </p>
-      ) : null}
-      <fieldset disabled={Boolean(reason)} style={{ border: 0, margin: 0, padding: 0, minInlineSize: 0 }}>
-        {children}
-      </fieldset>
+      {children}
     </section>
   )
 }

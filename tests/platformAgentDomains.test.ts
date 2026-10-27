@@ -60,6 +60,56 @@ describe('Agent Editor domain bridge', () => {
     expect((await c.list({ profileId: 'profile-a' }))[0].visual).toEqual(saved.visual)
   })
 
+  it("publish refuses a primary the gateway's check refuses, whichever client publishes, and checks only on request", async () => {
+    const { client, a } = fixture(), c = client('profile-a')
+    const refusal = "Claude Code can't enforce this agent's workspace and tool limits yet, so it can't run agent definitions."
+    const checked: string[] = []
+    a.checkRuntime = (request) => {
+      checked.push(request.definitionId)
+      return [{ code: 'SETTINGS_UNSUPPORTED', message: refusal, pointer: '/settings/tools/mode', retryable: false, details: { model: request.settings.primaryModel.ref } }]
+    }
+    const created = await c.create(input())
+    // The editor's check: only where it runs, with nothing else resolved.
+    expect(await c.validate({ profileId: 'profile-a', id: created.id, expectedDraftHash: created.draftHash, runtimeOnly: true })).toEqual({ issues: [expect.objectContaining({ message: refusal })] })
+    await expect(c.publish({ profileId: 'profile-a', id: created.id, expectedDraftHash: created.draftHash })).rejects.toMatchObject({ code: 'SETTINGS_UNSUPPORTED', message: refusal })
+    expect(a.registry.get(created.id).published).toBeUndefined()
+    // A refused fallback alone does not stop publishing: the run skips it.
+    a.checkRuntime = () => [{ code: 'SETTINGS_UNSUPPORTED', message: `Fallback x will be skipped: ${refusal}`, pointer: '/settings/tools/mode', retryable: false, details: { blocking: false } }]
+    expect((await c.publish({ profileId: 'profile-a', id: created.id, expectedDraftHash: created.draftHash })).revision).toBe(created.semanticHash)
+    expect(checked).toEqual([created.id, created.id])
+  })
+
+  it('a fallback or override model that cannot be reached (signed out, or a runtime that never runs definitions) is skipped, not blocking', async () => {
+    const profileRoot = mkdtempSync(join(tmpdir(), 'mousse-agent-domain-'))
+    roots.push(profileRoot)
+    const registry = new AgentDefinitionRegistry({ profileId: 'profile-a', profileRoot })
+    const unreachable = (modelId: string, code: string) => ({ ref: { providerId: 'cursor', modelId }, available: false, efforts: [], speeds: [], contexts: [], capabilities: [], unavailableReasons: [`${code} reason`], unavailableCode: code })
+    const resolver = new AgentResolver({
+      registry,
+      integrationLookup: new StaticAgentIntegrationLookup(),
+      modelLookup: new StaticAgentModelLookup([
+        { ref: { providerId: 'fixture', modelId: 'fixture-model' }, available: true, efforts: [], speeds: [], contexts: [], capabilities: ['tools', 'vision'], unavailableReasons: [] },
+        unreachable('agent', 'policy_unenforceable'),
+        unreachable('vision', 'signed_out')
+      ] as never)
+    })
+    const settings = input().settings
+    settings.fallbacks = { ...settings.fallbacks, enabled: true, allowHigherCost: true, models: [{ providerId: 'cursor', modelId: 'agent' }] }
+    settings.primaryModel.capabilityOverrides = { vision: { providerId: 'cursor', modelId: 'vision' } }
+    const created = registry.createDraft({ settings, systemPrompt: 'Hi' })
+    const resolved = resolver.resolveDraft({ definitionId: created.id, expectedDraftHash: created.draftHash })
+    expect(resolved.model.primary.ref.providerId).toBe('fixture')
+    expect(resolved.model.fallbacks).toEqual([])
+    expect(resolved.model.capabilityOverrides).toEqual({})
+    expect(resolved.issues.map((issue) => [issue.pointer, issue.details?.blocking, issue.details?.errorCode])).toEqual([
+      ['/settings/fallbacks/models/0', false, 'policy_unenforceable'],
+      ['/settings/primaryModel/capabilityOverrides/vision', false, 'signed_out']
+    ])
+    // The same model as the primary blocks.
+    const primary = registry.createDraft({ settings: { ...input().settings, identity: { ...settings.identity, slug: 'primary-cursor' }, primaryModel: { ref: { providerId: 'cursor', modelId: 'agent' }, capabilityOverrides: {} } }, systemPrompt: 'Hi' })
+    expect(() => resolver.resolveDraft({ definitionId: primary.id, expectedDraftHash: primary.draftHash })).toThrow(/policy_unenforceable reason/)
+  })
+
   it('rejects forged profile IDs and foreign definition IDs', async () => {
     const { client } = fixture()
     const record = await client('profile-a').create(input())

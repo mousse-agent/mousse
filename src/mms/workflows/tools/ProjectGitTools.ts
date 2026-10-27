@@ -1,9 +1,11 @@
 import { spawn } from 'child_process'
 import { Type, type Tool } from '@earendil-works/pi-ai'
-import type { FileService } from '../files/FileService'
-import type { GitService } from '../git/GitService'
-import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
-import { isFilesystemWideBashCommand } from './toolPathSafety'
+import type { FileService } from '../../files/FileService'
+import type { GitService } from '../../git/GitService'
+import type { LineEditStatsStore } from '../../stats/LineEditStatsStore'
+import { isFilesystemWideBashCommand } from '../../orchestrator/toolPathSafety'
+import { runProjectGitTool } from '../../git/scopedRead'
+import { projectGitToolDefinitions } from '../../run/mcp/appTools/projectGit'
 
 const COMMAND_TIMEOUT_MS = 120_000
 const MAX_COMMAND_OUTPUT = 32_000
@@ -18,33 +20,19 @@ const BLOCKED_COMMAND_PATTERNS = [
   /\breboot\b/i
 ]
 
-export class BuildModeTools {
+export class ProjectGitTools {
   constructor(
     private fileService: FileService,
     private gitService: GitService,
     private lineEditStats?: LineEditStatsStore
   ) {}
 
-  /** Git helpers kept alongside Pi SDK tools (read/bash/edit/write/grep/find/ls). */
+  /** Git helpers kept alongside Pi SDK tools (read/bash/edit/write/grep/find/ls); the same definitions as the git app tools. */
   getGitToolDefinitions(): Tool[] {
-    return [
-      {
-        name: 'git_status',
-        description: 'Get git status for the project repository.',
-        parameters: Type.Object({})
-      },
-      {
-        name: 'git_diff',
-        description: 'Get a git diff for one file.',
-        parameters: Type.Object({
-          path: Type.String({ description: 'Relative file path.' }),
-          staged: Type.Optional(Type.Boolean({ description: 'Whether to diff staged changes.' }))
-        })
-      }
-    ]
+    return projectGitToolDefinitions()
   }
 
-  /** @deprecated Prefer Pi SDK tools via PiCodingTools; kept for tests/legacy. */
+  /** @deprecated Prefer Pi SDK tools via ProjectFileTools; kept for tests/legacy. */
   getToolDefinitions(): Tool[] {
     return [
       {
@@ -91,10 +79,17 @@ export class BuildModeTools {
     return this.getToolDefinitions().some((tool) => tool.name === name)
   }
 
+  /**
+   * `roots`: where `git_status` and `git_diff` may read (a definition's canonical roots); the project
+   * by default. Both read through the scoped Git read the app tools use, never the GUI's status.
+   */
   async execute(
     name: string,
     args: Record<string, unknown>,
-    projectRoot: string
+    projectRoot: string,
+    roots: readonly string[] = [projectRoot],
+    /** The agent can write in `roots` (a definition): Git metadata there is not trusted. */
+    writable = false
   ): Promise<{ text: string; isError: boolean }> {
     try {
       switch (name) {
@@ -115,16 +110,9 @@ export class BuildModeTools {
           this.lineEditStats?.record('orchestrator', lines)
           return { text: `Wrote ${path}`, isError: false }
         }
-        case 'git_status': {
-          const status = await this.gitService.getStatus(projectRoot)
-          return { text: JSON.stringify(status, null, 2), isError: false }
-        }
-        case 'git_diff': {
-          const path = String(args.path ?? '')
-          const staged = args.staged === true
-          const diff = await this.gitService.getDiff(projectRoot, path, staged)
-          return { text: diff || '(no diff)', isError: false }
-        }
+        case 'git_status':
+        case 'git_diff':
+          return await runProjectGitTool(name, args, { projectPath: projectRoot, roots, writable })
         case 'run_command': {
           const command = String(args.command ?? '').trim()
           const cmdArgs = Array.isArray(args.args) ? args.args.map(String) : []

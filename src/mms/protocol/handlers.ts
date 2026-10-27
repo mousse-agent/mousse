@@ -41,7 +41,7 @@ import type { GitOperationHandle } from '../git/GitService'
 import { listClaimedQueue, QueueConflictError, QueueValidationError } from '../queue/ThreadMessageQueue'
 import { formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
 import { withoutStandingRules } from '../orchestrator/UserQuestionService'
-import { ANTIGRAVITY_INSTANCE_ID, CLAUDE_INSTANCE_ID, CODEX_INSTANCE_ID, type ModelOverride } from '../../shared/providerInstances'
+import type { ModelOverride } from '../../shared/providerInstances'
 import {
   ACCENT_COLORS,
   THEME_OPTIONS,
@@ -75,7 +75,6 @@ import {
   asOptionalString,
   asOptionalStringEnvMap,
   asOptionalTaskStatus,
-  asProviderLoginResponse,
   asScheduledJobPatch,
   asScope,
   asSettingsPartial,
@@ -125,39 +124,6 @@ import type { ReviewFilesResult, ReviewRange, ReviewScope } from '../../shared/r
 import { repoRelativePaths } from '../git/repoPaths'
 import { isGitRepository, listChangedFiles, readFileVersions, worktreeRange } from '../git/reviewDiff'
 import { resolveReviewScope } from '../actions/reviewRange'
-
-/** Profiles (keyed by their Claude service) whose last sign-in statuses both had a usable answer. */
-const vendorSignInsAnswered = new WeakSet<object>()
-
-/** False only while a sign-in has never been checked (or its settings cannot be read). */
-function signInAnswered(status: { state: string; checkedAt?: string } | undefined): boolean {
-  return !!status && (status.state !== 'error' || status.checkedAt !== undefined)
-}
-
-/**
- * Claude and Codex report their terminal sign-ins from cached live checks, each of which starts
- * the vendor CLI (a few hundred ms). Until both have an answer the check is awaited. After that,
- * reads such as opening Settings use the cached answer while a stale one refreshes in the
- * background, and clients get `providers.changed` when the refresh changes the provider list.
- */
-async function refreshVendorSignIns(ctx: HandlerContext): Promise<void> {
-  const key = ctx.mms.claudeSubscription
-  const refresh = async (): Promise<void> => {
-    const [claude, codex] = await Promise.all([ctx.mms.claudeSubscription.status(), ctx.mms.codex.status()])
-    if (signInAnswered(claude) && signInAnswered(codex)) vendorSignInsAnswered.add(key)
-    else vendorSignInsAnswered.delete(key)
-  }
-  if (!vendorSignInsAnswered.has(key)) return refresh()
-  const before = JSON.stringify(ctx.mms.providerInstances.configuredProviders())
-  void refresh()
-    .then(() => {
-      const providers = ctx.mms.providerInstances.configuredProviders()
-      if (JSON.stringify(providers) !== before) ctx.emitEvent?.('providers.changed', { providers })
-    })
-    .catch(() => {
-      vendorSignInsAnswered.delete(key)
-    })
-}
 
 export interface HandlerContext {
   mms: MmsProfileServices
@@ -2293,14 +2259,6 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         }
       }
     }
-    case 'providers.listConfigured':
-      // Claude's and Codex's terminal sign-ins are cached live checks; refresh them before listing.
-      await refreshVendorSignIns(ctx)
-      return {
-        providers: ctx.mms.providerInstances.configuredProviders(),
-        // Present while the profile's stored instance map cannot be read (nothing is overwritten).
-        ...(ctx.mms.providerInstances.storeError() ? { instancesError: ctx.mms.providerInstances.storeError() } : {})
-      }
     case 'providers.getUsage': {
       await ctx.mms.claudeSubscription.status()
       // Pi providers read the shared pi-ai credentials; agents (Codex) answer for the bound profile.
@@ -2352,52 +2310,6 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const { text } = await ctx.mms.providerAccess.transcribeAudio({ providerId, modelId, audio, mimeType })
       return { text }
     }
-    case 'providers.getLoginOptions': {
-      const p = isObject(params) ? params : {}
-      const authType = asOptionalString(p.authType, 32) as 'api_key' | 'oauth' | undefined
-      await refreshVendorSignIns(ctx)
-      // A built-in agent offers its sign-in only while it is an entry of the profile: a removed one
-      // comes back through Add provider's agent choice, not as a model API.
-      const entries = ctx.mms.providerInstances.list()
-      const offered = (instanceId: string, service: { configured(): boolean }) =>
-        authType !== 'api_key' && !service.configured() && Object.prototype.hasOwnProperty.call(entries, instanceId)
-      return {
-        options: [
-          ...ctx.mms.providerAuth.getLoginOptions(authType),
-          ...(offered(ANTIGRAVITY_INSTANCE_ID, ctx.mms.antigravity) ? [ctx.mms.antigravity.loginOption()] : []),
-          ...(offered(CLAUDE_INSTANCE_ID, ctx.mms.claudeSubscription) ? [ctx.mms.claudeSubscription.loginOption()] : []),
-          ...(offered(CODEX_INSTANCE_ID, ctx.mms.codex) ? [ctx.mms.codex.loginOption()] : [])
-        ]
-      }
-    }
-    case 'providers.refreshModels': {
-      const p = isObject(params) ? params : {}
-      const providerId = asString(p.providerId, 'providerId', 128)
-      // A vendor instance refreshes through its runtime; anything else is a pi-ai provider.
-      if (!(await harnessGateway(ctx).legacy.refreshModels(providerId, ctx.mms.worktrees.getRepoRoot())))
-        await ctx.mms.providerAuth.refreshDynamicModels()
-      return { options: await harnessGateway(ctx).llmProviders({ kind: 'device' }) }
-    }
-    case 'providers.getAmbientInfo': {
-      const p = isObject(params) ? params : {}
-      const providerId = asString(p.providerId, 'providerId', 128)
-      return { info: ctx.mms.providerAuth.getAmbientProviderInfo(providerId) }
-    }
-    case 'providers.setApiKey': {
-      const p = isObject(params) ? params : {}
-      const providerId = asString(p.providerId, 'providerId', 128)
-      const apiKey = asString(p.apiKey, 'apiKey', 8192)
-      // A removal still deleting this provider's key ends before the new key is saved.
-      await ctx.mms.harness?.legacy.removalSettled(providerId)
-      await ctx.mms.providerAuth.setApiKey(providerId, apiKey)
-      // The old Add dialog's key is an explicit add: a model API removed from this profile comes back.
-      await ctx.mms.harness?.legacy.explicitAdd(providerId)
-      await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
-      await ctx.mms.harness?.legacy.credentialsChanged(providerId)
-      const providers = ctx.mms.providerInstances.configuredProviders()
-      ctx.emitEvent?.('providers.changed', { providers })
-      return { providers }
-    }
     case 'webTools.getCredentialStatus':
       return {
         credentials: {
@@ -2419,114 +2331,6 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (service !== 'exa' && service !== 'parallel') throw new Error('Unsupported web tool service')
       await ctx.mms.providerAuth.logout(`web-tool:${service}`)
       return { configured: false }
-    }
-    case 'providers.verifyAmbient': {
-      const p = isObject(params) ? params : {}
-      const providerId = asString(p.providerId, 'providerId', 128)
-      await ctx.mms.harness?.legacy.removalSettled(providerId)
-      const result = await ctx.mms.providerAuth.verifyAmbientProvider(providerId)
-      if (result?.success) await ctx.mms.harness?.legacy.explicitAdd(providerId)
-      await ctx.mms.harness?.legacy.credentialsChanged(providerId)
-      const providers = ctx.mms.providerInstances.configuredProviders()
-      if (result?.success) ctx.emitEvent?.('providers.changed', { providers })
-      return { result, providers }
-    }
-    case 'providers.logout': {
-      const p = isObject(params) ? params : {}
-      const providerId = asString(p.providerId, 'providerId', 128)
-      // Vendor instances disconnect in Mousse only; terminal sign-ins are never logged out.
-      if (!(await harnessGateway(ctx).legacy.logout(providerId))) {
-        await ctx.mms.providerAuth.logout(providerId)
-        await harnessGateway(ctx).legacy.credentialsChanged(providerId)
-      }
-      const providers = ctx.mms.providerInstances.configuredProviders()
-      ctx.emitEvent?.('providers.changed', { providers })
-      return { providers }
-    }
-    case 'providers.loginOAuth': {
-      const p = isObject(params) ? params : {}
-      const providerId = asString(p.providerId, 'providerId', 128)
-      await ctx.mms.harness?.legacy.removalSettled(providerId)
-      const session = ctx.mms.providerAuth.createSession()
-      const forward = (event: unknown): void => {
-        ctx.emitEvent?.('providers.login-event', {
-          sessionId: session.sessionId,
-          event
-        })
-      }
-      session.on('event', forward)
-      try {
-        const result = await (harnessGateway(ctx).legacy.login(providerId, session, ctx.mms.worktrees.getRepoRoot())
-          ?? ctx.mms.providerAuth.runOAuthLogin(session, providerId))
-        if (result && (result as { success?: boolean }).success !== false) {
-          await ctx.mms.harness?.legacy.explicitAdd(providerId)
-          await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
-        }
-        await ctx.mms.harness?.legacy.credentialsChanged(providerId)
-        const providers = ctx.mms.providerInstances.configuredProviders()
-        if (result && (result as { success?: boolean }).success !== false) {
-          ctx.emitEvent?.('providers.changed', { providers })
-        }
-        return {
-          result,
-          sessionId: session.sessionId,
-          providers
-        }
-      } finally {
-        session.off('event', forward)
-        ctx.mms.providerAuth.endSession(session.sessionId)
-      }
-    }
-    case 'providers.loginApiKey': {
-      const p = isObject(params) ? params : {}
-      const providerId = asString(p.providerId, 'providerId', 128)
-      await ctx.mms.harness?.legacy.removalSettled(providerId)
-      const session = ctx.mms.providerAuth.createSession()
-      const forward = (event: unknown): void => {
-        ctx.emitEvent?.('providers.login-event', {
-          sessionId: session.sessionId,
-          event
-        })
-      }
-      session.on('event', forward)
-      try {
-        const result = await ctx.mms.providerAuth.runApiKeyLogin(session, providerId)
-        if (result && (result as { success?: boolean }).success !== false) {
-          await ctx.mms.harness?.legacy.explicitAdd(providerId)
-          await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
-        }
-        await ctx.mms.harness?.legacy.credentialsChanged(providerId)
-        const providers = ctx.mms.providerInstances.configuredProviders()
-        if (result && (result as { success?: boolean }).success !== false) {
-          ctx.emitEvent?.('providers.changed', { providers })
-        }
-        return {
-          result,
-          sessionId: session.sessionId,
-          providers
-        }
-      } finally {
-        session.off('event', forward)
-        ctx.mms.providerAuth.endSession(session.sessionId)
-      }
-    }
-    case 'providers.loginRespond': {
-      const p = isObject(params) ? params : {}
-      const sessionId = asString(p.sessionId, 'sessionId', 256)
-      const response = asProviderLoginResponse(p.response)
-      if (response.sessionId !== sessionId) {
-        throw new Error('response.sessionId must match sessionId')
-      }
-      const session = ctx.mms.providerAuth.getSession(sessionId)
-      if (!session) return { ok: false }
-      session.respond(response)
-      return { ok: true }
-    }
-    case 'providers.loginCancel': {
-      const p = isObject(params) ? params : {}
-      const sessionId = asString(p.sessionId, 'sessionId', 256)
-      ctx.mms.providerAuth.endSession(sessionId)
-      return { ok: true }
     }
     case 'providers.snapshots': {
       const p = isObject(params) ? params : {}

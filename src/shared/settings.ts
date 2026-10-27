@@ -239,6 +239,10 @@ export interface LlmModelOption {
   speed?: 'fast' | 'slow'
   /** `false`: this model cannot run a single request (chat titles) even though its provider can. */
   oneShot?: false
+  /** The model takes images, when its catalogue says so. */
+  images?: true
+  /** Context window in tokens, when its catalogue says so. */
+  contextWindow?: number
 }
 
 export interface LlmProviderOption {

@@ -1,6 +1,6 @@
 import { LiquidGlassOrb } from '../orb/LiquidGlassOrb'
 import type { AgentDefinitionRecord } from '../../../shared/agents/types'
-import { AGENT_RUNTIME_LABELS } from './client'
+import { savedForLabel } from './client'
 
 /** Compact read-only definition summary for workflow inspectors. */
 export function AgentDefinitionReadOnlySummary({
@@ -18,7 +18,7 @@ export function AgentDefinitionReadOnlySummary({
         <h3>{record.settings.identity.name}</h3>
         <p>{record.settings.identity.purpose || 'No purpose'}</p>
         <div className="agent-card__meta">
-          <span className="agent-chip">{AGENT_RUNTIME_LABELS[record.runtimeKind]}</span>
+          {savedForLabel(record.runtimeKind) ? <span className="agent-chip">{savedForLabel(record.runtimeKind)}</span> : null}
           <span className="agent-chip">
             {model.modelId ? `${model.providerId}/${model.modelId}` : 'No model'}
           </span>

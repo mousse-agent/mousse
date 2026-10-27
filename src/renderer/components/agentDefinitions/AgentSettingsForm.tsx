@@ -1,4 +1,4 @@
-import { AGENT_CAPABILITY_KINDS, AGENT_RUNTIME_KINDS } from '../../../shared/agents/types'
+import { AGENT_CAPABILITY_KINDS } from '../../../shared/agents/types'
 import type {
   AgentCapabilityKind,
   AgentDefinitionSettings,
@@ -10,16 +10,17 @@ import { AgentModelPicker } from './AgentModelPicker'
 import type { AgentEditorCatalogs } from './client'
 import { AGENT_RUNTIME_LABELS } from './client'
 import { JsonValueEditor } from './JsonValueEditor'
+import { runsOnLabel } from './editorIssues'
 import { CheckRow, Field, SettingGroup } from './fields'
 
 export interface AgentSettingsFormProps {
   definitionId: string
-  runtimeKind: AgentRuntimeKind
+  /** The kind the definition was saved with: an older CLI kind shows "Saved for <CLI>". */
+  savedRuntimeKind?: AgentRuntimeKind
   settings: AgentDefinitionSettings
   systemPrompt: string
   catalogs: AgentEditorCatalogs
   disabled?: boolean
-  onRuntimeKindChange: (runtimeKind: AgentRuntimeKind) => void
   onSettingsChange: (settings: AgentDefinitionSettings) => void
   onSystemPromptChange: (value: string) => void
   onSave?: () => void
@@ -35,22 +36,22 @@ function patch<K extends keyof AgentDefinitionSettings>(
 
 export function AgentSettingsForm({
   definitionId,
-  runtimeKind,
+  savedRuntimeKind,
   settings,
   systemPrompt,
   catalogs,
   disabled,
-  onRuntimeKindChange,
   onSettingsChange,
   onSystemPromptChange,
   onSave
 }: AgentSettingsFormProps) {
   const identity = settings.identity
   const promptPath = `agent-definitions/${definitionId}/system.md`
+  const runsOn = runsOnLabel(catalogs, settings.primaryModel.ref)
 
   return (
     <div className="agent-settings-form">
-      <SettingGroup pointer="/settings/identity" runtimeKind={runtimeKind} title="Name and purpose" lead="How this agent appears in the library.">
+      <SettingGroup pointer="/settings/identity" title="Name and purpose" lead="How this agent appears in the library.">
         <Field id="agent-name" label="Name">
           <input
             id="agent-name-input"
@@ -100,26 +101,28 @@ export function AgentSettingsForm({
             }
           />
         </Field>
-        <Field id="agent-runtime" label="Runtime">
-          <select
-            id="agent-runtime-input"
-            data-field="runtime"
-            value={runtimeKind}
-            disabled={disabled}
-            onChange={(event) => onRuntimeKindChange(event.target.value as AgentRuntimeKind)}
-          >
-            {AGENT_RUNTIME_KINDS.map((kind) => (
-              <option key={kind} value={kind}>
-                {AGENT_RUNTIME_LABELS[kind]}
-              </option>
-            ))}
-          </select>
+        <Field
+          id="agent-runtime"
+          label="Runs on"
+          hint="The provider of the model you pick below. Agents run where Mousse can enforce their workspace and tool limits."
+        >
+          <p id="agent-runtime-input" className="agent-runs-on" data-field="runtime">
+            <span>{runsOn ?? 'Choose a model'}</span>
+            {savedRuntimeKind && savedRuntimeKind !== 'mousse' ? (
+              <span
+                className="agent-chip"
+                data-saved-runtime={savedRuntimeKind}
+                title="Saved by an earlier version. Saving this agent again saves it for Mousse; it runs on the model's provider either way."
+              >
+                Saved for {AGENT_RUNTIME_LABELS[savedRuntimeKind]}
+              </span>
+            ) : null}
+          </p>
         </Field>
       </SettingGroup>
 
       <SettingGroup
         pointer="/settings/instructions"
-        runtimeKind={runtimeKind}
         title="System prompt"
         lead="Pinned when a run starts. Switching Source and Preview keeps the exact text."
       >
@@ -142,7 +145,7 @@ export function AgentSettingsForm({
         />
       </SettingGroup>
 
-      <SettingGroup pointer="/settings/primaryModel" runtimeKind={runtimeKind} title="Model" lead="Shared provider catalog. Personal selections stay with this profile's definition.">
+      <SettingGroup pointer="/settings/primaryModel" title="Model" lead="Shared provider catalog. Personal selections stay with this profile's definition.">
         <AgentModelPicker
           catalogs={catalogs}
           value={settings.primaryModel.ref}
@@ -155,7 +158,6 @@ export function AgentSettingsForm({
 
       <SettingGroup
         pointer="/settings/primaryModel/capabilityOverrides"
-        runtimeKind={runtimeKind}
         title="Capability-specific models"
         lead="Optional replacements when a capability needs a different model. Never silent."
       >
@@ -197,7 +199,7 @@ export function AgentSettingsForm({
         })}
       </SettingGroup>
 
-      <SettingGroup pointer="/settings/fallbacks" runtimeKind={runtimeKind} title="Fallbacks" lead="Off by default. Fallbacks never cross a missing-capability gap silently.">
+      <SettingGroup pointer="/settings/fallbacks" title="Fallbacks" lead="Off by default. Fallbacks never cross a missing-capability gap silently.">
         <CheckRow
           id="fallbacks-enabled"
           checked={settings.fallbacks.enabled}
@@ -266,7 +268,7 @@ export function AgentSettingsForm({
         </CheckRow>
       </SettingGroup>
 
-      <SettingGroup pointer="/settings/output" runtimeKind={runtimeKind} title="Response style">
+      <SettingGroup pointer="/settings/output" title="Response style">
         <div className="agent-inline-fields">
           <Field id="output-language" label="Language">
             <input
@@ -346,7 +348,7 @@ export function AgentSettingsForm({
         ) : null}
       </SettingGroup>
 
-      <SettingGroup pointer="/settings/context" runtimeKind={runtimeKind} title="What it can read">
+      <SettingGroup pointer="/settings/context" title="What it can read">
         <CheckRow
           id="include-thread"
           checked={settings.context.includeCurrentThread}
@@ -416,7 +418,7 @@ export function AgentSettingsForm({
         </Field>
       </SettingGroup>
 
-      <SettingGroup pointer="/settings/memory" runtimeKind={runtimeKind} title="Memory" lead="Default is this thread only. Profile memory never leaks to another profile.">
+      <SettingGroup pointer="/settings/memory" title="Memory" lead="Default is this thread only. Profile memory never leaks to another profile.">
         <Field id="memory-scope" label="Remember">
           <select
             id="memory-scope-input"
@@ -450,7 +452,7 @@ export function AgentSettingsForm({
         </Field>
       </SettingGroup>
 
-      <SettingGroup pointer="/settings/skills" runtimeKind={runtimeKind} title="Skills" lead="Inherit profile skills or pick a specific set. A missing skill keeps the draft but blocks publish/run.">
+      <SettingGroup pointer="/settings/skills" title="Skills" lead="Inherit profile skills or pick a specific set. A missing skill keeps the draft but blocks publish/run.">
         <Field id="skills-mode" label="Selection">
           <select
             id="skills-mode-input"
@@ -488,7 +490,7 @@ export function AgentSettingsForm({
         })}
       </SettingGroup>
 
-      <SettingGroup pointer="/settings/mcp" runtimeKind={runtimeKind} title="MCP tools" lead="Turning on a server is not permission for future tools. Name the tools this agent may use.">
+      <SettingGroup pointer="/settings/mcp" title="MCP tools" lead="Turning on a server is not permission for future tools. Name the tools this agent may use.">
         <Field id="mcp-mode" label="Selection">
           <select
             id="mcp-mode-input"
@@ -548,7 +550,7 @@ export function AgentSettingsForm({
         })}
       </SettingGroup>
 
-      <SettingGroup pointer="/settings/tools" runtimeKind={runtimeKind} title="Built-in tools">
+      <SettingGroup pointer="/settings/tools" title="Built-in tools">
         <Field id="tools-mode" label="Selection">
           <select
             id="tools-mode-input"
@@ -580,7 +582,7 @@ export function AgentSettingsForm({
         ))}
       </SettingGroup>
 
-      <SettingGroup pointer="/settings/browser" runtimeKind={runtimeKind} title="Browser" lead="Off for a new generic agent. Turn this on only when the agent should use a browser.">
+      <SettingGroup pointer="/settings/browser" title="Browser" lead="Off for a new generic agent. Turn this on only when the agent should use a browser.">
         <Field id="browser-mode" label="Mode">
           <select
             id="browser-mode-input"
@@ -650,7 +652,7 @@ export function AgentSettingsForm({
         </Field>
       </SettingGroup>
 
-      <SettingGroup pointer="/settings/delegation" runtimeKind={runtimeKind} title="Delegation" lead="No recursive children by default.">
+      <SettingGroup pointer="/settings/delegation" title="Delegation" lead="No recursive children by default.">
         <Field id="delegation-children" label="Agents this one may start">
           {catalogs.childDefinitions.map((child) => (
             <CheckRow
@@ -694,7 +696,7 @@ export function AgentSettingsForm({
         </Field>
       </SettingGroup>
 
-      <SettingGroup pointer="/settings/workspace" runtimeKind={runtimeKind} title="Workspace">
+      <SettingGroup pointer="/settings/workspace" title="Workspace">
         <Field id="workspace-mode" label="Files this agent may change">
           <select
             id="workspace-mode-input"
@@ -730,7 +732,7 @@ export function AgentSettingsForm({
         </Field>
       </SettingGroup>
 
-      <SettingGroup pointer="/settings/script" runtimeKind={runtimeKind} title="Scripts" lead="Prompt text cannot grant script authority.">
+      <SettingGroup pointer="/settings/script" title="Scripts" lead="Prompt text cannot grant script authority.">
         <CheckRow
           id="script-enabled"
           checked={settings.script.enabled}
@@ -787,7 +789,7 @@ export function AgentSettingsForm({
         </CheckRow>
       </SettingGroup>
 
-      <SettingGroup pointer="/settings/approval" runtimeKind={runtimeKind} title="When to ask you">
+      <SettingGroup pointer="/settings/approval" title="When to ask you">
         <CheckRow
           id="ask-user"
           checked={settings.approval.askUser}
@@ -834,7 +836,7 @@ export function AgentSettingsForm({
         </Field>
       </SettingGroup>
 
-      <SettingGroup pointer="/settings/limits" runtimeKind={runtimeKind} title="Limits">
+      <SettingGroup pointer="/settings/limits" title="Limits">
         <div className="agent-inline-fields">
           <Field id="max-turns" label="Max turns">
             <input
@@ -902,7 +904,7 @@ export function AgentSettingsForm({
         </Field>
       </SettingGroup>
 
-      <SettingGroup pointer="/settings/recovery" runtimeKind={runtimeKind} title="Recovery">
+      <SettingGroup pointer="/settings/recovery" title="Recovery">
         <Field id="retry-count" label="Retries">
           <input
             id="retry-count-input"
@@ -950,7 +952,7 @@ export function AgentSettingsForm({
         </Field>
       </SettingGroup>
 
-      <SettingGroup pointer="/settings/examples" runtimeKind={runtimeKind} title="Examples and try-run" lead="Test runs are separate and do not write production memory.">
+      <SettingGroup pointer="/settings/examples" title="Examples and try-run" lead="Test runs are separate and do not write production memory.">
         {settings.examples.map((example, index) => (
           <ExampleEditor
             key={example.id}

@@ -3,6 +3,11 @@ import { createConnection } from 'net'
 import { join } from 'path'
 
 const MAX_FRAME_BYTES = 16 * 1024 * 1024
+/**
+ * The daemon protocol this checkout speaks (`MMS_PROTOCOL_VERSION`; `tests/protocolVersionConstants`
+ * keeps it in sync). Not the owner lease's version, which is a separate contract.
+ */
+export const DAEMON_PROTOCOL_VERSION = 2
 
 function encodeFrame(value) {
   const body = Buffer.from(JSON.stringify(value), 'utf-8')
@@ -31,8 +36,9 @@ async function readOwner(homeDir) {
  * rebuild, before deciding whether it is safe to replace it.
  */
 class DevProbeClient {
-  constructor(owner) {
+  constructor(owner, protocolVersion = DAEMON_PROTOCOL_VERSION) {
     this.owner = owner
+    this.protocolVersion = protocolVersion
     this.socket = null
     this.buffer = Buffer.alloc(0)
     this.pending = new Map()
@@ -58,7 +64,7 @@ class DevProbeClient {
         socket.write(
           encodeFrame({
             kind: 'hello',
-            protocolVersion: this.owner.protocolVersion,
+            protocolVersion: this.protocolVersion,
             ownerToken: this.owner.token,
             clientType: 'cli',
             clientBuild: 'dev-restart-probe'
@@ -124,7 +130,11 @@ class DevProbeClient {
       return
     }
     if (envelope?.kind === 'hello_err') {
-      throw new Error(`MMS probe hello rejected: ${envelope.message ?? envelope.code}`)
+      const error = new Error(`MMS probe hello rejected: ${envelope.message ?? envelope.code}`)
+      // The daemon running now may be from before a protocol bump: it says which version it speaks.
+      const spoken = envelope.code === 'protocol_version' ? /server is (\d+)/.exec(String(envelope.message ?? ''))?.[1] : undefined
+      if (spoken) error.serverProtocolVersion = Number(spoken)
+      throw error
     }
     if (envelope?.kind !== 'res' || typeof envelope.id !== 'string') return
     const pending = this.pending.get(envelope.id)
@@ -148,7 +158,16 @@ export async function probeMmsActiveTurn(homeDir, opts = {}) {
     const owner = await readOwner(homeDir)
     client = new DevProbeClient(owner)
     try {
-      await client.connect()
+      try {
+        await client.connect()
+      } catch (error) {
+        // An older (or newer) daemon still answers its own version; it is the one about to be replaced.
+        const spoken = error?.serverProtocolVersion
+        if (!Number.isInteger(spoken) || spoken === client.protocolVersion) throw error
+        client.close()
+        client = new DevProbeClient(owner, spoken)
+        await client.connect()
+      }
       const listed = await client.request('threads.list')
       const threads = Array.isArray(listed?.threads) ? listed.threads : []
 

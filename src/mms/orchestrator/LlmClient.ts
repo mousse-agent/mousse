@@ -65,8 +65,8 @@ import type { FileService } from '../files/FileService'
 
 import type { GitService } from '../git/GitService'
 
-import { BuildModeTools } from './BuildModeTools'
-import { PiCodingTools, piToolSetForMode } from './PiCodingTools'
+import { ProjectGitTools } from '../workflows/tools/ProjectGitTools'
+import { ProjectFileTools, piToolSetForMode } from '../workflows/tools/ProjectFileTools'
 import { DevGuiTools } from '../devgui/DevGuiTools'
 import { QuickActionTools, type CreatedQuickAction } from './QuickActionTools'
 import { userQuestionService as defaultUserQuestionService, UserQuestionService } from './UserQuestionService'
@@ -89,6 +89,7 @@ import {
 import { DELEGATION_TOOL_NAMES, delegationToolDefinitions, type DelegationToolHost } from '../run/mcp/appTools/delegation'
 import { PUBLISH_APPLET_TOOL } from '../run/mcp/appTools/applets'
 import { modeFactsFor, offeredDefinitions, prepareSkills, settingsToolEnabled } from '../run/mcp/appTools/assemble'
+import { definitionWritesRoots } from '../run/mcp/appTools/projectGit'
 import { callUserMcpTool, userMcpTool } from '../run/mcp/appTools/userMcp'
 import { questionApproval } from '../run/mcp/appTools/quickActions'
 import type { BrowserRuntimePort } from '../../shared/browser/runtime'
@@ -422,9 +423,9 @@ export class LlmClient {
   private readonly questions: UserQuestionService
   private readonly modeRegistry: ModeRegistry
 
-  private buildTools: BuildModeTools
+  private buildTools: ProjectGitTools
 
-  private piCodingTools: PiCodingTools
+  private piCodingTools: ProjectFileTools
 
   /** The app tools (plans, tasks, skills, browser, quick actions, web, dev GUI, applets, delegation) over this client's dependencies. */
   private readonly appTools: { registry: ToolRegistry; families: Record<AppToolFamily, string[]> }
@@ -475,8 +476,8 @@ export class LlmClient {
     this.modeRegistry = runtime?.modeRegistry ?? defaultModeRegistry
     this.browserRuntime = runtime?.browserRuntime
 
-    this.buildTools = new BuildModeTools(fileService!, gitService!, lineEditStats)
-    this.piCodingTools = new PiCodingTools(lineEditStats)
+    this.buildTools = new ProjectGitTools(fileService!, gitService!, lineEditStats)
+    this.piCodingTools = new ProjectFileTools(lineEditStats)
 
     // The same modules the Mousse MCP server serves, over this client's own dependencies.
     this.appTools = createAppToolRegistry({
@@ -1557,6 +1558,12 @@ export class LlmClient {
   ): Promise<ToolResultMessage> {
 
     try {
+      // A Pi file tool's path as Pi will open it (`@` dropped, `~` expanded, absolute): what the
+      // definition's gate checks. The tool resolves the model's arguments the same way
+      // (`ProjectFileTools.execute`); prompts and events keep the model's own path.
+      const gateArgs = projectPath && this.piCodingTools.isPiTool(toolCall.name) && !this.appTools.registry.get(toolCall.name)
+        ? this.piCodingTools.piArgs(toolCall.name, (toolCall.arguments ?? {}) as Record<string, unknown>, projectPath)
+        : (toolCall.arguments ?? {}) as Record<string, unknown>
       const settingsEnabled = (name: string): boolean => Boolean(trustedAgent) || settingsToolEnabled(this.settingsStore.get().integrations.tools, name)
       const markTrustedEffect = (): void => {
         if (trustedAgent?.effects) trustedAgent.effects.dispatched = true
@@ -1573,7 +1580,7 @@ export class LlmClient {
           policy: trustedAgent.policy,
           grants: trustedAgent.grants,
           toolName: toolCall.name,
-          args: (toolCall.arguments ?? {}) as Record<string, unknown>,
+          args: gateArgs,
           isMcp,
           projectPath,
           ...(uncontainedShell ? { uncontainedShell } : {})
@@ -1583,7 +1590,7 @@ export class LlmClient {
           policy: trustedAgent.policy,
           grants: trustedAgent.grants,
           toolName: toolCall.name,
-          args: (toolCall.arguments ?? {}) as Record<string, unknown>,
+          args: gateArgs,
           isMcp,
           projectPath,
           signal,
@@ -1697,7 +1704,10 @@ export class LlmClient {
           : await this.buildTools.execute(
               toolCall.name,
               toolCall.arguments as Record<string, unknown>,
-              projectPath
+              projectPath,
+              // A definition's git reads stay in its roots; any other turn's in the project.
+              trustedAgent?.policy ? trustedAgent.policy.workspace.canonicalRoots : [projectPath],
+              trustedAgent?.policy ? definitionWritesRoots(trustedAgent.policy) : false
             )
 
         const resultEvent: LlmToolEvent = {

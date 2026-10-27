@@ -1,12 +1,13 @@
 import { existsSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { Tool } from '@earendil-works/pi-ai'
-import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
-import { countLineEdits } from '../../shared/lineEditStats'
+import type { LineEditStatsStore } from '../../stats/LineEditStatsStore'
+import { countLineEdits } from '../../../shared/lineEditStats'
 import { readFile } from 'fs/promises'
-import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
-import { resolveToolPath, sanitizeToolArgs } from './toolPathSafety'
+import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../../modes/ModeRegistry'
+import { isPathInsideCwd, resolveToolPath, sanitizeToolArgs } from '../../orchestrator/toolPathSafety'
+import { PI_PATH_ARGUMENTS, piResolvePath, piResolveReadPath } from '../../agents/piToolPaths'
 
 /**
  * Pi coding-agent built-in tools (read, bash, edit, write, grep, find, ls).
@@ -115,7 +116,7 @@ function contentToText(content: Array<{ type: string; text?: string }>): string 
     .join('\n')
 }
 
-export class PiCodingTools {
+export class ProjectFileTools {
   private toolsByCwd = new Map<string, Record<PiToolName, AgentToolLike>>()
 
   constructor(private lineEditStats?: LineEditStatsStore) {}
@@ -150,6 +151,19 @@ export class PiCodingTools {
     })
   }
 
+  /**
+   * The call's arguments with its path as Pi's tool opens it (`harness/pi/paths`: a leading `@`
+   * dropped, `~` expanded, `file://` and shell drive forms read, made absolute). A caller's gate
+   * checks this path, and `execute` hands the tool exactly it, so the checked path is the opened one.
+   */
+  piArgs(name: string, args: Record<string, unknown>, cwd: string): Record<string, unknown> {
+    const resolved = this.resolveCall(name, args)
+    if (!resolved || !PI_PATH_ARGUMENTS[resolved.name]) return args
+    const raw = args.path
+    if (typeof raw !== 'string' || !raw) return args
+    return { ...args, path: resolved.name === 'read' ? piResolveReadPath(raw, cwd) : piResolvePath(raw, cwd) }
+  }
+
   async execute(
     name: string,
     args: Record<string, unknown>,
@@ -159,7 +173,10 @@ export class PiCodingTools {
   ): Promise<{ text: string; isError: boolean }> {
     try {
       const tools = await this.getToolsForCwd(cwd)
-      const resolved = this.resolveCall(name, args)
+      // The path as Pi opens it, absolute: checked below (a write outside the project is refused,
+      // `~/…` included) and handed to the tool as it is, never re-read by Pi as `@…` or `~…`.
+      const piPathArgs = this.piArgs(name, args, cwd)
+      const resolved = this.resolveCall(name, piPathArgs)
       if (!resolved) {
         return { text: `Unknown Pi coding tool: ${name}`, isError: true }
       }
@@ -169,6 +186,18 @@ export class PiCodingTools {
         return { text: sanitized.error, isError: true }
       }
       resolved.args = sanitized.args
+      if (piPathArgs !== args) {
+        // Hand Pi a path it resolves again to exactly the checked one. Inside the cwd: `./` and the
+        // relative path, so the cwd is never re-normalized (a Unicode space in the project folder)
+        // and a leading `@` or `~` in the rest stays literal. Outside (reads): the absolute path,
+        // only when Pi reads it back unchanged.
+        const checked = String(piPathArgs.path)
+        const handed = isPathInsideCwd(checked, cwd)
+          ? `.${sep}${relative(resolve(cwd), checked) || '.'}`
+          : checked
+        if (piResolvePath(handed, cwd) !== resolve(checked)) return { text: `Path cannot be passed to the tool unchanged: ${String(args.path)}`, isError: true }
+        resolved.args.path = handed
+      }
 
       const tool = tools[resolved.name]
       if (!tool) {
