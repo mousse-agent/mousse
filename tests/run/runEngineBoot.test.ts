@@ -9,6 +9,8 @@ import { RunEngine } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
 import type { RunRecord, ThreadEvent } from '../../src/mms/run/types'
 
+const NO_APPROVALS = { continued: [], cancelled: [], undelivered: [] }
+
 describe('RunEngine boot (SPEC §12.5)', () => {
   let profileHome: string | undefined
   const dbs: ProfileDatabase[] = []
@@ -53,7 +55,7 @@ describe('RunEngine boot (SPEC §12.5)', () => {
 
   it('opens epoch 1 on a fresh profile and exposes the lease owner', () => {
     const { engine, boot } = daemon(10)
-    expect(boot).toEqual({ interrupted: [], uncertain: [], epoch: 1, orphanedChildren: [], recoveredWakes: [], strandedQueued: [] })
+    expect(boot).toEqual({ interrupted: [], uncertain: [], epoch: 1, orphanedChildren: [], recoveredWakes: [], strandedQueued: [], approvals: NO_APPROVALS })
     expect(engine.epoch).toBe(1)
     expect(engine.leaseOwner).toBe('1:10')
   })
@@ -65,7 +67,7 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     first.engine.shutdown()
 
     const second = daemon(20)
-    expect(second.boot).toEqual({ interrupted: [run.runId], uncertain: [], epoch: 2, orphanedChildren: [], recoveredWakes: [], strandedQueued: [] })
+    expect(second.boot).toEqual({ interrupted: [run.runId], uncertain: [], epoch: 2, orphanedChildren: [], recoveredWakes: [], strandedQueued: [], approvals: NO_APPROVALS })
     expect(second.store.getRun(run.runId)).toMatchObject({
       status: 'interrupted',
       outcome: { interruptedBy: 'daemon_restart' }
@@ -81,7 +83,7 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     // No shutdown(): the daemon crashed.
 
     const second = daemon(20)
-    expect(second.boot).toEqual({ interrupted: [], uncertain: [run.runId], epoch: 2, orphanedChildren: [], recoveredWakes: [], strandedQueued: [] })
+    expect(second.boot).toEqual({ interrupted: [], uncertain: [run.runId], epoch: 2, orphanedChildren: [], recoveredWakes: [], strandedQueued: [], approvals: NO_APPROVALS })
     const after = second.store.getRun(run.runId)!
     expect(after.status).toBe('uncertain')
     expect(after.outcome).toEqual({
@@ -108,7 +110,7 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     first.engine.markStarting(starting.runId)
 
     const second = daemon(20)
-    expect(second.boot).toEqual({ interrupted: [run.runId, starting.runId], uncertain: [], epoch: 2, orphanedChildren: [], recoveredWakes: [], strandedQueued: [] })
+    expect(second.boot).toEqual({ interrupted: [run.runId, starting.runId], uncertain: [], epoch: 2, orphanedChildren: [], recoveredWakes: [], strandedQueued: [], approvals: NO_APPROVALS })
     expect(second.store.getRun(run.runId)!.outcome).toEqual({ interruptedBy: 'daemon_restart' })
     expect(second.store.getAttempt(second.store.getRun(run.runId)!.activeAttemptId!)!.status).toBe('interrupted')
     expect(second.store.getRun(starting.runId)!.status).toBe('interrupted')
@@ -130,7 +132,7 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     expect(outbox.listRunning()).toHaveLength(3)
 
     const second = daemon(20)
-    expect(second.boot).toEqual({ interrupted: [b.runId], uncertain: [a.runId], epoch: 2, orphanedChildren: [], recoveredWakes: [], strandedQueued: [] })
+    expect(second.boot).toEqual({ interrupted: [b.runId], uncertain: [a.runId], epoch: 2, orphanedChildren: [], recoveredWakes: [], strandedQueued: [], approvals: NO_APPROVALS })
     expect(second.engine.outbox.get(turn.effectId)).toMatchObject({ status: 'cancelled', lastError: 'daemon_restart' })
     expect(second.engine.outbox.get(title.effectId)).toMatchObject({ status: 'pending', leaseOwner: null })
     expect(second.engine.outbox.get(cleanup.effectId)).toMatchObject({ status: 'pending' })
@@ -252,7 +254,7 @@ describe('RunEngine boot (SPEC §12.5)', () => {
 
     const second = daemon(20)
 
-    expect(second.boot).toEqual({ interrupted: [], uncertain: [], epoch: 2, orphanedChildren: [], recoveredWakes: [], strandedQueued: [] })
+    expect(second.boot).toEqual({ interrupted: [], uncertain: [], epoch: 2, orphanedChildren: [], recoveredWakes: [], strandedQueued: [], approvals: NO_APPROVALS })
     for (const run of [waiting, due]) {
       expect(second.store.getRun(run.runId)).toMatchObject({ status: 'paused', epoch: second.store.getRun(run.runId)!.epoch })
       expect(second.store.getAttempt(second.store.getRun(run.runId)!.activeAttemptId!)!.status).toBe('interrupted')
@@ -298,5 +300,114 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     expect(after.listForThread('t1')).toHaveLength(1)
     expect(after.listForThread('t1')[0].revokedAt).not.toBeNull()
     expect(after.resolve(minted.token)).toBeNull()
+  })
+
+  describe('saved approval requests (SPEC §17.6)', () => {
+    const ask = (engine: RunEngine, requestId: string, threadId: string, runId: string | null) =>
+      engine.approvals.create({
+        requestId,
+        threadId,
+        runId,
+        instanceId: 'claude',
+        provider: 'claude',
+        action: 'command',
+        permissionKey: 'claude:command',
+        fingerprint: `fp-${requestId}`,
+        questions: [{
+          id: 'permission',
+          prompt: 'Allow Claude Code to run a command (Bash)?\nls',
+          options: [
+            { id: 'allow', label: 'Allow once', decision: 'allow', scope: 'once' },
+            { id: 'reject', label: 'Reject', decision: 'reject' }
+          ]
+        }]
+      })
+
+    it('a crash turns pending requests into continue requests; an uncertain run records the tools that may have run', async () => {
+      const first = daemon(10)
+      const cut = await running(first.engine, 't-uncertain', 'req-1')
+      startTool(first.engine, cut, 'call-1', 'bash')
+      const calm = await running(first.engine, 't-calm', 'req-2')
+      ask(first.engine, 'r-uncertain', 't-uncertain', cut.runId)
+      ask(first.engine, 'r-calm', 't-calm', calm.runId)
+      // No shutdown(): the daemon crashed.
+
+      const second = daemon(20)
+      expect(second.boot.approvals).toEqual({ continued: ['r-uncertain', 'r-calm'], cancelled: [], undelivered: [] })
+      expect(second.engine.approvals.get('r-uncertain')).toMatchObject({ status: 'pending', answerPath: 'continue', uncertain: true, uncertainTools: ['bash'] })
+      expect(second.engine.approvals.get('r-calm')).toMatchObject({ status: 'pending', answerPath: 'continue', uncertain: false, uncertainTools: null })
+      // Nothing was answered or granted by the restart.
+      expect(second.engine.approvals.listPending().map((row) => row.decision)).toEqual([null, null])
+      const notes = (threadId: string) => second.store.listEvents(threadId).filter((event) => event.type === 'restart.note').map((event) => event.payload as { approvalRequestIds?: string[] })
+      expect(notes('t-uncertain')[0]!.approvalRequestIds).toEqual(['r-uncertain'])
+      expect(notes('t-calm')[0]!.approvalRequestIds).toEqual(['r-calm'])
+    })
+
+    it('a clean shutdown leaves them pending too: the next boot offers them as continue requests', async () => {
+      const first = daemon(10)
+      const run = await running(first.engine, 't', 'req-1')
+      ask(first.engine, 'r-1', 't', run.runId)
+      // The turn ends by the shutdown, as the orchestrator records it.
+      first.engine.markTerminal(run.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+      expect(first.engine.approvals.get('r-1')!.status).toBe('pending')
+      first.engine.shutdown()
+
+      const second = daemon(20)
+      expect(second.boot.approvals.continued).toEqual(['r-1'])
+      expect(second.engine.approvals.get('r-1')).toMatchObject({ status: 'pending', answerPath: 'continue' })
+    })
+
+    it('an answer committed but never delivered is reported and becomes a continue request', async () => {
+      const first = daemon(10)
+      const run = await running(first.engine, 't', 'req-1')
+      ask(first.engine, 'r-1', 't', run.runId)
+      // Settled with its delivery effect (the executor never ran), then the daemon crashed.
+      const settled = first.engine.approvals.settle('r-1', { permission: 'allow' }, { kind: 'user', via: 'gui' }, { enqueueDelivery: true })
+      expect(settled).toMatchObject({ ok: true, decision: 'allow' })
+      expect(first.engine.outbox.listForThread('t').map((effect) => effect.kind)).toEqual(['request.respond'])
+
+      const second = daemon(20)
+      expect(second.boot.approvals).toEqual({ continued: [], cancelled: [], undelivered: ['r-1'] })
+      // The delivery effect died with the process; the answer was not lost.
+      expect(second.engine.outbox.listForThread('t').find((effect) => effect.kind === 'request.respond')).toMatchObject({ status: 'cancelled', lastError: 'daemon_restart' })
+      expect(second.engine.approvals.get('r-1')).toMatchObject({ status: 'answered', decision: 'allow', answerPath: 'continue', deliveredAt: null })
+      expect(second.engine.approvals.listUndelivered().map((row) => row.requestId)).toEqual(['r-1'])
+    })
+
+    it('a request with no run that can continue is closed', async () => {
+      const first = daemon(10)
+      ask(first.engine, 'r-no-run', 't', null)
+      const finished = await running(first.engine, 'u', 'req-1')
+      first.engine.markTerminal(finished.runId, 'completed')
+      // A request written for a run that already ended is closed with it, never left behind.
+      ask(first.engine, 'r-late', 'u', finished.runId)
+
+      const second = daemon(20)
+      expect(second.boot.approvals).toEqual({ continued: [], cancelled: ['r-no-run', 'r-late'], undelivered: [] })
+      expect(second.engine.approvals.get('r-no-run')).toMatchObject({ status: 'cancelled', cancelReason: 'turn_ended' })
+      expect(second.engine.approvals.get('r-late')).toMatchObject({ status: 'cancelled', cancelReason: 'turn_ended' })
+    })
+
+    it('a run that ends while the daemon lives closes its requests in the terminal transaction', async () => {
+      const { engine, store } = daemon(10)
+      const done = await running(engine, 't1', 'req-1')
+      const failed = await running(engine, 't2', 'req-2')
+      const cut = await running(engine, 't3', 'req-3')
+      const unsure = await running(engine, 't4', 'req-4')
+      for (const [id, run] of [['r-done', done], ['r-failed', failed], ['r-cut', cut], ['r-unsure', unsure]] as const) ask(engine, id, run.threadId, run.runId)
+      engine.markTerminal(done.runId, 'completed')
+      engine.markTerminal(failed.runId, 'failed', { error: 'boom' })
+      // The restart cut-offs keep theirs for the next boot.
+      engine.markTerminal(cut.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+      engine.markTerminal(unsure.runId, 'uncertain', { uncertainReason: 'test' })
+
+      expect(engine.approvals.get('r-done')).toMatchObject({ status: 'cancelled', cancelReason: 'turn_ended' })
+      expect(engine.approvals.get('r-failed')).toMatchObject({ status: 'cancelled', cancelReason: 'turn_ended' })
+      expect(engine.approvals.get('r-cut')!.status).toBe('pending')
+      expect(engine.approvals.get('r-unsure')!.status).toBe('pending')
+      const types = store.listEvents('t1').map((event) => event.type)
+      expect(types).toContain('approval.pending')
+      expect(types.indexOf('approval.cancelled')).toBeGreaterThan(types.indexOf('approval.pending'))
+    })
   })
 })

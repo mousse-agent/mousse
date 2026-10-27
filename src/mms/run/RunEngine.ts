@@ -10,12 +10,14 @@ import { EffectOutbox } from './EffectOutbox'
 import { HandoffService } from './handoff/HandoffService'
 import { ContextTransfers } from './handoff/Transfers'
 import { Inbox } from './Inbox'
+import type { Answerer } from './approvalRights'
 import { DEFAULT_HEARTBEAT_MS } from './Reconciler'
 import type { RestartNote } from './restartNote'
 import type { RunStore } from './RunStore'
 import { bumpStopGenerations, currentStopGeneration, isRunAdmissionStale } from './stopGeneration'
 import { strandedQueuedRuns } from './strandedRuns'
 import { writeTerminalRun, type RunTerminalStatus, type TerminalNotice } from './terminal'
+import { ThreadApprovals, type BootRecovery } from './ThreadApprovals'
 import { ThreadMutex } from './ThreadMutex'
 import { ToolInvocations } from './ToolInvocations'
 import {
@@ -59,6 +61,17 @@ export type RunCommand =
       delegation?: SendDelegation
       /** The message text; kept only as the digest of a tracked delegation. */
       prompt?: string
+      /**
+       * SPEC §17.3: the send denies the thread's saved approval requests with `feedback` as the
+       * reason, inside its own admission, and hands the whole delivery group to the run it creates.
+       * Nothing is settled (and the run still queues) when `answeredBy` may not answer one of them.
+       */
+      settleApprovals?: { feedback?: string; answeredBy: Answerer }
+      /**
+       * SPEC §17.4: the answered approval requests this send is the continue turn of; handed to the
+       * run it creates in the same transaction, so the answers cannot be delivered twice or lost.
+       */
+      bindDelivery?: { requestIds: string[] }
     }
   | { kind: 'stop'; threadId: string; clientRequestId: string; runId: string }
   | { kind: 'steer'; threadId: string; clientRequestId: string; runId: string }
@@ -156,6 +169,8 @@ export interface BootReport {
   recoveredWakes: string[]
   /** Queued runs whose `turn.start` died before they began; reconciler rule 5 settles them. */
   strandedQueued: string[]
+  /** Saved approval requests the restart left (SPEC §17.6). */
+  approvals: BootRecovery
 }
 
 /** A `delegate_task` request (SPEC §14.2), already validated by the tool host. */
@@ -337,6 +352,8 @@ export class RunEngine extends EventEmitter {
   readonly daemonEpochs: DaemonEpoch
   readonly inbox: Inbox
   readonly delegations: Delegations
+  /** Saved approval requests (SPEC §17). */
+  readonly approvals: ThreadApprovals
   /** Context handoffs (SPEC §16.1). */
   readonly handoffs: HandoffService
   /** Fork and merge-back transfers (SPEC §16.2). */
@@ -369,6 +386,7 @@ export class RunEngine extends EventEmitter {
     this.daemonEpochs = new DaemonEpoch(opts.store)
     this.inbox = new Inbox(opts.store)
     this.delegations = new Delegations(opts.store, this.inbox)
+    this.approvals = new ThreadApprovals(opts.store, { outbox: this.outbox, lineage: (threadId) => this.delegations.getLineage(threadId) })
     this.handoffs = new HandoffService(opts.store)
     this.transfers = new ContextTransfers(opts.store)
     this.pid = opts.pid ?? process.pid
@@ -721,6 +739,8 @@ export class RunEngine extends EventEmitter {
       this.store.db.statement('UPDATE credentials SET revoked_at = ? WHERE revoked_at IS NULL').run(now)
       const interrupted: string[] = []
       const uncertain: string[] = []
+      /** The tools a crash may have cut off mid-call, per run: a saved approval request records them. */
+      const uncertainTools = new Map<string, string[]>()
       const notes = new Map<string, Omit<RestartNote, 'epoch'>>()
       const noteFor = (threadId: string): Omit<RestartNote, 'epoch'> => {
         const note = notes.get(threadId) ?? { runIds: [], uncertainRunIds: [], cutOffTools: [] }
@@ -739,6 +759,7 @@ export class RunEngine extends EventEmitter {
             error: `Non-idempotent tools were in flight when the daemon stopped: ${names.join(', ')}.`
           })
           uncertain.push(run.runId)
+          uncertainTools.set(run.runId, names)
         } else {
           this.writeTerminal(run, run.epoch, 'interrupted', { interruptedBy: 'daemon_restart' })
           interrupted.push(run.runId)
@@ -762,12 +783,20 @@ export class RunEngine extends EventEmitter {
         note.queuedRunIds = [...(note.queuedRunIds ?? []), run.runId]
         strandedQueued.push(run.runId)
       }
+      // SPEC §17.6: what waited for a provider in the dead process can only continue the thread now.
+      const approvals = this.approvals.recoverOnBoot(uncertainTools)
+      for (const requestId of approvals.continued) {
+        const record = this.approvals.get(requestId)
+        if (!record) continue
+        const note = noteFor(record.threadId)
+        note.approvalRequestIds = [...(note.approvalRequestIds ?? []), requestId]
+      }
       for (const [threadId, note] of notes)
         this.store.appendEvent({ threadId, type: 'restart.note', payload: { ...note, epoch } })
       // A subagent's question lives in the previous process's memory: nobody can answer it now.
       this.inbox.markAcknowledged(this.inbox.listOpenChildQuestions().map((row) => row.inboxId))
       this.settleAllWaitingDelegations()
-      return { interrupted, uncertain, epoch, orphanedChildren, recoveredWakes, strandedQueued }
+      return { interrupted, uncertain, epoch, orphanedChildren, recoveredWakes, strandedQueued, approvals }
     })
     this.daemonEpoch = report.epoch
     return report
@@ -1621,6 +1650,9 @@ export class RunEngine extends EventEmitter {
       // Not stored: the same `continue:<runId>` request succeeds once the user acknowledges.
       if (refusal) return refuse(refusal)
       if (command.delegation) this.checkFollowUp(command.threadId, command.delegation)
+      // The message denies the thread's saved approval requests in this same transaction: either every
+      // request is settled and the run exists, or nothing is (SPEC §17.3).
+      const settlement = command.settleApprovals ? this.approvals.settleForSend(command.threadId, command.settleApprovals) : null
       const continuationOf = command.continuationOfRunId
       const run = store.createRun({
         threadId: command.threadId,
@@ -1649,6 +1681,10 @@ export class RunEngine extends EventEmitter {
           role: tracked.role
         })
       }
+      // The run now owns every answer it was started for: the group a message denied (and the earlier
+      // approvals of a partly answered group), or the answers of a continue turn.
+      if (settlement && !settlement.refused && settlement.requestIds.length) this.approvals.bindDelivery(settlement.requestIds, run.runId)
+      if (command.bindDelivery?.requestIds.length) this.approvals.bindDelivery(command.bindDelivery.requestIds, run.runId)
       // The replacement exists before the pause ends, so a subagent's task stays `running` across the hand-over.
       let endedPause: { runId: string; resumeItemId?: string } | undefined
       if (paused) {

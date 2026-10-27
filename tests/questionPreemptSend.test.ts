@@ -46,7 +46,7 @@ describe('send preempts pending questions instead of queueing', () => {
       'thread-qa'
     )
     const result = userQuestionService.autoRejectPendingForThread('thread-qa')
-    expect(result).toEqual({ answered: 1, dismissed: 0 })
+    expect(result).toEqual({ answered: 1, dismissed: 0, refused: 0 })
     await expect(waiter).resolves.toEqual({ approval: 'reject' })
     expect(userQuestionService.listPendingForThread('thread-qa')).toHaveLength(0)
   })
@@ -67,7 +67,7 @@ describe('send preempts pending questions instead of queueing', () => {
     )
     const failed = expect(waiter).rejects.toThrow(/dismiss/i)
     const result = userQuestionService.autoRejectPendingForThread('thread-ask')
-    expect(result).toEqual({ answered: 0, dismissed: 1 })
+    expect(result).toEqual({ answered: 0, dismissed: 1, refused: 0 })
     await failed
     expect(userQuestionService.listPendingForThread('thread-ask')).toHaveLength(0)
   })

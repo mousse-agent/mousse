@@ -79,7 +79,7 @@ import { stableStringify } from '../run/json'
 import { closeStaleActivity, cutOffActivityOf, formatRestartNote } from '../run/restartNote'
 import { createHarnessGateway, PI_DRIVER_ID, type AdapterHost, type BindInput, type ChildTurnPolicy, type DefinitionLoop, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
 import { piDriver } from '../harness/drivers/pi'
-import { contextGauge, threadTurnOrigin } from '../harness/policy'
+import { contextGauge, policyOrigin, threadTurnOrigin } from '../harness/policy'
 import type { BotThreads } from '../../shared/bots/personal/authority'
 import type { BotTurnDispatcher, PreparedBotTurn } from '../bots/activation/dispatcher'
 import { harnessAppError, isRetriesExhausted, type BindPolicy, type ExecutionBinding, type HarnessCaps, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
@@ -149,6 +149,8 @@ import {
   type PermissionMode
 } from '../../shared/permissionMode'
 import { describeApprovalRefusal, type Answerer } from '../run/approvalRights'
+import { formatApprovalDecisions } from '../run/approvalNote'
+import type { ApprovalRecord, ContinuationDue } from '../run/ThreadApprovals'
 import { allowsOrchestrationActions, buildModeChangeNotice, chatModeEquals, getChatModeLabel, getLastUserChatMode, normalizeChatMode } from '../../shared/chatMode'
 import { AgentRegistry } from '../agents/AgentRegistry'
 import { TaskQueue } from '../tasks/TaskQueue'
@@ -427,6 +429,12 @@ export interface OrchestratorSendOptions {
    * (`canAnswerApproval`); one that is not leaves them pending and its message queues.
    */
   actor?: Answerer
+  /**
+   * Internal: this send is the continue turn that delivers these answered approval requests (SPEC
+   * §17.4). They are handed to its run in the admitting transaction, and the send does not deny the
+   * thread's other approvals.
+   */
+  bindDelivery?: { requestIds: string[] }
   /**
    * Daemon-only (the protocol request has no such fields): the model this turn runs on, whatever the
    * thread's own selection. A hidden or disabled model is refused before a run exists. The thread's
@@ -1525,8 +1533,10 @@ export class OrchestratorService extends EventEmitter {
     this.questionRouterOff?.()
     this.questionRouterOff = null
     this.runEngine?.handoffs.setTranscriptSource(null)
+    this.unbindApprovals()
     this.runEngine = engine
     if (!engine) return
+    this.bindApprovals(engine)
     this.installTitleGuard()
     this.attachInFlightCanceller()
     // Input (4) of the hold predicate: synchronous, in memory, never throws (it is read inside transactions).
@@ -1560,6 +1570,12 @@ export class OrchestratorService extends EventEmitter {
         this.runtimeManager?.setPendingDelegations(event.threadId,
           engine.delegations.listForParentThread(event.threadId).some((delegation) => delegation.status === 'running'))
       if (event.type === 'reconcile.delivery_failed') this.noteUndeliveredResult(event)
+      // A saved approval request closed without an answer (its run ended, a Stop, the thread was
+      // deleted): its card goes and the provider callback that still waits for it is released.
+      if (event.type === 'approval.cancelled') {
+        const { requestId, reason } = event.payload as { requestId?: string; reason?: string }
+        if (requestId) this.questions.approvalClosed(requestId, reason ?? 'withdrawn')
+      }
       this.emit('run-event', event)
     }
     const onStop = (payload: { threadId: string; runId: string }): void => { this.emit('stop-requested', payload) }
@@ -1571,6 +1587,86 @@ export class OrchestratorService extends EventEmitter {
       engine.off('event', onEvent)
       engine.off('stop-requested', onStop)
       engine.off('steer-accepted', onSteer)
+    }
+  }
+
+  /**
+   * Approval requests are saved in the engine's database from now on (SPEC §17). The service finds the
+   * run that is asking by its thread, delivers answers through the `request.respond` effect when a
+   * worker is attached, and asks this orchestrator for the continue turn of a restarted run.
+   */
+  private bindApprovals(engine: RunEngine): void {
+    this.questions.setApprovalStore({
+      store: engine.approvals,
+      context: (threadId) => {
+        const run = engine.getActiveRun(threadId)
+        if (!run) return null
+        const binding = engine.bindingForRun(run.runId)
+        return { runId: run.runId, instanceId: binding?.instanceId ?? '', provider: binding?.driver ?? '', origin: binding ? policyOrigin(binding.policy) : 'interactive' }
+      },
+      effectDelivery: () => this.effectsEnabled(),
+      continuationDue: (due) => this.startApprovalContinuation(due)
+    })
+  }
+
+  /** Only the binding this orchestrator made: a service shared with a newer orchestrator keeps theirs. */
+  private unbindApprovals(): void {
+    const store = this.runEngine?.approvals
+    if (store && this.questions.approvalStore === store) this.questions.setApprovalStore(null)
+  }
+
+  /**
+   * SPEC §17.4: every approval request a dead run left is answered, so the thread continues from where
+   * the run was cut off. The click was the user action SPEC §16.4 requires; a repeat of the same run's
+   * continuation is a replay (`approval-run:<runId>`). The answers are handed to the new run in the
+   * admitting transaction, and the run's first request for the same action is granted once.
+   */
+  private startApprovalContinuation(due: ContinuationDue): void {
+    void this.send('Continue where you left off.', false, {
+      threadId: due.threadId,
+      clientRequestId: `approval-run:${due.runId}`,
+      continuationOfRunId: due.runId,
+      acknowledgeUncertain: due.uncertain,
+      bindDelivery: { requestIds: due.requestIds },
+      awaitMode: 'ack'
+    }).catch((error: unknown) => {
+      console.warn('the continuation of an answered approval could not start', { threadId: due.threadId, runId: due.runId, error: error instanceof Error ? error.message : String(error) })
+    })
+  }
+
+  /**
+   * Boot: an answer committed before the process died but never delivered continues the thread now
+   * that the worker runs, once every request of its run is answered. A run's continuation that was
+   * already admitted is a replay.
+   */
+  private resumeUndeliveredApprovals(): void {
+    const engine = this.runEngine
+    if (!engine) return
+    try {
+      const byRun = new Map<string, ApprovalRecord[]>()
+      for (const row of engine.approvals.listUndelivered()) {
+        if (row.answerPath !== 'continue' || !row.runId) continue
+        byRun.set(row.runId, [...(byRun.get(row.runId) ?? []), row])
+      }
+      for (const [runId, rows] of byRun) {
+        if (engine.approvals.listPendingForRun(runId).length) continue
+        this.startApprovalContinuation({ threadId: rows[0]!.threadId, runId, requestIds: rows.map((row) => row.requestId), uncertain: rows.some((row) => row.uncertain) })
+      }
+    } catch (error) {
+      console.warn('answered approvals could not be resumed', { error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /** What the run tells its agent about the approvals it was started to deliver; undefined when none. */
+  private approvalDecisionNote(runId: string | undefined): string | undefined {
+    const engine = this.runEngine
+    if (!engine || !runId) return undefined
+    try {
+      const text = formatApprovalDecisions(engine.approvals.listDeliveredToRun(runId))
+      return text || undefined
+    } catch (error) {
+      console.warn('approval decisions could not be read', { runId, error: error instanceof Error ? error.message : String(error) })
+      return undefined
     }
   }
 
@@ -2024,6 +2120,17 @@ export class OrchestratorService extends EventEmitter {
     const result = engine.stopSubtree({ threadId, reason, ...opts })
     if (result.status !== 'stopped') return { ok: false, ...result }
     let aborted = false
+    // A Stop closes the saved approval requests of every thread it covers, including the ones a restart
+    // left for a run that no longer exists: nothing would answer them any more.
+    if (!result.replayed) {
+      for (const id of result.threads) {
+        try {
+          engine.approvals.cancelForThread(id, 'stopped')
+        } catch (error) {
+          console.warn('a Stop could not close approval requests', { threadId: id, error: error instanceof Error ? error.message : String(error) })
+        }
+      }
+    }
     if (result.replayed) {
       // The first Stop's interrupt may have ended without stopping the run (M4).
       for (const run of engine.reinterruptStopped(result)) aborted = this.interruptNow(run.runId, run.threadId) || aborted
@@ -2235,6 +2342,8 @@ export class OrchestratorService extends EventEmitter {
   attachEffectWorker(worker: EffectWorker | null): void {
     this.effectWorker = worker
     this.attachInFlightCanceller()
+    // Answers committed before the previous process died continue their threads once turns can run.
+    if (worker) setImmediate(() => { if (this.effectWorker === worker) this.resumeUndeliveredApprovals() })
   }
 
   /** C2: the engine aborts a claimed `turn.start` (a cancelled child still provisioning) through the worker. */
@@ -2600,7 +2709,9 @@ export class OrchestratorService extends EventEmitter {
     return {
       'turn.start': (effect, ctx) => this.executeTurnStartEffect(effect, ctx.signal),
       'turn.interrupt': (effect) => this.executeTurnInterruptEffect(effect),
-      'turn.steer': async (effect) => this.executeTurnSteerEffect(effect)
+      'turn.steer': async (effect) => this.executeTurnSteerEffect(effect),
+      // SPEC §17.4: an answer committed with this effect reaches the provider callback that waits for it.
+      'request.respond': async (effect) => { this.questions.deliver((effect.payload as { requestId: string }).requestId) }
     }
   }
 
@@ -3971,7 +4082,7 @@ export class OrchestratorService extends EventEmitter {
     // permission mode; `settle` applies `canAnswerApproval`. A plain question is answered as before.
     const settled = this.questions.settle(input.requestId, input.answers, { kind: 'agent', threadId: parentThreadId, runId: parentRunId, permissionMode: this.runPermissionMode(parentRunId) })
     if (!settled.ok) {
-      if (settled.reason === 'unknown')
+      if (settled.reason === 'unknown' || settled.reason === 'already_answered' || settled.reason === 'cancelled')
         return { answered: false as const, code: 'no_such_question' as const, message: `Question ${input.requestId} was answered or dismissed first.` }
       const code = settled.reason === 'answerer_required' ? 'not_parent' : settled.reason
       return { answered: false as const, code, message: `"${target.title}" asked for an approval you cannot give. ${describeApprovalRefusal(code)}` }
@@ -4774,6 +4885,11 @@ export class OrchestratorService extends EventEmitter {
     this.revokeMcp(threadId)
     this.appToolTurns.forgetThread(threadId)
     this.dropContinuationsOf(threadId)
+    try {
+      this.runEngine?.approvals.cancelForThread(threadId, 'thread_deleted')
+    } catch (error) {
+      console.warn('a deleted thread\'s approval requests could not be closed', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
     if (this.runEngine)
       void this.stopThread(threadId, 'thread_deleted', { clearQueue: true }).catch((error: unknown) => {
         console.warn('a deleted thread\'s work could not be stopped', { threadId, error: error instanceof Error ? error.message : String(error) })
@@ -5654,7 +5770,8 @@ export class OrchestratorService extends EventEmitter {
     workflowRun?: WorkflowChatRun,
     subagentNotice?: SubagentNoticeItem[],
     permissionMode?: PermissionMode,
-    scheduled?: ScheduledTurnRef
+    scheduled?: ScheduledTurnRef,
+    approvalNote?: string
   ): { claimAccepted: boolean } {
     const messagesBefore = this.messages.length
     const nativeBefore = structuredClone(this.nativeContext)
@@ -5694,6 +5811,11 @@ export class OrchestratorService extends EventEmitter {
         }
       }
     }
+    // Decisions the user made about approval requests while the agent could not be asked reach it
+    // with the message that delivers them (SPEC §17.4), before the visible message.
+    const decisionNotice: ChatMessage | null = approvalNote
+      ? { id: uuidv4(), role: 'user', content: approvalNote, timestamp: new Date().toISOString(), hidden: true }
+      : null
     const addedMessage: ChatMessage = {
       id: uuidv4(),
       role: 'user',
@@ -5720,6 +5842,10 @@ export class OrchestratorService extends EventEmitter {
     if (permissionNotice) {
       this.messages.push(permissionNotice)
       this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(permissionNotice.content))
+    }
+    if (decisionNotice) {
+      this.messages.push(decisionNotice)
+      this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(decisionNotice.content))
     }
     this.messages.push(addedMessage)
     this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(userContent, images))
@@ -6267,17 +6393,28 @@ export class OrchestratorService extends EventEmitter {
       ? () => this.assertSendableSelection(session, input, opts?.modelOverride, opts?.origin === 'schedule')
       : undefined
 
+    // The sender denies the thread's saved approval requests inside the send's own admission when it
+    // may answer them (SPEC §17.3); the message is their reason. A follow-up from a parent
+    // (`continue_subagent`) never answers a subagent's question for it, and the continue turn that
+    // delivers answered approvals denies nothing.
+    // A scheduled run (`preemptQuestions: false`) never answers for the user either: it waits.
+    const deniesApprovals = !opts?.forceQueue && !opts?.delegation && !opts?.bindDelivery && opts?.preemptQuestions !== false
     // The run is durable before any queue/run decision or provider I/O (SPEC §2.1).
     let run: { runId: string; sequence: number } | undefined
     if (this.runEngine) {
+      const text = normalizeSendRequest(input).content
       const result = await this.runEngine.dispatch({
         kind: 'send',
         threadId,
         clientRequestId: opts?.clientRequestId ?? uuidv4(),
         source: opts?.source ?? 'protocol',
-        prompt: normalizeSendRequest(input).content,
+        prompt: text,
         ...(opts?.delegation ? { delegation: opts.delegation } : {}),
-        ...(opts?.continuationOfRunId ? { continuationOfRunId: opts.continuationOfRunId, acknowledgeUncertain: opts.acknowledgeUncertain === true } : {})
+        ...(opts?.continuationOfRunId ? { continuationOfRunId: opts.continuationOfRunId, acknowledgeUncertain: opts.acknowledgeUncertain === true } : {}),
+        ...(deniesApprovals
+          ? { settleApprovals: { ...(opts?.continuationOfRunId || opts?.source === 'wake' || !text.trim() ? {} : { feedback: text }), answeredBy: opts?.actor ?? { kind: 'user' as const } } }
+          : {}),
+        ...(opts?.bindDelivery ? { bindDelivery: opts.bindDelivery } : {})
       }, { admit })
       if (result.status === 'rejected' && CONTINUATION_REFUSALS.has(result.reason))
         throw new DomainRpcError(result.reason, `Cannot continue run ${opts?.continuationOfRunId}: ${result.reason}.`)
@@ -6312,12 +6449,14 @@ export class OrchestratorService extends EventEmitter {
     // A thread waiting on the user's answer is busy for a send that must not answer it (a scheduled run).
     const waitingOnUser = opts?.preemptQuestions === false && this.questions.listPendingForThread(threadId).length > 0
 
-    // A follow-up from a parent (`continue_subagent`) never answers the subagent's question for it.
-    if (!opts?.forceQueue && !opts?.delegation && opts?.preemptQuestions !== false) {
+    if (deniesApprovals) {
+      // The saved approvals the send denied inside its admission: their waiting callbacks get the
+      // denial now that it is committed. Then the questions that live only in memory.
       // The sender denies the approvals only when it may answer them; otherwise they stay pending
       // and the message queues behind the turn.
+      const denied = this.questions.reconcileThread(threadId)
       const preempted = this.questions.autoRejectPendingForThread(threadId, opts?.actor)
-      if (preempted.answered + preempted.dismissed > 0 && session.isTurnRunning()) {
+      if (denied + preempted.answered + preempted.dismissed > 0 && session.isTurnRunning()) {
         this.abortActiveTurn(threadId)
         await this.waitForTurnToSettle(session)
       }
@@ -6862,6 +7001,8 @@ export class OrchestratorService extends EventEmitter {
     // The mode the turn runs in is known before its message is admitted, so a change reaches the
     // agent with that message and the message records the mode.
     const turnPermission = !reuseLastUser && displayUserMessage ? this.previewTurnPermission(session, mode, opts) : undefined
+    // The approvals this run was started to deliver (a continue turn, or a message that denied them).
+    const approvalNote = !reuseLastUser ? this.approvalDecisionNote(opts?.runId) : undefined
     try {
       if (!reuseLastUser) {
         // Automatic orchestration wakes belong in model context, not the user-facing timeline.
@@ -6877,7 +7018,8 @@ export class OrchestratorService extends EventEmitter {
             undefined,
             opts?.subagentNotice,
             turnPermission,
-            opts?.schedule
+            opts?.schedule,
+            approvalNote
           )
           claimAccepted = true
           this.notifyUserInputAccepted(session.threadId, opts?.onUserInputAccepted)

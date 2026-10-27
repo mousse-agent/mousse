@@ -8,6 +8,7 @@ import { AgentRegistry } from '../../src/mms/agents/AgentRegistry'
 import { ProjectManager } from '../../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../../src/mms/data/ThreadDataStore'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
+import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import type { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import { testHarness } from '../../src/mms/run/testkit/harness'
@@ -150,10 +151,13 @@ export function phase6Daemon(home: string, adapters: ProviderAdapter[], options:
   const projects = new ProjectManager()
   const store = new ThreadDataStore(projects)
   const settings = { ...getDefaultSettings(), provider: { ...getDefaultSettings().provider, ...PI } }
+  // Each daemon has its own questions, as each process has: waiting callbacks never outlive a daemon.
+  const questions = new UserQuestionService()
   const orch = new OrchestratorService(
     new AgentRegistry(), new TaskQueue(), new WorktreeManager(home), new PtyManager(),
     { get: () => settings } as never, {} as never,
-    undefined, undefined, undefined, undefined, undefined, projects
+    undefined, undefined, undefined, undefined, undefined, projects,
+    { questions }
   )
   orch.setThreadStore(store)
   ;(orch as any).llm = {
@@ -195,7 +199,7 @@ export function phase6Daemon(home: string, adapters: ProviderAdapter[], options:
     engine.store.db.close()
   }
   return {
-    orch, engine, store, projects, boot, worker,
+    orch, engine, store, projects, boot, worker, questions,
     /** Ends like a crash: the daemon epoch stays open. */
     crash: () => halt(false),
     stop: () => halt(true),
