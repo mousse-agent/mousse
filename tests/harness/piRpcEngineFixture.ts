@@ -99,9 +99,11 @@ export async function setup(cleanups: Array<() => unknown>, options: SetupOption
 export function harness(project: string, overrides: Partial<TurnInput> = {}, hostOverrides: Partial<AdapterHost> = {}) {
   const events: Array<{ kind: string; [key: string]: unknown }> = []
   const controller = new AbortController()
+  // A definition's turn comes whole: a session of its own and its system prompt in place of Pi's.
+  const definitionTurn: Partial<TurnInput> = hostOverrides.definition ? { session: 'ephemeral', instructions: { text: 'You are a test agent.', placement: 'replace' } } : {}
   const input: TurnInput = {
     runId: 'r1', attemptId: 'a1', threadId: 't1', cwd: project, instanceId: 'pi:mock', model: 'mock-model', llmProvider: 'mock',
-    modelPinned: true, mode: 'agent' as TurnInput['mode'], prompt: 'Say hello', messages: [], signal: controller.signal, ...overrides
+    modelPinned: true, mode: 'agent' as TurnInput['mode'], prompt: 'Say hello', messages: [], signal: controller.signal, ...definitionTurn, ...overrides
   }
   const sink: TurnSink = {
     text: (event) => events.push({ ...event, kind: 'text' }),

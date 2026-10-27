@@ -10,6 +10,7 @@ import { AppToolTurns } from '../../src/mms/run/mcp/appTools/turns'
 import { appTurn } from '../run/appToolsFixture'
 import type { AgentRuntimePolicy, AgentRuntimeToolApprovalRequest } from '../../src/shared/agents/execution'
 import type { EffectiveAgentGrants } from '../../src/shared/agents/types'
+import type { AdapterHost } from '../../src/mms/run/adapters/ProviderAdapter'
 import { harness, script, setup } from './piRpcEngineFixture'
 
 // PR 4 4b2: a definition's authority over Pi's built-in tools, at the gate (`/pi/gate`), on the real
@@ -41,10 +42,10 @@ function grants(...tools: string[]): EffectiveAgentGrants {
 const ALL = ['read', 'write', 'edit', 'bash', 'ls', 'grep', 'find']
 
 /** One turn whose model calls `calls` in order, under `definition`; returns the tool results. */
-async function run(definition: (project: string) => DefinitionAuthority, calls: Array<{ name: string; args: Record<string, unknown> }>) {
+async function run(definition: (project: string) => DefinitionAuthority, calls: Array<{ name: string; args: Record<string, unknown> }>, host: Partial<AdapterHost> = {}) {
   const { engine, recorder, project } = await setup(cleanups)
   recorder.respond(script([...calls.map((tool) => ({ tool })), { text: 'done' }]))
-  const turn = harness(project, {}, { definition: definition(project) })
+  const turn = harness(project, {}, { definition: definition(project), ...host })
   const result = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
   expect(result.text).toBe('done')
   const results = turn.events.filter((event) => event.kind === 'tool' && event.phase === 'complete')
@@ -55,7 +56,7 @@ async function run(definition: (project: string) => DefinitionAuthority, calls: 
 const refused = (event: { summary?: unknown }) => event.summary === 'The tool returned an error.'
 
 describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, real child)', () => {
-  it('read-only denies write; scripts off deny bash; a tool outside the grants is refused', async () => {
+  it('read-only denies write; scripts off deny bash; a tool outside the grants is not even offered', async () => {
     const readOnly = await run((project) => ({ policy: policy(project, { workspace: { mode: 'read_only' } }), grants: grants(...ALL) }), [
       { name: 'write', args: { path: 'blocked.txt', content: 'x' } }
     ])
@@ -73,7 +74,8 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
       { name: 'write', args: { path: 'ungranted.txt', content: 'x' } }
     ])
     expect(existsSync(join(notGranted.project, 'ungranted.txt'))).toBe(false)
-    expect(String(notGranted.results[0].response)).toContain('not granted')
+    // A definition's turn is offered exactly its grants: Pi has no such tool to run.
+    expect(String(notGranted.results[0].response)).toBe('Tool write not found')
   }, 120_000)
 
   it('a path outside the roots is denied in every form Pi would open, and a path inside runs', async () => {
@@ -136,7 +138,7 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
     expect(starts).toHaveLength(1)
   }, 120_000)
 
-  it('an app tool the definition refuses is refused at the gate and costs no tool call, as a refused built-in does', async () => {
+  it('an app tool the definition does not grant is not offered and costs no tool call, as an ungranted built-in', async () => {
     const { engine, recorder, project } = await setup(cleanups, {
       mousseTools: () => [{ name: 'create_task', description: 'Create a task', inputSchema: { type: 'object', properties: { description: { type: 'string' } } }, class: 'mutation' }]
     })
@@ -155,7 +157,7 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
     const result = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
     expect(result.text).toBe('done')
     const results = turn.events.filter((event) => event.kind === 'tool' && event.phase === 'complete')
-    expect(String(results[0].response)).toContain('not granted')
+    expect(String(results[0].response)).toBe('Tool create_task not found')
     // The refused app tool cost nothing: the one allowed call was the granted write.
     expect(readFileSync(join(project, 'granted.txt'), 'utf8')).toBe('ok')
     expect(counters.toolCalls).toBe(1)
@@ -250,5 +252,47 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
     expect(asked.map((request) => [request.toolName, request.arguments])).toEqual([['create_task', { description: 'a task' }], ['write', expect.anything()]])
     expect(ran).toEqual([{ description: 'a task' }])
     expect(counters.toolCalls).toBe(1)
+  }, 90_000)
+
+  it('the run stops being the thread’s active run while a built-in waits for approval: it is refused and nothing is written', async () => {
+    let active = true
+    const { project, results } = await run((root) => ({
+      policy: policy(root, { approval: { policy: 'always' } }),
+      grants: grants(...ALL),
+      // The run ends elsewhere (or another takes the thread) during the approval, which then says yes.
+      approve: async (request) => { active = false; return { status: 'approved', digest: request.argumentDigest } }
+    }), [{ name: 'write', args: { path: 'late.txt', content: 'x' } }], { tools: { runActive: () => active } })
+    expect(existsSync(join(project, 'late.txt'))).toBe(false)
+    expect(results.map(refused)).toEqual([true])
+  }, 90_000)
+
+  it('a built-in has a started ledger row before it runs, settled after: committed when it succeeds, failed when it fails', async () => {
+    const rows: Array<{ id: string; name: string; idempotent: boolean | undefined; outcome?: string }> = []
+    const toolLedger = {
+      start: (call: { id: string; name: string }, options?: { idempotent?: boolean }) => {
+        const id = `row-${rows.length + 1}`
+        rows.push({ id, name: call.name, idempotent: options?.idempotent })
+        return id
+      },
+      commit: (id: string) => void (rows.find((row) => row.id === id)!.outcome = 'committed'),
+      failed: (id: string) => void (rows.find((row) => row.id === id)!.outcome = 'failed')
+    }
+    const { project } = await run((root) => ({ policy: policy(root), grants: grants(...ALL) }), [
+      { name: 'write', args: { path: 'ledgered.txt', content: 'ok' } },
+      { name: 'read', args: { path: 'missing.txt' } }
+    ], { tools: { toolLedger: toolLedger as never } })
+    expect(readFileSync(join(project, 'ledgered.txt'), 'utf8')).toBe('ok')
+    expect(rows).toEqual([
+      { id: 'row-1', name: 'write', idempotent: false, outcome: 'committed' },
+      { id: 'row-2', name: 'read', idempotent: true, outcome: 'failed' }
+    ])
+  }, 90_000)
+
+  it('a tool offered beyond the grants is still refused by the gate itself (not granted), and nothing is written', async () => {
+    const { project, results } = await run((root) => ({ policy: policy(root), grants: grants('read') }), [
+      { name: 'write', args: { path: 'beyond.txt', content: 'x' } }
+    ], { bridge: { mcp: null, turnToken: 'tt', sessionInstructions: '', turnPreamble: '', userMcp: 'proxy', toolPolicy: { allow: ['read', 'write'] } } })
+    expect(existsSync(join(project, 'beyond.txt'))).toBe(false)
+    expect(String(results[0].response)).toContain('not granted')
   }, 90_000)
 })

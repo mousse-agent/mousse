@@ -231,7 +231,13 @@ export class AgentExecutionService {
       approveToolRequest: host?.approveToolRequest,
       effects: createEffectTracker(),
       conversation: runtimeContext.conversation,
-      fallbacks: structuredClone(resolved.settings.fallbacks)
+      fallbacks: structuredClone(resolved.settings.fallbacks),
+      features: {
+        outputFormat: resolved.settings.output.format,
+        browserMode: resolved.settings.browser.mode,
+        memoryScope: resolved.settings.memory.scope,
+        delegation: resolved.settings.delegation.maxConcurrentChildren > 0 || resolved.settings.delegation.maxDepth > 0 || resolved.settings.delegation.allowedChildDefinitionIds.length > 0
+      }
     }
     // Every stored runtimeKind runs on the one runtime; the instance comes from the model ref, and
     // what that instance cannot enforce is refused there (`gateway.check`), never relaxed.

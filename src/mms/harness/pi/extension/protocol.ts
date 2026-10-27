@@ -65,6 +65,8 @@ export interface PiTurnResponse {
   attemptToken: string
   /** Appended to Pi's system prompt for the turn. */
   sessionInstructions: string
+  /** Replaces Pi's system prompt for the turn (an agent definition's, Mousse's tool instructions after it). */
+  systemPrompt?: string
   tools: PiTurnTool[]
   /** Pi's built-in tools active this turn (read-only ones in plan mode and read-only children). */
   activeBuiltins: string[]

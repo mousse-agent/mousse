@@ -331,6 +331,10 @@ export class ToolRegistry {
         const decision = await authorizeDefinitionCall(turn.definition, { toolName: name, args: checked, ...projectPath, signal: request.signal })
         if (!decision.allowed) return { text: decision.message, isError: true }
       }
+      // The run may have ended while the approval waited (here or at the runtime's gate): it is
+      // checked again right before the tool runs, as the in-process path does.
+      if (this.options.activeRunId(threadId) !== active || this.options.turns?.get(active) !== turn || !credential.current())
+        throw notLive(`Run ${active} is no longer the active run of thread ${threadId}; the tool was not run.`)
     }
     // A tool that changes the workspace asks first unless the run's permission mode allows edits (a
     // definition run is held to its own grants above); a rejection ends the call before its handler

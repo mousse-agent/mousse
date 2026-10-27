@@ -250,8 +250,11 @@ export interface BindInput {
 
 export interface ResolveStoredOptions {
   purpose: ResolvePurpose
-  /** An agent definition's turn: the instance's definition caps apply (`HarnessDriver.definitionCaps`). */
-  definition?: boolean
+  /**
+   * An agent definition's turn: the instance's definition caps apply (`HarnessDriver.definitionCaps`);
+   * `{loop: true}`: one that needs the instance's definition loop (`PolicyAuthority.loop`).
+   */
+  definition?: boolean | { loop: boolean }
   scope?: ProviderScope
   allowDisabled?: boolean
 }
@@ -942,7 +945,7 @@ export class Harness implements HarnessGateway {
         harnessFail('model_hidden', `${this.modelName(resolved.instanceId, selection.model)} is hidden. Show it in Settings → Providers or choose another model.`, resolved.instanceId)
     }
     const version = this.probes.get(resolved.instanceId)?.lastGood?.binary?.version
-    const caps = (options.definition && driver.definitionCaps?.(config)) || driver.caps(config, version, this.currentFacts(resolved.instanceId), resolved.instanceId)
+    const caps = (options.definition && driver.definitionCaps?.(config, { loop: options.definition !== true && options.definition.loop })) || driver.caps(config, version, this.currentFacts(resolved.instanceId), resolved.instanceId)
     // An instance that approves tools itself runs only turns a person drives; reading or stopping
     // work already running (`allowDisabled`) is never refused.
     if (!options.allowDisabled && !purposeAllowed(caps, options.purpose))
@@ -1057,7 +1060,7 @@ export class Harness implements HarnessGateway {
 
   check(resolved: ResolvedTurnSelection, policy: RunPolicy): Enforceability {
     const record = this.recordOrUndefined(resolved.instanceId)
-    const caps = record ? this.capsFor(record, policy.authority?.kind === 'definition') : resolved.caps
+    const caps = record ? this.capsFor(record, policy.authority) : resolved.caps
     const spendModel = hasSpendLimit(policy) ? record?.runtime.spendModel?.(resolved.model) : undefined
     const verdict = checkPolicy(caps, policy, resolved.instanceId, spendModel, record ? this.policyOptions(record) : undefined)
     // An agent definition names the provider that cannot hold it, for the editor and the run's error.
@@ -1075,7 +1078,7 @@ export class Harness implements HarnessGateway {
     const accountId = record ? await this.currentAccount(record) : undefined
     const counters = this.counters.get(resolved.instanceId)
     // The attempt runs on the caps of this moment, whatever the runtime reports meanwhile.
-    const caps = record ? this.capsFor(record, input.policy?.authority?.kind === 'definition') : resolved.caps
+    const caps = record ? this.capsFor(record, input.policy?.authority) : resolved.caps
     const requested = normalizePermissionMode(input.permissionMode)
     const { effective, supported } = this.resolvePermissionMode(record, caps, requested, input.cwd ?? undefined)
     if (effective.refused) throw harnessAppError(permissionModeRefusal(effective.reason, supported, resolved.instanceId))
@@ -1343,8 +1346,13 @@ export class Harness implements HarnessGateway {
           ...(spec.app?.bot ? { bot: spec.app.bot } : {}),
           ...(counted ? { budget: counted.budget } : {})
         }
-        // An agent definition's turn runs where the instance runs definitions (`definitionAdapter`).
-        const adapter = spec.binding.policy.authority?.kind === 'definition' ? record.runtime.definitionAdapter ?? record.runtime.adapter : record.runtime.adapter
+        // An agent definition's turn runs where its binding's caps say: on the instance's definition
+        // loop (`definitionAdapter`) when they are the loop's (`definitionLimits: 'in_loop'`), else on
+        // the runtime itself.
+        const definitionCaps = spec.binding.caps ?? this.capsFor(record, spec.binding.policy.authority)
+        const adapter = spec.binding.policy.authority?.kind === 'definition' && definitionLimitsLevel(definitionCaps) === 'in_loop'
+          ? record.runtime.definitionAdapter ?? record.runtime.adapter
+          : record.runtime.adapter
         const turn = await adapter.startTurn(input, sink, spec.control, host)
         minted?.settle({ status: turn.aborted || signal.aborted ? 'aborted' : 'completed', ...(turn.drain ? { drain: turn.drain } : {}) })
         minted = undefined
@@ -1607,8 +1615,8 @@ export class Harness implements HarnessGateway {
 
   /** Capabilities of a record's instance at its last known version and current runtime facts. */
   /** The caps a turn runs on: the instance's, or its definition caps for an agent definition's turn. */
-  private capsFor(record: InstanceRecord, definition: boolean): HarnessCaps {
-    return (definition && record.driver.definitionCaps?.(record.config)) || this.recordCaps(record)
+  private capsFor(record: InstanceRecord, authority: RunPolicy['authority']): HarnessCaps {
+    return (authority?.kind === 'definition' && record.driver.definitionCaps?.(record.config, { loop: authority.loop === true })) || this.recordCaps(record)
   }
 
   private recordCaps(record: InstanceRecord): HarnessCaps {

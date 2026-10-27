@@ -144,6 +144,11 @@ export interface RunPolicy {
 export interface PolicyAuthority {
   kind: 'definition' | 'bot'
   digest: string
+  /**
+   * A definition that needs the instance's own definition loop (its browser): it runs there while
+   * the loop exists, whatever runtime the instance runs other definitions on (`definitionCaps`).
+   */
+  loop?: true
 }
 
 /** The caller's part of a binding's policy (`HarnessGateway.bind`): mode and origin are bound separately. */

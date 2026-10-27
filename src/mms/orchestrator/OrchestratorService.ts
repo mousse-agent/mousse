@@ -44,6 +44,8 @@ import { AgentExecutionService } from '../agentDefinitions/AgentExecutionService
 import {
   createDefinitionRuntime,
   definitionMessages,
+  definitionFeatureRefusal,
+  definitionNeedsLoop,
   definitionRunPolicy,
   type DefinitionCheck,
   type DefinitionHostBindings,
@@ -906,6 +908,25 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /**
+   * Where a definition runs on its instance: the instance's definition runtime, or its definition
+   * loop while one exists for a definition that needs it. That is one whose settings need it
+   * (`definitionNeedsLoop`: its browser), or one whose token or USD limits only the loop can hold
+   * (a cost limit on an unpriced model, a model that does not always send its output cap), which
+   * ran on the loop before Pi RPC held definitions.
+   */
+  private placeDefinition(check: DefinitionCheck): { resolved: ResolvedTurnSelection; loop: boolean } {
+    const selection = this.definitionSelection(check.ref)
+    const options = { purpose: check.origin, scope: this.threadScope(check.threadId) }
+    const loop = definitionNeedsLoop(check.features)
+    const resolved = this.harness.resolveStored(selection, { ...options, definition: { loop } })
+    if (loop || resolved.caps.definitionLimits === 'in_loop') return { resolved, loop }
+    const verdict = this.harness.check(resolved, definitionRunPolicy(check, [], false))
+    if (verdict.ok || !verdict.error.missing?.length || !verdict.error.missing.every((missing) => missing === 'spendLimits')) return { resolved, loop }
+    const onLoop = this.harness.resolveStored(selection, { ...options, definition: { loop: true } })
+    return onLoop.caps.definitionLimits === 'in_loop' ? { resolved: onLoop, loop: true } : { resolved, loop }
+  }
+
   /** The stored selection a definition's model ref names: its instance, else its provider's built-in one. */
   private definitionSelection(ref: DefinitionCheck['ref']): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'> {
     const model = ref.effort && !parseThinkingSuffixFromModelId(ref.modelId).effort ? `${ref.modelId}:${ref.effort}` : ref.modelId
@@ -918,9 +939,10 @@ export class OrchestratorService extends EventEmitter {
    */
   checkDefinitionTurn(check: DefinitionCheck): DefinitionRefusal | undefined {
     try {
-      const resolved = this.harness.resolveStored(this.definitionSelection(check.ref), { purpose: check.origin, scope: this.threadScope(check.threadId), definition: true })
-      const verdict = this.harness.check(resolved, definitionRunPolicy(check))
-      if (verdict.ok) return undefined
+      const { resolved, loop } = this.placeDefinition(check)
+      const verdict = this.harness.check(resolved, definitionRunPolicy(check, [], loop))
+      // Its output, browser, memory and delegation settings, where the runtime does not run its loop.
+      if (verdict.ok) return definitionFeatureRefusal(resolved.caps, check.features)
       const { code, message, missing, reason } = verdict.error
       return { code, message, ...(missing ? { missing } : {}), ...(reason ? { reason } : {}) }
     } catch (error) {
@@ -1012,15 +1034,17 @@ export class OrchestratorService extends EventEmitter {
 
   private async runDefinitionTurn(turn: DefinitionTurnRequest, engine: RunEngine, lease: ThreadLeaseHandle, extras: DefinitionTurnExtras): Promise<DefinitionTurnResult> {
     const { threadId } = turn
-    const resolved = this.harness.resolveStored(this.definitionSelection(turn.ref), { purpose: turn.origin, scope: this.threadScope(threadId), definition: true })
+    const { resolved, loop } = this.placeDefinition(turn)
     // The user's MCP tools the definition was granted, by the name the runtime calls them.
     const mcpTools = this.mcpManager && turn.grants.mcpTools.length
       ? (await this.mcpManager.getEnabledTools(turn.projectPath, definitionActor(turn.grants)))
           .filter((tool) => definitionToolGranted(tool.providerName, turn.grants, [tool]))
       : []
-    const policy = definitionRunPolicy(turn, mcpTools.map((tool) => tool.providerName))
+    const policy = definitionRunPolicy(turn, mcpTools.map((tool) => tool.providerName), loop)
     const verdict = this.harness.check(resolved, policy)
     if (!verdict.ok) throw harnessAppError(verdict.error)
+    const featureRefusal = definitionFeatureRefusal(resolved.caps, turn.features, resolved.instanceId)
+    if (featureRefusal) throw harnessAppError({ code: 'policy_unenforceable', message: featureRefusal.message, missing: featureRefusal.missing ?? ['toolControl'], instanceId: resolved.instanceId })
     if (turn.signal.aborted) throw turn.signal.reason ?? new DOMException('Aborted', 'AbortError')
     const dispatched = await engine.dispatch({ kind: 'send', threadId, clientRequestId: `definition:${turn.runId}:${turn.attempt}`, source: 'definition' })
     if (dispatched.status !== 'accepted') throw harnessAppError({ code: 'operation_busy', message: "The agent's turn could not be recorded." })
@@ -1048,9 +1072,10 @@ export class OrchestratorService extends EventEmitter {
       mcpTools
     }
     const projectPath = turn.projectPath
-    // Held to the profile's agent access level like any run (SPEC §15.1), and the grant is kept on the run.
+    // A definition acts at `lineage`, as on the loop, whatever the profile's agent access level
+    // (SPEC §15.1); the grant is kept on the run.
     const modeCeiling = this.modeCeilingFor(threadId, 'agent')
-    const accessLevel = this.grantFor(threadId, modeCeiling)
+    const accessLevel: AgentAccessLevel = 'lineage'
     try {
       engine.recordAccessGrant(runId, accessLevel)
     } catch (error) {
@@ -1127,6 +1152,10 @@ export class OrchestratorService extends EventEmitter {
         const token = writers.issue(`definition:${runId}`, { version: 1, workspace: 'shared', access: 'write' })
         return <T>(run: () => Promise<T>): Promise<T> => writers.runWriter(token, run)
       })()
+      // The definition's prompt as written. A runtime other than the loop gets its granted skills after
+      // it, as the loop adds them itself (`Granted skill <name>`); nothing else of Mousse's is added.
+      const loadedSkills = resolved.caps.definitionLimits === 'in_loop' ? [] : this.appToolTurns.get(runId)?.loadedSkills ?? []
+      const systemPrompt = [turn.systemPrompt, ...loadedSkills.map((skill) => `Granted skill ${skill.name}:\n${skill.content}`)].filter(Boolean).join('\n\n')
       // Prior turns only, as a runtime that takes history in its prompt reads them.
       const preamble = turn.conversation.length ? nativeAgentHistory(createNativeContext(definitionMessages(turn.conversation, '').slice(0, -1))) : ''
       const input: TurnInput = {
@@ -1158,7 +1187,24 @@ export class OrchestratorService extends EventEmitter {
         compaction: () => {},
         retry: () => {},
         progress: () => {},
-        usage: () => {},
+        // A runtime that reports usage per request (Pi's agent): it is the record's usage, kept as it
+        // arrives, so a turn that fails (a limit reached, a provider error) is still counted. A loop
+        // that runs under the definition's limits reports its own (`effects.attemptUsage`).
+        usage: (reported) => {
+          if (loopUsed) return
+          // In the usage statistics too, as the loop records its own.
+          this.lineEditStats?.recordUsage({
+            timestamp: new Date().toISOString(), provider: resolved.llmProvider, model: binding.model,
+            input: reported.input, output: reported.output, cacheRead: reported.cacheRead, cacheWrite: reported.cacheWrite
+          })
+          const used = turn.effects.attemptUsage
+          turn.effects.attemptUsage = {
+            ...used,
+            inputTokens: used.inputTokens + reported.input,
+            outputTokens: used.outputTokens + reported.output,
+            costUsd: used.costUsd + (reported.costUsd ?? 0)
+          }
+        },
         providerRef: (ref) => this.markRun(runId, (runs, id) => { runs.recordProviderRef(id, ref) }),
         steerAccepted: () => {},
         providerMetrics: (metrics) => record.metrics(metrics),
@@ -1189,7 +1235,7 @@ export class OrchestratorService extends EventEmitter {
         control,
         host,
         app: context,
-        instructions: { text: turn.systemPrompt, placement: 'replace' },
+        instructions: { text: systemPrompt, placement: 'replace' },
         session: 'ephemeral',
         counters: turn.counters,
         spend: turn.spend
@@ -1205,11 +1251,21 @@ export class OrchestratorService extends EventEmitter {
       // A limit the loop reached fails the run, as the definition's result does.
       else if (loopLimit) markTerminal('failed', { error: `The agent reached its ${loopLimit.kind} limit (${loopLimit.limit}).` }, text)
       else markTerminal('completed', undefined, text)
-      const usage = loopUsed
-        ? { inputTokens: turn.effects.attemptUsage.inputTokens, outputTokens: turn.effects.attemptUsage.outputTokens, costUsd: turn.effects.attemptUsage.costUsd }
+      const reported = turn.effects.attemptUsage
+      const usage = loopUsed || reported.inputTokens || reported.outputTokens || reported.costUsd
+        ? { inputTokens: reported.inputTokens, outputTokens: reported.outputTokens, costUsd: reported.costUsd }
         : record.usage(result.usage)
       return { text, history: record.history(turn.userMessage, text), usage, ...(loopLimit ? { limit: loopLimit } : {}) }
     } catch (error) {
+      // A limit the runtime refused the next step for (Pi's agent) ends the run as the loop's does:
+      // with the reply so far and the limit, not as an error that drops it.
+      const limit = !signal.aborted && error instanceof AppError && error.code === 'budget_exhausted' ? (error.details as { limit?: AgentExecutionLimit } | undefined)?.limit : undefined
+      if (limit && typeof limit.kind === 'string' && typeof limit.limit === 'number') {
+        const text = record.finalText()
+        markTerminal('failed', { error: `The agent reached its ${limit.kind} limit (${limit.limit}).` }, text)
+        const reported = turn.effects.attemptUsage
+        return { text, history: record.history(turn.userMessage, text), usage: { inputTokens: reported.inputTokens, outputTokens: reported.outputTokens, costUsd: reported.costUsd }, limit }
+      }
       if (signal.aborted) markTerminal('interrupted', { interruptedBy: 'user' })
       else markTerminal('failed', { error: error instanceof Error ? error.message : String(error) })
       throw error
@@ -2850,7 +2906,8 @@ export class OrchestratorService extends EventEmitter {
       mcpEligible: Boolean(this.runEngine),
       ...(turn.definition ? { definition: turn.definition } : {}),
       ...(turn.bot ? { bot: turn.bot } : {}),
-      instructions: (mcpAttached) => ({
+      // A definition's turn runs on its own prompt and its granted skills only (`runDefinitionTurn`).
+      instructions: (mcpAttached) => turn.definition ? { sessionInstructions: '', turnPreamble: '' } : ({
         sessionInstructions: sessionInstructions({ mcp: mcpAttached, appletGuidance: this.appletStore ? APPLET_GENERATION_GUIDANCE : undefined }),
         turnPreamble: withBotInstructions(input.botInstructions, turnPreamble({
           loadedSkills: turn.loadedSkills,

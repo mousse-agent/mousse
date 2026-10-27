@@ -25,6 +25,7 @@ import { APPROVAL_ONLY_INSTANCE } from '../fixtures/agent-platform/exactDefiniti
 import { createDefinitionEngine, DEFINITION_ENGINES, ENGINE_MODEL, FAKE_KEY, type DefinitionEngine } from '../fixtures/agent-platform/definitionEngines'
 import type { Harness } from '../../src/mms/harness/gateway'
 import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
+import { harnessAppError } from '../../src/shared/harness/types'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 
@@ -543,8 +544,8 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     defs.outputs.push(call('thread_read', { threadId: stranger.id }), say('done'))
     const result = await orch.runAgentDefinition(request(resolved, thread.id))
     expect(result.status).toBe('completed')
-    // The record carries the profile's grant…
-    expect(engine.listRuns(thread.id)[0]!.accessGrant).toBe('manage')
+    // The record carries `lineage`, a definition's level on every runtime, not the profile's…
+    expect(engine.listRuns(thread.id)[0]!.accessGrant).toBe('lineage')
     // …but the loop's in-process call to another thread still reaches nothing, as on master (its tools act at
     // `lineage`, and the loop has no tools that read other threads).
     const results = defs.captured.at(-1)!.messages.filter((message) => message.role === 'toolResult').map((message) => JSON.stringify(message.content))
@@ -626,6 +627,97 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     const resolved = resolver.resolve({ definitionId: definition.id, revision: definition.revision })
     const result = await orch.runAgentDefinition(request(resolved, store.createThread('deadline').id))
     expect(result).toMatchObject({ status: 'failed', error: { code: 'BUDGET_EXCEEDED', details: { limit: { kind: 'elapsed_ms', limit: 200 } } } })
+  })
+
+  it('a runtime that reports usage per request (Pi’s agent): the run’s usage is what it reported, a turn that reached a limit included', async () => {
+    harness.stop()
+    let limited = false
+    // Two requests' usage with their prices, then a reply (or a limit refusing the third request).
+    const reporting: ProviderAdapter = {
+      driver: 'codex',
+      capabilities: { steer: 'none', interrupt: true, rollback: 'none', fork: 'portable', events: 'rich', containment: 'strong', historyInjection: 'prompt', mcp: true, childPolicy: 'enforced' },
+      configured: () => true,
+      startTurn: async (input, sink) => {
+        sink.providerRef({ provider: 'p', instanceId: input.instanceId, model: input.model })
+        sink.usage({ input: 100, output: 20, cacheRead: 0, cacheWrite: 0, costUsd: 0.25 })
+        sink.usage({ input: 50, output: 10, cacheRead: 7, cacheWrite: 0, costUsd: 0.125 })
+        if (limited) {
+          // A reply streamed before the limit refused the next request.
+          sink.text({ phase: 'start', contentIndex: 0, content: 'partial ' } as never)
+          sink.text({ phase: 'delta', contentIndex: 0, content: 'answer' } as never)
+          throw harnessAppError({ code: 'budget_exhausted', message: 'The turn limit was reached.', limit: { kind: 'turns', limit: 2, actual: 2 } })
+        }
+        return { text: 'done', aborted: false, modelName: input.model, totalResponseTimeMs: 1, usage: { input: 150, output: 30, cacheRead: 7, cacheWrite: 0 }, contextSignature: 's', nativeMessages: [], providerRef: { provider: 'p' } }
+      },
+      interrupt: async () => 'not_active'
+    }
+    let stored: unknown = { reporting: { driver: 'codex', enabled: true } }
+    harness = testHarness({ drivers: [adapterDriver(reporting, { toolControl: 'exact', budgets: 'hard' })], instances: new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (state) => { stored = state.instances } } }), profileHome: home })
+    orch.setHarness(harness)
+    const definition = publish('mousse', 'reporting')
+    const resolved = resolver.resolve({ definitionId: definition.id, revision: definition.revision })
+    const completed = await orch.runAgentDefinition(request(resolved, store.createThread('usage').id))
+    expect(completed).toMatchObject({ status: 'completed', usage: { inputTokens: 150, outputTokens: 30, costUsd: 0.375 } })
+    limited = true
+    const stopped = await orch.runAgentDefinition(request(resolved, store.createThread('usage-limit').id))
+    // The limit ends the run as the loop's does: the reply so far, the limit, and the usage.
+    expect(stopped).toMatchObject({ status: 'failed', text: 'partial answer', error: { code: 'BUDGET_EXCEEDED', details: { limit: { kind: 'turns', limit: 2 } } }, usage: { inputTokens: 150, outputTokens: 30, costUsd: 0.375 } })
+  })
+
+  it('on an instance that runs definitions itself, a browser definition still runs on its definition loop, chosen per definition', async () => {
+    harness.stop()
+    const ran: string[] = []
+    const adapterNamed = (name: string): ProviderAdapter => ({
+      driver: 'codex',
+      capabilities: { steer: 'none', interrupt: true, rollback: 'none', fork: 'portable', events: 'rich', containment: 'strong', historyInjection: 'prompt', mcp: true, childPolicy: 'enforced' },
+      configured: () => true,
+      startTurn: async (input, sink) => {
+        ran.push(name)
+        sink.providerRef({ provider: 'p', instanceId: input.instanceId, model: input.model })
+        return { text: name, aborted: false, modelName: input.model, totalResponseTimeMs: 1, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextSignature: 's', nativeMessages: [], providerRef: { provider: 'p' } }
+      },
+      interrupt: async () => 'not_active'
+    })
+    // As the Pi driver declares on an RPC connection with evidence: the runtime for most
+    // definitions, its loop (with the loop's caps) for one that needs it.
+    const base = adapterDriver(adapterNamed('runtime'), { toolControl: 'exact', budgets: 'hard', runtime: { definitionAdapter: adapterNamed('loop') } })
+    const driver = { ...base, definitionCaps: (config: never, needs?: { loop?: boolean }) => ({ ...base.caps(config), ...(needs?.loop ? { definitionLimits: 'in_loop' as const } : {}) }) }
+    let stored: unknown = { routed: { driver: 'codex', enabled: true }, routed2: { driver: 'codex', enabled: true } }
+    harness = testHarness({ drivers: [driver], instances: new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (state) => { stored = state.instances } } }), profileHome: home })
+    orch.setHarness(harness)
+    const plain = resolver.resolve((({ id, revision }) => ({ definitionId: id, revision }))(publish('mousse', 'routed')))
+    expect(await orch.runAgentDefinition(request(plain, store.createThread('plain').id))).toMatchObject({ status: 'completed' })
+    const browsing = resolver.resolve((({ id, revision }) => ({ definitionId: id, revision }))(publish('mousse', 'routed2', (settings) => { settings.browser.mode = 'structured' })))
+    const browserRuntime = { resolveTarget: async () => null, dispatch: async () => ({}) }
+    expect(await orch.runAgentDefinition(request(browsing, store.createThread('browsing').id, { host: { workspaceRoots: [work], browserRuntime } as never }))).toMatchObject({ status: 'completed' })
+    expect(ran).toEqual(['runtime', 'loop'])
+  })
+
+  it('a definition whose spend limit only the loop can hold runs on the loop instead of being refused', async () => {
+    harness.stop()
+    const ran: string[] = []
+    const adapterNamed = (name: string): ProviderAdapter => ({
+      driver: 'codex',
+      capabilities: { steer: 'none', interrupt: true, rollback: 'none', fork: 'portable', events: 'rich', containment: 'strong', historyInjection: 'prompt', mcp: true, childPolicy: 'enforced' },
+      configured: () => true,
+      startTurn: async (input, sink) => {
+        ran.push(name)
+        sink.providerRef({ provider: 'p', instanceId: input.instanceId, model: input.model })
+        return { text: name, aborted: false, modelName: input.model, totalResponseTimeMs: 1, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextSignature: 's', nativeMessages: [], providerRef: { provider: 'p' } }
+      },
+      interrupt: async () => 'not_active'
+    })
+    // A runtime that holds counts but cannot reserve spend for this model (an unpriced one), with the loop beside it.
+    const base = adapterDriver(adapterNamed('runtime'), { toolControl: 'exact', budgets: 'hard', spendLimits: 'unsupported', runtime: { definitionAdapter: adapterNamed('loop') } })
+    const driver = { ...base, definitionCaps: (config: never, needs?: { loop?: boolean }) => ({ ...base.caps(config), ...(needs?.loop ? { definitionLimits: 'in_loop' as const } : {}) }) }
+    let stored: unknown = { spend: { driver: 'codex', enabled: true }, spend2: { driver: 'codex', enabled: true } }
+    harness = testHarness({ drivers: [driver], instances: new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (state) => { stored = state.instances } } }), profileHome: home })
+    orch.setHarness(harness)
+    const plain = resolver.resolve((({ id, revision }) => ({ definitionId: id, revision }))(publish('mousse', 'spend')))
+    expect(await orch.runAgentDefinition(request(plain, store.createThread('counts only').id))).toMatchObject({ status: 'completed', text: 'runtime' })
+    const limited = resolver.resolve((({ id, revision }) => ({ definitionId: id, revision }))(publish('mousse', 'spend2', (settings) => { settings.limits.maxCostUsd = 1 })))
+    expect(await orch.runAgentDefinition(request(limited, store.createThread('cost limited').id))).toMatchObject({ status: 'completed', text: 'loop' })
+    expect(ran).toEqual(['runtime', 'loop'])
   })
 
   it('an owned lease that another holds fails the turn as busy, and never queues it', async () => {
