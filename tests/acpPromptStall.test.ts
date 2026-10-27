@@ -17,7 +17,7 @@ import { AgentRegistry } from '../src/mms/agents/AgentRegistry'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { acpDriver } from '../src/mms/harness/drivers/acp'
-import { piLegacyDriver } from '../src/mms/harness/drivers/piLegacy'
+import { piDriver } from '../src/mms/harness/drivers/pi'
 import { createHarnessGateway } from '../src/mms/harness/gateway'
 import { OrchestratorService } from '../src/mms/orchestrator/OrchestratorService'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
@@ -92,7 +92,7 @@ describe('an ACP agent that never answers session/prompt', () => {
       questions: new UserQuestionService(),
       shellPath: async () => ({ entries: [], source: 'failed' }),
       drivers: [
-        piLegacyDriver({ client: () => orch.piChatClient() }),
+        piDriver({ client: () => orch.piChatClient() }),
         acpDriver({ connect: (_context, request) => agent.connect(request), pty: { available: () => false }, promptSilenceMs: SILENCE_MS })
       ]
     })

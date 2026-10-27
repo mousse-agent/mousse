@@ -2,7 +2,7 @@ import { expect } from 'vitest'
 import type { Scenario } from '../types'
 
 /**
- * A prompt that is a slash command goes to the agent as the first text block, exactly as typed, so
+ * A prompt that is a slash command goes to the agent as the first text block (trimmed), so
  * the agent expands it. (With a handed-over history the history follows as a second block; that
  * layout is pinned in `tests/harness/acpSession.test.ts`.)
  */

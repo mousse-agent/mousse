@@ -74,6 +74,8 @@ export interface AcpProcess extends AcpConnection {
   activity?: () => void
   /** `interrupt` sent the running prompt a native cancel (cleared when the next prompt starts). */
   cancelRequested?: boolean
+  /** The slash commands the agent advertised (`available_commands_update`), without the slash. */
+  commands?: Set<string>
 }
 
 /** How long a steer waits for a cancelled prompt's own completion before sending the next one. */
@@ -88,12 +90,28 @@ export const PROMPT_COMPLETE_WAIT_MS = 5_000
 export const PROMPT_SILENCE_MS = 15 * 60_000
 
 /** A prompt that is a slash command: the agent expands it only when it opens the first block. */
-const SLASH_COMMAND = /^\/[A-Za-z][\w:-]*(\s|$)/
+const SLASH_COMMAND = /^\/([A-Za-z][\w:-]*)(\s|$)/
 
-/** The trimmed prompt when it is a slash command (`/review src`; not a path such as `/tmp/x`). */
-export function slashCommand(prompt: string): string | undefined {
+/**
+ * The trimmed prompt when it is a slash command (`/review src`; not a path such as `/tmp/x`). When
+ * the agent advertised its commands (`available_commands_update`), only one of those counts, so
+ * "/tmp is full" is text; an agent that advertised none is matched by the shape alone.
+ */
+export function slashCommand(prompt: string, advertised?: ReadonlySet<string>): string | undefined {
   const text = prompt.trim()
-  return SLASH_COMMAND.test(text) ? text : undefined
+  const name = SLASH_COMMAND.exec(text)?.[1]
+  if (!name) return undefined
+  return advertised && advertised.size > 0 && !advertised.has(name) ? undefined : text
+}
+
+/** Remembers the command names an `available_commands_update` lists (without the leading slash). */
+function noteCommands(process: AcpProcess, update: unknown): void {
+  const event = update as { sessionUpdate?: string; availableCommands?: unknown } | null
+  if (event?.sessionUpdate !== 'available_commands_update' || !Array.isArray(event.availableCommands)) return
+  process.commands = new Set(event.availableCommands.flatMap((entry) => {
+    const name = (entry as { name?: unknown } | null)?.name
+    return typeof name === 'string' && name.replace(/^\//, '') ? [name.replace(/^\//, '')] : []
+  }))
 }
 
 function describeDuration(ms: number): string {
@@ -258,7 +276,13 @@ export class AcpSessions {
     }
     const classify = this.options.classifyOption ?? classifyGenericOption
     const handlers: AcpClientHandlers = {
-      requestPermission: (request) => answerPermission(active?.turnPrompter ?? this.prompter, scope, request, { label, classify }),
+      requestPermission: async (request) => {
+        const answer = await answerPermission(active?.turnPrompter ?? this.prompter, scope, request, { label, classify })
+        // A prompt the agent then ends `cancelled` ends because Mousse's answer cancelled the request
+        // (dismissed, timed out, or refused by policy), not because the agent chose to stop.
+        if (answer.outcome.outcome === 'cancelled' && active) active.cancelRequested = true
+        return answer
+      },
       ...(quirks.clientFs ? {
         readTextFile: (request) => readWorkspaceFile(scope, request),
         writeTextFile: (request) => writeWorkspaceFile(questions, scope, request, label)
@@ -301,6 +325,9 @@ export class AcpSessions {
       }
     })
     active = Object.assign(connection, { generation: this.options.launchGeneration(), signInGeneration: this.options.signInGeneration() })
+    // Between turns, and while a session opens, the agent's command list is still kept.
+    const resting = active
+    resting.onUpdate = (update) => noteCommands(resting, update)
     this.processes.add(active)
     return active
   }
@@ -608,7 +635,17 @@ export class AcpSessions {
       clearTimeout(silenceTimer)
       silenceTimer = undefined
       if (!prompting || !(silenceMs > 0) || (current.openRequests ?? 0) > 0) return
+      // Mousse's own tools (`ask_user`, `present_plan`, approvals) ask the user through the thread's
+      // questions, not through the ACP connection, and may wait up to an hour: the agent is not
+      // silent while one is open. The clock starts over (a full window) once the last one is answered.
+      if (questions.listPendingForThread(input.threadId).length > 0) {
+        silenceTimer = setTimeout(watchSilence, Math.min(500, silenceMs))
+        silenceTimer.unref?.()
+        return
+      }
       silenceTimer = setTimeout(() => {
+        // A question may have been asked since the timer started: look again before giving up.
+        if ((current.openRequests ?? 0) > 0 || questions.listPendingForThread(input.threadId).length > 0) return watchSilence()
         silenceFailure = harnessAppError({
           code: 'timeout',
           message: `${label} did not answer: it sent no reply and no update for ${describeDuration(silenceMs)}, so it was stopped. Send the message again.`,
@@ -620,6 +657,7 @@ export class AcpSessions {
     }
     const onUpdate = (update: unknown) => {
       watchSilence()
+      noteCommands(current, update)
       if (!update || typeof update !== 'object') return
       const event = update as { sessionUpdate?: string; content?: { type?: string; text?: string }; toolCallId?: string; title?: string; name?: string; status?: string; configOptions?: NewSessionResponse['configOptions']; currentModeId?: string }
       if (event.sessionUpdate === 'agent_message_chunk' && event.content?.type === 'text') {
@@ -767,7 +805,7 @@ export class AcpSessions {
       // The session's instructions go into its first prompt, and again into a resumed session's prompt
       // when they changed since (their hash is kept with the session). A slash command goes out
       // without them: the next prompt that is not a command carries them.
-      const command = slashCommand(input.prompt)
+      const command = slashCommand(input.prompt, active.commands)
       const instructionsHash = input.orchestrationInstructions ? createHash('sha256').update(input.orchestrationInstructions).digest('hex').slice(0, 32) : undefined
       const orchestration = !command && input.orchestrationInstructions && (!resumed || active.instructionsHash !== instructionsHash)
         ? `<mousse_orchestration_instructions>\n${input.orchestrationInstructions}\n</mousse_orchestration_instructions>\n\n`
@@ -836,9 +874,11 @@ export class AcpSessions {
           // However the prompt ended, a refusal or an error is never a finished turn.
           const failure = cancelSent || input.signal?.aborted ? undefined : xaiStopFailure(label, outcome)
           if (failure) throw failure
-        } else if (!cancelSent && !active.cancelRequested && !input.signal?.aborted) {
-          // The agent's own word on how the prompt ended: a refusal or a limit is never a clean
-          // success, and a cancel Mousse did not ask for is an interruption.
+        }
+        if (!cancelSent && !active.cancelRequested && !input.signal?.aborted) {
+          // The agent's own word on how the prompt ended (its reply, or xAI's `prompt_complete`): a
+          // refusal or a limit is never a clean success, and a cancel Mousse did not ask for is an
+          // interruption.
           const ended = promptStopOutcome(label, outcome)
           if (ended === 'cancelled') throw agentCancelledError(label)
           if (ended) throw ended
@@ -865,7 +905,7 @@ export class AcpSessions {
       current.activity = undefined
       if (steerTimer) clearInterval(steerTimer)
       input.signal?.removeEventListener('abort', abort)
-      current.onUpdate = undefined
+      current.onUpdate = (update) => noteCommands(current, update)
       current.turnSignal = undefined
       current.turnPrompter = undefined
       this.turning.delete(current)

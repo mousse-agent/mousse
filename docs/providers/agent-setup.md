@@ -138,16 +138,22 @@ sign-in check, chat) runs `grok --permission-mode default agent --no-leader stdi
 - How a prompt ends. An agent that ends a prompt with `refusal`, `max_tokens` or
   `max_turn_requests` fails the turn with a message naming the agent (what it wrote stays as an
   incomplete reply); one that ends it with `cancelled` when Mousse did not ask for a cancel
-  interrupts the turn like Stop. Any other ending, including one Mousse does not know, is a
-  finished turn.
-- An agent that gives no reply and no update for 15 minutes (time spent waiting for the user to
-  answer one of its requests does not count) fails the turn with a timeout, and its process is
-  ended; the next message starts a new session with the chat history.
+  interrupts the turn like Stop. A cancel Mousse asked for (Stop, a steer, or a permission request
+  you dismissed or that policy refused) leaves a finished turn with the agent's message. Any other
+  ending, including one Mousse does not know, is a finished turn. This holds for Grok's
+  `prompt_complete` too.
+- An agent that gives no reply and no update for 15 minutes fails the turn with a timeout, and its
+  process is ended; the next message starts a new session with the chat history. Time the agent
+  spends waiting for you does not count: a permission or file request on the connection, or a
+  question from Mousse's own tools (`ask_user`, plans, approvals) on the thread. The bound covers
+  the prompt only; an agent that hangs while starting or opening a session is not bounded by it.
 - Slash commands. A message that starts with `/` and a command name (`/review src`, not a path
-  such as `/tmp/x`) is sent as the first text block, exactly as typed, with the chat history as a
-  second block; the session instructions are left out of that message and go with the next one.
-  An agent that joins all the blocks before it parses them may still read the command literally.
-  A steer is never treated as a command.
+  such as `/tmp/x`) is sent, trimmed, as the first text block, with the chat history as a second
+  block; the session instructions are left out of that message and go with the next one. When the
+  agent advertised its commands (`available_commands_update`), only an advertised name counts, so
+  "/tmp is full" stays text; an agent that advertised none is matched by the shape alone. An agent
+  that joins all the blocks before it parses them may still read the command literally. A steer is
+  never treated as a command.
 - An agent that ignores `session/cancel` (some drop one sent right after the prompt) is ended after
   the cancel deadline, and the next message starts a new session. Agent-specific cancel timing
   belongs in that agent's preset quirks (`harness/acp/quirks.ts`), not in the shared session code.

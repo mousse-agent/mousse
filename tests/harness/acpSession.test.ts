@@ -21,6 +21,8 @@ interface AgentScript {
   capabilities?: Record<string, unknown>
   /** What `session/new` answers besides the session id (default: one `model` select, fast and deep). */
   session?: Record<string, unknown>
+  /** Slash commands the agent advertises (`available_commands_update`) when it opens a session. */
+  commands?: string[]
   /** Runs one prompt; resolves with its stop reason. `blocks` is the text of every block of the prompt. */
   prompt?: (text: string, context: { notify: (text: string) => Promise<void>; cancelled: Promise<void>; blocks: string[]; askPermission: () => Promise<unknown> }) => Promise<string>
 }
@@ -37,8 +39,9 @@ function scriptedAgent(script: AgentScript) {
         calls.push({ method: 'initialize', params: c.params })
         return { protocolVersion: PROTOCOL_VERSION, agentCapabilities: script.capabilities ?? {}, authMethods: [] }
       })
-      .onRequest(methods.agent.session.new, (c) => {
+      .onRequest(methods.agent.session.new, async (c) => {
         calls.push({ method: 'session/new', params: c.params })
+        if (script.commands) await c.client.notify(methods.client.session.update, { sessionId: 'native-1', update: { sessionUpdate: 'available_commands_update', availableCommands: script.commands.map((name) => ({ name, description: name })) } })
         return { sessionId: 'native-1', ...(script.session ?? DEFAULT_SESSION) } as never
       })
       .onRequest(methods.agent.session.setConfigOption, (c) => {
@@ -79,10 +82,11 @@ function scriptedAgent(script: AgentScript) {
 function core(connect: ReturnType<typeof scriptedAgent>['connect'], options: { closeSessions?: boolean; cancelDeadlineMs?: number; promptSilenceMs?: number } = {}) {
   const saved = new Map<string, SavedAcpSession>()
   let models: LlmModelOption[] = []
+  const questions = new UserQuestionService()
   const sessions = new AcpSessions({
     label: 'Fake agent',
     defaultInstanceId: 'acp:fake',
-    questions: new UserQuestionService(),
+    questions,
     connect,
     quirks: NO_QUIRKS,
     ...(options.closeSessions ? { closeSessions: true } : {}),
@@ -100,7 +104,7 @@ function core(connect: ReturnType<typeof scriptedAgent>['connect'], options: { c
     signInRequiredMessage: 'Sign in first'
   })
   sessionsUnderTest.push(sessions)
-  return { sessions, saved, models: () => models }
+  return { sessions, saved, questions, models: () => models }
 }
 
 describe('ACP sessions', () => {
@@ -217,6 +221,19 @@ describe('ACP sessions', () => {
       await expect(chat(sessions)).rejects.toMatchObject({ name: 'AbortError' })
     })
 
+    it('cancelled after Mousse answered a permission request cancelled (dismissed) is a finished turn with the agent’s message', async () => {
+      const agent = scriptedAgent({
+        prompt: async (_text, ctx) => {
+          await ctx.askPermission()
+          await ctx.notify('Understood, I will not run it.')
+          return 'cancelled'
+        }
+      })
+      const { sessions } = core(agent.connect)
+      const prompter = { choose: async () => undefined }
+      expect(await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'run it', onText: vi.fn(), prompter })).toBe('Understood, I will not run it.')
+    })
+
     it('cancelled after Mousse sent a cancel (a steer) is the steer restarting the prompt, not an interruption', async () => {
       const agent = scriptedAgent({
         prompt: async (text, ctx) => {
@@ -276,6 +293,31 @@ describe('ACP sessions', () => {
       const { sessions } = core(agent.connect, { promptSilenceMs: 100 })
       const prompter = { choose: async () => { await new Promise((resolve) => setTimeout(resolve, 350)); return 'allow' } }
       expect(await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'ask me', onText: vi.fn(), prompter })).toBe('allowed')
+    })
+
+    it('does not count the time one of Mousse’s own tools waits for the user (ask_user, plans, approvals), then counts again once it is answered', async () => {
+      let release: (() => void) | undefined
+      const agent = scriptedAgent({
+        prompt: async () => {
+          await new Promise<void>((resolve) => { release = resolve })
+          // After the answer the agent goes quiet for good.
+          return new Promise<string>(() => {})
+        }
+      })
+      const { sessions, questions } = core(agent.connect, { promptSilenceMs: 100 })
+      const turn = sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'plan it', onText: vi.fn() })
+      const outcome = turn.then(() => 'finished', (error: { code?: string }) => error.code)
+      await vi.waitFor(() => expect(release).toBeDefined())
+      // The same call the Mousse MCP server makes for `ask_user`: through the thread's questions, not the ACP connection.
+      const asked = questions.requestAnswers([{ id: 'q', prompt: 'Which?', options: [{ id: 'a', label: 'A' }] }], 't', { timeoutMs: 5_000 })
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      expect(agent.connections[0].killed).toBe(false)
+      const [pending] = questions.listPendingForThread('t')
+      questions.submitAnswers(pending!.requestId, { q: 'a' })
+      await asked
+      const answeredAt = Date.now()
+      expect(await outcome).toBe('timeout')
+      expect(Date.now() - answeredAt).toBeGreaterThanOrEqual(80)
     })
 
     it('does not run while no prompt is in flight, and a Stop still ends the turn at once', async () => {
@@ -385,6 +427,23 @@ describe('ACP sessions', () => {
       const { sessions } = core(agent.connect)
       await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt, history, onText: vi.fn() })
       expect(promptBlocks(agent)[0][0]).toBe(prompt)
+    })
+
+    it('goes by the commands the agent advertised when it advertised any', async () => {
+      const agent = scriptedAgent({ commands: ['review', 'compact'] })
+      const { sessions } = core(agent.connect)
+      const base = { cwd: process.cwd(), model: 'default', history, onText: vi.fn() }
+      await sessions.chat({ ...base, threadId: 'a', prompt: '/review src' })
+      await sessions.chat({ ...base, threadId: 'b', prompt: '/tmp is full, what can I delete?' })
+      await sessions.chat({ ...base, threadId: 'c', prompt: '/home' })
+      await sessions.chat({ ...base, threadId: 'd', prompt: '/unknown thing' })
+      const [review, tmp, home, unknown] = promptBlocks(agent)
+      expect(review[0]).toBe('/review src')
+      expect(review).toHaveLength(2)
+      for (const blocks of [tmp, home, unknown]) {
+        expect(blocks).toHaveLength(1)
+        expect(blocks[0]).toContain('Previous conversation')
+      }
     })
 
     it('never treats a steer as a command: the restarted prompt is the steer text alone', async () => {
