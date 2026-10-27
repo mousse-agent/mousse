@@ -174,7 +174,7 @@ describe('Claude Subscription native provider', () => {
     expect(refused.input).toEqual({ recordVersion: 1, title: 'API reviewer' })
     expect(JSON.parse(refused.response)).toEqual({ started: false, code: 'title_taken', message: 'You already have a subagent titled "API reviewer".' })
     expect(JSON.stringify(onTool.mock.calls)).not.toContain('SECRET PROMPT TEXT')
-    expect(complete('read1')).toEqual({ phase: 'complete', callId: 'read1', title: 'Read', toolName: 'Read', activity: { kind: 'generic', output: 'file contents' } })
+    expect(complete('read1')).toEqual({ phase: 'complete', callId: 'read1', title: 'Read', toolName: 'Read', activity: { kind: 'generic' } })
   })
 
   it('streams text/thinking/tools and only resumes committed matching history', async () => {
