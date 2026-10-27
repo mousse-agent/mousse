@@ -363,7 +363,7 @@ Pure functions from `(capabilities, runState)` to a decision; the engine and exe
 | `AcpAdapter` (Antigravity preset) | `AcpSessions.chat` (`harness/acp`) | interrupt_restart (cancel then re-prompt) / yes / sparse / weak |
 | `CodexAdapter` | `CodexProviderService.chat` over `codex app-server` | native (`turn/steer` joins the running turn) / yes (`turn/interrupt`) / rich / weak |
 
-There is no `terminalQuality` flag: every adapter's `startTurn` settles when its stream closes, and that settlement is the turn's terminal signal, so no code path would read a "stream closed without a terminal event" policy. A hung stream is caught by rule 2's heartbeat window (§12.4).
+There is no `terminalQuality` flag: every adapter's `startTurn` settles when its stream closes, and that settlement is the turn's terminal signal, so no code path would read a "stream closed without a terminal event" policy. Rule 2's heartbeat window (§12.4) does not catch a hung stream while the turn's `turn.start` effect is still running (rule 2 skips a run with a live effect), so a silent adapter is bounded only by that effect's six-hour timeout. ACP agents have their own bound: `AcpSessions` fails a prompt that gets no reply and no update for `PROMPT_SILENCE_MS` (15 minutes; time spent waiting on the user is not counted). The Claude, Codex and Cursor adapters have no such bound yet.
 
 Shared builders in `src/mms/run/adapters/shared/` **before** the second adapter: streaming message assembly (text/thinking/tool start-end into `ChatMessage`s), usage recording, native history serialisation (`providers/nativeAgentHistory.ts`), steer draining. Without them, each adapter re-implements the same assembly.
 
