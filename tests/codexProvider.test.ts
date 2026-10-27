@@ -741,15 +741,40 @@ describe('plan usage limits for the usage page', () => {
       return failing ? { error: { code: -32000, message: 'rate limits are unavailable' } } : { result: { rateLimits: limits(10) } }
     })
     const service = create(server)
+    await service.status({ force: true })
     expect(await service.rateLimits()).toMatchObject({ live: true, snapshot: limits(10) })
     // A turn's account update is kept too, and is newer than the read.
-    await service.status({ force: true })
     server.processes.at(-1)!.stdout.write(JSON.stringify({ method: 'account/rateLimits/updated', params: { rateLimits: limits(55) } }) + '\n')
     await vi.waitFor(async () => {
       failing = true
       const stale = await service.rateLimits()
       expect(stale).toMatchObject({ live: false, snapshot: limits(55) })
     })
+  })
+
+  it("never shows another account's limits: after an account switch or a disconnect a failed read throws", async () => {
+    let email = 'me@example.com'
+    let failing = false
+    const server = scriptedServer((message) => {
+      if (message.method === 'account/read') return { result: { account: { type: 'chatgpt', email, planType: 'plus' }, requiresOpenaiAuth: true } }
+      return failing ? { error: { code: -32000, message: 'rate limits are unavailable' } } : { result: { rateLimits: limits(10) } }
+    })
+    const service = create(server)
+    await service.status({ force: true })
+    expect(await service.rateLimits()).toMatchObject({ live: true })
+    failing = true
+    // The same account: its last snapshot stands in.
+    expect(await service.rateLimits()).toMatchObject({ live: false, snapshot: limits(10) })
+    // Another account signs in in the terminal: the old account's numbers are not shown.
+    email = 'other@example.com'
+    await service.status({ force: true })
+    await expect(service.rateLimits()).rejects.toThrow(/unavailable/)
+    // A read that succeeds for the new account is that account's own snapshot from then on; a disconnect forgets it.
+    failing = false
+    expect(await service.rateLimits()).toMatchObject({ live: true })
+    await service.logout()
+    failing = true
+    await expect(service.rateLimits()).rejects.toThrow(/unavailable/)
   })
 
   it('with nothing to fall back on, a failed read is thrown', async () => {

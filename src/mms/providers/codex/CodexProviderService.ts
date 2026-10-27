@@ -967,7 +967,7 @@ export class CodexProviderService {
   /** Model listings in flight; they keep the process open. */
   private listing = 0
   /** The plan limits as the process last reported them (a read, or a turn's update), for when a read fails. */
-  private lastLimits?: { snapshot: RateLimitSnapshot; at: number }
+  private lastLimits?: { snapshot: RateLimitSnapshot; at: number; account: string }
   private idleClose?: { timer: ReturnType<typeof setTimeout>; at: number }
   /** Bumped by disconnect; a turn from an older scope does not save its thread. */
   private scope = 0
@@ -1330,11 +1330,14 @@ export class CodexProviderService {
     try {
       const conn = await this.connection()
       const response = await conn.request('account/rateLimits/read', undefined, { timeoutMs: 10_000, signal })
-      this.lastLimits = { snapshot: response.rateLimits, at: Date.now() }
-      return { ...this.lastLimits, live: true }
+      const account = this.account()?.subject
+      if (account) this.lastLimits = { snapshot: response.rateLimits, at: Date.now(), account }
+      return { snapshot: response.rateLimits, at: Date.now(), live: true }
     } catch (error) {
-      if (signal?.aborted || !this.lastLimits) throw error
-      return { ...this.lastLimits, live: false }
+      // Only the signed-in account's own last snapshot stands in: never another account's limits.
+      const last = this.lastLimits
+      if (signal?.aborted || !last || last.account !== this.account()?.subject) throw error
+      return { snapshot: last.snapshot, at: last.at, live: false }
     } finally {
       this.listing -= 1
       this.closeWhenIdle(CODEX_CHECK_CLOSE_MS)
@@ -1376,6 +1379,7 @@ export class CodexProviderService {
     this.scope += 1
     this.settings.threads = {}
     this.probeResult = undefined
+    this.lastLimits = undefined
     this.save()
     this.abortInFlight()
     this.app?.conn.close()
@@ -1646,7 +1650,8 @@ export class CodexProviderService {
     // Account-wide, not tied to a thread: every open run keeps the latest, for a usage limit it may hit.
     const limits = notificationParams(notification, 'account/rateLimits/updated')
     if (limits) {
-      this.lastLimits = { snapshot: limits.rateLimits, at: Date.now() }
+      const owner = this.account()?.subject
+      this.lastLimits = owner ? { snapshot: limits.rateLimits, at: Date.now(), account: owner } : undefined
       for (const held of this.turns.values()) held.rateLimits = limits.rateLimits
       return
     }
