@@ -525,6 +525,11 @@ class TurnRun {
     this.questionsDone.abort(new Error('The Codex turn ended'))
   }
 
+  /** The directory this turn runs in. */
+  get cwd(): string {
+    return resolve(this.input.cwd)
+  }
+
   /** A read-only (`shared`) delegated child: every command and file change is declined, never asked. */
   get readOnlyChild(): boolean {
     return this.input.child?.readOnly === true
@@ -1696,11 +1701,16 @@ export class CodexProviderService {
         if (run.mode === 'plan' || run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/commandExecution/requestApproval'>
         // Full access never asks (Codex's own profile does not either; this is the backstop).
         if (permissionModeAllows(run.permissionMode, 'command')) return { decision: 'accept' } satisfies Result<'item/commandExecution/requestApproval'>
-        const command = approval.command ?? (run.item(approval.itemId) as { command?: string } | undefined)?.command ?? 'a command'
+        const known = approval.command ?? (run.item(approval.itemId) as { command?: string } | undefined)?.command
+        const command = typeof known === 'string' && known.trim() ? known : undefined
+        // Where the command runs: the directory Codex names, else the turn's own.
+        const where = resolve(approval.cwd ?? run.cwd)
         const decision = await this.approve(
           run,
-          `Allow Codex to run this command?\n${command}${approval.cwd ? `\nin ${approval.cwd}` : ''}${approval.reason ? `\n${approval.reason}` : ''}`,
-          'command'
+          `Allow Codex to run this command?\n${command ?? 'a command'}${approval.cwd ? `\nin ${approval.cwd}` : ''}${approval.reason ? `\n${approval.reason}` : ''}`,
+          'command',
+          // A command nobody can read has no stable description: no fingerprint, so no grant after a restart.
+          { name: 'commandExecution', input: command === undefined ? undefined : { command, cwd: where }, cwd: where }
         )
         return { decision } satisfies Result<'item/commandExecution/requestApproval'>
       }
@@ -1710,11 +1720,20 @@ export class CodexProviderService {
         if (run.mode === 'plan' || run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/fileChange/requestApproval'>
         // Edits go ahead under Auto-accept edits and Full access.
         if (permissionModeAllows(run.permissionMode, 'edit')) return { decision: 'accept' } satisfies Result<'item/fileChange/requestApproval'>
-        const changes = (run.item(approval.itemId) as { changes?: Array<{ path: string }> } | undefined)?.changes ?? []
+        const changes = (run.item(approval.itemId) as { changes?: Array<{ path: string; diff?: string; kind?: unknown }> } | undefined)?.changes ?? []
         const decision = await this.approve(
           run,
           `Allow Codex to edit ${changes.length ? changes.map((change) => change.path).join(', ') : 'files'}?${approval.reason ? `\n${approval.reason}` : ''}`,
-          'edit'
+          'edit',
+          // Only a change set Codex described in full (every change with its diff) has a stable action; a
+          // session-wide write root widens the approval, so it is part of it. Otherwise there is no grant.
+          {
+            name: 'fileChange',
+            input: changes.length && changes.every((change) => typeof change.diff === 'string' && change.diff.length > 0)
+              ? { changes: changes.map((change) => ({ path: change.path, diff: change.diff, kind: change.kind ?? null })), grantRoot: approval.grantRoot ?? null }
+              : undefined,
+            cwd: run.cwd
+          }
         )
         return { decision } satisfies Result<'item/fileChange/requestApproval'>
       }
@@ -1756,7 +1775,12 @@ export class CodexProviderService {
    * only: Codex's own "for this session" answer is not offered, because Mousse records "Always for
    * this thread" itself, and Codex would remember its allowance past a stricter mode.
    */
-  private async approve(run: TurnRun, prompt: string, kind: 'command' | 'edit'): Promise<'accept' | 'decline' | 'cancel'> {
+  private async approve(
+    run: TurnRun,
+    prompt: string,
+    kind: 'command' | 'edit',
+    tool: { name: string; input: unknown; cwd?: string }
+  ): Promise<'accept' | 'decline' | 'cancel'> {
     try {
       const answer = await this.questions.requestAnswers(
         [
@@ -1778,7 +1802,8 @@ export class CodexProviderService {
             options: [
               { id: 'allow', decision: 'allow', scope: 'once' },
               { id: 'reject', decision: 'reject' }
-            ]
+            ],
+            tool
           }
         }
       )

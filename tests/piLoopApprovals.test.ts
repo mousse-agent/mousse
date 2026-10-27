@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AssistantMessage, Context } from '@earendil-works/pi-ai'
 import { getDefaultSettings } from '../src/shared/settings'
 import type { PermissionMode } from '../src/shared/permissionMode'
@@ -65,12 +65,23 @@ function harness() {
     const results = contexts.at(-1)!.messages.filter((message) => message.role === 'toolResult') as Array<{ isError?: boolean; content: Array<{ text?: string }> }>
     return { asked, results }
   }
-  return { project, run }
+  return { project, run, questions }
 }
 
 const write = (path: string, content = 'x') => ({ name: 'write', arguments: { path, content } })
 
 describe('pi loop approvals', () => {
+  it('names the directory the call runs in, so a saved approval is not reused in another workspace', async () => {
+    const { run, questions, project } = harness()
+    const spy = vi.spyOn(questions, 'requestAnswers')
+    await run('ask', [{ name: 'bash', arguments: { command: 'echo hi' } }, { name: 'write', arguments: { path: 'a.txt', content: 'x' } }], 'reject')
+    const tools = spy.mock.calls.map(([, , options]) => options?.approval?.tool)
+    expect(tools).toEqual([
+      { name: 'bash', input: { command: 'echo hi' }, cwd: project },
+      { name: 'write', input: { path: 'a.txt', content: 'x' }, cwd: project }
+    ])
+  })
+
   it('asks before a command under Ask and Auto-accept edits, and a rejection is a tool error', async () => {
     for (const mode of ['ask', 'accept_edits'] as const) {
       const { run } = harness()

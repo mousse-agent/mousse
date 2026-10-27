@@ -13,7 +13,7 @@ import type {
 import { APPROVALS_REFUSED_MESSAGE } from '../../../shared/harness/types'
 import { acpPermissionKey, actionOf } from '../../../shared/permissionKeys'
 import { permissionModeAllows, type PermissionAction, type PermissionMode } from '../../../shared/permissionMode'
-import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
+import type { ApprovalTag, UserQuestionService } from '../../orchestrator/UserQuestionService'
 
 /**
  * What the agent asks of the user: tool permissions, and (where the preset offers client fs) file
@@ -88,7 +88,7 @@ export interface PermissionPrompter {
    * `approval` says what kind of action is asked about, so who may answer is decided by
    * `canAnswerApproval` (the options are all once-only: `allow_once` allows, `reject_once` rejects).
    */
-  choose(request: { threadId: string; title: string; options: ClassifiedOption[]; approval: { action: PermissionAction; permissionKey: string } }): Promise<string | undefined>
+  choose(request: { threadId: string; title: string; options: ClassifiedOption[]; approval: Pick<ApprovalTag, 'action' | 'permissionKey' | 'tool' | 'reason'> }): Promise<string | undefined>
 }
 
 export { APPROVALS_REFUSED_MESSAGE, QUESTIONS_REFUSED_MESSAGE } from '../../../shared/harness/types'
@@ -158,7 +158,8 @@ export async function answerPermission(
     threadId: scope.threadId,
     title: request.toolCall.title ?? `Allow ${options.label} to run this tool?`,
     options: shown,
-    approval: { action, permissionKey }
+    // The agent's own description of the call is its fingerprint: a request without one has no grant.
+    approval: { action, permissionKey, tool: { name: request.toolCall.kind ?? 'other', input: request.toolCall.rawInput, ...(scope.cwd ? { cwd: scope.cwd } : {}) } }
   })
   if (scope.aborted()) return cancelled
   const selected = shown.find((option) => option.optionId === answer)
@@ -217,7 +218,8 @@ export async function writeWorkspaceFile(
       approval: {
         action: 'edit',
         permissionKey: acpPermissionKey('edit'),
-        options: [{ id: 'allow', decision: 'allow', scope: 'once' }, { id: 'reject', decision: 'reject' }]
+        options: [{ id: 'allow', decision: 'allow', scope: 'once' }, { id: 'reject', decision: 'reject' }],
+        tool: { name: 'fs/write_text_file', input: { path: request.path, content: request.content }, ...(scope.cwd ? { cwd: scope.cwd } : {}) }
       }
     })
     if (answer.write !== 'allow') throw new Error(`${label} file write was rejected`)

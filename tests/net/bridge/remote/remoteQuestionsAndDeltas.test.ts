@@ -301,6 +301,97 @@ describe('remote pending questions', () => {
   })
 })
 
+describe('remote approval requests (SPEC §17)', () => {
+  const question = [{ id: 'permission', prompt: 'Allow Claude Code to run a command (Bash)?\nnpm test', options: [{ id: 'allow', label: 'Allow once' }, { id: 'reject', label: 'Reject' }] }]
+  const tag = {
+    action: 'command' as const,
+    permissionKey: 'claude:command',
+    options: [{ id: 'allow', decision: 'allow' as const, scope: 'once' as const }, { id: 'reject', decision: 'reject' as const }],
+    tool: { name: 'Bash', input: { command: 'npm test' } }
+  }
+  const ask = (p: Awaited<ReturnType<typeof setup>>, threadId: string) => {
+    const outcome = p.mms.questions.requestAnswers(question, threadId, { approval: tag }).then((value) => value, (error: Error) => error.message)
+    return { outcome, requestId: p.mms.questions.listPendingForThread(threadId)[0]!.requestId }
+  }
+  const answer = (b: Awaited<ReturnType<Awaited<ReturnType<typeof setup>>['connect']>>['b'], threadId: string, requestId: string, answers: Record<string, string>, idem = 'a-' + newId('rpc')) =>
+    b.rpc('orchestrator.answerQuestions', { threadId, requestId, answers }, rpc(idem))
+
+  it('a phone with the chat capability answers a saved request; the answer is recorded as coming from the Bridge', async () => {
+    const p = await setup(),
+      { b } = await p.connect(),
+      thread = p.mms.threads.createThread('Approve'),
+      { outcome, requestId } = ask(p, thread.id)
+    const { pending } = (await b.rpc('orchestrator.pendingQuestions', { threadId: thread.id }, rpc())) as { pending: Array<{ requestId: string; approval?: { answerPath: string } }> }
+    expect(pending).toEqual([expect.objectContaining({ requestId, approval: expect.objectContaining({ answerPath: 'live' }) })])
+    expect(await answer(b, thread.id, requestId, { permission: 'reject', feedback: 'not on a phone' })).toEqual({ ok: true })
+    await expect(outcome).resolves.toEqual({ permission: 'reject', feedback: 'not on a phone' })
+    expect(p.mms.runEngine.approvals.get(requestId)).toMatchObject({ status: 'answered', decision: 'reject', feedback: 'not on a phone', answeredBy: { kind: 'user', via: 'bridge' } })
+  })
+
+  it('a phone that can only read sees the request but cannot answer it', async () => {
+    const p = await setup(['read']),
+      { b } = await p.connect(),
+      thread = p.mms.threads.createThread('Read only'),
+      { outcome, requestId } = ask(p, thread.id)
+    expect(await b.rpc('orchestrator.pendingQuestions', { threadId: thread.id }, rpc())).toMatchObject({ pending: [{ requestId }] })
+    await expect(answer(b, thread.id, requestId, { permission: 'allow' })).rejects.toMatchObject({ code: 'forbidden' })
+    expect(p.mms.runEngine.approvals.get(requestId)!.status).toBe('pending')
+    p.mms.questions.dismissAllForThread(thread.id)
+    await outcome
+  })
+
+  it('a local answer wins: the phone gets the terminal result with who decided what, and its retry is told the same', async () => {
+    const p = await setup(),
+      { b } = await p.connect(),
+      thread = p.mms.threads.createThread('Race'),
+      { outcome, requestId } = ask(p, thread.id)
+    expect(p.mms.questions.settle(requestId, { permission: 'allow' }, { kind: 'user', via: 'gui' })).toEqual({ ok: true, decision: 'allow' })
+    await expect(outcome).resolves.toEqual({ permission: 'allow' })
+    const expected = { ok: false, reason: 'already_answered', answeredBy: { kind: 'user', via: 'gui' }, decision: 'allow' }
+    expect(await answer(b, thread.id, requestId, { permission: 'reject' }, 'late')).toEqual(expected)
+    // The same request replays its recorded result; a fresh one is told the same.
+    expect(await answer(b, thread.id, requestId, { permission: 'reject' }, 'late')).toEqual(expected)
+    expect(await answer(b, thread.id, requestId, { permission: 'reject' })).toEqual(expected)
+    expect(p.mms.runEngine.approvals.get(requestId)).toMatchObject({ decision: 'allow', answeredBy: { kind: 'user', via: 'gui' } })
+  })
+
+  it('the phone\'s own answer, retried, is already answered with the phone as the winner', async () => {
+    const p = await setup(),
+      { b } = await p.connect(),
+      thread = p.mms.threads.createThread('Retry'),
+      { requestId } = ask(p, thread.id)
+    expect(await answer(b, thread.id, requestId, { permission: 'allow' }, 'first')).toEqual({ ok: true })
+    expect(await answer(b, thread.id, requestId, { permission: 'allow' }, 'second')).toEqual({
+      ok: false, reason: 'already_answered', answeredBy: { kind: 'user', via: 'bridge' }, decision: 'allow'
+    })
+  })
+
+  it('a request that was closed says so', async () => {
+    const p = await setup(),
+      { b } = await p.connect(),
+      thread = p.mms.threads.createThread('Closed'),
+      { outcome, requestId } = ask(p, thread.id)
+    p.mms.runEngine.approvals.cancelForThread(thread.id, 'stopped')
+    await expect(outcome).resolves.toMatch(/closed/)
+    expect(await answer(b, thread.id, requestId, { permission: 'allow' })).toEqual({ ok: false, reason: 'cancelled', cancelReason: 'stopped' })
+  })
+
+  it('naming another thread, or an unknown request, gets a bare refusal whether the request is pending or settled', async () => {
+    const p = await setup(),
+      { b } = await p.connect(),
+      thread = p.mms.threads.createThread('Mine'),
+      other = p.mms.threads.createThread('Theirs'),
+      { requestId } = ask(p, thread.id)
+    expect(await answer(b, other.id, requestId, { permission: 'allow' })).toEqual({ ok: false })
+    expect(await answer(b, thread.id, 'no-such-request', { permission: 'allow' })).toEqual({ ok: false })
+    expect(p.mms.runEngine.approvals.get(requestId)!.status).toBe('pending')
+    p.mms.questions.settle(requestId, { permission: 'allow' }, { kind: 'user', via: 'gui' })
+    // Settled now: the thread check still applies, so the other thread learns nothing about who answered.
+    expect(await answer(b, other.id, requestId, { permission: 'allow' })).toEqual({ ok: false })
+    expect(await b.rpc('orchestrator.dismissQuestions', { threadId: other.id, requestId }, rpc('dismiss-other'))).toEqual({ ok: false })
+  })
+})
+
 describe('remote display deltas', () => {
   function fakeSource(threadId: string) {
     let emit!: (event: ThreadSourceEvent) => void

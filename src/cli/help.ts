@@ -4,6 +4,7 @@ import { BRIDGE_HUB_HELP } from './commands/bridge'
 import { SPACES_HELP } from './commands/spaces'
 import { BOTS_HELP } from './commands/bots'
 import { BROWSER_HELP } from './commands/browser'
+import { APPROVALS_HELP } from './commands/approvals'
 
 export const CLI_NAME = 'mousse-cli'
 
@@ -13,7 +14,8 @@ Usage:
   mousse-cli [options] [message...]          Interactive orchestrator chat (TTY) or one-shot
   mousse-cli chat "/<workflow> --arg value"   Invoke a published workflow from chat
   mousse-cli schedule <subcommand>           Manage scheduled jobs
-  mousse-cli workflow <subcommand>           Run and inspect durable workflows
+  mousse-cli approvals [answer <id> <option>] List or answer approval requests
+  mousse-cli workflow <subcommand>          Run and inspect durable workflows
   mousse-cli browser <status|install|cancel> Manage browser automation setup
   mousse-cli agents <subcommand>             Spawn/list/stop background CLI agents
   mousse-cli engine fsck                     Check Run Engine state for inconsistencies
@@ -60,6 +62,8 @@ Interactive chat (default on a TTY without -p):
   /model [name]               Same as /models
   /steer <prompt>             Mid-turn guidance for the active turn only
   /stop                       Abort the in-flight turn
+  /approve [id]               Allow an approval request once (the id is needed when several wait)
+  /deny [id] [reason]        Deny it, with a reason for the agent
   /help                       Interactive command help
   /exit                       Leave interactive mode
   /<workflow> [arguments]     Run a published workflow in the current profile
@@ -226,6 +230,8 @@ export function commandHelp(command: string): string | null {
       return WORKFLOW_HELP
     case 'schedule':
       return SCHEDULE_HELP
+    case 'approvals':
+      return APPROVALS_HELP
     case 'agents':
       return AGENTS_HELP
     case 'engine':

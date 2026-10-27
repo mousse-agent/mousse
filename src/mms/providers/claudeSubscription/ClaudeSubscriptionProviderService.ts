@@ -1443,7 +1443,9 @@ export class ClaudeSubscriptionProviderService {
                 options: [
                   { id: 'allow', decision: 'allow', scope: 'once' },
                   { id: 'reject', decision: 'reject' }
-                ]
+                ],
+                tool: { name: toolName, input: args, cwd: resolve(input.cwd) },
+                ...(own ? { reason: 'Claude Code asks even in Full access: its own safety check.' } : {})
               }
             }
           )
@@ -1451,8 +1453,11 @@ export class ClaudeSubscriptionProviderService {
             controller.signal.aborted ||
             context.signal.aborted ||
             answer.permission !== 'allow'
-          )
-            return { behavior: 'deny', message: 'Permission rejected' }
+          ) {
+            // The user's reason (a denial with a message, or a message that denied the request) goes to the agent.
+            const why = typeof answer.feedback === 'string' ? answer.feedback.trim().slice(0, 1000) : ''
+            return { behavior: 'deny', message: why ? `Permission rejected: ${why}` : 'Permission rejected' }
+          }
           return { behavior: 'allow', updatedInput: args }
         } catch {
           return { behavior: 'deny', message: 'Permission dismissed' }

@@ -1588,7 +1588,8 @@ export class LlmClient {
     action: 'command' | 'edit',
     permissionKey: string,
     threadId: string | undefined,
-    signal: AbortSignal | undefined
+    signal: AbortSignal | undefined,
+    projectPath: string
   ): Promise<ToolResultMessage | null> {
     if (permissionModeAllows(permissionMode, action)) return null
     const args = (toolCall.arguments ?? {}) as Record<string, unknown>
@@ -1617,12 +1618,15 @@ export class LlmClient {
             options: [
               { id: 'allow', decision: 'allow', scope: 'once' },
               { id: 'reject', decision: 'reject' }
-            ]
+            ],
+            // Relative paths and commands run against the project: the same call elsewhere is another action.
+            tool: { name: toolCall.name, input: args, cwd: projectPath }
           }
         }
       )
       if (answer.permission === 'allow' && !signal?.aborted) return null
-      return toolResult(toolCall, `The user rejected the request to ${what}. Do not retry it unless they ask.`, true)
+      const why = typeof answer.feedback === 'string' ? answer.feedback.trim().slice(0, 1000) : ''
+      return toolResult(toolCall, `The user rejected the request to ${what}.${why ? ` Reason: ${why}` : ' Do not retry it unless they ask.'}`, true)
     } catch {
       return toolResult(toolCall, `The user did not approve the request to ${what}.`, true)
     }
@@ -1747,7 +1751,7 @@ export class LlmClient {
         // and `tests/piLoopApprovals.test.ts` is pointed at that route.
         const permissionAction = permissionMode !== undefined ? piToolAction(toolCall.name) : null
         if (permissionAction) {
-          const refusal = await this.askPermission(toolCall, permissionMode!, permissionAction, piPermissionKey(permissionAction), appTurn?.threadId || undefined, signal)
+          const refusal = await this.askPermission(toolCall, permissionMode!, permissionAction, piPermissionKey(permissionAction), appTurn?.threadId || undefined, signal, projectPath)
           if (refusal) return refusal
         }
 

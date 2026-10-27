@@ -301,6 +301,112 @@ describe('ProfileDatabase', () => {
     })
   })
 
+  describe('the approval requests table (migration 12)', () => {
+    const migration = RUN_MIGRATIONS.find((candidate) => candidate.sql.includes('CREATE TABLE approval_requests'))!
+    const before = RUN_MIGRATIONS.filter((candidate) => candidate.version < migration.version)
+    const columns = (database: ProfileDatabase) => database.database.prepare('PRAGMA table_info(approval_requests)').all().map((column) => String(column.name))
+    const tables = (database: ProfileDatabase) => database.database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all().map((row) => String(row.name))
+    /** A database from before the table, with a run, an event and a receipt in it. */
+    const seeded = (): ProfileDatabase => {
+      const database = open()
+      database.migrate(before)
+      database.database.exec(
+        `INSERT INTO runs(run_id, thread_id, ordinal, status, epoch, source, requested_at) VALUES('run:a', 't1', 1, 'interrupted', 2, 'gui', '2026-10-12T00:00:00.000Z');
+         INSERT INTO thread_events(thread_id, run_id, type, payload, created_at) VALUES('t1', 'run:a', 'restart.note', '{}', '2026-10-12T00:00:01.000Z')`
+      )
+      insert(database, 'receipt-a')
+      return database
+    }
+
+    it('is a new version, after the pause rebuild', () => {
+      expect(migration.version).toBeGreaterThan(10)
+      expect(RUN_MIGRATIONS.at(-1)).toBe(migration)
+      expect(migration.foreignKeys).toBeUndefined()
+    })
+
+    it('adds the table and its three indexes to an older database and keeps everything else as it was', () => {
+      const database = seeded()
+      const tablesBefore = tables(database)
+      expect(columns(database)).toEqual([])
+      const run = database.database.prepare('SELECT * FROM runs').all()
+      const events = database.database.prepare('SELECT * FROM thread_events').all()
+
+      database.migrate(RUN_MIGRATIONS)
+
+      expect(database.userVersion()).toBe(migration.version)
+      expect(tables(database)).toEqual([...tablesBefore, 'approval_requests'].sort())
+      expect(columns(database)).toEqual([
+        'request_id', 'thread_id', 'run_id', 'instance_id', 'provider', 'action', 'permission_key', 'fingerprint', 'questions',
+        'reason', 'answer_path', 'uncertain', 'uncertain_tools', 'status', 'answers', 'decision', 'decision_scope', 'feedback',
+        'answered_by', 'cancel_reason', 'continuation_run_id', 'grant_consumed_at', 'delivered_at', 'created_at', 'settled_at'
+      ])
+      expect(database.database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'approval_requests' AND name LIKE 'approval_requests_%' ORDER BY name").all())
+        .toEqual([{ name: 'approval_requests_continuation' }, { name: 'approval_requests_run' }, { name: 'approval_requests_thread' }])
+      expect(database.database.prepare('SELECT * FROM runs').all()).toEqual(run)
+      expect(database.database.prepare('SELECT * FROM thread_events').all()).toEqual(events)
+      expect(count(database)).toBe(1)
+      expect(database.database.prepare('SELECT COUNT(*) AS n FROM approval_requests').get()).toEqual({ n: 0 })
+    })
+
+    it('stores a request with its defaults, refuses a row missing a required column, and is STRICT about types', () => {
+      const database = seeded()
+      database.migrate(RUN_MIGRATIONS)
+      database.database
+        .prepare(`INSERT INTO approval_requests(request_id, thread_id, instance_id, provider, action, permission_key, questions, answer_path, status, created_at)
+                  VALUES('r1', 't1', 'claude', 'claude', 'command', 'claude:command', '[]', 'live', 'pending', '2026-10-12T00:00:02.000Z')`)
+        .run()
+      expect(database.database.prepare('SELECT uncertain, run_id, fingerprint, delivered_at FROM approval_requests').get()).toEqual({ uncertain: 0, run_id: null, fingerprint: null, delivered_at: null })
+      expect(() => database.database.prepare("INSERT INTO approval_requests(request_id, thread_id) VALUES('r2', 't1')").run()).toThrow(/NOT NULL/)
+      expect(() => database.database
+        .prepare(`INSERT INTO approval_requests(request_id, thread_id, instance_id, provider, action, permission_key, questions, answer_path, uncertain, status, created_at)
+                  VALUES('r3', 't1', 'claude', 'claude', 'command', 'claude:command', '[]', 'live', 'yes', 'pending', 'now')`)
+        .run()).toThrow(/cannot store TEXT value in INTEGER column|datatype/i)
+    })
+
+    it('constrains its enumerated columns like the other tables, and reads the continuation of a run by index', () => {
+      const database = seeded()
+      database.migrate(RUN_MIGRATIONS)
+      const row = (overrides: Record<string, string | number | null> = {}) => {
+        const values: Record<string, string | number | null> = {
+          request_id: `r-${Math.random()}`, thread_id: 't1', instance_id: 'claude', provider: 'claude', action: 'command', permission_key: 'claude:command',
+          questions: '[]', answer_path: 'live', status: 'pending', created_at: '2026-10-12T00:00:02.000Z', ...overrides
+        }
+        const names = Object.keys(values)
+        database.database.prepare(`INSERT INTO approval_requests(${names.join(', ')}) VALUES(${names.map(() => '?').join(', ')})`).run(...Object.values(values))
+      }
+      expect(() => row()).not.toThrow()
+      expect(() => row({ decision: 'allow', decision_scope: 'always', status: 'answered' })).not.toThrow()
+      for (const bad of [{ status: 'done' }, { answer_path: 'later' }, { action: 'delete' }, { decision: 'maybe' }, { decision_scope: 'forever' }, { uncertain: 2 }])
+        expect(() => row(bad), JSON.stringify(bad)).toThrow(/CHECK/)
+      const plan = database.database.prepare('EXPLAIN QUERY PLAN SELECT * FROM approval_requests WHERE continuation_run_id = ?').all('run:a').map((step) => String(step.detail)).join(' ')
+      expect(plan).toContain('approval_requests_continuation')
+    })
+
+    it('opens idempotently, and a build that predates it refuses the newer database instead of reading it wrong', () => {
+      const database = open()
+      database.migrate(RUN_MIGRATIONS)
+      database.migrate(RUN_MIGRATIONS)
+      expect(database.database.prepare('SELECT version FROM run_schema_migrations ORDER BY version').all().at(-1)).toEqual({ version: migration.version })
+      expect(codeOf(() => database.migrate(before))).toBe('downgrade_unsupported')
+      expect(database.userVersion()).toBe(migration.version)
+    })
+
+    it('rolls back with its version when the commit fails, and applies on the next open', () => {
+      let armed = false
+      profileHome = mkdtempSync(join(tmpdir(), 'mousse-run-db-'))
+      db = new ProfileDatabase({ profileHome, fault: (point) => { if (armed && point === 'migration.beforeCommit') throw new Error('injected') } })
+      db.migrate(before)
+      armed = true
+      expect(() => db!.migrate(RUN_MIGRATIONS)).toThrow('injected')
+      armed = false
+      expect(db.userVersion()).toBe(before.at(-1)!.version)
+      expect(columns(db)).toEqual([])
+      db.migrate(RUN_MIGRATIONS)
+      expect(db.userVersion()).toBe(migration.version)
+      expect(columns(db)).toContain('request_id')
+    })
+  })
+
   it('refuses a symlinked run directory', () => {
     profileHome = mkdtempSync(join(tmpdir(), 'mousse-run-db-'))
     const elsewhere = join(profileHome, 'elsewhere')

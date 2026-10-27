@@ -374,4 +374,113 @@ describe('ThreadRuntime over the protocol', () => {
     expect(snap.activeTurn).toEqual({ active: false, running: false })
     await c.close()
   })
+
+  describe('saved approval requests (SPEC §17)', () => {
+    const approvalQuestion = [{ id: 'permission', prompt: 'Allow Claude Code to run a command (Bash)?\nnpm test', options: [{ id: 'allow', label: 'Allow once' }, { id: 'reject', label: 'Reject' }] }]
+    const approvalTag = {
+      action: 'command' as const,
+      permissionKey: 'claude:command',
+      options: [{ id: 'allow', decision: 'allow' as const, scope: 'once' as const }, { id: 'reject', decision: 'reject' as const }],
+      tool: { name: 'Bash', input: { command: 'npm test' }, cwd: '/work/app' }
+    }
+    const startRun = async (threadId: string, key = 'approval-run') => {
+      const sent = await mms.runEngine.dispatch({ kind: 'send', threadId, clientRequestId: key, source: 'gui' })
+      if (sent.status !== 'accepted') throw new Error('send rejected')
+      mms.runEngine.markStarting(sent.runId)
+      return mms.runEngine.markRunning(sent.runId)
+    }
+    const clientAs = async (clientType: 'gui' | 'cli'): Promise<LocalMmsClient> => {
+      const c = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType })
+      await c.connect()
+      return c
+    }
+    type Answer = { ok: boolean; reason?: string; decision?: string; answeredBy?: { kind: string; via?: string }; cancelReason?: string }
+
+    it('survives a client reconnect, is answered by the CLI, and a second client learns who won', async () => {
+      const thread = mms.threads.createThread('Approval')
+      await startRun(thread.id)
+      const gui = await clientAs('gui')
+      const live: string[] = []
+      gui.onEvent((event, delivery) => {
+        if (event.type === 'questions.pending' && !delivery?.replay) live.push((event.data as { requestId: string }).requestId)
+      })
+      await gui.subscribe(0)
+      const waiter = mms.questions.requestAnswers(approvalQuestion, thread.id, { approval: approvalTag })
+      await vi.waitFor(() => expect(mms.questions.listPendingForThread(thread.id)).toHaveLength(1))
+      const requestId = mms.questions.listPendingForThread(thread.id)[0]!.requestId
+      await vi.waitFor(() => expect(live).toEqual([requestId]))
+
+      // A reconnect and a resubscribe show the same card and notify nobody again.
+      await gui.close()
+      const reopened = await clientAs('gui')
+      const replayed: string[] = []
+      reopened.onEvent((event, delivery) => {
+        if (event.type === 'questions.pending' && (event.data as { requestId: string }).requestId === requestId) replayed.push(delivery?.replay ? 'replay' : 'live')
+      })
+      await reopened.subscribe(0)
+      expect(replayed.filter((kind) => kind === 'live')).toEqual([])
+      const pending = await reopened.request<{ pending: Array<{ requestId: string; approval?: { answerPath: string } }> }>('orchestrator.pendingQuestions', { threadId: thread.id })
+      expect(pending.pending).toEqual([expect.objectContaining({ requestId, approval: expect.objectContaining({ answerPath: 'live' }) })])
+      const snap = await reopened.request<{ pendingQuestions: Array<{ requestId: string }>; activity: string }>('thread.snapshot', { threadId: thread.id })
+      expect(snap.pendingQuestions.map((entry) => entry.requestId)).toEqual([requestId])
+
+      // The CLI answers; the callback gets the answer once.
+      const cli = await clientAs('cli')
+      await expect(cli.request<Answer>('orchestrator.answerQuestions', { requestId, answers: { permission: 'allow' } })).resolves.toEqual({ ok: true })
+      await expect(waiter).resolves.toEqual({ permission: 'allow' })
+      expect(mms.runEngine.approvals.get(requestId)).toMatchObject({ status: 'answered', decision: 'allow', answeredBy: { kind: 'user', via: 'cli' } })
+      // The GUI, a moment later, is told who decided what.
+      await expect(reopened.request<Answer>('orchestrator.answerQuestions', { requestId, answers: { permission: 'reject' } })).resolves.toEqual({
+        ok: false, reason: 'already_answered', answeredBy: { kind: 'user', via: 'cli' }, decision: 'allow'
+      })
+      expect((await reopened.request<{ pending: unknown[] }>('orchestrator.pendingQuestions', { threadId: thread.id })).pending).toEqual([])
+      await reopened.close()
+      await cli.close()
+    })
+
+    it('an answer to a request that was closed says so', async () => {
+      const thread = mms.threads.createThread('Closed')
+      const run = await startRun(thread.id)
+      const waiter = mms.questions.requestAnswers(approvalQuestion, thread.id, { approval: approvalTag }).catch((error: Error) => error.message)
+      const requestId = mms.questions.listPendingForThread(thread.id)[0]!.requestId
+      mms.runEngine.markTerminal(run.runId, 'failed', { error: 'boom' })
+      await expect(waiter).resolves.toMatch(/closed/)
+      const c = await clientAs('gui')
+      await expect(c.request<Answer>('orchestrator.answerQuestions', { requestId, answers: { permission: 'allow' } })).resolves.toEqual({ ok: false, reason: 'cancelled', cancelReason: 'turn_ended' })
+      await c.close()
+    })
+
+    it('stays pending across a profile restart as a request whose answer continues the thread', async () => {
+      const thread = mms.threads.createThread('Restart')
+      const run = await startRun(thread.id)
+      const waiter = mms.questions.requestAnswers(approvalQuestion, thread.id, { approval: approvalTag }).catch(() => undefined)
+      const requestId = mms.questions.listPendingForThread(thread.id)[0]!.requestId
+      await server.stop()
+      await mms.stop()
+      await waiter
+
+      mms = await MousseMainService.create({ homeDir: home, headless: true, ownerKind: 'test' })
+      await mms.start()
+      ownerToken = mms.getOwnerLease()!.owner.token
+      server = new MmsProtocolServer({ mms, ownerToken, version: 'test' })
+      endpoint = await server.start()
+
+      const c = await clientAs('cli')
+      const pending = await c.request<{ pending: Array<{ requestId: string; approval?: { answerPath: string; uncertain?: boolean } }> }>('orchestrator.pendingQuestions', { threadId: thread.id })
+      expect(pending.pending).toEqual([expect.objectContaining({ requestId, approval: expect.objectContaining({ answerPath: 'continue' }) })])
+      expect(mms.runEngine.approvals.get(requestId)).toMatchObject({ status: 'pending', decision: null, runId: run.runId })
+      // Nothing was started or granted by the restart.
+      expect(mms.runEngine.listRuns(thread.id)).toHaveLength(1)
+      await c.close()
+    })
+
+    it('orchestrator.send takes no approval or answerer fields: they are the daemon\'s own', async () => {
+      const thread = mms.threads.createThread('NoInternals')
+      const c = await clientAs('cli')
+      for (const field of [{ permissionDecisions: [] }, { bindDelivery: { requestIds: ['r'] } }, { settleApprovals: { answeredBy: { kind: 'user' } } }, { actor: { kind: 'user' } }])
+        await expect(c.request('orchestrator.send', { threadId: thread.id, content: 'hi', ...field })).rejects.toBeTruthy()
+      expect(mms.orchestrator.getMessagesForPersistence(thread.id)).toEqual([])
+      await c.close()
+    })
+  })
 })

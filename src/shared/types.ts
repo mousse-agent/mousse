@@ -282,6 +282,9 @@ export type OrchestratorContextUsageInput = string | OrchestratorContextUsageReq
 export interface UserQuestionOption {
   id: string
   label: string
+  /** An approval request's option: the decision it means, whatever id the provider gave it. */
+  decision?: 'allow' | 'reject'
+  scope?: 'once' | 'always'
 }
 
 export interface UserQuestion {
@@ -291,14 +294,44 @@ export interface UserQuestion {
   allowMultiple?: boolean
 }
 
+/**
+ * What a saved approval request adds to its card: why the provider asks, whether answering still
+ * reaches a waiting provider (`live`) or continues the thread after a restart (`continue`), and how
+ * far through the requests one dead run left the user is.
+ */
+export interface PendingApprovalInfo {
+  reason?: string
+  answerPath: 'live' | 'continue'
+  /** The run the request belonged to was cut off while a tool may have run: `uncertainTools`. */
+  uncertain?: boolean
+  uncertainTools?: string[]
+  /** `continue` requests of one run: how many are answered of how many the run left. */
+  answered?: number
+  total?: number
+}
+
 export interface PendingUserQuestions {
   requestId: string
   questions: UserQuestion[]
   /** Thread that owns this blocking plan-tool request. */
   threadId?: string
+  /** Present on a provider's, the Pi agent's or a Mousse tool's saved approval request. */
+  approval?: PendingApprovalInfo
 }
 
 export type UserQuestionAnswers = Record<string, string | string[]>
+
+/**
+ * The daemon's answer to `orchestrator.answerQuestions`. A saved approval request that someone else
+ * answered first (or that was closed meanwhile) comes back with who decided what, so a client can say so.
+ */
+export interface QuestionAnswerOutcome {
+  ok: boolean
+  reason?: 'already_answered' | 'cancelled'
+  decision?: 'allow' | 'reject'
+  answeredBy?: { kind: 'user'; via?: string } | { kind: 'agent'; threadId: string; runId: string }
+  cancelReason?: string
+}
 
 export interface DocumentOpenPayload {
   title: string

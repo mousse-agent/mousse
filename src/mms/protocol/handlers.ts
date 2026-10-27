@@ -1443,8 +1443,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const requestId = asString(p.requestId, 'requestId', 256)
       const answers = asAnswersMap(p.answers)
       const pending = ctx.mms.questions.getPending(requestId)
-      const ok = ctx.mms.questions.submitAnswers(requestId, answers, questionAnswerer(ctx))
-      if (ok && pending) {
+      const settled = ctx.mms.questions.settle(requestId, answers, questionAnswerer(ctx))
+      if (settled.ok && pending) {
         // Answers reach the model through the tool result; mirror them as a
         // visible user message so the transcript shows what the user said.
         ctx.mms.orchestrator.recordQuestionResponseMessage(
@@ -1452,7 +1452,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           formatQuestionAnswersMessage(pending.questions, answers)
         )
       }
-      return { ok }
+      // The loser of a race learns who won and what they decided (SPEC §17.4).
+      if (!settled.ok && (settled.reason === 'already_answered' || settled.reason === 'cancelled'))
+        return {
+          ok: false,
+          reason: settled.reason,
+          ...(settled.answeredBy ? { answeredBy: settled.answeredBy } : {}),
+          ...(settled.decision ? { decision: settled.decision } : {}),
+          ...(settled.cancelReason ? { cancelReason: settled.cancelReason } : {})
+        }
+      return { ok: settled.ok }
     }
     case 'orchestrator.dismissQuestions': {
       const p = isObject(params) ? params : {}

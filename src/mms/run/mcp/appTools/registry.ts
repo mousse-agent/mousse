@@ -324,7 +324,7 @@ export class ToolRegistry {
     // definition run is held to its own grants above); a rejection ends the call before its handler
     // runs and writes no ledger row.
     if (tool.access === 'editsWorkspace' && !turn.definition) {
-      const refusal = await this.askBeforeEditing(tool, caller, request.signal)
+      const refusal = await this.askBeforeEditing(tool, caller, request.signal, args)
       if (refusal) return refusal
     }
     const ctx: ToolCallContext = { caller, turn, toolCallId: request.toolCallId, signal: request.signal, transport: 'mcp', ...(scope ? { scope } : {}) }
@@ -373,7 +373,7 @@ export class ToolRegistry {
       // the user as any other runtime does, with or without a run.
       if (tool.access === 'editsWorkspace' && !turn.trusted) {
         callerThreadOnly(args, caller)
-        const refusal = await this.askBeforeEditing(tool, { ...caller, runId: authority.kind === 'run' ? authority.runId : turn.runId }, call.signal, turn.permissionMode)
+        const refusal = await this.askBeforeEditing(tool, { ...caller, runId: authority.kind === 'run' ? authority.runId : turn.runId }, call.signal, args, turn.permissionMode)
         if (refusal) return refusal
       }
       return await tool.handler(args, {
@@ -463,7 +463,7 @@ export class ToolRegistry {
    * ahead (the run's permission mode allows edits, or the user allowed it once). An owner that cannot
    * ask rejects: nothing runs unapproved.
    */
-  private async askBeforeEditing(tool: MousseTool, caller: McpCaller, signal: AbortSignal, turnMode?: PermissionMode): Promise<ToolOutcome | null> {
+  private async askBeforeEditing(tool: MousseTool, caller: McpCaller, signal: AbortSignal, args: Record<string, unknown>, turnMode?: PermissionMode): Promise<ToolOutcome | null> {
     const mode = turnMode ?? this.options.permissionModeFor?.(caller.runId)
     if (mode === undefined || permissionModeAllows(mode, 'edit')) return null
     const rejected: ToolOutcome = { text: `The user did not approve ${tool.name}, so it did not run. Do not retry it unless they ask.`, isError: true }
@@ -483,11 +483,14 @@ export class ToolRegistry {
           approval: {
             action: 'edit',
             permissionKey: tool.permissionKey ?? PERMISSION_KEYS.mousseIntegrate,
-            options: [{ id: 'allow', decision: 'allow', scope: 'once' }, { id: 'reject', decision: 'reject' }]
+            options: [{ id: 'allow', decision: 'allow', scope: 'once' }, { id: 'reject', decision: 'reject' }],
+            tool: { name: tool.name, input: args }
           }
         }
       )
-      return answers.permission === 'allow' && !signal.aborted ? null : rejected
+      if (answers.permission === 'allow' && !signal.aborted) return null
+      const why = typeof answers.feedback === 'string' ? answers.feedback.trim().slice(0, 1000) : ''
+      return why ? { text: `${rejected.text} Reason: ${why}`, isError: true } : rejected
     } catch {
       return rejected
     }

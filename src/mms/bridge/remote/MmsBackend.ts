@@ -115,9 +115,11 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     )
       throw new NetError('bad_request', 'Project is outside this profile inventory.')
     if (method === 'orchestrator.answerQuestions' || method === 'orchestrator.dismissQuestions') {
-      // A remote caller may only settle a question that belongs to the thread it names.
+      // A remote caller may only settle a question that belongs to the thread it names. A saved
+      // request another client already settled still names its thread, so the caller learns who
+      // answered first instead of a bare refusal; any other thread or an unknown id gets no detail.
       if (
-        this.services.questions.getPending(params.requestId as string)?.threadId !== params.threadId
+        this.services.questions.getRequest(params.requestId as string)?.threadId !== params.threadId
       )
         return { ok: false }
     }

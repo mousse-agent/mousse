@@ -325,5 +325,44 @@ ALTER TABLE delegations ADD COLUMN access_level TEXT CHECK(access_level IN ('lin
 -- version 11). A run that continues it is never granted more.
 ALTER TABLE runs ADD COLUMN access_grant TEXT CHECK(access_grant IN ('lineage','read','manage'));
 `
+  },
+  {
+    version: 12,
+    sql: `
+-- A provider's, the Pi agent's or a Mousse tool's approval request, saved so it survives a client
+-- reconnect and a daemon restart (SPEC §17). A request is settled once: 'pending' becomes
+-- 'answered' or 'cancelled'.
+CREATE TABLE approval_requests(
+  request_id TEXT PRIMARY KEY,
+  thread_id TEXT NOT NULL,
+  run_id TEXT,
+  instance_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  action TEXT NOT NULL CHECK(action IN ('command','edit','tool')),
+  permission_key TEXT NOT NULL,
+  fingerprint TEXT,
+  questions TEXT NOT NULL,
+  reason TEXT,
+  answer_path TEXT NOT NULL CHECK(answer_path IN ('live','continue')),
+  uncertain INTEGER NOT NULL DEFAULT 0 CHECK(uncertain IN (0,1)),
+  uncertain_tools TEXT,
+  status TEXT NOT NULL CHECK(status IN ('pending','answered','cancelled')),
+  answers TEXT,
+  decision TEXT CHECK(decision IS NULL OR decision IN ('allow','reject')),
+  decision_scope TEXT CHECK(decision_scope IS NULL OR decision_scope IN ('once','always')),
+  feedback TEXT,
+  answered_by TEXT,
+  cancel_reason TEXT,
+  continuation_run_id TEXT,
+  grant_consumed_at TEXT,
+  delivered_at TEXT,
+  created_at TEXT NOT NULL,
+  settled_at TEXT
+) STRICT;
+CREATE INDEX approval_requests_thread ON approval_requests(thread_id, status);
+CREATE INDEX approval_requests_run ON approval_requests(run_id, status);
+-- Read at every turn start: the requests a run was started to deliver.
+CREATE INDEX approval_requests_continuation ON approval_requests(continuation_run_id);
+`
   }
 ]

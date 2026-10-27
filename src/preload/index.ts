@@ -66,6 +66,7 @@ import type {
   ThreadActivitySnapshot,
   TurnState,
   TurnStateSnapshot,
+  QuestionAnswerOutcome,
   UserQuestionAnswers
 } from '../shared/types'
 import type {
@@ -275,6 +276,9 @@ const api = {
     },
     answerQuestions: (requestId: string, answers: UserQuestionAnswers): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:answerQuestions', requestId, answers),
+    /** `answerQuestions` with its outcome: who answered a saved approval request first, or why it was closed. */
+    answerQuestionsDetailed: (requestId: string, answers: UserQuestionAnswers): Promise<QuestionAnswerOutcome> =>
+      ipcRenderer.invoke('orchestrator:answerQuestionsDetailed', requestId, answers),
     dismissQuestions: (requestId: string): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:dismissQuestions', requestId),
     abort: (threadId?: string): Promise<boolean> =>
