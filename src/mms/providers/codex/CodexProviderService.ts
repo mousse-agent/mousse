@@ -71,6 +71,7 @@ import { DEFAULT_TREE_TIMING, HelperTree, RpcRefused, ThreadStatuses, TreeOff, i
 import { NativeHelpers, type StrayThread } from './nativeHelpers'
 import { readCodexUserSetup, type CodexUserSetup } from './userSetup'
 import type { ChildTurnPolicy } from '../../run/adapters/ProviderAdapter'
+import { QUESTIONS_REFUSED_MESSAGE } from '../../harness/acp/permissions'
 
 export const CODEX_PROVIDER_ID = 'codex'
 /** How long a live `account/read` result stands before it is checked again. */
@@ -286,7 +287,10 @@ export type CodexChatInput = {
    * that continues with other instructions gets the new text in that turn's prompt.
    */
   developerInstructions?: string
-  /** `never`: every command and file change that needs approval is declined without asking (`RunPolicy.approvals`). */
+  /**
+   * `never`: every command and file change that needs approval is declined, and every question to
+   * the user refused, without asking (`RunPolicy.approvals`).
+   */
   approvals?: 'never'
   onText: (text: string) => void
   onThinking?: (text: string) => void
@@ -1496,6 +1500,8 @@ export class CodexProviderService {
       case 'item/tool/requestUserInput': {
         const input = request.params as CodexServerRequestMap['item/tool/requestUserInput']['params']
         if (!run || run.questionSignal.aborted) throw new Error('No Mousse turn is waiting for this answer')
+        // Nobody answers a run whose approvals are `never`.
+        if (run.refusesApprovals) throw new Error(QUESTIONS_REFUSED_MESSAGE)
         const answers = await this.questions.requestAnswers(
           input.questions.map((question) => ({
             id: question.id,

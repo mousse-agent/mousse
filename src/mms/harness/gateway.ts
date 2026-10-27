@@ -981,6 +981,15 @@ export class Harness implements HarnessGateway {
         signal = AbortSignal.any([spec.input.signal, entry.cancel.signal])
         const input: TurnInput = { ...spec.input, signal }
         minted = this.mintBridge(record, spec)
+        // Approvals other than `ask` are answered by the turn's bridge: a turn without one would
+        // ask the user after all, so it does not run.
+        if (!minted && spec.binding.policy.approvals !== 'ask')
+          throw harnessAppError({
+            code: 'policy_unenforceable',
+            message: `This turn cannot refuse or pre-grant tool approvals on ${this.displayName(record)}: it has no turn bridge.`,
+            reason: 'The turn has no app context, so nothing answers its permission requests.',
+            instanceId: spec.binding.instanceId
+          })
         const host: AdapterHost = minted ? { ...spec.host, bridge: minted.bridge } : spec.host
         const turn = await record.runtime.adapter.startTurn(input, sink, spec.control, host)
         minted?.settle({ status: turn.aborted || signal.aborted ? 'aborted' : 'completed', ...(turn.drain ? { drain: turn.drain } : {}) })

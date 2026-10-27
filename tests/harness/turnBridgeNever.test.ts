@@ -1,16 +1,19 @@
 /**
  * PR 4 §4: `approvals: 'never'` is enforced. A binding takes its approvals from the caller, and the
  * turn bridge of a `never` binding denies every permission request without asking: ACP answers
- * `reject_once`, Claude Code's `canUseTool` denies with the fixed text, Codex declines (the Codex
- * service case is in `subagentProviderPolicy.test.ts`). `ask` keeps asking the thread's questions.
+ * `reject_once` and refuses file writes and Grok's questions, Claude Code's `canUseTool` denies with
+ * the fixed text (and refuses `AskUserQuestion`), Codex declines (the Codex service cases are in
+ * `subagentProviderPolicy.test.ts`). A `never` turn without a bridge does not run. `ask` keeps
+ * asking the thread's questions.
  */
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
 import type { RequestPermissionRequest } from '@agentclientprotocol/sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { answerPermission, APPROVALS_REFUSED_MESSAGE, classifyGenericOption, questionsPrompter, refusingPrompter, type AcpRequestScope, type PermissionPrompter } from '../../src/mms/harness/acp/permissions'
+import { answerPermission, APPROVALS_REFUSED_MESSAGE, classifyGenericOption, QUESTIONS_REFUSED_MESSAGE, questionsPrompter, refusingPrompter, writeWorkspaceFile, type AcpRequestScope, type PermissionPrompter } from '../../src/mms/harness/acp/permissions'
+import { answerXaiQuestions } from '../../src/mms/harness/acp/xai'
 import type { TurnSpec } from '../../src/mms/harness/gateway'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { ClaudeSubscriptionProviderService } from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
@@ -61,7 +64,7 @@ describe('the gateway mints the bridge from the binding\'s approvals', () => {
     const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored }), write: (next) => { stored = next.instances } } })
     const questions = new UserQuestionService()
     const harness = testHarness({ adapters: [adapter], instances, profileHome: home, questions })
-    const turn = async (approvals?: RunPolicy['approvals']) => {
+    const turn = async (approvals?: RunPolicy['approvals'], options: { app?: boolean } = {}) => {
       const binding = await harness.bind(harness.resolveStored({ instanceId: 'claude', llmProvider: '', model: 'm' }, { purpose: 'turn' }), { mode: 'agent', ...(approvals ? { approvals } : {}) })
       const spec: TurnSpec = {
         binding,
@@ -69,12 +72,12 @@ describe('the gateway mints the bridge from the binding\'s approvals', () => {
         sink: sink(),
         control: { drainSteer: () => undefined, heartbeat: noop },
         host: host(),
-        app: { turnToken: 'tt', modeCeiling: 'default', mcpEligible: false, instructions: () => ({ sessionInstructions: '', turnPreamble: '' }) }
+        ...(options.app === false ? {} : { app: { turnToken: 'tt', modeCeiling: 'default' as const, mcpEligible: false, instructions: () => ({ sessionInstructions: '', turnPreamble: '' }) } })
       }
       await harness.startTurn(spec).result
       return { binding, bridge: hosts.at(-1)!.bridge! }
     }
-    return { harness, questions, turn }
+    return { harness, questions, turn, hosts }
   }
 
   it('records the caller\'s approvals on the binding, `ask` by default', async () => {
@@ -96,6 +99,51 @@ describe('the gateway mints the bridge from the binding\'s approvals', () => {
     expect(await asking.choose({ threadId: 'thread-1', title: 'Run rm?', options: [] })).toBe('yes')
     expect(asked).toHaveBeenCalledOnce()
     s.harness.stop()
+  })
+
+  it('a turn without a bridge does not run under `never` (nothing would refuse its prompts), and runs under `ask`', async () => {
+    const s = setup()
+    await expect(s.turn('never', { app: false })).rejects.toMatchObject({ code: 'policy_unenforceable', details: { reason: expect.stringContaining('no app context') } })
+    expect(s.hosts).toHaveLength(0)
+    await s.turn('ask', { app: false }).catch(() => {})
+    expect(s.hosts).toHaveLength(1)
+    expect(s.hosts[0].bridge).toBeUndefined()
+    s.harness.stop()
+  })
+})
+
+describe('ACP file writes and Grok questions under `never`', () => {
+  const home = () => tempHome('mousse-never-acp-')
+
+  it('a file write is refused without asking and nothing is written', async () => {
+    const cwd = home()
+    const questions = new UserQuestionService()
+    const asked = vi.spyOn(questions, 'requestAnswers')
+    const scope: AcpRequestScope = { threadId: 'thread-1', cwd, approvals: 'never', aborted: () => false, throwIfAborted: noop }
+    await expect(writeWorkspaceFile(questions, scope, { sessionId: 's', path: join(cwd, 'a.txt'), content: 'x' }, 'Antigravity')).rejects.toThrow(APPROVALS_REFUSED_MESSAGE)
+    expect(asked).not.toHaveBeenCalled()
+    expect(existsSync(join(cwd, 'a.txt'))).toBe(false)
+  })
+
+  it('a file write still asks under `ask`', async () => {
+    const cwd = home()
+    const questions = new UserQuestionService()
+    const asked = vi.spyOn(questions, 'requestAnswers').mockResolvedValue({ write: 'allow' })
+    const scope: AcpRequestScope = { threadId: 'thread-1', cwd, aborted: () => false, throwIfAborted: noop }
+    await writeWorkspaceFile(questions, scope, { sessionId: 's', path: join(cwd, 'a.txt'), content: 'x' }, 'Antigravity')
+    expect(asked).toHaveBeenCalledOnce()
+    expect(existsSync(join(cwd, 'a.txt'))).toBe(true)
+  })
+
+  it('Grok ask_user_question is cancelled without asking under `never`, and asked under `ask`', async () => {
+    const questions = new UserQuestionService()
+    const asked = vi.spyOn(questions, 'requestAnswers').mockResolvedValue({ q0: 'option-0' })
+    const params = { questions: [{ question: 'Which file?', options: [{ label: 'a.ts' }] }] }
+    const base = { threadId: 'thread-1', cwd: '/work', aborted: () => false, throwIfAborted: noop }
+    expect(await answerXaiQuestions(questions, { ...base, approvals: 'never' }, params)).toEqual({ outcome: 'cancelled' })
+    expect(asked).not.toHaveBeenCalled()
+    expect(await answerXaiQuestions(questions, base, params)).toEqual({ outcome: 'accepted', answers: { 'Which file?': ['a.ts'] } })
+    expect(asked).toHaveBeenCalledOnce()
   })
 })
 
@@ -147,8 +195,8 @@ describe('Claude Code', () => {
     expect(inputs.map((chat) => chat.approvals)).toEqual(['never', undefined])
   })
 
-  /** A service whose query asks `canUseTool` about `Bash` while the turn runs. */
-  function claude() {
+  /** A service whose query asks `canUseTool` about `tool` while the turn runs. */
+  function claude(tool = 'Bash', args: Record<string, unknown> = { command: 'rm -rf build' }) {
     const home = tempHome('mousse-never-claude-')
     const binary = join(home, 'claude')
     writeFileSync(binary, 'fixture')
@@ -161,7 +209,7 @@ describe('Claude Code', () => {
     const service = new ClaudeSubscriptionProviderService(home, questions, {
       query: ({ options }: { options: Options }) => {
         const generator = (async function* () {
-          answers.push(await options.canUseTool!('Bash', { command: 'rm -rf build' }, { signal: new AbortController().signal } as never))
+          answers.push(await options.canUseTool!(tool, args, { signal: new AbortController().signal } as never))
           yield { type: 'result', subtype: 'success', is_error: false, result: 'done', session_id: 'vendor-session' }
         })()
         return Object.assign(generator, { close: vi.fn(), interrupt: vi.fn(async () => {}) }) as unknown as Query
@@ -179,6 +227,22 @@ describe('Claude Code', () => {
     expect(APPROVALS_REFUSED_MESSAGE).toBe('Tools that need approval are refused here.')
     expect(asked).not.toHaveBeenCalled()
     c.service.stop()
+  })
+
+  it('`AskUserQuestion` is denied without asking under `never`, and asked under `ask`', async () => {
+    const args = { questions: [{ question: 'Which file?', options: [{ label: 'a.ts' }] }] }
+    const refused = claude('AskUserQuestion', args)
+    const notAsked = vi.spyOn(refused.questions, 'requestAnswers')
+    await refused.service.chat({ threadId: 'thread-1', cwd: refused.home, model: 'sonnet', prompt: 'go', onText: noop, approvals: 'never' })
+    expect(refused.answers).toEqual([{ behavior: 'deny', message: QUESTIONS_REFUSED_MESSAGE }])
+    expect(notAsked).not.toHaveBeenCalled()
+    refused.service.stop()
+    const asking = claude('AskUserQuestion', args)
+    const asked = vi.spyOn(asking.questions, 'requestAnswers').mockResolvedValue({ 0: 'a.ts' })
+    await asking.service.chat({ threadId: 'thread-1', cwd: asking.home, model: 'sonnet', prompt: 'go', onText: noop })
+    expect(asking.answers).toEqual([expect.objectContaining({ behavior: 'allow' })])
+    expect(asked).toHaveBeenCalledOnce()
+    asking.service.stop()
   })
 
   it('`canUseTool` asks the user under `ask`, as before', async () => {

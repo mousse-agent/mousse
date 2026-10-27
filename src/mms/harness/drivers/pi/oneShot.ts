@@ -18,9 +18,9 @@ export async function runPiOneShot(models: PiOneShotModels, providerId: string, 
   const model = models.getModel(providerId, baseId) ?? customModel(models, providerId, spec)
   if (!model)
     throw harnessAppError({ code: 'model_unavailable', message: `${baseId} is not a model of this provider. Refresh models or choose another one.` })
-  if (!(await models.getAuth(model)))
+  // Reading the credentials may refresh a sign-in over the network: the timeout and a stop bound it too.
+  if (!(await untilAborted(models.getAuth(model), signal)))
     throw harnessAppError({ code: 'signed_out', message: 'This provider is not signed in. Sign in or choose another model.' })
-  signal.throwIfAborted()
   const context = {
     systemPrompt: spec.system,
     messages: [{ role: 'user' as const, content: spec.prompt, timestamp: Date.now() }]
@@ -34,6 +34,16 @@ export async function runPiOneShot(models: PiOneShotModels, providerId: string, 
   const message = await consumeAssistantStream(stream, {}, { signal, onProgress: () => spec.onActivity() })
   assertAssistantResponseSucceeded(message)
   return { text: message.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('') }
+}
+
+/** `promise`, or an `AbortError` as soon as `signal` aborts (the promise itself is left to settle). */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'))
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new DOMException('Aborted', 'AbortError'))
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
+  })
 }
 
 /** A custom model added to the provider runs with the transport of the provider's first listed model. */

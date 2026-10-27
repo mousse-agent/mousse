@@ -141,6 +141,17 @@ describe('gateway.oneShot on the pi driver', () => {
     expect(s.pi.requests).toHaveLength(1)
   })
 
+  it('bounds the credential read too: a refresh that hangs ends with `timeout` and sends nothing', async () => {
+    vi.useFakeTimers()
+    const s = setup()
+    s.pi.models.getAuth = () => new Promise(() => {})
+    const pending = s.harness.oneShot(s.request())
+    const settled = expect(pending).rejects.toMatchObject({ code: 'timeout' })
+    await vi.advanceTimersByTimeAsync(ONE_SHOT_INACTIVITY_MS)
+    await settled
+    expect(s.pi.requests).toHaveLength(0)
+  })
+
   it('restarts the timeout on every provider event', async () => {
     vi.useFakeTimers()
     const s = setup()

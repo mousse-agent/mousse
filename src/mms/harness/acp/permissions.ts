@@ -21,6 +21,8 @@ import type { UserQuestionService } from '../../orchestrator/UserQuestionService
 export interface AcpRequestScope {
   threadId?: string
   cwd?: string
+  /** The turn's approvals policy, from its prompter: `never` refuses writes and questions without asking. */
+  readonly approvals?: 'never'
   /** The turn was stopped, or the connection closed. */
   aborted(): boolean
   throwIfAborted(): void
@@ -82,6 +84,9 @@ export interface PermissionPrompter {
 
 /** What a runtime tells its model when a run refuses tools that need approval. */
 export const APPROVALS_REFUSED_MESSAGE = 'Tools that need approval are refused here.'
+
+/** What a runtime tells its model when it asks the user a question in a run nobody answers (`never`). */
+export const QUESTIONS_REFUSED_MESSAGE = 'Nobody can answer questions here. Continue without asking.'
 
 /** The prompter of a run whose policy is `approvals: 'never'`: nobody is asked, every request is denied. */
 export function refusingPrompter(): PermissionPrompter {
@@ -173,6 +178,7 @@ export async function writeWorkspaceFile(
 ): Promise<WriteTextFileResponse> {
   const path = workspacePath(scope, request.path)
   if (!scope.threadId) throw new Error('ACP file write has no thread')
+  if (scope.approvals === 'never') throw new Error(APPROVALS_REFUSED_MESSAGE)
   const answer = await questions.requestAnswers([{
     id: 'write', prompt: `Allow ${label} to write ${relative(scope.cwd!, path)}?`,
     options: [{ id: 'allow', label: 'Allow this edit' }, { id: 'reject', label: 'Reject' }]
