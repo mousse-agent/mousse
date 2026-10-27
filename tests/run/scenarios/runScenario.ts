@@ -30,7 +30,7 @@ import { codexDriver } from '../../../src/mms/harness/drivers/codex'
 import { cursorDriver } from '../../../src/mms/harness/drivers/cursor'
 import { instanceStateDir } from '../../../src/mms/harness/instances'
 import { replayCursorHost } from '../../../src/mms/run/testkit/cursorHostReplay'
-import { piLegacyDriver } from '../../../src/mms/harness/drivers/piLegacy'
+import { piDriver } from '../../../src/mms/harness/drivers/pi'
 import { ProviderInstanceService } from '../../../src/mms/providers/ProviderInstanceService'
 import { replayPiChat } from '../../../src/mms/run/testkit/piChatReplay'
 import { DEFAULT_VOLATILE_KEYS, dropKeys, readTranscript, ReplayTransport } from '../../../src/mms/run/testkit/ReplayTransport'
@@ -238,7 +238,7 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
     questions,
     shellPath: async () => ({ entries: [], source: 'failed' }),
     drivers: [
-      piLegacyDriver({ client: () => orch.piChatClient() }),
+      piDriver({ client: () => orch.piChatClient() }),
       claudeCodeDriver({ builtIn: () => services.claude! }),
       antigravityDriver({ builtIn: () => services.antigravity! }),
       // The generic driver runs for real; only its agent connection is replayed.

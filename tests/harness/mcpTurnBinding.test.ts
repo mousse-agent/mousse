@@ -9,7 +9,7 @@ import { acpDriver } from '../../src/mms/harness/drivers/acp'
 import { antigravityDriver } from '../../src/mms/harness/drivers/antigravity'
 import { claudeCodeDriver } from '../../src/mms/harness/drivers/claudeCode'
 import { codexDriver } from '../../src/mms/harness/drivers/codex'
-import { piLegacyDriver } from '../../src/mms/harness/drivers/piLegacy'
+import { piDriver } from '../../src/mms/harness/drivers/pi'
 import { HARNESS_CAP_KEYS } from '../../src/shared/harness/types'
 import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
 import { adapterDriver } from '../../src/mms/run/testkit/harness'
@@ -21,21 +21,24 @@ const DRIVERS: HarnessDriver[] = [
   codexDriver({ builtIn: unused }),
   antigravityDriver({ builtIn: unused }),
   acpDriver(),
-  piLegacyDriver({ client: unused, credentials: unused })
+  // With its RPC inputs, so the engine that attaches the Mousse MCP server is reachable.
+  piDriver({ client: unused, credentials: unused, rpc: { runtime: unused, catalog: unused } })
 ]
 
 describe('MCP turn binding (PR 2 §2)', () => {
   it.each(DRIVERS.map((driver) => [driver.kind, driver] as const))('%s declares a turn binding when it attaches the Mousse MCP server', (_kind, driver) => {
-    const caps = driver.caps(driver.decodeConfig(undefined))
-    if (caps.mcp) expect(['per_call', 'drained_turn', 'rotate']).toContain(driver.mcpTurnBinding)
+    // Any engine the driver can run (Pi: the legacy loop, or Pi's agent with `engine: 'rpc'`).
+    const attaches = [undefined, { engine: 'rpc' }].some((raw) => driver.caps(driver.decodeConfig(raw)).mcp)
+    if (attaches) expect(['per_call', 'drained_turn', 'rotate']).toContain(driver.mcpTurnBinding)
     else expect(driver.mcpTurnBinding).toBeUndefined()
   })
 
   it('keeps the bindings each runtime\'s proof allows', () => {
     const byKind = Object.fromEntries(DRIVERS.map((driver) => [driver.kind, driver.mcpTurnBinding]))
-    // Claude stamps every call with the turn token (Mousse's PreToolUse hook); Codex and ACP agents
-    // keep their bearer only after a turn proven drained.
-    expect(byKind).toEqual({ claude: 'per_call', codex: 'drained_turn', antigravity: 'drained_turn', acp: 'drained_turn', pi: undefined })
+    // Claude stamps every call with the turn token (Mousse's PreToolUse hook), Pi's agent with the
+    // attempt token (Mousse's extension); Codex and ACP agents keep their bearer only after a turn
+    // proven drained.
+    expect(byKind).toEqual({ claude: 'per_call', codex: 'drained_turn', antigravity: 'drained_turn', acp: 'drained_turn', pi: 'per_call' })
   })
 
   it('is not a capability: no capability key names it', () => {

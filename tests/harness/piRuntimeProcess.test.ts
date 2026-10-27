@@ -5,6 +5,7 @@ import { build } from 'esbuild'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { getPiExtensionBuildOptions } from '../../scripts/build-pi-runtime.mjs'
 import { instanceEnv } from '../../src/mms/harness/env'
+import { PiBridge } from '../../src/mms/harness/pi/bridge'
 import { piLaunch, startPiProcess, type PiProcess, type PiRuntimePaths } from '../../src/mms/harness/pi/launch'
 import type { PiRpcExit } from '../../src/mms/harness/pi/rpcClient'
 import { killTree, observeHarnessSpawns, type HarnessSpawn } from '../../src/mms/harness/spawn'
@@ -16,6 +17,7 @@ const repoRoot = resolve(__dirname, '..', '..')
 const piPackage = join(repoRoot, 'node_modules/@earendil-works/pi-coding-agent')
 const scratch: string[] = []
 const running: PiProcess[] = []
+const bridges: PiBridge[] = []
 /** Processes a test started through Pi: killed after it whatever happened. */
 const fixtures: number[] = []
 
@@ -30,6 +32,7 @@ function alive(pid: number): boolean {
 
 afterEach(() => {
   for (const started of running.splice(0)) killTree(started.child)
+  for (const bridge of bridges.splice(0)) bridge.stop()
   for (const pid of fixtures.splice(0)) {
     try {
       process.kill(pid, 'SIGKILL')
@@ -117,9 +120,22 @@ describe('Pi runtime process', () => {
     const extension = join(dir, 'mousse-extension.mjs')
     await build({ ...getPiExtensionBuildOptions(repoRoot), outfile: extension, logLevel: 'silent' })
     const runtime: PiRuntimePaths = { root: piPackage, entry: join(piPackage, 'dist/bundle/rpc-entry.js'), extension }
+    // Mousse's extension loads only with its bridge to the engine (a provider with no models of its own).
+    const bridge = new PiBridge()
+    await bridge.start()
+    bridges.push(bridge)
+    const registration = bridge.register({
+      catalog: async () => ({ provider: { id: 'openrouter', builtin: true, models: [] }, catalogRevision: 0 }),
+      ready: () => {},
+      turn: async () => ({ attemptToken: '', sessionInstructions: '', tools: [], activeBuiltins: [], mcp: null, catalogRevision: 0 }),
+      gate: async () => ({ allow: false, reason: 'denied' }),
+      quiesce: async () => ({ ok: false, reason: 'denied' }),
+      fatal: () => {}
+    })
     const launched = piLaunch({
       env, runtime, stateDir, provider: 'openrouter', model: 'anthropic/claude-sonnet-4.5', thinking: 'off',
-      ambient: { ...base, OPENROUTER_API_KEY: 'fake-openrouter-key' }
+      ambient: { ...base, OPENROUTER_API_KEY: 'fake-openrouter-key' },
+      engineEnv: { MOUSSE_PI_BRIDGE: JSON.stringify(registration.address) }
     })
     if (launched.runs !== 'yes') throw new Error(launched.reason)
     const exits: PiRpcExit[] = []

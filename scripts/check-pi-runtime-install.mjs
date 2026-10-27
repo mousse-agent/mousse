@@ -11,6 +11,8 @@
 // the app's own tree kill (`processTree.mjs`); and checks that the grandchild is gone. Anything it
 // started is killed at the end whatever happened. A receipt goes to .mousse-dev/logs/pi-runtime-check.json.
 import { spawn, spawnSync } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
+import { createServer } from 'node:http'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -68,6 +70,27 @@ Object.assign(env, {
   AWS_RETRY_MODE: 'standard',
   ...(asNode ? { ELECTRON_RUN_AS_NODE: '1' } : {})
 })
+
+// Mousse's extension refuses to load without its bridge to the engine: a minimal local one answers
+// it here (a provider with no models, a turn with no tools, every tool call denied).
+const bridgeToken = randomBytes(24).toString('hex')
+const bridgeAnswers = {
+  catalog: { provider: { id: 'openrouter', builtin: true, models: [] }, catalogRevision: 0 },
+  ready: {},
+  turn: { attemptToken: '', sessionInstructions: '', tools: [], activeBuiltins: [], mcp: null, catalogRevision: 0 },
+  gate: { allow: false, reason: 'mousse_tool_denied' },
+  quiesce: { ok: false, reason: 'mousse_tool_denied' },
+  fatal: {}
+}
+const bridge = createServer((req, res) => {
+  req.resume()
+  const name = (req.url ?? '').replace(/^\/pi\//, '')
+  const answer = req.headers.authorization === `Bearer ${bridgeToken}` ? bridgeAnswers[name] : undefined
+  res.writeHead(answer ? 200 : 404, { 'content-type': 'application/json' })
+  res.end(JSON.stringify(answer ?? { error: 'not found' }))
+})
+await new Promise((ready) => bridge.listen(0, '127.0.0.1', ready))
+env.MOUSSE_PI_BRIDGE = JSON.stringify({ url: `http://127.0.0.1:${bridge.address().port}`, token: bridgeToken })
 
 const args = [entry, '--session-dir', join(scratch, 'sessions'), '--no-extensions', '-e', extension,
   '--no-skills', '--no-prompt-templates', '--no-themes', '--no-context-files', '--no-approve']
@@ -184,6 +207,7 @@ ${stderr}`)
       /* already gone */
     }
   }
+  bridge.close()
   rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
 }
 

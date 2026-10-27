@@ -16,8 +16,10 @@ import type { SpendModelFacts } from './policy'
 /**
  * A driver is a kind of runtime (Claude Code, Codex, Antigravity, the pi loop). The gateway asks
  * it for one `DriverRuntime` per instance revision and owns everything around it: probes,
- * timeouts, scope, model prefs and the edge cases callers never see. Drivers do no retries,
- * timeouts or capability fallbacks.
+ * timeouts, scope, model prefs and the edge cases callers never see. Drivers never retry, and set
+ * no timeouts or capability fallbacks of their own. A runtime retries its own provider requests as
+ * Mousse configures it (Claude Code's, Codex's and Pi's own retries); the gateway's only retry is
+ * the turn retry when no side effect is possible.
  *
  * PR 1 drivers wrap today's provider services and run adapters; each instance gets its own adapter
  * built by the driver's factory.
@@ -42,6 +44,11 @@ export interface InstanceConfig {
    * sign-in, or `existing`, the user's Codex CLI). Chosen when the entry is added; fixed after.
    */
   setup?: 'managed' | 'existing'
+  /**
+   * Which engine runs a `pi` instance: Pi's agent as its own process (`rpc`) or the in-process pi
+   * loop (`legacy`, the default until PR 2c). Part of the record key: a switch builds a new runtime.
+   */
+  engine?: 'rpc' | 'legacy'
 }
 
 /** Whether an entry runs in a Mousse-owned home: it must, it may, or it must not. */
@@ -244,7 +251,12 @@ export interface DriverRuntime {
   hasContinuation?(threadId: string, id?: string): boolean
   /** Drops the turns of its own the thread's live process holds (only `id`, when given). */
   discardContinuations?(threadId: string, id?: string): void
-  stop(): void
+  /**
+   * Ends the runtime (its instance was replaced or removed). A runtime with processes returns a
+   * promise that settles once they exited; the gateway deletes a removed instance's files only then
+   * (Windows keeps open files locked).
+   */
+  stop(): void | Promise<void>
 }
 
 export interface HarnessDriver {
@@ -270,7 +282,7 @@ export interface HarnessDriver {
    * Every instance, built-in ones included, runs with a Mousse-owned home under its state dir,
    * whatever its config says (a runtime Mousse hosts itself and never points at the user's home).
    */
-  readonly alwaysPrivateHome?: boolean
+  readonly alwaysPrivateHome?: boolean | ((config: InstanceConfig) => boolean)
   readonly canInstall: boolean
   /** Runs a model the user adds by id (custom models); otherwise only the models it lists. */
   readonly customModels: boolean

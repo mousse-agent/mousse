@@ -57,9 +57,9 @@ import { WebTools } from './WebTools'
 import { stableStringify } from '../run/json'
 import { formatRestartNote } from '../run/restartNote'
 import { createHarnessGateway, PI_DRIVER_ID, type AdapterHost, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
-import { piLegacyDriver } from '../harness/drivers/piLegacy'
+import { piDriver } from '../harness/drivers/pi'
 import { contextGauge } from '../harness/policy'
-import type { ExecutionBinding, HarnessCaps, ProviderScope, RunPolicy, TurnOrigin } from '../../shared/harness/types'
+import { isRetriesExhausted, type ExecutionBinding, type HarnessCaps, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
 import { acknowledgeRows } from '../run/terminal'
@@ -894,7 +894,7 @@ export class OrchestratorService extends EventEmitter {
       profileHome: unboundHome,
       installationHome: unboundHome,
       instanceMap: new ProviderInstanceService({ providerAuth }),
-      drivers: [piLegacyDriver({ client: () => this.llm, credentials: () => this.providerAuth })],
+      drivers: [piDriver({ client: () => this.llm, credentials: () => this.providerAuth })],
       questions: runtime?.questions ?? defaultUserQuestionService,
       shellPath: async () => ({ entries: [], source: 'failed' })
     })
@@ -5999,7 +5999,7 @@ export class OrchestratorService extends EventEmitter {
       if (isAbort) {
         aborted = true
         assistantText = ''
-      } else if (err instanceof ConnectionRetriesExhaustedError) {
+      } else if (err instanceof ConnectionRetriesExhaustedError || isRetriesExhausted(err)) {
         connectionFailed = true
         providerError = serializeAppError(normalized)
         assistantText = ''

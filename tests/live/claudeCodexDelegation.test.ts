@@ -21,7 +21,7 @@ import { createCodexProviderService } from '../../src/mms/providers/codex/CodexP
 import { createHarnessGateway } from '../../src/mms/harness/gateway'
 import { claudeCodeDriver } from '../../src/mms/harness/drivers/claudeCode'
 import { codexDriver } from '../../src/mms/harness/drivers/codex'
-import { piLegacyDriver } from '../../src/mms/harness/drivers/piLegacy'
+import { piDriver } from '../../src/mms/harness/drivers/pi'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { EffectWorker } from '../../src/mms/run/EffectWorker'
@@ -93,7 +93,7 @@ describe.skipIf(!live)('live: Claude and Codex delegate to each other over the M
       instanceMap: new ProviderInstanceService(),
       questions,
       drivers: [
-        piLegacyDriver({ client: () => orch.piChatClient() }),
+        piDriver({ client: () => orch.piChatClient() }),
         claudeCodeDriver({ builtIn: () => claude }),
         codexDriver({ builtIn: () => codex })
       ]

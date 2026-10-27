@@ -53,6 +53,55 @@ export async function interruptWithDeadline(
   }
 }
 
+/** How long a runtime command (Pi's `switch_session`, `fork`, `get_entries`, `set_model`) may take. */
+export const COMMAND_DEADLINE_MS = 30_000
+/** How long a runtime process may take to start and report ready. */
+export const READY_DEADLINE_MS = 20_000
+
+/** A runtime command that did not answer in time; its process was killed and the session forgotten. */
+export class CommandTimeoutError extends Error {
+  readonly code = 'command_timeout'
+  constructor(readonly command: string, readonly deadlineMs: number) {
+    super(`The agent did not answer ${command} within ${Math.round(deadlineMs / 1000)} seconds.`)
+    this.name = 'CommandTimeoutError'
+  }
+}
+
+/**
+ * Sends one runtime command with a deadline (PR 2 §4 "Deadlines"). The runtime's client gets the
+ * signal and has no timers of its own; at the deadline the signal aborts, the runtime's processes
+ * for `ref` are killed and the thread's native session is forgotten, and the call rejects with
+ * `CommandTimeoutError`. The gateway then decides between a handoff and a failure.
+ */
+export async function commandWithDeadline<T>(
+  runtime: Pick<InterruptibleRuntime, 'terminate' | 'forgetConversation'>,
+  ref: ProviderRef,
+  name: string,
+  send: (signal: AbortSignal) => Promise<T>,
+  options: { threadId?: string; deadlineMs?: number } = {}
+): Promise<T> {
+  const deadlineMs = options.deadlineMs ?? COMMAND_DEADLINE_MS
+  const controller = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort()
+      try {
+        runtime.terminate?.(ref)
+        if (options.threadId) runtime.forgetConversation?.(options.threadId)
+      } finally {
+        reject(new CommandTimeoutError(name, deadlineMs))
+      }
+    }, deadlineMs)
+    timer.unref?.()
+  })
+  try {
+    return await Promise.race([send(controller.signal), deadline])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 /** A load that did not finish in time: the caller kills the process, forgets the session and hands history over. */
 export class SessionLoadTimeoutError extends Error {
   readonly code = 'session_load_timeout'

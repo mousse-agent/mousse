@@ -18,11 +18,16 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 /** Modules Pi hands to extensions (its `virtualModules`); everything else must be a Node built-in. */
 const PI_PROVIDED = /^(?:@earendil-works\/[^/]+|typebox|@sinclair\/typebox)(?:\/|$)/
 
-export function getPiExtensionBuildOptions(projectRoot = root) {
+/**
+ * `test: true` builds the extension with its test seams on (`__MOUSSE_PI_TEST__`, e.g. a log of the
+ * requests its guard let through); the shipped build has them off and drops their code.
+ */
+export function getPiExtensionBuildOptions(projectRoot = root, options = {}) {
   return {
     entryPoints: [resolve(projectRoot, 'src/mms/harness/pi/extension/index.ts')],
     outfile: resolve(projectRoot, 'out/pi-runtime/mousse-extension.mjs'),
     bundle: true, platform: 'node', format: 'esm', target: 'node22', sourcemap: false,
+    define: { __MOUSSE_PI_TEST__: options.test ? 'true' : 'false' },
     plugins: [{
       name: 'pi-extension-imports',
       setup(api) {
