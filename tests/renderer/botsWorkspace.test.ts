@@ -49,6 +49,7 @@ const activation = (patch: Partial<BotActivationSummary> = {}): BotActivationSum
   canContinue: true,
   canMarkDone: true,
   uncertain: false,
+  uncertainRunId: null,
   ...patch
 })
 
@@ -81,9 +82,24 @@ describe('Bots tab: activity rows', () => {
     await act(async () => document.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click())
     expect(button('Continue')!.disabled).toBe(false)
     await act(async () => button('Continue')!.click())
+    // Each action sends exactly the set shown, and the box clears after it.
+    expect(onContinue).toHaveBeenCalledWith({ calls: [activation().unknownCalls[0].invocationId], uncertainRunId: null })
+    expect(button('Mark done')!.disabled).toBe(true)
+    await act(async () => document.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click())
     await act(async () => button('Mark done')!.click())
-    expect(onContinue).toHaveBeenCalledWith(true)
-    expect(onMarkDone).toHaveBeenCalledWith(true)
+    expect(onMarkDone).toHaveBeenCalledWith({ calls: [activation().unknownCalls[0].invocationId], uncertainRunId: null })
+  })
+
+  it('a new set of interrupted calls on the same activation needs the box again', async () => {
+    const onContinue = vi.fn()
+    const first = activation()
+    act(() => root.render(createElement(ActivationRow, { activation: first, busy: false, onStop: () => {}, onContinue, onMarkDone: () => {} })))
+    await act(async () => document.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click())
+    expect(button('Continue')!.disabled).toBe(false)
+    const next = activation({ unknownCalls: [...first.unknownCalls, { runId: 'run-2', invocationId: 'inv-new', tool: 'write', role: 'main', acknowledged: false }] })
+    act(() => root.render(createElement(ActivationRow, { activation: next, busy: false, onStop: () => {}, onContinue, onMarkDone: () => {} })))
+    expect(document.querySelector<HTMLInputElement>('input[type="checkbox"]')!.checked).toBe(false)
+    expect(button('Continue')!.disabled).toBe(true)
   })
 
   it('an activation with nothing to check continues without the box', async () => {
@@ -92,11 +108,11 @@ describe('Bots tab: activity rows', () => {
     expect(document.querySelector('input[type="checkbox"]')).toBeNull()
     expect(button('Mark done')).toBeUndefined()
     await act(async () => button('Continue')!.click())
-    expect(onContinue).toHaveBeenCalledWith(false)
+    expect(onContinue).toHaveBeenCalledWith(undefined)
   })
 
   it('an uncertain run needs the box even with no listed call', () => {
-    act(() => root.render(createElement(ActivationRow, { activation: activation({ unknownCalls: [], uncertain: true }), busy: false, onStop: () => {}, onContinue: () => {}, onMarkDone: () => {} })))
+    act(() => root.render(createElement(ActivationRow, { activation: activation({ unknownCalls: [], uncertain: true, uncertainRunId: 'run-u' }), busy: false, onStop: () => {}, onContinue: () => {}, onMarkDone: () => {} })))
     expect(button('Continue')!.disabled).toBe(true)
   })
 })
@@ -169,13 +185,13 @@ describe('Bots wiring', () => {
     const request = vi.fn(async (method: string) => method === 'bots.definitions.list' ? { bots: [] } : method === 'bots.escalations.list' ? { escalations: [] } : {})
     const client = createPersonalBotsClient({ request } as never)
     await client.list()
-    await client.continue('act_x', true)
+    await client.continue('act_x', { calls: ['inv-1'], uncertainRunId: 'run-u' })
     await client.markDone('act_x')
     await client.respond('esc-1', 'allow_more', 60_000)
     await client.escalations()
     expect(request.mock.calls).toEqual([
       ['bots.definitions.list', {}],
-      ['bots.activations.continue', { activationId: 'act_x', acknowledgeUncertain: true }],
+      ['bots.activations.continue', { activationId: 'act_x', acknowledge: { calls: ['inv-1'], uncertainRunId: 'run-u' } }],
       ['bots.activations.markDone', { activationId: 'act_x' }],
       ['bots.escalations.respond', { escalationId: 'esc-1', answer: 'allow_more', amount: 60_000 }],
       ['bots.escalations.list', {}]

@@ -1,4 +1,4 @@
-import type { BotActivationSummary, BotApprovalView, BotDefinition, BotSummary } from '../../shared/bots/personal/definition'
+import type { BotAcknowledgement, BotActivationSummary, BotApprovalView, BotDefinition, BotSummary } from '../../shared/bots/personal/definition'
 import type { BotEscalationAnswer, BotEscalationSummary } from '../../shared/bots/personal/escalation'
 import type { PlatformRequestApi } from '../../shared/platform'
 
@@ -21,8 +21,9 @@ export interface PersonalBotsClient {
   activate(botId: string, input: string, clientRequestId: string): Promise<BotActivationSummary>
   activations(botId?: string): Promise<BotActivationSummary[]>
   stop(activationId: string): Promise<BotActivationSummary>
-  continue(activationId: string, acknowledgeUncertain?: boolean): Promise<BotActivationSummary>
-  markDone(activationId: string, acknowledgeUncertain?: boolean): Promise<BotActivationSummary>
+  /** `acknowledge`: exactly the calls (and uncertain run) the owner was shown and checked. */
+  continue(activationId: string, acknowledge?: BotAcknowledgement): Promise<BotActivationSummary>
+  markDone(activationId: string, acknowledge?: BotAcknowledgement): Promise<BotActivationSummary>
   escalations(activationId?: string): Promise<BotEscalationSummary[]>
   respond(escalationId: string, answer: BotEscalationAnswer, amount?: number): Promise<{ escalation: BotEscalationSummary; activation: BotActivationSummary }>
   resetContext(botId: string, key: string): Promise<{ gen: number }>
@@ -30,7 +31,7 @@ export interface PersonalBotsClient {
 
 /** The personal-bot methods over the host's profile-bound bridge (`bots.*`, PR 6). */
 export function createPersonalBotsClient(transport: PlatformRequestApi): PersonalBotsClient {
-  const ack = (acknowledgeUncertain?: boolean) => (acknowledgeUncertain ? { acknowledgeUncertain: true } : {})
+  const ack = (acknowledge?: BotAcknowledgement) => (acknowledge ? { acknowledge: { calls: [...acknowledge.calls], uncertainRunId: acknowledge.uncertainRunId ?? null } } : {})
   return {
     list: async () => (await transport.request<{ bots: BotSummary[] }>('bots.definitions.list', {})).bots,
     get: (botId) => transport.request('bots.definitions.get', { botId }),
@@ -42,8 +43,8 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     activate: (botId, input, clientRequestId) => transport.request('bots.activate', { botId, input, clientRequestId }),
     activations: async (botId) => (await transport.request<{ activations: BotActivationSummary[] }>('bots.activations.list', botId ? { botId } : {})).activations,
     stop: (activationId) => transport.request('bots.activations.stop', { activationId }),
-    continue: (activationId, acknowledgeUncertain) => transport.request('bots.activations.continue', { activationId, ...ack(acknowledgeUncertain) }),
-    markDone: (activationId, acknowledgeUncertain) => transport.request('bots.activations.markDone', { activationId, ...ack(acknowledgeUncertain) }),
+    continue: (activationId, acknowledge) => transport.request('bots.activations.continue', { activationId, ...ack(acknowledge) }),
+    markDone: (activationId, acknowledge) => transport.request('bots.activations.markDone', { activationId, ...ack(acknowledge) }),
     escalations: async (activationId) => (await transport.request<{ escalations: BotEscalationSummary[] }>('bots.escalations.list', activationId ? { activationId } : {})).escalations,
     respond: (escalationId, answer, amount) => transport.request('bots.escalations.respond', { escalationId, answer, ...(amount !== undefined ? { amount } : {}) }),
     resetContext: (botId, key) => transport.request('bots.context.reset', { botId, key })

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  acknowledgementOf,
   DEFAULT_BOT_ACTIVE_MS,
   ENDED_ACTIVATION_STATUSES,
+  type BotAcknowledgement,
   type BotActivationSummary,
   type BotApprovalView,
   type BotDefinition,
@@ -184,6 +186,7 @@ export function BotsWorkspace({ client, providers, skills, active = true }: Bots
         onStop={(id) => run(() => client.stop(id))}
         onContinue={(id, ack) => run(() => client.continue(id, ack))}
         onMarkDone={(id, ack) => run(() => client.markDone(id, ack))}
+        onResetContext={(key) => run(() => client.resetContext(entry.id, key))}
       /> : <p className="bots__muted bots__empty">Choose a bot, or make a new one.</p>}
     </main>
     {approving && entry?.approval && <ApprovalDialog
@@ -207,8 +210,9 @@ function BotDetail(props: {
   onDelete(): void
   onActivate(input: string): void
   onStop(id: string): void
-  onContinue(id: string, acknowledge: boolean): void
-  onMarkDone(id: string, acknowledge: boolean): void
+  onContinue(id: string, acknowledge: BotAcknowledgement | undefined): void
+  onMarkDone(id: string, acknowledge: BotAcknowledgement | undefined): void
+  onResetContext(key: string): void
 }) {
   const { entry, busy } = props
   const [input, setInput] = useState('')
@@ -243,6 +247,13 @@ function BotDetail(props: {
       <textarea id="bots-run-input" rows={2} value={input} disabled={!canRun || busy} onChange={(event) => setInput(event.target.value)} placeholder={canRun ? 'For example: fix the broken links on the docs site' : 'Approve this bot first'} />
       <button type="submit" className="btn btn-sm btn-primary" disabled={!canRun || busy || !input.trim()}>Run</button>
     </form>
+    {(entry.published?.context.length ?? 0) > 0 && <section className="bots__contexts" aria-label="Context threads">
+      <h3>Context threads</h3>
+      <ul>{entry.published!.context.map((thread) => <li key={thread.key}>
+        <span>{thread.title}</span>
+        <button type="button" className="btn btn-sm" disabled={busy} onClick={() => { if (window.confirm(`Start a new "${thread.title}" context? The bot's next consult starts with no history.`)) props.onResetContext(thread.key) }}>Reset context</button>
+      </li>)}</ul>
+    </section>}
     <h3>Activity</h3>
     {props.activations.length === 0 && <p className="bots__muted">No runs yet.</p>}
     <ul className="bots__activity">
@@ -258,12 +269,16 @@ export function ActivationRow({ activation, busy, onStop, onContinue, onMarkDone
   activation: BotActivationSummary
   busy: boolean
   onStop(): void
-  onContinue(acknowledge: boolean): void
-  onMarkDone(acknowledge: boolean): void
+  onContinue(acknowledge: BotAcknowledgement | undefined): void
+  onMarkDone(acknowledge: BotAcknowledgement | undefined): void
 }) {
-  const [checked, setChecked] = useState(false)
   const pending = activation.unknownCalls.filter((call) => !call.acknowledged)
-  const needsCheck = pending.length > 0 || activation.uncertain
+  const shown = acknowledgementOf(activation)
+  // The box belongs to the exact set shown: a new pause, a changed list or a refresh clears it.
+  const shownKey = JSON.stringify([activation.status, shown?.calls ?? [], shown?.uncertainRunId ?? null])
+  const [checkedFor, setCheckedFor] = useState<string | null>(null)
+  const checked = checkedFor === shownKey
+  const needsCheck = shown !== undefined
   const ended = ENDED_ACTIVATION_STATUSES.has(activation.status)
   const blockedByCheck = needsCheck && !checked
   return <li className="bots__activation" data-status={activation.status}>
@@ -280,13 +295,13 @@ export function ActivationRow({ activation, busy, onStop, onContinue, onMarkDone
     {needsCheck && !ended && <div className="bots__unknown">
       <p>{activation.uncertain ? 'Mousse stopped while this bot was working, so the outcome of its last tool calls is unknown.' : 'These tool calls were cut off, so their outcome is unknown:'}</p>
       {pending.length > 0 && <ul>{pending.map((call) => <li key={call.invocationId}><code>{call.tool}</code> ({call.role === 'main' ? 'main thread' : 'context thread'}, run {call.runId.slice(0, 8)})</li>)}</ul>}
-      <label><input type="checkbox" checked={checked} onChange={(event) => setChecked(event.target.checked)} /> I've checked what these calls did</label>
+      <label><input type="checkbox" checked={checked} onChange={(event) => setCheckedFor(event.target.checked ? shownKey : null)} /> I've checked what these calls did</label>
     </div>}
     <div className="bots__actions">
       {activation.threadId && <button type="button" className="btn btn-sm" onClick={() => void openThread(activation.threadId!)}>Open thread</button>}
       {!ended && <button type="button" className="btn btn-sm" disabled={busy} onClick={onStop}>Stop</button>}
-      {activation.canContinue && <button type="button" className="btn btn-sm btn-primary" disabled={busy || blockedByCheck} onClick={() => onContinue(needsCheck)}>Continue</button>}
-      {activation.canMarkDone && <button type="button" className="btn btn-sm" disabled={busy || blockedByCheck} onClick={() => onMarkDone(needsCheck)}>Mark done</button>}
+      {activation.canContinue && <button type="button" className="btn btn-sm btn-primary" disabled={busy || blockedByCheck} onClick={() => { setCheckedFor(null); onContinue(shown) }}>Continue</button>}
+      {activation.canMarkDone && <button type="button" className="btn btn-sm" disabled={busy || blockedByCheck} onClick={() => { setCheckedFor(null); onMarkDone(shown) }}>Mark done</button>}
     </div>
   </li>
 }
@@ -385,7 +400,7 @@ function BotEditor({ definition, isNew, providers, skills, busy, error, onCancel
       id: isNew ? slug(draft.name) : draft.id,
       permissions: {
         ...permissions,
-        workspace: rootList.length ? { roots: rootList, access: permissions.workspace?.access ?? 'read' } : null
+        workspace: rootList.length ? keepFolderAccess(rootList, permissions.workspace) : null
       }
     }
   }
@@ -452,4 +467,11 @@ function BotEditor({ definition, isNew, providers, skills, busy, error, onCancel
       </fieldset>
     </div>
   </form>
+}
+
+/** The folders as edited, keeping each remaining folder's own access (an answer may have set it). */
+function keepFolderAccess(roots: string[], workspace: BotDefinition['permissions']['workspace']): NonNullable<BotDefinition['permissions']['workspace']> {
+  const access = workspace?.access ?? 'read'
+  const own = Object.entries(workspace?.rootAccess ?? {}).filter(([root, value]) => roots.includes(root) && value !== access)
+  return own.length ? { roots, access, rootAccess: Object.fromEntries(own) } : { roots, access }
 }

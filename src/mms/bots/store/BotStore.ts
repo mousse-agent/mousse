@@ -148,6 +148,7 @@ CREATE TABLE bot_overlays(
   created_at TEXT NOT NULL,
   PRIMARY KEY(activation_id, escalation_id)
 ) STRICT;
+ALTER TABLE bot_dispatches ADD COLUMN send_json TEXT;
 CREATE TABLE bot_contexts(
   bot_id TEXT NOT NULL,
   key TEXT NOT NULL,
@@ -208,6 +209,8 @@ export interface BotDispatchRow {
   endedAt: string | null
   outcome: string | null
   settledBy: 'run' | 'startup' | null
+  /** How a continuation is sent (the run it continues, the owner's acknowledgement), so a resend matches it. */
+  send: { continuationOfRunId?: string; acknowledgeUncertain?: boolean }
 }
 
 export interface BotEscalationRow {
@@ -295,7 +298,8 @@ function dispatchOf(row: Row): BotDispatchRow {
     exitAt: num(row.exit_at),
     endedAt: str(row.ended_at),
     outcome: str(row.outcome),
-    settledBy: str(row.settled_by) as BotDispatchRow['settledBy']
+    settledBy: str(row.settled_by) as BotDispatchRow['settledBy'],
+    send: typeof row.send_json === 'string' ? (JSON.parse(row.send_json) as BotDispatchRow['send']) : {}
   }
 }
 
@@ -344,6 +348,11 @@ export class BotStore {
   registry(botId: string): BotRegistryRow | undefined {
     const row = this.get('SELECT * FROM bot_registry WHERE bot_id = ?', botId)
     return row ? { botId: row.bot_id as string, revision: str(row.revision), homeThreadId: str(row.home_thread_id), createdAt: row.created_at as string, deletedAt: str(row.deleted_at) } : undefined
+  }
+
+  /** Bots deleted by the owner: their cleanup is retried until their home thread is in the trash. */
+  deletedRegistry(): BotRegistryRow[] {
+    return this.all('SELECT bot_id FROM bot_registry WHERE deleted_at IS NOT NULL ORDER BY deleted_at, bot_id').map((row) => this.registry(row.bot_id as string)!)
   }
 
   listRegistry(): BotRegistryRow[] {
@@ -492,10 +501,10 @@ export class BotStore {
     return this.all('SELECT * FROM bot_dispatches WHERE ended_at IS NULL ORDER BY activation_id, n').map(dispatchOf)
   }
 
-  insertDispatch(row: Pick<BotDispatchRow, 'activationId' | 'n' | 'kind' | 'clientRequestId' | 'threadId' | 'prompt' | 'policyDigest'> & { mainN?: number }): void {
+  insertDispatch(row: Pick<BotDispatchRow, 'activationId' | 'n' | 'kind' | 'clientRequestId' | 'threadId' | 'prompt' | 'policyDigest'> & { mainN?: number; send?: BotDispatchRow['send'] }): void {
     this.run(
-      'INSERT INTO bot_dispatches(activation_id, n, kind, main_n, client_request_id, thread_id, prompt_json, policy_digest) VALUES(?, ?, ?, ?, ?, ?, ?, ?)',
-      row.activationId, row.n, row.kind, row.mainN ?? null, row.clientRequestId, row.threadId, JSON.stringify(row.prompt), row.policyDigest
+      'INSERT INTO bot_dispatches(activation_id, n, kind, main_n, client_request_id, thread_id, prompt_json, policy_digest, send_json) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      row.activationId, row.n, row.kind, row.mainN ?? null, row.clientRequestId, row.threadId, JSON.stringify(row.prompt), row.policyDigest, row.send && Object.keys(row.send).length ? JSON.stringify(row.send) : null
     )
   }
 
@@ -541,19 +550,23 @@ export class BotStore {
     }))
   }
 
-  putUnknownCall(input: { activationId: string; runId: string; invocationId: string; tool: string; role: 'main' | 'consult' }): void {
-    this.run(
+  putUnknownCall(input: { activationId: string; runId: string; invocationId: string; tool: string; role: 'main' | 'consult' }): number {
+    return this.run(
       'INSERT INTO bot_unknown_calls(activation_id, run_id, invocation_id, tool, role, found_at) VALUES(?, ?, ?, ?, ?, ?) ON CONFLICT(activation_id, invocation_id) DO NOTHING',
       input.activationId, input.runId, input.invocationId, input.tool, input.role, this.now()
     )
   }
 
-  dropUnknownCall(activationId: string, invocationId: string): void {
-    this.run('DELETE FROM bot_unknown_calls WHERE activation_id = ? AND invocation_id = ?', activationId, invocationId)
+  dropUnknownCall(activationId: string, invocationId: string): number {
+    return this.run('DELETE FROM bot_unknown_calls WHERE activation_id = ? AND invocation_id = ?', activationId, invocationId)
   }
 
-  acknowledgeUnknownCalls(activationId: string): number {
-    return this.run('UPDATE bot_unknown_calls SET acknowledged_at = ? WHERE activation_id = ? AND acknowledged_at IS NULL', this.now(), activationId)
+  /** Acknowledges exactly the calls named (the ones the owner was shown). */
+  acknowledgeUnknownCalls(activationId: string, invocationIds: readonly string[]): number {
+    let changed = 0
+    for (const id of invocationIds)
+      changed += this.run('UPDATE bot_unknown_calls SET acknowledged_at = ? WHERE activation_id = ? AND invocation_id = ? AND acknowledged_at IS NULL', this.now(), activationId, id)
+    return changed
   }
 
   // -- Escalations -----------------------------------------------------------------------------
@@ -634,6 +647,24 @@ export class BotStore {
 
   dropThread(threadId: string): void {
     this.run('DELETE FROM bot_threads WHERE thread_id = ?', threadId)
+  }
+
+  /**
+   * Forgets a context thread that went to the trash or is gone, and moves its key to the next
+   * generation, in one transaction: a crash never loses the bump.
+   */
+  retireContextThread(threadId: string): void {
+    this.db.transaction(() => {
+      const row = this.get("SELECT bot_id, key FROM bot_threads WHERE thread_id = ? AND role = 'context'", threadId)
+      if (!row) return
+      const stored = row.key as string
+      const at = stored.lastIndexOf(':')
+      const key = at > 0 ? stored.slice(0, at) : stored
+      const gen = at > 0 ? Number(stored.slice(at + 1)) || 1 : 1
+      if (this.contextGen(row.bot_id as string, key) <= gen)
+        this.run('INSERT INTO bot_contexts(bot_id, key, gen) VALUES(?, ?, ?) ON CONFLICT(bot_id, key) DO UPDATE SET gen = excluded.gen', row.bot_id as string, key, gen + 1)
+      this.run('DELETE FROM bot_threads WHERE thread_id = ?', threadId)
+    })
   }
 
   /** Every activation in `statuses`, oldest first. */

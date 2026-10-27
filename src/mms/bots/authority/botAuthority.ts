@@ -49,7 +49,7 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     appTools,
     skills,
     mcp,
-    workspace: workspace ? { roots: [...workspace.roots], access: workspace.access, scratch: workspace.scratch } : null,
+    workspace: workspace ? { roots: [...workspace.roots], access: workspace.access, writeRoots: [...workspace.writeRoots], scratch: workspace.scratch } : null,
     waiting: input.waiting,
     counters: input.counters,
     time: input.time,
@@ -98,7 +98,14 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
       } catch {
         return { ok: false, wall: { kind: 'path', tool: nativeName, path: raw, access } }
       }
-      if (writes && workspace.access !== 'write') return { ok: false, wall: { kind: 'path', tool: nativeName, path: raw, access } }
+      // Write access is per folder: the path must sit inside a root granted for writing.
+      if (writes) {
+        try {
+          assertInsideRoots(workspace.writeRoots, raw, scratch)
+        } catch {
+          return { ok: false, wall: { kind: 'path', tool: nativeName, path: raw, access } }
+        }
+      }
     }
     return { ok: true }
   }

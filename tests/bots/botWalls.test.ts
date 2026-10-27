@@ -292,7 +292,10 @@ describe('answers and continuations', () => {
     expect(bots.getActivation(activation.id)).toMatchObject({ status: 'paused', endReason: 'unknown_calls', unknownCalls: [{ invocationId: 'consult-edit', role: 'consult', acknowledged: false }] })
     expect(store.dispatches(activation.id).filter((dispatch) => dispatch.kind === 'continue')).toEqual([])
     await expect(bots.continueActivation(activation.id)).rejects.toMatchObject({ code: 'unknown_calls_not_acknowledged' })
-    await bots.continueActivation(activation.id, { acknowledgeUncertain: true })
+    // Only the exact set shown is acknowledged: a different set is refused and nothing is sent.
+    await expect(bots.continueActivation(activation.id, { acknowledge: { calls: ['something-else'] } })).rejects.toMatchObject({ code: 'unknown_calls_changed' })
+    expect(store.unknownCalls(activation.id)[0].acknowledged).toBe(false)
+    await bots.continueActivation(activation.id, { acknowledge: { calls: ['consult-edit'] } })
     const next = store.dispatches(activation.id).find((dispatch) => dispatch.kind === 'continue')!
     expect(next.prompt.text).toContain('The owner allowed: Use the tool `web_fetch`')
     expect(next.prompt.text).toContain('edit (consult run')
@@ -304,9 +307,10 @@ describe('answers and continuations', () => {
     end(payload.runId, 'uncertain', { uncertainReason: 'non_idempotent_tool_in_flight' })
     bots.settle(payload, {})
     await tick()
-    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'paused', endReason: 'uncertain', uncertain: true, canContinue: true })
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'paused', endReason: 'uncertain', uncertain: true, uncertainRunId: payload.runId, canContinue: true })
     await expect(bots.continueActivation(activation.id)).rejects.toMatchObject({ code: 'uncertain_not_acknowledged' })
-    await bots.continueActivation(activation.id, { acknowledgeUncertain: true })
+    await expect(bots.continueActivation(activation.id, { acknowledge: { calls: [] } })).rejects.toMatchObject({ code: 'unknown_calls_changed' })
+    await bots.continueActivation(activation.id, { acknowledge: { calls: [], uncertainRunId: payload.runId } })
     const next = store.dispatch(activation.id, 2)!
     expect(runs.getRun(next.runId!)).toMatchObject({ status: 'queued' })
   })
@@ -319,7 +323,7 @@ describe('answers and continuations', () => {
     await tick()
     expect(bots.getActivation(activation.id)).toMatchObject({ status: 'paused', result: 'Footer fixed.', canMarkDone: true })
     expect(() => bots.markDone(activation.id)).toThrow(expect.objectContaining({ code: 'unknown_calls_not_acknowledged' }))
-    expect(bots.markDone(activation.id, { acknowledgeUncertain: true })).toMatchObject({ status: 'done', result: 'Footer fixed.' })
+    expect(bots.markDone(activation.id, { acknowledge: { calls: ['inv-edit'] } })).toMatchObject({ status: 'done', result: 'Footer fixed.' })
   })
 })
 

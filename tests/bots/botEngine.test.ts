@@ -358,7 +358,8 @@ describe('activation and dispatch', () => {
     const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'c1' })
     store.run('UPDATE bot_counters SET active_ms = ? WHERE activation_id = ?', 10 * 60_000 - 14_000, activation.id)
     expect(bots.prepare(turnStart(store.dispatch(activation.id, 1)!.runId!))).toMatchObject({ code: 'active_time_exhausted' })
-    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'paused', endReason: 'active_time_exhausted' })
+    // A budget wall: the owner may allow more time.
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'waiting_grant', openEscalation: { kind: 'budget', permission: { budget: { key: 'maxActiveMs' } } } })
   })
 
   it('one activation runs at a time; the next starts when it ends', async () => {

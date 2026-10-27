@@ -1,5 +1,6 @@
 import { isNeutralTool } from '../../harness/tools'
-import type { BotManifest } from './definition'
+import { foldersOf, workspaceOf, type BotManifest } from './definition'
+import { isAbsolutePath } from './manifest'
 
 /**
  * Walls and escalations of personal bots (PR 6 §5). A wall ends the dispatch and asks the owner:
@@ -87,8 +88,11 @@ export function permissionProblem(value: unknown): string | undefined {
   const text = (item: unknown) => typeof item === 'string' && item.length > 0 && item.length <= 1024
   if (keys.length === 1 && keys[0] === 'tool') return text(entry.tool) ? undefined : 'The tool name is invalid.'
   if (keys.length === 1 && keys[0] === 'skill') return text(entry.skill) ? undefined : 'The skill is invalid.'
-  if (keys.length === 2 && 'path' in entry && 'access' in entry)
-    return text(entry.path) && (entry.access === 'read' || entry.access === 'write') ? undefined : 'The folder permission is invalid.'
+  if (keys.length === 2 && 'path' in entry && 'access' in entry) {
+    if (!text(entry.path) || (entry.access !== 'read' && entry.access !== 'write')) return 'The folder permission is invalid.'
+    // Never resolved against the daemon's working directory: the owner is shown the exact folder.
+    return isAbsolutePath(entry.path as string) ? undefined : 'The folder must be an absolute path.'
+  }
   if (keys.length === 1 && keys[0] === 'mcp') {
     const mcp = entry.mcp as Record<string, unknown> | null
     return mcp && typeof mcp === 'object' && text(mcp.serverId) && text(mcp.tool) ? undefined : 'The MCP tool is invalid.'
@@ -122,11 +126,8 @@ export function withPermission(manifest: BotManifest, permission: BotPermissionR
       if (!next.tools.includes(permission.tool)) next.tools.push(permission.tool)
     } else if (!next.appTools.includes(permission.tool)) next.appTools.push(permission.tool)
   } else if ('path' in permission) {
-    const roots = next.workspace?.roots ?? []
-    next.workspace = {
-      roots: roots.includes(permission.path) ? roots : [...roots, permission.path],
-      access: permission.access === 'write' || next.workspace?.access === 'write' ? 'write' : 'read'
-    }
+    // Only this folder is added or upgraded; every other folder keeps exactly its access.
+    next.workspace = workspaceOf([...foldersOf(next.workspace), [permission.path, permission.access]])
   } else if ('skill' in permission) {
     if (!next.skills.includes(permission.skill)) next.skills.push(permission.skill)
   } else if ('mcp' in permission) {

@@ -17,11 +17,48 @@ export interface BotManifest {
   mcp: Array<{ serverId: string; tool: string }>
   /** Skill ids. */
   skills: string[]
-  /** The folders the bot may touch, and how; null without file access. */
-  workspace: { roots: string[]; access: 'read' | 'write' } | null
+  /**
+   * The folders the bot may touch, and how; null without file access. `access` holds for every
+   * root unless `rootAccess` names that root: an answer to a wall adds or upgrades one folder
+   * without changing what the others allow.
+   */
+  workspace: BotWorkspace | null
   budget: BotBudget
   /** Personal bots work for their owner only; bots for other people are not available yet. */
   audience: 'owner'
+}
+
+export interface BotWorkspace {
+  roots: string[]
+  access: 'read' | 'write'
+  /** Per-folder access where it differs from `access` (keys are roots). */
+  rootAccess?: Record<string, 'read' | 'write'>
+}
+
+/** The access a manifest gives one of its roots. */
+export function folderAccess(workspace: BotWorkspace, root: string): 'read' | 'write' {
+  return workspace.rootAccess?.[root] ?? workspace.access
+}
+
+/**
+ * A workspace from per-folder access: `access` is `write` only when every folder is writable, and
+ * `rootAccess` names each folder that differs. Null without folders.
+ */
+export function workspaceOf(entries: ReadonlyArray<readonly [string, 'read' | 'write']>): BotWorkspace | null {
+  const folders = new Map<string, 'read' | 'write'>()
+  for (const [root, access] of entries) folders.set(root, folders.get(root) === 'write' ? 'write' : access)
+  if (!folders.size) return null
+  const access = [...folders.values()].every((value) => value === 'write') ? 'write' : 'read'
+  const roots = [...folders.keys()].sort()
+  const differing = roots.filter((root) => folders.get(root) !== access)
+  return differing.length
+    ? { roots, access, rootAccess: Object.fromEntries(differing.map((root) => [root, folders.get(root)!])) }
+    : { roots, access }
+}
+
+/** Each folder of a workspace with its own access. */
+export function foldersOf(workspace: BotWorkspace | null): Array<[string, 'read' | 'write']> {
+  return workspace ? workspace.roots.map((root) => [root, folderAccess(workspace, root)]) : []
 }
 
 export interface BotBudget {
@@ -97,6 +134,24 @@ export interface BotActivationSummary {
   canMarkDone: boolean
   /** The main run being continued is `uncertain`: Continue needs the acknowledgement. */
   uncertain: boolean
+  /** That `uncertain` run's id, which an acknowledgement names (`acknowledge.uncertainRunId`). */
+  uncertainRunId: string | null
+}
+
+/**
+ * "I've checked what these calls did": exactly the interrupted calls (by invocation id) and the
+ * `uncertain` run the owner was shown. A set that changed since is refused, never acknowledged.
+ */
+export interface BotAcknowledgement {
+  calls: readonly string[]
+  uncertainRunId?: string | null
+}
+
+/** What the owner is asked to check before an activation goes on, as the Bots tab shows it. */
+export function acknowledgementOf(activation: Pick<BotActivationSummary, 'unknownCalls' | 'uncertainRunId'>): BotAcknowledgement | undefined {
+  const calls = activation.unknownCalls.filter((call) => !call.acknowledged).map((call) => call.invocationId)
+  if (!calls.length && !activation.uncertainRunId) return undefined
+  return { calls, uncertainRunId: activation.uncertainRunId }
 }
 
 /** One thread's check result, as the approval dialog shows it. */

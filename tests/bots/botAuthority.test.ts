@@ -92,7 +92,7 @@ describe('compileBotThread', () => {
       budget: { maxWallMs: 600_000, maxTurns: 40 },
       authority: { kind: 'bot', digest: botManifestDigest(manifest()) }
     })
-    expect(compiled.permissions.workspace).toEqual({ roots: [root], access: 'write', scratch: realpathSync(scratch) })
+    expect(compiled.permissions.workspace).toEqual({ roots: [root], access: 'write', writeRoots: [root], scratch: realpathSync(scratch) })
   })
 
   it('refuses shell: no runtime has a proven sandbox here', () => {

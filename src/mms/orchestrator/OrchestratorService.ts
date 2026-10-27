@@ -2984,6 +2984,12 @@ export class OrchestratorService extends EventEmitter {
       dispatcher?.settle(payload, {})
     }
     if (!dispatcher) return cancel('bots_unavailable')
+    const session = this.getOrCreateSession(payload.threadId)
+    // A continuation can be sent while the walled turn is still letting go of the thread: wait for
+    // it (briefly) before anything is prepared, so no time is charged to a turn that cannot start.
+    const busy = (): boolean => session.deleted || session.turnAdmitted || session.isTurnRunning()
+    for (let waited = 0; busy() && !session.deleted && waited < 10_000 && !signal.aborted; waited += 50) await new Promise((resolve) => setTimeout(resolve, 50))
+    if (busy() || engine.getRun(payload.runId)?.status !== 'queued') return cancel('bot_state_invalid')
     let prepared: ReturnType<BotTurnDispatcher['prepare']>
     try {
       await dispatcher.refresh?.(payload)
@@ -2993,12 +2999,10 @@ export class OrchestratorService extends EventEmitter {
       return cancel('bot_prepare_failed')
     }
     if ('refused' in prepared) return cancel(prepared.code)
-    const session = this.getOrCreateSession(payload.threadId)
     // History 'none': a fresh activation thread has no transcript, native context or summary. A
     // continuation or a consult runs on the thread's own history ('thread').
-    const busy = session.deleted || session.turnAdmitted || session.isTurnRunning()
     const fresh = session.messages.length === 0 && getActiveMessages(session.nativeContext).length === 0 && !getCompactionSummary(session.nativeContext)
-    if (busy || (prepared.history !== 'thread' && !fresh)) return cancel('bot_state_invalid')
+    if (busy() || (prepared.history !== 'thread' && !fresh)) return cancel('bot_state_invalid')
     let text: string | undefined
     try {
       const response = await this.runTurnOnSession(

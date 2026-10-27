@@ -15,7 +15,7 @@ import {
   type BotPermissionRequest,
   type BotWallKind
 } from '../../../shared/bots/personal/escalation'
-import { BOT_APP_TOOLS } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { wallMessage } from '../../../shared/bots/personal/walls'
 import type { ChargeResult, CountKind, CounterScope } from '../../../shared/harness/counters'
 import type { ReserveResult, SpendLimits, SpendRequest, SpendScope } from '../../../shared/harness/spend'
@@ -24,6 +24,7 @@ import {
   ACTIVE_TIME_CHUNK_MS,
   ENDED_ACTIVATION_STATUSES,
   MAX_QUEUED_ACTIVATIONS,
+  type BotAcknowledgement,
   type BotActivationSummary,
   type BotDefinition,
   type BotManifest,
@@ -96,7 +97,7 @@ export interface BotEngineHost {
   setTimer?(fn: () => void, ms: number): { clear(): void }
 }
 
-export type { BotSummary, BotThreadCheck } from '../../../shared/bots/personal/definition'
+export type { BotAcknowledgement, BotSummary, BotThreadCheck } from '../../../shared/bots/personal/definition'
 
 interface LiveDispatch {
   controller: AbortController
@@ -219,23 +220,52 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.store.markDeleted(botId)
       return running
     })
-    this.host.definitions.remove(botId)
     for (const activation of live) {
       await this.stopRun(activation)
       this.cleanup({ ...activation, status: 'cancelled' })
     }
-    await this.trashHome(botId)
+    // Its runs end before its threads move: the trash refuses threads with work running.
+    await this.untilQuiet(live)
     this.changed({ botId })
+    await this.finishDeletion(botId)
   }
 
-  private async trashHome(botId: string): Promise<void> {
+  /**
+   * The rest of a deletion, once `bots.db` says the bot is deleted: its definition files go and its
+   * home thread moves to the trash (ownership takes its activation and context threads along).
+   * Idempotent; a failure is reported and retried by `finishDeletions` when the profile next starts.
+   */
+  private async finishDeletion(botId: string): Promise<void> {
+    try {
+      this.host.definitions.remove(botId)
+    } catch (error) {
+      console.warn('a deleted bot\'s definition could not be removed', { botId, error: error instanceof Error ? error.message : String(error) })
+    }
     const home = this.store.registry(botId)?.homeThreadId
     if (!home || !this.host.trashThread || this.threadState(home) !== 'active') return
     try {
       await this.host.trashThread(home)
     } catch (error) {
-      console.warn('a deleted bot\'s thread could not be trashed', { botId, error: error instanceof Error ? error.message : String(error) })
+      const message = error instanceof Error ? error.message : String(error)
+      throw new BotEngineError('bot_cleanup_failed', `The bot was deleted, but its thread could not be moved to the trash (${message}). Mousse tries again when the profile next starts.`)
     }
+  }
+
+  /** Finishes deletions a crash or a refused trash left unfinished (after the profile has started). */
+  async finishDeletions(): Promise<void> {
+    for (const entry of this.store.deletedRegistry()) {
+      try {
+        await this.finishDeletion(entry.botId)
+      } catch (error) {
+        console.warn('a deleted bot could not be cleaned up', { botId: entry.botId, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+  }
+
+  /** Waits until no run of the activations is live (bounded; the trash re-checks what is still busy). */
+  private async untilQuiet(rows: readonly BotActivationRow[], timeoutMs = 15_000): Promise<void> {
+    const until = Date.now() + timeoutMs
+    while (rows.some((row) => !this.allRunsEnded(row)) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 50))
   }
 
   private threadState(threadId: string): 'active' | 'trashed' | 'missing' {
@@ -286,7 +316,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       revision: published.revision!,
       digest: botManifestDigest(published.permissions),
       added: addedPermissions(published.permissions, grant?.manifest ?? null),
-      threads: [published.main].map((thread) => this.checkThread(thread, published.permissions))
+      threads: [published.main, ...published.context].map((thread) => this.checkThread(thread, published.permissions))
     }
   }
 
@@ -318,7 +348,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const published = this.published(botId)
     const digest = botManifestDigest(published.permissions)
     if (digest !== manifestDigest) throw new BotEngineError('bot_grant_changed', 'These permissions changed since they were shown. Review them again.')
-    const refused = [published.main].map((thread) => this.checkThread(thread, published.permissions)).find((check) => !check.ok)
+    const refused = [published.main, ...published.context].map((thread) => this.checkThread(thread, published.permissions)).find((check) => !check.ok)
     if (refused) throw new BotEngineError('policy_unenforceable', refused.reason ?? 'A thread of this bot cannot hold its permissions.', { thread: refused.key })
     const grant = this.store.approve(botId, digest, published.permissions)
     // Work running under the replaced grant ends now: it never goes on under another grant.
@@ -513,6 +543,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.store.moveActivation(row.id, ['running'], 'failed', { endReason: reason })
       this.cleanup(this.store.activation(row.id) ?? row)
       this.changed({ botId: row.botId, activationId: row.id })
+      this.pumpLater(row.botId)
     }
   }
 
@@ -543,9 +574,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // What runs: the revision's own permissions held inside the grant, so a narrower revision
     // narrows, plus what the owner allowed for this activation only.
     const effective = this.effectiveManifest(row, definition.permissions, grant.manifest)
+    const problem = manifestProblem(effective)
+    if (problem) return this.block(row, 'bot_permissions_invalid', problem)
     const counters = this.store.counters(row.id)
     const remainingMs = effective.budget.maxActiveMs - counters.activeMs
-    if (remainingMs < ACTIVE_TIME_CHUNK_MS) return this.pause(row, 'active_time_exhausted', 'This bot used up its work time.')
+    if (remainingMs < ACTIVE_TIME_CHUNK_MS) {
+      // Under one 15-second slice left: a budget wall, so the owner can allow more time.
+      this.raiseWall(row.id, { dispatchN: dispatch.n, kind: 'budget', permission: { budget: { key: 'maxActiveMs' } }, reason: 'This bot used up its work time.' })
+      return refuse('active_time_exhausted', 'This bot used up its work time.')
+    }
     const scratch = row.scratch ?? join(this.store.directory, 'scratch', row.id)
     const compiled = compileBotThread({
       grant: effective,
@@ -714,6 +751,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const authority: BotAuthority = {
       ...base,
       check,
+      checkAny: (calls: readonly NormalisedCall[]) => {
+        let refused: { ok: false; wall: WallReason } | undefined
+        for (const call of calls) {
+          const decided = base.check(call)
+          if (decided.ok) return decided
+          refused ??= decided
+        }
+        // Every name was refused: the wall is raised once, for the first.
+        return calls.length ? check(calls[0]) : refused ?? { ok: false, wall: { kind: 'ended' } }
+      },
       escalate: (request) => {
         const problem = permissionProblem(request.permission)
         if (problem) return `${problem} Ask for a tool, a folder, a skill, an MCP tool or a limit.`
@@ -814,6 +861,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // The dispatch ends now: its turn (and every consult, which shares the signal) is aborted.
     this.live.get(activationId)?.controller.abort(new BotWallAbort())
     const row = this.store.activation(activationId)
+    if (raised.kind === 'blocked' && row) this.pumpLater(row.botId)
     if (raised.kind === 'wall') {
       this.armExpiry(raised.escalation)
       const summary = this.escalationSummary(raised.escalation)
@@ -837,7 +885,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (!this.store.answerEscalation(escalationId, 'expired')) return false
       return this.store.moveActivation(escalation.activationId, ['waiting_grant'], 'blocked', { endReason: 'escalation_expired' })
     })
-    if (moved) this.changed({ activationId: escalation.activationId })
+    if (!moved) return
+    const row = this.store.activation(escalation.activationId)
+    this.changed({ ...(row ? { botId: row.botId } : {}), activationId: escalation.activationId })
+    // The activation no longer holds its bot: the next one waiting starts.
+    if (row) this.pumpLater(row.botId)
   }
 
   listEscalations(activationId?: string): BotEscalationSummary[] {
@@ -880,6 +932,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const amount = input.amount ?? ('budget' in escalation.permission ? escalation.permission.budget.amount : undefined)
     if (budget && input.answer !== 'deny' && (amount === undefined || !Number.isFinite(amount) || amount <= 0))
       throw new BotEngineError('invalid_answer', 'Say how much more to allow.')
+    if (input.answer !== 'deny') {
+      const problem = this.answerProblem(row, escalation.permission, amount)
+      if (problem) throw new BotEngineError('invalid_answer', problem)
+    }
     if (input.answer === 'allow_bot') this.allowForBot(row, escalation.permission, amount)
     const status = input.answer === 'deny' ? 'denied' : input.answer === 'allow_bot' ? 'allowed_bot' : 'allowed_once'
     const answered = this.store.db.transaction(() => {
@@ -895,27 +951,49 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return { escalation: this.escalationSummary(this.store.escalation(escalation.id)!), activation: this.activationSummary(this.store.activation(row.id)!) }
   }
 
-  /** "Allow for this bot": a revision with the permission is published and its grant approved. */
+  /** Why an answer cannot grant `permission`: the result would not be a valid manifest. */
+  private answerProblem(row: BotActivationRow, permission: BotPermissionRequest, amount: number | undefined): string | undefined {
+    const definition = this.host.definitions.revision(row.botId, row.revision)
+    const grant = this.store.activeGrant(row.botId)
+    if (!definition || !grant) return 'This bot\'s permissions changed; it cannot continue under them.'
+    return manifestProblem(withPermission(this.effectiveManifest(row, definition.permissions, grant.manifest), permission, amount))
+  }
+
+  /**
+   * "Allow for this bot": a revision with the permission is published and its grant approved,
+   * after every thread's runtime is checked as at approval. The owner's draft is never
+   * overwritten: the revision is published from the published one, and unpublished edits stay.
+   */
   private allowForBot(row: BotActivationRow, permission: BotPermissionRequest, amount: number | undefined): void {
     const entry = this.entry(row.botId)
     const published = entry.published
     const grant = this.store.activeGrant(row.botId)
     if (!published || !grant) throw new BotEngineError('bot_approval_required', 'Approve this bot\'s permissions first.')
-    const next: BotDefinition = { ...published, permissions: withPermission(published.permissions, permission, amount) }
-    delete next.revision
-    const draftChanged = entry.draftHash !== published.revision
-    const saved = this.host.definitions.save(next, entry.draftHash)
-    const revision = this.host.definitions.publish(row.botId, saved.draftHash)
-    this.store.setPublished(row.botId, revision.revision!)
-    // Unpublished edits stay a draft, with the same permission added.
-    if (draftChanged) this.host.definitions.save({ ...entry.draft, permissions: withPermission(entry.draft.permissions, permission, amount) }, saved.draftHash)
     const wider = withPermission(grant.manifest, permission, amount)
+    const next: BotDefinition = { ...published, permissions: withPermission(published.permissions, permission, amount) }
+    const refused = [next.main, ...next.context].map((thread) => this.checkThread(thread, wider)).find((check) => !check.ok)
+    if (refused) throw new BotEngineError('policy_unenforceable', refused.reason ?? 'A thread of this bot cannot hold its permissions.', { thread: refused.key })
+    let revision: BotDefinition
+    try {
+      revision = this.host.definitions.publishRevision(next)
+    } catch (error) {
+      if (error instanceof BotDefinitionError) throw new BotEngineError('invalid_answer', error.message)
+      throw error
+    }
     const digest = botManifestDigest(wider)
     this.store.db.transaction(() => {
+      this.store.setPublished(row.botId, revision.revision!)
       this.store.approve(row.botId, digest, wider)
       // The activation and its queued siblings move to the wider grant; nothing else changes for them.
       this.store.regrant(row.botId, grant.digest, digest, revision.revision!)
     })
+    // The draft gets the same permission; its other edits are kept. A draft without edits now matches the revision.
+    try {
+      const draft = entry.draftHash === published.revision ? next : { ...entry.draft, permissions: withPermission(entry.draft.permissions, permission, amount) }
+      this.host.definitions.save(draft, entry.draftHash)
+    } catch (error) {
+      console.warn('the bot draft was left as it was', { botId: row.botId, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   /**
@@ -988,6 +1066,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private collectUnknownCalls(row: BotActivationRow): void {
     const runs = this.host.runs()
     if (!runs) return
+    let changed = 0
     for (const dispatch of this.store.dispatches(row.id)) {
       const runId = dispatch.runId ?? this.receiptRun(dispatch.clientRequestId)
       if (!runId) continue
@@ -997,10 +1076,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       for (const call of runs.tools.listForRun(runId)) {
         if (call.idempotent) continue
         if (call.status === 'outcome_unknown' || call.status === 'started')
-          this.store.putUnknownCall({ activationId: row.id, runId, invocationId: call.invocationId, tool: call.tool, role })
-        else this.store.dropUnknownCall(row.id, call.invocationId)
+          changed += this.store.putUnknownCall({ activationId: row.id, runId, invocationId: call.invocationId, tool: call.tool, role })
+        else changed += this.store.dropUnknownCall(row.id, call.invocationId)
       }
     }
+    // The Bots tab lists exactly these rows: every change is shown before anyone acknowledges them.
+    if (changed) this.changed({ botId: row.botId, activationId: row.id })
   }
 
   /**
@@ -1028,6 +1109,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         this.store.moveActivation(row.id, [current.status], 'blocked', { endReason: 'bot_grant_revoked' })
         return { kind: 'blocked' }
       }
+      // A denied limit is not asked again: the activation ends blocked.
+      if (input.answer?.status === 'denied' && 'budget' in input.answer.permission) {
+        this.store.markApplied(input.answer.id)
+        this.store.moveActivation(row.id, [current.status], 'blocked', { endReason: 'budget_denied' })
+        return { kind: 'blocked' }
+      }
       const unknown = this.store.unknownCalls(row.id).some((call) => !call.acknowledged)
       if (unknown || (uncertain && !input.acknowledgeUncertain)) {
         this.store.moveActivation(row.id, [current.status], 'paused', { endReason: unknown ? 'unknown_calls' : 'uncertain' })
@@ -1047,7 +1134,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         clientRequestId: `${row.id}:d${n}`,
         threadId: current.threadId!,
         prompt: { text: this.continuationPrompt(row.id, input) },
-        policyDigest: grant.digest
+        policyDigest: grant.digest,
+        // Kept with the intent, so a resend after a crash sends exactly this.
+        send: { ...(previous?.runId ? { continuationOfRunId: previous.runId } : {}), ...(uncertain ? { acknowledgeUncertain: true } : {}) }
       }
       this.store.insertDispatch(dispatch)
       if (input.answer) this.store.markApplied(input.answer.id)
@@ -1062,11 +1151,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return 'wall'
     }
     this.changed({ botId: row.botId, activationId: row.id })
-    if (decided.kind !== 'sent') return decided.kind === 'paused' ? 'paused' : 'none'
-    await this.sendDispatch(this.store.activation(row.id)!, decided.dispatch, {
-      ...(previous?.runId ? { continuationOfRunId: previous.runId } : {}),
-      ...(uncertain ? { acknowledgeUncertain: true } : {})
-    })
+    if (decided.kind !== 'sent') {
+      // Paused or blocked: the activation no longer holds its bot.
+      if (decided.kind === 'paused' || decided.kind === 'blocked') this.pumpLater(row.botId)
+      return decided.kind === 'paused' ? 'paused' : 'none'
+    }
+    await this.sendDispatch(this.store.activation(row.id)!, decided.dispatch)
     return 'sent'
   }
 
@@ -1083,23 +1173,31 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /** Sends a written dispatch: its run, receipt and `turn.start` in one run-DB transaction. */
-  private async sendDispatch(row: BotActivationRow, dispatch: BotDispatchRow, options: { continuationOfRunId?: string; acknowledgeUncertain?: boolean } = {}): Promise<void> {
+  private async sendDispatch(row: BotActivationRow, dispatch: BotDispatchRow): Promise<void> {
     try {
-      const runs = this.host.runs()
-      if (!runs) throw new BotEngineError('bots_unavailable', 'The run engine is not running.')
-      const sent = await runs.sendWithStart(
-        { kind: 'send', threadId: dispatch.threadId, clientRequestId: dispatch.clientRequestId, source: 'bot', ...options },
-        (runId): BotTurnPayload => ({ kind: 'bot', runId, threadId: dispatch.threadId, activationId: row.id, dispatchN: dispatch.n })
-      )
-      if (sent.status !== 'accepted') throw new BotEngineError('bot_dispatch_refused', `The bot's run was refused (${sent.reason}).`)
-      this.store.setDispatchRun(row.id, dispatch.n, sent.runId)
-      this.host.notifyEffects()
+      await this.sendOnly(row, dispatch)
     } catch (error) {
       const reason = error instanceof BotEngineError ? error.code : 'bot_start_failed'
       console.warn('bot dispatch could not be sent', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
       this.store.moveActivation(row.id, ['running'], 'failed', { endReason: reason })
       this.cleanup(this.store.activation(row.id) ?? row)
       this.changed({ botId: row.botId, activationId: row.id })
+      this.pumpLater(row.botId)
+    }
+  }
+
+  /** Sends a written dispatch, with the send options kept on its intent; throws on refusal. */
+  private async sendOnly(row: BotActivationRow, dispatch: BotDispatchRow): Promise<void> {
+    {
+      const runs = this.host.runs()
+      if (!runs) throw new BotEngineError('bots_unavailable', 'The run engine is not running.')
+      const sent = await runs.sendWithStart(
+        { kind: 'send', threadId: dispatch.threadId, clientRequestId: dispatch.clientRequestId, source: 'bot', ...dispatch.send },
+        (runId): BotTurnPayload => ({ kind: 'bot', runId, threadId: dispatch.threadId, activationId: row.id, dispatchN: dispatch.n })
+      )
+      if (sent.status !== 'accepted') throw new BotEngineError('bot_dispatch_refused', `The bot's run was refused (${sent.reason}).`)
+      this.store.setDispatchRun(row.id, dispatch.n, sent.runId)
+      this.host.notifyEffects()
     }
   }
 
@@ -1108,7 +1206,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * calls must be acknowledged first ("I've checked what these calls did"), which also covers an
    * `uncertain` main run. A recorded wall answer is applied by this continuation.
    */
-  async continueActivation(activationId: string, options: { acknowledgeUncertain?: boolean } = {}): Promise<BotActivationSummary> {
+  async continueActivation(activationId: string, options: { acknowledge?: BotAcknowledgement } = {}): Promise<BotActivationSummary> {
     const row = this.store.activation(activationId)
     if (!row) throw new BotEngineError('activation_not_found', 'No activation with that id.')
     if (row.status !== 'paused' && row.status !== 'blocked') throw new BotEngineError('bot_not_paused', 'Only a paused or blocked activation can be continued.')
@@ -1116,28 +1214,44 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (this.store.activationsIn(row.botId, [...ACTIVE_HOLDING]).some((other) => other.id !== row.id))
       throw new BotEngineError('bot_busy', 'Another run of this bot is in progress. Continue this one when it has finished.')
     if (!this.allRunsEnded(row)) throw new BotEngineError('bot_still_running', 'This bot\'s last run has not stopped yet.')
-    this.collectUnknownCalls(row)
-    if (options.acknowledgeUncertain) this.store.acknowledgeUnknownCalls(row.id)
-    if (this.store.unknownCalls(row.id).some((call) => !call.acknowledged))
-      throw new BotEngineError('unknown_calls_not_acknowledged', 'Check what the interrupted tool calls did before continuing.', { calls: this.store.unknownCalls(row.id) })
-    const main = this.store.lastMainDispatch(row.id)
-    if (main?.runId && this.host.runs()?.getRun(main.runId)?.status === 'uncertain' && !options.acknowledgeUncertain)
-      throw new BotEngineError('uncertain_not_acknowledged', 'Check what the interrupted tool calls did before continuing.')
+    const uncertain = this.acknowledge(row, options.acknowledge)
     const answer = this.store.pendingAnswer(row.id)
-    await this.continueWith(row.id, ['paused', 'blocked'], { ...(answer ? { answer } : {}), ...(options.acknowledgeUncertain ? { acknowledgeUncertain: true } : {}) })
+    await this.continueWith(row.id, ['paused', 'blocked'], { ...(answer ? { answer } : {}), ...(uncertain ? { acknowledgeUncertain: true } : {}) })
     return this.activationSummary(this.store.activation(row.id)!)
   }
 
+  /**
+   * "I've checked what these calls did": the acknowledgement names exactly the calls (and the
+   * `uncertain` run) the owner was shown. When the set changed since, nothing is acknowledged and
+   * the request is refused with the current list. True when an `uncertain` main run was acknowledged.
+   */
+  private acknowledge(row: BotActivationRow, shown: BotAcknowledgement | undefined): boolean {
+    this.collectUnknownCalls(row)
+    const calls = this.store.unknownCalls(row.id)
+    const pending = calls.filter((call) => !call.acknowledged)
+    const main = this.store.lastMainDispatch(row.id)
+    const run = main?.runId ? this.host.runs()?.getRun(main.runId) : undefined
+    const uncertainRunId = run?.status === 'uncertain' ? run.runId : null
+    if (!shown) {
+      if (pending.length) throw new BotEngineError('unknown_calls_not_acknowledged', 'Check what the interrupted tool calls did first.', { calls, uncertainRunId })
+      if (uncertainRunId) throw new BotEngineError('uncertain_not_acknowledged', 'Check what the interrupted tool calls did first.', { calls, uncertainRunId })
+      return false
+    }
+    const names = new Set(shown.calls)
+    const same = names.size === pending.length && pending.every((call) => names.has(call.invocationId)) && (shown.uncertainRunId ?? null) === uncertainRunId
+    if (!same) throw new BotEngineError('unknown_calls_changed', 'The interrupted tool calls changed since they were shown. Check them again.', { calls, uncertainRunId })
+    this.store.acknowledgeUnknownCalls(row.id, pending.map((call) => call.invocationId))
+    return uncertainRunId !== null
+  }
+
   /** "Mark done": a paused activation whose run completed keeps its draft result as the result. */
-  markDone(activationId: string, options: { acknowledgeUncertain?: boolean } = {}): BotActivationSummary {
+  markDone(activationId: string, options: { acknowledge?: BotAcknowledgement } = {}): BotActivationSummary {
     const row = this.store.activation(activationId)
     if (!row) throw new BotEngineError('activation_not_found', 'No activation with that id.')
     const main = this.store.lastMainDispatch(row.id)
     const run = main?.runId ? this.host.runs()?.getRun(main.runId) : undefined
     if (row.status !== 'paused' || run?.status !== 'completed') throw new BotEngineError('bot_not_done', 'Only a paused activation whose run completed can be marked done.')
-    if (options.acknowledgeUncertain) this.store.acknowledgeUnknownCalls(row.id)
-    if (this.store.unknownCalls(row.id).some((call) => !call.acknowledged))
-      throw new BotEngineError('unknown_calls_not_acknowledged', 'Check what the interrupted tool calls did first.')
+    this.acknowledge(row, options.acknowledge)
     this.store.moveActivation(row.id, ['paused'], 'done', { endReason: null })
     const next = this.store.activation(row.id)!
     this.cleanup(next)
@@ -1175,6 +1289,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         if (this.store.moveActivation(row.id, ['running'], 'paused', { endReason: 'unknown_calls' })) {
           controller.abort(new BotWallAbort('bot_paused'))
           this.changed({ botId: row.botId, activationId: row.id })
+          this.pumpLater(row.botId)
         }
         return wallMessage({ kind: 'paused' })
       }
@@ -1192,7 +1307,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (!written) return wallMessage(this.endedWall(row.id))
       const key = `${row.id}:${written.n}`
       sent = new Promise<string>((resolve) => this.consultWaiters.set(key, { resolve }))
-      await this.sendDispatch(row, written)
+      try {
+        await this.sendOnly(row, written)
+      } catch (error) {
+        // A consult that could not be sent fails alone: the main dispatch goes on, and the lane opens.
+        const message = error instanceof Error ? error.message : String(error)
+        this.store.run('UPDATE bot_dispatches SET ended_at = ?, outcome = ? WHERE activation_id = ? AND n = ? AND ended_at IS NULL', this.store.now(), 'not_sent', row.id, written.n)
+        this.consultWaiters.delete(key)
+        sent = Promise.resolve('')
+        return `The consult could not be sent: ${message}`
+      }
       const answer = await untilAborted(sent, controller.signal)
       if (answer === undefined) return wallMessage(this.endedWall(row.id))
       return answer || '(The context thread gave no answer.)'
@@ -1327,12 +1451,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private block(row: BotActivationRow, code: string, reason: string): { refused: string; code: string } {
     this.store.moveActivation(row.id, ['running'], 'blocked', { endReason: code })
     this.changed({ botId: row.botId, activationId: row.id })
+    this.pumpLater(row.botId)
     return { code, refused: reason }
   }
 
   private pause(row: BotActivationRow, code: string, reason: string): { refused: string; code: string } {
     this.store.moveActivation(row.id, ['running'], 'paused', { endReason: code })
     this.changed({ botId: row.botId, activationId: row.id })
+    this.pumpLater(row.botId)
     return { code, refused: reason }
   }
 
@@ -1344,10 +1470,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * with `thread_trashed`, its escalations close, and its dispatch and consults stop. Idempotent,
    * so the index projection runs it again after the move. Restoring never revives an activation.
    */
-  beforeTrash(threadIds: readonly string[]): void {
-    const trashed = new Set(threadIds)
-    if (!trashed.size) return
+  beforeTrash(threadIds: readonly string[]): BotActivationRow[] {
+    // Ordinary threads never touch bots.db, so an unreadable bots.db never blocks their trash.
+    const ours = threadIds.filter((threadId) => this.known.has(threadId) || this.roleOrHomeOf(threadId))
+    if (!ours.length) return []
+    const trashed = new Set(ours)
     const threads = this.store.allThreads()
+    // A trashed context thread is retired: the next consult of its key starts a new one.
+    for (const thread of threads) if (thread.role === 'context' && trashed.has(thread.threadId)) {
+      this.store.retireContextThread(thread.threadId)
+      this.known.delete(thread.threadId)
+    }
     const touched = new Set(threads.filter((thread) => trashed.has(thread.threadId) && thread.role !== 'activation').map((thread) => thread.botId))
     const ended = this.store.db.transaction(() => {
       const rows = this.store.activationsWith([...NOT_ENDED]).filter((row) => touched.has(row.botId) || (row.threadId !== null && trashed.has(row.threadId)))
@@ -1362,10 +1495,35 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.cleanup({ ...row, status: 'cancelled' })
       this.changed({ botId: row.botId, activationId: row.id })
     }
+    for (const botId of new Set(ended.map((row) => row.botId))) this.pumpLater(botId)
+    return ended
   }
 
   afterTrash(threadIds: readonly string[]): void {
     this.beforeTrash(threadIds)
+  }
+
+  /**
+   * Before a thread goes to the trash: ends the activations it belongs to and waits until their
+   * runs have stopped, so the trash's own idle check does not refuse it. Never throws.
+   */
+  async quiesceForTrash(threadIds: readonly string[]): Promise<void> {
+    try {
+      const ended = this.beforeTrash(threadIds)
+      for (const row of ended) await this.stopRun(row)
+      await this.untilQuiet(ended)
+    } catch (error) {
+      console.warn('bot activations could not be ended before the trash', { error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /** Whether a thread is any bot thread (home included), read from bots.db. */
+  private roleOrHomeOf(threadId: string): boolean {
+    try {
+      return this.store.threadRole(threadId) !== undefined
+    } catch {
+      return false
+    }
   }
 
   /** What a profile removal ends: unfinished activations (running, waiting, paused, queued). */
@@ -1450,10 +1608,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // P6: a context thread in the trash or gone is forgotten; the next consult starts a new one.
     for (const thread of this.store.allThreads()) {
       if (thread.role !== 'context' || this.threadState(thread.threadId) === 'active') continue
-      this.store.dropThread(thread.threadId)
+      this.store.retireContextThread(thread.threadId)
       this.known.delete(thread.threadId)
-      const [key, gen] = contextKey(thread.key)
-      if (this.store.contextGen(thread.botId, key) <= gen) this.store.bumpContextGen(thread.botId, key)
     }
     // P7: the scratch folders of ended activations.
     for (const row of this.store.activationsWith(['done', 'failed', 'cancelled'])) if (row.scratch && existsSync(row.scratch)) this.cleanup(row)
@@ -1477,7 +1633,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // Row 1: the bot was deleted (a crash between its deletion and trashing its home thread).
     if (this.store.registry(row.botId)?.deletedAt) {
       end('cancelled', 'bot_deleted')
-      await this.trashHome(row.botId)
+      await this.finishDeletion(row.botId).catch((error: unknown) => console.warn('a deleted bot could not be cleaned up', { botId: row.botId, error: error instanceof Error ? error.message : String(error) }))
       return
     }
     // Row 2: the activation's thread or the bot's home thread is in the trash or gone.
@@ -1493,11 +1649,28 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (open) {
         if (Date.parse(open.expiresAt) <= this.now()) this.expire(open.id)
         else this.armExpiry(open)
+        return
       }
+      // Answered before the crash, but its continuation was never sent: send it now, behind the
+      // unknown-call gate (every run ended at boot).
+      const answer = this.store.pendingAnswer(row.id)
+      if (answer) {
+        await this.continueWith(row.id, ['waiting_grant'], { answer })
+        return
+      }
+      // Neither an open wall nor an answer: the owner decides.
+      this.store.moveActivation(row.id, ['waiting_grant'], 'paused', { endReason: 'wall_lost' })
+      this.changed({ botId: row.botId, activationId: row.id })
       return
     }
     const main = this.store.lastMainDispatch(row.id)
-    if (!main) return
+    // Claimed from the queue, but its first dispatch was never written: start it again; its threads
+    // and dispatch have fixed identities, so nothing is made twice.
+    if (!main) return this.startActivation(row)
+    // A queued run of an earlier main dispatch (a restart replaced it) never starts.
+    for (const earlier of this.store.dispatches(row.id))
+      if (earlier.kind !== 'consult' && earlier.n < main.n && earlier.runId && runs.getRun(earlier.runId)?.status === 'queued')
+        runs.markTerminal(earlier.runId, 'cancelled', { error: 'bot_dispatch_restarted' })
     for (const dispatch of this.store.dispatches(row.id))
       if (dispatch.endedAt === null && dispatch.runId) {
         const ended = runs.getRun(dispatch.runId)
@@ -1517,8 +1690,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // Row 6: the dispatch intent was written, its run never was: send it again with the same request id.
     if (!run) {
       if (!this.grantHolds(row)) return void this.block(row, 'bot_grant_revoked', 'The bot\'s permissions were revoked or changed.')
-      const previous = this.store.dispatches(row.id).filter((dispatch) => dispatch.kind !== 'consult' && dispatch.n < main.n).at(-1)
-      await this.sendDispatch(row, main, previous?.runId ? { continuationOfRunId: previous.runId } : {})
+      // The same options the intent was written with (the run it continues, the owner's acknowledgement).
+      await this.sendDispatch(row, main)
       return
     }
     // Row 7: the run never left `queued` (its `turn.start` was cancelled by boot).
@@ -1531,10 +1704,20 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         runs.outbox.enqueue({ threadId: main.threadId, runId: run.runId, kind: 'turn.start', payload: { kind: 'bot', runId: run.runId, threadId: main.threadId, activationId: row.id, dispatchN: main.n } satisfies BotTurnPayload })
         return
       }
-      // Its time window was already settled: a new dispatch with the same prompt, never the old row again.
-      runs.markTerminal(run.runId, 'cancelled', { error: 'bot_dispatch_restarted' })
+      // Its time window was already settled (the whole allowance, without exit evidence): too little
+      // left is a budget wall, as for an interrupted run.
+      const left = this.remainingMs(row)
+      if (left !== undefined && left < ACTIVE_TIME_CHUNK_MS) {
+        runs.markTerminal(run.runId, 'cancelled', { error: 'bot_dispatch_restarted' })
+        const raised = this.store.db.transaction(() => this.wallInTransaction(row.id, ['running'], { dispatchN: main.n, kind: 'budget', permission: { budget: { key: 'maxActiveMs' } }, reason: 'Mousse stopped unexpectedly before this bot\'s run began, and its work time was counted as used. Allow more time to continue.' }))
+        if (raised.kind !== 'none') this.afterWall(row.id, raised)
+        return
+      }
+      // Otherwise a new dispatch with the same prompt, never the old row again. The new intent is
+      // written first; the old run is cancelled after, so a crash between them is a plain resend (row 6).
       const n = this.store.nextDispatchN(row.id)
-      this.store.insertDispatch({ activationId: row.id, n, kind: 'continue', clientRequestId: `${row.id}:d${n}`, threadId: main.threadId, prompt: main.prompt, policyDigest: row.grantDigest })
+      this.store.insertDispatch({ activationId: row.id, n, kind: 'continue', clientRequestId: `${row.id}:d${n}`, threadId: main.threadId, prompt: main.prompt, policyDigest: row.grantDigest, send: main.send })
+      runs.markTerminal(run.runId, 'cancelled', { error: 'bot_dispatch_restarted' })
       await this.sendDispatch(row, this.store.dispatch(row.id, n)!)
       return
     }
@@ -1629,7 +1812,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       openEscalation: open ? this.escalationSummary(open) : null,
       canContinue: (row.status === 'paused' || row.status === 'blocked') && Boolean(main),
       canMarkDone: row.status === 'paused' && run?.status === 'completed',
-      uncertain: run?.status === 'uncertain'
+      uncertain: run?.status === 'uncertain',
+      uncertainRunId: run?.status === 'uncertain' ? run.runId : null
     }
   }
 

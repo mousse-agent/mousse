@@ -117,7 +117,9 @@ const LIFECYCLE_EXEMPT_METHODS = new Set([
   ...STORAGE_LIFECYCLE_METHODS,
   'storage.cleanup.run',
   'storage.cleanup.plan',
-  'storage.usage'
+  'storage.usage',
+  // Deleting a bot trashes its home thread once its runs stopped; its own request is not other work.
+  'bots.definitions.delete'
 ])
 
 /** Long-poll requests that sit open while nothing happens; they are not owned profile work. */
@@ -636,8 +638,9 @@ export class MmsProfileServices {
       drain: async (record) => {
         const owned = this.lifecycleOwnedTasks(record.taskId)
         for (const task of owned) this.threadRuntimes.assertDeletable(task.taskId)
-        // A bot activation whose own, home or context thread goes to the trash ends first (PR 6 §4).
-        if (record.state === 'active') this.personalBots?.beforeTrash(owned.map((task) => task.taskId))
+        // A bot activation whose own, home or context thread goes to the trash ends (PR 6 §4); it
+        // already ended before the idle check (`trashThread`), so this pass is the idempotent backstop.
+        try { this.personalBots?.beforeTrash(owned.map((task) => task.taskId)) } catch (error) { console.warn('bot activations could not be ended for the trash', { error: error instanceof Error ? error.message : String(error) }) }
         const runs = await this.platform.workflowRuns.runtime.list({ profileId: this.profileId })
         if (
           runs.some(
@@ -667,7 +670,9 @@ export class MmsProfileServices {
           else this.orchestrator.markThreadDeleted(task.taskId)
         }
         // A second, idempotent pass once the threads moved; restoring never revives an activation.
-        if (record.location !== record.originalLocation) this.personalBots?.afterTrash(this.lifecycleOwnedTasks(record.taskId).map((task) => task.taskId))
+        if (record.location !== record.originalLocation) {
+          try { this.personalBots?.afterTrash(this.lifecycleOwnedTasks(record.taskId).map((task) => task.taskId)) } catch (error) { console.warn('bot activations could not be ended after the trash', { error: error instanceof Error ? error.message : String(error) }) }
+        }
       },
       quiesceDisk: () => this.storageUsage.pause(),
       projectPurged: (record) => {
@@ -862,6 +867,9 @@ export class MmsProfileServices {
     // A trashed thread is not listed and cannot be written to, so its watch ends now, while its folder still resolves, and a
     // restore does not bring it back with a backlog.
     this.pullRequestWatch.onEnded(taskId, 'trashed')
+    // A running or waiting bot activation on these threads ends first, and its runs stop, so the
+    // trash's idle check does not refuse the thread (PR 6 §4). Ordinary threads are untouched.
+    if (this.personalBots) await this.personalBots.quiesceForTrash(this.lifecycleOwnedTasks(taskId).map((task) => task.taskId))
     const record = await this.lifecycle.trash({
       taskId,
       operationId: this.resolveLifecycleOperationId(taskId, 'trash', operationId),
@@ -1156,8 +1164,10 @@ export class MmsProfileServices {
     return { job, ...(secret ? { secret } : {}), url: this.scheduledWebhookUrl(jobId), listening: error === undefined, ...(error ? { error } : {}), ...(warning ? { warning } : {}) }
   }
 
-  start(): Promise<void> {
-    return this.requests.run('profile-start', () => this.startOwned())
+  async start(): Promise<void> {
+    await this.requests.run('profile-start', () => this.startOwned())
+    // Bot deletions a crash or a refused trash left unfinished, once the start's own request ended.
+    void this.personalBots?.finishDeletions().catch(() => {})
   }
 
   private async startOwned(): Promise<void> {

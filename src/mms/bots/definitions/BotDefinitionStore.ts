@@ -141,6 +141,22 @@ export class BotDefinitionStore {
     return { ...current.draft, revision }
   }
 
+  /**
+   * Publishes `definition` as a revision without touching the draft ("Allow for this bot"), so
+   * the owner's unpublished edits are never overwritten. A definition that cannot run is refused.
+   */
+  publishRevision(definition: BotDefinition): BotDefinition {
+    const { revision: _revision, ...content } = definition
+    const problem = definitionProblem(content as BotDefinition)
+    if (problem) throw new BotDefinitionError('bot_invalid', problem)
+    const revision = definitionHash(content as BotDefinition)
+    const dir = join(this.dir(definition.id), 'revisions')
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    const path = join(dir, `${revision}.json`)
+    if (!existsSync(path)) atomicWriteJsonSync(path, content)
+    return { ...(content as BotDefinition), revision }
+  }
+
   remove(botId: string): void {
     rmSync(this.dir(botId), { recursive: true, force: true })
   }
