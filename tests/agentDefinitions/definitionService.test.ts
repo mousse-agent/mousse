@@ -51,6 +51,7 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
   let resolver: AgentResolver
   let defs: DefinitionEngine
   let harness: Harness
+  let settings: ReturnType<typeof getDefaultSettings>
   const profileId = 'profile-defs'
 
   beforeEach(async () => {
@@ -60,7 +61,7 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     mkdirSync(work)
     store = new ThreadDataStore(new ProjectManager())
     defs = await createDefinitionEngine(kind, [PROVIDER, OTHER])
-    const settings = getDefaultSettings()
+    settings = getDefaultSettings()
     settings.integrations.skills.enabled = false
     orch = new OrchestratorService(new AgentRegistry(), new TaskQueue(), new WorktreeManager(home), new PtyManager(), { get: () => settings } as never, defs.providerAuth)
     orch.setThreadStore(store)
@@ -68,7 +69,7 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     orch.setRunEngine(engine)
     harness = defs.install(orch, home)
     registry = new AgentDefinitionRegistry({ profileId, profileRoot: join(home, 'profile') })
-    const integrations = new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write', 'ask_user', 'bash'] })
+    const integrations = new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write', 'ask_user', 'bash', 'thread_read'] })
     const entry = (instanceId?: string) => ({ ref: { providerId: PROVIDER, modelId: MODEL, ...(instanceId ? { instanceId } : {}) }, available: true, efforts: [], speeds: [], contexts: [], capabilities: ['tools'], unavailableReasons: [] })
     resolver = new AgentResolver({ registry, integrationLookup: integrations, modelLookup: new StaticAgentModelLookup([entry(), entry(`pi:${PROVIDER}`), entry(APPROVAL_ONLY_INSTANCE), entry('stubborn'), { ...entry(`pi:${OTHER}`), ref: { providerId: OTHER, modelId: MODEL, instanceId: `pi:${OTHER}` } }] as never) })
   })
@@ -88,7 +89,7 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     settings.tools = { mode: 'explicit', allowlist: ['read', 'write', 'ask_user'] }
     mutate(settings)
     const draft = registry.createDraft({ runtimeKind, settings, systemPrompt: 'DEFINITION_SYSTEM_PROMPT' })
-    const published = registry.publish(draft.id, draft.draftHash, { integrationLookup: new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write', 'ask_user', 'bash'] }) })
+    const published = registry.publish(draft.id, draft.draftHash, { integrationLookup: new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write', 'ask_user', 'bash', 'thread_read'] }) })
     return { id: draft.id, revision: published.revision }
   }
 
@@ -505,6 +506,51 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     expect(defs.turns.slice(0, 2).every((turn) => turn.input.prompt !== 'queued composer')).toBe(true)
     await new Promise((resolve) => setTimeout(resolve, 100))
     expect(defs.turns.filter((turn) => turn.input.prompt === 'queued composer')).toHaveLength(1)
+  })
+
+  it('a scheduled turn on the thread queues behind a running definition, then runs once after it', async () => {
+    const stored = publish('mousse', `pi:${PROVIDER}`)
+    const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })
+    const thread = store.createThread('scheduled behind a definition')
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    defs.setNext(async () => { await gate; return say('definition done') })
+    const pending = orch.runAgentDefinition(request(resolved, thread.id))
+    await vi.waitFor(() => expect(defs.turns).toHaveLength(1))
+    const scheduled = await orch.runIsolatedScheduledJob('scheduled prompt', {
+      jobId: 'job-1', occurrenceAt: new Date().toISOString(), threadId: thread.id,
+      selection: { instanceId: `pi:${PROVIDER}`, llmProvider: PROVIDER, model: MODEL }
+    })
+    // It never starts beside the definition: it waits as one queue item.
+    expect(scheduled).toMatchObject({ status: 'queued', threadId: thread.id })
+    expect(defs.turns).toHaveLength(1)
+    defs.setNext(async () => say('scheduled reply'))
+    release()
+    expect((await pending).status).toBe('completed')
+    await vi.waitFor(() => expect(defs.turns.filter((turn) => turn.input.prompt === 'scheduled prompt')).toHaveLength(1), { timeout: 5_000, interval: 25 })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(defs.turns.filter((turn) => turn.input.prompt === 'scheduled prompt')).toHaveLength(1)
+  })
+
+  it("on the legacy engine a definition's in-process app tools stay at `lineage`, even under a profile set to `manage`", async () => {
+    if (kind !== 'legacy') return
+    settings.agentAccess = { ...settings.agentAccess, level: 'manage' }
+    const stored = publish('mousse', `pi:${PROVIDER}`, (value) => { value.tools = { mode: 'explicit', allowlist: ['read', 'thread_read'] } })
+    const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })
+    resolved.grants.builtinTools = [...resolved.grants.builtinTools, { id: 'thread_read', source: 'explicit' }]
+    const stranger = store.createThread('someone else')
+    const thread = store.createThread('lineage on the loop')
+    defs.outputs.push(call('thread_read', { threadId: stranger.id }), say('done'))
+    const result = await orch.runAgentDefinition(request(resolved, thread.id))
+    expect(result.status).toBe('completed')
+    // The record carries the profile's grant…
+    expect(engine.listRuns(thread.id)[0]!.accessGrant).toBe('manage')
+    // …but the loop's in-process call to another thread still reaches nothing, as on master (its tools act at
+    // `lineage`, and the loop has no tools that read other threads).
+    const results = defs.captured.at(-1)!.messages.filter((message) => message.role === 'toolResult').map((message) => JSON.stringify(message.content))
+    expect(results).toHaveLength(1)
+    expect(results[0]).toMatch(/Unknown tool|lineage|scope|not available/i)
+    expect(results[0]).not.toContain('someone else')
   })
 
   it('a later record that finds the thread taken keeps the provider failure that moved the run', async () => {

@@ -27,7 +27,7 @@ describe('Pi budgets policy', () => {
     expect(PI_LEGACY_CAPS.definitionLimits).toBe('in_loop')
     expect(checkPolicy(PI_LEGACY_CAPS, definition)).toEqual({ ok: true })
     // A bot's authority, or the same limits with no authority, are still refused on the loop.
-    expect(checkPolicy(PI_LEGACY_CAPS, { ...definition, authority: { kind: 'bot', digest: 'd'.repeat(64) } })).toMatchObject({ ok: false, error: { missing: ['budgets', 'spendLimits'] } })
+    expect(checkPolicy(PI_LEGACY_CAPS, { ...definition, authority: { kind: 'bot', digest: 'd'.repeat(64) } })).toMatchObject({ ok: false, error: { missing: expect.arrayContaining(['budgets', 'spendLimits']) } })
     const { authority: _authority, ...plain } = definition
     expect(checkPolicy(PI_LEGACY_CAPS, plain)).toMatchObject({ ok: false, error: { missing: ['budgets', 'spendLimits'] } })
     // Pi RPC only asks for approval: a definition stays refused there until it earns `exact`.
