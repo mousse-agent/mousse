@@ -55,7 +55,7 @@ import { DevGuiTools } from '../devgui/DevGuiTools'
 import { QuickActionTools } from './QuickActionTools'
 import { WebTools } from './WebTools'
 import { stableStringify } from '../run/json'
-import { formatRestartNote } from '../run/restartNote'
+import { closeStaleActivity, cutOffActivityOf, formatRestartNote } from '../run/restartNote'
 import { createHarnessGateway, PI_DRIVER_ID, type AdapterHost, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
 import { piDriver } from '../harness/drivers/pi'
 import { contextGauge } from '../harness/policy'
@@ -3356,7 +3356,8 @@ export class OrchestratorService extends EventEmitter {
     if (!engine || !runId) return
     try {
       const note = engine.takeRestartNote(threadId, runId)
-      if (note) this.addSystemMessage(formatRestartNote(note))
+      // The saved items of the cut-off runs, so the note also names Claude and Codex work the tool ledger never saw.
+      if (note) this.addSystemMessage(formatRestartNote({ ...note, cutOffActivity: cutOffActivityOf(this.messages, note.runIds) }))
     } catch (error) {
       console.warn('run engine restart note failed', { runId, error: error instanceof Error ? error.message : String(error) })
     }
@@ -3618,6 +3619,7 @@ export class OrchestratorService extends EventEmitter {
         data.tasks,
         this.harness.instanceMap.migrate(this.threadStore.getThread(threadId)?.modelOverride)
       )
+      this.closeStaleActivity(session)
       if (this.projectManager) {
         const projectPath = resolveThreadProjectPath(this.projectManager, this.threadStore, threadId)
         session.projectCwd = resolveProjectWorkingDirectory(projectPath)
@@ -3697,6 +3699,7 @@ export class OrchestratorService extends EventEmitter {
         undefined,
         this.harness.instanceMap.migrate(this.threadStore?.getThread(threadId)?.modelOverride)
       )
+      this.closeStaleActivity(this.boundSession)
     }
 
     this.recoverApplets(threadId, this.boundSession.messages)
@@ -3772,6 +3775,41 @@ export class OrchestratorService extends EventEmitter {
       nativeContext ?? migrateLegacyContext(messages),
       queue
     )
+  }
+
+  /**
+   * Ends the activity items a previous daemon left `running` on a session that was just loaded.
+   * With no live turn, a `running` item is always stale (every turn ends its items). The rows are
+   * tagged `daemon_restart` in the session and on disk, so the restart note can name them whenever
+   * the next turn starts. Writes only when a row changed, so a second hydration writes nothing.
+   * A lease held by another live process (a CLI turn running now) means its running items are live.
+   */
+  private closeStaleActivity(session: ThreadSession): void {
+    if (session.isTurnRunning()) return
+    if (this.threadStore && session.threadId !== '__unbound__') {
+      try {
+        if (isLeaseHeldByLivePeer(this.threadStore.getThreadDir(session.threadId)).held) return
+      } catch {
+        return
+      }
+    }
+    const closed = closeStaleActivity(session.messages, new Date().toISOString())
+    if (!closed.size) return
+    session.messages = session.messages.map((message) => closed.get(message.id) ?? message)
+    if (!this.threadStore || session.threadId === '__unbound__') return
+    try {
+      // The caller may hold older messages than the disk (already swept by an earlier load): write nothing then.
+      const onDisk = this.threadStore.loadThreadData(session.threadId).messages
+      if (!onDisk.some((message) => message.activity?.status === 'running' && closed.has(message.id))) return
+      this.threadStore.mutateThreadData(session.threadId, (current) => ({
+        messages: current.messages.map((message) =>
+          message.activity?.status === 'running' ? (closed.get(message.id) ?? message) : message
+        )
+      }))
+    } catch (error) {
+      // The rows are closed in memory and the next save writes them; opening the thread must not fail.
+      console.warn('stale activity could not be saved', { threadId: session.threadId, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   /** Reattach only bundles already durably published by this exact completed turn. */
@@ -7444,6 +7482,7 @@ export class OrchestratorService extends EventEmitter {
         data.tasks,
         opts?.modelOverride ?? threadStore.getThread(threadId)?.modelOverride
       )
+      this.closeStaleActivity(session)
       try {
         const projectPath = this.projectManager
           ? resolveThreadProjectPath(this.projectManager, threadStore, threadId)
@@ -7653,6 +7692,7 @@ export class OrchestratorService extends EventEmitter {
         data.tasks,
         thread.modelOverride
       )
+      this.closeStaleActivity(session)
       const message = [...session.messages].reverse().find(
         (entry) => entry.role === 'assistant' && entry.workflowRun?.runId === run.runId
       )
