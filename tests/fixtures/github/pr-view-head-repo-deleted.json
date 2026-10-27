@@ -1,0 +1,24 @@
+{
+  "number": 5,
+  "title": "Merged from a deleted fork",
+  "url": "https://github.com/acme/app/pull/5",
+  "state": "MERGED",
+  "isDraft": false,
+  "body": "Done",
+  "author": { "login": "forker" },
+  "baseRefName": "main",
+  "headRefName": "gone",
+  "headRefOid": "2222222222222222222222222222222222222222",
+  "headRepository": null,
+  "headRepositoryOwner": null,
+  "isCrossRepository": true,
+  "reviewDecision": "APPROVED",
+  "updatedAt": "2026-10-20T12:00:00Z",
+  "mergedAt": "2026-10-20T12:00:00Z",
+  "closedAt": "2026-10-20T12:00:00Z",
+  "reviews": [],
+  "comments": [],
+  "statusCheckRollup": [
+    { "__typename": "CheckRun", "name": "build", "workflowName": "CI", "status": "COMPLETED", "conclusion": "SUCCESS", "detailsUrl": "https://github.com/acme/app/actions/runs/5/job/1" }
+  ]
+}

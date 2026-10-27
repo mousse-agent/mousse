@@ -3,6 +3,7 @@ import type {
   GitPullRequestInfo,
   GitPullRequestLookup,
   PullRequestBaseBranches,
+  PullRequestDetail,
   RepositoryIdentity
 } from '../../shared/pullRequests'
 
@@ -16,6 +17,12 @@ export interface CodeHost {
   repositoryIdentity(cwd: string): Promise<RepositoryIdentity>
   /** The pull request for a branch, by default the folder's current one. Cached for 30 seconds per repository and branch. */
   lookupPullRequest(cwd: string, branch?: string, options?: { force?: boolean }): Promise<GitPullRequestLookup>
+  /**
+   * One pull request of the folder's repository with its reviews, comments and each check. Cached for 30
+   * seconds per pull request and shared by every folder of the repository. A failure throws a
+   * `PullRequestReadError` carrying the host's own message.
+   */
+  getPullRequestDetail(cwd: string, number: number, options?: { force?: boolean }): Promise<PullRequestDetail>
   createPullRequest(cwd: string, input: CreatePullRequestInput): Promise<GitPullRequestInfo>
   listBaseBranches(cwd: string): Promise<PullRequestBaseBranches>
   /** The remote that points at the folder's repository, else `origin`, else the only remote; null when there is none. */

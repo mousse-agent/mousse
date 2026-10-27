@@ -105,6 +105,69 @@ export function pullRequestIdentityKey(identity: PullRequestIdentity): string {
   return `${identity.host.toLowerCase()}\u0000${identity.nameWithOwner.toLowerCase()}\u0000${identity.number}`
 }
 
+/** What the host says about the approval of a pull request; null when no review is required and none was given. */
+export type PullRequestReviewDecision = 'approved' | 'changes_requested' | 'review_required'
+
+export type PullRequestReviewVerdict = 'approved' | 'changes_requested' | 'commented' | 'dismissed' | 'pending'
+
+export interface PullRequestReview {
+  id: string
+  author: string
+  /** The host's word for how the author relates to the repository, for example `OWNER`, `MEMBER` or `NONE`. */
+  authorAssociation: string
+  state: PullRequestReviewVerdict
+  body: string
+  bodyTruncated: boolean
+  submittedAt: string | null
+  /** The author changed the review after posting it. */
+  edited: boolean
+  url: string
+}
+
+/** A comment on the conversation (`path` is null) or on a line of the diff. */
+export interface PullRequestComment {
+  id: string
+  author: string
+  authorAssociation: string
+  body: string
+  /** The body was cut; the full text is on the host. */
+  bodyTruncated: boolean
+  createdAt: string
+  edited: boolean
+  url: string
+  path: string | null
+  /** Null for a conversation comment, and for a line comment whose line is no longer in the diff. */
+  line: number | null
+  startLine: number | null
+  side: 'LEFT' | 'RIGHT' | null
+  inReplyTo: string | null
+}
+
+/** A pull request with everything the side card and the pull request panel show. */
+export interface PullRequestDetail extends GitPullRequestInfo {
+  identity: PullRequestIdentity
+  body: string
+  author: string
+  headRefName: string
+  baseRefName: string
+  headSha: string
+  /** `owner/repo` of the head branch; null when that repository was deleted. */
+  headRepository: string | null
+  baseRepository: string
+  isCrossRepository: boolean
+  reviewDecision: PullRequestReviewDecision | null
+  reviews: PullRequestReview[]
+  /** Conversation comments and line comments, oldest first. */
+  comments: PullRequestComment[]
+  /** More line comments exist than the newest ones held in `comments`. */
+  commentsTruncated: boolean
+  /** Every check with its own state and link. */
+  checkRuns: PullRequestCheck[]
+  updatedAt: string
+  mergedAt: string | null
+  closedAt: string | null
+}
+
 /** A thread's link to a pull request, set when it creates one, starts from one, or watches one. */
 export interface ThreadPullRequestLink {
   number: number
