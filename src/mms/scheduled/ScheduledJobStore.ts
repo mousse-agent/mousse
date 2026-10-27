@@ -41,6 +41,7 @@ import {
   appendDelivery,
   readDeliveries,
   readReceipts,
+  readTriggerPayload,
   removeJobTriggerFiles,
   removeTriggerPayload,
   resetReceipts,
@@ -578,6 +579,14 @@ export class ScheduledJobStore {
     })
   }
 
+  /**
+   * The request body a webhook delivery stored, as text: `undefined` when the payload is gone. Only the body is
+   * kept; the request's headers are never stored.
+   */
+  readWebhookBody(jobId: string, occurrenceId: string): string | undefined {
+    return readTriggerPayload(this.homeDir, jobId, occurrenceId)?.body
+  }
+
   /** Removes stored payloads nothing references any more (called about once a day). Returns how many files went. */
   sweepWebhookPayloads(now = Date.now()): number {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
@@ -624,12 +633,15 @@ export class ScheduledJobStore {
     jobId: string,
     occurrenceKey: string | undefined,
     result: { outcome: ScheduledWebhookDeliveryOutcome; error?: string },
-    options: { keepPayload?: boolean } = {}
+    options: { keepPayload?: boolean; missingPlaceholders?: string[] } = {}
   ): void {
     const occurrenceId = webhookIdOfOccurrence(occurrenceKey)
     if (!occurrenceId) return
     try {
-      updateDelivery(this.homeDir, jobId, occurrenceId, result)
+      updateDelivery(this.homeDir, jobId, occurrenceId, {
+        ...result,
+        ...(options.missingPlaceholders?.length ? { missingPlaceholders: options.missingPlaceholders } : {})
+      })
     } catch {
       /* the log is a courtesy */
     }
@@ -835,7 +847,7 @@ export class ScheduledJobStore {
 
     // A webhook delivery ends with its occurrence: its log row gets the outcome and its payload is deleted.
     const webhook = webhookIdOfOccurrence(occurrenceKey) !== undefined
-    if (webhook) this.settleWebhookDelivery(job.id, occurrenceKey, deliveryOutcomeOf(result, hadRun))
+    if (webhook) this.settleWebhookDelivery(job.id, occurrenceKey, deliveryOutcomeOf(result, hadRun), { missingPlaceholders: details?.missingPlaceholders })
 
     // A run that did not finish cleanly is never retried on its own: a one-shot job stays for a manual retry.
     if ((result.status === 'interrupted' || result.status === 'uncertain') && job.schedule.kind === 'once') {
@@ -945,7 +957,7 @@ export class ScheduledJobStore {
       job.runClaim = undefined
       job.state = 'scheduled'
       job.updatedAt = now
-      this.settleWebhookDelivery(job.id, claim.occurrenceKey, { outcome: 'queued' }, { keepPayload: true })
+      this.settleWebhookDelivery(job.id, claim.occurrenceKey, { outcome: 'queued' }, { keepPayload: true, missingPlaceholders: details?.missingPlaceholders })
       const settled = claim.settledResult
       if (settled) this.applyOccurrenceResult(jobs, job, claim.occurrenceKey, settled, now)
       this.saveJobs(jobs)

@@ -8,6 +8,7 @@ import { getSkillIdFromMode, normalizeChatMode } from '../../../../shared/chatMo
 import type { ChatMode } from '../../../../shared/types'
 import { canonicalizeBuiltinToolName } from '../../../agentDefinitions/runtimePolicy'
 import { resolveEffectiveSkills } from '../../../integrations/catalog/EffectiveIntegrationResolver'
+import { withoutWebhookData } from '../../../scheduled/promptPlaceholders'
 import type { SkillsRegistry } from '../../../integrations/skills/SkillsRegistry'
 import type { ModeRegistry } from '../../../modes/ModeRegistry'
 import { mousseOrchestrationInstructions } from '../instructions'
@@ -116,6 +117,15 @@ async function loadSkillForMode(
   return [{ name: result.skill.name, content: truncateForModel(result.content) }]
 }
 
+/**
+ * The skill names a message asks for with `/name` (at its start or after any whitespace), lower-cased. Text a
+ * webhook supplied to a scheduled run (inside `<webhook-data-ID>` tags) never counts: only the person's own
+ * words can load a skill.
+ */
+export function explicitSkillNames(userContent: string): string[] {
+  return Array.from(withoutWebhookData(userContent).matchAll(/(?:^|\s)\/([A-Za-z0-9_-]+)/g)).map((match) => match[1].toLowerCase())
+}
+
 async function loadExplicitSkills(
   registry: SkillsRegistry,
   userContent: string,
@@ -123,7 +133,7 @@ async function loadExplicitSkills(
   projectPath?: string,
   snapshot?: SkillsRegistrySnapshot
 ): Promise<Array<{ name: string; content: string }>> {
-  const requestedNames = Array.from(userContent.matchAll(/(?:^|\s)\/([A-Za-z0-9_-]+)/g)).map((match) => match[1].toLowerCase())
+  const requestedNames = explicitSkillNames(userContent)
   if (requestedNames.length === 0) return []
   const loaded: Array<{ name: string; content: string }> = []
   for (const name of requestedNames) {

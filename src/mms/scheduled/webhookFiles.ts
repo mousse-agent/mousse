@@ -43,7 +43,10 @@ function payloadPath(homeDir: string, jobId: string, occurrenceId: string): stri
   return join(jobTriggerDir(homeDir, jobId), `${assertSafeSegment(occurrenceId, 'occurrence id')}.json`)
 }
 
-/** What a delivery stored for its run. The body is untrusted data; nothing here reaches a prompt in this version. */
+/**
+ * What a delivery stored for its run: the body only, never the request's headers. The body is untrusted data;
+ * it reaches the prompt only through `{{body...}}` placeholders (`promptPlaceholders.ts`).
+ */
 export interface StoredTriggerPayload {
   occurrenceId: string
   jobId: string
