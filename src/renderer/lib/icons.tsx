@@ -76,6 +76,7 @@ import InboxIcon from '@hugeicons/core-free-icons/InboxIcon'
 import Infinity01Icon from '@hugeicons/core-free-icons/Infinity01Icon'
 import InformationCircleIcon from '@hugeicons/core-free-icons/InformationCircleIcon'
 import JavaScriptIcon from '@hugeicons/core-free-icons/JavaScriptIcon'
+import KeyboardIcon from '@hugeicons/core-free-icons/KeyboardIcon'
 import LaptopIcon from '@hugeicons/core-free-icons/LaptopIcon'
 import Layers01Icon from '@hugeicons/core-free-icons/Layers01Icon'
 import Link01Icon from '@hugeicons/core-free-icons/Link01Icon'
@@ -225,6 +226,7 @@ export const House = /* @__PURE__ */ createIcon('House', Home01Icon)
 export const Inbox = /* @__PURE__ */ createIcon('Inbox', InboxIcon)
 export const Infinity = /* @__PURE__ */ createIcon('Infinity', Infinity01Icon)
 export const Info = /* @__PURE__ */ createIcon('Info', InformationCircleIcon)
+export const Keyboard = /* @__PURE__ */ createIcon('Keyboard', KeyboardIcon)
 export const Laptop = /* @__PURE__ */ createIcon('Laptop', LaptopIcon)
 export const Layers = /* @__PURE__ */ createIcon('Layers', Layers01Icon)
 export const LayoutGrid = /* @__PURE__ */ createIcon('LayoutGrid', GridViewIcon)

@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { registerDialog } from '../src/renderer/components/ui/Modal'
 import {
+  applyPatch,
+  interpretRecorderKey,
+  proposeBinding,
+  resetAllPatch,
+  resetPatch
+} from '../src/renderer/commands/shortcutEditing'
+import {
   pushOverlay,
   registerCommand,
   runCommand,
@@ -316,5 +323,131 @@ describe('runCommand', () => {
     expect(runCommand('thread.new', 'menu')).toBe(true)
     expect(replacement).toHaveBeenCalledTimes(1)
     expect(run).not.toHaveBeenCalled()
+  })
+})
+
+describe('rebinding in the Shortcuts section', () => {
+  const ctrlShiftX = { key: 'X', code: 'KeyX', ctrlKey: true, shiftKey: true }
+
+  /** What the section does for one recorded press: read it, check it, apply the saved patch to the store. */
+  function recordAndSave(id: Parameters<typeof proposeBinding>[0], init: KeyInput) {
+    const action = interpretRecorderKey(init, 'win32')
+    if (action.type !== 'record') return action
+    const proposal = proposeBinding(id, action.binding, useAppStore.getState().shortcuts, 'win32')
+    if (proposal.kind === 'save') useAppStore.getState().setShortcuts(applyPatch(useAppStore.getState().shortcuts, proposal.patch, 'win32'))
+    return proposal
+  }
+
+  it('hands the chord to the recorder and runs nothing, whatever the chord is bound to', () => {
+    const { win } = stubWindow()
+    attachCommandShortcuts(win as never)
+    const created = vi.fn()
+    const stopped = vi.fn()
+    registerCommand('thread.new', { run: created })
+    registerCommand('run.stop', { run: stopped })
+    const recorderSaw: string[] = []
+    win.addEventListener('keydown', (event) => recorderSaw.push((event as KeyboardEvent).key))
+
+    setRecording(true)
+    keydown(win, ctrlN)
+    keydown(win, { key: 'Backspace', code: 'Backspace', ctrlKey: true, shiftKey: true })
+    expect(created).not.toHaveBeenCalled()
+    expect(stopped).not.toHaveBeenCalled()
+    expect(recorderSaw).toEqual(['n', 'Backspace'])
+  })
+
+  it('keeps the palette closed while recording and working afterwards', () => {
+    const { win } = stubWindow()
+    attachCommandShortcuts(win as never)
+    const palette = vi.fn()
+    registerCommand('palette.open', { run: palette })
+    const ctrlK = { key: 'k', code: 'KeyK', ctrlKey: true }
+
+    setRecording(true)
+    expect(keydown(win, ctrlK).defaultPrevented).toBe(false)
+    expect(runCommand('palette.open', 'menu')).toBe(false)
+    expect(palette).not.toHaveBeenCalled()
+
+    setRecording(false)
+    expect(keydown(win, ctrlK).defaultPrevented).toBe(true)
+    expect(palette).toHaveBeenCalledTimes(1)
+    // While the palette is the open overlay its own chord still toggles it.
+    const closePalette = pushOverlay('palette')
+    keydown(win, ctrlK)
+    expect(palette).toHaveBeenCalledTimes(2)
+    closePalette()
+  })
+
+  it('rebinds at once: the new chord runs the command and the old one does not', () => {
+    const { win } = stubWindow()
+    attachCommandShortcuts(win as never)
+    const created = vi.fn()
+    registerCommand('thread.new', { run: created })
+
+    setRecording(true)
+    const saved = recordAndSave('thread.new', Object.assign({ code: '', metaKey: false, altKey: false }, ctrlShiftX))
+    setRecording(false)
+    expect(saved).toMatchObject({ kind: 'save' })
+
+    keydown(win, ctrlN)
+    expect(created).not.toHaveBeenCalled()
+    expect(keydown(win, ctrlShiftX).defaultPrevented).toBe(true)
+    expect(created).toHaveBeenCalledTimes(1)
+  })
+
+  it('goes back to the default at once on reset, and on reset all', () => {
+    const { win } = stubWindow()
+    attachCommandShortcuts(win as never)
+    const created = vi.fn()
+    const searched = vi.fn()
+    registerCommand('thread.new', { run: created })
+    registerCommand('threads.search', { run: searched })
+    const { setShortcuts } = useAppStore.getState()
+    setShortcuts({ 'thread.new': 'CommandOrControl+Shift+X', 'threads.search': null })
+
+    keydown(win, ctrlN)
+    expect(created).not.toHaveBeenCalled()
+
+    const current = useAppStore.getState().shortcuts
+    const afterOne = applyPatch(current, resetPatch('thread.new', current, 'win32'), 'win32')
+    setShortcuts(afterOne)
+    keydown(win, ctrlN)
+    expect(created).toHaveBeenCalledTimes(1)
+    keydown(win, ctrlShiftX)
+    expect(created).toHaveBeenCalledTimes(1)
+    keydown(win, { key: 'O', code: 'KeyO', ctrlKey: true, shiftKey: true })
+    expect(searched).not.toHaveBeenCalled()
+
+    setShortcuts(applyPatch(afterOne, resetAllPatch(afterOne, 'win32'), 'win32'))
+    expect(useAppStore.getState().shortcuts).toEqual({})
+    keydown(win, { key: 'O', code: 'KeyO', ctrlKey: true, shiftKey: true })
+    expect(searched).toHaveBeenCalledTimes(1)
+  })
+
+  it('applies Replace: the other command stops answering the shared chord', () => {
+    const { win } = stubWindow()
+    attachCommandShortcuts(win as never)
+    const created = vi.fn()
+    const palette = vi.fn()
+    registerCommand('thread.new', { run: created })
+    registerCommand('palette.open', { run: palette })
+
+    const proposal = proposeBinding('thread.new', 'CommandOrControl+K', {}, 'win32')
+    if (proposal.kind !== 'confirm' || !proposal.replacePatch) throw new Error('expected a clash with a Replace choice')
+    useAppStore.getState().setShortcuts(applyPatch({}, proposal.replacePatch, 'win32'))
+
+    keydown(win, { key: 'k', code: 'KeyK', ctrlKey: true })
+    expect(created).toHaveBeenCalledTimes(1)
+    expect(palette).not.toHaveBeenCalled()
+  })
+
+  it('refuses a hard-reserved chord before saving, so the stored overrides do not change', () => {
+    stubWindow()
+    const before = useAppStore.getState().shortcuts
+    const result = recordAndSave('thread.new', { key: 'c', code: 'KeyC', ctrlKey: true, metaKey: false, altKey: false, shiftKey: false })
+    expect(result).toMatchObject({ kind: 'refuse' })
+    expect(useAppStore.getState().shortcuts).toBe(before)
+    // The zoom family is refused too, including modified variants.
+    expect(proposeBinding('thread.new', 'CommandOrControl+Shift+-', {}, 'win32').kind).toBe('refuse')
   })
 })

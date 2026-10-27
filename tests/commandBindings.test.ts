@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { interpretRecorderKey } from '../src/renderer/commands/shortcutEditing'
 import {
   COMMANDS,
   bindingFromKey,
@@ -448,5 +449,47 @@ describe('the command table', () => {
   it('keeps the reserved ids for later features out of the table', () => {
     const ids = COMMANDS.map((command) => command.id as string)
     for (const id of ['chat.findInThread', 'files.quickOpen', 'files.textSearch']) expect(ids).not.toContain(id)
+  })
+})
+
+describe('the Shortcuts recorder reading keys', () => {
+  const record = (spec: string, platform = 'win32') => interpretRecorderKey(press(spec), platform)
+
+  it('ignores a modifier pressed alone and keeps listening', () => {
+    for (const name of ['Control', 'Shift', 'Alt', 'Meta', 'CapsLock']) {
+      expect(interpretRecorderKey(key({ key: name, code: name, ctrlKey: name === 'Control' }), 'win32')).toEqual({ type: 'ignore' })
+    }
+  })
+
+  it('cancels on Escape, with or without a modifier', () => {
+    expect(interpretRecorderKey(key({ key: 'Escape', code: 'Escape' }), 'win32')).toEqual({ type: 'cancel' })
+    expect(interpretRecorderKey(key({ key: 'Escape', code: 'Escape', ctrlKey: true }), 'win32')).toEqual({ type: 'cancel' })
+  })
+
+  it('unbinds on Backspace alone and records Backspace with a modifier', () => {
+    expect(record('Backspace')).toEqual({ type: 'unbind' })
+    expect(record('Ctrl+Shift+Backspace')).toEqual({ type: 'record', binding: 'CommandOrControl+Shift+Backspace' })
+  })
+
+  it('records Shift with a letter as Shift+letter', () => {
+    expect(record('Ctrl+Shift+K')).toEqual({ type: 'record', binding: 'CommandOrControl+Shift+K' })
+    expect(record('Shift+K')).toEqual({ type: 'record', binding: 'Shift+K' })
+  })
+
+  it('records the character a German layout types for the apostrophe key, and skips AltGr text', () => {
+    expect(interpretRecorderKey(key({ key: '#', code: 'Backslash', ctrlKey: true }), 'win32')).toEqual({
+      type: 'record',
+      binding: 'CommandOrControl+#'
+    })
+    expect(interpretRecorderKey(key({ key: '@', code: 'KeyQ', ctrlKey: true, altKey: true }), 'win32')).toEqual({ type: 'ignore' })
+  })
+
+  it('emits CommandOrControl for Cmd on macOS and keeps Ctrl literal there', () => {
+    expect(record('Meta+K', 'darwin')).toEqual({ type: 'record', binding: 'CommandOrControl+K' })
+    expect(record('Ctrl+Tab', 'darwin')).toEqual({ type: 'record', binding: 'Ctrl+Tab' })
+  })
+
+  it('ignores a key typed during an IME composition', () => {
+    expect(interpretRecorderKey(key({ key: 'k', code: 'KeyK', ctrlKey: true, isComposing: true }), 'win32')).toEqual({ type: 'ignore' })
   })
 })
