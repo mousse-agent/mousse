@@ -530,7 +530,7 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
     const run = (id: string) => d.engine.getRun(id)!
     const terminal = (id: string) => ['completed', 'interrupted', 'failed', 'cancelled'].includes(run(id).status)
     const protocol = (method: string, params: Record<string, unknown>) =>
-      dispatchMethod({ mms: { orchestrator: d.orch, threads: d.store } as never, globalSequence: () => 0 }, method, params)
+      dispatchMethod({ mms: { orchestrator: d.orch, threads: d.store, pullRequestWatch: { onEnded: () => undefined } } as never, globalSequence: () => 0 }, method, params)
     const reconciler = new Reconciler({ store: d.engine.store, outbox: d.engine.outbox, tools: d.engine.tools, capabilitiesFor: (id) => d.orch.capabilitiesForThread(id) })
     return {
       d, adapter, out, gate, parentId, childThreadId, delegation, parentRunId: sent.runId!, run, terminal, protocol, reconciler,

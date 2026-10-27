@@ -6,6 +6,7 @@ import {
   type CreatePullRequestInput,
   type GitPullRequestInfo,
   type GitPullRequestLookup,
+  type LineCommentRead,
   type PullRequestBaseBranches,
   type PullRequestCheck,
   type PullRequestCheckState,
@@ -210,6 +211,32 @@ export class PullRequestReadError extends Error {
     super(message)
     this.name = 'PullRequestReadError'
   }
+}
+
+/** A timestamp as the host writes them (`2026-10-27T09:00:00Z`, with optional fraction), the only shape a `since` filter takes. */
+function requireTimestamp(value: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/.test(value)) throw new PullRequestReadError('Unsupported timestamp.', 'error')
+  return value
+}
+
+/** The latest `updated_at` of one page of projected line comments, as written; null when there is none. */
+function newestUpdate(stdout: string): string | null {
+  let newest: string | null = null
+  try {
+    for (const entry of JSON.parse(stdout) as unknown[]) {
+      const updated = entry && typeof entry === 'object' ? (entry as { updated_at?: unknown }).updated_at : undefined
+      if (typeof updated === 'string') newest = laterTimestamp(newest, updated)
+    }
+  } catch {
+    return null
+  }
+  return newest
+}
+
+function laterTimestamp(a: string | null, b: string | null): string | null {
+  if (a === null || Number.isNaN(Date.parse(a))) return b !== null && !Number.isNaN(Date.parse(b)) ? b : null
+  if (b === null || Number.isNaN(Date.parse(b))) return a
+  return Date.parse(b) > Date.parse(a) ? b : a
 }
 
 function text(value: unknown): string {
@@ -714,7 +741,7 @@ export class GitHubCodeHost implements CodeHost {
    * five pages of 100, so a busy pull request shows its latest ones; every read of them is projected and capped
    * by gh itself. Shared by every folder of the repository for 30 seconds; `force` only skips a value younger than that.
    */
-  async getPullRequestDetail(cwd: string, number: number, options: { force?: boolean } = {}): Promise<PullRequestDetail> {
+  async getPullRequestDetail(cwd: string, number: number, options: { force?: boolean; lineComments?: boolean } = {}): Promise<PullRequestDetail> {
     if (!Number.isSafeInteger(number) || number < 1) throw new PullRequestReadError('Unsupported pull request number.', 'error')
     const probe = await this.probeGh()
     if (!probe.ok) throw new PullRequestReadError(probe.message, probe.reason)
@@ -726,9 +753,11 @@ export class GitHubCodeHost implements CodeHost {
       throw await this.detailFailure(cwd, null, number, error)
     }
     const pullRequest: PullRequestIdentity = { ...identity, number }
+    // Without line comments (a watch reads those itself, a page at a time) the read is its own cache entry: one `gh pr view`.
+    const withLines = options.lineComments !== false
     return this.details.read(
-      pullRequestIdentityKey(pullRequest),
-      () => this.readDetail(cwd, pullRequest).catch(async (error: unknown) => {
+      withLines ? pullRequestIdentityKey(pullRequest) : `${pullRequestIdentityKey(pullRequest)}\u0000view`,
+      () => this.readDetail(cwd, pullRequest, withLines).catch(async (error: unknown) => {
         throw error instanceof PullRequestReadError ? error : await this.detailFailure(cwd, identity, number, error)
       }),
       // A failure that asking again would only repeat is kept briefly, so a signed-out or limited host is not hammered.
@@ -736,7 +765,7 @@ export class GitHubCodeHost implements CodeHost {
     )
   }
 
-  private async readDetail(cwd: string, pullRequest: PullRequestIdentity): Promise<PullRequestDetail> {
+  private async readDetail(cwd: string, pullRequest: PullRequestIdentity, withLines = true): Promise<PullRequestDetail> {
     const { stdout: view } = await this.runExecutable(
       'gh',
       ['pr', 'view', String(pullRequest.number), '--json', PULL_REQUEST_DETAIL_FIELDS, '--jq', PULL_REQUEST_VIEW_JQ],
@@ -746,7 +775,7 @@ export class GitHubCodeHost implements CodeHost {
     const endpoint = `repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/pulls/${pullRequest.number}/comments`
     const pages: string[] = []
     let lastCount = 0
-    for (let page = 1; page <= LINE_COMMENT_MAX_PAGES; page++) {
+    for (let page = 1; withLines && page <= LINE_COMMENT_MAX_PAGES; page++) {
       const { stdout } = await this.runExecutable(
         'gh',
         [
@@ -861,6 +890,63 @@ export class GitHubCodeHost implements CodeHost {
       : []
     const branches = defaultBranch ? [defaultBranch, ...refs.filter((name) => name !== defaultBranch)] : refs
     return { defaultBranch, branches }
+  }
+
+  async listLineCommentsSince(cwd: string, pullRequest: PullRequestIdentity, cursor: { since: string; page: number }, maxPages = LINE_COMMENT_MAX_PAGES): Promise<LineCommentRead> {
+    return this.readLineCommentPages(cwd, pullRequest, `sort=updated&direction=asc&since=${encodeURIComponent(requireTimestamp(cursor.since))}`, cursor.page, maxPages)
+  }
+
+  async listLineCommentsCreatedSince(cwd: string, pullRequest: PullRequestIdentity, createdSince: string, page: number, maxPages = LINE_COMMENT_MAX_PAGES): Promise<LineCommentRead> {
+    const since = requireTimestamp(createdSince)
+    return this.readLineCommentPages(cwd, pullRequest, `sort=created&direction=desc&since=${encodeURIComponent(since)}`, page, maxPages, Date.parse(since))
+  }
+
+  /**
+   * Reads up to `maxPages` pages of 100 line comments for a query, each projected and capped by gh itself (`LINE_COMMENT_JQ`).
+   * With `createdNotBefore` (a read in creation order, newest first) the read also ends at the first comment older than that.
+   */
+  private async readLineCommentPages(
+    cwd: string,
+    pullRequest: PullRequestIdentity,
+    query: string,
+    firstPage: number,
+    maxPages: number,
+    createdNotBefore?: number
+  ): Promise<LineCommentRead> {
+    if (!Number.isSafeInteger(pullRequest.number) || pullRequest.number < 1) throw new PullRequestReadError('Unsupported pull request number.', 'error')
+    if (!Number.isSafeInteger(firstPage) || firstPage < 1) throw new PullRequestReadError('Unsupported page.', 'error')
+    const pages = Math.min(Math.max(Math.trunc(maxPages) || 1, 1), LINE_COMMENT_MAX_PAGES)
+    const probe = await this.probeGh()
+    if (!probe.ok) throw new PullRequestReadError(probe.message, probe.reason)
+    const [owner, repository] = pullRequest.nameWithOwner.split('/')
+    const endpoint = `repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/pulls/${pullRequest.number}/comments`
+    const comments: PullRequestComment[] = []
+    let newestUpdatedAt: string | null = null
+    let requests = 0
+    let page = firstPage
+    for (let read = 0; read < pages; read++, page++) {
+      let stdout: string
+      try {
+        ;({ stdout } = await this.runExecutable(
+          'gh',
+          ['api', '--hostname', pullRequest.host, `${endpoint}?${query}&per_page=${LINE_COMMENT_PAGE_SIZE}&page=${page}`, '--jq', LINE_COMMENT_JQ],
+          { cwd }
+        ))
+      } catch (error) {
+        throw await this.detailFailure(cwd, pullRequest, pullRequest.number, error)
+      }
+      const parsed = parseLineCommentPage(stdout)
+      if (!parsed) throw new PullRequestReadError('GitHub CLI returned an unexpected comments response.', 'error')
+      comments.push(...parsed)
+      requests++
+      newestUpdatedAt = laterTimestamp(newestUpdatedAt, newestUpdate(stdout))
+      const olderSeen = createdNotBefore !== undefined && parsed.some((comment) => {
+        const at = Date.parse(comment.createdAt)
+        return !Number.isNaN(at) && at < createdNotBefore
+      })
+      if (parsed.length < LINE_COMMENT_PAGE_SIZE || olderSeen) return { comments, drained: true, nextPage: 1, newestUpdatedAt, pages: requests }
+    }
+    return { comments, drained: false, nextPage: page, newestUpdatedAt, pages: requests }
   }
 
   async viewerLogin(cwd: string): Promise<string | null> {

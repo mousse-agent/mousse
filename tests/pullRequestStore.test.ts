@@ -23,9 +23,12 @@ import {
   pullRequestKey,
   refreshPullRequest,
   refreshPullRequestDetail,
+  refreshPullRequestWatch,
+  refreshWatchedPullRequest,
   retainPullRequest,
   retainPullRequestDetail,
   setPullRequestTracked,
+  setPullRequestWatch,
   submitCreatePullRequest,
   useGitPullRequestStore
 } from '../src/renderer/stores/pullRequestStore'
@@ -978,5 +981,58 @@ describe('commit, push and open PR through the git store', () => {
     expect(result).toEqual({ pullRequest: null })
     expect(git.pullRequest).toHaveBeenCalledWith({ projectId: 'p1' }, 'feature', true)
     expect(formOf()).toBeNull()
+  })
+})
+
+describe('the watch state of a thread', () => {
+  const status = (mode: 'off' | 'notify' | 'act') => ({ threadId: 't1', mode, state: mode === 'off' ? 'off' : 'watching', nextCheckAt: null, ended: null, viewer: null, host: 'github.com', actRefusal: null })
+
+  beforeEach(() => {
+    useGitPullRequestStore.setState({ entries: {}, details: {}, watches: {} })
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const installWatch = (watch: ReturnType<typeof vi.fn>, watchStatus = vi.fn(async () => status('notify'))) => {
+    const git = install()
+    vi.stubGlobal('window', {
+      ...(globalThis as unknown as { window: { mousse: { pullRequests: object } } }).window,
+      mousse: { pullRequests: { get: git.pullRequest, detail: git.detail, watch, watchStatus } }
+    })
+    return { git, watchStatus }
+  }
+
+  it('keeps what the daemon answered, and passes the number to link by', async () => {
+    const watch = vi.fn(async () => status('act'))
+    installWatch(watch)
+    await setPullRequestWatch('t1', 'act', 7)
+    expect(watch).toHaveBeenCalledWith('t1', 'act', 7)
+    expect(useGitPullRequestStore.getState().watches.t1).toMatchObject({ mode: 'act' })
+  })
+
+  it('shows the daemon refusal to the caller and keeps the old state', async () => {
+    useGitPullRequestStore.setState({ watches: { t1: status('notify') } as never })
+    installWatch(vi.fn(async () => { throw new Error('A subagent thread can only be notified') }))
+    await expect(setPullRequestWatch('t1', 'act', 7)).rejects.toThrow('only be notified')
+    expect(useGitPullRequestStore.getState().watches.t1).toMatchObject({ mode: 'notify' })
+  })
+
+  it('reads the state without ever rejecting', async () => {
+    installWatch(vi.fn(), vi.fn(async () => { throw new Error('daemon gone') }))
+    await expect(refreshPullRequestWatch('t1')).resolves.toBeUndefined()
+    expect(useGitPullRequestStore.getState().watches.t1).toBeUndefined()
+  })
+
+  it('reads a watched pull request again at once, everywhere it is shown, and the watch state with it', async () => {
+    const { git, watchStatus } = installWatch(vi.fn())
+    const release = retainPullRequestDetail('/repo/a', 7, 'p1', 't1')
+    const other = retainPullRequestDetail('/repo/b', 8, 'p1')
+    refreshWatchedPullRequest('t1', 7)
+    await vi.waitFor(() => expect(git.detail).toHaveBeenCalledTimes(1))
+    expect(git.detail).toHaveBeenCalledWith({ threadId: 't1' }, 7, true)
+    await vi.waitFor(() => expect(watchStatus).toHaveBeenCalledWith('t1'))
+    release()
+    other()
   })
 })

@@ -26,10 +26,11 @@ import { PROVIDER_STT_MAX_BYTES } from '../../shared/dictation'
 import { PROVIDER_TTS_MAX_CHARS } from '../../shared/readAloud'
 import type { ExternalEffect, ThreadAction } from '../../shared/threadActions'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
-import type { GitPullRequestInfo, PullRequestDetail, PullRequestPushTarget, RepositoryIdentity, ThreadPullRequestLink } from '../../shared/pullRequests'
+import { relinked, sameLinkedPullRequest, type GitPullRequestInfo, type PullRequestDetail, type PullRequestPushTarget, type PullRequestWatchMode, type RepositoryIdentity, type ThreadPullRequestLink } from '../../shared/pullRequests'
 import { PULL_REQUEST_EXISTS, PullRequestReadError } from '../git/GitHubCodeHost'
 import { PullRequestThreadError, PullRequestThreadService } from '../git/PullRequestThreadService'
-import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest } from '../../shared/types'
+import { PullRequestWatchError } from '../git/PullRequestWatchService'
+import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest, Thread } from '../../shared/types'
 import { AppError, createErrorProvider, knownAppError } from '../../shared/errors'
 import type { GitOperationHandle } from '../git/GitService'
 import { listClaimedQueue } from '../queue/ThreadMessageQueue'
@@ -528,6 +529,17 @@ async function readPullRequestDetail(ctx: HandlerContext, root: string, number: 
 }
 
 /**
+ * Writes a thread's link. The same pull request keeps its watch; a different one ends the old watch (with its line), since
+ * a watch belongs to the pull request it began on and must not resume later with an old cutoff and a backlog.
+ */
+function writeThreadLink(ctx: HandlerContext, threadId: string, next: ThreadPullRequestLink, keepWatch: boolean): Thread {
+  const previous = ctx.mms.threads.getThread(threadId)?.pullRequest
+  const thread = ctx.mms.threads.updateThreadMeta(threadId, { pullRequest: keepWatch ? relinked(previous, next) : next })
+  if (previous && !sameLinkedPullRequest(previous, next)) ctx.mms.pullRequestWatch.onEnded(threadId, 'unlinked')
+  return thread
+}
+
+/**
  * Links a pull request to the thread that asked for it. The pull request exists by now, so a link that
  * cannot be written (the host cannot name the repository, the thread is gone) must not fail the call;
  * the side card finds the pull request by its branch meanwhile.
@@ -536,7 +548,7 @@ async function linkOriginThread(ctx: HandlerContext, threadId: string | null, ro
   if (!threadId) return
   try {
     const identity = await ctx.mms.gitService.codeHost.repositoryIdentity(root)
-    ctx.mms.threads.updateThreadMeta(threadId, { pullRequest: threadPullRequestLink(identity, pullRequest) })
+    writeThreadLink(ctx, threadId, threadPullRequestLink(identity, pullRequest), true)
     ctx.emitEvent?.('threads.updated', { threads: ctx.mms.threads.listAllThreads() })
   } catch {
     // Left unlinked; see above.
@@ -1084,10 +1096,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const settled = asOptionalBoolean(p.settled, 'settled') === true
       const thread = ctx.mms.threads.setThreadSettled(threadId, settled)
       // Settling a thread (the sidebar's archive) is a Stop: what it still runs ends with it.
-      if (settled)
+      if (settled) {
+        // The watch ends as archived, not as stopped.
+        ctx.mms.pullRequestWatch.onEnded(threadId, 'settled')
         await ctx.mms.orchestrator.stopThread(threadId, 'settled').catch((error: unknown) => {
           console.warn('settling a thread could not stop its work', { threadId, error: error instanceof Error ? error.message : String(error) })
         })
+      }
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
@@ -3057,7 +3072,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (now?.number !== before?.number || now?.linkedAt !== before?.linkedAt) {
         throw new DomainRpcError('pull_request_link_changed', "The thread's pull request link changed while it was being read; try again", { threadId, number })
       }
-      const thread = ctx.mms.threads.updateThreadMeta(threadId, { pullRequest: threadPullRequestLinkFromDetail(detail) })
+      // The same pull request keeps its watch; another one starts unwatched (a watch belongs to the pull request it began on).
+      const thread = writeThreadLink(ctx, threadId, threadPullRequestLinkFromDetail(detail), true)
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
@@ -3123,9 +3139,50 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       const thread = ctx.mms.threads.updateThreadMeta(threadId, { pullRequest: undefined })
+      // A watch cannot outlive the link it watches through; it ends with its line.
+      ctx.mms.pullRequestWatch.onEnded(threadId, 'unlinked')
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
+    }
+    case 'pullRequests.watch': {
+      // Turns a thread's watch of its pull request off, to notify (a line in the thread) or to act (also wakes the agent).
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'watch', 'number'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const mode = asString(p.watch, 'watch', 16)
+      if (mode !== 'off' && mode !== 'notify' && mode !== 'act') throw new DomainRpcError('invalid_params', 'watch must be off, notify or act')
+      const number = asOptionalBoundedInt(p.number, 'number', { min: 1, max: Number.MAX_SAFE_INTEGER })
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      ctx.mms.threads.assertThreadAdmission(threadId)
+      if (mode !== 'off' && number !== undefined && ctx.mms.threads.getThread(threadId)?.pullRequest?.number !== number) {
+        // No link to this pull request yet: link it first, from the host's full read, as `pullRequests.link` does.
+        await ensureWorkspaceMaterialized(ctx, threadId)
+        const detail = await readPullRequestDetail(ctx, pullRequestFolder(ctx, { threadId }), number, true)
+        writeThreadLink(ctx, threadId, threadPullRequestLinkFromDetail(detail), false)
+      }
+      let status
+      try {
+        status = ctx.mms.pullRequestWatch.setMode(threadId, mode as PullRequestWatchMode)
+      } catch (error) {
+        if (error instanceof PullRequestWatchError) throw new DomainRpcError(error.code, error.message, { threadId })
+        throw error
+      }
+      const threads = ctx.mms.threads.listAllThreads()
+      ctx.emitEvent?.('threads.updated', { threads })
+      return { status, thread: ctx.mms.threads.getThread(threadId), threads: visibleThreadsFor(ctx.connection, threads) }
+    }
+    case 'pullRequests.watchStatus': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      const status = ctx.mms.pullRequestWatch.status(threadId)
+      // The account whose own comments are never reported; read without waiting for the host when it is not known yet.
+      const link = ctx.mms.threads.getThread(threadId)?.pullRequest
+      const folder = link ? pullRequestFolder(ctx, { threadId }) : null
+      const viewer = folder && status.state !== 'off' ? await ctx.mms.gitService.codeHost.viewerLogin(folder) : null
+      return { status: { ...status, viewer } }
     }
     case 'threads.inventory': {
       const p = isObject(params) ? params : {}

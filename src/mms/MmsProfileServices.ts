@@ -95,6 +95,8 @@ import { existsSync } from 'node:fs'
 import { settleThreadMutationOwnership } from './queue/ThreadExecutionLease'
 import type { TaskLifecycleRecord } from '../shared/resourceLifecycle'
 import { UndoRetentionSweeper } from './actions/UndoRetentionSweeper'
+import { PullRequestWatchService } from './git/PullRequestWatchService'
+import { resolveThreadProjectPath } from './data/resolveActiveProjectPath'
 import { SpeechRelay } from './speech/SpeechRelay'
 import { systemClock } from './net/clock'
 
@@ -150,6 +152,8 @@ export class MmsProfileServices {
   readonly threads: ThreadDataStore
   readonly lifecycle: ResourceLifecycleCoordinator
   readonly undoRetention: UndoRetentionSweeper
+  /** Watches the pull requests of threads that opted in and tells them about checks and reviews. */
+  readonly pullRequestWatch: PullRequestWatchService
   readonly storagePolicy: StoragePolicyStore
   /** Storage cleanup rules: the one scheduler for worktree retirement and the trash sweep. */
   readonly storageCleanup: StorageCleanupService
@@ -667,6 +671,36 @@ export class MmsProfileServices {
       }
     })
     this.undoRetention = new UndoRetentionSweeper(this.threads.lifecycleStore)
+    this.pullRequestWatch = new PullRequestWatchService({
+      threads: this.threads,
+      codeHost: this.gitService.codeHost,
+      // The project's checkout names the repository every worktree of it shares, and exists whatever happens to a worktree.
+      folderFor: (threadId) => resolveThreadProjectPath(this.projects, this.threads, threadId) ?? null,
+      isAvailable: (threadId) => {
+        const record = this.threads.lifecycleStore.get(threadId)
+        return !record || record.state === 'active'
+      },
+      isSubagent: (threadId) => Boolean(this.threads.getThread(threadId)?.lineage || this.runEngine.delegations.getLineage(threadId)),
+      runStore: () => this.runEngine.store,
+      inbox: () => this.runEngine.inbox,
+      // A person's message is a visible user message that is not a job's prompt; wakes and notices are hidden or not user messages.
+      lastPersonMessageAt: (threadId) => {
+        const mine = this.orchestrator.getMessages(threadId).filter((message) => message.role === 'user' && !message.scheduled && !message.subagentNotice?.length)
+        const at = Date.parse(mine.at(-1)?.timestamp ?? '')
+        return Number.isNaN(at) ? null : at
+      },
+      notify: (threadId, text, messageId) => this.orchestrator.noteThreadUpdate(threadId, text, { messageId }),
+      onRunEnd: (listener) => {
+        const handler = (event: ThreadEvent): void => {
+          if (event.type !== 'run.status') return
+          if (TERMINAL_RUN_STATUSES.has((event.payload as RunRecord).status)) listener(event.threadId)
+        }
+        this.orchestrator.on('run-event', handler)
+        return () => { this.orchestrator.off('run-event', handler) }
+      }
+    })
+    // Any Stop that reaches a thread, and every subagent below it, ends its watch at once.
+    this.orchestrator.on('threads-stopped', (payload: { threadIds: string[] }) => this.pullRequestWatch.onStopped(payload.threadIds))
     const storageClock = new StorageSweepClock(this.threads.lifecycleStore.root)
     this.storagePolicy = new StoragePolicyStore(this.threads.lifecycleStore, storageClock, () =>
       this.storageCleanup.scheduleAfterPolicyChange()
@@ -813,6 +847,9 @@ export class MmsProfileServices {
   ): Promise<TaskLifecycleRecord> {
     this.threads.assertLifecycleMutationAvailable()
     if (!this.threads.lifecycleStore.get(taskId)) this.threads.getThreadDir(taskId)
+    // A trashed thread is not listed and cannot be written to, so its watch ends now, while its folder still resolves, and a
+    // restore does not bring it back with a backlog.
+    this.pullRequestWatch.onEnded(taskId, 'trashed')
     const record = await this.lifecycle.trash({
       taskId,
       operationId: this.resolveLifecycleOperationId(taskId, 'trash', operationId),
@@ -931,6 +968,7 @@ export class MmsProfileServices {
   /** Close admission synchronously, before any teardown await can admit another request. */
   beginShutdown(): void {
     void this.undoRetention.stop()
+    void this.pullRequestWatch.stop()
     void this.storageCleanup.stop()
     void this.storageUsage.stop()
     void this.lifecycle.cleanup.stop()
@@ -1136,6 +1174,7 @@ export class MmsProfileServices {
     this.questions.markInterruptedByDaemonRestart()
     await this.platform.workflowRuns.startRecovery()
     this.undoRetention.start()
+    this.pullRequestWatch.start()
     // The storage service is the only scheduler; it runs the trash sweep inside its own run.
     this.storageCleanup.start()
     this.storageUsage.start()
@@ -1357,6 +1396,7 @@ export class MmsProfileServices {
     // later owner from even receiving shutdown.
     const cleanups = [
       () => this.undoRetention.stop(),
+      () => this.pullRequestWatch.stop(),
       () => this.storageCleanup.stop(),
       () => this.storageUsage.stop(),
       () => this.lifecycle.cleanup.stop(),

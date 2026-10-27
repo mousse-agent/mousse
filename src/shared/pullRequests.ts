@@ -291,6 +291,50 @@ export interface PullRequestPushTarget {
   reason: string | null
 }
 
+/** What a watch does when its pull request changes: nothing, tell the thread, or tell the thread and wake the agent. */
+export type PullRequestWatchMode = 'off' | 'notify' | 'act'
+
+/** One page-bounded read of line comments: `drained` says the read reached the end; otherwise it continues at `nextPage`. */
+export interface LineCommentRead {
+  comments: PullRequestComment[]
+  drained: boolean
+  nextPage: number
+  /** The latest time any comment read was updated, as the host wrote it; null when none was read. */
+  newestUpdatedAt: string | null
+  /** How many requests the read made. */
+  pages?: number
+}
+
+/** Why a watch ended; the thread gets a line that names it. */
+export type PullRequestWatchEnd =
+  | 'merged'
+  | 'closed'
+  | 'id_cap'
+  | 'read_failures'
+  | 'not_found'
+  | 'signed_out'
+  | 'stopped'
+  | 'unlinked'
+  | 'project_missing'
+  | 'settled'
+  | 'trashed'
+
+/** What a thread's watch is doing now, for the side card. */
+export interface PullRequestWatchStatus {
+  threadId: string
+  mode: PullRequestWatchMode
+  /** `watching`: polling; `paused`: waiting out a rate limit or a sign-out; `ended`: stopped on its own, see `ended`; `off`. */
+  state: 'watching' | 'paused' | 'ended' | 'off'
+  /** When the next read is due; null when nothing is scheduled. */
+  nextCheckAt: string | null
+  ended: { reason: PullRequestWatchEnd; at: string } | null
+  /** The account the host's credential belongs to; its own comments are not reported. */
+  viewer: string | null
+  host: string | null
+  /** `act` cannot be turned on: a subagent's pending notice would hold its parent's task open. */
+  actRefusal: string | null
+}
+
 /** A thread's link to a pull request, set when it creates one, starts from one, or watches one. */
 export interface ThreadPullRequestLink {
   number: number
@@ -304,5 +348,21 @@ export interface ThreadPullRequestLink {
   linkedAt: string
   /** The thread was started from this pull request, so its worktree begins at the pull request's head and Push may go to its branch. */
   startedFromPullRequest?: true
-  watch?: 'off' | 'notify' | 'act'
+  watch?: PullRequestWatchMode
+}
+
+/** Whether `link` is the same pull request as `other` (host, repository and number, ignoring case). */
+export function sameLinkedPullRequest(link: Pick<ThreadPullRequestLink, 'host' | 'nameWithOwner' | 'number'> | undefined, other: Pick<ThreadPullRequestLink, 'host' | 'nameWithOwner' | 'number'> | undefined): boolean {
+  if (!link || !other) return false
+  return link.number === other.number && link.host.toLowerCase() === other.host.toLowerCase() && link.nameWithOwner.toLowerCase() === other.nameWithOwner.toLowerCase()
+}
+
+/**
+ * The link a thread keeps when `next` replaces `previous`. A new record always carries no watch, so a link written again
+ * for the same pull request (a re-link, the create form finding the pull request it made) keeps the thread's watch; a
+ * different pull request starts unwatched, because what was watched is no longer what the thread is linked to.
+ */
+export function relinked(previous: ThreadPullRequestLink | undefined, next: ThreadPullRequestLink): ThreadPullRequestLink {
+  if (next.watch !== undefined || !previous?.watch || !sameLinkedPullRequest(previous, next)) return next
+  return { ...next, watch: previous.watch }
 }

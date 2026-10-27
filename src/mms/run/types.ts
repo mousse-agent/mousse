@@ -379,7 +379,7 @@ export interface AgentActor {
   toolCallId: string
 }
 
-export type InboxKind = 'child_result' | 'restart_note' | 'reconcile_notice'
+export type InboxKind = 'child_result' | 'restart_note' | 'reconcile_notice' | 'pr_update'
 
 export type InboxStatus = 'pending' | 'delivered' | 'acknowledged'
 
@@ -421,6 +421,18 @@ export interface ChildQuestionPayload {
 
 export function isChildQuestionRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
   return row.kind === 'reconcile_notice' && (row.payload as { kind?: unknown } | null)?.kind === 'child_question'
+}
+
+/**
+ * Payload of a `pr_update` row: what a watched pull request changed, for a thread whose watch lets the
+ * agent act. `text` is the whole notice (server-authored, with every word from the host quoted); the rest says
+ * what it is about. The row's id carries the delivery id, so a second write of the same delivery is refused.
+ */
+export interface PullRequestUpdatePayload {
+  text: string
+  number: number
+  headSha: string
+  changes: string[]
 }
 
 /** Payload of a `turn.start` effect that wakes a thread for its pending inbox rows (rule 4). */

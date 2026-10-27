@@ -161,7 +161,9 @@ describe('ProfileDatabase', () => {
     it('comes after the runs rebuild, so a profile already at the rebuild\'s version still gets it', () => {
       const rebuild = RUN_MIGRATIONS.find((migration) => migration.foreignKeys === 'off')!
       expect(access.version).toBeGreaterThan(rebuild.version)
-      expect(RUN_MIGRATIONS.map((migration) => migration.version)).toEqual(RUN_MIGRATIONS.map((_migration, index) => index + 1))
+      // Versions only ever increase; a number another change has taken may be missing from this list.
+      const versions = RUN_MIGRATIONS.map((migration) => migration.version)
+      expect(versions).toEqual([...new Set(versions)].sort((a, b) => a - b))
     })
 
     it('upgrades a database that has credentials and delegations: old rows read as lineage, and the levels are checked', () => {
@@ -304,6 +306,8 @@ describe('ProfileDatabase', () => {
   describe('the approval requests table (migration 12)', () => {
     const migration = RUN_MIGRATIONS.find((candidate) => candidate.sql.includes('CREATE TABLE approval_requests'))!
     const before = RUN_MIGRATIONS.filter((candidate) => candidate.version < migration.version)
+    // The migrations up to this one: later ones (the inbox rebuild) are tested on their own.
+    const through = RUN_MIGRATIONS.filter((candidate) => candidate.version <= migration.version)
     const columns = (database: ProfileDatabase) => database.database.prepare('PRAGMA table_info(approval_requests)').all().map((column) => String(column.name))
     const tables = (database: ProfileDatabase) => database.database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all().map((row) => String(row.name))
     /** A database from before the table, with a run, an event and a receipt in it. */
@@ -320,7 +324,7 @@ describe('ProfileDatabase', () => {
 
     it('is a new version, after the pause rebuild', () => {
       expect(migration.version).toBeGreaterThan(10)
-      expect(RUN_MIGRATIONS.at(-1)).toBe(migration)
+      expect(RUN_MIGRATIONS.at(-1)!.version).toBeGreaterThanOrEqual(migration.version)
       expect(migration.foreignKeys).toBeUndefined()
     })
 
@@ -331,7 +335,7 @@ describe('ProfileDatabase', () => {
       const run = database.database.prepare('SELECT * FROM runs').all()
       const events = database.database.prepare('SELECT * FROM thread_events').all()
 
-      database.migrate(RUN_MIGRATIONS)
+      database.migrate(through)
 
       expect(database.userVersion()).toBe(migration.version)
       expect(tables(database)).toEqual([...tablesBefore, 'approval_requests'].sort())
@@ -350,7 +354,7 @@ describe('ProfileDatabase', () => {
 
     it('stores a request with its defaults, refuses a row missing a required column, and is STRICT about types', () => {
       const database = seeded()
-      database.migrate(RUN_MIGRATIONS)
+      database.migrate(through)
       database.database
         .prepare(`INSERT INTO approval_requests(request_id, thread_id, instance_id, provider, action, permission_key, questions, answer_path, status, created_at)
                   VALUES('r1', 't1', 'claude', 'claude', 'command', 'claude:command', '[]', 'live', 'pending', '2026-10-12T00:00:02.000Z')`)
@@ -365,7 +369,7 @@ describe('ProfileDatabase', () => {
 
     it('constrains its enumerated columns like the other tables, and reads the continuation of a run by index', () => {
       const database = seeded()
-      database.migrate(RUN_MIGRATIONS)
+      database.migrate(through)
       const row = (overrides: Record<string, string | number | null> = {}) => {
         const values: Record<string, string | number | null> = {
           request_id: `r-${Math.random()}`, thread_id: 't1', instance_id: 'claude', provider: 'claude', action: 'command', permission_key: 'claude:command',
@@ -384,8 +388,8 @@ describe('ProfileDatabase', () => {
 
     it('opens idempotently, and a build that predates it refuses the newer database instead of reading it wrong', () => {
       const database = open()
-      database.migrate(RUN_MIGRATIONS)
-      database.migrate(RUN_MIGRATIONS)
+      database.migrate(through)
+      database.migrate(through)
       expect(database.database.prepare('SELECT version FROM run_schema_migrations ORDER BY version').all().at(-1)).toEqual({ version: migration.version })
       expect(codeOf(() => database.migrate(before))).toBe('downgrade_unsupported')
       expect(database.userVersion()).toBe(migration.version)
@@ -397,13 +401,107 @@ describe('ProfileDatabase', () => {
       db = new ProfileDatabase({ profileHome, fault: (point) => { if (armed && point === 'migration.beforeCommit') throw new Error('injected') } })
       db.migrate(before)
       armed = true
-      expect(() => db!.migrate(RUN_MIGRATIONS)).toThrow('injected')
+      expect(() => db!.migrate(through)).toThrow('injected')
       armed = false
       expect(db.userVersion()).toBe(before.at(-1)!.version)
       expect(columns(db)).toEqual([])
-      db.migrate(RUN_MIGRATIONS)
+      db.migrate(through)
       expect(db.userVersion()).toBe(migration.version)
       expect(columns(db)).toContain('request_id')
+    })
+  })
+
+  describe('the pull request update kind of the inbox (the migration that rebuilds it)', () => {
+    const kind = RUN_MIGRATIONS.find((migration) => migration.sql.includes("'pr_update'"))!
+    const before = RUN_MIGRATIONS.filter((migration) => migration.version < kind.version)
+    const insertRow = (database: ProfileDatabase, id: string, rowKind: string, deliveredBy: string | null = null): void => {
+      database.database
+        .prepare("INSERT INTO inbox(inbox_id, thread_id, run_id, kind, payload, status, created_at, delivered_by) VALUES(?, 't1', NULL, ?, '{\"text\":\"x\"}', ?, '2026-10-12T00:00:00.000Z', ?)")
+        .run(id, rowKind, deliveredBy ? 'delivered' : 'pending', deliveredBy)
+    }
+
+    it('comes after the one that added delivered_by and after every table it could meet', () => {
+      expect(kind.version).toBeGreaterThan(7)
+      expect(kind.version).toBeGreaterThanOrEqual(13)
+    })
+
+    it('the chain 11, 12, 13 applies on a fresh database and on a database at 11 or 12, and 13 touches only the inbox', () => {
+      const upTo = (version: number) => RUN_MIGRATIONS.filter((migration) => migration.version <= version)
+      const seedApproval = (database: ProfileDatabase): void => {
+        database.database
+          .prepare("INSERT INTO approval_requests(request_id, thread_id, instance_id, provider, action, permission_key, questions, answer_path, status, created_at) VALUES('a1', 't1', 'claude', 'claude', 'command', 'claude:command', '[]', 'continue', 'pending', '2026-10-12T00:00:00.000Z')")
+          .run()
+      }
+      const tablesOf = (database: ProfileDatabase) => database.database.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%' ORDER BY name").all().map((row) => String(row.name))
+      const finish = (database: ProfileDatabase): void => {
+        database.close()
+        rmSync(profileHome!, { recursive: true, force: true })
+        profileHome = undefined
+        db = undefined
+      }
+
+      // Fresh: every migration at once.
+      const fresh = open()
+      fresh.migrate(RUN_MIGRATIONS)
+      expect(fresh.userVersion()).toBe(kind.version)
+      expect(tablesOf(fresh)).toEqual(expect.arrayContaining(['approval_requests', 'approval_requests_thread', 'inbox', 'inbox_thread_status']))
+      insertRow(fresh, 'i:pr', 'pr_update')
+      finish(fresh)
+
+      // At 11, nothing of 12 yet: 12 then 13 in one run, inbox rows kept.
+      const at11 = open()
+      at11.migrate(upTo(11))
+      insertRow(at11, 'i:child', 'child_result', 'effect:a')
+      const rows11 = at11.database.prepare('SELECT * FROM inbox ORDER BY inbox_id').all()
+      at11.migrate(RUN_MIGRATIONS)
+      expect(at11.userVersion()).toBe(kind.version)
+      expect(at11.database.prepare('SELECT * FROM inbox ORDER BY inbox_id').all()).toEqual(rows11)
+      insertRow(at11, 'i:pr', 'pr_update')
+      finish(at11)
+
+      // At 12 with a saved approval and inbox rows: 13 keeps all of them and every other table and index as it was.
+      const at12 = open()
+      at12.migrate(upTo(12))
+      seedApproval(at12)
+      insertRow(at12, 'i:notice', 'reconcile_notice', 'queue:q1')
+      const approvals = at12.database.prepare('SELECT * FROM approval_requests').all()
+      const rows12 = at12.database.prepare('SELECT * FROM inbox ORDER BY inbox_id').all()
+      const before12 = tablesOf(at12)
+      at12.migrate(RUN_MIGRATIONS)
+      expect(at12.userVersion()).toBe(kind.version)
+      expect(at12.database.prepare('SELECT * FROM approval_requests').all()).toEqual(approvals)
+      expect(at12.database.prepare('SELECT * FROM inbox ORDER BY inbox_id').all()).toEqual(rows12)
+      expect(tablesOf(at12)).toEqual(before12)
+      insertRow(at12, 'i:pr', 'pr_update')
+      expect(at12.database.prepare('SELECT version FROM run_schema_migrations ORDER BY version').all().map((row) => Number(row.version)).slice(-2)).toEqual([12, 13])
+      finish(at12)
+    })
+
+    it('keeps rows of every kind, their delivered_by and the index, and then accepts pr_update', () => {
+      const database = open()
+      database.migrate(before)
+      expect(database.userVersion()).toBe(before.at(-1)!.version)
+      insertRow(database, 'i:child', 'child_result', 'effect:a')
+      insertRow(database, 'i:restart', 'restart_note')
+      insertRow(database, 'i:notice', 'reconcile_notice', 'queue:q1')
+      // Before the rebuild the CHECK refuses the new kind.
+      expect(() => insertRow(database, 'i:pr', 'pr_update')).toThrow(/CHECK/)
+      const rows = database.database.prepare('SELECT * FROM inbox ORDER BY inbox_id').all()
+
+      database.migrate(RUN_MIGRATIONS)
+
+      expect(database.userVersion()).toBe(kind.version)
+      expect(database.database.prepare('SELECT * FROM inbox ORDER BY inbox_id').all()).toEqual(rows)
+      expect(database.database.prepare('SELECT delivered_by FROM inbox WHERE inbox_id = ?').get('i:child')).toEqual({ delivered_by: 'effect:a' })
+      expect(database.database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'inbox_thread_status'").all()).toHaveLength(1)
+      expect(database.database.prepare("SELECT name FROM sqlite_master WHERE name = 'inbox_new'").all()).toEqual([])
+      expect(database.database.prepare('PRAGMA table_info(inbox)').all().map((column) => column.name)).toEqual([
+        'inbox_id', 'thread_id', 'run_id', 'kind', 'payload', 'status', 'created_at', 'delivered_by'
+      ])
+      insertRow(database, 'i:pr', 'pr_update')
+      expect(() => insertRow(database, 'i:other', 'something_else')).toThrow(/CHECK/)
+      // The id is the primary key: a second write of the same delivery cannot slip in.
+      expect(() => insertRow(database, 'i:pr', 'pr_update')).toThrow(/UNIQUE|PRIMARY/)
     })
   })
 

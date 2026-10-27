@@ -1727,6 +1727,30 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * A line in the thread from a watch of its pull request, saved before this answers. `messageId` makes it once: a line
+   * with that id already in the transcript (live, or loaded from disk when the session was made) is not added again. The
+   * answer means the line is on disk: `delivered` when this call added it, `already` when it was there. A failed save throws
+   * and leaves the line in memory, so the retry finds it, adds and announces nothing a second time, and saves again.
+   * Unlike `postThreadNotice`, no inbox row is written, so nothing wakes the agent.
+   */
+  async noteThreadUpdate(threadId: string, text: string, opts: { messageId: string }): Promise<'delivered' | 'already'> {
+    if (this.lifecycle.stopping) throw new Error('The daemon is stopping')
+    if (this.threadStore?.lifecycleStore?.get(threadId)) this.threadStore.assertThreadAdmission(threadId)
+    const session = this.getOrCreateSession(threadId)
+    return this.sessionAls.run(session, () => {
+      const held = session.messages.some((message) => message.id === opts.messageId)
+      if (!held) {
+        const message: ChatMessage = { id: opts.messageId, role: 'system', content: text, timestamp: new Date().toISOString() }
+        session.messages.push(message)
+        this.emitMessageAdded(message)
+      }
+      // Immediate, and not swallowed: the caller records the delivery as done only after this returns.
+      this.persist(true)
+      return held ? 'already' : 'delivered'
+    })
+  }
+
+  /**
    * Claude started a turn of its own because background tasks finished (`ClaudeLiveHost`): it
    * becomes a `provider-continuation` run of the thread, queued like a wake. The run and its
    * `turn.start` effect are written in the engine; the effect runs the turn when the thread is free.
@@ -2148,6 +2172,8 @@ export class OrchestratorService extends EventEmitter {
     }
     const result = engine.stopSubtree({ threadId, reason, ...opts })
     if (result.status !== 'stopped') return { ok: false, ...result }
+    // The Stop is recorded (every thread of the subtree has a higher generation): a pull request watch on any of them ends now.
+    this.emit('threads-stopped', { threadIds: [...result.threads] })
     let aborted = false
     // A Stop closes the saved approval requests of every thread it covers, including the ones a restart
     // left for a run that no longer exists: nothing would answer them any more.
@@ -4471,6 +4497,12 @@ export class OrchestratorService extends EventEmitter {
       }
       throw new EffectDeferredError(this.wakeBusyDeferMs, 'thread_busy')
     }
+    // A pull request update asks the agent to change code. While the thread waits on an approval (one a restart left saved
+    // included) it must not start a turn of its own, which would also settle that approval: the wake stays queued, as for a
+    // busy thread, and runs once nothing waits.
+    if (rows.some((row) => row.kind === 'pr_update') && this.threadWaitsOnApproval(payload.threadId)) {
+      throw new EffectDeferredError(this.wakeBusyDeferMs, 'approval_waiting')
+    }
     const notice = planWakeNotice(rows, this.noticeContext())
     engine.inbox.recordNoticeVisibility(rows, notice.items)
     try {
@@ -4485,6 +4517,13 @@ export class OrchestratorService extends EventEmitter {
       const run = engine.getRun(payload.runId)
       if (!run || !TERMINAL_RUN_STATUSES.has(run.status)) throw error
     }
+  }
+
+  /** A saved approval request of the thread is waiting for an answer, or was answered and not yet delivered to its run. */
+  private threadWaitsOnApproval(threadId: string): boolean {
+    const approvals = this.runEngine?.approvals
+    if (!approvals) return false
+    return approvals.listPending(threadId).length > 0 || approvals.listUndelivered().some((row) => row.threadId === threadId)
   }
 
   private requireRunEngine(): RunEngine {

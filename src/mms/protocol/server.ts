@@ -652,6 +652,10 @@ export class MmsProtocolServer {
     onEmitter(services.scheduled, 'status', (status: unknown) => {
       emitToSubscribers(this.ring.push('scheduled.status', { status }, undefined))
     })
+    // A watched pull request changed (checks finished, a review arrived, the watch ended): clients refresh that thread's detail.
+    onEmitter(services.pullRequestWatch, 'updated', (payload: { threadId: string }) => {
+      emitToSubscribers(this.ring.push('pullRequests.updated', payload, payload.threadId))
+    })
     onEmitter(services.channels, 'updated', (snapshot: unknown) => {
       emitToSubscribers(this.ring.push('channels.updated', { snapshot }, undefined))
     })
