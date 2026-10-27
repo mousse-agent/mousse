@@ -3,7 +3,6 @@ import { harnessAppError } from '../../../../shared/harness/types'
 import { parseThinkingSuffixFromModelId } from '../../../../shared/modelVariants'
 import { customModelDefinition } from '../../catalog'
 import type { OneShotSpec } from '../../driver'
-import { PI_AWS_RETRY_ENV } from '../../pi/launch'
 import { assertAssistantResponseSucceeded, consumeAssistantStream, getCacheSessionId, getReasoningStreamOptions } from './stream'
 
 /** What a pi one-shot reads of the profile's pi-ai models: the catalogue, credentials and transport. */
@@ -19,6 +18,11 @@ export async function runPiOneShot(models: PiOneShotModels, providerId: string, 
   const model = models.getModel(providerId, baseId) ?? customModel(models, providerId, spec)
   if (!model)
     throw harnessAppError({ code: 'model_unavailable', message: `${baseId} is not a model of this provider. Refresh models or choose another one.` })
+  // pi-ai builds its AWS client without `maxAttempts` and takes no per-call setting, so the AWS SDK
+  // would retry below Mousse in this process. Bedrock one-shots wait until they run in a process
+  // Mousse configures (the Pi RPC child holds Bedrock to one attempt).
+  if (model.api === 'bedrock-converse-stream')
+    throw harnessAppError({ code: 'unsupported', message: 'Bedrock models cannot name chats yet. Choose another model for chat titles, or Automatic.' })
   // Reading the credentials may refresh a sign-in over the network: the timeout and a stop bound it too.
   if (!(await untilAborted(models.getAuth(model), signal)))
     throw harnessAppError({ code: 'signed_out', message: 'This provider is not signed in. Sign in or choose another model.' })
@@ -26,7 +30,6 @@ export async function runPiOneShot(models: PiOneShotModels, providerId: string, 
     systemPrompt: spec.system,
     messages: [{ role: 'user' as const, content: spec.prompt, timestamp: Date.now() }]
   }
-  if (model.api === 'bedrock-converse-stream') holdBedrockToOneAttempt()
   const reasoning = (spec.effort ?? effort ?? 'off') as ThinkingLevel
   const options = getReasoningStreamOptions(model.api, reasoning, signal, getCacheSessionId(spec.sessionKey), providerId)
   spec.onActivity()
@@ -36,18 +39,6 @@ export async function runPiOneShot(models: PiOneShotModels, providerId: string, 
   const message = await consumeAssistantStream(stream, {}, { signal, onProgress: () => spec.onActivity() })
   assertAssistantResponseSucceeded(message)
   return { text: message.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('') }
-}
-
-/**
- * One HTTP attempt per Bedrock request, as the Pi RPC child has (`PI_AWS_RETRY_ENV`). pi-ai builds its
- * AWS client with no `maxAttempts` and takes no per-call setting for it, so the AWS SDK reads
- * `AWS_MAX_ATTEMPTS` (before the shared config file's `max_attempts`) when the request goes out;
- * `options.maxRetries` does not reach it. Mousse's process is set to one attempt and never set
- * back, so no request running at the same time reads another value. This also holds the legacy
- * loop's Bedrock requests to one SDK attempt.
- */
-function holdBedrockToOneAttempt(): void {
-  for (const [name, value] of Object.entries(PI_AWS_RETRY_ENV)) process.env[name] = value
 }
 
 /** `promise`, or an `AbortError` as soon as `signal` aborts (the promise itself is left to settle). */
