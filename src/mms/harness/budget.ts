@@ -1,4 +1,5 @@
 import type { AgentExecutionLimit } from '../../shared/agents/execution'
+import type { ChargeResult, CountKind, CountLimitKey, CounterScope } from '../../shared/harness/counters'
 import type { RunPolicy } from '../../shared/harness/types'
 
 /**
@@ -19,22 +20,8 @@ import type { RunPolicy } from '../../shared/harness/types'
  * stays charged in full.
  */
 
-export type CountKind = 'request' | 'tool'
-export type CountLimitKey = 'maxTurns' | 'maxToolCalls'
-
-/** One charge: counted (`count` is the count now), or refused at `limit` with `count` already used. */
-export type ChargeResult = { ok: true; count: number } | { ok: false; count: number; limit: number }
-
-/** Counts that may be shared across runs. One call is one atomic compare-and-increment. */
-export interface CounterScope {
-  /**
-   * Counts one `kind` unless its count already reached `limit` (the binding's own number) or the
-   * scope's own allowance for it, whichever is lower: then nothing is counted and the step is
-   * refused, with the count and the threshold that refused. Without `limit` only the scope's own
-   * allowance applies.
-   */
-  charge(kind: CountKind, limit?: number): ChargeResult
-}
+// The scope's types are shared with PR 6's bot authority (`shared/bots/personal/authority.ts`).
+export type { ChargeResult, CountKind, CountLimitKey, CounterScope } from '../../shared/harness/counters'
 
 export type CountLimits = Pick<NonNullable<RunPolicy['budget']>, 'maxTurns' | 'maxToolCalls'>
 export type SpendLimits = Pick<NonNullable<RunPolicy['budget']>, 'maxInputTokens' | 'maxOutputTokens' | 'maxUsd'>
