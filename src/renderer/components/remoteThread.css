@@ -52,16 +52,3 @@
   color: var(--text-primary);
   font-weight: 500;
 }
-
-.remote-threads-heading {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-
-.remote-threads-heading span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}

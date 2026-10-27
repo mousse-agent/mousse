@@ -813,6 +813,7 @@ export function OrchestratorChat() {
           node: workspace.node,
           devices: readRunOnDevices,
           projectId: workspace.projectId,
+          localProjectId: workspace.localProjectId,
           worktreeEnabled: workspace.worktreeEnabled,
           content: text,
           images,

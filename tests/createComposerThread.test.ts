@@ -202,6 +202,15 @@ describe('composer thread on another computer', () => {
     await expect(started!.sent).resolves.toBeUndefined()
   })
 
+  it('lists the thread under the local project only when the target project is its match', async () => {
+    const matched = setup()
+    await startRemoteComposerThread({ ...matched.deps, localProjectId: 'project-here' })
+    expect(matched.open).toHaveBeenCalledWith({ ...ref, deviceName: 'Studio', title: 'Fix the parser', localProjectId: 'project-here' })
+    const unmatched = setup()
+    await startRemoteComposerThread({ ...unmatched.deps, projectId: undefined, localProjectId: 'project-here' })
+    expect(unmatched.open).toHaveBeenCalledWith({ ...ref, deviceName: 'Studio', title: 'Fix the parser' })
+  })
+
   it('creates a project-less chat without a worktree, whatever the toggle says', async () => {
     const { deps, calls } = setup()
     await startRemoteComposerThread({ ...deps, projectId: undefined })

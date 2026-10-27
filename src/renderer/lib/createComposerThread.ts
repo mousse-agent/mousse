@@ -67,6 +67,8 @@ export interface RemoteThreadTarget {
   entityId: string
   deviceName?: string
   title?: string
+  /** The project of this computer the thread belongs with, so the sidebar lists it there. */
+  localProjectId?: string
 }
 
 export interface RemoteComposerThread {
@@ -94,6 +96,8 @@ export async function startRemoteComposerThread(deps: {
   /** The user's devices, read just now. */
   devices: () => Promise<Device[]>
   projectId?: string
+  /** The draft's project on this computer; it counts only when `projectId` is that project's match. */
+  localProjectId?: string
   worktreeEnabled: boolean
   content: string
   images: readonly RemoteImage[]
@@ -133,7 +137,12 @@ export async function startRemoteComposerThread(deps: {
     if (picked?.ok === false) throw new Error(picked.error || `${deviceName} did not accept that model`)
   }
   // Opening attaches to the thread's display; the first message goes right after, so its events arrive.
-  deps.openRemoteThread({ ...ref, deviceName, title: remoteThreadName(deps.content) })
+  deps.openRemoteThread({
+    ...ref,
+    deviceName,
+    title: remoteThreadName(deps.content),
+    ...(deps.projectId && deps.localProjectId ? { localProjectId: deps.localProjectId } : {})
+  })
   const mode = deps.mode && typeof deps.mode === 'object' ? deps.mode : undefined
   const sent = deps.submit(ref, { content: deps.content, images: deps.images, ...(mode ? { mode } : {}) })
   return { ref, deviceName, sent }

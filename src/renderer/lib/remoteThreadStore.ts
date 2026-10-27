@@ -123,6 +123,8 @@ export interface RemoteThreadEntry {
   /** The computer the thread runs on, as the user knows it. */
   deviceName?: string
   title?: string
+  /** The project of this computer the thread is listed under in the sidebar, if any. */
+  localProjectId?: string
   view?: RemoteView
   /** A verified display arrived on the current attachment. */
   live: boolean
@@ -193,18 +195,19 @@ function followApp(): void {
  * and steering can name that run.
  */
 export function openRemoteThread(
-  ref: { nodeId: NodeId; entityId: string; deviceName?: string; title?: string; run?: RpcId }
+  ref: { nodeId: NodeId; entityId: string; deviceName?: string; title?: string; localProjectId?: string; run?: RpcId }
 ): void {
   followApp()
   const identity = { nodeId: ref.nodeId, entityId: ref.entityId }
   const key = remoteThreadKey(identity)
-  const { deviceName, title, run } = ref
+  const { deviceName, title, localProjectId, run } = ref
   activeThreadAtSelection = useAppStore.getState().activeThreadId
   const existing = useRemoteThreads.getState().entries[key]
   if (existing) {
     patch(key, {
       ...(deviceName ? { deviceName } : {}),
       ...(title ? { title } : {}),
+      ...(localProjectId ? { localProjectId } : {}),
       ...(run ? { run, sending: true } : {})
     })
     useRemoteThreads.setState({ activeKey: key })
@@ -214,7 +217,7 @@ export function openRemoteThread(
     entries: {
       ...state.entries,
       [key]: {
-        key, ref: identity, deviceName, title, live: false, error: '', sending: !!run, run, notice: '', attachment: 0
+        key, ref: identity, deviceName, title, localProjectId, live: false, error: '', sending: !!run, run, notice: '', attachment: 0
       }
     },
     order: [...state.order, key],
@@ -234,6 +237,26 @@ async function nameDevice(key: string): Promise<void> {
   } catch {
     // The thread still works; the side card falls back to a generic name.
   }
+}
+
+/**
+ * Where the sidebar lists attached remote threads, newest attachment first: under the project of
+ * this computer they were started from, or with the chats that have no project.
+ */
+export function sidebarRemoteThreads(
+  entries: Readonly<Record<string, RemoteThreadEntry>>,
+  order: readonly string[],
+  localProjectIds: ReadonlySet<string>
+): { all: RemoteThreadEntry[]; byProject: Map<string, RemoteThreadEntry[]>; unfiled: RemoteThreadEntry[] } {
+  const all = [...order].reverse().flatMap((key) => (entries[key] ? [entries[key]!] : []))
+  const byProject = new Map<string, RemoteThreadEntry[]>()
+  const unfiled: RemoteThreadEntry[] = []
+  for (const entry of all) {
+    const project = entry.localProjectId && localProjectIds.has(entry.localProjectId) ? entry.localProjectId : undefined
+    if (project) byProject.set(project, [...(byProject.get(project) ?? []), entry])
+    else unfiled.push(entry)
+  }
+  return { all, byProject, unfiled }
 }
 
 /** Shows an attached remote thread again (a sidebar row was clicked). */
