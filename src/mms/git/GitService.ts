@@ -8,6 +8,7 @@ import simpleGit, { type SimpleGit, type StatusResult } from 'simple-git'
 import { redactGitText } from '../../shared/gitText'
 import { holdsRepositoryMutation } from '../actions/GitOperationCoordinator'
 import type { CodeHost } from './CodeHost'
+import { COMMIT_SUGGESTION_LIMITS, EMPTY_COMMIT_INPUT, fitPatch, parseNumstat, type CommitInput } from './commitSuggestion'
 import { explicitActionGitEnv } from './gitEnv'
 import { IN_PROGRESS_GIT_MARKERS } from './gitMarkers'
 import { GitHubCodeHost } from './GitHubCodeHost'
@@ -859,6 +860,55 @@ export class GitService {
       return { subject: subject.trim(), body: body.join('\x1f').trim() }
     })
     return { commits, stat: stat.trim(), patch }
+  }
+
+  /**
+   * The changes the next commit would take, reduced for describing them to a model. Staged changes when
+   * any are staged, otherwise the working tree against HEAD with untracked files named only; `all` is a
+   * commit that takes everything whatever the index holds (a thread's worktree), leaving out `.mousse/`.
+   * Nothing outside that set is read, ignored files are never listed, and what is read is bounded: a patch
+   * of `maxBytes` at most, binary files as "Binary files differ", files that changed a great many lines
+   * left out of the patch (they stay in the summary), and each list capped.
+   */
+  async describeCommitInput(cwd: string, options: { all?: boolean; maxBytes?: number } = {}): Promise<CommitInput> {
+    if (!await this.isRepo(cwd)) return EMPTY_COMMIT_INPUT
+    const limits = COMMIT_SUGGESTION_LIMITS
+    const maxBytes = options.maxBytes ?? limits.diff
+    // From the top, like the commit: paths and pathspecs below are relative to it, not to a project subfolder.
+    const top = await this.toplevel(cwd)
+    const staged = !options.all && await readBoundedGit(top, ['diff', '--cached', '--name-only', '-z'], 64) !== ''
+    const against = staged || !await this.hasHead(top) ? ['--cached'] : ['HEAD']
+    // A repository's configuration must not run programs here: no external diff driver, no text conversion.
+    const diff = ['diff', '--no-color', '--no-ext-diff', '--no-textconv']
+    const scope = options.all ? [':(exclude).mousse/**'] : []
+
+    const numstatLimit = 64 * 1024
+    const numstatRaw = await readBoundedGit(top, [...diff, '--numstat', '-z', ...against, '--', '.', ...scope], numstatLimit)
+    const entries = parseNumstat(numstatRaw)
+    const huge = entries.filter((entry) => (entry.added ?? 0) + (entry.deleted ?? 0) > limits.hugeFileLines)
+    const excluded = huge.slice(0, limits.excludedFiles).map((entry) => `:(exclude,literal)${entry.path}`)
+
+    const patchLimit = 3 * maxBytes
+    const [statRaw, patchRaw, untrackedRaw] = await Promise.all([
+      readBoundedGit(top, [...diff, '--stat=120', `--stat-count=${limits.excludedFiles}`, ...against, '--', '.', ...scope], 2 * limits.stat),
+      readBoundedGit(top, [...diff, '--unified=3', ...against, '--', '.', ...scope, ...excluded], patchLimit),
+      // Only a commit that stages everything takes new files; the index alone never does.
+      staged ? Promise.resolve('') : readBoundedGit(top, ['ls-files', '--others', '--exclude-standard', '-z'], numstatLimit)
+    ])
+    const patch = fitPatch(patchRaw, { maxBytes, perFileBytes: Math.floor(maxBytes / 2), readCut: Buffer.byteLength(patchRaw) >= patchLimit - 4 })
+    const tracked = entries.map((entry) => entry.path)
+    const untracked = untrackedRaw.split('\0').filter((path) => path && !(options.all && (path === '.mousse' || path.startsWith('.mousse/'))))
+    const statCut = Buffer.byteLength(statRaw) >= 2 * limits.stat - 4
+    const statLines = statRaw.split('\n')
+    const stat = statCut ? statLines.slice(0, -1).join('\n') : statRaw
+    const files = [...tracked, ...untracked]
+    return {
+      diff: redactGitText(patch.text),
+      stat: redactGitText(stat.trim()),
+      truncated: patch.truncated || huge.length > 0 || statCut || files.length > limits.files || Buffer.byteLength(numstatRaw) >= numstatLimit - 4,
+      files: files.slice(0, limits.files),
+      untracked: untracked.slice(0, limits.files)
+    }
   }
 
   /** A name Git accepts for a branch, and one that cannot be mistaken for an option. */

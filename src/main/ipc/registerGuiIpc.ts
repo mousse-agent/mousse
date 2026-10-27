@@ -1876,6 +1876,8 @@ export function registerGuiIpc(
   }
   gitMutation('git:checkout', 'git.checkout', (branch: string, options?: GitCheckoutOptions) => ({ branch, dirty: options?.dirty }))
   gitMutation('git:commit', 'git.commit', (message: string, options?: GitCommitOptions) => ({ message, amend: options?.amend, expectedBranch: options?.expectedBranch }))
+  // A proposal, not a mutation, but it names its folder like one and its error codes (no title model) reach the renderer.
+  gitMutation('git:suggestCommitMessage', 'git.suggestCommitMessage', (options?: { expectedBranch?: string }) => ({ expectedBranch: options?.expectedBranch }))
   gitMutation('git:push', 'git.push', (options?: GitPushOptions) => ({ expectedBranch: options?.expectedBranch }))
   gitMutation('git:init', 'git.init')
   gitMutation('git:stage', 'git.stage', (input: { paths?: string[]; all?: boolean }) => ({ paths: input?.paths, all: input?.all }))

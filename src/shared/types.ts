@@ -1088,6 +1088,13 @@ export interface GitCommitOptions {
   expectedBranch?: string
 }
 
+/** A proposed commit message; the user edits it before committing. */
+export interface GitCommitSuggestion {
+  message: string
+  /** Part of the change was left out of what the model saw (too large, binary, too many files). */
+  truncated: boolean
+}
+
 export interface GitPushOptions {
   /** Refuse with `git_branch_changed` when HEAD is on another branch by now. */
   expectedBranch?: string

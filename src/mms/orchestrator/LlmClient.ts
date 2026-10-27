@@ -1195,6 +1195,19 @@ export class LlmClient {
     return this.completeWithTitleModel(systemPrompt, prompt, `pull-request-draft:${threadId ?? prompt.slice(0, 200)}`, selection)
   }
 
+  /**
+   * Proposes a commit message with the title model: the same selection, stream path and timeouts as
+   * `generateTitle`. Returns the model's raw answer; the caller parses it.
+   */
+  async generateCommitMessage(
+    systemPrompt: string,
+    prompt: string,
+    threadId?: string,
+    selection?: { instanceId?: string; llmProvider: string; model: string }
+  ): Promise<string> {
+    return this.completeWithTitleModel(systemPrompt, prompt, `commit-message:${threadId ?? prompt.slice(0, 200)}`, selection)
+  }
+
   /** One short, tool-free completion on the title model; `sessionKey` only names the provider's cache session. */
   private async completeWithTitleModel(
     systemPrompt: string,
