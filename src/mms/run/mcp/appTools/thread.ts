@@ -1,8 +1,9 @@
 import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
 import { visibleThreads } from '../../../../shared/threadLineage'
+import { readRunResultText } from '../../delegation/hold'
 import type { RunEngine } from '../../RunEngine'
-import type { DelegationRecord, ThreadEvent } from '../../types'
-import type { AppToolHost } from './host'
+import { TERMINAL_RUN_STATUSES, type AgentActor, type DelegationRecord, type RunRecord, type ThreadEvent } from '../../types'
+import type { AgentRunCommandResult, AppToolHost } from './host'
 import {
   CLIENT_REQUEST_ID_SCHEMA,
   json,
@@ -25,6 +26,15 @@ const THREAD_LIST_MAX_LIMIT = 500
 const THREAD_SEARCH_DEFAULT_LIMIT = 50
 const THREAD_SEARCH_MAX_LIMIT = 200
 const THREAD_SEARCH_MAX_QUERY_CHARS = 512
+/** An agent run may send this many messages to other threads; the next is refused. */
+export const THREAD_SEND_MAX_PER_RUN = 20
+/** The counts of `thread_send` are kept for this many runs, the oldest dropped first. */
+const THREAD_SEND_TRACKED_RUNS = 1000
+/** `thread_wait` waits this long unless told otherwise (MCP clients give up on a call after about a minute) and never longer than the cap. */
+export const THREAD_WAIT_DEFAULT_MS = 45_000
+export const THREAD_WAIT_MAX_MS = 300_000
+/** A run's error text is cut to this many characters in `thread_wait`. */
+const THREAD_WAIT_ERROR_MAX_CHARS = 1_000
 /** A `manage` search reads the transcripts of this many threads at most (the most recently updated). */
 const THREAD_SEARCH_MESSAGE_THREADS = 100
 /** Lineage walks stop here; deeper chains are treated as unrelated. */
@@ -47,14 +57,15 @@ function lineageVisible(type: string): boolean {
  * Another thread's events as a lineage relative sees them (M7): run and attempt lifecycle,
  * ignored commands, restart notes, the lineage row and `agent.action` rows; plus `delegation.status`
  * rows whose result is shown only to the delegation's own child (a sibling's result and the parent's
- * other prompts stay private). A caller that reaches the thread only through its access level
- * (`read`) gets no `run.result` either (a subagent's final text).
+ * other prompts stay private). The final text of a run (`run.result`, kept for every conversational run)
+ * is the caller's to read only for a thread below it or one it launched; an ancestor, a sibling and a
+ * caller that reaches the thread only through its access level (`read`) get none.
  * Inbox, effect (turn payloads carry prompts), tool and transfer events are left out.
  */
 function lineageView(events: ThreadEvent[], callerThreadId: string, scope: ToolScope): ThreadEvent[] {
   const out: ThreadEvent[] = []
   for (const event of events) {
-    if (event.type === 'run.result' && scope === 'read') continue
+    if (event.type === 'run.result' && !resultTextVisible(scope)) continue
     // Through the `read` level alone (any thread of the allowed projects), only a trimmed copy.
     if (scope === 'read') {
       if (lineageVisible(event.type) || event.type === 'delegation.status') out.push(readProjection(event))
@@ -67,6 +78,11 @@ function lineageView(events: ThreadEvent[], callerThreadId: string, scope: ToolS
     }
   }
   return out
+}
+
+/** Who may read the final text of a run: the caller itself, a manager, and the owner of a descendant or launched thread. */
+function resultTextVisible(scope: ToolScope): boolean {
+  return scope === 'own' || scope === 'manage' || scope === 'descendant' || scope === 'launched'
 }
 
 /**
@@ -146,12 +162,108 @@ function toolRequestId(args: Record<string, unknown>, ctx: ToolCallContext): str
   return args.clientRequestId
 }
 
+/** The agent behind a change to another thread: the caller's thread and run, and this call. */
+function actorOf(ctx: ToolCallContext): AgentActor {
+  return { kind: 'agent', threadId: ctx.caller.threadId, runId: ctx.caller.runId, toolCallId: ctx.toolCallId }
+}
+
+function requiredId(args: Record<string, unknown>, name: string): string {
+  const value = args[name]
+  if (typeof value !== 'string' || !value.trim()) throw new Error(`${name} must be a non-empty string`)
+  return value
+}
+
+/** Why the engine refused an agent's message because of the state the thread is in, in words for the agent. */
+const SEND_CONFLICTS: Readonly<Record<string, string>> = {
+  thread_paused:
+    "The thread's run is paused by a usage limit and resumes by itself; a message from an agent would end that pause. Stop the paused run with thread_interrupt first, or send again later.",
+  questions_pending:
+    'The thread is waiting for the user to answer a question or an approval; a message from an agent never answers or skips it. Try again after the user has answered.'
+}
+
+/** An engine refusal that means the thread is not in a state to take the message now, as a `mousse_conflict`. */
+function sendConflict(error: unknown): McpToolError | undefined {
+  const code = (error as { code?: unknown } | null)?.code
+  if (typeof code !== 'string') return undefined
+  if (SEND_CONFLICTS[code]) return new McpToolError('mousse_conflict', SEND_CONFLICTS[code], { conflict: code })
+  if (code === 'merge_back_pending') return new McpToolError('mousse_conflict', error instanceof Error ? error.message : 'A merge-back waits for the thread.', { conflict: code })
+  return undefined
+}
+
 /**
- * `thread_read`, `thread_list`, `thread_search`, the queue tools, `thread_fork` and
- * `thread_merge_back`: the run engine's own threads, offered over MCP only (the pi loop never had them).
+ * A change to another thread is refused while that thread is archived: it takes no new work until it is
+ * restored. A trashed thread never gets here (the central check refuses it as unknown).
+ */
+function assertTakesWork(host: AppToolHost, threadId: string): void {
+  if (host.threadMeta?.(threadId)?.settledAt)
+    throw new McpToolError('mousse_conflict', `Thread ${threadId} is archived; it takes no new work until it is restored.`, { conflict: 'thread_archived', threadId })
+}
+
+/** What an accepted Stop or steer returns; every other result is a refusal the caller can act on. */
+function acceptedRunCommand(result: AgentRunCommandResult, expectedRunId: string): { runId: string; sequence: number; replayed: boolean } {
+  switch (result.status) {
+    case 'accepted':
+      return { runId: result.runId, sequence: result.sequence, replayed: result.replayed }
+    case 'ceiling_exceeded':
+      throw new McpToolError(
+        'mousse_conflict',
+        `Run ${expectedRunId} is running under a looser permission mode (${result.targetMode}) than yours (${result.callerMode}); a running turn cannot be narrowed, so your steer would run with more authority than you have. Send a message instead: it runs under your mode.`,
+        { conflict: 'ceiling_exceeded', callerMode: result.callerMode, targetMode: result.targetMode }
+      )
+    case 'rejected':
+      throw new McpToolError('mousse_conflict', `The command was refused: ${result.reason}.`, { conflict: result.reason, expectedRunId })
+    case 'ignored':
+      if (result.reason === 'run_not_found')
+        throw new McpToolError('mousse_conflict', `Run ${expectedRunId} is not a run of this thread.`, { conflict: 'run_not_found', expectedRunId })
+      if (result.runStatus === 'paused')
+        throw new McpToolError(
+          'mousse_conflict',
+          `Run ${expectedRunId} is paused by a usage limit and has no live turn; end it with thread_interrupt, or wait for it to resume.`,
+          { conflict: 'run_paused', expectedRunId, activeRunId: result.activeRunId }
+        )
+      throw new McpToolError(
+        'mousse_conflict',
+        `Run ${expectedRunId} is not the thread's active run${result.activeRunId ? ` (${result.activeRunId} is)` : ' (it has none)'}; nothing was changed. Read the thread again.`,
+        { conflict: 'run_not_active', expectedRunId, activeRunId: result.activeRunId, ...(result.runStatus ? { runStatus: result.runStatus } : {}) }
+      )
+  }
+}
+
+/** The transcript row of a change the call made; the `agent.action` event is the record, so a row that fails to write is not an error. */
+function showAction(host: AppToolHost, threadId: string, actor: AgentActor, summary: string): void {
+  try {
+    host.showAgentAction?.({ threadId }, actor, summary)
+  } catch (error) {
+    console.warn('the transcript row of an agent action could not be written', { threadId, error: error instanceof Error ? error.message : String(error) })
+  }
+}
+
+/** How a `thread_wait` ended before its result was read. */
+type WaitEnd = { kind: 'finished' } | { kind: 'paused' } | { kind: 'timeout' } | { kind: 'caller_ended' }
+
+/**
+ * `thread_read`, `thread_list`, `thread_search`, the queue tools, `thread_fork`, `thread_merge_back` and the
+ * tools that act on other threads (`thread_send`, `thread_wait`, `thread_interrupt`, `thread_steer`): the
+ * run engine's own threads, offered over MCP only (the pi loop never had them).
  */
 export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] {
   const allowedProjectIds = (): string[] => host.agentAccess?.().projectIds ?? []
+  /** Messages each run has sent to other threads, in memory: a restart gives every run a fresh count. */
+  const sends = new Map<string, number>()
+  const reserveSend = (runId: string): void => {
+    const used = sends.get(runId) ?? 0
+    if (used >= THREAD_SEND_MAX_PER_RUN)
+      throw new Error(`thread_send is limited to ${THREAD_SEND_MAX_PER_RUN} messages per run; end your turn and let the other threads work.`)
+    sends.delete(runId)
+    sends.set(runId, used + 1)
+    // The oldest runs fall out first, so the map stays small on a long-lived daemon.
+    while (sends.size > THREAD_SEND_TRACKED_RUNS) sends.delete(sends.keys().next().value as string)
+  }
+  const releaseSend = (runId: string): void => {
+    const used = sends.get(runId) ?? 0
+    if (used <= 1) sends.delete(runId)
+    else sends.set(runId, used - 1)
+  }
   return [
     {
       name: 'thread_read',
@@ -311,6 +423,193 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
           .slice(0, limit)
           .map(({ snippet, ...hit }) => (manage && snippet !== undefined ? { ...hit, snippet } : hit))
         return json({ results })
+      }
+    },
+    {
+      name: 'thread_send',
+      description: `Send a message to another thread (needs the manage agent access level and a project the profile allows). The thread's model receives it labelled as a message from an agent in your thread, not from the user, and runs it under your permission mode when that is stricter than the thread's own; it never gets more than the thread itself allows. It starts a turn when the thread is idle and queues behind the running turn otherwise (it never steers the running turn). Refused while the thread waits for the user to answer a question or approval, is paused by a usage limit, or is archived. You may send ${THREAD_SEND_MAX_PER_RUN} messages per run. Returns the run it created: use thread_wait with it to wait for the answer, only when you need it this turn. Subagents are reached with continue_subagent.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          threadId: { type: 'string', description: 'The thread to send to; not your own (use queue_enqueue for that).' },
+          content: { type: 'string' },
+          mode: { type: 'string', enum: ['agent', 'plan'], description: 'Defaults to agent.' },
+          clientRequestId: CLIENT_REQUEST_ID_SCHEMA
+        },
+        required: ['threadId', 'content']
+      },
+      access: 'managesOthers',
+      class: 'mutation',
+      minLevel: 'manage',
+      offered: () => false,
+      handler: async (args, ctx) => {
+        const threadId = requiredId(args, 'threadId')
+        if (typeof args.content !== 'string' || !args.content.trim()) throw new Error('thread_send requires content')
+        if (args.mode !== undefined && args.mode !== 'agent' && args.mode !== 'plan') throw new Error('mode must be agent or plan')
+        const mode = (args.mode as 'agent' | 'plan' | undefined) ?? 'agent'
+        if (!host.sendToThread) return notAvailable('thread_send')
+        if (threadId === ctx.caller.threadId) throw new Error('thread_send is for other threads; use queue_enqueue to queue a message on your own thread.')
+        // Defence in depth: a plan ceiling is held to `read` and never gets here.
+        if (mode === 'agent' && ctx.caller.modeCeiling === 'plan') throw new McpToolError('mousse_ceiling_exceeded', 'A plan-ceiling caller can only send plan turns.')
+        // A subagent is reached through its parent: a message sent to it directly would run untracked.
+        if (engine.delegations.getLineage(threadId)?.relationship === 'subagent')
+          throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is a subagent; its parent reaches it with continue_subagent, and a message from here would run without its parent hearing the result.`)
+        assertTakesWork(host, threadId)
+        const actor = actorOf(ctx)
+        reserveSend(actor.runId)
+        let sent
+        try {
+          sent = await host.sendToThread(threadId, { content: args.content, mode }, { clientRequestId: `thread_send:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`, actor })
+        } catch (error) {
+          releaseSend(actor.runId)
+          throw sendConflict(error) ?? error
+        }
+        // A retry returns the first result and changes nothing, so it is not another send.
+        if (sent.replayed) releaseSend(actor.runId)
+        else showAction(host, threadId, actor, `sent a message (run ${sent.runId})`)
+        return json({ threadId, ...sent })
+      }
+    },
+    {
+      name: 'thread_wait',
+      description: `Wait for a run of another thread to finish, for at most timeoutMs (default ${THREAD_WAIT_DEFAULT_MS}, up to ${THREAD_WAIT_MAX_MS}). Pass the runId thread_send returned; without one, the run that is active now. Returns status finished (with the run's outcome, and its final text where you may read it), timeout (the run is still going: call again; the wait never interrupts it), paused (a usage limit paused the run; it resumes by itself), idle (no run to wait for) or caller_ended (your own run ended). Wait only when you need the answer this turn; otherwise end your turn and read the thread later.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          threadId: { type: 'string', description: 'The thread to wait on; not your own.' },
+          runId: { type: 'string', description: 'The run to wait for; the active run when omitted.' },
+          timeoutMs: { type: 'integer', minimum: 1, maximum: THREAD_WAIT_MAX_MS, description: `Default ${THREAD_WAIT_DEFAULT_MS}.` }
+        },
+        required: ['threadId']
+      },
+      access: 'readsOthers',
+      class: 'read',
+      minLevel: 'read',
+      offered: () => false,
+      handler: async (args, ctx) => {
+        const threadId = requiredId(args, 'threadId')
+        if (args.runId !== undefined && (typeof args.runId !== 'string' || !args.runId)) throw new Error('runId must be a non-empty string')
+        const timeoutMs = boundedInt(args.timeoutMs, 'timeoutMs', 1, THREAD_WAIT_MAX_MS, THREAD_WAIT_DEFAULT_MS)
+        if (threadId === ctx.caller.threadId) throw new Error('thread_wait is for other threads: your own run ends only when your turn does.')
+        const scope = ctx.scope ?? 'read'
+        let target = args.runId as string | undefined
+        let settle!: (end: WaitEnd) => void
+        const ended = new Promise<WaitEnd>((resolve) => { settle = resolve })
+        // Terminal runs seen before the run to wait for is known (no runId given).
+        const seenTerminal = new Set<string>()
+        // Subscribed before the run is read: a run that ends in between is seen here, never missed.
+        const unsubscribe = engine.store.onEvent((event) => {
+          if (event.threadId !== threadId || event.type !== 'run.status') return
+          const run = event.payload as RunRecord
+          if (TERMINAL_RUN_STATUSES.has(run.status)) {
+            seenTerminal.add(run.runId)
+            if (run.runId === target) settle({ kind: 'finished' })
+          } else if (run.status === 'paused' && run.runId === target) settle({ kind: 'paused' })
+        })
+        const timer = setTimeout(() => settle({ kind: 'timeout' }), timeoutMs)
+        const onAbort = (): void => settle({ kind: 'caller_ended' })
+        ctx.signal.addEventListener('abort', onAbort, { once: true })
+        try {
+          if (ctx.signal.aborted) return json({ status: 'caller_ended', threadId })
+          let run: RunRecord | null
+          if (target) {
+            run = engine.getRun(target)
+            if (!run || run.threadId !== threadId) throw new McpToolError('mousse_conflict', `Run ${target} is not a run of thread ${threadId}.`, { conflict: 'run_not_found', expectedRunId: target })
+          } else {
+            run = engine.getActiveRun(threadId) ?? engine.store.getPausedRun(threadId)
+            if (!run) return json({ status: 'idle', threadId })
+            target = run.runId
+          }
+          if (TERMINAL_RUN_STATUSES.has(run.status) || seenTerminal.has(run.runId)) settle({ kind: 'finished' })
+          else if (run.status === 'paused') settle({ kind: 'paused' })
+          const end = await ended
+          if (end.kind === 'caller_ended') return json({ status: 'caller_ended', threadId })
+          const now = engine.getRun(target) ?? run
+          const fullView = resultTextVisible(scope)
+          const outcome = now.outcome
+          const reported = {
+            runId: now.runId,
+            status: now.status,
+            ...(fullView && outcome?.error ? { error: outcome.error.slice(0, THREAD_WAIT_ERROR_MAX_CHARS) } : {}),
+            ...(outcome?.interruptedBy ? { interruptedBy: outcome.interruptedBy } : {})
+          }
+          if (end.kind === 'timeout') return json({ status: 'timeout', threadId, run: reported, hint: 'The run is still going; call thread_wait again.' })
+          if (end.kind === 'paused') {
+            const pause = now.outcome?.pause
+            return json({
+              status: 'paused',
+              threadId,
+              run: reported,
+              ...(pause ? { pause: { reason: pause.reason, until: pause.until, estimated: pause.estimated } } : {}),
+              hint: 'A usage limit paused the run; it resumes by itself. Call thread_wait again later, or end it with thread_interrupt.'
+            })
+          }
+          // The text of this run only, never the latest message of the thread.
+          const resultText = fullView ? readRunResultText(engine.store, threadId, now.runId) : undefined
+          return json({ status: 'finished', threadId, run: reported, ...(resultText !== undefined ? { resultText } : {}) })
+        } finally {
+          clearTimeout(timer)
+          unsubscribe()
+          ctx.signal.removeEventListener('abort', onAbort)
+        }
+      }
+    },
+    {
+      name: 'thread_interrupt',
+      description: 'Stop a run of another thread: the run you name, which must still be the thread\'s active (or paused) run, and the subagents below it, as a Stop in the app does (needs the manage agent access level and a project the profile allows; a thread you launched needs no level). Queued messages a person sent stay. Name the run you read; if it has ended or another run started, nothing is stopped and you are told which run is active. A paused run is ended too.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          threadId: { type: 'string' },
+          runId: { type: 'string', description: 'The run to stop, as you last read it.' },
+          clientRequestId: CLIENT_REQUEST_ID_SCHEMA
+        },
+        required: ['threadId', 'runId']
+      },
+      access: 'managesOthers',
+      class: 'mutation',
+      launchedOk: true,
+      offered: () => false,
+      handler: async (args, ctx) => {
+        const threadId = requiredId(args, 'threadId')
+        const runId = requiredId(args, 'runId')
+        if (!host.stopRun) return notAvailable('thread_interrupt')
+        if (threadId === ctx.caller.threadId) throw new Error('thread_interrupt is for other threads; stop your own work by ending your turn.')
+        assertTakesWork(host, threadId)
+        const actor = actorOf(ctx)
+        const result = acceptedRunCommand(await host.stopRun(threadId, runId, { clientRequestId: `thread_interrupt:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`, actor }), runId)
+        if (!result.replayed) showAction(host, threadId, actor, `stopped run ${runId}`)
+        return json({ threadId, ...result })
+      }
+    },
+    {
+      name: 'thread_steer',
+      description: 'Add guidance to the turn another thread is running now (needs the manage agent access level and a project the profile allows). Name the run you read; if it is not the thread\'s active run, or is paused, nothing is sent and you are told why. The thread\'s model receives the text labelled as a message from an agent, not from the user. Refused when the run is running under a looser permission mode than yours (a running turn cannot be narrowed): send a message instead.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          threadId: { type: 'string' },
+          runId: { type: 'string', description: 'The run to steer, as you last read it.' },
+          text: { type: 'string' },
+          clientRequestId: CLIENT_REQUEST_ID_SCHEMA
+        },
+        required: ['threadId', 'runId', 'text']
+      },
+      access: 'managesOthers',
+      class: 'mutation',
+      minLevel: 'manage',
+      offered: () => false,
+      handler: async (args, ctx) => {
+        const threadId = requiredId(args, 'threadId')
+        const runId = requiredId(args, 'runId')
+        if (typeof args.text !== 'string' || !args.text.trim()) throw new Error('thread_steer requires text')
+        if (!host.steerRun) return notAvailable('thread_steer')
+        if (threadId === ctx.caller.threadId) throw new Error('thread_steer is for other threads.')
+        assertTakesWork(host, threadId)
+        const actor = actorOf(ctx)
+        const result = acceptedRunCommand(await host.steerRun(threadId, runId, args.text, { clientRequestId: `thread_steer:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`, actor }), runId)
+        if (!result.replayed) showAction(host, threadId, actor, `steered run ${runId}`)
+        return json({ threadId, ...result })
       }
     },
     {

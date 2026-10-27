@@ -28,6 +28,10 @@ const PHASE5_TOOLS: Record<string, string> = {
   update_task: 'actsAsCaller',
   list_tasks: 'actsAsCaller',
   thread_read: 'readsOthers',
+  thread_wait: 'readsOthers',
+  thread_send: 'managesOthers',
+  thread_interrupt: 'managesOthers',
+  thread_steer: 'managesOthers',
   queue_list: 'reads',
   queue_enqueue: 'writesThreads',
   // Phase 6 (SPEC §16.2).
@@ -65,7 +69,7 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
 
   it('lists every Phase 5 tool with its access class and a plain JSON schema', async () => {
     const { registry } = await setup()
-    const listed = registry.listFor({ readOnly: false, modeCeiling: 'default' })
+    const listed = registry.listFor({ readOnly: false, modeCeiling: 'default', accessLevel: 'manage' })
     const byName = Object.fromEntries(listed.map((tool) => [tool.name, tool.access]))
     for (const [name, access] of Object.entries(PHASE5_TOOLS)) expect(byName[name], name).toBe(access)
     for (const tool of listed) {
