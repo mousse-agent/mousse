@@ -1,3 +1,4 @@
+import { redactSecrets } from '../../shared/errors'
 import type { PermissionAction } from '../../shared/permissionMode'
 import type { UserQuestionAnswers } from '../../shared/types'
 import { canAnswerApproval, type Answerer, type ApprovalRefusal, type LineageLookup } from './approvalRights'
@@ -322,9 +323,11 @@ export class ThreadApprovals {
     const rights = canAnswerApproval({ threadId: row.threadId, action: row.action, permissionKey: row.permissionKey }, answeredBy, meaning, this.deps.lineage)
     if (!rights.ok) return { ok: false, reason: rights.code }
     const at = now(this.store)
-    const feedback = feedbackOf(answers) ?? customAnswerOf(row.questions, answers)
+    const raw = feedbackOf(answers) ?? customAnswerOf(row.questions, answers)
+    const feedback = raw ? redactSecrets(raw).slice(0, 2000) : null
     // The provider reads the reason from `feedback`, whether it came as a field or as a typed answer.
-    if (feedback && answers.feedback === undefined) answers = { ...answers, feedback }
+    // What is saved and handed on is the redacted text.
+    if (feedback) answers = { ...answers, feedback }
     const who = storedAnswerer(answeredBy)
     const result = this.db
       .statement(
@@ -353,6 +356,8 @@ export class ThreadApprovals {
     if (this.listPendingForRun(record.runId).length) return null
     const rows = select(this.store, "run_id = ? AND status = 'answered' AND delivered_at IS NULL AND answer_path = 'continue'", record.runId)
     if (!rows.length) return null
+    // Continuing after a restart is the user's click: answers given only by agents wait for one.
+    if (!rows.some((row) => row.answeredBy?.kind === 'user')) return null
     return { threadId: record.threadId, runId: record.runId, requestIds: rows.map((row) => row.requestId), uncertain: rows.some((row) => row.uncertain) }
   }
 
@@ -388,18 +393,59 @@ export class ThreadApprovals {
    * Hands answered requests to the run that delivers them: the continue turn, or the message that
    * denied them. A request already given to a run is left alone. Joins the admitting transaction.
    */
-  bindDelivery(requestIds: readonly string[], runId: string): void {
-    this.db.transaction(() => {
+  bindDelivery(requestIds: readonly string[], runId: string): number {
+    return this.db.transaction(() => {
       const at = now(this.store)
+      let bound = 0
       for (const requestId of requestIds) {
         const result = this.db
           .statement("UPDATE approval_requests SET continuation_run_id = ?, delivered_at = ? WHERE request_id = ? AND status = 'answered' AND delivered_at IS NULL")
           .run(runId, at, requestId)
         if (Number(result.changes) !== 1) continue
+        bound += 1
         const record = this.get(requestId)
         if (record) event(this.store, 'approval.delivered', record, { runId })
       }
+      return bound
     })
+  }
+
+  /** How many of these requests are answered and not yet handed to a run: what a continuation would deliver. */
+  deliverableCount(requestIds: readonly string[]): number {
+    return requestIds.filter((requestId) => {
+      const record = this.get(requestId)
+      return record?.status === 'answered' && record.deliveredAt === null
+    }).length
+  }
+
+  /**
+   * A Stop (or deleting the thread) ends what is still armed for it: an answer nobody delivered yet
+   * is retired (its recorded decision stays, for audit), and a grant that was not used is spent, so
+   * neither the next boot nor a later run can act on a decision that came before the Stop.
+   */
+  retireDelivery(threadId: string): number {
+    return this.db.transaction(() => {
+      const at = now(this.store)
+      let retired = 0
+      for (const row of select(this.store, "thread_id = ? AND status = 'answered' AND ((delivered_at IS NULL) OR (decision = 'allow' AND grant_consumed_at IS NULL AND continuation_run_id IS NOT NULL))", threadId)) {
+        const result = this.db
+          .statement(
+            `UPDATE approval_requests SET delivered_at = COALESCE(delivered_at, ?),
+               grant_consumed_at = CASE WHEN decision = 'allow' THEN COALESCE(grant_consumed_at, ?) ELSE grant_consumed_at END
+             WHERE request_id = ? AND status = 'answered'`
+          )
+          .run(at, at, row.requestId)
+        if (Number(result.changes) !== 1) continue
+        retired += 1
+        event(this.store, 'approval.retired', row, { reason: 'stopped' })
+      }
+      return retired
+    })
+  }
+
+  /** Removes the requests of a deleted thread: their prompts and answers must not outlive its transcript. */
+  deleteForThread(threadId: string): number {
+    return this.db.transaction(() => Number(this.db.statement('DELETE FROM approval_requests WHERE thread_id = ?').run(threadId).changes))
   }
 
   /** The answer reached its waiting provider. */
@@ -432,12 +478,19 @@ export class ThreadApprovals {
    * `uncertain` records which tools may already have run. A request whose run cannot be continued
    * is closed. An answer that never reached its provider becomes `continue` too and is reported.
    */
-  recoverOnBoot(uncertainTools: ReadonlyMap<string, string[]>): BootRecovery {
+  recoverOnBoot(uncertainTools: ReadonlyMap<string, string[]>, unattended: (runId: string) => boolean = () => false): BootRecovery {
     return this.db.transaction(() => {
       const report: BootRecovery = { continued: [], cancelled: [], undelivered: [] }
       const rows = select(this.store, "status = 'pending' OR (status = 'answered' AND delivered_at IS NULL AND answer_path = 'live')")
       const at = now(this.store)
       for (const row of rows) {
+        // Nobody watches an unattended run (a scheduled job, a workflow, a bot, a definition): its request had
+        // a ten-minute limit and a restart only makes the wait longer, so it is closed as it would have been.
+        if (row.status === 'pending' && row.runId && unattended(row.runId)) {
+          cancelApprovalRows(this.store, 'request_id = ?', [row.requestId], 'timed_out')
+          report.cancelled.push(row.requestId)
+          continue
+        }
         const run = row.runId ? this.store.getRun(row.runId) : null
         const resumable = run !== null && (run.status === 'interrupted' || run.status === 'uncertain')
         if (!resumable) {

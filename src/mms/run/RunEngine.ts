@@ -784,7 +784,7 @@ export class RunEngine extends EventEmitter {
         strandedQueued.push(run.runId)
       }
       // SPEC §17.6: what waited for a provider in the dead process can only continue the thread now.
-      const approvals = this.approvals.recoverOnBoot(uncertainTools)
+      const approvals = this.approvals.recoverOnBoot(uncertainTools, (runId) => (this.bindingForRun(runId)?.policy.origin ?? 'interactive') !== 'interactive')
       for (const requestId of approvals.continued) {
         const record = this.approvals.get(requestId)
         if (!record) continue
@@ -1652,6 +1652,8 @@ export class RunEngine extends EventEmitter {
       if (command.delegation) this.checkFollowUp(command.threadId, command.delegation)
       // The message denies the thread's saved approval requests in this same transaction: either every
       // request is settled and the run exists, or nothing is (SPEC §17.3).
+      // A continue turn that would deliver nothing (a send already took the group) is not a run.
+      if (command.bindDelivery && this.approvals.deliverableCount(command.bindDelivery.requestIds) === 0) return refuse('approvals_already_delivered')
       const settlement = command.settleApprovals ? this.approvals.settleForSend(command.threadId, command.settleApprovals) : null
       const continuationOf = command.continuationOfRunId
       const run = store.createRun({

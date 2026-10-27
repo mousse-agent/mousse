@@ -668,6 +668,15 @@ export class OrchestratorService extends EventEmitter {
     return this.lifecycle.snapshot()
   }
 
+  /**
+   * The first step of a profile stop, before the effect worker stops (which aborts the live turns): from
+   * here a provider's stop handling cannot withdraw a saved approval request, so each stays pending for the
+   * next boot to offer as a continue request. Callbacks waiting for an answer are released. Idempotent.
+   */
+  holdApprovals(): void {
+    this.questions.shutdown()
+  }
+
   beginShutdown(): void {
     this.lifecycle.beginShutdown()
     for (const retry of this.releaseRetries) clearTimeout(retry)
@@ -677,10 +686,12 @@ export class OrchestratorService extends EventEmitter {
     }
     this.startupDrainPending = []
     this.startupDrainScheduled.clear()
+    // Before any turn is stopped: a provider's stop handler dismisses its pending requests, and a dismissal
+    // while the profile stops is no withdrawal. The saved requests stay pending for the next boot.
+    this.questions.shutdown()
     // The shutdown reason marks these turns as cut off by a restart, not stopped by a user.
     for (const session of new Set([this.boundSession, ...this.sessions.values()])) session.activeTurn?.abort.abort(this.lifecycle.signal.reason)
     for (const turn of this.channelTurns.values()) turn.abort.abort()
-    this.questions.shutdown()
   }
 
   /** A turn abort caused by the profile shutting down (worker stop or lifecycle), not by a user. */
@@ -1605,7 +1616,7 @@ export class OrchestratorService extends EventEmitter {
         return { runId: run.runId, instanceId: binding?.instanceId ?? '', provider: binding?.driver ?? '', origin: binding ? policyOrigin(binding.policy) : 'interactive' }
       },
       effectDelivery: () => this.effectsEnabled(),
-      continuationDue: (due) => this.startApprovalContinuation(due)
+      continuationDue: (due, answeredBy) => this.startApprovalContinuation(due, answeredBy)
     })
   }
 
@@ -1621,16 +1632,24 @@ export class OrchestratorService extends EventEmitter {
    * continuation is a replay (`approval-run:<runId>`). The answers are handed to the new run in the
    * admitting transaction, and the run's first request for the same action is granted once.
    */
-  private startApprovalContinuation(due: ContinuationDue): void {
+  private startApprovalContinuation(due: ContinuationDue, answeredBy?: Answerer): void {
+    // The source of the user's own client: a subagent's continuation is then tracked as a follow-up and its
+    // parent hears the result, as for the restart note's Continue.
+    const source = answeredBy?.kind === 'user' && (answeredBy.via === 'gui' || answeredBy.via === 'cli') ? answeredBy.via : 'internal'
     void this.send('Continue where you left off.', false, {
       threadId: due.threadId,
       clientRequestId: `approval-run:${due.runId}`,
       continuationOfRunId: due.runId,
       acknowledgeUncertain: due.uncertain,
       bindDelivery: { requestIds: due.requestIds },
+      source,
       awaitMode: 'ack'
     }).catch((error: unknown) => {
       console.warn('the continuation of an answered approval could not start', { threadId: due.threadId, runId: due.runId, error: error instanceof Error ? error.message : String(error) })
+      // Another run already took these answers: nothing is waiting. Any other refusal leaves an answer with no
+      // card and no turn, so the thread says so.
+      if ((error as { code?: unknown } | undefined)?.code !== 'approvals_already_delivered')
+        this.noteProviderNotice(due.threadId, `Your answer to an approval could not continue the thread (${error instanceof Error ? error.message : String(error)}). Send a message to carry on.`)
     })
   }
 
@@ -1650,7 +1669,17 @@ export class OrchestratorService extends EventEmitter {
       }
       for (const [runId, rows] of byRun) {
         if (engine.approvals.listPendingForRun(runId).length) continue
-        this.startApprovalContinuation({ threadId: rows[0]!.threadId, runId, requestIds: rows.map((row) => row.requestId), uncertain: rows.some((row) => row.uncertain) })
+        const threadId = rows[0]!.threadId
+        // Continuing is the user's click: an answer only agents gave waits for one.
+        if (!rows.some((row) => row.answeredBy?.kind === 'user')) continue
+        // A run the crash left `uncertain` is not continued behind the user's back: the acknowledgement that
+        // a tool may already have run is theirs to give, with the restart note's Continue.
+        if (rows.some((row) => row.uncertain)) {
+          const tools = [...new Set(rows.flatMap((row) => row.uncertainTools ?? []))]
+          this.noteProviderNotice(threadId, `An approval you answered before the restart was not delivered, and ${tools.length ? tools.join(', ') : 'a tool'} may already have run. Check the work, then press Continue.`)
+          continue
+        }
+        this.startApprovalContinuation({ threadId, runId, requestIds: rows.map((row) => row.requestId), uncertain: false })
       }
     } catch (error) {
       console.warn('answered approvals could not be resumed', { error: error instanceof Error ? error.message : String(error) })
@@ -2126,6 +2155,11 @@ export class OrchestratorService extends EventEmitter {
       for (const id of result.threads) {
         try {
           engine.approvals.cancelForThread(id, 'stopped')
+          // And what was answered but not yet delivered, or granted but not yet used: nothing before a Stop may act after it.
+          engine.approvals.retireDelivery(id)
+          // A scheduled prompt that waited behind those approvals may run now.
+          const waiting = this.sessions.get(id)
+          if (waiting) this.scheduleQueueDrain(waiting)
         } catch (error) {
           console.warn('a Stop could not close approval requests', { threadId: id, error: error instanceof Error ? error.message : String(error) })
         }
@@ -4887,6 +4921,8 @@ export class OrchestratorService extends EventEmitter {
     this.dropContinuationsOf(threadId)
     try {
       this.runEngine?.approvals.cancelForThread(threadId, 'thread_deleted')
+      // Prompts and answers never outlive the thread they belong to.
+      this.runEngine?.approvals.deleteForThread(threadId)
     } catch (error) {
       console.warn('a deleted thread\'s approval requests could not be closed', { threadId, error: error instanceof Error ? error.message : String(error) })
     }
@@ -8023,6 +8059,15 @@ export class OrchestratorService extends EventEmitter {
       return
     }
     let item = claimed as QueuedMessage
+    // A scheduled prompt never answers for the user, and never replaces the context a waiting approval was
+    // meant to continue: it stays queued while the thread waits on one, at startup too (the approval a restart
+    // left has no live turn holding the thread). The claim is given back; it drains once nothing waits.
+    if (item.origin?.kind === 'schedule' && this.questions.listPendingForThread(session.threadId).length > 0) {
+      this.releaseSessionClaim(session, item.id, claimToken)
+      this.emitQueueUpdated(session.threadId, session.queue)
+      settle('idle')
+      return
+    }
     const managedByStartup = opts?.managedByStartup === true
     // The Stop fence at promotion: an entry that starts work on behalf of a parent and was queued before a
     // Stop of its thread is refused (a Stop removes such entries itself; this catches one that outlived it).

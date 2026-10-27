@@ -81,7 +81,7 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
       const entry = ev.data as PendingApproval
       if (entry?.approval && entry.requestId) {
         for (const line of describeApproval(entry)) writeLine(line)
-        writeLine('  /approve to allow once, /deny [reason] to deny')
+        writeLine(`  /approve ${entry.requestId.slice(0, 8)} to allow once, /deny ${entry.requestId.slice(0, 8)} [reason] to deny`)
       }
     }
     if (ev.type === 'turn.started') turnActive = true

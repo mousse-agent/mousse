@@ -142,12 +142,32 @@ describe('mousse approvals', () => {
 })
 
 describe('interactive /approve and /deny', () => {
-  it('approves the latest request waiting on the thread, once', async () => {
-    const daemon = fakeDaemon([request('req-1'), request('req-2')])
+  it('approves the one request waiting on the thread, once, by the decision its option declares', async () => {
+    const daemon = fakeDaemon([request('req-1')])
     await expect(handleApprovalCommand('/approve', daemon.client, 'thread-1234567890')).resolves.toBe('Answered: allow')
-    // The latest request, by the decision its option declares.
-    expect(daemon.calls.at(-1)!.params).toEqual({ requestId: 'req-2', answers: { permission: 'allow' } })
+    expect(daemon.calls.at(-1)!.params).toEqual({ requestId: 'req-1', answers: { permission: 'allow' } })
+  })
+
+  it('with several waiting, answers only the one named by its id, never "the latest"', async () => {
+    const daemon = fakeDaemon([request('req-1'), request('req-2')])
+    const reply = await handleApprovalCommand('/approve', daemon.client, 'thread-1234567890')
+    expect(reply).toContain('2 approvals are waiting')
+    expect(reply).toContain('req-1')
+    expect(reply).toContain('req-2')
+    expect(daemon.calls.some((call) => call.method === 'orchestrator.answerQuestions')).toBe(false)
+    // A short or unknown id answers nothing either.
+    await expect(handleApprovalCommand('/approve rq', daemon.client, 'thread-1234567890')).resolves.toContain('2 approvals are waiting')
+    // The id picks the request; the rest of a denial is the reason.
+    await expect(handleApprovalCommand('/approve req-2', daemon.client, 'thread-1234567890')).resolves.toBe('Answered: allow')
     expect([...daemon.settled.keys()]).toEqual(['req-2'])
+    await expect(handleApprovalCommand('/deny req-1 use pnpm', daemon.client, 'thread-1234567890')).resolves.toBe('Answered: reject')
+    expect(daemon.calls.at(-1)!.params).toEqual({ requestId: 'req-1', answers: { permission: 'reject', feedback: 'use pnpm' } })
+  })
+
+  it('a prefix that fits more than one request is refused', async () => {
+    const daemon = fakeDaemon([request('abcd-1'), request('abcd-2')])
+    await expect(handleApprovalCommand('/approve abcd', daemon.client, 'thread-1234567890')).resolves.toContain('More than one')
+    expect(daemon.settled.size).toBe(0)
   })
 
   it('denies with a reason for the agent', async () => {

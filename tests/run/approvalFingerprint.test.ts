@@ -57,17 +57,32 @@ describe('approval fingerprints (SPEC §17.5)', () => {
     expect(claude('NotebookEdit', { notebook_path: '/n.ipynb' }, 'claude:edit')).toBeNull()
   })
 
-  it('any other tool is its whole input minus the description', () => {
-    expect(claude('WebFetch', { url: 'https://a.test', description: 'x' }, 'claude:tool:WebFetch')).toBe(claude('WebFetch', { url: 'https://a.test' }, 'claude:tool:WebFetch'))
+  it('any other tool is its whole input: only a tool\'s own schema says a field is a label, so none is dropped', () => {
+    const tool = (input: unknown, name = 'mcp__tickets__update') => claude(name, input, `claude:tool:${name}`)
+    // For a ticket tool, `description` is the content being changed.
+    expect(tool({ id: 7, description: 'ship it' })).not.toBe(tool({ id: 7, description: 'delete everything' }))
+    expect(tool({ id: 7, description: 'ship it' })).toBe(tool({ id: 7, description: 'ship it' }))
     expect(claude('WebFetch', { url: 'https://b.test' }, 'claude:tool:WebFetch')).not.toBe(claude('WebFetch', { url: 'https://a.test' }, 'claude:tool:WebFetch'))
+    expect(claude('WebFetch', { url: 'https://a.test', description: 'x' }, 'claude:tool:WebFetch')).not.toBe(claude('WebFetch', { url: 'https://a.test' }, 'claude:tool:WebFetch'))
   })
 
-  it('Codex, the Pi agent and Mousse tools use their arguments; an ACP request is its raw input as given', () => {
+  it('a command or an edit without the directory it runs in is not identified, so it gets no fingerprint', () => {
+    expect(claude('Bash', { command: 'ls' }, 'claude:command', { cwd: undefined })).toBeNull()
+    expect(approvalFingerprint({ instanceId: 'pi:openai', permissionKey: 'pi:command', toolName: 'bash', input: { command: 'ls' } })).toBeNull()
+    // The same relative call in another project is another action.
+    const pi = (cwd: string) => approvalFingerprint({ instanceId: 'pi:openai', cwd, permissionKey: 'pi:edit', toolName: 'edit', input: { path: 'src/a.ts', oldText: 'a', newText: 'b' } })
+    expect(pi('/work/app')).toMatch(/^[0-9a-f]{64}$/)
+    expect(pi('/work/app')).not.toBe(pi('/work/app-worktree'))
+    // An action that is not about files or commands needs no directory.
+    expect(approvalFingerprint({ instanceId: 'claude', permissionKey: 'claude:tool:WebFetch', toolName: 'WebFetch', input: { url: 'https://a.test' } })).toMatch(/^[0-9a-f]{64}$/)
+  })
+
+  it('Codex and the Pi agent use their arguments, and a Mousse tool gets none: what it acts on changes before a continuation', () => {
     expect(approvalFingerprint({ ...base, permissionKey: 'codex:command', toolName: 'commandExecution', input: { command: 'make', cwd: '/work/app' } })).toMatch(/^[0-9a-f]{64}$/)
     expect(approvalFingerprint({ ...base, permissionKey: 'pi:command', toolName: 'bash', input: { command: 'ls', description: 'x' } }))
-      .toBe(approvalFingerprint({ ...base, permissionKey: 'pi:command', toolName: 'bash', input: { command: 'ls' } }))
-    expect(approvalFingerprint({ ...base, permissionKey: 'mousse:integrate', toolName: 'integrate_delegation', input: { delegationId: 'd1' } }))
-      .not.toBe(approvalFingerprint({ ...base, permissionKey: 'mousse:integrate', toolName: 'integrate_delegation', input: { delegationId: 'd2' } }))
+      .not.toBe(approvalFingerprint({ ...base, permissionKey: 'pi:command', toolName: 'bash', input: { command: 'ls' } }))
+    for (const [key, name] of [['mousse:integrate', 'integrate_delegation'], ['mousse:merge_back', 'thread_merge_back']] as const)
+      expect(approvalFingerprint({ ...base, permissionKey: key, toolName: name, input: { delegationId: 'd1' } })).toBeNull()
     const acp = (rawInput: unknown) => approvalFingerprint({ ...base, permissionKey: 'acp:execute', toolName: 'execute', input: rawInput })
     expect(acp({ command: ['ls'] })).toBe(acp({ command: ['ls'] }))
     expect(acp({ command: ['ls'] })).not.toBe(acp({ command: ['rm'] }))

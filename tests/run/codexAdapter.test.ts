@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { usageLimitError } from '../../src/mms/orchestrator/providerErrors'
-import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
+import { UserQuestionService, type ApprovalTag } from '../../src/mms/orchestrator/UserQuestionService'
+import { approvalFingerprint } from '../../src/mms/run/approvalFingerprint'
 import { CodexAppServerExitedError } from '../../src/mms/providers/codex/CodexAppServerClient'
 import { CodexTurnFailure } from '../../src/mms/providers/codex/CodexProviderService'
 import { decideUsageLimit } from '../../src/mms/run/pausePolicy'
@@ -621,6 +622,55 @@ describe('CodexAdapter', () => {
     expect(asked[2].questions).toEqual([
       { id: 'q1', prompt: 'Scope\nWhich module?', options: [{ id: 'run', label: 'run' }, { id: 'agents', label: 'agents' }] }
     ])
+  })
+
+  describe('what a saved Codex request is fingerprinted by (a grant after a restart must name the exact action)', () => {
+    /** Runs one turn whose approval requests are answered with `decision`, and returns the fingerprint each was saved under. */
+    const fingerprints = async (frames: TranscriptFrame[]): Promise<Array<string | null>> => {
+      const replay = transport([...handshake(), ...threadStart(4), ...turnStart(5, 'go'), ...frames, ...message('msg-1', ['ok']), completed('completed')])
+      const codex = service(replay)
+      const asked: Array<ApprovalTag['tool']> = []
+      const original = questions.requestAnswers.bind(questions)
+      questions.requestAnswers = ((qs: Parameters<typeof original>[0], threadId?: string, options?: Parameters<typeof original>[2]) => {
+        asked.push(options?.approval?.tool)
+        return Promise.resolve({ permission: 'reject' })
+      }) as typeof questions.requestAnswers
+      await new CodexAdapter(() => codex).startTurn(input({ prompt: 'go' }), recordingSink(), control(), host())
+      replay.assertDone()
+      return asked.map((tool) => tool === undefined ? null : approvalFingerprint({ instanceId: 'codex', permissionKey: tool.name === 'fileChange' ? 'codex:fileChange' : 'codex:command', toolName: tool.name, input: tool.input, ...(tool.cwd ? { cwd: tool.cwd } : {}) }))
+    }
+    const command = (id: string, params: Record<string, unknown>): TranscriptFrame[] => [
+      inn({ id: `srv-${id}`, method: 'item/commandExecution/requestApproval', params: { kind: 'command', threadId: T, turnId: 'turn-1', itemId: `cmd-${id}`, startedAtMs: 0, environmentId: null, ...params } }),
+      out({ id: `srv-${id}`, result: { decision: 'decline' } })
+    ]
+    const patch = (id: string, changes: Array<Record<string, unknown>>, params: Record<string, unknown> = {}): TranscriptFrame[] => [
+      note('item/started', { threadId: T, turnId: 'turn-1', item: { type: 'fileChange', id: `patch-${id}`, changes, status: 'inProgress' } }),
+      inn({ id: `srv-${id}`, method: 'item/fileChange/requestApproval', params: { threadId: T, turnId: 'turn-1', itemId: `patch-${id}`, startedAtMs: 0, reason: null, ...params } }),
+      out({ id: `srv-${id}`, result: { decision: 'decline' } })
+    ]
+    const change = (diff: string | undefined) => ({ path: 'src/a.ts', kind: { type: 'update' }, ...(diff === undefined ? {} : { diff }) })
+
+    it('a command Codex did not give is never fingerprinted; a known one is, with where it runs', async () => {
+      const [unknown, known, other] = await fingerprints([...command('1', {}), ...command('2', { command: 'make', cwd: '/w' }), ...command('3', { command: 'make', cwd: '/elsewhere' })])
+      expect(unknown).toBeNull()
+      expect(known).toMatch(/^[0-9a-f]{64}$/)
+      expect(other).not.toBe(known)
+    })
+
+    it('a file change without its diff is never fingerprinted, and a session-wide write root is part of the action', async () => {
+      const [noDiff, partial, plain, rooted, otherRoot] = await fingerprints([
+        ...patch('1', [change(undefined)]),
+        ...patch('2', [change('@@\n-a\n+b'), change(undefined)]),
+        ...patch('3', [change('@@\n-a\n+b')]),
+        ...patch('4', [change('@@\n-a\n+b')], { grantRoot: '/w' }),
+        ...patch('5', [change('@@\n-a\n+b')], { grantRoot: '/w/src' })
+      ])
+      expect(noDiff).toBeNull()
+      expect(partial).toBeNull()
+      expect(plain).toMatch(/^[0-9a-f]{64}$/)
+      expect(rooted).not.toBe(plain)
+      expect(otherRoot).not.toBe(rooted)
+    })
   })
 
   it('runs plan turns read-only and declines approvals without asking', async () => {

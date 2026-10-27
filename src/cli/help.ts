@@ -62,8 +62,8 @@ Interactive chat (default on a TTY without -p):
   /model [name]               Same as /models
   /steer <prompt>             Mid-turn guidance for the active turn only
   /stop                       Abort the in-flight turn
-  /approve                    Allow the latest approval request waiting on the thread, once
-  /deny [reason]              Deny it, with a reason for the agent
+  /approve [id]               Allow an approval request once (the id is needed when several wait)
+  /deny [id] [reason]        Deny it, with a reason for the agent
   /help                       Interactive command help
   /exit                       Leave interactive mode
   /<workflow> [arguments]     Run a published workflow in the current profile

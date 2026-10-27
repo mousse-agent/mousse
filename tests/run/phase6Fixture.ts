@@ -190,6 +190,8 @@ export function phase6Daemon(home: string, adapters: ProviderAdapter[], options:
   const shutdown = async (): Promise<void> => {
     if (stopped) return
     stopped = true
+    // As the profile does: saved approvals are held before the worker's stop aborts the turns.
+    orch.holdApprovals()
     const workerStopped = worker.stop()
     await orch.shutdown()
     await workerStopped

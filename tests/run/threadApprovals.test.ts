@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { TurnOrigin } from '../../src/shared/harness/types'
 import { UserQuestionService, type ApprovalTag } from '../../src/mms/orchestrator/UserQuestionService'
 import type { PendingUserQuestions } from '../../src/shared/types'
+import type { TurnInput } from '../../src/mms/run/adapters/ProviderAdapter'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { EffectOutbox } from '../../src/mms/run/EffectOutbox'
 import { Reconciler } from '../../src/mms/run/Reconciler'
@@ -172,7 +173,7 @@ describe('saved approval requests: the store and the question service', () => {
     const request = ask(f, 't')
     expect(f.questions.settle(request.requestId, { permission: 'reject', feedback: '  never run tests here  ' }, { kind: 'user', via: 'cli' })).toEqual({ ok: true, decision: 'reject' })
     await request.promise
-    expect(request.outcome.value).toEqual({ permission: 'reject', feedback: '  never run tests here  ' })
+    expect(request.outcome.value).toEqual({ permission: 'reject', feedback: 'never run tests here' })
     expect(f.engine.approvals.get(request.requestId)).toMatchObject({ status: 'answered', decision: 'reject', feedback: 'never run tests here', answeredBy: { kind: 'user', via: 'cli' }, deliveredAt: expect.any(String) })
     expect(f.engine.approvals.consumeContinuationGrant('t', 'any', f.engine.approvals.get(request.requestId)!.fingerprint)).toBe(false)
     expect(f.questions.listPendingForThread('t')).toEqual([])
@@ -360,6 +361,24 @@ describe('saved approval requests: the store and the question service', () => {
     await expect(waiter).resolves.toEqual({ permission: 'allow' })
   })
 
+  it('saved prompts are bounded and carry no credentials; a deleted thread takes its requests with it', async () => {
+    const f = fixture()
+    await running(f.engine, 't', 'req-1')
+    const request = ask(f, 't', tag({ tool: BASH('curl') }), prompt(`Allow Codex to run this command?\ncurl -H "Authorization: Bearer abcdef0123456789abcdef" "https://x.test?token=hunter2value" ${'y'.repeat(9000)}`))
+    const saved = f.engine.approvals.get(request.requestId)!.questions[0]!.prompt
+    expect(saved).not.toContain('abcdef0123456789abcdef')
+    expect(saved).not.toContain('hunter2value')
+    expect(saved.length).toBeLessThanOrEqual(4500)
+    f.questions.settle(request.requestId, { permission: 'reject', feedback: 'no: sk-live-abcdef123456 leaked' }, USER)
+    await request.promise
+    const row = f.engine.approvals.get(request.requestId)!
+    expect(row.feedback).not.toContain('sk-live-abcdef123456')
+    expect(JSON.stringify(row.answers)).not.toContain('sk-live-abcdef123456')
+
+    expect(f.engine.approvals.deleteForThread('t')).toBe(1)
+    expect(f.engine.approvals.get(request.requestId)).toBeNull()
+  })
+
   it('shutdown releases the callbacks and leaves the saved requests exactly as they are', async () => {
     const f = fixture()
     await running(f.engine, 't', 'req-1')
@@ -397,21 +416,21 @@ describe('approval requests across a daemon restart', () => {
    * The binding a real turn on the pi instance records. Requests are fingerprinted with the instance
    * they were asked on, so a run set up by hand needs the instance a continuation will run on.
    */
-  const bindRun = (daemon: Phase6Daemon, run: RunRecord): void => {
+  const bindRun = (daemon: Phase6Daemon, run: RunRecord, origin: TurnOrigin = 'interactive'): void => {
     daemon.engine.recordExecutionBinding(run.runId, {
       instanceId: 'pi:openai', driver: 'pi', accountGeneration: 0, homeId: 'default', configRevision: 0, model: 'gpt-replay',
-      policy: { mode: 'default', origin: 'interactive', approvals: 'ask', permissionMode: 'accept_edits' }
+      policy: { mode: 'default', origin, approvals: 'ask', permissionMode: 'accept_edits' }
     })
   }
 
   /** A pi-shaped adapter whose script can ask the daemon's questions, like a provider does. */
-  const scripted = (script: (input: { prompt: string; threadId: string }) => Promise<string> | string) => piAdapter((input) => script(input))
+  const scripted = (script: (input: TurnInput) => Promise<string> | string) => piAdapter((input) => script(input))
 
   /**
    * A daemon that dies while the run it is executing waits for the user: the run is active, each
    * `asks` entry is a request from it, and `tools` are started in the tool ledger.
    */
-  const crashWhileAsking = async (asks: Tool[], options: { startedTools?: string[] } = {}) => {
+  const crashWhileAsking = async (asks: Tool[], options: { startedTools?: string[]; origin?: TurnOrigin; answerBeforeCrash?: boolean } = {}) => {
     const first = phase6Daemon(home!, [scripted(() => 'unused')], { pid: 1 })
     const thread = first.store.createThread('Approvals')
     first.orch.setThreadModelOverride(thread.id, PI)
@@ -419,7 +438,7 @@ describe('approval requests across a daemon restart', () => {
     if (sent.status !== 'accepted') throw new Error('send rejected')
     first.engine.markStarting(sent.runId)
     const run = first.engine.markRunning(sent.runId)
-    bindRun(first, run)
+    bindRun(first, run, options.origin)
     for (const [index, name] of (options.startedTools ?? []).entries())
       first.engine.tools.start({ invocationId: `call-${index}`, runId: run.runId, attemptId: run.activeAttemptId!, tool: name, argsDigest: 'd', now: new Date().toISOString() })
     const requestIds: string[] = []
@@ -427,6 +446,11 @@ describe('approval requests across a daemon restart', () => {
       const waiter = first.questions.requestAnswers(prompt(`Allow Claude Code to run a command (${tool.name})?\n${JSON.stringify(tool.input)}`), thread.id, { approval: tag({ tool, ...kindOf(tool) }) })
       waiter.catch(() => undefined)
       requestIds.push(first.questions.listPendingForThread(thread.id).at(-1)!.requestId)
+    }
+    if (options.answerBeforeCrash) {
+      // The answer is committed with its delivery effect, but the worker is gone before it runs.
+      await first.worker.stop()
+      first.questions.settle(requestIds[0]!, { permission: 'allow' }, USER)
     }
     await first.crash()
     // The process is gone: its callbacks die with it, the rows stay.
@@ -750,6 +774,165 @@ describe('approval requests across a daemon restart', () => {
     expect(second.boot.approvals.continued).toEqual([requestId])
     expect(second.engine.approvals.get(requestId)).toMatchObject({ status: 'pending', answerPath: 'continue', runId: sent.runId })
     expect(second.questions.listPendingForThread(thread.id)[0]).toMatchObject({ requestId, approval: { answerPath: 'continue' } })
+  })
+
+  describe('council round 1', () => {
+    it.each(['Claude', 'Codex'] as const)('a clean shutdown keeps a request tied to the turn\'s stop handling (%s shaped)', async (shape) => {
+      let first!: Phase6Daemon
+      const adapter = scripted(async (input) => {
+        // Claude's turn dismisses its thread's requests when it is cancelled; Codex binds each request to the run's signal.
+        if (shape === 'Claude') input.signal.addEventListener('abort', () => first.questions.dismissAllForThread(input.threadId), { once: true })
+        await first.questions.requestAnswers(prompt(), input.threadId, { approval: tag({ tool: BASH('npm test') }), ...(shape === 'Codex' ? { signal: input.signal } : {}) }).catch(() => undefined)
+        return 'never delivered'
+      })
+      first = phase6Daemon(home!, [adapter], { pid: 1 })
+      const thread = first.store.createThread('Shutdown')
+      first.orch.setThreadModelOverride(thread.id, PI)
+      const sent = await first.orch.send('go', false, { threadId: thread.id, clientRequestId: 'go-1', awaitMode: 'ack' })
+      await waitFor(() => first.questions.listPendingForThread(thread.id).length === 1, 'the turn to ask')
+      const requestId = first.questions.listPendingForThread(thread.id)[0]!.requestId
+      await first.shutdown()
+
+      const second = boot()
+      // The turn's stop handling ran, and it withdrew nothing.
+      expect(second.engine.listEvents(thread.id).some((event) => event.type === 'approval.cancelled')).toBe(false)
+      expect(second.engine.getRun(sent.runId!)).toMatchObject({ status: 'interrupted', outcome: { interruptedBy: 'daemon_restart' } })
+      expect(second.boot.approvals.continued).toEqual([requestId])
+      expect(second.engine.approvals.get(requestId)).toMatchObject({ status: 'pending', answerPath: 'continue' })
+    })
+
+    it('a provider dismissal after the profile stopped leaves a saved request alone, but a Stop of a running profile still closes it', async () => {
+      const { threadId, requestIds } = await crashWhileAsking([BASH('npm test')])
+      const second = boot()
+      second.questions.shutdown()
+      expect(second.questions.dismiss(requestIds[0]!)).toBe(false)
+      second.questions.dismissAllForThread(threadId)
+      expect(second.engine.approvals.get(requestIds[0]!)!.status).toBe('pending')
+    })
+
+    it('a Stop retires an answer nobody delivered and spends its grant: the next boot starts nothing', async () => {
+      const { threadId, requestIds } = await crashWhileAsking([BASH('npm test')])
+      const second = boot()
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      // The continuation fails to be admitted: the answer is recorded and undelivered.
+      // The attach-time resume has looked at the (still pending) request; now the continuation fails to be admitted.
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      vi.spyOn(second.engine.approvals, 'bindDelivery').mockImplementationOnce(() => { throw new Error('admission failed') })
+      expect(second.questions.settle(requestIds[0]!, { permission: 'allow' }, USER)).toMatchObject({ ok: true })
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      expect(second.engine.approvals.get(requestIds[0]!)).toMatchObject({ status: 'answered', decision: 'allow', deliveredAt: null })
+      expect(second.engine.listRuns(threadId)).toHaveLength(1)
+
+      await second.orch.stopThread(threadId, 'user', { clearQueue: true })
+      // The decision stays for audit; nothing is armed any more.
+      expect(second.engine.approvals.get(requestIds[0]!)).toMatchObject({ status: 'answered', decision: 'allow', deliveredAt: expect.any(String), grantConsumedAt: expect.any(String) })
+      expect(second.engine.approvals.listUndelivered()).toEqual([])
+      expect(second.engine.listEvents(threadId).some((event) => event.type === 'approval.retired')).toBe(true)
+      await second.crash()
+
+      const adapter = scripted(() => 'must not run')
+      const third = boot(adapter, 3)
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      expect(third.engine.listRuns(threadId)).toHaveLength(1)
+      expect(adapter.turns).toEqual([])
+    })
+
+    it('a scheduled prompt queued behind a recovered approval stays queued through the startup drain, and runs once nothing waits', async () => {
+      const { threadId, requestIds } = await crashWhileAsking([BASH('npm test')])
+      const adapter = scripted(() => 'ok')
+      const second = boot(adapter)
+      const queued = await second.orch.send('check the build', false, { threadId, clientRequestId: 'job-1', source: 'schedule', origin: 'schedule', preemptQuestions: false, queueOrigin: { kind: 'schedule', jobId: 'job', occurrenceKey: 'k1' } })
+      expect(queued.queued).toBe(true)
+
+      second.orch.recoverAndDrainPendingQueues()
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      expect(adapter.turns).toEqual([])
+      expect(second.engine.approvals.get(requestIds[0]!)).toMatchObject({ status: 'pending', decision: null })
+      // Still the same non-preempting item, waiting.
+      expect(second.orch.listQueue(threadId)).toEqual([expect.objectContaining({ content: 'check the build', origin: expect.objectContaining({ kind: 'schedule' }) })])
+
+      // The user answers: the continuation runs first, then the scheduled prompt.
+      second.questions.settle(requestIds[0]!, { permission: 'allow' }, USER)
+      await waitFor(() => adapter.turns.some((turn) => turn.prompt === 'check the build'), 'the scheduled prompt to run')
+      expect(adapter.turns.map((turn) => turn.prompt)[0]).toBe('Continue where you left off.')
+    })
+
+    it('an answer committed before a crash does not continue an uncertain run behind the user\'s back: the thread says so, and Continue delivers it', async () => {
+      const { threadId, runId, requestIds } = await crashWhileAsking([BASH('npm run deploy')], { startedTools: ['Bash'], answerBeforeCrash: true })
+      const adapter = scripted(() => 'checked')
+      const second = boot(adapter)
+      expect(second.boot.uncertain).toEqual([runId])
+      expect(second.boot.approvals.undelivered).toEqual(requestIds)
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      expect(second.engine.listRuns(threadId)).toHaveLength(1)
+      expect(adapter.turns).toEqual([])
+      expect(second.orch.getMessages(threadId).some((message) => message.role === 'system' && message.content.includes('may already have run') && message.content.includes('Bash'))).toBe(true)
+
+      await second.orch.send('Continue where you left off.', false, { threadId, clientRequestId: `continue:${runId}`, continuationOfRunId: runId, acknowledgeUncertain: true })
+      expect(second.engine.approvals.get(requestIds[0]!)).toMatchObject({ continuationRunId: asc(second.engine.listRuns(threadId))[1]!.runId })
+      expect(seen(adapter).some((text) => text.includes('The user approved'))).toBe(true)
+    })
+
+    it('an unattended run\'s request keeps its timeout across a restart: boot closes it instead of leaving a scheduled thread waiting for ever', async () => {
+      const { threadId, requestIds } = await crashWhileAsking([BASH('make')], { origin: 'schedule' })
+      const second = boot()
+      expect(second.boot.approvals).toEqual({ continued: [], cancelled: requestIds, undelivered: [] })
+      expect(second.engine.approvals.get(requestIds[0]!)).toMatchObject({ status: 'cancelled', cancelReason: 'timed_out' })
+      expect(second.questions.listPendingForThread(threadId)).toEqual([])
+      // Nothing holds the thread: a scheduled prompt runs.
+      const result = await second.orch.send('check the build', false, { threadId, clientRequestId: 'job-1', source: 'schedule', origin: 'schedule', preemptQuestions: false })
+      expect(result.queued).toBeUndefined()
+    })
+
+    it('an agent\'s answer never starts a restart continuation: that is the user\'s click', async () => {
+      const { threadId, runId, requestIds } = await crashWhileAsking([BASH('npm test')])
+      const adapter = scripted(() => 'ok')
+      const second = boot(adapter)
+      second.engine.delegations.createLineage({ threadId, parentThreadId: 'parent-thread', parentRunId: 'run-parent', relationship: 'subagent' })
+      expect(second.questions.settle(requestIds[0]!, { permission: 'allow' }, { kind: 'agent', threadId: 'parent-thread', runId: 'run-parent', permissionMode: 'full' })).toMatchObject({ ok: true })
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      expect(second.engine.listRuns(threadId)).toHaveLength(1)
+      expect(second.engine.approvals.get(requestIds[0]!)).toMatchObject({ status: 'answered', answeredBy: { kind: 'agent' }, deliveredAt: null })
+      // Nor does a later boot.
+      await second.crash()
+      const third = boot(adapter, 3)
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      expect(third.engine.listRuns(threadId)).toHaveLength(1)
+      expect(adapter.turns).toEqual([])
+      // The user's Continue delivers the agent's answer.
+      await third.orch.send('Continue where you left off.', false, { threadId, clientRequestId: `continue:${runId}`, continuationOfRunId: runId })
+      expect(third.engine.approvals.get(requestIds[0]!)!.continuationRunId).toBe(asc(third.engine.listRuns(threadId))[1]!.runId)
+    })
+
+    it('the continuation is a run of the user\'s own client, so a subagent\'s parent hears its result', async () => {
+      const { threadId, runId, requestIds } = await crashWhileAsking([BASH('npm test')])
+      const second = boot()
+      second.questions.settle(requestIds[0]!, { permission: 'allow' }, { kind: 'user', via: 'cli' })
+      await settled(second, threadId, 2)
+      expect(asc(second.engine.listRuns(threadId))[1]).toMatchObject({ source: 'cli', clientRequestId: `approval-run:${runId}` })
+    })
+
+    it('a continuation that would deliver nothing is refused, not run; a refused one is surfaced', async () => {
+      const { threadId, runId, requestIds } = await crashWhileAsking([BASH('npm test')])
+      const second = boot()
+      second.questions.settle(requestIds[0]!, { permission: 'allow' }, USER)
+      await settled(second, threadId, 2)
+      await expect(second.orch.send('Continue where you left off.', false, {
+        threadId, clientRequestId: 'approval-run:duplicate', continuationOfRunId: runId, bindDelivery: { requestIds }, source: 'gui'
+      })).rejects.toMatchObject({ code: 'approvals_already_delivered' })
+      expect(second.engine.listRuns(threadId)).toHaveLength(2)
+      expect(second.engine.store.getReceipt('approval-run:duplicate')).toBeNull()
+    })
+
+    it('a refusal that leaves an answer with no card and no turn is told to the thread', async () => {
+      const { threadId, requestIds } = await crashWhileAsking([BASH('npm test')])
+      const second = boot()
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      vi.spyOn(second.orch, 'send').mockRejectedValueOnce(Object.assign(new Error('Cannot continue run'), { code: 'continuation_source_active' }))
+      second.questions.settle(requestIds[0]!, { permission: 'allow' }, USER)
+      await waitFor(() => second.orch.getMessages(threadId).some((message) => message.role === 'system' && message.content.includes('could not continue the thread')), 'the notice')
+    })
+
   })
 
   it('a Stop closes the requests a restart left, and an answer afterwards learns it', async () => {

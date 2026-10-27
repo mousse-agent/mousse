@@ -98,10 +98,26 @@ export async function handleApprovalCommand(text: string, client: ApprovalClient
   const match = /^\/(approve|deny)(?:\s+([\s\S]*))?$/i.exec(text.trim())
   if (!match) return null
   const verb = match[1]!.toLowerCase()
-  const rest = match[2]?.trim()
+  const rest = match[2]?.trim() ?? ''
   const pending = await listPendingApprovals(client, threadId)
-  const latest = pending.at(-1)
-  if (!latest) return 'No approval is waiting on this thread.'
+  if (!pending.length) return 'No approval is waiting on this thread.'
+  // The request is the one named by its id (four or more characters of it are enough); without an id the
+  // only waiting request is meant. With several waiting, an answer for "the latest" could allow an action
+  // other than the one the user read, so an id is required.
+  const [first = ''] = rest.split(/\s+/)
+  const named = first.length >= 4 ? pending.filter((entry) => entry.requestId.startsWith(first)) : []
+  let latest: PendingApproval
+  let reason = rest
+  if (named.length === 1) {
+    latest = named[0]!
+    reason = rest.slice(first.length).trim()
+  } else if (named.length > 1) {
+    return `More than one waiting request starts with ${first}; give more of its id.`
+  } else if (pending.length === 1) {
+    latest = pending[0]!
+  } else {
+    return [`${pending.length} approvals are waiting; name the one you mean with /${verb} <id>:`, ...pending.map((entry) => `  ${entry.requestId}  ${(entry.questions[0]?.prompt ?? '').split('\n')[0]}`)].join('\n')
+  }
   const question = latest.questions[0]
   if (!question) return 'The waiting approval has no options to answer.'
   if (verb === 'approve') {
@@ -111,5 +127,5 @@ export async function handleApprovalCommand(text: string, client: ApprovalClient
   }
   const option = rejectOption(question)
   if (!option) return 'This request has no option that denies it.'
-  return describeAnswerResult(await answerApproval(client, latest.requestId, option.id, { threadId, ...(rest ? { feedback: rest } : {}) }), option.id)
+  return describeAnswerResult(await answerApproval(client, latest.requestId, option.id, { threadId, ...(reason ? { feedback: reason } : {}) }), option.id)
 }

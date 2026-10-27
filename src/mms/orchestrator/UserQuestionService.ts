@@ -11,6 +11,7 @@
  */
 
 import { EventEmitter } from 'events'
+import { redactSecrets } from '../../shared/errors'
 import type { TurnOrigin } from '../../shared/harness/types'
 import type { PermissionAction } from '../../shared/permissionMode'
 import type { PendingApprovalInfo, PendingUserQuestions, UserQuestionAnswers } from '../../shared/types'
@@ -32,6 +33,9 @@ import {
 } from '../run/ThreadApprovals'
 
 const QUESTION_TIMEOUT_MS = 10 * 60 * 1000
+
+/** The most characters of an approval prompt that are saved. */
+const SAVED_PROMPT_CHARS = 4500
 
 /** Option ids/labels treated as the default rejection when preempted by a new chat message. */
 const DEFAULT_REJECT_OPTION = /reject|decline|cancel|dismiss|skip|\bno\b/i
@@ -120,7 +124,7 @@ export interface ApprovalBinding {
   /** Whether answers are delivered through a `request.respond` effect (else directly). */
   effectDelivery(): boolean
   /** Every request of a dead run is answered: the continue turn that carries the answers is due. */
-  continuationDue(due: ContinuationDue): void
+  continuationDue(due: ContinuationDue, answeredBy: Answerer): void
 }
 
 function cancelMessage(reason: string): string {
@@ -316,7 +320,7 @@ export class UserQuestionService extends EventEmitter {
     this.emit('cleared', { requestId, threadId: outcome.record.threadId })
     // Without a worker nothing would run the `request.respond` effect: deliver here.
     if (outcome.record.answerPath === 'live' && !binding.effectDelivery()) this.deliver(requestId)
-    if (outcome.continuationDue && options.continuation !== false) binding.continuationDue(outcome.continuationDue)
+    if (outcome.continuationDue && options.continuation !== false) binding.continuationDue(outcome.continuationDue, answeredBy)
     return { ok: true, decision: outcome.decision }
   }
 
@@ -394,6 +398,7 @@ export class UserQuestionService extends EventEmitter {
 
   /** Closes a saved request without an answer and wakes its callback with a rejection. */
   private closeDurable(requestId: string, reason: ApprovalCancelReason): boolean {
+    if (this.stopped && reason !== 'timed_out') return false
     const closed = this.binding?.store.cancel(requestId, reason) ?? false
     const request = this.pending.get(requestId)
     if (!closed && !request?.durable) return false
@@ -410,7 +415,12 @@ export class UserQuestionService extends EventEmitter {
     const pending = this.pending.get(requestId)
     const saved = pending?.durable || (!pending && this.binding?.store.get(requestId)?.status === 'pending')
     if (saved) {
-      if (!answeredBy) return this.closeDurable(requestId, reason)
+      if (!answeredBy) {
+        // The profile is stopping: every provider callback is being torn down, which is no withdrawal.
+        // The request stays pending, so the next boot can offer it as a continue request.
+        if (this.stopped) return false
+        return this.closeDurable(requestId, reason)
+      }
       const row = this.binding!.store.get(requestId)
       return this.settleSaved(requestId, row ? answersFor(row.questions, 'reject') : {}, answeredBy, {}).ok
     }
@@ -649,7 +659,8 @@ export class UserQuestionService extends EventEmitter {
 function storedQuestions(questions: PendingUserQuestions['questions'], meanings: readonly ApprovalOptionMeaning[]): ApprovalQuestion[] {
   return questions.map((question, index) => ({
     id: question.id,
-    prompt: question.prompt,
+    // The profile database keeps a bounded preview without credentials, not the raw command text.
+    prompt: redactSecrets(question.prompt).slice(0, SAVED_PROMPT_CHARS),
     ...(question.allowMultiple ? { allowMultiple: question.allowMultiple } : {}),
     options: (question.options ?? []).map((option) => {
       const meaning = index === 0 ? meanings.find((candidate) => candidate.id === option.id) : undefined

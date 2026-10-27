@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { actionOf } from '../../shared/permissionKeys'
 import { stableStringify } from './json'
 
 /**
@@ -6,7 +7,8 @@ import { stableStringify } from './json'
  * (SPEC §17.5). An answer given after a restart authorizes the same action once, in the run it
  * started, and nothing else, so the fingerprint covers everything that changes what the action does.
  *
- * `action` is the whole tool input minus a short list of presentation-only fields, with explicit
+ * `action` is the whole tool input minus a short list of presentation-only fields (known only for the
+ * shell tools, where `description` is a label), with explicit
  * defaults filled in for optional fields that change the mutation: an omitted and an explicit default
  * match, any other difference does not. A field nobody listed is part of the hash, so a newly added
  * field is never silently dropped from the comparison. An input that does not have the shape the
@@ -46,8 +48,11 @@ const CLAUDE_TOOLS: Record<string, Canonicalizer> = {
   NotebookEdit: { required: { notebook_path: 'string', new_source: 'string' }, defaults: { edit_mode: 'replace' } }
 }
 
-/** Any other tool: the whole input minus its description. */
-const GENERIC: Canonicalizer = { drop: ['description'] }
+/**
+ * Any other tool: the whole input. Nothing is dropped, because only a tool's own schema says which
+ * field is a label: for a ticket tool, `description` is the content being changed.
+ */
+const GENERIC: Canonicalizer = {}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -80,6 +85,9 @@ function canonicalize(input: Record<string, unknown>, canon: Canonicalizer): Rec
 
 /** The canonical action of a call, or null when the call cannot be fingerprinted. */
 export function canonicalAction(permissionKey: string, toolName: string, input: unknown): unknown | null {
+  // A Mousse tool acts on state that changes between the question and its continuation (an integration
+  // merges whatever the delegation holds then), so no argument list describes what was approved.
+  if (permissionKey.startsWith('mousse:')) return null
   // ACP: the agent's own description of the call, as given. A request without one has no fingerprint.
   if (permissionKey.startsWith('acp:')) return input === undefined || input === null ? null : input
   if (!isRecord(input)) return null
@@ -89,6 +97,8 @@ export function canonicalAction(permissionKey: string, toolName: string, input: 
 
 /** The SHA-256 of the canonical action and where it runs, or null when there is no stable action. */
 export function approvalFingerprint(input: FingerprintInput): string | null {
+  // A command or an edit is relative to the directory it runs in: without it the action is not identified.
+  if (actionOf(input.permissionKey) !== 'tool' && !input.cwd) return null
   const action = canonicalAction(input.permissionKey, input.toolName, input.input)
   if (action === null) return null
   const text = stableStringify({

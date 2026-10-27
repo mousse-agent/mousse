@@ -324,7 +324,7 @@ describe('ProfileDatabase', () => {
       expect(migration.foreignKeys).toBeUndefined()
     })
 
-    it('adds the table and its two indexes to an older database and keeps everything else as it was', () => {
+    it('adds the table and its three indexes to an older database and keeps everything else as it was', () => {
       const database = seeded()
       const tablesBefore = tables(database)
       expect(columns(database)).toEqual([])
@@ -341,7 +341,7 @@ describe('ProfileDatabase', () => {
         'answered_by', 'cancel_reason', 'continuation_run_id', 'grant_consumed_at', 'delivered_at', 'created_at', 'settled_at'
       ])
       expect(database.database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'approval_requests' AND name LIKE 'approval_requests_%' ORDER BY name").all())
-        .toEqual([{ name: 'approval_requests_run' }, { name: 'approval_requests_thread' }])
+        .toEqual([{ name: 'approval_requests_continuation' }, { name: 'approval_requests_run' }, { name: 'approval_requests_thread' }])
       expect(database.database.prepare('SELECT * FROM runs').all()).toEqual(run)
       expect(database.database.prepare('SELECT * FROM thread_events').all()).toEqual(events)
       expect(count(database)).toBe(1)
@@ -361,6 +361,25 @@ describe('ProfileDatabase', () => {
         .prepare(`INSERT INTO approval_requests(request_id, thread_id, instance_id, provider, action, permission_key, questions, answer_path, uncertain, status, created_at)
                   VALUES('r3', 't1', 'claude', 'claude', 'command', 'claude:command', '[]', 'live', 'yes', 'pending', 'now')`)
         .run()).toThrow(/cannot store TEXT value in INTEGER column|datatype/i)
+    })
+
+    it('constrains its enumerated columns like the other tables, and reads the continuation of a run by index', () => {
+      const database = seeded()
+      database.migrate(RUN_MIGRATIONS)
+      const row = (overrides: Record<string, string | number | null> = {}) => {
+        const values: Record<string, string | number | null> = {
+          request_id: `r-${Math.random()}`, thread_id: 't1', instance_id: 'claude', provider: 'claude', action: 'command', permission_key: 'claude:command',
+          questions: '[]', answer_path: 'live', status: 'pending', created_at: '2026-10-12T00:00:02.000Z', ...overrides
+        }
+        const names = Object.keys(values)
+        database.database.prepare(`INSERT INTO approval_requests(${names.join(', ')}) VALUES(${names.map(() => '?').join(', ')})`).run(...Object.values(values))
+      }
+      expect(() => row()).not.toThrow()
+      expect(() => row({ decision: 'allow', decision_scope: 'always', status: 'answered' })).not.toThrow()
+      for (const bad of [{ status: 'done' }, { answer_path: 'later' }, { action: 'delete' }, { decision: 'maybe' }, { decision_scope: 'forever' }, { uncertain: 2 }])
+        expect(() => row(bad), JSON.stringify(bad)).toThrow(/CHECK/)
+      const plan = database.database.prepare('EXPLAIN QUERY PLAN SELECT * FROM approval_requests WHERE continuation_run_id = ?').all('run:a').map((step) => String(step.detail)).join(' ')
+      expect(plan).toContain('approval_requests_continuation')
     })
 
     it('opens idempotently, and a build that predates it refuses the newer database instead of reading it wrong', () => {

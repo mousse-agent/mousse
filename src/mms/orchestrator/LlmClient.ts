@@ -1588,7 +1588,8 @@ export class LlmClient {
     action: 'command' | 'edit',
     permissionKey: string,
     threadId: string | undefined,
-    signal: AbortSignal | undefined
+    signal: AbortSignal | undefined,
+    projectPath: string
   ): Promise<ToolResultMessage | null> {
     if (permissionModeAllows(permissionMode, action)) return null
     const args = (toolCall.arguments ?? {}) as Record<string, unknown>
@@ -1618,7 +1619,8 @@ export class LlmClient {
               { id: 'allow', decision: 'allow', scope: 'once' },
               { id: 'reject', decision: 'reject' }
             ],
-            tool: { name: toolCall.name, input: args }
+            // Relative paths and commands run against the project: the same call elsewhere is another action.
+            tool: { name: toolCall.name, input: args, cwd: projectPath }
           }
         }
       )
@@ -1749,7 +1751,7 @@ export class LlmClient {
         // and `tests/piLoopApprovals.test.ts` is pointed at that route.
         const permissionAction = permissionMode !== undefined ? piToolAction(toolCall.name) : null
         if (permissionAction) {
-          const refusal = await this.askPermission(toolCall, permissionMode!, permissionAction, piPermissionKey(permissionAction), appTurn?.threadId || undefined, signal)
+          const refusal = await this.askPermission(toolCall, permissionMode!, permissionAction, piPermissionKey(permissionAction), appTurn?.threadId || undefined, signal, projectPath)
           if (refusal) return refusal
         }
 

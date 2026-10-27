@@ -1181,6 +1181,8 @@ export class MmsProfileServices {
   private async stopRunEngine(): Promise<void> {
     if (this.daemonHeartbeat) clearInterval(this.daemonHeartbeat)
     this.daemonHeartbeat = null
+    // Before the worker stops (it aborts the live turns): a stop handler must not withdraw saved approvals.
+    this.orchestrator.holdApprovals()
     this.runReconciler?.stop()
     this.stopInboxWakes?.()
     this.stopInboxWakes = null
