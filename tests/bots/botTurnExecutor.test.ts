@@ -158,6 +158,21 @@ describe('bot turn setup', () => {
   })
 })
 
+describe('agent access level (#283)', () => {
+  it('a bot run gets the narrowest access level, whatever the profile setting, and it is recorded on the run', async () => {
+    ;(orch as unknown as { settingsStore: unknown }).settingsStore = { get: () => ({ ...getDefaultSettings(), agentAccess: { level: 'manage', projectIds: [], answerApprovals: true } }) }
+    const effect = await queuedBotRun()
+    const internals = orch as unknown as {
+      getOrCreateSession(threadId: string): unknown
+      registerAppTurn(session: unknown, runId: string, mode: string, continuation: boolean, bot?: unknown): { turn: { accessLevel?: string } }
+    }
+    const authority = { skills: new Set<string>(), time: { signal: new AbortController().signal } }
+    const registered = internals.registerAppTurn(internals.getOrCreateSession('bot-thread'), effect.runId!, 'agent', false, { authority, skills: [] })
+    expect(registered.turn.accessLevel).toBe('lineage')
+    expect(engine.getRun(effect.runId!)?.accessGrant).toBe('lineage')
+  })
+})
+
 describe('ordinary sends to bot threads', () => {
   const readOnly = { code: 'bot_thread_read_only', message: 'This thread belongs to the bot Site editor. Use the Bots tab to continue it.' }
 
