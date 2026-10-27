@@ -155,6 +155,17 @@ describe('the queue tools (SPEC §15.1)', () => {
       for (const { tool, args } of TOOLS.slice(1)) expect((await call('manage', tool, { ...args, threadId: own.childThreadId })).isError, tool).toBeUndefined()
     })
 
+    it('a personal bot\'s thread takes no queue change from another thread: its owner and its bot engine drive it', async () => {
+      const { call, denied, host } = await world({}, { botRole: (id: string) => (id === 'target' ? 'activation' : undefined) })
+      for (const { tool, args } of TOOLS) {
+        const error = await denied(call('manage', tool, { ...args, threadId: 'target' }))
+        expect(error, tool).toMatchObject({ code: 'mousse_scope_denied', message: expect.stringContaining('belongs to a bot') })
+      }
+      expect(host.queueCommand).not.toHaveBeenCalled()
+      // The caller's own thread is its own, whatever it is.
+      expect((await call('manage', 'queue_remove', { itemId: 'i1', expectedRevision: 'rev-1' })).isError).toBeUndefined()
+    })
+
     it('an archived thread takes no new message, edit or steer, but its queue can be tidied (remove, reorder)', async () => {
       const { call, denied, threads, host } = await world()
       threads.set('target', thread('target', { settledAt: NOW }))

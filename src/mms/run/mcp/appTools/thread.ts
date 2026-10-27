@@ -382,6 +382,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
   /** A change to another thread's queue is held to the same rules as a steer or a Stop there: not into another agent's subagent, and not into an archived thread. */
   const guardOtherThreadQueue = (threadId: string, ctx: ToolCallContext, tool: string, takesWork: boolean): void => {
     if (threadId === ctx.caller.threadId) return
+    assertNotBotThread(host, threadId, tool)
     assertOwnSubagentsOnly(engine, ctx.caller, threadId, tool)
     if (takesWork) assertTakesWork(host, threadId)
   }
@@ -924,6 +925,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
         const expectedRevision = optionalRevision(args)
         if (!own && expectedRevision === undefined) throw new Error('expectedRevision is required to queue a message on another thread: read the queue with queue_list first.')
         if (!own) {
+          assertNotBotThread(host, threadId, 'queue_enqueue')
           // A message to a subagent would run without its parent hearing the result.
           if (engine.delegations.getLineage(threadId)?.relationship === 'subagent')
             throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is a subagent; its parent reaches it with continue_subagent.`)
