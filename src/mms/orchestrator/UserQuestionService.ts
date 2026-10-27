@@ -756,7 +756,7 @@ function storedQuestions(questions: PendingUserQuestions['questions'], meanings:
 }
 
 /**
- * Process-wide default used by LlmClient / tools when no service is injected.
+ * Process-wide default used by tools when no service is injected.
  * Daemon wires the same instance into ThreadRuntimeManager + protocol.
  */
 export const userQuestionService = new UserQuestionService()

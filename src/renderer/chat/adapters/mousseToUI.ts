@@ -48,7 +48,7 @@ function activityState(status: AgentActivityItem['status']): string {
 }
 
 /**
- * LlmClient marks failed tool results in the summary
+ * Failed tool results are marked in the summary
  * ("The tool returned an error.", "The MCP tool returned an error.", ...).
  * Summaries are static provider strings (never user content), so matching
  * them is safe and backfills error state for old transcripts too. A row with a typed

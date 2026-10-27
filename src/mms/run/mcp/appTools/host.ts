@@ -194,9 +194,8 @@ export interface AgentScheduleHost {
 }
 
 /**
- * What the app tools need from their owner. The profile's thread owner (the orchestrator) serves
- * the Mousse MCP server's registry; an in-process loop (`LlmClient`) serves its own registry built
- * from the same modules, so both offer identical schemas and run identical handlers.
+ * What the app tools need from their owner: the profile's thread owner (the orchestrator), which
+ * serves the Mousse MCP server's registry.
  */
 export interface AppToolHost extends DelegationToolsHost {
   askUser(
