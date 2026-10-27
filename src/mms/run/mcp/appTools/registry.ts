@@ -1,5 +1,6 @@
 import type { ToolCall } from '@earendil-works/pi-ai'
 import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
+import { authorizeDefinitionCall } from '../../../agentDefinitions/definitionGate'
 import type { ModeCeiling } from '../../types'
 import type { AppToolTurns } from './turns'
 import { callerThreadOnly } from './thread'
@@ -205,6 +206,11 @@ export class ToolRegistry {
     if (availability !== true) return { text: availability, isError: true }
     const unattended = unattendedRefusal(tool, turn)
     if (unattended) return { text: unattended, isError: true }
+    // A definition run: its grants, policy and approvals hold for every call, as in the in-process loop.
+    if (turn.definition) {
+      const decision = await authorizeDefinitionCall(turn.definition, { toolName: name, args, ...(turn.projectPath ? { projectPath: turn.projectPath } : {}), signal: request.signal })
+      if (!decision.allowed) return { text: decision.message, isError: true }
+    }
     const ctx: ToolCallContext = { caller, turn, toolCallId: request.toolCallId, signal: request.signal, transport: 'mcp' }
     const ledger = this.options.toolLedger?.(active)
     const ledgerId = ledger?.start({ type: 'toolCall', id: ctx.toolCallId, name, arguments: args } as ToolCall)
