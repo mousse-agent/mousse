@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import {
   bindSettings,
+  capabilityLabel,
   deviceLine,
+  isComputer,
   isIncompatible,
   lastSeenLabel,
   routeDetails,
   routeLabel,
   serveSettings,
   updateInstructions,
+  worksOnThreads,
   type Device
 } from '../../src/renderer/lib/netDevices'
 
@@ -102,6 +105,31 @@ describe('deviceLine', () => {
     expect(isIncompatible(device({ state: 'closed', error: 'unsupported_version' }))).toBe(true)
     expect(isIncompatible(device({ state: 'closed', error: 'route_unreachable' }))).toBe(false)
     expect(isIncompatible(device({ state: 'open', error: 'incompatible_peer' }))).toBe(false)
+  })
+})
+
+describe('works on threads and blocking', () => {
+  it('calls the settings capability "work on threads" in the device line', () => {
+    expect(capabilityLabel('settings')).toBe('work on threads')
+    expect(capabilityLabel('read')).toBe('read')
+    expect(deviceLine(device({ caps: ['read', 'chat', 'write', 'settings'] }), NOW)).toBe(
+      'Online · can read, chat, write, work on threads'
+    )
+  })
+
+  it('tells a phone from a computer, and a device that predates the field is a computer', () => {
+    expect(worksOnThreads(device({ caps: ['read', 'settings'] }))).toBe(true)
+    expect(worksOnThreads(device())).toBe(false)
+    expect(isComputer(device({ kind: 'phone' }))).toBe(false)
+    expect(isComputer(device({ kind: 'computer' }))).toBe(true)
+    expect(isComputer(device())).toBe(true)
+  })
+
+  it('says a device is blocked on this computer, and reads a daemon without policy as before', () => {
+    const policy = { blocked: true, maxPermissionMode: 'accept_edits' as const, terminal: false }
+    expect(deviceLine(device({ policy }), NOW)).toBe('Online · can read, chat, write · blocked on this computer')
+    expect(deviceLine(device({ policy: { ...policy, blocked: false } }), NOW)).toBe('Online · can read, chat, write')
+    expect(deviceLine(device(), NOW)).toBe('Online · can read, chat, write')
   })
 })
 

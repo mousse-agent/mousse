@@ -1,5 +1,5 @@
 import type { NetStatus, NodeCapability, NodeId } from '../../shared/net'
-import type { NetAddonRecords, PlusStatus, SshRecordView } from '../../shared/net/local'
+import type { BridgeNodePolicy, NetAddonRecords, PlusStatus, SshRecordView } from '../../shared/net/local'
 import type { PlatformRequestMethod } from '../../shared/platform'
 import type { TransportManifest } from '../../mms/net/contracts'
 import { formatAgo } from './formatAgo'
@@ -41,6 +41,26 @@ export interface Device {
   olderThanThis?: boolean
   /** A route over SSH this device advertises and this computer has not approved yet. */
   sshOffer?: { endpoint: string }
+  /** What this computer lets the device do here. Absent from a daemon that predates it. */
+  policy?: BridgeNodePolicy
+}
+
+/** The capability that lets a computer work on this one's threads is stored as `settings`. */
+export const WORKS_ON_THREADS: NodeCapability = 'settings'
+
+/** Words for a capability in the device line; `settings` is "work on threads". */
+export function capabilityLabel(cap: NodeCapability): string {
+  return cap === WORKS_ON_THREADS ? 'work on threads' : cap
+}
+
+/** Whether the device holds the signed grant to work on threads. */
+export function worksOnThreads(device: Pick<Device, 'caps'>): boolean {
+  return device.caps.includes(WORKS_ON_THREADS)
+}
+
+/** The phone API is all a phone gets; computer limits and the thread grant do not apply to it. */
+export function isComputer(device: Pick<Device, 'kind'>): boolean {
+  return device.kind !== 'phone'
 }
 
 const ROUTE_LABELS: Record<string, string> = {
@@ -89,7 +109,8 @@ export function deviceLine(device: Device, now: number): string {
   }
   const version = versionLabel(device)
   if (version) parts.push(version)
-  if (device.caps.length) parts.push(`can ${device.caps.join(', ')}`)
+  if (device.caps.length) parts.push(`can ${device.caps.map(capabilityLabel).join(', ')}`)
+  if (device.policy?.blocked) parts.push('blocked on this computer')
   return parts.join(' · ')
 }
 
