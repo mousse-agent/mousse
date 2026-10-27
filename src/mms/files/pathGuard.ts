@@ -14,9 +14,11 @@ export function isInsidePath(
   parent: string,
   caseless = process.platform === 'win32' || process.platform === 'darwin'
 ): boolean {
-  const from = caseless ? parent.toLowerCase() : parent
-  const to = caseless ? child.toLowerCase() : child
-  return !leavesFolder(relative(from, to))
+  // Compared as text, because `relative` folds case on Windows whatever is asked.
+  const from = resolve(caseless ? parent.toLowerCase() : parent)
+  const to = resolve(caseless ? child.toLowerCase() : child)
+  if (to === from) return true
+  return to.startsWith(from.endsWith(sep) ? from : `${from}${sep}`)
 }
 
 export function resolveWithinRoot(root: string, targetPath = ''): string {
@@ -47,6 +49,8 @@ export interface GuardedPath {
 export interface PathGuard {
   /** Whether the guard holds to what is on disk (links, the real folder) and not only to the spelling. */
   readonly contained: boolean
+  /** Looks up, without blocking, what `resolve` needs to know about the folder before a change. Optional. */
+  prepare?(root: string, path: string, intent: PathIntent): Promise<void>
   resolve(root: string, path: string, intent: PathIntent): GuardedPath
 }
 

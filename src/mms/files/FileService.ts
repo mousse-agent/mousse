@@ -9,8 +9,35 @@ import { OTHER_NAMES, PathContainmentError } from './routedGuard'
 
 const MAX_READ_BYTES = 512 * 1024
 const MAX_ASSET_BYTES = 100 * 1024 * 1024
-/** A file this large or smaller is read before it is replaced, to count the lines that changed. */
-const MAX_DIFFED_BYTES = 25 * 1024 * 1024
+/**
+ * Lines changed are counted exactly (line by line) when both versions are this large or smaller. A larger save
+ * (up to 25 MiB from another computer) counts only the difference in the number of lines, by scanning bytes, so a
+ * save never holds the old file, the new one and a line list of each at once.
+ */
+const EXACT_COUNT_BYTES = 2 * 1024 * 1024
+const SCAN_CHUNK_BYTES = 1024 * 1024
+
+function countNewlines(bytes: Uint8Array): number {
+  let count = 0
+  for (let at = bytes.indexOf(10); at !== -1; at = bytes.indexOf(10, at + 1)) count += 1
+  return count
+}
+
+/** The lines `content` changes in the open file, counted as `countLineEdits` does, or approximately above `EXACT_COUNT_BYTES`. */
+async function countedLineEdits(handle: FileHandle, size: number, bytes: Buffer, content: string): Promise<number> {
+  if (size <= EXACT_COUNT_BYTES && bytes.length <= EXACT_COUNT_BYTES) {
+    return countLineEdits(size ? await handle.readFile({ encoding: 'utf8' }) : '', content)
+  }
+  let oldNewlines = 0
+  const chunk = Buffer.allocUnsafe(Math.min(SCAN_CHUNK_BYTES, Math.max(size, 1)))
+  for (let at = 0; at < size;) {
+    const { bytesRead } = await handle.read(chunk, 0, chunk.length, at)
+    if (bytesRead === 0) break
+    oldNewlines += countNewlines(chunk.subarray(0, bytesRead))
+    at += bytesRead
+  }
+  return Math.abs(oldNewlines - countNewlines(bytes))
+}
 
 const ASSET_MIME_TYPES: Record<string, string> = {
   pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
@@ -100,8 +127,9 @@ export class FileService {
     }
   }
 
-  async writeFile(root: string, filePath: string, content: string, guard: PathGuard = lexicalGuard): Promise<number> {
-    const guarded = guard.resolve(root, filePath, 'write')
+  /** `resolved` is the guard's answer for this path when the caller already asked it (a routed save asks once, before it records anything). */
+  async writeFile(root: string, filePath: string, content: string, guard: PathGuard = lexicalGuard, resolved?: GuardedPath): Promise<number> {
+    const guarded = resolved ?? guard.resolve(root, filePath, 'write')
     if (guard.contained) return this.writeContained(guarded, content)
     const absPath = guarded.absolute
     let oldContent = ''
@@ -141,10 +169,12 @@ export class FileService {
       const [opened, named] = await Promise.all([handle.stat({ bigint: true }), lstat(absolute, { bigint: true })])
       if (!named.isFile() || named.ino !== opened.ino || named.dev !== opened.dev) throw changed()
       if (opened.nlink > 1n) throw new PathContainmentError('path_protected', OTHER_NAMES)
-      const oldContent = opened.size <= BigInt(MAX_DIFFED_BYTES) ? await handle.readFile({ encoding: 'utf8' }) : ''
+      const bytes = Buffer.from(content, 'utf8')
+      // Counted from the old file before it is replaced.
+      const lineEdits = await countedLineEdits(handle, Number(opened.size), bytes, content)
       await handle.truncate(0)
-      await writeAll(handle, Buffer.from(content, 'utf8'))
-      return countLineEdits(oldContent, content)
+      await writeAll(handle, bytes)
+      return lineEdits
     } finally {
       await handle.close()
     }
@@ -159,9 +189,10 @@ export class FileService {
     if (await exists()) throw changed()
     const beside = join(dirname(absolute), `.${basename(absolute)}.${randomUUID()}.tmp`)
     const handle = await open(beside, 'wx')
+    const bytes = Buffer.from(content, 'utf8')
     try {
       try {
-        await writeAll(handle, Buffer.from(content, 'utf8'))
+        await writeAll(handle, bytes)
       } finally {
         await handle.close()
       }
@@ -171,7 +202,7 @@ export class FileService {
       await unlink(beside).catch(() => undefined)
       throw error
     }
-    return countLineEdits('', content)
+    return bytes.length <= EXACT_COUNT_BYTES ? countLineEdits('', content) : countNewlines(bytes)
   }
 
   async stat(root: string, targetPath: string, guard: PathGuard = lexicalGuard): Promise<FileStat> {

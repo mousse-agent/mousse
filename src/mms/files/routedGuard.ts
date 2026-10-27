@@ -1,7 +1,8 @@
-import { spawnSync } from 'node:child_process'
 import { lstatSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { isStricter, type PermissionMode } from '../../shared/permissionMode'
 import { MOUSSE_CONTROL_FILE_PATHS } from '../worktree/controlFiles'
+import { enclosingRepositories, gitControlCache, type GitControlCache } from './gitControl'
 import {
   isInsidePath,
   resolveWithinRoot,
@@ -9,19 +10,10 @@ import {
   type PathGuard,
   type PathIntent
 } from './pathGuard'
+import { PathContainmentError, outside, protectedPath, realPathOrAncestor } from './realPath'
+import { sensitiveFolderContaining } from './sensitiveFolders'
 
-export type PathRefusal = 'path_outside_folder' | 'path_protected'
-
-/** A path another computer may not read or change. `code` says which kind of refusal it is. */
-export class PathContainmentError extends Error {
-  constructor(
-    readonly code: PathRefusal,
-    message: string
-  ) {
-    super(message)
-    this.name = 'PathContainmentError'
-  }
-}
+export { PathContainmentError, realPathOrAncestor, type PathRefusal } from './realPath'
 
 export const OTHER_NAMES = 'This file has other names (a hard link), so another computer cannot change it.'
 
@@ -34,12 +26,6 @@ function hasOtherNames(path: string): boolean {
     return false
   }
 }
-
-const OUTSIDE = 'Path is outside the project root'
-const outside = (message = OUTSIDE): PathContainmentError =>
-  new PathContainmentError('path_outside_folder', message)
-const protectedPath = (message: string): PathContainmentError =>
-  new PathContainmentError('path_protected', message)
 
 /** A path of another disk or share, or a Windows device: it names something that is not in the folder. */
 const DRIVE_OR_NETWORK = /^(?:[\\/]{2}|[a-zA-Z]:)/
@@ -76,111 +62,124 @@ function checkSegments(path: string, windows: boolean): void {
 }
 
 /**
- * The real path of `path`, or of its deepest existing folder with the part that does not exist yet
- * after it. A link that leads nowhere is refused: writing through it would create what it points at.
+ * Files that start programs without anyone running them on the owner: the settings an agent harness loads from a
+ * project (Mousse loads them in `data/paths.ts` and the Claude Code and Cursor drivers: hooks, allowed tools, MCP
+ * servers, environment) and the runners Git calls on a commit (`husky`, `lefthook`, `pre-commit`). Another computer
+ * triggers them itself, with `chat` (the next turn) or `write` (a commit), so a device may change them only when its
+ * limit already lets it run commands: Full access. Names are matched in any folder and in any case.
+ * Not here, because they run only when a person on the owner runs them, or behind the tool's own trust prompt:
+ * `package.json` scripts, `Makefile`, `.vscode/tasks.json`, `.envrc`, CI files and source code.
  */
-export function realPathOrAncestor(path: string): string {
-  const missing: string[] = []
-  let current = resolve(path)
-  for (;;) {
-    try {
-      const real = realpathSync.native(current)
-      return missing.length ? join(real, ...missing) : real
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code
-      if (code !== 'ENOENT' && code !== 'ENOTDIR')
-        throw outside(`That path cannot be checked (${code ?? 'unknown error'}).`)
-    }
-    try {
-      lstatSync(current)
-      // It exists but does not resolve: a link whose target is missing.
-      throw outside('That path is a link that leads nowhere.')
-    } catch (error) {
-      if (error instanceof PathContainmentError) throw error
-      const code = (error as NodeJS.ErrnoException).code
-      if (code !== 'ENOENT' && code !== 'ENOTDIR')
-        throw outside(`That path cannot be checked (${code ?? 'unknown error'}).`)
-    }
-    const parent = dirname(current)
-    if (parent === current) throw outside('That path cannot be checked.')
-    missing.unshift(basename(current))
-    current = parent
-  }
-}
+const PROGRAM_FILES = [
+  '.claude/settings.json',
+  '.claude/settings.local.json',
+  '.mcp.json',
+  '.cursor/mcp.json',
+  '.cursor/hooks.json',
+  '.cursor/cli.json',
+  '.cursor/environment.json',
+  '.codex/config.toml',
+  '.codex/hooks.json',
+  'opencode.json',
+  '.opencode/opencode.json',
+  '.pre-commit-config.yaml',
+  '.pre-commit-config.yml'
+] as const
+const PROGRAM_FOLDERS = ['.husky', '.lefthook', '.claude/hooks', '.mousse/workflows'] as const
+const LEFTHOOK_FILE = /^\.?lefthook(-local)?\.(ya?ml|json|toml)$/
 
-/** The folders a repository takes hooks from other than its own: the real paths of every `core.hooksPath` it has. */
-export function hookFolders(root: string): string[] {
-  const read = (args: string[]) =>
-    spawnSync('git', ['-C', root, ...args], {
-      encoding: 'utf8',
-      timeout: 10_000,
-      windowsHide: true,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
-    })
-  const configured = read(['config', '--type=path', '--get-all', 'core.hooksPath'])
-  // No Git on this computer: nothing can run a hook.
-  if ((configured.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return []
-  if (configured.error || (configured.status !== 0 && configured.status !== 1))
-    throw protectedPath("This folder's hook settings could not be read, so nothing was written.")
-  const values = configured.stdout.split(/\r?\n/).filter(Boolean)
-  if (!values.length) return []
-  const folders: string[] = []
-  let top: string | undefined
-  for (const value of values) {
-    let folder: string
-    if (isAbsolute(value)) folder = resolve(value)
-    else {
-      // A relative path is taken from the top of the working tree.
-      if (top === undefined) {
-        const found = read(['rev-parse', '--show-toplevel'])
-        top = found.status === 0 ? found.stdout.trim() : root
-      }
-      folder = resolve(top, value)
-    }
-    try {
-      folders.push(realPathOrAncestor(folder))
-    } catch {
-      // A setting that does not resolve still names a place; keep it as it is spelled.
-      folders.push(folder)
-    }
-  }
-  return folders
+/** Whether a change to this name (relative to the folder, `/`-separated, any case) starts programs by itself. */
+export function startsPrograms(name: string): boolean {
+  const folded = `/${name.toLowerCase()}`
+  if (PROGRAM_FILES.some((file) => folded.endsWith(`/${file}`))) return true
+  if (LEFTHOOK_FILE.test(folded.slice(folded.lastIndexOf('/') + 1))) return true
+  return PROGRAM_FOLDERS.some((folder) => folded.includes(`/${folder}/`))
 }
 
 export interface RoutedGuardOptions {
-  /** Folders whose files Git runs as hooks. Read for a write only. */
-  hookFolders?: (root: string) => string[]
+  /** The most the calling device may run, from this computer's policy for it. Anything but `full` is below Full access. */
+  ceiling?: PermissionMode
+  /** What the repositories of the folder read from the working tree. */
+  git?: GitControlCache
   /** Control files of Mousse, relative to a checkout. */
   controlFiles?: readonly string[]
+  /** What a real path holds if it is a credentials or settings folder of this computer. */
+  sensitive?: (realPath: string) => string | undefined
   windows?: boolean
-  caseless?: boolean
 }
 
 /**
  * The guard for a call from another of the user's computers. A path is allowed when what it names on
  * disk, once every link, junction, short name and difference of case is resolved, lies inside the root's
- * real folder. A change is refused as well when it would reach
+ * real folder, and not in a credentials or settings folder of this computer even when the project is.
+ * A change is refused as well, at any limit, when it would reach
  * - Git's own folder (`.git`, at any depth, a worktree's `.git` file included), whose hooks and config run
  *   programs on the next commit;
- * - a folder `core.hooksPath` names, for the same reason;
+ * - a folder `core.hooksPath` names, or a file Git includes as configuration (`include.path`, `includeIf`), in the
+ *   folder's repository or a repository nested in it;
  * - a control file of Mousse;
- * - a file with other names (a hard link), which could be one of the above under another name.
+ * - a file with other names (a hard link), which could be one of the above under another name;
+ * and, below Full access, a file that starts programs by itself (`startsPrograms`).
  * A file that is read or written is opened at its real path, not through the path it was asked by.
  */
 export class RoutedGuard implements PathGuard {
   readonly contained = true
   private readonly windows: boolean
-  private readonly caseless: boolean
+  private readonly ceiling: PermissionMode
+  private readonly git: GitControlCache
   private readonly controlFiles: readonly string[]
-  constructor(private readonly options: RoutedGuardOptions = {}) {
+  private readonly sensitive: (realPath: string) => string | undefined
+  constructor(options: RoutedGuardOptions = {}) {
     this.windows = options.windows ?? process.platform === 'win32'
-    this.caseless = options.caseless ?? (this.windows || process.platform === 'darwin')
+    this.ceiling = options.ceiling ?? 'accept_edits'
+    this.git = options.git ?? gitControlCache
+    this.sensitive = options.sensitive ?? ((real) => sensitiveFolderContaining(real))
     this.controlFiles = (options.controlFiles ?? MOUSSE_CONTROL_FILE_PATHS).map((path) =>
       path.toLowerCase()
     )
   }
 
+  /** Looks up, without blocking the daemon, what the repositories around a change say about hooks and configuration. */
+  async prepare(root: string, path: string, intent: PathIntent): Promise<void> {
+    if (intent !== 'write') return
+    let place: { realRoot: string; real: string }
+    try {
+      place = this.locate(root, path, intent)
+    } catch {
+      // `resolve` says why.
+      return
+    }
+    for (const repository of enclosingRepositories(place.realRoot, place.real)) await this.git.prepare(repository)
+  }
+
   resolve(root: string, path: string, intent: PathIntent): GuardedPath {
+    const { realRoot, real, lexical } = this.locate(root, path, intent)
+    const relativeName = relative(realRoot, real).replace(/\\/g, '/')
+    const holds = this.sensitive(real)
+    if (holds) throw protectedPath(`That folder holds ${holds}, so another computer cannot reach it.`)
+    if (intent === 'write') {
+      // Both spellings: the one that was asked for, and the one it resolves to.
+      const asked = relative(resolve(root), lexical).replace(/\\/g, '/')
+      for (const name of [asked, relativeName]) this.assertChangeable(name)
+      for (const repository of enclosingRepositories(realRoot, real)) {
+        const control = this.git.get(repository)
+        if (!control || control instanceof Error)
+          throw protectedPath("This folder's hook and configuration settings could not be read, so nothing was written.")
+        for (const folder of control.hookFolders)
+          if (isInsidePath(real, folder, true))
+            throw protectedPath('Git runs the programs in this folder, so another computer cannot change them.')
+        for (const file of control.configFiles)
+          if (isInsidePath(real, file, true))
+            throw protectedPath('Git reads this file as configuration, and can run programs it names, so another computer cannot change it.')
+      }
+      // Checked here so a refused save is refused before anything is recorded; the save checks it again as it opens the file.
+      if (hasOtherNames(real)) throw protectedPath(OTHER_NAMES)
+    }
+    return { absolute: real, relative: relativeName }
+  }
+
+  /** The folder's real path and what the path really names, if it is inside the folder. */
+  private locate(root: string, path: string, intent: PathIntent): { realRoot: string; real: string; lexical: string } {
     if (typeof path !== 'string' || path.includes('\0')) throw outside()
     if (isAbsolute(path) || DRIVE_OR_NETWORK.test(path)) throw outside()
     checkSegments(path, this.windows)
@@ -201,19 +200,10 @@ export class RoutedGuard implements PathGuard {
       intent === 'inspect' && lexical !== resolve(root)
         ? join(realPathOrAncestor(dirname(lexical)), basename(lexical))
         : realPathOrAncestor(lexical)
-    if (!isInsidePath(real, realRoot, this.caseless)) throw outside('That path leads outside the thread’s folder.')
-    const relativeName = relative(realRoot, real).replace(/\\/g, '/')
-    if (intent === 'write') {
-      // Both spellings: the one that was asked for, and the one it resolves to.
-      const asked = relative(resolve(root), lexical).replace(/\\/g, '/')
-      for (const name of [asked, relativeName]) this.assertChangeable(name)
-      for (const folder of this.options.hookFolders?.(realRoot) ?? [])
-        if (isInsidePath(real, folder, this.caseless))
-          throw protectedPath('Git runs the programs in this folder, so another computer cannot change them.')
-      // Checked here so a refused save is refused before anything is recorded; the save checks it again as it opens the file.
-      if (hasOtherNames(real)) throw protectedPath(OTHER_NAMES)
-    }
-    return { absolute: real, relative: relativeName }
+    // Both are real paths, which name a folder the way the file system does, so they are compared exactly:
+    // folding case would take a folder beside the root, on a volume that tells them apart, for the root.
+    if (!isInsidePath(real, realRoot, false)) throw outside('That path leads outside the thread’s folder.')
+    return { realRoot, real, lexical }
   }
 
   private assertChangeable(name: string): void {
@@ -221,8 +211,19 @@ export class RoutedGuard implements PathGuard {
       throw protectedPath('Another computer cannot change Git’s own files (.git).')
     if (this.controlFiles.includes(name.toLowerCase()))
       throw protectedPath('Another computer cannot change Mousse’s control files.')
+    if (startsPrograms(name) && isStricter(this.ceiling, 'full'))
+      throw new PathContainmentError(
+        'path_needs_full_access',
+        'This file starts programs on this computer by itself (an agent setting or a hook runner), so changing it needs Full access for this device.'
+      )
   }
 }
 
-/** The guard the protocol handlers use for a call from another computer. */
-export const routedGuard = new RoutedGuard({ hookFolders })
+const guards = new Map<PermissionMode, RoutedGuard>()
+
+/** The guard the protocol handlers use for a call from another computer whose device may run turns up to `ceiling`. */
+export function routedGuardFor(ceiling: PermissionMode): RoutedGuard {
+  let guard = guards.get(ceiling)
+  if (!guard) guards.set(ceiling, (guard = new RoutedGuard({ ceiling })))
+  return guard
+}
