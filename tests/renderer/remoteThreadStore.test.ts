@@ -17,7 +17,6 @@ import {
   resetRemoteThreads,
   selectRemoteThread,
   setRemoteModel,
-  sidebarRemoteThreads,
   submitRemoteMessage,
   useRemoteThreads,
   watchRemoteThread
@@ -319,24 +318,6 @@ describe('unsupported actions', () => {
 })
 
 describe('sidebar placement', () => {
-  const entry = (entityId: string, localProjectId?: string) => ({
-    key: remoteThreadKey({ nodeId: node, entityId }),
-    ref: { nodeId: node, entityId },
-    ...(localProjectId ? { localProjectId } : {}),
-    live: false, error: '', sending: false, notice: '', attachment: 0
-  })
-
-  it('lists the newest attachment first, under the local project it was started from, else with the project-less chats', () => {
-    const a = entry('a', 'project-here'), b = entry('b'), c = entry('c', 'project-gone')
-    const entries = { [a.key]: a, [b.key]: b, [c.key]: c }
-    const placed = sidebarRemoteThreads(entries, [a.key, b.key, c.key, 'nod_missing:x'], new Set(['project-here']))
-    expect(placed.all.map((row) => row.ref.entityId)).toEqual(['c', 'b', 'a'])
-    expect([...placed.byProject.entries()].map(([project, rows]) => [project, rows.map((row) => row.ref.entityId)]))
-      .toEqual([['project-here', ['a']]])
-    // A project removed from this computer no longer holds its remote threads.
-    expect(placed.unfiled.map((row) => row.ref.entityId)).toEqual(['c', 'b'])
-  })
-
   it('remembers the local project a thread was opened with', () => {
     openRemoteThread({ ...ref, deviceName: 'Studio', localProjectId: 'project-here' })
     expect(useRemoteThreads.getState().entries[key]?.localProjectId).toBe('project-here')

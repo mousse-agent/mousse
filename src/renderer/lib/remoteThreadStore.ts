@@ -239,26 +239,6 @@ async function nameDevice(key: string): Promise<void> {
   }
 }
 
-/**
- * Where the sidebar lists attached remote threads, newest attachment first: under the project of
- * this computer they were started from, or with the chats that have no project.
- */
-export function sidebarRemoteThreads(
-  entries: Readonly<Record<string, RemoteThreadEntry>>,
-  order: readonly string[],
-  localProjectIds: ReadonlySet<string>
-): { all: RemoteThreadEntry[]; byProject: Map<string, RemoteThreadEntry[]>; unfiled: RemoteThreadEntry[] } {
-  const all = [...order].reverse().flatMap((key) => (entries[key] ? [entries[key]!] : []))
-  const byProject = new Map<string, RemoteThreadEntry[]>()
-  const unfiled: RemoteThreadEntry[] = []
-  for (const entry of all) {
-    const project = entry.localProjectId && localProjectIds.has(entry.localProjectId) ? entry.localProjectId : undefined
-    if (project) byProject.set(project, [...(byProject.get(project) ?? []), entry])
-    else unfiled.push(entry)
-  }
-  return { all, byProject, unfiled }
-}
-
 /** Shows an attached remote thread again (a sidebar row was clicked). */
 export function selectRemoteThread(key: string): void {
   if (!useRemoteThreads.getState().entries[key]) return

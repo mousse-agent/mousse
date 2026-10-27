@@ -44,8 +44,13 @@ function options(value: unknown): BridgeHubRequestOptions {
 }
 function createOptions(value: unknown): BridgeHubCreateOptions {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
-    const { worktreeEnabled, ...request } = value as Record<string, unknown>
+    const { worktreeEnabled, startedFromProjectId, ...request } = value as Record<string, unknown>
     if (worktreeEnabled !== undefined && typeof worktreeEnabled !== 'boolean') return invalid()
+    if (
+      startedFromProjectId !== undefined &&
+      (typeof startedFromProjectId !== 'string' || !startedFromProjectId || startedFromProjectId.length > 256)
+    )
+      return invalid()
     options(request)
   } else options(value)
   return value as BridgeHubCreateOptions

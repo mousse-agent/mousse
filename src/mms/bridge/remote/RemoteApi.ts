@@ -24,7 +24,7 @@ export interface RemoteChatExtras {
 
 export interface RemoteBackendPort {
   /** `queue.enqueue` params carry resolved `images` instead of staged `attachments`. */
-  execute(method: BridgeOrdinaryMethod, params: Record<string, unknown>): Promise<unknown>
+  execute(method: BridgeOrdinaryMethod, params: Record<string, unknown>, caller?: { node: NodeId }): Promise<unknown>
   snapshot(threadId: string): unknown
   /**
    * Must bind signal to this exact admitted run and return only after its lease/turn settles.
@@ -234,6 +234,8 @@ export class RemoteApi {
       run.bytes += bytes
       return { ok: true }
     }
+    // A thread remembers the device that created it, so every device can list it.
+    if (method === 'threads.create') return this.backend.execute(method, params, { node: context.caller.node })
     return this.backend.execute(method, params)
   }
   close(): void {

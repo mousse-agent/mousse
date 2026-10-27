@@ -4,7 +4,7 @@ import { portableRepository } from '../dispatch/repository'
 import { matchProject, type ProjectIdentity } from './projectMatch'
 import type { MmsProfileServices } from '../../MmsProfileServices'
 import { dispatchMethod } from '../../protocol/handlers'
-import { NetError } from '../../../shared/net'
+import { NetError, type NodeId } from '../../../shared/net'
 import { REMOTE_MESSAGE_IMAGES_MAX_CHARS } from './RemoteApi'
 import type { RemoteBackendPort, RemoteChatExtras } from './RemoteApi'
 import { mmsJson } from './jsonOutput'
@@ -123,7 +123,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     private readonly services: MmsProfileServices,
     private readonly revision: () => number = () => 0
   ) {}
-  async execute(method: BridgeOrdinaryMethod, params: Record<string, unknown>): Promise<unknown> {
+  async execute(method: BridgeOrdinaryMethod, params: Record<string, unknown>, caller?: { node: NodeId }): Promise<unknown> {
     if (
       typeof params.threadId === 'string' &&
       !this.services.threads.listAllThreads().some((thread) => thread.id === params.threadId)
@@ -145,6 +145,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     if (method === 'projects.match') return mmsJson(await this.matchProject(params))
     const composer = await this.composer(method, params)
     if (composer !== undefined) return mmsJson(composer)
+    if (method === 'threads.create') return mmsJson(await this.createThread(params, caller))
     return mmsJson(
       await dispatchMethod(
         {
@@ -158,6 +159,23 @@ export class MmsRemoteBackend implements RemoteBackendPort {
         params
       )
     )
+  }
+  /**
+   * Creates the thread as the local protocol does, then records the device that asked (and its own
+   * project id) on it, so every device that lists this machine's threads can show where it began.
+   */
+  private async createThread(params: Record<string, unknown>, caller?: { node: NodeId }): Promise<unknown> {
+    const { startedFromProjectId, ...create } = params
+    const result = (await dispatchMethod({ mms: this.services, globalSequence: this.revision }, 'threads.create', create)) as
+      { thread: { id: string } } & Record<string, unknown>
+    if (!caller) return result
+    const thread = this.services.threads.updateThreadMeta(
+      result.thread.id,
+      { startedFrom: { node: caller.node, ...(typeof startedFromProjectId === 'string' ? { projectId: startedFromProjectId } : {}) } },
+      { touch: false }
+    )
+    this.services.events.broadcast('threads:updated', { threads: this.services.threads.listAllThreads() })
+    return { ...result, thread }
   }
   /**
    * Which of this machine's projects is the same Git repository as the one described: an id, or

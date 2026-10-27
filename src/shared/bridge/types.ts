@@ -54,6 +54,8 @@ export interface BridgeRemoteParams {
     name: string
     projectId?: string
     worktreeEnabled?: boolean
+    /** The caller's own project the thread is started from; stored on the thread for the caller. */
+    startedFromProjectId?: string
   }
   'projects.match': {
     /** Root commits of the source repository (1 to 256). */
@@ -163,6 +165,8 @@ export interface BridgeHubRequestOptions {
 export interface BridgeHubCreateOptions extends BridgeHubRequestOptions {
   /** Run the thread in its own git worktree on the target machine. */
   worktreeEnabled?: boolean
+  /** This machine's project the thread is started from, so every device can list it there. */
+  startedFromProjectId?: string
 }
 export type BridgeHubRequestState =
   'prepared' | 'unknown' | 'completed' | 'failed' | 'cancelRequested'

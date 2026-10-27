@@ -601,14 +601,15 @@ export class BridgeHub {
     options: BridgeHubCreateOptions = {},
     projectId?: string
   ): Promise<unknown> {
-    const { worktreeEnabled, ...request } = options
+    const { worktreeEnabled, startedFromProjectId, ...request } = options
     return this.call(
       target,
       'threads.create',
       {
         name,
         ...(projectId ? { projectId } : {}),
-        ...(worktreeEnabled === undefined ? {} : { worktreeEnabled })
+        ...(worktreeEnabled === undefined ? {} : { worktreeEnabled }),
+        ...(startedFromProjectId ? { startedFromProjectId } : {})
       },
       request
     )

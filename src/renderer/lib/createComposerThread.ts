@@ -125,7 +125,10 @@ export async function startRemoteComposerThread(deps: {
     target: deps.node,
     name: remoteThreadName(deps.content),
     ...(deps.projectId ? { projectId: deps.projectId } : {}),
-    options: { worktreeEnabled: Boolean(deps.projectId && deps.worktreeEnabled) }
+    options: {
+      worktreeEnabled: Boolean(deps.projectId && deps.worktreeEnabled),
+      ...(deps.projectId && deps.localProjectId ? { startedFromProjectId: deps.localProjectId } : {})
+    }
   })
   const entityId = created?.thread?.id
   if (!entityId) throw new Error(`${deviceName} did not create the chat`)

@@ -270,6 +270,27 @@ it('passes worktreeEnabled through bridge.hub.create to the target thread', asyn
   expect(f.mms.threads.listAllThreads()).toHaveLength(threads.length)
 })
 
+it('records on the target which device started a thread, and its project there', async () => {
+  const f = await fixture()
+  await f.connect()
+  const create = (options: Record<string, unknown>) =>
+    executeBridgeHubLocal(f.hub(), 'bridge.hub.create', {
+      target: f.targetNode,
+      name: 'Started elsewhere',
+      options: { id: newId('rpc'), ...options }
+    }) as Promise<{ thread: { id: string; startedFrom?: unknown } }>
+  const withProject = await create({ startedFromProjectId: 'caller-project' })
+  expect(withProject.thread.startedFrom).toEqual({ node: f.callerNode, projectId: 'caller-project' })
+  const plain = await create({})
+  expect(plain.thread.startedFrom).toEqual({ node: f.callerNode })
+  // Every device that lists the target's threads sees where they began.
+  const listed = (await executeBridgeHubLocal(f.hub(), 'bridge.hub.threads', { target: f.targetNode })) as { threads: Array<{ id: string; startedFrom?: unknown }> }
+  expect(listed.threads.find((thread) => thread.id === withProject.thread.id)?.startedFrom).toEqual({ node: f.callerNode, projectId: 'caller-project' })
+  // A thread made on the target itself has no origin.
+  expect(f.mms.threads.createThread('Local').startedFrom).toBeUndefined()
+  await expect(create({ startedFromProjectId: 7 })).rejects.toMatchObject({ code: 'bad_request' })
+})
+
 it('delivers the first turn of a remote thread when the hub attaches before it sends', async () => {
   const f = await fixture()
   ;(f.mms.orchestrator as unknown as { llm: unknown }).llm = {

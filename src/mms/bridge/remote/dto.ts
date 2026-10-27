@@ -141,10 +141,11 @@ export function validateRemoteParams(
         throw new NetError('bad_request')
       break
     case 'threads.create':
-      keys(['name'], ['projectId', 'worktreeEnabled'])
+      keys(['name'], ['projectId', 'worktreeEnabled', 'startedFromProjectId'])
       text('name', 512)
       text('projectId', 256, true)
       boolean('worktreeEnabled', true)
+      text('startedFromProjectId', 256, true)
       break
     case 'threads.rename':
       keys(['threadId', 'name'])
