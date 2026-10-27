@@ -889,6 +889,7 @@ button.side-card-git-pr-check-state {
 
 .side-card-git-popover-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 6px;
 }

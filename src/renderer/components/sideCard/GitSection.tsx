@@ -12,14 +12,16 @@ import { useActiveThreadPullRequest } from '../../hooks/useActiveThreadPullReque
 import { useTransientError } from '../../hooks/useTransientError'
 import {
   CommitPushError,
+  OpenPullRequestError,
   commitGitChanges,
   initGitRepository,
   pushGitBranch,
   suggestGitCommitMessage,
+  type CommitPhase,
   type GitStatusView
 } from '../../stores/gitStatusStore'
 import { createPullRequestForBranch, useGitPullRequestStore } from '../../stores/pullRequestStore'
-import type { PullRequestDetail, ThreadPullRequestLink } from '../../../shared/pullRequests'
+import type { PullRequestDetail, PullRequestScope, ThreadPullRequestLink } from '../../../shared/pullRequests'
 import { gitScopeFor } from '../../lib/activeProject'
 import type { GitCommit, GitPullRequestLookup, GitScope } from '../../../shared/types'
 import { Switch } from '../settings/SettingsRow'
@@ -53,14 +55,16 @@ import {
   changesSummary,
   chooseAmend,
   clearAmendPrefill,
-  commitButtonLabels,
+  commitFlowButtons,
   commitFormFor,
   commitHint,
   commitMenuState,
+  commitPhaseLabel,
   commitScope,
   diffStatLabel,
   dirtySwitchChoices,
   emptyCommitForm,
+  existingPullRequestNotice,
   forceAmend,
   formatCommitLine,
   gitActionAvailability,
@@ -70,6 +74,7 @@ import {
   gitErrorMessage,
   isGitCancelled,
   localBranchNames,
+  openPullRequestFailedMessage,
   prefillAmendDraft,
   pullRequestRow,
   pullRequestScope,
@@ -79,6 +84,7 @@ import {
   untrackedFileCount,
   type CommitAvailability,
   type CommitDraft,
+  type CommitFlow,
   type CommitForm,
   type DirtySwitchChoiceId,
   type GitAction,
@@ -435,6 +441,11 @@ interface CommitButtonProps {
   commits: GitCommit[]
   /** The branch has somewhere to push to and is not behind, so the commit can go on to push. */
   pushable: boolean
+  /**
+   * What "Commit, push and open PR" opens the Create PR form for; null when `gitActionAvailability` does not
+   * offer it (behind, diverged, conflicted, a pull request already there, the default branch).
+   */
+  openPullRequest: PullRequestScope | null
   /** What a commit would include here, and why none can be made right now. */
   commitAvailability: CommitAvailability
   /** Another Git action is running, so nothing here may start. */
@@ -443,15 +454,16 @@ interface CommitButtonProps {
   onBegin: () => boolean
   onEnd: () => void
   onActionError: (message: string) => void
+  onNotice: (message: string) => void
 }
 
-/** What a running commit is doing, and whether it goes on to push. */
+/** What a running commit is doing: which button started it, and which step it is at. */
 interface CommitWork {
-  push: boolean
-  phase: 'committing' | 'pushing'
+  flow: CommitFlow
+  phase: CommitPhase
 }
 
-function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, commits, pushable, commitAvailability, lock, onBegin, onEnd, onActionError }: CommitButtonProps) {
+function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, commits, pushable, openPullRequest, commitAvailability, lock, onBegin, onEnd, onActionError, onNotice }: CommitButtonProps) {
   const [open, setOpen] = useState(false)
   const { branch: scopeBranch, head } = commitScope(branch, commits)
   const scope = useMemo(() => ({ branch: scopeBranch, head }), [scopeBranch, head])
@@ -479,7 +491,6 @@ function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, com
   const menu = commitMenuState(commits, fileCount, amendChecked, gitScope.workspaceThreadId !== null)
   const { amend } = menu
   const trimmed = draft.message.trim()
-  const labels = commitButtonLabels(amend)
   const blocked = lock.reason !== null
   const canSubmit = Boolean(trimmed) && !work && !blocked && commitAvailability.blockedReason === null
   // Amend with an empty message starts from the last commit's message, once: clearing it by hand sticks.
@@ -545,26 +556,32 @@ function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, com
     }
   }
 
-  const submit = async (push: boolean) => {
+  const submit = async (flow: CommitFlow) => {
     if (!canSubmit || !onBegin()) return
     dropSuggestion()
-    setWork({ push, phase: 'committing' })
+    setWork({ flow, phase: 'committing' })
     setError(null)
     const finish = () => {
       setForm(emptyCommitForm(scope))
       setOpen(false)
     }
     try {
-      await commitGitChanges(path, trimmed, gitScope, {
+      const result = await commitGitChanges(path, trimmed, gitScope, {
         amend,
-        push,
-        onPhase: (phase) => setWork({ push, phase })
+        push: flow !== 'commit',
+        ...(flow === 'push-pr' && openPullRequest ? { openPullRequest } : {}),
+        onPhase: (phase) => setWork({ flow, phase })
       })
       finish()
+      // The row below shows the pull request the branch already had; a second form would duplicate it.
+      if (result.pullRequest?.kind === 'existing') onNotice(existingPullRequestNotice(result.pullRequest))
     } catch (commitError) {
       if (commitError instanceof CommitPushError) {
         finish()
         if (!isGitCancelled(commitError.pushError)) onActionError(pushFailedMessage(commitError.pushError))
+      } else if (commitError instanceof OpenPullRequestError) {
+        finish()
+        onActionError(openPullRequestFailedMessage(commitError))
       } else if (!isGitCancelled(commitError)) {
         setError(gitErrorMessage(commitError))
       }
@@ -574,8 +591,8 @@ function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, com
     }
   }
 
-  const label = (push: boolean, idle: string) =>
-    work && work.push === push ? (work.phase === 'committing' ? 'Committing…' : 'Pushing…') : idle
+  const flowButtons = commitFlowButtons({ pushable, openPullRequest: openPullRequest !== null, amend })
+  const label = (flow: CommitFlow, idle: string) => (work && work.flow === flow ? commitPhaseLabel(work.phase) : idle)
 
   return (
     <>
@@ -623,7 +640,7 @@ function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, com
           onKeyDown={(event) => {
             if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
               event.preventDefault()
-              void submit(false)
+              void submit('commit')
             }
           }}
         />
@@ -657,24 +674,18 @@ function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, com
         <div className="side-card-git-popover-footer">
           <span className="side-card-git-hint">{commitHint(amend, menu.shortHash, fileCount, commitAvailability)}</span>
           <div className="side-card-git-popover-actions">
-            {pushable && (
+            {flowButtons.map(({ flow, label: idle, quiet }) => (
               <button
+                key={flow}
                 type="button"
-                className="side-card-git-submit side-card-git-submit-quiet"
+                className={quiet ? 'side-card-git-submit side-card-git-submit-quiet' : 'side-card-git-submit'}
+                data-flow={flow}
                 disabled={!canSubmit}
-                onClick={() => void submit(true)}
+                onClick={() => void submit(flow)}
               >
-                {label(true, labels.commitAndPush)}
+                {label(flow, idle)}
               </button>
-            )}
-            <button
-              type="button"
-              className="side-card-git-submit"
-              disabled={!canSubmit}
-              onClick={() => void submit(false)}
-            >
-              {label(false, labels.commit)}
-            </button>
+            ))}
           </div>
         </div>
       </CardPopover>
@@ -968,11 +979,13 @@ export function GitSectionView({
           fileCount={fileCount}
           commits={git.commits}
           pushable={availability.offerCommitAndPush}
+          openPullRequest={availability.offerCommitPushAndOpenPr ? createScope : null}
           commitAvailability={availability.commit}
           lock={gitActionLock(running, 'commit')}
           onBegin={() => begin('commit')}
           onEnd={end}
           onActionError={setActionError}
+          onNotice={setNotice}
         />
       </div>
       <GitOperationStatus path={path} />

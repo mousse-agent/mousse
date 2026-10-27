@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useAppStore } from '../src/renderer/stores/appStore'
 import {
   CommitPushError,
+  OpenPullRequestError,
   commitGitChanges,
   initGitRepository,
   pushGitBranch,
@@ -751,5 +752,230 @@ describe('commit and push through the git store', () => {
     await refreshGitStatus('/repo/a')
     await pushGitBranch('/repo/a', standalone)
     expect(git.pullRequest).not.toHaveBeenCalled()
+  })
+})
+
+describe('commit, push and open PR through the git store', () => {
+  const none: GitPullRequestLookup = { state: 'none', isDefaultBranch: false }
+  const worktree = { projectId: 'p1', workspaceThreadId: 't1' }
+  const projectForm = (): PullRequestScope => scope({ threadId: undefined, projectId: 'p1', originThreadId: null })
+  const formOf = () => useGitPullRequestStore.getState().createForm
+  const failure = (code: string, message: string) => Object.assign(new Error(message), { code })
+  const noLookupInstall = (patch: Partial<Mock> = {}) => install({ pullRequest: vi.fn(async () => none), ...patch })
+
+  beforeEach(() => {
+    useGitPullRequestStore.setState({ entries: {}, createForm: null })
+    useGitStatusStore.setState({ entries: {} })
+    listeners.clear()
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('commits, pushes, looks the pull request up past the caches, then opens the form, each step on the branch it started on', async () => {
+    const order: string[] = []
+    const git = noLookupInstall({
+      commit: vi.fn(async () => { order.push('commit'); return { status: repoStatus() } }),
+      push: vi.fn(async () => { order.push('push'); return { status: repoStatus() } }),
+      status: vi.fn(async () => { order.push('status'); return repoStatus() }),
+      pullRequest: vi.fn(async () => { order.push('lookup'); return none })
+    })
+    await refreshGitStatus('/repo/a')
+    order.length = 0
+    const phases: string[] = []
+    const result = await commitGitChanges('/repo/a', 'Add things', project, { openPullRequest: projectForm(), onPhase: (phase) => phases.push(phase) })
+    expect(order).toEqual(['commit', 'push', 'status', 'lookup'])
+    expect(phases).toEqual(['committing', 'pushing', 'opening-pr'])
+    expect(git.commit).toHaveBeenCalledWith(project, 'Add things', { amend: false, expectedBranch: 'feature' })
+    expect(git.push).toHaveBeenCalledWith(project, { expectedBranch: 'feature' })
+    expect(git.pullRequest).toHaveBeenCalledWith({ projectId: 'p1' }, 'feature', true)
+    expect(result).toEqual({ pullRequest: { kind: 'form' } })
+    // The same form the Create PR row opens, for the folder, branch and thread of the click; nothing is created here.
+    expect(formOf()).toEqual(projectForm())
+    expect(git.create).not.toHaveBeenCalled()
+  })
+
+  it('amends, pushes and opens the form when asked to amend', async () => {
+    const git = noLookupInstall()
+    await refreshGitStatus('/repo/a')
+    await commitGitChanges('/repo/a', 'Reword', project, { amend: true, openPullRequest: projectForm() })
+    expect(git.commit).toHaveBeenCalledWith(project, 'Reword', { amend: true, expectedBranch: 'feature' })
+    expect(formOf()).toEqual(projectForm())
+  })
+
+  it('in a thread worktree commits everything once and asks about the thread, never amending, and opens the form for the worktree', async () => {
+    const git = noLookupInstall()
+    await refreshGitStatus('/repo/a', { projectId: 'p1' })
+    const form = scope({ path: '/repo/a', threadId: 't1', originThreadId: 't1' })
+    const result = await commitGitChanges('/repo/a', 'Add things', worktree, { openPullRequest: form })
+    expect(git.commit).toHaveBeenCalledTimes(1)
+    expect(git.commit).toHaveBeenCalledWith(worktree, 'Add things', { amend: false, expectedBranch: 'feature' })
+    expect(git.push).toHaveBeenCalledWith(worktree, { expectedBranch: 'feature' })
+    expect(git.pullRequest).toHaveBeenLastCalledWith({ threadId: 't1' }, 'feature', true)
+    expect(result).toEqual({ pullRequest: { kind: 'form' } })
+    expect(formOf()).toEqual(form)
+  })
+
+  it('shows the pull request a branch already has instead of opening a second form', async () => {
+    const git = install({ pullRequest: vi.fn(async () => lookup(12)) })
+    await refreshGitStatus('/repo/a')
+    const result = await commitGitChanges('/repo/a', 'Add things', project, { openPullRequest: projectForm() })
+    expect(result).toEqual({ pullRequest: { kind: 'existing', number: 12, state: 'open' } })
+    expect(formOf()).toBeNull()
+    expect(git.create).not.toHaveBeenCalled()
+    // The found pull request is what the card's row reads.
+    expect(entry('/repo/a', 'feature').lookup).toEqual(lookup(12))
+  })
+
+  it('stops at a commit a hook refused: nothing is pushed, looked up or opened, and a retry that passes runs every step', async () => {
+    const hook = failure('git_hook_failed', 'pre-commit hook failed (exit 1)')
+    const git = noLookupInstall({
+      commit: vi.fn()
+        .mockRejectedValueOnce(hook)
+        .mockResolvedValue({ status: repoStatus() })
+    })
+    await refreshGitStatus('/repo/a')
+    await expect(commitGitChanges('/repo/a', 'Add things', project, { openPullRequest: projectForm() })).rejects.toBe(hook)
+    expect(git.push).not.toHaveBeenCalled()
+    expect(git.pullRequest).not.toHaveBeenCalled()
+    expect(formOf()).toBeNull()
+
+    const phases: string[] = []
+    await commitGitChanges('/repo/a', 'Add things', project, { openPullRequest: projectForm(), onPhase: (phase) => phases.push(phase) })
+    expect(phases).toEqual(['committing', 'pushing', 'opening-pr'])
+    expect(git.push).toHaveBeenCalledTimes(1)
+    expect(formOf()).toEqual(projectForm())
+  })
+
+  it('stops at a hook refusal in a thread worktree the same way', async () => {
+    const git = noLookupInstall({ commit: vi.fn(async () => { throw failure('git_hook_failed', 'pre-commit hook failed (exit 1)') }) })
+    await refreshGitStatus('/repo/a', { projectId: 'p1' })
+    await expect(
+      commitGitChanges('/repo/a', 'x', worktree, { openPullRequest: scope({ threadId: 't1', originThreadId: 't1' }) })
+    ).rejects.toThrow('pre-commit hook failed')
+    expect(git.push).not.toHaveBeenCalled()
+    expect(formOf()).toBeNull()
+  })
+
+  it.each([
+    ['the remote has newer commits', failure('git_push_rejected', 'The remote has commits this branch does not. Pull them, then push again.')],
+    ['the branch has diverged', failure('git_pull_diverged', 'This branch has diverged from its upstream.')],
+    ['there is no remote to push to', failure('git_no_remote', 'Add a remote before pushing.')],
+    ['the branch has no upstream', failure('git_no_upstream', 'This branch has no upstream. Push it first to set one.')],
+    ['the remote refused the push', failure('git_push_rejected_by_remote', 'The remote refused this push.')]
+  ])('stops at a push refused because %s: the commit stays, nothing is looked up or opened', async (_name, pushError) => {
+    const git = noLookupInstall({ push: vi.fn(async () => { throw pushError }) })
+    await refreshGitStatus('/repo/a')
+    const caught = await commitGitChanges('/repo/a', 'Add things', project, { openPullRequest: projectForm() }).catch((error: unknown) => error)
+    expect(caught).toBeInstanceOf(CommitPushError)
+    expect((caught as CommitPushError).pushError).toBe(pushError)
+    expect(git.commit).toHaveBeenCalledTimes(1)
+    // The status is read again so the card shows the commit as unpushed.
+    expect(git.status).toHaveBeenCalledTimes(2)
+    expect(git.pullRequest).not.toHaveBeenCalled()
+    expect(formOf()).toBeNull()
+  })
+
+  it('recovers from a refused push with a plain push, after which the Create PR row opens the same form', async () => {
+    const git = noLookupInstall({
+      push: vi.fn()
+        .mockRejectedValueOnce(failure('git_push_rejected', 'The remote has commits this branch does not.'))
+        .mockResolvedValue({ status: repoStatus() })
+    })
+    await refreshGitStatus('/repo/a')
+    await expect(commitGitChanges('/repo/a', 'Add things', project, { openPullRequest: projectForm() })).rejects.toBeInstanceOf(CommitPushError)
+    expect(formOf()).toBeNull()
+    await pushGitBranch('/repo/a', project)
+    await createPullRequestForBranch(projectForm())
+    expect(git.push).toHaveBeenCalledTimes(2)
+    expect(git.commit).toHaveBeenCalledTimes(1)
+    expect(formOf()).toEqual(projectForm())
+  })
+
+  it('does not open a pull request for a branch that is still ahead of its upstream after the push', async () => {
+    const git = noLookupInstall({ status: vi.fn(async () => repoStatus({ ahead: 1 })) })
+    await refreshGitStatus('/repo/a')
+    const caught = await commitGitChanges('/repo/a', 'Add things', project, { openPullRequest: projectForm() }).catch((error: unknown) => error)
+    expect(caught).toBeInstanceOf(OpenPullRequestError)
+    expect((caught as Error).message).toContain('not on the remote')
+    expect(formOf()).toBeNull()
+    expect(git.create).not.toHaveBeenCalled()
+  })
+
+  it('does not open a pull request for a branch with no upstream after the push', async () => {
+    noLookupInstall({ status: vi.fn(async () => repoStatus({ tracking: 'none', upstream: null })) })
+    await refreshGitStatus('/repo/a')
+    await expect(commitGitChanges('/repo/a', 'x', project, { openPullRequest: projectForm() })).rejects.toBeInstanceOf(OpenPullRequestError)
+    expect(formOf()).toBeNull()
+  })
+
+  it('refuses before committing when the folder is no longer on the branch the button was pressed on', async () => {
+    const git = noLookupInstall({ status: vi.fn(async () => repoStatus({ branch: 'other' })) })
+    await refreshGitStatus('/repo/a')
+    await expect(commitGitChanges('/repo/a', 'x', project, { openPullRequest: projectForm() })).rejects.toThrow('The branch changed')
+    expect(git.commit).not.toHaveBeenCalled()
+    expect(git.push).not.toHaveBeenCalled()
+    expect(formOf()).toBeNull()
+  })
+
+  it('stops when the daemon finds another branch at the commit, and leaves nothing pushed or opened', async () => {
+    const changed = failure('git_branch_changed', 'The branch changed while this was open. Review it, then try again.')
+    const git = noLookupInstall({ commit: vi.fn(async () => { throw changed }) })
+    await refreshGitStatus('/repo/a')
+    await expect(commitGitChanges('/repo/a', 'x', project, { openPullRequest: projectForm() })).rejects.toBe(changed)
+    expect(git.push).not.toHaveBeenCalled()
+    expect(git.pullRequest).not.toHaveBeenCalled()
+    expect(formOf()).toBeNull()
+  })
+
+  it('stops when the branch changes between the commit and the push: the push is refused and nothing is opened', async () => {
+    const changed = failure('git_branch_changed', 'The branch changed while this was open. Review it, then try again.')
+    const git = noLookupInstall({ push: vi.fn(async () => { throw changed }) })
+    await refreshGitStatus('/repo/a')
+    const caught = await commitGitChanges('/repo/a', 'x', project, { openPullRequest: projectForm() }).catch((error: unknown) => error)
+    expect(caught).toBeInstanceOf(CommitPushError)
+    expect((caught as CommitPushError).pushError).toBe(changed)
+    expect(git.pullRequest).not.toHaveBeenCalled()
+    expect(formOf()).toBeNull()
+  })
+
+  it('stops when the branch changes after the push, before the form opens', async () => {
+    const status = vi.fn()
+      .mockResolvedValueOnce(repoStatus())
+      .mockResolvedValue(repoStatus({ branch: 'other', upstream: 'origin/other' }))
+    const git = noLookupInstall({ status })
+    await refreshGitStatus('/repo/a')
+    const caught = await commitGitChanges('/repo/a', 'x', project, { openPullRequest: projectForm() }).catch((error: unknown) => error)
+    expect(caught).toBeInstanceOf(OpenPullRequestError)
+    expect((caught as Error).message).toContain('The branch changed')
+    expect(git.commit).toHaveBeenCalledTimes(1)
+    expect(formOf()).toBeNull()
+  })
+
+  it('reports why when the lookup is unavailable, and opens nothing', async () => {
+    noLookupInstall({ pullRequest: vi.fn(async () => ({ state: 'unavailable', reason: 'unauthenticated', message: 'Sign in to GitHub to open pull requests.' })) })
+    await refreshGitStatus('/repo/a')
+    await expect(commitGitChanges('/repo/a', 'x', project, { openPullRequest: projectForm() })).rejects.toThrow('Sign in to GitHub')
+    expect(formOf()).toBeNull()
+  })
+
+  it('opens nothing for the default branch or one that is not known to be a different branch', async () => {
+    for (const isDefaultBranch of [true, null]) {
+      noLookupInstall({ pullRequest: vi.fn(async () => ({ state: 'none', isDefaultBranch })) })
+      useGitStatusStore.setState({ entries: {} })
+      useGitPullRequestStore.setState({ entries: {}, createForm: null })
+      await refreshGitStatus('/repo/a')
+      await expect(commitGitChanges('/repo/a', 'x', project, { openPullRequest: projectForm() })).rejects.toBeInstanceOf(OpenPullRequestError)
+      expect(formOf()).toBeNull()
+    }
+  })
+
+  it('keeps "Commit and push" as it was: no form and no notice, and the lookup refreshed', async () => {
+    const git = noLookupInstall()
+    await refreshGitStatus('/repo/a')
+    const result = await commitGitChanges('/repo/a', 'Add things', project, { push: true })
+    expect(result).toEqual({ pullRequest: null })
+    expect(git.pullRequest).toHaveBeenCalledWith({ projectId: 'p1' }, 'feature', true)
+    expect(formOf()).toBeNull()
   })
 })

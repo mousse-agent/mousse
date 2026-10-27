@@ -11,12 +11,16 @@ import {
   GIT_BUSY_REASON,
   clearAmendPrefill,
   commitButtonLabels,
+  commitFlowButtons,
   commitFormFor,
   commitHint,
   commitMenuState,
+  commitPhaseLabel,
   commitScope,
   emptyCommitForm,
+  existingPullRequestNotice,
   forceAmend,
+  openPullRequestFailedMessage,
   gitActionAvailability,
   gitCollapsedLabel,
   gitActionLock,
@@ -512,8 +516,8 @@ describe('commit menu state', () => {
     expect(commitHint(false, 'a1b2c3d', 3)).toBe('Stages 3 files')
     expect(commitHint(true, 'a1b2c3d', 0)).toBe('Amends a1b2c3d')
     expect(commitHint(true, 'a1b2c3d', 2)).toBe('Amends a1b2c3d · stages 2 files')
-    expect(commitButtonLabels(false)).toEqual({ commit: 'Commit', commitAndPush: 'Commit and push' })
-    expect(commitButtonLabels(true)).toEqual({ commit: 'Amend', commitAndPush: 'Amend and push' })
+    expect(commitButtonLabels(false)).toEqual({ commit: 'Commit', commitAndPush: 'Commit and push', commitPushAndOpenPr: 'Commit, push and open PR' })
+    expect(commitButtonLabels(true)).toEqual({ commit: 'Amend', commitAndPush: 'Amend and push', commitPushAndOpenPr: 'Amend, push and open PR' })
   })
 })
 
@@ -595,7 +599,7 @@ describe('git action availability', () => {
     { name: 'no upstream and no commits', patch: { tracking: 'none', upstream: null }, commitCount: 0, push: 'Nothing to push', commitAndPush: true, openPr: false },
     { name: 'no upstream and no remote', patch: { tracking: 'none', upstream: null, hasRemote: false, changes: dirty }, push: 'No remote to push to', commitAndPush: false, openPr: false },
     { name: 'detached', patch: { branch: null, tracking: 'detached', upstream: null, changes: dirty }, push: 'No branch to push', commitAndPush: false, openPr: false },
-    { name: 'conflicted', patch: { ahead: 1, changes: conflicts }, push: 'Resolve 1 conflicted file first', commitAndPush: true, openPr: true },
+    { name: 'conflicted', patch: { ahead: 1, changes: conflicts }, push: 'Resolve 1 conflicted file first', commitAndPush: true, openPr: false },
     { name: 'merge in progress', patch: { ahead: 1, inProgress: 'merge', changes: dirty }, push: 'Finish or abort the merge first', commitAndPush: true, openPr: true },
     { name: 'rebase in progress', patch: { inProgress: 'rebase' }, push: 'Finish or abort the rebase first', commitAndPush: true, openPr: false },
     { name: 'dirty with a pull request already open', patch: { changes: dirty }, lookup: { state: 'found', pullRequest: pullRequest() }, push: 'Nothing to push', commitAndPush: true, openPr: false },
@@ -794,6 +798,77 @@ describe('amend message', () => {
   it('words a push that failed after the commit landed', () => {
     const error = new Error("Error invoking remote method 'git:push': Error: Git push failed.")
     expect(pushFailedMessage(error)).toBe('Committed, but the push failed: Git push failed.')
+  })
+
+  it('words a pull request that could not be opened after the push landed', () => {
+    const error = new Error('The branch changed while this was open. Review it, then try again.')
+    expect(openPullRequestFailedMessage(error)).toBe(
+      'Committed and pushed, but no pull request was opened: The branch changed while this was open. Review it, then try again.'
+    )
+  })
+
+  it('says which pull request the branch already has instead of opening a second form', () => {
+    expect(existingPullRequestNotice({ number: 12, state: 'open' })).toBe('Pushed. #12 is already open for this branch.')
+    expect(existingPullRequestNotice({ number: 12, state: 'merged' })).toBe('Pushed. #12 is merged for this branch.')
+  })
+
+  it('names each step of a running commit', () => {
+    expect(commitPhaseLabel('committing')).toBe('Committing…')
+    expect(commitPhaseLabel('pushing')).toBe('Pushing…')
+    expect(commitPhaseLabel('opening-pr')).toBe('Opening PR…')
+  })
+})
+
+describe('commit popover buttons', () => {
+  const buttons = (input: { pushable: boolean; openPullRequest: boolean; amend?: boolean }) =>
+    commitFlowButtons({ amend: false, ...input }).map(({ flow, label }) => `${flow}: ${label}`)
+
+  it('lists the pull request button first, then push, then the plain commit last as the primary one', () => {
+    expect(buttons({ pushable: true, openPullRequest: true })).toEqual([
+      'push-pr: Commit, push and open PR',
+      'push: Commit and push',
+      'commit: Commit'
+    ])
+    expect(commitFlowButtons({ amend: false, pushable: true, openPullRequest: true }).map((button) => button.quiet)).toEqual([true, true, false])
+  })
+
+  it('words the same buttons for an amend', () => {
+    expect(buttons({ pushable: true, openPullRequest: true, amend: true })).toEqual([
+      'push-pr: Amend, push and open PR',
+      'push: Amend and push',
+      'commit: Amend'
+    ])
+  })
+
+  it('never shows a pull request button without somewhere to push', () => {
+    expect(buttons({ pushable: false, openPullRequest: true })).toEqual(['commit: Commit'])
+    expect(buttons({ pushable: true, openPullRequest: false })).toEqual(['push: Commit and push', 'commit: Commit'])
+  })
+
+  it('shows the pull request button exactly where the availability table offers it', () => {
+    const none: GitPullRequestLookup = { state: 'none', isDefaultBranch: false }
+    const dirty = [fileChange('a.ts')]
+    const shown = (patch: Partial<GitStatusSnapshot>, scope = { workspaceThreadId: null as string | null }, lookup: GitPullRequestLookup | null = none) => {
+      const availability = gitActionAvailability(status(patch), lookup, 3, scope)
+      return commitFlowButtons({ amend: false, pushable: availability.offerCommitAndPush, openPullRequest: availability.offerCommitPushAndOpenPr })
+        .some((button) => button.flow === 'push-pr')
+    }
+    expect(shown({ changes: dirty })).toBe(true)
+    expect(shown({ ahead: 1, changes: dirty })).toBe(true)
+    expect(shown({ tracking: 'none', upstream: null, changes: dirty })).toBe(true)
+    expect(shown({ changes: dirty }, { workspaceThreadId: 't1' })).toBe(true)
+    // Behind, diverged and conflicted hide it, in a thread worktree as well.
+    expect(shown({ behind: 1, changes: dirty })).toBe(false)
+    expect(shown({ ahead: 1, behind: 1, changes: dirty })).toBe(false)
+    expect(shown({ changes: [fileChange('a.ts', { status: 'conflicted' })] })).toBe(false)
+    expect(shown({ behind: 1, changes: dirty }, { workspaceThreadId: 't1' })).toBe(false)
+    expect(shown({ changes: [fileChange('a.ts', { status: 'conflicted' })] }, { workspaceThreadId: 't1' })).toBe(false)
+    // Nothing to commit, no remote, no branch, a pull request already there, the default branch.
+    expect(shown({})).toBe(false)
+    expect(shown({ tracking: 'none', upstream: null, hasRemote: false, changes: dirty })).toBe(false)
+    expect(shown({ branch: null, tracking: 'detached', upstream: null, changes: dirty })).toBe(false)
+    expect(shown({ changes: dirty }, undefined, found())).toBe(false)
+    expect(shown({ changes: dirty }, undefined, { state: 'none', isDefaultBranch: true })).toBe(false)
   })
 })
 
