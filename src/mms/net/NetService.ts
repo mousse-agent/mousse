@@ -70,7 +70,7 @@ import { lookup } from 'node:dns/promises'
 import { NET_PROTO_MINOR, WEBRTC_SDP_MAX_BYTES } from '../../shared/net/limits'
 import { isOlderVersion } from '../../shared/net/version'
 import { mousseVersion } from '../appVersion'
-import { PeerPresence, parsePeerInfo, type PeerLink } from './presence'
+import { PEER_PRESENCE_SCHEMA, PeerPresence, parsePeerInfo, type PeerLink } from './presence'
 import type { TransportConfiguration } from './transports/registry'
 import type { RelayIdentity } from './relay/protocol'
 import { inviteRequiresProtection } from './enrollment/service'
@@ -214,6 +214,7 @@ export class NetService {
           'CREATE TABLE IF NOT EXISTS net_service_config(singleton INTEGER PRIMARY KEY CHECK(singleton=1),value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS net_peer_routes(node TEXT PRIMARY KEY,signed TEXT NOT NULL)'
         )
       )
+      db.transaction(() => db.database.exec(PEER_PRESENCE_SCHEMA))
       const row = db.database
         .prepare('SELECT value FROM net_service_config WHERE singleton=1')
         .get()
@@ -1312,6 +1313,7 @@ export class NetService {
       signed = rt.identity.roster()
     if (!signed) return
     const roster = rt.identity.verifySigned<Roster>(signed, root)
+    this.prunePresence(rt, roster)
     for (const row of rt.db.database.prepare('SELECT node,signed FROM net_peer_routes').all()) {
       const node = String(row.node) as NodeId
       if (node === self.node || this.supervisors.has(node)) continue
@@ -1924,6 +1926,32 @@ export class NetService {
       }))
     }
   }
+  /** A revoked or replaced device keeps no presence row; every current device keeps its own. */
+  private prunePresence(rt: NetRuntime, roster: Roster): void {
+    try {
+      const live = new Set<NodeId>()
+      for (const signed of roster.nodes) {
+        const delegation = rt.identity.verifySigned<NodeDelegation>(signed, roster.rootKey)
+        if (
+          !roster.revoked.some(
+            (row) => row.subject === delegation.subject && row.throughKeyEpoch >= delegation.keyEpoch
+          )
+        )
+          live.add(delegation.subject)
+      }
+      this.presences().prune(live)
+    } catch {
+      // Presence is a convenience; pruning runs again on the next roster change.
+    }
+  }
+  /** Whether this device may call a read method on its peers; without it `net.info` is refused. */
+  private canRead(): boolean {
+    try {
+      return this.currentNode(this.requireEnrolled().identity.self()!.node).caps.includes('read')
+    } catch {
+      return false
+    }
+  }
   private presences(): PeerPresence {
     const db = this.runtime().db
     if (this.presenceStore?.db !== db) this.presenceStore = new PeerPresence(db, this.clock)
@@ -1938,7 +1966,13 @@ export class NetService {
     const rt = this.requireEnrolled(),
       current = mousseVersion()
     if (node === rt.identity.self()?.node)
-      return { version: current, platform: process.platform, olderThanThis: false, routes: [] }
+      return {
+        version: current,
+        platform: process.platform,
+        arch: process.arch,
+        olderThanThis: false,
+        routes: []
+      }
     let row: ReturnType<PeerPresence['get']>
     try {
       row = this.presences().get(node)
@@ -1959,6 +1993,7 @@ export class NetService {
     return {
       ...(row?.version ? { version: row.version } : {}),
       ...(row?.platform ? { platform: row.platform } : {}),
+      ...(row?.arch ? { arch: row.arch } : {}),
       ...(link
         ? {
             route: {
@@ -1971,9 +2006,12 @@ export class NetService {
       routes: this.routes?.health(node) ?? [],
       ...(error ? { error } : {}),
       ...(lastSeenAt !== undefined ? { lastSeenAt } : {}),
-      // A development build has no release to compare with, so it never calls a peer old.
+      // A build with no version has nothing to compare with, so it never calls a peer old. A
+      // "too old to answer" verdict only counts for a device this one is allowed to ask.
       olderThanThis:
-        current !== '0.0.0' && !!row && (row.legacy || isOlderVersion(row.version, current))
+        current !== '0.0.0' &&
+        !!row &&
+        ((row.legacy && this.canRead()) || isOlderVersion(row.version, current))
     }
   }
   /** Notes an open session with one of the user's own devices and asks it for its version. */
@@ -1993,11 +2031,26 @@ export class NetService {
           // The service is shutting down.
         }
       })
+      // A refused `read` also answers `forbidden`, which would look like an older daemon.
+      if (!this.canRead()) {
+        this.presences().clearLegacy(peer.node)
+        return
+      }
       // A phone is a browser client with no daemon behind it.
       if (link.transport === PHONE_WEBRTC_TRANSPORT) return
       void this.track(this.readPeerInfo(session, peer.node))
     } catch {
       // Presence never affects a session.
+    }
+  }
+  /** True once the device has sent a signed routes record: computers always do, phones never. */
+  private publishesRoutes(node: NodeId): boolean {
+    try {
+      return !!this.runtime()
+        .db.database.prepare('SELECT 1 FROM net_peer_routes WHERE node=?')
+        .get(node)
+    } catch {
+      return false
     }
   }
   private async readPeerInfo(session: NetSyncSession, node: NodeId): Promise<void> {
@@ -2008,8 +2061,9 @@ export class NetService {
       if (info) this.presences().info(node, info)
     } catch (error) {
       // Unknown method: an older daemon. Any other failure (a closed session, a timeout) leaves
-      // what was known before.
-      if (error instanceof NetError && error.code === 'forbidden') {
+      // what was known before. A phone reached over the relay answers the same way, but it
+      // never publishes routes, so only a device that does can be an older daemon.
+      if (error instanceof NetError && error.code === 'forbidden' && this.publishesRoutes(node)) {
         try {
           this.presences().legacy(node)
         } catch {

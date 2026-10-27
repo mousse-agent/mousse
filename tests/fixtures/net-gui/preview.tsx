@@ -33,7 +33,7 @@ window.mousse = { platformRequest: { request: async (method: string) => {
     case 'bridge.nodes': return { nodes: [
       { node, name: 'This Mac', self: true, revoked: false, caps: ['read', 'write'], state: 'open', version: '0.1.3', platform: 'darwin', olderThanThis: false, routes: [] },
       { node: 'nod_other', name: 'Build Mac', self: false, revoked: false, caps: ['read', 'write'], state: 'open', version: '0.1.3', platform: 'darwin', route: { transport: 'tailscale', direction: 'out' }, routes: [{ route: { transport: 'tailscale', address: 'ws://100.64.0.2:4100/mousse-net', priority: 10 }, state: 'ok' }, { route: { transport: 'ssh', address: 'ssh://me@build.example.com/127.0.0.1:47821', priority: 40 }, state: 'failing', lastError: 'route_unreachable' }], olderThanThis: false },
-      { node: 'nod_vps', name: 'Linux VPS', self: false, revoked: false, caps: ['read', 'chat', 'write'], state: 'closed', version: '0.1.1', platform: 'linux', lastSeenAt: now - 2 * 3600_000, routes: [], olderThanThis: true },
+      { node: 'nod_vps', name: 'Linux VPS', self: false, revoked: false, caps: ['read', 'chat', 'write'], state: 'closed', version: '0.1.1', platform: 'linux', arch: 'x64', lastSeenAt: now - 2 * 3600_000, routes: [], olderThanThis: true },
       { node: 'nod_legacy', name: 'Old NAS', self: false, revoked: false, caps: ['read'], state: 'closed', lastSeenAt: now - 3 * 86_400_000, routes: [], olderThanThis: true }
     ] }
     default: throw new Error('This layout fixture has no daemon or mutation authority')

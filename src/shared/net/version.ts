@@ -39,7 +39,13 @@ function comparePrerelease(a: string[], b: string[]): -1 | 0 | 1 {
     if (left === right) continue
     const leftNumber = NUMERIC.test(left),
       rightNumber = NUMERIC.test(right)
-    if (leftNumber && rightNumber) return Number(left) < Number(right) ? -1 : 1
+    // Digit strings, not Number: an identifier may be longer than a double holds exactly.
+    if (leftNumber && rightNumber) {
+      const a = left.replace(/^0+(?=\d)/, ''),
+        b = right.replace(/^0+(?=\d)/, '')
+      if (a === b) continue
+      return a.length !== b.length ? (a.length < b.length ? -1 : 1) : a < b ? -1 : 1
+    }
     // Numeric identifiers sort before alphanumeric ones.
     if (leftNumber !== rightNumber) return leftNumber ? -1 : 1
     return left < right ? -1 : 1

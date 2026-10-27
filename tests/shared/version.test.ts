@@ -25,6 +25,14 @@ describe('compareVersions', () => {
     expect(compareVersions('0.1.2-nightly.20261022.17.1', '0.1.2-nightly.20261022.17')).toBe(1)
   })
 
+  it('compares long numeric prerelease identifiers exactly, in both directions', () => {
+    expect(compareVersions('1.0.0-9007199254740992', '1.0.0-9007199254740993')).toBe(-1)
+    expect(compareVersions('1.0.0-9007199254740993', '1.0.0-9007199254740992')).toBe(1)
+    expect(compareVersions('1.0.0-9007199254740993', '1.0.0-9007199254740993')).toBe(0)
+    expect(compareVersions('1.0.0-99999999999999999999', '1.0.0-100000000000000000000')).toBe(-1)
+    expect(compareVersions('1.0.0-007', '1.0.0-7')).toBe(0)
+  })
+
   it('follows SemVer for other prereleases and ignores build metadata', () => {
     expect(compareVersions('0.1.2-1', '0.1.2-alpha')).toBe(-1)
     expect(compareVersions('0.1.2-alpha', '0.1.2-beta')).toBe(-1)

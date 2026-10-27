@@ -223,7 +223,7 @@ export function NetDevicesSection() {
               indent
               title={device.version ? `Older than this device (${device.version})` : 'Older than this device'}
               description={device.version ? `This device runs ${selfDevice?.version ?? 'a newer version'}.` : `${device.name} is too old to report its version${selfDevice?.version ? `; this device runs ${selfDevice.version}` : ''}.`}
-              control={selfDevice?.version && <button type="button" className="settings-btn" onClick={() => setUpdating(device)}>Show command</button>}
+              control={selfDevice?.version && <button type="button" className="settings-btn" onClick={() => setUpdating(device)}>{updateInstructions(device, selfDevice.version).command ? 'Show command' : 'How to update'}</button>}
             />
           )
         ])}
@@ -396,13 +396,12 @@ export function NetDevicesSection() {
             <p>{instructions.summary}</p>
             {instructions.command && (
               <>
-                <code className="devices-code">{instructions.command}</code>
+                <code className="devices-code devices-code-block">{instructions.command}</code>
                 <div className="devices-dialog-actions">
                   <CopyButton text={instructions.command} label="Copy command" />
                 </div>
               </>
             )}
-            <p className="settings-muted">Threads running on {updating.name} stop when it restarts.</p>
           </div>
         </Modal>
       )

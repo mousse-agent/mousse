@@ -110,21 +110,57 @@ describe('routeDetails', () => {
 })
 
 describe('updateInstructions', () => {
-  it('gives a Linux host the download command for this version', () => {
-    const result = updateInstructions(device({ platform: 'linux' }), '0.1.3')
-    expect(result.command).toBe(
-      'curl -fL -O https://github.com/mousse-agent/mousse/releases/download/v0.1.3/mousse-cli-0.1.3-linux-x86_64.AppImage && chmod +x mousse-cli-0.1.3-linux-x86_64.AppImage'
-    )
+  const lines = (command?: string) => (command ?? '').split('\n')
+
+  it('gives a headless Linux x86_64 host the full sequence for this version', () => {
+    const result = updateInstructions(device({ platform: 'linux', arch: 'x64' }), '0.1.3')
+    const script = lines(result.command)
+    const base = 'https://github.com/mousse-agent/mousse/releases/download/v0.1.3'
+    expect(script).toContain(`curl -fLO ${base}/mousse-cli-0.1.3-linux-x86_64.AppImage`)
+    expect(script).toContain(`curl -fLO ${base}/SHA256SUMS-0.1.3.txt`)
+    expect(script).toContain('sha256sum -c --ignore-missing SHA256SUMS-0.1.3.txt')
+    expect(script).toContain('export ELECTRON_DISABLE_SANDBOX=1')
+    expect(script.at(-1)).toBe('systemctl --user restart mousse-mms')
+    expect(result.command).toContain('Environment=ELECTRON_DISABLE_SANDBOX=1')
+    // Stops at the first failure, and verifies before it installs anything.
+    expect(script[0]).toBe('set -e')
+    expect(script.findIndex((line) => line.startsWith('sha256sum'))).toBeLessThan(script.findIndex((line) => line.includes('service install')))
     expect(result.summary).toContain('Linux VPS')
+    expect(result.summary).toContain('desktop app')
   })
 
-  it('points a desktop at its own app and an unknown platform at the release page', () => {
-    expect(updateInstructions(device({ platform: 'darwin', name: 'Build Mac' }), '0.1.3')).toEqual({
-      summary: 'Open Mousse on Build Mac and install the update to 0.1.3.'
-    })
-    expect(updateInstructions(device({ platform: 'win32' }), '0.1.3').command).toBeUndefined()
+  it('offers no command for Linux on another architecture or one that did not report it', () => {
+    const arm = updateInstructions(device({ platform: 'linux', arch: 'arm64' }), '0.1.3')
+    expect(arm.command).toBeUndefined()
+    expect(arm.summary).toContain('arm64')
+    expect(updateInstructions(device({ platform: 'linux' }), '0.1.3').command).toBeUndefined()
+  })
+
+  it('says a Mac has no in-app update and names the download for its chip', () => {
+    const arm = updateInstructions(device({ platform: 'darwin', arch: 'arm64', name: 'Build Mac' }), '0.1.3')
+    expect(arm.command).toBeUndefined()
+    expect(arm.summary).toContain("can't update itself")
+    expect(arm.summary).toContain('Mousse-0.1.3-arm64.dmg')
+    expect(arm.summary).not.toContain('x64')
+    expect(updateInstructions(device({ platform: 'darwin', arch: 'x64' }), '0.1.3').summary).toContain('Mousse-0.1.3-x64.dmg')
+    const either = updateInstructions(device({ platform: 'darwin' }), '0.1.3').summary
+    expect(either).toContain('arm64.dmg')
+    expect(either).toContain('x64.dmg')
+  })
+
+  it('tells Windows to let the app update, and an unknown platform to use the release page', () => {
+    const windows = updateInstructions(device({ platform: 'win32' }), '0.1.3')
+    expect(windows.command).toBeUndefined()
+    expect(windows.summary).toContain('updates itself')
+    expect(windows.summary).toContain('Mousse.Setup.0.1.3.exe')
     const unknown = updateInstructions(device(), '0.1.3')
     expect(unknown.command).toBeUndefined()
     expect(unknown.summary).toContain('releases/tag/v0.1.3')
+  })
+
+  it('never builds a command from a target that is not a version', () => {
+    const result = updateInstructions(device({ platform: 'linux', arch: 'x64' }), '1.0; rm -rf ~')
+    expect(result.command).toBeUndefined()
+    expect(result.summary.length).toBeGreaterThan(0)
   })
 })
