@@ -6,7 +6,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { git as mousseGit } from '../src/mms/actions/git'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { GitService } from '../src/mms/git/GitService'
-import { clearRepoProgramCache, guardedSimpleGit, repoProgramOverrides, repoProgramProbes, withoutRepoPrograms, writesThroughFilters } from '../src/mms/git/repoPrograms'
+import { ProjectManager } from '../src/mms/data/ProjectManager'
+import { clearRepoProgramCache, guardedSimpleGit, repoProgramOverrides, repoProgramProbes, trustExistingProjectsOnce, withoutRepoPrograms, writesThroughFilters } from '../src/mms/git/repoPrograms'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { actionOptions, gitFoundationFixture } from './fixtures/gitFoundation'
 
@@ -229,6 +230,69 @@ describe('files under a filter only the repository defines are refused, never st
     expect(writesThroughFilters(['diff', '--cached'])).toBe(false)
     expect(writesThroughFilters(['hash-object', '--stdin'])).toBe(false)
     expect(writesThroughFilters(['hash-object', '-w', 'f'])).toBe(true)
+  })
+})
+
+describe('a filter the repository had when the user added it runs; one added or changed later does not', () => {
+  let f: ReturnType<typeof gitFoundationFixture>
+  beforeEach(() => { f = gitFoundationFixture() })
+  afterEach(() => f.dispose())
+
+  /** A git-crypt-like filter in the repository's own config, with a file under it committed. */
+  function withCrypt(cwd: string, clean = command('crypt-clean', true)): void {
+    plain(cwd, 'config', 'filter.crypt.clean', clean)
+    plain(cwd, 'config', 'filter.crypt.smudge', command('crypt-smudge', true))
+    plain(cwd, 'config', 'filter.crypt.required', 'true')
+    writeFileSync(join(cwd, '.gitattributes'), 'secrets.env filter=crypt\n')
+    writeFileSync(join(cwd, 'secrets.env'), 'TOKEN=one\n')
+    plain(cwd, 'add', '-A'); plain(cwd, 'commit', '-qm', 'secrets')
+    rmSync(markers, { recursive: true }); mkdirSync(markers)
+  }
+  const projects = () => new ProjectManager(join(f.root, 'profile'))
+
+  it('present when the project was added: the thread worktree and the checkpoint run it', async () => {
+    withCrypt(f.repo)
+    projects().openProject(f.repo)
+    const cwd = (await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)).worktreePath
+    expect(ran()).toContain('crypt-smudge')
+    const { action } = await new ThreadActionService(f.thread).runCheckpointedAction(actionOptions(cwd, 'turn-1'), () => writeFileSync(join(cwd, 'secrets.env'), 'TOKEN=two\n'))
+    expect(action.changedPaths.map((change) => change.path)).toEqual(['secrets.env'])
+    expect(ran()).toContain('crypt-clean')
+  })
+
+  it('added after the project was added: still refused, with how to trust it', () => {
+    projects().openProject(f.repo)
+    withCrypt(f.repo)
+    writeFileSync(join(f.repo, 'secrets.env'), 'TOKEN=two\n')
+    expect(() => mousseGit(f.repo, ['add', '-A'])).toThrow(/Trust Git settings again/)
+    expect(ran()).toEqual([])
+  })
+
+  it('a changed command for a trusted filter is refused until the user trusts the settings again', () => {
+    withCrypt(f.repo)
+    const manager = projects()
+    const project = manager.openProject(f.repo)
+    plain(f.repo, 'config', 'filter.crypt.clean', command('changed-clean', true))
+    writeFileSync(join(f.repo, 'secrets.env'), 'TOKEN=two\n')
+    expect(() => mousseGit(f.repo, ['add', '-A'])).toThrow(/"crypt" filter/)
+    expect(ran()).toEqual([])
+    expect(manager.trustGitSettings(project.id)).toEqual({ filters: ['crypt'] })
+    mousseGit(f.repo, ['add', '-A'])
+    expect(ran()).toEqual(['changed-clean'])
+  })
+
+  it('projects added before this version are recorded once, on the first start', () => {
+    withCrypt(f.repo)
+    const profile = join(f.root, 'existing-profile')
+    trustExistingProjectsOnce(profile, [f.repo])
+    writeFileSync(join(f.repo, 'secrets.env'), 'TOKEN=two\n')
+    mousseGit(f.repo, ['add', '-A'])
+    expect(ran()).toEqual(['crypt-clean'])
+    // A later start does not record a filter changed since.
+    plain(f.repo, 'config', 'filter.crypt.clean', command('changed-clean', true))
+    trustExistingProjectsOnce(profile, [f.repo])
+    writeFileSync(join(f.repo, 'secrets.env'), 'TOKEN=three\n')
+    expect(() => mousseGit(f.repo, ['add', '-A'])).toThrow(/"crypt" filter/)
   })
 })
 
