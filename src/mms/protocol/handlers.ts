@@ -1882,7 +1882,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'scheduled.webhook.deliveries': {
       const p = isObject(params) ? params : {}
       const id = asString(p.id, 'id', 256)
-      return withWebhookRefusals(async () => ({ deliveries: ctx.mms.scheduled.listWebhookDeliveries(id) }))
+      // The URL lets a page that opens later show where senders post; it carries no secret.
+      return withWebhookRefusals(async () => ({ deliveries: ctx.mms.scheduled.listWebhookDeliveries(id), url: ctx.mms.scheduledWebhookUrl(id) }))
     }
     // ── Channels ──────────────────────────────────────────────────────────
     case 'channels.getSnapshot':

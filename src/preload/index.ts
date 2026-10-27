@@ -52,6 +52,9 @@ import type {
   QueuedMessage,
   CreateScheduledJobInput,
   ScheduledJob,
+  ScheduledJobPatch,
+  ScheduledWebhookDeliveryLog,
+  ScheduledWebhookGrant,
   SchedulerStatus,
   ChannelActivityEvent,
   ChannelConfig,
@@ -809,8 +812,15 @@ const api = {
     get: (id: string): Promise<ScheduledJob | undefined> => ipcRenderer.invoke('scheduled:get', id),
     create: (input: CreateScheduledJobInput): Promise<ScheduledJob> =>
       ipcRenderer.invoke('scheduled:create', input),
-    update: (id: string, patch: Partial<ScheduledJob>): Promise<ScheduledJob | null> =>
+    update: (id: string, patch: ScheduledJobPatch): Promise<ScheduledJob | null> =>
       ipcRenderer.invoke('scheduled:update', id, patch),
+    webhook: {
+      enable: (id: string): Promise<ScheduledWebhookGrant> => ipcRenderer.invoke('scheduled:webhook:enable', id),
+      rotate: (id: string): Promise<ScheduledWebhookGrant> => ipcRenderer.invoke('scheduled:webhook:rotate', id),
+      disable: (id: string): Promise<ScheduledJob> => ipcRenderer.invoke('scheduled:webhook:disable', id),
+      deliveries: (id: string): Promise<ScheduledWebhookDeliveryLog> =>
+        ipcRenderer.invoke('scheduled:webhook:deliveries', id)
+    },
     delete: (id: string): Promise<boolean> => ipcRenderer.invoke('scheduled:delete', id),
     pause: (id: string, reason?: string): Promise<ScheduledJob | null> =>
       ipcRenderer.invoke('scheduled:pause', id, reason),
