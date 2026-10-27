@@ -141,6 +141,11 @@ describe('Pi connection methods', () => {
     expect(piCredentialSubject('github-copilot', { type: 'oauth', access: jwt('u2', 1) }, {})).not.toBe(before)
     expect(piCredentialSubject('kimi-coding', { type: 'oauth', access: 'opaque', accountId: 'acct-1' }, {})).toMatch(/^oauth:/)
     expect(piCredentialSubject('kimi-coding', { type: 'oauth', access: 'opaque' }, {})).toBeUndefined()
+    // Copilot's tokens are opaque: its GitHub token (kept by a refresh) names the account.
+    const copilot = piCredentialSubject('github-copilot', { type: 'oauth', access: 'tid=1;proxy-ep=x', refresh: 'ghu_one' }, {})
+    expect(copilot).toMatch(/^oauth:/)
+    expect(piCredentialSubject('github-copilot', { type: 'oauth', access: 'tid=2;proxy-ep=x', refresh: 'ghu_one' }, {})).toBe(copilot)
+    expect(piCredentialSubject('github-copilot', { type: 'oauth', access: 'tid=1;proxy-ep=x', refresh: 'ghu_two' }, {})).not.toBe(copilot)
     expect(piCredentialSubject('amazon-bedrock', undefined, { AWS_PROFILE: 'dev', AWS_REGION: 'us-east-1' })).toMatch(/^ambient:/)
     expect(piCredentialSubject('amazon-bedrock', undefined, {})).toBeUndefined()
     // Never the secret itself.

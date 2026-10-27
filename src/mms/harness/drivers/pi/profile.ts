@@ -75,7 +75,7 @@ const AMBIENT: Readonly<Record<string, readonly string[]>> = Object.freeze({
 export function piCredentialSubject(providerId: string, credential: Record<string, unknown> | undefined, env: NodeJS.ProcessEnv): string | undefined {
   if (credential?.type === 'api_key' && typeof credential.key === 'string' && credential.key) return `apikey:${sha256(credential.key)}`
   if (credential?.type === 'oauth') {
-    const claim = oauthSubject(credential)
+    const claim = oauthSubject(credential, providerId)
     return claim ? `oauth:${sha256(`${providerId}|${claim}`)}` : undefined
   }
   const ambient = AMBIENT[providerId]

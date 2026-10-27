@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
@@ -128,15 +128,18 @@ function jwtSubject(token: unknown): string | undefined {
 /**
  * The stable identity claim of a stored OAuth credential (PR 2 §5 "Identity"), unchanged by a
  * refresh: the access token's JWT `sub`, else the account id pi-ai stores (`accountId`), else a
- * `credentialId` field. Undefined when the credential has none (GitHub Copilot's tokens are not JWTs
- * and carry no account id, and Mousse's sign-in mints no `credentialId` yet).
+ * `credentialId` field; for GitHub Copilot, whose tokens are not JWTs and carry no account id, a
+ * hash of its stored GitHub token, which a Copilot refresh keeps (`refresh: refreshToken`). Undefined
+ * when the credential has none.
  */
-export function oauthSubject(credential: unknown): string | undefined {
+export function oauthSubject(credential: unknown, provider?: string): string | undefined {
   const stored = credential as Record<string, unknown> | undefined
   if (!stored || typeof stored !== 'object' || stored.type !== 'oauth') return undefined
   const sub = jwtSubject(stored.access)
   if (sub) return `sub:${sub}`
   if (typeof stored.accountId === 'string' && stored.accountId) return `account:${stored.accountId}`
   if (typeof stored.credentialId === 'string' && stored.credentialId) return `credential:${stored.credentialId}`
+  if (provider === 'github-copilot' && typeof stored.refresh === 'string' && stored.refresh)
+    return `github:${createHash('sha256').update(stored.refresh).digest('hex')}`
   return undefined
 }
