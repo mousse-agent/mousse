@@ -76,6 +76,8 @@ describe('a worktree retired by a storage rule comes back on demand', () => {
     ['git.diff', { path: 'value.txt' }],
     ['git.log', {}],
     ['git.branches', {}],
+    ['git.diffStats', {}],
+    ['git.lastCommitMessage', {}],
     ['files.search', { query: 'value' }],
     ['files.grep', { query: 'base' }],
     ['review.files', { scope: { kind: 'worktree' } }],

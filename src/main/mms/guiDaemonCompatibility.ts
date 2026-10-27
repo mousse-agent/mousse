@@ -25,6 +25,9 @@ export const GUI_REQUIRED_METHODS = [
   // The Files panel and composer search through the daemon; an older service lacks it.
   'files.search',
   'files.grep',
+  // The Files and Git panels look a thread's or project's folder up in the daemon; main reads no folder itself.
+  'files.root', 'files.list', 'files.read', 'files.readAsset', 'files.writeDirect',
+  'git.status', 'git.log', 'git.branches', 'git.diffStats', 'git.lastCommitMessage',
   // Automations → Bots: personal bots, profile-bound; an older service lacks them.
   ...BOTS_PERSONAL_METHODS
 ] as const

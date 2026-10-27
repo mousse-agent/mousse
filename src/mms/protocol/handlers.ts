@@ -113,6 +113,8 @@ import { getWorkspaceIndexRegistry } from '../files/WorkspaceIndexRegistry'
 import { searchWorkspacePaths } from '../files/WorkspaceSearch'
 import { devGuiBridge } from '../devgui/DevGuiBridge'
 import { existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs'
+import { FILE_ASSET_PIECE_BYTES, FILES_WRITE_DIRECT_MAX_CHARS } from '../../shared/fileAssets'
+import { homedir } from 'node:os'
 import { join, relative, resolve } from 'node:path'
 import type { DomainConnectionContext } from './domainRegistry'
 import { DomainRpcError } from './domainRegistry'
@@ -411,6 +413,57 @@ function projectRootContext(ctx: HandlerContext, params: Record<string, unknown>
   const project = ctx.mms.projects.getProject(projectId)
   if (!project) throw new DomainRpcError('project_not_found', 'Project not found', { projectId })
   return project.path
+}
+
+/** Only a Mousse window on this computer browses and saves files the way the Files panel does. */
+function isLocalWindow(ctx: HandlerContext): boolean {
+  return ctx.connection?.clientType === 'gui'
+}
+
+/**
+ * Runs a file call for a caller. The Files panel shows the reason a file cannot be opened or saved (too large,
+ * no preview for its type, outside the folder, no longer there), so a window of this computer gets the call's own
+ * message; any other caller keeps the daemon's general error for what it did not expect.
+ */
+async function fileCall<T>(ctx: HandlerContext, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run()
+  } catch (error) {
+    if (!isLocalWindow(ctx) || error instanceof DomainRpcError || error instanceof AppError) throw error
+    throw new DomainRpcError('file_unavailable', error instanceof Error ? error.message : String(error))
+  }
+}
+
+/**
+ * The folder the Files panel shows for a thread or project of this computer's own window:
+ * - a thread's ready worktree, which wins over the primary checkout;
+ * - else the project folder (the named project, or the thread's own);
+ * - else the home folder, for a thread without a project and for a window with nothing selected.
+ * Never provisions or restores a worktree (`files.root` is asked on every thread switch); the calls that read
+ * or write a file restore a retired one first.
+ */
+function localFilesRoot(ctx: HandlerContext, params: Record<string, unknown>): string {
+  const threadId = asOptionalString(params.threadId, 256)
+  const projectId = asOptionalString(params.projectId, 256)
+  const threadProject = threadId && ctx.mms.threads.getThread(threadId) ? resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId) : undefined
+  if (threadId && threadProject) {
+    const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
+    const stored = manager.load()
+    const execution = manager.executionContext(threadProject, stored ? manager.verify(stored) : undefined)
+    if (execution.lifecycle === 'ready' && execution.projectPath) return execution.projectPath
+  }
+  if (projectId) return ctx.mms.projects.getProject(projectId)?.path ?? homedir()
+  return threadProject ?? homedir()
+}
+
+/**
+ * The folder a `files.list`, `files.read` or `files.readAsset` call works in. A worktree that a storage rule retired
+ * comes back first, as for every read of a thread. A window of this computer then gets the Files panel's folder;
+ * every other caller gets exactly the thread's or project's own folder.
+ */
+async function filesRootContext(ctx: HandlerContext, params: Record<string, unknown>): Promise<string> {
+  await materializeRequestedWorkspace(ctx, params)
+  return isLocalWindow(ctx) ? localFilesRoot(ctx, params) : projectRootContext(ctx, params)
 }
 
 /** The folder of a `pullRequests.*` call; a missing or doubled reference is the caller's mistake, not an internal error. */
@@ -2731,18 +2784,59 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
       return await new PublishService(operation.threadDirectory).publish(workspace.worktreePath, operation.projectPath, targetBranch, undefined, { expectedSourceSha: asOptionalString(p.expectedSourceSha, 64), expectedTargetSha: asOptionalString(p.expectedTargetSha, 64), expectedJournalRevision: asOptionalBoundedInt(p.expectedJournalGeneration, 'expectedJournalGeneration', { min: 0, max: Number.MAX_SAFE_INTEGER }) ?? operation.currentGeneration, operationId: asOptionalString(p.operationId, 256) })
     }
+    case 'files.root': {
+      const p = isObject(params) ? params : {}
+      return { root: isLocalWindow(ctx) ? localFilesRoot(ctx, p) : projectRootContext(ctx, p) }
+    }
     case 'files.list': {
       const p = isObject(params) ? params : {}
-      await materializeRequestedWorkspace(ctx, p)
-      const root = projectRootContext(ctx, p)
-      return { entries: await ctx.mms.fileService.listDir(root, containedPath(root, p.path)) }
+      return await fileCall(ctx, async () => {
+        const root = await filesRootContext(ctx, p)
+        return { entries: await ctx.mms.fileService.listDir(root, containedPath(root, p.path)) }
+      })
     }
     case 'files.read': {
       const p = isObject(params) ? params : {}
-      await materializeRequestedWorkspace(ctx, p)
-      const root = projectRootContext(ctx, p)
-      const path = requiredContainedPath(root, p.path)
-      return { path, content: await ctx.mms.fileService.readFile(root, path) }
+      return await fileCall(ctx, async () => {
+        const root = await filesRootContext(ctx, p)
+        const path = requiredContainedPath(root, p.path)
+        return { path, content: await ctx.mms.fileService.readFile(root, path) }
+      })
+    }
+    case 'files.readAsset': {
+      const p = isObject(params) ? params : {}
+      // A preview can be far larger than a message: the caller reads it piece by piece and joins the pieces.
+      const offset = asOptionalBoundedInt(p.offset, 'offset', { min: 0, max: Number.MAX_SAFE_INTEGER }) ?? 0
+      const length = asOptionalBoundedInt(p.length, 'length', { min: 1, max: FILE_ASSET_PIECE_BYTES }) ?? FILE_ASSET_PIECE_BYTES
+      return await fileCall(ctx, async () => {
+        const root = await filesRootContext(ctx, p)
+        const path = requiredContainedPath(root, p.path)
+        const piece = await ctx.mms.fileService.readAssetRange(root, path, offset, length)
+        return { path, mimeType: piece.mimeType, size: piece.size, offset, data: Buffer.from(piece.data).toString('base64') }
+      })
+    }
+    case 'files.writeDirect': {
+      // The editor's save on this computer: it writes the file as it is and records no action, so unlike
+      // `files.write` it has no size limit below the message limit and nothing to Undo. Not for other computers.
+      if (!isLocalWindow(ctx)) throw new DomainRpcError('forbidden', 'Only a Mousse window on this computer saves files directly')
+      const p = isObject(params) ? params : {}
+      const expectedProfileId = asOptionalString(p.expectedProfileId, 256)
+      if (expectedProfileId && expectedProfileId !== ctx.mms.profileId) {
+        throw new DomainRpcError('profile_mismatch', 'Profile changed while saving; the file was not written')
+      }
+      // An empty file is a valid save, so this is not `asString`.
+      if (typeof p.content !== 'string') throw new DomainRpcError('invalid_params', 'content must be a string')
+      if (p.content.length > FILES_WRITE_DIRECT_MAX_CHARS) throw new DomainRpcError('invalid_params', `content exceeds max length ${FILES_WRITE_DIRECT_MAX_CHARS}`)
+      const content = p.content
+      return await fileCall(ctx, async () => {
+        // The file was read from the thread's worktree, so a retired one comes back before it is written.
+        await materializeRequestedWorkspace(ctx, p)
+        const root = localFilesRoot(ctx, p)
+        const path = requiredContainedPath(root, p.path)
+        const lines = await ctx.mms.fileService.writeFile(root, path, content)
+        ctx.mms.lineEditStats.record('manual', lines)
+        return { path }
+      })
     }
     case 'files.write': {
       const p = isObject(params) ? params : {}
@@ -2848,6 +2942,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       await materializeRequestedWorkspace(ctx, p)
       return { branches: await ctx.mms.gitService.getBranches(projectRootContext(ctx, p)) }
+    }
+    case 'git.diffStats': {
+      const p = isObject(params) ? params : {}
+      await materializeRequestedWorkspace(ctx, p)
+      return { stats: await ctx.mms.gitService.getDiffStats(projectRootContext(ctx, p)) }
+    }
+    case 'git.lastCommitMessage': {
+      const p = isObject(params) ? params : {}
+      await materializeRequestedWorkspace(ctx, p)
+      return { message: await ctx.mms.gitService.lastCommitMessage(projectRootContext(ctx, p)) }
     }
     case 'git.checkout': {
       const p = isObject(params) ? params : {}

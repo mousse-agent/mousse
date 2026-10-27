@@ -1,4 +1,4 @@
-import { readdir, readFile, writeFile, stat } from 'fs/promises'
+import { open, readdir, readFile, writeFile, stat } from 'fs/promises'
 import { join, relative } from 'path'
 import type { FileAsset, FileEntry, FileStat } from '../../shared/types'
 import { countLineEdits } from '../../shared/lineEditStats'
@@ -48,7 +48,8 @@ export class FileService {
     return readFile(absPath, 'utf8')
   }
 
-  async readAsset(root: string, filePath: string): Promise<FileAsset> {
+  /** The asset's file, once the root guard, the size limit and the preview types have passed. */
+  private async assetFile(root: string, filePath: string): Promise<{ absPath: string; mimeType: string; size: number }> {
     const absPath = resolveWithinRoot(root, filePath)
     const info = await stat(absPath)
     if (!info.isFile()) throw new Error('Not a file')
@@ -58,8 +59,30 @@ export class FileService {
     const extension = filePath.split('.').pop()?.toLowerCase() ?? ''
     const mimeType = ASSET_MIME_TYPES[extension]
     if (!mimeType) throw new Error('This file type does not support binary preview')
+    return { absPath, mimeType, size: info.size }
+  }
+
+  async readAsset(root: string, filePath: string): Promise<FileAsset> {
+    const { absPath, mimeType, size } = await this.assetFile(root, filePath)
     const data = await readFile(absPath)
-    return { data: new Uint8Array(data), mimeType, size: info.size }
+    return { data: new Uint8Array(data), mimeType, size }
+  }
+
+  /**
+   * `length` bytes of the asset from `offset`, so a preview of any size travels in pieces that fit a
+   * daemon message. `size` is the whole file's; a piece past its end is empty.
+   */
+  async readAssetRange(root: string, filePath: string, offset: number, length: number): Promise<FileAsset> {
+    const { absPath, mimeType, size } = await this.assetFile(root, filePath)
+    const wanted = Math.max(0, Math.min(length, size - offset))
+    const buffer = Buffer.alloc(wanted)
+    const handle = await open(absPath, 'r')
+    try {
+      const { bytesRead } = wanted > 0 ? await handle.read(buffer, 0, wanted, offset) : { bytesRead: 0 }
+      return { data: new Uint8Array(buffer.subarray(0, bytesRead)), mimeType, size }
+    } finally {
+      await handle.close()
+    }
   }
 
   async writeFile(root: string, filePath: string, content: string): Promise<number> {
