@@ -1,19 +1,20 @@
 import type { ScheduledJob } from '../../shared/types'
 
-/** Active jobs agents may have in a profile at once, counted from the saved jobs (so a restart does not reset it). */
-export const AGENT_JOB_MAX_ACTIVE = 10
-/** A job an agent creates or changes never runs more often than this. */
-export const AGENT_JOB_MIN_INTERVAL_MINUTES = 15
-/** A job an agent creates ends after this many days unless a person extends it. */
-export const AGENT_JOB_LIFETIME_DAYS = 7
+/**
+ * The limits on jobs agents create are settings (`scheduled.agentJobMaxActive`, `agentJobMinIntervalMinutes` and
+ * `agentJobLifetimeDays`, `MousseConfigStore.agentJobLimits`); `AGENT_JOB_LIMIT_DEFAULTS` holds their defaults. Read the
+ * current ones at the moment of use, never keep them.
+ */
+export { AGENT_JOB_LIMIT_DEFAULTS, AGENT_JOB_LIMIT_RANGES, type AgentJobLimits } from '../../shared/agentJobLimits'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 
-export function agentJobExpiry(from: Date = new Date()): string {
-  return new Date(from.getTime() + AGENT_JOB_LIFETIME_DAYS * DAY_MS).toISOString()
+/** When a job an agent creates now ends: `lifetimeDays` from `from`. A job already made keeps the `expiresAt` it has. */
+export function agentJobExpiry(lifetimeDays: number, from: Date = new Date()): string {
+  return new Date(from.getTime() + lifetimeDays * DAY_MS).toISOString()
 }
 
-/** Whether the job is an agent's, still able to run: it counts against `AGENT_JOB_MAX_ACTIVE`. */
+/** Whether the job is an agent's, still able to run: it counts against the limit on active jobs. */
 export function isActiveAgentJob(job: Pick<ScheduledJob, 'createdBy' | 'enabled' | 'state'>): boolean {
   return Boolean(job.createdBy) && job.enabled && job.state !== 'paused' && job.state !== 'completed'
 }
@@ -25,4 +26,7 @@ export function isExpired(job: Pick<ScheduledJob, 'expiresAt'>, now: Date = new 
 }
 
 export const AGENT_JOBS_OFF_REASON = 'Agents may create jobs is off, so jobs agents created do not run. Resume the job to run it again once it is on.'
-export const AGENT_JOB_EXPIRED_REASON = `Ended: a job an agent creates ends after ${AGENT_JOB_LIFETIME_DAYS} days unless a person extends it.`
+
+export function agentJobExpiredReason(lifetimeDays: number): string {
+  return `Ended: a job an agent creates ends after ${lifetimeDays} ${lifetimeDays === 1 ? 'day' : 'days'} unless a person extends it.`
+}

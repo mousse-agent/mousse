@@ -36,7 +36,7 @@ import {
 } from '../queue/processLiveness'
 import { createLeaseToken } from '../queue/ThreadExecutionLease'
 import { isPermissionMode, narrowPermissionMode, normalizePermissionMode, type PermissionMode } from '../../shared/permissionMode'
-import { AGENT_JOBS_OFF_REASON, AGENT_JOB_EXPIRED_REASON, AGENT_JOB_LIFETIME_DAYS, isExpired } from './agentJobLimits'
+import { AGENT_JOBS_OFF_REASON, agentJobExpiredReason, isExpired } from './agentJobLimits'
 import { computeNextRun } from './computeNextRun'
 import { withFileLock } from './fileLock'
 import { isWorkflowPrompt, JobPermissionRefused, permissionAboveCeiling, WORKFLOW_PERMISSION_REFUSAL, type JobPermissionEdit } from './jobPermission'
@@ -791,7 +791,7 @@ export class ScheduledJobStore {
    * Gives a job `days` more from now (a person's choice: an agent has no way to call this). A job that ended because its
    * time ran out starts running again on its schedule; a finished one-time job stays finished.
    */
-  extendJob(id: string, days: number = AGENT_JOB_LIFETIME_DAYS): ScheduledJob | null {
+  extendJob(id: string, days: number = this.config.agentJobLimits().lifetimeDays): ScheduledJob | null {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const job = this.getJob(id)
       if (!job) return null
@@ -833,6 +833,7 @@ export class ScheduledJobStore {
       const jobs = this.listJobs()
       const due: ScheduledJob[] = []
       const agentJobsOn = this.config.agentJobsEnabled()
+      const lifetimeDays = this.config.agentJobLimits().lifetimeDays
       // An occurrence whose run ended (or can never start) is released before its job is considered.
       const released: Array<{ jobId: string; threadId: string; runId: string }> = []
       let dirty = this.reconcilePendingOccurrences(jobs, now.toISOString(), released)
@@ -856,7 +857,7 @@ export class ScheduledJobStore {
           if (job.expiresAt && job.state !== 'completed' && isExpired(job, now)) {
             job.state = 'completed'
             job.nextRunAt = null
-            job.lastError = AGENT_JOB_EXPIRED_REASON
+            job.lastError = agentJobExpiredReason(lifetimeDays)
             dirty = true
             continue
           }
