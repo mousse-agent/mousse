@@ -1,5 +1,5 @@
 import { afterEach, expect, it } from 'vitest'
-import { BotOutbox } from '../../../../src/mms/bots/admission'
+import { BotOutbox } from '../../../../src/mms/bots/space/admission'
 import { canonicalJson, decodeEnvelope } from '../../../../src/mms/net/sync/codec'
 import type { EventId } from '../../../../src/shared/net'
 import { cleanup } from '../../spaces/host/helpers'

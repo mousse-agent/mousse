@@ -9,8 +9,8 @@ import type {
   SpaceId,
   StreamId,
   UserId
-} from '../net'
-import type { SpaceLocalDelivery } from '../spaces/local'
+} from '../../net'
+import type { SpaceLocalDelivery } from '../../spaces/local'
 
 export const BOTS_LOCAL_CAPABILITY = 'net.v1'
 export const BOTS_LOCAL_METHODS = [

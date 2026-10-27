@@ -8,7 +8,7 @@ import type {
   Outbox,
   PrivateStreamKeys,
   StreamStore
-} from '../../net/contracts'
+} from '../../../net/contracts'
 import type {
   BotPermissionRequest,
   BotPermissionGrant,
@@ -21,13 +21,13 @@ import type {
   SpaceId,
   NodeDelegation,
   Roster
-} from '../../../shared/net'
-import { newId, NetError, validateEventBody } from '../../../shared/net'
-import { NetDatabase, json, same } from '../../net/store/database'
-import { canonicalJson, decodeEnvelope } from '../../net/sync/codec'
-import type { PrivateSpaceService, PrivateState } from '../../spaces/private'
-import { decodeBase64 } from '../../net/identity/crypto'
-import { privateContentAAD } from '../../spaces/private/service'
+} from '../../../../shared/net'
+import { newId, NetError, validateEventBody } from '../../../../shared/net'
+import { NetDatabase, json, same } from '../../../net/store/database'
+import { canonicalJson, decodeEnvelope } from '../../../net/sync/codec'
+import type { PrivateSpaceService, PrivateState } from '../../../spaces/private'
+import { decodeBase64 } from '../../../net/identity/crypto'
+import { privateContentAAD } from '../../../spaces/private/service'
 import type { BotAdmissionService, AdmissionInput } from '../admission'
 import type { BotAdmissionOptions } from '../admission/service'
 import { acceptedBotReceipt } from '../admission/outbox'

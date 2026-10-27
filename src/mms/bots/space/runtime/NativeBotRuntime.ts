@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { Type, type Tool, type ToolCall, type ToolResultMessage } from '@earendil-works/pi-ai'
-import type { SettingsStore } from '../../settings/SettingsStore'
-import type { ProviderAuthService } from '../../providers/ProviderAuthService'
+import type { SettingsStore } from '../../../settings/SettingsStore'
+import type { ProviderAuthService } from '../../../providers/ProviderAuthService'
 import type {
   BotRuntimeAdapter,
   BotRunRequest,
@@ -9,9 +9,9 @@ import type {
   BotRunResult,
   CompartmentStore,
   BotExecutionBinding
-} from '../../net/contracts'
-import { NetError, type Base64Url, type BotProfile } from '../../../shared/net'
-import { canonicalJson } from '../../net/sync/codec'
+} from '../../../net/contracts'
+import { NetError, type Base64Url, type BotProfile } from '../../../../shared/net'
+import { canonicalJson } from '../../../net/sync/codec'
 import type { BillingQualification } from './GuardedProvider'
 import type { NativeReader, NativeReaderModule, NativeReaderQualification } from './NativeReader'
 const readerNames = ['safe_read', 'safe_list', 'safe_search'] as const

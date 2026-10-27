@@ -3,7 +3,7 @@ import { createRequire } from 'node:module'
 import { fstatSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { isAbsolute, relative, sep } from 'node:path'
 import { setImmediate } from 'node:timers/promises'
-import { NetError } from '../../../shared/net'
+import { NetError } from '../../../../shared/net'
 
 export interface NativeReaderModule {
   openRoot(root: string): number

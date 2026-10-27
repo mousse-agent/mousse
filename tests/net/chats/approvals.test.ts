@@ -9,7 +9,7 @@ import { ProviderAuthService } from '../../../src/mms/providers/ProviderAuthServ
 import { DomainHandlerRegistry } from '../../../src/mms/protocol/domainRegistry'
 import { NetService } from '../../../src/mms/net/NetService'
 import { BridgeProfileService } from '../../../src/mms/bridge/BridgeProfileService'
-import { effectiveBotPolicyDigest, nativeSdkVersion, type NativeBotDefinition } from '../../../src/mms/bots/runtime'
+import { effectiveBotPolicyDigest, nativeSdkVersion, type NativeBotDefinition } from '../../../src/mms/bots/space/runtime'
 import { ScriptedBotRuntime, readerScript } from '../bots/scriptedRuntime'
 import { decodeEnvelope } from '../../../src/mms/net/sync/codec'
 import { newId, spaceMetaStream, type StreamId, type BotPermissionRequest } from '../../../src/shared/net'
@@ -17,13 +17,13 @@ import { newId, spaceMetaStream, type StreamId, type BotPermissionRequest } from
 const cleanup: Array<() => void | Promise<void>> = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close() })
 
-import {loadNativeReader,type NativeReaderModule,type NativeReaderQualification} from '../../../src/mms/bots/runtime/NativeReader'
+import {loadNativeReader,type NativeReaderModule,type NativeReaderQualification} from '../../../src/mms/bots/space/runtime/NativeReader'
 let nativeReader:NativeReaderModule,readerQualification:NativeReaderQualification
 beforeAll(async()=>{
  const directory=realpathSync(mkdtempSync(join(tmpdir(),'reader-approval-native-')));cleanup.push(()=>rmSync(directory,{recursive:true,force:true}))
  let headers=process.env.NODE_HEADERS;for(const cache of[join(homedir(),'Library/Caches/node-gyp'),join(homedir(),'.cache/node-gyp')]){if(headers||!existsSync(cache))continue;headers=readdirSync(cache).filter(version=>version.startsWith('24.')).map(version=>join(cache,version,'include/node')).find(path=>existsSync(join(path,'node_api.h')))}
  if(!headers)throw Error('Node headers unavailable; actual reader qualification cannot run')
- const {buildNativeReader}=await import(new URL('../../../src/mms/bots/runtime/buildNativeReader.mjs',import.meta.url).href),artifact=buildNativeReader({headers,outfile:join(directory,'reader.node')})
+ const {buildNativeReader}=await import(new URL('../../../src/mms/bots/space/runtime/buildNativeReader.mjs',import.meta.url).href),artifact=buildNativeReader({headers,outfile:join(directory,'reader.node')})
  readerQualification={platform:process.platform as'darwin'|'linux',napi:8,artifactSha256:createHash('sha256').update(readFileSync(artifact)).digest('hex'),packaged:true};nativeReader=loadNativeReader(artifact,readerQualification)
 })
 async function profile(options: { native?: boolean } = {}) {
@@ -55,7 +55,7 @@ async function profile(options: { native?: boolean } = {}) {
 
 
 import { ChatNetworkBindingService } from '../../../src/mms/chats/network/ChatNetworkBindingService'
-import { BotLocalService } from '../../../src/mms/bots/BotLocalService'
+import { BotLocalService } from '../../../src/mms/bots/space/BotLocalService'
 import { defaultAgentSettings } from '../../../src/shared/agents/defaults'
 import { StaticAgentIntegrationLookup } from '../../../src/mms/agentDefinitions/lookups'
 

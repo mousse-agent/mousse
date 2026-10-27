@@ -4,7 +4,7 @@ import type {
   IdentityService,
   KeyStore,
   MetaProjection
-} from '../../net/contracts'
+} from '../../../net/contracts'
 import type {
   Base64Url,
   BotAudiencePolicy,
@@ -14,10 +14,10 @@ import type {
   NodeId,
   SpaceId,
   UserId
-} from '../../../shared/net'
-import { BOT_PROFILES, isId, NetError } from '../../../shared/net'
-import { NetDatabase, integer, json } from '../../net/store/database'
-import { decodeBase64 } from '../../net/identity/crypto'
+} from '../../../../shared/net'
+import { BOT_PROFILES, isId, NetError } from '../../../../shared/net'
+import { NetDatabase, integer, json } from '../../../net/store/database'
+import { decodeBase64 } from '../../../net/identity/crypto'
 export interface BotConfiguration {
   space: SpaceId
   bot: BotId

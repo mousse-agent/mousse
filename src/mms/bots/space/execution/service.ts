@@ -9,11 +9,11 @@ import type {
   ExecutionLedger,
   ExecutionRecord,
   OutboxEntry
-} from '../../net/contracts'
-import type { BotId, ExecutionId, SpaceId } from '../../../shared/net'
-import { NetError, NET_PROTO_MINOR } from '../../../shared/net'
-import { NetDatabase, json } from '../../net/store/database'
-import { decodeEnvelope } from '../../net/sync/codec'
+} from '../../../net/contracts'
+import type { BotId, ExecutionId, SpaceId } from '../../../../shared/net'
+import { NetError, NET_PROTO_MINOR } from '../../../../shared/net'
+import { NetDatabase, json } from '../../../net/store/database'
+import { decodeEnvelope } from '../../../net/sync/codec'
 import {
   BotAdmissionService,
   BotOutbox,

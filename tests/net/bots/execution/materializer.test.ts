@@ -4,10 +4,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ProjectManager } from '../../../../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../../../../src/mms/data/ThreadDataStore'
-import { MmsBotMaterializer } from '../../../../src/mms/bots/execution'
+import { MmsBotMaterializer } from '../../../../src/mms/bots/space/execution'
 import { newId } from '../../../../src/shared/net'
-import type { ActiveBot } from '../../../../src/mms/bots/registry'
-import type { AuthorizedMention } from '../../../../src/mms/bots/admission'
+import type { ActiveBot } from '../../../../src/mms/bots/space/registry'
+import type { AuthorizedMention } from '../../../../src/mms/bots/space/admission'
 import type { ExecutionRecord } from '../../../../src/mms/net/contracts'
 const dispose: Array<() => void> = []
 afterEach(() => {

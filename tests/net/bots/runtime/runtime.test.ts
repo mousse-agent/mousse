@@ -4,7 +4,7 @@ import {
   effectiveBotPolicyDigest,
   type NativeBotDefinition,
   type NativeBotRuntimeOptions
-} from '../../../../src/mms/bots/runtime'
+} from '../../../../src/mms/bots/space/runtime'
 import type { BotRunRequest } from '../../../../src/mms/net/contracts'
 import type { BotProfile } from '../../../../src/shared/net'
 

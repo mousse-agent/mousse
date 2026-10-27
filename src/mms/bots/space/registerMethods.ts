@@ -1,12 +1,12 @@
-import { AppError } from '../../shared/errors'
-import { BOT_PROFILES, SPACE_ROLES, isId, NetError, NET_ERRORS } from '../../shared/net'
+import { AppError } from '../../../shared/errors'
+import { BOT_PROFILES, SPACE_ROLES, isId, NetError, NET_ERRORS } from '../../../shared/net'
 import {
   BOTS_LOCAL_CAPABILITY,
   BOTS_LOCAL_METHODS,
   type BotsLocalMethod,
   type BotsLocalParams
-} from '../../shared/bots/local'
-import { DomainHandlerRegistry, domainObject } from '../protocol/domainRegistry'
+} from '../../../shared/bots/space/local'
+import { DomainHandlerRegistry, domainObject } from '../../protocol/domainRegistry'
 
 export interface BotsLocalPort {
   request<K extends BotsLocalMethod>(

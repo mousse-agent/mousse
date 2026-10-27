@@ -10,13 +10,13 @@ import type {
   OutboxEntry,
   PrivateStreamKeys,
   StreamStore
-} from '../../net/contracts'
-import type { Envelope, EventId, EventType, ExecutionId, StreamId } from '../../../shared/net'
-import { NetError, newId, validateEventBody } from '../../../shared/net'
-import { canonicalJson, decodeEnvelope } from '../../net/sync/codec'
-import type { PrivateSpaceService } from '../../spaces/private'
-import { privateContentAAD } from '../../spaces/private/service'
-import { NetDatabase } from '../../net/store/database'
+} from '../../../net/contracts'
+import type { Envelope, EventId, EventType, ExecutionId, StreamId } from '../../../../shared/net'
+import { NetError, newId, validateEventBody } from '../../../../shared/net'
+import { canonicalJson, decodeEnvelope } from '../../../net/sync/codec'
+import type { PrivateSpaceService } from '../../../spaces/private'
+import { privateContentAAD } from '../../../spaces/private/service'
+import { NetDatabase } from '../../../net/store/database'
 export interface PreparedBotReceipt {
   id: EventId
   stream: StreamId

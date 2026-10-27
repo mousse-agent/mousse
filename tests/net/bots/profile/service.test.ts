@@ -4,7 +4,7 @@ import { ScriptedBotRuntime } from '../scriptedRuntime'
 import { join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { SpaceCurrentIdentity } from '../../../../src/mms/spaces/SpaceCurrentIdentity'
-import { BotProfileService } from '../../../../src/mms/bots/BotProfileService'
+import { BotProfileService } from '../../../../src/mms/bots/space/BotProfileService'
 import {
   NativeBotRuntime,
   ReaderToolPort,
@@ -12,7 +12,7 @@ import {
   nativeSdkVersion,
   modelDigest,
   type NativeBotDefinition
-} from '../../../../src/mms/bots/runtime'
+} from '../../../../src/mms/bots/space/runtime'
 import { ProviderAuthService } from '../../../../src/mms/providers/ProviderAuthService'
 import { SettingsStore } from '../../../../src/mms/settings/SettingsStore'
 import { MousseConfigStore } from '../../../../src/mms/config/MousseConfigStore'

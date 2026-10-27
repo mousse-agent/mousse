@@ -1,14 +1,14 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
 import { join, relative } from 'node:path'
-import { ThreadDataStore, executionThreadId } from '../../data/ThreadDataStore'
-import type { ProjectManager } from '../../data/ProjectManager'
-import { atomicWriteJsonSync } from '../../data/AtomicFs'
-import { ThreadWorkspaceManager } from '../../workspace/ThreadWorkspaceManager'
-import { NetError, isId } from '../../../shared/net'
-import type { ExecutionRecord } from '../../net/contracts'
+import { ThreadDataStore, executionThreadId } from '../../../data/ThreadDataStore'
+import type { ProjectManager } from '../../../data/ProjectManager'
+import { atomicWriteJsonSync } from '../../../data/AtomicFs'
+import { ThreadWorkspaceManager } from '../../../workspace/ThreadWorkspaceManager'
+import { NetError, isId } from '../../../../shared/net'
+import type { ExecutionRecord } from '../../../net/contracts'
 import type { ActiveBot } from '../registry'
 import type { AuthorizedMention, PlannedBotOutput } from '../admission'
-import { same } from '../../net/store/database'
+import { same } from '../../../net/store/database'
 export interface MmsBotMaterializerOptions {
   profileId: string
   profileHome: string

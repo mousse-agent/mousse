@@ -10,13 +10,13 @@ import type {
   Signed,
   SpaceId,
   UserId
-} from '../../shared/net'
-import { NetError, isCritical, newId, spaceMetaStream } from '../../shared/net'
-import type { BotsLocalParams, BotsLocalResults } from '../../shared/bots/local'
+} from '../../../shared/net'
+import { NetError, isCritical, newId, spaceMetaStream } from '../../../shared/net'
+import type { BotsLocalParams, BotsLocalResults } from '../../../shared/bots/space/local'
 import type { BotProfileService } from './BotProfileService'
-import { canonicalJson, decodeEnvelope } from '../net/sync/codec'
-import { digest, json } from '../net/store/database'
-import { verifyDocument } from '../net/identity/crypto'
+import { canonicalJson, decodeEnvelope } from '../../net/sync/codec'
+import { digest, json } from '../../net/store/database'
+import { verifyDocument } from '../../net/identity/crypto'
 
 type Input = BotsLocalParams['bots.add']
 interface Registration {

@@ -1,14 +1,19 @@
-import type { IdentityService, KeyStore, ExecutionLedger, StreamStore } from '../../net/contracts'
+import type {
+  IdentityService,
+  KeyStore,
+  ExecutionLedger,
+  StreamStore
+} from '../../../net/contracts'
 import type {
   BotId,
   StreamId,
   PresenceMessage,
   PresenceState,
   ExecutionId
-} from '../../../shared/net'
-import { NetError } from '../../../shared/net'
-import { canonicalJson } from '../../net/sync/codec'
-import { NetDatabase, integer } from '../../net/store/database'
+} from '../../../../shared/net'
+import { NetError } from '../../../../shared/net'
+import { canonicalJson } from '../../../net/sync/codec'
+import { NetDatabase, integer } from '../../../net/store/database'
 import type { SqliteBotRegistry } from '../registry'
 export interface BotPresenceOptions {
   db: NetDatabase

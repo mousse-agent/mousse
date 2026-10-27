@@ -12,7 +12,7 @@ import { StaticAgentIntegrationLookup } from '../../../src/mms/agentDefinitions/
 import { defaultAgentSettings } from '../../../src/shared/agents/defaults'
 import { registerChatMethods } from '../../../src/mms/chats/registerMethods'
 import { registerChatNetworkMethods } from '../../../src/mms/chats/network/registerMethods'
-import { nativeSdkVersion, type NativeBotDefinition } from '../../../src/mms/bots/runtime'
+import { nativeSdkVersion, type NativeBotDefinition } from '../../../src/mms/bots/space/runtime'
 import { newId } from '../../../src/shared/net'
 import { ScriptedBotRuntime } from '../bots/scriptedRuntime'
 import { portableRepository } from '../../../src/mms/bridge/dispatch'

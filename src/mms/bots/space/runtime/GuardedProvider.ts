@@ -1,7 +1,4 @@
 import { createHash } from 'node:crypto'
-import { fileURLToPath } from 'node:url'
-import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
 import {
   createAssistantMessageEventStream,
   type AssistantMessage,
@@ -11,17 +8,10 @@ import {
   type Model,
   type StreamOptions
 } from '@earendil-works/pi-ai'
-import type { ProviderAuthService } from '../../providers/ProviderAuthService'
-import type { BotSpendPort } from '../../net/contracts'
-import { NetError } from '../../../shared/net'
-import { canonicalJson } from '../../net/sync/codec'
-export function nativeSdkVersion(): string {
-  const path = fileURLToPath(import.meta.resolve('@earendil-works/pi-ai')),
-    data = JSON.parse(readFileSync(join(dirname(path), '../package.json'), 'utf8'))
-  if (data.name !== '@earendil-works/pi-ai' || typeof data.version !== 'string')
-    throw new NetError('profile_unsupported')
-  return data.version
-}
+import type { ProviderAuthService } from '../../../providers/ProviderAuthService'
+import type { BotSpendPort } from '../../../net/contracts'
+import { NetError } from '../../../../shared/net'
+import { canonicalJson } from '../../../net/sync/codec'
 /** Host-reviewed billing evidence is required. Catalogue rates alone are not a maximum-charge proof. */
 export interface BillingQualification {
   provider: string

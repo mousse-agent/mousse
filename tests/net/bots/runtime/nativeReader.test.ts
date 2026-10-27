@@ -22,12 +22,12 @@ import type { BotRunRequest } from '../../../../src/mms/net/contracts'
 import {
   ReaderToolPort,
   type NativeBotDefinition
-} from '../../../../src/mms/bots/runtime/NativeBotRuntime'
+} from '../../../../src/mms/bots/space/runtime/NativeBotRuntime'
 import {
   NativeReader,
   loadNativeReader,
   type NativeReaderModule
-} from '../../../../src/mms/bots/runtime/NativeReader'
+} from '../../../../src/mms/bots/space/runtime/NativeReader'
 const directories: string[] = []
 let native: NativeReaderModule, binaryDir: string
 function temp() {
@@ -47,7 +47,10 @@ beforeAll(async () => {
       .find((path) => existsSync(join(path, 'node_api.h')))
   }
   if (!headers) throw Error('Node headers unavailable: reader qualification cannot run')
-  const helper = new URL('../../../../src/mms/bots/runtime/buildNativeReader.mjs', import.meta.url)
+  const helper = new URL(
+    '../../../../src/mms/bots/space/runtime/buildNativeReader.mjs',
+    import.meta.url
+  )
   const { buildNativeReader } = await import(helper.href),
     path = buildNativeReader({ headers, outfile: join(binaryDir, 'reader.node') })
   native = loadNativeReader(path, {
@@ -567,7 +570,8 @@ describe('reader approval and dispatch boundary', () => {
     }
   )
   it('checks exact owned tools before approval and consumes one action-bound grant before I/O', async () => {
-    const { ReaderToolPort } = await import('../../../../src/mms/bots/runtime/NativeBotRuntime'),
+    const { ReaderToolPort } =
+        await import('../../../../src/mms/bots/space/runtime/NativeBotRuntime'),
       { NetDatabase } = await import('../../../../src/mms/net/store/database'),
       { newId } = await import('../../../../src/shared/net')
     const root = temp(),
@@ -680,7 +684,8 @@ describe('reader approval and dispatch boundary', () => {
     }
   })
   it('freezes approval arguments across a real asynchronous mutation barrier and rejects exact-expiry grants', async () => {
-    const { ReaderToolPort } = await import('../../../../src/mms/bots/runtime/NativeBotRuntime'),
+    const { ReaderToolPort } =
+        await import('../../../../src/mms/bots/space/runtime/NativeBotRuntime'),
       { newId } = await import('../../../../src/shared/net')
     const root = temp(),
       profile = temp()
@@ -747,7 +752,8 @@ describe('reader approval and dispatch boundary', () => {
     }
   })
   it('aborts a pending approval without consuming a late grant or dispatching a read', async () => {
-    const { ReaderToolPort } = await import('../../../../src/mms/bots/runtime/NativeBotRuntime'),
+    const { ReaderToolPort } =
+        await import('../../../../src/mms/bots/space/runtime/NativeBotRuntime'),
       { newId } = await import('../../../../src/shared/net')
     const root = temp(),
       profile = temp()

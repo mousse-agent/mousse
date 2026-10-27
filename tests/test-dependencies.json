@@ -23,7 +23,7 @@
     },
     {
       "name": "network, bridge, bots, spaces and chats reach the bundled net daemons and crash children",
-      "when": ["src/mms/net/**", "src/mms/bridge/**", "src/mms/bots/**", "src/mms/spaces/**", "src/mms/chats/**", "src/shared/net/**", "src/shared/bridge/**", "src/shared/bots/**", "src/shared/spaces/**", "scripts/net/**"],
+      "when": ["src/mms/net/**", "src/mms/bridge/**", "src/mms/bots/space/**", "src/mms/spaces/**", "src/mms/chats/**", "src/shared/net/**", "src/shared/bridge/**", "src/shared/bots/space/**", "src/shared/spaces/**", "scripts/net/**"],
       "run": ["tests/net/**/*.test.ts"]
     },
     {

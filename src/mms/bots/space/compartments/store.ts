@@ -1,8 +1,8 @@
-import type { CompartmentBinding, CompartmentStore } from '../../net/contracts'
-import type { BotId, SpaceId, StreamId, UserId } from '../../../shared/net'
-import { isId, NetError } from '../../../shared/net'
-import { NetDatabase, integer, json, same } from '../../net/store/database'
-import { decodeBase64 } from '../../net/identity/crypto'
+import type { CompartmentBinding, CompartmentStore } from '../../../net/contracts'
+import type { BotId, SpaceId, StreamId, UserId } from '../../../../shared/net'
+import { isId, NetError } from '../../../../shared/net'
+import { NetDatabase, integer, json, same } from '../../../net/store/database'
+import { decodeBase64 } from '../../../net/identity/crypto'
 export type CompartmentTurn = {
   role: 'user' | 'assistant'
   author?: UserId | BotId

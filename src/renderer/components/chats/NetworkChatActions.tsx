@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { ChatNetworkProjection } from '../../../shared/chatsNetwork'
-import type { BotsLocalParams, BotsLocalResults } from '../../../shared/bots/local'
+import type { BotsLocalParams, BotsLocalResults } from '../../../shared/bots/space/local'
 import { newId } from '../../../shared/net'
 import type { SpacesLocalResults } from '../../../shared/spaces/local'
 import { useChatsStore } from '../../stores/chatsStore'

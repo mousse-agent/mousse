@@ -12,7 +12,7 @@ import {
   readerToolDefinitions,
   type NativeBotDefinition,
   type NativeReaderModule
-} from '../../../src/mms/bots/runtime'
+} from '../../../src/mms/bots/space/runtime'
 
 export interface ScriptedRunContext {
   request: BotRunRequest

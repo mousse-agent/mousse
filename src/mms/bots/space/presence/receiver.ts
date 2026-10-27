@@ -5,7 +5,7 @@ import type {
   MetaState,
   StreamStore,
   SyncSession
-} from '../../net/contracts'
+} from '../../../net/contracts'
 import type {
   PresenceMessage,
   BotId,
@@ -15,10 +15,10 @@ import type {
   SpaceId,
   UserId,
   NodeId
-} from '../../../shared/net'
-import { validateWireMessage, NetError } from '../../../shared/net'
-import { canonicalJson } from '../../net/sync/codec'
-import { NetDatabase } from '../../net/store/database'
+} from '../../../../shared/net'
+import { validateWireMessage, NetError } from '../../../../shared/net'
+import { canonicalJson } from '../../../net/sync/codec'
+import { NetDatabase } from '../../../net/store/database'
 export interface BotPresenceReceiverOptions {
   db: NetDatabase
   identity: IdentityService

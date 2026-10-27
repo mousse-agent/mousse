@@ -5,7 +5,7 @@ import type {
   StreamStore,
   SyncSession,
   VerifiedAuthor
-} from '../../net/contracts'
+} from '../../../net/contracts'
 import type {
   Envelope,
   StoredRecord,
@@ -17,12 +17,12 @@ import type {
   EnvelopeAuthRef,
   Roster,
   BotDelegation
-} from '../../../shared/net'
-import { NetError } from '../../../shared/net'
-import { canonicalJson, decodeEnvelope } from '../../net/sync/codec'
-import { decodeBase64 } from '../../net/identity/crypto'
-import type { ThreadBinding } from '../../spaces/host'
-import type { PrivateSpaceService, PrivateState } from '../../spaces/private'
+} from '../../../../shared/net'
+import { NetError } from '../../../../shared/net'
+import { canonicalJson, decodeEnvelope } from '../../../net/sync/codec'
+import { decodeBase64 } from '../../../net/identity/crypto'
+import type { ThreadBinding } from '../../../spaces/host'
+import type { PrivateSpaceService, PrivateState } from '../../../spaces/private'
 export interface BotOutputBinding extends ThreadBinding {
   visibilityEpoch?: number
   participantHash?: string

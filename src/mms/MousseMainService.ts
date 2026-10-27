@@ -23,8 +23,8 @@ import { registerNetMethods } from './net/registerMethods'
 import { registerBridgeMethods } from './bridge/registerMethods'
 import { registerSpaceMethods } from './spaces/registerMethods'
 import { registerSpaceArchiveMethods } from './spaces/archive/registerMethods'
-import { registerBotMethods } from './bots/registerMethods'
-import { BotLocalService } from './bots/BotLocalService'
+import { registerBotMethods } from './bots/space/registerMethods'
+import { BotLocalService } from './bots/space/BotLocalService'
 import { registerAgentDefinitionMethods } from './agentDefinitions/registerMethods'
 import { registerWorkflowDefinitionMethods } from './workflows/registerDefinitionMethods'
 import { registerWorkflowRunMethods } from './workflows/registerRunMethods'
@@ -217,7 +217,7 @@ export class MousseMainService extends MmsProfileServices {
     )
     registerSpaceMethods(this.domains, async profileId => (await profile(profileId)).spaces.local)
     registerSpaceArchiveMethods(this.domains, async profileId => (await profile(profileId)).archives)
-    const botLocals = new WeakMap<import('./bots/BotProfileService').BotProfileService, BotLocalService>()
+    const botLocals = new WeakMap<import('./bots/space/BotProfileService').BotProfileService, BotLocalService>()
     registerBotMethods(this.domains, async profileId => {
       const bots = (await profile(profileId)).bots
       let local = botLocals.get(bots)

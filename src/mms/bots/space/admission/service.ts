@@ -12,7 +12,7 @@ import type {
   StreamStore,
   BudgetLedger,
   VerifiedAuthor
-} from '../../net/contracts'
+} from '../../../net/contracts'
 import type {
   BotId,
   Envelope,
@@ -23,12 +23,12 @@ import type {
   StreamHead,
   StreamId,
   UserId
-} from '../../../shared/net'
-import { NetError, newId, NET_PROTO_MINOR } from '../../../shared/net'
-import { decodeEnvelope, canonicalJson } from '../../net/sync/codec'
-import { NetDatabase, same, json } from '../../net/store/database'
+} from '../../../../shared/net'
+import { NetError, newId, NET_PROTO_MINOR } from '../../../../shared/net'
+import { decodeEnvelope, canonicalJson } from '../../../net/sync/codec'
+import { NetDatabase, same, json } from '../../../net/store/database'
 import type { ActiveBot, SqliteBotRegistry } from '../registry'
-import type { PrivateSpaceService } from '../../spaces/private'
+import type { PrivateSpaceService } from '../../../spaces/private'
 export interface ConfirmedMetaHead {
   head: StreamHead
   confirmedAtMonotonic: number

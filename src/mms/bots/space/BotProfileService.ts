@@ -9,7 +9,7 @@ import type {
   Outbox,
   SyncSession,
   PrivateStreamKeys
-} from '../net/contracts'
+} from '../../net/contracts'
 import type {
   BotId,
   SpaceId,
@@ -20,16 +20,16 @@ import type {
   EventId,
   PresenceMessage,
   UserId
-} from '../../shared/net'
-import { NetError, newId, spaceMetaStream } from '../../shared/net'
-import { NetDatabase, json } from '../net/store/database'
-import { canonicalJson, decodeEnvelope } from '../net/sync/codec'
-import { SqlPrivateStreamKeys } from '../net/identity'
-import type { MetaProjection, SpaceHostService } from '../spaces/host'
-import type { PrivateSpaceService, PrivateState } from '../spaces/private'
-import type { StreamStore } from '../net/contracts'
-import type { ThreadDataStore } from '../data/ThreadDataStore'
-import type { ProjectManager } from '../data/ProjectManager'
+} from '../../../shared/net'
+import { NetError, newId, spaceMetaStream } from '../../../shared/net'
+import { NetDatabase, json } from '../../net/store/database'
+import { canonicalJson, decodeEnvelope } from '../../net/sync/codec'
+import { SqlPrivateStreamKeys } from '../../net/identity'
+import type { MetaProjection, SpaceHostService } from '../../spaces/host'
+import type { PrivateSpaceService, PrivateState } from '../../spaces/private'
+import type { StreamStore } from '../../net/contracts'
+import type { ThreadDataStore } from '../../data/ThreadDataStore'
+import type { ProjectManager } from '../../data/ProjectManager'
 import {
   BotAdmissionService,
   BotOutbox,
@@ -328,7 +328,7 @@ export class BotProfileService {
         const record = spaces.meta.botAt(space, bot, auth),
           member = record && spaces.meta.memberAt(space, record.owner, auth)
         if (!record || !member) return
-        const delegated = rt.identity.verifySigned<import('../../shared/net').BotDelegation>(
+        const delegated = rt.identity.verifySigned<import('../../../shared/net').BotDelegation>(
           record.delegation,
           member.rootKey
         )
@@ -614,7 +614,7 @@ export class BotProfileService {
   }
   canWriteBotRecord(
     descriptor: StreamDescriptor,
-    envelope: import('../../shared/net').Envelope,
+    envelope: import('../../../shared/net').Envelope,
     peer: SyncSession['peer']
   ): boolean {
     if (
@@ -635,7 +635,7 @@ export class BotProfileService {
   }
   canBotWrite(
     descriptor: StreamDescriptor,
-    envelope: import('../../shared/net').Envelope,
+    envelope: import('../../../shared/net').Envelope,
     peer: SyncSession['peer']
   ): boolean {
     return descriptor.authority === this.options.runtime.identity.self()?.node
@@ -644,7 +644,7 @@ export class BotProfileService {
   }
   validateExecutionReferences(
     descriptor: StreamDescriptor,
-    envelope: import('../../shared/net').Envelope,
+    envelope: import('../../../shared/net').Envelope,
     peer: SyncSession['peer']
   ): boolean {
     return descriptor.authority === this.options.runtime.identity.self()?.node

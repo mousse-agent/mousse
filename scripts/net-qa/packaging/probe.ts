@@ -2,12 +2,12 @@ import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { mkdirSync, readFileSync, realpathSync, writeFileSync, symlinkSync } from 'node:fs'
 import { join } from 'node:path'
-import { nativeSdkVersion } from '../../../src/mms/bots/runtime/GuardedProvider'
+import { nativeSdkVersion } from '../../../src/mms/bots/space/runtime/version'
 import {
   loadNativeReader,
   NativeReader,
   nativeReaderQualified
-} from '../../../src/mms/bots/runtime/NativeReader'
+} from '../../../src/mms/bots/space/runtime/NativeReader'
 import { createSecretCodec } from '../../../src/mms/providers/secretCodec'
 import { FileKeyStore } from '../../../src/mms/net/identity/FileKeyStore'
 

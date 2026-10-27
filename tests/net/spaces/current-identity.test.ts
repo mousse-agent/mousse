@@ -8,10 +8,10 @@ import { systemClock } from '../../../src/mms/net/clock'
 import { SpaceProfileService } from '../../../src/mms/spaces/SpaceProfileService'
 import { SpaceCurrentIdentity } from '../../../src/mms/spaces/SpaceCurrentIdentity'
 import { spaceHistoryAuthor } from '../../../src/mms/spaces/historyIdentity'
-import { BotPresenceReceiver } from '../../../src/mms/bots/presence/receiver'
+import { BotPresenceReceiver } from '../../../src/mms/bots/space/presence/receiver'
 import { canonicalJson, decodeEnvelope } from '../../../src/mms/net/sync/codec'
 import { signedDocument } from '../../../src/mms/net/identity/crypto'
-import type { AdmissionInput } from '../../../src/mms/bots/admission'
+import type { AdmissionInput } from '../../../src/mms/bots/space/admission'
 import {
   newId,
   type NodeDelegation,

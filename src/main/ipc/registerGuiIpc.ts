@@ -8,7 +8,7 @@ import { CHAT_NETWORK_METHODS } from '../../shared/chatsNetwork'
 import { NET_LOCAL_METHODS } from '../../shared/net/local'
 import { BRIDGE_HUB_LOCAL_METHODS } from '../../shared/bridge/types'
 import { SPACES_LOCAL_METHODS } from '../../shared/spaces/local'
-import { BOTS_LOCAL_METHODS } from '../../shared/bots/local'
+import { BOTS_LOCAL_METHODS } from '../../shared/bots/space/local'
 import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
 /**
  * Phase 3 GUI IPC: protocol-backed agent-chat/project/thread/queue + Electron-local UI.

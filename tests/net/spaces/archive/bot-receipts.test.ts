@@ -2,7 +2,7 @@ import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { expect, it, vi } from 'vitest'
-import { BotLocalService } from '../../../../src/mms/bots/BotLocalService'
+import { BotLocalService } from '../../../../src/mms/bots/space/BotLocalService'
 import type { BotRuntimeAdapter } from '../../../../src/mms/net/contracts'
 import { ScriptedBotRuntime } from '../../bots/scriptedRuntime'
 import { MousseMainService } from '../../../../src/mms/MousseMainService'
@@ -10,7 +10,7 @@ import {
   effectiveBotPolicyDigest,
   nativeSdkVersion,
   type NativeBotDefinition
-} from '../../../../src/mms/bots/runtime'
+} from '../../../../src/mms/bots/space/runtime'
 import {
   readVerifiedSpaceArchive,
   writeSpaceArchive,

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { buildNativeReader } from '../src/mms/bots/runtime/buildNativeReader.mjs'
+import { buildNativeReader } from '../src/mms/bots/space/runtime/buildNativeReader.mjs'
 import { buildOwnedProcess } from './build-owned-process.mjs'
 
 const project = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -15,7 +15,7 @@ export function buildPackagedNativeReader(outputRoot = join(project, 'out')) {
   const directory = join(outputRoot, 'net-native', `${process.platform}-${process.arch}`)
   const artifact = join(directory, 'reader.node')
   const manifestPath = join(directory, 'manifest.json')
-  const sourceSha256 = sha(readFileSync(join(project, 'src/mms/bots/runtime/nativeReader.cc')))
+  const sourceSha256 = sha(readFileSync(join(project, 'src/mms/bots/space/runtime/nativeReader.cc')))
   try {
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
     if (

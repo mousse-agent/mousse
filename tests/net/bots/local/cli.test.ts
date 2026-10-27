@@ -3,7 +3,7 @@ import { parseArgs } from '../../../../src/cli/parseArgs'
 import { commandHelp, ROOT_HELP } from '../../../../src/cli/help'
 import { prepareBotsCommand, executeBotsCommand } from '../../../../src/cli/commands/bots'
 import { prepareSpacesCommand } from '../../../../src/cli/commands/spaces'
-import { validateBotsLocal } from '../../../../src/mms/bots/registerMethods'
+import { validateBotsLocal } from '../../../../src/mms/bots/space/registerMethods'
 import { newId } from '../../../../src/shared/net'
 
 const space = newId('space'),

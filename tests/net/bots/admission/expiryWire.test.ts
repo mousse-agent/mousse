@@ -3,9 +3,9 @@ import {
   BotRecordAuthorization,
   BotAdmissionService,
   BotOutbox
-} from '../../../../src/mms/bots/admission'
-import { SqliteBotRegistry } from '../../../../src/mms/bots/registry'
-import { SqliteCompartmentStore } from '../../../../src/mms/bots/compartments'
+} from '../../../../src/mms/bots/space/admission'
+import { SqliteBotRegistry } from '../../../../src/mms/bots/space/registry'
+import { SqliteCompartmentStore } from '../../../../src/mms/bots/space/compartments'
 import { SpaceHostService } from '../../../../src/mms/spaces/host'
 import { SpaceClientService } from '../../../../src/mms/spaces/client'
 import { NetSyncSession } from '../../../../src/mms/net/sync/session'

@@ -1,10 +1,10 @@
-import { NetError, type BotId, type SpaceId } from '../../shared/net'
+import { NetError, type BotId, type SpaceId } from '../../../shared/net'
 import type {
   BotLocalSummary,
   BotsLocalMethod,
   BotsLocalParams,
   BotsLocalResults
-} from '../../shared/bots/local'
+} from '../../../shared/bots/space/local'
 import type { BotProfileService } from './BotProfileService'
 import type { LocalBot } from './registry'
 import { validateBotsLocal } from './registerMethods'
