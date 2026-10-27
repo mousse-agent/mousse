@@ -1027,11 +1027,16 @@ export class LlmClient {
 
         // The caller writes the ledger row of every call, app tools included (the registry writes none in process).
         const ledgerId = options.toolLedger?.start(toolCall)
-        const authority: InProcessAuthority = trustedAgent || !options.runId
+        // A definition run with a run record acts as that run: its calls stop once it is no longer the
+        // thread's active run, as any run's do (its grants are still checked below).
+        const authority: InProcessAuthority = !options.runId || (trustedAgent && !options.runActive)
           ? { kind: 'trusted', ledgerEntryId: ledgerId }
           : { kind: 'run', runId: options.runId, ledgerEntryId: ledgerId, ...(options.runActive ? { active: options.runActive } : {}) }
         const dispatch = async (): Promise<ToolResultMessage> => {
           if (runtimeContext) return runtimeContext.executeTool(toolCall, requestSignal)
+          // Mousse's own file and shell tools of a definition run do not run once the run is no longer active.
+          if (trustedAgent && options.runActive && !options.runActive())
+            return toolResult(toolCall, `Run ${options.runId} is no longer the active run of this thread; the tool was not run.`, true)
           if (appTurn && ((toolCall.name === 'publish_applet' && options.onPublishApplet) ||
               (options.delegation && DELEGATION_TOOL_NAMES.has(toolCall.name)))) {
             return this.callAppTool(toolCall, appTurn, authority, toolEvents, onToolEvent, requestSignal)

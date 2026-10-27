@@ -70,8 +70,10 @@ export interface HarnessCaps {
    * limits, as definitions have always run (Mousse's in-process loop, the legacy Pi engine): the turn
    * and tool-call counts refuse the next request or call before it starts, and the token and cost
    * limits are checked after each response. A definition authority's limits are then admitted
-   * without `hard` budgets or `reserved` spend; nothing else is. `none` everywhere else (and for
-   * caps from before the key existed). Goes with that loop (PR 4 4h).
+   * without `hard` budgets or `reserved` spend; nothing else is, and admission also requires the
+   * turn to carry that definition and its loop. `none` everywhere else (and for caps from before the
+   * key existed). Transitional: PR 4 unit 4d-rpc moves definitions to Pi RPC (exact tool control, a
+   * session per definition turn), and 4h deletes this key, its reader and the loop that declares it.
    */
   definitionLimits: 'in_loop' | 'none'
 }

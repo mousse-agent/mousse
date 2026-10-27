@@ -1,12 +1,13 @@
 import type { AssistantMessage, Message } from '../../shared/transcript'
 import { AgentDefinitionError } from '../../shared/agents/errors'
-import { canonicalJson, sha256Hex } from '../../shared/agents/hashes'
+import { definitionAuthorityDigest, type DefinitionAuthority } from './definitionGate'
 import type {
   AgentExecutionBudget,
   AgentExecutionHistoryEntry,
   AgentExecutionLimit,
   AgentExecutionSource,
   AgentRuntimeHostBindings,
+  AgentRuntimeAttemptUsage,
   AgentRuntimeEffectTracker,
   AgentRuntimeInput,
   AgentRuntimePolicy,
@@ -153,7 +154,7 @@ export function definitionRunPolicy(request: Pick<DefinitionCheck, 'origin' | 'g
     tools: { allow: definitionToolNames(request.grants, toolNames) },
     // The definition's authority (grants, roots and rules) is registered with the turn's app tools;
     // the policy names it, so only an `exact` runtime admits the turn.
-    authority: { kind: 'definition', digest: sha256Hex(canonicalJson({ definitionId: request.definition.id, revision: request.definition.revision, grants: request.grants })) },
+    authority: { kind: 'definition', digest: definitionAuthorityDigest({ policy: { definitionId: request.definition.id, definitionRevision: request.definition.revision }, grants: request.grants } as Pick<DefinitionAuthority, 'policy' | 'grants'>) },
     budget: {
       maxTurns: budget.maxTurns,
       maxToolCalls: budget.maxToolCalls,
@@ -254,6 +255,20 @@ function limitOf(error: unknown): AgentExecutionLimit | undefined {
   return limit && typeof limit.kind === 'string' && typeof limit.limit === 'number' ? limit : undefined
 }
 
+/** A refusal because the instance cannot hold the definition (as opposed to the model being unreachable). */
+function isPolicyRefusal(refusal: DefinitionRefusal): boolean {
+  return refusal.code === 'policy_unenforceable' || Boolean(refusal.missing?.length)
+}
+
+/**
+ * One record's usage, counted once: what a loop that runs under the definition's limits reported
+ * (the legacy engine), else what the turn reported.
+ */
+function recordUsage(loop: AgentRuntimeAttemptUsage, turn: DefinitionTurnResult['usage']): AgentRuntimeAttemptUsage {
+  if (loop.inputTokens || loop.outputTokens || loop.costUsd || loop.turns || loop.toolCalls) return loop
+  return { inputTokens: turn.inputTokens, outputTokens: turn.outputTokens, costUsd: turn.costUsd, turns: 0, toolCalls: 0 }
+}
+
 /** A limit the earlier records already used up: the next record never starts. */
 function exhaustedBefore(remaining: AgentExecutionBudget, original: AgentExecutionBudget, used: ReturnType<typeof emptyAttemptUsage>): AgentExecutionLimit | undefined {
   if (original.maxElapsedMs > 0 && remaining.maxElapsedMs <= 0) return { kind: 'elapsed_ms', limit: original.maxElapsedMs }
@@ -281,15 +296,16 @@ export function createDefinitionRuntime(port: DefinitionTurnPort): AgentRuntimeP
       const counters = new RunCounters()
       const spend = new RunSpend()
       const trace: string[] = []
-      const usage = { inputTokens: 0, outputTokens: 0, costUsd: 0 }
+      // What every record used, failed ones included: the limits left and the usage reported.
+      let used = emptyAttemptUsage()
       const result = (text: string, history: AgentExecutionHistoryEntry[], limit?: AgentExecutionLimit): AgentRuntimeResult => ({
         text,
         history,
         usage: {
-          inputTokens: usage.inputTokens,
-          outputTokens: usage.outputTokens,
-          totalTokens: usage.inputTokens + usage.outputTokens,
-          costUsd: usage.costUsd,
+          inputTokens: used.inputTokens,
+          outputTokens: used.outputTokens,
+          totalTokens: used.inputTokens + used.outputTokens,
+          costUsd: used.costUsd,
           elapsedMs: Date.now() - started
         },
         ...(limit ? { limit } : {}),
@@ -297,19 +313,29 @@ export function createDefinitionRuntime(port: DefinitionTurnPort): AgentRuntimeP
       })
       let attempt = 0
       let lastError: unknown
-      // What earlier records used, as a loop that runs under the definition's limits reports it.
-      let used = emptyAttemptUsage()
       for (let index = 0; index < candidates.length; ) {
         if (input.signal.aborted) throw input.signal.reason ?? new DOMException('Aborted', 'AbortError')
         const ref = candidates[index]!.ref
         const check: DefinitionCheck = { threadId: input.threadId, origin, definition: { id: policy.definitionId, revision: policy.definitionRevision }, ref, grants: input.grants, budget: input.budget }
         const refusal = port.checkDefinitionTurn(check)
-        if (refusal) {
-          // A refused primary fails the run: there is no silent move to a fallback.
+        if (refusal && isPolicyRefusal(refusal)) {
+          // A primary that cannot hold the definition fails the run: there is no silent move to a fallback.
           if (index === 0) throw refusalError(refusal, input.budget, ref)
           trace.push(`Skipped fallback ${ref.instanceId ?? ref.providerId}/${ref.modelId}: ${refusal.message}`)
           index += 1
           continue
+        }
+        if (refusal) {
+          // The model cannot be reached (its provider turned off or missing, the model hidden): like a
+          // failed attempt before any tool, it moves to the next model when the fallback settings allow.
+          const unavailable = new Error(refusal.message)
+          lastError = refusalError(refusal, input.budget, ref)
+          if (index + 1 < candidates.length && mayTryAgain(unavailable, fallbackPolicy, false)) {
+            trace.push(`Moved from ${ref.instanceId ?? ref.providerId}/${ref.modelId}: ${refusal.message}`)
+            index += 1
+            continue
+          }
+          throw lastError
         }
         let sameCandidateRetries = 0
         for (;;) {
@@ -336,10 +362,7 @@ export function createDefinitionRuntime(port: DefinitionTurnPort): AgentRuntimeP
               effects,
               remaining
             })
-            used = addAttemptUsage(used, effects.attemptUsage)
-            usage.inputTokens += turn.usage.inputTokens
-            usage.outputTokens += turn.usage.outputTokens
-            usage.costUsd += turn.usage.costUsd
+            used = addAttemptUsage(used, recordUsage(effects.attemptUsage, turn.usage))
             return result(turn.text, turn.history, turn.limit)
           } catch (error) {
             used = addAttemptUsage(used, effects.attemptUsage)

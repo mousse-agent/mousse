@@ -73,10 +73,14 @@ export function piDriver(options: { client: () => PiChatClient; credentials?: ()
     // The RPC engine's gate holds Pi's built-ins to a bot turn's authority (`/pi/gate`).
     botAuthority: (config) => piEngineOf(config, Boolean(options.rpc)) === 'rpc',
     nativeToolNames: (neutral, config) => (piEngineOf(config, Boolean(options.rpc)) === 'rpc' ? PI_NATIVE_TOOLS[neutral] ?? [] : []),
+    // Agent definitions run on Mousse's loop on either engine: Pi RPC cannot hold a definition yet
+    // (it only asks for approval and has no session of a turn's own), so nothing regresses until
+    // PR 4 unit 4d-rpc moves them. The loop runs a definition the way it always has.
+    definitionCaps: () => PI_LEGACY_CAPS,
     create(context: DriverContext): DriverRuntime {
       const providerId = piProviderIdOf(context.instanceId) ?? ''
       if (providerId && piEngineFor(providerId, piEngineOf(context.config, Boolean(options.rpc)), Boolean(options.rpc)) === 'rpc')
-        return createRpcRuntime(context, providerId, context.config.displayName ?? credentials()?.getProviderDisplayName?.(providerId) ?? providerId, credentials, options.rpc!)
+        return { ...createRpcRuntime(context, providerId, context.config.displayName ?? credentials()?.getProviderDisplayName?.(providerId) ?? providerId, credentials, options.rpc!), definitionAdapter: adapter }
       return piInstanceRuntime(context.instanceId, providerId, credentials, adapter)
     }
   }

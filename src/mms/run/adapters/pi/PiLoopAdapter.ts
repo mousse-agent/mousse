@@ -178,6 +178,11 @@ export class PiLoopAdapter implements ProviderAdapter {
         ...(effort ? { effort } : {}),
         ...(input.cwd ? { projectPath: input.cwd } : {}),
         threadId: input.threadId,
+        // The run's record, its tool ledger, its live-run guard and the host's writer, as every turn has.
+        runId: input.runId,
+        ...(host.tools.toolAccess ? { toolAccess: host.tools.toolAccess } : {}),
+        ...(host.tools.toolLedger ? { toolLedger: host.tools.toolLedger } : {}),
+        ...(host.tools.runActive ? { runActive: host.tools.runActive } : {}),
         signal: input.signal,
         actor: loop.actor,
         trustedAgent: {

@@ -1,6 +1,7 @@
 import type { AgentRuntimePolicy, AgentRuntimeToolApprovalCallback } from '../../shared/agents/execution'
 import type { EffectiveAgentGrants } from '../../shared/agents/types'
 import type { McpToolDescriptor } from '../../shared/integrations'
+import { canonicalJson, sha256Hex } from '../../shared/agents/hashes'
 import { authorizeTrustedToolDispatch, canonicalizeBuiltinToolName, digestToolArguments, prepareTrustedToolDispatch } from './runtimePolicy'
 
 /**
@@ -20,6 +21,14 @@ export interface DefinitionAuthority {
   approve?: AgentRuntimeToolApprovalCallback
   /** The user's MCP tools the run can see, by the name the runtime calls them. */
   mcpTools?: readonly McpToolDescriptor[]
+}
+
+/**
+ * The digest a definition turn's policy names its authority by (`RunPolicy.authority.digest`): the
+ * pinned definition and its effective grants. Admission compares it with the registered authority.
+ */
+export function definitionAuthorityDigest(authority: Pick<DefinitionAuthority, 'policy' | 'grants'>): string {
+  return sha256Hex(canonicalJson({ definitionId: authority.policy.definitionId, revision: authority.policy.definitionRevision, grants: authority.grants }))
 }
 
 export type DefinitionDecision = { allowed: true } | { allowed: false; message: string }

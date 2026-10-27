@@ -421,6 +421,8 @@ export class AgentChatService {
         finally {
           this.active.delete(chatId)
           if (!releaseExecutionLeaseHandle(owned.lease)) throw new Error('Chat execution lost its backing thread lease')
+          // What queued on the backing thread during the response runs now that the chat released it.
+          this.options.services.orchestrator.resumeThreadQueue?.(owned.threadId)
         }
       }
     }

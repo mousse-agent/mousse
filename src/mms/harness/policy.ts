@@ -196,7 +196,9 @@ export function checkPolicy(caps: HarnessCaps, policy: RunPolicy, instanceId?: s
     missing.push('toolControl')
   // A definition on a runtime that runs its loop under the definition's own limits (the legacy
   // engine) is held to them there, as definitions always were (`HarnessCaps.definitionLimits`).
-  const inLoop = policy.authority?.kind === 'definition' && definitionLimitsLevel(caps) === 'in_loop'
+  // PR 4 unit 4d-rpc moves definitions to Pi RPC; 4h then deletes this waiver with the loop.
+  const inLoop = policy.authority?.kind === 'definition' && (policy.origin === 'definition' || policy.origin === 'workflow') &&
+    definitionLimitsLevel(caps) === 'in_loop'
   if (needsHardBudget && budgetsLevel(caps) !== 'hard' && !inLoop) missing.push('budgets')
   let reason: string | undefined
   if (needsSpend && !inLoop) {
