@@ -479,8 +479,15 @@ export class MousseConfigStore {
 
   updateProvidersSection(partial: Partial<MousseProvidersConfig>): void {
     this.assertPersonalMutation('providers')
+    const previous = this.conf.providers
     this.conf.providers = { ...this.conf.providers, ...partial }
-    this.persist()
+    try {
+      this.persist()
+    } catch (error) {
+      // Not saved, so not kept: a later save of another section must not write it after all.
+      this.conf.providers = previous
+      throw error
+    }
   }
 
   updateAgentsSection(partial: Partial<MousseAgentsConfig>): void {

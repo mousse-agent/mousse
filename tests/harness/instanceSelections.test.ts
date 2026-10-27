@@ -55,7 +55,10 @@ async function titleProfile(options: { work?: boolean } = {}) {
   const claudeListing = { id: 'claude-subscription', label: 'Claude Code', models: [{ id: 'haiku', label: 'Haiku' }, { id: 'sonnet', label: 'Sonnet' }] }
   // The pi runtime's one request (`DriverRuntime.oneShot`) is a spy.
   const oneShot = vi.fn(async (_spec: OneShotSpec, _signal: AbortSignal) => ({ text: '"A title."' }))
-  const harness = testHarness({ drivers: [adapterDriver(pi, { runtime: { oneShot } }), adapterDriver(claude, { runtime: { llmProvider: () => claudeListing } })], instances })
+  // The pi runtime lists its provider (as the real one does while credentialed).
+  const piListing = adapterDriver(pi, { runtime: { oneShot } })
+  const piDriver = { ...piListing, create: (context: Parameters<typeof piListing.create>[0]) => ({ ...piListing.create(context), llmProvider: () => piProviders.find((provider) => `pi:${provider.id}` === context.instanceId) }) }
+  const harness = testHarness({ drivers: [piDriver, adapterDriver(claude, { runtime: { llmProvider: () => claudeListing } })], instances })
   return { harness, instances, oneShot }
 }
 
@@ -112,7 +115,7 @@ describe('chat title model', () => {
 
   it('the title picker offers only instances that run one request, without their Bedrock models', async () => {
     const { harness } = await titleProfile()
-    const listings = harness.instanceMap.llmProviders()
+    const listings = harness.listedLlmProviders({ kind: 'device' })
     expect(listings.find((option) => option.instanceId === 'pi:openai')?.oneShot).toBe(true)
     expect(listings.find((option) => option.instanceId === 'claude')?.oneShot).toBe(false)
     const bedrock = { id: 'amazon-bedrock', instanceId: 'pi:amazon-bedrock', label: 'Bedrock', oneShot: true, models: [{ id: 'claude-on-aws', label: 'Claude on AWS', oneShot: false as const }] }

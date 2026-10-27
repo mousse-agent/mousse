@@ -8,10 +8,13 @@ import { ProfileHost } from '../../src/mms/profiles/ProfileHost'
 import { PROFILES_V1_CAPABILITY } from '../../src/shared/profiles/types'
 import { dispatchMethod, type HandlerContext } from '../../src/mms/protocol/handlers'
 import { PROTOCOL_METHODS } from '../../src/mms/protocol/types'
-import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
+import { piDriver } from '../../src/mms/harness/drivers/pi'
+import { createProviderAccess } from '../../src/mms/providers/providerAccess'
+import { ProviderInstanceService, type StoredProviderInstances } from '../../src/mms/providers/ProviderInstanceService'
 import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
 import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
+import { PiInstallationCredentials } from './fixtures/piInstallationCredentials'
 
 const homes: string[] = []
 afterEach(() => {
@@ -40,6 +43,12 @@ function profileWithCodexUsage(remaining: number): MmsProfileServices {
   const home = mkdtempSync(join(tmpdir(), 'mousse-profile-usage-'))
   homes.push(home)
   const instances = new ProviderInstanceService({ store: { read: () => ({ instances: { codex: { driver: 'codex', enabled: true } }, seedVersion: 1 }), write: () => {} } })
+  // The pi-ai credential service is shared by every profile.
+  const providerAuth = {
+    getUsage: async () => ({ providers: [{ id: 'xai', label: 'xAI', status: 'unavailable', windows: [] }], fetchedAt: '' }),
+    getSubscriptionUsage: async (id: string) => (id === 'xai' ? 'xAI usage' : undefined),
+    getProviderDisplayName: (id: string) => id
+  }
   const codex: ProviderAdapter = { driver: 'codex', capabilities: pi.capabilities, startTurn: async () => { throw new Error('unused') }, interrupt: async () => 'not_active' }
   const harness = testHarness({
     drivers: [adapterDriver(codex, { runtime: { configured: () => true, usage: async () => ({ status: 'available', windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: remaining }] }) } })],
@@ -50,8 +59,8 @@ function profileWithCodexUsage(remaining: number): MmsProfileServices {
     harness,
     providerInstances: instances,
     claudeSubscription: { status: async () => undefined, configured: () => false },
-    // The pi-ai credential service is shared by every profile.
-    providerAuth: { getUsage: async () => ({ providers: [{ id: 'xai', label: 'xAI', status: 'unavailable', windows: [] }], fetchedAt: '' }), getSubscriptionUsage: async (id: string) => (id === 'xai' ? 'xAI usage' : undefined) },
+    providerAuth,
+    providerAccess: createProviderAccess(providerAuth as never, { isRemoved: (id) => instances.isRemoved(id), instanceIdForLegacyProvider: (id) => `pi:${id}` }),
     worktrees: { getRepoRoot: () => home }
   } as unknown as MmsProfileServices
 }
@@ -120,6 +129,44 @@ describe('provider methods on two profiles', () => {
     expect(await textOf(personal, 'codex')).toContain('20% used')
     expect(await textOf(work, 'codex')).toContain('85% used')
     expect(await textOf(work, 'nobody')).toBeUndefined()
+  })
+
+  it('model APIs: add, setSecret, addOptions and remove-stays-removed act on the bound profile only', async () => {
+    const credentials = new PiInstallationCredentials()
+    const piProfile = () => {
+      const home = mkdtempSync(join(tmpdir(), 'mousse-profile-pi-'))
+      homes.push(home)
+      let state: StoredProviderInstances = { instances: {}, seedVersion: 1 }
+      const instances = new ProviderInstanceService({ store: { read: () => ({ ...state }), write: (next) => { state = { ...next } } }, providerAuth: credentials })
+      const harness = testHarness({ drivers: [piDriver({ client: () => ({ chat: async () => { throw new Error('unused') } }) as never, credentials: () => credentials as never })], instances, profileHome: home })
+      return { services: { harness, providerInstances: instances } as unknown as MmsProfileServices, state: () => state }
+    }
+    const personal = piProfile()
+    const work = piProfile()
+    const context = (services: MmsProfileServices) => ({ mms: services, globalSequence: () => 0 }) as unknown as HandlerContext
+    for (const method of ['providers.instances.setSecret', 'providers.catalog.addOptions'])
+      expect((await resolveBoundServices({ installation: { getInstallationHost: () => ({ activeProfileCount: () => 2, manager: { get: () => ({ id: 'work', status: 'active' }) }, getProfileServices: async () => work.services }) } as never, method, binding: { profileId: 'work', epoch: 1 }, capabilities: new Set([PROFILES_V1_CAPABILITY]) })).services, method).toBe(work.services)
+
+    const add = { driver: 'pi', config: { provider: 'openrouter' } }
+    for (const profile of [personal, work]) {
+      expect(await dispatchMethod(context(profile.services), 'providers.instances.add', add)).toMatchObject({ snapshot: { instanceId: 'pi:openrouter' } })
+      expect(await dispatchMethod(context(profile.services), 'providers.instances.add', add)).toMatchObject({ existed: true })
+    }
+    await dispatchMethod(context(work.services), 'providers.instances.setSecret', { instanceId: 'pi:openrouter', value: 'fixture-key' })
+    expect(credentials.keys.get('openrouter')).toBe('fixture-key')
+    await dispatchMethod(context(work.services), 'providers.instances.remove', { instanceId: 'pi:openrouter' })
+    // The shared key is saved again by the other profile: work keeps it removed, personal keeps it.
+    await dispatchMethod(context(personal.services), 'providers.instances.setSecret', { instanceId: 'pi:openrouter', value: 'fixture-key-2' })
+    expect(work.state().removed).toEqual(['pi:openrouter'])
+    expect(personal.state().removed).toEqual([])
+    const optionOf = async (profile: ReturnType<typeof piProfile>) =>
+      ((await dispatchMethod(context(profile.services), 'providers.catalog.addOptions', {})) as { options: Array<{ id: string; added: boolean; hasSavedKey: boolean }> }).options.find((option) => option.id === 'openrouter')
+    expect(await optionOf(work)).toMatchObject({ added: false, hasSavedKey: true })
+    expect(await optionOf(personal)).toMatchObject({ added: true, hasSavedKey: true })
+    const idsOf = async (profile: ReturnType<typeof piProfile>) =>
+      ((await dispatchMethod(context(profile.services), 'providers.snapshots', { scope: { kind: 'device' } })) as { snapshots: Array<{ instanceId: string }> }).snapshots.map((snapshot) => snapshot.instanceId)
+    expect(await idsOf(work)).toEqual([])
+    expect(await idsOf(personal)).toEqual(['pi:openrouter'])
   })
 
   it('adds Claude Code on an API key as claude:api in the bound profile only', async () => {

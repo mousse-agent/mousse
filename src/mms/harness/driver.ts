@@ -1,5 +1,5 @@
 import type { AuthState, CredentialKind, InstallOwner } from '../../shared/harness/status'
-import type { CustomModel, HarnessCaps, HarnessDriverKind, RemoveInstallResult, RuntimeFacts } from '../../shared/harness/types'
+import type { AddOptionMethod, CustomModel, HarnessCaps, HarnessDriverKind, InstanceConfigPatch, RemoveInstallResult, RuntimeFacts } from '../../shared/harness/types'
 import type { NeutralTool } from '../../shared/harness/tools'
 import type { PermissionLimits } from '../../shared/permissionMode'
 import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult, ProviderUsage } from '../../shared/providerAuth'
@@ -250,6 +250,11 @@ export interface DriverRuntime {
   signIn?(session: LoginSession, cwd: string, method?: string): Promise<ProviderLoginResult>
   signOut?(): Promise<void>
   /**
+   * Saves the entry's secret (an API key) the way its own sign-in would (`instances.setSecret`).
+   * The value is never logged, emitted or put in an error.
+   */
+  setSecret?(value: string): Promise<void>
+  /**
    * The instance's credential changed outside its own sign-in and sign-out (another surface set a
    * key or signed in): a runtime holding credentials in its processes retires them.
    */
@@ -395,6 +400,19 @@ export interface HarnessDriver {
    */
   readonly ownsSignIn?: boolean
   /**
+   * The fixed id an added entry gets from its add input (`pi`: `pi:<provider>`), or a thrown
+   * `unsupported` for an input it cannot add. With it, ids are unique per entry, not per driver
+   * (`multiInstance` is not consulted), and adding an existing entry returns it unchanged.
+   */
+  instanceIdFor?(patch: InstanceConfigPatch): string
+  /**
+   * Removing an entry also signs it out (`runtime.signOut`): the credential Mousse holds for it is
+   * deleted, as the old Remove did. Never set for an agent on the user's own sign-in.
+   */
+  readonly removeSignsOut?: boolean
+  /** What the driver offers in Add provider (`providers.catalog.addOptions`), without `added`. */
+  addOptions?(): DriverAddOption[]
+  /**
    * Lenient decoder of an instance's stored `config`: unknown or malformed fields fall back. With
    * `instanceId`, fields that default per instance are resolved (the `pi` driver's engine).
    */
@@ -499,4 +517,17 @@ export function installOwner(path: string | undefined, source: 'path' | 'managed
   if (normalized.includes('/winget/')) return 'winget'
   if (normalized.includes('/.local/bin/') || normalized.includes('/.local/share/') || normalized.includes('/.grok/bin/')) return 'standalone'
   return 'unknown'
+}
+
+/** A driver's Add option (`HarnessDriver.addOptions`); the gateway adds whether it is added already. */
+export interface DriverAddOption {
+  id: string
+  label: string
+  description?: string
+  methods: AddOptionMethod[]
+  guidedKey?: true
+  ambientInfo?: { label: string; instructions: string[] }
+  /** The add input's config (`instances.add({driver, config})`). */
+  config: InstanceConfigPatch
+  hasSavedKey: boolean
 }

@@ -25,6 +25,11 @@ export interface MousseProvidersConfig {
   /** Seed version `instances` was last seeded with (`PROVIDER_INSTANCE_SEED_VERSION`). */
   instancesSeedVersion?: number
   /**
+   * Instance ids removed from this profile (tombstones). Authoritative over `instances`: a listed
+   * id is absent even when an older build re-seeded an entry for it. Only an explicit add clears one.
+   */
+  removedInstances?: string[]
+  /**
    * Model preferences per instance id (hidden, order, favorites, custom models), owned by the
    * harness gateway and validated when read.
    */

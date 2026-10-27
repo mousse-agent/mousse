@@ -36,10 +36,10 @@ export type ChannelAdapterFactory = (
 export interface ChannelServiceOptions {
   createAdapter?: ChannelAdapterFactory
   /**
-   * Models `/model` offers, after the profile's instance scope and model prefs (disabled
-   * instances and hidden models left out). Default: the credentialed pi-ai providers.
+   * Models `/model` offers, after the profile's instance scope and model prefs (disabled and
+   * removed instances and hidden models left out). Required: there is no unguarded default.
    */
-  listModels?: () => LlmProviderOption[]
+  listModels: () => LlmProviderOption[]
   /**
    * The caps of an instance resolved for a channel turn (`channel_model`); throws when it cannot
    * run one. Picks the one-time approvals notice for a model chosen with `/model`.
@@ -49,6 +49,11 @@ export interface ChannelServiceOptions {
   bots?: ChannelBots
   /** "This is me" codes (tests pass a clock). */
   ownerClaims?: ChannelOwnerClaims
+  /**
+   * `/usage`: the profile's guarded usage read (`providerAccess.subscriptionUsage`), which refuses a
+   * provider removed from the profile. Required: there is no unguarded default.
+   */
+  getSubscriptionUsage: (providerId: string) => Promise<string | undefined>
 }
 
 function createDefaultAdapter(
@@ -96,13 +101,13 @@ export class ChannelService extends EventEmitter {
     private store: ChannelStore,
     private settingsStore: SettingsStore,
     private providerAuth: ProviderAuthService,
-    private agentRegistry?: AgentRegistry,
-    options?: ChannelServiceOptions
+    private agentRegistry: AgentRegistry | undefined,
+    options: ChannelServiceOptions
   ) {
     super()
-    this.createAdapter = options?.createAdapter ?? createDefaultAdapter
-    this.ownerClaims = options?.ownerClaims ?? new ChannelOwnerClaims()
-    this.bots = options?.bots
+    this.createAdapter = options.createAdapter ?? createDefaultAdapter
+    this.ownerClaims = options.ownerClaims ?? new ChannelOwnerClaims()
+    this.bots = options.bots
     this.auth = new ChannelAuth(this.store.getPairingDirectory())
     this.sessionManager = new ChannelSessionManager(
       this.store,
@@ -127,9 +132,9 @@ export class ChannelService extends EventEmitter {
       {
         settingsStore: this.settingsStore,
         threadStore: this.threadStore,
-        listModels: options?.listModels ?? (() => this.providerAuth.getConfiguredLlmProviders()),
+        listModels: options.listModels,
         channelGate: (threadId, modelOverride) => {
-          const caps = this.turnCaps(threadId, modelOverride, options?.capsOf)
+          const caps = this.turnCaps(threadId, modelOverride, options.capsOf)
           const gate = channelGate(caps)
           if (gate.refusal) return { refusal: gate.refusal }
           const notice = this.approvalNotices.pending(threadId, caps)
@@ -139,7 +144,7 @@ export class ChannelService extends EventEmitter {
         ...(this.bots ? { bots: this.bots } : {}),
         ownerClaims: this.ownerClaims,
         ownerClaimReceived: () => this.emitUpdated(),
-        getSubscriptionUsage: (providerId) => this.providerAuth.getSubscriptionUsage(providerId),
+        getSubscriptionUsage: options.getSubscriptionUsage,
         listAgents: this.agentRegistry
           ? () =>
               this.agentRegistry!.list().map((agent) => ({

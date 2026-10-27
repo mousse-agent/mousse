@@ -203,7 +203,9 @@ export function createChannelService(
     providerAuth,
     undefined,
     {
-      createAdapter: () => adapter
+      createAdapter: () => adapter,
+      listModels: () => providerAuth.getConfiguredLlmProviders(),
+      getSubscriptionUsage: (providerId) => providerAuth.getSubscriptionUsage(providerId)
     }
   )
   return { ...world, service }

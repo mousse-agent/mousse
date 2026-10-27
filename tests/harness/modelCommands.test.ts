@@ -28,9 +28,15 @@ async function profile() {
     store: { read: () => ({ instances: stored, seedVersion }), write: (next) => { stored = next.instances; seedVersion = next.seedVersion } },
     providerAuth: { getConfiguredLlmProviders: () => piProviders, credentials: { listProviderIds: () => ['openai', 'anthropic'] } }
   })
+  // The pi runtime lists its provider while it is credentialed, as the real driver's does.
+  const piBase = adapterDriver(pi)
   const harness = testHarness({
     drivers: [
-      adapterDriver(pi),
+      {
+        ...piBase,
+        instanceIdFor: (patch) => piInstanceId(patch.provider ?? ''),
+        create: (context) => ({ ...piBase.create(context), llmProvider: () => piProviders.find((provider) => piInstanceId(provider.id) === context.instanceId) })
+      },
       adapterDriver(claude, { runtime: { llmProvider: () => ({ id: 'claude-subscription', label: 'Claude Code', models: [{ id: 'opus', label: 'Opus' }, { id: 'sonnet', label: 'Sonnet' }] }) } })
     ],
     instances
@@ -78,8 +84,8 @@ function cliContext(listModels: () => LlmProviderOption[]) {
 
 describe('/model honours hidden models and disabled instances', () => {
   it('the picker listing leaves them out and adds nothing hidden', async () => {
-    const { instances } = await profile()
-    const listing = instances.llmProviders()
+    const { harness } = await profile()
+    const listing = await harness.llmProviders({ kind: 'device' })
     expect(listing.map((option) => [option.instanceId, option.models.map((model) => model.id)])).toEqual([
       ['pi:openai', ['gpt-a']],
       ['claude', ['sonnet']]
@@ -87,9 +93,9 @@ describe('/model honours hidden models and disabled instances', () => {
   })
 
   it('channel /model cannot select a hidden model or a disabled instance', async () => {
-    const { instances } = await profile()
-    // The profile's channel listing (MmsProfileServices): pi-ai providers through the instance view.
-    const listModels = () => instances.llmProviders().filter((option) => option.instanceId && piProviderIdOf(option.instanceId))
+    const { harness } = await profile()
+    // The profile's channel listing (MmsProfileServices): pi-ai providers through the gateway's listing.
+    const listModels = () => harness.listedLlmProviders({ kind: 'device' }).filter((option) => option.instanceId && piProviderIdOf(option.instanceId))
     for (const name of ['gpt-hidden', 'claude-x']) {
       const { ctx, overrides } = channelContext(listModels, `/model ${name}`)
       const result = await dispatchSlashCommand(ctx)
@@ -103,9 +109,9 @@ describe('/model honours hidden models and disabled instances', () => {
   })
 
   it('CLI /models cannot select a hidden model or a disabled instance', async () => {
-    const { instances } = await profile()
-    // `settings.getOptions().llmProviders` is `providerInstances.llmProviders()`.
-    const listModels = () => instances.llmProviders()
+    const { harness } = await profile()
+    // `settings.getOptions().llmProviders` is `gateway.llmProviders` (this is its listing without the wait).
+    const listModels = () => harness.listedLlmProviders({ kind: 'device' })
     for (const name of ['gpt-hidden', 'claude-x', 'opus']) {
       const { ctx, overrides } = cliContext(listModels)
       expect(handleInteractiveSlash(`/models ${name}`, ctx).reply, name).toMatch(/Model not found/)
@@ -134,7 +140,7 @@ describe('/model honours hidden models and disabled instances', () => {
       }],
       instances
     })
-    const listModels = () => instances.llmProviders()
+    const listModels = () => harness.listedLlmProviders({ kind: 'device' })
     // Only the enabled Work instance is offered, under its own id.
     expect(listModels().map((option) => [option.instanceId, option.models.map((model) => model.id)])).toEqual([['claude:work', ['work-only', 'sonnet']]])
     const cli = cliContext(listModels)

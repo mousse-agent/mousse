@@ -7,6 +7,7 @@ import type { ThreadDataStore } from '../../data/ThreadDataStore'
 import type { ChannelSessionManager } from '../ChannelSessionManager'
 import type { ChannelStore } from '../ChannelStore'
 import type { InboundChannelMessage } from '../types'
+import { PROVIDER_REMOVED_CODE } from '../../providers/providerAccess'
 import { channelHelpText, resolveChannelCommand } from './registry'
 import type { ParsedSlashCommand } from './parse'
 
@@ -142,8 +143,10 @@ async function handleUsage(ctx: SlashContext): Promise<string> {
   try {
     const usage = await ctx.getSubscriptionUsage?.(llmProvider)
     if (usage) return usage
-  } catch {
-    // A usage endpoint is informational; its failure must not fail the channel turn.
+  } catch (error) {
+    // A provider removed from this profile says so; any other failure of the informational usage
+    // endpoint must not fail the channel turn.
+    if ((error as { code?: unknown } | undefined)?.code === PROVIDER_REMOVED_CODE && error instanceof Error) return error.message
   }
 
   return `Subscription usage is not available for ${llmProvider || 'the current provider'}.`

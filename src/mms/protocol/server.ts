@@ -184,7 +184,8 @@ export class MmsProtocolServer {
     this.catalogChangedUnsubscribe?.()
     this.catalogChangedUnsubscribe = this.opts.mms.providerAuth?.onCatalogChanged?.(() => {
       if (this.stopping || this.stopped) return
-      const providers = this.opts.mms.providerAuth.getConfiguredProviders()
+      // The same listing the old methods answer with: providers removed from the profile are left out.
+      const providers = this.opts.mms.providerInstances.configuredProviders()
       this.emitToSubscribers(this.ring.push('providers.changed', { providers }), null)
     }) ?? null
     this.accepting = true

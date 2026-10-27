@@ -1,6 +1,7 @@
-import { piProviderIdOf } from '../../../../shared/providerInstances'
+import { harnessAppError, type AddOptionMethod } from '../../../../shared/harness/types'
+import { piInstanceId, piProviderIdOf } from '../../../../shared/providerInstances'
 import { PiLoopAdapter, type PiChatClient } from '../../../run/adapters/pi/PiLoopAdapter'
-import { decodeInstanceConfig, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig } from '../../driver'
+import { decodeInstanceConfig, type DriverAddOption, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig } from '../../driver'
 import { PI_LEGACY_CAPS, piInstanceRuntime, type PiCredentials } from './engines/legacy'
 import { createRpcRuntime, piRpcCaps, piRpcEvidenceOf, piRpcHasEvidence, type PiRpcDriverOptions } from './engines/rpc'
 import { piEngineFor, piEngineOf, piEngineSwitchable, storedPiEngine } from './engines'
@@ -27,6 +28,62 @@ function decodePiConfig(raw: Record<string, unknown> | undefined, instanceId: st
 }
 
 /**
+ * What Add provider offers for the model APIs: one option per pi-ai provider in the catalogue (its
+ * sign-in methods merged), retired providers left out.
+ */
+function piAddOptions(credentials: PiCredentials | undefined): DriverAddOption[] {
+  const byId = new Map<string, DriverAddOption>()
+  let listed: ReturnType<NonNullable<PiCredentials['getLoginOptions']>> = []
+  try {
+    listed = credentials?.getLoginOptions?.() ?? []
+  } catch {
+    return []
+  }
+  for (const option of listed) {
+    if (piRetiredOf(option.id)) continue
+    const method: AddOptionMethod = option.authType === 'oauth' ? 'oauth' : option.ambient ? 'ambient' : 'api_key'
+    let entry = byId.get(option.id)
+    if (!entry) {
+      let hasSavedKey = false
+      try {
+        hasSavedKey = Boolean(credentials?.has?.(option.id))
+      } catch {
+        /* an unreadable credential is not a saved key */
+      }
+      const ambient = credentials?.getAmbientProviderInfo?.(option.id)
+      entry = {
+        id: option.id,
+        label: option.label,
+        ...(option.description ? { description: option.description } : {}),
+        methods: [],
+        ...(ambient ? { ambientInfo: { label: ambient.label, instructions: [...ambient.instructions] } } : {}),
+        config: { provider: option.id },
+        hasSavedKey
+      }
+      byId.set(option.id, entry)
+    }
+    if (!entry.methods.includes(method)) entry.methods.push(method)
+    if (method === 'api_key' && option.guidedLogin) entry.guidedKey = true
+  }
+  return [...byId.values()]
+}
+
+/**
+ * A provider an entry can be added for: one Add provider offers, one with a saved credential, or
+ * one the model catalogue registers (a custom provider with no sign-in of its own), so whatever
+ * could be removed can be added back.
+ */
+function piProviderKnown(credentials: PiCredentials | undefined, providerId: string): boolean {
+  if (piAddOptions(credentials).some((option) => option.id === providerId)) return true
+  try {
+    if (credentials?.has?.(providerId)) return true
+    return credentials?.models?.getProviders().some((provider) => provider.id === providerId) ?? false
+  } catch {
+    return false
+  }
+}
+
+/**
  * The `pi` driver: every `pi:<provider>` instance. Two engines share one stored kind:
  * - `legacy`, the in-process pi-ai loop (`LlmClient`), shared by the profile: the default, and
  *   always for the bare route (`openai-codex` and `cursor` are retired: `retired.ts`);
@@ -49,6 +106,17 @@ export function piDriver(options: { client: () => PiChatClient; credentials?: ()
     label: 'Mousse agent',
     binaryNames: [],
     multiInstance: false,
+    // One entry per provider, under a fixed id: adding it again returns the entry.
+    instanceIdFor: (patch) => {
+      const providerId = patch.provider?.trim()
+      if (!providerId) throw harnessAppError({ code: 'unsupported', message: 'Choose the model provider to add.' })
+      if (piRetiredOf(providerId) || !piProviderKnown(credentials(), providerId))
+        throw harnessAppError({ code: 'unsupported', message: `Mousse cannot add the model provider "${providerId}".` })
+      return piInstanceId(providerId)
+    },
+    // Removing a model API deletes its saved key, as Remove always did.
+    removeSignsOut: true,
+    addOptions: () => piAddOptions(credentials()),
     privateHome: false,
     // Pi's agent dir is the instance's state-dir home. The legacy loop reads no home, so its
     // instances keep theirs (`default`) and their bindings stay valid.

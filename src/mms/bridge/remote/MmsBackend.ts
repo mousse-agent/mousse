@@ -239,7 +239,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     }
     const provider = settings.provider
     return {
-      providers: s.providerInstances.llmProviders(),
+      providers: (await s.harness?.llmProviders({ kind: 'device' })) ?? [],
       defaultModel: provider?.model
         ? {
             ...(provider.instanceId ? { instanceId: provider.instanceId } : {}),
