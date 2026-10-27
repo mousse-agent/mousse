@@ -250,6 +250,15 @@ export class GitOperationHandle {
   }
 }
 
+/**
+ * Publishes the current branch under another name on a named remote (`HEAD:refs/heads/<toBranch>`), for a thread
+ * whose branch is the head of a pull request. Both are needed together; the daemon decides them, never a client.
+ */
+export interface GitPushTarget {
+  toRemote?: string
+  toBranch?: string
+}
+
 /** What a long GitService action takes: where its events go, and optionally an action opened earlier. */
 export type GitOperationRequest = GitOperationOptions & { operation?: GitOperationHandle }
 
@@ -1192,16 +1201,31 @@ ${run.output}`))
     if (onRemote) throw gitErrors.create('git_amend_pushed')
   }
 
-  async push(cwd: string, options: GitPushOptions & GitOperationRequest = {}): Promise<void> {
+  async push(cwd: string, options: GitPushOptions & GitPushTarget & GitOperationRequest = {}): Promise<void> {
     await this.runOperation(cwd, 'push', options, true, (live) => this.serialized(cwd, () => this.pushNow(cwd, options, live), live.signal))
   }
 
-  private async pushNow(cwd: string, options: GitPushOptions, live: Live): Promise<void> {
+  private async pushNow(cwd: string, options: GitPushOptions & GitPushTarget, live: Live): Promise<void> {
     assertNotCancelled(live)
     await this.assertBranch(cwd, options.expectedBranch)
     const git = this.gitFor(cwd)
     const branch = await this.currentBranch(cwd)
     if (!branch) throw gitErrors.create('git_detached_head')
+    if (options.toRemote !== undefined || options.toBranch !== undefined) {
+      const { toRemote, toBranch } = options
+      if (!toRemote || !toBranch) throw gitErrors.create('git_branch_invalid')
+      // Both names reach Git as arguments: the remote must be one this folder has, the branch a valid branch name.
+      const remotes = (await this.read(cwd, ['remote']) ?? '').split('\n').map((line) => line.trim()).filter(Boolean)
+      if (toRemote.startsWith('-') || !remotes.includes(toRemote)) throw gitErrors.create('git_no_remote')
+      if (toBranch.startsWith('-') || await this.read(cwd, ['check-ref-format', '--branch', toBranch]) !== toBranch) throw gitErrors.create('git_branch_invalid')
+      // The thread's own branch is published under the name the pull request's head branch has there. No `-u`: the
+      // branch keeps no upstream, so a push after the link is gone cannot follow it to the pull request's branch.
+      const run = await this.runLive(cwd, ['push', '--progress', toRemote, `HEAD:refs/heads/${toBranch}`], live, { env: explicitActionGitEnv(), silenceMs: PUSH_SILENCE_MS, hooks: true })
+      if (run.ok) return
+      if (run.cancelled) throw cancelledError()
+      if (run.stalled) throw gitErrors.create('git_silence_timeout')
+      throw this.pushFailure(run)
+    }
     const hasUpstream = Boolean(await this.upstream(git))
     const remote = hasUpstream ? null : await this.publishRemote(git, branch)
     if (!hasUpstream && !remote) throw gitErrors.create('git_no_remote')

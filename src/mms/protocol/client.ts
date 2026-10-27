@@ -52,7 +52,8 @@ const GIT_MUTATION_METHODS: ReadonlySet<string> = new Set([
 export function requestTimeoutFor(method: string): number {
   if (method === 'orchestrator.send') return MMS_PROTOCOL_ORCHESTRATOR_SEND_TIMEOUT_MS
   if (method === 'providers.loginOAuth' || method === 'providers.loginApiKey' || method === 'mcp.beginAuth' || method === 'mcp.authenticate') return MMS_PROTOCOL_LOGIN_TIMEOUT_MS
-  if (GIT_MUTATION_METHODS.has(method)) return MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS
+  // Fetches the pull request's head from the network and builds a worktree.
+  if (GIT_MUTATION_METHODS.has(method) || method === 'pullRequests.startThread') return MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS
   return MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS
 }
 

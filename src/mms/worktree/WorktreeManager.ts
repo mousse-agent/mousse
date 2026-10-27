@@ -421,8 +421,12 @@ async function linkSharedDependencies(repositoryRoot: string, worktreePath: stri
   return linked
 }
 
-/** Disable external content drivers only for explicitly isolated worktree operations. */
-async function safeWorktreeGit(repositoryRoot: string): Promise<{ git: SimpleGit; safety: string[] }> {
+/**
+ * Disable external content drivers only for explicitly isolated worktree operations. `safety` holds the `-c`
+ * overrides that switch off hooks, the file system monitor and every configured clean, smudge and process
+ * filter; a thread worktree that holds a pull request's commits keeps the same values in its own configuration.
+ */
+export async function safeWorktreeGit(repositoryRoot: string): Promise<{ git: SimpleGit; safety: string[] }> {
   // The unsafe library flags only permit these fixed disabling overrides.
   const git = simpleGit({
     baseDir: repositoryRoot,

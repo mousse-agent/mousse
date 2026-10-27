@@ -62,6 +62,12 @@ export interface ThreadWorkspaceMetadata {
   generation?: number
   provenance?: WorkspaceProvenance
   integrationTarget?: { checkoutPath: string; baseSha: string }
+  /**
+   * The worktree holds commits from someone else (a pull request's head). It is made and kept with hooks,
+   * filter and smudge drivers switched off in its own configuration, so no Git command run in it executes
+   * anything the commits carry.
+   */
+  untrusted?: true
 }
 
 export interface WorkspaceExecutionContext {

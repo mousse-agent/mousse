@@ -438,6 +438,49 @@ describe('push button', () => {
     expect(pushButtonModel(status({ tracking: 'none', upstream: null }), 0)).toBeNull()
   })
 
+  describe('for a thread linked to a pull request', () => {
+    const scope = { workspaceThreadId: 't1' }
+
+    it('names the pull request\'s branch on the remote that is its repository', () => {
+      const target = { remote: 'upstream', branch: 'fix-thing', reason: null }
+      expect(pushButtonModel(status({ tracking: 'none', upstream: null }), 2, scope, target)).toEqual({
+        label: 'Publish',
+        count: null,
+        title: "Push this branch to upstream/fix-thing, the pull request's branch"
+      })
+      expect(pushButtonModel(status({ ahead: 2 }), 5, scope, target)).toEqual({ label: 'Push', count: 2, title: 'Push 2 commits to upstream/fix-thing' })
+    })
+
+    it('says why Push keeps its usual target when the head is on a fork or no remote is that repository', () => {
+      const fork = { remote: null, branch: null, reason: "The pull request's branch is on a fork (bob/app); push by hand" }
+      expect(pushButtonModel(status({ ahead: 2 }), 5, scope, fork)).toEqual({
+        label: 'Push',
+        count: 2,
+        title: 'Push 2 commits to origin/feature/login',
+        note: "The pull request's branch is on a fork (bob/app); push by hand"
+      })
+      const noRemote = { remote: null, branch: null, reason: 'No remote of this checkout points at acme/app; push by hand' }
+      expect(pushButtonModel(status({ tracking: 'none', upstream: null }), 1, scope, noRemote)).toMatchObject({
+        label: 'Publish',
+        title: 'Push this branch and track it on the remote',
+        note: 'No remote of this checkout points at acme/app; push by hand'
+      })
+    })
+
+    it('keeps the disabled reason of the branch state', () => {
+      const target = { remote: 'upstream', branch: 'fix-thing', reason: null }
+      expect(pushButtonModel(status({ ahead: 2, behind: 4 }), 5, scope, target)).toMatchObject({
+        title: 'Push 2 commits to upstream/fix-thing',
+        disabledReason: 'Branch has diverged; pull with merge or rebase first'
+      })
+    })
+
+    it('is unchanged without a target', () => {
+      expect(pushButtonModel(status({ ahead: 3 }), 5, scope, null)).toEqual(pushButtonModel(status({ ahead: 3 }), 5, scope))
+      expect(pushButtonModel(status({ ahead: 3 }), 5, scope, { remote: null, branch: null, reason: null })).toEqual({ label: 'Push', count: 3, title: 'Push 3 commits to origin/feature/login' })
+    })
+  })
+
   it('publishes only to a remote that exists', () => {
     const local = status({ tracking: 'none', upstream: null })
     expect(pushButtonModel({ ...local, hasRemote: true }, 2)?.label).toBe('Publish')

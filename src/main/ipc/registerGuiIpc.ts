@@ -122,8 +122,13 @@ import type {
   PullRequestDetail,
   PullRequestDraft,
   PullRequestFormInput,
+  PullRequestListItem,
+  PullRequestPushTarget,
   PullRequestRef,
-  PullRequestScope
+  PullRequestScope,
+  ResolvedPullRequestSummary,
+  StartPullRequestThreadInput,
+  StartPullRequestThreadResult
 } from '../../shared/pullRequests'
 import { visibleThreads } from '../../shared/threadLineage'
 import type { ProviderLoginResponse } from '../../shared/providerAuth'
@@ -1955,6 +1960,31 @@ export function registerGuiIpc(
       ...(typeof ref?.projectId === 'string' ? { projectId: ref.projectId } : {})
     })
     return response.baseBranches
+  })
+  registerStorageHandler('pullRequests:list', async (_e, projectId: string, force?: boolean) => {
+    const response = await guiMms.request<{ pullRequests: PullRequestListItem[] }>('pullRequests.list', {
+      projectId,
+      ...(force === true ? { force } : {})
+    })
+    return response.pullRequests
+  })
+  // The daemon's refusals (wrong repository, closed, already has a thread) carry codes the dialog words itself.
+  registerStorageHandler('pullRequests:resolve', async (_e, projectId: string, reference: string) =>
+    guiMms.request<ResolvedPullRequestSummary>('pullRequests.resolve', { projectId, reference })
+  )
+  registerStorageHandler('pullRequests:startThread', async (_e, input: StartPullRequestThreadInput) => {
+    // The window opens the thread and fills its composer; sending the seed is for clients that have no composer.
+    const response = await guiMms.request<StartPullRequestThreadResult & { thread: Thread; threads: Thread[] }>('pullRequests.startThread', {
+      projectId: input?.projectId,
+      reference: input?.reference,
+      ...(input?.allowClosed === true ? { allowClosed: true } : {}),
+      ...(input?.allowDuplicate === true ? { allowDuplicate: true } : {})
+    })
+    return { thread: response.thread, seed: response.seed, headSha: response.headSha, headMoved: response.headMoved, sent: response.sent, withheld: response.withheld }
+  })
+  registerHandler('pullRequests:pushTarget', async (_e, threadId: string) => {
+    const response = await guiMms.request<{ target: PullRequestPushTarget }>('pullRequests.pushTarget', { threadId })
+    return response.target
   })
   registerHandler('editors:list', async (_e, options?: { refresh?: boolean }) =>
     listEditors(options)

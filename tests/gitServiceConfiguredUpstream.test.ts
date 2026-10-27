@@ -136,6 +136,73 @@ describe('GitService configured upstream and push behavior', () => {
   })
 })
 
+describe('GitService push to a named remote and branch', () => {
+  it('publishes HEAD under the given branch of the given remote, whatever pushRemote and the upstream say', async () => {
+    const fixture = repo()
+    // The branch is configured to publish to `team`, and tracks team/release; the target is origin's pr-branch.
+    git(fixture.cwd, 'config', 'branch.feature.pushRemote', 'team')
+    git(fixture.cwd, 'config', 'push.default', 'current')
+    await new GitService().push(fixture.cwd, { toRemote: 'origin', toBranch: 'pr-branch' })
+    expect(git(fixture.origin, 'rev-parse', 'refs/heads/pr-branch')).toBe(fixture.local)
+    expect(() => git(fixture.origin, 'rev-parse', '--verify', 'refs/heads/feature')).toThrow()
+    expect(git(fixture.upstream, 'rev-parse', 'refs/heads/release')).toBe(fixture.base)
+    expect(() => git(fixture.upstream, 'rev-parse', '--verify', 'refs/heads/feature')).toThrow()
+    // No upstream is set: the branch keeps the one it had, so a push after the link is gone cannot follow it to the pull request's branch.
+    expect(git(fixture.cwd, 'rev-parse', '--abbrev-ref', '@{upstream}')).toBe('team/release')
+    writeFileSync(join(fixture.cwd, 'more.txt'), 'more\n')
+    git(fixture.cwd, 'add', 'more.txt')
+    git(fixture.cwd, 'commit', '-m', 'more')
+    await new GitService().push(fixture.cwd, { toRemote: 'origin', toBranch: 'pr-branch' })
+    expect(git(fixture.origin, 'rev-parse', 'refs/heads/pr-branch')).toBe(git(fixture.cwd, 'rev-parse', 'HEAD'))
+  })
+
+  it('refuses a stale expectedBranch before any push', async () => {
+    const fixture = repo()
+    await expect(new GitService().push(fixture.cwd, { expectedBranch: 'other', toRemote: 'origin', toBranch: 'pr-branch' })).rejects.toMatchObject({ code: 'git_branch_changed' })
+    expect(() => git(fixture.origin, 'rev-parse', '--verify', 'refs/heads/pr-branch')).toThrow()
+    // The branch the caller expects is accepted.
+    await new GitService().push(fixture.cwd, { expectedBranch: 'feature', toRemote: 'origin', toBranch: 'pr-branch' })
+    expect(git(fixture.origin, 'rev-parse', 'refs/heads/pr-branch')).toBe(fixture.local)
+  })
+
+  it('never force-pushes: a branch that moved on is refused', async () => {
+    const fixture = repo()
+    git(fixture.cwd, 'push', 'origin', 'HEAD:refs/heads/pr-branch')
+    git(fixture.cwd, 'reset', '--hard', 'HEAD~1')
+    writeFileSync(join(fixture.cwd, 'other.txt'), 'other\n')
+    git(fixture.cwd, 'add', 'other.txt')
+    git(fixture.cwd, 'commit', '-m', 'diverged')
+    await expect(new GitService().push(fixture.cwd, { toRemote: 'origin', toBranch: 'pr-branch' })).rejects.toMatchObject({ code: 'git_push_rejected' })
+    expect(git(fixture.origin, 'rev-parse', 'refs/heads/pr-branch')).toBe(fixture.local)
+  })
+
+  it.each([
+    ['a remote the folder does not have', { toRemote: 'nope', toBranch: 'pr-branch' }, 'git_no_remote'],
+    ['a remote that reads as an option', { toRemote: '--receive-pack=x', toBranch: 'pr-branch' }, 'git_no_remote'],
+    ['a branch that reads as an option', { toRemote: 'origin', toBranch: '--force' }, 'git_branch_invalid'],
+    ['a branch name Git refuses', { toRemote: 'origin', toBranch: 'bad..name' }, 'git_branch_invalid'],
+    ['a remote without a branch', { toRemote: 'origin' }, 'git_branch_invalid'],
+    ['a branch without a remote', { toBranch: 'pr-branch' }, 'git_branch_invalid']
+  ])('refuses %s without pushing', async (_name, target, code) => {
+    const fixture = repo()
+    await expect(new GitService().push(fixture.cwd, target)).rejects.toMatchObject({ code })
+    expect(git(fixture.origin, 'for-each-ref', '--format=%(refname)')).toBe('refs/heads/main')
+  })
+
+  it('refuses a detached HEAD', async () => {
+    const fixture = repo()
+    git(fixture.cwd, 'checkout', '--detach')
+    await expect(new GitService().push(fixture.cwd, { toRemote: 'origin', toBranch: 'pr-branch' })).rejects.toMatchObject({ code: 'git_detached_head' })
+  })
+
+  it('leaves a plain push as it was', async () => {
+    const fixture = repo()
+    await new GitService().push(fixture.cwd)
+    expect(git(fixture.upstream, 'rev-parse', 'refs/heads/release')).toBe(fixture.local)
+    expect(git(fixture.origin, 'for-each-ref', '--format=%(refname)')).toBe('refs/heads/main')
+  })
+})
+
 /** `main` tracks origin/main; `peer` is a second clone that moves the remote on. */
 function synced() {
   const root = mkdtempSync(join(tmpdir(), 'mousse-sync-')); roots.push(root)

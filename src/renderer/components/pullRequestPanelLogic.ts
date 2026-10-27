@@ -6,6 +6,7 @@ import type {
   PullRequestReviewVerdict
 } from '../../shared/pullRequests'
 import { formatMousseFileLink } from '../../shared/chatReferences'
+import { stripHtmlComments } from '../../shared/pullRequestText'
 
 /** Pure helpers for the pull request panel. No React or store imports, so tests can load it. */
 
@@ -37,19 +38,7 @@ export function showFirst<T>(items: readonly T[], shown: number): { items: reado
 // Comment text
 // ---------------------------------------------------------------------------------------------
 
-const FENCE_OR_COMMENT = /(`{3,}[\s\S]*?(?:`{3,}|$))|(`[^`\n]*`)|(<!--[\s\S]*?(?:-->|$))/g
-
-/**
- * Removes HTML comments (`<!-- ... -->`), which the host hides too. Code spans and fenced code keep
- * theirs; an unclosed comment runs to the end, as it does on the host.
- */
-export function stripHtmlComments(text: string): string {
-  if (!text.includes('<!--')) return text
-  return text.replace(FENCE_OR_COMMENT, (match, fence: string | undefined, span: string | undefined) => {
-    const isCode = fence !== undefined || span !== undefined
-    return isCode ? match : ''
-  })
-}
+export { stripHtmlComments }
 
 const HTML_IMAGE = /<img\b[^>]*>/gi
 

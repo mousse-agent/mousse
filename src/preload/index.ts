@@ -74,8 +74,13 @@ import type {
   PullRequestDetail,
   PullRequestDraft,
   PullRequestFormInput,
+  PullRequestListItem,
+  PullRequestPushTarget,
   PullRequestRef,
-  PullRequestScope
+  PullRequestScope,
+  ResolvedPullRequestSummary,
+  StartPullRequestThreadInput,
+  StartPullRequestThreadResult
 } from '../shared/pullRequests'
 import type { ProfileCreateInput, ProfilePublicDto, ProfileUpdateInput } from '../shared/profiles/types'
 import type { LlmProviderOption, MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../shared/settings'
@@ -516,7 +521,19 @@ const api = {
     create: (scope: PullRequestScope, input: PullRequestFormInput): Promise<CreatePullRequestResult> =>
       ipcRenderer.invoke('pullRequests:create', scope, input),
     baseBranches: (ref: PullRequestRef): Promise<PullRequestBaseBranches> =>
-      ipcRenderer.invoke('pullRequests:baseBranches', ref)
+      ipcRenderer.invoke('pullRequests:baseBranches', ref),
+    /** The project's open pull requests, most recently updated first. */
+    list: (projectId: string, force?: boolean): Promise<PullRequestListItem[]> =>
+      storageInvoke('pullRequests:list', projectId, force),
+    /** The pull request a number, URL or `gh pr checkout` command names; rejects with a code when it is not this project's. */
+    resolve: (projectId: string, reference: string): Promise<ResolvedPullRequestSummary> =>
+      storageInvoke('pullRequests:resolve', projectId, reference),
+    /** Creates a thread whose worktree starts at the pull request's head; the seed message is returned for the composer. */
+    startThread: (input: StartPullRequestThreadInput): Promise<StartPullRequestThreadResult & { thread: Thread }> =>
+      storageInvoke('pullRequests:startThread', input),
+    /** Where Push goes for a thread linked to a pull request. */
+    pushTarget: (threadId: string): Promise<PullRequestPushTarget> =>
+      ipcRenderer.invoke('pullRequests:pushTarget', threadId)
   },
   editors: {
     list: (options?: { refresh?: boolean }): Promise<EditorInfo[]> =>

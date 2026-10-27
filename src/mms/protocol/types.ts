@@ -426,6 +426,10 @@ export const PROTOCOL_METHODS = [
   'pullRequests.baseBranches',
   'pullRequests.link',
   'pullRequests.unlink',
+  'pullRequests.list',
+  'pullRequests.resolve',
+  'pullRequests.startThread',
+  'pullRequests.pushTarget',
 
   'daemon.shutdown',
   'events.subscribe',

@@ -2,7 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react'
 
 import type { CSSProperties, KeyboardEvent } from 'react'
 
-import { Archive, CircleCheck, CircleDotDashed, Edit, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, ListTree, Loader2, MessageQuestion, MessagesSquare, MessageSquarePlus, Pin, Search } from '../lib/icons'
+import { Archive, CircleCheck, CircleDotDashed, Edit, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, GitPullRequest, ListTree, Loader2, MessageQuestion, MessagesSquare, MessageSquarePlus, Pin, Search } from '../lib/icons'
 
 import { isThreadActivityActive, type Thread, type ThreadActivityState } from '../../shared/types'
 import { findUnstartedThread, isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
@@ -23,6 +23,7 @@ import {
 
 } from './ThreadsContextMenu'
 
+import { StartFromPullRequestDialog } from './StartFromPullRequestDialog'
 import { ThreadHoverCard } from './ThreadHoverCard'
 import { ThreadSpeechIndicator, useSpeakingThreadId } from '../readAloud/ThreadSpeechIndicator'
 
@@ -327,6 +328,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   const [settledExpanded, setSettledExpanded] = useState(false)
   const [recentExpanded, setRecentExpanded] = useState(false)
+  // The project whose "start from a pull request" dialog is open.
+  const [pullRequestProject, setPullRequestProject] = useState<{ id: string; name: string } | null>(null)
 
   const sidebarView = useAppStore((s) => s.threadsSidebarView)
   const workspaceMode = useAppStore((s) => s.sidebarMode)
@@ -1130,6 +1133,28 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                       className="threads-sidebar-icon-btn threads-sidebar-project-new-chat"
 
+                      title="New chat from a pull request"
+
+                      aria-label="New chat from a pull request"
+
+                      onClick={() => {
+
+                        setPullRequestProject({ id: project.id, name: project.name })
+
+                      }}
+
+                    >
+
+                      <GitPullRequest size={14} strokeWidth={2} />
+
+                    </button>
+
+                    <button
+
+                      type="button"
+
+                      className="threads-sidebar-icon-btn threads-sidebar-project-new-chat"
+
                       title="New chat in project"
 
                       aria-label="New chat in project"
@@ -1304,6 +1329,14 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         />
 
+      )}
+
+      {pullRequestProject && (
+        <StartFromPullRequestDialog
+          projectId={pullRequestProject.id}
+          projectName={pullRequestProject.name}
+          onClose={() => setPullRequestProject(null)}
+        />
       )}
 
     </aside>
