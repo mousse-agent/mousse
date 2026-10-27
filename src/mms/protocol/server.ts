@@ -964,6 +964,7 @@ export class MmsProtocolServer {
         clientType: session.clientType,
         binding: resolved.binding,
         capabilities: admittedCapabilities ?? session.capabilities,
+        lifetime: connectionEventLifetime.signal,
         emitConnectionEvent: (type: ProtocolConnectionEventType, data: unknown, signal?: AbortSignal) =>
           this.emitConnectionEvent(
             session,

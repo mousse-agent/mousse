@@ -825,13 +825,15 @@ describe('GitService live output and cancel', () => {
     expect(sent.length).toBeGreaterThan(0)
     expect(sent.length).toBeLessThanOrEqual(5001)
     expect(Math.max(...sent.map((line) => line.length))).toBeLessThanOrEqual(501)
-    expect(Math.max(...normal.events.map((event) => event.lines?.length ?? 0))).toBeLessThanOrEqual(40)
+    // At most 40 lines, and a note when some were dropped; a batch stays far below the 64 KiB a connection event may carry.
+    expect(Math.max(...normal.events.map((event) => event.lines?.length ?? 0))).toBeLessThanOrEqual(41)
+    expect(Math.max(...normal.events.map((event) => Buffer.byteLength(JSON.stringify(event))))).toBeLessThan(48 * 1024)
     expect(phases(normal.events).at(-1)).toBe('done')
 
     write(cwd, 'b.txt')
     const capped = collect()
     await new GitService({ liveOutput: { intervalMs: 5, maxLines: 30 } }).commit(cwd, 'noisy again', { operationId: 'op-capped', onEvent: capped.onEvent })
-    const lines = capped.events.flatMap((event) => event.lines ?? [])
+    const lines = capped.events.flatMap((event) => event.lines ?? []).filter((line) => !/^… \d+ lines? not shown$/.test(line))
     expect(lines.length).toBeLessThanOrEqual(31)
     expect(lines.at(-1)).toBe('The rest of the output is not shown.')
   }, 60_000)
@@ -946,10 +948,12 @@ describe('GitService live output and cancel', () => {
     const pushing = service.push(cwd, { operationId: 'queued', onEvent: queued.onEvent }).then(() => null, (error: unknown) => error as { code?: string })
     await until(() => phases(queued.events).includes('started'))
     expect(service.cancelOperation('queued')).toBe(true)
-    writeFileSync(sentinel, '')
-    await committing
+    // It answers at once, while the action ahead of it still runs.
     expect(await pushing).toMatchObject({ code: 'git_cancelled' })
     expect(phases(queued.events)).toEqual(['started', 'cancelled'])
+    expect(phases(first.events)).not.toContain('done')
+    writeFileSync(sentinel, '')
+    await committing
     expect(git(origin, 'rev-parse', 'main')).toBe(remoteHead)
   }, 60_000)
 
@@ -966,5 +970,118 @@ describe('GitService live output and cancel', () => {
     await switching
     expect(git(cwd, 'symbolic-ref', '--short', 'HEAD')).toBe('feature')
     expect(phases(events).at(-1)).toBe('done')
+  }, 30_000)
+
+  /** The remote has one commit the branch lacks, and the branch has one the remote lacks. */
+  function diverge(cwd: string): void {
+    const origin = withRemote(cwd, false)
+    const other = join(dirname(cwd), `${basename(cwd)}-other`); roots.push(other)
+    git(dirname(cwd), 'clone', '-q', '-b', 'main', origin, other)
+    git(other, 'config', 'user.name', 'Other'); git(other, 'config', 'user.email', 'other@example.invalid'); git(other, 'config', 'commit.gpgsign', 'false')
+    write(other, 'remote.txt'); git(other, 'add', '.'); git(other, 'commit', '-qm', 'remote change'); git(other, 'push', '-q')
+    write(cwd, 'local.txt'); git(cwd, 'add', '.'); git(cwd, 'commit', '-qm', 'local change')
+  }
+
+  it('cancels a pull while it downloads, and leaves the folder as it was', async () => {
+    const cwd = repo(); withRemote(cwd, false)
+    const pidFile = scratch(cwd, 'pids'); stalledTransport(cwd, 'uploadpack', pidFile)
+    const head = git(cwd, 'rev-parse', 'HEAD'), service = new GitService()
+    const { events, onEvent } = collect()
+    const pulling = service.pull(cwd, { operationId: 'op-pull', onEvent }).then(() => null, (error: unknown) => error as { code?: string })
+    await until(() => existsSync(pidFile) && outputText(events).includes('hook started'))
+    expect(events[0]).toMatchObject({ phase: 'started', kind: 'pull', cancellable: true })
+    expect(service.cancelOperation('op-pull')).toBe(true)
+    expect(await pulling).toMatchObject({ code: 'git_cancelled' })
+    expect(phases(events)).not.toContain('integrating')
+    for (const pid of pidsOf(pidFile)) expect(await waitDead(pid)).toBe(true)
+    expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
+    expect(porcelain(cwd)).toEqual([])
+    expect((await service.getStatus(cwd)).inProgress).toBeNull()
+  }, 60_000)
+
+  it('does not offer Cancel once a pull starts to merge, not even when its client goes away, and finishes the merge', async () => {
+    const cwd = repo(), sentinel = scratch(cwd, 'go')
+    diverge(cwd)
+    withHook(cwd, blocksUntil(sentinel), 'pre-merge-commit')
+    const service = new GitService()
+    const { events, onEvent } = collect()
+    const connection = new AbortController()
+    const pulling = service.pull(cwd, { strategy: 'merge', operationId: 'op-merge', owner: 'window-1', onEvent, lifetime: connection.signal })
+    await until(() => phases(events).includes('integrating'))
+    expect(events.find((event) => event.phase === 'integrating')).toMatchObject({ cancellable: false })
+    // The merge is running (its hook waits): Cancel is refused, and so is the owner going away. Nothing is killed.
+    expect(service.cancelOperation('op-merge', 'window-1')).toBe(false)
+    connection.abort()
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    writeFileSync(sentinel, '')
+    await expect(pulling).resolves.toEqual({ result: 'merged' })
+    expect(phases(events).at(-1)).toBe('done')
+    expect(git(cwd, 'rev-list', '--parents', '-n', '1', 'HEAD').split(' ')).toHaveLength(3)
+    expect(porcelain(cwd)).toEqual([])
+  }, 60_000)
+
+  it('a pull with conflicts keeps a merge that can be aborted', async () => {
+    const cwd = repo(); withRemote(cwd, false)
+    const other = join(dirname(cwd), `${basename(cwd)}-other`); roots.push(other)
+    git(dirname(cwd), 'clone', '-q', '-b', 'main', join(dirname(cwd), `${basename(cwd)}-origin.git`), other)
+    git(other, 'config', 'user.name', 'Other'); git(other, 'config', 'user.email', 'other@example.invalid'); git(other, 'config', 'commit.gpgsign', 'false')
+    write(other, 'base.txt', 'remote edit\n'); git(other, 'commit', '-qam', 'remote edit'); git(other, 'push', '-q')
+    write(cwd, 'base.txt', 'local edit\n'); git(cwd, 'commit', '-qam', 'local edit')
+    const service = new GitService()
+    await expect(service.pull(cwd, { strategy: 'merge' })).resolves.toEqual({ result: 'conflicted' })
+    expect((await service.getStatus(cwd)).inProgress).toBe('merge')
+    await service.abortInProgress(cwd, 'merge')
+    expect((await service.getStatus(cwd)).inProgress).toBeNull()
+  }, 60_000)
+
+  it('cancelling an action whose starting client is gone stops it while it still can be stopped', async () => {
+    const cwd = repo(); withRemote(cwd, false)
+    const pidFile = scratch(cwd, 'pids'); stalledTransport(cwd, 'uploadpack', pidFile)
+    const service = new GitService()
+    const { events, onEvent } = collect()
+    const connection = new AbortController()
+    const fetching = service.fetch(cwd, { operationId: 'op-gone', owner: 'window-1', onEvent, lifetime: connection.signal }).then(() => null, (error: unknown) => error as { code?: string })
+    await until(() => existsSync(pidFile) && outputText(events).includes('hook started'))
+    connection.abort()
+    expect(await fetching).toMatchObject({ code: 'git_cancelled' })
+    for (const pid of pidsOf(pidFile)) expect(await waitDead(pid)).toBe(true)
+    // Nothing stays registered: the id is free again and the folder's queue is clear.
+    expect(service.cancelOperation('op-gone', 'window-1')).toBe(false)
+    git(cwd, 'config', '--unset', 'remote.origin.uploadpack')
+    await expect(service.fetch(cwd, { operationId: 'op-gone' })).resolves.toMatchObject({ behindAfter: 0 })
+  }, 60_000)
+
+  it.each([
+    ['a lock left by a Git the hook started and that was stopped', 'hook'],
+    ['a lock another program took while the hook ran', 'outside']
+  ] as const)('never deletes index.lock after a cancelled commit: %s', async (_name, who) => {
+    const cwd = repo(), pidFile = scratch(cwd, 'pids'), lock = join(cwd, '.git', 'index.lock')
+    // The hook hangs; for the first case it also leaves a lock behind, as a killed `git add` does.
+    withHook(cwd, `${who === 'hook' ? `require('node:fs').writeFileSync(${JSON.stringify(lock)}, 'from the hook');` : ''}${hangs(pidFile)}`)
+    write(cwd, 'a.txt'); write(cwd, 'b.txt'); git(cwd, 'add', 'a.txt')
+    const head = git(cwd, 'rev-parse', 'HEAD')
+    const service = new GitService()
+    const { events, onEvent } = collect()
+    const committing = service.commit(cwd, 'never lands', { all: true, operationId: 'op-lock', onEvent }).then(() => null, (error: unknown) => error as { code?: string; details?: unknown })
+    await until(() => events.some((event) => event.phase === 'hook'))
+    if (who === 'outside') writeFileSync(lock, 'from another program', { flag: 'wx' })
+    service.cancelOperation('op-lock')
+    const error = await committing
+    expect(error).toMatchObject({ code: 'git_index_locked', details: { path: expect.stringContaining('index.lock') } })
+    expect(phases(events).at(-1)).toBe('failed')
+    expect(readFileSync(lock, 'utf8')).toBe(who === 'hook' ? 'from the hook' : 'from another program')
+    expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
+    for (const pid of pidsOf(pidFile)) expect(await waitDead(pid)).toBe(true)
+  }, 60_000)
+
+  it('does not publish the rest of a very long line, so a credential across the cut stays hidden', async () => {
+    const cwd = repo()
+    withHook(cwd, "process.stderr.write('x'.repeat(4083) + 'https://user:B'); setTimeout(() => process.stderr.write('OUNDARY_SECRET@example.invalid/repo\\n'), 300)")
+    write(cwd, 'a.txt')
+    const { events, onEvent } = collect()
+    await new GitService().commit(cwd, 'long line', { operationId: 'op-long', onEvent })
+    const everything = JSON.stringify(events)
+    expect(everything).not.toContain('OUNDARY_SECRET')
+    expect(everything).not.toContain('BOUNDARY')
   }, 30_000)
 })

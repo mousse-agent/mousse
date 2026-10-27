@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
+import { withGitMutationLocks } from '../src/mms/actions/GitOperationCoordinator'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { MousseMainService } from '../src/mms/MousseMainService'
@@ -748,6 +749,46 @@ describe('Git mutations through the daemon', () => {
         await me.request('git.commit', { threadId: t.threadId, message: 'works now' })
         expect(porcelain(t.path)).toEqual([])
         expect(git(t.path, 'show', '--name-only', '--format=', 'HEAD').split('\n').filter(Boolean).sort()).toEqual(['a.txt', 'b.txt'])
+      }, 60_000)
+
+      it('cancels an action that still waits for its thread locks: Cancel works from the start and answers at once', async () => {
+        const t = await threadScope()
+        const mine = listen(me)
+        let release: () => void = () => undefined
+        const held = withGitMutationLocks(t.directory, t.path, 'test-holder', () => new Promise<void>((resolve) => { release = resolve }))
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        try {
+          const fetching = me.request('git.fetch', { threadId: t.threadId, operationId: 'daemon-queued' }).then(() => null, (error: unknown) => error)
+          // Registered before the locks are free: the started event arrives and Cancel is accepted.
+          await wait(() => mine.some((event) => event.phase === 'started'))
+          await expect(me.request('git.cancelOperation', { operationId: 'daemon-queued' })).resolves.toEqual({ cancelled: true })
+          expect(await fetching).toMatchObject({ code: 'git_cancelled' })
+          await wait(() => mine.at(-1)?.phase === 'cancelled')
+        } finally {
+          release()
+          await held
+        }
+      }, 60_000)
+
+      it('cancels a pull in its download when the connection that started it closes, and frees the folder', async () => {
+        const scope = await projectScope(); withRemote()
+        const pidFile = join(f.root, 'pids')
+        const script = join(f.root, 'uploadpack.cjs')
+        writeFileSync(script, hangs(pidFile))
+        git(f.repo, 'config', 'remote.origin.uploadpack', `node "${script.replace(/\\/g, '/')}"`)
+        const mineBefore = listen(me)
+        const pulling = me.request('git.pull', { ...scope, operationId: 'daemon-pull-gone' }).then(() => null, (error: unknown) => error)
+        await wait(() => existsSync(pidFile) && mineBefore.some((event) => event.phase === 'started'))
+        // The window goes away (closed, or reloaded onto a new connection) with the pull still downloading.
+        extraClients.splice(extraClients.indexOf(me), 1)
+        await me.close()
+        await pulling
+        await allDead(pidFile)
+        // Nobody holds the folder any more, and a new connection can use the same id.
+        git(f.repo, 'config', '--unset', 'remote.origin.uploadpack')
+        const fresh = await bound()
+        await expect(fresh.request('git.pull', { ...scope, operationId: 'daemon-pull-gone' })).resolves.toMatchObject({ result: 'up-to-date' })
+        await expect(fresh.request('git.cancelOperation', { operationId: 'daemon-pull-gone' })).resolves.toEqual({ cancelled: false })
       }, 60_000)
 
       it('accepts the connection event only for the types the daemon sends', () => {

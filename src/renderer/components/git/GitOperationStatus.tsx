@@ -28,7 +28,7 @@ export function GitOperationStatusView({ state, now, onCancel, onDismiss }: GitO
         {view.elapsed && <span className="git-operation-elapsed" aria-hidden="true">{view.elapsed}</span>}
         <span className="git-operation-actions">
           {view.cancelLabel && (
-            <button type="button" className="btn btn-ghost btn-sm" onClick={onCancel}>
+            <button type="button" className="btn btn-ghost btn-sm" title={view.cancelHint ?? undefined} onClick={onCancel}>
               {view.cancelLabel}
             </button>
           )}

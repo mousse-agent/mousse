@@ -69,6 +69,7 @@ const gitErrors = createErrorProvider({
   git_checkout_failed: { category: 'invalid', retryable: false, message: 'Git could not switch branches.' },
   git_stash_kept: { category: 'conflict', retryable: false, message: 'Git could not put your changes back. They are kept in the stash named "mousse: switch to ...".' },
   git_index_restore_failed: { category: 'internal', retryable: false, message: 'The commit failed and Git could not put the staged files back as they were. Everything is staged; unstage what you do not want to commit.' },
+  git_index_locked: { category: 'conflict', retryable: false, message: 'A stopped Git left its lock file .git/index.lock behind. Make sure no Git is running in this folder, delete that file, then check what is staged.' },
   git_stash_failed: { category: 'invalid', retryable: false, message: 'Git could not stash the changes.' },
   git_branch_invalid: { category: 'invalid', retryable: false, message: 'That is not a valid branch name.' },
   git_ref_not_found: { category: 'invalid', retryable: false, message: 'That branch or commit does not exist.' },
@@ -212,11 +213,45 @@ function selectEntries(entries: readonly RawEntry[], paths: readonly string[]): 
 
 /** What a long action hands its commands: the signal that stops them and where their output and hooks go. */
 interface Live {
-  /** Absent when the action must not be cut off halfway. */
+  /** Absent when the action must not be cut off halfway, or from the moment it must not be. */
   signal?: AbortSignal
   line: (line: GitLine) => void
   hook: (event: HookTraceEvent) => void
+  /** From now on the action can no longer be cancelled: what follows changes the folder. */
+  stopCancelling: () => void
 }
+
+/**
+ * An action registered for its events and for Cancel. A caller that has to wait for its own locks first
+ * opens it before waiting, so Cancel works from the start, hands it to the GitService method, and ends it.
+ */
+export class GitOperationHandle {
+  /** @internal */
+  readonly live: Live
+  private ended = false
+
+  constructor(
+    private readonly finish: (error: unknown) => void,
+    live: Live
+  ) {
+    this.live = live
+  }
+
+  /** Aborts when the action is cancelled; stays unset for an action that cannot be. */
+  get signal(): AbortSignal | undefined {
+    return this.live.signal
+  }
+
+  /** Reports how the action ended: done, or failed or cancelled with `error`. */
+  end(error?: unknown): void {
+    if (this.ended) return
+    this.ended = true
+    this.finish(error)
+  }
+}
+
+/** What a long GitService action takes: where its events go, and optionally an action opened earlier. */
+export type GitOperationRequest = GitOperationOptions & { operation?: GitOperationHandle }
 
 const cancelledError = (): AppError => gitErrors.create('git_cancelled')
 
@@ -336,25 +371,61 @@ export class GitService {
    * Runs a long action with its events. Registered before it waits for the repository's lease, so Cancel
    * works while it is still queued. The last event follows the outcome: done, failed, or cancelled.
    */
-  private async runOperation<T>(cwd: string, kind: GitOperationKind, options: GitOperationOptions, cancellable: boolean, work: (live: Live) => Promise<T>): Promise<T> {
-    const { operationId, owner } = options
-    if (operationId !== undefined && this.operations.has(operationId)) throw gitErrors.create('git_operation_exists')
-    const controller = new AbortController()
-    if (operationId !== undefined) this.operations.set(operationId, { controller, owner, cancellable })
-    const stream = new OperationStream({ operationId: operationId ?? '', kind, path: cwd, onEvent: options.onEvent, ...this.options.liveOutput })
-    const live: Live = { signal: cancellable ? controller.signal : undefined, line: (line) => stream.line(line), hook: (hook) => stream.hook(hook) }
+  private async runOperation<T>(cwd: string, kind: GitOperationKind, options: GitOperationRequest, cancellable: boolean, work: (live: Live) => Promise<T>): Promise<T> {
+    // An action opened by the caller is ended by the caller, after it has also released its own locks.
+    const opened = options.operation
+    const operation = opened ?? this.openOperation(cwd, kind, options, cancellable)
     try {
-      stream.started(cancellable)
-      const result = await work(live)
-      stream.end('done')
+      const result = await work(operation.live)
+      if (!opened) operation.end()
       return result
     } catch (error) {
-      if (error instanceof AppError && error.code === 'git_cancelled') stream.end('cancelled')
-      else stream.end('failed', { message: error instanceof Error ? error.message : String(error), code: error instanceof AppError ? error.code : undefined })
+      if (!opened) operation.end(error)
       throw error
-    } finally {
-      if (operationId !== undefined) this.operations.delete(operationId)
     }
+  }
+
+  /** The error an action ends with when it was cancelled. */
+  cancelledError(): AppError {
+    return cancelledError()
+  }
+
+  /**
+   * Registers an action and reports it as started. Cancel finds it from now on, also while it waits for
+   * its turn or for locks. It ends with `end()`; without it the action stays registered.
+   */
+  openOperation(cwd: string, kind: GitOperationKind, options: GitOperationOptions, cancellable = true): GitOperationHandle {
+    const { operationId, owner, lifetime } = options
+    if (operationId !== undefined && this.operations.has(operationId)) throw gitErrors.create('git_operation_exists')
+    const controller = new AbortController()
+    const entry = { controller, owner, cancellable }
+    if (operationId !== undefined) this.operations.set(operationId, entry)
+    const stream = new OperationStream({ operationId: operationId ?? '', kind, path: cwd, onEvent: options.onEvent, ...this.options.liveOutput })
+    const live: Live = {
+      signal: cancellable ? controller.signal : undefined,
+      line: (line) => stream.line(line),
+      hook: (hook) => stream.hook(hook),
+      stopCancelling: () => {
+        // Between the last check for a cancel and this line there is no await, so a cancel is either seen before or refused after.
+        entry.cancellable = false
+        live.signal = undefined
+        stream.integrating()
+      }
+    }
+    // The client that started it is gone and nobody can cancel it any more: stop it while it still can be stopped.
+    const onGone = (): void => {
+      if (entry.cancellable) controller.abort()
+    }
+    if (lifetime?.aborted) onGone()
+    else lifetime?.addEventListener('abort', onGone, { once: true })
+    stream.started(cancellable)
+    return new GitOperationHandle((error) => {
+      lifetime?.removeEventListener('abort', onGone)
+      if (operationId !== undefined) this.operations.delete(operationId)
+      if (error === undefined) stream.end('done')
+      else if (error instanceof AppError && error.code === 'git_cancelled') stream.end('cancelled')
+      else stream.end('failed', { message: error instanceof Error ? error.message : String(error), code: error instanceof AppError ? error.code : undefined })
+    }, live)
   }
 
   /**
@@ -540,20 +611,33 @@ export class GitService {
    * holds the repository mutation lease, which every worktree of the repository and
    * every other Git mutation in the app share.
    */
-  private serialized<T>(cwd: string, operation: () => Promise<T>): Promise<T> {
+  private serialized<T>(cwd: string, operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     const key = resolve(cwd)
     const previous = this.mutations.get(key) ?? Promise.resolve()
-    const leased = () => this.withLease(cwd, operation)
+    let turn = false
+    const leased = () => {
+      turn = true
+      // A cancel that came while it waited: its turn passes without running anything.
+      if (signal?.aborted) throw cancelledError()
+      return this.withLease(cwd, operation, signal)
+    }
     const run = previous.then(leased, leased)
     const settled = run.then(() => undefined, () => undefined)
     this.mutations.set(key, settled)
     void settled.then(() => {
       if (this.mutations.get(key) === settled) this.mutations.delete(key)
     })
-    return run
+    if (!signal) return run
+    // While it waits behind another action, a cancel answers at once instead of when that action ends.
+    return new Promise<T>((resolvePromise, reject) => {
+      const onAbort = (): void => { if (!turn) reject(cancelledError()) }
+      if (signal.aborted) onAbort()
+      else signal.addEventListener('abort', onAbort, { once: true })
+      run.then(resolvePromise, reject).finally(() => signal.removeEventListener('abort', onAbort))
+    })
   }
 
-  private async withLease<T>(cwd: string, operation: () => Promise<T>): Promise<T> {
+  private async withLease<T>(cwd: string, operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     let identity: ReturnType<typeof resolveRepositoryIdentity> | null = null
     try {
       identity = existsSync(cwd) ? resolveRepositoryIdentity(cwd) : null
@@ -566,9 +650,10 @@ export class GitService {
     if (holdsRepositoryMutation(identity.key)) return operation()
     let lease: Awaited<ReturnType<typeof acquireRepositoryLease>>
     try {
-      lease = await acquireRepositoryLease(identity, { signal: AbortSignal.timeout(LEASE_WAIT_MS) })
+      const wait = AbortSignal.timeout(LEASE_WAIT_MS)
+      lease = await acquireRepositoryLease(identity, { signal: signal ? AbortSignal.any([wait, signal]) : wait })
     } catch (error) {
-      if (error instanceof RepositoryLeaseAbortedError) throw gitErrors.create('git_busy', error)
+      if (error instanceof RepositoryLeaseAbortedError) throw signal?.aborted ? cancelledError() : gitErrors.create('git_busy', error)
       throw error
     }
     const heartbeat = setInterval(() => lease.heartbeat(), LEASE_HEARTBEAT_MS)
@@ -716,7 +801,7 @@ export class GitService {
     }
   }
 
-  async fetch(cwd: string, options: GitOperationOptions = {}): Promise<GitFetchResult> {
+  async fetch(cwd: string, options: GitOperationRequest = {}): Promise<GitFetchResult> {
     return this.runOperation(cwd, 'fetch', options, true, (live) => this.serialized(cwd, async () => {
       assertNotCancelled(live)
       const git = this.gitFor(cwd)
@@ -732,7 +817,7 @@ export class GitService {
         throw code ? classified(code, run) : failure('git_fetch_failed', run)
       }
       return { behindBefore, behindAfter: await this.behindCount(git) }
-    }))
+    }, live.signal))
   }
 
   private async behindCount(git: SimpleGit): Promise<number> {
@@ -745,26 +830,39 @@ export class GitService {
    * conflicts is returned as `conflicted` and left as Git left it, for the user to
    * resolve or abort.
    */
-  async pull(cwd: string, options: GitPullOptions & GitOperationOptions = {}): Promise<GitPullResult> {
+  async pull(cwd: string, options: GitPullOptions & GitOperationRequest = {}): Promise<GitPullResult> {
     const strategy = options.strategy ?? 'ff-only'
     return this.runOperation(cwd, 'pull', options, true, (live) => this.serialized(cwd, async () => {
       assertNotCancelled(live)
       const git = this.gitFor(cwd)
-      if (!await this.currentBranch(cwd)) throw gitErrors.create('git_detached_head')
+      const branch = await this.currentBranch(cwd)
+      if (!branch) throw gitErrors.create('git_detached_head')
       if (!await this.upstream(git)) throw gitErrors.create('git_no_upstream')
       const before = await this.read(cwd, ['rev-parse', 'HEAD'])
       // A merge or rebase already waiting makes Git refuse the pull; that is an error, not a new conflict.
       const waiting = await this.inProgress(cwd)
-      const flags = strategy === 'ff-only' ? ['--ff-only'] : strategy === 'merge' ? ['--no-rebase', '--no-edit'] : ['--rebase']
-      // Never on a timer: a merge or rebase killed halfway leaves the tree in a worse state than a slow one.
-      // Only the user's own Cancel stops it, and that can leave a merge or rebase in progress, which the status then shows.
-      const run = await this.runLive(cwd, ['pull', ...flags], live, { env: explicitActionGitEnv() })
+      // Two steps instead of `git pull`, so only the first can be cancelled. The download changes no file of the
+      // folder and may be stopped, and it has the fetch silence timer. A merge or rebase killed halfway can leave
+      // changed files with nothing to abort and, on Windows, a lock file, so it never is: not by a timer, not by Cancel.
+      const target = await this.branchUpstream(cwd, branch)
+      if (target) {
+        const fetched = await this.runLive(cwd, ['fetch', '--no-auto-gc', '--progress', target.remote], live, { env: explicitActionGitEnv(), silenceMs: FETCH_SILENCE_MS })
+        if (!fetched.ok) {
+          if (fetched.cancelled) throw cancelledError()
+          if (fetched.stalled) throw gitErrors.create('git_silence_timeout')
+          const code = remoteFailureCode(fetched.output)
+          throw code ? classified(code, fetched) : failure('git_pull_failed', fetched)
+        }
+      }
+      assertNotCancelled(live)
+      live.stopCancelling()
+      const integrate = strategy === 'ff-only' ? ['merge', '--ff-only', '@{upstream}'] : strategy === 'merge' ? ['merge', '--no-edit', '@{upstream}'] : ['rebase', '@{upstream}']
+      const run = await this.runLive(cwd, integrate, live, { env: explicitActionGitEnv() })
       if (!run.ok) {
-        if (run.cancelled) throw cancelledError()
         if (!waiting && await this.inProgress(cwd)) return { result: 'conflicted' }
         const text = run.output
         if (/Not possible to fast-forward|Need to specify how to reconcile/i.test(text)) throw classified('git_pull_diverged', run)
-        if (/would be overwritten|commit your changes or stash|You have unstaged changes|cannot pull with rebase/i.test(text)) throw classified('git_pull_dirty', run)
+        if (/would be overwritten|commit your changes or stash|You have unstaged changes|cannot pull with rebase|cannot rebase/i.test(text)) throw classified('git_pull_dirty', run)
         if (/no tracking information|no upstream/i.test(text)) throw classified('git_no_upstream', run)
         const code = remoteFailureCode(text)
         throw code ? classified(code, run) : failure('git_pull_failed', run)
@@ -780,7 +878,7 @@ export class GitService {
         return { result: forwarded ? 'fast-forwarded' : 'rebased' }
       }
       return { result: 'fast-forwarded' }
-    }))
+    }, live.signal))
   }
 
   /** Gives up a merge or rebase that stopped on conflicts. Only ever called by an explicit user action. */
@@ -968,7 +1066,7 @@ export class GitService {
    * included) are stashed, the switch happens, and they are re-applied; if re-applying
    * conflicts, the stash is kept and `stashKept` says so.
    */
-  async checkout(cwd: string, branch: string, options: GitCheckoutOptions & GitOperationOptions = {}): Promise<GitCheckoutResult> {
+  async checkout(cwd: string, branch: string, options: GitCheckoutOptions & GitOperationRequest = {}): Promise<GitCheckoutResult> {
     return this.runOperation(cwd, 'checkout', options, false, (live) => this.serialized(cwd, async () => {
       if (options.dirty !== 'stash') {
         await this.switchTo(cwd, branch, live)
@@ -1022,7 +1120,7 @@ export class GitService {
    * loses its skip-worktree marks in that restore, and an intent-to-add entry comes back
    * as an untracked file.
    */
-  async commit(cwd: string, message: string, options: GitCommitOptions & GitOperationOptions = {}): Promise<void> {
+  async commit(cwd: string, message: string, options: GitCommitOptions & GitOperationRequest = {}): Promise<void> {
     await this.runOperation(cwd, 'commit', options, true, (live) => this.serialized(cwd, async () => {
       assertNotCancelled(live)
       const git = this.gitFor(cwd)
@@ -1051,15 +1149,17 @@ export class GitService {
       const lockedBefore = lock !== null && existsSync(lock)
       const run = await this.runLive(cwd, ['commit', ...(options.amend ? ['--amend'] : []), '-m', message], live, { env: explicitActionGitEnv(), silenceMs: this.options.commitSilenceMs ?? COMMIT_SILENCE_MS, hooks: true })
       if (run.ok) return
-      // A commit stopped by force can leave Git's index lock behind (Windows cannot end a process gently). It is ours: nobody else
-      // could take the index while the repository's lease was ours, and it was not there before. Restoring the index needs it gone.
-      if ((run.cancelled || run.stalled) && run.exited && lock !== null && !lockedBefore) await rm(lock, { force: true }).catch(() => undefined)
       // The commit was recorded and only something after it failed or was stopped (a slow post-commit hook). Putting the old index back now would stage the commit's reversal.
       if (await this.read(cwd, ['rev-parse', '--verify', '--quiet', 'HEAD']) !== headBefore) return
-      if (snapshot !== null) await this.restoreIndex(cwd, snapshot, run)
+      let restoreError: unknown = null
+      if (snapshot !== null) await this.restoreIndex(cwd, snapshot, run).catch((error: unknown) => { restoreError = error })
+      // A Git stopped by force can leave its index lock behind (Windows cannot end a process gently). Whose lock it is cannot be told:
+      // Git does not hold it while a hook runs, and a terminal or an editor may have taken it meanwhile. It is never deleted here.
+      if ((run.cancelled || run.stalled) && lock !== null && !lockedBefore && existsSync(lock)) throw gitErrors.create('git_index_locked', restoreError, { path: lock })
+      if (restoreError) throw restoreError
       if (run.cancelled) throw cancelledError()
       throw run.stalled ? gitErrors.create('git_silence_timeout') : failure('git_commit_failed', run)
-    }))
+    }, live.signal))
   }
 
   /** Where Git keeps the lock it holds while writing this folder's index. */
@@ -1092,8 +1192,8 @@ ${run.output}`))
     if (onRemote) throw gitErrors.create('git_amend_pushed')
   }
 
-  async push(cwd: string, options: GitPushOptions & GitOperationOptions = {}): Promise<void> {
-    await this.runOperation(cwd, 'push', options, true, (live) => this.serialized(cwd, () => this.pushNow(cwd, options, live)))
+  async push(cwd: string, options: GitPushOptions & GitOperationRequest = {}): Promise<void> {
+    await this.runOperation(cwd, 'push', options, true, (live) => this.serialized(cwd, () => this.pushNow(cwd, options, live), live.signal))
   }
 
   private async pushNow(cwd: string, options: GitPushOptions, live: Live): Promise<void> {

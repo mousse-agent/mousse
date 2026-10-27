@@ -7,7 +7,7 @@ const KILL_GRACE_MS = 2_000
 const KILL_SETTLE_MS = 5_000
 /** Output kept per stream for classifying a failure; the end is kept because Git prints its verdict last. */
 const RETAINED_BYTES = 1024 * 1024
-/** A stream that never prints a newline is cut into lines of this many characters. */
+/** A physical line longer than this is passed on as its first this-many characters; the rest of it is dropped. */
 const MAX_PARTIAL_LINE = 4096
 
 export interface GitRun {
@@ -81,10 +81,24 @@ class TailBuffer {
 class LineSplitter {
   private readonly decoder = new StringDecoder('utf8')
   private partial = ''
+  /** The current line was too long and has been passed on; what follows it up to the next line break is dropped. */
+  private discarding = false
   constructor(private readonly emit: (line: GitLine) => void) {}
 
+  /**
+   * An overlong line is never cut into several lines: a secret that straddles a cut would reach the
+   * consumer as two halves that neither look like a credential. Only its head is kept, and the consumer
+   * redacts that head as a whole.
+   */
   write(chunk: Buffer): void {
-    const text = this.partial + this.decoder.write(chunk)
+    let text = this.partial + this.decoder.write(chunk)
+    this.partial = ''
+    if (this.discarding) {
+      const end = text.search(/[\r\n]/)
+      if (end === -1) return
+      this.discarding = false
+      text = text.slice(end)
+    }
     const pattern = /\r\n|\n|\r/g
     let start = 0
     for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
@@ -92,14 +106,15 @@ class LineSplitter {
       start = match.index + match[0].length
     }
     this.partial = text.slice(start)
-    while (this.partial.length > MAX_PARTIAL_LINE) {
+    if (this.partial.length > MAX_PARTIAL_LINE) {
       this.line(this.partial.slice(0, MAX_PARTIAL_LINE), false)
-      this.partial = this.partial.slice(MAX_PARTIAL_LINE)
+      this.partial = ''
+      this.discarding = true
     }
   }
 
   end(): void {
-    this.line(this.partial + this.decoder.end(), false)
+    if (!this.discarding) this.line(this.partial + this.decoder.end(), false)
     this.partial = ''
   }
 
@@ -169,16 +184,18 @@ export function runGit(cwd: string, args: readonly string[], options: GitRunOpti
       if (settled) return
       settled = true
       clearTimers()
+      // A run that finished on its own just as the stop arrived succeeded; a forced stop never exits 0.
+      const succeeded = code === 0
       // Nothing a stopped process started may outlive the result.
       if (stopping && process.platform !== 'win32') killGroup('SIGKILL')
       for (const splitter of splitters) splitter.end()
       const out = stdout.text()
       const err = stderr.text()
       resolvePromise({
-        ok: code === 0 && !stopping,
+        ok: succeeded,
         code,
-        stalled,
-        cancelled,
+        stalled: stalled && !succeeded,
+        cancelled: cancelled && !succeeded,
         exited,
         stdout: out,
         output: [out, err].filter(Boolean).join('\n')

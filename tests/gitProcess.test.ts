@@ -106,6 +106,19 @@ describe('runGit', () => {
     expect(Math.max(...lines.map((line) => line.text.length))).toBeLessThanOrEqual(4096)
   }, 30_000)
 
+  it('passes on only the head of an overlong line, so a secret across the cut never shows up as the next line', async () => {
+    const dir = folder()
+    const lines: GitLine[] = []
+    const run = await runGit(dir, aliasArgs(dir, `
+      process.stderr.write('x'.repeat(4083) + 'https://user:B')
+      setTimeout(() => process.stderr.write('OUNDARY_SECRET@example.invalid/repo\\nnext line\\n'), 300)
+    `), { onLine: (line) => lines.push(line) })
+    expect(run.ok).toBe(true)
+    expect(lines.map((line) => line.text.length)).toEqual([4096, 'next line'.length])
+    expect(lines.map((line) => line.text).join('\n')).not.toContain('OUNDARY_SECRET')
+    expect(lines.at(-1)?.text).toBe('next line')
+  }, 30_000)
+
   it('does not start a process whose signal is already aborted', async () => {
     const dir = folder()
     const marker = join(dir, 'ran')

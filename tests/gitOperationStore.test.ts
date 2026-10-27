@@ -85,10 +85,23 @@ describe('what the status says', () => {
     expect(verbs).toEqual(['Pushing…', 'Pulling…', 'Fetching…', 'Committing…', 'Switching branch…'])
   })
 
-  it('offers Cancel only while it can work, and warns on a pull', () => {
-    expect(describeOperation(newOperationState('op-1', 'push', 0), 0).cancelLabel).toBeNull()
-    expect(describeOperation(running('pull'), 0).cancelLabel).toBe('Cancel — may leave a merge in progress')
+  it('offers Cancel from the start (a lost first event cannot hide it) except for a branch switch', () => {
+    expect(describeOperation(newOperationState('op-1', 'push', 0), 0).cancelLabel).toBe('Cancel')
+    expect(describeOperation(newOperationState('op-1', 'checkout', 0), 0).cancelLabel).toBeNull()
     expect(describeOperation(running('checkout'), 0).cancelLabel).toBeNull()
+    expect(describeOperation(running('pull'), 0)).toMatchObject({ cancelLabel: 'Cancel', cancelHint: expect.stringContaining('download') })
+    expect(describeOperation(running('push'), 0).cancelHint).toBeNull()
+  })
+
+  it('takes Cancel away when a pull starts to change files, and says so', () => {
+    const merging = applyOperationEvent(running('pull'), event({ kind: 'pull', phase: 'integrating', cancellable: false }))
+    expect(describeOperation(merging, 0)).toMatchObject({ headline: 'Updating files…', cancelLabel: null, cancelHint: null, running: true })
+    // A late `started` cannot give it back.
+    expect(applyOperationEvent(merging, event({ kind: 'pull', phase: 'started', cancellable: true })).cancellable).toBe(false)
+    expect(describeOperation(applyOperationEvent(merging, event({ kind: 'pull', phase: 'done' })), 0).headline).toBe('Pull finished')
+  })
+
+  it('offers Cancel only while it can work', () => {
     expect(describeOperation({ ...running(), cancelling: true }, 0)).toMatchObject({ headline: 'Cancelling…', cancelLabel: null })
     expect(describeOperation(applyOperationEvent(running(), event({ phase: 'done' })), 0)).toMatchObject({ cancelLabel: null, running: false })
   })
@@ -148,7 +161,7 @@ describe('the operation store', () => {
   let subscribed: ((event: GitOperationEvent) => void) | null = null
   const cancelOperation = vi.fn(async (_id: string) => ({ cancelled: true }))
   beforeEach(() => {
-    useGitOperationStore.setState({ operations: {} })
+    useGitOperationStore.setState({ operations: {}, waiting: {} })
     cancelOperation.mockClear()
     cancelOperation.mockImplementation(async () => ({ cancelled: true }))
     vi.stubGlobal('window', { mousse: { git: { onOperation: (cb: (event: GitOperationEvent) => void) => { subscribed = cb; return () => undefined }, cancelOperation } } })
@@ -207,8 +220,6 @@ describe('the operation store', () => {
 
   it('cancels by asking the daemon for this action once it can be cancelled', async () => {
     const id = beginGitOperation('/repo', 'push')
-    await cancelGitOperation('/repo')
-    expect(cancelOperation).not.toHaveBeenCalled()
     receiveGitOperationEvent({ operationId: id, kind: 'push', path: '/repo', phase: 'started', cancellable: true, at: 1 })
     const first = cancelGitOperation('/repo')
     expect(op().cancelling).toBe(true)
@@ -229,6 +240,55 @@ describe('the operation store', () => {
     cancelOperation.mockImplementationOnce(async () => { throw new Error('gone') })
     await cancelGitOperation('/repo')
     expect(op().cancelling).toBe(false)
+  })
+
+  it('does not cancel a branch switch, or a pull that has begun to merge', async () => {
+    beginGitOperation('/switch', 'checkout')
+    await cancelGitOperation('/switch')
+    const pull = beginGitOperation('/pull', 'pull')
+    receiveGitOperationEvent({ operationId: pull, kind: 'pull', path: '/pull', phase: 'integrating', cancellable: false, at: 1 })
+    await cancelGitOperation('/pull')
+    expect(cancelOperation).not.toHaveBeenCalled()
+  })
+
+  it('asks to cancel at once, before the first event, since the daemon registers the action first', async () => {
+    const id = beginGitOperation('/repo', 'fetch')
+    await cancelGitOperation('/repo')
+    expect(cancelOperation).toHaveBeenCalledWith(id)
+  })
+
+  it('keeps a running action, its output and its Cancel on screen when another starts on the folder', async () => {
+    const first = beginGitOperation('/repo', 'push')
+    receiveGitOperationEvent({ operationId: first, kind: 'push', path: '/repo', phase: 'started', cancellable: true, at: 1 })
+    receiveGitOperationEvent({ operationId: first, kind: 'push', path: '/repo', phase: 'output', lines: ['pre-push is running'], at: 2 })
+    const second = beginGitOperation('/repo', 'fetch')
+    expect(op()).toMatchObject({ operationId: first, lines: ['pre-push is running'], cancellable: true })
+    // The second one's events find it while it waits.
+    receiveGitOperationEvent({ operationId: second, kind: 'fetch', path: '/repo', phase: 'output', lines: ['from the fetch'], at: 3 })
+    expect(op().operationId).toBe(first)
+    expect(op().lines).toEqual(['pre-push is running'])
+    // Cancel acts on the shown one.
+    await cancelGitOperation('/repo')
+    expect(cancelOperation).toHaveBeenCalledWith(first)
+    // When the first ends, the second takes its place with what it printed meanwhile.
+    finishGitOperation('/repo', first, 'done')
+    expect(op()).toMatchObject({ operationId: second, lines: ['from the fetch'] })
+    finishGitOperation('/repo', second, 'done')
+    expect(op()).toBeUndefined()
+  })
+
+  it('shows the next waiting action when the shown one is dismissed or ends by failing, and drops a waiting one that ends unseen', () => {
+    const first = beginGitOperation('/repo', 'push')
+    const second = beginGitOperation('/repo', 'fetch')
+    const third = beginGitOperation('/repo', 'pull')
+    finishGitOperation('/repo', second, 'failed', 'no remote')
+    receiveGitOperationEvent({ operationId: first, kind: 'push', path: '/repo', phase: 'failed', message: 'rejected', at: 1 })
+    expect(op()).toMatchObject({ operationId: third, phase: 'starting' })
+    expect(useGitOperationStore.getState().waiting['/repo']).toBeUndefined()
+    finishGitOperation('/repo', third, 'failed', 'later')
+    expect(op()).toMatchObject({ operationId: third, phase: 'failed' })
+    dismissGitOperation('/repo')
+    expect(op()).toBeUndefined()
   })
 
   it('dismisses an outcome', () => {

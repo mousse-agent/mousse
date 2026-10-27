@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import type { GitOperationEvent, GitOperationKind } from '../../shared/types'
-import { applyOperationEvent, newOperationState, type GitOperationState } from '../components/git/gitOperationLogic'
+import { applyOperationEvent, isActive, newOperationState, type GitOperationState } from '../components/git/gitOperationLogic'
 import { gitErrorCode } from '../components/sideCard/gitSectionLogic'
 import { errorText } from '../lib/errorText'
 
@@ -9,19 +9,52 @@ import { errorText } from '../lib/errorText'
  * only to this window, for actions this window started, so entries are matched by the id this store
  * made up when the button was pressed. A failed or cancelled action keeps its output until the
  * next action on the folder or Dismiss; a finished one disappears.
+ *
+ * A folder shows one action. When a second starts while the first still runs (the daemon queues it
+ * behind the first), the first stays on screen with its output and Cancel, and the second waits here
+ * and is shown when the first has ended.
  */
 interface GitOperationStoreState {
+  /** What each folder shows. */
   operations: Record<string, GitOperationState>
+  /** Actions started behind the one shown, oldest first. */
+  waiting: Record<string, GitOperationState[]>
 }
 
-export const useGitOperationStore = create<GitOperationStoreState>(() => ({ operations: {} }))
+export const useGitOperationStore = create<GitOperationStoreState>(() => ({ operations: {}, waiting: {} }))
 
-function patch(path: string, change: (state: GitOperationState) => GitOperationState): void {
-  useGitOperationStore.setState((store) => {
-    const current = store.operations[path]
-    if (!current) return store
-    const next = change(current)
-    return next === current ? store : { operations: { ...store.operations, [path]: next } }
+/** Replaces the shown action of a folder with the next waiting one, or with nothing. */
+function promote(state: GitOperationStoreState, path: string): GitOperationStoreState {
+  const [next, ...rest] = state.waiting[path] ?? []
+  const { [path]: _shown, ...operations } = state.operations
+  const { [path]: _queue, ...waiting } = state.waiting
+  return {
+    operations: next ? { ...operations, [path]: next } : operations,
+    waiting: rest.length ? { ...waiting, [path]: rest } : waiting
+  }
+}
+
+/** Applies `change` to the action with this id, wherever it is. */
+function patchById(operationId: string, change: (action: GitOperationState) => GitOperationState): void {
+  useGitOperationStore.setState((state) => {
+    const path = Object.keys(state.operations).find((key) => state.operations[key].operationId === operationId)
+    if (path) {
+      const next = change(state.operations[path])
+      if (next === state.operations[path]) return state
+      const updated = { ...state, operations: { ...state.operations, [path]: next } }
+      // The shown action has ended and another waits: that one is shown now.
+      return !isActive(next) && state.waiting[path]?.length ? promote(updated, path) : updated
+    }
+    for (const key of Object.keys(state.waiting)) {
+      const index = state.waiting[key].findIndex((action) => action.operationId === operationId)
+      if (index === -1) continue
+      const next = change(state.waiting[key][index])
+      if (next === state.waiting[key][index]) return state
+      // A waiting action that ends before it was ever shown has nothing to show.
+      const queue = isActive(next) ? state.waiting[key].map((action, at) => (at === index ? next : action)) : state.waiting[key].filter((_, at) => at !== index)
+      return { ...state, waiting: { ...state.waiting, [key]: queue } }
+    }
+    return state
   })
 }
 
@@ -36,54 +69,54 @@ function listen(): void {
   subscribe(receiveGitOperationEvent)
 }
 
-/** Applies an event to the folder whose action it belongs to. Events of other actions are ignored. */
+/** Applies an event to the action it belongs to. Events of other actions are ignored. */
 export function receiveGitOperationEvent(event: GitOperationEvent): void {
-  const { operations } = useGitOperationStore.getState()
-  const path = Object.keys(operations).find((key) => operations[key].operationId === event.operationId)
-  if (path) patch(path, (state) => applyOperationEvent(state, event))
+  patchById(event.operationId, (action) => applyOperationEvent(action, event))
 }
 
-/** Registers a new action of the folder, replacing any outcome left from the one before, and returns its id. */
+/**
+ * Registers a new action of the folder and returns its id. It replaces an outcome left from the one before;
+ * if an action is still running, it waits behind it.
+ */
 export function beginGitOperation(path: string, kind: GitOperationKind, now: number = Date.now()): string {
   listen()
   const operationId = crypto.randomUUID()
-  useGitOperationStore.setState((store) => ({ operations: { ...store.operations, [path]: newOperationState(operationId, kind, now) } }))
+  const action = newOperationState(operationId, kind, now)
+  useGitOperationStore.setState((state) => {
+    const shown = state.operations[path]
+    if (shown && isActive(shown)) return { ...state, waiting: { ...state.waiting, [path]: [...(state.waiting[path] ?? []), action] } }
+    return { ...state, operations: { ...state.operations, [path]: action } }
+  })
   return operationId
 }
 
 /** Records how the request ended. The daemon's own last event usually got here first. */
 export function finishGitOperation(path: string, operationId: string, outcome: 'done' | 'failed' | 'cancelled', message: string | null = null, now: number = Date.now()): void {
-  const { operations } = useGitOperationStore.getState()
-  if (operations[path]?.operationId !== operationId) return
-  if (outcome === 'done') {
-    dismissGitOperation(path)
+  const state = useGitOperationStore.getState()
+  const shown = state.operations[path]
+  if (outcome === 'done' && shown?.operationId === operationId) {
+    useGitOperationStore.setState((current) => promote(current, path))
     return
   }
-  patch(path, (state) => {
-    if (state.phase !== 'starting' && state.phase !== 'running') return state
-    return { ...state, phase: outcome, cancelling: false, endedAt: now, message: message ?? state.message }
-  })
+  patchById(operationId, (action) => (isActive(action) ? { ...action, phase: outcome, cancelling: false, endedAt: now, message: message ?? action.message } : action))
 }
 
+/** Clears the shown outcome of a folder. A waiting action, if any, is shown next. */
 export function dismissGitOperation(path: string): void {
-  useGitOperationStore.setState((store) => {
-    if (!store.operations[path]) return store
-    const { [path]: _removed, ...rest } = store.operations
-    return { operations: rest }
-  })
+  useGitOperationStore.setState((state) => (state.operations[path] ? promote(state, path) : state))
 }
 
 /** Asks the daemon to stop the folder's running action. The end arrives as the request's rejection. */
 export async function cancelGitOperation(path: string): Promise<void> {
   const state = useGitOperationStore.getState().operations[path]
-  if (!state || !state.cancellable || state.cancelling) return
-  patch(path, (current) => ({ ...current, cancelling: true }))
+  if (!state || !isActive(state) || !state.cancellable || state.cancelling) return
+  patchById(state.operationId, (action) => ({ ...action, cancelling: true }))
   try {
     const { cancelled } = await window.mousse.git.cancelOperation(state.operationId)
-    // It had already ended, or cannot be stopped: the button comes back.
-    if (!cancelled) patch(path, (current) => ({ ...current, cancelling: false }))
+    // It had already ended, or cannot be stopped any more: the button comes back.
+    if (!cancelled) patchById(state.operationId, (action) => ({ ...action, cancelling: false }))
   } catch {
-    patch(path, (current) => ({ ...current, cancelling: false }))
+    patchById(state.operationId, (action) => ({ ...action, cancelling: false }))
   }
 }
 

@@ -1153,7 +1153,7 @@ export interface GitFetchResult {
 
 export type GitOperationKind = 'push' | 'pull' | 'fetch' | 'commit' | 'checkout'
 
-export type GitOperationPhase = 'started' | 'hook' | 'output' | 'done' | 'failed' | 'cancelled'
+export type GitOperationPhase = 'started' | 'integrating' | 'hook' | 'output' | 'done' | 'failed' | 'cancelled'
 
 /**
  * What a long Git action reports while it runs. Sent only to the client that started it,
@@ -1166,7 +1166,7 @@ export interface GitOperationEvent {
   /** The folder Git runs in. */
   path: string
   phase: GitOperationPhase
-  /** On `started`: whether Cancel can stop it. */
+  /** On `started` and `integrating`: whether Cancel can stop it. `integrating` (a pull's merge or rebase) says it no longer can. */
   cancellable?: boolean
   /** On `output`: the new lines, redacted and each at most 500 characters. */
   lines?: string[]
@@ -1186,6 +1186,8 @@ export interface GitOperationOptions {
   operationId?: string
   /** Only the client that started the action may cancel it. */
   owner?: string
+  /** The action is cancelled when this aborts (the starting connection closed), while it still can be. */
+  lifetime?: AbortSignal
   onEvent?: (event: GitOperationEvent) => void
 }
 

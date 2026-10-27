@@ -12,6 +12,8 @@ export interface DomainConnectionContext {
   /** Assigned by daemon admission, never deserialized from request params. */
   readonly binding?: TrustedProfileBinding
   readonly capabilities: ReadonlySet<string>
+  /** Aborts when this connection closes or its profile binding changes. */
+  readonly lifetime?: AbortSignal
   /** Captured from authenticated connection admission, never a method parameter. */
   readonly clientType?: ProtocolClientType
   /** Server-only; mutates the connection binding after a validated profiles.bind. */

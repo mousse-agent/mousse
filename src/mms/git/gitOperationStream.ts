@@ -9,8 +9,16 @@ const DEFAULT_INTERVAL_MS = 100
 const DEFAULT_MAX_LINES = 5_000
 /** Lines held between two sends; when more arrive, the oldest are dropped. */
 const BATCH_LINES = 40
+/**
+ * UTF-8 bytes held between two sends. A connection event may not exceed 64 KiB in all, and a line of
+ * 500 characters can take 1,500 bytes, so the count above is not a bound on its own.
+ */
+const BATCH_BYTES = 32 * 1024
 /** Longest `failed` message; the request's own rejection still carries the full text. */
 const MAX_MESSAGE = 4_000
+
+/** Colour and cursor sequences, and the other control characters, which a log view cannot show. */
+const TERMINAL_CONTROLS = /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|[\u0000-\u0008\u000b-\u001f\u007f]/g
 
 export interface OperationStreamOptions {
   operationId: string
@@ -30,7 +38,10 @@ export interface OperationStreamOptions {
  */
 export class OperationStream {
   private pending: string[] = []
+  private pendingBytes = 0
   private pendingTransient = false
+  /** Lines pushed out of the batch before it was sent. */
+  private dropped = 0
   private sent = 0
   private noticed = false
   private lastSend = 0
@@ -53,31 +64,41 @@ export class OperationStream {
     this.emit({ phase: 'started', cancellable })
   }
 
+  /** The step that changes the folder has begun and can no longer be stopped. */
+  integrating(): void {
+    if (this.ended) return
+    this.flush()
+    this.emit({ phase: 'integrating', cancellable: false })
+  }
+
   line(line: GitLine): void {
     if (!this.options.onEvent || this.ended) return
-    const text = redactGitText(line.text).trim()
+    // `redactGitText` also caps each line at 500 characters, which is what the event type promises.
+    const text = redactGitText(line.text.replace(TERMINAL_CONTROLS, '')).trim()
     if (text === '') return
     if (this.sent >= (this.options.maxLines ?? DEFAULT_MAX_LINES)) {
       if (!this.noticed) {
         this.noticed = true
-        this.pending.push('The rest of the output is not shown.')
-        this.pendingTransient = false
-        this.trim()
+        this.push('The rest of the output is not shown.', false)
         this.schedule()
       }
       return
     }
     // The previous progress line was overwritten by this one.
-    if (this.pendingTransient && this.pending.length > 0) this.pending.pop()
+    if (this.pendingTransient && this.pending.length > 0) this.pendingBytes -= Buffer.byteLength(this.pending.pop()!)
     else this.sent += 1
-    this.pending.push(text)
-    this.pendingTransient = line.transient
-    this.trim()
+    this.push(text, line.transient)
     this.schedule()
   }
 
-  private trim(): void {
-    if (this.pending.length > BATCH_LINES) this.pending.splice(0, this.pending.length - BATCH_LINES)
+  private push(text: string, transient: boolean): void {
+    this.pending.push(text)
+    this.pendingBytes += Buffer.byteLength(text)
+    this.pendingTransient = transient
+    while (this.pending.length > 1 && (this.pending.length > BATCH_LINES || this.pendingBytes > BATCH_BYTES)) {
+      this.pendingBytes -= Buffer.byteLength(this.pending.shift()!)
+      this.dropped += 1
+    }
   }
 
   hook(event: HookTraceEvent): void {
@@ -112,8 +133,12 @@ export class OperationStream {
     this.timer = undefined
     if (this.pending.length === 0) return
     const lines = this.pending
+    // Said once, in the batch that lost lines.
+    if (this.dropped > 0) lines.unshift(`… ${this.dropped} ${this.dropped === 1 ? 'line' : 'lines'} not shown`)
     this.pending = []
+    this.pendingBytes = 0
     this.pendingTransient = false
+    this.dropped = 0
     this.lastSend = Date.now()
     this.emit({ phase: 'output', lines })
   }

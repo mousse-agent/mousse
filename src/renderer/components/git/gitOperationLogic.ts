@@ -16,7 +16,10 @@ export interface GitOperationState {
   startedAt: number
   /** When it ended, for an outcome that stays on screen. */
   endedAt: number | null
+  /** Cancel can stop it. Everything but a branch switch starts out so, before the daemon says otherwise, so a lost first event cannot hide Cancel. */
   cancellable: boolean
+  /** A pull is past its download and changing files: it can no longer be cancelled. */
+  integrating: boolean
   /** Cancel was pressed and the daemon has not reported the end yet. */
   cancelling: boolean
   /** The hook Git is running, or the last one that ended. */
@@ -42,17 +45,20 @@ const NOUN: Record<GitOperationKind, string> = {
 }
 
 export function newOperationState(operationId: string, kind: GitOperationKind, now: number): GitOperationState {
-  return { operationId, kind, phase: 'starting', startedAt: now, endedAt: null, cancellable: false, cancelling: false, hook: null, lines: [], message: null }
+  return { operationId, kind, phase: 'starting', startedAt: now, endedAt: null, cancellable: kind !== 'checkout', integrating: false, cancelling: false, hook: null, lines: [], message: null }
 }
 
-const active = (state: GitOperationState): boolean => state.phase === 'starting' || state.phase === 'running'
+export const isActive = (state: GitOperationState): boolean => state.phase === 'starting' || state.phase === 'running'
+const active = isActive
 
 /** The state after an event of the daemon. Events of another action, and a phase after the end, change nothing. */
 export function applyOperationEvent(state: GitOperationState, event: GitOperationEvent): GitOperationState {
   if (event.operationId !== state.operationId) return state
   switch (event.phase) {
     case 'started':
-      return active(state) ? { ...state, phase: 'running', cancellable: event.cancellable === true } : state
+      return active(state) ? { ...state, phase: 'running', cancellable: state.integrating ? false : event.cancellable === true } : state
+    case 'integrating':
+      return active(state) ? { ...state, phase: 'running', cancellable: false, integrating: true } : state
     case 'hook':
       return event.hook ? { ...state, hook: event.hook } : state
     case 'output': {
@@ -93,6 +99,8 @@ export interface OperationView {
   running: boolean
   /** The Cancel button's label, or null when the action cannot be cancelled now. */
   cancelLabel: string | null
+  /** What Cancel stops, for its tooltip. */
+  cancelHint: string | null
   /** An outcome that stays until the next action or Dismiss. */
   ended: boolean
 }
@@ -102,17 +110,18 @@ export function describeOperation(state: GitOperationState, now: number): Operat
   const hook = running && state.hook && state.hook.exitCode === undefined ? state.hook.name : null
   const lastLine = state.lines.length ? clip(state.lines[state.lines.length - 1]) : null
   const headline = running
-    ? `${state.cancelling ? 'Cancelling' : VERB[state.kind]}…`
+    ? `${state.cancelling ? 'Cancelling' : state.integrating ? 'Updating files' : VERB[state.kind]}…`
     : state.phase === 'cancelled' ? `${NOUN[state.kind]} cancelled` : state.phase === 'failed' ? `${NOUN[state.kind]} failed` : `${NOUN[state.kind]} finished`
-  const canCancel = running && state.phase === 'running' && state.cancellable && !state.cancelling
+  const canCancel = running && state.cancellable && !state.cancelling
   return {
     headline,
     hook,
     lastLine,
     elapsed: running ? formatElapsed(now - state.startedAt) : null,
     running,
-    // A pull stopped halfway can leave a merge or rebase to finish or abort.
-    cancelLabel: canCancel ? (state.kind === 'pull' ? 'Cancel — may leave a merge in progress' : 'Cancel') : null,
+    cancelLabel: canCancel ? 'Cancel' : null,
+    // A pull can only be stopped while it downloads; once it merges or rebases, Git has to finish.
+    cancelHint: canCancel && state.kind === 'pull' ? 'Stops the download. Once files start to change, a pull cannot be cancelled.' : null,
     ended: !running
   }
 }
