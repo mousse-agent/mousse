@@ -112,6 +112,8 @@ export function currentContext(source: CommandSource, target?: ClosestTarget | n
   })
   // Until the app info arrives the preload still knows the platform.
   if (!context.platform && typeof window !== 'undefined') context.platform = window.mousse?.platform ?? ''
+  // A palette row or menu click has no focus to judge, so it counts as being in the Files panel.
+  if (source !== 'key') context.inFilesPanel = true
   return source === 'guest' ? { ...context, inTextInput: true } : context
 }
 
