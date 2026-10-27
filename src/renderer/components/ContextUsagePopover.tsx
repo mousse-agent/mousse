@@ -102,7 +102,7 @@ export function ContextUsagePopover({
             type="button"
             className="context-usage-settings"
             aria-label="Context compaction settings"
-            title="Context compaction settings"
+            title="Compaction settings. Context compacts at your threshold, sometimes sooner to leave room for the reply."
             onClick={openSettings}
           >
             <Settings size={14} />
@@ -140,15 +140,16 @@ export function ContextUsagePopover({
           ))}
         </ul>
 
-        <div className="context-usage-notes">
-          {usage.processedTokens !== undefined && (
-            <p>Last reply read {formatTokenCount(usage.processedTokens)} tokens across model calls.</p>
-          )}
-          {usage.source === 'legacy-estimated' && (
-            <p>Estimate: older tool calls, results and reasoning could not be recovered.</p>
-          )}
-          <p>Compacts automatically at your threshold, sometimes sooner to leave room for the reply.</p>
-        </div>
+        {(usage.processedTokens !== undefined || usage.source === 'legacy-estimated') && (
+          <div className="context-usage-notes">
+            {usage.processedTokens !== undefined && (
+              <p>Last reply read {formatTokenCount(usage.processedTokens)} tokens across model calls.</p>
+            )}
+            {usage.source === 'legacy-estimated' && (
+              <p>Estimate: older tool calls, results and reasoning could not be recovered.</p>
+            )}
+          </div>
+        )}
       </div>
     </FloatingPortal>
   )
