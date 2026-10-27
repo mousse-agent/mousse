@@ -13,6 +13,10 @@ import type { EffectiveAgentGrants } from '../../src/shared/agents/types'
 import type { AdapterHost } from '../../src/mms/run/adapters/ProviderAdapter'
 import { PI_RPC_EXACT_CAPS } from '../../src/mms/harness/drivers/pi'
 import { harness, script, setup, type SetupOptions } from './piRpcEngineFixture'
+import { createDefinitionBrowserBinding } from '../../src/mms/orchestrator/browser/binding'
+import { browserTools } from '../../src/mms/run/mcp/appTools/browser'
+import type { AppToolHost } from '../../src/mms/run/mcp/appTools/host'
+import type { BrowserRuntimePort } from '../../src/shared/browser/runtime'
 
 // PR 4 4b2: a definition's authority over Pi's built-in tools, at the gate (`/pi/gate`), on the real
 // pinned Pi child. Every refusal is proven by the file system (a write that never happened, a read
@@ -214,6 +218,68 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
     const result = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host).catch((caught: unknown) => caught)
     return { result, asked, ran, counters, project }
   }
+
+  it('the browser: Pi is sent the granted browser tools as the turn’s binding offers them, and they run on the browser over MCP, each costing a tool call', async () => {
+    // A local browser stand-in: it records what reached it and loads no page.
+    const dispatched: Array<{ name: string; args: unknown; runId?: string }> = []
+    const runtime: BrowserRuntimePort = {
+      resolveTarget: () => ({ backend: 'managed-chromium' }),
+      dispatch: async (context, name, args) => (dispatched.push({ name, args, ...(context.execution.runId ? { runId: context.execution.runId } : {}) }), { observationId: 'obs-1' })
+    }
+    const turns = new AppToolTurns()
+    const registry = new ToolRegistry({ activeRunId: () => 'r1', turns })
+    for (const tool of browserTools({ browserRuntime: () => runtime } as unknown as AppToolHost)) registry.register(tool)
+    // The Pi driver's own wiring (`piProfileInputs`): a definition turn's tools as its loop sends them.
+    const { engine, recorder, project } = await setup(cleanups, { mousseTools: (threadId, runId) => registry.listForTurn(threadId, runId) })
+    const granted = ['browser_open', 'browser_observe', 'browser_screenshot']
+    const definition: DefinitionAuthority = { policy: policy(project), grants: grants(...granted) }
+    const browser = createDefinitionBrowserBinding({
+      request: { profileId: 'default', threadId: 't1', source: 'editor' } as never,
+      runId: 'definition-run',
+      resolved: { definitionId: 'def-1', revision: 'rev-1', settings: { browser: { mode: 'structured' }, limits: { maxToolCalls: 10, maxElapsedMs: 60_000 } }, grants: grants(...granted) } as never
+    })!
+    turns.register(appTurn({ threadId: 't1', runId: 'r1', turnToken: 'tt', projectPath: project, definition, browser }))
+    const server = createServer(async (req, res) => {
+      let body = ''
+      for await (const chunk of req) body += chunk
+      const call = JSON.parse(body) as { id: string; params: { name: string; arguments: Record<string, unknown> } }
+      const { clientRequestId, ...args } = call.params.arguments
+      const outcome = await registry.call(call.params.name, args, {
+        credential: { threadId: 't1', runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage', binding: 'per_call', current: () => true },
+        toolCallId: `mcp:${String(clientRequestId)}`,
+        signal: new AbortController().signal
+      })
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: call.id, result: { content: [{ type: 'text', text: outcome.text }], isError: outcome.isError } }))
+    })
+    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done))
+    cleanups.push(() => new Promise<void>((done) => server.close(() => done())))
+    recorder.respond(script([
+      { tool: { name: 'browser_open', args: { url: 'http://127.0.0.1:9/local-page' } } },
+      { tool: { name: 'browser_act', args: { sessionId: 's', tabId: 't', generation: 1, observationId: 'o', controlLeaseId: 'l', action: { type: 'reload' } } } },
+      { text: 'done' }
+    ]))
+    const counters = new RunCounters()
+    const turn = harness(project, {}, {
+      definition,
+      budget: new TurnBudget({ maxToolCalls: 5 }, counters),
+      bridge: { mcp: { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`, token: 'fake' }, turnToken: 'tt', sessionInstructions: '', turnPreamble: '', userMcp: 'proxy' }
+    })
+    const result = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
+    expect(result.text).toBe('done')
+    // Sent exactly the granted tools the binding offers (no screenshot for a model without vision),
+    // with the turn's schema, and nothing of Mousse's browser instructions besides it.
+    const sent = ((JSON.parse(recorder.requests[0]!.body) as { tools?: Array<{ function: { name: string; description: string; parameters: unknown } }> }).tools ?? []).map((tool) => tool.function)
+    expect(sent.map((tool) => tool.name).sort()).toEqual(['browser_observe', 'browser_open'])
+    expect(sent.find((tool) => tool.name === 'browser_observe')!.description).toContain('Do not request screenshots')
+    expect(recorder.requests[0]!.body).toContain('You are a test agent.')
+    // The granted call ran on the browser under the definition run's binding; the ungranted one was
+    // never offered, so Pi had no such tool, and it cost nothing.
+    expect(dispatched).toEqual([{ name: 'browser_open', args: { url: 'http://127.0.0.1:9/local-page' }, runId: 'definition-run' }])
+    const results = turn.events.filter((event) => event.kind === 'tool' && event.phase === 'complete')
+    expect(String(results[1]!.response)).toBe('Tool browser_act not found')
+    expect(counters.toolCalls).toBe(1)
+  }, 90_000)
 
   it('an app tool whose approval is denied costs no tool call, and is asked once', async () => {
     const { result, asked, ran, counters, project } = await appToolRun((request) =>
