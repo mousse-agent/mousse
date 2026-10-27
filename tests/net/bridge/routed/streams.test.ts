@@ -90,7 +90,11 @@ describe('opening a private stream', () => {
     expect(snapshot.messages.map((m: { content: string }) => m.content)).toEqual(['hello', 'hi'])
 
     // The stream is this computer's: the display adapter says so, and it is not the shared stream a phone reads.
-    expect(adapter!.privateAccess(stream)).toEqual({ reader: f.callerNode, kind: 'thread' })
+    expect(adapter!.privateAccess(stream)).toEqual({
+      reader: f.callerNode,
+      kind: 'thread',
+      open: true
+    })
     const shared = adapter!.activate(t.id)
     expect(shared.id).not.toBe(stream)
     expect(adapter!.privateAccess(shared.id)).toBeUndefined()
@@ -98,7 +102,7 @@ describe('opening a private stream', () => {
     const other = newId('node')
     const theirs = adapter!.openPrivate({ reader: other, kind: 'thread', subject: t.id })
     expect(theirs.id).not.toBe(stream)
-    expect(adapter!.privateAccess(theirs.id)).toEqual({ reader: other, kind: 'thread' })
+    expect(adapter!.privateAccess(theirs.id)).toEqual({ reader: other, kind: 'thread', open: true })
     const again = (await ok('stream.open', {
       kind: 'thread',
       threadId: t.id
@@ -273,7 +277,7 @@ describe('opening a private stream', () => {
     expect(() =>
       adapter!.openPrivate({ reader, kind: 'thread', subject: threads[16].id })
     ).not.toThrow()
-    expect(adapter!.privateAccess(first.id)).toEqual({ reader, kind: 'thread' })
+    expect(adapter!.privateAccess(first.id)).toEqual({ reader, kind: 'thread', open: false })
     expect(adapter!.privateHead(reader, threads[0].id)).toBeUndefined()
     const reopened = adapter!.openPrivate({ reader, kind: 'thread', subject: threads[0].id })
     expect(reopened.id).toBe(first.id)
@@ -282,6 +286,113 @@ describe('opening a private stream', () => {
     const readerSide = readStream(f, reopened.id, threads[0].id)
     expect(readerSide.snapshot.thread.id).toBe(threads[0].id)
   }, 120_000)
+
+  it('does not reopen a closed private stream because someone looked it up, and opens it only on request', async () => {
+    const { thread, adapter, f, ok } = await routedOwner({ streams: true })
+    const t = thread()
+    const opened = (await ok('stream.open', {
+      kind: 'thread',
+      threadId: t.id
+    })) as RoutedStreamOpened
+    const id = (opened.descriptor as { id: never }).id
+    const before = f.targetStore.head(id)
+    adapter!.closePrivate({ reader: f.callerNode })
+    expect(adapter!.privateHead(f.callerNode, t.id)).toBeUndefined()
+
+    // Any lookup of the stored stream (the network layer makes one for every read it checks) leaves it closed.
+    for (let n = 0; n < 3; n += 1) expect(adapter!.store.getStream(id)?.id).toBe(id)
+    expect(adapter!.privateHead(f.callerNode, t.id)).toBeUndefined()
+    expect(f.targetStore.head(id)).toEqual(before)
+    // A closed stream is known as the computer's but is not open: nothing reads it.
+    expect(adapter!.privateAccess(id)).toEqual({
+      reader: f.callerNode,
+      kind: 'thread',
+      open: false
+    })
+
+    // The computer asks to open it, through the request that runs the owner's checks, and it is open again.
+    const again = (await ok('stream.open', {
+      kind: 'thread',
+      threadId: t.id
+    })) as RoutedStreamOpened
+    expect((again.descriptor as { id: string }).id).toBe(id)
+    expect(adapter!.privateAccess(id)).toMatchObject({ open: true })
+    // A shared stream is still reopened by a lookup, as phones and hubs rely on.
+    const shared = adapter!.activate(t.id)
+    adapter!.deactivate(t.id)
+    expect(adapter!.privateAccess(shared.id)).toBeUndefined()
+    adapter!.store.getStream(shared.id)
+    expect(adapter!.ringStats(shared.id)).toBeDefined()
+  }, 60_000)
+
+  it('does not use the cap that phones and hubs share, so a full set of private streams leaves them room', async () => {
+    const { thread, adapter } = await routedOwner({ streams: { maxThreads: 2 } })
+    const threads = Array.from({ length: 6 }, (_, i) => thread(`T${i}`))
+    const warnings: string[] = []
+    const onWarning = (warning: Error) => warnings.push(warning.name)
+    process.on('warning', onWarning)
+    try {
+      // Two shared streams fill the shared cap; private streams are counted apart from it.
+      adapter!.activate(threads[0].id)
+      adapter!.activate(threads[1].id)
+      expect(() => adapter!.activate(threads[2].id)).toThrow(
+        expect.objectContaining({ code: 'rate_limited' })
+      )
+      const readers = [newId('node'), newId('node'), newId('node')]
+      for (const reader of readers)
+        for (const t of threads) adapter!.openPrivate({ reader, kind: 'thread', subject: t.id })
+      expect(adapter!.privateReaders()).toHaveLength(3)
+      expect(() => adapter!.activate(threads[2].id)).toThrow(
+        expect.objectContaining({ code: 'rate_limited' })
+      )
+      // Many streams listen to the same services without the "too many listeners" warning.
+      await new Promise((resolve) => setImmediate(resolve))
+    } finally {
+      process.off('warning', onWarning)
+    }
+    expect(warnings).not.toContain('MaxListenersExceededWarning')
+  }, 60_000)
+
+  it('opens a thread stream on a subagent thread like any other', async () => {
+    const { ok, thread, f } = await routedOwner({ streams: true })
+    const parent = thread('Parent')
+    const child = f.mms.threads.createThread('Child', undefined, undefined, {
+      lineage: { parentThreadId: parent.id, rootThreadId: parent.id, relationship: 'subagent' }
+    })
+    f.mms.orchestrator.getOrCreateSession(child.id).messages = [
+      message(0, 'from the child')
+    ] as never
+    const opened = (await ok('stream.open', {
+      kind: 'thread',
+      threadId: child.id
+    })) as RoutedStreamOpened
+    const { snapshot } = readStream(f, (opened.descriptor as { id: never }).id, child.id)
+    expect(snapshot.thread).toMatchObject({ id: child.id, lineage: { parentThreadId: parent.id } })
+    expect(snapshot.messages.map((m: { content: string }) => m.content)).toEqual(['from the child'])
+  }, 60_000)
+
+  it('tells a snapshot where the stream was before it read the thread, so no record is marked applied that it lacks', async () => {
+    const { ok, thread, f } = await routedOwner({ streams: true })
+    const t = thread()
+    f.mms.orchestrator.getOrCreateSession(t.id).messages = [message(0, 'before')] as never
+    const opened = (await ok('stream.open', {
+      kind: 'thread',
+      threadId: t.id
+    })) as RoutedStreamOpened
+    const stream = (opened.descriptor as { id: never }).id
+    const at = f.targetStore.head(stream)
+    // A record lands on the stream while the snapshot is being read.
+    const read = f.mms.orchestrator.getMessages.bind(f.mms.orchestrator)
+    vi.spyOn(f.mms.orchestrator, 'getMessages').mockImplementation((threadId?: string) => {
+      const messages = read(threadId)
+      f.mms.orchestrator.emit('thread-messages', { threadId: t.id, messages })
+      return messages
+    })
+    const snapshot = await ok('thread.snapshot', { threadId: t.id })
+    const now = f.targetStore.head(stream)
+    expect(now.seq).toBeGreaterThan(at.seq)
+    expect(snapshot.streamHead).toEqual({ stream, epoch: at.epoch, seq: at.seq })
+  }, 60_000)
 
   it('keeps a thread stream open while a turn runs on the thread, and not the other kinds', async () => {
     const clock = testClock()
@@ -294,7 +405,7 @@ describe('opening a private stream', () => {
     clock.advance(61_000)
     expect(adapter!.releaseIdle()).toBe(1)
     expect(adapter!.privateHead(reader, t.id)).toMatchObject({ stream: threadStream.id })
-    expect(adapter!.privateAccess(lists.id)).toEqual({ reader, kind: 'lists' })
+    expect(adapter!.privateAccess(lists.id)).toEqual({ reader, kind: 'lists', open: false })
     running.mockReturnValue(false)
     clock.advance(61_000)
     expect(adapter!.releaseIdle()).toBe(1)

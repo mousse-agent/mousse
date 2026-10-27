@@ -34,6 +34,11 @@ type MmsEventHandler = (data: unknown) => void
 export class MmsEventBus {
   private emitter = new EventEmitter()
 
+  /** Each open display stream listens on a channel of its own; see `raiseStreamListenerLimits`. */
+  setMaxListeners(count: number): void {
+    this.emitter.setMaxListeners(Math.max(count, this.emitter.getMaxListeners()))
+  }
+
   on(channel: MmsEventChannel, handler: MmsEventHandler): void {
     this.emitter.on(channel, handler)
   }

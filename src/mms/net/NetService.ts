@@ -158,12 +158,19 @@ export interface NetRuntime {
 export interface PrivateStreamsControl {
   access(
     stream: StreamId
-  ): { reader: NodeId; kind: 'thread' | 'lists' | 'channel' | 'terminal' } | undefined
+  ):
+    { reader: NodeId; kind: 'thread' | 'lists' | 'channel' | 'terminal'; open: boolean } | undefined
   /** Stops serving private streams (of one reader, of one kind, or all); returns the ones that were open. */
   close(filter?: {
     reader?: NodeId
     kind?: 'thread' | 'lists' | 'channel' | 'terminal'
   }): StreamId[]
+  /**
+   * Lets go of everything held for computers that may no longer work on threads here: their private
+   * streams, the results waiting to be fetched in pages and the values they staged. `granted` says
+   * which computers may; with none, every computer is let go of (the owner switch is off).
+   */
+  release(granted?: (node: NodeId) => boolean): StreamId[]
 }
 
 export interface NetDomainComposition {
@@ -517,6 +524,16 @@ export class NetService {
       })
       this.domain = this.options.composeRuntime?.(this.state) ?? undefined
       this.rosterListener = identity.onRosterChanged((user) => {
+        // A computer that lost "Works on threads" (or was revoked) keeps nothing open for it, as a block does.
+        this.endPrivateServing(
+          this.domain?.privateStreams?.release((node) => {
+            try {
+              return this.currentNode(node).caps.includes('settings')
+            } catch {
+              return false
+            }
+          }) ?? []
+        )
         this.emit()
         if (this.routes) this.refreshPeers()
         this.closeRevokedWebRtc()
@@ -795,7 +812,7 @@ export class NetService {
             this.saveConfig()
             // Off ends the private streams that are open, not only the next call.
             if (was && params.enabled !== true)
-              this.endPrivateServing(this.domain?.privateStreams?.close() ?? [])
+              this.endPrivateServing(this.domain?.privateStreams?.release() ?? [])
             this.emit()
           }
           return { enabled: this.config.workOnThreads === true }

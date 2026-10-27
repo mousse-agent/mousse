@@ -22,6 +22,7 @@ import {
   PRIVATE_STREAM_QUOTA,
   PRIVATE_TERMINAL_RING_BYTES,
   PRIVATE_TERMINAL_RING_ROWS,
+  PRIVATE_STREAMS_TOTAL,
   PRIVATE_THREAD_STREAMS_TOTAL,
   isPrivateKey,
   parsePrivateKey,
@@ -226,7 +227,11 @@ export class ThreadStreamAdapter {
             const row = this.options.db.database
               .prepare('SELECT thread_id FROM bridge_thread_streams WHERE stream=?')
               .get(stream)
-            if (row && !this.active.has(stream)) this.activateKey(String(row.thread_id))
+            // A lookup reopens a released shared stream. A private stream is never reopened here: it
+            // opens only through `openPrivate`, which the owner's checks (the block, the switches,
+            // the thread or terminal being this computer's) stand in front of.
+            if (row && !this.active.has(stream) && !isPrivateKey(String(row.thread_id)))
+              this.activateKey(String(row.thread_id))
             return target.getStream(stream)
           }
         if (key === 'openSnapshot')
@@ -260,10 +265,15 @@ export class ThreadStreamAdapter {
     return this.activateKey(privateKey(spec), undefined, spec)
   }
 
-  /** The node a private stream is bound to, and what it carries. Undefined for any other stream. */
-  privateAccess(stream: StreamId): { reader: NodeId; kind: RoutedStreamKind } | undefined {
+  /**
+   * The node a private stream is bound to, what it carries, and whether it is open now. Undefined for
+   * any other stream. A stream that was closed or released is not read until its computer opens it again.
+   */
+  privateAccess(
+    stream: StreamId
+  ): { reader: NodeId; kind: RoutedStreamKind; open: boolean } | undefined {
     const live = this.active.get(stream)
-    if (live) return live.spec && { reader: live.spec.reader, kind: live.spec.kind }
+    if (live) return live.spec && { reader: live.spec.reader, kind: live.spec.kind, open: true }
     if (!this.privateBindings.has(stream)) {
       const row = this.options.db.database
         .prepare('SELECT thread_id FROM bridge_thread_streams WHERE stream=?')
@@ -271,7 +281,17 @@ export class ThreadStreamAdapter {
       const spec = row ? parsePrivateKey(String(row.thread_id)) : undefined
       this.privateBindings.set(stream, spec && { reader: spec.reader, kind: spec.kind })
     }
-    return this.privateBindings.get(stream) ?? undefined
+    const bound = this.privateBindings.get(stream)
+    return bound && { ...bound, open: false }
+  }
+
+  /** The computers that have a private stream open. */
+  privateReaders(): NodeId[] {
+    return [
+      ...new Set(
+        [...this.active.values()].flatMap((thread) => (thread.spec ? [thread.spec.reader] : []))
+      )
+    ]
   }
 
   /**
@@ -325,6 +345,10 @@ export class ThreadStreamAdapter {
     return false
   }
 
+  private sharedOpen(): number {
+    return [...this.active.values()].filter((thread) => !thread.spec).length
+  }
+
   private assertPrivateRoom(spec: PrivateSpec): void {
     const count = (match: (other: PrivateSpec) => boolean): number =>
       [...this.active.values()].filter((thread) => thread.spec && match(thread.spec)).length
@@ -332,7 +356,8 @@ export class ThreadStreamAdapter {
       count((other) => other.reader === spec.reader && other.kind === spec.kind) >=
         PRIVATE_STREAM_QUOTA[spec.kind] ||
       (spec.kind === 'thread' &&
-        count((other) => other.kind === 'thread') >= PRIVATE_THREAD_STREAMS_TOTAL)
+        count((other) => other.kind === 'thread') >= PRIVATE_THREAD_STREAMS_TOTAL) ||
+      count(() => true) >= PRIVATE_STREAMS_TOTAL
     if (!full()) return
     // Streams no one reads any more give way before the computer is refused.
     this.releaseIdle()
@@ -353,9 +378,12 @@ export class ThreadStreamAdapter {
       return known.descriptor
     }
     if (spec) this.assertPrivateRoom(spec)
-    else if (holder !== undefined && this.metered(threadId)) this.assertHolderRoom(holder)
-    if (this.active.size >= (this.options.maxThreads ?? 64)) this.releaseIdle()
-    if (this.active.size >= (this.options.maxThreads ?? 64)) throw new NetError('rate_limited')
+    else {
+      if (holder !== undefined && this.metered(threadId)) this.assertHolderRoom(holder)
+      // Private streams have quotas of their own, so they do not use up what phones may open.
+      if (this.sharedOpen() >= (this.options.maxThreads ?? 64)) this.releaseIdle()
+      if (this.sharedOpen() >= (this.options.maxThreads ?? 64)) throw new NetError('rate_limited')
+    }
     if (this.options.db.database.isTransaction)
       throw new NetError('forbidden', 'Display generations must commit before publication.')
     // Validate the actual source exists before allocating a permanent stream identity.

@@ -541,6 +541,22 @@ export const ROUTED_STAGED_MAX_PER_CALL = 4
 export const isStageId = (value: unknown): value is string =>
   typeof value === 'string' && /^stg_[0-9a-f]{32}$/.test(value)
 
+/**
+ * Reads whose result can be megabytes, and so are built in several copies before they are paged. A
+ * computer may have this many of them under way at once; the next is refused `rate_limited`.
+ */
+export const ROUTED_LARGE_READS: readonly string[] = [
+  'thread.snapshot',
+  'thread.messages',
+  'thread.messageImage',
+  'files.read',
+  'files.readAsset',
+  'git.diff',
+  'review.file',
+  'runs.events'
+]
+export const ROUTED_LARGE_READS_PER_CALLER = 2
+
 /** Newest part of a transcript a snapshot carries, and the most a page of older messages carries. */
 export const ROUTED_SNAPSHOT_MESSAGE_BYTES = 16 * 1024 * 1024
 export const ROUTED_MESSAGES_PAGE_BYTES = 8 * 1024 * 1024
@@ -624,7 +640,7 @@ export const ROUTED_TRANSPORT_METHODS: Readonly<Record<string, RoutedTransportRo
       required: ['kind']
     },
     page: { capability: 'read', version: 1, keys: ['id', 'index'], required: ['id', 'index'] },
-    /** Takes a value uploaded as a request artifact and keeps it for the call that names it in `staged`. */
+    /** Takes a value uploaded as a request artifact and keeps it for the call that names it in `stagedValues`. */
     stage: { capability: 'chat', version: 1, keys: ['input'], required: ['input'] }
   }
 )

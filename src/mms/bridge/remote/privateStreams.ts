@@ -72,6 +72,8 @@ export const PRIVATE_STREAM_QUOTA: Readonly<Record<RoutedStreamKind, number>> = 
   terminal: 4
 })
 export const PRIVATE_THREAD_STREAMS_TOTAL = 32
+/** Private streams of every kind open at once. They are counted apart from the streams phones open. */
+export const PRIVATE_STREAMS_TOTAL = 96
 
 /** Records a private terminal stream keeps for a reader that is catching up, which is far more than a thread stream. */
 export const PRIVATE_TERMINAL_RING_ROWS = 4096

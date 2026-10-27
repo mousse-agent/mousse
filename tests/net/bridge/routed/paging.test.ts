@@ -132,6 +132,25 @@ describe('a reply too large for one RPC reply', () => {
   }, 120_000)
 })
 
+describe('the owner bounds large reads under way', () => {
+  it('lets a computer have two at once and refuses the third, and frees the room when one ends', async () => {
+    const { routes, f } = await routedOwner()
+    const gate = routes as unknown as {
+      enterLargeRead(node: string): void
+      leaveLargeRead(node: string): void
+    }
+    gate.enterLargeRead(f.callerNode)
+    gate.enterLargeRead(f.callerNode)
+    expect(() => gate.enterLargeRead(f.callerNode)).toThrow(
+      expect.objectContaining({ code: 'rate_limited' })
+    )
+    // Another computer is not held back by it.
+    expect(() => gate.enterLargeRead('nod_other')).not.toThrow()
+    gate.leaveLargeRead(f.callerNode)
+    expect(() => gate.enterLargeRead(f.callerNode)).not.toThrow()
+  }, 60_000)
+})
+
 describe('the owner keeps a few paged results for a minute', () => {
   const clock = {
     t: 1_000_000,
@@ -229,6 +248,22 @@ describe('a long thread read from another computer', () => {
     expect(everything.map((m) => m.id)).toEqual(all.map((m) => m.id))
     expect(everything.map((m) => m.content)).toEqual(all.map((m) => m.content))
   }, 180_000)
+
+  it('answers a page whose anchor message is gone as not found, so the reader takes a new snapshot', async () => {
+    const { call, thread, f } = await routedOwner()
+    const t = thread()
+    const session = f.mms.orchestrator.getOrCreateSession(t.id)
+    session.messages = [message(0, 'a'), message(1, 'b'), message(2, 'c')] as never
+    expect(await call('thread.messages', { threadId: t.id, before: 'm-2' })).toMatchObject({
+      ok: true
+    })
+    // A rewind or a compaction removed the message the reader was paging from.
+    session.messages = [message(0, 'a'), message(1, 'b')] as never
+    expect(await call('thread.messages', { threadId: t.id, before: 'm-2' })).toMatchObject({
+      ok: false,
+      error: { code: 'message_not_found' }
+    })
+  }, 120_000)
 
   it('refuses a page it cannot give with the reason, and a limit outside what it allows', async () => {
     const { call, thread, f } = await routedOwner()

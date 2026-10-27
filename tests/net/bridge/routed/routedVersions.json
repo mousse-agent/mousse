@@ -479,6 +479,21 @@
     "digest": "dd946eaa04f957e3",
     "security": "23c8269058d1b9db"
   },
+  "routed.page": {
+    "version": 1,
+    "digest": "1efc227a3067936f",
+    "security": "2455464eaace895f"
+  },
+  "routed.stage": {
+    "version": 1,
+    "digest": "2e60c015cf6b49d7",
+    "security": "72e89bafebed915a"
+  },
+  "routed.stream.open": {
+    "version": 1,
+    "digest": "be8d58f94ee217ef",
+    "security": "2455464eaace895f"
+  },
   "runs.cancelPause": {
     "version": 1,
     "digest": "09a87e17128c1172",

@@ -86,6 +86,26 @@ export function routedVersionProblems(
   return problems
 }
 
+/**
+ * The transport methods (`routed.page`, `routed.stage`, `routed.stream.open`) as rows, so their keys and
+ * capability are on record like any other row's and cannot change without a new version.
+ */
+const transportRows = (): Record<string, RoutedRow> =>
+  Object.fromEntries(
+    Object.entries(ROUTED_TRANSPORT_METHODS).map(([name, row]) => [
+      `routed.${name}`,
+      {
+        capability: row.capability,
+        durable: name === 'stage',
+        version: row.version,
+        target: 'computer',
+        keys: row.keys,
+        required: row.required,
+        via: 'protocol'
+      } satisfies RoutedRow
+    ])
+  )
+
 const snapshotOf = (table: Readonly<Record<string, RoutedRow>>): Snapshot =>
   Object.fromEntries(
     Object.entries(table)
@@ -225,15 +245,36 @@ describe('the routed method table', () => {
   })
 
   it('matches the versions on record, and a changed row needs a new version', () => {
-    const fresh = snapshotOf(ROUTED_METHODS)
+    const everyRow = { ...ROUTED_METHODS, ...transportRows() }
+    const fresh = snapshotOf(everyRow)
     if (process.env.UPDATE_ROUTED_VERSIONS === '1')
       writeFileSync(VERSIONS_FILE, JSON.stringify(fresh, null, 2) + '\n')
     const recorded = JSON.parse(readFileSync(VERSIONS_FILE, 'utf8')) as Snapshot
-    expect(routedVersionProblems(ROUTED_METHODS, recorded)).toEqual([])
+    expect(routedVersionProblems(everyRow, recorded)).toEqual([])
+
+    // The transport methods are on record too: a changed key or capability needs a new version.
+    expect(
+      routedVersionProblems(
+        {
+          ...everyRow,
+          'routed.page': {
+            ...everyRow['routed.page'],
+            keys: [...everyRow['routed.page'].keys, 'size']
+          }
+        },
+        recorded
+      )
+    ).toEqual([expect.stringContaining('routed.page changed its keys without a new version')])
+    expect(
+      routedVersionProblems(
+        { ...everyRow, 'routed.stage': { ...everyRow['routed.stage'], capability: 'read' } },
+        recorded
+      )
+    ).toEqual([expect.stringContaining('routed.stage changed its capability')])
 
     // A row with a new key and the same version fails.
     const changed = {
-      ...ROUTED_METHODS,
+      ...everyRow,
       'queue.list': {
         ...ROUTED_METHODS['queue.list'],
         keys: [...ROUTED_METHODS['queue.list'].keys, 'limit']
@@ -257,12 +298,12 @@ describe('the routed method table', () => {
     ]
     for (const [column, edit] of edits)
       expect(
-        routedVersionProblems({ ...ROUTED_METHODS, 'files.write': { ...row, ...edit } }, recorded),
+        routedVersionProblems({ ...everyRow, 'files.write': { ...row, ...edit } }, recorded),
         column
       ).toEqual([expect.stringContaining('files.write changed its capability')])
     // Raising the version is noticed until the record is updated, and a key that says which version added it is fine.
     const bumped = {
-      ...ROUTED_METHODS,
+      ...everyRow,
       'queue.list': {
         ...ROUTED_METHODS['queue.list'],
         keys: [...ROUTED_METHODS['queue.list'].keys, 'limit'],
@@ -277,12 +318,9 @@ describe('the routed method table', () => {
     expect(routedKeysAt(bumped['queue.list'], 2)).toEqual(['threadId', 'limit'])
     // A new row and a dropped row are both noticed.
     expect(
-      routedVersionProblems(
-        { ...ROUTED_METHODS, 'queue.size': ROUTED_METHODS['queue.list'] },
-        recorded
-      )
+      routedVersionProblems({ ...everyRow, 'queue.size': ROUTED_METHODS['queue.list'] }, recorded)
     ).toEqual([expect.stringContaining('queue.size is not on record')])
-    const { 'queue.list': _dropped, ...rest } = ROUTED_METHODS
+    const { 'queue.list': _dropped, ...rest } = everyRow
     expect(routedVersionProblems(rest, recorded)).toEqual([
       expect.stringContaining('queue.list is on record but no longer a row')
     ])

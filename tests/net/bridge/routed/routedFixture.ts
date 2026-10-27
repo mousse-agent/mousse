@@ -6,7 +6,10 @@ import { join } from 'node:path'
 import { expect } from 'vitest'
 import { OwnerRoutes } from '../../../../src/mms/bridge/routed/OwnerRoutes'
 import { reassemblePagedReply } from '../../../../src/mms/bridge/routed/pages'
-import { PrivateSources } from '../../../../src/mms/bridge/routed/privateSources'
+import {
+  PrivateSources,
+  raiseStreamListenerLimits
+} from '../../../../src/mms/bridge/routed/privateSources'
 import { RoutedStaging } from '../../../../src/mms/bridge/routed/staging'
 import { routedStreamsPort } from '../../../../src/mms/bridge/routed/streamsPort'
 import { MmsThreadSource } from '../../../../src/mms/bridge/remote/MmsThreadSource'
@@ -165,6 +168,8 @@ export async function routedOwner(options: RoutedOwnerOptions = {}) {
   // The display adapter the owner's private streams run on, as the Bridge service builds it.
   let adapter: ThreadStreamAdapter | undefined
   if (options.streams) {
+    // As the Bridge service: every stream listens to the same services, so they are given room for them.
+    raiseStreamListenerLimits(f.mms)
     const sources = new PrivateSources(f.mms, policy)
     const shared = new MmsThreadSource(f.mms)
     const tuning = options.streams === true ? {} : options.streams

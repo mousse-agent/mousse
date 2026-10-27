@@ -17,7 +17,7 @@ import { decodeEnvelope } from './codec'
  * computer of the user may see (see `bridge/remote/privateStreams.ts`).
  */
 export interface PrivateStreamBinding {
-  privateAccess(stream: StreamId): { reader: NodeId } | undefined
+  privateAccess(stream: StreamId): { reader: NodeId; open: boolean } | undefined
 }
 
 /** Same-user Bridge scope. Spaces require their independent meta authorization service. */
@@ -43,8 +43,10 @@ export class NodeStreamAuthority implements StreamAuthority {
         const bound = this.privateStreams?.privateAccess(stream)
         // A private stream is read by the one computer it is bound to, and only while that computer
         // holds "Works on threads": a phone, a read-only device or another computer never reads it.
+        // A stream that was closed is not read at all until its computer opens it again.
         if (bound)
           return (
+            bound.open &&
             peer.node === bound.reader &&
             delegation.caps.includes('read') &&
             delegation.caps.includes('settings')

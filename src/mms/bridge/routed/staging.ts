@@ -27,7 +27,7 @@ export interface RoutedStagingOptions {
   clock: Pick<Clock, 'now'>
   /** Reads the bytes of an upload that belongs to this request (the request-bound artifact). */
   readInput(ref: RpcArtifactRef, context: RpcContext): Uint8Array
-  limits?: { item?: number; caller?: number; total?: number; ttlMs?: number }
+  limits?: { item?: number; caller?: number; total?: number; ttlMs?: number; sweepMs?: number }
 }
 
 interface Row {
@@ -51,6 +51,8 @@ interface Row {
  * is emptied (when the value is used or expires) and the blob store collects it.
  */
 export class RoutedStaging {
+  /** Values a call is using right now. In memory only: a restart ends every call. */
+  private readonly claimed = new Set<string>()
   constructor(private readonly options: RoutedStagingOptions) {
     options.db.database.exec(
       'CREATE TABLE IF NOT EXISTS routed_stage(id TEXT PRIMARY KEY,caller TEXT NOT NULL,stream TEXT NOT NULL,event TEXT NOT NULL,blob TEXT NOT NULL,bytes INTEGER NOT NULL,created_at INTEGER NOT NULL) STRICT'
@@ -79,7 +81,7 @@ export class RoutedStaging {
     // Reading also proves the upload belongs to this request and is what its record says.
     const size = this.options.readInput(ref, context).length
     const refuse = (code: string, message: string): RoutedReply => {
-      this.release([{ stream: ref.stream }])
+      this.emptyStreams([{ stream: ref.stream }])
       return { ok: false, error: { code, message } }
     }
     if (size === 0) return refuse('stage_empty', 'There is nothing to stage.')
@@ -108,12 +110,14 @@ export class RoutedStaging {
   }
 
   /**
-   * The bytes of each staged value `caller` names, by id. Nothing is used up: a call that is refused
-   * leaves its values staged, and `consume` removes them once the call has gone through.
+   * The bytes of each staged value `caller` names, by id, and a claim on each: a value is used by one
+   * call, so a second call that names it while the first is under way is refused (`stage_in_use`).
+   * Nothing is used up here. The call gives the claims back with `release` when it is refused, and
+   * `consume` removes the values once it has gone through.
    */
   resolve(caller: NodeId, ids: readonly string[]): Map<string, Buffer> {
     this.sweep()
-    const found = new Map<string, Buffer>()
+    const rows: Row[] = []
     for (const id of ids) {
       const row = isStageId(id) ? this.get(id) : undefined
       // Another computer's value is reported as missing, not as someone else's.
@@ -123,15 +127,51 @@ export class RoutedStaging {
           'That staged value is no longer held. Send it again.',
           { stage: id }
         )
-      found.set(id, this.read(row))
+      if (this.claimed.has(id))
+        throw new DomainRpcError(
+          'stage_in_use',
+          'Another call is using that staged value. Send it again for this call.',
+          { stage: id }
+        )
+      rows.push(row)
     }
-    return found
+    // Claimed together, before any bytes are read, so concurrent calls never hold the same value in memory.
+    for (const row of rows) this.claimed.add(row.id)
+    try {
+      return new Map(rows.map((row) => [row.id, this.read(row)]))
+    } catch (error) {
+      this.release(ids)
+      throw error
+    }
+  }
+
+  /** Gives back the claims of a call that did not use its values up. */
+  release(ids: readonly string[]): void {
+    for (const id of ids) this.claimed.delete(id)
   }
 
   /** The values a successful call used are done with. */
   consume(ids: readonly string[]): void {
     const rows = ids.map((id) => this.get(id)).filter((row): row is Row => Boolean(row))
+    this.release(ids)
     this.remove(rows)
+  }
+
+  /**
+   * Looks for expired values now and every `sweepMs` while the service runs, so none stays on disk
+   * longer than its hour because nobody staged again. Returns what stops it.
+   */
+  start(): () => void {
+    this.sweep()
+    const timer = setInterval(() => {
+      try {
+        this.sweep()
+      } catch {
+        // The next interval tries again.
+      }
+    }, this.options.limits?.sweepMs ?? 60_000)
+    timer.unref?.()
+    return () => clearInterval(timer)
   }
 
   /** Drops values held longer than the hour. */
@@ -163,6 +203,14 @@ export class RoutedStaging {
           .prepare('SELECT coalesce(sum(bytes),0) AS n FROM routed_stage')
           .get()
     return Number(row?.n ?? 0)
+  }
+
+  /** The computers that have a value staged. */
+  callers(): NodeId[] {
+    return this.options.db.database
+      .prepare('SELECT DISTINCT caller FROM routed_stage')
+      .all()
+      .map((row) => String(row.caller) as NodeId)
   }
 
   count(caller?: NodeId): number {
@@ -201,17 +249,18 @@ export class RoutedStaging {
 
   private remove(rows: readonly Row[]): void {
     if (!rows.length) return
+    for (const row of rows) this.claimed.delete(row.id)
     this.options.db.transaction(() => {
       for (const row of rows) {
         this.options.db.charge(1)
         this.options.db.database.prepare('DELETE FROM routed_stage WHERE id=?').run(row.id)
       }
     })
-    this.release(rows)
+    this.emptyStreams(rows)
   }
 
   /** Empties the artifact streams that carried the uploads, so their blobs are no longer referenced. */
-  private release(rows: ReadonlyArray<{ stream: string }>): void {
+  private emptyStreams(rows: ReadonlyArray<{ stream: string }>): void {
     for (const stream of new Set(rows.map((row) => row.stream))) {
       try {
         const id = stream as Parameters<StreamStore['head']>[0]

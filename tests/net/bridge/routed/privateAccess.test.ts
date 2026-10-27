@@ -44,6 +44,8 @@ type Runtime = Parameters<
 async function owner() {
   let adapter!: ThreadStreamAdapter
   let net!: NetService
+  // Sources attached to the owner's services: a stream that was reopened would attach one.
+  let attached = 0
   const compose = (rt: Runtime): NetDomainComposition => {
     adapter = new ThreadStreamAdapter({
       db: rt.db,
@@ -54,7 +56,12 @@ async function owner() {
       clock: systemClock,
       source: {
         snapshot: (key) => ({ kind: 'fake', key }),
-        onThread: (_key, _listener: (event: ThreadSourceEvent) => void) => () => undefined
+        onThread: (_key, _listener: (event: ThreadSourceEvent) => void) => {
+          attached += 1
+          return () => {
+            attached -= 1
+          }
+        }
       },
       isSubscribed: (stream, holder) => net.streamSubscribed(stream, holder as NodeId | undefined)
     })
@@ -70,7 +77,12 @@ async function owner() {
       ),
       privateStreams: {
         access: (stream) => adapter.privateAccess(stream),
-        close: (filter) => adapter.closePrivate(filter)
+        close: (filter) => adapter.closePrivate(filter),
+        release: (granted) =>
+          adapter
+            .privateReaders()
+            .filter((node) => !granted?.(node))
+            .flatMap((node) => adapter.closePrivate({ reader: node }))
       }
     }
   }
@@ -125,7 +137,17 @@ async function owner() {
     return { seen, stop }
   }
   const open = (spec: PrivateSpec) => adapter.openPrivate(spec)
-  return { net, self, join, invite, phoneInvite, watch, open, adapter: () => adapter }
+  return {
+    net,
+    self,
+    join,
+    invite,
+    phoneInvite,
+    watch,
+    open,
+    adapter: () => adapter,
+    sources: () => attached
+  }
 }
 
 const ready = (watching: { seen: { ready: boolean } }) =>
@@ -172,6 +194,8 @@ describe('who reads a private stream', () => {
 
     // The owner takes the grant back (the authority re-signs the delegation without it).
     await o.net.request('bridge.setCaps', { node: laptop.node, caps: ['read', 'chat', 'write'] })
+    // Its stream is closed on the owner at once, not left running for a computer that may not have it.
+    await vi.waitFor(() => expect(o.adapter().privateHead(laptop.node, 't1')).toBeUndefined())
     const after = o.watch(laptop, mine)
     await refused(after)
     after.stop()
@@ -180,8 +204,25 @@ describe('who reads a private stream', () => {
       node: laptop.node,
       caps: ['read', 'chat', 'write', 'settings']
     })
-    const back = o.watch(laptop, mine)
-    await ready(back)
+    // Having the grant again does not reopen anything: the computer opens its stream again.
+    expect(o.adapter().privateHead(laptop.node, 't1')).toBeUndefined()
+    // The grant changes re-sign the roster, which the connection may re-establish: wait for it, and ask again if
+    // a subscription made while it was being re-established is lost.
+    await vi.waitFor(() =>
+      expect(laptop.net.status().peers).toContainEqual({ node: o.self.node, state: 'open' })
+    )
+    const reopened = o.open({ reader: laptop.node, kind: 'thread', subject: 't1' })
+    let attached = false
+    for (let attempt = 0; attempt < 3 && !attached; attempt += 1) {
+      const again = o.watch(laptop, reopened)
+      try {
+        await vi.waitFor(() => expect(again.seen.ready).toBe(true), { timeout: 8_000 })
+        attached = true
+      } catch {
+        again.stop()
+      }
+    }
+    expect(attached).toBe(true)
   }, 120_000)
 
   it('ends at once, and is refused again, when the owner turns the setting for other computers off', async () => {
@@ -199,12 +240,17 @@ describe('who reads a private stream', () => {
     live.stop()
     // The phone's stream is not a private one and goes on.
     expect(shared.seen.error).toBeUndefined()
-    // While it is off a new subscription is refused too, and when it is on again the stream is there.
+    // While it is off a new subscription is refused too, and asking for the old stream opens nothing.
+    const head = o.net.runtime().streams.head(mine.id)
     const during = o.watch(laptop, mine)
     await refused(during)
     during.stop()
+    expect(o.adapter().privateHead(laptop.node, 't1')).toBeUndefined()
+    expect(o.net.runtime().streams.head(mine.id)).toEqual(head)
+    // When it is on again the computer opens its stream again, as it does for a new one.
     await o.net.request('bridge.workOnThreads', { enabled: true })
-    await ready(o.watch(laptop, mine))
+    expect(o.adapter().privateHead(laptop.node, 't1')).toBeUndefined()
+    await ready(o.watch(laptop, o.open({ reader: laptop.node, kind: 'thread', subject: 't1' })))
   }, 120_000)
 
   it('ends at once for a blocked device, closes its streams, and serves it again when unblocked', async () => {
@@ -227,8 +273,41 @@ describe('who reads a private stream', () => {
     expect(o.adapter().privateHead(other.node, 't1')).toBeDefined()
     expect(otherLive.seen.error).toBeUndefined()
 
+    // A blocked device that keeps asking for its stream reopens nothing and nothing is written for it.
+    const head = o.net.runtime().streams.head(mine.id)
+    for (let n = 0; n < 3; n += 1) {
+      const again = o.watch(laptop, mine)
+      await refused(again)
+      again.stop()
+    }
+    expect(o.adapter().privateHead(laptop.node, 't1')).toBeUndefined()
+    expect(o.net.runtime().streams.head(mine.id)).toEqual(head)
+
     await o.net.request('bridge.policy', { node: laptop.node, blocked: false })
-    await ready(o.watch(laptop, mine))
+    // Unblocked, it opens its stream again; the old one does not come back by itself.
+    expect(o.adapter().privateHead(laptop.node, 't1')).toBeUndefined()
+    await ready(o.watch(laptop, o.open({ reader: laptop.node, kind: 'thread', subject: 't1' })))
+  }, 120_000)
+
+  it('does not record a terminal’s output for a device whose terminal switch is off, however it asks', async () => {
+    const o = await owner()
+    const laptop = await o.join(await o.invite(), 'laptop')
+    await o.net.request('bridge.policy', { node: laptop.node, terminal: true })
+    const terminal = o.open({ reader: laptop.node, kind: 'terminal', subject: 't1:pty-1' })
+    const on = o.watch(laptop, terminal)
+    await ready(on)
+    await o.net.request('bridge.policy', { node: laptop.node, terminal: false })
+    await refused(on)
+    on.stop()
+    const head = o.net.runtime().streams.head(terminal.id)
+    for (let n = 0; n < 3; n += 1) {
+      const again = o.watch(laptop, terminal)
+      await refused(again)
+      again.stop()
+    }
+    // Nothing reopened it: no source is attached, and nothing was written.
+    expect(o.sources()).toBe(0)
+    expect(o.net.runtime().streams.head(terminal.id)).toEqual(head)
   }, 120_000)
 
   it('serves a terminal stream only while the device’s terminal switch is on', async () => {

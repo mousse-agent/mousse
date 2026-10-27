@@ -80,6 +80,12 @@ export class ReplyPages {
     for (const [id, entry] of [...this.held]) if (entry.caller === caller) this.drop(id)
   }
 
+  /** The computers that have a result waiting. */
+  callers(): NodeId[] {
+    this.expire()
+    return [...new Set([...this.held.values()].map((entry) => entry.caller))]
+  }
+
   heldCount(caller?: NodeId): number {
     this.expire()
     return [...this.held.values()].filter((entry) => !caller || entry.caller === caller).length

@@ -8,7 +8,8 @@ import {
   type Roster,
   type PresenceMessage,
   type BotId,
-  type NodeId
+  type NodeId,
+  type StreamId
 } from '../../shared/net'
 import { parseProtocolJson, canonicalJson } from '../net/sync/codec'
 import { SpaceProfileService } from '../spaces/SpaceProfileService'
@@ -26,7 +27,7 @@ import { phoneSpeechMethods } from './remote/speech'
 import type { ThreadSourcePort } from './remote/ThreadStreamAdapter'
 import { DispatchService, mmsDispatchRuntime, type DispatchRuntime } from './dispatch'
 import { OwnerRoutes } from './routed/OwnerRoutes'
-import { PrivateSources } from './routed/privateSources'
+import { PrivateSources, raiseStreamListenerLimits } from './routed/privateSources'
 import { RoutedStaging } from './routed/staging'
 import { routedStreamsPort } from './routed/streamsPort'
 import { isPrivateKey } from './remote/privateStreams'
@@ -42,6 +43,8 @@ export class BridgeProfileService {
   readonly hub: BridgeHub
   readonly dispatch: DispatchService
   private readonly remote: RemoteApi
+  private readonly routes: OwnerRoutes
+  private readonly staging: RoutedStaging
   private readonly clock: Clock
   private readonly tasks = new Set<Promise<unknown>>()
   private readonly disposers = new Set<() => void | Promise<void>>()
@@ -70,6 +73,7 @@ export class BridgeProfileService {
     }
   ) {
     const { services, runtime: rt, net } = options
+    raiseStreamListenerLimits(services)
     this.clock = options.clock ?? systemClock
     this.spaces = new SpaceProfileService({
       runtime: rt,
@@ -252,6 +256,8 @@ export class BridgeProfileService {
       }
     })
     routes.register()
+    this.routes = routes
+    this.staging = staging
     this.disposers.add(() => routes.close())
     for (const method of remoteListMethods({
       openLists: () => {
@@ -366,7 +372,23 @@ export class BridgeProfileService {
       store: this.threads.store,
       privateStreams: {
         access: (stream) => this.threads.privateAccess(stream),
-        close: (filter) => this.threads.closePrivate(filter)
+        close: (filter) => this.threads.closePrivate(filter),
+        release: (granted) => {
+          // Everything held for a computer: its streams, the results it waits for and the values it staged.
+          const nodes = new Set([
+            ...this.threads.privateReaders(),
+            ...this.routes.pages.callers(),
+            ...this.staging.callers()
+          ])
+          const closed: StreamId[] = []
+          for (const node of nodes) {
+            if (granted?.(node)) continue
+            closed.push(...this.threads.closePrivate({ reader: node }))
+            this.routes.pages.dropCaller(node)
+            this.staging.dropCaller(node)
+          }
+          return closed
+        }
       },
       session: {
         ...session,

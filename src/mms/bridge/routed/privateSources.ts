@@ -10,6 +10,25 @@ import type { ThreadSourceEvent } from '../remote/ThreadStreamAdapter'
 /** Output a terminal record carries at most, so one record stays well inside a record's bound. */
 const PTY_RECORD_CHARS = 16 * 1024
 
+/**
+ * Every open display stream listens to the same few services, one listener each: up to 64 streams for
+ * phones and hubs and up to 96 private ones. The default of 10 would warn long before that, so the
+ * services that streams listen to are given room for them all.
+ */
+export function raiseStreamListenerLimits(services: MmsProfileServices, count = 256): void {
+  const emitters: Array<{ getMaxListeners(): number; setMaxListeners(count: number): unknown }> = [
+    services.orchestrator,
+    services.questions,
+    services.threads,
+    services.threadRuntimes,
+    services.pullRequestWatch,
+    services.ptyManager
+  ]
+  for (const emitter of emitters)
+    if (emitter.getMaxListeners() < count) emitter.setMaxListeners(count)
+  services.events.setMaxListeners(count)
+}
+
 /** Cuts output into pieces of at most `PTY_RECORD_CHARS`, never between the two halves of a character. */
 function split(text: string): string[] {
   const pieces: string[] = []

@@ -157,6 +157,91 @@ describe('routed.stage', () => {
     expect(f.targetBlobs.isReferenced(ref.blob, ref.stream)).toBe(false)
   }, 120_000)
 
+  it('lets one call use a staged value at a time, and gives it back to a call that did not use it', async () => {
+    const { f, ok, call, thread, stage, staging } = await routedOwner({ staging: {} })
+    const path = repo()
+    const project = f.mms.projects.openProject(path)
+    const t = thread('Saved', project.id, path)
+    const id = stageId(await stage('same text, sent once'))
+
+    // Two calls name the same value at once: one uses it, the other is told it is in use.
+    const [first, second] = await Promise.all([
+      call('files.write', { threadId: t.id, path: 'one.txt', stagedValues: { content: id } }),
+      call('files.write', { threadId: t.id, path: 'two.txt', stagedValues: { content: id } })
+    ])
+    const replies = [first, second]
+    expect(replies.filter((reply) => reply.ok)).toHaveLength(1)
+    const refused = replies.find((reply) => !reply.ok)!
+    expect(refused).toMatchObject({
+      ok: false,
+      error: { code: expect.stringMatching(/^(stage_in_use|stage_not_found)$/) }
+    })
+    expect(staging!.count()).toBe(0)
+
+    // A call that is refused before it uses the value gives it back, and the next call can use it.
+    const again = stageId(await stage('second value'))
+    expect(
+      await call('files.write', {
+        threadId: 'nothing',
+        path: 'x.txt',
+        stagedValues: { content: again }
+      })
+    ).toMatchObject({ ok: false, error: { code: 'thread_not_found' } })
+    expect(staging!.count()).toBe(1)
+    expect(
+      await ok('files.write', {
+        threadId: t.id,
+        path: 'three.txt',
+        stagedValues: { content: again }
+      })
+    ).toMatchObject({ path: 'three.txt' })
+    expect(staging!.count()).toBe(0)
+  }, 120_000)
+
+  it('refuses a claim on a value that is in use, without reading it again', async () => {
+    const { f, stage, staging } = await routedOwner({ staging: {} })
+    const id = stageId(await stage('big'))
+    const held = staging!.resolve(f.callerNode, [id])
+    expect(held.get(id)!.toString()).toBe('"big"')
+    expect(() => staging!.resolve(f.callerNode, [id])).toThrow(
+      expect.objectContaining({ code: 'stage_in_use' })
+    )
+    staging!.release([id])
+    expect(staging!.resolve(f.callerNode, [id]).size).toBe(1)
+  }, 120_000)
+
+  it('looks for expired values when it starts and on a timer, not only when someone stages again', async () => {
+    const clock = testClock()
+    const { f, stage, staging } = await routedOwner({ clock, staging: { sweepMs: 20 } })
+    stageId(await stage('one'))
+    stageId(await stage('two'))
+    expect(staging!.count()).toBe(2)
+    // At start: values left from before are dropped once they are older than their hour.
+    clock.advance(ROUTED_STAGE_TTL_MS + 1000)
+    const stop = staging!.start()
+    expect(staging!.count()).toBe(0)
+    // On a timer: a value that expires later goes without any call.
+    stageId(await stage('three'))
+    expect(staging!.count()).toBe(1)
+    clock.advance(ROUTED_STAGE_TTL_MS + 1000)
+    await vi.waitFor(() => expect(staging!.count()).toBe(0), { timeout: 5000 })
+    stop()
+    void f
+  }, 120_000)
+
+  it('keeps a staged value over 512 KiB for files.write out, as the save limit does for an inline one', async () => {
+    const { f, call, thread, stage, staging } = await routedOwner({ staging: {} })
+    const path = repo()
+    const project = f.mms.projects.openProject(path)
+    const t = thread('Saved', project.id, path)
+    // The save limit is the handler's (raised for routed saves by a later change); staging does not get around it.
+    const id = stageId(await stage('y'.repeat(600 * KIB)))
+    expect(
+      await call('files.write', { threadId: t.id, path: 'big.txt', stagedValues: { content: id } })
+    ).toMatchObject({ ok: false, error: { code: 'invalid_params' } })
+    expect(staging!.count()).toBe(1)
+  }, 120_000)
+
   it('drops what a device has staged or is waiting to fetch when it is blocked here', async () => {
     const { f, stage, staging, thread, raw, routes, policy } = await routedOwner({ staging: {} })
     stageId(await stage('staged before the block'))

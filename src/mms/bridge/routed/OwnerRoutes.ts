@@ -4,6 +4,8 @@ import { NetError, isBlobId, isId, type NodeId, type RpcArtifactRef } from '../.
 import type { NodeCapability } from '../../../shared/net'
 import {
   ROUTED_FORBIDDEN_KEYS,
+  ROUTED_LARGE_READS,
+  ROUTED_LARGE_READS_PER_CALLER,
   ROUTED_LEDGER_RESULT_MAX_BYTES,
   ROUTED_LOCAL_LIST_FIELDS,
   ROUTED_QUEUE_LIST_FIELD,
@@ -236,18 +238,22 @@ export class OwnerRoutes {
     this.registerTransport()
     // A device that is blocked has nothing held for it: the results waiting to be fetched and the
     // values it staged go with it.
-    this.stopWatching = this.options.policy.onChange((event) => {
-      if (!event.after.blocked || event.before.blocked) return
-      this.pages.dropCaller(event.node)
-      this.options.staging?.dropCaller(event.node)
-    })
+    const stops = [
+      this.options.policy.onChange((event) => {
+        if (!event.after.blocked || event.before.blocked) return
+        this.pages.dropCaller(event.node)
+        this.options.staging?.dropCaller(event.node)
+      })
+    ]
+    // Values staged before a restart that nobody came back for are looked for now, and then every minute.
+    if (this.options.staging) stops.push(this.options.staging.start())
+    this.stops = stops
   }
 
   close(): void {
-    this.stopWatching?.()
-    this.stopWatching = undefined
+    for (const stop of this.stops.splice(0)) stop()
   }
-  private stopWatching?: () => void
+  private stops: Array<() => void> = []
 
   /**
    * The methods that carry the API itself. They hold to the same checks as a row (the grant, the
@@ -410,6 +416,14 @@ export class OwnerRoutes {
     let params = sent
     // The staged values this call uses; they are used up once the call has gone through.
     let stagedIds: string[] = []
+    let consumed = false
+    let entered = false
+    // Where the stream of this computer is before the snapshot is read, so no record is marked as already
+    // applied that the snapshot does not hold.
+    const head =
+      method === 'thread.snapshot' && typeof params.threadId === 'string'
+        ? this.options.streams?.head(node, params.threadId)
+        : undefined
     const named = params[row.threadIds?.[0] ?? 'threadId']
     const thread = typeof named === 'string' ? named : undefined
     let project = typeof params.projectId === 'string' ? params.projectId : undefined
@@ -421,13 +435,18 @@ export class OwnerRoutes {
       // Nothing has run yet: a call that was cancelled before it started is a refusal, not an unknown outcome.
       if (context.signal.aborted)
         throw new DomainRpcError('cancelled', 'The request was cancelled before it started.')
+      // Reads whose result can be megabytes build several copies of it; a computer may have two under way.
+      if (ROUTED_LARGE_READS.includes(method)) {
+        this.enterLargeRead(node)
+        entered = true
+      }
       if (params[ROUTED_STAGED_KEY] !== undefined) {
         const unstaged = this.unstage(params, node)
         params = unstaged.params
         stagedIds = unstaged.ids
       }
       await this.assertOwned(method, row, params)
-      const result = await this.dispatch(method, row, params, context)
+      const result = await this.dispatch(method, row, params, context, head)
       if (method === 'projects.open')
         project = (result as { project?: { id?: string } }).project?.id ?? project
       const reply: RoutedReply = {
@@ -435,7 +454,10 @@ export class OwnerRoutes {
         result: row.durable ? withoutLocalLists(method, result) : result
       }
       const bytes = byteLength(reply)
-      if (stagedIds.length) staging?.consume(stagedIds)
+      if (stagedIds.length) {
+        staging?.consume(stagedIds)
+        consumed = true
+      }
       if (row.durable)
         audit.record({ node, method, thread, project, outcome: 'ok', kind: 'change' })
       else audit.countRead(node, bytes)
@@ -464,12 +486,30 @@ export class OwnerRoutes {
         audit.record({ node, method, thread, project, outcome: refusal.code, kind: 'refused' })
       else audit.countRead(node, 0)
       return { ok: false, error: refusal }
+    } finally {
+      // A call that did not use its staged values up gives them back, so they can be sent in a call that does.
+      if (stagedIds.length && !consumed) staging?.release(stagedIds)
+      if (entered) this.leaveLargeRead(node)
     }
   }
 
+  private readonly largeReads = new Map<NodeId, number>()
+  private enterLargeRead(node: NodeId): void {
+    const running = this.largeReads.get(node) ?? 0
+    if (running >= ROUTED_LARGE_READS_PER_CALLER) throw new NetError('rate_limited')
+    this.largeReads.set(node, running + 1)
+  }
+  private leaveLargeRead(node: NodeId): void {
+    const running = (this.largeReads.get(node) ?? 1) - 1
+    if (running > 0) this.largeReads.set(node, running)
+    else this.largeReads.delete(node)
+  }
+
   /**
-   * Puts the staged values back into the call. A staged value is the JSON text of the value it stands
-   * for, so what the handler gets is what an inline call would have carried, and is checked the same way.
+   * Puts the staged values back into the call, after the row's own checks have passed the call as it was
+   * sent. A staged value is the JSON text of the value it stands for, so what the handler gets is what an
+   * inline call would have carried, and the handler checks it the same way. The row's checks do not look
+   * at a value's content, so a check of that kind added to a row later has to look at staged values too.
    */
   private unstage(
     params: Record<string, unknown>,
@@ -487,6 +527,7 @@ export class OwnerRoutes {
       try {
         filled[key] = JSON.parse(bytes.get(id)!.toString('utf8'))
       } catch {
+        staging.release(ids)
         throw new DomainRpcError('stage_invalid', 'A staged value is not what it was said to be.', {
           stage: id
         })
@@ -504,9 +545,8 @@ export class OwnerRoutes {
    */
   private shape(
     method: string,
-    node: NodeId,
-    params: Record<string, unknown>,
-    result: unknown
+    result: unknown,
+    head: { stream: string; epoch: number; seq: number } | undefined
   ): unknown {
     if (method !== 'thread.snapshot' || !isPlainObject(result)) return result
     type WithImages = { images?: unknown }
@@ -519,7 +559,6 @@ export class OwnerRoutes {
       withImageBudget((snapshot.messages ?? []) as Array<{ id: string; images?: unknown }>),
       ROUTED_SNAPSHOT_MESSAGE_BYTES
     )
-    const head = this.options.streams?.head(node, params.threadId as string)
     return {
       ...snapshot,
       messages: kept.messages,
@@ -612,7 +651,8 @@ export class OwnerRoutes {
     method: string,
     row: RoutedRow,
     params: Record<string, unknown>,
-    context: RpcContext
+    context: RpcContext,
+    head?: { stream: string; epoch: number; seq: number }
   ): Promise<unknown> {
     const { services } = this.options
     const forwarded: Record<string, unknown> = { ...params }
@@ -643,9 +683,8 @@ export class OwnerRoutes {
     return mmsJson(
       this.shape(
         method,
-        context.caller.node,
-        forwarded,
-        await dispatchMethod(this.handlerContext(context), method, forwarded)
+        await dispatchMethod(this.handlerContext(context), method, forwarded),
+        head
       )
     )
   }
