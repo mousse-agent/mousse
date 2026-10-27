@@ -67,7 +67,10 @@ import {
   type PeerConnectionFactory
 } from './transports/phoneWebRtc'
 import { lookup } from 'node:dns/promises'
-import { WEBRTC_SDP_MAX_BYTES } from '../../shared/net/limits'
+import { NET_PROTO_MINOR, WEBRTC_SDP_MAX_BYTES } from '../../shared/net/limits'
+import { isOlderVersion } from '../../shared/net/version'
+import { mousseVersion } from '../appVersion'
+import { PeerPresence, parsePeerInfo, type PeerLink } from './presence'
 import type { TransportConfiguration } from './transports/registry'
 import type { RelayIdentity } from './relay/protocol'
 import { inviteRequiresProtection } from './enrollment/service'
@@ -169,6 +172,10 @@ export class NetService {
   private renewal?: { cancel(): void }
   private rosterListener?: () => void
   private domain?: NetDomainComposition
+  private presenceStore?: PeerPresence
+  private presenceTimer?: { cancel(): void }
+  /** How each session was carried, for the device list; only own-device sessions are recorded. */
+  private readonly sessionLinks = new WeakMap<object, PeerLink>()
   private domainClosing?: Promise<void>
   private domainClosed = false
   private shutdownInFlight?: Promise<void>
@@ -349,6 +356,31 @@ export class NetService {
             node: identity.self()?.node
           }
         }
+      })
+      // What this device tells its peers about itself; read-only, never journaled. A device
+      // from before this existed answers `forbidden`, which the device list reads as "older".
+      rpc.register({
+        method: 'net.info',
+        capability: 'read',
+        mutating: false,
+        ephemeral: true,
+        validate: (params) => {
+          if (
+            !params ||
+            typeof params !== 'object' ||
+            Array.isArray(params) ||
+            Object.keys(params).length
+          )
+            throw new NetError('bad_request')
+          return params
+        },
+        handle: async () => ({
+          v: 1,
+          version: mousseVersion(),
+          platform: process.platform,
+          arch: process.arch,
+          protoMinor: NET_PROTO_MINOR
+        })
       })
       this.state = {
         db,
@@ -1098,6 +1130,7 @@ export class NetService {
       }
     })
     this.sessions.add(session)
+    if (inbound) this.sessionLinks.set(session, { direction: 'in', transport: inbound.carrier })
     session.onClosed((error) => {
       this.sessions.delete(session)
       // Closing a carrier does not prove its async source/provider jobs settled.
@@ -1115,6 +1148,7 @@ export class NetService {
         () => {
           this.lastError = undefined
           this.domain?.onSessionOpened?.(session)
+          this.observePeer(session)
           this.emit()
         },
         () => {}
@@ -1320,6 +1354,11 @@ export class NetService {
             signal
           )
           const session = this.makeSession(result.channel)
+          this.sessionLinks.set(session, {
+            direction: 'out',
+            transport: result.route.transport,
+            address: result.route.address
+          })
           const abort = () => session.close()
           signal.addEventListener('abort', abort, { once: true })
           session.onClosed(() => signal.removeEventListener('abort', abort))
@@ -1813,6 +1852,8 @@ export class NetService {
     this.webrtc?.stop()
     this.transport?.admission.close()
     this.renewal?.cancel()
+    this.presenceTimer?.cancel()
+    this.presenceTimer = undefined
     this.domain?.beginDisable?.()
     for (const gateway of this.gateways) gateway.close()
     for (const supervisor of this.supervisors.values()) supervisor.close()
@@ -1878,9 +1919,123 @@ export class NetService {
         revoked: roster.revoked.some(
           (row) => row.subject === node.subject && row.throughKeyEpoch >= node.keyEpoch
         ),
-        state: this.status().peers.find((peer) => peer.node === node.subject)?.state ?? 'closed'
+        state: this.status().peers.find((peer) => peer.node === node.subject)?.state ?? 'closed',
+        ...this.presenceView(node.subject)
       }))
     }
+  }
+  private presences(): PeerPresence {
+    const db = this.runtime().db
+    if (this.presenceStore?.db !== db) this.presenceStore = new PeerPresence(db, this.clock)
+    return this.presenceStore
+  }
+  /**
+   * What this computer knows about a device beyond its roster entry: version, how it is connected
+   * now, every route tried and when it was last seen. Every field is optional because a device
+   * from before `net.info` reports nothing (its row says so through `olderThanThis`).
+   */
+  private presenceView(node: NodeId): Record<string, unknown> {
+    const rt = this.requireEnrolled(),
+      current = mousseVersion()
+    if (node === rt.identity.self()?.node)
+      return { version: current, platform: process.platform, olderThanThis: false, routes: [] }
+    let row: ReturnType<PeerPresence['get']>
+    try {
+      row = this.presences().get(node)
+    } catch {
+      // Presence is a convenience; the device list still works without it.
+    }
+    let open: NetSyncSession | undefined
+    for (const session of this.sessions) {
+      try {
+        if (session.state() === 'open' && session.peer.node === node) open = session
+      } catch {
+        // Not authenticated yet.
+      }
+    }
+    const link = open ? (this.sessionLinks.get(open) ?? row?.link) : undefined,
+      error = open ? undefined : this.supervisors.get(node)?.lastError(),
+      lastSeenAt = open ? this.clock.now() : row?.lastSeenAt
+    return {
+      ...(row?.version ? { version: row.version } : {}),
+      ...(row?.platform ? { platform: row.platform } : {}),
+      ...(link
+        ? {
+            route: {
+              direction: link.direction,
+              ...(link.transport ? { transport: link.transport } : {}),
+              ...(link.address ? { address: link.address } : {})
+            }
+          }
+        : {}),
+      routes: this.routes?.health(node) ?? [],
+      ...(error ? { error } : {}),
+      ...(lastSeenAt !== undefined ? { lastSeenAt } : {}),
+      // A development build has no release to compare with, so it never calls a peer old.
+      olderThanThis:
+        current !== '0.0.0' && !!row && (row.legacy || isOlderVersion(row.version, current))
+    }
+  }
+  /** Notes an open session with one of the user's own devices and asks it for its version. */
+  private observePeer(session: NetSyncSession): void {
+    const link = this.sessionLinks.get(session)
+    if (!link) return
+    try {
+      const rt = this.runtime(),
+        peer = session.peer
+      if (peer.user !== rt.identity.self()?.user) return
+      this.presences().opened(peer.node, link)
+      this.startPresenceTimer()
+      session.onClosed(() => {
+        try {
+          this.presences().seen(peer.node)
+        } catch {
+          // The service is shutting down.
+        }
+      })
+      // A phone is a browser client with no daemon behind it.
+      if (link.transport === PHONE_WEBRTC_TRANSPORT) return
+      void this.track(this.readPeerInfo(session, peer.node))
+    } catch {
+      // Presence never affects a session.
+    }
+  }
+  private async readPeerInfo(session: NetSyncSession, node: NodeId): Promise<void> {
+    try {
+      const info = parsePeerInfo(
+        await session.rpc('net.info', {}, { id: newId('rpc'), deadlineMs: 10_000 })
+      )
+      if (info) this.presences().info(node, info)
+    } catch (error) {
+      // Unknown method: an older daemon. Any other failure (a closed session, a timeout) leaves
+      // what was known before.
+      if (error instanceof NetError && error.code === 'forbidden') {
+        try {
+          this.presences().legacy(node)
+        } catch {
+          // The service is shutting down.
+        }
+      }
+    }
+  }
+  /** One timer for every session: keeps "last seen" within a minute while a device is connected. */
+  private startPresenceTimer(): void {
+    if (this.presenceTimer || this.stopped || this.disabled) return
+    this.presenceTimer = this.clock.setTimeout(() => {
+      this.presenceTimer = undefined
+      if (this.stopped || this.disabled) return
+      let connected = false
+      for (const session of this.sessions) {
+        if (session.state() !== 'open' || !this.sessionLinks.has(session)) continue
+        connected = true
+        try {
+          this.presences().seen(session.peer.node)
+        } catch {
+          // Try again on the next tick.
+        }
+      }
+      if (connected) this.startPresenceTimer()
+    }, 60_000)
   }
   private doctor(): NetDoctor {
     const status = this.status()
@@ -1964,6 +2119,7 @@ export class NetService {
     this.webrtc?.stop()
     this.transport?.admission.close()
     this.renewal?.cancel()
+    this.presenceTimer?.cancel()
     this.rosterListener?.()
     for (const gateway of this.gateways) gateway.close()
     for (const supervisor of this.supervisors.values()) supervisor.close()
