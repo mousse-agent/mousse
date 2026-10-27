@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { BrowserBackendRouter, type BrowserBackendPort } from '../src/mms/browser/BrowserBackendRouter'
-import { BrowserSessionManager } from '../src/mms/browser/automation/BrowserSessionManager'
+import { BrowserSessionManager, readSessionStates } from '../src/mms/browser/automation/BrowserSessionManager'
 import { BrowserToolDispatcher } from '../src/mms/browser/automation/BrowserToolDispatcher'
 import { BROWSER_AUTOMATION_TOOLS, type BrowserToolContext } from '../src/shared/browser/automation'
 import type { BrowserSessionRecord, BrowserWorkerRequest, BrowserWorkerResponse } from '../src/shared/browser/types'
@@ -161,6 +161,67 @@ describe('host-selected browser backend routing', () => {
     }]))
     const restored = new BrowserSessionManager({ profileId, profileRoot: root, broker: router })
     expect(restored.list(context())).toMatchObject([{ id: 'restored', backend: 'electron-attached', generation: 4, lifecycle: 'disconnected' }])
+  })
+
+  it('reports which sessions are open and their thread, in memory and from the persisted inventory', async () => {
+    const managed = backend('managed-chromium'), router = new BrowserBackendRouter({ profileId, managed })
+    const root = await mkdtemp(join(tmpdir(), 'mousse-browser-open-'))
+    roots.push(root)
+    expect([...readSessionStates(root, profileId)]).toEqual([])
+    const sessions = new BrowserSessionManager({ profileId, profileRoot: root, broker: router })
+    const owner = context('cli')
+    const first = await sessions.open(owner, {}), second = await sessions.open(owner, {})
+    const [a, b] = [first.session!.id, second.session!.id]
+    expect(sessions.sessionStates()).toEqual(new Map([[a, { open: true, threadId: 'thread_1' }], [b, { open: true, threadId: 'thread_1' }]]))
+    await sessions.close(owner, a)
+    expect(sessions.sessionStates()).toEqual(new Map([[a, { open: false, threadId: 'thread_1' }], [b, { open: true, threadId: 'thread_1' }]]))
+    expect(readSessionStates(root, profileId)).toEqual(sessions.sessionStates())
+    // A restart leaves the survivor disconnected, which is still open.
+    const restarted = new BrowserSessionManager({ profileId, profileRoot: root, broker: router })
+    expect(restarted.sessionStates().get(b)).toEqual({ open: true, threadId: 'thread_1' })
+    await writeFile(join(root, 'browser', 'automation-sessions.json'), '{"unexpected":true}')
+    expect(() => readSessionStates(root, profileId)).toThrow('inventory is corrupt')
+  })
+
+  it('counts a session disconnected since before the cutoff as closed, and a recently disconnected one as open', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mousse-browser-stale-'))
+    roots.push(root)
+    await mkdir(join(root, 'browser'), { recursive: true })
+    const record = (id: string, updatedAt: string, lifecycle: string) => ({
+      record: { id, profileId, threadId: 'thread_1', runId: 'run_1', backend: 'managed-chromium', persistent: false, browserVersion: 'fixture', generation: 1, lifecycle, createdAt: '2026-01-01T00:00:00Z', updatedAt },
+      owner: { threadId: 'thread_1', runId: 'run_1' }
+    })
+    const fresh = new Date().toISOString()
+    await writeFile(join(root, 'browser', 'automation-sessions.json'), JSON.stringify([record('crashed', '2026-01-02T00:00:00Z', 'agent-controlled'), record('recent', fresh, 'agent-controlled'), record('shut', '2026-01-02T00:00:00Z', 'closed')]))
+    const cutoff = Date.now() - 30 * 86_400_000
+    const expected = new Map([['crashed', { open: false, threadId: 'thread_1' }], ['recent', { open: true, threadId: 'thread_1' }], ['shut', { open: false, threadId: 'thread_1' }]])
+    expect(readSessionStates(root, profileId, cutoff)).toEqual(expected)
+    const sessions = new BrowserSessionManager({ profileId, profileRoot: root, broker: new BrowserBackendRouter({ profileId, managed: backend('managed-chromium') }) })
+    expect(sessions.sessionStates(cutoff)).toEqual(expected)
+    expect(sessions.sessionStates().get('crashed')).toEqual({ open: true, threadId: 'thread_1' }) // Without a cutoff it is still not closed.
+  })
+
+  it('treats a worker that no longer knows the session as having closed it, and any other failure as a disconnect', async () => {
+    const managed = backend('managed-chromium'), router = new BrowserBackendRouter({ profileId, managed })
+    const root = await mkdtemp(join(tmpdir(), 'mousse-browser-unknown-'))
+    roots.push(root)
+    const sessions = new BrowserSessionManager({ profileId, profileRoot: root, broker: router })
+    const owner = context('cli')
+    const [a, b] = [(await sessions.open(owner, {})).session!.id, (await sessions.open(owner, {})).session!.id]
+    const original = managed.call.getMockImplementation()!
+    const failClose = (code: string, message: string) => managed.call.mockImplementation(async (req, options) => req.method === 'session.close'
+      ? { version: 1, id: req.id, ok: false, error: { code, message } } as BrowserWorkerResponse : original(req, options))
+    failClose('session_closed', 'Unknown browser session')
+    await sessions.close(owner, a)
+    expect(sessions.sessionStates().get(a)).toMatchObject({ open: false })
+    await sessions.closeAll()
+    expect(sessions.sessionStates().get(b)).toMatchObject({ open: false })
+    // A different failure leaves the session disconnected, which is still open.
+    const c = (await sessions.open(owner, {})).session!.id
+    failClose('worker_disconnected', 'Browser worker request failed')
+    await sessions.closeAll()
+    expect(sessions.sessionStates().get(c)).toMatchObject({ open: true })
+    expect(sessions.list(owner).find((entry) => entry.id === c)?.lifecycle).toBe('disconnected')
   })
 
   it('closes a backend session that succeeds after router shutdown began', async () => {

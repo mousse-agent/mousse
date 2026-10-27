@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { spawn, type ChildProcess } from 'node:child_process'
+import { execSync, spawn, type ChildProcess } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join, relative, sep } from 'node:path'
+import { ScopedArtifactWriter } from '../src/browser-worker/artifacts'
 import { REPORT_ENTRY_LIMIT, STORAGE_POLICY_DEFAULTS, summarizeCleanupReport, type StorageCleanupItem, type StorageCleanupReport, type StoragePolicy } from '../src/shared/storage'
 import { measureTree } from '../src/mms/lifecycle/diskMeasure'
 import { GitHubCodeHost } from '../src/mms/git/GitHubCodeHost'
@@ -983,6 +984,510 @@ describe('restore leaves a folder alone that is not a failed retirement', () => 
     await expect(new ThreadWorkspaceManager(f.location).restore(f.repo)).rejects.toThrow('Workspace recovery is blocked')
     expect(readFileSync(join(f.worktree, 'mine.txt'), 'utf8')).toBe('someone else')
   }, 60_000)
+})
+
+// ---- Browser captures ----
+
+const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
+
+type SessionStates = Map<string, { open: boolean; threadId?: string }>
+interface CaptureOptions {
+  /** Ids of sessions that are still open. */
+  open?: string[]
+  /** Full control over what the browser reports about its sessions. */
+  sessions?: (staleBefore: number) => SessionStates
+  measure?: typeof measureTree
+  removeFile?: (path: string) => void
+  configured?: boolean
+  /** The profile home is reached through a link (a moved home or a mapped drive): `<root>/linked/profile`, where `linked` is a junction to `<root>/real`. */
+  linkedHome?: boolean
+  /** A thread the cleanup service can name. */
+  thread?: { id: string; name: string; projectId: string; createdAt: string }
+}
+
+/** A profile with no worktrees: just the lifecycle store, the policy, the clock and the capture folder. */
+function captureFixture(options: CaptureOptions = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'mousse-captures-')); roots.push(root)
+  let base = root
+  if (options.linkedHome) {
+    mkdirSync(join(root, 'real')); symlinkSync(join(root, 'real'), join(root, 'linked'), junctionType)
+    base = join(root, 'linked')
+  }
+  const home = join(base, 'profile'); mkdirSync(home, { recursive: true })
+  const store = new ResourceLifecycleStore({ profileId: 'test', profileHome: home })
+  registerThreadLifecycleGate(home, store)
+  const coordinator = new ResourceLifecycleCoordinator(store, { drain: async () => {}, settleMutationOwnership: async () => {}, projectIndex: () => {}, projectPurged: () => {} })
+  const clockState = { offset: 0 }
+  const now = () => Date.now() + clockState.offset
+  const clock = new StorageSweepClock(store.root, now); clock.start()
+  const policy = new StoragePolicyStore(store, clock)
+  const workerRoot = join(home, 'browser', 'worker-artifacts'), profileDir = join(workerRoot, 'test')
+  const sessions = options.sessions ?? (() => new Map(((options.open ?? []).map((id) => [id, { open: true }] as const))) as SessionStates)
+  const service = new StorageCleanupService({
+    store, threads: { getThread: (id) => options.thread && id === options.thread.id ? options.thread as never : undefined }, purge: coordinator.cleanup, policy, clock, idle: () => undefined, installationHome: home, now,
+    measure: options.measure, removeFile: options.removeFile,
+    ...(options.configured === false ? {} : { browserCaptures: { workerArtifactRoot: workerRoot, sessions } })
+  })
+  return { root, home, store, clock, clockState, policy, service, workerRoot, profileDir, now }
+}
+type CaptureFixture = ReturnType<typeof captureFixture>
+
+/** A file in a session folder, last written `ageDays` ago. */
+function capture(f: CaptureFixture, session: string, name: string, ageDays: number, content = 'png bytes'): string {
+  const dir = join(f.profileDir, session); mkdirSync(dir, { recursive: true })
+  const path = join(dir, name); writeFileSync(path, content)
+  const time = new Date(Date.now() - ageDays * DAY); utimesSync(path, time, time)
+  return path
+}
+const setCaptureDays = (f: CaptureFixture, captureDays: number | null) => f.policy.configure({ schemaVersion: 1, worktrees: { removeWithDeletedThreads: false, inactiveDays: null, removeMerged: false }, browser: { captureDays } }, true)
+const captureItems = (report: StorageCleanupReport) => report.items.filter((entry) => entry.rule === 'browser-capture')
+const captureHistory = (f: CaptureFixture) => readFileSync(join(f.store.root, 'storage-cleanup-history.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+
+describe('browser capture rule', () => {
+  it('deletes captures older than the policy days, with and without an extension, and keeps newer ones', async () => {
+    const f = captureFixture(); setCaptureDays(f, 30)
+    const withExtension = capture(f, 'session-a', `art_${uuid(1)}.png`, 40), withoutExtension = capture(f, 'session-a', `art_${uuid(2)}`, 31), recent = capture(f, 'session-a', `art_${uuid(3)}.png`, 5)
+    const report = await f.service.run('manual')
+    expect(existsSync(withExtension)).toBe(false); expect(existsSync(withoutExtension)).toBe(false); expect(existsSync(recent)).toBe(true)
+    expect(captureItems(report)).toEqual([expect.objectContaining({ rule: 'browser-capture', label: 'Browser session session-a', outcome: 'removed', files: 2, reason: '2 captures older than 30 days' })])
+    expect(captureItems(report)[0]!.bytes).toBeGreaterThan(0)
+    expect(report.counts).toMatchObject({ removed: 1, kept: 0, failed: 0 }); expect(report.bytesRecovered).toBe(captureItems(report)[0]!.bytes)
+  })
+
+  it('reads the retention from the policy: 7 days deletes a 10 day old capture that 30 days keeps, and off deletes nothing', async () => {
+    const f = captureFixture(); const old = capture(f, 'session-a', `art_${uuid(1)}.png`, 10)
+    setCaptureDays(f, 30); expect((await f.service.run('manual')).counts).toEqual({ removed: 0, kept: 0, failed: 0 }); expect(existsSync(old)).toBe(true)
+    setCaptureDays(f, null); expect(captureItems(await f.service.run('manual'))).toEqual([]); expect(existsSync(old)).toBe(true)
+    setCaptureDays(f, 7); expect(captureItems(await f.service.run('manual'))).toEqual([expect.objectContaining({ outcome: 'removed' })]); expect(existsSync(old)).toBe(false)
+  })
+
+  it('removes a session folder that the deletion emptied and leaves the capture folders above it', async () => {
+    const f = captureFixture(); setCaptureDays(f, 30)
+    capture(f, 'session-a', `art_${uuid(1)}.png`, 40); capture(f, 'session-b', `art_${uuid(2)}.png`, 40)
+    capture(f, 'session-b', `art_${uuid(3)}.png`, 1)
+    await f.service.run('manual')
+    expect(existsSync(join(f.profileDir, 'session-a'))).toBe(false); expect(existsSync(join(f.profileDir, 'session-b', `art_${uuid(3)}.png`))).toBe(true)
+    expect(existsSync(f.profileDir)).toBe(true); expect(existsSync(f.workerRoot)).toBe(true)
+  })
+
+  it('leaves every other file alone, however old: not named like a capture, a different extension shape, or not a file', async () => {
+    const f = captureFixture(); setCaptureDays(f, 30)
+    const others = ['actions.jsonl', 'notes.png', 'art_not-a-uuid.png', `art_${uuid(4)}.png.bak`, `ART_${uuid(5)}.png`, `art_${uuid(6)}.toolongextension1`, `art_${uuid(10)}.pdf`, `art_${uuid(11)}.pdf.download`, `art_${uuid(12)}.png.download`, `copy_${uuid(7)}.png`].map((name) => capture(f, 'session-a', name, 90))
+    const folder = join(f.profileDir, 'session-a', `art_${uuid(8)}.png`); mkdirSync(folder); writeFileSync(join(folder, 'inner.txt'), 'inside a folder named like a capture')
+    const old = new Date(Date.now() - 90 * DAY); utimesSync(folder, old, old)
+    const report = await f.service.run('manual')
+    for (const path of others) expect(existsSync(path), path).toBe(true)
+    expect(readFileSync(join(folder, 'inner.txt'), 'utf8')).toBe('inside a folder named like a capture')
+    expect(captureItems(report)).toEqual([]); expect(report.counts).toEqual({ removed: 0, kept: 0, failed: 0 })
+  })
+
+  it('skips a session that is still open, says so, and still cleans the closed ones', async () => {
+    const f = captureFixture({ open: ['session-open'] }); setCaptureDays(f, 30)
+    const live = capture(f, 'session-open', `art_${uuid(1)}.png`, 90), closed = capture(f, 'session-closed', `art_${uuid(2)}.png`, 90)
+    const report = await f.service.run('manual')
+    expect(existsSync(live)).toBe(true); expect(existsSync(closed)).toBe(false)
+    expect(captureItems(report)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: 'Browser session session-open', outcome: 'kept', reason: 'Session is not closed', bytes: 0 }),
+      expect.objectContaining({ label: 'Browser session session-closed', outcome: 'removed' })
+    ]))
+  })
+
+  it('deletes nothing when the open sessions cannot be read', async () => {
+    const f = captureFixture({ sessions: () => { throw new Error('Browser automation inventory is corrupt') } }); setCaptureDays(f, 30)
+    const old = capture(f, 'session-a', `art_${uuid(1)}.png`, 90)
+    const report = await f.service.run('manual')
+    expect(existsSync(old)).toBe(true); expect(captureItems(report)).toEqual([expect.objectContaining({ outcome: 'kept', reason: expect.stringContaining('could not be read') })])
+  })
+
+  it('touches nothing outside the worker capture folder: the artifact store and its index, other profiles and neighbouring folders', async () => {
+    const f = captureFixture(); setCaptureDays(f, 30)
+    const old = (path: string) => { mkdirSync(join(path, '..'), { recursive: true }); writeFileSync(path, 'kept'); const time = new Date(Date.now() - 90 * DAY); utimesSync(path, time, time); return path }
+    const indexed = old(join(f.home, 'artifacts', uuid(1), 'blob')), metadata = old(join(f.home, 'artifacts', uuid(1), 'meta.json'))
+    const index = old(join(f.home, 'browser', 'artifact-index', `${uuid(1)}.json`))
+    const otherProfile = old(join(f.workerRoot, 'other-profile', 'session-a', `art_${uuid(2)}.png`))
+    const userData = old(join(f.home, 'browser', 'user-data', 'session-a', `art_${uuid(3)}.png`))
+    const directlyInProfile = old(join(f.profileDir, `art_${uuid(4)}.png`)), tooDeep = old(join(f.profileDir, 'session-a', 'nested', `art_${uuid(5)}.png`))
+    const inside = capture(f, 'session-a', `art_${uuid(6)}.png`, 90)
+    await f.service.run('manual')
+    for (const path of [indexed, metadata, index, otherProfile, userData, directlyInProfile, tooDeep]) expect(existsSync(path), path).toBe(true)
+    expect(existsSync(inside)).toBe(false)
+  })
+
+  it('does nothing without a configured capture folder, and when no capture folder exists yet', async () => {
+    const unconfigured = captureFixture({ configured: false }); setCaptureDays(unconfigured, 30)
+    const old = capture(unconfigured, 'session-a', `art_${uuid(1)}.png`, 90)
+    expect(captureItems(await unconfigured.service.run('manual'))).toEqual([]); expect(existsSync(old)).toBe(true)
+    const empty = captureFixture(); setCaptureDays(empty, 30)
+    expect((await empty.service.run('manual')).counts).toEqual({ removed: 0, kept: 0, failed: 0 })
+  })
+})
+
+describe('browser capture rule never follows links', () => {
+  const external = (f: CaptureFixture) => {
+    const folder = join(f.root, 'elsewhere'); mkdirSync(folder, { recursive: true })
+    const path = join(folder, `art_${uuid(9)}.png`); writeFileSync(path, 'outside'); const time = new Date(Date.now() - 90 * DAY); utimesSync(path, time, time)
+    return { folder, path }
+  }
+
+  it('skips a session folder that is a link and leaves its target alone', async () => {
+    const f = captureFixture(); setCaptureDays(f, 30); const target = external(f)
+    mkdirSync(f.profileDir, { recursive: true }); symlinkSync(target.folder, join(f.profileDir, 'session-link'), junctionType)
+    const real = capture(f, 'session-real', `art_${uuid(1)}.png`, 90)
+    const report = await f.service.run('manual')
+    expect(existsSync(target.path)).toBe(true); expect(existsSync(real)).toBe(false)
+    expect(captureItems(report)).toEqual([expect.objectContaining({ label: 'Browser session session-real', outcome: 'removed' })])
+  })
+
+  it('keeps everything when the profile folder, the capture folder or a folder above it is a link', async () => {
+    for (const link of ['profile', 'root', 'ancestor'] as const) {
+      const f = captureFixture(); setCaptureDays(f, 30); const target = external(f)
+      const place = link === 'profile' ? f.profileDir : link === 'root' ? f.workerRoot : join(f.home, 'browser')
+      const moved = join(f.root, `moved-${link}`)
+      const inside = capture(f, 'session-a', `art_${uuid(1)}.png`, 90)
+      renameSync(place, moved); symlinkSync(moved, place, junctionType)
+      const report = await f.service.run('manual')
+      expect(existsSync(inside.replace(place, moved)), link).toBe(true); expect(existsSync(target.path), link).toBe(true)
+      expect(captureItems(report), link).toEqual([expect.objectContaining({ outcome: 'kept', reason: 'Outside the browser capture folder' })])
+    }
+  })
+
+  it('does not delete through a file link', async () => {
+    const f = captureFixture(); setCaptureDays(f, 30); const target = external(f)
+    const link = join(f.profileDir, 'session-a', `art_${uuid(1)}.png`); mkdirSync(join(link, '..'), { recursive: true })
+    try { symlinkSync(target.path, link, 'file') } catch { return } // Creating a file link needs a privilege on Windows.
+    const report = await f.service.run('manual')
+    expect(existsSync(target.path)).toBe(true); expect(captureItems(report)).toEqual([])
+  })
+
+  it('checks the session folder again right before deleting: one swapped for a link during the measurement is not followed', async () => {
+    let swapped = false
+    const moved = (f: CaptureFixture) => join(f.root, 'moved-session')
+    const holder: { f?: CaptureFixture } = {}
+    const f = captureFixture({ measure: async (path, options) => {
+      if (!swapped) { swapped = true; const dir = join(holder.f!.profileDir, 'session-a'); renameSync(dir, moved(holder.f!)); symlinkSync(moved(holder.f!), dir, junctionType) }
+      return measureTree(path, options)
+    } })
+    holder.f = f; setCaptureDays(f, 30)
+    const inside = capture(f, 'session-a', `art_${uuid(1)}.png`, 90)
+    const report = await f.service.run('manual')
+    expect(existsSync(join(moved(f), basename(inside)))).toBe(true)
+    expect(captureItems(report)).toEqual([expect.objectContaining({ outcome: 'failed', reason: 'The capture folder changed while it was being cleaned' })])
+  })
+
+  // An ancestor swapped for a link to a different folder that holds a file of the same name: a check that only
+  // compares a folder with its current parent would pass, and the delete would land outside the capture folder.
+  it.each(['profile folder', 'capture folder', 'browser folder'] as const)('stops when the %s is swapped for a link to another folder during the measurement, and that folder is untouched', async (level) => {
+    const holder: { f?: CaptureFixture; external?: string; moved?: string } = {}
+    let swapped = false
+    const f = captureFixture({ measure: async (path, options) => {
+      if (!swapped) {
+        swapped = true
+        const place = level === 'profile folder' ? holder.f!.profileDir : level === 'capture folder' ? holder.f!.workerRoot : join(holder.f!.home, 'browser')
+        renameSync(place, holder.moved!); symlinkSync(holder.external!, place, junctionType)
+      }
+      return measureTree(path, options)
+    } })
+    holder.f = f; setCaptureDays(f, 30)
+    const place = level === 'profile folder' ? f.profileDir : level === 'capture folder' ? f.workerRoot : join(f.home, 'browser')
+    const inside = capture(f, 'session-a', `art_${uuid(1)}.png`, 90)
+    holder.moved = join(f.root, 'moved'); holder.external = join(f.root, 'elsewhere')
+    const lookalike = join(holder.external, relative(place, inside)); mkdirSync(join(lookalike, '..'), { recursive: true }); writeFileSync(lookalike, 'outside')
+    const old = new Date(Date.now() - 90 * DAY); utimesSync(lookalike, old, old)
+    const report = await f.service.run('manual')
+    expect(existsSync(lookalike), level).toBe(true); expect(existsSync(join(lookalike, '..')), level).toBe(true)
+    expect(existsSync(join(holder.moved, relative(place, inside))), level).toBe(true)
+    expect(captureItems(report), level).toEqual([expect.objectContaining({ outcome: 'failed', reason: 'The capture folder changed while it was being cleaned' })])
+    expect(report.bytesRecovered).toBe(0)
+  })
+})
+
+/** The short 8.3 form of a path on Windows, or the path itself when the volume has no short names. */
+function shortPath(path: string): string {
+  try { return execSync(`for %I in ("${path}") do @echo %~sI`, { shell: 'cmd.exe', encoding: 'utf8' }).trim() || path } catch { return path }
+}
+
+describe('browser capture rule with a link above the profile home', () => {
+  it('still deletes: the capture folder and the home are compared as canonical paths', async () => {
+    const f = captureFixture({ linkedHome: true }); setCaptureDays(f, 30)
+    expect(f.home).toContain(`${sep}linked${sep}`) // The raw path reaches the home through the link; the store's home is the resolved one.
+    expect(f.store.profileHome).not.toContain(`${sep}linked${sep}`)
+    const old = capture(f, 'session-a', `art_${uuid(1)}.png`, 90), recent = capture(f, 'session-a', `art_${uuid(2)}.png`, 1)
+    const report = await f.service.run('manual')
+    expect(existsSync(old)).toBe(false); expect(existsSync(recent)).toBe(true)
+    expect(captureItems(report)).toEqual([expect.objectContaining({ outcome: 'removed', files: 1 })])
+  })
+
+  it('and the dry run lists the same session', async () => {
+    const f = captureFixture({ linkedHome: true }); setCaptureDays(f, 30); capture(f, 'session-a', `art_${uuid(1)}.png`, 90)
+    expect((await f.service.plan()).filter((entry) => entry.rule === 'browser-capture')).toEqual([expect.objectContaining({ action: 'remove', label: 'Browser session session-a' })])
+  })
+
+  it('still refuses a link inside the capture tree when the home is reached through a link', async () => {
+    const f = captureFixture({ linkedHome: true }); setCaptureDays(f, 30)
+    const inside = capture(f, 'session-a', `art_${uuid(1)}.png`, 90)
+    const moved = join(f.root, 'moved-browser'); renameSync(join(f.home, 'browser'), moved); symlinkSync(moved, join(f.home, 'browser'), junctionType)
+    const report = await f.service.run('manual')
+    expect(existsSync(join(moved, relative(join(f.home, 'browser'), inside)))).toBe(true)
+    expect(captureItems(report)).toEqual([expect.objectContaining({ outcome: 'kept', reason: 'Outside the browser capture folder' })])
+  })
+
+  it.runIf(process.platform === 'win32')('still deletes when the capture folder is given as an 8.3 short path', async () => {
+    const f = captureFixture(); setCaptureDays(f, 30)
+    const short = shortPath(f.root)
+    if (short.toLowerCase() === f.root.toLowerCase()) return // This volume has no short names, so there is no such path to test.
+    const old = capture(f, 'session-a', `art_${uuid(1)}.png`, 90)
+    const shortRoot = join(short, 'profile', 'browser', 'worker-artifacts')
+    const service = new StorageCleanupService({ store: f.store, threads: { getThread: () => undefined }, purge: new ResourceLifecycleCoordinator(f.store, { drain: async () => {}, settleMutationOwnership: async () => {}, projectIndex: () => {}, projectPurged: () => {} }).cleanup, policy: f.policy, clock: f.clock, idle: () => undefined, installationHome: f.home, now: f.now, browserCaptures: { workerArtifactRoot: shortRoot, sessions: () => new Map() } })
+    const report = await service.run('manual')
+    expect(existsSync(old)).toBe(false); expect(captureItems(report)).toEqual([expect.objectContaining({ outcome: 'removed' })])
+  })
+})
+
+describe('browser capture rule and the rest of the run', () => {
+  it('records each deletion in the history, and a later empty run does not erase it', async () => {
+    const f = captureFixture(); setCaptureDays(f, 30); capture(f, 'session-a', `art_${uuid(1)}.png`, 90)
+    const first = await f.service.run('manual')
+    const later = await f.service.run('schedule')
+    expect(later.counts).toEqual({ removed: 0, kept: 0, failed: 0 }); expect(f.service.lastReport()).toEqual(later)
+    expect(captureHistory(f)).toEqual([expect.objectContaining({ at: first.completedAt, trigger: 'manual', rule: 'browser-capture', label: 'Browser session session-a', outcome: 'removed', bytes: captureItems(first)[0]!.bytes, reason: '1 capture older than 30 days' })])
+  })
+
+  it('records nothing for a session it kept', async () => {
+    const f = captureFixture({ open: ['session-a'] }); setCaptureDays(f, 30); capture(f, 'session-a', `art_${uuid(1)}.png`, 90)
+    await f.service.run('manual')
+    expect(existsSync(join(f.store.root, 'storage-cleanup-history.jsonl'))).toBe(false)
+  })
+
+  it('reports the captures in the dry run, deletes nothing, and the run that follows does what the plan said', async () => {
+    const f = captureFixture({ open: ['session-open'] }); setCaptureDays(f, 30)
+    const closed = capture(f, 'session-closed', `art_${uuid(1)}.png`, 90), live = capture(f, 'session-open', `art_${uuid(2)}.png`, 90)
+    const plan = await f.service.plan()
+    expect(plan).toEqual(expect.arrayContaining([
+      expect.objectContaining({ rule: 'browser-capture', label: 'Browser session session-closed', action: 'remove', reason: '1 capture older than 30 days', bytes: expect.any(Number) }),
+      expect.objectContaining({ rule: 'browser-capture', label: 'Browser session session-open', action: 'keep', reason: 'Session is not closed', bytes: 0 })
+    ]))
+    expect(plan.find((entry) => entry.label === 'Browser session session-closed')!.bytes).toBeGreaterThan(0)
+    expect(existsSync(closed)).toBe(true); expect(existsSync(live)).toBe(true)
+    const names = readdirSync(f.store.root); expect(names).not.toContain('storage-cleanup-last-run.json'); expect(names).not.toContain('storage-cleanup-history.jsonl')
+    const report = await f.service.run('manual')
+    expect(captureItems(report).map((entry) => [entry.label, entry.outcome])).toEqual(expect.arrayContaining([['Browser session session-closed', 'removed'], ['Browser session session-open', 'kept']]))
+    expect(existsSync(closed)).toBe(false)
+  })
+
+  it('waits while the clock is suspended, in a run and in the plan, and resumes when the policy is saved', async () => {
+    const f = captureFixture(); setCaptureDays(f, 30)
+    const old = capture(f, 'session-a', `art_${uuid(1)}.png`, 90)
+    f.clockState.offset -= 10 * 60_000
+    expect((await f.service.plan()).filter((entry) => entry.rule === 'browser-capture')).toEqual([])
+    const report = await f.service.run('manual')
+    expect(report.suspended).toMatch(/^Paused after the system clock moved backwards/); expect(captureItems(report)).toEqual([]); expect(existsSync(old)).toBe(true)
+    setCaptureDays(f, 30) // Saving the policy resumes the time-based rules.
+    expect(captureItems(await f.service.run('manual'))).toEqual([expect.objectContaining({ outcome: 'removed' })]); expect(existsSync(old)).toBe(false)
+  })
+
+  it('does not count a capture dated in the future after the clock moved back', async () => {
+    const f = captureFixture(); setCaptureDays(f, 30)
+    const future = capture(f, 'session-a', `art_${uuid(1)}.png`, -10)
+    expect(captureItems(await f.service.run('manual'))).toEqual([]); expect(existsSync(future)).toBe(true)
+  })
+
+  it('uses the policy it started with: one saved while a session is being measured stops the deletion', async () => {
+    const holder: { f?: CaptureFixture } = {}
+    let first = true
+    const f = captureFixture({ measure: async (path, options) => { if (first) { first = false; setCaptureDays(holder.f!, null) } return measureTree(path, options) } })
+    holder.f = f; setCaptureDays(f, 30)
+    const a = capture(f, 'session-a', `art_${uuid(1)}.png`, 90), b = capture(f, 'session-b', `art_${uuid(2)}.png`, 90)
+    const report = await f.service.run('manual')
+    expect(existsSync(a)).toBe(true); expect(existsSync(b)).toBe(true)
+    expect(captureItems(report)).toEqual([expect.objectContaining({ outcome: 'kept', reason: 'Settings changed since check' })])
+  })
+
+  it('marks a measurement that ran out of budget as approximate in the item and the report', async () => {
+    const f = captureFixture({ measure: async (path, options) => ({ ...(await measureTree(path, options)), partial: true }) }); setCaptureDays(f, 30)
+    capture(f, 'session-a', `art_${uuid(1)}.png`, 90)
+    const report = await f.service.run('manual')
+    expect(captureItems(report)[0]).toMatchObject({ outcome: 'removed', bytesApproximate: true }); expect(report.bytesApproximate).toBe(true)
+  })
+})
+
+describe('browser capture files that cannot be deleted', () => {
+  const busy = (code: string) => Object.assign(new Error(`${code}: resource busy or locked`), { code })
+
+  it('keeps a capture another process holds open, retries it on the next run, and deletes the others', async () => {
+    let locked: string | undefined
+    const f = captureFixture({ removeFile: (path) => { if (path === locked) throw busy('EBUSY'); unlinkSync(path) } }); setCaptureDays(f, 30)
+    locked = capture(f, 'session-a', `art_${uuid(1)}.png`, 90); const free = capture(f, 'session-a', `art_${uuid(2)}.png`, 90)
+    const report = await f.service.run('manual')
+    expect(existsSync(locked)).toBe(true); expect(existsSync(free)).toBe(false)
+    expect(captureItems(report)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ outcome: 'removed', files: 1 }),
+      expect.objectContaining({ outcome: 'kept', bytes: 0, reason: '1 capture in use; tried again on the next run' })
+    ]))
+    expect(report.counts).toMatchObject({ removed: 1, kept: 1, failed: 0 }); expect(existsSync(join(f.profileDir, 'session-a'))).toBe(true)
+    expect(captureHistory(f)).toEqual([expect.objectContaining({ outcome: 'removed' })]) // The kept one is not a deletion.
+    locked = undefined
+    expect(captureItems(await f.service.run('manual'))).toEqual([expect.objectContaining({ outcome: 'removed', files: 1 })])
+    expect(existsSync(join(f.profileDir, 'session-a'))).toBe(false)
+  })
+
+  it('reports any other deletion error as failed, counts no space for the file, and records it', async () => {
+    const f = captureFixture({ removeFile: () => { throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' }) } }); setCaptureDays(f, 30)
+    const old = capture(f, 'session-a', `art_${uuid(1)}.png`, 90)
+    const report = await f.service.run('manual')
+    expect(existsSync(old)).toBe(true); expect(report.counts).toMatchObject({ removed: 0, failed: 1 }); expect(report.bytesRecovered).toBe(0)
+    expect(captureItems(report)).toEqual([expect.objectContaining({ outcome: 'failed', reason: 'EIO: i/o error' })])
+    expect(captureHistory(f)).toEqual([expect.objectContaining({ outcome: 'failed', rule: 'browser-capture' })])
+  })
+
+  it('treats a capture that vanished before its turn as already gone', async () => {
+    const f = captureFixture({ removeFile: (path) => { unlinkSync(path); throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) } }); setCaptureDays(f, 30)
+    capture(f, 'session-a', `art_${uuid(1)}.png`, 90)
+    expect((await f.service.run('manual')).counts).toEqual({ removed: 0, kept: 0, failed: 0 })
+  })
+
+  /** A process that opens the file with no sharing, which is what makes Windows refuse to delete it. */
+  describe.runIf(process.platform === 'win32')('on Windows', () => {
+    let child: ChildProcess | undefined
+    afterEach(async () => {
+      if (!child) return
+      const exited = new Promise<void>((resolve) => child!.once('exit', () => resolve()))
+      child.kill(); await exited; child = undefined
+    })
+    async function lockFile(path: string): Promise<void> {
+      const script = `$stream = [System.IO.File]::Open('${path.replace(/'/g, "''")}', 'Open', 'Read', 'None'); [Console]::Out.WriteLine('locked'); [Console]::Out.Flush(); Start-Sleep -Seconds 600`
+      child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
+      await new Promise<void>((resolve, reject) => {
+        child!.once('error', reject); child!.once('exit', () => reject(new Error('The lock holder exited early')))
+        child!.stdout!.on('data', (chunk: Buffer) => { if (chunk.toString().includes('locked')) resolve() })
+      })
+    }
+
+    it('keeps a capture that a process has open without sharing, deletes its neighbours, and deletes it once the process lets go', async () => {
+      const f = captureFixture(); setCaptureDays(f, 30)
+      const locked = capture(f, 'session-a', `art_${uuid(1)}.png`, 90), free = capture(f, 'session-a', `art_${uuid(2)}.png`, 90)
+      await lockFile(locked)
+      const report = await f.service.run('manual')
+      expect(existsSync(locked)).toBe(true); expect(existsSync(free)).toBe(false)
+      expect(captureItems(report)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ outcome: 'removed', files: 1 }),
+        expect.objectContaining({ outcome: 'kept', reason: '1 capture in use; tried again on the next run' })
+      ]))
+      expect(report.counts).toMatchObject({ failed: 0 })
+      const exited = new Promise<void>((resolve) => child!.once('exit', () => resolve()))
+      child!.kill(); await exited; child = undefined
+      expect(captureItems(await f.service.run('manual'))).toEqual([expect.objectContaining({ outcome: 'removed', files: 1 })])
+      expect(existsSync(locked)).toBe(false)
+    }, 60_000)
+  })
+})
+
+describe('browser downloads are not captures', () => {
+  it('keeps what the worker writes for a download, deletes the screenshot beside it, and keeps older downloads that kept their own extension', async () => {
+    const f = captureFixture(); setCaptureDays(f, 30)
+    const writer = new ScopedArtifactWriter(f.workerRoot)
+    const source = join(f.root, 'report.pdf'); writeFileSync(source, 'download bytes')
+    const screenshot = writer.write('test', 'session-a', Buffer.from('png bytes'), 'image/png', 'png')
+    const download = writer.writeFile('test', 'session-a', source, 'application/pdf', 'report.pdf')
+    const picture = writer.writeFile('test', 'session-a', source, 'image/png', 'photo.png') // A downloaded image is still a download.
+    const dir = join(f.profileDir, 'session-a')
+    expect(readdirSync(dir).filter((name) => name.startsWith(download.artifactId))).toEqual([`${download.artifactId}.pdf.download`])
+    const earlier = join(dir, `art_${uuid(1)}.pdf`); writeFileSync(earlier, 'a download from before')
+    const old = new Date(Date.now() - 90 * DAY)
+    for (const name of readdirSync(dir)) utimesSync(join(dir, name), old, old)
+    const report = await f.service.run('manual')
+    expect(existsSync(join(dir, `${screenshot.artifactId}.png`))).toBe(false)
+    expect(existsSync(join(dir, `${download.artifactId}.pdf.download`))).toBe(true); expect(existsSync(join(dir, `${picture.artifactId}.png.download`))).toBe(true)
+    expect(existsSync(earlier)).toBe(true)
+    expect(captureItems(report)).toEqual([expect.objectContaining({ outcome: 'removed', files: 1 })])
+  })
+})
+
+describe('browser capture rule: one session never stops the others', () => {
+  it('keeps what earlier sessions deleted in the report and the history when a later one fails', async () => {
+    const f = captureFixture({ measure: async (path, options) => { if (path.includes('session-b')) throw new Error('The disk reported an error'); return measureTree(path, options) } }); setCaptureDays(f, 30)
+    const a = capture(f, 'session-a', `art_${uuid(1)}.png`, 90), b = capture(f, 'session-b', `art_${uuid(2)}.png`, 90), c = capture(f, 'session-c', `art_${uuid(3)}.png`, 90)
+    const report = await f.service.run('manual')
+    expect(existsSync(a)).toBe(false); expect(existsSync(b)).toBe(true); expect(existsSync(c)).toBe(false)
+    expect(captureItems(report)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: 'Browser session session-a', outcome: 'removed' }),
+      expect.objectContaining({ label: 'Browser session session-b', outcome: 'failed', reason: 'The disk reported an error' }),
+      expect.objectContaining({ label: 'Browser session session-c', outcome: 'removed' })
+    ]))
+    expect(report.counts).toMatchObject({ removed: 2, failed: 1 })
+    expect(captureHistory(f).map((line) => [line.label, line.outcome])).toEqual(expect.arrayContaining([['Browser session session-a', 'removed'], ['Browser session session-b', 'failed'], ['Browser session session-c', 'removed']]))
+  })
+
+  it('skips a session folder that disappears during the run without reporting a failure', async () => {
+    let removedB = false
+    const holder: { f?: CaptureFixture } = {}
+    const f = captureFixture({ measure: async (path, options) => { if (!removedB) { removedB = true; rmSync(join(holder.f!.profileDir, 'session-b'), { recursive: true, force: true }) } return measureTree(path, options) } })
+    holder.f = f; setCaptureDays(f, 30)
+    capture(f, 'session-a', `art_${uuid(1)}.png`, 90); capture(f, 'session-b', `art_${uuid(2)}.png`, 90)
+    const report = await f.service.run('manual')
+    expect(captureItems(report)).toEqual([expect.objectContaining({ label: 'Browser session session-a', outcome: 'removed' })]); expect(report.counts.failed).toBe(0)
+  })
+})
+
+describe('browser capture files that keep failing', () => {
+  it('keeps a file in use without limit when the error says it is busy', async () => {
+    const f = captureFixture({ removeFile: () => { throw Object.assign(new Error('EBUSY: resource busy'), { code: 'EBUSY' }) } }); setCaptureDays(f, 30)
+    const old = capture(f, 'session-a', `art_${uuid(1)}.png`, 90)
+    for (let run = 0; run < 5; run++) expect(captureItems(await f.service.run('manual'))).toEqual([expect.objectContaining({ outcome: 'kept', reason: '1 capture in use; tried again on the next run' })])
+    expect(existsSync(old)).toBe(true); expect(existsSync(join(f.store.root, 'storage-cleanup-history.jsonl'))).toBe(false)
+  })
+
+  it.runIf(process.platform === 'win32')('reports a file that keeps failing with a permission error as failed on the third run, and records it', async () => {
+    const f = captureFixture({ removeFile: () => { throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' }) } }); setCaptureDays(f, 30)
+    const old = capture(f, 'session-a', `art_${uuid(1)}.png`, 90)
+    for (let run = 0; run < 2; run++) expect(captureItems(await f.service.run('manual'))).toEqual([expect.objectContaining({ outcome: 'kept' })])
+    expect(existsSync(join(f.store.root, 'storage-cleanup-history.jsonl'))).toBe(false)
+    const third = await f.service.run('manual')
+    expect(captureItems(third)).toEqual([expect.objectContaining({ outcome: 'failed', reason: expect.stringContaining('could not be deleted after 3 tries') })])
+    expect(third.counts.failed).toBe(1); expect(existsSync(old)).toBe(true)
+    expect(captureHistory(f)).toEqual([expect.objectContaining({ outcome: 'failed', rule: 'browser-capture' })])
+  })
+
+  it('does not carry a failed attempt over: one success in between starts the count again', async () => {
+    let failing = true
+    const f = captureFixture({ removeFile: (path) => { if (failing) throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' }); unlinkSync(path) } }); setCaptureDays(f, 30)
+    const old = capture(f, 'session-a', `art_${uuid(1)}.png`, 90)
+    await f.service.run('manual'); failing = false
+    expect(captureItems(await f.service.run('manual'))).toEqual([expect.objectContaining({ outcome: 'removed' })]); expect(existsSync(old)).toBe(false)
+  })
+})
+
+describe('browser sessions the worker lost', () => {
+  it('asks the browser with the retention cutoff, and deletes the captures of a session it reports as closed', async () => {
+    let cutoff: number | undefined
+    const f = captureFixture({ sessions: (staleBefore) => { cutoff = staleBefore; return new Map([['session-gone', { open: false }], ['session-live', { open: true }]]) } }); setCaptureDays(f, 30)
+    const gone = capture(f, 'session-gone', `art_${uuid(1)}.png`, 90), live = capture(f, 'session-live', `art_${uuid(2)}.png`, 90)
+    const report = await f.service.run('manual')
+    expect(Math.abs(cutoff! - (Date.now() - 30 * DAY))).toBeLessThan(60_000)
+    expect(existsSync(gone)).toBe(false); expect(existsSync(live)).toBe(true)
+    expect(captureItems(report)).toEqual(expect.arrayContaining([expect.objectContaining({ label: 'Browser session session-live', outcome: 'kept', reason: 'Session is not closed' })]))
+  })
+
+  it('treats a session the browser has no record of as closed', async () => {
+    const f = captureFixture({ sessions: () => new Map() }); setCaptureDays(f, 30)
+    const old = capture(f, 'session-forgotten', `art_${uuid(1)}.png`, 90)
+    await f.service.run('manual')
+    expect(existsSync(old)).toBe(false)
+  })
+})
+
+describe('browser capture rows can be traced', () => {
+  it('names the thread, carries its id and project, and records the file count in the history', async () => {
+    const thread = { id: 'task', name: 'Task one', projectId: 'project-1', createdAt: OLD.toISOString() }
+    const f = captureFixture({ thread, sessions: () => new Map([['session-a', { open: false, threadId: 'task' }], ['session-b', { open: false, threadId: 'deleted-thread' }]]) }); setCaptureDays(f, 30)
+    capture(f, 'session-a', `art_${uuid(1)}.png`, 90); capture(f, 'session-a', `art_${uuid(2)}`, 90); capture(f, 'session-b', `art_${uuid(3)}.png`, 90)
+    const report = await f.service.run('manual')
+    expect(captureItems(report)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: 'Task one: browser session session-a', threadId: 'task', projectId: 'project-1', files: 2, outcome: 'removed' }),
+      expect.objectContaining({ label: 'Browser session session-b', files: 1, outcome: 'removed' })
+    ]))
+    expect(captureItems(report).find((entry) => entry.label.endsWith('session-b'))!.threadId).toBeUndefined()
+    expect(captureHistory(f)).toEqual(expect.arrayContaining([expect.objectContaining({ label: 'Task one: browser session session-a', threadId: 'task', projectId: 'project-1', files: 2, rule: 'browser-capture' })]))
+  })
 })
 
 describe('storage defaults', () => {

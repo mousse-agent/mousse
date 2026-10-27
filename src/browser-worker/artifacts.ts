@@ -31,6 +31,8 @@ export class ScopedArtifactWriter {
   writeFile(profileId: string, sessionId: string, sourcePath: string, mediaType: string, displayName: string): WrittenArtifact {
     const bytes = readFileSync(sourcePath)
     const extension = displayName.includes('.') ? displayName.slice(displayName.lastIndexOf('.') + 1).replace(/[^a-zA-Z0-9]/g, '').slice(0, 12) || 'bin' : 'bin'
-    return this.write(profileId, sessionId, bytes, mediaType, extension)
+    // A download is not a screenshot capture. The `.download` ending keeps storage cleanup, which only deletes
+    // `art_<uuid>` and `art_<uuid>.png`, away from a file the action result may still point to.
+    return this.write(profileId, sessionId, bytes, mediaType, `${extension}.download`)
   }
 }
