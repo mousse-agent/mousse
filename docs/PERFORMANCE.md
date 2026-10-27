@@ -2,6 +2,8 @@
 
 > **Note:** the Agents tab (`AgentsPanel`, `AgentsTasksView`, `NamedAgents`), the Agents & Tasks window (`agentsTasksWindow.ts`) and `MousseAgentChat` were removed in #143. Findings below that name them are kept for history.
 
+> **Status rows:** where a finding has been acted on, its table starts with a **Status** row that says what shipped. The symptom, root cause and fix rows below it describe the code at the time of the audit.
+
 Analysis of the Mousse Electron app (`src/main/**`, `src/preload/**`, `src/renderer/**`) with actionable recommendations for smooth rendering, responsive IPC, and stable memory use. Findings are grounded in the current codebase as of this audit.
 
 ---
@@ -18,6 +20,9 @@ The largest wins are in the **renderer chat path** (virtualization, memoization,
 
 | | |
 |---|---|
+| **Status** | **Done** (#179). Messages now reach the transcript through `mousseToUIMessages` → `MousseAgentChatShell` → `AgentChat` → `MessageList` (`src/renderer/chat/components/agent-elements/`). The rows (`UserMessage`, `Markdown`, `ToolCallsGroup`, the tool renderers) and `PromptMarkersOverlay` are memoized. Threads of more than 40 turns are windowed per turn: only the turns near the viewport are mounted and the rest are spacers sized from measured or estimated heights (`virtual/turn-window.ts`, `virtual/use-turn-window.ts`). The first and last turn always stay mounted, and no more than 60 rows are mounted at any scroll position. Threads of 40 turns or fewer render every row. It is hand-written; no virtualization library was added. |
+| **Code and images** | Streamdown already helps here: each code block carries `content-visibility: auto` with a 200 px intrinsic size, so a block that is not near the viewport is not laid out, and a block is capped at 400 px high with its own scroller (tables at 300 px). The remaining height changes (a block expanding from its 200 px placeholder, a late syntax-highlighting pass) are absorbed by the scroll anchor in `use-turn-window.ts`. Thumbnails in a prompt sit in a fixed-size box (#228), so a loading image does not change the row height. |
+| **Find** | Ctrl/Cmd+F opens a find bar over the transcript (`agent-elements/find/`). The index is built from the messages, not the DOM, so matches in unmounted turns are counted and reachable. |
 | **Symptom** | Assistant streaming stutters; typing in composer feels laggy during long responses; CPU stays elevated for the whole stream. |
 | **Root cause** | Each LLM delta calls `updateStreamingAssistantMessage` → `emit('message-updated')` → Zustand `updateMessage`, which replaces the `messages` array (`src/renderer/stores/appStore.ts:107–110`). `OrchestratorChat` subscribes to `messages` (`src/renderer/components/OrchestratorChat.tsx:89`) and maps **all** messages on every update (`728–784`) with no `React.memo` on row components. |
 | **Fix** | (a) Memoize `ChatMessageContent` with a custom comparator on `id`, `content`, `streaming`, `kind`, `toolCall`, `thinking`. (b) Store streaming text in a ref or separate `streamingContentById` slice so non-streaming rows do not invalidate. (c) Add windowed virtualization (`@tanstack/react-virtual` or `react-window`) for lists > ~50 messages. |
@@ -38,6 +43,7 @@ The largest wins are in the **renderer chat path** (virtualization, memoization,
 
 | | |
 |---|---|
+| **Status** | **Done** (#179). The list follows the end only while the user is following it. `virtual/follow-mode.ts` has two modes, `following-end` and `free`, and moves between them on what the user does (wheel, scrollbar drag, PageUp/Home/arrow keys, touch), not on scroll direction. Scrolls the list makes itself never change the mode. Sending a turn or pressing Jump to latest returns to `following-end` and lands on the end instantly, with no smooth scroll; any user scroll input cancels a landing that is still settling. While the user reads, the text under the reading line stays put as content above it grows: windowed threads keep it with an element anchor in `use-turn-window.ts`, and threads of 40 turns or fewer rely on the browser's own scroll anchoring (`overflow-anchor: auto` in `global.css`). |
 | **Symptom** | Chat “fights” the user while reading history during streaming; unnecessary layout work. |
 | **Root cause** | `useEffect` scrolls to bottom whenever `messages` changes (`src/renderer/components/OrchestratorChat.tsx:251–263`), using `behavior: 'smooth'`, which schedules animation frames for the full list. |
 | **Fix** | Only auto-scroll when the user is already near the bottom (threshold ~100px). Use `behavior: 'instant'` during streaming deltas; reserve smooth scroll for new user sends. |
@@ -58,6 +64,7 @@ The largest wins are in the **renderer chat path** (virtualization, memoization,
 
 | | |
 |---|---|
+| **Status** | **Partly done.** The chat transcript is memoized: `MessageList`, `UserMessage`, `Markdown`, `ToolCallsGroup`, the tool renderers and `PromptMarkersOverlay` use `memo`. `ThreadsSidebar` and `ComposerFooter` are still plain function components, so the sidebar and footer note below still applies, and the store has not been split into slices. |
 | **Symptom** | Widespread subtree re-renders when any Zustand slice updates. |
 | **Root cause** | Grep shows zero `React.memo` / `memo(` usage under `src/renderer/`. Heavy children (`ThreadsSidebar`, `AgentsPanel` (removed), `ComposerFooter`) re-render on unrelated store updates. |
 | **Fix** | Add `memo` to leaf presentation components (`ChatMessageContent`, `ToolCallResponse`, `FileTree` nodes, tab bars). Split Zustand into slices (`messagesStore`, `layoutStore`, `threadsStore`) or use shallow compare selectors. |
@@ -152,6 +159,9 @@ The largest wins are in the **renderer chat path** (virtualization, memoization,
 
 | | |
 |---|---|
+| **Status** | **Still open.** #179 changed what the renderer does with a long thread, not how the thread reaches it. The selected thread's snapshot now arrives as one `thread:view` event (`broadcastThreadSnapshot` in `src/main/mms/protocolEventBridge.ts`), so the root cause row below names older code, but it still carries every message and nothing is paged. |
+| **Measured** | The Electron fixture `tests/renderer/turn-window-electron.test.ts` (offscreen window, hardware acceleration off) mounts a synthetic thread from memory and prints what it saw. Two runs on one machine: 260 messages (100 turns) mounted in 80–106 ms and 2,595 messages (1,000 turns, about 200 code blocks, 50 images and 300 tool groups) in 172–216 ms, a ratio of 2.0–2.3 for ten times the messages. At open the fixture had 3 and 4 rows mounted (142 and 623 DOM nodes), and the 2,595-message thread used about 45 MB of heap. A scripted scroll from the top in 40 steps of 14,000 px, over a thread that also holds a 5,000-line code block and a 300-row table, had a longest frame of 174 ms (one run). The test asserts counts and positions (at most 60 rows mounted at every scroll position, reading line within 2 px), not these timings, because wall-clock time on a shared runner is noisy. |
+| **Not measured** | The fixture starts from messages already in memory. It does not include sending the snapshot from the daemon, copying it, or `mousseToUIMessages`, so it cannot say whether switching threads is still slow. File a follow-up against this section if a measurement of that path shows it is. |
 | **Symptom** | Noticeable delay switching threads with long history. |
 | **Root cause** | `switchThread` loads disk → `broadcast('orchestrator:messages', getMessages())` plus agents and tasks (`src/main/data/ThreadContext.ts:68–84`). `getMessages()` clones array (`OrchestratorService.ts:180–182`). |
 | **Fix** | Renderer pulls via `getMessages` invoke on select; main sends only `{ threadId }` selected event. Consider incremental message paging for threads > 200 messages. |
@@ -422,7 +432,7 @@ The store is a **single flat slice** (`src/renderer/stores/appStore.ts:16–192`
 
 | Rank | Action | Impact | Effort | Primary location |
 |------|--------|--------|--------|------------------|
-| 1 | Virtualize orchestrator message list + memoize `ChatMessageContent` | High | Medium | `OrchestratorChat.tsx`, `ChatMessageContent.tsx` |
+| 1 | Virtualize orchestrator message list + memoize `ChatMessageContent` — **done** in #179 (§1.1) | High | Medium | `agent-elements/message-list.tsx`, `agent-elements/virtual/` |
 | 2 | Batch `pty:data` IPC (16ms window) + optional focused-pty filter | High | Medium | `PtyManager.ts` |
 | 3 | Batch LLM streaming IPC (`delta` events or 50ms coalesce) | High | Medium | `OrchestratorService.ts`, `registerIpc.ts` |
 | 4 | Dispose agent xterm instances when agents complete | High | Low | `AgentsPanel.tsx` (removed) |
@@ -431,7 +441,7 @@ The store is a **single flat slice** (`src/renderer/stores/appStore.ts:16–192`
 | 7 | Reduce KeepMounted scope; lazy-load Browser/Git/Files | High | Medium | `MainViewPanel.tsx`, `main.tsx` |
 | 8 | Incremental thread index + delta broadcasts (stop full `listAllThreads` scans) | High | Medium | `ThreadDataStore.ts`, `ThreadContext.ts` |
 | 9 | Async debounced thread persistence (avoid sync `writeFileSync` on hot path) | High | Medium | `ThreadDataStore.ts`, `ThreadContext.ts` |
-| 10 | Debounce context-usage IPC; near-bottom-only autoscroll | Medium | Low | `OrchestratorChat.tsx` |
+| 10 | Debounce context-usage IPC; near-bottom-only autoscroll (autoscroll done, §1.3) | Medium | Low | `OrchestratorChat.tsx` |
 
 ---
 
@@ -475,7 +485,7 @@ Target: < 2s to interactive UI on mid-range hardware (deferrable work excluded).
 
 ### 9.6 Regression harness
 
-- Scripted Playwright/Electron test: load thread with 500 synthetic messages, measure scroll FPS.
+- Scripted Electron test: load a long synthetic thread and scroll it. **Done for the chat transcript:** `tests/renderer/turn-window-electron.test.ts` (fixture in `tests/fixtures/turn-window/`) mounts about 2,600 messages in an offscreen window and checks the mounted-row cap, the reading line, following the end, Jump to latest and find; it prints mount times, DOM nodes, heap and the longest frame of a scripted scroll (§2.4). It reports the longest frame, not a frame rate, and runs without hardware acceleration.
 - Benchmark `listAllThreads()` with 50 projects × 20 threads — track wall time on CI.
 - Golden-path: cold start → first message send → spawn agent → PTY flood — capture trace artifacts in CI.
 
@@ -486,7 +496,7 @@ Target: < 2s to interactive UI on mid-range hardware (deferrable work excluded).
 | Area | Key files |
 |------|-----------|
 | Zustand | `src/renderer/stores/appStore.ts` |
-| Chat UI | `src/renderer/components/OrchestratorChat.tsx`, `ChatMessageContent.tsx` |
+| Chat UI | `src/renderer/components/OrchestratorChat.tsx`, `ChatMessageContent.tsx`, `src/renderer/chat/components/agent-elements/message-list.tsx`, `agent-elements/virtual/`, `agent-elements/find/` |
 | xterm | `src/renderer/hooks/useXtermTerminal.ts`, `AgentsPanel.tsx` (removed), `ProjectTerminalPanel.tsx` |
 | Panel lifecycle | `src/renderer/components/MainViewPanel.tsx`, `KeepMounted.tsx` |
 | IPC bridge | `src/preload/index.ts`, `src/main/ipc/registerIpc.ts` |
