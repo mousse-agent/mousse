@@ -315,6 +315,13 @@ export interface DriverRuntime {
   stop(): void | Promise<void>
 }
 
+/** The Move prompt of a retired instance (its card and chats), and the target its errors name. */
+export interface RetiredPrompt {
+  title: string
+  detail: string
+  target: string
+}
+
 export interface HarnessDriver {
   readonly kind: HarnessDriverKind
   readonly label: string
@@ -384,6 +391,11 @@ export interface HarnessDriver {
    * stored config, and whether the user may switch it (Providers → Advanced → Engine).
    */
   engine?(instanceId: string, stored: Record<string, unknown> | undefined): { effective: 'rpc' | 'legacy'; switchable: boolean }
+  /**
+   * The Move prompt of an instance a Mousse update retired (`pi`: `drivers/pi/retired.ts`), else
+   * undefined. A retired instance keeps its record and sign-in, runs nothing, and moves on.
+   */
+  retired?(instanceId: string): RetiredPrompt | undefined
   /**
    * Capabilities for an instance at an installed version. `facts` (when the runtime reported them)
    * refine what a preset cannot know statically: fork, plan mode, models.

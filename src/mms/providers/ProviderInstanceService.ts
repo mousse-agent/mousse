@@ -16,6 +16,7 @@ import {
 } from '../../shared/providerInstances'
 import type { LlmProviderOption } from '../../shared/settings'
 import { mirrorHash, tupleConfig, MIRROR_MARKER_KEY, type VendorMirror } from '../harness/vendorMirror'
+import { piRetiredOf } from '../harness/drivers/pi/retired'
 import type { ProviderAuthService } from './ProviderAuthService'
 
 /** What a profile stores: `providers.instances` and `providers.instancesSeedVersion`. */
@@ -277,7 +278,9 @@ export class ProviderInstanceService {
 
   private isKnownPiProvider(providerId: string): boolean {
     const auth = this.options.providerAuth
-    if (builtinPiProviders().has(providerId)) return true
+    // A retired provider stays known after its sign-in and registration are gone, so an old
+    // selection naming it follows its Move, or reads retired, never unknown.
+    if (builtinPiProviders().has(providerId) || piRetiredOf(providerId)) return true
     if (auth?.credentials?.listProviderIds().includes(providerId)) return true
     // The pi loop serves any provider the credential service reports as configured.
     try {

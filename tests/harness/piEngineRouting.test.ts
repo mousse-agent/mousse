@@ -1,7 +1,7 @@
 /**
  * PR 2 §5: `pi:*` instances stay on the legacy loop by default until the parity gate passes; one the
  * user switched (`engine: 'rpc'`, Advanced → Engine: New engine) runs on Pi's agent when the profile
- * gives the driver its RPC inputs. The legacy-only providers (`openai-codex`, `cursor`) and the bare
+ * gives the driver its RPC inputs. The retired providers (`openai-codex`, `cursor`) and the bare
  * route never do. The engine is part of the record key and the home, so a binding made on the loop
  * before a switch is `binding_stale` after it.
  */
@@ -57,13 +57,16 @@ function setup(options: { rpc?: PiRpcDriverOptions; home?: string; stored?: Reco
 
 describe('Pi engine routing', () => {
   it('keeps the loop by default and runs a provider the user opted in on Pi’s agent', () => {
-    const { caps } = setup({ rpc })
+    const { caps, harness } = setup({ rpc })
     expect(caps('pi:openrouter')).toBe(PI_LEGACY_CAPS)
     expect(caps('pi:groq')).toBe(PI_LEGACY_CAPS)
     expect(caps('pi:mistral')).toBe(PI_RPC_CAPS)
     expect(caps('pi:openai')).toBe(PI_RPC_CAPS)
-    expect(caps('pi:openai-codex')).toBe(PI_LEGACY_CAPS)
-    expect(caps('pi:cursor')).toBe(PI_LEGACY_CAPS)
+    // The retired providers never reach Pi's agent: their turns are refused, and read on the loop.
+    for (const instanceId of ['pi:openai-codex', 'pi:cursor']) {
+      expect(() => caps(instanceId)).toThrow(expect.objectContaining({ code: 'provider_retired' }))
+      expect(harness.resolveStored({ instanceId, llmProvider: '', model: 'm' }, { purpose: 'turn', allowDisabled: true }).caps).toBe(PI_LEGACY_CAPS)
+    }
   })
 
   it('keeps every instance on the loop when the build ships no runtime', () => {

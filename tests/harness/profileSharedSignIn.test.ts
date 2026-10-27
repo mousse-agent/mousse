@@ -41,7 +41,8 @@ describe('a move keeps the shared openai-codex sign-in while another profile use
       // A plain profile has no host of its own: the hook must still come from the profile host.
       expect(workServices.getInstallationHost()).toBeNull()
       // One credential for the device; both profiles list an unmoved `pi:openai-codex` from it.
-      await main.providerAuth.setApiKey('openai-codex', 'dummy-shared-credential')
+      // Stored before the upgrade: a retired provider takes no new sign-in.
+      await main.providerAuth.credentials.modify('openai-codex', async () => ({ type: 'api_key', key: 'dummy-shared-credential' }))
       const entry = (services: typeof main) => services.providerInstances.list()['pi:openai-codex']
       expect(entry(main)).toBeDefined()
       expect(entry(workServices)).toBeDefined()
@@ -71,7 +72,8 @@ describe('a move keeps the shared openai-codex sign-in while another profile use
     mkdirSync(home, { recursive: true })
     const main = await MousseMainService.create({ homeDir: home, repoRoot: root, headless: true, requireOwnership: false })
     try {
-      await main.providerAuth.setApiKey('openai-codex', 'dummy-shared-credential')
+      // Stored before the upgrade: a retired provider takes no new sign-in.
+      await main.providerAuth.credentials.modify('openai-codex', async () => ({ type: 'api_key', key: 'dummy-shared-credential' }))
       // The default profile loses its host (a profile built outside the host).
       ;(main as unknown as { profileHost: null }).profileHost = null
       expect(await dropOldSignIn(main.harness!)).toBe('kept_shared')

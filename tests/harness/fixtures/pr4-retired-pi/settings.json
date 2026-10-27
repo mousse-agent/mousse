@@ -1,0 +1,4 @@
+{
+  "provider": { "instanceId": "pi:openai-codex", "llmProvider": "openai-codex", "model": "gpt-5.1-codex" },
+  "title": { "instanceId": "pi:openai-codex", "llmProvider": "openai-codex", "model": "gpt-5.1-codex" }
+}

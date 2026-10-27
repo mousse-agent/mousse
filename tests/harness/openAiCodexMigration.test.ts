@@ -22,8 +22,8 @@ import { signIn, startSignIn } from './chatgpt/signInFlow'
 import { cleanupProfiles, FIXTURE, intermediateProfile, read } from './openAiCodexFixture'
 
 /**
- * `pi:openai-codex` in the PR 3 release (PR 3 §5): the PR 2 profile of `fixtures/pr2-openai-codex/`
- * keeps chatting on the legacy loop and carries a persistent Move prompt; the move is explicit,
+ * `pi:openai-codex` after PR 3 (PR 3 §5, retired in PR 4 §11): the PR 2 profile of
+ * `fixtures/pr2-openai-codex/` no longer chats and carries a persistent Move prompt; the move is explicit,
  * onto a Codex that is installed and signed in (a fresh sign-in, no credential copied), and drops the
  * old sign-in with it. Only fakes: a fake ChatGPT sign-in service, a fake install, a replayed pi loop.
  */
@@ -163,19 +163,26 @@ async function signManagedIn(made: Awaited<ReturnType<typeof profile>>) {
   })
 }
 
-describe('openai-codex in the PR 3 release', () => {
-  it('the decoder keeps the record, and the snapshot reads ready with the Move step', async () => {
+const RETIRED = { action: 'move', label: 'Move', title: 'Retired by this update', detail: 'Move to ChatGPT subscription to keep chatting. Your chats stay.' }
+
+/** What `resolveStored` throws for the pinned selection, if anything. */
+function pinnedRefusal(harness: Harness): unknown {
+  try {
+    harness.resolveStored(read('thread.json').modelOverride, { purpose: 'turn' })
+  } catch (error) {
+    return error
+  }
+  return undefined
+}
+
+describe('openai-codex after the PR 3 release', () => {
+  it('the decoder keeps the record, and the snapshot reads retired with the Move step', async () => {
     const { harness, stored } = await profile()
     expect(stored()['pi:openai-codex']).toMatchObject({ driver: 'pi', enabled: true, config: { displayName: 'ChatGPT' } })
     const snapshot = await snapshotOf(harness, 'pi:openai-codex')
-    expect(snapshot).toMatchObject({ driver: 'pi', auth: { state: 'signed_in' }, runs: { state: 'yes' }, engine: { effective: 'legacy' } })
-    expect(snapshot.nextStep).toEqual({
-      action: 'move',
-      label: 'Move',
-      title: 'Move to ChatGPT subscription',
-      detail: 'This connection uses an older sign-in that a coming Mousse update turns off. Your chats stay.'
-    })
-    expect(describeStatus(snapshot)).toMatchObject({ tone: 'ready', nextStep: null })
+    expect(snapshot).toMatchObject({ driver: 'pi', auth: { state: 'signed_in' }, runs: { state: 'no' }, engine: { effective: 'legacy' } })
+    expect(snapshot.nextStep).toEqual(RETIRED)
+    expect(describeStatus(snapshot)).toMatchObject({ headline: 'Retired by this update', tone: 'warning', nextStep: RETIRED })
     // Control: an entry with no old route going away has no Move step.
     expect((await snapshotOf(harness, MANAGED)).nextStep).toEqual({ action: 'sign_in', label: 'Sign in' })
   })
@@ -187,13 +194,14 @@ describe('openai-codex in the PR 3 release', () => {
     const snapshot = await snapshotOf(harness, 'pi:openai-codex')
     expect(snapshot.auth.state).toBe('signed_out')
     expect(snapshot.nextStep).toMatchObject({ action: 'move' })
-    expect(describeStatus(snapshot)).toMatchObject({ headline: 'Not signed in', nextStep: { action: 'move' } })
+    expect(describeStatus(snapshot)).toMatchObject({ headline: 'Retired by this update', nextStep: { action: 'move' } })
   })
 
-  it('a turn on the pinned thread still runs on the legacy loop, and no Pi process starts', async () => {
+  it('a turn on the pinned thread fails provider_retired, even on a binding from before, and nothing runs', async () => {
     const { harness, transport, rpc } = await profile()
     const pinned = read('thread.json')
-    const binding = await harness.bind(harness.resolveStored(pinned.modelOverride, { purpose: 'turn' }), { mode: 'agent' })
+    expect(pinnedRefusal(harness)).toMatchObject({ code: 'provider_retired' })
+    const binding = await harness.bind(harness.resolveStored(pinned.modelOverride, { purpose: 'turn', allowDisabled: true }), { mode: 'agent' })
     expect(binding).toMatchObject({ instanceId: 'pi:openai-codex', driver: 'pi' })
     const spec: TurnSpec = {
       binding,
@@ -206,8 +214,9 @@ describe('openai-codex in the PR 3 release', () => {
       control: { drainSteer: () => undefined, heartbeat: noop },
       host: { tools: {}, context: { recoverOverflow: () => null, prepareNativeContext: () => null, nativeHistoryAfterTurn: () => '' } }
     }
-    expect(await harness.startTurn(spec).result).toMatchObject({ text: 'Still on the loop', aborted: false })
-    transport.assertDone()
+    await expect(harness.startTurn(spec).result).rejects.toMatchObject({ code: 'provider_retired' })
+    // The loop was never reached: its one chat call is still unread.
+    expect(() => transport.assertDone()).toThrow('not consumed')
     expect(rpc.starts).toEqual([])
   })
 
@@ -218,14 +227,14 @@ describe('openai-codex in the PR 3 release', () => {
     const banner = threadMoveBanner(selection.instanceId, snapshots)
     expect(banner).toEqual({
       instanceId: 'pi:openai-codex',
-      title: 'Move to ChatGPT subscription',
-      detail: 'This connection uses an older sign-in that a coming Mousse update turns off. Your chats stay.',
+      title: RETIRED.title,
+      detail: RETIRED.detail,
       label: 'Move'
     })
     expect(threadMoveBanner(MANAGED, snapshots)).toBeNull()
     expect(threadMoveBanner(undefined, snapshots)).toBeNull()
     const html = renderToStaticMarkup(createElement(ThreadMoveBanner, { instanceId: selection.instanceId, snapshots }))
-    expect(html).toContain('Move to ChatGPT subscription.')
+    expect(html).toContain('Retired by this update.')
     expect(html).toContain('Your chats stay.')
     expect(html).toMatch(/<button[^>]*>Move<\/button>/)
     expect(renderToStaticMarkup(createElement(ThreadMoveBanner, { instanceId: MANAGED, snapshots }))).toBe('')
@@ -254,8 +263,8 @@ describe('openai-codex in the PR 3 release', () => {
     expect(auth['openai-codex']).toBeDefined()
     expect(deviceDefault()).toEqual(read('defaults.json').provider)
     expect(new HarnessScopeStore(made.profileHome).project('project-1')?.defaultSelection).toMatchObject({ instanceId: 'pi:openai-codex' })
-    // The pinned thread is still on the old entry.
-    expect(harness.resolveStored(read('thread.json').modelOverride, { purpose: 'turn' })).toMatchObject({ instanceId: 'pi:openai-codex', driver: 'pi' })
+    // The pinned thread is still on the old entry, which runs nothing.
+    expect(pinnedRefusal(harness)).toMatchObject({ code: 'provider_retired', message: 'ChatGPT was retired by a Mousse update. Move it to ChatGPT subscription in Settings → Providers to keep chatting. Your chats stay.' })
   })
 
   it('a move onto a turned-off Codex is refused too', async () => {
@@ -308,7 +317,7 @@ describe('openai-codex in the PR 3 release', () => {
     const snapshot = await snapshotOf(made.harness, 'pi:openai-codex')
     expect(snapshot).toMatchObject({ enabled: { device: true }, auth: { state: 'signed_in' }, nextStep: { action: 'move' } })
     expect(snapshot.config?.movedTo).toBeUndefined()
-    expect(made.harness.resolveStored(read('thread.json').modelOverride, { purpose: 'turn' })).toMatchObject({ instanceId: 'pi:openai-codex', driver: 'pi' })
+    expect(pinnedRefusal(made.harness)).toMatchObject({ code: 'provider_retired' })
     // Once the disk is back, Move goes through.
     failing.mockRestore()
     expect(await made.harness.instances.move('pi:openai-codex', MANAGED)).toMatchObject({ oldSignIn: 'removed' })
@@ -354,7 +363,7 @@ describe('openai-codex in the PR 3 release', () => {
     expect(await profiles.a.harness.instances.move('pi:openai-codex', MANAGED)).toMatchObject({ oldSignIn: 'kept_shared' })
     expect(shared['openai-codex']).toBeDefined()
     expect(await snapshotOf(profiles.b.harness, 'pi:openai-codex')).toMatchObject({ auth: { state: 'signed_in' }, nextStep: { action: 'move' } })
-    expect(profiles.b.harness.resolveStored(read('thread.json').modelOverride, { purpose: 'turn' })).toMatchObject({ instanceId: 'pi:openai-codex', driver: 'pi' })
+    expect(pinnedRefusal(profiles.b.harness)).toMatchObject({ code: 'provider_retired' })
     expect(profiles.a.stored()['pi:openai-codex']).toMatchObject({ enabled: false, config: { movedTo: MANAGED } })
 
     // B is the last profile to move: now nothing uses the sign-in, and it is deleted.

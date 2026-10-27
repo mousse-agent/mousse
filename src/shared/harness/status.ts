@@ -41,7 +41,7 @@ export type NextStepAction =
   | 'recheck'
   | 'sign_in'
   | 'update'
-  /** The entry's old route is going away: move to the agent that replaces it. */
+  /** A Mousse update retired the entry's route: move to the agent that replaces it. */
   | 'move'
 
 export interface NextStep {
@@ -136,6 +136,8 @@ export interface InstanceSnapshot {
     canSignOut?: boolean
     /** A sign-in can start in Mousse now, even when the account is not checked (`unknown`). */
     canSignIn?: boolean
+    /** A move may copy a model API's saved API key to this entry (`instances.move` with `copyKey`). */
+    canTakeKey?: boolean
     /** What the instance runs on once signed in; absent when the driver cannot tell without another check. */
     credential?: CredentialKind
   }
@@ -224,7 +226,7 @@ function step(snapshot: InstanceSnapshot, action: NextStepAction, label = DEFAUL
   return hint?.action === action ? hint : { action, label }
 }
 
-/** An entry whose old route is going away has no sign-in to offer: signed out, its step stays Move. */
+/** A retired entry has no sign-in to offer: signed out, its step stays Move. */
 function signInStep(snapshot: InstanceSnapshot, label?: string): NextStep {
   return snapshot.nextStep?.action === 'move' ? snapshot.nextStep : step(snapshot, 'sign_in', label)
 }
@@ -250,6 +252,16 @@ const STALE_DETAIL = 'The last check did not finish. Showing the last good statu
  */
 export function describeStatus(snapshot: InstanceSnapshot): StatusDescription {
   const { enabled, install, runs, auth, compatibility } = snapshot
+
+  // Retired by a Mousse update: nothing runs on it, on or off, and Move is the one step.
+  if (runs.state === 'no' && snapshot.nextStep?.action === 'move') {
+    return {
+      headline: snapshot.nextStep.title ?? 'Retired',
+      detail: snapshot.nextStep.detail ?? runs.message ?? null,
+      tone: 'warning',
+      nextStep: snapshot.nextStep
+    }
+  }
 
   if (!enabled.effective) {
     return {

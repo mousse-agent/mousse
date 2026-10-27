@@ -1,10 +1,9 @@
 import type { InstanceConfig } from '../../driver'
 
 /**
- * Providers that stay on the legacy pi loop whatever their config says (PR 2 §5):
- * - `openai-codex` until PR 4 (PR 3 offers the move to Codex and keeps it chatting meanwhile);
- * - `cursor` until PR D (Mousse registers it in its own process; Pi's agent has no such provider).
- * Every other provider can run on Pi's agent (`rpc`) when the user opts in (Advanced → Engine:
+ * Providers that never run on Pi's agent whatever their config says (PR 2 §5): `openai-codex` and
+ * `cursor` ran only on the legacy loop, and a Mousse update retired them (`retired.ts`: they run
+ * nowhere until moved). Every other provider can run on Pi's agent (`rpc`) when the user opts in (Advanced → Engine:
  * New engine); the default stays the loop until the parity gate passed on real accounts, and a later
  * PR flips it. The bare `pi` route (no instance) stays on the loop until PR 4.
  */
