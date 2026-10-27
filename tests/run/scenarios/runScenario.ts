@@ -257,7 +257,7 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
     questions,
     shellPath: async () => ({ entries: [], source: 'failed' }),
     drivers: [
-      piDriver({ client: () => orch.piChatClient(), ...(piRpc ? { rpc: piRpc.driverOptions() } : {}) }),
+      piDriver({ ...(piRpc ? { rpc: piRpc.driverOptions() } : {}) }),
       // A vendor driver is installed only with its service: the built-in instances of the others
       // have nothing to reconcile or probe, and no vendor CLI of the machine is ever reached.
       ...(services.claude ? [claudeCodeDriver({ builtIn: () => services.claude! })] : []),

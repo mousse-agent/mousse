@@ -8,7 +8,7 @@ import { instanceEnv, type InstanceEnv } from '../../src/mms/harness/env'
 import { instanceStateDir } from '../../src/mms/harness/instances'
 import { ANTHROPIC_OAUTH_ENV_KEYS, PI_ENV_KEYS, PI_PROVIDER_ENV_KEYS } from '../../src/mms/harness/pi/envKeys'
 import { piLaunch, piRuntimePaths, type PiLaunchInput } from '../../src/mms/harness/pi/launch'
-import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PiStubAdapter } from '../support/piStub'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 
 const repoRoot = resolve(__dirname, '..', '..')
@@ -189,7 +189,7 @@ describe('Pi instances: a Mousse-owned home', () => {
     const profileHome = mkdtempSync(join(tmpdir(), 'mousse-pi-home-'))
     homes.push(profileHome)
     const contexts: DriverContext[] = []
-    const base = adapterDriver(new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } })))
+    const base = adapterDriver(new PiStubAdapter())
     const driver = { ...base, alwaysPrivateHome: true, create: (context: DriverContext) => (contexts.push(context), base.create(context)) }
     const instances = new ProviderInstanceService({
       store: { read: () => ({ instances: undefined }), write: () => {} },

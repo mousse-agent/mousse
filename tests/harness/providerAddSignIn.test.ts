@@ -15,7 +15,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { piDriver } from '../../src/mms/harness/drivers/pi'
 import type { HarnessGatewayEvent } from '../../src/mms/harness/gateway'
 import { ProviderInstanceService, type StoredProviderInstances } from '../../src/mms/providers/ProviderInstanceService'
-import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PiStubAdapter } from '../support/piStub'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import { PiInstallationCredentials } from './fixtures/piInstallationCredentials'
 
@@ -33,7 +33,7 @@ function profile(credentials: PiInstallationCredentials) {
   const harness = testHarness({
     profileHome: home,
     instances,
-    drivers: [piDriver({ client: () => ({ chat: async () => { throw new Error('no model call in this test') } }) as never, credentials: () => credentials as never })]
+    drivers: [piDriver({ credentials: () => credentials as never })]
   })
   const events: HarnessGatewayEvent[] = []
   harness.instances.subscribe((event) => events.push(event))
@@ -68,7 +68,7 @@ describe('adding cloud credentials', () => {
 describe('a sign-in that finishes during an older check', () => {
   it('is checked again once that check ends, so the entry reads signed in', async () => {
     let signedIn = false
-    const pi = new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } }))
+    const pi = new PiStubAdapter()
     let releaseCheck!: () => void
     let checks = 0
     const driver = adapterDriver(pi, {
@@ -140,7 +140,7 @@ describe('events that only a snapshots event now carries', () => {
 
 describe('a driver with Add options', () => {
   it('must give them fixed ids', () => {
-    const pi = new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } }))
+    const pi = new PiStubAdapter()
     const driver = { ...adapterDriver(pi), addOptions: () => [] }
     expect(() => testHarness({ drivers: [driver], instances: new ProviderInstanceService(), profileHome: tmpdir() })).toThrow('offers Add options but no fixed instance ids')
   })

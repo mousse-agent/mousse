@@ -13,7 +13,7 @@ import { MousseMainService } from '../../src/mms/MousseMainService'
 import { LocalMmsClient } from '../../src/mms/protocol/client'
 import { MmsProtocolServer } from '../../src/mms/protocol/server'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
-import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import type { RunRecord } from '../../src/mms/run/types'
 import { evaluateRestore, pathsOverlap, RESTORE_DIFF_MAX_CHARS, restoreDiff, restoreDiffSha, worktreeClaims } from '../../src/mms/run/workspace/restoreSafety'
 import { WorkspaceResolver } from '../../src/mms/workspace/WorkspaceResolver'
@@ -41,7 +41,7 @@ describe('evaluateRestore (SPEC §16.3)', () => {
     const owned = metadata('t1', worktree, join(root, 'primary'))
     expect(evaluateRestore({ threadId: 't1', caps: CLAUDE_SUBSCRIPTION_CAPABILITIES, metadata: owned, others: [] })).toEqual({ action: 'review', mode: 'review_diff' })
     expect(evaluateRestore({ threadId: 't1', caps: CLAUDE_SUBSCRIPTION_CAPABILITIES, metadata: owned, others: [], reviewed: true })).toEqual({ action: 'proceed', mode: 'review_diff' })
-    expect(evaluateRestore({ threadId: 't1', caps: PI_LOOP_CAPABILITIES, metadata: owned, others: [] })).toEqual({ action: 'proceed', mode: 'auto' })
+    expect(evaluateRestore({ threadId: 't1', caps: PI_TEST_CAPABILITIES, metadata: owned, others: [] })).toEqual({ action: 'proceed', mode: 'auto' })
     expect(evaluateRestore({ threadId: 't1', caps: null, metadata: owned, others: [] })).toEqual({ action: 'review', mode: 'review_diff' })
   })
 
@@ -54,11 +54,11 @@ describe('evaluateRestore (SPEC §16.3)', () => {
     symlinkSync(worktree, join(root, 'alias'))
     const owned = metadata('t1', worktree, primary)
     const refuse = (others: Parameters<typeof evaluateRestore>[0]['others'], meta: ThreadWorkspaceMetadata | undefined = owned) =>
-      evaluateRestore({ threadId: 't1', caps: PI_LOOP_CAPABILITIES, metadata: meta, others })
+      evaluateRestore({ threadId: 't1', caps: PI_TEST_CAPABILITIES, metadata: meta, others })
     // Not owned: another thread's worktree, the primary checkout, or none.
     expect(refuse([], { ...owned, provenance: { ownerThreadId: 't2' } })).toMatchObject({ action: 'refuse', reason: 'workspace_shared' })
     expect(refuse([], { ...owned, worktreePath: primary })).toMatchObject({ action: 'refuse', reason: 'workspace_shared' })
-    expect(evaluateRestore({ threadId: 't1', caps: PI_LOOP_CAPABILITIES, metadata: undefined, others: [] })).toMatchObject({ action: 'refuse', reason: 'workspace_shared' })
+    expect(evaluateRestore({ threadId: 't1', caps: PI_TEST_CAPABILITIES, metadata: undefined, others: [] })).toMatchObject({ action: 'refuse', reason: 'workspace_shared' })
     // Overlap through a symlink alias, a nested live cwd, or an enclosing worktree.
     expect(refuse([{ threadId: 't2', path: join(root, 'alias'), kind: 'worktree' }])).toMatchObject({ action: 'refuse', conflicts: [{ threadId: 't2' }] })
     expect(refuse([{ threadId: 't3', path: join(root, 'alias', 'src'), kind: 'live_cwd' }])).toMatchObject({ action: 'refuse', conflicts: [{ threadId: 't3' }] })

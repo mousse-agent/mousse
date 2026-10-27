@@ -7,14 +7,14 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import type { AdapterHost, ProviderAdapter, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
 import { PI, phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 /** A pi-shaped adapter that records the model and working directory of each turn. */
 class RecordingAdapter implements ProviderAdapter {
   readonly driver = 'pi' as const
-  readonly capabilities = PI_LOOP_CAPABILITIES
+  readonly capabilities = PI_TEST_CAPABILITIES
   readonly turns: Array<{ threadId: string; model: string; provider: string; cwd: string | null }> = []
 
   configured(): boolean {

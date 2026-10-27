@@ -8,7 +8,7 @@ import { customModelDefinition } from '../../src/mms/harness/catalog'
 import { LlmClient } from '../../src/mms/orchestrator/LlmClient'
 import { userMessage } from '../../src/mms/orchestrator/nativeContext'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
-import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PiStubAdapter } from '../support/piStub'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import { piInstanceId } from '../../src/shared/providerInstances'
 import { getDefaultSettings } from '../../src/shared/settings'
@@ -16,7 +16,7 @@ import { fixtureModel, providerResponse, streamOf } from '../fixtures/agent-plat
 
 describe('custom models', () => {
   it('a custom model absent from the upstream catalog is dispatched with its provider transport and declared capabilities', async () => {
-    const pi = new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } }))
+    const pi = new PiStubAdapter()
     const harness = testHarness({
       adapters: [pi],
       instances: new ProviderInstanceService({ providerAuth: { credentials: { listProviderIds: () => ['fixture-provider'] } } })
@@ -65,7 +65,7 @@ describe('custom models', () => {
   })
 
   it('a runtime that runs only the models it lists refuses custom models and says so in its snapshot', async () => {
-    const pi = new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } }))
+    const pi = new PiStubAdapter()
     const antigravity = { ...adapterDriver({ ...pi, driver: 'antigravity', startTurn: pi.startTurn.bind(pi), interrupt: pi.interrupt.bind(pi) }), customModels: false }
     const harness = testHarness({ drivers: [adapterDriver(pi), antigravity], instances: new ProviderInstanceService() })
     await expect(harness.instances.setModelPrefs('antigravity', { custom: [{ id: 'x', capabilities: { efforts: [], images: false } }] }))

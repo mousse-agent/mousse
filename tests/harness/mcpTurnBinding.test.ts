@@ -22,7 +22,7 @@ const DRIVERS: HarnessDriver[] = [
   antigravityDriver({ builtIn: unused }),
   acpDriver(),
   // With its RPC inputs, so the engine that attaches the Mousse MCP server is reachable.
-  piDriver({ client: unused, credentials: unused, rpc: { runtime: unused, catalog: unused } })
+  piDriver({ credentials: unused, rpc: { runtime: unused, catalog: unused } })
 ]
 
 describe('MCP turn binding (PR 2 §2)', () => {

@@ -8,7 +8,7 @@ import type { AuthReading } from '../../src/mms/harness/driver'
 import { PROBE_TTL_MS, type HarnessGatewayEvent } from '../../src/mms/harness/gateway'
 import { dispatchMethod, type HandlerContext } from '../../src/mms/protocol/handlers'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
-import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PiStubAdapter } from '../support/piStub'
 import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 
@@ -18,7 +18,7 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
-const pi = new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } }))
+const pi = new PiStubAdapter()
 const claude: ProviderAdapter = { driver: 'claude', capabilities: pi.capabilities, configured: () => true, startTurn: async () => { throw new Error('unused') }, interrupt: async () => 'not_active' }
 const signedIn: AuthReading = { state: 'signed_in' }
 

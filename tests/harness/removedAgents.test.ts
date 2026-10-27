@@ -16,7 +16,7 @@ import { instanceStateDir } from '../../src/mms/harness/instances'
 import { dispatchMethod, type HandlerContext } from '../../src/mms/protocol/handlers'
 import { createProviderAccess } from '../../src/mms/providers/providerAccess'
 import { ProviderInstanceService, type StoredProviderInstances } from '../../src/mms/providers/ProviderInstanceService'
-import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PiStubAdapter } from '../support/piStub'
 import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import { PiInstallationCredentials } from './fixtures/piInstallationCredentials'
@@ -109,7 +109,7 @@ describe('a removed built-in agent', () => {
 })
 
 describe('removing an entry and adding it back keeps the new entry\'s state folder', () => {
-  const pi = new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } }))
+  const pi = new PiStubAdapter()
   const claude: ProviderAdapter = { driver: 'claude', capabilities: pi.capabilities, configured: () => true, startTurn: async () => { throw new Error('unused') }, interrupt: async () => 'not_active' }
 
   it('an agent\'s own-setup id, re-added while the removal waits for a check', async () => {
@@ -142,7 +142,7 @@ describe('removing an entry and adding it back keeps the new entry\'s state fold
     const credentials = new PiInstallationCredentials()
     let state: StoredProviderInstances = { instances: {}, seedVersion: 1 }
     const instances = new ProviderInstanceService({ store: { read: () => ({ ...state }), write: (next) => { state = { ...next } } }, providerAuth: credentials })
-    const harness = testHarness({ profileHome: dir, instances, drivers: [piDriver({ client: () => ({ chat: async () => { throw new Error('unused') } }) as never, credentials: () => credentials as never })] })
+    const harness = testHarness({ profileHome: dir, instances, drivers: [piDriver({ credentials: () => credentials as never })] })
     cleanups.push(() => harness.stop())
     await harness.instances.add({ driver: 'pi', config: { provider: 'openrouter' } })
     await harness.instances.snapshots({ kind: 'device' })
@@ -171,7 +171,7 @@ describe('a key saved for an entry added back while its removal deletes the old 
     credentials.keys.set('openrouter', 'fixture-old-key')
     let state: StoredProviderInstances = { instances: {}, seedVersion: 1 }
     const instances = new ProviderInstanceService({ store: { read: () => ({ ...state }), write: (next) => { state = { ...next } } }, providerAuth: credentials })
-    const harness = testHarness({ profileHome: dir, instances, drivers: [piDriver({ client: () => ({ chat: async () => { throw new Error('unused') } }) as never, credentials: () => credentials as never })] })
+    const harness = testHarness({ profileHome: dir, instances, drivers: [piDriver({ credentials: () => credentials as never })] })
     cleanups.push(() => harness.stop())
     // The old key's deletion is slow: whatever is saved meanwhile must survive it.
     const slow = deferred<void>()

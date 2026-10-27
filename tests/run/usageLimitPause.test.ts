@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { formatPullRequestNotice } from '../../src/mms/git/pullRequestWatch'
 import { usageLimitError } from '../../src/mms/orchestrator/providerErrors'
 import { readDurableQueue } from '../../src/mms/queue/durableQueue'
-import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import { startedByPerson } from '../../src/mms/run/approvalRights'
 import { CONTINUE_TEXT, pauseProviderName, pausedLine } from '../../src/mms/run/pauseText'
 import { BRIDGE_THREAD_EVENT_TYPES } from '../../src/shared/net/envelope'
@@ -476,7 +476,7 @@ describe('a usage limit pauses the run', () => {
       const pi = scripted([{ fail: () => limit({ ms: 60_000 }) }])
       const d = boot(newHome(), [pi])
       const { thread, run } = await paused(d, pi)
-      const reconciler = new Reconciler({ store: d.engine.store, outbox: d.engine.outbox, tools: new ToolInvocations(d.engine.store), now: () => new Date().toISOString(), capabilitiesFor: () => PI_LOOP_CAPABILITIES })
+      const reconciler = new Reconciler({ store: d.engine.store, outbox: d.engine.outbox, tools: new ToolInvocations(d.engine.store), now: () => new Date().toISOString(), capabilitiesFor: () => PI_TEST_CAPABILITIES })
       d.engine.inbox.append({ inboxId: `inbox:pr-update:${thread.id}:1:0`, threadId: thread.id, kind: 'pr_update', payload: { text: NOTICE, number: 7, headSha: 'abcdef0123', changes: ['checks_failed'] } })
 
       expect(reconciler.runOnce().wakes.wakes).toEqual([])

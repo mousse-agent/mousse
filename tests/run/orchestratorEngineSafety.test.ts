@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import type { Message } from '@earendil-works/pi-ai'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { DelegationToolHost } from '../../src/mms/run/mcp/appTools/delegation'
-import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
 import { McpToolError } from '../../src/mms/run/mcp/appTools'
 import { Reconciler } from '../../src/mms/run/Reconciler'
@@ -27,7 +27,7 @@ class HostAdapter implements ProviderAdapter {
   interrupts = 0
   constructor(
     private readonly script: HostScript,
-    readonly capabilities: ProviderCapabilities = PI_LOOP_CAPABILITIES
+    readonly capabilities: ProviderCapabilities = PI_TEST_CAPABILITIES
   ) {}
 
   configured(): boolean {

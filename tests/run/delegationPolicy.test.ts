@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import type {
   AdapterHost,
   ProviderAdapter,
@@ -21,7 +21,7 @@ import { PI, phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 /** A pi-shaped adapter that records each turn's thread, cwd and tool access, and replies. */
 class PolicyAdapter implements ProviderAdapter {
   readonly driver = 'pi' as const
-  readonly capabilities = PI_LOOP_CAPABILITIES
+  readonly capabilities = PI_TEST_CAPABILITIES
   readonly turns: Array<{ threadId: string; cwd: string | null; toolAccess: AdapterHost['tools']['toolAccess'] }> = []
 
   configured(): boolean {

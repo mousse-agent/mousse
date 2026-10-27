@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { DelegateTaskInput, DelegationToolHost } from '../../src/mms/run/mcp/appTools/delegation'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
-import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import { phase6Daemon, waitFor } from './phase6Fixture'
@@ -66,7 +66,7 @@ describe('delegate_task by provider instance', () => {
     previousHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = home
     const outcome: { started?: { delegationId: string }; error?: { code?: string; message: string } } = {}
-    const parent = new ScriptedAdapter('pi', PI_LOOP_CAPABILITIES, async (input, delegation) => {
+    const parent = new ScriptedAdapter('pi', PI_TEST_CAPABILITIES, async (input, delegation) => {
       if (input.prompt !== 'Review the module') return 'unexpected pi turn'
       try {
         outcome.started = await delegation!.delegateTask({ prompt: 'Review it', workspace: 'shared', role: 'review', ...request }, { toolCallId: 'call-1' }) as { delegationId: string }

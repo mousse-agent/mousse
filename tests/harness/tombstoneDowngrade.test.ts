@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
 import { PI_LEGACY_CAPS, piDriver } from '../../src/mms/harness/drivers/pi'
 import { configInstanceStore, ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
-import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PiStubAdapter } from '../support/piStub'
 import { testHarness } from '../../src/mms/run/testkit/harness'
 import { PiInstallationCredentials } from './fixtures/piInstallationCredentials'
 import olderBuildWrite from './fixtures/preTombstoneProvidersWrite.json'
@@ -39,7 +39,7 @@ function start(home: string, credentials: PiInstallationCredentials) {
   const harness = testHarness({
     profileHome: home,
     instances,
-    drivers: [piDriver({ client: () => ({ chat: async () => { throw new Error('no model call in this test') } }) as never, credentials: () => credentials as never })]
+    drivers: [piDriver({ credentials: () => credentials as never })]
   })
   cleanups.push(() => harness.stop())
   return { config, instances, harness, writes: () => writes }
@@ -81,7 +81,7 @@ describe('a tombstone across a downgrade', () => {
 
     // This build starts on A again.
     const next = start(homeA, credentials)
-    const startTurn = vi.spyOn(PiLoopAdapter.prototype, 'startTurn')
+    const startTurn = vi.spyOn(PiStubAdapter.prototype, 'startTurn')
     // (The agents are seeded on a profile's first start; no driver serves them in this test.)
     expect(Object.keys(next.instances.list())).toEqual(['antigravity', 'claude', 'codex'])
     expect(next.instances.get('pi:openrouter')).toBeUndefined()

@@ -106,7 +106,7 @@ describe('Pi budgets policy', () => {
   it('declares the RPC caps only for an instance whose config asks for the RPC engine', () => {
     const unused = () => { throw new Error('unused') }
     const rpc = { runtime: unused, catalog: unused }
-    const driver = piDriver({ client: unused, rpc })
+    const driver = piDriver({ rpc })
     // A private home only for the RPC engine: legacy instances keep their home id (and bindings).
     const privateHome = driver.alwaysPrivateHome as (config: ReturnType<typeof driver.decodeConfig>) => boolean
     expect(privateHome(driver.decodeConfig({ engine: 'rpc' }))).toBe(true)
@@ -116,7 +116,7 @@ describe('Pi budgets policy', () => {
     expect(driver.caps(driver.decodeConfig({}))).toBe(PI_LEGACY_CAPS)
     expect(driver.caps(driver.decodeConfig({ engine: 'nonsense' }))).toBe(PI_LEGACY_CAPS)
     // Without the profile's RPC options every instance stays on the legacy loop.
-    const legacyOnly = piDriver({ client: unused })
+    const legacyOnly = piDriver()
     expect(legacyOnly.caps(legacyOnly.decodeConfig({ engine: 'rpc' }))).toBe(PI_LEGACY_CAPS)
   })
 })

@@ -91,7 +91,7 @@ describe('an ACP agent that never answers session/prompt', () => {
       questions: new UserQuestionService(),
       shellPath: async () => ({ entries: [], source: 'failed' }),
       drivers: [
-        piDriver({ client: () => orch.piChatClient() }),
+        piDriver(),
         acpDriver({ connect: (_context, request) => agent.connect(request), pty: { available: () => false }, promptSilenceMs: SILENCE_MS })
       ]
     })

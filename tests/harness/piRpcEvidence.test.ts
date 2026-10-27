@@ -19,7 +19,7 @@ const record = (overrides: Partial<ContainmentEvidence> = {}): ContainmentEviden
 
 function driver(platform: NodeJS.Platform, evidence: readonly ContainmentEvidence[]) {
   const rpc = { runtime: () => ({ root: piRoot, entry: join(piRoot, 'dist/bundle/rpc-entry.js'), extension: 'unused.mjs' }), catalog: () => ({ revision: 1, provider: { id: 'x', builtin: false, models: [] } }), platform, evidence } as unknown as PiRpcDriverOptions
-  return piDriver({ client: () => ({ chat: async () => { throw new Error('unused') } }), rpc })
+  return piDriver({ rpc })
 }
 
 const definitionPolicy = { mode: 'default' as const, origin: 'definition' as const, approvals: 'grants' as const, tools: { allow: ['read'] }, authority: { kind: 'definition' as const, digest: 'd' }, budget: { maxTurns: 3, maxToolCalls: 5 } }

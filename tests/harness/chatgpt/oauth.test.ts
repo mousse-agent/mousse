@@ -10,7 +10,7 @@ import { isBrowserBlockedPort, parsePastedRedirect, setBlockedPortCheckForTests 
 import { activeSession } from '../../../src/mms/harness/chatgpt/store'
 import type { HarnessGatewayEvent } from '../../../src/mms/harness/gateway'
 import { ProviderInstanceService } from '../../../src/mms/providers/ProviderInstanceService'
-import { PiLoopAdapter } from '../../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PiStubAdapter } from '../../support/piStub'
 import type { ProviderAdapter } from '../../../src/mms/run/adapters/ProviderAdapter'
 import { adapterDriver, testHarness } from '../../../src/mms/run/testkit/harness'
 import { FakeIssuer, FULL_SCOPE, guardNetwork, plainCodec, tempHomes } from './fakeIssuer'
@@ -488,7 +488,7 @@ function stored(auth: ReturnType<typeof chatgptAuth>) {
 describe('Sign in with ChatGPT through the gateway', () => {
   const fake = (): ProviderAdapter => ({
     driver: 'codex',
-    capabilities: new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } })).capabilities,
+    capabilities: new PiStubAdapter().capabilities,
     configured: () => true,
     startTurn: async () => { throw new Error('unused') },
     interrupt: async () => 'not_active'

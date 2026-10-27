@@ -14,7 +14,7 @@ import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import { testHarness } from '../../src/mms/run/testkit/harness'
 import type { HarnessDriver } from '../../src/mms/harness/driver'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
-import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import type {
   AdapterHost,
   ProviderAdapter,
@@ -116,7 +116,7 @@ export class ScriptedAdapter implements ProviderAdapter {
 
 /** A pi-shaped adapter (`historyInjection: 'native'`). */
 export const piAdapter = (script: Script, caps: Partial<ProviderCapabilities> = {}, sessionId?: string): ScriptedAdapter =>
-  new ScriptedAdapter('pi', { ...PI_LOOP_CAPABILITIES, ...caps }, script, sessionId)
+  new ScriptedAdapter('pi', { ...PI_TEST_CAPABILITIES, ...caps }, script, sessionId)
 
 /** A Claude-subscription-shaped adapter (`historyInjection: 'prompt'`, weak containment). */
 export const claudeAdapter = (script: Script): ScriptedAdapter =>

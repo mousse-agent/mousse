@@ -176,7 +176,7 @@ export function startProfile(home: string, store: ProfileStore, binaries: { clau
     // No registry lookups.
     latest: { get: () => undefined, refresh: async () => false } as never,
     drivers: [
-      piDriver({ client: () => ({ chat: async () => { throw new Error('unused') } }) as never }),
+      piDriver(),
       claudeCodeDriver({ builtIn: () => claude }),
       codexDriver({ builtIn: () => codex }),
       antigravityDriver({ builtIn: () => antigravity })

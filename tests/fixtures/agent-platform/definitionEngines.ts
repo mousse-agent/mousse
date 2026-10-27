@@ -167,7 +167,7 @@ export async function createDefinitionEngine(kind: DefinitionEngineKind, provide
     setNext: (value) => { custom = value },
     install: (orchestrator, profileHome, options = {}) => {
       const never = (): never => { throw new Error('Pi RPC must not start for a definition turn') }
-      const pi = piDriver({ client: () => orchestrator.piChatClient(), credentials: () => providerAuth as never, ...(options.engine === 'rpc' ? { rpc: { runtime: never, catalog: never } } : {}) })
+      const pi = piDriver({ credentials: () => providerAuth as never, ...(options.engine === 'rpc' ? { rpc: { runtime: never, catalog: never } } : {}) })
       // The real loop adapter, with every turn it is given recorded.
       const recorded = {
         ...pi,

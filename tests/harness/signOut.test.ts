@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { decodeInstanceConfig, type DriverRuntime, type HarnessDriver } from '../../src/mms/harness/driver'
 import type { Harness, TurnSpec } from '../../src/mms/harness/gateway'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
-import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PiStubAdapter } from '../support/piStub'
 import type { ProviderAdapter, TurnResult } from '../../src/mms/run/adapters/ProviderAdapter'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 
@@ -22,7 +22,7 @@ afterEach(() => {
 })
 
 const noop = () => {}
-const capabilities = new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } })).capabilities
+const capabilities = new PiStubAdapter().capabilities
 
 function turnSpec(binding: TurnSpec['binding'], attemptId: string, previous?: TurnSpec['binding']): TurnSpec {
   return {
@@ -206,7 +206,7 @@ describe('a pi provider signed out in Mousse', () => {
   it('a saved key signs it in again; a call that saved none leaves it signed out', async () => {
     let hasKey = true
     let accepts = false
-    const pi = adapterDriver(new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } })), {
+    const pi = adapterDriver(new PiStubAdapter(), {
       runtime: { configured: () => hasKey, signOut: async () => { hasKey = false }, setSecret: async () => { if (accepts) hasKey = true } }
     })
     const { harness } = gateway(pi, { 'pi:openrouter': { driver: 'pi', enabled: true } })

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { ANTIGRAVITY_CAPABILITIES } from '../../src/mms/harness/acp/presets/antigravity'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
-import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import { NOTICE_TASK_CHARS } from '../../src/mms/run/delegation/notice'
 import { planWakeNotice } from '../../src/mms/run/delegation/notice'
 import { redeliveryDelayMs } from '../../src/mms/run/delegation/wake'
@@ -102,7 +102,7 @@ describe('Reconciler rule 4: a child result wakes its parent (SPEC §14.3)', () 
 
   it('active pi-loop parent: a notice row is steered into the live run', async () => {
     const { f, parent } = await childFinished({ parentStaysActive: true })
-    f.capabilities.set('parent', PI_LOOP_CAPABILITIES)
+    f.capabilities.set('parent', PI_TEST_CAPABILITIES)
     f.engine.inbox.append({ threadId: 'parent', kind: 'reconcile_notice', payload: { text: 'heads up' } })
     const report = f.reconciler.runOnce().wakes
     expect(report.wakes).toEqual([])

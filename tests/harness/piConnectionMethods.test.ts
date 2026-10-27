@@ -88,7 +88,7 @@ describe('Pi connection methods', () => {
   })
 
   it('routes each row to its engine once the user opts in', () => {
-    const driver = piDriver({ client: () => { throw new Error('unused') }, rpc: profile({}) })
+    const driver = piDriver({ rpc: profile({}) })
     for (const [id, method] of Object.entries(METHODS)) {
       expect(driver.engine?.(`pi:${id}`, { engine: 'rpc' }).effective, id).toBe(method === 'legacy' ? 'legacy' : 'rpc')
       // The default stays the loop until the parity gate passed.

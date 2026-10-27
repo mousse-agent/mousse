@@ -11,7 +11,7 @@ import { piDriver } from '../../src/mms/harness/drivers/pi'
 import type { HarnessGatewayEvent } from '../../src/mms/harness/gateway'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import { dispatchMethod, type HandlerContext } from '../../src/mms/protocol/handlers'
-import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PiStubAdapter } from '../support/piStub'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import { describeStatus } from '../../src/shared/harness/status'
 
@@ -51,7 +51,7 @@ describe('credential changes through the provider instance methods', () => {
     const instances = new ProviderInstanceService({ providerAuth: auth as never })
     const now = Date.now()
     const harness = testHarness({
-      drivers: [piDriver({ client: () => ({ chat: async () => { throw new Error('unused') } }), credentials: () => auth as never })],
+      drivers: [piDriver({ credentials: () => auth as never })],
       instances,
       profileHome: home(),
       now: () => now
@@ -84,7 +84,7 @@ describe('credential changes through the provider instance methods', () => {
 })
 
 describe('a check that throws', () => {
-  const pi = () => new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } }))
+  const pi = () => new PiStubAdapter()
 
   it('is recorded with its error and offers Check again, never "Checking"', async () => {
     const adapter = pi()

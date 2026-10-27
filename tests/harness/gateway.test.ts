@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import { RunStoreError } from '../../src/mms/run/db/RunStoreError'
-import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PiStubAdapter } from '../support/piStub'
 import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import type { HarnessGatewayEvent } from '../../src/mms/harness/gateway'
@@ -16,7 +16,7 @@ import { describeStatus } from '../../src/shared/harness/status'
 import { asInstanceConfigPatch } from '../../src/mms/protocol/validators'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 
-const pi = (): PiLoopAdapter => new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } }))
+const pi = (): PiStubAdapter => new PiStubAdapter()
 
 const fake = (driver: ProviderDriverKind, configured = true): ProviderAdapter => ({
   driver,

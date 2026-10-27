@@ -11,7 +11,7 @@ import { ProjectManager } from '../../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../../src/mms/data/ThreadDataStore'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
 import { testHarness } from '../../src/mms/run/testkit/harness'
-import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import type {
   AdapterHost,
   ProviderAdapter,
@@ -31,7 +31,7 @@ import { getDefaultSettings } from '../../src/shared/settings'
 
 class FakePiAdapter implements ProviderAdapter {
   readonly driver = 'pi' as const
-  readonly capabilities = PI_LOOP_CAPABILITIES
+  readonly capabilities = PI_TEST_CAPABILITIES
   readonly turns: Array<{ input: TurnInput; host: AdapterHost }> = []
 
   async startTurn(input: TurnInput, sink: TurnSink, ctl: TurnControl, host: AdapterHost): Promise<TurnResult> {

@@ -146,9 +146,7 @@ describe('moving pi:cursor to Cursor', () => {
     const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
     const harness = testHarness({
       drivers: [
-        piDriver({
-          client: () => ({ chat: async () => { throw new Error('unused') } }),
-          credentials: () => ({ has: () => true, storedApiKey: (id: string) => (id === 'cursor' ? 'pi-cursor-key' : undefined), getConfiguredProviders: () => [], getConfiguredLlmProviders: () => [] })
+        piDriver({ credentials: () => ({ has: () => true, storedApiKey: (id: string) => (id === 'cursor' ? 'pi-cursor-key' : undefined), getConfiguredProviders: () => [], getConfiguredLlmProviders: () => [] })
         }),
         cursorDriver({ connect: host.connect })
       ],

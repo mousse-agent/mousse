@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
-import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import type { HandoffItem } from '../../src/mms/run/handoff/budget'
 import type { ProviderRef } from '../../src/mms/run/types'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
@@ -77,7 +77,7 @@ describe('HandoffService strategies (SPEC §16.1)', () => {
     await ranOn('t', 'openai')
     const run = await target('t')
     transcript(items)
-    const plan = fx.engine.handoffs.plan({ threadId: 't', targetRunId: run.runId, from: { provider: 'openai' }, to, caps: PI_LOOP_CAPABILITIES })
+    const plan = fx.engine.handoffs.plan({ threadId: 't', targetRunId: run.runId, from: { provider: 'openai' }, to, caps: PI_TEST_CAPABILITIES })
     expect(plan.strategy).toBe('delta')
     expect(plan.delivery).toBe('native_history')
     expect(plan.history.map((item) => item.text)).toEqual(['u2', 'a2'])
@@ -89,7 +89,7 @@ describe('HandoffService strategies (SPEC §16.1)', () => {
     await ranOn('t', 'x')
     const run = await target('t')
     transcript(items)
-    const plan = fx.engine.handoffs.plan({ threadId: 't', targetRunId: run.runId, from: { provider: 'x', sessionId: 's1' }, to: { provider: 'x' }, caps: PI_LOOP_CAPABILITIES })
+    const plan = fx.engine.handoffs.plan({ threadId: 't', targetRunId: run.runId, from: { provider: 'x', sessionId: 's1' }, to: { provider: 'x' }, caps: PI_TEST_CAPABILITIES })
     expect(plan.strategy).toBe('native_resume')
     expect(plan.history).toEqual([])
     expect(plan.pointer).toBe('')

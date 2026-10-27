@@ -11,7 +11,7 @@ import { PROTOCOL_METHODS } from '../../src/mms/protocol/types'
 import { piDriver } from '../../src/mms/harness/drivers/pi'
 import { createProviderAccess } from '../../src/mms/providers/providerAccess'
 import { ProviderInstanceService, type StoredProviderInstances } from '../../src/mms/providers/ProviderInstanceService'
-import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PiStubAdapter } from '../support/piStub'
 import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import { PiInstallationCredentials } from './fixtures/piInstallationCredentials'
@@ -21,7 +21,7 @@ afterEach(() => {
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
 })
 
-const pi = new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } }))
+const pi = new PiStubAdapter()
 const claude: ProviderAdapter = { driver: 'claude', capabilities: pi.capabilities, startTurn: async () => { throw new Error('unused') }, interrupt: async () => 'not_active' }
 
 /** A profile with its own home, instance map and gateway. */
@@ -138,7 +138,7 @@ describe('provider methods on two profiles', () => {
       homes.push(home)
       let state: StoredProviderInstances = { instances: {}, seedVersion: 1 }
       const instances = new ProviderInstanceService({ store: { read: () => ({ ...state }), write: (next) => { state = { ...next } } }, providerAuth: credentials })
-      const harness = testHarness({ drivers: [piDriver({ client: () => ({ chat: async () => { throw new Error('unused') } }) as never, credentials: () => credentials as never })], instances, profileHome: home })
+      const harness = testHarness({ drivers: [piDriver({ credentials: () => credentials as never })], instances, profileHome: home })
       return { services: { harness, providerInstances: instances } as unknown as MmsProfileServices, state: () => state }
     }
     const personal = piProfile()

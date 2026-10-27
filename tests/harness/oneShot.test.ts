@@ -82,7 +82,7 @@ function setup() {
   const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
   const harness = testHarness({
     adapters: [agent],
-    drivers: [piDriver({ client: () => ({ chat: async () => { throw new Error('unused') } }), credentials: () => credentials as never })],
+    drivers: [piDriver({ credentials: () => credentials as never })],
     instances,
     profileHome: home
   })

@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, vi } from 'vitest'
 import type { DelegationToolHost } from '../../src/mms/run/mcp/appTools/delegation'
-import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import type { AdapterHost, ProviderAdapter, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
 import { Reconciler } from '../../src/mms/run/Reconciler'
 import { phase6Daemon, waitFor } from './phase6Fixture'
@@ -19,7 +19,7 @@ export type Json = Record<string, any>
 
 export class ScriptedPi implements ProviderAdapter {
   readonly driver = 'pi' as const
-  readonly capabilities = PI_LOOP_CAPABILITIES
+  readonly capabilities = PI_TEST_CAPABILITIES
   readonly turns: Array<{ threadId: string; prompt: string; mode: string }> = []
   constructor(private readonly script: (input: TurnInput, delegation: DelegationToolHost | undefined, host: AdapterHost) => Promise<string>) {}
   configured(): boolean {

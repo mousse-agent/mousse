@@ -118,7 +118,7 @@ describe('Pi’s auth.json ends with the sign-in', () => {
     const logout = vi.fn(async () => {})
     const instances = new ProviderInstanceService({ store: { read: () => ({ instances: { 'pi:openrouter': { driver: 'pi', enabled: true, config: { engine: 'rpc' } } }, seedVersion: 1 }), write: () => {} } })
     const source: PiOAuthSource = { credential: async () => undefined, refresh: async () => undefined }
-    const harness = testHarness({ profileHome: dir, instances, drivers: [piDriver({ client: unused, credentials: () => ({ has: () => true, getConfiguredProviders: () => [], getConfiguredLlmProviders: () => [], logout }) as never, rpc: { runtime: unused, catalog: unused, oauth: source } })] })
+    const harness = testHarness({ profileHome: dir, instances, drivers: [piDriver({ credentials: () => ({ has: () => true, getConfiguredProviders: () => [], getConfiguredLlmProviders: () => [], logout }) as never, rpc: { runtime: unused, catalog: unused, oauth: source } })] })
     cleanups.push(() => harness.stop())
     harness.resolveStored({ instanceId: 'pi:openrouter', llmProvider: 'openrouter', model: 'm' }, { purpose: 'turn' })
     const home = join(instanceStateDir(dir, 'pi:openrouter'), 'home')
@@ -163,7 +163,7 @@ describe('stable identities for tokens that name no account', () => {
 describe('native forks through the gateway', () => {
   function gateway(dir: string) {
     const instances = new ProviderInstanceService({ store: { read: () => ({ instances: { 'pi:openrouter': { driver: 'pi', enabled: true, config: { engine: 'rpc' } } }, seedVersion: 1 }), write: () => {} } })
-    const harness = testHarness({ profileHome: dir, instances, drivers: [piDriver({ client: unused, credentials: () => ({ has: () => true, getConfiguredProviders: () => [], getConfiguredLlmProviders: () => [] }) as never, rpc: { runtime: unused, catalog: unused, identity: () => 'oauth:fake-A' } })] })
+    const harness = testHarness({ profileHome: dir, instances, drivers: [piDriver({ credentials: () => ({ has: () => true, getConfiguredProviders: () => [], getConfiguredLlmProviders: () => [] }) as never, rpc: { runtime: unused, catalog: unused, identity: () => 'oauth:fake-A' } })] })
     cleanups.push(() => harness.stop())
     return harness
   }

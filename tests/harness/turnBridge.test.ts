@@ -12,7 +12,7 @@ import type { TurnAppContext, TurnSpec } from '../../src/mms/harness/gateway'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import { CODEX_CAPABILITIES } from '../../src/mms/run/adapters/codex/CodexAdapter'
-import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PiStubAdapter } from '../support/piStub'
 import type { AdapterHost, ProviderAdapter, TurnResult } from '../../src/mms/run/adapters/ProviderAdapter'
 import type { BearerTurn, TurnSettlement } from '../../src/mms/run/mcp/McpCredentials'
 import type { McpAttachmentProvider } from '../../src/mms/run/mcp/MousseMcpServer'
@@ -65,7 +65,7 @@ function attachment() {
 function setup() {
   const home = mkdtempSync(join(tmpdir(), 'mousse-turn-bridge-'))
   homes.push(home)
-  const pi = new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } }))
+  const pi = new PiStubAdapter()
   const claude = runtime('claude', CLAUDE_SUBSCRIPTION_CAPABILITIES)
   const codex = runtime('codex', CODEX_CAPABILITIES)
   let stored: unknown

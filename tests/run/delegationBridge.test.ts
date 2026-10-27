@@ -15,7 +15,7 @@ import type { DelegationToolHost } from '../../src/mms/run/mcp/appTools/delegati
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
 import { subagentPreamble } from '../../src/mms/run/delegation/guidance'
 import { testHarness } from '../../src/mms/run/testkit/harness'
-import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import type { AdapterHost, ProviderAdapter, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { EffectWorker } from '../../src/mms/run/EffectWorker'
@@ -32,7 +32,7 @@ type Script = (input: TurnInput, delegation: DelegationToolHost | undefined) => 
 /** A pi-shaped adapter whose replies come from a per-turn script with the turn's delegation host. */
 class ScriptedPiAdapter implements ProviderAdapter {
   readonly driver = 'pi' as const
-  readonly capabilities = PI_LOOP_CAPABILITIES
+  readonly capabilities = PI_TEST_CAPABILITIES
   readonly turns: TurnInput[] = []
   constructor(private readonly script: Script) {}
 
