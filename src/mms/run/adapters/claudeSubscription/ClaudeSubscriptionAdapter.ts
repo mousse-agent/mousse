@@ -22,12 +22,14 @@ import { systemTempDirs } from '../../../bots/grants/compile'
 import { retryContextOverflowOnce } from '../shared/retryContextOverflow'
 
 /**
- * A locked instance (PR 6 §3): it runs bot turns only, each under the locked profile. Read per turn:
- * whether a `shell` grant may run here now (the sandbox is available and has evidence for this CLI
- * on this platform), and where each Claude Code process is reported.
+ * A locked instance (PR 6 §3): it runs bot turns only, each under the locked profile. `admit` is read
+ * as each turn starts: refused under an organisation's policy or without gate-and-ledger evidence for
+ * the CLI version in use; otherwise whether a `shell` grant may run here now (the sandbox is
+ * available and has evidence for this version on this platform). `onProcess` gets each Claude Code
+ * process.
  */
 export interface ClaudeLockedProfile {
-  shellContained(): Promise<boolean>
+  admit(): Promise<{ ok: true; shellContained: boolean } | { ok: false; reason: string }>
   onProcess?(pid: number, threadId: string): void
 }
 
@@ -85,7 +87,9 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
     }
     const bot = host.bot
     if (!bot) throw refuse('This Claude Code runtime is locked for bots, so it runs only bot turns.')
-    const shellContained = await this.locked.shellContained()
+    const admitted = await this.locked.admit()
+    if (!admitted.ok) throw refuse(admitted.reason)
+    const shellContained = admitted.shellContained
     const onProcess = this.locked.onProcess
     return {
       authority: bot,

@@ -82,14 +82,31 @@ async function anthropicMock(steps: Json[]) {
   }
 }
 
+interface LockedRun {
+  base: string
+  root: string
+  scratch: string
+  outside: string
+  userHome: string
+  results: string
+  toolRequests: Array<{ tools: string[] }>
+  rows: Array<{ name: string; status: string; idempotent?: boolean }>
+  charge: ReturnType<typeof vi.fn>
+  pids: number[]
+  text: string
+}
+
 describe('locked Claude Code against the real pinned CLI', () => {
   const cleanups: Array<() => Promise<void> | void> = []
   afterEach(async () => {
-    vi.unstubAllEnvs()
     for (const cleanup of cleanups.splice(0).reverse()) await Promise.resolve(cleanup()).catch(() => undefined)
   })
 
-  it.skipIf(!hasBinary)('ignores user and project settings, offers only the granted tools, and the gate keeps a granted Read inside the roots', async () => {
+  /**
+   * One locked bot turn through Mousse's service: a bot granted `read` and `search` on one read-only
+   * root, its scratch folder as the working folder, and the scripted tool calls `steps(paths)`.
+   */
+  async function lockedRun(steps: (paths: { root: string; scratch: string; outside: string; userHome: string }) => Json[], options: { charge?: () => unknown } = {}): Promise<LockedRun & { marker: (name: string) => string }> {
     const base = mkdtempSync(join(tmpdir(), 'mousse-claude-locked-'))
     cleanups.push(() => rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }))
     const root = join(base, 'root')
@@ -99,7 +116,10 @@ describe('locked Claude Code against the real pinned CLI', () => {
     const userHome = join(base, 'user-home')
     for (const dir of [root, scratch, join(scratch, 'tmp'), outside, instanceHome, userHome, join(scratch, '.claude')]) mkdirSync(dir, { recursive: true })
     writeFileSync(join(root, 'a.txt'), 'inside text')
+    writeFileSync(join(scratch, 'scratch-note.txt'), 'SCRATCH-NOTE-VALUE')
     writeFileSync(join(outside, 'secret.txt'), 'TOP-SECRET-VALUE')
+    // Claude Code expands `~` to the home folder itself (review M1): a search there must stay walled.
+    writeFileSync(join(userHome, 'home-secret.txt'), 'HOME-SECRET-VALUE')
     // A hook, an MCP server and allow rules in the entry's home and in the working folder: none may apply (items 2 and 3).
     const marker = (name: string) => join(base, `${name}.marker`)
     const hook = (name: string) => ({ hooks: { PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: `node -e "require('fs').writeFileSync(process.argv[1], 'x')" "${marker(name).replace(/\\/g, '/')}"` }] }] } })
@@ -108,10 +128,7 @@ describe('locked Claude Code against the real pinned CLI', () => {
     writeFileSync(join(scratch, '.claude', 'settings.json'), settings('project'))
     writeFileSync(join(scratch, '.mcp.json'), JSON.stringify({ mcpServers: { planted_project: { command: 'node', args: ['-e', ''] } } }))
 
-    const anthropic = await anthropicMock([
-      { name: 'Read', input: { file_path: join(outside, 'secret.txt') } },
-      { name: 'Read', input: { file_path: join(root, 'a.txt') } }
-    ])
+    const anthropic = await anthropicMock(steps({ root, scratch, outside, userHome }))
     cleanups.push(() => anthropic.close())
 
     const state = mkdtempSync(join(base, 'state-'))
@@ -140,42 +157,69 @@ describe('locked Claude Code against the real pinned CLI', () => {
     })
     cleanups.push(() => service.stop())
 
-    const rows: Array<{ name: string; status: string; idempotent?: boolean }> = []
+    const rows: LockedRun['rows'] = []
     const ledger: ToolLedger = {
-      start: (call, options) => {
-        rows.push({ name: call.name, status: 'started', ...(options?.idempotent !== undefined ? { idempotent: options.idempotent } : {}) })
+      start: (call, opts) => {
+        rows.push({ name: call.name, status: 'started', ...(opts?.idempotent !== undefined ? { idempotent: opts.idempotent } : {}) })
         return String(rows.length - 1)
       },
       commit: (id) => { rows[Number(id)].status = 'committed' },
       failed: (id) => { rows[Number(id)].status = 'failed' }
     }
-    const charge = vi.fn(() => ({ ok: true as const, count: 1 }))
+    const charge = vi.fn(options.charge ?? (() => ({ ok: true as const, count: 1 })))
     const authority = createBotAuthority({
       activationId: 'act-1', role: 'activation',
       permissions: { tools: ['read', 'search'], appTools: [], mcp: [], skills: [], workspace: { roots: [root], access: 'read', scratch } },
-      waiting: () => false, counters: { charge },
+      waiting: () => false, counters: { charge: charge as never },
       time: { deadline: () => Number.MAX_SAFE_INTEGER, signal: new AbortController().signal }, spend: null
     })
     const pids: number[] = []
     const locked: ClaudeLockedTurn = { authority, ledger, cwd: scratch, shellContained: false, temps: [], systemPrompt: 'You are a test bot.', onProcess: (pid) => pids.push(pid) }
     const text = await service.chat({ threadId: 'bot-thread', cwd: scratch, model: 'claude-sonnet-4-5', prompt: 'Read the files.', permissionMode: 'full', locked, onText: () => undefined })
+    return {
+      base, root, scratch, outside, userHome, rows, charge, pids, text, marker,
+      results: anthropic.requests.at(-1)!.results.join('\n'),
+      toolRequests: anthropic.requests.filter((request) => request.tools.length)
+    }
+  }
 
-    expect(text).toContain('done')
+  it.skipIf(!hasBinary)('ignores user and project settings, offers only the granted tools, and the gate keeps every path inside the roots', async () => {
+    const run = await lockedRun(({ root, outside }) => [
+      { name: 'Read', input: { file_path: join(outside, 'secret.txt') } },
+      { name: 'Grep', input: { pattern: 'HOME-SECRET', path: '~', output_mode: 'content' } },
+      { name: 'Glob', input: { pattern: '*', path: '~' } },
+      { name: 'Grep', input: { pattern: 'SECRET', path: outside, output_mode: 'content' } },
+      { name: 'Read', input: { file_path: join(root, 'a.txt') } }
+    ])
+    expect(run.text).toContain('done')
     // Our own spawn ran the CLI (item 1).
-    expect(pids.length).toBe(1)
+    expect(run.pids.length).toBe(1)
     // Item 4: the request offers exactly the granted built-ins; nothing planted adds a tool.
-    const toolRequests = anthropic.requests.filter((request) => request.tools.length)
-    expect(toolRequests.length).toBeGreaterThan(0)
-    for (const request of toolRequests) expect(request.tools.sort()).toEqual(['Glob', 'Grep', 'Read'])
-    // Item 5: the outside Read was denied by the gate and the file was never read; the inside one ran.
-    const results = anthropic.requests.at(-1)!.results
-    expect(results.join('\n')).not.toContain('TOP-SECRET-VALUE')
-    expect(results.join('\n')).toContain('inside text')
-    expect(rows).toEqual([{ name: 'Read', status: 'committed', idempotent: true }])
-    expect(charge).toHaveBeenCalledTimes(1)
+    expect(run.toolRequests.length).toBeGreaterThan(0)
+    for (const request of run.toolRequests) expect(request.tools.sort()).toEqual(['Glob', 'Grep', 'Read'])
+    // Item 5: the outside Read, the `~` searches and the outside Grep were denied by the gate and
+    // nothing outside was read; the inside Read ran.
+    expect(run.results).not.toContain('TOP-SECRET-VALUE')
+    expect(run.results).not.toContain('HOME-SECRET-VALUE')
+    expect(run.results).not.toContain('home-secret.txt')
+    expect(run.results).toContain('inside text')
+    expect(run.rows).toEqual([{ name: 'Read', status: 'committed', idempotent: true }])
+    expect(run.charge).toHaveBeenCalledTimes(1)
     // Items 2 and 3: no settings hook ran.
-    expect(existsSync(marker('user'))).toBe(false)
-    expect(existsSync(marker('project'))).toBe(false)
-    expect(readFileSync(join(outside, 'secret.txt'), 'utf8')).toBe('TOP-SECRET-VALUE')
+    expect(existsSync(run.marker('user'))).toBe(false)
+    expect(existsSync(run.marker('project'))).toBe(false)
+    expect(readFileSync(join(run.outside, 'secret.txt'), 'utf8')).toBe('TOP-SECRET-VALUE')
+  }, 120_000)
+
+  it.skipIf(!hasBinary)('a gate that throws denies the call: nothing runs, even a read Claude Code would allow in its working folder', async () => {
+    const run = await lockedRun(({ scratch }) => [
+      { name: 'Read', input: { file_path: join(scratch, 'scratch-note.txt') } },
+      { name: 'Glob', input: { pattern: '*.txt', path: scratch } }
+    ], { charge: () => { throw new Error('database is locked') } })
+    expect(run.text).toContain('done')
+    expect(run.results).not.toContain('SCRATCH-NOTE-VALUE')
+    expect(run.results).not.toContain('scratch-note.txt')
+    expect(run.results).toContain('could not be checked')
+    expect(run.rows).toEqual([])
   }, 120_000)
 })

@@ -16,6 +16,8 @@ import {
   CLAUDE_BUILTIN_TOOLS,
   claudeLockedCaps,
   claudeLockedHoldsBots,
+  claudeManagedPolicy,
+  claudeManagedPolicyIn,
   claudeLockedSandbox,
   claudeLockedSpawn,
   claudeLockedTools,
@@ -27,7 +29,6 @@ import { decodeInstanceConfig } from '../../src/mms/harness/driver'
 import { CLAUDE_CODE_CAPS, claudeCodeDriver, claudeLocked } from '../../src/mms/harness/drivers/claudeCode'
 import { lockedEnv } from '../../src/mms/harness/env'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
-import { claudeManagedPolicyPresent } from '../../src/mms/providers/claudeSubscription/accountSubject'
 import { ClaudeSubscriptionProviderService } from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
 import { ClaudeSubscriptionAdapter } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import type { ToolLedger } from '../../src/mms/run/mcp/appTools/types'
@@ -152,7 +153,7 @@ describe('locked Claude Code: launch options (item 1, 4, 7)', () => {
   it('a bot without a folder runs in an empty folder of Mousse\'s own, never the thread\'s project', async () => {
     const project = temp('claude-locked-project-')
     const service = { standaloneWorkspace: vi.fn(() => '/mousse/standalone/bot-thread'), chat: vi.fn(async () => 'done'), commitConversation: vi.fn(), configured: () => true }
-    const adapter = new ClaudeSubscriptionAdapter(() => service as never, () => null, { shellContained: async () => false })
+    const adapter = new ClaudeSubscriptionAdapter(() => service as never, () => null, { admit: async () => ({ ok: true as const, shellContained: false }) })
     const authority = createBotAuthority({
       activationId: 'act-1', role: 'activation',
       permissions: { tools: [], appTools: [], mcp: [], skills: [], workspace: null },
@@ -258,9 +259,26 @@ describe('locked Claude Code: who runs bots', () => {
     const service = { standaloneWorkspace: () => scratch, chat: vi.fn(async () => 'done'), commitConversation: vi.fn(), configured: () => true }
     const interactive = new ClaudeSubscriptionAdapter(() => service as never)
     await expect(interactive.startTurn(turnInput(root), sink(), control(), host({ bot: authorityFor(['read'], { root, scratch }) }))).rejects.toMatchObject({ code: 'policy_unenforceable' })
-    const locked = new ClaudeSubscriptionAdapter(() => service as never, () => null, { shellContained: async () => false })
+    const locked = new ClaudeSubscriptionAdapter(() => service as never, () => null, { admit: async () => ({ ok: true as const, shellContained: false }) })
     await expect(locked.startTurn(turnInput(root), sink(), control(), host({}))).rejects.toMatchObject({ code: 'policy_unenforceable' })
     expect(service.chat).not.toHaveBeenCalled()
+  })
+
+  it('a locked turn is admitted again when it starts: a policy or a CLI version without evidence refuses it', async () => {
+    const root = temp('claude-locked-root-')
+    const scratch = temp('claude-locked-scratch-')
+    const service = { standaloneWorkspace: () => scratch, chat: vi.fn(async () => 'done'), commitConversation: vi.fn(), configured: () => true }
+    const refusing = new ClaudeSubscriptionAdapter(() => service as never, () => null, { admit: async () => ({ ok: false as const, reason: 'No evidence for Claude Code 9.9.9 here.' }) })
+    await expect(refusing.startTurn(turnInput(root), sink(), control(), host({ bot: authorityFor(['read'], { root, scratch }) }))).rejects.toMatchObject({ code: 'policy_unenforceable', message: 'No evidence for Claude Code 9.9.9 here.' })
+    expect(service.chat).not.toHaveBeenCalled()
+  })
+
+  it('the user\'s own built-in entry is never locked', () => {
+    const driver = claudeCodeDriver({ platform: 'linux', managedPolicy: () => false })
+    expect(driver.decodeConfig({ home: 'private', profile: 'locked' }, 'claude')).not.toHaveProperty('profile')
+    expect(driver.decodeConfig({ home: 'private', profile: 'locked' }, 'claude-bots')).toMatchObject({ profile: 'locked' })
+    // So its caps (Plan mode included) stay the user's.
+    expect(driver.caps(driver.decodeConfig({ home: 'private', profile: 'locked' }, 'claude'), '2.1.0')).toBe(CLAUDE_CODE_CAPS)
   })
 
   it('the locked profile is an entry setting, kept only with a home of its own', () => {
@@ -295,17 +313,42 @@ describe('locked Claude Code: who runs bots', () => {
     expect(claudeLockedCaps(CLAUDE_CODE_CAPS, { platform: 'darwin', cliVersion: '2.1.0', managedPolicy: false, evidence }).toolControl).toBe('approval_only')
     // An organisation's managed Claude Code policy downgrades the caps and refuses bots.
     expect(claudeLockedCaps(CLAUDE_CODE_CAPS, { platform: 'linux', cliVersion: '2.1.0', managedPolicy: true, evidence })).toMatchObject({ toolControl: 'approval_only', containment: 'weak' })
+    // Gate-and-ledger evidence alone lets a locked entry hold a bot; the sandbox's is needed only
+    // for shell (and `strong` containment), never for the authority.
+    const toolsOnly = evidence.slice(0, 1)
+    expect(claudeLockedHoldsBots('linux', false, toolsOnly)).toBe(true)
     expect(claudeLockedHoldsBots('linux', false, evidence)).toBe(true)
     expect(claudeLockedHoldsBots('linux', true, evidence)).toBe(false)
-    // Gate and ledger evidence alone is not enough: the sandbox's is needed too.
-    expect(claudeLockedHoldsBots('linux', false, evidence.slice(0, 1))).toBe(false)
+    expect(claudeLockedHoldsBots('win32', false, toolsOnly)).toBe(false)
+    expect(claudeLockedHoldsBots('linux', false, evidence.slice(1))).toBe(false)
+    expect(claudeLockedCaps(CLAUDE_CODE_CAPS, { platform: 'linux', cliVersion: '2.1.0', managedPolicy: false, evidence: toolsOnly })).toMatchObject({ toolControl: 'exact', containment: 'weak' })
     expect(hasContainmentEvidence({ driver: 'claude', kind: 'sandbox', platform: 'linux', cliVersion: undefined }, evidence)).toBe(false)
   })
 
-  it('reads the managed-settings files Claude Code reads', () => {
-    expect(claudeManagedPolicyPresent('linux', (path) => path === '/etc/claude-code/managed-settings.json')).toBe(true)
-    expect(claudeManagedPolicyPresent('darwin', () => false)).toBe(false)
-    expect(claudeManagedPolicyPresent('win32', (path) => path.startsWith('C:\\ProgramData'))).toBe(true)
+  it('an organisation\'s policy from any source counts, as the SDK\'s resolver reports it (item 14)', async () => {
+    const managed = (policyOrigin?: string, path?: string) => ({ sources: [{ source: 'managed' as const, settings: {}, ...(path ? { path } : {}), ...(policyOrigin ? { policyOrigin: policyOrigin as never } : {}) }] })
+    for (const origin of ['remote', 'plist', 'hklm', 'hkcu', 'helper', 'file', 'parent'])
+      expect(claudeManagedPolicyIn(managed(origin)), origin).toBe(true)
+    // A `managed-settings.d` drop-in with no main file.
+    expect(claudeManagedPolicyIn(managed('file', '/etc/claude-code/managed-settings.d/company.json'))).toBe(true)
+    expect(claudeManagedPolicyIn({ sources: [{ source: 'userSettings' as never, settings: {} }] })).toBe(false)
+    expect(claudeManagedPolicyIn({ sources: [] })).toBe(false)
+    const resolve = vi.fn(async () => ({ sources: [] }))
+    const noFiles = () => false
+    expect(await claudeManagedPolicy(resolve, { cwd: '/w', home: '/h', exists: noFiles })).toBe(false)
+    // Only the policy tier is read.
+    expect(resolve).toHaveBeenCalledWith({ cwd: '/w', settingSources: [] })
+    expect(await claudeManagedPolicy(async () => managed('hkcu'), { cwd: '/w', exists: noFiles })).toBe(true)
+    // The entry's own server-managed cache, which the resolver does not read.
+    expect(await claudeManagedPolicy(resolve, { cwd: '/w', home: '/h', exists: (path) => path.replace(/\\/g, '/') === '/h/remote-settings.json' })).toBe(true)
+    // A resolver that fails claims nothing.
+    expect(await claudeManagedPolicy(async () => { throw new Error('reg.exe failed') }, { cwd: '/w', exists: noFiles })).toBe(true)
+  })
+
+  it('until the policy has been read, a locked entry claims nothing', () => {
+    const driver = claudeCodeDriver({ platform: 'linux' })
+    expect(driver.caps({ home: 'private', profile: 'locked' }, '2.1.0').toolControl).toBe('approval_only')
+    expect(driver.botAuthority!({ home: 'private', profile: 'locked' })).toBe(false)
   })
 })
 
@@ -339,42 +382,103 @@ describe('locked Claude Code: shell (item 15)', () => {
 })
 
 describe('locked Claude Code: its own spawn (item 1)', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
   function fakeChild(pid = 4242) {
-    return Object.assign(new EventEmitter(), { pid, stdin: {}, stdout: {}, killed: false, exitCode: null })
+    const stderr = Object.assign(new EventEmitter(), { setEncoding: vi.fn() })
+    return Object.assign(new EventEmitter(), { pid, stdin: { destroy: vi.fn() }, stdout: { destroy: vi.fn() }, stderr, killed: false, exitCode: null })
   }
+  const signal = () => new AbortController().signal
 
   it('passes the SDK\'s command, arguments, folder and environment through unchanged, in its own group on POSIX', () => {
     const spawn = vi.fn(() => fakeChild())
     const onProcess = vi.fn()
-    const options = { command: '/usr/bin/claude', args: ['--output-format', 'stream-json'], cwd: '/scratch', env: { PATH: '/bin', TMPDIR: '/scratch/tmp' }, signal: new AbortController().signal }
-    claudeLockedSpawn({ platform: 'linux', spawn: spawn as never, onProcess, killTree: vi.fn() })(options)
-    expect(spawn).toHaveBeenCalledWith('/usr/bin/claude', ['--output-format', 'stream-json'], expect.objectContaining({ cwd: '/scratch', env: options.env, detached: true }))
+    const options = { command: '/usr/bin/claude', args: ['--output-format', 'stream-json'], cwd: '/scratch', env: { PATH: '/bin', TMPDIR: '/scratch/tmp' }, signal: signal() }
+    claudeLockedSpawn({ platform: 'linux', spawn: spawn as never, onProcess, signalGroup: vi.fn() })(options)
+    // stdio as the SDK's own spawn: the CLI's error output is kept.
+    expect(spawn).toHaveBeenCalledWith('/usr/bin/claude', ['--output-format', 'stream-json'], expect.objectContaining({ cwd: '/scratch', env: options.env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] }))
     expect(onProcess).toHaveBeenCalledWith(4242)
     claudeLockedSpawn({ platform: 'win32', spawn: spawn as never, killTree: vi.fn() })(options)
     expect(spawn.mock.calls[1]).toEqual(['/usr/bin/claude', options.args, expect.objectContaining({ detached: false })])
   })
 
-  it('ends the whole group at the SDK\'s forwarded abort and at every exit on POSIX; never after a Windows exit', () => {
-    const killTree = vi.fn()
+  it('on POSIX, ends the group at the forwarded abort and at the exit: SIGTERM, then SIGKILL after the grace if anyone is left', () => {
+    vi.useFakeTimers()
+    const sent: Array<[number, NodeJS.Signals | 0]> = []
+    let alive = true
+    const signalGroup = (pid: number, sig: NodeJS.Signals | 0) => {
+      sent.push([pid, sig])
+      if (sig === 'SIGKILL') alive = false
+      if (!alive && sig === 0) throw new Error('ESRCH')
+    }
     const child = fakeChild()
     const controller = new AbortController()
-    claudeLockedSpawn({ platform: 'linux', spawn: (() => child) as never, killTree })({ command: 'c', args: [], env: {}, signal: controller.signal })
+    claudeLockedSpawn({ platform: 'linux', spawn: (() => child) as never, signalGroup, graceMs: 2_000 })({ command: 'c', args: [], env: {}, signal: controller.signal })
     child.emit('exit', 0, null)
-    expect(killTree).toHaveBeenCalledWith(4242)
+    expect(sent).toEqual([[4242, 'SIGTERM']])
+    vi.advanceTimersByTime(2_000)
+    expect(sent).toEqual([[4242, 'SIGTERM'], [4242, 0], [4242, 'SIGKILL']])
+    // Ended once: a later abort sends nothing.
     controller.abort()
-    expect(killTree).toHaveBeenCalledTimes(1)
+    expect(sent.length).toBe(3)
 
+    // A group that went at SIGTERM is not killed again.
+    const quiet: Array<NodeJS.Signals | 0> = []
     const aborted = new AbortController()
-    const second = fakeChild(5151)
-    claudeLockedSpawn({ platform: 'linux', spawn: (() => second) as never, killTree })({ command: 'c', args: [], env: {}, signal: aborted.signal })
+    claudeLockedSpawn({ platform: 'linux', spawn: (() => fakeChild(5151)) as never, signalGroup: (_pid, sig) => { quiet.push(sig); if (sig === 0) throw new Error('ESRCH') }, graceMs: 2_000 })({ command: 'c', args: [], env: {}, signal: aborted.signal })
     aborted.abort()
-    expect(killTree).toHaveBeenLastCalledWith(5151)
+    vi.advanceTimersByTime(2_000)
+    expect(quiet).toEqual(['SIGTERM', 0])
+  })
 
-    const windowsKill = vi.fn()
-    const third = fakeChild(6161)
-    claudeLockedSpawn({ platform: 'win32', spawn: (() => third) as never, killTree: windowsKill })({ command: 'c', args: [], env: {}, signal: new AbortController().signal })
-    third.emit('exit', 0, null)
-    expect(windowsKill).not.toHaveBeenCalled()
+  it('on Windows, ends the tree at the abort while the CLI runs, and never after its exit', () => {
+    const killTree = vi.fn()
+    const running = new AbortController()
+    claudeLockedSpawn({ platform: 'win32', spawn: (() => fakeChild(6161)) as never, killTree })({ command: 'c', args: [], env: {}, signal: running.signal })
+    running.abort()
+    expect(killTree).toHaveBeenCalledWith(6161)
+    const exited = fakeChild(7171)
+    const later = new AbortController()
+    claudeLockedSpawn({ platform: 'win32', spawn: (() => exited) as never, killTree })({ command: 'c', args: [], env: {}, signal: later.signal })
+    exited.emit('exit', 0, null)
+    later.abort()
+    expect(killTree).toHaveBeenCalledTimes(1)
+  })
+
+  it('a process whose registration fails is killed at once, and the spawn fails (review: no unsupervised child)', () => {
+    const sent: Array<NodeJS.Signals | 0> = []
+    const child = fakeChild()
+    const spawn = claudeLockedSpawn({ platform: 'linux', spawn: (() => child) as never, signalGroup: (_pid, sig) => { sent.push(sig) }, onProcess: () => { throw new Error('supervisor unavailable') } })
+    expect(() => spawn({ command: 'c', args: [], env: {}, signal: signal() })).toThrow('supervisor unavailable')
+    expect(sent).toEqual(['SIGKILL'])
+    expect(child.stdin.destroy).toHaveBeenCalled()
+    expect(child.stdout.destroy).toHaveBeenCalled()
+    const killTree = vi.fn()
+    expect(() => claudeLockedSpawn({ platform: 'win32', spawn: (() => fakeChild(8181)) as never, killTree, onProcess: () => { throw new Error('x') } })({ command: 'c', args: [], env: {}, signal: signal() })).toThrow('x')
+    expect(killTree).toHaveBeenCalledWith(8181)
+  })
+
+  it('keeps the tail of the CLI\'s error output for a failed turn', () => {
+    const onStderr = vi.fn()
+    const child = fakeChild()
+    claudeLockedSpawn({ platform: 'linux', spawn: (() => child) as never, signalGroup: () => { throw new Error('ESRCH') }, onStderr })({ command: 'c', args: [], env: {}, signal: signal() })
+    child.stderr.emit('data', 'x'.repeat(5_000))
+    child.stderr.emit('data', 'Error: the model refused')
+    child.emit('exit', 1, null)
+    expect(onStderr).toHaveBeenCalledTimes(1)
+    const [tail, code] = onStderr.mock.calls[0] as [string, number]
+    expect(code).toBe(1)
+    expect(tail.endsWith('Error: the model refused')).toBe(true)
+    expect(tail.length).toBeLessThanOrEqual(4_000)
+  })
+
+  it.skipIf(process.platform === 'win32')('a real child in its own group is gone after the abort (POSIX)', async () => {
+    const controller = new AbortController()
+    const child = claudeLockedSpawn({ graceMs: 200 })({ command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'], env: { ...process.env }, signal: controller.signal }) as unknown as { pid: number }
+    controller.abort()
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    expect(() => process.kill(-child.pid, 0)).toThrow()
   })
 })
 

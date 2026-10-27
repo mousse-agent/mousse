@@ -28,9 +28,9 @@ import {
   type ClaudeApiKeyChecker
 } from '../claude/apiKey'
 import { cliNames, findOnPath, lockedEnv, ownedLaunchEnv, ownedUserEnv } from '../env'
-import { CLAUDE_LOCKED_PROFILE, CLAUDE_NATIVE_TOOLS, claudeLockedCaps, claudeLockedHoldsBots, claudeSandboxFact } from '../claude/locked'
+import { CLAUDE_LOCKED_PROFILE, CLAUDE_MANAGED_POLICY_REFUSAL, CLAUDE_NATIVE_TOOLS, claudeLockedCaps, claudeLockedHoldsBots, claudeManagedPolicy, claudeSandboxFact } from '../claude/locked'
 import { hasContainmentEvidence } from '../compatibility'
-import { claudeManagedPolicyPresent } from '../../providers/claudeSubscription/accountSubject'
+import { CLAUDE_INSTANCE_ID } from '../../../shared/providerInstances'
 import { decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig } from '../driver'
 import { ownedHomeProblem } from '../ownedHome'
 import { ptyAvailable, redactSignIn, runInPty, terminalText, transcriptLinks, type PtyRun, type PtySpawn } from '../pty'
@@ -108,14 +108,17 @@ export interface ClaudeCodeDriverOptions {
   resolveSettings?: SettingsResolver
   /** Test seam: the platform a locked entry's caps and evidence are read for (default `process.platform`). */
   platform?: NodeJS.Platform
-  /** Test seam: whether an organisation's managed Claude Code policy is installed (default: read from disk). */
+  /**
+   * Test seam: whether an organisation's Claude Code policy applies (default: the SDK's resolver,
+   * `claudeManagedPolicy`, read again when each locked turn starts and kept for the caps).
+   */
   managedPolicy?: () => boolean
   /** Each Claude Code process a locked entry's bot turn starts (its active-time supervision). */
   onLockedProcess?: (pid: number, threadId: string) => void
 }
 
 /** The SDK's `resolveSettings`: the settings a turn's folder gives Claude Code, without starting it. */
-export type SettingsResolver = (options: { cwd: string; settingSources: Array<'project' | 'local'> }) => Promise<Pick<ResolvedSettings, 'sources'>>
+export type SettingsResolver = (options: { cwd: string; settingSources: Array<'project' | 'local'> | [] }) => Promise<Pick<ResolvedSettings, 'sources'>>
 
 const sdkResolveSettings: SettingsResolver = async (options) => (await import('@anthropic-ai/claude-agent-sdk')).resolveSettings(options)
 
@@ -177,7 +180,19 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
    */
   const owned = new Map<string, OwnedService>()
   const platform = options.platform ?? process.platform
-  const managedPolicy = options.managedPolicy ?? (() => claudeManagedPolicyPresent(platform))
+  const resolveSettings = options.resolveSettings ?? sdkResolveSettings
+  /**
+   * The last reading of the organisation's policy, for the synchronous caps; unknown until a locked
+   * entry reads it, and unknown counts as present.
+   */
+  let managedReading: boolean | undefined
+  const managedPolicy = options.managedPolicy ?? (() => managedReading !== false)
+  /** Reads the policy now, as a locked turn starts in `cwd` with the entry's `home`. */
+  const readManaged = async (cwd: string, home?: string): Promise<boolean> => {
+    if (options.managedPolicy) return options.managedPolicy()
+    managedReading = await claudeManagedPolicy(resolveSettings, { cwd, ...(home ? { home } : {}) })
+    return managedReading
+  }
   return {
     kind: 'claude',
     label: 'Claude Code',
@@ -195,14 +210,19 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     // Claude Code passes MCP image content to the model, and every Claude model reads images.
     mcpImageResults: true,
     mirrorsVendorFile: true,
-    decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: true }),
+    decodeConfig: (raw, instanceId) => {
+      const config = decodeInstanceConfig(raw, { privateHome: true })
+      // The user's own built-in entry is never locked: it runs Claude Code as they set it up.
+      if (instanceId === CLAUDE_INSTANCE_ID) delete config.profile
+      return config
+    },
     // An API-key entry has a home of its own: the user's own Claude Code runs exactly as they set it up.
     // So does a locked entry: a bot never runs in the user's own Claude Code setup.
     privateHomeFor: (config) => (claudeRunsOnApiKey(config) || config.profile === CLAUDE_LOCKED_PROFILE ? 'required' : 'allowed'),
     caps: (config, installedVersion) =>
       claudeLocked(config) ? claudeLockedCaps(CLAUDE_CODE_CAPS, { platform, ...(installedVersion ? { cliVersion: installedVersion } : {}), managedPolicy: managedPolicy() }) : CLAUDE_CODE_CAPS,
-    // Only a locked entry holds a bot to its grant, and only once its gate, ledger and sandbox have
-    // evidence on this platform (`CONTAINMENT_EVIDENCE`); no record exists yet.
+    // Only a locked entry holds a bot to its grant, and only once its gate and ledger have evidence on
+    // this platform (`CONTAINMENT_EVIDENCE`) and no organisation policy applies; no record exists yet.
     botAuthority: (config) => claudeLocked(config) && claudeLockedHoldsBots(platform, managedPolicy()),
     nativeToolNames: (neutral) => CLAUDE_NATIVE_TOOLS[neutral] ?? [],
     updateCommand: (owner: InstallOwner) => {
@@ -430,12 +450,15 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
       const lockedEntry = !shared && claudeLocked(context.config)
       const adapter = new ClaudeSubscriptionAdapter(() => service, () => integrations, lockedEntry
         ? {
-            // Shell runs only where the sandbox is there and has evidence for this CLI version here.
-            shellContained: async () => {
-              if (managedPolicy()) return false
-              if (claudeSandboxFact(platform, (name) => Boolean(findOnPath([name], context.env))) !== 'available') return false
+            // Read again as each turn starts: the policy, the CLI version's gate-and-ledger evidence, and
+            // for shell the sandbox and its evidence for this version here.
+            admit: async () => {
+              if (await readManaged(service.standaloneWorkspace('locked-policy'), context.env.home)) return { ok: false, reason: CLAUDE_MANAGED_POLICY_REFUSAL }
               const version = (await service.cliConfig()).version
-              return version !== undefined && hasContainmentEvidence({ driver: 'claude', kind: 'sandbox', platform, cliVersion: version })
+              if (version === undefined || !hasContainmentEvidence({ driver: 'claude', kind: 'tools', platform, cliVersion: version }))
+                return { ok: false, reason: `Mousse has no evidence that Claude Code ${version ?? '(unknown version)'} holds a bot to its permissions here.` }
+              const sandbox = claudeSandboxFact(platform, (name) => Boolean(findOnPath([name], context.env))) === 'available'
+              return { ok: true, shellContained: sandbox && hasContainmentEvidence({ driver: 'claude', kind: 'sandbox', platform, cliVersion: version }) }
             },
             ...(options.onLockedProcess ? { onProcess: options.onLockedProcess } : {})
           }

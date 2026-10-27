@@ -133,3 +133,37 @@ describe('locked Claude Code: built-in ledger rows', () => {
     expect(rows).toEqual([])
   })
 })
+
+describe('locked Claude Code: the gate fails closed (PR 6 review M2)', () => {
+  it('a count that throws (a busy bots.db) denies the call in PreToolUse, and writes nothing', () => {
+    const { gate, rows, root, charge } = fixture()
+    charge.mockImplementation(() => { throw new Error('database is locked') })
+    expect(gate.preToolUse('Read', { file_path: join(root, 'a') })).toEqual({ ok: false, reason: expect.stringContaining('could not be checked') })
+    expect(rows).toEqual([])
+  })
+
+  it('a check that throws denies the call in both hooks, and writes no row', () => {
+    const { gate, rows, root } = fixture()
+    const authority = (gate as unknown as { turn: ClaudeLockedTurn }).turn.authority
+    authority.check = () => { throw new Error('bots.db is busy') }
+    expect(gate.preToolUse('Read', { file_path: join(root, 'a') }).ok).toBe(false)
+    expect(gate.canUse('Read', { file_path: join(root, 'a') }, 'tu-1')).toEqual({ ok: false, reason: expect.stringContaining('could not be checked') })
+    expect(gate.canUse('mcp__mousse__thread_read', {}, 'tu-2').ok).toBe(false)
+    expect(rows).toEqual([])
+  })
+
+  it('a ledger that throws denies the call', () => {
+    const { gate, root } = fixture()
+    const turn = (gate as unknown as { turn: ClaudeLockedTurn }).turn
+    turn.ledger = { start: () => { throw new Error('disk full') }, commit: () => {}, failed: () => {} }
+    expect(gate.canUse('Read', { file_path: join(root, 'a') }, 'tu-1').ok).toBe(false)
+  })
+
+  it('a Glob or Grep pattern that leaves its folder is refused, braces included', () => {
+    const { gate, root } = fixture()
+    for (const pattern of ['{..,x}/secret', '../**', '~/**', '/etc/*', 'C:/x/*', '$HOME/*'])
+      expect(gate.preToolUse('Glob', { pattern, path: root }).ok, pattern).toBe(false)
+    expect(gate.preToolUse('Grep', { pattern: 'x', path: root, glob: '{..}/*.ts' }).ok).toBe(false)
+    expect(gate.preToolUse('Glob', { pattern: 'src/**/*.{ts,tsx}', path: root }).ok).toBe(true)
+  })
+})

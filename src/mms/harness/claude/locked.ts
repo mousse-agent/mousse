@@ -1,17 +1,18 @@
-import { spawn as nodeSpawn } from 'node:child_process'
+import { execFile, spawn as nodeSpawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { isAbsolute } from 'node:path'
-import type { Options, SandboxSettings, SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk'
+import { isAbsolute, join } from 'node:path'
+import type { Options, ResolvedSettings, SandboxSettings, SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk'
 import type { ToolCall } from '@earendil-works/pi-ai'
 import type { BotAuthority } from '../../../shared/bots/personal/authority'
 import { botAppToolRefusal, checkBuiltinCall, wallMessage } from '../../../shared/bots/personal/walls'
+import { runtimeExpandedPath } from '../../bots/authority/botAuthority'
 import { neutralToolIdempotent, neutralToolsOf, type NativeToolTable, type NeutralTool } from '../../../shared/harness/tools'
 import type { HarnessCaps } from '../../../shared/harness/types'
 import { withoutTransportFields } from '../../agentDefinitions/definitionGate'
 import { CLAUDE_MOUSSE_TOOL_PREFIX } from '../../run/mcp/attachment'
 import type { ToolLedger } from '../../run/mcp/appTools/types'
 import { hasContainmentEvidence, type ContainmentEvidence } from '../compatibility'
-import { killProcessTree } from '../processTree.mjs'
 
 /**
  * The locked Claude Code profile (PR 6 §3): how a bot's turn runs on Claude Code. An instance with
@@ -79,15 +80,44 @@ export function claudeLockedCaps(base: HarnessCaps, input: { platform: NodeJS.Pl
 }
 
 /**
- * Whether a locked instance holds a bot to its grant on this platform: only once the gate and
- * ledger (`tools`) and the sandbox (`sandbox`) both have evidence here. The version is checked by
- * the caps (`claudeLockedCaps`), which a bot policy's `exact` tool control needs too.
+ * Whether a locked instance holds a bot to its grant on this platform: once the gate and ledger
+ * (`tools`, items 1–7) have evidence here, and no managed Claude Code policy applies. The sandbox's
+ * evidence is needed only for shell (`shellContained`, per turn); the version is checked by the caps
+ * (`claudeLockedCaps`) and again when a turn starts.
  */
 export function claudeLockedHoldsBots(platform: NodeJS.Platform, managedPolicy: boolean, evidence?: readonly ContainmentEvidence[]): boolean {
-  if (managedPolicy) return false
-  return hasContainmentEvidence({ driver: 'claude', kind: 'tools', platform }, evidence) &&
-    hasContainmentEvidence({ driver: 'claude', kind: 'sandbox', platform }, evidence)
+  return !managedPolicy && hasContainmentEvidence({ driver: 'claude', kind: 'tools', platform }, evidence)
 }
+
+/** What `resolveSettings` reports: whether any managed (policy) tier is present, whatever its origin. */
+export function claudeManagedPolicyIn(resolved: Pick<ResolvedSettings, 'sources'>): boolean {
+  return resolved.sources.some((source) => source.source === 'managed')
+}
+
+/**
+ * Whether an organisation's Claude Code policy applies to a locked entry, read with the SDK's own
+ * resolver (`settingSources: []`: only the policy tier): `managed-settings.json` and its
+ * `managed-settings.d` drop-ins, the server-managed cache, macOS MDM, the Windows HKLM and HKCU
+ * policy, and a configured `policyHelper` (which the resolver does not run, but whose configuration
+ * is itself policy). The entry's own home may hold a server-managed cache the resolver does not read
+ * (`remote-settings.json`), so that counts too. A resolver that fails counts as a policy: nothing is
+ * claimed that Mousse cannot see past.
+ */
+export async function claudeManagedPolicy(
+  resolve: (options: { cwd: string; settingSources: [] }) => Promise<Pick<ResolvedSettings, 'sources'>>,
+  input: { cwd: string; home?: string; exists?: (path: string) => boolean }
+): Promise<boolean> {
+  const exists = input.exists ?? existsSync
+  if (input.home && exists(join(input.home, 'remote-settings.json'))) return true
+  try {
+    return claudeManagedPolicyIn(await resolve({ cwd: input.cwd, settingSources: [] }))
+  } catch {
+    return true
+  }
+}
+
+/** Why a locked entry refuses a bot under an organisation's policy. */
+export const CLAUDE_MANAGED_POLICY_REFUSAL = 'Your organisation\'s Claude Code policy applies; Mousse can\'t guarantee this bot\'s tool list.'
 
 /**
  * Claude Code's built-ins for each neutral tool (PR 6 §2). Every name exists in the pinned SDK's
@@ -207,12 +237,18 @@ type Classified =
   | { kind: 'tool_search' }
   | { kind: 'unknown' }
 
-/** Path-like arguments of Claude's search tools that the authority's path check does not read. */
+/**
+ * Path-like arguments of Claude's search tools that the authority's path check does not read: an
+ * absolute or drive pattern, one the runtime expands (`~`, a variable), or any `..` (braces such
+ * as `{..,x}` included) is refused.
+ */
 function patternEscapes(value: unknown): boolean {
   if (typeof value !== 'string') return false
-  const normalised = value.replace(/\\/g, '/')
-  return isAbsolute(value) || /^[A-Za-z]:/.test(value) || normalised.startsWith('~') || normalised.split('/').includes('..')
+  return isAbsolute(value) || /^[A-Za-z]:/.test(value) || runtimeExpandedPath(value) || value.includes('..')
 }
+
+/** What the model is told when the gate itself fails: the call does not run. */
+const GATE_FAILED = 'This call could not be checked against the bot\'s permissions, so it does not run.'
 
 /**
  * The grant gate of one locked turn: `PreToolUse` and `canUseTool` decide every call with it, and
@@ -275,10 +311,16 @@ export class ClaudeLockedGate {
    * count limit, so the count never refuses here.
    */
   preToolUse(toolName: string, args: Record<string, unknown>): Decision {
-    const decided = this.decide(toolName, args)
-    if (!decided.ok) return decided
-    if (decided.classified?.kind === 'builtin') this.turn.authority.counters.charge('tool')
-    return { ok: true }
+    // Fails closed: a check or count that throws (a busy bots.db) denies the call.
+    try {
+      const decided = this.decide(toolName, args)
+      if (!decided.ok) return decided
+      if (decided.classified?.kind === 'builtin') this.turn.authority.counters.charge('tool')
+      return { ok: true }
+    } catch (error) {
+      console.warn('[claude-locked] the grant gate failed; the call is denied', error instanceof Error ? error.message : String(error))
+      return { ok: false, reason: GATE_FAILED }
+    }
   }
 
   /**
@@ -287,6 +329,15 @@ export class ClaudeLockedGate {
    * are idempotent; `edit`, `write` and `shell` are not). A Mousse tool's row is the registry's.
    */
   canUse(toolName: string, args: Record<string, unknown>, toolUseId: string): Decision {
+    try {
+      return this.allow(toolName, args, toolUseId)
+    } catch (error) {
+      console.warn('[claude-locked] the grant gate failed; the call is denied', error instanceof Error ? error.message : String(error))
+      return { ok: false, reason: GATE_FAILED }
+    }
+  }
+
+  private allow(toolName: string, args: Record<string, unknown>, toolUseId: string): Decision {
     const decided = this.decide(toolName, args)
     if (!decided.ok) return decided
     const classified = decided.classified!
@@ -315,51 +366,109 @@ export class ClaudeLockedGate {
   }
 }
 
-/**
- * The spawn of a locked turn's Claude Code (`spawnClaudeCodeProcess`): the SDK's command,
- * arguments, folder and environment unchanged, in a process group of its own on POSIX, reported to
- * `onProcess`. The SDK's forwarded abort ends the whole group (or tree), and so does the CLI's own
- * exit: a command it started in the background never outlives the dispatch.
- */
-export function claudeLockedSpawn(options: {
+/** How long a locked turn's process group has to end after SIGTERM before it is killed. */
+export const CLAUDE_LOCKED_KILL_GRACE_MS = 2_000
+
+/** How much of the CLI's error output a failed locked turn keeps for the log. */
+const STDERR_TAIL = 4_000
+
+export interface ClaudeLockedSpawnOptions {
   onProcess?: (pid: number) => void
   platform?: NodeJS.Platform
   spawn?: typeof nodeSpawn
+  /** Signals the process group `pid` leads (POSIX); throws when it has no member left. */
+  signalGroup?: (pid: number, signal: NodeJS.Signals | 0) => void
+  /** Ends the process tree `pid` heads (Windows), without waiting for it. */
   killTree?: (pid: number) => void
-} = {}): (spawnOptions: SpawnOptions) => SpawnedProcess {
+  graceMs?: number
+  /** Where a failed turn's error output goes (default: the log). */
+  onStderr?: (tail: string, code: number | null) => void
+}
+
+const defaultSignalGroup = (pid: number, signal: NodeJS.Signals | 0) => process.kill(-pid, signal)
+// `taskkill` runs on its own: the daemon's loop never waits for it.
+const defaultKillTree = (pid: number) => {
+  execFile('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true, timeout: 5_000 }, () => undefined)
+}
+
+/**
+ * The spawn of a locked turn's Claude Code (`spawnClaudeCodeProcess`): the SDK's command,
+ * arguments, folder and environment unchanged, in a process group of its own on POSIX, reported to
+ * `onProcess`. The SDK's forwarded abort (after its own close grace) and the CLI's exit end the whole
+ * group: SIGTERM, then SIGKILL after a short grace, with plain signals and no process listing on the
+ * daemon's loop. On Windows the tree is ended by a `taskkill` that runs on its own, and only while the
+ * CLI still runs (a pid may be reused once it is gone). A process whose registration fails is ended
+ * at once and the spawn fails: nothing runs unsupervised. The CLI's error output is kept, and its
+ * tail is logged when it fails.
+ */
+export function claudeLockedSpawn(options: ClaudeLockedSpawnOptions = {}): (spawnOptions: SpawnOptions) => SpawnedProcess {
   const platform = options.platform ?? process.platform
   const spawn = options.spawn ?? nodeSpawn
-  const killTree = options.killTree ?? ((pid: number) => killProcessTree(pid))
+  const signalGroup = options.signalGroup ?? defaultSignalGroup
+  const killTree = options.killTree ?? defaultKillTree
+  const graceMs = options.graceMs ?? CLAUDE_LOCKED_KILL_GRACE_MS
+  const onStderr = options.onStderr ?? ((tail: string, code: number | null) => console.warn(`[claude-locked] Claude Code exited with code ${code}: ${tail}`))
+  const send = (pid: number, signal: NodeJS.Signals | 0): boolean => {
+    try {
+      signalGroup(pid, signal)
+      return true
+    } catch {
+      return false
+    }
+  }
   return (spawnOptions) => {
     const child = spawn(spawnOptions.command, spawnOptions.args, {
       ...(spawnOptions.cwd ? { cwd: spawnOptions.cwd } : {}),
       env: spawnOptions.env as NodeJS.ProcessEnv,
-      stdio: ['pipe', 'pipe', 'ignore'],
+      stdio: ['pipe', 'pipe', 'pipe'],
       detached: platform !== 'win32',
       windowsHide: true
     })
     const pid = child.pid
+    let exited = false
     let ended = false
-    const end = () => {
+    let stderr = ''
+    child.stderr?.setEncoding?.('utf8')
+    child.stderr?.on?.('data', (chunk: string) => {
+      stderr = (stderr + chunk).slice(-STDERR_TAIL)
+    })
+    /** Ends the group or tree; `now` skips the grace. */
+    const end = (now = false) => {
       if (ended || pid === undefined) return
       ended = true
-      try {
-        killTree(pid)
-      } catch (error) {
-        console.warn('[claude-locked] the process group could not be ended', error instanceof Error ? error.message : String(error))
+      if (platform === 'win32') {
+        if (!exited) killTree(pid)
+        return
       }
+      if (now || !send(pid, 'SIGTERM')) {
+        send(pid, 'SIGKILL')
+        return
+      }
+      const timer = setTimeout(() => {
+        if (send(pid, 0)) send(pid, 'SIGKILL')
+      }, graceMs)
+      timer.unref?.()
     }
     const abort = () => end()
     if (spawnOptions.signal.aborted) queueMicrotask(abort)
     else spawnOptions.signal.addEventListener('abort', abort, { once: true })
-    child.once('exit', () => {
+    child.once('exit', (code: number | null) => {
+      exited = true
       spawnOptions.signal.removeEventListener('abort', abort)
-      // On POSIX the group outlives its leader and is ended too. A Windows pid may be reused once
-      // the process is gone, so nothing is signalled after its exit.
-      if (platform !== 'win32') end()
-      else ended = true
+      if (code !== 0 && code !== null && stderr.trim()) onStderr(stderr.trim(), code)
+      // On POSIX the group outlives its leader and is ended too.
+      end()
     })
-    if (pid !== undefined) options.onProcess?.(pid)
+    if (pid !== undefined && options.onProcess) {
+      try {
+        options.onProcess(pid)
+      } catch (error) {
+        end(true)
+        child.stdin?.destroy?.()
+        child.stdout?.destroy?.()
+        throw error
+      }
+    }
     return child as unknown as SpawnedProcess
   }
 }

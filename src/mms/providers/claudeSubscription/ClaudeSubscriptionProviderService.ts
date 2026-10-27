@@ -909,6 +909,25 @@ export class ClaudeSubscriptionProviderService {
       includePartialMessages: true
     }
   }
+  /**
+   * The options of a query that runs no turn (model discovery, usage). A locked entry's run as its
+   * turns do: in a folder of Mousse's own, with no settings files, plugins, launch arguments or MCP
+   * servers, and the locked environment; every other entry's run as the user set Claude Code up.
+   */
+  private housekeepingOptions(cwd: string, controller: AbortController): Options {
+    const lockedEnv = this.dependencies.lockedEnv
+    if (!lockedEnv) return this.options(cwd, controller)
+    const folder = join(this.dir, 'locked')
+    mkdirSync(join(folder, 'tmp'), { recursive: true, mode: 0o700 })
+    return {
+      ...this.options(folder, controller, this.finalEnv(lockedEnv(folder))),
+      settingSources: [],
+      strictMcpConfig: true,
+      plugins: [],
+      extraArgs: {},
+      mcpServers: {}
+    }
+  }
   async refreshModels(cwd: string, signal?: AbortSignal): Promise<void> {
     // A refresh before the first sign-in check (or after it went stale) checks first.
     if (this.checkDue()) await this.status()
@@ -929,7 +948,7 @@ export class ClaudeSubscriptionProviderService {
         )
       }
       query = await this.createQuery(idle(), {
-        ...this.options(cwd, controller),
+        ...this.housekeepingOptions(cwd, controller),
         tools: [],
         canUseTool: async () => ({ behavior: 'deny', message: 'Model discovery cannot run tools' })
       })
@@ -979,7 +998,7 @@ export class ClaudeSubscriptionProviderService {
         )
       }
       const pending = this.createQuery(idle(), {
-        ...this.options(cwd, controller),
+        ...this.housekeepingOptions(cwd, controller),
         tools: [],
         canUseTool: async () => ({ behavior: 'deny', message: 'Usage checks cannot run tools' })
       }).then((created) => {
@@ -1291,15 +1310,20 @@ export class ClaudeSubscriptionProviderService {
                 const turn = turnOf()
                 // A locked turn: the grant gate decides, and a call it passes still goes to canUseTool.
                 if (turn.locked && event.hook_event_name === 'PreToolUse') {
-                  const args = (event.tool_input ?? {}) as Record<string, unknown>
-                  const decided = turn.locked.preToolUse(event.tool_name, args)
-                  if (!decided.ok)
-                    return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: decided.reason } }
-                  await turn.editCounter.start(event.tool_use_id, event.tool_name, event.tool_input)
-                  const stamped = turn.input.mcp && turn.input.mcpTurnToken && event.tool_name.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX)
-                    ? { updatedInput: { ...args, [TURN_TOKEN_KEY]: turn.input.mcpTurnToken } }
-                    : undefined
-                  return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask', ...stamped } }
+                  const deny = (reason: string) => ({ hookSpecificOutput: { hookEventName: 'PreToolUse' as const, permissionDecision: 'deny' as const, permissionDecisionReason: reason } })
+                  // Fails closed: Claude Code reads a hook that throws as no decision, and would go on.
+                  try {
+                    const args = (event.tool_input ?? {}) as Record<string, unknown>
+                    const decided = turn.locked.preToolUse(event.tool_name, args)
+                    if (!decided.ok) return deny(decided.reason)
+                    await turn.editCounter.start(event.tool_use_id, event.tool_name, event.tool_input)
+                    const stamped = turn.input.mcp && turn.input.mcpTurnToken && event.tool_name.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX)
+                      ? { updatedInput: { ...args, [TURN_TOKEN_KEY]: turn.input.mcpTurnToken } }
+                      : undefined
+                    return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask', ...stamped } }
+                  } catch {
+                    return deny('This call could not be checked against the bot\'s permissions, so it does not run.')
+                  }
                 }
                 // Hooks run in every permission mode, so the user's per-server tool limits hold
                 // on unattended turns too.
@@ -1377,8 +1401,12 @@ export class ClaudeSubscriptionProviderService {
           return { behavior: 'deny', message: 'Turn cancelled' }
         // A locked turn: the second, default-deny check, which writes a granted built-in's ledger row.
         if (turn.locked) {
-          const decided = turn.locked.canUse(toolName, args, context.toolUseID)
-          return decided.ok ? { behavior: 'allow', updatedInput: args } : { behavior: 'deny', message: decided.reason }
+          try {
+            const decided = turn.locked.canUse(toolName, args, context.toolUseID)
+            return decided.ok ? { behavior: 'allow', updatedInput: args } : { behavior: 'deny', message: decided.reason }
+          } catch {
+            return { behavior: 'deny', message: 'This call could not be checked against the bot\'s permissions, so it does not run.' }
+          }
         }
         const childDenial = claudeChildToolDenial(input.child, toolName)
         if (childDenial) return { behavior: 'deny', message: childDenial }
@@ -1513,7 +1541,9 @@ export class ClaudeSubscriptionProviderService {
     // The folder's settings are read before anything starts; whether the instance may run is checked
     // after, so a sign-out while they are read stops the turn here.
     let turnSettings: SdkSettings | undefined
-    if (this.dependencies.turnSettings) {
+    // A locked turn loads no folder settings, so there is nothing to pin over them (and its scratch
+    // folder, which the bot writes, must not be able to refuse its later turns).
+    if (this.dependencies.turnSettings && !input.locked) {
       const policy = await this.dependencies.turnSettings(input.cwd)
       input.signal?.throwIfAborted()
       if (policy.refuse) throw new AppError({ code: 'claude_settings_conflict', message: policy.refuse, errorInfo: { category: 'unavailable', retryable: false } })
@@ -1648,7 +1678,7 @@ export class ClaudeSubscriptionProviderService {
         : readOnlyChild
           ? 'default'
           : { ask: 'default', accept_edits: 'acceptEdits', full: 'bypassPermissions' }[threadMode] as PermissionMode
-      const launchAppend = claudeLaunchAppendSystemPrompt(claudeExtraArgs(storedCliArgs(this.launchSettings())), input.cwd)
+      const launchAppend = locked ? [] : claudeLaunchAppendSystemPrompt(claudeExtraArgs(storedCliArgs(this.launchSettings())), input.cwd)
       const appendTexts = [input.systemPromptAppend ?? '', ...launchAppend]
       // What a live process is started for (`HARD_PARTS`); a process the turn can reuse already holds the conversation.
       const hard = [
