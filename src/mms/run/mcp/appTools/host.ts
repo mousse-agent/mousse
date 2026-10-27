@@ -62,6 +62,8 @@ export interface AppToolHost extends DelegationToolsHost {
   readOnlyThread?(threadId: string): boolean
   /** The ceiling the thread's delegations gave it (the listing ignores the turn's mode). */
   threadCeiling?(threadId: string): ModeCeiling
+  /** The thread's role when it is a personal bot's thread (PR 6 §5). */
+  botRole?(threadId: string): 'activation' | 'context' | undefined
   awaitLiveRun?(threadId: string): Promise<LiveRunGate | undefined> | undefined
   /** The permission mode the caller's run enforces, from its attempt's binding (never from the mode ceiling). */
   permissionModeFor?(runId: string): PermissionMode | undefined

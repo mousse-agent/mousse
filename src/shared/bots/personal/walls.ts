@@ -16,6 +16,8 @@ export function wallMessage(wall: WallReason): string {
     case 'policy_unenforceable': return `This bot cannot use ${wall.tool} on this runtime.`
     case 'revoked': return 'This bot\'s permissions were withdrawn, so it cannot use tools now.'
     case 'ended': return 'This bot\'s run has ended, so it cannot use tools now.'
+    case 'escalated': return `Paused: waiting for the owner to allow: ${wall.permission}. End your turn now.`
+    case 'paused': return 'Paused: earlier tool calls need checking by the owner. End your turn now.'
   }
 }
 
@@ -23,9 +25,10 @@ export function wallMessage(wall: WallReason): string {
  * A runtime's built-in call (`nativeName` in `table`) under a bot's authority: allowed when any
  * neutral tool the name stands for passes `check`. A name with no neutral tool is never granted.
  */
-export function checkBuiltinCall(bot: Pick<BotAuthority, 'check'>, table: NativeToolTable, nativeName: string, args: Record<string, unknown>): { ok: true } | { ok: false; wall: WallReason } {
+export function checkBuiltinCall(bot: Pick<BotAuthority, 'check' | 'checkAny'>, table: NativeToolTable, nativeName: string, args: Record<string, unknown>): { ok: true } | { ok: false; wall: WallReason } {
   const neutrals = neutralToolsOf(table, nativeName)
   if (!neutrals.length) return { ok: false, wall: { kind: 'tool', tool: nativeName } }
+  if (bot.checkAny) return bot.checkAny(neutrals.map((tool) => ({ kind: 'builtin' as const, tool, nativeName, args })))
   let refused: { ok: false; wall: WallReason } | undefined
   for (const tool of neutrals) {
     const decided = bot.check({ kind: 'builtin', tool, nativeName, args })

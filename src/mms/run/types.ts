@@ -57,7 +57,8 @@ export interface RunPause {
 
 export interface RunOutcome {
   error?: string
-  interruptedBy?: 'user' | 'daemon_restart' | 'provider'
+  /** `bot_wall`: a personal bot's dispatch ended at a wall (PR 6 §5); the run engine never retries it. */
+  interruptedBy?: 'user' | 'daemon_restart' | 'provider' | 'bot_wall'
   uncertainReason?: string
   stopRequested?: boolean
   /** SPEC §16.4: the interrupted run this send continues ("Continue" after a restart). */

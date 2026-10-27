@@ -9,11 +9,13 @@ import type { NetLocalMethod } from './net/local'
 import type { BridgeHubLocalMethod } from './bridge/types'
 import type { SpacesLocalMethod } from './spaces/local'
 import type { BotsLocalMethod } from './bots/space/local'
+import type { BotsPersonalMethod } from './bots/personal/methods'
 import type { SpaceArchiveMethod } from './spaces/archive'
 import type { SpeechHostMethod } from './speechRelay'
 
 export type PlatformRequestMethod = ChatMethod | ChatResourceMethod | WorkflowRunMethod | BrowserGuiMethod | BrowserSetupMethod | BrowserAccessMethod
   | ChatNetworkMethod | NetLocalMethod | BridgeHubLocalMethod | SpacesLocalMethod | BotsLocalMethod | SpaceArchiveMethod | SpeechHostMethod
+  | BotsPersonalMethod
   | 'workflows.list' | 'workflows.get' | 'workflows.getRevision' | 'workflows.create'
   | 'workflows.saveDraft' | 'workflows.publish' | 'workflows.archive'
   | 'workflows.duplicate' | 'workflows.importBundle' | 'workflows.exportBundle'

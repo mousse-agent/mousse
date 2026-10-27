@@ -81,7 +81,7 @@ import { createHarnessGateway, PI_DRIVER_ID, type AdapterHost, type BindInput, t
 import { piDriver } from '../harness/drivers/pi'
 import { contextGauge, policyOrigin, threadTurnOrigin } from '../harness/policy'
 import type { BotThreads } from '../../shared/bots/personal/authority'
-import type { BotTurnDispatcher, PreparedBotTurn } from '../bots/activation/dispatcher'
+import { isBotWallAbort, type BotTurnDispatcher, type PreparedBotTurn } from '../bots/activation/dispatcher'
 import { harnessAppError, isRetriesExhausted, type BindPolicy, type ExecutionBinding, type HarnessCaps, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
@@ -2707,6 +2707,8 @@ export class OrchestratorService extends EventEmitter {
       readOnlyThread: (threadId) => this.isReadOnlyChild(threadId),
       // The ceiling the thread's delegations gave it: a Plan turn narrows only its own calls.
       threadCeiling: (threadId) => this.modeCeilingFor(threadId, 'agent'),
+      // Only a bot's threads list the bot tools (`escalate`; `consult` on its activation thread).
+      botRole: (threadId) => this.botThreads?.roleOf(threadId),
       awaitLiveRun: (threadId) => this.continuationGate(threadId),
       permissionModeFor: (runId) => this.runPermissionMode(runId),
       askApproval: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
@@ -2982,6 +2984,12 @@ export class OrchestratorService extends EventEmitter {
       dispatcher?.settle(payload, {})
     }
     if (!dispatcher) return cancel('bots_unavailable')
+    const session = this.getOrCreateSession(payload.threadId)
+    // A continuation can be sent while the walled turn is still letting go of the thread: wait for
+    // it (briefly) before anything is prepared, so no time is charged to a turn that cannot start.
+    const busy = (): boolean => session.deleted || session.turnAdmitted || session.isTurnRunning()
+    for (let waited = 0; busy() && !session.deleted && waited < 10_000 && !signal.aborted; waited += 50) await new Promise((resolve) => setTimeout(resolve, 50))
+    if (busy() || engine.getRun(payload.runId)?.status !== 'queued') return cancel('bot_state_invalid')
     let prepared: ReturnType<BotTurnDispatcher['prepare']>
     try {
       await dispatcher.refresh?.(payload)
@@ -2991,11 +2999,10 @@ export class OrchestratorService extends EventEmitter {
       return cancel('bot_prepare_failed')
     }
     if ('refused' in prepared) return cancel(prepared.code)
-    const session = this.getOrCreateSession(payload.threadId)
-    // History 'none': a fresh activation thread has no transcript, native context or summary.
-    if (session.deleted || session.turnAdmitted || session.isTurnRunning() || session.messages.length > 0 ||
-        getActiveMessages(session.nativeContext).length > 0 || Boolean(getCompactionSummary(session.nativeContext)))
-      return cancel('bot_state_invalid')
+    // History 'none': a fresh activation thread has no transcript, native context or summary. A
+    // continuation or a consult runs on the thread's own history ('thread').
+    const fresh = session.messages.length === 0 && getActiveMessages(session.nativeContext).length === 0 && !getCompactionSummary(session.nativeContext)
+    if (busy() || (prepared.history !== 'thread' && !fresh)) return cancel('bot_state_invalid')
     let text: string | undefined
     try {
       const response = await this.runTurnOnSession(
@@ -6711,7 +6718,8 @@ export class OrchestratorService extends EventEmitter {
     let turnResponse: OrchestratorResponse | undefined
     let turnFailure: unknown
     try {
-      turnResponse = await this.lifecycle.run('turn', () => this.sessionAls
+      // A bot's turn is named by its thread, so a trash of that thread can tell it from other work.
+      turnResponse = await this.lifecycle.run(opts?.bot ? `bot-turn:${session.threadId}` : 'turn', () => this.sessionAls
         .run(session, () =>
           this.executeTurn(input, reuseLastUser, displayUserMessage, { ...opts, externalSignal: opts?.externalSignal ? AbortSignal.any([opts.externalSignal, this.lifecycle.signal]) : this.lifecycle.signal })
         ))
@@ -7138,7 +7146,7 @@ export class OrchestratorService extends EventEmitter {
     const engineRunId = this.runEngine ? opts?.runId : undefined
     let runTerminalMarked = false
     // `resultText` is the turn's final reply; a delegated child run publishes it (SPEC §14.1).
-    const markRunTerminal = (status: 'completed' | 'interrupted' | 'failed', outcome?: { error?: string; interruptedBy?: 'user' | 'daemon_restart' }, resultText?: string): void => {
+    const markRunTerminal = (status: 'completed' | 'interrupted' | 'failed', outcome?: { error?: string; interruptedBy?: 'user' | 'daemon_restart' | 'bot_wall' }, resultText?: string): void => {
       if (runTerminalMarked) return
       runTerminalMarked = true
       this.markRun(engineRunId, (engine, id) => engine.markTerminal(id, status, outcome, { resultText }))
@@ -7713,10 +7721,12 @@ export class OrchestratorService extends EventEmitter {
       }
       // SPEC §12.5: a profile shutdown is a restart, not a user's Stop; the next boot notes it.
       const restart = this.isShutdownAbort(turn.abort.signal.reason)
-      this.addSystemMessage(restart ? 'Turn interrupted by a Mousse restart.' : 'Turn stopped.')
+      // A bot's dispatch that ended at a wall waits for its owner; it was not stopped by a person.
+      const wall = !restart && Boolean(opts?.bot) && isBotWallAbort(turn.abort.signal.reason)
+      this.addSystemMessage(restart ? 'Turn interrupted by a Mousse restart.' : wall ? 'Paused: waiting for the owner.' : 'Turn stopped.')
       const response: OrchestratorResponse = { message: partial, actions: [] }
       this.setTurnPhase(session.threadId, 'stopped')
-      markRunTerminal('interrupted', { interruptedBy: restart ? 'daemon_restart' : 'user' }, partial)
+      markRunTerminal('interrupted', { interruptedBy: restart ? 'daemon_restart' : wall ? 'bot_wall' : 'user' }, partial)
       await checkpointTurn('stopped')
       this.persist(true)
       // Cross-channel IPC delivery and an in-flight renderer snapshot can otherwise leave

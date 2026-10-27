@@ -121,6 +121,8 @@ export interface ToolRegistryOptions {
   readOnlyThread?(threadId: string): boolean
   /** The ceiling a thread's delegations gave it, whatever its current turn's mode (the stable listing). */
   threadCeiling?(threadId: string): ModeCeiling
+  /** The thread's role when it is a personal bot's thread; bot tools are listed only there. */
+  botRole?(threadId: string): 'activation' | 'context' | undefined
   /** The turns registered by the `turn.start` executor; MCP calls act only inside one. */
   turns?: AppToolTurns
   /**
@@ -227,8 +229,18 @@ export class ToolRegistry {
     return this.listFor({
       readOnly: this.options.readOnlyThread?.(threadId) === true,
       modeCeiling: this.options.threadCeiling?.(threadId) ?? fallback,
-      accessLevel: this.effectiveLevel(granted)
+      accessLevel: this.effectiveLevel(granted),
+      ...this.botListing(threadId)
     })
+  }
+
+  private botListing(threadId: string): { botRole?: 'activation' | 'context' } {
+    try {
+      const role = this.options.botRole?.(threadId)
+      return role ? { botRole: role } : {}
+    } catch {
+      return {}
+    }
   }
 
   /**

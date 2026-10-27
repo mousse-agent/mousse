@@ -1,7 +1,8 @@
 import type { BotDefinition } from '../../shared/bots/personal/definition'
+import { BOT_ESCALATION_ANSWERS, type BotEscalationAnswer } from '../../shared/bots/personal/escalation'
 import { BOTS_PERSONAL_CAPABILITY, BOTS_PERSONAL_METHODS, type BotsPersonalMethod } from '../../shared/bots/personal/methods'
 import { DomainHandlerRegistry, DomainRpcError, domainObject } from '../protocol/domainRegistry'
-import { BotEngineError, type BotEngine } from './activation/BotEngine'
+import { BotEngineError, type BotAcknowledgement, type BotEngine } from './activation/BotEngine'
 import { BotDefinitionError, isBotId } from './definitions/BotDefinitionStore'
 
 type Params = Record<string, unknown>
@@ -17,7 +18,12 @@ const KEYS: Record<BotsPersonalMethod, readonly string[]> = {
   'bots.activate': ['botId', 'input', 'clientRequestId'],
   'bots.activations.list': ['botId'],
   'bots.activations.get': ['activationId'],
-  'bots.activations.stop': ['activationId']
+  'bots.activations.stop': ['activationId'],
+  'bots.activations.continue': ['activationId', 'acknowledge'],
+  'bots.activations.markDone': ['activationId', 'acknowledge'],
+  'bots.escalations.list': ['activationId'],
+  'bots.escalations.respond': ['escalationId', 'answer', 'amount'],
+  'bots.context.reset': ['botId', 'key']
 }
 
 const HASH = /^[a-f0-9]{64}$/
@@ -38,8 +44,22 @@ function validate(method: BotsPersonalMethod, value: unknown): Params {
     if (typeof p.input !== 'string' || !p.input.trim() || p.input.length > 64 * 1024) throw new DomainRpcError('invalid_params', 'The bot needs something to do')
     if (typeof p.clientRequestId !== 'string' || !REQUEST_ID.test(p.clientRequestId)) throw new DomainRpcError('invalid_params', 'A request id is required')
   }
-  if (KEYS[method].includes('activationId') && (typeof p.activationId !== 'string' || !/^act_[0-9a-f-]{36}$/.test(p.activationId)))
+  const activationOptional = method === 'bots.escalations.list' && p.activationId === undefined
+  if (KEYS[method].includes('activationId') && !activationOptional && (typeof p.activationId !== 'string' || !/^act_[0-9a-f-]{36}$/.test(p.activationId)))
     throw new DomainRpcError('invalid_params', 'An activation id is required')
+  if (p.acknowledge !== undefined) {
+    const shown = p.acknowledge as { calls?: unknown; uncertainRunId?: unknown } | null
+    const ids = (value: unknown) => Array.isArray(value) && value.length <= 1000 && value.every((id) => typeof id === 'string' && id.length > 0 && id.length <= 256)
+    if (!shown || typeof shown !== 'object' || Array.isArray(shown) || !ids(shown.calls) || Object.keys(shown).some((key) => key !== 'calls' && key !== 'uncertainRunId') ||
+        (shown.uncertainRunId !== undefined && shown.uncertainRunId !== null && typeof shown.uncertainRunId !== 'string'))
+      throw new DomainRpcError('invalid_params', 'acknowledge must list the checked calls (and the uncertain run, if any)')
+  }
+  if (method === 'bots.escalations.respond') {
+    if (typeof p.escalationId !== 'string' || !/^esc_[0-9a-f-]{36}$/.test(p.escalationId)) throw new DomainRpcError('invalid_params', 'An escalation id is required')
+    if (!BOT_ESCALATION_ANSWERS.includes(p.answer as BotEscalationAnswer)) throw new DomainRpcError('invalid_params', 'The answer must be allow_bot, allow_once, deny or allow_more')
+    if (p.amount !== undefined && (typeof p.amount !== 'number' || !Number.isFinite(p.amount) || p.amount <= 0)) throw new DomainRpcError('invalid_params', 'The amount must be a positive number')
+  }
+  if (method === 'bots.context.reset' && (typeof p.key !== 'string' || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(p.key))) throw new DomainRpcError('invalid_params', 'A context thread key is required')
   return p
 }
 
@@ -66,6 +86,11 @@ async function handle(method: BotsPersonalMethod, p: Params, bots: BotEngine): P
     case 'bots.activations.list': return { activations: bots.listActivations(p.botId as string | undefined) }
     case 'bots.activations.get': return bots.getActivation(p.activationId as string)
     case 'bots.activations.stop': return bots.stop(p.activationId as string)
+    case 'bots.activations.continue': return bots.continueActivation(p.activationId as string, p.acknowledge ? { acknowledge: p.acknowledge as BotAcknowledgement } : {})
+    case 'bots.activations.markDone': return bots.markDone(p.activationId as string, p.acknowledge ? { acknowledge: p.acknowledge as BotAcknowledgement } : {})
+    case 'bots.escalations.list': return { escalations: bots.listEscalations(p.activationId as string | undefined) }
+    case 'bots.escalations.respond': return bots.respond({ escalationId: p.escalationId as string, answer: p.answer as BotEscalationAnswer, ...(p.amount !== undefined ? { amount: p.amount as number } : {}) })
+    case 'bots.context.reset': return bots.resetContext(p.botId as string, p.key as string)
   }
 }
 

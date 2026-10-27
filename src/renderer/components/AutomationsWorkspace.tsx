@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Bot, Clock, RefreshCw, Workflow } from '../lib/icons'
+import { Bot, Clock, RefreshCw, Workflow, Zap } from '../lib/icons'
 import { MOUSSE_BUILTIN_TOOLS } from '../../shared/integrations'
 import { createAgentDefinitionsClient } from '../services/agentDefinitionsClient'
+import { createPersonalBotsClient } from '../services/personalBotsClient'
+import { notifyBotEscalation } from '../lib/botNotifications'
+import { BotsWorkspace } from './bots/BotsWorkspace'
 import { createWorkflowDefinitionsClient } from '../services/workflowDefinitionsClient'
 import { createWorkflowExecutionClient } from '../services/workflowExecutionClient'
 import { createIntegrationPlatformClient } from '../services/integrationPlatformClient'
@@ -20,10 +23,11 @@ const workflowProjectToolIds = new Set(MOUSSE_BUILTIN_TOOLS.filter((tool) => too
 const automationTabs = [
   { id: 'agents', label: 'Agents', icon: Bot },
   { id: 'workflows', label: 'Workflows', icon: Workflow },
-  { id: 'scheduled', label: 'Scheduled', icon: Clock }
+  { id: 'scheduled', label: 'Scheduled', icon: Clock },
+  { id: 'bots', label: 'Bots', icon: Zap }
 ] as const
 
-/** Reusable agents, editable workflows, and scheduled jobs in Automations. */
+/** Reusable agents, editable workflows, scheduled jobs and personal bots in Automations. */
 export function AutomationsWorkspace({ active = true }: { active?: boolean }) {
   const profileId = useAppStore((state) => state.profileId)
   return <ProfileAutomationsWorkspace key={profileId} profileId={profileId} active={active} />
@@ -44,7 +48,8 @@ function ProfileAutomationsWorkspace({ profileId, active }: { profileId: string;
     agents: createAgentDefinitionsClient(window.mousse.platformRequest),
     workflows: createWorkflowDefinitionsClient(window.mousse.platformRequest),
     execution: createWorkflowExecutionClient(window.mousse.platformRequest),
-    integrations: createIntegrationPlatformClient(window.mousse.platformRequest)
+    integrations: createIntegrationPlatformClient(window.mousse.platformRequest),
+    bots: createPersonalBotsClient(window.mousse.platformRequest)
   }), [])
   const load = useCallback(async (discoverTools = false) => {
     const ticket = ++generation.current
@@ -83,6 +88,13 @@ function ProfileAutomationsWorkspace({ profileId, active }: { profileId: string;
     reveal()
     return workflowGuard.current(reason)
   }), [reveal])
+  // A bot waiting at a wall asks the owner even while Automations is closed (this view stays mounted).
+  useEffect(() => window.mousse.personalBots?.onEscalation((escalation) => {
+    if (escalation.status !== 'open') return
+    void clients.bots.list().then((bots) => bots.find((bot) => bot.id === escalation.botId)?.name, () => undefined).then((name) => {
+      notifyBotEscalation(escalation, name, () => { reveal(); setTab('bots') })
+    })
+  }), [clients, reveal])
   const registerWorkflowGuard = useCallback((guard: WorkflowLeaveGuard | null) => { workflowGuard.current = guard }, [])
   const selectTab = async (next: typeof tab, focus = false) => {
     if (next === tab) return
@@ -117,6 +129,8 @@ function ProfileAutomationsWorkspace({ profileId, active }: { profileId: string;
       <AgentDefinitionsWorkspace profileId={profileId} client={clients.agents} catalogs={catalogs} active={active} onRequestAttention={reveal} />
     </div> : tab === 'workflows' ? <div className="agents-workspace__pane" role="tabpanel" id="automations-workflows-pane" aria-labelledby="automations-workflows-tab">
       <WorkflowsWorkspace profileId={profileId} client={clients.workflows} execution={clients.execution} catalogs={workflowCatalogs} agentDefinitions={clients.agents} active={active} onRegisterLeaveGuard={registerWorkflowGuard} />
+    </div> : tab === 'bots' ? <div className="agents-workspace__pane" role="tabpanel" id="automations-bots-pane" aria-labelledby="automations-bots-tab">
+      <BotsWorkspace client={clients.bots} providers={catalogs.providers} skills={catalogs.skills} active={active} />
     </div> : <div className="agents-workspace__pane automations-scheduled-pane" role="tabpanel" id="automations-scheduled-pane" aria-labelledby="automations-scheduled-tab">
       <ScheduledPanel />
     </div>}

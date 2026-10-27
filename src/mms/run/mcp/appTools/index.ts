@@ -1,5 +1,6 @@
 import type { RunEngine } from '../../RunEngine'
 import { appletTools } from './applets'
+import { botTools } from './bots'
 import { browserTools } from './browser'
 import { delegationTools } from './delegation'
 import { devGuiTools } from './devGui'
@@ -31,7 +32,7 @@ export {
 } from './delegation'
 
 /** The tool families in the order the pi loop has always sent them, after the delegation tools. */
-export const APP_TOOL_FAMILIES = ['skills', 'plans', 'tasks', 'quickActions', 'devGui', 'web', 'browser', 'applets', 'delegation', 'thread'] as const
+export const APP_TOOL_FAMILIES = ['skills', 'plans', 'tasks', 'quickActions', 'devGui', 'web', 'browser', 'applets', 'delegation', 'thread', 'bots'] as const
 export type AppToolFamily = (typeof APP_TOOL_FAMILIES)[number]
 
 /**
@@ -74,6 +75,7 @@ export function createAppToolRegistry(input: {
     toolLedger: host.toolLedger ? (runId) => host.toolLedger!(runId) : undefined,
     readOnlyThread: host.readOnlyThread ? (threadId) => host.readOnlyThread!(threadId) : undefined,
     threadCeiling: host.threadCeiling ? (threadId) => host.threadCeiling!(threadId) : undefined,
+    botRole: host.botRole ? (threadId) => host.botRole!(threadId) : undefined,
     permissionModeFor: host.permissionModeFor ? (runId) => host.permissionModeFor!(runId) : undefined,
     askApproval: host.askApproval ? (threadId, questions, options) => host.askApproval!(threadId, questions, options) : undefined,
     turns: input.turns,
@@ -95,5 +97,6 @@ export function createAppToolRegistry(input: {
   add('web', webTools(host))
   add('browser', browserTools(host))
   add('applets', appletTools())
+  add('bots', botTools())
   return { registry, families }
 }

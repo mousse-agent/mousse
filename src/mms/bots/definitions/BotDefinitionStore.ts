@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { type BotDefinition, type BotThreadSpec } from '../../../shared/bots/personal/definition'
+import { MAX_BOT_CONTEXT_THREADS, type BotDefinition, type BotThreadSpec } from '../../../shared/bots/personal/definition'
 import { canonicalManifest, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import { stableStringify } from '../../run/json'
@@ -34,8 +34,14 @@ export function definitionProblem(definition: BotDefinition): string | undefined
   const thread = threadProblem(definition.main)
   if (thread) return thread
   if (!Array.isArray(definition.context)) return 'The context threads are invalid.'
-  // Consults come later; a context thread cannot be used yet.
-  if (definition.context.length > 0) return 'Context threads are not available yet.'
+  if (definition.context.length > MAX_BOT_CONTEXT_THREADS) return `A bot can have at most ${MAX_BOT_CONTEXT_THREADS} context threads.`
+  const keys = new Set([definition.main.key])
+  for (const context of definition.context) {
+    const problem = threadProblem(context)
+    if (problem) return problem
+    if (keys.has(context.key)) return 'Each thread needs its own key.'
+    keys.add(context.key)
+  }
   if (!definition.triggers || definition.triggers.manual !== true || Object.keys(definition.triggers).some((key) => key !== 'manual'))
     return 'Only manual activation is available yet.'
   return manifestProblem(definition.permissions)
@@ -111,7 +117,9 @@ export class BotDefinitionStore {
     const current = this.get(definition.id)
     if (current && expectedDraftHash !== undefined && current.draftHash !== expectedDraftHash)
       throw new BotDefinitionError('bot_draft_conflict', 'This bot was changed elsewhere. Reload it and try again.')
-    const { revision: _revision, ...draft } = definition
+    const { revision: _revision, ...given } = definition
+    // Permissions are stored in their one canonical form (per-folder access included).
+    const draft = given.permissions && typeof given.permissions === 'object' && !manifestProblem(given.permissions) ? { ...given, permissions: canonicalManifest(given.permissions) } : given
     mkdirSync(this.dir(definition.id), { recursive: true, mode: 0o700 })
     atomicWriteJsonSync(join(this.dir(definition.id), 'draft.json'), draft)
     return this.get(definition.id)!
@@ -133,6 +141,23 @@ export class BotDefinitionStore {
     const path = join(dir, `${revision}.json`)
     if (!existsSync(path)) atomicWriteJsonSync(path, current.draft)
     return { ...current.draft, revision }
+  }
+
+  /**
+   * Publishes `definition` as a revision without touching the draft ("Allow for this bot"), so
+   * the owner's unpublished edits are never overwritten. A definition that cannot run is refused.
+   */
+  publishRevision(definition: BotDefinition): BotDefinition {
+    const { revision: _revision, ...given } = definition
+    const content = { ...given, permissions: canonicalManifest(given.permissions) }
+    const problem = definitionProblem(content as BotDefinition)
+    if (problem) throw new BotDefinitionError('bot_invalid', problem)
+    const revision = definitionHash(content as BotDefinition)
+    const dir = join(this.dir(definition.id), 'revisions')
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    const path = join(dir, `${revision}.json`)
+    if (!existsSync(path)) atomicWriteJsonSync(path, content)
+    return { ...(content as BotDefinition), revision }
   }
 
   remove(botId: string): void {
