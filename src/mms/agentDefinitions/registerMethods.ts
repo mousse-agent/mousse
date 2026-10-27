@@ -149,6 +149,10 @@ async function handle(method: AgentDefinitionMethod, p: Params, service: AgentDe
     case 'agentDefinitions.saveDraft': return registry.saveDraft(id, p as unknown as SaveAgentDraftInput)
     case 'agentDefinitions.publish': {
       const resolved = resolver.resolveDraft({ definitionId: id, expectedDraftHash })
+      // A revision whose primary model can never run it is refused here, whatever client publishes.
+      const refused = (service.checkRuntime?.({ definitionId: id, revision: resolved.revision, settings: resolved.settings, grants: resolved.grants }) ?? [])
+        .filter((issue) => issue.details?.blocking !== false)
+      if (refused.length) throw new AgentDefinitionError('SETTINGS_UNSUPPORTED', refused[0]!.message, { pointer: refused[0]!.pointer, details: { issues: refused } })
       return registry.publish(id, expectedDraftHash!, {
         dependencyHashes: resolved.dependencyHashes
       })
