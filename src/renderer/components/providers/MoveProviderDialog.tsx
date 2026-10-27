@@ -86,14 +86,20 @@ export function MoveDialogHost({
   )
 }
 
-/** The card's Move prompt: the banner for an entry whose old route is going away, else a row. */
+/**
+ * The card's Move prompt. `banner`: the persistent banner of an entry whose old route is going away,
+ * shown above its Setup. `row`: the quiet row of any other entry that runs as an agent now (or the
+ * note that it moved), inside Setup. The editor renders both; each shows only its own case.
+ */
 export function MoveNotice({
   snapshot,
   snapshots,
+  variant = 'row',
   onMoved
 }: {
   snapshot: InstanceSnapshot
   snapshots: readonly InstanceSnapshot[]
+  variant?: 'banner' | 'row'
   onMoved?: () => Promise<void> | void
 }) {
   const [open, setOpen] = useState(false)
@@ -102,27 +108,31 @@ export function MoveNotice({
   const label = DRIVER_INFO[agent].label
   const banner = moveBannerOf(snapshot)
   const movedTo = snapshot.config?.movedTo
+  let shown = null
+  if (variant === 'banner') {
+    if (banner) shown = <MoveBannerView banner={banner} onMove={() => setOpen(true)} />
+  } else if (!banner) {
+    shown = movedTo ? (
+      <SettingsRow
+        title="Moved"
+        description={`This entry moved to ${snapshots.find((entry) => entry.instanceId === movedTo)?.displayName ?? label} and is off. Remove it when you no longer need it.`}
+      />
+    ) : (
+      <SettingsRow
+        title={`Runs as ${label} now`}
+        description={`${snapshot.displayName} now runs as an agent with your account.`}
+        control={
+          <button type="button" className="settings-btn" onClick={() => setOpen(true)}>
+            Move…
+          </button>
+        }
+      />
+    )
+  }
   // The dialog stays up after the move (it lists what changed), though the entry now reads as moved.
   return (
     <>
-      {movedTo ? (
-        <SettingsRow
-          title="Moved"
-          description={`This entry moved to ${snapshots.find((entry) => entry.instanceId === movedTo)?.displayName ?? label} and is off. Remove it when you no longer need it.`}
-        />
-      ) : banner ? (
-        <MoveBannerView banner={banner} onMove={() => setOpen(true)} />
-      ) : (
-        <SettingsRow
-          title={`Runs as ${label} now`}
-          description={`${snapshot.displayName} now runs as an agent with your account.`}
-          control={
-            <button type="button" className="settings-btn" onClick={() => setOpen(true)}>
-              Move…
-            </button>
-          }
-        />
-      )}
+      {shown}
       {open && <MoveDialogHost snapshot={snapshot} snapshots={snapshots} onMoved={onMoved} onClose={() => setOpen(false)} />}
     </>
   )
@@ -158,7 +168,7 @@ function TargetReadiness({ target, onSignIn, onRecheck }: { target: InstanceSnap
       ) : target.auth.canSignIn && onSignIn ? (
         <>
           <p className="settings-muted">Sign in to {target.displayName} first. Nothing moves until you have, and no sign-in is copied from the old connection.</p>
-          <button type="button" className="settings-btn" disabled={!idle} onClick={() => void run('signin', () => onSignIn(target))}>
+          <button type="button" className="settings-btn move-target-action" disabled={!idle} onClick={() => void run('signin', () => onSignIn(target))}>
             {target.config?.setup === 'managed' ? 'Continue with ChatGPT' : 'Sign in'}
           </button>
         </>
@@ -167,7 +177,7 @@ function TargetReadiness({ target, onSignIn, onRecheck }: { target: InstanceSnap
           <p className="settings-muted">{command ? 'Run this in a terminal, then check again.' : `Sign in to ${target.displayName} first.`}</p>
           {command && <CommandBox command={command} label="Copy sign-in command" />}
           {onRecheck && (
-            <button type="button" className="settings-btn" disabled={!idle} onClick={() => void run('recheck', () => onRecheck(target))}>
+            <button type="button" className="settings-btn move-target-action" disabled={!idle} onClick={() => void run('recheck', () => onRecheck(target))}>
               Check again
             </button>
           )}

@@ -268,6 +268,7 @@ export function EngineRow({ snapshot, onSetEngine }: { snapshot: InstanceSnapsho
 export function ApiEditor({
   snapshot,
   setup,
+  banner,
   move,
   removeHint,
   onRemove,
@@ -277,6 +278,8 @@ export function ApiEditor({
 }: {
   snapshot: InstanceSnapshot
   setup: ReactNode
+  /** The persistent Move banner of an entry whose old route is going away, above its Setup. */
+  banner?: ReactNode
   move?: ReactNode
   removeHint?: string
   onRemove: () => Promise<void>
@@ -287,6 +290,7 @@ export function ApiEditor({
   return (
     <>
       <EditorHeader snapshot={snapshot} removeLabel="Remove provider" removeHint={removeHint} onRemove={onRemove} />
+      {banner}
       <EditorSection title="Setup">
         {setup}
         {move}

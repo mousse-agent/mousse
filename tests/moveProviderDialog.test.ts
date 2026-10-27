@@ -2,6 +2,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { MoveNotice, MoveProviderDialog, isMoveReady, moveTargets } from '../src/renderer/components/providers/MoveProviderDialog'
+import { ApiEditor } from '../src/renderer/components/providers/ProviderEditor'
 import { moveBannerOf } from '../src/shared/harness/move'
 import { describeStatus, type InstanceSnapshot } from '../src/shared/harness/status'
 import { snapshot } from './providerSnapshotFixture'
@@ -34,10 +35,30 @@ describe('the Move banner of an entry whose old route is going away', () => {
   })
 
   it('shows on the card with its Move button, in place of the plain row', () => {
-    const html = renderToStaticMarkup(createElement(MoveNotice, { snapshot: chatgpt(), snapshots: [chatgpt(), managed()] }))
+    const html = renderToStaticMarkup(createElement(MoveNotice, { variant: 'banner', snapshot: chatgpt(), snapshots: [chatgpt(), managed()] }))
     expect(html).toContain('Move to ChatGPT subscription.')
     expect(html).toContain('Your chats stay.')
     expect(buttons(html).map((entry) => entry.label)).toEqual(['Move'])
+    // The row variant leaves it to the banner.
+    expect(renderToStaticMarkup(createElement(MoveNotice, { snapshot: chatgpt(), snapshots: [chatgpt(), managed()] }))).toBe('')
+  })
+
+  it('sits between the card header and its Setup, once', () => {
+    const entry = chatgpt()
+    const html = renderToStaticMarkup(
+      createElement(ApiEditor, {
+        snapshot: entry,
+        setup: createElement('span', null, 'setup-row'),
+        banner: createElement(MoveNotice, { variant: 'banner', snapshot: entry, snapshots: [entry, managed()] }),
+        move: createElement(MoveNotice, { snapshot: entry, snapshots: [entry, managed()] }),
+        onRemove: noop,
+        onSaveModelPrefs: noop,
+        onRefreshModels: noop
+      })
+    )
+    expect(html.match(/move-banner"/g)).toHaveLength(1)
+    expect(html.indexOf('move-banner')).toBeLessThan(html.indexOf('setup-row'))
+    expect(html.indexOf('Setup')).toBeGreaterThan(html.indexOf('move-banner'))
     expect(html).not.toContain('Runs as')
   })
 
@@ -46,6 +67,8 @@ describe('the Move banner of an entry whose old route is going away', () => {
     const html = renderToStaticMarkup(createElement(MoveNotice, { snapshot: cursor, snapshots: [cursor] }))
     expect(html).toContain('Runs as Cursor now')
     expect(html).not.toContain('move-banner')
+    // No banner variant for it either.
+    expect(renderToStaticMarkup(createElement(MoveNotice, { variant: 'banner', snapshot: cursor, snapshots: [cursor] }))).toBe('')
   })
 
   it('a moved entry says where it went and has no banner', () => {
@@ -53,6 +76,7 @@ describe('the Move banner of an entry whose old route is going away', () => {
     const html = renderToStaticMarkup(createElement(MoveNotice, { snapshot: moved, snapshots: [moved, managed()] }))
     expect(html).toContain('This entry moved to ChatGPT subscription and is off.')
     expect(html).not.toContain('move-banner')
+    expect(renderToStaticMarkup(createElement(MoveNotice, { variant: 'banner', snapshot: moved, snapshots: [moved, managed()] }))).toBe('')
   })
 
   it('signed out, the status keeps Move as its step', () => {

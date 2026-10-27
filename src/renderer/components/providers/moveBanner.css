@@ -29,9 +29,14 @@
   flex: 0 0 auto;
 }
 
-/* On a card the banner sits inside the editor column, which has its own margins. */
+/* In the dialog's column the buttons keep their own width. */
+.move-target-action {
+  align-self: flex-start;
+}
+
+/* On a card the banner sits between the header and Setup, inside the editor column. */
 .prov-editor .move-banner {
-  margin: 0 0 var(--space-12, 12px);
+  margin: 0;
 }
 
 /* The conversation fills what the bar leaves. */

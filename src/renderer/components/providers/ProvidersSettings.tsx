@@ -261,9 +261,8 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
               }}
             />
           }
-          move={
-<MoveNotice snapshot={snapshot} snapshots={sorted} onMoved={reload} />
-          }
+          banner={<MoveNotice variant="banner" snapshot={snapshot} snapshots={sorted} onMoved={reload} />}
+          move={<MoveNotice snapshot={snapshot} snapshots={sorted} onMoved={reload} />}
           onSaveModelPrefs={onSaveModelPrefs}
           onRefreshModels={refreshModels(snapshot)}
           onSetEngine={(engine) => actionsFor(snapshot).configure({ engine })}
