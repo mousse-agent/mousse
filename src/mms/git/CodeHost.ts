@@ -18,6 +18,8 @@ export interface CodeHost {
   lookupPullRequest(cwd: string, branch?: string, options?: { force?: boolean }): Promise<GitPullRequestLookup>
   createPullRequest(cwd: string, input: CreatePullRequestInput): Promise<GitPullRequestInfo>
   listBaseBranches(cwd: string): Promise<PullRequestBaseBranches>
+  /** The remote that points at the folder's repository, else `origin`, else the only remote; null when there is none. */
+  remoteForRepository(cwd: string): Promise<string | null>
   /** The account the host's credential belongs to, or null when it cannot be read; cached for 10 minutes per host. */
   viewerLogin(cwd: string): Promise<string | null>
 }

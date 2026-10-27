@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { antigravityDriver } from '../../src/mms/harness/drivers/antigravity'
 import { claudeCodeDriver } from '../../src/mms/harness/drivers/claudeCode'
 import { codexDriver } from '../../src/mms/harness/drivers/codex'
-import { piLegacyDriver } from '../../src/mms/harness/drivers/piLegacy'
+import { piDriver } from '../../src/mms/harness/drivers/pi'
 import { createHarnessGateway } from '../../src/mms/harness/gateway'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { AntigravityProviderService } from '../../src/mms/providers/antigravity/AntigravityProviderService'
@@ -73,7 +73,7 @@ function legacyProfile(claudeSettings: Record<string, unknown>, instances: Recor
     questions,
     shellPath: async () => ({ entries: [], source: 'failed' }),
     drivers: [
-      piLegacyDriver({ client: () => ({ chat: async () => { throw new Error('unused') } }) }),
+      piDriver({ client: () => ({ chat: async () => { throw new Error('unused') } }) }),
       claudeCodeDriver({ builtIn: () => claude }),
       codexDriver({ builtIn: () => codex }),
       antigravityDriver({ builtIn: () => antigravity })

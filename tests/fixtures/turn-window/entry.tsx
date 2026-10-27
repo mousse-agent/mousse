@@ -3,7 +3,14 @@ import { createRoot } from 'react-dom/client'
 import { flushSync } from 'react-dom'
 import type { UIMessage } from 'ai'
 import { MessageList } from '../../../src/renderer/chat/components/agent-elements/message-list'
+import { runCommand } from '../../../src/renderer/commands/commandRegistry'
+import { attachCommandShortcuts } from '../../../src/renderer/commands/useCommandShortcuts'
+import { useAppStore } from '../../../src/renderer/stores/appStore'
 import '../../../src/renderer/styles/app.css'
+
+// Ctrl/Cmd+F goes through the command registry like in the app: a thread is open and the dispatcher listens.
+useAppStore.setState({ activeThreadId: 'fixture', appInfo: { platform: 'win32', repoRoot: '', llmProvider: '' } })
+attachCommandShortcuts(window)
 
 const WORDS = 'the quick brown fox jumps over a lazy dog while reading a long transcript of prior turns'.split(' ')
 
@@ -48,7 +55,7 @@ let streaming = false
 function Fixture({ list, version, status }: { list: UIMessage[]; version: number; status: 'ready' | 'streaming' }) {
   return (
     <div style={{ height: 800, width: 1000, display: 'flex', flexDirection: 'column' }}>
-      <MessageList key={version} messages={list} status={status} />
+      <MessageList key={version} messages={list} status={status} enableFind />
     </div>
   )
 }
@@ -228,6 +235,32 @@ const qa = {
     return { drift, scrollHeightDelta: Math.abs(el.scrollHeight - startHeight) }
   },
   pickSentinel,
+  /** Opens the find bar the way the command palette does. */
+  openFind: () => runCommand('chat.findInThread', 'palette'),
+  findOpen: () => Boolean(document.querySelector('[role="search"]')),
+  findCount: () => document.querySelector('.chat-find-count')?.textContent ?? null,
+  /** Where the active match is painted, relative to the transcript's top edge, or null when none is. */
+  activeMatch(): { top: number; bottom: number; text: string; viewport: number; turn: string | null } | null {
+    const highlight = (CSS as unknown as { highlights: Map<string, Iterable<Range>> }).highlights.get('mousse-find-active')
+    const range = highlight ? Array.from(highlight)[0] : undefined
+    if (!range) return null
+    const rect = range.getBoundingClientRect()
+    const edge = container().getBoundingClientRect()
+    const row = range.startContainer.parentElement?.closest<HTMLElement>('[data-turn-key]')
+    return { top: rect.top - edge.top, bottom: rect.bottom - edge.top, text: range.toString(), viewport: edge.height, turn: row?.dataset.turnKey ?? null }
+  },
+  activeInView(): boolean {
+    const match = qa.activeMatch()
+    return match !== null && match.top >= 0 && match.bottom <= match.viewport
+  },
+  highlightCount: () => (CSS as unknown as { highlights: Map<string, unknown> }).highlights.size,
+  /** Types into the find field the way a person does: React sees an input event. */
+  setFindQuery(value: string) {
+    const field = document.querySelector<HTMLInputElement>('input[aria-label="Find in thread"]')!
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(field, value)
+    field.dispatchEvent(new Event('input', { bubbles: true }))
+  },
+  findFocused: () => document.activeElement === document.querySelector('input[aria-label="Find in thread"]'),
   errors: () => errors,
   unmount: () => root.unmount(),
 }

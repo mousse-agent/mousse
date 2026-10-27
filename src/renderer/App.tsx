@@ -23,6 +23,7 @@ import { WorkspaceLoading } from './components/WorkspaceLoading'
 import { LinuxWindowResizeHandles } from './components/LinuxWindowResizeHandles'
 import { TitleBar } from './components/TitleBar'
 import { SubscriptionUsagePage } from './components/SubscriptionUsagePage'
+import { CommandPalette } from './components/CommandPalette'
 
 import { openSurface } from './lib/surfaces'
 import { useAppStore } from './stores/appStore'
@@ -593,6 +594,8 @@ export default function App() {
         </div>
 
       </div>
+
+      <CommandPalette />
 
     </div>
 

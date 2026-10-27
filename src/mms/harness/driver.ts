@@ -1,5 +1,5 @@
 import type { AuthState, InstallOwner } from '../../shared/harness/status'
-import type { HarnessCaps, HarnessDriverKind, RemoveInstallResult, RuntimeFacts } from '../../shared/harness/types'
+import type { CustomModel, HarnessCaps, HarnessDriverKind, RemoveInstallResult, RuntimeFacts } from '../../shared/harness/types'
 import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult } from '../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
 import type { UserQuestionService } from '../orchestrator/UserQuestionService'
@@ -11,12 +11,15 @@ import type { McpTurnBinding } from '../run/mcp/appTools/registry'
 import type { ProviderRef } from '../run/types'
 import type { InstanceEnv } from './env'
 import type { LatestVersionSource } from './latest'
+import type { SpendModelFacts } from './policy'
 
 /**
  * A driver is a kind of runtime (Claude Code, Codex, Antigravity, the pi loop). The gateway asks
  * it for one `DriverRuntime` per instance revision and owns everything around it: probes,
- * timeouts, scope, model prefs and the edge cases callers never see. Drivers do no retries,
- * timeouts or capability fallbacks.
+ * timeouts, scope, model prefs and the edge cases callers never see. Drivers never retry, and set
+ * no timeouts or capability fallbacks of their own. A runtime retries its own provider requests as
+ * Mousse configures it (Claude Code's, Codex's and Pi's own retries); the gateway's only retry is
+ * the turn retry when no side effect is possible.
  *
  * PR 1 drivers wrap today's provider services and run adapters; each instance gets its own adapter
  * built by the driver's factory.
@@ -41,6 +44,11 @@ export interface InstanceConfig {
    * sign-in, or `existing`, the user's Codex CLI). Chosen when the entry is added; fixed after.
    */
   setup?: 'managed' | 'existing'
+  /**
+   * Which engine runs a `pi` instance: Pi's agent as its own process (`rpc`) or the in-process pi
+   * loop (`legacy`, the default until PR 2c). Part of the record key: a switch builds a new runtime.
+   */
+  engine?: 'rpc' | 'legacy'
 }
 
 /** Whether an entry runs in a Mousse-owned home: it must, it may, or it must not. */
@@ -123,9 +131,38 @@ export interface LiveProcessHost {
   notice?(threadId: string, text: string): void
 }
 
+/**
+ * One model request with no tools and no session (a chat title), run by the gateway's `oneShot`.
+ * The gateway resolved and admitted the selection and owns the timeout; the driver makes exactly one
+ * request and never retries.
+ */
+export interface OneShotSpec {
+  /** The model as selected (a `:effort` suffix included, when the selection had one). */
+  model: string
+  effort?: string
+  /** The user's custom model of that id on this instance, when it is one. */
+  customModel?: CustomModel
+  system: string
+  prompt: string
+  /** Prompt-cache affinity, hashed before it reaches the provider (a thread id). */
+  sessionKey?: string
+  /** Called on every event the provider sends; the gateway's inactivity timeout restarts. */
+  onActivity(): void
+}
+
 export interface DriverRuntime {
   /** The turn runtime of this instance. */
   readonly adapter: ProviderAdapter
+  /**
+   * One request with no tools (`HarnessDriver.oneShot`). Throws the provider's failure; `signal`
+   * aborts it (the caller stopped, or the gateway's inactivity timeout).
+   */
+  oneShot?(spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }>
+  /**
+   * What token and spend limits need from `model` (`SpendModelFacts`), read at turn admission only
+   * when the policy has such a limit and the caps reserve spend. Absent or undefined refuses them.
+   */
+  spendModel?(model: string): SpendModelFacts | undefined
   /** Signed in and installed, so its models can be the default. */
   configured(): boolean
   /** The Settings listings of a vendor instance (`providers.listConfigured`, model pickers). */
@@ -214,7 +251,12 @@ export interface DriverRuntime {
   hasContinuation?(threadId: string, id?: string): boolean
   /** Drops the turns of its own the thread's live process holds (only `id`, when given). */
   discardContinuations?(threadId: string, id?: string): void
-  stop(): void
+  /**
+   * Ends the runtime (its instance was replaced or removed). A runtime with processes returns a
+   * promise that settles once they exited; the gateway deletes a removed instance's files only then
+   * (Windows keeps open files locked).
+   */
+  stop(): void | Promise<void>
 }
 
 export interface HarnessDriver {
@@ -240,10 +282,15 @@ export interface HarnessDriver {
    * Every instance, built-in ones included, runs with a Mousse-owned home under its state dir,
    * whatever its config says (a runtime Mousse hosts itself and never points at the user's home).
    */
-  readonly alwaysPrivateHome?: boolean
+  readonly alwaysPrivateHome?: boolean | ((config: InstanceConfig) => boolean)
   readonly canInstall: boolean
   /** Runs a model the user adds by id (custom models); otherwise only the models it lists. */
   readonly customModels: boolean
+  /**
+   * Its runtimes run a single request with no tools (`DriverRuntime.oneShot`), so its models can name
+   * chats. Agent runtimes run turns only (absent = false).
+   */
+  readonly oneShot?: boolean
   /** How the driver's instances sign in, for display. */
   readonly methodLabel?: string
   /**

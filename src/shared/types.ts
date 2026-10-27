@@ -960,6 +960,43 @@ export interface FileSearchResponse {
   complete: boolean
 }
 
+export interface FileGrepMatch {
+  /** Root-relative, `/`-separated. */
+  path: string
+  /** 1-based. */
+  line: number
+  /** 1-based UTF-16 code unit offset of the match within the full line. */
+  column: number
+  /** UTF-16 length of the match; `null` for a regular-expression match, where only the start is known. */
+  matchLength: number | null
+  /** The line, cut to a window around the match when it is long. */
+  text: string
+  /** UTF-16 offset of `text` within the full line; the match starts at `column - 1 - snippetStart` in `text`. */
+  snippetStart: number
+}
+
+export interface FileGrepResponse {
+  /** Absolute root the match paths are relative to. */
+  root: string
+  /** `git` is `git grep`; `walk` is a fixed-string scan of the file index. */
+  source: 'git' | 'walk'
+  /** Why a Git repository was scanned instead of searched by git; absent for `git`. */
+  fallbackReason?: 'not-a-repo' | 'git-missing' | 'git-too-old'
+  matches: FileGrepMatch[]
+  filesWithMatches: number
+  /** The match limit, a per-file limit or the file index cap cut the results short. */
+  truncated: boolean
+  /** The time budget ran out; `matches` holds what was found so far. */
+  timedOut: boolean
+  /** The file index was still building, so the scan covered only part of the project. */
+  indexing: boolean
+  /** Matching lines too long to return. */
+  skippedLongLines: number
+  /** Set when a regular expression could not be used and the query was searched literally. */
+  regexError?: string
+  elapsedMs: number
+}
+
 export interface FileStat {
   path: string
   kind: 'file' | 'directory'
@@ -1065,6 +1102,19 @@ export interface GitCheckoutResult {
   /** The changes were stashed and could not be re-applied cleanly, so the stash is kept. */
   stashKept?: boolean
 }
+
+/**
+ * Which folder a Git mutation belongs to, as the daemon needs it. A thread working in its own
+ * worktree names the thread (the daemon applies the thread rules there); any other folder names its project.
+ */
+export interface GitScope {
+  projectId: string | null
+  /** Set only when the folder is the thread's own ready worktree. */
+  workspaceThreadId: string | null
+}
+
+/** What a daemon Git mutation answers: the folder's fresh status, plus the action's own result. */
+export type GitMutationResult<T extends object = object> = { status: GitStatusSnapshot } & T
 
 export type GitPullStrategy = 'ff-only' | 'merge' | 'rebase'
 

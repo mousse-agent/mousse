@@ -13,6 +13,7 @@ export type CommandId =
   | 'thread.next'
   | 'thread.previous'
   | 'threads.search'
+  | 'chat.findInThread'
   | 'run.stop'
   | 'sideCard.toggle'
   | 'terminal.open'
@@ -162,6 +163,20 @@ export const COMMANDS: readonly CommandDefinition[] = [
     textInput: 'allow',
     terminal: 'deny',
     guest: 'allow'
+  },
+  {
+    // The transcript's own find bar. A text field may be focused (the composer); a terminal or the
+    // browser surface keeps the key, and the handler also leaves Monaco its own find widget.
+    id: 'chat.findInThread',
+    title: 'Find in thread',
+    category: 'Thread',
+    searchTerms: ['search', 'text', 'messages', 'transcript'],
+    defaultBinding: `${MOD}+F`,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'deny',
+    guest: 'deny',
+    when: threadIsOpen
   },
   {
     id: 'run.stop',
@@ -669,7 +684,12 @@ export const RESERVED_BINDINGS: readonly ReservedBinding[] = [
   { match: `${MOD}+R`, reason: 'Reloads the window in development builds', hard: false },
   { match: `${MOD}+Shift+R`, reason: 'Reloads the window in development builds', hard: false },
   { match: `${MOD}+Shift+I`, reason: 'Opens developer tools in development builds', hard: false },
-  { match: `${MOD}+F`, reason: 'Reserved for Find in thread (chat.findInThread)', hard: false },
+  {
+    match: `${MOD}+F`,
+    reason: 'Reserved for Find in thread (chat.findInThread)',
+    hard: false,
+    except: ['chat.findInThread']
+  },
   { match: `${MOD}+P`, reason: 'Reserved for Files quick open (files.quickOpen)', hard: false },
   { match: `${MOD}+Shift+F`, reason: 'Reserved for Files text search (files.textSearch)', hard: false },
   {
@@ -713,11 +733,11 @@ export type Conflict =
     }
 
 /** Scopes can be active together when they are equal or either is global. */
-const scopesOverlap = (a: CommandDefinition, b: CommandDefinition): boolean =>
+export const scopesOverlap = (a: CommandDefinition, b: CommandDefinition): boolean =>
   a.scope === b.scope || a.scope === 'global' || b.scope === 'global'
 
 /** Scoped beats global; otherwise the earlier one in the table. */
-const beats = (a: CommandDefinition, b: CommandDefinition): boolean => {
+export const beats = (a: CommandDefinition, b: CommandDefinition): boolean => {
   if ((a.scope === 'global') !== (b.scope === 'global')) return a.scope !== 'global'
   return COMMANDS.indexOf(a) < COMMANDS.indexOf(b)
 }

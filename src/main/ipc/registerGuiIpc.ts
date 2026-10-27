@@ -17,6 +17,7 @@ import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
 
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, session, shell } from 'electron'
 import { homedir } from 'os'
+import { daemonGitParams } from './daemonGitParams'
 import { getComputerName } from '../computerName'
 import { randomUUID } from 'node:crypto'
 import type { GuiMmsController } from '../mms/GuiMmsController'
@@ -34,6 +35,9 @@ import { SettingsStore } from '../../mms/settings/SettingsStore'
 import { FileService } from '../../mms/files/FileService'
 import { GitService } from '../../mms/git/GitService'
 import { listEditors, openInEditor } from '../editors'
+import { refreshApplicationMenu } from '../applicationMenu'
+import { setGuestShortcuts } from '../menu/guestShortcutForward'
+import type { ShortcutOverrides } from '../../shared/commands'
 import { BrowserViewManager } from '../browser/BrowserViewManager'
 import type { AttachedBrowserHost } from '../browser/AttachedBrowserHost'
 import { domainObject } from '../../mms/protocol/domainRegistry'
@@ -89,8 +93,15 @@ import type {
   ChannelConfig,
   ChannelPlatform,
   CreateScheduledJobInput,
+  FileGrepResponse,
   FileSearchResponse,
+  GitBranchOptions,
+  GitCheckoutOptions,
   GitCommitOptions,
+  GitDeleteBranchOptions,
+  GitPullOptions,
+  GitPushOptions,
+  GitScope,
   MainView,
   OrchestratorContextUsageInput,
   OrchestratorSendInput,
@@ -103,7 +114,14 @@ import type {
   UserQuestionAnswers
 } from '../../shared/types'
 import { isThreadActivityActive } from '../../shared/types'
-import type { PullRequestRef } from '../../shared/pullRequests'
+import type {
+  CreatePullRequestResult,
+  PullRequestBaseBranches,
+  PullRequestDraft,
+  PullRequestFormInput,
+  PullRequestRef,
+  PullRequestScope
+} from '../../shared/pullRequests'
 import { visibleThreads } from '../../shared/threadLineage'
 import type { ProviderLoginResponse } from '../../shared/providerAuth'
 import type {
@@ -174,6 +192,14 @@ class PlatformRequestError extends AppError {
 
 let mousseIdCallbacks: MousseIdCallbacks | undefined
 
+/** The shortcut overrides of each window's bound profile, by the window's webContents id. */
+const shortcutsByWindow = new Map<number, ShortcutOverrides>()
+
+/** What the window's before-input gate reads: undefined until the window's settings have arrived. */
+export function getWindowShortcuts(senderId: number): ShortcutOverrides | undefined {
+  return shortcutsByWindow.get(senderId)
+}
+
 function registerHandler(
   channel: string,
   handler: Parameters<typeof ipcMain.handle>[1]
@@ -223,6 +249,16 @@ function normalizeSendContent(request: OrchestratorSendInput): {
     requestId: request.requestId,
     mode: request.mode,
     images: request.images
+  }
+}
+
+/** The daemon's parameters for a pull request action: its folder, originating thread and the branch it is bound to. */
+function pullRequestScopeParams(scope: PullRequestScope | undefined): Record<string, string> {
+  return {
+    ...(typeof scope?.threadId === 'string' ? { threadId: scope.threadId } : {}),
+    ...(typeof scope?.projectId === 'string' ? { projectId: scope.projectId } : {}),
+    ...(typeof scope?.originThreadId === 'string' ? { originThreadId: scope.originThreadId } : {}),
+    ...(typeof scope?.branch === 'string' ? { expectedBranch: scope.branch } : {})
   }
 }
 
@@ -301,6 +337,12 @@ export function registerGuiIpc(
   // repainting another profile's window.
   const windowPresentations = new Map<number, PresentationState>()
   const windowSettings = new Map<number, MousseSettings>()
+  // The application menu and the key gate show the shortcuts of the profile this window is bound to.
+  const rememberWindowSettings = (senderId: number, next: MousseSettings): void => {
+    windowSettings.set(senderId, next)
+    shortcutsByWindow.set(senderId, next.shortcuts ?? {})
+    refreshApplicationMenu(next.shortcuts)
+  }
   const currentPresentation = (): PresentationState => {
     const senderId = guiMms.getCurrentSenderId()
     if (senderId === null) return presentation
@@ -708,7 +750,7 @@ export function registerGuiIpc(
     if (event.type === 'settings.changed') {
       const next = (event.data as { settings?: MousseSettings } | null)?.settings
       if (next) {
-        windowSettings.set(senderId, next)
+        rememberWindowSettings(senderId, next)
         if (binding.profileId === guiMms.getBaseBinding()?.profileId) {
           try {
             settings.set(next)
@@ -1785,6 +1827,29 @@ export function registerGuiIpc(
       threadId?: string | null
     ) => searchScoped<FileSearchResponse>('files.search', { query, ...options }, projectId, threadId)
   )
+  registerHandler(
+    'fs:grep',
+    (
+      _e,
+      query: string,
+      options?: { regex?: boolean; caseSensitive?: boolean; wholeWord?: boolean; limit?: number; timeoutMs?: number },
+      projectId?: string,
+      threadId?: string | null
+    ) =>
+      searchScoped<FileGrepResponse>(
+        'files.grep',
+        {
+          query,
+          regex: options?.regex,
+          caseSensitive: options?.caseSensitive,
+          wholeWord: options?.wholeWord,
+          limit: options?.limit,
+          timeoutMs: options?.timeoutMs
+        },
+        projectId,
+        threadId
+      )
+  )
 
   const resolveGitCwd = async (projectId?: string, cwd?: string): Promise<string> => {
     if (cwd) return cwd
@@ -1802,24 +1867,26 @@ export function registerGuiIpc(
   registerHandler('git:diffStats', async (_e, projectId?: string, cwd?: string) =>
     gitService.getDiffStats(await resolveGitCwd(projectId, cwd))
   )
-  registerHandler(
-    'git:checkout',
-    async (_e, branch: string, projectId?: string, cwd?: string) => {
-      await gitService.checkout(await resolveGitCwd(projectId, cwd), branch)
-    }
-  )
-  registerHandler(
-    'git:commit',
-    async (_e, message: string, projectId?: string, cwd?: string, options?: GitCommitOptions) => {
-      await gitService.commit(await resolveGitCwd(projectId, cwd), message, options)
-    }
-  )
-  registerHandler('git:init', async (_e, projectId?: string, cwd?: string) => {
-    await gitService.init(await resolveGitCwd(projectId, cwd))
-  })
-  registerHandler('git:push', async (_e, projectId?: string, cwd?: string) => {
-    await gitService.push(await resolveGitCwd(projectId, cwd))
-  })
+  // Every Git mutation runs in the daemon, so the thread-worktree rules and the repository lease apply
+  // to the GUI like any other client. Storage handlers keep the daemon's error code across IPC.
+  const gitMutation = <A extends unknown[]>(channel: string, method: string, toArgs: (...args: A) => Record<string, unknown> = () => ({})): void => {
+    registerStorageHandler(channel, async (_e, scope: GitScope, ...args: unknown[]) =>
+      guiMms.request(method, daemonGitParams(scope, toArgs(...(args as A))))
+    )
+  }
+  gitMutation('git:checkout', 'git.checkout', (branch: string, options?: GitCheckoutOptions) => ({ branch, dirty: options?.dirty }))
+  gitMutation('git:commit', 'git.commit', (message: string, options?: GitCommitOptions) => ({ message, amend: options?.amend, expectedBranch: options?.expectedBranch }))
+  gitMutation('git:push', 'git.push', (options?: GitPushOptions) => ({ expectedBranch: options?.expectedBranch }))
+  gitMutation('git:init', 'git.init')
+  gitMutation('git:stage', 'git.stage', (input: { paths?: string[]; all?: boolean }) => ({ paths: input?.paths, all: input?.all }))
+  gitMutation('git:unstage', 'git.unstage', (input: { paths?: string[]; all?: boolean }) => ({ paths: input?.paths, all: input?.all }))
+  gitMutation('git:discard', 'git.discard', (paths: string[]) => ({ paths }))
+  gitMutation('git:fetch', 'git.fetch')
+  gitMutation('git:pull', 'git.pull', (options?: GitPullOptions) => ({ strategy: options?.strategy }))
+  gitMutation('git:abortInProgress', 'git.abortInProgress', (kind: 'merge' | 'rebase') => ({ kind }))
+  gitMutation('git:createBranch', 'git.createBranch', (name: string, options?: GitBranchOptions) => ({ name, from: options?.from, checkout: options?.checkout }))
+  gitMutation('git:renameBranch', 'git.renameBranch', (name: string, newName: string) => ({ name, newName }))
+  gitMutation('git:deleteBranch', 'git.deleteBranch', (name: string, options?: GitDeleteBranchOptions) => ({ name, force: options?.force }))
   registerHandler('git:lastCommitMessage', async (_e, projectId?: string, cwd?: string) =>
     gitService.lastCommitMessage(await resolveGitCwd(projectId, cwd))
   )
@@ -1832,8 +1899,29 @@ export function registerGuiIpc(
     })
     return response.lookup
   })
-  registerHandler('git:createPullRequest', async (_e, projectId?: string, cwd?: string) => {
-    await gitService.github.createPullRequest(await resolveGitCwd(projectId, cwd))
+  registerHandler('pullRequests:draft', async (_e, scope: PullRequestScope, base?: string) => {
+    const response = await guiMms.request<{ title: string; body: string; base: string; source: 'model' | 'heuristic' }>(
+      'pullRequests.draft',
+      { ...pullRequestScopeParams(scope), ...(typeof base === 'string' && base ? { base } : {}) }
+    )
+    return { title: response.title, body: response.body, base: response.base, source: response.source } satisfies PullRequestDraft
+  })
+  registerHandler('pullRequests:create', async (_e, scope: PullRequestScope, input: PullRequestFormInput) => {
+    const response = await guiMms.request<CreatePullRequestResult>('pullRequests.create', {
+      ...pullRequestScopeParams(scope),
+      title: input?.title,
+      body: input?.body,
+      base: input?.base,
+      draft: input?.draft === true
+    })
+    return { pullRequest: response.pullRequest, existing: response.existing === true } satisfies CreatePullRequestResult
+  })
+  registerHandler('pullRequests:baseBranches', async (_e, ref: PullRequestRef | undefined) => {
+    const response = await guiMms.request<{ baseBranches: PullRequestBaseBranches }>('pullRequests.baseBranches', {
+      ...(typeof ref?.threadId === 'string' ? { threadId: ref.threadId } : {}),
+      ...(typeof ref?.projectId === 'string' ? { projectId: ref.projectId } : {})
+    })
+    return response.baseBranches
   })
   registerHandler('editors:list', async (_e, options?: { refresh?: boolean }) =>
     listEditors(options)
@@ -1923,7 +2011,7 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ settings: MousseSettings }>('settings.get')
     const senderId = guiMms.getCurrentSenderId()
     if (senderId !== null) {
-      windowSettings.set(senderId, res.settings)
+      rememberWindowSettings(senderId, res.settings)
       const win = BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.id === senderId)
       applyWindowAccentBackground(win, res.settings)
     }
@@ -1940,7 +2028,7 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ settings: MousseSettings }>('settings.set', {
       partial
     })
-    windowSettings.set(event.sender.id, res.settings)
+    rememberWindowSettings(event.sender.id, res.settings)
     if (guiMms.getWindowBinding()?.profileId === guiMms.getBaseBinding()?.profileId) {
       try {
         settings.set(res.settings)
@@ -1950,6 +2038,10 @@ export function registerGuiIpc(
     }
     applyWindowAccentBackground(BrowserWindow.fromWebContents(event.sender), res.settings)
     return res.settings
+  })
+  // Chords the renderer can run when they are typed into the browser surface (see menu/guestShortcutForward).
+  registerHandler('commands:setGuestShortcuts', (event, entries: unknown) => {
+    setGuestShortcuts(event.sender.id, entries)
   })
   registerHandler('settings:getOptions', async () => {
     const res = await guiMms.request<{ options: unknown }>('settings.getOptions')

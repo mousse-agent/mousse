@@ -54,8 +54,8 @@ import { DEFAULT_HOME_ID, findOnPath, instanceEnv, type InstanceEnv } from './en
 import { addedInstanceId, defaultInstanceId, InstanceCounterStore, instanceStateDir, isBuiltInInstance } from './instances'
 import { LatestVersionCache } from './latest'
 import { RuntimeFactsStore } from './facts'
-import { questionsPrompter } from './acp/permissions'
-import { checkPolicy, purposeAllowed, toolControlLevel } from './policy'
+import { questionsPrompter, refusingPrompter } from './acp/permissions'
+import { checkPolicy, hasSpendLimit, purposeAllowed, toolControlLevel } from './policy'
 import { HarnessScopeStore } from './scope'
 import { sharedShellPath, type ShellPathResult } from './shellPath'
 import { compatibilityOf, fingerprintOf, PROBE_TIMEOUTS, probeInstance, sameBinary, updateAffordance, type ProbeResult } from './status'
@@ -80,7 +80,9 @@ export type {
 
 /**
  * The only way app code reaches agents and providers. Drivers (`./drivers/*`) sit behind it; the
- * gateway owns retries, timeouts, capability fallbacks, scope and model prefs. Failures are thrown
+ * gateway owns timeouts, capability fallbacks, scope and model prefs. Drivers never retry; runtimes
+ * retry their own requests as Mousse configures them, and the gateway's own retry is the turn retry
+ * when no side effect is possible. Failures are thrown
  * as `harnessAppError(...)` (`shared/harness/types.ts`) so callers and the protocol see typed codes.
  */
 export interface HarnessGateway {
@@ -99,6 +101,13 @@ export interface HarnessGateway {
    * `policy_unenforceable` when the instance cannot enforce the binding's policy.
    */
   startTurn(spec: TurnSpec): TurnHandle
+  /**
+   * One model request with no tools (a chat title), on an instance whose driver runs one-shots
+   * (`HarnessDriver.oneShot`). Resolves the selection like a turn for `purpose` (scope, hidden models,
+   * disabled instances); agent runtimes are refused with `unsupported`. Ends with `timeout` after
+   * `ONE_SHOT_INACTIVITY_MS` without a provider event, and is never retried: the caller falls back.
+   */
+  oneShot(request: OneShotRequest): Promise<{ text: string }>
 
   // -- Run engine -------------------------------------------------------------------------------
 
@@ -120,7 +129,7 @@ export interface HarnessGateway {
    * the binding records it. That reading serves the `startTurn` of this binding once; any other
    * dispatch (a stored binding: retry, recovery) reads the account again.
    */
-  bind(resolved: ResolvedTurnSelection, input: { mode: ChatMode; effort?: string; origin?: TurnOrigin }): Promise<ExecutionBinding>
+  bind(resolved: ResolvedTurnSelection, input: { mode: ChatMode; effort?: string; origin?: TurnOrigin; approvals?: RunPolicy['approvals'] }): Promise<ExecutionBinding>
   /** The selection a binding runs: a retry or recovery of a run executes its binding, never the current selection. */
   selectionOf(binding: ExecutionBinding): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'>
   /**
@@ -205,6 +214,22 @@ export type ResolvePurpose =
   | 'channel_model'
   | 'cli_model'
   | 'title'
+  | 'schedule'
+
+/** `HarnessGateway.oneShot`. */
+export interface OneShotRequest {
+  /** A stored selection (the title setting); a `:effort` suffix on the model is kept. */
+  selection: Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'>
+  scope?: ProviderScope
+  purpose: 'title'
+  system: string
+  prompt: string
+  /** The text is cut to this length. */
+  maxChars: number
+  /** Prompt-cache affinity (a thread id), hashed before it reaches the provider. */
+  sessionKey?: string
+  signal?: AbortSignal
+}
 
 export interface ResolvedSelection {
   selection: ProviderSelection
@@ -296,6 +321,13 @@ export interface TurnSpec {
   host: AdapterHost
   /** The turn's app-tool context, from which the gateway mints its `TurnBridge`. */
   app?: TurnAppContext
+  /**
+   * Instructions of the turn's own (an agent definition's system prompt): they replace the
+   * runtime's default instructions or are appended to them. Not policy.
+   */
+  instructions?: { text: string; placement: 'replace' | 'append' }
+  /** `ephemeral`: the turn runs in a session of its own that is not kept for the thread. Default `thread`. */
+  session?: 'thread' | 'ephemeral'
 }
 
 /** What the `turn.start` executor knows of a turn's app tools, for its bridge (PR 2 §2). */
@@ -326,6 +358,8 @@ export interface TurnHandle {
 export const PROBE_TTL_MS = 10 * 60_000
 /** How long a probe waits for the login-shell PATH before searching the inherited PATH only. */
 const SHELL_PATH_WAIT_MS = 3_000
+/** A one-shot request ends with `timeout` after this long without a provider event. */
+export const ONE_SHOT_INACTIVITY_MS = 60_000
 /** How long turn admission waits for the account check; past it the account counts as unknown. */
 export const TURN_ACCOUNT_CHECK_MS = 10_000
 
@@ -367,7 +401,7 @@ interface InstanceRecord {
   driver: HarnessDriver
   config: InstanceConfig
   builtIn: boolean
-  /** Driver, revision and home: a change builds a new runtime. */
+  /** Driver, revision, home and engine: a change builds a new runtime. */
   key: string
   env: InstanceEnv
   runtime: DriverRuntime
@@ -684,7 +718,7 @@ export class Harness implements HarnessGateway {
     const driver = this.drivers.get(resolved.entry.driver)
     if (!driver) fail('bad_request', `No provider adapter for driver ${resolved.entry.driver} (instance ${resolved.instanceId}).`)
     // Chat titles are a one-shot completion of an API provider's model; agent runtimes run turns only.
-    if (options.purpose === 'title' && driver.kind !== 'pi')
+    if (options.purpose === 'title' && !driver.oneShot)
       harnessFail('unsupported', `${driver.label} cannot name chats. Choose an API provider's model for chat titles, or Automatic.`, resolved.instanceId)
     if (!options.allowDisabled) {
       if (options.scope?.kind === 'project' && !this.scopes.enabled(resolved.instanceId, true, options.scope).effective)
@@ -785,7 +819,7 @@ export class Harness implements HarnessGateway {
     if (this.facts.set(record.instanceId, facts) && !this.stopped) this.changed(record.instanceId, { legacy: false })
   }
 
-  async bind(resolved: ResolvedTurnSelection, input: { mode: ChatMode; effort?: string; origin?: TurnOrigin }): Promise<ExecutionBinding> {
+  async bind(resolved: ResolvedTurnSelection, input: { mode: ChatMode; effort?: string; origin?: TurnOrigin; approvals?: RunPolicy['approvals'] }): Promise<ExecutionBinding> {
     const record = resolved.instanceId === PI_DRIVER_ID ? undefined : this.recordOrUndefined(resolved.instanceId)
     const accountId = record ? await this.currentAccount(record) : undefined
     const counters = this.counters.get(resolved.instanceId)
@@ -809,7 +843,7 @@ export class Harness implements HarnessGateway {
       ...(accountId ? { accountId } : {}),
       model,
       ...(input.effort ? { effort: input.effort } : {}),
-      policy: { mode: policyMode(input.mode), approvals: 'ask', origin: input.origin ?? 'interactive' },
+      policy: { mode: policyMode(input.mode), approvals: input.approvals ?? 'ask', origin: input.origin ?? 'interactive' },
       caps: { ...caps },
       factsRevision: record ? this.facts.revision(record.instanceId) : 0,
       ...(binary ? { binary: { ...binary } } : {})
@@ -949,6 +983,15 @@ export class Harness implements HarnessGateway {
         signal = AbortSignal.any([spec.input.signal, entry.cancel.signal])
         const input: TurnInput = { ...spec.input, signal }
         minted = this.mintBridge(record, spec)
+        // Approvals other than `ask` are answered by the turn's bridge: a turn without one would
+        // ask the user after all, so it does not run.
+        if (!minted && spec.binding.policy.approvals !== 'ask')
+          throw harnessAppError({
+            code: 'policy_unenforceable',
+            message: `This turn cannot refuse or pre-grant tool approvals on ${this.displayName(record)}: it has no turn bridge.`,
+            reason: 'The turn has no app context, so nothing answers its permission requests.',
+            instanceId: spec.binding.instanceId
+          })
         const host: AdapterHost = minted ? { ...spec.host, bridge: minted.bridge } : spec.host
         const turn = await record.runtime.adapter.startTurn(input, sink, spec.control, host)
         minted?.settle({ status: turn.aborted || signal.aborted ? 'aborted' : 'completed', ...(turn.drain ? { drain: turn.drain } : {}) })
@@ -985,6 +1028,47 @@ export class Harness implements HarnessGateway {
     }
   }
 
+  async oneShot(request: OneShotRequest): Promise<{ text: string }> {
+    let resolved: ResolvedTurnSelection
+    try {
+      resolved = this.resolveStored(request.selection, { purpose: request.purpose, ...(request.scope ? { scope: request.scope } : {}) })
+    } catch (error) {
+      throw asHarnessError(error, request.selection.instanceId ?? '')
+    }
+    const record = this.record(resolved.instanceId)
+    const runtime = record.runtime
+    if (!runtime.oneShot) harnessFail('unsupported', `${this.displayName(record)} cannot run a single request.`, record.instanceId)
+    if (record.stopped) throw this.stopError(record, record.stopped.reason)
+    // The gateway's inactivity bound: every provider event restarts it; past it the request is aborted.
+    const idle = new AbortController()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const restart = () => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => idle.abort(), ONE_SHOT_INACTIVITY_MS)
+    }
+    const signal = request.signal ? AbortSignal.any([request.signal, idle.signal]) : idle.signal
+    const { baseId } = parseThinkingSuffixFromModelId(resolved.model)
+    const customModel = this.catalog.customModel(record.instanceId, baseId)
+    restart()
+    try {
+      const { text } = await runtime.oneShot({
+        model: resolved.model,
+        ...(customModel ? { customModel } : {}),
+        system: request.system,
+        prompt: request.prompt,
+        ...(request.sessionKey ? { sessionKey: request.sessionKey } : {}),
+        onActivity: restart
+      }, signal)
+      return { text: text.slice(0, Math.max(0, request.maxChars)) }
+    } catch (error) {
+      if (idle.signal.aborted && !request.signal?.aborted)
+        harnessFail('timeout', `${this.displayName(record)} sent nothing for ${ONE_SHOT_INACTIVITY_MS / 1000} seconds.`, record.instanceId)
+      throw error
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
   /**
    * Runs a turn on its binding or not at all: the input names the binding's instance, model and
    * policy mode, the instance can enforce that policy, and its config, home and account are still
@@ -1007,7 +1091,9 @@ export class Harness implements HarnessGateway {
       harnessFail('protocol', `The turn runs in ${policyMode(input.mode)} mode but its binding is ${binding.policy.mode} mode.`, binding.instanceId)
     // The caps the binding froze (bindings from before snapshots: the live ones).
     const caps = binding.caps ?? this.recordCaps(record)
-    const enforceable = checkPolicy(caps, binding.policy, binding.instanceId)
+    // Token and spend limits also need the model's own facts (an output cap, a price).
+    const spendModel = hasSpendLimit(binding.policy) ? record.runtime.spendModel?.(binding.model) : undefined
+    const enforceable = checkPolicy(caps, binding.policy, binding.instanceId, spendModel)
     if (!enforceable.ok) throw harnessAppError(enforceable.error)
     const stale = (what: string) => harnessFail('binding_stale', `This run started before ${what} of this provider changed, so it cannot continue on it. Send the message again.`, binding.instanceId)
     if (record.env.homeId !== binding.homeId) stale('the home')
@@ -1245,7 +1331,8 @@ export class Harness implements HarnessGateway {
         turnPreamble: texts.turnPreamble,
         ...(binding.policy.tools ? { toolPolicy: binding.policy.tools } : {}),
         userMcp: record.driver.userMcp ?? 'native',
-        permission: questionsPrompter(this.options.questions)
+        // `never`: nobody answers, so every permission request is denied without asking.
+        permission: binding.policy.approvals === 'never' ? refusingPrompter() : questionsPrompter(this.options.questions)
       },
       settle: (settlement) => {
         if (!attachment || !mcp) return
@@ -1308,7 +1395,7 @@ export class Harness implements HarnessGateway {
     const driver = this.drivers.get(resolved.entry.driver)
     if (!driver) return harnessFail('unsupported', `No driver for ${resolved.entry.driver} (instance ${instanceId}).`, instanceId)
     const config = driver.decodeConfig(resolved.entry.config)
-    const key = `${driver.kind}|${this.counters.get(instanceId).configRevision}|${config.home}`
+    const key = recordKey(driver, this.counters.get(instanceId).configRevision, config)
     if (current && current.key === key) {
       current.entry = resolved.entry
       current.config = config
@@ -1349,7 +1436,7 @@ export class Harness implements HarnessGateway {
       instanceId,
       driver: entry.driver,
       configRevision: revision,
-      ...(driver.alwaysPrivateHome || (config.home === 'private' && !builtIn) ? { home: join(stateDir, 'home') } : {}),
+      ...(alwaysPrivate(driver, config) || (config.home === 'private' && !builtIn) ? { home: join(stateDir, 'home') } : {}),
       searchPath: this.searchPath
     })
     const record: InstanceRecord = {
@@ -1358,7 +1445,7 @@ export class Harness implements HarnessGateway {
       driver,
       config,
       builtIn,
-      key: `${driver.kind}|${revision}|${config.home}`,
+      key: recordKey(driver, revision, config),
       env,
       active: 0,
       turns: new Map(),
@@ -1405,10 +1492,22 @@ export class Harness implements HarnessGateway {
     for (const record of this.retired) {
       if (record.active > 0) continue
       this.retired.delete(record)
+      let stopped: void | Promise<void> = undefined
       try {
-        record.runtime.stop()
+        stopped = record.runtime.stop()
       } catch (error) {
         console.warn('[harness] runtime stop failed', { instanceId: record.instanceId, error: errorText(error) })
+      }
+      // A removed instance's files wait for its processes to exit.
+      const removal = this.removals.get(record.instanceId)
+      if (stopped && removal) {
+        removal.pending += 1
+        void stopped.catch((error) => console.warn('[harness] runtime stop failed', { instanceId: record.instanceId, error: errorText(error) })).finally(() => {
+          removal.pending -= 1
+          this.deleteRemoved()
+        })
+      } else if (stopped) {
+        void stopped.catch(() => {})
       }
     }
     this.deleteRemoved()
@@ -2124,7 +2223,7 @@ export class Harness implements HarnessGateway {
     this.operations.clear()
     for (const record of [...this.records.values(), ...this.retired]) {
       try {
-        record.runtime.stop()
+        void Promise.resolve(record.runtime.stop()).catch(() => {})
       } catch {
         /* stopping is best effort */
       }
@@ -2133,6 +2232,16 @@ export class Harness implements HarnessGateway {
     this.retired.clear()
     this.listeners.clear()
   }
+}
+
+/** The driver keeps every instance in a Mousse-owned home (for some configs, e.g. Pi's RPC engine). */
+function alwaysPrivate(driver: HarnessDriver, config: InstanceConfig): boolean {
+  return typeof driver.alwaysPrivateHome === 'function' ? driver.alwaysPrivateHome(config) : driver.alwaysPrivateHome === true
+}
+
+/** Driver, revision, home and engine: a change in any builds a new runtime (and a new epoch). */
+function recordKey(driver: HarnessDriver, revision: number, config: InstanceConfig): string {
+  return `${driver.kind}|${revision}|${config.home}|${config.engine ?? ''}`
 }
 
 function setOrDelete(target: Record<string, unknown>, key: string, value: unknown): void {

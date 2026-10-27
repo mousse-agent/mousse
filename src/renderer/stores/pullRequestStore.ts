@@ -1,6 +1,13 @@
 import { useEffect } from 'react'
 import { create } from 'zustand'
-import type { PullRequestRef } from '../../shared/pullRequests'
+import type {
+  CreatePullRequestResult,
+  PullRequestBaseBranches,
+  PullRequestDraft,
+  PullRequestFormInput,
+  PullRequestRef,
+  PullRequestScope
+} from '../../shared/pullRequests'
 import type { GitPullRequestLookup } from '../../shared/types'
 import { errorText } from '../lib/errorText'
 import { anyTurnEnded } from '../lib/turnEnded'
@@ -24,9 +31,14 @@ export interface PullRequestEntry {
 
 interface PullRequestState {
   entries: Record<string, PullRequestEntry>
+  /** The scope the create form is open for; the form shows in the section of that folder and branch. */
+  createForm: PullRequestScope | null
 }
 
-export const useGitPullRequestStore = create<PullRequestState>(() => ({ entries: {} }))
+export const useGitPullRequestStore = create<PullRequestState>(() => ({ entries: {}, createForm: null }))
+
+/** Lookups kept in memory; the least recently fetched ones that no section shows go first. */
+const MAX_PULL_REQUEST_ENTRIES = 200
 
 export function pullRequestKey(path: string, branch: string): string {
   return `${path}\u0000${branch}`
@@ -48,7 +60,17 @@ interface Flight {
 const flights = new Map<string, Flight>()
 
 function setEntry(key: string, entry: PullRequestEntry) {
-  useGitPullRequestStore.setState((state) => ({ entries: { ...state.entries, [key]: entry } }))
+  useGitPullRequestStore.setState((state) => {
+    const entries = { ...state.entries, [key]: entry }
+    const keys = Object.keys(entries)
+    if (keys.length > MAX_PULL_REQUEST_ENTRIES) {
+      const stale = keys
+        .filter((other) => other !== key && !retained.has(other))
+        .sort((a, b) => entries[a].fetchedAt - entries[b].fetchedAt)
+      for (const other of stale.slice(0, keys.length - MAX_PULL_REQUEST_ENTRIES)) delete entries[other]
+    }
+    return { entries }
+  })
 }
 
 /** The daemon resolves the folder from a thread or a project; a reader that gave neither borrows its retained entry's. */
@@ -127,8 +149,6 @@ interface Retained {
 }
 
 const retained = new Map<string, Retained>()
-/** Branches whose create page was opened in the browser; the next focus checks them again. */
-const awaitingReturn = new Map<string, { path: string; branch: string; projectId?: string }>()
 let detach: (() => void) | null = null
 
 function refreshRetained() {
@@ -137,21 +157,10 @@ function refreshRetained() {
   }
 }
 
-function refreshAwaiting() {
-  const pending = [...awaitingReturn.values()]
-  awaitingReturn.clear()
-  // Nothing may be left holding the listeners once the last reader has gone.
-  detachIfIdle()
-  for (const { path, branch, projectId } of pending) {
-    void refreshPullRequest(path, branch, { force: true, projectId })
-  }
-}
-
 // One window listener and one store subscription serve every reader.
 function attach() {
   if (typeof window === 'undefined' || detach) return
   const onFocus = () => {
-    refreshAwaiting()
     refreshRetained()
   }
   window.addEventListener('focus', onFocus)
@@ -165,7 +174,7 @@ function attach() {
 }
 
 function detachIfIdle() {
-  if (retained.size === 0 && awaitingReturn.size === 0 && detach) {
+  if (retained.size === 0 && detach) {
     detach()
     detach = null
   }
@@ -202,11 +211,43 @@ export function setPullRequestTracked(path: string, branch: string, tracked: boo
   if (entry) entry.tracked = tracked
 }
 
-/** Open GitHub's create page, then look the branch up again when the window regains focus. */
-export async function createPullRequestForBranch(path: string, branch: string, projectId?: string): Promise<void> {
-  await window.mousse.git.createPullRequest(projectId, path)
-  awaitingReturn.set(pullRequestKey(path, branch), { path, branch, projectId })
-  attach()
+/**
+ * Opens the create form for a scope. The scope is captured here and carried by the form, its draft and
+ * its submit; nothing reads the active thread or the current checkout later.
+ */
+export function openCreatePullRequestForm(scope: PullRequestScope): void {
+  useGitPullRequestStore.setState({ createForm: scope })
+}
+
+export function closeCreatePullRequestForm(): void {
+  useGitPullRequestStore.setState({ createForm: null })
+}
+
+/** The entry point of every "create a pull request" action: opens the form for the scope and resolves once it is open. */
+export async function createPullRequestForBranch(scope: PullRequestScope): Promise<void> {
+  openCreatePullRequestForm(scope)
+}
+
+/** A title, description and base proposed for the scope's branch. */
+export function draftPullRequestFor(scope: PullRequestScope, base?: string): Promise<PullRequestDraft> {
+  return base ? window.mousse.pullRequests.draft(scope, base) : window.mousse.pullRequests.draft(scope)
+}
+
+/** The branches the scope's pull request can target. */
+export function loadPullRequestBaseBranches(scope: PullRequestScope): Promise<PullRequestBaseBranches> {
+  return window.mousse.pullRequests.baseBranches(scope.threadId ? { threadId: scope.threadId } : scope.projectId ? { projectId: scope.projectId } : {})
+}
+
+/**
+ * Creates the pull request for the scope's branch, or returns the open one it already has. The daemon
+ * has checked that the folder is still on `scope.branch`, so the result is stored under the scope's
+ * own key. A failure stores nothing and leaves the form as it is.
+ */
+export async function submitCreatePullRequest(scope: PullRequestScope, input: PullRequestFormInput): Promise<CreatePullRequestResult> {
+  const result = await window.mousse.pullRequests.create(scope, input)
+  setEntry(pullRequestKey(scope.path, scope.branch), { lookup: { state: 'found', pullRequest: result.pullRequest }, fetchedAt: Date.now() })
+  void refreshPullRequest(scope.path, scope.branch, { force: true, projectId: scope.projectId, threadId: scope.threadId })
+  return result
 }
 
 /** The lookup for a branch; null when there is no branch to look up. */

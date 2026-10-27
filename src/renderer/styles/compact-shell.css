@@ -130,7 +130,8 @@ html:not(.platform-darwin) .app {
 .app .file-tree-root-label { padding: 4px 10px 5px; }
 .app .file-tree-row { min-height: 26px; padding-block: 3px; }
 .app .git-section-title { padding: 6px 10px 4px; }
-.app .git-file-row { min-height: 28px; padding: 4px 10px; gap: 6px; }
+.app .git-file-row { min-height: 28px; }
+.app .git-file-select { padding: 4px 10px; gap: 6px; }
 
 /* Agent chat lists share the same density without changing the transcript. */
 .app .chats-sidebar-content { padding: 0 4px 8px; }

@@ -21,9 +21,12 @@ import { EFFECT_PAGE_MAX } from '../run/EffectOutbox'
 import { evaluateRestore, restoreDiff, restoreDiffSha, worktreeClaims, type WorkspaceClaim } from '../run/workspace/restoreSafety'
 import { PROVIDER_STT_MAX_BYTES } from '../../shared/dictation'
 import { PROVIDER_TTS_MAX_CHARS } from '../../shared/readAloud'
-import type { ThreadAction } from '../../shared/threadActions'
+import type { ExternalEffect, ThreadAction } from '../../shared/threadActions'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
-import type { ChatMessage, FileSearchResponse, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest } from '../../shared/types'
+import type { GitPullRequestInfo, RepositoryIdentity, ThreadPullRequestLink } from '../../shared/pullRequests'
+import { PULL_REQUEST_EXISTS } from '../git/GitHubCodeHost'
+import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest } from '../../shared/types'
+import { createErrorProvider } from '../../shared/errors'
 import { listClaimedQueue } from '../queue/ThreadMessageQueue'
 import { formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
 import type { ModelOverride } from '../../shared/providerInstances'
@@ -74,7 +77,7 @@ import { visibleThreadsFor } from './threadVisibility'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
-import { StaleThreadActionRevisionError, ThreadActionService } from '../actions/ThreadActionService'
+import { ActionExecutionError, StaleThreadActionRevisionError, ThreadActionService, type RunThreadActionOptions } from '../actions/ThreadActionService'
 import { UndoService } from '../actions/UndoService'
 import { UndoRetentionService } from '../actions/UndoRetentionService'
 import { ReceiptRefReleaseService } from '../actions/ReceiptRefReleaseService'
@@ -89,6 +92,7 @@ import { ChangeReceiptService } from '../actions/ChangeReceiptService'
 import { PublishService } from '../actions/PublishService'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { resolveWithinRoot } from '../files/pathGuard'
+import { grepWorkspace } from '../files/WorkspaceGrep'
 import { getWorkspaceIndexRegistry } from '../files/WorkspaceIndexRegistry'
 import { searchWorkspacePaths } from '../files/WorkspaceSearch'
 import { devGuiBridge } from '../devgui/DevGuiBridge'
@@ -101,6 +105,7 @@ import { isInstallationMethod } from '../profiles/admission'
 import { ChatReferenceMetadataResolver } from '../data/resolveChatReferenceMetadata'
 import { parseChatReference } from '../../shared/chatReferences'
 import type { ReviewFilesResult, ReviewRange, ReviewScope } from '../../shared/review'
+import { repoRelativePaths } from '../git/repoPaths'
 import { isGitRepository, listChangedFiles, readFileVersions, worktreeRange } from '../git/reviewDiff'
 import { resolveReviewScope } from '../actions/reviewRange'
 
@@ -410,6 +415,81 @@ function pullRequestFolder(ctx: HandlerContext, params: Record<string, unknown>)
   return projectRootContext(ctx, params)
 }
 
+function defaultBranchError(): DomainRpcError {
+  return new DomainRpcError('pull_request_default_branch', "The repository's default branch cannot get a pull request. Create a branch for your changes first.")
+}
+
+/**
+ * The folder, branch and originating thread of a pull request action that is bound to the branch its
+ * form opened on. The folder's checked-out branch is read before anything else, and a different one
+ * (or none) refuses the call with `git_branch_changed`, so a checkout that moved meanwhile is never
+ * drafted, looked up or created for.
+ */
+async function pullRequestBranchContext(
+  ctx: HandlerContext,
+  p: Record<string, unknown>
+): Promise<{ root: string; branch: string; originThreadId: string | null; projectId: string | null }> {
+  const root = pullRequestFolder(ctx, p)
+  const branch = asString(p.expectedBranch, 'expectedBranch', 512)
+  if (branch.startsWith('-')) throw new DomainRpcError('invalid_params', 'expectedBranch is not a branch name')
+  const originThreadId = asOptionalString(p.originThreadId, 256) ?? null
+  let projectId: string | null = null
+  if (originThreadId) {
+    const origin = ctx.mms.threads.getThread(originThreadId)
+    if (!origin) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId: originThreadId })
+    // Admitted like the thread of any other call: a thread being trashed or purged takes no new work.
+    if (ctx.mms.threads.lifecycleStore?.get(originThreadId)) ctx.mms.threads.assertThreadAdmission(originThreadId)
+    // Its conversation drafts the description and it receives the link, so it must be the thread whose folder this is:
+    // the folder's own thread, or one on the project's checkout.
+    const originFolder = projectRootContext(ctx, { threadId: originThreadId })
+    if (!samePath(originFolder, root)) {
+      throw new DomainRpcError('invalid_params', "originThreadId is not the thread of this folder", { threadId: originThreadId })
+    }
+    projectId = origin.projectId ?? null
+  }
+  const git = ctx.mms.gitService
+  if (await git.currentBranch(root) === null) throw new DomainRpcError('pull_request_detached_head', 'Check out a branch before creating a pull request.')
+  await git.assertBranch(root, branch)
+  projectId ??= asOptionalString(p.projectId, 256) ?? (asOptionalString(p.threadId, 256) ? ctx.mms.threads.getThread(String(p.threadId))?.projectId ?? null : null)
+  return { root, branch, originThreadId, projectId }
+}
+
+function samePath(a: string, b: string): boolean {
+  const normalize = (value: string) => (process.platform === 'win32' ? resolve(value).toLowerCase() : resolve(value))
+  return normalize(a) === normalize(b)
+}
+
+/** The link a thread keeps to a pull request of its own repository (the lookup lists no forks' pull requests). */
+function threadPullRequestLink(identity: RepositoryIdentity, pullRequest: GitPullRequestInfo): ThreadPullRequestLink {
+  return {
+    number: pullRequest.number,
+    url: pullRequest.url,
+    host: identity.host,
+    nameWithOwner: identity.nameWithOwner,
+    headRefName: pullRequest.headRefName ?? '',
+    baseRefName: pullRequest.baseRefName ?? '',
+    headRepository: identity.nameWithOwner,
+    isCrossRepository: false,
+    linkedAt: new Date().toISOString()
+  }
+}
+
+/**
+ * Links a pull request to the thread that asked for it. The pull request exists by now, so a link that
+ * cannot be written (the host cannot name the repository, the thread is gone) must not fail the call;
+ * the side card finds the pull request by its branch meanwhile.
+ */
+async function linkOriginThread(ctx: HandlerContext, threadId: string | null, root: string, pullRequest: GitPullRequestInfo): Promise<void> {
+  if (!threadId) return
+  try {
+    const identity = await ctx.mms.gitService.codeHost.repositoryIdentity(root)
+    ctx.mms.threads.updateThreadMeta(threadId, { pullRequest: threadPullRequestLink(identity, pullRequest) })
+    ctx.emitEvent?.('threads.updated', { threads: ctx.mms.threads.listAllThreads() })
+  } catch {
+    // Left unlinked; see above.
+  }
+}
+
 async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<string, unknown>): Promise<void> {
   if (!params.threadId) return
   const threadId = asString(params.threadId, 'threadId', 256)
@@ -420,6 +500,95 @@ async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<stri
   if (!manager.load()) await manager.provision(threadId, 'main', project)
   if (!existsSync(manager.load()!.worktreePath) && manager.hasReconstructionManifest()) await manager.restore(project)
   if (manager.verify().lifecycle !== 'ready') throw new DomainRpcError('workspace_recovery_required', 'Task workspace requires recovery before mutation')
+}
+
+/** Refusals that follow from a thread's worktree being checkpointed. Each has a fixed code the GUI can show copy for. */
+const gitThreadRules = createErrorProvider({
+  task_branch_authoritative: { category: 'denied', retryable: false, message: 'Task branches are authoritative. Use the conversation branch controls to switch task revisions.' },
+  thread_worktree_checkpointed: { category: 'denied', retryable: false, message: "This thread's branch is checkpointed; commits include every change." },
+  git_amend_in_thread: { category: 'denied', retryable: false, message: "This thread's branch is checkpointed; amend is not available." },
+  git_thread_dirty: { category: 'conflict', retryable: false, message: "Commit this thread's changes before pushing." }
+})
+
+const GIT_PATHS_MAX = 5_000
+
+interface GitMutationTarget {
+  root: string
+  directory?: string
+  /** Set when the folder is the thread's own worktree. */
+  workspace?: ThreadWorkspaceMetadata
+}
+
+/**
+ * Resolves the folder a Git mutation runs in, provisioning the thread's worktree when it has none yet.
+ * Actions a thread worktree never allows name their refusal, and it comes first: a refused call must not
+ * create a worktree as a side effect.
+ */
+async function gitMutationTarget(ctx: HandlerContext, p: Record<string, unknown>, refuseInThread?: 'task_branch_authoritative' | 'thread_worktree_checkpointed'): Promise<GitMutationTarget> {
+  if (refuseInThread && p.threadId !== undefined && p.threadId !== null) throw gitThreadRules.create(refuseInThread)
+  await ensureOwnedTaskWorkspace(ctx, p)
+  const root = projectRootContext(ctx, p)
+  const threadId = asOptionalString(p.threadId, 256)
+  const directory = threadId ? ctx.mms.threads.getThreadDir(threadId) : undefined
+  const workspace = directory ? new ThreadWorkspaceManager(directory).load() : undefined
+  return { root, directory, workspace }
+}
+
+/** Paths as `getStatus` names them (repository-relative), accepted only inside the project folder. */
+function gitPaths(root: string, value: unknown): string[] {
+  const paths = asStringArray(value, 'paths', { unique: true, maxItems: GIT_PATHS_MAX, maxItemLen: 4096 })
+  if (paths.length === 0) throw new DomainRpcError('invalid_params', 'paths must name at least one file')
+  const top = workspaceGit(root, ['rev-parse', '--show-toplevel'])
+  try {
+    return repoRelativePaths(top, root, paths)
+  } catch {
+    throw new DomainRpcError('git_path_outside', 'That path is outside the project folder.')
+  }
+}
+
+/**
+ * Runs a user's own Git action in a thread worktree as one recorded action. The action keeps whatever
+ * error Git raised, so the caller sees the real code instead of a wrapper.
+ */
+async function runUserThreadGitAction<T>(
+  ctx: HandlerContext,
+  target: Required<Pick<GitMutationTarget, 'root' | 'directory' | 'workspace'>>,
+  extra: Pick<RunThreadActionOptions, 'onFailure' | 'externalEffects'>,
+  mutate: () => Promise<T>
+): Promise<T> {
+  const { root, directory, workspace } = target
+  const announce = (action: ThreadAction) => ctx.emitEvent?.('actions.updated', { threadId: workspace.threadId, action }, workspace.threadId)
+  try {
+    const { result, action } = await new ThreadActionService(directory).runCheckpointedAction({
+      threadId: workspace.threadId, turnId: randomUUID(), conversationBranchId: workspace.conversationBranchId,
+      workspacePath: root, actor: { kind: 'user' }, allowDirtyInput: true, presentationMessageStart: 0, presentationMessageEnd: 0,
+      nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' }, ...extra
+    }, mutate)
+    announce(action)
+    return result
+  } catch (error) {
+    if (error instanceof ActionExecutionError) {
+      announce(error.action)
+      throw error.cause ?? error
+    }
+    throw error
+  }
+}
+
+/**
+ * Runs an action that does not move the thread's branch under the thread's Git locks, like push. Without them
+ * it would queue inside GitService ahead of a commit that already holds the repository lease and stall it.
+ */
+async function underThreadLocks<T>(target: GitMutationTarget, label: string, run: () => Promise<T>): Promise<T> {
+  return target.directory && target.workspace ? withGitMutationLocks(target.directory, target.root, label, run) : run()
+}
+
+function threadWorktree(target: GitMutationTarget): Required<GitMutationTarget> | null {
+  return target.directory && target.workspace ? { root: target.root, directory: target.directory, workspace: target.workspace } : null
+}
+
+async function gitStatusResult(ctx: HandlerContext, root: string, extra: Record<string, unknown> = {}): Promise<{ status: GitStatusSnapshot }> {
+  return { status: await ctx.mms.gitService.getStatus(root), ...extra } as { status: GitStatusSnapshot }
 }
 
 function containedPath(root: string, value: unknown): string {
@@ -2241,6 +2410,20 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         complete: snapshot.complete && ranked.complete
       } satisfies FileSearchResponse
     }
+    case 'files.grep': {
+      const p = isObject(params) ? params : {}
+      const root = projectRootContext(ctx, p)
+      // Not `asString`: a query of spaces is a legitimate search, an empty one is not.
+      const query = asOptionalString(p.query, 512)
+      if (!query) throw new DomainRpcError('invalid_params', 'query must be a non-empty string')
+      return await grepWorkspace(root, query, {
+        regex: asOptionalBoolean(p.regex, 'regex') === true,
+        caseSensitive: asOptionalBoolean(p.caseSensitive, 'caseSensitive'),
+        wholeWord: asOptionalBoolean(p.wholeWord, 'wholeWord') === true,
+        limit: asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: 2000 }) ?? 500,
+        timeoutMs: asOptionalBoundedInt(p.timeoutMs, 'timeoutMs', { min: 100, max: 10_000 }) ?? 1_000
+      }) satisfies FileGrepResponse
+    }
     case 'git.status': {
       const p = isObject(params) ? params : {}
       return { status: await ctx.mms.gitService.getStatus(projectRootContext(ctx, p)) }
@@ -2261,41 +2444,112 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'git.checkout': {
       const p = isObject(params) ? params : {}
-      await ensureOwnedTaskWorkspace(ctx, p)
-      const root = projectRootContext(ctx, p)
-      if (p.threadId && new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(String(p.threadId))).load()) throw new DomainRpcError('task_branch_authoritative', 'Task branches are authoritative. Use the conversation branch controls to switch task revisions.')
-      await ctx.mms.gitService.checkout(root, asString(p.branch, 'branch', 512))
-      return { status: await ctx.mms.gitService.getStatus(root) }
+      const target = await gitMutationTarget(ctx, p, 'task_branch_authoritative')
+      const dirty = asOptionalString(p.dirty, 16)
+      if (dirty !== undefined && dirty !== 'carry' && dirty !== 'stash') throw new DomainRpcError('invalid_params', 'dirty must be carry or stash')
+      const result = await ctx.mms.gitService.checkout(target.root, asString(p.branch, 'branch', 512), dirty ? { dirty } : {})
+      return gitStatusResult(ctx, target.root, { ...result })
     }
     case 'git.commit': {
       const p = isObject(params) ? params : {}
-      await ensureOwnedTaskWorkspace(ctx, p)
-      const root = projectRootContext(ctx, p)
+      const target = await gitMutationTarget(ctx, p)
       const message = asString(p.message, 'message', 4096)
-      const directory = p.threadId ? ctx.mms.threads.getThreadDir(String(p.threadId)) : undefined
-      const workspace = directory ? new ThreadWorkspaceManager(directory).load() : undefined
-      if (workspace && directory) {
-        await new ThreadActionService(directory).runCheckpointedAction({ threadId: workspace.threadId, turnId: randomUUID(), conversationBranchId: workspace.conversationBranchId,
-          workspacePath: root, actor: { kind: 'user' }, allowDirtyInput: true, presentationMessageStart: 0, presentationMessageEnd: 0,
-          nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' } }, () => ctx.mms.gitService.commit(root, message))
-      } else await ctx.mms.gitService.commit(root, message)
-      return { status: await ctx.mms.gitService.getStatus(root) }
+      const amend = asOptionalBoolean(p.amend, 'amend') === true
+      const expectedBranch = asOptionalString(p.expectedBranch, 512)
+      const thread = threadWorktree(target)
+      if (thread) {
+        // The branch is checkpointed: an amend would replace the recorded head, so it is refused before Git runs.
+        if (amend) throw gitThreadRules.create('git_amend_in_thread')
+        // Everything is committed through the user's hooks as one commit; a rejected commit is recorded, never swept in with --no-verify.
+        await runUserThreadGitAction(ctx, thread, { onFailure: 'record' }, () => ctx.mms.gitService.commit(target.root, message, { all: true, expectedBranch }))
+      } else await ctx.mms.gitService.commit(target.root, message, { amend, expectedBranch })
+      return gitStatusResult(ctx, target.root)
     }
     case 'git.push': {
       const p = isObject(params) ? params : {}
-      await ensureOwnedTaskWorkspace(ctx, p)
-      const root = projectRootContext(ctx, p)
-      const directory = p.threadId ? ctx.mms.threads.getThreadDir(String(p.threadId)) : undefined
-      const metadata = directory ? new ThreadWorkspaceManager(directory).load() : undefined
+      const target = await gitMutationTarget(ctx, p)
+      const expectedBranch = asOptionalString(p.expectedBranch, 512)
+      const { root, directory, workspace: metadata } = target
       if (metadata && directory) {
         await withGitMutationLocks(directory, root, 'user-git-push', async () => {
           const manager = new ThreadWorkspaceManager(directory)
           if (manager.verify().lifecycle !== 'ready' || manager.load()?.headSha !== metadata.headSha) throw new Error('Task revision changed before push; refresh the reviewed revision')
-          if (workspaceGit(root, ['status', '--porcelain'])) throw new Error('Commit task changes before pushing')
-          await ctx.mms.gitService.push(root)
+          if (workspaceGit(root, ['status', '--porcelain'])) throw gitThreadRules.create('git_thread_dirty')
+          await ctx.mms.gitService.push(root, { expectedBranch })
         })
-      } else await ctx.mms.gitService.push(root)
-      return { status: await ctx.mms.gitService.getStatus(root) }
+      } else await ctx.mms.gitService.push(root, { expectedBranch })
+      return gitStatusResult(ctx, root)
+    }
+    case 'git.stage':
+    case 'git.unstage': {
+      const p = isObject(params) ? params : {}
+      // The next checkpoint would sweep the index anyway.
+      const target = await gitMutationTarget(ctx, p, 'thread_worktree_checkpointed')
+      const all = asOptionalBoolean(p.all, 'all') === true
+      const staging = method === 'git.stage'
+      if (all) await (staging ? ctx.mms.gitService.stageAll(target.root) : ctx.mms.gitService.unstageAll(target.root))
+      else await (staging ? ctx.mms.gitService.stage(target.root, gitPaths(target.root, p.paths)) : ctx.mms.gitService.unstage(target.root, gitPaths(target.root, p.paths)))
+      return gitStatusResult(ctx, target.root)
+    }
+    case 'git.discard': {
+      const p = isObject(params) ? params : {}
+      const target = await gitMutationTarget(ctx, p)
+      const paths = gitPaths(target.root, p.paths)
+      const thread = threadWorktree(target)
+      if (thread) {
+        // The remainder is checkpointed afterwards, so the tree is clean again and the discard is on record.
+        const effects: ExternalEffect[] = [{ kind: 'unknown', description: `Discarded ${paths.length} ${paths.length === 1 ? 'file' : 'files'}`, reversible: false }]
+        await runUserThreadGitAction(ctx, thread, { externalEffects: effects }, () => ctx.mms.gitService.discard(target.root, paths))
+      } else await ctx.mms.gitService.discard(target.root, paths)
+      return gitStatusResult(ctx, target.root)
+    }
+    case 'git.fetch': {
+      const p = isObject(params) ? params : {}
+      const target = await gitMutationTarget(ctx, p)
+      const result = await underThreadLocks(target, 'user-git-fetch', () => ctx.mms.gitService.fetch(target.root))
+      return gitStatusResult(ctx, target.root, { ...result })
+    }
+    case 'git.pull': {
+      const p = isObject(params) ? params : {}
+      const target = await gitMutationTarget(ctx, p, 'task_branch_authoritative')
+      const strategy = asOptionalString(p.strategy, 16) ?? 'ff-only'
+      if (strategy !== 'ff-only' && strategy !== 'merge' && strategy !== 'rebase') throw new DomainRpcError('invalid_params', 'strategy must be ff-only, merge or rebase')
+      const result = await ctx.mms.gitService.pull(target.root, { strategy: strategy as GitPullStrategy })
+      return gitStatusResult(ctx, target.root, { ...result })
+    }
+    case 'git.abortInProgress': {
+      const p = isObject(params) ? params : {}
+      const target = await gitMutationTarget(ctx, p)
+      const kind = asString(p.kind, 'kind', 16)
+      if (kind !== 'merge' && kind !== 'rebase') throw new DomainRpcError('invalid_params', 'kind must be merge or rebase')
+      // A thread worktree allows it: it gives up a merge or rebase a terminal started, back to the recorded head.
+      await underThreadLocks(target, 'user-git-abort', () => ctx.mms.gitService.abortInProgress(target.root, kind))
+      return gitStatusResult(ctx, target.root)
+    }
+    case 'git.createBranch': {
+      const p = isObject(params) ? params : {}
+      const target = await gitMutationTarget(ctx, p, 'task_branch_authoritative')
+      await ctx.mms.gitService.createBranch(target.root, asString(p.name, 'name', 512), { from: asOptionalString(p.from, 512), checkout: asOptionalBoolean(p.checkout, 'checkout') })
+      return gitStatusResult(ctx, target.root)
+    }
+    case 'git.renameBranch': {
+      const p = isObject(params) ? params : {}
+      const target = await gitMutationTarget(ctx, p, 'task_branch_authoritative')
+      await ctx.mms.gitService.renameBranch(target.root, asString(p.name, 'name', 512), asString(p.newName, 'newName', 512))
+      return gitStatusResult(ctx, target.root)
+    }
+    case 'git.deleteBranch': {
+      const p = isObject(params) ? params : {}
+      const target = await gitMutationTarget(ctx, p, 'task_branch_authoritative')
+      await ctx.mms.gitService.deleteBranch(target.root, asString(p.name, 'name', 512), { force: asOptionalBoolean(p.force, 'force') === true })
+      return gitStatusResult(ctx, target.root)
+    }
+    case 'git.init': {
+      const p = isObject(params) ? params : {}
+      if (p.threadId !== undefined) throw new DomainRpcError('invalid_params', 'git.init takes a projectId, not a threadId')
+      const root = projectRootContext(ctx, p)
+      await ctx.mms.gitService.init(root)
+      return gitStatusResult(ctx, root)
     }
     case 'github.status':
       return { availability: await ctx.mms.gitService.github.getAvailability() }
@@ -2340,19 +2594,69 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       )
       return { lookup }
     }
+    case 'pullRequests.draft': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'projectId', 'originThreadId', 'expectedBranch', 'base'])
+      const requestedBase = asOptionalString(p.base, 512)?.trim()
+      if (requestedBase?.startsWith('-')) throw new DomainRpcError('invalid_params', 'base is not a branch name')
+      const { root, branch, originThreadId, projectId } = await pullRequestBranchContext(ctx, p)
+      const codeHost = ctx.mms.gitService.codeHost
+      const baseBranches = await codeHost.listBaseBranches(root)
+      if (baseBranches.defaultBranch === branch) throw defaultBranchError()
+      const base = requestedBase || baseBranches.defaultBranch || baseBranches.branches[0] || ''
+      const draft = await ctx.mms.orchestrator.draftPullRequest({
+        root,
+        branch,
+        base,
+        remote: await codeHost.remoteForRepository(root),
+        originThreadId,
+        projectId,
+        threadName: originThreadId ? ctx.mms.threads.getThread(originThreadId)?.name ?? null : null
+      })
+      return { ...draft, base }
+    }
     case 'pullRequests.create': {
       const p = isObject(params) ? params : {}
-      rejectUnknownKeys(p, ['threadId', 'projectId', 'title', 'body', 'base', 'draft', 'head'])
-      const root = pullRequestFolder(ctx, p)
-      const pullRequest = await ctx.mms.gitService.codeHost.createPullRequest(root, {
-        title: asString(p.title, 'title', 256),
-        // An empty description is a valid one.
-        body: asOptionalString(p.body, 64 * 1024) ?? '',
-        base: asString(p.base, 'base', 512),
-        draft: asOptionalBoolean(p.draft, 'draft') === true,
-        head: asOptionalString(p.head, 512)
-      })
-      return { pullRequest }
+      rejectUnknownKeys(p, ['threadId', 'projectId', 'originThreadId', 'expectedBranch', 'title', 'body', 'base', 'draft'])
+      const title = asString(p.title, 'title', 256)
+      // An empty description is a valid one.
+      const body = asOptionalString(p.body, 64 * 1024) ?? ''
+      const base = asString(p.base, 'base', 512).trim()
+      if (base.startsWith('-')) throw new DomainRpcError('invalid_params', 'base is not a branch name')
+      const draft = asOptionalBoolean(p.draft, 'draft') === true
+      const { root, branch, originThreadId } = await pullRequestBranchContext(ctx, p)
+      const codeHost = ctx.mms.gitService.codeHost
+      // Forced: an open pull request made meanwhile, by anyone, must be shown rather than duplicated.
+      const lookup = await codeHost.lookupPullRequest(root, branch, { force: true })
+      if (lookup.state === 'unavailable') throw new DomainRpcError('pull_request_unavailable', lookup.message, { reason: lookup.reason })
+      if (lookup.state === 'none' && lookup.isDefaultBranch === true) throw defaultBranchError()
+      if (lookup.state === 'found' && lookup.pullRequest.state === 'open') {
+        await linkOriginThread(ctx, originThreadId, root, lookup.pullRequest)
+        return { pullRequest: lookup.pullRequest, existing: true }
+      }
+      // `--head` names the local branch, so the branch must be on the remote under that name: the pull request
+      // holds what was pushed, and the draft was written from the local commits.
+      const upstream = await ctx.mms.gitService.branchUpstream(root, branch)
+      if (!upstream) throw new DomainRpcError('pull_request_unpushed', 'Push the branch first: it has no upstream on the remote yet.')
+      if (upstream.branch !== branch) {
+        throw new DomainRpcError('pull_request_upstream_renamed', `This branch is pushed as "${upstream.branch}" on the remote. Pull requests from a branch under another name are not supported here; open it on GitHub.`)
+      }
+      let pullRequest: GitPullRequestInfo
+      try {
+        // The branch is the one the caller opened the form on and the daemon has just checked out.
+        pullRequest = await codeHost.createPullRequest(root, { title, body, base, draft, head: branch })
+      } catch (error) {
+        // The host's message is what the user needs (gh says why); a plain error would reach the form as "something went wrong".
+        const failure = new DomainRpcError('pull_request_create_failed', error instanceof Error ? error.message : String(error))
+        if ((error as { code?: unknown } | null)?.code !== PULL_REQUEST_EXISTS) throw failure
+        // Another client was first (the lookup above and the create are not one step): show its pull request.
+        const again = await codeHost.lookupPullRequest(root, branch, { force: true })
+        if (again.state !== 'found' || again.pullRequest.state !== 'open') throw failure
+        await linkOriginThread(ctx, originThreadId, root, again.pullRequest)
+        return { pullRequest: again.pullRequest, existing: true }
+      }
+      await linkOriginThread(ctx, originThreadId, root, pullRequest)
+      return { pullRequest, existing: false }
     }
     case 'pullRequests.baseBranches': {
       const p = isObject(params) ? params : {}
@@ -2382,21 +2686,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (now?.number !== before?.number || now?.linkedAt !== before?.linkedAt) {
         throw new DomainRpcError('pull_request_link_changed', "The thread's pull request link changed while it was being read; try again", { threadId, number })
       }
-      const { pullRequest } = lookup
-      const thread = ctx.mms.threads.updateThreadMeta(threadId, {
-        pullRequest: {
-          number,
-          url: pullRequest.url,
-          host: identity.host,
-          nameWithOwner: identity.nameWithOwner,
-          headRefName: pullRequest.headRefName ?? '',
-          baseRefName: pullRequest.baseRefName ?? '',
-          // The lookup lists only this repository's own pull requests.
-          headRepository: identity.nameWithOwner,
-          isCrossRepository: false,
-          linkedAt: new Date().toISOString()
-        }
-      })
+      const thread = ctx.mms.threads.updateThreadMeta(threadId, { pullRequest: threadPullRequestLink(identity, lookup.pullRequest) })
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: visibleThreadsFor(ctx.connection, threads) }

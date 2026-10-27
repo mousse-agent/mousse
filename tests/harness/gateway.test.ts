@@ -315,6 +315,23 @@ describe('harness gateway: instances', () => {
     expect(existsSync(stateDir)).toBe(false)
   })
 
+  it('deletes a removed instance’s files only after its runtime’s processes exited (an async stop)', async () => {
+    const profileHome = home()
+    let exited!: () => void
+    const stopped = new Promise<void>((resolve) => { exited = resolve })
+    const claude = adapterDriver(fake('claude'), { runtime: { stop: () => stopped } })
+    const multi = { ...claude, multiInstance: true, privateHome: true, decodeConfig: (raw: Record<string, unknown> | undefined) => decodeInstanceConfig(raw, { privateHome: true }) }
+    const harness = testHarness({ drivers: [adapterDriver(pi()), multi], instances: instances(), profileHome })
+    const { instanceId } = await harness.instances.add({ driver: 'claude', config: { displayName: 'Warm' } })
+    const stateDir = instanceStateDir(profileHome, instanceId)
+    mkdirSync(stateDir, { recursive: true })
+    harness.resolveStored({ instanceId, llmProvider: '', model: 'm' }, { purpose: 'turn' })
+    await harness.instances.remove(instanceId)
+    expect(existsSync(stateDir)).toBe(true)
+    exited()
+    await vi.waitFor(() => expect(existsSync(stateDir)).toBe(false))
+  })
+
   it('rejects a second instance of a single-instance driver', async () => {
     const { harness } = full()
     await expect(harness.instances.add({ driver: 'codex' })).rejects.toMatchObject({ code: 'unsupported' })

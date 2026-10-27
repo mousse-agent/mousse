@@ -182,6 +182,8 @@ export class NetService {
       onChanged?(status: NetStatus): void
       composeRuntime?(runtime: NetRuntime): NetDomainComposition | void
       hosted?: HostedNetModule
+      /** Tests replace the `ssh` executable and the user's known_hosts file. */
+      ssh?: { binary?: string; userKnownHosts?: string }
       /** Tests replace the native WebRTC stack and this computer's addresses. */
       phoneWebRtc?: {
         factory?: PeerConnectionFactory
@@ -429,12 +431,17 @@ export class NetService {
       if (method.startsWith('net.plus.')) return this.hosted!.request(method, params)
       switch (method) {
         case 'net.transport.configure': {
-          const rt = this.requireEnrolled(),
-            checked = this.createTransports().validate({
-              id: params.id as string,
-              enabled: params.enabled as boolean,
-              settings: params.settings
-            })
+          const rt = this.requireEnrolled()
+          // Switching off without settings keeps the saved ones (endpoint, port, binary), so an
+          // add-on that failed to start can be turned off from a screen that has no form state.
+          const saved = this.transportConfigurations().find((row) => row.id === params.id)
+          if (params.settings === undefined && (params.enabled !== false || !saved))
+            throw new NetError('bad_request')
+          const checked = this.createTransports().validate({
+            id: params.id as string,
+            enabled: params.enabled as boolean,
+            settings: params.settings === undefined ? saved!.settings : params.settings
+          })
           const existing = this.transportConfigurations().filter((row) => row.id !== checked.id)
           if (existing.length >= 8) throw new NetError('too_large')
           this.config.transports = [...existing, checked]
@@ -695,6 +702,7 @@ export class NetService {
       clock: this.clock,
       profileDir: this.options.profileDir,
       hosted: this.hosted?.transports,
+      ssh: this.options.ssh,
       relayRendezvous:
         rt.enrollment.preparedNodeJoin()?.rendezvous?.transport === HOSTED_RELAY_TRANSPORT &&
         !this.hosted?.connected()

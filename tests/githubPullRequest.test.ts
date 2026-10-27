@@ -9,10 +9,12 @@ import {
   parseRemotes,
   parseRemoteUrl,
   parseRepositoryIdentity,
+  PULL_REQUEST_EXISTS,
   remoteForIdentity,
+  removeTempFolder,
   summarizeCheckRollup
 } from '../src/mms/git/GitHubCodeHost'
-import { createGhFallbackRunner, GitHubService, type ExecutableRunner } from '../src/mms/git/GitHubService'
+import { createGhFallbackRunner, type ExecutableRunner } from '../src/mms/git/GitHubService'
 import { pullRequestIdentityKey } from '../src/shared/pullRequests'
 
 const enoent = () => Object.assign(new Error('spawn gh ENOENT'), { code: 'ENOENT' })
@@ -384,6 +386,18 @@ describe('GitHubCodeHost shared read cache', () => {
     expect(prListCalls(run)).toHaveLength(2)
   })
 
+  it('never reuses a cached "no pull request" answer for a forced lookup, but still joins a read in flight', async () => {
+    let listed = '[]'
+    const run = runner({ pr: async () => ok(listed) })
+    const host = new GitHubCodeHost(run, () => 1_000_000)
+    expect(await host.lookupPullRequest('/repo')).toMatchObject({ state: 'none' })
+    // Another client opens the pull request; the clock has not moved, so the miss is far younger than the 5 second floor.
+    listed = `[${prJson}]`
+    expect(await host.lookupPullRequest('/repo')).toMatchObject({ state: 'none' })
+    expect(await host.lookupPullRequest('/repo', undefined, { force: true })).toMatchObject({ state: 'found' })
+    expect(prListCalls(run).length).toBeGreaterThan(1)
+  })
+
   it('keeps a branch separate from other branches of the repository', async () => {
     const run = runner()
     const host = new GitHubCodeHost(run)
@@ -456,14 +470,15 @@ describe('remote URLs', () => {
 })
 
 describe('GitHubCodeHost.createPullRequest', () => {
-  const input = { title: ' Add a thing ', body: 'Why\n\n- one', base: 'main', draft: false }
+  const input = { title: ' Add a thing ', body: 'Why\n\n- one', base: 'main', draft: false, head: 'feature' }
+  const bodyFileOf = (args: readonly string[]) => (args.find((arg) => arg.startsWith('--body-file=')) ?? '').slice('--body-file='.length)
 
   it('creates through a body file, parses the number from the URL and reads the pull request back by number', async () => {
     let bodyFile = ''
     let written = ''
     const run = runner({
       create: async (args) => {
-        bodyFile = args[args.indexOf('--body-file') + 1]
+        bodyFile = bodyFileOf(args)
         written = readFileSync(bodyFile, 'utf8')
         return ok('Creating pull request for feature into main in acme/app\n\nhttps://github.com/acme/app/pull/41\n')
       },
@@ -472,24 +487,34 @@ describe('GitHubCodeHost.createPullRequest', () => {
     const created = await new GitHubCodeHost(run).createPullRequest('/repo', { ...input, head: 'feature' })
     expect(created).toMatchObject({ number: 41, title: 'Add a thing', state: 'open' })
     const create = run.mock.calls.find((call) => call[1][1] === 'create')
-    expect(create?.[1]).toEqual(['pr', 'create', '--title', 'Add a thing', '--body-file', bodyFile, '--base', 'main', '--head', 'feature'])
+    expect(create?.[1]).toEqual(['pr', 'create', '--title=Add a thing', `--body-file=${bodyFile}`, '--base=main', '--head=feature'])
     expect(create?.[2]).toEqual({ cwd: '/repo' })
     expect(written).toBe('Why\n\n- one')
     expect(existsSync(bodyFile)).toBe(false)
     expect(run).toHaveBeenCalledWith('gh', ['pr', 'view', '41', '--json', FIELDS], { cwd: '/repo' })
   })
 
-  it('passes --draft only for a draft, and no --head without one', async () => {
+  it('passes --draft only for a draft', async () => {
     const run = runner()
+    await new GitHubCodeHost(run).createPullRequest('/repo', input)
     await new GitHubCodeHost(run).createPullRequest('/repo', { ...input, draft: true })
+    const creates = run.mock.calls.filter((call) => call[1][1] === 'create').map((call) => call[1])
+    expect(creates[0]).not.toContain('--draft')
+    expect(creates[1]).toContain('--draft')
+  })
+
+  it('binds every value to its flag, so a value that looks like a flag stays a value', async () => {
+    const run = runner()
+    await new GitHubCodeHost(run).createPullRequest('/repo', { ...input, title: '--web' })
     const args = run.mock.calls.find((call) => call[1][1] === 'create')?.[1] ?? []
-    expect(args).toContain('--draft')
-    expect(args).not.toContain('--head')
+    expect(args[2]).toBe('--title=--web')
+    // Every argument after `pr create` is one self-contained `--flag=value`.
+    expect(args.slice(2).every((arg) => /^--[a-z-]+=/.test(arg))).toBe(true)
   })
 
   it('removes the body file when gh fails', async () => {
     let bodyFile = ''
-    const run = runner({ create: async (args) => { bodyFile = args[args.indexOf('--body-file') + 1]; throw failure('boom') } })
+    const run = runner({ create: async (args) => { bodyFile = bodyFileOf(args); throw failure('boom') } })
     await expect(new GitHubCodeHost(run).createPullRequest('/repo', input)).rejects.toThrow('boom')
     expect(bodyFile).not.toBe('')
     expect(existsSync(bodyFile)).toBe(false)
@@ -505,7 +530,7 @@ describe('GitHubCodeHost.createPullRequest', () => {
 
   it('says so when the branch already has a pull request, and passes other errors on verbatim', async () => {
     const exists = runner({ create: async () => { throw failure('a pull request for branch "feature" into branch "main" already exists:\nhttps://github.com/acme/app/pull/3') } })
-    await expect(new GitHubCodeHost(exists).createPullRequest('/repo', input)).rejects.toThrow('A pull request for this branch already exists.')
+    await expect(new GitHubCodeHost(exists).createPullRequest('/repo', input)).rejects.toMatchObject({ message: 'A pull request for this branch already exists.', code: PULL_REQUEST_EXISTS })
     const other = runner({ create: async () => { throw failure('GraphQL: Head sha can\'t be blank, Base sha can\'t be blank (createPullRequest)') } })
     await expect(new GitHubCodeHost(other).createPullRequest('/repo', input)).rejects.toThrow('GraphQL: Head sha can\'t be blank, Base sha can\'t be blank (createPullRequest)')
     const missing = runner({ create: async () => { throw enoent() } })
@@ -527,7 +552,8 @@ describe('GitHubCodeHost.createPullRequest', () => {
     await expect(host.createPullRequest('/repo', { ...input, title: 'x'.repeat(257) })).rejects.toThrow('1–256')
     await expect(host.createPullRequest('/repo', { ...input, base: '--web' })).rejects.toThrow('Unsupported branch name')
     await expect(host.createPullRequest('/repo', { ...input, head: '-x' })).rejects.toThrow('Unsupported branch name')
-    await expect(host.createPullRequest('/repo', { ...input, head: '' })).rejects.toThrow('Unsupported branch name')
+    await expect(host.createPullRequest('/repo', { ...input, head: '' })).rejects.toThrow('Name the branch')
+    await expect(host.createPullRequest('/repo', { ...input, head: '  ' })).rejects.toThrow('Name the branch')
     await expect(host.createPullRequest('/repo', { ...input, base: ' ' })).rejects.toThrow('base branch')
     expect(run).not.toHaveBeenCalled()
     await host.createPullRequest('/repo', { ...input, title: 'x'.repeat(256) })
@@ -589,6 +615,19 @@ describe('GitHubCodeHost.listBaseBranches', () => {
   })
 })
 
+describe('GitHubCodeHost.remoteForRepository', () => {
+  it('names the remote that points at the repository, else origin, else the only remote', async () => {
+    const both = [
+      'origin\tgit@github.com:me/app.git (fetch)',
+      'upstream\thttps://github.com/acme/app.git (fetch)'
+    ].join('\n')
+    expect(await new GitHubCodeHost(runner({ remotes: both })).remoteForRepository('/repo')).toBe('upstream')
+    expect(await new GitHubCodeHost(runner({ remotes: 'origin\thttps://example.com/x.git (fetch)\nb\thttps://example.com/y.git (fetch)' })).remoteForRepository('/repo')).toBe('origin')
+    expect(await new GitHubCodeHost(runner({ remotes: 'mirror\thttps://example.com/y.git (fetch)' })).remoteForRepository('/repo')).toBe('mirror')
+    expect(await new GitHubCodeHost(runner({ remotes: '' })).remoteForRepository('/repo')).toBeNull()
+  })
+})
+
 describe('GitHubCodeHost.viewerLogin', () => {
   it('asks the repository\'s own host', async () => {
     const run = runner({ identity: () => identityJson('https://ghe.example.com/acme/app') })
@@ -623,16 +662,25 @@ describe('GitHubCodeHost.viewerLogin', () => {
   })
 })
 
-describe('GitHubService.createPullRequest', () => {
-  it('runs gh pr create --web in the folder', async () => {
-    const run = vi.fn<ExecutableRunner>(async () => ok())
-    await new GitHubService(run).createPullRequest('/repo')
-    expect(run).toHaveBeenCalledWith('gh', ['pr', 'create', '--web'], { cwd: '/repo' })
+describe('removeTempFolder', () => {
+  it('retries and then gives up quietly, so a created pull request is never turned into an error', async () => {
+    const remove = vi.fn(async () => { throw Object.assign(new Error('EPERM'), { code: 'EPERM' }) })
+    await expect(removeTempFolder('/tmp/x', remove as never)).resolves.toBeUndefined()
+    expect(remove).toHaveBeenCalledWith('/tmp/x', expect.objectContaining({ recursive: true, force: true, maxRetries: 3 }))
   })
+})
 
-  it('surfaces gh errors', async () => {
-    const run = vi.fn<ExecutableRunner>(async () => { throw failure('must first push the current branch') })
-    await expect(new GitHubService(run).createPullRequest('/repo')).rejects.toThrow('must first push the current branch')
+describe('GitHubCodeHost caches', () => {
+  it('keeps a bounded number of lookups, oldest first out', async () => {
+    const run = runner()
+    const host = new GitHubCodeHost(run)
+    for (let index = 0; index < 520; index++) await host.lookupPullRequest('/repo', `branch-${index}`)
+    expect(prListCalls(run)).toHaveLength(520)
+    // The newest branches are still answered from memory; the first ones were let go.
+    await host.lookupPullRequest('/repo', 'branch-519')
+    expect(prListCalls(run)).toHaveLength(520)
+    await host.lookupPullRequest('/repo', 'branch-0')
+    expect(prListCalls(run)).toHaveLength(521)
   })
 })
 

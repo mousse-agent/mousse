@@ -11,6 +11,7 @@ import { parseEnvelope } from './validators'
 import {
   MMS_PROTOCOL_CHUNK_CAPABILITY,
   MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS,
+  MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS,
   MMS_PROTOCOL_LOGIN_TIMEOUT_MS,
   MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES,
   MMS_PROTOCOL_MAX_PENDING_REQUESTS,
@@ -35,6 +36,23 @@ export interface MmsClient {
   onEvent(handler: (event: ProtocolEvent, delivery?: { replay: boolean }) => void): () => void
   readonly connected: boolean
   readonly hello: ProtocolHelloOk | null
+}
+
+/** Git methods that change the repository and may run hooks or talk to a remote. */
+const GIT_MUTATION_METHODS: ReadonlySet<string> = new Set([
+  'git.checkout', 'git.commit', 'git.push', 'git.stage', 'git.unstage', 'git.discard', 'git.fetch', 'git.pull',
+  'git.abortInProgress', 'git.createBranch', 'git.renameBranch', 'git.deleteBranch', 'git.init'
+])
+
+/**
+ * How long a request may stay open when neither the call nor the client sets a timeout.
+ * A client's blanket `requestTimeoutMs` still outranks this, and an explicit `timeoutMs` outranks both.
+ */
+export function requestTimeoutFor(method: string): number {
+  if (method === 'orchestrator.send' || method === 'bridge.hub.send') return MMS_PROTOCOL_ORCHESTRATOR_SEND_TIMEOUT_MS
+  if (method === 'providers.loginOAuth' || method === 'providers.loginApiKey' || method === 'mcp.beginAuth' || method === 'mcp.authenticate') return MMS_PROTOCOL_LOGIN_TIMEOUT_MS
+  if (GIT_MUTATION_METHODS.has(method)) return MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS
+  return MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS
 }
 
 /** Structured daemon rejection preserved across every local client caller. */
@@ -353,14 +371,7 @@ export class LocalMmsClient implements MmsClient {
     params?: unknown,
     timeoutMs?: number
   ): Promise<T> {
-    const effectiveTimeoutMs =
-      timeoutMs ??
-      this.opts.requestTimeoutMs ??
-      (method === 'orchestrator.send' || method === 'bridge.hub.send'
-        ? MMS_PROTOCOL_ORCHESTRATOR_SEND_TIMEOUT_MS
-        : method === 'providers.loginOAuth' || method === 'providers.loginApiKey' || method === 'mcp.beginAuth' || method === 'mcp.authenticate'
-        ? MMS_PROTOCOL_LOGIN_TIMEOUT_MS
-        : MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS)
+    const effectiveTimeoutMs = timeoutMs ?? this.opts.requestTimeoutMs ?? requestTimeoutFor(method)
     if (!this._connected || !this.socket || this.socket.destroyed) {
       throw new Error('Not connected')
     }

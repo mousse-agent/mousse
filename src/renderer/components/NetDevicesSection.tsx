@@ -86,6 +86,7 @@ export function NetDevicesSection() {
   const [status, setStatus] = useState<NetStatus>(), [devices, setDevices] = useState<Device[]>([]), [manifests, setManifests] = useState<TransportManifest[]>([])
   const [error, setError] = useState(''), [busy, setBusy] = useState(false), [passphrase, setPassphrase] = useState(''), [name, setName] = useState('My device'), [invite, setInvite] = useState(''), [joinText, setJoinText] = useState(''), [doctor, setDoctor] = useState<NetDoctor>()
   const [relayAddress, setRelayAddress] = useState(''), [named, setNamed] = useState(false), [tunnelId, setTunnelId] = useState(''), [hostname, setHostname] = useState(''), [credentialsFile, setCredentialsFile] = useState('')
+  const [sshEndpoint, setSshEndpoint] = useState(''), [sshPort, setSshPort] = useState('')
   const [adding, setAdding] = useState(false), [revoking, setRevoking] = useState<Device>()
   const nameEdited = useRef(false)
   const reload = async () => {
@@ -120,7 +121,7 @@ export function NetDevicesSection() {
     catch (cause) { if (alive.current) { setError(String((cause as Error)?.message ?? cause)); if (method === 'net.disable') { setDevices([]); setManifests([]); await reload().catch(() => undefined) } } }
     finally { if (alive.current) { setBusy(false); setPassphrase('') } }
   }
-  const transport = (transportId: string, enabled: boolean, settings: Record<string, unknown>) => action('net.transport.configure', { id: transportId, enabled, settings })
+  const transport = (transportId: string, enabled: boolean, settings?: Record<string, unknown>) => action('net.transport.configure', { id: transportId, enabled, ...(settings ? { settings } : {}) })
 
   const self = status?.self
   const selfDevice = devices.find((device) => device.self)
@@ -232,17 +233,20 @@ export function NetDevicesSection() {
               const live = status.transports?.find((t) => t.id === manifest.id)
               const on = !!live?.enabled
               const tip = manifest.setupSteps.map((step) => `${step.title}: ${step.detail}${step.command ? ` (${step.command})` : ''}`).join('\n')
-              const cloudflare = manifest.id === 'cloudflared', relay = manifest.id === 'relay'
+              const cloudflare = manifest.id === 'cloudflared', relay = manifest.id === 'relay', ssh = manifest.id === 'ssh'
               const namedReady = !named || (!!tunnelId && !!hostname && !!credentialsFile)
+              const sshPortNumber = Number(sshPort), sshReady = !!sshEndpoint.trim() && Number.isInteger(sshPortNumber) && sshPortNumber >= 1 && sshPortNumber <= 65535
               const enableSettings: Record<string, unknown> | undefined =
                 cloudflare ? (named ? { mode: 'named', tunnelId, hostname, credentialsFile } : { mode: 'quick' })
                   : manifest.id === 'direct' ? { host: '127.0.0.1', port: 0 }
                     : manifest.id === 'tailscale' ? {}
                       : relay ? { address: relayAddress }
-                        : undefined
+                        : ssh ? (sshReady ? { endpoint: sshEndpoint.trim(), port: sshPortNumber } : undefined)
+                          : undefined
               const canEnable = !!enableSettings && (!cloudflare || namedReady) && (!relay || !!relayAddress)
-              const disableSettings = cloudflare ? { mode: 'quick' } : relay ? { address: relayAddress || live?.routes[0]?.address || '' } : {}
-              const label = manifest.id === 'direct' ? 'Local listener' : manifest.id === 'tailscale' ? 'Tailscale' : relay ? 'Relay' : manifest.displayName
+              // Switching SSH off keeps the saved settings, which the screen may not have (a listener that failed to start has no route and the form starts empty).
+              const disableSettings = cloudflare ? { mode: 'quick' } : relay ? { address: relayAddress || live?.routes[0]?.address || '' } : ssh ? undefined : {}
+              const label = manifest.id === 'direct' ? 'Local listener' : manifest.id === 'tailscale' ? 'Tailscale' : relay ? 'Relay' : ssh ? 'SSH (for devices that can ssh here)' : manifest.displayName
               return [
                 <SettingsRow
                   key={manifest.id}
@@ -276,6 +280,12 @@ export function NetDevicesSection() {
                 ),
                 relay && (
                   <SettingsRow key={`${manifest.id}-address`} indent title="Relay address" htmlFor={`${id}-relay`} control={<input id={`${id}-relay`} className="settings-input" value={relayAddress} placeholder="wss://relay.example.com" onChange={(event) => setRelayAddress(event.target.value)} />} />
+                ),
+                ssh && (
+                  <SettingsRow key={`${manifest.id}-endpoint`} indent title="SSH address" description="What other devices type after ssh: [user@]host[:port]" htmlFor={`${id}-ssh-endpoint`} control={<input id={`${id}-ssh-endpoint`} className="settings-input" value={sshEndpoint} placeholder="me@box.example.com" onChange={(event) => setSshEndpoint(event.target.value)} />} />
+                ),
+                ssh && (
+                  <SettingsRow key={`${manifest.id}-port`} indent title="Daemon port" description="A free port on this computer, reachable only through SSH" htmlFor={`${id}-ssh-port`} control={<input id={`${id}-ssh-port`} className="settings-input" inputMode="numeric" value={sshPort} placeholder="47821" onChange={(event) => setSshPort(event.target.value)} />} />
                 )
               ]
             })}

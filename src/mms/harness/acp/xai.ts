@@ -34,7 +34,8 @@ function both<T>(name: string, value: T): Record<string, T> {
 export async function answerXaiQuestions(questions: UserQuestionService, scope: AcpRequestScope, params: unknown): Promise<unknown> {
   const cancelled = { outcome: 'cancelled' }
   const asked = Array.isArray(xaiParams(params).questions) ? (xaiParams(params).questions as unknown[]).filter(isRecord) : []
-  if (scope.aborted() || !scope.threadId || !asked.length) return cancelled
+  // A run nobody answers (`approvals: 'never'`) never puts a question to the user.
+  if (scope.aborted() || !scope.threadId || !asked.length || scope.approvals === 'never') return cancelled
   const shown: Array<UserQuestion & { text: string; labels: Map<string, string> }> = asked.flatMap((question, index) => {
     if (typeof question.question !== 'string' || !question.question.trim()) return []
     const options = Array.isArray(question.options) ? question.options.filter(isRecord) : []

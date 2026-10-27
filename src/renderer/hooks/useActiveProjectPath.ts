@@ -3,19 +3,25 @@ import { resolveActiveProject, type ActiveProject } from '../lib/activeProject'
 import { isNewEmptyThread, localWorkspaceFor } from '../lib/newThread'
 import { useAppStore } from '../stores/appStore'
 
-async function resolveWorkspaceProjectPath(threadId: string | null): Promise<string | null> {
-  if (!threadId) return window.mousse.app.getActiveProjectPath(threadId)
+interface ResolvedWorkspace {
+  path: string | null
+  /** The thread whose ready worktree `path` is, when it is one. */
+  workspaceThreadId: string | null
+}
+
+async function resolveWorkspaceProjectPath(threadId: string | null): Promise<ResolvedWorkspace> {
+  if (!threadId) return { path: await window.mousse.app.getActiveProjectPath(threadId), workspaceThreadId: null }
   try {
     const status = await window.mousse.workspace.getStatus(threadId) as {
       execution?: { projectPath?: string; lifecycle?: string }
     }
     if (status.execution?.projectPath && status.execution.lifecycle === 'ready') {
-      return status.execution.projectPath
+      return { path: status.execution.projectPath, workspaceThreadId: threadId }
     }
   } catch {
     // Legacy/standalone threads keep the existing project-path behavior.
   }
-  return window.mousse.app.getActiveProjectPath(threadId)
+  return { path: await window.mousse.app.getActiveProjectPath(threadId), workspaceThreadId: null }
 }
 
 /**
@@ -38,13 +44,13 @@ export function useActiveProjectLocation(): ActiveProject {
     s.threads.find((thread) => thread.id === s.activeThreadId)
   ).projectId)
   const scope = `${profileId}:${activeThreadId ?? '__blank__'}`
-  const [resolved, setResolved] = useState<{ scope: string; path: string | null } | null>(null)
+  const [resolved, setResolved] = useState<({ scope: string } & ResolvedWorkspace) | null>(null)
 
   useEffect(() => {
     let cancelled = false
-    void resolveWorkspaceProjectPath(activeThreadId).then((path) => {
-      if (!cancelled) setResolved({ scope, path })
-    }).catch(() => { if (!cancelled) setResolved({ scope, path: null }) })
+    void resolveWorkspaceProjectPath(activeThreadId).then((workspace) => {
+      if (!cancelled) setResolved({ scope, ...workspace })
+    }).catch(() => { if (!cancelled) setResolved({ scope, path: null, workspaceThreadId: null }) })
     return () => { cancelled = true }
   }, [activeThreadId, profileId, scope])
 
@@ -53,7 +59,9 @@ export function useActiveProjectLocation(): ActiveProject {
     draftProjectId,
     threadProjectId,
     projects,
-    resolved: resolved?.scope === scope ? { path: resolved.path, loading: false } : { path: null, loading: true }
+    resolved: resolved?.scope === scope
+      ? { path: resolved.path, loading: false, workspaceThreadId: resolved.workspaceThreadId }
+      : { path: null, loading: true, workspaceThreadId: null }
   })
 }
 

@@ -4,6 +4,7 @@ import type { ProviderToolEvent } from '../../../shared/agentActivity'
 import type { LlmModelOption } from '../../../shared/settings'
 import type { ChatImageAttachment } from '../../../shared/types'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
+import { harnessAppError } from '../../../shared/harness/types'
 import { interruptWithDeadline, loadWithDeadline, SessionLoadTimeoutError } from '../supervise'
 import { isAuthRequired } from './auth'
 import { initializeAgent, sessionCapability, type AcpAgentInfo } from './capabilities'
@@ -22,6 +23,7 @@ import {
   type PermissionPrompter
 } from './permissions'
 import type { AcpQuirks } from './quirks'
+import { agentCancelledError, promptStopOutcome } from './stopReason'
 import { xaiHandlers, xaiStopFailure } from './xai'
 
 /**
@@ -66,10 +68,75 @@ export interface AcpProcess extends AcpConnection {
    * removed when that prompt settles, so a late completion of an earlier prompt touches nothing.
    */
   promptWaiters?: Map<string, (params: Record<string, unknown>) => void>
+  /** Requests of the agent that Mousse is answering now (permission, questions, files): its silence is not counted meanwhile. */
+  openRequests?: number
+  /** Called when the agent shows a sign of life or such a request starts or ends (the running turn's silence timer). */
+  activity?: () => void
+  /** `interrupt` sent the running prompt a native cancel (cleared when the next prompt starts). */
+  cancelRequested?: boolean
+  /** The slash commands the agent advertised (`available_commands_update`), without the slash. */
+  commands?: Set<string>
 }
 
 /** How long a steer waits for a cancelled prompt's own completion before sending the next one. */
 export const PROMPT_COMPLETE_WAIT_MS = 5_000
+
+/**
+ * How long a prompt may get no reply and no update from the agent (and no request of the agent
+ * waiting on the user) before the turn fails and the agent's process is ended. Long, because an
+ * agent may run a quiet tool for minutes; it only has to be finite, so that a hung agent never
+ * leaves a chat, a schedule or a delegating parent running for the turn's six-hour limit.
+ */
+export const PROMPT_SILENCE_MS = 15 * 60_000
+
+/** A prompt that is a slash command: the agent expands it only when it opens the first block. */
+const SLASH_COMMAND = /^\/([A-Za-z][\w:-]*)(\s|$)/
+
+/**
+ * The trimmed prompt when it is a slash command (`/review src`; not a path such as `/tmp/x`). When
+ * the agent advertised its commands (`available_commands_update`), only one of those counts, so
+ * "/tmp is full" is text; an agent that advertised none is matched by the shape alone.
+ */
+export function slashCommand(prompt: string, advertised?: ReadonlySet<string>): string | undefined {
+  const text = prompt.trim()
+  const name = SLASH_COMMAND.exec(text)?.[1]
+  if (!name) return undefined
+  return advertised && advertised.size > 0 && !advertised.has(name) ? undefined : text
+}
+
+/** Remembers the command names an `available_commands_update` lists (without the leading slash). */
+function noteCommands(process: AcpProcess, update: unknown): void {
+  const event = update as { sessionUpdate?: string; availableCommands?: unknown } | null
+  if (event?.sessionUpdate !== 'available_commands_update' || !Array.isArray(event.availableCommands)) return
+  process.commands = new Set(event.availableCommands.flatMap((entry) => {
+    const name = (entry as { name?: unknown } | null)?.name
+    return typeof name === 'string' && name.replace(/^\//, '') ? [name.replace(/^\//, '')] : []
+  }))
+}
+
+function describeDuration(ms: number): string {
+  return ms >= 60_000 ? `${Math.round(ms / 60_000)} minutes` : `${Math.max(1, Math.round(ms / 1000))} seconds`
+}
+
+/** The agent's requests count as open while a handler answers them (see `AcpProcess.openRequests`). */
+function attended(handlers: AcpClientHandlers, track: { begin(): void; end(): void }): AcpClientHandlers {
+  const wrap = <A extends unknown[], R>(handle: (...args: A) => Promise<R>) => async (...args: A): Promise<R> => {
+    track.begin()
+    try {
+      return await handle(...args)
+    } finally {
+      track.end()
+    }
+  }
+  return {
+    ...handlers,
+    requestPermission: wrap(handlers.requestPermission),
+    ...(handlers.readTextFile ? { readTextFile: wrap(handlers.readTextFile) } : {}),
+    ...(handlers.writeTextFile ? { writeTextFile: wrap(handlers.writeTextFile) } : {}),
+    ...(handlers.createElicitation ? { createElicitation: wrap(handlers.createElicitation) } : {}),
+    ...(handlers.extRequests ? { extRequests: Object.fromEntries(Object.entries(handlers.extRequests).map(([method, handle]) => [method, wrap(handle)])) } : {})
+  }
+}
 
 /** `instanceId` is absent on sessions saved before provider instances existed (the default instance). */
 export interface SavedAcpSession {
@@ -153,6 +220,8 @@ export interface AcpSessionsOptions {
   cancelDeadlineMs?: number
   /** Test seam: how long a load replay may pause before the gate opens (`LOAD_REPLAY_IDLE_MS`). */
   loadIdleMs?: number
+  /** Test seam: how long a prompt may get no sign of life before the turn fails (`PROMPT_SILENCE_MS`); 0 turns it off. */
+  promptSilenceMs?: number
   /** Client capabilities added to `initialize` (ACP `auth`, `elicitation`). */
   clientCapabilities?: () => Record<string, unknown>
   /** Sign-in links may arrive as URL elicitations (else only through the preset's own channel). */
@@ -198,6 +267,7 @@ export class AcpSessions {
     const scope: AcpRequestScope = {
       get threadId() { return active?.threadId },
       get cwd() { return active?.cwd },
+      get approvals() { return active?.turnPrompter?.approvals },
       aborted: () => Boolean(active?.turnSignal?.aborted || active?.connection.signal.aborted),
       throwIfAborted: () => {
         active?.turnSignal?.throwIfAborted()
@@ -205,27 +275,45 @@ export class AcpSessions {
       }
     }
     const classify = this.options.classifyOption ?? classifyGenericOption
+    const handlers: AcpClientHandlers = {
+      requestPermission: async (request) => {
+        const answer = await answerPermission(active?.turnPrompter ?? this.prompter, scope, request, { label, classify })
+        // A prompt the agent then ends `cancelled` ends because Mousse's answer cancelled the request
+        // (dismissed, timed out, or refused by policy), not because the agent chose to stop.
+        if (answer.outcome.outcome === 'cancelled' && active) active.cancelRequested = true
+        return answer
+      },
+      ...(quirks.clientFs ? {
+        readTextFile: (request) => readWorkspaceFile(scope, request),
+        writeTextFile: (request) => writeWorkspaceFile(questions, scope, request, label)
+      } : {}),
+      // A sign-in link the agent sends as a URL elicitation goes to the sign-in; nothing else is answered.
+      ...(this.options.urlElicitation ? { createElicitation: async (request: Parameters<NonNullable<AcpClientHandlers['createElicitation']>>[0]) => {
+        const url = (request as { mode?: unknown; url?: unknown }).mode === 'url' ? (request as { url?: unknown }).url : undefined
+        if (!onAuthUrl || typeof url !== 'string' || !/^https:\/\//i.test(url)) return { action: 'decline' }
+        onAuthUrl(url)
+        return { action: 'accept' }
+      } } : {}),
+      ...(quirks.xaiExtensions ? xaiHandlers({
+        questions,
+        scope,
+        promptComplete: (promptId, params) => active?.promptWaiters?.get(promptId)?.(params)
+      }) : {})
+    }
     const connection = this.options.connect({
       purpose,
-      handlers: {
-        requestPermission: (request) => answerPermission(active?.turnPrompter ?? this.prompter, scope, request, { label, classify }),
-        ...(quirks.clientFs ? {
-          readTextFile: (request) => readWorkspaceFile(scope, request),
-          writeTextFile: (request) => writeWorkspaceFile(questions, scope, request, label)
-        } : {}),
-        // A sign-in link the agent sends as a URL elicitation goes to the sign-in; nothing else is answered.
-        ...(this.options.urlElicitation ? { createElicitation: async (request: Parameters<NonNullable<AcpClientHandlers['createElicitation']>>[0]) => {
-          const url = (request as { mode?: unknown; url?: unknown }).mode === 'url' ? (request as { url?: unknown }).url : undefined
-          if (!onAuthUrl || typeof url !== 'string' || !/^https:\/\//i.test(url)) return { action: 'decline' }
-          onAuthUrl(url)
-          return { action: 'accept' }
-        } } : {}),
-        ...(quirks.xaiExtensions ? xaiHandlers({
-          questions,
-          scope,
-          promptComplete: (promptId, params) => active?.promptWaiters?.get(promptId)?.(params)
-        }) : {})
-      },
+      handlers: attended(handlers, {
+        begin: () => {
+          if (!active) return
+          active.openRequests = (active.openRequests ?? 0) + 1
+          active.activity?.()
+        },
+        end: () => {
+          if (!active) return
+          active.openRequests = Math.max(0, (active.openRequests ?? 0) - 1)
+          active.activity?.()
+        }
+      }),
       onAuthUrl: onAuthUrl ?? (() => {
         // The agent wants a sign-in outside a sign-in: the saved sign-in is gone or was never valid.
         if (!active) return
@@ -237,6 +325,9 @@ export class AcpSessions {
       }
     })
     active = Object.assign(connection, { generation: this.options.launchGeneration(), signInGeneration: this.options.signInGeneration() })
+    // Between turns, and while a session opens, the agent's command list is still kept.
+    const resting = active
+    resting.onUpdate = (update) => noteCommands(resting, update)
     this.processes.add(active)
     return active
   }
@@ -374,6 +465,8 @@ export class AcpSessions {
     const active = this.bySession(sessionId)
     if (!active || !this.turning.has(active) || !active.prompting) return 'not_active'
     if (active.threadId) this.options.questions.autoRejectPendingForThread(active.threadId)
+    // The prompt that ends `cancelled` now ends because Mousse asked, not because the agent chose to.
+    active.cancelRequested = true
     await active.connection.agent.notify(methods.agent.session.cancel, { sessionId: active.sessionId! })
     await active.prompting
     // The agent may still count its task as running after the cancel's reply: its process ends,
@@ -532,7 +625,39 @@ export class AcpSessions {
     let resumed = !freshProcess
     let steerTimer: ReturnType<typeof setInterval> | undefined
     let steerFailure: unknown
+    // A prompt is in flight, and the agent's silence is counted (`PROMPT_SILENCE_MS`).
+    let prompting = false
+    const silenceMs = this.options.promptSilenceMs ?? PROMPT_SILENCE_MS
+    let silenceTimer: ReturnType<typeof setTimeout> | undefined
+    let silenceFailure: Error | undefined
+    /** Restarts the silence timer on a sign of life; it does not run while the agent waits on a request of its own. */
+    const watchSilence = () => {
+      clearTimeout(silenceTimer)
+      silenceTimer = undefined
+      if (!prompting || !(silenceMs > 0) || (current.openRequests ?? 0) > 0) return
+      // Mousse's own tools (`ask_user`, `present_plan`, approvals) ask the user through the thread's
+      // questions, not through the ACP connection, and may wait up to an hour: the agent is not
+      // silent while one is open. The clock starts over (a full window) once the last one is answered.
+      if (questions.listPendingForThread(input.threadId).length > 0) {
+        silenceTimer = setTimeout(watchSilence, Math.min(500, silenceMs))
+        silenceTimer.unref?.()
+        return
+      }
+      silenceTimer = setTimeout(() => {
+        // A question may have been asked since the timer started: look again before giving up.
+        if ((current.openRequests ?? 0) > 0 || questions.listPendingForThread(input.threadId).length > 0) return watchSilence()
+        silenceFailure = harnessAppError({
+          code: 'timeout',
+          message: `${label} did not answer: it sent no reply and no update for ${describeDuration(silenceMs)}, so it was stopped. Send the message again.`,
+          instanceId
+        })
+        closeAcpConnection(current)
+      }, silenceMs)
+      silenceTimer.unref?.()
+    }
     const onUpdate = (update: unknown) => {
+      watchSilence()
+      noteCommands(current, update)
       if (!update || typeof update !== 'object') return
       const event = update as { sessionUpdate?: string; content?: { type?: string; text?: string }; toolCallId?: string; title?: string; name?: string; status?: string; configOptions?: NewSessionResponse['configOptions']; currentModeId?: string }
       if (event.sessionUpdate === 'agent_message_chunk' && event.content?.type === 'text') {
@@ -641,7 +766,6 @@ export class AcpSessions {
         return { type: 'image' as const, data: image.data, mimeType }
       })
       const pendingSteers: string[] = []
-      let prompting = false
       let cancelSent = false
       const turnProcess = active
       const collectSteer = () => {
@@ -679,25 +803,41 @@ export class AcpSessions {
         ? `Previous conversation (context only; do not repeat earlier actions):\n${input.history}\n\nCurrent request:\n`
         : ''
       // The session's instructions go into its first prompt, and again into a resumed session's prompt
-      // when they changed since (their hash is kept with the session).
+      // when they changed since (their hash is kept with the session). A slash command goes out
+      // without them: the next prompt that is not a command carries them.
+      const command = slashCommand(input.prompt, active.commands)
       const instructionsHash = input.orchestrationInstructions ? createHash('sha256').update(input.orchestrationInstructions).digest('hex').slice(0, 32) : undefined
-      const orchestration = input.orchestrationInstructions && (!resumed || active.instructionsHash !== instructionsHash)
+      const orchestration = !command && input.orchestrationInstructions && (!resumed || active.instructionsHash !== instructionsHash)
         ? `<mousse_orchestration_instructions>\n${input.orchestrationInstructions}\n</mousse_orchestration_instructions>\n\n`
         : ''
-      if (instructionsHash && active.instructionsHash !== instructionsHash) {
+      if (!command && instructionsHash && active.instructionsHash !== instructionsHash) {
         active.instructionsHash = instructionsHash
         const savedNow = store.saved(input.threadId)
         if (savedNow) store.setSaved(input.threadId, { ...savedNow, instructionsHash })
       }
-      let prompt = orchestration + history + (input.turnPreamble ? input.turnPreamble + '\n\nCurrent request:\n' : '') + (input.prompt || '(image attachment)')
+      const preamble = input.turnPreamble ? input.turnPreamble + '\n\nCurrent request:\n' : ''
+      // The text blocks of the prompt. A command is the first block alone, as typed, because agents
+      // parse a command at the start of the first block; the history the agent needs follows it.
+      // (An agent that joins every block before it parses may still read the command literally.)
+      let blocks = command
+        ? [command, history + preamble].filter((block) => block)
+        : [orchestration + history + preamble + (input.prompt || '(image attachment)')]
+      let commandTurn = command !== undefined
       let attachments = imageBlocks
       for (;;) {
         input.signal?.throwIfAborted()
         if (steerFailure) throw steerFailure
         collectSteer()
-        if (pendingSteers.length) prompt += '\n\nAdditional guidance:\n' + pendingSteers.splice(0).join('\n')
+        if (pendingSteers.length) {
+          const guidance = 'Additional guidance:\n' + pendingSteers.splice(0).join('\n')
+          if (commandTurn) blocks = [blocks[0], blocks[1] ? `${blocks[1]}\n\n${guidance}` : guidance]
+          else blocks = [`${blocks[0]}\n\n${guidance}`]
+        }
         prompting = true
         cancelSent = false
+        active.cancelRequested = false
+        active.activity = watchSilence
+        watchSilence()
         // Any accepted prompt makes the old history fingerprint stale until commit.
         const accepted = store.saved(input.threadId)
         if (accepted) {
@@ -707,7 +847,7 @@ export class AcpSessions {
         // xAI: the prompt is tagged, and ends at its reply or its `prompt_complete`, whichever is first.
         const promptId = quirks.xaiExtensions ? randomUUID() : undefined
         const reply = active.connection.agent.request(methods.agent.session.prompt, { sessionId: active.sessionId,
-          prompt: [{ type: 'text', text: prompt }, ...attachments], ...(promptId ? { _meta: { promptId } } : {}) })
+          prompt: [...blocks.map((block) => ({ type: 'text' as const, text: block })), ...attachments], ...(promptId ? { _meta: { promptId } } : {}) })
         const completion = promptId ? this.completionOf(active, promptId) : undefined
         const request: Promise<unknown> = completion ? Promise.race([reply, completion.done]) : reply
         if (completion) reply.catch(() => undefined)
@@ -722,6 +862,7 @@ export class AcpSessions {
           active.prompting = undefined
         }
         prompting = false
+        watchSilence()
         if (completion) {
           // A steer's cancel: the next prompt waits (briefly) for the cancelled task to report its end.
           if (cancelSent) {
@@ -734,11 +875,20 @@ export class AcpSessions {
           const failure = cancelSent || input.signal?.aborted ? undefined : xaiStopFailure(label, outcome)
           if (failure) throw failure
         }
+        if (!cancelSent && !active.cancelRequested && !input.signal?.aborted) {
+          // The agent's own word on how the prompt ended (its reply, or xAI's `prompt_complete`): a
+          // refusal or a limit is never a clean success, and a cancel Mousse did not ask for is an
+          // interruption.
+          const ended = promptStopOutcome(label, outcome)
+          if (ended === 'cancelled') throw agentCancelledError(label)
+          if (ended) throw ended
+        }
         input.signal?.throwIfAborted()
         collectSteer()
         if (steerFailure) throw steerFailure
         if (!pendingSteers.length) break
-        prompt = pendingSteers.splice(0).join('\n')
+        blocks = [pendingSteers.splice(0).join('\n')]
+        commandTurn = false
         attachments = []
         if (text) text += '\n\n'
       }
@@ -748,11 +898,14 @@ export class AcpSessions {
       this.close(current)
       this.sessions.delete(input.threadId)
       if (steerFailure) throw steerFailure
+      if (silenceFailure && !input.signal?.aborted) throw silenceFailure
       throw this.authRequiredError(current, error) ?? error
     } finally {
+      clearTimeout(silenceTimer)
+      current.activity = undefined
       if (steerTimer) clearInterval(steerTimer)
       input.signal?.removeEventListener('abort', abort)
-      current.onUpdate = undefined
+      current.onUpdate = (update) => noteCommands(current, update)
       current.turnSignal = undefined
       current.turnPrompter = undefined
       this.turning.delete(current)

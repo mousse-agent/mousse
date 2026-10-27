@@ -24,7 +24,7 @@ Identity and keys; signed versioned event streams; sync protocol for node↔node
 - `historyVisibility: sinceJoin`. Members see full channel history in v1.
 - Sandboxed shell for restricted bots. v1 offers only permission profiles the runtime can actually enforce (§4.8.3).
 - Sharing PR #41's local browser/PTY/file resources across the network.
-- Loading add-ons from outside the repo; SSH bootstrap; short-code enrollment through a relay; Tailscale Funnel automation; the hosted relay add-on itself; `mousse://` deep-link registration (v1 uses pasted strings).
+- Loading add-ons from outside the repo; SSH bootstrap (installing Mousse on another machine; the `ssh` route add-on only reaches a daemon that is already running); short-code enrollment through a relay; Tailscale Funnel automation; the hosted relay add-on itself; `mousse://` deep-link registration (v1 uses pasted strings).
 - Rewriting `ThreadDataStore` or the GUI↔daemon local protocol.
 
 ### Kept
@@ -177,6 +177,7 @@ Transports and order of delivery:
 3. `tailscale`: detects the `tailscale` CLI and the tailnet address or MagicDNS name and advertises a `direct` route on it; guided setup text when missing.
 4. `relay`: outbound connection to a self-hosted relay (`mousse-cli relay serve`). The relay authenticates nodes by a signature challenge on the node signing key, admits only allow-listed user or node keys, pairs two connections addressed to each other and forwards bytes. For enrollment, the inviter registers a short-lived rendezvous ID (in the invite); the uncertified joiner may connect only to that ID. Bounded buffers; quotas persisted.
 5. `cloudflared` (P4b, after Bridge is qualified on 2–4): supervises a user-installed binary for quick and named tunnels on the user's own account.
+6. `ssh`: for a device reachable only over SSH. On that device the add-on listens on a fixed loopback port and advertises `ssh://<endpoint>/127.0.0.1:<port>` at priority 40. Other devices dial it through `ssh -W` with the usual WebSocket and pinned TLS on top. SSH is dial-side only on clients: a client never listens on it, and it spawns `ssh` only for an endpoint it approved locally for that device, with a host key it already trusts. See [ssh-setup.md](ssh-setup.md).
 
 Add-on model: an in-tree module exporting `{ id, kind: 'transport', displayName, traits, settingsSchema, setupSteps }` and a factory, registered in a generic registry with per-profile enablement and settings validation. A future closed or third-party transport needs no core change. No stub modules ship.
 

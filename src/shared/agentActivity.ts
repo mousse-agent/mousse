@@ -278,9 +278,9 @@ export function unifiedDiff(path: string, oldText: string, newText: string): str
  * the new text of an `add` and the old text of a `delete`.
  */
 export function diffSides(diff: string, change: ActivityFileChange['change'] = 'update'): { oldText: string; newText: string } {
-  if (!diff.includes('@@')) {
-    if (change === 'add') return { oldText: '', newText: diff }
-    if (change === 'delete') return { oldText: diff, newText: '' }
+  // An added or deleted file's diff is its text as it is, whatever characters it holds.
+  if ((change === 'add' || change === 'delete') && !hasHunkHeader(diff)) {
+    return change === 'add' ? { oldText: '', newText: diff } : { oldText: diff, newText: '' }
   }
   const oldLines: string[] = []
   const newLines: string[] = []
@@ -302,6 +302,11 @@ export function diffSides(diff: string, change: ActivityFileChange['change'] = '
 }
 
 const HUNK_HEADER = /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/
+
+/** Whether any line of `text` is a real unified-diff hunk header (a stray `@@` in a file's text is not one). */
+export function hasHunkHeader(text: string): boolean {
+  return /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/m.test(text)
+}
 
 /**
  * A stored diff as a patch a diff viewer can parse, so hunks keep the line numbers they came

@@ -3,6 +3,7 @@ import { resolveCommand, type CommandId } from '../../shared/commands'
 import { useAppStore } from '../stores/appStore'
 import {
   asClosestTarget,
+  attachCommandBridge,
   currentBindings,
   currentContext,
   invokeCommand,
@@ -37,5 +38,12 @@ export function attachCommandShortcuts(target: Pick<Window, 'addEventListener' |
 }
 
 export function useCommandShortcuts(): void {
-  useEffect(() => attachCommandShortcuts(window), [])
+  useEffect(() => {
+    const detachKeys = attachCommandShortcuts(window)
+    const detachBridge = attachCommandBridge(window.mousse?.commands)
+    return () => {
+      detachKeys()
+      detachBridge()
+    }
+  }, [])
 }

@@ -128,6 +128,9 @@ interface AppState {
   /** The Search threads dialog, opened from the rail's menu, the threads sidebar and its shortcut. */
   threadSearchOpen: boolean
   setThreadSearchOpen: (open: boolean) => void
+  /** The command palette. Not persisted. */
+  paletteOpen: boolean
+  setPaletteOpen: (open: boolean) => void
   threadsSidebarView: 'projects' | 'threads' | 'chats'
   setThreadsSidebarView: (view: 'projects' | 'threads' | 'chats') => void
   sidebarMode: 'projects' | 'chats'
@@ -364,6 +367,8 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   setShortcuts: (shortcuts) => set((s) => (JSON.stringify(s.shortcuts) === JSON.stringify(shortcuts) ? s : { shortcuts })),
   threadSearchOpen: false,
   setThreadSearchOpen: (threadSearchOpen) => set({ threadSearchOpen }),
+  paletteOpen: false,
+  setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
   threadsSidebarOpen: true,
   mainAreaOpen: false,
   sideCardOn: true,
@@ -631,6 +636,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       // Another profile's shortcuts must not stay bound until its own settings arrive.
       shortcuts: {},
       threadSearchOpen: false,
+      paletteOpen: false,
       ...next,
       messages: [],
       agents: [],

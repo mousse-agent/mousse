@@ -46,7 +46,7 @@ import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/
 import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { stopStrategy } from '../run/CommandPolicy'
-import { AppToolTurns, createAppToolRegistry, McpToolError, type AppToolHost, type AppToolTurn, type McpCaller, type ToolRegistry } from '../run/mcp/appTools'
+import { AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type AppToolHost, type AppToolTurn, type McpCaller, type ToolRegistry } from '../run/mcp/appTools'
 import { modeFactsFor, prepareSkills, sessionInstructions, settingsToolEnabled, turnPreamble } from '../run/mcp/appTools/assemble'
 import { questionApproval } from '../run/mcp/appTools/quickActions'
 import { APPLET_GENERATION_GUIDANCE } from '../../shared/appletGuidance'
@@ -57,9 +57,9 @@ import { WebTools } from './WebTools'
 import { stableStringify } from '../run/json'
 import { formatRestartNote } from '../run/restartNote'
 import { createHarnessGateway, PI_DRIVER_ID, type AdapterHost, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
-import { piLegacyDriver } from '../harness/drivers/piLegacy'
+import { piDriver } from '../harness/drivers/pi'
 import { contextGauge } from '../harness/policy'
-import type { ExecutionBinding, HarnessCaps, ProviderScope, TurnOrigin } from '../../shared/harness/types'
+import { isRetriesExhausted, type ExecutionBinding, type HarnessCaps, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
 import { acknowledgeRows } from '../run/terminal'
@@ -136,6 +136,15 @@ import type { McpManager } from '../integrations/mcp/McpManager'
 import type { SkillsRegistry } from '../integrations/skills/SkillsRegistry'
 import type { FileService } from '../files/FileService'
 import type { GitService } from '../git/GitService'
+import {
+  PULL_REQUEST_DRAFT_SYSTEM,
+  buildPullRequestDraftPrompt,
+  conversationExcerpt,
+  heuristicPullRequestDraft,
+  parsePullRequestDraft,
+  type PullRequestDraftInputs
+} from '../git/pullRequestDraft'
+import { readPullRequestTemplate } from '../git/pullRequestTemplate'
 import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
 import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
@@ -894,7 +903,7 @@ export class OrchestratorService extends EventEmitter {
       profileHome: unboundHome,
       installationHome: unboundHome,
       instanceMap: new ProviderInstanceService({ providerAuth }),
-      drivers: [piLegacyDriver({ client: () => this.llm, credentials: () => this.providerAuth })],
+      drivers: [piDriver({ client: () => this.llm, credentials: () => this.providerAuth })],
       questions: runtime?.questions ?? defaultUserQuestionService,
       shellPath: async () => ({ entries: [], source: 'failed' })
     })
@@ -1688,7 +1697,7 @@ export class OrchestratorService extends EventEmitter {
    */
   private async completeAppTurn(
     registered: AppToolTurn,
-    input: { promptRuntime: boolean; browser?: AppToolTurn['browser']; onPublishApplet?: AppToolTurn['onPublishApplet']; userContent: string; instanceId: string; model: string }
+    input: { promptRuntime: boolean; browser?: AppToolTurn['browser']; onPublishApplet?: AppToolTurn['onPublishApplet']; userContent: string; instanceId: string; model: string; approvals: RunPolicy['approvals'] }
   ): Promise<TurnAppContext> {
     let skills: Pick<AppToolTurn, 'enabledSkills' | 'loadedSkills'> = { enabledSkills: [], loadedSkills: [] }
     if (input.promptRuntime) {
@@ -1714,6 +1723,8 @@ export class OrchestratorService extends EventEmitter {
     const turn = this.appToolTurns.update(registered.runId, {
       ...(browser ? { browser } : {}),
       ...(input.onPublishApplet ? { onPublishApplet: input.onPublishApplet } : {}),
+      // A run nobody answers: Mousse tools that wait for the user are refused, on every transport.
+      ...(input.approvals === 'never' ? { approvals: 'never' as const } : {}),
       ...skills
     }) ?? registered
     const descriptor = typeof turn.mode === 'string' ? this.modeRegistry.getModeSync(turn.mode, { projectPath: turn.projectPath }) : undefined
@@ -1743,6 +1754,8 @@ export class OrchestratorService extends EventEmitter {
       // A Plan turn cannot start threads; everything else listed is usable when available now.
       .filter((tool) => !(turn.modeCeiling === 'plan' && tool.access === 'startsThreads'))
       .filter((tool) => (tool.available?.(turn) ?? true) === true)
+      // A run nobody answers does not offer the tools that wait for the user (they are refused if called).
+      .filter((tool) => !unattendedRefusal(tool, turn))
       // A screenshot is refused when it cannot reach the model; the preamble does not offer it.
       .filter((tool) => !(tool.name === 'browser_screenshot' && turn.browser && !turn.browser.vision))
       .map((tool) => tool.name)
@@ -4062,6 +4075,65 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * Proposes a title and description for a branch's pull request from the originating thread's
+   * conversation, the branch's commits and patch, and the repository's template. The title model writes
+   * it when one is chosen (the same guard as `generateThreadTitle`); without one, or on any failure, a
+   * plain draft built from the commits and the template is returned instead, so this never throws.
+   */
+  async draftPullRequest(params: {
+    root: string
+    branch: string
+    base: string
+    remote: string | null
+    originThreadId: string | null
+    /** The folder's project; the title model is resolved in its scope, so an instance turned off there is never used. */
+    projectId: string | null
+    threadName: string | null
+  }): Promise<{ title: string; body: string; source: 'model' | 'heuristic' }> {
+    const summary = await (this.gitService?.readBranchSummary(params.root, params).catch(() => null) ?? null)
+    const template = await readPullRequestTemplate(params.root).catch(() => null)
+    let conversation = ''
+    if (params.originThreadId) {
+      try {
+        conversation = conversationExcerpt(this.getMessages(params.originThreadId))
+      } catch {
+        // A thread that cannot be read still gets a draft from its commits.
+      }
+    }
+    const name = params.threadName?.trim()
+    const inputs: PullRequestDraftInputs = {
+      branch: params.branch,
+      base: params.base,
+      threadName: name && name !== 'New Chat' ? name : null,
+      conversation,
+      commits: summary?.commits ?? [],
+      stat: summary?.stat ?? '',
+      patch: summary?.patch ?? '',
+      template
+    }
+    const heuristic = { ...heuristicPullRequestDraft(inputs), source: 'heuristic' as const }
+    const titleSettings = this.settingsStore.get().title
+    const hasExplicitTitleModel = Boolean(titleSettings.llmProvider?.trim() && titleSettings.model?.trim())
+    if (!hasExplicitTitleModel || (!inputs.commits.length && !inputs.patch && !conversation)) return heuristic
+    try {
+      const resolved = this.harness.resolveStored(titleSettings, {
+        purpose: 'title',
+        scope: params.projectId ? { kind: 'project', projectId: params.projectId } : params.originThreadId ? this.threadScope(params.originThreadId) : { kind: 'device' }
+      })
+      const text = await this.llm.draftPullRequest(
+        PULL_REQUEST_DRAFT_SYSTEM,
+        buildPullRequestDraftPrompt(inputs),
+        params.originThreadId ?? undefined,
+        { instanceId: resolved.instanceId, llmProvider: resolved.llmProvider, model: titleSettings.model }
+      )
+      const parsed = parsePullRequestDraft(text)
+      return parsed ? { ...parsed, source: 'model' } : heuristic
+    } catch {
+      return heuristic
+    }
+  }
+
+  /**
    * Promote a draft into a sidebar-visible thread as soon as the user commits
    * the first send. Title generation is often slow; without this, switching away
    * mid-title leaves the thread filtered out until a rename arrives.
@@ -5897,7 +5969,7 @@ export class OrchestratorService extends EventEmitter {
         stagedApplets.push(validateAppletSubmission(value))
         return { queued: true, title: stagedApplets[stagedApplets.length - 1].title }
       } : undefined
-      const app = appTurn ? await this.completeAppTurn(appTurn.turn, { promptRuntime, browser: browserExecution, onPublishApplet, userContent, instanceId: instance.instanceId, model: selectedModel.model }) : undefined
+      const app = appTurn ? await this.completeAppTurn(appTurn.turn, { promptRuntime, browser: browserExecution, onPublishApplet, userContent, instanceId: instance.instanceId, model: selectedModel.model, approvals: binding.policy.approvals }) : undefined
       const adapterHost: AdapterHost = {
         tools: {
           onPublishApplet,
@@ -5995,7 +6067,7 @@ export class OrchestratorService extends EventEmitter {
       if (isAbort) {
         aborted = true
         assistantText = ''
-      } else if (err instanceof ConnectionRetriesExhaustedError) {
+      } else if (err instanceof ConnectionRetriesExhaustedError || isRetriesExhausted(err)) {
         connectionFailed = true
         providerError = serializeAppError(normalized)
         assistantText = ''

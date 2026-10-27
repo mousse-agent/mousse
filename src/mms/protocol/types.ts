@@ -15,6 +15,8 @@ export const MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS = 60_000
 export const MMS_PROTOCOL_LOGIN_TIMEOUT_MS = 15 * 60_000
 /** Agent turns legitimately run longer than the default control-request timeout. */
 export const MMS_PROTOCOL_ORCHESTRATOR_SEND_TIMEOUT_MS = 30 * 60_000
+/** Git mutations can wait on hooks, credential helpers or a slow remote; Git itself decides when they are stuck. */
+export const MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS = 30 * 60_000
 export const MMS_PROTOCOL_REPLAY_RING_SIZE = 512
 export const MMS_PROTOCOL_MAX_PENDING_REQUESTS = 64
 /** Per-connection outbound write backlog before disconnecting a slow client. */
@@ -379,6 +381,7 @@ export const PROTOCOL_METHODS = [
   'files.write',
   'files.stat',
   'files.search',
+  'files.grep',
   'git.status',
   'git.diff',
   'review.files',
@@ -388,10 +391,21 @@ export const PROTOCOL_METHODS = [
   'git.checkout',
   'git.commit',
   'git.push',
+  'git.stage',
+  'git.unstage',
+  'git.discard',
+  'git.fetch',
+  'git.pull',
+  'git.abortInProgress',
+  'git.createBranch',
+  'git.renameBranch',
+  'git.deleteBranch',
+  'git.init',
   'github.status',
   'github.createRepository',
   'github.cloneRepository',
   'pullRequests.get',
+  'pullRequests.draft',
   'pullRequests.create',
   'pullRequests.baseBranches',
   'pullRequests.link',
