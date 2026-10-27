@@ -132,18 +132,40 @@ export function SetupRow({
   )
 
   return (
+    <>
+      <SettingsRow
+        title="Status"
+        description={withError(progress ?? <StatusLine status={status} />, error)}
+        control={
+          <>
+            {recheck}
+            {control}
+          </>
+        }
+      >
+        {below}
+      </SettingsRow>
+      {snapshot.settingsNotice && <OlderSettingsRow notice={snapshot.settingsNotice} actions={actions} />}
+    </>
+  )
+}
+
+/**
+ * What Mousse found at start in the provider's own settings file, changed by an older Mousse
+ * version: taken over (said once), or kept apart with the choice to use it instead.
+ */
+function OlderSettingsRow({ notice, actions }: { notice: NonNullable<InstanceSnapshot['settingsNotice']>; actions: InstanceActions }) {
+  const { busy, error, run } = useAsyncAction()
+  return (
     <SettingsRow
-      title="Status"
-      description={withError(progress ?? <StatusLine status={status} />, error)}
-      control={
-        <>
-          {recheck}
-          {control}
-        </>
-      }
-    >
-      {below}
-    </SettingsRow>
+      title="Older settings"
+      description={withError(<span className="prov-warning-text">{notice.message}</span>, error)}
+      control={notice.kind === 'older_conflict' && (
+        <button type="button" className="settings-btn" disabled={busy !== null} onClick={() => void run('older', () => actions.configure({ useOlderSettings: true }))}>
+          Use the older settings
+        </button>
+      )}
+    />
   )
 }
 
