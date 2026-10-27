@@ -17,6 +17,7 @@ import {
   type ScheduledRunDetails
 } from './ScheduledJobStore'
 import type { BackgroundWorkflowTurnResult, ScheduledJobIngress } from '../platform/MmsWorkflowChat'
+import { hasPlaceholders, renderPrompt } from './promptPlaceholders'
 
 /** Runs one tick starts at most; a catch-up after downtime follows over the next ticks instead of in one second. */
 const MAX_STARTS_PER_TICK = 3
@@ -566,6 +567,24 @@ export class ScheduledJobService extends EventEmitter {
     this.inFlight.set(job.id, tracked)
   }
 
+  /**
+   * The prompt this occurrence sends. Only a webhook delivery fills placeholders, from the body its request stored.
+   * Whether the prompt is a workflow is decided on the template, never on the filled text; a workflow takes no
+   * webhook data, so a workflow template with placeholders is refused rather than given untrusted arguments.
+   */
+  private promptFor(
+    job: ScheduledJob,
+    claim: ScheduledJob['runClaim']
+  ): { error?: undefined; prompt: string; missing: string[] } | { error: string; prompt?: undefined; missing?: undefined } {
+    const occurrenceId = claim?.webhookOccurrenceId
+    if (!occurrenceId || !hasPlaceholders(job.prompt)) return { prompt: job.prompt, missing: [] }
+    if (job.prompt.trimStart().startsWith('/')) return { error: 'A workflow prompt cannot use webhook placeholders.' }
+    const bodyText = this.store.readWebhookBody(job.id, occurrenceId)
+    if (bodyText === undefined) return { error: 'The webhook request this run needs is no longer stored.' }
+    const rendered = renderPrompt(job.prompt, { bodyText })
+    return { prompt: rendered.prompt, missing: rendered.missing }
+  }
+
   private async executeJob(job: ScheduledJob): Promise<void> {
     this.emitUpdated()
     const claim = job.runClaim
@@ -582,7 +601,16 @@ export class ScheduledJobService extends EventEmitter {
         }
         return
       }
-      const result = await this.runner.runIsolated(job.prompt, {
+      // A webhook delivery fills `{{body...}}` placeholders from its stored body; any other run leaves them as written.
+      const rendered = this.promptFor(job, claim)
+      if (rendered.error !== undefined) {
+        if (claimToken && this.store.isRunClaimCurrent(job.id, claimToken)) {
+          this.store.markJobRun(job.id, false, undefined, rendered.error, false, claimToken)
+        }
+        return
+      }
+      const missingPlaceholders = rendered.missing
+      const result = await this.runner.runIsolated(rendered.prompt, {
         jobId: job.id,
         occurrenceAt: occurrenceKey,
         occurrenceKey,
@@ -624,6 +652,7 @@ export class ScheduledJobService extends EventEmitter {
       }
 
       // A turn on a thread: the run record says where it ran and with what.
+      const missingDetails: ScheduledRunDetails = missingPlaceholders.length ? { missingPlaceholders } : {}
       const details: ScheduledRunDetails | undefined = result.threadId
         ? {
             threadId: result.threadId,
@@ -631,9 +660,10 @@ export class ScheduledJobService extends EventEmitter {
             ...(result.queueItemId ? { queueItemId: result.queueItemId } : {}),
             ...(result.selection ? { selection: result.selection } : {}),
             mode: job.mode ?? 'agent',
-            ...(job.workspace ? { workspace: job.workspace } : {})
+            ...(job.workspace ? { workspace: job.workspace } : {}),
+            ...missingDetails
           }
-        : undefined
+        : missingPlaceholders.length ? missingDetails : undefined
 
       if (result.status === 'queued' || result.status === 'replayed') {
         // Admitted, not finished: the job is held until its run is terminal.
