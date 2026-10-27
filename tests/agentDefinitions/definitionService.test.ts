@@ -266,6 +266,43 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     expect(results[2]).toContain('+two')
   })
 
+  it("a definition's file tools never change Git metadata: the reviewers' hook, alternates and planted .git writes are refused on its runtime", async () => {
+    const top = join(home, 'meta-repo')
+    mkdirSync(top)
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: top, stdio: 'pipe' })
+    git('init', '-q')
+    git('config', 'user.email', 'test@example.invalid')
+    git('config', 'user.name', 'Test')
+    git('config', 'commit.gpgsign', 'false')
+    writeFileSync(join(top, 'a.txt'), 'one\n')
+    git('add', 'a.txt')
+    git('commit', '-q', '-m', 'init')
+    mkdirSync(join(top, 'sub'))
+    const configBefore = readFileSync(join(top, '.git', 'config'), 'utf8')
+    const stored = publish('mousse', `pi:${PROVIDER}`, (settings) => {
+      settings.tools = { mode: 'explicit', allowlist: ['write', 'git_diff'] }
+      settings.script.enabled = false
+    })
+    const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })
+    const thread = store.createThread('git-metadata')
+    const replies = [
+      call('write', { path: '.git/config', content: `${configBefore}[hook "evil"]\n\tcommand = echo ran\n\tevent = post-index-change\n` }, 'w1'),
+      call('write', { path: '.git/objects/info/alternates', content: '/elsewhere/.git/objects\n' }, 'w2'),
+      call('write', { path: 'sub/.git', content: 'gitdir: /elsewhere/.git\n' }, 'w3'),
+      call('write', { path: 'ok.txt', content: 'fine\n' }, 'w4'),
+      say('done')
+    ]
+    defs.setNext(async () => replies.shift()!)
+    const result = await orch.runAgentDefinition(request(resolved, thread.id, { projectPath: top, host: { workspaceRoots: [top] } }))
+    expect(result.status).toBe('completed')
+    const results = defs.captured.at(-1)!.messages.filter((message) => message.role === 'toolResult').map((message) => JSON.stringify(message.content))
+    expect(results.slice(0, 3).every((text) => /cannot change Git metadata/.test(text))).toBe(true)
+    expect(readFileSync(join(top, '.git', 'config'), 'utf8')).toBe(configBefore)
+    expect(existsSync(join(top, '.git', 'objects', 'info', 'alternates'))).toBe(false)
+    expect(existsSync(join(top, 'sub', '.git'))).toBe(false)
+    expect(readFileSync(join(top, 'ok.txt'), 'utf8')).toBe('fine\n')
+  })
+
   it('holds the script rule and a read-only workspace even for granted tools', async () => {
     const stored = publish('mousse', `pi:${PROVIDER}`, (settings) => {
       settings.tools = { mode: 'explicit', allowlist: ['read', 'write', 'bash'] }
