@@ -24,6 +24,8 @@ type ProfileSettings = {
   /** Extra environment variables, applied over the environment Mousse prepares. */
   env?: Record<string, string>
   models?: LlmModelOption[]
+  /** ISO time `models` was last listed by the agent. */
+  modelsRefreshedAt?: string
   signedIn?: boolean
   sessions?: Record<string, SavedAcpSession>
 }
@@ -89,6 +91,7 @@ export class AntigravityProviderService {
         models: () => this.settings.models ?? [],
         setModels: (models) => {
           this.settings.models = models
+          this.settings.modelsRefreshedAt = new Date().toISOString()
           this.save()
         }
       },
@@ -181,7 +184,7 @@ export class AntigravityProviderService {
       const models = modelOptions(newSession)
       if (!models.length) throw new Error('Google agent did not confirm account model access')
       this.signInGeneration += 1
-      this.settings = { ...this.settings, signedIn: true, models }
+      this.settings = { ...this.settings, signedIn: true, models, modelsRefreshedAt: new Date().toISOString() }
       this.save()
       return { success: true, sessionId: session.sessionId }
     } catch (error) {
@@ -212,6 +215,7 @@ export class AntigravityProviderService {
       const models = modelOptions(session)
       if (!models.length) throw new Error('Google agent did not return account models')
       this.settings.models = models
+      this.settings.modelsRefreshedAt = new Date().toISOString()
       this.save()
       return models
     } catch (error) {
@@ -244,6 +248,11 @@ export class AntigravityProviderService {
     return this.settings.models ?? []
   }
 
+  /** When the agent last listed the models, kept with them across restarts. */
+  modelsRefreshedAt(): string | undefined {
+    return this.settings.models?.length ? this.settings.modelsRefreshedAt : undefined
+  }
+
   async logout(): Promise<void> {
     for (const session of this.loginSessions) session.abort.abort()
     this.closeAll()
@@ -260,6 +269,7 @@ export class AntigravityProviderService {
     } finally {
       this.settings.signedIn = false
       this.settings.models = []
+      delete this.settings.modelsRefreshedAt
       this.settings.sessions = {}
       this.save()
       this.notifyChanged()
@@ -313,6 +323,7 @@ export class AntigravityProviderService {
     if (!this.settings.signedIn && !this.settings.models?.length) return
     this.settings.signedIn = false
     this.settings.models = []
+    delete this.settings.modelsRefreshedAt
     this.save()
     this.notifyChanged()
   }

@@ -348,6 +348,7 @@ export const PROTOCOL_METHODS = [
   'providers.instances.signOut',
   'providers.instances.recheck',
   'providers.instances.refreshModels',
+  'providers.instances.refreshAllModels',
   'providers.instances.setModelPrefs',
   'providers.instances.move',
   'providers.registry.search',

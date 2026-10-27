@@ -4,7 +4,7 @@ import type { ProviderLoginOption, ProviderLoginResult } from '../../../shared/p
 import { describeStatus, type InstanceSnapshot } from '../../../shared/harness/status'
 import type { HarnessDriverKind, InstanceConfigPatch, ProviderScope } from '../../../shared/harness/types'
 import { piProviderIdOf } from '../../../shared/providerInstances'
-import { Plus, RefreshCw } from '../../lib/icons'
+import { Plus, RefreshCw, Sparkles } from '../../lib/icons'
 import { saveModelPrefs, useLegacyFavoritesImport } from '../../lib/modelFavorites'
 import {
   DEVICE_SCOPE,
@@ -27,7 +27,7 @@ import type { InstanceActions } from './CliSections'
 import { MoveNotice } from './MoveProviderDialog'
 import { AgentEditor, ApiEditor } from './ProviderEditor'
 import { ProviderListRow, errorText, useAsyncAction, useRelativeTime } from './parts'
-import { formatVersion, iconIdOf, isApiInstance, lastCheckedAt, switchStateOf, usedByLabel } from './providerView'
+import { formatVersion, iconIdOf, isApiInstance, lastCheckedAt, modelsFreshness, switchStateOf, usedByLabel } from './providerView'
 import { SignInDialog } from './SignInDialog'
 import '../../styles/providers.css'
 
@@ -87,6 +87,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
   /** Something a finished action wants the user to know (files kept after a remove). */
   const [pageNotice, setPageNotice] = useState<string | null>(null)
   const refreshing = useAsyncAction()
+  const refreshingModels = useAsyncAction()
 
   // Model APIs still connect through the provider login methods; their options say what is connected.
   const loadLoginOptions = useCallback(async () => {
@@ -188,6 +189,19 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
       for (const result of results) if (result.status === 'fulfilled') applySnapshot(result.value)
       const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
       if (failed) throw failed.reason
+    })
+
+  /**
+   * The header's "Refresh models": every enabled provider's list, in one call. A provider that is
+   * not signed in or has a chat running is left alone; one that fails is named with the reason.
+   */
+  const refreshAllModels = () =>
+    void refreshingModels.run('models', async () => {
+      const results = await window.mousse.providers.instances.refreshAllModels()
+      for (const result of results) applySnapshot(result.snapshot)
+      const failed = results.filter((result) => result.outcome === 'failed')
+      if (failed.length)
+        throw new Error(`Could not refresh models: ${failed.map((result) => `${result.snapshot.displayName} (${result.message ?? 'failed'})`).join('; ')}`)
     })
 
   const addHandlers: AddProviderHandlers = {
@@ -321,12 +335,23 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
             <span className="sr-only">Refresh provider status</span>
             <span>{refreshing.busy ? 'Refreshing providers' : checkedLabel ? `Checked ${checkedLabel}` : 'Checking'}</span>
           </button>
+          <button
+            type="button"
+            className="prov-ghost-btn"
+            title="Refresh models"
+            aria-busy={refreshingModels.busy !== null}
+            disabled={refreshingModels.busy !== null}
+            onClick={refreshAllModels}
+          >
+            {refreshingModels.busy ? <RefreshCw size={13} className="icon-spin" /> : <Sparkles size={13} />}
+            <span>{refreshingModels.busy ? 'Refreshing models' : 'Refresh models'}</span>
+          </button>
         </span>
       </div>
       {scopeId && (
         <p className="prov-scope-note">Switches here apply to this project only. A provider turned off for the device stays off in every project. Setup, runtime, environment and models apply to this device.</p>
       )}
-      {(pageError ?? refreshing.error) && <p className="prov-error">{pageError ?? refreshing.error}</p>}
+      {(pageError ?? refreshing.error ?? refreshingModels.error) && <p className="prov-error">{pageError ?? refreshing.error ?? refreshingModels.error}</p>}
       {pageNotice && <p className="prov-notice">{pageNotice}</p>}
 
       {!snapshots ? (
@@ -362,6 +387,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
                     : undefined
                 }
                 status={describeStatus(snapshot)}
+                models={modelsFreshness(snapshot)}
                 toggle={switchStateOf(snapshot, scope)}
                 selected={selected?.instanceId === snapshot.instanceId}
                 onSelect={() => setSelectedId(snapshot.instanceId)}

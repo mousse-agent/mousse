@@ -2039,6 +2039,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       return { snapshot: await harnessGateway(ctx).instances.refreshModels(asInstanceId(p.instanceId)) }
     }
+    case 'providers.instances.refreshAllModels':
+      return { results: await harnessGateway(ctx).instances.refreshAllModels() }
     case 'providers.instances.setModelPrefs': {
       const p = isObject(params) ? params : {}
       const instanceId = asInstanceId(p.instanceId)

@@ -1,4 +1,4 @@
-import type { InstanceSnapshot, ProviderSnapshotsEvent } from '../../shared/harness/status'
+import type { InstanceSnapshot, ModelRefreshResult, ProviderSnapshotsEvent } from '../../shared/harness/status'
 import type {
   AddInstanceInput,
   BinaryFingerprint,
@@ -274,6 +274,12 @@ export interface HarnessInstances {
   /** Bypasses the probe cache. */
   recheck(instanceId: string): Promise<InstanceSnapshot>
   refreshModels(instanceId: string): Promise<InstanceSnapshot>
+  /**
+   * Refreshes the model list of every enabled instance (Settings → Providers → "Refresh models"),
+   * at most two at a time. An instance that is not signed in or has a chat running is skipped; one
+   * whose refresh fails is reported, never thrown. Results come in the order of the instances.
+   */
+  refreshAllModels(): Promise<ModelRefreshResult[]>
   setModelPrefs(instanceId: string, patch: ModelPrefsPatch): Promise<InstanceSnapshot>
   /**
    * Moves a model API entry to the agent that now serves it (`FOLDED_INTO_AGENT`): the old entry is
@@ -383,6 +389,14 @@ export interface TurnHandle {
 export const PROBE_TTL_MS = 10 * 60_000
 /** How long a probe waits for the login-shell PATH before searching the inherited PATH only. */
 const SHELL_PATH_WAIT_MS = 3_000
+/** Every enabled, signed-in instance's model list is refreshed this often (`startModelRefreshSchedule`). */
+export const MODEL_REFRESH_INTERVAL_MS = 3 * 60 * 60_000
+/** The first scheduled pass runs this long after start-up, once the app is up and quiet. */
+export const MODEL_REFRESH_STARTUP_DELAY_MS = 2 * 60_000
+/** Model refreshes running at once (Claude Code and Codex start a CLI each). */
+const MODEL_REFRESH_CONCURRENCY = 2
+/** Test-only: replaces `MODEL_REFRESH_INTERVAL_MS`, in milliseconds. */
+const MODEL_REFRESH_INTERVAL_ENV = 'MOUSSE_MODEL_REFRESH_INTERVAL_MS'
 /** A one-shot request ends with `timeout` after this long without a provider event. */
 export const ONE_SHOT_INACTIVITY_MS = 60_000
 /** How long turn admission waits for the account check; past it the account counts as unknown. */
@@ -466,6 +480,7 @@ interface ProbeState {
   lastGood?: ProbeResult
   checkedAtMs?: number
   probing?: Promise<void>
+  /** What this run's refreshes found; the age of a list kept on disk comes from the runtime (`modelsRefreshedAt`). */
   models?: { refreshedAt?: string; error?: string; live?: boolean }
   /** The account read running for a turn admission (resolves undefined = unknown). */
   accountCheck?: Promise<string | undefined>
@@ -597,6 +612,14 @@ export class Harness implements HarnessGateway {
   private searchPath: string[] = []
   private readonly shellPath: Promise<void>
   private stopped = false
+  /**
+   * Model refreshes queued or running, one per instance: a second ask for the same instance (the
+   * schedule, a probe that saw a new program, a click) joins it instead of starting another.
+   */
+  private readonly modelRefreshes = new Map<string, Promise<void>>()
+  private modelSlots = 0
+  private readonly modelWaiting: Array<() => void> = []
+  private modelSchedule?: { interval: ReturnType<typeof setInterval>; startup: ReturnType<typeof setTimeout>; intervalMs: number }
 
   constructor(private readonly options: HarnessGatewayOptions) {
     this.instanceMap = options.instanceMap
@@ -651,6 +674,7 @@ export class Harness implements HarnessGateway {
         return this.snapshot(instanceId, { kind: 'device' })
       },
       refreshModels: (instanceId) => this.refreshModels(instanceId),
+      refreshAllModels: () => this.refreshAllModels(),
       move: (fromInstanceId, toInstanceId, options) => this.move(fromInstanceId, toInstanceId, options),
       setModelPrefs: async (instanceId, patch) => {
         const record = this.record(instanceId, { allowDisabled: true })
@@ -1621,6 +1645,7 @@ export class Harness implements HarnessGateway {
     const state = this.probes.get(instanceId) ?? {}
     this.probes.set(instanceId, state)
     if (state.probing) return state.probing
+    let upgraded = false
     const run = async () => {
       await Promise.race([this.shellPath, new Promise((resolve) => setTimeout(resolve, SHELL_PATH_WAIT_MS).unref?.())])
       const record = this.record(instanceId, { allowDisabled: true })
@@ -1642,12 +1667,15 @@ export class Harness implements HarnessGateway {
       else if (state.handshake && record.driver.versionArgs?.(record.config) === null && result.runs.state === 'yes' &&
           state.handshake.revision === revision && sameBinary(state.handshake.fingerprint, result.fingerprint))
         result = { ...result, runs: state.handshake.runs }
+      const before = state.lastGood?.fingerprint
       state.result = result
       state.checkedAtMs = this.now()
       if (!result.timedOut) state.lastGood = result
       // A different account than the last check: sessions made on the old one are not resumed.
       this.noteAuth(record, result.auth)
       if (options.handshake) this.captureFacts(record)
+      // A different program than the last check saw (a CLI upgrade): its models come right away.
+      upgraded = !result.timedOut && Boolean(before && result.fingerprint && !sameBinary(before, result.fingerprint))
     }
     state.probing = run()
       .catch((error) => {
@@ -1669,6 +1697,8 @@ export class Harness implements HarnessGateway {
       .finally(() => {
         state.probing = undefined
         if (!this.stopped) this.changed(instanceId, { legacy: false })
+        // After the check ends, so what the refresh publishes cannot be taken for part of it.
+        if (upgraded) this.refreshAfterUpgrade(instanceId)
       })
     return state.probing
   }
@@ -1689,6 +1719,8 @@ export class Harness implements HarnessGateway {
     const prefs = this.prefs.get(instanceId)
     const listed = runtime.models()
     const models = state?.models
+    // The runtime keeps the age of the list it stores; a runtime without that knows this run's refreshes.
+    const refreshedAt = runtime.modelsRefreshedAt ? runtime.modelsRefreshedAt() : models?.refreshedAt
     const signInStep: NextStep | undefined = auth.state === 'signed_out' || auth.state === 'expired'
       ? { action: 'sign_in', label: auth.state === 'expired' ? 'Sign in again' : 'Sign in', ...(auth.signInCommand ? { command: auth.signInCommand } : {}) }
       : undefined
@@ -1725,9 +1757,9 @@ export class Harness implements HarnessGateway {
       config: this.configView(record),
       models: {
         entries: modelsWithPrefs(listed, prefs),
-        source: listed.length ? (models?.live ? 'live' : 'cached') : prefs.custom.length ? 'manifest' : 'none',
+        source: listed.length ? (models?.live || (runtime.modelsRefreshedAt && refreshedAt) ? 'live' : 'cached') : prefs.custom.length ? 'manifest' : 'none',
         canAddCustom: driver.customModels,
-        ...(models?.refreshedAt ? { refreshedAt: models.refreshedAt } : {}),
+        ...(refreshedAt ? { refreshedAt } : {}),
         ...(models?.error ? { error: models.error } : {})
       },
       ...(latest ? { checkedAt: latest.checkedAt } : {}),
@@ -2032,18 +2064,151 @@ export class Harness implements HarnessGateway {
   }
 
   private async refreshModels(instanceId: string): Promise<InstanceSnapshot> {
-    const record = this.record(instanceId, { allowDisabled: true })
-    const state = this.probes.get(instanceId) ?? {}
-    this.probes.set(instanceId, state)
-    try {
-      await record.runtime.refreshModels?.(this.cwd())
-      state.models = { live: true, refreshedAt: new Date(this.now()).toISOString() }
-      this.captureFacts(record)
-    } catch (error) {
-      state.models = { ...state.models, error: errorText(error) }
-    }
-    this.changed(instanceId)
+    this.record(instanceId, { allowDisabled: true })
+    await this.refreshModelsOf(instanceId)
     return this.snapshot(instanceId, { kind: 'device' })
+  }
+
+  /**
+   * Refreshes every enabled instance's models, two at a time. Pi providers share one catalog
+   * refresh, so it runs once and its outcome counts for each of them.
+   */
+  private async refreshAllModels(): Promise<ModelRefreshResult[]> {
+    const entries = Object.entries(this.instanceMap.list()).filter(([, entry]) => entry.enabled)
+    let pi: Promise<void> | undefined
+    return Promise.all(entries.map(async ([instanceId, entry]): Promise<ModelRefreshResult> => {
+      const result = (outcome: ModelRefreshResult['outcome'], message?: string): ModelRefreshResult =>
+        ({ instanceId, outcome, ...(message ? { message } : {}), snapshot: this.snapshot(instanceId, { kind: 'device' }) })
+      try {
+        if (entry.driver === 'pi') {
+          pi ??= this.refreshModelsOf(instanceId)
+          await pi
+        } else {
+          if (!this.probes.get(instanceId)?.result) await this.probe(instanceId, false)
+          const reason = this.modelRefreshSkip(instanceId)
+          if (reason) return result('skipped', reason)
+          await this.refreshModelsOf(instanceId)
+        }
+        const error = this.probes.get(instanceId)?.models?.error
+        return error ? result('failed', error) : result('refreshed')
+      } catch (error) {
+        return result('failed', errorText(error))
+      }
+    }))
+  }
+
+  /**
+   * Why an instance's models are left alone now, or undefined when they may be refreshed. Used by
+   * the schedule and by "Refresh models" for all: a refresh starts a short-lived CLI or agent
+   * session, which must not meet a running chat, an install, or a sign-in that is not there.
+   */
+  private modelRefreshSkip(instanceId: string): string | undefined {
+    const entry = this.instanceMap.list()[instanceId]
+    if (!entry?.enabled) return 'Turned off'
+    const record = this.recordOrUndefined(instanceId)
+    if (!record || record.stopped) return 'Turned off'
+    const auth = this.probes.get(instanceId)?.lastGood?.auth.state
+    if (auth !== 'signed_in' && auth !== 'not_required') return 'Not signed in'
+    if (record.active > 0) return 'A chat is running'
+    const installing = record.runtime.installState?.().installing === true || [...this.operations.values()].some((operation) => operation.started.instanceId === instanceId && operation.started.kind !== 'sign_in')
+    if (installing) return 'Being installed'
+    return undefined
+  }
+
+  /**
+   * One refresh of an instance's list, queued behind the others (`MODEL_REFRESH_CONCURRENCY` run
+   * at once). A refresh that fails is recorded on the instance, never thrown. When `when` is set,
+   * the instance is checked again once its turn comes and is left alone if it no longer qualifies.
+   */
+  private refreshModelsOf(instanceId: string, when?: { minAgeMs: number; reason: 'schedule' | 'upgrade' }): Promise<void> {
+    const running = this.modelRefreshes.get(instanceId)
+    if (running) return running
+    const job = this.withModelSlot(async () => {
+      if (this.stopped) return
+      const record = this.recordOrUndefined(instanceId)
+      if (!record) return
+      if (when) {
+        if (!this.probes.get(instanceId)?.result) await this.probe(instanceId, false)
+        if (this.stopped || this.modelRefreshSkip(instanceId) || this.modelsAgeMs(record) < when.minAgeMs) return
+      }
+      const state = this.probeState(instanceId)
+      try {
+        await record.runtime.refreshModels?.(this.cwd())
+        const stamped = record.runtime.modelsRefreshedAt?.()
+        // A runtime that keeps its own stamp says when it listed (nothing listed, nothing stamped).
+        state.models = record.runtime.modelsRefreshedAt
+          ? { ...(stamped ? { live: true, refreshedAt: stamped } : {}) }
+          : { live: true, refreshedAt: new Date(this.now()).toISOString() }
+        this.captureFacts(record)
+      } catch (error) {
+        state.models = { ...state.models, error: errorText(error) }
+      }
+      if (when) console.info('[harness] model refresh', { instanceId, reason: when.reason, ...(state.models?.error ? { error: state.models.error } : { refreshedAt: state.models?.refreshedAt }) })
+      if (!this.stopped) this.changed(instanceId)
+    }).finally(() => {
+      this.modelRefreshes.delete(instanceId)
+    })
+    this.modelRefreshes.set(instanceId, job)
+    return job
+  }
+
+  /** How long ago the instance's list was updated; infinite when it never was (a fallback list). */
+  private modelsAgeMs(record: InstanceRecord): number {
+    const stamp = record.runtime.modelsRefreshedAt ? record.runtime.modelsRefreshedAt() : this.probes.get(record.instanceId)?.models?.refreshedAt
+    const at = stamp ? Date.parse(stamp) : NaN
+    return Number.isFinite(at) ? Math.max(0, this.now() - at) : Infinity
+  }
+
+  private async withModelSlot<T>(job: () => Promise<T>): Promise<T> {
+    // A finished job hands its slot to the next one waiting, so the count stays at the limit.
+    if (this.modelSlots >= MODEL_REFRESH_CONCURRENCY) await new Promise<void>((resolve) => this.modelWaiting.push(resolve))
+    else this.modelSlots += 1
+    try {
+      return await job()
+    } finally {
+      const next = this.modelWaiting.shift()
+      if (next) next()
+      else this.modelSlots -= 1
+    }
+  }
+
+  /**
+   * Keeps every provider's model list fresh without anyone clicking: a pass shortly after start-up
+   * for lists older than the interval, then one every `MODEL_REFRESH_INTERVAL_MS` (3 hours). A pass
+   * queues each enabled, signed-in instance that has no chat running and was not refreshed in the
+   * last half interval; the rest wait for the next pass. Pi providers have their own 5-minute cycle
+   * (`ProviderAuthService`) and are not part of this one. The timers are unref'd and stop with the
+   * gateway.
+   *
+   * Antigravity is part of the schedule on purpose. Its `refreshModels` starts a whole agent
+   * session, which is why background health checks must never call it; the schedule is not a
+   * health check, runs rarely, and only when the instance is signed in and idle, and it shares the
+   * two-at-a-time limit with the others.
+   */
+  startModelRefreshSchedule(): void {
+    if (this.stopped || this.modelSchedule) return
+    const override = Number(process.env[MODEL_REFRESH_INTERVAL_ENV])
+    const intervalMs = Number.isFinite(override) && override > 0 ? override : MODEL_REFRESH_INTERVAL_MS
+    const pass = (minAgeMs: number) => {
+      if (this.stopped) return
+      for (const [instanceId, entry] of Object.entries(this.instanceMap.list())) {
+        if (!entry.enabled || entry.driver === 'pi') continue
+        // The first pass leaves a list younger than the interval alone; later ones also take lists
+        // the previous pass refreshed just under an interval ago.
+        void this.refreshModelsOf(instanceId, { minAgeMs, reason: 'schedule' }).catch((error) => console.warn('[harness] scheduled model refresh failed', { instanceId, error: errorText(error) }))
+      }
+    }
+    const interval = setInterval(() => pass(intervalMs / 2), intervalMs)
+    const startup = setTimeout(() => pass(intervalMs), Math.min(MODEL_REFRESH_STARTUP_DELAY_MS, intervalMs))
+    interval.unref?.()
+    startup.unref?.()
+    this.modelSchedule = { interval, startup, intervalMs }
+  }
+
+  /** A probe found another program than before: list its models now, when the instance qualifies. */
+  private refreshAfterUpgrade(instanceId: string): void {
+    if (this.stopped || this.instanceMap.list()[instanceId]?.driver === 'pi') return
+    void this.refreshModelsOf(instanceId, { minAgeMs: 0, reason: 'upgrade' }).catch((error) => console.warn('[harness] model refresh after an upgrade failed', { instanceId, error: errorText(error) }))
   }
 
   // -- Operations -------------------------------------------------------------------------------
@@ -2263,6 +2428,11 @@ export class Harness implements HarnessGateway {
 
   stop(): void {
     this.stopped = true
+    if (this.modelSchedule) {
+      clearInterval(this.modelSchedule.interval)
+      clearTimeout(this.modelSchedule.startup)
+      this.modelSchedule = undefined
+    }
     for (const operation of this.operations.values()) operation.cancel()
     this.operations.clear()
     for (const record of [...this.records.values(), ...this.retired]) {

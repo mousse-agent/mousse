@@ -188,6 +188,12 @@ export interface DriverRuntime {
    */
   identity?(signal: AbortSignal): Promise<string | undefined>
   refreshModels?(cwd: string): Promise<void>
+  /**
+   * When the stored model list was last updated from the vendor (ISO time), kept with the list so
+   * its age survives a restart; undefined for a fallback list. Without it the gateway knows only
+   * the refreshes of this run.
+   */
+  modelsRefreshedAt?(): string | undefined
   signIn?(session: LoginSession, cwd: string, method?: string): Promise<ProviderLoginResult>
   signOut?(): Promise<void>
   /** The API key this entry runs with, for a move that copies it (model APIs with a saved key). */

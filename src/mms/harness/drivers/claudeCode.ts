@@ -129,6 +129,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
         configuredProvider: () => service.configuredProvider(),
         llmProvider: () => service.llmProvider(),
         models: () => service.models(),
+        modelsRefreshedAt: () => service.modelsRefreshedAt(),
         ...(context.builtIn
           ? {
               launch: () => service.storedLaunch(),

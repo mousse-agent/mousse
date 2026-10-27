@@ -2203,6 +2203,7 @@ export function registerGuiIpc(
   const removeInstanceInstall = instanceCommand('providers.instances.removeInstall', 'result')
   const searchRegistry = instanceCommand('providers.registry.search', 'agents')
   const refreshInstanceModels = instanceCommand('providers.instances.refreshModels', 'snapshot')
+  const refreshAllInstanceModels = instanceCommand('providers.instances.refreshAllModels', 'results')
   const setInstanceModelPrefs = instanceCommand('providers.instances.setModelPrefs', 'snapshot')
   // The daemon validates every payload.
   registerHandler('providers:instances:add', async (_e, input: Record<string, unknown>) => addInstance(input))
@@ -2230,6 +2231,7 @@ export function registerGuiIpc(
   registerHandler('providers:registry:search', async (_e, query: unknown) => searchRegistry({ query: typeof query === 'string' ? query : '' }))
   registerHandler('providers:instances:refreshModels', async (_e, instanceId: string) =>
     refreshInstanceModels({ instanceId }))
+  registerHandler('providers:instances:refreshAllModels', async () => refreshAllInstanceModels({}))
   registerHandler('providers:instances:setModelPrefs', async (_e, instanceId: string, patch: unknown) =>
     setInstanceModelPrefs({ instanceId, patch }))
   registerHandler('dialog:pickExecutable', async (event, request: unknown) => {
