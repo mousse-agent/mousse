@@ -87,7 +87,6 @@ describe('a tombstone across a downgrade', () => {
     expect(next.instances.get('pi:openrouter')).toBeUndefined()
     expect((await next.harness.instances.snapshots(device)).map((snapshot) => snapshot.instanceId)).toEqual([])
     expect((await next.harness.llmProviders(device)).map((option) => option.instanceId)).toEqual([])
-    expect(next.instances.configuredProviders().map((provider) => provider.instanceId)).toEqual([])
     expect(next.harness.catalog.addOptions().find((option) => option.id === 'openrouter')).toMatchObject({ added: false, hasSavedKey: true })
     // A thread pinned to it runs nothing.
     await expect(next.harness.bind({ instanceId: 'pi:openrouter', llmProvider: 'openrouter', driver: 'pi', model: 'openrouter-model', caps: PI_LEGACY_CAPS }, { mode: 'default' }))

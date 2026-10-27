@@ -48,6 +48,16 @@ export function protocolMismatchText(homeDir: string): string {
   return `The running Mousse service uses another protocol version than this command (${MMS_PROTOCOL_VERSION}). Let active tasks finish, then run mousse-cli service stop --home ${JSON.stringify(homeDir)} (or, from a source checkout, node out/cli/index.js service stop --home ${JSON.stringify(homeDir)}), then run the command again. The service has not been stopped automatically.`
 }
 
+/** Connects; a service on another protocol version gets the recovery text instead of the raw refusal. */
+export async function connectCliClient(client: LocalMmsClient, homeDir: string): Promise<void> {
+  try {
+    await client.connect()
+  } catch (error) {
+    if (isProtocolVersionMismatch(error)) throw new Error(protocolMismatchText(homeDir))
+    throw error
+  }
+}
+
 /**
  * Ensure daemon is ready and return an authenticated LocalMmsClient.
  * Fails clearly if a live foreign owner blocks start, or readiness times out.
@@ -110,12 +120,7 @@ export async function connectDaemonClient(
     ],
     requestTimeoutMs: opts.requestTimeoutMs
   })
-  try {
-    await client.connect()
-  } catch (error) {
-    if (isProtocolVersionMismatch(error)) throw new Error(protocolMismatchText(homeDir))
-    throw error
-  }
+  await connectCliClient(client, homeDir)
 
   return {
     homeDir,

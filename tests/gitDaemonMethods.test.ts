@@ -34,7 +34,9 @@ describe('requestTimeoutFor', () => {
       expect(requestTimeoutFor(method), method).toBe(MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS)
     }
     expect(requestTimeoutFor('orchestrator.send')).toBe(MMS_PROTOCOL_ORCHESTRATOR_SEND_TIMEOUT_MS)
-    expect(requestTimeoutFor('providers.loginOAuth')).toBe(MMS_PROTOCOL_LOGIN_TIMEOUT_MS)
+    expect(requestTimeoutFor('mcp.authenticate')).toBe(MMS_PROTOCOL_LOGIN_TIMEOUT_MS)
+    // Provider sign-ins return an operation id at once (`providers.instances.signIn`).
+    expect(requestTimeoutFor('providers.instances.signIn')).toBe(MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS)
   })
 })
 

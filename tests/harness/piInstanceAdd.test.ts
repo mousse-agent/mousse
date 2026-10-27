@@ -118,7 +118,6 @@ describe('a removed model API stays removed in its profile', () => {
     expect(a.instances.get('pi:openrouter')).toBeUndefined()
     expect((await a.harness.instances.snapshots(device)).map((snapshot) => snapshot.instanceId)).toEqual([])
     expect((await a.harness.llmProviders(device)).map((option) => option.instanceId)).toEqual([])
-    expect(a.instances.configuredProviders().map((provider) => provider.instanceId)).toEqual([])
     expect(a.harness.catalog.addOptions().find((option) => option.id === 'openrouter')).toMatchObject({ added: false, hasSavedKey: true })
     // A selection pinned to the removed entry runs nowhere: it resolves as an unknown instance (the
     // run engine's code), and a binding made before the removal is refused before any start.
@@ -149,6 +148,7 @@ describe('catalog.addOptions', () => {
       description: 'API key',
       methods: ['api_key', 'oauth'],
       add: { driver: 'pi', config: { provider: 'openai' } },
+      instanceId: 'pi:openai',
       added: false,
       hasSavedKey: false
     })
@@ -159,8 +159,8 @@ describe('catalog.addOptions', () => {
     expect(options.find((option) => option.id === 'openrouter')).toMatchObject({ added: true })
     // A key another profile saved is offered without retyping it.
     expect(options.find((option) => option.id === 'opencode-go')).toMatchObject({ added: true, hasSavedKey: true })
-    // Each option's `add` is exactly what `instances.add` takes.
-    for (const option of options) await a.harness.instances.add(option.add)
+    // Each option's `add` is exactly what `instances.add` takes, and adds the entry `instanceId` names.
+    for (const option of options) expect((await a.harness.instances.add(option.add)).instanceId).toBe(option.instanceId)
     expect(Object.keys(a.instances.list()).sort()).toEqual(['pi:amazon-bedrock', 'pi:openai', 'pi:opencode-go', 'pi:openrouter'])
   })
 })

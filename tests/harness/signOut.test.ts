@@ -205,17 +205,18 @@ describe('sign-out in Mousse', () => {
 describe('a pi provider signed out in Mousse', () => {
   it('a saved key signs it in again; a call that saved none leaves it signed out', async () => {
     let hasKey = true
+    let accepts = false
     const pi = adapterDriver(new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } })), {
-      runtime: { configured: () => hasKey, signOut: async () => { hasKey = false } }
+      runtime: { configured: () => hasKey, signOut: async () => { hasKey = false }, setSecret: async () => { if (accepts) hasKey = true } }
     })
     const { harness } = gateway(pi, { 'pi:openrouter': { driver: 'pi', enabled: true } })
     await harness.instances.signOut('pi:openrouter')
     expect(harness.signedOutInMousse('pi:openrouter')).toBe(true)
-    // A removed key or a failed check calls in too, with nothing saved.
-    await harness.legacy.credentialsChanged('openrouter')
+    // A key the credential store did not take leaves it signed out.
+    await harness.instances.setSecret('pi:openrouter', 'fixture-refused')
     expect(harness.signedOutInMousse('pi:openrouter')).toBe(true)
-    hasKey = true
-    await harness.legacy.credentialsChanged('openrouter')
+    accepts = true
+    await harness.instances.setSecret('pi:openrouter', 'fixture-key')
     expect(harness.signedOutInMousse('pi:openrouter')).toBe(false)
   })
 })
