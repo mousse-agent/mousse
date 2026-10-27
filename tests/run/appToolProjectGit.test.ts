@@ -4,7 +4,7 @@
  * them in Build mode, as in the pi loop, which keeps its own copies.
  */
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -37,6 +37,32 @@ function repo(): string {
   git('commit', '-q', '-m', 'init')
   writeFileSync(join(dir, 'a.txt'), 'two\n')
   return dir
+}
+
+const SECRET = 'TOP SECRET OUTSIDE ROOT'
+
+/**
+ * A repository whose agent may use only its `allowed` folder: `secret.txt` beside it and
+ * `allowed/a.txt` are both committed and both changed, and an untracked file sits beside them too.
+ */
+function parentRepo(): { top: string; allowed: string } {
+  const top = realpathSync.native(mkdtempSync(join(tmpdir(), 'mousse-project-git-parent-')))
+  dirs.push(top)
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: top, stdio: 'pipe' })
+  git('init', '-q')
+  git('config', 'user.email', 'test@example.invalid')
+  git('config', 'user.name', 'Test')
+  git('config', 'commit.gpgsign', 'false')
+  const allowed = join(top, 'allowed')
+  mkdirSync(allowed)
+  writeFileSync(join(top, 'secret.txt'), 'old secret\n')
+  writeFileSync(join(allowed, 'a.txt'), 'one\n')
+  git('add', '.')
+  git('commit', '-q', '-m', 'init')
+  writeFileSync(join(top, 'secret.txt'), `${SECRET}\n`)
+  writeFileSync(join(top, 'other-new.txt'), `${SECRET}\n`)
+  writeFileSync(join(allowed, 'a.txt'), 'two\n')
+  return { top, allowed }
 }
 
 function policy(root: string): AgentRuntimePolicy {
@@ -96,6 +122,53 @@ describe('git_status and git_diff as app tools', () => {
     const off = await setup({ projectPath: root, modeFacts: { readOnly: false, agent: false, build: true }, settingsEnabled: (name) => name !== 'git_status' })
     expect(await off.call('git_status', {})).toMatchObject({ isError: true, text: expect.stringContaining('disabled in Settings') })
     expect((await off.call('git_diff', { path: 'a.txt' })).isError).toBe(false)
+  })
+
+  describe('a project that is a folder of a larger repository', () => {
+    const turns = (allowed: string) => [
+      ['a definition held to the folder', { projectPath: allowed, definition: { policy: policy(allowed), grants: grants('git_status', 'git_diff') } as DefinitionAuthority }],
+      ['a Build turn in the folder', { projectPath: allowed, modeFacts: { readOnly: false, agent: false, build: true } }]
+    ] as const
+
+    it('git_diff reads a name as a file, never as a pathspec, so nothing outside the folder is shown', async () => {
+      const { allowed } = parentRepo()
+      for (const [, turn] of turns(allowed)) {
+        fx?.dispose()
+        const s = await setup(turn)
+        // Magic pathspecs, globs and parent paths that Git would resolve outside the folder.
+        for (const path of [':(top)secret.txt', ':/secret.txt', ':(top,glob)*.txt', ':(icase)../SECRET.TXT', '*.txt', '../*.txt', '../secret.txt', '../other-new.txt', `${allowed}/../secret.txt`]) {
+          const result = await s.call('git_diff', { path })
+          expect(result.text, path).not.toContain(SECRET)
+          expect(result.isError || result.text === '(no diff)', path).toBe(true)
+          expect((await s.call('git_diff', { path, staged: true })).text, path).not.toContain(SECRET)
+        }
+        const own = await s.call('git_diff', { path: 'a.txt' })
+        expect(own).toMatchObject({ isError: false, text: expect.stringContaining('+two') })
+        expect(own.text).not.toContain(SECRET)
+      }
+    })
+
+    it("git_status shows only the folder's files, never the rest of the repository", async () => {
+      const { top, allowed } = parentRepo()
+      // A rename from outside into the folder shows as an added file, without its source.
+      execFileSync('git', ['mv', 'secret.txt', 'allowed/moved.txt'], { cwd: top, stdio: 'pipe' })
+      writeFileSync(join(allowed, 'new.txt'), 'new\n')
+      for (const [, turn] of turns(allowed)) {
+        fx?.dispose()
+        const s = await setup(turn)
+        const status = await s.call('git_status', {})
+        expect(status.isError).toBe(false)
+        expect(status.text).not.toContain('secret')
+        expect(status.text).not.toContain('other-new')
+        const parsed = JSON.parse(status.text) as { isRepo: boolean; changes: Array<{ path: string; status: string; staged: boolean; originalPath?: string }> }
+        expect(parsed.isRepo).toBe(true)
+        // The moved file was also changed after the move: a staged and an unstaged change.
+        expect([...new Set(parsed.changes.map((change) => change.path))].sort()).toEqual(['a.txt', 'moved.txt', 'new.txt'])
+        expect(parsed.changes.find((change) => change.path === 'moved.txt' && change.staged)).toMatchObject({ status: 'added' })
+        expect(parsed.changes.every((change) => change.originalPath === undefined)).toBe(true)
+        expect(parsed).not.toHaveProperty('upstream')
+      }
+    })
   })
 
   it('a host that does not read the repository (the pi loop) registers none', () => {
