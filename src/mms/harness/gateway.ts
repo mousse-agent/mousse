@@ -56,6 +56,7 @@ import { LatestVersionCache } from './latest'
 import { RuntimeFactsStore } from './facts'
 import { questionsPrompter, refusingPrompter } from './acp/permissions'
 import { checkPolicy, hasSpendLimit, purposeAllowed, toolControlLevel } from './policy'
+import { countLimitsOf, RunCounterBook, type CounterScope } from './budget'
 import { HarnessScopeStore } from './scope'
 import { sharedShellPath, type ShellPathResult } from './shellPath'
 import { compatibilityOf, fingerprintOf, PROBE_TIMEOUTS, probeInstance, sameBinary, updateAffordance, type ProbeResult } from './status'
@@ -328,6 +329,12 @@ export interface TurnSpec {
   instructions?: { text: string; placement: 'replace' | 'append' }
   /** `ephemeral`: the turn runs in a session of its own that is not kept for the thread. Default `thread`. */
   session?: 'thread' | 'ephemeral'
+  /**
+   * Where the run's request and tool-call counts are kept, for a caller that shares one allowance
+   * across runs (PR 6's activations). Default: the run's own counters, shared by its attempts. The
+   * limits are always the binding's policy.
+   */
+  counters?: CounterScope
 }
 
 /** What the `turn.start` executor knows of a turn's app tools, for its bridge (PR 2 §2). */
@@ -559,6 +566,8 @@ export class Harness implements HarnessGateway {
   private readonly stats = new Map<string, { fingerprint?: BinaryFingerprint; atMs: number }>()
   /** Threads already told that an instance approves tools itself (`thread|instance`). */
   private readonly toolNotices = new Set<string>()
+  /** Each run's own request and tool-call counts (`budgets: 'hard'`), shared by its attempts. */
+  private readonly runCounters = new RunCounterBook()
   /** Bindings made for a selection that named a moved entry: their thread is told once. */
   private readonly boundMoves = new WeakMap<ExecutionBinding, string>()
   private readonly operations = new Map<string, Operation>()
@@ -992,7 +1001,13 @@ export class Harness implements HarnessGateway {
             reason: 'The turn has no app context, so nothing answers its permission requests.',
             instanceId: spec.binding.instanceId
           })
-        const host: AdapterHost = minted ? { ...spec.host, bridge: minted.bridge } : spec.host
+        // A count limit travels as the run's budget; only a `hard` runtime passed admission with one.
+        const limits = countLimitsOf(spec.binding.policy)
+        const host: AdapterHost = {
+          ...spec.host,
+          ...(minted ? { bridge: minted.bridge } : {}),
+          ...(limits ? { budget: this.runCounters.budgetFor(input.runId, limits, spec.counters) } : {})
+        }
         const turn = await record.runtime.adapter.startTurn(input, sink, spec.control, host)
         minted?.settle({ status: turn.aborted || signal.aborted ? 'aborted' : 'completed', ...(turn.drain ? { drain: turn.drain } : {}) })
         minted = undefined

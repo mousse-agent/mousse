@@ -45,7 +45,7 @@ async function oneAttempt(adjustEnv?: (env: NodeJS.ProcessEnv) => NodeJS.Process
   const registration = bridge.register({
     catalog: async () => catalog, ready: () => {},
     turn: async () => ({ attemptToken: 'a', sessionInstructions: '', tools: [], activeBuiltins: [], mcp: null, catalogRevision: 1 }),
-    gate: async () => ({ allow: false, reason: 'x' }), quiesce: async () => ({ ok: false, reason: 'x' }), fatal: () => {}
+    gate: async () => ({ allow: false, reason: 'x' }), request: async () => ({ ok: true }), quiesce: async () => ({ ok: false, reason: 'x' }), fatal: () => {}
   })
   const extension = await testExtension(scratch.dir)
   const log = `${scratch.dir}/guard.log`

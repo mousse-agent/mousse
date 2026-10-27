@@ -88,6 +88,20 @@ export interface PiGateRequest {
  */
 export type PiGateResponse = { allow: true; input?: Record<string, unknown> } | { allow: false; reason: string }
 
+/**
+ * `/pi/request`, before every model request the guarded wrapper lets through (agent requests,
+ * compactions, summaries and Pi's own retries alike): Mousse charges it to the live turn's run and
+ * may refuse it. Nothing is sent when it is refused or cannot be asked.
+ */
+export interface PiRequestRequest {
+  /** The attempt token of the turn the extension last fetched ('' before the first); informational. */
+  attemptToken: string
+  kind: 'request'
+}
+
+/** `reason`: one of the fixed request-path texts (`messages.ts`), never a number. */
+export type PiRequestResponse = { ok: true } | { ok: false; reason: string }
+
 /** `/pi/quiesce`: a delegation tool waits here before it runs (no parent mutation authorized or running). */
 export interface PiQuiesceRequest {
   attemptToken: string

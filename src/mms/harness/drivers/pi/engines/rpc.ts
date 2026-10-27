@@ -11,8 +11,10 @@ import { piInstanceRuntime, type PiCredentials } from './legacy'
  *
  * - Containment and tool control stay `weak`/`approval_only` until the evidence suite passes on the
  *   whole execution profile: Mousse sees and can refuse every call, but does not run the tools.
- * - `budgets: 'observed'`, `spendLimits: 'unsupported'`: Pi reports usage per message, nothing
- *   refuses a request in advance yet (PR 4 raises both through the guarded request wrapper).
+ * - `budgets: 'hard'`: every model request is charged through the guarded request wrapper
+ *   (`/pi/request`) and every tool call at the gate, and the next one is refused before it starts
+ *   once a turn or tool-call limit is reached. `spendLimits: 'unsupported'` until token and cost
+ *   reservations land (PR 4 4b3).
  * - `fork: 'portable'` until the native fork is wired (a fork hands the history over).
  */
 export const PI_RPC_CAPS: HarnessCaps = Object.freeze({
@@ -28,7 +30,7 @@ export const PI_RPC_CAPS: HarnessCaps = Object.freeze({
   planMode: true,
   contextUsage: 'reported',
   toolControl: 'approval_only',
-  budgets: 'observed',
+  budgets: 'hard',
   spendLimits: 'unsupported'
 })
 

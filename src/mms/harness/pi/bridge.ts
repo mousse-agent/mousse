@@ -11,6 +11,8 @@ import type {
   PiQuiesceRequest,
   PiQuiesceResponse,
   PiReadyRequest,
+  PiRequestRequest,
+  PiRequestResponse,
   PiTurnResponse
 } from './extension/protocol'
 
@@ -26,6 +28,8 @@ export interface PiBridgeHandlers {
   ready(request: PiReadyRequest): void
   turn(): Promise<PiTurnResponse>
   gate(request: PiGateRequest): Promise<PiGateResponse>
+  /** One model request about to be sent: charged to the live turn, or refused. */
+  request(request: PiRequestRequest): Promise<PiRequestResponse>
   /** Settles when the request's delegation may run; `signal` aborts when the extension gave up. */
   quiesce(request: PiQuiesceRequest, signal: AbortSignal): Promise<PiQuiesceResponse>
   fatal(request: PiFatalRequest): void
@@ -148,6 +152,8 @@ export class PiBridge {
         return this.reply(res, 200, await handlers.turn())
       case 'gate':
         return this.reply(res, 200, await handlers.gate(body as unknown as PiGateRequest))
+      case 'request':
+        return this.reply(res, 200, await handlers.request(body as unknown as PiRequestRequest))
       case 'quiesce': {
         const aborted = new AbortController()
         res.on('close', () => {
