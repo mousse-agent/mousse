@@ -50,7 +50,7 @@ export class ResourcePurgeService {
   private timer?: ReturnType<typeof setInterval>
   private sweepPromise?: Promise<TrashSweepOutcome[]>
   private stopping = false
-  constructor(readonly store: ResourceLifecycleStore, private readonly hooks: { assertIdle(taskId: string): void; projectPurged(record: TaskLifecycleRecord): void | Promise<void>; onBoundary?(record: TaskLifecycleRecord): void | Promise<void>; configurationChanged?(): void }) { this.retirement = new WorktreeRetirementService(store) }
+  constructor(readonly store: ResourceLifecycleStore, private readonly hooks: { assertIdle(taskId: string): void; projectPurged(record: TaskLifecycleRecord): void | Promise<void>; onBoundary?(record: TaskLifecycleRecord): void | Promise<void>; configurationChanged?(): void; /** Stops background disk measurement until the returned function is called, so no handle of it is open in what is about to be removed. */ quiesceDisk?(): Promise<() => void> }) { this.retirement = new WorktreeRetirementService(store) }
 
   policy(): TrashRetentionPolicy {
     const path = join(this.store.root, 'trash-policy.json')
@@ -166,6 +166,10 @@ export class ResourcePurgeService {
    * checkout. Automatic rules use it to repeat their location and content checks at that point.
    */
   async retireTrashed(taskId: string, options: { recheck?: (worktreePath: string) => string | undefined } = {}): Promise<void> {
+    const release = await this.hooks.quiesceDisk?.()
+    try { await this.retireTrashedQuiet(taskId, options) } finally { release?.() }
+  }
+  private async retireTrashedQuiet(taskId: string, options: { recheck?: (worktreePath: string) => string | undefined }): Promise<void> {
     await this.withOwnership(taskId, async () => {
       const record = this.store.require(taskId), token = record.cleanupOwner!.token
       if (record.state !== 'trashed') return
@@ -356,7 +360,8 @@ export class ResourcePurgeService {
 
   async purge(input: { taskId: string; operationId: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean; human?: boolean }): Promise<TaskLifecycleRecord> {
     if (!input || typeof input !== 'object' || typeof input.operationId !== 'string' || !input.operationId || input.operationId.length > 256 || /[\x00-\x1f]/.test(input.operationId) || typeof input.taskId !== 'string') throw new Error('Purge requires a valid task and operation identity')
-    return this.withOwnership(input.taskId, () => this.purgeOwned(input))
+    const release = await this.hooks.quiesceDisk?.()
+    try { return await this.withOwnership(input.taskId, () => this.purgeOwned(input)) } finally { release?.() }
   }
   private async purgeOwned(input: { taskId: string; operationId: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean; human?: boolean }): Promise<TaskLifecycleRecord> {
     const key = `${this.store.root}/${input.taskId}`

@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { groupUsage, type MachineUsageEntry, type StorageUsageEntry, type StorageUsageSnapshot } from '../src/shared/storage'
 import { measureTree } from '../src/mms/lifecycle/diskMeasure'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
-import { condenseUsage, StorageUsageService, type StorageUsageDeps } from '../src/mms/lifecycle/StorageUsageService'
+import { clipName, fitUsage, StorageUsageService, USAGE_SNAPSHOT_MAX_BYTES, type StorageUsageDeps } from '../src/mms/lifecycle/StorageUsageService'
+import { canonicalJson } from '../src/mms/net/sync/codec'
 import type { Project, Thread } from '../src/shared/types'
 
 const KB = 1024
@@ -92,7 +93,7 @@ function world(options: { link?: boolean; sameHome?: boolean; minimal?: boolean 
     root, outside, store, threads, projects, location,
     service: (overrides = {}) => new StorageUsageService({
       store, threads: { listAllThreads: () => threads }, projects: { listProjects: () => projects },
-      installationHome: root, now: () => (tick += 1000), autoContinue: false, ...overrides
+      installationHome: root, now: () => (tick += 1), autoContinue: false, ...overrides
     })
   }
 }
@@ -156,9 +157,11 @@ describe('StorageUsageService', () => {
     for (let index = 0; index < 60; index++) file(join(location, 'many', `f${index}.bin`), 4)
     const service = new StorageUsageService({
       store, threads: { listAllThreads: () => [thread('t1', 'Many')] }, projects: { listProjects: () => [] }, installationHome: root,
-      scanEntryBudget: 20, autoContinue: false
+      scanEntryBudget: 20, discoveryEntryCost: 0, autoContinue: false
     })
-    const snapshot = await service.measure({ refresh: true })
+    // The first scan finds the roots; the next one measures the first root with the whole budget.
+    await service.measure({ refresh: true })
+    const snapshot = await service.continueScan()
     expect(snapshot.partial).toBe(true)
     const entry = only(snapshot, 'threads', 't1')!
     expect(entry.partial).toBe(true)
@@ -210,7 +213,7 @@ describe('StorageUsageService', () => {
         started.push(path)
         return { ...(await measureTree(path, { ...options, maxEntries: undefined })), entries: 10 }
       }
-      return w.service({ measure, scanEntryBudget: 10 })
+      return w.service({ measure, scanEntryBudget: 10, discoveryEntryCost: 0 })
     }
 
     it('measures every root exactly once over consecutive scans, counts a shared hard link once, and reports partial until the last', async () => {
@@ -281,19 +284,243 @@ describe('StorageUsageService', () => {
     await service.stop()
   })
 
-  it('keeps the answer small enough for a remote reply by folding the smallest threads into their kind', () => {
-    const entries: StorageUsageEntry[] = Array.from({ length: 800 }, (_, index) => ({
+  describe('the reply that crosses the Bridge', () => {
+    const envelope = { measuredAt: '2026-10-27T10:00:00.000Z', durationMs: 1234, partial: false }
+    const longEnglish = (index: number): string => `Thread ${index}: ${'quarterly planning notes and follow ups '.repeat(8)}`.slice(0, 200)
+    const longChinese = (index: number): string => `线程${index}：${'季度规划与后续事项的详细记录'.repeat(20)}`.slice(0, 200)
+    const crowd = (count: number): StorageUsageEntry[] => Array.from({ length: count }, (_, index) => ({
       kind: index % 2 ? 'worktrees' : 'threads', projectId: `project-${index % 7}`, threadId: `thread-${String(index).padStart(36, '0')}`, bytes: 1_000_000 - index, files: 3
     }))
-    const total = entries.reduce((sum, entry) => sum + entry.bytes, 0)
-    const result = condenseUsage(entries, 20_000)
-    expect(result.condensed).toBe(true)
-    expect(JSON.stringify(result.entries).length).toBeLessThanOrEqual(20_000)
-    expect(result.entries.reduce((sum, entry) => sum + entry.bytes, 0)).toBe(total)
-    expect(result.entries.reduce((sum, entry) => sum + entry.files, 0)).toBe(800 * 3)
-    // The biggest threads keep their ids.
-    expect(result.entries.some((entry) => entry.threadId === entries[0].threadId)).toBe(true)
-    expect(condenseUsage(entries.slice(0, 3), 20_000)).toEqual({ entries: entries.slice(0, 3), condensed: false })
+    const ids = (entries: readonly StorageUsageEntry[]) => entries.map((entry) => entry.threadId).filter(Boolean)
+    const sizes = (snapshot: StorageUsageSnapshot) => ({ bytes: Buffer.byteLength(JSON.stringify(snapshot)), canonical: canonicalJson(snapshot).length })
+
+    for (const [label, name] of [['English', longEnglish], ['CJK', longChinese]] as const) {
+      it(`fits 240 threads with 200-character ${label} names, whole reply counted, with margin under the 64 KiB limit`, () => {
+        const entries = crowd(240)
+        const total = entries.reduce((sum, entry) => sum + entry.bytes, 0)
+        const names = (id: string): string => name(Number(id.replace(/\D/g, '')))
+        const snapshot = fitUsage(entries, { project: (id) => `Project ${id}`, thread: names }, envelope)
+        const { bytes, canonical } = sizes(snapshot)
+        expect(bytes).toBeLessThanOrEqual(USAGE_SNAPSHOT_MAX_BYTES)
+        expect(canonical).toBeLessThanOrEqual(64 * 1024 - 4096)
+        expect(snapshot.entries.reduce((sum, entry) => sum + entry.bytes, 0)).toBe(total)
+        expect(snapshot.entries.reduce((sum, entry) => sum + entry.files, 0)).toBe(240 * 3)
+        // Something had to give, and names only ever belong to ids that are still in the reply.
+        expect(snapshot.condensed || Object.values(snapshot.names.threads).some((value) => value.length < 200)).toBe(true)
+        for (const id of Object.keys(snapshot.names.threads)) expect(ids(snapshot.entries)).toContain(id)
+        // The biggest thread keeps its id.
+        expect(ids(snapshot.entries)).toContain(entries[0].threadId)
+      })
+    }
+
+    it('a short list is sent whole and uncondensed', () => {
+      const entries = crowd(3)
+      const snapshot = fitUsage(entries, { project: (id) => id, thread: (id) => `name of ${id}` }, envelope)
+      expect(snapshot.condensed).toBeUndefined()
+      expect(snapshot.entries).toHaveLength(3)
+      expect(snapshot.names.threads[entries[0].threadId!]).toBe(`name of ${entries[0].threadId}`)
+    })
+
+    it('never cuts a name inside an emoji or a surrogate pair, and replaces a lone surrogate', () => {
+      const emojiName = `${'a'.repeat(199)}😀`
+      expect(clipName(emojiName, 200)).toBe(emojiName)
+      expect(clipName(`${'a'.repeat(200)}😀`, 200)).toBe('a'.repeat(200))
+      expect(clipName('x'.repeat(5) + '👨‍👩‍👧‍👦' + 'y', 6)).toBe('xxxxx👨‍👩‍👧‍👦')
+      expect(clipName('ab\uD83D', 10)).toBe('ab�')
+      expect(clipName('\uDE00ab', 10)).toBe('�ab')
+      expect(clipName('abc', 0)).toBe('')
+      // A reply holding such names encodes, which the Bridge requires.
+      const entries = crowd(240)
+      const snapshot = fitUsage(entries, { project: () => 'p', thread: () => `${'a'.repeat(199)}😀\uD83D` }, envelope)
+      expect(() => canonicalJson(snapshot)).not.toThrow()
+      for (const value of Object.values(snapshot.names.threads)) expect(value).not.toMatch(/[\uD800-\uDBFF]$|^[\uDC00-\uDFFF]/)
+    })
+
+    it('a profile with 250 listed threads and long names answers within the limit', async () => {
+      const w = world({ minimal: true })
+      w.threads.length = 0
+      const results = Array.from({ length: 250 }, (_, index) => {
+        w.threads.push(thread(`thread-${index}`, longChinese(index), { projectId: 'p1' }))
+        return { id: index.toString(16).padStart(16, '0'), kind: 'threads', threadId: `thread-${index}`, bytes: 10_000 + index, files: 2, measuredAt: 1_700_000_000_000, generation: 1 }
+      })
+      writeFileSync(join(w.store.root, 'storage-usage.json'), JSON.stringify({ schemaVersion: 1, generation: 1, complete: true, durationMs: 5, results }))
+      const snapshot = await w.service().measure()
+      expect(sizes(snapshot).bytes).toBeLessThanOrEqual(USAGE_SNAPSHOT_MAX_BYTES)
+      expect(sizes(snapshot).canonical).toBeLessThanOrEqual(64 * 1024)
+      expect(snapshot.entries.reduce((sum, entry) => sum + entry.bytes, 0)).toBe(results.reduce((sum, row) => sum + row.bytes, 0))
+    })
+  })
+
+  describe('roots stay inside Mousse\'s data', () => {
+    it('does not follow a link in the folder that holds the worktree folders', async () => {
+      const w = world({ minimal: true })
+      file(join(w.outside, 'elsewhere', 'repo', 'worktrees', 'external.bin'), 1024)
+      symlinkSync(join(w.outside, 'elsewhere'), join(w.root, 'repositories'), process.platform === 'win32' ? 'junction' : 'dir')
+      const snapshot = await w.service().measure()
+      expect(snapshot.entries.some((entry) => entry.kind === 'worktrees')).toBe(false)
+      expect(snapshot.entries.reduce((sum, entry) => sum + entry.bytes, 0)).toBeLessThan(900 * KB)
+    })
+
+    it('does not accept the profile folder, or the installation folder, as a thread\'s worktree', async () => {
+      const w = world({ minimal: true })
+      file(join(w.root, 'profile', 'misc', 'other.bin'), 512)
+      writeFileSync(join(w.location('t1'), 'workspace.json'), JSON.stringify({ worktreePath: join(w.root, 'profile') }))
+      writeFileSync(join(w.location('t2'), 'workspace.json'), JSON.stringify({ worktreePath: w.root }))
+      writeFileSync(join(w.location('t3'), 'agents.json'), JSON.stringify([{ worktreePath: join(w.root, 'repositories') }, { worktreePath: join(w.root, 'repositories', 'r1', 'worktrees') }]))
+      const snapshot = await w.service().measure()
+      expect(snapshot.entries.some((entry) => entry.kind === 'worktrees')).toBe(false)
+      about(only(snapshot, 'other', undefined), 512, 400)
+    })
+
+    it('measures a root again only if no link has appeared on the way to it since it was found', async () => {
+      const w = world({ minimal: true })
+      file(join(w.outside, 'swapped', 'big.bin'), 1024)
+      const parent = join(w.root, 'profile', 'thread-data')
+      let swapped = false
+      const measure: typeof measureTree = async (path, options) => {
+        // After the first root, the folder holding every thread folder becomes a junction to somewhere else.
+        if (!swapped) {
+          swapped = true
+          rmSync(join(w.outside, 'thread-data-moved'), { recursive: true, force: true })
+          renameSync(parent, join(w.outside, 'thread-data-moved'))
+          symlinkSync(join(w.outside, 'swapped'), parent, process.platform === 'win32' ? 'junction' : 'dir')
+        }
+        return measureTree(path, options)
+      }
+      const snapshot = await w.service({ measure, discoveryEntryCost: 0 }).measure()
+      expect(snapshot.entries.reduce((sum, entry) => sum + entry.bytes, 0)).toBeLessThan(900 * KB)
+      expect(snapshot.entries.some((entry) => entry.threadId === 't2')).toBe(false)
+    })
+  })
+
+  describe('finding the roots is part of the budget', () => {
+    it('spreads discovery over scans when the entry budget runs out while the roots are being found', async () => {
+      const w = world({ minimal: true })
+      const reference = await w.service().measure()
+      const second = world({ minimal: true })
+      // Each step of finding roots costs 20 of the scan's 100 entries, so only a few steps fit in one scan.
+      const stingy = second.service({ scanEntryBudget: 100, discoveryEntryCost: 20 })
+      const first = await stingy.measure({ refresh: true })
+      expect(stingy.isComplete()).toBe(false)
+      expect(first.entries).toEqual([])
+      expect(first.partial).toBe(true)
+      let scans = 1
+      while (!stingy.isComplete() && scans < 200) { await stingy.continueScan(); scans += 1 }
+      expect(scans).toBeGreaterThan(3)
+      const done = stingy.snapshot()
+      expect(done.partial).toBe(false)
+      const sum = (snapshot: StorageUsageSnapshot) => snapshot.entries.reduce((total, entry) => total + entry.bytes, 0)
+      expect(Math.abs(sum(done) - sum(reference))).toBeLessThan(32 * KB)
+    })
+
+    it('spreads discovery over scans when slow metadata reads use up the time', async () => {
+      const w = world({ minimal: true })
+      let clock = 0
+      const service = w.service({ now: () => (clock += 6_000), discoveryEntryCost: 0, scanBudgetMs: 20_000 })
+      const first = await service.measure({ refresh: true })
+      expect(service.isComplete()).toBe(false)
+      expect(first.entries).toEqual([])
+      let scans = 1
+      while (!service.isComplete() && scans < 200) { await service.continueScan(); scans += 1 }
+      expect(service.isComplete()).toBe(true)
+      expect(scans).toBeGreaterThan(3)
+    })
+  })
+
+  describe('pausing for a move or removal', () => {
+    const interrupted = { bytes: 0, files: 0, entries: 1, estimated: false, partial: true, unreadable: 0, stopped: 'aborted' as const }
+
+    it('stops the walk before returning, keeps it stopped until released, then measures the same root again', async () => {
+      const w = world({ minimal: true })
+      const calls: string[] = []
+      let inFlight = 0
+      let live = false
+      const measure: typeof measureTree = (path, options) => {
+        calls.push(path)
+        if (live) return measureTree(path, options)
+        inFlight += 1
+        return new Promise((resolve) => {
+          const finish = (): void => { inFlight -= 1; resolve(interrupted) }
+          if (options.signal?.aborted) finish()
+          else options.signal?.addEventListener('abort', finish, { once: true })
+        })
+      }
+      const service = w.service({ measure, discoveryEntryCost: 0 })
+      const scanning = service.measure({ refresh: true })
+      for (let waited = 0; waited < 2000 && calls.length < 1; waited += 10) await new Promise((done) => setTimeout(done, 10))
+      expect(inFlight).toBe(1)
+      const release = await service.pause()
+      expect(inFlight).toBe(0) // no walk is open once pause() has returned
+      await scanning
+      await service.continueScan()
+      expect(calls).toHaveLength(1) // held: nothing new starts
+      release()
+      live = true
+      await service.continueScan()
+      expect(calls[1]).toBe(calls[0]) // the interrupted root is measured first
+      expect(calls.length).toBeGreaterThan(1)
+      // Pauses stack, and releasing one twice does not undo another.
+      const a = await service.pause(); const b = await service.pause()
+      a(); a()
+      const before = calls.length
+      await service.continueScan()
+      expect(calls.length).toBe(before)
+      b()
+    })
+
+    it('stop() ends a walk in progress', async () => {
+      const w = world({ minimal: true })
+      let aborted = false
+      const measure: typeof measureTree = (_path, options) => new Promise((resolve) => options.signal?.addEventListener('abort', () => { aborted = true; resolve(interrupted) }, { once: true }))
+      const service = w.service({ measure, discoveryEntryCost: 0 })
+      void service.measure({ refresh: true })
+      await new Promise((done) => setTimeout(done, 100))
+      await service.stop()
+      expect(aborted).toBe(true)
+    })
+  })
+
+  describe('the cache', () => {
+    const goodRow = { id: '0123456789abcdef', kind: 'threads', bytes: 100, files: 1, measuredAt: 1_700_000_000_000, generation: 1 }
+    const cacheWith = (row: Record<string, unknown>) => ({ schemaVersion: 1, generation: 1, complete: true, durationMs: 1, results: [goodRow, row] })
+
+    it('is not trusted when a row is semantically wrong: it starts cold instead of failing every read', async () => {
+      for (const bad of [
+        { ...goodRow, id: 'fedcba9876543210', measuredAt: 1e100 },
+        { ...goodRow, id: 'fedcba9876543210', kind: 'toString' },
+        { ...goodRow, id: 'fedcba9876543210', kind: '__proto__' },
+        { ...goodRow, id: 'fedcba9876543210', bytes: -5 },
+        { ...goodRow, id: 'fedcba9876543210', files: 1.5 },
+        { ...goodRow, id: 'fedcba9876543210', generation: 7 },
+        { ...goodRow, id: '../../etc/passwd' }
+      ]) {
+        const w = world({ minimal: true })
+        writeFileSync(join(w.store.root, 'storage-usage.json'), JSON.stringify(cacheWith(bad)))
+        const calls: string[] = []
+        const snapshot = await w.service({ measure: (path, options) => { calls.push(path); return measureTree(path, options) } }).measure()
+        expect(calls.length, JSON.stringify(bad)).toBeGreaterThan(0)
+        expect(Number.isNaN(Date.parse(snapshot.measuredAt))).toBe(false)
+        expect(snapshot.entries.find((entry) => entry.bytes === 100)).toBeUndefined()
+      }
+    })
+
+    it('carries on with an unfinished pass after a restart instead of starting from the first root', async () => {
+      const w = world({ minimal: true })
+      const stepped = (started: string[]) => w.service({
+        discoveryEntryCost: 0, scanEntryBudget: 10,
+        measure: async (path, options) => { started.push(path); return { ...(await measureTree(path, { ...options, maxEntries: undefined })), entries: 10 } }
+      })
+      const before: string[] = []
+      await stepped(before).measure({ refresh: true })
+      expect(before).toHaveLength(1)
+      const after: string[] = []
+      const restarted = stepped(after)
+      expect(restarted.isComplete()).toBe(false)
+      for (let scan = 0; scan < 6 && !restarted.isComplete(); scan++) await restarted.continueScan()
+      expect(restarted.isComplete()).toBe(true)
+      expect(after).not.toContain(before[0])
+      expect(after).toHaveLength(5) // six roots, one of them measured before the restart
+    })
   })
 })
 

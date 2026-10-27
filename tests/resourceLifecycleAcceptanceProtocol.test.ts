@@ -308,6 +308,77 @@ describe('lifecycle public protocol acceptance', () => {
     } finally { await f.close() }
   })
 
+  it('trash and restore go ahead while a slow storage.usage request is still in flight', async () => {
+    const f = await lifecycleHarness()
+    let release: () => void = () => undefined
+    try {
+      const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
+      const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'trashed during a scan' })
+      let entered: () => void = () => undefined
+      const inFlight = new Promise<void>((resolve) => { entered = resolve })
+      const held = new Promise<void>((resolve) => { release = resolve })
+      vi.spyOn(f.services.storageUsage, 'measure').mockImplementation(async () => {
+        entered()
+        await held
+        return { measuredAt: new Date().toISOString(), durationMs: 0, partial: true, entries: [], names: { projects: {}, threads: {} } }
+      })
+      const slow = cli.request('storage.usage', { refresh: true })
+      await inFlight
+      const began = Date.now()
+      await f.rpc.request('threads.trash', { threadId: thread.id })
+      await f.rpc.request('threads.restore', { threadId: thread.id })
+      // Without the exemption each of these waits two seconds for the scan and then fails with "profile requests are still active".
+      expect(Date.now() - began).toBeLessThan(1500)
+      expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('active')
+      release()
+      await slow
+    } finally { release(); await f.close() }
+  })
+
+  it('trash, restore and permanent delete each stop disk measurement first and let it carry on afterwards', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const gui = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY])
+      const pause = vi.spyOn(f.services.storageUsage, 'pause')
+      const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'moved and removed' })
+      writeFileSync(join(f.services.threads.getThreadDir(thread.id), 'payload.bin'), Buffer.alloc(32 * 1024, 1))
+      await f.rpc.request('threads.trash', { threadId: thread.id })
+      const afterTrash = pause.mock.calls.length
+      expect(afterTrash).toBeGreaterThanOrEqual(1)
+      await f.rpc.request('threads.restore', { threadId: thread.id })
+      expect(pause.mock.calls.length).toBeGreaterThan(afterTrash)
+      await f.rpc.request('threads.trash', { threadId: thread.id })
+      const { preview } = await gui.request<{ preview: LifecyclePurgePreview }>('threads.purge', { threadId: thread.id, preview: true })
+      const beforePurge = pause.mock.calls.length
+      await gui.request('threads.purge', { threadId: thread.id, operationId: 'remove-it', expectedGeneration: preview.generation, previewDigest: preview.digest })
+      expect(pause.mock.calls.length).toBeGreaterThan(beforePurge)
+      expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('purged')
+      // Every pause was released: a scan still runs.
+      const usage = await gui.request<StorageUsageSnapshot>('storage.usage', { refresh: true })
+      expect(usage.entries.length).toBeGreaterThan(0)
+    } finally { await f.close() }
+  })
+
+  it.runIf(process.platform === 'win32')('threads can be trashed while a scan is walking their folders', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
+      const created: Thread[] = []
+      for (let index = 0; index < 5; index++) {
+        const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: `busy folder ${index}` })
+        const folder = join(f.services.threads.getThreadDir(thread.id), 'many')
+        mkdirSync(folder, { recursive: true })
+        for (let file = 0; file < 1500; file++) writeFileSync(join(folder, `f${file}.txt`), 'x')
+        created.push(thread)
+      }
+      // A scan walks the folders while each thread is moved; a walker's open handles make Windows refuse such a rename.
+      const scanning = cli.request('storage.usage', { refresh: true })
+      for (const thread of created) await f.rpc.request('threads.trash', { threadId: thread.id })
+      await scanning
+      for (const thread of created) expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('trashed')
+    } finally { await f.close() }
+  })
+
   it('a purge preview carries a reclaim estimate beside a preview whose digest is unchanged', async () => {
     const f = await lifecycleHarness()
     try {

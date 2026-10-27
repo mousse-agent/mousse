@@ -105,6 +105,60 @@ describe('measureTree', () => {
     expect(locked.stopped).toBeUndefined()
   })
 
+  it('keeps nothing from a folder that was replaced while its entries were being read', async () => {
+    const root = temp(); mkdirSync(join(root, 'swap')); writeFileSync(join(root, 'swap', 'a.bin'), 'x'.repeat(8192)); writeFileSync(join(root, 'keep.bin'), 'y'.repeat(8192))
+    let lookups = 0
+    const fs = {
+      readdir: (path: string) => readdir(path),
+      lstat: (async (path: string, o?: { bigint?: boolean }) => {
+        const stat = await lstat(path, o as never) as import('node:fs').BigIntStats
+        if (o?.bigint && basename(path) === 'swap' && ++lookups === 2) return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { ino: stat.ino + 1n })
+        return stat
+      }) as typeof lstat
+    }
+    const measured = await measureTree(root, { mode: 'usage', budgetMs: 5000, fs })
+    expect(measured.files).toBe(1) // keep.bin; the replaced folder contributed nothing
+    expect(measured).toMatchObject({ unreadable: 1, partial: true })
+    // Unchanged, the same folder counts.
+    expect((await measureTree(root, { mode: 'usage', budgetMs: 5000 })).files).toBe(2)
+  })
+
+  it('does not walk a folder that has turned into a link since it was listed', async () => {
+    const root = temp(); mkdirSync(join(root, 'outside')); writeFileSync(join(root, 'outside', 'big.bin'), 'x'.repeat(16384))
+    mkdirSync(join(root, 'tree')); mkdirSync(join(root, 'tree', 'child'))
+    let swapped = false
+    const fs = {
+      lstat,
+      readdir: async (path: string) => {
+        // The approved child is replaced by a junction just before it is listed.
+        if (!swapped && basename(path) === 'child') {
+          swapped = true
+          rmSync(path, { recursive: true }); symlinkSync(join(root, 'outside'), path, process.platform === 'win32' ? 'junction' : 'dir')
+        }
+        return readdir(path)
+      }
+    }
+    const measured = await measureTree(join(root, 'tree'), { mode: 'usage', budgetMs: 5000, fs })
+    expect(measured.files).toBe(0)
+  })
+
+  it('tells apart hard-linked files whose 64-bit file ids differ only beyond the precision of a number', async () => {
+    const root = temp()
+    for (const name of ['one', 'two']) { writeFileSync(join(root, `${name}.bin`), 'x'.repeat(4096)); linkSync(join(root, `${name}.bin`), join(root, `${name}-link.bin`)) }
+    const fs = {
+      readdir: (path: string) => readdir(path),
+      lstat: (async (path: string, o?: { bigint?: boolean }) => {
+        const stat = await lstat(path, o as never) as import('node:fs').BigIntStats
+        if (!basename(path).startsWith('one') && !basename(path).startsWith('two')) return stat
+        const second = basename(path).startsWith('two')
+        // Both files report the same number, as a Windows file id above 2^53 would; only the BigInt form differs.
+        return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { ino: o?.bigint ? 2n ** 60n + (second ? 1n : 0n) : 2 ** 60 })
+      }) as typeof lstat
+    }
+    const measured = await measureTree(root, { mode: 'usage', budgetMs: 5000, fs })
+    expect(measured.files).toBe(2)
+  })
+
   it.runIf(process.platform === 'win32')('sizes a tree whose paths are longer than the classic 260 characters', async () => {
     const root = temp(); let deep = root
     for (let level = 0; level < 8; level++) deep = join(deep, 'segment-'.padEnd(40, 'x') + level)

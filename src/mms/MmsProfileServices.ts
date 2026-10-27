@@ -102,6 +102,19 @@ const STORAGE_LIFECYCLE_METHODS = new Set([
   'threads.purge'
 ])
 
+/**
+ * Requests that must not make a trash, restore or purge wait or look like other work: the lifecycle calls
+ * themselves, a manual cleanup run (which purges through the same checks) and its dry run, and a
+ * disk usage read, which can run for seconds and only reads. One set serves both the admission wait and
+ * the idle check, so the two cannot disagree.
+ */
+const LIFECYCLE_EXEMPT_METHODS = new Set([
+  ...STORAGE_LIFECYCLE_METHODS,
+  'storage.cleanup.run',
+  'storage.cleanup.plan',
+  'storage.usage'
+])
+
 /** Long-poll requests that sit open while nothing happens; they are not owned profile work. */
 const IDLE_WAIT_METHODS = new Set(['speech.host.wait'])
 
@@ -617,7 +630,10 @@ export class MmsProfileServices {
           else this.orchestrator.markThreadDeleted(task.taskId)
         }
       },
+      quiesceDisk: () => this.storageUsage.pause(),
       projectPurged: (record) => {
+        // A permanent delete freed space.
+        this.storageUsage.rescanSoon()
         clearCleanupMarker(this.threads.lifecycleStore, record.taskId)
         this.threads.projectPurgedIndex(record)
         this.threadRuntimes.disposeRuntime(record.taskId)
@@ -643,7 +659,8 @@ export class MmsProfileServices {
       codeHost: this.gitService.codeHost,
       browserCaptures: { workerArtifactRoot: this.platform.workerArtifactRoot, sessions: (staleBefore) => this.platform.browserSessionStates(staleBefore) },
       // A run that freed space has made the cached numbers wrong.
-      onRunComplete: (report) => { if (report.counts.removed > 0) this.storageUsage.rescanSoon() }
+      onRunComplete: (report) => { if (report.counts.removed > 0) this.storageUsage.rescanSoon() },
+      quiesceDisk: () => this.storageUsage.pause()
     })
     this.storageUsage = new StorageUsageService({
       store: this.threads.lifecycleStore,
@@ -679,18 +696,7 @@ export class MmsProfileServices {
     const requests = this.requests.snapshot()
     const activeRequests = Object.entries(requests).filter(
       ([key, count]) =>
-        count > 0 &&
-        ![
-          'rpc:threads.delete',
-          'rpc:threads.trash',
-          'rpc:threads.restore',
-          'rpc:threads.purge',
-          // A manual storage run purges trash through this same idle check, and a dry run previews it; their own request is not other work.
-          'rpc:storage.cleanup.run',
-          'rpc:storage.cleanup.plan',
-          // A usage scan only reads; it can run for seconds and must not make a thread look busy.
-          'rpc:storage.usage'
-        ].includes(key)
+        count > 0 && !LIFECYCLE_EXEMPT_METHODS.has(key.replace(/^rpc:/, ''))
     )
     if (activeRequests.length) {
       throw new ResourceLifecycleError(
@@ -792,7 +798,8 @@ export class MmsProfileServices {
     if (record.state === 'trashed' && this.removesWorktreesWithDeletedThreads()) {
       try {
         // The same keep rules as the hourly run (unpublished commits, links, files in use); a checkout that is kept stays until purge.
-        await this.storageCleanup.retireDeletedWorktree(taskId)
+        const item = await this.storageCleanup.retireDeletedWorktree(taskId)
+        if (item?.outcome === 'removed') this.storageUsage.rescanSoon()
       } catch (error) {
         this.threads.lifecycleStore.update(taskId, (current) => {
           current.blockedReason = `Checkout retirement retained resources: ${(error as Error).message}`
@@ -852,7 +859,7 @@ export class MmsProfileServices {
         // the move; this wait alone never does. Exclude lifecycle calls consistently
         // with that idle check, avoiding a pair of lifecycle calls waiting on itself.
         const include = (active: string) =>
-          !STORAGE_LIFECYCLE_METHODS.has(active.replace(/^rpc:/, ''))
+          !LIFECYCLE_EXEMPT_METHODS.has(active.replace(/^rpc:/, ''))
         try {
           await this.requests.waitForIdle(2_000, include)
         } catch (error) {

@@ -1,4 +1,4 @@
-import { writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BRIDGE_REMOTE_METHODS, validateRemoteParams } from '../../../../src/mms/bridge/remote'
@@ -52,6 +52,27 @@ describe('remote storage.usage', () => {
     await executeBridgeHubLocal(f.hub(), 'bridge.hub.storage', { target: f.targetNode })
     expect(measure).toHaveBeenCalledTimes(2)
     expect(measure.mock.calls.every(([options]) => options?.refresh === false)).toBe(true)
+  })
+
+  it('delivers the reply for a profile with 240 threads with long English and CJK names, which the hub accepts', async () => {
+    const f = await fixture(['read'])
+    await f.connect()
+    // The cache holds 240 measured threads; the profile lists them with long names.
+    const listed = Array.from({ length: 240 }, (_, index) => ({
+      id: `thread-${index}`,
+      name: index % 2
+        ? `线程${index}：${'季度规划与后续事项的详细记录'.repeat(20)}`.slice(0, 200)
+        : `Thread ${index}: ${'quarterly planning notes and follow ups '.repeat(8)}`.slice(0, 200),
+      createdAt: '2026-10-21T10:00:00.000Z', updatedAt: '2026-10-21T10:00:00.000Z', order: index
+    }))
+    vi.spyOn(f.mms.threads, 'listAllThreads').mockReturnValue(listed)
+    const results = listed.map((thread, index) => ({ id: index.toString(16).padStart(16, '0'), kind: 'threads', threadId: thread.id, bytes: 2048 + index, files: 1, measuredAt: 1_700_000_000_000, generation: 1 }))
+    mkdirSync(f.mms.threads.lifecycleStore.root, { recursive: true })
+    writeFileSync(join(f.mms.threads.lifecycleStore.root, 'storage-usage.json'), JSON.stringify({ schemaVersion: 1, generation: 1, complete: true, durationMs: 3, results }))
+    const usage = (await executeBridgeHubLocal(f.hub(), 'bridge.hub.storage', { target: f.targetNode })) as StorageUsageSnapshot
+    expect(Buffer.byteLength(JSON.stringify(usage))).toBeLessThanOrEqual(56 * 1024)
+    const total = usage.entries.filter((entry) => entry.kind === 'threads').reduce((sum, entry) => sum + entry.bytes, 0)
+    expect(total).toBe(results.reduce((sum, row) => sum + row.bytes, 0))
   })
 
   it('refuses a node that lacks the read capability, and refuses a request that asks for a rescan', async () => {

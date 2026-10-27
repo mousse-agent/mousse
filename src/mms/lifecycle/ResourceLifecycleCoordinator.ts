@@ -22,6 +22,11 @@ export interface ResourceLifecycleHooks {
   projectIndex(record: TaskLifecycleRecord): Promise<void> | void
   projectPurged?(record: TaskLifecycleRecord): Promise<void> | void
   configurationChanged?(): void
+  /**
+   * Called before a thread's folder is moved or removed. Stops background disk measurement (it holds
+   * handles that make Windows refuse a rename) until the returned function is called.
+   */
+  quiesceDisk?(): Promise<() => void>
   /** Fault injection / observability after durable boundaries, never used to authorize a move. */
   onPhase?(record: TaskLifecycleRecord, phase: LifecycleOperationPhase): Promise<void> | void
 }
@@ -30,11 +35,26 @@ const running = new Set<string>()
 const LOCATION_MARKER = '.lifecycle-location.json'
 const MOVABLE_LOCKS = ['execution.lease', 'queue.mut.lock', 'thread-data.mut.lock']
 
+/**
+ * Moves a thread's folder. On Windows a rename fails with EPERM/EACCES/EBUSY while any process, such as
+ * an indexer, a virus scanner or a build tool, has a handle inside the folder; they let go within moments,
+ * so the move is retried briefly before the failure is reported.
+ */
+function renameFolder(from: string, to: string): void {
+  for (let attempt = 0; ; attempt++) {
+    try { renameSync(from, to); return } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (process.platform !== 'win32' || (code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY') || attempt >= 10) throw error
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
+    }
+  }
+}
+
 /** Phase 1 only: reversible metadata moves. No resource deletion, ref updates or Git maintenance. */
 export class ResourceLifecycleCoordinator {
   readonly cleanup: ResourcePurgeService
   constructor(readonly store: ResourceLifecycleStore, private readonly hooks: ResourceLifecycleHooks) {
-    this.cleanup = new ResourcePurgeService(store, { assertIdle: (taskId) => hooks.assertCanTrash?.(store.require(taskId)), projectPurged: (record) => hooks.projectPurged?.(record), onBoundary: (record) => hooks.onPhase?.(record, 'purge-started'), configurationChanged: hooks.configurationChanged })
+    this.cleanup = new ResourcePurgeService(store, { assertIdle: (taskId) => hooks.assertCanTrash?.(store.require(taskId)), projectPurged: (record) => hooks.projectPurged?.(record), onBoundary: (record) => hooks.onPhase?.(record, 'purge-started'), configurationChanged: hooks.configurationChanged, quiesceDisk: hooks.quiesceDisk })
   }
 
   trash(request: LifecycleRequest): Promise<TaskLifecycleRecord> { return this.run('trash', request) }
@@ -95,6 +115,7 @@ export class ResourceLifecycleCoordinator {
       claimed = true
     })
     if (terminalReplay) return this.store.require(request.taskId)
+    const resumeDisk = await this.hooks.quiesceDisk?.()
     running.add(token)
     try {
       let record = this.store.require(request.taskId)
@@ -147,7 +168,7 @@ export class ResourceLifecycleCoordinator {
           if (source) {
             this.store.assertTaskLocation(active.to)
             mkdirSync(dirname(active.to), { recursive: true })
-            renameSync(active.from, active.to)
+            renameFolder(active.from, active.to)
             fsyncDirectorySync(dirname(active.from)); fsyncDirectorySync(dirname(active.to))
           }
           // This update can be recovered from the exact marker if the process exits after rename.
@@ -185,6 +206,7 @@ export class ResourceLifecycleCoordinator {
       throw error
     } finally {
       running.delete(token)
+      resumeDisk?.()
       if (claimed) this.store.update(request.taskId, (record) => {
         if (record.operations.at(-1)?.runner?.token === token) delete record.operations.at(-1)!.runner
       })
