@@ -1762,7 +1762,7 @@ export class OrchestratorService extends EventEmitter {
    * A run that continues another (the resume after a usage-limit pause, whether the timer or a person
    * made it, a "Continue" after a restart, or a turn a provider started itself) is never granted more
    * than the run it continues, whatever the setting says now. The earlier run's grant is the one recorded
-   * when its turn started; one that was never recorded, or a continuation whose original cannot be read,
+   * when its turn started (`RunRecord.accessGrant`); one that was never recorded, or a continuation whose original cannot be read,
    * is `lineage`.
    */
   private continuedGrant(runId: string, threadId: string, grant: AgentAccessLevel): AgentAccessLevel {
@@ -1778,7 +1778,7 @@ export class OrchestratorService extends EventEmitter {
         earlier = engine.listRuns(threadId).filter((candidate) => candidate.ordinal < run.ordinal).sort((a, b) => b.ordinal - a.ordinal)[0]
       }
       if (!earlier) return grant
-      const held = earlier.outcome?.accessGrant
+      const held = earlier.accessGrant
       return narrowAgentAccess(grant, isAgentAccessLevel(held) ? held : 'lineage') ?? 'lineage'
     } catch {
       return 'lineage'

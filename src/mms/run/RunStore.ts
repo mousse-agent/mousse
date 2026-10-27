@@ -5,6 +5,7 @@ import { RUN_MIGRATIONS } from './db/migrations'
 import { json, str, type Row } from './db/rows'
 import { fail } from './db/RunStoreError'
 import { settleWaitingDelegations } from './delegation/hold'
+import { isAgentAccessLevel, narrowAgentAccess, type AgentAccessLevel } from '../../shared/settings'
 import { stableStringify } from './json'
 import { currentStopGeneration } from './stopGeneration'
 import {
@@ -221,6 +222,21 @@ export class RunStore {
       if (patch.activeAttemptId !== undefined) next.activeAttemptId = patch.activeAttemptId
       if (patch.userMessageId !== undefined) next.userMessageId = patch.userMessageId
       return this.writeCas(next, input.expectedEpoch)
+    })
+  }
+
+  /**
+   * Records the agent access level the run's turn was granted. It is a plain column, not a run status
+   * write: no epoch moves and no event is appended. Only ever narrower: a second call keeps the narrower
+   * level. Returns the level now recorded, or undefined for an unknown run.
+   */
+  setRunAccessGrant(runId: string, level: AgentAccessLevel): AgentAccessLevel | undefined {
+    return this.db.transaction(() => {
+      const row = this.db.statement('SELECT access_grant FROM runs WHERE run_id = ?').get(runId)
+      if (!row) return undefined
+      const next = narrowAgentAccess(isAgentAccessLevel(row.access_grant) ? row.access_grant : undefined, level) ?? 'lineage'
+      if (row.access_grant !== next) this.db.statement('UPDATE runs SET access_grant = ? WHERE run_id = ?').run(next, runId)
+      return next
     })
   }
 
@@ -585,7 +601,8 @@ function toRun(row: Row): RunRecord {
     startedAt: str(row.started_at),
     completedAt: str(row.completed_at),
     outcome: json<RunOutcome>(row.outcome),
-    heartbeatAt: str(row.heartbeat_at)
+    heartbeatAt: str(row.heartbeat_at),
+    ...(isAgentAccessLevel(row.access_grant) ? { accessGrant: row.access_grant } : {})
   }
 }
 

@@ -169,6 +169,10 @@ describe('ProfileDatabase', () => {
       database.migrate(before)
       expect(database.userVersion()).toBe(access.version - 1)
       database.database
+        .prepare(`INSERT INTO runs(run_id, thread_id, ordinal, status, epoch, source, requested_at, stop_generation)
+          VALUES('r-old', 't1', 1, 'completed', 0, 'gui', '2026-10-12T00:00:00.000Z', 0)`)
+        .run()
+      database.database
         .prepare("INSERT INTO credentials(token_hash, thread_id, run_id, provider, mode_ceiling, created_at, revoked_at, last_seen_at) VALUES('old', 't1', 'r1', 'claude', 'default', '2026-10-12T00:00:00.000Z', NULL, '2026-10-12T00:00:00.000Z')")
         .run()
       database.database
@@ -179,8 +183,10 @@ describe('ProfileDatabase', () => {
       expect(database.userVersion()).toBe(RUN_MIGRATIONS.at(-1)!.version)
       expect(database.database.prepare("SELECT access_level FROM credentials WHERE token_hash = 'old'").get()).toEqual({ access_level: 'lineage' })
       expect(database.database.prepare("SELECT access_level FROM delegations WHERE delegation_id = 'd-old'").get()).toEqual({ access_level: null })
+      expect(database.database.prepare("SELECT access_grant FROM runs").all()).toEqual([{ access_grant: null }])
       expect(() => database.database.prepare("UPDATE credentials SET access_level = 'root'").run()).toThrow(/CHECK/)
       expect(() => database.database.prepare("UPDATE delegations SET access_level = 'root'").run()).toThrow(/CHECK/)
+      expect(() => database.database.prepare("UPDATE runs SET access_grant = 'root'").run()).toThrow(/CHECK/)
     })
   })
 
@@ -188,7 +194,8 @@ describe('ProfileDatabase', () => {
     const rebuild = RUN_MIGRATIONS.find((migration) => migration.foreignKeys === 'off')!
     const older = RUN_MIGRATIONS.filter((migration) => migration.version < rebuild.version)
     const foreignKeys = (database: ProfileDatabase): number => Number(database.database.prepare('PRAGMA foreign_keys').get()!.foreign_keys)
-    const runs = (database: ProfileDatabase) => database.database.prepare('SELECT * FROM runs ORDER BY run_id').all()
+    // The columns the rebuild copied; a later migration adds more (access_grant), which these tests do not compare.
+    const runs = (database: ProfileDatabase) => database.database.prepare('SELECT * FROM runs ORDER BY run_id').all().map(({ access_grant: _grant, ...row }) => row)
     const insertRun = (database: ProfileDatabase, status: string): void => {
       database.database
         .prepare(
@@ -235,9 +242,10 @@ describe('ProfileDatabase', () => {
       expect(database.database.prepare('SELECT * FROM run_attempts ORDER BY attempt_id').all()).toEqual(attempts)
       expect(database.database.prepare('PRAGMA foreign_key_check').all()).toEqual([])
       expect(database.database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'runs_thread_status'").all()).toHaveLength(1)
+      // The rebuild's columns in order, then the one the next migration adds.
       expect(database.database.prepare('PRAGMA table_info(runs)').all().map((column) => column.name)).toEqual([
         'run_id', 'thread_id', 'ordinal', 'status', 'epoch', 'active_attempt_id', 'source', 'client_request_id',
-        'user_message_id', 'requested_at', 'started_at', 'completed_at', 'outcome', 'heartbeat_at', 'stop_generation'
+        'user_message_id', 'requested_at', 'started_at', 'completed_at', 'outcome', 'heartbeat_at', 'stop_generation', 'access_grant'
       ])
       // The new CHECK takes paused and still refuses anything else.
       insertRun(database, 'paused')

@@ -10,7 +10,7 @@ import type { Migration } from './ProfileDatabase'
  * version 7 records which effect delivered an inbox row; version 8 is the Stop fence (thread stop
  * generations); version 9 stores each attempt's execution binding (harness gateway); version 10
  * rebuilds `runs` so a run can be `paused` until a usage limit resets; version 11 records the agent
- * access level on credentials and delegations.
+ * access level on credentials, delegations and runs.
  */
 export const RUN_MIGRATIONS: readonly Migration[] = [
   {
@@ -320,6 +320,10 @@ ALTER TABLE credentials ADD COLUMN access_level TEXT NOT NULL DEFAULT 'lineage' 
 
 -- The access level a delegation passes to its child; NULL for delegations made before version 11.
 ALTER TABLE delegations ADD COLUMN access_level TEXT CHECK(access_level IN ('lineage','read','manage'));
+
+-- The access level a run's turn was granted when it started; NULL until recorded (and on runs from before
+-- version 11). A run that continues it is never granted more.
+ALTER TABLE runs ADD COLUMN access_grant TEXT CHECK(access_grant IN ('lineage','read','manage'));
 `
   }
 ]
