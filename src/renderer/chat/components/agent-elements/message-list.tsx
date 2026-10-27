@@ -59,7 +59,9 @@ import {
 import {
   RENDER_ALL_THRESHOLD,
   estimateTurnHeight,
+  lastIndexAtOrBefore,
   resolveTurnKey,
+  shouldGlide,
   windowRowItems,
   type RowItem,
 } from "./virtual/turn-window";
@@ -555,6 +557,16 @@ function groupMessagesIntoTurns(messages: UIMessage[]) {  const turns: { userMsg
 
 type PromptMarker = { id: string; offset: number; preview: string; responsePreview: string };
 
+/**
+ * What the overlay needs from a windowed list, where most prompts are not in
+ * the DOM: every prompt's offset from the layout, and an instant, settled jump.
+ */
+export type PromptMarkerLayout = {
+  offsetOf: (id: string) => number | undefined;
+  scrollTo: (id: string) => void;
+  subscribe: (listener: () => void) => () => void;
+};
+
 function cappedWords(text: string, limit: number): string {
   const words = text.trim().split(/\s+/).filter(Boolean);
   return words.slice(0, limit).join(" ") + (words.length > limit ? "…" : "");
@@ -575,6 +587,7 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
   onUserNavigate,
   markProgrammatic,
   scrollAnimRef,
+  layout,
 }: {
   messages: UIMessage[];
   containerRef: React.RefObject<HTMLDivElement | null>;
@@ -584,27 +597,39 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
   onUserNavigate: () => void;
   markProgrammatic: () => void;
   scrollAnimRef: React.MutableRefObject<number>;
+  /** Set while the list is windowed; without it every prompt is read from the DOM. */
+  layout?: PromptMarkerLayout;
 }) {
   const [markers, setMarkers] = useState<PromptMarker[]>([]);
   const [activeId, setActiveId] = useState<string>();
   const [previewId, setPreviewId] = useState<string>();
   const markerPositionsRef = useRef<PromptMarker[]>([]);
+  const markerOffsetsRef = useRef<number[]>([]);
   const rafRef = useRef(0);
   const loggedCountRef = useRef(-1);
 
   const updateActiveMarker = useCallback(() => {
     const container = containerRef.current;
-    const positions = markerPositionsRef.current.filter((marker) => Number.isFinite(marker.offset));
-    if (!container || !positions.length) return;
+    if (!container) return;
     const atBottom = container.scrollHeight > container.clientHeight &&
       container.scrollTop + container.clientHeight >= container.scrollHeight - 2;
+    if (layout) {
+      // Offsets are ascending and all finite: binary search instead of a scan.
+      const all = markerPositionsRef.current;
+      if (!all.length) return;
+      const index = lastIndexAtOrBefore(markerOffsetsRef.current, container.scrollTop + 24);
+      setActiveId((atBottom ? all[all.length - 1] : all[Math.max(index, 0)])?.id);
+      return;
+    }
+    const positions = markerPositionsRef.current.filter((marker) => Number.isFinite(marker.offset));
+    if (!positions.length) return;
     let current = positions[0];
     for (const marker of positions) {
       if (atBottom || marker.offset <= container.scrollTop + 24) current = marker;
       else break;
     }
     setActiveId(current?.id);
-  }, [containerRef]);
+  }, [containerRef, layout]);
 
   const updateMarkers = useCallback(() => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
@@ -624,13 +649,15 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
         const userMsg = turn.userMsg;
         // A message that delivers subagent results is not a prompt the user wrote.
         if (!userMsg || readSubagentNotice(userMsg)) continue;
-        const target: Element | null = content.querySelector(
-          `[data-prompt-id="${escapeId(userMsg.id)}"]`,
-        );
+        const target: Element | null = layout
+          ? null
+          : content.querySelector(`[data-prompt-id="${escapeId(userMsg.id)}"]`);
         // Rect-based so nested `relative` wrappers / transforms can't skew it.
-        const y = target instanceof HTMLElement
-          ? target.getBoundingClientRect().top - containerRect.top + container.scrollTop
-          : markerPositionsRef.current.find((marker) => marker.id === userMsg.id)?.offset ?? Infinity;
+        const y = layout
+          ? layout.offsetOf(userMsg.id) ?? Infinity
+          : target instanceof HTMLElement
+            ? target.getBoundingClientRect().top - containerRect.top + container.scrollTop
+            : markerPositionsRef.current.find((marker) => marker.id === userMsg.id)?.offset ?? Infinity;
         const preview = cappedWords(getTextFromParts(userMsg.parts ?? [], " "), 10);
         const responsePreview = cappedWords(
           turn.assistantMsgs.map((message) => getTextFromParts(message.parts ?? [], " ")).join(" "),
@@ -649,6 +676,7 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
         console.debug(`[prompt-markers] tracking ${next.length} prompts`);
       }
       markerPositionsRef.current = next;
+      markerOffsetsRef.current = next.map((marker) => marker.offset);
       updateActiveMarker();
       setMarkers((prev) => {
         if (
@@ -665,8 +693,11 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
         return next;
       });
     });
-  }, [messages, containerRef, contentRef, updateActiveMarker]);
+  }, [messages, containerRef, contentRef, updateActiveMarker, layout]);
   const visiblePromptIds = useVisiblePromptIds(containerRef, contentRef, updateMarkers);
+
+  // The layout moves without the DOM saying so: rows measured, window shifted.
+  useEffect(() => layout?.subscribe(updateMarkers), [layout, updateMarkers]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -714,13 +745,21 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
       const el = content.querySelector(`[data-prompt-id="${escapeId}"]`);
       const y = el instanceof HTMLElement
         ? el.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop
-        : markerPositionsRef.current.find((marker) => marker.id === id)?.offset;
+        : layout?.offsetOf(id) ?? markerPositionsRef.current.find((marker) => marker.id === id)?.offset;
       if (y === undefined || !Number.isFinite(y)) return;
       onUserNavigate();
       onActive();
       const targetTop = Math.max(0, y - 16);
       const start = container.scrollTop;
       const distance = targetTop - start;
+      // A prompt that is not mounted, or is far away, lands instantly and is
+      // corrected against the real DOM; gliding across rows that are still
+      // being measured would aim at an estimate.
+      if (layout && (!(el instanceof HTMLElement) || !shouldGlide(distance, container.clientHeight))) {
+        cancelScroll();
+        layout.scrollTo(id);
+        return;
+      }
       if (Math.abs(distance) < 4) {
         container.scrollTop = targetTop;
         return;
@@ -748,6 +787,8 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
           scrollAnimRef.current = requestAnimationFrame(step);
         } else {
           scrollAnimRef.current = 0;
+          // Rows measured on the way may have moved the target.
+          layout?.scrollTo(id);
         }
       };
       scrollAnimRef.current = requestAnimationFrame(step);
@@ -760,6 +801,7 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
       cancelScroll,
       markProgrammatic,
       scrollAnimRef,
+      layout,
     ],
   );
 
@@ -1287,6 +1329,25 @@ export const MessageList = memo(function MessageList({
   const rowItems: RowItem[] = windowed
     ? windowRowItems(turns.length, virtualization.window)
     : turns.map((_, index) => ({ kind: "row", index }));
+  const markerLayout = useMemo(
+    () =>
+      windowed
+        ? {
+            offsetOf: (id: string) =>
+              virtualizationRef.current?.offsetOf(
+                turnKeyAliasRef.current.get(id) ?? id,
+              ),
+            scrollTo: (id: string) =>
+              void virtualizationRef.current?.scrollToKey(
+                turnKeyAliasRef.current.get(id) ?? id,
+                { align: "start", offset: 16 },
+              ),
+            subscribe: (listener: () => void) =>
+              virtualizationRef.current?.subscribe(listener) ?? (() => {}),
+          }
+        : undefined,
+    [windowed],
+  );
   const showPlanning = useMemo(() => {
     if (!isStreaming) return false;
     const lastMessage = normalizedMessages[normalizedMessages.length - 1];
@@ -1672,6 +1733,7 @@ export const MessageList = memo(function MessageList({
       onUserNavigate={handleMarkerNavigateStart}
       markProgrammatic={markProgrammaticScroll}
       scrollAnimRef={promptScrollAnimRef}
+      layout={markerLayout}
     />
     {showJumpButton && (
       <button
