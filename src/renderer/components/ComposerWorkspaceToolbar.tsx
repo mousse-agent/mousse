@@ -256,7 +256,7 @@ function ComposerDeviceButton({ device, node, disabled }: { device: ComposerDevi
           <div
             ref={menuRef}
             id={menuId}
-            className="composer-workspace-menu scrollbar-ultra-thin"
+            className="composer-workspace-menu composer-workspace-device-menu scrollbar-ultra-thin"
             role="menu"
             aria-label="Run on"
             style={menuStyle}
