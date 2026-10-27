@@ -749,6 +749,32 @@ describe('an added Claude instance: one service per settings file', () => {
     expect(harness.launchFor('claude:work')).toEqual({ binaryPath: bin })
   })
 
+  it('a sign-in that ends after a home change clears the sign-out through the service that writes the file now', async () => {
+    const { dir, harness, services, stored } = addedProfile()
+    const settings = join(instanceStateDir(dir, 'claude:work'), 'settings.json')
+    await harness.instances.signOut('claude:work')
+    expect(JSON.parse(readFileSync(settings, 'utf8'))).toMatchObject({ cliDisconnected: true })
+    const done = new Promise<void>((resolve) => {
+      const off = harness.instances.subscribe((event) => {
+        if (event.type === 'operation' && (event.data.phase === 'completed' || event.data.phase === 'failed')) {
+          off()
+          resolve()
+        }
+      })
+    })
+    // The sign-in runs on the first service; the home changes before it ends.
+    vi.spyOn(services[0]!, 'login').mockImplementation(async (session) => {
+      await harness.instances.configure('claude:work', { home: 'default' })
+      harness.instances.snapshots({ kind: 'device' }).catch(() => {})
+      return { success: true, sessionId: session.sessionId }
+    })
+    await harness.instances.signIn('claude:work')
+    await done
+    expect(services).toHaveLength(2)
+    expect(stored()['claude:work']!.config).toMatchObject({ signedOutInMousse: false, vendorMirror: mirrorHash({}) })
+    expect(JSON.parse(readFileSync(settings, 'utf8')).cliDisconnected).toBeUndefined()
+  })
+
   it('a new home gets its own service, and the old one never writes the file again', async () => {
     const { dir, harness, services } = addedProfile()
     const settings = join(instanceStateDir(dir, 'claude:work'), 'settings.json')
