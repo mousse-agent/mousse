@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from 'react'
+import { useCallback, useEffect, useMemo } from 'react'
 import { create } from 'zustand'
 import type {
   GitBranchInfo,
@@ -26,6 +26,9 @@ import { createPullRequestForBranch, pullRequestKey, refreshPullRequest, useGitP
  * One shared copy of Git state per working folder, read by the Git panel and the
  * thread side card. Requests for the same folder share a single in-flight fetch, so
  * the two surfaces never run the same Git commands twice.
+ *
+ * A folder is named by its `key` (see `folderKey`: the thread whose own worktree it is, else the
+ * project) and read through its `scope`, which the daemon resolves to the folder. A path is never sent.
  */
 
 export const GIT_LOG_LIMIT = 40
@@ -67,7 +70,8 @@ export interface GitRefreshOptions {
   force?: boolean
   /** Marks refreshes the user did not ask for. `loading` is only ever set for the first fetch, so this does not change the state. */
   quiet?: boolean
-  projectId?: string
+  /** Which folder the daemon reads: the thread's own worktree, else the project's folder. */
+  scope: GitScope
 }
 
 interface Flight {
@@ -77,33 +81,34 @@ interface Flight {
 
 const flights = new Map<string, Flight>()
 
-function patchEntry(path: string, patch: Partial<GitStatusEntry>) {
+function patchEntry(key: string, patch: Partial<GitStatusEntry>) {
   useGitStatusStore.setState((state) => ({
-    entries: { ...state.entries, [path]: { ...(state.entries[path] ?? EMPTY_GIT_ENTRY), ...patch } }
+    entries: { ...state.entries, [key]: { ...(state.entries[key] ?? EMPTY_GIT_ENTRY), ...patch } }
   }))
 }
+
 
 /** Keep the previous reference when nothing changed, so unchanged data does not re-render readers. */
 export function keepIfEqual<T>(previous: T, next: T): T {
   return JSON.stringify(previous) === JSON.stringify(next) ? previous : next
 }
 
-async function fetchInto(path: string, projectId: string | undefined): Promise<void> {
+async function fetchInto(key: string, scope: GitScope): Promise<void> {
   const git = window.mousse.git
   const [status, log, branches, diffStats] = await Promise.allSettled([
-    git.status(projectId, path),
-    git.log(GIT_LOG_LIMIT, projectId, path),
-    git.branches(projectId, path),
-    git.diffStats(projectId, path)
+    git.status(scope),
+    git.log(GIT_LOG_LIMIT, scope),
+    git.branches(scope),
+    git.diffStats(scope)
   ])
-  const previous = useGitStatusStore.getState().entries[path] ?? EMPTY_GIT_ENTRY
+  const previous = useGitStatusStore.getState().entries[key] ?? EMPTY_GIT_ENTRY
 
   if (status.status === 'rejected') {
-    patchEntry(path, { loaded: true, error: errorText(status.reason), fetchedAt: Date.now() })
+    patchEntry(key, { loaded: true, error: errorText(status.reason), fetchedAt: Date.now() })
     return
   }
   if (!status.value.isRepo) {
-    patchEntry(path, {
+    patchEntry(key, {
       status: keepIfEqual(previous.status, status.value),
       commits: previous.commits.length ? [] : previous.commits,
       branches: null,
@@ -114,7 +119,7 @@ async function fetchInto(path: string, projectId: string | undefined): Promise<v
     })
     return
   }
-  patchEntry(path, {
+  patchEntry(key, {
     status: keepIfEqual(previous.status, status.value),
     commits: log.status === 'fulfilled' ? keepIfEqual(previous.commits, log.value) : previous.commits,
     branches: branches.status === 'fulfilled' ? keepIfEqual(previous.branches, branches.value) : previous.branches,
@@ -130,135 +135,135 @@ async function fetchInto(path: string, projectId: string | undefined): Promise<v
  * forced call that arrives mid-fetch queues exactly one more fetch behind it. Never
  * rejects: a failed status fetch is recorded on the entry as `error`.
  */
-export function refreshGitStatus(path: string, options: GitRefreshOptions = {}): Promise<void> {
-  const flight = flights.get(path)
+export function refreshGitStatus(key: string, options: GitRefreshOptions): Promise<void> {
+  const flight = flights.get(key)
   if (flight) {
     if (options.force) flight.rerun = true
     return flight.promise
   }
 
-  const entry = useGitStatusStore.getState().entries[path]
+  const entry = useGitStatusStore.getState().entries[key]
   if (!options.force && entry?.loaded && Date.now() - entry.fetchedAt < GIT_STATUS_MAX_AGE_MS) {
     return Promise.resolve()
   }
 
   const next: Flight = { promise: Promise.resolve(), rerun: false }
-  flights.set(path, next)
+  flights.set(key, next)
   // Only a folder with nothing loaded yet shows a spinner; a refresh keeps the cached data on screen.
-  patchEntry(path, { loading: !entry?.loaded })
+  patchEntry(key, { loading: !entry?.loaded })
   next.promise = (async () => {
     try {
       do {
         next.rerun = false
-        await fetchInto(path, options.projectId)
+        await fetchInto(key, options.scope)
       } while (next.rerun)
     } finally {
-      flights.delete(path)
-      patchEntry(path, { loading: false })
+      flights.delete(key)
+      patchEntry(key, { loading: false })
     }
   })()
   return next.promise
 }
 
-/** The project id a refresh reads with; the daemon names the folder by `scope`, the main process reads it by `path`. */
+/** The project id a pull request lookup of the folder is made with. */
 function refreshProjectId(scope: GitScope): string | undefined {
   return scope.projectId ?? undefined
 }
 
 /** Refresh a folder after a mutation, whether it worked or not. */
-async function refreshAfterMutation(path: string, scope: GitScope): Promise<void> {
-  await refreshGitStatus(path, { force: true, quiet: true, projectId: refreshProjectId(scope) })
+async function refreshAfterMutation(key: string, scope: GitScope): Promise<void> {
+  await refreshGitStatus(key, { force: true, quiet: true, scope })
 }
 
 /** Switch branches, then refresh. Rejects with Git's message when the checkout fails. */
-export async function checkoutGitBranch(path: string, branch: string, scope: GitScope, options: GitCheckoutOptions = {}): Promise<GitCheckoutResult> {
+export async function checkoutGitBranch(key: string, branch: string, scope: GitScope, options: GitCheckoutOptions = {}): Promise<GitCheckoutResult> {
   try {
-    const result = await trackGitOperation(path, 'checkout', (operationId) => window.mousse.git.checkout(scope, branch, { ...options, operationId }))
+    const result = await trackGitOperation(key, 'checkout', (operationId) => window.mousse.git.checkout(scope, branch, { ...options, operationId }))
     return { stashKept: result.stashKept }
   } finally {
     // A failed stash-and-switch can already have taken the changes out of the working tree.
-    await refreshAfterMutation(path, scope)
+    await refreshAfterMutation(key, scope)
   }
 }
 
 /** Stage these paths, or everything. */
-export async function stageGitPaths(path: string, paths: readonly string[] | 'all', scope: GitScope): Promise<void> {
+export async function stageGitPaths(key: string, paths: readonly string[] | 'all', scope: GitScope): Promise<void> {
   try {
     await window.mousse.git.stage(scope, paths === 'all' ? { all: true } : { paths: [...paths] })
   } finally {
-    await refreshAfterMutation(path, scope)
+    await refreshAfterMutation(key, scope)
   }
 }
 
 /** Take these paths out of the index, or everything. */
-export async function unstageGitPaths(path: string, paths: readonly string[] | 'all', scope: GitScope): Promise<void> {
+export async function unstageGitPaths(key: string, paths: readonly string[] | 'all', scope: GitScope): Promise<void> {
   try {
     await window.mousse.git.unstage(scope, paths === 'all' ? { all: true } : { paths: [...paths] })
   } finally {
-    await refreshAfterMutation(path, scope)
+    await refreshAfterMutation(key, scope)
   }
 }
 
 /** Throw away the changes to these paths; untracked files are deleted. The caller confirms first. */
-export async function discardGitPaths(path: string, paths: readonly string[], scope: GitScope): Promise<void> {
+export async function discardGitPaths(key: string, paths: readonly string[], scope: GitScope): Promise<void> {
   try {
     await window.mousse.git.discard(scope, [...paths])
   } finally {
-    await refreshAfterMutation(path, scope)
+    await refreshAfterMutation(key, scope)
   }
 }
 
 /** Fetch the branch's remote and say how far behind it is now. */
-export async function fetchGit(path: string, scope: GitScope): Promise<GitFetchResult> {
+export async function fetchGit(key: string, scope: GitScope): Promise<GitFetchResult> {
   try {
-    const result = await trackGitOperation(path, 'fetch', (operationId) => window.mousse.git.fetch(scope, { operationId }))
+    const result = await trackGitOperation(key, 'fetch', (operationId) => window.mousse.git.fetch(scope, { operationId }))
     return { behindBefore: result.behindBefore, behindAfter: result.behindAfter }
   } finally {
-    await refreshAfterMutation(path, scope)
+    await refreshAfterMutation(key, scope)
   }
 }
 
 /** Pull the upstream into the branch; `conflicted` leaves the merge or rebase for the user. */
-export async function pullGit(path: string, scope: GitScope, options: GitPullOptions = {}): Promise<GitPullResult> {
+export async function pullGit(key: string, scope: GitScope, options: GitPullOptions = {}): Promise<GitPullResult> {
   try {
-    const result = await trackGitOperation(path, 'pull', (operationId) => window.mousse.git.pull(scope, { ...options, operationId }))
+    const result = await trackGitOperation(key, 'pull', (operationId) => window.mousse.git.pull(scope, { ...options, operationId }))
     return { result: result.result }
   } finally {
     // A conflicted pull rejects nothing, but a failed one may still have changed the folder.
-    await refreshAfterMutation(path, scope)
+    await refreshAfterMutation(key, scope)
   }
 }
 
 /** Abort the merge or rebase that is waiting on the user. */
-export async function abortGitInProgress(path: string, kind: 'merge' | 'rebase', scope: GitScope): Promise<void> {
+export async function abortGitInProgress(key: string, kind: 'merge' | 'rebase', scope: GitScope): Promise<void> {
   try {
     await window.mousse.git.abortInProgress(scope, kind)
   } finally {
-    await refreshAfterMutation(path, scope)
+    await refreshAfterMutation(key, scope)
   }
 }
 
-export async function createGitBranch(path: string, name: string, scope: GitScope, options: GitBranchOptions = {}): Promise<void> {
+export async function createGitBranch(key: string, name: string, scope: GitScope, options: GitBranchOptions = {}): Promise<void> {
   try {
     await window.mousse.git.createBranch(scope, name, options)
   } finally {
-    await refreshAfterMutation(path, scope)
+    await refreshAfterMutation(key, scope)
   }
 }
 
-export async function renameGitBranch(path: string, name: string, newName: string, scope: GitScope): Promise<void> {
+export async function renameGitBranch(key: string, name: string, newName: string, scope: GitScope): Promise<void> {
   try {
     await window.mousse.git.renameBranch(scope, name, newName)
   } finally {
-    await refreshAfterMutation(path, scope)
+    await refreshAfterMutation(key, scope)
   }
 }
 
-export async function deleteGitBranch(path: string, name: string, scope: GitScope, options: GitDeleteBranchOptions = {}): Promise<void> {
+export async function deleteGitBranch(key: string, name: string, scope: GitScope, options: GitDeleteBranchOptions = {}): Promise<void> {
   try {
     await window.mousse.git.deleteBranch(scope, name, options)
   } finally {
-    await refreshAfterMutation(path, scope)
+    await refreshAfterMutation(key, scope)
   }
 }
 
@@ -309,9 +314,9 @@ export class OpenPullRequestError extends Error {
 }
 
 /** Look up the pull request of the folder's current branch again, bypassing its max age. */
-async function refreshBranchPullRequest(path: string, projectId: string | undefined): Promise<void> {
-  const branch = useGitStatusStore.getState().entries[path]?.status?.branch
-  if (branch) await refreshPullRequest(path, branch, { force: true, projectId })
+async function refreshBranchPullRequest(key: string, projectId: string | undefined): Promise<void> {
+  const branch = useGitStatusStore.getState().entries[key]?.status?.branch
+  if (branch) await refreshPullRequest(key, branch, { force: true, projectId })
 }
 
 /**
@@ -319,14 +324,14 @@ async function refreshBranchPullRequest(path: string, projectId: string | undefi
  * report the pull request it already has. Opens nothing for a branch that is not pushed, is not the one the
  * flow started on, or cannot get a pull request, and says why.
  */
-async function openPullRequestAfterPush(path: string, expectedBranch: string, projectId: string | undefined, scope: PullRequestScope): Promise<CommitPullRequestOutcome> {
-  await refreshPullRequest(path, expectedBranch, { force: true, projectId, threadId: scope.threadId })
-  const status = useGitStatusStore.getState().entries[path]?.status
+async function openPullRequestAfterPush(key: string, expectedBranch: string, projectId: string | undefined, scope: PullRequestScope): Promise<CommitPullRequestOutcome> {
+  await refreshPullRequest(key, expectedBranch, { force: true, projectId, threadId: scope.threadId })
+  const status = useGitStatusStore.getState().entries[key]?.status
   if (!status) throw new OpenPullRequestError('Could not read the state of the branch.')
   if (status.branch !== expectedBranch) throw new OpenPullRequestError(BRANCH_CHANGED_MESSAGE)
   // The same rule as the Create PR row: a pull request is only opened for a branch whose commits are all on its upstream.
   if (status.tracking !== 'tracked' || status.ahead > 0) throw new OpenPullRequestError('The branch is not on the remote yet. Push it, then use Create PR.')
-  const lookup = useGitPullRequestStore.getState().entries[pullRequestKey(path, expectedBranch)]?.lookup
+  const lookup = useGitPullRequestStore.getState().entries[pullRequestKey(key, expectedBranch)]?.lookup
   if (lookup?.state === 'found') {
     const { number, state } = lookup.pullRequest
     return { kind: 'existing', number, state }
@@ -346,7 +351,7 @@ async function openPullRequestAfterPush(path: string, expectedBranch: string, pr
  * a pull request resolves with it instead of a second form.
  */
 export async function commitGitChanges(
-  path: string,
+  key: string,
   message: string,
   scope: GitScope,
   options: CommitGitOptions = {}
@@ -356,65 +361,65 @@ export async function commitGitChanges(
   const pullRequestScope = options.openPullRequest
   const push = options.push === true || pullRequestScope !== undefined
   // The branch the user was looking at; the daemon refuses if HEAD is on another one by then.
-  const expectedBranch = useGitStatusStore.getState().entries[path]?.status?.branch ?? undefined
+  const expectedBranch = useGitStatusStore.getState().entries[key]?.status?.branch ?? undefined
   // The form is for the branch the button was pressed on; if the status has moved on, nothing has run yet, so stop here.
   if (pullRequestScope && pullRequestScope.branch !== expectedBranch) throw new Error(BRANCH_CHANGED_MESSAGE)
   options.onPhase?.('committing')
-  await trackGitOperation(path, 'commit', (operationId) => git.commit(scope, message, { amend: options.amend === true, expectedBranch, operationId }))
+  await trackGitOperation(key, 'commit', (operationId) => git.commit(scope, message, { amend: options.amend === true, expectedBranch, operationId }))
   let pushError: CommitPushError | null = null
   if (push) {
     options.onPhase?.('pushing')
     try {
-      await trackGitOperation(path, 'push', (operationId) => git.push(scope, { expectedBranch, operationId }))
+      await trackGitOperation(key, 'push', (operationId) => git.push(scope, { expectedBranch, operationId }))
     } catch (error) {
       pushError = new CommitPushError(error)
     }
   }
-  await refreshGitStatus(path, { force: true, quiet: true, projectId })
+  await refreshGitStatus(key, { force: true, quiet: true, scope })
   if (pushError) throw pushError
   if (!push) return { pullRequest: null }
   if (!pullRequestScope || !expectedBranch) {
-    await refreshBranchPullRequest(path, projectId)
+    await refreshBranchPullRequest(key, projectId)
     return { pullRequest: null }
   }
   options.onPhase?.('opening-pr')
-  return { pullRequest: await openPullRequestAfterPush(path, expectedBranch, projectId, pullRequestScope) }
+  return { pullRequest: await openPullRequestAfterPush(key, expectedBranch, projectId, pullRequestScope) }
 }
 
 /**
  * A proposed message for what the next commit takes. Nothing changes in the repository, so there is no
  * refresh. Rejects with the daemon's code, `git_suggest_no_model` among them.
  */
-export async function suggestGitCommitMessage(path: string, scope: GitScope): Promise<GitCommitSuggestion> {
-  const expectedBranch = useGitStatusStore.getState().entries[path]?.status?.branch ?? undefined
+export async function suggestGitCommitMessage(key: string, scope: GitScope): Promise<GitCommitSuggestion> {
+  const expectedBranch = useGitStatusStore.getState().entries[key]?.status?.branch ?? undefined
   const suggestion = await window.mousse.git.suggestCommitMessage(scope, { expectedBranch })
   return { message: suggestion.message, truncated: suggestion.truncated }
 }
 
 /** Push the current branch (publishing it when it has no upstream), then refresh. Rejects with Git's message. */
-export async function pushGitBranch(path: string, scope: GitScope): Promise<void> {
-  const expectedBranch = useGitStatusStore.getState().entries[path]?.status?.branch ?? undefined
-  await trackGitOperation(path, 'push', (operationId) => window.mousse.git.push(scope, { expectedBranch, operationId }))
-  await refreshAfterMutation(path, scope)
-  await refreshBranchPullRequest(path, refreshProjectId(scope))
+export async function pushGitBranch(key: string, scope: GitScope): Promise<void> {
+  const expectedBranch = useGitStatusStore.getState().entries[key]?.status?.branch ?? undefined
+  await trackGitOperation(key, 'push', (operationId) => window.mousse.git.push(scope, { expectedBranch, operationId }))
+  await refreshAfterMutation(key, scope)
+  await refreshBranchPullRequest(key, refreshProjectId(scope))
 }
 
 /**
  * Make the folder a Git repository, then refresh so the section switches to its normal view.
  * Rejects with Git's message. Only a project folder can be initialised, so the thread is left out.
  */
-export async function initGitRepository(path: string, scope: GitScope): Promise<void> {
+export async function initGitRepository(key: string, scope: GitScope): Promise<void> {
   const projectScope = { projectId: scope.projectId, workspaceThreadId: null }
   await window.mousse.git.init(projectScope)
-  await refreshAfterMutation(path, projectScope)
+  await refreshAfterMutation(key, projectScope)
 }
 
-const retained = new Map<string, { count: number; projectId?: string }>()
+const retained = new Map<string, { count: number; scope: GitScope }>()
 let detach: (() => void) | null = null
 
 function refreshRetained(force: boolean) {
-  for (const [path, { projectId }] of retained) {
-    void refreshGitStatus(path, { force, quiet: true, projectId })
+  for (const [key, { scope }] of retained) {
+    void refreshGitStatus(key, { force, quiet: true, scope })
   }
 }
 
@@ -434,19 +439,19 @@ function attach() {
 }
 
 /** Keep a folder's state refreshing on focus and run completion until the returned release runs. */
-export function retainGitPath(path: string, projectId?: string): () => void {
-  const current = retained.get(path)
-  retained.set(path, { count: (current?.count ?? 0) + 1, projectId: projectId ?? current?.projectId })
+export function retainGitPath(key: string, scope: GitScope): () => void {
+  const current = retained.get(key)
+  retained.set(key, { count: (current?.count ?? 0) + 1, scope })
   attach()
   let released = false
   return () => {
     // A second call would take a count that belongs to another holder.
     if (released) return
     released = true
-    const entry = retained.get(path)
+    const entry = retained.get(key)
     if (!entry) return
-    if (entry.count > 1) retained.set(path, { ...entry, count: entry.count - 1 })
-    else retained.delete(path)
+    if (entry.count > 1) retained.set(key, { ...entry, count: entry.count - 1 })
+    else retained.delete(key)
     if (retained.size === 0 && detach) {
       detach()
       detach = null
@@ -459,21 +464,23 @@ export interface GitStatusView extends Omit<GitStatusEntry, 'fetchedAt'> {
   refresh: () => Promise<void>
 }
 
-/** Shared Git state for a folder; null path means there is nothing to read. */
-export function useGitStatus(path: string | null, projectId?: string | null): GitStatusView {
-  const entry = useGitStatusStore((state) => (path ? state.entries[path] : undefined)) ?? EMPTY_GIT_ENTRY
-  const scopedProjectId = projectId ?? undefined
+/** Shared Git state for a folder; a null key means there is nothing to read. */
+export function useGitStatus(key: string | null, scope: GitScope): GitStatusView {
+  const entry = useGitStatusStore((state) => (key ? state.entries[key] : undefined)) ?? EMPTY_GIT_ENTRY
+  // The ids, not the object: a caller that builds its scope on every render must not refetch on every render.
+  const { projectId, workspaceThreadId } = scope
+  const readScope = useMemo<GitScope>(() => ({ projectId, workspaceThreadId }), [projectId, workspaceThreadId])
 
   useEffect(() => {
-    if (!path) return
-    const release = retainGitPath(path, scopedProjectId)
-    void refreshGitStatus(path, { projectId: scopedProjectId })
+    if (!key) return
+    const release = retainGitPath(key, readScope)
+    void refreshGitStatus(key, { scope: readScope })
     return release
-  }, [path, scopedProjectId])
+  }, [key, readScope])
 
   const refresh = useCallback(
-    () => (path ? refreshGitStatus(path, { force: true, projectId: scopedProjectId }) : Promise.resolve()),
-    [path, scopedProjectId]
+    () => (key ? refreshGitStatus(key, { force: true, scope: readScope }) : Promise.resolve()),
+    [key, readScope]
   )
 
   return {
@@ -481,7 +488,7 @@ export function useGitStatus(path: string | null, projectId?: string | null): Gi
     commits: entry.commits,
     branches: entry.branches,
     diffStats: entry.diffStats,
-    loading: path ? !entry.loaded || entry.loading : false,
+    loading: key ? !entry.loaded || entry.loading : false,
     loaded: entry.loaded,
     error: entry.error,
     refresh

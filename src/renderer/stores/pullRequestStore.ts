@@ -57,6 +57,7 @@ export const useGitPullRequestStore = create<PullRequestState>(() => ({ entries:
 const MAX_PULL_REQUEST_ENTRIES = 200
 const MAX_PULL_REQUEST_DETAILS = 100
 
+/** `path` here and in the functions below is the folder's key (`folderKey`), never a path on disk. */
 export function pullRequestKey(path: string, branch: string): string {
   return `${path}\u0000${branch}`
 }

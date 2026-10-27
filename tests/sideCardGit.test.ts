@@ -178,7 +178,7 @@ describe('shared git status store', () => {
 
   it('shares one fetch between concurrent requests for the same path', async () => {
     const git = installGit()
-    await Promise.all([refreshGitStatus('/repo/a'), refreshGitStatus('/repo/a'), refreshGitStatus('/repo/a', { quiet: true })])
+    await Promise.all([refreshGitStatus('/repo/a', { scope: scope }), refreshGitStatus('/repo/a', { scope: scope }), refreshGitStatus('/repo/a', { scope: scope, quiet: true })])
     expect(git.status).toHaveBeenCalledTimes(1)
     expect(git.log).toHaveBeenCalledTimes(1)
     expect(git.branches).toHaveBeenCalledTimes(1)
@@ -191,29 +191,32 @@ describe('shared git status store', () => {
     expect(entry.diffStats?.additions).toBe(4)
   })
 
-  it('fetches paths independently', async () => {
+  it('fetches folders independently, each through its own scope', async () => {
     const git = installGit()
-    await Promise.all([refreshGitStatus('/repo/a'), refreshGitStatus('/repo/b')])
+    await Promise.all([refreshGitStatus('/repo/a', { scope }), refreshGitStatus('/repo/b', { scope: threadScope })])
     expect(git.status).toHaveBeenCalledTimes(2)
-    expect(git.status).toHaveBeenCalledWith(undefined, '/repo/a')
-    expect(git.status).toHaveBeenCalledWith(undefined, '/repo/b')
+    expect(git.status).toHaveBeenCalledWith(scope)
+    expect(git.status).toHaveBeenCalledWith(threadScope)
+    expect(git.log).toHaveBeenCalledWith(expect.any(Number), threadScope)
+    expect(git.branches).toHaveBeenCalledWith(scope)
+    expect(git.diffStats).toHaveBeenCalledWith(threadScope)
   })
 
   it('skips an ordinary request while the data is fresh, but a forced refresh refetches', async () => {
     const git = installGit()
-    await refreshGitStatus('/repo/a')
-    await refreshGitStatus('/repo/a')
+    await refreshGitStatus('/repo/a', { scope: scope })
+    await refreshGitStatus('/repo/a', { scope: scope })
     expect(git.status).toHaveBeenCalledTimes(1)
-    await refreshGitStatus('/repo/a', { force: true })
+    await refreshGitStatus('/repo/a', { scope: scope, force: true })
     expect(git.status).toHaveBeenCalledTimes(2)
   })
 
   it('fetches again once the data has gone stale', async () => {
     vi.useFakeTimers()
     const git = installGit()
-    await refreshGitStatus('/repo/a')
+    await refreshGitStatus('/repo/a', { scope: scope })
     vi.advanceTimersByTime(5000)
-    await refreshGitStatus('/repo/a')
+    await refreshGitStatus('/repo/a', { scope: scope })
     expect(git.status).toHaveBeenCalledTimes(2)
   })
 
@@ -225,9 +228,9 @@ describe('shared git status store', () => {
         .mockImplementationOnce(async () => { await gate; return repoStatus({ branch: 'old' }) })
         .mockImplementation(async () => repoStatus({ branch: 'new' }))
     })
-    const first = refreshGitStatus('/repo/a')
-    const forced = refreshGitStatus('/repo/a', { force: true })
-    const forcedAgain = refreshGitStatus('/repo/a', { force: true })
+    const first = refreshGitStatus('/repo/a', { scope: scope })
+    const forced = refreshGitStatus('/repo/a', { scope: scope, force: true })
+    const forcedAgain = refreshGitStatus('/repo/a', { scope: scope, force: true })
     release?.()
     await Promise.all([first, forced, forcedAgain])
     expect(git.status).toHaveBeenCalledTimes(2)
@@ -236,10 +239,10 @@ describe('shared git status store', () => {
 
   it('does not flag loading for quiet refreshes of loaded data', async () => {
     installGit()
-    await refreshGitStatus('/repo/a')
+    await refreshGitStatus('/repo/a', { scope: scope })
     const seen: boolean[] = []
     const stop = useGitStatusStore.subscribe((state) => seen.push(state.entries['/repo/a'].loading))
-    await refreshGitStatus('/repo/a', { force: true, quiet: true })
+    await refreshGitStatus('/repo/a', { scope: scope, force: true, quiet: true })
     stop()
     expect(seen).not.toContain(true)
   })
@@ -248,12 +251,12 @@ describe('shared git status store', () => {
     installGit()
     const seen: boolean[] = []
     const stop = useGitStatusStore.subscribe((state) => seen.push(state.entries['/repo/a']?.loading))
-    await refreshGitStatus('/repo/a')
+    await refreshGitStatus('/repo/a', { scope: scope })
     expect(seen).toContain(true)
     seen.length = 0
     // What the Git panel asks for on mount and from its refresh button.
-    await refreshGitStatus('/repo/a', { force: true })
-    await refreshGitStatus('/repo/a', { force: true, quiet: false })
+    await refreshGitStatus('/repo/a', { scope: scope, force: true })
+    await refreshGitStatus('/repo/a', { scope: scope, force: true, quiet: false })
     stop()
     expect(seen.length).toBeGreaterThan(0)
     expect(seen).not.toContain(true)
@@ -261,16 +264,16 @@ describe('shared git status store', () => {
 
   it('keeps loaded data free of loading when a refresh joins a fetch already running', async () => {
     installGit()
-    await refreshGitStatus('/repo/a')
-    const first = refreshGitStatus('/repo/a', { force: true })
-    const joined = refreshGitStatus('/repo/a')
+    await refreshGitStatus('/repo/a', { scope: scope })
+    const first = refreshGitStatus('/repo/a', { scope: scope, force: true })
+    const joined = refreshGitStatus('/repo/a', { scope: scope })
     expect(useGitStatusStore.getState().entries['/repo/a'].loading).toBe(false)
     await Promise.all([first, joined])
   })
 
   it('clears commits, branches and stats for a folder that is not a repo', async () => {
     installGit({ status: vi.fn(async () => repoStatus({ isRepo: false, branch: null, tracking: 'none' })) })
-    await refreshGitStatus('/plain')
+    await refreshGitStatus('/plain', { scope: scope })
     const entry = useGitStatusStore.getState().entries['/plain']
     expect(entry.loaded).toBe(true)
     expect(entry.status?.isRepo).toBe(false)
@@ -281,7 +284,7 @@ describe('shared git status store', () => {
 
   it('records a failed status fetch without rejecting', async () => {
     installGit({ status: vi.fn(async () => { throw new Error('spawn failed') }) })
-    await expect(refreshGitStatus('/broken')).resolves.toBeUndefined()
+    await expect(refreshGitStatus('/broken', { scope: scope })).resolves.toBeUndefined()
     const entry = useGitStatusStore.getState().entries['/broken']
     expect(entry.loaded).toBe(true)
     expect(entry.error).toBe('spawn failed')
@@ -290,9 +293,9 @@ describe('shared git status store', () => {
 
   it('keeps unchanged data by reference across refreshes', async () => {
     installGit()
-    await refreshGitStatus('/repo/a')
+    await refreshGitStatus('/repo/a', { scope: scope })
     const before = useGitStatusStore.getState().entries['/repo/a']
-    await refreshGitStatus('/repo/a', { force: true })
+    await refreshGitStatus('/repo/a', { scope: scope, force: true })
     const after = useGitStatusStore.getState().entries['/repo/a']
     expect(after.status).toBe(before.status)
     expect(after.commits).toBe(before.commits)
@@ -301,7 +304,7 @@ describe('shared git status store', () => {
 
   it('refreshes after a checkout and after a commit', async () => {
     const git = installGit()
-    await refreshGitStatus('/repo/a')
+    await refreshGitStatus('/repo/a', { scope: scope })
     await checkoutGitBranch('/repo/a', 'dev', scope)
     expect(git.checkout).toHaveBeenCalledWith(scope, 'dev', { operationId: expect.any(String) })
     expect(git.status).toHaveBeenCalledTimes(2)
@@ -312,14 +315,14 @@ describe('shared git status store', () => {
 
   it('passes the dirty-switch choice to the daemon and reports a kept stash', async () => {
     const git = installGit({ checkout: vi.fn(async () => ({ status: repoStatus(), stashKept: true })) })
-    await refreshGitStatus('/repo/a')
+    await refreshGitStatus('/repo/a', { scope: scope })
     await expect(checkoutGitBranch('/repo/a', 'dev', scope, { dirty: 'stash' })).resolves.toEqual({ stashKept: true })
     expect(git.checkout).toHaveBeenCalledWith(scope, 'dev', { dirty: 'stash', operationId: expect.any(String) })
   })
 
   it('sends each new Git action with its scope, then refreshes once', async () => {
     const git = installGit()
-    await refreshGitStatus('/repo/a')
+    await refreshGitStatus('/repo/a', { scope: scope })
     await stageGitPaths('/repo/a', ['a.ts', 'b.ts'], scope)
     expect(git.stage).toHaveBeenLastCalledWith(scope, { paths: ['a.ts', 'b.ts'] })
     await stageGitPaths('/repo/a', 'all', scope)
@@ -347,14 +350,14 @@ describe('shared git status store', () => {
 
   it('refreshes after a discard that fails, since part of it may have run', async () => {
     const git = installGit({ discard: vi.fn(async () => { throw new Error('busy') }) })
-    await refreshGitStatus('/repo/a')
+    await refreshGitStatus('/repo/a', { scope: scope })
     await expect(discardGitPaths('/repo/a', ['a.ts'], scope)).rejects.toThrow('busy')
     expect(git.status).toHaveBeenCalledTimes(2)
   })
 
   it('refreshes after a checkout that fails, since a stash-and-switch may have taken the changes away', async () => {
     const git = installGit({ checkout: vi.fn(async () => { throw new Error('local changes would be overwritten') }) })
-    await refreshGitStatus('/repo/a')
+    await refreshGitStatus('/repo/a', { scope: scope })
     await expect(checkoutGitBranch('/repo/a', 'dev', scope, { dirty: 'stash' })).rejects.toThrow('overwritten')
     expect(git.status).toHaveBeenCalledTimes(2)
   })
@@ -362,7 +365,7 @@ describe('shared git status store', () => {
   it('refreshes after any other new Git action that fails', async () => {
     const fail = () => vi.fn(async () => { throw new Error('refused') })
     const git = installGit({ stage: fail(), unstage: fail(), fetch: fail(), createBranch: fail(), renameBranch: fail(), deleteBranch: fail() })
-    await refreshGitStatus('/repo/a')
+    await refreshGitStatus('/repo/a', { scope: scope })
     let refreshes = 1
     for (const run of [
       () => stageGitPaths('/repo/a', ['a.ts'], scope),
@@ -384,10 +387,10 @@ describe('shared git status store', () => {
     const listeners = new Map<string, () => void>()
     const win = (globalThis as unknown as { window: { addEventListener: ReturnType<typeof vi.fn>; removeEventListener: ReturnType<typeof vi.fn> } }).window
     win.addEventListener.mockImplementation((type: string, listener: () => void) => { listeners.set(type, listener) })
-    const releaseOne = retainGitPath('/repo/a')
-    const releaseTwo = retainGitPath('/repo/a')
+    const releaseOne = retainGitPath('/repo/a', scope)
+    const releaseTwo = retainGitPath('/repo/a', scope)
     expect(win.addEventListener).toHaveBeenCalledTimes(1)
-    await refreshGitStatus('/repo/a')
+    await refreshGitStatus('/repo/a', { scope: scope })
     vi.advanceTimersByTime(5000)
     listeners.get('focus')?.()
     await vi.waitFor(() => expect(git.status).toHaveBeenCalledTimes(2))
@@ -406,8 +409,8 @@ describe('retainGitPath release', () => {
   it('is idempotent: a second call does not take a count that belongs to another holder', () => {
     installGit()
     const win = (globalThis as unknown as { window: { addEventListener: ReturnType<typeof vi.fn>; removeEventListener: ReturnType<typeof vi.fn> } }).window
-    const releaseOne = retainGitPath('/repo/held')
-    const releaseTwo = retainGitPath('/repo/held')
+    const releaseOne = retainGitPath('/repo/held', scope)
+    const releaseTwo = retainGitPath('/repo/held', scope)
     releaseOne()
     releaseOne()
     releaseOne()

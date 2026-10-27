@@ -11,8 +11,6 @@ import { stopRunningDaemon } from '../cli/daemonShutdown'
 import { canonicalizeHome, SERVICE_STOP_TIMEOUT_MS } from '../cli/mmsRuntime'
 import { MousseConfigStore } from '../mms/config/MousseConfigStore'
 import { SettingsStore } from '../mms/settings/SettingsStore'
-import { FileService } from '../mms/files/FileService'
-import { GitService } from '../mms/git/GitService'
 import { GuiMmsController } from './mms/GuiMmsController'
 import { PresentationState } from './mms/PresentationState'
 import {
@@ -309,8 +307,6 @@ function startGuiApp(): void {
         request: (sender, method, params) => browserMms.requestAttachedBrowser(sender, method, params)
       })
       browserMms.setAttachedBrowserHost(attachedBrowserHost)
-      const fileService = new FileService()
-      const gitService = new GitService()
 
       if (!ipcRegistered) {
         registerGuiIpc(
@@ -318,8 +314,6 @@ function startGuiApp(): void {
             guiMms,
             presentation,
             settings,
-            fileService,
-            gitService,
             browserView,
             attachedBrowserHost,
             repoRoot,

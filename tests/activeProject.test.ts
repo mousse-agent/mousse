@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { gitScopeFor, resolveActiveProject, type ActiveProjectInput } from '../src/renderer/lib/activeProject'
+import { folderKey, gitScopeFor, resolveActiveProject, type ActiveProjectInput } from '../src/renderer/lib/activeProject'
 
 describe('active project', () => {
   const projects = [
@@ -15,7 +15,7 @@ describe('active project', () => {
   }
 
   it('keeps the thread own project and folder once the chat has started', () => {
-    expect(resolveActiveProject(base)).toEqual({ projectId: 'p1', path: '/work/one', loading: false, workspaceThreadId: null })
+    expect(resolveActiveProject(base)).toEqual({ projectId: 'p1', path: '/work/one', key: 'project:p1', loading: false, workspaceThreadId: null })
     // A stale draft for a started thread changes nothing.
     expect(resolveActiveProject({ ...base, draftProjectId: 'p2' })).toMatchObject({ projectId: 'p1', path: '/work/one' })
   })
@@ -24,6 +24,7 @@ describe('active project', () => {
     expect(resolveActiveProject({ ...base, isNewChat: true, draftProjectId: 'p2' })).toEqual({
       projectId: 'p2',
       path: '/work/two',
+      key: 'project:p2',
       loading: false,
       workspaceThreadId: null
     })
@@ -38,6 +39,7 @@ describe('active project', () => {
     expect(resolveActiveProject({ ...base, isNewChat: true, draftProjectId: 'gone' })).toEqual({
       projectId: 'gone',
       path: null,
+      key: null,
       loading: false,
       workspaceThreadId: null
     })
@@ -47,6 +49,7 @@ describe('active project', () => {
     expect(resolveActiveProject({ ...base, isNewChat: true, draftProjectId: undefined, threadProjectId: null })).toEqual({
       projectId: null,
       path: '/work/one',
+      key: null,
       loading: false,
       workspaceThreadId: null
     })
@@ -65,6 +68,7 @@ describe('active project', () => {
     expect(resolveActiveProject({ ...base, resolved: worktree })).toEqual({
       projectId: 'p1',
       path: '/wt/thread-1',
+      key: 'thread:thread-1',
       loading: false,
       workspaceThreadId: 'thread-1'
     })
@@ -77,5 +81,20 @@ describe('active project', () => {
     expect(gitScopeFor(project)).toEqual({ projectId: 'p1', workspaceThreadId: null })
     const worktree = resolveActiveProject({ ...base, resolved: { path: '/wt/thread-1', loading: false, workspaceThreadId: 'thread-1' } })
     expect(gitScopeFor(worktree)).toEqual({ projectId: 'p1', workspaceThreadId: 'thread-1' })
+  })
+
+  it('caches a folder under its thread or project, never under its path', () => {
+    expect(folderKey({ projectId: 'p1', workspaceThreadId: null })).toBe('project:p1')
+    expect(folderKey({ projectId: 'p1', workspaceThreadId: 'thread-1' })).toBe('thread:thread-1')
+    expect(folderKey({ projectId: null, workspaceThreadId: null })).toBeNull()
+    // Two projects (two computers' qualified ids) at the same path are two folders.
+    const a = resolveActiveProject({ ...base, threadProjectId: 'nod_a:p1', resolved: { path: '/work/one', loading: false } })
+    const b = resolveActiveProject({ ...base, threadProjectId: 'nod_b:p1', resolved: { path: '/work/one', loading: false } })
+    expect(a.path).toBe(b.path)
+    expect(a.key).not.toBe(b.key)
+  })
+
+  it('has no key until the folder is known', () => {
+    expect(resolveActiveProject({ ...base, resolved: { path: null, loading: true } }).key).toBeNull()
   })
 })

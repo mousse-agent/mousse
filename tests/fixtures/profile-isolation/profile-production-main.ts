@@ -8,8 +8,6 @@ import { registerGuiIpc } from '../../../src/main/ipc/registerGuiIpc'
 import { PresentationState } from '../../../src/main/mms/PresentationState'
 import { MousseConfigStore } from '../../../src/mms/config/MousseConfigStore'
 import { SettingsStore } from '../../../src/mms/settings/SettingsStore'
-import { FileService } from '../../../src/mms/files/FileService'
-import { GitService } from '../../../src/mms/git/GitService'
 import { LineEditStatsStore } from '../../../src/mms/stats/LineEditStatsStore'
 import { BrowserViewManager } from '../../../src/main/browser/BrowserViewManager'
 import { profileBrowserPartition } from '../../../src/main/browser/browserPolicy'
@@ -70,8 +68,6 @@ async function main(): Promise<void> {
     guiMms: gui,
     presentation,
     settings: chromeSettings,
-    fileService: new FileService(),
-    gitService: new GitService(),
     lineEditStats: new LineEditStatsStore(home),
     browserView,
     repoRoot: runtimeRoot

@@ -17,7 +17,8 @@ import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
  */
 
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, session, shell } from 'electron'
-import { homedir } from 'os'
+import { SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
+import { readAssetInPieces } from './assetPieces'
 import { daemonGitParams } from './daemonGitParams'
 import { getComputerName } from '../computerName'
 import { randomUUID } from 'node:crypto'
@@ -33,8 +34,6 @@ import {
   broadcastThreadSnapshot
 } from '../mms/protocolEventBridge'
 import { SettingsStore } from '../../mms/settings/SettingsStore'
-import { FileService } from '../../mms/files/FileService'
-import { GitService } from '../../mms/git/GitService'
 import { listEditors, openInEditor } from '../editors'
 import { refreshApplicationMenu } from '../applicationMenu'
 import { setGuestShortcuts } from '../menu/guestShortcutForward'
@@ -93,11 +92,17 @@ import type {
   ChannelConfig,
   ChannelPlatform,
   CreateScheduledJobInput,
+  FileAsset,
+  FileEntry,
   FileGrepResponse,
   FileSearchResponse,
+  GitBranchInfo,
   GitBranchOptions,
   GitCheckoutOptions,
+  GitCommit,
   GitCommitOptions,
+  GitDiffStats,
+  GitStatusSnapshot,
   GitDeleteBranchOptions,
   GitFetchOptions,
   GitPullOptions,
@@ -152,8 +157,6 @@ export interface GuiIpcServices {
    * settings:get/set always route to the daemon; this mirror is updated from protocol.
    */
   settings: SettingsStore
-  fileService: FileService
-  gitService: GitService
   browserView: BrowserViewManager
   attachedBrowserHost?: AttachedBrowserHost
   repoRoot: string
@@ -287,8 +290,6 @@ export function registerGuiIpc(
     guiMms,
     presentation,
     settings,
-    fileService,
-    gitService,
     browserView,
     repoRoot
   } = services
@@ -1859,44 +1860,37 @@ export function registerGuiIpc(
     return (await resolveProjectPath(undefined, id)) ?? null
   })
 
-  registerHandler('app:getFilesRoot', async (_e, threadId?: string | null) => {
-    const id = threadId ?? currentPresentation().getActiveThreadId()
-    return resolveFilesRoot(undefined, id)
+  // The files and Git panels name a thread or a project; the daemon resolves its folder. This process
+  // never reads or writes one itself. Standalone threads intentionally browse the user's home directory
+  // (the daemon does that for a window of this computer), and a ready per-thread workspace is
+  // authoritative over the project's primary checkout.
+  const filesScope = (projectId?: string, threadId?: string | null): Record<string, unknown> => ({
+    ...(typeof projectId === 'string' && projectId ? { projectId } : {}),
+    ...(typeof threadId === 'string' && threadId ? { threadId } : {})
   })
 
-  // Standalone threads intentionally browse the user's home directory. A ready
-  // per-thread workspace is authoritative over the project's primary checkout;
-  // FileService still applies its existing root guard to the selected root.
-  const resolveFilesRoot = async (projectId?: string, threadId?: string | null): Promise<string> => {
-    if (threadId) {
-      try {
-        const status = await guiMms.request<{
-          execution?: { projectPath?: string; lifecycle?: string }
-        }>('workspace.getStatus', { threadId })
-        if (status.execution?.lifecycle === 'ready' && status.execution.projectPath) {
-          return status.execution.projectPath
-        }
-      } catch {
-        // Missing/unready workspace falls back to the daemon-authoritative project.
-      }
-    }
-    return (await resolveProjectPath(projectId, threadId)) ?? homedir()
-  }
+  registerHandler('app:getFilesRoot', async (_e, threadId?: string | null) => {
+    const id = threadId ?? currentPresentation().getActiveThreadId()
+    return (await guiMms.request<{ root: string }>('files.root', filesScope(undefined, id))).root
+  })
 
   registerHandler(
     'fs:listDir',
     async (_e, dirPath?: string, projectId?: string, threadId?: string | null) =>
-      fileService.listDir(await resolveFilesRoot(projectId, threadId), dirPath ?? '')
+      (await guiMms.request<{ entries: FileEntry[] }>('files.list', { ...filesScope(projectId, threadId), path: dirPath ?? '' })).entries
   )
   registerHandler(
     'fs:readFile',
     async (_e, filePath: string, projectId?: string, threadId?: string | null) =>
-      fileService.readFile(await resolveFilesRoot(projectId, threadId), filePath)
+      (await guiMms.request<{ content: string }>('files.read', { ...filesScope(projectId, threadId), path: filePath })).content
   )
   registerHandler(
     'fs:readAsset',
-    async (_e, filePath: string, projectId?: string, threadId?: string | null) =>
-      fileService.readAsset(await resolveFilesRoot(projectId, threadId), filePath)
+    // The daemon sends a preview in pieces that fit a message; they are joined here.
+    (_e, filePath: string, projectId?: string, threadId?: string | null): Promise<FileAsset> =>
+      readAssetInPieces((offset, length) =>
+        guiMms.request('files.readAsset', { ...filesScope(projectId, threadId), path: filePath, offset, length })
+      )
   )
   registerHandler(
     'fs:writeFile',
@@ -1907,18 +1901,19 @@ export function registerGuiIpc(
       projectId?: string,
       threadId?: string | null
     ) => {
-      const profileId = guiMms.getWindowBinding()?.profileId
-      const lines = await fileService.writeFile(
-        await resolveFilesRoot(projectId, threadId),
-        filePath,
-        content
-      )
-      await guiMms.request('stats.recordManualEdits', { lines, expectedProfileId: profileId })
+      // A request to the daemon is one frame of at most 4 MiB; say so before sending rather than fail inside the transport.
+      if (saveExceedsRequest(content)) throw new Error(SAVE_TOO_LARGE_MESSAGE)
+      await guiMms.request('files.writeDirect', {
+        ...filesScope(projectId, threadId),
+        path: filePath,
+        content,
+        expectedProfileId: guiMms.getWindowBinding()?.profileId
+      })
     }
   )
 
-  // Search runs in the daemon, never in this process. It deliberately skips
-  // `resolveFilesRoot`, whose home-directory fallback must never be indexed.
+  // Search runs in the daemon, never in this process. It deliberately skips the Files panel's
+  // folder rules (`files.root`), whose home-directory fallback must never be indexed.
   // The daemon rejects `threadId` and `projectId` together, hence the sequence.
   const searchScoped = async <T>(
     method: string,
@@ -1972,21 +1967,19 @@ export function registerGuiIpc(
       )
   )
 
-  const resolveGitCwd = async (projectId?: string, cwd?: string): Promise<string> => {
-    if (cwd) return cwd
-    return (await resolveProjectPath(projectId)) ?? homedir()
-  }
-  registerHandler('git:status', async (_e, projectId?: string, cwd?: string) =>
-    gitService.getStatus(await resolveGitCwd(projectId, cwd))
+  // Git reads name the folder by scope, like the mutations below: the thread when the folder is its own
+  // worktree, the project otherwise. The daemon resolves the folder; a path from the renderer is never used.
+  registerHandler('git:status', async (_e, scope?: GitScope) =>
+    (await guiMms.request<{ status: GitStatusSnapshot }>('git.status', daemonGitParams(scope))).status
   )
-  registerHandler('git:log', async (_e, limit?: number, projectId?: string, cwd?: string) =>
-    gitService.getLog(await resolveGitCwd(projectId, cwd), limit)
+  registerHandler('git:log', async (_e, limit: number | undefined, scope?: GitScope) =>
+    (await guiMms.request<{ commits: GitCommit[] }>('git.log', daemonGitParams(scope, { limit }))).commits
   )
-  registerHandler('git:branches', async (_e, projectId?: string, cwd?: string) =>
-    gitService.getBranches(await resolveGitCwd(projectId, cwd))
+  registerHandler('git:branches', async (_e, scope?: GitScope) =>
+    (await guiMms.request<{ branches: GitBranchInfo }>('git.branches', daemonGitParams(scope))).branches
   )
-  registerHandler('git:diffStats', async (_e, projectId?: string, cwd?: string) =>
-    gitService.getDiffStats(await resolveGitCwd(projectId, cwd))
+  registerHandler('git:diffStats', async (_e, scope?: GitScope) =>
+    (await guiMms.request<{ stats: GitDiffStats }>('git.diffStats', daemonGitParams(scope))).stats
   )
   // Every Git mutation runs in the daemon, so the thread-worktree rules and the repository lease apply
   // to the GUI like any other client. Storage handlers keep the daemon's error code across IPC.
@@ -2014,8 +2007,8 @@ export function registerGuiIpc(
   registerStorageHandler('git:cancelOperation', async (_e, operationId: string) =>
     guiMms.request<{ cancelled: boolean }>('git.cancelOperation', { operationId })
   )
-  registerHandler('git:lastCommitMessage', async (_e, projectId?: string, cwd?: string) =>
-    gitService.lastCommitMessage(await resolveGitCwd(projectId, cwd))
+  registerHandler('git:lastCommitMessage', async (_e, scope?: GitScope) =>
+    (await guiMms.request<{ message: string | null }>('git.lastCommitMessage', daemonGitParams(scope))).message
   )
   registerHandler('pullRequests:get', async (_e, ref: PullRequestRef | undefined, branch?: string, force?: boolean) => {
     const response = await guiMms.request<{ lookup: unknown }>('pullRequests.get', {

@@ -20,7 +20,7 @@ async function run(){
   await app.whenReady()
   const gui=new GuiMmsController({homeDir:config.home,endpointOverride:config.endpoint,ownerTokenOverride:config.ownerToken,disableAutoStart:true,requestTimeoutMs:10000});gui.on('error',()=>{})
   let active:BrowserWindow|null=null
-  registerGuiIpc({guiMms:gui,presentation:new PresentationState(),settings:{get:()=>getDefaultSettings()} as never,fileService:{} as never,gitService:{} as never,browserView:{init:()=>{}} as never,repoRoot:config.home},()=>active)
+  registerGuiIpc({guiMms:gui,presentation:new PresentationState(),settings:{get:()=>getDefaultSettings()} as never,browserView:{init:()=>{}} as never,repoRoot:config.home},()=>active)
   const windows:BrowserWindow[]=[]
   const win=()=>{const result=new BrowserWindow({show:false,webPreferences:{preload:config.preload,sandbox:false,contextIsolation:true,nodeIntegration:false,backgroundThrottling:false}});windows.push(result);return result}
   const owner=win(),member=win()

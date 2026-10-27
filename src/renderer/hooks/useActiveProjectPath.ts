@@ -11,6 +11,9 @@ interface ResolvedWorkspace {
 
 async function resolveWorkspaceProjectPath(threadId: string | null): Promise<ResolvedWorkspace> {
   if (!threadId) return { path: await window.mousse.app.getActiveProjectPath(threadId), workspaceThreadId: null }
+  // The Files panel's folder comes back first if a storage rule retired the thread's worktree, so the Git
+  // panel, the tree, the header and the terminal all start from the same folder. It answers either way.
+  await window.mousse.app.getFilesRoot(threadId).catch(() => undefined)
   try {
     const status = await window.mousse.workspace.getStatus(threadId) as {
       execution?: { projectPath?: string; lifecycle?: string }

@@ -469,14 +469,15 @@ const api = {
       ipcRenderer.invoke('github:cloneRepository', input)
   } satisfies GitHubApi,
   git: {
-    status: (projectId?: string, cwd?: string): Promise<GitStatusSnapshot> =>
-      ipcRenderer.invoke('git:status', projectId, cwd),
-    log: (limit?: number, projectId?: string, cwd?: string): Promise<GitCommit[]> =>
-      ipcRenderer.invoke('git:log', limit, projectId, cwd),
-    branches: (projectId?: string, cwd?: string): Promise<GitBranchInfo> =>
-      ipcRenderer.invoke('git:branches', projectId, cwd),
-    diffStats: (projectId?: string, cwd?: string): Promise<GitDiffStats> =>
-      ipcRenderer.invoke('git:diffStats', projectId, cwd),
+    // Reads name their folder by scope, like the mutations: the thread when it is the thread's own worktree, else the project.
+    status: (scope: GitScope): Promise<GitStatusSnapshot> =>
+      ipcRenderer.invoke('git:status', scope),
+    log: (limit: number | undefined, scope: GitScope): Promise<GitCommit[]> =>
+      ipcRenderer.invoke('git:log', limit, scope),
+    branches: (scope: GitScope): Promise<GitBranchInfo> =>
+      ipcRenderer.invoke('git:branches', scope),
+    diffStats: (scope: GitScope): Promise<GitDiffStats> =>
+      ipcRenderer.invoke('git:diffStats', scope),
     // Mutations run in the daemon and reject with `{ code, message, details }` (storage handlers).
     checkout: (scope: GitScope, branch: string, options?: GitCheckoutOptions): Promise<GitMutationResult<GitCheckoutResult>> =>
       storageInvoke('git:checkout', scope, branch, options),
@@ -515,8 +516,8 @@ const api = {
       storageInvoke('git:renameBranch', scope, name, newName),
     deleteBranch: (scope: GitScope, name: string, options?: GitDeleteBranchOptions): Promise<GitMutationResult> =>
       storageInvoke('git:deleteBranch', scope, name, options),
-    lastCommitMessage: (projectId?: string, cwd?: string): Promise<string | null> =>
-      ipcRenderer.invoke('git:lastCommitMessage', projectId, cwd)
+    lastCommitMessage: (scope: GitScope): Promise<string | null> =>
+      ipcRenderer.invoke('git:lastCommitMessage', scope)
   },
   pullRequests: {
     get: (ref: PullRequestRef, branch: string, force?: boolean): Promise<GitPullRequestLookup> =>
