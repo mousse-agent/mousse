@@ -22,6 +22,10 @@ import { ClaudeSubscriptionAdapter, CLAUDE_SUBSCRIPTION_CAPABILITIES, type Claud
 import { CodexAdapter, type CodexClient } from '../../src/mms/run/adapters/codex/CodexAdapter'
 import type { AdapterHost, ProviderAdapter, TurnBridge, TurnInput, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
 import { testHarness } from '../../src/mms/run/testkit/harness'
+import { QuickActionTools } from '../../src/mms/orchestrator/QuickActionTools'
+import { createAppToolRegistry, type AppToolTurn } from '../../src/mms/run/mcp/appTools'
+import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { appTurn, fakeAppToolHost } from '../run/appToolsFixture'
 import type { RunPolicy } from '../../src/shared/harness/types'
 
 const homes: string[] = []
@@ -276,5 +280,54 @@ describe('Codex', () => {
     await adapter.startTurn(codexInput, sink(), control, host(refusingPrompter()))
     await adapter.startTurn(codexInput, sink(), control, host(questionsPrompter(new UserQuestionService())))
     expect(inputs.map((chat) => chat.approvals)).toEqual(['never', undefined])
+  })
+})
+
+describe('Mousse tools that wait for the user', () => {
+  function registry() {
+    const fixture = fakeAppToolHost()
+    const approve = vi.fn(async () => true)
+    const quickActions = new QuickActionTools(approve, () => {})
+    const { registry: tools } = createAppToolRegistry({ host: { ...fixture.host, quickActions } })
+    const call = (name: string, args: Record<string, unknown>, approvals?: 'never') => {
+      const turn = { ...appTurn({ threadId: 'thread-1', runId: '', trusted: true, ...(approvals ? { approvals } : {}) }), turnToken: '' } as AppToolTurn
+      return tools.callInProcess(name, args, { kind: 'trusted' }, { turn, toolCallId: 'call-1', signal: new AbortController().signal })
+    }
+    return { askUser: fixture.host.askUser, approve, call }
+  }
+  const question = { questions: [{ id: 'q1', prompt: 'Which file?', options: [{ id: 'a', label: 'a.ts' }, { id: 'b', label: 'b.ts' }] }] }
+  const action = { label: 'Build', kind: 'bash', payload: 'npm run build' }
+
+  it('are refused before they ask under `never`', async () => {
+    const r = registry()
+    expect(await r.call('ask_user', question, 'never')).toEqual({ text: QUESTIONS_REFUSED_MESSAGE, isError: true })
+    expect(await r.call('create_quick_action', action, 'never')).toEqual({ text: APPROVALS_REFUSED_MESSAGE, isError: true })
+    expect(r.askUser).not.toHaveBeenCalled()
+    expect(r.approve).not.toHaveBeenCalled()
+    // A tool that does not wait for the user still runs.
+    expect((await r.call('create_task', { description: 'fine' }, 'never')).isError).toBe(false)
+  })
+
+  it('still ask under `ask`', async () => {
+    const r = registry()
+    expect(await r.call('ask_user', question)).toMatchObject({ isError: false })
+    expect(await r.call('create_quick_action', action)).toMatchObject({ isError: false })
+    expect(r.askUser).toHaveBeenCalledOnce()
+    expect(r.approve).toHaveBeenCalledOnce()
+  })
+
+  it('the pi loop is told `never` from the bridge, and nothing under `ask`', async () => {
+    const seen: Array<{ approvals?: string }> = []
+    const adapter = new PiLoopAdapter(() => ({
+      chat: async (_messages, _onTool, options = {}) => {
+        seen.push(options)
+        throw new Error('stop here')
+      }
+    }))
+    const control = { drainSteer: () => undefined, heartbeat: noop }
+    const piInput = turnInput({ instanceId: 'pi:openai', llmProvider: 'openai' })
+    await expect(adapter.startTurn(piInput, sink(), control, host(refusingPrompter()))).rejects.toThrow('stop here')
+    await expect(adapter.startTurn(piInput, sink(), control, host(questionsPrompter(new UserQuestionService())))).rejects.toThrow('stop here')
+    expect(seen.map((options) => options.approvals)).toEqual(['never', undefined])
   })
 })

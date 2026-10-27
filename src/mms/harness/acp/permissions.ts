@@ -10,6 +10,7 @@ import type {
   WriteTextFileRequest,
   WriteTextFileResponse
 } from '@agentclientprotocol/sdk'
+import { APPROVALS_REFUSED_MESSAGE } from '../../../shared/harness/types'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
 
 /**
@@ -82,11 +83,7 @@ export interface PermissionPrompter {
   choose(request: { threadId: string; title: string; options: ClassifiedOption[] }): Promise<string | undefined>
 }
 
-/** What a runtime tells its model when a run refuses tools that need approval. */
-export const APPROVALS_REFUSED_MESSAGE = 'Tools that need approval are refused here.'
-
-/** What a runtime tells its model when it asks the user a question in a run nobody answers (`never`). */
-export const QUESTIONS_REFUSED_MESSAGE = 'Nobody can answer questions here. Continue without asking.'
+export { APPROVALS_REFUSED_MESSAGE, QUESTIONS_REFUSED_MESSAGE } from '../../../shared/harness/types'
 
 /** The prompter of a run whose policy is `approvals: 'never'`: nobody is asked, every request is denied. */
 export function refusingPrompter(): PermissionPrompter {

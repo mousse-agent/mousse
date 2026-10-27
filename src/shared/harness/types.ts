@@ -171,6 +171,12 @@ export interface RuntimeFacts {
   source: 'handshake' | 'session'
 }
 
+/** What a runtime or Mousse tool tells the model when a run refuses tools that need approval (`approvals: 'never'`). */
+export const APPROVALS_REFUSED_MESSAGE = 'Tools that need approval are refused here.'
+
+/** What the model is told when it asks the user a question in a run nobody answers (`approvals: 'never'`). */
+export const QUESTIONS_REFUSED_MESSAGE = 'Nobody can answer questions here. Continue without asking.'
+
 /** Why the gateway could not serve a request. Typed so callers never parse messages. */
 export const HARNESS_ERROR_CODES = [
   'instance_unknown',

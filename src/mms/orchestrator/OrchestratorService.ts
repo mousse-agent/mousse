@@ -59,7 +59,7 @@ import { formatRestartNote } from '../run/restartNote'
 import { createHarnessGateway, PI_DRIVER_ID, type AdapterHost, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
 import { piLegacyDriver } from '../harness/drivers/piLegacy'
 import { contextGauge } from '../harness/policy'
-import type { ExecutionBinding, HarnessCaps, ProviderScope, TurnOrigin } from '../../shared/harness/types'
+import type { ExecutionBinding, HarnessCaps, ProviderScope, RunPolicy, TurnOrigin } from '../../shared/harness/types'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
 import { acknowledgeRows } from '../run/terminal'
@@ -1688,7 +1688,7 @@ export class OrchestratorService extends EventEmitter {
    */
   private async completeAppTurn(
     registered: AppToolTurn,
-    input: { promptRuntime: boolean; browser?: AppToolTurn['browser']; onPublishApplet?: AppToolTurn['onPublishApplet']; userContent: string; instanceId: string; model: string }
+    input: { promptRuntime: boolean; browser?: AppToolTurn['browser']; onPublishApplet?: AppToolTurn['onPublishApplet']; userContent: string; instanceId: string; model: string; approvals: RunPolicy['approvals'] }
   ): Promise<TurnAppContext> {
     let skills: Pick<AppToolTurn, 'enabledSkills' | 'loadedSkills'> = { enabledSkills: [], loadedSkills: [] }
     if (input.promptRuntime) {
@@ -1714,6 +1714,8 @@ export class OrchestratorService extends EventEmitter {
     const turn = this.appToolTurns.update(registered.runId, {
       ...(browser ? { browser } : {}),
       ...(input.onPublishApplet ? { onPublishApplet: input.onPublishApplet } : {}),
+      // A run nobody answers: Mousse tools that wait for the user are refused, on every transport.
+      ...(input.approvals === 'never' ? { approvals: 'never' as const } : {}),
       ...skills
     }) ?? registered
     const descriptor = typeof turn.mode === 'string' ? this.modeRegistry.getModeSync(turn.mode, { projectPath: turn.projectPath }) : undefined
@@ -5897,7 +5899,7 @@ export class OrchestratorService extends EventEmitter {
         stagedApplets.push(validateAppletSubmission(value))
         return { queued: true, title: stagedApplets[stagedApplets.length - 1].title }
       } : undefined
-      const app = appTurn ? await this.completeAppTurn(appTurn.turn, { promptRuntime, browser: browserExecution, onPublishApplet, userContent, instanceId: instance.instanceId, model: selectedModel.model }) : undefined
+      const app = appTurn ? await this.completeAppTurn(appTurn.turn, { promptRuntime, browser: browserExecution, onPublishApplet, userContent, instanceId: instance.instanceId, model: selectedModel.model, approvals: binding.policy.approvals }) : undefined
       const adapterHost: AdapterHost = {
         tools: {
           onPublishApplet,

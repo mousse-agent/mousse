@@ -71,6 +71,8 @@ export class PiLoopAdapter implements ProviderAdapter {
           browser: host.tools.browser,
           delegation: host.tools.delegation,
           toolAccess: host.tools.toolAccess,
+          // The loop runs Mousse's tools itself: a run nobody answers refuses those that wait for the user.
+          ...(host.bridge?.permission?.approvals === 'never' ? { approvals: 'never' as const } : {}),
           signal: input.signal,
           onRetry: (attempt) => {
             sink.retry(attempt)

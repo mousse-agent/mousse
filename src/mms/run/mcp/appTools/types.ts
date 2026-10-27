@@ -1,6 +1,7 @@
 import type { Tool, ToolCall } from '@earendil-works/pi-ai'
 import type { SkillDescriptor } from '../../../../shared/integrations'
 import type { IntegrationActor } from '../../../../shared/integrations/actor'
+import { APPROVALS_REFUSED_MESSAGE, QUESTIONS_REFUSED_MESSAGE } from '../../../../shared/harness/types'
 import type { ChatMode } from '../../../../shared/types'
 import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
 import type { BrowserExecutionBinding } from '../../../orchestrator/browser'
@@ -80,6 +81,11 @@ export interface AppToolTurn {
   settingsEnabled(name: string): boolean
   /** A trusted definition caller: its grants were checked before dispatch. */
   trusted?: boolean
+  /**
+   * The run refuses everything that would wait for the user (`RunPolicy.approvals: 'never'`):
+   * tools that ask for approval or put a question to the user are refused at call time.
+   */
+  approvals?: 'never'
 }
 
 /** Writes an in-process call's timeline rows (`LlmToolEvent`s), as the pi loop always has. */
@@ -118,6 +124,12 @@ export interface ToolOutcome {
 
 export type JsonSchema = Record<string, unknown>
 
+/** Why a run that nobody answers (`approvals: 'never'`) refuses a tool that waits for the user; undefined when it may run. */
+export function unattendedRefusal(tool: Pick<MousseTool, 'asksUser'>, turn: Pick<AppToolTurn, 'approvals'>): string | undefined {
+  if (turn.approvals !== 'never' || !tool.asksUser) return undefined
+  return tool.asksUser === 'question' ? QUESTIONS_REFUSED_MESSAGE : APPROVALS_REFUSED_MESSAGE
+}
+
 /** Per-turn availability: `true`, or why the tool cannot be used now. */
 export type Availability = true | string
 
@@ -144,6 +156,11 @@ export interface MousseTool {
   readOnlySafe?: boolean
   /** Callable in process only and never listed (older names kept for replayed transcripts). */
   hidden?: boolean
+  /**
+   * The call waits for the user: an approval (a quick action) or a question (`ask_user`). A run
+   * whose approvals are `never` refuses it before the handler runs.
+   */
+  asksUser?: 'approval' | 'question'
   /** The pi-ai definition an in-process loop sends for this turn (default: the static one). */
   definition?(turn: AppToolTurn): Tool
   /** Per-turn availability, checked at call time on every transport. */
