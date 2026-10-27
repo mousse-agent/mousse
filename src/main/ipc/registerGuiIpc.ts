@@ -17,6 +17,7 @@ import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
  */
 
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, session, shell } from 'electron'
+import { SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
 import { readAssetInPieces } from './assetPieces'
 import { daemonGitParams } from './daemonGitParams'
 import { getComputerName } from '../computerName'
@@ -1900,6 +1901,8 @@ export function registerGuiIpc(
       projectId?: string,
       threadId?: string | null
     ) => {
+      // A request to the daemon is one frame of at most 4 MiB; say so before sending rather than fail inside the transport.
+      if (saveExceedsRequest(content)) throw new Error(SAVE_TOO_LARGE_MESSAGE)
       await guiMms.request('files.writeDirect', {
         ...filesScope(projectId, threadId),
         path: filePath,

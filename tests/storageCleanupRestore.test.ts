@@ -69,6 +69,17 @@ describe('a worktree retired by a storage rule comes back on demand', () => {
     expect(readFileSync(join(worktreePath, 'value.txt'), 'utf8').replace(/\r\n/g, '\n')).toBe('base\n')
   }, 120_000)
 
+  it('files.root restores the checkout and names the same folder as the tree that lists it', async () => {
+    const { threadId, worktreePath } = await retiredThread()
+    const { root } = await gui.request<{ root: string }>('files.root', { threadId })
+    expect(root).toBe(worktreePath)
+    expect(existsSync(worktreePath)).toBe(true); expect(existsSync(marker(threadId))).toBe(false)
+    const listed = await gui.request<{ entries: Array<{ name: string }> }>('files.list', { threadId, path: '' })
+    expect(listed.entries.map((entry) => entry.name)).toContain('value.txt')
+    const status = await gui.request<{ execution: { projectPath: string; lifecycle: string } }>('workspace.getStatus', { threadId })
+    expect(status.execution).toMatchObject({ projectPath: root, lifecycle: 'ready' })
+  }, 120_000)
+
   it.each([
     ['files.list', { path: '' }],
     ['files.read', { path: 'value.txt' }],

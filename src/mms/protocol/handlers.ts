@@ -113,7 +113,7 @@ import { getWorkspaceIndexRegistry } from '../files/WorkspaceIndexRegistry'
 import { searchWorkspacePaths } from '../files/WorkspaceSearch'
 import { devGuiBridge } from '../devgui/DevGuiBridge'
 import { existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs'
-import { FILE_ASSET_PIECE_BYTES, FILES_WRITE_DIRECT_MAX_CHARS } from '../../shared/fileAssets'
+import { FILE_ASSET_PIECE_BYTES, SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
 import { homedir } from 'node:os'
 import { join, relative, resolve } from 'node:path'
 import type { DomainConnectionContext } from './domainRegistry'
@@ -438,21 +438,24 @@ async function fileCall<T>(ctx: HandlerContext, run: () => Promise<T>): Promise<
  * The folder the Files panel shows for a thread or project of this computer's own window:
  * - a thread's ready worktree, which wins over the primary checkout;
  * - else the project folder (the named project, or the thread's own);
- * - else the home folder, for a thread without a project and for a window with nothing selected.
- * Never provisions or restores a worktree (`files.root` is asked on every thread switch); the calls that read
- * or write a file restore a retired one first.
+ * - else the home folder, for an existing thread without a project and for a window with nothing selected.
+ * A thread or project that is named but unknown is refused (`thread_not_found`, `project_not_found`).
+ * Never provisions or restores a worktree itself; the calls that use the folder restore a retired one first.
  */
 function localFilesRoot(ctx: HandlerContext, params: Record<string, unknown>): string {
   const threadId = asOptionalString(params.threadId, 256)
   const projectId = asOptionalString(params.projectId, 256)
-  const threadProject = threadId && ctx.mms.threads.getThread(threadId) ? resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId) : undefined
+  // A thread or project that is named but unknown is refused, never answered with the home folder.
+  if (threadId && !ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+  if (projectId && !ctx.mms.projects.getProject(projectId)) throw new DomainRpcError('project_not_found', 'Project not found', { projectId })
+  const threadProject = threadId ? resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId) : undefined
   if (threadId && threadProject) {
     const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
     const stored = manager.load()
     const execution = manager.executionContext(threadProject, stored ? manager.verify(stored) : undefined)
     if (execution.lifecycle === 'ready' && execution.projectPath) return execution.projectPath
   }
-  if (projectId) return ctx.mms.projects.getProject(projectId)?.path ?? homedir()
+  if (projectId) return ctx.mms.projects.getProject(projectId)!.path
   return threadProject ?? homedir()
 }
 
@@ -2786,7 +2789,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'files.root': {
       const p = isObject(params) ? params : {}
-      return { root: isLocalWindow(ctx) ? localFilesRoot(ctx, p) : projectRootContext(ctx, p) }
+      if (!isLocalWindow(ctx)) return { root: projectRootContext(ctx, p) }
+      // Restores a retired worktree like the calls that read it, so the header, the terminal's folder,
+      // file links and the tree all name the same folder.
+      await materializeRequestedWorkspace(ctx, p)
+      return { root: localFilesRoot(ctx, p) }
     }
     case 'files.list': {
       const p = isObject(params) ? params : {}
@@ -2817,7 +2824,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'files.writeDirect': {
       // The editor's save on this computer: it writes the file as it is and records no action, so unlike
-      // `files.write` it has no size limit below the message limit and nothing to Undo. Not for other computers.
+      // `files.write` it has no 512 KiB limit and nothing to Undo; a save is limited only by the 4 MiB request frame. Not for other computers.
       if (!isLocalWindow(ctx)) throw new DomainRpcError('forbidden', 'Only a Mousse window on this computer saves files directly')
       const p = isObject(params) ? params : {}
       const expectedProfileId = asOptionalString(p.expectedProfileId, 256)
@@ -2826,7 +2833,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
       // An empty file is a valid save, so this is not `asString`.
       if (typeof p.content !== 'string') throw new DomainRpcError('invalid_params', 'content must be a string')
-      if (p.content.length > FILES_WRITE_DIRECT_MAX_CHARS) throw new DomainRpcError('invalid_params', `content exceeds max length ${FILES_WRITE_DIRECT_MAX_CHARS}`)
+      if (saveExceedsRequest(p.content)) throw new DomainRpcError('file_too_large', SAVE_TOO_LARGE_MESSAGE)
       const content = p.content
       return await fileCall(ctx, async () => {
         // The file was read from the thread's worktree, so a retired one comes back before it is written.

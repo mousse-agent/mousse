@@ -10,17 +10,24 @@ interface AssetPiece {
   data: string
 }
 
+const CHANGED = 'The file changed while it was being read'
+
 /** Reads a preview piece by piece, as `request` answers each `offset`, and joins the pieces. */
 export async function readAssetInPieces(request: (offset: number, length: number) => Promise<AssetPiece>): Promise<FileAsset> {
-  const pieces: Buffer[] = []
+  let whole: Buffer | null = null
   let received = 0
   for (;;) {
     const piece = await request(received, FILE_ASSET_PIECE_BYTES)
+    // One buffer for the whole preview, filled in place (never pooled: it is sent on as it is).
+    whole ??= Buffer.alloc(piece.size)
+    // A file that grew or shrank between pieces would give a preview made of two versions.
+    if (piece.size !== whole.length) throw new Error(CHANGED)
     const bytes = Buffer.from(piece.data, 'base64')
-    pieces.push(bytes)
+    if (received + bytes.length > whole.length) throw new Error(CHANGED)
+    bytes.copy(whole, received)
     received += bytes.length
-    if (received >= piece.size) return { data: new Uint8Array(Buffer.concat(pieces)), mimeType: piece.mimeType, size: piece.size }
+    if (received === whole.length) return { data: new Uint8Array(whole.buffer, whole.byteOffset, whole.length), mimeType: piece.mimeType, size: piece.size }
     // The file shrank while it was read: stop rather than ask for bytes that are not there.
-    if (bytes.length === 0) throw new Error('The file changed while it was being read')
+    if (bytes.length === 0) throw new Error(CHANGED)
   }
 }

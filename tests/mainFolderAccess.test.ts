@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { readAssetInPieces } from '../src/main/ipc/assetPieces'
-import { FILE_ASSET_PIECE_BYTES } from '../src/shared/fileAssets'
+import { FILE_ASSET_PIECE_BYTES, FILES_WRITE_DIRECT_MAX_BYTES, saveExceedsRequest } from '../src/shared/fileAssets'
 
 function sourcesUnder(directory: string): string[] {
   return readdirSync(directory).flatMap((name) => {
@@ -26,6 +26,19 @@ describe('the Electron main process and folders', () => {
       expect(source, channel).toContain(`'${channel}'`)
     }
     expect(source).not.toMatch(/resolveFilesRoot|resolveGitCwd|homedir/)
+  })
+})
+
+describe('a save from the editor', () => {
+  it('fits one daemon request when it is under the 4 MiB frame, counting what JSON makes of it', () => {
+    expect(saveExceedsRequest('')).toBe(false)
+    expect(saveExceedsRequest('a'.repeat(FILES_WRITE_DIRECT_MAX_BYTES - 2))).toBe(false)
+    expect(saveExceedsRequest('a'.repeat(FILES_WRITE_DIRECT_MAX_BYTES - 1))).toBe(true)
+    expect(saveExceedsRequest('a'.repeat(5 * 1024 * 1024))).toBe(true)
+    // Escapes and multi-byte characters take more bytes than characters.
+    expect(saveExceedsRequest('\n'.repeat(FILES_WRITE_DIRECT_MAX_BYTES / 2 + 1))).toBe(true)
+    expect(saveExceedsRequest('語'.repeat(FILES_WRITE_DIRECT_MAX_BYTES / 3 + 1))).toBe(true)
+    expect(saveExceedsRequest('語'.repeat(FILES_WRITE_DIRECT_MAX_BYTES / 3 - 10))).toBe(false)
   })
 })
 
@@ -52,6 +65,11 @@ describe('a preview read in pieces', () => {
     const asset = await readAssetInPieces(async () => piece(Buffer.alloc(0)))
     expect(asset.data).toHaveLength(0)
     expect(asset.size).toBe(0)
+  })
+
+  it('refuses pieces of a file that changed size between them', async () => {
+    await expect(readAssetInPieces(async (offset) => (offset === 0 ? piece(Buffer.alloc(4), 10) : piece(Buffer.alloc(6), 9)))).rejects.toThrow(/changed while/)
+    await expect(readAssetInPieces(async (offset) => (offset === 0 ? piece(Buffer.alloc(8), 10) : piece(Buffer.alloc(8), 10)))).rejects.toThrow(/changed while/)
   })
 
   it('stops when the file shrinks under the read', async () => {

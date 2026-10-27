@@ -6,7 +6,7 @@ import { MousseMainService } from '../src/mms/MousseMainService'
 import { LocalMmsClient } from '../src/mms/protocol/client'
 import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
-import { FILE_ASSET_PIECE_BYTES } from '../src/shared/fileAssets'
+import { FILE_ASSET_PIECE_BYTES, FILES_WRITE_DIRECT_MAX_BYTES, SAVE_TOO_LARGE_MESSAGE } from '../src/shared/fileAssets'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
 
 /**
@@ -74,7 +74,19 @@ describe('files and Git reads by thread, through the daemon', () => {
       const standalone = mms.threads.createThread('No project')
       expect(await rootOf({ threadId: standalone.id })).toBe(homedir())
       expect(await rootOf({})).toBe(homedir())
-      expect(await rootOf({ threadId: 'no-such-thread' })).toBe(homedir())
+    })
+
+    it('is refused for a thread or project the daemon does not know, never answered with the home folder', async () => {
+      const p = project()
+      const named = [{ threadId: 'no-such-thread' }, { projectId: 'no-such-project' }, { threadId: 'no-such-thread', projectId: p.id }]
+      for (const params of named) {
+        await expect(window.request('files.root', params)).rejects.toMatchObject({ code: expect.stringMatching(/^(thread|project)_not_found$/) })
+        await expect(window.request('files.list', { ...params, path: '' })).rejects.toMatchObject({ code: expect.stringMatching(/not_found$/) })
+        await expect(window.request('files.read', { ...params, path: 'value.txt' })).rejects.toMatchObject({ code: expect.stringMatching(/not_found$/) })
+        await expect(window.request('files.readAsset', { ...params, path: 'a.png' })).rejects.toMatchObject({ code: expect.stringMatching(/not_found$/) })
+        await expect(window.request('files.writeDirect', { ...params, path: 'mousse-must-not-exist.txt', content: 'x' })).rejects.toMatchObject({ code: expect.stringMatching(/not_found$/) })
+      }
+      expect(existsSync(join(homedir(), 'mousse-must-not-exist.txt'))).toBe(false)
     })
 
     it('lists, reads and saves in that folder, and keeps a path inside it', async () => {
@@ -121,6 +133,18 @@ describe('files and Git reads by thread, through the daemon', () => {
       await expect(window.request('files.write', { threadId: t.threadId, path: 'big2.txt', content: big })).rejects.toThrow(/max length/)
       const actions = await window.request<{ actions: unknown[] }>('actions.list', { threadId: t.threadId })
       expect(actions.actions).toHaveLength(0)
+    })
+
+    it('saves up to the request frame and refuses, in plain words, a save that would not fit it', async () => {
+      const p = project()
+      const fits = 'a'.repeat(FILES_WRITE_DIRECT_MAX_BYTES - 100)
+      await window.request('files.writeDirect', { projectId: p.id, path: 'near-limit.txt', content: fits })
+      expect(readFileSync(join(f.repo, 'near-limit.txt'), 'utf8')).toBe(fits)
+      // Over the save limit but still a frame the transport carries: the daemon refuses it with the reason.
+      const tooBig = 'a'.repeat(FILES_WRITE_DIRECT_MAX_BYTES + 1000)
+      await expect(window.request('files.writeDirect', { projectId: p.id, path: 'too-big.txt', content: tooBig }))
+        .rejects.toMatchObject({ code: 'file_too_large', message: SAVE_TOO_LARGE_MESSAGE })
+      expect(existsSync(join(f.repo, 'too-big.txt'))).toBe(false)
     })
 
     it('saves an empty file, and counts the lines it changed', async () => {

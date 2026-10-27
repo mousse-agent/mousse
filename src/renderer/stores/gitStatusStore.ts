@@ -71,7 +71,7 @@ export interface GitRefreshOptions {
   /** Marks refreshes the user did not ask for. `loading` is only ever set for the first fetch, so this does not change the state. */
   quiet?: boolean
   /** Which folder the daemon reads: the thread's own worktree, else the project's folder. */
-  scope?: GitScope
+  scope: GitScope
 }
 
 interface Flight {
@@ -87,7 +87,6 @@ function patchEntry(key: string, patch: Partial<GitStatusEntry>) {
   }))
 }
 
-const NO_SCOPE: GitScope = { projectId: null, workspaceThreadId: null }
 
 /** Keep the previous reference when nothing changed, so unchanged data does not re-render readers. */
 export function keepIfEqual<T>(previous: T, next: T): T {
@@ -136,7 +135,7 @@ async function fetchInto(key: string, scope: GitScope): Promise<void> {
  * forced call that arrives mid-fetch queues exactly one more fetch behind it. Never
  * rejects: a failed status fetch is recorded on the entry as `error`.
  */
-export function refreshGitStatus(key: string, options: GitRefreshOptions = {}): Promise<void> {
+export function refreshGitStatus(key: string, options: GitRefreshOptions): Promise<void> {
   const flight = flights.get(key)
   if (flight) {
     if (options.force) flight.rerun = true
@@ -156,7 +155,7 @@ export function refreshGitStatus(key: string, options: GitRefreshOptions = {}): 
     try {
       do {
         next.rerun = false
-        await fetchInto(key, options.scope ?? NO_SCOPE)
+        await fetchInto(key, options.scope)
       } while (next.rerun)
     } finally {
       flights.delete(key)
@@ -415,7 +414,7 @@ export async function initGitRepository(key: string, scope: GitScope): Promise<v
   await refreshAfterMutation(key, projectScope)
 }
 
-const retained = new Map<string, { count: number; scope?: GitScope }>()
+const retained = new Map<string, { count: number; scope: GitScope }>()
 let detach: (() => void) | null = null
 
 function refreshRetained(force: boolean) {
@@ -440,9 +439,9 @@ function attach() {
 }
 
 /** Keep a folder's state refreshing on focus and run completion until the returned release runs. */
-export function retainGitPath(key: string, scope?: GitScope): () => void {
+export function retainGitPath(key: string, scope: GitScope): () => void {
   const current = retained.get(key)
-  retained.set(key, { count: (current?.count ?? 0) + 1, scope: scope ?? current?.scope })
+  retained.set(key, { count: (current?.count ?? 0) + 1, scope })
   attach()
   let released = false
   return () => {
