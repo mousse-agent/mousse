@@ -365,5 +365,6 @@ export interface ProviderAdapter {
    * null when the runtime cannot branch it (the fork then falls back to a portable handoff). Only
    * called when `featureGates.forkStrategy(caps)` is `native` and `ref` names a session.
    */
-  forkSession?(ref: ProviderRef, atTurnOrdinal: number): Promise<ProviderRef | null>
+  /** `target`: the thread the fork belongs to (a runtime that keeps sessions per thread binds the new one to it). */
+  forkSession?(ref: ProviderRef, atTurnOrdinal: number, target?: { threadId: string }): Promise<ProviderRef | null>
 }

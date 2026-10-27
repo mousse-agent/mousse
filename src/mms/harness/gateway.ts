@@ -160,7 +160,7 @@ export interface HarnessGateway {
   /** Stops a native session by its ref (an instance disabled since can still be stopped). */
   interrupt(ref: ProviderRef): Promise<'interrupted' | 'not_active'>
   /** A native fork of `ref` after `atTurnOrdinal`, or null when the instance cannot branch it. */
-  forkSession(ref: ProviderRef, atTurnOrdinal: number): Promise<ProviderRef | null>
+  forkSession(ref: ProviderRef, atTurnOrdinal: number, target?: { threadId: string }): Promise<ProviderRef | null>
   /**
    * Ends what a thread's process still runs in the background (`ProviderAdapter.stopThread`), on
    * whichever instance holds it: the thread may have switched instances since. 'stopped' when one did.
@@ -1386,9 +1386,9 @@ export class Harness implements HarnessGateway {
     return this.interruptOn(this.refRecord(ref), ref)
   }
 
-  async forkSession(ref: ProviderRef, atTurnOrdinal: number): Promise<ProviderRef | null> {
+  async forkSession(ref: ProviderRef, atTurnOrdinal: number, target?: { threadId: string }): Promise<ProviderRef | null> {
     const adapter = this.refRecord(ref).runtime.adapter
-    return adapter.forkSession ? adapter.forkSession(ref, atTurnOrdinal) : null
+    return adapter.forkSession ? adapter.forkSession(ref, atTurnOrdinal, target) : null
   }
 
   async stopThread(threadId: string): Promise<'stopped' | 'not_active'> {

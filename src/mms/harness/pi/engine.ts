@@ -1,13 +1,13 @@
 import { execFile } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdirSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync } from 'node:fs'
+import { join, resolve as resolvePath } from 'node:path'
 import { promisify } from 'node:util'
 import { isRetryableAssistantError } from '@earendil-works/pi-ai'
 import { AppError } from '../../../shared/errors'
 import { harnessAppError } from '../../../shared/harness/types'
 import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
-import { atomicWriteJsonSync } from '../../data/AtomicFs'
+import { atomicWriteFileSync, atomicWriteJsonSync } from '../../data/AtomicFs'
 import { normalizeProviderError } from '../../orchestrator/providerErrors'
 import type {
   AdapterHost,
@@ -19,6 +19,7 @@ import type {
   TurnResult,
   TurnSink
 } from '../../run/adapters/ProviderAdapter'
+import { CumulativeStream } from '../../run/transcript/promptRuntime'
 import type { ProviderRef } from '../../run/types'
 import type { InstanceEnv } from '../env'
 import { killTree } from '../spawn'
@@ -35,6 +36,7 @@ import type { SpendModelFacts } from '../policy'
 import type { TurnBudget } from '../budget'
 import { piLaunch, startPiProcess, type PiLaunch, type PiProcess, type PiRuntimePaths, type PiThinkingLevel } from './launch'
 import { PI_PATH_ARGUMENTS, piResolvePath, piResolveReadPath } from './paths'
+import { piCredentialHandler, piOAuthCredential, piOAuthHandle, writePiAuth, type PiOAuthSource } from './oauthBroker'
 import type { PiRpcEvent, PiRpcExit, PiRpcRequest } from './rpcClient'
 import { preparePiHome, type PiSettingsInput } from './settings'
 
@@ -106,6 +108,12 @@ export interface PiRpcEngineOptions {
   catalog: () => PiEngineCatalog
   /** The stored key of the instance; it reaches Pi only in the factory's catalogue answer. */
   apiKey?: () => string | undefined
+  /**
+   * Mousse's OAuth credentials (`piOAuthBroker`): the instance provider's one is written to Pi's
+   * `auth.json` before every start with an opaque handle for its refresh token, and Pi's refreshes
+   * come back to it over `/pi/credential`.
+   */
+  oauth?: PiOAuthSource
   /** Variables configured on the instance (ids only; the launcher refuses credentials). */
   extraEnv?: () => Readonly<Record<string, string>> | undefined
   /** Git Bash on Windows. */
@@ -131,12 +139,86 @@ export interface PiRpcEngineOptions {
   onSpawn?: (pid: number, threadId: string) => void
   /** Variables for a test build of the extension (`MOUSSE_PI_TEST_*`). */
   testEnv?: Readonly<Record<`MOUSSE_PI_TEST_${string}`, string>>
+  /**
+   * A line for the thread's user (`history_injected`): a turn started a new Pi session with the
+   * thread's history handed over, seeded into the session or as a prompt preamble.
+   */
+  notice?: (threadId: string, notice: { code: 'history_injected'; message: string }) => void
+  /** Test seam: runs after a seeded session file was written, before Pi loads it (tests corrupt it). */
+  onSeed?: (file: string) => void
 }
 
 interface SavedThread {
   sessionId: string
   historyFingerprint?: string
   instructionsHash?: string
+  /** The session's leaf entry after the last completed turn (the cursor of `get_entries since`). */
+  leafId?: string
+  /** The leaf entry each completed turn left, by the turn's key (`nativeTurnId`): a fork's branch point. */
+  turnLeaves?: Record<string, string>
+}
+
+/** A session Mousse wrote from a thread's transcript, and the roles Pi must report back for it. */
+interface PiSeed {
+  sessionId: string
+  file: string
+  roles: string[]
+}
+
+/** How many turns' leaves a thread keeps for forks. */
+const FORKABLE_TURNS = 200
+/** Messages Pi's `convertToLlm` passes to the model as they are: the only ones a seeded session holds. */
+const SEED_ROLES = new Set(['user', 'assistant', 'toolResult'])
+
+/** The file of a Pi session in `dir` (Pi names them `<timestamp>_<sessionId>.jsonl`). */
+function sessionFileOf(dir: string, sessionId: string): string | undefined {
+  try {
+    const name = readdirSync(dir).find((entry) => entry.endsWith(`_${sessionId}.jsonl`))
+    return name ? join(dir, name) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** The header line of a Pi session file (`{type:'session', id, cwd, ...}`), read without loading the file. */
+function sessionHeaderOf(file: string): { line: string; header: { type?: unknown; id?: unknown; cwd?: unknown } } | undefined {
+  let fd: number | undefined
+  try {
+    fd = openSync(file, 'r')
+    const buffer = Buffer.alloc(64 * 1024)
+    const read = readSync(fd, buffer, 0, buffer.length, 0)
+    const text = buffer.subarray(0, read).toString('utf8')
+    const end = text.indexOf('\n')
+    if (end < 0) return undefined
+    const line = text.slice(0, end)
+    const header = JSON.parse(line) as { type?: unknown; id?: unknown; cwd?: unknown }
+    return header?.type === 'session' ? { line, header } : undefined
+  } catch {
+    return undefined
+  } finally {
+    if (fd !== undefined) closeSync(fd)
+  }
+}
+
+/**
+ * A saved session is resumable in `cwd` only when its file is there and its header names `cwd`:
+ * Pi finds `--session <id>` among the sessions of its working directory, and one recorded for
+ * another directory (a fork's first turn in its own worktree) would make it ask on stdin. Mousse
+ * owns the files, so the header is moved to `cwd`. False when the session cannot be resumed.
+ */
+function prepareSession(dir: string, sessionId: string, cwd: string): boolean {
+  const file = sessionFileOf(dir, sessionId)
+  const found = file ? sessionHeaderOf(file) : undefined
+  if (!file || !found || found.header.id !== sessionId) return false
+  const target = resolvePath(cwd)
+  if (typeof found.header.cwd === 'string' && resolvePath(found.header.cwd) === target) return true
+  try {
+    const content = readFileSync(file, 'utf8')
+    atomicWriteFileSync(file, `${JSON.stringify({ ...found.header, cwd: target })}${content.slice(found.line.length)}`, { mode: 0o600 })
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** A Pi process failed before or during a turn in a way Mousse must not paper over. */
@@ -230,7 +312,10 @@ class PiTurn {
   retryExhaustedError: AppError | undefined
   /** Pi's retry limit, as its last `auto_retry_start` stated it. */
   maxRetries = 0
-  lastText = ''
+  /** The text of each assistant message that ended the turn's steps, in order (the reply joins them). */
+  readonly texts: string[] = []
+  /** The Stop in progress: a second caller (thread Stop after a turn Stop) waits for the same one. */
+  stopping: Promise<'interrupted' | 'not_active'> | undefined
   /** Pi acknowledged the prompt (its preflight ended); before that, Stop must kill the process. */
   promptAccepted = false
   progressed = false
@@ -238,7 +323,10 @@ class PiTurn {
   readonly openTools = new Map<string, { name: string; mousse: boolean }>()
   readonly steers: Array<{ text: string; token?: string }> = []
   usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+  /** The current assistant message's text blocks by `contentIndex`. */
   text = new Map<number, string>()
+  /** The turn's reply as one cumulative stream, closed with the joined text when the turn ends. */
+  readonly reply: CumulativeStream
   thinking = ''
   settled!: () => void
   failed!: (error: unknown) => void
@@ -273,12 +361,19 @@ class PiTurn {
         })
       : undefined
     this.episode = new WriterEpisode(writer ? { acquire: writer } : {})
+    this.reply = new CumulativeStream((phase, content) => sink.text({ phase, content, contentIndex: 0 }))
     this.done = new Promise<void>((resolve, reject) => {
       this.settled = resolve
       this.failed = reject
     })
     // A turn that ended through one path must not also reject unobserved through another.
     this.done.catch(() => {})
+  }
+
+  /** The reply so far: every ended step's text, then the current message's. */
+  replyText(): string {
+    const current = [...this.text.entries()].sort(([a], [b]) => a - b).map(([, text]) => text).join('')
+    return [...this.texts, current].filter((text) => text.trim()).join('\n\n')
   }
 
   progress(): void {
@@ -362,9 +457,16 @@ export class PiRpcEngine implements ProviderAdapter {
   private readonly closing = new Set<PiThreadProcess>()
   private readonly starts = new Set<Promise<unknown>>()
   private stopped = false
+  /**
+   * The `refresh` Pi holds in `auth.json`: opaque, for this instance and this engine only. Every
+   * process of the instance shares its agent dir (and so the file); a handle from another instance
+   * or an earlier run of Mousse is refused.
+   */
+  private readonly oauthHandle: string
 
   constructor(private readonly options: PiRpcEngineOptions) {
     this.capabilities = options.capabilities
+    this.oauthHandle = piOAuthHandle(options.instanceId)
   }
 
   describe(_model: string): ModelInfo {
@@ -567,7 +669,11 @@ export class PiRpcEngine implements ProviderAdapter {
       ...(this.options.compaction ? { compaction: this.options.compaction() } : {}),
       ...(this.options.settings?.retry ? { retry: this.options.settings.retry } : {})
     })
+    const grant = await this.options.oauth?.credential(this.options.provider)
+    if (this.stopped || thread.cancelled || cancelled()) throw stopping()
+    writePiAuth(env.home, this.options.provider, grant ? piOAuthCredential(grant, this.oauthHandle) : undefined)
     const registration = this.bridge.register({
+      ...(this.options.oauth ? { credential: piCredentialHandler({ provider: this.options.provider, handle: this.oauthHandle, source: this.options.oauth }) } : {}),
       catalog: async (first) => {
         const catalog = this.options.catalog()
         const key = first ? this.options.apiKey?.() : undefined
@@ -875,15 +981,20 @@ export class PiRpcEngine implements ProviderAdapter {
       mkdirSync(cwd, { recursive: true })
       const history = input.nativeHistory ?? ''
       const saved = this.saved()[input.threadId]
-      const resume = saved && saved.historyFingerprint === fingerprint(history) ? saved.sessionId : undefined
+      let resume = saved && saved.historyFingerprint === fingerprint(history) ? saved.sessionId : undefined
+      // A cold resume needs the session's file, in this workspace (a fork's first turn runs in its own).
+      const warm = this.threads.get(input.threadId)
+      const warmOnIt = warm?.alive && warm.cwd === cwd && warm.sessionId === resume
+      if (resume && !warmOnIt && !prepareSession(this.sessionsDir, resume, cwd)) resume = undefined
       let started: { thread: PiThreadProcess; resumed: boolean }
       try {
         if (input.signal.aborted || starting.cancelled) throw new Error('aborted')
-        started = await this.processFor(input, cwd, resume, starting)
+        started = resume || !history ? await this.processFor(input, cwd, resume, starting) : await this.handOver(input, cwd, starting)
       } catch (error) {
         if (input.signal.aborted || starting.cancelled) return this.abortedResult(input, ref, startedAt)
         throw error
       }
+      if (history && !resume) this.historyNotice(input.threadId)
       return await this.runTurn(started.thread, started.resumed, key, starting, ref, input, sink, ctl, host, history)
     } finally {
       input.signal.removeEventListener('abort', onEarlyAbort)
@@ -957,12 +1068,19 @@ export class PiRpcEngine implements ProviderAdapter {
       }
     }
     sink.providerMetrics({ totalResponseTimeMs: Date.now() - turn.startedAt, totalTokensUsed: turn.usage.input + turn.usage.output, ...(context ? { context } : {}) })
-    const text = turn.lastText
+    // Every step's text, as the legacy loop's reply joins them (a steered turn answers more than once).
+    // A stopped turn keeps its partial reply; a finished one is every step's text, joined.
+    const text = stopped ? turn.replyText() : turn.texts.join('\n\n')
+    // A stopped or failed reply stays open: the orchestrator closes it as incomplete.
+    if (!stopped) turn.reply.complete(text)
     if (!stopped) {
       const committed = host.context.nativeHistoryAfterTurn(text)
-      if (thread.sessionId) this.save(input.threadId, { sessionId: thread.sessionId, historyFingerprint: fingerprint(committed), instructionsHash: fingerprint(host.bridge?.sessionInstructions ?? '') })
+      if (thread.sessionId) {
+        const leaves = await this.turnLeaf(thread, input.threadId, key)
+        this.save(input.threadId, { sessionId: thread.sessionId, historyFingerprint: fingerprint(committed), instructionsHash: fingerprint(host.bridge?.sessionInstructions ?? ''), ...leaves })
+      }
     } else if (thread.sessionId && thread.alive && host.context.nativeHistoryNow) {
-      this.save(input.threadId, { sessionId: thread.sessionId, historyFingerprint: fingerprint(host.context.nativeHistoryNow()) })
+      this.save(input.threadId, { sessionId: thread.sessionId, historyFingerprint: fingerprint(host.context.nativeHistoryNow()), ...this.leavesOf(input.threadId, thread.sessionId) })
     }
     const contextKey = `${input.llmProvider}:${input.model}`
     return {
@@ -983,8 +1101,14 @@ export class PiRpcEngine implements ProviderAdapter {
    * Stop: fence steers, clear Pi's queue (returning what it held once), revoke the episode, abort.
    * Past the deadline the tree is killed, and the turn ends only once it is gone.
    */
-  private async stopTurn(thread: PiThreadProcess, turn: PiTurn): Promise<'interrupted' | 'not_active'> {
-    if (turn.phase === 'stopping') return 'interrupted'
+  private stopTurn(thread: PiThreadProcess, turn: PiTurn): Promise<'interrupted' | 'not_active'> {
+    // One graceful Stop per turn: a later caller (thread Stop, deletion) waits for it instead of
+    // cutting it off with a kill before `clear_queue` and `abort` reached Pi.
+    turn.stopping ??= this.stopTurnOnce(thread, turn)
+    return turn.stopping
+  }
+
+  private async stopTurnOnce(thread: PiThreadProcess, turn: PiTurn): Promise<'interrupted' | 'not_active'> {
     turn.phase = 'stopping'
     turn.episode.revoke()
     if (!thread.alive) {
@@ -1073,9 +1197,182 @@ export class PiRpcEngine implements ProviderAdapter {
     }
   }
 
-  /** Native fork is not wired yet: a fork uses the portable handoff. */
-  async forkSession(_ref: ProviderRef, _atTurnOrdinal: number): Promise<ProviderRef | null> {
-    return null
+  /**
+   * Native fork (SPEC §16.2): a new Pi session holding the source session up to the end of the turn
+   * `ref` names (its key, `nativeTurnId`, not the ordinal: Mousse's run ordinals do not count Pi's
+   * prompts). `clone` when that turn is the session's latest, else `fork` before the prompt that
+   * followed it. A process of its own on the source session does it, so the source thread's process
+   * is untouched, under the command deadline. `target` is the thread the fork belongs to: its first
+   * turn resumes the new session. Null (a portable handoff) without a target to bind the session
+   * to, when the turn's branch point is unknown (a turn before 2c, a stopped one) or Pi declines.
+   */
+  async forkSession(ref: ProviderRef, _atTurnOrdinal: number, target?: { threadId: string }): Promise<ProviderRef | null> {
+    if (!target || !ref.sessionId || !ref.nativeTurnId || !ref.model || this.stopped) return null
+    const leaf = Object.values(this.saved()).find((entry) => entry.sessionId === ref.sessionId)?.turnLeaves?.[ref.nativeTurnId]
+    const file = leaf ? sessionFileOf(this.sessionsDir, ref.sessionId) : undefined
+    const cwd = file ? sessionHeaderOf(file)?.header.cwd : undefined
+    if (!leaf || typeof cwd !== 'string') return null
+    const { modelId, thinking } = this.thinkingFor(ref.model)
+    const thread = new PiThreadProcess(`fork:${randomUUID()}`, cwd, modelId, thinking)
+    thread.keyFingerprint = fingerprint(this.options.apiKey?.() ?? '')
+    // Tracked like a thread's process, so `stop()` kills it; no turn ever runs on it.
+    this.threads.set(thread.threadId, thread)
+    try {
+      const started = this.start(thread, ref.sessionId)
+      thread.starting = started
+      this.starts.add(started)
+      try {
+        await started
+      } finally {
+        this.starts.delete(started)
+      }
+      const after = await this.send<{ entries: Array<{ id: string; type: string; message?: { role?: string } }> }>(thread, { type: 'get_entries', since: leaf })
+      const next = after.entries.find((entry) => entry.type === 'message')
+      if (!next) {
+        if ((await this.send<{ cancelled: boolean }>(thread, { type: 'clone' })).cancelled) return null
+      } else {
+        const { messages } = await this.send<{ messages: Array<{ entryId: string }> }>(thread, { type: 'get_fork_messages' })
+        if (next.message?.role !== 'user' || !messages.some((message) => message.entryId === next.id)) return null
+        if ((await this.send<{ cancelled: boolean }>(thread, { type: 'fork', entryId: next.id })).cancelled) return null
+      }
+      const { sessionId } = await this.send<{ sessionId?: string }>(thread, { type: 'get_state' })
+      // Pi writes a branch once it holds a reply; one it did not write cannot be resumed.
+      if (!sessionId || sessionId === ref.sessionId || !sessionFileOf(this.sessionsDir, sessionId)) return null
+      // The fork's thread has no history of its own before its first turn, which resumes the branch.
+      this.save(target.threadId, { sessionId, historyFingerprint: fingerprint('') })
+      return { provider: ref.provider, ...(ref.instanceId ? { instanceId: ref.instanceId } : {}), model: ref.model, sessionId }
+    } finally {
+      await within(this.kill(thread), CLEANUP_DEADLINE_MS)
+    }
+  }
+
+  // -- Sessions handed over -------------------------------------------------------------------------
+
+  private get sessionsDir(): string {
+    return join(this.options.stateDir, 'sessions')
+  }
+
+  /**
+   * A new session for a thread with history and no session to resume (a thread from the pi loop,
+   * whose refs name none, or one whose session was forgotten): seeded from the thread's transcript
+   * and checked with `get_messages`. Anything wrong, and the history goes in the prompt instead
+   * (`resumed: false`).
+   */
+  private async handOver(input: TurnInput, cwd: string, starting: StartingTurn): Promise<{ thread: PiThreadProcess; resumed: boolean }> {
+    let seed: PiSeed | undefined
+    try {
+      seed = this.seedSession(input, cwd)
+    } catch (error) {
+      console.warn('[harness] could not seed a Pi session', { instanceId: this.options.instanceId, error: error instanceof Error ? error.message : String(error) })
+    }
+    if (seed) {
+      try {
+        const started = await this.processFor(input, cwd, seed.sessionId, starting)
+        if (await this.seedLoaded(started.thread, seed)) return started
+        await within(this.kill(started.thread), CLEANUP_DEADLINE_MS)
+      } catch (error) {
+        if (input.signal.aborted || starting.cancelled) throw error
+      }
+      console.warn('[harness] Pi did not load the seeded session; the history goes in the prompt', { instanceId: this.options.instanceId })
+      try {
+        rmSync(seed.file, { force: true })
+      } catch {
+        // A stray seed is never resumed: no thread maps to it.
+      }
+    }
+    const started = await this.processFor(input, cwd, undefined, starting)
+    return { thread: started.thread, resumed: false }
+  }
+
+  /**
+   * Writes a v3 Pi session holding the thread's transcript before the admitted message: the
+   * messages Pi's `convertToLlm` passes as they are (user, assistant, tool results), chained in
+   * order, and the compaction memory as a compaction entry that keeps all of them. Undefined when
+   * there is nothing to seed.
+   */
+  private seedSession(input: TurnInput, cwd: string): PiSeed | undefined {
+    const prior = input.messages.at(-1)?.role === 'user' ? input.messages.slice(0, -1) : input.messages
+    const messages = prior.filter((message) => SEED_ROLES.has(message.role))
+    const summary = input.contextSummary?.trim()
+    if (!messages.length && !summary) return undefined
+    const sessionId = randomUUID()
+    const timestamp = new Date().toISOString()
+    const ids = new Set<string>()
+    const entryId = (): string => {
+      let id = randomUUID().slice(0, 8)
+      while (ids.has(id)) id = randomUUID().slice(0, 8)
+      ids.add(id)
+      return id
+    }
+    const lines: Array<Record<string, unknown>> = [{ type: 'session', version: 3, id: sessionId, timestamp, cwd: resolvePath(cwd) }]
+    const roles: string[] = []
+    let parentId: string | null = null
+    let firstKeptEntryId: string | undefined
+    for (const message of messages) {
+      const id = entryId()
+      firstKeptEntryId ??= id
+      lines.push({ type: 'message', id, parentId, timestamp, message })
+      roles.push(message.role)
+      parentId = id
+    }
+    if (summary) {
+      lines.push({ type: 'compaction', id: entryId(), parentId, timestamp, summary, tokensBefore: 0, ...(firstKeptEntryId ? { firstKeptEntryId } : {}) })
+      roles.unshift('compactionSummary')
+    }
+    mkdirSync(this.sessionsDir, { recursive: true, mode: 0o700 })
+    const file = join(this.sessionsDir, `${timestamp.replace(/[:.]/g, '-')}_${sessionId}.jsonl`)
+    atomicWriteFileSync(file, `${lines.map((line) => JSON.stringify(line)).join('\n')}\n`, { mode: 0o600 })
+    this.options.onSeed?.(file)
+    return { sessionId, file, roles }
+  }
+
+  /** Pi runs the seeded session and holds exactly the seeded messages. */
+  private async seedLoaded(thread: PiThreadProcess, seed: PiSeed): Promise<boolean> {
+    if (thread.sessionId !== seed.sessionId) return false
+    try {
+      const { messages } = await this.send<{ messages: Array<{ role?: unknown }> }>(thread, { type: 'get_messages' })
+      return messages.length === seed.roles.length && messages.every((message, index) => message?.role === seed.roles[index])
+    } catch {
+      return false
+    }
+  }
+
+  /** The thread is told its history was handed to a new session (`history_injected`). */
+  private historyNotice(threadId: string): void {
+    try {
+      this.options.notice?.(threadId, { code: 'history_injected', message: `${this.options.label} started a new session for this chat, with the chat history handed over.` })
+    } catch (error) {
+      console.warn('[harness] notice failed', error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /** The fork points the thread keeps for `sessionId` (none when it ran another session). */
+  private leavesOf(threadId: string, sessionId: string): Pick<SavedThread, 'leafId' | 'turnLeaves'> {
+    const saved = this.saved()[threadId]
+    if (saved?.sessionId !== sessionId) return {}
+    return { ...(saved.leafId ? { leafId: saved.leafId } : {}), ...(saved.turnLeaves ? { turnLeaves: saved.turnLeaves } : {}) }
+  }
+
+  /**
+   * The session's leaf after a completed turn, kept under the turn's key beside the thread's earlier
+   * turns in the same session. Read with `get_entries since` the previous leaf, so only the turn's
+   * own entries cross the pipe. Without it the turn cannot be forked natively.
+   */
+  private async turnLeaf(thread: PiThreadProcess, threadId: string, key: string): Promise<Pick<SavedThread, 'leafId' | 'turnLeaves'>> {
+    const kept = this.leavesOf(threadId, thread.sessionId ?? '')
+    const read = async (since?: string): Promise<string | undefined> => {
+      if (!thread.alive) return undefined
+      try {
+        const { leafId } = await this.send<{ leafId: string | null }>(thread, { type: 'get_entries', ...(since ? { since } : {}) })
+        return leafId ?? undefined
+      } catch {
+        return undefined
+      }
+    }
+    // A cursor Pi no longer knows is read again from the start.
+    const leafId = (await read(kept.leafId)) ?? (kept.leafId ? await read() : undefined)
+    if (!leafId) return kept
+    return { leafId, turnLeaves: Object.fromEntries(Object.entries({ ...kept.turnLeaves, [key]: leafId }).slice(-FORKABLE_TURNS)) }
   }
 
   // -- Events -------------------------------------------------------------------------------------
@@ -1216,7 +1513,9 @@ export class PiRpcEngine implements ProviderAdapter {
         if (message.stopReason === 'aborted') return
         turn.pendingError = undefined
         const text = textOf(message)
-        if (text.trim()) turn.lastText = text
+        if (text.trim()) turn.texts.push(text)
+        // Counted once: the message's blocks are in `texts` now.
+        turn.text = new Map()
         return
       }
       case 'tool_execution_start': {
@@ -1266,6 +1565,8 @@ export class PiRpcEngine implements ProviderAdapter {
         return
       }
       case 'auto_retry_start':
+        // The failed attempt's partial text is not part of the reply.
+        turn.text = new Map()
         // Pi dropped the failed attempt from its context; its partial output is superseded.
         turn.pendingError = undefined
         turn.maxRetries = Number(event.maxAttempts) || turn.maxRetries
@@ -1320,20 +1621,16 @@ export class PiRpcEngine implements ProviderAdapter {
     const { sink } = turn
     turn.progress()
     switch (update.type) {
+      // One reply bubble per turn, as the legacy loop shows it: every step's text, joined.
       case 'text_start':
         turn.text.set(update.contentIndex, '')
-        return sink.text({ phase: 'start', content: '', contentIndex: update.contentIndex })
-      case 'text_delta': {
-        if (!turn.text.has(update.contentIndex)) sink.text({ phase: 'start', content: '', contentIndex: update.contentIndex })
-        const content = `${turn.text.get(update.contentIndex) ?? ''}${update.delta ?? ''}`
-        turn.text.set(update.contentIndex, content)
-        return sink.text({ phase: 'delta', content, contentIndex: update.contentIndex })
-      }
-      case 'text_end': {
-        const content = update.content ?? turn.text.get(update.contentIndex) ?? ''
-        turn.text.set(update.contentIndex, content)
-        return sink.text({ phase: 'complete', content, contentIndex: update.contentIndex })
-      }
+        return turn.reply.update(turn.replyText())
+      case 'text_delta':
+        turn.text.set(update.contentIndex, `${turn.text.get(update.contentIndex) ?? ''}${update.delta ?? ''}`)
+        return turn.reply.update(turn.replyText())
+      case 'text_end':
+        turn.text.set(update.contentIndex, update.content ?? turn.text.get(update.contentIndex) ?? '')
+        return turn.reply.update(turn.replyText())
       case 'thinking_start':
         turn.thinking = ''
         return sink.thinking({ phase: 'start', content: '' })

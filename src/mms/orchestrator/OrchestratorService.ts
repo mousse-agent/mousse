@@ -2482,7 +2482,7 @@ export class OrchestratorService extends EventEmitter {
         let branched: ProviderRef | null = null
         if (forkStrategy(caps) === 'native' && sourceRef?.sessionId && sourceRef.provider === to.provider) {
           try {
-            branched = await this.harness.forkSession(sourceRef, fork.sourceRunOrdinal)
+            branched = await this.harness.forkSession(sourceRef, fork.sourceRunOrdinal, { threadId })
           } catch (error) {
             console.warn('native fork failed; using a portable handoff', { runId, error: error instanceof Error ? error.message : String(error) })
           }
