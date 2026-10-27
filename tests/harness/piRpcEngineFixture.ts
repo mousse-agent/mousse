@@ -40,6 +40,7 @@ export interface SetupOptions {
   adjustLaunch?: PiRpcEngineOptions['adjustLaunch']
   holdTurn?: PiRpcEngineOptions['holdTurn']
   mousseTools?: PiRpcEngineOptions['mousseTools']
+  userMcpTools?: PiRpcEngineOptions['userMcpTools']
   /** The mock provider's models instead of the one OpenAI-compatible model (`url`: the recorder's). */
   models?: (url: string) => unknown[]
   extraEnv?: Record<string, string>
@@ -89,6 +90,7 @@ export async function setup(cleanups: Array<() => unknown>, options: SetupOption
     ...(options.adjustLaunch ? { adjustLaunch: options.adjustLaunch } : {}),
     ...(options.holdTurn ? { holdTurn: options.holdTurn } : {}),
     ...(options.mousseTools ? { mousseTools: options.mousseTools } : {}),
+    ...(options.userMcpTools ? { userMcpTools: options.userMcpTools } : {}),
     ...(options.retry ? { settings: { retry: options.retry } } : { settings: { retry: { enabled: false, maxRetries: 0, baseDelayMs: 10, provider: { maxRetries: 0 } } } })
   })
   cleanups.push(() => engine.stop())

@@ -73,7 +73,7 @@ import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/
 import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { stopStrategy } from '../run/CommandPolicy'
-import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type AgentApprovalResult, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry } from '../run/mcp/appTools'
+import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type AgentApprovalResult, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, type UserMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, LAUNCHED_THREAD_ACCESS_CEILING, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { THREAD_CREATE_MAX_ACTIVE_PER_THREAD } from '../run/mcp/appTools/thread'
 import { createHash } from 'node:crypto'
@@ -2871,7 +2871,13 @@ export class OrchestratorService extends EventEmitter {
    * over this thread owner, with the run engine's thread tools and the turns registered here.
    */
   mcpToolRegistry(): ToolRegistry {
-    this.mcpRegistry ??= createAppToolRegistry({ host: this.mcpToolHost(), engine: this.requireRunEngine(), turns: this.appToolTurns }).registry
+    this.mcpRegistry ??= createAppToolRegistry({
+      host: this.mcpToolHost(),
+      engine: this.requireRunEngine(),
+      turns: this.appToolTurns,
+      // The user's own MCP servers, proxied for Pi's agent (`userMcp: 'proxy'`).
+      ...(this.mcpManager ? { options: { userMcp: userMcpProxy(this.mcpManager) } } : {})
+    }).registry
     return this.mcpRegistry
   }
 
@@ -11248,5 +11254,14 @@ export class OrchestratorService extends EventEmitter {
     } finally {
       releaseExecutionLeaseHandle(lease)
     }
+  }
+}
+
+/** `ToolRegistryOptions.userMcp` over the profile's MCP manager. */
+function userMcpProxy(manager: McpManager): UserMcpProxy {
+  return {
+    list: (projectPath, actor) => manager.getEnabledTools(projectPath, actor),
+    allowed: (name, projectPath, actor) => manager.isToolCallAllowed(name, projectPath, actor),
+    call: (name, args, projectPath, signal, actor) => manager.callTool(name, args, projectPath, signal, actor)
   }
 }

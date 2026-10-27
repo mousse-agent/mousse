@@ -7,6 +7,9 @@ import { isAgentAccessLevel, narrowAgentAccess, type AgentAccessLevel } from '..
 import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
 import { authorizeDefinitionCall, definitionRefusal, takeAuthorizedCall, withoutTransportFields } from '../../../agentDefinitions/definitionGate'
 import { botAppToolRefusal } from '../../../../shared/bots/personal/walls'
+import type { McpToolDescriptor } from '../../../../shared/integrations'
+import type { IntegrationActor } from '../../../../shared/integrations/actor'
+import type { McpToolCallResult } from '../../../../shared/integrations/results'
 import type { ModeCeiling } from '../../types'
 import type { AppToolTurns } from './turns'
 import { callerThreadOnly } from './thread'
@@ -109,6 +112,38 @@ export interface ToolRegistryOptions {
   askApproval?(threadId: string, questions: PendingUserQuestions['questions'], options: { signal: AbortSignal; approval: ApprovalTag }): Promise<UserQuestionAnswers>
   /** Without it a `readsOthers` or `managesOthers` tool reaches the caller's own thread only and the effective level is `lineage`. */
   access?: ToolAccessPolicy
+  /**
+   * The user's own MCP servers, proxied for a runtime Mousse sends its tools to per turn (a driver
+   * with `userMcp: 'proxy'`: Pi's agent). Without it no user MCP tool is listed or called.
+   */
+  userMcp?: UserMcpProxy
+}
+
+/** `ToolRegistryOptions.userMcp`: the profile's `McpManager`, as the registry uses it. */
+export interface UserMcpProxy {
+  list(projectPath: string | undefined, actor: IntegrationActor): Promise<McpToolDescriptor[]>
+  allowed(providerName: string, projectPath: string | undefined, actor: IntegrationActor): Promise<{ allowed: boolean; reason?: string }>
+  call(providerName: string, args: Record<string, unknown>, projectPath: string | undefined, signal: AbortSignal, actor: IntegrationActor): Promise<McpToolCallResult>
+}
+
+/** A user MCP tool as a runtime is sent it: its own name and schema, effects unknown (`mutation`). */
+export type UserMcpListing = Pick<MousseTool, 'name' | 'description' | 'inputSchema' | 'class'>
+
+/** An MCP result as a tool outcome: its text blocks and readable stand-ins, then its inline images. */
+export function userMcpOutcome(result: McpToolCallResult): ToolOutcome {
+  const texts: string[] = []
+  const images: Array<{ data: string; mimeType: string }> = []
+  for (const block of result.content ?? []) {
+    if (block.type === 'text') texts.push(block.text)
+    else if (block.type === 'image' && block.data) images.push({ data: block.data, mimeType: block.mimeType })
+    else if (block.type === 'image') texts.push(`[image ${block.mimeType}${block.bytes ? `, ${block.bytes} bytes` : ''}${block.artifactId ? `; artifact=${block.artifactId}` : ''}]`)
+    else if (block.type === 'resource_link') texts.push(`[resource ${block.uri}]`)
+    else if (block.type === 'resource') texts.push(block.text ?? `[resource ${block.uri ?? 'untyped'}]`)
+    else texts.push(`[${block.rawType}]`)
+  }
+  if (result.structuredContent !== undefined) texts.push(`structuredContent: ${JSON.stringify(result.structuredContent)}`)
+  const text = texts.length ? texts.join('\n') : result.text || (result.isError ? 'The MCP tool returned an error.' : '')
+  return { text, ...(result.isError ? { isError: true } : {}), ...(images.length ? { images } : {}) }
 }
 
 /** Every property name an input schema declares, at any depth. */
@@ -136,6 +171,16 @@ function uncoveredThreadArgs(tool: MousseTool): string[] {
     if (!/^(?:\w*ThreadIds?|threadIds?)$/i.test(name)) return false
     return !(name === 'threadId' && covered)
   })
+}
+
+/** Where a call stands once its turn is known (`ToolRegistry.call`). */
+interface CallSite {
+  threadId: string
+  active: string
+  turn: AppToolTurn
+  credential: McpCredentialAuthority
+  boundToken: string
+  request: McpCallRequest
 }
 
 function notLive(message: string): McpToolError {
@@ -229,6 +274,41 @@ export class ToolRegistry {
       })
   }
 
+  /**
+   * The user's own MCP tools a turn is offered (`userMcp: 'proxy'` runtimes), as the in-process loop
+   * offered them: the turn's actor's enabled tools in its project; a definition's granted ones only;
+   * none for a bot's turn, nor for the main agent in a build mode (its tools are the mode's); and in
+   * a read-only child only those its workspace capability allows.
+   */
+  async userMcpForTurn(threadId: string, runId: string | undefined): Promise<McpToolDescriptor[]> {
+    const proxy = this.options.userMcp
+    const turn = runId ? this.options.turns?.get(runId) : undefined
+    if (!proxy || !turn || turn.threadId !== threadId || turn.bot) return []
+    let tools: readonly McpToolDescriptor[]
+    if (turn.definition) tools = turn.definition.mcpTools ?? []
+    else if (turn.modeFacts.build && !turn.subagent) return []
+    else {
+      try {
+        tools = await proxy.list(turn.projectPath, turn.actor)
+      } catch (error) {
+        console.warn('[mcp] the user MCP tools could not be listed for the turn', { threadId, error: error instanceof Error ? error.message : String(error) })
+        return []
+      }
+    }
+    const readOnly = this.options.readOnlyThread?.(threadId) === true
+    return tools.filter((tool) => !this.tools.has(tool.providerName) && (!readOnly || turn.toolAccess?.allows(tool.providerName) === true))
+  }
+
+  /** `userMcpForTurn` as a runtime is sent the tools. */
+  async userMcpListingForTurn(threadId: string, runId: string | undefined): Promise<UserMcpListing[]> {
+    return (await this.userMcpForTurn(threadId, runId)).map((tool) => ({
+      name: tool.providerName,
+      description: tool.description || `Call ${tool.toolName} on MCP server ${tool.serverName}.`,
+      inputSchema: tool.inputSchema && (tool.inputSchema as { type?: unknown }).type === 'object' ? tool.inputSchema : { type: 'object', additionalProperties: true },
+      class: 'mutation'
+    }))
+  }
+
   private botListing(threadId: string): { botRole?: 'activation' | 'context' } {
     try {
       const role = this.options.botRole?.(threadId)
@@ -265,8 +345,10 @@ export class ToolRegistry {
    * tool the turn cannot use now is an error result that says why.
    */
   async call(name: string, rawArgs: Record<string, unknown>, request: McpCallRequest): Promise<ToolOutcome> {
-    const tool = this.tools.get(name)
-    if (!tool || tool.hidden) throw new McpToolError('mousse_unknown_tool', `No Mousse tool named ${name}.`)
+    const registered = this.tools.get(name)
+    const tool = registered && !registered.hidden ? registered : undefined
+    // Any other name can only be one of the turn's proxied user MCP tools, looked up once the turn is known.
+    if (!tool && (registered || !this.options.userMcp)) throw new McpToolError('mousse_unknown_tool', `No Mousse tool named ${name}.`)
     const { credential } = request
     const threadId = credential.threadId
     const gate = await this.options.awaitLiveRun?.(threadId)
@@ -296,6 +378,7 @@ export class ToolRegistry {
       if (!tagged) throw notLive(`This call was made for an earlier turn of thread ${threadId}; it was not run.`)
     }
     const caller: McpCaller = { threadId, runId: active, provider: credential.provider, modeCeiling: credential.modeCeiling, accessLevel: credential.accessLevel }
+    if (!tool) return this.callUserMcp(name, args, { threadId, active, turn, credential, boundToken, request })
     // Scope and level are checked first: a refused call asks nobody anything and leaves no ledger row.
     const scope = this.authorize(tool, args, caller, this.options.readOnlyThread?.(threadId) === true)
     const availability = tool.available?.(turn) ?? true
@@ -312,24 +395,8 @@ export class ToolRegistry {
     // A call the runtime's gate already authorized in full (approval included, before it was
     // charged) is revalidated without asking again; any other call is authorized here.
     if (turn.definition) {
-      const callId = request.toolCallId.startsWith('mcp:') ? request.toolCallId.slice('mcp:'.length) : request.toolCallId
-      // Transport fields are not part of the call, here as at the gate.
-      const checked = withoutTransportFields(args)
-      const projectPath = turn.projectPath ? { projectPath: turn.projectPath } : {}
-      // A per-call runtime's gate authorized this exact call (turn, tool, call id, arguments).
-      const handedOver = credential.binding === 'per_call' && takeAuthorizedCall(turn.definition, { turnToken: boundToken, toolName: name, callId, args: checked })
-      if (handedOver) {
-        const refusal = definitionRefusal(turn.definition, { toolName: name, args: checked, ...projectPath })
-        if (refusal) return { text: refusal, isError: true }
-        if (request.signal.aborted) return { text: 'Tool dispatch cancelled immediately before side effects.', isError: true }
-      } else {
-        const decision = await authorizeDefinitionCall(turn.definition, { toolName: name, args: checked, ...projectPath, signal: request.signal })
-        if (!decision.allowed) return { text: decision.message, isError: true }
-      }
-      // The run may have ended while the approval waited (here or at the runtime's gate): it is
-      // checked again right before the tool runs, as the in-process path does.
-      if (this.options.activeRunId(threadId) !== active || this.options.turns?.get(active) !== turn || !credential.current())
-        throw notLive(`Run ${active} is no longer the active run of thread ${threadId}; the tool was not run.`)
+      const refused = await this.authorizeDefinition(name, args, { threadId, active, turn, credential, boundToken, request })
+      if (refused) return refused
     }
     // A tool that changes the workspace asks first unless the run's permission mode allows edits (a
     // definition run is held to its own grants above); a rejection ends the call before its handler
@@ -347,6 +414,67 @@ export class ToolRegistry {
     } catch (error) {
       if (ledgerId) ledger?.failed(ledgerId)
       if (error instanceof McpToolError) throw error
+      return { text: error instanceof Error ? error.message : String(error), isError: true }
+    }
+    if (ledgerId) {
+      if (outcome.isError) ledger?.failed(ledgerId)
+      else ledger?.commit(ledgerId)
+    }
+    return outcome
+  }
+
+  /**
+   * A definition run's call: its grants, policy and approvals. A call the runtime's gate already
+   * authorized in full (approval included, before it was charged) is revalidated without asking
+   * again; any other call is authorized here. The run is checked again right before the tool runs,
+   * since it may have ended while the approval waited. Returns the refusal, or undefined to run.
+   */
+  private async authorizeDefinition(name: string, args: Record<string, unknown>, at: CallSite): Promise<ToolOutcome | undefined> {
+    const { threadId, active, turn, credential, boundToken, request } = at
+    const definition = turn.definition!
+    const callId = request.toolCallId.startsWith('mcp:') ? request.toolCallId.slice('mcp:'.length) : request.toolCallId
+    // Transport fields are not part of the call, here as at the gate.
+    const checked = withoutTransportFields(args)
+    const projectPath = turn.projectPath ? { projectPath: turn.projectPath } : {}
+    // A per-call runtime's gate authorized this exact call (turn, tool, call id, arguments).
+    const handedOver = credential.binding === 'per_call' && takeAuthorizedCall(definition, { turnToken: boundToken, toolName: name, callId, args: checked })
+    if (handedOver) {
+      const refusal = definitionRefusal(definition, { toolName: name, args: checked, ...projectPath })
+      if (refusal) return { text: refusal, isError: true }
+      if (request.signal.aborted) return { text: 'Tool dispatch cancelled immediately before side effects.', isError: true }
+    } else {
+      const decision = await authorizeDefinitionCall(definition, { toolName: name, args: checked, ...projectPath, signal: request.signal })
+      if (!decision.allowed) return { text: decision.message, isError: true }
+    }
+    if (this.options.activeRunId(threadId) !== active || this.options.turns?.get(active) !== turn || !credential.current())
+      throw notLive(`Run ${active} is no longer the active run of thread ${threadId}; the tool was not run.`)
+    return undefined
+  }
+
+  /**
+   * A call of one of the turn's proxied user MCP tools (`userMcpForTurn`), held to what an app tool
+   * is held to: the turn's liveness (checked by the caller), a definition's grants and approvals,
+   * the actor's grant at call time and the run's tool ledger.
+   */
+  private async callUserMcp(name: string, args: Record<string, unknown>, at: CallSite): Promise<ToolOutcome> {
+    const { threadId, active, turn, request } = at
+    const proxy = this.options.userMcp!
+    const tool = (await this.userMcpForTurn(threadId, active)).find((entry) => entry.providerName === name)
+    if (!tool) throw new McpToolError('mousse_unknown_tool', `No Mousse tool named ${name}.`)
+    if (turn.definition) {
+      const refused = await this.authorizeDefinition(name, args, at)
+      if (refused) return refused
+    }
+    const checked = withoutTransportFields(args)
+    const allowed = await proxy.allowed(name, turn.projectPath, turn.actor)
+    if (!allowed.allowed) return { text: allowed.reason ?? 'MCP tool is not enabled for this actor.', isError: true }
+    const ledger = this.options.toolLedger?.(active)
+    const ledgerId = ledger?.start({ type: 'toolCall', id: request.toolCallId, name, arguments: checked } as ToolCall)
+    let outcome: ToolOutcome
+    try {
+      outcome = userMcpOutcome(await proxy.call(name, checked, turn.projectPath, request.signal, turn.actor))
+    } catch (error) {
+      if (ledgerId) ledger?.failed(ledgerId)
       return { text: error instanceof Error ? error.message : String(error), isError: true }
     }
     if (ledgerId) {

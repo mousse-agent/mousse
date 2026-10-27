@@ -124,6 +124,8 @@ export interface PiRpcDriverOptions {
   apiKey?(providerId: string): string | undefined
   /** Mousse's tools for a thread, with their class; as `runId`'s turn is offered them when given (`ToolRegistry.listForTurn`). */
   mousseTools?(threadId: string, runId?: string): PiMousseTool[]
+  /** The user's own MCP tools a turn is offered, proxied through Mousse's MCP server (`userMcp: 'proxy'`). */
+  userMcpTools?(threadId: string, runId?: string): Promise<PiMousseTool[]>
   /**
    * Ids the provider's stored credential carries beside its key (Cloudflare's account and gateway
    * ids): they reach the child's environment, never a credential.
@@ -181,6 +183,7 @@ export function createRpcRuntime(context: DriverContext, providerId: string, lab
     extraEnv: () => ({ ...(options.credentialEnv?.(providerId) ?? {}), ...(context.config.env ?? {}) }),
     shellPath: () => piShellPath({ env: context.env.env }),
     ...(options.mousseTools ? { mousseTools: (threadId: string, runId?: string) => options.mousseTools!(threadId, runId) } : {}),
+    ...(options.userMcpTools ? { userMcpTools: (threadId: string, runId?: string) => options.userMcpTools!(threadId, runId) } : {}),
     // A new session seeded with the chat's history tells the thread (`history_injected`).
     notice: (threadId, { message }) => notice.send(threadId, message),
     ...options.engine

@@ -29,12 +29,12 @@ export type PiProfileAuth = Pick<ProviderAuthService, 'has' | 'storedApiKey'> & 
 
 export interface PiProfileInputs {
   auth: () => PiProfileAuth | undefined
-  /** The runtime Mousse ships; undefined when this build has none (every instance stays on the loop). */
+  /** The runtime Mousse ships; undefined when this build has none (every turn is refused). */
   runtime: PiRuntimePaths | undefined
   /** The user's custom models of an instance (Settings → Providers → Models). */
   customModels?: (instanceId: string) => readonly CustomModel[]
   /** Mousse's app tools (the Mousse MCP server's registry). */
-  registry?: () => Pick<ToolRegistry, 'listForTurn'>
+  registry?: () => Pick<ToolRegistry, 'listForTurn'> & Partial<Pick<ToolRegistry, 'userMcpListingForTurn'>>
   /** Mousse's OAuth credentials for Pi's OAuth providers (`piOAuthBroker`). */
   oauth?: PiOAuthSource
   /** The process environment ambient credentials come from (test seam). */
@@ -149,6 +149,12 @@ export function piRpcProfileOptions(inputs: PiProfileInputs): PiRpcDriverOptions
       ? {
           // A definition's turn gets its tools as the definition loop sends them (`listForTurn`).
           mousseTools: (threadId: string, runId?: string): PiMousseTool[] => inputs.registry!().listForTurn(threadId, runId).map((tool) => ({
+            name: tool.name,
+            description: tool.description,
+            inputSchema: tool.inputSchema as Record<string, unknown>,
+            class: tool.class
+          })),
+          userMcpTools: async (threadId: string, runId?: string): Promise<PiMousseTool[]> => ((await inputs.registry!().userMcpListingForTurn?.(threadId, runId)) ?? []).map((tool) => ({
             name: tool.name,
             description: tool.description,
             inputSchema: tool.inputSchema as Record<string, unknown>,
