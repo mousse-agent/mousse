@@ -1977,7 +1977,7 @@ export class Harness implements HarnessGateway {
    * at once). A refresh that fails is recorded on the instance, never thrown. When `when` is set,
    * the instance is checked again once its turn comes and is left alone if it no longer qualifies.
    */
-  private refreshModelsOf(instanceId: string, when?: { minAgeMs: number }): Promise<void> {
+  private refreshModelsOf(instanceId: string, when?: { minAgeMs: number; reason: 'schedule' | 'upgrade' }): Promise<void> {
     const running = this.modelRefreshes.get(instanceId)
     if (running) return running
     const job = this.withModelSlot(async () => {
@@ -2000,6 +2000,7 @@ export class Harness implements HarnessGateway {
       } catch (error) {
         state.models = { ...state.models, error: errorText(error) }
       }
+      if (when) console.info('[harness] model refresh', { instanceId, reason: when.reason, ...(state.models?.error ? { error: state.models.error } : { refreshedAt: state.models?.refreshedAt }) })
       if (!this.stopped) this.changed(instanceId)
     }).finally(() => {
       this.modelRefreshes.delete(instanceId)
@@ -2051,7 +2052,7 @@ export class Harness implements HarnessGateway {
         if (!entry.enabled || entry.driver === 'pi') continue
         // The first pass leaves a list younger than the interval alone; later ones also take lists
         // the previous pass refreshed just under an interval ago.
-        void this.refreshModelsOf(instanceId, { minAgeMs }).catch((error) => console.warn('[harness] scheduled model refresh failed', { instanceId, error: errorText(error) }))
+        void this.refreshModelsOf(instanceId, { minAgeMs, reason: 'schedule' }).catch((error) => console.warn('[harness] scheduled model refresh failed', { instanceId, error: errorText(error) }))
       }
     }
     const interval = setInterval(() => pass(intervalMs / 2), intervalMs)
@@ -2064,7 +2065,7 @@ export class Harness implements HarnessGateway {
   /** A probe found another program than before: list its models now, when the instance qualifies. */
   private refreshAfterUpgrade(instanceId: string): void {
     if (this.stopped || this.instanceMap.list()[instanceId]?.driver === 'pi') return
-    void this.refreshModelsOf(instanceId, { minAgeMs: 0 }).catch((error) => console.warn('[harness] model refresh after an upgrade failed', { instanceId, error: errorText(error) }))
+    void this.refreshModelsOf(instanceId, { minAgeMs: 0, reason: 'upgrade' }).catch((error) => console.warn('[harness] model refresh after an upgrade failed', { instanceId, error: errorText(error) }))
   }
 
   // -- Operations -------------------------------------------------------------------------------
