@@ -4,7 +4,7 @@ import { Inbox } from './Inbox'
 import { stableStringify } from './json'
 import type { RunStore } from './RunStore'
 import { cancelApprovalRows } from './ThreadApprovals'
-import type { AttemptStatus, ChildResultPayload, InboxKind, InboxRecord, RunOutcome, RunRecord } from './types'
+import { stoppedByPerson, type AttemptStatus, type ChildResultPayload, type InboxKind, type InboxRecord, type RunOutcome, type RunRecord } from './types'
 
 /**
  * An inbox row the run owes its own thread, written in the run's terminal transaction before the
@@ -45,10 +45,13 @@ export function writeTerminalRun(
   options: { resultText?: string; notice?: TerminalNotice } = {}
 ): RunRecord {
   return store.db.transaction(() => {
+    // A Stop an agent asked for ends the run as the agent's, wherever the end is written (the turn
+    // that was aborted, a Stop that settles locally, the reconciler, a paused run's end).
+    const agentStop = outcome?.interruptedBy === 'user' && run.outcome?.stopRequestedBy === 'agent'
     const merged =
       outcome || run.outcome
         ? (JSON.parse(
-            stableStringify({ ...(run.outcome ?? {}), ...(outcome ?? {}) })
+            stableStringify({ ...(run.outcome ?? {}), ...(outcome ?? {}), ...(agentStop ? { interruptedBy: 'agent' } : {}) })
           ) as RunOutcome)
         : undefined
     const next = store.casRunStatus({
@@ -89,12 +92,13 @@ export function writeTerminalRun(
  *
  * A run the user stopped is left out on purpose: a user's Stop publishes right away (D2's rule for
  * every delivery the user stops), and the user already knows the integration did not finish. That
- * includes reconciler rule 3, which ends a Stop that did not land as `interruptedBy: 'user'`. A run
+ * includes reconciler rule 3, which ends a Stop that did not land as `interruptedBy: 'user'`, and a
+ * Stop an agent asked for (`interruptedBy: 'agent'`). A run
  * that completed has its outcome written by the executor. A run that already has an `integration_*`
  * row (the executor's own fallback wrote one before the run was ended) owes no second one.
  */
 function interruptedIntegrationNotice(store: RunStore, run: RunRecord): TerminalNotice | null {
-  if (run.source !== 'integration' || run.status === 'completed' || run.outcome?.interruptedBy === 'user') return null
+  if (run.source !== 'integration' || run.status === 'completed' || stoppedByPerson(run.outcome)) return null
   const written = store.db
     .statement("SELECT 1 FROM inbox WHERE thread_id = ? AND run_id = ? AND kind = 'reconcile_notice' AND json_extract(payload, '$.type') IN ('integration_completed', 'integration_failed') LIMIT 1")
     .get(run.threadId, run.runId)

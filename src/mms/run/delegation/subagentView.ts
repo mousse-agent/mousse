@@ -9,7 +9,7 @@ import {
 import type { Delegations } from '../Delegations'
 import type { Inbox } from '../Inbox'
 import type { RunStore } from '../RunStore'
-import { TERMINAL_RUN_STATUSES, type DelegationRecord, type RunRecord, type RunStatus } from '../types'
+import { stoppedByPerson, TERMINAL_RUN_STATUSES, type DelegationRecord, type RunRecord, type RunStatus } from '../types'
 import { childBusyInputs, isChildBusy, type ChildBusyInputs } from './hold'
 
 /** What the view reads besides the run store. */
@@ -28,7 +28,7 @@ export interface SubagentViewSources {
  */
 const NON_CONTINUATION_SOURCES: ReadonlySet<string> = new Set(['wake', 'provider-continuation'])
 
-/** How a terminal child run ended, as a task outcome. A user's Stop is `stopped`; a restart is `interrupted`. */
+/** How a terminal child run ended, as a task outcome. A Stop (a person's or an agent's) is `stopped`; a restart is `interrupted`. */
 export function outcomeOfRun(status: RunStatus, interruptedBy?: string): SubagentTaskOutcome {
   switch (status) {
     case 'completed':
@@ -39,7 +39,7 @@ export function outcomeOfRun(status: RunStatus, interruptedBy?: string): Subagen
     case 'cancelled':
       return 'stopped'
     case 'interrupted':
-      return interruptedBy === 'user' ? 'stopped' : 'interrupted'
+      return stoppedByPerson({ interruptedBy }) ? 'stopped' : 'interrupted'
     default:
       return 'running'
   }

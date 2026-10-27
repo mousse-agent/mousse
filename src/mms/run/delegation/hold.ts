@@ -2,6 +2,7 @@ import { Delegations, DELEGATION_RESULT_MAX_CHARS, childResult } from '../Delega
 import { Inbox } from '../Inbox'
 import type { RunStore } from '../RunStore'
 import {
+  stoppedByPerson,
   TERMINAL_RUN_STATUSES,
   type DelegationRecord,
   type DelegationResult,
@@ -106,7 +107,7 @@ function deliveryStoppedByUser(store: RunStore, row: InboxRecord): boolean {
   const effect = store.db.statement('SELECT run_id FROM effects WHERE effect_id = ?').get(row.deliveredBy)
   const runId = typeof effect?.run_id === 'string' ? effect.run_id : null
   const run = runId ? store.getRun(runId) : null
-  return Boolean(run && TERMINAL_RUN_STATUSES.has(run.status) && run.outcome?.interruptedBy === 'user')
+  return Boolean(run && TERMINAL_RUN_STATUSES.has(run.status) && stoppedByPerson(run.outcome))
 }
 
 function actionableInbox(store: RunStore, threadId: string): boolean {
@@ -182,16 +183,20 @@ export function latestResultRun(store: RunStore, delegation: Pick<DelegationReco
 }
 
 /**
- * Keeps the final text of a subagent's run next to its terminal status, so a task that publishes
- * later (once the subagent stops waiting) still has it. Written in the run's terminal transaction;
- * only for runs that may become a result.
+ * Sources of other conversational runs whose final text is kept too, so `thread_wait` can return the
+ * text of the run it waited for. They are not result sources of a subagent's task (`isResultRun`):
+ * keeping a text does not make the run the answer to a delegation.
+ */
+const KEPT_RESULT_SOURCES: ReadonlySet<string> = new Set([...RESULT_SOURCES, 'mcp', 'protocol', 'queue', 'schedule', 'lease-race'])
+
+/**
+ * Keeps the final text of a conversational run next to its terminal status: a subagent's, so a task
+ * that publishes later (once the subagent stops waiting) still has it, and any other thread's, so
+ * `thread_wait` returns the text of the run it waited for and never another run's. Written in the
+ * run's terminal transaction; capped.
  */
 export function recordRunResultText(store: RunStore, run: RunRecord, text: string | undefined): void {
-  if (!text?.trim() || !RESULT_SOURCES.has(run.source)) return
-  const lineage = store.db
-    .statement(`SELECT 1 FROM thread_lineage WHERE thread_id = ? AND relationship = 'subagent'`)
-    .get(run.threadId)
-  if (!lineage) return
+  if (!text?.trim() || !KEPT_RESULT_SOURCES.has(run.source)) return
   store.appendEvent({
     threadId: run.threadId,
     runId: run.runId,

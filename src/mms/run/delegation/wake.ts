@@ -8,6 +8,7 @@ import type { RunStore } from '../RunStore'
 import { writeTerminalRun } from '../terminal'
 import {
   TERMINAL_RUN_STATUSES,
+  stoppedByPerson,
   isWakeTurnPayload,
   type ChildResultPayload,
   type EffectRecord,
@@ -195,7 +196,7 @@ function deliveryFailure(store: RunStore, effect: EffectRecord, row: InboxRecord
   // Only an effect that carries a turn can have its run end without the notice being read.
   if (effect.kind !== 'turn.start' && effect.kind !== 'turn.steer') return null
   if (!run || !TERMINAL_RUN_STATUSES.has(run.status) || run.status === 'completed') return null
-  if (run.outcome?.interruptedBy === 'user') return null
+  if (stoppedByPerson(run.outcome)) return null
   return { at: run.completedAt ?? effect.updatedAt, error: run.outcome?.error ?? `the delivering run ${run.status}` }
 }
 

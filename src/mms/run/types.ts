@@ -57,10 +57,15 @@ export interface RunPause {
 
 export interface RunOutcome {
   error?: string
-  /** `bot_wall`: a personal bot's dispatch ended at a wall (PR 6 §5); the run engine never retries it. */
-  interruptedBy?: 'user' | 'daemon_restart' | 'provider' | 'bot_wall'
+  /**
+   * `bot_wall`: a personal bot's dispatch ended at a wall (PR 6 §5); the run engine never retries it.
+   * `agent`: another thread's agent stopped the run (`thread_interrupt`); it settles as a user's Stop does (`stoppedByPerson`).
+   */
+  interruptedBy?: 'user' | 'agent' | 'daemon_restart' | 'provider' | 'bot_wall'
   uncertainReason?: string
   stopRequested?: boolean
+  /** Set with `stopRequested` (or on a paused run a Stop ends) when an agent asked for the Stop; the terminal write then records `interruptedBy: 'agent'`. */
+  stopRequestedBy?: 'agent'
   /** SPEC §16.4: the interrupted run this send continues ("Continue" after a restart). */
   continuationOf?: string
   /** Set while the run is `paused`, and kept after the pause ended. */
@@ -154,6 +159,15 @@ export interface ThreadEvent {
  * no effect and no provider; they heartbeat while the action runs (reconciler rule 2).
  */
 export const LOCAL_ACTION_SOURCES: ReadonlySet<string> = new Set(['undo', 'revert'])
+
+/**
+ * A Stop ended the run, whether a person pressed it or another thread's agent asked for it
+ * (`interruptedBy` `user` or `agent`). Everything that treats "the user stopped it" specially (no
+ * wake, no integration notice, no redelivery) asks this, so an agent's Stop is never taken for a failure.
+ */
+export function stoppedByPerson(outcome: { interruptedBy?: string } | null | undefined): boolean {
+  return outcome?.interruptedBy === 'user' || outcome?.interruptedBy === 'agent'
+}
 
 export const runId = (threadId: string, ordinal: number): string =>
   `run:thread:${encodeURIComponent(threadId)}:ordinal:${ordinal}`
