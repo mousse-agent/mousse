@@ -122,12 +122,20 @@ export function narrowAgentAccess(...levels: Array<AgentAccessLevel | null | und
   return narrowest
 }
 
+/**
+ * The setting as the daemon reads it. An absent project list means every project, but a list that is
+ * present and malformed (not an array, or an entry that is not a non-empty string) is a narrowing
+ * that cannot be read, so it fails closed: the level becomes `lineage`, which reaches no other thread,
+ * rather than widening to every project.
+ */
 export function normalizeAgentAccessSettings(raw?: Partial<AgentAccessSettings> | null): AgentAccessSettings {
+  const ids: unknown = raw?.projectIds
+  const malformed =
+    ids !== undefined && ids !== null && (!Array.isArray(ids) || ids.some((id) => typeof id !== 'string' || id.length === 0))
+  if (malformed) return { level: 'lineage', projectIds: [], answerApprovals: false }
   return {
     level: isAgentAccessLevel(raw?.level) ? raw.level : 'lineage',
-    projectIds: Array.isArray(raw?.projectIds)
-      ? [...new Set(raw.projectIds.filter((id): id is string => typeof id === 'string' && id.length > 0))]
-      : [],
+    projectIds: Array.isArray(ids) ? [...new Set(ids as string[])] : [],
     answerApprovals: raw?.answerApprovals === true
   }
 }

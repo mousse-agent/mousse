@@ -5,6 +5,7 @@ import { join } from 'path'
 import { MousseConfigStore } from '../src/mms/config/MousseConfigStore'
 import { SettingsStore } from '../src/mms/settings/SettingsStore'
 import { SETTINGS_CLASSIFICATION } from '../src/shared/profiles/settingsClassification'
+import { asSettingsPartial } from '../src/mms/protocol/validators'
 import { getDefaultSettings, isAgentAccessLevel, narrowAgentAccess, normalizeAgentAccessSettings } from '../src/shared/settings'
 
 describe('agent access settings (SPEC §15.1)', () => {
@@ -17,11 +18,29 @@ describe('agent access settings (SPEC §15.1)', () => {
     expect(normalizeAgentAccessSettings({ level: 'root' as never }).level).toBe('lineage')
     expect(normalizeAgentAccessSettings({ level: undefined }).level).toBe('lineage')
     expect(normalizeAgentAccessSettings({ level: 'manage' }).level).toBe('manage')
-    expect(normalizeAgentAccessSettings({ projectIds: ['a', 7, '', null, 'a', 'b'] as never }).projectIds).toEqual(['a', 'b'])
-    expect(normalizeAgentAccessSettings({ projectIds: 'a' as never }).projectIds).toEqual([])
+    expect(normalizeAgentAccessSettings({ projectIds: ['a', 'b', 'a'] }).projectIds).toEqual(['a', 'b'])
+    expect(normalizeAgentAccessSettings({ level: 'manage', projectIds: [] })).toMatchObject({ level: 'manage', projectIds: [] })
     expect(normalizeAgentAccessSettings({ answerApprovals: 'yes' as never }).answerApprovals).toBe(false)
     expect(normalizeAgentAccessSettings({ answerApprovals: true }).answerApprovals).toBe(true)
     expect(normalizeAgentAccessSettings(null)).toEqual({ level: 'lineage', projectIds: [], answerApprovals: false })
+  })
+
+  it('a malformed project list fails closed to lineage, never to every project', () => {
+    for (const projectIds of ['a', 7, {}, [123], ['a', 7], ['a', ''], [null]]) {
+      expect(normalizeAgentAccessSettings({ level: 'manage', projectIds: projectIds as never, answerApprovals: true }), JSON.stringify(projectIds)).toEqual({
+        level: 'lineage', projectIds: [], answerApprovals: false
+      })
+    }
+    // An absent list is every project, which is what an empty one means.
+    expect(normalizeAgentAccessSettings({ level: 'read' })).toMatchObject({ level: 'read', projectIds: [] })
+  })
+
+  it('the settings protocol refuses a malformed agentAccess patch', () => {
+    expect(asSettingsPartial({ agentAccess: { level: 'read', projectIds: ['p1'], answerApprovals: false } })).toEqual({ agentAccess: { level: 'read', projectIds: ['p1'], answerApprovals: false } })
+    expect(asSettingsPartial({ agentAccess: { projectIds: [] } })).toEqual({ agentAccess: { projectIds: [] } })
+    for (const bad of [{ projectIds: 'p1' }, { projectIds: [123] }, { projectIds: [''] }, { level: 'root' }, { answerApprovals: 'yes' }, { extra: 1 }])
+      expect(() => asSettingsPartial({ agentAccess: bad }), JSON.stringify(bad)).toThrow(/agentAccess/)
+    expect(() => asSettingsPartial({ agentAccess: 'manage' })).toThrow()
   })
 
   it('narrows to the narrower level and ignores an absent or unknown one', () => {

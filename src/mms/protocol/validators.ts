@@ -7,6 +7,7 @@ import { knownAppError, parseErrorInfo } from '../../shared/errors'
 import type { ChatImageAttachment, ChatMode } from '../../shared/types'
 import type { ProviderLoginResponse } from '../../shared/providerAuth'
 import { PROVIDER_DRIVER_KINDS } from '../../shared/providerInstances'
+import { isAgentAccessLevel } from '../../shared/settings'
 import {
   RESERVED_AGENT_IDS,
   reservedAgentMessage,
@@ -967,7 +968,23 @@ export function asSettingsPartial(v: unknown): Record<string, unknown> {
     }
     throw new Error(`${path} has unsupported type`)
   }
-  return walk(o, 'partial', 0) as Record<string, unknown>
+  const walked = walk(o, 'partial', 0) as Record<string, unknown>
+  if (walked.agentAccess !== undefined) assertAgentAccessPatch(walked.agentAccess)
+  return walked
+}
+
+/** `agentAccess` narrows what agents may reach, so a malformed patch is refused rather than guessed at. */
+function assertAgentAccessPatch(value: unknown): void {
+  const patch = asPlainObject(value, 'partial.agentAccess')
+  for (const key of Object.keys(patch)) {
+    if (key !== 'level' && key !== 'projectIds' && key !== 'answerApprovals') throw new Error(`partial.agentAccess.${key} is not allowed`)
+  }
+  if (patch.level !== undefined && !isAgentAccessLevel(patch.level)) throw new Error('partial.agentAccess.level must be lineage, read or manage')
+  if (patch.answerApprovals !== undefined && typeof patch.answerApprovals !== 'boolean') throw new Error('partial.agentAccess.answerApprovals must be a boolean')
+  if (patch.projectIds !== undefined) {
+    if (!Array.isArray(patch.projectIds) || patch.projectIds.some((id) => typeof id !== 'string' || id.length === 0 || id.length > 256))
+      throw new Error('partial.agentAccess.projectIds must be an array of project ids')
+  }
 }
 
 export function asStringEnvMap(v: unknown, name = 'env'): Record<string, string> {
