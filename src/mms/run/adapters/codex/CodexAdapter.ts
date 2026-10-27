@@ -36,6 +36,15 @@ export type CodexClient = Pick<
 /** How Codex 0.162.1 begins the message of a turn its `auth.command` failed (wire test). */
 const TOKEN_COMMAND_FAILED = 'provider auth command '
 
+/** The harness error for a plan usage limit of a managed Codex. */
+export function codexUsageLimitHarnessError(instanceId?: string): AppError {
+  return harnessAppError({
+    code: 'rate_limited',
+    message: 'Usage limit reached for your ChatGPT plan. It resets later; see Manage usage on chatgpt.com.',
+    ...(instanceId ? { instanceId } : {})
+  })
+}
+
 /**
  * The harness error of a turn a managed Codex (Sign in with ChatGPT) ended as failed. The adapter
  * never retries: Codex has already retried transient failures itself, and the gateway decides
@@ -58,8 +67,7 @@ export function codexHarnessError(error: unknown, instanceId?: string): unknown 
     return fail('auth_expired', 'Mousse could not give Codex a ChatGPT token. Sign in again in Settings → Providers.')
   if (kind === 'unauthorized' || status === 401)
     return fail('auth_expired', 'ChatGPT did not accept this sign-in. Sign in again in Settings → Providers.')
-  if (kind === 'usageLimitExceeded' || status === 429)
-    return fail('rate_limited', 'Usage limit reached for your ChatGPT plan. It resets later; see Manage usage on chatgpt.com.')
+  if (kind === 'usageLimitExceeded' || status === 429) return codexUsageLimitHarnessError(instanceId)
   if (status === 403)
     return fail('not_eligible', "ChatGPT refused this request for this account or plan. Check the plan, or sign in with another account.")
   if (kind === 'serverOverloaded' || status === 503)
@@ -224,10 +232,13 @@ export class CodexAdapter implements ProviderAdapter {
       // A managed run still reports the failure behind a usage limit to the harness gateway, which maps it itself.
       // The typed limit stays on the mapped error as its cause: that is how the run's pause reads the reset time and window.
       if (this.options.managed && !input.signal.aborted) {
-        const mapped = codexHarnessError(limited ? (error as Error).cause : error, input.instanceId)
-        if (limited && mapped instanceof AppError)
+        // Every limit the service read (`usageLimitExceeded`, `rateLimitExceeded`, a 429, or an old server's text alone)
+        // is `rate_limited` here, whatever kind the failure behind it carried.
+        if (limited) {
+          const mapped = codexUsageLimitHarnessError(input.instanceId)
           throw new AppError({ code: mapped.code, message: mapped.message, details: mapped.details, errorInfo: mapped.errorInfo }, error)
-        throw mapped
+        }
+        throw codexHarnessError(error, input.instanceId)
       }
       throw error
     }

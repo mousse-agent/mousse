@@ -42,11 +42,20 @@ export function estimatedReset(nowMs: number): string {
   return new Date(nowMs + USAGE_LIMIT_DEFAULT_ESTIMATE_MS).toISOString()
 }
 
-/** A provider reset time (epoch seconds or ISO text) as ISO; undefined when unparseable, already past, or more than 8 days ahead. */
+/** A reset this far past is a skewed clock or a reset that just happened, not a stale answer. */
+const USAGE_LIMIT_RESET_TOLERANCE_MS = 5 * 60 * 1000
+/** What a reset inside the tolerance becomes: shortly from now, so the continue turn is not sent before the provider has switched over. */
+const USAGE_LIMIT_RESET_GRACE_MS = 30 * 1000
+
+/**
+ * A provider reset time (epoch seconds or ISO text) as ISO; undefined when unparseable, more than
+ * 8 days ahead, or past by more than five minutes. A reset that passed within five minutes (the
+ * limit just reset, or the local clock runs fast) becomes 30 seconds from now.
+ */
 export function boundedResetIso(epochSecondsOrIso: number | string | undefined, nowMs: number): string | undefined {
   const at = typeof epochSecondsOrIso === 'number' ? epochSecondsOrIso * 1000 : typeof epochSecondsOrIso === 'string' ? Date.parse(epochSecondsOrIso) : NaN
-  if (!Number.isFinite(at) || at <= nowMs || at - nowMs > USAGE_LIMIT_MAX_RESET_MS) return undefined
-  return new Date(at).toISOString()
+  if (!Number.isFinite(at) || at - nowMs > USAGE_LIMIT_MAX_RESET_MS || nowMs - at > USAGE_LIMIT_RESET_TOLERANCE_MS) return undefined
+  return new Date(at > nowMs ? at : nowMs + USAGE_LIMIT_RESET_GRACE_MS).toISOString()
 }
 
 const PROVIDER_LABELS: Record<string, string> = { claude: 'Claude', 'claude-subscription': 'Claude', codex: 'Codex', anthropic: 'Anthropic', openai: 'OpenAI', 'openai-codex': 'ChatGPT' }

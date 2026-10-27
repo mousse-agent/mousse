@@ -32,6 +32,15 @@ describe('the usage-limit pause decision', () => {
     }
   })
 
+  it('a reset that has just passed is not an estimate: the run continues shortly, not in five hours', () => {
+    const error = usageLimitError({ provider: 'claude', resetsAt: new Date(Date.now() - 60_000).toISOString(), estimated: false, limitKind: 'five_hour' })
+    const decision = decide(error)
+    expect(decision).toMatchObject({ action: 'pause', pause: { estimated: false, limitKind: 'five_hour' } })
+    const until = Date.parse((decision as { pause: RunPause }).pause.until)
+    expect(until).toBeGreaterThan(NOW)
+    expect(until - NOW).toBeLessThan(2 * 60_000)
+  })
+
   it('records whether the user turned automatic resume on', () => {
     const error = usageLimitError({ provider: 'claude', resetsAt: new Date(NOW + HOUR).toISOString(), estimated: false })
     expect(decide(error, { autoResume: false })).toMatchObject({ action: 'pause', pause: { autoResume: false } })

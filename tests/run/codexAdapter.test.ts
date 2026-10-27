@@ -732,6 +732,19 @@ describe('CodexAdapter', () => {
       for (const error of [plain, managed]) expect(decide(error)).toMatchObject({ action: 'pause', pause: { estimated: true, provider: 'codex' } })
     })
 
+    it.each([
+      ['rateLimitExceeded', { message: 'Rate limit reached', codexErrorInfo: 'rateLimitExceeded' }],
+      ['a limit read only from the message of an older server', { message: 'You have hit your usage limit', codexErrorInfo: null }],
+      ['a 429 after Codex gave up retrying', { message: 'Too many requests', codexErrorInfo: { responseTooManyFailedAttempts: { httpStatusCode: 429 } } }]
+    ])('%s pauses on a managed Codex as on a plain one', async (_name, info) => {
+      const cause = () => new CodexTurnFailure(info.message, info as never)
+      const managed = await turn(failing(usageLimitError({ provider: 'codex', resetsAt, estimated: false }, cause())), true)
+      const plain = await turn(failing(usageLimitError({ provider: 'codex', resetsAt, estimated: false }, cause())), false)
+      expect(managed).toMatchObject({ code: 'rate_limited' })
+      expect(decide(managed)).toEqual(decide(plain))
+      expect(decide(managed)).toMatchObject({ action: 'pause', pause: { until: resetsAt, estimated: false } })
+    })
+
     it('a managed Codex failure that is not a usage limit does not pause', async () => {
       const overloaded = new CodexTurnFailure('Overloaded', { message: 'Overloaded', codexErrorInfo: 'serverOverloaded' })
       const managed = await turn(failing(overloaded), true)
