@@ -33,6 +33,8 @@ describe('a pull request that tries to run code', () => {
   let requests: string[]
   let prSha: string
   let previousGlobal: string | undefined
+  let author: string
+  let authorGit: (...args: string[]) => string
 
   const marked = () => readdirSync(markers).sort()
   /**
@@ -76,10 +78,10 @@ describe('a pull request that tries to run code', () => {
     git(f.repo, 'push', '-q', 'upstream', 'HEAD:refs/heads/main')
 
     // The contributor's own Git runs with no system or user configuration (Git LFS is installed system-wide on some machines).
-    const author = join(f.root, 'author')
+    author = join(f.root, 'author')
     const emptyConfig = join(f.root, 'empty.gitconfig')
     writeFileSync(emptyConfig, '')
-    const authorGit = (...args: string[]) =>
+    authorGit = (...args: string[]) =>
       execFileSync('git', args, { cwd: author, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: emptyConfig } }).trim()
     git(f.root, 'clone', '-q', '--branch', 'main', baseBare, author)
     authorGit('config', 'user.name', 'Contributor')
@@ -216,6 +218,40 @@ describe('a pull request that tries to run code', () => {
     await settle()
     expect(requests).toEqual([])
   }, 60_000)
+
+  it('keeps the safety when storage cleanup retires the worktree and it is rebuilt from its manifest', async () => {
+    // Storage cleanup keeps a checkout that uses external filters, so the pull request drops them in a later commit (the hooks remain).
+    authorGit('rm', '-q', '.gitattributes')
+    authorGit('commit', '-qm', 'drop the attributes')
+    authorGit('push', '-q', '--force', 'origin', 'HEAD:refs/pull/7/head')
+    prSha = authorGit('rev-parse', 'HEAD')
+    const { thread } = await service.startThread({ projectId, reference: '7' })
+    const workspace = workspaceOf(thread.id)
+    // An inactive-worktree rule 40 days on retires it; only manual runs may act, as a scheduled one could retire it again.
+    const manualRun = mms.storageCleanup.run.bind(mms.storageCleanup)
+    vi.spyOn(mms.storageCleanup, 'run').mockImplementation((trigger) => (trigger === 'manual' ? manualRun(trigger) : Promise.resolve({} as never)))
+    mms.storageCleanup.setClockForTests(() => Date.now() + 40 * 86_400_000)
+    mms.storagePolicy.configure({ schemaVersion: 1, worktrees: { removeWithDeletedThreads: true, inactiveDays: 30, removeMerged: false }, browser: { captureDays: null } }, true)
+    // The rule needs the repository's default branch, which a clone would have recorded.
+    // Its commits count as published when the default branch already holds them (as after the pull request is merged).
+    git(f.repo, 'update-ref', 'refs/remotes/origin/main', prSha)
+    git(f.repo, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main')
+    const report = await manualRun('manual')
+    expect(report.items.find((entry) => entry.threadId === thread.id), JSON.stringify(report.items)).toMatchObject({ rule: 'worktree-inactive', outcome: 'removed' })
+    expect(existsSync(workspace.worktreePath)).toBe(false)
+    expect(marked()).toEqual([])
+
+    const restored = await new ThreadWorkspaceManager(mms.threads.getThreadDir(thread.id)).restore(f.repo)
+    expect(restored.lifecycle).toBe('ready')
+    expect(f.read(restored.worktreePath, 'value.txt')).toBe('pull request value\n')
+    expect(git(restored.worktreePath, 'config', '--show-scope', '--get', 'core.hooksPath')).toMatch(/^worktree\s+\/dev\/null$/)
+    expect(git(restored.worktreePath, 'config', '--worktree', '--get', 'filter.evil.smudge')).toBe('')
+    git(restored.worktreePath, 'commit', '-q', '--no-verify', '--allow-empty', '-m', 'x')
+    // Nothing ran while it was rebuilt or afterwards.
+    expect(marked()).toEqual([])
+    await settle()
+    expect(requests).toEqual([])
+  }, 120_000)
 
   it('refuses, and leaves nothing, when a filter driver is configured for the repository itself', async () => {
     git(f.repo, 'config', 'filter.evil.smudge', 'sh tools/smudge.sh')
