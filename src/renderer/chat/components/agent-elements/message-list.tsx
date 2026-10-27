@@ -1790,9 +1790,28 @@ export const MessageList = memo(function MessageList({
 });
 
 type HandoffSelection = { provider: string; model: string };
+type HandoffMarker = {
+  from: HandoffSelection;
+  to: HandoffSelection;
+  strategy?: string;
+  transfer?: "fork" | "merge_back";
+};
 
-/** "Opus 4.5 · High → GPT-5": a model switch in the transcript, by the names the instances list. */
-function ContextHandoffMarker({ handoff }: { handoff: { from: HandoffSelection; to: HandoffSelection } }) {
+/**
+ * What a handoff marker says happened: a thread transfer names its source ("Forked from Draft"),
+ * a switch that rebuilt the context for the new model is a context handoff, any other switch a
+ * plain model change.
+ */
+function handoffStatus(handoff: HandoffMarker, text: string): string {
+  if (handoff.transfer) return text || (handoff.transfer === "fork" ? "Forked" : "Merged back");
+  return handoff.strategy && handoff.strategy !== "native_resume" ? "Context handoff" : "Model changed";
+}
+
+/**
+ * "Model changed / Claude Opus 4.5 · High → GPT-5": a model switch in the transcript, by the names
+ * the instances list, under a line saying what happened.
+ */
+function ContextHandoffMarker({ handoff, text }: { handoff: HandoffMarker; text: string }) {
   // Names come from the provider snapshots: show them once those arrive.
   useProviderSnapshotsStore((state) => state.scopes);
   const iconId = (selection: HandoffSelection) => {
@@ -1800,13 +1819,21 @@ function ContextHandoffMarker({ handoff }: { handoff: { from: HandoffSelection; 
     // An unknown model falls back to its provider's id, which ProviderIcon maps to the vendor logo.
     return brand === 'anthropic' ? 'claude' : brand;
   };
+  const status = handoffStatus(handoff, text);
   const from = modelDisplayName(handoff.from.provider, handoff.from.model);
   const to = modelDisplayName(handoff.to.provider, handoff.to.model);
-  return <div role="status" aria-label={`Context handoff: ${from} to ${to}`}
-    className="flex w-full items-center justify-center gap-2 py-1 text-xs text-muted-foreground">
-    <span className="inline-flex items-center gap-1.5" title={handoff.from.model}><ProviderIcon providerId={iconId(handoff.from)} size={14} />{from}</span>
-    <span aria-hidden="true">→</span>
-    <span className="inline-flex items-center gap-1.5" title={handoff.to.model}><ProviderIcon providerId={iconId(handoff.to)} size={14} />{to}</span>
+  // A transfer that kept the model names it once.
+  const sameModel = handoff.from.provider === handoff.to.provider && handoff.from.model === handoff.to.model;
+  return <div role="status" aria-label={sameModel ? `${status}: ${to}` : `${status}: ${from} to ${to}`}
+    className="flex w-full flex-col items-center gap-1 py-1.5 text-xs text-muted-foreground">
+    <span className="text-[11px] opacity-70">{status}</span>
+    <span className="flex items-center gap-2">
+      {!sameModel && <>
+        <span className="inline-flex items-center gap-1.5" title={handoff.from.model}><ProviderIcon providerId={iconId(handoff.from)} size={14} />{from}</span>
+        <span aria-hidden="true">→</span>
+      </>}
+      <span className="inline-flex items-center gap-1.5" title={handoff.to.model}><ProviderIcon providerId={iconId(handoff.to)} size={14} />{to}</span>
+    </span>
   </div>;
 }
 
@@ -1957,8 +1984,8 @@ function AssistantParts({
     toolRenderers,
   ]);
 
-  const handoff = (msg.metadata as { contextHandoff?: { from: { provider: string; model: string }; to: { provider: string; model: string } } } | undefined)?.contextHandoff;
-  if (handoff) return <ContextHandoffMarker handoff={handoff} />;
+  const handoff = (msg.metadata as { contextHandoff?: HandoffMarker } | undefined)?.contextHandoff;
+  if (handoff) return <ContextHandoffMarker handoff={handoff} text={parts.filter(isTextPart).map((part) => part.text).join('')} />;
   const compactionMetadata = msg.metadata as { compaction?: boolean; compacting?: boolean } | undefined;
   if (compactionMetadata?.compaction) {
     const text = parts.filter(isTextPart).map((part) => part.text).join('');

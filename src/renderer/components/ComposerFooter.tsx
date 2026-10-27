@@ -262,6 +262,7 @@ export function ComposerFooter({
             open={contextOpen}
             onClose={() => onContextOpenChange(false)}
             usage={contextUsage}
+            providerId={selectedProviderId}
             anchorRef={contextBtnRef}
           />
         </div>}
