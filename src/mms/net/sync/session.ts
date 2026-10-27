@@ -639,6 +639,10 @@ export class NetSyncSession implements SyncSession {
     this.ephemeralScope(message.stream)
     void this.send(message).catch((error) => this.fail(error))
   }
+  /** True while the peer holds a subscription to the stream on this session. */
+  serves(stream: StreamId): boolean {
+    return this.serving.has(stream)
+  }
   /**
    * Display-only delta for a stream this session is live-serving. Peers that did not negotiate
    * presence.v1 or are not subscribed get nothing; deltas are never stored or replayed.

@@ -3,7 +3,13 @@ import type { NetDomainComposition, NetRuntime, NetService } from '../net/NetSer
 import type { BotRuntimeAdapter, Clock, SyncSession } from '../net/contracts'
 import { systemClock } from '../net/clock'
 import { NodeStreamAuthority } from '../net/sync/nodeAuthority'
-import { NetError, type Roster, type PresenceMessage, type BotId } from '../../shared/net'
+import {
+  NetError,
+  type Roster,
+  type PresenceMessage,
+  type BotId,
+  type NodeId
+} from '../../shared/net'
 import { parseProtocolJson, canonicalJson } from '../net/sync/codec'
 import { SpaceProfileService } from '../spaces/SpaceProfileService'
 import { SpaceArchiveService } from '../spaces/archive/SpaceArchiveService'
@@ -171,6 +177,9 @@ export class BridgeProfileService {
       keys: rt.keys,
       clock: this.clock,
       source,
+      unmetered: (threadId) => threadId === LISTS_STREAM_THREAD_ID,
+      isSubscribed: (stream, holder) => net.streamSubscribed(stream, holder as NodeId | undefined),
+      isTurnActive: (threadId) => services.orchestrator.isTurnActive(threadId),
       onDelta: (stream, data, key) => net.publishDelta(stream, data, key),
       onDeltaDiscard: (stream, matches) => net.discardDeltas(stream, matches),
       onRecord: (stream, record) => {
@@ -199,10 +208,10 @@ export class BridgeProfileService {
       capability: 'read',
       mutating: false,
       validate: (value) => validateHubParams('bridge.thread.open', value),
-      handle: async (value) => {
+      handle: async (value, context) => {
         const threadId = (value as { threadId: string }).threadId
         if (threadId === LISTS_STREAM_THREAD_ID) throw new NetError('stream_unknown')
-        const descriptor = this.threads.activate(threadId)
+        const descriptor = this.threads.activate(threadId, context.caller.node)
         return { descriptor, head: this.threads.store.head(descriptor.id) }
       }
     })

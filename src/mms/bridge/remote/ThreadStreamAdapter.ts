@@ -58,6 +58,10 @@ interface ActiveThread {
   /** Latest pending delta per coalescing key, flushed at most every deltaIntervalMs. */
   deltas: Map<string, unknown>
   deltaTimer?: { cancel(): void }
+  /** Callers that opened this thread, with when each last did. Only they count against a quota. */
+  holders: Map<string, number>
+  /** Last time the stream was opened, subscribed to or running a turn (wall clock, ms). */
+  lastBusyAt: number
 }
 export interface ThreadStreamOptions {
   db: NetDatabase
@@ -71,6 +75,23 @@ export interface ThreadStreamOptions {
   maxRows?: number
   maxBytes?: number
   maxThreads?: number
+  /** Threads one caller may hold open at once (default 16). */
+  maxThreadsPerHolder?: number
+  /** Threads that never count against a caller's quota, such as the shared lists stream. */
+  unmetered?(threadId: string): boolean
+  /**
+   * Whether a session (of `holder`, when given) is being served the stream. Without it, no stream
+   * is ever released for being idle.
+   */
+  isSubscribed?(stream: StreamId, holder?: string): boolean
+  /** Whether the thread has a running turn, which keeps its stream open. */
+  isTurnActive?(threadId: string): boolean
+  /** Release a stream no one is subscribed to and no turn is running on after this long (default 10 minutes). */
+  idleMs?: number
+  /** Drop the stored records of a stream not opened for this long (default 7 days). */
+  staleMs?: number
+  /** How often idle streams are looked for (default 1 minute). */
+  sweepMs?: number
   /** Minimum spacing between delta flushes per stream (default 100 ms). */
   deltaIntervalMs?: number
   /** `key` names what the delta replaces: one streaming message, or the pending questions. */
@@ -80,7 +101,13 @@ export interface ThreadStreamOptions {
   onRecord?(stream: StreamId, record: StoredRecord): void
   onError?(threadId: string, error: unknown, stream: StreamId): void
 }
-const SNAPSHOT_MAX = 32 * 1024 * 1024,
+const IDLE_MS = 10 * 60 * 1000,
+  STALE_MS = 7 * 24 * 60 * 60 * 1000,
+  SWEEP_MS = 60 * 1000,
+  STALE_CHECK_MS = 60 * 60 * 1000,
+  STALE_BATCH = 20,
+  HOLDER_MAX_THREADS = 16,
+  SNAPSHOT_MAX = 32 * 1024 * 1024,
   CHUNK_BYTES = 32 * 1024,
   DELTA_MAX = 32 * 1024
 /** Streaming message deltas coalesce per message; question updates per thread. */
@@ -95,6 +122,9 @@ export class ThreadStreamAdapter {
   readonly store: StreamStore
   private readonly active = new Map<StreamId, ActiveThread>()
   private readonly boot: string
+  private sweepTimer?: { cancel(): void }
+  private lastStaleCheckAt = Number.NEGATIVE_INFINITY
+  private closed = false
   constructor(private readonly options: ThreadStreamOptions) {
     this.boot = options.bootId ?? randomUUID()
     if (
@@ -109,6 +139,21 @@ export class ThreadStreamAdapter {
         'CREATE TABLE IF NOT EXISTS bridge_thread_streams(thread_id TEXT PRIMARY KEY,stream TEXT NOT NULL UNIQUE,boot TEXT NOT NULL) STRICT'
       )
     )
+    // Streams opened before the idle columns existed start their stale period now.
+    if (
+      !options.db.database
+        .prepare('PRAGMA table_info(bridge_thread_streams)')
+        .all()
+        .some((row) => row.name === 'last_active')
+    )
+      options.db.transaction(() => {
+        options.db.database.exec(
+          'ALTER TABLE bridge_thread_streams ADD COLUMN last_active INTEGER NOT NULL DEFAULT 0;ALTER TABLE bridge_thread_streams ADD COLUMN dropped INTEGER NOT NULL DEFAULT 0'
+        )
+        options.db.database
+          .prepare('UPDATE bridge_thread_streams SET last_active=?')
+          .run(options.clock.now())
+      })
     this.store = new Proxy(options.store, {
       get: (target, key) => {
         if (key === 'getStream')
@@ -130,11 +175,23 @@ export class ThreadStreamAdapter {
       }
     })
   }
-  activate(threadId: string): StreamDescriptor {
+  /**
+   * Opens the thread's display stream. `holder` names the caller (a node) opening it: one holder
+   * may keep only `maxThreadsPerHolder` threads open, so a single device cannot fill the shared cap.
+   */
+  activate(threadId: string, holder?: string): StreamDescriptor {
     if (typeof threadId !== 'string' || !threadId.length || threadId.length > 256)
       throw new NetError('bad_request')
+    const now = this.options.clock.now()
     const known = [...this.active.values()].find((thread) => thread.threadId === threadId)
-    if (known) return known.descriptor
+    if (known) {
+      // Marked busy first, so making room for the holder cannot release this very stream.
+      known.lastBusyAt = now
+      this.admitHolder(known, holder, now)
+      return known.descriptor
+    }
+    if (holder !== undefined && this.metered(threadId)) this.assertHolderRoom(holder)
+    if (this.active.size >= (this.options.maxThreads ?? 64)) this.releaseIdle()
     if (this.active.size >= (this.options.maxThreads ?? 64)) throw new NetError('rate_limited')
     if (this.options.db.database.isTransaction)
       throw new NetError('forbidden', 'Display generations must commit before publication.')
@@ -169,9 +226,14 @@ export class ThreadStreamAdapter {
         }
         this.options.store.createStream(descriptor, 1)
         this.options.db.database
-          .prepare('INSERT INTO bridge_thread_streams(thread_id,stream,boot) VALUES(?,?,?)')
-          .run(threadId, descriptor.id, this.boot)
+          .prepare(
+            'INSERT INTO bridge_thread_streams(thread_id,stream,boot,last_active,dropped) VALUES(?,?,?,?,0)'
+          )
+          .run(threadId, descriptor.id, this.boot, now)
       }
+      this.options.db.database
+        .prepare('UPDATE bridge_thread_streams SET last_active=?,dropped=0 WHERE thread_id=?')
+        .run(now, threadId)
       this.options.db.charge(1)
     })
     const thread: ActiveThread = {
@@ -180,10 +242,14 @@ export class ThreadStreamAdapter {
       descriptor,
       ring: [],
       bytes: 0,
-      deltas: new Map()
+      deltas: new Map(),
+      holders: new Map(),
+      lastBusyAt: now
     }
+    if (holder !== undefined && this.metered(threadId)) thread.holders.set(holder, now)
     this.refreshSnapshot(thread)
     this.active.set(thread.stream, thread)
+    this.scheduleSweep()
     const fail = (error: unknown): void => {
       if (this.active.get(thread.stream) !== thread) return
       this.deactivate(threadId)
@@ -354,12 +420,110 @@ export class ThreadStreamAdapter {
         return
       }
   }
+  private metered(threadId: string): boolean {
+    return !this.options.unmetered?.(threadId)
+  }
+  private threadsHeldBy(holder: string): number {
+    let held = 0
+    for (const thread of this.active.values()) if (thread.holders.has(holder)) held++
+    return held
+  }
+  private assertHolderRoom(holder: string): void {
+    if (this.threadsHeldBy(holder) < (this.options.maxThreadsPerHolder ?? HOLDER_MAX_THREADS))
+      return
+    // Streams this caller no longer uses give way before it is refused.
+    this.releaseIdle()
+    if (this.threadsHeldBy(holder) >= (this.options.maxThreadsPerHolder ?? HOLDER_MAX_THREADS))
+      throw new NetError('rate_limited')
+  }
+  private admitHolder(thread: ActiveThread, holder: string | undefined, now: number): void {
+    if (holder === undefined || !this.metered(thread.threadId)) return
+    if (!thread.holders.has(holder)) this.assertHolderRoom(holder)
+    thread.holders.set(holder, now)
+  }
+  /** Housekeeping runs on its own only where the host can say who is subscribed. */
+  private scheduleSweep(): void {
+    if (this.closed || this.sweepTimer || !this.active.size || !this.options.isSubscribed) return
+    this.sweepTimer = this.options.clock.setTimeout(() => {
+      this.sweepTimer = undefined
+      try {
+        this.releaseIdle()
+        this.dropStale()
+      } catch {
+        // Housekeeping only; the next sweep tries again.
+      }
+      this.scheduleSweep()
+    }, this.options.sweepMs ?? SWEEP_MS)
+  }
+  /**
+   * Releases streams that no session is subscribed to and no turn is running on, once they have
+   * been quiet for the idle period. A released stream keeps its identity and reopens on demand.
+   */
+  releaseIdle(): number {
+    const { isSubscribed, isTurnActive } = this.options
+    if (!isSubscribed) return 0
+    const now = this.options.clock.now(),
+      idle = this.options.idleMs ?? IDLE_MS
+    let released = 0
+    for (const thread of [...this.active.values()]) {
+      for (const [holder, touched] of thread.holders)
+        if (now - touched >= idle && !isSubscribed(thread.stream, holder))
+          thread.holders.delete(holder)
+      if (isSubscribed(thread.stream) || isTurnActive?.(thread.threadId)) {
+        thread.lastBusyAt = now
+        continue
+      }
+      if (now - thread.lastBusyAt < idle) continue
+      this.deactivate(thread.threadId)
+      this.options.db.transaction(() =>
+        this.options.db.database
+          .prepare('UPDATE bridge_thread_streams SET last_active=? WHERE thread_id=?')
+          .run(thread.lastBusyAt, thread.threadId)
+      )
+      released++
+    }
+    return released
+  }
+  /**
+   * Stored display records of a stream nobody opened for the stale period go away. The stream keeps
+   * its identity, and a later open publishes a fresh snapshot.
+   */
+  dropStale(): number {
+    const now = this.options.clock.now()
+    if (now - this.lastStaleCheckAt < STALE_CHECK_MS) return 0
+    this.lastStaleCheckAt = now
+    const rows = this.options.db.database
+      .prepare(
+        'SELECT thread_id,stream FROM bridge_thread_streams WHERE dropped=0 AND last_active<? ORDER BY last_active LIMIT ?'
+      )
+      .all(now - (this.options.staleMs ?? STALE_MS), STALE_BATCH)
+    let dropped = 0
+    for (const row of rows) {
+      const stream = row.stream as StreamId
+      if (this.active.has(stream)) continue
+      try {
+        this.options.store.truncate(stream, this.options.store.head(stream).seq)
+        this.options.db.transaction(() =>
+          this.options.db.database
+            .prepare('UPDATE bridge_thread_streams SET dropped=1 WHERE thread_id=?')
+            .run(row.thread_id)
+        )
+        dropped++
+      } catch {
+        // Retention is best effort; the next check tries again.
+      }
+    }
+    return dropped
+  }
   ringStats(stream: StreamId): { rows: number; bytes: number } {
     const thread = this.active.get(stream)
     if (!thread) throw new NetError('stream_unknown')
     return { rows: thread.ring.length, bytes: thread.bytes }
   }
   close(): void {
+    this.closed = true
+    this.sweepTimer?.cancel()
+    this.sweepTimer = undefined
     for (const thread of this.active.values()) {
       thread.dispose?.()
       this.stopDeltas(thread)
