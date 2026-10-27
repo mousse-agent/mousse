@@ -35,4 +35,22 @@ describe('Vitest default Mousse home', () => {
     isolated.cleanup()
     expect(existsSync(isolated.home)).toBe(false)
   })
+
+  it('drops inherited credentials so a CLI started by a test cannot sign in with them', () => {
+    const environment: NodeJS.ProcessEnv = {
+      ANTHROPIC_AUTH_TOKEN: 'inherited', ANTHROPIC_BASE_URL: 'https://example.invalid', CLAUDE_CODE_OAUTH_TOKEN: 'inherited',
+      OPENAI_API_KEY: 'inherited', AWS_PROFILE: 'inherited', GROK_AUTH_PATH: 'inherited', PATH: 'kept'
+    }
+    const isolated = createIsolatedMousseHome(environment)
+    try {
+      for (const name of ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY', 'AWS_PROFILE', 'GROK_AUTH_PATH']) {
+        expect(environment[name]).toBeUndefined()
+      }
+      expect(environment.PATH).toBe('kept')
+      expect(environment.CLAUDE_SECURESTORAGE_CONFIG_DIR).toBe(environment.CLAUDE_CONFIG_DIR)
+      expect(environment.ANTHROPIC_CONFIG_DIR).toBe(join(isolated.home, 'anthropic'))
+    } finally {
+      isolated.cleanup()
+    }
+  })
 })
