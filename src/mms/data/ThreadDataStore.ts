@@ -62,6 +62,7 @@ interface ThreadMeta {
   /** See `Thread.accessCeiling`. */
   accessCeiling?: AgentAccessLevel
   workspaceBinding?: SubagentWorkspaceBinding
+  scheduledJobId?: string
   /** Opt-in isolated git worktree. OFF by default; undefined treated as false. */
   worktreeEnabled?: boolean
   pullRequest?: ThreadPullRequestLink
@@ -263,8 +264,8 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   /**
-   * `lineage`, `modelOverride` and `workspaceBinding` are written with the first `meta.json`, so a
-   * subagent never exists without them. `ownerThreadId` makes the new thread owned by that thread in
+   * `lineage`, `modelOverride`, `workspaceBinding` and `scheduledJobId` are written with the first
+   * `meta.json`, so a subagent or a scheduled per-run thread never exists without them. `ownerThreadId` makes the new thread owned by that thread in
    * the lifecycle store: trashing, restoring or purging the owner takes this thread along.
    */
   createThread(
@@ -282,6 +283,7 @@ export class ThreadDataStore extends EventEmitter {
       createdByThreadId?: string
       /** See `Thread.accessCeiling`. */
       accessCeiling?: AgentAccessLevel
+      scheduledJobId?: string
     }
   ): Thread {
     this.invalidateListCache()
@@ -302,6 +304,7 @@ export class ThreadDataStore extends EventEmitter {
     if (opts?.modelOverride) meta.modelOverride = structuredClone(opts.modelOverride)
     if (opts?.permissionMode) meta.permissionMode = opts.permissionMode
     if (opts?.workspaceBinding) meta.workspaceBinding = structuredClone(opts.workspaceBinding)
+    if (opts?.scheduledJobId) meta.scheduledJobId = opts.scheduledJobId
 
     const threadDir = this.resolveThreadDir(meta, projectPath)
     // An owner without a lifecycle record yet (an older thread) is registered first; the child's

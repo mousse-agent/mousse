@@ -8,7 +8,8 @@ export type MainView = 'browser' | 'terminal' | 'files' | 'git' | 'review' | 'pu
 
 export type ScheduledJobState = 'scheduled' | 'running' | 'paused' | 'completed' | 'error'
 
-export type ScheduleKind = 'once' | 'interval' | 'cron'
+/** `manual` has no clock: the job runs only when started (Run now, or a later trigger). */
+export type ScheduleKind = 'once' | 'interval' | 'cron' | 'manual'
 
 export interface JobSchedule {
   kind: ScheduleKind
@@ -22,12 +23,25 @@ export interface ScheduledJobRepeat {
   completed: number
 }
 
+/** Where a scheduled run works; a job bound to a thread runs in that thread's own workspace. */
+export type ScheduledJobWorkspace = { kind: 'project' } | { kind: 'newWorktree' } | { kind: 'worktree'; path: string }
+
 export interface ScheduledJobRunRecord {
   runAt: string
-  status: 'ok' | 'error' | 'interrupted' | 'waiting'
+  /** `queued` while the occurrence waits behind a busy thread; it is updated when its run ends. */
+  status: 'ok' | 'error' | 'interrupted' | 'waiting' | 'queued' | 'uncertain'
   output?: string
   error?: string
   silent?: boolean
+  threadId?: string
+  runId?: string
+  queueItemId?: string
+  /** The model the run actually used (the run's binding), not the job's field. */
+  selection?: ModelOverride
+  mode?: 'agent' | 'plan'
+  workspace?: ScheduledJobWorkspace
+  occurrenceKey?: string
+  missingPlaceholders?: string[]
 }
 
 /**
@@ -44,6 +58,34 @@ export interface ScheduledJobRunClaim {
   workflowInvocationId?: string
   /** This claim is observing a workflow that previously reached a wait state. */
   resumedWaiting?: boolean
+  /** The occurrence this claim runs: `nextRunAt` for a timed claim. Names the deterministic send receipt. */
+  occurrenceKey: string
+  /** Recorded as each becomes known, so a restart can find the run this claim admitted. */
+  threadId?: string
+  runId?: string
+  queueItemId?: string
+  /** The run ended before the claim was finalized (a fast drain); finalizing the claim applies it at once. */
+  settledResult?: ScheduledOccurrenceResult
+}
+
+/** How an occurrence ended; `uncertain` keeps the engine's "effects may have occurred" text in `error`. */
+export interface ScheduledOccurrenceResult {
+  status: 'ok' | 'error' | 'interrupted' | 'uncertain'
+  text?: string
+  error?: string
+  silent?: boolean
+}
+
+/**
+ * An occurrence that was admitted to the Run Engine and is not terminal yet. It holds the job's
+ * single outstanding occurrence: later ticks skip the job until the run ends.
+ */
+export interface ScheduledJobPendingOccurrence {
+  occurrenceKey: string
+  threadId: string
+  runId: string
+  queueItemId?: string
+  state: 'admitted' | 'queued' | 'running'
 }
 
 export interface ScheduledJob {
@@ -55,17 +97,30 @@ export interface ScheduledJob {
   state: ScheduledJobState
   nextRunAt: string | null
   lastRunAt?: string
-  lastStatus?: 'ok' | 'error' | 'interrupted' | 'waiting'
+  lastStatus?: 'ok' | 'error' | 'interrupted' | 'waiting' | 'uncertain'
   lastError?: string
   pausedAt?: string
   pausedReason?: string
   threadId?: string
   projectId?: string
   createThread?: boolean
+  /** Provider instance and model every run uses; absent = the thread's model (bound) or the profile default. */
+  selection?: ModelOverride
+  mode?: 'agent' | 'plan'
+  workspace?: ScheduledJobWorkspace
+  /** The thread (and run) of the agent that created the job; absent for jobs people create. */
+  createdBy?: { threadId: string; runId?: string }
+  /**
+   * The most agent access (SPEC §15.1) a run of this job may be granted: the level of whoever created it. Absent
+   * (a creator whose level is not known) reads as `lineage`; a run is never granted more than the profile's setting either.
+   */
+  accessCap?: import('./settings').AgentAccessLevel
   repeat?: ScheduledJobRepeat
   runHistory?: ScheduledJobRunRecord[]
   /** Present while state === 'running'; cleared on terminal transition. */
   runClaim?: ScheduledJobRunClaim
+  /** Present while an admitted occurrence has not reached a terminal run. */
+  pendingOccurrence?: ScheduledJobPendingOccurrence
   createdAt: string
   updatedAt: string
 }
@@ -75,7 +130,9 @@ export interface SchedulerStatus {
   lastHeartbeatAt: string | null
   lastSuccessAt: string | null
   lastTickError: string | null
+  /** The first of `activeJobIds`. */
   activeJobId: string | null
+  activeJobIds: string[]
   jobCount: number
   dueCount: number
 }
@@ -87,6 +144,11 @@ export interface CreateScheduledJobInput {
   threadId?: string
   projectId?: string
   createThread?: boolean
+  selection?: ModelOverride
+  mode?: 'agent' | 'plan'
+  workspace?: ScheduledJobWorkspace
+  createdBy?: { threadId: string; runId?: string }
+  accessCap?: import('./settings').AgentAccessLevel
   repeat?: { times?: number }
 }
 
@@ -443,6 +505,8 @@ export interface ChatMessage {
    * steer): the tasks it reports, so the app never parses the text.
    */
   subagentNotice?: import('./subagents').SubagentNoticeItem[]
+  /** Set on a user message a scheduled job sent, so the thread can show "Scheduled: <name>" instead of passing it off as typed. */
+  scheduled?: { jobId: string; jobName?: string }
   /**
    * A user message added to a turn that was already running (a steer), so it does not start a turn.
    * Older transcripts do not carry it.
@@ -660,6 +724,11 @@ export interface QueuedMessage {
   stopGeneration?: number
   /** A mode this turn must not exceed, set by a daemon-side sender (a scheduled job); it only tightens. */
   permissionMode?: PermissionMode
+  /**
+   * Set on the occurrence of a scheduled job that found its thread busy. The run drains with the
+   * job's model and origin; the ids travel on to the turn so its end completes the occurrence.
+   */
+  origin?: { kind: 'schedule'; jobId: string; occurrenceKey: string; jobName?: string; selection?: ModelOverride }
 }
 
 export interface ContextUsageCategory {
@@ -717,7 +786,8 @@ export interface ThreadLineage {
  * again from the parent's current session.
  */
 export interface SubagentWorkspaceBinding {
-  policy: 'shared' | 'isolated'
+  /** `primary`: a scheduled run on the project's own checkout, never a provisioned worktree. */
+  policy: 'shared' | 'isolated' | 'primary'
   /** The parent's workspace path a `shared` child observes read-only. */
   sharedPath?: string
 }
@@ -742,8 +812,10 @@ export interface Thread {
    * (the profile's setting and the thread's delegations still apply).
    */
   accessCeiling?: import('./settings').AgentAccessLevel
-  /** Set on a subagent created after workspace bindings were recorded. */
+  /** Set on a subagent created after workspace bindings were recorded, and on a scheduled per-run thread. */
   workspaceBinding?: SubagentWorkspaceBinding
+  /** Set on the per-run thread a scheduled job created; counts the job's open per-run threads. */
+  scheduledJobId?: string
   /**
    * Explicit model selection for this thread; absent means use global settings. `instanceId` is
    * absent on threads saved before provider instances existed.

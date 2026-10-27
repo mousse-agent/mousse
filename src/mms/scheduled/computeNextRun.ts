@@ -89,6 +89,9 @@ export function computeNextRun(
   lastRunAt?: string | null,
   now: Date = new Date()
 ): string | null {
+  // No clock: the job runs only when something starts it.
+  if (schedule.kind === 'manual') return null
+
   if (schedule.kind === 'once') {
     return recoverableOneshotRunAt(schedule, now, lastRunAt)
   }
