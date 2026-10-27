@@ -98,7 +98,7 @@ it('mounts only the turns near the viewport of a long thread and holds the readi
       `${result.large.messages} messages ${result.large.mountMs.toFixed(0)} ms (${result.large.mounted} rows, ${result.large.domNodes} nodes, heap ${result.large.heapMB?.toFixed(0)} MB), ` +
       `time ratio ${(result.large.mountMs / result.small.mountMs).toFixed(2)}, longest frame of a scripted scroll ${result.longestFrameMs.toFixed(0)} ms`,
     )
-    // Reported, not asserted: the largest jump of the reading line while only the toolbar of the row above it was at the top edge.
+    // The largest jump of the reading line while only the toolbar of the row above it was at the top edge (asserted below).
     const tail = [...result.up.tailDrift, ...result.down.tailDrift].map(Math.abs)
     console.info(`turn window: reading-line jump with only a row tail at the top edge: ${tail.length} samples, largest ${Math.max(0, ...tail).toFixed(0)} px`)
 
@@ -158,6 +158,10 @@ it('mounts only the turns near the viewport of a long thread and holds the readi
       expect(sweep.drift.length).toBeGreaterThanOrEqual(20)
       expect(Math.max(...sweep.drift.map(Math.abs)), sweep.drift.map(value => value.toFixed(0)).join(' ')).toBeLessThanOrEqual(2)
     }
+    // Including the steps where only the toolbar at the end of the row above is at the top edge: a block above the toolbar that
+    // expands then moves the toolbar, and the reading line goes with it.
+    expect(tail.length).toBeGreaterThan(0)
+    expect(Math.max(...tail), tail.map(value => value.toFixed(0)).join(' ')).toBeLessThanOrEqual(2)
     expect(result.up.scrollHeightDelta + result.down.scrollHeightDelta).toBeGreaterThan(300)
     expect(result.afterSweeps.mounted).toBeLessThanOrEqual(60)
     expect(result.afterSweeps.first && result.afterSweeps.last).toBe(true)
