@@ -51,6 +51,7 @@ import type { BridgeOrdinaryMethod } from '../remote/capabilities'
 import { mmsJson } from '../remote/jsonOutput'
 import { newestMessages } from '../../protocol/transcriptPaging'
 import { ReplyPages } from './pages'
+import { cleanUpBlockedDevice } from './blockCleanup'
 import type { RoutedStaging } from './staging'
 
 /** Ids are text of this length at most, as in the protocol handlers. */
@@ -245,6 +246,15 @@ export class OwnerRoutes {
         if (!event.after.blocked || event.before.blocked) return
         this.pages.dropCaller(event.node)
         this.options.staging?.dropCaller(event.node)
+        // What the device queued, made a rule of and started is taken away too.
+        const cleanup: Promise<void> = this.options
+          .track(cleanUpBlockedDevice(this.options.services, event.node))
+          .then(
+            () => undefined,
+            () => undefined
+          )
+          .finally(() => this.cleanups.delete(cleanup))
+        this.cleanups.add(cleanup)
       })
     ]
     // Values staged before a restart that nobody came back for are looked for now, and then every minute.
@@ -526,6 +536,13 @@ export class OwnerRoutes {
   }
 
   private readonly largeSaves = new Set<NodeId>()
+  /** The clean-ups of blocked devices under way. */
+  private readonly cleanups = new Set<Promise<void>>()
+  /** Resolves when the clean-up of every device blocked so far is done. */
+  async cleanedUp(): Promise<void> {
+    while (this.cleanups.size) await Promise.all([...this.cleanups])
+  }
+
   private readonly largeReads = new Map<NodeId, number>()
   private enterLargeRead(node: NodeId): void {
     const running = this.largeReads.get(node) ?? 0

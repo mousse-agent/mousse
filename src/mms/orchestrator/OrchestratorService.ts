@@ -4461,6 +4461,11 @@ export class OrchestratorService extends EventEmitter {
     return { removed: approvals ? approvals.revokeRules(threadId, ruleId) : 0 }
   }
 
+  /** Revokes every "Always for this thread" rule that a person on the computer `node` made. */
+  clearApprovalRulesMadeBy(node: string): number {
+    return this.runEngine?.approvals.revokeRulesMadeBy(node) ?? 0
+  }
+
   /**
    * The permission mode a run enforces, read from its attempt's binding (never from a mode ceiling).
    * A binding recorded before permission modes, and a run with no binding, read as `ask`.
