@@ -16,14 +16,6 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const scenariosDir = join(root, 'tests', 'run', 'scenarios')
 
 const ADAPTERS = {
-  pi: {
-    boundary: 'LlmClient.chat call (src/mms/run/testkit/piChatReplay.ts)',
-    env: {
-      MOUSSE_RECORD_PI_PROVIDER: 'pi-ai provider id to record against, e.g. openai',
-      MOUSSE_RECORD_PI_MODEL: 'model id, e.g. gpt-4.1-mini',
-      MOUSSE_RECORD_PI_API_KEY: 'API key for that provider (never written to the fixture)'
-    }
-  },
   'claude-subscription': {
     boundary: 'Agent SDK query() seam (src/mms/run/testkit/sdkQueryReplay.ts)',
     env: {

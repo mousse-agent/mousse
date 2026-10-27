@@ -27,11 +27,10 @@ import {
 import { fileWorkspaceScope } from '../src/renderer/stores/filesStore'
 import { formatChatReferences, parseChatReference } from '../src/shared/chatReferences'
 import { parseActions, stripActionBlocks, filterActionsForChatMode } from '../src/mms/orchestrator/actions'
-import { buildOrchestratorSystemPrompt } from '../src/mms/orchestrator/systemPrompt'
 import { ProjectGitTools } from '../src/mms/workflows/tools/ProjectGitTools'
 import { FileService } from '../src/mms/files/FileService'
 import { GitService } from '../src/mms/git/GitService'
-import { mkdir, mkdtemp, writeFile, rm } from 'fs/promises'
+import { mkdtemp, writeFile, rm } from 'fs/promises'
 import { join } from 'path'
 import { tmpdir } from 'os'
 
@@ -107,50 +106,6 @@ describe('skill model settings', () => {
 })
 
 describe('mode-aware prompts and plan output', () => {
-  it('builds distinct system prompts per mode', () => {
-    const agentPrompt = buildOrchestratorSystemPrompt({ mode: 'agent' })
-    const cursorAgentPrompt = buildOrchestratorSystemPrompt({ mode: 'agent', providerId: 'cursor' })
-    const planPrompt = buildOrchestratorSystemPrompt({ mode: 'plan' })
-    const buildPrompt = buildOrchestratorSystemPrompt({ mode: 'build' })
-
-    // Delegation is the delegate_task tool family, appended when the turn has the tools.
-    expect(agentPrompt).not.toContain('spawn_agents')
-    expect(agentPrompt).toContain('"type": "complete_task"')
-    expect(agentPrompt).toContain('present_plan')
-    expect(agentPrompt).toContain('You decide whether to plan')
-    expect(cursorAgentPrompt).not.toContain('"type": "complete_task"')
-    expect(cursorAgentPrompt).toContain('official Mousse session configuration')
-    expect(planPrompt).toContain('ask_user')
-    expect(planPrompt).toContain('Do NOT call show_document')
-    expect(planPrompt).toContain('markdown only')
-    expect(buildPrompt).toContain('read')
-    expect(buildPrompt).toContain('edit')
-    expect(buildPrompt).toContain('grep')
-    expect(buildPrompt).toContain('Do not emit complete_task')
-    expect(buildPrompt).not.toContain('"type": "complete_task"')
-    const skillPrompt = buildOrchestratorSystemPrompt({
-      mode: { type: 'skill', skillId: 'reviewer' }
-    })
-    expect(skillPrompt).toContain('Do not emit complete_task')
-    expect(skillPrompt).not.toContain('"type": "complete_task"')
-  })
-
-  it('prepends project MOUSSE.md instructions when present', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'mousse-project-prompt-'))
-    const instructions = '# Project instructions\nAlways use project conventions.'
-
-    try {
-      await mkdir(join(root, '.mousse'))
-      await writeFile(join(root, '.mousse', 'MOUSSE.md'), instructions, 'utf-8')
-      const prompt = buildOrchestratorSystemPrompt({ mode: 'agent', projectPath: root })
-
-      expect(prompt.startsWith(instructions)).toBe(true)
-      expect(prompt).toContain('You are the assistant inside Mousse')
-    } finally {
-      await rm(root, { recursive: true, force: true })
-    }
-  })
-
   it('executes only dedicated orchestration blocks and strips them', () => {
     const response = `Here is the plan.
 

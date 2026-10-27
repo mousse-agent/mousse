@@ -3,7 +3,7 @@ import { newId } from '../../../../src/shared/net'
 import { BRIDGE_HUB_LOCAL_METHODS } from '../../../../src/shared/bridge'
 import { executeBridgeHubLocal, validateBridgeHubLocal } from '../../../../src/mms/bridge/hub'
 import { validateRemoteParams } from '../../../../src/mms/bridge/remote'
-import { fixture, cleanup } from './fixture'
+import { fixture, cleanup, scriptTurns } from './fixture'
 afterEach(cleanup)
 
 const png = Buffer.from('not really a png').toString('base64')
@@ -125,36 +125,7 @@ it('carries no permission mode: a thread made from another computer keeps the ta
 
 it('stages an image and sends it with the message, which the target stores with the user message', async () => {
   const f = await fixture()
-  ;(f.mms.orchestrator as unknown as { llm: unknown }).llm = {
-    getSelectedModelContextLimit: () => ({ limit: 128000, modelName: 'fixture' }),
-    getContextInputs: async () => ({
-      systemPromptText: '',
-      mcpToolsText: '',
-      otherToolsText: '',
-      signature: 'fixture'
-    }),
-    generateTitle: async () => 'Image turn',
-    chat: async (
-      _messages: unknown,
-      _tools: unknown,
-      _options: unknown,
-      _thinking: unknown,
-      onText: (event: unknown) => void
-    ) => {
-      onText({ phase: 'start', content: '', contentIndex: 0 })
-      onText({ phase: 'delta', content: 'seen', contentIndex: 0 })
-      return {
-        text: 'seen',
-        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-        modelName: 'fixture',
-        totalResponseTimeMs: 1,
-        totalTokensUsed: 2,
-        contextInputs: { signature: 'fixture' },
-        toolEvents: [],
-        nativeMessages: []
-      }
-    }
-  }
+  scriptTurns(f.mms, () => 'seen')
   await f.connect()
   const created = (await executeBridgeHubLocal(f.hub(), 'bridge.hub.create', {
       target: f.targetNode,

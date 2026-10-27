@@ -1,7 +1,6 @@
 /**
  * An ACP agent that accepts `session/prompt` and then says nothing at all, under the real
- * orchestrator and Run Engine (beside `providerStreamStall.test.ts`, which covers the pi loop's
- * stream stall; that test cannot host an adapter turn).
+ * orchestrator and Run Engine.
  *
  * The turn's `turn.start` effect stays running for as long as the turn, so the reconciler's
  * silent-run window (rule 2, `heartbeatToleranceMs`, 6x for sparse event streams) never applies to
@@ -79,11 +78,6 @@ describe('an ACP agent that never answers session/prompt', () => {
     const worker = new EffectWorker({ outbox: engine.outbox, executors: orch.effectExecutors(), owner: engine.leaseOwner })
     worker.start()
     orch.attachEffectWorker(worker)
-    ;(orch as any).llm = {
-      getSelectedModelContextLimit: () => ({ limit: 128_000, modelName: 'replay' }),
-      getContextInputs: async () => ({ systemPromptText: '', mcpToolsText: '', otherToolsText: '', signature: 'replay' }),
-      chat: async () => { throw new Error('ACP turns must not reach the pi loop') }
-    }
     const harness = createHarnessGateway({
       profileHome: home,
       installationHome: home,

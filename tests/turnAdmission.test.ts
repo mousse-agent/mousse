@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { OrchestratorService } from '../src/mms/orchestrator/OrchestratorService'
-import { createOrchestrator } from './run/phase6Fixture'
+import { createOrchestrator, piAdapter } from './run/phase6Fixture'
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void
@@ -34,31 +34,23 @@ describe('per-thread turn admission', () => {
   let maxInFlight: number
   let chatCalls: string[]
   let chatGate: Promise<void>
+  let signalsAtCall: boolean[]
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'mousse-admit-'))
     process.env.MOUSSE_HOME = home
     store = new ThreadDataStore(new ProjectManager())
-    orch = createOrchestrator(home, store)
-    inFlight = 0; maxInFlight = 0; chatCalls = []
+    inFlight = 0; maxInFlight = 0; chatCalls = []; signalsAtCall = []
     chatGate = Promise.resolve()
-    ;(orch as any).llm = {
-      getSelectedModelContextLimit: () => ({ limit: 128_000, modelName: 'probe' }),
-      getContextInputs: async () => ({ systemPromptText: '', mcpToolsText: '', otherToolsText: '', signature: 'probe-sig' }),
-      generateTitle: async () => 'Probe Title',
-      chat: async (messages: Array<{ content?: unknown }>) => {
-        inFlight += 1; maxInFlight = Math.max(maxInFlight, inFlight)
-        chatCalls.push(JSON.stringify(messages.at(-1)?.content ?? ''))
-        await chatGate
-        await new Promise((r) => setTimeout(r, 30))
-        inFlight -= 1
-        return {
-          text: 'reply', usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, modelName: 'probe',
-          totalResponseTimeMs: 1, totalTokensUsed: 2, tokensPerSecond: undefined,
-          contextInputs: { signature: 'probe-sig' }, toolEvents: [], aborted: false, nativeMessages: []
-        }
-      }
-    }
+    orch = createOrchestrator(home, store, [piAdapter(async (input) => {
+      inFlight += 1; maxInFlight = Math.max(maxInFlight, inFlight)
+      signalsAtCall.push(input.signal.aborted)
+      chatCalls.push(input.prompt)
+      await chatGate
+      await new Promise((r) => setTimeout(r, 30))
+      inFlight -= 1
+      return 'reply'
+    })])
   })
 
   afterEach(() => {
@@ -98,12 +90,6 @@ describe('per-thread turn admission', () => {
     const gate = deferred()
     ;(orch as any).executeTurn = async (...args: unknown[]) => { await gate.promise; return realExecute(...args) }
 
-    const signalsAtCall: boolean[] = []
-    ;(orch as any).llm.chat = ((real) => async (messages: never, onEvent: never, opts?: { signal?: AbortSignal }) => {
-      signalsAtCall.push(Boolean(opts?.signal?.aborted))
-      return real(messages, onEvent, opts as never)
-    })((orch as any).llm.chat)
-
     const first = orch.send('msg-a', false, { threadId: thread.id })
     await waitFor(() => orch.isActiveTurnRunning(thread.id))
     expect(orch.abortActiveTurn(thread.id)).toBe(true)
@@ -111,7 +97,7 @@ describe('per-thread turn admission', () => {
     gate.resolve()
     await first
     await waitFor(() => settled(thread.id))
-    // The model client receives an already-aborted signal, so a real provider call ends immediately.
+    // The provider turn receives an already-aborted signal, so a real provider call ends immediately.
     expect(signalsAtCall.every(Boolean)).toBe(true)
     const session = (orch as any).sessions.get(thread.id) ?? (orch as any).boundSession
     expect(session.abortRequested).toBe(false)
@@ -137,31 +123,5 @@ describe('per-thread turn admission', () => {
     expect(maxInFlight).toBe(1)
     expect(chatCalls).toHaveLength(1)
     expect(orch.isActiveTurnRunning(thread.id)).toBe(false)
-  }, 30_000)
-
-  it('queues a send that arrives during the post-turn phase and drains it afterwards', async () => {
-    const thread = store.createThread('C')
-    const postTurn = deferred()
-    let actionRuns = 0
-    ;(orch as any).llm.chat = ((real) => async (...args: unknown[]) => {
-      const result = await real(...(args as [never]))
-      return chatCalls.length === 1
-        ? { ...result, text: 'working\n```mousse-actions\n{"type":"message","content":"hold"}\n```' }
-        : result
-    })((orch as any).llm.chat)
-    ;(orch as any).executeAction = async () => { actionRuns += 1; await postTurn.promise; return ['held'] }
-
-    const first = orch.send('msg-a', false, { threadId: thread.id })
-    await waitFor(() => actionRuns === 1) // model loop done: activeTurn is already cleared
-    expect(inFlight).toBe(0)
-    const second = await orch.send('msg-b', false, { threadId: thread.id })
-    expect(second.queued).toBe(true)
-    expect(chatCalls).toHaveLength(1)
-
-    postTurn.resolve()
-    await first
-    await waitFor(() => chatCalls.length === 2 && settled(thread.id))
-    expect(maxInFlight).toBe(1)
-    expect(orch.getMessages(thread.id).map((m) => m.content)).toContain('msg-b')
   }, 30_000)
 })

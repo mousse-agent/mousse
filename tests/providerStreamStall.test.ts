@@ -11,10 +11,6 @@ import {
   ProviderStreamStallError,
   resolveStreamInactivityTimeout
 } from '../src/mms/harness/drivers/pi/stream'
-import {
-  isConnectionFailure,
-  retryConnectionFailures
-} from '../src/mms/orchestrator/connectionRetry'
 
 const resultMessage: AssistantMessage = {
   role: 'assistant',
@@ -59,24 +55,6 @@ describe('provider stream inactivity protection', () => {
     expect(() =>
       assertAssistantResponseSucceeded({ ...failed, stopReason: 'aborted' })
     ).not.toThrow()
-  })
-
-  it('classifies a stall as retryable and bounds retries without replaying a successful attempt', async () => {
-    const operation = vi
-      .fn<() => Promise<string>>()
-      .mockRejectedValueOnce(new ProviderStreamStallError(10))
-      .mockResolvedValueOnce('recovered')
-    const retries: number[] = []
-
-    expect(isConnectionFailure(new ProviderStreamStallError(10))).toBe(true)
-    await expect(
-      retryConnectionFailures(operation, (attempt) => retries.push(attempt), {
-        delayMs: 0,
-        wait: async () => {}
-      })
-    ).resolves.toBe('recovered')
-    expect(operation).toHaveBeenCalledTimes(2)
-    expect(retries).toEqual([1])
   })
 
   it('fails a silent stream with a retryable connection timeout', async () => {

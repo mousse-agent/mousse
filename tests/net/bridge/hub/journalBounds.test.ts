@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { newId } from '../../../../src/shared/net'
 import { systemClock } from '../../../../src/mms/net/clock'
 import { executeBridgeHubLocal } from '../../../../src/mms/bridge/hub'
-import { fixture, cleanup } from './fixture'
+import { fixture, cleanup, scriptTurns } from './fixture'
 afterEach(cleanup)
 
 const rows = (f: Awaited<ReturnType<typeof fixture>>): number =>
@@ -19,36 +19,7 @@ const create = (f: Awaited<ReturnType<typeof fixture>>, name: string) =>
   }>
 
 function stubModel(f: Awaited<ReturnType<typeof fixture>>) {
-  ;(f.mms.orchestrator as unknown as { llm: unknown }).llm = {
-    getSelectedModelContextLimit: () => ({ limit: 128000, modelName: 'fixture' }),
-    getContextInputs: async () => ({
-      systemPromptText: '',
-      mcpToolsText: '',
-      otherToolsText: '',
-      signature: 'fixture'
-    }),
-    generateTitle: async () => 'Turn',
-    chat: async (
-      _messages: unknown,
-      _tools: unknown,
-      _options: unknown,
-      _thinking: unknown,
-      onText: (event: unknown) => void
-    ) => {
-      onText({ phase: 'start', content: '', contentIndex: 0 })
-      onText({ phase: 'delta', content: 'ok', contentIndex: 0 })
-      return {
-        text: 'ok',
-        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-        modelName: 'fixture',
-        totalResponseTimeMs: 1,
-        totalTokensUsed: 2,
-        contextInputs: { signature: 'fixture' },
-        toolEvents: [],
-        nativeMessages: []
-      }
-    }
-  }
+  scriptTurns(f.mms, () => 'ok')
 }
 
 it('does not journal reads, so polling a computer never fills the journal', async () => {

@@ -8,10 +8,9 @@ import { SCENARIOS } from './index'
 import { FIXTURES_DIR, fixtureAdapters, runScenario } from './runScenario'
 import { join } from 'node:path'
 
-const ADAPTERS = ['acp', 'antigravity', 'claude-subscription', 'codex', 'cursor', 'pi', 'pi-rpc']
+const ADAPTERS = ['acp', 'antigravity', 'claude-subscription', 'codex', 'cursor', 'pi-rpc']
 
-// A scenario may declare a subset of adapters (`delegate-child` is pi-only: vendor runtimes get no
-// ToolHost until Phase 5).
+// A scenario may declare a subset of adapters.
 describe.each(Object.keys(SCENARIOS))('scenario %s', (name) => {
   const adapters = fixtureAdapters(name)
 

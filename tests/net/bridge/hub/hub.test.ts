@@ -6,7 +6,7 @@ import { systemClock } from '../../../../src/mms/net/clock'
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { fixture, cleanup, resources } from './fixture'
+import { fixture, cleanup, resources, scriptTurns } from './fixture'
 afterEach(cleanup)
 
 it('persists exact original IDs/idem aliases before sending and rejects cross-payload aliases', async () => {
@@ -293,38 +293,11 @@ it('records on the target which device started a thread, and its project there',
 
 it('delivers the first turn of a remote thread when the hub attaches before it sends', async () => {
   const f = await fixture()
-  // The turn runs on the profile's default model, a pi instance over the replaced loop client.
+  // The turn runs on the profile's default model, a pi instance over a scripted adapter.
   f.mms.settings.set({ provider: { llmProvider: 'openai', model: 'fixture' } })
-  ;(f.mms.orchestrator as unknown as { llm: unknown }).llm = {
-    getSelectedModelContextLimit: () => ({ limit: 128000, modelName: 'fixture' }),
-    getContextInputs: async () => ({
-      systemPromptText: '',
-      mcpToolsText: '',
-      otherToolsText: '',
-      signature: 'fixture'
-    }),
-    generateTitle: async () => 'First turn',
-    chat: async (
-      _messages: unknown,
-      _tools: unknown,
-      _options: unknown,
-      _thinking: unknown,
-      onText: (event: unknown) => void
-    ) => {
-      onText({ phase: 'start', content: '', contentIndex: 0 })
-      onText({ phase: 'delta', content: 'first reply', contentIndex: 0 })
-      return {
-        text: 'first reply',
-        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-        modelName: 'fixture',
-        totalResponseTimeMs: 1,
-        totalTokensUsed: 2,
-        contextInputs: { signature: 'fixture' },
-        toolEvents: [],
-        nativeMessages: []
-      }
-    }
-  }
+  scriptTurns(f.mms, async () => {
+    return 'first reply'
+  })
   const adapter = f.makeAdapter()
   await f.connect(adapter.store)
   const created = (await executeBridgeHubLocal(f.hub(), 'bridge.hub.create', {
@@ -361,39 +334,12 @@ it('delivers the first turn of a remote thread when the hub attaches before it s
 
 it('delivers the first turn of a remote thread when the hub attaches after the send has started', async () => {
   const f = await fixture()
-  // The turn runs on the profile's default model, a pi instance over the replaced loop client.
+  // The turn runs on the profile's default model, a pi instance over a scripted adapter.
   f.mms.settings.set({ provider: { llmProvider: 'openai', model: 'fixture' } })
-  ;(f.mms.orchestrator as unknown as { llm: unknown }).llm = {
-    getSelectedModelContextLimit: () => ({ limit: 128000, modelName: 'fixture' }),
-    getContextInputs: async () => ({
-      systemPromptText: '',
-      mcpToolsText: '',
-      otherToolsText: '',
-      signature: 'fixture'
-    }),
-    generateTitle: async () => 'First turn',
-    chat: async (
-      _messages: unknown,
-      _tools: unknown,
-      _options: unknown,
-      _thinking: unknown,
-      onText: (event: unknown) => void
-    ) => {
-      await new Promise((resolve) => setTimeout(resolve, 400))
-      onText({ phase: 'start', content: '', contentIndex: 0 })
-      onText({ phase: 'delta', content: 'first reply', contentIndex: 0 })
-      return {
-        text: 'first reply',
-        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-        modelName: 'fixture',
-        totalResponseTimeMs: 1,
-        totalTokensUsed: 2,
-        contextInputs: { signature: 'fixture' },
-        toolEvents: [],
-        nativeMessages: []
-      }
-    }
-  }
+  scriptTurns(f.mms, async () => {
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    return 'first reply'
+  })
   const adapter = f.makeAdapter()
   await f.connect(adapter.store)
   const created = (await executeBridgeHubLocal(f.hub(), 'bridge.hub.create', {

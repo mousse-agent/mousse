@@ -78,12 +78,6 @@ function daemon(home: string, script: Script, pid: number) {
     undefined, undefined, undefined, undefined, undefined, projects
   )
   orch.setThreadStore(store)
-  ;(orch as any).llm = {
-    getSelectedModelContextLimit: () => ({ limit: 128_000, modelName: 'scripted' }),
-    getContextInputs: async () => ({ systemPromptText: '', mcpToolsText: '', otherToolsText: '', signature: 'scripted' }),
-    generateTitle: async () => 'Scripted',
-    chat: async () => { throw new Error('the scripted adapter replaces the pi loop') }
-  }
   const adapter = new ScriptedPiAdapter(script)
   orch.setHarness(testHarness({ adapters: [adapter], profileHome: home }))
   const engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home })), pid })

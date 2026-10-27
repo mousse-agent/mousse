@@ -32,12 +32,10 @@ import { instanceStateDir } from '../../../src/mms/harness/instances'
 import { replayCursorHost } from '../../../src/mms/run/testkit/cursorHostReplay'
 import { piDriver } from '../../../src/mms/harness/drivers/pi'
 import { ProviderInstanceService } from '../../../src/mms/providers/ProviderInstanceService'
-import { replayPiChat } from '../../../src/mms/run/testkit/piChatReplay'
 import { replayPiRpc, type PiRpcReplay } from '../../../src/mms/run/testkit/piRpcReplay'
-import { DEFAULT_VOLATILE_KEYS, dropKeys, readTranscript, ReplayTransport } from '../../../src/mms/run/testkit/ReplayTransport'
-import { Reconciler } from '../../../src/mms/run/Reconciler'
+import { readTranscript, ReplayTransport } from '../../../src/mms/run/testkit/ReplayTransport'
 import { replaySdkQuery } from '../../../src/mms/run/testkit/sdkQueryReplay'
-import type { AttemptRecord, DelegationRecord, EffectKind, EffectRecord, HandoffRecord, RunRecord, TransferRecord } from '../../../src/mms/run/types'
+import type { AttemptRecord, EffectKind, EffectRecord, RunRecord } from '../../../src/mms/run/types'
 import { TaskQueue } from '../../../src/mms/tasks/TaskQueue'
 import { PtyManager } from '../../../src/mms/terminals/PtyManager'
 import { WorktreeManager } from '../../../src/mms/worktree/WorktreeManager'
@@ -49,8 +47,7 @@ export const FIXTURES_DIR = join(__dirname, '..', 'fixtures')
 
 /** Model selection per adapter; every fixture is authored against these. */
 const SELECTION: Record<string, { instanceId?: string; llmProvider: string; model: string }> = {
-  pi: { llmProvider: 'openai', model: 'gpt-replay' },
-  // The same `pi:openai` instance on the Pi RPC engine (`config.engine: 'rpc'`).
+  // The `pi:openai` instance, on Pi's agent (the RPC engine).
   'pi-rpc': { llmProvider: 'openai', model: 'gpt-replay' },
   // A Custom command: named by its instance only (no legacy provider name), on the agent's own model.
   acp: { instanceId: 'acp:replay', llmProvider: '', model: 'default' },
@@ -70,29 +67,10 @@ export interface ScenarioResult {
   /** Canonical (native) transcript after the turn. */
   llmMessages: Message[]
   turnState: TurnState
-  /** Delegations the scenario thread made (SPEC §14), oldest first. */
-  delegations: DelegationRecord[]
   /** Runs of the scenario thread, oldest first. */
   runs: RunRecord[]
-  /** Handoffs the scenario thread received (SPEC §16.1), oldest first. */
-  handoffs: HandoffRecord[]
-  /** Transfers into or out of the scenario thread (SPEC §16.2), oldest first. */
-  transfers: TransferRecord[]
   /** Attempts of each run of the scenario thread (with their execution bindings), by run id. */
   attempts: Record<string, AttemptRecord[]>
-}
-
-const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g
-
-/** Replaces run-time uuids in every string (delegating scenarios mint threads and delegations). */
-function normalizeIds(frame: unknown): unknown {
-  const walk = (value: unknown): unknown => {
-    if (typeof value === 'string') return value.replace(UUID, '<uuid>')
-    if (Array.isArray(value)) return value.map(walk)
-    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, walk(entry)]))
-    return value
-  }
-  return walk(dropKeys(DEFAULT_VOLATILE_KEYS)(frame))
 }
 
 /** Adapters with a fixture for `scenario`, by file name. */
@@ -172,7 +150,6 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
   let cues = 0
   let piRpc: PiRpcReplay | undefined
   const transport = new ReplayTransport(transcript, {
-    ...(scenario.delegates ? { normalize: normalizeIds } : {}),
     onCue: async (cue) => {
       const action = cue as { action?: string; text?: string }
       // Pi's events cross a process boundary: the cue acts once the engine read them.
@@ -191,29 +168,15 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
     }
   })
 
-  // Every adapter shares the orchestrator's `LlmClient` for titles; only pi replays its chat.
-  ;(orch as any).llm = {
-    getSelectedModelContextLimit: () => ({ limit: 128_000, modelName: 'replay' }),
-    getContextInputs: async () => ({ systemPromptText: '', mcpToolsText: '', otherToolsText: '', signature: 'replay' }),
-    generateTitle: async () => 'Replay',
-    chat: async () => {
-      throw new Error(`${adapterId} turns must not reach the pi loop`)
-    }
-  }
   const questions = new UserQuestionService()
   const services: { claude?: ClaudeSubscriptionProviderService; antigravity?: AntigravityProviderService; codex?: CodexProviderService } = {}
-  // A scenario may drive turns on several adapters (`before`); each replays from the one transcript.
-  const involved = new Set([adapterId, ...(scenario.before ?? []).map((turn) => turn.adapter)])
-  if (involved.has('pi')) {
-    ;(orch as any).llm.chat = replayPiChat(transport).chat
-  }
   // Pi's RPC mode: a relay process per thread pipes the engine's RPC stdio to the replay.
-  if (involved.has('pi-rpc')) {
+  if (adapterId === 'pi-rpc') {
     const replay = await replayPiRpc(transport)
     piRpc = replay
     stops.push(() => replay.close())
   }
-  if (involved.has('claude-subscription')) {
+  if (adapterId === 'claude-subscription') {
     const binary = join(home, 'claude')
     writeFileSync(binary, '#!/bin/sh\nexit 0\n')
     chmodSync(binary, 0o755)
@@ -230,14 +193,14 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
     stops.push(() => service.stop())
     services.claude = service
   }
-  if (involved.has('antigravity')) {
+  if (adapterId === 'antigravity') {
     // Replace the agent process boundary only; the service's session lifecycle runs for real.
     const service = new AntigravityProviderService(home, home, questions, undefined, { connect: replayAcpProcess(transport) })
     Object.assign(service as unknown as Record<string, unknown>, { configured: () => true })
     stops.push(() => service.stop())
     services.antigravity = service
   }
-  if (involved.has('codex')) {
+  if (adapterId === 'codex') {
     const binary = join(home, 'codex')
     writeFileSync(binary, '#!/bin/sh\nexit 0\n')
     chmodSync(binary, 0o755)
@@ -271,9 +234,9 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
   })
   // Awaited: the RPC engine's processes must be gone before the home is removed.
   stops.unshift(() => harness.stop())
-  if (involved.has('pi-rpc')) harness.instanceMap.setEntry('pi:openai', { driver: 'pi', enabled: true, config: { engine: 'rpc' } })
-  if (involved.has('acp')) harness.instanceMap.setEntry('acp:replay', { driver: 'acp', enabled: true, config: { displayName: 'Replay agent', binaryPath: process.execPath } })
-  if (involved.has('cursor')) {
+  if (adapterId === 'pi-rpc') harness.instanceMap.setEntry('pi:openai', { driver: 'pi', enabled: true })
+  if (adapterId === 'acp') harness.instanceMap.setEntry('acp:replay', { driver: 'acp', enabled: true, config: { displayName: 'Replay agent', binaryPath: process.execPath } })
+  if (adapterId === 'cursor') {
     // A key saved for the entry (the vault keeps plain text outside Electron).
     const stateDir = instanceStateDir(home, 'cursor:replay')
     mkdirSync(stateDir, { recursive: true })
@@ -292,31 +255,8 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
       thread = store.createThread(name, project.id, workspace)
     } else thread = store.createThread(name)
     threadId = thread.id
-    for (const [index, turn] of (scenario.before ?? []).entries()) {
-      const selected = SELECTION[turn.adapter]
-      if (!selected) throw new Error(`No model selection for adapter ${turn.adapter}`)
-      orch.setThreadModelOverride(threadId, selected)
-      await orch.send(turn.prompt, false, { threadId, clientRequestId: `scenario-before-${index}` })
-    }
-    if (scenario.before) orch.setThreadModelOverride(threadId, selection)
-    if (scenario.fork) threadId = (await engine.forkThread({ sourceThreadId: threadId, clientRequestId: 'scenario-fork' })).threadId
     const response = await orch.send(scenario.prompt, false, { threadId, clientRequestId: 'scenario-send' })
     await transport.idle()
-    if (scenario.delegates) {
-      // Children and wake turns run after the send returns; rule 4 wakes the parent.
-      const reconciler = new Reconciler({ store: engine.store, outbox: engine.outbox, tools: engine.tools, capabilitiesFor: (id) => orch.capabilitiesForThread(id) })
-      await waitFor(() => {
-        if (transport.error) return true
-        reconciler.runOnce()
-        try {
-          transport.assertDone()
-          return engine.listRuns(threadId).every((run) => ['completed', 'failed', 'interrupted', 'cancelled'].includes(run.status))
-        } catch {
-          return false
-        }
-      }, 'the delegation to settle')
-      await transport.idle()
-    }
     transport.assertDone()
     const run = engine.listRuns(threadId).find((entry) => entry.clientRequestId === 'scenario-send')
     if (!run) throw new Error('The scenario send created no run')
@@ -328,10 +268,7 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
       messages: orch.getMessages(threadId),
       llmMessages: orch.getNativeContext(threadId).messages,
       turnState: orch.getTurnState(threadId),
-      delegations: engine.delegations.listForParentThread(threadId),
       runs: engine.listRuns(threadId).reverse(),
-      handoffs: engine.handoffs.listForThread(threadId),
-      transfers: engine.transfers.listForThread(threadId),
       attempts: Object.fromEntries(engine.listRuns(threadId).map((entry) => [entry.runId, engine.store.listAttempts(entry.runId)]))
     }
   } finally {

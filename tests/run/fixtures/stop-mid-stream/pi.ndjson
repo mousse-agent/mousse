@@ -1,6 +1,0 @@
-{"kind":"transcript","adapter":"pi","scenario":"stop-mid-stream","boundary":"LlmClient.chat call: request projection out; callbacks and result in","recordedAt":"hand-authored","version":1}
-{"dir":"out","frame":{"kind":"chat","messages":[{"role":"user","content":"Write a long essay"}],"options":{"mode":"agent"}}}
-{"dir":"in","frame":{"kind":"text","event":{"phase":"start","content":"","contentIndex":0}}}
-{"dir":"in","frame":{"kind":"text","event":{"phase":"delta","content":"Partial","contentIndex":0}}}
-{"dir":"cue","frame":{"action":"stop"}}
-{"dir":"in","frame":{"kind":"result","result":{"text":"Partial","usage":{"input":12,"output":4,"cacheRead":0,"cacheWrite":0,"totalTokens":16,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"modelName":"GPT Replay","totalResponseTimeMs":40,"totalTokensUsed":16,"tokensPerSecond":100,"contextInputs":{"systemPromptText":"","mcpToolsText":"","otherToolsText":"","signature":"replay-sig","modelKey":"openai:gpt-replay"},"toolEvents":[],"aborted":true}}}

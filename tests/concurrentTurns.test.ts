@@ -10,7 +10,8 @@ import { describe, expect, it, afterEach, beforeEach } from 'vitest'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { OrchestratorService } from '../src/mms/orchestrator/OrchestratorService'
-import { createOrchestrator } from './run/phase6Fixture'
+import { createOrchestrator, piAdapter } from './run/phase6Fixture'
+import { testHarness } from '../src/mms/run/testkit/harness'
 
 describe('concurrent same-project turns', () => {
   let home: string
@@ -40,35 +41,14 @@ describe('concurrent same-project turns', () => {
 
       let inFlight = 0
       let maxInFlight = 0
-      ;(orch as any).llm = {
-        getSelectedModelContextLimit: () => ({ limit: 128_000, modelName: 'probe' }),
-        getContextInputs: async () => ({
-          systemPromptText: '',
-          mcpToolsText: '',
-          otherToolsText: '',
-          signature: 'probe-sig'
-        }),
-        chat: async (_messages: unknown, _onTool: unknown, opts: any) => {
-          inFlight += 1
-          maxInFlight = Math.max(maxInFlight, inFlight)
-          // Force overlap: both turns must be inside chat() at once.
-          await new Promise((r) => setTimeout(r, 200))
-          inFlight -= 1
-          const aborted = Boolean(opts?.signal?.aborted)
-          return {
-            text: aborted ? '' : 'hello from probe',
-            usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-            modelName: 'probe',
-            totalResponseTimeMs: 1,
-            totalTokensUsed: 2,
-            tokensPerSecond: undefined,
-            contextInputs: { signature: 'probe-sig' },
-            toolEvents: [],
-            aborted,
-            nativeMessages: []
-          }
-        }
-      }
+      orch.setHarness(testHarness({ adapters: [piAdapter(async () => {
+        inFlight += 1
+        maxInFlight = Math.max(maxInFlight, inFlight)
+        // Force overlap: both turns must be inside the provider turn at once.
+        await new Promise((r) => setTimeout(r, 200))
+        inFlight -= 1
+        return 'hello from probe'
+      })], profileHome: home }))
 
       const [r1, r2] = await Promise.all([
         orch.send('msg-a', false, { threadId: t1.id }),

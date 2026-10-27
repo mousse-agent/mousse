@@ -79,7 +79,7 @@ describe('HandoffService strategies (SPEC §16.1)', () => {
     transcript(items)
     const plan = fx.engine.handoffs.plan({ threadId: 't', targetRunId: run.runId, from: { provider: 'openai' }, to, caps: PI_TEST_CAPABILITIES })
     expect(plan.strategy).toBe('delta')
-    expect(plan.delivery).toBe('native_history')
+    expect(plan.delivery).toBe('prompt_preamble')
     expect(plan.history.map((item) => item.text)).toEqual(['u2', 'a2'])
     expect(plan.record).toMatchObject({ coveredFromOrdinal: 2, coveredToOrdinal: 2 })
   })
@@ -194,15 +194,14 @@ describe('provider switch through the orchestrator (SPEC §16.1)', () => {
     // Delivered: switching again is allowed.
     expect(() => d.orch.setThreadModelOverride(thread.id, PI)).not.toThrow()
 
-    // Back on pi: Claude ran on run 2, so pi (last on run 1) gets the delta since then, as messages.
+    // Back on pi: Claude ran on run 2, so pi (last on run 1) gets the delta since then, in its prompt.
     await d.orch.send('Third question', false, { threadId: thread.id, clientRequestId: 'send-3' })
     const third = d.engine.handoffs.listForThread(thread.id)[1]
     expect(third).toMatchObject({ strategy: 'delta', coveredFromOrdinal: 2, coveredToOrdinal: 2, status: 'delivered' })
-    const sent = pi.turns[1].messages
-    expect(sent[0]).toMatchObject({ role: 'user' })
-    expect(String(sent[0].content)).toContain('[Context handoff: strategy=delta, covered=2.]')
-    expect(String(sent[0].content)).toContain('Second question')
-    expect(sent.at(-1)).toMatchObject({ role: 'user', content: 'Third question' })
+    const sent = pi.turns[1].prompt
+    expect(sent.startsWith('<handoff strategy="delta" covered="2"')).toBe(true)
+    expect(sent).toContain('[user] Second question')
+    expect(sent.endsWith('</handoff>\n\nThird question')).toBe(true)
     // The canonical transcript keeps every turn: the delta prefix was not persisted over it.
     const canonical = d.orch.getNativeContext(thread.id).messages
     expect(canonical.filter((message) => message.role === 'user').map((message) => message.content)).toEqual(['First question', 'Second question', 'Third question'])

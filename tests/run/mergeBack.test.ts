@@ -96,12 +96,12 @@ describe('merge-back (SPEC §16.2)', () => {
     await d.orch.send('What did the fork find?', false, { threadId: parent.id, clientRequestId: 'p-2' })
     const turn = pi.turns.at(-1)!
     expect(turn.threadId).toBe(parent.id)
-    const sent = turn.messages.map((message) => (typeof message.content === 'string' ? message.content : JSON.stringify(message.content)))
     // The parent keeps its own history and receives the fork's runs 1–2 before the new message.
-    expect(sent[0]).toBe('Design the API')
-    expect(sent.some((text) => text.includes('[Context handoff: strategy=fork_delta_summary, covered=1-2.]') && text.includes('Try variant B'))).toBe(true)
-    expect(sent.some((text) => text.includes('reply to Polish variant B'))).toBe(true)
-    expect(sent.at(-1)).toBe('What did the fork find?')
+    expect(turn.nativeHistory).toContain('Design the API')
+    expect(turn.prompt.startsWith('<handoff strategy="fork_delta_summary" covered="1-2"')).toBe(true)
+    expect(turn.prompt).toContain('Try variant B')
+    expect(turn.prompt).toContain('reply to Polish variant B')
+    expect(turn.prompt.endsWith('What did the fork find?')).toBe(true)
 
     expect(d.engine.transfers.get(second.transferId)).toMatchObject({ status: 'consumed', payload: { strategy: 'fork_delta_summary' } })
     const handoff = d.engine.handoffs.listForThread(parent.id).at(-1)!

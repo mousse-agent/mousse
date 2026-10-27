@@ -24,6 +24,8 @@ import { TaskQueue } from '../../src/mms/tasks/TaskQueue'
 import { PtyManager } from '../../src/mms/terminals/PtyManager'
 import { WorktreeManager } from '../../src/mms/worktree/WorktreeManager'
 import { getDefaultSettings } from '../../src/shared/settings'
+import { testHarness } from '../../src/mms/run/testkit/harness'
+import { piAdapter } from './phase6Fixture'
 
 function createOrchestrator(home: string, store: ThreadDataStore): OrchestratorService {
   process.env.MOUSSE_HOME = home
@@ -101,41 +103,18 @@ describe('OrchestratorService over the Run Engine', () => {
     orch.on('run-event', (event: ThreadEvent) => forwarded.push(event))
     chatCalls = 0
     const firstGate = new Promise<void>((resolve) => (releaseFirst = resolve))
-    ;(orch as any).llm = {
-      getSelectedModelContextLimit: () => ({ limit: 128_000, modelName: 'probe' }),
-      getContextInputs: async () => ({
-        systemPromptText: '',
-        mcpToolsText: '',
-        otherToolsText: '',
-        signature: 'probe-sig'
-      }),
-      generateTitle: async () => 'Probe Title',
-      chat: async (_messages: unknown, _onTool: unknown, opts: any) => {
-        chatCalls += 1
-        if (chatCalls === 1) {
-          // Hold the first turn inside the provider call until released or aborted.
-          await new Promise<void>((resolve) => {
-            const signal: AbortSignal | undefined = opts?.signal
-            if (signal?.aborted) return resolve()
-            signal?.addEventListener('abort', () => resolve(), { once: true })
-            void firstGate.then(resolve)
-          })
-        }
-        const aborted = Boolean(opts?.signal?.aborted)
-        return {
-          text: aborted ? '' : 'hello from probe',
-          usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-          modelName: 'probe',
-          totalResponseTimeMs: 1,
-          totalTokensUsed: 2,
-          tokensPerSecond: undefined,
-          contextInputs: { signature: 'probe-sig' },
-          toolEvents: [],
-          aborted,
-          nativeMessages: []
-        }
+    orch.setHarness(testHarness({ adapters: [piAdapter(async ({ signal }) => {
+      chatCalls += 1
+      if (chatCalls === 1) {
+        // Hold the first turn inside the provider call until released or aborted.
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) return resolve()
+          signal.addEventListener('abort', () => resolve(), { once: true })
+          void firstGate.then(resolve)
+        })
       }
-    }
+      return signal.aborted ? '' : 'hello from probe'
+    })], profileHome: home }))
   })
 
   afterEach(async () => {

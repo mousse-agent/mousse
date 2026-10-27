@@ -189,7 +189,8 @@ describe('undo and revert through the protocol (SPEC §16.3)', () => {
 
   it('strong containment restores automatically; undo and revert are runs; a failure ends the run failed', async () => {
     const { thread, workspace, action } = await threadWithAction('auto')
-    mms.orchestrator.setThreadModelOverride(thread.id, { llmProvider: 'openai', model: 'gpt-4o' })
+    // No shipped runtime has strong containment now (Pi's RPC engine is weak): a Mousse-run one stands in.
+    vi.spyOn(mms.orchestrator, 'capabilitiesForThread').mockReturnValue(PI_TEST_CAPABILITIES as never)
     const reverted = await client.request<{ runId: string }>('actions.revertCode', { threadId: thread.id, actionId: action.id })
     expect(f.read(workspace)).toBe('base\n')
     await expect(client.request('actions.revertCode', { threadId: thread.id, actionId: 'missing-action' })).rejects.toThrow()

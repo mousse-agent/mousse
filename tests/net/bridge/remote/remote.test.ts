@@ -36,6 +36,8 @@ import {
 } from '../../../../src/shared/net'
 import { memoryPair } from '../../harness/MemoryTransport'
 import { cliChild } from '../../../support/build'
+import { testHarness } from '../../../../src/mms/run/testkit/harness'
+import { piAdapter } from '../../../run/phase6Fixture'
 
 const resources: Array<() => void | Promise<void>> = [],
   paths: string[] = []
@@ -378,44 +380,22 @@ describe('P3 real MMS remote Bridge', () => {
   it('keeps an accepted actual MMS turn running when the sender deadline expires, until a Stop ends it', async () => {
     const p = await setup(),
       thread = p.mms.threads.createThread('Owned turn'),
-      calls: Array<{ signal: AbortSignal; drainSteer: () => string | undefined }> = []
-    const llm = {
-      getSelectedModelContextLimit: () => ({ limit: 128000, modelName: 'fixture' }),
-      getContextInputs: async () => ({
-        systemPromptText: '',
-        mcpToolsText: '',
-        otherToolsText: '',
-        signature: 'fixture'
-      }),
-      chat: async (
-        _messages: unknown,
-        _tools: unknown,
-        options: { signal: AbortSignal; drainSteer: () => string | undefined },
-        _thinking: unknown,
-        onText: (event: unknown) => void
-      ) => {
-        calls.push(options)
-        onText({ phase: 'start', content: '', contentIndex: 0 })
-        onText({ phase: 'delta', content: 'partial fixture output', contentIndex: 0 })
-        if (!options.signal.aborted)
-          await new Promise<void>((resolve) =>
-            options.signal.addEventListener('abort', () => resolve(), { once: true })
-          )
-        return {
-          text: 'partial fixture output',
-          aborted: true,
-          usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-          modelName: 'fixture',
-          totalResponseTimeMs: 1,
-          totalTokensUsed: 2,
-          contextInputs: { signature: 'fixture' },
-          toolEvents: [],
-          nativeMessages: []
-        }
-      }
+      calls: Array<{ signal: AbortSignal }> = []
+    const pi = piAdapter(async ({ signal }) => {
+      calls.push({ signal })
+      if (!signal.aborted)
+        await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+      return 'partial fixture output'
+    })
+    // The turn streams its partial output before it waits for the Stop.
+    const startTurn = pi.startTurn.bind(pi)
+    pi.startTurn = (input, sink, ...rest) => {
+      sink.text({ phase: 'start', content: '', contentIndex: 0 })
+      sink.text({ phase: 'delta', content: 'partial fixture output', contentIndex: 0 })
+      return startTurn(input, sink, ...rest)
     }
-    ;(p.mms.orchestrator as unknown as { llm: unknown }).llm = llm
-    // The turn runs on the profile's default model, a pi instance over the replaced loop client.
+    p.mms.orchestrator.setHarness(testHarness({ adapters: [pi], profileHome: p.mms.getProfileHomeDir() }))
+    // The turn runs on the profile's default model, a pi instance over a scripted adapter.
     p.mms.settings.set({ provider: { llmProvider: 'openai', model: 'fixture' } })
     const deltas: unknown[] = [],
       adapter = new ThreadStreamAdapter({
@@ -439,7 +419,8 @@ describe('P3 real MMS remote Bridge', () => {
           { id: run, idem: 'deadline-send', deadlineMs: 1000 }
         )
         .catch((error) => error)
-    await vi.waitFor(() => expect(calls).toHaveLength(1))
+    // The first turn of a fresh profile starts its runtime (and loads its modules) first.
+    await vi.waitFor(() => expect(calls).toHaveLength(1), { timeout: 5000 })
     // Live deltas are batched and published about every 100 ms.
     await vi.waitFor(() => expect(deltas.length).toBeGreaterThan(0))
     expect(await expired).toMatchObject({ code: 'deadline_exceeded' })

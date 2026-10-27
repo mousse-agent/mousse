@@ -952,16 +952,6 @@ describe('agent access level (SPEC §15.1)', () => {
     expect(registry.listForThread('parent', 'default', 'read').map((tool) => tool.name)).toEqual(expect.arrayContaining(['thread_read', 'thread_list', 'thread_search']))
   })
 
-  it('an in-process call of a tool that reaches other threads is held to the same check', async () => {
-    const { registry, turns, parentRun } = await world({ level: 'manage' })
-    const turn = turns.get(parentRun.runId)!
-    const inProcess = (args: Record<string, unknown>, accessLevel?: AgentAccessLevel) =>
-      registry.callInProcess('thread_read', args, { kind: 'run', runId: parentRun.runId }, { turn: { ...turn, ...(accessLevel ? { accessLevel } : {}) }, toolCallId: 'c', signal: new AbortController().signal })
-    expect(await inProcess({ threadId: 'stranger' })).toMatchObject({ isError: true, text: expect.stringContaining('needs the "read" agent access level') })
-    expect((await inProcess({ threadId: 'stranger' }, 'manage')).isError).toBeUndefined()
-    expect((await inProcess({})).isError).toBeUndefined()
-  })
-
   it('the model cannot choose the level of a task it delegates: the host works it out from the caller', async () => {
     const { call, host, delegation } = await world({ level: 'manage' })
     await call('parent', 'lineage', 'delegate_task', { prompt: 'Look', title: 'Looker', workspace: 'shared', role: 'research', accessLevel: 'manage' })
@@ -1060,16 +1050,4 @@ describe('workspace-changing tools and the permission mode', () => {
     expect(fake.delegation.integrateDelegation).not.toHaveBeenCalled()
   })
 
-  it('asks an in-process run by the turn\'s own mode, and a trusted caller does not ask', async () => {
-    const { registry, asked, delegation, run } = await setup(undefined, 'reject')
-    const turn = { ...appTurn({ threadId: 'parent', runId: run.runId }), turnToken: 't', permissionMode: 'ask' as const, delegation }
-    const call = { turn, toolCallId: 'c1', signal: new AbortController().signal }
-    await expect(registry.callInProcess('integrate_delegation', { delegationId: 'd1' }, { kind: 'run', runId: run.runId, active: () => true }, call))
-      .resolves.toMatchObject({ isError: true, text: expect.stringContaining('did not approve') })
-    expect(asked).toHaveLength(1)
-    expect(delegation.integrateDelegation).not.toHaveBeenCalled()
-
-    await registry.callInProcess('integrate_delegation', { delegationId: 'd1' }, { kind: 'trusted' }, { ...call, turn: { ...turn, trusted: true } })
-    expect(asked).toHaveLength(1)
-  })
 })

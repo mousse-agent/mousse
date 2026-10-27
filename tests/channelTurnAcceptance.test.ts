@@ -11,7 +11,7 @@ import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { OrchestratorService } from '../src/mms/orchestrator/OrchestratorService'
 import type { WorkflowChatRun } from '../src/shared/workflowChat'
-import { createOrchestrator } from './run/phase6Fixture'
+import { createOrchestrator, piAdapter } from './run/phase6Fixture'
 
 describe('channel turn input acceptance', () => {
   let home: string
@@ -23,20 +23,11 @@ describe('channel turn input acceptance', () => {
     home = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-accept-')))
     process.env.MOUSSE_HOME = home
     store = new ThreadDataStore(new ProjectManager())
-    orch = createOrchestrator(home, store)
     chatCalls = 0
-    ;(orch as any).llm = {
-      getSelectedModelContextLimit: () => ({ limit: 128_000, modelName: 'probe' }),
-      getContextInputs: async () => ({ systemPromptText: '', mcpToolsText: '', otherToolsText: '', signature: 'probe-sig' }),
-      chat: async () => {
-        chatCalls += 1
-        return {
-          text: 'reply', usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, modelName: 'probe',
-          totalResponseTimeMs: 1, totalTokensUsed: 2, tokensPerSecond: undefined,
-          contextInputs: { signature: 'probe-sig' }, toolEvents: [], aborted: false, nativeMessages: []
-        }
-      }
-    }
+    orch = createOrchestrator(home, store, [piAdapter(() => {
+      chatCalls += 1
+      return 'reply'
+    })])
   })
 
   afterEach(() => {

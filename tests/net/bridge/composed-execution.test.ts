@@ -1,25 +1,18 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { mkdir, mkdtemp, realpath, readFile, writeFile, rm, stat } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, writeFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createHash } from 'node:crypto'
 import { lookup, Resolver } from 'node:dns/promises'
-import type { AssistantMessage, Context } from '@earendil-works/pi-ai'
 import { MousseMainService } from '../../../src/mms/MousseMainService'
 import { ProviderAuthService } from '../../../src/mms/providers/ProviderAuthService'
 import { Harness } from '../../../src/mms/harness/gateway'
-import { newId, validateStreamDescriptor, type StreamDescriptor } from '../../../src/shared/net'
-import { defaultAgentSettings } from '../../../src/shared/agents/defaults'
-import { portableRepository, type DispatchResultBody } from '../../../src/mms/bridge/dispatch'
+import { newId } from '../../../src/shared/net'
 import { git } from '../../../src/mms/bridge/dispatch/git'
-import { inputRef } from '../../../src/mms/bridge/dispatch/bundle'
-import {
-  providerResponse,
-  streamOf
-} from '../../fixtures/agent-platform/agent-runtime-policy/helpers'
 import { DirectTransport } from '../../../src/mms/net/transports/direct'
 import { ProcessSupervisor } from '../../../src/mms/net/transports/runtime/process'
 import { dispatchMethod } from '../../../src/mms/protocol/handlers'
+import { testHarness } from '../../../src/mms/run/testkit/harness'
+import { piAdapter } from '../../run/phase6Fixture'
 
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -100,36 +93,42 @@ function deferred() {
   return { promise, resolve }
 }
 
+/**
+ * Turns on `mms` run on a scripted pi adapter. Each provider step streams `text` and waits on its
+ * gate (or the turn's abort); between two steps the turn takes a waiting steer, as a runtime with
+ * native steering does. Returns the steps, with the steer each one carried.
+ */
+function steeringTurns(mms: MousseMainService, gates: Array<{ promise: Promise<void> }>, text: string): Array<{ steer?: string; signal: AbortSignal }> {
+  const calls: Array<{ steer?: string; signal: AbortSignal }> = []
+  const pi = piAdapter(() => text)
+  pi.startTurn = async (input, sink, control, host) => {
+    const step = async (steer?: string) => {
+      const index = calls.length
+      calls.push({ ...(steer ? { steer } : {}), signal: input.signal })
+      sink.text({ phase: 'start', content: '', contentIndex: 0 })
+      sink.text({ phase: 'delta', content: text, contentIndex: 0 })
+      await Promise.race([gates[index].promise, new Promise<void>((done) => input.signal.addEventListener('abort', () => done(), { once: true }))])
+    }
+    await step()
+    const steer = input.signal.aborted ? undefined : control.drainSteer()
+    if (steer) {
+      sink.steerAccepted(steer)
+      await step(steer)
+    }
+    if (!input.signal.aborted) host.context.nativeHistoryAfterTurn(text)
+    return { text, aborted: input.signal.aborted, modelName: 'Scripted', totalResponseTimeMs: 1, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, contextSignature: 'scripted', nativeMessages: [] }
+  }
+  mms.orchestrator.setHarness(testHarness({ adapters: [pi], profileHome: mms.getProfileHomeDir() }))
+  return calls
+}
+
 it('steers and aborts the exact composed remote native run without cancelling a later local run', async () => {
   const f = await fixture(),
     thread = f.target.threads.createThread('Owned native turn'),
     ref = { nodeId: f.node, entityId: thread.id },
     id = newId('rpc')
-  const calls: Array<{ context: Context; signal?: AbortSignal }> = [],
-    gates = [deferred(), deferred(), deferred()]
-  vi.spyOn(f.target.providerAuth.models, 'streamSimple').mockImplementation(
-    (_model, context, options) => {
-      const index = calls.length
-      calls.push({ context: structuredClone(context), signal: options?.signal })
-      const response = providerResponse(
-        [{ type: 'text', text: 'native deterministic partial' }],
-        'stop'
-      )
-      return {
-        async *[Symbol.asyncIterator]() {
-          yield { type: 'text_start', contentIndex: 0, partial: response }
-          yield {
-            type: 'text_delta',
-            contentIndex: 0,
-            delta: 'native deterministic partial',
-            partial: response
-          }
-          await gates[index].promise
-        },
-        result: async () => response
-      } as never
-    }
-  )
+  const gates = [deferred(), deferred(), deferred()],
+    calls = steeringTurns(f.target, gates, 'native deterministic partial')
   const sending = f.caller.bridge.hub
     .send(ref, 'Original owned remote prompt', {
       id,
@@ -137,19 +136,17 @@ it('steers and aborts the exact composed remote native run without cancelling a 
       deadlineMs: 15_000
     })
     .catch((error) => error)
-  await vi.waitFor(() => expect(calls).toHaveLength(1))
+  await vi.waitFor(() => expect(calls).toHaveLength(1), { timeout: 5_000 })
   expect(await f.caller.bridge.hub.steer(ref, id, 'Keep the exact mid-turn steering text')).toEqual(
     { ok: true }
   )
   gates[0].resolve()
   await vi.waitFor(() => expect(calls).toHaveLength(2))
-  expect(JSON.stringify(calls[1].context.messages)).toContain(
-    'Keep the exact mid-turn steering text'
-  )
+  expect(calls[1].steer).toBe('Keep the exact mid-turn steering text')
   expect(await f.caller.bridge.hub.abort(ref, id)).toEqual({ ok: true })
   expect(await sending).toMatchObject({ code: 'outcome_uncertain' })
   await vi.waitFor(() => {
-    expect(calls[1].signal?.aborted).toBe(true)
+    expect(calls[1].signal.aborted).toBe(true)
     expect(f.target.orchestrator.getOrCreateSession(thread.id).turnAdmitted).toBe(false)
   })
   gates[1].resolve()
@@ -162,7 +159,7 @@ it('steers and aborts the exact composed remote native run without cancelling a 
     )
   await vi.waitFor(() => expect(calls).toHaveLength(3))
   expect(await f.caller.bridge.hub.abort(ref, id)).toEqual({ ok: false })
-  expect(calls[2].signal?.aborted).toBe(false)
+  expect(calls[2].signal.aborted).toBe(false)
   local.abort()
   await later
   gates[2].resolve()
@@ -316,35 +313,22 @@ it.skipIf(process.env.MOUSSE_NET_QA_OPT_IN !== '1')(
     await vi.waitFor(() => expect(JSON.stringify(views)).toContain('Actual CF local rename'))
     f.target.threads.mutateThreadData(thread.id, () => ({ messages: [] }))
     f.target.orchestrator.getOrCreateSession(thread.id).messages = []
-    const calls: Array<{ context: Context; signal?: AbortSignal }> = [],
-      gates = [deferred(), deferred()]
-    vi.spyOn(f.target.providerAuth.models, 'streamSimple').mockImplementation(
-      (_model, context, options) => {
-        const index = calls.length
-        calls.push({ context: structuredClone(context), signal: options?.signal })
-        const response = providerResponse([{ type: 'text', text: 'CF native fixture' }], 'stop')
-        return {
-          async *[Symbol.asyncIterator]() {
-            await gates[index].promise
-          },
-          result: async () => response
-        } as never
-      }
-    )
+    const gates = [deferred(), deferred()],
+      calls = steeringTurns(f.target, gates, 'CF native fixture')
     const id = newId('rpc'),
       sending = f.caller.bridge.hub
         .send(ref, 'Actual CF native turn', { id, deadlineMs: 20_000 })
         .catch((error) => error)
-    await vi.waitFor(() => expect(calls).toHaveLength(1))
+    await vi.waitFor(() => expect(calls).toHaveLength(1), { timeout: 5_000 })
     expect(await f.caller.bridge.hub.steer(ref, id, 'Cloudflare mid-turn steer')).toEqual({
       ok: true
     })
     gates[0].resolve()
     await vi.waitFor(() => expect(calls).toHaveLength(2))
-    expect(JSON.stringify(calls[1].context)).toContain('Cloudflare mid-turn steer')
+    expect(calls[1].steer).toBe('Cloudflare mid-turn steer')
     expect(await f.caller.bridge.hub.abort(ref, id)).toEqual({ ok: true })
     expect(await sending).toMatchObject({ code: 'outcome_uncertain' })
-    await vi.waitFor(() => expect(calls[1].signal?.aborted).toBe(true))
+    await vi.waitFor(() => expect(calls[1].signal.aborted).toBe(true))
     gates[1].resolve()
     expect(errors).toEqual([])
     expect(f.caller.net.session(f.node).peer.node).toBe(f.node)
@@ -390,193 +374,4 @@ it.skipIf(process.env.MOUSSE_NET_QA_OPT_IN !== '1')(
     console.log(JSON.stringify(evidence))
   },
   120_000
-)
-
-it.each(['shared-remote', 'bundle'])(
-  'runs actual composed native Dispatch with %s and publishes a verified Git result once',
-  async (mode) => {
-    const f = await fixture(),
-      sender = join(f.root, 'sender')
-    await git(f.root, ['clone', f.repo, sender])
-    const base = await git(f.repo, ['rev-parse', 'HEAD'])
-    await writeFile(join(sender, 'input.txt'), 'verified incoming base')
-    await git(sender, ['add', '.'])
-    await git(sender, [
-      '-c',
-      'user.name=Fixture',
-      '-c',
-      'user.email=fixture@localhost',
-      'commit',
-      '-m',
-      'incoming base'
-    ])
-    const incoming = await git(sender, ['rev-parse', 'HEAD'])
-    if (mode === 'shared-remote') await git(f.repo, ['remote', 'add', 'origin', `file://${sender}`])
-    else {
-      await git(f.repo, ['remote', 'add', 'origin', 'https://example.invalid/team/repo.git'])
-      await git(sender, ['remote', 'set-url', 'origin', 'https://example.invalid/team/repo.git'])
-    }
-    const portable = await portableRepository(f.repo)
-    await f.target.bridge.dispatch.bindRepository(
-      portable.repoId,
-      f.repo,
-      mode === 'shared-remote' ? { allowFetch: true, remote: 'origin' } : {}
-    )
-    const outputs: AssistantMessage[] = [
-        providerResponse(
-          [
-            {
-              type: 'toolCall',
-              id: 'write-1',
-              name: 'write',
-              arguments: { path: 'result.txt', content: 'actual native tool bytes' }
-            }
-          ],
-          'toolUse'
-        ),
-        providerResponse([{ type: 'text', text: 'native composed dispatch complete' }], 'stop')
-      ],
-      contexts: Context[] = []
-    vi.spyOn(f.target.providerAuth.models, 'streamSimple').mockImplementation((_model, context) => {
-      contexts.push(structuredClone(context))
-      const next = outputs.shift()
-      if (!next) throw new Error('Deterministic provider exhausted')
-      return streamOf(next) as never
-    })
-    const integrations = f.target.settings.get().integrations
-    f.target.settings.set({
-      integrations: { ...integrations, tools: { enabled: true, enabledTools: ['write', 'read'] } }
-    })
-    const settings = defaultAgentSettings({ name: 'Composed Dispatch', slug: 'composed-dispatch' })
-    settings.primaryModel.ref = { providerId: f.provider.id, modelId: f.model.id }
-    settings.tools = { mode: 'explicit', allowlist: ['write'] }
-    settings.context.includeProjectInstructions = false
-    settings.context.includeCurrentThread = false
-    settings.context.attachmentPolicy = 'none'
-    settings.context.sources = []
-    settings.memory.scope = 'off'
-    settings.recovery.retryCount = 0
-    settings.approval.policy = 'inherit'
-    const draft = f.target.platform.agentDefinitions.createDraft({
-        settings,
-        systemPrompt: 'PINNED_COMPOSED_DISPATCH'
-      }),
-      published = f.target.platform.agentDefinitions.publish(draft.id, draft.draftHash)
-    const id = newId('rpc'),
-      request = {
-        repoId: portable.repoId,
-        baseCommit: incoming,
-        agent: draft.id,
-        prompt: 'Write result.txt in the isolated worktree.',
-        limits: { maxTurns: 2, maxToolCalls: 1, maxElapsedMs: 10_000 },
-        ...(mode === 'shared-remote' ? { fetch: true } : {})
-      }
-    let result: DispatchResultBody
-    if (mode === 'bundle') {
-      await git(sender, ['update-ref', inputRef(incoming), incoming])
-      const path = join(f.root, 'input.bundle')
-      await git(sender, ['bundle', 'create', path, inputRef(incoming), `^${base}`])
-      expect((await portableRepository(sender)).repoId).toBe(portable.repoId)
-      f.caller.bridge.hub.prepareDispatchWithBundle(f.node, request, await readFile(path), {
-        id,
-        idem: 'one-native-dispatch',
-        deadlineMs: 15_000
-      })
-      result = (await f.caller.bridge.hub.resumeDispatchWithBundle(id)) as DispatchResultBody
-    } else
-      result = (await f.caller.bridge.hub.dispatch(f.node, request, {
-        id,
-        idem: 'one-native-dispatch',
-        deadlineMs: 15_000
-      })) as DispatchResultBody
-    expect(result).toMatchObject({
-      kind: 'bridge.dispatch.result.v1',
-      rpc: id,
-      baseCommit: incoming,
-      agent: { revision: published.revision, profileId: f.target.profileId }
-    })
-    expect(await git(f.repo, ['show', `${result.ref}:result.txt`])).toBe('actual native tool bytes')
-    expect(await git(f.repo, ['show', `${result.ref}:input.txt`])).toBe('verified incoming base')
-    expect(contexts).toHaveLength(2)
-    expect(contexts[0].systemPrompt).toContain('PINNED_COMPOSED_DISPATCH')
-    expect(
-      f.target.threads
-        .loadThreadData(result.threadId)
-        .messages.map((message) => message.content)
-        .join('\n')
-    ).toContain('native composed dispatch complete')
-    const db = f.target.net.runtime().db,
-      record = JSON.parse(
-        String(
-          db.database
-            .prepare('SELECT record FROM net_dispatches WHERE execution=?')
-            .get(result.execution)!.record
-        )
-      )
-    expect(record.state).toBe('completed')
-    expect(
-      f.target.bridge.threads.store.getById(result.artifact.stream, result.artifact.event)
-    ).toBeDefined()
-    expect(
-      f.target.net.runtime().blobs.isReferenced(result.artifact.blob, result.artifact.stream)
-    ).toBe(true)
-    await f.target.bridge.dispatch.drainCleanup()
-    expect(await f.caller.bridge.hub.query(id)).toEqual(result)
-    expect(db.database.prepare('SELECT * FROM net_dispatches').all()).toHaveLength(1)
-    expect(
-      db.database
-        .prepare("SELECT DISTINCT execution FROM net_rpc_aliases WHERE method='bridge.dispatch'")
-        .all()
-    ).toHaveLength(1)
-    expect(contexts).toHaveLength(2)
-    expect(
-      await git(sender, ['for-each-ref', '--format=%(refname)', 'refs/heads/mousse/dispatch/'])
-    ).toBe('')
-    expect(result.artifact.blob).toBe(`blb_${result.bundleHash}`)
-    const descriptor = (await f.caller.bridge.hub.call(f.node, 'bridge.artifacts.open', {
-      forRpcId: id,
-      forMethod: 'bridge.dispatch'
-    })) as StreamDescriptor
-    expect(validateStreamDescriptor(descriptor)).toBe(true)
-    expect(descriptor.id).toBe(result.artifact.stream)
-    expect(descriptor.artifact).toMatchObject({
-      rpc: id,
-      method: 'bridge.dispatch',
-      caller: f.caller.net.runtime().identity.self()!.node
-    })
-    const store = f.caller.bridge.threads.store,
-      session = f.caller.net.session(f.node),
-      errors: unknown[] = []
-    store.createStream(descriptor, 1)
-    const subscription = session.subscribe(descriptor.id, {
-      onRecord() {},
-      onCaughtUp() {},
-      onError: (code) => {
-        errors.push(code)
-      }
-    })
-    try {
-      await vi.waitFor(() =>
-        expect(store.getById(result.artifact.stream, result.artifact.event)).toBeDefined()
-      )
-      expect(errors).toEqual([])
-      const received = await session.getBlob(result.artifact.stream, result.artifact.blob)
-      expect(createHash('sha256').update(received).digest('hex')).toBe(result.bundleHash)
-      const receivedPath = join(f.root, 'result.bundle')
-      await writeFile(receivedPath, received)
-      await git(sender, ['bundle', 'verify', receivedPath])
-      await git(sender, [
-        'fetch',
-        '--no-write-fetch-head',
-        receivedPath,
-        `${result.ref}:refs/heads/verified-result`
-      ])
-      expect(await git(sender, ['show', 'refs/heads/verified-result:result.txt'])).toBe(
-        'actual native tool bytes'
-      )
-    } finally {
-      subscription.close()
-    }
-  },
-  30_000
 )
