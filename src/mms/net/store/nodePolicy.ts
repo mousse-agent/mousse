@@ -44,10 +44,21 @@ interface Row {
 /** `net_node_policy`, in the Net database. A node without a row has the defaults. */
 export class SqliteNodePolicy {
   private readonly listeners = new Set<(event: NodePolicyEvent) => void>()
+  /**
+   * The blocked nodes, kept in memory: the check runs for every record pushed to every
+   * subscriber, so it cannot be a query. This class is the only writer of the table, and the set
+   * changes only once a write is committed.
+   */
+  private readonly blocked = new Set<string>()
   constructor(
     private readonly db: NetDatabase,
     private readonly clock: Clock
-  ) {}
+  ) {
+    for (const row of this.db.database
+      .prepare('SELECT node FROM net_node_policy WHERE blocked=1')
+      .all())
+      this.blocked.add(String(row.node))
+  }
 
   get(node: NodeId): NodePolicy {
     const row = this.db.database
@@ -57,12 +68,9 @@ export class SqliteNodePolicy {
       .get(node) as Row | undefined
     return row ? this.read(row) : this.defaults(node)
   }
-  /** Read on every Bridge call, so it stays one indexed lookup. */
+  /** Read on every Bridge call and record push; answered from memory. */
   isBlocked(node: NodeId): boolean {
-    return (
-      this.db.database.prepare('SELECT blocked FROM net_node_policy WHERE node=?').get(node)
-        ?.blocked === 1
-    )
+    return this.blocked.has(node)
   }
   list(): NodePolicy[] {
     return (
@@ -107,7 +115,11 @@ export class SqliteNodePolicy {
         )
       event = { node, before, after: this.get(node) }
       // Listeners end live work, so they run only once the row is durable.
-      this.db.afterCommit(() => this.notify(event!))
+      this.db.afterCommit(() => {
+        if (event!.after.blocked) this.blocked.add(node)
+        else this.blocked.delete(node)
+        this.notify(event!)
+      })
     })
     return event!.after
   }

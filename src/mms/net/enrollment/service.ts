@@ -439,8 +439,9 @@ export class EnrollmentService {
     if (!Number.isSafeInteger(ttl) || ttl < 1 || ttl > NODE_DELEGATION_TTL_MS)
       throw new NetError('bad_request')
     caps(granted)
-    // A phone never works on threads, whatever the invite asked for.
-    if (input.kind === 'phone' && granted.includes('settings')) throw new NetError('bad_request')
+    // Only an invite known to be for a computer can carry the thread grant: a phone never works
+    // on threads, and an invite that does not say what it is for is not trusted with it.
+    if (input.kind !== 'computer' && granted.includes('settings')) throw new NetError('bad_request')
     if (input.name !== undefined) name(input.name)
     if (input.joinerTransportFingerprint !== undefined)
       decodeBase64(input.joinerTransportFingerprint, 32)
@@ -565,12 +566,29 @@ export class EnrollmentService {
       token.fill(0)
     }
   }
-  /** The kind recorded when this node approved the device's invite; `undefined` when none was. */
+  /**
+   * What the authority recorded for the device: from the invite it issued for it, or from the
+   * owner saying so (`recordNodeKind`). `undefined` when nothing was recorded, for a device
+   * enrolled before kinds existed or approved by an earlier authority. That is not a computer.
+   */
   nodeKind(node: NodeId): NodeKind | undefined {
     const row = this.options.db.database
-      .prepare('SELECT kind FROM net_enrollment_kinds WHERE node=?')
+      .prepare('SELECT kind FROM net_enrollment_kinds WHERE node=? ORDER BY rowid DESC LIMIT 1')
       .get(node) as { kind: NodeKind } | undefined
     return row?.kind
+  }
+  /** The owner's own statement of what a device is; it replaces whatever was recorded before. */
+  recordNodeKind(node: NodeId, kind: NodeKind): void {
+    if (!this.options.identity.self()?.isAuthority) throw new NetError('forbidden')
+    if (!isId('node', node) || (kind !== 'computer' && kind !== 'phone'))
+      throw new NetError('bad_request')
+    this.options.db.transaction(() => {
+      this.options.db.charge?.(2)
+      this.options.db.database.prepare('DELETE FROM net_enrollment_kinds WHERE node=?').run(node)
+      this.options.db.database
+        .prepare('INSERT INTO net_enrollment_kinds(invite,node,kind) VALUES(?,?,?)')
+        .run(`set_${node}`, node, kind)
+    })
   }
   revokeInvite(invite: InviteId): void {
     if (!this.options.identity.self()?.isAuthority) throw new NetError('forbidden')

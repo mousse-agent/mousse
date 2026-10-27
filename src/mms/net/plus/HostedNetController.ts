@@ -220,9 +220,11 @@ export class HostedNetController implements HostedNet {
       }
       case 'net.plus.enrollment.offer': {
         if (!this.service().status().connected) throw new NetError('not_enrolled')
-        const invite = await this.host.issueRendezvousInvite(
-            params.name === undefined ? {} : { name: String(params.name) }
-          ),
+        // The QR code is for a phone ("Add phone"), so the authority records the device as one.
+        const invite = await this.host.issueRendezvousInvite({
+            kind: 'phone',
+            ...(params.name === undefined ? {} : { name: String(params.name) })
+          }),
           key = randomBytes(32)
         try {
           const offer = await this.service().enrollmentOffer(sealInviteForOffer(invite.text, key))

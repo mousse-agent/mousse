@@ -369,6 +369,10 @@ export class NetService {
             throw new NetError('bad_request')
           return params
         },
+        // These carry no family, so the block is checked here: a blocked phone gets no endpoints.
+        authorize: (_params, context) => {
+          if (policy.isBlocked(context.caller.node)) throw new NetError('forbidden')
+        },
         handle: async (_params, context) => this.phoneEndpoints(context.carrier)
       })
       rpc.register({
@@ -391,6 +395,9 @@ export class NetService {
           )
             throw new NetError('bad_request')
           return { sdp: value.sdp, v: 1 }
+        },
+        authorize: (_params, context) => {
+          if (policy.isBlocked(context.caller.node)) throw new NetError('forbidden')
         },
         handle: async (params, context) =>
           this.phoneWebRtcOffer((params as { sdp: string }).sdp, context.carrier, context.caller)
@@ -623,10 +630,11 @@ export class NetService {
           if (!this.routes) await this.activate()
           // The device kind is recorded only when a Mousse ID request is approved, never on request.
           const { kind: _kind, ...rest } = params
-          // An invite made here is for another computer unless it names its capabilities. A
-          // phone joins through Mousse ID, where its kind is known, and never gets `settings`.
+          // An invite made here is for another computer, and is recorded as one; a phone joins
+          // through Mousse ID, where its kind is known, and never gets `settings`.
           const input = {
             ...rest,
+            kind: 'computer' as const,
             caps: (rest.caps as NodeCapability[] | undefined) ?? [...COMPUTER_NODE_CAPABILITIES]
           }
           const invite = this.transport?.hasRelayListener()
@@ -670,10 +678,43 @@ export class NetService {
           const rt = this.requireEnrolled(),
             node = params.node as NodeId,
             caps = params.caps as NodeCapability[]
-          // The invite paths already keep `settings` from a phone; so does re-signing.
-          if (caps.includes('settings') && rt.enrollment.nodeKind(node) === 'phone')
-            throw new NetError('forbidden', 'A phone cannot work on threads.')
+          // The thread grant goes to a device this authority knows is a computer, and to nothing
+          // else: a phone, and a device whose kind was never recorded, are refused.
+          if (
+            caps.includes('settings') &&
+            node !== rt.identity.self()!.node &&
+            rt.enrollment.nodeKind(node) !== 'computer'
+          )
+            throw new NetError(
+              'forbidden',
+              'Only a device known to be a computer can work on threads.'
+            )
           rt.identity.setNodeCaps(node, caps)
+          this.emit()
+          return { ok: true }
+        }
+        case 'bridge.setKind': {
+          const rt = this.requireEnrolled(),
+            node = params.node as NodeId,
+            kind = params.kind as 'computer' | 'phone'
+          if (!rt.identity.self()!.isAuthority) throw new NetError('forbidden')
+          if (node === rt.identity.self()!.node) throw new NetError('bad_request')
+          try {
+            this.currentNode(node)
+          } catch {
+            throw new NetError('bad_request', 'Unknown device.')
+          }
+          rt.enrollment.recordNodeKind(node, kind)
+          // A device said to be a phone keeps no thread grant it may have been given.
+          if (kind === 'phone') {
+            const held = this.nodes() as { nodes: Array<{ node: NodeId; caps: NodeCapability[] }> }
+            const caps = held.nodes.find((row) => row.node === node)?.caps ?? []
+            if (caps.includes('settings'))
+              rt.identity.setNodeCaps(
+                node,
+                caps.filter((cap) => cap !== 'settings')
+              )
+          }
           this.emit()
           return { ok: true }
         }
@@ -764,7 +805,9 @@ export class NetService {
     if (!this.state) return []
     return this.transportConfigurations()
       .map((row) => (row.settings as { port?: unknown } | undefined)?.port)
-      .filter((port): port is number => typeof port === 'number' && Number.isInteger(port) && port > 0)
+      .filter(
+        (port): port is number => typeof port === 'number' && Number.isInteger(port) && port > 0
+      )
   }
 
   private transportConfigurations(): TransportConfiguration[] {
@@ -2072,8 +2115,17 @@ export class NetService {
     this.emit()
     return { ...query, phase: 'activated', authority: node }
   }
+  /** An authority from before the thread grant existed gets it on its own delegation. */
+  private grantAuthoritySettings(): void {
+    try {
+      this.state?.identity.grantAuthoritySettings()
+    } catch {
+      // A roster conflict leaves it for the next renewal; it must not fail activation.
+    }
+  }
   private scheduleRenewal(): void {
     this.renewal?.cancel()
+    this.grantAuthoritySettings()
     this.renewal = this.clock.setTimeout(
       () => {
         if (this.stopped || this.disabled || !this.config.enabled) return
@@ -2429,7 +2481,12 @@ export class NetService {
         caps: node.caps.filter((cap) => NODE_CAPABILITIES.includes(cap)),
         keyEpoch: node.keyEpoch,
         expiresAt: node.expiresAt,
-        kind: rt.enrollment.nodeKind(node.subject) ?? 'computer',
+        // Only the authority records kinds. A device with none recorded is unknown, never assumed
+        // to be a computer: it cannot be given the thread grant until the owner says what it is.
+        kind:
+          node.subject === rt.identity.self()!.node
+            ? 'computer'
+            : (rt.enrollment.nodeKind(node.subject) ?? 'unknown'),
         // What this computer lets the device do here; the device's own limits are on that device.
         policy: policyView(rt.policy.get(node.subject)),
         self: node.subject === rt.identity.self()!.node,
@@ -2449,7 +2506,8 @@ export class NetService {
         const delegation = rt.identity.verifySigned<NodeDelegation>(signed, roster.rootKey)
         if (
           !roster.revoked.some(
-            (row) => row.subject === delegation.subject && row.throughKeyEpoch >= delegation.keyEpoch
+            (row) =>
+              row.subject === delegation.subject && row.throughKeyEpoch >= delegation.keyEpoch
           )
         )
           live.add(delegation.subject)

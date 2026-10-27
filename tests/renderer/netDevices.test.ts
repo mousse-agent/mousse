@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   bindSettings,
+  canWorkOnThreads,
   capabilityLabel,
   deviceLine,
   isComputer,
@@ -117,12 +118,17 @@ describe('works on threads and blocking', () => {
     )
   })
 
-  it('tells a phone from a computer, and a device that predates the field is a computer', () => {
+  it('offers the grant only for a device recorded as a computer', () => {
     expect(worksOnThreads(device({ caps: ['read', 'settings'] }))).toBe(true)
     expect(worksOnThreads(device())).toBe(false)
+    expect(canWorkOnThreads(device({ kind: 'computer' }))).toBe(true)
+    expect(canWorkOnThreads(device({ kind: 'phone' }))).toBe(false)
+    expect(canWorkOnThreads(device({ kind: 'unknown' }))).toBe(false)
+    expect(canWorkOnThreads(device())).toBe(false)
+    // Limits are about the thread API, which a phone does not have.
     expect(isComputer(device({ kind: 'phone' }))).toBe(false)
     expect(isComputer(device({ kind: 'computer' }))).toBe(true)
-    expect(isComputer(device())).toBe(true)
+    expect(isComputer(device({ kind: 'unknown' }))).toBe(true)
   })
 
   it('says a device is blocked on this computer, and reads a daemon without policy as before', () => {

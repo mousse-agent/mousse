@@ -19,8 +19,11 @@ export interface Device {
   caps: NodeCapability[]
   keyEpoch: number
   expiresAt: number
-  /** Absent from a daemon that predates it: read that as a computer. */
-  kind?: 'computer' | 'phone'
+  /**
+   * What the authority recorded for the device. `unknown` is a device it never recorded a kind
+   * for; it is not treated as a computer. Absent from a daemon that predates the field.
+   */
+  kind?: 'computer' | 'phone' | 'unknown'
   self: boolean
   revoked: boolean
   state: 'connecting' | 'open' | 'closed'
@@ -58,9 +61,14 @@ export function worksOnThreads(device: Pick<Device, 'caps'>): boolean {
   return device.caps.includes(WORKS_ON_THREADS)
 }
 
-/** The phone API is all a phone gets; computer limits and the thread grant do not apply to it. */
+/** The phone API is all a phone gets; computer limits do not apply to it. */
 export function isComputer(device: Pick<Device, 'kind'>): boolean {
   return device.kind !== 'phone'
+}
+
+/** Only a device recorded as a computer can be given "Works on threads". */
+export function canWorkOnThreads(device: Pick<Device, 'kind'>): boolean {
+  return device.kind === 'computer'
 }
 
 const ROUTE_LABELS: Record<string, string> = {

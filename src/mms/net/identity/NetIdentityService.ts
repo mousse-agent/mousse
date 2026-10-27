@@ -671,6 +671,23 @@ export class NetIdentityService implements IdentityService {
       roster.nodes.push(signedDocument(changed, (bytes) => this.keys.signAsRoot(bytes)))
     })
   }
+  /**
+   * The authority is a computer, so its own delegation holds `settings`. An authority created
+   * before that grant existed adds it here, once, so the main computer of a current user is not
+   * refused by their other computers. Returns the new roster, or nothing when no change was due.
+   */
+  grantAuthoritySettings(): Signed | undefined {
+    const self = this.self(),
+      current = this.roster()
+    if (!self?.isAuthority || !current) return undefined
+    const held = this.latestNode(
+      this.rosterDocument(current, this.pinnedRootKey(self.user)!),
+      self.node
+    )
+    if (!held || held.caps.includes('settings') || held.expiresAt <= this.clock.now())
+      return undefined
+    return this.setNodeCaps(self.node, [...held.caps, 'settings'])
+  }
   private latestNode(roster: Roster, node: NodeId): NodeDelegation | undefined {
     return this.delegations(roster)
       .filter((row): row is NodeDelegation => row.kind === 'node' && row.subject === node)

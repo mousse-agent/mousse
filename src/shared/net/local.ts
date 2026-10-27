@@ -52,6 +52,7 @@ export const NET_LOCAL_METHODS = [
   'bridge.revoke',
   'bridge.rename',
   'bridge.setCaps',
+  'bridge.setKind',
   'bridge.policy',
   'net.authority.transfer',
   'net.authority.status',

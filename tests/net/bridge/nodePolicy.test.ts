@@ -1,16 +1,21 @@
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createHash } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { NetService } from '../../../src/mms/net/NetService'
+import type { HostedNetHost } from '../../../src/mms/net/hosted'
+import { HostedNetController } from '../../../src/mms/net/plus/HostedNetController'
+import type { NodeInviteInput } from '../../../src/mms/net/enrollment/service'
 import { FileKeyStore, NetIdentityService } from '../../../src/mms/net/identity'
 import { NetDatabase } from '../../../src/mms/net/store/database'
 import { SqliteNodePolicy } from '../../../src/mms/net/store/nodePolicy'
 import { validateIdentityDocument } from '../../../src/mms/net/plus/wire/crypto'
 import { encodeEnvelope, parseProtocolJson } from '../../../src/mms/net/sync/codec'
 import { systemClock } from '../../../src/mms/net/clock'
-import type { Clock } from '../../../src/mms/net/contracts'
+import type { Clock, StreamAuthority } from '../../../src/mms/net/contracts'
 import {
+  type BlobId,
   COMPUTER_NODE_CAPABILITIES,
   DEFAULT_NODE_CAPABILITIES,
   newId,
@@ -35,16 +40,16 @@ function directory(prefix: string): string {
   cleanups.push(() => rmSync(path, { recursive: true, force: true }))
   return path
 }
-function service(): NetService {
-  const net = new NetService({ profileDir: directory('net-policy-') })
+function service(options: Partial<ConstructorParameters<typeof NetService>[0]> = {}): NetService {
+  const net = new NetService({ profileDir: directory('net-policy-'), ...options })
   cleanups.push(() => net.shutdown())
   return net
 }
 const body = (value: unknown) => (value ?? {}) as Record<string, unknown>
 
 /** An authority that listens, and the helpers to enroll devices into its set. */
-async function authority() {
-  const a = service()
+async function authority(options: Partial<ConstructorParameters<typeof NetService>[0]> = {}) {
+  const a = service(options)
   await a.request('net.init', { name: 'authority', listen: true, port: 0 })
   await a.request('net.protect', { passphrase: 'test-authority-protection' })
   const self = a.runtime().identity.self()!
@@ -90,12 +95,115 @@ describe('which devices work on threads', () => {
     )
     expect((await device(approvedComputer.node)).caps).toContain('settings')
 
-    // The QR offer names no kind, so it is the phone grant.
+    // An invite that does not say what it is for gets the phone grant.
     const unnamed = await join(
       a.runtime().enrollment.issueNodeInvite({ name: 'scan' }).text,
       'scan'
     )
     expect((await device(unnamed.node)).caps).not.toContain('settings')
+    // Each device shows what the authority recorded: invites made here are computers.
+    expect((await device(laptop.node)).kind).toBe('computer')
+    expect((await device(phone.node)).kind).toBe('phone')
+    expect((await device(unnamed.node)).kind).toBe('unknown')
+  }, 60_000)
+
+  it('records a device added with Add phone as a phone, so it can never be given settings', async () => {
+    const { a, join, device } = await authority()
+    let text = ''
+    const controller = new HostedNetController({
+      clock: { now: () => Date.now() },
+      signal: new AbortController().signal,
+      loadedRuntime: () => undefined,
+      requireEnrolled: () => ({}),
+      closed: () => false,
+      enabled: () => true,
+      featureEnabled: () => true,
+      serial: (work: () => Promise<unknown>) => work(),
+      emit: () => undefined,
+      fail: () => undefined,
+      // The real invite path of the authority, as the hosted flow reaches it.
+      issueRendezvousInvite: async (input: NodeInviteInput) => {
+        const issued = a.runtime().enrollment.issueNodeInvite(input)
+        text = issued.text
+        return issued
+      },
+      revokeUnsentInvite: () => undefined
+    } as unknown as HostedNetHost)
+    ;(controller as unknown as Record<string, unknown>).hostedProfile = {
+      status: () => ({ connected: true }),
+      enrollmentOffer: async () => ({
+        id: 'offer-1',
+        apiOrigin: 'https://id.example',
+        expiresAt: Date.now() + 60_000
+      })
+    }
+    await controller.request('net.plus.enrollment.offer', { name: 'Pocket' })
+    expect(text).toMatch(/^mj1_/)
+    const phone = await join(text, 'Pocket')
+    const row = await device(phone.node)
+    expect(row.kind).toBe('phone')
+    expect(row.caps).not.toContain('settings')
+    await expect(
+      a.request('bridge.setCaps', { node: phone.node, caps: ['read', 'chat', 'write', 'settings'] })
+    ).rejects.toMatchObject({ code: 'forbidden' })
+    expect((await device(phone.node)).caps).not.toContain('settings')
+  }, 60_000)
+
+  it('refuses the grant to a device with no recorded kind until the owner says it is a computer', async () => {
+    const { a, join, device } = await authority()
+    const legacy = await join(await inviteText(a, { caps: ['read', 'chat', 'write'] }), 'legacy')
+    // A device enrolled before kinds existed, or approved by an earlier authority, has no row.
+    a.runtime()
+      .db.database.prepare('DELETE FROM net_enrollment_kinds WHERE node=?')
+      .run(legacy.node)
+    expect((await device(legacy.node)).kind).toBe('unknown')
+    const grant = { node: legacy.node, caps: ['read', 'chat', 'write', 'settings'] }
+    await expect(a.request('bridge.setCaps', grant)).rejects.toMatchObject({ code: 'forbidden' })
+    expect((await device(legacy.node)).caps).not.toContain('settings')
+
+    // Only the authority records kinds.
+    await expect(
+      legacy.net.request('bridge.setKind', { node: legacy.node, kind: 'computer' })
+    ).rejects.toMatchObject({ code: 'forbidden' })
+    await a.request('bridge.setKind', { node: legacy.node, kind: 'computer' })
+    expect((await device(legacy.node)).kind).toBe('computer')
+    await a.request('bridge.setCaps', grant)
+    expect((await device(legacy.node)).caps).toContain('settings')
+
+    // Saying it is a phone takes the grant back, and keeps it from coming back.
+    await a.request('bridge.setKind', { node: legacy.node, kind: 'phone' })
+    expect(await device(legacy.node)).toMatchObject({ kind: 'phone' })
+    expect((await device(legacy.node)).caps).not.toContain('settings')
+    await expect(a.request('bridge.setCaps', grant)).rejects.toMatchObject({ code: 'forbidden' })
+    // This computer's own kind is not the owner's to change, and unknown ids are refused.
+    await expect(
+      a.request('bridge.setKind', { node: a.runtime().identity.self()!.node, kind: 'phone' })
+    ).rejects.toMatchObject({ code: 'bad_request' })
+    await expect(
+      a.request('bridge.setKind', { node: newId('node'), kind: 'computer' })
+    ).rejects.toMatchObject({ code: 'bad_request' })
+  }, 60_000)
+
+  it('gives an authority created with the old default capabilities the grant on activation', async () => {
+    const profileDir = directory('net-legacy-authority-')
+    const first = new NetService({ profileDir })
+    await first.request('net.init', { name: 'old authority', listen: true, port: 0 })
+    const self = first.runtime().identity.self()!.node
+    const capsOf = async (net: NetService) =>
+      ((await net.request('bridge.nodes', {})) as { nodes: Device[] }).nodes.find(
+        (row) => row.node === self
+      )!.caps
+    // What an authority from before the grant existed holds.
+    await first.request('bridge.setCaps', { node: self, caps: ['read', 'chat', 'write'] })
+    expect(await capsOf(first)).toEqual(['read', 'chat', 'write'])
+    await first.shutdown()
+
+    const upgraded = new NetService({ profileDir })
+    cleanups.push(() => upgraded.shutdown())
+    await upgraded.start()
+    await vi.waitFor(async () => expect(await capsOf(upgraded)).toContain('settings'), {
+      timeout: 10_000
+    })
   }, 60_000)
 
   it('keeps settings out of an invite that says it is for a phone, and honours named capabilities', async () => {
@@ -106,6 +214,10 @@ describe('which devices work on threads', () => {
         kind: 'phone',
         caps: ['read', 'chat', 'write', 'settings']
       })
+    ).toThrow(expect.objectContaining({ code: 'bad_request' }))
+    // An invite that does not say it is for a computer is not trusted with the grant either.
+    expect(() =>
+      a.runtime().enrollment.issueNodeInvite({ name: 'who', caps: ['read', 'settings'] })
     ).toThrow(expect.objectContaining({ code: 'bad_request' }))
     const named = await join(await inviteText(a, { caps: ['read', 'chat', 'write'] }), 'named')
     expect((await device(named.node)).caps).toEqual(['read', 'chat', 'write'])
@@ -261,6 +373,31 @@ describe('a re-signed delegation and a fast authority clock', () => {
     // A peer on the right time accepts a row only when it is not dated after its own now.
     expect(changed.issuedAt).toBeLessThanOrEqual(time.peer.now())
     expect(changed.issuedAt).toBeLessThan(time.fast.now() - 3_000_000)
+  })
+
+  it('adds settings to an authority that lacks it once, and leaves one that has it alone', async () => {
+    const dir = directory('net-caps-own-')
+    const keys = new FileKeyStore(dir)
+    await keys.initialize({ asAuthority: true })
+    const db = new NetDatabase({ profileDir: dir })
+    cleanups.push(() => db.close())
+    const identity = new NetIdentityService({
+      database: db.database,
+      keys,
+      clock: systemClock,
+      coordinator: db
+    })
+    await identity.bootstrapAuthority('authority')
+    const self = identity.self()!.node
+    expect(identity.grantAuthoritySettings()).toBeUndefined()
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    identity.setNodeCaps(self, ['read', 'chat', 'write'])
+    const stripped = identity.roster()
+    expect(identity.grantAuthoritySettings()).toBeDefined()
+    expect(identity.roster()).not.toEqual(stripped)
+    const again = identity.roster()
+    expect(identity.grantAuthoritySettings()).toBeUndefined()
+    expect(identity.roster()).toEqual(again)
   })
 
   it('refuses an empty, repeated or unknown capability list', async () => {
@@ -444,6 +581,103 @@ describe('blocking a device on a computer', () => {
     cleanups.push(() => next.close())
     // It picks up from where it was: the record it missed while blocked arrives.
     await vi.waitFor(() => expect(resumed).toHaveBeenCalled())
+  }, 60_000)
+
+  it('lets a computer that is not the authority block the authority, and refuses the endpoint methods', async () => {
+    const { a, join } = await authority()
+    const laptop = await join(await inviteText(a), 'laptop')
+    laptop.net.runtime().rpc.register({
+      method: 'test.bridge',
+      family: 'bridge',
+      capability: 'read',
+      mutating: false,
+      ephemeral: true,
+      handle: async () => ({ ok: true })
+    })
+    const authorityNode = a.runtime().identity.self()!.node
+    const callOnLaptop = () =>
+      a.session(laptop.node).rpc('test.bridge', {}, { id: newId('rpc'), deadlineMs: 5000 })
+    expect(await callOnLaptop()).toEqual({ ok: true })
+    // The block is the laptop's own decision and needs no authority.
+    await laptop.net.request('bridge.policy', { node: authorityNode, blocked: true })
+    await expect(callOnLaptop()).rejects.toMatchObject({ code: 'forbidden' })
+    // The phone transport methods carry no family, so they check the block themselves.
+    const endpoints = () =>
+      a.session(laptop.node).rpc('net.direct.endpoints', {}, { id: newId('rpc'), deadlineMs: 5000 })
+    await expect(endpoints()).rejects.toMatchObject({ code: 'forbidden' })
+    await laptop.net.request('bridge.policy', { node: authorityNode, blocked: false })
+    expect(await callOnLaptop()).toEqual({ ok: true })
+    await expect(endpoints()).resolves.toBeDefined()
+  }, 60_000)
+
+  it('refuses a blocked device appends and blob downloads, and serves them again after Unblock', async () => {
+    const authorityStub: StreamAuthority = {
+      canRead: () => true,
+      append: () => ({ kind: 'stored', epoch: 1, seq: 1, recvTs: Date.now() }),
+      canFetchBlob: () => true,
+      acceptBlob: () => undefined
+    }
+    const { a, join } = await authority({ composeRuntime: () => ({ authority: authorityStub }) })
+    const laptop = await join(await inviteText(a), 'laptop')
+    const stream = threadStream(a, laptop.net)
+    const self = a.runtime().identity.self()!
+    const bytes = Buffer.alloc(2_000, 7)
+    const blob = `blb_${createHash('sha256').update(bytes).digest('hex')}` as BlobId
+    const upload = a.runtime().blobs.begin(blob, bytes.length, false)
+    upload.write(0, bytes)
+    upload.commit()
+    const eventId = newId('event')
+    const withBlob = encodeEnvelope({
+      v: 1,
+      minor: 0,
+      id: eventId,
+      stream: stream.id,
+      type: 'message.posted',
+      crit: false,
+      author: { user: self.user, node: self.node, keyEpoch: 1 },
+      ts: Date.now(),
+      body: { text: 'attachment' },
+      blobs: [{ id: blob, bytes: bytes.length, mime: 'application/octet-stream', sealed: false }]
+    })
+    a.runtime().streams.appendAsAuthority(stream.id, {
+      id: eventId,
+      envelope: withBlob,
+      sig: a.runtime().keys.signAsNode(withBlob),
+      recvTs: Date.now()
+    })
+    a.runtime().blobs.addRef(blob, stream.id, eventId)
+    const session = () => laptop.net.session(self.node)
+    const write = () => {
+      const id = newId('event')
+      const envelope = encodeEnvelope({
+        v: 1,
+        minor: 0,
+        id,
+        stream: stream.id,
+        type: 'message.posted',
+        crit: false,
+        author: { user: self.user, node: laptop.node, keyEpoch: 1 },
+        ts: Date.now(),
+        body: { text: 'from the laptop' }
+      })
+      return session().append(
+        stream.id,
+        id,
+        envelope,
+        laptop.net.runtime().keys.signAsNode(envelope)
+      )
+    }
+    expect(await write()).toMatchObject({ epoch: 1, seq: 1 })
+    expect(Buffer.from(await session().getBlob(stream.id, blob)).equals(bytes)).toBe(true)
+
+    await a.request('bridge.policy', { node: laptop.node, blocked: true })
+    await expect(write()).rejects.toMatchObject({ code: 'forbidden' })
+    await expect(session().getBlob(stream.id, blob)).rejects.toMatchObject({ code: 'forbidden' })
+    expect(session().state()).toBe('open')
+
+    await a.request('bridge.policy', { node: laptop.node, blocked: false })
+    expect(await write()).toMatchObject({ epoch: 1, seq: 1 })
+    expect(Buffer.from(await session().getBlob(stream.id, blob)).equals(bytes)).toBe(true)
   }, 60_000)
 
   it('asks the requests a blocked device has running to stop', async () => {

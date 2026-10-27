@@ -63,6 +63,7 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
   'bridge.revoke': ['node'],
   'bridge.rename': ['node', 'name'],
   'bridge.setCaps': ['node', 'caps'],
+  'bridge.setKind': ['node', 'kind'],
   'bridge.policy': ['node', 'blocked', 'maxPermissionMode', 'terminal']
 }
 const SSH_ID = /^[A-Za-z0-9_-]{1,64}$/u
@@ -228,12 +229,15 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
       'bridge.revoke',
       'bridge.rename',
       'bridge.setCaps',
+      'bridge.setKind',
       'bridge.policy',
       'net.authority.transfer'
     ].includes(method) &&
     !isId('node', params.node)
   )
     throw new DomainRpcError('invalid_params', 'A node identity is required')
+  if (method === 'bridge.setKind' && params.kind !== 'computer' && params.kind !== 'phone')
+    throw new DomainRpcError('invalid_params', 'kind must be computer or phone')
   if (method === 'bridge.setCaps' && params.caps === undefined)
     throw new DomainRpcError('invalid_params', 'A capability list is required')
   if (method === 'bridge.policy') {
