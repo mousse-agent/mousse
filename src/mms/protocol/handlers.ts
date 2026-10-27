@@ -37,7 +37,7 @@ import type { GitOperationHandle } from '../git/GitService'
 import { listClaimedQueue, QueueConflictError, QueueValidationError } from '../queue/ThreadMessageQueue'
 import { formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
 import { withoutStandingRules } from '../orchestrator/UserQuestionService'
-import type { ModelOverride } from '../../shared/providerInstances'
+import { ANTIGRAVITY_INSTANCE_ID, CLAUDE_INSTANCE_ID, CODEX_INSTANCE_ID, type ModelOverride } from '../../shared/providerInstances'
 import {
   ACCENT_COLORS,
   THEME_OPTIONS,
@@ -2317,7 +2317,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const authType = asOptionalString(p.authType, 32) as 'api_key' | 'oauth' | undefined
       await refreshVendorSignIns(ctx)
-      return { options: [...ctx.mms.providerAuth.getLoginOptions(authType), ...(authType === 'api_key' || ctx.mms.antigravity.configured() ? [] : [ctx.mms.antigravity.loginOption()]), ...(authType === 'api_key' || ctx.mms.claudeSubscription.configured() ? [] : [ctx.mms.claudeSubscription.loginOption()]), ...(authType === 'api_key' || ctx.mms.codex.configured() ? [] : [ctx.mms.codex.loginOption()])] }
+      // A built-in agent offers its sign-in only while it is an entry of the profile: a removed one
+      // comes back through Add provider's agent choice, not as a model API.
+      const entries = ctx.mms.providerInstances.list()
+      const offered = (instanceId: string, service: { configured(): boolean }) =>
+        authType !== 'api_key' && !service.configured() && Object.prototype.hasOwnProperty.call(entries, instanceId)
+      return {
+        options: [
+          ...ctx.mms.providerAuth.getLoginOptions(authType),
+          ...(offered(ANTIGRAVITY_INSTANCE_ID, ctx.mms.antigravity) ? [ctx.mms.antigravity.loginOption()] : []),
+          ...(offered(CLAUDE_INSTANCE_ID, ctx.mms.claudeSubscription) ? [ctx.mms.claudeSubscription.loginOption()] : []),
+          ...(offered(CODEX_INSTANCE_ID, ctx.mms.codex) ? [ctx.mms.codex.loginOption()] : [])
+        ]
+      }
     }
     case 'providers.refreshModels': {
       const p = isObject(params) ? params : {}
@@ -2336,6 +2348,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
       const apiKey = asString(p.apiKey, 'apiKey', 8192)
+      // A removal still deleting this provider's key ends before the new key is saved.
+      await ctx.mms.harness?.legacy.removalSettled(providerId)
       await ctx.mms.providerAuth.setApiKey(providerId, apiKey)
       // The old Add dialog's key is an explicit add: a model API removed from this profile comes back.
       await ctx.mms.harness?.legacy.explicitAdd(providerId)
@@ -2370,6 +2384,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'providers.verifyAmbient': {
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
+      await ctx.mms.harness?.legacy.removalSettled(providerId)
       const result = await ctx.mms.providerAuth.verifyAmbientProvider(providerId)
       if (result?.success) await ctx.mms.harness?.legacy.explicitAdd(providerId)
       await ctx.mms.harness?.legacy.credentialsChanged(providerId)
@@ -2392,6 +2407,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'providers.loginOAuth': {
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
+      await ctx.mms.harness?.legacy.removalSettled(providerId)
       const session = ctx.mms.providerAuth.createSession()
       const forward = (event: unknown): void => {
         ctx.emitEvent?.('providers.login-event', {
@@ -2425,6 +2441,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'providers.loginApiKey': {
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
+      await ctx.mms.harness?.legacy.removalSettled(providerId)
       const session = ctx.mms.providerAuth.createSession()
       const forward = (event: unknown): void => {
         ctx.emitEvent?.('providers.login-event', {

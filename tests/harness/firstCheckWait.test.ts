@@ -79,6 +79,30 @@ describe('the first-check wait on settings.getOptions', () => {
     expect(auth).toHaveBeenCalledTimes(2)
   })
 
+  it('a check that keeps timing out is retried once: after two timeouts the next read returns at once without checking', async () => {
+    const { auth, options } = setup({ authMs: 200 })
+    auth.mockImplementation(() => new Promise<AuthReading>(() => {}))
+    await options()
+    await options()
+    expect(auth).toHaveBeenCalledTimes(2)
+    const started = Date.now()
+    expect((await options()).map((option) => option.instanceId)).toEqual(['claude'])
+    expect(Date.now() - started).toBeLessThan(150)
+    expect(auth).toHaveBeenCalledTimes(2)
+  })
+
+  it('the Providers page never waits for the retry of a timed-out first check', async () => {
+    const { harness, auth, options } = setup({ authMs: 1_000 })
+    auth.mockImplementation(() => new Promise<AuthReading>(() => {}))
+    await options()
+    expect(auth).toHaveBeenCalledTimes(1)
+    const started = Date.now()
+    await harness.instances.snapshots({ kind: 'device' })
+    // The retry started in the background; the page did not wait out its deadline.
+    expect(auth).toHaveBeenCalledTimes(2)
+    expect(Date.now() - started).toBeLessThan(500)
+  })
+
   it('a later read uses the cache and a refresh arrives as a snapshot event', async () => {
     const { auth, events, options, advance } = setup()
     await options()

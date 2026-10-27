@@ -105,6 +105,22 @@ describe('a removed built-in agent', () => {
     expect(profile.claudeQuery).not.toHaveBeenCalled()
     expect(profile.codexAccount).not.toHaveBeenCalled()
   })
+
+  it('is not offered as a model API sign-in by the old Add dialog, while one that is there and signed out is', async () => {
+    const { profile, context } = profileWithClis()
+    const mms = (context as unknown as { mms: Record<string, unknown> }).mms
+    mms.providerAuth = { getLoginOptions: () => [] }
+    mms.antigravity = profile.antigravity
+    const loginIds = async () => ((await dispatchMethod(context, 'providers.getLoginOptions', { authType: 'oauth' })) as { options: Array<{ id: string }> }).options.map((option) => option.id)
+    // Codex signed out in Mousse but still an entry: its sign-in is offered, as before.
+    await profile.harness.instances.signOut('codex')
+    expect(await loginIds()).toContain('codex')
+    await profile.harness.instances.remove('claude')
+    await profile.harness.instances.remove('codex')
+    const ids = await loginIds()
+    expect(ids).not.toContain('claude-subscription')
+    expect(ids).not.toContain('codex')
+  })
 })
 
 describe('removing an entry and adding it back keeps the new entry\'s state folder', () => {
@@ -146,7 +162,8 @@ describe('removing an entry and adding it back keeps the new entry\'s state fold
     await harness.instances.add({ driver: 'pi', config: { provider: 'openrouter' } })
     await harness.instances.snapshots({ kind: 'device' })
 
-    // The key's deletion is slow, so the removal is still running when the entry is added back.
+    // The key's deletion is slow, so the removal is still running when the entry is added back:
+    // the add waits for it, and the folder is the new entry's.
     const slow = deferred<void>()
     credentials.logout.mockImplementationOnce(async (providerId: string) => {
       await slow.promise
@@ -154,9 +171,64 @@ describe('removing an entry and adding it back keeps the new entry\'s state fold
     })
     const removal = harness.instances.remove('pi:openrouter')
     await vi.waitFor(() => expect(instances.isRemoved('pi:openrouter')).toBe(true))
-    await harness.instances.add({ driver: 'pi', config: { provider: 'openrouter' } })
+    const added = harness.instances.add({ driver: 'pi', config: { provider: 'openrouter' } })
     slow.resolve()
     await removal
+    await added
     expect(existsSync(instanceStateDir(dir, 'pi:openrouter'))).toBe(true)
+  })
+})
+
+describe('a key saved for an entry added back while its removal deletes the old key', () => {
+  function piProfile() {
+    const dir = home()
+    const credentials = new PiInstallationCredentials()
+    credentials.keys.set('openrouter', 'fixture-old-key')
+    let state: StoredProviderInstances = { instances: {}, seedVersion: 1 }
+    const instances = new ProviderInstanceService({ store: { read: () => ({ ...state }), write: (next) => { state = { ...next } } }, providerAuth: credentials })
+    const harness = testHarness({ profileHome: dir, instances, drivers: [piDriver({ client: () => ({ chat: async () => { throw new Error('unused') } }) as never, credentials: () => credentials as never })] })
+    cleanups.push(() => harness.stop())
+    // The old key's deletion is slow: whatever is saved meanwhile must survive it.
+    const slow = deferred<void>()
+    credentials.logout.mockImplementationOnce(async (providerId: string) => {
+      await slow.promise
+      credentials.keys.delete(providerId)
+    })
+    return { dir, credentials, instances, harness, slow }
+  }
+
+  it('Add waits for the removal, so setSecret on the entry added back keeps its key', async () => {
+    const { credentials, instances, harness, slow } = piProfile()
+    expect(Object.keys(instances.list())).toEqual(['pi:openrouter'])
+    const removal = harness.instances.remove('pi:openrouter')
+    await vi.waitFor(() => expect(credentials.logout).toHaveBeenCalled())
+    let addSettled = false
+    const added = harness.instances.add({ driver: 'pi', config: { provider: 'openrouter' } }).then((snapshot) => {
+      addSettled = true
+      return snapshot
+    })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(addSettled).toBe(false)
+    slow.resolve()
+    await removal
+    await added
+    await harness.instances.setSecret('pi:openrouter', 'fixture-new-key')
+    expect(credentials.keys.get('openrouter')).toBe('fixture-new-key')
+    expect(Object.keys(instances.list())).toEqual(['pi:openrouter'])
+  })
+
+  it('the old Add dialog\'s key waits for the removal too, and brings the entry back with that key', async () => {
+    const { credentials, instances, harness, slow } = piProfile()
+    const context = { mms: { harness, providerInstances: instances, providerAuth: credentials }, globalSequence: () => 0 } as unknown as HandlerContext
+    const removal = harness.instances.remove('pi:openrouter')
+    await vi.waitFor(() => expect(credentials.logout).toHaveBeenCalled())
+    const saved = dispatchMethod(context, 'providers.setApiKey', { providerId: 'openrouter', apiKey: 'fixture-new-key' })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(credentials.setApiKey).not.toHaveBeenCalled()
+    slow.resolve()
+    await removal
+    await saved
+    expect(credentials.keys.get('openrouter')).toBe('fixture-new-key')
+    expect(instances.isRemoved('pi:openrouter')).toBe(false)
   })
 })

@@ -4,7 +4,7 @@
  * A's stored map. This build still treats it as removed everywhere, leaves that entry on disk as
  * it is, runs nothing on it, and an explicit Add brings it back in one write.
  */
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -105,5 +105,36 @@ describe('a tombstone across a downgrade', () => {
     expect(providersOf(homeA).removedInstances).toBeUndefined()
     expect(providersOf(homeA).instances?.['pi:openrouter']).toEqual({ driver: 'pi', enabled: true })
     expect((await next.harness.llmProviders(device)).map((option) => option.instanceId)).toEqual(['pi:openrouter'])
+  })
+})
+
+describe('a removal that cannot be saved', () => {
+  it('changes nothing, in the config store too: a later save of another section does not write it', async () => {
+    const credentials = new PiInstallationCredentials()
+    const homeA = scratch()
+    const a = start(homeA, credentials)
+    await a.harness.instances.add({ driver: 'pi', config: { provider: 'openrouter' } })
+    await a.harness.instances.setSecret('pi:openrouter', 'fixture-key')
+
+    // mousse.conf cannot be replaced (a folder stands where the file goes).
+    const conf = join(homeA, 'mousse.conf')
+    renameSync(conf, `${conf}.saved`)
+    mkdirSync(conf)
+    writeFileSync(join(conf, 'blocker'), '')
+    await expect(a.harness.instances.remove('pi:openrouter')).rejects.toThrow()
+    expect(a.config.getProvidersSection().removedInstances).toBeUndefined()
+    expect(a.config.getProvidersSection().instances).toHaveProperty(['pi:openrouter'])
+    expect(credentials.keys.get('openrouter')).toBe('fixture-key')
+    expect(Object.keys(a.instances.list())).toContain('pi:openrouter')
+
+    // Saving works again; another section's save writes no tombstone.
+    rmSync(conf, { recursive: true, force: true })
+    renameSync(`${conf}.saved`, conf)
+    a.config.updateProvidersSection({ model: 'fixture-model' })
+    expect(providersOf(homeA).removedInstances).toBeUndefined()
+    expect(providersOf(homeA).instances).toHaveProperty(['pi:openrouter'])
+    // And removing it again finishes the removal.
+    await a.harness.instances.remove('pi:openrouter')
+    expect(providersOf(homeA).removedInstances).toEqual(['pi:openrouter'])
   })
 })

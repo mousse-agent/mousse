@@ -300,6 +300,8 @@ export interface LegacyProviders {
    * removed from this profile is added again (its tombstone cleared) through the add path.
    */
   explicitAdd(providerId: string): Promise<void>
+  /** Waits for a removal of `providerId`'s entry that is still deleting its key (before a key is saved for it). */
+  removalSettled(providerId: string): Promise<void>
 }
 
 /**
@@ -628,6 +630,11 @@ interface ProbeState {
   fingerprint?: string
   /** The last start-up check: what it found, for which executable and config revision. */
   handshake?: { runs: ProbeResult['runs']; fingerprint?: BinaryFingerprint; revision: number }
+  /**
+   * The one retry of a first check that timed out has started (`awaitFirstChecks`): after it, a
+   * timed-out instance is checked again only when its result is due, like any other.
+   */
+  firstRetried?: boolean
 }
 
 /** A removed instance's state directory, deleted once nothing uses it any more. */
@@ -747,6 +754,12 @@ export class Harness implements HarnessGateway {
    */
   private readonly stopBarriers = new Map<string, Set<Promise<void>>>()
   private readonly removals = new Map<string, Removal>()
+  /**
+   * The key deletion of a removal still running, per instance (settles, never rejects). An add of
+   * the same id, and the old methods that save a key for it, wait for it: a key saved for the
+   * entry added back is never deleted by the removal before it.
+   */
+  private readonly removing = new Map<string, Promise<void>>()
   /** The account reading `bind` took, for the `startTurn` of that binding (once). */
   private readonly boundAccounts = new WeakMap<ExecutionBinding, { accountId?: string }>()
   private readonly probes = new Map<string, ProbeState>()
@@ -875,6 +888,13 @@ export class Harness implements HarnessGateway {
     }
     this.legacy = {
       configuredProviders: () => this.instanceMap.configuredProviders(),
+      removalSettled: async (providerId) => {
+        try {
+          await this.removing.get(this.instanceMap.instanceIdForLegacyProvider(providerId))
+        } catch {
+          /* a name no instance maps to has no removal */
+        }
+      },
       explicitAdd: async (providerId) => {
         let instanceId: string
         try {
@@ -2047,7 +2067,8 @@ export class Harness implements HarnessGateway {
   async snapshots(scope: ProviderScope): Promise<InstanceSnapshot[]> {
     const ids = Object.keys(this.instanceMap.list())
     this.refreshLatest(ids)
-    await this.awaitFirstChecks(ids)
+    // The Providers page waits only for checks that never ran; a retry arrives as an event.
+    await this.awaitFirstChecks(ids, { waitForRetry: false })
     return ids.flatMap((instanceId) => {
       try {
         return [this.snapshot(instanceId, scope)]
@@ -2062,19 +2083,22 @@ export class Harness implements HarnessGateway {
    * of each one never checked (each phase has a hard deadline). Later refreshes run in the
    * background and arrive as `providers.snapshots` events.
    */
-  private async awaitFirstChecks(ids: readonly string[]): Promise<void> {
+  private async awaitFirstChecks(ids: readonly string[], options: { waitForRetry: boolean }): Promise<void> {
     const entries = this.instanceMap.list()
     const firstChecks: Array<Promise<void>> = []
     for (const instanceId of ids) {
       if (!entries[instanceId]?.enabled) continue
       const state = this.probes.get(instanceId)
-      // A first check that timed out answered nothing: it is checked (and waited for) again on the
-      // next read, not after the probe TTL.
-      const unanswered = !state?.result || (state.result.timedOut === true && !state.lastGood)
-      const due = unanswered || !state?.checkedAtMs || this.now() - state.checkedAtMs >= PROBE_TTL_MS
+      const neverChecked = !state?.result
+      // A first check that timed out answered nothing: it is retried once on the next read (not
+      // after the probe TTL), and only the model listing waits for that retry. After a second
+      // timeout the instance is left to its TTL, so a check that keeps hanging holds up no read.
+      const retry = !neverChecked && state!.result!.timedOut === true && !state!.lastGood && !state!.firstRetried && !state!.probing
+      const due = neverChecked || retry || !state?.checkedAtMs || this.now() - state.checkedAtMs >= PROBE_TTL_MS
       if (!due) continue
       const probing = this.probe(instanceId, false)
-      if (unanswered) firstChecks.push(probing)
+      if (retry) this.probes.get(instanceId)!.firstRetried = true
+      if (neverChecked || (retry && options.waitForRetry)) firstChecks.push(probing)
     }
     if (!firstChecks.length) return
     // Each phase of an ordinary check has its own deadline; a forced one (after Add or an install)
@@ -2093,7 +2117,7 @@ export class Harness implements HarnessGateway {
   }
 
   async llmProviders(scope: ProviderScope): Promise<LlmProviderOption[]> {
-    await this.awaitFirstChecks(Object.keys(this.instanceMap.list()))
+    await this.awaitFirstChecks(Object.keys(this.instanceMap.list()), { waitForRetry: true })
     return this.listedLlmProviders(scope)
   }
 
@@ -2465,6 +2489,7 @@ export class Harness implements HarnessGateway {
         instanceId = addedInstanceId(driver.kind, patch.displayName ?? undefined, taken, input.slug)
       }
     }
+    await this.removing.get(instanceId)
     const config = useOwnSetup
       ? this.applyConfigPatch({}, {
           ...(patch.displayName ? { displayName: patch.displayName } : {}),
@@ -2522,6 +2547,8 @@ export class Harness implements HarnessGateway {
    */
   private async addFixed(driver: HarnessDriver, patch: InstanceConfigPatch): Promise<{ snapshot: InstanceSnapshot; existed: boolean }> {
     const instanceId = driver.instanceIdFor!(patch)
+    // A removal of this id still deleting its key ends first (`removing`).
+    await this.removing.get(instanceId)
     if (Object.prototype.hasOwnProperty.call(this.instanceMap.list(), instanceId))
       return { snapshot: this.snapshot(instanceId, { kind: 'device' }), existed: true }
     const config: Record<string, unknown> = {}
@@ -2622,10 +2649,18 @@ export class Harness implements HarnessGateway {
     // id meanwhile calls off the folder's deletion above.
     let signOutFailure: unknown
     if (record.driver.removeSignsOut && record.runtime.signOut) {
+      const signOut = (async () => {
+        // Checked right before the key goes: an entry added back meanwhile keeps it.
+        if (this.instanceMap.isRemoved(instanceId)) await record.runtime.signOut!()
+      })()
+      const settled = signOut.then(() => undefined, () => undefined)
+      this.removing.set(instanceId, settled)
       try {
-        await record.runtime.signOut()
+        await signOut
       } catch (error) {
         signOutFailure = error
+      } finally {
+        if (this.removing.get(instanceId) === settled) this.removing.delete(instanceId)
       }
     }
     // Chats running on it stop (on this runtime and on any older one still finishing turns); the
