@@ -147,7 +147,7 @@ export const UserMessage = memo(function UserMessage({
           <div
             key={i}
             className={cn(
-              "max-w-[200px] p-1.5 bg-an-foreground/4 rounded-an-message",
+              "h-[132px] w-[196px] shrink-0 p-1.5 bg-an-foreground/4 rounded-an-message",
               enableImagePreview && "cursor-pointer",
             )}
             onClick={
@@ -157,7 +157,9 @@ export const UserMessage = memo(function UserMessage({
             <img
               src={url}
               alt="attachment"
-              className="block object-cover max-w-[184px] max-h-[120px] rounded-an-message-inner"
+              loading="lazy"
+              decoding="async"
+              className="block h-[120px] w-[184px] object-cover rounded-an-message-inner"
             />
           </div>
         ))}
