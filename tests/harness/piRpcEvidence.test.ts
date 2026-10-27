@@ -49,6 +49,12 @@ describe('Pi RPC’s evidence gate', () => {
     expect(piRpcCaps({ platform: 'darwin', piVersion: version, evidence: [record({ environment: 'wsl2' })] })).toBe(PI_RPC_CAPS)
   })
 
+  it('the shipped records make Pi RPC exact on Linux (from WSL2) for this Pi, and nowhere else', () => {
+    expect(CONTAINMENT_EVIDENCE.filter((entry) => entry.driver === 'pi').map(({ platform, environment, cliVersion }) => ({ platform, environment, cliVersion }))).toEqual([{ platform: 'linux', environment: 'wsl2', cliVersion: version }])
+    expect(piRpcCaps({ platform: 'linux', piVersion: version, evidence: CONTAINMENT_EVIDENCE })).toBe(PI_RPC_EXACT_CAPS)
+    expect(piRpcCaps({ platform: 'linux', piVersion: '0.86.0', evidence: CONTAINMENT_EVIDENCE })).toBe(PI_RPC_CAPS)
+  })
+
   it('the shipped records claim nothing on macOS or Windows', () => {
     for (const platform of ['darwin', 'win32'] as const)
       expect(piRpcCaps({ platform, piVersion: version, evidence: CONTAINMENT_EVIDENCE })).toBe(PI_RPC_CAPS)

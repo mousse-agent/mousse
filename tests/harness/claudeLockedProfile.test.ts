@@ -298,7 +298,8 @@ describe('locked Claude Code: who runs bots', () => {
   })
 
   it('no locked entry holds a bot, or gets exact tool control, without recorded evidence (item 14)', () => {
-    expect(CONTAINMENT_EVIDENCE).toEqual([])
+    // No Claude record (Pi RPC's own records do not count for Claude Code).
+    expect(CONTAINMENT_EVIDENCE.filter((record) => record.driver === 'claude')).toEqual([])
     for (const platform of ['linux', 'darwin', 'win32'] as const) {
       const driver = claudeCodeDriver({ platform, managedPolicy: () => false })
       expect(driver.botAuthority!({ home: 'private', profile: 'locked' }), platform).toBe(false)

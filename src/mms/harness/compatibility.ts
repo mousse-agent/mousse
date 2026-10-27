@@ -51,12 +51,14 @@ export const PI_RPC_EVIDENCE_ITEMS: readonly number[] = Object.freeze([1, 2, 3, 
  * Every record so far.
  * - Locked Claude Code: none. No platform has passed the real-CLI suite yet, so it holds no bot
  *   authority and runs no shell anywhere.
- * - Pi RPC: none yet. Runs in WSL2 (a real Linux kernel, not a Linux machine) passed every item;
- *   whether WSL2 counts as Linux evidence is still to be decided, and such a record would carry
- *   `environment: 'wsl2'`, so it holds only in WSL2. macOS needs a run on a Mac; Windows gets none
- *   (Pi's shell runs uncontained there). Without a record, definitions run on the loop.
+ * - Pi RPC: Linux, from runs in WSL2 (a real Linux kernel in a VM on Windows, accepted as Linux
+ *   evidence): items 1–9 and 10 on their own files, 11 and 12 again at the final change. macOS
+ *   needs a run on a Mac; Windows gets none (Pi's shell runs uncontained there). Without a record,
+ *   definitions run on the loop.
  */
-export const CONTAINMENT_EVIDENCE: readonly ContainmentEvidence[] = Object.freeze([])
+export const CONTAINMENT_EVIDENCE: readonly ContainmentEvidence[] = Object.freeze([
+  Object.freeze({ driver: 'pi', kind: 'tools', cliVersion: '0.85.1', platform: 'linux', environment: 'wsl2', items: PI_RPC_EVIDENCE_ITEMS, recordedAt: '2026-10-27T13:38:46Z' })
+] satisfies ContainmentEvidence[])
 
 export interface EvidenceQuery {
   driver: HarnessDriverKind
