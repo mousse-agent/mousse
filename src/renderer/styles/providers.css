@@ -301,9 +301,7 @@
 /* The model list's age, quieter than the status above it. */
 .prov-item-models {
   min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
   font-size: var(--settings-fs-small);
   line-height: 1.45;
   color: var(--text-secondary);
