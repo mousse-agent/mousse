@@ -18,6 +18,7 @@ import type {
   ResolvedAgentDefinition
 } from '../../shared/agents/types'
 import { normalizeOsPath } from '../orchestrator/toolPathSafety'
+import { gitMetadataRefusal, touchesGitMetadata } from '../agents/gitMetadata'
 import { BROWSER_READ_TOOLS, isBrowserAutomationTool } from '../orchestrator/browser/tools'
 import { browserRuntimeHostBindingMessage, readHostBrowserRuntime } from '../orchestrator/browser/binding'
 
@@ -485,6 +486,8 @@ export function prepareTrustedToolDispatch(input: {
         : resolve(normalizeOsPath(cwd), normalizeOsPath(rawPath))
       const check = pathInsideCanonicalRoots(absolute, input.policy.workspace.canonicalRoots)
       if (!check.ok) return deny(check.reason)
+      // Git metadata is never a file tool's to change, inside the roots or not (`agents/gitMetadata`).
+      if (classification === 'write' && touchesGitMetadata(absolute, cwd)) return deny(gitMetadataRefusal(rawPath))
       workspacePaths.push(check.canonical)
     }
   }

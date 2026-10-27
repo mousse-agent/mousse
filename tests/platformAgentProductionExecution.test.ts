@@ -41,6 +41,8 @@ async function fixture(outputs: AssistantMessage[]) {
   const provider = services.providerAuth.models.getProviders().find((entry) => services.providerAuth.models.getModels(entry.id).length > 0)!
   const model = services.providerAuth.models.getModels(provider.id)[0]
   vi.spyOn(services.providerAuth, 'has').mockReturnValue(true)
+  // Its stored sign-in: the gateway catalogue lists the models of signed-in instances.
+  vi.spyOn(services.providerAuth.credentials, 'listProviderIds').mockReturnValue([provider.id])
   vi.spyOn(services.providerAuth.models, 'getAuth').mockResolvedValue({ apiKey: 'fixture' } as never)
   vi.spyOn(services.providerAuth.models, 'streamSimple').mockImplementation((_model, context) => {
     captured.push(structuredClone(context))
@@ -106,6 +108,33 @@ describe('native Agent Editor Try Run production host', () => {
       expect((await b.agents.list({ profileId: f.bob.id }))).toEqual([])
       await expect(b.agents.tryRun({ profileId: f.bob.id, id: created.id, revision: published.revision, prompt: 'cross profile' })).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' })
       expect(f.services.orchestrator.getMessages(result.threadId!).map((message) => message.content)).toEqual(expect.arrayContaining(['write the fixture', 'pinned answer']))
+    } finally { await f.close() }
+  }, 30_000)
+
+  it('a fallback on a signed-out provider is skipped and the primary runs; a signed-out primary says to sign in again', async () => {
+    const f = await fixture([providerResponse([{ type: 'text', text: 'primary answer' }], 'stop')])
+    try {
+      const a = await f.connect(f.alice.id)
+      const models = f.services.providerAuth.models
+      // Another provider with models, but no stored sign-in: its instance lists nothing.
+      const other = models.getProviders().find((entry) => entry.id !== f.modelRef.providerId && models.getModels(entry.id).length > 0)!
+      const otherRef = { providerId: other.id, modelId: models.getModels(other.id)[0]!.id }
+      const value = settings('Fallback Agent', f.modelRef)
+      value.fallbacks = { ...value.fallbacks, enabled: true, allowHigherCost: true, models: [otherRef] }
+      const created = await a.agents.create({ profileId: f.alice.id, settings: value, systemPrompt: 'FALLBACK_SYSTEM' })
+      const validation = await a.agents.validate({ profileId: f.alice.id, id: created.id, expectedDraftHash: created.draftHash })
+      expect(validation.issues).toEqual([expect.objectContaining({ pointer: '/settings/fallbacks/models/0', details: expect.objectContaining({ blocking: false, errorCode: 'signed_out' }) })])
+      expect(validation.issues[0]!.message).toMatch(/signed out.*Sign in again/)
+      const published = await a.agents.publish({ profileId: f.alice.id, id: created.id, expectedDraftHash: created.draftHash })
+      const result = await a.agents.tryRun({ profileId: f.alice.id, id: created.id, revision: published.revision, prompt: 'answer' })
+      expect(result).toMatchObject({ ok: true, status: 'completed', summary: 'primary answer' })
+      expect(f.captured).toHaveLength(1)
+      // The same provider as the primary: the run is refused, saying to sign in again.
+      const signedOut = await a.agents.create({ profileId: f.alice.id, settings: settings('Signed Out Agent', otherRef), systemPrompt: 'unreachable' })
+      const refused = await a.agents.tryRun({ profileId: f.alice.id, id: signedOut.id, expectedDraftHash: signedOut.draftHash, prompt: 'must not dispatch' }).catch((error: unknown) => error)
+      expect(refused).toMatchObject({ code: 'MODEL_CAPABILITY_MISSING' })
+      expect(String((refused as Error).message)).toMatch(/signed out.*Sign in again/)
+      expect(f.captured).toHaveLength(1)
     } finally { await f.close() }
   }, 30_000)
 

@@ -12,7 +12,7 @@ import {
   resolveToolPath,
   sanitizeToolArgs
 } from '../src/mms/orchestrator/toolPathSafety'
-import { PiCodingTools } from '../src/mms/orchestrator/PiCodingTools'
+import { ProjectFileTools } from '../src/mms/workflows/tools/ProjectFileTools'
 
 describe('toolPathSafety', () => {
   it.skipIf(process.platform !== 'win32')('normalizes Git Bash and WSL drive paths on Windows', () => {
@@ -86,7 +86,7 @@ describe('toolPathSafety', () => {
   })
 })
 
-describe('PiCodingTools path safety integration', () => {
+describe('ProjectFileTools path safety integration', () => {
   const roots: string[] = []
 
   afterEach(async () => {
@@ -96,7 +96,7 @@ describe('PiCodingTools path safety integration', () => {
   it.skipIf(process.platform !== 'win32')('writes Git Bash absolute paths into the worktree cwd, not C:\\c\\...', async () => {
     const root = await mkdtemp(join(tmpdir(), 'mousse-path-safety-'))
     roots.push(root)
-    const tools = new PiCodingTools()
+    const tools = new ProjectFileTools()
 
     const gitBashPath = root
       .replace(/^([A-Za-z]):\\/, '/$1/')
@@ -123,7 +123,7 @@ describe('PiCodingTools path safety integration', () => {
   it('rejects filesystem-wide bash before spawning', async () => {
     const root = await mkdtemp(join(tmpdir(), 'mousse-bash-block-'))
     roots.push(root)
-    const tools = new PiCodingTools()
+    const tools = new ProjectFileTools()
 
     const result = await tools.execute(
       'bash',

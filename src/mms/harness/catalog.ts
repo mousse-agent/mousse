@@ -129,9 +129,9 @@ export function customModelDefinition(template: Model<Api>, custom: CustomModel)
   }
 }
 
-/** Capabilities of a listed model: its efforts; images and window are unknown for listed models. */
+/** Capabilities of a listed model: its efforts, and images and window when its listing states them (unknown is no). */
 function listedCapabilities(model: LlmModelOption): ModelCapabilities {
-  return { efforts: model.efforts ?? [], images: false }
+  return { efforts: model.efforts ?? [], images: model.images === true, ...(model.contextWindow !== undefined ? { contextWindow: model.contextWindow } : {}) }
 }
 
 /**

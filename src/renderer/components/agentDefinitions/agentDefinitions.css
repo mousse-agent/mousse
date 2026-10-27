@@ -208,14 +208,17 @@
   font-weight: 600;
 }
 
-.agent-setting-group p.agent-setting-lead,
-.agent-setting-disabled {
+.agent-setting-group p.agent-setting-lead {
   margin: 0 0 12px;
   color: var(--ad-muted);
 }
 
-.agent-setting-disabled {
-  color: var(--ad-danger);
+.agent-setting-group p.agent-runs-on {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
 }
 
 .agent-field {

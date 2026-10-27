@@ -2,8 +2,8 @@ import type { EffectClass, ExecutionContext, ExecutionPolicyLayer, ExecutionPoli
 import { MOUSSE_BUILTIN_TOOLS } from '../../shared/integrations'
 import { isPlainObject, stableStringify, type CompiledGraph, type StartWorkflowRequest, type ToolExecutorAdapter, type WorkflowRunManifest } from '../../shared/workflows'
 import type { MmsProfileServices } from '../MmsProfileServices'
-import { BuildModeTools } from '../orchestrator/BuildModeTools'
-import { PiCodingTools } from '../orchestrator/PiCodingTools'
+import { ProjectGitTools } from '../workflows/tools/ProjectGitTools'
+import { ProjectFileTools } from '../workflows/tools/ProjectFileTools'
 import { DomainRpcError } from '../protocol/domainRegistry'
 import type { WorkflowRecordSnapshot } from '../workflows/registry/WorkflowRegistry'
 import { collectTransitiveWorkflowRecords } from '../workflows/engine/childAdmission'
@@ -19,16 +19,16 @@ const WRITE_TOOL_IDS = new Set(['write', 'edit'])
 /** Profile-bound adapter for the catalog's generic built-in project-tool node. */
 export class MmsWorkflowTools {
   readonly adapter: ToolExecutorAdapter = { kind: 'tool', invoke: (request) => this.invoke(request) }
-  private readonly coding: PiCodingTools
-  private readonly build: BuildModeTools
+  private readonly coding: ProjectFileTools
+  private readonly build: ProjectGitTools
   private stopped = false
 
   constructor(
     private readonly services: MmsProfileServices,
     private readonly run: (context: ExecutionContext) => Promise<WorkflowRunManifest>
   ) {
-    this.coding = new PiCodingTools(services.lineEditStats)
-    this.build = new BuildModeTools(services.fileService, services.gitService, services.lineEditStats)
+    this.coding = new ProjectFileTools(services.lineEditStats)
+    this.build = new ProjectGitTools(services.fileService, services.gitService, services.lineEditStats)
   }
 
   dispose(): void { this.stopped = true }

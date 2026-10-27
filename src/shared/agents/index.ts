@@ -53,7 +53,6 @@ export type {
   AgentPublishedRevision,
   AgentRecoverySettings,
   AgentResolveRequest,
-  AgentRuntimeCompatibility,
   AgentRuntimeKind,
   AgentScriptExecutionMode,
   AgentScriptPolicy,
@@ -105,7 +104,6 @@ export {
   parseVisualMetadata,
   toManifest
 } from './schema'
-export { collectUnsupportedCliSettings, getRuntimeCompatibility } from './compatibility'
 export {
   grantDependencyHashes,
   resolveBuiltinToolGrants,

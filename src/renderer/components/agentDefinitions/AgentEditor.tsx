@@ -4,7 +4,6 @@ import type {
   AgentDefinitionRecord,
   AgentDefinitionSettings,
   AgentLibraryFlags,
-  AgentRuntimeKind,
   AgentVisualMetadata
 } from '../../../shared/agents/types'
 import { OrbAppearanceEditor } from '../orb/OrbAppearanceEditor'
@@ -12,14 +11,14 @@ import type { OrbAppearance } from '../orb/orbAppearance'
 import { AgentSettingsForm } from './AgentSettingsForm'
 import { TryRunPanel } from './TryRunPanel'
 import { createAsyncGate, shouldApplyAsyncResult } from './asyncGate'
+import type { AgentDefinitionIssue } from '../../../shared/agents/errors'
 import {
-  AGENT_RUNTIME_LABELS,
   isAgentDefinitionClientError,
   type AgentDefinitionsClient,
   type AgentEditorCatalogs
 } from './client'
 import { DraftConflictDialog, UnsavedChangesDialog } from './dialogs'
-import { collectEditorIssues, fieldIdForPointer } from './editorIssues'
+import { collectEditorIssues, editorRuntimeIssues, fieldIdForPointer, runsOnLabel } from './editorIssues'
 import { downloadJson } from './importBundle'
 import { registerNavigationGuard } from '../../services/navigationGuards'
 
@@ -34,8 +33,8 @@ export interface AgentEditorProps {
   onRequestAttention?: () => void
 }
 
+/** What the editor changes. The stored `runtimeKind` is not one of them: a save writes `mousse`. */
 interface DraftSnapshot {
-  runtimeKind: AgentRuntimeKind
   settings: AgentDefinitionSettings
   systemPrompt: string
   visual: AgentVisualMetadata
@@ -44,7 +43,6 @@ interface DraftSnapshot {
 
 function snapshotFromRecord(record: AgentDefinitionRecord): DraftSnapshot {
   return {
-    runtimeKind: record.runtimeKind,
     settings: record.settings,
     systemPrompt: record.systemPrompt,
     visual: record.visual,
@@ -144,15 +142,31 @@ export function AgentEditor({
     }
   }, [dirty, onRequestAttention])
   useEffect(() => () => { navigationDecision.current?.(false) }, [])
+  // Where the saved draft would run (the gateway's check of its models' instances), read again for
+  // every saved draft. It answers for the saved settings only, so it is hidden while the settings
+  // have unsaved edits (a model picked but not saved would contradict it), and Publish waits for it.
+  const [runtimeIssues, setRuntimeIssues] = useState<{ draftHash: string; issues: AgentDefinitionIssue[] } | null>(null)
+  const recordId = record?.id
+  const recordDraftHash = record?.draftHash
+  useEffect(() => {
+    if (!recordId || !recordDraftHash) return
+    let current = true
+    client.validate({ profileId, id: recordId, expectedDraftHash: recordDraftHash, runtimeOnly: true })
+      .then((result) => { if (current) setRuntimeIssues({ draftHash: recordDraftHash, issues: result.issues }) })
+      // Unanswered, the check does not hold Publish: the daemon checks again when it publishes or runs.
+      .catch(() => { if (current) setRuntimeIssues({ draftHash: recordDraftHash, issues: [] }) })
+    return () => { current = false }
+  }, [client, profileId, recordId, recordDraftHash])
+  const { checked: runtimeChecked, serverIssues } = editorRuntimeIssues({ answer: runtimeIssues, draftHash: recordDraftHash, settings: draft?.settings, savedSettings: baseline?.settings })
   const issues = useMemo(
     () =>
       draft
-        ? collectEditorIssues({ runtimeKind: draft.runtimeKind, settings: draft.settings, catalogs })
+        ? collectEditorIssues({ settings: draft.settings, catalogs, ...(serverIssues ? { serverIssues } : {}) })
         : [],
-    [catalogs, draft]
+    [catalogs, draft, serverIssues]
   )
   const blocking = issues.filter((issue) => issue.blocking)
-  const canPublish = Boolean(record && draft && !dirty && blocking.length === 0)
+  const canPublish = Boolean(record && draft && !dirty && runtimeChecked && blocking.length === 0)
   const canRun = Boolean(record && draft && !dirty && blocking.length === 0)
 
   const requestLeave = (action: () => void) => {
@@ -181,7 +195,8 @@ export function AgentEditor({
         profileId,
         id: record.id,
         expectedDraftHash: record.draftHash,
-        runtimeKind: draft.runtimeKind,
+        // New and resaved definitions are Mousse's; an older CLI kind changes only here, by a save.
+        runtimeKind: 'mousse',
         settings: draft.settings,
         systemPrompt: draft.systemPrompt,
         visual: draft.visual,
@@ -208,7 +223,14 @@ export function AgentEditor({
     setError(null)
     const started = gate.current.current()
     try {
-      await client.publish({ profileId, id: record.id, expectedDraftHash: record.draftHash })
+      let expectedDraftHash = record.draftHash
+      // Republishing a definition saved for an older CLI kind saves it for Mousse first.
+      if (record.runtimeKind !== 'mousse') {
+        const saved = await client.saveDraft({ profileId, id: record.id, expectedDraftHash, runtimeKind: 'mousse' })
+        if (!shouldApplyAsyncResult(started, gate.current.current())) return
+        expectedDraftHash = saved.draftHash
+      }
+      await client.publish({ profileId, id: record.id, expectedDraftHash })
       if (!shouldApplyAsyncResult(started, gate.current.current())) return
       await load()
     } catch (caught) {
@@ -282,6 +304,7 @@ export function AgentEditor({
     )
   }
   if (!record || !draft) return null
+  const runsOn = runsOnLabel(catalogs, draft.settings.primaryModel.ref)
 
   return (
     <div
@@ -300,7 +323,7 @@ export function AgentEditor({
         <span className="agent-defs__status" data-editor-status="">
           {status}
           {dirty ? ' · Unsaved' : ''}
-          {` · ${AGENT_RUNTIME_LABELS[draft.runtimeKind]}`}
+          {runsOn ? ` · Runs on ${runsOn}` : ''}
         </span>
         <div className="agent-defs__actions">
           <button
@@ -408,11 +431,10 @@ export function AgentEditor({
           />
           <AgentSettingsForm
             definitionId={record.id}
-            runtimeKind={draft.runtimeKind}
+            savedRuntimeKind={record.runtimeKind}
             settings={draft.settings}
             systemPrompt={draft.systemPrompt}
             catalogs={catalogs}
-            onRuntimeKindChange={(runtimeKind) => setDraft({ ...draft, runtimeKind })}
             onSettingsChange={(settings) => setDraft({ ...draft, settings })}
             onSystemPromptChange={(systemPrompt) => setDraft({ ...draft, systemPrompt })}
             onSave={() => void saveDraft()}

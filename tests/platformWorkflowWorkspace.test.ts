@@ -410,6 +410,8 @@ async function agentFixture() {
   const model = services.providerAuth.models.getModels(provider.id)[0]
   const modelRef = { providerId: provider.id, modelId: model.id }
   vi.spyOn(services.providerAuth, 'has').mockReturnValue(true)
+  // Its stored sign-in: the gateway catalogue lists the models of signed-in instances.
+  vi.spyOn(services.providerAuth.credentials, 'listProviderIds').mockReturnValue([provider.id])
   vi.spyOn(services.providerAuth.models, 'getAuth').mockResolvedValue({ apiKey: 'fixture' } as never)
   vi.spyOn(services.providerAuth.models, 'streamSimple').mockImplementation((_model, context) => {
     captured.push(structuredClone(context))

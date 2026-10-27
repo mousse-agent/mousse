@@ -1,5 +1,6 @@
 import { AGENT_DEFINITION_CAPABILITY, AGENT_DEFINITION_METHODS, type AgentDefinitionMethod } from '../../shared/agentPlatform'
 import { AgentDefinitionError, type AgentDefinitionIssue } from '../../shared/agents/errors'
+import { resolveEffectiveGrants } from '../../shared/agents/grants'
 import { isAgentDefinitionId, isAgentRuntimeKind } from '../../shared/agents/schema'
 import type { PendingUserQuestions, UserQuestionAnswers } from '../../shared/types'
 import type { AgentDefinitionRecord, AgentExportBundle, AgentIntegrationLookup, CreateAgentDefinitionInput, ResolvedAgentDefinition, SaveAgentDraftInput } from '../../shared/agents/types'
@@ -19,6 +20,11 @@ export interface DefinitionTryRunResult {
 
 export interface AgentDefinitionDomainServices extends AgentDefinitionServices {
   integrationLookup: AgentIntegrationLookup
+  /**
+   * Where the definition would run (`gateway.check()` on its models' instances, PR 4 §6), as editor
+   * issues. Root binds it to the profile's orchestrator; absent, no such issue is reported.
+   */
+  checkRuntime?: (input: { definitionId: string; revision: string; settings: AgentDefinitionRecord['settings']; grants: ResolvedAgentDefinition['grants'] }) => AgentDefinitionIssue[]
   /** Root attaches the real native/CLI executor; the domain never invents a successful run. */
   tryRun?: (input: {
     resolved: ResolvedAgentDefinition; record: AgentDefinitionRecord; prompt: string;
@@ -49,7 +55,7 @@ const keys: Record<AgentDefinitionMethod, readonly string[]> = {
   'agentDefinitions.duplicate': ['id'],
   'agentDefinitions.importBundle': ['bundle', 'conflict'],
   'agentDefinitions.exportBundle': ['id', 'revision'],
-  'agentDefinitions.validate': ['id', 'expectedDraftHash'],
+  'agentDefinitions.validate': ['id', 'expectedDraftHash', 'runtimeOnly'],
   'agentDefinitions.tryRun': ['id', 'expectedDraftHash', 'revision', 'prompt', 'exampleId'],
   'agentDefinitions.tryRunPending': ['id'],
   'agentDefinitions.tryRunAnswer': ['id', 'requestId', 'answers', 'dismiss']
@@ -65,6 +71,7 @@ function validate(method: AgentDefinitionMethod, value: unknown): Params {
   if (['agentDefinitions.saveDraft', 'agentDefinitions.publish'].includes(method) && p.expectedDraftHash === undefined) throw new DomainRpcError('invalid_params', 'Expected draft hash is required')
   if (p.runtimeKind !== undefined && !isAgentRuntimeKind(p.runtimeKind)) throw new DomainRpcError('invalid_params', 'Unsupported agent runtime')
   if (p.archived !== undefined && typeof p.archived !== 'boolean') throw new DomainRpcError('invalid_params', 'archived must be boolean')
+  if (p.runtimeOnly !== undefined && typeof p.runtimeOnly !== 'boolean') throw new DomainRpcError('invalid_params', 'runtimeOnly must be boolean')
   if (p.flags !== undefined) {
     const flags = domainObject(p.flags, ['enabled', 'favorite'])
     if (Object.values(flags).some((flag) => typeof flag !== 'boolean')) throw new DomainRpcError('invalid_params', 'Agent flags must be boolean')
@@ -142,6 +149,10 @@ async function handle(method: AgentDefinitionMethod, p: Params, service: AgentDe
     case 'agentDefinitions.saveDraft': return registry.saveDraft(id, p as unknown as SaveAgentDraftInput)
     case 'agentDefinitions.publish': {
       const resolved = resolver.resolveDraft({ definitionId: id, expectedDraftHash })
+      // A revision whose primary model can never run it is refused here, whatever client publishes.
+      const refused = (service.checkRuntime?.({ definitionId: id, revision: resolved.revision, settings: resolved.settings, grants: resolved.grants }) ?? [])
+        .filter((issue) => issue.details?.blocking !== false)
+      if (refused.length) throw new AgentDefinitionError('SETTINGS_UNSUPPORTED', refused[0]!.message, { pointer: refused[0]!.pointer, details: { issues: refused } })
       return registry.publish(id, expectedDraftHash!, {
         dependencyHashes: resolved.dependencyHashes
       })
@@ -152,7 +163,18 @@ async function handle(method: AgentDefinitionMethod, p: Params, service: AgentDe
     case 'agentDefinitions.exportBundle': return registry.exportBundle(id, revision)
     case 'agentDefinitions.validate': {
       if (!id) return { issues: [] }
-      try { return { issues: resolver.resolveDraft({ definitionId: id, expectedDraftHash }).issues } }
+      if (p.runtimeOnly === true) {
+        // The editor's check of where the saved draft would run: no integration is started for it.
+        const record = registry.get(id)
+        if (expectedDraftHash !== undefined && expectedDraftHash !== record.draftHash) {
+          throw new AgentDefinitionError('REVISION_CONFLICT', 'Draft changed since it was loaded. Reload and retry.', { retryable: true, details: { expectedDraftHash, actualDraftHash: record.draftHash } })
+        }
+        return { issues: service.checkRuntime?.({ definitionId: id, revision: record.semanticHash, settings: record.settings, grants: resolveEffectiveGrants(record.settings, service.integrationLookup) }) ?? [] }
+      }
+      try {
+        const resolved = resolver.resolveDraft({ definitionId: id, expectedDraftHash })
+        return { issues: [...resolved.issues, ...(service.checkRuntime?.({ definitionId: id, revision: resolved.revision, settings: resolved.settings, grants: resolved.grants }) ?? [])] }
+      }
       catch (error) {
         if (error instanceof AgentDefinitionError && error.code === 'REVISION_CONFLICT') throw error
         return { issues: issues(error) }

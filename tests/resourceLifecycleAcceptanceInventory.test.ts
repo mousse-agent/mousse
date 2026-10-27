@@ -131,6 +131,8 @@ describe('public inventory and request identity', () => {
       const provider = f.services.providerAuth.models.getProviders().find((entry) => f.services.providerAuth.models.getModels(entry.id).length > 0)!
       const model = f.services.providerAuth.models.getModels(provider.id)[0]
       const auth = vi.spyOn(f.services.providerAuth, 'has').mockReturnValue(true)
+      // Its stored sign-in: the gateway catalogue lists the models of signed-in instances.
+      const signedIn = vi.spyOn(f.services.providerAuth.credentials, 'listProviderIds').mockReturnValue([provider.id])
       const getAuth = vi.spyOn(f.services.providerAuth.models, 'getAuth').mockResolvedValue({ apiKey: 'fixture' } as never)
       const stream = vi.spyOn(f.services.providerAuth.models, 'streamSimple').mockImplementation(() => streamOf(providerResponse([{ type: 'text', text: '{"summary":"shared workflow result"}' }], 'stop')) as never)
       f.services.settings.set({ provider: { llmProvider: provider.id, model: model.id } })
@@ -151,7 +153,7 @@ describe('public inventory and request identity', () => {
         expect(view.state, view.error).toBe('succeeded')
       }, { timeout: 5000 })
       expect(stream).toHaveBeenCalled()
-      auth.mockRestore(); getAuth.mockRestore(); stream.mockRestore()
+      auth.mockRestore(); signedIn.mockRestore(); getAuth.mockRestore(); stream.mockRestore()
 
       const generated = f.services.threads.listAllThreads().filter((entry) => entry.id !== thread.id)
       expect(generated.length, 'workflow must actually create a separate durable invocation thread').toBeGreaterThan(0)

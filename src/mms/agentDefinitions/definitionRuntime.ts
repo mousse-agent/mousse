@@ -1,5 +1,5 @@
 import type { AssistantMessage, Message } from '../../shared/transcript'
-import { AgentDefinitionError } from '../../shared/agents/errors'
+import { AgentDefinitionError, type AgentDefinitionIssue } from '../../shared/agents/errors'
 import { definitionAuthorityDigest, type DefinitionAuthority } from './definitionGate'
 import type {
   AgentExecutionBudget,
@@ -17,7 +17,7 @@ import type {
   AgentRuntimeToolApprovalCallback,
   AgentRuntimeUnsupportedSetting
 } from '../../shared/agents/execution'
-import type { AgentFallbackRetryCategory, AgentModelRef, EffectiveAgentGrants } from '../../shared/agents/types'
+import type { AgentDefinitionSettings, AgentFallbackRetryCategory, AgentModelRef, EffectiveAgentGrants } from '../../shared/agents/types'
 import { AppError } from '../../shared/errors'
 import { isRetriesExhausted, type HarnessCaps, type RunPolicy } from '../../shared/harness/types'
 import { RunCounters, RunSpend, type CounterScope, type SpendScope } from '../harness/budget'
@@ -93,6 +93,16 @@ export interface DefinitionCheck {
  */
 export function definitionNeedsLoop(features: AgentRuntimeFeatures | undefined): boolean {
   return !features
+}
+
+/** The settings `definitionFeatureGaps` reads, from a definition's settings. */
+export function definitionFeatures(settings: Pick<AgentDefinitionSettings, 'output' | 'browser' | 'memory' | 'delegation'>): AgentRuntimeFeatures {
+  return {
+    outputFormat: settings.output.format,
+    browserMode: settings.browser.mode,
+    memoryScope: settings.memory.scope,
+    delegation: settings.delegation.maxConcurrentChildren > 0 || settings.delegation.maxDepth > 0 || settings.delegation.allowedChildDefinitionIds.length > 0
+  }
 }
 
 /**
@@ -255,6 +265,54 @@ function refusalError(refusal: DefinitionRefusal, budget: AgentExecutionBudget, 
       reasons: Object.fromEntries(unsupported.map((item) => [item.pointer, item.reason]))
     }
   })
+}
+
+/**
+ * The editor's view of where a definition would run (PR 4 §6): `gateway.check()` on the instance
+ * each model ref names, with the definition's own limits, before anything runs. A refused primary
+ * is a blocking `SETTINGS_UNSUPPORTED` issue on each setting the refusal names (the run would fail
+ * the same way); a refused enabled fallback is a non-blocking issue (`details.blocking: false`),
+ * since the run skips it. A model that cannot be reached is the model lookup's issue, not this one.
+ */
+export function definitionCheckIssues(
+  port: Pick<DefinitionTurnPort, 'checkDefinitionTurn'>,
+  input: { threadId: string; definition: { id: string; revision: string }; settings: AgentDefinitionSettings; grants: EffectiveAgentGrants }
+): AgentDefinitionIssue[] {
+  const { settings } = input
+  const limits = settings.limits
+  const budget: AgentExecutionBudget = {
+    maxTurns: limits.maxTurns,
+    maxToolCalls: limits.maxToolCalls,
+    maxElapsedMs: limits.maxElapsedMs,
+    ...(limits.maxInputTokens !== undefined ? { maxInputTokens: limits.maxInputTokens } : {}),
+    ...(limits.maxOutputTokens !== undefined ? { maxOutputTokens: limits.maxOutputTokens } : {}),
+    ...(limits.maxCostUsd !== undefined ? { maxCostUsd: limits.maxCostUsd } : {})
+  }
+  const refs: Array<{ ref: AgentModelRef; at: string; primary: boolean }> = [{ ref: settings.primaryModel.ref, at: '/settings/primaryModel/ref', primary: true }]
+  if (settings.fallbacks.enabled) settings.fallbacks.models.forEach((ref, index) => refs.push({ ref, at: `/settings/fallbacks/models/${index}`, primary: false }))
+  const issues: AgentDefinitionIssue[] = []
+  for (const { ref, at, primary } of refs) {
+    if (!ref.providerId || !ref.modelId) continue
+    const refusal = port.checkDefinitionTurn({ threadId: input.threadId, origin: 'definition', definition: input.definition, ref, grants: input.grants, budget, features: definitionFeatures(settings) })
+    if (!refusal || !isPolicyRefusal(refusal)) continue
+    const model = { providerId: ref.providerId, modelId: ref.modelId, ...(ref.instanceId ? { instanceId: ref.instanceId } : {}) }
+    for (const { pointer } of refusalPointers(refusal, budget, at)) {
+      issues.push({
+        code: 'SETTINGS_UNSUPPORTED',
+        message: primary ? refusal.message : `Fallback ${ref.modelId} will be skipped: ${refusal.message}`,
+        pointer,
+        retryable: false,
+        details: {
+          code: refusal.code,
+          model,
+          ...(refusal.missing ? { missing: refusal.missing } : {}),
+          ...(refusal.reason ? { reason: refusal.reason } : {}),
+          ...(primary ? {} : { blocking: false, at })
+        }
+      })
+    }
+  }
+  return issues
 }
 
 function historyAssistant(content: string, at: string): AssistantMessage {

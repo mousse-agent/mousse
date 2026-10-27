@@ -389,14 +389,6 @@ export interface SaveAgentDraftInput {
   flags?: Partial<Pick<AgentLibraryFlags, 'enabled' | 'favorite'>>
 }
 
-export interface AgentRuntimeCompatibility {
-  runtimeKind: AgentRuntimeKind
-  native: boolean
-  supportedSettingPointers: string[]
-  unsupportedSettingPointers: string[]
-  notes: string[]
-}
-
 export interface AgentModelLookup {
   resolve(ref: AgentModelRef): AgentModelCapabilityProfile | null
 }
