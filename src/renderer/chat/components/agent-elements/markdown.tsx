@@ -36,7 +36,7 @@ function restoreMousseFileHref(href: string): string {
     : href;
 }
 
-function normalizeMarkdown(text: string): string {
+export function normalizeMarkdown(text: string): string {
   const parts = text.split(/(```[\s\S]*?(?:```|$))/g);
   return parts
     .map((part, index) => {
@@ -57,7 +57,7 @@ function normalizeMarkdown(text: string): string {
  *  The code plugin loads each shiki grammar on first use and falls back to
  *  plain text for ids it does not know. ```math stays math only when math is
  *  rendered. */
-function normalizeCodeFenceLanguages(text: string, keepMath: boolean): string {
+export function normalizeCodeFenceLanguages(text: string, keepMath: boolean): string {
   return text.replace(/```([^\n]*)/g, (_match, langRaw) => {
     const lang = String(langRaw || "")
       .trim()
