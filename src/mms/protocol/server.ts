@@ -321,6 +321,7 @@ export class MmsProtocolServer {
     // changes made through requests, which reach no service event of their own.
     if (profileId && type === 'projects.updated') services.events.broadcast('projects:updated', data)
     else if (profileId && type === 'threads.updated') services.events.broadcast('threads:updated', data)
+    else if (profileId && threadId) services.events.broadcast('thread:event', { type, data, threadId })
   }
 
   private wireOrchestratorEvents(services: MmsProfileServices): void {

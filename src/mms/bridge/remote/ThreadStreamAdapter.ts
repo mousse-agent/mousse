@@ -7,10 +7,29 @@ import type {
   StreamDescriptor,
   StoredRecord
 } from '../../../shared/net'
-import { BRIDGE_THREAD_EVENT_TYPES, NetError, newId } from '../../../shared/net'
+import {
+  BRIDGE_ROUTED_EVENT_TYPES,
+  BRIDGE_THREAD_EVENT_TYPES,
+  NetError,
+  newId,
+  type NodeId
+} from '../../../shared/net'
+import type { RoutedStreamKind } from '../../../shared/bridge/routed'
 import type { Clock, IdentityService, KeyStore, StreamStore } from '../../net/contracts'
 import type { NetDatabase } from '../../net/store/database'
 import { canonicalJson, encodeEnvelope } from '../../net/sync/codec'
+import {
+  PRIVATE_STREAM_QUOTA,
+  PRIVATE_TERMINAL_RING_BYTES,
+  PRIVATE_TERMINAL_RING_ROWS,
+  PRIVATE_STREAMS_TOTAL,
+  PRIVATE_THREAD_STREAMS_TOTAL,
+  isPrivateKey,
+  parsePrivateKey,
+  privateKey,
+  privateRecordSubject,
+  type PrivateSpec
+} from './privateStreams'
 
 export const THREAD_EVENT_TYPES = BRIDGE_THREAD_EVENT_TYPES
 /**
@@ -22,13 +41,26 @@ export const THREAD_DELTA_TYPES = [
   'thread.message-updated',
   'questions.updated'
 ] as const
+/**
+ * What only a private stream sends as a display-only delta: a note that something about the thread
+ * changed (the reader fetches what it needs), or the new state when that is small.
+ */
+export const PRIVATE_DELTA_TYPES = [
+  'subagents.updated',
+  'agents.updated',
+  'tasks.updated',
+  'pullRequests.updated',
+  'actions.updated',
+  'workspace.updated',
+  'thread.title-generation-failed'
+] as const
 export interface ThreadDisplayEvent {
-  type: (typeof THREAD_EVENT_TYPES)[number]
+  type: (typeof THREAD_EVENT_TYPES)[number] | (typeof BRIDGE_ROUTED_EVENT_TYPES)[number]
   data: unknown
   ephemeral?: boolean
 }
 export interface ThreadDeltaEvent {
-  type: (typeof THREAD_DELTA_TYPES)[number]
+  type: (typeof THREAD_DELTA_TYPES)[number] | (typeof PRIVATE_DELTA_TYPES)[number]
   data: unknown
   ephemeral: true
 }
@@ -49,7 +81,15 @@ export interface ThreadGenerationPort {
   beginNodeEpoch(stream: StreamId, epoch: number): void
 }
 interface ActiveThread {
+  /** What the stream is stored and sourced under: a thread id, or the key of a private stream. */
   threadId: string
+  /** The id its records carry as `threadId`: the thread's own id, or the private stream's subject. */
+  subject: string
+  /** Set on a private stream: who reads it, and what it is. */
+  spec?: PrivateSpec
+  /** Records the stream keeps for a reader catching up; a terminal keeps more than a thread. */
+  maxRows?: number
+  maxBytes?: number
   stream: StreamId
   descriptor: StreamDescriptor
   ring: StoredRecord[]
@@ -110,17 +150,41 @@ const IDLE_MS = 10 * 60 * 1000,
   SNAPSHOT_MAX = 32 * 1024 * 1024,
   CHUNK_BYTES = 32 * 1024,
   DELTA_MAX = 32 * 1024
-/** Streaming message deltas coalesce per message; question updates per thread. */
+const PRIVATE_DELTA_SET: readonly string[] = PRIVATE_DELTA_TYPES
+const PRIVATE_DURABLE_SET: readonly string[] = BRIDGE_ROUTED_EVENT_TYPES
+
+/**
+ * Streaming message deltas coalesce per message; question updates per thread; the notes only a
+ * private stream sends coalesce per kind (and per subagent parent or action, which are many).
+ */
 function deltaKey(event: ThreadDisplayEvent | ThreadDeltaEvent): string | undefined {
   if (event.type === 'questions.updated') return 'questions'
+  if (PRIVATE_DELTA_SET.includes(event.type)) {
+    const data = (event.data ?? {}) as { parentThreadId?: unknown; action?: { id?: unknown } }
+    const part = data.parentThreadId ?? data.action?.id
+    return `${event.type}:${typeof part === 'string' ? part : ''}`
+  }
   const message = (event.data as { message?: { id?: unknown } } | undefined)?.message
   return typeof message?.id === 'string' ? 'message:' + message.id : undefined
 }
 const isMessageKey = (key: string): boolean => key.startsWith('message:')
+/** The ids a note keeps when its payload is too large to send: enough to know what to fetch. */
+function omittedIds(data: unknown): Record<string, string> {
+  const ids: Record<string, string> = {}
+  for (const key of ['threadId', 'parentThreadId'])
+    if (typeof (data as Record<string, unknown> | undefined)?.[key] === 'string')
+      ids[key] = (data as Record<string, string>)[key]
+  return ids
+}
 /** Display-only adapter. ThreadDataStore remains authoritative; no received wrapper can execute. */
 export class ThreadStreamAdapter {
   readonly store: StreamStore
   private readonly active = new Map<StreamId, ActiveThread>()
+  /** Which streams are private to a reader, kept so the check that runs for every record is not a query. */
+  private readonly privateBindings = new Map<
+    StreamId,
+    { reader: NodeId; kind: RoutedStreamKind } | undefined
+  >()
   private readonly boot: string
   private sweepTimer?: { cancel(): void }
   private sweepSlow = false
@@ -163,7 +227,11 @@ export class ThreadStreamAdapter {
             const row = this.options.db.database
               .prepare('SELECT thread_id FROM bridge_thread_streams WHERE stream=?')
               .get(stream)
-            if (row && !this.active.has(stream)) this.activate(String(row.thread_id))
+            // A lookup reopens a released shared stream. A private stream is never reopened here: it
+            // opens only through `openPrivate`, which the owner's checks (the block, the switches,
+            // the thread or terminal being this computer's) stand in front of.
+            if (row && !this.active.has(stream) && !isPrivateKey(String(row.thread_id)))
+              this.activateKey(String(row.thread_id))
             return target.getStream(stream)
           }
         if (key === 'openSnapshot')
@@ -183,8 +251,124 @@ export class ThreadStreamAdapter {
    * may keep only `maxThreadsPerHolder` threads open, so a single device cannot fill the shared cap.
    */
   activate(threadId: string, holder?: string): StreamDescriptor {
+    // A private stream is opened for its reader only (`openPrivate`); no caller names its key.
+    if (typeof threadId === 'string' && isPrivateKey(threadId)) throw new NetError('bad_request')
+    return this.activateKey(threadId, holder)
+  }
+
+  /**
+   * Opens a stream only `spec.reader` may read (see `privateStreams.ts`), or returns the one that is
+   * open. One computer may hold 16 thread streams, one lists, one channel and 4 terminals; together
+   * the computers hold 32 thread streams. A stream left idle is released first to make room.
+   */
+  openPrivate(spec: PrivateSpec): StreamDescriptor {
+    return this.activateKey(privateKey(spec), undefined, spec)
+  }
+
+  /**
+   * The node a private stream is bound to, what it carries, and whether it is open now. Undefined for
+   * any other stream. A stream that was closed or released is not read until its computer opens it again.
+   */
+  privateAccess(
+    stream: StreamId
+  ): { reader: NodeId; kind: RoutedStreamKind; open: boolean } | undefined {
+    const live = this.active.get(stream)
+    if (live) return live.spec && { reader: live.spec.reader, kind: live.spec.kind, open: true }
+    if (!this.privateBindings.has(stream)) {
+      const row = this.options.db.database
+        .prepare('SELECT thread_id FROM bridge_thread_streams WHERE stream=?')
+        .get(stream)
+      const spec = row ? parsePrivateKey(String(row.thread_id)) : undefined
+      this.privateBindings.set(stream, spec && { reader: spec.reader, kind: spec.kind })
+    }
+    const bound = this.privateBindings.get(stream)
+    return bound && { ...bound, open: false }
+  }
+
+  /** The computers that have a private stream open. */
+  privateReaders(): NodeId[] {
+    return [
+      ...new Set(
+        [...this.active.values()].flatMap((thread) => (thread.spec ? [thread.spec.reader] : []))
+      )
+    ]
+  }
+
+  /**
+   * Stops serving private streams (of `reader`, of one `kind`, or all). Their stored records stay, and
+   * the reader can open them again if it may. Returns the streams that were open, so the sessions
+   * that serve them can be told.
+   */
+  closePrivate(filter: { reader?: NodeId; kind?: RoutedStreamKind } = {}): StreamId[] {
+    const closed: StreamId[] = []
+    for (const thread of [...this.active.values()]) {
+      const spec = thread.spec
+      if (!spec || (filter.reader && spec.reader !== filter.reader)) continue
+      if (filter.kind && spec.kind !== filter.kind) continue
+      this.deactivate(thread.threadId)
+      closed.push(thread.stream)
+    }
+    return closed
+  }
+
+  /** Where the stream `reader` holds open for `threadId` is now, if it holds one. */
+  privateHead(
+    reader: NodeId,
+    threadId: string
+  ): { stream: StreamId; epoch: number; seq: number } | undefined {
+    for (const thread of this.active.values())
+      if (
+        thread.spec?.reader === reader &&
+        thread.spec.kind === 'thread' &&
+        thread.spec.subject === threadId
+      ) {
+        const head = this.options.store.head(thread.stream)
+        return { stream: thread.stream, ...head }
+      }
+    return undefined
+  }
+
+  /**
+   * Adds a record to the channel stream `reader` holds open (Git progress for the window that started
+   * the action). Nothing happens when the reader holds none: progress is for a window that is watching.
+   */
+  pushChannel(
+    reader: NodeId,
+    type: (typeof BRIDGE_ROUTED_EVENT_TYPES)[number],
+    data: unknown
+  ): boolean {
+    for (const thread of this.active.values())
+      if (thread.spec?.reader === reader && thread.spec.kind === 'channel') {
+        this.appendEvent(thread, type, data)
+        return true
+      }
+    return false
+  }
+
+  private sharedOpen(): number {
+    return [...this.active.values()].filter((thread) => !thread.spec).length
+  }
+
+  private assertPrivateRoom(spec: PrivateSpec): void {
+    const count = (match: (other: PrivateSpec) => boolean): number =>
+      [...this.active.values()].filter((thread) => thread.spec && match(thread.spec)).length
+    const full = (): boolean =>
+      count((other) => other.reader === spec.reader && other.kind === spec.kind) >=
+        PRIVATE_STREAM_QUOTA[spec.kind] ||
+      (spec.kind === 'thread' &&
+        count((other) => other.kind === 'thread') >= PRIVATE_THREAD_STREAMS_TOTAL) ||
+      count(() => true) >= PRIVATE_STREAMS_TOTAL
+    if (!full()) return
+    // Streams no one reads any more give way before the computer is refused.
+    this.releaseIdle()
+    if (full()) throw new NetError('rate_limited')
+  }
+
+  private activateKey(threadId: string, holder?: string, given?: PrivateSpec): StreamDescriptor {
     if (typeof threadId !== 'string' || !threadId.length || threadId.length > 256)
       throw new NetError('bad_request')
+    const spec = given ?? (isPrivateKey(threadId) ? parsePrivateKey(threadId) : undefined)
+    if (isPrivateKey(threadId) && !spec) throw new NetError('bad_request')
     const now = this.options.clock.now()
     const known = [...this.active.values()].find((thread) => thread.threadId === threadId)
     if (known) {
@@ -193,9 +377,13 @@ export class ThreadStreamAdapter {
       this.admitHolder(known, holder, now)
       return known.descriptor
     }
-    if (holder !== undefined && this.metered(threadId)) this.assertHolderRoom(holder)
-    if (this.active.size >= (this.options.maxThreads ?? 64)) this.releaseIdle()
-    if (this.active.size >= (this.options.maxThreads ?? 64)) throw new NetError('rate_limited')
+    if (spec) this.assertPrivateRoom(spec)
+    else {
+      if (holder !== undefined && this.metered(threadId)) this.assertHolderRoom(holder)
+      // Private streams have quotas of their own, so they do not use up what phones may open.
+      if (this.sharedOpen() >= (this.options.maxThreads ?? 64)) this.releaseIdle()
+      if (this.sharedOpen() >= (this.options.maxThreads ?? 64)) throw new NetError('rate_limited')
+    }
     if (this.options.db.database.isTransaction)
       throw new NetError('forbidden', 'Display generations must commit before publication.')
     // Validate the actual source exists before allocating a permanent stream identity.
@@ -239,8 +427,14 @@ export class ThreadStreamAdapter {
         .run(now, threadId)
       this.options.db.charge(1)
     })
+    const terminal = spec?.kind === 'terminal'
     const thread: ActiveThread = {
       threadId,
+      subject: spec ? privateRecordSubject(spec) : threadId,
+      ...(spec ? { spec } : {}),
+      ...(terminal
+        ? { maxRows: PRIVATE_TERMINAL_RING_ROWS, maxBytes: PRIVATE_TERMINAL_RING_BYTES }
+        : {}),
       stream: descriptor.id,
       descriptor,
       ring: [],
@@ -249,7 +443,8 @@ export class ThreadStreamAdapter {
       holders: new Map(),
       lastBusyAt: now
     }
-    if (holder !== undefined && this.metered(threadId)) thread.holders.set(holder, now)
+    if (spec) this.privateBindings.set(descriptor.id, { reader: spec.reader, kind: spec.kind })
+    else if (holder !== undefined && this.metered(threadId)) thread.holders.set(holder, now)
     this.refreshSnapshot(thread)
     this.active.set(thread.stream, thread)
     this.scheduleSweep()
@@ -258,6 +453,13 @@ export class ThreadStreamAdapter {
       this.deactivate(threadId)
       this.options.onError?.(threadId, error, thread.stream)
     }
+    // A private stream sends more kinds of record than a phone's stream may, and only to its reader.
+    const durableTypes: readonly string[] = spec
+      ? [...THREAD_EVENT_TYPES, ...PRIVATE_DURABLE_SET]
+      : THREAD_EVENT_TYPES
+    const deltaTypes: readonly string[] = spec
+      ? [...THREAD_DELTA_TYPES, ...PRIVATE_DELTA_SET]
+      : THREAD_DELTA_TYPES
     thread.dispose = this.options.source.onThread(
       threadId,
       (event) => {
@@ -267,17 +469,22 @@ export class ThreadStreamAdapter {
             this.refreshSnapshot(thread)
             return
           }
-          const body = { threadId, type: event.type, data: event.data }
+          const body = { threadId: thread.subject, type: event.type, data: event.data }
           if (event.ephemeral) {
-            if (!(THREAD_DELTA_TYPES as readonly string[]).includes(event.type))
-              throw new NetError('bad_request')
+            if (!deltaTypes.includes(event.type)) throw new NetError('bad_request')
             const key = deltaKey(event)
-            if (key && canonicalJson(body).byteLength <= DELTA_MAX)
-              this.queueDelta(thread, key, body)
+            if (!key) return
+            if (canonicalJson(body).byteLength <= DELTA_MAX) this.queueDelta(thread, key, body)
+            // A note too large to send whole still says that something changed; the reader fetches it.
+            else if (PRIVATE_DELTA_SET.includes(event.type))
+              this.queueDelta(thread, key, {
+                threadId: thread.subject,
+                type: event.type,
+                data: { omitted: true, ...omittedIds(event.data) }
+              })
             return
           }
-          if (!(THREAD_EVENT_TYPES as readonly string[]).includes(event.type))
-            throw new NetError('bad_request')
+          if (!durableTypes.includes(event.type)) throw new NetError('bad_request')
           // A settled record supersedes any streaming delta for the same message.
           if (event.type === 'thread.messages') this.dropDeltas(thread, isMessageKey)
           else {
@@ -295,6 +502,20 @@ export class ThreadStreamAdapter {
       fail
     )
     return descriptor
+  }
+
+  /** A durable event record added from outside the thread's own source (the channel's progress). */
+  private appendEvent(thread: ActiveThread, type: string, data: unknown): void {
+    try {
+      const body = { threadId: thread.subject, type, data }
+      // Progress is small; one that is not is dropped rather than turned into a snapshot.
+      if (canonicalJson(body).byteLength > 48 * 1024) return
+      this.append(thread, 'thread.event', body)
+      this.trim(thread)
+    } catch (error) {
+      this.deactivate(thread.threadId)
+      this.options.onError?.(thread.threadId, error, thread.stream)
+    }
   }
   private queueDelta(thread: ActiveThread, key: string, body: unknown): void {
     if (!this.options.onDelta) return
@@ -375,8 +596,8 @@ export class ThreadStreamAdapter {
     thread.ring.push(record)
     thread.bytes += bytes.byteLength + sig.byteLength
     while (
-      thread.ring.length > (this.options.maxRows ?? 512) ||
-      thread.bytes > (this.options.maxBytes ?? 1024 * 1024)
+      thread.ring.length > (thread.maxRows ?? this.options.maxRows ?? 512) ||
+      thread.bytes > (thread.maxBytes ?? this.options.maxBytes ?? 1024 * 1024)
     ) {
       const dropped = thread.ring.shift()!
       thread.bytes -= dropped.envelope.byteLength + dropped.sig.byteLength
@@ -392,7 +613,7 @@ export class ThreadStreamAdapter {
       chunks = Math.max(1, Math.ceil(bytes.length / CHUNK_BYTES)),
       previous = this.options.store.head(thread.stream).seq
     this.append(thread, 'thread.snapshot.begin', {
-      threadId: thread.threadId,
+      threadId: thread.subject,
       snapshot,
       totalBytes: bytes.length,
       chunks,
@@ -400,14 +621,14 @@ export class ThreadStreamAdapter {
     })
     for (let index = 0; index < chunks; index++)
       this.append(thread, 'thread.snapshot.chunk', {
-        threadId: thread.threadId,
+        threadId: thread.subject,
         snapshot,
         index,
         data: Buffer.from(bytes.subarray(index * CHUNK_BYTES, (index + 1) * CHUNK_BYTES)).toString(
           'base64url'
         )
       })
-    this.append(thread, 'thread.snapshot.end', { threadId: thread.threadId, snapshot, sha256 })
+    this.append(thread, 'thread.snapshot.end', { threadId: thread.subject, snapshot, sha256 })
     if (previous) this.options.store.truncate(thread.stream, previous, { forgetIds: true })
   }
   private trim(thread: ActiveThread): void {
@@ -424,7 +645,8 @@ export class ThreadStreamAdapter {
       }
   }
   private metered(threadId: string): boolean {
-    return !this.options.unmetered?.(threadId)
+    // A private stream has quotas of its own (`assertPrivateRoom`), apart from the shared per-caller one.
+    return !isPrivateKey(threadId) && !this.options.unmetered?.(threadId)
   }
   private threadsHeldBy(holder: string): number {
     let held = 0
@@ -490,7 +712,9 @@ export class ThreadStreamAdapter {
       for (const [holder, touched] of thread.holders)
         if (now - touched >= idle && !isSubscribed(thread.stream, holder))
           thread.holders.delete(holder)
-      if (isSubscribed(thread.stream) || isTurnActive?.(thread.threadId)) {
+      // Only a thread's own stream is kept open by its turn; the lists, the channel and a terminal are not turns.
+      const turn = (!thread.spec || thread.spec.kind === 'thread') && isTurnActive?.(thread.subject)
+      if (isSubscribed(thread.stream) || turn) {
         thread.lastBusyAt = now
         continue
       }

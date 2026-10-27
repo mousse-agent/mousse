@@ -74,6 +74,31 @@ describe('events raised by a routed call', () => {
     await claimed.close().catch(() => undefined)
   }, 60_000)
 
+  it('reach the in-daemon watchers of a thread (the private stream another computer reads), whoever raised them', async () => {
+    const heard: unknown[] = []
+    mms.events.on('thread:event', (data) => heard.push(data))
+    await client.subscribe(0)
+    // Raised by a routed call, which has no window to push through.
+    mms.events.emit({
+      channel: 'protocol:event',
+      data: { type: 'actions.updated', data: { threadId: 't-1' }, threadId: 't-1' }
+    })
+    // Raised by a request of a window: the server pushes it, and tells the watchers the same way.
+    await vi.waitFor(() =>
+      expect(heard).toEqual([
+        { type: 'actions.updated', data: { threadId: 't-1' }, threadId: 't-1' }
+      ])
+    )
+    // An event with no thread, and the list events watchers already have their own channels for, are not repeated.
+    mms.events.emit({ channel: 'protocol:event', data: { type: 'projects.updated', data: [] } })
+    mms.events.emit({
+      channel: 'protocol:event',
+      data: { type: 'threads.updated', data: { threads: [] }, threadId: 't-1' }
+    })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(heard).toHaveLength(1)
+  }, 60_000)
+
   it('tell in-daemon watchers about a changed thread list, as an event raised by a window does', async () => {
     const lists: unknown[] = []
     mms.events.on('threads:updated', (data) => lists.push(data))

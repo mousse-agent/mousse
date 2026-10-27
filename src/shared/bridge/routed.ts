@@ -73,10 +73,25 @@ export interface RoutedRow {
   terminal?: true
   /** Only the call that names an absolute `path` (`projects.open`) may. */
   absolutePath?: true
+  /**
+   * Keys whose value may be sent ahead through `routed.stage` instead of inline (a large message, an
+   * image, a file's content) and named in `stagedValues`. The owner puts the value back before it checks
+   * the call, so a staged call is held to the row's keys exactly like an inline one.
+   */
+  stageable?: readonly string[]
 }
 
 const FOLDER = ['threadId', 'projectId'] as const
 const GEN = 'expectedJournalGeneration'
+/** The key of a call that names its staged values: `{ stagedValues: { content: 'stg_…' } }`. */
+export const ROUTED_STAGED_KEY = 'stagedValues'
+
+/** A row whose large values may be staged: the key is new at version 2, so an older owner never sees it. */
+const staging = (values: readonly string[]): Partial<RoutedRow> => ({
+  version: 2,
+  since: { [ROUTED_STAGED_KEY]: 2 },
+  stageable: values
+})
 
 function row(
   capability: RoutedRow['capability'],
@@ -120,6 +135,12 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   // ---------------------------------------------------------------- thread reads
   'threads.get': read('thread', ['threadId']),
   'thread.snapshot': read('thread', ['threadId']),
+  // Older messages of a long thread, a page at a time, newest first from `before` (a message id).
+  'thread.messages': read('thread', ['threadId', 'before', 'limit']),
+  // The image of one message or queued message, by its place in it (the stream carries only the newest images' data).
+  'thread.messageImage': read('thread', ['threadId', 'messageId', 'queueItemId', 'index'], {
+    required: ['index']
+  }),
   'orchestrator.isTurnActive': read('thread', ['threadId']),
   'orchestrator.contextUsage': read('thread', ['threadId', 'draftInput', 'mode']),
   'orchestrator.pendingQuestions': read('thread', ['threadId']),
@@ -230,14 +251,20 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
       'requestId',
       'clientRequestId',
       'continuationOfRunId',
-      'acknowledgeUncertain'
+      'acknowledgeUncertain',
+      ROUTED_STAGED_KEY
     ],
-    { required: ['content'] }
+    { required: ['content'], ...staging(['content', 'images']) }
   ),
-  'orchestrator.steer': chat('thread', ['threadId', 'text', 'runId', 'clientRequestId'], {
-    required: ['text'],
-    owned: { runId: 'run' }
-  }),
+  'orchestrator.steer': chat(
+    'thread',
+    ['threadId', 'text', 'runId', 'clientRequestId', ROUTED_STAGED_KEY],
+    {
+      required: ['text'],
+      owned: { runId: 'run' },
+      ...staging(['text'])
+    }
+  ),
   'orchestrator.abort': chat('thread', ['threadId', 'clearQueue', 'runId', 'clientRequestId'], {
     owned: { runId: 'run' }
   }),
@@ -250,12 +277,16 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
     required: ['requestId'],
     owned: { requestId: 'question' }
   }),
-  'queue.enqueue': chat('thread', ['threadId', 'content', 'mode', 'images', 'requestId'], {
-    required: ['content']
-  }),
-  'queue.edit': chat('thread', ['threadId', 'itemId', 'content', 'mode', 'expectedRevision'], {
-    required: ['itemId']
-  }),
+  'queue.enqueue': chat(
+    'thread',
+    ['threadId', 'content', 'mode', 'images', 'requestId', ROUTED_STAGED_KEY],
+    { required: ['content'], ...staging(['content', 'images']) }
+  ),
+  'queue.edit': chat(
+    'thread',
+    ['threadId', 'itemId', 'content', 'mode', 'expectedRevision', ROUTED_STAGED_KEY],
+    { required: ['itemId'], ...staging(['content']) }
+  ),
   'queue.reorder': chat('thread', ['threadId', 'orderedIds', 'expectedRevision'], {
     required: ['orderedIds']
   }),
@@ -381,8 +412,9 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   }),
   'operations.recover': write('thread', ['threadId', GEN]),
   // A save from another computer is an action the owner can Undo; it names the thread, never a folder.
-  'files.write': write('thread', ['threadId', 'path', 'content'], {
-    required: ['path', 'content']
+  'files.write': write('thread', ['threadId', 'path', 'content', ROUTED_STAGED_KEY], {
+    required: ['path', 'content'],
+    ...staging(['content'])
   }),
   'publish.start': write(
     'thread',
@@ -486,6 +518,81 @@ export const isRoutedReply = (value: unknown): value is RoutedReply => {
   return reply.ok === false && typeof error?.code === 'string' && typeof error.message === 'string'
 }
 
+/** An ephemeral read larger than this does not fit one RPC reply: it is held for the caller and fetched in pages. */
+export const ROUTED_REPLY_MAX_BYTES = 63 * 1024
+/**
+ * Raw bytes in one page. A page travels as base64 inside one RPC reply (63 KiB at most), so 48 KiB of
+ * raw bytes would not fit; 45 KiB becomes 60 KiB of text.
+ */
+export const ROUTED_PAGE_BYTES = 45 * 1024
+/** How long a paged result waits for the caller to fetch it. */
+export const ROUTED_PAGES_TTL_MS = 60_000
+/** Results held for one caller at once, and their bytes. A newer one pushes out the oldest. */
+export const ROUTED_PAGES_PER_CALLER = 4
+export const ROUTED_PAGES_CALLER_BYTES = 32 * 1024 * 1024
+
+/** Staged values: one at most 25 MiB (the blob store's bound), per caller and in total, and how long each is kept. */
+export const ROUTED_STAGE_ITEM_BYTES = 25 * 1024 * 1024
+export const ROUTED_STAGE_CALLER_BYTES = 64 * 1024 * 1024
+export const ROUTED_STAGE_TOTAL_BYTES = 256 * 1024 * 1024
+export const ROUTED_STAGE_TTL_MS = 60 * 60 * 1000
+/** Values one call may stage. */
+export const ROUTED_STAGED_MAX_PER_CALL = 4
+export const isStageId = (value: unknown): value is string =>
+  typeof value === 'string' && /^stg_[0-9a-f]{32}$/.test(value)
+
+/**
+ * Reads whose result can be megabytes, and so are built in several copies before they are paged. A
+ * computer may have this many of them under way at once; the next is refused `rate_limited`.
+ */
+export const ROUTED_LARGE_READS: readonly string[] = [
+  'thread.snapshot',
+  'thread.messages',
+  'thread.messageImage',
+  'files.read',
+  'files.readAsset',
+  'git.diff',
+  'review.file',
+  'runs.events'
+]
+export const ROUTED_LARGE_READS_PER_CALLER = 2
+
+/** Newest part of a transcript a snapshot carries, and the most a page of older messages carries. */
+export const ROUTED_SNAPSHOT_MESSAGE_BYTES = 16 * 1024 * 1024
+export const ROUTED_MESSAGES_PAGE_BYTES = 8 * 1024 * 1024
+
+/**
+ * A reply too large for one RPC reply. The owner keeps the whole `RoutedReply` for a minute; the
+ * caller fetches `pages` pieces with `routed.page` and checks the hash.
+ */
+export interface RoutedPaged {
+  id: string
+  /** Bytes of the whole reply, as JSON. */
+  bytes: number
+  pages: number
+  /** Hex SHA-256 of the whole reply. */
+  sha256: string
+}
+export type RoutedPagedReply = { ok: true; paged: RoutedPaged }
+export const isRoutedPagedReply = (value: unknown): value is RoutedPagedReply => {
+  if (!value || typeof value !== 'object') return false
+  const reply = value as { ok?: unknown; paged?: Partial<RoutedPaged> }
+  return (
+    reply.ok === true &&
+    typeof reply.paged?.id === 'string' &&
+    Number.isSafeInteger(reply.paged.bytes) &&
+    Number.isSafeInteger(reply.paged.pages) &&
+    typeof reply.paged.sha256 === 'string'
+  )
+}
+
+/** What `routed.page` answers: one page of a paged reply. */
+export interface RoutedPage {
+  index: number
+  /** The page's bytes, base64. */
+  data: string
+}
+
 /** A durable routed result larger than this is kept in the ledger as its hash only (a retry is "may have happened"). */
 export const ROUTED_LEDGER_RESULT_MAX_BYTES = 16 * 1024
 
@@ -512,10 +619,51 @@ export function routedKeysAt(rowOf: RoutedRow, version: number): string[] {
   return rowOf.keys.filter((key) => (rowOf.since?.[key] ?? 1) <= version)
 }
 
+/**
+ * The Net methods that carry the routed API itself rather than one protocol method: they open a
+ * private stream, fetch a page of a large reply, and stage a large value. Each is registered as
+ * `routed.<name>` with the same checks as a row, and advertised in `net.info` beside the rows.
+ */
+export interface RoutedTransportRow {
+  capability: Extract<NodeCapability, 'read' | 'chat' | 'write'>
+  version: number
+  keys: readonly string[]
+  required: readonly string[]
+}
+export const ROUTED_TRANSPORT_METHODS: Readonly<Record<string, RoutedTransportRow>> = Object.freeze(
+  {
+    /** A stream only the calling computer may read: `thread`, `lists`, `channel` or `terminal`. */
+    'stream.open': {
+      capability: 'read',
+      version: 1,
+      keys: ['kind', 'threadId', 'ptyId'],
+      required: ['kind']
+    },
+    page: { capability: 'read', version: 1, keys: ['id', 'index'], required: ['id', 'index'] },
+    /** Takes a value uploaded as a request artifact and keeps it for the call that names it in `stagedValues`. */
+    stage: { capability: 'chat', version: 1, keys: ['input'], required: ['input'] }
+  }
+)
+
+/** The kinds of private stream a computer can open. */
+export const ROUTED_STREAM_KINDS = ['thread', 'lists', 'channel', 'terminal'] as const
+export type RoutedStreamKind = (typeof ROUTED_STREAM_KINDS)[number]
+
+/** What `routed.stream.open` answers. */
+export interface RoutedStreamOpened {
+  descriptor: unknown
+  head: { epoch: number; seq: number }
+  kind: RoutedStreamKind
+  /** The `threadId` every record of the stream carries in its body. */
+  subject: string
+}
+
 /** `{ [method]: version }`, as `net.info` advertises it. */
 export function routedVersions(): Record<string, number> {
   const out: Record<string, number> = {}
   for (const [method, definition] of Object.entries(ROUTED_METHODS))
+    out[method] = definition.version
+  for (const [method, definition] of Object.entries(ROUTED_TRANSPORT_METHODS))
     out[method] = definition.version
   return out
 }

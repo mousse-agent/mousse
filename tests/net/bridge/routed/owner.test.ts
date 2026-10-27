@@ -110,7 +110,15 @@ describe('the routed methods the owner registers', () => {
   it('registers one Net method per row with its fixed capability, and nothing for a local method', async () => {
     const { f } = await owner()
     const registered = f.targetRpc.methods().filter((name) => name.startsWith('routed.'))
-    expect(registered).toEqual(Object.keys(ROUTED_METHODS).map(routedNetMethod).sort())
+    // The rows, and `routed.page` that fetches a reply too large for one RPC reply (staging and streams are opt-in).
+    expect(registered).toEqual([...Object.keys(ROUTED_METHODS), 'page'].map(routedNetMethod).sort())
+    expect(f.targetRpc.methodInfo(routedNetMethod('page'))).toMatchObject({
+      family: 'routed',
+      capability: 'read',
+      requires: ['settings'],
+      mutating: false,
+      ephemeral: true
+    })
     for (const [method, row] of Object.entries(ROUTED_METHODS)) {
       const info = f.targetRpc.methodInfo(routedNetMethod(method))!
       expect(info, method).toMatchObject({

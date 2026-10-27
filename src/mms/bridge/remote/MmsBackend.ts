@@ -7,6 +7,9 @@ import type { MmsProfileServices } from '../../MmsProfileServices'
 import { dispatchMethod } from '../../protocol/handlers'
 import { NetError, type NodeId } from '../../../shared/net'
 import { REMOTE_MESSAGE_IMAGES_MAX_CHARS } from './RemoteApi'
+import type { PermissionMode } from '../../../shared/permissionMode'
+import { newestMessages } from '../../protocol/transcriptPaging'
+import { ROUTED_SNAPSHOT_MESSAGE_BYTES } from '../../../shared/bridge/routed'
 import type { RemoteBackendPort, RemoteChatExtras } from './RemoteApi'
 import { mmsJson } from './jsonOutput'
 import type { BridgeOrdinaryMethod } from './capabilities'
@@ -409,17 +412,34 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     if (!skills.some((skill) => skill.id === skillId || skill.installationId === skillId))
       throw new Error('That skill is not available.')
   }
-  snapshot(threadId: string, maximumBytes = 25 * 1024 * 1024): unknown {
+  /**
+   * What a reader is given on opening a thread. `newestOnly` is for another computer of the user: a
+   * long transcript is cut to its newest 16 MiB (`earlier` says where the rest begins, and
+   * `thread.messages` pages it), where a phone's snapshot is whole and fails past its bound.
+   */
+  snapshot(
+    threadId: string,
+    maximumBytes = 25 * 1024 * 1024,
+    options: { newestOnly?: boolean; deviceLimit?: PermissionMode } = {}
+  ): unknown {
     const s = this.services,
       thread = s.threads.listAllThreads().find((thread) => thread.id === threadId)
     if (!thread) throw new NetError('stream_unknown', 'Thread not found.')
     const pause = s.orchestrator.getTurnState(threadId).pause
+    const shown = withImageBudget(s.orchestrator.getMessages(threadId))
+    const kept = options.newestOnly
+      ? newestMessages(shown, ROUTED_SNAPSHOT_MESSAGE_BYTES)
+      : { messages: shown, earlier: undefined }
     return mmsJson(
       {
         thread,
-        messages: withImageBudget(s.orchestrator.getMessages(threadId)),
+        messages: kept.messages,
+        ...(kept.earlier ? { earlier: kept.earlier } : {}),
         queue: s.orchestrator.listQueue(threadId).map(withoutImageData),
-        pendingQuestions: s.questions.listPendingForThread(threadId).map(withoutStandingRules),
+        // A phone's cards have no "Always for this thread"; another computer's keep it where its limit allows the rule.
+        pendingQuestions: options.deviceLimit
+          ? s.questions.listPendingForDevice(threadId, options.deviceLimit)
+          : s.questions.listPendingForThread(threadId).map(withoutStandingRules),
         activeTurn: {
           active: s.orchestrator.isTurnActive(threadId),
           running: s.orchestrator.isActiveTurnRunning(threadId),

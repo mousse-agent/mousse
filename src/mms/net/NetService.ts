@@ -151,9 +151,32 @@ export interface NetRuntime {
   enrollment: EnrollmentService
   transfer: AuthorityTransferDelivery
 }
+/**
+ * Display streams that one computer of the user reads and no other (see `bridge/remote/privateStreams.ts`).
+ * The network layer asks which stream is one, and ends them when their reader may no longer have them.
+ */
+export interface PrivateStreamsControl {
+  access(
+    stream: StreamId
+  ):
+    { reader: NodeId; kind: 'thread' | 'lists' | 'channel' | 'terminal'; open: boolean } | undefined
+  /** Stops serving private streams (of one reader, of one kind, or all); returns the ones that were open. */
+  close(filter?: {
+    reader?: NodeId
+    kind?: 'thread' | 'lists' | 'channel' | 'terminal'
+  }): StreamId[]
+  /**
+   * Lets go of everything held for computers that may no longer work on threads here: their private
+   * streams, the results waiting to be fetched in pages and the values they staged. `granted` says
+   * which computers may; with none, every computer is let go of (the owner switch is off).
+   */
+  release(granted?: (node: NodeId) => boolean): StreamId[]
+}
+
 export interface NetDomainComposition {
   store?: StreamStore
   authority?: StreamAuthority
+  privateStreams?: PrivateStreamsControl
   session?: Pick<
     SyncSessionOptions,
     | 'canReceive'
@@ -493,9 +516,24 @@ export class NetService {
       // A block ends what the device is doing here now, not only what it asks for next.
       this.policyListener = policy.onChange((event) => {
         if (event.after.blocked && !event.before.blocked) this.endBlockedNode(event.node)
+        // Terminal output is for a device whose terminal switch is on; switching it off ends the stream at once.
+        else if (event.before.terminal && !event.after.terminal)
+          this.endPrivateServing(
+            this.domain?.privateStreams?.close({ reader: event.node, kind: 'terminal' }) ?? []
+          )
       })
       this.domain = this.options.composeRuntime?.(this.state) ?? undefined
       this.rosterListener = identity.onRosterChanged((user) => {
+        // A computer that lost "Works on threads" (or was revoked) keeps nothing open for it, as a block does.
+        this.endPrivateServing(
+          this.domain?.privateStreams?.release((node) => {
+            try {
+              return this.currentNode(node).caps.includes('settings')
+            } catch {
+              return false
+            }
+          }) ?? []
+        )
         this.emit()
         if (this.routes) this.refreshPeers()
         this.closeRevokedWebRtc()
@@ -769,8 +807,12 @@ export class NetService {
           // takes effect on the next routed call, so turning it off is also the kill switch.
           this.requireEnrolled()
           if (params.enabled !== undefined) {
+            const was = this.config.workOnThreads === true
             this.config = { ...this.config, workOnThreads: params.enabled === true }
             this.saveConfig()
+            // Off ends the private streams that are open, not only the next call.
+            if (was && params.enabled !== true)
+              this.endPrivateServing(this.domain?.privateStreams?.release() ?? [])
             this.emit()
           }
           return { enabled: this.config.workOnThreads === true }
@@ -1443,6 +1485,15 @@ export class NetService {
     // A device this computer blocked reads, fetches and writes none of its Bridge streams.
     const blockedFor = (stream: StreamId, peer: { node: NodeId }): boolean =>
       !store.getStream(stream)?.kind.startsWith('space.') && rt.policy.isBlocked(peer.node)
+    // A private stream is read by its computer only, while the owner's switch for other computers is on
+    // (read on every record, so turning it off is also a kill switch) and, for a terminal, the device's
+    // terminal switch is on. The authority checks the reader and "Works on threads".
+    const privateReadable = (stream: StreamId, peer: { node: NodeId }): boolean => {
+      const access = this.domain?.privateStreams?.access(stream)
+      if (!access) return true
+      if (!this.config.workOnThreads) return false
+      return access.kind !== 'terminal' || rt.policy.get(peer.node).terminal
+    }
     const session = new NetSyncSession({
       ...this.domain?.session,
       channel,
@@ -1461,12 +1512,23 @@ export class NetService {
       clock: this.clock,
       isStreamQuiesced: (stream) => this.streamQuiesced(stream),
       isSpaceQuiesced: (space) => this.archiveFences.has(space),
-      isStreamBlocked: (stream, peer) => blockedFor(stream, peer),
+      // A request for a stream the device may not have is answered on that stream with `forbidden` and the
+      // connection stays up: the same connection carries everything else the device does here.
+      isStreamBlocked: (stream, peer) =>
+        blockedFor(stream, peer) ||
+        (this.domain?.privateStreams?.access(stream) !== undefined &&
+          !(privateReadable(stream, peer) && baseAuthority.canRead(stream, peer))),
       authority: {
         canRead: (...args) =>
-          allowed(args[0]) && !blockedFor(args[0], args[1]) && baseAuthority.canRead(...args),
+          allowed(args[0]) &&
+          !blockedFor(args[0], args[1]) &&
+          privateReadable(args[0], args[1]) &&
+          baseAuthority.canRead(...args),
         canFetchBlob: (...args) =>
-          allowed(args[0]) && !blockedFor(args[0], args[2]) && baseAuthority.canFetchBlob(...args),
+          allowed(args[0]) &&
+          !blockedFor(args[0], args[2]) &&
+          privateReadable(args[0], args[2]) &&
+          baseAuthority.canFetchBlob(...args),
         append: (...args) => {
           check(args[0])
           if (blockedFor(args[0], args[4])) throw new NetError('forbidden')
@@ -1780,6 +1842,21 @@ export class NetService {
         // Not authenticated yet: its first read is checked against the policy.
       }
     }
+    // Its private streams are closed as well, not only unserved: nothing is kept open for a device that is blocked.
+    this.domain?.privateStreams?.close({ reader: node })
+  }
+  /** Tells every session that serves one of these private streams that it is over. */
+  private endPrivateServing(streams: readonly StreamId[]): void {
+    if (!streams.length) return
+    for (const session of this.sessions)
+      for (const stream of streams) {
+        try {
+          if (session.state() === 'open' && session.serves(stream))
+            void session.failServingStream(stream, 'forbidden').catch(() => {})
+        } catch {
+          // A session that is closing has nothing left to end.
+        }
+      }
   }
   /** Sessions that authenticated `node` but are not open yet do not see roster changes. */
   private closeHandshakingSessions(node: NodeId): void {

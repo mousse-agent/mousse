@@ -144,7 +144,7 @@ export interface EventBodies {
   'thread.snapshot.end': { threadId: string; snapshot: string; sha256: Base64Url }
   'thread.event': {
     threadId: string
-    type: (typeof BRIDGE_THREAD_EVENT_TYPES)[number]
+    type: (typeof BRIDGE_THREAD_EVENT_TYPES)[number] | (typeof BRIDGE_ROUTED_EVENT_TYPES)[number]
     data: unknown
   }
   'artifact.published': { rpc: RpcId; purpose: 'input' | 'result' }
@@ -258,6 +258,11 @@ export const BRIDGE_THREAD_EVENT_TYPES = [
   'connection.failed',
   'thread.metadata'
 ] as const
+/**
+ * Records only a private stream carries (one computer's own stream: Git progress and terminal output).
+ * A phone's or a hub's display stream never has them, and its projection refuses them.
+ */
+export const BRIDGE_ROUTED_EVENT_TYPES = ['git.operation', 'pty.data', 'pty.exit'] as const
 export type ContentEventType = (typeof CONTENT_EVENT_TYPES)[number]
 
 export type KnownEventType = MetaEventType | ContentEventType
