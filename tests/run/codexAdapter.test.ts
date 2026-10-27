@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { usageLimitError } from '../../src/mms/orchestrator/providerErrors'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { CodexAppServerExitedError } from '../../src/mms/providers/codex/CodexAppServerClient'
+import { CodexTurnFailure } from '../../src/mms/providers/codex/CodexProviderService'
 import {
   CodexAdapter,
   createCodexProviderService,
@@ -681,6 +682,23 @@ describe('CodexAdapter', () => {
     expect(committed).toEqual([['thread-1', 'history up to the limit']])
     await expect(new CodexAdapter(() => client(new Error('boom'))).startTurn(input(), recordingSink(), control(), withHistory)).rejects.toThrow('boom')
     expect(committed).toHaveLength(1)
+  })
+
+  it('a managed run keeps reporting a usage limit to the harness gateway, and still fingerprints the thread', async () => {
+    const committed: string[] = []
+    const failure = new CodexTurnFailure('Usage limit reached', { message: 'Usage limit reached', codexErrorInfo: 'usageLimitExceeded' })
+    const client = {
+      configured: () => true,
+      chat: async () => {
+        throw usageLimitError({ provider: 'codex', estimated: true }, failure)
+      },
+      commitInterrupted: (_threadId: string, history: string) => void committed.push(history)
+    } as unknown as CodexProviderService
+    const base = host()
+    const withHistory: AdapterHost = { ...base, context: { ...base.context, nativeHistoryNow: () => 'history up to the limit' } }
+    const error = await new CodexAdapter(() => client, { managed: true }).startTurn(input(), recordingSink(), control(), withHistory).catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ code: 'rate_limited' })
+    expect(committed).toEqual(['history up to the limit'])
   })
 
   it('interrupts a turn that was stopped before turn/start answered', async () => {

@@ -58,7 +58,7 @@ describe('provider error classification', () => {
       const error = normalizeProviderError({ status: 429, headers: new Headers({ 'Retry-After': '3600' }) }, 'openai-codex')
       expect(error).toMatchObject({ code: 'provider_usage_limit', errorInfo: { category: 'unavailable', retryable: false } })
       expect(error.errorInfo.retryAfterMs).toBeUndefined()
-      expect(error.details).toEqual({ provider: 'openai-codex', resetsAt: '2026-10-01T01:00:00.000Z', estimated: false })
+      expect(error.details).toEqual({ provider: 'openai-codex', status: 429, resetsAt: '2026-10-01T01:00:00.000Z', estimated: false })
       expect(readUsageLimit(error)).toEqual({ provider: 'openai-codex', resetsAt: '2026-10-01T01:00:00.000Z', estimated: false })
     }))
 

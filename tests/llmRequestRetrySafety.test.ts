@@ -190,8 +190,8 @@ describe('request-scoped provider retry safety', () => {
     expect(fetch, String(failure.cause?.message ?? failure.cause ?? '')).toHaveBeenCalledOnce()
     expect(failure).toMatchObject({ code, errorInfo: { retryable: false } })
     expect(failure.message).not.toContain('privateFixture')
-    // A wait this long on a 429 is a usage limit: the details carry the server's reset time instead of the status.
-    if (code === 'provider_usage_limit') expect(failure.details).toEqual({ provider: 'anthropic', resetsAt: expect.any(String), estimated: false })
+    // A wait this long on a 429 is a usage limit: the details add the server's reset time to the status.
+    if (code === 'provider_usage_limit') expect(failure.details).toEqual({ provider: 'anthropic', status, resetsAt: expect.any(String), estimated: false })
     else expect(failure.details).toEqual({ provider: 'anthropic', status })
     expect(streamSimple).toHaveBeenCalledOnce()
     expect(onRetry).not.toHaveBeenCalled()

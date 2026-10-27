@@ -49,7 +49,7 @@ export function boundedResetIso(epochSecondsOrIso: number | string | undefined, 
   return new Date(at).toISOString()
 }
 
-const PROVIDER_LABELS: Record<string, string> = { claude: 'Claude', 'claude-subscription': 'Claude', codex: 'Codex' }
+const PROVIDER_LABELS: Record<string, string> = { claude: 'Claude', 'claude-subscription': 'Claude', codex: 'Codex', anthropic: 'Anthropic', openai: 'OpenAI', 'openai-codex': 'ChatGPT' }
 const LIMIT_KIND_LABELS: Record<string, string> = {
   five_hour: '5-hour',
   seven_day: 'weekly',
@@ -70,8 +70,11 @@ function usageLimitMessage(limit: UsageLimit, nowMs: number): string {
   return `${head} It resets at ${at}${limit.estimated ? ' (estimated)' : ''}.`
 }
 
-/** The error for a usage limit. A missing, past or implausible reset becomes a 5-hour estimate. */
-export function usageLimitError(limit: UsageLimit, cause?: unknown): AppError {
+/**
+ * The error for a usage limit. A missing, past or implausible reset becomes a 5-hour estimate.
+ * `extra` carries the diagnostic details of the failure it came from (status, request id).
+ */
+export function usageLimitError(limit: UsageLimit, cause?: unknown, extra: Record<string, unknown> = {}): AppError {
   const nowMs = Date.now()
   const reported = limit.estimated ? undefined : boundedResetIso(limit.resetsAt, nowMs)
   const resolved: UsageLimit = { ...limit, resetsAt: reported ?? estimatedReset(nowMs), estimated: reported === undefined }
@@ -80,7 +83,7 @@ export function usageLimitError(limit: UsageLimit, cause?: unknown): AppError {
     code: definition.code,
     message: usageLimitMessage(resolved, nowMs),
     errorInfo: definition.errorInfo,
-    details: { ...(resolved.provider ? { provider: resolved.provider } : {}), resetsAt: resolved.resetsAt, estimated: resolved.estimated, ...(resolved.limitKind ? { limitKind: resolved.limitKind } : {}) }
+    details: { ...extra, ...(resolved.provider ? { provider: resolved.provider } : {}), resetsAt: resolved.resetsAt, estimated: resolved.estimated, ...(resolved.limitKind ? { limitKind: resolved.limitKind } : {}) }
   }, cause)
 }
 
@@ -111,7 +114,7 @@ export function normalizeProviderError(error: unknown, provider?: string, respon
   // Permanent classifications have precedence even if messages contain transport words.
   if (status === 401 || /authentication_error|invalid_api_key/.test(code) || /invalid (?:api key|auth|credential)|authentication (?:failed|required|error)|unauthorized|incorrect api key/i.test(text)) return providerErrors.create('provider_auth_invalid', error, details)
   if (status === 403 || /permission_denied/.test(code) || /permission denied|forbidden|access denied|denied by policy|refused by policy/i.test(text)) return providerErrors.create('provider_permission_denied', error, details)
-  if (/hit your ChatGPT usage limit/i.test(text)) return usageLimitError({ provider, estimated: true }, error)
+  if (/hit your ChatGPT usage limit/i.test(text)) return usageLimitError({ provider, estimated: true }, error, details)
   if (/insufficient_quota|quota_exceeded|billing/.test(code) || /insufficient[_ ]quota|quota (?:exceeded|exhausted)|billing (?:limit|error)|credit balance|GoUsageLimitError|FreeUsageLimitError|monthly usage limit|available balance|out of budget/i.test(text)) return providerErrors.create('provider_quota_exceeded', error, details)
   if (/context(?:_|\s|-)*(?:window|length|limit)|maximum context|too many tokens|prompt is too long/i.test(text)) return providerErrors.create('provider_context_overflow', error, details)
   if ((status !== undefined && status >= 400 && status < 500 && status !== 408 && status !== 429) || /invalid_request|model_not_found/.test(code) || /invalid request|unknown model|model (?:not found|does not exist)/i.test(text)) return providerErrors.create('provider_request_invalid', error, details)
@@ -119,7 +122,7 @@ export function normalizeProviderError(error: unknown, provider?: string, respon
     const retryAfter = shape?.headers?.get?.('retry-after') ?? response?.retryAfter
     // A wait too long to retry in-turn is a usage limit; the server's time says when it resets.
     const seconds = retryAfterSeconds(retryAfter)
-    if (seconds !== undefined && seconds > 10) return usageLimitError({ provider, resetsAt: new Date(Date.now() + seconds * 1000).toISOString(), estimated: false }, error)
+    if (seconds !== undefined && seconds > 10) return usageLimitError({ provider, resetsAt: new Date(Date.now() + seconds * 1000).toISOString(), estimated: false }, error, details)
     return withRetryDelay(providerErrors.create('provider_rate_limited', error, details), retryAfter, error)
   }
   if (status === 408 || /etimedout|timeout/.test(code) || /timed?\s*out|timeout/i.test(text)) return withRetryDelay(providerErrors.create('provider_timeout', error, details), shape?.headers?.get?.('retry-after') ?? response?.retryAfter, error)
