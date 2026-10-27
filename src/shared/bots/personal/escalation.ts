@@ -91,7 +91,7 @@ export function permissionProblem(value: unknown): string | undefined {
   if (keys.length === 2 && 'path' in entry && 'access' in entry) {
     if (!text(entry.path) || (entry.access !== 'read' && entry.access !== 'write')) return 'The folder permission is invalid.'
     // Never resolved against the daemon's working directory: the owner is shown the exact folder.
-    return isAbsolutePath(entry.path as string) ? undefined : 'The folder must be an absolute path.'
+    return isAbsolutePath(entry.path as string) ? undefined : 'The folder must be a full path, without . or .. parts.'
   }
   if (keys.length === 1 && keys[0] === 'mcp') {
     const mcp = entry.mcp as Record<string, unknown> | null
@@ -118,7 +118,8 @@ export function withPermission(manifest: BotManifest, permission: BotPermissionR
     appTools: [...manifest.appTools],
     mcp: manifest.mcp.map((pair) => ({ ...pair })),
     skills: [...manifest.skills],
-    workspace: manifest.workspace ? { roots: [...manifest.workspace.roots], access: manifest.workspace.access } : null,
+    // Every folder keeps its own access, in the one canonical form (`workspaceOf`).
+    workspace: workspaceOf(foldersOf(manifest.workspace)),
     budget: { ...manifest.budget }
   }
   if ('tool' in permission) {

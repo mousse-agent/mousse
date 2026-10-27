@@ -260,9 +260,10 @@ export class ThreadRuntimeManager extends EventEmitter {
   /**
    * Refuse deletion when the thread owns active turn/agent/task/PTY/question work.
    */
-  assertDeletable(threadId: string): void {
+  /** `ignoreTurn`: a bot's turn there, which the accepted trash stops in its drain. */
+  assertDeletable(threadId: string, options: { ignoreTurn?: boolean } = {}): void {
     const rt = this.getOrHydrate(threadId)
-    const turnRunning = this.orchestrator?.isActiveTurnRunning(threadId) ?? false
+    const turnRunning = !options.ignoreTurn && (this.orchestrator?.isActiveTurnRunning(threadId) ?? false)
     const pendingQ = this.questions?.listPendingForThread(threadId) ?? []
     const livePtys = [...rt.ptyIds].filter((id) => this.ptyManager?.isAlive(id))
     const runningAgents = rt.agents

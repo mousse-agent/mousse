@@ -5,8 +5,14 @@
  */
 import { describe, expect, it } from 'vitest'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
-import type { BotManifest } from '../../src/shared/bots/personal/definition'
-import { addedPermissions, canonicalManifest, describeManifest, intersectManifest, manifestProblem, manifestSubset, narrowManifest } from '../../src/shared/bots/personal/manifest'
+import { foldersOf, type BotManifest } from '../../src/shared/bots/personal/definition'
+import { withPermission } from '../../src/shared/bots/personal/escalation'
+import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
+import { compileBotThread } from '../../src/mms/bots/grants/compile'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { addedPermissions, canonicalManifest, describeManifest, intersectManifest, isAbsolutePath, manifestProblem, manifestSubset, narrowManifest } from '../../src/shared/bots/personal/manifest'
 
 const manifest = (patch: Partial<BotManifest> = {}): BotManifest => ({
   tools: ['read', 'edit'],
@@ -109,22 +115,39 @@ describe('narrowManifest', () => {
   })
 })
 
+/** A folder that is absolute on the platform running the tests (on Windows `/x` is not). */
+const SITE = process.platform === 'win32' ? 'C:\\home\\me\\proj\\site' : '/home/me/proj/site'
+const valid = (patch: Partial<BotManifest> = {}): BotManifest => manifest({ workspace: { roots: [SITE], access: 'write' }, ...patch })
+
+describe('full folder paths', () => {
+  it('names exactly the folder shown: absolute on the platform, with no . or .. part', () => {
+    expect(isAbsolutePath('/home/me/site', 'linux')).toBe(true)
+    expect(isAbsolutePath('/home/me/../site', 'linux')).toBe(false)
+    expect(isAbsolutePath('/home/./site', 'linux')).toBe(false)
+    expect(isAbsolutePath('C:\\Users\\me', 'win32')).toBe(true)
+    // On Windows `/x` is relative to the current drive.
+    expect(isAbsolutePath('/x', 'win32')).toBe(false)
+    expect(isAbsolutePath('C:\\Users\\..\\Windows', 'win32')).toBe(false)
+    expect(isAbsolutePath('\\\\server\\share\\dir', 'win32')).toBe(true)
+  })
+})
+
 describe('manifestProblem', () => {
   it('accepts a well-formed manifest and refuses malformed ones', () => {
-    expect(manifestProblem(manifest())).toBeUndefined()
-    expect(manifestProblem(manifest({ tools: ['powershell' as never] }))).toMatch(/built-in tool/)
-    expect(manifestProblem(manifest({ workspace: { roots: ['relative/path'], access: 'write' } }))).toMatch(/absolute/)
-    expect(manifestProblem(manifest({ budget: { maxActiveMs: 0 } }))).toMatch(/maxActiveMs/)
-    expect(manifestProblem(manifest({ audience: 'others' as never }))).toMatch(/other people/)
+    expect(manifestProblem(valid())).toBeUndefined()
+    expect(manifestProblem(valid({ tools: ['powershell' as never] }))).toMatch(/built-in tool/)
+    expect(manifestProblem(valid({ workspace: { roots: ['relative/path'], access: 'write' } }))).toMatch(/absolute/)
+    expect(manifestProblem(valid({ budget: { maxActiveMs: 0 } }))).toMatch(/maxActiveMs/)
+    expect(manifestProblem(valid({ audience: 'others' as never }))).toMatch(/other people/)
   })
 })
 
 describe('round-1 review fixes', () => {
   it('MCP identity is injective: a separator in a server or tool name is refused, and pairs never collide', () => {
     const granted = manifest({ mcp: [{ serverId: 'server-a', tool: 'branch_write' }] })
-    expect(manifestProblem(manifest({ mcp: [{ serverId: 'server-a::branch', tool: 'write' }] }))).toBe('An MCP tool is invalid.')
-    expect(manifestProblem(manifest({ mcp: [{ serverId: 'server-a', tool: 'branch::write' }] }))).toBe('An MCP tool is invalid.')
-    expect(manifestProblem(manifest({ mcp: [{ serverId: 'a__b', tool: 'c' }] }))).toBe('An MCP tool is invalid.')
+    expect(manifestProblem(valid({ mcp: [{ serverId: 'server-a::branch', tool: 'write' }] }))).toBe('An MCP tool is invalid.')
+    expect(manifestProblem(valid({ mcp: [{ serverId: 'server-a', tool: 'branch::write' }] }))).toBe('An MCP tool is invalid.')
+    expect(manifestProblem(valid({ mcp: [{ serverId: 'a__b', tool: 'c' }] }))).toBe('An MCP tool is invalid.')
     // Even past validation, identity is the pair itself.
     const forged = manifest({ mcp: [{ serverId: 'server-a::branch', tool: 'write' }] })
     const hidden = manifest({ mcp: [{ serverId: 'server-a', tool: 'branch::write' }] })
@@ -134,16 +157,16 @@ describe('round-1 review fixes', () => {
   })
 
   it('only web and skill app tools can be granted: delegation, thread and queue tools are refused at publish', () => {
-    expect(manifestProblem(manifest({ appTools: ['web_search', 'web_fetch'] }))).toBeUndefined()
+    expect(manifestProblem(valid({ appTools: ['web_search', 'web_fetch'] }))).toBeUndefined()
     for (const tool of ['delegate_task', 'continue_subagent', 'create_subagents', 'thread_fork', 'thread_merge_back', 'queue_enqueue', 'thread_read', 'ask_user', 'read'])
-      expect(manifestProblem(manifest({ appTools: [tool] })), tool).toContain(`the Mousse tool ${tool}`)
+      expect(manifestProblem(valid({ appTools: [tool] })), tool).toContain(`the Mousse tool ${tool}`)
   })
 
   it('limits are whole numbers, and work time is at most a day', () => {
-    expect(manifestProblem(manifest({ budget: { maxActiveMs: 1.5 } }))).toMatch(/whole number/)
-    expect(manifestProblem(manifest({ budget: { maxActiveMs: 60_000, maxTurns: 2.5 } }))).toMatch(/whole number/)
-    expect(manifestProblem(manifest({ budget: { maxActiveMs: 25 * 60 * 60_000 } }))).toMatch(/24 hours/)
-    expect(manifestProblem(manifest({ budget: { maxActiveMs: 60_000, maxUsd: 0.5 } }))).toBeUndefined()
+    expect(manifestProblem(valid({ budget: { maxActiveMs: 1.5 } }))).toMatch(/whole number/)
+    expect(manifestProblem(valid({ budget: { maxActiveMs: 60_000, maxTurns: 2.5 } }))).toMatch(/whole number/)
+    expect(manifestProblem(valid({ budget: { maxActiveMs: 25 * 60 * 60_000 } }))).toMatch(/24 hours/)
+    expect(manifestProblem(valid({ budget: { maxActiveMs: 60_000, maxUsd: 0.5 } }))).toBeUndefined()
   })
 
   it('intersectManifest keeps only what both name, with the lower limits', () => {
@@ -166,5 +189,51 @@ describe('intersectManifest access', () => {
     expect(intersectManifest({ ...base, workspace: write }, { ...base, workspace: read }).workspace).toEqual(read)
     expect(intersectManifest({ ...base, workspace: read }, { ...base, workspace: write }).workspace).toEqual(read)
     expect(intersectManifest({ ...base, workspace: write }, { ...base, workspace: null }).workspace).toBeNull()
+  })
+})
+
+describe('round 2: per-folder access survives every answer and narrowing', () => {
+  const two = (workspace: BotManifest['workspace']): BotManifest => manifest({ tools: ['read', 'edit'], mcp: [], skills: [], workspace })
+
+  it('later answers keep each folder\'s access (the review probe, as a test)', () => {
+    const afterB = withPermission(two({ roots: ['/a'], access: 'read' }), { path: '/b', access: 'write' })
+    expect(foldersOf(afterB.workspace)).toEqual([['/a', 'read'], ['/b', 'write']])
+    // A budget answer, then another folder answer: /b stays writable.
+    expect(foldersOf(withPermission(afterB, { budget: { key: 'maxActiveMs' } }, 1000).workspace)).toEqual([['/a', 'read'], ['/b', 'write']])
+    expect(foldersOf(withPermission(afterB, { path: '/c', access: 'read' }).workspace)).toEqual([['/a', 'read'], ['/b', 'write'], ['/c', 'read']])
+    // Two "Allow for this bot" folder answers in a row.
+    expect(foldersOf(withPermission(afterB, { path: '/c', access: 'write' }).workspace)).toEqual([['/a', 'read'], ['/b', 'write'], ['/c', 'write']])
+  })
+
+  it('an owner-written mixed workspace is granted exactly as shown, before and after a tool answer', () => {
+    const authored = two({ roots: ['/a', '/b'], access: 'write', rootAccess: { '/a': 'read' } })
+    // One canonical form: what approval shows is what is stored and granted.
+    expect(canonicalManifest(authored).workspace).toEqual({ roots: ['/a', '/b'], access: 'read', rootAccess: { '/b': 'write' } })
+    expect(describeManifest(authored).map((line) => line.text)).toEqual(['Read files in /a', 'Read and edit files in /b', 'Read files in /a, /b', 'Edit files in /b', 'Up to 15 minutes of work per run'])
+    const after = withPermission(authored, { tool: 'search' })
+    expect(foldersOf(after.workspace)).toEqual([['/a', 'read'], ['/b', 'write']])
+  })
+
+  it('a thread\'s narrowing keeps its read-only folders read-only, through compilation and the call check', () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-narrow-')))
+    const site = join(base, 'site')
+    const output = join(base, 'output')
+    const profile = join(base, 'profile')
+    for (const dir of [site, output, join(profile, 'scratch')]) mkdirSync(dir, { recursive: true })
+    try {
+      const grant = manifest({ tools: ['edit'], mcp: [], skills: [], workspace: { roots: [site, output], access: 'write' } })
+      const narrow = { workspace: { roots: [site, output], access: 'write' as const, rootAccess: { [site]: 'read' as const } } }
+      expect(foldersOf(narrowManifest(grant, narrow).workspace)).toEqual([[output, 'write'], [site, 'read']].sort())
+      const compiled = compileBotThread({ grant, digest: 'd', thread: { narrow }, scratch: join(profile, 'scratch'), profileHome: profile, temps: [], nativeNames: (tools) => ({ ok: true, names: [...tools] }), remaining: { deadlineMs: 60_000 } })
+      if (!compiled.ok) throw new Error(compiled.error.message)
+      const authority = createBotAuthority({ activationId: 'a', role: 'context', permissions: compiled.permissions, waiting: () => false, counters: { charge: () => ({ ok: true, count: 1 }) }, time: { deadline: () => 0, signal: new AbortController().signal }, spend: null })
+      expect(authority.check({ kind: 'builtin', tool: 'edit', nativeName: 'edit', args: { path: join(site, 'file.md') } })).toMatchObject({ ok: false, wall: { kind: 'path' } })
+      expect(authority.check({ kind: 'builtin', tool: 'edit', nativeName: 'edit', args: { path: join(output, 'file.md') } })).toEqual({ ok: true })
+      // The reverse: a write override under a read default stays writable where both say write.
+      const mixed = manifest({ tools: ['edit'], mcp: [], skills: [], workspace: { roots: [site, output], access: 'read', rootAccess: { [output]: 'write' } } })
+      expect(foldersOf(narrowManifest(mixed, { workspace: { roots: [site, output], access: 'read', rootAccess: { [output]: 'write' } } }).workspace)).toEqual([[output, 'write'], [site, 'read']].sort())
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
   })
 })

@@ -446,7 +446,7 @@ function BotEditor({ definition, isNew, providers, skills, busy, error, onCancel
         <legend>Folders</legend>
         <label>One folder per line (absolute paths)<textarea rows={3} value={roots} onChange={(event) => setRoots(event.target.value)} /></label>
         <label>Access
-          <select value={permissions.workspace?.access ?? 'read'} onChange={(event) => setPermissions({ workspace: { roots: rootList, access: event.target.value as 'read' | 'write' } })}>
+          <select value={permissions.workspace?.access ?? 'read'} onChange={(event) => setPermissions({ workspace: keepFolderAccess(rootList, { roots: rootList, access: event.target.value as 'read' | 'write', ...(permissions.workspace?.rootAccess ? { rootAccess: permissions.workspace.rootAccess } : {}) }) })}>
             <option value="read">Read only</option>
             <option value="write">Read and edit</option>
           </select>
@@ -470,7 +470,7 @@ function BotEditor({ definition, isNew, providers, skills, busy, error, onCancel
 }
 
 /** The folders as edited, keeping each remaining folder's own access (an answer may have set it). */
-function keepFolderAccess(roots: string[], workspace: BotDefinition['permissions']['workspace']): NonNullable<BotDefinition['permissions']['workspace']> {
+export function keepFolderAccess(roots: string[], workspace: BotDefinition['permissions']['workspace']): NonNullable<BotDefinition['permissions']['workspace']> {
   const access = workspace?.access ?? 'read'
   const own = Object.entries(workspace?.rootAccess ?? {}).filter(([root, value]) => roots.includes(root) && value !== access)
   return own.length ? { roots, access, rootAccess: Object.fromEntries(own) } : { roots, access }

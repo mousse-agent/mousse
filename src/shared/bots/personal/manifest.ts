@@ -87,8 +87,22 @@ export function manifestProblem(value: unknown): string | undefined {
   return undefined
 }
 
-export function isAbsolutePath(path: string): boolean {
-  return path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path) || path.startsWith('\\\\')
+/**
+ * A full folder path that names exactly the folder shown: absolute on the daemon's platform (on
+ * Windows `/x` is relative to the current drive, so it is not), with no `.` or `..` part that
+ * would make the folder granted differ from the one shown.
+ */
+export function isAbsolutePath(path: string, platform: string = currentPlatform()): boolean {
+  const windows = platform === 'win32'
+  const absolute = windows ? /^[A-Za-z]:[\\/]/.test(path) || /^\\\\[^\\/]+[\\/][^\\/]+/.test(path) : path.startsWith('/')
+  if (!absolute) return false
+  return !path.split(windows ? /[\\/]/ : /\//).some((part) => part === '.' || part === '..')
+}
+
+function currentPlatform(): string {
+  const scope = globalThis as { process?: { platform?: string }; navigator?: { platform?: string } }
+  if (typeof scope.process?.platform === 'string') return scope.process.platform
+  return /win/i.test(scope.navigator?.platform ?? '') ? 'win32' : 'linux'
 }
 
 /**
@@ -160,9 +174,15 @@ const TOOL_WORDS: Record<NeutralTool, string> = {
   web_search: 'Search the web'
 }
 
+/** Tools that change files: they reach only the folders granted for writing. */
+const WRITING_TOOLS: ReadonlySet<NeutralTool> = new Set<NeutralTool>(['edit', 'write'])
+
 function toolLine(tool: NeutralTool, workspace: BotManifest['workspace']): BotPermissionLine {
-  const where = workspace && tool !== 'web_fetch' && tool !== 'web_search' ? ` in ${workspace.roots.join(', ')}` : ''
-  return { kind: 'tool', text: `${TOOL_WORDS[tool]}${where}` }
+  if (!workspace || tool === 'web_fetch' || tool === 'web_search') return { kind: 'tool', text: TOOL_WORDS[tool] }
+  // Per folder: a writing tool names only the folders it may change.
+  const folders = foldersOf(workspace).filter(([, access]) => !WRITING_TOOLS.has(tool) || access === 'write').map(([root]) => root)
+  if (!folders.length) return { kind: 'tool', text: `${TOOL_WORDS[tool]} (no folder allows it)` }
+  return { kind: 'tool', text: `${TOOL_WORDS[tool]} in ${folders.join(', ')}` }
 }
 
 function workspaceLine(root: string, access: 'read' | 'write'): BotPermissionLine {
@@ -208,9 +228,10 @@ export function narrowManifest(manifest: BotManifest, narrow: Partial<Pick<BotMa
     if (narrow.workspace === null || !workspace) workspace = null
     else {
       const roots = new Set(keep(workspace.roots, narrow.workspace.roots, (root) => root))
-      const writes = narrow.workspace.access === 'write'
       const from = workspace
-      workspace = workspaceOf(from.roots.filter((root) => roots.has(root)).map((root) => [root, writes && folderAccess(from, root) === 'write' ? 'write' : 'read'] as const))
+      const by = narrow.workspace
+      // Per folder: write only where both the manifest and the thread's narrowing say write.
+      workspace = workspaceOf(from.roots.filter((root) => roots.has(root)).map((root) => [root, folderAccess(from, root) === 'write' && folderAccess(by, root) === 'write' ? 'write' : 'read'] as const))
     }
   }
   return {

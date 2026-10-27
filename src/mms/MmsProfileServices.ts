@@ -502,7 +502,21 @@ export class MmsProfileServices {
           return this.threads.getThread(threadId) ? 'active' : record ? 'trashed' : 'missing'
         }
       },
-      trashThread: (threadId) => this.trashThread(threadId),
+      // A deleted bot's home thread: like the lifecycle RPCs, wait briefly for other requests to
+      // finish, and retry a busy refusal a few times before reporting it.
+      trashThread: async (threadId) => {
+        const include = (active: string) => !LIFECYCLE_EXEMPT_METHODS.has(active.replace(/^rpc:/, ''))
+        for (let attempt = 0; ; attempt += 1) {
+          await this.requests.waitForIdle(2_000, include).catch(() => {})
+          try {
+            return await this.trashThread(threadId)
+          } catch (error) {
+            const busy = error instanceof Error && 'code' in error && (error as { code?: unknown }).code === 'busy'
+            if (!busy || attempt >= 2) throw error
+            await new Promise((resolve) => setTimeout(resolve, 500))
+          }
+        }
+      },
       runs: () => this.runEngine,
       harness,
       notifyEffects: () => this.orchestrator.notifyEffects(),
@@ -637,10 +651,13 @@ export class MmsProfileServices {
       assertCanTrash: (record) => this.assertLifecycleIdle(record.taskId),
       drain: async (record) => {
         const owned = this.lifecycleOwnedTasks(record.taskId)
+        // The trash was accepted for exactly these threads (fresh operation, current generation, the
+        // fence installed): only now do the bot activations on them end and their runs stop (PR 6 §4).
+        // A stale, refused or replayed trash never gets here. A stop that does not finish in time is
+        // reported busy and the fence is kept, so nothing live moves.
+        if (this.personalBots && !(await this.personalBots.quiesceForTrash(owned.map((task) => task.taskId))))
+          throw new ResourceLifecycleError('busy', 'Cannot trash thread: the bot working in it is still stopping')
         for (const task of owned) this.threadRuntimes.assertDeletable(task.taskId)
-        // A bot activation whose own, home or context thread goes to the trash ends (PR 6 §4); it
-        // already ended before the idle check (`trashThread`), so this pass is the idempotent backstop.
-        try { this.personalBots?.beforeTrash(owned.map((task) => task.taskId)) } catch (error) { console.warn('bot activations could not be ended for the trash', { error: error instanceof Error ? error.message : String(error) }) }
         const runs = await this.platform.workflowRuns.runtime.list({ profileId: this.profileId })
         if (
           runs.some(
@@ -749,11 +766,14 @@ export class MmsProfileServices {
 
   private assertLifecycleIdle(taskId: string): void {
     const owned = this.lifecycleOwnedTasks(taskId)
-    for (const task of owned) this.threadRuntimes.assertDeletable(task.taskId)
+    // A bot's turns on these threads are not other work: the accepted trash stops them in its drain.
+    const botThreads = new Set(this.personalBots?.botThreadsAmong(owned.map((task) => task.taskId)) ?? [])
+    for (const task of owned) this.threadRuntimes.assertDeletable(task.taskId, { ignoreTurn: botThreads.has(task.taskId) })
     this.platform.chats.assertLifecycleIdle(new Set(owned.map((task) => task.taskId)))
     this.platform.workflowRuns.assertLifecycleIdle(new Set(owned.map((task) => task.taskId)))
+    const turns = Object.fromEntries(Object.entries(this.orchestrator.getOwnedActivity()).filter(([label]) => !(label.startsWith('bot-turn:') && botThreads.has(label.slice('bot-turn:'.length)))))
     const activity = {
-      ...this.orchestrator.getOwnedActivity(),
+      ...turns,
       platform: this.platform.getActiveCount(),
       scheduled: this.scheduled.getActiveCount(),
       channels: this.channels.getActiveCount(),
@@ -867,9 +887,6 @@ export class MmsProfileServices {
     // A trashed thread is not listed and cannot be written to, so its watch ends now, while its folder still resolves, and a
     // restore does not bring it back with a backlog.
     this.pullRequestWatch.onEnded(taskId, 'trashed')
-    // A running or waiting bot activation on these threads ends first, and its runs stop, so the
-    // trash's idle check does not refuse the thread (PR 6 §4). Ordinary threads are untouched.
-    if (this.personalBots) await this.personalBots.quiesceForTrash(this.lifecycleOwnedTasks(taskId).map((task) => task.taskId))
     const record = await this.lifecycle.trash({
       taskId,
       operationId: this.resolveLifecycleOperationId(taskId, 'trash', operationId),

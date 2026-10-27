@@ -1,5 +1,6 @@
 import { ProfileDatabase, type Migration, type ProfileDatabaseFault } from '../../run/db/ProfileDatabase'
 import type { BotActivationStatus, BotManifest } from '../../../shared/bots/personal/definition'
+import { canonicalManifest } from '../../../shared/bots/personal/manifest'
 import type { ActivationLimits } from './scopes'
 import type { BotThreadRole } from '../../../shared/bots/personal/authority'
 import type { BotEscalationStatus, BotPermissionRequest, BotWallKind } from '../../../shared/bots/personal/escalation'
@@ -149,6 +150,7 @@ CREATE TABLE bot_overlays(
   PRIMARY KEY(activation_id, escalation_id)
 ) STRICT;
 ALTER TABLE bot_dispatches ADD COLUMN send_json TEXT;
+ALTER TABLE bot_registry ADD COLUMN cleaned_at TEXT;
 CREATE TABLE bot_contexts(
   bot_id TEXT NOT NULL,
   key TEXT NOT NULL,
@@ -350,9 +352,14 @@ export class BotStore {
     return row ? { botId: row.bot_id as string, revision: str(row.revision), homeThreadId: str(row.home_thread_id), createdAt: row.created_at as string, deletedAt: str(row.deleted_at) } : undefined
   }
 
-  /** Bots deleted by the owner: their cleanup is retried until their home thread is in the trash. */
+  /** Deleted bots whose cleanup is not done yet: it is retried until their home thread left. */
   deletedRegistry(): BotRegistryRow[] {
-    return this.all('SELECT bot_id FROM bot_registry WHERE deleted_at IS NOT NULL ORDER BY deleted_at, bot_id').map((row) => this.registry(row.bot_id as string)!)
+    return this.all('SELECT bot_id FROM bot_registry WHERE deleted_at IS NOT NULL AND cleaned_at IS NULL ORDER BY deleted_at, bot_id').map((row) => this.registry(row.bot_id as string)!)
+  }
+
+  /** A deleted bot's cleanup is done: a home thread the owner restores later is left alone. */
+  markCleaned(botId: string): void {
+    this.run('UPDATE bot_registry SET cleaned_at = ? WHERE bot_id = ? AND deleted_at IS NOT NULL AND cleaned_at IS NULL', this.now(), botId)
   }
 
   listRegistry(): BotRegistryRow[] {
@@ -383,8 +390,10 @@ export class BotStore {
     return row ? { botId, digest: row.digest as string, manifest: JSON.parse(row.manifest_json as string) as BotManifest, approvedAt: row.approved_at as string } : undefined
   }
 
-  /** Records an approval; it replaces the earlier grant, if any. */
-  approve(botId: string, digest: string, manifest: BotManifest): BotGrantRow {
+  /** Records an approval, in canonical form; it replaces the earlier grant, if any. */
+  approve(botId: string, digest: string, given: BotManifest): BotGrantRow {
+    // One form for what is granted: what approval showed is exactly what later answers build on.
+    const manifest = canonicalManifest(given)
     return this.db.transaction(() => {
       const at = this.now()
       this.run('UPDATE bot_grants SET revoked_at = ? WHERE bot_id = ? AND revoked_at IS NULL', at, botId)

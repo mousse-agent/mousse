@@ -117,7 +117,9 @@ export class BotDefinitionStore {
     const current = this.get(definition.id)
     if (current && expectedDraftHash !== undefined && current.draftHash !== expectedDraftHash)
       throw new BotDefinitionError('bot_draft_conflict', 'This bot was changed elsewhere. Reload it and try again.')
-    const { revision: _revision, ...draft } = definition
+    const { revision: _revision, ...given } = definition
+    // Permissions are stored in their one canonical form (per-folder access included).
+    const draft = given.permissions && typeof given.permissions === 'object' && !manifestProblem(given.permissions) ? { ...given, permissions: canonicalManifest(given.permissions) } : given
     mkdirSync(this.dir(definition.id), { recursive: true, mode: 0o700 })
     atomicWriteJsonSync(join(this.dir(definition.id), 'draft.json'), draft)
     return this.get(definition.id)!
@@ -146,7 +148,8 @@ export class BotDefinitionStore {
    * the owner's unpublished edits are never overwritten. A definition that cannot run is refused.
    */
   publishRevision(definition: BotDefinition): BotDefinition {
-    const { revision: _revision, ...content } = definition
+    const { revision: _revision, ...given } = definition
+    const content = { ...given, permissions: canonicalManifest(given.permissions) }
     const problem = definitionProblem(content as BotDefinition)
     if (problem) throw new BotDefinitionError('bot_invalid', problem)
     const revision = definitionHash(content as BotDefinition)

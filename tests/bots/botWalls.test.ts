@@ -587,7 +587,7 @@ describe('round 1: folder answers grant exactly what is shown', () => {
 
   it('a relative folder is never asked for or resolved against the working directory', async () => {
     const { activation, prepared } = await running()
-    expect(prepared.authority.escalate!({ permission: { path: 'docs', access: 'read' }, reason: 'r' })).toContain('absolute path')
+    expect(prepared.authority.escalate!({ permission: { path: 'docs', access: 'read' }, reason: 'r' })).toContain('full path')
     // A relative path outside the scratch folder is refused without asking anybody.
     expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: '../../outside.md' } })).toMatchObject({ ok: false, wall: { kind: 'path', path: '../../outside.md' } })
     expect(store.escalations({ activationId: activation.id })).toEqual([])
@@ -856,5 +856,38 @@ describe('round 1: smaller fixes', () => {
     await tick()
     expect(seen).toContain(activation.id)
     expect(bots.getActivation(activation.id).unknownCalls.map((call) => call.invocationId)).toEqual(['late-edit'])
+  })
+})
+
+describe('round 2', () => {
+  it('a time wall before the first dispatch started resends that dispatch\'s prompt after the answer', async () => {
+    const activation = await bots.activate({ botId: 'site-editor', input: 'Fix the footer', clientRequestId: 'c1' })
+    store.run('UPDATE bot_counters SET active_ms = ? WHERE activation_id = ?', 10 * 60_000 - 5_000, activation.id)
+    const payload = payloadOf(store.dispatch(activation.id, 1)!.runId!)
+    expect(bots.prepare(payload)).toMatchObject({ code: 'active_time_exhausted' })
+    runs.markTerminal(payload.runId, 'cancelled', { error: 'active_time_exhausted' })
+    bots.settle(payload, {})
+    await tick()
+    await bots.respond({ escalationId: bots.listEscalations(activation.id)[0].id, answer: 'allow_more', amount: 5 * 60_000 })
+    const next = store.dispatch(activation.id, 2)!
+    expect(next.prompt.text).toContain('The owner allowed')
+    expect(next.prompt.text).toContain('Fix the footer')
+  })
+
+  it('a stored grant and draft are in the one canonical form', () => {
+    const entry = bots.get('site-editor')
+    const saved = bots.save({ ...entry.draft, permissions: { ...entry.draft.permissions, workspace: { roots: [root, other], access: 'write', rootAccess: { [root]: 'read' } } } }, entry.draftHash)
+    expect(saved.draft.permissions.workspace).toEqual({ roots: [root, other].sort(), access: 'read', rootAccess: { [other]: 'write' } })
+  })
+
+  it('a deleted bot\'s cleanup is done once: a home thread restored afterwards is left alone', async () => {
+    const { payload } = await running()
+    host.stopThread = () => { end(payload.runId, 'interrupted', { interruptedBy: 'user' }) }
+    await bots.remove('site-editor')
+    expect(trashed).toEqual(['thread:bot:site-editor'])
+    // The owner restores the home thread; the next start leaves it.
+    threadStates.set('thread:bot:site-editor', 'active')
+    await bots.finishDeletions()
+    expect(trashed).toEqual(['thread:bot:site-editor'])
   })
 })

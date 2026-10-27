@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { BotActivationSummary, BotApprovalView, BotSummary } from '../../src/shared/bots/personal/definition'
 import type { BotEscalationSummary } from '../../src/shared/bots/personal/escalation'
 import { BOTS_PERSONAL_METHODS } from '../../src/shared/bots/personal/methods'
-import { ActivationRow, ApprovalDialog, BotsWorkspace, EscalationRow, shellNote } from '../../src/renderer/components/bots/BotsWorkspace'
+import { ActivationRow, ApprovalDialog, BotsWorkspace, EscalationRow, keepFolderAccess, shellNote } from '../../src/renderer/components/bots/BotsWorkspace'
 import { createPersonalBotsClient, type PersonalBotsClient } from '../../src/renderer/services/personalBotsClient'
 import { bridgeProtocolEvent } from '../../src/main/mms/protocolEventBridge'
 import { GUI_REQUIRED_METHODS } from '../../src/main/mms/guiDaemonCompatibility'
@@ -204,5 +204,15 @@ describe('Bots wiring', () => {
     expect(bridgeProtocolEvent({ type: 'bots.changed', data: { botId: 'site-editor' } } as never, broadcast, presentation)).toBe(true)
     expect(bridgeProtocolEvent({ type: 'bots.escalation', data: escalation() } as never, broadcast, presentation)).toBe(true)
     expect(broadcast.mock.calls).toEqual([['bots:changed', { botId: 'site-editor' }], ['bots:escalation', escalation()]])
+  })
+})
+
+describe('Bots tab: editor folders', () => {
+  it('changing the access setting or the folder list keeps the access set for each folder', () => {
+    const mixed = { roots: ['/a', '/b'], access: 'read' as const, rootAccess: { '/b': 'write' as const } }
+    // A folder whose own access differs from the setting keeps it.
+    expect(keepFolderAccess(['/a', '/b'], { ...mixed, access: 'write', rootAccess: { '/a': 'read' } })).toEqual({ roots: ['/a', '/b'], access: 'write', rootAccess: { '/a': 'read' } })
+    expect(keepFolderAccess(['/a', '/b', '/c'], mixed)).toEqual({ roots: ['/a', '/b', '/c'], access: 'read', rootAccess: { '/b': 'write' } })
+    expect(keepFolderAccess(['/a'], mixed)).toEqual({ roots: ['/a'], access: 'read' })
   })
 })

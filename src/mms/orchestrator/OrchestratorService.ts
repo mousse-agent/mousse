@@ -6718,7 +6718,8 @@ export class OrchestratorService extends EventEmitter {
     let turnResponse: OrchestratorResponse | undefined
     let turnFailure: unknown
     try {
-      turnResponse = await this.lifecycle.run('turn', () => this.sessionAls
+      // A bot's turn is named by its thread, so a trash of that thread can tell it from other work.
+      turnResponse = await this.lifecycle.run(opts?.bot ? `bot-turn:${session.threadId}` : 'turn', () => this.sessionAls
         .run(session, () =>
           this.executeTurn(input, reuseLastUser, displayUserMessage, { ...opts, externalSignal: opts?.externalSignal ? AbortSignal.any([opts.externalSignal, this.lifecycle.signal]) : this.lifecycle.signal })
         ))

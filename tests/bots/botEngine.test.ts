@@ -160,7 +160,7 @@ describe('approval', () => {
     publish({ tools: ['read', 'search', 'edit'] })
     await expect(bots.activate({ botId: 'site-editor', input: 'b', clientRequestId: 'wide' })).rejects.toMatchObject({
       code: 'bot_approval_required',
-      details: { added: [{ kind: 'tool', text: `Edit files in ${root}` }] }
+      details: { added: [{ kind: 'tool', text: 'Edit files (no folder allows it)' }] }
     })
   })
 
@@ -432,6 +432,11 @@ describe('activation and dispatch', () => {
     const running = await bots.activate({ botId: 'site-editor', input: 'one', clientRequestId: 'c1' })
     const trashed: string[] = []
     engineHost.trashThread = async (threadId) => { trashed.push(threadId) }
+    // Its run ends when its thread is stopped; only then does the home thread move.
+    engineHost.stopThread = (threadId) => {
+      stopped.push(threadId)
+      runs.markTerminal(store.dispatch(running.id, 1)!.runId!, 'cancelled', { error: 'stopped' })
+    }
     await bots.remove('site-editor')
     expect(trashed).toEqual(['thread:bot:site-editor'])
     expect(bots.getActivation(running.id)).toMatchObject({ status: 'cancelled', endReason: 'bot_deleted' })

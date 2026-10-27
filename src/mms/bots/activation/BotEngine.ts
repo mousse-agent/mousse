@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import type { BotAuthority, BotThreadRole, BotThreads, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
 import {
   BOT_ESCALATION_TTL_MS,
@@ -76,6 +76,8 @@ export interface BotEngineHost {
   }
   /** Moves a thread to the trash (a deleted bot's home thread; its owned threads follow). */
   trashThread?(threadId: string): Promise<unknown>
+  /** How long stopping a bot's runs may take before a trash or delete gives up (default 15 s). */
+  quiesceTimeoutMs?: number
   /** The profile's run engine (null while it is not running). */
   runs(): RunEngine | null
   harness: {
@@ -220,13 +222,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.store.markDeleted(botId)
       return running
     })
-    for (const activation of live) {
-      await this.stopRun(activation)
-      this.cleanup({ ...activation, status: 'cancelled' })
-    }
-    // Its runs end before its threads move: the trash refuses threads with work running.
-    await this.untilQuiet(live)
+    for (const activation of live) this.cleanup({ ...activation, status: 'cancelled' })
+    // Its runs end before its threads move: the trash refuses threads with work running. The stop is
+    // bounded, a hung provider stop included; what is still stopping is cleaned up at the next start.
+    const quiet = await this.stopAndWait(live)
     this.changed({ botId })
+    if (!quiet) throw new BotEngineError('bot_cleanup_failed', 'The bot was deleted, but its last run is still stopping. Its thread moves to the trash when the profile next starts.')
     await this.finishDeletion(botId)
   }
 
@@ -242,13 +243,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       console.warn('a deleted bot\'s definition could not be removed', { botId, error: error instanceof Error ? error.message : String(error) })
     }
     const home = this.store.registry(botId)?.homeThreadId
-    if (!home || !this.host.trashThread || this.threadState(home) !== 'active') return
-    try {
-      await this.host.trashThread(home)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      throw new BotEngineError('bot_cleanup_failed', `The bot was deleted, but its thread could not be moved to the trash (${message}). Mousse tries again when the profile next starts.`)
+    if (home && this.host.trashThread && this.threadState(home) === 'active') {
+      try {
+        await this.host.trashThread(home)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        throw new BotEngineError('bot_cleanup_failed', `The bot was deleted, but its thread could not be moved to the trash (${message}). Mousse tries again when the profile next starts.`)
+      }
     }
+    // Done once: a home thread the owner restores afterwards is never trashed again.
+    this.store.markCleaned(botId)
   }
 
   /** Finishes deletions a crash or a refused trash left unfinished (after the profile has started). */
@@ -260,6 +264,24 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         console.warn('a deleted bot could not be cleaned up', { botId: entry.botId, error: error instanceof Error ? error.message : String(error) })
       }
     }
+  }
+
+  /**
+   * Stops the activations' runs and waits until none is live, all within one deadline that also
+   * bounds the provider stops themselves (a stop that never settles included). True when quiet.
+   */
+  private async stopAndWait(rows: readonly BotActivationRow[], timeoutMs = this.host.quiesceTimeoutMs ?? 15_000): Promise<boolean> {
+    if (!rows.length) return true
+    const until = Date.now() + timeoutMs
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs) })
+    const work = (async () => {
+      await Promise.all(rows.map((row) => this.stopRun(row)))
+      await this.untilQuiet(rows, Math.max(0, until - Date.now()))
+    })()
+    await Promise.race([work, deadline])
+    clearTimeout(timer)
+    return rows.every((row) => this.allRunsEnded(row))
   }
 
   /** Waits until no run of the activations is live (bounded; the trash re-checks what is still busy). */
@@ -489,6 +511,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.live.get(row.id)?.controller.abort(new Error('stopped'))
     const main = this.store.lastMainDispatch(row.id)
     if (main) this.stopConsults(row, main.n)
+    // A run that never started is not needed any more: it is cancelled here, not left to the executor.
+    const runs = this.host.runs()
+    for (const dispatch of this.store.dispatches(row.id)) {
+      const run = dispatch.runId ? runs?.getRun(dispatch.runId) : undefined
+      if (run?.status !== 'queued') continue
+      try { runs!.markTerminal(run.runId, 'cancelled', { error: 'bot_activation_ended' }) } catch { /* it started meanwhile */ }
+    }
     try {
       await this.host.stopThread?.(row.threadId)
     } catch (error) {
@@ -1133,7 +1162,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         kind: 'continue' as const,
         clientRequestId: `${row.id}:d${n}`,
         threadId: current.threadId!,
-        prompt: { text: this.continuationPrompt(row.id, input) },
+        prompt: { text: this.continuationPrompt(row.id, input, previous && previousRun && !previousRun.activeAttemptId ? previous.prompt.text : undefined) },
         policyDigest: grant.digest,
         // Kept with the intent, so a resend after a crash sends exactly this.
         send: { ...(previous?.runId ? { continuationOfRunId: previous.runId } : {}), ...(uncertain ? { acknowledgeUncertain: true } : {}) }
@@ -1160,7 +1189,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return 'sent'
   }
 
-  private continuationPrompt(activationId: string, input: { answer?: BotEscalationRow; restart?: boolean }): string {
+  private continuationPrompt(activationId: string, input: { answer?: BotEscalationRow; restart?: boolean }, neverRan?: string): string {
     const answer = input.answer
     const lead = answer
       ? `${answer.status === 'denied' ? 'The owner denied' : 'The owner allowed'}: ${permissionText(answer.permission)}${answer.amount !== null && 'budget' in answer.permission ? ` (${answer.amount} more)` : ''}.`
@@ -1169,6 +1198,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const interrupted = calls.length
       ? ` Interrupted tool calls (their effects are unknown; check before repeating them): ${calls.map((call) => `${call.tool} (${call.role} run ${call.runId}, call ${call.invocationId})`).join('; ')}.`
       : ''
+    // The walled dispatch never ran (a time wall before it started): its own prompt is sent now.
+    if (neverRan !== undefined) return `[Mousse] ${lead}${interrupted}\n\n${neverRan}`
     return `[Mousse] ${lead} Continue the task.${interrupted}`
   }
 
@@ -1507,14 +1538,24 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * Before a thread goes to the trash: ends the activations it belongs to and waits until their
    * runs have stopped, so the trash's own idle check does not refuse it. Never throws.
    */
-  async quiesceForTrash(threadIds: readonly string[]): Promise<void> {
+  async quiesceForTrash(threadIds: readonly string[]): Promise<boolean> {
+    let ended: BotActivationRow[]
     try {
-      const ended = this.beforeTrash(threadIds)
-      for (const row of ended) await this.stopRun(row)
-      await this.untilQuiet(ended)
+      ended = this.beforeTrash(threadIds)
     } catch (error) {
-      console.warn('bot activations could not be ended before the trash', { error: error instanceof Error ? error.message : String(error) })
+      console.warn('bot activations could not be ended for the trash', { error: error instanceof Error ? error.message : String(error) })
+      return true
     }
+    return this.stopAndWait(ended)
+  }
+
+  /**
+   * The bot threads among `threadIds` (its home, activation and context threads). A trash accepted
+   * for them ends their activations and stops their runs in its drain, so the trash's idle check
+   * does not count those threads' bot turns as other work. Never throws.
+   */
+  botThreadsAmong(threadIds: readonly string[]): string[] {
+    return threadIds.filter((threadId) => this.known.has(threadId) || this.roleOrHomeOf(threadId))
   }
 
   /** Whether a thread is any bot thread (home included), read from bots.db. */
@@ -1866,7 +1907,12 @@ function instructionsOf(role: string, thread: BotThreadSpec): { instructions?: s
 function permissionOfWall(call: NormalisedCall, wall: WallReason): BotPermissionRequest | undefined {
   switch (wall.kind) {
     // A folder is asked for only by its absolute path: a relative one is refused, never resolved.
-    case 'path': return isAbsolutePath(wall.path) ? { path: wall.path, access: wall.access } : undefined
+    case 'path': {
+      // Only an absolute path is asked for, shown resolved (`..` removed); a relative one is refused.
+      if (!isAbsolute(wall.path)) return undefined
+      const path = resolve(wall.path)
+      return isAbsolutePath(path) ? { path, access: wall.access } : undefined
+    }
     case 'skill': return { skill: wall.skill }
     case 'mcp': return { mcp: { serverId: wall.server, tool: wall.tool } }
     case 'tool':
