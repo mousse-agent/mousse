@@ -127,7 +127,13 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
   process.env.MOUSSE_HOME = home
   const projects = new ProjectManager()
   const store = new ThreadDataStore(projects)
-  const settings = { ...getDefaultSettings(), provider: { ...getDefaultSettings().provider, ...selection } }
+  // The fixtures record turns that run without asking (Claude's `bypassPermissions`, Codex's
+  // never-ask policy), so the threads start in `full`, not the profile default.
+  const settings = {
+    ...getDefaultSettings(),
+    provider: { ...getDefaultSettings().provider, ...selection },
+    permissions: { defaultMode: 'full' as const }
+  }
   const orch = new OrchestratorService(
     new AgentRegistry(),
     new TaskQueue(),
@@ -252,11 +258,13 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
     shellPath: async () => ({ entries: [], source: 'failed' }),
     drivers: [
       piDriver({ client: () => orch.piChatClient(), ...(piRpc ? { rpc: piRpc.driverOptions() } : {}) }),
-      claudeCodeDriver({ builtIn: () => services.claude! }),
-      antigravityDriver({ builtIn: () => services.antigravity! }),
+      // A vendor driver is installed only with its service: the built-in instances of the others
+      // have nothing to reconcile or probe, and no vendor CLI of the machine is ever reached.
+      ...(services.claude ? [claudeCodeDriver({ builtIn: () => services.claude! })] : []),
+      ...(services.antigravity ? [antigravityDriver({ builtIn: () => services.antigravity! })] : []),
       // The generic driver runs for real; only its agent connection is replayed.
       acpDriver({ connect: (_context, request) => replayAcpProcess(transport)(request), pty: { available: () => false } }),
-      codexDriver({ builtIn: () => services.codex! }),
+      ...(services.codex ? [codexDriver({ builtIn: () => services.codex! })] : []),
       // The driver and its session lifecycle run for real; only the host process is replayed.
       cursorDriver({ connect: replayCursorHost(transport) })
     ]

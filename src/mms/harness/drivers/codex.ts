@@ -33,6 +33,8 @@ const SIGN_IN_COMMAND = 'codex login'
  * as well, and the composer says so. Add the two fixtures, then remove this limit.
  */
 export const CODEX_PERMISSION_LIMITS: PermissionLimits = Object.freeze({
+  // Full access is Codex's own full-access profile: `never` ask and no sandbox (`codexTurnPolicy`).
+  sandboxOffInFull: true,
   unavailable: Object.freeze({ accept_edits: 'Codex cannot auto-accept edits while asking for commands' })
 })
 

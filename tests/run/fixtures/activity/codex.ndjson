@@ -6,9 +6,9 @@
 {"dir":"in","frame":{"id":2,"result":{"account":{"type":"chatgpt","email":"replay@example.com","planType":"plus"},"requiresOpenaiAuth":true}}}
 {"dir":"out","frame":{"id":3,"method":"thread/list","params":{"parentThreadId":"00000000-0000-0000-0000-000000000000","ancestorThreadId":"00000000-0000-0000-0000-000000000000","limit":1}}}
 {"dir":"in","frame":{"id":3,"result":{"data":[],"nextCursor":null}}}
-{"dir":"out","frame":{"id":4,"method":"thread/start","params":{"approvalPolicy":"on-request","sandbox":"workspace-write","model":"gpt-x","modelProvider":"openai","config":{"model_provider":"openai"}}}}
+{"dir":"out","frame":{"id":4,"method":"thread/start","params":{"approvalPolicy":"untrusted","sandbox":"read-only","model":"gpt-x","modelProvider":"openai","config":{"model_provider":"openai"}}}}
 {"dir":"in","frame":{"id":4,"result":{"thread":{"id":"thr-act"},"model":"gpt-x","modelProvider":"openai","cwd":"/w"}}}
-{"dir":"out","frame":{"id":5,"method":"turn/start","params":{"threadId":"thr-act","input":[{"type":"text","text":"Do the work","text_elements":[]}],"approvalPolicy":"on-request","sandboxPolicy":{"type":"workspaceWrite","writableRoots":[],"networkAccess":false,"excludeTmpdirEnvVar":false,"excludeSlashTmp":false},"model":"gpt-x"}}}
+{"dir":"out","frame":{"id":5,"method":"turn/start","params":{"threadId":"thr-act","input":[{"type":"text","text":"Do the work","text_elements":[]}],"approvalPolicy":"untrusted","sandboxPolicy":{"type":"readOnly","networkAccess":false},"model":"gpt-x"}}}
 {"dir":"in","frame":{"id":5,"result":{"turn":{"id":"turn-1","status":"inProgress","error":null,"items":[]}}}}
 {"dir":"in","frame":{"method":"turn/started","params":{"threadId":"thr-act","turn":{"id":"turn-1","status":"inProgress","error":null}}}}
 {"dir":"in","frame":{"method":"item/started","params":{"threadId":"thr-act","turnId":"turn-1","item":{"type":"commandExecution","id":"cmd-1","command":"/bin/bash -lc 'npm test'","cwd":"/w","processId":"4242","source":"agent","commandActions":[],"status":"inProgress","aggregatedOutput":null,"exitCode":null,"durationMs":null}}}}
