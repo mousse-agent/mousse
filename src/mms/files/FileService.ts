@@ -1,11 +1,16 @@
-import { open, readdir, readFile, writeFile, stat } from 'fs/promises'
-import { join, relative } from 'path'
+import { randomUUID } from 'node:crypto'
+import { constants } from 'node:fs'
+import { open, readdir, readFile, writeFile, stat, lstat, rename, unlink, type FileHandle } from 'fs/promises'
+import { basename, dirname, join, posix } from 'path'
 import type { FileAsset, FileEntry, FileStat } from '../../shared/types'
 import { countLineEdits } from '../../shared/lineEditStats'
-import { resolveWithinRoot, SKIP_DIR_NAMES } from './pathGuard'
+import { SKIP_DIR_NAMES, lexicalGuard, type GuardedPath, type PathGuard } from './pathGuard'
+import { OTHER_NAMES, PathContainmentError } from './routedGuard'
 
 const MAX_READ_BYTES = 512 * 1024
 const MAX_ASSET_BYTES = 100 * 1024 * 1024
+/** A file this large or smaller is read before it is replaced, to count the lines that changed. */
+const MAX_DIFFED_BYTES = 25 * 1024 * 1024
 
 const ASSET_MIME_TYPES: Record<string, string> = {
   pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
@@ -14,18 +19,28 @@ const ASSET_MIME_TYPES: Record<string, string> = {
   mov: 'video/quicktime', m4v: 'video/x-m4v'
 }
 
+/** Writes every byte of `bytes` at the start of the file. */
+async function writeAll(handle: FileHandle, bytes: Buffer): Promise<void> {
+  for (let written = 0; written < bytes.length;) {
+    written += (await handle.write(bytes, written, bytes.length - written, written)).bytesWritten
+  }
+}
+
+/**
+ * Every call takes the guard of its caller (the default is a window of this computer): the guard
+ * says which file a path names and whether this caller may read or change it.
+ */
 export class FileService {
-  async listDir(root: string, dirPath = ''): Promise<FileEntry[]> {
-    const absDir = resolveWithinRoot(root, dirPath)
-    const entries = await readdir(absDir, { withFileTypes: true })
+  async listDir(root: string, dirPath = '', guard: PathGuard = lexicalGuard): Promise<FileEntry[]> {
+    const dir = guard.resolve(root, dirPath, 'read')
+    const entries = await readdir(dir.absolute, { withFileTypes: true })
     const result: FileEntry[] = []
 
     for (const entry of entries) {
       if (entry.isDirectory() && SKIP_DIR_NAMES.has(entry.name)) continue
-      const rel = relative(root, join(absDir, entry.name)).replace(/\\/g, '/')
       result.push({
         name: entry.name,
-        path: rel,
+        path: posix.join(dir.relative, entry.name),
         kind: entry.isDirectory() ? 'directory' : 'file'
       })
     }
@@ -38,19 +53,19 @@ export class FileService {
     return result
   }
 
-  async readFile(root: string, filePath: string): Promise<string> {
-    const absPath = resolveWithinRoot(root, filePath)
-    const info = await stat(absPath)
+  async readFile(root: string, filePath: string, guard: PathGuard = lexicalGuard): Promise<string> {
+    const { absolute } = guard.resolve(root, filePath, 'read')
+    const info = await stat(absolute)
     if (!info.isFile()) throw new Error('Not a file')
     if (info.size > MAX_READ_BYTES) {
       throw new Error(`File exceeds ${MAX_READ_BYTES / 1024}KB limit`)
     }
-    return readFile(absPath, 'utf8')
+    return readFile(absolute, 'utf8')
   }
 
   /** The asset's file, once the root guard, the size limit and the preview types have passed. */
-  private async assetFile(root: string, filePath: string): Promise<{ absPath: string; mimeType: string; size: number }> {
-    const absPath = resolveWithinRoot(root, filePath)
+  private async assetFile(root: string, filePath: string, guard: PathGuard): Promise<{ absPath: string; mimeType: string; size: number }> {
+    const { absolute: absPath } = guard.resolve(root, filePath, 'read')
     const info = await stat(absPath)
     if (!info.isFile()) throw new Error('Not a file')
     if (info.size > MAX_ASSET_BYTES) {
@@ -62,8 +77,8 @@ export class FileService {
     return { absPath, mimeType, size: info.size }
   }
 
-  async readAsset(root: string, filePath: string): Promise<FileAsset> {
-    const { absPath, mimeType, size } = await this.assetFile(root, filePath)
+  async readAsset(root: string, filePath: string, guard: PathGuard = lexicalGuard): Promise<FileAsset> {
+    const { absPath, mimeType, size } = await this.assetFile(root, filePath, guard)
     const data = await readFile(absPath)
     return { data: new Uint8Array(data), mimeType, size }
   }
@@ -72,8 +87,8 @@ export class FileService {
    * `length` bytes of the asset from `offset`, so a preview of any size travels in pieces that fit a
    * daemon message. `size` is the whole file's; a piece past its end is empty.
    */
-  async readAssetRange(root: string, filePath: string, offset: number, length: number): Promise<FileAsset> {
-    const { absPath, mimeType, size } = await this.assetFile(root, filePath)
+  async readAssetRange(root: string, filePath: string, offset: number, length: number, guard: PathGuard = lexicalGuard): Promise<FileAsset> {
+    const { absPath, mimeType, size } = await this.assetFile(root, filePath, guard)
     const wanted = Math.max(0, Math.min(length, size - offset))
     const buffer = Buffer.alloc(wanted)
     const handle = await open(absPath, 'r')
@@ -85,8 +100,10 @@ export class FileService {
     }
   }
 
-  async writeFile(root: string, filePath: string, content: string): Promise<number> {
-    const absPath = resolveWithinRoot(root, filePath)
+  async writeFile(root: string, filePath: string, content: string, guard: PathGuard = lexicalGuard): Promise<number> {
+    const guarded = guard.resolve(root, filePath, 'write')
+    if (guard.contained) return this.writeContained(guarded, content)
+    const absPath = guarded.absolute
     let oldContent = ''
     try {
       const info = await stat(absPath)
@@ -100,11 +117,68 @@ export class FileService {
     return countLineEdits(oldContent, content)
   }
 
-  async stat(root: string, targetPath: string): Promise<FileStat> {
-    const absPath = resolveWithinRoot(root, targetPath)
-    const info = await stat(absPath)
+  /**
+   * A change from another computer. The file is opened first and then checked to be the file the guard
+   * resolved (not a link put there since), with a name of its own, before a byte of it is changed. A new
+   * file is written beside its name and renamed onto it: a rename replaces a link at the name instead of
+   * following it, which creating the file at that name would do on Windows.
+   */
+  private async writeContained(guarded: GuardedPath, content: string): Promise<number> {
+    const { absolute } = guarded
+    const changed = (): PathContainmentError =>
+      new PathContainmentError('path_outside_folder', 'That path changed while it was being saved, so nothing was written.')
+    let handle: FileHandle
+    try {
+      handle = await open(absolute, constants.O_RDWR | (constants.O_NOFOLLOW ?? 0))
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      // A link at the name is refused by the open itself (`O_NOFOLLOW`) where the system has it.
+      if (code === 'ELOOP') throw changed()
+      if (code !== 'ENOENT') throw error
+      return this.createContained(absolute, content, changed)
+    }
+    try {
+      const [opened, named] = await Promise.all([handle.stat({ bigint: true }), lstat(absolute, { bigint: true })])
+      if (!named.isFile() || named.ino !== opened.ino || named.dev !== opened.dev) throw changed()
+      if (opened.nlink > 1n) throw new PathContainmentError('path_protected', OTHER_NAMES)
+      const oldContent = opened.size <= BigInt(MAX_DIFFED_BYTES) ? await handle.readFile({ encoding: 'utf8' }) : ''
+      await handle.truncate(0)
+      await writeAll(handle, Buffer.from(content, 'utf8'))
+      return countLineEdits(oldContent, content)
+    } finally {
+      await handle.close()
+    }
+  }
+
+  private async createContained(absolute: string, content: string, changed: () => PathContainmentError): Promise<number> {
+    // A name that exists by now (a link to nowhere, or a file made since) is not the new file the guard saw.
+    const exists = (): Promise<boolean> => lstat(absolute).then(() => true, (error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return false
+      throw error
+    })
+    if (await exists()) throw changed()
+    const beside = join(dirname(absolute), `.${basename(absolute)}.${randomUUID()}.tmp`)
+    const handle = await open(beside, 'wx')
+    try {
+      try {
+        await writeAll(handle, Buffer.from(content, 'utf8'))
+      } finally {
+        await handle.close()
+      }
+      if (await exists()) throw changed()
+      await rename(beside, absolute)
+    } catch (error) {
+      await unlink(beside).catch(() => undefined)
+      throw error
+    }
+    return countLineEdits('', content)
+  }
+
+  async stat(root: string, targetPath: string, guard: PathGuard = lexicalGuard): Promise<FileStat> {
+    const { absolute, relative: name } = guard.resolve(root, targetPath, 'read')
+    const info = await stat(absolute)
     return {
-      path: relative(root, absPath).replace(/\\/g, '/'),
+      path: name,
       kind: info.isDirectory() ? 'directory' : 'file',
       size: info.size,
       modifiedAt: info.mtime.toISOString()

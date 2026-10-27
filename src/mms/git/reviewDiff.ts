@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process'
 import { createReadStream } from 'node:fs'
 import { lstat, open, readlink, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative } from 'node:path'
+import { leavesFolder } from '../files/pathGuard'
 import { guardedSimpleGit, NO_DIFF_PROGRAMS, repoProgramEnv, withoutRepoPrograms } from './repoPrograms'
 import {
   EMPTY_TREE_SHA,
@@ -327,8 +328,7 @@ async function readBounded(path: string): Promise<{ buffer: Buffer; size: number
 }
 
 function isInside(root: string, path: string): boolean {
-  const rel = relative(root, path)
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+  return !leavesFolder(relative(root, path))
 }
 
 async function readWorktreeFile(cwd: string, path: string): Promise<ReviewFileSide> {
