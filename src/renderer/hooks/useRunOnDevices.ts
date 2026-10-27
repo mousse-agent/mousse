@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { NodeId } from '../../shared/net'
 import type { Project } from '../../shared/types'
 import type { Device } from '../lib/netDevices'
-import { readRemoteProjects, readRunOnDevices } from '../lib/remoteComputers'
+import { readRemoteComposerOptions, readRemoteProjects, readRunOnDevices, type RemoteComposerOptions } from '../lib/remoteComputers'
 
 /** The user's devices, read on mount and again whenever `refresh` is called (a menu opening). */
 export function useRunOnDevices(): { devices: Device[]; refresh: () => void } {
@@ -45,4 +45,24 @@ export function useRemoteProjects(node: NodeId | undefined): {
   }, [])
   // Projects read for another computer are never shown for this one.
   return state.node === node && node ? { projects: state.projects, failed: state.failed, add } : { projects: [], failed: false, add }
+}
+
+/**
+ * The models the picked computer offers a new chat. Empty until it answers, and when it cannot
+ * be reached (the project list already reports that).
+ */
+export function useRemoteComposerOptions(node: NodeId | undefined): RemoteComposerOptions & { loaded: boolean } {
+  const [state, setState] = useState<{ node: NodeId | undefined; options: RemoteComposerOptions }>({ node, options: { providers: [], defaultModel: null } })
+  useEffect(() => {
+    let cancelled = false
+    if (!node) return
+    void readRemoteComposerOptions(node).then(
+      (options) => { if (!cancelled) setState({ node, options }) },
+      () => { if (!cancelled) setState({ node, options: { providers: [], defaultModel: null } }) }
+    )
+    return () => { cancelled = true }
+  }, [node])
+  return state.node === node && node
+    ? { ...state.options, loaded: true }
+    : { providers: [], defaultModel: null, loaded: false }
 }

@@ -39,7 +39,7 @@ import type { NodeId } from '../../shared/net'
 import { RemoteNotConnectedError, prepareComposerThread, startRemoteComposerThread } from '../lib/createComposerThread'
 import { openRemoteThread } from '../lib/openRemoteThread'
 import { openRemoteProject, readRunOnDevices, remoteErrorMessage, workspaceOnDevice } from '../lib/remoteComputers'
-import { useRemoteProjects, useRunOnDevices } from '../hooks/useRunOnDevices'
+import { useRemoteComposerOptions, useRemoteProjects, useRunOnDevices } from '../hooks/useRunOnDevices'
 import { localDeviceName, runOnLabel } from './sideCard/deviceMenu'
 import { pickerIdFor, pickerProviders, projectScope, useProviderSnapshots } from '../lib/providerSnapshots'
 import { sendErrorLine } from '../lib/errorText'
@@ -139,8 +139,16 @@ export function OrchestratorChat() {
   }, [setComposerDraft])
   const [catalog, setCatalog] = useState<LlmProviderOption[]>([])
   // The picker lists the instances the thread's project allows, from the daemon's snapshots.
-  const { snapshots: providerSnapshots } = useProviderSnapshots(projectScope(workspace.projectId))
-  const providers = useMemo(() => pickerProviders(providerSnapshots, catalog), [providerSnapshots, catalog])
+  // A new chat for another computer offers that computer's models, not this one's.
+  const remoteDraft = newChat && Boolean(workspace.node)
+  const remoteOptions = useRemoteComposerOptions(remoteDraft ? workspace.node : undefined)
+  const { snapshots: providerSnapshots } = useProviderSnapshots(projectScope(remoteDraft ? undefined : workspace.projectId))
+  const providers = useMemo(
+    () => remoteDraft ? pickerProviders(undefined, remoteOptions.providers) : pickerProviders(providerSnapshots, catalog),
+    [remoteDraft, remoteOptions.providers, providerSnapshots, catalog]
+  )
+  const remoteDraftRef = useRef(remoteDraft)
+  remoteDraftRef.current = remoteDraft
   /** The selection a picker entry stores: its instance and the provider name that instance reports. */
   const selectionFor = (pickerId: string): { instanceId?: string; llmProvider: string } => {
     const provider = providers.find((entry) => entry.id === pickerId)
@@ -388,9 +396,12 @@ export function OrchestratorChat() {
     ])
     setCatalog(options.llmProviders)
     const selectedModel = activeThreadModelOverride ?? settings.provider
-    setSelectedLlmProvider(selectedModel.llmProvider)
-    setSelectedInstanceId(selectedModel.instanceId)
-    setSelectedModelId(selectedModel.model)
+    // The picker shows the other computer's model while a chat for it is being written.
+    if (!remoteDraftRef.current) {
+      setSelectedLlmProvider(selectedModel.llmProvider)
+      setSelectedInstanceId(selectedModel.instanceId)
+      setSelectedModelId(selectedModel.model)
+    }
 
     const skillsSnapshot = await skillsRequest
     const enabled = new Set(settings.integrations.skills.enabledSkills)
@@ -404,6 +415,19 @@ export function OrchestratorChat() {
     // activeThreadId: project-scoped skills follow the active thread, so a
     // snapshot fetched for another thread goes stale on switch.
   }, [activeThreadModelOverride, activeThreadId, profileReady, profileId])
+
+  // Picking a computer swaps the picker to its default model; coming back restores this computer's.
+  const remoteDefault = remoteOptions.defaultModel
+  useEffect(() => {
+    if (!remoteDraft) {
+      void refreshSelection()
+      return
+    }
+    if (!remoteOptions.loaded) return
+    setSelectedLlmProvider(remoteDefault?.llmProvider ?? '')
+    setSelectedInstanceId(remoteDefault?.instanceId)
+    setSelectedModelId(remoteDefault?.model ?? '')
+  }, [remoteDraft, workspace.node, remoteOptions.loaded, remoteDefault])
 
   useEffect(() => {
     void refreshSelection()
@@ -766,6 +790,9 @@ export function OrchestratorChat() {
           content: text,
           images,
           mode: skillMode ?? chatMode,
+          model: selectedProviderId && selectedModelId
+            ? { ...selectionFor(selectedProviderId), model: selectedModelId }
+            : undefined,
           request: (method, params) => window.mousse.platformRequest.request(method, params),
           stillVisible,
           openRemoteThread
@@ -869,7 +896,8 @@ export function OrchestratorChat() {
     // Persist as last-used default for new threads. Existing chats keep their
     // own modelOverride, which is stamped at create time from this value.
     if (!activeThreadId) {
-      void window.mousse.settings.set({
+      // A chat for another computer takes its model there; this computer's default stays as it is.
+      if (!remoteDraft) void window.mousse.settings.set({
         provider: { ...instance, model: modelId }
       })
       return

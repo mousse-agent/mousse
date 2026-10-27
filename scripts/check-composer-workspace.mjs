@@ -40,7 +40,7 @@ try {
         }},
         subagents:{list:async()=>[],onUpdated:subscription},
         actions:{list:async()=>({})},
-        workspace:{getStatus:async()=>({})},
+        workspace:{getStatus:async(id)=>{const project=projects.find(p=>p.id===useAppStore.getState().threads.find(t=>t.id===id)?.projectId);if(fixture.pendingPath)await new Promise(resolve=>fixture.resumePath=resolve);return project?{execution:{projectPath:project.path,lifecycle:'ready'}}:{}}},
         app:{getActiveProjectPath:async(id)=>{const project=projects.find(p=>p.id===useAppStore.getState().threads.find(t=>t.id===id)?.projectId);if(fixture.pendingPath)await new Promise(resolve=>fixture.resumePath=resolve);return project?.path ?? null}},
         threads:{
           create:async(_,projectId,opts)=>{
@@ -73,7 +73,9 @@ try {
           'bridge.nodes':()=>({nodes:fixture.nodes}),
           'bridge.hub.projects':({target})=>({projects:target==='n-linux'?remoteProjects:[]}),
           'bridge.hub.openProject':({path})=>path==='/srv/new'?{ok:true,project:{id:'r3',name:'new',path}}:{ok:false,error:'That folder does not exist on this computer.'},
+          'bridge.hub.composerOptions':()=>({providers:[{id:'remote-llm',label:'Remote LLM',models:[{id:'r-model',label:'R Model'}]}],defaultModel:{llmProvider:'remote-llm',model:'r-model'},modes:['agent'],skills:[],commands:[]}),
           'bridge.hub.create':()=>({thread:{id:'remote-1'}}),
+          'bridge.hub.setModel':()=>({ok:true,modelOverride:null}),
           'bridge.hub.attach':({ref})=>({ref}),
           'bridge.hub.send':()=>new Promise(()=>{})
         }
@@ -274,7 +276,7 @@ try {
         await evaluate('fixture.reset('+JSON.stringify(draft)+')');await pause(120)
         await evaluate('fixture.store.getState().setMainView("files");fixture.pendingPath=true;fixture.store.getState().upsertThread({id:"other",name:"Other",projectId:"b"});fixture.store.getState().switchToThread("other")');await pause(100)
         assert.equal(await evaluate('fixture.store.getState().mainView'),'files')
-        await evaluate('fixture.resumePath()');await pause(100)
+        await evaluate('fixture.resumePath&&fixture.resumePath()');await pause(100)
         assert.equal(await evaluate('fixture.store.getState().mainView'),'files')
         await evaluate('fixture.reset()');await pause(120)
         assert.equal(await evaluate('fixture.store.getState().mainView'),'browser')
@@ -318,10 +320,13 @@ try {
         await click('[role=dialog] footer button');await pause(100)
         assert.equal(await evaluate('!!document.querySelector("[role=dialog]")'),false)
         assert.equal(await evaluate('document.querySelector(".composer-workspace-project").dataset.projectId'),'r3')
+        await click('.composer-workspace-worktree')
+        assert.equal(await evaluate('document.querySelector(".composer-workspace-worktree").getAttribute("aria-pressed")'),'true')
         assert.deepEqual((await evaluate('fixture.requests')).filter(r=>r[0]==='bridge.hub.openProject').map(r=>r[1]),[{target:'n-linux',path:'/missing'},{target:'n-linux',path:'/srv/new'}])
         // Sending creates the thread on that computer, attaches, then sends, and hands the thread to the view.
         await prompt('Run this on the server');await send();await pause(150)
-        assert.deepEqual((await evaluate('fixture.requests')).map(r=>r[0]).filter(m=>m.startsWith('bridge.hub.')&&m!=='bridge.hub.projects'&&m!=='bridge.hub.openProject'),['bridge.hub.create','bridge.hub.attach','bridge.hub.send'])
+        assert.deepEqual((await evaluate('fixture.requests')).map(r=>r[0]).filter(m=>m.startsWith('bridge.hub.')&&m!=='bridge.hub.projects'&&m!=='bridge.hub.openProject'&&m!=='bridge.hub.composerOptions'),['bridge.hub.create','bridge.hub.setModel','bridge.hub.attach','bridge.hub.send'])
+        assert.deepEqual((await evaluate('fixture.requests')).find(r=>r[0]==='bridge.hub.setModel')[1],{ref:{nodeId:'n-linux',entityId:'remote-1'},model:{llmProvider:'remote-llm',model:'r-model'}})
         assert.deepEqual((await evaluate('fixture.requests')).find(r=>r[0]==='bridge.hub.create')[1],{target:'n-linux',name:'Run this on the server',projectId:'r3',options:{worktreeEnabled:true}})
         assert.deepEqual(await evaluate('fixture.opened'),[{nodeId:'n-linux',entityId:'remote-1',deviceName:'Build Linux',title:'Run this on the server'}])
         assert.deepEqual((await calls()).map(c=>c[0]),[])

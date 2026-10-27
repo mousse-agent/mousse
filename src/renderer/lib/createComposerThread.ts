@@ -3,6 +3,12 @@ import type { Thread } from '../../shared/types'
 import type { PlatformRequestMethod } from '../../shared/platform'
 import type { Device } from './netDevices'
 import type { RemoteThreadTarget } from './openRemoteThread'
+import {
+  REMOTE_ATTACHMENT_CHUNK_CHARS,
+  REMOTE_ATTACHMENT_MAX_CHARS,
+  REMOTE_MAX_ATTACHMENTS,
+  type BridgeRemoteParams
+} from '../../shared/bridge/types'
 import { connectedRemoteDevices } from '../components/sideCard/deviceMenu'
 
 /** Keep an asynchronous blank-composer creation from overriding later navigation. */
@@ -61,8 +67,6 @@ export interface RemoteImage {
   data: string
 }
 
-/** Base64 characters per staged slice; the target accepts at most 48 KiB. */
-const STAGE_SLICE_CHARS = 48 * 1024
 /** A turn on the other computer can run for hours; this is the longest the hub allows. */
 const SEND_DEADLINE_MS = 86_400_000
 /** Chat modes the target accepts as plain strings. */
@@ -99,6 +103,8 @@ export async function startRemoteComposerThread(deps: {
   content: string
   images: readonly RemoteImage[]
   mode?: string | { type: 'skill'; skillId: string }
+  /** The model picked for the chat, from the target's own list; its default applies without one. */
+  model?: BridgeRemoteParams['threads.setModel']['model']
   request: Request
   stillVisible: () => boolean
   openRemoteThread: (target: RemoteThreadTarget) => void
@@ -111,19 +117,23 @@ export async function startRemoteComposerThread(deps: {
     throw new RemoteNotConnectedError(deviceName)
   if (!deps.stillVisible()) return null
 
+  if (deps.images.length > REMOTE_MAX_ATTACHMENTS)
+    throw new Error(`Attach up to ${REMOTE_MAX_ATTACHMENTS} images to a chat on another computer.`)
+  if (deps.images.some((image) => image.data.length > REMOTE_ATTACHMENT_MAX_CHARS))
+    throw new Error('An image is too large to send to another computer.')
   const uploads: string[] = []
   for (const image of deps.images) {
     const upload = deps.uploadId?.() ?? `up-${crypto.randomUUID()}`
-    const total = Math.max(1, Math.ceil(image.data.length / STAGE_SLICE_CHARS))
+    const total = Math.max(1, Math.ceil(image.data.length / REMOTE_ATTACHMENT_CHUNK_CHARS))
     for (let index = 0; index < total; index += 1) {
-      const staged = await deps.request<{ ok?: boolean; error?: string } | undefined>('bridge.hub.stage', {
+      const staged = await deps.request<{ ok?: boolean; error?: string } | undefined>('bridge.hub.stageAttachment', {
         target: deps.node,
         upload,
         index,
         total,
         name: image.name,
         mimeType: image.mimeType,
-        data: image.data.slice(index * STAGE_SLICE_CHARS, (index + 1) * STAGE_SLICE_CHARS)
+        data: image.data.slice(index * REMOTE_ATTACHMENT_CHUNK_CHARS, (index + 1) * REMOTE_ATTACHMENT_CHUNK_CHARS)
       })
       if (staged?.ok === false) throw new Error(staged.error || `${deviceName} did not accept the image`)
     }
@@ -142,6 +152,10 @@ export async function startRemoteComposerThread(deps: {
   const ref = { nodeId: deps.node, entityId }
   if (!deps.stillVisible()) return null
 
+  if (deps.model) {
+    const picked = await deps.request<{ ok?: boolean; error?: string } | undefined>('bridge.hub.setModel', { ref, model: deps.model })
+    if (picked?.ok === false) throw new Error(picked.error || `${deviceName} did not accept that model`)
+  }
   // Attach first: the display stream then carries the first turn from its first event.
   await deps.request('bridge.hub.attach', { ref })
   const mode = typeof deps.mode === 'string' ? (REMOTE_MODES.has(deps.mode) ? deps.mode : undefined) : deps.mode

@@ -157,8 +157,9 @@ describe('composer thread on another computer', () => {
     const calls: Array<{ method: string; params: any }> = []
     const answers: Record<string, unknown> = {
       'bridge.hub.create': { thread: { id: 'remote-thread' } },
+      'bridge.hub.setModel': { ok: true },
       'bridge.hub.attach': { ref: { nodeId: node, entityId: 'remote-thread' } },
-      'bridge.hub.stage': { ok: true },
+      'bridge.hub.stageAttachment': { ok: true },
       'bridge.hub.send': { text: 'done' },
       ...over.answers
     }
@@ -216,7 +217,7 @@ describe('composer thread on another computer', () => {
       mode: 'plan'
     })
     expect(calls.map((call) => call.method)).toEqual([
-      'bridge.hub.stage', 'bridge.hub.stage', 'bridge.hub.stage', 'bridge.hub.stage',
+      'bridge.hub.stageAttachment', 'bridge.hub.stageAttachment', 'bridge.hub.stageAttachment', 'bridge.hub.stageAttachment',
       'bridge.hub.create', 'bridge.hub.attach', 'bridge.hub.send'
     ])
     expect(calls.slice(0, 3).map((call) => [call.params.upload, call.params.index, call.params.total, call.params.data.length]))
@@ -226,11 +227,35 @@ describe('composer thread on another computer', () => {
   })
 
   it('stops before creating anything when the target refuses an image', async () => {
-    const { deps, calls, open } = setup({ answers: { 'bridge.hub.stage': { ok: false, error: 'The image is too large.' } } })
+    const { deps, calls, open } = setup({ answers: { 'bridge.hub.stageAttachment': { ok: false, error: 'The image is too large.' } } })
     await expect(startRemoteComposerThread({ ...deps, images: [{ name: 'a.png', mimeType: 'image/png', data: 'QUJD' }] }))
       .rejects.toThrow('The image is too large.')
-    expect(calls.map((call) => call.method)).toEqual(['bridge.hub.stage'])
+    expect(calls.map((call) => call.method)).toEqual(['bridge.hub.stageAttachment'])
     expect(open).not.toHaveBeenCalled()
+  })
+
+  it('stamps the picked model on the new thread before attaching, from the target\'s own list', async () => {
+    const { deps, calls } = setup()
+    await startRemoteComposerThread({ ...deps, model: { instanceId: 'codex', llmProvider: 'openai', model: 'gpt-x' } })
+    expect(calls.map((call) => call.method)).toEqual(['bridge.hub.create', 'bridge.hub.setModel', 'bridge.hub.attach', 'bridge.hub.send'])
+    expect(calls[1].params).toEqual({
+      ref: { nodeId: node, entityId: 'remote-thread' },
+      model: { instanceId: 'codex', llmProvider: 'openai', model: 'gpt-x' }
+    })
+    const refused = setup({ answers: { 'bridge.hub.setModel': { ok: false, error: 'That model is not available.' } } })
+    await expect(startRemoteComposerThread({ ...refused.deps, model: { instanceId: 'x', model: 'y' } })).rejects.toThrow('That model is not available.')
+    expect(refused.calls.map((call) => call.method)).toEqual(['bridge.hub.create', 'bridge.hub.setModel'])
+    expect(refused.open).not.toHaveBeenCalled()
+  })
+
+  it('refuses too many or too large images before staging anything', async () => {
+    const many = setup()
+    const image = { name: 'a.png', mimeType: 'image/png', data: 'QUJD' }
+    await expect(startRemoteComposerThread({ ...many.deps, images: Array.from({ length: 17 }, () => image) })).rejects.toThrow('Attach up to 16 images')
+    const large = setup()
+    await expect(startRemoteComposerThread({ ...large.deps, images: [{ ...image, data: 'A'.repeat(3 * 1024 * 1024 + 4) }] })).rejects.toThrow('too large')
+    expect(many.calls).toEqual([])
+    expect(large.calls).toEqual([])
   })
 
   it('passes only modes the target knows, and skill modes as they are', async () => {

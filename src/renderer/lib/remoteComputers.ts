@@ -1,4 +1,5 @@
 import type { NodeId } from '../../shared/net'
+import type { LlmProviderOption } from '../../shared/settings'
 import type { Project } from '../../shared/types'
 import { readDevices, type Device } from './netDevices'
 import { workspaceForDevice, type ComposerWorkspace } from './newThread'
@@ -56,4 +57,25 @@ export async function workspaceOnDevice(
 ): Promise<ComposerWorkspace> {
   const target = node ? await readRemoteProjects(node) : local
   return workspaceForDevice(workspace, shown, target, node)
+}
+
+/** The model a computer would use for a new chat, in the shape `bridge.hub.setModel` takes. */
+export interface RemoteDefaultModel {
+  instanceId?: string
+  llmProvider?: string
+  model: string
+}
+
+/** What another computer's composer offers: its models, and the one it would pick by default. */
+export interface RemoteComposerOptions {
+  providers: LlmProviderOption[]
+  defaultModel: RemoteDefaultModel | null
+}
+
+export async function readRemoteComposerOptions(node: NodeId): Promise<RemoteComposerOptions> {
+  const value = await request<Partial<RemoteComposerOptions> | undefined>('bridge.hub.composerOptions', { target: node })
+  return {
+    providers: Array.isArray(value?.providers) ? value.providers : [],
+    defaultModel: value?.defaultModel ?? null
+  }
 }
