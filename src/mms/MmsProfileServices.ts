@@ -11,6 +11,7 @@ import { ClaudeSubscriptionProviderService } from './providers/claudeSubscriptio
 import { ClaudeIntegrationResolver } from './providers/claudeSubscription/integrations'
 import { AntigravityProviderService } from './providers/antigravity/AntigravityProviderService'
 import { ProviderInstanceService } from './providers/ProviderInstanceService'
+import { createProviderAccess, type ProviderAccess } from './providers/providerAccess'
 import { createHarnessGateway, type Harness, type HarnessGateway } from './harness/gateway'
 import { antigravityDriver } from './harness/drivers/antigravity'
 import { acpDriver } from './harness/drivers/acp'
@@ -152,6 +153,11 @@ export class MmsProfileServices {
   readonly codex: CodexProviderService
   /** Provider instances of this profile: the agents callers pick by `{ instanceId, model }`. */
   readonly providerInstances: ProviderInstanceService
+  /**
+   * The shared speech and usage calls as this profile may make them: a provider removed from the
+   * profile is refused, whatever key another profile saved. Every caller goes through it.
+   */
+  readonly providerAccess: ProviderAccess
   /** The harness gateway: the only way app code reaches agents and providers. */
   harness?: HarnessGateway
   private harnessImpl?: Harness
@@ -345,15 +351,19 @@ export class MmsProfileServices {
       store: {
         read: () => {
           const section = config.getProvidersSection()
-          return { instances: section.instances, seedVersion: section.instancesSeedVersion }
+          return { instances: section.instances, seedVersion: section.instancesSeedVersion, removed: section.removedInstances }
         },
-        write: ({ instances, seedVersion }) => config.updateProvidersSection({ instances, instancesSeedVersion: seedVersion })
+        // One write: the entries and the tombstones never disagree on disk. An older build merges
+        // its own writes over this section and keeps `removedInstances` as it is.
+        write: ({ instances, seedVersion, removed }) =>
+          config.updateProvidersSection({ instances, instancesSeedVersion: seedVersion, removedInstances: removed.length ? removed : undefined })
       }
     })
       .registerVendor('antigravity', this.antigravity)
       .registerVendor('claude', this.claudeSubscription)
       .registerVendor('codex', this.codex)
     this.providerInstances.list()
+    this.providerAccess = createProviderAccess(this.providerAuth, this.providerInstances)
     this.integrationContext = shared.personal
       ? {
           profileId: this.profileId,
@@ -650,8 +660,9 @@ export class MmsProfileServices {
       {
         // `/model` lists what a channel turn can run on and hold `CHANNEL_POLICY` (disabled
         // instances and hidden models already left the listing); nothing is picked by name.
-        listModels: () => channelModelOptions(this.providerInstances.llmProviders(), channelCapsOf),
+        listModels: () => channelModelOptions(harness.listedLlmProviders({ kind: 'device' }), channelCapsOf),
         capsOf: channelCapsOf,
+        getSubscriptionUsage: (providerId) => this.providerAccess.subscriptionUsage(providerId),
         // Personal bots answer their owner's DMs (PR 6 §6); without bots.db the channel has none.
         ...(bots ? {
           bots: {

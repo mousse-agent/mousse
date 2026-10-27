@@ -24,12 +24,16 @@ const INSTALLATION_METHODS = new Set([
 // These responses also contain profile-local ACP credentials/catalog state.
 // The pi-ai credential service remains shared between profile service instances.
 // The usage methods answer for the profile's own agents (its Codex entries) next to the shared pi-ai
-// providers, so each profile sees only its own.
+// providers, so each profile sees only its own. Speech and usage refuse a provider removed from the
+// bound profile (`providerAccess`), and the old Add dialog's key and sign-ins add a removed model
+// API back to the bound profile, so they run on it too.
 const PROFILE_PROVIDER_METHODS = new Set([
   'providers.getUsage', 'providers.getSubscriptionUsage',
+  'providers.synthesizeSpeech', 'providers.transcribeAudio',
   'providers.listConfigured', 'providers.getLoginOptions', 'providers.refreshModels',
-  'providers.loginOAuth', 'providers.logout',
-  'providers.snapshots', 'providers.instances.add', 'providers.instances.remove',
+  'providers.loginOAuth', 'providers.loginApiKey', 'providers.verifyAmbient', 'providers.setApiKey', 'providers.logout',
+  'providers.snapshots', 'providers.catalog.addOptions',
+  'providers.instances.add', 'providers.instances.setSecret', 'providers.instances.remove',
   'providers.instances.configure', 'providers.instances.setEnabled', 'providers.instances.install',
   'providers.instances.cancelInstall', 'providers.instances.update',
   'providers.instances.signIn', 'providers.instances.respondSignIn', 'providers.instances.signOut',

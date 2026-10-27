@@ -706,7 +706,9 @@ function apiKeyCredential(live: () => DriverContext, check: ClaudeApiKeyChecker,
         live().changed()
         if (failures.length) throw failures[0]
       },
-      adoptApiKey: save
+      adoptApiKey: save,
+      // Replace key: the entry's own key in its vault, never in the terminal's sign-in.
+      setSecret: save
     }
   }
   return { serviceOptions, runtime }

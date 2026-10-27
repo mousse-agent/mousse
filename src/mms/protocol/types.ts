@@ -360,6 +360,7 @@ export const PROTOCOL_METHODS = [
   // and report through `providers.operation` events.
   'providers.snapshots',
   'providers.instances.add',
+  'providers.instances.setSecret',
   'providers.instances.remove',
   'providers.instances.configure',
   'providers.instances.setEnabled',
@@ -376,6 +377,7 @@ export const PROTOCOL_METHODS = [
   'providers.instances.setModelPrefs',
   'providers.instances.move',
   'providers.registry.search',
+  'providers.catalog.addOptions',
   'webTools.getCredentialStatus',
   'webTools.setApiKey',
   'webTools.clearApiKey',

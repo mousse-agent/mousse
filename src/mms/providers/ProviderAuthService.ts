@@ -525,11 +525,14 @@ export class ProviderAuthService {
     await this.credentials.delete(providerId)
   }
 
-  /** Fetch subscription limits daemon-side; credentials never cross the protocol boundary. */
-  async getUsage(): Promise<ProvidersUsageResponse> {
+  /**
+   * Fetch subscription limits daemon-side; credentials never cross the protocol boundary. `include`
+   * leaves providers out before anything is fetched (a profile's removed providers: `providerAccess`).
+   */
+  async getUsage(include: (providerId: string) => boolean = () => true): Promise<ProvidersUsageResponse> {
     // Keep every configured provider in the response so the usage view is a complete
     // provider inventory (providers without a quota API are explicitly marked unavailable).
-    const configuredProviders = this.getConfiguredProviders()
+    const configuredProviders = this.getConfiguredProviders().filter((provider) => include(provider.id))
     const providers = await Promise.all(
       configuredProviders.map(async (provider) => {
         if (provider.id === 'anthropic') return {

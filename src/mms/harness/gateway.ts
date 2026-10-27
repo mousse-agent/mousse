@@ -12,6 +12,7 @@ import type {
   InstanceConfigPatch,
   InstanceModel,
   ModelPrefsPatch,
+  ProviderAddOption,
   ProviderOperationEvent,
   ProviderOperationStarted,
   ProviderScope,
@@ -224,6 +225,15 @@ export interface HarnessGateway {
   discardContinuations(threadId: string, id?: string): void
   /** `llmProvider` names of enabled vendor instances that are signed in (default-model fallback). */
   configuredProviderIds(): string[]
+  /**
+   * The model pickers' listing (`settings.getOptions().llmProviders`): one entry per enabled,
+   * non-removed instance that lists models, with its model prefs applied. The first read after
+   * start waits for each instance's first check (each phase has a hard deadline); later reads use
+   * the cached result while a due refresh runs in the background and arrives as a snapshots event.
+   */
+  llmProviders(scope: ProviderScope): Promise<LlmProviderOption[]>
+  /** The same listing from what is known now, without waiting (synchronous readers: channel `/model`). */
+  listedLlmProviders(scope: ProviderScope): LlmProviderOption[]
   /** Old provider methods (`providers.listConfigured`, `loginOAuth`, ...) forward here. */
   readonly legacy: LegacyProviders
   /** Stops the instances' runtimes and running operations. */
@@ -275,8 +285,6 @@ export interface ResolvedTurnSelection {
 /** The old provider RPCs, served through the instances that replace the vendor branches. */
 export interface LegacyProviders {
   configuredProviders(): ConfiguredProvider[]
-  /** Picker listings: one per enabled instance, hidden models removed, custom models added. */
-  llmProviders(): LlmProviderOption[]
   /** False when `providerId` is not a vendor instance (the caller then asks the pi credentials). */
   refreshModels(providerId: string, cwd: string): Promise<boolean>
   logout(providerId: string): Promise<boolean>
@@ -287,6 +295,11 @@ export interface LegacyProviders {
    * instance is checked again now and its snapshot published, whatever the probe cache held.
    */
   credentialsChanged(providerId: string): Promise<void>
+  /**
+   * The old Add dialog saves a credential for `providerId`: that is an explicit add, so a model API
+   * removed from this profile is added again (its tombstone cleared) through the add path.
+   */
+  explicitAdd(providerId: string): Promise<void>
 }
 
 /**
@@ -343,6 +356,10 @@ export interface HarnessInstances {
    */
   usage(scope: ProviderScope): Promise<ProviderUsage[]>
   add(input: AddInstanceInput): Promise<InstanceSnapshot>
+  /** `add`, telling whether the entry existed already (a fixed-id entry is then returned unchanged). */
+  addInstance(input: AddInstanceInput): Promise<{ snapshot: InstanceSnapshot; existed: boolean }>
+  /** Saves the entry's secret (`DriverRuntime.setSecret`), then checks it again. The value is never logged or emitted. */
+  setSecret(instanceId: string, value: string): Promise<InstanceSnapshot>
   /** Deletes any instance, built-in ones too; a vendor agent is not seeded again. */
   remove(instanceId: string): Promise<void>
   configure(instanceId: string, patch: InstanceConfigPatch): Promise<InstanceSnapshot>
@@ -403,6 +420,11 @@ export interface HarnessCatalog {
    * agent's own word in `initialize` (`promptCapabilities.image`). Unknown is no.
    */
   toolImages(instanceId: string, modelId: string): boolean
+  /**
+   * What Add provider offers (`providers.catalog.addOptions`): every driver's options, each with
+   * the exact `instances.add` input and whether this profile has it already.
+   */
+  addOptions(): ProviderAddOption[]
 }
 
 /**
@@ -776,25 +798,17 @@ export class Harness implements HarnessGateway {
           if (state.result?.install === 'not_installed') state.checkedAtMs = undefined
       })
       .catch(() => {})
-    this.instanceMap.setListings(
-      (instanceId) => {
-        const record = this.recordOrUndefined(instanceId)
-        // An instance signed out in Mousse lists nothing, whatever its runtime says.
-        if (!record || this.isSignedOut(record)) return undefined
-        // An added instance is named after itself, so two Claude instances read apart.
-        const named = <T extends { label: string }>(value: T | undefined): T | undefined =>
-          value && !record.builtIn ? { ...value, label: this.displayName(record) } : value
-        return {
-          configuredProvider: () => named(record.runtime.configuredProvider?.()),
-          llmProvider: () => named(record.runtime.llmProvider?.())
-        }
-      },
-      (option) => ({ ...visibleProviderOption(option, this.prefs.get(option.instanceId)), instanceId: option.instanceId, oneShot: this.oneShotAvailable(option.instanceId) })
-    )
+    // Transitional (`configuredProviders`, the old `providers.listConfigured`): deleted in 5a-2.
+    this.instanceMap.setListings((instanceId) => {
+      const record = this.listedRecord(instanceId)
+      return record ? { configuredProvider: () => this.named(record, record.runtime.configuredProvider?.()), llmProvider: () => this.named(record, record.runtime.llmProvider?.()) } : undefined
+    })
     this.instances = {
       snapshots: (scope) => this.snapshots(scope),
       usage: (scope) => this.usage(scope),
-      add: (input) => this.add(input),
+      add: async (input) => (await this.add(input)).snapshot,
+      addInstance: (input) => this.add(input),
+      setSecret: (instanceId, value) => this.setSecret(instanceId, value),
       remove: (instanceId) => this.remove(instanceId),
       configure: (instanceId, patch) => this.configure(instanceId, patch),
       setEnabled: (instanceId, scope, enabled) => this.setEnabled(instanceId, scope, enabled),
@@ -851,11 +865,23 @@ export class Harness implements HarnessGateway {
         if (record.driver.mcpImageResults === true) return true
         const prompt = this.currentFacts(instanceId)?.agentCapabilities?.promptCapabilities
         return typeof prompt === 'object' && prompt !== null && (prompt as { image?: unknown }).image === true
-      }
+      },
+      addOptions: () => this.addOptions()
     }
     this.legacy = {
       configuredProviders: () => this.instanceMap.configuredProviders(),
-      llmProviders: () => this.instanceMap.llmProviders(),
+      explicitAdd: async (providerId) => {
+        let instanceId: string
+        try {
+          instanceId = this.instanceMap.instanceIdForLegacyProvider(providerId)
+        } catch {
+          return
+        }
+        // Only a removed model API comes back; any other provider is added by its credential, as before.
+        const provider = piProviderIdOf(instanceId)
+        if (!provider || !this.instanceMap.isRemoved(instanceId)) return
+        await this.add({ driver: 'pi', config: { provider } })
+      },
       refreshModels: async (providerId, cwd) => {
         const record = this.legacyRecord(providerId)
         if (!record) return false
@@ -895,16 +921,7 @@ export class Harness implements HarnessGateway {
           return
         }
         if (this.instanceMap.get(instanceId)?.driver !== 'pi') return
-        // Processes started with the old credential stop holding it (Pi's agent: its auth.json too).
-        const record = this.records.get(instanceId)
-        await record?.runtime.credentialsChanged?.().catch((error) => console.warn('[harness] could not retire old credentials', { instanceId, error: errorText(error) }))
-        // A key saved for an instance signed out in Mousse signs it in again; a call that saved
-        // nothing (a removed key, a failed check) leaves it signed out.
-        const flagged = this.recordOrUndefined(instanceId)
-        if (flagged && this.isSignedOut(flagged) && flagged.runtime.configured()) await this.reconnect(flagged).catch((error) => console.warn('[harness] could not clear a sign-out', { instanceId, error: errorText(error) }))
-        // A check already running read the old credentials: wait for it, then check again.
-        await this.probes.get(instanceId)?.probing
-        await this.probe(instanceId, true)
+        await this.credentialsChanged(instanceId)
       }
     }
     // Before the first probe: launch settings and sign-outs an older Mousse left in vendor files.
@@ -2020,18 +2037,8 @@ export class Harness implements HarnessGateway {
 
   async snapshots(scope: ProviderScope): Promise<InstanceSnapshot[]> {
     const ids = Object.keys(this.instanceMap.list())
-    const firstChecks: Array<Promise<void>> = []
-    for (const instanceId of ids) {
-      const state = this.probes.get(instanceId)
-      const due = !state?.checkedAtMs || this.now() - state.checkedAtMs >= PROBE_TTL_MS
-      if (!due || !this.instanceMap.list()[instanceId]?.enabled) continue
-      const probing = this.probe(instanceId, false)
-      // The first check of an instance is awaited (each phase has a hard deadline); later
-      // refreshes run in the background and arrive as `providers.snapshots` events.
-      if (!state?.result) firstChecks.push(probing)
-    }
     this.refreshLatest(ids)
-    await Promise.all(firstChecks)
+    await this.awaitFirstChecks(ids)
     return ids.flatMap((instanceId) => {
       try {
         return [this.snapshot(instanceId, scope)]
@@ -2039,6 +2046,73 @@ export class Harness implements HarnessGateway {
         return []
       }
     })
+  }
+
+  /**
+   * Starts the check of every enabled instance whose result is due, and waits for the first check
+   * of each one never checked (each phase has a hard deadline). Later refreshes run in the
+   * background and arrive as `providers.snapshots` events.
+   */
+  private async awaitFirstChecks(ids: readonly string[]): Promise<void> {
+    const entries = this.instanceMap.list()
+    const firstChecks: Array<Promise<void>> = []
+    for (const instanceId of ids) {
+      const state = this.probes.get(instanceId)
+      const due = !state?.checkedAtMs || this.now() - state.checkedAtMs >= PROBE_TTL_MS
+      if (!due || !entries[instanceId]?.enabled) continue
+      const probing = this.probe(instanceId, false)
+      if (!state?.result) firstChecks.push(probing)
+    }
+    await Promise.all(firstChecks)
+  }
+
+  async llmProviders(scope: ProviderScope): Promise<LlmProviderOption[]> {
+    await this.awaitFirstChecks(Object.keys(this.instanceMap.list()))
+    return this.listedLlmProviders(scope)
+  }
+
+  listedLlmProviders(scope: ProviderScope): LlmProviderOption[] {
+    const entries = this.instanceMap.list()
+    const listed: LlmProviderOption[] = []
+    for (const [instanceId, entry] of Object.entries(entries)) {
+      if (!this.scopes.enabled(instanceId, entry.enabled, scope).effective) continue
+      const record = this.listedRecord(instanceId)
+      // A runtime lists nothing while it cannot run (a model API without its credential).
+      const option = record && this.named(record, record.runtime.llmProvider?.())
+      if (!option) continue
+      listed.push({ ...visibleProviderOption({ ...option, instanceId }, this.prefs.get(instanceId)), instanceId, oneShot: this.oneShotAvailable(instanceId) })
+    }
+    return listed
+  }
+
+  /** The record of an instance the listings show, or undefined (unknown, or signed out in Mousse). */
+  private listedRecord(instanceId: string): InstanceRecord | undefined {
+    const record = this.recordOrUndefined(instanceId)
+    // An instance signed out in Mousse lists nothing, whatever its runtime says.
+    return record && !this.isSignedOut(record) ? record : undefined
+  }
+
+  /** An added instance is named after itself, so two Claude instances read apart. */
+  private named<T extends { label: string }>(record: InstanceRecord, value: T | undefined): T | undefined {
+    return value && !record.builtIn ? { ...value, label: this.displayName(record) } : value
+  }
+
+  private addOptions(): ProviderAddOption[] {
+    const entries = this.instanceMap.list()
+    const options: ProviderAddOption[] = []
+    for (const driver of this.drivers.values()) {
+      for (const option of driver.addOptions?.() ?? []) {
+        let instanceId: string | undefined
+        try {
+          instanceId = driver.instanceIdFor?.(option.config)
+        } catch {
+          continue
+        }
+        const { config, ...shown } = option
+        options.push({ ...shown, add: { driver: driver.kind, config: { ...config } }, added: instanceId !== undefined && Object.prototype.hasOwnProperty.call(entries, instanceId) })
+      }
+    }
+    return options.sort((a, b) => a.label.localeCompare(b.label))
   }
 
   private async usage(scope: ProviderScope): Promise<ProviderUsage[]> {
@@ -2327,11 +2401,17 @@ export class Harness implements HarnessGateway {
 
   // -- Mutations --------------------------------------------------------------------------------
 
-  private async add(input: AddInstanceInput): Promise<InstanceSnapshot> {
+  /**
+   * Adds an entry; an explicit add, so a removed (tombstoned) id comes back with a fresh entry. A
+   * driver with fixed ids (`instanceIdFor`) returns an existing entry unchanged (`existed`).
+   */
+  private async add(input: AddInstanceInput): Promise<{ snapshot: InstanceSnapshot; existed: boolean }> {
     const driver = this.drivers.get(input.driver)
     if (!driver) return harnessFail('unsupported', `Mousse cannot add a ${input.driver} instance.`)
     const patch = input.config ?? {}
     if (patch.engine !== undefined) return harnessFail('unsupported', `${driver.label} takes its engine under Advanced once added.`)
+    if (driver.instanceIdFor) return this.addFixed(driver, patch)
+    if (patch.provider !== undefined) return harnessFail('unsupported', `${driver.label} takes no model provider.`)
     const entries = this.instanceMap.list()
     const hasOne = Object.values(entries).some((entry) => entry.driver === driver.kind)
     if (hasOne && !driver.multiInstance) return harnessFail('unsupported', `${driver.label} supports one instance in this version.`)
@@ -2382,7 +2462,7 @@ export class Harness implements HarnessGateway {
       config.signedOutInMousse = false
     }
     try {
-      this.instanceMap.setEntry(instanceId, entry)
+      this.instanceMap.setEntry(instanceId, entry, { revive: true })
     } catch (error) {
       if (record) {
         this.records.delete(instanceId)
@@ -2399,14 +2479,78 @@ export class Harness implements HarnessGateway {
     mkdirSync(instanceStateDir(this.options.profileHome, instanceId), { recursive: true, mode: 0o700 })
     this.changed(instanceId)
     void this.probe(instanceId, true, { handshake: true })
+    return { snapshot: this.snapshot(instanceId, { kind: 'device' }), existed: false }
+  }
+
+  /**
+   * An entry whose id its add input fixes (`pi:<provider>`): an existing one is returned as it is
+   * (a CLI add runs twice safely); otherwise a fresh entry is written over any stale one an older
+   * build left for a removed id, and the tombstone goes in the same write. The provider is not
+   * stored: the id carries it.
+   */
+  private async addFixed(driver: HarnessDriver, patch: InstanceConfigPatch): Promise<{ snapshot: InstanceSnapshot; existed: boolean }> {
+    const instanceId = driver.instanceIdFor!(patch)
+    if (Object.prototype.hasOwnProperty.call(this.instanceMap.list(), instanceId))
+      return { snapshot: this.snapshot(instanceId, { kind: 'device' }), existed: true }
+    const config: Record<string, unknown> = {}
+    if (patch.displayName?.trim()) config.displayName = patch.displayName.trim()
+    this.instanceMap.setEntry(instanceId, { driver: driver.kind, enabled: true, ...(Object.keys(config).length ? { config } : {}) }, { revive: true })
+    // A runtime still held from before the removal is not reused.
+    const stale = this.records.get(instanceId)
+    if (stale) {
+      this.records.delete(instanceId)
+      this.retire(stale)
+    }
+    mkdirSync(instanceStateDir(this.options.profileHome, instanceId), { recursive: true, mode: 0o700 })
+    this.changed(instanceId)
+    void this.probe(instanceId, true, { handshake: true })
+    return { snapshot: this.snapshot(instanceId, { kind: 'device' }), existed: false }
+  }
+
+  /**
+   * Saves an entry's secret through its runtime, then checks it again (after any check already
+   * running, which read the old one). The value goes nowhere else: no log, event or error.
+   */
+  private async setSecret(instanceId: string, value: string): Promise<InstanceSnapshot> {
+    const record = this.record(instanceId, { allowDisabled: true })
+    this.refuseRetired(record)
+    if (!record.runtime.setSecret) return harnessFail('unsupported', `${this.displayName(record)} takes no API key.`, instanceId)
+    await record.runtime.setSecret(value)
+    await this.credentialsChanged(instanceId)
+    this.options.onProvidersChanged?.()
     return this.snapshot(instanceId, { kind: 'device' })
   }
 
+  /**
+   * An instance's credential changed outside its own sign-in (a saved key, another surface): what
+   * holds the old one lets it go, a key saved for an instance signed out in Mousse signs it in
+   * again, and the instance is checked again after any check already running.
+   */
+  private async credentialsChanged(instanceId: string): Promise<void> {
+    // Processes started with the old credential stop holding it (Pi's agent: its auth.json too).
+    const record = this.records.get(instanceId)
+    await record?.runtime.credentialsChanged?.().catch((error) => console.warn('[harness] could not retire old credentials', { instanceId, error: errorText(error) }))
+    // A call that saved nothing (a removed key, a failed check) leaves a sign-out as it is.
+    const flagged = this.recordOrUndefined(instanceId)
+    if (flagged && this.isSignedOut(flagged) && flagged.runtime.configured()) await this.reconnect(flagged).catch((error) => console.warn('[harness] could not clear a sign-out', { instanceId, error: errorText(error) }))
+    // A check already running read the old credentials: wait for it, then check again.
+    await this.probes.get(instanceId)?.probing
+    await this.probe(instanceId, true)
+  }
+
   private async remove(instanceId: string): Promise<void> {
-    // Every provider is an entry like any other: removing deletes it. The user's own CLI and its
-    // sign-in are never touched, and Add provider adds it back.
+    // Every provider is an entry like any other: removing deletes it, and it stays deleted (a
+    // tombstone) until Add provider adds it back. The user's own CLI and its sign-in are never
+    // touched; a model API's saved key is deleted (`removeSignsOut`).
     const record = this.record(instanceId, { allowDisabled: true })
     const state = this.probes.get(instanceId)
+    if (record.driver.removeSignsOut && record.runtime.signOut) {
+      try {
+        await record.runtime.signOut()
+      } catch (error) {
+        harnessFail('operation_busy', `${this.displayName(record)} could not be removed: ${errorText(error)} Try removing it again.`, instanceId)
+      }
+    }
     // Sign-ins Mousse keeps in the instance's folder go first, with what used them stopped and
     // their tokens revoked; the folder is deleted only after that. When it fails the entry stays,
     // so removing it again retries.
@@ -2480,6 +2624,8 @@ export class Harness implements HarnessGateway {
     if (patch.engine !== undefined && !record.driver.engine?.(instanceId, record.entry.config ?? {}).switchable)
       harnessFail('unsupported', `${this.displayName(record)} runs on one engine only.`, instanceId)
     if (patch.useOlderSettings) return this.useOlderSettings(record)
+    if (patch.provider !== undefined)
+      harnessFail('unsupported', `${this.displayName(record)} keeps the provider it was added with. Add another entry for another one.`, instanceId)
     const launch: CliProviderConfigPatch = {
       ...(patch.binaryPath !== undefined ? { binaryPath: patch.binaryPath } : {}),
       ...(patch.args !== undefined ? { args: patch.args } : {}),

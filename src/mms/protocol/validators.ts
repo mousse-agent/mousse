@@ -538,7 +538,7 @@ function asNullableTrimmed(v: unknown, name: string, maxLen: number): string | n
 export function asInstanceConfigPatch(v: unknown, name = 'patch'): InstanceConfigPatch {
   if (v === undefined || v === null) return {}
   const o = asPlainObject(v, name)
-  assertKnownKeys(o, name, ['displayName', 'home', 'binaryPath', 'args', 'env', 'loginMethod', 'source', 'setup', 'engine', 'useOlderSettings'])
+  assertKnownKeys(o, name, ['displayName', 'home', 'binaryPath', 'args', 'env', 'loginMethod', 'source', 'setup', 'engine', 'useOlderSettings', 'provider'])
   if (o.useOlderSettings !== undefined) {
     if (o.useOlderSettings !== true) throw invalidParams(`${name}.useOlderSettings must be true`)
     return { useOlderSettings: true }
@@ -560,10 +560,17 @@ export function asInstanceConfigPatch(v: unknown, name = 'patch'): InstanceConfi
     if (o.engine !== null && o.engine !== 'rpc' && o.engine !== 'legacy') throw invalidParams(`${name}.engine must be rpc|legacy|null`)
     patch.engine = o.engine
   }
+  if (o.provider !== undefined) {
+    const provider = asString(o.provider, `${name}.provider`, 64)
+    if (!PROVIDER_ID.test(provider)) throw invalidParams(`${name}.provider is not a provider id`)
+    patch.provider = provider
+  }
   return patch
 }
 
 const REGISTRY_AGENT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/
+/** A model API's provider id (`pi:<provider>`). */
+const PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const REGISTRY_VERSION = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/
 
 /** An ACP registry agent to install: ids and versions that can be path segments only. */

@@ -2242,8 +2242,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'settings.getOptions': {
       await ctx.mms.providerAuth.init()
-      await refreshVendorSignIns(ctx)
-      const llmProviders = ctx.mms.providerInstances.llmProviders()
+      // The first read after start waits for each instance's first check (`awaitFirstChecks`).
+      const llmProviders = (await ctx.mms.harness?.llmProviders({ kind: 'device' })) ?? []
       const agentTypes = buildAgentTypesFromCatalogs(ctx.mms.providerAuth.getCatalogLlmProviders())
       return {
         options: {
@@ -2266,7 +2266,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       await ctx.mms.claudeSubscription.status()
       // Pi providers read the shared pi-ai credentials; agents (Codex) answer for the bound profile.
       const [usage, claude, agents] = await Promise.all([
-        ctx.mms.providerAuth.getUsage(),
+        // Providers removed from this profile are left out (`providerAccess`).
+        ctx.mms.providerAccess.usage(),
         ctx.mms.claudeSubscription.configured()
           ? ctx.mms.claudeSubscription.getUsage(ctx.mms.worktrees.getRepoRoot())
           : Promise.resolve(undefined),
@@ -2281,7 +2282,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'providers.getSubscriptionUsage': {
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
-      const text = await ctx.mms.providerAuth.getSubscriptionUsage(providerId)
+      // A provider removed from this profile is refused (`providerAccess`).
+      const text = await ctx.mms.providerAccess.subscriptionUsage(providerId)
       if (text !== undefined) return { usage: text }
       // An agent instance named by its id (`codex`, `codex:work`).
       const agent = (await ctx.mms.harness?.instances.usage({ kind: 'device' }))?.find((entry) => entry.id === providerId)
@@ -2293,7 +2295,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const modelId = asString(p.modelId, 'modelId', 256)
       const text = asString(p.text, 'text', PROVIDER_TTS_MAX_CHARS)
       const voice = p.voice === undefined ? undefined : asString(p.voice, 'voice', 128)
-      const { audio, mimeType } = await ctx.mms.providerAuth.synthesizeSpeech({ providerId, modelId, text, voice })
+      const { audio, mimeType } = await ctx.mms.providerAccess.synthesizeSpeech({ providerId, modelId, text, voice })
       return { audioBase64: Buffer.from(audio).toString('base64'), mimeType }
     }
     case 'providers.transcribeAudio': {
@@ -2308,7 +2310,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (audio.byteLength > PROVIDER_STT_MAX_BYTES) {
         throw new Error(`The recording is too long to transcribe with ${ctx.mms.providerAuth.getProviderDisplayName(providerId)}. Record a shorter message.`)
       }
-      const { text } = await ctx.mms.providerAuth.transcribeAudio({ providerId, modelId, audio, mimeType })
+      const { text } = await ctx.mms.providerAccess.transcribeAudio({ providerId, modelId, audio, mimeType })
       return { text }
     }
     case 'providers.getLoginOptions': {
@@ -2323,7 +2325,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // A vendor instance refreshes through its runtime; anything else is a pi-ai provider.
       if (!(await harnessGateway(ctx).legacy.refreshModels(providerId, ctx.mms.worktrees.getRepoRoot())))
         await ctx.mms.providerAuth.refreshDynamicModels()
-      return { options: ctx.mms.providerInstances.llmProviders() }
+      return { options: await harnessGateway(ctx).llmProviders({ kind: 'device' }) }
     }
     case 'providers.getAmbientInfo': {
       const p = isObject(params) ? params : {}
@@ -2335,6 +2337,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const providerId = asString(p.providerId, 'providerId', 128)
       const apiKey = asString(p.apiKey, 'apiKey', 8192)
       await ctx.mms.providerAuth.setApiKey(providerId, apiKey)
+      // The old Add dialog's key is an explicit add: a model API removed from this profile comes back.
+      await ctx.mms.harness?.legacy.explicitAdd(providerId)
       await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
       await ctx.mms.harness?.legacy.credentialsChanged(providerId)
       const providers = ctx.mms.providerInstances.configuredProviders()
@@ -2367,6 +2371,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
       const result = await ctx.mms.providerAuth.verifyAmbientProvider(providerId)
+      if (result?.success) await ctx.mms.harness?.legacy.explicitAdd(providerId)
       await ctx.mms.harness?.legacy.credentialsChanged(providerId)
       const providers = ctx.mms.providerInstances.configuredProviders()
       if (result?.success) ctx.emitEvent?.('providers.changed', { providers })
@@ -2399,6 +2404,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         const result = await (harnessGateway(ctx).legacy.login(providerId, session, ctx.mms.worktrees.getRepoRoot())
           ?? ctx.mms.providerAuth.runOAuthLogin(session, providerId))
         if (result && (result as { success?: boolean }).success !== false) {
+          await ctx.mms.harness?.legacy.explicitAdd(providerId)
           await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
         }
         await ctx.mms.harness?.legacy.credentialsChanged(providerId)
@@ -2430,6 +2436,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       try {
         const result = await ctx.mms.providerAuth.runApiKeyLogin(session, providerId)
         if (result && (result as { success?: boolean }).success !== false) {
+          await ctx.mms.harness?.legacy.explicitAdd(providerId)
           await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
         }
         await ctx.mms.harness?.legacy.credentialsChanged(providerId)
@@ -2468,10 +2475,23 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'providers.snapshots': {
       const p = isObject(params) ? params : {}
       const scope = asProviderScope(p.scope)
-      return { scope, snapshots: await harnessGateway(ctx).instances.snapshots(scope) }
+      const snapshots = await harnessGateway(ctx).instances.snapshots(scope)
+      const instancesError = ctx.mms.providerInstances.storeError()
+      // Present while the profile's stored instance map cannot be read (nothing is overwritten).
+      return { scope, snapshots, ...(instancesError ? { instancesError } : {}) }
     }
-    case 'providers.instances.add':
-      return { snapshot: await harnessGateway(ctx).instances.add(asAddInstanceInput(params)) }
+    case 'providers.catalog.addOptions':
+      return { options: harnessGateway(ctx).catalog.addOptions() }
+    case 'providers.instances.add': {
+      // A fixed-id entry that exists already comes back unchanged (`existed`), so adding is idempotent.
+      const { snapshot, existed } = await harnessGateway(ctx).instances.addInstance(asAddInstanceInput(params))
+      return { snapshot, ...(existed ? { existed: true } : {}) }
+    }
+    case 'providers.instances.setSecret': {
+      const p = isObject(params) ? params : {}
+      const instanceId = asInstanceId(p.instanceId)
+      return { snapshot: await harnessGateway(ctx).instances.setSecret(instanceId, asString(p.value, 'value', 8192)) }
+    }
     case 'providers.instances.remove': {
       const p = isObject(params) ? params : {}
       await harnessGateway(ctx).instances.remove(asInstanceId(p.instanceId))
