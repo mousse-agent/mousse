@@ -21,6 +21,7 @@ import type {
   FileAsset,
   EditorInfo,
   FileEntry,
+  FileGrepResponse,
   FileSearchResponse,
   GitBranchInfo,
   GitCommit,
@@ -415,7 +416,13 @@ const api = {
       options?: { limit?: number; kinds?: Array<'file' | 'directory'> },
       projectId?: string,
       threadId?: string | null
-    ): Promise<FileSearchResponse> => ipcRenderer.invoke('fs:search', query, options, projectId, threadId)
+    ): Promise<FileSearchResponse> => ipcRenderer.invoke('fs:search', query, options, projectId, threadId),
+    grep: (
+      query: string,
+      options?: { regex?: boolean; caseSensitive?: boolean; wholeWord?: boolean; limit?: number; timeoutMs?: number },
+      projectId?: string,
+      threadId?: string | null
+    ): Promise<FileGrepResponse> => ipcRenderer.invoke('fs:grep', query, options, projectId, threadId)
   },
   github: {
     status: (): Promise<GitHubAvailability> => ipcRenderer.invoke('github:status'),

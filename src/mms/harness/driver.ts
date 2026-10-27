@@ -1,5 +1,5 @@
 import type { AuthState, InstallOwner } from '../../shared/harness/status'
-import type { HarnessCaps, HarnessDriverKind, RemoveInstallResult, RuntimeFacts } from '../../shared/harness/types'
+import type { CustomModel, HarnessCaps, HarnessDriverKind, RemoveInstallResult, RuntimeFacts } from '../../shared/harness/types'
 import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult } from '../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
 import type { UserQuestionService } from '../orchestrator/UserQuestionService'
@@ -11,6 +11,7 @@ import type { McpTurnBinding } from '../run/mcp/appTools/registry'
 import type { ProviderRef } from '../run/types'
 import type { InstanceEnv } from './env'
 import type { LatestVersionSource } from './latest'
+import type { SpendModelFacts } from './policy'
 
 /**
  * A driver is a kind of runtime (Claude Code, Codex, Antigravity, the pi loop). The gateway asks
@@ -123,9 +124,38 @@ export interface LiveProcessHost {
   notice?(threadId: string, text: string): void
 }
 
+/**
+ * One model request with no tools and no session (a chat title), run by the gateway's `oneShot`.
+ * The gateway resolved and admitted the selection and owns the timeout; the driver makes exactly one
+ * request and never retries.
+ */
+export interface OneShotSpec {
+  /** The model as selected (a `:effort` suffix included, when the selection had one). */
+  model: string
+  effort?: string
+  /** The user's custom model of that id on this instance, when it is one. */
+  customModel?: CustomModel
+  system: string
+  prompt: string
+  /** Prompt-cache affinity, hashed before it reaches the provider (a thread id). */
+  sessionKey?: string
+  /** Called on every event the provider sends; the gateway's inactivity timeout restarts. */
+  onActivity(): void
+}
+
 export interface DriverRuntime {
   /** The turn runtime of this instance. */
   readonly adapter: ProviderAdapter
+  /**
+   * One request with no tools (`HarnessDriver.oneShot`). Throws the provider's failure; `signal`
+   * aborts it (the caller stopped, or the gateway's inactivity timeout).
+   */
+  oneShot?(spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }>
+  /**
+   * What token and spend limits need from `model` (`SpendModelFacts`), read at turn admission only
+   * when the policy has such a limit and the caps reserve spend. Absent or undefined refuses them.
+   */
+  spendModel?(model: string): SpendModelFacts | undefined
   /** Signed in and installed, so its models can be the default. */
   configured(): boolean
   /** The Settings listings of a vendor instance (`providers.listConfigured`, model pickers). */
@@ -250,6 +280,11 @@ export interface HarnessDriver {
   readonly canInstall: boolean
   /** Runs a model the user adds by id (custom models); otherwise only the models it lists. */
   readonly customModels: boolean
+  /**
+   * Its runtimes run a single request with no tools (`DriverRuntime.oneShot`), so its models can name
+   * chats. Agent runtimes run turns only (absent = false).
+   */
+  readonly oneShot?: boolean
   /** How the driver's instances sign in, for display. */
   readonly methodLabel?: string
   /**

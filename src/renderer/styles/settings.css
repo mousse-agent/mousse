@@ -1344,3 +1344,96 @@ html[data-theme='high-contrast'] .toggle-switch.on::after {
   gap: var(--space-4);
 }
 
+
+/* Shortcuts: a search box with Reset all beside it, then one group per category. */
+.shortcuts-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  margin-bottom: var(--space-12);
+}
+
+.shortcuts-toolbar .shortcuts-search {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.shortcuts-toolbar .settings-btn {
+  height: var(--settings-control-h);
+  border-radius: var(--ui-control-radius);
+  font-size: var(--settings-fs-small);
+}
+
+.shortcut-kbd {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 var(--space-8);
+  border: 1px solid var(--ui-line-strong);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: var(--settings-fs-small);
+  color: var(--text-primary);
+  background: var(--ui-raised);
+  white-space: nowrap;
+}
+
+/* The row being recorded: a background highlight, no edge bar. */
+.shortcut-recorder {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 120px;
+  height: var(--settings-control-h);
+  padding: 0 var(--space-12);
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-control-radius);
+  font-size: var(--settings-fs-small);
+  color: var(--text-primary);
+  background: var(--ui-selected);
+}
+
+.shortcut-recorder:focus-visible {
+  outline: 1px solid var(--ui-line-strong);
+  outline-offset: 0;
+}
+
+.shortcut-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 var(--space-8);
+  border-radius: 9px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--ui-hover);
+}
+
+.shortcut-notice {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  margin-top: var(--space-8);
+  padding: var(--space-8) var(--space-12);
+  border-radius: var(--ui-control-radius);
+  font-size: var(--settings-fs-small);
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: var(--ui-hover);
+}
+
+.shortcut-notice p {
+  margin: 0;
+}
+
+.shortcut-notice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-8);
+}
+
+.shortcut-notice-actions .settings-btn {
+  height: var(--settings-control-h);
+  border-radius: var(--ui-control-radius);
+  font-size: var(--settings-fs-small);
+}

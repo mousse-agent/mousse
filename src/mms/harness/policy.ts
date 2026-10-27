@@ -39,8 +39,8 @@ export function spendLimitLevel(caps: Partial<Pick<HarnessCaps, 'spendLimits'>>)
 
 /**
  * Purposes a person drives turn by turn. Only these may resolve an `uncontrolled` instance: every
- * other purpose (delegation, definitions, workflows, titles, and any purpose added later) runs
- * without a person watching each tool.
+ * other purpose (delegation, definitions, workflows, scheduled jobs, titles, and any purpose added
+ * later) runs without a person watching each tool.
  */
 export const INTERACTIVE_PURPOSES: ReadonlySet<string> = new Set(['composer', 'default', 'turn', 'channel_model', 'cli_model'])
 
@@ -55,6 +55,37 @@ export function policyOrigin(policy: Pick<RunPolicy, 'origin'>): TurnOrigin {
 }
 
 /**
+ * What token and spend limits need from the model itself, beyond the instance's `spendLimits`
+ * (`DriverRuntime.spendModel`): the driver can bound the output cap the request carries on the wire,
+ * and the model has a price.
+ */
+export interface SpendModelFacts {
+  /** The model's name, for the refusal. */
+  label: string
+  /** The driver can bound the output cap of every request on this model. */
+  outputCap: boolean
+  /** The model has a non-zero price (a USD limit needs one). */
+  priced: boolean
+}
+
+/** The policy has a token or USD limit (`spendLimits`). */
+export function hasSpendLimit(policy: Pick<RunPolicy, 'budget'>): boolean {
+  const budget = policy.budget ?? {}
+  return budget.maxInputTokens !== undefined || budget.maxOutputTokens !== undefined || budget.maxUsd !== undefined
+}
+
+/**
+ * Why a model cannot hold the policy's token or USD limits, on an instance whose `spendLimits` are
+ * `reserved`; undefined when it can. Unknown facts refuse: Mousse never assumes a cap it cannot show.
+ */
+function spendModelGap(budget: NonNullable<RunPolicy['budget']>, model: SpendModelFacts | undefined): string | undefined {
+  if (!model) return 'Mousse cannot tell whether this model caps its output, so token and cost limits cannot be held.'
+  if (!model.outputCap) return `${model.label} cannot cap its output, so token and cost limits cannot be held.`
+  if (budget.maxUsd !== undefined && !model.priced) return `${model.label} has no price, so a cost limit cannot be held.`
+  return undefined
+}
+
+/**
  * Whether an instance with `caps` can honour `policy`. Fails closed: a restriction the instance
  * cannot enforce is `policy_unenforceable`, naming the capabilities it lacks.
  * - an exact tool allowlist needs `exact` tool control;
@@ -62,33 +93,40 @@ export function policyOrigin(policy: Pick<RunPolicy, 'origin'>): TurnOrigin {
  *   (compaction, summaries, retries included) or tool call before it starts; a limit checked after
  *   a response is only `observed`;
  * - a token or USD limit needs `hard` budgets and `reserved` spend limits (a conservative reservation
- *   before each request, with the output cap lowered to fit);
+ *   before each request, with the output cap lowered to fit), and a model whose output cap the
+ *   driver can bound (`model`); a USD limit also needs a priced model. A model gap is
+ *   `spendLimits` with a `reason`;
  * - a wall-clock budget needs nothing: the gateway enforces it everywhere;
  * - pre-granted or no approvals need at least `approval_only`;
  * - a turn nobody watches (delegated, workflow, definition, bot) needs more than `uncontrolled`,
  *   for its first dispatch and every retry, continuation and steer.
  */
-export function checkPolicy(caps: HarnessCaps, policy: RunPolicy, instanceId?: string): Enforceability {
+export function checkPolicy(caps: HarnessCaps, policy: RunPolicy, instanceId?: string, model?: SpendModelFacts): Enforceability {
   const missing: Array<keyof HarnessCaps> = []
   const control = toolControlLevel(caps)
   if (policy.mode === 'plan' && !planModeAvailable(caps)) missing.push('planMode')
   const needsExact = Boolean(policy.tools)
   const budget = policy.budget ?? {}
-  const needsSpend = budget.maxInputTokens !== undefined || budget.maxOutputTokens !== undefined || budget.maxUsd !== undefined
+  const needsSpend = hasSpendLimit(policy)
   const needsHardBudget = needsSpend || budget.maxTurns !== undefined || budget.maxToolCalls !== undefined
   const needsApprovals = policy.approvals === 'grants' || policy.approvals === 'never'
   const unattended = policyOrigin(policy) !== 'interactive'
   if ((needsExact && control !== 'exact') || (needsApprovals && control === 'uncontrolled') || (unattended && control === 'uncontrolled'))
     missing.push('toolControl')
   if (needsHardBudget && budgetsLevel(caps) !== 'hard') missing.push('budgets')
-  if (needsSpend && spendLimitLevel(caps) !== 'reserved') missing.push('spendLimits')
+  let reason: string | undefined
+  if (needsSpend) {
+    if (spendLimitLevel(caps) !== 'reserved') missing.push('spendLimits')
+    else if ((reason = spendModelGap(budget, model))) missing.push('spendLimits')
+  }
   if (!missing.length) return { ok: true }
   return {
     ok: false,
     error: {
       code: 'policy_unenforceable',
-      message: `This provider cannot enforce the requested restrictions (${missing.join(', ')}).`,
+      message: `This provider cannot enforce the requested restrictions (${missing.join(', ')}).${reason ? ` ${reason}` : ''}`,
       missing,
+      ...(reason ? { reason } : {}),
       ...(instanceId ? { instanceId } : {})
     }
   }

@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,15 +7,38 @@ import { NetService } from '../../../src/mms/net/NetService'
 import { SyncSupervisor } from '../../../src/mms/net/sync/supervisor'
 import type { NodeId } from '../../../src/shared/net'
 import type { NetRuntime } from '../../../src/mms/net/NetService'
-import { NetError } from '../../../src/shared/net'
+import { NetError, newId } from '../../../src/shared/net'
+import { registerNetMethods } from '../../../src/mms/net/registerMethods'
+import { DomainHandlerRegistry } from '../../../src/mms/protocol/domainRegistry'
+import type { HandlerContext } from '../../../src/mms/protocol/handlers'
+import { approve, fakeSsh, trustHost } from './fakeSsh'
+import { sshKnownHostsPath } from '../../../src/mms/net/transports/ssh'
+
+const fixtures = vi.hoisted(() => ({ binaries: new Set<string>() }))
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
+  return {
+    ...actual,
+    spawn: ((...input: unknown[]) => {
+      // Windows cannot run a shebang fixture; run it through Node. Every other process keeps its real invocation.
+      if (process.platform === 'win32' && fixtures.binaries.has(input[0] as string))
+        return Reflect.apply(actual.spawn, undefined, [
+          process.execPath,
+          [input[0], ...(input[1] as string[])],
+          ...input.slice(2)
+        ])
+      return Reflect.apply(actual.spawn, undefined, input)
+    }) as typeof actual.spawn
+  }
+})
 
 const cleanups: Array<() => Promise<void> | void> = []
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
 })
-function profile() {
+function profile(ssh?: { binary?: string; userKnownHosts?: string }) {
   const path = mkdtempSync(join(tmpdir(), 'mousse-net-addon-service-')),
-    net = new NetService({ profileDir: path })
+    net = new NetService({ profileDir: path, ssh })
   cleanups.push(
     () => rmSync(path, { recursive: true, force: true }),
     () => net.shutdown()
@@ -198,3 +221,119 @@ it.each(['sync', 'async'] as const)(
     expect(calls).toBe(3)
   }
 )
+
+it('switches off an ssh add-on that failed to start using the saved settings', async () => {
+  const a = profile()
+  await a.net.request('net.init', {})
+  const registry = new DomainHandlerRegistry()
+  registerNetMethods(registry, () => a.net)
+  const context = {
+    connection: {
+      id: 'local-owner',
+      binding: { profileId: 'selected-profile', epoch: 1 },
+      capabilities: new Set(['net.v1'])
+    }
+  } as unknown as HandlerContext
+  type Rows = {
+    transports: Array<{ id: string; enabled: boolean; state: string; routes: unknown[] }>
+  }
+  const configure = (params: Record<string, unknown>) =>
+    registry.dispatch(context, 'net.transport.configure', {
+      profileId: 'selected-profile',
+      ...params
+    }) as Promise<Rows>
+  // The fixed port is taken, as after a restart: the add-on stays enabled but has no route.
+  const busy = createServer()
+  await new Promise<void>((resolve) => busy.listen(0, '127.0.0.1', resolve))
+  cleanups.push(() => new Promise<void>((resolve) => busy.close(() => resolve())))
+  const settings = {
+    endpoint: 'me@box.example.com:2222',
+    port: (busy.address() as { port: number }).port,
+    binary: '/opt/openssh/ssh'
+  }
+  expect(
+    (await configure({ id: 'ssh', enabled: true, settings })).transports.find(
+      (row) => row.id === 'ssh'
+    )
+  ).toMatchObject({ enabled: true, state: 'failed', routes: [] })
+  // The screen was reopened: it has no form state, so it sends no settings.
+  expect(
+    (await configure({ id: 'ssh', enabled: false })).transports.find((row) => row.id === 'ssh')
+  ).toMatchObject({ enabled: false, state: 'disabled', routes: [] })
+  const saved = (a.net as unknown as { config: { transports: Array<{ id: string }> } }).config
+    .transports
+  expect(saved.find((row) => row.id === 'ssh')).toEqual({ id: 'ssh', enabled: false, settings })
+  // Settings may be omitted only to switch something off that is configured.
+  await expect(configure({ id: 'ssh', enabled: true })).rejects.toMatchObject({
+    code: 'bad_request'
+  })
+  await expect(configure({ id: 'relay', enabled: false })).rejects.toMatchObject({
+    code: 'bad_request'
+  })
+})
+
+it('reaches a device that listens only on ssh, and serves rpc in both directions over one session', async () => {
+  const where = mkdtempSync(join(tmpdir(), 'mousse-net-ssh-service-')),
+    ssh = await fakeSsh(where, 'forward')
+  fixtures.binaries.add(ssh.binary)
+  cleanups.push(() => rmSync(where, { recursive: true, force: true }))
+  const a = profile({ binary: ssh.binary, userKnownHosts: join(where, 'known_hosts') }),
+    b = profile()
+  await a.net.request('net.init', { listen: true, port: 0 })
+  await a.net.request('net.protect', { passphrase: 'test authority protection' })
+  const invite = (await a.net.request('bridge.invite', {})) as { invite: string }
+  const joined = (await b.net.request('bridge.join', { invite: invite.invite })) as {
+    node: NodeId
+    authority: NodeId
+  }
+  // A stops listening. B keeps nothing but an ssh listener on a fixed loopback port.
+  const closed = createServer()
+  await new Promise<void>((resolve) => closed.listen(0, '127.0.0.1', resolve))
+  const port = (closed.address() as { port: number }).port
+  await new Promise<void>((resolve) => closed.close(() => resolve()))
+  for (const side of [a, b])
+    await side.net.request('net.transport.configure', {
+      id: 'direct',
+      enabled: false,
+      settings: { port: 0 }
+    })
+  await b.net.request('net.transport.configure', {
+    id: 'ssh',
+    enabled: true,
+    settings: { endpoint: 'me@box.example.com:2222', port, binary: ssh.binary }
+  })
+  expect(a.net.status().routes).toEqual([])
+  expect(b.net.status().routes).toEqual([
+    {
+      transport: 'ssh',
+      address: `ssh://me@box.example.com:2222/127.0.0.1:${port}`,
+      priority: 40
+    }
+  ])
+  // A approves B's endpoint, then adopts B's signed routes.
+  await approve(a.path, { [joined.node]: 'me@box.example.com:2222' })
+  await trustHost(sshKnownHostsPath(a.path), 'box.example.com', 2222)
+  a.net.adoptRoutes(b.net.signedRoutes(), joined.node)
+  const internals = a.net as unknown as {
+    refreshPeers(): void
+    supervisors: Map<NodeId, SyncSupervisor>
+  }
+  internals.refreshPeers()
+  internals.supervisors.get(joined.node)?.retryAfterStateChange()
+  await vi.waitFor(() => expect(a.net.session(joined.node).state()).toBe('open'), {
+    timeout: 15_000
+  })
+  const ask = (side: typeof a, node: NodeId) =>
+    side.net
+      .session(node)
+      .rpc('authority.transfer.ready', {}, { id: newId('rpc'), deadlineMs: 10_000 })
+  // A dialed out through ssh; B answers on the inbound session it never dialed.
+  expect(await ask(a, joined.node)).toMatchObject({ node: joined.node })
+  await vi.waitFor(() => expect(b.net.session(joined.authority).state()).toBe('open'))
+  expect(await ask(b, joined.authority)).toMatchObject({ node: joined.authority })
+  const spawned = readFileSync(ssh.log, 'utf8').trim().split('\n')
+  expect(spawned).toHaveLength(1)
+  expect(JSON.parse(spawned[0])).toEqual(
+    expect.arrayContaining(['-p', '2222', '-W', `127.0.0.1:${port}`, '--', 'box.example.com'])
+  )
+}, 30_000)

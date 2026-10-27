@@ -89,6 +89,7 @@ import type {
   ChannelConfig,
   ChannelPlatform,
   CreateScheduledJobInput,
+  FileGrepResponse,
   FileSearchResponse,
   GitCommitOptions,
   MainView,
@@ -1784,6 +1785,29 @@ export function registerGuiIpc(
       projectId?: string,
       threadId?: string | null
     ) => searchScoped<FileSearchResponse>('files.search', { query, ...options }, projectId, threadId)
+  )
+  registerHandler(
+    'fs:grep',
+    (
+      _e,
+      query: string,
+      options?: { regex?: boolean; caseSensitive?: boolean; wholeWord?: boolean; limit?: number; timeoutMs?: number },
+      projectId?: string,
+      threadId?: string | null
+    ) =>
+      searchScoped<FileGrepResponse>(
+        'files.grep',
+        {
+          query,
+          regex: options?.regex,
+          caseSensitive: options?.caseSensitive,
+          wholeWord: options?.wholeWord,
+          limit: options?.limit,
+          timeoutMs: options?.timeoutMs
+        },
+        projectId,
+        threadId
+      )
   )
 
   const resolveGitCwd = async (projectId?: string, cwd?: string): Promise<string> => {

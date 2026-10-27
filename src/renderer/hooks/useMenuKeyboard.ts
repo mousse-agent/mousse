@@ -21,6 +21,20 @@ export function nextMenuIndex(key: string, index: number, count: number): number
   return undefined
 }
 
+/** Rows a PageUp or PageDown press moves in the command palette. */
+export const PALETTE_PAGE_SIZE = 8
+
+/**
+ * The row a key moves the palette to, or undefined for keys that do not move. Arrows wrap; Home, End
+ * and the page keys stop at the ends. An empty list never moves.
+ */
+export function nextPaletteIndex(key: string, index: number, count: number): number | undefined {
+  if (count === 0) return undefined
+  if (key === 'PageDown') return Math.min(index + PALETTE_PAGE_SIZE, count - 1)
+  if (key === 'PageUp') return Math.max(index - PALETTE_PAGE_SIZE, 0)
+  return nextMenuIndex(key, index, count)
+}
+
 /** Focuses the checked item, or the first one. */
 export function focusInitialMenuItem(menu: HTMLElement | null): void {
   const items = menuItems(menu)

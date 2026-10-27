@@ -11,7 +11,21 @@ import {
   resolveModelForMode,
   resolveSkillModelSettings
 } from '../src/shared/settings'
-import { findInlineSkillToken, removeInlineSkillToken } from '../src/shared/channelCommands'
+import {
+  applyMentionPick,
+  findInlineSkillToken,
+  findMentionQueryAtCaret,
+  isImeComposing,
+  isMentionResultCurrent,
+  joinMentionPath,
+  mentionItemReference,
+  mergeMentionSuggestions,
+  moveSelection,
+  pickerKeyAction,
+  removeInlineSkillToken
+} from '../src/shared/channelCommands'
+import { fileWorkspaceScope } from '../src/renderer/stores/filesStore'
+import { formatChatReferences, parseChatReference } from '../src/shared/chatReferences'
 import { parseActions, stripActionBlocks, filterActionsForChatMode } from '../src/mms/orchestrator/actions'
 import { buildOrchestratorSystemPrompt } from '../src/mms/orchestrator/systemPrompt'
 import { BuildModeTools } from '../src/mms/orchestrator/BuildModeTools'
@@ -232,6 +246,276 @@ describe('inline skill token', () => {
     expect(removeInlineSkillToken('no token here', skills)).toBe('no token here')
     // A lone token leaves no prompt text.
     expect(removeInlineSkillToken('@review', skills).trim()).toBe('')
+  })
+})
+
+describe('composer mentions', () => {
+  const review = { id: 'review', name: 'review', description: 'Review a change' }
+  const skills = [
+    { id: 'plan', name: 'plan', description: 'Plan work, then review it' },
+    review,
+    { id: 'reviewer', name: 'reviewer', description: 'Second opinion' }
+  ]
+  const file = (path: string, kind: 'file' | 'directory' = 'file', positions: number[] = []) => ({ path, kind, positions })
+
+  describe('findMentionQueryAtCaret', () => {
+    it('opens at the start of the text, after a space and after an opening bracket or quote', () => {
+      expect(findMentionQueryAtCaret('@src', 4)).toEqual({ index: 0, query: 'src' })
+      expect(findMentionQueryAtCaret('look at @src/ma', 15)).toEqual({ index: 8, query: 'src/ma' })
+      expect(findMentionQueryAtCaret('(@src', 5)).toEqual({ index: 1, query: 'src' })
+      expect(findMentionQueryAtCaret('see "@src', 9)).toEqual({ index: 5, query: 'src' })
+      expect(findMentionQueryAtCaret('line one\n@src', 13)).toEqual({ index: 9, query: 'src' })
+      expect(findMentionQueryAtCaret('@', 1)).toEqual({ index: 0, query: '' })
+    })
+
+    it('stays closed inside words, emails and code', () => {
+      expect(findMentionQueryAtCaret('me@review', 9)).toBeNull()
+      expect(findMentionQueryAtCaret('a@b.com', 7)).toBeNull()
+      expect(findMentionQueryAtCaret('@scope/pkg(', 11)).toBeNull()
+      expect(findMentionQueryAtCaret('@Injectable(', 12)).toBeNull()
+      expect(findMentionQueryAtCaret('`@src', 5)).toBeNull()
+      expect(findMentionQueryAtCaret('x@@src', 6)).toBeNull()
+      expect(findMentionQueryAtCaret('no mention here', 15)).toBeNull()
+    })
+
+    it('stays closed inside an unclosed code fence and opens again after it closes', () => {
+      expect(findMentionQueryAtCaret('```ts\n@src', 10)).toBeNull()
+      expect(findMentionQueryAtCaret('```ts\ncode\n```\n@src', 19)).toEqual({ index: 15, query: 'src' })
+    })
+
+    it('ends at whitespace and reads only the part before the caret', () => {
+      expect(findMentionQueryAtCaret('@src x', 6)).toBeNull()
+      expect(findMentionQueryAtCaret('@src/ma', 4)).toEqual({ index: 0, query: 'src' })
+      expect(findMentionQueryAtCaret('@src/main.ts tail', 7)).toEqual({ index: 0, query: 'src/ma' })
+    })
+
+    it('ignores a caret that is not a position (a selected range reports -1)', () => {
+      expect(findMentionQueryAtCaret('@src', -1)).toBeNull()
+      expect(findMentionQueryAtCaret('@src', 99)).toEqual({ index: 0, query: 'src' })
+    })
+
+    it('keeps listing files while the caret is at the end of a complete skill name', () => {
+      expect(findMentionQueryAtCaret('@review', 7)).toEqual({ index: 0, query: 'review' })
+      expect(findInlineSkillToken('@review', skills)).toMatchObject({ skillId: 'review' })
+      expect(findMentionQueryAtCaret('@review ', 8)).toBeNull()
+    })
+  })
+
+  describe('ranking and filtering', () => {
+    it('lists skills first, then files in the order the daemon ranked them', () => {
+      const items = mergeMentionSuggestions(skills, [file('src/a.ts'), file('docs', 'directory'), file('b.md')], { query: '' })
+      expect(items.map((item) => (item.kind === 'skill' ? `skill:${item.skill.id}` : item.path))).toEqual([
+        'skill:plan',
+        'skill:review',
+        'skill:reviewer',
+        'src/a.ts',
+        'docs',
+        'b.md'
+      ])
+    })
+
+    it('filters skills by the query and puts an exact name first of all', () => {
+      const items = mergeMentionSuggestions(skills, [file('review.md')], { query: 'review' })
+      expect(items.map((item) => (item.kind === 'skill' ? `skill:${item.skill.id}` : item.path))).toEqual([
+        'skill:review',
+        'skill:reviewer',
+        'skill:plan',
+        'review.md'
+      ])
+      // Matches on a name come before matches on a description only.
+      expect(items[2]).toMatchObject({ kind: 'skill', skill: { id: 'plan' } })
+      expect(mergeMentionSuggestions(skills, [], { query: 'zzz' })).toEqual([])
+    })
+
+    it('caps skills at five and the whole list at the limit, and keeps file order', () => {
+      const many = Array.from({ length: 9 }, (_, i) => ({ id: `s${i}`, name: `s${i}`, description: '' }))
+      const files = Array.from({ length: 30 }, (_, i) => file(`f${i}.ts`))
+      const capped = mergeMentionSuggestions(many, files, { query: '' })
+      expect(capped.filter((item) => item.kind === 'skill')).toHaveLength(5)
+      expect(capped).toHaveLength(20)
+      expect(capped.slice(5).map((item) => (item.kind === 'skill' ? '' : item.path))).toEqual(files.slice(0, 15).map((f) => f.path))
+      expect(mergeMentionSuggestions(many, files, { query: '', maxSkills: 2, limit: 4 })).toHaveLength(4)
+    })
+
+    it('lists a skill and a file with the same name side by side, skill first', () => {
+      const items = mergeMentionSuggestions([review], [file('review.md')], { query: 'review' })
+      expect(items).toHaveLength(2)
+      expect(items[0]).toMatchObject({ kind: 'skill' })
+      expect(items[1]).toMatchObject({ kind: 'file', path: 'review.md' })
+    })
+
+    it('carries match positions through for highlighting', () => {
+      const [item] = mergeMentionSuggestions([], [file('src/main.ts', 'file', [4, 5])])
+      expect(item).toEqual({ kind: 'file', path: 'src/main.ts', positions: [4, 5] })
+    })
+  })
+
+  describe('inserting a pick', () => {
+    it('inserts the same skill token typing it would leave', () => {
+      const edit = applyMentionPick('please @revi', { index: 7, end: 12 }, '@review ')
+      expect(edit).toEqual({ value: 'please @review ', caret: 15 })
+      expect(findInlineSkillToken(edit.value, skills)).toEqual(findInlineSkillToken('please @review ', skills))
+      expect(findInlineSkillToken(edit.value, skills)).toMatchObject({ index: 7, skillId: 'review' })
+      // The picker is closed once the token is complete and followed by a space.
+      expect(findMentionQueryAtCaret(edit.value, edit.caret)).toBeNull()
+    })
+
+    it('removes the typed query for a file or folder and collapses the doubled space', () => {
+      expect(applyMentionPick('look at @src now', { index: 8, end: 12 }, '')).toEqual({ value: 'look at now', caret: 8 })
+      expect(applyMentionPick('@src and more', { index: 0, end: 4 }, '')).toEqual({ value: 'and more', caret: 0 })
+      expect(applyMentionPick('fix @src', { index: 4, end: 8 }, '')).toEqual({ value: 'fix ', caret: 4 })
+      expect(applyMentionPick('a\n@src b', { index: 2, end: 6 }, '')).toEqual({ value: 'a\nb', caret: 2 })
+    })
+
+    it('does not swallow text that is not a space and replaces only up to the caret', () => {
+      expect(applyMentionPick('see(@src)', { index: 4, end: 8 }, '')).toEqual({ value: 'see()', caret: 4 })
+      expect(applyMentionPick('go @sr tail', { index: 3, end: 6 }, '@review ')).toEqual({ value: 'go @review tail', caret: 11 })
+    })
+
+    it('builds a file reference under the daemon root, not the project', () => {
+      const reference = mentionItemReference(
+        { kind: 'file', path: 'src/My App/index (1).ts', positions: [] },
+        'C:\\repo\\.mousse-worktrees\\t1\\',
+        { threadId: 't1', projectId: 'p1' },
+        'file:1'
+      )
+      expect(reference).toEqual({
+        id: 'file:1',
+        kind: 'file',
+        title: 'index (1).ts',
+        path: 'C:\\repo\\.mousse-worktrees\\t1/src/My App/index (1).ts',
+        threadId: 't1',
+        projectId: 'p1'
+      })
+      expect(parseChatReference(reference)).toMatchObject({ kind: 'file', path: reference.path })
+    })
+
+    it('builds a folder reference for a directory result and formats its path for the agent', () => {
+      const reference = mentionItemReference(
+        { kind: 'directory', path: 'src/shared/', positions: [] },
+        '/repo',
+        { projectId: 'p1' },
+        'directory:1'
+      )
+      expect(reference).toMatchObject({ kind: 'folder', title: 'shared', path: '/repo/src/shared', projectId: 'p1' })
+      expect(reference.threadId).toBeUndefined()
+      const block = formatChatReferences([reference])
+      expect(block).toContain('- folder: "shared"')
+      expect(block).toContain('Path: /repo/src/shared')
+      expect(joinMentionPath('/repo/', '/a.ts')).toBe('/repo/a.ts')
+    })
+  })
+
+  describe('result ownership', () => {
+    const scope = fileWorkspaceScope('profile', 'thread-a', 'project-1')
+
+    it('accepts a result only for the same scope and the same query', () => {
+      expect(isMentionResultCurrent({ scopeKey: scope, query: 'src' }, { scopeKey: scope, query: 'src' })).toBe(true)
+      expect(isMentionResultCurrent({ scopeKey: scope, query: 'sr' }, { scopeKey: scope, query: 'src' })).toBe(false)
+    })
+
+    it('rejects a result from another thread, or from another project in the blank composer', () => {
+      const other = fileWorkspaceScope('profile', 'thread-b', 'project-1')
+      expect(isMentionResultCurrent({ scopeKey: scope, query: 'src' }, { scopeKey: other, query: 'src' })).toBe(false)
+      const blankA = fileWorkspaceScope('profile', null, 'project-1')
+      const blankB = fileWorkspaceScope('profile', null, 'project-2')
+      expect(isMentionResultCurrent({ scopeKey: blankA, query: 'src' }, { scopeKey: blankB, query: 'src' })).toBe(false)
+    })
+
+    it('drops a late response once the query or scope moved on', async () => {
+      // The composer keeps one "current" value and checks it when a response arrives.
+      let current = { scopeKey: scope, query: 'sr' }
+      let resolveFirst!: (value: string[]) => void
+      const first = new Promise<string[]>((resolve) => { resolveFirst = resolve })
+      const requested = { ...current }
+      const kept: string[][] = []
+      const arrival = first.then((rows) => {
+        if (isMentionResultCurrent(requested, current)) kept.push(rows)
+      })
+      current = { scopeKey: scope, query: 'src' }
+      resolveFirst(['stale.ts'])
+      await arrival
+      expect(kept).toEqual([])
+    })
+  })
+
+  describe('keyboard selection', () => {
+    it('moves with the arrows, wrapping at both ends', () => {
+      expect(moveSelection(0, 'ArrowDown', 3)).toBe(1)
+      expect(moveSelection(2, 'ArrowDown', 3)).toBe(0)
+      expect(moveSelection(0, 'ArrowUp', 3)).toBe(2)
+      expect(moveSelection(2, 'ArrowUp', 3)).toBe(1)
+    })
+
+    it('moves by eight with the page keys, jumps with Home and End, and clamps', () => {
+      expect(moveSelection(0, 'PageDown', 20)).toBe(8)
+      expect(moveSelection(15, 'PageDown', 20)).toBe(19)
+      expect(moveSelection(10, 'PageUp', 20)).toBe(2)
+      expect(moveSelection(3, 'PageUp', 20)).toBe(0)
+      expect(moveSelection(7, 'Home', 20)).toBe(0)
+      expect(moveSelection(7, 'End', 20)).toBe(19)
+      expect(moveSelection(5, 'ArrowDown', 0)).toBe(0)
+      expect(moveSelection(9, 'x', 4)).toBe(3)
+    })
+
+    it('maps keys to picker actions: move, pick with Enter and Tab, dismiss with Escape', () => {
+      const options = { count: 4 }
+      expect(pickerKeyAction({ key: 'ArrowDown' }, options)).toEqual({ type: 'move', key: 'ArrowDown' })
+      expect(pickerKeyAction({ key: 'PageUp' }, options)).toEqual({ type: 'move', key: 'PageUp' })
+      expect(pickerKeyAction({ key: 'Home' }, options)).toEqual({ type: 'move', key: 'Home' })
+      expect(pickerKeyAction({ key: 'End' }, options)).toEqual({ type: 'move', key: 'End' })
+      expect(pickerKeyAction({ key: 'Enter' }, options)).toEqual({ type: 'pick' })
+      expect(pickerKeyAction({ key: 'Tab' }, options)).toEqual({ type: 'pick' })
+      expect(pickerKeyAction({ key: 'Escape' }, options)).toEqual({ type: 'dismiss' })
+    })
+
+    it('leaves Shift+Enter, Shift+Tab, modified navigation and ordinary keys to the text box', () => {
+      const options = { count: 4 }
+      expect(pickerKeyAction({ key: 'Enter', shiftKey: true }, options)).toBeNull()
+      expect(pickerKeyAction({ key: 'Tab', shiftKey: true }, options)).toBeNull()
+      expect(pickerKeyAction({ key: 'Home', ctrlKey: true }, options)).toBeNull()
+      expect(pickerKeyAction({ key: 'ArrowDown', shiftKey: true }, options)).toBeNull()
+      expect(pickerKeyAction({ key: 'a' }, options)).toBeNull()
+      expect(pickerKeyAction({ key: 'Backspace' }, options)).toBeNull()
+    })
+
+    it('with no rows lets Enter send the text, while Escape still dismisses', () => {
+      expect(pickerKeyAction({ key: 'Enter' }, { count: 0 })).toBeNull()
+      expect(pickerKeyAction({ key: 'ArrowDown' }, { count: 0 })).toBeNull()
+      expect(pickerKeyAction({ key: 'Tab' }, { count: 0 })).toBeNull()
+      expect(pickerKeyAction({ key: 'Escape' }, { count: 0 })).toEqual({ type: 'dismiss' })
+    })
+
+    it('with no rows the skills list keeps swallowing Enter and the arrows', () => {
+      const options = { count: 0, swallowWhenEmpty: true }
+      expect(pickerKeyAction({ key: 'Enter' }, options)).toEqual({ type: 'swallow' })
+      expect(pickerKeyAction({ key: 'ArrowUp' }, options)).toEqual({ type: 'swallow' })
+      expect(pickerKeyAction({ key: 'Tab' }, options)).toBeNull()
+    })
+  })
+
+  describe('input method composition', () => {
+    it('does nothing for any key while composing, so committing text never picks', () => {
+      for (const key of ['Enter', 'Tab', 'Escape', 'ArrowDown', 'ArrowUp', 'Home', 'PageDown']) {
+        expect(pickerKeyAction({ key, isComposing: true }, { count: 4 })).toBeNull()
+      }
+    })
+
+    it('treats keyCode 229 as composing, which is how Safari reports the committing Enter', () => {
+      expect(isImeComposing({ isComposing: false, keyCode: 229 })).toBe(true)
+      expect(isImeComposing({ isComposing: true, keyCode: 13 })).toBe(true)
+      expect(isImeComposing({ isComposing: false, keyCode: 13 })).toBe(false)
+      expect(isImeComposing({})).toBe(false)
+      expect(pickerKeyAction({ key: 'Enter', isComposing: false, keyCode: 229 }, { count: 4 })).toBeNull()
+    })
+
+    it('picks again once composition ends', () => {
+      expect(pickerKeyAction({ key: 'Enter', isComposing: false, keyCode: 13 }, { count: 4 })).toEqual({ type: 'pick' })
+    })
+
+    it('still finds the query in text an input method has already committed', () => {
+      expect(findMentionQueryAtCaret('看看 @文档', 6)).toEqual({ index: 3, query: '文档' })
+    })
   })
 })
 

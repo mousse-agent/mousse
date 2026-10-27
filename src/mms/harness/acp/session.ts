@@ -198,6 +198,7 @@ export class AcpSessions {
     const scope: AcpRequestScope = {
       get threadId() { return active?.threadId },
       get cwd() { return active?.cwd },
+      get approvals() { return active?.turnPrompter?.approvals },
       aborted: () => Boolean(active?.turnSignal?.aborted || active?.connection.signal.aborted),
       throwIfAborted: () => {
         active?.turnSignal?.throwIfAborted()

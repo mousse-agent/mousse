@@ -21,6 +21,7 @@ import type { ProviderToolEvent } from '../../../shared/agentActivity'
 import { CLAUDE_INSTANCE_ID } from '../../../shared/providerInstances'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
+import { APPROVALS_REFUSED_MESSAGE, QUESTIONS_REFUSED_MESSAGE } from '../../harness/acp/permissions'
 import { CLAUDE_MOUSSE_TOOL_PREFIX, claudeMcpServers } from '../../run/mcp/attachment'
 import { TURN_TOKEN_KEY } from '../../run/mcp/appTools/registry'
 import type { LoginSession } from '../LoginSession'
@@ -110,6 +111,11 @@ export type ClaudeSubscriptionChatInput = {
   mcpTurnToken?: string
   /** Mousse's own instructions, appended to Claude Code's system prompt. */
   systemPromptAppend?: string
+  /**
+   * `never`: a tool call that needs the user's approval, and `AskUserQuestion`, are denied without
+   * asking (`RunPolicy.approvals`): nobody answers this run.
+   */
+  approvals?: 'never'
   /** The MCP servers and skills the user enabled in Mousse; absent attaches none. */
   integrations?: ClaudeTurnIntegrations
   /**
@@ -1257,6 +1263,7 @@ export class ClaudeSubscriptionProviderService {
           }
         try {
           if (toolName === 'AskUserQuestion') {
+            if (input.approvals === 'never') return { behavior: 'deny', message: QUESTIONS_REFUSED_MESSAGE }
             const native = args.questions as
               | Array<{
                   question: string
@@ -1303,6 +1310,7 @@ export class ClaudeSubscriptionProviderService {
           }
           if (turn.restricted) return { behavior: 'allow', updatedInput: args }
           // Only calls Claude Code refuses to auto-approve even in bypass mode arrive here.
+          if (input.approvals === 'never') return { behavior: 'deny', message: APPROVALS_REFUSED_MESSAGE }
           const answer = await this.questions.requestAnswers(
             [
               {
@@ -1764,7 +1772,8 @@ export class ClaudeSubscriptionProviderService {
       } finally {
         input.onMetrics?.(report)
       }
-      frames.closeTools()
+      // A turn that was stopped or failed stopped its open calls; one that settled never got their results.
+      frames.closeTools(success && input.signal?.aborted !== true ? 'no_result' : 'stop')
     }
   }
   /** What a new process would start with besides the turn's model and folder: launch settings and integrations. */

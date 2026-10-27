@@ -10,6 +10,7 @@ import type {
   SkillChatMode
 } from '../../shared/types'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
+import { fileWorkspaceScope } from '../stores/filesStore'
 import { removeInlineSkillToken } from '../../shared/channelCommands'
 import type { SkillDescriptor } from '../../shared/integrations'
 import { isTurnActivePhase } from '../../shared/types'
@@ -132,6 +133,20 @@ export function OrchestratorChat() {
   // The picker lists the instances the thread's project allows, from the daemon's snapshots.
   const { snapshots: providerSnapshots } = useProviderSnapshots(projectScope(workspace.projectId))
   const providers = useMemo(() => pickerProviders(providerSnapshots, catalog), [providerSnapshots, catalog])
+  // `@` mentions search the thread's own checkout, or the project picked for a blank composer.
+  const mentionProjectId = workspace.projectId
+  const searchMentions = useCallback(
+    (query: string) => window.mousse.fs.search(query, { limit: 20 }, mentionProjectId ?? undefined, activeThreadId ?? undefined),
+    [mentionProjectId, activeThreadId]
+  )
+  const mentionScope = useMemo(
+    () => ({
+      scopeKey: fileWorkspaceScope(profileId, activeThreadId, mentionProjectId),
+      threadId: activeThreadId ?? undefined,
+      projectId: mentionProjectId ?? undefined
+    }),
+    [profileId, activeThreadId, mentionProjectId]
+  )
   /** The selection a picker entry stores: its instance and the provider name that instance reports. */
   const selectionFor = (pickerId: string): { instanceId?: string; llmProvider: string } => {
     const provider = providers.find((entry) => entry.id === pickerId)
@@ -1022,6 +1037,8 @@ export function OrchestratorChat() {
               onSend={(skillMode) => void handleSend(skillMode)}
               onStop={() => void handleStop()}
               banner={<SubagentComposerBanner threadId={activeThreadId} />}
+              searchMentions={searchMentions}
+              mentionScope={mentionScope}
 
 
             />

@@ -713,11 +713,11 @@ export type Conflict =
     }
 
 /** Scopes can be active together when they are equal or either is global. */
-const scopesOverlap = (a: CommandDefinition, b: CommandDefinition): boolean =>
+export const scopesOverlap = (a: CommandDefinition, b: CommandDefinition): boolean =>
   a.scope === b.scope || a.scope === 'global' || b.scope === 'global'
 
 /** Scoped beats global; otherwise the earlier one in the table. */
-const beats = (a: CommandDefinition, b: CommandDefinition): boolean => {
+export const beats = (a: CommandDefinition, b: CommandDefinition): boolean => {
   if ((a.scope === 'global') !== (b.scope === 'global')) return a.scope !== 'global'
   return COMMANDS.indexOf(a) < COMMANDS.indexOf(b)
 }

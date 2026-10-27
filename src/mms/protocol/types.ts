@@ -380,6 +380,7 @@ export const PROTOCOL_METHODS = [
   'files.write',
   'files.stat',
   'files.search',
+  'files.grep',
   'git.status',
   'git.diff',
   'review.files',

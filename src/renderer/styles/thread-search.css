@@ -106,6 +106,33 @@
   background: rgba(var(--accent-rgb), 0.12);
 }
 
+/* Command palette rows: text on the left, the command's shortcut on the right. The highlight is a background only. */
+.thread-search-result.palette-result {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.palette-result-text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  min-width: 0;
+}
+
+.palette-result-shortcut {
+  flex-shrink: 0;
+  font-family: inherit;
+  font-size: 10.5px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: rgba(var(--surface-elevated-rgb), 0.5);
+  color: var(--text-secondary);
+}
+
 .thread-search-result-title {
   font-size: 13px;
   font-weight: 500;
