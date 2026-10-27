@@ -1,7 +1,19 @@
-/** What a node of the same user may do on another node over Bridge. */
+/**
+ * What a node of the same user may do on another node over Bridge.
+ *
+ * `settings` is the signed grant for the routed thread API ("Works on threads" in the UI). It is
+ * given to computers only. The name is the one the closed capability list of older peers and the
+ * hosted relay already accept, so a delegation that carries it validates everywhere.
+ */
 export const NODE_CAPABILITIES = ['read', 'chat', 'write', 'terminal', 'settings'] as const
 export type NodeCapability = (typeof NODE_CAPABILITIES)[number]
+/** What a phone gets, and what an invite grants when it does not say it is for a computer. */
 export const DEFAULT_NODE_CAPABILITIES: readonly NodeCapability[] = ['read', 'chat', 'write']
+/** What a computer gets: the phone grant plus the routed thread API. */
+export const COMPUTER_NODE_CAPABILITIES: readonly NodeCapability[] = [
+  ...DEFAULT_NODE_CAPABILITIES,
+  'settings'
+]
 
 export const SPACE_ROLES = ['owner', 'admin', 'member'] as const
 export type SpaceRole = (typeof SPACE_ROLES)[number]

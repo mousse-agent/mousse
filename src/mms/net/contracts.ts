@@ -832,8 +832,12 @@ export interface RpcContext {
 
 export interface RpcMethod {
   method: string
-  /** Current profile feature policy; omitted only for shared Net operations. */
-  family?: 'bridge' | 'spaces'
+  /**
+   * Current profile feature policy; omitted only for shared Net operations. `routed` is the
+   * thread API for the user's other computers: it follows the Bridge feature flag, and like
+   * `bridge` it is refused to a device the owner blocked.
+   */
+  family?: 'bridge' | 'routed' | 'spaces'
   capability: NodeCapability
   /** A scoped gateway can require the registered method's capability instead. */
   capabilityFor?(params: unknown): NodeCapability

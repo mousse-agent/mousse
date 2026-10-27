@@ -91,6 +91,8 @@ export const BRIDGE_HELP = `Usage:
 
 Only the current authority can invite, revoke or rename nodes.
 revoke and rename require the nod_ identifier shown by bridge nodes.
+An invite without --caps is for another computer: read, chat, write and settings
+("works on threads"). Name --caps read,chat,write for a device that should not.
 bridge nodes also reports each device's version, the route in use, every known
 route with its last result, and when it was last seen. A device that predates
 these fields shows none of them.

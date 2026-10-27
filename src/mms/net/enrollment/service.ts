@@ -14,6 +14,7 @@ import type {
   UserId
 } from '../../../shared/net'
 import {
+  COMPUTER_NODE_CAPABILITIES,
   DEFAULT_NODE_CAPABILITIES,
   NODE_CAPABILITIES,
   NODE_DELEGATION_TTL_MS,
@@ -430,11 +431,16 @@ export class EnrollmentService {
     if (!this.protected()) throw new NetError('keystore_locked')
     // The invite carries the whole roster; rosters written before pruning shrink first.
     identity.compactRoster()
+    // Only a device known to be a computer gets the routed thread API without being asked for it.
     const ttl = input.ttlMs ?? 600000,
-      granted = input.caps ?? [...DEFAULT_NODE_CAPABILITIES]
+      granted = input.caps ?? [
+        ...(input.kind === 'computer' ? COMPUTER_NODE_CAPABILITIES : DEFAULT_NODE_CAPABILITIES)
+      ]
     if (!Number.isSafeInteger(ttl) || ttl < 1 || ttl > NODE_DELEGATION_TTL_MS)
       throw new NetError('bad_request')
     caps(granted)
+    // A phone never works on threads, whatever the invite asked for.
+    if (input.kind === 'phone' && granted.includes('settings')) throw new NetError('bad_request')
     if (input.name !== undefined) name(input.name)
     if (input.joinerTransportFingerprint !== undefined)
       decodeBase64(input.joinerTransportFingerprint, 32)

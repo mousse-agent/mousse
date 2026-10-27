@@ -317,4 +317,5 @@ CREATE TABLE IF NOT EXISTS net_quota_reservations(scope TEXT NOT NULL REFERENCES
 CREATE TABLE IF NOT EXISTS net_rate_config(scope TEXT NOT NULL, principal TEXT NOT NULL, max_units INTEGER NOT NULL, window_ms INTEGER NOT NULL, last_now INTEGER NOT NULL, PRIMARY KEY(scope,principal)) STRICT;
 CREATE TABLE IF NOT EXISTS net_rate_charges(scope TEXT NOT NULL, principal TEXT NOT NULL, id TEXT NOT NULL, created_at INTEGER NOT NULL, units INTEGER NOT NULL, PRIMARY KEY(scope,principal,id), FOREIGN KEY(scope,principal) REFERENCES net_rate_config(scope,principal)) STRICT;
 CREATE INDEX IF NOT EXISTS net_rate_window ON net_rate_charges(scope,principal,created_at);
+CREATE TABLE IF NOT EXISTS net_node_policy(node TEXT PRIMARY KEY, blocked INTEGER NOT NULL CHECK(blocked IN (0,1)), max_permission_mode TEXT NOT NULL, terminal INTEGER NOT NULL CHECK(terminal IN (0,1)), created_at INTEGER NOT NULL) STRICT;
 `

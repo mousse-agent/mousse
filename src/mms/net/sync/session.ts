@@ -135,6 +135,11 @@ export interface SyncSessionOptions {
   /** Trusted local archive fence, inherited by every new session. */
   isStreamQuiesced?: (stream: StreamId) => boolean
   isSpaceQuiesced?: (space: SpaceId) => boolean
+  /**
+   * The owner of this computer blocked the peer for this stream. The peer is told `forbidden` for
+   * that stream alone, and the connection stays up, unlike an authorization failure, which ends it.
+   */
+  isStreamBlocked?: (stream: StreamId, peer: SyncSession['peer']) => boolean
 }
 
 type Pending = {
@@ -794,6 +799,28 @@ export class NetSyncSession implements SyncSession {
     await this.send({ t: 'error', re: stream, error: wireError(new NetError(code)) })
   }
 
+  /** Answers a request for a stream the peer is blocked from with `forbidden`, on that stream only. */
+  private async refuseBlocked(stream: StreamId): Promise<boolean> {
+    if (!this.options.isStreamBlocked?.(stream, this.peer)) return false
+    await this.send({ t: 'error', re: stream, error: wireError(new NetError('forbidden')) })
+    return true
+  }
+  /**
+   * Ends everything this session serves to its peer, as a block on the peer does: each live
+   * subscription gets `code` and each snapshot transfer stops. The connection stays up, so
+   * the peer can still be unblocked later without a new handshake.
+   */
+  async endServing(code: NetErrorCode): Promise<void> {
+    if (this.currentState !== 'open') return
+    const streams = new Set([...this.serving.keys(), ...this.snapshotJobs.keys()])
+    await Promise.all(
+      [...streams].map(async (stream) => {
+        this.cancelSnapshot(stream)
+        await this.failServingStream(stream, code)
+      })
+    )
+  }
+
   private scope(header: WireMessage): JobScope {
     // Releasing a subscription must not look up or reactivate its failed source.
     // It can only remove serving state, including while an archive fence is held.
@@ -1023,6 +1050,7 @@ export class NetSyncSession implements SyncSession {
         return // Hint only. Independently verified roster controls teardown.
       case 'subscribe':
         this.requireCap('streams.v1')
+        if (await this.refuseBlocked(h.stream)) return
         await this.serve(h.stream, h.after, signal)
         return
       case 'unsubscribe':
@@ -1050,6 +1078,7 @@ export class NetSyncSession implements SyncSession {
         return
       case 'snapshot.get':
         this.requireCap('streams.v1')
+        if (await this.refuseBlocked(h.stream)) return
         await this.serveSnapshot(h.stream, signal)
         return
       case 'snapshot.chunk':

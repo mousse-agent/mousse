@@ -37,6 +37,9 @@ Use these terms in issues, PRs, comments, and docs. If you need a term that is n
 - **Mousse Net:** networking between Mousse installations. It covers Bridge and Spaces.
 - **Bridge:** one person controlling agents on several of their own machines from one place.
 - **Remote thread:** a thread that runs on another of the user's computers through Bridge; the local app shows it but the target computer owns it.
+- **Works on threads:** the signed permission (the `settings` capability in a device's delegation) that lets one of the user's computers act on threads that run on another of their computers. Only computers get it; phones never do, and a phone keeps the smaller phone API.
+- **Block (a device):** a setting on one computer that refuses every Bridge call, stream and request from one other device, at once. It is kept on that computer only, needs no authority, and is undone with Unblock.
+- **Highest permission mode (for a device):** the most permissive permission mode a person on another computer can run a turn or create an "Always" rule in on this computer. A new computer starts at Auto-accept edits.
 - **Space:** a group chat for a project. Members add their own bots, which run on the owner's machine with the owner's keys.
 - **Mousse ID:** the optional account service. Signing in lets a person reach their computers from a phone and relays connections without seeing their content. It was called Mousse Plus; code and wire names such as `net.plus.*` and `plus-relay` keep the old name. There are no paid plans. The hosted service is maintained separately; this repository holds only its MIT client in `src/mms/net/plus/`, which core Net reaches through `src/mms/net/hosted.ts`. Builds without `MOUSSE_ID_ORIGIN` show no Mousse ID UI.
 - **Leaf node:** a device, such as a phone, that joins a user's devices but cannot invite or revoke others.
