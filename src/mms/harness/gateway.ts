@@ -1179,8 +1179,10 @@ export class Harness implements HarnessGateway {
         const input: TurnInput = { ...spec.input, signal }
         minted = this.mintBridge(record, spec)
         // Approvals other than `ask` are answered by the turn's bridge: a turn without one would
-        // ask the user after all, so it does not run.
-        if (!minted && spec.binding.policy.approvals !== 'ask')
+        // ask the user after all, so it does not run. (`grants` under Full access is the permission
+        // mode's own: the runtimes allow without asking, no bridge is needed.)
+        const policy = spec.binding.policy
+        if (!minted && policy.approvals !== 'ask' && !(policy.approvals === 'grants' && policy.permissionMode === 'full'))
           throw harnessAppError({
             code: 'policy_unenforceable',
             message: `This turn cannot refuse or pre-grant tool approvals on ${this.displayName(record)}: it has no turn bridge.`,

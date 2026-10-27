@@ -111,7 +111,7 @@ describe('permission modes', () => {
   it('does not offer Auto-accept edits on Codex: the thread asks about edits too, with the reason', () => {
     // No recorded app-server exchange proves a patch applies after Mousse's automatic answer while a
     // mutating command still waits, so the Codex driver reports the mode as unavailable.
-    const runtime = codexDriver({ builtIn: () => ({}) as CodexProviderService }).create({} as DriverContext)
+    const runtime = codexDriver({ builtIn: () => ({}) as CodexProviderService }).create({ config: {} } as DriverContext)
     const limits = runtime.permissionLimits?.()
     expect(limits).toBe(CODEX_PERMISSION_LIMITS)
     const supported = supportedPermissionModes(CODEX_CAPS, limits)
