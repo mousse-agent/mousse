@@ -629,6 +629,9 @@ const api = {
   projects: {
     list: (): Promise<Project[]> => ipcRenderer.invoke('projects:list'),
     open: (): Promise<Project | null> => ipcRenderer.invoke('projects:open'),
+    /** The Git identity of a project, or null when it is not a Git repository. */
+    identity: (projectId: string): Promise<{ roots: string[]; remotes: string[] } | null> =>
+      ipcRenderer.invoke('projects:identity', projectId),
     remove: (projectId: string): Promise<void> =>
       ipcRenderer.invoke('projects:remove', projectId),
     rename: (projectId: string, name: string): Promise<Project> =>

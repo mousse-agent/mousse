@@ -15,6 +15,8 @@ export {
   REMOTE_ATTACHMENT_MIME
 }
 
+/** A Git commit id: SHA-1 or SHA-256 in hex. */
+const COMMIT_HASH = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/
 const UPLOAD_ID = /^[A-Za-z0-9_-]{8,64}$/
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/
 const BUILT_IN_MODES = new Set(['agent', 'plan', 'build'])
@@ -87,6 +89,29 @@ export function validateRemoteParams(
     case 'projects.list':
       keys([])
       break
+    case 'projects.match': {
+      keys(['roots'], ['remotes'])
+      const roots = p.roots
+      if (
+        !Array.isArray(roots) ||
+        roots.length < 1 ||
+        roots.length > 256 ||
+        new Set(roots).size !== roots.length ||
+        roots.some((root) => typeof root !== 'string' || !COMMIT_HASH.test(root))
+      )
+        throw new NetError('bad_request')
+      const remotes = p.remotes ?? []
+      if (
+        !Array.isArray(remotes) ||
+        remotes.length > 64 ||
+        remotes.some(
+          (remote) =>
+            typeof remote !== 'string' || !remote || remote.length > 512 || /[\x00-\x20\x7f]/.test(remote)
+        )
+      )
+        throw new NetError('bad_request')
+      break
+    }
     case 'projects.open':
       keys(['path'])
       text('path', 4096)

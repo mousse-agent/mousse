@@ -72,6 +72,7 @@ export function validateBridgeHubLocal<M extends BridgeHubLocalMethod>(
       ['projectId', 'options']
     ],
     'bridge.hub.openProject': [['target', 'path'], ['options']],
+    'bridge.hub.matchProject': [['target', 'roots'], ['remotes', 'options']],
     'bridge.hub.composerOptions': [['target'], ['threadId', 'options']],
     'bridge.hub.setModel': [['ref', 'model'], ['options']],
     'bridge.hub.stageAttachment': [
@@ -112,6 +113,11 @@ export function validateBridgeHubLocal<M extends BridgeHubLocalMethod>(
       ...(row.projectId === undefined ? {} : { projectId: row.projectId })
     })
   if (method === 'bridge.hub.openProject') validateHubParams('projects.open', { path: row.path })
+  if (method === 'bridge.hub.matchProject')
+    validateHubParams('projects.match', {
+      roots: row.roots,
+      ...(row.remotes === undefined ? {} : { remotes: row.remotes })
+    })
   if (method === 'bridge.hub.composerOptions')
     validateHubParams(
       'composer.options',
@@ -168,6 +174,8 @@ export async function executeBridgeHubLocal(
       return hub.create(row.target, row.name, row.options, row.projectId)
     case 'bridge.hub.openProject':
       return hub.openProject(row.target, row.path, row.options)
+    case 'bridge.hub.matchProject':
+      return hub.matchProject(row.target, { roots: row.roots, remotes: row.remotes ?? [] }, row.options)
     case 'bridge.hub.composerOptions':
       return hub.composerOptions(row.target, row.threadId, row.options)
     case 'bridge.hub.setModel':

@@ -1,5 +1,7 @@
 import { realpathSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, relative, resolve } from 'node:path'
+import { portableRepository } from '../dispatch/repository'
+import { matchProject, type ProjectIdentity } from './projectMatch'
 import type { MmsProfileServices } from '../../MmsProfileServices'
 import { dispatchMethod } from '../../protocol/handlers'
 import { NetError } from '../../../shared/net'
@@ -95,6 +97,11 @@ export function remoteThreadEventData(data: unknown): unknown {
   }
 }
 
+/** How long a project's repository identity is reused before its repository is read again. */
+const IDENTITY_TTL_MS = 5 * 60_000
+/** Projects looked at for one match; a profile with more is matched against the first ones. */
+const MATCH_PROJECT_LIMIT = 256
+
 /** Whether `child` is `parent` or lies below it; case-insensitive where the filesystem usually is. */
 function isInside(child: string, parent: string): boolean {
   const fold = process.platform === 'darwin' || process.platform === 'win32'
@@ -110,6 +117,8 @@ function failure(error: unknown): { ok: false; error: string } {
 
 /** Adapts the actual profile services, never a client-supplied ingress/profile/path. */
 export class MmsRemoteBackend implements RemoteBackendPort {
+  /** Repository identity per project path, null for a folder that is not a Git repository. */
+  private readonly identities = new Map<string, { at: number; identity: ProjectIdentity | null }>()
   constructor(
     private readonly services: MmsProfileServices,
     private readonly revision: () => number = () => 0
@@ -133,6 +142,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
         return { ok: false }
     }
     if (method === 'projects.open') return mmsJson(this.openProject(params.path))
+    if (method === 'projects.match') return mmsJson(await this.matchProject(params))
     const composer = await this.composer(method, params)
     if (composer !== undefined) return mmsJson(composer)
     return mmsJson(
@@ -148,6 +158,36 @@ export class MmsRemoteBackend implements RemoteBackendPort {
         params
       )
     )
+  }
+  /**
+   * Which of this machine's projects is the same Git repository as the one described: an id, or
+   * nothing. Read-only; only ids leave this machine, never a path. Identities are cached by path
+   * for a few minutes, so a profile's repositories are read once per window of use.
+   */
+  private async matchProject(params: Record<string, unknown>): Promise<{ projectId?: string }> {
+    const now = Date.now()
+    const candidates: Array<{ id: string; identity: ProjectIdentity | null }> = []
+    for (const [path, held] of this.identities) if (now - held.at > IDENTITY_TTL_MS) this.identities.delete(path)
+    for (const project of this.services.projects.listProjects().slice(0, MATCH_PROJECT_LIMIT)) {
+      let held = this.identities.get(project.path)
+      if (!held || now - held.at > IDENTITY_TTL_MS) {
+        let identity: ProjectIdentity | null = null
+        try {
+          const { roots, remotes } = await portableRepository(project.path)
+          identity = { roots, remotes }
+        } catch {
+          // Not a Git repository, or not readable: it never matches.
+        }
+        held = { at: now, identity }
+        this.identities.set(project.path, held)
+      }
+      candidates.push({ id: project.id, identity: held.identity })
+    }
+    const projectId = matchProject(
+      { roots: params.roots as string[], remotes: (params.remotes as string[] | undefined) ?? [] },
+      candidates
+    )
+    return projectId ? { projectId } : {}
   }
   /**
    * Registers an existing directory on this machine as a project. The path comes from another

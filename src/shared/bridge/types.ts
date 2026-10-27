@@ -55,6 +55,12 @@ export interface BridgeRemoteParams {
     projectId?: string
     worktreeEnabled?: boolean
   }
+  'projects.match': {
+    /** Root commits of the source repository (1 to 256). */
+    roots: string[]
+    /** Normalized remotes of the source repository, as `portableRepository` lists them. */
+    remotes?: string[]
+  }
   'projects.open': {
     /** Absolute path of an existing directory on the receiving machine. */
     path: string
@@ -176,6 +182,7 @@ export const BRIDGE_HUB_LOCAL_METHODS = [
   'bridge.hub.search',
   'bridge.hub.create',
   'bridge.hub.openProject',
+  'bridge.hub.matchProject',
   'bridge.hub.composerOptions',
   'bridge.hub.setModel',
   'bridge.hub.stageAttachment',
@@ -218,6 +225,11 @@ export interface BridgeHubLocalParams {
     target: NodeId
     /** Absolute path of an existing directory on the target machine. */
     path: string
+    options?: BridgeHubRequestOptions
+  }
+  /** Which project on the target is the same Git repository; resolves `{ projectId }` or `{}`. */
+  'bridge.hub.matchProject': BridgeRemoteParams['projects.match'] & {
+    target: NodeId
     options?: BridgeHubRequestOptions
   }
   /** The models, modes and skills the target's composer offers (`composer.options`). */

@@ -617,6 +617,14 @@ export class BridgeHub {
   ): Promise<unknown> {
     return this.call(target, 'projects.open', { path }, options)
   }
+  /** Asks the target which of its projects is the same repository; read-only, and sends no path. */
+  matchProject(
+    target: NodeId,
+    identity: BridgeRemoteParams['projects.match'],
+    options: BridgeHubRequestOptions = {}
+  ): Promise<unknown> {
+    return this.call(target, 'projects.match', identity, options)
+  }
   composerOptions(
     target: NodeId,
     threadId?: string,

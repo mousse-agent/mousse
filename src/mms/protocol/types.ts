@@ -199,6 +199,7 @@ export const PROTOCOL_METHODS = [
   'projects.list',
   'chatReferences.resolve',
   'projects.open',
+  'projects.identity',
   'projects.remove',
   'projects.rename',
   'projects.pin',
