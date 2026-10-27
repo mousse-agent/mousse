@@ -1,11 +1,11 @@
 import { accessSync, constants } from 'node:fs'
 import { homedir } from 'node:os'
-import { isAbsolute, join, resolve } from 'node:path'
-import type { BinarySource } from '../../shared/harness/status'
+import { isAbsolute, join, posix, resolve } from 'node:path'
+import type { BinarySource, CredentialKind } from '../../shared/harness/status'
 import type { HarnessDriverKind } from '../../shared/harness/types'
 import { cliLaunch, withUserEnv, type CliLaunch } from '../providers/cliConfig'
 import { resolveWindowsShim } from '../providers/resolveWindowsShim'
-import { PI_ENV_KEYS } from './pi/envKeys'
+import { PI_AMBIENT_ENV, PI_ENV_KEYS } from './pi/envKeys'
 import { GROK_CREDENTIAL_VARIABLES } from './grok/variables'
 
 /**
@@ -128,6 +128,75 @@ export function instanceEnv(input: {
     searchPath: [...input.searchPath, ...extraSearch],
     ...(extraSearch.length ? { driverSearchPath: extraSearch } : {})
   }
+}
+
+/**
+ * What a locked process (a bot's runtime, PR 6 §2) may take from Mousse's environment: what finds
+ * programs, the home folder, the locale and terminal, the system folders, and the proxy and
+ * certificate settings. Credentials, tokens and every other variable are left out.
+ */
+export const LOCKED_ENV_POSIX: readonly string[] = Object.freeze(['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_*', 'TERM'])
+export const LOCKED_ENV_WINDOWS: readonly string[] = Object.freeze([
+  'PATH', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP',
+  'PROGRAMDATA', 'PROGRAMFILES', 'CLAUDE_CODE_GIT_BASH_PATH'
+])
+/** Kept on every platform, in any case (`https_proxy` as well as `HTTPS_PROXY`). */
+export const LOCKED_ENV_NETWORK: readonly string[] = Object.freeze(['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE'])
+
+/** The ambient credentials a driver's instance may run on, by provider (Pi's Bedrock and Vertex). */
+const AMBIENT_ENV: Partial<Record<HarnessDriverKind, Readonly<Record<string, readonly string[]>>>> = { pi: PI_AMBIENT_ENV }
+
+export interface LockedEnvInput {
+  platform: NodeJS.Platform
+  /** Mousse's environment, which the allowed variables are copied from. */
+  base: NodeJS.ProcessEnv
+  driver: HarnessDriverKind
+  /** The instance's provider, for a driver with several (`pi:<provider>`). */
+  provider?: string
+  /** What the instance runs on (`InstanceSnapshot.auth.credential`): only `ambient` passes the provider's cloud credentials. */
+  credential: CredentialKind
+  /** The instance's Mousse-owned home, set as the driver's home variable. */
+  home?: string
+  /** The instance's own secret (its key variable), set after the home. */
+  secrets?: Readonly<Record<string, string>>
+  /** The activation's private scratch folder: on POSIX, `TMPDIR` is `<scratch>/tmp`. */
+  scratch: string
+  /** Values Mousse always sets (telemetry off), applied last over everything else. */
+  enforced?: Readonly<Record<string, string>>
+}
+
+/**
+ * The environment of a locked process, built from nothing (PR 6 §2): the platform's allowlist and
+ * the network settings, `TMPDIR` in the scratch folder, then for an ambient instance exactly its
+ * provider's cloud credentials (`PI_AMBIENT_ENV`), then the driver's home variable and the
+ * instance's secret, then the enforced values. Key and subscription instances, and every driver
+ * without ambient sign-in, get no cloud credentials. Interactive instances keep `instanceEnv`.
+ */
+export function lockedEnv(input: LockedEnvInput): NodeJS.ProcessEnv {
+  const windows = input.platform === 'win32'
+  const env: NodeJS.ProcessEnv = {}
+  const copy = (names: readonly string[], anyCase: boolean) => {
+    for (const [key, value] of Object.entries(input.base)) {
+      if (value === undefined) continue
+      const allowed = anyCase || windows ? matchesVariable(names, key) : names.some((name) => (name.endsWith('*') ? key.startsWith(name.slice(0, -1)) : key === name))
+      if (allowed) env[key] = value
+    }
+  }
+  /** Sets `name`, dropping any other spelling of it first (Windows names ignore case). */
+  const put = (name: string, value: string) => {
+    for (const key of Object.keys(env)) if (key === name || (windows && key.toUpperCase() === name.toUpperCase())) delete env[key]
+    env[name] = value
+  }
+  copy(windows ? LOCKED_ENV_WINDOWS : LOCKED_ENV_POSIX, false)
+  copy(LOCKED_ENV_NETWORK, true)
+  if (!windows) put('TMPDIR', posix.join(input.scratch, 'tmp'))
+  const ambient = input.credential === 'ambient' && input.provider ? AMBIENT_ENV[input.driver]?.[input.provider] : undefined
+  if (ambient) copy(ambient, false)
+  const variable = HOME_VARIABLES[input.driver]
+  if (input.home && variable) put(variable, input.home)
+  for (const [name, value] of Object.entries(input.secrets ?? {})) put(name, value)
+  for (const [name, value] of Object.entries(input.enforced ?? {})) put(name, value)
+  return env
 }
 
 export interface ResolvedBinary {
