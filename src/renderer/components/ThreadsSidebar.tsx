@@ -15,6 +15,7 @@ import { useChatsStore } from '../stores/chatsStore'
 import { createAndSelectThread, selectThread } from '../lib/threadActions'
 import { ChatsSidebar } from './chats/ChatsSidebar'
 import { ProfileSwitcher } from './profiles/ProfileSwitcher'
+import { RecentlyDeletedSection } from './sidebar/RecentlyDeletedSection'
 
 import {
   ThreadsContextMenu,
@@ -818,6 +819,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         aria-current={activeThreadId === thread.id ? 'page' : undefined}
 
+        data-thread-id={thread.id}
+
         draggable={!isRenaming && !isSettled}
 
         onDragStart={(event) => {
@@ -1302,6 +1305,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         )}
 
       </div>
+
+      <RecentlyDeletedSection hidden={sidebarView !== 'threads'} />
 
       <ProfileSwitcher onSwitched={(profile) => useAppStore.getState().activateProfile(profile.id)} />
 
