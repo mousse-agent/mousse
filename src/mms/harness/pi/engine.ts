@@ -528,7 +528,7 @@ export class PiRpcEngine implements ProviderAdapter {
   forgetConversation(threadId: string): void {
     if (!this.saved()[threadId]?.pendingFork) this.save(threadId, undefined)
     const thread = this.threads.get(threadId)
-    if (thread && !thread.turn) this.kill(thread)
+    if (thread && !thread.turn) void this.kill(thread)
   }
 
   /**
