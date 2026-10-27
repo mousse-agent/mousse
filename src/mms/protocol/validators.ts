@@ -23,6 +23,7 @@ import {
   type SignInResponse
 } from '../../shared/harness/types'
 import { parseCliConfigPatch } from '../providers/cliConfig'
+import { cronProblem } from '../scheduled/computeNextRun'
 import {
   parseClientCommandResponse,
   parseServerCommandCancel,
@@ -753,6 +754,9 @@ export function asJobSchedule(v: unknown, name = 'schedule'): {
   if (expr.split(/\s+/).filter(Boolean).length < 5) {
     throw new Error(`${name}.expr must be a cron expression with at least 5 fields`)
   }
+  // A malformed field (a step of 0, a value out of range) is refused here, never searched.
+  const problem = cronProblem(expr)
+  if (problem) throw new Error(`${name}.expr: ${problem}`)
   return { kind, expr }
 }
 
@@ -920,10 +924,7 @@ function asChannelPlatformConfig(
     'allowAllUsers',
     'homeChatId',
     'webhookPort',
-    'webhookSecret',
-    // A saved form sends the owner back as it was read; it is dropped here, because the owner is
-    // set only through "This is me" (`channels.owner.*`).
-    'owner'
+    'webhookSecret'
   ])
   for (const key of Object.keys(o)) {
     if (!allowed.has(key)) throw new Error(`${name}.${key} is not allowed`)

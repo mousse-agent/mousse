@@ -4,6 +4,7 @@ import { narrowAgentAccess } from '../../../../shared/settings'
 import type { JobSchedule, ScheduledJob } from '../../../../shared/types'
 import { AGENT_JOB_LIFETIME_DAYS, AGENT_JOB_MAX_ACTIVE, AGENT_JOB_MIN_INTERVAL_MINUTES, agentJobExpiry, isActiveAgentJob, isExpired } from '../../../scheduled/agentJobLimits'
 import { runNowRefusal } from '../../../scheduled/runNowRefusal'
+import { cronProblem } from '../../../scheduled/computeNextRun'
 import { asCreateScheduledJobInput, asScheduledJobPatch } from '../../../protocol/validators'
 import type { RunEngine } from '../../RunEngine'
 import type { AgentScheduleHost, AppToolHost } from './host'
@@ -93,7 +94,7 @@ export function scheduleRefusal(schedule: JobSchedule): string | undefined {
   const gaps = minutes.map((minute, index) => (index === 0 ? minutes[0] + 60 - minutes[minutes.length - 1] : minute - minutes[index - 1]))
   if (minutes.length > 1 && Math.min(...gaps) < MIN_MINUTES)
     return `The minutes of a cron expression must be at least ${MIN_MINUTES} apart.`
-  return undefined
+  return cronProblem(schedule.expr ?? '')
 }
 
 /** A job that would start a workflow is refused: only a person starts one from a schedule. */

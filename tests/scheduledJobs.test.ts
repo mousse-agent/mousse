@@ -1,5 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { computeNextRun, isSilentOutput } from '../src/mms/scheduled/computeNextRun'
+import { asJobSchedule } from '../src/mms/protocol/validators'
+import { scheduleRefusal } from '../src/mms/run/mcp/appTools/schedules'
 import { ScheduledJobStore, type ScheduledRunProbe, type ScheduledRunView } from '../src/mms/scheduled/ScheduledJobStore'
 import { ScheduledJobService, type ScheduledJobRunner } from '../src/mms/scheduled/ScheduledJobService'
 import type { ScheduledJob } from '../src/shared/types'
@@ -33,6 +35,19 @@ import { PROCESS_INSTANCE_ID } from '../src/mms/queue/processLiveness'
 import { removeTriggerPayload } from '../src/mms/scheduled/webhookFiles'
 
 describe('computeNextRun', () => {
+  it('a cron with a step of 0 or a value out of range never runs and is never searched', () => {
+    const started = Date.now()
+    for (const expr of ['1-5/0 * * * *', '*/0 * * * *', '0 1-3/0 * * *', 'a b c d e', '60 * * * *', '0 0 32 * *'])
+      expect(computeNextRun({ kind: 'cron', expr }, null, new Date('2026-06-01T00:00:00.000Z')), expr).toBeNull()
+    expect(Date.now() - started).toBeLessThan(2000)
+    // A job with one is refused when it is made, by a person or by an agent.
+    expect(() => asJobSchedule({ kind: 'cron', expr: '1-5/0 * * * *' })).toThrow(/invalid/)
+    expect(scheduleRefusal({ kind: 'cron', expr: '0 1-3/0 * * *' })).toMatch(/invalid/)
+    // Valid forms still run: steps, ranges, lists, and 7 as Sunday.
+    expect(computeNextRun({ kind: 'cron', expr: '*/15 9-17 * * 1-5' }, null, new Date(2026, 5, 1, 8, 0))).toBe(new Date(2026, 5, 1, 9, 0).toISOString())
+    expect(computeNextRun({ kind: 'cron', expr: '0 9 * * 7' }, null, new Date(2026, 5, 1, 8, 0))).toBe(new Date(2026, 5, 7, 9, 0).toISOString())
+  })
+
   it('computes interval from last run', () => {
     const lastRunAt = '2026-01-01T12:00:00.000Z'
     const next = computeNextRun({ kind: 'interval', minutes: 30 }, lastRunAt)

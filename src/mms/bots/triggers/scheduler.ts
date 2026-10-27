@@ -1,5 +1,5 @@
 import type { BotSchedule } from '../../../shared/bots/personal/definition'
-import { computeNextRun } from '../../scheduled/computeNextRun'
+import { computeNextRun, cronProblem } from '../../scheduled/computeNextRun'
 
 /**
  * Bot schedules (PR 6 §6). No second `ScheduledJobService`: the times come from `computeNextRun`,
@@ -27,6 +27,9 @@ export function scheduleProblem(schedule: BotSchedule): string | undefined {
   if (when.kind === 'cron') {
     if (Object.keys(when).some((key) => key !== 'kind' && key !== 'expr')) return 'A schedule time is invalid.'
     if (typeof when.expr !== 'string' || when.expr.trim().split(/\s+/).length !== 5 || when.expr.length > 200) return 'A cron schedule needs five fields.'
+    // Every field is checked before any time is searched: a malformed one is refused, never run.
+    const problem = cronProblem(when.expr)
+    if (problem) return problem
     if (!computeNextRun({ kind: 'cron', expr: when.expr }, null, new Date(0))) return 'This cron schedule never runs.'
     return undefined
   }
