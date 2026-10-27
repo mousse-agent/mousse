@@ -4,14 +4,10 @@ import {
   useId,
   useMemo,
   useRef,
-  useState,
-  type ReactNode,
-  type RefObject
+  useState
 } from 'react'
 import { Check, ChevronDown, GitBranch, Search, X } from '../../lib/icons'
-import { FloatingPortal, useFloatingPosition, type FloatingPlacement } from '../../lib/floatingLayer'
 import { openSurface } from '../../lib/surfaces'
-import { useOutsideDismiss } from '../../hooks/useOutsideDismiss'
 import { useActiveProjectLocation } from '../../hooks/useActiveProjectPath'
 import { useTransientError } from '../../hooks/useTransientError'
 import { useAppStore } from '../../stores/appStore'
@@ -24,11 +20,13 @@ import {
   useGitStatus,
   type GitStatusView
 } from '../../stores/gitStatusStore'
-import { createPullRequestForBranch, usePullRequest } from '../../stores/pullRequestStore'
+import { createPullRequestForBranch, useGitPullRequestStore, usePullRequest } from '../../stores/pullRequestStore'
 import { gitScopeFor } from '../../lib/activeProject'
 import type { GitCommit, GitPullRequestLookup, GitScope } from '../../../shared/types'
 import { Switch } from '../settings/SettingsRow'
+import { CardPopover } from './CardPopover'
 import { menuRowLabel } from './deviceMenu'
+import { PullRequestCreateForm } from './PullRequestCreateForm'
 import { SideCardSection, type SideCardSectionContext } from './SideCardSection'
 import {
   branchChoices,
@@ -55,6 +53,7 @@ import {
   prefillAmendDraft,
   THREAD_BRANCH_LABEL,
   pullRequestRow,
+  pullRequestScope,
   pushButtonModel,
   pushFailedMessage,
   releaseForcedAmend,
@@ -67,71 +66,6 @@ import {
   type PushButtonModel
 } from './gitSectionLogic'
 import './gitSection.css'
-
-interface CardPopoverProps {
-  open: boolean
-  anchorRef: RefObject<HTMLElement | null>
-  placement: FloatingPlacement
-  label: string
-  className?: string
-  /** Focused once the popover has been positioned. */
-  initialFocusRef?: RefObject<HTMLElement | null>
-  /** Recompute the position when the content's size changes. */
-  sizeKey?: unknown
-  onClose: () => void
-  children: ReactNode
-}
-
-/** A popover sized to the side card, closed by Escape or a click outside it. */
-function CardPopover({
-  open,
-  anchorRef,
-  placement,
-  label,
-  className,
-  initialFocusRef,
-  sizeKey,
-  onClose,
-  children
-}: CardPopoverProps) {
-  const popoverRef = useRef<HTMLDivElement>(null)
-  const style = useFloatingPosition({
-    open,
-    anchorRef,
-    contentRef: popoverRef,
-    placement,
-    gap: 4,
-    deps: [sizeKey]
-  })
-  const dismissRefs = useMemo(() => [anchorRef, popoverRef], [anchorRef])
-  useOutsideDismiss(open, dismissRefs, onClose)
-
-  useEffect(() => {
-    if (open && style.visibility === 'visible') initialFocusRef?.current?.focus()
-  }, [open, style.visibility, initialFocusRef])
-
-  if (!open) return null
-  return (
-    <FloatingPortal>
-      <div
-        ref={popoverRef}
-        className={`side-card-git-popover${className ? ` ${className}` : ''}`}
-        role="dialog"
-        aria-label={label}
-        style={style}
-        onKeyDown={(event) => {
-          if (event.key !== 'Escape') return
-          event.preventDefault()
-          event.stopPropagation()
-          onClose()
-          anchorRef.current?.focus()
-        }}
-      >
-        {children}
-      </div>
-    </FloatingPortal>
-  )
-}
 
 interface BranchPickerProps {
   status: GitStatusView['status']
@@ -524,6 +458,8 @@ function PullRequestLink({ row }: { row: PullRequestFoundRow }) {
 
 interface GitSectionViewProps {
   threadId: string | null
+  /** The thread whose folder and conversation Git works on; null for a new chat that follows the composer's project pick. */
+  ownThreadId?: string | null
   projectId: string | null
   /** The thread whose own worktree `path` is, when it is one; its branch is then fixed. */
   workspaceThreadId?: string | null
@@ -541,9 +477,11 @@ interface GitSectionViewProps {
 }
 
 /** The section's markup, given its data. `GitSection` supplies the data. */
-export function GitSectionView({ threadId, projectId, workspaceThreadId = null, path, git, pullRequest = null, collapsedLabel, canInitialize = false, now }: GitSectionViewProps) {
+export function GitSectionView({ threadId, ownThreadId = null, projectId, workspaceThreadId = null, path, git, pullRequest = null, collapsedLabel, canInitialize = false, now }: GitSectionViewProps) {
   const scope = useMemo(() => gitScopeFor({ projectId, workspaceThreadId }), [projectId, workspaceThreadId])
   const [running, setRunning] = useState<GitAction | null>(null)
+  const rowRef = useRef<HTMLDivElement>(null)
+  const createForm = useGitPullRequestStore((state) => state.createForm)
   const runningRef = useRef<GitAction | null>(null)
   const [actionError, setActionError] = useTransientError()
 
@@ -621,11 +559,13 @@ export function GitSectionView({ threadId, projectId, workspaceThreadId = null, 
   }
 
   const branch = git.status?.branch ?? null
+  // The folder, thread and branch of this click; the form, its draft and its submit use these, not whatever is active later.
+  const createScope = pullRequestScope({ path, branch, projectId, ownThreadId })
   const createPullRequest = async () => {
-    if (!branch || !begin('pullRequest')) return
+    if (!createScope || !begin('pullRequest')) return
     setActionError(null)
     try {
-      await createPullRequestForBranch(path, branch, projectId ?? undefined)
+      await createPullRequestForBranch(createScope)
     } catch (error) {
       setActionError(gitErrorMessage(error))
     } finally {
@@ -642,7 +582,7 @@ export function GitSectionView({ threadId, projectId, workspaceThreadId = null, 
 
   return (
     <SideCardSection title="Git" threadId={threadId}>
-      <div className="side-card-git-row">
+      <div ref={rowRef} className="side-card-git-row">
         <BranchPicker
           status={git.status}
           branches={git.branches}
@@ -668,6 +608,10 @@ export function GitSectionView({ threadId, projectId, workspaceThreadId = null, 
           onActionError={setActionError}
         />
       </div>
+      <PullRequestCreateForm
+        scope={createForm && createForm.path === path && createForm.branch === branch ? createForm : null}
+        anchorRef={rowRef}
+      />
       {prRow?.kind === 'found' && <PullRequestLink row={prRow} />}
       {prRow?.kind === 'create' && (
         <button
@@ -743,6 +687,7 @@ export function GitSection({ threadId }: SideCardSectionContext) {
   return (
     <GitSectionView
       threadId={threadId}
+      ownThreadId={ownThreadId}
       projectId={projectId}
       workspaceThreadId={location.workspaceThreadId}
       path={path}

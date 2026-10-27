@@ -1,3 +1,4 @@
+import type { PullRequestScope } from '../../../shared/pullRequests'
 import type {
   GitBranchInfo,
   GitCommit,
@@ -248,6 +249,26 @@ export function pullRequestRow(lookup: GitPullRequestLookup | null, status: GitS
     suffix,
     tooltip: [title ? `${number} ${title}` : number, checks?.label].filter(Boolean).join('\n'),
     ariaLabel: ['Pull request ' + number, title, suffix?.toLowerCase(), checks?.spoken].filter(Boolean).join(', ')
+  }
+}
+
+/**
+ * What Create PR captures when it is clicked: the folder (the thread's own, else the project's), the thread
+ * whose conversation drafts the description and receives the link, the folder's path and the branch. Null
+ * without a branch. A thread on the project's checkout is the origin as much as one with a worktree.
+ */
+export function pullRequestScope(input: {
+  path: string
+  branch: string | null
+  projectId: string | null
+  ownThreadId: string | null
+}): PullRequestScope | null {
+  if (!input.branch) return null
+  return {
+    ...(input.ownThreadId ? { threadId: input.ownThreadId } : input.projectId ? { projectId: input.projectId } : {}),
+    originThreadId: input.ownThreadId,
+    path: input.path,
+    branch: input.branch
   }
 }
 

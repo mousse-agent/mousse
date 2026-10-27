@@ -1161,6 +1161,47 @@ export class LlmClient {
     threadId?: string,
     selection?: { instanceId?: string; llmProvider: string; model: string }
   ): Promise<string> {
+    const prompt = [
+      'Write a concise title for this chat (maximum 7 words).',
+      'Return only the title: no quotes, markdown, or ending punctuation.',
+      '',
+      `User request: ${userRequest.slice(0, 4000)}`,
+      ...(firstResponse?.trim() ? [`First response: ${firstResponse.slice(0, 6000)}`] : [])
+    ].join('\n')
+    const text = await this.completeWithTitleModel(
+      'You name chat threads clearly and specifically.',
+      prompt,
+      threadId ?? `title:${userRequest}`,
+      selection
+    )
+    return text
+      .trim()
+      .replace(/^["'`]+|["'`]+$/g, '')
+      .replace(/[.!?:;]+$/g, '')
+      .replace(/\s+/g, ' ')
+      .slice(0, 80)
+  }
+
+  /**
+   * Proposes a pull request's title and description with the title model: the same selection,
+   * stream path and timeouts as `generateTitle`. Returns the model's raw answer; the caller parses it.
+   */
+  async draftPullRequest(
+    systemPrompt: string,
+    prompt: string,
+    threadId?: string,
+    selection?: { instanceId?: string; llmProvider: string; model: string }
+  ): Promise<string> {
+    return this.completeWithTitleModel(systemPrompt, prompt, `pull-request-draft:${threadId ?? prompt.slice(0, 200)}`, selection)
+  }
+
+  /** One short, tool-free completion on the title model; `sessionKey` only names the provider's cache session. */
+  private async completeWithTitleModel(
+    systemPrompt: string,
+    prompt: string,
+    sessionKey: string,
+    selection?: { instanceId?: string; llmProvider: string; model: string }
+  ): Promise<string> {
     const { llmProvider, model: selectedModelId } = selection ?? resolveTitleModel(this.settingsStore.get(), this.providerAuth.getConfiguredLlmProviders())
     if (!llmProvider || !selectedModelId) {
       throw new Error('Connect a provider with a title model before generating a chat title.')
@@ -1173,19 +1214,12 @@ export class LlmClient {
       throw new Error(`Title provider "${llmProvider}" is not configured.`)
     }
 
-    const prompt = [
-      'Write a concise title for this chat (maximum 7 words).',
-      'Return only the title: no quotes, markdown, or ending punctuation.',
-      '',
-      `User request: ${userRequest.slice(0, 4000)}`,
-      ...(firstResponse?.trim() ? [`First response: ${firstResponse.slice(0, 6000)}`] : [])
-    ].join('\n')
     const titleContext = {
-      systemPrompt: 'You name chat threads clearly and specifically.',
+      systemPrompt,
       messages: [{ role: 'user' as const, content: prompt, timestamp: Date.now() }]
     }
     const reasoning = (effort ?? 'off') as ThinkingLevel
-    const titleSessionId = getCacheSessionId(threadId ?? `title:${userRequest}`)
+    const titleSessionId = getCacheSessionId(sessionKey)
     const streamOptions = getReasoningStreamOptions(
       model.api,
       reasoning,
@@ -1212,11 +1246,6 @@ export class LlmClient {
       { inactivityTimeoutMs: DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS }
     )
     return extractAssistantText(response)
-      .trim()
-      .replace(/^["'`]+|["'`]+$/g, '')
-      .replace(/[.!?:;]+$/g, '')
-      .replace(/\s+/g, ' ')
-      .slice(0, 80)
   }
 
   getSelectedModelContextLimit(

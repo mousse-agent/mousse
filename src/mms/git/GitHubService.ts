@@ -62,18 +62,6 @@ export class GitHubService {
     }
   }
 
-  /** Opens GitHub's create page in the browser. */
-  async createPullRequest(cwd: string): Promise<void> {
-    await this.runExclusive(async () => {
-      try {
-        await this.runExecutable('gh', ['pr', 'create', '--web'], { cwd })
-      } catch (error) {
-        if (isMissingExecutable(error)) throw new Error('GitHub CLI (gh) was not found. Install it and try again.')
-        throw new Error(processMessage(error))
-      }
-    })
-  }
-
   async createRepository(
     projectPath: string,
     input: Omit<GitHubCreateRepositoryInput, 'projectId'>

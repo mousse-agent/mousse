@@ -63,7 +63,14 @@ import type {
   TurnStateSnapshot,
   UserQuestionAnswers
 } from '../shared/types'
-import type { PullRequestRef } from '../shared/pullRequests'
+import type {
+  CreatePullRequestResult,
+  PullRequestBaseBranches,
+  PullRequestDraft,
+  PullRequestFormInput,
+  PullRequestRef,
+  PullRequestScope
+} from '../shared/pullRequests'
 import type { ProfileCreateInput, ProfilePublicDto, ProfileUpdateInput } from '../shared/profiles/types'
 import type { LlmProviderOption, MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../shared/settings'
 import type { LineEditStatsSnapshot, UsageStatsSnapshot } from '../shared/lineEditStats'
@@ -480,13 +487,17 @@ const api = {
     deleteBranch: (scope: GitScope, name: string, options?: GitDeleteBranchOptions): Promise<GitMutationResult> =>
       storageInvoke('git:deleteBranch', scope, name, options),
     lastCommitMessage: (projectId?: string, cwd?: string): Promise<string | null> =>
-      ipcRenderer.invoke('git:lastCommitMessage', projectId, cwd),
-    createPullRequest: (projectId?: string, cwd?: string): Promise<void> =>
-      ipcRenderer.invoke('git:createPullRequest', projectId, cwd)
+      ipcRenderer.invoke('git:lastCommitMessage', projectId, cwd)
   },
   pullRequests: {
     get: (ref: PullRequestRef, branch: string, force?: boolean): Promise<GitPullRequestLookup> =>
-      ipcRenderer.invoke('pullRequests:get', ref, branch, force)
+      ipcRenderer.invoke('pullRequests:get', ref, branch, force),
+    draft: (scope: PullRequestScope, base?: string): Promise<PullRequestDraft> =>
+      ipcRenderer.invoke('pullRequests:draft', scope, base),
+    create: (scope: PullRequestScope, input: PullRequestFormInput): Promise<CreatePullRequestResult> =>
+      ipcRenderer.invoke('pullRequests:create', scope, input),
+    baseBranches: (ref: PullRequestRef): Promise<PullRequestBaseBranches> =>
+      ipcRenderer.invoke('pullRequests:baseBranches', ref)
   },
   editors: {
     list: (options?: { refresh?: boolean }): Promise<EditorInfo[]> =>

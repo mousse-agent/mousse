@@ -111,7 +111,14 @@ import type {
   UserQuestionAnswers
 } from '../../shared/types'
 import { isThreadActivityActive } from '../../shared/types'
-import type { PullRequestRef } from '../../shared/pullRequests'
+import type {
+  CreatePullRequestResult,
+  PullRequestBaseBranches,
+  PullRequestDraft,
+  PullRequestFormInput,
+  PullRequestRef,
+  PullRequestScope
+} from '../../shared/pullRequests'
 import { visibleThreads } from '../../shared/threadLineage'
 import type { ProviderLoginResponse } from '../../shared/providerAuth'
 import type {
@@ -231,6 +238,16 @@ function normalizeSendContent(request: OrchestratorSendInput): {
     requestId: request.requestId,
     mode: request.mode,
     images: request.images
+  }
+}
+
+/** The daemon's parameters for a pull request action: its folder, originating thread and the branch it is bound to. */
+function pullRequestScopeParams(scope: PullRequestScope | undefined): Record<string, string> {
+  return {
+    ...(typeof scope?.threadId === 'string' ? { threadId: scope.threadId } : {}),
+    ...(typeof scope?.projectId === 'string' ? { projectId: scope.projectId } : {}),
+    ...(typeof scope?.originThreadId === 'string' ? { originThreadId: scope.originThreadId } : {}),
+    ...(typeof scope?.branch === 'string' ? { expectedBranch: scope.branch } : {})
   }
 }
 
@@ -1865,8 +1882,29 @@ export function registerGuiIpc(
     })
     return response.lookup
   })
-  registerHandler('git:createPullRequest', async (_e, projectId?: string, cwd?: string) => {
-    await gitService.github.createPullRequest(await resolveGitCwd(projectId, cwd))
+  registerHandler('pullRequests:draft', async (_e, scope: PullRequestScope, base?: string) => {
+    const response = await guiMms.request<{ title: string; body: string; base: string; source: 'model' | 'heuristic' }>(
+      'pullRequests.draft',
+      { ...pullRequestScopeParams(scope), ...(typeof base === 'string' && base ? { base } : {}) }
+    )
+    return { title: response.title, body: response.body, base: response.base, source: response.source } satisfies PullRequestDraft
+  })
+  registerHandler('pullRequests:create', async (_e, scope: PullRequestScope, input: PullRequestFormInput) => {
+    const response = await guiMms.request<CreatePullRequestResult>('pullRequests.create', {
+      ...pullRequestScopeParams(scope),
+      title: input?.title,
+      body: input?.body,
+      base: input?.base,
+      draft: input?.draft === true
+    })
+    return { pullRequest: response.pullRequest, existing: response.existing === true } satisfies CreatePullRequestResult
+  })
+  registerHandler('pullRequests:baseBranches', async (_e, ref: PullRequestRef | undefined) => {
+    const response = await guiMms.request<{ baseBranches: PullRequestBaseBranches }>('pullRequests.baseBranches', {
+      ...(typeof ref?.threadId === 'string' ? { threadId: ref.threadId } : {}),
+      ...(typeof ref?.projectId === 'string' ? { projectId: ref.projectId } : {})
+    })
+    return response.baseBranches
   })
   registerHandler('editors:list', async (_e, options?: { refresh?: boolean }) =>
     listEditors(options)
