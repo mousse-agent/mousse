@@ -280,7 +280,7 @@ import { ThreadSession, type ActiveTurnControl, type SteerEntry } from './Thread
 import { userQuestionService as defaultUserQuestionService, UserQuestionService, withoutStandingRules } from './UserQuestionService'
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
 import { ConnectionRetriesExhaustedError } from './connectionRetry'
-import { AppError, errorDiagnostic, normalizeAppError, serializeAppError, type AppErrorShape } from '../../shared/errors'
+import { AppError, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError, type AppErrorShape } from '../../shared/errors'
 import {
   compactMessagesAtSafeBoundary,
   commitNativeMessages,
@@ -910,8 +910,8 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * Where a definition runs on its instance: the instance's definition runtime, or its definition
-   * loop while one exists for a definition that needs it. That is one whose settings need it
-   * (`definitionNeedsLoop`: its browser), or one whose token or USD limits only the loop can hold
+   * loop while one exists for a definition that needs it. That is one whose settings are not known
+   * (`definitionNeedsLoop`), or one whose token or USD limits only the loop can hold
    * (a cost limit on an unpriced model, a model that does not always send its output cap), which
    * ran on the loop before Pi RPC held definitions.
    */
@@ -1045,6 +1045,12 @@ export class OrchestratorService extends EventEmitter {
     if (!verdict.ok) throw harnessAppError(verdict.error)
     const featureRefusal = definitionFeatureRefusal(resolved.caps, turn.features, resolved.instanceId)
     if (featureRefusal) throw harnessAppError({ code: 'policy_unenforceable', message: featureRefusal.message, missing: featureRefusal.missing ?? ['toolControl'], instanceId: resolved.instanceId })
+    // A runtime other than the loop reaches the definition's browser as Mousse app tools, on the
+    // host's browser runtime (an agent chat's shared browser) as the loop does, else the profile's,
+    // which also lists them. Without one the turn fails before it starts, as on the loop.
+    const hostBrowser = readHostBrowserRuntime(extras.host)
+    if (extras.browser && resolved.caps.definitionLimits !== 'in_loop' && !this.browserRuntime)
+      throw knownAppError({ code: 'browser_runtime_unbound', message: 'Browser runtime is not bound. Call setBrowserRuntime with a BrowserRuntimePort before enabling browser tools.' })
     if (turn.signal.aborted) throw turn.signal.reason ?? new DOMException('Aborted', 'AbortError')
     const dispatched = await engine.dispatch({ kind: 'send', threadId, clientRequestId: `definition:${turn.runId}:${turn.attempt}`, source: 'definition' })
     if (dispatched.status !== 'accepted') throw harnessAppError({ code: 'operation_busy', message: "The agent's turn could not be recorded." })
@@ -1092,9 +1098,11 @@ export class OrchestratorService extends EventEmitter {
       discovery: false,
       ...(projectPath ? { projectPath } : {}),
       actor: definitionActor(turn.grants),
+      ...(extras.browser && hostBrowser ? { browserRuntime: hostBrowser } : {}),
       enabledSkills: [],
       loadedSkills: [],
-      settingsEnabled: (name) => settingsToolEnabled(this.settingsStore.get().integrations?.tools, name),
+      // As on the loop: the definition's grants decide its tools, not the profile's tool settings.
+      settingsEnabled: () => true,
       definition: authority
     }, { continuation: false })
     const record = new DefinitionTurnRecord()

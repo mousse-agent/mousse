@@ -34,7 +34,7 @@ export interface PiProfileInputs {
   /** The user's custom models of an instance (Settings → Providers → Models). */
   customModels?: (instanceId: string) => readonly CustomModel[]
   /** Mousse's app tools (the Mousse MCP server's registry). */
-  registry?: () => Pick<ToolRegistry, 'listForThread'>
+  registry?: () => Pick<ToolRegistry, 'listForTurn'>
   /** Mousse's OAuth credentials for Pi's OAuth providers (`piOAuthBroker`). */
   oauth?: PiOAuthSource
   /** The process environment ambient credentials come from (test seam). */
@@ -147,7 +147,8 @@ export function piRpcProfileOptions(inputs: PiProfileInputs): PiRpcDriverOptions
     },
     ...(inputs.registry
       ? {
-          mousseTools: (threadId: string): PiMousseTool[] => inputs.registry!().listForThread(threadId).map((tool) => ({
+          // A definition's turn gets its tools as the definition loop sends them (`listForTurn`).
+          mousseTools: (threadId: string, runId?: string): PiMousseTool[] => inputs.registry!().listForTurn(threadId, runId).map((tool) => ({
             name: tool.name,
             description: tool.description,
             inputSchema: tool.inputSchema as Record<string, unknown>,

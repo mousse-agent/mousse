@@ -145,7 +145,8 @@ export interface PolicyAuthority {
   kind: 'definition' | 'bot'
   digest: string
   /**
-   * A definition that needs the instance's own definition loop (its browser): it runs there while
+   * A definition that needs the instance's own definition loop (its settings not known, or a token
+   * or USD limit only the loop can hold for its model): it runs there while
    * the loop exists, whatever runtime the instance runs other definitions on (`definitionCaps`).
    */
   loop?: true

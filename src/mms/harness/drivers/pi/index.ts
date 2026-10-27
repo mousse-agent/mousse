@@ -147,9 +147,10 @@ export function piDriver(options: { client: () => PiChatClient; credentials?: ()
     // Agent definitions run on Pi's agent where its evidence suite passed, with or without the
     // contained shell (a fresh process and session per turn, the definition's system prompt, its
     // exact tools and limits: PR 4 4d-rpc). Without the contained shell (a no-shell record), a
-    // definition's shell command asks a person first and an unattended one runs none.
-    // Everywhere else, on the legacy engine, and for a definition that needs the loop (its browser),
-    // they run on Mousse's loop as they always have, so nothing regresses.
+    // definition's shell command asks a person first and an unattended one runs none. Its browser is
+    // Mousse's browser app tools over its MCP server, held to the definition's authority.
+    // Everywhere else, on the legacy engine, and for a definition that needs the loop (its settings
+    // not known, or a spend limit only the loop holds), they run on Mousse's loop as they always have.
     definitionCaps: (config, needs) => (definitionsOnRpc(config) && !needs?.loop ? piRpcCaps(piRpcEvidenceOf(options.rpc!)) : PI_LEGACY_CAPS),
     create(context: DriverContext): DriverRuntime {
       const providerId = piProviderIdOf(context.instanceId) ?? ''

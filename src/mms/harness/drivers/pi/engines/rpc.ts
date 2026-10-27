@@ -123,8 +123,8 @@ export interface PiRpcDriverOptions {
   catalog(providerId: string): PiEngineCatalog
   /** The stored key of a provider, if it has one. */
   apiKey?(providerId: string): string | undefined
-  /** Mousse's tools for a thread, with their class. */
-  mousseTools?(threadId: string): PiMousseTool[]
+  /** Mousse's tools for a thread, with their class; as `runId`'s turn is offered them when given (`ToolRegistry.listForTurn`). */
+  mousseTools?(threadId: string, runId?: string): PiMousseTool[]
   /**
    * Ids the provider's stored credential carries beside its key (Cloudflare's account and gateway
    * ids): they reach the child's environment, never a credential.
@@ -181,7 +181,7 @@ export function createRpcRuntime(context: DriverContext, providerId: string, lab
     ...(options.oauth ? { oauth: options.oauth } : {}),
     extraEnv: () => ({ ...(options.credentialEnv?.(providerId) ?? {}), ...(context.config.env ?? {}) }),
     shellPath: () => piShellPath({ env: context.env.env }),
-    ...(options.mousseTools ? { mousseTools: (threadId: string) => options.mousseTools!(threadId) } : {}),
+    ...(options.mousseTools ? { mousseTools: (threadId: string, runId?: string) => options.mousseTools!(threadId, runId) } : {}),
     // A new session seeded with the chat's history tells the thread (`history_injected`).
     notice: (threadId, { message }) => notice.send(threadId, message),
     ...options.engine

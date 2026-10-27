@@ -14,6 +14,7 @@ import {
   ACCESS_CLASSES,
   levelAtLeast,
   McpToolError,
+  plainSchema,
   TOOL_CLASSES,
   unattendedRefusal,
   type AppToolTurn,
@@ -232,6 +233,26 @@ export class ToolRegistry {
       accessLevel: this.effectiveLevel(granted),
       ...this.botListing(threadId)
     })
+  }
+
+  /**
+   * The tools a runtime that takes its tool list per turn is sent for `runId` (the Pi RPC engine).
+   * A definition's turn gets them as the definition loop sends them: each with the schema the turn
+   * is offered (`definition`: the browser's follows the turn's binding, its vision and backend), and
+   * none the turn is not offered (`offered`: a browser tool outside the binding, or a screenshot a
+   * model without vision cannot see). Any other turn gets the thread's stable listing.
+   */
+  listForTurn(threadId: string, runId: string | undefined, granted: AgentAccessLevel = 'lineage'): Array<Pick<MousseTool, 'name' | 'description' | 'inputSchema' | 'class'>> {
+    const listed = this.listForThread(threadId, 'default', granted)
+    const turn = runId ? this.options.turns?.get(runId) : undefined
+    const plain = (tool: MousseTool) => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema, class: tool.class })
+    if (!turn?.definition || turn.threadId !== threadId) return listed.map(plain)
+    return listed
+      .filter((tool) => !tool.offered || tool.offered(turn))
+      .map((tool) => {
+        const offered = tool.definition?.(turn)
+        return offered ? { ...plain(tool), description: offered.description, inputSchema: plainSchema(offered) } : plain(tool)
+      })
   }
 
   private botListing(threadId: string): { botRole?: 'activation' | 'context' } {
