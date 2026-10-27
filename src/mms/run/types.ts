@@ -58,6 +58,11 @@ export interface RunPause {
 export interface RunOutcome {
   error?: string
   /**
+   * A scheduled run that failed on a provider usage limit (it is never paused): when the limit resets. The
+   * scheduler records the occurrence as waiting and runs the job again then.
+   */
+  usageLimitUntil?: string
+  /**
    * `bot_wall`: a personal bot's dispatch ended at a wall (PR 6 §5); the run engine never retries it.
    * `agent`: another thread's agent stopped the run (`thread_interrupt`); it settles as a user's Stop does (`stoppedByPerson`).
    */

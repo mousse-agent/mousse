@@ -24,7 +24,7 @@ import type {
   TurnResult,
   TurnSink
 } from '../../src/mms/run/adapters/ProviderAdapter'
-import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
+import { ProfileDatabase, type ProfileDatabaseFault } from '../../src/mms/run/db/ProfileDatabase'
 import { EffectWorker } from '../../src/mms/run/EffectWorker'
 import { RunEngine } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
@@ -32,7 +32,7 @@ import type { ProviderRef } from '../../src/mms/run/types'
 import { TaskQueue } from '../../src/mms/tasks/TaskQueue'
 import { PtyManager } from '../../src/mms/terminals/PtyManager'
 import { WorktreeManager } from '../../src/mms/worktree/WorktreeManager'
-import { getDefaultSettings } from '../../src/shared/settings'
+import { getDefaultSettings, normalizeRunSettings, type RunSettings } from '../../src/shared/settings'
 
 /** Model selections the scripted adapters serve. */
 export const PI = { llmProvider: 'openai', model: 'gpt-replay' }
@@ -147,10 +147,11 @@ export function createOrchestrator(home: string, store: ThreadDataStore): Orches
 }
 
 /** One daemon over `home`: orchestrator, engine and effect worker with the given adapters. */
-export function phase6Daemon(home: string, adapters: ProviderAdapter[], options: { pid?: number; instances?: ProviderInstanceService; drivers?: HarnessDriver[] } = {}) {
+export function phase6Daemon(home: string, adapters: ProviderAdapter[], options: { pid?: number; instances?: ProviderInstanceService; drivers?: HarnessDriver[]; runs?: Partial<RunSettings>; fault?: ProfileDatabaseFault } = {}) {
   const projects = new ProjectManager()
   const store = new ThreadDataStore(projects)
-  const settings = { ...getDefaultSettings(), provider: { ...getDefaultSettings().provider, ...PI } }
+  // The returned `settings` is the daemon's live settings object: a test may change it while the daemon runs.
+  const settings = { ...getDefaultSettings(), provider: { ...getDefaultSettings().provider, ...PI }, runs: normalizeRunSettings(options.runs) }
   // Each daemon has its own questions, as each process has: waiting callbacks never outlive a daemon.
   const questions = new UserQuestionService()
   const orch = new OrchestratorService(
@@ -167,7 +168,7 @@ export function phase6Daemon(home: string, adapters: ProviderAdapter[], options:
     chat: async () => { throw new Error('the scripted adapter replaces the pi loop') }
   }
   orch.setHarness(testHarness({ adapters, ...(options.drivers ? { drivers: options.drivers } : {}), ...(options.instances ? { instances: options.instances } : {}), profileHome: home }))
-  const engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home })), pid: options.pid ?? 1 })
+  const engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home, ...(options.fault ? { fault: options.fault } : {}) })), pid: options.pid ?? 1 })
   orch.setRunEngine(engine)
   const boot = engine.reconcileOnBoot()
   const worker = new EffectWorker({ outbox: engine.outbox, executors: orch.effectExecutors(), owner: engine.leaseOwner })
@@ -201,7 +202,7 @@ export function phase6Daemon(home: string, adapters: ProviderAdapter[], options:
     engine.store.db.close()
   }
   return {
-    orch, engine, store, projects, boot, worker, questions,
+    orch, engine, store, projects, boot, worker, questions, settings,
     /** Ends like a crash: the daemon epoch stays open. */
     crash: () => halt(false),
     stop: () => halt(true),

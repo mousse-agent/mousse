@@ -60,6 +60,8 @@ export interface ScheduledOccurrenceSettled {
   occurrenceKey: string
   runId: string
   status: ScheduledOccurrenceResult['status']
+  /** With `waiting`: when the usage limit the run hit resets. */
+  retryAt?: string
   text?: string
   error?: string
   /** The model the run's binding used. */
@@ -346,7 +348,7 @@ export class ScheduledJobService extends EventEmitter {
       const job = this.store.completeOccurrence(
         event.jobId,
         event.occurrenceKey,
-        { status: event.status, text: event.text, error: event.error, silent },
+        { status: event.status, text: event.text, error: event.error, silent, ...(event.retryAt ? { retryAt: event.retryAt } : {}) },
         { runId: event.runId, ...(event.selection ? { selection: event.selection } : {}), ...(event.permissionMode ? { permissionMode: event.permissionMode } : {}) }
       )
       // A finished run on the project's checkout leaves nothing to keep open: its reply is in the run record and

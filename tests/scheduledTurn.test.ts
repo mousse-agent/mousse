@@ -9,6 +9,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MousseConfigStore } from '../src/mms/config/MousseConfigStore'
 import { resolveProjectWorkingDirectory } from '../src/mms/data/projectWorkingDirectory'
+import { usageLimitError } from '../src/mms/orchestrator/providerErrors'
 import { readDurableQueue } from '../src/mms/queue/durableQueue'
 import { releaseExecutionLeaseHandle, tryAcquireExecutionLease } from '../src/mms/queue/ThreadExecutionLease'
 import type { HarnessDriver } from '../src/mms/harness/driver'
@@ -1395,6 +1396,78 @@ describe('scheduled jobs run as turns', () => {
       await second.tick()
       await waitFor(() => second.jobs.getJob(job.id)?.lastStatus === 'ok', 'the next run')
       expect(pi.turns).toHaveLength(1)
+    })
+  })
+
+  describe('a provider usage limit', () => {
+    const HOUR = 3_600_000
+    /** A pi-shaped provider whose turns hit the limit (resetting `ms` ahead) until `open.value` is true. */
+    const limited = (ms: number, open: { value: boolean }) =>
+      piAdapter((input) => {
+        if (!open.value) throw usageLimitError({ provider: 'claude', resetsAt: new Date(Date.now() + ms).toISOString(), estimated: false, limitKind: 'five_hour' })
+        return `pi: ${input.prompt}`
+      })
+
+    it('makes the job wait for the reset: no error, no slot inside the window, and it runs again at the reset', async () => {
+      const open = { value: false }
+      const pi = limited(2 * HOUR, open)
+      const w = boot([pi])
+      const project = projectOf(w)
+      const job = addJob(w, { projectId: project.id, schedule: { kind: 'interval', minutes: 10 } })
+      makeDue(w, job)
+
+      await w.tick()
+      const record = await finished(w, job.id)
+
+      // The run failed on the limit, which the scheduler records as a wait.
+      expect(w.engine.getRun(record.runId!)).toMatchObject({ status: 'failed', outcome: { usageLimitUntil: expect.any(String) } })
+      expect(record).toMatchObject({ status: 'waiting', usageLimitUntil: w.engine.getRun(record.runId!)!.outcome!.usageLimitUntil })
+      const waiting = w.jobs.getJob(job.id)!
+      expect(waiting).toMatchObject({ lastStatus: 'waiting', state: 'scheduled' })
+      expect(waiting.lastError).toBeUndefined()
+      // The next run is the reset, two hours away, not the ten-minute slot that would fall inside the window.
+      expect(waiting.nextRunAt).toBe(record.usageLimitUntil)
+      expect(Date.parse(waiting.nextRunAt!) - Date.now()).toBeGreaterThan(HOUR)
+
+      for (let index = 0; index < 3; index += 1) await w.tick()
+      expect(pi.turns).toHaveLength(1)
+
+      // At the reset the job runs again, and a success clears the wait.
+      open.value = true
+      // The reset has come: the retry is its own occurrence, named by the time the job was due.
+      makeDue(w, job, new Date(Date.now() - 5_000).toISOString())
+      await w.tick()
+      await waitFor(() => w.jobs.getJob(job.id)?.lastStatus === 'ok', 'the run after the reset')
+      expect(pi.turns).toHaveLength(2)
+    })
+
+    it('does not spend a repeat, and a webhook-style or manual job is not rescheduled', async () => {
+      const open = { value: false }
+      const w = boot([limited(HOUR, open)])
+      const project = projectOf(w)
+      const job = addJob(w, { projectId: project.id, repeat: { times: 1 } })
+
+      await runNow(w, job)
+      await finished(w, job.id)
+
+      expect(w.jobs.getJob(job.id)).toMatchObject({ lastStatus: 'waiting', nextRunAt: null, repeat: { times: 1, completed: 0 } })
+    })
+
+    it('records an error after three waits in a row, so a limit that never lifts is seen', async () => {
+      const open = { value: false }
+      const w = boot([limited(HOUR, open)])
+      const project = projectOf(w)
+      const job = addJob(w, { projectId: project.id, schedule: { kind: 'interval', minutes: 10 } })
+
+      for (let attempt = 1; attempt <= 4; attempt += 1) {
+        // Each occurrence is named by the time the job was due.
+        makeDue(w, job, new Date(Date.now() - attempt * 1000).toISOString())
+        await w.tick()
+        await waitFor(() => (w.jobs.getJob(job.id)?.runHistory?.length ?? 0) === attempt && !w.jobs.getJob(job.id)?.pendingOccurrence && w.jobs.getJob(job.id)?.state === 'scheduled', `attempt ${attempt} to finish`)
+      }
+
+      expect(w.jobs.getJob(job.id)!.runHistory!.map((entry) => entry.status)).toEqual(['waiting', 'waiting', 'waiting', 'error'])
+      expect(w.jobs.getJob(job.id)).toMatchObject({ lastStatus: 'error', lastError: expect.stringContaining('Usage limit reached 4 times in a row') })
     })
   })
 })

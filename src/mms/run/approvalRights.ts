@@ -28,8 +28,11 @@ export interface ApprovalAnswer {
 
 export type ApprovalRefusal = 'own_request' | 'not_parent' | 'mode_forbids' | 'agent_no_standing_grant' | 'bridge_no_standing_grant'
 
-/** The run sources that are a person at their own app or CLI (`RunRecord.source`); anything else is not a person's turn. */
-const PERSON_SOURCES: ReadonlySet<string> = new Set(['gui', 'cli'])
+/**
+ * The run sources that are a person at their own app or CLI (`RunRecord.source`); anything else is not a person's turn.
+ * `resume_now` is the continue turn a person asked for by pressing Resume now; the one the timer sends (`resume`) is not.
+ */
+const PERSON_SOURCES: ReadonlySet<string> = new Set(['gui', 'cli', 'resume_now'])
 
 /**
  * Whether a person started the turn, which is the only kind of turn a standing "Always for this

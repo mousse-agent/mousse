@@ -5,7 +5,7 @@ import { narrowAgentAccess, type AgentAccessLevel } from '../../shared/settings'
 import { DaemonEpoch } from './DaemonEpoch'
 import { CommandRejection, fail, reject, RunStoreError } from './db/RunStoreError'
 import { inheritedAgentHops } from './agentHops'
-import { isFencedSource, isFollowUpSource, isResumeSource } from './delegation/sources'
+import { isFencedSource, isFollowUpSource, isPauseHeldSource, isResumeSource } from './delegation/sources'
 import { cancelAcknowledgedWakes, recoverWakesOnBoot } from './delegation/wake'
 import { Delegations } from './Delegations'
 import { EffectOutbox } from './EffectOutbox'
@@ -469,8 +469,8 @@ export class RunEngine extends EventEmitter {
       // pause and its timer stay intact.
       const paused = this.store.getPausedRun(run.threadId)
       if (paused) {
-        // A message another thread's agent sent is never a person's: it waits for the pause to end on its own.
-        if (isFencedSource(run.source) || run.outcome?.sentByAgent) fail('conflict', `Thread ${run.threadId} is paused by run ${paused.runId}.`)
+        // A message another thread's agent sent, or a scheduled run, is never a person's: it waits for the pause to end on its own.
+        if (isFencedSource(run.source) || isPauseHeldSource(run.source) || run.outcome?.sentByAgent) fail('conflict', `Thread ${run.threadId} is paused by run ${paused.runId}.`)
         this.endPause(paused.runId, 'user_message')
       }
       const attemptId =
@@ -1704,7 +1704,7 @@ export class RunEngine extends EventEmitter {
       const refuse = (reason: string): CommandResult => ({ status: 'rejected', reason, sequence: store.maxSeq(command.threadId) })
       // Work started on the thread's behalf never runs beside a pause; only the resume itself does, and
       // only for the pause it was queued for (it may have ended meanwhile).
-      if (paused && isFencedSource(command.source) && !resuming) return refuse('thread_paused')
+      if (paused && (isFencedSource(command.source) || isPauseHeldSource(command.source)) && !resuming) return refuse('thread_paused')
       // A message an agent sent never ends a pause the user's usage limit put there: it can stop the
       // paused run first (`thread_interrupt`), and send once that is done.
       if (paused && command.actor && !resuming) return refuse('thread_paused')

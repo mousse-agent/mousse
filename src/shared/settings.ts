@@ -140,6 +140,31 @@ export function normalizeAgentAccessSettings(raw?: Partial<AgentAccessSettings> 
   }
 }
 
+/**
+ * How runs behave after a provider's usage limit. With `resumeAfterUsageLimit` a paused run continues
+ * by itself when the limit resets, at most `usageLimitPauseCap` times in a row on one thread; without
+ * it the pause waits for Resume now. Read when a run pauses, never afterwards: turning it on does not
+ * arm runs that are already paused.
+ */
+export interface RunSettings {
+  resumeAfterUsageLimit: boolean
+  usageLimitPauseCap: number
+}
+
+export const DEFAULT_USAGE_LIMIT_PAUSE_CAP = 3
+export const MAX_USAGE_LIMIT_PAUSE_CAP = 10
+
+export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSettings {
+  const cap = raw?.usageLimitPauseCap
+  return {
+    resumeAfterUsageLimit: raw?.resumeAfterUsageLimit === true,
+    usageLimitPauseCap:
+      typeof cap === 'number' && Number.isInteger(cap) && cap >= 1 && cap <= MAX_USAGE_LIMIT_PAUSE_CAP
+        ? cap
+        : DEFAULT_USAGE_LIMIT_PAUSE_CAP
+  }
+}
+
 export interface MousseSettings {
   profile: {
     username: string
@@ -151,6 +176,7 @@ export interface MousseSettings {
   permissions: PermissionSettings
   context: ContextSettings
   agentAccess: AgentAccessSettings
+  runs: RunSettings
   provider: {
     llmProvider: LlmProviderId
     model: string
@@ -433,6 +459,7 @@ export function getDefaultSettings(): MousseSettings {
     permissions: normalizePermissionSettings(),
     context: normalizeContextSettings(),
     agentAccess: normalizeAgentAccessSettings(),
+    runs: normalizeRunSettings(),
     provider: {
       llmProvider: '',
       model: ''

@@ -23,6 +23,7 @@ import type {
   ScheduledWebhookDelivery,
   ScheduledWebhookDeliveryOutcome
 } from '../../shared/types'
+import { DEFAULT_USAGE_LIMIT_PAUSE_CAP } from '../../shared/settings'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { TERMINAL_RUN_STATUSES, type RunStatus } from '../run/types'
 import { jobToDefinition, type MousseConfigStore } from '../config/MousseConfigStore'
@@ -92,6 +93,7 @@ export type WebhookTriggerResult =
 function deliveryOutcomeOf(result: ScheduledOccurrenceResult, hadRun: boolean): { outcome: ScheduledWebhookDeliveryOutcome; error?: string } {
   if (result.status === 'ok') return { outcome: 'completed' }
   if (result.status === 'uncertain') return { outcome: 'uncertain', error: result.error }
+  // The delivery was consumed and did not run: the job's own timer is untouched, as for any delivery.
   return { outcome: hadRun ? 'failed' : 'dispatch_failed', error: result.error }
 }
 
@@ -101,7 +103,12 @@ export interface ScheduledRunView {
   threadId: string
   /** The run's own error text, when it ended with one. */
   error?: string
+  /** A run that failed on a provider usage limit: when the limit resets. */
+  usageLimitUntil?: string
 }
+
+/** Consecutive occurrences of a job that may wait for a usage limit before the next one is an error. */
+export const SCHEDULED_USAGE_LIMIT_WAIT_CAP = DEFAULT_USAGE_LIMIT_PAUSE_CAP
 
 /**
  * What the store asks the Run Engine about an admitted occurrence (the orchestrator builds it over
@@ -128,11 +135,13 @@ export function scheduledReceiptId(jobId: string, occurrenceKey: string): string
 }
 
 /** The occurrence outcome a terminal Run Engine run maps to. */
-export function occurrenceResultOfRun(run: Pick<ScheduledRunView, 'status' | 'error'>): ScheduledOccurrenceResult {
+export function occurrenceResultOfRun(run: Pick<ScheduledRunView, 'status' | 'error' | 'usageLimitUntil'>): ScheduledOccurrenceResult {
   switch (run.status) {
     case 'completed':
       return { status: 'ok' }
     case 'failed':
+      // A usage limit is a wait for the reset, not a failure of the job.
+      if (run.usageLimitUntil) return { status: 'waiting', retryAt: run.usageLimitUntil, error: run.error ?? 'The provider\'s usage limit was reached' }
       return { status: 'error', error: run.error ?? 'The run failed' }
     case 'uncertain':
       return { status: 'uncertain', error: run.error ?? 'The run ended uncertain; its effects may have occurred' }
@@ -875,12 +884,23 @@ export class ScheduledJobStore {
     nowIso: string,
     details?: ScheduledRunDetails
   ): void {
+    // A usage limit makes the job wait for the reset instead of taking its next slot inside the window. After
+    // `SCHEDULED_USAGE_LIMIT_WAIT_CAP` waits in a row the next one is an error, so a limit that never lifts is seen.
+    if (result.status === 'waiting') {
+      let waits = 0
+      const earlier = job.runHistory ?? []
+      for (let index = earlier.length - 1; index >= 0 && earlier[index].usageLimitUntil; index -= 1) waits += 1
+      if (waits >= SCHEDULED_USAGE_LIMIT_WAIT_CAP)
+        result = { status: 'error', error: `Usage limit reached ${waits + 1} times in a row; the job did not run. ${result.error ?? ''}`.trim() }
+    }
+    const waiting = result.status === 'waiting'
     const record: ScheduledJobRunRecord = {
       runAt: nowIso,
       status: result.status,
       output: result.status === 'ok' ? result.text : undefined,
       error: result.status === 'ok' ? undefined : result.error,
       silent: result.silent,
+      ...(waiting && result.retryAt ? { usageLimitUntil: result.retryAt } : {}),
       ...(occurrenceKey ? { occurrenceKey } : {}),
       ...details
     }
@@ -898,7 +918,8 @@ export class ScheduledJobStore {
     job.runHistory = history.slice(-20)
     job.lastRunAt = nowIso
     job.lastStatus = result.status
-    job.lastError = result.status === 'ok' ? undefined : result.error
+    // A wait is not an error: the job shows it as waiting, with no error text to repeat.
+    job.lastError = result.status === 'ok' || waiting ? undefined : result.error
     job.runClaim = undefined
     job.pendingOccurrence = undefined
     job.updatedAt = nowIso
@@ -907,6 +928,17 @@ export class ScheduledJobStore {
     const webhook = webhookIdOfOccurrence(occurrenceKey) !== undefined
     if (webhook) this.settleWebhookDelivery(job.id, occurrenceKey, deliveryOutcomeOf(result, hadRun), { missingPlaceholders: details?.missingPlaceholders })
 
+    // Waiting for a usage limit spends no repeat. The job runs again at the reset (a delivery never moves the job's own timer).
+    if (waiting) {
+      if (!webhook) {
+        // A manual job has no timer: it runs when it is triggered again.
+        job.nextRunAt = job.schedule.kind === 'manual'
+          ? null
+          : result.retryAt && Date.parse(result.retryAt) > Date.parse(nowIso) ? result.retryAt : computeNextRun(job.schedule, nowIso)
+      }
+      if (job.state !== 'paused') job.state = 'scheduled'
+      return
+    }
     // A run that did not finish cleanly is never retried on its own: a one-shot job stays for a manual retry.
     if ((result.status === 'interrupted' || result.status === 'uncertain') && job.schedule.kind === 'once') {
       job.enabled = false

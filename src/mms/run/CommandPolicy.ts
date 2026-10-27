@@ -15,7 +15,8 @@ export type SteerStrategy = 'native' | 'interrupt_restart' | 'queue' | 'late_ste
  * or the queue.
  */
 export function steerStrategy(caps: ProviderCapabilities, run: RunRecord | null): SteerStrategy {
-  if (!run || run.status === 'finalizing' || TERMINAL_RUN_STATUSES.has(run.status))
+  // A paused run has no live turn and none is coming: the text becomes a message of its own.
+  if (!run || run.status === 'finalizing' || run.status === 'paused' || TERMINAL_RUN_STATUSES.has(run.status))
     return 'late_steer_new_run'
   if (run.status === 'queued') return 'queue'
   if (caps.steer === 'native') return 'native'
@@ -32,7 +33,8 @@ export type StopStrategy = 'interrupt' | 'settle_locally' | 'noop'
 
 export function stopStrategy(caps: ProviderCapabilities, run: RunRecord | null): StopStrategy {
   if (!run || TERMINAL_RUN_STATUSES.has(run.status)) return 'noop'
-  if (run.status === 'queued') return 'settle_locally'
+  // A paused run has nothing live to interrupt: the provider's turn ended with the usage limit.
+  if (run.status === 'queued' || run.status === 'paused') return 'settle_locally'
   return caps.interrupt ? 'interrupt' : 'settle_locally'
 }
 

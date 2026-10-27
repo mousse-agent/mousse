@@ -26,10 +26,11 @@ describe('canAnswerApproval', () => {
 
   it('counts only a person at the app or the CLI, in a turn of their own, as starting a turn', () => {
     const origins = ['interactive', 'delegated', 'workflow', 'definition', 'bot', 'schedule']
-    const sources = ['gui', 'cli', 'schedule', 'webhook', 'channel', 'wake', 'delegation', 'internal', 'agent', 'mcp', 'protocol', 'bridge', 'steer-followup', '', undefined, null]
+    // `resume_now` is a person's Resume now press; `resume` is the timer's continue turn, which nobody asked for.
+    const sources = ['gui', 'cli', 'resume_now', 'resume', 'schedule', 'webhook', 'channel', 'wake', 'delegation', 'internal', 'agent', 'mcp', 'protocol', 'bridge', 'steer-followup', '', undefined, null]
     for (const origin of origins)
       for (const source of sources)
-        expect(startedByPerson({ origin, source }), `${origin} / ${source}`).toBe(origin === 'interactive' && (source === 'gui' || source === 'cli'))
+        expect(startedByPerson({ origin, source }), `${origin} / ${source}`).toBe(origin === 'interactive' && (source === 'gui' || source === 'cli' || source === 'resume_now'))
   })
 
   it.each([

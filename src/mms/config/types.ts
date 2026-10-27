@@ -42,7 +42,7 @@ export interface MousseAgentsConfig {
 
 export type MousseSettingsSection = Pick<
   MousseSettings,
-  'profile' | 'appearance' | 'notifications' | 'shortcuts' | 'permissions' | 'context' | 'agentAccess' | 'integrations' | 'title'
+  'profile' | 'appearance' | 'notifications' | 'shortcuts' | 'permissions' | 'context' | 'agentAccess' | 'runs' | 'integrations' | 'title'
 >
 
 /** Default port of the loopback listener that receives job webhooks. */
