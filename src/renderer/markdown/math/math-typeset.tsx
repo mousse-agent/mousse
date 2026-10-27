@@ -21,6 +21,7 @@ export default function MathTypeset({ tex, display, block, source }: MathTypeset
   return (
     <Tag
       className="an-math"
+      data-find-ignore
       data-math-tex={tex}
       data-math-source={source}
       dangerouslySetInnerHTML={{ __html: html }}

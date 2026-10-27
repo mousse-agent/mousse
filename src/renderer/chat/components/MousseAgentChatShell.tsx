@@ -111,6 +111,7 @@ export function MousseAgentChatShell({
           </div> : undefined}
           showCopyToolbar
           enableImagePreview
+          enableFind
         />
       </SubagentInheritedProviderContext.Provider>
       </SubagentCardsContext.Provider>

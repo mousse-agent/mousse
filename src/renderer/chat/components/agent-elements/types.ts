@@ -156,6 +156,12 @@ export type AgentChatProps = {
    */
   enableImagePreview?: boolean;
 
+  /**
+   * When true, Ctrl/Cmd+F opens a find bar over the transcript. Off by
+   * default so a chat embedded somewhere else does not take the shortcut.
+   */
+  enableFind?: boolean;
+
   suggestions?: InputSuggestions;
 
   emptyStatePosition?: "default" | "center";

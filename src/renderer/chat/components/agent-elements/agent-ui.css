@@ -540,3 +540,85 @@ html[data-theme] .an-edit-tool-card .an-edit-diff code {
    single newlines are intended breaks). The reset above on the nested
    list itself keeps inter-item whitespace collapsing (direct rule beats
    inheritance, so no !important needed there). */
+
+/* Find in thread. Matches are painted with the CSS Custom Highlight API: a
+   background fill on the text itself, never a bar beside it. The current match
+   is the stronger fill. */
+::highlight(mousse-find) {
+  background-color: rgba(var(--accent-rgb), 0.28);
+  color: inherit;
+}
+
+::highlight(mousse-find-active) {
+  background-color: rgba(var(--accent-rgb), 0.62);
+  color: inherit;
+}
+
+.chat-find-bar {
+  position: absolute;
+  top: 8px;
+  right: 40px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 4px 4px 10px;
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-control-radius);
+  background: var(--ui-raised);
+  box-shadow: var(--ui-raised-shadow);
+  color: var(--text-primary);
+}
+
+.chat-find-input {
+  width: 200px;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.chat-find-input::placeholder {
+  color: var(--text-secondary);
+  opacity: 0.65;
+}
+
+.chat-find-count {
+  min-width: 52px;
+  padding: 0 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-find-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.chat-find-button:hover:not(:disabled) {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.chat-find-button:focus-visible {
+  box-shadow: var(--ui-focus-ring);
+  outline: none;
+}
+
+.chat-find-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
