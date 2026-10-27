@@ -641,7 +641,12 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
         sink.providerRef({ provider: 'p', instanceId: input.instanceId, model: input.model })
         sink.usage({ input: 100, output: 20, cacheRead: 0, cacheWrite: 0, costUsd: 0.25 })
         sink.usage({ input: 50, output: 10, cacheRead: 7, cacheWrite: 0, costUsd: 0.125 })
-        if (limited) throw harnessAppError({ code: 'budget_exhausted', message: 'The turn limit was reached.', limit: { kind: 'turns', limit: 2, actual: 2 } })
+        if (limited) {
+          // A reply streamed before the limit refused the next request.
+          sink.text({ phase: 'start', contentIndex: 0, content: 'partial ' } as never)
+          sink.text({ phase: 'delta', contentIndex: 0, content: 'answer' } as never)
+          throw harnessAppError({ code: 'budget_exhausted', message: 'The turn limit was reached.', limit: { kind: 'turns', limit: 2, actual: 2 } })
+        }
         return { text: 'done', aborted: false, modelName: input.model, totalResponseTimeMs: 1, usage: { input: 150, output: 30, cacheRead: 7, cacheWrite: 0 }, contextSignature: 's', nativeMessages: [], providerRef: { provider: 'p' } }
       },
       interrupt: async () => 'not_active'
@@ -655,7 +660,8 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     expect(completed).toMatchObject({ status: 'completed', usage: { inputTokens: 150, outputTokens: 30, costUsd: 0.375 } })
     limited = true
     const stopped = await orch.runAgentDefinition(request(resolved, store.createThread('usage-limit').id))
-    expect(stopped).toMatchObject({ usage: { inputTokens: 150, outputTokens: 30, costUsd: 0.375 } })
+    // The limit ends the run as the loop's does: the reply so far, the limit, and the usage.
+    expect(stopped).toMatchObject({ status: 'failed', text: 'partial answer', error: { code: 'BUDGET_EXCEEDED', details: { limit: { kind: 'turns', limit: 2 } } }, usage: { inputTokens: 150, outputTokens: 30, costUsd: 0.375 } })
   })
 
   it('on an instance that runs definitions itself, a browser definition still runs on its definition loop, chosen per definition', async () => {
