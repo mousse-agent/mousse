@@ -56,6 +56,8 @@ import { LatestVersionCache } from './latest'
 import { RuntimeFactsStore } from './facts'
 import { questionsPrompter, refusingPrompter } from './acp/permissions'
 import { checkPolicy, hasSpendLimit, purposeAllowed, toolControlLevel } from './policy'
+import { countLimitsOf, RunCounterBook, type CounterScope } from './budget'
+import type { DefinitionAuthority } from '../agentDefinitions/definitionGate'
 import { HarnessScopeStore } from './scope'
 import { sharedShellPath, type ShellPathResult } from './shellPath'
 import { compatibilityOf, fingerprintOf, PROBE_TIMEOUTS, probeInstance, sameBinary, updateAffordance, type ProbeResult } from './status'
@@ -101,6 +103,11 @@ export interface HarnessGateway {
    * `policy_unenforceable` when the instance cannot enforce the binding's policy.
    */
   startTurn(spec: TurnSpec): TurnHandle
+  /**
+   * The run reached its final state (the `turn.start` executor marked it terminal): its count
+   * record is dropped, and an attempt of it that still arrives is refused every step.
+   */
+  runSettled?(runId: string): void
   /**
    * One model request with no tools (a chat title), on an instance whose driver runs one-shots
    * (`HarnessDriver.oneShot`). Resolves the selection like a turn for `purpose` (scope, hidden models,
@@ -328,6 +335,18 @@ export interface TurnSpec {
   instructions?: { text: string; placement: 'replace' | 'append' }
   /** `ephemeral`: the turn runs in a session of its own that is not kept for the thread. Default `thread`. */
   session?: 'thread' | 'ephemeral'
+  /**
+   * The attempt's ordinal in its run (1 for the first; a retry, recovery or steer restart is later).
+   * Absent: a first attempt. A later attempt of a run with a count limit and no count record in
+   * this process fails closed.
+   */
+  attemptOrdinal?: number
+  /**
+   * Where the run's request and tool-call counts are kept, for a caller that shares one allowance
+   * across runs (PR 6's activations). Default: the run's own counters, shared by its attempts. The
+   * limits are always the binding's policy.
+   */
+  counters?: CounterScope
 }
 
 /** What the `turn.start` executor knows of a turn's app tools, for its bridge (PR 2 §2). */
@@ -340,6 +359,12 @@ export interface TurnAppContext {
   mcpEligible: boolean
   /** The session text and turn preamble, given whether the server was attached. */
   instructions(mcpAttached: boolean): { sessionInstructions: string; turnPreamble: string }
+  /**
+   * The definition authority of the turn's registered app tools (`AppToolTurn.definition`): its one
+   * source. The gateway hands the same object to the runtime (`AdapterHost.definition`), so Pi's
+   * built-ins and the app and MCP tools are held to one authority.
+   */
+  definition?: DefinitionAuthority
 }
 
 export interface TurnHandle {
@@ -559,6 +584,8 @@ export class Harness implements HarnessGateway {
   private readonly stats = new Map<string, { fingerprint?: BinaryFingerprint; atMs: number }>()
   /** Threads already told that an instance approves tools itself (`thread|instance`). */
   private readonly toolNotices = new Set<string>()
+  /** Each run's own request and tool-call counts (`budgets: 'hard'`), shared by its attempts. */
+  private readonly runCounters = new RunCounterBook()
   /** Bindings made for a selection that named a moved entry: their thread is told once. */
   private readonly boundMoves = new WeakMap<ExecutionBinding, string>()
   private readonly operations = new Map<string, Operation>()
@@ -943,6 +970,10 @@ export class Harness implements HarnessGateway {
 
   // -- Turns ------------------------------------------------------------------------------------
 
+  runSettled(runId: string): void {
+    this.runCounters.settle(runId)
+  }
+
   startTurn(spec: TurnSpec): TurnHandle {
     const record = this.turnRecord(spec.binding)
     let ref: ProviderRef | undefined
@@ -975,6 +1006,10 @@ export class Harness implements HarnessGateway {
     const result = (async () => {
       let outcome: 'ok' | 'aborted' | 'failed' = 'failed'
       let minted: ReturnType<Harness['mintBridge']>
+      // A count limit travels as the run's budget; only a `hard` runtime passes admission with one.
+      // The record is taken before admission, so a first attempt that is refused still leaves one.
+      const limits = countLimitsOf(spec.binding.policy)
+      const counted = limits ? this.runCounters.acquire(spec.input.runId, limits, spec.counters, { laterAttempt: (spec.attemptOrdinal ?? 1) > 1 }) : undefined
       let signal = spec.input.signal
       try {
         await this.admitTurn(record, spec, entry)
@@ -992,7 +1027,15 @@ export class Harness implements HarnessGateway {
             reason: 'The turn has no app context, so nothing answers its permission requests.',
             instanceId: spec.binding.instanceId
           })
-        const host: AdapterHost = minted ? { ...spec.host, bridge: minted.bridge } : spec.host
+        // The definition authority comes only from the app context (one source for every tool).
+        const base: AdapterHost = { ...spec.host }
+        delete base.definition
+        const host: AdapterHost = {
+          ...base,
+          ...(minted ? { bridge: minted.bridge } : {}),
+          ...(spec.app?.definition ? { definition: spec.app.definition } : {}),
+          ...(counted ? { budget: counted.budget } : {})
+        }
         const turn = await record.runtime.adapter.startTurn(input, sink, spec.control, host)
         minted?.settle({ status: turn.aborted || signal.aborted ? 'aborted' : 'completed', ...(turn.drain ? { drain: turn.drain } : {}) })
         minted = undefined
@@ -1005,6 +1048,7 @@ export class Harness implements HarnessGateway {
         if (this.cancelledByStop(spec, entry)) throw entry.cancel.signal.reason
         throw error
       } finally {
+        counted?.release()
         ended = true
         record.turns.delete(key)
         record.active -= 1

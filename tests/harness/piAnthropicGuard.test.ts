@@ -1,7 +1,7 @@
 import { createProvider, type Api, type AssistantMessageEventStream, type Model, type Provider } from '@earendil-works/pi-ai'
 import { describe, expect, it } from 'vitest'
-import { guardProvider, isGuarded, refusesAnthropicRequest } from '../../src/mms/harness/pi/extension/guard'
-import { ANTHROPIC_OAUTH_REFUSED, LOGIN_REFUSED } from '../../src/mms/harness/pi/extension/messages'
+import { guardProvider, guardStreams, isGuarded, refusesAnthropicRequest, type RequestGate } from '../../src/mms/harness/pi/extension/guard'
+import { ANTHROPIC_OAUTH_REFUSED, BUDGET_EXHAUSTED, LOGIN_REFUSED } from '../../src/mms/harness/pi/extension/messages'
 
 // The guard's rule and its wrapper, in process. `piGuardSpike` runs the same wrapper inside the
 // real pinned Pi child against local recorders.
@@ -83,5 +83,59 @@ describe('guardProvider', () => {
   it('refuses Pi’s own sign-in flows', async () => {
     const guarded = guardProvider(recordingProvider().provider)
     await expect(guarded.auth.apiKey!.login!({} as never)).rejects.toThrow(LOGIN_REFUSED)
+  })
+
+  it('with a request gate: each admitted request is charged before the stream function runs, and a refusal sends nothing', async () => {
+    const { provider, calls } = recordingProvider()
+    const charged: string[] = []
+    let answer: 'ok' | 'refuse' | 'unreachable' = 'ok'
+    const gate: RequestGate = {
+      request: async (target) => {
+        charged.push(target.api)
+        if (answer === 'refuse') throw new Error(BUDGET_EXHAUSTED)
+        if (answer === 'unreachable') throw new Error('mousse_gate_unavailable')
+      }
+    }
+    const admitted: string[] = []
+    const guarded = guardProvider(provider, { admitted: (target) => void admitted.push(target.api) }, gate)
+    const target = model('openai-completions', 'http://127.0.0.1:1')
+    const first = guarded.streamSimple(target, { messages: [] }, { apiKey: 'plain' })
+    // Nothing runs until Mousse answered.
+    expect(calls).toHaveLength(0)
+    await first.result()
+    expect(charged).toEqual(['openai-completions'])
+    expect(calls).toEqual([{ api: 'openai-completions', options: expect.objectContaining({ apiKey: 'plain', maxRetries: 0 }) }])
+    expect(admitted).toEqual(['openai-completions'])
+
+    answer = 'refuse'
+    expect(await guarded.streamSimple(target, { messages: [] }, { apiKey: 'plain' }).result()).toMatchObject({ stopReason: 'error', errorMessage: BUDGET_EXHAUSTED })
+    answer = 'unreachable'
+    expect(await guarded.stream(target, { messages: [] }, { apiKey: 'plain' }).result()).toMatchObject({ stopReason: 'error', errorMessage: 'mousse_gate_unavailable' })
+    expect(calls).toHaveLength(1)
+    expect(admitted).toHaveLength(1)
+
+    // The Anthropic rule comes first: an OAuth token is refused without asking Mousse.
+    const before = charged.length
+    expect(await guarded.streamSimple(model('anthropic-messages', 'http://127.0.0.1:1'), { messages: [] }, { apiKey: 'sk-ant-oat01-x' }).result()).toMatchObject({ errorMessage: ANTHROPIC_OAUTH_REFUSED })
+    expect(charged).toHaveLength(before)
+  })
+
+  it('a request that passes through a second guarded layer is checked again but charged once', async () => {
+    const charged: string[] = []
+    const gate: RequestGate = { request: async (target) => void charged.push(target.id) }
+    const sent: Array<Record<string, unknown>> = []
+    // The global api registry's layer, reached by a provider's own (guarded) stream function.
+    const inner = guardStreams({
+      streamSimple: ((_m: Model<Api>, _c: unknown, options?: Record<string, unknown>) => {
+        sent.push(options ?? {})
+        return { result: async () => ({}) } as unknown as AssistantMessageEventStream
+      }) as never
+    }, undefined, undefined, gate)
+    const outer = guardStreams({
+      streamSimple: ((m: Model<Api>, c: unknown, options?: Record<string, unknown>) => inner.streamSimple!(m, c as never, options as never)) as never
+    }, undefined, undefined, gate)
+    await outer.streamSimple!(model('openai-completions', 'http://127.0.0.1:1'), { messages: [] }, { apiKey: 'plain' } as never).result()
+    expect(charged).toEqual(['m-openai-completions'])
+    expect(sent).toHaveLength(1)
   })
 })

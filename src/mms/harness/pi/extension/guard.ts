@@ -12,6 +12,10 @@ import { ANTHROPIC_OAUTH_REFUSED, LOGIN_REFUSED } from './messages'
  * The wrapper also forces `options.maxRetries = 0`: SDK retries run inside the stream function,
  * below this check, so one check would otherwise cover several HTTP requests. (Bedrock's AWS SDK
  * ignores it; the launcher pins `AWS_MAX_ATTEMPTS=1` for it.) Pi's own retry re-enters the wrapper.
+ *
+ * With a request gate (PR 4 §5a, the extension's `/pi/request`), every request the guard admits is
+ * then charged to the live turn before any network I/O; a refusal, or a gate that cannot be asked,
+ * ends the stream with a fixed text Pi does not retry, and nothing is sent.
  */
 
 /** Subscription tokens of Claude.ai accounts (access and refresh). */
@@ -97,6 +101,22 @@ export interface GuardObserver {
   admitted?(model: Model<Api>): void
 }
 
+/**
+ * Asked before every admitted request (`/pi/request`): resolves when Mousse lets it go, throws one
+ * of the fixed request-path texts otherwise. It runs before the stock stream function, so before
+ * any network I/O.
+ */
+export interface RequestGate {
+  request(model: Model<Api>): Promise<void>
+}
+
+/**
+ * Marks options a gate already charged: a provider that dispatches through the (also guarded)
+ * global api registry reaches a second wrapper with them, which checks again but does not charge
+ * the same request twice.
+ */
+const CHARGED = Symbol.for('mousse.pi.requestCharged')
+
 const GUARDED = new WeakSet<object>()
 
 /** Whether `provider` is a guarded registration (made by `guardProvider`). */
@@ -104,10 +124,10 @@ export function isGuarded(provider: unknown): boolean {
   return typeof provider === 'object' && provider !== null && GUARDED.has(provider)
 }
 
-type RequestOptions = { apiKey?: unknown; headers?: Record<string, unknown>; env?: Record<string, unknown>; maxRetries?: number }
+type RequestOptions = { apiKey?: unknown; headers?: Record<string, unknown>; env?: Record<string, unknown>; maxRetries?: number; [CHARGED]?: true }
 
 /** Checks one request; returns the options it may go out with (`maxRetries: 0`), or null when refused. */
-function admit(model: Model<Api>, providerHeaders: Record<string, unknown> | undefined, options: RequestOptions | undefined, observer?: GuardObserver): RequestOptions | null {
+function admit(model: Model<Api>, providerHeaders: Record<string, unknown> | undefined, options: RequestOptions | undefined): RequestOptions | null {
   const request: GuardedRequest = {
     api: model.api,
     baseUrl: model.baseUrl,
@@ -117,7 +137,6 @@ function admit(model: Model<Api>, providerHeaders: Record<string, unknown> | und
     sdkBaseUrls: sdkBaseUrls(options?.env)
   }
   if (refusesAnthropicRequest(request)) return null
-  observer?.admitted?.(model)
   return { ...(options ?? {}), maxRetries: 0 }
 }
 
@@ -127,21 +146,34 @@ function refused(model: Model<Api>): AssistantMessageEventStream {
   })
 }
 
-/** Stream functions with the guard in front (the provider's own, or the global api registry's). */
-export function guardStreams<T extends Partial<ProviderStreams>>(streams: T, providerHeaders: Record<string, unknown> | undefined, observer?: GuardObserver): T {
+/**
+ * Stream functions with the guard in front (the provider's own, or the global api registry's):
+ * the Anthropic rule, then the request gate when there is one. A cancellation of a deferred
+ * response is checked but never charged: it is not a model request.
+ */
+export function guardStreams<T extends Partial<ProviderStreams>>(streams: T, providerHeaders: Record<string, unknown> | undefined, observer?: GuardObserver, gate?: RequestGate): T {
   const wrapped: Record<string, unknown> = {}
   for (const name of ['stream', 'streamSimple', 'fetchDeferred'] as const) {
     const original = streams[name] as ((model: Model<Api>, input: unknown, options?: RequestOptions) => AssistantMessageEventStream) | undefined
     if (!original) continue
     wrapped[name] = (model: Model<Api>, input: unknown, options?: RequestOptions) => {
-      const admitted = admit(model, providerHeaders, options, observer)
-      return admitted ? original(model, input, admitted) : refused(model)
+      const admitted = admit(model, providerHeaders, options)
+      if (!admitted) return refused(model)
+      if (!gate || admitted[CHARGED]) {
+        observer?.admitted?.(model)
+        return original(model, input, admitted)
+      }
+      return lazyStream(model, async () => {
+        await gate.request(model)
+        observer?.admitted?.(model)
+        return original(model, input, { ...admitted, [CHARGED]: true })
+      })
     }
   }
   const cancel = streams.cancelDeferred as ((model: Model<Api>, handle: unknown, options?: RequestOptions) => Promise<void>) | undefined
   if (cancel)
     wrapped.cancelDeferred = async (model: Model<Api>, handle: unknown, options?: RequestOptions) => {
-      const admitted = admit(model, providerHeaders, options, observer)
+      const admitted = admit(model, providerHeaders, options)
       if (!admitted) throw new Error(ANTHROPIC_OAUTH_REFUSED)
       return cancel(model, handle, admitted)
     }
@@ -161,7 +193,7 @@ function override<T extends object>(value: T, patch: Partial<T>): T {
  * `provider` with its stream functions guarded and its sign-in flows refused (Mousse signs in;
  * Pi never does). Everything else, OAuth `toAuth` and `refresh` included, is the provider's own.
  */
-export function guardProvider(provider: Provider, observer?: GuardObserver): Provider {
+export function guardProvider(provider: Provider, observer?: GuardObserver, gate?: RequestGate): Provider {
   if (isGuarded(provider)) return provider
   const auth = provider.auth
   const guarded = override(provider, {
@@ -170,7 +202,7 @@ export function guardProvider(provider: Provider, observer?: GuardObserver): Pro
       streamSimple: provider.streamSimple.bind(provider),
       ...(provider.fetchDeferred ? { fetchDeferred: provider.fetchDeferred.bind(provider) } : {}),
       ...(provider.cancelDeferred ? { cancelDeferred: provider.cancelDeferred.bind(provider) } : {})
-    }, provider.headers, observer),
+    }, provider.headers, observer, gate),
     auth: {
       ...(auth.apiKey ? { apiKey: auth.apiKey.login ? override(auth.apiKey, { login: refuseLogin }) : auth.apiKey } : {}),
       ...(auth.oauth ? { oauth: override(auth.oauth, { login: refuseLogin }) } : {})

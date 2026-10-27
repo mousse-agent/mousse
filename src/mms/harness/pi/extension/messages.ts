@@ -13,8 +13,15 @@ export const ANTHROPIC_OAUTH_REFUSED = 'mousse_anthropic_oauth_refused'
 /** Mousse could not hand over a credential (any `/pi/credential` failure, transport included). */
 export const CREDENTIAL_UNAVAILABLE = 'mousse_credential_unavailable'
 
+/** A turn, tool-call, token or cost limit of the run refused the request (the limit is in Mousse's counter record). */
+export const BUDGET_EXHAUSTED = 'mousse_budget_exhausted'
+/** Mousse refused the request for another reason: no turn is live on the process, or it is stopping. */
+export const REQUEST_REFUSED = 'mousse_request_refused'
+/** `/pi/request` could not be reached or answered badly (never the transport's own text). */
+export const GATE_UNAVAILABLE = 'mousse_gate_unavailable'
+
 /** Every text Mousse raises on the request path; a unit test checks pi-ai does not retry any. */
-export const REQUEST_PATH_ERRORS: readonly string[] = Object.freeze([ANTHROPIC_OAUTH_REFUSED, CREDENTIAL_UNAVAILABLE])
+export const REQUEST_PATH_ERRORS: readonly string[] = Object.freeze([ANTHROPIC_OAUTH_REFUSED, CREDENTIAL_UNAVAILABLE, BUDGET_EXHAUSTED, REQUEST_REFUSED, GATE_UNAVAILABLE])
 
 /** Pi's sign-in flows are Mousse's: a provider's `login` rejects with this. */
 export const LOGIN_REFUSED = "mousse_login_refused: sign in from Mousse's Providers page"
@@ -26,5 +33,7 @@ export const GATE_REFUSALS = Object.freeze({
   /** The call is not one the turn allows (not in its active set, or an old attempt). */
   denied: 'mousse_tool_denied',
   /** A delegation of the attempt is authorized: parent mutations wait for the next step. */
-  writerYielded: 'mousse_writer_yielded'
+  writerYielded: 'mousse_writer_yielded',
+  /** The run's tool-call limit (or an earlier limit) is reached: the call never runs. */
+  budget: BUDGET_EXHAUSTED
 })

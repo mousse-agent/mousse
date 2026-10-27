@@ -26,8 +26,10 @@ import { COMMAND_DEADLINE_MS, INTERRUPT_DEADLINE_MS, READY_DEADLINE_MS } from '.
 import { PiBridge, type PiBridgeRegistration } from './bridge'
 import { DescendantTracker, OwnedGroups } from './descendants'
 import { WriterEpisode, type PiToolClass } from './episode'
-import { ANTHROPIC_OAUTH_REFUSED, CREDENTIAL_UNAVAILABLE, GATE_REFUSALS } from './extension/messages'
-import { PI_BRIDGE_ENV, type PiCatalogProvider, type PiGateRequest, type PiGateResponse, type PiReadyRequest, type PiTurnResponse, type PiTurnTool } from './extension/protocol'
+import { authorizeDefinitionCall, recordAuthorizedCall, withoutTransportFields } from '../../agentDefinitions/definitionGate'
+import type { AgentExecutionLimit } from '../../../shared/agents/execution'
+import { ANTHROPIC_OAUTH_REFUSED, BUDGET_EXHAUSTED, CREDENTIAL_UNAVAILABLE, GATE_REFUSALS, GATE_UNAVAILABLE, REQUEST_REFUSED } from './extension/messages'
+import { PI_BRIDGE_ENV, type PiCatalogProvider, type PiGateRequest, type PiGateResponse, type PiReadyRequest, type PiRequestResponse, type PiTurnResponse, type PiTurnTool } from './extension/protocol'
 import { piLaunch, startPiProcess, type PiLaunch, type PiProcess, type PiRuntimePaths, type PiThinkingLevel } from './launch'
 import { PI_PATH_ARGUMENTS, piResolvePath, piResolveReadPath } from './paths'
 import type { PiRpcEvent, PiRpcExit, PiRpcRequest } from './rpcClient'
@@ -41,8 +43,11 @@ import { preparePiHome, type PiSettingsInput } from './settings'
  * guarded and the AWS SDK pinned to one attempt; any failure to get there (an exit, a failed
  * provider registration, a missing report within the deadline) kills the tree before `prompt`.
  * Tool calls pass the gate (`/pi/gate`): only the turn's active tools, for the turn's attempt, with
- * the writer episode and its barrier. The engine never retries: Pi's own retry (as `settings.json`
- * configures it) is mapped to the status line and, when exhausted, to `retriesExhausted`.
+ * the writer episode and its barrier, a definition's authority over Pi's built-ins, and the run's
+ * tool-call limit. Every model request is charged first (`/pi/request`): none is sent outside a
+ * live turn, and the run's turn limit refuses the next one before it starts (`budgets: 'hard'`).
+ * The engine never retries: Pi's own retry (as `settings.json` configures it) is mapped to the
+ * status line and, when exhausted, to `retriesExhausted`.
  *
  * Every ref the engine reports names its turn exactly (`nativeTurnId`), from the first one on: a
  * steer, Stop or kill reaches that turn's process or nothing, never another thread's.
@@ -134,6 +139,13 @@ function interruptedError(message: string): AppError {
   return new AppError({ code: 'interrupted', message, errorInfo: { category: 'unavailable', retryable: false } })
 }
 
+/** What a turn that hit a count limit says. */
+function limitMessage(limit: AgentExecutionLimit | undefined): string {
+  if (limit?.kind === 'turns') return `This run reached its limit of ${limit.limit} model request${limit.limit === 1 ? '' : 's'}, so the next one was not sent.`
+  if (limit?.kind === 'tool_calls') return `This run reached its limit of ${limit.limit} tool call${limit.limit === 1 ? '' : 's'}, so it stopped before the next step.`
+  return 'This run reached one of its limits, so the next step was not sent.'
+}
+
 function fingerprint(text: string): string {
   return createHash('sha256').update(text).digest('hex')
 }
@@ -193,6 +205,12 @@ class PiTurn {
   /** `running` until `agent_end`; `ending` after it (a steer then waits); `retrying` during a backoff; `stopping` after Stop. */
   phase: 'running' | 'ending' | 'retrying' | 'stopping' = 'running'
   pendingError: string | undefined
+  /**
+   * Mousse refused a request or tool call of this turn (one of the fixed request-path texts). It
+   * decides the turn's end whatever Pi reports after it: an automatic compaction whose summary was
+   * refused ends only in a `compaction_end` error, never in a failed assistant message.
+   */
+  refusal: string | undefined
   retryExhaustedError: AppError | undefined
   /** Pi's retry limit, as its last `auto_retry_start` stated it. */
   maxRetries = 0
@@ -523,6 +541,7 @@ export class PiRpcEngine implements ProviderAdapter {
         return this.turnFor(thread)
       },
       gate: (request) => this.gate(thread, request),
+      request: async () => this.admitRequest(thread),
       quiesce: async (request, signal) => {
         const turn = thread.turn
         if (!turn || turn.attemptToken !== request.attemptToken) return { ok: false, reason: GATE_REFUSALS.denied }
@@ -658,27 +677,52 @@ export class PiRpcEngine implements ProviderAdapter {
       attemptToken: turn.attemptToken,
       sessionInstructions: turn.host.bridge?.sessionInstructions ?? '',
       tools,
-      activeBuiltins: [...turn.active].filter((name) => name in BUILTIN_CLASSES),
+      activeBuiltins: [...turn.active].filter((name) => Object.hasOwn(BUILTIN_CLASSES, name)),
       mcp: turn.host.bridge?.mcp ?? null,
       catalogRevision
     }
   }
 
   /**
+   * One model request about to go (an agent request, a compaction, a summary or one of Pi's
+   * retries): refused outside a live turn and after Stop; under a count limit it is charged to the
+   * run, and refused once the run's turn limit (or an earlier limit) is reached.
+   */
+  private admitRequest(thread: PiThreadProcess): PiRequestResponse {
+    const turn = thread.turn
+    if (!turn || turn.phase === 'stopping' || !thread.alive) {
+      if (turn && turn.phase !== 'stopping') turn.refusal ??= REQUEST_REFUSED
+      return { ok: false, reason: REQUEST_REFUSED }
+    }
+    const decision = turn.host.budget?.request() ?? { ok: true }
+    if (decision.ok) return { ok: true }
+    turn.refusal ??= BUDGET_EXHAUSTED
+    return { ok: false, reason: BUDGET_EXHAUSTED }
+  }
+
+  /**
    * Default deny: the turn's active tools, for its attempt, under the writer barrier. A read-only
-   * child's file tools are checked on the path Pi would open (Pi's own resolution: `@`, `~`,
-   * `file://`, Git Bash drive paths), and Pi is handed that checked absolute path to run on.
+   * child's file tools, and a definition's, are checked on the path Pi would open (Pi's own
+   * resolution: `@`, `~`, `file://`, Git Bash drive paths), and Pi is handed that checked absolute
+   * path to run on. A definition run holds Pi's built-ins to its grants, policy and approvals (its
+   * app tools are held by the Mousse MCP registry). An allowed call is then charged to the run's
+   * tool-call limit; the call that would pass it never runs.
    */
   private async gate(thread: PiThreadProcess, request: PiGateRequest): Promise<PiGateResponse> {
     const turn = thread.turn
     if (!turn || turn.attemptToken !== request.attemptToken || turn.phase === 'stopping') return { allow: false, reason: GATE_REFUSALS.denied }
     if (!turn.active.has(request.toolName)) return { allow: false, reason: `${GATE_REFUSALS.denied}: ${request.toolName} is not available in this turn` }
     const kind = turn.classes.get(request.toolName) ?? 'mutation'
-    const access = turn.host.tools.toolAccess
+    const access = turn.input.child?.readOnly ? turn.host.tools.toolAccess : undefined
+    const builtin = Object.hasOwn(BUILTIN_CLASSES, request.toolName)
+    const definition = turn.host.definition
+    let input = request.input
     let rewritten: Record<string, unknown> | undefined
-    if (turn.input.child?.readOnly && access) {
+    // An app or MCP tool is approved as the registry will run it: without transport fields.
+    if (definition && !builtin) input = withoutTransportFields(request.input)
+    if (access || (definition && builtin)) {
+      input = { ...request.input }
       const argument = PI_PATH_ARGUMENTS[request.toolName]
-      const input = { ...request.input }
       if (argument) {
         const raw = input[argument.key] ?? argument.fallback
         if (typeof raw !== 'string') return { allow: false, reason: `${GATE_REFUSALS.denied}: ${request.toolName} needs a path` }
@@ -688,14 +732,35 @@ export class PiRpcEngine implements ProviderAdapter {
         input[argument.key] = resolved
         rewritten = { [argument.key]: resolved }
       }
+    }
+    if (access) {
       try {
         await access.execute(request.toolName, input, async () => undefined)
       } catch (error) {
         return { allow: false, reason: error instanceof Error ? error.message : GATE_REFUSALS.denied }
       }
     }
+    // A definition run: every call, built-in or app/MCP, is authorized in full (approval included)
+    // before it is charged, so a refused call never costs a tool call.
+    if (definition) {
+      // The arguments checked (and approved) are the ones the tool runs with.
+      const decided = await authorizeDefinitionCall(definition, { toolName: request.toolName, args: input, projectPath: thread.cwd, signal: turn.input.signal })
+      if (!decided.allowed) return { allow: false, reason: decided.message }
+      // Stopped while the approval was pending: nothing runs.
+      if (thread.turn !== turn || (turn.phase as PiTurn['phase']) === 'stopping') return { allow: false, reason: GATE_REFUSALS.denied }
+    }
     const decision = await turn.episode.authorize(request.toolCallId, kind)
-    return decision.allow && rewritten ? { allow: true, input: rewritten } : decision
+    if (!decision.allow) return decision
+    const counted = turn.host.budget?.toolCall() ?? { ok: true }
+    if (!counted.ok) {
+      turn.episode.ended(request.toolCallId)
+      turn.refusal ??= BUDGET_EXHAUSTED
+      return { allow: false, reason: GATE_REFUSALS.budget }
+    }
+    // An app or MCP tool runs through the Mousse MCP registry, which takes this authorization
+    // instead of asking for approval a second time.
+    if (definition && !builtin) recordAuthorizedCall(definition, { turnToken: turn.attemptToken, toolName: request.toolName, callId: request.toolCallId, args: input })
+    return rewritten ? { allow: true, input: rewritten } : { allow: true }
   }
 
   async startTurn(input: TurnInput, sink: TurnSink, ctl: TurnControl, host: AdapterHost): Promise<TurnResult> {
@@ -1064,7 +1129,7 @@ export class PiRpcEngine implements ProviderAdapter {
         void thread.descendants?.snapshot()
         void thread.groups.refresh().catch(() => {})
         const name = String(event.toolName)
-        const mousse = !(name in BUILTIN_CLASSES)
+        const mousse = !Object.hasOwn(BUILTIN_CLASSES, name)
         turn.openTools.set(String(event.toolCallId), { name, mousse })
         turn.progress()
         sink.tool({
@@ -1132,17 +1197,24 @@ export class PiRpcEngine implements ProviderAdapter {
       case 'compaction_start':
         sink.compaction('start')
         return
-      case 'compaction_end':
+      case 'compaction_end': {
+        // A summary request Mousse refused (or could not be asked about) fails the compaction only.
+        const failure = typeof event.errorMessage === 'string' ? event.errorMessage : ''
+        const refusal = [BUDGET_EXHAUSTED, REQUEST_REFUSED, GATE_UNAVAILABLE].find((text) => failure.includes(text))
+        if (refusal) turn.refusal ??= refusal
         sink.compaction(event.result ? 'complete' : 'unchanged')
         return
+      }
       case 'agent_end':
         if (turn.phase === 'running') turn.phase = 'ending'
         return
       case 'agent_settled':
         if (turn.phase === 'stopping') return turn.settled()
-        if (turn.pendingError && this.mousseRefusal(turn.pendingError)) return turn.failed(this.requestError(turn.pendingError))
+        // Mousse's own record decides: a refused step ends the turn, whatever Pi made of it.
+        if (turn.refusal) return turn.failed(this.requestError(turn.refusal, turn))
+        if (turn.pendingError && this.mousseRefusal(turn.pendingError)) return turn.failed(this.requestError(turn.pendingError, turn))
         if (turn.retryExhaustedError) return turn.failed(turn.retryExhaustedError)
-        if (turn.pendingError) return turn.failed(this.requestError(turn.pendingError))
+        if (turn.pendingError) return turn.failed(this.requestError(turn.pendingError, turn))
         return turn.settled()
       default:
         return
@@ -1183,11 +1255,23 @@ export class PiRpcEngine implements ProviderAdapter {
   }
 
   private mousseRefusal(message: string): boolean {
-    return message.includes(ANTHROPIC_OAUTH_REFUSED) || message.includes(CREDENTIAL_UNAVAILABLE)
+    return [ANTHROPIC_OAUTH_REFUSED, CREDENTIAL_UNAVAILABLE, BUDGET_EXHAUSTED, REQUEST_REFUSED, GATE_UNAVAILABLE].some((text) => message.includes(text))
   }
 
-  /** A failed request's error: Mousse's own refusals by kind, anything else as a provider error. */
-  private requestError(message: string): Error {
+  /**
+   * A failed request's error: Mousse's own refusals by kind, anything else as a provider error. A
+   * budget refusal names the limit from the run's counter record, never from Pi's text.
+   */
+  private requestError(message: string, turn: PiTurn): Error {
+    if (message.includes(BUDGET_EXHAUSTED)) {
+      const limit = turn.host.budget?.exhausted
+      const text = turn.host.budget?.lost
+        ? "This run's earlier usage is no longer known (Mousse restarted, or the run had already ended), so it cannot continue under its limits."
+        : limitMessage(limit)
+      return harnessAppError({ code: 'budget_exhausted', message: text, ...(limit ? { limit } : {}), instanceId: this.options.instanceId })
+    }
+    if (message.includes(REQUEST_REFUSED) || message.includes(GATE_UNAVAILABLE))
+      return protocolError(this.options.instanceId, `${this.options.label} could not get Mousse's approval for a model request, so nothing was sent.`)
     if (message.includes(ANTHROPIC_OAUTH_REFUSED))
       return harnessAppError({ code: 'auth_expired', message: `${this.options.label} will not send a Claude subscription credential. Use an Anthropic API key here, or Claude Code for a Claude subscription.`, instanceId: this.options.instanceId })
     if (message.includes(CREDENTIAL_UNAVAILABLE))

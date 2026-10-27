@@ -51,6 +51,7 @@ async function run(options: RunOptions) {
     ready: (request) => void ready.push(request),
     turn: async () => ({ attemptToken: 'a1', sessionInstructions: '', tools: [], activeBuiltins: [], mcp: null, catalogRevision: 1 }),
     gate: async () => ({ allow: false, reason: 'spike' }),
+    request: async () => ({ ok: true }),
     quiesce: async () => ({ ok: false, reason: 'spike' }),
     fatal: () => {}
   })

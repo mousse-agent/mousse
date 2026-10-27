@@ -6,6 +6,8 @@ import type { StreamingLlmTextEvent, StreamingLlmThinkingEvent, StreamingLlmTool
 import type { NativeMessageCheckpoint } from '../../orchestrator/nativeContext'
 import type { ChildPreflightContext, SubagentRefusal } from '../policy/featureGates'
 import type { PermissionPrompter } from '../../harness/acp/permissions'
+import type { TurnBudget } from '../../harness/budget'
+import type { DefinitionAuthority } from '../../agentDefinitions/definitionGate'
 import type { ProviderRef } from '../types'
 
 /**
@@ -276,6 +278,19 @@ export interface AdapterHost {
   tools: ToolHost
   /** Minted by the gateway; absent when the caller gave the turn no app context. The pi loop, fed in process, ignores it. */
   bridge?: TurnBridge
+  /**
+   * The run's hard count budget (`budgets: 'hard'`), set by the gateway when the binding's policy
+   * has a turn or tool-call limit. A runtime that declares `hard` asks it before every model request
+   * and every tool call, and refuses the step it refuses.
+   */
+  budget?: TurnBudget
+  /**
+   * A definition run's authority over its tool calls (PR 4 §5a), checked before each call the
+   * runtime's own tools would run. Set only by the gateway, from the turn's app context, which
+   * takes it from the run's `AppToolTurn`: the Mousse MCP registry checks app and MCP tools against
+   * that same object.
+   */
+  definition?: DefinitionAuthority
   context: {
     /** Safe-boundary compaction inside a long tool loop; absent when compaction is disabled. */
     toolLoopSafety?: ToolLoopSafetyOptions

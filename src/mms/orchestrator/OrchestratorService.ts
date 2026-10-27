@@ -1741,6 +1741,7 @@ export class OrchestratorService extends EventEmitter {
       turnToken: turn.turnToken,
       modeCeiling: turn.modeCeiling,
       mcpEligible: Boolean(this.runEngine),
+      ...(turn.definition ? { definition: turn.definition } : {}),
       instructions: (mcpAttached) => ({
         sessionInstructions: sessionInstructions({ mcp: mcpAttached, appletGuidance: this.appletStore ? APPLET_GENERATION_GUIDANCE : undefined }),
         turnPreamble: turnPreamble({
@@ -3414,6 +3415,8 @@ export class OrchestratorService extends EventEmitter {
       } else {
         engine.markTerminal(id, 'completed')
       }
+      // The run's count record goes with it.
+      this.harness.runSettled?.(id)
     })
     this.staleRuns.delete(runId)
   }
@@ -5642,6 +5645,8 @@ export class OrchestratorService extends EventEmitter {
       if (runTerminalMarked) return
       runTerminalMarked = true
       this.markRun(engineRunId, (engine, id) => engine.markTerminal(id, status, outcome, { resultText }))
+      // The run's count record goes with it: no later attempt starts from fresh counts.
+      this.harness.runSettled?.(engineRunId ?? turnId)
     }
     // C2: a run that cannot be marked starting (cancelled meanwhile, or held by another turn) is
     // not this turn's to run; it ends here, before any provider I/O.
@@ -6067,9 +6072,11 @@ export class OrchestratorService extends EventEmitter {
         }
       }
       const previous = engineRunId ? this.runEngine?.previousBinding(session.threadId, engineRunId, binding.instanceId) : undefined
+      const attemptOrdinal = engineRunId ? this.runEngine?.activeAttemptOrdinal(engineRunId) : undefined
       const result = await this.harness.startTurn({
         binding,
         ...(previous ? { previous } : {}),
+        ...(attemptOrdinal ? { attemptOrdinal } : {}),
         input: turnInput,
         sink: turnSink,
         control: turnControl,

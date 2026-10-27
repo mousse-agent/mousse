@@ -4,6 +4,7 @@ import type { IntegrationActor } from '../../../../shared/integrations/actor'
 import { APPROVALS_REFUSED_MESSAGE, QUESTIONS_REFUSED_MESSAGE } from '../../../../shared/harness/types'
 import type { ChatMode } from '../../../../shared/types'
 import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
+import type { DefinitionAuthority } from '../../../agentDefinitions/definitionGate'
 import type { BrowserExecutionBinding } from '../../../orchestrator/browser'
 import type { LlmToolEvent, StreamingLlmToolEvent } from '../../../harness/turnEvents'
 import type { ModeCeiling } from '../../types'
@@ -81,6 +82,11 @@ export interface AppToolTurn {
   settingsEnabled(name: string): boolean
   /** A trusted definition caller: its grants were checked before dispatch. */
   trusted?: boolean
+  /**
+   * A definition run on a runtime with its own loop: every app-tool and proxied MCP call is held to
+   * the definition's grants, policy and approvals before it runs (PR 4 §5a).
+   */
+  definition?: DefinitionAuthority
   /**
    * The run refuses everything that would wait for the user (`RunPolicy.approvals: 'never'`):
    * tools that ask for approval or put a question to the user are refused at call time.
