@@ -1099,8 +1099,8 @@ export class PiRpcEngine implements ProviderAdapter {
       if (thread.turn !== turn || (turn.phase as PiTurn['phase']) === 'stopping') return { allow: false, reason: GATE_REFUSALS.denied }
     }
     // The thread's permission mode: a command (and, under Ask, an edit) asks the user first. A definition
-    // run is held to its own grants above and never asks a person.
-    if (!definition && builtin) {
+    // run and a bot run are held to their own grants above and never ask a person.
+    if (!definition && !bot && builtin) {
       const refusal = await this.askPermission(turn, request.toolName, input)
       if (refusal) return refusal
       if (thread.turn !== turn || (turn.phase as PiTurn['phase']) === 'stopping') return { allow: false, reason: GATE_REFUSALS.denied }

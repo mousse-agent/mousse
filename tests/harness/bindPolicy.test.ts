@@ -91,8 +91,8 @@ describe('bind with a policy', () => {
     const s = setup()
     const caller = structuredClone(BOT_POLICY)
     const binding = await s.harness.bind(s.resolved(), { mode: 'agent', origin: 'bot', policy: caller })
-    expect(binding.policy).toEqual({ ...BOT_POLICY, mode: 'default', origin: 'bot' })
-    const expected = createHash('sha256').update(stableStringify({ ...BOT_POLICY, mode: 'default', origin: 'bot' })).digest('hex')
+    expect(binding.policy).toEqual({ ...BOT_POLICY, mode: 'default', origin: 'bot', permissionMode: 'ask' })
+    const expected = createHash('sha256').update(stableStringify({ ...BOT_POLICY, mode: 'default', origin: 'bot', permissionMode: 'ask' })).digest('hex')
     expect(binding.policyDigest).toBe(expected)
     expect(policyDigest(binding.policy)).toBe(expected)
     // Frozen to its leaves; the caller's own object stays the caller's.
@@ -117,7 +117,7 @@ describe('bind with a policy', () => {
   it('keeps approvals as the shorthand, and records no digest without a policy', async () => {
     const s = setup()
     const plain = await s.harness.bind(s.resolved(), { mode: 'agent', approvals: 'never' })
-    expect(plain.policy).toEqual({ mode: 'default', approvals: 'never', origin: 'interactive' })
+    expect(plain.policy).toEqual({ mode: 'default', approvals: 'never', origin: 'interactive', permissionMode: 'ask' })
     expect(plain.policyDigest).toBeUndefined()
     expect(Object.isFrozen(plain.policy)).toBe(true)
     const both = await s.harness.bind(s.resolved(), { mode: 'agent', approvals: 'never', policy: { approvals: 'grants' } })
