@@ -95,6 +95,16 @@ export function definitionNeedsLoop(features: AgentRuntimeFeatures | undefined):
   return !features
 }
 
+/** The settings `definitionFeatureGaps` reads, from a definition's settings. */
+export function definitionFeatures(settings: Pick<AgentDefinitionSettings, 'output' | 'browser' | 'memory' | 'delegation'>): AgentRuntimeFeatures {
+  return {
+    outputFormat: settings.output.format,
+    browserMode: settings.browser.mode,
+    memoryScope: settings.memory.scope,
+    delegation: settings.delegation.maxConcurrentChildren > 0 || settings.delegation.maxDepth > 0 || settings.delegation.allowedChildDefinitionIds.length > 0
+  }
+}
+
 /**
  * The definition settings, besides its tools and limits, that an instance with `caps` cannot hold
  * (PR 4 4d-rpc). A runtime that runs the definition's own loop (`definitionLimits: 'in_loop'`, the
@@ -283,7 +293,7 @@ export function definitionCheckIssues(
   const issues: AgentDefinitionIssue[] = []
   for (const { ref, at, primary } of refs) {
     if (!ref.providerId || !ref.modelId) continue
-    const refusal = port.checkDefinitionTurn({ threadId: input.threadId, origin: 'definition', definition: input.definition, ref, grants: input.grants, budget })
+    const refusal = port.checkDefinitionTurn({ threadId: input.threadId, origin: 'definition', definition: input.definition, ref, grants: input.grants, budget, features: definitionFeatures(settings) })
     if (!refusal || !isPolicyRefusal(refusal)) continue
     const model = { providerId: ref.providerId, modelId: ref.modelId, ...(ref.instanceId ? { instanceId: ref.instanceId } : {}) }
     for (const { pointer } of refusalPointers(refusal, budget, at)) {
