@@ -76,7 +76,8 @@ describe('provider methods on two profiles', () => {
     await dispatchMethod(context(work.services), 'providers.instances.setModelPrefs', { instanceId: 'claude', patch: { hidden: ['opus'] } })
 
     expect(work.stored().claude).toMatchObject({ enabled: false })
-    expect(personal.stored().claude).toBeUndefined()
+    // The other profile only has the built-in entry it was seeded with, still on: nothing leaked into it.
+    expect(personal.stored().claude).toEqual({ driver: 'claude', enabled: true })
     const workSnapshots = await dispatchMethod(context(work.services), 'providers.snapshots', { scope: { kind: 'device' } }) as { snapshots: Array<{ instanceId: string; enabled: { device: boolean } }> }
     const personalSnapshots = await dispatchMethod(context(personal.services), 'providers.snapshots', { scope: { kind: 'device' } }) as { snapshots: Array<{ instanceId: string; enabled: { device: boolean } }> }
     expect(workSnapshots.snapshots.find((entry) => entry.instanceId === 'claude')?.enabled.device).toBe(false)
