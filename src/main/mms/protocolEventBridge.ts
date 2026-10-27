@@ -217,6 +217,14 @@ export function bridgeProtocolEvent(
       broadcast('mcp:changed', null)
       return true
     }
+    case 'bots.changed': {
+      broadcast('bots:changed', event.data ?? {})
+      return true
+    }
+    case 'bots.escalation': {
+      broadcast('bots:escalation', event.data)
+      return true
+    }
     case 'activity':
     case 'activity.snapshot': {
       // Prefer daemon-authoritative full map. Never broadcast a one-thread replacement

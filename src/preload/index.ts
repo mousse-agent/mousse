@@ -117,6 +117,7 @@ import type {
   RemoveInstallResult,
   SignInResponse
 } from '../shared/harness/types'
+import type { BotEscalationSummary } from '../shared/bots/personal/escalation'
 import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from '../shared/platform'
 import type { ChatReference } from '../shared/chatReferences'
 import type { InAppBrowserApi, InAppBrowserState } from '../shared/browser/inApp'
@@ -633,6 +634,19 @@ const api = {
       const handler = () => cb()
       ipcRenderer.on('mcp:changed', handler)
       return () => ipcRenderer.removeListener('mcp:changed', handler)
+    }
+  },
+  /** Personal bots (Automations → Bots): change and escalation events; requests go through `platformRequest`. */
+  personalBots: {
+    onChanged: (cb: (event: { botId?: string; activationId?: string }) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, event: { botId?: string; activationId?: string }) => cb(event ?? {})
+      ipcRenderer.on('bots:changed', handler)
+      return () => ipcRenderer.removeListener('bots:changed', handler)
+    },
+    onEscalation: (cb: (escalation: BotEscalationSummary) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, escalation: BotEscalationSummary) => cb(escalation)
+      ipcRenderer.on('bots:escalation', handler)
+      return () => ipcRenderer.removeListener('bots:escalation', handler)
     }
   },
   skills: {

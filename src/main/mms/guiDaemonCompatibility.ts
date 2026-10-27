@@ -1,5 +1,6 @@
 import type { LocalMmsClient } from '../../mms/protocol/client'
 import { MMS_PROTOCOL_VERSION, type ProtocolHelloOk } from '../../mms/protocol/types'
+import { BOTS_PERSONAL_METHODS } from '../../shared/bots/personal/methods'
 
 /** APIs used by the current task shell. Add required APIs when the shell adopts them. */
 export const GUI_REQUIRED_METHODS = [
@@ -22,7 +23,9 @@ export const GUI_REQUIRED_METHODS = [
   'providers.registry.search',
   // The Files panel and composer search through the daemon; an older service lacks it.
   'files.search',
-  'files.grep'
+  'files.grep',
+  // Automations → Bots: personal bots, profile-bound; an older service lacks them.
+  ...BOTS_PERSONAL_METHODS
 ] as const
 
 export async function assertGuiDaemonCompatible(client: LocalMmsClient, hello: ProtocolHelloOk, homeDir: string): Promise<void> {
