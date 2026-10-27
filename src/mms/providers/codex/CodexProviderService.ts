@@ -47,6 +47,7 @@ import {
 } from './CodexAppServerClient'
 import {
   RPC_METHOD_NOT_FOUND,
+  codexErrorKind,
   codexHttpStatus,
   notificationParams,
   type AccountReadResponse,
@@ -55,6 +56,7 @@ import {
   type CodexServerRequestMap,
   type CodexTurn,
   type ModelListResponse,
+  type RateLimitSnapshot,
   type SandboxPolicy,
   type ThreadConfig,
   type ThreadItem,
@@ -62,6 +64,8 @@ import {
   type TurnError,
   type UserInput
 } from './protocol'
+import { isUsageLimitInfo, isUsageLimitText, resetFromSnapshot } from './rateLimits'
+import { readUsageLimit, usageLimitError } from '../../orchestrator/providerErrors'
 import { codexTurnPolicy } from './childPolicy'
 import { DEFAULT_TREE_TIMING, HelperTree, RpcRefused, ThreadStatuses, TreeOff, isWakeUp, type TreePorts, type TreeTiming } from './helperTree'
 import { NativeHelpers, type StrayThread } from './nativeHelpers'
@@ -462,6 +466,8 @@ class TurnRun {
   private retries = 0
   /** The last `error` notification Codex gave up on (`willRetry: false`). */
   lastError: TurnError | undefined
+  /** The account's latest rate-limit snapshot the server reported while this run was open. */
+  rateLimits: RateLimitSnapshot | undefined
   interruptRequested = false
   /** A `turn/start` is on its way; its turn id is not known yet. */
   startInFlight = false
@@ -822,7 +828,7 @@ export class CodexProviderService {
   private readonly activeThreads = new Set<string>()
   private readonly controllers = new Set<AbortController>()
   private readonly readyToCommit = new Set<string>()
-  /** Threads whose last turn was stopped after its Codex thread was opened, by that Codex thread id (`commitInterrupted`). */
+  /** Threads whose last turn was stopped or ended on a usage limit after its Codex thread was opened, by that Codex thread id (`commitInterrupted`). */
   private readonly interruptedThreads = new Map<string, string>()
   /** Mousse MCP tokens handed to Codex; never echoed into errors or status messages. */
   private readonly secrets = new Set<string>()
@@ -1431,6 +1437,12 @@ export class CodexProviderService {
       }
       return
     }
+    // Account-wide, not tied to a thread: every open run keeps the latest, for a usage limit it may hit.
+    const limits = notificationParams(notification, 'account/rateLimits/updated')
+    if (limits) {
+      for (const held of this.turns.values()) held.rateLimits = limits.rateLimits
+      return
+    }
     const threadId = (notification.params as { threadId?: unknown } | undefined)?.threadId
     if (typeof threadId !== 'string') return
     const run = this.turns.get(threadId)
@@ -1543,9 +1555,9 @@ export class CodexProviderService {
   }
 
   /**
-   * Records the history a stopped turn left in its Codex thread, so the next turn resumes that thread
-   * instead of starting a new one with the history replayed. A stop before the thread was opened saves
-   * nothing.
+   * Records the history a stopped turn, or one a usage limit ended, left in its Codex thread (Codex took the
+   * request in before rejecting it), so the next turn resumes that thread instead of starting a new one with
+   * the history replayed. A turn that ended before the thread was opened saves nothing.
    */
   commitInterrupted(threadId: string, history: string): void {
     const codexThreadId = this.interruptedThreads.get(threadId)
@@ -2046,7 +2058,7 @@ export class CodexProviderService {
         await Promise.race([steering, aborted])
         collectSteer()
         await Promise.race([steering, aborted])
-        if (lastTurn.status === 'failed') throw this.turnFailure(lastTurn.error, current.lastError)
+        if (lastTurn.status === 'failed') throw await this.limitOrFailure(this.turnFailure(lastTurn.error, current.lastError), current, conn, signal)
         if (lastTurn.status === 'interrupted') {
           signal.throwIfAborted()
           throw new Error('Codex interrupted the turn')
@@ -2064,7 +2076,7 @@ export class CodexProviderService {
             steerWake = undefined
             // Stop interrupts the helpers, and their end can be reported before the abort is seen.
             signal.throwIfAborted()
-            this.throwAdoptedFailure(current, signal)
+            await this.throwAdoptedFailure(current, signal, conn)
             if (held) {
               // A steer that arrived in the same tick still gets its turn before the run ends.
               await this.stopAbandoned(current, conn, signal)
@@ -2078,7 +2090,7 @@ export class CodexProviderService {
       }
       // A turn that ran after the cap (a held steer) does not wait for helpers; its own are interrupted
       // before the run ends.
-      this.throwAdoptedFailure(current, signal)
+      await this.throwAdoptedFailure(current, signal, conn)
       if (afterCap) await this.stopAbandoned(current, conn, signal)
       if (abandoned) current.addNote(abandoned)
       this.release(current)
@@ -2101,11 +2113,10 @@ export class CodexProviderService {
       // already been rejected. The run is released when that ends.
       if (run) void this.startSweep(run)
       run?.closeTools()
-      if (signal.aborted && input.signal?.aborted) {
-        // The thread exists on the server: the adapter may fingerprint it (`commitInterrupted`).
-        if (run && scope === this.scope) this.interruptedThreads.set(input.threadId, run.codexThreadId)
-        throw input.signal.reason ?? error
-      }
+      const stopped = signal.aborted && input.signal?.aborted
+      // The thread exists on the server: the adapter may fingerprint it (`commitInterrupted`).
+      if ((stopped || readUsageLimit(error)) && run && scope === this.scope) this.interruptedThreads.set(input.threadId, run.codexThreadId)
+      if (stopped) throw input.signal?.reason ?? error
       throw error
     } finally {
       if (steerTimer) clearInterval(steerTimer)
@@ -2147,11 +2158,34 @@ export class CodexProviderService {
     return run.helpers.running().length ? this.holdForHelpers(run, input, aborted, steerArrived, pinnedSince) : undefined
   }
 
+  /**
+   * What a failed turn stands for: a plan usage limit, with the reset the server reports (asked for
+   * once now, else the last snapshot, else an estimate), or the failure itself. The failure stays the
+   * limit's cause, so a managed run still maps it for the harness.
+   */
+  private async limitOrFailure(failure: CodexTurnFailure, run: TurnRun, conn: CodexConnection, signal: AbortSignal): Promise<Error> {
+    const info = failure.codexErrorInfo
+    // A server that classifies its errors is believed; the message is read only when it sends no kind.
+    if (!(codexErrorKind(info) === undefined ? isUsageLimitText(failure.message) : isUsageLimitInfo(info))) return failure
+    let fresh: RateLimitSnapshot | undefined
+    try {
+      fresh = (await conn.request('account/rateLimits/read', undefined, { timeoutMs: 5_000, signal })).rateLimits
+    } catch {
+      // The snapshot the server last sent stands in.
+    }
+    const now = Date.now()
+    const reset = resetFromSnapshot(fresh, now) ?? resetFromSnapshot(run.rateLimits, now)
+    return usageLimitError(
+      { provider: 'codex', ...(reset?.resetsAt ? { resetsAt: new Date(reset.resetsAt * 1000).toISOString() } : {}), estimated: reset?.resetsAt === undefined, ...(reset?.limitKind ? { limitKind: reset.limitKind } : {}) },
+      failure
+    )
+  }
+
   /** A turn the run adopted ended `failed` or `interrupted`: the run fails like one of Mousse's own turns, and its sweep follows. */
-  private throwAdoptedFailure(run: TurnRun, signal: AbortSignal): void {
+  private async throwAdoptedFailure(run: TurnRun, signal: AbortSignal, conn: CodexConnection): Promise<void> {
     const turn = run.adoptedFailure
     if (!turn) return
-    if (turn.status === 'failed') throw this.turnFailure(turn.error, run.lastError)
+    if (turn.status === 'failed') throw await this.limitOrFailure(this.turnFailure(turn.error, run.lastError), run, conn, signal)
     signal.throwIfAborted()
     throw new Error('Codex interrupted the turn')
   }

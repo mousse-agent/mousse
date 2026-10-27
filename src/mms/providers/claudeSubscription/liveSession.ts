@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { Query, SDKMessage, SDKResultMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
+import { observeRateLimit, RejectedWindows } from './usageLimit'
 
 /**
  * Claude threads run on a long-lived query (issue #142): the prompt is a queue-backed iterable that
@@ -419,6 +420,8 @@ export class LiveRun {
   deferredResult: SDKResultMessage | undefined
   /** The turn produced its first frame. */
   started = false
+  /** The plan windows Claude Code rejected while this turn was open. */
+  readonly rateLimits = new RejectedWindows()
   /** For a wake: the tasks it was opened for, the ones whose notifications it reads. */
   readonly wakeTaskIds = new Set<string>()
   /** What a discarded wake had left when this turn began; it clears them when it commits. */
@@ -961,6 +964,12 @@ export class LiveSession<Turn = unknown> {
       this.routeResult(message)
       return
     }
+    if (message.type === 'rate_limit_event') {
+      // The event names no message of ours: it is the open turn's, and dropped when none is open.
+      const open = this.openRun()
+      if (open) observeRateLimit(message, open.rateLimits)
+      return
+    }
     if (message.type !== 'stream_event' && message.type !== 'assistant' && message.type !== 'user') return
     const echoed = echoedIds(message)
     const owner = echoed.length ? this.ownerOf(echoed) : undefined
@@ -984,7 +993,15 @@ export class LiveSession<Turn = unknown> {
     // A frame that does not begin the turn (a background agent's) does not stop a wake that has not begun:
     // that would stop the agents with it.
     if (target.abandoned && target.kind === 'continuation' && target.started) this.interruptDiscarded(target)
+    observeRateLimit(message, target.rateLimits)
     target.deliver(message)
+  }
+
+  /** The run whose turn is open on this session: the one the frames are in, or the only live run. */
+  private openRun(): LiveRun | undefined {
+    if (this.cursor && !this.cursor.settled && !this.cursor.abandoned) return this.cursor
+    const open = [...this.runs, ...(this.continuation && !this.runs.includes(this.continuation) ? [this.continuation] : [])].filter((run) => !run.settled && !run.abandoned)
+    return open.length === 1 ? open[0] : undefined
   }
 
   /** Where a frame that echoes no id of ours goes. */

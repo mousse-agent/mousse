@@ -3,6 +3,7 @@ import type {
   AgentRuntimeAttemptUsage,
   AgentRuntimeFallbackPolicy
 } from '../../shared/agents/execution'
+import { AppError } from '../../shared/errors'
 import type { AgentFallbackRetryCategory, AgentModelCapabilityProfile } from '../../shared/agents/types'
 
 export function emptyAttemptUsage(): AgentRuntimeAttemptUsage {
@@ -59,6 +60,8 @@ export function isAbortError(error: unknown, signal?: AbortSignal): boolean {
 
 export function classifyProviderFailure(error: unknown): AgentFallbackRetryCategory | undefined {
   if (isAbortError(error)) return undefined
+  // A plan usage limit is a rate limit whatever its message says (it names the window and the reset).
+  if (error instanceof AppError && error.code === 'provider_usage_limit') return 'rate_limit'
   const text = errorText(error).toLowerCase()
   if (/content[_\s-]?filter|safety|refused/.test(text)) return 'content_filter'
   if (/rate.?limit|too many requests|429/.test(text)) return 'rate_limit'
