@@ -45,9 +45,14 @@ export type MousseSettingsSection = Pick<
   'profile' | 'appearance' | 'notifications' | 'shortcuts' | 'permissions' | 'context' | 'agentAccess' | 'integrations' | 'title'
 >
 
+/** Default port of the loopback listener that receives job webhooks. */
+export const DEFAULT_SCHEDULED_WEBHOOK_PORT = 18790
+
 export interface ScheduledConfigSection {
   enabled: boolean
   jobs: ScheduledJobDefinition[]
+  /** The loopback listener for job webhooks; off until a job's webhook is enabled. */
+  webhooks?: { enabled: boolean; port: number }
 }
 
 /** Static job fields stored in mousse.conf (runtime state lives under ~/.mousse/scheduled/). */
@@ -65,6 +70,7 @@ export interface ScheduledJobDefinition {
   workspace?: ScheduledJob['workspace']
   createdBy?: ScheduledJob['createdBy']
   accessCap?: ScheduledJob['accessCap']
+  trigger?: ScheduledJob['trigger']
   repeat?: { times: number; completed?: number }
   createdAt: string
   updatedAt: string
@@ -82,6 +88,8 @@ export interface ScheduledJobRuntime {
   repeat?: { times: number; completed: number }
   runClaim?: ScheduledJob['runClaim']
   pendingOccurrence?: ScheduledJob['pendingOccurrence']
+  pendingTrigger?: ScheduledJob['pendingTrigger']
+  webhookReceipts?: ScheduledJob['webhookReceipts']
 }
 
 export interface MousseConf {

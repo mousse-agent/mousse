@@ -113,6 +113,7 @@ function jobToDefinition(job: ScheduledJob): ScheduledJobDefinition {
     workspace: job.workspace,
     createdBy: job.createdBy,
     accessCap: job.accessCap,
+    trigger: job.trigger,
     repeat: job.repeat?.times
       ? { times: job.repeat.times, completed: job.repeat.completed }
       : undefined,
@@ -284,7 +285,8 @@ export class MousseConfigStore {
       ) as unknown as MousseAgentsConfig,
       scheduled: {
         enabled: raw.scheduled?.enabled ?? base.scheduled.enabled,
-        jobs: raw.scheduled?.jobs ?? base.scheduled.jobs
+        jobs: raw.scheduled?.jobs ?? base.scheduled.jobs,
+        ...(raw.scheduled?.webhooks ? { webhooks: raw.scheduled.webhooks } : {})
       },
       channels: deepMerge(
         base.channels as unknown as Record<string, unknown>,
@@ -492,6 +494,9 @@ export class MousseConfigStore {
     }
     if (partial.jobs !== undefined) {
       this.conf.scheduled.jobs = partial.jobs
+    }
+    if (partial.webhooks !== undefined) {
+      this.conf.scheduled.webhooks = { ...partial.webhooks }
     }
     this.persist()
   }

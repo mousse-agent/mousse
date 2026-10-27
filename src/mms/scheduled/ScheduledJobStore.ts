@@ -18,8 +18,12 @@ import type {
   ScheduledJob,
   ScheduledJobRunClaim,
   ScheduledJobRunRecord,
-  ScheduledOccurrenceResult
+  ScheduledJobWebhookTrigger,
+  ScheduledOccurrenceResult,
+  ScheduledWebhookDelivery,
+  ScheduledWebhookDeliveryOutcome
 } from '../../shared/types'
+import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { TERMINAL_RUN_STATUSES, type RunStatus } from '../run/types'
 import { jobToDefinition, type MousseConfigStore } from '../config/MousseConfigStore'
 import type { ScheduledJobDefinition, ScheduledJobRuntime } from '../config/types'
@@ -32,8 +36,67 @@ import {
 import { createLeaseToken } from '../queue/ThreadExecutionLease'
 import { computeNextRun } from './computeNextRun'
 import { withFileLock } from './fileLock'
+import {
+  appendDelivery,
+  readDeliveries,
+  removeJobTriggerFiles,
+  removeTriggerPayload,
+  sweepTriggerPayloads,
+  updateDelivery,
+  writeTriggerPayload
+} from './webhookFiles'
 
 export const TICKER_INTERVAL_MS = 60_000
+
+/** A webhook request's timestamp may differ from the daemon's clock by this much (seconds), either way. */
+export const WEBHOOK_TIMESTAMP_TOLERANCE_S = 300
+/** Signature-valid requests one job accepts per minute; further ones are answered 429. */
+export const WEBHOOK_RATE_LIMIT_PER_MINUTE = 60
+/** A receipt is kept while its timestamp could still pass the freshness check, plus a minute of clock slack. */
+const WEBHOOK_RECEIPT_RETENTION_S = WEBHOOK_TIMESTAMP_TOLERANCE_S + 60
+/**
+ * Receipts one job keeps at most. Only a holder of the secret can add them (every one is a verified
+ * signature), and such a sender can sign a fresh request anyway, so dropping the oldest at the cap
+ * costs nothing: replay protection exists for captured traffic.
+ */
+const MAX_WEBHOOK_RECEIPTS = 2000
+/** A refusal of the same kind is logged at most this often per job, so a flood cannot churn the log file. */
+const REFUSAL_LOG_INTERVAL_MS = 1000
+
+const WEBHOOK_OCCURRENCE_PREFIX = 'webhook:'
+
+export function webhookOccurrenceKey(occurrenceId: string): string {
+  return WEBHOOK_OCCURRENCE_PREFIX + occurrenceId
+}
+
+/** The delivery an occurrence key names, or undefined for a timed or manual occurrence. */
+export function webhookIdOfOccurrence(occurrenceKey: string | undefined): string | undefined {
+  return occurrenceKey?.startsWith(WEBHOOK_OCCURRENCE_PREFIX) ? occurrenceKey.slice(WEBHOOK_OCCURRENCE_PREFIX.length) : undefined
+}
+
+/**
+ * A job as clients see it: without the webhook receipts, which are the replay record (hundreds of signatures
+ * for a busy webhook), not something to list or broadcast on every update.
+ */
+export function publicJob<T extends ScheduledJob | null | undefined>(job: T): T {
+  if (!job || !job.webhookReceipts) return job
+  const { webhookReceipts: _receipts, ...rest } = job
+  void _receipts
+  return rest as T
+}
+
+/** What the store did with a signature-verified webhook request (the listener maps it to an HTTP status). */
+export type WebhookTriggerResult =
+  | { kind: 'accepted'; occurrenceId: string }
+  | { kind: 'unknown' }
+  | { kind: 'replay' | 'rate_limited' | 'running' | 'pending' | 'paused' }
+
+/** The log outcome of an occurrence that ended, and whether the run it had (if any) is the reason. */
+function deliveryOutcomeOf(result: ScheduledOccurrenceResult, hadRun: boolean): { outcome: ScheduledWebhookDeliveryOutcome; error?: string } {
+  if (result.status === 'ok') return { outcome: 'completed' }
+  if (result.status === 'uncertain') return { outcome: 'uncertain', error: result.error }
+  return { outcome: hadRun ? 'failed' : 'dispatch_failed', error: result.error }
+}
 
 /** The Run Engine run an occurrence is held by, as the scheduler reads it. */
 export interface ScheduledRunView {
@@ -152,6 +215,8 @@ function extractRuntime(job: ScheduledJob): ScheduledJobRuntime {
     runHistory: job.runHistory,
     runClaim: job.runClaim,
     pendingOccurrence: job.pendingOccurrence,
+    pendingTrigger: job.pendingTrigger,
+    webhookReceipts: job.webhookReceipts,
     repeat: job.repeat?.times
       ? { times: job.repeat.times, completed: job.repeat.completed ?? 0 }
       : undefined
@@ -181,6 +246,8 @@ function mergeJob(definition: ScheduledJobDefinition, runtime?: ScheduledJobRunt
     runHistory: runtime?.runHistory ?? [],
     runClaim: runtime?.runClaim,
     pendingOccurrence: runtime?.pendingOccurrence,
+    pendingTrigger: runtime?.pendingTrigger,
+    webhookReceipts: runtime?.webhookReceipts,
     repeat
   }
 }
@@ -217,6 +284,9 @@ export class ScheduledJobStore {
   readonly homeDir: string
   private probe: ScheduledRunProbe | null = null
   private onOrphanedThread: ((orphan: { jobId: string; threadId: string; runId?: string }) => void) | null = null
+  private onJobRemoved: ((job: ScheduledJob) => void) | null = null
+  /** When a refusal of each kind was last written to a job's log (`<jobId>:<outcome>`). */
+  private readonly lastRefusalLogAt = new Map<string, number>()
 
   constructor(private readonly config: MousseConfigStore) {
     this.homeDir = config.getHomeDir()
@@ -236,6 +306,20 @@ export class ScheduledJobStore {
   /** The Run Engine run of an occurrence, or `unavailable` when there is no probe or engine to ask. */
   probeRun(runId: string): ScheduledRunView | 'absent' | 'unavailable' {
     return this.probe ? this.probe.runStatus(runId) : 'unavailable'
+  }
+
+  /** Called after a job is gone for good (deleted, or its repeat was spent), so its webhook secret can be removed too. */
+  setJobRemovedHandler(handler: ((job: ScheduledJob) => void) | null): void {
+    this.onJobRemoved = handler
+  }
+
+  private notifyJobRemoved(job: ScheduledJob): void {
+    removeJobTriggerFiles(this.homeDir, job.id)
+    try {
+      this.onJobRemoved?.(job)
+    } catch {
+      /* best effort: a secret left behind belongs to a job that no longer exists and verifies nothing */
+    }
   }
 
   private notifyOrphanedThread(jobId: string, claim: Pick<ScheduledJobRunClaim, 'threadId' | 'runId'> | undefined): void {
@@ -281,6 +365,16 @@ export class ScheduledJobStore {
       const runtimeMap = this.loadRuntimeMap()
       return definitions.map((definition) => mergeJob(definition, runtimeMap[definition.id]))
     })
+  }
+
+  /**
+   * Writes only the runtime file, durably (fsync before the rename). For changes that touch no definition and
+   * must survive a crash the moment they are acknowledged, like a webhook delivery and its receipt.
+   */
+  private saveRuntimeDurably(jobs: ScheduledJob[]): void {
+    const runtimeMap: Record<string, ScheduledJobRuntime> = {}
+    for (const job of jobs) runtimeMap[job.id] = extractRuntime(job)
+    atomicWriteJsonSync(join(this.homeDir, 'scheduled', 'jobs-runtime.json'), runtimeMap)
   }
 
   private saveJobs(jobs: ScheduledJob[]): void {
@@ -363,8 +457,160 @@ export class ScheduledJobStore {
       const next = jobs.filter((job) => job.id !== id)
       if (next.length === jobs.length) return false
       this.saveJobs(next)
+      const removed = jobs.find((job) => job.id === id)
+      if (removed) this.notifyJobRemoved(removed)
       return true
     })
+  }
+
+  // ── Webhook trigger ────────────────────────────────────────────────────
+
+  /** Puts a webhook trigger on a job, or takes it off (`undefined`) and drops the delivery that was waiting. */
+  setWebhookTrigger(id: string, trigger: ScheduledJobWebhookTrigger | undefined): ScheduledJob | null {
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
+      const jobs = this.listJobs()
+      const job = jobs.find((entry) => entry.id === id)
+      if (!job) return null
+      if (trigger && job.schedule.kind === 'once') throw new Error('A one-time job runs once and cannot have a webhook; use a manual job for a webhook-only trigger.')
+      const dropped = trigger ? undefined : job.pendingTrigger
+      job.trigger = trigger ? { webhook: trigger } : undefined
+      if (dropped) job.pendingTrigger = undefined
+      job.updatedAt = new Date().toISOString()
+      this.saveJobs(jobs)
+      if (dropped) {
+        this.settleWebhookDelivery(job.id, webhookOccurrenceKey(dropped.occurrenceId), { outcome: 'dispatch_failed', error: 'Dropped: the webhook was disabled before the run started' })
+      }
+      return job
+    })
+  }
+
+  /**
+   * A webhook request whose signature has been verified. Under the jobs lock: a request already seen is a
+   * replay; every other request consumes a durable receipt first (so a request answered 409 or 429 can never be
+   * delivered later, and senders re-sign a retry with a fresh timestamp); then the rate limit, the job's
+   * state and the single pending slot decide; an accepted delivery's payload and pending slot are on disk
+   * before this returns.
+   */
+  triggerFromWebhook(jobId: string, request: { ts: number; sig: string; body: Buffer; now?: number }): WebhookTriggerResult {
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
+      const jobs = this.listJobs()
+      const job = jobs.find((entry) => entry.id === jobId)
+      // A job an agent created never takes a webhook (decision: no inbound trigger for agent-made jobs).
+      if (!job?.trigger?.webhook || job.createdBy) return { kind: 'unknown' }
+
+      const nowMs = request.now ?? Date.now()
+      const nowIso = new Date(nowMs).toISOString()
+      const bodyBytes = request.body.length
+      const receipts = (job.webhookReceipts ?? []).filter((receipt) => receipt.ts >= Math.floor(nowMs / 1000) - WEBHOOK_RECEIPT_RETENTION_S)
+
+      if (receipts.some((receipt) => receipt.sig === request.sig)) {
+        this.logRefusal(job.id, 'replay', { receivedAt: nowIso, bodyBytes })
+        return { kind: 'replay' }
+      }
+      receipts.push({ ts: request.ts, sig: request.sig, at: nowMs })
+      if (receipts.length > MAX_WEBHOOK_RECEIPTS) receipts.splice(0, receipts.length - MAX_WEBHOOK_RECEIPTS)
+      job.webhookReceipts = receipts
+
+      // The receipt is durable before any answer, whatever the answer is.
+      const refuse = (kind: 'rate_limited' | 'running' | 'pending' | 'paused', error?: string): WebhookTriggerResult => {
+        this.saveRuntimeDurably(jobs)
+        this.logRefusal(job.id, kind, { receivedAt: nowIso, bodyBytes, ...(error ? { error } : {}) })
+        return { kind }
+      }
+
+      if (receipts.filter((receipt) => receipt.at > nowMs - 60_000).length > WEBHOOK_RATE_LIMIT_PER_MINUTE) return refuse('rate_limited')
+      if (job.state === 'running' || job.runClaim) return refuse('running', 'The job is running')
+      if (job.pendingOccurrence) {
+        return refuse('running', job.pendingOccurrence.state === 'queued' ? 'The job has a run waiting in a queue' : 'The job has a run in progress')
+      }
+      if (job.pendingTrigger) return refuse('pending', 'Another delivery is waiting to start')
+      if (!job.enabled || job.state === 'paused') return refuse('paused', 'The job is paused')
+
+      const occurrenceId = uuidv4()
+      // The payload is stored before the slot that names it: a slot never points at a file that is not there.
+      writeTriggerPayload(this.homeDir, { occurrenceId, jobId: job.id, receivedAt: nowIso, bodyBytes, body: request.body.toString('utf-8') })
+      job.pendingTrigger = { occurrenceId, receivedAt: nowIso }
+      try {
+        this.saveRuntimeDurably(jobs)
+      } catch (error) {
+        removeTriggerPayload(this.homeDir, job.id, occurrenceId)
+        throw error
+      }
+      this.logDelivery(job.id, { occurrenceId, receivedAt: nowIso, outcome: 'accepted', bodyBytes })
+      return { kind: 'accepted', occurrenceId }
+    })
+  }
+
+  /** A request that failed verification, for the job's log. Only a job with a webhook has a log. */
+  recordWebhookRejection(jobId: string, outcome: 'rejected_signature' | 'too_large', bodyBytes: number): void {
+    try {
+      withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
+        const job = this.listJobs().find((entry) => entry.id === jobId)
+        if (!job?.trigger?.webhook) return
+        this.logRefusal(job.id, outcome, { receivedAt: new Date().toISOString(), bodyBytes })
+      })
+    } catch {
+      /* the log is a courtesy; the request was refused either way */
+    }
+  }
+
+  /** The job's delivery log, newest first. */
+  listWebhookDeliveries(jobId: string): ScheduledWebhookDelivery[] {
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
+      return this.getJob(jobId) ? readDeliveries(this.homeDir, jobId) : []
+    })
+  }
+
+  /** Removes stored payloads nothing references any more (called about once a day). Returns how many files went. */
+  sweepWebhookPayloads(now = Date.now()): number {
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
+      const jobs = this.listJobs()
+      return sweepTriggerPayloads(this.homeDir, {
+        jobIds: new Set(jobs.map((job) => job.id)),
+        now,
+        isReferenced: (jobId, occurrenceId) => {
+          const job = jobs.find((entry) => entry.id === jobId)
+          if (!job) return false
+          const key = webhookOccurrenceKey(occurrenceId)
+          return job.pendingTrigger?.occurrenceId === occurrenceId
+            || job.runClaim?.webhookOccurrenceId === occurrenceId
+            || job.pendingOccurrence?.occurrenceKey === key
+        }
+      })
+    })
+  }
+
+  private logDelivery(jobId: string, row: ScheduledWebhookDelivery): void {
+    try {
+      appendDelivery(this.homeDir, jobId, row)
+    } catch {
+      /* the log is not the delivery: the request is already durable */
+    }
+  }
+
+  private logRefusal(jobId: string, outcome: ScheduledWebhookDeliveryOutcome, row: Omit<ScheduledWebhookDelivery, 'outcome'>): void {
+    const key = `${jobId}:${outcome}`
+    const at = Date.now()
+    if (at - (this.lastRefusalLogAt.get(key) ?? 0) < REFUSAL_LOG_INTERVAL_MS) return
+    this.lastRefusalLogAt.set(key, at)
+    this.logDelivery(jobId, { ...row, outcome })
+  }
+
+  /** Moves a webhook delivery's log row to `result`; an ended delivery's stored payload goes with it. */
+  private settleWebhookDelivery(
+    jobId: string,
+    occurrenceKey: string | undefined,
+    result: { outcome: ScheduledWebhookDeliveryOutcome; error?: string },
+    options: { keepPayload?: boolean } = {}
+  ): void {
+    const occurrenceId = webhookIdOfOccurrence(occurrenceKey)
+    if (!occurrenceId) return
+    try {
+      updateDelivery(this.homeDir, jobId, occurrenceId, result)
+    } catch {
+      /* the log is a courtesy */
+    }
+    if (!options.keepPayload) removeTriggerPayload(this.homeDir, jobId, occurrenceId)
   }
 
   pauseJob(id: string, reason?: string): ScheduledJob | null {
@@ -427,8 +673,15 @@ export class ScheduledJobStore {
       // An occurrence whose run ended (or can never start) is released before its job is considered.
       const released: Array<{ jobId: string; threadId: string; runId: string }> = []
       let dirty = this.reconcilePendingOccurrences(jobs, now.toISOString(), released)
+      const droppedDeliveries: Array<{ jobId: string; occurrenceId: string }> = []
 
       for (const job of jobs) {
+        // A delivery that was accepted and then the job was paused does not run later, when it is stale.
+        if (job.pendingTrigger && (!job.enabled || job.state === 'paused') && job.state !== 'running' && !job.runClaim) {
+          droppedDeliveries.push({ jobId: job.id, occurrenceId: job.pendingTrigger.occurrenceId })
+          job.pendingTrigger = undefined
+          dirty = true
+        }
         if (!job.enabled || job.state === 'paused' || job.state === 'running' || job.runClaim) continue
         // A job this process is already running is not claimed again: the caller would drop the claim.
         if (options.skipJobIds?.has(job.id)) continue
@@ -436,6 +689,16 @@ export class ScheduledJobStore {
         if (options.limit !== undefined && due.length >= options.limit) break
         // One outstanding occurrence per job, held until its run is terminal.
         if (job.pendingOccurrence) continue
+        // A verified webhook delivery is due whatever the job's own timer says, and does not move that timer.
+        if (job.pendingTrigger) {
+          const { occurrenceId } = job.pendingTrigger
+          job.pendingTrigger = undefined
+          job.state = 'running'
+          job.runClaim = { ...newRunClaim(webhookOccurrenceKey(occurrenceId)), webhookOccurrenceId: occurrenceId }
+          due.push({ ...job, runClaim: { ...job.runClaim } })
+          dirty = true
+          continue
+        }
         if (!job.nextRunAt) continue
         if (new Date(job.nextRunAt).getTime() > now.getTime()) continue
         const resumedWaiting = job.lastStatus === 'waiting'
@@ -450,6 +713,9 @@ export class ScheduledJobStore {
       }
       // A released occurrence whose run produced nothing (never started, removed) leaves an empty per-run thread.
       for (const { jobId, threadId, runId } of released) this.notifyOrphanedThread(jobId, { threadId, runId })
+      for (const { jobId, occurrenceId } of droppedDeliveries) {
+        this.settleWebhookDelivery(jobId, webhookOccurrenceKey(occurrenceId), { outcome: 'dispatch_failed', error: 'Dropped: the job was paused before the run started' })
+      }
 
       return due
     })
@@ -532,6 +798,8 @@ export class ScheduledJobStore {
         if (history[index].occurrenceKey === occurrenceKey && history[index].status === 'queued') { existing = index; break }
       }
     }
+    // Whether the occurrence ever had a run decides if a webhook delivery "failed" or "never dispatched".
+    const hadRun = Boolean(details?.runId ?? job.runClaim?.runId ?? job.pendingOccurrence?.runId ?? (existing >= 0 ? history[existing].runId : undefined))
     if (existing >= 0) history[existing] = { ...history[existing], ...record, runAt: history[existing].runAt }
     else history.push(record)
     job.runHistory = history.slice(-20)
@@ -541,6 +809,10 @@ export class ScheduledJobStore {
     job.runClaim = undefined
     job.pendingOccurrence = undefined
     job.updatedAt = nowIso
+
+    // A webhook delivery ends with its occurrence: its log row gets the outcome and its payload is deleted.
+    const webhook = webhookIdOfOccurrence(occurrenceKey) !== undefined
+    if (webhook) this.settleWebhookDelivery(job.id, occurrenceKey, deliveryOutcomeOf(result, hadRun))
 
     // A run that did not finish cleanly is never retried on its own: a one-shot job stays for a manual retry.
     if ((result.status === 'interrupted' || result.status === 'uncertain') && job.schedule.kind === 'once') {
@@ -553,13 +825,21 @@ export class ScheduledJobStore {
       job.repeat.completed = (job.repeat.completed ?? 0) + 1
       if (job.repeat.completed >= job.repeat.times) {
         const index = jobs.indexOf(job)
-        if (index >= 0) jobs.splice(index, 1)
+        if (index >= 0) {
+          jobs.splice(index, 1)
+          this.notifyJobRemoved(job)
+        }
         return
       }
     }
+    const wasPaused = job.state === 'paused'
+    // A delivery does not move the job's own timer: an interval or cron job keeps its cadence.
+    if (webhook) {
+      if (!wasPaused) job.state = 'scheduled'
+      return
+    }
     const nextRunAt = computeNextRun(job.schedule, nowIso)
     job.nextRunAt = nextRunAt
-    const wasPaused = job.state === 'paused'
     if (!nextRunAt) {
       if (job.schedule.kind === 'once') job.enabled = false
       if (job.schedule.kind !== 'manual' && job.schedule.kind !== 'once') job.lastError = job.lastError ?? 'Failed to compute next run'
@@ -642,6 +922,7 @@ export class ScheduledJobStore {
       job.runClaim = undefined
       job.state = 'scheduled'
       job.updatedAt = now
+      this.settleWebhookDelivery(job.id, claim.occurrenceKey, { outcome: 'queued' }, { keepPayload: true })
       const settled = claim.settledResult
       if (settled) this.applyOccurrenceResult(jobs, job, claim.occurrenceKey, settled, now)
       this.saveJobs(jobs)
@@ -758,7 +1039,11 @@ export class ScheduledJobStore {
       job.lastError = reason
       job.runHistory = [...(job.runHistory ?? []), { runAt: now, status: 'interrupted' as const, error: reason, ...claimRecordFields(claim) }].slice(-20)
       job.runClaim = undefined
-      if (job.schedule.kind === 'once') {
+      const webhook = webhookIdOfOccurrence(claim.occurrenceKey) !== undefined
+      if (webhook) {
+        // A delivery never moves the job's own timer.
+        job.state = 'scheduled'
+      } else if (job.schedule.kind === 'once') {
         job.enabled = false
         job.state = 'error'
         job.nextRunAt = null
@@ -768,6 +1053,7 @@ export class ScheduledJobStore {
       }
       job.updatedAt = now
       this.saveJobs(jobs)
+      this.settleWebhookDelivery(id, claim.occurrenceKey, { outcome: claim.runId ? 'failed' : 'dispatch_failed', error: reason })
       // The claim never reached a run, so a per-run thread it created is still empty.
       if (!claim.runId) this.notifyOrphanedThread(id, claim)
       return job
@@ -790,6 +1076,7 @@ export class ScheduledJobStore {
     const jobs = this.listJobs()
     const interrupted: ScheduledJob[] = []
     const orphans: Array<{ jobId: string; claim: ScheduledJobRunClaim | undefined }> = []
+    const deliveriesToSettle: Array<{ jobId: string; occurrenceKey: string | undefined; hadRun: boolean; error?: string }> = []
     let dirty = false
     const nowIso = now.toISOString()
 
@@ -832,7 +1119,11 @@ export class ScheduledJobStore {
       job.runHistory = [...(job.runHistory ?? []), record].slice(-20)
       job.runClaim = undefined
 
-      if (job.schedule.kind === 'once') {
+      if (webhookIdOfOccurrence(claim?.occurrenceKey) !== undefined) {
+        // A delivery never moves the job's own timer; its log row and stored payload end with the claim.
+        job.state = 'scheduled'
+        deliveriesToSettle.push({ jobId: job.id, occurrenceKey: claim?.occurrenceKey, hadRun: Boolean(claim?.runId), error: record.error })
+      } else if (job.schedule.kind === 'once') {
         // Non-idempotent side effects: do not complete and do not auto-rerun.
         job.enabled = false
         job.state = 'error'
@@ -856,6 +1147,9 @@ export class ScheduledJobStore {
     }
 
     if (dirty) this.saveJobs(jobs)
+    for (const { jobId, occurrenceKey, hadRun, error } of deliveriesToSettle) {
+      this.settleWebhookDelivery(jobId, occurrenceKey, { outcome: hadRun ? 'failed' : 'dispatch_failed', error })
+    }
     // A claim that never reached a run leaves its empty per-run thread to be discarded.
     for (const { claim, jobId } of orphans) if (claim && !claim.runId) this.notifyOrphanedThread(jobId, claim)
     return interrupted
@@ -905,6 +1199,7 @@ export class ScheduledJobStore {
   getDueCount(now = new Date()): number {
     return this.listJobs().filter((job) => {
       if (!job.enabled || job.state === 'paused' || job.state === 'running' || job.pendingOccurrence) return false
+      if (job.pendingTrigger) return true
       if (!job.nextRunAt) return false
       return new Date(job.nextRunAt).getTime() <= now.getTime()
     }).length

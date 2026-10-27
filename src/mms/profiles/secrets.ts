@@ -57,3 +57,13 @@ export function writeProfileSecret(profileRoot: string, name: string, value: str
   current[name] = value
   atomicWriteJsonSync(filePath, current, { mode: 0o600 })
 }
+
+/** Removes a secret written by `writeProfileSecret`; a missing name or file is not an error. */
+export function deleteProfileSecret(profileRoot: string, name: string): void {
+  const filePath = join(profileRoot, 'secrets', 'refs.json')
+  if (!existsSync(filePath)) return
+  const current = JSON.parse(readFileSync(filePath, 'utf8')) as Record<string, string>
+  if (!Object.prototype.hasOwnProperty.call(current, name)) return
+  delete current[name]
+  atomicWriteJsonSync(filePath, current, { mode: 0o600 })
+}
