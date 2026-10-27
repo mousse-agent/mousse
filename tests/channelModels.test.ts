@@ -65,9 +65,9 @@ describe('channel model choices', () => {
     notices.delivered('t1')
     expect(notices.pending('t1', caps('approval_only'))).toBeUndefined()
     expect(notices.pending('t2', caps('approval_only'))).toBe(CHANNEL_APPROVALS_NOTICE)
-    // Mousse's own loop does not; Pi's agent does on every platform (it runs its tools under the
-    // thread's permission mode), with or without the contained shell.
-    expect(notices.pending('t3', PI_LEGACY_CAPS)).toBeUndefined()
+    // Every runtime with exact tool control does, without reading `definitionLimits` (4h deletes it):
+    // Pi's agent on every platform, with or without the contained shell, and the legacy engine.
+    expect(notices.pending('t3', PI_LEGACY_CAPS)).toBe(CHANNEL_APPROVALS_NOTICE)
     expect(notices.pending('t4', null)).toBeUndefined()
     expect(notices.pending('t5', PI_RPC_EXACT_CAPS)).toBe(CHANNEL_APPROVALS_NOTICE)
     expect(notices.pending('t6', PI_RPC_NO_SHELL_CAPS)).toBe(CHANNEL_APPROVALS_NOTICE)
@@ -80,7 +80,7 @@ describe('channel model choices', () => {
     expect(CHANNEL_MODEL_REFUSED).toBe("This model can't run in channels. Choose another with /model.")
     expect(CHANNEL_MODEL_REFUSED).not.toMatch(/toolControl/)
     expect(channelGate(caps('approval_only'))).toEqual({ approvalOnly: true })
-    expect(channelGate(PI_LEGACY_CAPS)).toEqual({})
+    expect(channelGate(PI_LEGACY_CAPS)).toEqual({ approvalOnly: true })
     expect(channelGate(PI_RPC_NO_SHELL_CAPS)).toEqual({ approvalOnly: true })
     // No model or an unreadable instance: the turn reports its own error.
     expect(channelGate(null)).toEqual({})

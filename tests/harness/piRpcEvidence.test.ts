@@ -6,7 +6,7 @@ import type { DriverContext } from '../../src/mms/harness/driver'
 import { PI_LEGACY_CAPS, PI_RPC_CAPS, PI_RPC_EXACT_CAPS, PI_RPC_NO_SHELL_CAPS, piDriver, piRpcCaps, piRpcEvidenceLevel, type PiRpcDriverOptions } from '../../src/mms/harness/drivers/pi'
 import { piRuntimeVersion } from '../../src/mms/harness/drivers/pi/engines/rpc'
 import { checkPolicy } from '../../src/mms/harness/policy'
-import { definitionFeatureGaps, definitionNeedsLoop, definitionRunPolicy } from '../../src/mms/agentDefinitions/definitionRuntime'
+import { definitionFeatureGaps, definitionRunPolicy } from '../../src/mms/agentDefinitions/definitionRuntime'
 
 // PR 4 4d-rpc: Pi RPC is `exact`/`strong`, and runs agent definitions, on a platform whose evidence
 // record for the pinned Pi holds every item; `exact`/`weak` with a no-shell record (every item but the
@@ -141,15 +141,11 @@ describe('definition settings Pi RPC must hold', () => {
     expect(definitionFeatureGaps(PI_RPC_EXACT_CAPS, undefined).map((gap) => gap.pointer)).toEqual(['/settings'])
   })
 
-  it('only a definition whose settings are not known is routed to the loop; a browser definition runs on Pi RPC', () => {
-    expect(definitionNeedsLoop({ ...features, browserMode: 'structured' })).toBe(false)
-    expect(definitionNeedsLoop(undefined)).toBe(true)
-    expect(definitionNeedsLoop(features)).toBe(false)
+  it('no definition is routed to the loop by its settings: a browser definition runs on Pi RPC, and settings not given are refused everywhere', () => {
     const policy = definitionRunPolicy({ origin: 'definition', grants: { skills: [], mcpTools: [], builtinTools: [], denied: [] }, budget: { maxTurns: 1, maxToolCalls: 1, maxElapsedMs: 0 } as never, definition: { id: 'd', revision: 'r' }, features: { ...features, browserMode: 'structured' } })
     expect(policy.authority).toMatchObject({ kind: 'definition' })
     expect(policy.authority).not.toHaveProperty('loop')
-    expect(definitionRunPolicy({ origin: 'definition', grants: { skills: [], mcpTools: [], builtinTools: [], denied: [] }, budget: { maxTurns: 1, maxToolCalls: 1, maxElapsedMs: 0 } as never, definition: { id: 'd', revision: 'r' } }).authority).toMatchObject({ kind: 'definition', loop: true })
-    expect(definitionRunPolicy({ origin: 'definition', grants: { skills: [], mcpTools: [], builtinTools: [], denied: [] }, budget: { maxTurns: 1, maxToolCalls: 1, maxElapsedMs: 0 } as never, definition: { id: 'd', revision: 'r' }, features }).authority).not.toHaveProperty('loop')
+    expect(definitionFeatureGaps(PI_LEGACY_CAPS, undefined).map((gap) => gap.pointer)).toEqual(['/settings'])
   })
 
   it('the loop holds them all, as it always has', () => {

@@ -1,6 +1,6 @@
 import type { HarnessCaps, RunPolicy } from '../../shared/harness/types'
 import type { LlmProviderOption } from '../../shared/settings'
-import { checkPolicy, definitionLimitsLevel, toolControlLevel } from '../harness/policy'
+import { checkPolicy, toolControlLevel } from '../harness/policy'
 
 /**
  * The policy every channel turn binds with. Nobody in a channel can answer a tool approval, so the
@@ -44,13 +44,11 @@ export function channelGate(caps: HarnessCaps | null, instanceId?: string): { re
 /**
  * Whether a runtime admitted to channels asks before some of its tools, so a channel turn refuses
  * them: one that asks Mousse before each tool (`approval_only`), and one that runs its own tools
- * under the thread's permission mode with Mousse deciding each (`exact` outside Mousse's own loop:
- * Pi's agent on any platform). Mousse's loop (`definitionLimits: 'in_loop'`) never showed the
- * notice; 4h deletes it, and then every `exact` runtime shows it.
+ * under the thread's permission mode with Mousse deciding each (`exact`: Pi's agent on any platform).
  */
 export function asksBeforeTools(caps: HarnessCaps): boolean {
   const control = toolControlLevel(caps)
-  return control === 'approval_only' || (control === 'exact' && definitionLimitsLevel(caps) !== 'in_loop')
+  return control === 'approval_only' || control === 'exact'
 }
 
 /**

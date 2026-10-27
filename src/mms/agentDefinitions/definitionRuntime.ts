@@ -82,18 +82,15 @@ export interface DefinitionCheck {
   ref: AgentModelRef
   grants: EffectiveAgentGrants
   budget: AgentExecutionBudget
-  /** The definition's output, browser, memory and delegation settings (`definitionFeatureGaps`). */
-  features?: AgentRuntimeFeatures
+  /**
+   * The definition's output, browser, memory and delegation settings (`definitionFeatureGaps`).
+   * Every caller passes them: where a definition runs never depends on settings it was not given.
+   */
+  features: AgentRuntimeFeatures
 }
 
-/**
- * Whether a definition needs the instance's own definition loop while it exists: one whose settings
- * are not known. Such a definition runs on the loop (`PolicyAuthority.loop`,
- * `HarnessDriver.definitionCaps`), never refused for it.
- */
-export function definitionNeedsLoop(features: AgentRuntimeFeatures | undefined): boolean {
-  return !features
-}
+/** Why a definition whose settings were not passed to its runtime does not run. */
+export const DEFINITION_SETTINGS_MISSING = "This agent's settings were not passed to its runtime, so it does not run. Run it from the agent editor, a workflow or an agent chat, which pass them."
 
 /** The settings `definitionFeatureGaps` reads, from a definition's settings. */
 export function definitionFeatures(settings: Pick<AgentDefinitionSettings, 'output' | 'browser' | 'memory' | 'delegation'>): AgentRuntimeFeatures {
@@ -118,11 +115,12 @@ export function definitionFeatures(settings: Pick<AgentDefinitionSettings, 'outp
  * - the browser: the same browser tools, as Mousse app tools over its MCP server, under the same
  *   binding (`createDefinitionBrowserBinding`) and the definition's authority on every call. A
  *   runtime that cannot attach Mousse's MCP server cannot reach them, so it is refused there.
- * Settings that are not known are refused.
+ * Settings that are not known are refused, on every runtime.
  */
 export function definitionFeatureGaps(caps: Pick<HarnessCaps, 'definitionLimits' | 'mcp'>, features: AgentRuntimeFeatures | undefined): AgentRuntimeUnsupportedSetting[] {
+  // Settings that were not given are refused everywhere, the loop included: nothing falls back for them.
+  if (!features) return [{ pointer: '/settings', reason: DEFINITION_SETTINGS_MISSING }]
   if (caps.definitionLimits === 'in_loop') return []
-  if (!features) return [{ pointer: '/settings', reason: "This agent's settings were not checked against this provider, so it does not run here." }]
   if (features.browserMode !== 'disabled' && !caps.mcp)
     return [{ pointer: '/settings/browser/mode', reason: "The browser reaches agent definitions through Mousse's tools, which this provider's engine cannot attach. Turn the browser off, or pick another provider." }]
   return []
@@ -206,9 +204,7 @@ export function definitionToolNames(grants: EffectiveAgentGrants, extra: readonl
  */
 export function definitionRunPolicy(
   request: Pick<DefinitionCheck, 'origin' | 'grants' | 'budget' | 'definition' | 'features'>,
-  toolNames: readonly string[] = [],
-  /** The definition runs on the instance's definition loop (default: when its settings need it). */
-  loop = definitionNeedsLoop(request.features)
+  toolNames: readonly string[] = []
 ): RunPolicy {
   const { budget } = request
   return {
@@ -220,9 +216,7 @@ export function definitionRunPolicy(
     // the policy names it, so only an `exact` runtime admits the turn.
     authority: {
       kind: 'definition',
-      digest: definitionAuthorityDigest({ policy: { definitionId: request.definition.id, definitionRevision: request.definition.revision }, grants: request.grants } as Pick<DefinitionAuthority, 'policy' | 'grants'>),
-      // A definition that needs the instance's definition loop runs there (`definitionNeedsLoop`).
-      ...(loop ? { loop: true as const } : {})
+      digest: definitionAuthorityDigest({ policy: { definitionId: request.definition.id, definitionRevision: request.definition.revision }, grants: request.grants } as Pick<DefinitionAuthority, 'policy' | 'grants'>)
     },
     budget: {
       maxTurns: budget.maxTurns,
@@ -412,6 +406,9 @@ export function createDefinitionRuntime(port: DefinitionTurnPort): AgentRuntimeP
       effects.attemptUsage = emptyAttemptUsage()
       const policy = input.policy
       if (!policy) throw new AgentDefinitionError('SETTINGS_UNSUPPORTED', 'A definition run needs its compiled runtime policy.')
+      // Every candidate is checked against the definition's settings; without them none is.
+      if (!input.features) throw new AgentDefinitionError('SETTINGS_UNSUPPORTED', DEFINITION_SETTINGS_MISSING, { pointer: '/settings' })
+      const features = input.features
       const fallbackPolicy = policy.fallbacks
       const candidates = orderedFallbackModels(input.model.primary, policy.fallbackModels, fallbackPolicy.enabled)
       const origin = definitionOrigin(policy.source)
@@ -441,7 +438,7 @@ export function createDefinitionRuntime(port: DefinitionTurnPort): AgentRuntimeP
       for (let index = 0; index < candidates.length; ) {
         if (input.signal.aborted) throw input.signal.reason ?? new DOMException('Aborted', 'AbortError')
         const ref = candidates[index]!.ref
-        const check: DefinitionCheck = { threadId: input.threadId, origin, definition: { id: policy.definitionId, revision: policy.definitionRevision }, ref, grants: input.grants, budget: input.budget, ...(input.features ? { features: input.features } : {}) }
+        const check: DefinitionCheck = { threadId: input.threadId, origin, definition: { id: policy.definitionId, revision: policy.definitionRevision }, ref, grants: input.grants, budget: input.budget, features }
         const refusal = port.checkDefinitionTurn(check)
         if (refusal && isPolicyRefusal(refusal)) {
           // A primary that cannot hold the definition fails the run: there is no silent move to a fallback.

@@ -109,14 +109,17 @@ export function hasSpendLimit(policy: Pick<RunPolicy, 'budget'>): boolean {
   return budget.maxInputTokens !== undefined || budget.maxOutputTokens !== undefined || budget.maxUsd !== undefined
 }
 
+/** What to change when a model cannot cap its output. */
+const PICK_CAPPED = ' Pick a model that reports its output cap, or remove the token and cost limits.'
+
 /**
  * Why a model cannot hold the policy's token or USD limits, on an instance whose `spendLimits` are
  * `reserved`; undefined when it can. Unknown facts refuse: Mousse never assumes a cap it cannot show.
  */
 function spendModelGap(budget: NonNullable<RunPolicy['budget']>, model: SpendModelFacts | undefined): string | undefined {
-  if (!model) return 'Mousse cannot tell whether this model caps its output, so token and cost limits cannot be held.'
-  if (!model.outputCap) return `${model.label} cannot cap its output, so token and cost limits cannot be held.`
-  if (budget.maxUsd !== undefined && !model.priced) return `${model.label} has no price, so a cost limit cannot be held.`
+  if (!model) return `Mousse cannot tell whether this model caps its output, so token and cost limits cannot be held.${PICK_CAPPED}`
+  if (!model.outputCap) return `${model.label} does not always send its output cap, so token and cost limits cannot be held.${PICK_CAPPED}`
+  if (budget.maxUsd !== undefined && !model.priced) return `${model.label} has no price, so a cost limit cannot be held. Set a price for the model, or use a token limit instead.`
   const smallest = model.smallestCap
   const effort = model.effort && model.effort !== 'off' ? `${model.effort} effort` : 'no thinking'
   if (smallest !== undefined && budget.maxOutputTokens !== undefined && budget.maxOutputTokens < smallest)

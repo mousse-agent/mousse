@@ -462,6 +462,11 @@ export interface TurnAppContext {
   accessLevel?: AgentAccessLevel
   /** The turn may attach the Mousse MCP server (a run engine run). */
   mcpEligible: boolean
+  /**
+   * App tools the turn cannot run without (an agent definition's granted ones): a turn whose Mousse
+   * MCP bearer cannot be issued is refused before the runtime starts, never run without them.
+   */
+  requiredTools?: readonly string[]
   /** The session text and turn preamble, given whether the server was attached. */
   instructions(mcpAttached: boolean): { sessionInstructions: string; turnPreamble: string }
   /**
@@ -1278,6 +1283,15 @@ export class Harness implements HarnessGateway {
           ...(spec.instructions ? { instructions: { ...spec.instructions } } : {})
         }
         minted = this.mintBridge(record, spec)
+        const required = spec.app?.requiredTools ?? []
+        if (required.length && !minted?.bridge.mcp)
+          throw harnessAppError({
+            code: 'policy_unenforceable',
+            message: `This agent's tools (${required.join(', ')}) could not be connected for this run, so it did not start. Try again; if it keeps failing, restart Mousse.`,
+            reason: "Mousse's tool server could not issue a credential for the turn.",
+            missing: ['mcp'],
+            instanceId: spec.binding.instanceId
+          })
         // Approvals other than `ask` are answered by the turn's bridge: a turn without one would
         // ask the user after all, so it does not run. (`grants` under Full access is the permission
         // mode's own: the runtimes allow without asking, no bridge is needed.)
@@ -1715,7 +1729,8 @@ export class Harness implements HarnessGateway {
    * The turn's bridge (PR 2 §2 `TurnBridge`, the orchestrator's former `mcpFor`): a bearer under the
    * driver's turn binding when the instance can attach the Mousse MCP server, the instruction texts,
    * and the settle that ends the turn for the bearer (the drained-turn check, then in-flight calls
-   * abort). A bearer that cannot be minted leaves the turn without Mousse tools, never failed.
+   * abort). A bearer that cannot be minted leaves the turn without Mousse tools; `startTurn` then
+   * refuses a turn that requires them (`TurnAppContext.requiredTools`).
    */
   private mintBridge(record: InstanceRecord, spec: TurnSpec): { bridge: TurnBridge; settle(settlement: TurnSettlement): void } | undefined {
     const app = spec.app

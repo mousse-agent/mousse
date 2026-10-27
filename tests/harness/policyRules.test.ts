@@ -44,7 +44,7 @@ describe('checkPolicy rows', () => {
     expect(missing(checkPolicy(caps({ spendLimits: 'unsupported' }), policy({ budget }), 'i', model()))).toEqual(['spendLimits'])
     const uncapped = checkPolicy(caps(), policy({ budget }), 'i', model({ outputCap: false }))
     expect(uncapped).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['spendLimits'], instanceId: 'i' } })
-    expect(reason(uncapped)).toBe('Model X cannot cap its output, so token and cost limits cannot be held.')
+    expect(reason(uncapped)).toBe('Model X does not always send its output cap, so token and cost limits cannot be held. Pick a model that reports its output cap, or remove the token and cost limits.')
     expect(uncapped.ok ? '' : uncapped.error.message).toContain(reason(uncapped))
   })
 
@@ -53,7 +53,7 @@ describe('checkPolicy rows', () => {
     expect(checkPolicy(caps(), policy({ budget }), 'i', model())).toEqual({ ok: true })
     const unpriced = checkPolicy(caps(), policy({ budget }), 'i', model({ priced: false }))
     expect(missing(unpriced)).toEqual(['spendLimits'])
-    expect(reason(unpriced)).toBe('Model X has no price, so a cost limit cannot be held.')
+    expect(reason(unpriced)).toBe('Model X has no price, so a cost limit cannot be held. Set a price for the model, or use a token limit instead.')
   })
 
   it('unknown model facts refuse spend limits; a missing capability carries no model reason', () => {
@@ -171,7 +171,7 @@ describe('the schedule purpose and origin on the gateway', () => {
     expect(facts).toEqual([])
     await harness.startTurn(spec({ ...bound, policy: { ...bound.policy, budget: { maxOutputTokens: 500 } } })).result
     await expect(harness.startTurn(spec({ ...bound, policy: { ...bound.policy, budget: { maxUsd: 1 } } })).result)
-      .rejects.toMatchObject({ code: 'policy_unenforceable', details: { missing: ['spendLimits'], reason: 'Model M has no price, so a cost limit cannot be held.' } })
+      .rejects.toMatchObject({ code: 'policy_unenforceable', details: { missing: ['spendLimits'], reason: 'Model M has no price, so a cost limit cannot be held. Set a price for the model, or use a token limit instead.' } })
     expect(facts).toEqual(['m', 'm'])
     expect(runtime.turns).toHaveLength(2)
     harness.stop()
