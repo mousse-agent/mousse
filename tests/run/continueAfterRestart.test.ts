@@ -3,10 +3,11 @@
  * continued run, opens the turn with a system line, replays on a repeated `continue:<runId>`
  * request, and needs `acknowledgeUncertain` for an `uncertain` run.
  */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { getExecutionLeasePath, isLeaseHeldByLivePeer } from '../../src/mms/queue/ThreadExecutionLease'
 import { ThreadSession } from '../../src/mms/orchestrator/ThreadSession'
 import { Reconciler } from '../../src/mms/run/Reconciler'
 import type { AgentActivityItem } from '../../src/shared/agentActivity'
@@ -233,6 +234,8 @@ describe('continue after restart (SPEC §16.4)', () => {
       expect(saves).toHaveBeenCalledTimes(1)
       expect(snapshot(second, threadId)).toEqual(expected)
       expect(second.store.loadThreadData(threadId).messages.find((message) => message.id === 'cmd')?.activity?.endedAt).toBe(endedAt)
+      // The session holds the saved rows too, with the same end time, not a second closure.
+      expect(second.orch.getMessages(threadId).find((message) => message.id === 'cmd')?.activity?.endedAt).toBe(endedAt)
 
       // (c) The first turn names them, once.
       await second.orch.send('Next', false, { threadId, clientRequestId: 'next-1' })
@@ -302,20 +305,157 @@ describe('continue after restart (SPEC §16.4)', () => {
       expect(text).not.toContain('npm run lint')
     })
 
-    it('a live turn is never swept: its running items stay running', async () => {
+    const sweep = (d: Phase6Daemon, session: ThreadSession) => (d.orch as any).closeStaleActivity(session)
+    const loaded = (d: Phase6Daemon, threadId: string, messages = d.store.loadThreadData(threadId).messages): ThreadSession => {
+      const session = new ThreadSession(threadId)
+      session.load(messages)
+      return session
+    }
+    const statusIn = (messages: ChatMessage[], id: string) => messages.find((message) => message.id === id)?.activity?.status
+    /** A live foreign process (this test's parent) owns the thread's execution lease. */
+    const peerLease = (d: Phase6Daemon, threadId: string) => {
+      const path = getExecutionLeasePath(d.store.getThreadDir(threadId))
+      const stamp = new Date().toISOString()
+      writeFileSync(path, JSON.stringify({ pid: process.ppid, token: 'peer-token', processInstanceId: 'peer-instance', acquiredAt: stamp, heartbeatAt: stamp, source: 'cli' }))
+      expect(isLeaseHeldByLivePeer(d.store.getThreadDir(threadId)).held).toBe(true)
+      return () => rmSync(path, { force: true })
+    }
+
+    it('a session whose turn is running is never swept', async () => {
       const dir = setupHome()
       const { threadId, pi } = await crashWithWork(dir)
       const second = phase6Daemon(dir, [pi], { pid: 2 })
       daemons.push(second)
-      const session = second.orch.getOrCreateSession(threadId)
-      expect(snapshot(second, threadId)).toContain('cmd:interrupted:daemon_restart')
-      // The same rows reloaded into a session whose turn is admitted stay as they are.
-      const live = new ThreadSession('live-thread')
+      const saves = vi.spyOn(second.store, 'mutateThreadData')
+      // The thread is in the store with rows running, so only the running-turn guard can stop the sweep.
+      const live = loaded(second, threadId)
       live.turnAdmitted = true
-      live.load([item('cmd', 'run-live', { toolName: 'Bash', kind: 'command', command: 'sleep 9' })])
-      ;(second.orch as any).closeStaleActivity(live)
-      expect(live.messages[0]!.activity?.status).toBe('running')
-      expect(session.messages.find((message) => message.id === 'cmd')?.activity?.status).toBe('interrupted')
+      sweep(second, live)
+      expect(statusIn(live.messages, 'cmd')).toBe('running')
+      expect(statusIn(second.store.loadThreadData(threadId).messages, 'cmd')).toBe('running')
+      expect(saves).not.toHaveBeenCalled()
+      // The same session, once its turn is over, is swept.
+      live.turnAdmitted = false
+      sweep(second, live)
+      expect(statusIn(live.messages, 'cmd')).toBe('interrupted')
+      expect(statusIn(second.store.loadThreadData(threadId).messages, 'cmd')).toBe('interrupted')
+      expect(saves).toHaveBeenCalledTimes(1)
+    })
+
+    it('a thread another live process holds the lease of is left alone, then swept once it is free', async () => {
+      const dir = setupHome()
+      const { threadId, pi } = await crashWithWork(dir)
+      const second = phase6Daemon(dir, [pi], { pid: 2 })
+      daemons.push(second)
+      const saves = vi.spyOn(second.store, 'mutateThreadData')
+      const release = peerLease(second, threadId)
+      try {
+        const session = loaded(second, threadId)
+        sweep(second, session)
+        expect(statusIn(session.messages, 'cmd')).toBe('running')
+        expect(statusIn(second.store.loadThreadData(threadId).messages, 'cmd')).toBe('running')
+        expect(saves).not.toHaveBeenCalled()
+        // Opening the thread the way production does leaves it running too.
+        second.orch.getOrCreateSession(threadId)
+        expect(saves).not.toHaveBeenCalled()
+      } finally {
+        release()
+      }
+      sweep(second, loaded(second, threadId))
+      expect(statusIn(second.store.loadThreadData(threadId).messages, 'cmd')).toBe('interrupted')
+      expect(saves).toHaveBeenCalledTimes(1)
+    })
+
+    it('a lease taken between the read and the write stops the write, and the session keeps what the disk has', async () => {
+      const dir = setupHome()
+      const { threadId, pi } = await crashWithWork(dir)
+      const second = phase6Daemon(dir, [pi], { pid: 2 })
+      daemons.push(second)
+      const original = second.store.mutateThreadData.bind(second.store)
+      let release = () => {}
+      vi.spyOn(second.store, 'mutateThreadData').mockImplementation((id, mutator) => {
+        // The peer starts a turn after the check that let the sweep proceed.
+        release = peerLease(second, id)
+        return original(id, mutator)
+      })
+      try {
+        const session = loaded(second, threadId)
+        sweep(second, session)
+        expect(statusIn(session.messages, 'cmd')).toBe('running')
+        expect(statusIn(second.store.loadThreadData(threadId).messages, 'cmd')).toBe('running')
+      } finally {
+        release()
+      }
+    })
+
+    it('a stale snapshot never overrides a row another process finished: the session takes the saved row', async () => {
+      const dir = setupHome()
+      const { threadId, pi } = await crashWithWork(dir)
+      const second = phase6Daemon(dir, [pi], { pid: 2 })
+      daemons.push(second)
+      const stale = second.store.loadThreadData(threadId).messages
+      // A peer finished the command (and ran on to a new one) after the snapshot was read.
+      const finishedAt = '2026-10-27T10:30:00.000Z'
+      second.store.mutateThreadData(threadId, (current) => ({
+        messages: [
+          ...current.messages.map((message) =>
+            message.id === 'cmd' ? { ...message, activity: { ...message.activity!, status: 'done', output: 'FINAL OUTPUT', endedAt: finishedAt } as AgentActivityItem } : message
+          ),
+          item('peer-new', 'run-peer', { toolName: 'Bash', kind: 'command', command: 'npm run peer' })
+        ]
+      }))
+      const saves = vi.spyOn(second.store, 'mutateThreadData')
+
+      second.orch.bindThread(threadId, stale)
+      const bound = second.orch.getMessagesForPersistence(threadId)
+      expect(bound.find((message) => message.id === 'cmd')?.activity).toMatchObject({ status: 'done', output: 'FINAL OUTPUT', endedAt: finishedAt })
+      // The rows that were still running on disk are closed; the peer's new row is not in the snapshot and is not touched.
+      expect(statusIn(bound, 'agent')).toBe('interrupted')
+      expect(statusIn(second.store.loadThreadData(threadId).messages, 'peer-new')).toBe('running')
+      expect(saves).toHaveBeenCalledTimes(1)
+      // What the session would save next equals the disk, row for row.
+      const onDisk = second.store.loadThreadData(threadId).messages
+      expect(bound.map((message) => `${message.id}:${message.activity?.status}:${message.activity?.endedAt}`)).toEqual(
+        onDisk.filter((message) => bound.some((entry) => entry.id === message.id)).map((message) => `${message.id}:${message.activity?.status}:${message.activity?.endedAt}`)
+      )
+    })
+
+    it('nothing is written when the disk has no row still running, and the session takes the saved rows', async () => {
+      const dir = setupHome()
+      const { threadId, pi } = await crashWithWork(dir)
+      const second = phase6Daemon(dir, [pi], { pid: 2 })
+      daemons.push(second)
+      const stale = second.store.loadThreadData(threadId).messages
+      const finishedAt = '2026-10-27T10:30:00.000Z'
+      second.store.mutateThreadData(threadId, (current) => ({
+        messages: current.messages.map((message) =>
+          message.activity?.status === 'running' ? { ...message, activity: { ...message.activity, status: 'done', output: 'FINAL OUTPUT', endedAt: finishedAt } as AgentActivityItem } : message
+        )
+      }))
+      const saves = vi.spyOn(second.store, 'mutateThreadData')
+      const session = loaded(second, threadId, stale)
+      sweep(second, session)
+      expect(saves).not.toHaveBeenCalled()
+      expect(session.messages.filter((message) => message.activity).map((message) => `${message.id}:${message.activity!.status}:${message.activity!.endedAt}`)).toEqual(
+        ['cmd', 'agent', 'child', 'helper-2', 'finished'].map((id) => `${id}:done:${id === 'finished' ? at : finishedAt}`)
+      )
+    })
+
+    it('opening a thread the way production does (no bind) writes once, however often it is opened', async () => {
+      const dir = setupHome()
+      const { threadId, pi } = await crashWithWork(dir)
+      const second = phase6Daemon(dir, [pi], { pid: 2 })
+      daemons.push(second)
+      const saves = vi.spyOn(second.store, 'mutateThreadData')
+      second.orch.getOrCreateSession(threadId)
+      expect(saves).toHaveBeenCalledTimes(1)
+      expect(snapshot(second, threadId).filter((entry) => entry.endsWith(':interrupted:daemon_restart'))).toHaveLength(4)
+      second.orch.getOrCreateSession(threadId)
+      // A fresh session for the same thread (a reload) finds nothing running.
+      ;(second.orch as any).sessions.delete(threadId)
+      second.orch.getOrCreateSession(threadId)
+      sweep(second, loaded(second, threadId))
+      expect(saves).toHaveBeenCalledTimes(1)
     })
 
     it('a graceful restart: rows the shutdown closed, a background agent and a plan included, are named', async () => {

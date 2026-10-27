@@ -178,7 +178,7 @@ describe('cutOffActivityOf', () => {
     expect(cutOffActivityOf([sub('a', { agentType: 'explorer' }), sub('b', {})], ['r1']).map((entry) => entry.label)).toEqual(['explorer', 'subagent'])
   })
 
-  it('never reads output, cwd, a prompt or a result', () => {
+  it('never reads output, cwd, a result, or the arguments and text of a generic row', () => {
     const messages = [
       command('c1', 'interrupted', 'r1', 'npm test', { output: 'SECRET OUTPUT sk-abcdef123456', cwd: '/home/secret-dir' }),
       row('g1', { id: 'g1', callId: 'g', toolName: 'delegate_task', kind: 'generic', input: { prompt: 'SECRET PROMPT TEXT' }, output: 'SECRET RESULT', status: 'interrupted', startedAt: at, runId: 'r1' }, {
@@ -190,6 +190,41 @@ describe('cutOffActivityOf', () => {
     expect(text).toContain('command: npm test')
     expect(text).toContain('delegate_task')
     expect(text).not.toMatch(/SECRET|sk-abcdef|secret-dir/)
+  })
+
+  it('a native helper is labelled by the capped start of its prompt, cut to the note limit and redacted', () => {
+    // A Codex helper's `description` is the first 200 characters of its prompt.
+    const prompt = `Audit the schema with API_TOKEN=hunter2secret and report ${'every table '.repeat(30)}`
+    const description = prompt.slice(0, 200)
+    const helper = row('h1', { id: 'h1', callId: 'helper:thr-1', toolName: 'spawnAgent', kind: 'subagent', description, agentType: 'explorer', nativeId: 'thr-1', status: 'interrupted', startedAt: at, runId: 'r1' })
+    const text = formatRestartNote(note({ cutOffActivity: cutOffActivityOf([helper], ['r1']) }))
+    const line = text.split('\n')[1]!
+    expect(line).toMatch(/^- subagent: Audit the schema with API_TOKEN=\[redacted\] and report every table/)
+    expect(line).toMatch(/…\s\(id thr-1\)$/)
+    expect(line.slice('- subagent: '.length, line.indexOf(' (id '))).toHaveLength(RESTART_NOTE_LABEL_CHARS)
+    expect(text).not.toContain('hunter2secret')
+  })
+
+  it('redacts PowerShell assignments and API-key headers in command lines, through selection and formatting', () => {
+    const commands = [
+      "powershell -NoProfile -Command \"$env:API_TOKEN = 'privatevalue123'; npm run deploy\"",
+      '$env:GITHUB_TOKEN="privatevalue123"; gh pr list',
+      'Set-Item Env:SERVICE_SECRET -Value x; $env:SERVICE_SECRET = privatevalue123',
+      'curl -H "x-api-key: privatevalue123" https://example.test',
+      "curl -H 'X-Api-Key: privatevalue123' https://example.test",
+      'curl -H "Authorization: Bearer privatevalue123" https://example.test',
+      'curl -H "Authorization: Basic privatevalue123" https://basic.example.test',
+      'curl -d \'{"api_key": "privatevalue123"}\' https://example.test',
+      'deploy --api-key privatevalue123 --password=privatevalue123',
+      'DB_PASSWORD=privatevalue123 npm run migrate'
+    ]
+    const messages = commands.map((text, index) => command(`c${index}`, 'interrupted', 'r1', text))
+    const text = formatRestartNote(note({ cutOffActivity: cutOffActivityOf(messages, ['r1']) }))
+    expect(text).not.toContain('privatevalue123')
+    expect(text.split('\n').filter((line) => line.startsWith('- command:'))).toHaveLength(commands.length)
+    expect(text).toContain('$env:API_TOKEN=[redacted]; npm run deploy')
+    expect(text).toContain('curl -H "x-api-key: [redacted]')
+    expect(text).toContain('deploy --api-key [redacted] --password=[redacted]')
   })
 
   it('commands come before subagents and the rest, so the cap never hides them', () => {

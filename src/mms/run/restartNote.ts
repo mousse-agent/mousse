@@ -2,7 +2,7 @@ import { commandLabel, INTERRUPTED_SUMMARY } from '../../shared/agentActivity'
 import { redactSecrets } from '../../shared/errors'
 import type { ChatMessage } from '../../shared/types'
 
-/** One piece of saved work a restart cut off, as the note names it. Never carries output or prompts. */
+/** One piece of saved work a restart cut off, as the note names it. Never carries output, a working directory or a result; a Codex helper's label is the capped start of its prompt, redacted like every label. */
 export interface CutOffActivity {
   runId?: string
   kind: 'command' | 'subagent' | 'other'
@@ -31,12 +31,17 @@ const RESTART_NOTE_ID_CHARS = 64
 /** Text read from an item before it is cleaned, so a huge command cannot slow the note down. */
 const RAW_LABEL_CHARS = 4000
 
-const ENV_SECRET = /\b([A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Za-z0-9_]*)=("[^"]*"|'[^']*'|\S+)/gi
+/** `NAME=value`, and PowerShell `$env:NAME = 'value'` (spaces around the equals sign allowed). */
+const ENV_SECRET = /\b([A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Za-z0-9_]*)\s*=\s*("[^"]*"|'[^']*'|\S+)/gi
 const FLAG_SECRET = /(--?(?:api-?key|token|secret|password|passwd|auth)[ =])("[^"]*"|'[^']*'|\S+)/gi
+/** `Authorization: …`, `x-api-key: …` and similar header or JSON fields, also inside quotes as in `-H "X-Api-Key: …"`. */
+const HEADER_SECRET = /((?:authorization|[a-z0-9_-]*(?:api[-_]?key|token|secret|password|passwd)[a-z0-9_-]*)["']?\s*:\s*)(?:(?:bearer|basic|token)\s+)?["']?[^\s"',;]+/gi
 
 /** A one-line label without credentials, whitespace runs or anything past the label limit. */
 function noteLabel(text: string): string {
-  const redacted = redactSecrets(text.slice(0, RAW_LABEL_CHARS).replace(ENV_SECRET, '$1=[redacted]').replace(FLAG_SECRET, '$1[redacted]'))
+  const redacted = redactSecrets(
+    text.slice(0, RAW_LABEL_CHARS).replace(ENV_SECRET, '$1=[redacted]').replace(FLAG_SECRET, '$1[redacted]').replace(HEADER_SECRET, '$1[redacted]')
+  )
   const line = redacted.replace(/\s+/g, ' ').trim()
   return line.length > RESTART_NOTE_LABEL_CHARS ? `${line.slice(0, RESTART_NOTE_LABEL_CHARS - 1).trimEnd()}…` : line
 }

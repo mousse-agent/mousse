@@ -395,6 +395,9 @@ export interface StopThreadOutcome extends Partial<StopResult> {
 export const WAKE_BUSY_DEFER_MS = 5_000
 
 /** Send refusals reported with their reason as the error code (SPEC §16.4). */
+/** Thrown inside the thread write to leave the file untouched when the stale rows no longer need closing. */
+class StaleActivitySkipped extends Error {}
+
 const CONTINUATION_REFUSALS: ReadonlySet<string> = new Set([
   'continuation_not_found',
   'continuation_source_active',
@@ -3779,36 +3782,63 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * Ends the activity items a previous daemon left `running` on a session that was just loaded.
-   * With no live turn, a `running` item is always stale (every turn ends its items). The rows are
-   * tagged `daemon_restart` in the session and on disk, so the restart note can name them whenever
-   * the next turn starts. Writes only when a row changed, so a second hydration writes nothing.
-   * A lease held by another live process (a CLI turn running now) means its running items are live.
+   * With no live turn, a `running` item is always stale (every turn ends its items), so they are
+   * tagged `daemon_restart` and the restart note can name them whenever the next turn starts.
+   *
+   * The disk is authoritative, not the snapshot the session was loaded from: the rows are closed
+   * against the saved thread under the data write lock, which also re-checks the lease, and the
+   * session then takes the saved rows. A row another process finished meanwhile stays finished,
+   * with its output and times; a lease held by another live process (a CLI turn running now)
+   * leaves everything as it is. Nothing is written when no saved row is still `running`, so a
+   * second hydration, or one from an older snapshot, writes nothing and changes nothing.
    */
   private closeStaleActivity(session: ThreadSession): void {
     if (session.isTurnRunning()) return
-    if (this.threadStore && session.threadId !== '__unbound__') {
-      try {
-        if (isLeaseHeldByLivePeer(this.threadStore.getThreadDir(session.threadId)).held) return
-      } catch {
+    const stale = new Set(session.messages.filter((message) => message.activity?.status === 'running').map((message) => message.id))
+    if (!stale.size) return
+    const store = this.threadStore
+    if (!store || session.threadId === '__unbound__') {
+      const closed = closeStaleActivity(session.messages, new Date().toISOString())
+      session.messages = session.messages.map((message) => closed.get(message.id) ?? message)
+      return
+    }
+    const threadId = session.threadId
+    try {
+      const threadDir = store.getThreadDir(threadId)
+      if (isLeaseHeldByLivePeer(threadDir).held) return
+      let saved = store.loadThreadData(threadId).messages
+      if (saved.some((message) => stale.has(message.id) && message.activity?.status === 'running')) {
+        saved = store.mutateThreadData(threadId, (current) => {
+          // Under the write lock: a peer may have taken the thread, or finished rows, since the read above.
+          if (isLeaseHeldByLivePeer(threadDir).held) throw new StaleActivitySkipped()
+          const closed = closeStaleActivity(current.messages.filter((message) => stale.has(message.id)), new Date().toISOString())
+          if (!closed.size) throw new StaleActivitySkipped()
+          return { messages: current.messages.map((message) => closed.get(message.id) ?? message) }
+        }).messages
+      }
+      // The session takes the saved version of each row it held as running. A row the disk does not
+      // have (a caller's own messages) is closed from the snapshot.
+      const byId = new Map(saved.map((message) => [message.id, message]))
+      const leftover = closeStaleActivity(session.messages.filter((message) => stale.has(message.id) && !byId.has(message.id)), new Date().toISOString())
+      session.messages = session.messages.map((message) => (stale.has(message.id) ? (byId.get(message.id) ?? leftover.get(message.id) ?? message) : message))
+    } catch (error) {
+      if (error instanceof StaleActivitySkipped) {
+        // Nothing was written, so the session must not diverge from the disk either.
+        this.adoptSavedActivity(session, stale)
         return
       }
+      // Opening the thread must not fail; the rows stay as loaded and the next hydration retries.
+      console.warn('stale activity could not be closed', { threadId, error: error instanceof Error ? error.message : String(error) })
     }
-    const closed = closeStaleActivity(session.messages, new Date().toISOString())
-    if (!closed.size) return
-    session.messages = session.messages.map((message) => closed.get(message.id) ?? message)
-    if (!this.threadStore || session.threadId === '__unbound__') return
+  }
+
+  /** The session takes the saved version of the rows it held as `running`, when the disk has them. */
+  private adoptSavedActivity(session: ThreadSession, ids: ReadonlySet<string>): void {
     try {
-      // The caller may hold older messages than the disk (already swept by an earlier load): write nothing then.
-      const onDisk = this.threadStore.loadThreadData(session.threadId).messages
-      if (!onDisk.some((message) => message.activity?.status === 'running' && closed.has(message.id))) return
-      this.threadStore.mutateThreadData(session.threadId, (current) => ({
-        messages: current.messages.map((message) =>
-          message.activity?.status === 'running' ? (closed.get(message.id) ?? message) : message
-        )
-      }))
-    } catch (error) {
-      // The rows are closed in memory and the next save writes them; opening the thread must not fail.
-      console.warn('stale activity could not be saved', { threadId: session.threadId, error: error instanceof Error ? error.message : String(error) })
+      const byId = new Map(this.threadStore!.loadThreadData(session.threadId).messages.map((message) => [message.id, message]))
+      session.messages = session.messages.map((message) => (ids.has(message.id) ? (byId.get(message.id) ?? message) : message))
+    } catch {
+      // Unreadable: the rows stay as loaded.
     }
   }
 
