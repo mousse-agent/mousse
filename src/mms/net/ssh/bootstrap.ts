@@ -1317,7 +1317,7 @@ export class SshBootstrap {
               result:
                 result.code === 0
                   ? 'Joined.'
-                  : 'Joined; the reply was lost and the node was recovered.'
+                  : `Joined; the reply was lost (exit ${result.code}${tail(result.stderr) ? `: ${tail(result.stderr)}` : ''}) and the node was recovered.`
             }
           }
           // An unused invitation is revoked either way, so nothing can redeem it later.
