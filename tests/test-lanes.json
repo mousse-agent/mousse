@@ -134,6 +134,7 @@
     "tests/platformManagedBrowserDrain.test.ts",
     "tests/platformScheduledBrowserE2E.test.ts",
     "tests/promptMarkers.test.ts",
+    "tests/renderer/menu-shortcut-gate-electron.test.ts",
     "tests/renderer/networkTaskPicker-electron.test.ts",
     "tests/renderer/profile-footer-electron.test.ts",
     "tests/renderer/profileReady-startup-electron.test.ts",
