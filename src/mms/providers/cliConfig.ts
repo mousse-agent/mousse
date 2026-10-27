@@ -6,7 +6,7 @@ import { isWindowsScriptShim, resolveWindowsShim, type CliLaunch } from './resol
 
 export type { CliLaunch } from './resolveWindowsShim'
 
-/** The user's CLI launch settings as stored in each vendor driver's `settings.json`. */
+/** The user's CLI launch settings, as an instance's config keeps them (`InstanceConfig`). */
 export type StoredCliConfig = {
   binaryPath?: string
   args?: string[]
@@ -78,31 +78,6 @@ export function storedCliEnv(stored: StoredCliConfig): Record<string, string> {
   return Object.fromEntries(
     Object.entries(env).filter(([key, entry]) => ENV_KEY.test(key) && typeof entry === 'string')
   )
-}
-
-/**
- * Applies a validated patch to the stored settings. `validateBinary` checks (and may normalise) a
- * new executable path; it runs before anything is written, so a rejected patch changes nothing.
- */
-export function applyCliConfigPatch(
-  stored: StoredCliConfig,
-  patch: CliProviderConfigPatch,
-  validateBinary: (path: string) => string,
-  validateArgs: (args: string[]) => void = () => {}
-): void {
-  const binaryPath =
-    patch.binaryPath === undefined ? undefined : patch.binaryPath === null ? null : validateBinary(patch.binaryPath)
-  if (patch.args) validateArgs(patch.args)
-  if (binaryPath === null) delete stored.binaryPath
-  else if (binaryPath !== undefined) stored.binaryPath = binaryPath
-  if (patch.args) {
-    if (patch.args.length) stored.args = [...patch.args]
-    else delete stored.args
-  }
-  if (patch.env) {
-    if (Object.keys(patch.env).length) stored.env = { ...patch.env }
-    else delete stored.env
-  }
 }
 
 /**

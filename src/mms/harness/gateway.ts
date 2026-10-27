@@ -65,6 +65,19 @@ import { HarnessScopeStore } from './scope'
 import { sharedShellPath, type ShellPathResult } from './shellPath'
 import { compatibilityOf, fingerprintOf, PROBE_TIMEOUTS, probeInstance, sameBinary, updateAffordance, type ProbeResult } from './status'
 import { interruptWithDeadline } from './supervise'
+import {
+  changedFields,
+  fieldLabels,
+  instanceTuple,
+  MIRROR_MARKER_KEY,
+  mirrorHash,
+  reconcileRow,
+  storedMarker,
+  tupleConfig,
+  unsetFields,
+  type MirrorTuple
+} from './vendorMirror'
+import type { StoredCliConfig } from '../providers/cliConfig'
 
 /** Instance id of a turn that ran on the unselected default: the bare pi loop. */
 export const PI_DRIVER_ID = 'pi'
@@ -633,6 +646,8 @@ export class Harness implements HarnessGateway {
   /** Bindings made for a selection that named a moved entry: their thread is told once. */
   private readonly boundMoves = new WeakMap<ExecutionBinding, string>()
   private readonly operations = new Map<string, Operation>()
+  /** What this start's reconcile found about a vendor file an older Mousse changed, per instance. */
+  private readonly settingsNotices = new Map<string, NonNullable<InstanceSnapshot['settingsNotice']>>()
   private readonly listeners = new Set<(event: HarnessGatewayEvent) => void>()
   private readonly scopes: HarnessScopeStore
   private readonly counters: InstanceCounterStore
@@ -673,7 +688,8 @@ export class Harness implements HarnessGateway {
     this.instanceMap.setListings(
       (instanceId) => {
         const record = this.recordOrUndefined(instanceId)
-        if (!record) return undefined
+        // An instance signed out in Mousse lists nothing, whatever its runtime says.
+        if (!record || this.isSignedOut(record)) return undefined
         // An added instance is named after itself, so two Claude instances read apart.
         const named = <T extends { label: string }>(value: T | undefined): T | undefined =>
           value && !record.builtIn ? { ...value, label: this.displayName(record) } : value
@@ -756,7 +772,18 @@ export class Harness implements HarnessGateway {
       login: (providerId, session, cwd) => {
         const record = this.legacyRecord(providerId)
         if (!record?.runtime.signIn) return undefined
-        return record.runtime.signIn(session, cwd).finally(() => void this.probe(record.instanceId, true))
+        // Reconnecting an instance signed out in Mousse: on the user's own sign-in, only the flag clears.
+        if (this.isSignedOut(record) && !this.ownsSignIn(record))
+          return this.reconnect(record)
+            .then((): ProviderLoginResult => ({ success: true, sessionId: session.sessionId }))
+            .catch((error): ProviderLoginResult => ({ success: false, sessionId: session.sessionId, error: errorText(error) }))
+            .finally(() => void this.probe(record.instanceId, true))
+        return record.runtime.signIn(session, cwd)
+          .then(async (result) => {
+            if (result.success && this.isSignedOut(record)) await this.reconnect(record)
+            return result
+          })
+          .finally(() => void this.probe(record.instanceId, true))
       },
       credentialsChanged: async (providerId) => {
         let instanceId: string
@@ -769,11 +796,16 @@ export class Harness implements HarnessGateway {
         // Processes started with the old credential stop holding it (Pi's agent: its auth.json too).
         const record = this.records.get(instanceId)
         await record?.runtime.credentialsChanged?.().catch((error) => console.warn('[harness] could not retire old credentials', { instanceId, error: errorText(error) }))
+        // A key saved for an instance signed out in Mousse signs it in again.
+        const flagged = this.recordOrUndefined(instanceId)
+        if (flagged && this.isSignedOut(flagged)) await this.reconnect(flagged).catch((error) => console.warn('[harness] could not clear a sign-out', { instanceId, error: errorText(error) }))
         // A check already running read the old credentials: wait for it, then check again.
         await this.probes.get(instanceId)?.probing
         await this.probe(instanceId, true)
       }
     }
+    // Before the first probe: launch settings and sign-outs an older Mousse left in vendor files.
+    this.reconcileVendorMirrors()
   }
 
   // -- Resolution -------------------------------------------------------------------------------
@@ -904,6 +936,8 @@ export class Harness implements HarnessGateway {
 
   async bind(resolved: ResolvedTurnSelection, input: BindInput): Promise<ExecutionBinding> {
     const record = resolved.instanceId === PI_DRIVER_ID ? undefined : this.recordOrUndefined(resolved.instanceId)
+    // Nothing is admitted on an instance signed out in Mousse: no account check, no runtime start.
+    if (record) this.refuseSignedOut(record)
     const accountId = record ? await this.currentAccount(record) : undefined
     const counters = this.counters.get(resolved.instanceId)
     // The attempt runs on the caps of this moment, whatever the runtime reports meanwhile.
@@ -1032,7 +1066,7 @@ export class Harness implements HarnessGateway {
       try {
         const record = this.record(instanceId)
         const llmProvider = legacyProviderForInstance(instanceId, entry)
-        if (llmProvider && record.runtime.configured() && !ids.includes(llmProvider)) ids.push(llmProvider)
+        if (llmProvider && !this.isSignedOut(record) && record.runtime.configured() && !ids.includes(llmProvider)) ids.push(llmProvider)
       } catch {
         // An instance whose driver is missing offers nothing.
       }
@@ -1156,6 +1190,7 @@ export class Harness implements HarnessGateway {
     const runtime = record.runtime
     if (!runtime.oneShot) harnessFail('unsupported', `${this.displayName(record)} cannot run a single request.`, record.instanceId)
     if (record.stopped) throw this.stopError(record, record.stopped.reason)
+    this.refuseSignedOut(record)
     // The gateway's inactivity bound: every provider event restarts it; past it the request is aborted.
     const idle = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -1201,6 +1236,8 @@ export class Harness implements HarnessGateway {
     const draining = this.stopBarriers.get(record.instanceId)
     if (draining?.size) await Promise.all([...draining])
     this.refuseStopped(record, entry)
+    // Every attempt (first, retry, recovery, continuation) of an instance signed out in Mousse is refused.
+    this.refuseSignedOut(record)
     if (input.instanceId !== binding.instanceId || input.model !== binding.model)
       harnessFail('protocol', `The turn names ${input.instanceId ?? 'no instance'}/${input.model} but its binding is ${binding.instanceId}/${binding.model}.`, binding.instanceId)
     // The runtime takes its permissions from the input's mode: it must be the binding's policy.
@@ -1582,7 +1619,9 @@ export class Harness implements HarnessGateway {
       stateDir,
       questions: this.options.questions,
       findBinary: () => this.findBinary(record),
-      changed: () => this.changed(instanceId)
+      changed: () => this.changed(instanceId),
+      signedOut: () => this.signedOutInMousse(instanceId),
+      saveLaunch: async (patch) => void (await this.configure(instanceId, patch))
     })
     record.runtime.setLiveHost?.(this.liveHost)
     this.records.set(instanceId, record)
@@ -1702,10 +1741,13 @@ export class Harness implements HarnessGateway {
     const run = async () => {
       await Promise.race([this.shellPath, new Promise((resolve) => setTimeout(resolve, SHELL_PATH_WAIT_MS).unref?.())])
       const record = this.record(instanceId, { allowDisabled: true })
-      const override = record.builtIn ? record.runtime.launch?.().binaryPath : record.config.binaryPath
+      const override = record.config.binaryPath
+      // Signed out in Mousse: reported as such without asking the runtime (no CLI status check).
+      const signedOut = this.isSignedOut(record)
       let result = await probeInstance({
         driver: record.driver,
         runtime: record.runtime,
+        ...(signedOut ? { auth: async () => this.signedOutReading(record) } : {}),
         env: { ...record.env, searchPath: [...this.searchPath, ...(record.env.driverSearchPath ?? [])] },
         ...(override ? { override } : {}),
         config: record.config,
@@ -1767,8 +1809,10 @@ export class Harness implements HarnessGateway {
     const installing = Boolean(operation) || runtime.installState?.().installing === true
     const installProgress = operation?.progress ?? (runtime.installState?.().progress ? { message: runtime.installState!().progress! } : undefined)
     const managed = runtime.managed?.()
-    const auth = shown?.auth ?? { state: 'unknown' as const }
+    // Signed out in Mousse wins over a check that started before the sign-out.
+    const auth = this.isSignedOut(record) ? this.signedOutReading(record) : shown?.auth ?? { state: 'unknown' as const }
     const update = this.updateFor(record)
+    const settingsNotice = this.settingsNotices.get(instanceId)
     const prefs = this.prefs.get(instanceId)
     const listed = runtime.models()
     const models = state?.models
@@ -1820,7 +1864,8 @@ export class Harness implements HarnessGateway {
       ...(latest ? { checkedAt: latest.checkedAt } : {}),
       stale,
       ...(state?.lastGood ? { lastGoodAt: state.lastGood.checkedAt } : {}),
-      ...(signInStep ? { nextStep: signInStep } : {})
+      ...(signInStep ? { nextStep: signInStep } : {}),
+      ...(settingsNotice ? { settingsNotice } : {})
     }
   }
 
@@ -1862,7 +1907,7 @@ export class Harness implements HarnessGateway {
   private ownsSignIn(record: InstanceRecord): boolean {
     if (record.entry.driver === 'pi') return true
     if (record.env.home) return true
-    return Boolean(record.runtime.managed?.()) && !record.runtime.launch?.().binaryPath
+    return Boolean(record.runtime.managed?.()) && !record.config.binaryPath
   }
 
   /** The engine of a driver with several (`pi`): the user's stored choice and the one in effect. */
@@ -1874,10 +1919,9 @@ export class Harness implements HarnessGateway {
     return { engine: { ...(setting ? { setting } : {}), effective: engine.effective, switchable: engine.switchable } }
   }
 
-  /** The settings the editor shows: built-in instances read launch settings from `settings.json`. */
+  /** The settings the editor shows, all from the instance config. */
   private configView(record: InstanceRecord): InstanceConfigView {
-    const launch = record.builtIn ? record.runtime.launch?.() : undefined
-    const source = launch ?? record.config
+    const source = record.config
     return {
       ...(record.config.displayName ? { displayName: record.config.displayName } : {}),
       home: record.env.home ? 'private' : 'default',
@@ -1936,9 +1980,36 @@ export class Harness implements HarnessGateway {
       }
     }
     const config = useOwnSetup
-      ? this.applyConfigPatch({}, { ...(patch.displayName ? { displayName: patch.displayName } : {}), ...(patch.setup ? { setup: patch.setup } : {}) }, driver)
+      ? this.applyConfigPatch({}, {
+          ...(patch.displayName ? { displayName: patch.displayName } : {}),
+          ...(patch.setup ? { setup: patch.setup } : {}),
+          ...(patch.binaryPath ? { binaryPath: patch.binaryPath } : {}),
+          ...(patch.args?.length ? { args: patch.args } : {}),
+          ...(patch.env && Object.keys(patch.env).length ? { env: patch.env } : {})
+        }, driver)
       : this.applyConfigPatch({ home: driver.privateHome && rule !== 'forbidden' ? 'private' : 'default' }, patch, driver)
-    this.instanceMap.setEntry(instanceId, { driver: driver.kind, enabled: true, config })
+    const entry: ProviderInstanceConfig = { driver: driver.kind, enabled: true, config }
+    // An instance with a vendor mirror starts signed in, and records the vendor tuple it found in
+    // the same write (the marker), so a later start never takes the vendor file for its first copy.
+    const record = driver.mirrorsVendorFile ? this.build(instanceId, entry) : undefined
+    const mirror = record?.runtime.vendorMirror
+    const vendor = mirror?.read()
+    if (mirror) {
+      config.signedOutInMousse = false
+      if (vendor && vendor !== 'unreadable') config[MIRROR_MARKER_KEY] = mirrorHash(vendor)
+    }
+    try {
+      this.instanceMap.setEntry(instanceId, entry)
+    } catch (error) {
+      if (record) this.records.delete(instanceId)
+      throw error
+    }
+    if (record) this.noteStored(record, config)
+    // The vendor file still holds other values than the new entry's (a re-added built-in): mirror them.
+    if (record && mirror && vendor && vendor !== 'unreadable' && mirrorHash(instanceTuple(config, mirror.fields)) !== mirrorHash(vendor)) {
+      const failure = this.mirrorWrite(record, config)
+      if (failure) console.warn('[harness] could not mirror a new instance to its settings file', { instanceId, error: errorText(failure) })
+    }
     mkdirSync(instanceStateDir(this.options.profileHome, instanceId), { recursive: true, mode: 0o700 })
     this.changed(instanceId)
     void this.probe(instanceId, true, { handshake: true })
@@ -2015,41 +2086,251 @@ export class Harness implements HarnessGateway {
       harnessFail('unsupported', `${this.displayName(record)} cannot use a separate home.`, instanceId)
     if (patch.home === 'default' && homeRule === 'required')
       harnessFail('unsupported', `${this.displayName(record)} always runs in a home of its own.`, instanceId)
-    const stored = record.entry.config ?? {}
     // Only a provider that can run on Pi's agent switches engines (Advanced → Engine).
-    if (patch.engine !== undefined && !record.driver.engine?.(instanceId, stored).switchable)
+    if (patch.engine !== undefined && !record.driver.engine?.(instanceId, record.entry.config ?? {}).switchable)
       harnessFail('unsupported', `${this.displayName(record)} runs on one engine only.`, instanceId)
-    if (record.builtIn) {
-      // Built-in vendor instances keep their launch settings in their own settings.json.
-      const launch: CliProviderConfigPatch = {
-        ...(patch.binaryPath !== undefined ? { binaryPath: patch.binaryPath } : {}),
-        ...(patch.args !== undefined ? { args: patch.args } : {}),
-        ...(patch.env !== undefined ? { env: patch.env } : {})
-      }
-      if (Object.keys(launch).length) {
-        if (!record.runtime.setLaunch) harnessFail('unsupported', 'This provider has no launch settings.', instanceId)
-        try {
-          await record.runtime.setLaunch(launch)
-        } catch (error) {
-          harnessFail('override_not_found', errorText(error), instanceId)
-        }
-      }
-      const config = { ...stored }
-      if (patch.displayName !== undefined) setOrDelete(config, 'displayName', patch.displayName?.trim() || undefined)
-      if (patch.loginMethod !== undefined) setOrDelete(config, 'loginMethod', patch.loginMethod || undefined)
-      if (patch.engine !== undefined) setOrDelete(config, 'engine', patch.engine ?? undefined)
-      this.instanceMap.setEntry(instanceId, { ...record.entry, config })
-    } else {
-      const config = this.applyConfigPatch(stored, patch, record.driver)
-      this.instanceMap.setEntry(instanceId, { ...record.entry, config })
+    if (patch.useOlderSettings) return this.useOlderSettings(record)
+    const launch: CliProviderConfigPatch = {
+      ...(patch.binaryPath !== undefined ? { binaryPath: patch.binaryPath } : {}),
+      ...(patch.args !== undefined ? { args: patch.args } : {}),
+      ...(patch.env !== undefined ? { env: patch.env } : {})
     }
+    // An executable that cannot run, or args the runtime cannot pass: nothing is saved.
+    if (Object.keys(launch).length && record.runtime.validateLaunch) {
+      try {
+        record.runtime.validateLaunch(launch)
+      } catch (error) {
+        harnessFail('override_not_found', errorText(error), instanceId)
+      }
+    }
+    // The three-step write: the instance first, then its vendor mirror, then the marker. A write
+    // that stops between them is finished at the next start (`reconcileRow`).
+    const config = this.applyConfigPatch(record.entry.config ?? {}, patch, record.driver)
+    this.storeConfig(record, config)
+    this.settingsNotices.delete(instanceId)
     // A new name changes nothing a turn runs with: the runtime and its sessions stay.
-    if (Object.keys(patch).some((key) => key !== 'displayName')) {
+    const runChanged = Object.keys(patch).some((key) => key !== 'displayName')
+    if (runChanged) {
       this.counters.bumpConfig(instanceId)
-      void this.probe(instanceId, true)
+      if (Object.keys(launch).length) record.runtime.launchChanged?.()
     }
+    const failure = this.mirrorWrite(record, config)
+    if (runChanged) void this.probe(instanceId, true)
+    this.changed(instanceId)
+    if (failure)
+      harnessFail('protocol', `Saved, but ${this.displayName(record)}'s own settings file was not updated: ${errorText(failure)} Older Mousse versions keep the previous settings until it is.`, instanceId)
+    return this.snapshot(instanceId, { kind: 'device' })
+  }
+
+  /**
+   * "Use the older settings": the vendor file's values (an older Mousse changed them) replace the
+   * instance's, and the marker records them. The vendor file is not written.
+   */
+  private useOlderSettings(record: InstanceRecord): InstanceSnapshot {
+    const { instanceId } = record
+    const mirror = record.runtime.vendorMirror
+    if (!mirror) return harnessFail('unsupported', `${this.displayName(record)} has no older settings to use.`, instanceId)
+    const vendor = mirror.read()
+    if (vendor === 'unreadable') return harnessFail('protocol', `${this.displayName(record)}'s own settings file cannot be read.`, instanceId)
+    const stored = record.entry.config ?? {}
+    const before = instanceTuple(stored, mirror.fields)
+    this.storeConfig(record, { ...stored, ...tupleConfig(vendor, mirror.fields), [MIRROR_MARKER_KEY]: mirrorHash(vendor) })
+    this.settingsNotices.delete(instanceId)
+    this.appliedVendorTuple(record, before, vendor)
+    void this.probe(instanceId, true)
     this.changed(instanceId)
     return this.snapshot(instanceId, { kind: 'device' })
+  }
+
+  /** The instance took the vendor file's tuple: what runs and, when the sign-out moved, the account move on. */
+  private appliedVendorTuple(record: InstanceRecord, before: MirrorTuple, vendor: MirrorTuple): void {
+    const fields = record.runtime.vendorMirror?.fields ?? []
+    const changed = changedFields(before, vendor, fields)
+    if (!changed.length) return
+    this.counters.bumpConfig(record.instanceId)
+    if (changed.some((field) => field !== 'signedOut')) record.runtime.launchChanged?.()
+    if (changed.includes('signedOut')) this.counters.bumpAccount(record.instanceId)
+  }
+
+  // -- Instance config and its vendor mirror ------------------------------------------------------
+
+  /** Whether the instance is signed out in Mousse (its config's flag). */
+  signedOutInMousse(instanceId: string): boolean {
+    const record = this.records.get(instanceId) ?? this.recordOrUndefined(instanceId)
+    return record ? this.isSignedOut(record) : false
+  }
+
+  /** The instance's launch settings, from its config: what its vendor service starts with. */
+  launchFor(instanceId: string): StoredCliConfig {
+    const config = (this.records.get(instanceId) ?? this.recordOrUndefined(instanceId))?.config
+    if (!config) return {}
+    return {
+      ...(config.binaryPath ? { binaryPath: config.binaryPath } : {}),
+      ...(config.args?.length ? { args: [...config.args] } : {}),
+      ...(config.env && Object.keys(config.env).length ? { env: { ...config.env } } : {})
+    }
+  }
+
+  private isSignedOut(record: InstanceRecord): boolean {
+    return record.config.signedOutInMousse === true
+  }
+
+  /** What the card shows for an instance signed out in Mousse. */
+  private signedOutReading(record: InstanceRecord): AuthReading {
+    const methodLabel = record.driver.methodLabel
+    return {
+      state: 'signed_out',
+      ...(methodLabel ? { methodLabel } : {}),
+      message: this.ownsSignIn(record) ? 'Signed out in Mousse.' : `Signed out in Mousse. Your ${record.driver.label} sign-in on this computer is unchanged.`
+    }
+  }
+
+  /** Dispatch on an instance signed out in Mousse is refused before anything starts. */
+  private refuseSignedOut(record: InstanceRecord): void {
+    if (this.isSignedOut(record))
+      harnessFail('signed_out', `${this.displayName(record)} is signed out in Mousse. Sign in again in Settings → Providers.`, record.instanceId)
+  }
+
+  /** Stores the instance's config (one write) and keeps the record's copy in step with it. */
+  private storeConfig(record: InstanceRecord, config: Record<string, unknown>): void {
+    const entry = { ...(this.instanceMap.list()[record.instanceId] ?? record.entry), config }
+    this.instanceMap.setEntry(record.instanceId, entry)
+    this.noteStored(record, config, entry.enabled)
+  }
+
+  private noteStored(record: InstanceRecord, config: Record<string, unknown>, enabled = record.entry.enabled): void {
+    record.entry = { ...record.entry, enabled, config }
+    record.config = record.driver.decodeConfig(config, record.instanceId)
+    // A newer runtime of the instance reads the same config.
+    const current = this.records.get(record.instanceId)
+    if (current && current !== record) {
+      current.entry = { ...current.entry, enabled, config }
+      current.config = current.driver.decodeConfig(config, current.instanceId)
+    }
+  }
+
+  /** The instance's stored config now (a sign-in may have saved a launch setting meanwhile). */
+  private storedConfig(record: InstanceRecord): Record<string, unknown> {
+    return { ...(this.instanceMap.list()[record.instanceId]?.config ?? record.entry.config ?? {}) }
+  }
+
+  /**
+   * Steps 2 and 3 of a change: the vendor mirror gets the instance's tuple, then the marker records
+   * it. Returns the failure of step 2 (the vendor file cannot be saved): the marker then stays, and
+   * the next start finishes the write. Nothing to do for an instance without a mirror, or when both
+   * sides already hold the tuple.
+   */
+  private mirrorWrite(record: InstanceRecord, config: Record<string, unknown>): unknown {
+    const mirror = record.runtime.vendorMirror
+    if (!mirror) return undefined
+    const tuple = instanceTuple(config, mirror.fields)
+    const hash = mirrorHash(tuple)
+    const vendor = mirror.read()
+    if (storedMarker(config) === hash && vendor !== 'unreadable' && mirrorHash(vendor) === hash) return undefined
+    try {
+      mirror.write(tuple)
+    } catch (error) {
+      return error
+    }
+    try {
+      this.storeConfig(record, { ...config, [MIRROR_MARKER_KEY]: hash })
+    } catch (error) {
+      // Both sides hold the tuple; the next start records the marker (in sync).
+      console.warn('[harness] could not record a mirrored write', { instanceId: record.instanceId, error: errorText(error) })
+    }
+    return undefined
+  }
+
+  /** Sets or clears the instance's sign-out flag with the three-step write. */
+  private setSignedOut(record: InstanceRecord, signedOut: boolean): unknown {
+    const config = { ...this.storedConfig(record), signedOutInMousse: signedOut }
+    this.storeConfig(record, config)
+    return this.mirrorWrite(record, config)
+  }
+
+  /**
+   * Signs an instance signed out in Mousse in again: the flag clears (and its mirror), and its
+   * account moves on so nothing bound before the sign-out resumes.
+   */
+  private async reconnect(record: InstanceRecord): Promise<void> {
+    const failure = this.setSignedOut(record, false)
+    this.counters.bumpAccount(record.instanceId)
+    if (failure) console.warn('[harness] could not mirror a sign-in to the settings file', { instanceId: record.instanceId, error: errorText(failure) })
+    this.options.onProvidersChanged?.()
+  }
+
+  /**
+   * At start, before any probe: every instance with a vendor mirror is brought in step with it
+   * (`reconcileRow`). An unreadable vendor file is left alone (its card shows the error); an
+   * unreadable instance map skips everything until the next start.
+   */
+  private reconcileVendorMirrors(): void {
+    let entries: Record<string, ProviderInstanceConfig>
+    try {
+      entries = this.instanceMap.list()
+    } catch {
+      return
+    }
+    if (this.instanceMap.storeError()) return
+    for (const [instanceId, entry] of Object.entries(entries)) {
+      if (!this.drivers.get(entry.driver)?.mirrorsVendorFile) continue
+      try {
+        this.reconcile(this.record(instanceId, { allowDisabled: true }))
+      } catch (error) {
+        console.warn('[harness] could not reconcile an instance with its settings file', { instanceId, error: errorText(error) })
+      }
+    }
+  }
+
+  private reconcile(record: InstanceRecord): void {
+    const mirror = record.runtime.vendorMirror
+    if (!mirror) return
+    const vendor = mirror.read()
+    if (vendor === 'unreadable') return
+    const { fields } = mirror
+    const vendorHash = mirrorHash(vendor)
+    let stored = { ...(record.entry.config ?? {}) }
+    const marker = storedMarker(stored)
+    let instance = instanceTuple(stored, fields)
+    let row = reconcileRow(mirrorHash(instance), vendorHash, marker)
+    if (row === 'first_copy') {
+      // Only what the instance never set comes over; the vendor file is not changed by the copy.
+      const copied = tupleConfig(vendor, fields)
+      for (const field of unsetFields(stored, fields)) {
+        const key = field === 'signedOut' ? 'signedOutInMousse' : field
+        stored[key] = copied[key]
+      }
+      stored = { ...stored, [MIRROR_MARKER_KEY]: vendorHash }
+      this.storeConfig(record, stored)
+      instance = instanceTuple(stored, fields)
+      row = mirrorHash(instance) === vendorHash ? 'in_sync' : 'finish_write'
+    }
+    switch (row) {
+      case 'in_sync':
+        if (storedMarker(stored) !== vendorHash) this.storeConfig(record, { ...stored, [MIRROR_MARKER_KEY]: vendorHash })
+        return
+      case 'finish_write': {
+        const failure = this.mirrorWrite(record, stored)
+        if (failure) console.warn('[harness] could not finish writing a settings file', { instanceId: record.instanceId, error: errorText(failure) })
+        return
+      }
+      case 'older_changed': {
+        const changed = changedFields(instance, vendor, fields)
+        this.storeConfig(record, { ...stored, ...tupleConfig(vendor, fields), [MIRROR_MARKER_KEY]: vendorHash })
+        this.appliedVendorTuple(record, instance, vendor)
+        this.settingsNotices.set(record.instanceId, {
+          kind: 'older_applied',
+          message: `Settings changed in an older Mousse version were applied: ${fieldLabels(changed)}.`
+        })
+        return
+      }
+      case 'conflict':
+        this.settingsNotices.set(record.instanceId, {
+          kind: 'older_conflict',
+          message: "An older Mousse version changed this provider's settings. Mousse is using this version's."
+        })
+        return
+    }
   }
 
   /** The stored `config` of an added instance after a patch (unknown fields kept). */
@@ -2058,9 +2339,11 @@ export class Harness implements HarnessGateway {
     if (patch.displayName !== undefined) setOrDelete(config, 'displayName', patch.displayName?.trim() || undefined)
     if (patch.home !== undefined) config.home = patch.home
     if (patch.setup !== undefined) config.setup = patch.setup
-    if (patch.binaryPath !== undefined) setOrDelete(config, 'binaryPath', patch.binaryPath?.trim() || undefined)
-    if (patch.args !== undefined) setOrDelete(config, 'args', patch.args.length ? [...patch.args] : undefined)
-    if (patch.env !== undefined) setOrDelete(config, 'env', Object.keys(patch.env).length ? { ...patch.env } : undefined)
+    // A cleared launch setting is stored as `null` ("set to the default"), never deleted, so it is
+    // told apart from one never set (`harness/vendorMirror`).
+    if (patch.binaryPath !== undefined) config.binaryPath = patch.binaryPath?.trim() || null
+    if (patch.args !== undefined) config.args = patch.args.length ? [...patch.args] : null
+    if (patch.env !== undefined) config.env = Object.keys(patch.env).length ? { ...patch.env } : null
     if (patch.loginMethod !== undefined) setOrDelete(config, 'loginMethod', patch.loginMethod || undefined)
     if (patch.engine !== undefined) setOrDelete(config, 'engine', patch.engine ?? undefined)
     if (patch.source !== undefined) {
@@ -2126,10 +2409,24 @@ export class Harness implements HarnessGateway {
   private async signOut(instanceId: string): Promise<InstanceSnapshot> {
     const record = this.record(instanceId, { allowDisabled: true })
     if (!record.runtime.signOut) harnessFail('unsupported', 'This provider has no sign-out.', instanceId)
-    await record.runtime.signOut()
+    // 1. The flag first: from here on nothing is admitted on the instance (fail closed).
+    const config = { ...this.storedConfig(record), signedOutInMousse: true }
+    this.storeConfig(record, config)
+    // 2. The runtime's own sign-out (stop turns, drop sessions, revoke what Mousse holds), then the
+    // vendor mirror, even when the runtime's sign-out failed: the flag stays and is mirrored.
+    let failure: unknown
+    try {
+      await record.runtime.signOut()
+    } catch (error) {
+      failure = error
+    }
+    const mirrorFailure = this.mirrorWrite(record, config)
+    if (mirrorFailure) console.warn('[harness] could not mirror a sign-out to the settings file', { instanceId, error: errorText(mirrorFailure) })
+    // 3. Nothing bound before the sign-out resumes, and the card reads signed out.
     this.counters.bumpAccount(instanceId)
     await this.probe(instanceId, true)
     this.options.onProvidersChanged?.()
+    if (failure) throw failure
     return this.snapshot(instanceId, { kind: 'device' })
   }
 
@@ -2356,6 +2653,17 @@ export class Harness implements HarnessGateway {
     if ([...this.operations.values()].some((entry) => entry.started.instanceId === instanceId && entry.started.kind === 'sign_in'))
       return harnessFail('operation_busy', 'A sign-in is already running for this provider.', instanceId)
     const started: ProviderOperationStarted = { operationId: randomUUID(), instanceId, kind: 'sign_in' }
+    // Signed out in Mousse on the user's own sign-in (their CLI's home): reconnecting only clears the
+    // flag. No sign-in runs; when the agent itself is signed out, the card shows its command.
+    if (this.isSignedOut(record) && !this.ownsSignIn(record)) {
+      queueMicrotask(() => {
+        void this.reconnect(record)
+          .then(() => this.emit({ type: 'operation', data: { ...started, phase: 'completed' } }))
+          .catch((error) => this.emit({ type: 'operation', data: { ...started, phase: 'failed', error: { code: 'protocol', message: errorText(error), instanceId } } }))
+          .finally(() => void this.probe(instanceId, true))
+      })
+      return started
+    }
     const session = new LoginSessionImpl(started.operationId)
     const operation: Operation = {
       started,
@@ -2374,6 +2682,11 @@ export class Harness implements HarnessGateway {
         .then((result) => {
           if (session.abort.signal.aborted) this.emit({ type: 'operation', data: { ...started, phase: 'cancelled' } })
           else if (result.success) {
+            // A sign-in Mousse owns clears a sign-out only once it succeeded.
+            if (this.isSignedOut(record)) {
+              const failure = this.setSignedOut(record, false)
+              if (failure) console.warn('[harness] could not mirror a sign-in to the settings file', { instanceId, error: errorText(failure) })
+            }
             // A completed sign-in may be another account: sessions made before it are not resumed.
             this.counters.bumpAccount(instanceId)
             // Its verification (a `session/new`) may have listed the account's models and modes.

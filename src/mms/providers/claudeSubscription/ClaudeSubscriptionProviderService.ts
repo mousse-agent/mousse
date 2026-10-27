@@ -26,8 +26,8 @@ import { APPROVALS_REFUSED_MESSAGE, QUESTIONS_REFUSED_MESSAGE } from '../../harn
 import { CLAUDE_MOUSSE_TOOL_PREFIX, claudeMcpServers } from '../../run/mcp/attachment'
 import { TURN_TOKEN_KEY } from '../../run/mcp/appTools/registry'
 import type { LoginSession } from '../LoginSession'
+import { settingsMirror, type MirrorField, type VendorMirror } from '../../harness/vendorMirror'
 import {
-  applyCliConfigPatch,
   claudeExtraArgs,
   cliLaunch,
   requireExecutable,
@@ -76,12 +76,13 @@ type Settings = {
   loginPolicy?: 'cli' | 'isolated'
   /** Older versions: a profile-private sign-in completed. Dropped by the migration. */
   signedIn?: boolean
-  /** Disconnected in Mousse; the terminal sign-in stays intact. */
+  /**
+   * The launch settings and the sign-out flag as an older Mousse reads them: a mirror of the
+   * instance config, written only through `vendorMirror()` and never read for a launch.
+   */
   cliDisconnected?: boolean
   binaryPath?: string
-  /** Extra Claude Code launch args (long options only; passed as the SDK's `extraArgs`). */
   args?: string[]
-  /** Extra environment variables, applied over the subscription environment. */
   env?: Record<string, string>
   models?: LlmModelOption[]
   /** ISO time `models` was last listed by Claude Code (absent for the fallback aliases). */
@@ -195,10 +196,14 @@ type Dependencies = {
    */
   baseEnv?: () => NodeJS.ProcessEnv
   /**
-   * The executable, launch args and variables of an instance whose launch settings live in its
-   * instance config rather than in `settings.json`.
+   * The executable, launch args and variables: the instance config's (the gateway's). Without it
+   * Claude Code runs as found, with no extra args or variables.
    */
   launchConfig?: () => StoredCliConfig
+  /** Signed out in Mousse (the instance config's flag, the gateway's); default false. */
+  signedOut?: () => boolean
+  /** Saves an executable path entered at sign-in to the instance config (the gateway's `configure`). */
+  saveLaunch?: (patch: CliProviderConfigPatch) => Promise<void>
   /** The terminal command that signs this instance in; default `claude auth login`. */
   signInCommand?: string
 }
@@ -483,9 +488,25 @@ export class ClaudeSubscriptionProviderService {
   private environment(): NodeJS.ProcessEnv {
     return withUserEnv(claudeSubscriptionEnvironment(this.dependencies.baseEnv?.()), storedCliEnv(this.launchSettings()))
   }
-  /** The stored executable, args and variables: the instance config's, else `settings.json`. */
+  /** The stored executable, args and variables: the instance config's, never `settings.json`. */
   private launchSettings(): StoredCliConfig {
-    return this.dependencies.launchConfig?.() ?? this.settings
+    return this.dependencies.launchConfig?.() ?? {}
+  }
+  /** Signed out in Mousse: the instance's flag; the terminal sign-in stays intact. */
+  private signedOut(): boolean {
+    return this.dependencies.signedOut?.() === true
+  }
+  /**
+   * The copy of `fields` in this service's `settings.json` for an older Mousse. It reads and writes
+   * the settings object loaded now (Recheck replaces it) and saves through `save()`, the file's one writer.
+   */
+  vendorMirror(fields: readonly MirrorField[]): VendorMirror {
+    return settingsMirror(fields, {
+      settings: () => this.settings as Record<string, unknown>,
+      settingsError: () => this.settingsError,
+      save: () => this.save(),
+      signedOutKey: 'cliDisconnected'
+    })
   }
   /** The terminal command that signs this instance in. */
   private signInCommand(): string {
@@ -501,11 +522,6 @@ export class ClaudeSubscriptionProviderService {
     this.settings.sessions = rest
     this.save()
   }
-  /** The stored executable, launch args and variables, as saved (no lookup, no version check). */
-  storedLaunch(): StoredCliConfig {
-    const stored = this.launchSettings()
-    return { ...(stored.binaryPath ? { binaryPath: stored.binaryPath } : {}), args: storedCliArgs(stored), env: storedCliEnv(stored) }
-  }
   /** The executable path, launch args and environment set in Settings → Providers. */
   async cliConfig(): Promise<CliProviderConfig> {
     const launch = this.launchTarget()
@@ -519,29 +535,19 @@ export class ClaudeSubscriptionProviderService {
     }
   }
   /**
-   * Saves the launch settings. Each turn starts its own Claude Code process, so the next turn uses
-   * them; a changed executable re-checks the sign-in.
+   * Checks launch settings before the gateway saves them: an executable that cannot run, or args
+   * the SDK cannot pass. Each turn starts its own Claude Code process, so the next turn uses them.
    */
-  async setCliConfig(patch: CliProviderConfigPatch): Promise<CliProviderConfig> {
-    if (this.stopped) throw new Error('Claude provider is stopped')
-    if (this.settingsError) throw new Error(this.settingsError)
-    const before = this.binary()
-    applyCliConfigPatch(
-      this.settings,
-      patch,
-      (path) => requireExecutable(path, 'Claude Code'),
-      (args) => void claudeExtraArgs(args)
-    )
-    this.save()
-    if (this.binary() !== before) await this.status({ force: true })
-    return this.cliConfig()
+  validateLaunch(patch: CliProviderConfigPatch): void {
+    if (typeof patch.binaryPath === 'string') requireExecutable(patch.binaryPath, 'Claude Code')
+    if (patch.args) claudeExtraArgs(patch.args)
   }
   /**
    * Synchronous view for routing and listings. It reflects the last live `claude auth status`
    * check (see `status()`).
    */
   configured(): boolean {
-    if (this.stopped || this.settingsError || this.settings.cliDisconnected || !this.binary()) return false
+    if (this.stopped || this.settingsError || this.signedOut() || !this.binary()) return false
     // Refresh a stale result in the background; the first check comes from `status()`.
     if (this.cliProbe && this.checkDue()) void this.status()
     return this.cliProbe?.result.kind === 'signed_in'
@@ -641,7 +647,7 @@ export class ClaudeSubscriptionProviderService {
   }
   /** A live check is due: the last terminal sign-in result is missing or stale. */
   private checkDue(): boolean {
-    if (this.stopped || this.settingsError || this.settings.cliDisconnected) return false
+    if (this.stopped || this.settingsError || this.signedOut()) return false
     const at = this.cliProbe?.at
     return at === undefined || Date.now() - at >= CLAUDE_AUTH_STATUS_TTL_MS
   }
@@ -690,7 +696,7 @@ export class ClaudeSubscriptionProviderService {
         state: 'missing_binary',
         message: 'Claude Code CLI not found. Install the official Claude Code CLI, then recheck.'
       }
-    if (this.settings.cliDisconnected)
+    if (this.signedOut())
       return {
         state: 'disconnected',
         message: 'Disconnected in Mousse. The Claude sign-in in your terminal is unchanged.'
@@ -726,12 +732,12 @@ export class ClaudeSubscriptionProviderService {
           placeholder: '/home/me/.local/bin/claude'
         })
         if (!isAbsolute(binary)) throw new Error('Claude Code binary path must be absolute')
-        this.settings.binaryPath = binary
+        // Saved to the instance config through the gateway, like any other launch setting.
+        if (!this.dependencies.saveLaunch) throw new Error('Claude Code executable is unavailable')
+        await this.dependencies.saveLaunch({ binaryPath: binary })
         if (!this.binary()) throw new Error('Claude Code executable is unavailable')
       }
       checkpoint()
-      delete this.settings.cliDisconnected
-      this.save()
       while (!(await signedIn())) {
         // Same synchronous segment as the prompt: nothing can cancel in between.
         checkpoint()
@@ -934,7 +940,7 @@ export class ClaudeSubscriptionProviderService {
   }
   private signInRequiredMessage(): string {
     if (this.settingsError) return 'Connect Claude Subscription in Settings → Providers first.'
-    if (this.settings.cliDisconnected)
+    if (this.signedOut())
       return 'Claude Subscription is disconnected. Reconnect it in Settings → Providers.'
     return `Claude Code isn't signed in. Run \`${this.signInCommand()}\` in a terminal, then try again.`
   }
@@ -1820,10 +1826,10 @@ export class ClaudeSubscriptionProviderService {
   }
   /**
    * Disconnects this profile. Only Mousse-side state is cleared: the terminal sign-in is shared
-   * with the user's own `claude`, so `claude auth logout` never runs.
+   * with the user's own `claude`, so `claude auth logout` never runs. The gateway keeps the
+   * signed-out flag in the instance config (and mirrors it to `settings.json`).
    */
   async logout(): Promise<void> {
-    this.settings.cliDisconnected = true
     this.settings.sessions = {}
     this.save()
     this.abortInFlight()

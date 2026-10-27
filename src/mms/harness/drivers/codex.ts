@@ -5,6 +5,7 @@ import { CODEX_CAPABILITIES, CodexAdapter } from '../../run/adapters/codex/Codex
 import { cliNames } from '../env'
 import { decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig } from '../driver'
 import { createManagedCodexRuntime } from '../codex/managedRuntime'
+import { ALL_MIRROR_FIELDS } from '../vendorMirror'
 
 /** Codex CLI versions Mousse was tested with. */
 export const CODEX_TESTED_VERSIONS = { min: '0.100.0', max: '0.162.999' }
@@ -71,6 +72,7 @@ export function codexDriver(options: { builtIn: () => CodexProviderService; mana
     userMcp: 'native',
     // Codex passes MCP image content to the model; the ChatGPT models it runs read images.
     mcpImageResults: true,
+    mirrorsVendorFile: true,
     decodeConfig: decodeCodexConfig,
     caps: () => CODEX_CAPS,
     updateCommand: (owner: InstallOwner) => {
@@ -88,8 +90,10 @@ export function codexDriver(options: { builtIn: () => CodexProviderService; mana
         llmProvider: () => service.llmProvider(),
         models: () => service.models(),
         modelsRefreshedAt: () => service.modelsRefreshedAt(),
-        launch: () => service.storedLaunch(),
-        setLaunch: async (patch) => void (await service.setCliConfig(patch)),
+        // The user's own Codex mirrors its launch settings and sign-out to its settings.json for an older Mousse.
+        ...(context.builtIn ? { vendorMirror: service.vendorMirror(ALL_MIRROR_FIELDS) } : {}),
+        validateLaunch: (patch) => service.validateLaunch(patch),
+        launchChanged: () => service.launchChanged(),
         auth: async ({ force }) => readAuth(service, await service.status({ force })),
         refreshModels: async () => {
           await service.status()

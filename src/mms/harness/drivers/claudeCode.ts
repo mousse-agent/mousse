@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import type { InstallOwner } from '../../../shared/harness/status'
 import type { NativeToolTable } from '../../../shared/harness/tools'
 import type { HarnessCaps } from '../../../shared/harness/types'
+import type { CliProviderConfigPatch } from '../../../shared/providerAuth'
 import type { StoredCliConfig } from '../../providers/cliConfig'
 import {
   ClaudeSubscriptionProviderService
@@ -14,6 +15,7 @@ import {
 } from '../../run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import { cliNames } from '../env'
 import { decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver } from '../driver'
+import { ALL_MIRROR_FIELDS, SIGN_OUT_MIRROR_FIELDS } from '../vendorMirror'
 
 /** Claude Code versions Mousse was tested with. */
 export const CLAUDE_TESTED_VERSIONS = { min: '2.0.0', max: '2.1.999' }
@@ -107,6 +109,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     userMcp: 'native',
     // Claude Code passes MCP image content to the model, and every Claude model reads images.
     mcpImageResults: true,
+    mirrorsVendorFile: true,
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: true }),
     caps: () => CLAUDE_CODE_CAPS,
     nativeToolNames: (neutral) => CLAUDE_NATIVE_TOOLS[neutral] ?? [],
@@ -121,7 +124,8 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
       const signInCommand = claudeSignInCommand(context.env.home)
       let service: ClaudeSubscriptionProviderService
       let owned = false
-      if (context.builtIn && options.builtIn) service = options.builtIn()
+      const shared = Boolean(context.builtIn && options.builtIn)
+      if (shared) service = options.builtIn!()
       else {
         owned = true
         if (context.env.home) mkdirSync(context.env.home, { recursive: true, mode: 0o700 })
@@ -135,6 +139,8 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
           findBinary: context.findBinary,
           baseEnv: env,
           launchConfig: launch,
+          signedOut: () => context.signedOut(),
+          saveLaunch: (patch: CliProviderConfigPatch) => context.saveLaunch(patch),
           signInCommand
         }
         service = options.createService?.(context, serviceOptions)
@@ -149,12 +155,10 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
         llmProvider: () => service.llmProvider(),
         models: () => service.models(),
         modelsRefreshedAt: () => service.modelsRefreshedAt(),
-        ...(context.builtIn
-          ? {
-              launch: () => service.storedLaunch(),
-              setLaunch: async (patch) => void (await service.setCliConfig(patch))
-            }
-          : {}),
+        // The built-in instance mirrors its launch settings and sign-out to its settings.json for an
+        // older Mousse; an added one only its sign-out (its launch settings were always in config).
+        vendorMirror: service.vendorMirror(shared ? ALL_MIRROR_FIELDS : SIGN_OUT_MIRROR_FIELDS),
+        ...(shared ? { validateLaunch: (patch: CliProviderConfigPatch) => service.validateLaunch(patch) } : {}),
         auth: async ({ force }) => readAuth(service, await service.status({ force }), signInCommand),
         // Read from the home and the variables Claude Code reads; `claude auth status` is the turn's own check.
         identity: async () => service.accountSubject(),

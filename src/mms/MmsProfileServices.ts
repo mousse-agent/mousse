@@ -26,7 +26,9 @@ import { piOAuthBroker } from './harness/pi/oauthBroker'
 import { harnessAuthRunner, recordHarnessSpawn } from './harness/spawn'
 import { spawnCodexAppServer } from './providers/codex/CodexAppServerClient'
 import { createCodexProviderService, findCodexBinary, type CodexProviderService } from './providers/codex/CodexProviderService'
-import { CLAUDE_INSTANCE_ID, CODEX_INSTANCE_ID, piInstanceId, piProviderIdOf } from '../shared/providerInstances'
+import { ANTIGRAVITY_INSTANCE_ID, CLAUDE_INSTANCE_ID, CODEX_INSTANCE_ID, piInstanceId, piProviderIdOf } from '../shared/providerInstances'
+import { ALL_MIRROR_FIELDS, LAUNCH_MIRROR_FIELDS } from './harness/vendorMirror'
+import type { CliProviderConfigPatch } from '../shared/providerAuth'
 import { ProjectManager } from './data/ProjectManager'
 import { ThreadDataStore } from './data/ThreadDataStore'
 import { backfillSubagentLineage } from './data/subagentLineage'
@@ -238,10 +240,20 @@ export class MmsProfileServices {
     this.events = new MmsEventBus()
     this.settings = new SettingsStore(config)
     this.providerAuth = shared.providerAuth
+    // The built-in instances' launch settings and sign-out live in their instance config (the
+    // gateway's); the vendor services read them from there and save through `configure`.
+    const launchOf = (instanceId: string) => () => this.harnessImpl?.launchFor(instanceId) ?? {}
+    const signedOutOf = (instanceId: string) => () => this.harnessImpl?.signedOutInMousse(instanceId) ?? false
+    const saveLaunchOf = (instanceId: string) => async (patch: CliProviderConfigPatch) => {
+      if (!this.harnessImpl) throw new Error('Providers are not ready yet')
+      await this.harnessImpl.instances.configure(instanceId, patch)
+    }
     this.antigravity = new AntigravityProviderService(
       homeDir,
       shared.installationHome,
-      this.questions
+      this.questions,
+      undefined,
+      { launch: launchOf(ANTIGRAVITY_INSTANCE_ID), saveLaunch: saveLaunchOf(ANTIGRAVITY_INSTANCE_ID) }
     )
     this.antigravity.hooks.changed = () => this.events.emit({ channel: 'providers:changed', data: undefined })
     this.antigravity.hooks.installProgress = (message) =>
@@ -250,7 +262,10 @@ export class MmsProfileServices {
     // gateway (the inherited PATH first, then the login shell's) and start through its spawn path.
     this.claudeSubscription = new ClaudeSubscriptionProviderService(homeDir, this.questions, {
       findBinary: () => this.harnessImpl?.findBinaryFor(CLAUDE_INSTANCE_ID),
-      runAuth: harnessAuthRunner(CLAUDE_INSTANCE_ID)
+      runAuth: harnessAuthRunner(CLAUDE_INSTANCE_ID),
+      launchConfig: launchOf(CLAUDE_INSTANCE_ID),
+      signedOut: signedOutOf(CLAUDE_INSTANCE_ID),
+      saveLaunch: saveLaunchOf(CLAUDE_INSTANCE_ID)
     })
     this.codex = createCodexProviderService(homeDir, this.questions, {
       findBinary: () => this.harnessImpl?.findBinaryFor(CODEX_INSTANCE_ID) ?? findCodexBinary(),
@@ -258,10 +273,20 @@ export class MmsProfileServices {
         recordHarnessSpawn({ instanceId: CODEX_INSTANCE_ID, purpose: 'app-server', command: launch.binary, args: launch.args, env: launch.env })
         return spawnCodexAppServer(launch)
       }
+    }, {
+      launch: launchOf(CODEX_INSTANCE_ID),
+      signedOut: signedOutOf(CODEX_INSTANCE_ID),
+      saveLaunch: saveLaunchOf(CODEX_INSTANCE_ID)
     })
     // Seeded on load; a stored instance is never rewritten.
     this.providerInstances = new ProviderInstanceService({
       providerAuth: this.providerAuth,
+      // A seeded built-in starts with what its vendor file holds (`harness/vendorMirror`).
+      mirrorFor: (instanceId) =>
+        instanceId === CLAUDE_INSTANCE_ID ? this.claudeSubscription.vendorMirror(ALL_MIRROR_FIELDS)
+          : instanceId === CODEX_INSTANCE_ID ? this.codex.vendorMirror(ALL_MIRROR_FIELDS)
+            : instanceId === ANTIGRAVITY_INSTANCE_ID ? this.antigravity.vendorMirror(LAUNCH_MIRROR_FIELDS)
+              : undefined,
       store: {
         read: () => {
           const section = config.getProvidersSection()

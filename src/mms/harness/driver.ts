@@ -4,7 +4,6 @@ import type { NeutralTool } from '../../shared/harness/tools'
 import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult } from '../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
 import type { UserQuestionService } from '../orchestrator/UserQuestionService'
-import type { StoredCliConfig } from '../providers/cliConfig'
 import type { AcpSource } from './acp/preset'
 import type { LoginSession } from '../providers/LoginSession'
 import type { ProviderAdapter } from '../run/adapters/ProviderAdapter'
@@ -13,6 +12,7 @@ import type { ProviderRef } from '../run/types'
 import type { InstanceEnv } from './env'
 import type { LatestVersionSource } from './latest'
 import type { SpendModelFacts } from './policy'
+import type { VendorMirror } from './vendorMirror'
 
 /**
  * A driver is a kind of runtime (Claude Code, Codex, Antigravity, the pi loop). The gateway asks
@@ -32,7 +32,10 @@ export interface InstanceConfig {
   /** `private`: a Mousse-owned home under `<profileHome>/harness/<instanceId>/home`. */
   home: 'default' | 'private'
   loginMethod?: string
-  /** Launch settings of an added instance (built-in instances keep theirs in `settings.json`). */
+  /**
+   * Launch settings, kept by every instance (a cleared one is stored as `null` and decodes as
+   * absent). Built-in vendor instances also mirror them to their `settings.json` (`vendorMirror`).
+   */
   binaryPath?: string
   args?: string[]
   env?: Record<string, string>
@@ -51,6 +54,11 @@ export interface InstanceConfig {
    * engine in effect (`drivers/pi/engines.ts`). Part of the record key: a switch builds a new runtime.
    */
   engine?: 'rpc' | 'legacy'
+  /**
+   * Signed out in Mousse (Sign out on the page): the gateway refuses its turns and reports it signed
+   * out without asking the runtime, whatever the agent's own sign-in says.
+   */
+  signedOutInMousse?: boolean
 }
 
 /** Whether an entry runs in a Mousse-owned home: it must, it may, or it must not. */
@@ -121,6 +129,13 @@ export interface DriverContext {
   findBinary(): string | undefined
   /** Clients learn about a change the runtime noticed on its own (sign-in refused, install done). */
   changed(): void
+  /** Whether the instance is signed out in Mousse (`InstanceConfig.signedOutInMousse`), read live. */
+  signedOut(): boolean
+  /**
+   * Saves launch settings the runtime learned itself (a path entered at sign-in, a manual path an
+   * install replaces) through the gateway's `configure`, so they land in the instance config.
+   */
+  saveLaunch(patch: CliProviderConfigPatch): Promise<void>
 }
 
 /**
@@ -180,10 +195,15 @@ export interface DriverRuntime {
    * Undefined when no model is listed. Without it, the binding keeps `model` as selected.
    */
   concreteModel?(model: string): string | undefined
-  /** The stored launch settings (built-in vendor instances: their `settings.json`). */
-  launch?(): StoredCliConfig
-  /** Saves launch settings of a built-in instance; added instances are configured by the gateway. */
-  setLaunch?(patch: CliProviderConfigPatch): Promise<void>
+  /**
+   * The copy of the instance's launch settings and sign-out flag in the vendor's own `settings.json`
+   * (`harness/vendorMirror`), kept so an older Mousse reads what the user set. Only the gateway uses it.
+   */
+  vendorMirror?: VendorMirror
+  /** Checks a launch-settings patch before anything is saved (an executable that cannot run, unsupported args). */
+  validateLaunch?(patch: CliProviderConfigPatch): void
+  /** The instance's launch settings changed: processes started with the old ones are replaced. */
+  launchChanged?(): void
   /** `force` skips the runtime's own cache (Recheck; turn admission without `identity`). */
   auth(options: { force: boolean; signal?: AbortSignal }): Promise<AuthReading>
   /**
@@ -324,6 +344,11 @@ export interface HarnessDriver {
    */
   readonly mcpImageResults?: boolean
   /**
+   * Its runtimes may keep a copy of their settings in a vendor file (`DriverRuntime.vendorMirror`),
+   * reconciled when the gateway starts.
+   */
+  readonly mirrorsVendorFile?: boolean
+  /**
    * Lenient decoder of an instance's stored `config`: unknown or malformed fields fall back. With
    * `instanceId`, fields that default per instance are resolved (the `pi` driver's engine).
    */
@@ -374,6 +399,7 @@ export function decodeInstanceConfig(raw: Record<string, unknown> | undefined, o
     const env = Object.fromEntries(Object.entries(raw.env as Record<string, unknown>).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
     if (Object.keys(env).length) config.env = env
   }
+  if (raw.signedOutInMousse === true) config.signedOutInMousse = true
   return config
 }
 
