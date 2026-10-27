@@ -9,6 +9,7 @@ import { basename, dirname, join } from 'path'
 import type {
   ChannelConfig,
   ChannelDirectoryEntry,
+  ChannelOwner,
   ChannelPlatform,
   ChannelSession
 } from '../../shared/types'
@@ -86,6 +87,7 @@ export class ChannelStore {
   private readonly lockPath: string
   private readonly sessionsPath: string
   private readonly directoryPath: string
+  private readonly ownersPath: string
   private readonly environment: NodeJS.ProcessEnv
   constructor(
     private readonly config: MousseConfigStore,
@@ -103,6 +105,46 @@ export class ChannelStore {
     this.lockPath = join(this.directory, '.channels.lock')
     this.sessionsPath = join(this.directory, 'sessions.json')
     this.directoryPath = join(this.directory, 'directory.json')
+    this.ownersPath = join(this.directory, 'owners.json')
+  }
+
+  /**
+   * Each platform's confirmed owner (PR 6 §6). A file of its own, outside the channel config: an
+   * older build's validator, which knows no `owner`, never sees it when Settings saves the form.
+   */
+  getOwners(): Partial<Record<ChannelPlatform, ChannelOwner>> {
+    ensureChannelsDir(this.directory)
+    return withFileLock(this.lockPath, () => this.readOwners())
+  }
+
+  /** Stores (or with undefined forgets) a platform's owner. */
+  setOwner(platform: ChannelPlatform, owner: ChannelOwner | undefined): Partial<Record<ChannelPlatform, ChannelOwner>> {
+    ensureChannelsDir(this.directory)
+    return withFileLock(this.lockPath, () => {
+      const owners = this.readOwners()
+      if (owner) owners[platform] = { userId: owner.userId, displayName: owner.displayName, confirmedAt: owner.confirmedAt }
+      else delete owners[platform]
+      atomicWriteJson(this.ownersPath, owners)
+      return owners
+    })
+  }
+
+  private readOwners(): Partial<Record<ChannelPlatform, ChannelOwner>> {
+    if (!existsSync(this.ownersPath)) return {}
+    let raw: unknown
+    try {
+      raw = JSON.parse(readFileSync(this.ownersPath, 'utf-8'))
+    } catch {
+      // An unreadable file means no owner: bots then answer nobody, which fails closed.
+      return {}
+    }
+    const owners: Partial<Record<ChannelPlatform, ChannelOwner>> = {}
+    for (const platform of ['telegram', 'discord'] as const) {
+      const entry = (raw as Record<string, unknown> | null)?.[platform] as Partial<ChannelOwner> | undefined
+      if (entry && typeof entry.userId === 'string' && entry.userId && typeof entry.displayName === 'string' && typeof entry.confirmedAt === 'string')
+        owners[platform] = { userId: entry.userId, displayName: entry.displayName, confirmedAt: entry.confirmedAt }
+    }
+    return owners
   }
 
   getConfig(): ChannelConfig {

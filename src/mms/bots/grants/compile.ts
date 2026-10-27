@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { realpathSync } from 'node:fs'
-import type { BotManifest, BotThreadSpec } from '../../../shared/bots/personal/definition'
+import { foldersOf, type BotManifest, type BotThreadSpec } from '../../../shared/bots/personal/definition'
 import { BOT_APP_TOOLS, canonicalManifest, intersectManifest, narrowManifest } from '../../../shared/bots/personal/manifest'
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { BindPolicy, HarnessCaps, HarnessError } from '../../../shared/harness/types'
@@ -26,7 +26,8 @@ export interface BotPermissions {
   appTools: string[]
   mcp: Array<`${string}::${string}`>
   skills: string[]
-  workspace: { roots: string[]; access: 'read' | 'write'; scratch: string } | null
+  /** `writeRoots`: the roots the bot may change (per-folder access). */
+  workspace: { roots: string[]; access: 'read' | 'write'; writeRoots?: string[]; scratch: string } | null
 }
 
 export interface CompileInput {
@@ -48,6 +49,11 @@ export interface CompileInput {
   remaining: { maxTurns?: number; maxToolCalls?: number; maxInputTokens?: number; maxOutputTokens?: number; maxUsd?: number; deadlineMs: number }
   /** System temporary folders (default: `systemTempDirs()`). */
   temps?: readonly string[]
+  /**
+   * The bot tools the thread gets beside its grant (6c-2): `escalate` on every bot thread, and
+   * `consult` on the activation thread of a bot with context threads.
+   */
+  botTools?: { escalate: boolean; consult: boolean }
 }
 
 export type CompileResult =
@@ -92,12 +98,13 @@ export function compileBotThread(input: CompileInput): CompileResult {
   const profile = real(input.profileHome)
   if (manifest.workspace) {
     const temps = (input.temps ?? systemTempDirs()).map(real)
+    const writable = new Set(foldersOf(manifest.workspace).filter(([, access]) => access === 'write').map(([root]) => real(root)))
     for (const root of manifest.workspace.roots.map(real)) {
       if (inside(root, scratch) || inside(scratch, root))
         return unenforceable(`The folder ${root} overlaps the bot's private scratch folder.`)
       if (inside(root, profile)) return unenforceable(`The folder ${root} contains Mousse's own data. Choose a folder inside it instead.`)
       if (inside(profile, root)) return unenforceable(`The folder ${root} is inside Mousse's own data.`)
-      if (manifest.workspace.access === 'write' && temps.some((temp) => inside(temp, root)))
+      if (writable.has(root) && temps.some((temp) => inside(temp, root)))
         return unenforceable(`The folder ${root} is inside a temporary folder. Move the folder out of the temporary folder.`)
     }
   }
@@ -108,7 +115,12 @@ export function compileBotThread(input: CompileInput): CompileResult {
   for (const key of ['maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTokens', 'maxUsd'] as const)
     if (counts[key] !== undefined) budget[key] = counts[key]
   // Granted skills come with the skill tools that list and load them.
-  const appTools = [...new Set([...manifest.appTools, ...(manifest.skills.length ? ['list_skills', 'load_skill'] : [])])].sort()
+  const appTools = [...new Set([
+    ...manifest.appTools,
+    ...(manifest.skills.length ? ['list_skills', 'load_skill'] : []),
+    ...(input.botTools?.escalate ? ['escalate'] : []),
+    ...(input.botTools?.consult ? ['consult'] : [])
+  ])].sort()
   const mcp = [...new Set(manifest.mcp.map((pair) => `${pair.serverId}::${pair.tool}` as const))].sort()
   return {
     ok: true,
@@ -125,7 +137,14 @@ export function compileBotThread(input: CompileInput): CompileResult {
       appTools,
       mcp,
       skills: [...new Set(manifest.skills)].sort(),
-      workspace: manifest.workspace ? { roots: [...manifest.workspace.roots], access: manifest.workspace.access, scratch } : null
+      workspace: manifest.workspace
+        ? {
+            roots: [...manifest.workspace.roots],
+            access: manifest.workspace.access,
+            writeRoots: foldersOf(manifest.workspace).filter(([, access]) => access === 'write').map(([root]) => root),
+            scratch
+          }
+        : null
     }
   }
 }

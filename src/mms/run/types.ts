@@ -57,9 +57,28 @@ export interface RunPause {
 
 export interface RunOutcome {
   error?: string
-  interruptedBy?: 'user' | 'daemon_restart' | 'provider'
+  /** The typed reason of `error`, when it has one (`binding_stale` for a run on the retired bare pi route). */
+  errorCode?: string
+  /**
+   * A scheduled run that failed on a provider usage limit (it is never paused): when the limit resets. The
+   * scheduler records the occurrence as waiting and runs the job again then.
+   */
+  usageLimitUntil?: string
+  /**
+   * `bot_wall`: a personal bot's dispatch ended at a wall (PR 6 §5); the run engine never retries it.
+   * `agent`: another thread's agent stopped the run (`thread_interrupt`); it settles as a user's Stop does (`stoppedByPerson`).
+   */
+  interruptedBy?: 'user' | 'agent' | 'daemon_restart' | 'provider' | 'bot_wall'
   uncertainReason?: string
   stopRequested?: boolean
+  /** Set with `stopRequested` (or on a paused run a Stop ends) when an agent asked for the Stop; the terminal write then records `interruptedBy: 'agent'`. */
+  stopRequestedBy?: 'agent'
+  /**
+   * Another thread's agent sent the message this run answers (`thread_send`). Such a run never ends a usage-limit
+   * pause by starting, and `agentHops` is how many agent messages in a row led to it.
+   */
+  sentByAgent?: true
+  agentHops?: number
   /** SPEC §16.4: the interrupted run this send continues ("Continue" after a restart). */
   continuationOf?: string
   /** Set while the run is `paused`, and kept after the pause ended. */
@@ -154,6 +173,15 @@ export interface ThreadEvent {
  */
 export const LOCAL_ACTION_SOURCES: ReadonlySet<string> = new Set(['undo', 'revert'])
 
+/**
+ * A Stop ended the run, whether a person pressed it or another thread's agent asked for it
+ * (`interruptedBy` `user` or `agent`). Everything that treats "the user stopped it" specially (no
+ * wake, no integration notice, no redelivery) asks this, so an agent's Stop is never taken for a failure.
+ */
+export function stoppedByPerson(outcome: { interruptedBy?: string } | null | undefined): boolean {
+  return outcome?.interruptedBy === 'user' || outcome?.interruptedBy === 'agent'
+}
+
 export const runId = (threadId: string, ordinal: number): string =>
   `run:thread:${encodeURIComponent(threadId)}:ordinal:${ordinal}`
 
@@ -231,12 +259,12 @@ export const EFFECT_KIND_SPEC: Record<EffectKind, EffectKindSpec> = {
   'turn.start': { class: 'process_bound', timeoutMs: 6 * 60 * 60_000, maxAttempts: 1 },
   'turn.interrupt': { class: 'process_bound', timeoutMs: 30_000, lane: 'control' },
   'turn.steer': { class: 'process_bound', timeoutMs: 30_000, maxAttempts: 1, lane: 'control' },
+  // Delivers a saved approval request's answer to the provider callback waiting in this process (SPEC §17.4).
   'request.respond': {
     class: 'process_bound',
     timeoutMs: 30_000,
     maxAttempts: 1,
-    lane: 'control',
-    reserved: true
+    lane: 'control'
   },
   'checkpoint.capture': { class: 'replay_safe', timeoutMs: 2 * 60_000, reserved: true },
   'title.generate': { class: 'replay_safe', timeoutMs: 60_000, lane: 'title', reserved: true },
@@ -377,9 +405,11 @@ export interface AgentActor {
   threadId: string
   runId: string
   toolCallId: string
+  /** How many agent messages in a row led to this one (the sender's own count plus one); set by the thread owner. */
+  hops?: number
 }
 
-export type InboxKind = 'child_result' | 'restart_note' | 'reconcile_notice'
+export type InboxKind = 'child_result' | 'restart_note' | 'reconcile_notice' | 'pr_update'
 
 export type InboxStatus = 'pending' | 'delivered' | 'acknowledged'
 
@@ -421,6 +451,18 @@ export interface ChildQuestionPayload {
 
 export function isChildQuestionRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
   return row.kind === 'reconcile_notice' && (row.payload as { kind?: unknown } | null)?.kind === 'child_question'
+}
+
+/**
+ * Payload of a `pr_update` row: what a watched pull request changed, for a thread whose watch lets the
+ * agent act. `text` is the whole notice (server-authored, with every word from the host quoted); the rest says
+ * what it is about. The row's id carries the delivery id, so a second write of the same delivery is refused.
+ */
+export interface PullRequestUpdatePayload {
+  text: string
+  number: number
+  headSha: string
+  changes: string[]
 }
 
 /** Payload of a `turn.start` effect that wakes a thread for its pending inbox rows (rule 4). */

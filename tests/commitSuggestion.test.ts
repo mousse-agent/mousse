@@ -10,6 +10,7 @@ import {
   type CommitInput
 } from '../src/mms/git/commitSuggestion'
 import { getDefaultSettings } from '../src/shared/settings'
+import type { OneShotRequest } from '../src/mms/harness/gateway'
 
 const section = (name: string, body: string) => `diff --git a/${name} b/${name}\nindex 111..222 100644\n--- a/${name}\n+++ b/${name}\n@@ -1 +1 @@\n${body}\n`
 
@@ -146,37 +147,35 @@ describe('OrchestratorService.generateCommitMessage', () => {
       ...getDefaultSettings(),
       title: options.titleModel ? { llmProvider: 'openai', model: 'gpt-big' } : getDefaultSettings().title
     }
-    const resolveStored = vi.fn(() => ({ instanceId: 'pi:openai', llmProvider: 'openai' }))
-    const generateCommitMessage = vi.fn(options.answer ?? (async () => 'Add retry to login.\n\nIt retries twice.'))
+    const answer = options.answer ?? (async () => 'Add retry to login.\n\nIt retries twice.')
+    const oneShot = vi.fn(async (_request: OneShotRequest) => ({ text: await answer() }))
     const describeCommitInput = vi.fn(async () => options.input ?? input)
     const orch = Object.assign(Object.create(OrchestratorService.prototype), {
       settingsStore: { get: () => settings },
-      harness: { resolveStored },
-      llm: { generateCommitMessage },
+      harness: { oneShot },
       gitService: { describeCommitInput },
       threadScope: (threadId: string) => ({ kind: 'project', projectId: `of-${threadId}` })
     }) as OrchestratorService
-    return { orch, resolveStored, generateCommitMessage, describeCommitInput }
+    return { orch, oneShot, describeCommitInput }
   }
 
   it('without a chosen title model refuses with a code the UI can show, before reading or asking anything', async () => {
-    const { orch, generateCommitMessage, describeCommitInput, resolveStored } = orchestrator()
+    const { orch, oneShot, describeCommitInput } = orchestrator()
     await expect(orch.generateCommitMessage(params())).rejects.toMatchObject({ code: 'git_suggest_no_model' })
     expect(describeCommitInput).not.toHaveBeenCalled()
-    expect(resolveStored).not.toHaveBeenCalled()
-    expect(generateCommitMessage).not.toHaveBeenCalled()
+    expect(oneShot).not.toHaveBeenCalled()
   })
 
   it('asks the chosen title model with the changes in the prompt and returns the cleaned message', async () => {
-    const { orch, generateCommitMessage, describeCommitInput } = orchestrator({ titleModel: true })
+    const { orch, oneShot, describeCommitInput } = orchestrator({ titleModel: true })
     expect(await orch.generateCommitMessage(params({ all: true }))).toEqual({ message: 'Add retry to login\n\nIt retries twice.', truncated: false })
     expect(describeCommitInput).toHaveBeenCalledWith('/repo', { all: true })
-    const [system, prompt, threadId, selection] = generateCommitMessage.mock.calls[0] as unknown as [string, string, string | undefined, unknown]
-    expect(system).toContain('commit messages')
-    expect(prompt).toContain('+retry()')
-    expect(prompt).toContain('branch "main"')
-    expect(threadId).toBeUndefined()
-    expect(selection).toEqual({ instanceId: 'pi:openai', llmProvider: 'openai', model: 'gpt-big' })
+    const request = oneShot.mock.calls[0]![0]
+    expect(request.system).toContain('commit messages')
+    expect(request.prompt).toContain('+retry()')
+    expect(request.prompt).toContain('branch "main"')
+    expect(request.sessionKey).not.toContain('t1')
+    expect(request).toMatchObject({ purpose: 'title', task: 'commit_message', selection: { llmProvider: 'openai', model: 'gpt-big' } })
   })
 
   it('reports that part of the change was left out', async () => {
@@ -185,27 +184,27 @@ describe('OrchestratorService.generateCommitMessage', () => {
   })
 
   it('resolves the title model in the project of the folder, else in the thread\'s scope, else on the device', async () => {
-    const { orch, resolveStored } = orchestrator({ titleModel: true })
+    const { orch, oneShot } = orchestrator({ titleModel: true })
     await orch.generateCommitMessage(params())
     await orch.generateCommitMessage(params({ projectId: null, threadId: 't1' }))
     await orch.generateCommitMessage(params({ projectId: null, threadId: null }))
-    expect(resolveStored.mock.calls.map((call) => (call as unknown as [unknown, { purpose: string; scope: unknown }])[1])).toEqual([
-      { purpose: 'title', scope: { kind: 'project', projectId: 'p1' } },
-      { purpose: 'title', scope: { kind: 'project', projectId: 'of-t1' } },
-      { purpose: 'title', scope: { kind: 'device' } }
+    expect(oneShot.mock.calls.map(([request]) => request.scope)).toEqual([
+      { kind: 'project', projectId: 'p1' },
+      { kind: 'project', projectId: 'of-t1' },
+      { kind: 'device' }
     ])
   })
 
   it('names the thread to the model call only for a thread\'s worktree', async () => {
-    const { orch, generateCommitMessage } = orchestrator({ titleModel: true })
+    const { orch, oneShot } = orchestrator({ titleModel: true })
     await orch.generateCommitMessage(params({ all: true, projectId: 'p1', threadId: 't1' }))
-    expect((generateCommitMessage.mock.calls[0] as unknown as [string, string, string])[2]).toBe('t1')
+    expect(oneShot.mock.calls[0]![0].sessionKey).toBe('commit-message:t1')
   })
 
   it('has no model to ask when there is nothing to describe', async () => {
-    const { orch, generateCommitMessage } = orchestrator({ titleModel: true, input: EMPTY_COMMIT_INPUT })
+    const { orch, oneShot } = orchestrator({ titleModel: true, input: EMPTY_COMMIT_INPUT })
     await expect(orch.generateCommitMessage(params())).rejects.toMatchObject({ code: 'git_suggest_empty' })
-    expect(generateCommitMessage).not.toHaveBeenCalled()
+    expect(oneShot).not.toHaveBeenCalled()
   })
 
   it('fails with a fixed message when the model fails or answers without a subject', async () => {

@@ -8,6 +8,7 @@ import { AgentRegistry } from '../../src/mms/agents/AgentRegistry'
 import { ProjectManager } from '../../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../../src/mms/data/ThreadDataStore'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
+import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import type { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import { testHarness } from '../../src/mms/run/testkit/harness'
@@ -23,7 +24,7 @@ import type {
   TurnResult,
   TurnSink
 } from '../../src/mms/run/adapters/ProviderAdapter'
-import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
+import { ProfileDatabase, type ProfileDatabaseFault } from '../../src/mms/run/db/ProfileDatabase'
 import { EffectWorker } from '../../src/mms/run/EffectWorker'
 import { RunEngine } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
@@ -31,7 +32,7 @@ import type { ProviderRef } from '../../src/mms/run/types'
 import { TaskQueue } from '../../src/mms/tasks/TaskQueue'
 import { PtyManager } from '../../src/mms/terminals/PtyManager'
 import { WorktreeManager } from '../../src/mms/worktree/WorktreeManager'
-import { getDefaultSettings } from '../../src/shared/settings'
+import { getDefaultSettings, normalizeRunSettings, type RunSettings } from '../../src/shared/settings'
 
 /** Model selections the scripted adapters serve. */
 export const PI = { llmProvider: 'openai', model: 'gpt-replay' }
@@ -132,10 +133,13 @@ export async function waitFor(cond: () => boolean, label: string, timeoutMs = 10
 /**
  * A bare `OrchestratorService` over `store` with inert collaborators (no run engine, no providers):
  * tests replace `llm` and drive the queue, admission and event paths. Points `MOUSSE_HOME` at `home`.
+ * The default model is a pi instance (`PI`), so turns run on the pi loop over the replaced `llm`:
+ * a profile with no model has no turn to run (`no_model_selected`).
  */
 export function createOrchestrator(home: string, store: ThreadDataStore): OrchestratorService {
   process.env.MOUSSE_HOME = home
-  const settingsStore = { getSettings: () => getDefaultSettings(), get: () => getDefaultSettings() }
+  const settings = () => ({ ...getDefaultSettings(), provider: { ...getDefaultSettings().provider, ...PI } })
+  const settingsStore = { getSettings: settings, get: settings }
   const providerAuth = { getConnectedProviders: () => [] }
   const orch = new OrchestratorService(
     new AgentRegistry(), new TaskQueue(), new WorktreeManager(home), new PtyManager(),
@@ -146,14 +150,18 @@ export function createOrchestrator(home: string, store: ThreadDataStore): Orches
 }
 
 /** One daemon over `home`: orchestrator, engine and effect worker with the given adapters. */
-export function phase6Daemon(home: string, adapters: ProviderAdapter[], options: { pid?: number; instances?: ProviderInstanceService; drivers?: HarnessDriver[] } = {}) {
+export function phase6Daemon(home: string, adapters: ProviderAdapter[], options: { pid?: number; instances?: ProviderInstanceService; drivers?: HarnessDriver[]; runs?: Partial<RunSettings>; fault?: ProfileDatabaseFault } = {}) {
   const projects = new ProjectManager()
   const store = new ThreadDataStore(projects)
-  const settings = { ...getDefaultSettings(), provider: { ...getDefaultSettings().provider, ...PI } }
+  // The returned `settings` is the daemon's live settings object: a test may change it while the daemon runs.
+  const settings = { ...getDefaultSettings(), provider: { ...getDefaultSettings().provider, ...PI }, runs: normalizeRunSettings(options.runs) }
+  // Each daemon has its own questions, as each process has: waiting callbacks never outlive a daemon.
+  const questions = new UserQuestionService()
   const orch = new OrchestratorService(
     new AgentRegistry(), new TaskQueue(), new WorktreeManager(home), new PtyManager(),
     { get: () => settings } as never, {} as never,
-    undefined, undefined, undefined, undefined, undefined, projects
+    undefined, undefined, undefined, undefined, undefined, projects,
+    { questions }
   )
   orch.setThreadStore(store)
   ;(orch as any).llm = {
@@ -163,7 +171,7 @@ export function phase6Daemon(home: string, adapters: ProviderAdapter[], options:
     chat: async () => { throw new Error('the scripted adapter replaces the pi loop') }
   }
   orch.setHarness(testHarness({ adapters, ...(options.drivers ? { drivers: options.drivers } : {}), ...(options.instances ? { instances: options.instances } : {}), profileHome: home }))
-  const engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home })), pid: options.pid ?? 1 })
+  const engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home, ...(options.fault ? { fault: options.fault } : {}) })), pid: options.pid ?? 1 })
   orch.setRunEngine(engine)
   const boot = engine.reconcileOnBoot()
   const worker = new EffectWorker({ outbox: engine.outbox, executors: orch.effectExecutors(), owner: engine.leaseOwner })
@@ -186,6 +194,8 @@ export function phase6Daemon(home: string, adapters: ProviderAdapter[], options:
   const shutdown = async (): Promise<void> => {
     if (stopped) return
     stopped = true
+    // As the profile does: saved approvals are held before the worker's stop aborts the turns.
+    orch.holdApprovals()
     const workerStopped = worker.stop()
     await orch.shutdown()
     await workerStopped
@@ -195,7 +205,7 @@ export function phase6Daemon(home: string, adapters: ProviderAdapter[], options:
     engine.store.db.close()
   }
   return {
-    orch, engine, store, projects, boot, worker,
+    orch, engine, store, projects, boot, worker, questions, settings,
     /** Ends like a crash: the daemon epoch stays open. */
     crash: () => halt(false),
     stop: () => halt(true),

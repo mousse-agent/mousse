@@ -22,7 +22,11 @@ export const IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   'list_delegations',
   // Phase 5 Mousse MCP server (SPEC §15.1).
   'thread_read',
-  'queue_list'
+  'queue_list',
+  // A bot's Mousse tools (PR 6 §3). A consult's effects are the consult run's own calls, each in the
+  // ledger; an escalation writes only bots.db. Either cut off by a crash leaves nothing unknown.
+  'consult',
+  'escalate'
 ])
 
 /** Tools with side effects. Listed for documentation; any unknown tool is also non-idempotent. */

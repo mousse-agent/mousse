@@ -64,6 +64,9 @@ describe('awaited profile work ownership', () => {
         toolEvents: [],
         nativeMessages: [...messages, { role: 'assistant', content: 'Other profile works', timestamp: Date.now() }]
       }))
+      // Both profiles run turns on a default model (there is no bare pi route).
+      for (const orchestrator of [services.orchestrator, main.orchestrator])
+        (orchestrator as any).settingsStore.set({ provider: { llmProvider: 'openai', model: 'fixture' } })
       const at = new Date().toISOString()
       const run = services.orchestrator.runIsolatedScheduledJob('Fixture owned run', { jobId: 'owned-job', occurrenceAt: at, occurrenceKey: at, jobName: 'Owned' })
       await entered.promise

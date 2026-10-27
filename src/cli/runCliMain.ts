@@ -8,6 +8,7 @@ import { ROOT_HELP, commandHelp } from './help'
 import { resolveMousseHome } from './paths'
 import { runChat } from './commands/chat'
 import { runSchedule } from './commands/schedule'
+import { runApprovals } from './commands/approvals'
 import { runWorkflow } from './commands/workflow'
 import { runBrowser } from './commands/browser'
 import { runAgents } from './commands/agents'
@@ -75,6 +76,9 @@ export async function runCliMain(argv: string[] = process.argv.slice(2)): Promis
         break
       case 'schedule':
         await runSchedule(args)
+        break
+      case 'approvals':
+        await runApprovals(args)
         break
       case 'agents':
         await runAgents(args)

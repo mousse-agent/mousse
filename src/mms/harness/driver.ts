@@ -1,5 +1,5 @@
 import type { AuthState, CredentialKind, InstallOwner } from '../../shared/harness/status'
-import type { CustomModel, HarnessCaps, HarnessDriverKind, RemoveInstallResult, RuntimeFacts } from '../../shared/harness/types'
+import type { AddOptionMethod, CustomModel, HarnessCaps, HarnessDriverKind, InstanceConfigPatch, RemoveInstallResult, RuntimeFacts } from '../../shared/harness/types'
 import type { NeutralTool } from '../../shared/harness/tools'
 import type { PermissionLimits } from '../../shared/permissionMode'
 import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult, ProviderUsage } from '../../shared/providerAuth'
@@ -60,6 +60,12 @@ export interface InstanceConfig {
    * out without asking the runtime, whatever the agent's own sign-in says.
    */
   signedOutInMousse?: boolean
+  /**
+   * `locked`: the entry runs bots only, in a home of its own, under the locked profile of its driver
+   * (Claude Code, PR 6 §3): no user settings, plugins or launch settings, the exact granted tools,
+   * Mousse's grant gate on every call. Chosen when the entry is added; absent for every other entry.
+   */
+  profile?: 'locked'
 }
 
 /** Whether an entry runs in a Mousse-owned home: it must, it may, or it must not. */
@@ -169,9 +175,14 @@ export interface OneShotSpec {
   prompt: string
   /** Prompt-cache affinity, hashed before it reaches the provider (a thread id). */
   sessionKey?: string
+  /** What the request is for, so a refusal can say so; absent reads as `title`. */
+  task?: OneShotTask
   /** Called on every event the provider sends; the gateway's inactivity timeout restarts. */
   onActivity(): void
 }
+
+/** What a one-shot writes on the title model: a chat title, a pull request draft or a commit message. */
+export type OneShotTask = 'title' | 'pull_request' | 'commit_message'
 
 export interface DriverRuntime {
   /** The turn runtime of this instance. */
@@ -238,6 +249,11 @@ export interface DriverRuntime {
   modelsRefreshedAt?(): string | undefined
   signIn?(session: LoginSession, cwd: string, method?: string): Promise<ProviderLoginResult>
   signOut?(): Promise<void>
+  /**
+   * Saves the entry's secret (an API key) the way its own sign-in would (`instances.setSecret`).
+   * The value is never logged, emitted or put in an error.
+   */
+  setSecret?(value: string): Promise<void>
   /**
    * The instance's credential changed outside its own sign-in and sign-out (another surface set a
    * key or signed in): a runtime holding credentials in its processes retires them.
@@ -384,6 +400,19 @@ export interface HarnessDriver {
    */
   readonly ownsSignIn?: boolean
   /**
+   * The fixed id an added entry gets from its add input (`pi`: `pi:<provider>`), or a thrown
+   * `unsupported` for an input it cannot add. With it, ids are unique per entry, not per driver
+   * (`multiInstance` is not consulted), and adding an existing entry returns it unchanged.
+   */
+  instanceIdFor?(patch: InstanceConfigPatch): string
+  /**
+   * Removing an entry also signs it out (`runtime.signOut`): the credential Mousse holds for it is
+   * deleted, as the old Remove did. Never set for an agent on the user's own sign-in.
+   */
+  readonly removeSignsOut?: boolean
+  /** What the driver offers in Add provider (`providers.catalog.addOptions`), without `added`. */
+  addOptions?(): DriverAddOption[]
+  /**
    * Lenient decoder of an instance's stored `config`: unknown or malformed fields fall back. With
    * `instanceId`, fields that default per instance are resolved (the `pi` driver's engine).
    */
@@ -402,13 +431,14 @@ export interface HarnessDriver {
    * Capabilities for an instance at an installed version. `facts` (when the runtime reported them)
    * refine what a preset cannot know statically: fork, plan mode, models.
    */
-  caps(config: InstanceConfig, installedVersion?: string, facts?: RuntimeFacts): HarnessCaps
+  /** `instanceId`: the entry, for caps that depend on what was read for it (a locked entry's policy). */
+  caps(config: InstanceConfig, installedVersion?: string, facts?: RuntimeFacts, instanceId?: string): HarnessCaps
   /**
    * The caps an agent definition's turn runs on, when the instance runs definitions on another
    * runtime than its chats (`DriverRuntime.definitionAdapter`): a Pi connection on the RPC engine
    * runs definitions on Mousse's loop until Pi RPC can hold them (PR 4 unit 4d-rpc). Absent: `caps`.
    */
-  definitionCaps?(config: InstanceConfig): HarnessCaps
+  definitionCaps?(config: InstanceConfig, needs?: { loop?: boolean }): HarnessCaps
   /**
    * Arguments that make the executable print its version; `null` when it has no such flag (the
    * probe then skips the version check and the handshake decides whether it runs). Default
@@ -426,7 +456,13 @@ export interface HarnessDriver {
    * (`AdapterHost.bot`) before it runs, so a bot policy's approvals are answered by the host
    * (`approve: 'host'`) and never reach a person. Absent: such a policy is refused.
    */
-  botAuthority?(config: InstanceConfig): boolean
+  botAuthority?(config: InstanceConfig, instanceId?: string): boolean
+  /**
+   * Reads again, now, what the entry's caps and `botAuthority` depend on beyond its config (a
+   * locked Claude entry's organisation policy). The gateway calls it before every bot check point:
+   * approval, dispatch and turn admission.
+   */
+  readPolicyFacts?(config: InstanceConfig, instanceId: string): Promise<void>
   create(context: DriverContext): DriverRuntime
   /** The command that updates a binary installed by `owner`, when there is one. */
   updateCommand?(owner: InstallOwner): string | undefined
@@ -452,6 +488,8 @@ export function decodeInstanceConfig(raw: Record<string, unknown> | undefined, o
     if (Object.keys(env).length) config.env = env
   }
   if (raw.signedOutInMousse === true) config.signedOutInMousse = true
+  // Only an entry with a home of its own can be locked: the user's own setup is never.
+  if (raw.profile === 'locked' && config.home === 'private') config.profile = 'locked'
   return config
 }
 
@@ -479,4 +517,17 @@ export function installOwner(path: string | undefined, source: 'path' | 'managed
   if (normalized.includes('/winget/')) return 'winget'
   if (normalized.includes('/.local/bin/') || normalized.includes('/.local/share/') || normalized.includes('/.grok/bin/')) return 'standalone'
   return 'unknown'
+}
+
+/** A driver's Add option (`HarnessDriver.addOptions`); the gateway adds whether it is added already. */
+export interface DriverAddOption {
+  id: string
+  label: string
+  description?: string
+  methods: AddOptionMethod[]
+  guidedKey?: true
+  ambientInfo?: { label: string; instructions: string[] }
+  /** The add input's config (`instances.add({driver, config})`). */
+  config: InstanceConfigPatch
+  hasSavedKey: boolean
 }

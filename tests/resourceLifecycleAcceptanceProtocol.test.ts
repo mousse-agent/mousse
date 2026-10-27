@@ -215,7 +215,7 @@ describe('lifecycle public protocol acceptance', () => {
       const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
       expect(await cli.request('storage.policy', {})).toEqual({
         trash: { schemaVersion: 1, graceDays: 30, automaticPurge: false }, trashSweepStatus: { suspended: false },
-        policy: STORAGE_POLICY_DEFAULTS, clockSuspended: false
+        policy: STORAGE_POLICY_DEFAULTS, clockSuspended: false, reviewRecommended: false
       })
     } finally { await f.close() }
   })
@@ -261,6 +261,47 @@ describe('lifecycle public protocol acceptance', () => {
       expect(plan).toEqual([expect.objectContaining({ rule: 'trash', threadId: thread.id, action: 'remove' })])
       expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('trashed')
       expect(await cli.request('storage.cleanup.lastReport', {})).toEqual({ report: null })
+    } finally { await f.close() }
+  })
+
+  it('a run given the plan token empties only the trash the plan listed, and a malformed or stale token is refused', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const gui = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY])
+      const { thread: listed } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'listed' })
+      const { thread: later } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'later' })
+      await gui.request('threads.configureTrash', { graceDays: 1, automaticPurge: true })
+      const overdue = (id: string) => f.services.threads.lifecycleStore.update(id, (record) => { record.trashedAt = new Date(Date.now() - 3 * 86_400_000).toISOString() })
+      await f.rpc.request('threads.trash', { threadId: listed.id }); overdue(listed.id)
+      const { token } = await gui.request<{ token: { keys: string[]; policyDigest: string } }>('storage.cleanup.plan', {})
+      expect(token.keys).toEqual(['trash:' + listed.id])
+      await f.rpc.request('threads.trash', { threadId: later.id }); overdue(later.id)
+      for (const bad of [{ ...token, keys: 'all' }, { ...token, keys: [''] }, { ...token, expiresAt: 'soon' }, { ...token, policyDigest: undefined }, 'everything']) {
+        await expect(gui.request('storage.cleanup.run', { token: bad })).rejects.toThrow()
+      }
+      expect(f.services.threads.lifecycleStore.require(listed.id).state).toBe('trashed')
+      await expect(gui.request('storage.cleanup.run', { token: { ...token, policyDigest: 'f'.repeat(64) } })).rejects.toThrow(/Settings changed/)
+      expect(f.services.threads.lifecycleStore.require(listed.id).state).toBe('trashed')
+      const { report } = await gui.request<{ report: StorageCleanupReport }>('storage.cleanup.run', { token })
+      expect(report.items.filter((entry) => entry.rule === 'trash').map((entry) => entry.threadId)).toEqual([listed.id])
+      expect(f.services.threads.lifecycleStore.require(listed.id).state).toBe('purged')
+      expect(f.services.threads.lifecycleStore.require(later.id).state).toBe('trashed')
+    } finally { await f.close() }
+  })
+
+  it('storage.reviewDismiss ends the recommended-rules notice for a gui client and is refused for a cli client', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const gui = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY])
+      const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
+      expect(f.services.storagePolicy.initialize(() => true)).toBe('existing')
+      expect((await cli.request<{ reviewRecommended: boolean }>('storage.policy', {})).reviewRecommended).toBe(true)
+      await expect(cli.request('storage.reviewDismiss', {})).rejects.toMatchObject({ code: 'handler_error' })
+      expect((await cli.request<{ reviewRecommended: boolean }>('storage.policy', {})).reviewRecommended).toBe(true)
+      expect(await gui.request('storage.reviewDismiss', {})).toEqual({ reviewRecommended: false })
+      const after = await cli.request<{ reviewRecommended: boolean; policy: StoragePolicy }>('storage.policy', {})
+      expect(after.reviewRecommended).toBe(false)
+      expect(after.policy.worktrees.inactiveDays).toBeNull()
     } finally { await f.close() }
   })
 

@@ -1,4 +1,5 @@
 import { portableRepository } from '../bridge/dispatch/repository'
+import type { StorageCleanupPlanToken } from '../../shared/storage'
 import { validateAppletAppearance } from '../../shared/appletAppearance'
 import { appletJsonBytes, APPLET_STATE_LIMIT } from '../../shared/applets'
 import { ConversationActionService } from '../actions/ConversationActionService'
@@ -27,15 +28,17 @@ import { PROVIDER_STT_MAX_BYTES } from '../../shared/dictation'
 import { PROVIDER_TTS_MAX_CHARS } from '../../shared/readAloud'
 import type { ExternalEffect, ThreadAction } from '../../shared/threadActions'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
-import type { GitPullRequestInfo, PullRequestDetail, PullRequestPushTarget, RepositoryIdentity, ThreadPullRequestLink } from '../../shared/pullRequests'
+import { relinked, sameLinkedPullRequest, type GitPullRequestInfo, type PullRequestDetail, type PullRequestPushTarget, type PullRequestWatchMode, type RepositoryIdentity, type ThreadPullRequestLink } from '../../shared/pullRequests'
 import { PULL_REQUEST_EXISTS, PullRequestReadError } from '../git/GitHubCodeHost'
 import { PullRequestThreadError, PullRequestThreadService } from '../git/PullRequestThreadService'
-import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest } from '../../shared/types'
+import { PullRequestWatchError } from '../git/PullRequestWatchService'
+import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest, Thread } from '../../shared/types'
 import { AppError, createErrorProvider, knownAppError } from '../../shared/errors'
 import type { GitOperationHandle } from '../git/GitService'
-import { listClaimedQueue } from '../queue/ThreadMessageQueue'
+import { listClaimedQueue, QueueConflictError, QueueValidationError } from '../queue/ThreadMessageQueue'
 import { formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
-import type { ModelOverride } from '../../shared/providerInstances'
+import { withoutStandingRules } from '../orchestrator/UserQuestionService'
+import { ANTIGRAVITY_INSTANCE_ID, CLAUDE_INSTANCE_ID, CODEX_INSTANCE_ID, type ModelOverride } from '../../shared/providerInstances'
 import {
   ACCENT_COLORS,
   THEME_OPTIONS,
@@ -84,7 +87,10 @@ import { visibleThreadsFor } from './threadVisibility'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
-import { validateScheduledJobOptions, type ScheduledJobOptionsDeps } from '../scheduled/validateJobOptions'
+import { scheduledJobOptionsDepsFrom, validateScheduledJobOptions, type ScheduledJobOptionsDeps } from '../scheduled/validateJobOptions'
+import { isExecutableJobEdit, JobPermissionRefused, permissionAboveCeiling, permissionsAfterEdit } from '../scheduled/jobPermission'
+import { ScheduledWebhookError } from '../scheduled/ScheduledJobService'
+import { runNowRefusal } from '../scheduled/runNowRefusal'
 import { ActionExecutionError, StaleThreadActionRevisionError, ThreadActionService, type RunThreadActionOptions } from '../actions/ThreadActionService'
 import { UndoService } from '../actions/UndoService'
 import { UndoRetentionService } from '../actions/UndoRetentionService'
@@ -212,6 +218,21 @@ async function asRpcRejection<T>(run: () => Promise<T> | T): Promise<T> {
     return await run()
   } catch (error) {
     if (error instanceof CommandRejection) throw new DomainRpcError(error.reason, error.message)
+    throw error
+  }
+}
+
+/**
+ * A change to the queue that failed because the queue or the run is not as the caller expects (the conflict's code,
+ * with the ids to read again), or because the message cannot be changed that way (a message a turn started, a workflow
+ * command): the reason reaches the client instead of a generic failure.
+ */
+function queueRpc<T>(run: () => T): T {
+  try {
+    return run()
+  } catch (error) {
+    if (error instanceof QueueConflictError) throw new DomainRpcError(error.code, error.message, error.details)
+    if (error instanceof QueueValidationError) throw new DomainRpcError('queue_change_refused', error.message)
     throw error
   }
 }
@@ -528,6 +549,17 @@ async function readPullRequestDetail(ctx: HandlerContext, root: string, number: 
 }
 
 /**
+ * Writes a thread's link. The same pull request keeps its watch; a different one ends the old watch (with its line), since
+ * a watch belongs to the pull request it began on and must not resume later with an old cutoff and a backlog.
+ */
+function writeThreadLink(ctx: HandlerContext, threadId: string, next: ThreadPullRequestLink, keepWatch: boolean): Thread {
+  const previous = ctx.mms.threads.getThread(threadId)?.pullRequest
+  const thread = ctx.mms.threads.updateThreadMeta(threadId, { pullRequest: keepWatch ? relinked(previous, next) : next })
+  if (previous && !sameLinkedPullRequest(previous, next)) ctx.mms.pullRequestWatch.onEnded(threadId, 'unlinked')
+  return thread
+}
+
+/**
  * Links a pull request to the thread that asked for it. The pull request exists by now, so a link that
  * cannot be written (the host cannot name the repository, the thread is gone) must not fail the call;
  * the side card finds the pull request by its branch meanwhile.
@@ -536,7 +568,7 @@ async function linkOriginThread(ctx: HandlerContext, threadId: string | null, ro
   if (!threadId) return
   try {
     const identity = await ctx.mms.gitService.codeHost.repositoryIdentity(root)
-    ctx.mms.threads.updateThreadMeta(threadId, { pullRequest: threadPullRequestLink(identity, pullRequest) })
+    writeThreadLink(ctx, threadId, threadPullRequestLink(identity, pullRequest), true)
     ctx.emitEvent?.('threads.updated', { threads: ctx.mms.threads.listAllThreads() })
   } catch {
     // Left unlinked; see above.
@@ -839,6 +871,21 @@ function buildSendInput(
   return content
 }
 
+function badPlan(message: string): AppError {
+  return knownAppError({ code: 'storage_plan_invalid', message }, { category: 'invalid', retryable: false })
+}
+
+/** The token a dry run issued, as a client returns it. Anything else is refused rather than guessed. */
+function asPlanToken(value: unknown): StorageCleanupPlanToken {
+  const raw = isObject(value) ? value : {}
+  const time = (input: unknown, name: string): number => {
+    if (typeof input !== 'number' || !Number.isFinite(input) || input < 0) throw badPlan(`Invalid plan ${name}`)
+    return input
+  }
+  if (!Array.isArray(raw.keys) || raw.keys.length > 20_000 || raw.keys.some((key) => typeof key !== 'string' || key.length === 0 || key.length > 512)) throw badPlan('Invalid plan keys')
+  return { issuedAt: time(raw.issuedAt, 'time'), expiresAt: time(raw.expiresAt, 'expiry'), policyDigest: asString(raw.policyDigest, 'policyDigest', 128), keys: raw.keys as string[] }
+}
+
 function lifecycleExpectedGeneration(params: Record<string, unknown>): number | undefined {
   const value = params.expectedGeneration
   if (value === undefined) return undefined
@@ -872,6 +919,26 @@ function jobRefused(message: string): AppError {
   return knownAppError({ code: 'scheduled_job_refused', message }, { category: 'invalid', retryable: false })
 }
 
+/** Runs a webhook request; the service's refusals ("already has a webhook", "agent-created jobs ...") reach the caller as readable errors. */
+async function withWebhookRefusals<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run()
+  } catch (error) {
+    if (error instanceof ScheduledWebhookError) throw jobRefused(error.message)
+    throw error
+  }
+}
+
+/** A refusal of a job's permission fields reaches the caller as a readable error. */
+function withPermissionRefusals<T>(run: () => T): T {
+  try {
+    return run()
+  } catch (error) {
+    if (error instanceof JobPermissionRefused) throw jobRefused(error.message)
+    throw error
+  }
+}
+
 /** `validateScheduledJobOptions` with its plain-text refusals made visible to the caller. */
 function checkJobOptions(ctx: HandlerContext, job: Parameters<typeof validateScheduledJobOptions>[0]): ReturnType<typeof validateScheduledJobOptions> {
   try {
@@ -884,22 +951,12 @@ function checkJobOptions(ctx: HandlerContext, job: Parameters<typeof validateSch
 
 /** The profile services the scheduled-job checks read (model, mode and workspace of a job). */
 function scheduledJobOptionsDeps(ctx: HandlerContext): ScheduledJobOptionsDeps {
-  const { threads, projects } = ctx.mms
-  return {
-    overrideFor: (input) => ctx.mms.providerInstances.overrideFor(input),
-    resolveStored: (selection, options) => harnessGateway(ctx).resolveStored(selection, options),
-    getProject: (projectId) => projects.getProject(projectId),
-    getThread: (threadId) => threads.getThread(threadId),
-    listProjectThreads: (projectId) => threads.listAllThreads().filter((thread) => thread.projectId === projectId),
-    loadWorkspace: (threadId) => new ThreadWorkspaceManager(threads.getThreadDir(threadId)).load(),
-    isGitBacked: (projectPath) => {
-      try {
-        return new ThreadWorkspaceManager('').resolveRepository(projectPath).capability.gitBacked
-      } catch {
-        return false
-      }
-    }
-  }
+  return scheduledJobOptionsDepsFrom({
+    providerInstances: ctx.mms.providerInstances,
+    harness: () => harnessGateway(ctx),
+    projects: ctx.mms.projects,
+    threads: ctx.mms.threads
+  })
 }
 
 async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
@@ -1088,10 +1145,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const settled = asOptionalBoolean(p.settled, 'settled') === true
       const thread = ctx.mms.threads.setThreadSettled(threadId, settled)
       // Settling a thread (the sidebar's archive) is a Stop: what it still runs ends with it.
-      if (settled)
+      if (settled) {
+        // The watch ends as archived, not as stopped.
+        ctx.mms.pullRequestWatch.onEnded(threadId, 'settled')
         await ctx.mms.orchestrator.stopThread(threadId, 'settled').catch((error: unknown) => {
           console.warn('settling a thread could not stop its work', { threadId, error: error instanceof Error ? error.message : String(error) })
         })
+      }
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
@@ -1219,6 +1279,24 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
+    }
+    case 'threads.approvalRules': {
+      // The thread's "Always for this thread" rules (SPEC §17.8). Not exposed on the Bridge.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      return { threadId, rules: ctx.mms.orchestrator.listApprovalRules(threadId) }
+    }
+    case 'threads.clearApprovalRules': {
+      // Revokes one rule (`ruleId`) or every rule of the thread. Not exposed on the Bridge.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'ruleId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const ruleId = asOptionalString(p.ruleId, 256)
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      const { removed } = ctx.mms.orchestrator.clearApprovalRules(threadId, ruleId)
+      return { threadId, removed, rules: ctx.mms.orchestrator.listApprovalRules(threadId) }
     }
     case 'orchestrator.send': {
       const p = isObject(params) ? params : {}
@@ -1349,6 +1427,21 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       return { handoffs: ctx.mms.runEngine.handoffs.listForThread(threadId) }
     }
+    case 'runs.resumeNow': {
+      // Continue a run a usage limit paused, now instead of at the reset time. A run that is not paused (the
+      // banner has not caught up with a hand-over or a Cancel) is refused `conflict`.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['runId'])
+      const runId = asString(p.runId, 'runId', 256)
+      return asRpcRejection(() => ctx.mms.orchestrator.resumePausedRun(runId))
+    }
+    case 'runs.cancelPause': {
+      // End a pause without continuing: the run is cancelled and the thread's held messages go on.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['runId'])
+      const runId = asString(p.runId, 'runId', 256)
+      return asRpcRejection(() => ctx.mms.orchestrator.cancelPausedRun(runId))
+    }
     case 'thread.fork': {
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['sourceThreadId', 'atRunOrdinal', 'title', 'clientRequestId', 'seedFrom'])
@@ -1390,10 +1483,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'queue.list': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
-      const session = ctx.mms.orchestrator.getOrCreateSession(threadId)
+      ctx.mms.orchestrator.getOrCreateSession(threadId)
+      // Read from disk (after an agent command a crash left unfinished is finished): the queue a change that names
+      // the revision is checked against. `open` is false while a merge-back keeps the queue from taking messages.
+      const snapshot = ctx.mms.orchestrator.queueSnapshot(threadId)
       return {
-        items: ctx.mms.orchestrator.listQueue(threadId),
-        claimed: listClaimedQueue(session.queue).filter((item) => !item.internal)
+        items: snapshot.items,
+        claimed: snapshot.claimed,
+        revision: snapshot.revision,
+        open: snapshot.open,
+        ...(snapshot.blockedReason ? { blockedReason: snapshot.blockedReason } : {})
       }
     }
     case 'queue.enqueue': {
@@ -1411,6 +1510,18 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       )
       return { item, items: ctx.mms.orchestrator.listQueue(threadId) }
     }
+    case 'queue.edit': {
+      const p = isObject(params) ? params : {}
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const itemId = asString(p.itemId, 'itemId', 256)
+      const content = asOptionalString(p.content)
+      const mode = asOptionalChatMode(p.mode, 'mode')
+      if (content === undefined && mode === undefined) throw new DomainRpcError('invalid_params', 'queue.edit needs content or mode.')
+      const expectedRevision = asOptionalString(p.expectedRevision, 64)
+      // Who wrote the message and the mode limit it carries stay as they are; the edit changes the text and chat mode only.
+      const item = queueRpc(() => ctx.mms.orchestrator.editQueuedItem(threadId, itemId, { content, mode }, { expectedRevision }))
+      return { item, items: ctx.mms.orchestrator.listQueue(threadId) }
+    }
     case 'queue.reorder': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
@@ -1418,14 +1529,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         unique: true,
         maxItems: 10_000
       })
-      const items = ctx.mms.orchestrator.reorderQueue(threadId, orderedIds)
+      const expectedRevision = asOptionalString(p.expectedRevision, 64)
+      const items = queueRpc(() => ctx.mms.orchestrator.reorderQueue(threadId, orderedIds, { expectedRevision }))
       return { items }
     }
     case 'queue.remove': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       const itemId = asString(p.itemId, 'itemId', 256)
-      const removed = ctx.mms.orchestrator.removeQueuedItem(threadId, itemId)
+      const expectedRevision = asOptionalString(p.expectedRevision, 64)
+      const removed = queueRpc(() => ctx.mms.orchestrator.removeQueuedItem(threadId, itemId, { expectedRevision }))
       if (!removed) {
         const current = ctx.mms.orchestrator
           .getOrCreateSession(threadId)
@@ -1441,7 +1554,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       const itemId = asString(p.itemId, 'itemId', 256)
-      const ok = ctx.mms.orchestrator.promoteQueueItemToSteer(threadId, itemId)
+      const expectedRevision = asOptionalString(p.expectedRevision, 64)
+      const expectedRunId = asOptionalString(p.expectedRunId, 256)
+      // A message an agent wrote keeps the mode limit it carries: a run that runs looser than that limit refuses it.
+      const ok = queueRpc(() => ctx.mms.orchestrator.promoteQueueItemToSteer(threadId, itemId, { expectedRevision, expectedRunId }))
       return { ok, items: ctx.mms.orchestrator.listQueue(threadId) }
     }
     case 'orchestrator.contextUsage': {
@@ -1458,8 +1574,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const requestId = asString(p.requestId, 'requestId', 256)
       const answers = asAnswersMap(p.answers)
       const pending = ctx.mms.questions.getPending(requestId)
-      const ok = ctx.mms.questions.submitAnswers(requestId, answers, questionAnswerer(ctx))
-      if (ok && pending) {
+      const settled = ctx.mms.questions.settle(requestId, answers, questionAnswerer(ctx))
+      if (settled.ok && pending) {
         // Answers reach the model through the tool result; mirror them as a
         // visible user message so the transcript shows what the user said.
         ctx.mms.orchestrator.recordQuestionResponseMessage(
@@ -1467,7 +1583,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           formatQuestionAnswersMessage(pending.questions, answers)
         )
       }
-      return { ok }
+      // The loser of a race learns who won and what they decided (SPEC §17.4).
+      if (!settled.ok && (settled.reason === 'already_answered' || settled.reason === 'cancelled'))
+        return {
+          ok: false,
+          reason: settled.reason,
+          ...(settled.answeredBy ? { answeredBy: settled.answeredBy } : {}),
+          ...(settled.decision ? { decision: settled.decision } : {}),
+          ...(settled.cancelReason ? { cancelReason: settled.cancelReason } : {})
+        }
+      return { ok: settled.ok }
     }
     case 'orchestrator.dismissQuestions': {
       const p = isObject(params) ? params : {}
@@ -1485,10 +1610,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'orchestrator.pendingQuestions': {
       const p = isObject(params) ? params : {}
       const threadId = asOptionalString(p.threadId, 256)
+      // A request over the Bridge (no connection of its own) is shown without "Always for this thread": a linked
+      // device cannot list or revoke rules, so it does not make them.
+      const shown = ctx.connection ? <T extends { questions: unknown[] }>(entry: T): T => entry : withoutStandingRules
       if (threadId) {
-        return { pending: ctx.mms.questions.listPendingForThread(threadId) }
+        return { pending: ctx.mms.questions.listPendingForThread(threadId).map(shown) }
       }
-      return { pending: ctx.mms.questions.listAllPending() }
+      return { pending: ctx.mms.questions.listAllPending().map(shown) }
     }
     case 'subagents.stopAll': {
       // Lineage's Stop all: every subagent of the thread that is working, each with its own subtree; the thread keeps running.
@@ -1741,11 +1869,17 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const input = asCreateScheduledJobInput(p.input)
       // The selection is stored as the profile resolves it; a `worktree` workspace names the thread that owns it.
       const checked = checkJobOptions(ctx, input)
-      const job = ctx.mms.scheduled.createJob({
+      // The job's ceiling is the mode its creator holds now (the target thread's, else the profile's). It comes
+      // from the daemon, never from the request, and the job's own mode may not exceed it.
+      const permissionCeiling = ctx.mms.orchestrator.scheduledCreatorCeiling(checked.threadId ?? input.threadId)
+      const tooWide = permissionAboveCeiling(input.permissionMode, permissionCeiling)
+      if (tooWide) throw jobRefused(tooWide)
+      const job = withPermissionRefusals(() => ctx.mms.scheduled.createJob({
         ...input,
+        permissionCeiling,
         ...(checked.selection ? { selection: checked.selection } : {}),
         ...(checked.threadId ? { threadId: checked.threadId } : {})
-      })
+      }))
       return { job, jobs: ctx.mms.scheduled.listJobs() }
     }
     case 'scheduled.update': {
@@ -1754,6 +1888,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const patch = asScheduledJobPatch(p.patch)
       const existing = ctx.mms.scheduled.getJob(id)
       if (!existing) throw new Error(`Job not found: ${id}`)
+      if (patch.schedule?.kind === 'once' && existing.trigger?.webhook) {
+        throw jobRefused('A job with a webhook cannot become a one-time job; disable its webhook first, or use a manual schedule.')
+      }
       // Validate the job as it would be after the change; `null` clears a field.
       const merged = {
         threadId: patch.threadId === undefined ? existing.threadId : patch.threadId ?? undefined,
@@ -1764,7 +1901,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
       const touchesOptions = ['selection', 'mode', 'workspace', 'threadId', 'projectId'].some((key) => (patch as Record<string, unknown>)[key] !== undefined)
       const checked = touchesOptions ? checkJobOptions(ctx, merged) : {}
-      const job = ctx.mms.scheduled.updateJob(id, {
+      // An edit never raises the job's ceiling above what the editor holds now. The person editing here may raise it
+      // to their own mode by choosing a mode on purpose (see `permissionsAfterEdit`). It is worked out inside the store's
+      // lock, against the job as stored at that moment, so two edits at once cannot undo each other's lowering.
+      const executable = isExecutableJobEdit(patch)
+      const job = withPermissionRefusals(() => ctx.mms.scheduled.updateJob(id, {
         ...(patch.name !== undefined ? { name: patch.name } : {}),
         ...(patch.prompt !== undefined ? { prompt: patch.prompt } : {}),
         ...(patch.schedule !== undefined ? { schedule: patch.schedule } : {}),
@@ -1785,7 +1926,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
                 }
               }
             : {})
-      })
+      }, {
+        permissions: (current) => permissionsAfterEdit({
+          stored: current,
+          editor: ctx.mms.orchestrator.scheduledCreatorCeiling(checked.threadId ?? (patch.threadId === undefined ? current.threadId : patch.threadId ?? undefined)),
+          patchMode: patch.permissionMode,
+          executable,
+          canRaise: true
+        })
+      }))
       return { job, jobs: ctx.mms.scheduled.listJobs() }
     }
     case 'scheduled.delete': {
@@ -1812,10 +1961,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const id = asString(p.id, 'id', 256)
       // A job with a run in flight or waiting in a queue has one occurrence outstanding; say so instead of reporting a start.
       const current = ctx.mms.scheduled.getJob(id)
-      if (current?.state === 'running' || current?.runClaim) throw jobRefused(`Job is already running: ${current.name}`)
-      if (current?.pendingOccurrence) {
-        throw jobRefused(`Job already has a run ${current.pendingOccurrence.state === 'queued' ? 'waiting in the queue' : 'in progress'}: ${current.name}. It can run again when that run ends.`)
-      }
+      const refusal = current ? runNowRefusal(current) : undefined
+      if (refusal) throw jobRefused(refusal)
       const job = ctx.mms.scheduled.triggerJob(id)
       // Run now starts within seconds: the scheduler ticks now instead of at the next minute.
       if (job) ctx.mms.scheduled.wake()
@@ -1823,6 +1970,48 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'scheduled.status':
       return { status: ctx.mms.scheduled.getStatus() }
+    case 'scheduled.settings.get':
+      return { settings: { agentJobs: ctx.mms.config.agentJobsEnabled() } }
+    case 'scheduled.settings.set': {
+      const p = isObject(params) ? params : {}
+      for (const key of Object.keys(p)) if (key !== 'agentJobs') throw jobRefused(`${key} is not allowed`)
+      const agentJobs = asBoolean(p.agentJobs, 'agentJobs')
+      ctx.mms.config.updateScheduledSection({ agentJobs })
+      // Off means the jobs agents made stop now, visibly paused; turning it on again does not restart them.
+      if (!agentJobs) ctx.mms.scheduled.pauseAgentJobs()
+      return { settings: { agentJobs: ctx.mms.config.agentJobsEnabled() } }
+    }
+    case 'scheduled.extend': {
+      const p = isObject(params) ? params : {}
+      const id = asString(p.id, 'id', 256)
+      const days = p.days === undefined ? undefined : asBoundedInt(p.days, 'days', { min: 1, max: 365 })
+      const job = ctx.mms.scheduled.extendJob(id, days)
+      if (!job) throw jobRefused(`Job not found: ${id}`)
+      return { job, jobs: ctx.mms.scheduled.listJobs() }
+    }
+    // The secret is in the `enable` and `rotate` answers only; no other method returns it.
+    case 'scheduled.webhook.enable': {
+      const p = isObject(params) ? params : {}
+      const id = asString(p.id, 'id', 256)
+      const port = p.port === undefined ? undefined : asBoundedInt(p.port, 'port', { min: 1024, max: 65535 })
+      return withWebhookRefusals(async () => ({ ...(await ctx.mms.enableScheduledWebhook(id, { port })), jobs: ctx.mms.scheduled.listJobs() }))
+    }
+    case 'scheduled.webhook.rotate': {
+      const p = isObject(params) ? params : {}
+      const id = asString(p.id, 'id', 256)
+      return withWebhookRefusals(async () => ({ ...ctx.mms.scheduled.rotateWebhook(id), url: ctx.mms.scheduledWebhookUrl(id), jobs: ctx.mms.scheduled.listJobs() }))
+    }
+    case 'scheduled.webhook.disable': {
+      const p = isObject(params) ? params : {}
+      const id = asString(p.id, 'id', 256)
+      return withWebhookRefusals(async () => ({ job: ctx.mms.scheduled.disableWebhook(id), jobs: ctx.mms.scheduled.listJobs() }))
+    }
+    case 'scheduled.webhook.deliveries': {
+      const p = isObject(params) ? params : {}
+      const id = asString(p.id, 'id', 256)
+      // The URL lets a page that opens later show where senders post; it carries no secret.
+      return withWebhookRefusals(async () => ({ deliveries: ctx.mms.scheduled.listWebhookDeliveries(id), url: ctx.mms.scheduledWebhookUrl(id) }))
+    }
     // ── Channels ──────────────────────────────────────────────────────────
     case 'channels.getSnapshot':
       return { snapshot: ctx.mms.channels.getSnapshot() }
@@ -1879,6 +2068,42 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           ? Math.min(Math.floor(p.limit), 500)
           : undefined
       return { activity: ctx.mms.channels.getRecentActivity(limit) }
+    }
+    // "This is me" (PR 6 §6): a code shown here, `/owner <code>` from the account, then confirm.
+    case 'channels.owner.start': {
+      const p = isObject(params) ? params : {}
+      try {
+        return { claim: ctx.mms.channels.startOwnerClaim(asChannelPlatform(p.platform)) }
+      } catch (error) {
+        if ((error as { code?: unknown }).code === 'channel_owner_unconfirmed')
+          throw knownAppError({ code: 'channel_owner_unconfirmed', message: (error as Error).message }, { category: 'invalid', retryable: false })
+        throw error
+      }
+    }
+    case 'channels.owner.status': {
+      const p = isObject(params) ? params : {}
+      return { claim: ctx.mms.channels.ownerClaimStatus(asChannelPlatform(p.platform)) }
+    }
+    case 'channels.owner.confirm': {
+      const p = isObject(params) ? params : {}
+      const platform = asChannelPlatform(p.platform)
+      const userId = asString(p.userId, 'userId', 256)
+      try {
+        return { owners: ctx.mms.channels.confirmOwner(platform, userId) }
+      } catch (error) {
+        if ((error as { code?: unknown }).code === 'channel_owner_unconfirmed')
+          throw knownAppError({ code: 'channel_owner_unconfirmed', message: (error as Error).message }, { category: 'invalid', retryable: false })
+        throw error
+      }
+    }
+    case 'channels.owner.cancel': {
+      const p = isObject(params) ? params : {}
+      ctx.mms.channels.cancelOwnerClaim(asChannelPlatform(p.platform))
+      return { ok: true }
+    }
+    case 'channels.owner.clear': {
+      const p = isObject(params) ? params : {}
+      return { owners: ctx.mms.channels.clearOwner(asChannelPlatform(p.platform)) }
     }
     // ── MCP / skills ──────────────────────────────────────────────────────
     case 'mcp.listServers': {
@@ -2032,8 +2257,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'settings.getOptions': {
       await ctx.mms.providerAuth.init()
-      await refreshVendorSignIns(ctx)
-      const llmProviders = ctx.mms.providerInstances.llmProviders()
+      // The first read after start waits for each instance's first check (`awaitFirstChecks`).
+      const llmProviders = (await ctx.mms.harness?.llmProviders({ kind: 'device' })) ?? []
       const agentTypes = buildAgentTypesFromCatalogs(ctx.mms.providerAuth.getCatalogLlmProviders())
       return {
         options: {
@@ -2056,7 +2281,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       await ctx.mms.claudeSubscription.status()
       // Pi providers read the shared pi-ai credentials; agents (Codex) answer for the bound profile.
       const [usage, claude, agents] = await Promise.all([
-        ctx.mms.providerAuth.getUsage(),
+        // Providers removed from this profile are left out (`providerAccess`).
+        ctx.mms.providerAccess.usage(),
         ctx.mms.claudeSubscription.configured()
           ? ctx.mms.claudeSubscription.getUsage(ctx.mms.worktrees.getRepoRoot())
           : Promise.resolve(undefined),
@@ -2071,7 +2297,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'providers.getSubscriptionUsage': {
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
-      const text = await ctx.mms.providerAuth.getSubscriptionUsage(providerId)
+      // A provider removed from this profile is refused (`providerAccess`).
+      const text = await ctx.mms.providerAccess.subscriptionUsage(providerId)
       if (text !== undefined) return { usage: text }
       // An agent instance named by its id (`codex`, `codex:work`).
       const agent = (await ctx.mms.harness?.instances.usage({ kind: 'device' }))?.find((entry) => entry.id === providerId)
@@ -2083,7 +2310,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const modelId = asString(p.modelId, 'modelId', 256)
       const text = asString(p.text, 'text', PROVIDER_TTS_MAX_CHARS)
       const voice = p.voice === undefined ? undefined : asString(p.voice, 'voice', 128)
-      const { audio, mimeType } = await ctx.mms.providerAuth.synthesizeSpeech({ providerId, modelId, text, voice })
+      const { audio, mimeType } = await ctx.mms.providerAccess.synthesizeSpeech({ providerId, modelId, text, voice })
       return { audioBase64: Buffer.from(audio).toString('base64'), mimeType }
     }
     case 'providers.transcribeAudio': {
@@ -2098,14 +2325,26 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (audio.byteLength > PROVIDER_STT_MAX_BYTES) {
         throw new Error(`The recording is too long to transcribe with ${ctx.mms.providerAuth.getProviderDisplayName(providerId)}. Record a shorter message.`)
       }
-      const { text } = await ctx.mms.providerAuth.transcribeAudio({ providerId, modelId, audio, mimeType })
+      const { text } = await ctx.mms.providerAccess.transcribeAudio({ providerId, modelId, audio, mimeType })
       return { text }
     }
     case 'providers.getLoginOptions': {
       const p = isObject(params) ? params : {}
       const authType = asOptionalString(p.authType, 32) as 'api_key' | 'oauth' | undefined
       await refreshVendorSignIns(ctx)
-      return { options: [...ctx.mms.providerAuth.getLoginOptions(authType), ...(authType === 'api_key' || ctx.mms.antigravity.configured() ? [] : [ctx.mms.antigravity.loginOption()]), ...(authType === 'api_key' || ctx.mms.claudeSubscription.configured() ? [] : [ctx.mms.claudeSubscription.loginOption()]), ...(authType === 'api_key' || ctx.mms.codex.configured() ? [] : [ctx.mms.codex.loginOption()])] }
+      // A built-in agent offers its sign-in only while it is an entry of the profile: a removed one
+      // comes back through Add provider's agent choice, not as a model API.
+      const entries = ctx.mms.providerInstances.list()
+      const offered = (instanceId: string, service: { configured(): boolean }) =>
+        authType !== 'api_key' && !service.configured() && Object.prototype.hasOwnProperty.call(entries, instanceId)
+      return {
+        options: [
+          ...ctx.mms.providerAuth.getLoginOptions(authType),
+          ...(offered(ANTIGRAVITY_INSTANCE_ID, ctx.mms.antigravity) ? [ctx.mms.antigravity.loginOption()] : []),
+          ...(offered(CLAUDE_INSTANCE_ID, ctx.mms.claudeSubscription) ? [ctx.mms.claudeSubscription.loginOption()] : []),
+          ...(offered(CODEX_INSTANCE_ID, ctx.mms.codex) ? [ctx.mms.codex.loginOption()] : [])
+        ]
+      }
     }
     case 'providers.refreshModels': {
       const p = isObject(params) ? params : {}
@@ -2113,7 +2352,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // A vendor instance refreshes through its runtime; anything else is a pi-ai provider.
       if (!(await harnessGateway(ctx).legacy.refreshModels(providerId, ctx.mms.worktrees.getRepoRoot())))
         await ctx.mms.providerAuth.refreshDynamicModels()
-      return { options: ctx.mms.providerInstances.llmProviders() }
+      return { options: await harnessGateway(ctx).llmProviders({ kind: 'device' }) }
     }
     case 'providers.getAmbientInfo': {
       const p = isObject(params) ? params : {}
@@ -2124,7 +2363,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
       const apiKey = asString(p.apiKey, 'apiKey', 8192)
+      // A removal still deleting this provider's key ends before the new key is saved.
+      await ctx.mms.harness?.legacy.removalSettled(providerId)
       await ctx.mms.providerAuth.setApiKey(providerId, apiKey)
+      // The old Add dialog's key is an explicit add: a model API removed from this profile comes back.
+      await ctx.mms.harness?.legacy.explicitAdd(providerId)
       await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
       await ctx.mms.harness?.legacy.credentialsChanged(providerId)
       const providers = ctx.mms.providerInstances.configuredProviders()
@@ -2156,7 +2399,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'providers.verifyAmbient': {
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
+      await ctx.mms.harness?.legacy.removalSettled(providerId)
       const result = await ctx.mms.providerAuth.verifyAmbientProvider(providerId)
+      if (result?.success) await ctx.mms.harness?.legacy.explicitAdd(providerId)
       await ctx.mms.harness?.legacy.credentialsChanged(providerId)
       const providers = ctx.mms.providerInstances.configuredProviders()
       if (result?.success) ctx.emitEvent?.('providers.changed', { providers })
@@ -2177,6 +2422,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'providers.loginOAuth': {
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
+      await ctx.mms.harness?.legacy.removalSettled(providerId)
       const session = ctx.mms.providerAuth.createSession()
       const forward = (event: unknown): void => {
         ctx.emitEvent?.('providers.login-event', {
@@ -2189,6 +2435,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         const result = await (harnessGateway(ctx).legacy.login(providerId, session, ctx.mms.worktrees.getRepoRoot())
           ?? ctx.mms.providerAuth.runOAuthLogin(session, providerId))
         if (result && (result as { success?: boolean }).success !== false) {
+          await ctx.mms.harness?.legacy.explicitAdd(providerId)
           await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
         }
         await ctx.mms.harness?.legacy.credentialsChanged(providerId)
@@ -2209,6 +2456,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'providers.loginApiKey': {
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
+      await ctx.mms.harness?.legacy.removalSettled(providerId)
       const session = ctx.mms.providerAuth.createSession()
       const forward = (event: unknown): void => {
         ctx.emitEvent?.('providers.login-event', {
@@ -2220,6 +2468,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       try {
         const result = await ctx.mms.providerAuth.runApiKeyLogin(session, providerId)
         if (result && (result as { success?: boolean }).success !== false) {
+          await ctx.mms.harness?.legacy.explicitAdd(providerId)
           await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
         }
         await ctx.mms.harness?.legacy.credentialsChanged(providerId)
@@ -2258,10 +2507,23 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'providers.snapshots': {
       const p = isObject(params) ? params : {}
       const scope = asProviderScope(p.scope)
-      return { scope, snapshots: await harnessGateway(ctx).instances.snapshots(scope) }
+      const snapshots = await harnessGateway(ctx).instances.snapshots(scope)
+      const instancesError = ctx.mms.providerInstances?.storeError()
+      // Present while the profile's stored instance map cannot be read (nothing is overwritten).
+      return { scope, snapshots, ...(instancesError ? { instancesError } : {}) }
     }
-    case 'providers.instances.add':
-      return { snapshot: await harnessGateway(ctx).instances.add(asAddInstanceInput(params)) }
+    case 'providers.catalog.addOptions':
+      return { options: harnessGateway(ctx).catalog.addOptions() }
+    case 'providers.instances.add': {
+      // A fixed-id entry that exists already comes back unchanged (`existed`), so adding is idempotent.
+      const { snapshot, existed } = await harnessGateway(ctx).instances.addInstance(asAddInstanceInput(params))
+      return { snapshot, ...(existed ? { existed: true } : {}) }
+    }
+    case 'providers.instances.setSecret': {
+      const p = isObject(params) ? params : {}
+      const instanceId = asInstanceId(p.instanceId)
+      return { snapshot: await harnessGateway(ctx).instances.setSecret(instanceId, asString(p.value, 'value', 8192)) }
+    }
     case 'providers.instances.remove': {
       const p = isObject(params) ? params : {}
       await harnessGateway(ctx).instances.remove(asInstanceId(p.instanceId))
@@ -3027,7 +3289,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (now?.number !== before?.number || now?.linkedAt !== before?.linkedAt) {
         throw new DomainRpcError('pull_request_link_changed', "The thread's pull request link changed while it was being read; try again", { threadId, number })
       }
-      const thread = ctx.mms.threads.updateThreadMeta(threadId, { pullRequest: threadPullRequestLinkFromDetail(detail) })
+      // The same pull request keeps its watch; another one starts unwatched (a watch belongs to the pull request it began on).
+      const thread = writeThreadLink(ctx, threadId, threadPullRequestLinkFromDetail(detail), true)
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
@@ -3093,9 +3356,50 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       const thread = ctx.mms.threads.updateThreadMeta(threadId, { pullRequest: undefined })
+      // A watch cannot outlive the link it watches through; it ends with its line.
+      ctx.mms.pullRequestWatch.onEnded(threadId, 'unlinked')
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
+    }
+    case 'pullRequests.watch': {
+      // Turns a thread's watch of its pull request off, to notify (a line in the thread) or to act (also wakes the agent).
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'watch', 'number'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const mode = asString(p.watch, 'watch', 16)
+      if (mode !== 'off' && mode !== 'notify' && mode !== 'act') throw new DomainRpcError('invalid_params', 'watch must be off, notify or act')
+      const number = asOptionalBoundedInt(p.number, 'number', { min: 1, max: Number.MAX_SAFE_INTEGER })
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      ctx.mms.threads.assertThreadAdmission(threadId)
+      if (mode !== 'off' && number !== undefined && ctx.mms.threads.getThread(threadId)?.pullRequest?.number !== number) {
+        // No link to this pull request yet: link it first, from the host's full read, as `pullRequests.link` does.
+        await ensureWorkspaceMaterialized(ctx, threadId)
+        const detail = await readPullRequestDetail(ctx, pullRequestFolder(ctx, { threadId }), number, true)
+        writeThreadLink(ctx, threadId, threadPullRequestLinkFromDetail(detail), false)
+      }
+      let status
+      try {
+        status = ctx.mms.pullRequestWatch.setMode(threadId, mode as PullRequestWatchMode)
+      } catch (error) {
+        if (error instanceof PullRequestWatchError) throw new DomainRpcError(error.code, error.message, { threadId })
+        throw error
+      }
+      const threads = ctx.mms.threads.listAllThreads()
+      ctx.emitEvent?.('threads.updated', { threads })
+      return { status, thread: ctx.mms.threads.getThread(threadId), threads: visibleThreadsFor(ctx.connection, threads) }
+    }
+    case 'pullRequests.watchStatus': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      const status = ctx.mms.pullRequestWatch.status(threadId)
+      // The account whose own comments are never reported; read without waiting for the host when it is not known yet.
+      const link = ctx.mms.threads.getThread(threadId)?.pullRequest
+      const folder = link ? pullRequestFolder(ctx, { threadId }) : null
+      const viewer = folder && status.state !== 'off' ? await ctx.mms.gitService.codeHost.viewerLogin(folder) : null
+      return { status: { ...status, viewer } }
     }
     case 'threads.inventory': {
       const p = isObject(params) ? params : {}
@@ -3156,7 +3460,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'storage.policy': {
       const cleanup = ctx.mms.lifecycle.cleanup
-      return { trash: cleanup.policy(), trashSweepStatus: cleanup.sweepStatus(), policy: ctx.mms.storagePolicy.policy(), clockSuspended: ctx.mms.storageCleanup.clockSuspended() }
+      return { trash: cleanup.policy(), trashSweepStatus: cleanup.sweepStatus(), policy: ctx.mms.storagePolicy.policy(), clockSuspended: ctx.mms.storageCleanup.clockSuspended(), reviewRecommended: ctx.mms.storagePolicy.reviewPending() }
+    }
+    // The notice about the recommended rules is dismissed; the rules stay as they are.
+    case 'storage.reviewDismiss': {
+      ctx.mms.storagePolicy.dismissReview(ctx.connection?.clientType === 'gui')
+      return { reviewRecommended: false }
     }
     case 'storage.configure': {
       const p = isObject(params) ? params : {}
@@ -3176,11 +3485,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       return { policy }
     }
     // Any local client may run it: it only applies rules a person already configured.
-    case 'storage.cleanup.run':
-      return { report: await ctx.mms.storageCleanup.run('manual') }
+    // With a `token` from the dry run it removes only what that plan named, and only if it is still eligible.
+    case 'storage.cleanup.run': {
+      const p = isObject(params) ? params : {}
+      return { report: await ctx.mms.storageCleanup.run('manual', p.token === undefined ? undefined : { plan: asPlanToken(p.token) }) }
+    }
     // Dry run: what a run would remove or keep now. Changes nothing, so it is open to any local client too.
+    // The token is what a confirmed run is bounded by.
     case 'storage.cleanup.plan':
-      return { plan: await ctx.mms.storageCleanup.plan() }
+      return await ctx.mms.storageCleanup.planWithToken()
     case 'storage.cleanup.lastReport':
       return { report: ctx.mms.storageCleanup.lastReport() }
     // Totals by project, thread and kind, from the cache (a scan only on `refresh` or the first call). Ids and names, never a path.

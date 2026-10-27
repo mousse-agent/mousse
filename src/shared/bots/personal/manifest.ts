@@ -1,5 +1,5 @@
 import { isNeutralTool, type NeutralTool } from '../../harness/tools'
-import type { BotBudget, BotManifest, BotPermissionLine } from './definition'
+import { folderAccess, foldersOf, workspaceOf, type BotBudget, type BotManifest, type BotPermissionLine } from './definition'
 
 /**
  * A bot manifest's canonical form, the subset rule of approval, and the plain words the approval
@@ -45,9 +45,7 @@ export function canonicalManifest(manifest: BotManifest): BotManifest {
     appTools: sorted(manifest.appTools, (tool) => tool),
     mcp: sorted(manifest.mcp, mcpIdentity).map((pair) => ({ serverId: pair.serverId, tool: pair.tool })),
     skills: sorted(manifest.skills, (skill) => skill),
-    workspace: manifest.workspace
-      ? { roots: sorted(manifest.workspace.roots, (root) => root), access: manifest.workspace.access }
-      : null,
+    workspace: workspaceOf(foldersOf(manifest.workspace)),
     budget,
     audience: manifest.audience
   }
@@ -69,6 +67,11 @@ export function manifestProblem(value: unknown): string | undefined {
     if (!workspace || typeof workspace !== 'object' || !strings(workspace.roots) || workspace.roots.length === 0) return 'The bot needs at least one folder, or no file access.'
     if (workspace.access !== 'read' && workspace.access !== 'write') return 'Folder access must be read or write.'
     if (workspace.roots.some((root) => !isAbsolutePath(root))) return 'Folders must be absolute paths.'
+    if (workspace.rootAccess !== undefined) {
+      if (!workspace.rootAccess || typeof workspace.rootAccess !== 'object' || Array.isArray(workspace.rootAccess)) return 'Folder access is invalid.'
+      for (const [root, access] of Object.entries(workspace.rootAccess))
+        if (!workspace.roots.includes(root) || (access !== 'read' && access !== 'write')) return 'Folder access is invalid.'
+    }
   }
   const budget = manifest.budget
   if (!budget || typeof budget !== 'object') return 'The limits are missing.'
@@ -84,8 +87,22 @@ export function manifestProblem(value: unknown): string | undefined {
   return undefined
 }
 
-function isAbsolutePath(path: string): boolean {
-  return path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path) || path.startsWith('\\\\')
+/**
+ * A full folder path that names exactly the folder shown: absolute on the daemon's platform (on
+ * Windows `/x` is relative to the current drive, so it is not), with no `.` or `..` part that
+ * would make the folder granted differ from the one shown.
+ */
+export function isAbsolutePath(path: string, platform: string = currentPlatform()): boolean {
+  const windows = platform === 'win32'
+  const absolute = windows ? /^[A-Za-z]:[\\/]/.test(path) || /^\\\\[^\\/]+[\\/][^\\/]+/.test(path) : path.startsWith('/')
+  if (!absolute) return false
+  return !path.split(windows ? /[\\/]/ : /\//).some((part) => part === '.' || part === '..')
+}
+
+function currentPlatform(): string {
+  const scope = globalThis as { process?: { platform?: string }; navigator?: { platform?: string } }
+  if (typeof scope.process?.platform === 'string') return scope.process.platform
+  return /win/i.test(scope.navigator?.platform ?? '') ? 'win32' : 'linux'
 }
 
 /**
@@ -113,11 +130,10 @@ export function addedPermissions(wanted: BotManifest, granted: BotManifest | nul
   const skills = new Set(granted.skills)
   for (const skill of wanted.skills) if (!skills.has(skill)) lines.push({ kind: 'skill', text: `Use the skill *${skill}*` })
   if (wanted.workspace) {
-    const roots = new Set(granted.workspace?.roots ?? [])
-    const writes = granted.workspace?.access === 'write'
-    for (const root of wanted.workspace.roots) {
-      if (!roots.has(root)) lines.push(workspaceLine(root, wanted.workspace.access))
-      else if (wanted.workspace.access === 'write' && !writes) lines.push(workspaceLine(root, 'write'))
+    const held = new Map(foldersOf(granted.workspace))
+    for (const [root, access] of foldersOf(wanted.workspace)) {
+      if (!held.has(root)) lines.push(workspaceLine(root, access))
+      else if (access === 'write' && held.get(root) !== 'write') lines.push(workspaceLine(root, 'write'))
     }
   }
   for (const key of BUDGET_KEYS) {
@@ -132,7 +148,7 @@ export function addedPermissions(wanted: BotManifest, granted: BotManifest | nul
 /** Every permission of a manifest, in plain words. */
 export function describeManifest(manifest: BotManifest): BotPermissionLine[] {
   const lines: BotPermissionLine[] = []
-  if (manifest.workspace) for (const root of manifest.workspace.roots) lines.push(workspaceLine(root, manifest.workspace.access))
+  for (const [root, access] of foldersOf(manifest.workspace)) lines.push(workspaceLine(root, access))
   for (const tool of manifest.tools) lines.push(toolLine(tool, manifest.workspace))
   for (const tool of manifest.appTools) lines.push({ kind: 'app_tool', text: `Use the Mousse tool \`${tool}\`` })
   for (const pair of manifest.mcp) lines.push(mcpLine(pair))
@@ -158,9 +174,15 @@ const TOOL_WORDS: Record<NeutralTool, string> = {
   web_search: 'Search the web'
 }
 
+/** Tools that change files: they reach only the folders granted for writing. */
+const WRITING_TOOLS: ReadonlySet<NeutralTool> = new Set<NeutralTool>(['edit', 'write'])
+
 function toolLine(tool: NeutralTool, workspace: BotManifest['workspace']): BotPermissionLine {
-  const where = workspace && tool !== 'web_fetch' && tool !== 'web_search' ? ` in ${workspace.roots.join(', ')}` : ''
-  return { kind: 'tool', text: `${TOOL_WORDS[tool]}${where}` }
+  if (!workspace || tool === 'web_fetch' || tool === 'web_search') return { kind: 'tool', text: TOOL_WORDS[tool] }
+  // Per folder: a writing tool names only the folders it may change.
+  const folders = foldersOf(workspace).filter(([, access]) => !WRITING_TOOLS.has(tool) || access === 'write').map(([root]) => root)
+  if (!folders.length) return { kind: 'tool', text: `${TOOL_WORDS[tool]} (no folder allows it)` }
+  return { kind: 'tool', text: `${TOOL_WORDS[tool]} in ${folders.join(', ')}` }
 }
 
 function workspaceLine(root: string, access: 'read' | 'write'): BotPermissionLine {
@@ -205,8 +227,11 @@ export function narrowManifest(manifest: BotManifest, narrow: Partial<Pick<BotMa
   if (narrow.workspace !== undefined) {
     if (narrow.workspace === null || !workspace) workspace = null
     else {
-      const roots = keep(workspace.roots, narrow.workspace.roots, (root) => root)
-      workspace = roots.length ? { roots, access: workspace.access === 'write' && narrow.workspace.access === 'write' ? 'write' : 'read' } : null
+      const roots = new Set(keep(workspace.roots, narrow.workspace.roots, (root) => root))
+      const from = workspace
+      const by = narrow.workspace
+      // Per folder: write only where both the manifest and the thread's narrowing say write.
+      workspace = workspaceOf(from.roots.filter((root) => roots.has(root)).map((root) => [root, folderAccess(from, root) === 'write' && folderAccess(by, root) === 'write' ? 'write' : 'read'] as const))
     }
   }
   return {
@@ -230,8 +255,8 @@ export function intersectManifest(wanted: BotManifest, granted: BotManifest): Bo
   }
   let workspace: BotManifest['workspace'] = null
   if (wanted.workspace && granted.workspace) {
-    const roots = within(wanted.workspace.roots, granted.workspace.roots, (root) => root)
-    if (roots.length) workspace = { roots, access: wanted.workspace.access === 'write' && granted.workspace.access === 'write' ? 'write' : 'read' }
+    const held = new Map(foldersOf(granted.workspace))
+    workspace = workspaceOf(foldersOf(wanted.workspace).filter(([root]) => held.has(root)).map(([root, access]) => [root, access === 'write' && held.get(root) === 'write' ? 'write' : 'read'] as const))
   }
   const budget: BotBudget = { maxActiveMs: Math.min(wanted.budget.maxActiveMs, granted.budget.maxActiveMs) }
   for (const key of BUDGET_KEYS) {

@@ -68,7 +68,7 @@ export const DRIVER_INFO: Record<HarnessDriverKind, DriverInfo> = {
     iconId: 'openai',
     family: 'agent',
     description: 'Use your ChatGPT plan through Codex.',
-    // Further entries are Mousse-managed, each with its own ChatGPT sign-in.
+    // Further entries are Mousse-managed (their own ChatGPT sign-in), or the user's Codex CLI as another account with a home of its own.
     multiInstance: true,
     customModels: true,
     homeHint: '~/.codex',

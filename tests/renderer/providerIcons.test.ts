@@ -92,7 +92,7 @@ describe('subagent provider icons', () => {
     const tone = (state: SubagentState, pending = false) => subagentBadgeTone({ state, pending })
     expect(['queued', 'starting', 'working'].map((state) => tone(state as SubagentState))).toEqual(['running', 'running', 'running'])
     expect(tone('done', true)).toBe('running')
-    expect([tone('needs_input'), tone('waiting')]).toEqual(['attention', 'attention'])
+    expect([tone('needs_input'), tone('waiting'), tone('paused')]).toEqual(['attention', 'attention', 'attention'])
     expect(tone('done')).toBe('done')
     expect([tone('failed'), tone('interrupted')]).toEqual(['failed', 'failed'])
     expect([tone('stopped'), tone('idle')]).toEqual(['idle', 'idle'])

@@ -184,7 +184,8 @@ export class MmsProtocolServer {
     this.catalogChangedUnsubscribe?.()
     this.catalogChangedUnsubscribe = this.opts.mms.providerAuth?.onCatalogChanged?.(() => {
       if (this.stopping || this.stopped) return
-      const providers = this.opts.mms.providerAuth.getConfiguredProviders()
+      // The same listing the old methods answer with: providers removed from the profile are left out.
+      const providers = this.opts.mms.providerInstances.configuredProviders()
       this.emitToSubscribers(this.ring.push('providers.changed', { providers }), null)
     }) ?? null
     this.accepting = true
@@ -373,6 +374,12 @@ export class MmsProtocolServer {
       'updated',
       (thread: { id: string }) => pushThreadsUpdated(thread.id)
     )
+    // An unused thread was discarded after `created` announced it (a creation that did not finish).
+    onEmitter(
+      services.threads,
+      'discarded',
+      (thread: { id: string }) => pushThreadsUpdated(thread.id)
+    )
     // First-send and title rename both need a full list push so the sidebar
     // can show/hide and rename without a rescan.
     onOrch('thread-started', (payload: { threadId: string }) => {
@@ -445,6 +452,15 @@ export class MmsProtocolServer {
       if (payload.threadId) {
         services.threadRuntimes.setActivity(payload.threadId, 'idle')
       }
+    })
+
+    // A run that hit a usage limit is not running and not finished: the thread rests, shown as Paused,
+    // until the limit resets (`turn.state` carries the pause).
+    onOrch('turn-paused', (payload: { threadId?: string }) => {
+      if (payload.threadId) {
+        services.threadRuntimes.setActivity(payload.threadId, 'paused')
+      }
+      emitToSubscribers(this.ring.push('turn.paused', payload, payload.threadId))
     })
 
     onOrch('turn-aborted', (payload: { threadId?: string }) => {
@@ -652,11 +668,19 @@ export class MmsProtocolServer {
     onEmitter(services.scheduled, 'status', (status: unknown) => {
       emitToSubscribers(this.ring.push('scheduled.status', { status }, undefined))
     })
+    // A watched pull request changed (checks finished, a review arrived, the watch ended): clients refresh that thread's detail.
+    onEmitter(services.pullRequestWatch, 'updated', (payload: { threadId: string }) => {
+      emitToSubscribers(this.ring.push('pullRequests.updated', payload, payload.threadId))
+    })
     onEmitter(services.channels, 'updated', (snapshot: unknown) => {
       emitToSubscribers(this.ring.push('channels.updated', { snapshot }, undefined))
     })
     if (services.personalBots) onEmitter(services.personalBots.events, 'changed', (event: unknown) => {
       emitToSubscribers(this.ring.push('bots.changed', event, undefined))
+    })
+    // A wall asks the owner: the Bots tab's inbox and a desktop notification.
+    if (services.personalBots) onEmitter(services.personalBots.events, 'escalation', (escalation: unknown) => {
+      emitToSubscribers(this.ring.push('bots.escalation', escalation, undefined))
     })
     onEmitter(services.channels, 'activity', (event: unknown) => {
       emitToSubscribers(this.ring.push('channels.activity', { event }, undefined))

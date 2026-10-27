@@ -43,6 +43,19 @@ export function isFencedSource(source: string | null | undefined): boolean {
   return source !== null && source !== undefined && FENCED_SOURCES.has(source)
 }
 
+/**
+ * Sources of sends nobody typed: a scheduled occurrence (a webhook-triggered job is one too). Such a send
+ * is not a person's message, so on a thread paused by a usage limit it neither ends the pause nor
+ * restarts its chain of automatic resumes: `commitSend` refuses it (`thread_paused`), and one that was
+ * admitted before the pause waits (`markStarting` refuses it) until the pause has ended on its own. A
+ * message another thread's agent sends is held the same way (agent sends).
+ */
+export const PAUSE_HELD_SOURCES: ReadonlySet<string> = new Set(['schedule'])
+
+export function isPauseHeldSource(source: string | null | undefined): boolean {
+  return source !== null && source !== undefined && PAUSE_HELD_SOURCES.has(source)
+}
+
 /** The continue turn of a paused run: `resume` at the reset time, `resume_now` when a person asked. */
 export const RESUME_SOURCES: ReadonlySet<string> = new Set(['resume', 'resume_now'])
 

@@ -1518,3 +1518,13 @@ html[data-theme='high-contrast'] .toggle-switch.on::after {
   border-radius: var(--ui-control-radius);
   font-size: var(--settings-fs-small);
 }
+
+/* A dot beside a section name: something in it is waiting to be looked at. */
+.settings-nav-dot {
+  width: 6px;
+  height: 6px;
+  margin-left: var(--space-8, 8px);
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+}

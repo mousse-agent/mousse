@@ -7,7 +7,7 @@ import { lookup, Resolver } from 'node:dns/promises'
 import type { AssistantMessage, Context } from '@earendil-works/pi-ai'
 import { MousseMainService } from '../../../src/mms/MousseMainService'
 import { ProviderAuthService } from '../../../src/mms/providers/ProviderAuthService'
-import { LlmClient } from '../../../src/mms/orchestrator/LlmClient'
+import { Harness } from '../../../src/mms/harness/gateway'
 import { newId, validateStreamDescriptor, type StreamDescriptor } from '../../../src/shared/net'
 import { defaultAgentSettings } from '../../../src/shared/agents/defaults'
 import { portableRepository, type DispatchResultBody } from '../../../src/mms/bridge/dispatch'
@@ -28,7 +28,7 @@ afterEach(async () => {
 })
 async function fixture(cloudflare = false, preflight?: (address: string) => Promise<void>) {
   vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
-  vi.spyOn(LlmClient.prototype, 'generateTitle').mockResolvedValue('Owned native fixture')
+  vi.spyOn(Harness.prototype, 'oneShot').mockResolvedValue({ text: 'Owned native fixture' })
   vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
     throw new Error('External HTTP is forbidden in this deterministic qualification')
   })

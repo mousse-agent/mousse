@@ -33,6 +33,7 @@ export const SETTINGS_CLASSIFICATION: readonly SettingsClassificationEntry[] = [
   { path: 'settings.notifications', scope: 'profile', notes: 'Notification preferences are personal.' },
   { path: 'settings.shortcuts', scope: 'profile', notes: 'Keyboard shortcut overrides are personal.' },
   { path: 'settings.permissions', scope: 'profile', notes: 'The default permission mode of new threads is personal.' },
+  { path: 'settings.runs', scope: 'profile', notes: 'Whether a paused run continues by itself after a usage limit is a per-profile choice.' },
   { path: 'settings.agentAccess', scope: 'profile', notes: 'How far agents may act on other threads is a per-profile trust choice.' },
   { path: 'settings.integrations', scope: 'profile', notes: 'Skill/MCP enablement is profile-owned.' },
   { path: 'settings.title', scope: 'profile', notes: 'Title-model selection points at the shared catalog.' },
@@ -55,6 +56,11 @@ export const SETTINGS_CLASSIFICATION: readonly SettingsClassificationEntry[] = [
     path: 'providers.instancesSeedVersion',
     scope: 'profile',
     notes: 'Which seed set the profile instances were last seeded with.'
+  },
+  {
+    path: 'providers.removedInstances',
+    scope: 'profile',
+    notes: 'Provider instances removed from this profile stay removed; credentials remain shared.'
   },
   { path: 'agents', scope: 'profile', notes: 'Engine enablement and per-agent model prefs are personal.' },
   { path: 'scheduled', scope: 'profile', notes: 'Job definitions bind their owner at creation.' },

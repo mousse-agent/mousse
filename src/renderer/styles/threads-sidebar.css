@@ -487,6 +487,7 @@
 .threads-sidebar-card-status-input { color: var(--status-input); }
 .threads-sidebar-card-status-waiting { color: var(--status-waiting); }
 .threads-sidebar-card-status-done { color: var(--status-done); }
+.threads-sidebar-card-status-paused { color: var(--warning); }
 
 .threads-sidebar-card-title {
   display: block;
@@ -552,6 +553,10 @@
 
 .threads-sidebar-status-icon--waiting {
   color: var(--status-waiting);
+}
+
+.threads-sidebar-status-icon--paused {
+  color: var(--warning);
 }
 
 .threads-sidebar-thread-trailing {
@@ -882,4 +887,164 @@
 @container threads-sidebar (max-width: 220px) {
   .threads-sidebar-tab { gap: 4px; font-size: 12px; }
   .threads-sidebar-tab svg { width: 15px; height: 15px; }
+}
+
+/* Recently deleted: rows are lists of actions, not a selection, so hover and focus use a
+   background fill only. */
+.threads-sidebar-trash-list {
+  padding-bottom: 6px;
+}
+
+.threads-sidebar-trash-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.threads-sidebar-trash-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 4px 4px 7px;
+  border-radius: 5px;
+}
+
+.threads-sidebar-trash-row:hover,
+.threads-sidebar-trash-row:focus-within {
+  background: rgba(var(--accent-rgb), 0.09);
+}
+
+.threads-sidebar-trash-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.threads-sidebar-trash-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.threads-sidebar-trash-meta {
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.threads-sidebar-trash-error {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+.threads-sidebar-trash-actions {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 2px;
+}
+
+.threads-sidebar-trash-actions .threads-sidebar-icon-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
+.threads-sidebar-trash-actions .threads-sidebar-icon-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.threads-sidebar-trash-actions .threads-sidebar-icon-btn.danger:hover:not(:disabled) {
+  color: var(--danger);
+}
+
+/* The permanent-deletion dialog. */
+.trash-delete {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.trash-delete > p,
+.trash-delete-warning > p {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.trash-delete-headline {
+  color: var(--text-primary);
+}
+
+.trash-delete-frees {
+  color: var(--text-secondary);
+}
+
+.trash-delete-warning {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+.trash-delete-discard {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.trash-delete-discard input {
+  flex-shrink: 0;
+  margin: 3px 0 0;
+  accent-color: var(--accent);
+}
+
+.trash-delete-error {
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+.trash-delete-details > summary,
+.trash-delete-files > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.trash-delete-details ul {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.trash-delete-details li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.trash-delete-identity {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.trash-delete-kind {
+  font-size: 11px;
+  color: var(--text-secondary);
 }

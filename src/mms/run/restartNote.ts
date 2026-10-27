@@ -19,6 +19,8 @@ export interface RestartNote {
   cutOffTools: Array<{ runId: string; invocationId: string; tool: string; idempotent: boolean }>
   /** Queued runs whose `turn.start` died before they began (reconciler rule 5 restarts them). */
   queuedRunIds?: string[]
+  /** Saved approval requests the restart left waiting for an answer (SPEC §17.6). */
+  approvalRequestIds?: string[]
   /** Saved activity items the restart cut off. Filled from the thread's messages when the note is delivered, never stored in the event. */
   cutOffActivity?: CutOffActivity[]
   epoch: number

@@ -52,12 +52,12 @@ describe('usageWindows', () => {
 describe("the user's own Codex reports its plan limits", () => {
   /** A Codex driver whose service answers `rateLimits` as scripted. */
   function runtime(read: CodexProviderService['rateLimits']) {
-    const service = { rateLimits: read, configured: () => true } as unknown as CodexProviderService
+    const service = { rateLimits: read, configured: () => true, vendorMirror: () => ({}) } as unknown as CodexProviderService
     const driver = codexDriver({ builtIn: () => service })
     const home = mkdtempSync(join(tmpdir(), 'mousse-codex-usage-'))
     homes.push(home)
     const context: DriverContext = {
-      instanceId: 'codex', builtIn: false, config: { home: 'default' },
+      instanceId: 'codex', builtIn: true, config: { home: 'default' },
       env: instanceEnv({ instanceId: 'codex', driver: 'codex', configRevision: 0, home: undefined, searchPath: [], base: {} }),
       profileHome: home, installationHome: home, stateDir: join(home, 'harness', 'codex'), questions: new UserQuestionService(), findBinary: () => undefined, changed: () => {}
     }

@@ -41,7 +41,7 @@ it('renders unavailable expired Undo, trash restore and permanent deletion for a
     })
     expect(result.code, result.output).toBe(0)
     expect(existsSync(evidence), 'The full-shell driver exited without producing evidence.\n' + result.output).toBe(true)
-    expect(JSON.parse(readFileSync(evidence, 'utf8'))).toMatchObject({ expiredUndoUnavailable: true, restoreIdle: true, purged: true, primaryPreserved: true })
+    expect(JSON.parse(readFileSync(evidence, 'utf8'))).toMatchObject({ expiredUndoUnavailable: true, trashedFromSidebar: true, restoreIdle: true, purged: true, primaryPreserved: true })
     expect(git(fixture.repo, 'rev-parse', 'HEAD')).toBe(fixture.baseSha)
     expect(git(fixture.repo, 'for-each-ref', '--format=%(refname)', 'refs/mousse/', 'refs/heads/mousse/')).toBe('')
   } finally {

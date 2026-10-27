@@ -236,6 +236,17 @@ describe('Bedrock one-shots', () => {
       await new Promise<void>((resolve) => server.close(() => resolve()))
     }
   })
+
+  it('the refusal names what the request was for', async () => {
+    const model = { id: 'anthropic.claude', provider: 'amazon-bedrock', api: 'bedrock-converse-stream' }
+    const models = { getModel: () => model, getModels: () => [model], getAuth: vi.fn(), stream: vi.fn(), streamSimple: vi.fn() }
+    const refusal = (task?: 'title' | 'pull_request' | 'commit_message') =>
+      runPiOneShot(models as never, 'amazon-bedrock', { model: model.id, system: '', prompt: '', onActivity: () => {}, ...(task ? { task } : {}) }, AbortSignal.timeout(5_000)).catch((error: Error) => error.message)
+    expect(await refusal()).toMatch(/^Bedrock models cannot name chats yet\./)
+    expect(await refusal('pull_request')).toMatch(/^Bedrock models cannot draft pull requests yet\./)
+    expect(await refusal('commit_message')).toMatch(/^Bedrock models cannot write commit messages yet\./)
+    expect(models.getAuth).not.toHaveBeenCalled()
+  })
 })
 
 describe('runPiOneShot cancellation', () => {

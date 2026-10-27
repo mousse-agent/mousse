@@ -45,6 +45,8 @@ export interface SetupOptions {
   extraEnv?: Record<string, string>
   /** Pi's threshold compaction, read when a process starts (default on). */
   compaction?: () => boolean
+  /** The engine's caps (default `PI_RPC_CAPS`: weak containment, so a definition's shell asks first). */
+  capabilities?: PiRpcEngineOptions['capabilities']
 }
 
 /** An engine on a fresh scratch dir with a recorder; `cleanups` gets what to undo, in order. */
@@ -66,7 +68,7 @@ export async function setup(cleanups: Array<() => unknown>, options: SetupOption
     instanceId: 'pi:mock',
     provider: 'mock',
     label: 'Mock',
-    capabilities: PI_RPC_CAPS,
+    capabilities: options.capabilities ?? PI_RPC_CAPS,
     env: () => env,
     stateDir,
     runtime: () => ({ root: piPackage, entry: join(piPackage, 'dist/bundle/rpc-entry.js'), extension }),
@@ -99,9 +101,11 @@ export async function setup(cleanups: Array<() => unknown>, options: SetupOption
 export function harness(project: string, overrides: Partial<TurnInput> = {}, hostOverrides: Partial<AdapterHost> = {}) {
   const events: Array<{ kind: string; [key: string]: unknown }> = []
   const controller = new AbortController()
+  // A definition's turn comes whole: a session of its own and its system prompt in place of Pi's.
+  const definitionTurn: Partial<TurnInput> = hostOverrides.definition ? { session: 'ephemeral', instructions: { text: 'You are a test agent.', placement: 'replace' } } : {}
   const input: TurnInput = {
     runId: 'r1', attemptId: 'a1', threadId: 't1', cwd: project, instanceId: 'pi:mock', model: 'mock-model', llmProvider: 'mock',
-    modelPinned: true, mode: 'agent' as TurnInput['mode'], prompt: 'Say hello', messages: [], signal: controller.signal, ...overrides
+    modelPinned: true, mode: 'agent' as TurnInput['mode'], prompt: 'Say hello', messages: [], signal: controller.signal, ...definitionTurn, ...overrides
   }
   const sink: TurnSink = {
     text: (event) => events.push({ ...event, kind: 'text' }),

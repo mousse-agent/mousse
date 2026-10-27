@@ -416,6 +416,31 @@ export class RunStore {
     return row ? toReceipt(row) : null
   }
 
+  /**
+   * The `thread_create` receipts made since `sinceIso` whose thread has no completion marker (an `agent.action` event
+   * `created_thread`), oldest first: what boot repair looks at, in one query that reads no event of a finished creation.
+   */
+  listUnfinishedThreadCreations(sinceIso: string): ReceiptRecord[] {
+    return this.db
+      .statement(
+        `SELECT * FROM receipts r WHERE r.command_kind = 'thread_create' AND r.created_at >= ?
+           AND NOT EXISTS (SELECT 1 FROM thread_events e WHERE e.thread_id = json_extract(r.result, '$.threadId')
+             AND e.type = 'agent.action' AND json_extract(e.payload, '$.action') = 'created_thread')
+         ORDER BY r.created_at, r.client_request_id`
+      )
+      .all(sinceIso)
+      .map(toReceipt)
+  }
+
+  /** The thread has an `agent.action` event of this action (the completion marker of a thread an agent created). */
+  hasAgentAction(threadId: string, action: string): boolean {
+    return Boolean(
+      this.db
+        .statement(`SELECT 1 AS found FROM thread_events WHERE thread_id = ? AND type = 'agent.action' AND json_extract(payload, '$.action') = ? LIMIT 1`)
+        .get(threadId, action)
+    )
+  }
+
   putReceipt(record: ReceiptRecord): ReceiptRecord {
     return this.db.transaction(() => {
       if (this.getReceipt(record.clientRequestId))

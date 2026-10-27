@@ -140,7 +140,7 @@ describe('first start after the upgrade', () => {
     expect(codex.auth).toMatchObject({ state: 'signed_out', message: expect.stringContaining('Signed out in Mousse') })
     expect(codex.settingsNotice).toBeUndefined()
     expect(profile.codexAccount).not.toHaveBeenCalled()
-    expect(profile.instanceMap.llmProviders().some((entry) => entry.instanceId === 'codex')).toBe(false)
+    expect(profile.harness.listedLlmProviders({ kind: 'device' }).some((entry) => entry.instanceId === 'codex')).toBe(false)
     await expect(bindTurn(profile, 'codex', 'codex')).rejects.toMatchObject({ code: 'signed_out' })
   })
 
@@ -309,7 +309,7 @@ describe('sign-out across versions', () => {
     const claude = await snapshotOf(next, 'claude')
     expect(claude.auth).toMatchObject({ state: 'signed_out', message: 'Signed out in Mousse. Your Claude Code sign-in on this computer is unchanged.' })
     expect(next.claudeAuth).not.toHaveBeenCalled()
-    expect(next.instanceMap.llmProviders().some((entry) => entry.instanceId === 'claude')).toBe(false)
+    expect(next.harness.listedLlmProviders({ kind: 'device' }).some((entry) => entry.instanceId === 'claude')).toBe(false)
     expect(next.harness.configuredProviderIds()).not.toContain('claude-subscription')
     await expect(bindTurn(next, 'claude', 'claude-subscription')).rejects.toMatchObject({ code: 'signed_out' })
     expect(profile).not.toBe(next)

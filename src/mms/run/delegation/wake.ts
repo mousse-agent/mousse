@@ -4,10 +4,12 @@ import { RunStoreError } from '../db/RunStoreError'
 import { Delegations } from '../Delegations'
 import { toEffect, type EffectOutbox } from '../EffectOutbox'
 import { Inbox } from '../Inbox'
+import { inheritedAgentHops } from '../agentHops'
 import type { RunStore } from '../RunStore'
 import { writeTerminalRun } from '../terminal'
 import {
   TERMINAL_RUN_STATUSES,
+  stoppedByPerson,
   isWakeTurnPayload,
   type ChildResultPayload,
   type EffectRecord,
@@ -195,7 +197,7 @@ function deliveryFailure(store: RunStore, effect: EffectRecord, row: InboxRecord
   // Only an effect that carries a turn can have its run end without the notice being read.
   if (effect.kind !== 'turn.start' && effect.kind !== 'turn.steer') return null
   if (!run || !TERMINAL_RUN_STATUSES.has(run.status) || run.status === 'completed') return null
-  if (run.outcome?.interruptedBy === 'user') return null
+  if (stoppedByPerson(run.outcome)) return null
   return { at: run.completedAt ?? effect.updatedAt, error: run.outcome?.error ?? `the delivering run ${run.status}` }
 }
 
@@ -233,7 +235,14 @@ export function wakeThreads(
         const active = store.getActiveRun(threadId)
         if (!active) {
           if (hasQueuedWake(store, threadId)) return
-          const run = store.createRun({ threadId, source: 'wake', clientRequestId: `wake:${rows[0].inboxId}` })
+          // The wake carries on the work that delegated: a chain of agent messages is not reset by it (SPEC §15.1).
+          const carriedHops = inheritedAgentHops(store, threadId, 'wake')
+          const run = store.createRun({
+            threadId,
+            source: 'wake',
+            clientRequestId: `wake:${rows[0].inboxId}`,
+            ...(carriedHops !== undefined ? { outcome: { agentHops: carriedHops } } : {})
+          })
           const payload: WakeTurnPayload = {
             kind: 'wake',
             threadId,
@@ -276,8 +285,13 @@ export function wakeThreads(
   return report
 }
 
-/** Rows without a delegation (notices) always steer; a child result follows its delegation. */
+/**
+ * Rows without a delegation (notices) steer; a child result follows its delegation. A pull request update never steers:
+ * it asks the agent to change code and push, which must not interrupt what a person has started, so it waits for the
+ * run to end and arrives as a turn of its own.
+ */
 function wantsSteer(row: InboxRecord, delegations: Delegations): boolean {
+  if (row.kind === 'pr_update') return false
   if (row.kind !== 'child_result') return true
   const delegation = delegations.get((row.payload as ChildResultPayload).delegationId)
   return delegation?.wake === 'always'

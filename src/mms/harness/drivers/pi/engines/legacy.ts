@@ -27,6 +27,7 @@ export const PI_LEGACY_CAPS: HarnessCaps = Object.freeze({
 
 export type PiCredentials = Partial<Pick<ProviderAuthService,
   'getConfiguredProviders' | 'getConfiguredLlmProviders' | 'has' | 'logout' | 'runOAuthLogin' | 'runApiKeyLogin' | 'refreshDynamicModels' | 'getProviderDisplayName' | 'storedApiKey' | 'models'
+  | 'setApiKey' | 'verifyAmbientProvider' | 'getLoginOptions' | 'getAmbientProviderInfo'
 >>
 
 /**
@@ -76,10 +77,22 @@ export function piInstanceRuntime(instanceId: string, providerId: string, creden
     refreshModels: async () => void (await credentials()?.refreshDynamicModels?.()),
     signIn: async (session, _cwd, method) => {
       const auth = credentials()
+      // The environment's cloud credentials, checked and saved as the provider's credential.
+      if (method === 'ambient') {
+        if (!auth?.verifyAmbientProvider) return { success: false, error: 'Sign-in is not available' }
+        return { ...(await auth.verifyAmbientProvider(providerId)), sessionId: session.sessionId }
+      }
       if (!auth?.runOAuthLogin || !auth.runApiKeyLogin) return { success: false, error: 'Sign-in is not available' }
       return method === 'api_key' ? auth.runApiKeyLogin(session, providerId) : auth.runOAuthLogin(session, providerId)
     },
     signOut: async () => void (await credentials()?.logout?.(providerId)),
+    // The key is installation-scoped, as the old Add dialog saved it: every profile with this entry uses it.
+    setSecret: async (value) => {
+      const auth = credentials()
+      if (!auth?.setApiKey) throw new Error('Mousse has no provider credentials loaded yet.')
+      await auth.setApiKey(providerId, value)
+      await auth.refreshDynamicModels?.().catch(() => undefined)
+    },
     exportApiKey: async () => credentials()?.storedApiKey?.(providerId),
     // Chat titles: one pi-ai request in Mousse's process, on either engine (`runPiOneShot`).
     oneShot: (spec, signal) => {

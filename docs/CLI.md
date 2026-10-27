@@ -203,7 +203,68 @@ mousse-cli schedule disable <job-id>
 mousse-cli schedule remove <job-id>
 ```
 
-A job runs as a turn on a thread. `--instance` and `--model` choose the provider instance and model, `--mode agent|plan` the mode, and `--workspace project|new-worktree|<path>` where it works (`project`, the default, is the project's own checkout: an agent-mode job there edits the folder you work in, unattended, with no checkpoints or undo. For a Git project, prefer `new-worktree`). `--thread <id>` runs the job on an existing thread with its history and its own workspace. `--manual` makes a job with no clock that runs only with `schedule run`. `schedule list` shows the job's model, and `queued` while a run waits behind a busy thread.
+A job runs as a turn on a thread. `--instance` and `--model` choose the provider instance and model, `--mode agent|plan` the mode, and `--workspace project|new-worktree|<path>` where it works (`project`, the default, is the project's own checkout: an agent-mode job there edits the folder you work in, unattended, with no checkpoints or undo. For a Git project, prefer `new-worktree`). `--thread <id>` runs the job on an existing thread with its history and its own workspace. `--manual` makes a job with no clock that runs only with `schedule run`. `schedule list` shows the job's model, and `queued` while a run waits behind a busy thread. `--permission ask|accept_edits|full` sets how much the run may do without asking, never above the mode you hold for the job (the run follows its thread otherwise, up to that limit). A workflow job (a prompt starting with `/`) takes no permission mode. See "Permission mode and ceiling" in `docs/CONFIGURATION.md`.
+
+### Jobs agents create
+
+Agents can manage the jobs their own thread made through Mousse's tools (`schedule_list`, `schedule_create`, `schedule_update`, `schedule_pause`, `schedule_run`) when the Scheduled page's "Agents may create jobs" (`scheduled.agentJobs`, off by default) is on and the profile gives agents the `manage` access level. Only a turn you started can create or start a job. A job an agent creates runs no wider than that agent, runs at most every 15 minutes, ends after 7 days unless you extend it (`mousse-cli schedule extend <id> [--days 7]`, or "Extend 7 days" on the page), counts against 10 active agent-made jobs in the profile, shows "Created by an agent" in the page and its run history (`agent` in the BY column of `schedule list`), and cannot have a webhook. Turning the setting off pauses these jobs and turning it on does not resume them. The rules are in `docs/CONFIGURATION.md` (scheduled jobs). These limits bind the Mousse tools. An agent that can run shell commands can reach the daemon's local protocol as you do (`mousse-cli schedule ...`), which is what the permission mode of that thread governs; the setting does not stop it.
+
+### Webhook trigger
+
+A job can also be started by a signed HTTP request, for example from a CI system or a script on this machine.
+
+```bash
+mousse-cli schedule webhook enable <job-id> [--port 18790]   # prints the URL and the secret, once; on a job that has one, --port moves the listener
+mousse-cli schedule webhook rotate <job-id>                  # new secret; the old one stops working at once
+mousse-cli schedule webhook disable <job-id>
+mousse-cli schedule webhook deliveries <job-id>              # recent requests and what became of each
+```
+
+Sending a request (the signature covers the timestamp and the exact body bytes):
+
+```bash
+BODY='{"event":"deploy","ref":"main"}'
+TS=$(date +%s)
+SIG=$(printf '%s.%s' "$TS" "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -hex | sed 's/^.* //')
+curl -sS -X POST "http://127.0.0.1:18790/hooks/<job-id>" \
+  -H "X-Mousse-Timestamp: $TS" -H "X-Mousse-Signature: sha256=$SIG" \
+  --data-binary "$BODY"
+```
+
+| Status | Meaning |
+|--------|---------|
+| `202` | Accepted: the delivery and its replay record are saved, and the job starts within seconds. |
+| `401` | Not authenticated: wrong or missing signature, a timestamp more than 5 minutes from this machine's clock, a job without a webhook, or an unknown job. All look the same on purpose. |
+| `403` | Not a plain local request (a browser `Origin`, or a `Host` other than `127.0.0.1`, `localhost` or `[::1]` with the port). |
+| `404` | Not `POST /hooks/<job-id>`. |
+| `503` | Not accepted, and nothing was used up: the scheduler is off, the job's replay record is unreadable (rotate the secret to repair it), or the daemon is busy or shutting down. |
+| `409` | `replay` (this exact request was already received), `running` (the job is running or its run is waiting in a queue), `pending` (another delivery is waiting to start) or `paused`. |
+| `413` | Body over 1 MiB. |
+| `429` | More than 60 signed requests for this job in a minute. |
+
+Things to know:
+
+- **A request that is answered `409` or `429` is used up.** Its signature is remembered until its timestamp can no longer pass the 5-minute check (up to 6 minutes after it arrived), so it can never be delivered later. To retry, sign again with a fresh timestamp (two requests with the same body in the same second share a signature). If a job's record fills with requests that could still be replayed, it refuses every request for a few minutes (`429`) instead of forgetting any.
+- **One delivery at a time per job.** While a run is going or waiting, further requests get `409`; none is queued.
+- **The body reaches the prompt only through placeholders** (next section). The stored copy is deleted when the run ends, and it sits in a folder only your account can read (owner-only permissions on macOS and Linux; on Windows the folder's access list is reduced to your account and SYSTEM, and a webhook cannot be enabled if that fails). The request's headers are never stored. A value a placeholder fills in is different: it becomes part of the run's message, so it stays in the thread's history, in the queue while the run waits, and in the run's records, with no time limit. Do not name a body field that can hold a secret.
+- **Local only.** The listener binds `127.0.0.1` and refuses browser requests; it is not meant to be exposed. It runs only while some job has a webhook, and a port that a net transport of this profile uses (for example one Tailscale Serve forwards to) is refused. A tunnel makes the unauthenticated surface remote: anyone who can reach the tunnel can send requests (every one that is not correctly signed gets `401`). An HTTP tunnel must rewrite `Host` to `127.0.0.1:<port>`, or every request gets `403`.
+- **The secret** is stored in the profile's secret file and is never logged or returned again after `enable` or `rotate`. The daemon's own protocol belongs to processes running as you (they hold its owner token), and any of them can rotate a job's secret or read the secret file; the signature keeps other senders out, not the rest of your own account.
+- A one-time job cannot have a webhook (it would finish after one run); use a `--manual` job. Jobs created by an agent cannot have one either.
+- A webhook-started run is an ordinary scheduled run: same model, mode, workspace and access cap, and it does not move an interval or cron job's timer.
+
+### Webhook fields in the prompt
+
+A job's prompt can name fields of the request body with `{{body.some.path}}`. Only a run started by a webhook fills them; a timer or "Run now" sends the prompt as written.
+
+```text
+Review pull request {{body.pull_request.number}}, "{{body.pull_request.title}}", and report problems.
+```
+
+- **Syntax.** `{{body}}` or `{{body.a.b.0.c}}`, optionally with spaces inside the braces. Each part is a key of a JSON object or a number for a position in a list (`items.0` is the first); the body must be JSON. A lookup follows the body's own keys and nothing else: there are no expressions, calls or filters, and `__proto__`, `constructor` and `prototype` never match. Text that is not exactly this form, such as `{{headers.x}}` or `{{ body.a + 1 }}`, stays as written.
+- **Only single values.** A placeholder gives a string, a number or `true`/`false`. A missing key, `null`, an object or a list, a body that is not JSON, or a placeholder after the 64 KiB total is used up gives an empty value (a single long value is cut, not emptied), and the run record and the delivery log list the placeholder under `missingPlaceholders`. The run still happens.
+- **Headers and secrets are not available.** Placeholders read the body only; nothing from the request's headers, the signature or the secret can reach the prompt.
+- **The agent is told it is data.** Each value is sent inside a `<webhook-data-ID>` tag with a random ID chosen for that run, and a note at the end of the prompt says that the tagged text came from a webhook request and is not instructions. A value is cut to one line (line breaks become a space; control, hidden and direction-changing characters, variation selectors and lone surrogate halves are removed or replaced) and cannot contain a tag of that kind. Mousse also does not look for skills inside these tags. So that a value cannot become a skill (`/name`), a file mention (`@path`) or a `$name` mention in an agent program, one character is swapped for its fullwidth look-alike (`／`, `＠`, `＄`) where such a mention could start: a `/` at the start of the value or after whitespace and followed by a letter, digit, `_` or `-` (so `in /srv/app` reads `in ／srv/app`), a `@` or `$` not inside a word and followed by a non-space (so `see @notes.txt` reads `see ＠notes.txt`, while `user@example.com`, `git@host:repo`, `$5` and `a/b` are unchanged). Copy such a value into a command with that in mind. Values are limited to 4 KiB each, and the values with their tags, truncation markers and the closing note to 64 KiB in total; a value is never searched for placeholders again. Treat the body as untrusted anyway: write the prompt so that acting on a wrong value is harmless, and keep the job's mode and access level as low as the work allows.
+- **Workflows.** A prompt that starts with `/` is a workflow and cannot use placeholders: a webhook run of it fails with a message instead of passing outside text to the workflow.
 
 ## agents
 

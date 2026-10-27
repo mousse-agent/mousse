@@ -33,9 +33,11 @@ import type { EffectiveAgentGrants } from '../../shared/agents/types'
 import {
   authorizeTrustedToolDispatch,
   canonicalizeBuiltinToolName,
+  isShellTool,
   isToolPermittedByPolicy,
   prepareTrustedToolDispatch
 } from '../agentDefinitions/runtimePolicy'
+import { platformShellContained } from '../harness/compatibility'
 
 import type { ChatMode } from '../../shared/types'
 
@@ -45,7 +47,7 @@ import { permissionModeAllows, type PermissionMode } from '../../shared/permissi
 import { piPermissionKey, piToolAction } from '../../shared/permissionKeys'
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
 
-import { resolveModelForMode, resolveTitleModel, normalizeContextSettings, resolveContextCompactionTokens } from '../../shared/settings'
+import { resolveModelForMode, normalizeContextSettings, resolveContextCompactionTokens } from '../../shared/settings'
 
 import { EFFORT_SUFFIXES, parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 
@@ -101,7 +103,6 @@ import type { LlmTextEventHandler, LlmThinkingEventHandler, LlmToolEvent, LlmToo
 import {
   assertAssistantResponseSucceeded,
   consumeAssistantStream,
-  DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS,
   getCacheSessionId,
   getReasoningStreamOptions,
   resolveStreamInactivityTimeout
@@ -243,6 +244,9 @@ export interface LlmChatOptions {
   /** Trusted internal seam for immutable user-created agent definitions. */
   trustedAgent?: TrustedAgentExecutionOptions
 
+  /** False: `/skill` mentions in the user's message load no skill (the message was written by another thread's agent). */
+  skillMentions?: false
+
   /**
    * Per-turn trusted browser binding. Root supplies source/profile/thread/turn
    * identity; models cannot create this object. Falls back to bindBrowserExecution.
@@ -258,6 +262,12 @@ export interface TrustedAgentExecutionOptions {
   policy?: AgentRuntimePolicy
   approveToolRequest?: AgentRuntimeToolApprovalCallback
   effects?: AgentRuntimeEffectTracker
+  /**
+   * Whether this platform's shell is contained (default `platformShellContained()`). Where it is
+   * not, a definition's shell command asks a person first, bound to the exact command, and an
+   * unattended run runs none, on this loop as on Pi's agent.
+   */
+  shellContained?: boolean
 }
 
 
@@ -638,7 +648,8 @@ export class LlmClient {
 
 
     const projectPath = options.projectPath ?? this.getProjectPath?.()
-    const userContent = extractLastUserText(messages)
+    // What another thread's agent wrote is never read for `/skill` mentions: only a person invokes a skill.
+    const userContent = options.skillMentions === false ? '' : extractLastUserText(messages)
     const cacheSessionId = getCacheSessionId(options.threadId)
     const streamInactivityTimeoutMs = resolveStreamInactivityTimeout(
       options.streamInactivityTimeoutMs
@@ -1161,109 +1172,6 @@ export class LlmClient {
 
   }
 
-
-
-  /**
-   * `selection` is the title model the harness gateway resolved and admitted (an API provider's
-   * model); it runs as is. Absent, the stored title setting is resolved against the configured
-   * providers.
-   */
-  async generateTitle(
-    userRequest: string,
-    firstResponse?: string,
-    threadId?: string,
-    selection?: { instanceId?: string; llmProvider: string; model: string }
-  ): Promise<string> {
-    const prompt = [
-      'Write a concise title for this chat (maximum 7 words).',
-      'Return only the title: no quotes, markdown, or ending punctuation.',
-      '',
-      `User request: ${userRequest.slice(0, 4000)}`,
-      ...(firstResponse?.trim() ? [`First response: ${firstResponse.slice(0, 6000)}`] : [])
-    ].join('\n')
-    const text = await this.completeWithTitleModel(
-      'You name chat threads clearly and specifically.',
-      prompt,
-      threadId ?? `title:${userRequest}`,
-      selection
-    )
-    return text
-      .trim()
-      .replace(/^["'`]+|["'`]+$/g, '')
-      .replace(/[.!?:;]+$/g, '')
-      .replace(/\s+/g, ' ')
-      .slice(0, 80)
-  }
-
-  /**
-   * Proposes a pull request's title and description with the title model: the same selection,
-   * stream path and timeouts as `generateTitle`. Returns the model's raw answer; the caller parses it.
-   */
-  async draftPullRequest(
-    systemPrompt: string,
-    prompt: string,
-    threadId?: string,
-    selection?: { instanceId?: string; llmProvider: string; model: string }
-  ): Promise<string> {
-    return this.completeWithTitleModel(systemPrompt, prompt, `pull-request-draft:${threadId ?? prompt.slice(0, 200)}`, selection)
-  }
-
-  /**
-   * Proposes a commit message with the title model: the same selection, stream path and timeouts as
-   * `generateTitle`. Returns the model's raw answer; the caller parses it.
-   */
-  async generateCommitMessage(
-    systemPrompt: string,
-    prompt: string,
-    threadId?: string,
-    selection?: { instanceId?: string; llmProvider: string; model: string }
-  ): Promise<string> {
-    return this.completeWithTitleModel(systemPrompt, prompt, `commit-message:${threadId ?? prompt.slice(0, 200)}`, selection)
-  }
-
-  /** One short, tool-free completion on the title model; `sessionKey` only names the provider's cache session. */
-  private async completeWithTitleModel(
-    systemPrompt: string,
-    prompt: string,
-    sessionKey: string,
-    selection?: { instanceId?: string; llmProvider: string; model: string }
-  ): Promise<string> {
-    const { llmProvider, model: selectedModelId } = selection ?? resolveTitleModel(this.settingsStore.get(), this.providerAuth.getConfiguredLlmProviders())
-    if (!llmProvider || !selectedModelId) {
-      throw new Error('Connect a provider with a title model before generating a chat title.')
-    }
-
-    const { baseId, effort } = parseThinkingSuffixFromModelId(selectedModelId)
-    const model = this.catalogModel(llmProvider, baseId)
-    if (!model) throw new Error(`Unknown title model "${selectedModelId}" for provider "${llmProvider}"`)
-    if (!(await this.providerAuth.models.getAuth(model))) {
-      throw new Error(`Title provider "${llmProvider}" is not configured.`)
-    }
-
-    const titleContext = {
-      systemPrompt,
-      messages: [{ role: 'user' as const, content: prompt, timestamp: Date.now() }]
-    }
-    const reasoning = (effort ?? 'off') as ThinkingLevel
-    const titleSessionId = getCacheSessionId(sessionKey)
-    const streamOptions = getReasoningStreamOptions(
-      model.api,
-      reasoning,
-      undefined,
-      titleSessionId,
-      llmProvider
-    )
-    const stream = this.providerAuth.models.streamSimple(model, titleContext, streamOptions as { reasoning: ThinkingLevel })
-    // Bounded like main turns: a dead title connection must fail fast (the caller
-    // falls back to a heuristic) instead of leaking a pending promise forever.
-    const response = await consumeAssistantStream(
-      stream,
-      {},
-      { inactivityTimeoutMs: DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS }
-    )
-    return extractAssistantText(response)
-  }
-
   getSelectedModelContextLimit(
     mode: ChatMode = 'agent',
     options: Pick<LlmChatOptions, 'llmProvider' | 'model'> = {}
@@ -1588,7 +1496,8 @@ export class LlmClient {
     action: 'command' | 'edit',
     permissionKey: string,
     threadId: string | undefined,
-    signal: AbortSignal | undefined
+    signal: AbortSignal | undefined,
+    projectPath: string
   ): Promise<ToolResultMessage | null> {
     if (permissionModeAllows(permissionMode, action)) return null
     const args = (toolCall.arguments ?? {}) as Record<string, unknown>
@@ -1617,12 +1526,15 @@ export class LlmClient {
             options: [
               { id: 'allow', decision: 'allow', scope: 'once' },
               { id: 'reject', decision: 'reject' }
-            ]
+            ],
+            // Relative paths and commands run against the project: the same call elsewhere is another action.
+            tool: { name: toolCall.name, input: args, cwd: projectPath }
           }
         }
       )
       if (answer.permission === 'allow' && !signal?.aborted) return null
-      return toolResult(toolCall, `The user rejected the request to ${what}. Do not retry it unless they ask.`, true)
+      const why = typeof answer.feedback === 'string' ? answer.feedback.trim().slice(0, 1000) : ''
+      return toolResult(toolCall, `The user rejected the request to ${what}.${why ? ` Reason: ${why}` : ' Do not retry it unless they ask.'}`, true)
     } catch {
       return toolResult(toolCall, `The user did not approve the request to ${what}.`, true)
     }
@@ -1656,13 +1568,15 @@ export class LlmClient {
 
       if (trustedAgent?.policy) {
         const isMcp = mcpTools.some((tool) => tool.providerName === toolCall.name)
+        const uncontainedShell = !isMcp && isShellTool(toolCall.name) && !(trustedAgent.shellContained ?? platformShellContained())
         const prepared = prepareTrustedToolDispatch({
           policy: trustedAgent.policy,
           grants: trustedAgent.grants,
           toolName: toolCall.name,
           args: (toolCall.arguments ?? {}) as Record<string, unknown>,
           isMcp,
-          projectPath
+          projectPath,
+          ...(uncontainedShell ? { uncontainedShell } : {})
         })
         const authorized = await authorizeTrustedToolDispatch({
           prepared,
@@ -1747,7 +1661,7 @@ export class LlmClient {
         // and `tests/piLoopApprovals.test.ts` is pointed at that route.
         const permissionAction = permissionMode !== undefined ? piToolAction(toolCall.name) : null
         if (permissionAction) {
-          const refusal = await this.askPermission(toolCall, permissionMode!, permissionAction, piPermissionKey(permissionAction), appTurn?.threadId || undefined, signal)
+          const refusal = await this.askPermission(toolCall, permissionMode!, permissionAction, piPermissionKey(permissionAction), appTurn?.threadId || undefined, signal, projectPath)
           if (refusal) return refusal
         }
 

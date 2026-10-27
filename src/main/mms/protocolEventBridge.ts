@@ -155,6 +155,10 @@ export function bridgeProtocolEvent(
       )
       return true
     }
+    case 'pullRequests.updated': {
+      broadcast('pullRequests:updated', event.data)
+      return true
+    }
     case 'scheduled.status': {
       broadcast(
         'scheduled:status',
@@ -211,6 +215,14 @@ export function bridgeProtocolEvent(
     }
     case 'mcp.changed': {
       broadcast('mcp:changed', null)
+      return true
+    }
+    case 'bots.changed': {
+      broadcast('bots:changed', event.data ?? {})
+      return true
+    }
+    case 'bots.escalation': {
+      broadcast('bots:escalation', event.data)
       return true
     }
     case 'activity':

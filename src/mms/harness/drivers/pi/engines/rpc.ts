@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { HarnessCaps } from '../../../../../shared/harness/types'
+import { hasContainmentEvidence, PI_RPC_EVIDENCE_ITEMS, PI_RPC_NO_SHELL_ITEMS, type ContainmentEvidence } from '../../../compatibility'
 import type { DriverContext, DriverRuntime, LiveProcessHost } from '../../../driver'
 import { PiRpcEngine, type PiEngineCatalog, type PiMousseTool, type PiRpcEngineOptions } from '../../../pi/engine'
 import type { PiRuntimePaths } from '../../../pi/launch'
@@ -12,8 +13,11 @@ import { piInstanceRuntime, type PiCredentials } from './legacy'
  * Pi's agent as its own process (PR 2 §4): a `pi:*` instance the user switched to it (Advanced →
  * Engine: New engine), except the legacy-only providers (`../engines.ts`).
  *
- * - Containment and tool control stay `weak`/`approval_only` until the evidence suite passes on the
- *   whole execution profile: Mousse sees and can refuse every call, but does not run the tools.
+ * - Containment and tool control are `weak`/`approval_only` (these caps) wherever the evidence suite
+ *   has not passed for this platform and Pi version: Mousse sees and can refuse every call, but does
+ *   not run the tools. Where it passed they are `strong`/`exact` (`piRpcCaps`), and the engine runs
+ *   agent definitions. Where it passed without the contained shell (a no-shell record) they are
+ *   `weak`/`exact`: the engine runs agent definitions, and a definition's shell asks a person first.
  * - `budgets: 'hard'`: every model request is charged through the guarded request wrapper
  *   (`/pi/request`) and every tool call at the gate, and the next one is refused before it starts
  *   once a turn or tool-call limit is reached.
@@ -44,6 +48,73 @@ export const PI_RPC_CAPS: HarnessCaps = Object.freeze({
   definitionLimits: 'none'
 })
 
+/** What decides whether the evidence suite passed here: the platform, the pinned Pi and the records. */
+export interface PiRpcEvidenceInput {
+  platform: NodeJS.Platform
+  /** The pinned Pi's version; unknown never matches a record. */
+  piVersion: string | undefined
+  evidence?: readonly ContainmentEvidence[]
+}
+
+/**
+ * What the evidence suite proved on this platform for this exact Pi version (`compatibility.ts`):
+ * every item, the contained shell included (`shell`); every item but the contained shell
+ * (`no_shell`, a no-shell record); or nothing (`none`).
+ */
+export type PiRpcEvidenceLevel = 'shell' | 'no_shell' | 'none'
+
+export function piRpcEvidenceLevel(input: PiRpcEvidenceInput): PiRpcEvidenceLevel {
+  if (!input.piVersion) return 'none'
+  const query = { driver: 'pi', kind: 'tools', platform: input.platform, cliVersion: input.piVersion } as const
+  if (hasContainmentEvidence({ ...query, items: PI_RPC_EVIDENCE_ITEMS }, input.evidence)) return 'shell'
+  if (hasContainmentEvidence({ ...query, items: PI_RPC_NO_SHELL_ITEMS }, input.evidence)) return 'no_shell'
+  return 'none'
+}
+
+/**
+ * Whether the engine runs agent definitions here: a record with or without the contained shell.
+ * Without one the engine stays `weak`/`approval_only` and runs no definition.
+ */
+export function piRpcHasEvidence(input: PiRpcEvidenceInput): boolean {
+  return piRpcEvidenceLevel(input) !== 'none'
+}
+
+/**
+ * The engine's caps here (PR 2 §4, S7): `strong`/`exact` where every item passed, `weak`/`exact`
+ * where every item but the contained shell did, else `weak`/`approval_only`.
+ */
+export function piRpcCaps(input: PiRpcEvidenceInput): HarnessCaps {
+  const level = piRpcEvidenceLevel(input)
+  return level === 'shell' ? PI_RPC_EXACT_CAPS : level === 'no_shell' ? PI_RPC_NO_SHELL_CAPS : PI_RPC_CAPS
+}
+
+/** The engine's caps where its evidence suite passed. */
+export const PI_RPC_EXACT_CAPS: HarnessCaps = Object.freeze({ ...PI_RPC_CAPS, containment: 'strong', toolControl: 'exact' })
+
+/**
+ * The engine's caps where its evidence suite passed without the contained shell: Mousse decides
+ * every call (`exact`), but Pi's shell runs uncontained (`weak`). So a definition's shell command
+ * asks a person first, bound to the exact command, and an unattended definition runs none
+ * (`PiRpcEngine.gate`). Checkpoint restore still reviews the diff, as `weak` containment does.
+ */
+export const PI_RPC_NO_SHELL_CAPS: HarnessCaps = Object.freeze({ ...PI_RPC_CAPS, toolControl: 'exact' })
+
+/** The pinned Pi's version, read from the packaged runtime once; undefined when it cannot be read. */
+export function piRuntimeVersion(root: string): string | undefined {
+  const known = runtimeVersions.get(root)
+  if (known !== undefined || runtimeVersions.has(root)) return known
+  let version: string | undefined
+  try {
+    const parsed = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { version?: unknown }
+    version = typeof parsed.version === 'string' ? parsed.version : undefined
+  } catch {
+    version = undefined
+  }
+  runtimeVersions.set(root, version)
+  return version
+}
+const runtimeVersions = new Map<string, string | undefined>()
+
 /** What the RPC engine needs from the profile. */
 export interface PiRpcDriverOptions {
   /** The packaged runtime (`piRuntimePaths(applicationRoot)`). */
@@ -52,8 +123,8 @@ export interface PiRpcDriverOptions {
   catalog(providerId: string): PiEngineCatalog
   /** The stored key of a provider, if it has one. */
   apiKey?(providerId: string): string | undefined
-  /** Mousse's tools for a thread, with their class. */
-  mousseTools?(threadId: string): PiMousseTool[]
+  /** Mousse's tools for a thread, with their class; as `runId`'s turn is offered them when given (`ToolRegistry.listForTurn`). */
+  mousseTools?(threadId: string, runId?: string): PiMousseTool[]
   /**
    * Ids the provider's stored credential carries beside its key (Cloudflare's account and gateway
    * ids): they reach the child's environment, never a credential.
@@ -66,12 +137,26 @@ export interface PiRpcDriverOptions {
   identity?(providerId: string): string | undefined | Promise<string | undefined>
   /** Mousse's OAuth credentials for pi-ai's OAuth providers (`piOAuthBroker(providerAuth)`); Mousse is the only refresher. */
   oauth?: PiOAuthSource
+  /** Test seams for the evidence check: the platform (default `process.platform`) and the records (default `CONTAINMENT_EVIDENCE`). */
+  platform?: NodeJS.Platform
+  evidence?: readonly ContainmentEvidence[]
   /** Test seams passed through to the engine. */
   engine?: Partial<Pick<PiRpcEngineOptions, 'warmMs' | 'readyDeadlineMs' | 'commandDeadlineMs' | 'settings' | 'host' | 'adjustLaunch' | 'onCommand' | 'testEnv'>>
 }
 
+/** The evidence inputs of a profile's RPC options. */
+export function piRpcEvidenceOf(options: PiRpcDriverOptions): PiRpcEvidenceInput {
+  let piVersion: string | undefined
+  try {
+    piVersion = piRuntimeVersion(options.runtime().root)
+  } catch {
+    piVersion = undefined
+  }
+  return { platform: options.platform ?? process.platform, piVersion, ...(options.evidence ? { evidence: options.evidence } : {}) }
+}
+
 export function createRpcRuntime(context: DriverContext, providerId: string, label: string, credentials: () => PiCredentials | undefined, options: PiRpcDriverOptions): DriverRuntime {
-  const capabilities = PI_RPC_CAPS
+  const capabilities = piRpcCaps(piRpcEvidenceOf(options))
   const notice = engineNotice(context, label)
   const engine = new PiRpcEngine({
     instanceId: context.instanceId,
@@ -96,7 +181,7 @@ export function createRpcRuntime(context: DriverContext, providerId: string, lab
     ...(options.oauth ? { oauth: options.oauth } : {}),
     extraEnv: () => ({ ...(options.credentialEnv?.(providerId) ?? {}), ...(context.config.env ?? {}) }),
     shellPath: () => piShellPath({ env: context.env.env }),
-    ...(options.mousseTools ? { mousseTools: (threadId: string) => options.mousseTools!(threadId) } : {}),
+    ...(options.mousseTools ? { mousseTools: (threadId: string, runId?: string) => options.mousseTools!(threadId, runId) } : {}),
     // A new session seeded with the chat's history tells the thread (`history_injected`).
     notice: (threadId, { message }) => notice.send(threadId, message),
     ...options.engine

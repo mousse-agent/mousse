@@ -48,6 +48,8 @@ export interface PiLaunchInput {
   thinking: PiThinkingLevel
   /** Resume this session (`--session`). */
   sessionId?: string
+  /** A session of the turn's own, kept in memory only (`--no-session`): nothing is written or resumed. */
+  ephemeral?: boolean
   /**
    * Variables configured on the instance (e.g. an account id). They pass the same filter as the
    * inherited environment: no Electron, Node, Mousse or Pi setting, no credential variable, and
@@ -134,8 +136,7 @@ export function piLaunch(input: PiLaunchInput): PiLaunch {
     '--provider', input.provider,
     '--model', input.model,
     '--thinking', input.thinking,
-    '--session-dir', join(input.stateDir, 'sessions'),
-    ...(input.sessionId ? ['--session', input.sessionId] : []),
+    ...(input.ephemeral ? ['--no-session'] : ['--session-dir', join(input.stateDir, 'sessions'), ...(input.sessionId ? ['--session', input.sessionId] : [])]),
     '--no-extensions', '-e', input.runtime.extension,
     '--no-skills', '--no-prompt-templates', '--no-themes', '--no-context-files', '--no-approve'
   ]

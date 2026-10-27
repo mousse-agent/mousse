@@ -160,8 +160,30 @@ describe('approval', () => {
     publish({ tools: ['read', 'search', 'edit'] })
     await expect(bots.activate({ botId: 'site-editor', input: 'b', clientRequestId: 'wide' })).rejects.toMatchObject({
       code: 'bot_approval_required',
-      details: { added: [{ kind: 'tool', text: `Edit files in ${root}` }] }
+      details: { added: [{ kind: 'tool', text: 'Edit files (no folder allows it)' }] }
     })
+  })
+
+  it('approval and dispatch read the runtime\'s policy facts again first, so a runtime that only knows them after a reading can hold the bot (review r2)', async () => {
+    publish()
+    // A runtime that can hold a bot only on a fresh reading (a locked Claude entry's policy).
+    let fresh = false
+    const refreshed: string[] = []
+    engineHost.harness.refreshPolicyFacts = async (instanceId) => {
+      refreshed.push(instanceId)
+      fresh = true
+    }
+    check = () => (fresh ? { ok: true } : { ok: false, error: { code: 'policy_unenforceable', message: 'no', missing: ['toolControl'], reason: 'Not read yet.' } })
+    expect(() => approve()).toThrow(expect.objectContaining({ code: 'policy_unenforceable' }))
+    await bots.refreshRuntimes('site-editor')
+    expect(refreshed).toEqual(['pi:openrouter'])
+    expect(approve()).toMatchObject({ digest: botManifestDigest(manifest()) })
+    const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'c1' })
+    const payload = turnStart(store.dispatch(activation.id, 1)!.runId!)
+    fresh = false
+    expect(bots.prepare(payload)).toMatchObject({ code: 'policy_unenforceable' })
+    await bots.refresh(payload)
+    expect(refreshed).toEqual(['pi:openrouter', 'pi:openrouter'])
   })
 
   it('shell is never approvable on this build', () => {
@@ -201,7 +223,7 @@ describe('activation and dispatch', () => {
     if ('refused' in prepared) throw new Error(prepared.refused)
     expect(prepared.prompt).toBe(' /deploy now')
     expect(prepared.instructions).toBe('You keep the site tidy.\n\nAnswer briefly.')
-    expect(prepared.policy).toMatchObject({ approvals: 'grants', approve: 'host', tools: { allow: ['find', 'grep', 'read'] }, budget: { maxTurns: 30, maxWallMs: 10 * 60_000 }, authority: { kind: 'bot' } })
+    expect(prepared.policy).toMatchObject({ approvals: 'grants', approve: 'host', tools: { allow: ['escalate', 'find', 'grep', 'read'] }, budget: { maxTurns: 30, maxWallMs: 10 * 60_000 }, authority: { kind: 'bot' } })
     expect(prepared.authority.spend).toBeNull()
     expect(existsSync(join(prepared.scratch, 'tmp'))).toBe(true)
     expect(store.counters(activation.id).activeMs).toBe(10 * 60_000)
@@ -282,13 +304,14 @@ describe('activation and dispatch', () => {
     expect(store.counters(activation.id).limits).toEqual({ maxTurns: 5 })
     const prepared = bots.prepare(turnStart(store.dispatch(activation.id, 1)!.runId!))
     if ('refused' in prepared) throw new Error(prepared.refused)
-    expect(prepared.policy).toMatchObject({ tools: { allow: ['read'] }, budget: { maxTurns: 5, maxWallMs: 2 * 60_000 } })
+    expect(prepared.policy).toMatchObject({ tools: { allow: ['escalate', 'read'] }, budget: { maxTurns: 5, maxWallMs: 2 * 60_000 } })
     expect(store.counters(activation.id).activeMs).toBe(2 * 60_000)
-    expect(prepared.authority.check({ kind: 'builtin', tool: 'search', nativeName: 'grep', args: { path: root } })).toMatchObject({ ok: false, wall: { kind: 'tool' } })
-    expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(base, 'docs', 'a.md') } })).toMatchObject({ ok: false, wall: { kind: 'path' } })
+    // An ungranted tool is a wall (6c-2): the owner is asked, and every later call waits.
+    expect(prepared.authority.check({ kind: 'builtin', tool: 'search', nativeName: 'grep', args: { path: root } })).toMatchObject({ ok: false, wall: { kind: 'escalated', permission: 'Use the tool `search`' } })
+    expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(base, 'docs', 'a.md') } })).toMatchObject({ ok: false, wall: { kind: 'waiting' } })
   })
 
-  it('the deadline aborts the turn and stops its run; later calls are refused', async () => {
+  it('the deadline ends the dispatch at a budget wall; later calls are refused', async () => {
     const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'c1' })
     const prepared = bots.prepare(turnStart(store.dispatch(activation.id, 1)!.runId!))
     if ('refused' in prepared) throw new Error(prepared.refused)
@@ -296,8 +319,8 @@ describe('activation and dispatch', () => {
     timers[0].fn()
     await new Promise((resolve) => setImmediate(resolve))
     expect(prepared.authority.time.signal.aborted).toBe(true)
-    expect(stopped).toEqual([activation.threadId])
-    expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(root, 'a.md') } })).toEqual({ ok: false, wall: { kind: 'ended' } })
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'waiting_grant', openEscalation: { kind: 'budget', permission: { budget: { key: 'maxActiveMs' } } } })
+    expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(root, 'a.md') } })).toEqual({ ok: false, wall: { kind: 'waiting' } })
   })
 
   it('the run\'s terminal event settles the dispatch on any path; the final message lands afterwards', async () => {
@@ -335,7 +358,8 @@ describe('activation and dispatch', () => {
     const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'c1' })
     store.run('UPDATE bot_counters SET active_ms = ? WHERE activation_id = ?', 10 * 60_000 - 14_000, activation.id)
     expect(bots.prepare(turnStart(store.dispatch(activation.id, 1)!.runId!))).toMatchObject({ code: 'active_time_exhausted' })
-    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'paused', endReason: 'active_time_exhausted' })
+    // A budget wall: the owner may allow more time.
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'waiting_grant', openEscalation: { kind: 'budget', permission: { budget: { key: 'maxActiveMs' } } } })
   })
 
   it('one activation runs at a time; the next starts when it ends', async () => {
@@ -404,9 +428,17 @@ describe('activation and dispatch', () => {
     expect(bots.listActivations('site-editor').filter((row) => row.status === 'queued')).toHaveLength(20)
   })
 
-  it('deleting the bot cancels its activations and revokes its grant', async () => {
+  it('deleting the bot cancels its activations, revokes its grant and trashes its home thread', async () => {
     const running = await bots.activate({ botId: 'site-editor', input: 'one', clientRequestId: 'c1' })
+    const trashed: string[] = []
+    engineHost.trashThread = async (threadId) => { trashed.push(threadId) }
+    // Its run ends when its thread is stopped; only then does the home thread move.
+    engineHost.stopThread = (threadId) => {
+      stopped.push(threadId)
+      runs.markTerminal(store.dispatch(running.id, 1)!.runId!, 'cancelled', { error: 'stopped' })
+    }
     await bots.remove('site-editor')
+    expect(trashed).toEqual(['thread:bot:site-editor'])
     expect(bots.getActivation(running.id)).toMatchObject({ status: 'cancelled', endReason: 'bot_deleted' })
     expect(store.activeGrant('site-editor')).toBeUndefined()
     expect(bots.list()).toEqual([])

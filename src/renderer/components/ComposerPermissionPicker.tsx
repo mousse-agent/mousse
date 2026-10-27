@@ -33,7 +33,7 @@ function modeDescription(mode: PermissionMode, agent: string, sandboxOff: boolea
  * Full access on an agent that approves tools itself, and, for a subagent, never a mode above its
  * lineage's ceiling.
  */
-export function ComposerPermissionPicker({ mode, agent, caps, limits, ceiling, sandboxOffInFull, readOnly, onSelect }: {
+export function ComposerPermissionPicker({ mode, agent, caps, limits, ceiling, readOnly, onSelect }: {
   /** The mode the thread is set to. */
   mode: PermissionMode
   /** The selected agent's name ("Claude Code"). */
@@ -42,8 +42,6 @@ export function ComposerPermissionPicker({ mode, agent, caps, limits, ceiling, s
   limits?: PermissionLimits
   /** A subagent's lineage ceiling; absent for a thread nobody delegated. */
   ceiling?: PermissionMode
-  /** Full access turns the agent's own sandbox off (Codex), which the menu says. */
-  sandboxOffInFull?: boolean
   readOnly?: boolean
   onSelect: (mode: PermissionMode) => void
 }) {
@@ -85,7 +83,7 @@ export function ComposerPermissionPicker({ mode, agent, caps, limits, ceiling, s
             <MenuCheck on={mode === entry} />
             <span className="composer-mode-menu-item-text">
               <span>{describePermissionMode(entry)}</span>
-              <span className="composer-mode-menu-item-desc">{aboveCeiling ? 'A thread this subagent belongs to is set lower.' : modeDescription(entry, agent, sandboxOffInFull === true)}</span>
+              <span className="composer-mode-menu-item-desc">{aboveCeiling ? 'A thread this subagent belongs to is set lower.' : modeDescription(entry, agent, limits?.sandboxOffInFull === true)}</span>
             </span>
           </button>
         })}

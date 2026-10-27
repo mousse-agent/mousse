@@ -24,6 +24,7 @@ import { SkillsMcpSettings } from './settings/SkillsMcpSettings'
 import { ShortcutsSettings } from './settings/ShortcutsSettings'
 import { createIntegrationPlatformClient } from '../services/integrationPlatformClient'
 import { confirmNavigation } from '../services/navigationGuards'
+import { useStorageReviewPending } from '../lib/storageReview'
 import '../styles/settings.css'
 
 function SettingsLoader() {
@@ -44,7 +45,7 @@ const SETTINGS_SECTIONS = [
   { id: 'speech', label: 'Speech', icon: VolumeHigh, hue: 3, group: 'Customize', keywords: ['voice', 'read aloud', 'dictation', 'microphone', 'noise', 'speed'] },
   { id: 'shortcuts', label: 'Shortcuts', icon: Keyboard, hue: 2, group: 'Customize', keywords: ['keyboard', 'keys', 'keybindings', 'hotkeys', 'rebind', 'command palette', 'accelerator', 'reset'] },
   { id: 'connections', label: 'Devices', icon: Laptop, hue: 2, group: 'This computer', keywords: ['devices', 'network', 'pair', 'remote'] },
-  { id: 'storage', label: 'Storage', icon: Server, hue: 0, group: 'This computer', keywords: ['trash', 'delete', 'purge', 'retention', 'disk'] }
+  { id: 'storage', label: 'Storage', icon: Server, hue: 0, group: 'This computer', keywords: ['trash', 'delete', 'purge', 'retention', 'disk', 'worktree', 'usage', 'cleanup', 'browser', 'space'] }
 ] as const
 
 type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]['id']
@@ -286,6 +287,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
     }
     void confirmNavigation('navigate', 'integrations').then((allowed) => { if (allowed) setActiveSection(id) })
   }
+  const reviewPending = useStorageReviewPending()
   const navSections = VISIBLE_SETTINGS_SECTIONS
     .filter((section) => matchesSettingsQuery(section, navQuery))
   const activeSectionLabel = SETTINGS_SECTIONS.find((section) => section.id === activeSection)?.label ?? 'Settings'
@@ -313,11 +315,13 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
               className={`settings-nav-item${active ? ' active' : ''}`}
               onClick={() => goToSection(section.id)}
               aria-current={active ? 'page' : undefined}
+              aria-label={section.id === 'storage' && reviewPending ? 'Storage, new cleanup rules to review' : undefined}
             >
               <span className="settings-nav-item-icon" data-hue={section.hue}>
                 <Icon size={14} strokeWidth={1.8} aria-hidden="true" />
               </span>
               {section.label}
+              {section.id === 'storage' && reviewPending && <span className="settings-nav-dot" data-testid="storage-review-dot" aria-hidden="true" />}
             </button>
           </Fragment>
         )

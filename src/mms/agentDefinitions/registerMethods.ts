@@ -1,6 +1,7 @@
 import { AGENT_DEFINITION_CAPABILITY, AGENT_DEFINITION_METHODS, type AgentDefinitionMethod } from '../../shared/agentPlatform'
 import { AgentDefinitionError, type AgentDefinitionIssue } from '../../shared/agents/errors'
 import { isAgentDefinitionId, isAgentRuntimeKind } from '../../shared/agents/schema'
+import type { PendingUserQuestions, UserQuestionAnswers } from '../../shared/types'
 import type { AgentDefinitionRecord, AgentExportBundle, AgentIntegrationLookup, CreateAgentDefinitionInput, ResolvedAgentDefinition, SaveAgentDraftInput } from '../../shared/agents/types'
 import { DomainHandlerRegistry, DomainRpcError, domainObject } from '../protocol/domainRegistry'
 import type { HandlerContext } from '../protocol/handlers'
@@ -23,6 +24,18 @@ export interface AgentDefinitionDomainServices extends AgentDefinitionServices {
     resolved: ResolvedAgentDefinition; record: AgentDefinitionRecord; prompt: string;
     exampleId?: string; connectionId: string
   }) => Promise<DefinitionTryRunResult>
+  /**
+   * The questions this connection's running Try Runs of a definition wait on (a shell command's
+   * approval, an `ask_user`): the Try Run panel shows them, since their thread is not on screen.
+   */
+  tryRunPending?: (input: { definitionId: string; connectionId: string }) => DefinitionTryRunPending
+  /** Answers (or dismisses) one of those questions; any other request is refused. */
+  tryRunAnswer?: (input: { definitionId: string; connectionId: string; requestId: string; answers?: UserQuestionAnswers; dismiss?: boolean; via: 'gui' | 'cli' | 'internal' }) => { ok: boolean }
+}
+
+/** A connection's running Try Runs of one definition, and what each waits on. */
+export interface DefinitionTryRunPending {
+  runs: Array<{ runId: string; threadId: string; threadTitle: string; questions: PendingUserQuestions[] }>
 }
 
 type Params = Record<string, unknown>
@@ -37,7 +50,9 @@ const keys: Record<AgentDefinitionMethod, readonly string[]> = {
   'agentDefinitions.importBundle': ['bundle', 'conflict'],
   'agentDefinitions.exportBundle': ['id', 'revision'],
   'agentDefinitions.validate': ['id', 'expectedDraftHash'],
-  'agentDefinitions.tryRun': ['id', 'expectedDraftHash', 'revision', 'prompt', 'exampleId']
+  'agentDefinitions.tryRun': ['id', 'expectedDraftHash', 'revision', 'prompt', 'exampleId'],
+  'agentDefinitions.tryRunPending': ['id'],
+  'agentDefinitions.tryRunAnswer': ['id', 'requestId', 'answers', 'dismiss']
 }
 
 function validate(method: AgentDefinitionMethod, value: unknown): Params {
@@ -59,6 +74,18 @@ function validate(method: AgentDefinitionMethod, value: unknown): Params {
   }
   if (method === 'agentDefinitions.tryRun' && (typeof p.prompt !== 'string' || !p.prompt.trim())) throw new DomainRpcError('invalid_params', 'A try-run prompt is required')
   if (method === 'agentDefinitions.tryRun' && p.revision !== undefined && p.expectedDraftHash !== undefined) throw new DomainRpcError('invalid_params', 'Choose an exact draft or a published revision')
+  if (method === 'agentDefinitions.tryRunAnswer') {
+    if (typeof p.requestId !== 'string' || !p.requestId || p.requestId.length > 256) throw new DomainRpcError('invalid_params', 'A question request id is required')
+    if (p.dismiss !== undefined && typeof p.dismiss !== 'boolean') throw new DomainRpcError('invalid_params', 'dismiss must be boolean')
+    if ((p.answers === undefined) === (p.dismiss !== true)) throw new DomainRpcError('invalid_params', 'Give the answers, or dismiss the question')
+    if (p.answers !== undefined) {
+      if (!p.answers || typeof p.answers !== 'object' || Array.isArray(p.answers)) throw new DomainRpcError('invalid_params', 'Invalid answers')
+      const values = Object.values(p.answers as Record<string, unknown>)
+      const valid = (value: unknown) => typeof value === 'string' && value.length <= 64 * 1024
+      if (values.length > 32 || values.some((value) => !valid(value) && !(Array.isArray(value) && value.length <= 64 && value.every(valid))))
+        throw new DomainRpcError('invalid_params', 'Invalid answers')
+    }
+  }
   if (p.conflict !== undefined && p.conflict !== 'fail' && p.conflict !== 'rename') throw new DomainRpcError('invalid_params', 'Invalid import conflict choice')
   if (p.settings !== undefined) domainObject(p.settings, ['identity', 'instructions', 'primaryModel', 'fallbacks', 'output', 'context', 'memory', 'skills', 'mcp', 'tools', 'browser', 'delegation', 'workspace', 'script', 'approval', 'limits', 'recovery', 'examples'])
   if (method === 'agentDefinitions.create' && p.settings === undefined) throw new DomainRpcError('invalid_params', 'Agent settings are required')
@@ -139,6 +166,14 @@ async function handle(method: AgentDefinitionMethod, p: Params, service: AgentDe
         : resolver.resolve({ definitionId: id, revision, task: p.prompt as string })
       if (!service.tryRun) return { ok: false, status: 'blocked', summary: 'Agent execution is unavailable in this daemon.', trace: [] }
       return service.tryRun({ resolved, record, prompt: p.prompt as string, exampleId: p.exampleId as string | undefined, connectionId: context.connection!.id })
+    }
+    case 'agentDefinitions.tryRunPending':
+      return service.tryRunPending?.({ definitionId: id, connectionId: context.connection!.id }) ?? { runs: [] }
+    case 'agentDefinitions.tryRunAnswer': {
+      if (!service.tryRunAnswer) return { ok: false }
+      const via = context.connection?.clientType === 'gui' ? 'gui' : context.connection?.clientType === 'cli' ? 'cli' : 'internal'
+      return service.tryRunAnswer({ definitionId: id, connectionId: context.connection!.id, requestId: p.requestId as string,
+        ...(p.answers !== undefined ? { answers: p.answers as UserQuestionAnswers } : {}), ...(p.dismiss === true ? { dismiss: true } : {}), via })
     }
   }
 }

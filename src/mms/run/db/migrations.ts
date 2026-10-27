@@ -325,5 +325,117 @@ ALTER TABLE delegations ADD COLUMN access_level TEXT CHECK(access_level IN ('lin
 -- version 11). A run that continues it is never granted more.
 ALTER TABLE runs ADD COLUMN access_grant TEXT CHECK(access_grant IN ('lineage','read','manage'));
 `
+  },
+  {
+    version: 12,
+    sql: `
+-- A provider's, the Pi agent's or a Mousse tool's approval request, saved so it survives a client
+-- reconnect and a daemon restart (SPEC §17). A request is settled once: 'pending' becomes
+-- 'answered' or 'cancelled'.
+CREATE TABLE approval_requests(
+  request_id TEXT PRIMARY KEY,
+  thread_id TEXT NOT NULL,
+  run_id TEXT,
+  instance_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  action TEXT NOT NULL CHECK(action IN ('command','edit','tool')),
+  permission_key TEXT NOT NULL,
+  fingerprint TEXT,
+  questions TEXT NOT NULL,
+  reason TEXT,
+  answer_path TEXT NOT NULL CHECK(answer_path IN ('live','continue')),
+  uncertain INTEGER NOT NULL DEFAULT 0 CHECK(uncertain IN (0,1)),
+  uncertain_tools TEXT,
+  status TEXT NOT NULL CHECK(status IN ('pending','answered','cancelled')),
+  answers TEXT,
+  decision TEXT CHECK(decision IS NULL OR decision IN ('allow','reject')),
+  decision_scope TEXT CHECK(decision_scope IS NULL OR decision_scope IN ('once','always')),
+  feedback TEXT,
+  answered_by TEXT,
+  cancel_reason TEXT,
+  continuation_run_id TEXT,
+  grant_consumed_at TEXT,
+  delivered_at TEXT,
+  created_at TEXT NOT NULL,
+  settled_at TEXT
+) STRICT;
+CREATE INDEX approval_requests_thread ON approval_requests(thread_id, status);
+CREATE INDEX approval_requests_run ON approval_requests(run_id, status);
+-- Read at every turn start: the requests a run was started to deliver.
+CREATE INDEX approval_requests_continuation ON approval_requests(continuation_run_id);
+`
+  },
+  {
+    version: 13,
+    // SQLite cannot change a CHECK in place, so `inbox` is rebuilt (SQLite's "other kinds of ALTER TABLE"
+    // procedure). Nothing references it, and its index goes with the dropped table and is made again. It touches only
+    // `inbox`, so it applies the same on a database at version 11 and on one that another change has taken to 12.
+    sql: `
+-- A watched pull request tells its thread about finished checks and new reviews (issue #176): the
+-- kind list adds 'pr_update'. Columns are those of version 3 plus delivered_by (version 7).
+CREATE TABLE inbox_new(
+  inbox_id   TEXT PRIMARY KEY,
+  thread_id  TEXT NOT NULL,
+  run_id     TEXT,
+  kind       TEXT NOT NULL CHECK(kind IN ('child_result','restart_note','reconcile_notice','pr_update')),
+  payload    TEXT NOT NULL,
+  status     TEXT NOT NULL CHECK(status IN ('pending','delivered','acknowledged')),
+  created_at TEXT NOT NULL,
+  delivered_by TEXT
+) STRICT;
+INSERT INTO inbox_new(inbox_id, thread_id, run_id, kind, payload, status, created_at, delivered_by)
+  SELECT inbox_id, thread_id, run_id, kind, payload, status, created_at, delivered_by FROM inbox;
+DROP TABLE inbox;
+ALTER TABLE inbox_new RENAME TO inbox;
+CREATE INDEX inbox_thread_status ON inbox(thread_id, status);
+`
+  },
+  {
+    version: 14,
+    sql: `
+-- "Always for this thread" (SPEC §17.8): a standing rule that answers one exact request again, in one
+-- thread. It is keyed by the request's fingerprint (instance, directory, key, tool, whole input), so it
+-- never widens to another command, folder or tool; a request without a fingerprint cannot match. Only a
+-- user creates one. It is ignored while the thread's permission mode is stricter than the one it was
+-- granted under, and goes with the thread.
+CREATE TABLE approval_rules(
+  thread_id TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  permission_key TEXT NOT NULL,
+  action TEXT NOT NULL CHECK(action IN ('command','edit','tool')),
+  summary TEXT NOT NULL,
+  granted_under TEXT NOT NULL CHECK(granted_under IN ('ask','accept_edits','full')),
+  source_request_id TEXT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(thread_id, fingerprint)
+) STRICT;
+
+-- The permission mode the request was asked under: what a rule created by answering it is granted under.
+-- NULL on requests saved before version 14 (they create no rule).
+ALTER TABLE approval_requests ADD COLUMN permission_mode TEXT CHECK(permission_mode IS NULL OR permission_mode IN ('ask','accept_edits','full'));
+`
+  },
+  {
+    version: 15,
+    sql: `
+-- An agent's change to a thread's queued messages (issue #184), written before the queue file changes. 'pending':
+-- the change may not be in the file yet; 'effects_pending': it is, but a side effect (cancelling the item's queued run,
+-- giving its notice rows back) did not commit and is retried; 'applied': done, and the stored result is what a retry of
+-- the same request returns. The intent holds the complete change so an unfinished one is finished from it alone; once
+-- applied it is cut down to what tells a reused request id from a retry, and its result holds no message text. An entry
+-- that cannot be finished after a few tries becomes 'failed' and is left alone; old finished entries are pruned.
+CREATE TABLE queue_commands(
+  command_key TEXT PRIMARY KEY,
+  thread_id   TEXT NOT NULL,
+  intent      TEXT NOT NULL,
+  status      TEXT NOT NULL CHECK(status IN ('pending','effects_pending','applied','failed')),
+  result      TEXT,
+  attempts    INTEGER NOT NULL DEFAULT 0,
+  last_error  TEXT,
+  created_at  TEXT NOT NULL,
+  applied_at  TEXT
+) STRICT;
+CREATE INDEX queue_commands_thread_status ON queue_commands(thread_id, status);
+`
   }
 ]

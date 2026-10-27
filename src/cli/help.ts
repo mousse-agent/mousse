@@ -4,6 +4,7 @@ import { BRIDGE_HUB_HELP } from './commands/bridge'
 import { SPACES_HELP } from './commands/spaces'
 import { BOTS_HELP } from './commands/bots'
 import { BROWSER_HELP } from './commands/browser'
+import { APPROVALS_HELP } from './commands/approvals'
 
 export const CLI_NAME = 'mousse-cli'
 
@@ -13,7 +14,8 @@ Usage:
   mousse-cli [options] [message...]          Interactive orchestrator chat (TTY) or one-shot
   mousse-cli chat "/<workflow> --arg value"   Invoke a published workflow from chat
   mousse-cli schedule <subcommand>           Manage scheduled jobs
-  mousse-cli workflow <subcommand>           Run and inspect durable workflows
+  mousse-cli approvals [answer <id> <option>|rules <thread>|reset <thread>] List or answer approval requests, list or revoke a thread's "always" rules
+  mousse-cli workflow <subcommand>          Run and inspect durable workflows
   mousse-cli browser <status|install|cancel> Manage browser automation setup
   mousse-cli agents <subcommand>             Spawn/list/stop background CLI agents
   mousse-cli engine fsck                     Check Run Engine state for inconsistencies
@@ -60,6 +62,9 @@ Interactive chat (default on a TTY without -p):
   /model [name]               Same as /models
   /steer <prompt>             Mid-turn guidance for the active turn only
   /stop                       Abort the in-flight turn
+  /approve [id]               Allow an approval request once (the id is needed when several wait)
+  /approve always [id]       Allow this exact request again for this thread, without asking
+  /deny [id] [reason]        Deny it, with a reason for the agent
   /help                       Interactive command help
   /exit                       Leave interactive mode
   /<workflow> [arguments]     Run a published workflow in the current profile
@@ -96,12 +101,26 @@ export const SCHEDULE_HELP = `Usage:
   mousse-cli schedule add --name <name> --prompt <text> --manual
   mousse-cli schedule remove <id>
   mousse-cli schedule run <id>
+  mousse-cli schedule extend <id> [--days 7]   Give a job an agent created more time (they end after 7 days)
   mousse-cli schedule enable <id>
   mousse-cli schedule disable <id>
+  mousse-cli schedule webhook enable <id> [--port <port>]   (on a job that has one, --port moves the listener)
+  mousse-cli schedule webhook rotate <id>
+  mousse-cli schedule webhook disable <id>
+  mousse-cli schedule webhook deliveries <id>
+
+Webhook: "enable" and "rotate" print the URL (127.0.0.1 only) and the signing secret, once. A request is
+POST /hooks/<id> with X-Mousse-Timestamp (unix seconds) and X-Mousse-Signature: sha256=<hex>, the HMAC-SHA256
+of "<timestamp>.<raw body>" under the secret. The body does not reach the job's prompt.
 
 Options for add:
   --instance <id> --model <model>   Provider instance and model every run uses
   --mode agent|plan                 Mode of the run (default agent)
+  --permission ask|accept_edits|full
+                                    How much the run may do without asking. Never above the mode you hold when
+                                    you create the job (its thread's, else the default for new threads).
+                                    Without it the run follows its thread's mode, up to that limit. Not for a
+                                    workflow job (a prompt starting with /): workflows take no permission mode
   --project <id>                    Project the run works in
   --thread <id>                     Run as a turn on this thread, with its history
   --workspace project|new-worktree|<path>
@@ -226,6 +245,8 @@ export function commandHelp(command: string): string | null {
       return WORKFLOW_HELP
     case 'schedule':
       return SCHEDULE_HELP
+    case 'approvals':
+      return APPROVALS_HELP
     case 'agents':
       return AGENTS_HELP
     case 'engine':

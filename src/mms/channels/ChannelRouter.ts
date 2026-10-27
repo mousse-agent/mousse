@@ -5,14 +5,17 @@ import type {
   ChannelActivityEvent,
   ChannelConfig,
   ChannelPlatform,
+  ChannelSession,
   Project
 } from '../../shared/types'
+import type { BotChannelReplyTo } from '../../shared/bots/personal/definition'
 import { listingKey, listingServes, selectionFromListing, type ModelOverride } from '../../shared/providerInstances'
 import type { LlmProviderOption } from '../../shared/settings'
 import { applyEffortToModelId, formatEffortLabel } from '../../shared/modelVariants'
 import type { SettingsStore } from '../settings/SettingsStore'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
 import { ChannelAuth } from './ChannelAuth'
+import { BOT_NO_MESSAGE_ID_REPLY, BOT_NO_OWNER_REPLY, BOT_NOT_OWNER_REPLY, channelAudience, type ChannelBots, type ChannelOwnerClaims } from './channelBots'
 import { ChannelSessionManager } from './ChannelSessionManager'
 import { ChannelStore } from './ChannelStore'
 import { chunkMessage } from './chunkMessage'
@@ -60,6 +63,18 @@ export interface ChannelRouterDeps {
   listModels: () => LlmProviderOption[]
   listAgents?: () => SlashAgentInfo[]
   getSubscriptionUsage?: (providerId: string) => Promise<string | undefined>
+  /**
+   * Checked before each channel turn: `refusal` replaces the turn (the model cannot run in channels);
+   * `notice` is sent first, once per thread (tools that need approval are refused), and confirmed
+   * through `noticeDelivered` after it reached the chat.
+   */
+  channelGate?: (threadId: string, modelOverride: ModelOverride | undefined) => { refusal?: string; notice?: string }
+  noticeDelivered?: (threadId: string) => void
+  /** The profile's personal bots (`/bot <name>` and bot sessions); absent when bots are unavailable. */
+  bots?: ChannelBots
+  /** "This is me" codes (`/owner <code>`); `ownerClaimReceived` runs after a code was accepted. */
+  ownerClaims?: ChannelOwnerClaims
+  ownerClaimReceived?: () => void
 }
 
 interface InteractiveMenuDefinition {
@@ -214,6 +229,20 @@ export class ChannelRouter extends EventEmitter {
     }
 
     const parsed = parseSlashCommand(text)
+    if (parsed?.name === 'owner' && this.deps.ownerClaims) {
+      await this.deliverReply(message, this.receiveOwnerCode(message, parsed.args))
+      return
+    }
+    if (parsed?.name === 'bot') {
+      await this.deliverReply(message, this.attachBot(message, session, parsed.args))
+      return
+    }
+    // A session attached to a bot activates the bot; other slash commands keep working as usual.
+    if (!parsed && session.botId) {
+      await this.runBotTurn(message, session.sessionKey, text)
+      return
+    }
+
     if (parsed) {
       const result = await dispatchSlashCommand({
         message,
@@ -305,6 +334,85 @@ export class ChannelRouter extends EventEmitter {
     this.emit('pairing-updated')
   }
 
+  /** `/owner <code>`: the one attempt a "This is me" code allows; the desktop app confirms it. */
+  private receiveOwnerCode(message: InboundChannelMessage, code: string): string {
+    if (message.chatType !== 'dm') return 'Send /owner from a direct message to this bot.'
+    if (this.deps.ownerClaims!.receive(message, code) !== 'received') return 'That code is not valid. Start again in Mousse: Settings → Channels → "This is me".'
+    try { this.deps.ownerClaimReceived?.() } catch { /* the code stays received */ }
+    return 'Code received. Confirm in Mousse that this is your account.'
+  }
+
+  /** `/bot <name>` attaches this DM to a personal bot, `/bot off` detaches it; owner only. */
+  private attachBot(message: InboundChannelMessage, session: ChannelSession, args: string): string {
+    const bots = this.deps.bots
+    if (!bots) return 'Bots are unavailable in this profile.'
+    const name = args.trim()
+    if (!name) return session.botId ? `This chat talks to the bot ${bots.findByName(session.botId)?.name ?? session.botId}. Send /bot off to detach it.` : 'Send /bot <name> to talk to one of your bots here.'
+    if (name.toLowerCase() === 'off') {
+      this.sessionManager.setBot(session.sessionKey, undefined)
+      return 'Detached. Messages here go to the chat thread again.'
+    }
+    const owner = this.store.getOwners()[message.platform]
+    // Attaching is refused until the owner is confirmed, and for anyone but the owner.
+    if (!owner) return BOT_NO_OWNER_REPLY
+    if (channelAudience(owner, session, message) !== 'owner') return BOT_NOT_OWNER_REPLY
+    const bot = bots.findByName(name)
+    if (!bot) return `No bot named "${name.slice(0, 60)}".`
+    if (!this.sessionManager.setBot(session.sessionKey, bot.id)) return 'Could not update this channel session.'
+    return `Messages here now go to the bot ${bot.name}. Send /bot off to detach it.`
+  }
+
+  /**
+   * A message to a bot: the audience is checked again on the live session and config, so an
+   * owner change or a session change counts from the next message. Only the owner activates it.
+   */
+  private async runBotTurn(message: InboundChannelMessage, sessionKey: string, text: string): Promise<void> {
+    const bots = this.deps.bots
+    const session = this.sessionManager.getSession(sessionKey)
+    if (!session?.botId) return
+    if (!bots) {
+      await this.deliverReply(message, 'Bots are unavailable in this profile.')
+      return
+    }
+    if (channelAudience(this.store.getOwners()[message.platform], session, message) !== 'owner') {
+      await this.deliverReply(message, BOT_NOT_OWNER_REPLY)
+      return
+    }
+    // The chat message's own id keys the activation, so a redelivery runs once; without one, the
+    // bot cannot tell a redelivery from a new message and refuses it.
+    const messageId = message.messageId?.trim()
+    if (!messageId) {
+      await this.deliverReply(message, BOT_NO_MESSAGE_ID_REPLY)
+      return
+    }
+    const replyTo: BotChannelReplyTo = {
+      platform: message.platform,
+      chatId: message.chatId,
+      ...(message.threadId ? { threadId: message.threadId } : {}),
+      messageId,
+      userId: message.userId
+    }
+    try {
+      await bots.activateFromChannel({ botId: session.botId, input: text, clientRequestId: `${sessionKey}:${messageId}`, replyTo })
+    } catch (error) {
+      await this.deliverReply(message, error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /** Posts a bot activation's reply to the chat it came from; true when every chunk was sent. */
+  async deliverBotReply(replyTo: BotChannelReplyTo, text: string): Promise<boolean> {
+    const message: InboundChannelMessage = {
+      platform: replyTo.platform,
+      chatId: replyTo.chatId,
+      ...(replyTo.threadId ? { threadId: replyTo.threadId } : {}),
+      ...(replyTo.messageId ? { messageId: replyTo.messageId } : {}),
+      chatType: 'dm',
+      userId: '',
+      text: ''
+    }
+    return this.lifecycle.run('bot-reply', () => this.deliverReply(message, text))
+  }
+
   private async processTurn(
     message: InboundChannelMessage,
     threadId: string,
@@ -340,6 +448,20 @@ export class ChannelRouter extends EventEmitter {
     this.activeSessionTurns.set(sessionKey, turn)
 
     try {
+      const gate = this.deps.channelGate?.(effectiveThreadId, modelOverride)
+      // A model that cannot hold the channel policy is refused before the turn, with what to do.
+      if (gate?.refusal) {
+        await this.deliverReply(message, gate.refusal)
+        return
+      }
+      if (gate?.notice) {
+        // The notice is remembered only once it reached the chat; a failed send never blocks the turn.
+        try {
+          if (await this.deliverReply(message, gate.notice)) this.deps.noticeDelivered?.(effectiveThreadId)
+        } catch (error) {
+          console.warn('[channels] approvals notice could not be sent', error)
+        }
+      }
       const messageId = message.messageId?.trim()
       const result = await this.runner.runChannelTurn(effectiveThreadId, text, {
         modelOverride,
@@ -492,7 +614,7 @@ export class ChannelRouter extends EventEmitter {
     const thread = this.deps.threadStore.getThread(threadId)
     if (!thread) return 'That thread no longer exists. Run /threads again.'
     const bound = this.sessionManager.bindThread(sessionKey, thread.id)
-    if (!bound) return `Could not bind thread \`${thread.id.slice(0, 8)}\`.`
+    if (!bound) return `Could not bind thread \`${thread.id.slice(0, 8)}\`. A bot's thread can't be used from a chat; send /bot <name> instead.`
     return `Selected thread ${thread.id.slice(0, 8)} — ${thread.name?.trim() || '(unnamed)'}\n(Session binding updated; history preserved.)`
   }
 
@@ -697,14 +819,15 @@ export class ChannelRouter extends EventEmitter {
     this.recordActivity('outbound', message.platform, message, text)
   }
 
-  private async deliverReply(message: InboundChannelMessage, text: string): Promise<void> {
-    if (this.lifecycle.stopping) return
+  /** Sends `text` as the reply; true when every chunk reached the chat. */
+  private async deliverReply(message: InboundChannelMessage, text: string): Promise<boolean> {
+    if (this.lifecycle.stopping) return false
     const adapter = this.getAdapter(message.platform)
-    if (!adapter) return
+    if (!adapter) return false
 
     const chunks = chunkMessage(text)
     for (const chunk of chunks) {
-      if (this.lifecycle.stopping) return
+      if (this.lifecycle.stopping) return false
       const outbound: OutboundChannelMessage = {
         platform: message.platform,
         chatId: message.chatId,
@@ -715,10 +838,11 @@ export class ChannelRouter extends EventEmitter {
       const result = await adapter.send(outbound)
       if (!result.success) {
         console.error('[channels] outbound failed:', result.error)
-        break
+        return false
       }
       this.recordActivity('outbound', message.platform, message, chunk)
     }
+    return true
   }
 
   async sendTest(

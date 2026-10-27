@@ -1,9 +1,10 @@
 import { AppError } from '../../shared/errors'
 import { boundedResetIso, estimatedReset, readUsageLimit, type UsageLimit } from '../orchestrator/providerErrors'
+import { DEFAULT_USAGE_LIMIT_PAUSE_CAP } from '../../shared/settings'
 import type { RunPause, RunRecord } from './types'
 
-/** Automatic resumes in a row on one thread before the next usage limit fails the run. */
-export const DEFAULT_USAGE_LIMIT_PAUSE_CAP = 3
+/** Automatic resumes in a row on one thread before the next usage limit fails the run (`settings.runs`). */
+export { DEFAULT_USAGE_LIMIT_PAUSE_CAP }
 
 /**
  * The usage limit a failed turn stands for, or undefined when it is anything else.

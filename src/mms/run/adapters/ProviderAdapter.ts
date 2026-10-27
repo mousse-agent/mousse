@@ -101,6 +101,11 @@ export interface TurnInput {
   continuation?: boolean
   /** Which turn the provider started this run is for, when it started several. */
   continuationId?: string
+  /**
+   * The admitted message was written by another thread's agent: no `/skill` mention in it loads a skill (only a
+   * person invokes one). Runtimes that read mentions themselves (the pi loop) skip them for this turn.
+   */
+  fromAgent?: true
   /** Text of the admitted user message; prompt-based adapters send it as the turn's prompt. */
   prompt: string
   /** Active pi-ai transcript, ending with the admitted user message. */
@@ -171,7 +176,7 @@ export interface TurnSink {
    * usage statistics, attributed to the latest `providerMetrics` model. The pi loop's `LlmClient`
    * records its own usage, so the pi adapter does not report here (no double counting).
    */
-  usage(u: { input: number; output: number; cacheRead: number; cacheWrite: number }): void
+  usage(u: { input: number; output: number; cacheRead: number; cacheWrite: number; /** The request's price, when the runtime knows it. */ costUsd?: number }): void
   /** The provider session reference, as soon as it is known and whenever it changes (§13.1 `nativeRef`). */
   providerRef(ref: ProviderRef): void
   /**

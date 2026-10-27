@@ -9,6 +9,7 @@ import {
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { ProviderIcon } from '../lib/providerIcons'
 import { useSubagents } from '../hooks/useSubagents'
+import { retiredWorktreeNote } from '../lib/storageCopy'
 
 const HOVER_OPEN_DELAY_MS = 420
 const HOVER_CLOSE_DELAY_MS = 120
@@ -23,6 +24,8 @@ interface WorkspaceHoverInfo {
   worktreePath: string | null
   lifecycle: string | null
   primaryBranch: string | null
+  /** When a cleanup rule removed the checkout; it is restored the next time the thread is used. */
+  retiredByCleanupAt: string | null
 }
 
 function shortBranchLabel(branch?: string | null, fallback?: string | null): string | null {
@@ -129,6 +132,7 @@ export function ThreadHoverCard({ thread, enabled = true, children }: ThreadHove
           workspacePath?: string
           lifecycle?: string
         }
+        retiredByCleanup?: { at: string; rule: string }
       }
       if (requestId !== requestIdRef.current) return
       const branchLabel =
@@ -139,7 +143,8 @@ export function ThreadHoverCard({ thread, enabled = true, children }: ThreadHove
         branchLabel,
         worktreePath: status.metadata?.worktreePath ?? status.execution?.workspacePath ?? null,
         lifecycle: status.metadata?.lifecycle ?? status.execution?.lifecycle ?? null,
-        primaryBranch: shortBranchLabel(status.execution?.branch)
+        primaryBranch: shortBranchLabel(status.execution?.branch),
+        retiredByCleanupAt: status.retiredByCleanup?.at ?? null
       })
     } catch {
       if (requestId !== requestIdRef.current) return
@@ -212,7 +217,7 @@ export function ThreadHoverCard({ thread, enabled = true, children }: ThreadHove
       return {
         icon: 'branch' as const,
         label: branch,
-        detail: folder ? `Worktree · ${folder}` : 'Isolated worktree'
+        detail: (workspace?.retiredByCleanupAt && retiredWorktreeNote(workspace.retiredByCleanupAt)) || (folder ? `Worktree · ${folder}` : 'Isolated worktree')
       }
     }
     if (workspace?.lifecycle && workspace.lifecycle !== 'ready') {

@@ -1,8 +1,8 @@
+import { randomBytes } from 'node:crypto'
 import { EventEmitter } from 'events'
-import { v4 as uuidv4 } from 'uuid'
 import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
-import type { SchedulerStatus, ScheduledJob, ScheduledOccurrenceResult } from '../../shared/types'
+import type { SchedulerStatus, ScheduledJob, ScheduledOccurrenceResult, ScheduledWebhookDelivery } from '../../shared/types'
 import { join } from 'node:path'
 import { TERMINAL_RUN_STATUSES } from '../run/types'
 import { isSilentOutput } from './computeNextRun'
@@ -16,6 +16,7 @@ import {
   type ScheduledRunDetails
 } from './ScheduledJobStore'
 import type { BackgroundWorkflowTurnResult, ScheduledJobIngress } from '../platform/MmsWorkflowChat'
+import { hasPlaceholders, renderPrompt } from './promptPlaceholders'
 
 /** Runs one tick starts at most; a catch-up after downtime follows over the next ticks instead of in one second. */
 const MAX_STARTS_PER_TICK = 3
@@ -26,16 +27,46 @@ export interface ScheduledJobRunner {
   runIsolated(prompt: string, ingress?: ScheduledJobIngress): Promise<BackgroundWorkflowTurnResult>
 }
 
+/** How often stored webhook payloads nothing references are swept. */
+const PAYLOAD_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000
+
+/** Where job webhook secrets are kept (the profile secret store). */
+export interface ScheduledWebhookSecrets {
+  write(ref: string, value: string): void
+  delete(ref: string): void
+}
+
+/** A webhook request the job's state or kind cannot take; the message says why and is shown to the person. */
+export class ScheduledWebhookError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ScheduledWebhookError'
+  }
+}
+
+export function webhookSecretRef(jobId: string): string {
+  return `scheduled-webhook-${jobId}`
+}
+
+/** 256 random bits; the whole string is the HMAC key. */
+export function generateWebhookSecret(): string {
+  return `whsec_${randomBytes(32).toString('base64url')}`
+}
+
 /** What the orchestrator reports when a scheduled turn's Run Engine run ends. */
 export interface ScheduledOccurrenceSettled {
   jobId: string
   occurrenceKey: string
   runId: string
   status: ScheduledOccurrenceResult['status']
+  /** With `waiting`: when the usage limit the run hit resets. */
+  retryAt?: string
   text?: string
   error?: string
   /** The model the run's binding used. */
   selection?: ScheduledRunDetails['selection']
+  /** The permission mode the run's binding enforced. */
+  permissionMode?: ScheduledRunDetails['permissionMode']
 }
 
 export class ScheduledJobService extends EventEmitter {
@@ -61,6 +92,11 @@ export class ScheduledJobService extends EventEmitter {
   /** Last successfully observed job counts (survive peer lock contention on status). */
   private lastJobCount = 0
   private lastDueCount = 0
+  private webhookSecrets: ScheduledWebhookSecrets | null = null
+  private questionProbe: ((threadId: string) => boolean) | null = null
+  /** Why the webhook listener is not up (a taken port), shown with the scheduler's errors. */
+  private webhookListenerError: string | null = null
+  private lastPayloadSweepAt = 0
 
   constructor(
     private runner: ScheduledJobRunner,
@@ -71,6 +107,113 @@ export class ScheduledJobService extends EventEmitter {
     super()
     // A claim that died before its run was admitted may leave an empty per-run thread behind.
     this.store.setOrphanedThreadHandler((orphan) => this.discardOrphanedThread(orphan))
+    // A job that is gone (deleted, or its repeat spent) takes its webhook secret with it.
+    this.store.setJobRemovedHandler((job) => {
+      if (job.trigger?.webhook) this.webhookSecrets?.delete(job.trigger.webhook.secretRef)
+    })
+  }
+
+  /** True while the scheduler is started: only then does anything start a webhook delivery. */
+  isRunning(): boolean {
+    return !this.stopped && !this.lifecycle.stopping
+  }
+
+  /**
+   * Whether a thread has a question waiting for the person (the profile's question service), for the
+   * job view's live status. Without it a working occurrence shows as running.
+   */
+  setQuestionProbe(probe: ((threadId: string) => boolean) | null): void {
+    this.questionProbe = probe
+  }
+
+  /** Where webhook secrets live; without it a job cannot get a webhook. */
+  setWebhookSecrets(secrets: ScheduledWebhookSecrets | null): void {
+    this.webhookSecrets = secrets
+  }
+
+  /** The webhook listener could not start (or started again); shown in the scheduler status. */
+  setWebhookListenerError(message: string | null): void {
+    this.webhookListenerError = message
+  }
+
+  /**
+   * Gives a job a webhook trigger and returns its signing secret, the only time it is shown. Refused for a job
+   * that cannot take one (a one-time job, an agent-created job) and for a job that already has one.
+   */
+  enableWebhook(id: string): { job: ScheduledJob; secret: string } {
+    this.lifecycle.assertAccepting()
+    const secrets = this.requireWebhookSecrets()
+    const job = this.store.getJob(id)
+    if (!job) throw new ScheduledWebhookError(`Job not found: ${id}`)
+    if (job.createdBy) throw new ScheduledWebhookError('Agent-created jobs cannot have a webhook trigger.')
+    if (job.schedule.kind === 'once') throw new ScheduledWebhookError('A one-time job runs once and cannot have a webhook; use a manual job for a webhook-only trigger.')
+    if (job.trigger?.webhook) throw new ScheduledWebhookError('This job already has a webhook. Rotate its secret to get a new one.')
+    const secretRef = webhookSecretRef(id)
+    const secret = generateWebhookSecret()
+    secrets.write(secretRef, secret)
+    let updated: ScheduledJob | null
+    try {
+      updated = this.store.setWebhookTrigger(id, { scheme: 'mousse', secretRef, createdAt: new Date().toISOString() })
+    } catch (error) {
+      secrets.delete(secretRef)
+      throw error instanceof Error ? new ScheduledWebhookError(error.message) : error
+    }
+    if (!updated) {
+      secrets.delete(secretRef)
+      throw new ScheduledWebhookError(`Job not found: ${id}`)
+    }
+    this.emitUpdated()
+    return { job: updated, secret }
+  }
+
+  /** Replaces the job's signing secret at once (the old one stops verifying) and returns the new one, shown only now. */
+  rotateWebhook(id: string): { job: ScheduledJob; secret: string } {
+    this.lifecycle.assertAccepting()
+    const secrets = this.requireWebhookSecrets()
+    const trigger = this.store.getJob(id)?.trigger?.webhook
+    if (!trigger) throw new ScheduledWebhookError('This job has no webhook to rotate.')
+    const secret = generateWebhookSecret()
+    secrets.write(trigger.secretRef, secret)
+    const updated = this.store.setWebhookTrigger(id, { ...trigger, rotatedAt: new Date().toISOString() })
+    if (!updated) throw new ScheduledWebhookError(`Job not found: ${id}`)
+    this.emitUpdated()
+    return { job: updated, secret }
+  }
+
+  /** Takes the webhook off the job: requests stop verifying at once, the secret is deleted, a waiting delivery is dropped. */
+  disableWebhook(id: string): ScheduledJob {
+    this.lifecycle.assertAccepting()
+    const secrets = this.requireWebhookSecrets()
+    const trigger = this.store.getJob(id)?.trigger?.webhook
+    if (!trigger) throw new ScheduledWebhookError('This job has no webhook.')
+    const updated = this.store.setWebhookTrigger(id, undefined)
+    if (!updated) throw new ScheduledWebhookError(`Job not found: ${id}`)
+    secrets.delete(trigger.secretRef)
+    this.emitUpdated()
+    return updated
+  }
+
+  /** The job's recent webhook requests and what became of each, newest first. */
+  listWebhookDeliveries(id: string): ScheduledWebhookDelivery[] {
+    if (!this.store.getJob(id)) throw new ScheduledWebhookError(`Job not found: ${id}`)
+    return this.store.listWebhookDeliveries(id)
+  }
+
+  private requireWebhookSecrets(): ScheduledWebhookSecrets {
+    if (!this.webhookSecrets) throw new ScheduledWebhookError('Webhooks are not available in this profile.')
+    return this.webhookSecrets
+  }
+
+  /** Stored webhook payloads nothing references are removed about once a day. */
+  private sweepWebhookPayloadsIfDue(): void {
+    const now = Date.now()
+    if (now - this.lastPayloadSweepAt < PAYLOAD_SWEEP_INTERVAL_MS) return
+    this.lastPayloadSweepAt = now
+    try {
+      this.store.sweepWebhookPayloads(now)
+    } catch {
+      /* the next day's sweep retries; leftover files are harmless */
+    }
   }
 
   start(): void {
@@ -139,11 +282,32 @@ export class ScheduledJobService extends EventEmitter {
   }
 
   listJobs(): ScheduledJob[] {
-    return this.store.listJobs()
+    return this.store.listJobs().map((job) => this.withLiveStatus(job))
   }
 
   getJob(id: string): ScheduledJob | undefined {
-    return this.store.getJob(id)
+    const job = this.store.getJob(id)
+    return job ? this.withLiveStatus(job) : undefined
+  }
+
+  /**
+   * The current occurrence's thread and whether it waits for the person, from the moment it is claimed:
+   * a claim that is running its turn (`runClaim.threadId`, set once the thread is chosen), else an
+   * admitted or running occurrence the claim handed over. A queued occurrence and a job with nothing
+   * under way show their own state. Derived when listed, never stored.
+   */
+  private withLiveStatus(job: ScheduledJob): ScheduledJob {
+    const pending = job.pendingOccurrence
+    const threadId = (job.state === 'running' ? job.runClaim?.threadId : undefined) ??
+      (pending && pending.state !== 'queued' ? pending.threadId : undefined)
+    if (!threadId) return job
+    let waiting = false
+    try {
+      waiting = this.questionProbe?.(threadId) ?? false
+    } catch {
+      // An unreadable question list shows the occurrence as running.
+    }
+    return { ...job, liveStatus: waiting ? 'needs_answer' : 'running', liveThreadId: threadId }
   }
 
   createJob(input: Parameters<ScheduledJobStore['createJob']>[0]): ScheduledJob {
@@ -153,9 +317,11 @@ export class ScheduledJobService extends EventEmitter {
     return job
   }
 
-  updateJob(id: string, patch: Partial<ScheduledJob>): ScheduledJob | null {
+  updateJob(id: string, patch: Partial<ScheduledJob>, options?: Parameters<ScheduledJobStore['updateJob']>[2]): ScheduledJob | null {
     this.lifecycle.assertAccepting()
-    const job = this.store.updateJob(id, patch)
+    // The live status is derived when listed; a patch that carries it back never stores it.
+    const { liveStatus: _status, liveThreadId: _thread, ...stored } = patch
+    const job = this.store.updateJob(id, stored, options)
     if (job) this.emitUpdated()
     return job
   }
@@ -177,6 +343,20 @@ export class ScheduledJobService extends EventEmitter {
   resumeJob(id: string): ScheduledJob | null {
     this.lifecycle.assertAccepting()
     const job = this.store.resumeJob(id)
+    if (job) this.emitUpdated()
+    return job
+  }
+
+  /** "Agents may create jobs" was turned off: the jobs agents created stop until a person resumes them. */
+  pauseAgentJobs(): number {
+    const paused = this.store.pauseAgentJobs()
+    if (paused > 0) this.emitUpdated()
+    return paused
+  }
+
+  extendJob(id: string, days?: number): ScheduledJob | null {
+    this.lifecycle.assertAccepting()
+    const job = this.store.extendJob(id, days)
     if (job) this.emitUpdated()
     return job
   }
@@ -213,8 +393,8 @@ export class ScheduledJobService extends EventEmitter {
       const job = this.store.completeOccurrence(
         event.jobId,
         event.occurrenceKey,
-        { status: event.status, text: event.text, error: event.error, silent },
-        { runId: event.runId, ...(event.selection ? { selection: event.selection } : {}) }
+        { status: event.status, text: event.text, error: event.error, silent, ...(event.retryAt ? { retryAt: event.retryAt } : {}) },
+        { runId: event.runId, ...(event.selection ? { selection: event.selection } : {}), ...(event.permissionMode ? { permissionMode: event.permissionMode } : {}) }
       )
       // A finished run on the project's checkout leaves nothing to keep open: its reply is in the run record and
       // the thread stays reachable from it. A new-worktree thread holds the run's work, so it stays open.
@@ -268,7 +448,7 @@ export class ScheduledJobService extends EventEmitter {
         running: this.ticker !== null && !this.stopped,
         lastHeartbeatAt: this.lastHeartbeatAt ?? persisted.heartbeatAt,
         lastSuccessAt: this.lastSuccessAt ?? persisted.successAt,
-        lastTickError: this.lastTickError,
+        lastTickError: this.lastTickError ?? this.webhookListenerError,
         activeJobId,
         activeJobIds,
         jobCount: this.lastJobCount,
@@ -296,7 +476,7 @@ export class ScheduledJobService extends EventEmitter {
 
   private emitUpdated(): void {
     try {
-      this.emit('updated', this.store.listJobs())
+      this.emit('updated', this.listJobs())
     } catch (err) {
       if (err instanceof FileLockBusyError) {
         this.lastTickError = `Scheduler update lock busy: ${err.message}`
@@ -354,6 +534,7 @@ export class ScheduledJobService extends EventEmitter {
 
       // Jobs this process is already running are not claimed again, and a catch-up after downtime starts a few
       // runs per tick, not every overdue job in the same second; the rest stay due and follow shortly.
+      this.sweepWebhookPayloadsIfDue()
       const dueJobs = this.store.claimDueJobs(new Date(), { limit: MAX_STARTS_PER_TICK, skipJobIds: new Set(this.inFlight.keys()) })
       if (dueJobs.length >= MAX_STARTS_PER_TICK) this.scheduleCatchUp()
       for (const job of dueJobs) {
@@ -435,6 +616,41 @@ export class ScheduledJobService extends EventEmitter {
     this.inFlight.set(job.id, tracked)
   }
 
+  /**
+   * The prompt this occurrence sends. Only a webhook delivery fills placeholders, from the body its request stored.
+   * Whether the prompt is a workflow is decided on the template, never on the filled text; a workflow takes no
+   * webhook data, so a workflow template with placeholders is refused rather than given untrusted arguments.
+   */
+  private promptFor(
+    job: ScheduledJob,
+    claim: ScheduledJob['runClaim']
+  ): { error?: undefined; prompt: string; missing: string[] } | { error: string; prompt?: undefined; missing?: undefined } {
+    const occurrenceId = claim?.webhookOccurrenceId
+    if (!occurrenceId || !hasPlaceholders(job.prompt)) return { prompt: job.prompt, missing: [] }
+    if (job.prompt.trimStart().startsWith('/')) return { error: 'A workflow prompt cannot use webhook placeholders.' }
+    const bodyText = this.store.readWebhookBody(job.id, occurrenceId)
+    if (bodyText === undefined) return { error: 'The webhook request this run needs is no longer stored.' }
+    const rendered = renderPrompt(job.prompt, { bodyText })
+    return { prompt: rendered.prompt, missing: rendered.missing }
+  }
+
+  /** Why the job cannot run because a thread it depends on is gone or archived; undefined when it can. Needs the thread store. */
+  private goneThread(job: ScheduledJob): string | undefined {
+    const store = this.threadStore
+    if (!store) return undefined
+    try {
+      if (job.threadId) {
+        const thread = store.getThread(job.threadId)
+        if (!thread) return 'Its thread was deleted'
+        if (thread.settledAt) return 'Its thread was archived'
+      }
+      if (job.createdBy && !store.getThread(job.createdBy.threadId)) return 'The thread that created it was deleted'
+    } catch {
+      return undefined
+    }
+    return undefined
+  }
+
   private async executeJob(job: ScheduledJob): Promise<void> {
     this.emitUpdated()
     const claim = job.runClaim
@@ -451,7 +667,27 @@ export class ScheduledJobService extends EventEmitter {
         }
         return
       }
-      const result = await this.runner.runIsolated(job.prompt, {
+      // A job whose thread is gone (or that an agent made from a thread that is gone) pauses with a reason once, instead of
+      // failing on every tick for ever. A person resumes it after choosing another thread.
+      const gone = this.goneThread(job)
+      if (gone) {
+        if (claimToken && this.store.isRunClaimCurrent(job.id, claimToken)) {
+          this.store.markJobRun(job.id, false, undefined, gone, false, claimToken)
+          this.store.pauseJob(job.id, gone)
+          this.emitUpdated()
+        }
+        return
+      }
+      // A webhook delivery fills `{{body...}}` placeholders from its stored body; any other run leaves them as written.
+      const rendered = this.promptFor(job, claim)
+      if (rendered.error !== undefined) {
+        if (claimToken && this.store.isRunClaimCurrent(job.id, claimToken)) {
+          this.store.markJobRun(job.id, false, undefined, rendered.error, false, claimToken)
+        }
+        return
+      }
+      const missingPlaceholders = rendered.missing
+      const result = await this.runner.runIsolated(rendered.prompt, {
         jobId: job.id,
         occurrenceAt: occurrenceKey,
         occurrenceKey,
@@ -462,6 +698,8 @@ export class ScheduledJobService extends EventEmitter {
         selection: job.selection,
         mode: job.mode,
         workspace: job.workspace,
+        permissionMode: job.permissionMode,
+        permissionCeiling: job.permissionCeiling,
         accessCap: job.accessCap,
         claim: { threadId: claim?.threadId, runId: claim?.runId },
         resumeWaiting: job.runClaim?.resumedWaiting === true,
@@ -493,6 +731,7 @@ export class ScheduledJobService extends EventEmitter {
       }
 
       // A turn on a thread: the run record says where it ran and with what.
+      const missingDetails: ScheduledRunDetails = missingPlaceholders.length ? { missingPlaceholders } : {}
       const details: ScheduledRunDetails | undefined = result.threadId
         ? {
             threadId: result.threadId,
@@ -500,9 +739,11 @@ export class ScheduledJobService extends EventEmitter {
             ...(result.queueItemId ? { queueItemId: result.queueItemId } : {}),
             ...(result.selection ? { selection: result.selection } : {}),
             mode: job.mode ?? 'agent',
-            ...(job.workspace ? { workspace: job.workspace } : {})
+            ...(result.permissionMode ? { permissionMode: result.permissionMode } : {}),
+            ...(job.workspace ? { workspace: job.workspace } : {}),
+            ...missingDetails
           }
-        : undefined
+        : missingPlaceholders.length ? missingDetails : undefined
 
       if (result.status === 'queued' || result.status === 'replayed') {
         // Admitted, not finished: the job is held until its run is terminal.
@@ -518,38 +759,35 @@ export class ScheduledJobService extends EventEmitter {
       const writeThread = !silent && !result.transcriptWritten
 
       if (writeThread && this.threadStore) {
+        // The result thread and message are named by the occurrence. A crash after this write and
+        // before the occurrence is recorded delivers the same result again on recovery; it then
+        // finds both and writes nothing, so one occurrence never appears twice.
+        const resultKey = `scheduled-result:${job.id}:${occurrenceKey}`
+        // A result that ran on another thread (a workflow's own thread) links to it.
+        const ranOn = (target: string) => result.threadId && result.threadId !== target
+          ? { scheduledRun: { jobId: job.id, threadId: result.threadId, ...(result.runId ? { runId: result.runId } : {}) } }
+          : {}
+        const deliver = (threadId: string, content: string): void => {
+          this.threadStore!.mutateThreadData(threadId, (current) => current.messages.some((message) => message.id === resultKey) ? {} : ({
+            messages: [
+              ...current.messages,
+              { id: resultKey, role: 'assistant', content, timestamp: new Date().toISOString(), ...ranOn(threadId) }
+            ]
+          }))
+        }
         if (job.createThread) {
-          const projectPath = job.projectId
-            ? this.projectManager?.getProject(job.projectId)?.path
-            : undefined
-          const thread = this.threadStore.createThread(
-            `Scheduled: ${job.name}`,
-            job.projectId,
-            projectPath
-          )
-          this.threadStore.mutateThreadData(thread.id, (current) => ({
-            messages: [
-              ...current.messages,
-              {
-                id: uuidv4(),
-                role: 'assistant',
-                content: result.text,
-                timestamp: new Date().toISOString()
-              }
-            ]
-          }))
+          const name = `Scheduled: ${job.name}`.slice(0, 120)
+          let thread: { id: string }
+          try {
+            thread = this.threadStore.ensureExecutionThread(resultKey, name, job.projectId)
+          } catch (error) {
+            // A job whose project was removed still keeps its result, on a thread outside any project.
+            if (!job.projectId || !/project is unavailable/i.test(error instanceof Error ? error.message : String(error))) throw error
+            thread = this.threadStore.ensureExecutionThread(resultKey, name)
+          }
+          deliver(thread.id, result.text)
         } else if (job.threadId) {
-          this.threadStore.mutateThreadData(job.threadId, (current) => ({
-            messages: [
-              ...current.messages,
-              {
-                id: uuidv4(),
-                role: 'assistant',
-                content: `[Scheduled: ${job.name}]\n\n${result.text}`,
-                timestamp: new Date().toISOString()
-              }
-            ]
-          }))
+          deliver(job.threadId, `[Scheduled: ${job.name}]\n\n${result.text}`)
         }
       }
 

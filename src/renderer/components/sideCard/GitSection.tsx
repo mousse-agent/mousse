@@ -20,9 +20,10 @@ import {
   type CommitPhase,
   type GitStatusView
 } from '../../stores/gitStatusStore'
-import { createPullRequestForBranch, useGitPullRequestStore } from '../../stores/pullRequestStore'
-import type { PullRequestDetail, PullRequestPushTarget, PullRequestScope, ThreadPullRequestLink } from '../../../shared/pullRequests'
+import { createPullRequestForBranch, setPullRequestWatch, useGitPullRequestStore, useThreadPullRequestWatch } from '../../stores/pullRequestStore'
+import type { PullRequestDetail, PullRequestPushTarget, PullRequestScope, PullRequestWatchMode, PullRequestWatchStatus, ThreadPullRequestLink } from '../../../shared/pullRequests'
 import { usePullRequestPushTarget } from './usePullRequestPushTarget'
+import { PullRequestWatchControl } from './PullRequestWatchControl'
 import { gitScopeFor } from '../../lib/activeProject'
 import type { GitCommit, GitPullRequestLookup, GitScope } from '../../../shared/types'
 import { Switch } from '../settings/SettingsRow'
@@ -836,6 +837,10 @@ interface GitSectionViewProps {
   pullRequestLink?: ThreadPullRequestLink | null
   /** Where Push goes for a thread linked to a pull request; null when it keeps its usual target. */
   pullRequestPushTarget?: PullRequestPushTarget | null
+  /** What the thread's watch of its pull request is doing; null until it is known. */
+  pullRequestWatch?: PullRequestWatchStatus | null
+  /** Sets the watch (`number` links the pull request the row found by its branch). Without it the control is not shown. */
+  onWatchChange?: (mode: PullRequestWatchMode, number: number) => Promise<unknown>
   /** When set, the section collapses to this one muted line. */
   collapsedLabel: string | null
   /** The folder is not a repository, so the collapsed section offers to make it one. */
@@ -857,6 +862,8 @@ export function GitSectionView({
   pullRequestError = null,
   pullRequestLink = null,
   pullRequestPushTarget = null,
+  pullRequestWatch = null,
+  onWatchChange,
   collapsedLabel,
   canInitialize = false,
   now
@@ -953,6 +960,8 @@ export function GitSectionView({
   const availability = gitActionAvailability(git.status, pullRequest, git.commits.length, scope)
   const prRow = pullRequestRow(pullRequest, git.status, pullRequestDetail, pullRequestLink, workspaceThreadId !== null)
   const createLock = gitActionLock(running, 'pullRequest')
+  // Only an open pull request is worth watching, and only a thread of its own can be told about it.
+  const watchedNumber = ownThreadId !== null && pullRequest?.state === 'found' && pullRequest.pullRequest.state === 'open' ? pullRequest.pullRequest.number : null
   const branchActions = branchActionState(scope.workspaceThreadId)
 
   return (
@@ -1000,6 +1009,9 @@ export function GitSectionView({
       />
       {prRow?.kind === 'found' && <PullRequestLink row={prRow} />}
       <PullRequestDetailLines row={prRow?.kind === 'found' ? prRow : null} error={pullRequestError} />
+      {onWatchChange && watchedNumber !== null && (
+        <PullRequestWatchControl status={pullRequestWatch} now={now} onChange={(mode) => onWatchChange(mode, watchedNumber)} />
+      )}
       {prRow?.kind === 'create' && (
         <button
           type="button"
@@ -1061,6 +1073,9 @@ export function GitSection({ threadId }: SideCardSectionContext) {
   }
   const collapsedLabel = gitCollapsedLabel(collapse)
   const pullRequestPushTarget = usePullRequestPushTarget(location.workspaceThreadId, link)
+  const watchActive = ownThreadId !== null && pullRequest?.state === 'found' && pullRequest.pullRequest.state === 'open'
+  const pullRequestWatch = useThreadPullRequestWatch(ownThreadId, watchActive)
+  const onWatchChange = ownThreadId ? (mode: PullRequestWatchMode, number: number) => setPullRequestWatch(ownThreadId, mode, number) : undefined
   return (
     <GitSectionView
       threadId={threadId}
@@ -1074,6 +1089,8 @@ export function GitSection({ threadId }: SideCardSectionContext) {
       pullRequestError={detailError}
       pullRequestLink={link}
       pullRequestPushTarget={pullRequestPushTarget}
+      pullRequestWatch={pullRequestWatch}
+      onWatchChange={onWatchChange}
       collapsedLabel={collapsedLabel}
       canInitialize={canInitRepository(collapse)}
     />

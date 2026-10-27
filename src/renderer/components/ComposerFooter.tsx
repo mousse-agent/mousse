@@ -245,7 +245,6 @@ export function ComposerFooter({
           caps={selectedProvider?.caps}
           limits={selectedProvider?.permissionLimits}
           ceiling={permission.ceiling}
-          sandboxOffInFull={selectedProvider?.id === 'codex'}
           onSelect={permission.onSelect}
         />}
       </div>

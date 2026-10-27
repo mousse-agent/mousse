@@ -111,9 +111,11 @@ describe('permission modes', () => {
   it('does not offer Auto-accept edits on Codex: the thread asks about edits too, with the reason', () => {
     // No recorded app-server exchange proves a patch applies after Mousse's automatic answer while a
     // mutating command still waits, so the Codex driver reports the mode as unavailable.
-    const runtime = codexDriver({ builtIn: () => ({}) as CodexProviderService }).create({ config: {} } as DriverContext)
+    const runtime = codexDriver({ builtIn: () => ({ vendorMirror: () => ({}) }) as unknown as CodexProviderService }).create({ builtIn: true, config: {} } as DriverContext)
     const limits = runtime.permissionLimits?.()
     expect(limits).toBe(CODEX_PERMISSION_LIMITS)
+    // Full access also turns Codex's sandbox off; the composer reads this from the limits, not from a name.
+    expect(limits?.sandboxOffInFull).toBe(true)
     const supported = supportedPermissionModes(CODEX_CAPS, limits)
     expect(supported).toEqual(['ask', 'full'])
     expect(effectivePermissionMode('accept_edits', supported, { agent: 'Codex', limits })).toEqual({

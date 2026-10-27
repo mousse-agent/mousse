@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { X } from '../lib/icons'
-import type { PendingUserQuestions, UserQuestion, UserQuestionAnswers } from '../../shared/types'
+import { ALWAYS_OPTION_NOTE } from '../../shared/permissionKeys'
+import type { PendingApprovalInfo, PendingUserQuestions, QuestionAnswerOutcome, UserQuestion, UserQuestionAnswers } from '../../shared/types'
 
 interface ComposerQuestionModalProps {
   pending: PendingUserQuestions
@@ -38,6 +39,37 @@ export function resolveQuestionAnswers(
     }
   }
   return resolved
+}
+
+/** The composer's hint while an approval request waits: a message is also an answer. */
+export const APPROVAL_COMPOSER_PLACEHOLDER = 'Answer the approval, or send a message to deny it and redirect the agent'
+
+/** What a loser of an answer race is told; null when the answer was taken (or there is nothing to say). */
+export function describeAnswerOutcome(outcome: QuestionAnswerOutcome | undefined): string | null {
+  if (!outcome || outcome.ok) return null
+  if (outcome.reason === 'already_answered') {
+    const decided = outcome.decision === 'allow' ? 'approved' : outcome.decision === 'reject' ? 'denied' : 'decided'
+    const by = outcome.answeredBy
+    const via = by?.kind === 'agent' ? 'an agent' : by?.via === 'cli' ? 'the CLI' : by?.via === 'bridge' ? 'a remote device' : by?.via === 'gui' ? 'the app' : 'another client'
+    return `Already answered: ${decided} from ${via}.`
+  }
+  if (outcome.reason === 'cancelled') return 'This approval request was closed before it was answered.'
+  return null
+}
+
+/** The lines under a saved approval request's prompt: why it asks, and what answering it does after a restart. */
+export function approvalNotes(approval: PendingApprovalInfo): string[] {
+  const notes: string[] = []
+  if (approval.reason) notes.push(approval.reason)
+  if (approval.answerPath === 'continue') {
+    const tools = approval.uncertainTools?.length ? approval.uncertainTools.join(', ') : 'a tool'
+    notes.push(approval.uncertain
+      ? `The agent's process ended; ${tools} may already have run. Approve or deny to continue the thread.`
+      : "The agent's process ended. Approve or deny to continue the thread.")
+    if (approval.total && approval.total > 1) notes.push(`${approval.answered ?? 0} of ${approval.total} answered. The thread continues once all are.`)
+    notes.push('Sending a message denies the pending approvals with your message as the reason.')
+  }
+  return notes
 }
 
 function initAnswers(questions: UserQuestion[]): UserQuestionAnswers {
@@ -148,7 +180,13 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss }: Composer
       </div>
       <div className="composer-question-modal-body">
         <div key={active.id} className="composer-question-block">
-          <p className="composer-question-prompt">{active.prompt}</p>
+          <p className={`composer-question-prompt${pending.approval ? ' composer-question-prompt--approval' : ''}`}>{active.prompt}</p>
+          {pending.approval && approvalNotes(pending.approval).map((note) => (
+            <p key={note} className="composer-question-reason">{note}</p>
+          ))}
+          {pending.approval && active.options.some((option) => option.scope === 'always') && (
+            <p className="composer-question-reason">{ALWAYS_OPTION_NOTE}</p>
+          )}
           <div className="composer-question-options">
             {active.options.map((option) => {
               const selected = active.allowMultiple

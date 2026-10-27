@@ -12,6 +12,7 @@ const STATE_LABELS: Partial<Record<SubagentState, string>> = {
   queued: "Queued",
   starting: "Starting",
   working: "Working",
+  paused: "Paused",
   done: "Done",
   failed: "Failed",
   stopped: "Stopped",
@@ -61,7 +62,7 @@ export function cardModelLabel(card: Pick<SubagentCardModel, "provider" | "model
 
 /**
  * What a row says next to its name. The dot on the provider icon already shows that a task is going
- * or done, so only the states worth reading get words: a question, a wait, a failure or a stop, and a
+ * or done, so only the states worth reading get words: a question, a wait, a usage-limit pause, a failure or a stop, and a
  * finished task the subagent has since continued.
  */
 export function cardStateNote(card: Pick<SubagentCardModel, "state" | "pending" | "waitingOn" | "continued">): string | null {
@@ -69,7 +70,7 @@ export function cardStateNote(card: Pick<SubagentCardModel, "state" | "pending" 
   const base =
     card.state === "waiting"
       ? waitingLabel(card)
-      : card.state === "needs_input" || card.state === "failed" || card.state === "stopped" || card.state === "interrupted"
+      : card.state === "needs_input" || card.state === "paused" || card.state === "failed" || card.state === "stopped" || card.state === "interrupted"
         ? STATE_LABELS[card.state]!
         : null;
   if (!card.continued || isCardRunning(card)) return base;

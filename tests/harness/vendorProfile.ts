@@ -31,6 +31,8 @@ export interface ProfileStore {
   writes: Array<{ instances: Record<string, unknown>; seedVersion: number }>
   /** The profile config cannot be read (reads throw). */
   unreadable?: boolean
+  /** Instance ids removed from the profile (`removedInstances`). */
+  removed?: string[]
 }
 
 export const VENDOR_DIRS = {
@@ -95,12 +97,17 @@ export interface StartedProfile {
   claudeAuth: ReturnType<typeof vi.fn>
   /** Codex account reads (none start an app-server). */
   codexAccount: ReturnType<typeof vi.fn>
+  /** Claude Agent SDK queries (fakes; usage, models). */
+  claudeQuery: ReturnType<typeof vi.fn>
   questions: UserQuestionService
   stop(): void
 }
 
-/** One start of Mousse on `home` with the profile config `store`. */
-export function startProfile(home: string, store: ProfileStore): StartedProfile {
+/**
+ * One start of Mousse on `home` with the profile config `store`. `binaries` are paths the vendor
+ * services find their CLI at (a fake file nothing runs); without them no CLI is found.
+ */
+export function startProfile(home: string, store: ProfileStore, binaries: { claude?: string; codex?: string } = {}): StartedProfile {
   const questions = new UserQuestionService()
   let harness: Harness | undefined
   const launchOf = (instanceId: string) => () => harness?.launchFor(instanceId) ?? {}
@@ -110,10 +117,11 @@ export function startProfile(home: string, store: ProfileStore): StartedProfile 
     await harness.instances.configure(instanceId, patch)
   }
   const claudeAuth = vi.fn(async () => SIGNED_IN)
+  const claudeQuery = vi.fn(() => fakeQuery())
   const claude = new ClaudeSubscriptionProviderService(home, questions, {
-    findBinary: () => undefined,
+    findBinary: () => binaries.claude,
     runAuth: claudeAuth,
-    query: () => fakeQuery(),
+    query: claudeQuery,
     live: false,
     launchConfig: launchOf('claude'),
     signedOut: signedOutOf('claude'),
@@ -121,7 +129,7 @@ export function startProfile(home: string, store: ProfileStore): StartedProfile 
   })
   const codexAccount = vi.fn(async (): Promise<CodexAccountReading> => ({ kind: 'signed_in', planType: 'plus', email: 'me@example.com' }))
   const codex = createCodexProviderService(home, questions, {
-    findBinary: () => undefined,
+    findBinary: () => binaries.codex,
     launch: () => {
       throw new Error('tests never start a Codex app-server')
     }
@@ -143,12 +151,13 @@ export function startProfile(home: string, store: ProfileStore): StartedProfile 
     store: {
       read: () => {
         if (store.unreadable) throw new Error('The profile config could not be read')
-        return { instances: store.instances, seedVersion: store.seedVersion }
+        return { instances: store.instances, seedVersion: store.seedVersion, removed: store.removed }
       },
       write: (next) => {
         store.writes.push(next)
         store.instances = next.instances
         store.seedVersion = next.seedVersion
+        store.removed = next.removed
       }
     },
     mirrorFor: (instanceId) =>
@@ -182,6 +191,7 @@ export function startProfile(home: string, store: ProfileStore): StartedProfile 
     antigravity,
     claudeAuth,
     codexAccount,
+    claudeQuery,
     questions,
     stop: () => {
       started.stop()

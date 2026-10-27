@@ -1,6 +1,5 @@
 import type { MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../../../shared/settings'
-import { CONTEXT_COMPACTION_OPTIONS, normalizeContextSettings, type ContextCompactionTokens } from '../../../shared/settings'
-import { piProviderIdOf } from '../../../shared/providerInstances'
+import { CONTEXT_COMPACTION_OPTIONS, normalizeContextSettings, oneShotProviderOptions, type ContextCompactionTokens } from '../../../shared/settings'
 import type { Project } from '../../../shared/types'
 import { AgentAccessSettings } from './AgentAccessSettings'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
@@ -26,14 +25,20 @@ export function AgentsSettings({
 }) {
   const providers = options.llmProviders
   const hasProviders = providers.length > 0
-  // Titles run on an API provider; agent runtimes (Claude Code, Codex) cannot name chats.
-  const titleProviders = providers.filter((provider) => !provider.instanceId || piProviderIdOf(provider.instanceId))
+  // Titles are one request with no tools: only instances (and models) that run one are offered.
+  const titleProviders = oneShotProviderOptions(providers)
 
-  // Blank title keys mean "Automatic" (resolveTitleModel picks a connected
-  // model at send time). Show the saved mode, not the resolved fallback.
+  // Blank title keys mean "Automatic": chats are named from their first line, with no model call.
+  // Show the saved mode.
   const titleProvider = settings.title?.llmProvider ?? ''
   const titleModel = settings.title?.model ?? ''
   const titleIsAutomatic = !titleProvider || !titleModel
+  // A stored choice the picker no longer offers (a Bedrock model, an agent runtime) cannot run:
+  // say so instead of showing an empty picker while titles quietly fall back.
+  const titleInstance = settings.title?.instanceId
+  const titleUnavailable = !titleIsAutomatic && providers.length > 0 && !titleProviders.some((provider) =>
+    (titleInstance ? provider.instanceId === titleInstance : provider.id === titleProvider) &&
+    provider.models.some((model) => model.id === titleModel || titleModel.startsWith(`${model.id}:`)))
 
   const context = normalizeContextSettings(settings.context)
 
@@ -64,7 +69,9 @@ export function AgentsSettings({
         <SettingsRow
           title="Chat titles"
           titleId="agents-title-model-title"
-          description="Automatic picks a fast connected model to name chats."
+          description={titleUnavailable
+            ? `${titleModel} can't name chats here, so chats keep their first line as the title. Choose another model or Automatic.`
+            : 'Automatic picks a fast connected model to name chats.'}
           titleAction={!titleIsAutomatic && (
             <button
               type="button"

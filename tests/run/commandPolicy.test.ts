@@ -91,3 +91,15 @@ describe('heartbeatToleranceMs', () => {
     expect(heartbeatToleranceMs(caps({ events: 'sparse' }), 20_000)).toBe(120_000)
   })
 })
+
+describe('a paused run (a usage limit ended its turn)', () => {
+  it('has no live turn to steer: the text becomes a message of its own, whatever the provider can do', () => {
+    for (const capability of [caps({ steer: 'native' }), caps({ steer: 'interrupt_restart', interrupt: true }), caps({ steer: 'queue_only' })])
+      expect(steerStrategy(capability, run('paused'))).toBe('late_steer_new_run')
+  })
+
+  it('has nothing to interrupt: a Stop settles it without provider I/O', () => {
+    expect(stopStrategy(caps({ interrupt: true }), run('paused'))).toBe('settle_locally')
+    expect(stopStrategy(caps({ interrupt: false }), run('paused'))).toBe('settle_locally')
+  })
+})

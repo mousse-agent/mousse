@@ -252,7 +252,7 @@ describe('retired legacy-only Pi connections', () => {
       expect(snapshot.models.entries).toEqual([])
     }
     // Nor do the pickers that read the pi listings (composer, defaults, channels, settings).
-    const offered = profile.harness.instanceMap.llmProviders().map((option) => option.instanceId)
+    const offered = profile.harness.listedLlmProviders({ kind: 'device' }).map((option) => option.instanceId)
     expect(offered).not.toContain('pi:openai-codex')
     expect(offered).not.toContain('pi:cursor')
     expect(profile.providerAuth.getConfiguredLlmProviders().map((option) => option.id)).toEqual([])
@@ -334,7 +334,7 @@ describe('retired legacy-only Pi connections', () => {
     expect(profile.stored()['pi:openai-codex']).toEqual(read('instances.json').instances['pi:openai-codex'])
     expect(profile.providerAuth.has('openai-codex')).toBe(true)
     // The model pickers offer nothing on a retired entry.
-    const offered = profile.harness.instanceMap.llmProviders().map((option) => option.instanceId)
+    const offered = profile.harness.listedLlmProviders({ kind: 'device' }).map((option) => option.instanceId)
     expect(offered).not.toContain('pi:openai-codex')
     expect(offered).not.toContain('pi:cursor')
     expect(requests).toEqual([])
@@ -421,7 +421,7 @@ describe('retired legacy-only Pi connections', () => {
     expect(snapshot.models.canAddCustom).toBe(false)
     expect(profile.harness.catalog.models('pi:openai-codex', device)).toEqual([])
     // The composer's own picker, from the snapshots and the pi listings.
-    const picked = pickerProviders(snapshots, profile.harness.instanceMap.llmProviders())
+    const picked = pickerProviders(snapshots, profile.harness.listedLlmProviders({ kind: 'device' }))
     expect(picked.map((provider) => provider.instanceId)).not.toContain('pi:openai-codex')
     // A new custom model is refused; the stored one stays for older versions and history.
     await expect(

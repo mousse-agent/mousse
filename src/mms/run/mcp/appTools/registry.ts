@@ -14,6 +14,7 @@ import {
   ACCESS_CLASSES,
   levelAtLeast,
   McpToolError,
+  plainSchema,
   TOOL_CLASSES,
   unattendedRefusal,
   type AppToolTurn,
@@ -121,6 +122,8 @@ export interface ToolRegistryOptions {
   readOnlyThread?(threadId: string): boolean
   /** The ceiling a thread's delegations gave it, whatever its current turn's mode (the stable listing). */
   threadCeiling?(threadId: string): ModeCeiling
+  /** The thread's role when it is a personal bot's thread; bot tools are listed only there. */
+  botRole?(threadId: string): 'activation' | 'context' | undefined
   /** The turns registered by the `turn.start` executor; MCP calls act only inside one. */
   turns?: AppToolTurns
   /**
@@ -227,8 +230,38 @@ export class ToolRegistry {
     return this.listFor({
       readOnly: this.options.readOnlyThread?.(threadId) === true,
       modeCeiling: this.options.threadCeiling?.(threadId) ?? fallback,
-      accessLevel: this.effectiveLevel(granted)
+      accessLevel: this.effectiveLevel(granted),
+      ...this.botListing(threadId)
     })
+  }
+
+  /**
+   * The tools a runtime that takes its tool list per turn is sent for `runId` (the Pi RPC engine).
+   * A definition's turn gets them as the definition loop sends them: each with the schema the turn
+   * is offered (`definition`: the browser's follows the turn's binding, its vision and backend), and
+   * none the turn is not offered (`offered`: a browser tool outside the binding, or a screenshot a
+   * model without vision cannot see). Any other turn gets the thread's stable listing.
+   */
+  listForTurn(threadId: string, runId: string | undefined, granted: AgentAccessLevel = 'lineage'): Array<Pick<MousseTool, 'name' | 'description' | 'inputSchema' | 'class'>> {
+    const listed = this.listForThread(threadId, 'default', granted)
+    const turn = runId ? this.options.turns?.get(runId) : undefined
+    const plain = (tool: MousseTool) => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema, class: tool.class })
+    if (!turn?.definition || turn.threadId !== threadId) return listed.map(plain)
+    return listed
+      .filter((tool) => !tool.offered || tool.offered(turn))
+      .map((tool) => {
+        const offered = tool.definition?.(turn)
+        return offered ? { ...plain(tool), description: offered.description, inputSchema: plainSchema(offered) } : plain(tool)
+      })
+  }
+
+  private botListing(threadId: string): { botRole?: 'activation' | 'context' } {
+    try {
+      const role = this.options.botRole?.(threadId)
+      return role ? { botRole: role } : {}
+    } catch {
+      return {}
+    }
   }
 
   /**
@@ -319,15 +352,19 @@ export class ToolRegistry {
         const decision = await authorizeDefinitionCall(turn.definition, { toolName: name, args: checked, ...projectPath, signal: request.signal })
         if (!decision.allowed) return { text: decision.message, isError: true }
       }
+      // The run may have ended while the approval waited (here or at the runtime's gate): it is
+      // checked again right before the tool runs, as the in-process path does.
+      if (this.options.activeRunId(threadId) !== active || this.options.turns?.get(active) !== turn || !credential.current())
+        throw notLive(`Run ${active} is no longer the active run of thread ${threadId}; the tool was not run.`)
     }
     // A tool that changes the workspace asks first unless the run's permission mode allows edits (a
     // definition run is held to its own grants above); a rejection ends the call before its handler
     // runs and writes no ledger row.
     if (tool.access === 'editsWorkspace' && !turn.definition) {
-      const refusal = await this.askBeforeEditing(tool, caller, request.signal)
+      const refusal = await this.askBeforeEditing(tool, caller, request.signal, args)
       if (refusal) return refusal
     }
-    const ctx: ToolCallContext = { caller, turn, toolCallId: request.toolCallId, signal: request.signal, transport: 'mcp', ...(scope ? { scope } : {}) }
+    const ctx: ToolCallContext = { caller, turn, toolCallId: request.toolCallId, signal: request.signal, transport: 'mcp', level: this.effectiveLevel(caller.accessLevel), ...(scope ? { scope } : {}) }
     const ledger = this.options.toolLedger?.(active)
     const ledgerId = ledger?.start({ type: 'toolCall', id: ctx.toolCallId, name, arguments: args } as ToolCall)
     let outcome: ToolOutcome
@@ -373,12 +410,13 @@ export class ToolRegistry {
       // the user as any other runtime does, with or without a run.
       if (tool.access === 'editsWorkspace' && !turn.trusted) {
         callerThreadOnly(args, caller)
-        const refusal = await this.askBeforeEditing(tool, { ...caller, runId: authority.kind === 'run' ? authority.runId : turn.runId }, call.signal, turn.permissionMode)
+        const refusal = await this.askBeforeEditing(tool, { ...caller, runId: authority.kind === 'run' ? authority.runId : turn.runId }, call.signal, args, turn.permissionMode)
         if (refusal) return refusal
       }
       return await tool.handler(args, {
         caller,
         turn,
+        level: this.effectiveLevel(caller.accessLevel),
         ...(scope ? { scope } : {}),
         toolCallId: call.toolCallId,
         signal: call.signal,
@@ -463,7 +501,7 @@ export class ToolRegistry {
    * ahead (the run's permission mode allows edits, or the user allowed it once). An owner that cannot
    * ask rejects: nothing runs unapproved.
    */
-  private async askBeforeEditing(tool: MousseTool, caller: McpCaller, signal: AbortSignal, turnMode?: PermissionMode): Promise<ToolOutcome | null> {
+  private async askBeforeEditing(tool: MousseTool, caller: McpCaller, signal: AbortSignal, args: Record<string, unknown>, turnMode?: PermissionMode): Promise<ToolOutcome | null> {
     const mode = turnMode ?? this.options.permissionModeFor?.(caller.runId)
     if (mode === undefined || permissionModeAllows(mode, 'edit')) return null
     const rejected: ToolOutcome = { text: `The user did not approve ${tool.name}, so it did not run. Do not retry it unless they ask.`, isError: true }
@@ -483,11 +521,14 @@ export class ToolRegistry {
           approval: {
             action: 'edit',
             permissionKey: tool.permissionKey ?? PERMISSION_KEYS.mousseIntegrate,
-            options: [{ id: 'allow', decision: 'allow', scope: 'once' }, { id: 'reject', decision: 'reject' }]
+            options: [{ id: 'allow', decision: 'allow', scope: 'once' }, { id: 'reject', decision: 'reject' }],
+            tool: { name: tool.name, input: args }
           }
         }
       )
-      return answers.permission === 'allow' && !signal.aborted ? null : rejected
+      if (answers.permission === 'allow' && !signal.aborted) return null
+      const why = typeof answers.feedback === 'string' ? answers.feedback.trim().slice(0, 1000) : ''
+      return why ? { text: `${rejected.text} Reason: ${why}`, isError: true } : rejected
     } catch {
       return rejected
     }

@@ -92,6 +92,20 @@ describe('ThreadRuntime over the protocol', () => {
     await c.close()
   })
 
+  it('a turn the orchestrator reports paused shows the thread as Paused, and a new turn replaces it', async () => {
+    const thread = mms.threads.createThread('Limited')
+    const c = await client()
+    mms.threadRuntimes.setActivity(thread.id, 'processing')
+
+    mms.orchestrator.emit('turn-paused', { threadId: thread.id })
+    expect(mms.threadRuntimes.getActivity(thread.id)).toBe('paused')
+    expect(mms.threadRuntimes.getActivitySnapshot()[thread.id]).toBe('paused')
+
+    mms.orchestrator.emit('turn-started', { threadId: thread.id })
+    expect(mms.threadRuntimes.getActivity(thread.id)).toBe('processing')
+    await c.close()
+  })
+
   it('thread selection via GUI does not kill PTY on another thread', async () => {
     const t1 = mms.threads.createThread('PtyA')
     const t2 = mms.threads.createThread('PtyB')
@@ -373,5 +387,186 @@ describe('ThreadRuntime over the protocol', () => {
     expect(snap.activity).toBe('awaiting_input')
     expect(snap.activeTurn).toEqual({ active: false, running: false })
     await c.close()
+  })
+
+  describe('saved approval requests (SPEC §17)', () => {
+    const approvalQuestion = [{ id: 'permission', prompt: 'Allow Claude Code to run a command (Bash)?\nnpm test', options: [{ id: 'allow', label: 'Allow once' }, { id: 'reject', label: 'Reject' }] }]
+    const approvalTag = {
+      action: 'command' as const,
+      permissionKey: 'claude:command',
+      options: [{ id: 'allow', decision: 'allow' as const, scope: 'once' as const }, { id: 'reject', decision: 'reject' as const }],
+      tool: { name: 'Bash', input: { command: 'npm test' }, cwd: '/work/app' }
+    }
+    const startRun = async (threadId: string, key = 'approval-run') => {
+      const sent = await mms.runEngine.dispatch({ kind: 'send', threadId, clientRequestId: key, source: 'gui' })
+      if (sent.status !== 'accepted') throw new Error('send rejected')
+      mms.runEngine.markStarting(sent.runId)
+      const run = mms.runEngine.markRunning(sent.runId)
+      // The binding a real turn records: it says which mode the run asks under and who started it.
+      mms.runEngine.recordExecutionBinding(run.runId, {
+        instanceId: 'claude-subscription', driver: 'claude-code', accountGeneration: 0, homeId: 'default', configRevision: 0, model: 'sonnet',
+        policy: { mode: 'default', origin: 'interactive', approvals: 'ask', permissionMode: 'ask' }
+      } as never)
+      return run
+    }
+    const clientAs = async (clientType: 'gui' | 'cli'): Promise<LocalMmsClient> => {
+      const c = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType })
+      await c.connect()
+      return c
+    }
+    type Answer = { ok: boolean; reason?: string; decision?: string; answeredBy?: { kind: string; via?: string }; cancelReason?: string }
+
+    it('survives a client reconnect, is answered by the CLI, and a second client learns who won', async () => {
+      const thread = mms.threads.createThread('Approval')
+      await startRun(thread.id)
+      const gui = await clientAs('gui')
+      const live: string[] = []
+      gui.onEvent((event, delivery) => {
+        if (event.type === 'questions.pending' && !delivery?.replay) live.push((event.data as { requestId: string }).requestId)
+      })
+      await gui.subscribe(0)
+      const waiter = mms.questions.requestAnswers(approvalQuestion, thread.id, { approval: approvalTag })
+      await vi.waitFor(() => expect(mms.questions.listPendingForThread(thread.id)).toHaveLength(1))
+      const requestId = mms.questions.listPendingForThread(thread.id)[0]!.requestId
+      await vi.waitFor(() => expect(live).toEqual([requestId]))
+
+      // A reconnect and a resubscribe show the same card and notify nobody again.
+      await gui.close()
+      const reopened = await clientAs('gui')
+      const replayed: string[] = []
+      reopened.onEvent((event, delivery) => {
+        if (event.type === 'questions.pending' && (event.data as { requestId: string }).requestId === requestId) replayed.push(delivery?.replay ? 'replay' : 'live')
+      })
+      await reopened.subscribe(0)
+      expect(replayed.filter((kind) => kind === 'live')).toEqual([])
+      const pending = await reopened.request<{ pending: Array<{ requestId: string; approval?: { answerPath: string } }> }>('orchestrator.pendingQuestions', { threadId: thread.id })
+      expect(pending.pending).toEqual([expect.objectContaining({ requestId, approval: expect.objectContaining({ answerPath: 'live' }) })])
+      const snap = await reopened.request<{ pendingQuestions: Array<{ requestId: string }>; activity: string }>('thread.snapshot', { threadId: thread.id })
+      expect(snap.pendingQuestions.map((entry) => entry.requestId)).toEqual([requestId])
+
+      // The CLI answers; the callback gets the answer once.
+      const cli = await clientAs('cli')
+      await expect(cli.request<Answer>('orchestrator.answerQuestions', { requestId, answers: { permission: 'allow' } })).resolves.toEqual({ ok: true })
+      await expect(waiter).resolves.toEqual({ permission: 'allow' })
+      expect(mms.runEngine.approvals.get(requestId)).toMatchObject({ status: 'answered', decision: 'allow', answeredBy: { kind: 'user', via: 'cli' } })
+      // The GUI, a moment later, is told who decided what.
+      await expect(reopened.request<Answer>('orchestrator.answerQuestions', { requestId, answers: { permission: 'reject' } })).resolves.toEqual({
+        ok: false, reason: 'already_answered', answeredBy: { kind: 'user', via: 'cli' }, decision: 'allow'
+      })
+      expect((await reopened.request<{ pending: unknown[] }>('orchestrator.pendingQuestions', { threadId: thread.id })).pending).toEqual([])
+      await reopened.close()
+      await cli.close()
+    })
+
+    it('"Always for this thread" from the CLI makes a rule that is listed, answers the same request, stays in its thread and is revoked over the protocol', async () => {
+      const thread = mms.threads.createThread('Always')
+      const other = mms.threads.createThread('Other')
+      await startRun(thread.id, 'always-run')
+      await startRun(other.id, 'other-run')
+      const cli = await clientAs('cli')
+      const waiter = mms.questions.requestAnswers(approvalQuestion, thread.id, { approval: approvalTag })
+      const pending = await cli.request<{ pending: Array<{ requestId: string; questions: Array<{ options: Array<{ id: string; decision?: string; scope?: string }> }> }> }>('orchestrator.pendingQuestions', { threadId: thread.id })
+      const requestId = pending.pending[0]!.requestId
+      expect(pending.pending[0]!.questions[0]!.options.map((option) => option.id)).toEqual(['allow', 'allow_always', 'reject'])
+      await expect(cli.request<Answer>('orchestrator.answerQuestions', { requestId, answers: { permission: 'allow_always' } })).resolves.toEqual({ ok: true })
+      await expect(waiter).resolves.toEqual({ permission: 'allow' })
+
+      const listed = await cli.request<{ threadId: string; rules: Array<{ id: string; permissionKey: string; action: string; summary: string; grantedUnder: string; active: boolean }> }>('threads.approvalRules', { threadId: thread.id })
+      expect(listed.rules).toEqual([expect.objectContaining({ permissionKey: 'claude:command', action: 'command', grantedUnder: 'ask', active: true, summary: expect.stringContaining('npm test') })])
+      expect((await cli.request<{ rules: unknown[] }>('threads.approvalRules', { threadId: other.id })).rules).toEqual([])
+
+      // The same request is answered without asking; the other thread, a near miss and a request without a fingerprint ask.
+      const again = mms.questions.requestAnswers(approvalQuestion, thread.id, { approval: approvalTag })
+      expect(mms.questions.listPendingForThread(thread.id)).toEqual([])
+      await expect(again).resolves.toEqual({ permission: 'allow' })
+      for (const [threadId, approval] of [
+        [other.id, approvalTag],
+        [thread.id, { ...approvalTag, tool: { ...approvalTag.tool, input: { command: 'npm test --watch' } } }],
+        [thread.id, { ...approvalTag, tool: { ...approvalTag.tool, cwd: '/work/other' } }],
+        [thread.id, { ...approvalTag, tool: undefined }]
+      ] as Array<[string, typeof approvalTag]>) {
+        const asked = mms.questions.requestAnswers(approvalQuestion, threadId, { approval }).catch(() => undefined)
+        expect(mms.questions.listPendingForThread(threadId), JSON.stringify(approval.tool)).toHaveLength(1)
+        mms.questions.dismissAllForThread(threadId)
+        await asked
+      }
+
+      // Revoking is validated and scoped to the thread.
+      await expect(cli.request('threads.approvalRules', { threadId: 'missing' })).rejects.toMatchObject({ code: 'thread_not_found' })
+      await expect(cli.request('threads.clearApprovalRules', { threadId: 'missing' })).rejects.toMatchObject({ code: 'thread_not_found' })
+      await expect(cli.request('threads.clearApprovalRules', { threadId: thread.id, all: true })).rejects.toBeTruthy()
+      await expect(cli.request('threads.approvalRules', { threadId: thread.id, extra: 1 })).rejects.toBeTruthy()
+      expect(await cli.request('threads.clearApprovalRules', { threadId: other.id, ruleId: listed.rules[0]!.id })).toMatchObject({ removed: 0, rules: [] })
+      expect(mms.runEngine.approvals.listRules(thread.id)).toHaveLength(1)
+      expect(await cli.request('threads.clearApprovalRules', { threadId: thread.id, ruleId: listed.rules[0]!.id })).toMatchObject({ removed: 1, rules: [] })
+      const asked = mms.questions.requestAnswers(approvalQuestion, thread.id, { approval: approvalTag }).catch(() => undefined)
+      expect(mms.questions.listPendingForThread(thread.id)).toHaveLength(1)
+      mms.questions.dismissAllForThread(thread.id)
+      await asked
+      await cli.close()
+    })
+
+    it('a rule is shown as paused while the thread is stricter than the mode it was granted under', async () => {
+      const thread = mms.threads.createThread('Paused')
+      await startRun(thread.id, 'paused-run')
+      mms.orchestrator.setThreadPermissionMode(thread.id, 'accept_edits')
+      const cli = await clientAs('cli')
+      const waiter = mms.questions.requestAnswers(approvalQuestion, thread.id, { approval: approvalTag })
+      // The run has no binding, so it asks as the strictest mode: the rule is granted under Ask and holds everywhere.
+      mms.questions.settle(mms.questions.listPendingForThread(thread.id)[0]!.requestId, { permission: 'allow_always' }, { kind: 'user' })
+      await waiter
+      expect((await cli.request<{ rules: Array<{ active: boolean }> }>('threads.approvalRules', { threadId: thread.id })).rules.map((rule) => rule.active)).toEqual([true])
+      // Hand-made rule granted under Full access: paused while the thread asks about more.
+      mms.runEngine.approvals.create({ requestId: 'x', threadId: thread.id, instanceId: 'i', provider: 'claude', action: 'command', permissionKey: 'claude:command', fingerprint: 'b'.repeat(64), permissionMode: 'full', questions: [{ id: 'permission', prompt: 'Run it again?', options: [{ id: 'allow', label: 'Allow once', decision: 'allow', scope: 'once' }, { id: 'allow_always', label: 'Always', decision: 'allow', scope: 'always' }, { id: 'reject', label: 'Reject', decision: 'reject' }] }] })
+      mms.questions.settle('x', { permission: 'allow_always' }, { kind: 'user' })
+      const rules = (await cli.request<{ rules: Array<{ grantedUnder: string; active: boolean }> }>('threads.approvalRules', { threadId: thread.id })).rules
+      expect(rules.map((rule) => [rule.grantedUnder, rule.active]).sort()).toEqual([['ask', true], ['full', false]])
+      await cli.close()
+    })
+
+    it('an answer to a request that was closed says so', async () => {
+      const thread = mms.threads.createThread('Closed')
+      const run = await startRun(thread.id)
+      const waiter = mms.questions.requestAnswers(approvalQuestion, thread.id, { approval: approvalTag }).catch((error: Error) => error.message)
+      const requestId = mms.questions.listPendingForThread(thread.id)[0]!.requestId
+      mms.runEngine.markTerminal(run.runId, 'failed', { error: 'boom' })
+      await expect(waiter).resolves.toMatch(/closed/)
+      const c = await clientAs('gui')
+      await expect(c.request<Answer>('orchestrator.answerQuestions', { requestId, answers: { permission: 'allow' } })).resolves.toEqual({ ok: false, reason: 'cancelled', cancelReason: 'turn_ended' })
+      await c.close()
+    })
+
+    it('stays pending across a profile restart as a request whose answer continues the thread', async () => {
+      const thread = mms.threads.createThread('Restart')
+      const run = await startRun(thread.id)
+      const waiter = mms.questions.requestAnswers(approvalQuestion, thread.id, { approval: approvalTag }).catch(() => undefined)
+      const requestId = mms.questions.listPendingForThread(thread.id)[0]!.requestId
+      await server.stop()
+      await mms.stop()
+      await waiter
+
+      mms = await MousseMainService.create({ homeDir: home, headless: true, ownerKind: 'test' })
+      await mms.start()
+      ownerToken = mms.getOwnerLease()!.owner.token
+      server = new MmsProtocolServer({ mms, ownerToken, version: 'test' })
+      endpoint = await server.start()
+
+      const c = await clientAs('cli')
+      const pending = await c.request<{ pending: Array<{ requestId: string; approval?: { answerPath: string; uncertain?: boolean } }> }>('orchestrator.pendingQuestions', { threadId: thread.id })
+      expect(pending.pending).toEqual([expect.objectContaining({ requestId, approval: expect.objectContaining({ answerPath: 'continue' }) })])
+      expect(mms.runEngine.approvals.get(requestId)).toMatchObject({ status: 'pending', decision: null, runId: run.runId })
+      // Nothing was started or granted by the restart.
+      expect(mms.runEngine.listRuns(thread.id)).toHaveLength(1)
+      await c.close()
+    })
+
+    it('orchestrator.send takes no approval or answerer fields: they are the daemon\'s own', async () => {
+      const thread = mms.threads.createThread('NoInternals')
+      const c = await clientAs('cli')
+      for (const field of [{ permissionDecisions: [] }, { bindDelivery: { requestIds: ['r'] } }, { settleApprovals: { answeredBy: { kind: 'user' } } }, { actor: { kind: 'user' } }])
+        await expect(c.request('orchestrator.send', { threadId: thread.id, content: 'hi', ...field })).rejects.toBeTruthy()
+      expect(mms.orchestrator.getMessagesForPersistence(thread.id)).toEqual([])
+      await c.close()
+    })
   })
 })

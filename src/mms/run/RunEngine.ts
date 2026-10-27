@@ -1,27 +1,32 @@
 import { EventEmitter } from 'node:events'
-import type { ExecutionBinding } from '../../shared/harness/types'
+import { onRetiredBareRoute, type ExecutionBinding } from '../../shared/harness/types'
+import { isStricter, type PermissionMode } from '../../shared/permissionMode'
 import { narrowAgentAccess, type AgentAccessLevel } from '../../shared/settings'
 import { DaemonEpoch } from './DaemonEpoch'
 import { CommandRejection, fail, reject, RunStoreError } from './db/RunStoreError'
-import { isFencedSource, isFollowUpSource, isResumeSource } from './delegation/sources'
+import { inheritedAgentHops } from './agentHops'
+import { isFencedSource, isFollowUpSource, isPauseHeldSource, isResumeSource } from './delegation/sources'
 import { cancelAcknowledgedWakes, recoverWakesOnBoot } from './delegation/wake'
 import { Delegations } from './Delegations'
 import { EffectOutbox } from './EffectOutbox'
 import { HandoffService } from './handoff/HandoffService'
 import { ContextTransfers } from './handoff/Transfers'
 import { Inbox } from './Inbox'
+import type { Answerer } from './approvalRights'
 import { DEFAULT_HEARTBEAT_MS } from './Reconciler'
 import type { RestartNote } from './restartNote'
 import type { RunStore } from './RunStore'
 import { bumpStopGenerations, currentStopGeneration, isRunAdmissionStale } from './stopGeneration'
 import { strandedQueuedRuns } from './strandedRuns'
 import { writeTerminalRun, type RunTerminalStatus, type TerminalNotice } from './terminal'
+import { ThreadApprovals, type BootRecovery } from './ThreadApprovals'
 import { ThreadMutex } from './ThreadMutex'
 import { ToolInvocations } from './ToolInvocations'
 import {
   TERMINAL_EFFECT_STATUSES,
   TERMINAL_RUN_STATUSES,
   leaseOwner,
+  type AgentActor,
   type AttemptRecord,
   type DelegationRecord,
   type DelegationWake,
@@ -59,9 +64,46 @@ export type RunCommand =
       delegation?: SendDelegation
       /** The message text; kept only as the digest of a tracked delegation. */
       prompt?: string
+      /**
+       * SPEC §17.3: the send denies the thread's saved approval requests with `feedback` as the
+       * reason, inside its own admission, and hands the whole delivery group to the run it creates.
+       * Nothing is settled (and the run still queues) when `answeredBy` may not answer one of them.
+       */
+      settleApprovals?: { feedback?: string; answeredBy: Answerer }
+      /**
+       * SPEC §17.4: the answered approval requests this send is the continue turn of; handed to the
+       * run it creates in the same transaction, so the answers cannot be delivered twice or lost.
+       */
+      bindDelivery?: { requestIds: string[] }
+      /**
+       * Another thread's agent sent it (`thread_send`): the `agent.action` event is written with the run,
+       * and a paused thread refuses it (`thread_paused`) instead of ending the pause.
+       */
+      actor?: AgentActor
+      /**
+       * The run is for a message an agent queued earlier (its audit event was written when it was queued): it is
+       * remembered as an agent's, with the count of agent messages in a row, exactly as a send with an `actor`, but
+       * writes no event and does not refuse a paused thread (the queue holds such an item while a pause lasts).
+       */
+      agentOrigin?: { hops: number }
     }
-  | { kind: 'stop'; threadId: string; clientRequestId: string; runId: string }
-  | { kind: 'steer'; threadId: string; clientRequestId: string; runId: string }
+  | { kind: 'stop'; threadId: string; clientRequestId: string; runId: string; actor?: AgentActor }
+  | {
+      kind: 'steer'
+      threadId: string
+      clientRequestId: string
+      runId: string
+      actor?: AgentActor
+      /** The steer's length, for the audit row (never its text). */
+      textLength?: number
+      /**
+       * With `actor`: the permission mode the sender runs in. Decided inside the transaction against the
+       * mode the run is bound to: a run with no binding yet (it is still starting) is refused
+       * (`steer_target_not_ready`), and so is one bound to a looser mode (`ceiling_exceeded`), because a running
+       * turn cannot be narrowed. Absent with an `actor` reads as the strictest mode.
+       */
+      ceiling?: PermissionMode
+    }
 
 /** The delegation row a follow-up `send` writes with its run (the child thread is the command's). */
 export interface SendDelegation {
@@ -114,6 +156,11 @@ export interface StopRequest {
   requesterThreadId?: string
   /** Also cancels the runs a person queued on `threadId` (today's `clearQueue`). */
   clearQueue?: boolean
+  /**
+   * Another thread's agent asked for the Stop (`thread_interrupt`): everything it ends is recorded as the
+   * agent's (`interruptedBy: 'agent'`) and one `agent.action` event is written in the same transaction.
+   */
+  actor?: AgentActor
 }
 
 export interface StopResult {
@@ -156,6 +203,8 @@ export interface BootReport {
   recoveredWakes: string[]
   /** Queued runs whose `turn.start` died before they began; reconciler rule 5 settles them. */
   strandedQueued: string[]
+  /** Saved approval requests the restart left (SPEC §17.6). */
+  approvals: BootRecovery
 }
 
 /** A `delegate_task` request (SPEC §14.2), already validated by the tool host. */
@@ -309,6 +358,12 @@ export class TitleTakenRejection extends CommandRejection {
   }
 }
 
+/** The outcome of a run whose binding names the retired bare pi route (PR 4). */
+const RETIRED_ROUTE_OUTCOME = Object.freeze({
+  errorCode: 'binding_stale',
+  error: 'This run started on a route Mousse no longer has, so it cannot continue. Send the message again.'
+})
+
 const ACTIVE_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
   'starting',
   'running',
@@ -337,6 +392,8 @@ export class RunEngine extends EventEmitter {
   readonly daemonEpochs: DaemonEpoch
   readonly inbox: Inbox
   readonly delegations: Delegations
+  /** Saved approval requests (SPEC §17). */
+  readonly approvals: ThreadApprovals
   /** Context handoffs (SPEC §16.1). */
   readonly handoffs: HandoffService
   /** Fork and merge-back transfers (SPEC §16.2). */
@@ -369,6 +426,7 @@ export class RunEngine extends EventEmitter {
     this.daemonEpochs = new DaemonEpoch(opts.store)
     this.inbox = new Inbox(opts.store)
     this.delegations = new Delegations(opts.store, this.inbox)
+    this.approvals = new ThreadApprovals(opts.store, { outbox: this.outbox, lineage: (threadId) => this.delegations.getLineage(threadId) })
     this.handoffs = new HandoffService(opts.store)
     this.transfers = new ContextTransfers(opts.store)
     this.pid = opts.pid ?? process.pid
@@ -423,7 +481,8 @@ export class RunEngine extends EventEmitter {
       // pause and its timer stay intact.
       const paused = this.store.getPausedRun(run.threadId)
       if (paused) {
-        if (isFencedSource(run.source)) fail('conflict', `Thread ${run.threadId} is paused by run ${paused.runId}.`)
+        // A message another thread's agent sent, or a scheduled run, is never a person's: it waits for the pause to end on its own.
+        if (isFencedSource(run.source) || isPauseHeldSource(run.source) || run.outcome?.sentByAgent) fail('conflict', `Thread ${run.threadId} is paused by run ${paused.runId}.`)
         this.endPause(paused.runId, 'user_message')
       }
       const attemptId =
@@ -707,6 +766,11 @@ export class RunEngine extends EventEmitter {
    *    uncertain child runs publish through the terminal write's publication gate.
    * Step 6 (heartbeat and reconciler) belongs to the profile that owns the worker (Phase 2b).
    */
+  /** Whether the run's binding was made on the retired bare pi route. */
+  private onRetiredRoute(runId: string): boolean {
+    return onRetiredBareRoute(this.bindingForRun(runId)?.instanceId)
+  }
+
   reconcileOnBoot(): BootReport {
     this.epochs.clear()
     const report = this.store.db.transaction((): BootReport => {
@@ -721,6 +785,8 @@ export class RunEngine extends EventEmitter {
       this.store.db.statement('UPDATE credentials SET revoked_at = ? WHERE revoked_at IS NULL').run(now)
       const interrupted: string[] = []
       const uncertain: string[] = []
+      /** The tools a crash may have cut off mid-call, per run: a saved approval request records them. */
+      const uncertainTools = new Map<string, string[]>()
       const notes = new Map<string, Omit<RestartNote, 'epoch'>>()
       const noteFor = (threadId: string): Omit<RestartNote, 'epoch'> => {
         const note = notes.get(threadId) ?? { runIds: [], uncertainRunIds: [], cutOffTools: [] }
@@ -732,15 +798,20 @@ export class RunEngine extends EventEmitter {
       for (const run of active) {
         const started = this.tools.listStarted(run.runId)
         const unsafe = previousCrashed ? started.filter((tool) => !tool.idempotent) : []
+        // A run bound on the retired bare pi route says so (`binding_stale`); an unsafe tool still
+        // makes it `uncertain`, with that tool's error.
+        const retired = this.onRetiredRoute(run.runId)
         if (unsafe.length) {
           const names = [...new Set(unsafe.map((tool) => tool.tool))]
           this.writeTerminal(run, run.epoch, 'uncertain', {
             uncertainReason: 'non_idempotent_tool_in_flight',
-            error: `Non-idempotent tools were in flight when the daemon stopped: ${names.join(', ')}.`
+            error: `Non-idempotent tools were in flight when the daemon stopped: ${names.join(', ')}.`,
+            ...(retired ? { errorCode: 'binding_stale' } : {})
           })
           uncertain.push(run.runId)
+          uncertainTools.set(run.runId, names)
         } else {
-          this.writeTerminal(run, run.epoch, 'interrupted', { interruptedBy: 'daemon_restart' })
+          this.writeTerminal(run, run.epoch, 'interrupted', { interruptedBy: 'daemon_restart', ...(retired ? RETIRED_ROUTE_OUTCOME : {}) })
           interrupted.push(run.runId)
         }
         const note = noteFor(run.threadId)
@@ -754,6 +825,16 @@ export class RunEngine extends EventEmitter {
             idempotent: tool.idempotent
           })
       }
+      // A run still waiting (never started again) on a binding made on the retired bare pi route can
+      // never run there: it is interrupted, typed `binding_stale`, and its pending work is cancelled,
+      // so nothing is replayed. It never ran in this epoch, so the restart note leaves it out. The
+      // thread's next turn resolves the default model.
+      for (const run of this.store.listNonTerminalRuns()) {
+        if (!this.onRetiredRoute(run.runId)) continue
+        for (const effect of this.outbox.listForRun(run.runId)) this.outbox.cancel(effect.effectId, now, 'binding_stale')
+        this.writeTerminal(run, run.epoch, 'interrupted', RETIRED_ROUTE_OUTCOME)
+        interrupted.push(run.runId)
+      }
       const orphanedChildren = this.settleOrphanedChildren()
       const recoveredWakes = recoverWakesOnBoot(this.store, this.outbox, now)
       const strandedQueued: string[] = []
@@ -762,12 +843,20 @@ export class RunEngine extends EventEmitter {
         note.queuedRunIds = [...(note.queuedRunIds ?? []), run.runId]
         strandedQueued.push(run.runId)
       }
+      // SPEC §17.6: what waited for a provider in the dead process can only continue the thread now.
+      const approvals = this.approvals.recoverOnBoot(uncertainTools, (runId) => (this.bindingForRun(runId)?.policy.origin ?? 'interactive') !== 'interactive')
+      for (const requestId of approvals.continued) {
+        const record = this.approvals.get(requestId)
+        if (!record) continue
+        const note = noteFor(record.threadId)
+        note.approvalRequestIds = [...(note.approvalRequestIds ?? []), requestId]
+      }
       for (const [threadId, note] of notes)
         this.store.appendEvent({ threadId, type: 'restart.note', payload: { ...note, epoch } })
       // A subagent's question lives in the previous process's memory: nobody can answer it now.
       this.inbox.markAcknowledged(this.inbox.listOpenChildQuestions().map((row) => row.inboxId))
       this.settleAllWaitingDelegations()
-      return { interrupted, uncertain, epoch, orphanedChildren, recoveredWakes, strandedQueued }
+      return { interrupted, uncertain, epoch, orphanedChildren, recoveredWakes, strandedQueued, approvals }
     })
     this.daemonEpoch = report.epoch
     return report
@@ -965,22 +1054,26 @@ export class RunEngine extends EventEmitter {
 
       const activeRuns: StopResult['activeRuns'] = []
       const cancelledRuns: StopResult['cancelledRuns'] = []
+      // A Stop an agent asked for ends everything in the subtree as the agent's (`interruptedBy: 'agent'`).
+      const asAgent = request.actor !== undefined
       for (const run of this.store.listNonTerminalRuns().filter((entry) => depths.has(entry.threadId))) {
         // A paused run has no turn to abort: the Stop ends the pause, and with it the timer.
         if (run.status === 'paused') {
+          if (asAgent) this.noteStoppedByAgent(run)
           this.endPause(run.runId, 'stop')
           cancelledRuns.push({ threadId: run.threadId, runId: run.runId })
           continue
         }
         if (run.status === 'queued') {
           if (this.survivesStop(run, request.clearQueue === true)) continue
-          if (this.cancelQueuedRunInTransaction(run, request.reason, { interruptedBy: 'user' }, claimed))
+          if (this.cancelQueuedRunInTransaction(run, request.reason, { interruptedBy: asAgent ? 'agent' : 'user' }, claimed))
             cancelledRuns.push({ threadId: run.threadId, runId: run.runId })
           continue
         }
         if (!ACTIVE_STATUSES.has(run.status)) continue
+        // A Stop already asked for (by a person) stays theirs.
         if (!run.outcome?.stopRequested) {
-          const next = this.store.casRunOutcome({ runId: run.runId, expectedEpoch: run.epoch, outcomePatch: { stopRequested: true } })
+          const next = this.store.casRunOutcome({ runId: run.runId, expectedEpoch: run.epoch, outcomePatch: { stopRequested: true, ...(asAgent ? { stopRequestedBy: 'agent' as const } : {}) } })
           if (this.epochs.has(run.runId)) this.epochs.set(run.runId, next.epoch)
         }
         // A steer still waiting for the run it was meant for is part of what the Stop ends (the executor
@@ -1004,12 +1097,39 @@ export class RunEngine extends EventEmitter {
         delegations: [...running].sort((a, b) => depths.get(b.childThreadId)! - depths.get(a.childThreadId)!).map((delegation) => delegation.delegationId),
         acknowledgedRows
       }
+      // The audit row is part of the Stop: it exists exactly when the Stop does, and a replay writes none.
+      if (request.actor)
+        this.recordAgentAction(threadId, request.runId ?? null, request.actor, 'stopped_run', {
+          threads: threads.length,
+          activeRuns: activeRuns.length,
+          cancelledRuns: cancelledRuns.length
+        })
       this.putStopReceipt(key, commandKind, threadId, stopped)
       for (const run of activeRuns) this.store.db.afterCommit(() => this.emit('stop-requested', run))
       return stopped
     })
     this.cancelInFlight(claimed)
     return result
+  }
+
+  /**
+   * Writes the `agent.action` event of a change another thread's agent made, in the caller's
+   * transaction (SPEC §15.1): ids, counts and lengths, never message content.
+   */
+  private recordAgentAction(threadId: string, runId: string | null, actor: AgentActor, action: string, details: Record<string, string | number | boolean | null> = {}): void {
+    this.store.appendEvent({
+      threadId,
+      runId,
+      type: 'agent.action',
+      payload: { ...details, action, actorThreadId: actor.threadId, actorRunId: actor.runId, toolCallId: actor.toolCallId }
+    })
+  }
+
+  /** Marks a run a Stop is about to end as stopped by an agent; the terminal write turns `user` into `agent`. */
+  private noteStoppedByAgent(run: RunRecord): void {
+    if (run.outcome?.stopRequestedBy === 'agent') return
+    const next = this.store.casRunOutcome({ runId: run.runId, expectedEpoch: run.epoch, outcomePatch: { stopRequestedBy: 'agent' } })
+    if (this.epochs.has(run.runId)) this.epochs.set(run.runId, next.epoch)
   }
 
   /** A replayed Stop whose runs are still live and have no interrupt pending gets one again (M4); returns those runs. */
@@ -1615,21 +1735,36 @@ export class RunEngine extends EventEmitter {
       const refuse = (reason: string): CommandResult => ({ status: 'rejected', reason, sequence: store.maxSeq(command.threadId) })
       // Work started on the thread's behalf never runs beside a pause; only the resume itself does, and
       // only for the pause it was queued for (it may have ended meanwhile).
-      if (paused && isFencedSource(command.source) && !resuming) return refuse('thread_paused')
+      if (paused && (isFencedSource(command.source) || isPauseHeldSource(command.source)) && !resuming) return refuse('thread_paused')
+      // A message an agent sent never ends a pause the user's usage limit put there: it can stop the
+      // paused run first (`thread_interrupt`), and send once that is done.
+      if (paused && command.actor && !resuming) return refuse('thread_paused')
       if (resuming && (!paused || command.continuationOfRunId !== paused.runId)) return refuse('pause_ended')
       const refusal = this.continuationRefusal(command)
       // Not stored: the same `continue:<runId>` request succeeds once the user acknowledges.
       if (refusal) return refuse(refusal)
       if (command.delegation) this.checkFollowUp(command.threadId, command.delegation)
+      // The message denies the thread's saved approval requests in this same transaction: either every
+      // request is settled and the run exists, or nothing is (SPEC §17.3).
+      // A continue turn that would deliver nothing (a send already took the group) is not a run.
+      if (command.bindDelivery && this.approvals.deliverableCount(command.bindDelivery.requestIds) === 0) return refuse('approvals_already_delivered')
+      const settlement = command.settleApprovals ? this.approvals.settleForSend(command.threadId, command.settleApprovals) : null
       const continuationOf = command.continuationOfRunId
+      // A run that carries on agent work (a provider's continuation, the resume after a pause) keeps the count of agent
+      // messages in a row; it is not itself an agent's message.
+      const carriedHops = command.actor || command.agentOrigin ? undefined : inheritedAgentHops(store, command.threadId, command.source, continuationOf)
+      const outcome: RunOutcome = {
+        ...(continuationOf ? { continuationOf, ...(resuming ? { resumedFromPause: command.source === 'resume' ? 'auto' as const : 'user' as const } : {}) } : {}),
+        // Remembered with the run, so a message an agent sent is still known as one when it starts later.
+        ...(command.actor ? { sentByAgent: true as const, agentHops: command.actor.hops ?? 1 } : command.agentOrigin ? { sentByAgent: true as const, agentHops: command.agentOrigin.hops } : {}),
+        ...(carriedHops !== undefined ? { agentHops: carriedHops } : {})
+      }
       const run = store.createRun({
         threadId: command.threadId,
         source: command.source,
         clientRequestId: command.clientRequestId,
         userMessageId: command.userMessageId,
-        ...(continuationOf
-          ? { outcome: { continuationOf, ...(resuming ? { resumedFromPause: command.source === 'resume' ? 'auto' as const : 'user' as const } : {}) } }
-          : {})
+        ...(Object.keys(outcome).length ? { outcome } : {})
       })
       if (tracked) {
         // Whatever the caller recorded, the row is never wider than any earlier task of this thread.
@@ -1649,12 +1784,22 @@ export class RunEngine extends EventEmitter {
           role: tracked.role
         })
       }
+      // The run now owns every answer it was started for: the group a message denied (and the earlier
+      // approvals of a partly answered group), or the answers of a continue turn.
+      if (settlement && !settlement.refused && settlement.requestIds.length) this.approvals.bindDelivery(settlement.requestIds, run.runId)
+      if (command.bindDelivery?.requestIds.length) this.approvals.bindDelivery(command.bindDelivery.requestIds, run.runId)
       // The replacement exists before the pause ends, so a subagent's task stays `running` across the hand-over.
       let endedPause: { runId: string; resumeItemId?: string } | undefined
       if (paused) {
         endedPause = { runId: paused.runId, ...(paused.outcome?.pause?.resumeItemId ? { resumeItemId: paused.outcome.pause.resumeItemId } : {}) }
         this.endPause(paused.runId, !resuming ? 'user_message' : command.source === 'resume' ? 'resume' : 'resume_now')
       }
+      // The audit row is written with the run, so a message an agent sent is never without it.
+      if (command.actor)
+        this.recordAgentAction(command.threadId, run.runId, command.actor, 'sent_message', {
+          runId: run.runId,
+          ...(command.prompt !== undefined ? { length: command.prompt.length } : {})
+        })
       const sequence = store.maxSeq(command.threadId)
       this.putReceipt(command, 'accepted', { runId: run.runId, sequence, ...(endedPause ? { endedPause } : {}) })
       return { status: 'accepted', runId: run.runId, sequence, replayed: false, ...(endedPause ? { endedPause } : {}) }
@@ -1698,7 +1843,9 @@ export class RunEngine extends EventEmitter {
       const activeRunId = store.getActiveRun(threadId)?.runId ?? null
       // A Stop that names the paused run ends the pause: there is no turn to signal and nothing to mark.
       if (kind === 'stop' && run?.threadId === threadId && run.status === 'paused') {
+        if (command.actor) this.noteStoppedByAgent(run)
         this.endPause(runId, 'stop')
+        if (command.actor) this.recordAgentAction(threadId, runId, command.actor, 'stopped_run', { runId })
         const sequence = store.maxSeq(threadId)
         this.putReceipt(command, 'accepted', { runId, sequence })
         return { status: 'accepted', runId, sequence, replayed: false }
@@ -1715,14 +1862,28 @@ export class RunEngine extends EventEmitter {
         this.putReceipt(command, 'ignored', { runId, activeRunId, reason, sequence })
         return { status: 'ignored', reason, runId, activeRunId, sequence }
       }
+      // An agent's steer joins the live turn as it is: its authority is the run's, which the sender must not
+      // exceed. Decided here, with the run, so no start or binding can slip in between.
+      if (kind === 'steer' && command.actor) {
+        const binding = this.bindingForRun(runId)
+        const refuse = (reason: string): CommandResult => ({ status: 'rejected', reason, sequence: store.maxSeq(threadId) })
+        // A run that has not bound its turn yet has no mode to compare with: unknown, never "strictest".
+        if (!binding) return refuse('steer_target_not_ready')
+        if (isStricter(command.ceiling ?? 'ask', binding.policy.permissionMode ?? 'ask')) return refuse('ceiling_exceeded')
+      }
       if (kind === 'stop') {
         const next = store.casRunOutcome({
           runId,
           expectedEpoch: run.epoch,
-          outcomePatch: { stopRequested: true }
+          outcomePatch: { stopRequested: true, ...(command.actor ? { stopRequestedBy: 'agent' as const } : {}) }
         })
         if (this.epochs.has(runId)) this.epochs.set(runId, next.epoch)
       }
+      if (command.actor)
+        this.recordAgentAction(threadId, runId, command.actor, kind === 'stop' ? 'stopped_run' : 'steered_run', {
+          runId,
+          ...(command.kind === 'steer' && command.textLength !== undefined ? { length: command.textLength } : {})
+        })
       const sequence = store.maxSeq(threadId)
       this.putReceipt(command, 'accepted', { runId, sequence })
       store.db.afterCommit(() =>

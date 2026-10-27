@@ -78,6 +78,7 @@ function splitSettings(full: MousseSettings): {
       permissions: full.permissions,
       context: full.context,
       agentAccess: full.agentAccess,
+      runs: full.runs,
       integrations: full.integrations,
       title: full.title
     },
@@ -111,8 +112,12 @@ function jobToDefinition(job: ScheduledJob): ScheduledJobDefinition {
     selection: job.selection,
     mode: job.mode,
     workspace: job.workspace,
+    permissionMode: job.permissionMode,
+    permissionCeiling: job.permissionCeiling,
     createdBy: job.createdBy,
     accessCap: job.accessCap,
+    expiresAt: job.expiresAt,
+    trigger: job.trigger,
     repeat: job.repeat?.times
       ? { times: job.repeat.times, completed: job.repeat.completed }
       : undefined,
@@ -284,7 +289,9 @@ export class MousseConfigStore {
       ) as unknown as MousseAgentsConfig,
       scheduled: {
         enabled: raw.scheduled?.enabled ?? base.scheduled.enabled,
-        jobs: raw.scheduled?.jobs ?? base.scheduled.jobs
+        jobs: raw.scheduled?.jobs ?? base.scheduled.jobs,
+        ...(raw.scheduled?.webhooks ? { webhooks: raw.scheduled.webhooks } : {}),
+        ...(typeof raw.scheduled?.agentJobs === 'boolean' ? { agentJobs: raw.scheduled.agentJobs } : {})
       },
       channels: deepMerge(
         base.channels as unknown as Record<string, unknown>,
@@ -472,8 +479,15 @@ export class MousseConfigStore {
 
   updateProvidersSection(partial: Partial<MousseProvidersConfig>): void {
     this.assertPersonalMutation('providers')
+    const previous = this.conf.providers
     this.conf.providers = { ...this.conf.providers, ...partial }
-    this.persist()
+    try {
+      this.persist()
+    } catch (error) {
+      // Not saved, so not kept: a later save of another section must not write it after all.
+      this.conf.providers = previous
+      throw error
+    }
   }
 
   updateAgentsSection(partial: Partial<MousseAgentsConfig>): void {
@@ -493,7 +507,18 @@ export class MousseConfigStore {
     if (partial.jobs !== undefined) {
       this.conf.scheduled.jobs = partial.jobs
     }
+    if (partial.webhooks !== undefined) {
+      this.conf.scheduled.webhooks = { ...partial.webhooks }
+    }
+    if (partial.agentJobs !== undefined) {
+      this.conf.scheduled.agentJobs = partial.agentJobs === true
+    }
     this.persist()
+  }
+
+  /** Whether agents may use the scheduled-job tools (`scheduled.agentJobs`, off by default). Cheap: read at every tool call. */
+  agentJobsEnabled(): boolean {
+    return this.conf.scheduled.agentJobs === true
   }
 
   updateChannelsSection(config: ChannelConfig): void {
@@ -526,12 +551,14 @@ export class MousseConfigStore {
       partial.permissions ||
       partial.context ||
       partial.agentAccess ||
+      partial.runs ||
       partial.integrations ||
       partial.title
     ) {
       this.updateSettingsSection({
         ...(partial.context ? { context: partial.context as MousseSettingsSection['context'] } : {}),
         ...(partial.agentAccess ? { agentAccess: partial.agentAccess as MousseSettingsSection['agentAccess'] } : {}),
+        ...(partial.runs ? { runs: partial.runs as MousseSettingsSection['runs'] } : {}),
         ...(partial.profile ? { profile: partial.profile as MousseSettingsSection['profile'] } : {}),
         ...(partial.appearance
           ? { appearance: partial.appearance as MousseSettingsSection['appearance'] }

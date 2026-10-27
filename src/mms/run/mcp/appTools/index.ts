@@ -1,5 +1,6 @@
 import type { RunEngine } from '../../RunEngine'
 import { appletTools } from './applets'
+import { botTools } from './bots'
 import { browserTools } from './browser'
 import { delegationTools } from './delegation'
 import { devGuiTools } from './devGui'
@@ -7,6 +8,7 @@ import type { AppToolHost } from './host'
 import { planTools } from './plans'
 import { quickActionTools } from './quickActions'
 import { ToolRegistry, type ToolAccessPolicy, type ToolRegistryOptions } from './registry'
+import { scheduleTools } from './schedules'
 import { skillTools } from './skills'
 import { taskTools } from './tasks'
 import { lineageRelation, threadTools } from './thread'
@@ -16,7 +18,8 @@ import { webTools } from './web'
 export * from './types'
 export * from './registry'
 export * from './turns'
-export type { AgentActionDetails, AppToolHost, ThreadSearchHit } from './host'
+export type { AgentActionDetails, AgentApprovalResult, AgentCreatedThread, AgentQueueCommand, AgentQueueResult, AgentScheduleHost, AgentRunCommandResult, AgentSendResult, AgentThreadRequest, ApprovalRequestInfo, AppToolHost, QueueSnapshot, ThreadSearchHit } from './host'
+export { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX, agentMessageText } from './agentMessage'
 export {
   delegationToolDefinitions,
   dispatchDelegationTool,
@@ -31,7 +34,7 @@ export {
 } from './delegation'
 
 /** The tool families in the order the pi loop has always sent them, after the delegation tools. */
-export const APP_TOOL_FAMILIES = ['skills', 'plans', 'tasks', 'quickActions', 'devGui', 'web', 'browser', 'applets', 'delegation', 'thread'] as const
+export const APP_TOOL_FAMILIES = ['skills', 'plans', 'tasks', 'quickActions', 'devGui', 'web', 'browser', 'applets', 'delegation', 'thread', 'schedules', 'bots'] as const
 export type AppToolFamily = (typeof APP_TOOL_FAMILIES)[number]
 
 /**
@@ -74,6 +77,7 @@ export function createAppToolRegistry(input: {
     toolLedger: host.toolLedger ? (runId) => host.toolLedger!(runId) : undefined,
     readOnlyThread: host.readOnlyThread ? (threadId) => host.readOnlyThread!(threadId) : undefined,
     threadCeiling: host.threadCeiling ? (threadId) => host.threadCeiling!(threadId) : undefined,
+    botRole: host.botRole ? (threadId) => host.botRole!(threadId) : undefined,
     permissionModeFor: host.permissionModeFor ? (runId) => host.permissionModeFor!(runId) : undefined,
     askApproval: host.askApproval ? (threadId, questions, options) => host.askApproval!(threadId, questions, options) : undefined,
     turns: input.turns,
@@ -89,11 +93,13 @@ export function createAppToolRegistry(input: {
   add('plans', planTools(host))
   add('tasks', taskTools(host))
   add('thread', engine ? threadTools(host, engine) : [])
+  add('schedules', engine ? scheduleTools(host, engine) : [])
   add('skills', skillTools(host))
   add('quickActions', quickActionTools(host))
   add('devGui', devGuiTools(host))
   add('web', webTools(host))
   add('browser', browserTools(host))
   add('applets', appletTools())
+  add('bots', botTools())
   return { registry, families }
 }

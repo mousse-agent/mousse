@@ -2,6 +2,7 @@ import { realpathSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import { portableRepository } from '../dispatch/repository'
 import { matchProject, type ProjectIdentity } from './projectMatch'
+import { withoutStandingRules } from '../../orchestrator/UserQuestionService'
 import type { MmsProfileServices } from '../../MmsProfileServices'
 import { dispatchMethod } from '../../protocol/handlers'
 import { NetError, type NodeId } from '../../../shared/net'
@@ -135,9 +136,11 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     )
       throw new NetError('bad_request', 'Project is outside this profile inventory.')
     if (method === 'orchestrator.answerQuestions' || method === 'orchestrator.dismissQuestions') {
-      // A remote caller may only settle a question that belongs to the thread it names.
+      // A remote caller may only settle a question that belongs to the thread it names. A saved
+      // request another client already settled still names its thread, so the caller learns who
+      // answered first instead of a bare refusal; any other thread or an unknown id gets no detail.
       if (
-        this.services.questions.getPending(params.requestId as string)?.threadId !== params.threadId
+        this.services.questions.getRequest(params.requestId as string)?.threadId !== params.threadId
       )
         return { ok: false }
     }
@@ -341,7 +344,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     }
     const provider = settings.provider
     return {
-      providers: s.providerInstances.llmProviders(),
+      providers: (await s.harness?.llmProviders({ kind: 'device' })) ?? [],
       defaultModel: provider?.model
         ? {
             ...(provider.instanceId ? { instanceId: provider.instanceId } : {}),
@@ -386,15 +389,18 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     const s = this.services,
       thread = s.threads.listAllThreads().find((thread) => thread.id === threadId)
     if (!thread) throw new NetError('stream_unknown', 'Thread not found.')
+    const pause = s.orchestrator.getTurnState(threadId).pause
     return mmsJson(
       {
         thread,
         messages: withImageBudget(s.orchestrator.getMessages(threadId)),
         queue: s.orchestrator.listQueue(threadId).map(withoutImageData),
-        pendingQuestions: s.questions.listPendingForThread(threadId),
+        pendingQuestions: s.questions.listPendingForThread(threadId).map(withoutStandingRules),
         activeTurn: {
           active: s.orchestrator.isTurnActive(threadId),
-          running: s.orchestrator.isActiveTurnRunning(threadId)
+          running: s.orchestrator.isActiveTurnRunning(threadId),
+          // A run that hit a usage limit: when it resets and whether it continues by itself. Absent otherwise.
+          ...(pause ? { paused: { runId: pause.runId, until: pause.until, estimated: pause.estimated, autoResume: pause.autoResume, ...(pause.stale ? { stale: true } : {}), ...(pause.limitKind ? { limitKind: pause.limitKind } : {}) } } : {})
         },
         revision: this.revision()
       },

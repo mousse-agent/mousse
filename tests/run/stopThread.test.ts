@@ -530,7 +530,7 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
     const run = (id: string) => d.engine.getRun(id)!
     const terminal = (id: string) => ['completed', 'interrupted', 'failed', 'cancelled'].includes(run(id).status)
     const protocol = (method: string, params: Record<string, unknown>) =>
-      dispatchMethod({ mms: { orchestrator: d.orch, threads: d.store } as never, globalSequence: () => 0 }, method, params)
+      dispatchMethod({ mms: { orchestrator: d.orch, threads: d.store, pullRequestWatch: { onEnded: () => undefined } } as never, globalSequence: () => 0 }, method, params)
     const reconciler = new Reconciler({ store: d.engine.store, outbox: d.engine.outbox, tools: d.engine.tools, capabilitiesFor: (id) => d.orch.capabilitiesForThread(id) })
     return {
       d, adapter, out, gate, parentId, childThreadId, delegation, parentRunId: sent.runId!, run, terminal, protocol, reconciler,
@@ -686,7 +686,7 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
     // A channel turn starts on the parent after the Stop; it is not an engine run. It is registered directly
     // on purpose: starting a real channel turn here is heavy and the test only needs Stop to see one.
     const channelTurns = (s.d.orch as unknown as { channelTurns: Map<string, unknown> }).channelTurns
-    channelTurns.set(s.parentId, { abort: new AbortController(), pendingSteer: [], promotedSteerIds: [] })
+    channelTurns.set(s.parentId, { abort: new AbortController(), pendingSteer: [] })
     try {
       s.adapter.providerStops.length = 0
       await s.d.orch.stopThread(s.parentId, 'user', { clientRequestId: 'once' })

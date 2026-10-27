@@ -1,5 +1,6 @@
 import type { Tool } from '@earendil-works/pi-ai'
 import { BROWSER_AUTOMATION_TOOLS, type BrowserAutomationTool } from '../../../../shared/browser/automation'
+import type { BrowserRuntimePort } from '../../../../shared/browser/runtime'
 import {
   BROWSER_READ_TOOLS,
   dispatchBrowserTool,
@@ -10,9 +11,14 @@ import type { LlmToolEvent } from '../../../harness/turnEvents'
 import type { AppToolHost } from './host'
 import { disabledInSettings, plainSchema, type AppToolTurn, type MousseTool, type ToolOutcome } from './types'
 
+/** The runtime a turn's browser tools run on: its host's own (an agent chat's), else the profile's. */
+function runtimeFor(host: AppToolHost, turn: AppToolTurn): BrowserRuntimePort | undefined {
+  return turn.browserRuntime ?? host.browserRuntime?.()
+}
+
 /** The browser tools as a turn's binding offers them (vision, backend and screenshot support). */
 function turnDefinitions(host: AppToolHost, turn: AppToolTurn): Tool[] {
-  const runtime = host.browserRuntime?.()
+  const runtime = runtimeFor(host, turn)
   const binding = turn.browser
   if (!runtime || !binding || binding.mode !== 'structured') return []
   return getBrowserToolDefinitions({
@@ -25,7 +31,8 @@ function turnDefinitions(host: AppToolHost, turn: AppToolTurn): Tool[] {
 /**
  * The host-bound browser tools. A native MCP client lists every one with the widest schema (a
  * vision binding with screenshots) so its list stays stable; the turn's binding decides at call time
- * what runs, and an in-process loop is sent the turn's own definitions.
+ * what runs, and an in-process loop (or a runtime sent a definition turn's tools) is sent the turn's
+ * own definitions.
  */
 export function browserTools(host: AppToolHost): MousseTool[] {
   const listing = getBrowserToolDefinitions({ vision: true, screenshots: true })
@@ -48,7 +55,7 @@ export function browserTools(host: AppToolHost): MousseTool[] {
       class: BROWSER_READ_TOOLS.has(name as BrowserAutomationTool) ? 'read' : 'mutation',
       listed: () => Boolean(host.browserRuntime?.()),
       available: (turn) => {
-        const runtime = host.browserRuntime?.()
+        const runtime = runtimeFor(host, turn)
         if (!runtime || !turn.browser || turn.browser.mode === 'disabled')
           return runtime
             ? 'Browser tools are not bound for this turn. Root must supply a trusted execution context.'
@@ -60,7 +67,7 @@ export function browserTools(host: AppToolHost): MousseTool[] {
         turn.browser!.policy.allowedTools.includes(name) && definitions(turn).some((tool) => tool.name === name),
       describe: () => `Browser tool ${name}`,
       handler: async (args, ctx): Promise<ToolOutcome> => {
-        const runtime = host.browserRuntime?.()
+        const runtime = runtimeFor(host, ctx.turn)
         const binding = ctx.turn.browser
         if (!runtime || !binding) throw new Error('Browser runtime is not bound. Call setBrowserRuntime before dispatching browser tools.')
         const callEvent: LlmToolEvent = {

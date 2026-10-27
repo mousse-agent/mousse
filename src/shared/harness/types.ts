@@ -144,6 +144,12 @@ export interface RunPolicy {
 export interface PolicyAuthority {
   kind: 'definition' | 'bot'
   digest: string
+  /**
+   * A definition that needs the instance's own definition loop (its settings not known, or a token
+   * or USD limit only the loop can hold for its model): it runs there while
+   * the loop exists, whatever runtime the instance runs other definitions on (`definitionCaps`).
+   */
+  loop?: true
 }
 
 /** The caller's part of a binding's policy (`HarnessGateway.bind`): mode and origin are bound separately. */
@@ -292,6 +298,18 @@ export function isRetriesExhausted(error: unknown): boolean {
   return error instanceof AppError && (error.details as { retriesExhausted?: unknown } | undefined)?.retriesExhausted === true
 }
 
+/**
+ * The instance id that runs and provider refs carried when a turn with no selection ran on the bare
+ * pi loop. That route is gone: such a record never resolves again (a binding is `binding_stale`, a
+ * ref is not active), and the thread's next turn resolves the default model.
+ */
+const RETIRED_BARE_ROUTE_ID = 'pi'
+
+/** Whether a stored binding or ref was made on the retired bare pi route. */
+export function onRetiredBareRoute(instanceId: string | undefined): boolean {
+  return instanceId === RETIRED_BARE_ROUTE_ID
+}
+
 const HARNESS_ERROR_CATEGORY: Record<HarnessErrorCode, ErrorCategory> = {
   instance_unknown: 'invalid',
   instance_disabled: 'unavailable',
@@ -427,6 +445,11 @@ export interface InstanceConfigPatch {
    * (`InstanceSnapshot.settingsNotice` `older_conflict`); every other field is ignored.
    */
   useOlderSettings?: true
+  /**
+   * A model API's provider (`pi`), at add only: the entry's id carries it (`pi:<provider>`), so it is
+   * never stored and never changes.
+   */
+  provider?: string
 }
 
 /**
@@ -488,6 +511,29 @@ export interface AddInstanceInput {
   config?: InstanceConfigPatch
   /** The id's slug (`claude:api`), when it should not come from the display name. */
   slug?: string
+}
+
+/** How an Add option signs in once added: a pasted key, a browser sign-in, or the environment's credentials. */
+export type AddOptionMethod = 'api_key' | 'oauth' | 'ambient'
+
+/**
+ * One provider the Add dialog and the CLI offer (`providers.catalog.addOptions`). `add` is the exact
+ * input for `providers.instances.add`, so no client builds an id or branches on a name.
+ */
+export interface ProviderAddOption {
+  id: string
+  label: string
+  description?: string
+  methods: AddOptionMethod[]
+  /** `api_key` runs the provider's guided sign-in (`instances.signIn`) instead of a pasted key. */
+  guidedKey?: true
+  /** Where the environment's credentials come from (`ambient`). */
+  ambientInfo?: { label: string; instructions: string[] }
+  add: AddInstanceInput
+  /** Already an entry of this profile (removed entries are not). */
+  added: boolean
+  /** A key for it is saved on this device already (shared by the profiles), so no key needs typing. */
+  hasSavedKey: boolean
 }
 
 /** Long provider operations; each returns an operation id at once and reports through events. */

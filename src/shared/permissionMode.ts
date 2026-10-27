@@ -65,6 +65,8 @@ export interface PermissionLimits {
   bypassDisabled?: boolean
   /** Modes the runtime cannot enforce, each with the reason shown when a thread resolves to a stricter one. */
   unavailable?: Partial<Record<PermissionMode, string>>
+  /** Full access also turns the agent's own sandbox off (Codex), which the permission menu says. */
+  sandboxOffInFull?: boolean
 }
 
 /**

@@ -17,7 +17,8 @@ import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import { SettingsStore } from '../../src/mms/settings/SettingsStore'
 import { parseModelRef } from '../../src/shared/agents/schema'
-import { getDefaultSettings, resolveModelForMode, type MousseSettings } from '../../src/shared/settings'
+import { getDefaultSettings, oneShotProviderOptions, resolveModelForMode, type MousseSettings } from '../../src/shared/settings'
+import type { OneShotSpec } from '../../src/mms/harness/driver'
 
 const pi = new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } }))
 const claude: ProviderAdapter = { driver: 'claude', capabilities: pi.capabilities, configured: () => true, startTurn: async () => { throw new Error('unused') }, interrupt: async () => 'not_active' }
@@ -52,58 +53,76 @@ async function titleProfile(options: { work?: boolean } = {}) {
     providerAuth: { getConfiguredLlmProviders: () => piProviders, credentials: { listProviderIds: () => ['openai'] } } as never
   })
   const claudeListing = { id: 'claude-subscription', label: 'Claude Code', models: [{ id: 'haiku', label: 'Haiku' }, { id: 'sonnet', label: 'Sonnet' }] }
-  const harness = testHarness({ drivers: [adapterDriver(pi), adapterDriver(claude, { runtime: { llmProvider: () => claudeListing } })], instances })
-  return { harness, instances }
+  // The pi runtime's one request (`DriverRuntime.oneShot`) is a spy.
+  const oneShot = vi.fn(async (_spec: OneShotSpec, _signal: AbortSignal) => ({ text: '"A title."' }))
+  // The pi runtime lists its provider (as the real one does while credentialed).
+  const piListing = adapterDriver(pi, { runtime: { oneShot } })
+  const piDriver = { ...piListing, create: (context: Parameters<typeof piListing.create>[0]) => ({ ...piListing.create(context), llmProvider: () => piProviders.find((provider) => `pi:${provider.id}` === context.instanceId) }) }
+  const harness = testHarness({ drivers: [piDriver, adapterDriver(claude, { runtime: { llmProvider: () => claudeListing } })], instances })
+  return { harness, instances, oneShot }
 }
 
 const OPENAI_BIG = { instanceId: 'pi:openai', llmProvider: 'openai', model: 'gpt-big' }
 
-/** The orchestrator's title path over a real gateway; the pi call itself is a spy. */
-function titleOrchestrator(harness: unknown, title: MousseSettings['title']) {
+/** The orchestrator's title path over a real gateway (`gateway.oneShot`); the pi request itself is a spy. */
+function titleOrchestrator(profile: Awaited<ReturnType<typeof titleProfile>>, title: MousseSettings['title']) {
   const settings = { ...getDefaultSettings(), title }
-  const generateTitle = vi.fn(async () => 'A title')
   const orch = Object.assign(Object.create(OrchestratorService.prototype), {
-    harness,
-    settingsStore: { get: () => settings },
-    llm: { generateTitle }
+    harness: profile.harness,
+    settingsStore: { get: () => settings }
   }) as {
     generateTitleText: (request: string, first: string | undefined, threadId: string | undefined) => Promise<string>
     generateThreadTitle: (messages: Array<{ role: 'user' | 'assistant'; content: string }>) => Promise<string>
   }
-  return { orch, generateTitle }
+  return { orch, oneShot: profile.oneShot }
 }
 
 describe('chat title model', () => {
   it('Automatic (the default setting) names chats from their first line, with no model call', async () => {
-    const { harness } = await titleProfile()
-    const { orch, generateTitle } = titleOrchestrator(harness, getDefaultSettings().title)
+    const { orch, oneShot } = titleOrchestrator(await titleProfile(), getDefaultSettings().title)
     // Even with an API provider connected, as on master.
     expect(await orch.generateThreadTitle([{ role: 'user', content: 'hello there' }])).toBe('hello there')
-    expect(generateTitle).not.toHaveBeenCalled()
+    expect(oneShot).not.toHaveBeenCalled()
   })
 
   it('a chosen model runs exactly as chosen; a legacy record resolves to its instance', async () => {
-    const { harness } = await titleProfile()
-    const chosen = titleOrchestrator(harness, OPENAI_BIG)
-    await chosen.orch.generateTitleText('hello', undefined, undefined)
-    expect(chosen.generateTitle).toHaveBeenCalledWith('hello', undefined, undefined, OPENAI_BIG)
-    const legacy = titleOrchestrator(harness, { llmProvider: 'openai', model: 'gpt-big' })
-    await legacy.orch.generateTitleText('hello', undefined, undefined)
-    expect(legacy.generateTitle).toHaveBeenCalledWith('hello', undefined, undefined, OPENAI_BIG)
+    const profile = await titleProfile()
+    const chosen = titleOrchestrator(profile, OPENAI_BIG)
+    // The answer is cleaned the way titles always were: no quotes, no ending punctuation.
+    expect(await chosen.orch.generateTitleText('hello', undefined, undefined)).toBe('A title')
+    expect(profile.oneShot).toHaveBeenCalledTimes(1)
+    expect(profile.oneShot.mock.calls[0]![0]).toMatchObject({ model: 'gpt-big', system: expect.stringContaining('name chat threads') })
+    expect(profile.oneShot.mock.calls[0]![0].prompt).toContain('User request: hello')
+    const legacy = titleOrchestrator(profile, { llmProvider: 'openai', model: 'gpt-big' })
+    expect(await legacy.orch.generateTitleText('hello', undefined, undefined)).toBe('A title')
+    expect(profile.oneShot).toHaveBeenCalledTimes(2)
   })
 
   it('an agent runtime, a disabled instance or a hidden model is refused with its code, never run elsewhere', async () => {
-    const vendor = titleOrchestrator((await titleProfile()).harness, WORK)
+    const vendor = titleOrchestrator(await titleProfile(), WORK)
     await expect(vendor.orch.generateTitleText('hello', undefined, undefined)).rejects.toMatchObject({ code: 'unsupported' })
-    expect(vendor.generateTitle).not.toHaveBeenCalled()
-    const disabled = titleOrchestrator((await titleProfile({ work: false })).harness, WORK)
-    await expect(disabled.orch.generateTitleText('hello', undefined, undefined)).rejects.toMatchObject({ code: 'provider_instance_disabled' })
-    expect(disabled.generateTitle).not.toHaveBeenCalled()
+    expect(vendor.oneShot).not.toHaveBeenCalled()
+    const disabled = titleOrchestrator(await titleProfile({ work: false }), WORK)
+    // The gateway's own code for it (oneShot reports harness errors).
+    await expect(disabled.orch.generateTitleText('hello', undefined, undefined)).rejects.toMatchObject({ code: 'instance_disabled' })
+    expect(disabled.oneShot).not.toHaveBeenCalled()
     const profile = await titleProfile()
     await profile.harness.instances.setModelPrefs('pi:openai', { hidden: ['gpt-big'] })
-    const hidden = titleOrchestrator(profile.harness, OPENAI_BIG)
+    const hidden = titleOrchestrator(profile, OPENAI_BIG)
     await expect(hidden.orch.generateTitleText('hello', undefined, undefined)).rejects.toMatchObject({ code: 'model_hidden' })
-    expect(hidden.generateTitle).not.toHaveBeenCalled()
+    expect(hidden.oneShot).not.toHaveBeenCalled()
+  })
+
+  it('the title picker offers only instances that run one request, without their Bedrock models', async () => {
+    const { harness } = await titleProfile()
+    const listings = harness.listedLlmProviders({ kind: 'device' })
+    expect(listings.find((option) => option.instanceId === 'pi:openai')?.oneShot).toBe(true)
+    expect(listings.find((option) => option.instanceId === 'claude')?.oneShot).toBe(false)
+    const bedrock = { id: 'amazon-bedrock', instanceId: 'pi:amazon-bedrock', label: 'Bedrock', oneShot: true, models: [{ id: 'claude-on-aws', label: 'Claude on AWS', oneShot: false as const }] }
+    const mixed = { id: 'openrouter', instanceId: 'pi:openrouter', label: 'OpenRouter', oneShot: true, models: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B', oneShot: false as const }] }
+    const choices = oneShotProviderOptions([...listings, bedrock, mixed])
+    expect(choices.map((option) => option.instanceId)).toEqual(['pi:openai', 'pi:openrouter'])
+    expect(choices.find((option) => option.instanceId === 'pi:openrouter')?.models.map((model) => model.id)).toEqual(['a'])
   })
 })
 

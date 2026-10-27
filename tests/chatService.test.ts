@@ -105,6 +105,9 @@ function fixture(outputs: Array<string | AssistantMessage> = ['done'], override?
     f.service.send({ chatId: chat.id, text: 'Tell @someone about yourself' })
     await f.service.waitForIdle()
     expect(f.requests).toHaveLength(1)
+    // The chat's person watches the reply: without this mark the run is unattended, and where the
+    // shell is not contained its shell commands are refused rather than asked about (#299).
+    expect(f.requests[0]!.host?.attended).toBe(true)
     expect(f.service.get(chat.id).run?.state).toBe('completed')
     expect(f.service.get(chat.id).messages).toHaveLength(2)
   })

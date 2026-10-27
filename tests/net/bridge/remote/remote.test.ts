@@ -187,6 +187,13 @@ describe('P3 real MMS remote Bridge', () => {
     expect(exposed.filter((method) => /permission/i.test(method))).toEqual([])
   })
 
+  it('never exposes a thread\'s "Always for this thread" rules: a remote client can answer a request, not list or revoke the rules', () => {
+    const exposed = Object.keys(BRIDGE_REMOTE_METHODS)
+    expect(exposed).not.toContain('threads.approvalRules')
+    expect(exposed).not.toContain('threads.clearApprovalRules')
+    expect(exposed.filter((method) => /approvalRules|ApprovalRules/.test(method))).toEqual([])
+  })
+
   it('maps every exposed method, denies local/secret ingress, validates before admission, and deduplicates real thread creation', async () => {
     const p = await setup(),
       { b } = await p.connect()
@@ -222,6 +229,7 @@ describe('P3 real MMS remote Bridge', () => {
     expect(p.mms.threads.listAllThreads()).toHaveLength(1)
     for (const method of [
       'providers.setApiKey',
+      'providers.instances.setSecret',
       'provider.login',
       'settings.set',
       'pty.create',
@@ -379,7 +387,6 @@ describe('P3 real MMS remote Bridge', () => {
         otherToolsText: '',
         signature: 'fixture'
       }),
-      generateTitle: async () => 'Owned turn',
       chat: async (
         _messages: unknown,
         _tools: unknown,
@@ -408,6 +415,8 @@ describe('P3 real MMS remote Bridge', () => {
       }
     }
     ;(p.mms.orchestrator as unknown as { llm: unknown }).llm = llm
+    // The turn runs on the profile's default model, a pi instance over the replaced loop client.
+    p.mms.settings.set({ provider: { llmProvider: 'openai', model: 'fixture' } })
     const deltas: unknown[] = [],
       adapter = new ThreadStreamAdapter({
         db: p.aDb,

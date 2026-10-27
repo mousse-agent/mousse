@@ -223,6 +223,8 @@ export const PROTOCOL_METHODS = [
   'threads.setModel',
   'threads.setWorktreeEnabled',
   'threads.setPermissionMode',
+  'threads.approvalRules',
+  'threads.clearApprovalRules',
   'thread.snapshot',
   'orchestrator.send',
   'orchestrator.abort',
@@ -237,6 +239,8 @@ export const PROTOCOL_METHODS = [
   'runs.credentials',
   'runs.transfers',
   'runs.handoffs',
+  'runs.resumeNow',
+  'runs.cancelPause',
   'thread.fork',
   'thread.mergeBack',
   'orchestrator.answerQuestions',
@@ -246,6 +250,7 @@ export const PROTOCOL_METHODS = [
   'subagents.stopAll',
   'queue.list',
   'queue.enqueue',
+  'queue.edit',
   'queue.reorder',
   'queue.remove',
   'queue.promoteToSteer',
@@ -300,6 +305,13 @@ export const PROTOCOL_METHODS = [
   'scheduled.resume',
   'scheduled.run',
   'scheduled.status',
+  'scheduled.settings.get',
+  'scheduled.settings.set',
+  'scheduled.extend',
+  'scheduled.webhook.enable',
+  'scheduled.webhook.rotate',
+  'scheduled.webhook.disable',
+  'scheduled.webhook.deliveries',
   'channels.getSnapshot',
   'channels.getConfig',
   'channels.updateConfig',
@@ -310,6 +322,11 @@ export const PROTOCOL_METHODS = [
   'channels.rejectPairing',
   'channels.sendTest',
   'channels.getActivity',
+  'channels.owner.start',
+  'channels.owner.status',
+  'channels.owner.confirm',
+  'channels.owner.cancel',
+  'channels.owner.clear',
   'mcp.listServers',
   'mcp.listTools',
   'mcp.testServer',
@@ -344,6 +361,7 @@ export const PROTOCOL_METHODS = [
   // and report through `providers.operation` events.
   'providers.snapshots',
   'providers.instances.add',
+  'providers.instances.setSecret',
   'providers.instances.remove',
   'providers.instances.configure',
   'providers.instances.setEnabled',
@@ -360,6 +378,7 @@ export const PROTOCOL_METHODS = [
   'providers.instances.setModelPrefs',
   'providers.instances.move',
   'providers.registry.search',
+  'providers.catalog.addOptions',
   'webTools.getCredentialStatus',
   'webTools.setApiKey',
   'webTools.clearApiKey',
@@ -387,6 +406,7 @@ export const PROTOCOL_METHODS = [
   'threads.configureTrash',
   'storage.policy',
   'storage.configure',
+  'storage.reviewDismiss',
   'storage.cleanup.run',
   'storage.cleanup.plan',
   'storage.cleanup.lastReport',
@@ -432,6 +452,8 @@ export const PROTOCOL_METHODS = [
   'pullRequests.resolve',
   'pullRequests.startThread',
   'pullRequests.pushTarget',
+  'pullRequests.watch',
+  'pullRequests.watchStatus',
 
   'daemon.shutdown',
   'events.subscribe',
@@ -468,12 +490,14 @@ export const PROTOCOL_CAPABILITIES = [
 export type ProtocolEventType =
   | 'net.updated'
   | 'bots.changed'
+  | 'bots.escalation'
   | 'run.event'
   | 'run.stop-requested'
   | 'run.steer-accepted'
   | 'run.interrupted-on-boot'
   | 'projects.updated'
   | 'threads.updated'
+  | 'pullRequests.updated'
   | 'thread.title-generation-failed'
   | 'subagents.updated'
   | 'thread.message'
@@ -484,6 +508,7 @@ export type ProtocolEventType =
   | 'turn.completed'
   | 'turn.interrupted'
   | 'turn.aborted'
+  | 'turn.paused'
   | 'turn.steered'
   | 'connection.failed'
   | 'activity'

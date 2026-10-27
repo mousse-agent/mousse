@@ -231,7 +231,9 @@ export class MmsProfilePlatform {
       registry: this.agentDefinitions,
       resolver: new AgentResolver({ registry: this.agentDefinitions, modelLookup: this.models, integrationLookup }),
       integrationLookup,
-      tryRun: (input) => this.agentRuns.tryRun(input)
+      tryRun: (input) => this.agentRuns.tryRun(input),
+      tryRunPending: (input) => this.agentRuns.pending(input),
+      tryRunAnswer: (input) => this.agentRuns.answer(input)
     }
   }
 

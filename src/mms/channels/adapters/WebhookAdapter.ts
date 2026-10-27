@@ -1,4 +1,3 @@
-import { timingSafeEqual } from 'crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http'
 import type { ChannelPlatformConfig, ChannelStatus } from '../../../shared/types'
 import type {
@@ -7,10 +6,16 @@ import type {
   OutboundChannelMessage,
   SendResult
 } from '../types'
+import {
+  BodyTooLargeError,
+  isAllowedLoopbackHost,
+  isBrowserOriginated,
+  isJsonContentType,
+  readBodyBytes,
+  secretsMatch
+} from '../../http/loopbackRequest'
 
 const MAX_BODY_BYTES = 1024 * 1024
-
-class BodyTooLargeError extends Error {}
 
 interface WebhookPayload {
   text?: string
@@ -131,10 +136,7 @@ export class WebhookAdapter implements ChannelAdapter {
   }
 
   private isAllowedHost(host: string | undefined): boolean {
-    const port = this.listenPort ?? this.config.webhookPort ?? 18789
-    if (!host) return false
-    const normalized = host.toLowerCase()
-    return [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`].includes(normalized)
+    return isAllowedLoopbackHost(host, this.listenPort ?? this.config.webhookPort ?? 18789)
   }
 
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -149,11 +151,7 @@ export class WebhookAdapter implements ChannelAdapter {
       return
     }
 
-    if (req.headers.origin !== undefined) {
-      return reject(res, 403, 'Browser-originated requests are not allowed')
-    }
-    const fetchSite = req.headers['sec-fetch-site']
-    if (fetchSite !== undefined && fetchSite !== 'none') {
+    if (isBrowserOriginated(req.headers)) {
       return reject(res, 403, 'Browser-originated requests are not allowed')
     }
     if (!this.isAllowedHost(req.headers.host)) {
@@ -229,49 +227,8 @@ function reject(res: ServerResponse, status: number, message: string): void {
   res.end(message)
 }
 
-function secretsMatch(provided: string, expected: string): boolean {
-  const a = Buffer.from(provided)
-  const b = Buffer.from(expected)
-  if (a.length !== b.length) return false
-  return timingSafeEqual(a, b)
-}
-
-function isJsonContentType(value: string | undefined): boolean {
-  if (!value) return false
-  return value.split(';')[0].trim().toLowerCase() === 'application/json'
-}
-
-function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const declared = Number(req.headers['content-length'])
-    if (Number.isFinite(declared) && declared > maxBytes) {
-      reject(new BodyTooLargeError())
-      return
-    }
-    const chunks: Buffer[] = []
-    let size = 0
-    let done = false
-    req.on('data', (chunk) => {
-      if (done) return
-      const buf = Buffer.from(chunk)
-      size += buf.length
-      if (size > maxBytes) {
-        done = true
-        chunks.length = 0
-        req.pause()
-        req.removeAllListeners('data')
-        reject(new BodyTooLargeError())
-        return
-      }
-      chunks.push(buf)
-    })
-    req.on('end', () => {
-      if (!done) resolve(Buffer.concat(chunks).toString('utf-8'))
-    })
-    req.on('error', (err) => {
-      if (!done) reject(err)
-    })
-  })
+async function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
+  return (await readBodyBytes(req, maxBytes)).toString('utf-8')
 }
 
 function sleep(ms: number): Promise<void> {

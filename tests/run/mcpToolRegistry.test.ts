@@ -28,8 +28,18 @@ const PHASE5_TOOLS: Record<string, string> = {
   update_task: 'actsAsCaller',
   list_tasks: 'actsAsCaller',
   thread_read: 'readsOthers',
-  queue_list: 'reads',
-  queue_enqueue: 'writesThreads',
+  thread_wait: 'readsOthers',
+  thread_send: 'managesOthers',
+  thread_create: 'managesOthers',
+  thread_interrupt: 'managesOthers',
+  thread_steer: 'managesOthers',
+  approval_respond: 'managesOthers',
+  queue_list: 'readsOthers',
+  queue_enqueue: 'managesOthers',
+  queue_edit: 'managesOthers',
+  queue_remove: 'managesOthers',
+  queue_reorder: 'managesOthers',
+  queue_promote_to_steer: 'managesOthers',
   // Phase 6 (SPEC §16.2).
   thread_fork: 'startsThreads',
   thread_merge_back: 'editsWorkspace'
@@ -65,7 +75,7 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
 
   it('lists every Phase 5 tool with its access class and a plain JSON schema', async () => {
     const { registry } = await setup()
-    const listed = registry.listFor({ readOnly: false, modeCeiling: 'default' })
+    const listed = registry.listFor({ readOnly: false, modeCeiling: 'default', accessLevel: 'manage' })
     const byName = Object.fromEntries(listed.map((tool) => [tool.name, tool.access]))
     for (const [name, access] of Object.entries(PHASE5_TOOLS)) expect(byName[name], name).toBe(access)
     for (const tool of listed) {
@@ -78,9 +88,9 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
       expect(listed.some((tool) => tool.name === hidden), hidden).toBe(false)
   })
 
-  it('refuses writesThreads to another thread with mousse_scope_denied', async () => {
+  it('refuses a queue tool on another thread below manage with mousse_scope_denied, and queues on its own', async () => {
     const { registry, ctx, enqueued } = await setup()
-    const denied = await registry.call('queue_enqueue', { content: 'hi', threadId: 'other' }, ctx()).catch((error) => error)
+    const denied = await registry.call('queue_enqueue', { content: 'hi', threadId: 'other', expectedRevision: 'rev-0' }, ctx()).catch((error) => error)
     expect(denied).toBeInstanceOf(McpToolError)
     expect(denied.code).toBe('mousse_scope_denied')
     expect(enqueued).toEqual([])
@@ -537,7 +547,6 @@ describe('agent access level (SPEC §15.1)', () => {
         const names = JSON.stringify(registered.inputSchema).match(/"\w*[tT]hreadIds?"\s*:/g) ?? []
         if (names.length) expect(['readsOthers', 'managesOthers', 'writesThreads'].includes(registered.access) || Boolean(registered.threadArgChecked), registered.name).toBe(true)
       }
-      expect(registry.get('queue_list')!.threadArgChecked).toBeTruthy()
       expect(registry.get('thread_fork')!.threadArgChecked).toBeTruthy()
     })
   })

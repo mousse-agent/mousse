@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { addMs, EffectOutbox, EFFECT_LEASE_GRACE_MS } from '../../src/mms/run/EffectOutbox'
 import { RunStore } from '../../src/mms/run/RunStore'
+import { effectLaneClass } from '../../src/mms/run/types'
 
 const T0 = '2026-10-12T00:00:00.000Z'
 const at = (ms: number): string => addMs(T0, ms)
@@ -119,10 +120,18 @@ describe('EffectOutbox', () => {
   it('refuses to enqueue a reserved effect kind (no producer yet, SPEC §12.2)', () => {
     const { store } = open()
     const strict = new EffectOutbox(store)
-    for (const kind of ['request.respond', 'checkpoint.capture', 'title.generate', 'workspace.cleanup'] as const)
+    for (const kind of ['checkpoint.capture', 'title.generate', 'workspace.cleanup'] as const)
       expect(() => strict.enqueue({ threadId: 't', kind })).toThrow(expect.objectContaining({ code: 'bad_request', message: 'reserved effect kind' }))
     expect(strict.listForThread('t')).toEqual([])
     expect(strict.enqueue({ threadId: 't', kind: 'turn.interrupt' }).status).toBe('pending')
+  })
+
+  it('enqueues request.respond (a saved approval request\'s answer, SPEC §17.4): process-bound, control lane, never retried', () => {
+    const { store } = open()
+    const strict = new EffectOutbox(store)
+    const answer = strict.enqueue({ threadId: 't', kind: 'request.respond', payload: { requestId: 'req-1' } })
+    expect(answer).toMatchObject({ class: 'process_bound', status: 'pending', maxAttempts: 1, timeoutMs: 30_000 })
+    expect(effectLaneClass('request.respond')).toBe('control')
   })
 
   it('pages a thread\'s effects newest first by cursor, oldest first within a page', () => {

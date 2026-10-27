@@ -1,6 +1,10 @@
+import type { PermissionMode } from '../../shared/permissionMode'
 import type {
   Agent,
+  AgentOrigin,
+  ChatImageAttachment,
   ChatMessage,
+  ChatMode,
   NativeLlmContext,
   QueuedMessage,
   Task,
@@ -13,16 +17,32 @@ import { AgentRegistry } from '../agents/AgentRegistry'
 import { TaskQueue } from '../tasks/TaskQueue'
 import { createNativeContext, isNativeLastTurnUsage, normalizeNativeContext } from './nativeContext'
 
+/**
+ * One steer waiting for a live turn to read it. A person's typed steer has only its text. A promoted queue
+ * item carries its id, and what the item carried when it was promoted (its mode ceiling, the agent it came
+ * from), so the entry can stand in for the item if the item is gone: a steer the turn never reads becomes a
+ * turn of its own with that identity, never merged into a person's text and never under a looser mode. An
+ * agent's steer (`thread_steer`) carries the sender and the mode it may run in.
+ */
+export interface SteerEntry {
+  text: string
+  itemId?: string
+  permissionMode?: PermissionMode
+  origin?: AgentOrigin
+  /** The promoted item's chat mode and images, so a steer the turn never reads comes back as the message it was. */
+  mode?: ChatMode
+  images?: ChatImageAttachment[]
+  /** An agent promoted the item: nothing here may settle a question or approval the user has been asked. */
+  byAgent?: true
+}
+
 export interface ActiveTurnControl {
   abort: AbortController
   /** The Run Engine run this turn executes, so a Stop aimed at one run cannot abort a later turn of the thread. */
   runId?: string
-  pendingSteer: string[]
-  promotedSteerIds: string[]
+  pendingSteer: SteerEntry[]
   /** Notices (subagent results) the steers in `pendingSteer` carry, until the model reads them or the turn ends. */
   carriedSteers?: Array<{ inboxIds: string[]; effectId: string; text: string; subagentNotice?: SubagentNoticeItem[] }>
-  /** What the last drain took (its texts and the carried entries among them), so a drained steer the provider could not take can be put back whole. */
-  lastDrained?: { parts: string[]; carried: NonNullable<ActiveTurnControl['carriedSteers']> }
 }
 
 /** Mutable per-thread execution state owned by MMS. */

@@ -39,9 +39,15 @@ export interface ScheduledJobRunRecord {
   /** The model the run actually used (the run's binding), not the job's field. */
   selection?: ModelOverride
   mode?: 'agent' | 'plan'
+  /** The permission mode the run's binding enforced (the stricter of the job, its ceiling and the thread). */
+  permissionMode?: PermissionMode
   workspace?: ScheduledJobWorkspace
   occurrenceKey?: string
   missingPlaceholders?: string[]
+  /** Set on a `waiting` record: the occurrence hit a provider usage limit that resets at this time. */
+  usageLimitUntil?: string
+  /** The job was created by an agent (`ScheduledJob.createdBy`); set when the record is saved. */
+  agentCreated?: true
 }
 
 /**
@@ -66,11 +72,65 @@ export interface ScheduledJobRunClaim {
   queueItemId?: string
   /** The run ended before the claim was finalized (a fast drain); finalizing the claim applies it at once. */
   settledResult?: ScheduledOccurrenceResult
+  /** Set when a webhook delivery started this claim (`occurrenceKey` is `webhook:<id>`). */
+  webhookOccurrenceId?: string
+}
+
+/**
+ * A job's webhook trigger. The signing secret lives in the profile secret store under `secretRef`
+ * and is shown once, when the trigger is enabled or rotated; it is never part of a job.
+ */
+export interface ScheduledJobWebhookTrigger {
+  scheme: 'mousse'
+  secretRef: string
+  createdAt: string
+  rotatedAt?: string
+}
+
+/** A verified delivery waiting for the scheduler to start it; its payload is stored under the job's trigger folder. */
+export interface ScheduledJobPendingTrigger {
+  occurrenceId: string
+  receivedAt: string
+}
+
+/**
+ * How a webhook request ended. The first six name the life of an accepted delivery; the rest are requests
+ * that were answered without starting anything. `failed`: the run ended in an error or was interrupted;
+ * `dispatch_failed`: the occurrence never got a run.
+ */
+export type ScheduledWebhookDeliveryOutcome =
+  | 'accepted'
+  | 'queued'
+  | 'completed'
+  | 'failed'
+  | 'dispatch_failed'
+  | 'uncertain'
+  | 'running'
+  | 'pending'
+  | 'paused'
+  | 'replay'
+  | 'rejected_signature'
+  | 'rate_limited'
+  | 'too_large'
+
+export interface ScheduledWebhookDelivery {
+  occurrenceId?: string
+  receivedAt: string
+  outcome: ScheduledWebhookDeliveryOutcome
+  error?: string
+  missingPlaceholders?: string[]
+  bodyBytes: number
 }
 
 /** How an occurrence ended; `uncertain` keeps the engine's "effects may have occurred" text in `error`. */
 export interface ScheduledOccurrenceResult {
-  status: 'ok' | 'error' | 'interrupted' | 'uncertain'
+  /**
+   * `waiting`: the turn hit a provider usage limit. It is not an error and does not spend a repeat; the job's
+   * next run is `retryAt` (the reset), not a slot inside the window.
+   */
+  status: 'ok' | 'error' | 'interrupted' | 'uncertain' | 'waiting'
+  /** With `waiting`: when the limit resets. */
+  retryAt?: string
   text?: string
   error?: string
   silent?: boolean
@@ -108,21 +168,47 @@ export interface ScheduledJob {
   selection?: ModelOverride
   mode?: 'agent' | 'plan'
   workspace?: ScheduledJobWorkspace
-  /** The thread (and run) of the agent that created the job; absent for jobs people create. */
-  createdBy?: { threadId: string; runId?: string }
+  /** How much the job's runs may do without asking; never wider than `permissionCeiling`. Absent = the thread's mode. */
+  permissionMode?: PermissionMode
+  /**
+   * The widest mode a run of this job may have: the mode its creator (or last editor) held. The daemon
+   * sets it; no protocol request can. A run is the stricter of this, `permissionMode` and the thread's mode.
+   */
+  permissionCeiling?: PermissionMode
+  /**
+   * The thread and run of the agent that created the job; absent for jobs people create. `requestId` is the
+   * creating call's key, so a retried call finds the job it already made.
+   */
+  createdBy?: { threadId: string; runId?: string; requestId?: string }
   /**
    * The most agent access (SPEC §15.1) a run of this job may be granted: the level of whoever created it. Absent
    * (a creator whose level is not known) reads as `lineage`; a run is never granted more than the profile's setting either.
    */
   accessCap?: import('./settings').AgentAccessLevel
+  /** When the job ends: set on jobs agents create (7 days); only a person extends it. Absent: no end. */
+  expiresAt?: string
   repeat?: ScheduledJobRepeat
   runHistory?: ScheduledJobRunRecord[]
   /** Present while state === 'running'; cleared on terminal transition. */
   runClaim?: ScheduledJobRunClaim
   /** Present while an admitted occurrence has not reached a terminal run. */
   pendingOccurrence?: ScheduledJobPendingOccurrence
+  /** The current occurrence's run is working, or waits for the person's answer; derived when listed, never stored. */
+  liveStatus?: 'running' | 'needs_answer'
+  /** The thread the current occurrence runs on, with `liveStatus`; derived when listed, never stored. */
+  liveThreadId?: string
+  /** A signed request starts this job; absent when the job has no webhook. */
+  trigger?: { webhook: ScheduledJobWebhookTrigger }
+  /** A verified delivery that the next tick starts (one at a time). */
+  pendingTrigger?: ScheduledJobPendingTrigger
   createdAt: string
   updatedAt: string
+}
+
+/** Profile settings of the scheduler that people choose on the Scheduled page. */
+export interface ScheduledSettings {
+  /** Agents may list, create, change, pause and run jobs through the Mousse tools. Off by default. */
+  agentJobs: boolean
 }
 
 export interface SchedulerStatus {
@@ -147,9 +233,47 @@ export interface CreateScheduledJobInput {
   selection?: ModelOverride
   mode?: 'agent' | 'plan'
   workspace?: ScheduledJobWorkspace
-  createdBy?: { threadId: string; runId?: string }
+  permissionMode?: PermissionMode
+  /** Daemon-only: the protocol refuses it, and the daemon sets it from the creator's mode. */
+  permissionCeiling?: PermissionMode
+  createdBy?: ScheduledJob['createdBy']
   accessCap?: import('./settings').AgentAccessLevel
+  /** Daemon-only, like `accessCap`: the protocol refuses it. */
+  expiresAt?: string
   repeat?: { times?: number }
+}
+
+/** The edits the Scheduled page sends; `null` clears a field so the job goes back to its default. */
+export interface ScheduledJobPatch {
+  name?: string
+  prompt?: string
+  schedule?: JobSchedule
+  threadId?: string | null
+  projectId?: string | null
+  createThread?: boolean
+  selection?: ModelOverride | null
+  mode?: 'agent' | 'plan' | null
+  /** `null` clears it: the run follows its thread's mode again. The job's ceiling is not part of a patch. */
+  permissionMode?: PermissionMode | null
+  workspace?: ScheduledJobWorkspace | null
+}
+
+/**
+ * What enabling or rotating a webhook answers. `secret` is in this answer and no other: the page shows it once
+ * and drops it. Enabling a webhook that already exists issues no secret.
+ */
+export interface ScheduledWebhookGrant {
+  job: ScheduledJob
+  secret?: string
+  url: string
+  listening?: boolean
+  error?: string
+  warning?: string
+}
+
+export interface ScheduledWebhookDeliveryLog {
+  deliveries: ScheduledWebhookDelivery[]
+  url: string
 }
 
 export interface ThreadSearchResult {
@@ -180,6 +304,25 @@ export interface ChannelPlatformConfig {
   webhookSecret?: string
 }
 
+/**
+ * The account confirmed as a platform's owner (Settings → Channels → "This is me"). Personal bots
+ * answer only this account, in a direct message. Never inferred from allowed users or pairing.
+ * Stored in `channels/owners.json`, outside the channel config, so older builds never see it.
+ */
+export interface ChannelOwner {
+  userId: string
+  displayName: string
+  confirmedAt: string
+}
+
+/** A "This is me" code in progress: when it expires, whether its one attempt was used, and who sent it. */
+export interface ChannelOwnerClaim {
+  expiresAt: string
+  /** Accounts that sent a wrong code (each has one attempt). */
+  failedAttempts: number
+  claimant?: { userId: string; displayName: string }
+}
+
 export interface ChannelConfig {
   platforms: Record<ChannelPlatform, ChannelPlatformConfig>
   filterSilenceNarration: boolean
@@ -200,6 +343,8 @@ export interface ChannelSession {
   createdAt: string
   /** Session model; `instanceId` is absent on sessions saved before provider instances existed. */
   modelOverride?: ModelOverride
+  /** The personal bot this DM talks to (`/bot <name>`); its messages activate the bot instead of a chat turn. */
+  botId?: string
 }
 
 export interface ChannelDirectoryEntry {
@@ -222,6 +367,8 @@ export interface ChannelsSnapshot {
   sessions: ChannelSession[]
   statuses: ChannelStatus[]
   directoryUpdatedAt?: string
+  /** Each platform's confirmed owner ("This is me"); absent from older daemons. */
+  owners?: Partial<Record<ChannelPlatform, ChannelOwner>>
 }
 
 export interface PairingRequest {
@@ -282,6 +429,9 @@ export type OrchestratorContextUsageInput = string | OrchestratorContextUsageReq
 export interface UserQuestionOption {
   id: string
   label: string
+  /** An approval request's option: the decision it means, whatever id the provider gave it. */
+  decision?: 'allow' | 'reject'
+  scope?: 'once' | 'always'
 }
 
 export interface UserQuestion {
@@ -291,14 +441,59 @@ export interface UserQuestion {
   allowMultiple?: boolean
 }
 
+/**
+ * What a saved approval request adds to its card: why the provider asks, whether answering still
+ * reaches a waiting provider (`live`) or continues the thread after a restart (`continue`), and how
+ * far through the requests one dead run left the user is.
+ */
+export interface PendingApprovalInfo {
+  reason?: string
+  answerPath: 'live' | 'continue'
+  /** The run the request belonged to was cut off while a tool may have run: `uncertainTools`. */
+  uncertain?: boolean
+  uncertainTools?: string[]
+  /** `continue` requests of one run: how many are answered of how many the run left. */
+  answered?: number
+  total?: number
+}
+
+/** One "Always for this thread" rule, as a client lists it (SPEC §17.8): the exact request it answers, and whether it applies now. */
+export interface ApprovalRuleInfo {
+  /** Names the rule when it is revoked. */
+  id: string
+  permissionKey: string
+  action: 'command' | 'edit' | 'tool'
+  /** A bounded preview of what was allowed, without credentials. */
+  summary: string
+  /** The permission mode the user was asked under; the rule is ignored while the thread's mode is stricter. */
+  grantedUnder: PermissionMode
+  /** False while the thread's mode is stricter than the one the rule was granted under. */
+  active: boolean
+  createdAt: string
+}
+
 export interface PendingUserQuestions {
   requestId: string
   questions: UserQuestion[]
   /** Thread that owns this blocking plan-tool request. */
   threadId?: string
+  /** Present on a provider's, the Pi agent's or a Mousse tool's saved approval request. */
+  approval?: PendingApprovalInfo
 }
 
 export type UserQuestionAnswers = Record<string, string | string[]>
+
+/**
+ * The daemon's answer to `orchestrator.answerQuestions`. A saved approval request that someone else
+ * answered first (or that was closed meanwhile) comes back with who decided what, so a client can say so.
+ */
+export interface QuestionAnswerOutcome {
+  ok: boolean
+  reason?: 'already_answered' | 'cancelled'
+  decision?: 'allow' | 'reject'
+  answeredBy?: { kind: 'user'; via?: string } | { kind: 'agent'; threadId: string; runId: string; toolCallId?: string }
+  cancelReason?: string
+}
 
 export interface DocumentOpenPayload {
   title: string
@@ -507,6 +702,13 @@ export interface ChatMessage {
   subagentNotice?: import('./subagents').SubagentNoticeItem[]
   /** Set on a user message a scheduled job sent, so the thread can show "Scheduled: <name>" instead of passing it off as typed. */
   scheduled?: { jobId: string; jobName?: string }
+  /** Set on a user message another thread's agent sent (`thread_send`), so the thread can say whose it is. */
+  origin?: AgentOrigin
+  /**
+   * Set on a scheduled job's result appended to its thread when it ran on another thread (a
+   * workflow's): that thread and run, which the transcript links to.
+   */
+  scheduledRun?: { jobId: string; threadId: string; runId?: string }
   /**
    * A user message added to a turn that was already running (a steer), so it does not start a turn.
    * Older transcripts do not carry it.
@@ -725,10 +927,33 @@ export interface QueuedMessage {
   /** A mode this turn must not exceed, set by a daemon-side sender (a scheduled job); it only tightens. */
   permissionMode?: PermissionMode
   /**
-   * Set on the occurrence of a scheduled job that found its thread busy. The run drains with the
-   * job's model and origin; the ids travel on to the turn so its end completes the occurrence.
+   * The run a promoted item (`steering`) was promoted into. Only that run's steer drain takes the text, and
+   * only when the run's mode is no stricter than the item's own; any other run that meets the item reverts it
+   * to a pending message, so a promotion never reaches a run it was not checked against.
    */
-  origin?: { kind: 'schedule'; jobId: string; occurrenceKey: string; jobName?: string; selection?: ModelOverride }
+  steerRunId?: string
+  /**
+   * Who the item is from when it is not a person. `schedule`: set on the occurrence of a scheduled job
+   * that found its thread busy; the run drains with the job's model and origin, and the ids travel on to
+   * the turn so its end completes the occurrence. `agent`: a message another thread's agent sent; it
+   * drains as that agent's message, so the turn's transcript row keeps saying so.
+   */
+  origin?: { kind: 'schedule'; jobId: string; occurrenceKey: string; jobName?: string; selection?: ModelOverride } | AgentOrigin
+}
+
+/**
+ * The agent a message came from (SPEC §15.1): the thread and run that sent it. Stored on the user
+ * message the target thread shows, so a message an agent wrote never passes for one a person typed.
+ */
+export interface AgentOrigin {
+  kind: 'agent'
+  threadId: string
+  runId: string
+  /**
+   * How many agent messages in a row led to this one without a person in between (the sender's own count
+   * plus one). A message that would pass the limit is refused, so a chain of agents cannot run unwatched.
+   */
+  hops?: number
 }
 
 export interface ContextUsageCategory {
@@ -859,9 +1084,10 @@ export interface Thread {
 /**
  * Sidebar status of a thread. `processing` is Working. `waiting` is Waiting: the turn is blocked
  * only on wait tools, or it ended while thread-owned work that reports back is still running.
- * `awaiting_input` is Input: the agent asked the user something.
+ * `awaiting_input` is Input: the agent asked the user something. `paused` is a run stopped by a
+ * provider usage limit that continues when the limit resets: not working, and not finished.
  */
-export type ThreadActivityState = 'idle' | 'processing' | 'waiting' | 'awaiting_input' | 'completed'
+export type ThreadActivityState = 'idle' | 'processing' | 'waiting' | 'awaiting_input' | 'completed' | 'paused'
 
 /** Working or Waiting: the thread's work cycle has not finished yet. */
 export function isThreadActivityActive(state: ThreadActivityState | undefined): boolean {
@@ -874,6 +1100,23 @@ export type TurnPhase =
   | 'idle' | 'queued' | 'thinking' | 'streaming'
   | 'tool_running' | 'awaiting_input' | 'finalizing'
   | 'completed' | 'stopped' | 'failed'
+  /** The run hit a provider usage limit and waits for it to reset (`TurnState.pause`). Not an active turn. */
+  | 'paused'
+
+/** What a client shows of a run paused by a usage limit (the daemon's `RunPause`, with the run's id). */
+export interface TurnPause {
+  runId: string
+  /** ISO-8601 time the limit resets: the provider's, or an estimate when `estimated`. */
+  until: string
+  estimated: boolean
+  provider?: string
+  /** The window that was hit, as the provider names it (`five_hour`, `seven_day`, …). */
+  limitKind?: string
+  /** Whether the run continues by itself at `until`; false means Resume now is the way on. */
+  autoResume: boolean
+  /** The reset passed while Mousse was off for more than a day: the timer was dropped and only Resume now (or a message) continues the run. */
+  stale?: true
+}
 
 export interface TurnState {
   threadId: string
@@ -884,6 +1127,8 @@ export interface TurnState {
   updatedAt: string
   error?: string
   errorDescriptor?: import('./errors').AppErrorShape
+  /** Set only while `phase` is `paused`. */
+  pause?: TurnPause
 }
 export type TurnStateSnapshot = Record<string, TurnState>
 
@@ -894,6 +1139,7 @@ export function isTurnActivePhase(phase: TurnPhase): boolean {
 /** Thread activity for a turn phase; `blockedOnWait` marks a tool phase whose calls only wait. */
 export function turnPhaseActivity(phase: TurnPhase, blockedOnWait = false): ThreadActivityState {
   if (phase === 'awaiting_input') return 'awaiting_input'
+  if (phase === 'paused') return 'paused'
   if (isTurnActivePhase(phase)) return phase === 'tool_running' && blockedOnWait ? 'waiting' : 'processing'
   // Keep a finished turn completed until its runtime activity changes.
   if (phase === 'completed') return 'completed'

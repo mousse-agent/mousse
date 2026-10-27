@@ -23,6 +23,8 @@ import type {
   ChannelActivityEvent,
   ChannelConfig,
   ChannelConnectionState,
+  ChannelOwner,
+  ChannelOwnerClaim,
   ChannelPlatform,
   ChannelsSnapshot,
   PairingRequest
@@ -99,6 +101,84 @@ function Section({
       </button>
       {open ? <div className="channels-group-body">{children}</div> : null}
     </section>
+  )
+}
+
+/**
+ * "This is me" (PR 6 §6): the owner is the account that sends the one-time code with `/owner` in a
+ * direct message, confirmed here. Personal bots answer only this account.
+ */
+function OwnerField({ platform, owner, revision, onError }: { platform: ChannelPlatform; owner: ChannelOwner | undefined; revision: unknown; onError: (text: string) => void }) {
+  const [code, setCode] = useState<{ code: string; expiresAt: string } | null>(null)
+  // Undefined until read; null once no claim is in progress (used up or expired).
+  const [claim, setClaim] = useState<ChannelOwnerClaim | null | undefined>(undefined)
+  const run = async (work: () => Promise<unknown>) => {
+    try {
+      await work()
+    } catch (err) {
+      onError(err instanceof Error ? err.message : String(err))
+    }
+  }
+  // A received code arrives as a channels update; the claim is read again on each one.
+  useEffect(() => {
+    if (!code) return
+    void window.mousse.channels.owner.status(platform).then(setClaim, () => setClaim(null))
+  }, [code, platform, revision])
+  const reset = () => {
+    setCode(null)
+    setClaim(undefined)
+  }
+  // "No" and "Cancel" end the claim in the daemon too, so the code stops working.
+  const cancel = () => {
+    reset()
+    void run(() => window.mousse.channels.owner.cancel(platform))
+  }
+  if (owner && !code) {
+    return (
+      <div className="channels-field">
+        <span className="channels-label">Owner</span>
+        <div className="channels-field-row split">
+          <span className="channels-hint">{owner.displayName} ({owner.userId}) · personal bots answer only this account, in a direct message.</span>
+          <button type="button" className="channels-btn" onClick={() => void run(() => window.mousse.channels.owner.clear(platform))}>
+            Forget
+          </button>
+        </div>
+      </div>
+    )
+  }
+  return (
+    <div className="channels-field">
+      <span className="channels-label">Owner</span>
+      {!code ? (
+        <div className="channels-field-row split">
+          <span className="channels-hint">No owner yet: bots answer nobody here.</span>
+          <button type="button" className="channels-btn" onClick={() => void run(async () => setCode(await window.mousse.channels.owner.start(platform)))}>
+            This is me
+          </button>
+        </div>
+      ) : claim?.claimant ? (
+        <div className="channels-field-row split">
+          <span className="channels-hint">Is this your account? {claim.claimant.displayName} ({claim.claimant.userId})</span>
+          <button type="button" className="channels-btn primary" onClick={() => void run(async () => { await window.mousse.channels.owner.confirm(platform, claim.claimant!.userId); reset() })}>
+            Yes, that's me
+          </button>
+          <button type="button" className="channels-btn" onClick={cancel}>
+            No
+          </button>
+        </div>
+      ) : (
+        <div className="channels-field-row split">
+          <span className="channels-hint">
+            {claim === null
+              ? 'That code was used up or expired. Start again.'
+              : <>From your own account, which must already be allowed or paired, send <code>/owner {code.code}</code> to the bot in a direct message. The code works until {new Date(code.expiresAt).toLocaleTimeString()}.</>}
+          </span>
+          <button type="button" className="channels-btn" onClick={claim === null ? reset : cancel}>
+            {claim === null ? 'Close' : 'Cancel'}
+          </button>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -577,6 +657,14 @@ export function ChannelsPanel() {
                     </div>
                   ) : null}
                 </div>
+                {platform !== 'webhook' ? (
+                  <OwnerField
+                    platform={platform}
+                    owner={snapshot?.owners?.[platform]}
+                    revision={snapshot}
+                    onError={(text) => showMessage('error', text)}
+                  />
+                ) : null}
               </div>
             </Section>
           )

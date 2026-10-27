@@ -81,3 +81,15 @@
 
 .navigation-rail-menu button:hover:not(:disabled) { background: rgba(var(--accent-rgb), 0.14); }
 .navigation-rail-menu button:disabled { opacity: 0.4; }
+
+/* A small dot, not a bar: something in Settings is waiting to be looked at. */
+.navigation-rail-notice-dot {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  pointer-events: none;
+}

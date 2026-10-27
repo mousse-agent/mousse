@@ -19,16 +19,44 @@ import { mirrorHash, tupleConfig, MIRROR_MARKER_KEY, type VendorMirror } from '.
 import { piRetiredOf } from '../harness/drivers/pi/retired'
 import type { ProviderAuthService } from './ProviderAuthService'
 
-/** What a profile stores: `providers.instances` and `providers.instancesSeedVersion`. */
+/**
+ * What a profile stores: `providers.instances`, `providers.instancesSeedVersion` and
+ * `providers.removedInstances` (the tombstones).
+ */
 export interface StoredProviderInstances {
   instances?: unknown
   seedVersion?: unknown
+  removed?: unknown
+}
+
+/** One write of the instance map: the entries, the seed version and the tombstones together. */
+export interface ProviderInstanceState {
+  instances: Record<string, unknown>
+  seedVersion: number
+  removed: string[]
 }
 
 /** Where a profile keeps its instance map. `read` throws when the stored data cannot be read. */
 export interface ProviderInstanceStore {
   read(): StoredProviderInstances
-  write(state: { instances: Record<string, unknown>; seedVersion: number }): void
+  write(state: ProviderInstanceState): void
+}
+
+/** The instance store over a profile's config `providers` section (`instances`, the seed version and the tombstones). */
+export function configInstanceStore(config: {
+  getProvidersSection(): { instances?: unknown; instancesSeedVersion?: unknown; removedInstances?: unknown }
+  updateProvidersSection(partial: { instances: Record<string, unknown>; instancesSeedVersion: number; removedInstances: string[] | undefined }): void
+}): ProviderInstanceStore {
+  return {
+    read: () => {
+      const section = config.getProvidersSection()
+      return { instances: section.instances, seedVersion: section.instancesSeedVersion, removed: section.removedInstances }
+    },
+    // One write: the entries and the tombstones never disagree on disk. An older build merges its
+    // own writes over this section and keeps `removedInstances` as it is.
+    write: ({ instances, seedVersion, removed }) =>
+      config.updateProvidersSection({ instances, instancesSeedVersion: seedVersion, removedInstances: removed.length ? removed : undefined })
+  }
 }
 
 /** What the provider RPCs list for a vendor driver, from that driver's provider service. */
@@ -53,6 +81,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
+/** The stored tombstones, read leniently: anything but a list of non-empty strings is ignored. */
+function removedIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return [...new Set(value.filter((id): id is string => typeof id === 'string' && id.length > 0))]
+}
+
 let builtinPiProviderIds: ReadonlySet<string> | undefined
 function builtinPiProviders(): ReadonlySet<string> {
   builtinPiProviderIds ??= new Set(builtinProviders().map((provider) => provider.id))
@@ -64,6 +98,11 @@ function builtinPiProviders(): ReadonlySet<string> {
  * one `pi:<provider>` per credentialed pi-ai provider), resolution of an instance id, and the
  * legacy `llmProvider` mapping used wherever an old selection still arrives. Without a store the
  * map lives in memory (tests, single-process tools).
+ *
+ * Removed instances are tombstoned (`removedInstances`): a tombstoned id is absent everywhere, even
+ * when the stored map still holds an entry for it (an older Mousse may re-seed one from the shared
+ * key). That entry is left on disk untouched; only an explicit add (`setEntry` with `revive`)
+ * writes a fresh entry and clears the tombstone, in one write.
  */
 export class ProviderInstanceService {
   /** Last state read from (or written to) the store; the working copy after a failed read. */
@@ -71,8 +110,6 @@ export class ProviderInstanceService {
   private readonly vendors = new Map<ProviderDriverKind, VendorProviderListing>()
   /** Per-instance listings (the harness gateway); replaces the one-listing-per-driver map. */
   private instanceListing?: (instanceId: string, entry: ProviderInstanceConfig) => VendorProviderListing | undefined
-  /** Applied to every picker listing: hidden models leave, custom models join. */
-  private modelView?: (option: LlmProviderOption & { instanceId: string }) => LlmProviderOption & { instanceId: string }
   private writeFailed = false
   private readError?: string
 
@@ -86,22 +123,18 @@ export class ProviderInstanceService {
     mirrorFor?: (instanceId: string) => VendorMirror | undefined
   } = {}) {}
 
-  /** Lists a vendor driver's provider in `configuredProviders()` / `llmProviders()`. */
+  /** Lists a vendor driver's provider in `configuredProviders()`. Transitional: deleted in 5a-2 with the old provider methods. */
   registerVendor(driver: Exclude<ProviderDriverKind, 'pi'>, listing: VendorProviderListing): this {
     this.vendors.set(driver, listing)
     return this
   }
 
   /**
-   * Lists every enabled vendor instance from its own runtime (several instances of one driver
-   * each get an entry), and passes picker listings through `view` (model prefs).
+   * Lists every enabled vendor instance from its own runtime in `configuredProviders()` (several
+   * instances of one driver each get an entry). Transitional: deleted in 5a-2.
    */
-  setListings(
-    listing: (instanceId: string, entry: ProviderInstanceConfig) => VendorProviderListing | undefined,
-    view?: (option: LlmProviderOption & { instanceId: string }) => LlmProviderOption & { instanceId: string }
-  ): this {
+  setListings(listing: (instanceId: string, entry: ProviderInstanceConfig) => VendorProviderListing | undefined): this {
     this.instanceListing = listing
-    this.modelView = view
     return this
   }
 
@@ -109,44 +142,77 @@ export class ProviderInstanceService {
    * The effective instance map. Seeds the profile's stored map with any instance it lacks and
    * persists only when something changed; a stored entry is never rewritten (except a superseded
    * seed, see `seedProviderInstances`). After a failed read nothing is written: the map comes from
-   * the last successful read, and the error is reported by `storeError()`.
+   * the last successful read, and the error is reported by `storeError()`. Removed instances are
+   * left out, whatever the stored map holds for them.
    */
   list(): ProviderInstanceMap {
     const { stored, readable } = this.readStored()
     const seeded = this.seed(stored)
     const changed = seeded.added.length > 0 || seeded.upgraded.length > 0 || stored.seedVersion !== seeded.seedVersion
-    if (changed && readable) this.writeStored({ instances: seeded.instances, seedVersion: seeded.seedVersion })
-    return readProviderInstances(seeded.instances)
+    if (changed && readable) this.writeStored({ instances: seeded.instances, seedVersion: seeded.seedVersion, removed: removedIds(stored.removed) })
+    const removed = removedIds(stored.removed)
+    const listed = readProviderInstances(seeded.instances)
+    for (const instanceId of removed) delete listed[instanceId]
+    return listed
+  }
+
+  /** Whether `instanceId` was removed from this profile (a tombstone); only an explicit add revives it. */
+  isRemoved(instanceId: string): boolean {
+    return removedIds(this.readStored().stored.removed).includes(instanceId)
   }
 
   /**
    * Stores one entry (an added instance, a device toggle, instance config). Fields of the stored
    * entry this version does not know are kept, so an older or newer build reads it unchanged.
    * Throws while the stored map cannot be read: nothing is written over it.
+   *
+   * A removed (tombstoned) instance takes no entry, except with `revive` (an explicit add): then a
+   * fresh entry replaces any stale one and the tombstone goes, in the same write.
    */
-  setEntry(instanceId: string, entry: ProviderInstanceConfig): void {
+  setEntry(instanceId: string, entry: ProviderInstanceConfig, options: { revive?: boolean } = {}): void {
     if (!instanceId || instanceId === '__proto__' || instanceId === 'constructor' || instanceId === 'prototype')
       throw new Error(`Invalid provider instance id "${instanceId}"`)
     const { stored, readable } = this.readStored()
     if (!readable) throw new Error(this.readError ?? 'The provider instances could not be read')
+    const removed = removedIds(stored.removed)
+    const tombstoned = removed.includes(instanceId)
+    if (tombstoned && !options.revive) throw providerInstanceUnknown(instanceId, `Provider instance "${instanceId}" was removed. Add it again in Settings → Providers.`)
     const seeded = this.seed(stored)
-    const previous = seeded.instances[instanceId]
+    // An explicit add writes a fresh entry: nothing of a stale one (an older build's re-seed) is kept.
+    const previous = options.revive ? undefined : seeded.instances[instanceId]
     const next: Record<string, unknown> = { ...(isRecord(previous) ? previous : {}), driver: entry.driver, enabled: entry.enabled }
     if (entry.config && Object.keys(entry.config).length) next.config = { ...entry.config }
     else delete next.config
-    this.writeStored({ instances: { ...seeded.instances, [instanceId]: next }, seedVersion: seeded.seedVersion })
-    if (this.writeFailed) throw new Error('Mousse could not save the provider instances')
+    this.writeExplicit({
+      instances: { ...seeded.instances, [instanceId]: next },
+      seedVersion: seeded.seedVersion,
+      removed: tombstoned ? removed.filter((id) => id !== instanceId) : removed
+    })
   }
 
-  /** Removes a stored entry. A vendor agent stays removed; a `pi:<provider>` entry returns while its provider is credentialed. */
+  /**
+   * Removes an entry and tombstones its id in the same write, so it stays removed: no seed brings
+   * it back (a credentialed `pi:<provider>` included) and nothing resolves it until it is added again.
+   */
   removeEntry(instanceId: string): void {
     const { stored, readable } = this.readStored()
     if (!readable) throw new Error(this.readError ?? 'The provider instances could not be read')
     const seeded = this.seed(stored)
-    if (!Object.prototype.hasOwnProperty.call(seeded.instances, instanceId)) return
+    const removed = removedIds(stored.removed)
     const { [instanceId]: _removed, ...rest } = seeded.instances
-    this.writeStored({ instances: rest, seedVersion: seeded.seedVersion })
-    if (this.writeFailed) throw new Error('Mousse could not save the provider instances')
+    this.writeExplicit({ instances: rest, seedVersion: seeded.seedVersion, removed: removed.includes(instanceId) ? removed : [...removed, instanceId] })
+  }
+
+  /**
+   * A change the caller asked for (an entry, a removal): when it cannot be saved it throws and the
+   * working copy stays as it was, so nothing looks changed that is not (unlike derivable seeds).
+   */
+  private writeExplicit(state: ProviderInstanceState): void {
+    const before = this.memory
+    this.writeStored(state)
+    if (!this.writeFailed) return
+    this.memory = before
+    throw new Error('Mousse could not save the provider instances')
   }
 
   /** Why the stored instance map could not be read, while that lasts. */
@@ -160,6 +226,8 @@ export class ProviderInstanceService {
    * credentials itself.
    */
   get(instanceId: string): ProviderInstanceConfig | undefined {
+    // A removed instance is unknown: neither a stored entry nor the implicit pi instance stands in.
+    if (this.isRemoved(instanceId)) return undefined
     const listed = this.list()[instanceId]
     if (listed) return listed
     const providerId = piProviderIdOf(instanceId)
@@ -217,24 +285,17 @@ export class ProviderInstanceService {
     }
   }
 
-  /** Signed-in providers for Settings: credentialed pi-ai providers, then each enabled vendor instance. */
+  /**
+   * Signed-in providers for Settings: credentialed pi-ai providers, then each enabled vendor
+   * instance; removed ones are left out. The model pickers list through `HarnessGateway.llmProviders`.
+   * Transitional: deleted in 5a-2 with the old provider methods.
+   */
   configuredProviders(): ConfiguredProvider[] {
     const instances = this.list()
     const pi = (this.options.providerAuth?.getConfiguredProviders?.() ?? [])
       .map((provider) => ({ ...provider, instanceId: piInstanceId(provider.id) }))
-      .filter((provider) => instances[provider.instanceId]?.enabled !== false)
+      .filter((provider) => instances[provider.instanceId]?.enabled !== false && !this.isRemoved(provider.instanceId))
     return [...pi, ...this.vendorEntries(instances, (listing) => listing.configuredProvider())]
-  }
-
-  /** Model catalogs for the pickers: credentialed pi-ai providers, then each enabled vendor instance. */
-  llmProviders(): LlmProviderOption[] {
-    const instances = this.list()
-    const pi = (this.options.providerAuth?.getConfiguredLlmProviders?.() ?? [])
-      .map((provider) => ({ ...provider, instanceId: piInstanceId(provider.id) }))
-      .filter((provider) => instances[provider.instanceId]?.enabled !== false)
-    const all = [...pi, ...this.vendorEntries(instances, (listing) => listing.llmProvider())]
-    const view = this.modelView
-    return view ? all.map((option) => view(option)) : all
   }
 
   /** One entry per vendor driver (v1 has one instance per driver), from its first enabled instance. */
@@ -265,18 +326,27 @@ export class ProviderInstanceService {
     return entries
   }
 
-  /** The stored map with its seeds; a vendor seed copies its vendor file's tuple and records the marker. */
+  /**
+   * The stored map with its seeds; a vendor seed copies its vendor file's tuple and records the
+   * marker. A removed instance is never seeded; a stored entry for it stays as it is on disk.
+   */
   private seed(stored: StoredProviderInstances): ReturnType<typeof seedProviderInstances> {
-    return seedProviderInstances(stored.instances, this.credentialedPiProviders(), stored.seedVersion, undefined, undefined, (instanceId) => {
+    const removed = new Set(removedIds(stored.removed))
+    const credentialed = this.credentialedPiProviders().filter((providerId) => !removed.has(piInstanceId(providerId)))
+    const seeded = seedProviderInstances(stored.instances, credentialed, stored.seedVersion, undefined, undefined, (instanceId) => {
       const mirror = this.options.mirrorFor?.(instanceId)
       const vendor = mirror?.read()
       // Unreadable: no marker, so the first start that reads it copies it (without overwriting).
       if (!mirror || !vendor || vendor === 'unreadable') return undefined
       return { ...tupleConfig(vendor, mirror.fields), [MIRROR_MARKER_KEY]: mirrorHash(vendor) }
     })
+    const added = seeded.added.filter((instanceId) => !removed.has(instanceId))
+    for (const instanceId of seeded.added) if (removed.has(instanceId)) delete seeded.instances[instanceId]
+    return { ...seeded, added }
   }
 
-  private isKnownPiProvider(providerId: string): boolean {
+  /** Whether `providerId` names a pi-ai provider: in the catalogue, credentialed, or retired by an update. */
+  isKnownPiProvider(providerId: string): boolean {
     const auth = this.options.providerAuth
     // A retired provider stays known after its sign-in and registration are gone, so an old
     // selection naming it follows its Move, or reads retired, never unknown.
@@ -317,7 +387,7 @@ export class ProviderInstanceService {
       this.readError = undefined
       // After a failed save, keep the seeds from memory so every read does not retry the write.
       if (this.writeFailed && isRecord(this.memory.instances))
-        return { stored: { instances: { ...this.memory.instances, ...(isRecord(stored.instances) ? stored.instances : {}) }, seedVersion: this.memory.seedVersion }, readable: true }
+        return { stored: { instances: { ...this.memory.instances, ...(isRecord(stored.instances) ? stored.instances : {}) }, seedVersion: this.memory.seedVersion, removed: this.memory.removed }, readable: true }
       this.memory = stored
       return { stored, readable: true }
     } catch (error) {
@@ -328,7 +398,7 @@ export class ProviderInstanceService {
     }
   }
 
-  private writeStored(state: { instances: Record<string, unknown>; seedVersion: number }): void {
+  private writeStored(state: ProviderInstanceState): void {
     this.memory = state
     if (!this.options.store) return
     try {

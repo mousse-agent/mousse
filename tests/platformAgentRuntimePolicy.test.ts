@@ -3,6 +3,7 @@ import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Context } from '@earendil-works/pi-ai'
 import { AgentExecutionService } from '../src/mms/agentDefinitions/AgentExecutionService'
+import { platformShellContained } from '../src/mms/harness/compatibility'
 import { createNativeAgentRuntime } from '../src/mms/agentDefinitions/nativeRuntime'
 import {
   createOutsideSecretLayout,
@@ -338,6 +339,7 @@ describe('native agent runtime policy', () => {
     snapshot.settings.script.executionMode = 'workspace'
     snapshot.settings.script.allowFilesystem = true
     grantTools(snapshot, ['write', 'bash'])
+    const asked: string[] = []
     const { pending } = runNative(snapshot, [
       providerResponse([
         { type: 'toolCall', id: 'ok-w', name: 'write', arguments: { path: 'inside.txt', content: 'from-write' } }
@@ -355,12 +357,15 @@ describe('native agent runtime policy', () => {
       providerResponse([{ type: 'text', text: 'wrote' }], 'stop')
     ], {
       projectPath: root,
-      host: { workspaceRoots: [root] }
+      // A person watches (Try Run, an agent chat): where the shell is not contained (#299), the
+      // command asks them first; where it is, it runs under the grants.
+      host: { workspaceRoots: [root], attended: true, approveToolRequest: async (request) => (asked.push(request.canonicalToolName), { status: 'approved', digest: request.argumentDigest }) }
     })
     const result = await pending
     expect(result.status).toBe('completed')
     expect(readFileSync(join(root, 'inside.txt'), 'utf8')).toBe('from-write')
     expect(readFileSync(join(root, 'from-shell.txt'), 'utf8')).toBe('from-shell')
+    expect(asked).toEqual(platformShellContained() ? [] : ['bash'])
   })
 
   it('denies, cancels, and rejects stale approvals before dispatch', async () => {

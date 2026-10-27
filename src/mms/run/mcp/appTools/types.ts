@@ -9,6 +9,7 @@ import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
 import type { DefinitionAuthority } from '../../../agentDefinitions/definitionGate'
 import type { BotAuthority } from '../../../../shared/bots/personal/authority'
 import type { BrowserExecutionBinding } from '../../../orchestrator/browser'
+import type { BrowserRuntimePort } from '../../../../shared/browser/runtime'
 import type { LlmToolEvent, StreamingLlmToolEvent } from '../../../harness/turnEvents'
 import type { ModeCeiling } from '../../types'
 import type { DelegationToolHost } from './delegation'
@@ -109,6 +110,11 @@ export interface AppToolTurn {
   actor: IntegrationActor
   /** The turn's trusted browser binding, with `vision` from the selected model. */
   browser?: BrowserExecutionBinding
+  /**
+   * The browser runtime the turn's browser tools run on, when its host supplies its own (an agent
+   * chat's shared browser); absent: the profile's (`AppToolHost.browserRuntime`).
+   */
+  browserRuntime?: BrowserRuntimePort
   /** Stages an applet for the response; absent when applets are off or the caller is a subagent. */
   onPublishApplet?: (source: unknown) => unknown
   enabledSkills: SkillDescriptor[]
@@ -155,6 +161,8 @@ export interface ToolCallContext {
   signal: AbortSignal
   /** Set by the registry's central check for `readsOthers` and `managesOthers` tools. */
   scope?: ToolScope
+  /** The caller's effective agent access level at this call: its grant narrowed by the profile's setting now. */
+  level?: AgentAccessLevel
   transport: 'mcp' | 'in_process'
   /** In-process calls only: the caller's timeline. */
   timeline?: ToolTimeline
@@ -194,6 +202,8 @@ export interface ToolListing {
   modeCeiling: ModeCeiling
   /** The caller's effective agent access level; absent is `lineage`, which hides tools that need more. */
   accessLevel?: AgentAccessLevel
+  /** The thread's role when it is a personal bot's thread (PR 6 §5): only bot threads list the bot tools. */
+  botRole?: 'activation' | 'context'
 }
 
 export interface MousseTool {

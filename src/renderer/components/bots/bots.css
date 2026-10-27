@@ -1,0 +1,47 @@
+.bots { display: flex; height: 100%; min-height: 0; min-width: 0; color: var(--text-primary); font-size: 13px; }
+.bots button, .bots input, .bots select, .bots textarea { font: inherit; }
+.bots__list { width: 240px; flex: 0 0 auto; border-right: 1px solid var(--border-color, #ffffff18); overflow: auto; padding: 12px 8px; }
+.bots__list ul { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.bots__list-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 6px; }
+.bots__list-head h2, .bots__detail-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.bots__row { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 8px; border: 0; border-radius: 8px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.bots__row:hover { background: var(--bg-tertiary, #ffffff0d); }
+.bots__row[aria-current="true"] { background: var(--bg-tertiary, #ffffff14); }
+.bots__row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bots__badge { min-width: 18px; padding: 0 5px; border-radius: 9px; background: var(--accent, #b5c9fa); color: var(--bg-primary, #111); font-size: 11px; font-weight: 600; text-align: center; }
+.bots__main { flex: 1; min-width: 0; overflow: auto; padding: 14px 18px; display: flex; flex-direction: column; gap: 14px; }
+.bots__muted { color: var(--text-secondary); font-size: 12px; }
+.bots__empty { margin-top: 24px; }
+.bots__error { color: var(--error-color, #e67e8c); font-size: 12px; margin: 0; }
+.bots__detail { display: flex; flex-direction: column; gap: 10px; }
+.bots__detail h3, .bots__inbox h3 { margin: 6px 0 0; font-size: 13px; font-weight: 600; }
+.bots__detail-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.bots__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.bots__role { margin: 0; white-space: pre-wrap; }
+.bots__notice, .bots__unknown { padding: 8px 10px; border-radius: 8px; background: var(--bg-tertiary, #ffffff0d); }
+.bots__notice p, .bots__unknown p { margin: 0 0 4px; }
+.bots__notice ul, .bots__unknown ul { margin: 0 0 6px; padding-left: 18px; }
+.bots__run { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.bots__run textarea { width: 100%; box-sizing: border-box; resize: vertical; }
+.bots__activity { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.bots__activation { padding: 10px 12px; border: 1px solid var(--border-color, #ffffff18); border-radius: 10px; display: flex; flex-direction: column; gap: 6px; }
+.bots__activation-head { display: flex; gap: 10px; align-items: baseline; min-width: 0; }
+.bots__activation-head .bots__muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bots__result { margin: 0; white-space: pre-wrap; max-height: 160px; overflow: auto; }
+.bots__inbox { display: flex; flex-direction: column; gap: 8px; }
+.bots__escalation { padding: 10px 12px; border-radius: 10px; background: var(--bg-tertiary, #ffffff0d); display: flex; flex-direction: column; gap: 4px; }
+.bots__escalation p { margin: 0; }
+.bots__more { display: inline-flex; align-items: center; gap: 4px; }
+.bots__more input { width: 64px; }
+.bots__dialog-backdrop { position: fixed; inset: 0; background: #0008; display: flex; align-items: center; justify-content: center; z-index: 50; }
+.bots__dialog { width: min(520px, calc(100vw - 48px)); max-height: calc(100vh - 80px); overflow: auto; padding: 18px 20px; border-radius: 12px; background: var(--bg-secondary, #1a1d24); border: 1px solid var(--border-color, #ffffff18); display: flex; flex-direction: column; gap: 8px; }
+.bots__dialog h2 { margin: 0; font-size: 15px; }
+.bots__dialog h3 { margin: 4px 0 0; font-size: 13px; }
+.bots__dialog ul { margin: 0; padding-left: 18px; }
+.bots--editor { flex-direction: column; overflow: auto; padding: 14px 18px; gap: 12px; }
+.bots__fields { display: flex; flex-direction: column; gap: 10px; max-width: 640px; }
+.bots__fields > label, .bots__fields fieldset > label:not(.bots__check) { display: flex; flex-direction: column; gap: 4px; }
+.bots__fields fieldset { border: 1px solid var(--border-color, #ffffff18); border-radius: 10px; padding: 8px 12px 10px; display: flex; flex-direction: column; gap: 6px; }
+.bots__fields legend { padding: 0 4px; color: var(--text-secondary); }
+.bots__check { display: flex; align-items: center; gap: 8px; }
+.bots__note { margin: 4px 0 0; color: var(--text-secondary); font-size: 12px; }

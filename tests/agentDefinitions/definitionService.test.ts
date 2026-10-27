@@ -25,8 +25,10 @@ import { APPROVAL_ONLY_INSTANCE } from '../fixtures/agent-platform/exactDefiniti
 import { createDefinitionEngine, DEFINITION_ENGINES, ENGINE_MODEL, FAKE_KEY, type DefinitionEngine } from '../fixtures/agent-platform/definitionEngines'
 import type { Harness } from '../../src/mms/harness/gateway'
 import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
+import { harnessAppError } from '../../src/shared/harness/types'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
+import type { BrowserRuntimePort } from '../../src/shared/browser/runtime'
 
 // PR 4 §6 / §16 `definitionService`, through the real AgentExecutionService, orchestrator, gateway
 // and run engine, on each runtime that holds definitions: the real legacy Pi engine (where they run
@@ -543,8 +545,8 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     defs.outputs.push(call('thread_read', { threadId: stranger.id }), say('done'))
     const result = await orch.runAgentDefinition(request(resolved, thread.id))
     expect(result.status).toBe('completed')
-    // The record carries the profile's grant…
-    expect(engine.listRuns(thread.id)[0]!.accessGrant).toBe('manage')
+    // The record carries `lineage`, a definition's level on every runtime, not the profile's…
+    expect(engine.listRuns(thread.id)[0]!.accessGrant).toBe('lineage')
     // …but the loop's in-process call to another thread still reaches nothing, as on master (its tools act at
     // `lineage`, and the loop has no tools that read other threads).
     const results = defs.captured.at(-1)!.messages.filter((message) => message.role === 'toolResult').map((message) => JSON.stringify(message.content))
@@ -626,6 +628,192 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     const resolved = resolver.resolve({ definitionId: definition.id, revision: definition.revision })
     const result = await orch.runAgentDefinition(request(resolved, store.createThread('deadline').id))
     expect(result).toMatchObject({ status: 'failed', error: { code: 'BUDGET_EXCEEDED', details: { limit: { kind: 'elapsed_ms', limit: 200 } } } })
+  })
+
+  it('a runtime that reports usage per request (Pi’s agent): the run’s usage is what it reported, a turn that reached a limit included', async () => {
+    harness.stop()
+    let limited = false
+    // Two requests' usage with their prices, then a reply (or a limit refusing the third request).
+    const reporting: ProviderAdapter = {
+      driver: 'codex',
+      capabilities: { steer: 'none', interrupt: true, rollback: 'none', fork: 'portable', events: 'rich', containment: 'strong', historyInjection: 'prompt', mcp: true, childPolicy: 'enforced' },
+      configured: () => true,
+      startTurn: async (input, sink) => {
+        sink.providerRef({ provider: 'p', instanceId: input.instanceId, model: input.model })
+        sink.usage({ input: 100, output: 20, cacheRead: 0, cacheWrite: 0, costUsd: 0.25 })
+        sink.usage({ input: 50, output: 10, cacheRead: 7, cacheWrite: 0, costUsd: 0.125 })
+        if (limited) {
+          // A reply streamed before the limit refused the next request.
+          sink.text({ phase: 'start', contentIndex: 0, content: 'partial ' } as never)
+          sink.text({ phase: 'delta', contentIndex: 0, content: 'answer' } as never)
+          throw harnessAppError({ code: 'budget_exhausted', message: 'The turn limit was reached.', limit: { kind: 'turns', limit: 2, actual: 2 } })
+        }
+        return { text: 'done', aborted: false, modelName: input.model, totalResponseTimeMs: 1, usage: { input: 150, output: 30, cacheRead: 7, cacheWrite: 0 }, contextSignature: 's', nativeMessages: [], providerRef: { provider: 'p' } }
+      },
+      interrupt: async () => 'not_active'
+    }
+    let stored: unknown = { reporting: { driver: 'codex', enabled: true } }
+    harness = testHarness({ drivers: [adapterDriver(reporting, { toolControl: 'exact', budgets: 'hard' })], instances: new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (state) => { stored = state.instances } } }), profileHome: home })
+    orch.setHarness(harness)
+    const definition = publish('mousse', 'reporting')
+    const resolved = resolver.resolve({ definitionId: definition.id, revision: definition.revision })
+    const completed = await orch.runAgentDefinition(request(resolved, store.createThread('usage').id))
+    expect(completed).toMatchObject({ status: 'completed', usage: { inputTokens: 150, outputTokens: 30, costUsd: 0.375 } })
+    limited = true
+    const stopped = await orch.runAgentDefinition(request(resolved, store.createThread('usage-limit').id))
+    // The limit ends the run as the loop's does: the reply so far, the limit, and the usage.
+    expect(stopped).toMatchObject({ status: 'failed', text: 'partial answer', error: { code: 'BUDGET_EXCEEDED', details: { limit: { kind: 'turns', limit: 2 } } }, usage: { inputTokens: 150, outputTokens: 30, costUsd: 0.375 } })
+  })
+
+  describe('a browser definition on an instance that runs definitions itself (Pi RPC)', () => {
+    const BROWSER_BUILTINS = ['read', 'write', 'ask_user', 'bash', 'thread_read', 'browser_open', 'browser_observe', 'browser_act', 'browser_screenshot']
+    /** A local browser stand-in: it records what reached it and never loads a page. */
+    function localBrowser(label: string) {
+      const dispatched: Array<{ label: string; name: string; args: unknown; actor: unknown; runId?: string }> = []
+      const runtime: BrowserRuntimePort = {
+        resolveTarget: () => ({ backend: 'managed-chromium' }),
+        dispatch: async (context, name, args) => {
+          dispatched.push({ label, name, args, actor: context.execution.actor, ...(context.execution.runId ? { runId: context.execution.runId } : {}) })
+          return { observationId: 'obs-1' }
+        }
+      }
+      return { runtime, dispatched }
+    }
+    /**
+     * A runtime with its own loop, standing in for Pi RPC: it is sent the turn's Mousse tools
+     * (`listForTurn`, as the Pi driver sends them) and calls them over the Mousse MCP registry, as
+     * Pi's extension does, under a credential bound to its run.
+     */
+    function mcpRuntime(calls: Array<{ name: string; args: Record<string, unknown> }>, seen: { tools?: string[]; results: Array<{ text: string; isError?: boolean }>; runId?: string; ran: string[] }, name: string): ProviderAdapter {
+      return {
+        driver: 'codex',
+        capabilities: { steer: 'none', interrupt: true, rollback: 'none', fork: 'portable', events: 'rich', containment: 'strong', historyInjection: 'prompt', mcp: true, childPolicy: 'enforced' },
+        configured: () => true,
+        startTurn: async (input, sink) => {
+          seen.ran.push(name)
+          seen.runId = input.runId
+          sink.providerRef({ provider: 'p', instanceId: input.instanceId, model: input.model })
+          const registry = orch.mcpToolRegistry()
+          seen.tools = registry.listForTurn(input.threadId, input.runId).map((tool) => tool.name)
+          for (const [index, call] of calls.entries()) {
+            seen.results.push(await registry.call(call.name, call.args, {
+              credential: { threadId: input.threadId, runId: input.runId, provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage', binding: 'rotate', current: () => true },
+              toolCallId: `call-${index}`,
+              signal: input.signal
+            }))
+          }
+          return { text: name, aborted: false, modelName: input.model, totalResponseTimeMs: 1, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextSignature: 's', nativeMessages: [], providerRef: { provider: 'p' } }
+        },
+        interrupt: async () => 'not_active'
+      }
+    }
+    function install(adapter: ProviderAdapter, loop: ProviderAdapter): void {
+      harness.stop()
+      // As the Pi driver declares on an RPC connection with evidence: the runtime for definitions,
+      // its loop (with the loop's caps) only for one that needs it.
+      const base = adapterDriver(adapter, { toolControl: 'exact', budgets: 'hard', runtime: { definitionAdapter: loop } })
+      const driver = { ...base, definitionCaps: (config: never, needs?: { loop?: boolean }) => ({ ...base.caps(config), ...(needs?.loop ? { definitionLimits: 'in_loop' as const } : {}) }) }
+      let stored: unknown = { browsing: { driver: 'codex', enabled: true } }
+      harness = testHarness({ drivers: [driver], instances: new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (state) => { stored = state.instances } } }), profileHome: home })
+      orch.setHarness(harness)
+    }
+    function browsing(allowlist: string[], mutate: (settings: ReturnType<typeof defaultAgentSettings>) => void = () => {}): ResolvedAgentDefinition {
+      const lookup = new StaticAgentIntegrationLookup({ builtinToolIds: BROWSER_BUILTINS })
+      const agent = defaultAgentSettings({ name: 'Browser', slug: `browser-${allowlist.join('-').replace(/\W/g, '')}` })
+      agent.primaryModel.ref = { providerId: PROVIDER, modelId: MODEL, instanceId: 'browsing' }
+      agent.tools = { mode: 'explicit', allowlist }
+      agent.browser.mode = 'structured'
+      mutate(agent)
+      const draft = registry.createDraft({ runtimeKind: 'mousse', settings: agent, systemPrompt: 'DEFINITION_SYSTEM_PROMPT' })
+      const published = registry.publish(draft.id, draft.draftHash, { integrationLookup: lookup })
+      const entry = { ref: { providerId: PROVIDER, modelId: MODEL, instanceId: 'browsing' }, available: true, efforts: [], speeds: [], contexts: [], capabilities: ['tools'], unavailableReasons: [] }
+      return new AgentResolver({ registry, integrationLookup: lookup, modelLookup: new StaticAgentModelLookup([entry] as never) }).resolve({ definitionId: draft.id, revision: published.revision })
+    }
+    const noLoop = mcpRuntime([], { results: [], ran: [] }, 'loop')
+
+    it('runs on the runtime, not the loop; its granted browser tools run over the Mousse MCP server on the host’s browser, with a ledger row', async () => {
+      const seen = { results: [] as Array<{ text: string; isError?: boolean }>, ran: [] as string[], tools: undefined as string[] | undefined, runId: undefined as string | undefined }
+      const loopSeen = { results: [], ran: [] as string[] }
+      install(mcpRuntime([
+        { name: 'browser_open', args: { url: 'http://127.0.0.1:9/local-page' } },
+        { name: 'browser_act', args: { sessionId: 's', tabId: 't', generation: 1, observationId: 'o', controlLeaseId: 'l', action: { type: 'reload' } } }
+      ], seen, 'runtime'), mcpRuntime([], loopSeen, 'loop'))
+      const profile = localBrowser('profile')
+      const host = localBrowser('host')
+      orch.setBrowserRuntime(profile.runtime)
+      // The profile turned every Mousse tool off in its settings: a definition's grants decide its
+      // tools, as on the loop.
+      settings.integrations.tools.enabled = false
+      const resolved = browsing(['read', 'browser_open', 'browser_observe', 'browser_screenshot'])
+      const result = await orch.runAgentDefinition(request(resolved, store.createThread('browsing').id, { runId: 'definition-run', host: { workspaceRoots: [work], browserRuntime: host.runtime } as never }))
+      expect(result).toMatchObject({ status: 'completed', text: 'runtime' })
+      expect(seen.ran).toEqual(['runtime'])
+      expect(loopSeen.ran).toEqual([])
+      // Sent the browser tools the turn's binding offers, none outside the grants.
+      expect(seen.tools).toEqual(expect.arrayContaining(['browser_open', 'browser_observe']))
+      expect(seen.tools).not.toContain('browser_act')
+      // The granted call ran on the host's browser (an agent chat's shared one, say), as the
+      // definition, under the definition run's binding; the ungranted one never reached a browser.
+      expect(seen.results[0]).toMatchObject({ isError: false })
+      expect(seen.results[1]).toMatchObject({ isError: true, text: expect.stringContaining('not granted') })
+      expect(host.dispatched).toEqual([{ label: 'host', name: 'browser_open', args: { url: 'http://127.0.0.1:9/local-page' }, actor: { kind: 'agent', definitionId: resolved.definitionId, definitionRevision: resolved.revision }, runId: 'definition-run' }])
+      expect(profile.dispatched).toEqual([])
+      // The call is in the run's tool ledger.
+      expect(engine.tools.listForRun(seen.runId!).map((row) => [row.tool, row.status])).toEqual([['browser_open', 'committed']])
+    })
+
+    it('an unattended run is held as on the loop: an action its approval policy denies never reaches the browser', async () => {
+      const seen = { results: [] as Array<{ text: string; isError?: boolean }>, ran: [] as string[] }
+      install(mcpRuntime([
+        { name: 'browser_act', args: { sessionId: 's', tabId: 't', generation: 1, observationId: 'o', controlLeaseId: 'l', action: { type: 'reload' } } },
+        { name: 'browser_observe', args: { sessionId: 's' } }
+      ], seen, 'runtime'), noLoop)
+      const browser = localBrowser('profile')
+      orch.setBrowserRuntime(browser.runtime)
+      const resolved = browsing(['browser_act', 'browser_observe'], (agent) => { agent.approval.policy = 'unattended_deny' })
+      expect(await orch.runAgentDefinition(request(resolved, store.createThread('scheduled').id, { source: 'schedule', host: { workspaceRoots: [work], browserRuntime: browser.runtime } as never }))).toMatchObject({ status: 'completed' })
+      expect(seen.results[0]).toMatchObject({ isError: true, text: expect.stringContaining('/settings/approval/policy') })
+      // A read is not refused by that policy, on the loop or here.
+      expect(seen.results[1]).toMatchObject({ isError: false })
+      expect(browser.dispatched.map((call) => call.name)).toEqual(['browser_observe'])
+    })
+
+    it('without a browser runtime it fails before the turn, as on the loop', async () => {
+      const seen = { results: [] as Array<{ text: string; isError?: boolean }>, ran: [] as string[] }
+      install(mcpRuntime([], seen, 'runtime'), noLoop)
+      const resolved = browsing(['browser_open'])
+      const host = localBrowser('host')
+      const result = await orch.runAgentDefinition(request(resolved, store.createThread('unbound').id, { host: { workspaceRoots: [work], browserRuntime: host.runtime } as never }))
+      expect(result).toMatchObject({ status: 'failed', error: { message: expect.stringContaining('Browser runtime is not bound') } })
+      expect(seen.ran).toEqual([])
+    })
+  })
+
+  it('a definition whose spend limit only the loop can hold runs on the loop instead of being refused', async () => {
+    harness.stop()
+    const ran: string[] = []
+    const adapterNamed = (name: string): ProviderAdapter => ({
+      driver: 'codex',
+      capabilities: { steer: 'none', interrupt: true, rollback: 'none', fork: 'portable', events: 'rich', containment: 'strong', historyInjection: 'prompt', mcp: true, childPolicy: 'enforced' },
+      configured: () => true,
+      startTurn: async (input, sink) => {
+        ran.push(name)
+        sink.providerRef({ provider: 'p', instanceId: input.instanceId, model: input.model })
+        return { text: name, aborted: false, modelName: input.model, totalResponseTimeMs: 1, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextSignature: 's', nativeMessages: [], providerRef: { provider: 'p' } }
+      },
+      interrupt: async () => 'not_active'
+    })
+    // A runtime that holds counts but cannot reserve spend for this model (an unpriced one), with the loop beside it.
+    const base = adapterDriver(adapterNamed('runtime'), { toolControl: 'exact', budgets: 'hard', spendLimits: 'unsupported', runtime: { definitionAdapter: adapterNamed('loop') } })
+    const driver = { ...base, definitionCaps: (config: never, needs?: { loop?: boolean }) => ({ ...base.caps(config), ...(needs?.loop ? { definitionLimits: 'in_loop' as const } : {}) }) }
+    let stored: unknown = { spend: { driver: 'codex', enabled: true }, spend2: { driver: 'codex', enabled: true } }
+    harness = testHarness({ drivers: [driver], instances: new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (state) => { stored = state.instances } } }), profileHome: home })
+    orch.setHarness(harness)
+    const plain = resolver.resolve((({ id, revision }) => ({ definitionId: id, revision }))(publish('mousse', 'spend')))
+    expect(await orch.runAgentDefinition(request(plain, store.createThread('counts only').id))).toMatchObject({ status: 'completed', text: 'runtime' })
+    const limited = resolver.resolve((({ id, revision }) => ({ definitionId: id, revision }))(publish('mousse', 'spend2', (settings) => { settings.limits.maxCostUsd = 1 })))
+    expect(await orch.runAgentDefinition(request(limited, store.createThread('cost limited').id))).toMatchObject({ status: 'completed', text: 'loop' })
+    expect(ran).toEqual(['runtime', 'loop'])
   })
 
   it('an owned lease that another holds fails the turn as busy, and never queues it', async () => {

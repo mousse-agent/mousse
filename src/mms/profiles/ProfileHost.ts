@@ -271,7 +271,8 @@ export class ProfileHost {
       profileId: record.id,
       ownedRoots: [root],
       activeTurns: live ? countActiveTurns(live) : 0,
-      ownedActivity: live?.getOwnedActivity() ?? {},
+      // Unfinished bot activations (running, waiting, paused, queued) end with the profile.
+      ownedActivity: { ...(live?.getOwnedActivity() ?? {}), ...(live?.personalBots ? { bots: live.personalBots.ownedActivity() } : {}) },
       scheduledJobs: live?.scheduled.listJobs().filter((job) => job.enabled).length ?? 0,
       channelsEnabled: Boolean(
         live &&

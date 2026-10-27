@@ -4,6 +4,7 @@ import { classifyGhFailure } from '../src/mms/git/ghRunner'
 import {
   classifyPullRequestFailure,
   GitHubCodeHost,
+  LINE_COMMENT_JQ,
   parsePullRequestJson,
   parsePullRequestList,
   parsePushUrls,
@@ -17,6 +18,7 @@ import {
 } from '../src/mms/git/GitHubCodeHost'
 import { createGhFallbackRunner, type ExecutableRunner } from '../src/mms/git/GitHubService'
 import { parsePullRequestReference, pullRequestIdentityKey, pullRequestReferenceMismatch } from '../src/shared/pullRequests'
+import { FakeGh, ghFailure, stamp } from './fakeGh'
 
 const enoent = () => Object.assign(new Error('spawn gh ENOENT'), { code: 'ENOENT' })
 const failure = (stderr: string) => Object.assign(new Error('exit 1'), { stderr })
@@ -990,5 +992,128 @@ describe('remoteForRepository with push URLs', () => {
     )
     expect(await ask(output)).toBe('mirror')
     expect(await new GitHubCodeHost(runnerFor(output)).remoteForRepository('/repo', base)).toBe('origin')
+  })
+})
+
+describe('line comment reads for a watch', () => {
+  const T0 = Date.parse('2026-10-12T00:00:00Z')
+  const pr = { host: 'github.com', nameWithOwner: 'acme/app', number: 7 }
+  const comment = (id: number, createdSeconds: number, updatedSeconds = createdSeconds) => ({
+    id,
+    createdAt: stamp(T0 + createdSeconds * 1000),
+    updatedAt: stamp(T0 + updatedSeconds * 1000),
+    user: 'maria',
+    association: 'COLLABORATOR',
+    body: `comment ${id}`
+  })
+  const many = (count: number) => Array.from({ length: count }, (_, index) => comment(index + 1, index + 1))
+
+  it('asks for comments updated since the cursor, oldest update first, from the cursor page, projected, on the pull request host', async () => {
+    const gh = new FakeGh()
+    gh.host = 'ghe.example.com'
+    gh.lines = many(3)
+    const read = await new GitHubCodeHost(gh.runner).listLineCommentsSince('/repo', { ...pr, host: 'ghe.example.com' }, { since: '2026-10-12T00:00:01Z', page: 1 })
+    expect(gh.linePages()).toEqual([
+      ['api', '--hostname', 'ghe.example.com', 'repos/acme/app/pulls/7/comments?sort=updated&direction=asc&since=2026-10-12T00%3A00%3A01Z&per_page=100&page=1', '--jq', LINE_COMMENT_JQ]
+    ])
+    expect(read.comments.map((item) => item.id)).toEqual(['1', '2', '3'])
+    expect(read).toMatchObject({ drained: true, nextPage: 1, newestUpdatedAt: stamp(T0 + 3000) })
+  })
+
+  it('continues from a given page and says it is drained on a short page', async () => {
+    const gh = new FakeGh()
+    gh.lines = many(250)
+    const host = new GitHubCodeHost(gh.runner)
+    const read = await host.listLineCommentsSince('/repo', pr, { since: '2026-10-11T23:59:59Z', page: 3 })
+    expect(gh.linePages().map((args) => /&page=(\d+)/.exec(args[3])![1])).toEqual(['3'])
+    expect(read.comments).toHaveLength(50)
+    expect(read.drained).toBe(true)
+  })
+
+  it('stops after the page limit with the next page to read, and not drained', async () => {
+    const gh = new FakeGh()
+    gh.lines = many(650)
+    const host = new GitHubCodeHost(gh.runner)
+    const first = await host.listLineCommentsSince('/repo', pr, { since: '2026-10-11T23:59:59Z', page: 1 })
+    expect(first.comments).toHaveLength(500)
+    expect(first).toMatchObject({ drained: false, nextPage: 6 })
+    expect(gh.linePages()).toHaveLength(5)
+    const rest = await host.listLineCommentsSince('/repo', pr, { since: '2026-10-11T23:59:59Z', page: first.nextPage })
+    expect(rest.comments).toHaveLength(150)
+    expect(rest).toMatchObject({ drained: true })
+    // A smaller bound reads fewer pages.
+    gh.calls.length = 0
+    expect((await host.listLineCommentsSince('/repo', pr, { since: '2026-10-11T23:59:59Z', page: 1 }, 2)).nextPage).toBe(3)
+    expect(gh.linePages()).toHaveLength(2)
+  })
+
+  it('treats a page of exactly 100 as not drained and reads on', async () => {
+    const gh = new FakeGh()
+    gh.lines = many(100)
+    const read = await new GitHubCodeHost(gh.runner).listLineCommentsSince('/repo', pr, { since: '2026-10-11T23:59:59Z', page: 1 }, 1)
+    expect(read).toMatchObject({ drained: false, nextPage: 2 })
+  })
+
+  it('reads in creation order, newest first, and ends at the first comment older than the cutoff', async () => {
+    const gh = new FakeGh()
+    // 150 created after the cutoff, then 60 created before it and edited since (they sort after every newer one).
+    gh.lines = [...many(150), ...Array.from({ length: 60 }, (_, index) => comment(1000 + index, -86_400 + index, 200 + index))]
+    const host = new GitHubCodeHost(gh.runner)
+    const read = await host.listLineCommentsCreatedSince('/repo', pr, stamp(T0 - 1000), 1)
+    expect(gh.linePages()[0][3]).toBe('repos/acme/app/pulls/7/comments?sort=created&direction=desc&since=2026-10-11T23%3A59%3A59Z&per_page=100&page=1')
+    expect(gh.linePages()[0].at(-1)).toBe(LINE_COMMENT_JQ)
+    // Page 1 is full; page 2 holds the last 50 new ones and the 60 edited old ones, so the read ends there.
+    expect(gh.linePages()).toHaveLength(2)
+    expect(read.drained).toBe(true)
+    expect(read.comments.filter((item) => Date.parse(item.createdAt) >= T0)).toHaveLength(150)
+  })
+
+  it('ends a creation-ordered read on a short page, and carries on from the page asked for', async () => {
+    const gh = new FakeGh()
+    gh.lines = many(30)
+    const host = new GitHubCodeHost(gh.runner)
+    expect(await host.listLineCommentsCreatedSince('/repo', pr, stamp(T0 - 1000), 1)).toMatchObject({ drained: true })
+    gh.lines = many(300)
+    gh.calls.length = 0
+    const part = await host.listLineCommentsCreatedSince('/repo', pr, stamp(T0 - 1000), 2, 1)
+    expect(part).toMatchObject({ drained: false, nextPage: 3 })
+    expect(gh.linePages()[0][3]).toContain('page=2')
+  })
+
+  it('refuses a malformed timestamp or page and reports failures by kind', async () => {
+    const gh = new FakeGh()
+    const host = new GitHubCodeHost(gh.runner)
+    await expect(host.listLineCommentsSince('/repo', pr, { since: 'yesterday', page: 1 })).rejects.toThrow('Unsupported timestamp')
+    await expect(host.listLineCommentsSince('/repo', pr, { since: '2026-10-12T00:00:00Z', page: 0 })).rejects.toThrow('Unsupported page')
+    await expect(host.listLineCommentsCreatedSince('/repo', pr, '2026-10-12T00:00:00Z&per_page=1', 1)).rejects.toThrow('Unsupported timestamp')
+    gh.fail = (args) => (args[0] === 'api' ? ghFailure('API rate limit exceeded') : null)
+    await expect(host.listLineCommentsSince('/repo', pr, { since: '2026-10-12T00:00:00Z', page: 1 })).rejects.toMatchObject({ kind: 'rate-limited' })
+    gh.fail = (args) => (args[0] === 'api' ? ghFailure('HTTP 404: Not Found') : null)
+    await expect(host.listLineCommentsSince('/repo', pr, { since: '2026-10-12T00:00:00Z', page: 1 })).rejects.toMatchObject({ kind: 'not-found' })
+  })
+
+  it('reads a pull request without its line comments as its own cache entry, and with them as before', async () => {
+    const gh = new FakeGh()
+    gh.lines = many(3)
+    const host = new GitHubCodeHost(gh.runner)
+    const plain = await host.getPullRequestDetail('/repo', 7, { lineComments: false })
+    expect(plain.comments).toEqual([])
+    expect(gh.linePages()).toHaveLength(0)
+    expect(gh.prViews()).toBe(1)
+    await host.getPullRequestDetail('/repo', 7, { lineComments: false })
+    expect(gh.prViews()).toBe(1)
+    const full = await host.getPullRequestDetail('/repo', 7)
+    expect(full.comments).toHaveLength(3)
+    expect(gh.prViews()).toBe(2)
+    expect(gh.linePages()).toHaveLength(1)
+  })
+
+  it('does not cache: every read asks the host', async () => {
+    const gh = new FakeGh()
+    gh.lines = many(2)
+    const host = new GitHubCodeHost(gh.runner)
+    await host.listLineCommentsSince('/repo', pr, { since: '2026-10-11T23:59:59Z', page: 1 })
+    await host.listLineCommentsSince('/repo', pr, { since: '2026-10-11T23:59:59Z', page: 1 })
+    expect(gh.linePages()).toHaveLength(2)
   })
 })

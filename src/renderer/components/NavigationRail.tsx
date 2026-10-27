@@ -4,6 +4,7 @@ import type { MainView } from '../../shared/types'
 import { useActiveProjectPath } from '../hooks/useActiveProjectPath'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { openSurface } from '../lib/surfaces'
+import { refreshStorageReview, useStorageReviewPending } from '../lib/storageReview'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useAppStore } from '../stores/appStore'
 import { ThreadSearchDialog } from './ThreadSearchDialog'
@@ -99,12 +100,15 @@ export function NavigationRail({ onMouseEnter, onMouseLeave }: NavigationRailPro
     setMainAreaOpen(false)
   }
   const overlayOpen = scheduledOpen || channelsOpen || searchOpen
+  const reviewPending = useStorageReviewPending()
+  useEffect(() => { void refreshStorageReview() }, [])
   const shortcut = (label: string, Icon: LucideIcon, active: boolean, onClick: () => void, disabled = false) => (
     <button type="button" className={`navigation-rail-button${active ? ' active' : ''}`}
-      aria-label={label} title={label} aria-current={active ? 'page' : undefined}
+      aria-label={label} title={label === 'Settings' && reviewPending ? 'Settings · new cleanup rules to review in Storage' : label} aria-current={active ? 'page' : undefined}
       onClick={onClick} disabled={disabled}>
       <Icon size={18} strokeWidth={1.8} aria-hidden="true" />
       {label === 'Home' && active && <span className="navigation-rail-active-dot" aria-hidden="true" />}
+      {label === 'Settings' && reviewPending && <span className="navigation-rail-notice-dot" data-testid="settings-review-dot" aria-hidden="true" />}
     </button>
   )
 

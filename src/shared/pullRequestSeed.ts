@@ -10,13 +10,13 @@ export const SEED_SNIPPET_CHARS = 200
 export const SEED_MAX_BYTES = 16 * 1024
 const SEED_DESCRIPTION_CHARS = 4_000
 
-const QUOTE_MARK = 'Quoted from GitHub:'
+export const QUOTE_MARK = 'Quoted from GitHub:'
 const TRUNCATION_NOTE = '[The rest was cut to keep this message short; read the pull request for it.]'
 
 /** Everything but ordinary characters becomes one space: no line break, separator or control character survives. */
 const NOT_PLAIN = /[\s\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g
 
-function flatten(text: string, limit: number): string {
+export function flatten(text: string, limit: number): string {
   const flat = stripHtmlComments(text).replace(NOT_PLAIN, ' ').trim()
   return flat.length > limit ? `${flat.slice(0, limit - 1).trimEnd()}…` : flat
 }
@@ -64,6 +64,11 @@ function selection(detail: PullRequestDetail): { reviews: PullRequestReview[]; l
 
 const TRUSTED_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR'])
 
+/** Whether the host calls the author an owner, member or collaborator of the repository: the only people whose words may start an agent turn. */
+export function isTrustedAssociation(association: string): boolean {
+  return TRUSTED_ASSOCIATIONS.has(association.toUpperCase())
+}
+
 /**
  * Whether everyone whose words are in the seed is an owner, member or collaborator of the repository, the same rule
  * that decides who may wake an agent. Only then may a client send the seed as a turn without a person reading it.
@@ -73,7 +78,7 @@ export function pullRequestSeedTrust(detail: PullRequestDetail): { trusted: bool
   const chosen = selection(detail)
   const authors = new Map<string, string>([[detail.author, detail.authorAssociation]])
   for (const item of [...chosen.reviews, ...chosen.lineComments, ...chosen.conversation]) authors.set(item.author, item.authorAssociation)
-  const untrusted = [...authors].filter(([, association]) => !TRUSTED_ASSOCIATIONS.has(association.toUpperCase())).map(([author]) => author)
+  const untrusted = [...authors].filter(([, association]) => !isTrustedAssociation(association)).map(([author]) => author)
   return { trusted: untrusted.length === 0, untrusted }
 }
 
@@ -82,7 +87,7 @@ function section(title: string, lines: readonly string[]): string[] {
 }
 
 /** `text` cut to at most `limit` bytes of UTF-8 without splitting a character. */
-function clipBytes(text: string, limit: number): string {
+export function clipBytes(text: string, limit: number): string {
   const encoder = new TextEncoder()
   if (encoder.encode(text).length <= limit) return text
   let low = 0

@@ -1,7 +1,9 @@
 import { ProfileDatabase, type Migration, type ProfileDatabaseFault } from '../../run/db/ProfileDatabase'
-import type { BotActivationStatus, BotManifest } from '../../../shared/bots/personal/definition'
+import type { BotActivationStatus, BotActivationTrigger, BotManifest } from '../../../shared/bots/personal/definition'
+import { canonicalManifest } from '../../../shared/bots/personal/manifest'
 import type { ActivationLimits } from './scopes'
 import type { BotThreadRole } from '../../../shared/bots/personal/authority'
+import type { BotEscalationStatus, BotPermissionRequest, BotWallKind } from '../../../shared/bots/personal/escalation'
 
 /**
  * `<profileHome>/bots/bots.db` (PR 6 §4): personal bots' grants, threads, activations, dispatches
@@ -117,6 +119,64 @@ CREATE TABLE bot_unknown_calls(
   PRIMARY KEY(activation_id, invocation_id)
 ) STRICT;
 `
+  },
+  {
+    // 6c-2: walls and their answers, the overlays "Allow this time" adds to one activation, and the
+    // generation of each context thread ("Reset context" starts a new one).
+    version: 2,
+    sql: `
+CREATE TABLE bot_escalations(
+  id TEXT PRIMARY KEY,
+  activation_id TEXT NOT NULL,
+  dispatch_n INTEGER NOT NULL,
+  tool_call_id TEXT,
+  kind TEXT NOT NULL CHECK(kind IN ('escalate','gate','budget')),
+  permission_json TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('open','allowed_bot','allowed_once','denied','expired','cancelled')),
+  amount REAL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  answered_at TEXT,
+  applied_at TEXT
+) STRICT;
+CREATE INDEX bot_escalations_by_activation ON bot_escalations(activation_id, status);
+CREATE TABLE bot_overlays(
+  activation_id TEXT NOT NULL,
+  escalation_id TEXT NOT NULL,
+  permission_json TEXT NOT NULL,
+  amount REAL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(activation_id, escalation_id)
+) STRICT;
+ALTER TABLE bot_dispatches ADD COLUMN send_json TEXT;
+ALTER TABLE bot_registry ADD COLUMN cleaned_at TEXT;
+-- Bots deleted before this version kept their threads on purpose: their cleanup counts as done.
+UPDATE bot_registry SET cleaned_at = deleted_at WHERE deleted_at IS NOT NULL;
+CREATE TABLE bot_contexts(
+  bot_id TEXT NOT NULL,
+  key TEXT NOT NULL,
+  gen INTEGER NOT NULL,
+  PRIMARY KEY(bot_id, key)
+) STRICT;
+`
+  },
+  {
+    // 6d: when each schedule of a bot runs next (the schedule as it was read, so an edit restarts
+    // it), and the last state a channel activation told its chat about (each state is posted once).
+    version: 3,
+    sql: `
+CREATE TABLE bot_schedule_state(
+  bot_id TEXT NOT NULL,
+  schedule_id TEXT NOT NULL,
+  spec_json TEXT NOT NULL,
+  next_run_at TEXT,
+  last_skip_at TEXT,
+  last_skip_reason TEXT,
+  PRIMARY KEY(bot_id, schedule_id)
+) STRICT;
+ALTER TABLE bot_activations ADD COLUMN reply_status TEXT;
+`
   }
 ]
 
@@ -140,7 +200,7 @@ export interface BotActivationRow {
   botId: string
   revision: string
   grantDigest: string
-  trigger: { kind: 'manual'; input: string }
+  trigger: BotActivationTrigger
   idempotencyKey: string
   status: BotActivationStatus
   threadId: string | null
@@ -170,6 +230,42 @@ export interface BotDispatchRow {
   endedAt: string | null
   outcome: string | null
   settledBy: 'run' | 'startup' | null
+  /** How a continuation is sent (the run it continues, the owner's acknowledgement), so a resend matches it. */
+  send: { continuationOfRunId?: string; acknowledgeUncertain?: boolean }
+}
+
+export interface BotEscalationRow {
+  id: string
+  activationId: string
+  dispatchN: number
+  toolCallId: string | null
+  kind: BotWallKind
+  permission: BotPermissionRequest
+  reason: string
+  status: BotEscalationStatus
+  amount: number | null
+  createdAt: string
+  expiresAt: string
+  answeredAt: string | null
+  appliedAt: string | null
+}
+
+function escalationOf(row: Row): BotEscalationRow {
+  return {
+    id: row.id as string,
+    activationId: row.activation_id as string,
+    dispatchN: num(row.dispatch_n)!,
+    toolCallId: str(row.tool_call_id),
+    kind: row.kind as BotWallKind,
+    permission: JSON.parse(row.permission_json as string) as BotPermissionRequest,
+    reason: row.reason as string,
+    status: row.status as BotEscalationStatus,
+    amount: num(row.amount),
+    createdAt: row.created_at as string,
+    expiresAt: row.expires_at as string,
+    answeredAt: str(row.answered_at),
+    appliedAt: str(row.applied_at)
+  }
 }
 
 export interface BotCountersRow {
@@ -223,7 +319,8 @@ function dispatchOf(row: Row): BotDispatchRow {
     exitAt: num(row.exit_at),
     endedAt: str(row.ended_at),
     outcome: str(row.outcome),
-    settledBy: str(row.settled_by) as BotDispatchRow['settledBy']
+    settledBy: str(row.settled_by) as BotDispatchRow['settledBy'],
+    send: typeof row.send_json === 'string' ? (JSON.parse(row.send_json) as BotDispatchRow['send']) : {}
   }
 }
 
@@ -274,6 +371,16 @@ export class BotStore {
     return row ? { botId: row.bot_id as string, revision: str(row.revision), homeThreadId: str(row.home_thread_id), createdAt: row.created_at as string, deletedAt: str(row.deleted_at) } : undefined
   }
 
+  /** Deleted bots whose cleanup is not done yet: it is retried until their home thread left. */
+  deletedRegistry(): BotRegistryRow[] {
+    return this.all('SELECT bot_id FROM bot_registry WHERE deleted_at IS NOT NULL AND cleaned_at IS NULL ORDER BY deleted_at, bot_id').map((row) => this.registry(row.bot_id as string)!)
+  }
+
+  /** A deleted bot's cleanup is done: a home thread the owner restores later is left alone. */
+  markCleaned(botId: string): void {
+    this.run('UPDATE bot_registry SET cleaned_at = ? WHERE bot_id = ? AND deleted_at IS NOT NULL AND cleaned_at IS NULL', this.now(), botId)
+  }
+
   listRegistry(): BotRegistryRow[] {
     return this.all('SELECT bot_id FROM bot_registry WHERE deleted_at IS NULL ORDER BY created_at, bot_id').map((row) => this.registry(row.bot_id as string)!)
   }
@@ -302,8 +409,10 @@ export class BotStore {
     return row ? { botId, digest: row.digest as string, manifest: JSON.parse(row.manifest_json as string) as BotManifest, approvedAt: row.approved_at as string } : undefined
   }
 
-  /** Records an approval; it replaces the earlier grant, if any. */
-  approve(botId: string, digest: string, manifest: BotManifest): BotGrantRow {
+  /** Records an approval, in canonical form; it replaces the earlier grant, if any. */
+  approve(botId: string, digest: string, given: BotManifest): BotGrantRow {
+    // One form for what is granted: what approval showed is exactly what later answers build on.
+    const manifest = canonicalManifest(given)
     return this.db.transaction(() => {
       const at = this.now()
       this.run('UPDATE bot_grants SET revoked_at = ? WHERE bot_id = ? AND revoked_at IS NULL', at, botId)
@@ -420,11 +529,22 @@ export class BotStore {
     return this.all('SELECT * FROM bot_dispatches WHERE ended_at IS NULL ORDER BY activation_id, n').map(dispatchOf)
   }
 
-  insertDispatch(row: Pick<BotDispatchRow, 'activationId' | 'n' | 'kind' | 'clientRequestId' | 'threadId' | 'prompt' | 'policyDigest'>): void {
+  insertDispatch(row: Pick<BotDispatchRow, 'activationId' | 'n' | 'kind' | 'clientRequestId' | 'threadId' | 'prompt' | 'policyDigest'> & { mainN?: number; send?: BotDispatchRow['send'] }): void {
     this.run(
-      'INSERT INTO bot_dispatches(activation_id, n, kind, client_request_id, thread_id, prompt_json, policy_digest) VALUES(?, ?, ?, ?, ?, ?, ?)',
-      row.activationId, row.n, row.kind, row.clientRequestId, row.threadId, JSON.stringify(row.prompt), row.policyDigest
+      'INSERT INTO bot_dispatches(activation_id, n, kind, main_n, client_request_id, thread_id, prompt_json, policy_digest, send_json) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      row.activationId, row.n, row.kind, row.mainN ?? null, row.clientRequestId, row.threadId, JSON.stringify(row.prompt), row.policyDigest, row.send && Object.keys(row.send).length ? JSON.stringify(row.send) : null
     )
+  }
+
+  /** The next dispatch number of an activation (main and consult dispatches share one sequence). */
+  nextDispatchN(activationId: string): number {
+    return Number(this.get('SELECT COALESCE(MAX(n), 0) + 1 AS n FROM bot_dispatches WHERE activation_id = ?', activationId)?.n ?? 1)
+  }
+
+  /** The activation's latest main dispatch (`start` or `continue`). */
+  lastMainDispatch(activationId: string): BotDispatchRow | undefined {
+    const row = this.get("SELECT * FROM bot_dispatches WHERE activation_id = ? AND kind IN ('start', 'continue') ORDER BY n DESC LIMIT 1", activationId)
+    return row ? dispatchOf(row) : undefined
   }
 
   setDispatchRun(activationId: string, n: number, runId: string): void {
@@ -458,14 +578,193 @@ export class BotStore {
     }))
   }
 
-  putUnknownCall(input: { activationId: string; runId: string; invocationId: string; tool: string; role: 'main' | 'consult' }): void {
-    this.run(
+  putUnknownCall(input: { activationId: string; runId: string; invocationId: string; tool: string; role: 'main' | 'consult' }): number {
+    return this.run(
       'INSERT INTO bot_unknown_calls(activation_id, run_id, invocation_id, tool, role, found_at) VALUES(?, ?, ?, ?, ?, ?) ON CONFLICT(activation_id, invocation_id) DO NOTHING',
       input.activationId, input.runId, input.invocationId, input.tool, input.role, this.now()
     )
   }
 
-  dropUnknownCall(activationId: string, invocationId: string): void {
-    this.run('DELETE FROM bot_unknown_calls WHERE activation_id = ? AND invocation_id = ?', activationId, invocationId)
+  dropUnknownCall(activationId: string, invocationId: string): number {
+    return this.run('DELETE FROM bot_unknown_calls WHERE activation_id = ? AND invocation_id = ?', activationId, invocationId)
+  }
+
+  /** Acknowledges exactly the calls named (the ones the owner was shown). */
+  acknowledgeUnknownCalls(activationId: string, invocationIds: readonly string[]): number {
+    let changed = 0
+    for (const id of invocationIds)
+      changed += this.run('UPDATE bot_unknown_calls SET acknowledged_at = ? WHERE activation_id = ? AND invocation_id = ? AND acknowledged_at IS NULL', this.now(), activationId, id)
+    return changed
+  }
+
+  // -- Escalations -----------------------------------------------------------------------------
+
+  escalation(id: string): BotEscalationRow | undefined {
+    const row = this.get('SELECT * FROM bot_escalations WHERE id = ?', id)
+    return row ? escalationOf(row) : undefined
+  }
+
+  escalations(filter: { activationId?: string; status?: BotEscalationStatus } = {}): BotEscalationRow[] {
+    const where: string[] = []
+    const params: Param[] = []
+    if (filter.activationId) { where.push('activation_id = ?'); params.push(filter.activationId) }
+    if (filter.status) { where.push('status = ?'); params.push(filter.status) }
+    return this.all(`SELECT * FROM bot_escalations ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY created_at, id`, ...params).map(escalationOf)
+  }
+
+  countEscalations(activationId: string): number {
+    return Number(this.get('SELECT COUNT(*) AS n FROM bot_escalations WHERE activation_id = ?', activationId)?.n ?? 0)
+  }
+
+  insertEscalation(row: Omit<BotEscalationRow, 'status' | 'amount' | 'answeredAt' | 'appliedAt'>): void {
+    this.run(
+      "INSERT INTO bot_escalations(id, activation_id, dispatch_n, tool_call_id, kind, permission_json, reason, status, created_at, expires_at) VALUES(?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)",
+      row.id, row.activationId, row.dispatchN, row.toolCallId, row.kind, JSON.stringify(row.permission), row.reason, row.createdAt, row.expiresAt
+    )
+  }
+
+  /** Compare-and-set from `open`: false when it was already answered, expired or cancelled. */
+  answerEscalation(id: string, status: Exclude<BotEscalationStatus, 'open'>, amount?: number): boolean {
+    return this.run("UPDATE bot_escalations SET status = ?, amount = ?, answered_at = ? WHERE id = ? AND status = 'open'", status, amount ?? null, this.now(), id) > 0
+  }
+
+  /** Ends every open escalation of an activation (it ended, expired, or was trashed). */
+  closeEscalations(activationId: string, status: 'expired' | 'cancelled'): number {
+    return this.run("UPDATE bot_escalations SET status = ?, answered_at = ? WHERE activation_id = ? AND status = 'open'", status, this.now(), activationId)
+  }
+
+  /** The answered escalation whose continuation has not been sent yet. */
+  pendingAnswer(activationId: string): BotEscalationRow | undefined {
+    const row = this.get("SELECT * FROM bot_escalations WHERE activation_id = ? AND status IN ('allowed_bot', 'allowed_once', 'denied') AND applied_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 1", activationId)
+    return row ? escalationOf(row) : undefined
+  }
+
+  markApplied(id: string): void {
+    this.run('UPDATE bot_escalations SET applied_at = ? WHERE id = ? AND applied_at IS NULL', this.now(), id)
+  }
+
+  // -- Overlays and context generations --------------------------------------------------------
+
+  overlays(activationId: string): Array<{ permission: BotPermissionRequest; amount: number | null }> {
+    return this.all('SELECT * FROM bot_overlays WHERE activation_id = ? ORDER BY created_at, escalation_id', activationId).map((row) => ({
+      permission: JSON.parse(row.permission_json as string) as BotPermissionRequest,
+      amount: num(row.amount)
+    }))
+  }
+
+  putOverlay(activationId: string, escalationId: string, permission: BotPermissionRequest, amount?: number): void {
+    this.run(
+      'INSERT INTO bot_overlays(activation_id, escalation_id, permission_json, amount, created_at) VALUES(?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
+      activationId, escalationId, JSON.stringify(permission), amount ?? null, this.now()
+    )
+  }
+
+  contextGen(botId: string, key: string): number {
+    return num(this.get('SELECT gen FROM bot_contexts WHERE bot_id = ? AND key = ?', botId, key)?.gen) ?? 1
+  }
+
+  bumpContextGen(botId: string, key: string): number {
+    const next = this.contextGen(botId, key) + 1
+    this.run('INSERT INTO bot_contexts(bot_id, key, gen) VALUES(?, ?, ?) ON CONFLICT(bot_id, key) DO UPDATE SET gen = excluded.gen', botId, key, next)
+    return next
+  }
+
+  allThreads(): Array<{ threadId: string; botId: string; role: 'home' | BotThreadRole; key: string; activationId: string | null }> {
+    return this.all('SELECT * FROM bot_threads').map((row) => ({ threadId: row.thread_id as string, botId: row.bot_id as string, role: row.role as 'home' | BotThreadRole, key: row.key as string, activationId: str(row.activation_id) }))
+  }
+
+  dropThread(threadId: string): void {
+    this.run('DELETE FROM bot_threads WHERE thread_id = ?', threadId)
+  }
+
+  /**
+   * Forgets a context thread that went to the trash or is gone, and moves its key to the next
+   * generation, in one transaction: a crash never loses the bump.
+   */
+  retireContextThread(threadId: string): void {
+    this.db.transaction(() => {
+      const row = this.get("SELECT bot_id, key FROM bot_threads WHERE thread_id = ? AND role = 'context'", threadId)
+      if (!row) return
+      const stored = row.key as string
+      const at = stored.lastIndexOf(':')
+      const key = at > 0 ? stored.slice(0, at) : stored
+      const gen = at > 0 ? Number(stored.slice(at + 1)) || 1 : 1
+      if (this.contextGen(row.bot_id as string, key) <= gen)
+        this.run('INSERT INTO bot_contexts(bot_id, key, gen) VALUES(?, ?, ?) ON CONFLICT(bot_id, key) DO UPDATE SET gen = excluded.gen', row.bot_id as string, key, gen + 1)
+      this.run('DELETE FROM bot_threads WHERE thread_id = ?', threadId)
+    })
+  }
+
+  /** Every activation in `statuses`, oldest first. */
+  activationsWith(statuses: readonly BotActivationStatus[]): BotActivationRow[] {
+    const marks = statuses.map(() => '?').join(', ')
+    return this.all(`SELECT * FROM bot_activations WHERE status IN (${marks}) ORDER BY created_at, id`, ...statuses).map(activationOf)
+  }
+
+  // -- Schedules and channel replies (6d) -------------------------------------------------------
+
+  scheduleStates(botId: string): Array<{ scheduleId: string; spec: string; nextRunAt: string | null; lastSkipAt: string | null; lastSkipReason: string | null }> {
+    return this.all('SELECT * FROM bot_schedule_state WHERE bot_id = ? ORDER BY schedule_id', botId).map((row) => ({
+      scheduleId: row.schedule_id as string,
+      spec: row.spec_json as string,
+      nextRunAt: str(row.next_run_at),
+      lastSkipAt: str(row.last_skip_at),
+      lastSkipReason: str(row.last_skip_reason)
+    }))
+  }
+
+  /** The occurrence a schedule last skipped and why; null once an occurrence runs again. */
+  setScheduleSkip(botId: string, scheduleId: string, reason: string | null, at: string | null): void {
+    this.run('UPDATE bot_schedule_state SET last_skip_reason = ?, last_skip_at = ? WHERE bot_id = ? AND schedule_id = ?', reason, at, botId, scheduleId)
+  }
+
+  putScheduleState(botId: string, scheduleId: string, spec: string, nextRunAt: string | null): void {
+    this.run(
+      'INSERT INTO bot_schedule_state(bot_id, schedule_id, spec_json, next_run_at) VALUES(?, ?, ?, ?) ON CONFLICT(bot_id, schedule_id) DO UPDATE SET spec_json = excluded.spec_json, next_run_at = excluded.next_run_at',
+      botId, scheduleId, spec, nextRunAt
+    )
+  }
+
+  dropScheduleState(botId: string, scheduleId?: string): void {
+    if (scheduleId === undefined) this.run('DELETE FROM bot_schedule_state WHERE bot_id = ?', botId)
+    else this.run('DELETE FROM bot_schedule_state WHERE bot_id = ? AND schedule_id = ?', botId, scheduleId)
+  }
+
+  /**
+   * Inserts an activation unless its idempotency key exists already; true when it was inserted.
+   * A repeated schedule occurrence only finds the activation it made before.
+   */
+  insertActivationOnce(row: Parameters<BotStore['insertActivation']>[0], limits: ActivationLimits): boolean {
+    const inserted = this.run(
+      'INSERT OR IGNORE INTO bot_activations(id, bot_id, revision, grant_digest, trigger_json, idempotency_key, status, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)',
+      row.id, row.botId, row.revision, row.grantDigest, JSON.stringify(row.trigger), row.idempotencyKey, row.status, row.createdAt
+    )
+    if (!inserted) return false
+    this.run('INSERT INTO bot_counters(activation_id, limits_json) VALUES(?, ?)', row.id, JSON.stringify(limits))
+    this.run('INSERT INTO bot_spend(activation_id) VALUES(?)', row.id)
+    return true
+  }
+
+  /** Claims telling the chat about `status` (compare-and-set): false when it was told already. */
+  claimReply(activationId: string, status: string): boolean {
+    return this.run('UPDATE bot_activations SET reply_status = ? WHERE id = ? AND (reply_status IS NULL OR reply_status <> ?)', status, activationId, status) > 0
+  }
+
+  /** Gives back a claim whose send failed, unless a later state was claimed since. */
+  releaseReply(activationId: string, status: string): void {
+    this.run('UPDATE bot_activations SET reply_status = NULL WHERE id = ? AND reply_status = ?', activationId, status)
+  }
+
+  setAutoRestarts(id: string, count: number): void {
+    this.run('UPDATE bot_activations SET auto_restarts = ? WHERE id = ?', count, id)
+  }
+
+  setLimits(activationId: string, limits: ActivationLimits): void {
+    this.run('UPDATE bot_counters SET limits_json = ? WHERE activation_id = ?', JSON.stringify(limits), activationId)
+  }
+
+  /** Moves a bot's unfinished activations from one grant to its wider successor ("Allow for this bot"). */
+  regrant(botId: string, fromDigest: string, toDigest: string, revision: string): void {
+    this.run("UPDATE bot_activations SET grant_digest = ?, revision = ? WHERE bot_id = ? AND grant_digest = ? AND status NOT IN ('done', 'failed', 'cancelled')", toDigest, revision, botId, fromDigest)
   }
 }

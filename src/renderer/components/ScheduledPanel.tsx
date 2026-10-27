@@ -1,52 +1,55 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import {
+  MessageSquare,
   Pause,
+  Pencil,
   Play,
   Plus,
   RefreshCw,
   Trash2,
+  Webhook,
   Zap
 } from '../lib/icons'
-import type {
-  CreateScheduledJobInput,
-  JobSchedule,
-  ScheduledJob,
-  SchedulerStatus
-} from '../../shared/types'
+import { normalizePermissionMode } from '../../shared/permissionMode'
+import type { LlmProviderOption } from '../../shared/settings'
+import type { ScheduledJob, ScheduledJobRunRecord, SchedulerStatus } from '../../shared/types'
+import { JobEditor } from './scheduled/JobEditor'
+import {
+  createInputOf,
+  draftFromJob,
+  EMPTY_CATALOG,
+  isUnchanged,
+  modelGroups,
+  newDraft,
+  patchOf,
+  type JobDraft,
+  type ScheduledCatalog
+} from './scheduled/jobDraft'
+import {
+  describeLastStatus,
+  describeMode,
+  describeModel,
+  describePermission,
+  describeSchedule,
+  describeWorkspace,
+  errorText,
+  RUN_STATUS_LABEL
+} from './scheduled/scheduledLabels'
+import { WebhookDialog, type WebhookApi } from './scheduled/WebhookDialog'
+import { openThread } from '../lib/openThread'
 import '../styles/scheduled-panel.css'
-
-type SchedulePreset = 'once-5m' | 'interval-30m' | 'interval-1h' | 'cron-daily'
-
-const PRESETS: { value: SchedulePreset; label: string }[] = [
-  { value: 'once-5m', label: 'Once' },
-  { value: 'interval-30m', label: '30 min' },
-  { value: 'interval-1h', label: 'Hourly' },
-  { value: 'cron-daily', label: 'Daily 9am' }
-]
-
-function presetToSchedule(preset: SchedulePreset): JobSchedule {
-  switch (preset) {
-    case 'once-5m':
-      return {
-        kind: 'once',
-        runAt: new Date(Date.now() + 5 * 60_000).toISOString()
-      }
-    case 'interval-30m':
-      return { kind: 'interval', minutes: 30 }
-    case 'interval-1h':
-      return { kind: 'interval', minutes: 60 }
-    case 'cron-daily':
-      return { kind: 'cron', expr: '0 9 * * *' }
-  }
-}
 
 function formatWhen(iso: string | null | undefined): string {
   if (!iso) return 'none'
   return new Date(iso).toLocaleString()
 }
 
-function stateLabel(state: ScheduledJob['state']): string {
-  switch (state) {
+function stateLabel(job: ScheduledJob): string {
+  // A working occurrence says whether it waits for the person (derived when the job is listed).
+  if (job.liveStatus === 'needs_answer') return 'Needs your answer'
+  if (job.liveStatus === 'running') return 'Running'
+  if (job.pendingOccurrence?.state === 'queued' && job.state !== 'paused') return 'Queued'
+  switch (job.state) {
     case 'scheduled':
       return 'Scheduled'
     case 'running':
@@ -60,14 +63,67 @@ function stateLabel(state: ScheduledJob['state']): string {
   }
 }
 
+const HISTORY_ROWS = 10
+
+/** The thread where the job's current occurrence runs, else where its last recorded run ran. */
+function runThreadId(job: ScheduledJob): string | undefined {
+  return job.liveThreadId ?? job.pendingOccurrence?.threadId ?? [...(job.runHistory ?? [])].reverse().find((record) => record.threadId)?.threadId
+}
+
+function browserWebhookApi(): WebhookApi {
+  const webhook = window.mousse.scheduled.webhook
+  return {
+    enable: (id) => webhook.enable(id),
+    rotate: (id) => webhook.rotate(id),
+    disable: (id) => webhook.disable(id),
+    deliveries: (id) => webhook.deliveries(id),
+    copy: (text) => navigator.clipboard.writeText(text)
+  }
+}
+
+interface Editing {
+  id: string
+  initial: JobDraft
+}
+
 export function ScheduledPanel() {
   const [jobs, setJobs] = useState<ScheduledJob[]>([])
   const [status, setStatus] = useState<SchedulerStatus | null>(null)
-  const [showForm, setShowForm] = useState(false)
-  const [name, setName] = useState('')
-  const [prompt, setPrompt] = useState('')
-  const [preset, setPreset] = useState<SchedulePreset>('interval-30m')
-  const [busy, setBusy] = useState(false)
+  const [catalog, setCatalog] = useState<ScheduledCatalog>(EMPTY_CATALOG)
+  const [providers, setProviders] = useState<LlmProviderOption[]>([])
+  const [creating, setCreating] = useState(false)
+  const [editing, setEditing] = useState<Editing | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [webhookJobId, setWebhookJobId] = useState<string | null>(null)
+  /** `scheduled.agentJobs`; null until the profile has answered. */
+  const [agentJobs, setAgentJobs] = useState<boolean | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
+  const newButton = useRef<HTMLButtonElement>(null)
+  const listRef = useRef<HTMLDivElement>(null)
+  const webhookApi = useMemo(browserWebhookApi, [])
+  const detailsId = useId()
+  const agentToggleId = useId()
+
+  const loadCatalog = useCallback(async () => {
+    try {
+      const [options, projects, threads, settings] = await Promise.all([
+        window.mousse.settings.getOptions(),
+        window.mousse.projects.list(),
+        window.mousse.threads.listAll(),
+        window.mousse.settings.get()
+      ])
+      setProviders(options.llmProviders)
+      setCatalog({
+        models: modelGroups(options.llmProviders),
+        projects,
+        threads: threads.filter((thread) => !thread.lineage && !thread.settledAt),
+        // A job made without a thread is made in the mode threads start in; it is also the most the job may run with.
+        defaultPermissionMode: normalizePermissionMode(settings.permissions?.defaultMode)
+      })
+    } catch {
+      // The form still works with the defaults; a model or project it cannot list is simply not offered.
+    }
+  }, [])
 
   const refresh = useCallback(async () => {
     const [nextJobs, nextStatus] = await Promise.all([
@@ -80,13 +136,15 @@ export function ScheduledPanel() {
 
   useEffect(() => {
     void refresh()
+    void loadCatalog()
+    void window.mousse.scheduled.settings.get().then((settings) => setAgentJobs(settings.agentJobs), () => undefined)
     const offUpdated = window.mousse.scheduled.onUpdated(setJobs)
     const offStatus = window.mousse.scheduled.onStatus(setStatus)
     return () => {
       offUpdated()
       offStatus()
     }
-  }, [refresh])
+  }, [refresh, loadCatalog])
 
   const sortedJobs = useMemo(
     () =>
@@ -98,25 +156,55 @@ export function ScheduledPanel() {
     [jobs]
   )
 
-  const submitCreate = async () => {
-    if (!prompt.trim()) return
-    setBusy(true)
+  const webhookJob = webhookJobId ? jobs.find((job) => job.id === webhookJobId) : undefined
+  // A job deleted while its webhook dialog is open closes the dialog (and with it the secret).
+  useEffect(() => {
+    if (webhookJobId && !webhookJob && jobs.length > 0) setWebhookJobId(null)
+  }, [webhookJobId, webhookJob, jobs.length])
+
+  const focusLater = (selector: string) => requestAnimationFrame(() => document.querySelector<HTMLElement>(selector)?.focus())
+
+  const act = async (action: () => Promise<unknown>) => {
+    setActionError(null)
     try {
-      const input: CreateScheduledJobInput = {
-        name: name.trim() || 'Scheduled job',
-        prompt: prompt.trim(),
-        schedule: presetToSchedule(preset),
-        createThread: true
-      }
-      await window.mousse.scheduled.create(input)
-      setShowForm(false)
-      setName('')
-      setPrompt('')
-      await refresh()
-    } finally {
-      setBusy(false)
+      await action()
+    } catch (cause) {
+      setActionError(errorText(cause))
     }
   }
+
+  const openCreate = () => {
+    setEditing(null)
+    setCreating(true)
+    void loadCatalog()
+  }
+
+  const startEdit = (job: ScheduledJob) => {
+    setCreating(false)
+    setEditing({ id: job.id, initial: draftFromJob(job, catalog, providers) })
+    void loadCatalog()
+  }
+
+  const closeEditor = (jobId?: string) => {
+    setCreating(false)
+    setEditing(null)
+    if (jobId) focusLater(`[data-edit-job="${jobId}"]`)
+    else newButton.current?.focus()
+  }
+
+  const moveBetweenRows = (event: KeyboardEvent<HTMLButtonElement>) => {
+    const keys = ['ArrowDown', 'ArrowUp', 'Home', 'End']
+    if (!keys.includes(event.key)) return
+    const rows = [...(listRef.current?.querySelectorAll<HTMLElement>('[data-row-button]') ?? [])]
+    const index = rows.indexOf(event.currentTarget)
+    if (index === -1) return
+    event.preventDefault()
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1 : Math.min(rows.length - 1, Math.max(0, index + (event.key === 'ArrowDown' ? 1 : -1)))
+    rows[next]?.focus()
+  }
+
+  const nameOfThread = (threadId: string) => catalog.threads.find((thread) => thread.id === threadId)?.name
+  const nameOfProject = (projectId: string) => catalog.projects.find((project) => project.id === projectId)?.name
 
   return (
     <div className="scheduled-panel">
@@ -136,18 +224,38 @@ export function ScheduledPanel() {
           ) : null}
         </div>
         <div className="scheduled-toolbar-actions">
+          <label
+            className="scheduled-agent-toggle"
+            htmlFor={agentToggleId}
+            title="Lets agents create, change, pause and run their own scheduled jobs through Mousse's tools, from a turn you started. It also needs the Manage agent access level. Jobs agents create run no wider than that agent, end after 7 days unless you extend them, and are paused when you turn this off (you resume them)."
+          >
+            <input
+              id={agentToggleId}
+              type="checkbox"
+              checked={agentJobs === true}
+              disabled={agentJobs === null}
+              onChange={(event) => {
+                const next = event.currentTarget.checked
+                void act(async () => setAgentJobs((await window.mousse.scheduled.settings.setAgentJobs(next)).agentJobs))
+              }}
+            />
+            Agents may create jobs
+          </label>
           <button
             type="button"
             className="scheduled-icon-btn"
             onClick={() => void refresh()}
             title="Refresh"
+            aria-label="Refresh"
           >
             <RefreshCw size={15} strokeWidth={2} />
           </button>
           <button
+            ref={newButton}
             type="button"
             className="scheduled-btn primary"
-            onClick={() => setShowForm((open) => !open)}
+            aria-expanded={creating}
+            onClick={() => (creating ? closeEditor() : openCreate())}
           >
             <Plus size={14} strokeWidth={2} />
             New job
@@ -155,114 +263,215 @@ export function ScheduledPanel() {
         </div>
       </div>
 
-      {showForm && (
-        <div className="scheduled-form">
-          <input
-            className="scheduled-input"
-            placeholder="Job name"
-            aria-label="Job name"
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-          />
-          <textarea
-            className="scheduled-input scheduled-textarea"
-            placeholder="Prompt"
-            aria-label="Prompt"
-            value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
-            rows={4}
-          />
-          <div className="scheduled-segmented">
-            {PRESETS.map((opt) => (
-              <button
-                key={opt.value}
-                type="button"
-                className={`scheduled-segment${preset === opt.value ? ' active' : ''}`}
-                onClick={() => setPreset(opt.value)}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
-          <div className="scheduled-form-actions">
-            <button type="button" className="scheduled-btn ghost" onClick={() => setShowForm(false)}>
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="scheduled-btn primary"
-              disabled={busy || !prompt.trim()}
-              onClick={() => void submitCreate()}
-            >
-              Create
-            </button>
-          </div>
-        </div>
-      )}
+      {actionError ? <p className="scheduled-action-error" role="alert">{actionError}</p> : null}
 
-      <div className="scheduled-list">
+      {creating ? (
+        <JobEditor
+          initial={newDraft()}
+          catalog={catalog}
+          onCancel={() => closeEditor()}
+          save={async (draft) => {
+            await window.mousse.scheduled.create(createInputOf(draft, catalog))
+            closeEditor()
+            await refresh()
+          }}
+        />
+      ) : null}
+
+      <div className="scheduled-list" ref={listRef}>
         {sortedJobs.length === 0 ? (
           <div className="scheduled-empty">No jobs yet.</div>
         ) : (
-          sortedJobs.map((job) => (
-            <div key={job.id} className="scheduled-item">
-              <div className="scheduled-item-main">
-                <div className="scheduled-item-top">
-                  <span className="scheduled-item-title">{job.name}</span>
-                  <span className="scheduled-status">
-                    <span className={`scheduled-dot state-${job.state}${job.state === 'running' ? ' on' : ''}`} />
-                    {stateLabel(job.state)}
-                  </span>
+          sortedJobs.map((job) => {
+            if (editing?.id === job.id) {
+              return (
+                <div key={job.id} className="scheduled-item editing" data-job-id={job.id}>
+                  <JobEditor
+                    job={job}
+                    initial={editing.initial}
+                    catalog={catalog}
+                    onCancel={() => closeEditor(job.id)}
+                    save={async (draft) => {
+                      const patch = patchOf(editing.initial, draft, catalog)
+                      if (!isUnchanged(patch)) await window.mousse.scheduled.update(job.id, patch)
+                      closeEditor(job.id)
+                      await refresh()
+                    }}
+                  />
                 </div>
-                <p className="scheduled-item-prompt">{job.prompt}</p>
-                <div className="scheduled-item-meta">
-                  <span>Next {formatWhen(job.nextRunAt)}</span>
-                  <span>Last {formatWhen(job.lastRunAt)}</span>
-                  {job.lastStatus && <span>{job.lastStatus}</span>}
+              )
+            }
+            const selected = selectedId === job.id
+            const workspace = describeWorkspace(job.workspace, job)
+            const thread = job.threadId ? nameOfThread(job.threadId) : undefined
+            const project = job.projectId ? nameOfProject(job.projectId) : undefined
+            return (
+              <div key={job.id} className="scheduled-item" data-job-id={job.id} data-selected={selected ? 'true' : undefined}>
+                <div className="scheduled-item-main">
+                  <div className="scheduled-item-top">
+                    <button
+                      type="button"
+                      className="scheduled-item-select"
+                      data-row-button=""
+                      aria-expanded={selected}
+                      aria-controls={selected ? `${detailsId}-${job.id}` : undefined}
+                      onClick={() => setSelectedId(selected ? null : job.id)}
+                      onKeyDown={moveBetweenRows}
+                    >
+                      <span className="scheduled-item-title">{job.name}</span>
+                    </button>
+                    <span className="scheduled-status">
+                      <span className={`scheduled-dot state-${job.state}${job.state === 'running' ? ' on' : ''}`} />
+                      {stateLabel(job)}
+                    </span>
+                  </div>
+                  <p className="scheduled-item-prompt">{job.prompt}</p>
+                  <div className="scheduled-item-meta" aria-label="Job settings">
+                    <span>{describeSchedule(job.schedule)}</span>
+                    <span data-meta="model">{describeModel(job.selection)}</span>
+                    <span data-meta="mode">{describeMode(job.mode)}</span>
+                    {job.permissionMode ? <span data-meta="permission">{describePermission(job.permissionMode)}</span> : null}
+                    {workspace ? <span data-meta="workspace">{workspace}</span> : null}
+                    {project ? <span data-meta="project">{project}</span> : null}
+                    {thread ? <span data-meta="thread">Thread: {thread}</span> : null}
+                    {job.trigger?.webhook ? <span data-meta="webhook">Webhook</span> : null}
+                    {job.createdBy ? <span data-meta="agent">Created by an agent</span> : null}
+                    {job.expiresAt ? (
+                      <span data-meta="expires">
+                        {job.state === 'completed' && new Date(job.expiresAt).getTime() <= Date.now() ? 'Ended' : 'Ends'} {formatWhen(job.expiresAt)}{' '}
+                        <button type="button" className="scheduled-link-btn" onClick={() => void act(() => window.mousse.scheduled.extend(job.id))}>
+                          Extend 7 days
+                        </button>
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="scheduled-item-meta">
+                    <span>Next {formatWhen(job.nextRunAt)}</span>
+                    <span>Last {formatWhen(job.lastRunAt)}</span>
+                    {job.lastStatus && <span>{describeLastStatus(job.lastStatus)}</span>}
+                  </div>
+                  {job.state === 'paused' && job.pausedReason ? <p className="scheduled-item-note" data-meta="paused-reason">Paused: {job.pausedReason}</p> : null}
+                  {job.lastError && <p className="scheduled-item-error">{job.lastError}</p>}
+                  {selected ? <RunHistory id={`${detailsId}-${job.id}`} job={job} /> : null}
                 </div>
-                {job.lastError && <p className="scheduled-item-error">{job.lastError}</p>}
-              </div>
-              <div className="scheduled-item-actions">
-                <button
-                  type="button"
-                  className="scheduled-icon-btn"
-                  title="Run now"
-                  onClick={() => void window.mousse.scheduled.run(job.id)}
-                >
-                  <Zap size={14} strokeWidth={2} />
-                </button>
-                {job.state === 'paused' ? (
+                <div className="scheduled-item-actions">
+                  {runThreadId(job) ? (
+                    <button
+                      type="button"
+                      className="scheduled-icon-btn"
+                      title="Open the run's thread"
+                      aria-label={`Open the thread of ${job.name}'s run`}
+                      onClick={() => void openThread(runThreadId(job)!)}
+                    >
+                      <MessageSquare size={14} strokeWidth={2} />
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     className="scheduled-icon-btn"
-                    title="Resume"
-                    onClick={() => void window.mousse.scheduled.resume(job.id)}
+                    title="Edit"
+                    aria-label={`Edit ${job.name}`}
+                    data-edit-job={job.id}
+                    onClick={() => startEdit(job)}
                   >
-                    <Play size={14} strokeWidth={2} />
+                    <Pencil size={14} strokeWidth={2} />
                   </button>
-                ) : (
                   <button
                     type="button"
                     className="scheduled-icon-btn"
-                    title="Pause"
-                    onClick={() => void window.mousse.scheduled.pause(job.id)}
+                    title="Webhook"
+                    aria-label={`Webhook for ${job.name}`}
+                    data-webhook-job={job.id}
+                    onClick={() => setWebhookJobId(job.id)}
                   >
-                    <Pause size={14} strokeWidth={2} />
+                    <Webhook size={14} strokeWidth={2} />
                   </button>
-                )}
-                <button
-                  type="button"
-                  className="scheduled-icon-btn danger"
-                  title="Delete"
-                  onClick={() => void window.mousse.scheduled.delete(job.id)}
-                >
-                  <Trash2 size={14} strokeWidth={2} />
-                </button>
+                  <button
+                    type="button"
+                    className="scheduled-icon-btn"
+                    title="Run now"
+                    aria-label={`Run ${job.name} now`}
+                    onClick={() => void act(() => window.mousse.scheduled.run(job.id))}
+                  >
+                    <Zap size={14} strokeWidth={2} />
+                  </button>
+                  {job.state === 'paused' ? (
+                    <button
+                      type="button"
+                      className="scheduled-icon-btn"
+                      title="Resume"
+                      aria-label={`Resume ${job.name}`}
+                      onClick={() => void act(() => window.mousse.scheduled.resume(job.id))}
+                    >
+                      <Play size={14} strokeWidth={2} />
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="scheduled-icon-btn"
+                      title="Pause"
+                      aria-label={`Pause ${job.name}`}
+                      onClick={() => void act(() => window.mousse.scheduled.pause(job.id))}
+                    >
+                      <Pause size={14} strokeWidth={2} />
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="scheduled-icon-btn danger"
+                    title="Delete"
+                    aria-label={`Delete ${job.name}`}
+                    onClick={() => void act(() => window.mousse.scheduled.delete(job.id))}
+                  >
+                    <Trash2 size={14} strokeWidth={2} />
+                  </button>
+                </div>
               </div>
-            </div>
-          ))
+            )
+          })
         )}
       </div>
+
+      {webhookJob ? (
+        <WebhookDialog
+          job={webhookJob}
+          api={webhookApi}
+          onClose={() => {
+            setWebhookJobId(null)
+            focusLater(`[data-webhook-job="${webhookJob.id}"]`)
+          }}
+        />
+      ) : null}
     </div>
+  )
+}
+
+function RunHistory({ id, job }: { id: string; job: ScheduledJob }) {
+  const records: ScheduledJobRunRecord[] = [...(job.runHistory ?? [])].reverse().slice(0, HISTORY_ROWS)
+  return (
+    <section className="scheduled-history" id={id} aria-label={`Run history for ${job.name}`}>
+      {records.length === 0 ? (
+        <p className="scheduled-empty">No runs yet.</p>
+      ) : (
+        <ul>
+          {records.map((record, index) => {
+            const workspace = describeWorkspace(record.workspace, job)
+            return (
+              <li key={`${record.runAt}-${record.runId ?? index}`} className="scheduled-history-row" data-status={record.status}>
+                <span className="scheduled-history-status">{RUN_STATUS_LABEL[record.status]}</span>
+                <span>{formatWhen(record.runAt)}</span>
+                {record.selection ? <span data-meta="model">{describeModel(record.selection)}</span> : null}
+                {record.mode ? <span data-meta="mode">{describeMode(record.mode)}</span> : null}
+                {record.permissionMode ? <span data-meta="permission">{describePermission(record.permissionMode)}</span> : null}
+                {workspace && record.workspace ? <span data-meta="workspace">{workspace}</span> : null}
+                {record.agentCreated ? <span data-meta="agent">Job created by an agent</span> : null}
+                {record.missingPlaceholders?.length ? <span data-meta="missing">Missing fields: {record.missingPlaceholders.join(', ')}</span> : null}
+                {record.error ? <span className="scheduled-history-error">{record.error}</span> : null}
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </section>
   )
 }

@@ -10,7 +10,8 @@ import { AppletStore } from './applets/AppletStore'
 import { ClaudeSubscriptionProviderService } from './providers/claudeSubscription/ClaudeSubscriptionProviderService'
 import { ClaudeIntegrationResolver } from './providers/claudeSubscription/integrations'
 import { AntigravityProviderService } from './providers/antigravity/AntigravityProviderService'
-import { ProviderInstanceService } from './providers/ProviderInstanceService'
+import { configInstanceStore, ProviderInstanceService } from './providers/ProviderInstanceService'
+import { createProviderAccess, type ProviderAccess } from './providers/providerAccess'
 import { createHarnessGateway, type Harness, type HarnessGateway } from './harness/gateway'
 import { antigravityDriver } from './harness/drivers/antigravity'
 import { acpDriver } from './harness/drivers/acp'
@@ -30,6 +31,7 @@ import { createCodexProviderService, findCodexBinary, type CodexProviderService 
 import { ANTIGRAVITY_INSTANCE_ID, CLAUDE_INSTANCE_ID, CODEX_INSTANCE_ID, piProviderIdOf } from '../shared/providerInstances'
 import { ALL_MIRROR_FIELDS, LAUNCH_MIRROR_FIELDS } from './harness/vendorMirror'
 import type { CliProviderConfigPatch } from '../shared/providerAuth'
+import type { ScheduledJob } from '../shared/types'
 import { ProjectManager } from './data/ProjectManager'
 import { ThreadDataStore } from './data/ThreadDataStore'
 import { backfillSubagentLineage } from './data/subagentLineage'
@@ -43,12 +45,19 @@ import { Reconciler } from './run/Reconciler'
 import { RunEngine } from './run/RunEngine'
 import type { BotEngine } from './bots/activation/BotEngine'
 import { openPersonalBots } from './bots/activation/open'
+import { BotScheduler } from './bots/triggers/scheduler'
 import type { BotStore } from './bots/store/BotStore'
 import { RunStore } from './run/RunStore'
-import { ScheduledJobService } from './scheduled/ScheduledJobService'
+import { jobPermissionRequest } from './scheduled/jobPermission'
+import { ScheduledJobService, ScheduledWebhookError } from './scheduled/ScheduledJobService'
 import { ScheduledJobStore } from './scheduled/ScheduledJobStore'
+import { ScheduledWebhookServer, scheduledWebhookPort } from './scheduled/ScheduledWebhookServer'
+import { WebhookSecretCache } from './scheduled/webhookSecretCache'
+import { scheduledJobOptionsDepsFrom, validateScheduledJobOptions } from './scheduled/validateJobOptions'
 import { ChannelService } from './channels/ChannelService'
+import { channelModelOptions } from './channels/channelModels'
 import { ChannelStore } from './channels/ChannelStore'
+import type { ChannelBots } from './channels/channelBots'
 import { AgentRegistry } from './agents/AgentRegistry'
 import { TaskQueue } from './tasks/TaskQueue'
 import { WorktreeManager } from './worktree/WorktreeManager'
@@ -64,7 +73,7 @@ import { type MmsOwnerHandle, type MmsOwnerRecord } from './ownership/MmsOwnerLe
 import { ThreadRuntimeManager } from './runtime/ThreadRuntimeManager'
 import { UserQuestionService } from './orchestrator/UserQuestionService'
 import { ModeRegistry } from './modes/ModeRegistry'
-import { createProfileSecretAdapter } from './profiles/secrets'
+import { createProfileSecretAdapter, deleteProfileSecret, writeProfileSecret } from './profiles/secrets'
 import type { ProfileHost } from './profiles/ProfileHost'
 import {
   createLegacySingleProfileContext,
@@ -82,6 +91,7 @@ import type { MmsOptions } from './MmsOptions'
 import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
 import { OwnedWorkBarrier } from './execution/OwnedWorkBarrier'
 import { ResourceLifecycleCoordinator } from './lifecycle/ResourceLifecycleCoordinator'
+import { buildResourceInventory } from './lifecycle/ResourceInventory'
 import { clearCleanupMarker, StorageCleanupService } from './lifecycle/StorageCleanupService'
 import { StorageUsageService } from './lifecycle/StorageUsageService'
 import { StoragePolicyStore } from './lifecycle/StoragePolicyStore'
@@ -92,6 +102,8 @@ import { existsSync } from 'node:fs'
 import { settleThreadMutationOwnership } from './queue/ThreadExecutionLease'
 import type { TaskLifecycleRecord } from '../shared/resourceLifecycle'
 import { UndoRetentionSweeper } from './actions/UndoRetentionSweeper'
+import { PullRequestWatchService } from './git/PullRequestWatchService'
+import { resolveThreadProjectPath } from './data/resolveActiveProjectPath'
 import { SpeechRelay } from './speech/SpeechRelay'
 import { systemClock } from './net/clock'
 
@@ -112,7 +124,9 @@ const LIFECYCLE_EXEMPT_METHODS = new Set([
   ...STORAGE_LIFECYCLE_METHODS,
   'storage.cleanup.run',
   'storage.cleanup.plan',
-  'storage.usage'
+  'storage.usage',
+  // Deleting a bot trashes its home thread once its runs stopped; its own request is not other work.
+  'bots.definitions.delete'
 ])
 
 /** Long-poll requests that sit open while nothing happens; they are not owned profile work. */
@@ -139,6 +153,11 @@ export class MmsProfileServices {
   readonly codex: CodexProviderService
   /** Provider instances of this profile: the agents callers pick by `{ instanceId, model }`. */
   readonly providerInstances: ProviderInstanceService
+  /**
+   * The shared speech and usage calls as this profile may make them: a provider removed from the
+   * profile is refused, whatever key another profile saved. Every caller goes through it.
+   */
+  readonly providerAccess: ProviderAccess
   /** The harness gateway: the only way app code reaches agents and providers. */
   harness?: HarnessGateway
   private harnessImpl?: Harness
@@ -147,6 +166,8 @@ export class MmsProfileServices {
   readonly threads: ThreadDataStore
   readonly lifecycle: ResourceLifecycleCoordinator
   readonly undoRetention: UndoRetentionSweeper
+  /** Watches the pull requests of threads that opted in and tells them about checks and reviews. */
+  readonly pullRequestWatch: PullRequestWatchService
   readonly storagePolicy: StoragePolicyStore
   /** Storage cleanup rules: the one scheduler for worktree retirement and the trash sweep. */
   readonly storageCleanup: StorageCleanupService
@@ -206,6 +227,7 @@ export class MmsProfileServices {
   /** Personal bots (PR 6 §4). */
   /** Null when `bots.db` could not be opened: bots are unavailable, every other thread works. */
   readonly personalBots: BotEngine | null
+  private readonly botScheduler: BotScheduler | null
   private readonly botStore: BotStore | null
   /** Phase 5 (SPEC §15.1): durable bearer credentials of the Mousse MCP server. */
   readonly mcpCredentials: McpCredentials
@@ -225,6 +247,11 @@ export class MmsProfileServices {
 
   private readonly channelStore: ChannelStore
   private readonly scheduledStore: ScheduledJobStore
+  private readonly scheduledWebhookServer: ScheduledWebhookServer
+  private readonly webhookSecretCache: WebhookSecretCache
+  private webhookRetryTimer: NodeJS.Timeout | null = null
+  /** Set when the profile starts shutting down: the webhook listener is not started or retried again. */
+  private webhooksClosed = false
   private started = false
   private stopped = false
   private readonly requests = new OwnedWorkBarrier()
@@ -321,18 +348,13 @@ export class MmsProfileServices {
           : instanceId === CODEX_INSTANCE_ID ? this.codex.vendorMirror(ALL_MIRROR_FIELDS)
             : instanceId === ANTIGRAVITY_INSTANCE_ID ? this.antigravity.vendorMirror(LAUNCH_MIRROR_FIELDS)
               : undefined,
-      store: {
-        read: () => {
-          const section = config.getProvidersSection()
-          return { instances: section.instances, seedVersion: section.instancesSeedVersion }
-        },
-        write: ({ instances, seedVersion }) => config.updateProvidersSection({ instances, instancesSeedVersion: seedVersion })
-      }
+      store: configInstanceStore(config)
     })
       .registerVendor('antigravity', this.antigravity)
       .registerVendor('claude', this.claudeSubscription)
       .registerVendor('codex', this.codex)
     this.providerInstances.list()
+    this.providerAccess = createProviderAccess(this.providerAuth, this.providerInstances)
     this.integrationContext = shared.personal
       ? {
           profileId: this.profileId,
@@ -480,11 +502,35 @@ export class MmsProfileServices {
     const harness = this.harnessImpl
     const opened = openPersonalBots({
       profileHome: homeDir,
-      threads: this.threads,
+      threads: {
+        ensureExecutionThread: (key, name, projectId, ownership) => this.threads.ensureExecutionThread(key, name, projectId, ownership),
+        threadState: (threadId) => {
+          const record = this.threads.lifecycleStore.get(threadId)
+          if (record && record.state !== 'active') return 'trashed'
+          return this.threads.getThread(threadId) ? 'active' : record ? 'trashed' : 'missing'
+        }
+      },
+      // A deleted bot's home thread: like the lifecycle RPCs, wait briefly for other requests to
+      // finish, and retry a busy refusal a few times before reporting it.
+      trashThread: async (threadId) => {
+        const include = (active: string) => !LIFECYCLE_EXEMPT_METHODS.has(active.replace(/^rpc:/, ''))
+        for (let attempt = 0; ; attempt += 1) {
+          await this.requests.waitForIdle(2_000, include).catch(() => {})
+          try {
+            return await this.trashThread(threadId)
+          } catch (error) {
+            const busy = error instanceof Error && 'code' in error && (error as { code?: unknown }).code === 'busy'
+            if (!busy || attempt >= 2) throw error
+            await new Promise((resolve) => setTimeout(resolve, 500))
+          }
+        }
+      },
       runs: () => this.runEngine,
       harness,
       notifyEffects: () => this.orchestrator.notifyEffects(),
-      stopThread: (threadId) => this.orchestrator.stopThread(threadId, 'user', { clientRequestId: `bot-stop:${threadId}:${Date.now()}` })
+      stopThread: (threadId) => this.orchestrator.stopThread(threadId, 'user', { clientRequestId: `bot-stop:${threadId}:${Date.now()}` }),
+      // A published schedule is read at once; before the scheduler started this does nothing.
+      schedulesChanged: () => { void this.botScheduler?.wake() }
     })
     this.botStore = opened?.store ?? null
     this.personalBots = opened?.engine ?? null
@@ -500,6 +546,8 @@ export class MmsProfileServices {
       })
     })
     this.orchestrator.setBotDispatcher(personalBots)
+    // Bot schedules tick only after the bot startup pass (`startOwned`).
+    this.botScheduler = personalBots ? new BotScheduler({ tick: (now) => personalBots.tickSchedules(now) }) : null
     this.orchestrator.setWorkflowChatExecutor(this.platform.workflowChat)
     this.orchestrator.setFeatureFlags(this.config.get().features)
     this.threadRuntimes = new ThreadRuntimeManager()
@@ -540,7 +588,59 @@ export class MmsProfileServices {
     )
     // The Run Engine decides when a scheduled occurrence is over, including after a restart.
     this.scheduledStore.setRunProbe(this.orchestrator.scheduledRunProbe())
-    this.orchestrator.setScheduledHooks({ onOccurrenceSettled: (event) => this.scheduled.occurrenceSettled(event) })
+    this.orchestrator.setScheduledHooks({
+      onOccurrenceSettled: (event) => this.scheduled.occurrenceSettled(event),
+      currentPermissionRequest: (jobId) => {
+        const job = this.scheduled.getJob(jobId)
+        return job ? jobPermissionRequest(job) : undefined
+      }
+    })
+    this.scheduled.setQuestionProbe((threadId) => this.questions.listPendingForThread(threadId).length > 0)
+    // Jobs saved before permission ceilings existed get one now: the mode of the thread they run on, else the
+    // mode threads start in, else `ask`. Jobs that already have one are untouched, so this is safe on every start.
+    try {
+      this.scheduledStore.stampMissingPermissionCeilings((job) => this.orchestrator.scheduledCreatorCeiling(job.threadId))
+    } catch (error) {
+      console.warn('scheduled job permission ceilings could not be stamped; jobs without one follow their thread\'s mode', error instanceof Error ? error.message : String(error))
+    }
+    // Agents' schedule tools: the same checks and store the protocol uses, behind `scheduled.agentJobs` (off by default).
+    const jobOptionDeps = scheduledJobOptionsDepsFrom({
+      providerInstances: this.providerInstances,
+      harness: () => {
+        if (!this.harnessImpl) throw new Error('Providers are not ready yet')
+        return this.harnessImpl
+      },
+      projects: this.projects,
+      threads: this.threads
+    })
+    this.orchestrator.setScheduledJobs({
+      enabled: () => config.agentJobsEnabled(),
+      list: () => this.scheduled.listJobs(),
+      get: (id) => this.scheduled.getJob(id),
+      validate: (job) => validateScheduledJobOptions(job, jobOptionDeps),
+      create: (input) => this.scheduled.createJob(input),
+      update: (id, patch) => this.scheduled.updateJob(id, patch),
+      pause: (id, reason) => this.scheduled.pauseJob(id, reason),
+      trigger: (id) => this.scheduled.triggerJob(id),
+      wake: () => this.scheduled.wake()
+    })
+    // Job webhooks: secrets live in this profile's secret file, never in the process environment. The listener
+    // looks them up in a small in-memory table that is rebuilt on any scheduler change, so a request costs no file work.
+    const webhookSecrets = createProfileSecretAdapter({ profileRoot: homeDir, inheritProcessEnv: false })
+    this.scheduled.setWebhookSecrets({
+      write: (ref, value) => writeProfileSecret(homeDir, ref, value),
+      delete: (ref) => deleteProfileSecret(homeDir, ref)
+    })
+    this.webhookSecretCache = new WebhookSecretCache(this.scheduledStore, webhookSecrets)
+    this.scheduledWebhookServer = new ScheduledWebhookServer({
+      resolveSecret: (jobId) => this.webhookSecretCache.resolve(jobId),
+      schedulerRunning: () => this.scheduled.isRunning(),
+      trigger: (jobId, request) => this.scheduledStore.triggerFromWebhook(jobId, request),
+      recordRejection: (jobId, outcome, bodyBytes) => this.scheduledStore.recordWebhookRejection(jobId, outcome, bodyBytes),
+      accepted: () => this.scheduled.wake()
+    })
+    const channelCapsOf = (instanceId: string) => harness.resolve({ instanceId, model: '' }, { kind: 'device' }, 'channel_model').caps
+    const bots = this.personalBots
     this.channels = new ChannelService(
       this.orchestrator,
       this.threads,
@@ -549,8 +649,24 @@ export class MmsProfileServices {
       this.providerAuth,
       this.agents,
       {
-        // Channel turns pick pi-ai providers by name; disabled instances and hidden models leave.
-        listModels: () => this.providerInstances.llmProviders().filter((option) => option.instanceId && piProviderIdOf(option.instanceId))
+        // `/model` lists what a channel turn can run on and hold `CHANNEL_POLICY` (disabled
+        // instances and hidden models already left the listing); nothing is picked by name.
+        listModels: () => channelModelOptions(harness.listedLlmProviders({ kind: 'device' }), channelCapsOf),
+        capsOf: channelCapsOf,
+        getSubscriptionUsage: (providerId) => this.providerAccess.subscriptionUsage(providerId),
+        // Personal bots answer their owner's DMs (PR 6 §6); without bots.db the channel has none.
+        ...(bots ? {
+          bots: {
+            findByName: (name: string) => bots.findByName(name),
+            activateFromChannel: (input) => bots.activateFromChannel(input),
+            channelReply: (activationId, options) => bots.channelReply(activationId, options),
+            recentChannelActivations: () => bots.recentChannelActivations(),
+            onChanged: (listener) => {
+              bots.events.on('changed', listener)
+              return () => { bots.events.off('changed', listener) }
+            }
+          } satisfies ChannelBots
+        } : {})
       }
     )
 
@@ -600,7 +716,10 @@ export class MmsProfileServices {
       assertCanTrash: (record) => this.assertLifecycleIdle(record.taskId),
       drain: async (record) => {
         const owned = this.lifecycleOwnedTasks(record.taskId)
-        for (const task of owned) this.threadRuntimes.assertDeletable(task.taskId)
+        const botThreads = new Set(this.personalBots?.botThreadsAmong(owned.map((task) => task.taskId)) ?? [])
+        // Every check that does not depend on the bot's own turns comes first, so a trash refused by
+        // other work leaves the bot untouched.
+        for (const task of owned) this.threadRuntimes.assertDeletable(task.taskId, { ignoreTurn: botThreads.has(task.taskId) })
         const runs = await this.platform.workflowRuns.runtime.list({ profileId: this.profileId })
         if (
           runs.some(
@@ -614,7 +733,33 @@ export class MmsProfileServices {
             'Cannot trash thread: an owned workflow is still active or waiting'
           )
         }
-        for (const task of owned) settleThreadMutationOwnership(task.location)
+        const inventory = buildResourceInventory(this.threads.lifecycleStore, record)
+        if (inventory.blockers.length)
+          throw new ResourceLifecycleError('ambiguous', `Resource ownership is not established: ${inventory.blockers.join('; ')}`)
+        // The trash was accepted for exactly these threads (fresh operation, current generation) and
+        // passed every other check: only now do the bot activations on them end and their runs stop
+        // (PR 6 §4). A stale, refused or replayed trash never gets here. A stop that does not finish
+        // within its deadline is reported busy and nothing moves; the activations it ended stay ended,
+        // since their stop is already under way. Context threads are retired only after the move.
+        if (this.personalBots && !(await this.personalBots.quiesceForTrash(owned.map((task) => task.taskId))))
+          throw new ResourceLifecycleError('busy', 'Cannot trash thread: the bot working in it is still stopping')
+        // The final proof, now that the bot's turns have ended: no turn, and every lease free. A
+        // stopped bot turn lets go of its lease as it unwinds, so that is waited for briefly.
+        const prove = (): void => {
+          for (const task of owned) this.threadRuntimes.assertDeletable(task.taskId)
+          for (const task of owned) settleThreadMutationOwnership(task.location)
+        }
+        const until = Date.now() + 5_000
+        for (;;) {
+          try {
+            prove()
+            break
+          } catch (error) {
+            const busy = error instanceof Error && (('code' in error && (error as { code?: unknown }).code === 'busy') || error.name === 'LeaseBusyError')
+            if (!botThreads.size || !busy || Date.now() >= until) throw error
+            await new Promise((resolve) => setTimeout(resolve, 50))
+          }
+        }
       },
       settleMutationOwnership: async (record) => {
         const owned = this.lifecycleOwnedTasks(record.taskId)
@@ -628,6 +773,10 @@ export class MmsProfileServices {
           if (record.location === record.originalLocation)
             this.orchestrator.markThreadRestored(task.taskId)
           else this.orchestrator.markThreadDeleted(task.taskId)
+        }
+        // A second, idempotent pass once the threads moved; restoring never revives an activation.
+        if (record.location !== record.originalLocation) {
+          try { this.personalBots?.afterTrash(this.lifecycleOwnedTasks(record.taskId).map((task) => task.taskId)) } catch (error) { console.warn('bot activations could not be ended after the trash', { error: error instanceof Error ? error.message : String(error) }) }
         }
       },
       quiesceDisk: () => this.storageUsage.pause(),
@@ -644,6 +793,36 @@ export class MmsProfileServices {
       }
     })
     this.undoRetention = new UndoRetentionSweeper(this.threads.lifecycleStore)
+    this.pullRequestWatch = new PullRequestWatchService({
+      threads: this.threads,
+      codeHost: this.gitService.codeHost,
+      // The project's checkout names the repository every worktree of it shares, and exists whatever happens to a worktree.
+      folderFor: (threadId) => resolveThreadProjectPath(this.projects, this.threads, threadId) ?? null,
+      isAvailable: (threadId) => {
+        const record = this.threads.lifecycleStore.get(threadId)
+        return !record || record.state === 'active'
+      },
+      isSubagent: (threadId) => Boolean(this.threads.getThread(threadId)?.lineage || this.runEngine.delegations.getLineage(threadId)),
+      runStore: () => this.runEngine.store,
+      inbox: () => this.runEngine.inbox,
+      // A person's message is a visible user message that is not a job's prompt; wakes and notices are hidden or not user messages.
+      lastPersonMessageAt: (threadId) => {
+        const mine = this.orchestrator.getMessages(threadId).filter((message) => message.role === 'user' && !message.scheduled && !message.subagentNotice?.length)
+        const at = Date.parse(mine.at(-1)?.timestamp ?? '')
+        return Number.isNaN(at) ? null : at
+      },
+      notify: (threadId, text, messageId) => this.orchestrator.noteThreadUpdate(threadId, text, { messageId }),
+      onRunEnd: (listener) => {
+        const handler = (event: ThreadEvent): void => {
+          if (event.type !== 'run.status') return
+          if (TERMINAL_RUN_STATUSES.has((event.payload as RunRecord).status)) listener(event.threadId)
+        }
+        this.orchestrator.on('run-event', handler)
+        return () => { this.orchestrator.off('run-event', handler) }
+      }
+    })
+    // Any Stop that reaches a thread, and every subagent below it, ends its watch at once.
+    this.orchestrator.on('threads-stopped', (payload: { threadIds: string[] }) => this.pullRequestWatch.onStopped(payload.threadIds))
     const storageClock = new StorageSweepClock(this.threads.lifecycleStore.root)
     this.storagePolicy = new StoragePolicyStore(this.threads.lifecycleStore, storageClock, () =>
       this.storageCleanup.scheduleAfterPolicyChange()
@@ -675,11 +854,14 @@ export class MmsProfileServices {
 
   private assertLifecycleIdle(taskId: string): void {
     const owned = this.lifecycleOwnedTasks(taskId)
-    for (const task of owned) this.threadRuntimes.assertDeletable(task.taskId)
+    // A bot's turns on these threads are not other work: the accepted trash stops them in its drain.
+    const botThreads = new Set(this.personalBots?.botThreadsAmong(owned.map((task) => task.taskId)) ?? [])
+    for (const task of owned) this.threadRuntimes.assertDeletable(task.taskId, { ignoreTurn: botThreads.has(task.taskId) })
     this.platform.chats.assertLifecycleIdle(new Set(owned.map((task) => task.taskId)))
     this.platform.workflowRuns.assertLifecycleIdle(new Set(owned.map((task) => task.taskId)))
+    const turns = Object.fromEntries(Object.entries(this.orchestrator.getOwnedActivity()).filter(([label]) => !(label.startsWith('bot-turn:') && botThreads.has(label.slice('bot-turn:'.length)))))
     const activity = {
-      ...this.orchestrator.getOwnedActivity(),
+      ...turns,
       platform: this.platform.getActiveCount(),
       scheduled: this.scheduled.getActiveCount(),
       channels: this.channels.getActiveCount(),
@@ -706,8 +888,12 @@ export class MmsProfileServices {
     }
     const root = this.threads.lifecycleStore.require(taskId)
     const settle = () => {
-      for (const task of owned)
+      for (const task of owned) {
+        // A bot turn on a thread this trash would stop holds that thread's execution lease. The drain
+        // stops it and then proves ownership, so admission does not refuse the trash for it.
+        if (root.state === 'active' && botThreads.has(task.taskId)) continue
         if (existsSync(task.location)) settleThreadMutationOwnership(task.location)
+      }
     }
     if (['trashed', 'purge-started'].includes(root.state))
       this.threads.lifecycleStore.withCleanupSettlement(taskId, settle)
@@ -790,6 +976,9 @@ export class MmsProfileServices {
   ): Promise<TaskLifecycleRecord> {
     this.threads.assertLifecycleMutationAvailable()
     if (!this.threads.lifecycleStore.get(taskId)) this.threads.getThreadDir(taskId)
+    // A trashed thread is not listed and cannot be written to, so its watch ends now, while its folder still resolves, and a
+    // restore does not bring it back with a backlog.
+    this.pullRequestWatch.onEnded(taskId, 'trashed')
     const record = await this.lifecycle.trash({
       taskId,
       operationId: this.resolveLifecycleOperationId(taskId, 'trash', operationId),
@@ -908,6 +1097,7 @@ export class MmsProfileServices {
   /** Close admission synchronously, before any teardown await can admit another request. */
   beginShutdown(): void {
     void this.undoRetention.stop()
+    void this.pullRequestWatch.stop()
     void this.storageCleanup.stop()
     void this.storageUsage.stop()
     void this.lifecycle.cleanup.stop()
@@ -922,6 +1112,11 @@ export class MmsProfileServices {
     this.platform.beginShutdown()
     this.orchestrator.beginShutdown()
     this.scheduled.beginShutdown()
+    this.botScheduler?.stop()
+    this.webhooksClosed = true
+    if (this.webhookRetryTimer) clearTimeout(this.webhookRetryTimer)
+    this.webhookRetryTimer = null
+    void this.scheduledWebhookServer.stop().catch(() => undefined)
     this.ptyManager.beginShutdown()
   }
 
@@ -967,6 +1162,9 @@ export class MmsProfileServices {
   private wireServiceEvents(): void {
     this.scheduled.on('updated', (jobs) => {
       this.events.emit({ channel: 'scheduled:updated', data: jobs })
+      // A change to the jobs (a rotated or removed secret, a deleted job) applies to the listener at once.
+      this.webhookSecretCache.invalidate()
+      this.reconcileScheduledWebhookListener(jobs as ScheduledJob[])
     })
     this.scheduled.on('status', (status) => {
       this.events.emit({ channel: 'scheduled:status', data: status })
@@ -976,8 +1174,110 @@ export class MmsProfileServices {
     })
   }
 
-  start(): Promise<void> {
-    return this.requests.run('profile-start', () => this.startOwned())
+  /** True when at least one job has a webhook (the listener has a reason to run). */
+  private hasScheduledWebhooks(jobs: ScheduledJob[] = this.scheduled.listJobs()): boolean {
+    return jobs.some((job) => job.trigger?.webhook !== undefined)
+  }
+
+  /** Brings the job webhook listener up when the profile has it enabled; a taken port is reported and retried, not fatal. */
+  private async listenScheduledWebhooksIfEnabled(): Promise<void> {
+    const section = this.config.getScheduledSection().webhooks
+    if (!section?.enabled || this.webhooksClosed) return
+    if (!this.hasScheduledWebhooks()) {
+      this.config.updateScheduledSection({ webhooks: { enabled: false, port: scheduledWebhookPort(section.port) } })
+      return
+    }
+    await this.listenScheduledWebhooks(scheduledWebhookPort(section.port))
+  }
+
+  /** Binds the listener; returns the reason when it could not. A failed bind is tried again every half minute. */
+  private async listenScheduledWebhooks(port: number): Promise<string | undefined> {
+    if (this.webhooksClosed) return 'The profile is shutting down.'
+    // A forward set up for a net transport (Tailscale Serve) would reach whatever listens on its port.
+    if (this.net.localPorts().includes(port)) {
+      const message = `Webhook listener not started: port ${port} is used by this profile's net service. Choose another port.`
+      this.scheduled.setWebhookListenerError(message)
+      return message
+    }
+    try {
+      await this.scheduledWebhookServer.start(port)
+      this.scheduled.setWebhookListenerError(null)
+      return undefined
+    } catch (error) {
+      const message = `Webhook listener could not start on 127.0.0.1:${port}: ${error instanceof Error ? error.message : String(error)}`
+      this.scheduled.setWebhookListenerError(message)
+      this.scheduleWebhookRetry()
+      return message
+    }
+  }
+
+  private scheduleWebhookRetry(): void {
+    if (this.webhookRetryTimer || this.webhooksClosed) return
+    this.webhookRetryTimer = setTimeout(() => {
+      this.webhookRetryTimer = null
+      void this.listenScheduledWebhooksIfEnabled().catch(() => undefined)
+    }, 30_000)
+    this.webhookRetryTimer.unref?.()
+  }
+
+  /** The listener runs only while some job has a webhook: removing the last one stops it and turns it off. */
+  private reconcileScheduledWebhookListener(jobs: ScheduledJob[]): void {
+    const section = this.config.getScheduledSection().webhooks
+    if (!section?.enabled || this.hasScheduledWebhooks(jobs)) return
+    if (this.webhookRetryTimer) clearTimeout(this.webhookRetryTimer)
+    this.webhookRetryTimer = null
+    this.scheduled.setWebhookListenerError(null)
+    this.config.updateScheduledSection({ webhooks: { enabled: false, port: scheduledWebhookPort(section.port) } })
+    void this.scheduledWebhookServer.stop().catch(() => undefined)
+  }
+
+  /** The URL a sender posts to for a job (the configured port; the listener may not be up). */
+  scheduledWebhookUrl(jobId: string): string {
+    const port = scheduledWebhookPort(this.config.getScheduledSection().webhooks?.port)
+    return `http://127.0.0.1:${port}/hooks/${jobId}`
+  }
+
+  /**
+   * Gives a job a webhook, turns the listener on (and moves it when a different port is asked for) and returns the
+   * secret, shown only here. For a job that already has a webhook, a port moves the listener and no secret is
+   * issued. A listener that cannot bind is reported with the result; the job keeps its webhook.
+   */
+  async enableScheduledWebhook(
+    jobId: string,
+    options: { port?: number } = {}
+  ): Promise<{ job: ScheduledJob; secret?: string; url: string; listening: boolean; error?: string; warning?: string }> {
+    const existing = this.scheduled.getJob(jobId)
+    let job: ScheduledJob
+    let secret: string | undefined
+    if (existing?.trigger?.webhook) {
+      if (options.port === undefined) {
+        throw new ScheduledWebhookError('This job already has a webhook. Rotate its secret to get a new one, or give a port to move the listener.')
+      }
+      job = existing
+    } else {
+      ;({ job, secret } = this.scheduled.enableWebhook(jobId))
+    }
+    const current = this.config.getScheduledSection().webhooks
+    const port = scheduledWebhookPort(options.port ?? current?.port)
+    if (!current?.enabled || current.port !== port) this.config.updateScheduledSection({ webhooks: { enabled: true, port } })
+    this.webhooksClosed = false
+    let error = await this.listenScheduledWebhooks(port)
+    if (error && current?.enabled && current.port !== port) {
+      // The new port is not available: go back to the one that was working.
+      this.config.updateScheduledSection({ webhooks: { enabled: true, port: current.port } })
+      await this.listenScheduledWebhooks(current.port)
+      error = `${error} The listener stays on port ${current.port}.`
+    }
+    const warning = this.scheduled.isRunning()
+      ? undefined
+      : 'The scheduler is off, so requests are refused (503) until it is turned on (scheduled.enabled).'
+    return { job, ...(secret ? { secret } : {}), url: this.scheduledWebhookUrl(jobId), listening: error === undefined, ...(error ? { error } : {}), ...(warning ? { warning } : {}) }
+  }
+
+  async start(): Promise<void> {
+    await this.requests.run('profile-start', () => this.startOwned())
+    // Bot deletions a crash or a refused trash left unfinished, once the start's own request ended.
+    void this.personalBots?.finishDeletions().catch(() => {})
   }
 
   private async startOwned(): Promise<void> {
@@ -989,13 +1289,25 @@ export class MmsProfileServices {
     // and before anything that can send one (H4): scheduled jobs, channels and the network all
     // start below, so none of their sends can create a run that boot recovery then interrupts.
     this.orchestrator.recoverRunEngineOnBoot()
+    // Personal bots settle what the crash left before any worker can change a bot run (PR 6 §5a).
+    if (this.personalBots) {
+      try {
+        await this.personalBots.reconcileOnStartup()
+      } catch (error) {
+        console.warn('the bot startup pass failed', { error: error instanceof Error ? error.message : String(error) })
+      }
+    }
     this.startRunEngineWorkers()
 
     if (this.config.getScheduledSection().enabled) {
       this.scheduled.start()
+      // Bot schedules follow the same switch: with the scheduler off, nothing starts on its own.
+      this.botScheduler?.start()
     }
     await this.channels.startEnabled()
     await this.net.start()
+    // After the net service has loaded its ports, so the listener can refuse one of them.
+    await this.listenScheduledWebhooksIfEnabled()
 
     await this.startMcpServer()
     // Restore multi-tenant runtimes; mark non-reattachable PTY/agents interrupted.
@@ -1004,6 +1316,10 @@ export class MmsProfileServices {
     this.questions.markInterruptedByDaemonRestart()
     await this.platform.workflowRuns.startRecovery()
     this.undoRetention.start()
+    this.pullRequestWatch.start()
+    // A profile with no storage policy gets one now: what it had before for a profile in use, the recommended rules for a new one.
+    try { this.storagePolicy.initialize(() => this.threads.lifecycleStore.list().length > 0 || this.threads.listAllThreads().length > 0) }
+    catch { /* The policy is read again by every run; one that cannot be written is reported there. */ }
     // The storage service is the only scheduler; it runs the trash sweep inside its own run.
     this.storageCleanup.start()
     this.storageUsage.start()
@@ -1181,6 +1497,8 @@ export class MmsProfileServices {
   private async stopRunEngine(): Promise<void> {
     if (this.daemonHeartbeat) clearInterval(this.daemonHeartbeat)
     this.daemonHeartbeat = null
+    // Before the worker stops (it aborts the live turns): a stop handler must not withdraw saved approvals.
+    this.orchestrator.holdApprovals()
     this.runReconciler?.stop()
     this.stopInboxWakes?.()
     this.stopInboxWakes = null
@@ -1223,10 +1541,12 @@ export class MmsProfileServices {
     // later owner from even receiving shutdown.
     const cleanups = [
       () => this.undoRetention.stop(),
+      () => this.pullRequestWatch.stop(),
       () => this.storageCleanup.stop(),
       () => this.storageUsage.stop(),
       () => this.lifecycle.cleanup.stop(),
       () => this.platform.dispose(),
+      () => this.scheduledWebhookServer.stop(),
       () => this.scheduled.shutdown(),
       () => this.channels.shutdown(),
       () => this.stopRunEngine(),

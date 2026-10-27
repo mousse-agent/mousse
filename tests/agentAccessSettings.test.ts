@@ -21,8 +21,14 @@ describe('agent access settings (SPEC §15.1)', () => {
     expect(normalizeAgentAccessSettings({ projectIds: ['a', 'b', 'a'] }).projectIds).toEqual(['a', 'b'])
     expect(normalizeAgentAccessSettings({ level: 'manage', projectIds: [] })).toMatchObject({ level: 'manage', projectIds: [] })
     expect(normalizeAgentAccessSettings({ answerApprovals: 'yes' as never }).answerApprovals).toBe(false)
-    expect(normalizeAgentAccessSettings({ answerApprovals: true }).answerApprovals).toBe(true)
+    expect(normalizeAgentAccessSettings({ level: 'manage', answerApprovals: true }).answerApprovals).toBe(true)
     expect(normalizeAgentAccessSettings(null)).toEqual({ level: 'lineage', projectIds: [], answerApprovals: false })
+  })
+
+  it('the answer switch reads as off below the manage level, whoever wrote the level', () => {
+    for (const level of ['lineage', 'read', undefined, 'root'] as const)
+      expect(normalizeAgentAccessSettings({ level: level as never, answerApprovals: true }).answerApprovals, String(level)).toBe(false)
+    expect(normalizeAgentAccessSettings({ answerApprovals: true }).answerApprovals).toBe(false)
   })
 
   it('a malformed project list fails closed to lineage, never to every project', () => {
@@ -70,6 +76,18 @@ describe('agent access settings (SPEC §15.1)', () => {
       reloaded.set({ agentAccess: { projectIds: ['p2'] } as never })
       reloaded = new SettingsStore(MousseConfigStore.load(home))
       expect(reloaded.get().agentAccess).toEqual({ level: 'manage', projectIds: ['p2'], answerApprovals: true })
+      // A partial update that only lowers the level (from the CLI, another client or a script) clears the switch in the
+      // store itself, and raising the level again does not bring it back.
+      reloaded.set({ agentAccess: { level: 'read' } as never })
+      expect(new SettingsStore(MousseConfigStore.load(home)).get().agentAccess).toEqual({ level: 'read', projectIds: ['p2'], answerApprovals: false })
+      reloaded.set({ agentAccess: { level: 'manage' } as never })
+      expect(new SettingsStore(MousseConfigStore.load(home)).get().agentAccess).toEqual({ level: 'manage', projectIds: ['p2'], answerApprovals: false })
+      // Turning it on is its own, explicit write at the manage level.
+      reloaded.set({ agentAccess: { answerApprovals: true } as never })
+      expect(new SettingsStore(MousseConfigStore.load(home)).get().agentAccess.answerApprovals).toBe(true)
+      reloaded.set({ agentAccess: { level: 'lineage' } as never })
+      reloaded.set({ agentAccess: { level: 'manage' } as never })
+      expect(new SettingsStore(MousseConfigStore.load(home)).get().agentAccess.answerApprovals).toBe(false)
       // A level that is not one of the three reads back as the narrowest.
       reloaded.set({ agentAccess: { level: 'superuser' } as never })
       expect(new SettingsStore(MousseConfigStore.load(home)).get().agentAccess.level).toBe('lineage')

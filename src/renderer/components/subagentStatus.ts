@@ -15,6 +15,7 @@ export function subagentBadgeTone(subagent: { state: SubagentState; pending?: bo
       return 'running'
     case 'needs_input':
     case 'waiting':
+    case 'paused':
       return 'attention'
     case 'done':
       return 'done'

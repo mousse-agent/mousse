@@ -25,6 +25,11 @@ export interface MousseProvidersConfig {
   /** Seed version `instances` was last seeded with (`PROVIDER_INSTANCE_SEED_VERSION`). */
   instancesSeedVersion?: number
   /**
+   * Instance ids removed from this profile (tombstones). Authoritative over `instances`: a listed
+   * id is absent even when an older build re-seeded an entry for it. Only an explicit add clears one.
+   */
+  removedInstances?: string[]
+  /**
    * Model preferences per instance id (hidden, order, favorites, custom models), owned by the
    * harness gateway and validated when read.
    */
@@ -42,12 +47,19 @@ export interface MousseAgentsConfig {
 
 export type MousseSettingsSection = Pick<
   MousseSettings,
-  'profile' | 'appearance' | 'notifications' | 'shortcuts' | 'permissions' | 'context' | 'agentAccess' | 'integrations' | 'title'
+  'profile' | 'appearance' | 'notifications' | 'shortcuts' | 'permissions' | 'context' | 'agentAccess' | 'runs' | 'integrations' | 'title'
 >
+
+/** Default port of the loopback listener that receives job webhooks. */
+export const DEFAULT_SCHEDULED_WEBHOOK_PORT = 18790
 
 export interface ScheduledConfigSection {
   enabled: boolean
   jobs: ScheduledJobDefinition[]
+  /** The loopback listener for job webhooks; off until a job's webhook is enabled. */
+  webhooks?: { enabled: boolean; port: number }
+  /** Agents may list, create, change, pause and run jobs through the Mousse tools; off until a person turns it on. */
+  agentJobs?: boolean
 }
 
 /** Static job fields stored in mousse.conf (runtime state lives under ~/.mousse/scheduled/). */
@@ -63,8 +75,12 @@ export interface ScheduledJobDefinition {
   selection?: ScheduledJob['selection']
   mode?: ScheduledJob['mode']
   workspace?: ScheduledJob['workspace']
+  permissionMode?: ScheduledJob['permissionMode']
+  permissionCeiling?: ScheduledJob['permissionCeiling']
   createdBy?: ScheduledJob['createdBy']
   accessCap?: ScheduledJob['accessCap']
+  expiresAt?: ScheduledJob['expiresAt']
+  trigger?: ScheduledJob['trigger']
   repeat?: { times: number; completed?: number }
   createdAt: string
   updatedAt: string
@@ -82,6 +98,7 @@ export interface ScheduledJobRuntime {
   repeat?: { times: number; completed: number }
   runClaim?: ScheduledJob['runClaim']
   pendingOccurrence?: ScheduledJob['pendingOccurrence']
+  pendingTrigger?: ScheduledJob['pendingTrigger']
 }
 
 export interface MousseConf {

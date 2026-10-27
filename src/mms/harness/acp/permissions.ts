@@ -13,7 +13,7 @@ import type {
 import { APPROVALS_REFUSED_MESSAGE } from '../../../shared/harness/types'
 import { acpPermissionKey, actionOf } from '../../../shared/permissionKeys'
 import { permissionModeAllows, type PermissionAction, type PermissionMode } from '../../../shared/permissionMode'
-import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
+import type { ApprovalTag, UserQuestionService } from '../../orchestrator/UserQuestionService'
 
 /**
  * What the agent asks of the user: tool permissions, and (where the preset offers client fs) file
@@ -88,7 +88,7 @@ export interface PermissionPrompter {
    * `approval` says what kind of action is asked about, so who may answer is decided by
    * `canAnswerApproval` (the options are all once-only: `allow_once` allows, `reject_once` rejects).
    */
-  choose(request: { threadId: string; title: string; options: ClassifiedOption[]; approval: { action: PermissionAction; permissionKey: string } }): Promise<string | undefined>
+  choose(request: { threadId: string; title: string; options: ClassifiedOption[]; approval: Pick<ApprovalTag, 'action' | 'permissionKey' | 'tool' | 'reason'> }): Promise<string | undefined>
 }
 
 export { APPROVALS_REFUSED_MESSAGE, QUESTIONS_REFUSED_MESSAGE } from '../../../shared/harness/types'
@@ -158,11 +158,27 @@ export async function answerPermission(
     threadId: scope.threadId,
     title: request.toolCall.title ?? `Allow ${options.label} to run this tool?`,
     options: shown,
-    approval: { action, permissionKey }
+    // The agent's own description of the call is its fingerprint, with the call's title: the kind alone names no
+    // tool (a read-only and a destructive MCP tool are both `other`). A request whose `rawInput` is missing or
+    // empty (`{}`, a string) describes nothing, so it has no fingerprint, no grant and no rule.
+    approval: {
+      action,
+      permissionKey,
+      tool: {
+        name: request.toolCall.kind ?? 'other',
+        input: isDescribed(request.toolCall.rawInput) ? { title: request.toolCall.title ?? null, rawInput: request.toolCall.rawInput } : undefined,
+        ...(scope.cwd ? { cwd: scope.cwd } : {})
+      }
+    }
   })
   if (scope.aborted()) return cancelled
   const selected = shown.find((option) => option.optionId === answer)
   return selected ? { outcome: { outcome: 'selected', optionId: selected.optionId } } : cancelled
+}
+
+/** A call description that says something: a non-empty object. */
+function isDescribed(rawInput: unknown): rawInput is Record<string, unknown> {
+  return typeof rawInput === 'object' && rawInput !== null && !Array.isArray(rawInput) && Object.keys(rawInput).length > 0
 }
 
 /** A path the agent may touch: inside the workspace, also after resolving links. */
@@ -217,7 +233,8 @@ export async function writeWorkspaceFile(
       approval: {
         action: 'edit',
         permissionKey: acpPermissionKey('edit'),
-        options: [{ id: 'allow', decision: 'allow', scope: 'once' }, { id: 'reject', decision: 'reject' }]
+        options: [{ id: 'allow', decision: 'allow', scope: 'once' }, { id: 'reject', decision: 'reject' }],
+        tool: { name: 'fs/write_text_file', input: { path: request.path, content: request.content }, ...(scope.cwd ? { cwd: scope.cwd } : {}) }
       }
     })
     if (answer.write !== 'allow') throw new Error(`${label} file write was rejected`)

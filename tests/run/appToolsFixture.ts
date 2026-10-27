@@ -4,6 +4,7 @@ import type { DelegationToolHost } from '../../src/mms/run/mcp/appTools/delegati
 import {
   AppToolTurns,
   createAppToolRegistry,
+  type AgentQueueCommand,
   type AppToolHost,
   type AppToolTurn,
   type McpCallRequest,
@@ -11,7 +12,7 @@ import {
   type McpTurnBinding
 } from '../../src/mms/run/mcp/appTools'
 import type { RunEngine } from '../../src/mms/run/RunEngine'
-import type { ModeCeiling } from '../../src/mms/run/types'
+import type { AgentActor, ModeCeiling } from '../../src/mms/run/types'
 import { TaskQueue } from '../../src/mms/tasks/TaskQueue'
 
 /** A fake thread owner for the app-tool registry, recording what each tool asked of it. */
@@ -29,19 +30,30 @@ export function fakeAppToolHost(overrides: Partial<AppToolHost> = {}) {
   }
   const tasks = new TaskQueue()
   const enqueued: Array<{ threadId: string; input: unknown }> = []
+  /** Every queue command the tools asked for, with who asked and under which request key. */
+  const queueCommands: Array<{ threadId: string; command: AgentQueueCommand; options: { clientRequestId: string; actor: AgentActor; level: AgentAccessLevel } }> = []
   const host: AppToolHost = {
     delegation: vi.fn(() => delegation),
     askUser: vi.fn(async () => ({ q1: 'a' })),
     presentPlan: vi.fn(),
     tasks: () => tasks,
-    listQueue: () => [],
-    enqueue: (threadId, input) => {
-      enqueued.push({ threadId, input })
-      return { id: 'item-1' }
+    queueSnapshot: () => ({ items: [], claimed: [], revision: 'rev-0', open: true }),
+    queueCommand: (threadId, command, options) => {
+      queueCommands.push({ threadId, command, options })
+      if (command.op === 'enqueue') enqueued.push({ threadId, input: { content: command.content, mode: command.mode } })
+      const itemId = 'itemId' in command ? command.itemId : 'item-1'
+      return {
+        outcome: command.op === 'enqueue' ? 'enqueued' : command.op === 'edit' ? 'edited' : command.op === 'remove' ? 'removed' : command.op === 'reorder' ? 'reordered' : 'promoted',
+        itemId,
+        revision: 'rev-1',
+        replayed: false,
+        effectsSettled: true,
+        ...(command.op === 'enqueue' ? { item: { id: 'item-1', threadId, content: command.content, enqueuedAt: '2026-10-27T00:00:00.000Z', order: 0, intent: 'normal' as const, state: 'pending' as const } } : {})
+      }
     },
     ...overrides
   }
-  return { host, delegation, tasks, enqueued }
+  return { host, delegation, tasks, enqueued, queueCommands }
 }
 
 /** A turn as the `turn.start` executor registers it, for an agent-mode main thread. */

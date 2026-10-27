@@ -43,6 +43,7 @@ import type {
   GitPushOptions,
   GitScope,
   GitStatusSnapshot,
+  ApprovalRuleInfo,
   MainView,
   OrchestratorResponse,
   PermissionMode,
@@ -52,9 +53,14 @@ import type {
   QueuedMessage,
   CreateScheduledJobInput,
   ScheduledJob,
+  ScheduledJobPatch,
+  ScheduledWebhookDeliveryLog,
+  ScheduledWebhookGrant,
+  ScheduledSettings,
   SchedulerStatus,
   ChannelActivityEvent,
   ChannelConfig,
+  ChannelOwnerClaim,
   ChannelPlatform,
   ChannelsSnapshot,
   PairingRequest,
@@ -66,6 +72,7 @@ import type {
   ThreadActivitySnapshot,
   TurnState,
   TurnStateSnapshot,
+  QuestionAnswerOutcome,
   UserQuestionAnswers
 } from '../shared/types'
 import type {
@@ -78,6 +85,8 @@ import type {
   PullRequestPushTarget,
   PullRequestRef,
   PullRequestScope,
+  PullRequestWatchMode,
+  PullRequestWatchStatus,
   ResolvedPullRequestSummary,
   StartPullRequestThreadInput,
   StartPullRequestThreadResult
@@ -114,6 +123,7 @@ import type {
   RemoveInstallResult,
   SignInResponse
 } from '../shared/harness/types'
+import type { BotEscalationSummary } from '../shared/bots/personal/escalation'
 import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from '../shared/platform'
 import type { ChatReference } from '../shared/chatReferences'
 import type { InAppBrowserApi, InAppBrowserState } from '../shared/browser/inApp'
@@ -275,6 +285,9 @@ const api = {
     },
     answerQuestions: (requestId: string, answers: UserQuestionAnswers): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:answerQuestions', requestId, answers),
+    /** `answerQuestions` with its outcome: who answered a saved approval request first, or why it was closed. */
+    answerQuestionsDetailed: (requestId: string, answers: UserQuestionAnswers): Promise<QuestionAnswerOutcome> =>
+      ipcRenderer.invoke('orchestrator:answerQuestionsDetailed', requestId, answers),
     dismissQuestions: (requestId: string): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:dismissQuestions', requestId),
     abort: (threadId?: string): Promise<boolean> =>
@@ -533,7 +546,18 @@ const api = {
       storageInvoke('pullRequests:startThread', input),
     /** Where Push goes for a thread linked to a pull request. */
     pushTarget: (threadId: string): Promise<PullRequestPushTarget> =>
-      ipcRenderer.invoke('pullRequests:pushTarget', threadId)
+      ipcRenderer.invoke('pullRequests:pushTarget', threadId),
+    /** Turns a thread's watch of its pull request off, to notify, or to wake the agent. `number` links that pull request first. */
+    watch: (threadId: string, watch: PullRequestWatchMode, number?: number): Promise<PullRequestWatchStatus> =>
+      ipcRenderer.invoke('pullRequests:watch', threadId, watch, number),
+    watchStatus: (threadId: string): Promise<PullRequestWatchStatus> =>
+      ipcRenderer.invoke('pullRequests:watchStatus', threadId),
+    /** A watched pull request changed (checks finished, a review or comment arrived, the watch ended). */
+    onUpdated: (cb: (event: { threadId: string; number: number; changes: string[] }) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, event: { threadId: string; number: number; changes: string[] }) => cb(event)
+      ipcRenderer.on('pullRequests:updated', handler)
+      return () => ipcRenderer.removeListener('pullRequests:updated', handler)
+    }
   },
   editors: {
     list: (options?: { refresh?: boolean }): Promise<EditorInfo[]> =>
@@ -618,6 +642,19 @@ const api = {
       return () => ipcRenderer.removeListener('mcp:changed', handler)
     }
   },
+  /** Personal bots (Automations → Bots): change and escalation events; requests go through `platformRequest`. */
+  personalBots: {
+    onChanged: (cb: (event: { botId?: string; activationId?: string }) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, event: { botId?: string; activationId?: string }) => cb(event ?? {})
+      ipcRenderer.on('bots:changed', handler)
+      return () => ipcRenderer.removeListener('bots:changed', handler)
+    },
+    onEscalation: (cb: (escalation: BotEscalationSummary) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, escalation: BotEscalationSummary) => cb(escalation)
+      ipcRenderer.on('bots:escalation', handler)
+      return () => ipcRenderer.removeListener('bots:escalation', handler)
+    }
+  },
   skills: {
     list: (projectId?: string): Promise<SkillsRegistrySnapshot> =>
       ipcRenderer.invoke('skills:list', projectId),
@@ -634,9 +671,11 @@ const api = {
     }
   },
   storage: {
-    policy: (): Promise<{ trash: import('../shared/resourceLifecycle').TrashRetentionPolicy; trashSweepStatus: { suspended: boolean; reason?: string }; policy: import('../shared/storage').StoragePolicy; clockSuspended: boolean }> => storageInvoke('storage:policy'),
+    policy: (): Promise<{ trash: import('../shared/resourceLifecycle').TrashRetentionPolicy; trashSweepStatus: { suspended: boolean; reason?: string }; policy: import('../shared/storage').StoragePolicy; clockSuspended: boolean; reviewRecommended?: boolean }> => storageInvoke('storage:policy'),
+    reviewDismiss: (): Promise<{ reviewRecommended: false }> => storageInvoke('storage:reviewDismiss'),
     configure: (policy: import('../shared/storage').StoragePolicy): Promise<{ policy: import('../shared/storage').StoragePolicy }> => storageInvoke('storage:configure', policy),
-    cleanupRun: (): Promise<{ report: import('../shared/storage').StorageCleanupReport }> => storageInvoke('storage:cleanupRun'),
+    cleanupPlan: (): Promise<{ plan: import('../shared/storage').StorageCleanupPlanItem[]; token: import('../shared/storage').StorageCleanupPlanToken }> => storageInvoke('storage:cleanupPlan'),
+    cleanupRun: (token?: import('../shared/storage').StorageCleanupPlanToken): Promise<{ report: import('../shared/storage').StorageCleanupReport }> => storageInvoke('storage:cleanupRun', token),
     cleanupLastReport: (): Promise<{ report: import('../shared/storage').StorageCleanupReport | null }> => storageInvoke('storage:cleanupLastReport'),
     usage: (options?: { refresh?: boolean }): Promise<import('../shared/storage').StorageUsageSnapshot> => storageInvoke('storage:usage', options)
   },
@@ -720,6 +759,12 @@ const api = {
       ipcRenderer.invoke('threads:setWorktreeEnabled', threadId, enabled),
     setPermissionMode: (threadId: string, mode: PermissionMode): Promise<Thread> =>
       ipcRenderer.invoke('threads:setPermissionMode', threadId, mode),
+    /** The thread's "Always for this thread" rules. */
+    approvalRules: (threadId: string): Promise<ApprovalRuleInfo[]> =>
+      ipcRenderer.invoke('threads:approvalRules', threadId),
+    /** Revokes one rule (by id) or all of them; returns the rules that remain. */
+    clearApprovalRules: (threadId: string, ruleId?: string): Promise<ApprovalRuleInfo[]> =>
+      ipcRenderer.invoke('threads:clearApprovalRules', threadId, ruleId),
     settle: (threadId: string, settled: boolean): Promise<Thread> =>
       ipcRenderer.invoke('threads:settle', threadId, settled),
     reorder: (projectId: string | undefined, threadIds: string[]): Promise<Thread[]> =>
@@ -779,8 +824,15 @@ const api = {
     get: (id: string): Promise<ScheduledJob | undefined> => ipcRenderer.invoke('scheduled:get', id),
     create: (input: CreateScheduledJobInput): Promise<ScheduledJob> =>
       ipcRenderer.invoke('scheduled:create', input),
-    update: (id: string, patch: Partial<ScheduledJob>): Promise<ScheduledJob | null> =>
+    update: (id: string, patch: ScheduledJobPatch): Promise<ScheduledJob | null> =>
       ipcRenderer.invoke('scheduled:update', id, patch),
+    webhook: {
+      enable: (id: string): Promise<ScheduledWebhookGrant> => ipcRenderer.invoke('scheduled:webhook:enable', id),
+      rotate: (id: string): Promise<ScheduledWebhookGrant> => ipcRenderer.invoke('scheduled:webhook:rotate', id),
+      disable: (id: string): Promise<ScheduledJob> => ipcRenderer.invoke('scheduled:webhook:disable', id),
+      deliveries: (id: string): Promise<ScheduledWebhookDeliveryLog> =>
+        ipcRenderer.invoke('scheduled:webhook:deliveries', id)
+    },
     delete: (id: string): Promise<boolean> => ipcRenderer.invoke('scheduled:delete', id),
     pause: (id: string, reason?: string): Promise<ScheduledJob | null> =>
       ipcRenderer.invoke('scheduled:pause', id, reason),
@@ -788,6 +840,11 @@ const api = {
       ipcRenderer.invoke('scheduled:resume', id),
     run: (id: string): Promise<ScheduledJob | null> => ipcRenderer.invoke('scheduled:run', id),
     status: (): Promise<SchedulerStatus> => ipcRenderer.invoke('scheduled:status'),
+    extend: (id: string): Promise<ScheduledJob | null> => ipcRenderer.invoke('scheduled:extend', id),
+    settings: {
+      get: (): Promise<ScheduledSettings> => ipcRenderer.invoke('scheduled:settings:get'),
+      setAgentJobs: (agentJobs: boolean): Promise<ScheduledSettings> => ipcRenderer.invoke('scheduled:settings:set', agentJobs)
+    },
     onUpdated: (cb: (jobs: ScheduledJob[]) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, jobs: ScheduledJob[]) => cb(jobs)
       ipcRenderer.on('scheduled:updated', handler)
@@ -823,6 +880,19 @@ const api = {
       ipcRenderer.invoke('channels:sendTest', platform, chatId, text, threadId),
     getActivity: (limit?: number): Promise<ChannelActivityEvent[]> =>
       ipcRenderer.invoke('channels:getActivity', limit),
+    /** "This is me": the code, its status, and the confirmation that stores the owner. */
+    owner: {
+      start: (platform: ChannelPlatform): Promise<{ code: string; expiresAt: string }> =>
+        ipcRenderer.invoke('channels:owner:start', platform),
+      status: (platform: ChannelPlatform): Promise<ChannelOwnerClaim | null> =>
+        ipcRenderer.invoke('channels:owner:status', platform),
+      confirm: (platform: ChannelPlatform, userId: string): Promise<unknown> =>
+        ipcRenderer.invoke('channels:owner:confirm', platform, userId),
+      cancel: (platform: ChannelPlatform): Promise<void> =>
+        ipcRenderer.invoke('channels:owner:cancel', platform),
+      clear: (platform: ChannelPlatform): Promise<unknown> =>
+        ipcRenderer.invoke('channels:owner:clear', platform)
+    },
     onUpdated: (cb: (snapshot: ChannelsSnapshot) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, snapshot: ChannelsSnapshot) => cb(snapshot)
       ipcRenderer.on('channels:updated', handler)

@@ -296,7 +296,7 @@ describe('two Cursor instances', () => {
       await signIn('cursor:a', 'key-1')
       await signIn('cursor:b', 'key-2')
       const turn = async (instanceId: string, previous?: TurnSpec['binding']) => {
-        const binding = await harness.bind(harness.resolveStored({ instanceId, llmProvider: '', model: 'default' }, { purpose: 'turn' }), { mode: 'agent' })
+        const binding = await harness.bind(harness.resolveStored({ instanceId, llmProvider: '', model: 'default' }, { purpose: 'turn' }), { mode: 'agent', permissionMode: 'full' })
         const spec = turnSpec(instanceId, binding, profileHome)
         await harness.startTurn({ ...spec, ...(previous ? { previous } : {}), input: { ...spec.input, model: 'default', llmProvider: '' } }).result
         return binding

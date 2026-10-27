@@ -6,7 +6,7 @@ import {
   type MousseSettingsUpdate
 } from '../../../shared/settings'
 import type { Project } from '../../../shared/types'
-import { SettingsGroup, SettingsRow } from './SettingsRow'
+import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { Select } from '../ui/Select'
 import { Check, ShieldCheck } from '../../lib/icons'
 
@@ -117,7 +117,9 @@ export function AgentAccessSettings({
           <Select
             ariaLabel="Agent access level"
             value={access.level}
-            onChange={(next) => save({ level: next })}
+            // Answering approvals is part of Manage: leaving it switches the answer switch off, so raising the level
+            // again later never brings the permission back on its own.
+            onChange={(next) => save({ level: next, ...(next !== 'manage' ? { answerApprovals: false } : {}) })}
             options={AGENT_ACCESS_LEVELS.map(({ value, label, summary }) => ({ value, label, description: summary }))}
           />
         }
@@ -157,6 +159,27 @@ export function AgentAccessSettings({
             )}
           </div>
         </SettingsRow>
+      )}
+      {access.level === 'manage' && (
+        <SettingsRow
+          title="Agents may answer approvals on other threads"
+          htmlFor="agent-access-answer-approvals"
+          description={<>
+            <strong>Use with care.</strong> An agent can approve a command, a file change or a tool that
+            another thread asked to run, in the projects above, without you seeing the request first. It can approve only what its own permission
+            mode would allow without asking, never &ldquo;Always for this thread&rdquo;, and never its own thread. Each answer shows in that
+            thread as approved by an agent. Requests the provider asks for itself (such as Claude Code&rsquo;s own safety check) and turns you
+            started yourself stay yours. Off by default, and switched off again when the level above is lowered.
+          </>}
+          control={
+            <Switch
+              id="agent-access-answer-approvals"
+              label="Agents may answer approvals on other threads"
+              checked={access.answerApprovals}
+              onChange={(answerApprovals) => save({ answerApprovals })}
+            />
+          }
+        />
       )}
       <SettingsRow
         title="Capped threads"

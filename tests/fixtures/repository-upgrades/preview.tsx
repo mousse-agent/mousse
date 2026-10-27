@@ -86,12 +86,21 @@ Object.assign(window, { mousse: { threads: {
         trashSweepStatus: { reason: 'Fixture cleanup status' } }
     } finally { probes.inventoryActive -= 1 }
   },
-  configureTrash: async (policy: { graceDays: number; automaticPurge: boolean }) => { if (probes.actionFailure) throw probes.actionFailure; probes.savedGraceDays = policy.graceDays; probes.savedAutomaticPurge = policy.automaticPurge },
-  delete: async () => { if (probes.actionFailure) throw probes.actionFailure; probes.state = 'trashed' },
-  restore: async () => { if (probes.actionFailure) throw probes.actionFailure; probes.state = 'active' }
+  configureTrash: async (policy: { graceDays: number; automaticPurge: boolean }) => { if (probes.actionFailure) throw probes.actionFailure; probes.savedGraceDays = policy.graceDays; probes.savedAutomaticPurge = policy.automaticPurge }
 } } })
 const unsubscribe = () => () => {}
+const fixturePolicy = { schemaVersion: 1, worktrees: { removeWithDeletedThreads: true, inactiveDays: 30, removeMerged: true }, browser: { captureDays: 30 } }
 Object.assign(window.mousse, {
+  // Settings > Storage: policies, a saved usage measurement and cleanup, with nothing on disk behind them.
+  storage: {
+    policy: async () => ({ trash: { schemaVersion: 1, graceDays: probes.savedGraceDays, automaticPurge: probes.savedAutomaticPurge }, trashSweepStatus: { suspended: false }, policy: fixturePolicy, clockSuspended: false }),
+    configure: async (policy: unknown) => ({ policy }),
+    usage: async () => ({ measuredAt: new Date().toISOString(), durationMs: 5, partial: false, entries: [{ kind: 'worktrees', projectId: 'p1', threadId: 'fixture-task', bytes: 1024 * 1024, files: 10 }], names: { projects: { p1: 'Fixture project' }, threads: { 'fixture-task': 'Fixture task' } } }),
+    cleanupLastReport: async () => ({ report: null }),
+    cleanupPlan: async () => ({ plan: [] }),
+    cleanupRun: async () => { throw new Error('The fixture does not clean up') }
+  },
+  platformRequest: { request: async () => { throw new Error('The fixture has no network') } },
   settings: { get: async () => getDefaultSettings(), getOptions: async () => ({ llmProviders: [] }), onChanged: unsubscribe },
   skills: { list: async () => ({ skills: [] }), onChanged: unsubscribe },
   providers: { onChanged: unsubscribe },

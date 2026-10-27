@@ -13,7 +13,8 @@ export function Modal({
   onClose,
   children,
   footer,
-  className
+  className,
+  closeDisabled = false
 }: {
   open: boolean
   title: string
@@ -23,6 +24,8 @@ export function Modal({
   footer?: ReactNode
   /** Extra class on the overlay, for dialogs that need their own stacking or layout. */
   className?: string
+  /** The dialog cannot be dismissed right now (work is in progress): the close button says so. */
+  closeDisabled?: boolean
 }) {
   const titleId = useId()
   const panelRef = useRef<HTMLDivElement>(null)
@@ -40,7 +43,7 @@ export function Modal({
       <div ref={panelRef} tabIndex={-1} className={`modal${hideTitle ? ' untitled' : ''}`} onClick={(e) => e.stopPropagation()}>
         <header className="modal-header">
           {!hideTitle && <h3 id={titleId}>{title}</h3>}
-          <ModalClose onClose={onClose} />
+          <ModalClose onClose={onClose} disabled={closeDisabled} />
         </header>
         <DialogParent.Provider value={panelRef}>
           <div className="modal-body">{children}</div>
@@ -52,9 +55,9 @@ export function Modal({
 }
 
 /** The dialog close button: a 28px icon button with a tooltip. Shared with the integrations dialog. */
-export function ModalClose({ onClose }: { onClose: () => void }) {
+export function ModalClose({ onClose, disabled = false }: { onClose: () => void; disabled?: boolean }) {
   return (
-    <button type="button" className="settings-icon-btn modal-close" title="Close" aria-label="Close" onClick={onClose}>
+    <button type="button" className="settings-icon-btn modal-close" title="Close" aria-label="Close" disabled={disabled} onClick={onClose}>
       <X size={16} />
     </button>
   )

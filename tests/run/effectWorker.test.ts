@@ -308,6 +308,39 @@ describe('EffectWorker', () => {
     worker.notify()
     await waitFor(() => done.includes('manual'), 'notify wake')
   })
+
+  it('runs request.respond (an approval request\'s answer) on a control fibre beside a turn, and never retries it', async () => {
+    profileHome = mkdtempSync(join(tmpdir(), 'mousse-worker-'))
+    db = new ProfileDatabase({ profileHome })
+    const outbox = new EffectOutbox(new RunStore(db))
+    const turn = deferred()
+    const delivered: string[] = []
+    const worker = new EffectWorker({
+      outbox,
+      executors: {
+        'turn.start': async () => turn.promise,
+        'request.respond': async (effect) => {
+          delivered.push((effect.payload as { requestId: string }).requestId)
+          if (delivered.length === 1) throw new Error('the callback is gone')
+        }
+      },
+      owner: '1:1',
+      fibres: { turn: 1, control: 1 },
+      pollMs: 60_000
+    })
+    workers.push(worker)
+    worker.start()
+    // A long turn holds its fibre; the answer is not queued behind it.
+    outbox.enqueue({ threadId: 't', kind: 'turn.start' })
+    const first = outbox.enqueue({ threadId: 't', kind: 'request.respond', payload: { requestId: 'req-1' } })
+    await waitFor(() => outbox.get(first.effectId)!.status === 'failed', 'the failed delivery')
+    // Delivered at most once: a failure is final, not another attempt.
+    expect(outbox.get(first.effectId)).toMatchObject({ status: 'failed', attempts: 1, maxAttempts: 1 })
+    const second = outbox.enqueue({ threadId: 't', kind: 'request.respond', payload: { requestId: 'req-2' } })
+    await waitFor(() => outbox.get(second.effectId)!.status === 'succeeded', 'the delivery')
+    expect(delivered).toEqual(['req-1', 'req-2'])
+    turn.resolve()
+  })
 })
 
 function addMinutes(iso: string, minutes: number): string {

@@ -1,0 +1,7 @@
+{
+  "_comment": "What a build before 5a-1 writes to a profile's providers section when it seeds pi:<provider> for a credentialed provider (ProviderInstanceService.list before 5a-1): the whole instances map and the seed version, merged shallowly over the section. It knows nothing of removedInstances.",
+  "instances": {
+    "pi:openrouter": { "driver": "pi", "enabled": true }
+  },
+  "instancesSeedVersion": 1
+}

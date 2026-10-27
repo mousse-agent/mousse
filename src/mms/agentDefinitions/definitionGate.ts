@@ -121,11 +121,12 @@ export function takeAuthorizedCall(authority: DefinitionAuthority, call: Authori
 /**
  * One call under the definition's authority: granted, prepared, approved when the policy says so,
  * and revalidated. `args` are the arguments the call runs with; the caller never changes them
- * after this check.
+ * after this check. `uncontainedShell`: the call runs a shell the runtime cannot contain, so a
+ * person approves exactly these arguments first, and an unattended run is refused.
  */
 export async function authorizeDefinitionCall(
   authority: DefinitionAuthority,
-  call: { toolName: string; args: Record<string, unknown>; projectPath?: string; signal?: AbortSignal }
+  call: { toolName: string; args: Record<string, unknown>; projectPath?: string; signal?: AbortSignal; uncontainedShell?: boolean }
 ): Promise<DefinitionDecision> {
   if (!definitionToolGranted(call.toolName, authority.grants, authority.mcpTools))
     return { allowed: false, message: `Tool "${call.toolName}" is not granted to this agent definition.` }
@@ -138,7 +139,7 @@ export async function authorizeDefinitionCall(
     isMcp,
     ...(call.projectPath ? { projectPath: call.projectPath } : {})
   }
-  const prepared = prepareTrustedToolDispatch(base)
+  const prepared = prepareTrustedToolDispatch({ ...base, ...(call.uncontainedShell ? { uncontainedShell: true } : {}) })
   const authorized = await authorizeTrustedToolDispatch({
     ...base,
     prepared,

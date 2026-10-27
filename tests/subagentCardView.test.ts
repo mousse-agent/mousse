@@ -94,6 +94,7 @@ describe('card text', () => {
   it('says what the subagent is doing in words', () => {
     expect(cardStatusLabel(card({ state: 'working' }))).toBe('Working')
     expect(cardStatusLabel(card({ state: 'needs_input' }))).toBe('Needs input')
+    expect(cardStatusLabel(card({ state: 'paused' }))).toBe('Paused')
     expect(cardStatusLabel(card({ state: 'done' }))).toBe('Done')
     expect(cardStatusLabel(card({ state: 'failed' }))).toBe('Failed')
     expect(cardStatusLabel(card({ state: 'stopped' }))).toBe('Stopped')
@@ -121,6 +122,7 @@ describe('card text', () => {
     expect(cardStateNote(card({ pending: true, state: 'starting' }))).toBeNull()
     expect(cardStateNote(card({ state: 'done' }))).toBeNull()
     expect(cardStateNote(card({ state: 'needs_input' }))).toBe('Needs input')
+    expect(cardStateNote(card({ state: 'paused' }))).toBe('Paused')
     expect(cardStateNote(card({ state: 'failed' }))).toBe('Failed')
     expect(cardStateNote(card({ state: 'stopped' }))).toBe('Stopped')
     expect(cardStateNote(card({ state: 'waiting', waitingOn: [{ title: 'a', state: 'working' }] }))).toBe('Waiting on 1 subagent')

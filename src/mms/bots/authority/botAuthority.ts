@@ -41,7 +41,9 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
   const appTools: ReadonlySet<string> = new Set(permissions.appTools)
   const skills: ReadonlySet<string> = new Set(permissions.skills)
   const mcp: ReadonlySet<`${string}::${string}`> = new Set(permissions.mcp)
-  const workspace = permissions.workspace
+  // Without per-folder access every root has the workspace's access.
+  const workspace = permissions.workspace ? { ...permissions.workspace, writeRoots: permissions.workspace.writeRoots ?? (permissions.workspace.access === 'write' ? permissions.workspace.roots : []) } : null
+  const readOnlyRoots = workspace ? workspace.roots.filter((root) => !workspace.writeRoots.includes(root)) : []
   const authority: BotAuthority = {
     activationId: input.activationId,
     role: input.role,
@@ -49,7 +51,7 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     appTools,
     skills,
     mcp,
-    workspace: workspace ? { roots: [...workspace.roots], access: workspace.access, scratch: workspace.scratch } : null,
+    workspace: workspace ? { roots: [...workspace.roots], access: workspace.access, writeRoots: [...workspace.writeRoots], scratch: workspace.scratch } : null,
     waiting: input.waiting,
     counters: input.counters,
     time: input.time,
@@ -85,6 +87,8 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     // A file tool with no path argument works in its working directory: the scratch folder.
     if (!paths.length) return { ok: true }
     for (const raw of paths) {
+      // A path the runtime itself expands is read only after this check: never inside a root.
+      if (runtimeExpandedPath(raw)) return { ok: false, wall: { kind: 'path', tool: nativeName, path: raw, access } }
       try {
         assertInsideRoots([scratch], raw, scratch)
         continue
@@ -96,13 +100,55 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
       } catch {
         return { ok: false, wall: { kind: 'path', tool: nativeName, path: raw, access } }
       }
-      if (writes && workspace.access !== 'write') return { ok: false, wall: { kind: 'path', tool: nativeName, path: raw, access } }
+      // Write access is per folder: the path must sit inside a root granted for writing, and not
+      // inside a read-only root (a write folder nested in a read folder stays read-only, as the
+      // shell sandbox denies it too).
+      if (writes) {
+        try {
+          assertInsideRoots(workspace.writeRoots, raw, scratch)
+        } catch {
+          return { ok: false, wall: { kind: 'path', tool: nativeName, path: raw, access } }
+        }
+        if (readOnlyRoots.length && insideAny(readOnlyRoots, raw, scratch)) return { ok: false, wall: { kind: 'path', tool: nativeName, path: raw, access } }
+      }
     }
     return { ok: true }
   }
 }
 
+/**
+ * Whether a runtime rewrites `raw` before it opens it, so the path checked here is not the one it
+ * would use: a home folder (`~`, `~user`; Claude Code and Pi expand it), Pi's leading `@`, a
+ * variable (`$HOME`, `${HOME}`, `%USERPROFILE%`), or on Windows Claude Code's `/c/...` drive form.
+ * Such a path is refused rather than expanded here: the bot names its folders by their real paths.
+ *
+ * So is any spelling a runtime or the file system reads differently from Node's `resolve`:
+ * - whitespace around the path (Claude Code's resolver starts with JS `trim()`, so `' ../x'` or
+ *   `'<root>\\.. '` would leave the folder that `resolve` keeps it in);
+ * - a NUL or other control character;
+ * - a segment ending in a space or a dot other than `.` and `..` themselves (`'.. '`, `'x.'`),
+ *   which Windows drops when it opens the path.
+ */
+export function runtimeExpandedPath(raw: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (raw !== raw.trim()) return true
+  if (/[\u0000-\u001f\u007f]/.test(raw)) return true
+  if (raw.split(/[\\/]/).some((segment) => segment !== '.' && segment !== '..' && /[ .]$/.test(segment))) return true
+  if (/^[~@]/.test(raw)) return true
+  if (/\$(\{|[A-Za-z_])/.test(raw)) return true
+  if (platform === 'win32' && (/%[^%\\/]+%/.test(raw) || /^\/[A-Za-z](\/|$)/.test(raw))) return true
+  return false
+}
+
 function firstPath(args: Record<string, unknown>): unknown {
   for (const key of PATH_ARGUMENTS) if (typeof args[key] === 'string') return args[key]
   return undefined
+}
+
+function insideAny(roots: readonly string[], raw: string, scratch: string): boolean {
+  try {
+    assertInsideRoots(roots, raw, scratch)
+    return true
+  } catch {
+    return false
+  }
 }

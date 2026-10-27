@@ -27,6 +27,7 @@ import {
   isClaudeSubscriptionToken,
   registerClaudeSdkProvider
 } from './claudeSdkProvider'
+import { piOneShotRunsOn } from '../harness/drivers/pi/oneShotApis'
 import { FileCredentialStore } from './FileCredentialStore'
 import { FileModelsStore } from './FileModelsStore'
 import { LoginSession } from './LoginSession'
@@ -309,7 +310,8 @@ export class ProviderAuthService {
       return {
         id: model.id,
         label: model.name,
-        ...(efforts && efforts.length > 0 ? { efforts } : {})
+        ...(efforts && efforts.length > 0 ? { efforts } : {}),
+        ...(piOneShotRunsOn(model.api) ? {} : { oneShot: false as const })
       }
     })
     if (models.length === 0) return null
@@ -523,11 +525,14 @@ export class ProviderAuthService {
     await this.credentials.delete(providerId)
   }
 
-  /** Fetch subscription limits daemon-side; credentials never cross the protocol boundary. */
-  async getUsage(): Promise<ProvidersUsageResponse> {
+  /**
+   * Fetch subscription limits daemon-side; credentials never cross the protocol boundary. `include`
+   * leaves providers out before anything is fetched (a profile's removed providers: `providerAccess`).
+   */
+  async getUsage(include: (providerId: string) => boolean = () => true): Promise<ProvidersUsageResponse> {
     // Keep every configured provider in the response so the usage view is a complete
     // provider inventory (providers without a quota API are explicitly marked unavailable).
-    const configuredProviders = this.getConfiguredProviders()
+    const configuredProviders = this.getConfiguredProviders().filter((provider) => include(provider.id))
     const providers = await Promise.all(
       configuredProviders.map(async (provider) => {
         if (provider.id === 'anthropic') return {

@@ -4,7 +4,6 @@ import type { ChatMode } from './types'
 import { getSkillIdFromMode } from './chatMode'
 import { DEFAULT_PERMISSION_MODE, normalizePermissionMode, type PermissionMode } from './permissionMode'
 import { generateRandomUsername } from './randomUsername'
-import { listingServes } from './providerInstances'
 import type { ShortcutOverrides } from './commands'
 
 /** Color themes only — acrylic is a separate appearance toggle. */
@@ -133,10 +132,39 @@ export function normalizeAgentAccessSettings(raw?: Partial<AgentAccessSettings> 
   const malformed =
     ids !== undefined && ids !== null && (!Array.isArray(ids) || ids.some((id) => typeof id !== 'string' || id.length === 0))
   if (malformed) return { level: 'lineage', projectIds: [], answerApprovals: false }
+  const level = isAgentAccessLevel(raw?.level) ? raw.level : 'lineage'
   return {
-    level: isAgentAccessLevel(raw?.level) ? raw.level : 'lineage',
+    level,
     projectIds: Array.isArray(ids) ? [...new Set(ids as string[])] : [],
-    answerApprovals: raw?.answerApprovals === true
+    // Answering approvals is part of Manage. Below it the switch reads, and is saved, as off, whoever wrote the
+    // level (the Settings screen, a partial update from another client, a hand edit), so raising the level
+    // again never brings the permission back by itself.
+    answerApprovals: level === 'manage' && raw?.answerApprovals === true
+  }
+}
+
+/**
+ * How runs behave after a provider's usage limit. With `resumeAfterUsageLimit` a paused run continues
+ * by itself when the limit resets, at most `usageLimitPauseCap` times in a row on one thread; without
+ * it the pause waits for Resume now. Read when a run pauses, never afterwards: turning it on does not
+ * arm runs that are already paused.
+ */
+export interface RunSettings {
+  resumeAfterUsageLimit: boolean
+  usageLimitPauseCap: number
+}
+
+export const DEFAULT_USAGE_LIMIT_PAUSE_CAP = 3
+export const MAX_USAGE_LIMIT_PAUSE_CAP = 10
+
+export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSettings {
+  const cap = raw?.usageLimitPauseCap
+  return {
+    resumeAfterUsageLimit: raw?.resumeAfterUsageLimit === true,
+    usageLimitPauseCap:
+      typeof cap === 'number' && Number.isInteger(cap) && cap >= 1 && cap <= MAX_USAGE_LIMIT_PAUSE_CAP
+        ? cap
+        : DEFAULT_USAGE_LIMIT_PAUSE_CAP
   }
 }
 
@@ -151,6 +179,7 @@ export interface MousseSettings {
   permissions: PermissionSettings
   context: ContextSettings
   agentAccess: AgentAccessSettings
+  runs: RunSettings
   provider: {
     llmProvider: LlmProviderId
     model: string
@@ -208,6 +237,8 @@ export interface LlmModelOption {
   efforts?: string[]
   /** Effective endpoint speed, including provider defaults. */
   speed?: 'fast' | 'slow'
+  /** `false`: this model cannot run a single request (chat titles) even though its provider can. */
+  oneShot?: false
 }
 
 export interface LlmProviderOption {
@@ -216,6 +247,19 @@ export interface LlmProviderOption {
   instanceId?: string
   label: string
   models: LlmModelOption[]
+  /**
+   * The instance runs a single request with no tools (chat titles, pull request drafts, commit
+   * messages). Set by the gateway on every listing; agent runtimes are `false`.
+   */
+  oneShot?: boolean
+}
+
+/** The title model choices: instances that run one-shots, without the models that cannot. */
+export function oneShotProviderOptions(providers: readonly LlmProviderOption[]): LlmProviderOption[] {
+  return providers
+    .filter((provider) => provider.oneShot === true)
+    .map((provider) => ({ ...provider, models: provider.models.filter((model) => model.oneShot !== false) }))
+    .filter((provider) => provider.models.length > 0)
 }
 
 export interface AgentTypeOption {
@@ -433,6 +477,7 @@ export function getDefaultSettings(): MousseSettings {
     permissions: normalizePermissionSettings(),
     context: normalizeContextSettings(),
     agentAccess: normalizeAgentAccessSettings(),
+    runs: normalizeRunSettings(),
     provider: {
       llmProvider: '',
       model: ''
@@ -544,60 +589,6 @@ export function appearanceUsesAcrylic(appearance: Pick<AppearanceSettings, 'acry
 /** @deprecated Use appearanceUsesAcrylic — kept for any stray imports during transition. */
 export function themeUsesAcrylic(theme: string): boolean {
   return theme.endsWith('-acrylic') || theme === 'system-acrylic'
-}
-
-function preferredTitleModel(provider: LlmProviderOption): string {
-  const providerName = `${provider.id} ${provider.label}`.toLowerCase()
-  const models = provider.models
-  const find = (pattern: RegExp) =>
-    [...models]
-      .filter((model) => pattern.test(`${model.id} ${model.label}`.toLowerCase()))
-      .sort((a, b) => b.id.localeCompare(a.id))[0]
-
-  let selected: LlmModelOption | undefined
-  if (/openai/.test(providerName)) selected = find(/luna/)
-  if (!selected && /(anthropic|claude)/.test(providerName)) selected = find(/haiku/)
-  selected ??= find(/\b(?:mini|flash|small|lite|fast)\b/)
-  selected ??= models[0]
-  if (!selected) return ''
-
-  // Luna is inexpensive and capable enough for a one-line title; avoid spending reasoning tokens.
-  if (/luna/i.test(`${selected.id} ${selected.label}`) && selected.efforts?.includes('low')) {
-    return `${selected.id}:low`
-  }
-  return selected.id
-}
-
-/** Resolve the title model, preferring OpenAI Luna Low when it is connected. */
-export function resolveTitleModel(
-  settings: MousseSettings,
-  providers: LlmProviderOption[]
-): { instanceId?: string; llmProvider: string; model: string } {
-  const explicitProvider = settings.title?.llmProvider
-    ? providers.find((provider) => listingServes(provider, settings.title))
-    : undefined
-  if (explicitProvider) {
-    const instance = explicitProvider.instanceId ? { instanceId: explicitProvider.instanceId } : {}
-    const { baseId } = parseTitleModelId(settings.title.model)
-    if (explicitProvider.models.some((model) => model.id === baseId)) {
-      return { ...instance, llmProvider: explicitProvider.id, model: settings.title.model }
-    }
-    return { ...instance, llmProvider: explicitProvider.id, model: preferredTitleModel(explicitProvider) }
-  }
-
-  const openAi = providers.find((provider) => {
-    const name = `${provider.id} ${provider.label}`.toLowerCase()
-    return /openai/.test(name) && provider.models.some((model) => /luna/i.test(`${model.id} ${model.label}`))
-  })
-  const provider = openAi ?? providers.find((candidate) => candidate.id === settings.provider?.llmProvider) ?? providers[0]
-  return provider
-    ? { llmProvider: provider.id, model: preferredTitleModel(provider) }
-    : { llmProvider: '', model: '' }
-}
-
-function parseTitleModelId(modelId: string): { baseId: string } {
-  const suffix = modelId.match(/:(?:off|minimal|low|medium|high|xhigh|max)$/)?.[0]
-  return { baseId: suffix ? modelId.slice(0, -suffix.length) : modelId }
 }
 
 export function resolveSkillModelSettings(

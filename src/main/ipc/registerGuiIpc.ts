@@ -9,6 +9,7 @@ import { NET_LOCAL_METHODS } from '../../shared/net/local'
 import { BRIDGE_HUB_LOCAL_METHODS } from '../../shared/bridge/types'
 import { SPACES_LOCAL_METHODS } from '../../shared/spaces/local'
 import { BOTS_LOCAL_METHODS } from '../../shared/bots/space/local'
+import { BOTS_PERSONAL_METHODS } from '../../shared/bots/personal/methods'
 import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
 /**
  * Phase 3 GUI IPC: protocol-backed agent-chat/project/thread/queue + Electron-local UI.
@@ -103,16 +104,20 @@ import type {
   GitPullOptions,
   GitPushOptions,
   GitScope,
+  ApprovalRuleInfo,
   MainView,
   OrchestratorContextUsageInput,
   OrchestratorSendInput,
   PermissionMode,
-  ScheduledJob,
+  ScheduledJobPatch,
+  ScheduledWebhookDeliveryLog,
+  ScheduledWebhookGrant,
   ThreadActivitySnapshot,
   Thread,
   ThreadActivityState,
   TurnState,
   TurnStateSnapshot,
+  QuestionAnswerOutcome,
   UserQuestionAnswers
 } from '../../shared/types'
 import { isThreadActivityActive } from '../../shared/types'
@@ -126,6 +131,8 @@ import type {
   PullRequestPushTarget,
   PullRequestRef,
   PullRequestScope,
+  PullRequestWatchMode,
+  PullRequestWatchStatus,
   ResolvedPullRequestSummary,
   StartPullRequestThreadInput,
   StartPullRequestThreadResult
@@ -169,6 +176,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   ...BRIDGE_HUB_LOCAL_METHODS,
   ...SPACES_LOCAL_METHODS,
   ...BOTS_LOCAL_METHODS,
+  ...BOTS_PERSONAL_METHODS,
   ...SPACE_ARCHIVE_METHODS,
   ...SPEECH_HOST_METHODS,
   ...BROWSER_ACCESS_METHODS,
@@ -183,12 +191,14 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   'agentDefinitions.saveDraft', 'agentDefinitions.publish', 'agentDefinitions.archive',
   'agentDefinitions.duplicate', 'agentDefinitions.importBundle',
   'agentDefinitions.exportBundle', 'agentDefinitions.validate', 'agentDefinitions.tryRun',
+  'agentDefinitions.tryRunPending', 'agentDefinitions.tryRunAnswer',
   'integrations.snapshot',
   'chatReferences.resolve',
   'skills.create', 'skills.update', 'skills.editor', 'skills.enable', 'skills.archive',
   'skills.importPackage', 'skills.exportPackage',
   'mcp.create', 'mcp.update', 'mcp.read', 'mcp.enable', 'mcp.delete',
-  'mcp.testConnection', 'mcp.beginAuth', 'mcp.cancelAuth', 'mcp.revokeAuth'
+  'mcp.testConnection', 'mcp.beginAuth', 'mcp.cancelAuth', 'mcp.revokeAuth',
+  'runs.resumeNow', 'runs.cancelPause'
 ])
 
 class PlatformRequestError extends AppError {
@@ -566,7 +576,8 @@ export function registerGuiIpc(
             notifyThread(event.threadId, 'completed', currentPresentation().getActiveThreadId())
           } else if (state === 'awaiting_input') {
             notifyThread(event.threadId, 'question', currentPresentation().getActiveThreadId())
-          } else if (state === 'idle') {
+          } else if (state === 'idle' || state === 'paused') {
+            // A run that hit a usage limit stopped and waits for the person (or the reset).
             notifyThread(event.threadId, 'idle', currentPresentation().getActiveThreadId())
           }
         }
@@ -914,17 +925,24 @@ export function registerGuiIpc(
     }
   )
 
+  const answerQuestions = async (requestId: string, answers: UserQuestionAnswers): Promise<QuestionAnswerOutcome> => {
+    const res = await guiMms.request<QuestionAnswerOutcome>('orchestrator.answerQuestions', {
+      requestId,
+      answers
+    })
+    const busy = activityTrackerFor().getBusyThreadId()
+    if (res.ok && busy) setThreadActivity(busy, 'processing')
+    return res
+  }
   registerHandler(
     'orchestrator:answerQuestions',
-    async (_e, requestId: string, answers: UserQuestionAnswers) => {
-      const res = await guiMms.request<{ ok: boolean }>('orchestrator.answerQuestions', {
-        requestId,
-        answers
-      })
-      const busy = activityTrackerFor().getBusyThreadId()
-      if (res.ok && busy) setThreadActivity(busy, 'processing')
-      return res.ok
-    }
+    async (_e, requestId: string, answers: UserQuestionAnswers) => (await answerQuestions(requestId, answers)).ok
+  )
+  // The same answer with its outcome: when another client answered a saved approval request first,
+  // the card says who decided what (SPEC §17.4).
+  registerHandler(
+    'orchestrator:answerQuestionsDetailed',
+    async (_e, requestId: string, answers: UserQuestionAnswers) => answerQuestions(requestId, answers)
   )
   registerHandler('orchestrator:dismissQuestions', async (_e, requestId: string) => {
     const res = await guiMms.request<{ ok: boolean }>('orchestrator.dismissQuestions', {
@@ -1057,9 +1075,12 @@ export function registerGuiIpc(
   registerStorageHandler('threads:inventory', async (_e, threadId?: string) => guiMms.request('threads.inventory', { threadId }))
   registerStorageHandler('threads:configureTrash', async (_e, policy: { graceDays: number; automaticPurge: boolean }) => guiMms.request('threads.configureTrash', policy))
   registerStorageHandler('storage:policy', async () => guiMms.request('storage.policy', {}))
+  registerStorageHandler('storage:reviewDismiss', async () => guiMms.request('storage.reviewDismiss', {}))
   registerStorageHandler('storage:configure', async (_e, policy: unknown) => guiMms.request('storage.configure', { policy }))
+  // The dry run measures what a run would remove, so it can take as long as the scan phase of a run.
+  registerStorageHandler('storage:cleanupPlan', async () => guiMms.request('storage.cleanup.plan', {}, 5 * 60_000))
   // A run may purge large trees; it must not hit the 60 s default.
-  registerStorageHandler('storage:cleanupRun', async () => guiMms.request('storage.cleanup.run', {}, 15 * 60_000))
+  registerStorageHandler('storage:cleanupRun', async (_e, token?: unknown) => guiMms.request('storage.cleanup.run', token === undefined ? {} : { token }, 15 * 60_000))
   registerStorageHandler('storage:cleanupLastReport', async () => guiMms.request('storage.cleanup.lastReport', {}))
   // The first call on a profile measures it, which can take most of the scan budget.
   registerStorageHandler('storage:usage', async (_e, options?: { refresh?: boolean }) =>
@@ -1338,6 +1359,14 @@ export function registerGuiIpc(
     broadcast('threads:updated', res.threads)
     return res.thread
   })
+  registerHandler('threads:approvalRules', async (_e, threadId: string) => {
+    const res = await guiMms.request<{ rules: ApprovalRuleInfo[] }>('threads.approvalRules', { threadId })
+    return res.rules
+  })
+  registerHandler('threads:clearApprovalRules', async (_e, threadId: string, ruleId?: string) => {
+    const res = await guiMms.request<{ rules: ApprovalRuleInfo[] }>('threads.clearApprovalRules', { threadId, ...(ruleId ? { ruleId } : {}) })
+    return res.rules
+  })
   registerHandler('threads:settle', async (_e, threadId: string, settled: boolean) => {
     const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(
       'threads.settle',
@@ -1502,11 +1531,34 @@ export function registerGuiIpc(
   })
   registerHandler(
     'scheduled:update',
-    async (_e, id: string, patch: Partial<ScheduledJob>) => {
+    async (_e, id: string, patch: ScheduledJobPatch) => {
       const res = await guiMms.request<{ job: unknown }>('scheduled.update', { id, patch })
       return res.job
     }
   )
+  // The secret is in the enable and rotate answers only. It is passed on untouched and never kept or logged here.
+  const webhookGrant = (res: ScheduledWebhookGrant): ScheduledWebhookGrant => ({
+    job: res.job,
+    url: res.url,
+    ...(res.secret ? { secret: res.secret } : {}),
+    ...(res.listening === undefined ? {} : { listening: res.listening }),
+    ...(res.error ? { error: res.error } : {}),
+    ...(res.warning ? { warning: res.warning } : {})
+  })
+  registerHandler('scheduled:webhook:enable', async (_e, id: string) =>
+    webhookGrant(await guiMms.request<ScheduledWebhookGrant>('scheduled.webhook.enable', { id }))
+  )
+  registerHandler('scheduled:webhook:rotate', async (_e, id: string) =>
+    webhookGrant(await guiMms.request<ScheduledWebhookGrant>('scheduled.webhook.rotate', { id }))
+  )
+  registerHandler('scheduled:webhook:disable', async (_e, id: string) => {
+    const res = await guiMms.request<{ job: unknown }>('scheduled.webhook.disable', { id })
+    return res.job
+  })
+  registerHandler('scheduled:webhook:deliveries', async (_e, id: string) => {
+    const res = await guiMms.request<ScheduledWebhookDeliveryLog>('scheduled.webhook.deliveries', { id })
+    return { deliveries: res.deliveries, url: res.url }
+  })
   registerHandler('scheduled:delete', async (_e, id: string) => {
     const res = await guiMms.request<{ ok: boolean }>('scheduled.delete', { id })
     return res.ok
@@ -1526,6 +1578,18 @@ export function registerGuiIpc(
   registerHandler('scheduled:status', async () => {
     const res = await guiMms.request<{ status: unknown }>('scheduled.status')
     return res.status
+  })
+  registerHandler('scheduled:extend', async (_e, id: string) => {
+    const res = await guiMms.request<{ job: unknown }>('scheduled.extend', { id })
+    return res.job
+  })
+  registerHandler('scheduled:settings:get', async () => {
+    const res = await guiMms.request<{ settings: unknown }>('scheduled.settings.get')
+    return res.settings
+  })
+  registerHandler('scheduled:settings:set', async (_e, agentJobs: boolean) => {
+    const res = await guiMms.request<{ settings: unknown }>('scheduled.settings.set', { agentJobs })
+    return res.settings
   })
 
   registerHandler('channels:getSnapshot', async () => {
@@ -1581,6 +1645,25 @@ export function registerGuiIpc(
       limit
     })
     return res.activity
+  })
+  registerHandler('channels:owner:start', async (_e, platform: ChannelPlatform) => {
+    const res = await guiMms.request<{ claim: unknown }>('channels.owner.start', { platform })
+    return res.claim
+  })
+  registerHandler('channels:owner:status', async (_e, platform: ChannelPlatform) => {
+    const res = await guiMms.request<{ claim: unknown }>('channels.owner.status', { platform })
+    return res.claim
+  })
+  registerHandler('channels:owner:confirm', async (_e, platform: ChannelPlatform, userId: string) => {
+    const res = await guiMms.request<{ owners: unknown }>('channels.owner.confirm', { platform, userId })
+    return res.owners
+  })
+  registerHandler('channels:owner:cancel', async (_e, platform: ChannelPlatform) => {
+    await guiMms.request<{ ok: boolean }>('channels.owner.cancel', { platform })
+  })
+  registerHandler('channels:owner:clear', async (_e, platform: ChannelPlatform) => {
+    const res = await guiMms.request<{ owners: unknown }>('channels.owner.clear', { platform })
+    return res.owners
   })
 
   registerHandler('mcp:listServers', async (_e, projectId?: string) => {
@@ -1996,6 +2079,19 @@ export function registerGuiIpc(
   registerHandler('pullRequests:pushTarget', async (_e, threadId: string) => {
     const response = await guiMms.request<{ target: PullRequestPushTarget }>('pullRequests.pushTarget', { threadId })
     return response.target
+  })
+  // A thread's watch of its pull request: `off`, `notify` (a line in the thread) or `act` (also wakes the agent).
+  registerHandler('pullRequests:watch', async (_e, threadId: string, watch: PullRequestWatchMode, number?: number) => {
+    const response = await guiMms.request<{ status: PullRequestWatchStatus }>('pullRequests.watch', {
+      threadId,
+      watch,
+      ...(typeof number === 'number' ? { number } : {})
+    })
+    return response.status
+  })
+  registerHandler('pullRequests:watchStatus', async (_e, threadId: string) => {
+    const response = await guiMms.request<{ status: PullRequestWatchStatus }>('pullRequests.watchStatus', { threadId })
+    return response.status
   })
   registerHandler('editors:list', async (_e, options?: { refresh?: boolean }) =>
     listEditors(options)

@@ -7,6 +7,7 @@ import { Bell, Download, Info, Loader2, Palette, RefreshCw, RotateCcw, ShieldChe
 import { describePermissionMode, PERMISSION_MODES } from '../../../shared/permissionMode'
 import { Select } from '../ui/Select'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
+import { RunSettingsGroup } from './RunSettingsGroup'
 
 /** Set at build time from package.json (electron.vite.config.ts). */
 declare const __MOUSSE_VERSION__: string | undefined
@@ -199,6 +200,8 @@ export function GeneralSettings({
           }
         />
       </SettingsGroup>
+
+      <RunSettingsGroup runs={settings.runs} onUpdate={onUpdate} />
 
       <SettingsGroup title="Notifications" icon={Bell}>
         <SettingsRow

@@ -34,7 +34,9 @@ export const CHANNEL_COMMAND_REGISTRY: ChannelCommandDef[] = [
   { name: 'whoami', description: 'Show your user and chat identity', category: 'Info' },
   { name: 'title', description: 'Set or show the current thread title', category: 'Session', argsHint: '[name]' },
   { name: 'sethome', description: 'Set this chat as the platform home channel', category: 'Session', aliases: ['set-home'] },
-  { name: 'agents', description: 'List active agents', category: 'Session', aliases: ['tasks'] }
+  { name: 'agents', description: 'List active agents', category: 'Session', aliases: ['tasks'] },
+  { name: 'bot', description: 'Talk to one of your bots in this direct message (owner only)', category: 'Session', argsHint: '<name>|off' },
+  { name: 'owner', description: 'Confirm this account as the owner with the code Mousse shows', category: 'Info', argsHint: '<code>' }
 ]
 
 /**
