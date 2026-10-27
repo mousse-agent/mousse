@@ -75,7 +75,15 @@ export interface RemoteComposerThread {
   ref: Pick<RemoteThreadTarget, 'nodeId' | 'entityId'>
   deviceName: string
   /** Settles when the first turn ends. Failures are shown by the remote thread view, not thrown. */
-  sent: Promise<void>
+  sent: Promise<unknown>
+}
+
+/** Remote chats created for a draft that has not opened yet, by where the draft runs. */
+const unsentRemoteThreads = new Map<string, string>()
+
+/** Forgets the chats waiting for a retry; tests and a profile switch start clean. */
+export function resetUnsentRemoteThreads(): void {
+  unsentRemoteThreads.clear()
 }
 
 /** First line of the message, as the name of a thread the target will title itself. */
@@ -110,7 +118,8 @@ export async function startRemoteComposerThread(deps: {
   request: Request
   stillVisible: () => boolean
   openRemoteThread: (target: RemoteThreadTarget) => void
-  submit: (ref: RemoteComposerThread['ref'], input: { content: string; images: readonly RemoteImage[]; mode?: SkillChatMode }) => Promise<void>
+  /** Sends the first message; resolves false when it did not go out (the thread view then holds its text and images). */
+  submit: (ref: RemoteComposerThread['ref'], input: { content: string; images: readonly RemoteImage[]; mode?: SkillChatMode }) => Promise<unknown>
 }): Promise<RemoteComposerThread | null> {
   const devices = await deps.devices()
   const device = devices.find((entry) => entry.node === deps.node && !entry.self)
@@ -121,17 +130,24 @@ export async function startRemoteComposerThread(deps: {
   if (problem) throw new Error(problem)
   if (!deps.stillVisible()) return null
 
-  const created = await deps.request<{ thread?: { id?: string } }>('bridge.hub.create', {
-    target: deps.node,
-    name: remoteThreadName(deps.content),
-    ...(deps.projectId ? { projectId: deps.projectId } : {}),
-    options: {
-      worktreeEnabled: Boolean(deps.projectId && deps.worktreeEnabled),
-      ...(deps.projectId && deps.localProjectId ? { startedFromProjectId: deps.localProjectId } : {})
-    }
-  })
-  const entityId = created?.thread?.id
-  if (!entityId) throw new Error(`${deviceName} did not create the chat`)
+  // A chat created for this draft whose first message did not go out (the model was refused, the
+  // user moved on) is used again by the next send, so a retry does not leave another empty thread.
+  const draftKey = [deps.node, deps.projectId ?? '', Boolean(deps.projectId && deps.worktreeEnabled)].join('|')
+  let entityId = unsentRemoteThreads.get(draftKey)
+  if (!entityId) {
+    const created = await deps.request<{ thread?: { id?: string } }>('bridge.hub.create', {
+      target: deps.node,
+      name: remoteThreadName(deps.content),
+      ...(deps.projectId ? { projectId: deps.projectId } : {}),
+      options: {
+        worktreeEnabled: Boolean(deps.projectId && deps.worktreeEnabled),
+        ...(deps.projectId && deps.localProjectId ? { startedFromProjectId: deps.localProjectId } : {})
+      }
+    })
+    entityId = created?.thread?.id
+    if (!entityId) throw new Error(`${deviceName} did not create the chat`)
+    unsentRemoteThreads.set(draftKey, entityId)
+  }
   const ref = { nodeId: deps.node, entityId }
   if (!deps.stillVisible()) return null
 
@@ -146,6 +162,7 @@ export async function startRemoteComposerThread(deps: {
     title: remoteThreadName(deps.content),
     ...(deps.projectId && deps.localProjectId ? { localProjectId: deps.localProjectId } : {})
   })
+  unsentRemoteThreads.delete(draftKey)
   const mode = deps.mode && typeof deps.mode === 'object' ? deps.mode : undefined
   const sent = deps.submit(ref, { content: deps.content, images: deps.images, ...(mode ? { mode } : {}) })
   return { ref, deviceName, sent }

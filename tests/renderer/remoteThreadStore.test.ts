@@ -7,16 +7,21 @@ import {
   REMOTE_UNSUPPORTED,
   abortRemoteTurn,
   clearRemoteSelection,
+  clearRemoteUnsent,
   closeRemoteThread,
   imageChunks,
   openRemoteThread,
+  refreshRemoteQuestions,
   refreshRemoteThread,
+  remoteQuestionCount,
   remoteImageProblem,
+  remoteSlashCommand,
   remoteThreadKey,
   remoteUnsupported,
   resetRemoteThreads,
   selectRemoteThread,
   setRemoteModel,
+  shownRemoteThread,
   submitRemoteMessage,
   useRemoteThreads,
   watchRemoteThread
@@ -156,17 +161,64 @@ describe('remote thread lifecycle', () => {
 })
 
 describe('selection', () => {
-  it('leaves the remote view when a local thread is selected but keeps it attached', async () => {
+  it('leaves the remote view when a local thread is selected, lets go of its display and attaches again when shown', async () => {
     openRemoteThread({ ...ref })
     await flush()
+    publish(snapshot())
+    await flush()
     useAppStore.setState({ activeThreadId: 'another-local-thread' })
+    await flush()
     expect(useRemoteThreads.getState().activeKey).toBeNull()
+    // The sidebar keeps the row; the daemon's attachment is released.
     expect(useRemoteThreads.getState().order).toEqual([key])
-    expect(methods()).not.toContain('bridge.hub.detach')
+    expect(calls.filter((call) => call.method === 'bridge.hub.detach')).toEqual([{ method: 'bridge.hub.detach', params: { ref } }])
+    expect(entry()).toMatchObject({ live: false, view: undefined })
     selectRemoteThread(key)
+    await flush()
     expect(useRemoteThreads.getState().activeKey).toBe(key)
+    expect(methods().filter((method) => method === 'bridge.hub.attach')).toHaveLength(2)
     clearRemoteSelection()
+    await flush()
     expect(useRemoteThreads.getState().activeKey).toBeNull()
+    expect(methods().filter((method) => method === 'bridge.hub.detach')).toHaveLength(2)
+  })
+
+  it('opens more threads than the daemon can keep attached, one after another', async () => {
+    const daemonLimit = 8
+    let attached = 0
+    let peak = 0
+    responses['bridge.hub.attach'] = () => {
+      attached += 1
+      peak = Math.max(peak, attached)
+      if (attached > daemonLimit) throw new Error('rate_limited')
+      return {}
+    }
+    responses['bridge.hub.detach'] = () => { attached -= 1; return {} }
+    for (let index = 0; index < 20; index++) {
+      openRemoteThread({ nodeId: node, entityId: `thread-${index}` })
+      await flush()
+      expect(useRemoteThreads.getState().entries[remoteThreadKey({ nodeId: node, entityId: `thread-${index}` })]!.error).toBe('')
+    }
+    expect(peak).toBeLessThanOrEqual(2)
+    expect(attached).toBe(1)
+    // Every thread is still listed in the sidebar.
+    expect(useRemoteThreads.getState().order).toHaveLength(20)
+  })
+
+  it('keeps the display of a thread that is not shown while a message of this window runs on it', async () => {
+    let finish: (value: unknown) => void = () => {}
+    responses['bridge.hub.send'] = () => new Promise((resolve) => { finish = resolve })
+    openRemoteThread({ ...ref })
+    await flush()
+    const sending = submitRemoteMessage(key, { content: 'Run the tests' })
+    await flush()
+    clearRemoteSelection()
+    await flush()
+    expect(methods()).not.toContain('bridge.hub.detach')
+    finish({ text: 'done', silent: false })
+    await sending
+    await flush()
+    expect(calls.filter((call) => call.method === 'bridge.hub.detach')).toHaveLength(1)
   })
 })
 
@@ -207,17 +259,53 @@ describe('send, steer, stop', () => {
     expect(calls.find((call) => call.method === 'bridge.hub.steer')!.params.run).toBe(run)
   })
 
-  it('finds the one running send when the thread was started elsewhere in this window', async () => {
+  it('after a reload, Stop and steering name the send of this thread that the hub is still waiting on', async () => {
     responses['bridge.hub.requests'] = () => [
-      { id: 'rpc_0000000000000000000000000b', method: 'orchestrator.send', state: 'unknown' },
-      { id: 'rpc_0000000000000000000000000c', method: 'threads.create', state: 'completed' }
+      { id: 'rpc_0000000000000000000000000b', method: 'orchestrator.send', state: 'unknown', threadId: ref.entityId, running: true, createdAt: 20 },
+      { id: 'rpc_0000000000000000000000000c', method: 'threads.create', state: 'completed', createdAt: 30 },
+      // Another thread's send, in flight.
+      { id: 'rpc_0000000000000000000000000d', method: 'orchestrator.send', state: 'unknown', threadId: 'other-thread', running: true, createdAt: 40 },
+      // This thread's sends that a restart interrupted: nobody is waiting on them any more.
+      { id: 'rpc_0000000000000000000000000e', method: 'orchestrator.send', state: 'unknown', threadId: ref.entityId, createdAt: 50 },
+      { id: 'rpc_0000000000000000000000000f', method: 'orchestrator.send', state: 'unknown', threadId: ref.entityId, createdAt: 60 }
     ]
     openRemoteThread({ ...ref })
     await flush()
     publish(snapshot([message('m1', 'user', 'Hello')], true))
     await flush()
     await abortRemoteTurn(key)
-    expect(calls.find((call) => call.method === 'bridge.hub.abort')!.params.run).toBe('rpc_0000000000000000000000000b')
+    expect(calls.find((call) => call.method === 'bridge.hub.abort')!.params).toEqual({ ref, run: 'rpc_0000000000000000000000000b' })
+    await submitRemoteMessage(key, { content: 'Use the staging database' })
+    expect(calls.find((call) => call.method === 'bridge.hub.steer')!.params).toEqual({ ref, run: 'rpc_0000000000000000000000000b', text: 'Use the staging database' })
+  })
+
+  it('never names another thread\'s run or an interrupted send when this thread has none', async () => {
+    responses['bridge.hub.requests'] = () => [
+      { id: 'rpc_0000000000000000000000000d', method: 'orchestrator.send', state: 'unknown', threadId: 'other-thread', running: true, createdAt: 40 },
+      { id: 'rpc_0000000000000000000000000e', method: 'orchestrator.send', state: 'unknown', threadId: ref.entityId, createdAt: 50 }
+    ]
+    responses['bridge.hub.abort'] = () => ({ ok: false })
+    openRemoteThread({ ...ref, deviceName: 'Studio Mac' })
+    await flush()
+    publish(snapshot([message('m1', 'user', 'Hello')], true))
+    await flush()
+    await abortRemoteTurn(key)
+    const named = calls.find((call) => call.method === 'bridge.hub.abort')!.params.run
+    expect(['rpc_0000000000000000000000000d', 'rpc_0000000000000000000000000e']).not.toContain(named)
+    expect(entry().notice).toContain('cannot be stopped from here')
+    await submitRemoteMessage(key, { content: 'Hurry up' })
+    expect(methods()).not.toContain('bridge.hub.steer')
+    expect(entry().notice).toContain('Studio Mac')
+  })
+
+  it('lets the hub wait a day for a send and shows nothing when that wait runs out', async () => {
+    responses['bridge.hub.send'] = () => { throw new Error('deadline_exceeded') }
+    openRemoteThread({ ...ref })
+    await flush()
+    await submitRemoteMessage(key, { content: 'A very long task' })
+    expect(calls.find((call) => call.method === 'bridge.hub.send')!.params.options.deadlineMs).toBe(24 * 60 * 60_000)
+    // The turn may well be running; the display says so, and no error is claimed.
+    expect(entry()).toMatchObject({ notice: '', sending: false })
   })
 
   it('tells the user when a running turn is not theirs to steer', async () => {
@@ -282,6 +370,119 @@ describe('send, steer, stop', () => {
     await flush()
     await abortRemoteTurn(key)
     expect(entry().notice).toContain('cannot be stopped from here')
+  })
+})
+
+describe('a message that does not go out', () => {
+  const image = { name: 'a.png', mimeType: 'image/png', data: 'AAAA' }
+
+  it('reports it and keeps the text and images for the composer to take back', async () => {
+    openRemoteThread({ ...ref })
+    await flush()
+    // An image refused before anything is sent.
+    expect(await submitRemoteMessage(key, { content: 'Look', images: [{ name: 'doc.pdf', mimeType: 'application/pdf', data: 'AAAA' }] })).toBe(false)
+    expect(entry().unsent).toMatchObject({ content: 'Look', images: [{ name: 'doc.pdf' }] })
+    clearRemoteUnsent(key)
+    expect(entry().unsent).toBeUndefined()
+    // A refusal by the target.
+    responses['bridge.hub.send'] = () => ({ text: '', silent: false, error: 'That skill is not available.' })
+    expect(await submitRemoteMessage(key, { content: 'Use it', images: [image] })).toBe(false)
+    expect(entry()).toMatchObject({ notice: 'That skill is not available.', unsent: { content: 'Use it', images: [image] } })
+    // A failed upload and an unreachable computer.
+    responses['bridge.hub.send'] = () => { throw new Error('peer_offline') }
+    expect(await submitRemoteMessage(key, { content: 'Again' })).toBe(false)
+    expect(entry().unsent).toMatchObject({ content: 'Again' })
+    responses['bridge.hub.stageAttachment'] = () => ({ ok: false, error: 'Too many images are waiting to be sent.' })
+    expect(await submitRemoteMessage(key, { content: 'Pic', images: [image] })).toBe(false)
+    expect(entry().unsent).toMatchObject({ content: 'Pic', images: [image] })
+  })
+
+  it('keeps nothing back for a message that went out, or whose wait ran out', async () => {
+    openRemoteThread({ ...ref })
+    await flush()
+    expect(await submitRemoteMessage(key, { content: 'Fine' })).toBe(true)
+    responses['bridge.hub.send'] = () => { throw new Error('deadline_exceeded') }
+    expect(await submitRemoteMessage(key, { content: 'Long task' })).toBe(true)
+    expect(entry().unsent).toBeUndefined()
+  })
+
+  it('gives a steer back when the turn is not one this window can steer', async () => {
+    responses['bridge.hub.requests'] = () => []
+    openRemoteThread({ ...ref, deviceName: 'Studio Mac' })
+    await flush()
+    publish(snapshot([message('m1', 'user', 'Hello')], true))
+    await flush()
+    expect(await submitRemoteMessage(key, { content: 'Hurry up' })).toBe(false)
+    expect(entry().unsent).toMatchObject({ content: 'Hurry up' })
+    responses['bridge.hub.requests'] = () => [{ id: 'rpc_0000000000000000000000000b', method: 'orchestrator.send', state: 'unknown', threadId: ref.entityId, running: true, createdAt: 1 }]
+    responses['bridge.hub.steer'] = () => ({ ok: false })
+    expect(await submitRemoteMessage(key, { content: 'Too late' })).toBe(false)
+    responses['bridge.hub.steer'] = () => ({ ok: true })
+    expect(await submitRemoteMessage(key, { content: 'In time' })).toBe(true)
+  })
+})
+
+describe('slash commands and shortcuts', () => {
+  it('knows /stop and /steer and leaves every other text a message', () => {
+    expect(remoteSlashCommand('/stop')).toEqual({ kind: 'stop' })
+    expect(remoteSlashCommand('  /stop now ')).toEqual({ kind: 'stop' })
+    expect(remoteSlashCommand('/steer use the staging database')).toEqual({ kind: 'steer', text: 'use the staging database' })
+    expect(remoteSlashCommand('/steer')).toEqual({ kind: 'steer', text: '' })
+    for (const text of ['stop', '/stopping', '/steering now', '/new', '/usage', 'Hello /stop']) expect(remoteSlashCommand(text)).toBeUndefined()
+  })
+
+  it('names the shown remote thread and whether a message of it is running', async () => {
+    expect(shownRemoteThread()).toBeNull()
+    openRemoteThread({ ...ref })
+    await flush()
+    expect(shownRemoteThread()).toEqual({ key, running: false })
+    publish(snapshot([message('m1', 'user', 'Hello')], true))
+    await flush()
+    expect(shownRemoteThread()).toEqual({ key, running: true })
+    clearRemoteSelection()
+    expect(shownRemoteThread()).toBeNull()
+  })
+})
+
+describe('questions the thread is waiting on', () => {
+  it('follow the target while a turn runs, in both directions, and are not asked about an idle thread', async () => {
+    let pending: unknown[] = []
+    responses['bridge.hub.questions'] = () => ({ pending })
+    openRemoteThread({ ...ref })
+    await flush()
+    publish(snapshot([message('m1', 'user', 'Hello')], false))
+    await flush()
+    await refreshRemoteQuestions(key)
+    expect(methods()).not.toContain('bridge.hub.questions')
+    publish(event(2, 'turn.started', { threadId: ref.entityId }))
+    await flush()
+    pending = [{ requestId: 'q1' }, { requestId: 'q2' }]
+    await refreshRemoteQuestions(key)
+    expect(calls.find((call) => call.method === 'bridge.hub.questions')!.params).toEqual({ ref })
+    expect(remoteQuestionCount(entry())).toBe(2)
+    // A later event of the display does not undo what the target answered.
+    publish(event(3, 'thread.message', { threadId: ref.entityId, message: message('m2', 'assistant', 'Which one?') }))
+    await flush()
+    expect(remoteQuestionCount(entry())).toBe(2)
+    // The turn ends while the question still shows; it is read until the target says it is gone.
+    publish(event(4, 'turn.completed', { threadId: ref.entityId }))
+    await flush()
+    expect(remoteQuestionCount(entry())).toBe(2)
+    pending = []
+    await refreshRemoteQuestions(key)
+    expect(remoteQuestionCount(entry())).toBe(0)
+    await refreshRemoteQuestions(key)
+    expect(methods().filter((method) => method === 'bridge.hub.questions')).toHaveLength(2)
+  })
+
+  it('keeps the last count when the target cannot be asked', async () => {
+    responses['bridge.hub.questions'] = () => { throw new Error('peer_offline') }
+    openRemoteThread({ ...ref })
+    await flush()
+    publish({ ...snapshot([message('m1', 'user', 'Hello')], true) })
+    await flush()
+    await refreshRemoteQuestions(key)
+    expect(remoteQuestionCount(entry())).toBe(0)
   })
 })
 

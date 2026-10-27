@@ -2,12 +2,13 @@ import { useEffect } from 'react'
 import { create } from 'zustand'
 import type { NodeId } from '../../shared/net'
 import { isThreadStarted } from '../../shared/threadTitle'
-import type { Thread } from '../../shared/types'
+import type { Thread, ThreadActivityState } from '../../shared/types'
+import type { RemotePause } from '../services/remoteThreadDisplay'
 import { connectedRemoteDevices } from '../components/sideCard/deviceMenu'
 import { useAppStore } from '../stores/appStore'
 import type { Device } from './netDevices'
 import { readRunOnDevices } from './remoteComputers'
-import { remoteThreadKey, type RemoteThreadEntry } from './remoteThreadStore'
+import { remoteQuestionCount, remoteThreadKey, type RemoteThreadEntry } from './remoteThreadStore'
 
 /**
  * A thread on another computer that some device of the user started there through Bridge. Every
@@ -108,6 +109,20 @@ export function useRemoteThreadListing(profileId: string | null): void {
       window.removeEventListener('focus', refresh)
     }
   }, [profileId])
+}
+
+/**
+ * The status a sidebar row shows for a thread this window is attached to: waiting for an answer,
+ * paused by a usage limit (with when it resets), or working. Nothing while idle or not attached.
+ */
+export function remoteRowActivity(
+  entry: Pick<RemoteThreadEntry, 'view' | 'sending' | 'questions'> | undefined
+): { activity?: ThreadActivityState; pause?: RemotePause } {
+  const pause = entry?.view?.active ? undefined : entry?.view?.paused
+  if (entry && remoteQuestionCount(entry) > 0) return { activity: 'awaiting_input' }
+  if (pause) return { activity: 'paused', pause }
+  if (entry?.view?.active || entry?.sending) return { activity: 'processing' }
+  return {}
 }
 
 /** A remote thread as a sidebar row: listed from its computer, attached in this window, or both. */

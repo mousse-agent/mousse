@@ -15,7 +15,7 @@ import { confirmNavigation } from '../services/navigationGuards'
 import { useChatsStore } from '../stores/chatsStore'
 import { createAndSelectThread, selectThread } from '../lib/threadActions'
 import { closeRemoteThread, openRemoteThread, selectRemoteThread, useRemoteThreads } from '../lib/remoteThreadStore'
-import { sidebarRemoteThreads, useRemoteListedThreads, useRemoteThreadListing, type RemoteSidebarThread } from '../lib/remoteThreadList'
+import { remoteRowActivity, sidebarRemoteThreads, useRemoteListedThreads, useRemoteThreadListing, type RemoteSidebarThread } from '../lib/remoteThreadList'
 import { ChatsSidebar } from './chats/ChatsSidebar'
 import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 import { RecentlyDeletedSection } from './sidebar/RecentlyDeletedSection'
@@ -237,7 +237,7 @@ function ThreadCardBody({
   activity?: ThreadActivityState
   startedAt?: string
   /** This thread's own pause (not one a subagent below it is in): when its limit resets. */
-  pause?: TurnPause
+  pause?: Pick<TurnPause, 'until' | 'estimated'>
 
   isRenaming: boolean
   renamingName: string
@@ -711,8 +711,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   const renderThreadStatus = (threadId: string) => renderActivityStatus(rolledUpActivity[threadId] ?? threadActivity[threadId], threadId)
 
-  // A thread on another computer passes no id: its pause time is not known here.
-  const renderActivityStatus = (state: ThreadActivityState | undefined, threadId?: string) => {
+  // A thread on another computer passes no id, and the pause its display reports.
+  const renderActivityStatus = (state: ThreadActivityState | undefined, threadId?: string, remotePause?: Pick<TurnPause, 'until' | 'estimated'>) => {
     if (!state || state === 'idle') return null
 
     if (state === 'processing') {
@@ -761,7 +761,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
     if (state === 'paused') {
       const turn = threadId ? turnStates[threadId] : undefined
-      const own = turn?.phase === 'paused' ? turn.pause : undefined
+      const own = remotePause ?? (turn?.phase === 'paused' ? turn.pause : undefined)
       const label = pausedStatusLabel(own, Date.now())
       return (
         <Pause
@@ -1038,10 +1038,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const device = thread.deviceName ?? 'Another computer'
     const active = activeRemoteKey === thread.key
     // Live status is known only while this window is attached to the thread.
-    const activity: ThreadActivityState | undefined = entry?.view?.questions
-      ? 'awaiting_input'
-      : entry?.view?.active || entry?.sending ? 'processing' : undefined
-    const statusNode = renderActivityStatus(activity)
+    const { activity, pause: paused } = remoteRowActivity(entry)
+    const statusNode = renderActivityStatus(activity, undefined, paused)
     return (
       <div key={thread.key} className="threads-sidebar-thread-container">
         <button
@@ -1056,6 +1054,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
               thread={{ name, projectId: thread.localProjectId, updatedAt: thread.updatedAt ?? '', worktreeEnabled: thread.worktreeEnabled }}
               projectName={thread.localProjectId ? projects.find((project) => project.id === thread.localProjectId)?.name : undefined}
               activity={activity}
+              pause={paused}
               device={device}
               isRenaming={false}
               renamingName=""

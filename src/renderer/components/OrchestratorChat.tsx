@@ -40,7 +40,7 @@ import {
 import '../chat/components/agent-elements/agent-ui.css'
 import type { NodeId } from '../../shared/net'
 import { RemoteNotConnectedError, prepareComposerThread, startRemoteComposerThread } from '../lib/createComposerThread'
-import { openRemoteThread, remoteImageProblem, remoteThreadKey, submitRemoteMessage } from '../lib/remoteThreadStore'
+import { openRemoteThread, remoteImageProblem, remoteThreadKey, shownRemoteThread, submitRemoteMessage } from '../lib/remoteThreadStore'
 import { openRemoteProject, readRunOnDevices, remoteErrorMessage, workspaceOnDevice } from '../lib/remoteComputers'
 import { useRemoteComposerOptions, useRemoteProjects, useRunOnDevices } from '../hooks/useRunOnDevices'
 import { localDeviceName, runOnLabel } from './sideCard/deviceMenu'
@@ -734,7 +734,8 @@ export function OrchestratorChat() {
     await refreshTurnActive()
   }, [activeThreadId, refreshTurnActive])
   // Stop run is bound to a key; the command's own rule limits it to a thread with a run going.
-  useCommand('run.stop', () => void handleStop())
+  // While a thread on another computer is shown, this hidden chat is not what Stop acts on.
+  useCommand('run.stop', () => void handleStop(), () => shownRemoteThread() === null)
 
   const handleSend = async (skillMode?: SkillChatMode) => {
     if (!useAppStore.getState().workspaceReady) return
@@ -828,6 +829,8 @@ export function OrchestratorChat() {
           submit: (ref, input) => submitRemoteMessage(remoteThreadKey(ref), input)
         })
         if (!started) return
+        // A mode picked for this draft belongs to it; it must not carry over to the next local chat.
+        setBlankPermissionMode(undefined)
         // The remote thread view shows the turn and any refusal of it.
         clearComposer(false)
         releaseComposerUrls()
@@ -936,6 +939,8 @@ export function OrchestratorChat() {
       })
       return
     }
+    // The empty local thread behind a remote draft is not the chat; its model is not the other computer's pick.
+    if (remoteDraft) return
 
     // Optimistic local meta so the composer badge updates before IPC returns.
     const current = useAppStore.getState().threads.find((t) => t.id === activeThreadId)

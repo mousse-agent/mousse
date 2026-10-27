@@ -31,8 +31,11 @@ export function remoteUnsupported(action: RemoteUnsupportedAction, device?: stri
   return { title: REMOTE_UNSUPPORTED, detail }
 }
 
-/** A turn can run as long as a local one; the hub waits this long for a send to finish. */
-const SEND_DEADLINE_MS = 30 * 60_000
+/**
+ * How long the hub waits for a send to finish: its longest wait (a day). The target ends a turn
+ * only when the deadline passes before it accepted the message, never for how long the turn runs.
+ */
+const SEND_DEADLINE_MS = 24 * 60 * 60_000
 
 const request = <T>(method: PlatformRequestMethod, params: unknown) =>
   window.mousse.platformRequest.request<T>(method, params)
@@ -134,6 +137,10 @@ export interface RemoteThreadEntry {
   /** Id of that message's request: the run that Stop and steering name. */
   run?: RpcId
   notice: string
+  /** Questions the thread waits on, as the target last answered (the display stream carries only the count at attach). */
+  questions?: number
+  /** What the last message that did not go out held; the thread's composer puts it back. */
+  unsent?: { content: string; images: readonly RemoteImage[] }
   options?: RemoteComposerOptions
   /** Bumped to attach again. */
   attachment: number
@@ -168,11 +175,39 @@ function attach(key: string): void {
   watchers.get(key)?.()
   const entry = useRemoteThreads.getState().entries[key]
   if (!entry) return
-  patch(key, { live: false, error: '' })
-  watchers.set(key, watchRemoteThread(entry.ref, {
+  patch(key, { live: false, error: '', questions: undefined })
+  const stopWatching = watchRemoteThread(entry.ref, {
     view: (view) => patch(key, { view, live: true, error: '' }),
     error: (error) => patch(key, { view: undefined, live: false, error })
-  }))
+  })
+  const poll = setInterval(() => void refreshRemoteQuestions(key), QUESTION_POLL_MS)
+  watchers.set(key, () => {
+    clearInterval(poll)
+    stopWatching()
+  })
+}
+
+/** How many questions the thread waits on: the last answer to a poll, else what the attached display said. */
+export const remoteQuestionCount = (entry: Pick<RemoteThreadEntry, 'questions' | 'view'>): number =>
+  entry.questions ?? entry.view?.questions ?? 0
+
+/** How often a working remote thread is asked what it is waiting on (the display stream does not carry questions). */
+export const QUESTION_POLL_MS = 3000
+
+/**
+ * Reads the questions the thread is waiting on and updates the count the view and the sidebar show.
+ * Only while a turn is running or a question is already showing; a read, so nothing is journaled.
+ */
+export async function refreshRemoteQuestions(key: string): Promise<void> {
+  const entry = useRemoteThreads.getState().entries[key]
+  if (!entry || !entry.view || !(entry.view.active || entry.sending || remoteQuestionCount(entry) > 0)) return
+  try {
+    const answer = await request<{ pending?: unknown[] } | undefined>('bridge.hub.questions', { ref: entry.ref })
+    const count = Array.isArray(answer?.pending) ? answer.pending.length : 0
+    patch(key, (current) => (current.questions !== count ? { questions: count } : {}))
+  } catch {
+    // The count stays as the display last said; the next tick asks again.
+  }
 }
 
 /** Leaves the remote thread view when the app moves to a local thread or another profile. */
@@ -211,6 +246,8 @@ export function openRemoteThread(
       ...(run ? { run, sending: true } : {})
     })
     useRemoteThreads.setState({ activeKey: key })
+    if (!watchers.has(key)) attach(key)
+    releaseIdleThreads()
     return
   }
   useRemoteThreads.setState((state) => ({
@@ -224,8 +261,25 @@ export function openRemoteThread(
     activeKey: key
   }))
   attach(key)
+  releaseIdleThreads()
   void loadComposerOptions(key)
   if (!deviceName) void nameDevice(key)
+}
+
+/**
+ * Lets go of the display of every remote thread that is not shown and has no message running, so
+ * the daemon's limit on attached threads (shared by every window) is never used up by threads the
+ * user only passed through. The sidebar keeps the row; showing it again attaches again.
+ */
+function releaseIdleThreads(): void {
+  const { entries, order, activeKey } = useRemoteThreads.getState()
+  for (const key of order) {
+    const stop = watchers.get(key)
+    if (!stop || key === activeKey || entries[key]?.sending) continue
+    stop()
+    watchers.delete(key)
+    patch(key, { view: undefined, live: false, error: '' })
+  }
 }
 
 async function nameDevice(key: string): Promise<void> {
@@ -239,17 +293,21 @@ async function nameDevice(key: string): Promise<void> {
   }
 }
 
-/** Shows an attached remote thread again (a sidebar row was clicked). */
+/** Shows a remote thread of the sidebar again (a row was clicked), attaching to it if it was let go. */
 export function selectRemoteThread(key: string): void {
   if (!useRemoteThreads.getState().entries[key]) return
   followApp()
   activeThreadAtSelection = useAppStore.getState().activeThreadId
   useRemoteThreads.setState({ activeKey: key })
+  if (!watchers.has(key)) attach(key)
+  releaseIdleThreads()
 }
 
-/** The main thread area goes back to the local threads; remote threads stay attached. */
+/** The main thread area goes back to the local threads; a remote thread keeps its display only while a message of this window runs on it. */
 export function clearRemoteSelection(): void {
-  if (useRemoteThreads.getState().activeKey !== null) useRemoteThreads.setState({ activeKey: null })
+  if (useRemoteThreads.getState().activeKey === null) return
+  useRemoteThreads.setState({ activeKey: null })
+  releaseIdleThreads()
 }
 
 /** Detaches from a remote thread and removes it from the sidebar. */
@@ -360,16 +418,27 @@ function isRunning(entry: RemoteThreadEntry): boolean {
   return entry.sending || entry.view?.active === true
 }
 
-/** The run of the one message this window has running on a computer, when the thread did not record it. */
+/**
+ * The run of the message this computer is still waiting on for this thread, when the window did
+ * not record it (after a reload). Only a send the hub is waiting on counts, and only one that
+ * names this thread: a send another thread started, or one a restart interrupted, is never the run.
+ */
 async function findRun(entry: RemoteThreadEntry): Promise<RpcId | undefined> {
   try {
-    const rows = await request<Array<{ id: RpcId; method: string; state: string }>>('bridge.hub.requests', { target: entry.ref.nodeId })
-    const running = rows.filter((row) => row.method === 'orchestrator.send' && row.state === 'unknown')
-    return running.length === 1 ? running[0]!.id : undefined
+    const rows = await request<Array<{ id: RpcId; method: string; state: string; threadId?: string; running?: boolean; createdAt?: number }>>(
+      'bridge.hub.requests', { target: entry.ref.nodeId }
+    )
+    const mine = rows
+      .filter((row) => row.method === 'orchestrator.send' && row.state === 'unknown' && row.running === true && row.threadId === entry.ref.entityId)
+      .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+    return mine[0]?.id
   } catch {
     return undefined
   }
 }
+
+/** A wait that ran out says nothing about the turn: the display shows whether it is still running. */
+const isWaitTimeout = (cause: unknown): boolean => /deadline_exceeded|outcome_uncertain/.test(messageOf(cause))
 
 export interface RemoteSubmit {
   content: string
@@ -380,29 +449,44 @@ export interface RemoteSubmit {
 /**
  * The composer's Send on a remote thread. While the target is working, the text goes to the
  * running turn as a steer (the target keeps no separate queue for this window); otherwise it
- * starts a turn. Resolves when the turn ends or fails; failures are put on the entry.
+ * starts a turn. Resolves when the turn ends or fails; failures are put on the entry. The result
+ * is false when the message did not go out (a refusal, a failed upload, an unreachable computer), so
+ * the composer can give the text and images back.
  */
-export async function submitRemoteMessage(key: string, input: RemoteSubmit): Promise<void> {
+export async function submitRemoteMessage(key: string, input: RemoteSubmit): Promise<boolean> {
+  const sent = await deliver(key, input)
+  // The composer takes the text and images back, wherever the message was typed.
+  if (!sent) patch(key, { unsent: { content: input.content, images: input.images ?? [] } })
+  return sent
+}
+
+/** The composer has taken back what a message that did not go out held. */
+export function clearRemoteUnsent(key: string): void {
+  patch(key, (entry) => (entry.unsent ? { unsent: undefined } : {}))
+}
+
+async function deliver(key: string, input: RemoteSubmit): Promise<boolean> {
   const entry = useRemoteThreads.getState().entries[key]
-  if (!entry) return
+  if (!entry) return false
   const images = input.images ?? []
   patch(key, { notice: '', error: '' })
   if (isRunning(entry)) {
-    if (images.length) return patch(key, { notice: 'Images can only be added when a turn starts.' })
+    if (images.length) return refused(key, 'Images can only be added when a turn starts.')
     const run = entry.run ?? await findRun(entry)
-    if (!run) return patch(key, { notice: `This turn was started on ${entry.deviceName ?? 'another computer'}. Wait for it to finish, then send.` })
+    if (!run) return refused(key, `This turn was started on ${entry.deviceName ?? 'another computer'}. Wait for it to finish, then send.`)
     try {
       const result = await request<{ ok?: boolean }>('bridge.hub.steer', { ref: entry.ref, run, text: input.content })
-      patch(key, { notice: result?.ok === false ? 'The turn had already finished.' : '' })
+      if (result?.ok === false) return refused(key, 'The turn had already finished.')
+      return true
     } catch (cause) {
-      patch(key, { notice: messageOf(cause) })
+      return refused(key, messageOf(cause))
     }
-    return
   }
   const problem = remoteImageProblem(images)
-  if (problem) return patch(key, { notice: problem })
+  if (problem) return refused(key, problem)
   const run = newId('rpc')
   patch(key, { sending: true, run })
+  let delivered = true
   try {
     const uploads = images.length ? await stageImages(entry.ref.nodeId, images) : []
     const result = await request<{ error?: string } | undefined>('bridge.hub.send', {
@@ -412,12 +496,36 @@ export async function submitRemoteMessage(key: string, input: RemoteSubmit): Pro
       ...(uploads.length ? { attachments: uploads } : {}),
       options: { id: run, deadlineMs: SEND_DEADLINE_MS }
     })
-    if (result?.error) patch(key, { notice: result.error })
+    if (result?.error) delivered = refused(key, result.error)
   } catch (cause) {
-    patch(key, { notice: messageOf(cause) })
+    // A wait that ran out leaves the message with the target; anything else means it did not go out.
+    if (!isWaitTimeout(cause)) delivered = refused(key, messageOf(cause))
   } finally {
     patch(key, (current) => (current.run === run ? { sending: false, run: undefined } : {}))
+    releaseIdleThreads()
   }
+  return delivered
+}
+
+/** Shows why a message did not go out; always false. */
+function refused(key: string, notice: string): false {
+  patch(key, { notice })
+  return false
+}
+
+/** `/stop` and `/steer <text>` typed in a remote thread's composer; anything else is a message. */
+export function remoteSlashCommand(text: string): { kind: 'stop' } | { kind: 'steer'; text: string } | undefined {
+  const trimmed = text.trim()
+  if (trimmed === '/stop' || trimmed.startsWith('/stop ')) return { kind: 'stop' }
+  if (trimmed === '/steer' || trimmed.startsWith('/steer ')) return { kind: 'steer', text: trimmed.replace(/^\/steer\s*/, '').trim() }
+  return undefined
+}
+
+/** The remote thread the main area shows and whether a message of it is running: what shortcuts act on. */
+export function shownRemoteThread(): { key: string; running: boolean } | null {
+  const { activeKey, entries } = useRemoteThreads.getState()
+  const entry = activeKey ? entries[activeKey] : undefined
+  return entry ? { key: entry.key, running: isRunning(entry) } : null
 }
 
 /** Stops the running turn on the target. */

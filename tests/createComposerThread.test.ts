@@ -1,10 +1,11 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Thread } from '../src/shared/types'
 import {
   RemoteNotConnectedError,
   createComposerThread,
   prepareComposerThread,
   remoteThreadName,
+  resetUnsentRemoteThreads,
   startRemoteComposerThread
 } from '../src/renderer/lib/createComposerThread'
 import type { Device } from '../src/renderer/lib/netDevices'
@@ -154,6 +155,7 @@ describe('composer thread on another computer', () => {
     self: false, revoked: false, state: 'open', kind: 'computer', ...patch
   })
   const ref = { nodeId: node, entityId: 'remote-thread' }
+  beforeEach(resetUnsentRemoteThreads)
   function setup(over: { devices?: Device[]; answers?: Record<string, unknown>; visible?: () => boolean; problem?: string } = {}) {
     const calls: Array<{ method: string; params: any }> = []
     const order: string[] = []
@@ -240,6 +242,31 @@ describe('composer thread on another computer', () => {
     await expect(startRemoteComposerThread({ ...refused.deps, model: { instanceId: 'x', model: 'y' } })).rejects.toThrow('That model is not available.')
     expect(refused.open).not.toHaveBeenCalled()
     expect(refused.submit).not.toHaveBeenCalled()
+  })
+
+  it('uses the chat it already created when a first send that failed is tried again, instead of leaving another empty one', async () => {
+    const answers: Record<string, unknown> = { 'bridge.hub.setModel': { ok: false, error: 'That model is not available.' } }
+    const first = setup({ answers })
+    await expect(startRemoteComposerThread({ ...first.deps, model: { instanceId: 'x', model: 'y' } })).rejects.toThrow('That model is not available.')
+    expect(first.calls.filter((call) => call.method === 'bridge.hub.create')).toHaveLength(1)
+    // The retry, with another model, sends into the same chat.
+    const retry = setup({ answers: { 'bridge.hub.create': { thread: { id: 'another-thread' } } } })
+    const started = await startRemoteComposerThread({ ...retry.deps, model: { instanceId: 'codex', model: 'gpt-x' } })
+    expect(retry.calls.map((call) => call.method)).toEqual(['bridge.hub.setModel'])
+    expect(started!.ref).toEqual(ref)
+    expect(retry.submit).toHaveBeenCalledWith(ref, expect.anything())
+    // Once the chat is open the next draft starts a new one.
+    const next = setup({ answers: { 'bridge.hub.create': { thread: { id: 'another-thread' } } } })
+    expect((await startRemoteComposerThread(next.deps))!.ref.entityId).toBe('another-thread')
+    expect(next.calls.map((call) => call.method)).toEqual(['bridge.hub.create'])
+  })
+
+  it('does not reuse a chat made for another project or computer', async () => {
+    const first = setup({ answers: { 'bridge.hub.setModel': { ok: false, error: 'No.' } } })
+    await expect(startRemoteComposerThread({ ...first.deps, model: { instanceId: 'x', model: 'y' } })).rejects.toThrow('No.')
+    const other = setup({ answers: { 'bridge.hub.create': { thread: { id: 'other-project-thread' } } } })
+    const started = await startRemoteComposerThread({ ...other.deps, projectId: 'another-project' })
+    expect(started!.ref.entityId).toBe('other-project-thread')
   })
 
   it('passes a skill mode to the view and drops the built-in modes', async () => {

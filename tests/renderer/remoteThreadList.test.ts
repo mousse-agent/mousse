@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { Device } from '../../src/renderer/lib/netDevices'
 import {
   refreshRemoteListedThreads,
+  remoteRowActivity,
   sidebarRemoteThreads,
   startedElsewhere,
   useRemoteListedThreads,
@@ -21,6 +22,34 @@ const thread = (id: string, over: Partial<Thread> = {}): Thread =>
   ({ id, name: `Thread ${id}`, createdAt: '2026-10-27T10:00:00Z', updatedAt: '2026-10-27T10:00:00Z', startedAt: '2026-10-27T10:00:00Z', ...over }) as Thread
 
 afterEach(() => useRemoteListedThreads.setState({ threads: [] }))
+
+describe('the status a sidebar row shows for an attached thread', () => {
+  const view = (over: Record<string, unknown> = {}) =>
+    ({ thread: thread('t'), messages: [], active: false, queued: 0, questions: 0, ...over }) as never
+  const pause = { until: '2026-10-28T09:00:00Z', estimated: true, autoResume: true }
+
+  it('shows nothing for an idle or unattached thread', () => {
+    expect(remoteRowActivity(undefined)).toEqual({})
+    expect(remoteRowActivity({ view: view(), sending: false })).toEqual({})
+  })
+
+  it('shows working while a turn or a message of this window runs', () => {
+    expect(remoteRowActivity({ view: view({ active: true }), sending: false })).toEqual({ activity: 'processing' })
+    expect(remoteRowActivity({ view: undefined, sending: true })).toEqual({ activity: 'processing' })
+  })
+
+  it('shows a question as waiting for input, ahead of everything else', () => {
+    expect(remoteRowActivity({ view: view({ active: true, questions: 1 }), sending: true })).toEqual({ activity: 'awaiting_input' })
+    // What the target last answered replaces the count the display carried when it attached.
+    expect(remoteRowActivity({ view: view({ questions: 1 }), sending: false, questions: 0 })).toEqual({})
+    expect(remoteRowActivity({ view: view(), sending: false, questions: 2 })).toEqual({ activity: 'awaiting_input' })
+  })
+
+  it('shows a run a usage limit paused, with when it resets, and not once the turn works again', () => {
+    expect(remoteRowActivity({ view: view({ paused: pause }), sending: false })).toEqual({ activity: 'paused', pause })
+    expect(remoteRowActivity({ view: view({ paused: pause, active: true }), sending: false })).toEqual({ activity: 'processing' })
+  })
+})
 
 describe('threads started from another device', () => {
   it('lists a computer\'s threads that another device started, with this computer\'s project only for its own', () => {

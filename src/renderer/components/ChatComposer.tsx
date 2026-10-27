@@ -83,6 +83,8 @@ export interface ChatComposerProps {
   loading?: boolean
   disabled?: boolean
   placeholder?: string
+  /** What the empty input says while a turn runs; the composer queues the next message unless the parent says otherwise. */
+  loadingPlaceholder?: string
   /** Receives the inline `@skill` token (if any) so the parent can send this
    * prompt in skill mode without flipping the global chat mode. */
   onSend: (skillMode?: SkillChatMode) => void
@@ -119,6 +121,11 @@ interface MentionSearchState {
 }
 
 /** Caret of a text box, or -1 while a range is selected. */
+/** A kept-mounted pane that is not the one in view is inert; its composer must not answer shortcuts. */
+function isShown(input: HTMLElement | null): boolean {
+  return !input?.closest('[inert]')
+}
+
 function readCaret(node: HTMLTextAreaElement): number {
   return node.selectionStart === node.selectionEnd ? node.selectionStart : -1
 }
@@ -157,6 +164,7 @@ export function ChatComposer({
   loading = false,
   disabled = false,
   placeholder = 'Describe a task or ask a question',
+  loadingPlaceholder = 'Running… send queues next',
   onSend,
   onStop,
   disableSkillsPicker = false,
@@ -167,7 +175,8 @@ export function ChatComposer({
 }: ChatComposerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const composerInputRef = useRef<HTMLTextAreaElement>(null)
-  useCommand('composer.focus', () => composerInputRef.current?.focus(), () => !disabled)
+  // Two composers can be mounted at once (the local thread behind a remote one): the shown one answers.
+  useCommand('composer.focus', () => composerInputRef.current?.focus(), () => !disabled && isShown(composerInputRef.current))
   const resizeDraft = useCallback(() => {
     const inputElement = composerInputRef.current
     if (!inputElement) return
@@ -721,7 +730,7 @@ export function ChatComposer({
           onFocus={resizeDraft}
           placeholder={
             loading
-              ? 'Running… send queues next'
+              ? loadingPlaceholder
               : placeholder
           }
           rows={3}
