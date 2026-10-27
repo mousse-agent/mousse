@@ -19,7 +19,7 @@ import { claudeCodeDriver } from './harness/drivers/claudeCode'
 import { codexDriver } from './harness/drivers/codex'
 import { cursorDriver } from './harness/drivers/cursor'
 import { grokDriver } from './harness/drivers/grok'
-import { piLegacyDriver } from './harness/drivers/piLegacy'
+import { piDriver } from './harness/drivers/pi'
 import { harnessAuthRunner, recordHarnessSpawn } from './harness/spawn'
 import { spawnCodexAppServer } from './providers/codex/CodexAppServerClient'
 import { createCodexProviderService, findCodexBinary, type CodexProviderService } from './providers/codex/CodexProviderService'
@@ -355,7 +355,7 @@ export class MmsProfileServices {
       installationHome: shared.installationHome,
       instanceMap: this.providerInstances,
       drivers: [
-        piLegacyDriver({ client: () => this.orchestrator.piChatClient(), credentials: () => this.providerAuth }),
+        piDriver({ client: () => this.orchestrator.piChatClient(), credentials: () => this.providerAuth }),
         claudeCodeDriver({
           builtIn: () => this.claudeSubscription,
           // Skill resolution follows the instance's environment (its own CLAUDE_CONFIG_DIR, if any).

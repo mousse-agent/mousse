@@ -153,6 +153,30 @@ describe('Grok sessions', () => {
     await expect(sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'hi', onText: vi.fn() })).rejects.toThrow(message)
   })
 
+  describe.each([['the reply', false], ['the completion', true]])('a prompt that ends by %s with a limit or a cancel', (_name, byCompletion) => {
+    const ending = (stopReason: string): Prompt => async (c) => {
+      await c.client.notify(methods.client.session.update, text(c.params.sessionId, 'partial'))
+      if (!byCompletion) return { stopReason }
+      await c.client.notify('_x.ai/session/prompt_complete', { sessionId: c.params.sessionId, promptId: c.params._meta?.promptId, stopReason })
+      return new Promise(() => {})
+    }
+
+    it.each([['max_tokens', 'acp_incomplete_reply'], ['max_turn_requests', 'acp_incomplete_reply']])('%s fails the turn', async (reason, code) => {
+      const { sessions } = core(grokAgent(ending(reason)).connect)
+      await expect(sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'hi', onText: vi.fn() })).rejects.toMatchObject({ code })
+    })
+
+    it('cancelled, when nobody asked for a cancel, interrupts the turn', async () => {
+      const { sessions } = core(grokAgent(ending('cancelled')).connect)
+      await expect(sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'hi', onText: vi.fn() })).rejects.toMatchObject({ name: 'AbortError' })
+    })
+
+    it('end_turn is still a finished turn', async () => {
+      const { sessions } = core(grokAgent(ending('end_turn')).connect)
+      expect(await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'hi', onText: vi.fn() })).toBe('partial')
+    })
+  })
+
   it('keeps a refusal the reply reports', async () => {
     const agent = grokAgent(async () => ({ stopReason: 'refusal' }))
     const { sessions } = core(agent.connect)

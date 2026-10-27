@@ -117,7 +117,7 @@ const MermaidBlock = memo(function MermaidBlock({ code, isIncomplete }: CustomRe
 
   if (isIncomplete || !outcome) {
     return (
-      <div className="an-md-diagram" data-mermaid-state={isIncomplete ? "streaming" : "drawing"}>
+      <div className="an-md-diagram" data-find-ignore data-mermaid-state={isIncomplete ? "streaming" : "drawing"}>
         <SourceBlock source={code} isIncomplete={isIncomplete} />
       </div>
     );
@@ -125,7 +125,7 @@ const MermaidBlock = memo(function MermaidBlock({ code, isIncomplete }: CustomRe
 
   if (outcome.status === "ready" && !showCode) {
     return (
-      <div className="an-md-diagram" data-mermaid-state="ready">
+      <div className="an-md-diagram" data-find-ignore data-mermaid-state="ready">
         <CodeBlockContainer language="mermaid">
           <CodeBlockHeader language="mermaid" />
           <Actions>
@@ -143,7 +143,7 @@ const MermaidBlock = memo(function MermaidBlock({ code, isIncomplete }: CustomRe
 
   if (outcome.status === "ready") {
     return (
-      <div className="an-md-diagram" data-mermaid-state="code">
+      <div className="an-md-diagram" data-find-ignore data-mermaid-state="code">
         <SourceBlock source={code}>
           <ToggleButton onClick={() => setShowCode(false)}>Show diagram</ToggleButton>
         </SourceBlock>
@@ -152,7 +152,7 @@ const MermaidBlock = memo(function MermaidBlock({ code, isIncomplete }: CustomRe
   }
 
   return (
-    <div className="an-md-diagram" data-mermaid-state={outcome.status}>
+    <div className="an-md-diagram" data-find-ignore data-mermaid-state={outcome.status}>
       {outcome.status === "unavailable" ? (
         <DiagramFailure title="Unable to load the diagram renderer" message={outcome.message}>
           <button className="an-md-diagram-retry" onClick={retry} type="button">

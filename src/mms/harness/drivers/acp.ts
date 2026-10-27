@@ -63,6 +63,8 @@ export interface AcpDriverOptions {
   pty?: { available: () => boolean; spawn?: PtySpawn }
   /** Managed installs of registry agents; without it a registry entry cannot be installed. */
   agents?: AgentInstalls
+  /** Test seam: how long a prompt may get no sign of life before the turn fails. */
+  promptSilenceMs?: number
 }
 
 /**
@@ -326,6 +328,7 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
     questions: context.questions,
     connect,
     quirks: preset.quirks,
+    ...(options.promptSilenceMs !== undefined ? { promptSilenceMs: options.promptSilenceMs } : {}),
     ...(preset.classifyOption ? { classifyOption: preset.classifyOption } : {}),
     ...(preset.initializeMeta ? { initializeMeta: preset.initializeMeta } : {}),
     urlElicitation: true,

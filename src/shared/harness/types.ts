@@ -228,6 +228,16 @@ export interface HarnessError {
   reason?: string
   /** `budget_exhausted`: the limit that refused the next step, and what was used when known. */
   limit?: AgentExecutionLimit
+  /**
+   * The runtime's own retries of a provider request ran out (Pi's, as Mousse configured them). The
+   * turn shows the connection-failed retry affordance, and no turn-level retry runs again.
+   */
+  retriesExhausted?: true
+}
+
+/** A turn error whose details say the runtime's own request retries ran out (`HarnessError.retriesExhausted`). */
+export function isRetriesExhausted(error: unknown): boolean {
+  return error instanceof AppError && (error.details as { retriesExhausted?: unknown } | undefined)?.retriesExhausted === true
 }
 
 const HARNESS_ERROR_CATEGORY: Record<HarnessErrorCode, ErrorCategory> = {

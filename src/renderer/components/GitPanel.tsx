@@ -1,74 +1,27 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Cloud, Download, FolderOpen, GitBranch, Milestone, RefreshCw } from '../lib/icons'
 import type { GitCommit, GitFileChange } from '../../shared/types'
 import type { GitHubAvailability, GitHubRepositoryVisibility } from '../../shared/github'
+import { gitScopeFor } from '../lib/activeProject'
 import { useActiveProjectLocation } from '../hooks/useActiveProjectPath'
 import { useAppStore } from '../stores/appStore'
 import { useGitStatus } from '../stores/gitStatusStore'
+import { GitChangesList, type SelectedFile } from './git/GitChangesList'
+import { runRowAction, runSync, type RowRequest, type SyncRequest } from './git/gitPanelActions'
+import {
+  IDLE_SYNC_ACTIVITY,
+  selectionAfterAction,
+  type GitSectionId,
+  type RowAction,
+  type SectionAction,
+  type SyncActivity
+} from './git/gitPanelLogic'
+import { GitSyncBar } from './git/GitSyncBar'
 import { ResizablePanelSidebar } from './ResizablePanelSidebar'
 import { ReviewDiffPane, WhitespaceToggle } from './review/ReviewDiffPane'
 
-const STATUS_LABELS: Record<GitFileChange['status'], string> = {
-  modified: 'M',
-  added: 'A',
-  deleted: 'D',
-  renamed: 'R',
-  copied: 'C',
-  untracked: 'U',
-  ignored: 'I',
-  conflicted: '!'
-}
-
 const MIN_SECTION_RATIO = 0.15
 const MAX_SECTION_RATIO = 0.85
-
-type GitSectionId = 'staged' | 'changes' | 'untracked' | 'commits'
-
-function groupChanges(changes: GitFileChange[]) {
-  const staged = changes.filter((c) => c.staged && c.status !== 'untracked')
-  const unstaged = changes.filter((c) => !c.staged && c.status !== 'untracked' && c.status !== 'ignored')
-  const untracked = changes.filter((c) => c.status === 'untracked')
-  return { staged, unstaged, untracked }
-}
-
-function ChangeSection({
-  title,
-  items,
-  selected,
-  onSelect,
-  flex,
-  sectionRef
-}: {
-  title: string
-  items: GitFileChange[]
-  selected: { path: string; staged: boolean } | null
-  onSelect: (path: string, staged: boolean) => void
-  flex: number
-  sectionRef?: (el: HTMLDivElement | null) => void
-}) {
-  return (
-    <div className="git-section" style={{ flex: `${flex} 1 0` }} ref={sectionRef}>
-      <div className="git-section-title">{title}</div>
-      <div className="git-section-list">
-        {items.map((item) => (
-          <button
-            key={`${item.staged}-${item.path}`}
-            type="button"
-            className={`git-file-row${
-              selected?.path === item.path && selected.staged === item.staged ? ' selected' : ''
-            }`}
-            onClick={() => onSelect(item.path, item.staged)}
-          >
-            <span className={`git-status-badge status-${item.status}`}>
-              {STATUS_LABELS[item.status]}
-            </span>
-            <span className="git-file-path">{item.path}</span>
-          </button>
-        ))}
-      </div>
-    </div>
-  )
-}
 
 function CommitsSection({
   commits,
@@ -115,7 +68,10 @@ function CommitsSection({
 }
 
 export function GitPanel() {
-  const { path: projectPath, projectId } = useActiveProjectLocation()
+  const location = useActiveProjectLocation()
+  const { path: projectPath, projectId, workspaceThreadId } = location
+  // Tells the daemon which folder a Git action belongs to; a thread's own worktree gets the thread's rules.
+  const scope = useMemo(() => gitScopeFor({ projectId, workspaceThreadId }), [projectId, workspaceThreadId])
   const projects = useAppStore((state) => state.projects)
   const activeProject = useMemo(
     () => projects.find((project) => project.id === projectId) ?? projects.find((project) => project.path === projectPath),
@@ -136,7 +92,14 @@ export function GitPanel() {
   // Reload the open diff in place whenever the status refreshes.
   const [diffVersion, setDiffVersion] = useState(0)
   useEffect(() => setDiffVersion((value) => value + 1), [status])
-  const [selected, setSelected] = useState<{ path: string; staged: boolean } | null>(null)
+  const [selected, setSelected] = useState<SelectedFile | null>(null)
+  const selectedRef = useRef(selected)
+  selectedRef.current = selected
+  const [activity, setActivity] = useState<SyncActivity>(IDLE_SYNC_ACTIVITY)
+  const [rowError, setRowError] = useState('')
+  // One Git action at a time: the ref answers a second click before the state has rendered.
+  const [busy, setBusy] = useState(false)
+  const busyRef = useRef(false)
   const [githubStatus, setGithubStatus] = useState<GitHubAvailability | null>(null)
   const [githubBusy, setGithubBusy] = useState(false)
   const [githubError, setGithubError] = useState('')
@@ -149,6 +112,7 @@ export function GitPanel() {
     staged: 1,
     changes: 1,
     untracked: 1,
+    conflicts: 1,
     commits: 1
   })
   const sectionElsRef = useRef<Partial<Record<GitSectionId, HTMLDivElement | null>>>({})
@@ -158,7 +122,60 @@ export function GitPanel() {
     setSelected(null)
     setGithubError('')
     setGithubNotice('')
+    setActivity(IDLE_SYNC_ACTIVITY)
+    setRowError('')
   }, [projectPath])
+
+  // A file that is no longer listed (staged, discarded or committed elsewhere) has no diff to show.
+  useEffect(() => {
+    if (!status?.isRepo) return
+    setSelected((current) =>
+      current && !status.changes.some((change) => change.path === current.path && change.staged === current.staged) ? null : current
+    )
+  }, [status])
+
+  const withBusy = useCallback(async (run: () => Promise<void>) => {
+    if (busyRef.current) return
+    busyRef.current = true
+    setBusy(true)
+    try {
+      await run()
+    } finally {
+      busyRef.current = false
+      setBusy(false)
+    }
+  }, [])
+
+  const runSyncAction = useCallback((request: SyncRequest) => {
+    if (!projectPath) return
+    void withBusy(() => runSync(projectPath, scope, request, setActivity))
+  }, [projectPath, scope, withBusy])
+
+  const runFileRequest = useCallback((request: RowRequest) => {
+    if (!projectPath) return
+    setRowError('')
+    // The open file as it was when the button was pressed: the refresh after the action drops a row that moved, so it is read first.
+    const before = selectedRef.current
+    void withBusy(async () => {
+      const outcome = await runRowAction(projectPath, scope, request)
+      if (outcome.kind === 'failed') {
+        setRowError(outcome.message)
+      } else if (outcome.kind === 'done') {
+        const paths = request.files === 'all' ? 'all' : request.files.map((file) => file.path)
+        const followed = selectionAfterAction(before, request.action, paths)
+        // Another row opened meanwhile stays open.
+        setSelected((current) => (current === null || current === before ? followed : current))
+      }
+    })
+  }, [projectPath, scope, withBusy])
+
+  const onRowAction = useCallback((action: RowAction, file: GitFileChange) => {
+    runFileRequest({ action, files: [file] })
+  }, [runFileRequest])
+
+  const onSectionAction = useCallback((action: SectionAction, files: GitFileChange[]) => {
+    runFileRequest(action === 'unstage-all' ? { action: 'unstage', files: 'all' } : { action: 'stage', files })
+  }, [runFileRequest])
 
   useEffect(() => {
     setRepositoryName(activeProject?.name.replace(/[^A-Za-z0-9._-]/g, '-') ?? '')
@@ -226,11 +243,6 @@ export function GitPanel() {
       void refreshGitHubStatus()
     }
   }, [cloneDestination, cloneRepository, refreshGitHubStatus])
-
-  const groups = useMemo(
-    () => (status?.changes ? groupChanges(status.changes) : null),
-    [status?.changes]
-  )
 
   const onDividerMouseDown = useCallback((upper: GitSectionId, lower: GitSectionId) => {
     draggingDivider.current = { upper, lower }
@@ -319,98 +331,23 @@ export function GitPanel() {
       </div>
     )
 
-    const nodes: ReactNode[] = []
-    const fileSectionCount =
-      (groups?.staged.length ? 1 : 0) +
-      (groups?.unstaged.length ? 1 : 0) +
-      (groups?.untracked.length ? 1 : 0)
-
-    if (fileSectionCount === 0) {
-      nodes.push(
-        <div key="clean" className="git-empty git-empty-nested">
-          Working tree clean
-        </div>
-      )
-    }
-
-    const pushDivider = (upper: GitSectionId, lower: GitSectionId, upperTitle: string, lowerTitle: string) => {
-      nodes.push(
-        <div
-          key={`divider-${upper}-${lower}`}
-          className="git-section-divider"
-          onMouseDown={() => onDividerMouseDown(upper, lower)}
-          role="separator"
-          aria-orientation="horizontal"
-          aria-label={`Resize ${upperTitle} and ${lowerTitle} sections`}
-        />
-      )
-    }
-
-    let previousId: GitSectionId | null = null
-    let previousTitle = ''
-
-    if (groups?.staged.length) {
-      if (previousId) pushDivider(previousId, 'staged', previousTitle, 'Staged')
-      nodes.push(
-        <ChangeSection
-          key="staged"
-          title="Staged"
-          items={groups.staged}
+    return (
+      <>
+        <GitChangesList
+          changes={status.changes}
           selected={selected}
           onSelect={(path, staged) => setSelected({ path, staged })}
-          flex={sectionFlex.staged}
-          sectionRef={bindSectionRef('staged')}
+          scope={scope}
+          busy={busy}
+          onRowAction={onRowAction}
+          onSectionAction={onSectionAction}
+          flex={sectionFlex}
+          bindSectionRef={bindSectionRef}
+          onDividerMouseDown={onDividerMouseDown}
         />
-      )
-      previousId = 'staged'
-      previousTitle = 'Staged'
-    }
-
-    if (groups?.unstaged.length) {
-      if (previousId) pushDivider(previousId, 'changes', previousTitle, 'Changes')
-      nodes.push(
-        <ChangeSection
-          key="changes"
-          title="Changes"
-          items={groups.unstaged}
-          selected={selected}
-          onSelect={(path, staged) => setSelected({ path, staged })}
-          flex={sectionFlex.changes}
-          sectionRef={bindSectionRef('changes')}
-        />
-      )
-      previousId = 'changes'
-      previousTitle = 'Changes'
-    }
-
-    if (groups?.untracked.length) {
-      if (previousId) pushDivider(previousId, 'untracked', previousTitle, 'Untracked')
-      nodes.push(
-        <ChangeSection
-          key="untracked"
-          title="Untracked"
-          items={groups.untracked}
-          selected={selected}
-          onSelect={(path, staged) => setSelected({ path, staged })}
-          flex={sectionFlex.untracked}
-          sectionRef={bindSectionRef('untracked')}
-        />
-      )
-      previousId = 'untracked'
-      previousTitle = 'Untracked'
-    }
-
-    if (previousId) pushDivider(previousId, 'commits', previousTitle, 'Commits')
-    nodes.push(
-      <CommitsSection
-        key="commits"
-        commits={commits}
-        flex={sectionFlex.commits}
-        sectionRef={bindSectionRef('commits')}
-      />
+        <CommitsSection commits={commits} flex={sectionFlex.commits} sectionRef={bindSectionRef('commits')} />
+      </>
     )
-
-    return nodes
   }
 
   return (
@@ -420,9 +357,6 @@ export function GitPanel() {
           <div className="git-toolbar-info">
             <GitBranch size={14} />
             <span>{status?.branch ?? (status?.tracking === 'detached' ? 'Detached HEAD' : '—')}</span>
-            {status?.isRepo && <span className="text-secondary" title={status.upstream ?? undefined}>{status.upstream ?? (status.tracking === 'unborn' ? 'No commits yet' : status.tracking === 'detached' ? 'No branch' : 'No upstream')}</span>}
-            {status?.ahead ? <span className="badge">↑{status.ahead}</span> : null}
-            {status?.behind ? <span className="badge">↓{status.behind}</span> : null}
           </div>
           <button
             type="button"
@@ -434,6 +368,19 @@ export function GitPanel() {
             <RefreshCw size={14} strokeWidth={2} />
           </button>
         </div>
+
+        {projectPath && !loading && (
+          <GitSyncBar
+            status={status}
+            scope={scope}
+            activity={activity}
+            busy={busy}
+            onFetch={() => runSyncAction({ action: 'fetch' })}
+            onPull={(strategy) => runSyncAction({ action: 'pull', strategy })}
+            onAbort={(kind) => runSyncAction({ action: 'abort', kind })}
+          />
+        )}
+        {rowError && <div className="git-changes-error" role="alert">{rowError}</div>}
 
         <div className="git-changes">{renderSidebarBody()}</div>
       </ResizablePanelSidebar>

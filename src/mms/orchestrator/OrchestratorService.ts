@@ -57,9 +57,9 @@ import { WebTools } from './WebTools'
 import { stableStringify } from '../run/json'
 import { formatRestartNote } from '../run/restartNote'
 import { createHarnessGateway, PI_DRIVER_ID, type AdapterHost, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
-import { piLegacyDriver } from '../harness/drivers/piLegacy'
+import { piDriver } from '../harness/drivers/pi'
 import { contextGauge } from '../harness/policy'
-import type { ExecutionBinding, HarnessCaps, ProviderScope, RunPolicy, TurnOrigin } from '../../shared/harness/types'
+import { isRetriesExhausted, type ExecutionBinding, type HarnessCaps, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
 import { acknowledgeRows } from '../run/terminal'
@@ -136,6 +136,21 @@ import type { McpManager } from '../integrations/mcp/McpManager'
 import type { SkillsRegistry } from '../integrations/skills/SkillsRegistry'
 import type { FileService } from '../files/FileService'
 import type { GitService } from '../git/GitService'
+import {
+  PULL_REQUEST_DRAFT_SYSTEM,
+  buildPullRequestDraftPrompt,
+  conversationExcerpt,
+  heuristicPullRequestDraft,
+  parsePullRequestDraft,
+  type PullRequestDraftInputs
+} from '../git/pullRequestDraft'
+import {
+  COMMIT_SUGGESTION_SYSTEM,
+  buildCommitSuggestionPrompt,
+  commitSuggestionErrors,
+  parseCommitSuggestion
+} from '../git/commitSuggestion'
+import { readPullRequestTemplate } from '../git/pullRequestTemplate'
 import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
 import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
@@ -894,7 +909,7 @@ export class OrchestratorService extends EventEmitter {
       profileHome: unboundHome,
       installationHome: unboundHome,
       instanceMap: new ProviderInstanceService({ providerAuth }),
-      drivers: [piLegacyDriver({ client: () => this.llm, credentials: () => this.providerAuth })],
+      drivers: [piDriver({ client: () => this.llm, credentials: () => this.providerAuth })],
       questions: runtime?.questions ?? defaultUserQuestionService,
       shellPath: async () => ({ entries: [], source: 'failed' })
     })
@@ -4066,6 +4081,105 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * Proposes a title and description for a branch's pull request from the originating thread's
+   * conversation, the branch's commits and patch, and the repository's template. The title model writes
+   * it when one is chosen (the same guard as `generateThreadTitle`); without one, or on any failure, a
+   * plain draft built from the commits and the template is returned instead, so this never throws.
+   */
+  async draftPullRequest(params: {
+    root: string
+    branch: string
+    base: string
+    remote: string | null
+    originThreadId: string | null
+    /** The folder's project; the title model is resolved in its scope, so an instance turned off there is never used. */
+    projectId: string | null
+    threadName: string | null
+  }): Promise<{ title: string; body: string; source: 'model' | 'heuristic' }> {
+    const summary = await (this.gitService?.readBranchSummary(params.root, params).catch(() => null) ?? null)
+    const template = await readPullRequestTemplate(params.root).catch(() => null)
+    let conversation = ''
+    if (params.originThreadId) {
+      try {
+        conversation = conversationExcerpt(this.getMessages(params.originThreadId))
+      } catch {
+        // A thread that cannot be read still gets a draft from its commits.
+      }
+    }
+    const name = params.threadName?.trim()
+    const inputs: PullRequestDraftInputs = {
+      branch: params.branch,
+      base: params.base,
+      threadName: name && name !== 'New Chat' ? name : null,
+      conversation,
+      commits: summary?.commits ?? [],
+      stat: summary?.stat ?? '',
+      patch: summary?.patch ?? '',
+      template
+    }
+    const heuristic = { ...heuristicPullRequestDraft(inputs), source: 'heuristic' as const }
+    const titleSettings = this.settingsStore.get().title
+    const hasExplicitTitleModel = Boolean(titleSettings.llmProvider?.trim() && titleSettings.model?.trim())
+    if (!hasExplicitTitleModel || (!inputs.commits.length && !inputs.patch && !conversation)) return heuristic
+    try {
+      const resolved = this.harness.resolveStored(titleSettings, {
+        purpose: 'title',
+        scope: params.projectId ? { kind: 'project', projectId: params.projectId } : params.originThreadId ? this.threadScope(params.originThreadId) : { kind: 'device' }
+      })
+      const text = await this.llm.draftPullRequest(
+        PULL_REQUEST_DRAFT_SYSTEM,
+        buildPullRequestDraftPrompt(inputs),
+        params.originThreadId ?? undefined,
+        { instanceId: resolved.instanceId, llmProvider: resolved.llmProvider, model: titleSettings.model }
+      )
+      const parsed = parsePullRequestDraft(text)
+      return parsed ? { ...parsed, source: 'model' } : heuristic
+    } catch {
+      return heuristic
+    }
+  }
+
+  /**
+   * Writes a commit message for what the next commit in `root` would take, with the title model. Only a
+   * title model the user chose is used (Automatic never reaches a model, as for chat titles): without one
+   * this refuses with `git_suggest_no_model` before reading anything, so the caller can say so. The model
+   * is resolved in the folder's project, so an instance turned off there is never used. Nothing is written
+   * to the repository; the message is a proposal the user edits.
+   */
+  async generateCommitMessage(params: {
+    root: string
+    /** The commit takes every change, as in a thread's worktree; else staged changes when there are any. */
+    all: boolean
+    /** The folder's project; the title model is resolved in its scope. */
+    projectId: string | null
+    /** The thread whose worktree this is, when it is one; names the provider's cache session. */
+    threadId: string | null
+    branch?: string | null
+  }): Promise<{ message: string; truncated: boolean }> {
+    const titleSettings = this.settingsStore.get().title
+    if (!titleSettings.llmProvider?.trim() || !titleSettings.model?.trim()) throw commitSuggestionErrors.create('git_suggest_no_model')
+    const input = await this.gitService?.describeCommitInput(params.root, { all: params.all })
+    if (!input || input.files.length === 0) throw commitSuggestionErrors.create('git_suggest_empty')
+    try {
+      const resolved = this.harness.resolveStored(titleSettings, {
+        purpose: 'title',
+        scope: params.projectId ? { kind: 'project', projectId: params.projectId } : params.threadId ? this.threadScope(params.threadId) : { kind: 'device' }
+      })
+      const text = await this.llm.generateCommitMessage(
+        COMMIT_SUGGESTION_SYSTEM,
+        buildCommitSuggestionPrompt(input, params.branch),
+        params.threadId ?? undefined,
+        { instanceId: resolved.instanceId, llmProvider: resolved.llmProvider, model: titleSettings.model }
+      )
+      const message = parseCommitSuggestion(text)
+      if (!message) throw new Error('The model answered without a commit message')
+      return { message, truncated: input.truncated }
+    } catch (error) {
+      throw commitSuggestionErrors.create('git_suggest_failed', error)
+    }
+  }
+
+  /**
    * Promote a draft into a sidebar-visible thread as soon as the user commits
    * the first send. Title generation is often slow; without this, switching away
    * mid-title leaves the thread filtered out until a rename arrives.
@@ -5999,7 +6113,7 @@ export class OrchestratorService extends EventEmitter {
       if (isAbort) {
         aborted = true
         assistantText = ''
-      } else if (err instanceof ConnectionRetriesExhaustedError) {
+      } else if (err instanceof ConnectionRetriesExhaustedError || isRetriesExhausted(err)) {
         connectionFailed = true
         providerError = serializeAppError(normalized)
         assistantText = ''

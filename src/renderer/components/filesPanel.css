@@ -34,3 +34,89 @@
 .files-save-status.error, .files-save-status.conflict { color: var(--danger); }
 .files-conflict { display: flex; align-items: center; gap: 8px; }
 .files-conflict-actions { display: flex; gap: 6px; margin-left: auto; }
+
+/* Search box above the tree: quick open by name, or text search across files. A selected row only gets a background. */
+.files-sidebar .files-toolbar-actions { display: flex; align-items: center; gap: 2px; }
+.files-sidebar .files-toolbar-actions .btn.active { background: rgba(var(--accent-rgb), 0.18); color: var(--text-primary); }
+
+.files-search-host { display: flex; flex: 2 1 0; flex-direction: column; min-height: 0; border-bottom: 1px solid var(--border-subtle); }
+.files-search { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; font-size: 12px; }
+.files-search-bar { display: flex; flex: 0 0 auto; flex-direction: column; gap: 6px; padding: 8px; }
+.files-search-modes { display: flex; align-items: center; gap: 2px; }
+.files-search-mode.active { background: rgba(var(--accent-rgb), 0.18); color: var(--text-primary); }
+.files-search-close { margin-left: auto; }
+.files-search-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--surface-primary);
+}
+.files-search-field:focus-within { border-color: rgba(var(--accent-rgb), 0.5); }
+.files-search-field-icon { flex: none; color: var(--text-secondary); }
+.files-search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 0;
+  border: 0;
+  outline: 0;
+  color: var(--text-primary);
+  background: transparent;
+  font: inherit;
+}
+.files-search-options { display: flex; flex: none; gap: 2px; }
+.files-search-option {
+  min-width: 22px;
+  padding: 1px 4px;
+  border: 0;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.files-search-option:hover { background: rgba(var(--accent-rgb), 0.1); }
+.files-search-option.active { color: var(--text-primary); background: rgba(var(--accent-rgb), 0.22); }
+
+.files-search-notes { display: flex; flex: 0 0 auto; flex-direction: column; gap: 2px; padding: 0 8px 6px; }
+.files-search-note { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--text-secondary); line-height: 1.4; }
+.files-search-note.warning { color: var(--text-primary); }
+.files-search-note.error { color: var(--danger); }
+.files-search-note-detail { flex-basis: 100%; overflow-wrap: anywhere; font-size: 11px; opacity: 0.8; }
+
+.files-search-results { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 0 4px 6px; }
+.files-search-results.stale { opacity: 0.6; }
+.files-search-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.files-search-row:hover { background: rgba(var(--accent-rgb), 0.1); color: var(--text-primary); }
+.files-search-row.selected { background: rgba(var(--accent-rgb), 0.18); color: var(--text-primary); }
+.files-search-row-icon { flex: none; opacity: 0.75; }
+.files-search-row-name { flex: none; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.files-search-row-dir { min-width: 0; overflow: hidden; color: var(--text-secondary); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; opacity: 0.8; }
+.files-search-row-name mark, .files-search-row-dir mark { color: var(--text-primary); background: transparent; font-weight: 700; }
+
+.files-search-group { display: flex; align-items: center; gap: 6px; padding: 6px 6px 2px; color: var(--text-primary); font-weight: 600; }
+.files-search-count { flex: none; margin-left: auto; padding: 0 6px; color: var(--text-secondary); font-size: 10px; line-height: 16px; background: rgba(var(--accent-pale-rgb), 0.14); border-radius: 8px; }
+.files-search-match { padding-left: 14px; }
+.files-search-line { flex: none; min-width: 2.5em; color: var(--text-secondary); font-size: 11px; text-align: right; font-variant-numeric: tabular-nums; }
+.files-search-snippet { min-width: 0; overflow: hidden; font-family: var(--font-mono, monospace); font-size: 11px; text-overflow: ellipsis; white-space: pre; }
+.files-search-snippet mark { color: var(--text-primary); background: rgba(var(--accent-rgb), 0.3); border-radius: 2px; }
+/* A regular-expression match has no known length: a thin inline caret marks where it starts. */
+.files-search-caret { display: inline-block; width: 2px; height: 1em; margin: 0 1px; vertical-align: text-bottom; background: rgba(var(--accent-rgb), 0.8); }

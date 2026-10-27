@@ -47,14 +47,48 @@ export interface CreatePullRequestInput {
   body: string
   base: string
   draft: boolean
-  /** The branch the pull request is opened from; the checked-out branch when absent. */
-  head?: string
+  /** The branch the pull request is opened from, named explicitly so a checkout that moved meanwhile cannot change it. */
+  head: string
+}
+
+/** What the create form submits; the scope supplies the branch and the folder. */
+export interface PullRequestFormInput {
+  title: string
+  body: string
+  base: string
+  draft: boolean
+}
+
+/** A title and description proposed for a branch. `source` says whether a model or the plain fallback wrote it. */
+export interface PullRequestDraft {
+  title: string
+  body: string
+  base: string
+  source: 'model' | 'heuristic'
+}
+
+/** `existing` is true when the branch already had an open pull request, which is returned instead of a new one. */
+export interface CreatePullRequestResult {
+  pullRequest: GitPullRequestInfo
+  existing: boolean
 }
 
 /** Names the folder a pull request call runs in: a project's folder or a thread's own worktree. */
 export interface PullRequestRef {
   projectId?: string
   threadId?: string
+}
+
+/**
+ * Everything a pull request action needs, captured when it starts and never read from the active
+ * thread or the current checkout afterwards: the folder (`projectId` or `threadId`, as for every
+ * pull request call), the thread whose conversation drafts the description and receives the link,
+ * the folder's path (the key of the cached lookup) and the branch the action is bound to.
+ */
+export interface PullRequestScope extends PullRequestRef {
+  originThreadId: string | null
+  path: string
+  branch: string
 }
 
 export interface RepositoryIdentity {

@@ -17,6 +17,7 @@ import { GuiMmsController } from './mms/GuiMmsController'
 import { PresentationState } from './mms/PresentationState'
 import {
   attachWindowListeners,
+  getWindowShortcuts,
   registerGuiIpc
 } from './ipc/registerGuiIpc'
 import { appearanceUsesAcrylic, normalizeAppearance } from '../shared/settings'
@@ -45,6 +46,8 @@ import { startDesktopUpdates } from './updates'
 import type { DesktopUpdater } from './updates/DesktopUpdater'
 import { setupApplicationMenu } from './applicationMenu'
 import { attachZoomShortcuts } from './zoomShortcuts'
+import { attachMenuShortcutGate } from './menu/menuShortcutGate'
+import { attachGuestShortcuts, clearGuestShortcuts } from './menu/guestShortcutForward'
 import { openExternalSafely } from './safeExternalUrl'
 import { attachDevGuiConsoleCapture, isDevGuiMainEnabled } from './devgui/devGuiMain'
 import { startDevGuiPoller } from './devgui/devGuiPoller'
@@ -247,10 +250,14 @@ function startGuiApp(): void {
     browserOwner.webContents.on('did-attach-webview', (_event, guest) => {
       configureBrowserPopupPolicy(guest, browserOwner)
       attachedBrowserHost?.observeGuest(browserOwner.webContents, guest)
+      attachGuestShortcuts(guest, browserOwner.webContents)
     })
+    const browserOwnerId = browserOwner.webContents.id
+    browserOwner.webContents.once('destroyed', () => clearGuestShortcuts(browserOwnerId))
 
     attachContextMenu(mainWindow.webContents, () => mainWindow)
     attachZoomShortcuts(mainWindow.webContents)
+    attachMenuShortcutGate(mainWindow.webContents, () => getWindowShortcuts(browserOwnerId))
     // Dev-only: buffer the renderer console so Mousse tools can read it.
     if (isDevGuiMainEnabled()) attachDevGuiConsoleCapture(mainWindow.webContents)
 

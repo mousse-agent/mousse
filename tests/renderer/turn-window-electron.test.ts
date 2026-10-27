@@ -17,6 +17,8 @@ type Position = {
   first: boolean; last: boolean; farBelow: boolean; farAbove: boolean
 }
 type Sweep = { drift: number[]; scrollHeightDelta: number }
+type ActiveMatch = { top: number; bottom: number; text: string; viewport: number; turn: string | null }
+type FindState = { count: string | null; match: ActiveMatch | null; turns: number; last: boolean; endGap: number }
 type Evidence = {
   t200: number; t1000: number; mounted200: number; opened: Opened; positions: Position[]
   hold: { text: string; row: number; top: number }
@@ -29,8 +31,16 @@ type Evidence = {
   markerFrames: number; marker: { top: number; mounted: boolean; count: number }
   interrupted: { at: number; later: number; top: number | null }
   small: { windowed: boolean; mounted: number; spacers: number }; grown: { windowed: boolean; mounted: number; gap: number }
+  find: {
+    opened: boolean; focusFrames: number; farFrames: number; far: FindState; manyFrames: number; many: FindState
+    last: FindState; wrapFrames: number; wrapped: FindState; backFrames: number; back: FindState
+    closed: { open: boolean; highlights: number }
+  }
   pageErrors: string[]; rendererErrors: string[]
 }
+
+/** The match is painted inside the transcript's visible area. */
+const inView = (match: ActiveMatch | null) => Boolean(match && match.top >= 0 && match.bottom <= match.viewport)
 
 it('mounts only the turns near the viewport of a long thread and holds the reading line while it scrolls and grows', async () => {
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-turn-window-'))
@@ -132,6 +142,39 @@ it('mounts only the turns near the viewport of a long thread and holds the readi
     expect(result.grown.windowed).toBe(true)
     expect(result.grown.mounted).toBeLessThanOrEqual(41)
     expect(result.grown.gap).toBeLessThan(2)
+
+    // Find: the bar opens from the command and takes focus; a word that only exists in a turn that is not mounted is
+    // counted from the messages, and landing on it mounts that turn and puts the match inside the visible area.
+    const find = result.find
+    expect(find.opened).toBe(true)
+    expect(find.focusFrames).toBeGreaterThanOrEqual(0)
+    expect(find.farFrames).toBeGreaterThanOrEqual(0)
+    expect(find.far.count).toBe('1 of 1')
+    expect(find.far.turns).toBeLessThanOrEqual(60)
+    expect(find.far.match).toMatchObject({ text: 'anchor-123-0', turn: 'u-123' })
+    expect(inView(find.far.match)).toBe(true)
+    // Eleven matches, the first one shown is the nearest one below the reader (turns 990 and up), in view.
+    expect(find.manyFrames).toBeGreaterThanOrEqual(0)
+    expect(find.many.count).toMatch(/ of 11$/)
+    expect(find.many.match?.text).toBe('sentinel-u99')
+    expect(inView(find.many.match)).toBe(true)
+    // Next ends on the last match, in the last turn; one more wraps to the first, in turn 99, which was far away.
+    expect(find.last.count).toBe('11 of 11')
+    expect(find.last.match?.turn).toBe('u-999')
+    expect(find.last.last).toBe(true)
+    expect(inView(find.last.match)).toBe(true)
+    expect(find.wrapFrames).toBeGreaterThanOrEqual(0)
+    expect(find.wrapped.count).toBe('1 of 11')
+    expect(find.wrapped.match?.turn).toBe('u-99')
+    expect(find.wrapped.turns).toBeLessThanOrEqual(60)
+    expect(inView(find.wrapped.match)).toBe(true)
+    // Shift+Enter wraps back to the last match.
+    expect(find.backFrames, JSON.stringify(find.back)).toBeGreaterThanOrEqual(0)
+    expect(find.back.count).toBe('11 of 11')
+    expect(find.back.match?.turn).toBe('u-999')
+    expect(inView(find.back.match)).toBe(true)
+    // Escape closes the bar and clears the highlights.
+    expect(find.closed).toEqual({ open: false, highlights: 0 })
   } finally {
     if (child?.pid && child.exitCode === null && child.signalCode === null) {
       child.kill('SIGTERM')

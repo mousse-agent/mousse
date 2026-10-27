@@ -1,6 +1,20 @@
 import { useCallback, useEffect } from 'react'
 import { create } from 'zustand'
-import type { GitBranchInfo, GitCommit, GitDiffStats, GitStatusSnapshot } from '../../shared/types'
+import type {
+  GitBranchInfo,
+  GitBranchOptions,
+  GitCheckoutOptions,
+  GitCheckoutResult,
+  GitCommit,
+  GitCommitSuggestion,
+  GitDeleteBranchOptions,
+  GitDiffStats,
+  GitFetchResult,
+  GitPullOptions,
+  GitPullResult,
+  GitScope,
+  GitStatusSnapshot
+} from '../../shared/types'
 import { errorText } from '../lib/errorText'
 import { anyTurnEnded } from '../lib/turnEnded'
 import { useAppStore } from './appStore'
@@ -144,10 +158,106 @@ export function refreshGitStatus(path: string, options: GitRefreshOptions = {}):
   return next.promise
 }
 
+/** The project id a refresh reads with; the daemon names the folder by `scope`, the main process reads it by `path`. */
+function refreshProjectId(scope: GitScope): string | undefined {
+  return scope.projectId ?? undefined
+}
+
+/** Refresh a folder after a mutation, whether it worked or not. */
+async function refreshAfterMutation(path: string, scope: GitScope): Promise<void> {
+  await refreshGitStatus(path, { force: true, quiet: true, projectId: refreshProjectId(scope) })
+}
+
 /** Switch branches, then refresh. Rejects with Git's message when the checkout fails. */
-export async function checkoutGitBranch(path: string, branch: string, projectId?: string): Promise<void> {
-  await window.mousse.git.checkout(branch, projectId, path)
-  await refreshGitStatus(path, { force: true, quiet: true, projectId })
+export async function checkoutGitBranch(path: string, branch: string, scope: GitScope, options: GitCheckoutOptions = {}): Promise<GitCheckoutResult> {
+  try {
+    const result = await window.mousse.git.checkout(scope, branch, options)
+    return { stashKept: result.stashKept }
+  } finally {
+    // A failed stash-and-switch can already have taken the changes out of the working tree.
+    await refreshAfterMutation(path, scope)
+  }
+}
+
+/** Stage these paths, or everything. */
+export async function stageGitPaths(path: string, paths: readonly string[] | 'all', scope: GitScope): Promise<void> {
+  try {
+    await window.mousse.git.stage(scope, paths === 'all' ? { all: true } : { paths: [...paths] })
+  } finally {
+    await refreshAfterMutation(path, scope)
+  }
+}
+
+/** Take these paths out of the index, or everything. */
+export async function unstageGitPaths(path: string, paths: readonly string[] | 'all', scope: GitScope): Promise<void> {
+  try {
+    await window.mousse.git.unstage(scope, paths === 'all' ? { all: true } : { paths: [...paths] })
+  } finally {
+    await refreshAfterMutation(path, scope)
+  }
+}
+
+/** Throw away the changes to these paths; untracked files are deleted. The caller confirms first. */
+export async function discardGitPaths(path: string, paths: readonly string[], scope: GitScope): Promise<void> {
+  try {
+    await window.mousse.git.discard(scope, [...paths])
+  } finally {
+    await refreshAfterMutation(path, scope)
+  }
+}
+
+/** Fetch the branch's remote and say how far behind it is now. */
+export async function fetchGit(path: string, scope: GitScope): Promise<GitFetchResult> {
+  try {
+    const result = await window.mousse.git.fetch(scope)
+    return { behindBefore: result.behindBefore, behindAfter: result.behindAfter }
+  } finally {
+    await refreshAfterMutation(path, scope)
+  }
+}
+
+/** Pull the upstream into the branch; `conflicted` leaves the merge or rebase for the user. */
+export async function pullGit(path: string, scope: GitScope, options: GitPullOptions = {}): Promise<GitPullResult> {
+  try {
+    const result = await window.mousse.git.pull(scope, options)
+    return { result: result.result }
+  } finally {
+    // A conflicted pull rejects nothing, but a failed one may still have changed the folder.
+    await refreshAfterMutation(path, scope)
+  }
+}
+
+/** Abort the merge or rebase that is waiting on the user. */
+export async function abortGitInProgress(path: string, kind: 'merge' | 'rebase', scope: GitScope): Promise<void> {
+  try {
+    await window.mousse.git.abortInProgress(scope, kind)
+  } finally {
+    await refreshAfterMutation(path, scope)
+  }
+}
+
+export async function createGitBranch(path: string, name: string, scope: GitScope, options: GitBranchOptions = {}): Promise<void> {
+  try {
+    await window.mousse.git.createBranch(scope, name, options)
+  } finally {
+    await refreshAfterMutation(path, scope)
+  }
+}
+
+export async function renameGitBranch(path: string, name: string, newName: string, scope: GitScope): Promise<void> {
+  try {
+    await window.mousse.git.renameBranch(scope, name, newName)
+  } finally {
+    await refreshAfterMutation(path, scope)
+  }
+}
+
+export async function deleteGitBranch(path: string, name: string, scope: GitScope, options: GitDeleteBranchOptions = {}): Promise<void> {
+  try {
+    await window.mousse.git.deleteBranch(scope, name, options)
+  } finally {
+    await refreshAfterMutation(path, scope)
+  }
 }
 
 export interface CommitGitOptions {
@@ -180,17 +290,20 @@ async function refreshBranchPullRequest(path: string, projectId: string | undefi
 export async function commitGitChanges(
   path: string,
   message: string,
-  projectId?: string,
+  scope: GitScope,
   options: CommitGitOptions = {}
 ): Promise<void> {
   const git = window.mousse.git
+  const projectId = refreshProjectId(scope)
+  // The branch the user was looking at; the daemon refuses if HEAD is on another one by then.
+  const expectedBranch = useGitStatusStore.getState().entries[path]?.status?.branch ?? undefined
   options.onPhase?.('committing')
-  await git.commit(message, projectId, path, { amend: options.amend === true })
+  await git.commit(scope, message, { amend: options.amend === true, expectedBranch })
   let pushError: CommitPushError | null = null
   if (options.push) {
     options.onPhase?.('pushing')
     try {
-      await git.push(projectId, path)
+      await git.push(scope, { expectedBranch })
     } catch (error) {
       pushError = new CommitPushError(error)
     }
@@ -200,17 +313,32 @@ export async function commitGitChanges(
   if (options.push) await refreshBranchPullRequest(path, projectId)
 }
 
-/** Push the current branch (publishing it when it has no upstream), then refresh. Rejects with Git's message. */
-export async function pushGitBranch(path: string, projectId?: string): Promise<void> {
-  await window.mousse.git.push(projectId, path)
-  await refreshGitStatus(path, { force: true, quiet: true, projectId })
-  await refreshBranchPullRequest(path, projectId)
+/**
+ * A proposed message for what the next commit takes. Nothing changes in the repository, so there is no
+ * refresh. Rejects with the daemon's code, `git_suggest_no_model` among them.
+ */
+export async function suggestGitCommitMessage(path: string, scope: GitScope): Promise<GitCommitSuggestion> {
+  const expectedBranch = useGitStatusStore.getState().entries[path]?.status?.branch ?? undefined
+  const suggestion = await window.mousse.git.suggestCommitMessage(scope, { expectedBranch })
+  return { message: suggestion.message, truncated: suggestion.truncated }
 }
 
-/** Make the folder a Git repository, then refresh so the section switches to its normal view. Rejects with Git's message. */
-export async function initGitRepository(path: string, projectId?: string): Promise<void> {
-  await window.mousse.git.init(projectId, path)
-  await refreshGitStatus(path, { force: true, quiet: true, projectId })
+/** Push the current branch (publishing it when it has no upstream), then refresh. Rejects with Git's message. */
+export async function pushGitBranch(path: string, scope: GitScope): Promise<void> {
+  const expectedBranch = useGitStatusStore.getState().entries[path]?.status?.branch ?? undefined
+  await window.mousse.git.push(scope, { expectedBranch })
+  await refreshAfterMutation(path, scope)
+  await refreshBranchPullRequest(path, refreshProjectId(scope))
+}
+
+/**
+ * Make the folder a Git repository, then refresh so the section switches to its normal view.
+ * Rejects with Git's message. Only a project folder can be initialised, so the thread is left out.
+ */
+export async function initGitRepository(path: string, scope: GitScope): Promise<void> {
+  const projectScope = { projectId: scope.projectId, workspaceThreadId: null }
+  await window.mousse.git.init(projectScope)
+  await refreshAfterMutation(path, projectScope)
 }
 
 const retained = new Map<string, { count: number; projectId?: string }>()

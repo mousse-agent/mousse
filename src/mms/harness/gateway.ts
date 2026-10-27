@@ -80,7 +80,9 @@ export type {
 
 /**
  * The only way app code reaches agents and providers. Drivers (`./drivers/*`) sit behind it; the
- * gateway owns retries, timeouts, capability fallbacks, scope and model prefs. Failures are thrown
+ * gateway owns timeouts, capability fallbacks, scope and model prefs. Drivers never retry; runtimes
+ * retry their own requests as Mousse configures them, and the gateway's own retry is the turn retry
+ * when no side effect is possible. Failures are thrown
  * as `harnessAppError(...)` (`shared/harness/types.ts`) so callers and the protocol see typed codes.
  */
 export interface HarnessGateway {
@@ -413,7 +415,7 @@ interface InstanceRecord {
   driver: HarnessDriver
   config: InstanceConfig
   builtIn: boolean
-  /** Driver, revision and home: a change builds a new runtime. */
+  /** Driver, revision, home and engine: a change builds a new runtime. */
   key: string
   env: InstanceEnv
   runtime: DriverRuntime
@@ -1417,7 +1419,7 @@ export class Harness implements HarnessGateway {
     const driver = this.drivers.get(resolved.entry.driver)
     if (!driver) return harnessFail('unsupported', `No driver for ${resolved.entry.driver} (instance ${instanceId}).`, instanceId)
     const config = driver.decodeConfig(resolved.entry.config)
-    const key = `${driver.kind}|${this.counters.get(instanceId).configRevision}|${config.home}`
+    const key = recordKey(driver, this.counters.get(instanceId).configRevision, config)
     if (current && current.key === key) {
       current.entry = resolved.entry
       current.config = config
@@ -1458,7 +1460,7 @@ export class Harness implements HarnessGateway {
       instanceId,
       driver: entry.driver,
       configRevision: revision,
-      ...(driver.alwaysPrivateHome || (config.home === 'private' && !builtIn) ? { home: join(stateDir, 'home') } : {}),
+      ...(alwaysPrivate(driver, config) || (config.home === 'private' && !builtIn) ? { home: join(stateDir, 'home') } : {}),
       searchPath: this.searchPath
     })
     const record: InstanceRecord = {
@@ -1467,7 +1469,7 @@ export class Harness implements HarnessGateway {
       driver,
       config,
       builtIn,
-      key: `${driver.kind}|${revision}|${config.home}`,
+      key: recordKey(driver, revision, config),
       env,
       active: 0,
       turns: new Map(),
@@ -1514,10 +1516,22 @@ export class Harness implements HarnessGateway {
     for (const record of this.retired) {
       if (record.active > 0) continue
       this.retired.delete(record)
+      let stopped: void | Promise<void> = undefined
       try {
-        record.runtime.stop()
+        stopped = record.runtime.stop()
       } catch (error) {
         console.warn('[harness] runtime stop failed', { instanceId: record.instanceId, error: errorText(error) })
+      }
+      // A removed instance's files wait for its processes to exit.
+      const removal = this.removals.get(record.instanceId)
+      if (stopped && removal) {
+        removal.pending += 1
+        void stopped.catch((error) => console.warn('[harness] runtime stop failed', { instanceId: record.instanceId, error: errorText(error) })).finally(() => {
+          removal.pending -= 1
+          this.deleteRemoved()
+        })
+      } else if (stopped) {
+        void stopped.catch(() => {})
       }
     }
     this.deleteRemoved()
@@ -2379,7 +2393,7 @@ export class Harness implements HarnessGateway {
     this.operations.clear()
     for (const record of [...this.records.values(), ...this.retired]) {
       try {
-        record.runtime.stop()
+        void Promise.resolve(record.runtime.stop()).catch(() => {})
       } catch {
         /* stopping is best effort */
       }
@@ -2388,6 +2402,16 @@ export class Harness implements HarnessGateway {
     this.retired.clear()
     this.listeners.clear()
   }
+}
+
+/** The driver keeps every instance in a Mousse-owned home (for some configs, e.g. Pi's RPC engine). */
+function alwaysPrivate(driver: HarnessDriver, config: InstanceConfig): boolean {
+  return typeof driver.alwaysPrivateHome === 'function' ? driver.alwaysPrivateHome(config) : driver.alwaysPrivateHome === true
+}
+
+/** Driver, revision, home and engine: a change in any builds a new runtime (and a new epoch). */
+function recordKey(driver: HarnessDriver, revision: number, config: InstanceConfig): string {
+  return `${driver.kind}|${revision}|${config.home}|${config.engine ?? ''}`
 }
 
 function setOrDelete(target: Record<string, unknown>, key: string, value: unknown): void {

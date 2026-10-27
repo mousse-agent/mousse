@@ -3,6 +3,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
 import type { BridgeDisplayPart } from '../shared/bridge'
 import type { NetStatus } from '../shared/net/local'
+import type { CommandId } from '../shared/commands'
 import type { LocalTtsModelId, LocalTtsModelStatus, ProviderSpeechRequest, ProviderSpeechResult } from '../shared/readAloud'
 import type { LocalSttModelId, LocalSttModelStatus, ProviderTranscriptionRequest, ProviderTranscriptionResult } from '../shared/dictation'
 import type { WindowResizeEdge } from '../shared/windowResize'
@@ -24,10 +25,21 @@ import type {
   FileGrepResponse,
   FileSearchResponse,
   GitBranchInfo,
+  GitBranchOptions,
+  GitCheckoutOptions,
+  GitCheckoutResult,
   GitCommit,
   GitCommitOptions,
+  GitCommitSuggestion,
+  GitDeleteBranchOptions,
   GitDiffStats,
+  GitFetchResult,
+  GitMutationResult,
+  GitPullOptions,
   GitPullRequestLookup,
+  GitPullResult,
+  GitPushOptions,
+  GitScope,
   GitStatusSnapshot,
   MainView,
   OrchestratorResponse,
@@ -53,7 +65,14 @@ import type {
   TurnStateSnapshot,
   UserQuestionAnswers
 } from '../shared/types'
-import type { PullRequestRef } from '../shared/pullRequests'
+import type {
+  CreatePullRequestResult,
+  PullRequestBaseBranches,
+  PullRequestDraft,
+  PullRequestFormInput,
+  PullRequestRef,
+  PullRequestScope
+} from '../shared/pullRequests'
 import type { ProfileCreateInput, ProfilePublicDto, ProfileUpdateInput } from '../shared/profiles/types'
 import type { LlmProviderOption, MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../shared/settings'
 import type { LineEditStatsSnapshot, UsageStatsSnapshot } from '../shared/lineEditStats'
@@ -442,22 +461,47 @@ const api = {
       ipcRenderer.invoke('git:branches', projectId, cwd),
     diffStats: (projectId?: string, cwd?: string): Promise<GitDiffStats> =>
       ipcRenderer.invoke('git:diffStats', projectId, cwd),
-    checkout: (branch: string, projectId?: string, cwd?: string): Promise<void> =>
-      ipcRenderer.invoke('git:checkout', branch, projectId, cwd),
-    commit: (message: string, projectId?: string, cwd?: string, options?: GitCommitOptions): Promise<void> =>
-      ipcRenderer.invoke('git:commit', message, projectId, cwd, options),
-    push: (projectId?: string, cwd?: string): Promise<void> =>
-      ipcRenderer.invoke('git:push', projectId, cwd),
-    init: (projectId?: string, cwd?: string): Promise<void> =>
-      ipcRenderer.invoke('git:init', projectId, cwd),
+    // Mutations run in the daemon and reject with `{ code, message, details }` (storage handlers).
+    checkout: (scope: GitScope, branch: string, options?: GitCheckoutOptions): Promise<GitMutationResult<GitCheckoutResult>> =>
+      storageInvoke('git:checkout', scope, branch, options),
+    commit: (scope: GitScope, message: string, options?: GitCommitOptions): Promise<GitMutationResult> =>
+      storageInvoke('git:commit', scope, message, options),
+    suggestCommitMessage: (scope: GitScope, options?: { expectedBranch?: string }): Promise<GitCommitSuggestion> =>
+      storageInvoke('git:suggestCommitMessage', scope, options),
+    push: (scope: GitScope, options?: GitPushOptions): Promise<GitMutationResult> =>
+      storageInvoke('git:push', scope, options),
+    init: (scope: GitScope): Promise<GitMutationResult> =>
+      storageInvoke('git:init', scope),
+    stage: (scope: GitScope, input: { paths: string[] } | { all: true }): Promise<GitMutationResult> =>
+      storageInvoke('git:stage', scope, input),
+    unstage: (scope: GitScope, input: { paths: string[] } | { all: true }): Promise<GitMutationResult> =>
+      storageInvoke('git:unstage', scope, input),
+    discard: (scope: GitScope, paths: string[]): Promise<GitMutationResult> =>
+      storageInvoke('git:discard', scope, paths),
+    fetch: (scope: GitScope): Promise<GitMutationResult<GitFetchResult>> =>
+      storageInvoke('git:fetch', scope),
+    pull: (scope: GitScope, options?: GitPullOptions): Promise<GitMutationResult<GitPullResult>> =>
+      storageInvoke('git:pull', scope, options),
+    abortInProgress: (scope: GitScope, kind: 'merge' | 'rebase'): Promise<GitMutationResult> =>
+      storageInvoke('git:abortInProgress', scope, kind),
+    createBranch: (scope: GitScope, name: string, options?: GitBranchOptions): Promise<GitMutationResult> =>
+      storageInvoke('git:createBranch', scope, name, options),
+    renameBranch: (scope: GitScope, name: string, newName: string): Promise<GitMutationResult> =>
+      storageInvoke('git:renameBranch', scope, name, newName),
+    deleteBranch: (scope: GitScope, name: string, options?: GitDeleteBranchOptions): Promise<GitMutationResult> =>
+      storageInvoke('git:deleteBranch', scope, name, options),
     lastCommitMessage: (projectId?: string, cwd?: string): Promise<string | null> =>
-      ipcRenderer.invoke('git:lastCommitMessage', projectId, cwd),
-    createPullRequest: (projectId?: string, cwd?: string): Promise<void> =>
-      ipcRenderer.invoke('git:createPullRequest', projectId, cwd)
+      ipcRenderer.invoke('git:lastCommitMessage', projectId, cwd)
   },
   pullRequests: {
     get: (ref: PullRequestRef, branch: string, force?: boolean): Promise<GitPullRequestLookup> =>
-      ipcRenderer.invoke('pullRequests:get', ref, branch, force)
+      ipcRenderer.invoke('pullRequests:get', ref, branch, force),
+    draft: (scope: PullRequestScope, base?: string): Promise<PullRequestDraft> =>
+      ipcRenderer.invoke('pullRequests:draft', scope, base),
+    create: (scope: PullRequestScope, input: PullRequestFormInput): Promise<CreatePullRequestResult> =>
+      ipcRenderer.invoke('pullRequests:create', scope, input),
+    baseBranches: (ref: PullRequestRef): Promise<PullRequestBaseBranches> =>
+      ipcRenderer.invoke('pullRequests:baseBranches', ref)
   },
   editors: {
     list: (options?: { refresh?: boolean }): Promise<EditorInfo[]> =>
@@ -927,6 +971,17 @@ const api = {
       ipcRenderer.on('app:navigateMainView', handler)
       return () => ipcRenderer.removeListener('app:navigateMainView', handler)
     }
+  },
+  /** Registry commands started outside the renderer: the application menu and keys typed in the browser surface. */
+  commands: {
+    onRun: (cb: (run: { id: CommandId; source: 'menu' | 'guest' }) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, run: { id: CommandId; source: 'menu' | 'guest' }) => cb(run)
+      ipcRenderer.on('commands:run', handler)
+      return () => ipcRenderer.removeListener('commands:run', handler)
+    },
+    /** The chords the browser surface forwards to the renderer: binding and the command it runs. */
+    setGuestShortcuts: (shortcuts: { binding: string; id: CommandId }[]): Promise<void> =>
+      ipcRenderer.invoke('commands:setGuestShortcuts', shortcuts)
   },
   net: {
     /** Network status pushed by the daemon whenever it changes, including its list of phone requests. */

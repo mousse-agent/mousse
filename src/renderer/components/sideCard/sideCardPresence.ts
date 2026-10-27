@@ -1,4 +1,4 @@
-/** Keep in sync with the opacity/transform transition on `.thread-side-card` and the padding transition in sideCard.css. */
+/** Keep in sync with the opacity/transform transitions on `.thread-side-card` and the scrim, and the column transition in sideCard.css. */
 export const SIDE_CARD_FADE_MS = 180
 
 /**
