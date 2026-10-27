@@ -101,7 +101,7 @@ export const SCHEDULE_HELP = `Usage:
   mousse-cli schedule add --name <name> --prompt <text> --manual
   mousse-cli schedule remove <id>
   mousse-cli schedule run <id>
-  mousse-cli schedule extend <id> [--days 7]   Give a job an agent created more time (they end after 7 days)
+  mousse-cli schedule extend <id> [--days 7]   Give a job an agent created more time (default 7 days; the Scheduled page sets it)
   mousse-cli schedule enable <id>
   mousse-cli schedule disable <id>
   mousse-cli schedule webhook enable <id> [--port <port>]   (on a job that has one, --port moves the listener)

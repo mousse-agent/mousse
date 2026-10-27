@@ -1045,14 +1045,58 @@ describe('scheduled job webhook trigger', () => {
     })
 
     it('"Agents may create jobs" is off by default, is chosen over the protocol, and refuses anything else', async () => {
-      expect(await client.request('scheduled.settings.get')).toEqual({ settings: { agentJobs: false } })
-      expect(await client.request('scheduled.settings.set', { agentJobs: true })).toEqual({ settings: { agentJobs: true } })
-      expect(await client.request('scheduled.settings.get')).toEqual({ settings: { agentJobs: true } })
+      const limits = { agentJobMaxActive: 10, agentJobMinIntervalMinutes: 15, agentJobLifetimeDays: 7 }
+      expect(await client.request('scheduled.settings.get')).toEqual({ settings: { agentJobs: false, ...limits } })
+      expect(await client.request('scheduled.settings.set', { agentJobs: true })).toEqual({ settings: { agentJobs: true, ...limits } })
+      expect(await client.request('scheduled.settings.get')).toEqual({ settings: { agentJobs: true, ...limits } })
       expect(mms.config.agentJobsEnabled()).toBe(true)
       await expect(client.request('scheduled.settings.set', { agentJobs: 'yes' })).rejects.toThrow()
       await expect(client.request('scheduled.settings.set', { agentJobs: false, other: 1 })).rejects.toThrow(/not allowed/)
       expect(mms.config.agentJobsEnabled()).toBe(true)
-      expect(await client.request('scheduled.settings.set', { agentJobs: false })).toEqual({ settings: { agentJobs: false } })
+      expect(await client.request('scheduled.settings.set', { agentJobs: false })).toEqual({ settings: { agentJobs: false, ...limits } })
+    })
+
+    it('the limits on jobs agents create are chosen over the protocol, take effect at once, and refuse a value out of range', async () => {
+      const schedules = mms.orchestrator.mcpToolHost().schedules!
+      expect(schedules.jobLimits()).toEqual({ maxActive: 10, minIntervalMinutes: 15, lifetimeDays: 7 })
+      const changed = await client.request('scheduled.settings.set', { agentJobMaxActive: 3, agentJobMinIntervalMinutes: 60, agentJobLifetimeDays: 30 })
+      expect(changed).toEqual({ settings: { agentJobs: false, agentJobMaxActive: 3, agentJobMinIntervalMinutes: 60, agentJobLifetimeDays: 30 } })
+      // The tools read them at the next call: no restart.
+      expect(schedules.jobLimits()).toEqual({ maxActive: 3, minIntervalMinutes: 60, lifetimeDays: 30 })
+      expect(mms.config.agentJobLimits()).toEqual({ maxActive: 3, minIntervalMinutes: 60, lifetimeDays: 30 })
+      // Naming one limit leaves the others and "Agents may create jobs" alone.
+      await client.request('scheduled.settings.set', { agentJobs: true })
+      await client.request('scheduled.settings.set', { agentJobMaxActive: 4 })
+      expect(await client.request('scheduled.settings.get')).toEqual({ settings: { agentJobs: true, agentJobMaxActive: 4, agentJobMinIntervalMinutes: 60, agentJobLifetimeDays: 30 } })
+
+      const refused: Array<[Record<string, unknown>, RegExp]> = [
+        [{ agentJobMaxActive: 0 }, /between 1 and 100/],
+        [{ agentJobMaxActive: 101 }, /between 1 and 100/],
+        [{ agentJobMaxActive: 2.5 }, /integer/],
+        [{ agentJobMinIntervalMinutes: 0 }, /between 1 and 1440/],
+        [{ agentJobMinIntervalMinutes: 1441 }, /between 1 and 1440/],
+        [{ agentJobLifetimeDays: 0 }, /between 1 and 365/],
+        [{ agentJobLifetimeDays: 366 }, /between 1 and 365/],
+        [{ agentJobLifetimeDays: '7' }, /integer/],
+        [{ agentJobLifetimeDays: null }, /integer/],
+        [{}, /at least one setting/],
+        [{ agentJobMaxActive: 5, other: 1 }, /not allowed/],
+        // One bad value in a request saves none of it.
+        [{ agentJobMaxActive: 5, agentJobLifetimeDays: 400 }, /between 1 and 365/]
+      ]
+      for (const [params, message] of refused) await expect(client.request('scheduled.settings.set', params), JSON.stringify(params)).rejects.toThrow(message)
+      expect(await client.request('scheduled.settings.get')).toEqual({ settings: { agentJobs: true, agentJobMaxActive: 4, agentJobMinIntervalMinutes: 60, agentJobLifetimeDays: 30 } })
+
+      // A lower limit pauses nothing: the jobs agents made keep running.
+      const agent = schedules.create({ name: 'By an agent', prompt: 'x', schedule: { kind: 'interval', minutes: 120 }, createdBy: { threadId: 'agent-thread' }, expiresAt: new Date(Date.now() + 3_600_000).toISOString() })
+      await client.request('scheduled.settings.set', { agentJobMaxActive: 1, agentJobMinIntervalMinutes: 1440, agentJobLifetimeDays: 1 })
+      expect((await client.request<{ job: { state: string; enabled: boolean; expiresAt: string } }>('scheduled.get', { id: agent.id })).job).toMatchObject({ state: 'scheduled', enabled: true, expiresAt: agent.expiresAt })
+      // "Extend" with no days gives the lifetime that is set now.
+      const extended = await client.request<{ job: { expiresAt: string } }>('scheduled.extend', { id: agent.id })
+      expect(Date.parse(extended.job.expiresAt)).toBeLessThan(Date.now() + 25 * 3_600_000)
+      await client.request('scheduled.settings.set', { agentJobLifetimeDays: 10 })
+      const longer = await client.request<{ job: { expiresAt: string } }>('scheduled.extend', { id: agent.id })
+      expect(Date.parse(longer.job.expiresAt)).toBeGreaterThan(Date.now() + 9 * 24 * 3_600_000)
     })
 
     it('turning "Agents may create jobs" off pauses the jobs agents made with a reason, leaves a person\'s alone, and turning it on does not resume them; a person extends an ended one', async () => {

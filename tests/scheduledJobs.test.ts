@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
-import { computeNextRun, isSilentOutput } from '../src/mms/scheduled/computeNextRun'
+import { computeNextRun, isSilentOutput, minCronGapMinutes } from '../src/mms/scheduled/computeNextRun'
+import { AGENT_JOB_LIMIT_DEFAULTS } from '../src/mms/scheduled/agentJobLimits'
 import { asJobSchedule } from '../src/mms/protocol/validators'
 import { scheduleRefusal } from '../src/mms/run/mcp/appTools/schedules'
 import { ScheduledJobStore, type ScheduledRunProbe, type ScheduledRunView } from '../src/mms/scheduled/ScheduledJobStore'
@@ -42,7 +43,7 @@ describe('computeNextRun', () => {
     expect(Date.now() - started).toBeLessThan(2000)
     // A job with one is refused when it is made, by a person or by an agent.
     expect(() => asJobSchedule({ kind: 'cron', expr: '1-5/0 * * * *' })).toThrow(/invalid/)
-    expect(scheduleRefusal({ kind: 'cron', expr: '0 1-3/0 * * *' })).toMatch(/invalid/)
+    expect(scheduleRefusal({ kind: 'cron', expr: '0 1-3/0 * * *' }, AGENT_JOB_LIMIT_DEFAULTS.minIntervalMinutes)).toMatch(/invalid/)
     // Valid forms still run: steps, ranges, lists, and 7 as Sunday.
     expect(computeNextRun({ kind: 'cron', expr: '*/15 9-17 * * 1-5' }, null, new Date(2026, 5, 1, 8, 0))).toBe(new Date(2026, 5, 1, 9, 0).toISOString())
     expect(computeNextRun({ kind: 'cron', expr: '0 9 * * 7' }, null, new Date(2026, 5, 1, 8, 0))).toBe(new Date(2026, 5, 7, 9, 0).toISOString())
@@ -119,6 +120,58 @@ describe('ScheduledJobStore', () => {
     expect(MousseConfigStore.load(tempHome).agentJobsEnabled()).toBe(true)
     config.set('scheduled.agentJobs', 'true')
     expect(config.agentJobsEnabled()).toBe(false)
+  })
+
+  it('has the limits on jobs agents create at their defaults, keeps a person\'s choice, and reads it without a restart', () => {
+    const config = MousseConfigStore.load(tempHome)
+    expect(config.agentJobLimits()).toEqual({ maxActive: 10, minIntervalMinutes: 15, lifetimeDays: 7 })
+    config.updateScheduledSection({ agentJobMaxActive: 3, agentJobMinIntervalMinutes: 60 })
+    expect(config.agentJobLimits()).toEqual({ maxActive: 3, minIntervalMinutes: 60, lifetimeDays: 7 })
+    expect(MousseConfigStore.load(tempHome).agentJobLimits()).toEqual({ maxActive: 3, minIntervalMinutes: 60, lifetimeDays: 7 })
+    // The ends of each range are allowed; other changes to the section leave the values alone.
+    config.updateScheduledSection({ agentJobMaxActive: 100, agentJobMinIntervalMinutes: 1440, agentJobLifetimeDays: 365 })
+    config.updateScheduledSection({ agentJobs: true })
+    expect(MousseConfigStore.load(tempHome).agentJobLimits()).toEqual({ maxActive: 100, minIntervalMinutes: 1440, lifetimeDays: 365 })
+    config.updateScheduledSection({ agentJobMaxActive: 1, agentJobMinIntervalMinutes: 1, agentJobLifetimeDays: 1 })
+    expect(config.agentJobLimits()).toEqual({ maxActive: 1, minIntervalMinutes: 1, lifetimeDays: 1 })
+  })
+
+  it.each([
+    ['agentJobMaxActive', [0, 101, 1.5, -1, Number.NaN, '5', null]],
+    ['agentJobMinIntervalMinutes', [0, 1441, 14.5, -15, Number.POSITIVE_INFINITY, '15']],
+    ['agentJobLifetimeDays', [0, 366, 0.5, -7, '7']]
+  ] as const)('refuses a value of %s that is not a whole number in range, and keeps what was saved', (key, bad) => {
+    const config = MousseConfigStore.load(tempHome)
+    config.updateScheduledSection({ agentJobMaxActive: 4, agentJobMinIntervalMinutes: 20, agentJobLifetimeDays: 9 })
+    for (const value of bad) {
+      expect(() => config.updateScheduledSection({ [key]: value } as never), String(value)).toThrow(/whole number from/)
+    }
+    // One bad value in a change saves none of it.
+    expect(() => config.updateScheduledSection({ agentJobMaxActive: 5, [key]: 0 } as never)).toThrow()
+    expect(config.agentJobLimits()).toEqual({ maxActive: 4, minIntervalMinutes: 20, lifetimeDays: 9 })
+    expect(MousseConfigStore.load(tempHome).agentJobLimits()).toEqual({ maxActive: 4, minIntervalMinutes: 20, lifetimeDays: 9 })
+  })
+
+  it('reads a value that is not a whole number in range as the default, so a hand-edited file never disables a limit', () => {
+    const config = MousseConfigStore.load(tempHome)
+    config.updateScheduledSection({ agentJobMaxActive: 4 })
+    config.set('scheduled.agentJobMaxActive', 100000)
+    config.set('scheduled.agentJobMinIntervalMinutes', 'often')
+    config.set('scheduled.agentJobLifetimeDays', 0)
+    expect(config.agentJobLimits()).toEqual({ maxActive: 10, minIntervalMinutes: 15, lifetimeDays: 7 })
+    config.save()
+    expect(MousseConfigStore.load(tempHome).agentJobLimits()).toEqual({ maxActive: 10, minIntervalMinutes: 15, lifetimeDays: 7 })
+  })
+
+  it('finds the fewest minutes between runs of a cron expression, hours and days included', () => {
+    expect(minCronGapMinutes('0 * * * *')).toBe(60)
+    expect(minCronGapMinutes('0,30 * * * *')).toBe(30)
+    expect(minCronGapMinutes('0 */2 * * *')).toBe(120)
+    expect(minCronGapMinutes('0 9 * * *')).toBe(1440)
+    expect(minCronGapMinutes('0 23,0 * * *')).toBe(60)
+    expect(minCronGapMinutes('30 9 * * 1-5')).toBe(1440)
+    expect(minCronGapMinutes('30 9 1 1 *')).toBeNull()
+    expect(minCronGapMinutes('nonsense')).toBeNull()
   })
 
   it('creates, pauses, resumes, and deletes jobs atomically', () => {
@@ -1262,6 +1315,21 @@ describe('ScheduledJobService concurrency and occurrences', () => {
       expect(runner).toHaveBeenCalledTimes(1)
       expect(store.getJob(ended.id)).toMatchObject({ state: 'completed', nextRunAt: null, lastError: expect.stringContaining('ends after 7 days') })
       expect(store.getJob(ended.id)?.runHistory).toEqual([])
+    })
+
+    it('says the lifetime that is set now, and extends by it when no days are named', () => {
+      config.updateScheduledSection({ agentJobLifetimeDays: 30 })
+      const ended = due('Ended', { createdBy: { threadId: 'agent-thread' }, expiresAt: new Date(Date.now() - 1000).toISOString() })
+      store.claimDueJobs()
+      expect(store.getJob(ended.id)).toMatchObject({ state: 'completed', lastError: expect.stringContaining('ends after 30 days') })
+      const before = Date.now()
+      const extended = store.extendJob(ended.id)
+      expect(Date.parse(extended!.expiresAt!)).toBeGreaterThanOrEqual(before + 30 * 24 * 3_600_000)
+      expect(Date.parse(extended!.expiresAt!)).toBeLessThanOrEqual(Date.now() + 30 * 24 * 3_600_000)
+      // Days named by the caller still win, and a shorter lifetime applies at once.
+      config.updateScheduledSection({ agentJobLifetimeDays: 1 })
+      expect(Date.parse(store.extendJob(ended.id, 3)!.expiresAt!)).toBeGreaterThan(Date.now() + 2 * 24 * 3_600_000)
+      expect(Date.parse(store.extendJob(ended.id)!.expiresAt!)).toBeLessThan(Date.now() + 2 * 24 * 3_600_000)
     })
 
     it('a person extends it: a recurring job starts again, a finished one-time job stays finished', () => {

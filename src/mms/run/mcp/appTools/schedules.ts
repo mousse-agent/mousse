@@ -2,31 +2,34 @@ import type { PermissionMode } from '../../../../shared/permissionMode'
 import { isWorkflowPrompt, permissionsAfterEdit } from '../../../scheduled/jobPermission'
 import { narrowAgentAccess } from '../../../../shared/settings'
 import type { JobSchedule, ScheduledJob } from '../../../../shared/types'
-import { AGENT_JOB_LIFETIME_DAYS, AGENT_JOB_MAX_ACTIVE, AGENT_JOB_MIN_INTERVAL_MINUTES, agentJobExpiry, isActiveAgentJob, isExpired } from '../../../scheduled/agentJobLimits'
+import type { AgentJobLimits } from '../../../../shared/agentJobLimits'
+import { agentJobExpiry, isActiveAgentJob, isExpired } from '../../../scheduled/agentJobLimits'
 import { runNowRefusal } from '../../../scheduled/runNowRefusal'
-import { cronProblem } from '../../../scheduled/computeNextRun'
+import { cronProblem, minCronGapMinutes } from '../../../scheduled/computeNextRun'
 import { asCreateScheduledJobInput, asScheduledJobPatch } from '../../../protocol/validators'
 import type { RunEngine } from '../../RunEngine'
 import type { AgentScheduleHost, AppToolHost } from './host'
 import { lineageRelation } from './thread'
 import { CLIENT_REQUEST_ID_SCHEMA, json, McpToolError, type MousseTool, type ToolCallContext } from './types'
 
-const MIN_MINUTES = AGENT_JOB_MIN_INTERVAL_MINUTES
 /** The prompt `schedule_list` returns is cut to this many characters. */
 const PROMPT_LIST_CHARS = 2000
 /** Run records `schedule_list` returns per job. */
 const RECENT_RUNS = 3
 
-const SCHEDULE_SCHEMA = {
-  type: 'object',
-  description: `When the job runs. kind "interval": minutes (at least ${MIN_MINUTES}). kind "cron": expr with exactly five fields whose minute field is a fixed list such as "0" or "15,45", at least ${MIN_MINUTES} minutes apart. kind "once": runAt, an ISO date. kind "manual": no clock; a person's turn starts it with schedule_run.`,
-  properties: {
-    kind: { type: 'string', enum: ['once', 'interval', 'cron', 'manual'] },
-    minutes: { type: 'integer', minimum: MIN_MINUTES },
-    expr: { type: 'string' },
-    runAt: { type: 'string' }
-  },
-  required: ['kind']
+/** The schedule's schema with the profile's shortest interval as it is now. */
+function scheduleSchema(minMinutes: number) {
+  return {
+    type: 'object',
+    description: `When the job runs. kind "interval": minutes (at least ${minMinutes}). kind "cron": expr with exactly five fields whose minute field is a fixed list such as "0" or "15,45", with runs at least ${minMinutes} minutes apart. kind "once": runAt, an ISO date. kind "manual": no clock; a person's turn starts it with schedule_run.`,
+    properties: {
+      kind: { type: 'string', enum: ['once', 'interval', 'cron', 'manual'] },
+      minutes: { type: 'integer', minimum: minMinutes },
+      expr: { type: 'string' },
+      runAt: { type: 'string' }
+    },
+    required: ['kind']
+  }
 }
 
 const SELECTION_SCHEMA = {
@@ -78,13 +81,14 @@ function refuseForbidden(args: Record<string, unknown>): void {
 }
 
 /**
- * The cadence rules for jobs an agent makes: nothing more often than every `AGENT_JOB_MIN_INTERVAL_MINUTES`. A cron
- * expression has exactly five fields and a fixed list of minutes that far apart (`*` and steps in the minute field would
- * fire every minute).
+ * The cadence rules for jobs an agent makes: nothing more often than every `minMinutes` (the profile's
+ * `scheduled.agentJobMinIntervalMinutes` as it is now). A cron expression has exactly five fields and a fixed list of
+ * minutes that far apart (`*` and steps in the minute field would fire every minute); above an hour, the hours it
+ * names must keep its runs that far apart too.
  */
-export function scheduleRefusal(schedule: JobSchedule): string | undefined {
-  if (schedule.kind === 'interval' && (schedule.minutes ?? 0) < MIN_MINUTES)
-    return `An interval of less than ${MIN_MINUTES} minutes is not allowed for an agent's job.`
+export function scheduleRefusal(schedule: JobSchedule, minMinutes: number): string | undefined {
+  if (schedule.kind === 'interval' && (schedule.minutes ?? 0) < minMinutes)
+    return `An interval of less than ${minMinutes} minutes is not allowed for an agent's job.`
   if (schedule.kind !== 'cron') return undefined
   const fields = (schedule.expr ?? '').trim().split(/\s+/).filter(Boolean)
   if (fields.length !== 5) return 'A cron expression needs exactly five fields: minute hour day-of-month month day-of-week.'
@@ -92,9 +96,16 @@ export function scheduleRefusal(schedule: JobSchedule): string | undefined {
   const minutes = [...new Set(fields[0].split(',').map(Number))].sort((a, b) => a - b)
   if (minutes.some((minute) => minute > 59)) return 'The minute field of a cron expression must be between 0 and 59.'
   const gaps = minutes.map((minute, index) => (index === 0 ? minutes[0] + 60 - minutes[minutes.length - 1] : minute - minutes[index - 1]))
-  if (minutes.length > 1 && Math.min(...gaps) < MIN_MINUTES)
-    return `The minutes of a cron expression must be at least ${MIN_MINUTES} apart.`
-  return cronProblem(schedule.expr ?? '')
+  if (minutes.length > 1 && Math.min(...gaps) < minMinutes)
+    return `The minutes of a cron expression must be at least ${minMinutes} apart.`
+  const invalid = cronProblem(schedule.expr ?? '')
+  if (invalid) return invalid
+  // The minute field alone cannot keep runs an hour or more apart: "0 * * * *" runs every hour.
+  if (minMinutes > 60) {
+    const gap = minCronGapMinutes(schedule.expr ?? '')
+    if (gap !== null && gap < minMinutes) return `A cron expression must not run more often than every ${minMinutes} minutes; this one runs every ${gap}.`
+  }
+  return undefined
 }
 
 /** A job that would start a workflow is refused: only a person starts one from a schedule. */
@@ -118,12 +129,15 @@ function permissionFieldsAfterAgentEdit(job: ScheduledJob, editor: PermissionMod
  * `scheduled.agentJobs` to be on. Only a turn a person started may create or start a job or change what one does, so
  * no scheduled run, agent message, subagent or channel can make jobs of its own and no chain of jobs can form. A job an
  * agent creates runs no wider than the agent that made it (its access level and permission mode are recorded on the
- * job, and a later change can only narrow them), ends after `AGENT_JOB_LIFETIME_DAYS` days unless a person extends it,
- * and counts against a profile-wide cap. Offered over MCP only, like the other tools that act on the profile.
+ * job, and a later change can only narrow them), ends after the profile's lifetime for such jobs unless a person
+ * extends it, and counts against a profile-wide cap. The three limits are settings only a person changes
+ * (`schedules.jobLimits`, read at every use, so the tool text and checks follow a change at once; no tool writes
+ * them). Offered over MCP only, like the other tools that act on the profile.
  */
 export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[] {
   const schedules = host.schedules
   if (!schedules) return []
+  const limitsNow = (): AgentJobLimits => schedules.jobLimits()
   const enabled = (): boolean => {
     try {
       return schedules.enabled()
@@ -220,8 +234,9 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
   /** The profile-wide cap on active agent-made jobs, counted from the saved jobs so a restart does not reset it. */
   const assertRoomForAnotherJob = (): void => {
     const active = schedules.list().filter(isActiveAgentJob).length
-    if (active >= AGENT_JOB_MAX_ACTIVE)
-      throw new Error(`The profile already has ${active} active jobs made by agents (the limit is ${AGENT_JOB_MAX_ACTIVE}). Pause one with schedule_pause, wait for one to end, or ask the user.`)
+    const { maxActive } = limitsNow()
+    if (active >= maxActive)
+      throw new Error(`The profile already has ${active} active jobs made by agents (the limit is ${maxActive}). Pause one with schedule_pause, wait for one to end, or ask the user.`)
   }
 
   const common = {
@@ -252,21 +267,27 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
     {
       ...common,
       name: 'schedule_create',
-      description: `Create a scheduled job that runs a prompt later or on a cadence, as a turn in a thread (needs the manage agent access level, "Agents may create jobs" turned on, and a turn a person started: a job, another agent, a subagent or a channel cannot create jobs). The job outlives this run. It runs no wider than you do: its runs get at most your access level and permission mode. It takes your thread's project. Leave threadId out for a new thread per run, or give your own thread or one of your lineage. Not allowed: a prompt that starts with "/", a webhook trigger, a worktree workspace, an interval under ${MIN_MINUTES} minutes. The profile allows ${AGENT_JOB_MAX_ACTIVE} active jobs made by agents in all, and a job ends ${AGENT_JOB_LIFETIME_DAYS} days after it is made unless a person extends it. The job is labelled as made by an agent and each change you make is recorded in your thread. Use schedule_run to start it at once.`,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          name: { type: 'string' },
-          prompt: { type: 'string', description: 'What the run is asked to do, written for an agent that has none of this conversation.' },
-          schedule: SCHEDULE_SCHEMA,
-          mode: { type: 'string', enum: ['agent', 'plan'], description: 'Defaults to agent; plan only under a plan ceiling.' },
-          selection: SELECTION_SCHEMA,
-          workspace: WORKSPACE_SCHEMA,
-          threadId: { type: 'string', description: 'Run in this thread (yours or one of your lineage); a new thread per run when omitted.' },
-          repeat: { type: 'object', properties: { times: { type: 'integer', minimum: 1 } }, description: 'Stop after this many runs.' },
-          clientRequestId: CLIENT_REQUEST_ID_SCHEMA
-        },
-        required: ['name', 'prompt', 'schedule']
+      // Read at every listing: the tool is built once, and a person may change the limits at any time.
+      get description() {
+        const limits = limitsNow()
+        return `Create a scheduled job that runs a prompt later or on a cadence, as a turn in a thread (needs the manage agent access level, "Agents may create jobs" turned on, and a turn a person started: a job, another agent, a subagent or a channel cannot create jobs). The job outlives this run. It runs no wider than you do: its runs get at most your access level and permission mode. It takes your thread's project. Leave threadId out for a new thread per run, or give your own thread or one of your lineage. Not allowed: a prompt that starts with "/", a webhook trigger, a worktree workspace, an interval under ${limits.minIntervalMinutes} minutes. The profile allows ${limits.maxActive} active jobs made by agents in all, and a job ends ${limits.lifetimeDays} days after it is made unless a person extends it. A person sets these limits; you cannot change them. The job is labelled as made by an agent and each change you make is recorded in your thread. Use schedule_run to start it at once.`
+      },
+      get inputSchema() {
+        return {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            prompt: { type: 'string', description: 'What the run is asked to do, written for an agent that has none of this conversation.' },
+            schedule: scheduleSchema(limitsNow().minIntervalMinutes),
+            mode: { type: 'string', enum: ['agent', 'plan'], description: 'Defaults to agent; plan only under a plan ceiling.' },
+            selection: SELECTION_SCHEMA,
+            workspace: WORKSPACE_SCHEMA,
+            threadId: { type: 'string', description: 'Run in this thread (yours or one of your lineage); a new thread per run when omitted.' },
+            repeat: { type: 'object', properties: { times: { type: 'integer', minimum: 1 } }, description: 'Stop after this many runs.' },
+            clientRequestId: CLIENT_REQUEST_ID_SCHEMA
+          },
+          required: ['name', 'prompt', 'schedule']
+        }
       },
       class: 'mutation',
       handler: (args, ctx) => {
@@ -278,7 +299,7 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
         const earlier = schedules.list().find((job) => job.createdBy?.requestId === requestKey)
         if (earlier) return json({ job: summary(earlier, ctx), replayed: true })
         const input = asCreateScheduledJobInput(without(args, 'clientRequestId'))
-        const refusal = scheduleRefusal(input.schedule) ?? promptRefusal(input.prompt)
+        const refusal = scheduleRefusal(input.schedule, limitsNow().minIntervalMinutes) ?? promptRefusal(input.prompt)
         if (refusal) throw new Error(refusal)
         if (input.workspace?.kind === 'worktree') throw new Error('A job an agent creates cannot run in an existing worktree.')
         let mode = input.mode
@@ -308,7 +329,7 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
           createdBy: { threadId: ctx.caller.threadId, runId: ctx.caller.runId, requestId: requestKey },
           accessCap: limits.accessCap,
           permissionCeiling: limits.permissionCeiling,
-          expiresAt: agentJobExpiry()
+          expiresAt: agentJobExpiry(limitsNow().lifetimeDays)
         })
         record(ctx, 'scheduled_job_created', job, `created scheduled job "${job.name}" (${job.id})`)
         return json({ job: summary(job, ctx) })
@@ -319,20 +340,22 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
       name: 'schedule_update',
       description:
         'Change a scheduled job your thread created (needs the manage agent access level and "Agents may create jobs" turned on). Pass jobId and only the fields to change; null clears model, workspace, thread or mode back to the default. Changing anything but the name needs a turn a person started. The rules of schedule_create hold. A change can only narrow the access and permission mode its runs get, to yours at most, and can only shorten how many runs it has; it never lengthens the job\'s life. To pause a job use schedule_pause; resuming or extending one is for a person.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          jobId: { type: 'string' },
-          name: { type: 'string' },
-          prompt: { type: 'string' },
-          schedule: SCHEDULE_SCHEMA,
-          mode: { type: ['string', 'null'], enum: ['agent', 'plan', null] },
-          selection: { ...SELECTION_SCHEMA, type: ['object', 'null'] },
-          workspace: { ...WORKSPACE_SCHEMA, type: ['object', 'null'] },
-          threadId: { type: ['string', 'null'], description: 'Your thread or one of your lineage; null for a new thread per run.' },
-          repeat: { type: ['object', 'null'], properties: { times: { type: 'integer', minimum: 1 } } }
-        },
-        required: ['jobId']
+      get inputSchema() {
+        return {
+          type: 'object',
+          properties: {
+            jobId: { type: 'string' },
+            name: { type: 'string' },
+            prompt: { type: 'string' },
+            schedule: scheduleSchema(limitsNow().minIntervalMinutes),
+            mode: { type: ['string', 'null'], enum: ['agent', 'plan', null] },
+            selection: { ...SELECTION_SCHEMA, type: ['object', 'null'] },
+            workspace: { ...WORKSPACE_SCHEMA, type: ['object', 'null'] },
+            threadId: { type: ['string', 'null'], description: 'Your thread or one of your lineage; null for a new thread per run.' },
+            repeat: { type: ['object', 'null'], properties: { times: { type: 'integer', minimum: 1 } } }
+          },
+          required: ['jobId']
+        }
       },
       class: 'mutation',
       handler: (args, ctx) => {
@@ -355,7 +378,7 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
           if (refusal) throw new Error(refusal)
         }
         if (patch.schedule) {
-          const refusal = scheduleRefusal(patch.schedule)
+          const refusal = scheduleRefusal(patch.schedule, limitsNow().minIntervalMinutes)
           if (refusal) throw new Error(refusal)
         }
         if (patch.workspace?.kind === 'worktree') throw new Error('A job an agent changes cannot run in an existing worktree.')

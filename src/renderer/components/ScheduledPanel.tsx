@@ -12,7 +12,9 @@ import {
 } from '../lib/icons'
 import { normalizePermissionMode } from '../../shared/permissionMode'
 import type { LlmProviderOption } from '../../shared/settings'
-import type { ScheduledJob, ScheduledJobRunRecord, SchedulerStatus } from '../../shared/types'
+import { AGENT_JOB_LIMIT_DEFAULTS } from '../../shared/agentJobLimits'
+import type { ScheduledJob, ScheduledJobRunRecord, ScheduledSettings, ScheduledSettingsUpdate, SchedulerStatus } from '../../shared/types'
+import { AgentJobLimitFields } from './scheduled/AgentJobLimitFields'
 import { JobEditor } from './scheduled/JobEditor'
 import {
   createInputOf,
@@ -95,8 +97,11 @@ export function ScheduledPanel() {
   const [editing, setEditing] = useState<Editing | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [webhookJobId, setWebhookJobId] = useState<string | null>(null)
-  /** `scheduled.agentJobs`; null until the profile has answered. */
-  const [agentJobs, setAgentJobs] = useState<boolean | null>(null)
+  /** `scheduled.agentJobs` and the limits on the jobs agents create; null until the profile has answered. */
+  const [settings, setSettings] = useState<ScheduledSettings | null>(null)
+  const agentJobs = settings ? settings.agentJobs : null
+  /** What "Extend" gives a job: the lifetime of jobs agents create (the default until the profile has answered). */
+  const extendDays = settings?.agentJobLifetimeDays ?? AGENT_JOB_LIMIT_DEFAULTS.lifetimeDays
   const [actionError, setActionError] = useState<string | null>(null)
   const newButton = useRef<HTMLButtonElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
@@ -137,7 +142,7 @@ export function ScheduledPanel() {
   useEffect(() => {
     void refresh()
     void loadCatalog()
-    void window.mousse.scheduled.settings.get().then((settings) => setAgentJobs(settings.agentJobs), () => undefined)
+    void window.mousse.scheduled.settings.get().then(setSettings, () => undefined)
     const offUpdated = window.mousse.scheduled.onUpdated(setJobs)
     const offStatus = window.mousse.scheduled.onStatus(setStatus)
     return () => {
@@ -172,6 +177,9 @@ export function ScheduledPanel() {
       setActionError(errorText(cause))
     }
   }
+
+  const saveSettings = (update: ScheduledSettingsUpdate) =>
+    act(async () => setSettings(await window.mousse.scheduled.settings.set(update)))
 
   const openCreate = () => {
     setEditing(null)
@@ -227,7 +235,7 @@ export function ScheduledPanel() {
           <label
             className="scheduled-agent-toggle"
             htmlFor={agentToggleId}
-            title="Lets agents create, change, pause and run their own scheduled jobs through Mousse's tools, from a turn you started. It also needs the Manage agent access level. Jobs agents create run no wider than that agent, end after 7 days unless you extend them, and are paused when you turn this off (you resume them)."
+            title="Lets agents create, change, pause and run their own scheduled jobs through Mousse's tools, from a turn you started. It also needs the Manage agent access level. Jobs agents create run no wider than that agent, end after the lifetime set here unless you extend them, and are paused when you turn this off (you resume them)."
           >
             <input
               id={agentToggleId}
@@ -236,11 +244,12 @@ export function ScheduledPanel() {
               disabled={agentJobs === null}
               onChange={(event) => {
                 const next = event.currentTarget.checked
-                void act(async () => setAgentJobs((await window.mousse.scheduled.settings.setAgentJobs(next)).agentJobs))
+                void saveSettings({ agentJobs: next })
               }}
             />
             Agents may create jobs
           </label>
+          <AgentJobLimitFields settings={settings} save={saveSettings} />
           <button
             type="button"
             className="scheduled-icon-btn"
@@ -340,7 +349,7 @@ export function ScheduledPanel() {
                       <span data-meta="expires">
                         {job.state === 'completed' && new Date(job.expiresAt).getTime() <= Date.now() ? 'Ended' : 'Ends'} {formatWhen(job.expiresAt)}{' '}
                         <button type="button" className="scheduled-link-btn" onClick={() => void act(() => window.mousse.scheduled.extend(job.id))}>
-                          Extend 7 days
+                          {`Extend ${extendDays} ${extendDays === 1 ? 'day' : 'days'}`}
                         </button>
                       </span>
                     ) : null}

@@ -1,4 +1,5 @@
 import type { BrowserRuntimePort } from '../../../../shared/browser/runtime'
+import type { AgentJobLimits } from '../../../../shared/agentJobLimits'
 import type { PermissionMode } from '../../../../shared/permissionMode'
 import type { ModelOverride } from '../../../../shared/providerInstances'
 import type { AgentAccessLevel, AgentAccessSettings } from '../../../../shared/settings'
@@ -159,6 +160,11 @@ export type AgentApprovalResult =
 export interface AgentScheduleHost {
   /** `scheduled.agentJobs` as it is now: off until a person turns it on, read at every call. */
   enabled(): boolean
+  /**
+   * The limits on jobs agents create as they are now (`scheduled.agentJobMaxActive`, `agentJobMinIntervalMinutes`,
+   * `agentJobLifetimeDays`), read at every call. Read only: a person sets them on the Scheduled page, and no tool does.
+   */
+  jobLimits(): AgentJobLimits
   list(): ScheduledJob[]
   get(id: string): ScheduledJob | undefined
   /**

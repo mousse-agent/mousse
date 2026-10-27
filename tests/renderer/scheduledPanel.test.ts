@@ -74,6 +74,7 @@ interface Harness {
 
 function makeApi(state: { jobs: ScheduledJob[] }) {
   let listener: ((jobs: ScheduledJob[]) => void) | null = null
+  const settings = { agentJobs: false, agentJobMaxActive: 10, agentJobMinIntervalMinutes: 15, agentJobLifetimeDays: 7 }
   const scheduled = {
     list: vi.fn(async () => state.jobs),
     status: vi.fn(async () => ({ running: true, lastHeartbeatAt: null, lastSuccessAt: null, lastTickError: null, activeJobId: null, activeJobIds: [], jobCount: state.jobs.length, dueCount: 0 })),
@@ -87,8 +88,8 @@ function makeApi(state: { jobs: ScheduledJob[] }) {
     run: vi.fn(async () => null),
     extend: vi.fn(async () => null),
     settings: {
-      get: vi.fn(async () => ({ agentJobs: false })),
-      setAgentJobs: vi.fn(async (agentJobs: boolean) => ({ agentJobs }))
+      get: vi.fn(async () => ({ ...settings })),
+      set: vi.fn(async (update: Partial<typeof settings>) => ({ ...Object.assign(settings, update) }))
     },
     webhook: {
       enable: vi.fn(),
@@ -841,20 +842,76 @@ describe('Scheduled page: jobs agents create', () => {
     const h = await mount([])
     expect(agentsToggle().checked).toBe(false)
     await click(agentsToggle())
-    expect(h.api.scheduled.settings.setAgentJobs).toHaveBeenCalledWith(true)
+    expect(h.api.scheduled.settings.set).toHaveBeenCalledWith({ agentJobs: true })
     expect(agentsToggle().checked).toBe(true)
     await click(agentsToggle())
-    expect(h.api.scheduled.settings.setAgentJobs).toHaveBeenLastCalledWith(false)
+    expect(h.api.scheduled.settings.set).toHaveBeenLastCalledWith({ agentJobs: false })
     expect(agentsToggle().checked).toBe(false)
   })
 
   it('shows the setting as the profile has it, and says why when the choice is refused', async () => {
     const h = await mount([])
     expect(h.api.scheduled.settings.get).toHaveBeenCalledTimes(1)
-    h.api.scheduled.settings.setAgentJobs.mockRejectedValueOnce(new Error("Error invoking remote method 'scheduled:settings:set': Error: Not saved"))
+    h.api.scheduled.settings.set.mockRejectedValueOnce(new Error("Error invoking remote method 'scheduled:settings:set': Error: Not saved"))
     await click(agentsToggle())
     expect(alerts().join(' ')).toContain('Not saved')
     expect(agentsToggle().checked).toBe(false)
+  })
+
+  describe('the limits on jobs agents create', () => {
+    const limit = (label: string) => control<HTMLInputElement>(label)
+    const blur = async (element: HTMLElement) => { await act(async () => { element.dispatchEvent(new FocusEvent('focusout', { bubbles: true })) }) }
+
+    it('shows the three limits beside the toggle, whether it is on or off, with their values', async () => {
+      await mount([])
+      expect(agentsToggle().checked).toBe(false)
+      expect(limit('Max active jobs').value).toBe('10')
+      expect(limit('Min interval (minutes)').value).toBe('15')
+      expect(limit('Lifetime (days)').value).toBe('7')
+      await click(agentsToggle())
+      expect(limit('Max active jobs').value).toBe('10')
+      expect(limit('Max active jobs').closest('label')?.title).toMatch(/never pauses or deletes a job that exists/)
+      expect(limit('Lifetime (days)').closest('label')?.title).toMatch(/does not change/)
+    })
+
+    it('saves a value when the field is left, and only that one', async () => {
+      const h = await mount([])
+      await setValue(limit('Max active jobs'), '25')
+      await blur(limit('Max active jobs'))
+      expect(h.api.scheduled.settings.set).toHaveBeenCalledWith({ agentJobMaxActive: 25 })
+      expect(limit('Max active jobs').value).toBe('25')
+      await setValue(limit('Lifetime (days)'), '14')
+      await key(limit('Lifetime (days)'), 'Enter')
+      expect(h.api.scheduled.settings.set).toHaveBeenLastCalledWith({ agentJobLifetimeDays: 14 })
+      expect(limit('Lifetime (days)').value).toBe('14')
+    })
+
+    it.each([
+      ['Max active jobs', '0', /from 1 to 100/],
+      ['Max active jobs', '101', /from 1 to 100/],
+      ['Min interval (minutes)', '1441', /from 1 to 1440/],
+      ['Min interval (minutes)', '1.5', /from 1 to 1440/],
+      ['Lifetime (days)', '', /from 1 to 365/],
+      ['Lifetime (days)', '-3', /from 1 to 365/]
+    ])('refuses %s of "%s" and shows the range', async (label, value, range) => {
+      const h = await mount([])
+      await setValue(limit(label), value)
+      await blur(limit(label))
+      expect(h.api.scheduled.settings.set).not.toHaveBeenCalled()
+      expect(alerts().join(' ')).toMatch(range)
+      expect(limit(label).getAttribute('aria-invalid')).toBe('true')
+    })
+
+    it('says "Extend N days" with the lifetime that is set', async () => {
+      const future = new Date(Date.now() + 3 * 24 * 3_600_000).toISOString()
+      const h = await mount([job({ id: 'job-agent', name: 'Agent made', createdBy: { threadId: 't1' }, expiresAt: future })])
+      const extendLabel = () => [...document.querySelectorAll('button')].map((item) => item.textContent).find((text) => text?.startsWith('Extend'))
+      expect(extendLabel()).toBe('Extend 7 days')
+      await setValue(limit('Lifetime (days)'), '30')
+      await blur(limit('Lifetime (days)'))
+      expect(h.api.scheduled.settings.set).toHaveBeenCalledWith({ agentJobLifetimeDays: 30 })
+      expect(extendLabel()).toBe('Extend 30 days')
+    })
   })
 
   it('shows when an agent\'s job ends, lets a person extend it, and says why a job is paused', async () => {

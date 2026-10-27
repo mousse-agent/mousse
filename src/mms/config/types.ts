@@ -60,6 +60,12 @@ export interface ScheduledConfigSection {
   webhooks?: { enabled: boolean; port: number }
   /** Agents may list, create, change, pause and run jobs through the Mousse tools; off until a person turns it on. */
   agentJobs?: boolean
+  /** Active jobs agents may have in the profile at once (1 to 100; unset reads as 10). Only a person sets it. */
+  agentJobMaxActive?: number
+  /** The fewest minutes between runs of a job an agent creates or changes (1 to 1440; unset reads as 15). Only a person sets it. */
+  agentJobMinIntervalMinutes?: number
+  /** Days a job an agent creates lasts unless a person extends it (1 to 365; unset reads as 7). Only a person sets it. */
+  agentJobLifetimeDays?: number
 }
 
 /** Static job fields stored in mousse.conf (runtime state lives under ~/.mousse/scheduled/). */

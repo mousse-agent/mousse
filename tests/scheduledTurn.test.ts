@@ -16,7 +16,7 @@ import type { HarnessDriver } from '../src/mms/harness/driver'
 import { adapterDriver } from '../src/mms/run/testkit/harness'
 import { Reconciler } from '../src/mms/run/Reconciler'
 import { jobPermissionRequest } from '../src/mms/scheduled/jobPermission'
-import { agentJobExpiry, isActiveAgentJob } from '../src/mms/scheduled/agentJobLimits'
+import { AGENT_JOB_LIMIT_DEFAULTS, agentJobExpiry, isActiveAgentJob } from '../src/mms/scheduled/agentJobLimits'
 import { ScheduledJobService } from '../src/mms/scheduled/ScheduledJobService'
 import { ScheduledJobStore } from '../src/mms/scheduled/ScheduledJobStore'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
@@ -1638,7 +1638,7 @@ describe('scheduled jobs run as turns', () => {
       const w = boot([pi])
       const project = projectOf(w)
       const creator = { threadId: w.store.createThread('Creator', project.id, project.path).id, runId: 'r1' }
-      const job = addJob(w, { projectId: project.id, schedule: { kind: 'interval', minutes: 10 }, createdBy: creator, expiresAt: agentJobExpiry() })
+      const job = addJob(w, { projectId: project.id, schedule: { kind: 'interval', minutes: 10 }, createdBy: creator, expiresAt: agentJobExpiry(AGENT_JOB_LIMIT_DEFAULTS.lifetimeDays) })
       makeDue(w, job)
 
       await w.tick()

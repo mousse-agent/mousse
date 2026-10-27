@@ -615,6 +615,7 @@ export class MmsProfileServices {
     })
     this.orchestrator.setScheduledJobs({
       enabled: () => config.agentJobsEnabled(),
+      jobLimits: () => config.agentJobLimits(),
       list: () => this.scheduled.listJobs(),
       get: (id) => this.scheduled.getJob(id),
       validate: (job) => validateScheduledJobOptions(job, jobOptionDeps),
