@@ -1,3 +1,4 @@
+import type { CommandId } from '../../shared/commands'
 import type { MainView } from '../../shared/types'
 import type { BrowserTabState, ProjectTerminalTab } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
@@ -5,15 +6,16 @@ import { useAppStore } from '../stores/appStore'
 export interface SurfaceChoice {
   id: MainView
   label: string
-  shortcut: string
+  /** The registry command that opens this surface; its binding is what the menu rows show. */
+  commandId: CommandId
 }
 
 export const SURFACE_CHOICES: SurfaceChoice[] = [
-  { id: 'browser', label: 'Browser', shortcut: 'B' },
-  { id: 'terminal', label: 'Terminal', shortcut: 'T' },
-  { id: 'files', label: 'Files', shortcut: 'F' },
-  { id: 'git', label: 'Diff', shortcut: 'D' },
-  { id: 'review', label: 'Review', shortcut: 'R' }
+  { id: 'browser', label: 'Browser', commandId: 'surface.browser' },
+  { id: 'terminal', label: 'Terminal', commandId: 'surface.terminal' },
+  { id: 'files', label: 'Files', commandId: 'surface.files' },
+  { id: 'git', label: 'Diff', commandId: 'surface.git' },
+  { id: 'review', label: 'Review', commandId: 'surface.review' }
 ]
 
 export interface SurfaceTabItem {
