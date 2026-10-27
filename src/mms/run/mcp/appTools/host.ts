@@ -36,6 +36,8 @@ export interface AgentSendResult {
   queued: boolean
   /** The same `clientRequestId` was sent before: this is the first result, nothing new was started. */
   replayed: boolean
+  /** The mode the message was sent in: Plan when the thread is kept in Plan, whatever the sender asked for. */
+  mode?: 'agent' | 'plan'
 }
 
 /** What a Stop or a steer an agent asked for did to the run it named. */
@@ -68,7 +70,8 @@ export interface AppToolHost extends DelegationToolsHost {
   /** The run engine of the thread tools (`thread_read`, the queue, fork and merge-back); MCP only. */
   engine?: RunEngine
   listQueue?(threadId: string): unknown[]
-  enqueue?(threadId: string, input: { content: string; mode: 'agent' | 'plan' }): unknown
+  /** `permissionMode`: the mode the caller's run is bound to; the queued turn never runs looser than it (nor than the thread's own). */
+  enqueue?(threadId: string, input: { content: string; mode: 'agent' | 'plan' }, options?: { permissionMode?: PermissionMode }): unknown
   browserRuntime?(): BrowserRuntimePort | undefined
   skills?(): SkillsRegistry | undefined
   quickActions?: QuickActionTools
@@ -121,6 +124,11 @@ export interface AppToolHost extends DelegationToolsHost {
    * `clientRequestId` returns the first result.
    */
   sendToThread?(threadId: string, input: { content: string; mode: 'agent' | 'plan' }, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentSendResult>
+  /**
+   * The first result of a send that `clientRequestId` already made to the thread, found without admitting anything; undefined
+   * when the key made none. A retry past the send cap is answered with it.
+   */
+  earlierSend?(threadId: string, clientRequestId: string): AgentSendResult | undefined
   /** Stops run `runId` of another thread and what is below it, as `actor`'s Stop (`thread_interrupt`). */
   stopRun?(threadId: string, runId: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult>
   /** Steers run `runId` of another thread with `text` as `actor`'s message (`thread_steer`). */

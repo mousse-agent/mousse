@@ -178,7 +178,11 @@ const SEND_CONFLICTS: Readonly<Record<string, string>> = {
   thread_paused:
     "The thread's run is paused by a usage limit and resumes by itself; a message from an agent would end that pause. Stop the paused run with thread_interrupt first, or send again later.",
   questions_pending:
-    'The thread is waiting for the user to answer a question or an approval; a message from an agent never answers or skips it. Try again after the user has answered.'
+    'The thread is waiting for the user to answer a question or an approval; a message from an agent never answers or skips it. Try again after the user has answered.',
+  agent_hops_exceeded:
+    'Too many agent messages in a row without a person in between: this message would be past the limit. Stop here and let a person reply before agents go on.',
+  agent_queue_full:
+    'The thread already has several messages from agents waiting in its queue. Wait for them to run (thread_wait), or try again later.'
 }
 
 /** An engine refusal that means the thread is not in a state to take the message now, as a `mousse_conflict`. */
@@ -199,6 +203,17 @@ function assertTakesWork(host: AppToolHost, threadId: string): void {
     throw new McpToolError('mousse_conflict', `Thread ${threadId} is archived; it takes no new work until it is restored.`, { conflict: 'thread_archived', threadId })
 }
 
+/**
+ * A steer or Stop reaches a subagent only from its own parent's lineage: a steer into another agent's task would
+ * shape the result that task hands its parent, and a Stop would cancel a task its owner never gave up. A thread that
+ * is no subagent, and a subagent below the caller, are fine.
+ */
+function assertOwnSubagentsOnly(engine: RunEngine, caller: McpCaller, threadId: string, tool: string): void {
+  if (engine.delegations.getLineage(threadId)?.relationship !== 'subagent') return
+  if (lineageRelation(engine, caller.threadId, threadId) === 'descendant') return
+  throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is a subagent of another thread; ${tool} reaches only the subagents below your own thread. Its parent manages it.`)
+}
+
 /** What an accepted Stop or steer returns; every other result is a refusal the caller can act on. */
 function acceptedRunCommand(result: AgentRunCommandResult, expectedRunId: string): { runId: string; sequence: number; replayed: boolean } {
   switch (result.status) {
@@ -211,6 +226,10 @@ function acceptedRunCommand(result: AgentRunCommandResult, expectedRunId: string
         { conflict: 'ceiling_exceeded', callerMode: result.callerMode, targetMode: result.targetMode }
       )
     case 'rejected':
+      if (result.reason === 'steer_target_not_ready')
+        throw new McpToolError('mousse_conflict', `Run ${expectedRunId} has not started its turn yet, so there is nothing to steer. Steer it once it is running, or send a message instead.`, { conflict: result.reason, expectedRunId })
+      if (SEND_CONFLICTS[result.reason])
+        throw new McpToolError('mousse_conflict', SEND_CONFLICTS[result.reason], { conflict: result.reason, expectedRunId })
       throw new McpToolError('mousse_conflict', `The command was refused: ${result.reason}.`, { conflict: result.reason, expectedRunId })
     case 'ignored':
       if (result.reason === 'run_not_found')
@@ -239,7 +258,7 @@ function showAction(host: AppToolHost, threadId: string, actor: AgentActor, summ
 }
 
 /** How a `thread_wait` ended before its result was read. */
-type WaitEnd = { kind: 'finished' } | { kind: 'paused' } | { kind: 'timeout' } | { kind: 'caller_ended' }
+type WaitEnd = { kind: 'finished' } | { kind: 'timeout' } | { kind: 'caller_ended' }
 
 /**
  * `thread_read`, `thread_list`, `thread_search`, the queue tools, `thread_fork`, `thread_merge_back` and the
@@ -427,7 +446,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
     },
     {
       name: 'thread_send',
-      description: `Send a message to another thread (needs the manage agent access level and a project the profile allows). The thread's model receives it labelled as a message from an agent in your thread, not from the user, and runs it under your permission mode when that is stricter than the thread's own; it never gets more than the thread itself allows. It starts a turn when the thread is idle and queues behind the running turn otherwise (it never steers the running turn). Refused while the thread waits for the user to answer a question or approval, is paused by a usage limit, or is archived. You may send ${THREAD_SEND_MAX_PER_RUN} messages per run. Returns the run it created: use thread_wait with it to wait for the answer, only when you need it this turn. Subagents are reached with continue_subagent.`,
+      description: `Send a message to another thread (needs the manage agent access level and a project the profile allows). The thread's model receives it labelled as a message from an agent in your thread, not from the user, and runs it under your permission mode when that is stricter than the thread's own; it never gets more than the thread itself allows. It starts a turn when the thread is idle and queues behind the running turn otherwise (it never steers the running turn). A thread kept in Plan takes it as a plan turn. Refused while the thread waits for the user to answer a question or approval, is paused by a usage limit, or is archived, when it already has several messages from agents waiting, and when it would be more than a few agent messages in a row without a person in between. You may send ${THREAD_SEND_MAX_PER_RUN} messages per run. Returns the run it created: use thread_wait with it to wait for the answer, only when you need it this turn. Subagents are reached with continue_subagent.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -456,10 +475,18 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
           throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is a subagent; its parent reaches it with continue_subagent, and a message from here would run without its parent hearing the result.`)
         assertTakesWork(host, threadId)
         const actor = actorOf(ctx)
-        reserveSend(actor.runId)
+        const requestKey = `thread_send:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`
+        try {
+          reserveSend(actor.runId)
+        } catch (limit) {
+          // A retry of a send this run already made is answered with its first result, however many it has made.
+          const earlier = host.earlierSend?.(threadId, requestKey)
+          if (earlier) return json({ threadId, ...earlier })
+          throw limit
+        }
         let sent
         try {
-          sent = await host.sendToThread(threadId, { content: args.content, mode }, { clientRequestId: `thread_send:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`, actor })
+          sent = await host.sendToThread(threadId, { content: args.content, mode }, { clientRequestId: requestKey, actor })
         } catch (error) {
           releaseSend(actor.runId)
           throw sendConflict(error) ?? error
@@ -472,7 +499,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
     },
     {
       name: 'thread_wait',
-      description: `Wait for a run of another thread to finish, for at most timeoutMs (default ${THREAD_WAIT_DEFAULT_MS}, up to ${THREAD_WAIT_MAX_MS}). Pass the runId thread_send returned; without one, the run that is active now. Returns status finished (with the run's outcome, and its final text where you may read it), timeout (the run is still going: call again; the wait never interrupts it), paused (a usage limit paused the run; it resumes by itself), idle (no run to wait for) or caller_ended (your own run ended). Wait only when you need the answer this turn; otherwise end your turn and read the thread later.`,
+      description: `Wait for a run of another thread to finish, for at most timeoutMs (default ${THREAD_WAIT_DEFAULT_MS}, up to ${THREAD_WAIT_MAX_MS}). Pass the runId thread_send returned; without one, the run that is active now. Returns status finished (with the run's outcome, and its final text where you may read it), timeout (the run is still going: call again; the wait never interrupts it), paused (a usage limit paused the run and it was still paused when the wait ran out: it resumes by itself, and the result says when to ask again; a wait that is running when it resumes follows it into the run that continues it), idle (no run to wait for) or caller_ended (your own run ended). Wait only when you need the answer this turn; otherwise end your turn and read the thread later.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -497,14 +524,29 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
         const ended = new Promise<WaitEnd>((resolve) => { settle = resolve })
         // Terminal runs seen before the run to wait for is known (no runId given).
         const seenTerminal = new Set<string>()
+        // The run a usage-limit pause handed over to: its answer is the one the waiter wants, so the wait
+        // follows the pause into the run that continues it.
+        let continuedFrom: string | undefined
+        const answered = (run: RunRecord): boolean => {
+          if (!TERMINAL_RUN_STATUSES.has(run.status)) return false
+          const endedBy = run.outcome?.pause?.endedBy
+          if (endedBy === 'resume' || endedBy === 'resume_now') {
+            const next = engine.listRuns(threadId, { limit: 20 }).find((entry) => entry.outcome?.continuationOf === run.runId)
+            if (next) {
+              continuedFrom ??= run.runId
+              target = next.runId
+              return answered(next)
+            }
+          }
+          return true
+        }
         // Subscribed before the run is read: a run that ends in between is seen here, never missed.
         const unsubscribe = engine.store.onEvent((event) => {
           if (event.threadId !== threadId || event.type !== 'run.status') return
           const run = event.payload as RunRecord
-          if (TERMINAL_RUN_STATUSES.has(run.status)) {
-            seenTerminal.add(run.runId)
-            if (run.runId === target) settle({ kind: 'finished' })
-          } else if (run.status === 'paused' && run.runId === target) settle({ kind: 'paused' })
+          if (!TERMINAL_RUN_STATUSES.has(run.status)) return
+          seenTerminal.add(run.runId)
+          if (run.runId === target && answered(run)) settle({ kind: 'finished' })
         })
         const timer = setTimeout(() => settle({ kind: 'timeout' }), timeoutMs)
         const onAbort = (): void => settle({ kind: 'caller_ended' })
@@ -520,8 +562,9 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
             if (!run) return json({ status: 'idle', threadId })
             target = run.runId
           }
-          if (TERMINAL_RUN_STATUSES.has(run.status) || seenTerminal.has(run.runId)) settle({ kind: 'finished' })
-          else if (run.status === 'paused') settle({ kind: 'paused' })
+          // A paused run is waited on like a running one: the pause ends by itself (the run resumes, and the wait
+          // follows it), or the wait times out and says when to ask again. It is never answered at once.
+          if (answered(run) || (seenTerminal.has(run.runId) && answered(engine.getRun(run.runId) ?? run))) settle({ kind: 'finished' })
           const end = await ended
           if (end.kind === 'caller_ended') return json({ status: 'caller_ended', threadId })
           const now = engine.getRun(target) ?? run
@@ -530,20 +573,23 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
           const reported = {
             runId: now.runId,
             status: now.status,
+            ...(continuedFrom ? { continuedFrom } : {}),
             ...(fullView && outcome?.error ? { error: outcome.error.slice(0, THREAD_WAIT_ERROR_MAX_CHARS) } : {}),
             ...(outcome?.interruptedBy ? { interruptedBy: outcome.interruptedBy } : {})
           }
-          if (end.kind === 'timeout') return json({ status: 'timeout', threadId, run: reported, hint: 'The run is still going; call thread_wait again.' })
-          if (end.kind === 'paused') {
+          if (end.kind === 'timeout' && now.status === 'paused') {
             const pause = now.outcome?.pause
+            const retryAfterMs = pause ? Math.min(THREAD_WAIT_MAX_MS, Math.max(1_000, Date.parse(pause.until) - Date.now())) : THREAD_WAIT_DEFAULT_MS
             return json({
               status: 'paused',
               threadId,
               run: reported,
               ...(pause ? { pause: { reason: pause.reason, until: pause.until, estimated: pause.estimated } } : {}),
-              hint: 'A usage limit paused the run; it resumes by itself. Call thread_wait again later, or end it with thread_interrupt.'
+              retryAfterMs,
+              hint: `A usage limit paused the run; it resumes by itself. Ask again after ${Math.ceil(retryAfterMs / 1000)} s (not sooner), or end it with thread_interrupt.`
             })
           }
+          if (end.kind === 'timeout') return json({ status: 'timeout', threadId, run: reported, hint: 'The run is still going; call thread_wait again.' })
           // The text of this run only, never the latest message of the thread.
           const resultText = fullView ? readRunResultText(engine.store, threadId, now.runId) : undefined
           return json({ status: 'finished', threadId, run: reported, ...(resultText !== undefined ? { resultText } : {}) })
@@ -575,7 +621,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
         const runId = requiredId(args, 'runId')
         if (!host.stopRun) return notAvailable('thread_interrupt')
         if (threadId === ctx.caller.threadId) throw new Error('thread_interrupt is for other threads; stop your own work by ending your turn.')
-        assertTakesWork(host, threadId)
+        // A Stop removes work, so an archived thread (which can still have a live or paused run) may be stopped.
+        assertOwnSubagentsOnly(engine, ctx.caller, threadId, 'thread_interrupt')
         const actor = actorOf(ctx)
         const result = acceptedRunCommand(await host.stopRun(threadId, runId, { clientRequestId: `thread_interrupt:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`, actor }), runId)
         if (!result.replayed) showAction(host, threadId, actor, `stopped run ${runId}`)
@@ -605,6 +652,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
         if (typeof args.text !== 'string' || !args.text.trim()) throw new Error('thread_steer requires text')
         if (!host.steerRun) return notAvailable('thread_steer')
         if (threadId === ctx.caller.threadId) throw new Error('thread_steer is for other threads.')
+        assertOwnSubagentsOnly(engine, ctx.caller, threadId, 'thread_steer')
         assertTakesWork(host, threadId)
         const actor = actorOf(ctx)
         const result = acceptedRunCommand(await host.steerRun(threadId, runId, args.text, { clientRequestId: `thread_steer:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`, actor }), runId)
@@ -645,7 +693,10 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
           throw new McpToolError('mousse_ceiling_exceeded', 'A plan-ceiling caller can only queue plan turns.')
         const mode = (args.mode as 'agent' | 'plan' | undefined) ?? (ctx.caller.modeCeiling === 'plan' ? 'plan' : 'agent')
         if (!host.enqueue) throw new Error('This Mousse cannot queue messages.')
-        return json({ item: host.enqueue(threadId, { content: args.content, mode }) })
+        // The queued turn never runs looser than the turn that queued it: a turn another thread's agent
+        // narrowed cannot widen itself by queueing a message on its own thread.
+        const permissionMode = host.permissionModeFor?.(ctx.caller.runId)
+        return json({ item: host.enqueue(threadId, { content: args.content, mode }, { permissionMode: permissionMode ?? 'ask' }) })
       }
     },
     {
