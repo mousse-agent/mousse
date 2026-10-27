@@ -1,22 +1,14 @@
 /**
- * Profiles written by builds before the gateway: their instance map, toggles and vendor launch
- * settings are read as they are (no seed bump, no rewrite), and built-in instances keep their ids.
+ * Profiles written by builds before the gateway: their instance map and toggles are read as they
+ * are (no seed bump), built-in instances keep their ids, and the vendor launch settings are copied
+ * into the instance config once, leaving the vendor files as they were.
  */
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { antigravityDriver } from '../../src/mms/harness/drivers/antigravity'
-import { claudeCodeDriver } from '../../src/mms/harness/drivers/claudeCode'
-import { codexDriver } from '../../src/mms/harness/drivers/codex'
-import { piDriver } from '../../src/mms/harness/drivers/pi'
-import { createHarnessGateway } from '../../src/mms/harness/gateway'
-import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
-import { AntigravityProviderService } from '../../src/mms/providers/antigravity/AntigravityProviderService'
-import { ClaudeSubscriptionProviderService } from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
-import { createCodexProviderService } from '../../src/mms/providers/codex/CodexProviderService'
-import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import { describeStatus } from '../../src/shared/harness/status'
+import { startProfile, type ProfileStore } from './vendorProfile'
 
 const dirs: string[] = []
 afterEach(() => {
@@ -48,44 +40,16 @@ function legacyProfile(claudeSettings: Record<string, unknown>, instances: Recor
   const home = tempDir('mousse-legacy-profile-')
   mkdirSync(join(home, 'providers', 'claude-subscription'), { recursive: true })
   writeFileSync(join(home, 'providers', 'claude-subscription', 'settings.json'), JSON.stringify(claudeSettings))
-  let section = { instances, instancesSeedVersion: 1 }
-  const writes: unknown[] = []
-  const instanceMap = new ProviderInstanceService({
-    store: {
-      read: () => ({ instances: section.instances, seedVersion: section.instancesSeedVersion }),
-      write: (next) => {
-        writes.push(next)
-        section = { instances: next.instances, instancesSeedVersion: next.seedVersion }
-      }
-    }
-  })
-  const questions = new UserQuestionService()
-  const claude = new ClaudeSubscriptionProviderService(home, questions, {
-    findBinary: () => undefined,
-    runAuth: async () => JSON.stringify({ loggedIn: true, orgId: 'org-1', subscriptionType: 'max' })
-  })
-  const codex = createCodexProviderService(home, questions, { findBinary: () => undefined })
-  const antigravity = new AntigravityProviderService(home, home, questions)
-  const harness = createHarnessGateway({
-    profileHome: home,
-    installationHome: home,
-    instanceMap,
-    questions,
-    shellPath: async () => ({ entries: [], source: 'failed' }),
-    drivers: [
-      piDriver({ client: () => ({ chat: async () => { throw new Error('unused') } }) }),
-      claudeCodeDriver({ builtIn: () => claude }),
-      codexDriver({ builtIn: () => codex }),
-      antigravityDriver({ builtIn: () => antigravity })
-    ]
-  })
-  const stop = () => {
-    harness.stop()
-    claude.stop()
-    codex.stop()
-    antigravity.stop()
+  // Wired as MmsProfileServices wires it (`vendorProfile.ts`).
+  const store: ProfileStore = { instances, seedVersion: 1, writes: [] }
+  const profile = startProfile(home, store)
+  return {
+    home,
+    harness: profile.harness,
+    section: () => ({ instances: store.instances, instancesSeedVersion: store.seedVersion }),
+    writes: store.writes,
+    stop: profile.stop
   }
-  return { home, harness, section: () => section, writes, stop }
 }
 
 describe('legacy profiles', () => {
@@ -110,11 +74,17 @@ describe('legacy profiles', () => {
       const codex = snapshots.find((entry) => entry.instanceId === 'codex')!
       expect(codex.enabled).toEqual({ device: false, effective: false, setBy: 'device' })
       expect(describeStatus(codex).headline).toBe('Disabled')
-      // Nothing was rewritten: no seed bump, the stored entries are byte-equal.
-      expect(profile.section()).toEqual({ instances: { antigravity: { driver: 'antigravity', enabled: true }, claude: { driver: 'claude', enabled: true }, codex: { driver: 'codex', enabled: false } }, instancesSeedVersion: 1 })
-      expect(profile.writes).toEqual([])
-      // The vendor settings file is untouched.
-      expect(JSON.parse(readFileSync(join(profile.home, 'providers', 'claude-subscription', 'settings.json'), 'utf8'))).toMatchObject({ binaryPath: binary, args: ['--verbose'] })
+      // No seed bump and no toggle changed; the launch settings were copied into the instance once.
+      expect(profile.section()).toMatchObject({
+        instances: {
+          antigravity: { driver: 'antigravity', enabled: true },
+          claude: { driver: 'claude', enabled: true, config: { binaryPath: binary, args: ['--verbose'], env: { FOO: 'bar' }, signedOutInMousse: false, vendorMirror: expect.any(String) } },
+          codex: { driver: 'codex', enabled: false, config: { signedOutInMousse: false, vendorMirror: expect.any(String) } }
+        },
+        instancesSeedVersion: 1
+      })
+      // The vendor settings file is untouched: an older build still reads its own settings.
+      expect(JSON.parse(readFileSync(join(profile.home, 'providers', 'claude-subscription', 'settings.json'), 'utf8'))).toMatchObject({ loginPolicy: 'cli', binaryPath: binary, args: ['--verbose'], env: { FOO: 'bar' } })
     } finally {
       profile.stop()
     }
