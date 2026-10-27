@@ -17,6 +17,7 @@ import {
   commitScope,
   emptyCommitForm,
   forceAmend,
+  gitActionAvailability,
   gitCollapsedLabel,
   gitActionLock,
   prefillAmendDraft,
@@ -29,6 +30,7 @@ import {
 import { EMPTY_GIT_ENTRY, type GitStatusView } from '../src/renderer/stores/gitStatusStore'
 import type {
   GitCommit,
+  GitFileChange,
   GitPullRequestInfo,
   GitPullRequestLookup,
   GitStatusSnapshot
@@ -44,6 +46,8 @@ const status = (patch: Partial<GitStatusSnapshot> = {}): GitStatusSnapshot => ({
   changes: [],
   ...patch
 })
+
+const fileChange = (path: string, patch: Partial<GitFileChange> = {}): GitFileChange => ({ path, status: 'modified', staged: false, ...patch })
 
 const commit = (patch: Partial<GitCommit> = {}): GitCommit => ({
   hash: 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2',
@@ -184,8 +188,23 @@ describe('push button', () => {
     expect(pushButtonModel(status({ ahead: 1 }), 5)?.title).toBe('Push 1 commit to origin/feature/login')
   })
 
-  it('stays when the branch is also behind, so Git can report the rejection', () => {
-    expect(pushButtonModel(status({ ahead: 2, behind: 4 }), 5)).toMatchObject({ label: 'Push', count: 2 })
+  it('stays when the branch has diverged, but is disabled with the way forward', () => {
+    expect(pushButtonModel(status({ ahead: 2, behind: 4 }), 5)).toMatchObject({
+      label: 'Push',
+      count: 2,
+      disabledReason: 'Branch has diverged; pull with merge or rebase first'
+    })
+    expect(pushButtonModel(status({ ahead: 2 }), 5)?.disabledReason).toBeUndefined()
+  })
+
+  it('is disabled while files are conflicted or a merge or rebase waits', () => {
+    const conflicted = [{ path: 'a.ts', status: 'conflicted' as const, staged: false }]
+    expect(pushButtonModel(status({ ahead: 1, changes: conflicted }), 5)?.disabledReason).toBe('Resolve 1 conflicted file first')
+    expect(pushButtonModel(status({ ahead: 1, inProgress: 'rebase' }), 5)?.disabledReason).toBe('Finish or abort the rebase first')
+  })
+
+  it('still pushes from a thread worktree', () => {
+    expect(pushButtonModel(status({ ahead: 1 }), 5, { workspaceThreadId: 't1' })?.disabledReason).toBeUndefined()
   })
 
   it('publishes a branch with no upstream that has commits', () => {
@@ -277,6 +296,144 @@ describe('commit menu state', () => {
     expect(commitHint(true, 'a1b2c3d', 2)).toBe('Amends a1b2c3d · stages 2 files')
     expect(commitButtonLabels(false)).toEqual({ commit: 'Commit', commitAndPush: 'Commit and push' })
     expect(commitButtonLabels(true)).toEqual({ commit: 'Amend', commitAndPush: 'Amend and push' })
+  })
+})
+
+describe('commit hint by what the commit includes', () => {
+  const availability = (patch: Partial<GitStatusSnapshot>, scope = { workspaceThreadId: null as string | null }) =>
+    gitActionAvailability(status(patch), null, 3, scope).commit
+
+  it('commits only the staged files when anything is staged', () => {
+    const commitState = availability({ changes: [fileChange('a.ts', { staged: true }), fileChange('b.ts'), fileChange('c.ts', { status: 'untracked' })] })
+    expect(commitHint(false, 'a1b2c3d', 3, commitState)).toBe('Commits 1 staged file')
+    expect(commitHint(true, 'a1b2c3d', 3, commitState)).toBe('Amends a1b2c3d · adds 1 staged file')
+  })
+
+  it('stages everything when nothing is staged', () => {
+    const commitState = availability({ changes: [fileChange('a.ts'), fileChange('b.ts', { status: 'untracked' })] })
+    expect(commitHint(false, 'a1b2c3d', 2, commitState)).toBe('Stages 2 files')
+    expect(commitHint(true, 'a1b2c3d', 2, commitState)).toBe('Amends a1b2c3d · stages 2 files')
+  })
+
+  it('counts a file staged and edited again once', () => {
+    const commitState = availability({ changes: [fileChange('mm.ts', { staged: true }), fileChange('mm.ts')] })
+    expect(commitState).toMatchObject({ stagedCount: 1, unstagedCount: 1, changedCount: 1, mode: 'staged' })
+    expect(commitHint(false, null, 1, commitState)).toBe('Commits 1 staged file')
+  })
+
+  it("says a thread worktree's commit takes all changes, whatever is staged", () => {
+    const commitState = availability({ changes: [fileChange('a.ts', { staged: true }), fileChange('b.ts')] }, { workspaceThreadId: 't1' })
+    expect(commitState.mode).toBe('thread')
+    expect(commitHint(false, 'a1b2c3d', 2, commitState)).toBe("Commits all changes on this thread's branch")
+  })
+
+  it('blocks the commit while files are conflicted', () => {
+    const commitState = availability({ changes: [fileChange('a.ts', { status: 'conflicted' }), fileChange('b.ts', { status: 'conflicted' }), fileChange('c.ts', { staged: true })] })
+    expect(commitState.blockedReason).toBe('Resolve 2 conflicted files first')
+    expect(commitHint(false, null, 3, commitState)).toBe('Resolve 2 conflicted files first')
+    expect(commitHint(true, 'a1b2c3d', 3, commitState)).toBe('Resolve 2 conflicted files first')
+    expect(availability({ changes: [fileChange('a.ts', { status: 'conflicted' })] }).blockedReason).toBe('Resolve 1 conflicted file first')
+  })
+
+  it('says a merge with nothing left to resolve is finished by the commit', () => {
+    const commitState = availability({ inProgress: 'merge', changes: [fileChange('a.ts', { staged: true })] })
+    expect(commitState).toMatchObject({ mode: 'finish-merge', blockedReason: null })
+    expect(commitHint(false, null, 1, commitState)).toBe('Finishes the merge')
+  })
+
+  it('keeps the old wording without availability', () => {
+    expect(commitHint(false, 'a1b2c3d', 2)).toBe('Stages 2 files')
+  })
+})
+
+describe('git action availability', () => {
+  const none: GitPullRequestLookup = { state: 'none', isDefaultBranch: false }
+  const project = { workspaceThreadId: null }
+  const inThread = { workspaceThreadId: 't1' }
+  const available = (patch: Partial<GitStatusSnapshot>, scope = project, lookup: GitPullRequestLookup | null = none, commitCount = 3) =>
+    gitActionAvailability(status(patch), lookup, commitCount, scope)
+  const dirty = [fileChange('a.ts')]
+  const conflicts = [fileChange('a.ts', { status: 'conflicted' })]
+
+  const cases: Array<{
+    name: string
+    patch: Partial<GitStatusSnapshot>
+    scope?: { workspaceThreadId: string | null }
+    lookup?: GitPullRequestLookup | null
+    commitCount?: number
+    push: string | null
+    commitAndPush: boolean
+    openPr: boolean
+  }> = [
+    { name: 'clean and level with upstream', patch: {}, push: 'Nothing to push', commitAndPush: true, openPr: false },
+    { name: 'dirty and level', patch: { changes: dirty }, push: 'Nothing to push', commitAndPush: true, openPr: true },
+    { name: 'ahead', patch: { ahead: 2 }, push: null, commitAndPush: true, openPr: false },
+    { name: 'ahead and dirty', patch: { ahead: 2, changes: dirty }, push: null, commitAndPush: true, openPr: true },
+    { name: 'behind', patch: { behind: 2 }, push: 'Branch is behind; pull first', commitAndPush: false, openPr: false },
+    { name: 'behind and dirty', patch: { behind: 2, changes: dirty }, push: 'Branch is behind; pull first', commitAndPush: false, openPr: false },
+    { name: 'diverged', patch: { ahead: 1, behind: 1 }, push: 'Branch has diverged; pull with merge or rebase first', commitAndPush: false, openPr: false },
+    { name: 'no upstream with commits', patch: { tracking: 'none', upstream: null }, push: null, commitAndPush: true, openPr: false },
+    { name: 'no upstream and dirty', patch: { tracking: 'none', upstream: null, changes: dirty }, push: null, commitAndPush: true, openPr: true },
+    { name: 'no upstream and no commits', patch: { tracking: 'none', upstream: null }, commitCount: 0, push: 'Nothing to push', commitAndPush: true, openPr: false },
+    { name: 'no upstream and no remote', patch: { tracking: 'none', upstream: null, hasRemote: false, changes: dirty }, push: 'No remote to push to', commitAndPush: false, openPr: false },
+    { name: 'detached', patch: { branch: null, tracking: 'detached', upstream: null, changes: dirty }, push: 'No branch to push', commitAndPush: false, openPr: false },
+    { name: 'conflicted', patch: { ahead: 1, changes: conflicts }, push: 'Resolve 1 conflicted file first', commitAndPush: true, openPr: true },
+    { name: 'merge in progress', patch: { ahead: 1, inProgress: 'merge', changes: dirty }, push: 'Finish or abort the merge first', commitAndPush: true, openPr: true },
+    { name: 'rebase in progress', patch: { inProgress: 'rebase' }, push: 'Finish or abort the rebase first', commitAndPush: true, openPr: false },
+    { name: 'dirty with a pull request already open', patch: { changes: dirty }, lookup: { state: 'found', pullRequest: pullRequest() }, push: 'Nothing to push', commitAndPush: true, openPr: false },
+    { name: 'dirty on the default branch', patch: { changes: dirty }, lookup: { state: 'none', isDefaultBranch: true }, push: 'Nothing to push', commitAndPush: true, openPr: false },
+    { name: 'dirty with the default branch unknown', patch: { changes: dirty }, lookup: { state: 'none', isDefaultBranch: null }, push: 'Nothing to push', commitAndPush: true, openPr: false },
+    { name: 'dirty before the lookup loaded', patch: { changes: dirty }, lookup: null, push: 'Nothing to push', commitAndPush: true, openPr: false },
+    { name: 'thread worktree, dirty and ahead', patch: { ahead: 1, changes: dirty }, scope: inThread, push: null, commitAndPush: true, openPr: true },
+    { name: 'thread worktree, behind', patch: { behind: 1, changes: dirty }, scope: inThread, push: 'Branch is behind; pull first', commitAndPush: false, openPr: false }
+  ]
+
+  it.each(cases)('$name', ({ patch, scope, lookup, commitCount, push, commitAndPush, openPr }) => {
+    const result = available(patch, scope, lookup, commitCount)
+    expect(result.push.reason).toBe(push)
+    expect(result.push.enabled).toBe(push === null)
+    expect(result.offerCommitAndPush).toBe(commitAndPush)
+    expect(result.offerCommitPushAndOpenPr).toBe(openPr)
+  })
+
+  it('refuses amend in a thread worktree with the reason, and without commits', () => {
+    expect(available({}, inThread).amend).toEqual({ enabled: false, reason: "This thread's branch is checkpointed" })
+    expect(available({}, project).amend).toEqual({ enabled: true, reason: null })
+    expect(available({}, project, none, 0).amend).toEqual({ enabled: false, reason: 'No commits yet' })
+  })
+
+  it('offers neither push choice nor a pull request commit without a branch, a repository or status', () => {
+    for (const state of [null, status({ isRepo: false, branch: null })]) {
+      const result = gitActionAvailability(state, none, 0, project)
+      expect(result.push.enabled).toBe(false)
+      expect(result.offerCommitAndPush).toBe(false)
+      expect(result.offerCommitPushAndOpenPr).toBe(false)
+    }
+  })
+
+  it('never offers a push after a commit while behind, and never enables Push with conflicts or a stopped merge, whatever else is true', () => {
+    for (const behind of [0, 1]) for (const ahead of [0, 1]) for (const tracking of ['tracked', 'none', 'detached'] as const)
+      for (const inProgress of [null, 'merge', 'rebase'] as const) for (const conflicted of [false, true])
+        for (const staged of [false, true]) for (const scope of [project, inThread]) {
+          const changes = [
+            ...(conflicted ? conflicts : []),
+            ...(staged ? [fileChange('s.ts', { staged: true })] : [])
+          ]
+          const result = available({
+            behind,
+            ahead,
+            tracking,
+            branch: tracking === 'detached' ? null : 'main',
+            upstream: tracking === 'tracked' ? 'origin/main' : null,
+            inProgress,
+            changes
+          }, scope)
+          if (behind > 0 && tracking === 'tracked') expect(result.offerCommitAndPush).toBe(false)
+          if (conflicted || inProgress) expect(result.push.enabled).toBe(false)
+          if (result.offerCommitPushAndOpenPr) expect(result.offerCommitAndPush).toBe(true)
+          if (conflicted) expect(result.commit.blockedReason).not.toBeNull()
+          if (scope === inThread && !conflicted) expect(result.commit.mode).toBe('thread')
+        }
   })
 })
 
@@ -500,8 +657,22 @@ describe('git section actions markup', () => {
     expect(html).not.toMatch(/class="side-card-git-push"[^>]*disabled/)
   })
 
-  it('keeps Push when the branch is behind as well', () => {
-    expect(render(view({ status: status({ ahead: 1, behind: 2 }) }))).toContain('side-card-git-push-count" aria-hidden="true">↑1<')
+  it('keeps Push when the branch is behind as well, disabled with the reason', () => {
+    const html = render(view({ status: status({ ahead: 1, behind: 2 }) }))
+    expect(html).toContain('side-card-git-push-count" aria-hidden="true">↑1<')
+    expect(html).toMatch(/class="side-card-git-push"[^>]*title="Branch has diverged; pull with merge or rebase first"[^>]*disabled=""/)
+  })
+
+  it('keeps Push enabled in a thread worktree', () => {
+    const html = renderToStaticMarkup(createElement(GitSectionView, {
+      threadId: 't1',
+      projectId: 'p1',
+      workspaceThreadId: 't1',
+      path: '/repo/a',
+      git: view({ status: status({ ahead: 1 }) }),
+      collapsedLabel: null
+    }))
+    expect(html).toMatch(/class="side-card-git-push"(?![^>]*disabled)/)
   })
 
   it('renders Publish for a branch with no upstream', () => {

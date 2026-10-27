@@ -3,7 +3,9 @@ import type {
   GitBranchInfo,
   GitCommit,
   GitDiffStats,
+  GitInProgress,
   GitPullRequestLookup,
+  GitScope,
   GitStatusSnapshot
 } from '../../../shared/types'
 import { ipcErrorLine } from '../../lib/errorText'
@@ -277,6 +279,8 @@ export interface PushButtonModel {
   /** Unpushed commits for the badge; null for a branch with no upstream. */
   count: number | null
   title: string
+  /** Why the button is disabled right now; absent when it can be used. */
+  disabledReason?: string
 }
 
 /** Whether the branch has somewhere to push to: an upstream, or a remote to publish to. */
@@ -285,15 +289,123 @@ export function canPush(status: GitStatusSnapshot | null): boolean {
   return status.tracking === 'tracked' || status.hasRemote !== false
 }
 
+/** Shown where a thread's own worktree rules out an action, for example amend. */
+export const THREAD_CHECKPOINTED_REASON = "This thread's branch is checkpointed"
+
+const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? '' : 's'}`
+
+const IN_PROGRESS_NAMES: Record<GitInProgress, string> = {
+  merge: 'merge',
+  rebase: 'rebase',
+  'cherry-pick': 'cherry-pick',
+  revert: 'revert'
+}
+
+/** Files by what Git says about them; a file staged and edited again counts on both sides but once in `changedCount`. */
+export interface GitChangeCounts {
+  stagedCount: number
+  unstagedCount: number
+  conflictedCount: number
+  changedCount: number
+}
+
+export function gitChangeCounts(status: GitStatusSnapshot | null): GitChangeCounts {
+  const staged = new Set<string>()
+  const unstaged = new Set<string>()
+  const conflicted = new Set<string>()
+  const changed = new Set<string>()
+  for (const change of status?.changes ?? []) {
+    if (change.status === 'ignored') continue
+    changed.add(change.path)
+    if (change.status === 'conflicted') conflicted.add(change.path)
+    else if (change.staged) staged.add(change.path)
+    else unstaged.add(change.path)
+  }
+  return { stagedCount: staged.size, unstagedCount: unstaged.size, conflictedCount: conflicted.size, changedCount: changed.size }
+}
+
+/** What a commit would include, which decides the hint under the message. */
+export type CommitMode = 'staged' | 'all' | 'thread' | 'conflicted' | 'finish-merge'
+
+export interface CommitAvailability extends GitChangeCounts {
+  mode: CommitMode
+  /** Why no commit can be made right now; null when one can. */
+  blockedReason: string | null
+}
+
+export interface GitActionAvailability {
+  push: { enabled: boolean; reason: string | null }
+  /** The commit popover offers "Commit and push": there is somewhere to push, and the branch is not behind. */
+  offerCommitAndPush: boolean
+  /** The commit popover also offers "Commit, push and open PR": a pushable branch without a pull request that is not the default one. */
+  offerCommitPushAndOpenPr: boolean
+  amend: { enabled: boolean; reason: string | null }
+  commit: CommitAvailability
+}
+
+/**
+ * Which side card actions can be used, and why not, from the state of the branch alone.
+ * `scope.workspaceThreadId` is set in a thread's own worktree, where every commit takes all changes and amend is refused.
+ */
+export function gitActionAvailability(
+  status: GitStatusSnapshot | null,
+  pullRequest: GitPullRequestLookup | null,
+  commitCount: number,
+  scope: Pick<GitScope, 'workspaceThreadId'>
+): GitActionAvailability {
+  const counts = gitChangeCounts(status)
+  const inThread = scope.workspaceThreadId !== null
+  const inProgress = status?.inProgress ?? null
+  const conflictedReason = counts.conflictedCount > 0 ? `Resolve ${plural(counts.conflictedCount, 'conflicted file')} first` : null
+  const diverged = status?.tracking === 'tracked' && status.ahead > 0 && status.behind > 0
+  const behind = status?.tracking === 'tracked' && status.behind > 0
+
+  let pushReason: string | null = null
+  if (!status?.isRepo || !status.branch) pushReason = 'No branch to push'
+  else if (conflictedReason) pushReason = conflictedReason
+  else if (inProgress) pushReason = `Finish or abort the ${IN_PROGRESS_NAMES[inProgress]} first`
+  else if (diverged) pushReason = 'Branch has diverged; pull with merge or rebase first'
+  else if (behind) pushReason = 'Branch is behind; pull first'
+  else if (status.tracking === 'tracked' && status.ahead === 0) pushReason = 'Nothing to push'
+  else if (status.tracking !== 'tracked' && status.hasRemote === false) pushReason = 'No remote to push to'
+  else if (status.tracking !== 'tracked' && commitCount === 0) pushReason = 'Nothing to push'
+
+  const offerCommitAndPush = canPush(status) && !behind
+  const lookupNone = pullRequest?.state === 'none' && pullRequest.isDefaultBranch === false
+  const amendReason = inThread ? THREAD_CHECKPOINTED_REASON : commitCount === 0 ? 'No commits yet' : null
+
+  let mode: CommitMode = 'all'
+  if (conflictedReason) mode = 'conflicted'
+  else if (inThread) mode = 'thread'
+  else if (inProgress === 'merge') mode = 'finish-merge'
+  else if (counts.stagedCount > 0) mode = 'staged'
+
+  return {
+    push: { enabled: pushReason === null, reason: pushReason },
+    offerCommitAndPush,
+    offerCommitPushAndOpenPr: offerCommitAndPush && counts.changedCount > 0 && lookupNone,
+    amend: { enabled: amendReason === null, reason: amendReason },
+    commit: { ...counts, mode, blockedReason: conflictedReason }
+  }
+}
+
+const PROJECT_SCOPE = { workspaceThreadId: null } as const
+
 /** The Push or Publish button, or null when there is nothing to push or nowhere to push it. */
-export function pushButtonModel(status: GitStatusSnapshot | null, commitCount: number): PushButtonModel | null {
+export function pushButtonModel(
+  status: GitStatusSnapshot | null,
+  commitCount: number,
+  scope: Pick<GitScope, 'workspaceThreadId'> = PROJECT_SCOPE
+): PushButtonModel | null {
   if (!status || !canPush(status)) return null
+  const { push } = gitActionAvailability(status, null, commitCount, scope)
+  const disabled = push.enabled || push.reason === null ? {} : { disabledReason: push.reason }
   if (status.tracking === 'tracked' && status.ahead > 0) {
     const noun = status.ahead === 1 ? '1 commit' : `${status.ahead} commits`
-    return { label: 'Push', count: status.ahead, title: status.upstream ? `Push ${noun} to ${status.upstream}` : `Push ${noun}` }
+    return { label: 'Push', count: status.ahead, title: status.upstream ? `Push ${noun} to ${status.upstream}` : `Push ${noun}`, ...disabled }
   }
   if (status.tracking === 'none' && commitCount > 0) {
-    return { label: 'Publish', count: null, title: 'Push this branch and track it on the remote' }
+    return { label: 'Publish', count: null, title: 'Push this branch and track it on the remote', ...disabled }
   }
   return null
 }
@@ -328,7 +440,7 @@ export function commitMenuState(commits: readonly GitCommit[], fileCount: number
   const hasChanges = fileCount > 0
   const forced = canAmend && !hasChanges
   const amendTitle = !canAmend
-    ? checkpointed ? "This thread's branch is checkpointed" : commits.length === 0 ? 'No commits yet' : 'The last commit is already pushed'
+    ? checkpointed ? THREAD_CHECKPOINTED_REASON : commits.length === 0 ? 'No commits yet' : 'The last commit is already pushed'
     : forced ? 'No changes to commit' : null
   const triggerEnabled = hasChanges || canAmend
   return {
@@ -343,12 +455,24 @@ export function commitMenuState(commits: readonly GitCommit[], fileCount: number
   }
 }
 
-/** Footer hint of the commit menu. */
-export function commitHint(amend: boolean, shortHash: string | null, fileCount: number): string {
-  const files = fileCount === 1 ? '1 file' : `${fileCount} files`
-  if (!amend) return `Stages ${files}`
+/**
+ * Footer hint of the commit menu. With `commit` it says what the commit includes: only the staged
+ * files when anything is staged, everything otherwise, all changes in a thread's worktree.
+ * Without it the hint assumes everything is staged first.
+ */
+export function commitHint(amend: boolean, shortHash: string | null, fileCount: number, commit?: CommitAvailability): string {
+  if (commit?.blockedReason) return commit.blockedReason
+  const files = plural(fileCount, 'file')
+  if (!amend) {
+    if (commit?.mode === 'thread') return "Commits all changes on this thread's branch"
+    if (commit?.mode === 'finish-merge') return 'Finishes the merge'
+    if (commit?.mode === 'staged') return `Commits ${plural(commit.stagedCount, 'staged file')}`
+    return `Stages ${files}`
+  }
   const target = shortHash ? `Amends ${shortHash}` : 'Amends the last commit'
-  return fileCount > 0 ? `${target} · stages ${files}` : target
+  if (fileCount === 0) return target
+  if (commit && commit.mode !== 'all' && commit.stagedCount > 0) return `${target} · adds ${plural(commit.stagedCount, 'staged file')}`
+  return `${target} · stages ${files}`
 }
 
 export function commitButtonLabels(amend: boolean): { commit: string; commitAndPush: string } {
