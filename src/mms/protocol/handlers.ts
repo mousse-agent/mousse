@@ -1406,6 +1406,21 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       return { handoffs: ctx.mms.runEngine.handoffs.listForThread(threadId) }
     }
+    case 'runs.resumeNow': {
+      // Continue a run a usage limit paused, now instead of at the reset time. A run that is not paused (the
+      // banner has not caught up with a hand-over or a Cancel) is refused `conflict`.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['runId'])
+      const runId = asString(p.runId, 'runId', 256)
+      return asRpcRejection(() => ctx.mms.orchestrator.resumePausedRun(runId))
+    }
+    case 'runs.cancelPause': {
+      // End a pause without continuing: the run is cancelled and the thread's held messages go on.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['runId'])
+      const runId = asString(p.runId, 'runId', 256)
+      return asRpcRejection(() => ctx.mms.orchestrator.cancelPausedRun(runId))
+    }
     case 'thread.fork': {
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['sourceThreadId', 'atRunOrdinal', 'title', 'clientRequestId', 'seedFrom'])

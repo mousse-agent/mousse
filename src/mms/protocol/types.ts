@@ -238,6 +238,8 @@ export const PROTOCOL_METHODS = [
   'runs.credentials',
   'runs.transfers',
   'runs.handoffs',
+  'runs.resumeNow',
+  'runs.cancelPause',
   'thread.fork',
   'thread.mergeBack',
   'orchestrator.answerQuestions',
@@ -494,6 +496,7 @@ export type ProtocolEventType =
   | 'turn.completed'
   | 'turn.interrupted'
   | 'turn.aborted'
+  | 'turn.paused'
   | 'turn.steered'
   | 'connection.failed'
   | 'activity'

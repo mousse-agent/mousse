@@ -253,6 +253,7 @@ export const BRIDGE_THREAD_EVENT_TYPES = [
   'turn.completed',
   'turn.interrupted',
   'turn.aborted',
+  'turn.paused',
   'turn.state',
   'turn.steered',
   'connection.failed',

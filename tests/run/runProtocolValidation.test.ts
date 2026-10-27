@@ -49,6 +49,17 @@ describe('run protocol validation', () => {
     expect(mms.runEngine.listRuns(thread.id)).toEqual([])
   }, 30_000)
 
+  it('rejects unknown keys of the pause methods, and a run that is not paused is refused conflict', async () => {
+    const invalid = { code: 'invalid_params' }
+    await expect(client.request('runs.resumeNow', { runId: 'run:x', bogus: 1 })).rejects.toMatchObject({ ...invalid, message: expect.stringContaining('bogus') })
+    await expect(client.request('runs.cancelPause', { runId: 'run:x', bogus: 1 })).rejects.toMatchObject(invalid)
+    await expect(client.request('runs.resumeNow', {})).rejects.toMatchObject(invalid)
+    await expect(client.request('runs.cancelPause', {})).rejects.toMatchObject(invalid)
+    // A banner that has not caught up with a hand-over, a Cancel or a deleted run gets feedback, not silence.
+    await expect(client.request('runs.resumeNow', { runId: 'run:missing' })).rejects.toMatchObject({ code: 'conflict' })
+    await expect(client.request('runs.cancelPause', { runId: 'run:missing' })).rejects.toMatchObject({ code: 'conflict' })
+  }, 30_000)
+
   it('surfaces engine refusals with their reason as the error code', async () => {
     const thread = mms.threads.createThread('Refusals')
     await expect(client.request('thread.mergeBack', { forkThreadId: thread.id })).rejects.toMatchObject({ code: 'not_a_fork' })

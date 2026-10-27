@@ -19,6 +19,7 @@ import {
   narrowAgentAccess,
   normalizeAgentAccessSettings,
   normalizeContextSettings,
+  normalizeRunSettings,
   resolveContextCompactionTokens,
   resolveModelForMode,
   type AgentAccessLevel
@@ -59,8 +60,10 @@ import { EventEmitter } from 'events'
 import { nativeAgentAssistantMessage, nativeAgentHistory } from '../providers/nativeAgentHistory'
 import { v4 as uuidv4 } from 'uuid'
 import { narrowestAccess, TitleTakenRejection, type CommandResult, type RunEngine, type SendDelegation, type StopResult } from '../run/RunEngine'
-import { isFencedSource } from '../run/delegation/sources'
+import { isFencedSource, isPauseHeldSource, isResumeSource } from '../run/delegation/sources'
 import { deleteRunResults } from '../run/delegation/hold'
+import { decideUsageLimit, type UsageLimitDecision } from '../run/pausePolicy'
+import { CONTINUE_TEXT, pausedLine } from '../run/pauseText'
 import { currentStopGeneration, runStopGeneration } from '../run/stopGeneration'
 import { buildSubagentView } from '../run/delegation/subagentView'
 import { resolveSubagent, subagentsTitled, type SubagentAddressSources } from '../run/delegation/subagentAddress'
@@ -89,6 +92,7 @@ import { harnessAppError, isRetriesExhausted, type BindPolicy, type ExecutionBin
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
 import { acknowledgeRows } from '../run/terminal'
+import { cancelQueuedWakes } from '../run/delegation/wake'
 import { taskCheckpoint } from '../run/delegation/checkpoint'
 import { subagentPreamble } from '../run/delegation/guidance'
 import { isRunningSubagent, type SubagentNoticeItem } from '../../shared/subagents'
@@ -114,7 +118,9 @@ import {
   type EffectRecord,
   type ModeCeiling,
   type ProviderRef,
+  type RunPause,
   type RunRecord,
+  type RunResumePayload,
   type ThreadEvent,
   type TransferRecord,
   type WakeTurnPayload
@@ -1344,7 +1350,7 @@ export class OrchestratorService extends EventEmitter {
   private turnStates = new Map<string, TurnState>()
 
   /** `blockedOnWait`: every running tool call only waits, so the thread shows Waiting. */
-  private setTurnPhase(threadId: string, phase: TurnPhase, patch?: Partial<Pick<TurnState, 'turnId' | 'activeMessageId' | 'error' | 'errorDescriptor'>> & { blockedOnWait?: boolean }): void {
+  private setTurnPhase(threadId: string, phase: TurnPhase, patch?: Partial<Pick<TurnState, 'turnId' | 'activeMessageId' | 'error' | 'errorDescriptor' | 'pause'>> & { blockedOnWait?: boolean }): void {
     const now = new Date().toISOString()
     const existing = this.turnStates.get(threadId)
     const state: TurnState = {
@@ -1360,6 +1366,9 @@ export class OrchestratorService extends EventEmitter {
     if (phase !== 'streaming' && phase !== 'tool_running') delete (state as any).activeMessageId
     if (phase === 'idle') { state.turnId = null; delete (state as any).startedAt }
     if (phase !== 'failed') { delete (state as any).error; delete state.errorDescriptor }
+    // The pause is only part of the paused state; any other phase drops it.
+    if (phase === 'paused' && patch?.pause) state.pause = patch.pause
+    else delete state.pause
     if ((phase === 'queued' || phase === 'thinking') && !existing?.startedAt) (state as any).startedAt = now
     if (phase !== 'idle' && !(state as any).startedAt) (state as any).startedAt = existing?.startedAt ?? now
     this.turnStates.set(threadId, state)
@@ -2070,6 +2079,7 @@ export class OrchestratorService extends EventEmitter {
     this.recoverQueuedRows()
     this.recoverOrphanedFollowUps()
     this.recoverAgentThreadCreations()
+    this.restorePausedTurnStates()
     return interrupted
   }
 
@@ -2233,6 +2243,13 @@ export class OrchestratorService extends EventEmitter {
     if (result.status !== 'stopped') return { ok: false, ...result }
     // The Stop is recorded (every thread of the subtree has a higher generation): a pull request watch on any of them ends now.
     this.emit('threads-stopped', { threadIds: [...result.threads] })
+    // A pause the Stop ended (the engine ends it in the same transaction): the thread no longer shows as paused,
+    // and the continue message that waited for the reset is gone (`removeStoppedQueueEntries` for the replayed case).
+    if (!result.replayed) {
+      for (const run of result.cancelledRuns) {
+        if (this.turnStates.get(run.threadId)?.phase === 'paused') this.pauseEndedWithoutTurn(run.threadId, 'Paused run stopped.')
+      }
+    }
     let aborted = false
     // A Stop closes the saved approval requests of every thread it covers, including the ones a restart
     // left for a run that no longer exists: nothing would answer them any more.
@@ -2418,6 +2435,16 @@ export class OrchestratorService extends EventEmitter {
     const engine = this.runEngine
     const run = engine?.getRun(runId) ?? null
     if (run && TERMINAL_RUN_STATUSES.has(run.status)) return
+    // A paused run has no turn to interrupt: the Stop ends its pause (and its timer).
+    if (engine && run?.status === 'paused') {
+      try {
+        engine.endPause(runId, 'stop')
+        this.pauseEndedWithoutTurn(threadId, 'Paused run stopped.')
+      } catch (error) {
+        console.warn('a paused run could not be stopped', { runId, error: error instanceof Error ? error.message : String(error) })
+      }
+      return
+    }
     const caps = this.capabilitiesForThread(threadId)
     const strategy = caps ? stopStrategy(caps, run) : run ? 'interrupt' : 'noop'
     // Only this run's turn: a later turn of the thread (a message sent after the Stop) is not its to abort.
@@ -3260,6 +3287,7 @@ export class OrchestratorService extends EventEmitter {
       'turn.start': (effect, ctx) => this.executeTurnStartEffect(effect, ctx.signal),
       'turn.interrupt': (effect) => this.executeTurnInterruptEffect(effect),
       'turn.steer': async (effect) => this.executeTurnSteerEffect(effect),
+      'run.resume': (effect) => this.executeResumeEffect(effect),
       // SPEC §17.4: an answer committed with this effect reaches the provider callback that waits for it.
       'request.respond': async (effect) => { this.questions.deliver((effect.payload as { requestId: string }).requestId) }
     }
@@ -3385,6 +3413,8 @@ export class OrchestratorService extends EventEmitter {
 
   private async executeTurnStartEffect(effect: EffectRecord, signal: AbortSignal): Promise<void> {
     if (isWakeTurnPayload(effect.payload)) return this.executeWakeEffect(effect, effect.payload, signal)
+    // Work started on the thread's behalf, or a scheduled occurrence, never runs beside a pause.
+    if (this.cancelStartOnPausedThread(effect)) return
     if (isIntegrationTurnPayload(effect.payload)) return this.executeIntegrationEffect(effect.payload, signal)
     if (isContinuationTurnPayload(effect.payload)) return this.executeContinuationEffect(effect, effect.payload, signal)
     if (isBotTurnPayload(effect.payload)) return this.executeBotEffect(effect.payload, signal)
@@ -3613,6 +3643,256 @@ export class OrchestratorService extends EventEmitter {
     const run = engine.getRun(runId)
     if (run && !TERMINAL_RUN_STATUSES.has(run.status) && this.steerThread(threadId, content, notice, carried, origin, limit)) return
     this.enqueueLateSteer(threadId, content, carried, notice, runId, origin, limit)
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // A run paused by a usage limit (docs/run-engine/SPEC.md §5, §16.4). The continue message is a queue
+  // item, `resume:<runId>`, written at the front of the thread's queue by the `run.resume` effect (the
+  // timer at the reset time, or Resume now). Its drain sends the continue turn and ends the pause in the
+  // same transaction that creates the run, so each crash point has one owner: the effect (still running,
+  // so re-queued on boot) before the item exists, the message queue (an item on disk is re-drained, a
+  // claim reclaimed) after.
+
+  /** A timer that fires this long after the reset it was armed for (Mousse was off over it) does not continue the run by itself. */
+  private static readonly RESUME_STALE_MS = 24 * 60 * 60 * 1000
+
+  /** The id of the queue item that continues the paused run `runId`. */
+  private resumeItemId(runId: string): string {
+    return `resume:${runId}`
+  }
+
+  /** What clients show of a paused run. */
+  private turnPauseOf(run: RunRecord): NonNullable<TurnState['pause']> | undefined {
+    const pause = run.outcome?.pause
+    if (!pause) return undefined
+    return {
+      runId: run.runId,
+      until: pause.until,
+      estimated: pause.estimated,
+      autoResume: pause.autoResume,
+      ...(pause.provider ? { provider: pause.provider } : {}),
+      ...(pause.limitKind ? { limitKind: pause.limitKind } : {})
+    }
+  }
+
+  /** Boot: a run a usage limit paused (it survives a restart) shows as paused again until it is continued or ended. */
+  restorePausedTurnStates(): void {
+    const engine = this.runEngine
+    if (!engine) return
+    for (const run of engine.store.listNonTerminalRuns()) {
+      if (run.status !== 'paused') continue
+      const pause = this.turnPauseOf(run)
+      if (pause) this.setTurnPhase(run.threadId, 'paused', { turnId: run.runId, pause })
+    }
+  }
+
+  /** A thread's pause ended without a new turn (Cancel, Stop): its state is idle and, when `text` is given, the transcript says so. */
+  private pauseEndedWithoutTurn(threadId: string, text?: string): void {
+    if (this.turnStates.get(threadId)?.phase === 'paused') this.setTurnPhase(threadId, 'idle')
+    if (!text) return
+    try {
+      const session = this.getOrCreateSession(threadId)
+      if (session.deleted) return
+      this.sessionAls.run(session, () => {
+        this.addSystemMessage(text)
+        this.persist(true)
+      })
+    } catch (error) {
+      console.warn('the end of a pause could not be written to the thread', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /**
+   * Removes the continue message of a pause while it is still pending, and gives back the rows it owned
+   * (they are pending again, for rule 4 or the next continue turn). A claimed item is never removed
+   * here: the drain that holds the claim ends it, by admitting the continuation or by its refusal.
+   */
+  private removeResumeItem(threadId: string, itemId: string): void {
+    const owner = queueOwner(itemId)
+    try {
+      let claimed = false
+      this.mutateQueue(threadId, (items) => {
+        claimed = items.some((item) => item.id === itemId && item.state === 'claimed')
+        const target = items.find((item) => item.id === itemId && item.state !== 'claimed')
+        if (!target) return items
+        this.releaseQueuedRows([target])
+        return items.filter((item) => item !== target)
+      })
+      // Rows the item owned when it was lost (a crash between the item and its removal): given back as boot does.
+      const engine = this.runEngine
+      if (engine && !claimed) {
+        const owned = engine.inbox.listDeliveredByQueue().filter((row) => row.deliveredBy === owner).map((row) => row.inboxId)
+        if (owned.length) engine.inbox.release(owned, owner)
+      }
+    } catch (error) {
+      console.warn('the continue message of a pause could not be removed', { threadId, itemId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /**
+   * `run.resume`: the timer of a paused run (at its reset time) or Resume now. Idempotent step by step, and
+   * re-run after a crash (a running replay-safe effect is queued again on boot):
+   * 1. Prepare: a pause that ended is dealt with (superseded: its item goes; handed over: only the drain is
+   *    left); a stale timer ends nothing but turns auto-resume off; otherwise queued wakes and the rows the
+   *    paused turn delivered go back to pending, and the item's id is recorded on the pause.
+   * 2. Item: the continue message is written at the front of the queue, carrying the thread's pending rows, and
+   *    the rows are marked as owned by it once the item is on disk.
+   * 3. Drain: the queue is drained; the item is the one thing a paused thread's queue lets through.
+   */
+  private async executeResumeEffect(effect: EffectRecord): Promise<void> {
+    const engine = this.requireRunEngine()
+    const payload = effect.payload as RunResumePayload
+    const { runId, threadId } = payload
+    const itemId = this.resumeItemId(runId)
+    const owner = queueOwner(itemId)
+    const db = engine.store.db
+    const run = engine.getRun(runId)
+    const pause = run?.outcome?.pause
+    const session = this.getOrCreateSession(threadId)
+    if (!run || run.status !== 'paused' || !pause) {
+      const endedBy = pause?.endedBy
+      // Handed over: the item's drain admitted the continuation, so the item and its claim belong to the message
+      // queue now. Only a drain is left to do (the queue's own recovery may not have reached it yet).
+      if (endedBy === 'resume' || endedBy === 'resume_now') this.scheduleQueueDrain(session)
+      // Superseded (a message, Cancel, Stop, delete) or gone: the item is no longer wanted.
+      else this.removeResumeItem(threadId, itemId)
+      return
+    }
+    if (session.deleted || (this.threadStore && !this.threadStore.getThread(threadId))) {
+      engine.endPause(runId, 'deleted')
+      return
+    }
+    if (!payload.manual && Date.now() - Date.parse(pause.until) > OrchestratorService.RESUME_STALE_MS) {
+      engine.endPause(runId, 'stale')
+      this.pauseEndedWithoutTurn(threadId, 'The usage limit reset while Mousse was off; press Resume now.')
+      return
+    }
+    const manual = payload.manual === true
+    db.transaction(() => {
+      // A paused thread takes no wake, and the rows the paused turn delivered are for the continue turn.
+      cancelQueuedWakes(engine.store, engine.outbox, new Date().toISOString(), threadId)
+      engine.inbox.releaseRunDeliveries(runId)
+      engine.updatePause(runId, { resumeItemId: itemId, resumeRequested: manual ? 'user' : 'auto' })
+    })
+    db.checkpoint('resume.afterPrepare')
+    const pending = this.dropStaleQuestionRows(engine.inbox.listPending(threadId))
+    const planned = pending.length ? planWakeNotice(pending, this.noticeContext()) : undefined
+    this.enqueueForThread(
+      threadId,
+      { content: CONTINUE_TEXT, mode: getLastUserChatMode(session.messages) ?? 'agent' },
+      {
+        id: itemId,
+        atFront: true,
+        source: manual ? 'resume_now' : 'resume',
+        internal: true,
+        continuationOfRunId: runId,
+        // The mode the paused run ran in: the continuation is never looser.
+        permissionMode: this.runPermissionMode(runId),
+        ...(planned ? { inboxIds: pending.map((row) => row.inboxId), subagentNotice: planned.items } : {}),
+        afterSave: (item) => {
+          db.checkpoint('resume.afterItem')
+          // Only while the item is still pending: a claimed one was taken by a drain that took what it owns.
+          // Exactly the manifest, and only rows that are still pending; the rest stays for rule 4.
+          if (item.state === 'pending' && item.inboxIds?.length) engine.inbox.markDelivered(item.inboxIds, owner)
+          db.checkpoint('resume.afterRows')
+        }
+      }
+    )
+    this.scheduleQueueDrain(session)
+  }
+
+  /** `runs.resumeNow`: continue the paused run `runId` now. Refused `conflict` when it is not paused. */
+  async resumePausedRun(runId: string): Promise<{ runId: string; effectId: string }> {
+    const engine = this.requireRunEngine()
+    const effect = engine.requestResume(runId, true)
+    if (this.effectsEnabled()) this.effectWorker?.notify()
+    else await this.executeResumeEffect(effect)
+    return { runId, effectId: effect.effectId }
+  }
+
+  /** `runs.cancelPause`: ends the pause without continuing. The run is cancelled and the thread's held messages go on. */
+  async cancelPausedRun(runId: string): Promise<{ runId: string }> {
+    const engine = this.requireRunEngine()
+    const run = engine.getRun(runId)
+    if (!run || run.status !== 'paused') throw new CommandRejection('conflict', `Run ${runId} is not paused.`)
+    engine.endPause(runId, 'cancel')
+    this.removeResumeItem(run.threadId, run.outcome?.pause?.resumeItemId ?? this.resumeItemId(runId))
+    this.pauseEndedWithoutTurn(run.threadId, 'Paused run cancelled.')
+    // A claimed continue message is retired by the drain that holds it; what was queued before the pause goes on now.
+    this.scheduleQueueDrain(this.getOrCreateSession(run.threadId))
+    return { runId }
+  }
+
+  /**
+   * The continue message of a pause is being drained: sends the continue turn for the paused run. That
+   * creates the continuation run and ends the pause in one transaction. Returns the run's id, or undefined
+   * when the send is refused for any reason (the pause ended first: a message, Cancel, Stop): the item is
+   * retired without ever reaching the provider and the drain goes on. A replay (after a crash) returns the
+   * same run. An exception leaves the claim to `settleClaimAfterFailure`.
+   */
+  private async admitResumeItem(session: ThreadSession, original: QueuedMessage, rebuilt: QueuedMessage, claimToken: string): Promise<string | undefined> {
+    const engine = this.requireRunEngine()
+    try {
+      const result = await engine.dispatch({
+        kind: 'send',
+        threadId: original.threadId,
+        clientRequestId: queueOwner(original.id),
+        source: original.source ?? 'resume',
+        continuationOfRunId: original.continuationOfRunId!
+      })
+      if (result.status === 'accepted') return result.runId
+      console.warn('the continue message of a paused run was refused', { itemId: original.id, reason: result.status === 'rejected' ? result.reason : result.status })
+    } catch (error) {
+      session.turnAdmitted = false
+      session.admissionRunId = undefined
+      throw error
+    }
+    session.turnAdmitted = false
+    session.admissionRunId = undefined
+    this.completeSessionClaim(session, original.id, claimToken)
+    this.releaseQueuedRows([original, rebuilt])
+    this.scheduleQueueDrain(session)
+    return undefined
+  }
+
+  /** The continue message of a pause, rebuilt from the rows it still owns (it is never dropped for want of them). */
+  private rebuildResumeItem(item: QueuedMessage): QueuedMessage {
+    const { inboxIds: _ids, subagentNotice: _notice, ...rest } = item
+    const engine = this.runEngine
+    if (!engine || !item.inboxIds?.length) return { ...rest, content: CONTINUE_TEXT }
+    const owner = queueOwner(item.id)
+    const rows = this.dropStaleQuestionRows(engine.inbox.getMany(item.inboxIds).filter((row) => row.status === 'delivered' && row.deliveredBy === owner))
+    if (rows.length === 0) return { ...rest, content: CONTINUE_TEXT }
+    const planned = planWakeNotice(rows, this.noticeContext())
+    engine.inbox.recordNoticeVisibility(rows, planned.items)
+    return { ...rest, content: `${CONTINUE_TEXT}\n\n${planned.text}`, inboxIds: rows.map((row) => row.inboxId), subagentNotice: planned.items }
+  }
+
+  /**
+   * A queued run that must not start beside a pause (work started on the thread's behalf, a scheduled
+   * occurrence) is cancelled instead of waiting in the thread's lane, where it would hold up the continue turn
+   * (the lane is first-in, first-out). Returns true when the effect was dealt with.
+   */
+  private cancelStartOnPausedThread(effect: EffectRecord): boolean {
+    const engine = this.runEngine
+    const runId = (effect.payload as { runId?: unknown } | null)?.runId
+    if (!engine || typeof runId !== 'string') return false
+    const run = engine.getRun(runId)
+    if (!run || run.status !== 'queued' || isResumeSource(run.source)) return false
+    if (!isFencedSource(run.source) && !isPauseHeldSource(run.source)) return false
+    if (!engine.store.getPausedRun(run.threadId)) return false
+    this.markRun(runId, (runs, id) => {
+      if (runs.getRun(id)?.status === 'queued') runs.markTerminal(id, 'cancelled', { error: 'The thread is paused by a usage limit.' })
+    })
+    if (isContinuationTurnPayload(effect.payload)) {
+      this.harness.discardContinuations(effect.payload.threadId, effect.payload.continuationId)
+      this.endContinuationHold(effect.payload.continuationId, true)
+    } else if (!isIntegrationTurnPayload(effect.payload) && !isBotTurnPayload(effect.payload)) {
+      const stored = effect.payload as TurnStartPayload
+      const entry = this.turnResults.get(stored.runId)
+      this.skipUnstartableTurn(entry?.payload ?? stored, entry, engine.getRun(runId) ?? run)
+    }
+    return true
   }
 
   /** Titles for the notices this orchestrator writes. */
@@ -5080,6 +5360,12 @@ export class OrchestratorService extends EventEmitter {
       cancelWake(!session.deleted)
       return
     }
+    // A paused thread takes no wake: its rows stay pending and the continue turn carries them. The wake ends
+    // here instead of waiting in the thread's lane, which would hold up that turn.
+    if (engine.store.getPausedRun(payload.threadId)) {
+      cancelWake(true)
+      return
+    }
     if (session.turnAdmitted || session.isTurnRunning() || engine.getActiveRun(payload.threadId)) {
       const waiting = engine.outbox
         .listForThread(payload.threadId)
@@ -5165,7 +5451,7 @@ export class OrchestratorService extends EventEmitter {
     try {
       const continued = engine.getRun(runId)?.outcome?.continuationOf
       const source = continued ? engine.getRun(continued) : null
-      if (source) this.addSystemMessage(`Continuing run ${source.ordinal} after a restart.`)
+      if (source) this.addSystemMessage(source.outcome?.pause ? `Continuing run ${source.ordinal} after the usage limit reset.` : `Continuing run ${source.ordinal} after a restart.`)
     } catch (error) {
       console.warn('run engine continuation note failed', { runId, error: error instanceof Error ? error.message : String(error) })
     }
@@ -5232,6 +5518,8 @@ export class OrchestratorService extends EventEmitter {
     this.markRun(runId, (engine, id) => {
       const run = engine.getRun(id)
       if (!run || TERMINAL_RUN_STATUSES.has(run.status)) return
+      // A paused run waits for its limit to reset; only `endPause` ends it.
+      if (run.status === 'paused') return
       if (run.status === 'queued' && requeued) return
       if (failure !== undefined) {
         engine.markTerminal(id, 'failed', { error: failure instanceof Error ? failure.message : String(failure) })
@@ -5559,6 +5847,13 @@ export class OrchestratorService extends EventEmitter {
     } catch (error) {
       console.warn('a deleted thread\'s approval requests could not be closed', { threadId, error: error instanceof Error ? error.message : String(error) })
     }
+    // A paused run has no turn for the Stop below to end: its pause (and timer) ends with the thread, as deleted.
+    try {
+      const paused = this.runEngine?.store.getPausedRun(threadId)
+      if (paused) this.runEngine!.endPause(paused.runId, 'deleted')
+    } catch (error) {
+      console.warn('a deleted thread\'s pause could not be ended', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
     if (this.runEngine) {
       // The answers kept for waiters go with the thread; again once its stopped work has written its last one.
       const forgetResults = (): void => {
@@ -5769,7 +6064,16 @@ export class OrchestratorService extends EventEmitter {
   enqueueForThread(
     threadId: string,
     input: OrchestratorSendInput,
-    opts?: { source?: string; intent?: 'normal' | 'steer'; internal?: boolean; runId?: string; inboxIds?: string[]; subagentNotice?: SubagentNoticeItem[]; stopGeneration?: number; permissionMode?: PermissionMode; origin?: QueuedMessage['origin'] }
+    opts?: {
+      source?: string; intent?: 'normal' | 'steer'; internal?: boolean; runId?: string; inboxIds?: string[]; subagentNotice?: SubagentNoticeItem[]; stopGeneration?: number; permissionMode?: PermissionMode; origin?: QueuedMessage['origin']
+      /** A fixed id: an item with it already on the queue is returned as it is (the continue message of a pause). */
+      id?: string
+      /** Ahead of every pending item. */
+      atFront?: boolean
+      continuationOfRunId?: string
+      /** Runs once the queue holding the item is saved, before the queue lock is released; the item is the saved one, an existing one included. */
+      afterSave?: (item: QueuedMessage, saved: QueuedMessage[]) => void
+    }
   ): QueuedMessage {
     if (this.threadStore && !this.threadStore.getThread(threadId)) {
       throw new QueueValidationError(`Thread not found: ${threadId}`)
@@ -5804,11 +6108,14 @@ export class OrchestratorService extends EventEmitter {
           subagentNotice: opts?.subagentNotice,
           stopGeneration,
           permissionMode: opts?.permissionMode,
-          origin: opts?.origin
+          origin: opts?.origin,
+          id: opts?.id,
+          atFront: opts?.atFront,
+          continuationOfRunId: opts?.continuationOfRunId
         })
         item = result.item
         return result.items
-      })
+      }, opts?.afterSave ? { afterSave: (saved) => opts.afterSave!(saved.find((entry) => entry.id === item!.id) ?? item!, saved) } : undefined)
       session.queue = next
       this.emitQueueUpdated(threadId, session.queue)
       return item!
@@ -5827,10 +6134,14 @@ export class OrchestratorService extends EventEmitter {
       subagentNotice: opts?.subagentNotice,
       stopGeneration,
       permissionMode: opts?.permissionMode,
-      origin: opts?.origin
+      origin: opts?.origin,
+      id: opts?.id,
+      atFront: opts?.atFront,
+      continuationOfRunId: opts?.continuationOfRunId
     })
     session.queue = result.items
     item = result.item
+    opts?.afterSave?.(item, session.queue)
     this.emitQueueUpdated(threadId, session.queue)
     return item
   }
@@ -6779,7 +7090,8 @@ export class OrchestratorService extends EventEmitter {
     turn: NonNullable<ThreadSession['activeTurn']>,
     aborted: boolean,
     opts?: { onTurnSettled?: (aborted: boolean) => void },
-    failed = false
+    failed = false,
+    paused = false
   ): void {
     const wasAborted = aborted || turn.abort.signal.aborted
     const hadUnreadSteers = !wasAborted && turn.pendingSteer.length > 0
@@ -6864,9 +7176,54 @@ export class OrchestratorService extends EventEmitter {
     // follow-up turn now (which keeps holding them), or were dropped (which releases them).
     if (hadUnreadSteers) this.reevaluateHold(session.threadId)
     opts?.onTurnSettled?.(wasAborted)
-    this.emit(wasAborted ? 'turn-interrupted' : failed ? 'turn-failed' : 'turn-completed', {
+    // A paused run is neither finished nor failed: its thread rests until the limit resets.
+    this.emit(wasAborted ? 'turn-interrupted' : paused ? 'turn-paused' : failed ? 'turn-failed' : 'turn-completed', {
       threadId: session.threadId
     })
+  }
+
+  /** The user's `runs` settings, read when a run pauses and never afterwards. */
+  private runSettings(): ReturnType<typeof normalizeRunSettings> {
+    try {
+      return normalizeRunSettings(this.settingsStore.get().runs)
+    } catch {
+      return normalizeRunSettings()
+    }
+  }
+
+  /** What a failed turn does to its run when it hit a usage limit (`decideUsageLimit`); undefined for any other failure. */
+  private usageLimitDecision(error: unknown, runId: string | undefined): UsageLimitDecision | undefined {
+    const engine = this.runEngine
+    const run = engine && runId ? engine.getRun(runId) : null
+    if (!engine || !run) return undefined
+    try {
+      const settings = this.runSettings()
+      return decideUsageLimit({
+        error,
+        run,
+        lookup: (id) => engine.getRun(id),
+        cap: settings.usageLimitPauseCap,
+        autoResume: settings.resumeAfterUsageLimit,
+        nowMs: Date.now()
+      })
+    } catch (failure) {
+      console.warn('the usage limit decision could not be made; the run fails as before', { runId, error: failure instanceof Error ? failure.message : String(failure) })
+      return undefined
+    }
+  }
+
+  /** Pauses the run (and arms its timer when the pause continues by itself). False when the engine refuses: the Stop won the race. */
+  private pauseForUsageLimit(runId: string, pause: RunPause): boolean {
+    const engine = this.runEngine
+    if (!engine || this.staleRuns.has(runId)) return false
+    try {
+      engine.pauseRun({ runId, pause, ...(pause.autoResume ? { resumeAt: pause.until } : {}) })
+      return true
+    } catch (error) {
+      if (error instanceof RunStoreError && error.code === 'stale_write') this.staleRuns.add(runId)
+      console.warn('the run could not be paused', { runId, error: error instanceof Error ? error.message : String(error) })
+      return false
+    }
   }
 
   /** The thread's inputs to the hold predicate changed outside the run store: publish the tasks that are no longer held. */
@@ -7175,6 +7532,12 @@ export class OrchestratorService extends EventEmitter {
         return { message: '', actions: [], ...replayed }
       }
       run = { runId: result.runId, sequence: result.sequence }
+      // This message ended a usage-limit pause (it is a person's): the continue message that waited for the
+      // reset is not wanted any more, and the thread no longer shows as paused.
+      if (result.endedPause) {
+        if (result.endedPause.resumeItemId) this.removeResumeItem(threadId, result.endedPause.resumeItemId)
+        this.pauseEndedWithoutTurn(threadId)
+      }
       // The caller records the run before anything is queued or started, so a restart can find it. When it
       // cannot (its claim was lost), the run is cancelled and the send fails: nothing runs unrecorded.
       if (opts?.onAdmitted) {
@@ -7931,6 +8294,8 @@ export class OrchestratorService extends EventEmitter {
     let connectionFailed = false
     let executionFailed = false
     let providerError: AppErrorShape | undefined
+    /** Set when the turn failed on a usage limit that pauses the run instead of failing it. */
+    let usagePause: RunPause | undefined
     let failureDiagnostic: Record<string, unknown> | undefined
     let compactionNote: ChatMessage | undefined
     let switchMarker: ChatMessage | undefined
@@ -8336,6 +8701,11 @@ export class OrchestratorService extends EventEmitter {
       } else {
         executionFailed = true
         providerError = serializeAppError(normalized)
+        // A plan usage limit pauses the run (it is not an error the run can retry now); once the
+        // limit was hit again after the cap, it fails with a message that says why.
+        const limit = opts?.bot || opts?.schedule ? undefined : this.usageLimitDecision(err, engineRunId)
+        if (limit?.action === 'pause') usagePause = limit.pause
+        else if (limit?.action === 'fail') providerError = { ...providerError, message: limit.message }
         assistantText = `[${providerError.code}] ${providerError.message}`
       }
     } finally {
@@ -8347,10 +8717,10 @@ export class OrchestratorService extends EventEmitter {
     }
 
     let turnSettled = false
-    const settleOnce = (wasAborted: boolean, failed = false): void => {
+    const settleOnce = (wasAborted: boolean, failed = false, paused = false): void => {
       if (turnSettled) return
       turnSettled = true
-      this.settleActiveTurn(session, turn, wasAborted, opts, failed)
+      this.settleActiveTurn(session, turn, wasAborted, opts, failed, paused)
     }
     try {
 
@@ -8366,6 +8736,36 @@ export class OrchestratorService extends EventEmitter {
             : 'stop'
           : 'no_result'
     )
+
+    // A usage limit: the run pauses, in the same write that ends its turn. A Stop that came in first
+    // (the engine refuses to pause a stopping run) leaves the ordinary failure below.
+    if (providerError && usagePause && engineRunId && !turn.abort.signal.aborted && this.pauseForUsageLimit(engineRunId, usagePause)) {
+      runTerminalMarked = true
+      this.harness.runSettled?.(engineRunId)
+      this.transcript.abandonAssistant(this.transcript.openAssistantContent() ?? '', false)
+      const message = pausedLine(usagePause)
+      this.addSystemMessage(message)
+      this.setTurnPhase(session.threadId, 'paused', {
+        turnId: engineRunId,
+        pause: {
+          runId: engineRunId,
+          until: usagePause.until,
+          estimated: usagePause.estimated,
+          autoResume: usagePause.autoResume,
+          ...(usagePause.provider ? { provider: usagePause.provider } : {}),
+          ...(usagePause.limitKind ? { limitKind: usagePause.limitKind } : {})
+        }
+      })
+      await checkpointTurn('stopped')
+      this.persist(true)
+      this.emitThreadMessages(session.threadId, session.messages)
+      settleOnce(false, false, true)
+      this.releaseSessionExecutionLease(session)
+      // The queue is held while the run is paused (`scheduleQueueDrain`); this drain is what picks up the continue
+      // message of a pause whose timer or Resume now fired before the turn had finished settling.
+      if (!suppressAutoQueueDrain) session.drainAfterSettle = true
+      return { message, actions: [] }
+    }
 
     if (providerError) {
       console.error('Orchestrator turn failed', failureDiagnostic ?? errorDiagnostic(providerError, 'orchestrator.chat'))
@@ -8772,13 +9172,14 @@ export class OrchestratorService extends EventEmitter {
             isAccepted: (item) => acceptedIds.has(item.id)
           }).items
           const demoted = demoteSteerItems(dropSteerItems(cleaned, [...acceptedSteerIds]))
-          const result = claimNextNormal(demoted, claimOwner)
+          // The queue is held while the thread is paused; only the continue message of the pause goes.
+          const result = this.pausedHoldsQueue(threadId, demoted) ? { items: demoted, claimed: null } : claimNextNormal(demoted, claimOwner)
           claimed = result.claimed
           return result.items
         })
       } else {
         const demoted = demoteSteerItems(session.queue)
-        const result = claimNextNormal(demoted, claimOwner)
+        const result = this.pausedHoldsQueue(session.threadId, demoted) ? { items: demoted, claimed: null } : claimNextNormal(demoted, claimOwner)
         session.queue = result.items
         claimed = result.claimed
       }
@@ -8823,7 +9224,11 @@ export class OrchestratorService extends EventEmitter {
       this.scheduleQueueDrain(session, opts)
       return
     }
-    if (item.inboxIds?.length && this.runEngine) {
+    // The continue message of a pause is never dropped for want of rows: it is rebuilt from the rows it still
+    // owns and always runs, with the fixed text, and ends the pause when its run is admitted.
+    const resume = this.runEngine && isResumeSource(item.source) && item.continuationOfRunId ? item : undefined
+    if (resume) item = this.rebuildResumeItem(resume)
+    else if (item.inboxIds?.length && this.runEngine) {
       // A queued steer that carries notices is rebuilt now: a row acknowledged since it was queued
       // (a `task_status` read) is dropped, and with none left there is nothing to deliver.
       const rows = this.dropStaleQuestionRows(this.runEngine.inbox.getMany(item.inboxIds).filter((row) => row.status === 'delivered' && row.deliveredBy === queueOwner(item.id)))
@@ -8866,8 +9271,24 @@ export class OrchestratorService extends EventEmitter {
       // An agent's message drains as that agent's, whenever it runs.
       ...(queued.origin?.kind === 'agent' ? { agent: agentOriginOf(queued.origin) } : {})
     })
-    let started: Promise<OrchestratorResponse>
-    if (!item.runId && this.runEngine) {
+    let started: Promise<OrchestratorResponse | undefined>
+    if (resume) {
+      // The pause ends in the transaction that admits the continuation. A refusal (the pause ended some other
+      // way first) retires the item without ever reaching the provider.
+      session.turnAdmitted = true
+      started = this.admitResumeItem(session, resume, item, claimToken).then((runId) => {
+        if (!runId) return undefined
+        try {
+          return startClaimed(runId, true)
+        } catch (error) {
+          // The turn could not be handed on (before any effect took the admission): the item goes back to the queue
+          // and the continuation, already admitted, is found again by its replay.
+          session.turnAdmitted = false
+          session.admissionRunId = undefined
+          throw error
+        }
+      })
+    } else if (!item.runId && this.runEngine) {
       // Hold admission across the run-record await so no concurrent send can start a turn.
       session.turnAdmitted = true
       started = this.ensureQueueItemRun(item).then((runId) => startClaimed(runId, true))
@@ -8876,8 +9297,8 @@ export class OrchestratorService extends EventEmitter {
       started = startClaimed(item.runId, false)
     }
     void started
-      .then(() => {
-        settle('ran')
+      .then((response) => {
+        settle(response ? 'ran' : 'idle')
       })
       .catch((err) => {
         // Fail-closed: only definite not_accepted may release.
@@ -8894,6 +9315,24 @@ export class OrchestratorService extends EventEmitter {
         })
         settle('failed')
       })
+  }
+
+  /**
+   * Whether a drain must leave the queue alone: the thread is paused by a usage limit and the next
+   * pending item (the one `claimNextNormal` would take) is not that pause's continue message. What was
+   * queued before the pause waits behind it, in its original order, and what is sent during it is
+   * either a person's message (which ends the pause) or held the same way.
+   */
+  private pausedHoldsQueue(threadId: string, items: QueuedMessage[]): boolean {
+    let paused: RunRecord | null | undefined
+    try {
+      paused = this.runEngine?.store.getPausedRun(threadId)
+    } catch {
+      return false
+    }
+    if (!paused) return false
+    const next = listPendingQueue(items).find((item) => item.intent === 'normal' && item.state === 'pending')
+    return !next || next.id !== paused.outcome?.pause?.resumeItemId
   }
 
   /**
@@ -8954,7 +9393,7 @@ export class OrchestratorService extends EventEmitter {
         const hasPendingNormal = listPendingQueue(session.queue).some(
           (item) => item.intent === 'normal' && item.state === 'pending'
         )
-        if (!hasPendingNormal) continue
+        if (!hasPendingNormal || this.pausedHoldsQueue(thread.id, session.queue)) continue
         this.startupDrainScheduled.add(thread.id)
         this.startupDrainPending.push(thread.id)
       } catch (err) {

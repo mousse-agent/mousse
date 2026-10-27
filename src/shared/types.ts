@@ -1027,6 +1027,21 @@ export type TurnPhase =
   | 'idle' | 'queued' | 'thinking' | 'streaming'
   | 'tool_running' | 'awaiting_input' | 'finalizing'
   | 'completed' | 'stopped' | 'failed'
+  /** The run hit a provider usage limit and waits for it to reset (`TurnState.pause`). Not an active turn. */
+  | 'paused'
+
+/** What a client shows of a run paused by a usage limit (the daemon's `RunPause`, with the run's id). */
+export interface TurnPause {
+  runId: string
+  /** ISO-8601 time the limit resets: the provider's, or an estimate when `estimated`. */
+  until: string
+  estimated: boolean
+  provider?: string
+  /** The window that was hit, as the provider names it (`five_hour`, `seven_day`, …). */
+  limitKind?: string
+  /** Whether the run continues by itself at `until`; false means Resume now is the way on. */
+  autoResume: boolean
+}
 
 export interface TurnState {
   threadId: string
@@ -1037,6 +1052,8 @@ export interface TurnState {
   updatedAt: string
   error?: string
   errorDescriptor?: import('./errors').AppErrorShape
+  /** Set only while `phase` is `paused`. */
+  pause?: TurnPause
 }
 export type TurnStateSnapshot = Record<string, TurnState>
 
