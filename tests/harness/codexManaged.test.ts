@@ -416,3 +416,26 @@ describe('managed Codex: a stopped revision until its process exits', () => {
     expect(seen).toEqual([{ exited: true, leases: 0 }])
   })
 })
+
+describe('managed Codex: a listing for the previous account', () => {
+  it('a listing that ends after an account change neither blocks nor overwrites the new account\'s listing', async () => {
+    const listed = { status: 200, body: { models: [{ slug: 'gpt-a', display_name: 'GPT A', visibility: 'list' }] } }
+    let release!: () => void
+    const held = new Promise<typeof listed>((resolve) => (release = () => resolve(listed)))
+    issuer.onModels = (() => held) as unknown as typeof issuer.onModels
+    const { runtime, auth } = setup()
+    await signIn(issuer, auth, alice)
+    await runtime.auth({ force: true })
+    await vi.waitFor(() => expect(issuer.modelRequests).toHaveLength(1))
+    // Another account signs in while the first listing is still out.
+    await signIn(issuer, auth, { subject: 'bob' }, { method: 'chatgpt-new-account', clientId: 'oaiapp_two' })
+    issuer.onModels = () => listed
+    release()
+    // The old listing is refused (it was for the previous account) once it ends.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(runtime.models()).toEqual([])
+    // The new account's check lists its models at once, without waiting out a retry delay.
+    await runtime.auth({ force: true })
+    await vi.waitFor(() => expect(runtime.models().map((model) => model.id)).toEqual(['gpt-a']))
+  })
+})

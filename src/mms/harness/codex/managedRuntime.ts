@@ -237,16 +237,22 @@ export function createManagedCodexRuntime(context: DriverContext, deps: ManagedC
   const discoverModels = (): void => {
     if (codex.models().length || discovery.running) return
     if (discovery.failedAt !== undefined && Date.now() - discovery.failedAt < MODEL_RETRY_MS) return
-    discovery.running = codex.refreshModels().then(
+    // Each listing writes back only into its own state: one an account change replaced (cleared
+    // with `discovery = {}`) neither blocks nor overwrites the listing for the new account.
+    const own: { running?: Promise<void>; failedAt?: number } = {}
+    discovery = own
+    own.running = codex.refreshModels().then(
       () => {
+        if (discovery !== own) return
         discovery = {}
         context.changed()
       },
       () => {
-        discovery = { failedAt: Date.now() }
+        if (discovery === own) discovery = { failedAt: Date.now() }
       }
     )
   }
+
   // Ready from Mousse's own state: an installed, unbroken Codex and a signed-in ChatGPT
   // connection. The store read is local; it is cached briefly because listings call it often.
   let signedIn: { at: number; value: boolean } | undefined
