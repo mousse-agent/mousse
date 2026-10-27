@@ -84,10 +84,6 @@
   overflow: hidden;
 }
 
-.thread-side-card-layer--overlay {
-  overflow: hidden;
-}
-
 .thread-side-card-layer--overlay .thread-side-card {
   width: min(var(--side-card-width), calc(100% - 2 * var(--side-card-gutter)));
   transform: translateX(calc(100% + var(--side-card-gutter)));
