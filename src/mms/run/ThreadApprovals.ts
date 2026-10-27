@@ -44,7 +44,7 @@ export interface ApprovalQuestion {
 
 /** Who answered, as stored (an agent's permission mode and access are not kept; the tool call that answered is, when there was one). */
 export type AnsweredBy =
-  | { kind: 'user'; via?: 'gui' | 'cli' | 'bridge' | 'internal' }
+  | { kind: 'user'; via?: 'gui' | 'cli' | 'bridge' | 'internal'; node?: string }
   | { kind: 'agent'; threadId: string; runId: string; toolCallId?: string }
 
 export interface ApprovalRecord {
@@ -245,7 +245,7 @@ export function onceAllowOption(questions: readonly ApprovalQuestion[]): Approva
 
 function storedAnswerer(answerer: Answerer): AnsweredBy {
   return answerer.kind === 'user'
-    ? { kind: 'user', ...(answerer.via ? { via: answerer.via } : {}) }
+    ? { kind: 'user', ...(answerer.via ? { via: answerer.via } : {}), ...(answerer.node ? { node: answerer.node } : {}) }
     : { kind: 'agent', threadId: answerer.threadId, runId: answerer.runId, ...(answerer.toolCallId ? { toolCallId: answerer.toolCallId } : {}) }
 }
 

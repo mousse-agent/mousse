@@ -26,6 +26,29 @@ describe('canAnswerApproval', () => {
     expect(canAnswerApproval(request('child', 'command'), { kind: 'user', via: 'bridge' }, { decision: 'allow', scope: 'always' }, lineage)).toEqual({ ok: false, code: 'bridge_no_standing_grant' })
   })
 
+  it('lets the user at another of their computers make a rule only for what that computer lets the device run without asking', () => {
+    const always = { decision: 'allow' as const, scope: 'always' as const }
+    const device = (maxPermissionMode: PermissionMode): Answerer => ({ kind: 'user', via: 'bridge', node: 'nod_laptop', maxPermissionMode })
+    // A device limited to Auto-accept edits: a rule for a file edit, not for a command or a tool.
+    expect(canAnswerApproval(request('child', 'edit'), device('accept_edits'), always, lineage)).toEqual({ ok: true })
+    for (const action of ['command', 'tool'] as const)
+      expect(canAnswerApproval(request('child', action), device('accept_edits'), always, lineage)).toEqual({ ok: false, code: 'device_mode_forbids' })
+    // A device the owner raised to Full access makes any rule; one limited to Ask makes none.
+    for (const action of ['edit', 'command', 'tool'] as const) {
+      expect(canAnswerApproval(request('child', action), device('full'), always, lineage)).toEqual({ ok: true })
+      expect(canAnswerApproval(request('child', action), device('ask'), always, lineage)).toEqual({ ok: false, code: 'device_mode_forbids' })
+    }
+    // A device with no recorded limit asks about everything, and a request the provider keeps for a person has no rule at all.
+    expect(canAnswerApproval(request('child', 'edit'), { kind: 'user', via: 'bridge', node: 'nod_laptop' }, always, lineage)).toEqual({ ok: false, code: 'device_mode_forbids' })
+    expect(canAnswerApproval(request('child', 'edit', 'safety check'), device('full'), always, lineage)).toEqual({ ok: false, code: 'device_mode_forbids' })
+    // Allowing or rejecting once is the person's decision on what they see, at any limit.
+    for (const answer of [once, { decision: 'reject' as const }])
+      expect(canAnswerApproval(request('child', 'command'), device('ask'), answer, lineage)).toEqual({ ok: true })
+    // A linked phone (no computer) still makes no rule.
+    expect(canAnswerApproval(request('child', 'edit'), { kind: 'user', via: 'bridge' }, always, lineage)).toEqual({ ok: false, code: 'bridge_no_standing_grant' })
+    expect(describeApprovalRefusal('device_mode_forbids')).toMatch(/limit/)
+  })
+
   it('counts only a person at the app or the CLI, in a turn of their own, as starting a turn', () => {
     const origins = ['interactive', 'delegated', 'workflow', 'definition', 'bot', 'schedule']
     // `resume_now` is a person's Resume now press; `resume` is the timer's continue turn, which nobody asked for.

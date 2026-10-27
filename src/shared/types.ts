@@ -1035,6 +1035,11 @@ export interface ThreadStartedFrom {
   projectId?: string
 }
 
+/** The computer a thread's latest routed message came from. */
+export interface ThreadSentFrom {
+  node: string
+}
+
 export interface Thread {
   id: string
   name: string
@@ -1050,6 +1055,8 @@ export interface Thread {
   createdByThreadId?: string
   /** Set on a thread another of the user's devices created through Bridge. */
   startedFrom?: ThreadStartedFrom
+  /** The other computer of the user a message in this thread was last sent from; absent when every message came from this one. */
+  sentFrom?: ThreadSentFrom
   /**
    * The most an agent running in this thread may reach beyond its own thread and lineage (agent access
    * level, SPEC §15.1), fixed for the thread's life. Set on a fork from its source and the forking agent,

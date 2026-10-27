@@ -8,7 +8,7 @@ import { tryAcquireExecutionLease, heartbeatExecutionLease, releaseExecutionLeas
 import { clearCleanupMarker, readCleanupMarker } from '../lifecycle/StorageCleanupService'
 import { enableVersionedLifecycleWriter } from '../queue/ThreadLifecycleAdmission'
 import { assertEpisodePath } from '../agents/WorkspaceAccessPolicy'
-import { isPermissionMode, PERMISSION_MODES } from '../../shared/permissionMode'
+import { isPermissionMode, PERMISSION_MODES, type PermissionMode } from '../../shared/permissionMode'
 import type { Answerer } from '../run/approvalRights'
 import { buildResourceInventory } from '../lifecycle/ResourceInventory'
 import { assertLifecyclePath } from '../lifecycle/ResourceLifecycleStore'
@@ -138,10 +138,33 @@ export interface HandlerContext {
   emitEvent?: (type: string, data: unknown, threadId?: string) => void
 }
 
+/**
+ * A person at a Mousse window on this computer, or at another of the user's computers (a routed
+ * call). Both are the user acting for themselves; the second keeps its computer in `bridgeCaller`.
+ */
+function isPerson(connection: HandlerContext['connection']): boolean {
+  return connection?.clientType === 'gui' || connection?.clientType === 'bridge'
+}
+
 /** Browser authority uses the authenticated ingress, never a caller's source label. */
 function admittedChatSource(ctx: HandlerContext, fallback: string): string {
   if (!ctx.connection) return fallback === 'gui' || fallback === 'cli' ? 'internal' : fallback
-  return ctx.connection.clientType === 'gui' ? 'gui' : ctx.connection.clientType === 'cli' ? 'cli' : 'internal'
+  // A person on another computer sends as a person (`gui`); the computer is kept in `sentFrom`.
+  return isPerson(ctx.connection) ? 'gui' : ctx.connection.clientType === 'cli' ? 'cli' : 'internal'
+}
+
+/**
+ * The most a routed caller's device may run a turn or a rule in, from this computer's policy for it;
+ * undefined for every other caller.
+ */
+function deviceLimit(ctx: HandlerContext): PermissionMode | undefined {
+  return ctx.connection?.bridgeCaller?.maxPermissionMode
+}
+
+/** The computer a routed call came from, for messages it sends. */
+function sentFromOf(ctx: HandlerContext): { node: string } | undefined {
+  const caller = ctx.connection?.bridgeCaller
+  return caller ? { node: caller.node } : undefined
 }
 
 /**
@@ -151,6 +174,8 @@ function admittedChatSource(ctx: HandlerContext, fallback: string): string {
  */
 function questionAnswerer(ctx: HandlerContext): Answerer {
   if (!ctx.connection) return { kind: 'user', via: 'bridge' }
+  const caller = ctx.connection.bridgeCaller
+  if (caller) return { kind: 'user', via: 'bridge', node: caller.node, maxPermissionMode: caller.maxPermissionMode }
   return { kind: 'user', via: ctx.connection.clientType === 'gui' ? 'gui' : ctx.connection.clientType === 'cli' ? 'cli' : 'internal' }
 }
 
@@ -313,7 +338,7 @@ async function prepareChatInput(ctx: HandlerContext, threadId: string, input: Or
   if (Object.hasOwn(raw, 'workflowInvocationId')) throw new DomainRpcError('invalid_params', 'Workflow receipt references are server-owned')
   const bridge = ctx.mms.platform?.workflowChat
   if (!bridge || !ctx.connection) return buildSendInput(input.content, input.mode, input.images)
-  const prepared = await bridge.prepare(threadId, { ...input, requestId: asOptionalString(raw.requestId, 64) }, ctx.connection.clientType === 'gui' ? 'gui' : 'cli')
+  const prepared = await bridge.prepare(threadId, { ...input, requestId: asOptionalString(raw.requestId, 64) }, isPerson(ctx.connection) ? 'gui' : 'cli')
   if (prepared.workflowInvocationId) {
     if (!ctx.connection.capabilities.has(WORKFLOW_RUN_CAPABILITY)) throw new DomainRpcError('capability_required', 'This connection cannot execute workflow commands')
     return prepared
@@ -422,14 +447,15 @@ function isLocalWindow(ctx: HandlerContext): boolean {
 
 /**
  * Runs a file call for a caller. The Files panel shows the reason a file cannot be opened or saved (too large,
- * no preview for its type, outside the folder, no longer there), so a window of this computer gets the call's own
- * message; any other caller keeps the daemon's general error for what it did not expect.
+ * no preview for its type, outside the folder, no longer there), so a window of this computer, and the same
+ * panel on another of the user's computers, get the call's own message; any other caller keeps the daemon's
+ * general error for what it did not expect.
  */
 async function fileCall<T>(ctx: HandlerContext, run: () => Promise<T>): Promise<T> {
   try {
     return await run()
   } catch (error) {
-    if (!isLocalWindow(ctx) || error instanceof DomainRpcError || error instanceof AppError) throw error
+    if (!isPerson(ctx.connection) || error instanceof DomainRpcError || error instanceof AppError) throw error
     throw new DomainRpcError('file_unavailable', error instanceof Error ? error.message : String(error))
   }
 }
@@ -1317,7 +1343,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!isPermissionMode(mode)) throw new DomainRpcError('invalid_params', `mode must be one of ${PERMISSION_MODES.join(', ')}`)
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       // Applies from the next turn; a running turn and a pending question are not touched.
-      const thread = ctx.mms.orchestrator.setThreadPermissionMode(threadId, mode)
+      const caller = ctx.connection?.bridgeCaller
+      const thread = ctx.mms.orchestrator.setThreadPermissionMode(threadId, mode, caller ? { node: caller.node, maxPermissionMode: caller.maxPermissionMode } : undefined)
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
@@ -1367,6 +1394,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         throw new DomainRpcError('invalid_params', 'acknowledgeUncertain applies only with continuationOfRunId')
       ctx.mms.orchestrator.getOrCreateSession(threadId)
       const input = await prepareChatInput(ctx, threadId, { content, mode, images }, p)
+      const limit = deviceLimit(ctx)
+      const sentFrom = sentFromOf(ctx)
       return await ctx.mms.orchestrator.send(input, false, {
         threadId,
         source,
@@ -1374,6 +1403,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         clientRequestId,
         awaitMode,
         actor: questionAnswerer(ctx),
+        // A turn from another computer never runs looser than that computer's limit here, however the thread is set.
+        ...(limit ? { permissionMode: limit } : {}),
+        ...(sentFrom ? { sentFrom } : {}),
         ...(continuationOfRunId ? { continuationOfRunId, acknowledgeUncertain } : {})
       })
     }
@@ -1402,8 +1434,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         return runCommandResponse(await ctx.mms.orchestrator.steerRun(runId, text, clientRequestId, threadId), runId)
       }
       // Prefer mid-turn steer; fall back to external enqueue when no local turn.
+      const limit = deviceLimit(ctx)
       const result = ctx.mms.orchestrator.steerThreadOrEnqueueExternal(threadId, text, {
-        source: admittedChatSource(ctx, asOptionalString(p.source, 64) ?? 'protocol-steer')
+        source: admittedChatSource(ctx, asOptionalString(p.source, 64) ?? 'protocol-steer'),
+        // Text that cannot join the running turn waits as a turn of its own, at no more than the device's limit.
+        ...(limit ? { permissionMode: limit } : {})
       })
       return { ok: result.steered || result.queued, steered: result.steered, queued: result.queued }
     }
@@ -1422,7 +1457,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'runs.get': {
       const p = isObject(params) ? params : {}
-      rejectUnknownKeys(p, ['runId'])
+      // `threadId` only routes a call to the computer that runs the thread (the owner checks the run is its).
+      rejectUnknownKeys(p, ['runId', 'threadId'])
       const runId = asString(p.runId, 'runId', 256)
       const run = ctx.mms.runEngine.getRun(runId)
       if (!run) throw new DomainRpcError('run_not_found', 'Run not found', { runId })
@@ -1473,14 +1509,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // Continue a run a usage limit paused, now instead of at the reset time. A run that is not paused (the
       // banner has not caught up with a hand-over or a Cancel) is refused `conflict`.
       const p = isObject(params) ? params : {}
-      rejectUnknownKeys(p, ['runId'])
+      rejectUnknownKeys(p, ['runId', 'threadId'])
       const runId = asString(p.runId, 'runId', 256)
       return asRpcRejection(() => ctx.mms.orchestrator.resumePausedRun(runId))
     }
     case 'runs.cancelPause': {
       // End a pause without continuing: the run is cancelled and the thread's held messages go on.
       const p = isObject(params) ? params : {}
-      rejectUnknownKeys(p, ['runId'])
+      rejectUnknownKeys(p, ['runId', 'threadId'])
       const runId = asString(p.runId, 'runId', 256)
       return asRpcRejection(() => ctx.mms.orchestrator.cancelPausedRun(runId))
     }
@@ -1545,10 +1581,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const images = asOptionalChatImages(p.images, 'images')
       const source = admittedChatSource(ctx, asOptionalString(p.source, 64) ?? 'protocol')
       ctx.mms.orchestrator.assertQueueOpen(threadId)
+      const limit = deviceLimit(ctx)
+      // A queued message from another computer carries that computer's limit: it runs later, at no more than that.
       const item = ctx.mms.orchestrator.enqueueForThread(
         threadId,
         await prepareChatInput(ctx, threadId, { content, mode, images }, p),
-        { source }
+        { source, ...(limit ? { permissionMode: limit } : {}) }
       )
       return { item, items: ctx.mms.orchestrator.listQueue(threadId) }
     }
@@ -1599,7 +1637,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const expectedRevision = asOptionalString(p.expectedRevision, 64)
       const expectedRunId = asOptionalString(p.expectedRunId, 256)
       // A message an agent wrote keeps the mode limit it carries: a run that runs looser than that limit refuses it.
-      const ok = queueRpc(() => ctx.mms.orchestrator.promoteQueueItemToSteer(threadId, itemId, { expectedRevision, expectedRunId }))
+      const limit = deviceLimit(ctx)
+      const ok = queueRpc(() => ctx.mms.orchestrator.promoteQueueItemToSteer(threadId, itemId, { expectedRevision, expectedRunId, ...(limit ? { permissionCeiling: limit } : {}) }))
       return { ok, items: ctx.mms.orchestrator.listQueue(threadId) }
     }
     case 'orchestrator.contextUsage': {
@@ -2576,7 +2615,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         return { ...logical, physical }
       }
       // CLI/model callers cannot self-assert a human identity in request parameters.
-      const human = ctx.connection?.clientType === 'gui'
+      const human = isPerson(ctx.connection)
       if (method === 'actions.pin') await retention.pin(workspace.worktreePath, asString(p.actionId, 'actionId', 256), asBoolean(p.pinned, 'pinned'), human, asOptionalString(p.reason, 512))
       else {
         const policy = isObject(p.policy) ? p.policy : {}

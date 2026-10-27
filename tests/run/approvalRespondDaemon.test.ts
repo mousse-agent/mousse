@@ -760,6 +760,21 @@ describe('approval_respond end to end (SPEC §15.1)', () => {
       expect(adapter.turns.length).toBeLessThanOrEqual(1)
     })
 
+    it.each([
+      ['the user at another of their computers continues the thread as their own turn', { kind: 'user' as const, via: 'bridge' as const, node: 'nod_laptop', maxPermissionMode: 'accept_edits' as const }, 'gui'],
+      ["a linked phone's answer does not", { kind: 'user' as const, via: 'bridge' as const }, 'internal']
+    ])('%s', async (_name, answerer, source) => {
+      const { threadId, requestIds } = await crashWhileAsking(dir!, ['npm test'], 'gui')
+      const { second, answer } = await reboot()
+      // An agent is refused either way: the turn that asks is the person's, whichever computer they sit at.
+      expect(answer(threadId, requestIds[0]!, 'allow', 'a1')).toEqual({ ok: false, reason: 'person_turn' })
+      expect(second.questions.settle(requestIds[0]!, { permission: 'allow' }, answerer)).toEqual({ ok: true, decision: 'allow' })
+      await waitFor(() => runsOf(second, threadId).length === 2, 'the continuation to start')
+      // The continuation is the run that names the one the restart cut off; its source says whose turn it is.
+      expect(runsOf(second, threadId).find((run) => run.outcome?.continuationOf)).toMatchObject({ source })
+      expect(second.engine.approvals.get(requestIds[0]!)).toMatchObject({ answeredBy: { kind: 'user', via: 'bridge', ...('node' in answerer ? { node: answerer.node } : {}) } })
+    })
+
     it('answers given only by an agent record the decisions and start nothing: continuing after a restart is the person\'s click', async () => {
       const { threadId, requestIds } = await crashWhileAsking(dir!, ['npm test', 'npm run build'])
       const { second, adapter, answer } = await reboot()

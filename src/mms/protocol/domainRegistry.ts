@@ -1,6 +1,7 @@
 import type { HandlerContext } from './handlers'
 import { MMS_PROTOCOL_MAX_TEXT_LENGTH, PROTOCOL_METHODS } from './types'
 import type { ProtocolClientType, ProtocolConnectionEventType } from './types'
+import type { PermissionMode } from '../../shared/permissionMode'
 
 export interface TrustedProfileBinding {
   readonly profileId: string
@@ -20,6 +21,18 @@ export interface DomainConnectionContext {
   bind?: (value: TrustedProfileBinding) => void
   /** Awaited, connection-only display delivery under the captured binding. */
   emitConnectionEvent?: (type: ProtocolConnectionEventType, data: unknown, signal?: AbortSignal) => Promise<void>
+  /**
+   * Set only on a routed call (`clientType: 'bridge'`): the person on another of the user's
+   * computers. `maxPermissionMode` is the highest mode this computer lets that device run a turn
+   * or a standing rule in (`net_node_policy`), read when the call started.
+   */
+  readonly bridgeCaller?: BridgeCaller
+}
+
+export interface BridgeCaller {
+  readonly node: string
+  readonly user: string
+  readonly maxPermissionMode: PermissionMode
 }
 
 export class DomainRpcError extends Error {

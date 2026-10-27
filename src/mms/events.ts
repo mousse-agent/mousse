@@ -8,6 +8,18 @@ export type MmsEvent =
   | { channel: 'channels:updated'; data: unknown }
   | { channel: 'net:updated'; data: import('../shared/net/local').NetStatus }
   | { channel: 'providers:install'; data: import('../shared/providerAuth').CliInstallEvent }
+  /**
+   * An event a request handler raised outside the protocol server, to be pushed to this daemon's
+   * subscribers (its windows) like one raised by a window's own request. A routed call from another
+   * computer uses it, so the windows on the computer that runs the thread hear what it changed.
+   */
+  | { channel: 'protocol:event'; data: ProtocolEventRequest }
+
+export interface ProtocolEventRequest {
+  type: string
+  data: unknown
+  threadId?: string
+}
 
 export type MmsEventChannel = MmsEvent['channel']
 

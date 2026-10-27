@@ -181,6 +181,11 @@ export class MmsProfileServices {
   readonly agents: AgentRegistry
   readonly tasks: TaskQueue
   readonly events: MmsEventBus
+  /**
+   * The sequence of the newest event this daemon pushed to its windows. The protocol server sets it while it
+   * serves this profile; a routed call reports it as the revision of what it read.
+   */
+  protocolSequence: () => number = () => 0
   readonly net: NetService
   readonly chatNetwork: ChatNetworkBindingService
   private bridgeService?: BridgeProfileService
