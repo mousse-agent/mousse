@@ -5,12 +5,15 @@ import { isTurnActivePhase, type Project, type TurnPhase } from '../../shared/ty
 /**
  * Where a new chat will run: the project it starts in and whether that is a fresh worktree.
  * `node` names another of the user's computers; without it the chat runs here, and `projectId`
- * then names a project of this computer. With it, `projectId` is that computer's own project id.
+ * then names a project of this computer. With it, `projectId` is that computer's own project id,
+ * and `localProjectId` remembers the project the draft had here.
  */
 export interface ComposerWorkspace {
   projectId?: string
   worktreeEnabled: boolean
   node?: NodeId
+  /** With `node`: the project this draft had on this computer, restored when it is picked again. */
+  localProjectId?: string
 }
 
 /**
@@ -45,22 +48,40 @@ export function localWorkspaceFor(
   return draft?.node ? { worktreeEnabled: false } : composerWorkspaceFor(draft, thread)
 }
 
+/** The project of this computer a draft stands for, also while another computer is picked. */
+export function localProjectIdOf(workspace: ComposerWorkspace): string | undefined {
+  return workspace.node ? workspace.localProjectId : workspace.projectId
+}
+
 /**
- * The draft after picking where the chat runs. The project carries over only when the new
- * place has a project at the same path; otherwise the chat starts without a project.
+ * The draft after going back to this computer: the project it had here comes back, if it is
+ * still there. The worktree choice only counts with a project.
  */
-export function workspaceForDevice(
+export function workspaceOnThisComputer(
   workspace: ComposerWorkspace,
-  from: readonly Pick<Project, 'id' | 'path'>[],
-  to: readonly Pick<Project, 'id' | 'path'>[],
-  node: NodeId | undefined
+  localProjects: readonly Pick<Project, 'id'>[]
 ): ComposerWorkspace {
-  const path = from.find((project) => project.id === workspace.projectId)?.path
-  const match = path === undefined ? undefined : to.find((project) => project.path === path)
+  const id = localProjectIdOf(workspace)
+  const projectId = localProjects.some((project) => project.id === id) ? id : undefined
+  return { projectId, worktreeEnabled: Boolean(projectId && workspace.worktreeEnabled) }
+}
+
+/**
+ * The draft after picking another computer. `projectId` is that computer's project for the same
+ * repository (found by `bridge.hub.matchProject`), or none. The project the draft had on this
+ * computer is kept, so going back restores it.
+ */
+export function workspaceOnOtherComputer(
+  workspace: ComposerWorkspace,
+  node: NodeId,
+  matchedProjectId: string | undefined
+): ComposerWorkspace {
+  const local = localProjectIdOf(workspace)
   return {
-    projectId: match?.id,
-    worktreeEnabled: Boolean(match && workspace.worktreeEnabled),
-    ...(node ? { node } : {})
+    projectId: matchedProjectId,
+    worktreeEnabled: Boolean(matchedProjectId && workspace.worktreeEnabled),
+    node,
+    ...(local ? { localProjectId: local } : {})
   }
 }
 

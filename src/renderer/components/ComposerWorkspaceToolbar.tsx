@@ -6,7 +6,7 @@ import { useMenuKeyboard } from '../hooks/useMenuKeyboard'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import type { Device } from '../lib/netDevices'
 import type { ComposerWorkspace } from '../lib/newThread'
-import { LOCAL_RUN_ON_ID, buildRunOnOptions, runOnLabel } from './sideCard/deviceMenu'
+import { LOCAL_RUN_ON_ID, buildRunOnOptions, canPickComputer, runOnLabel } from './sideCard/deviceMenu'
 import { RemoteProjectDialog } from './RemoteProjectDialog'
 import '../styles/composer-workspace.css'
 
@@ -162,9 +162,9 @@ export function ComposerWorkspaceToolbar({ projects, workspace, disabled, device
           </div>
         </FloatingPortal>
       )}
-      {device
+      {device && canPickComputer(device.devices, workspace.node)
         ? <ComposerDeviceButton device={device} node={workspace.node} disabled={disabled || opening} />
-        : <span className="composer-workspace-device"><Laptop size={16} aria-hidden="true" />This computer</span>}
+        : <span className="composer-workspace-device"><Laptop size={16} aria-hidden="true" />{device?.localName ?? 'This computer'}</span>}
       {remoteDialog && device && workspace.node && (
         <RemoteProjectDialog
           deviceName={runOnLabel(device.localName, device.devices, workspace.node)}
@@ -198,10 +198,10 @@ function ComposerDeviceButton({ device, node, disabled }: { device: ComposerDevi
   const menuId = useId()
   const run = buildRunOnOptions({ localName: device.localName, devices: device.devices, node })
   const label = runOnLabel(device.localName, device.devices, node)
-  const selectedIndex = Math.max(0, run.options.findIndex((option) => option.active))
+  const selectedIndex = Math.max(0, run.findIndex((option) => option.active))
   const open = menuOpen && !disabled
   const menuStyle = useFloatingPosition({
-    open, anchorRef: triggerRef, contentRef: menuRef, placement: 'below-start', deps: [run.options.length]
+    open, anchorRef: triggerRef, contentRef: menuRef, placement: 'below-start', deps: [run.length]
   })
   const closeMenu = () => {
     setMenuOpen(false)
@@ -243,7 +243,7 @@ function ComposerDeviceButton({ device, node, disabled }: { device: ComposerDevi
         onKeyDown={(event) => {
           if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
             event.preventDefault()
-            openMenu(event.key === 'ArrowUp' ? run.options.length - 1 : selectedIndex)
+            openMenu(event.key === 'ArrowUp' ? run.length - 1 : selectedIndex)
           }
         }}
       >
@@ -263,7 +263,7 @@ function ComposerDeviceButton({ device, node, disabled }: { device: ComposerDevi
             onKeyDown={menuKeyDown}
           >
             <div className="composer-workspace-menu-label" aria-hidden="true">Run on</div>
-            {run.options.map((option, index) => {
+            {run.map((option, index) => {
               const RowIcon = option.id === LOCAL_RUN_ON_ID ? Laptop : Server
               return (
                 <button
@@ -286,7 +286,6 @@ function ComposerDeviceButton({ device, node, disabled }: { device: ComposerDevi
                 </button>
               )
             })}
-            {run.note && <div className="composer-workspace-menu-note" aria-hidden="true">{run.note}</div>}
           </div>
         </FloatingPortal>
       )}

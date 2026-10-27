@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { NodeId } from '../../../shared/net'
 import { FloatingPortal } from '../../lib/floatingLayer'
 import { ChevronDown, Folder, FolderPlus, Laptop, Server } from '../../lib/icons'
-import { useRemoteProjects, useRunOnDevices } from '../../hooks/useRunOnDevices'
+import { useRunOnDevices } from '../../hooks/useRunOnDevices'
 import { workspaceOnDevice } from '../../lib/remoteComputers'
 import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread } from '../../lib/newThread'
 import { useAppStore } from '../../stores/appStore'
@@ -64,8 +64,6 @@ function DeviceMenuButton({ threadId, name, locked }: { threadId: string | null;
   const [menuOpen, setOpen] = useState(false)
   const { devices, refresh } = useRunOnDevices()
   const localProjects = useAppStore((s) => s.projects)
-  const remoteProjects = useRemoteProjects(workspace.node)
-  const shownProjects = workspace.node ? remoteProjects.projects : localProjects
   const triggerRef = useRef<HTMLButtonElement>(null)
   const model = buildDeviceMenu({ localName: name, devices, workspace })
   const label = runOnLabel(name, devices, workspace.node)
@@ -77,7 +75,7 @@ function DeviceMenuButton({ threadId, name, locked }: { threadId: string | null;
     setOpen,
     anchorRef: triggerRef,
     focusRef: triggerRef,
-    sizeKey: model.runOn.length
+    sizeKey: model.runOn?.length ?? 0
   })
 
   // The list is read again each time the menu opens.
@@ -89,8 +87,8 @@ function DeviceMenuButton({ threadId, name, locked }: { threadId: string | null;
     closeAndFocus()
     const node = id === LOCAL_RUN_ON_ID ? undefined : id as NodeId
     if (node === workspace.node) return
-    // The project carries over only when the picked computer has one at the same path.
-    void workspaceOnDevice(workspace, shownProjects, localProjects, node).then(
+    // The project carries over only when the picked computer has the same Git repository.
+    void workspaceOnDevice(workspace, localProjects, node).then(
       (next) => setComposerWorkspaceDraft(threadId, next),
       () => undefined
     )
@@ -129,7 +127,7 @@ function DeviceMenuButton({ threadId, name, locked }: { threadId: string | null;
             style={menuStyle}
             onKeyDown={menuKeyDown}
           >
-            {model.runOn.length > 0 && (
+            {model.runOn && (
               <div role="group" aria-labelledby={`${menuId}-run-on`}>
                 <div id={`${menuId}-run-on`} className="side-card-device-group-label">Run on</div>
                 {model.runOn.map((option) => (
@@ -143,9 +141,6 @@ function DeviceMenuButton({ threadId, name, locked }: { threadId: string | null;
                     onSelect={() => chooseDevice(option.id)}
                   />
                 ))}
-                {model.runOnNote && (
-                  <div className="side-card-device-note" aria-hidden="true">{model.runOnNote}</div>
-                )}
               </div>
             )}
             <div role="group" aria-labelledby={`${menuId}-workspace`}>

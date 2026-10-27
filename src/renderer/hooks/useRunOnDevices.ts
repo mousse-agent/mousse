@@ -4,7 +4,13 @@ import type { Project } from '../../shared/types'
 import type { Device } from '../lib/netDevices'
 import { readRemoteComposerOptions, readRemoteProjects, readRunOnDevices, type RemoteComposerOptions } from '../lib/remoteComputers'
 
-/** The user's devices, read on mount and again whenever `refresh` is called (a menu opening). */
+/** How often the list is read again while the window is open, so a computer that connects shows up. */
+const DEVICE_REFRESH_MS = 30_000
+
+/**
+ * The user's devices, read on mount, whenever the window regains focus, every half minute, and
+ * whenever `refresh` is called (a menu opening).
+ */
 export function useRunOnDevices(): { devices: Device[]; refresh: () => void } {
   const [devices, setDevices] = useState<Device[]>([])
   const alive = useRef(true)
@@ -14,7 +20,13 @@ export function useRunOnDevices(): { devices: Device[]; refresh: () => void } {
   useEffect(() => {
     alive.current = true
     refresh()
-    return () => { alive.current = false }
+    const timer = window.setInterval(refresh, DEVICE_REFRESH_MS)
+    window.addEventListener('focus', refresh)
+    return () => {
+      alive.current = false
+      window.clearInterval(timer)
+      window.removeEventListener('focus', refresh)
+    }
   }, [refresh])
   return { devices, refresh }
 }

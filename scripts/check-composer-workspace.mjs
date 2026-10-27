@@ -30,7 +30,7 @@ try {
         settings:{get:async()=>({provider:{llmProvider:'openai',model:'test'},integrations:{skills:{enabledSkills:[]}}}),
           getOptions:async()=>({llmProviders:[{id:'openai',label:'OpenAI',models:[{id:'test',label:'Test'}]}]}),onChanged:subscription},
         providers:{onChanged:subscription}, skills:{list:async()=>({skills:[]}),onChanged:subscription},
-        projects:{open:async()=>{fixture.calls.push(['open']);return projects[1]},listThreads:async()=>[]},
+        projects:{open:async()=>{fixture.calls.push(['open']);return projects[1]},listThreads:async()=>[],identity:async(id)=>fixture.identities[id] ?? null},
         chatReferences:{resolve:async(reference)=>{if(fixture.referenceError)throw new Error('Reference unavailable');return {...reference,metadataPath:'/fixture/meta.json'}}},
         bridge:{onThreadPart:subscription},
         platformRequest:{request:async(method,params)=>{
@@ -65,6 +65,8 @@ try {
           sendToThread:async(id,request)=>{fixture.calls.push(['send',id,request.content]);if(fixture.pendingSend && fixture.turnRunning)return {queued:true};if(fixture.pendingSend){fixture.turnRunning=true;await new Promise(resolve=>fixture.resumeSend=()=>{fixture.sendResolved=true;fixture.turnRunning=false;resolve()})}return fixture.sendError ? {requestAcknowledged:false,error:{code:'delivery_rejected',message:'Delivery rejected'}} : {queued:false}}
         }
       }
+      // Git identity of this computer's projects: 'a' is a repository, 'b' is a plain folder.
+      fixture.identities = {a:{roots:['root-mousse'],remotes:['example.com/mousse']}}
       fixture.resetRemote = () => {
         fixture.requests=[]
         fixture.nodes=[node('n-self','Studio Mac',{self:true}),node('n-linux','Build Linux'),node('n-phone','Pocket',{kind:'phone'}),node('n-off','Old Mac',{state:'closed'})]
@@ -72,6 +74,7 @@ try {
           'net.status':()=>({enabled:true,self:{node:'n-self'},keystore:'unlocked'}),
           'net.transport.list':()=>({manifests:[]}),
           'bridge.nodes':()=>({nodes:fixture.nodes}),
+          'bridge.hub.matchProject':({roots})=>roots.includes('root-mousse')?{projectId:'r1'}:{},
           'bridge.hub.projects':({target})=>({projects:target==='n-linux'?remoteProjects:[]}),
           'bridge.hub.openProject':({path})=>path==='/srv/new'?{ok:true,project:{id:'r3',name:'new',path}}:{ok:false,error:'That folder does not exist on this computer.'},
           'bridge.hub.composerOptions':()=>({providers:[{id:'remote-llm',label:'Remote LLM',models:[{id:'r-model',label:'R Model'}]}],defaultModel:{llmProvider:'remote-llm',model:'r-model'},modes:['agent'],skills:[],commands:[]}),
@@ -297,15 +300,26 @@ try {
         await choose('a');await click('[aria-label="Start in a worktree"]')
         await pickDevice('n-linux')
         assert.equal(await evaluate('document.querySelector(".composer-workspace-device-btn").textContent'),'Build Linux')
-        // The project carries over by path, under the other computer's own id; the worktree choice stays.
+        // The project carries over by repository, under the other computer's own id; the worktree choice stays.
         assert.equal(await evaluate('document.querySelector(".composer-workspace-project").dataset.projectId'),'r1')
         assert.equal(await evaluate('document.querySelector(".composer-workspace-worktree").getAttribute("aria-pressed")'),'true')
         await click('.composer-workspace-project')
         assert.deepEqual(await evaluate('Array.from(document.querySelectorAll(".composer-workspace-menu-item")).map(item=>item.textContent)'),['No project','mousse','servers','Open project…'])
         await key('Escape')
-        // Picking a project that does not exist here, then returning, drops it.
+        const matches=(await evaluate('fixture.requests')).filter(r=>r[0]==='bridge.hub.matchProject')
+        assert.deepEqual(matches.map(r=>r[1]),[{target:'n-linux',roots:['root-mousse'],remotes:['example.com/mousse']}])
+        assert.equal(JSON.stringify(matches).includes('/fixture'),false)
+        // Going back to this computer restores the project it had here.
+        await pickDevice('')
+        assert.equal(await evaluate('document.querySelector(".composer-workspace-project").dataset.projectId'),'a')
+        await pickDevice('n-linux')
+        // A project picked on the other computer replaces the one remembered from here.
         await choose('r2');await pickDevice('')
         assert.equal(await evaluate('document.querySelector(".composer-workspace-project").dataset.projectId'),'')
+        // A folder that is not a Git repository never carries over.
+        await choose('b');await pickDevice('n-linux')
+        assert.equal(await evaluate('document.querySelector(".composer-workspace-project").dataset.projectId'),'')
+        await pickDevice('');await choose('a');await pickDevice('n-linux');await choose('r1')
         await pickDevice('n-linux')
         // Open project on the other computer: a refusal stays inline, a good path selects the project.
         await choose('__open_project__')
@@ -326,7 +340,7 @@ try {
         assert.deepEqual((await evaluate('fixture.requests')).filter(r=>r[0]==='bridge.hub.openProject').map(r=>r[1]),[{target:'n-linux',path:'/missing'},{target:'n-linux',path:'/srv/new'}])
         // Sending creates the thread on that computer, sets its model, and hands it to the remote thread view, which attaches and sends.
         await prompt('Run this on the server');await send();await pause(150)
-        assert.deepEqual((await evaluate('fixture.requests')).map(r=>r[0]).filter(m=>m.startsWith('bridge.hub.')&&m!=='bridge.hub.projects'&&m!=='bridge.hub.openProject'&&m!=='bridge.hub.composerOptions').sort(),['bridge.hub.attach','bridge.hub.create','bridge.hub.send','bridge.hub.setModel'])
+        assert.deepEqual((await evaluate('fixture.requests')).map(r=>r[0]).filter(m=>m.startsWith('bridge.hub.')&&m!=='bridge.hub.projects'&&m!=='bridge.hub.openProject'&&m!=='bridge.hub.composerOptions'&&m!=='bridge.hub.matchProject').sort(),['bridge.hub.attach','bridge.hub.create','bridge.hub.send','bridge.hub.setModel'])
         assert.deepEqual((await evaluate('fixture.requests')).find(r=>r[0]==='bridge.hub.setModel')[1],{ref:{nodeId:'n-linux',entityId:'remote-1'},model:{llmProvider:'remote-llm',model:'r-model'}})
         assert.deepEqual((await evaluate('fixture.requests')).find(r=>r[0]==='bridge.hub.create')[1],{target:'n-linux',name:'Run this on the server',projectId:'r3',options:{worktreeEnabled:true}})
         // The remote thread view takes the thread over, and the first message goes through it with a run id for Stop.
@@ -340,16 +354,16 @@ try {
         await pickDevice('n-linux');await prompt('Too late')
         await evaluate('fixture.nodes[1].state="closed"');await send();await pause(100)
         assert.equal(await evaluate('document.querySelector("[role=alert]").textContent'),'Build Linux is not connected')
-        assert.equal(await evaluate('document.querySelector(".composer-workspace-device-btn").textContent'),'Studio Mac')
+        // No other computer is connected now, so the toolbar is back to naming this one.
+        assert.equal(await evaluate('document.querySelector(".composer-workspace-device").textContent'),'Studio Mac')
         assert.equal(await evaluate('document.querySelector(".composer-input").value'),'Too late')
         assert.equal((await evaluate('fixture.requests')).some(r=>r[0]==='bridge.hub.create'),false)
         assert.equal((await calls()).some(c=>c[0]==='create'||c[0]==='send'),false)
-        // With no other computer connected the menu says where to connect one.
-        await evaluate('fixture.reset();fixture.nodes=[fixture.nodes[0]]');await pause(150)
-        assert.deepEqual(await runOn(),['Studio Mac'])
-        assert.equal(await evaluate('document.querySelector(".composer-workspace-menu-note").textContent'),'Connect another computer in Settings > Devices')
-        await key('Escape')
-        console.log('PASS: Run on menu lists connected computers only, carries the project by path, opens a project on the other computer, and starts the chat there')
+        // With no other computer connected there is no button: the toolbar names this computer.
+        await evaluate('fixture.reset();fixture.nodes=[fixture.nodes[0]];window.dispatchEvent(new Event("focus"))');await pause(200)
+        assert.equal(await evaluate('!!document.querySelector(".composer-workspace-device-btn")'),false)
+        assert.equal(await evaluate('document.querySelector(".composer-workspace-device").textContent'),'Studio Mac')
+        console.log('PASS: Run on menu lists connected computers only, carries the project by repository and restores it on return, opens a project on the other computer, and starts the chat there')
         await evaluate('fixture.appInfo=null;fixture.reset()');await pause(100)
         // Draft choices survive both thread switching and profile-local persistence.
         await evaluate('fixture.reset('+JSON.stringify(draft)+');fixture.store.getState().activateProfile("toolbar-profile")');await pause(100)

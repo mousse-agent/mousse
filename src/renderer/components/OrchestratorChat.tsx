@@ -45,7 +45,7 @@ import { localDeviceName, runOnLabel } from './sideCard/deviceMenu'
 import { pickerIdFor, pickerProviders, projectScope, useProviderSnapshots } from '../lib/providerSnapshots'
 import { sendErrorLine } from '../lib/errorText'
 import { composerThreadActions } from '../lib/composerThreadActions'
-import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending, type ComposerWorkspace } from '../lib/newThread'
+import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending, workspaceOnThisComputer, type ComposerWorkspace } from '../lib/newThread'
 import { ComposerWorkspaceToolbar } from './ComposerWorkspaceToolbar'
 import { ChatBrowserAccess } from './chats/ChatBrowserAccess'
 import { extractChatReferences, type ChatReference } from '../../shared/chatReferences'
@@ -823,9 +823,9 @@ export function OrchestratorChat() {
         releaseComposerUrls()
       } catch (error) {
         if (!(error instanceof RemoteNotConnectedError)) throw error
-        // Back to this computer, with its own projects, so another send cannot reach a stale target.
+        // Back to this computer and the project the draft had here, so another send cannot reach a stale target.
         if (stillVisible()) {
-          setComposerWorkspaceDraft(activeThreadId, { worktreeEnabled: false })
+          setComposerWorkspaceDraft(activeThreadId, workspaceOnThisComputer(workspace, projects))
           setSendError(error.message)
         }
       }
@@ -943,12 +943,12 @@ export function OrchestratorChat() {
     if (workspace.node && remoteProjects.failed) setSendError(`${pickedDeviceName} is not connected`)
   }, [workspace.node, remoteProjects.failed, pickedDeviceName])
 
-  /** Picks where the new chat runs; the project carries over only if the target has one at the same path. */
+  /** Picks where the new chat runs; the project carries over only if the target has the same Git repository. */
   const selectRunOnDevice = async (node: NodeId | undefined) => {
     if (node === workspace.node) return
     let next: ComposerWorkspace
     try {
-      next = await workspaceOnDevice(workspace, toolbarProjects, projects, node)
+      next = await workspaceOnDevice(workspace, projects, node)
     } catch (error) {
       const known = (await readRunOnDevices()).find((device) => device.node === node)
       setSendError(remoteErrorMessage(error, known?.name ?? 'That computer'))
@@ -970,7 +970,8 @@ export function OrchestratorChat() {
       const state = useAppStore.getState()
       if (state.profileId !== profileId || state.activeThreadId !== activeThreadId) return undefined
       remoteProjects.add(opened.project)
-      setComposerWorkspaceDraft(activeThreadId, { ...workspace, projectId: opened.project.id })
+      // A project picked on this computer replaces the one remembered from here.
+      setComposerWorkspaceDraft(activeThreadId, { projectId: opened.project.id, worktreeEnabled: workspace.worktreeEnabled, node })
       return undefined
     } catch (error) {
       return remoteErrorMessage(error, pickedDeviceName)

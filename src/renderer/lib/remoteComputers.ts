@@ -2,7 +2,7 @@ import type { NodeId } from '../../shared/net'
 import type { LlmProviderOption } from '../../shared/settings'
 import type { Project } from '../../shared/types'
 import { readDevices, type Device } from './netDevices'
-import { workspaceForDevice, type ComposerWorkspace } from './newThread'
+import { localProjectIdOf, workspaceOnOtherComputer, workspaceOnThisComputer, type ComposerWorkspace } from './newThread'
 
 const request = <T>(method: Parameters<typeof window.mousse.platformRequest.request>[0], params: unknown) =>
   window.mousse.platformRequest.request<T>(method, params)
@@ -44,21 +44,50 @@ export function remoteErrorMessage(error: unknown, deviceName: string): string {
   return typeof message === 'string' && message ? message : `Could not reach ${deviceName}`
 }
 
+/** The repository identity of a project of this computer, or null for a folder that is not a Git repository. */
+export interface ProjectIdentity {
+  roots: string[]
+  remotes: string[]
+}
+
 /**
- * The draft after picking where the chat runs: the project carries over only when the picked
- * computer has one at the same path. Reads that computer's projects, so it throws when it
- * cannot be reached.
+ * The project on another computer that is the same Git repository as a project here, or
+ * undefined. The other computer compares root commits and remotes itself; no path is sent.
+ */
+export async function matchRemoteProject(node: NodeId, identity: ProjectIdentity): Promise<string | undefined> {
+  const value = await request<{ projectId?: unknown } | undefined>('bridge.hub.matchProject', {
+    target: node,
+    roots: identity.roots,
+    remotes: identity.remotes
+  })
+  return typeof value?.projectId === 'string' ? value.projectId : undefined
+}
+
+/**
+ * The draft after picking where the chat runs. Going to another computer carries the project
+ * over only when that computer has a project for the same repository (found by root commits,
+ * with shared remotes as the tie-break); going back restores the project the draft had here.
+ * A failed match leaves the chat without a project; it does not stop the pick.
  */
 export async function workspaceOnDevice(
   workspace: ComposerWorkspace,
-  shown: readonly Project[],
   local: readonly Project[],
-  node: NodeId | undefined
+  node: NodeId | undefined,
+  identityOf: (projectId: string) => Promise<ProjectIdentity | null> = (id) => window.mousse.projects.identity(id)
 ): Promise<ComposerWorkspace> {
-  const target = node ? await readRemoteProjects(node) : local
-  return workspaceForDevice(workspace, shown, target, node)
+  if (!node) return workspaceOnThisComputer(workspace, local)
+  let matched: string | undefined
+  const source = localProjectIdOf(workspace)
+  if (source) {
+    try {
+      const identity = await identityOf(source)
+      if (identity) matched = await matchRemoteProject(node, identity)
+    } catch {
+      matched = undefined
+    }
+  }
+  return workspaceOnOtherComputer(workspace, node, matched)
 }
-
 /** The model a computer would use for a new chat, in the shape `bridge.hub.setModel` takes. */
 export interface RemoteDefaultModel {
   instanceId?: string

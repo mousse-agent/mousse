@@ -7,9 +7,6 @@ export const LOCAL_DEVICE_FALLBACK_NAME = 'This computer'
 /** The id of the row for this computer; every other row is the device's node id. */
 export const LOCAL_RUN_ON_ID = 'local'
 
-/** Shown under the Run on rows while no other computer is connected, so the feature can be found. */
-export const CONNECT_ANOTHER_COMPUTER_NOTE = 'Connect another computer in Settings > Devices'
-
 export type WorkspaceChoice = 'checkout' | 'worktree'
 
 export interface RunOnOption {
@@ -31,10 +28,8 @@ export interface WorkspaceOption {
 }
 
 export interface DeviceMenuModel {
-  /** This computer first, then each connected computer. */
-  runOn: RunOnOption[]
-  /** One muted line under the Run on rows while no other computer is connected. */
-  runOnNote?: string
+  /** This computer first, then each connected computer. Null with no other computer to pick. */
+  runOn: RunOnOption[] | null
   workspace: WorkspaceOption[]
 }
 
@@ -68,20 +63,25 @@ export function buildRunOnOptions(input: {
   localName: string
   devices: readonly Device[]
   node?: NodeId
-}): { options: RunOnOption[]; note?: string } {
+}): RunOnOption[] {
   const remote = connectedRemoteDevices(input.devices)
-  return {
-    options: [
-      { id: LOCAL_RUN_ON_ID, name: input.localName, active: !input.node, disabled: false },
-      ...remote.map((device) => ({
-        id: device.node,
-        name: device.name,
-        active: device.node === input.node,
-        disabled: false
-      }))
-    ],
-    note: remote.length === 0 ? CONNECT_ANOTHER_COMPUTER_NOTE : undefined
-  }
+  return [
+    { id: LOCAL_RUN_ON_ID, name: input.localName, active: !input.node, disabled: false },
+    ...remote.map((device) => ({
+      id: device.node,
+      name: device.name,
+      active: device.node === input.node,
+      disabled: false
+    }))
+  ]
+}
+
+/**
+ * Whether a computer can be picked at all: another one is connected, or the draft already names
+ * one (which may have dropped offline, and then needs a way back to this computer).
+ */
+export function canPickComputer(devices: readonly Device[], node: NodeId | undefined): boolean {
+  return Boolean(node) || connectedRemoteDevices(devices).length > 0
 }
 
 /** The workspace choice a draft stands for. A worktree needs a project, as in the composer toolbar. */
@@ -94,14 +94,15 @@ export function workspaceDraftForChoice(workspace: ComposerWorkspace, choice: Wo
   return {
     projectId: workspace.projectId,
     worktreeEnabled: choice === 'worktree',
-    ...(workspace.node ? { node: workspace.node } : {})
+    ...(workspace.node ? { node: workspace.node } : {}),
+    ...(workspace.localProjectId ? { localProjectId: workspace.localProjectId } : {})
   }
 }
 
 /** True when at least one row would change something if picked. */
 export function hasDeviceChoices(model: DeviceMenuModel): boolean {
   return model.workspace.some((option) => !option.disabled) ||
-    model.runOn.some((option) => !option.disabled && !option.active)
+    (model.runOn ?? []).some((option) => !option.disabled && !option.active)
 }
 
 /** Accessible name of a row: its label, plus why it is unavailable. */
@@ -118,10 +119,10 @@ export function buildDeviceMenu(input: {
   const hasProject = Boolean(input.workspace.projectId)
   const choice = activeWorkspaceChoice(input.workspace)
   const noProject = hasProject ? undefined : 'Needs a project'
-  const runOn = buildRunOnOptions({ localName: input.localName, devices: input.devices, node: input.workspace.node })
   return {
-    runOn: runOn.options,
-    runOnNote: runOn.note,
+    runOn: canPickComputer(input.devices, input.workspace.node)
+      ? buildRunOnOptions({ localName: input.localName, devices: input.devices, node: input.workspace.node })
+      : null,
     workspace: [
       { id: 'checkout', label: 'Current checkout', active: choice === 'checkout', disabled: !hasProject, reason: noProject },
       { id: 'worktree', label: 'New worktree', active: choice === 'worktree', disabled: !hasProject, reason: noProject }

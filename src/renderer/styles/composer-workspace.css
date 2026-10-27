@@ -89,9 +89,7 @@
 .composer-workspace-menu-item[aria-checked='true'] { color: var(--accent); }
 .composer-workspace-menu-check { margin-left: auto; }
 .composer-workspace-menu-separator { height: 1px; background: var(--border); margin: 5px; }
-.composer-workspace-device-menu { width: min(330px, calc(100vw - 16px)); }
 .composer-workspace-menu-label { padding: 6px 10px 3px; color: var(--text-secondary); font-size: 11px; font-weight: 500; }
-.composer-workspace-menu-note { padding: 4px 10px 6px; color: var(--text-secondary); font-size: 12px; line-height: 1.4; }
 
 /* Open project on another computer. */
 .remote-project-dialog { display: flex; flex-direction: column; gap: 12px; min-width: min(420px, 100%); }
