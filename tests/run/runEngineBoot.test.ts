@@ -390,10 +390,10 @@ describe('RunEngine boot (SPEC §12.5)', () => {
 
     it('a run that ends while the daemon lives closes its requests in the terminal transaction', async () => {
       const { engine, store } = daemon(10)
-      const done = await running(engine, 't1', 'req-1')
-      const failed = await running(engine, 't2', 'req-2')
-      const cut = await running(engine, 't3', 'req-3')
-      const unsure = await running(engine, 't4', 'req-4')
+      const done = await running(engine, 'thread-done', 'req-1')
+      const failed = await running(engine, 'thread-failed', 'req-2')
+      const cut = await running(engine, 'thread-cut', 'req-3')
+      const unsure = await running(engine, 'thread-unsure', 'req-4')
       for (const [id, run] of [['r-done', done], ['r-failed', failed], ['r-cut', cut], ['r-unsure', unsure]] as const) ask(engine, id, run.threadId, run.runId)
       engine.markTerminal(done.runId, 'completed')
       engine.markTerminal(failed.runId, 'failed', { error: 'boom' })
@@ -405,7 +405,7 @@ describe('RunEngine boot (SPEC §12.5)', () => {
       expect(engine.approvals.get('r-failed')).toMatchObject({ status: 'cancelled', cancelReason: 'turn_ended' })
       expect(engine.approvals.get('r-cut')!.status).toBe('pending')
       expect(engine.approvals.get('r-unsure')!.status).toBe('pending')
-      const types = store.listEvents('t1').map((event) => event.type)
+      const types = store.listEvents('thread-done').map((event) => event.type)
       expect(types).toContain('approval.pending')
       expect(types.indexOf('approval.cancelled')).toBeGreaterThan(types.indexOf('approval.pending'))
     })

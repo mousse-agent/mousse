@@ -863,6 +863,59 @@ describe('approval requests across a daemon restart', () => {
     expect(daemon.engine.approvals.get(pending!.requestId)).toMatchObject({ status: 'answered', answeredBy: { kind: 'user', via: 'bridge' }, deliveredAt: expect.any(String), continuationRunId: null })
   })
 
+  describe('scheduled runs keep their contract (they ask like any turn, time out, and never answer for the user)', () => {
+    /** Runs one turn whose script asks for an approval, and reports whether the question service armed its ten-minute timer. */
+    const timerArmed = async (origin: 'schedule' | undefined): Promise<boolean> => {
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+      let daemon!: Phase6Daemon
+      const adapter = scripted(async (input) => {
+        const waiting = daemon.questions.requestAnswers(prompt(), input.threadId, { approval: tag({ tool: BASH('npm test') }) }).catch(() => undefined)
+        const armed = setTimeoutSpy.mock.calls.some(([, delay]) => delay === 10 * 60 * 1000)
+        daemon.questions.dismissAllForThread(input.threadId)
+        await waiting
+        return armed ? 'armed' : 'unarmed'
+      })
+      daemon = boot(adapter, 1)
+      const thread = daemon.store.createThread('Timer')
+      daemon.orch.setThreadModelOverride(thread.id, PI)
+      const response = await daemon.orch.send('go', false, { threadId: thread.id, clientRequestId: 'go-1', ...(origin ? { origin, source: origin } : {}) })
+      setTimeoutSpy.mockRestore()
+      return response.message === 'armed'
+    }
+
+    it('a scheduled turn\'s approval keeps the ten-minute timeout', async () => {
+      expect(await timerArmed('schedule')).toBe(true)
+    })
+
+    it('a person\'s turn has no timeout', async () => {
+      expect(await timerArmed(undefined)).toBe(false)
+    })
+
+    it('a scheduled send leaves a waiting approval alone and queues behind it', async () => {
+      let daemon!: Phase6Daemon
+      const adapter = scripted(async (input) => {
+        if (input.prompt !== 'go') return `scheduled: ${input.prompt}`
+        const answers = await daemon.questions.requestAnswers(prompt(), input.threadId, { approval: tag({ tool: BASH('npm test') }) })
+        return answers.permission === 'allow' ? 'ran it' : 'blocked'
+      })
+      daemon = boot(adapter, 1)
+      const thread = daemon.store.createThread('Scheduled')
+      daemon.orch.setThreadModelOverride(thread.id, PI)
+      await daemon.orch.send('go', false, { threadId: thread.id, clientRequestId: 'go-1', awaitMode: 'ack' })
+      await waitFor(() => daemon.questions.listPendingForThread(thread.id).length === 1, 'the turn to ask')
+      const requestId = daemon.questions.listPendingForThread(thread.id)[0]!.requestId
+
+      const queued = await daemon.orch.send('check the build', false, { threadId: thread.id, clientRequestId: 'job-1', source: 'schedule', origin: 'schedule', preemptQuestions: false })
+      expect(queued.queued).toBe(true)
+      expect(daemon.engine.approvals.get(requestId)).toMatchObject({ status: 'pending', decision: null })
+      expect(daemon.questions.listPendingForThread(thread.id)).toHaveLength(1)
+
+      // The user answers; the turn ends and the queued scheduled prompt runs after it.
+      daemon.questions.settle(requestId, { permission: 'allow' }, USER)
+      await waitFor(() => adapter.turns.some((turn) => turn.prompt === 'check the build'), 'the scheduled prompt to run')
+    })
+  })
+
   it('a message during a live turn denies the request inside the send, aborts the turn and runs as a fresh turn', async () => {
     let daemon!: Phase6Daemon
     let calls = 0
