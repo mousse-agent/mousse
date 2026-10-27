@@ -122,7 +122,7 @@ describe('the Move dialog for such an entry', () => {
     const target = managed()
     expect(isMoveReady(target)).toBe(true)
     const html = dialog(chatgpt(), [target])
-    expect(html).toContain('Moving turns the old connection off and removes its sign-in.')
+    expect(html).toContain('removes its sign-in, unless another profile still uses it.')
     expect(disabled(html, 'Move')).toBe(false)
   })
 

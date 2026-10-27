@@ -482,7 +482,10 @@ export class ProfileHost {
       installationHome: this.installation.homeDir,
       personal: true,
       profileId: record.id,
-      listProfiles: () => this.manager.list().map((profile) => ({ id: profile.id, displayName: profile.displayName })),      allowLegacyProjectData: isDefault,
+      listProfiles: () => this.manager.list().map((profile) => ({ id: profile.id, displayName: profile.displayName })),
+      // A sign-in the profiles share stays while another profile still uses it.
+      otherProfilesUse: (instanceId) => this.otherProfilesUse(record.id, instanceId),
+      allowLegacyProjectData: isDefault,
       inheritChannelEnvironment: isDefault,
       includeExternalCliConfigs: isDefault
     })

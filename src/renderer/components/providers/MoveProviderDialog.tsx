@@ -164,7 +164,7 @@ export function oldSignInNote(result: MoveResult): string {
 /** What the chosen target still needs before an entry with a Move banner can move onto it. */
 function TargetReadiness({ target, onSignIn, onRecheck }: { target: InstanceSnapshot; onSignIn?: MoveHandlers['onSignIn']; onRecheck?: MoveHandlers['onRecheck'] }) {
   const { busy, error, run } = useAsyncAction()
-  if (isMoveReady(target)) return <p className="settings-muted">{target.displayName} is signed in. Moving turns the old connection off and removes its sign-in.</p>
+  if (isMoveReady(target)) return <p className="settings-muted">{target.displayName} is signed in. Moving turns the old connection off and removes its sign-in, unless another profile still uses it.</p>
   const command = target.nextStep?.command
   const idle = busy === null
   return (

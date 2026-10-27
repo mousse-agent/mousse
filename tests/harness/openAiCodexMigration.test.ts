@@ -101,6 +101,8 @@ interface ProfileOptions {
   otherProfilesUse?: (instanceId: string) => boolean
   /** Makes the credentials' `logout` fail. */
   logoutFails?: boolean
+  /** Makes the settings' default rewrite fail (after the move is saved). */
+  rewriteFails?: boolean
 }
 
 async function profile(options: ProfileOptions = {}) {
@@ -129,6 +131,7 @@ async function profile(options: ProfileOptions = {}) {
       // The profile's settings: the device default names the old entry, and the move rewrites it.
       defaults: {
         rewrite: (from, to) => {
+          if (options.rewriteFails) throw new Error('Mousse could not save the settings')
           if (deviceDefault.instanceId !== from) return []
           deviceDefault = { instanceId: to.instanceId, llmProvider: to.llmProvider, model: to.model(deviceDefault.model as string) }
           return ['Default model']
@@ -321,6 +324,17 @@ describe('openai-codex in the PR 3 release', () => {
     expect(made.deviceDefault()).toMatchObject({ instanceId: MANAGED })
     expect(made.harness.resolveStored(read('thread.json').modelOverride, { purpose: 'turn' })).toMatchObject({ instanceId: MANAGED, movedFrom: 'pi:openai-codex' })
     expect(made.auth['openai-codex']).toBeDefined()
+    await expect(made.harness.instances.move('pi:openai-codex', MANAGED)).rejects.toMatchObject({ code: 'unsupported', message: expect.stringContaining('already moved') })
+  })
+
+  it('a default rewrite that fails after the move is saved leaves the entry moved, keeps the old sign-in, and chats follow the move', async () => {
+    const made = await profile({ rewriteFails: true })
+    await signManagedIn(made)
+    await expect(made.harness.instances.move('pi:openai-codex', MANAGED)).rejects.toThrow('could not save the settings')
+    expect(made.stored()['pi:openai-codex']).toMatchObject({ enabled: false, config: { movedTo: MANAGED } })
+    // The credential is only deleted by a move that went through; the stale one is harmless.
+    expect(made.auth['openai-codex']).toBeDefined()
+    expect(made.harness.resolveStored(read('thread.json').modelOverride, { purpose: 'turn' })).toMatchObject({ instanceId: MANAGED, movedFrom: 'pi:openai-codex' })
     await expect(made.harness.instances.move('pi:openai-codex', MANAGED)).rejects.toMatchObject({ code: 'unsupported', message: expect.stringContaining('already moved') })
   })
 
