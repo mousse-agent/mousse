@@ -316,6 +316,20 @@ export class ScheduledJobService extends EventEmitter {
     return job
   }
 
+  /** "Agents may create jobs" was turned off: the jobs agents created stop until a person resumes them. */
+  pauseAgentJobs(): number {
+    const paused = this.store.pauseAgentJobs()
+    if (paused > 0) this.emitUpdated()
+    return paused
+  }
+
+  extendJob(id: string, days?: number): ScheduledJob | null {
+    this.lifecycle.assertAccepting()
+    const job = this.store.extendJob(id, days)
+    if (job) this.emitUpdated()
+    return job
+  }
+
   triggerJob(id: string): ScheduledJob | null {
     this.lifecycle.assertAccepting()
     const job = this.store.triggerJob(id)
@@ -589,6 +603,23 @@ export class ScheduledJobService extends EventEmitter {
     return { prompt: rendered.prompt, missing: rendered.missing }
   }
 
+  /** Why the job cannot run because a thread it depends on is gone or archived; undefined when it can. Needs the thread store. */
+  private goneThread(job: ScheduledJob): string | undefined {
+    const store = this.threadStore
+    if (!store) return undefined
+    try {
+      if (job.threadId) {
+        const thread = store.getThread(job.threadId)
+        if (!thread) return 'Its thread was deleted'
+        if (thread.settledAt) return 'Its thread was archived'
+      }
+      if (job.createdBy && !store.getThread(job.createdBy.threadId)) return 'The thread that created it was deleted'
+    } catch {
+      return undefined
+    }
+    return undefined
+  }
+
   private async executeJob(job: ScheduledJob): Promise<void> {
     this.emitUpdated()
     const claim = job.runClaim
@@ -602,6 +633,17 @@ export class ScheduledJobService extends EventEmitter {
       if (job.createdBy && job.prompt.trim().startsWith('/')) {
         if (claimToken && this.store.isRunClaimCurrent(job.id, claimToken)) {
           this.store.markJobRun(job.id, false, undefined, 'Agent-created jobs cannot run workflows', false, claimToken)
+        }
+        return
+      }
+      // A job whose thread is gone (or that an agent made from a thread that is gone) pauses with a reason once, instead of
+      // failing on every tick for ever. A person resumes it after choosing another thread.
+      const gone = this.goneThread(job)
+      if (gone) {
+        if (claimToken && this.store.isRunClaimCurrent(job.id, claimToken)) {
+          this.store.markJobRun(job.id, false, undefined, gone, false, claimToken)
+          this.store.pauseJob(job.id, gone)
+          this.emitUpdated()
         }
         return
       }

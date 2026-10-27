@@ -1,8 +1,10 @@
 import type { BrowserRuntimePort } from '../../../../shared/browser/runtime'
 import type { PermissionMode } from '../../../../shared/permissionMode'
+import type { ModelOverride } from '../../../../shared/providerInstances'
 import type { AgentAccessLevel, AgentAccessSettings } from '../../../../shared/settings'
 import type { ApprovalTag } from '../../../orchestrator/UserQuestionService'
-import type { ChatMessage, DocumentOpenPayload, PendingUserQuestions, Thread, UserQuestionAnswers } from '../../../../shared/types'
+import type { ChatMessage, CreateScheduledJobInput, DocumentOpenPayload, PendingUserQuestions, ScheduledJob, Thread, UserQuestionAnswers } from '../../../../shared/types'
+import type { ScheduledJobOptionsInput } from '../../../scheduled/validateJobOptions'
 import type { DevGuiTools } from '../../../devgui/DevGuiTools'
 import type { SkillsRegistry } from '../../../integrations/skills/SkillsRegistry'
 import type { ThreadSearchOptions } from '../../../data/ThreadDataStore'
@@ -84,6 +86,41 @@ export type AgentRunCommandResult =
   | { status: 'rejected'; reason: string }
   /** A steer joins a run that is already running under a looser permission mode than the caller's own. */
   | { status: 'ceiling_exceeded'; callerMode: PermissionMode; targetMode: PermissionMode }
+
+/**
+ * What the scheduled-job tools need from the profile (`schedule_*`). Every method acts as the daemon, so the tools
+ * decide what the caller may do first; none of this is reachable from model input except through them.
+ */
+export interface AgentScheduleHost {
+  /** `scheduled.agentJobs` as it is now: off until a person turns it on, read at every call. */
+  enabled(): boolean
+  list(): ScheduledJob[]
+  get(id: string): ScheduledJob | undefined
+  /**
+   * Checks the model, mode and workspace of the job as it would be after the change, as the protocol does. Throws a
+   * message the agent can act on; returns the model as the profile stores it and the thread a worktree names.
+   */
+  validate(job: ScheduledJobOptionsInput): { selection?: ModelOverride; threadId?: string }
+  /**
+   * Whether a person started the caller's run (`startedByPerson`: an interactive turn from the app or the CLI). Fails
+   * closed: a scheduled or webhook run, an agent's message, a subagent, a wake, a continuation, a bot, a channel, a run with
+   * no recorded binding or one that cannot be read is not a person's turn. Only a person's turn may create or start jobs.
+   */
+  startedByPerson(caller: { threadId: string; runId: string }): boolean
+  /**
+   * What a job created or changed by this caller may be granted: the access level its run holds (narrowed by the profile
+   * now) and the permission mode its run is bound to. The narrowest of both when the run is not a person's turn, which
+   * the tools refuse before they ask.
+   */
+  limits(caller: { threadId: string; runId: string; accessLevel: AgentAccessLevel }): { accessCap: AgentAccessLevel; permissionCeiling: PermissionMode }
+  create(input: CreateScheduledJobInput): ScheduledJob
+  update(id: string, patch: Partial<ScheduledJob>): ScheduledJob | null
+  pause(id: string, reason?: string): ScheduledJob | null
+  /** Makes the job due now, as Run now does; a job with a run in flight or waiting is returned as it is. */
+  trigger(id: string): ScheduledJob | null
+  /** The scheduler ticks now instead of at the next minute, so a job that was just made due starts within seconds. */
+  wake(): void
+}
 
 /**
  * What the app tools need from their owner. The profile's thread owner (the orchestrator) serves
@@ -185,4 +222,6 @@ export interface AppToolHost extends DelegationToolsHost {
   stopRun?(threadId: string, runId: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult>
   /** Steers run `runId` of another thread with `text` as `actor`'s message (`thread_steer`). */
   steerRun?(threadId: string, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult>
+  /** The profile's scheduled jobs (`schedule_*`); absent: the host registers no schedule tools. */
+  schedules?: AgentScheduleHost
 }

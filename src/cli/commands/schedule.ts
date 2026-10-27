@@ -32,7 +32,7 @@ export async function runSchedule(args: ParsedArgs): Promise<void> {
           const rows = data as ScheduledJob[]
           if (rows.length === 0) return 'No scheduled jobs.'
           return formatTable([
-            ['ID', 'NAME', 'ENABLED', 'STATE', 'MODEL', 'NEXT'],
+            ['ID', 'NAME', 'ENABLED', 'STATE', 'MODEL', 'BY', 'NEXT'],
             ...rows.map((job: ScheduledJob) => [
               job.id.slice(0, 8),
               job.name,
@@ -40,6 +40,8 @@ export async function runSchedule(args: ParsedArgs): Promise<void> {
               // An admitted occurrence that has not ended is shown as queued, whatever the job's own state.
               job.pendingOccurrence ? 'queued' : job.state,
               job.selection ? `${job.selection.instanceId ?? job.selection.llmProvider}/${job.selection.model}` : '-',
+              // A job an agent created says so (`createdBy`).
+              job.createdBy ? 'agent' : '-',
               job.nextRunAt ?? '-'
             ])
           ])
@@ -78,6 +80,14 @@ export async function runSchedule(args: ParsedArgs): Promise<void> {
           id
         })
         if (!res.job) exitWithError(`Job not found: ${id}`, globals.mode)
+        writeOutput(globals.mode, res.job)
+        break
+      }
+      case 'extend': {
+        const id = positional[0]
+        if (!id) exitWithError('schedule extend requires a job id.', globals.mode)
+        const days = flagString(flags, 'days')
+        const res = await client.request<{ job: ScheduledJob }>('scheduled.extend', { id, ...(days ? { days: Number(days) } : {}) })
         writeOutput(globals.mode, res.job)
         break
       }

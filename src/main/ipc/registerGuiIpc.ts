@@ -1571,6 +1571,18 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ status: unknown }>('scheduled.status')
     return res.status
   })
+  registerHandler('scheduled:extend', async (_e, id: string) => {
+    const res = await guiMms.request<{ job: unknown }>('scheduled.extend', { id })
+    return res.job
+  })
+  registerHandler('scheduled:settings:get', async () => {
+    const res = await guiMms.request<{ settings: unknown }>('scheduled.settings.get')
+    return res.settings
+  })
+  registerHandler('scheduled:settings:set', async (_e, agentJobs: boolean) => {
+    const res = await guiMms.request<{ settings: unknown }>('scheduled.settings.set', { agentJobs })
+    return res.settings
+  })
 
   registerHandler('channels:getSnapshot', async () => {
     const res = await guiMms.request<{ snapshot: unknown }>('channels.getSnapshot')

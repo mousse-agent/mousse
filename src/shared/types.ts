@@ -46,6 +46,8 @@ export interface ScheduledJobRunRecord {
   missingPlaceholders?: string[]
   /** Set on a `waiting` record: the occurrence hit a provider usage limit that resets at this time. */
   usageLimitUntil?: string
+  /** The job was created by an agent (`ScheduledJob.createdBy`); set when the record is saved. */
+  agentCreated?: true
 }
 
 /**
@@ -173,13 +175,18 @@ export interface ScheduledJob {
    * sets it; no protocol request can. A run is the stricter of this, `permissionMode` and the thread's mode.
    */
   permissionCeiling?: PermissionMode
-  /** The thread (and run) of the agent that created the job; absent for jobs people create. */
-  createdBy?: { threadId: string; runId?: string }
+  /**
+   * The thread and run of the agent that created the job; absent for jobs people create. `requestId` is the
+   * creating call's key, so a retried call finds the job it already made.
+   */
+  createdBy?: { threadId: string; runId?: string; requestId?: string }
   /**
    * The most agent access (SPEC §15.1) a run of this job may be granted: the level of whoever created it. Absent
    * (a creator whose level is not known) reads as `lineage`; a run is never granted more than the profile's setting either.
    */
   accessCap?: import('./settings').AgentAccessLevel
+  /** When the job ends: set on jobs agents create (7 days); only a person extends it. Absent: no end. */
+  expiresAt?: string
   repeat?: ScheduledJobRepeat
   runHistory?: ScheduledJobRunRecord[]
   /** Present while state === 'running'; cleared on terminal transition. */
@@ -192,6 +199,12 @@ export interface ScheduledJob {
   pendingTrigger?: ScheduledJobPendingTrigger
   createdAt: string
   updatedAt: string
+}
+
+/** Profile settings of the scheduler that people choose on the Scheduled page. */
+export interface ScheduledSettings {
+  /** Agents may list, create, change, pause and run jobs through the Mousse tools. Off by default. */
+  agentJobs: boolean
 }
 
 export interface SchedulerStatus {
@@ -219,8 +232,10 @@ export interface CreateScheduledJobInput {
   permissionMode?: PermissionMode
   /** Daemon-only: the protocol refuses it, and the daemon sets it from the creator's mode. */
   permissionCeiling?: PermissionMode
-  createdBy?: { threadId: string; runId?: string }
+  createdBy?: ScheduledJob['createdBy']
   accessCap?: import('./settings').AgentAccessLevel
+  /** Daemon-only, like `accessCap`: the protocol refuses it. */
+  expiresAt?: string
   repeat?: { times?: number }
 }
 

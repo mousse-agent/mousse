@@ -85,11 +85,14 @@ export function ScheduledPanel() {
   const [editing, setEditing] = useState<Editing | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [webhookJobId, setWebhookJobId] = useState<string | null>(null)
+  /** `scheduled.agentJobs`; null until the profile has answered. */
+  const [agentJobs, setAgentJobs] = useState<boolean | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const newButton = useRef<HTMLButtonElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const webhookApi = useMemo(browserWebhookApi, [])
   const detailsId = useId()
+  const agentToggleId = useId()
 
   const loadCatalog = useCallback(async () => {
     try {
@@ -124,6 +127,7 @@ export function ScheduledPanel() {
   useEffect(() => {
     void refresh()
     void loadCatalog()
+    void window.mousse.scheduled.settings.get().then((settings) => setAgentJobs(settings.agentJobs), () => undefined)
     const offUpdated = window.mousse.scheduled.onUpdated(setJobs)
     const offStatus = window.mousse.scheduled.onStatus(setStatus)
     return () => {
@@ -210,6 +214,23 @@ export function ScheduledPanel() {
           ) : null}
         </div>
         <div className="scheduled-toolbar-actions">
+          <label
+            className="scheduled-agent-toggle"
+            htmlFor={agentToggleId}
+            title="Lets agents create, change, pause and run their own scheduled jobs through Mousse's tools, from a turn you started. It also needs the Manage agent access level. Jobs agents create run no wider than that agent, end after 7 days unless you extend them, and are paused when you turn this off (you resume them)."
+          >
+            <input
+              id={agentToggleId}
+              type="checkbox"
+              checked={agentJobs === true}
+              disabled={agentJobs === null}
+              onChange={(event) => {
+                const next = event.currentTarget.checked
+                void act(async () => setAgentJobs((await window.mousse.scheduled.settings.setAgentJobs(next)).agentJobs))
+              }}
+            />
+            Agents may create jobs
+          </label>
           <button
             type="button"
             className="scheduled-icon-btn"
@@ -304,12 +325,22 @@ export function ScheduledPanel() {
                     {project ? <span data-meta="project">{project}</span> : null}
                     {thread ? <span data-meta="thread">Thread: {thread}</span> : null}
                     {job.trigger?.webhook ? <span data-meta="webhook">Webhook</span> : null}
+                    {job.createdBy ? <span data-meta="agent">Created by an agent</span> : null}
+                    {job.expiresAt ? (
+                      <span data-meta="expires">
+                        {job.state === 'completed' && new Date(job.expiresAt).getTime() <= Date.now() ? 'Ended' : 'Ends'} {formatWhen(job.expiresAt)}{' '}
+                        <button type="button" className="scheduled-link-btn" onClick={() => void act(() => window.mousse.scheduled.extend(job.id))}>
+                          Extend 7 days
+                        </button>
+                      </span>
+                    ) : null}
                   </div>
                   <div className="scheduled-item-meta">
                     <span>Next {formatWhen(job.nextRunAt)}</span>
                     <span>Last {formatWhen(job.lastRunAt)}</span>
                     {job.lastStatus && <span>{describeLastStatus(job.lastStatus)}</span>}
                   </div>
+                  {job.state === 'paused' && job.pausedReason ? <p className="scheduled-item-note" data-meta="paused-reason">Paused: {job.pausedReason}</p> : null}
                   {job.lastError && <p className="scheduled-item-error">{job.lastError}</p>}
                   {selected ? <RunHistory id={`${detailsId}-${job.id}`} job={job} /> : null}
                 </div>
@@ -412,6 +443,7 @@ function RunHistory({ id, job }: { id: string; job: ScheduledJob }) {
                 {record.mode ? <span data-meta="mode">{describeMode(record.mode)}</span> : null}
                 {record.permissionMode ? <span data-meta="permission">{describePermission(record.permissionMode)}</span> : null}
                 {workspace && record.workspace ? <span data-meta="workspace">{workspace}</span> : null}
+                {record.agentCreated ? <span data-meta="agent">Job created by an agent</span> : null}
                 {record.missingPlaceholders?.length ? <span data-meta="missing">Missing fields: {record.missingPlaceholders.join(', ')}</span> : null}
                 {record.error ? <span className="scheduled-history-error">{record.error}</span> : null}
               </li>
