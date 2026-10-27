@@ -435,6 +435,8 @@ export const PROTOCOL_METHODS = [
   'pullRequests.resolve',
   'pullRequests.startThread',
   'pullRequests.pushTarget',
+  'pullRequests.watch',
+  'pullRequests.watchStatus',
 
   'daemon.shutdown',
   'events.subscribe',
@@ -477,6 +479,7 @@ export type ProtocolEventType =
   | 'run.interrupted-on-boot'
   | 'projects.updated'
   | 'threads.updated'
+  | 'pullRequests.updated'
   | 'thread.title-generation-failed'
   | 'subagents.updated'
   | 'thread.message'
