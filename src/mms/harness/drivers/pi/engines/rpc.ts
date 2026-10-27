@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { HarnessCaps } from '../../../../../shared/harness/types'
+import { hasContainmentEvidence, PI_RPC_EVIDENCE_ITEMS, type ContainmentEvidence } from '../../../compatibility'
 import type { DriverContext, DriverRuntime, LiveProcessHost } from '../../../driver'
 import { PiRpcEngine, type PiEngineCatalog, type PiMousseTool, type PiRpcEngineOptions } from '../../../pi/engine'
 import type { PiRuntimePaths } from '../../../pi/launch'
@@ -12,8 +13,10 @@ import { piInstanceRuntime, type PiCredentials } from './legacy'
  * Pi's agent as its own process (PR 2 §4): a `pi:*` instance the user switched to it (Advanced →
  * Engine: New engine), except the legacy-only providers (`../engines.ts`).
  *
- * - Containment and tool control stay `weak`/`approval_only` until the evidence suite passes on the
- *   whole execution profile: Mousse sees and can refuse every call, but does not run the tools.
+ * - Containment and tool control are `weak`/`approval_only` (these caps) wherever the evidence suite
+ *   has not passed for this platform and Pi version: Mousse sees and can refuse every call, but does
+ *   not run the tools. Where it passed they are `strong`/`exact` (`piRpcCaps`), and the engine runs
+ *   agent definitions.
  * - `budgets: 'hard'`: every model request is charged through the guarded request wrapper
  *   (`/pi/request`) and every tool call at the gate, and the next one is refused before it starts
  *   once a turn or tool-call limit is reached.
@@ -44,6 +47,47 @@ export const PI_RPC_CAPS: HarnessCaps = Object.freeze({
   definitionLimits: 'none'
 })
 
+/** What decides whether the evidence suite passed here: the platform, the pinned Pi and the records. */
+export interface PiRpcEvidenceInput {
+  platform: NodeJS.Platform
+  /** The pinned Pi's version; unknown never matches a record. */
+  piVersion: string | undefined
+  evidence?: readonly ContainmentEvidence[]
+}
+
+/**
+ * Whether the evidence suite passed on this platform for this Pi (`compatibility.ts`): every item,
+ * for this exact version. Without it the engine stays `weak`/`approval_only` and runs no definition.
+ */
+export function piRpcHasEvidence(input: PiRpcEvidenceInput): boolean {
+  if (!input.piVersion) return false
+  return hasContainmentEvidence({ driver: 'pi', kind: 'tools', platform: input.platform, cliVersion: input.piVersion, items: PI_RPC_EVIDENCE_ITEMS }, input.evidence)
+}
+
+/** The engine's caps here: `strong`/`exact` only where the evidence suite passed (PR 2 §4, S7). */
+export function piRpcCaps(input: PiRpcEvidenceInput): HarnessCaps {
+  return piRpcHasEvidence(input) ? PI_RPC_EXACT_CAPS : PI_RPC_CAPS
+}
+
+/** The engine's caps where its evidence suite passed. */
+export const PI_RPC_EXACT_CAPS: HarnessCaps = Object.freeze({ ...PI_RPC_CAPS, containment: 'strong', toolControl: 'exact' })
+
+/** The pinned Pi's version, read from the packaged runtime once; undefined when it cannot be read. */
+export function piRuntimeVersion(root: string): string | undefined {
+  const known = runtimeVersions.get(root)
+  if (known !== undefined || runtimeVersions.has(root)) return known
+  let version: string | undefined
+  try {
+    const parsed = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { version?: unknown }
+    version = typeof parsed.version === 'string' ? parsed.version : undefined
+  } catch {
+    version = undefined
+  }
+  runtimeVersions.set(root, version)
+  return version
+}
+const runtimeVersions = new Map<string, string | undefined>()
+
 /** What the RPC engine needs from the profile. */
 export interface PiRpcDriverOptions {
   /** The packaged runtime (`piRuntimePaths(applicationRoot)`). */
@@ -66,12 +110,26 @@ export interface PiRpcDriverOptions {
   identity?(providerId: string): string | undefined | Promise<string | undefined>
   /** Mousse's OAuth credentials for pi-ai's OAuth providers (`piOAuthBroker(providerAuth)`); Mousse is the only refresher. */
   oauth?: PiOAuthSource
+  /** Test seams for the evidence check: the platform (default `process.platform`) and the records (default `CONTAINMENT_EVIDENCE`). */
+  platform?: NodeJS.Platform
+  evidence?: readonly ContainmentEvidence[]
   /** Test seams passed through to the engine. */
   engine?: Partial<Pick<PiRpcEngineOptions, 'warmMs' | 'readyDeadlineMs' | 'commandDeadlineMs' | 'settings' | 'host' | 'adjustLaunch' | 'onCommand' | 'testEnv'>>
 }
 
+/** The evidence inputs of a profile's RPC options. */
+export function piRpcEvidenceOf(options: PiRpcDriverOptions): PiRpcEvidenceInput {
+  let piVersion: string | undefined
+  try {
+    piVersion = piRuntimeVersion(options.runtime().root)
+  } catch {
+    piVersion = undefined
+  }
+  return { platform: options.platform ?? process.platform, piVersion, ...(options.evidence ? { evidence: options.evidence } : {}) }
+}
+
 export function createRpcRuntime(context: DriverContext, providerId: string, label: string, credentials: () => PiCredentials | undefined, options: PiRpcDriverOptions): DriverRuntime {
-  const capabilities = PI_RPC_CAPS
+  const capabilities = piRpcCaps(piRpcEvidenceOf(options))
   const notice = engineNotice(context, label)
   const engine = new PiRpcEngine({
     instanceId: context.instanceId,

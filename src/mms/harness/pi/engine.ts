@@ -430,7 +430,14 @@ class PiThreadProcess {
   process: PiProcess | undefined
   registration: PiBridgeRegistration | undefined
 
-  constructor(readonly threadId: string, readonly cwd: string, public model: string, public thinking: PiThinkingLevel) {}
+  constructor(
+    readonly threadId: string,
+    readonly cwd: string,
+    public model: string,
+    public thinking: PiThinkingLevel,
+    /** An agent definition's turn: a process and an in-memory session of its own, never saved, resumed or kept warm. */
+    readonly ephemeral = false
+  ) {}
 
   get alive(): boolean {
     return !this.exit && !this.dead && !this.fatal
@@ -706,7 +713,7 @@ export class PiRpcEngine implements ProviderAdapter {
         // Rejected first, so the race ends with the deadline and not with the aborted command.
         reject(protocolError(this.options.instanceId, `${this.options.label} did not answer ${command.type} in time.`))
         controller.abort()
-        this.save(thread.threadId, undefined)
+        if (!thread.ephemeral) this.save(thread.threadId, undefined)
         void this.kill(thread)
       }, deadlineMs)
       timer.unref?.()
@@ -721,14 +728,19 @@ export class PiRpcEngine implements ProviderAdapter {
   }
 
   /** The thread's process for this turn: the warm one, or a new one that reported ready. */
-  private async processFor(input: TurnInput, cwd: string, resume: string | undefined, starting: StartingTurn): Promise<{ thread: PiThreadProcess; resumed: boolean }> {
+  private async processFor(
+    input: TurnInput, cwd: string, resume: string | undefined, starting: StartingTurn,
+    /** An agent definition's turn: a new process under a key of its own (never the thread's warm one). */
+    ephemeral?: { key: string }
+  ): Promise<{ thread: PiThreadProcess; resumed: boolean }> {
     // Before the process is registered: a credential retirement in progress would count it as one
     // of the old credential's and kill it.
     await this.afterRetirement()
     if (starting.cancelled || this.stopped) throw protocolError(this.options.instanceId, `${this.options.label} was stopped while it started.`)
     const { modelId, thinking } = this.thinkingFor(input.model)
     const keyFingerprint = fingerprint(this.options.apiKey?.() ?? '')
-    const existing = this.threads.get(input.threadId)
+    const processKey = ephemeral?.key ?? input.threadId
+    const existing = this.threads.get(processKey)
     if (existing && existing.alive && existing.ready && existing.cwd === cwd && !existing.turn && resume && existing.sessionId === resume && existing.keyFingerprint === keyFingerprint) {
       starting.thread = existing
       if (existing.warm) clearTimeout(existing.warm)
@@ -747,10 +759,10 @@ export class PiRpcEngine implements ProviderAdapter {
     if (existing) await within(this.kill(existing), INTERRUPT_DEADLINE_MS)
     // Stopped while the old process went: no replacement.
     if (starting.cancelled || this.stopped) throw protocolError(this.options.instanceId, `${this.options.label} was stopped while it started.`)
-    const thread = new PiThreadProcess(input.threadId, cwd, modelId, thinking)
+    const thread = new PiThreadProcess(processKey, cwd, modelId, thinking, Boolean(ephemeral))
     thread.keyFingerprint = keyFingerprint
     starting.thread = thread
-    this.threads.set(input.threadId, thread)
+    this.threads.set(processKey, thread)
     const started = this.start(thread, resume, () => starting.cancelled)
     thread.starting = started
     this.starts.add(started)
@@ -857,6 +869,7 @@ export class PiRpcEngine implements ProviderAdapter {
       model: thread.model,
       thinking: thread.thinking,
       ...(sessionId ? { sessionId } : {}),
+      ...(thread.ephemeral ? { ephemeral: true } : {}),
       ...(extraEnv ? { extraEnv } : {}),
       engineEnv: { ...(this.options.testEnv ?? {}), [PI_BRIDGE_ENV]: JSON.stringify(registration.address) } as Record<`MOUSSE_PI_${string}`, string>,
       ...(this.options.host ? { host: this.options.host } : {})
@@ -957,9 +970,13 @@ export class PiRpcEngine implements ProviderAdapter {
     const catalogRevision = this.options.catalog().revision
     if (!turn) return { attemptToken: '', sessionInstructions: '', tools: [], activeBuiltins: [], mcp: null, catalogRevision }
     const tools: PiTurnTool[] = turn.tools.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.inputSchema, class: tool.class }))
+    const sessionInstructions = turn.host.bridge?.sessionInstructions ?? ''
+    // An agent definition's system prompt replaces Pi's; Mousse's own tool instructions follow it.
+    const instructions = turn.input.instructions?.placement === 'replace' ? turn.input.instructions.text : undefined
     return {
       attemptToken: turn.attemptToken,
-      sessionInstructions: turn.host.bridge?.sessionInstructions ?? '',
+      sessionInstructions: instructions === undefined ? sessionInstructions : '',
+      ...(instructions !== undefined ? { systemPrompt: [instructions, sessionInstructions].filter(Boolean).join('\n\n') } : {}),
       tools,
       activeBuiltins: [...turn.active].filter((name) => Object.hasOwn(BUILTIN_CLASSES, name)),
       mcp: turn.host.bridge?.mcp ?? null,
@@ -1162,11 +1179,16 @@ export class PiRpcEngine implements ProviderAdapter {
   }
 
   async startTurn(input: TurnInput, sink: TurnSink, ctl: TurnControl, host: AdapterHost): Promise<TurnResult> {
-    // A definition turn (a session of its own, its own instructions) needs a fresh short-lived
-    // process and the instructions applied in `before_agent_start`; neither exists yet, and the
-    // engine is not `exact`, so the gateway never sends one. Refused here too, before anything runs.
-    if (input.session === 'ephemeral' || input.instructions)
-      throw harnessAppError({ code: 'policy_unenforceable', message: "Pi's agent cannot run an agent definition's turn yet.", missing: ['toolControl'], instanceId: this.options.instanceId })
+    // An agent definition's turn (PR 4 4d-rpc) comes whole: its authority, its own system prompt in
+    // place of Pi's, and a session of its own. Anything less is refused before anything runs.
+    const definitionTurn = input.session === 'ephemeral' || input.instructions !== undefined || host.definition !== undefined
+    if (definitionTurn && (input.session !== 'ephemeral' || input.instructions?.placement !== 'replace' || !host.definition))
+      throw harnessAppError({
+        code: 'policy_unenforceable',
+        message: "This turn does not carry everything an agent definition needs (its authority, its instructions and a session of its own), so it does not run.",
+        missing: ['toolControl'],
+        instanceId: this.options.instanceId
+      })
     const key = randomUUID()
     const ref: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model, nativeTurnId: key }
     sink.providerRef(ref)
@@ -1179,6 +1201,14 @@ export class PiRpcEngine implements ProviderAdapter {
       if (!starting.turn && starting.thread) void this.kill(starting.thread)
     }
     input.signal.addEventListener('abort', onEarlyAbort, { once: true })
+    if (definitionTurn) {
+      try {
+        return await this.definitionTurn(key, ref, starting, startedAt, input, sink, ctl, host)
+      } finally {
+        input.signal.removeEventListener('abort', onEarlyAbort)
+        this.turns.delete(key)
+      }
+    }
     try {
       const cwd = input.cwd ?? join(this.options.stateDir, 'chats', fingerprint(input.threadId).slice(0, 16))
       mkdirSync(cwd, { recursive: true })
@@ -1231,6 +1261,33 @@ export class PiRpcEngine implements ProviderAdapter {
     }
   }
 
+  /**
+   * An agent definition's turn: a new Pi process with an in-memory session (`--no-session`) under a
+   * key of its own, so it never resumes, saves or warms a session and never touches the thread's own
+   * process. Its prior conversation goes in the prompt, its system prompt replaces Pi's
+   * (`before_agent_start`), and its tools are exactly its grants. The process is gone when the turn ends.
+   */
+  private async definitionTurn(
+    key: string, ref: ProviderRef, starting: StartingTurn, startedAt: number,
+    input: TurnInput, sink: TurnSink, ctl: TurnControl, host: AdapterHost
+  ): Promise<TurnResult> {
+    const cwd = input.cwd ?? join(this.options.stateDir, 'chats', fingerprint(input.threadId).slice(0, 16))
+    mkdirSync(cwd, { recursive: true })
+    let started: { thread: PiThreadProcess; resumed: boolean }
+    try {
+      if (input.signal.aborted || starting.cancelled) throw new Error('aborted')
+      started = await this.processFor(input, cwd, undefined, starting, { key: `definition:${key}` })
+    } catch (error) {
+      if (input.signal.aborted || starting.cancelled) return this.abortedResult(input, ref, startedAt)
+      throw error
+    }
+    try {
+      return await this.runTurn(started.thread, false, key, starting, ref, input, sink, ctl, host, input.nativeHistory ?? '')
+    } finally {
+      await within(this.kill(started.thread), CLEANUP_DEADLINE_MS)
+    }
+  }
+
   private abortedResult(input: TurnInput, ref: ProviderRef, startedAt: number): TurnResult {
     const contextKey = `${input.llmProvider}:${input.model}`
     return {
@@ -1245,8 +1302,15 @@ export class PiRpcEngine implements ProviderAdapter {
   ): Promise<TurnResult> {
     const ref: ProviderRef = { ...baseRef, ...(thread.sessionId ? { sessionId: thread.sessionId } : {}) }
     if (thread.sessionId) sink.providerRef(ref)
-    const builtins = !input.cwd ? [] : input.mode === 'plan' || input.child?.readOnly ? PI_READ_ONLY_BUILTINS : PI_ALL_BUILTINS
-    const tools = host.bridge?.mcp ? this.options.mousseTools?.(input.threadId) ?? [] : []
+    let builtins = !input.cwd ? [] : input.mode === 'plan' || input.child?.readOnly ? PI_READ_ONLY_BUILTINS : PI_ALL_BUILTINS
+    let tools = host.bridge?.mcp ? this.options.mousseTools?.(input.threadId) ?? [] : []
+    // An agent definition's turn offers exactly its grants (the policy's allowlist, none without
+    // one), and never a delegation tool: a definition delegates nothing, as on the legacy loop.
+    if (host.definition) {
+      const allowed = new Set(host.bridge?.toolPolicy?.allow ?? [])
+      builtins = builtins.filter((name) => allowed.has(name))
+      tools = tools.filter((tool) => allowed.has(tool.name) && tool.class !== 'delegation')
+    }
     const turn = new PiTurn(key, host.bridge?.turnToken ?? key, input, sink, ctl, host, tools, builtins)
     thread.turn = turn
     starting.turn = turn
@@ -1276,8 +1340,9 @@ export class PiRpcEngine implements ProviderAdapter {
     if (thread.dead || thread.exit) await within(thread.closed, CLEANUP_DEADLINE_MS)
     turn.episode.close()
     if (thread.turn === turn) thread.turn = undefined
-    // Every ended turn, failed or not, leaves its process for the warm period only.
-    if (thread.alive) {
+    // Every ended turn, failed or not, leaves its process for the warm period only (a definition's
+    // process goes when its turn ends: `definitionTurn`).
+    if (thread.alive && !thread.ephemeral) {
       thread.warm = setTimeout(() => void this.kill(thread), this.options.warmMs ?? PI_WARM_MS)
       thread.warm.unref?.()
     }
@@ -1302,7 +1367,10 @@ export class PiRpcEngine implements ProviderAdapter {
     const text = stopped ? turn.replyText() : turn.texts.join('\n\n')
     // A stopped or failed reply stays open: the orchestrator closes it as incomplete.
     if (!stopped) turn.reply.complete(text)
-    if (!stopped) {
+    // A definition's in-memory session is never mapped to the thread.
+    if (thread.ephemeral) {
+      // Nothing to save.
+    } else if (!stopped) {
       const committed = host.context.nativeHistoryAfterTurn(text)
       if (thread.sessionId) {
         const leaves = await this.turnLeaf(thread, input.threadId, key)
@@ -1348,7 +1416,7 @@ export class PiRpcEngine implements ProviderAdapter {
     if (!turn.promptAccepted) {
       // Pi runs an accepted-later prompt detached from `abort` (its preflight: compaction,
       // `before_agent_start`): the process goes, and its session with the half-started prompt.
-      this.save(thread.threadId, undefined)
+      if (!thread.ephemeral) this.save(thread.threadId, undefined)
       this.returnSteers(turn)
       await within(this.kill(thread), CLEANUP_DEADLINE_MS)
       turn.settled()
@@ -1740,13 +1808,15 @@ export class PiRpcEngine implements ProviderAdapter {
       case 'message_update':
         return this.streamUpdate(turn, event.assistantMessageEvent as { type: string; contentIndex: number; delta?: string; content?: string } | undefined)
       case 'message_end': {
-        const message = event.message as { role?: string; usage?: Record<string, number>; stopReason?: string; errorMessage?: string }
+        const message = event.message as { role?: string; usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } }; stopReason?: string; errorMessage?: string }
         if (message?.role !== 'assistant') return
         // Every attempt's usage, failed ones included: they can be billable.
         const usage = message.usage ?? {}
         const reported = { input: usage.input ?? 0, output: usage.output ?? 0, cacheRead: usage.cacheRead ?? 0, cacheWrite: usage.cacheWrite ?? 0 }
+        // Pi's own price of the request, from the catalogue Mousse registered.
+        const cost = usage.cost?.total
         if (reported.input || reported.output || reported.cacheRead || reported.cacheWrite) {
-          sink.usage(reported)
+          sink.usage({ ...reported, ...(typeof cost === 'number' && Number.isFinite(cost) && cost > 0 ? { costUsd: cost } : {}) })
           turn.usage = { input: turn.usage.input + reported.input, output: turn.usage.output + reported.output, cacheRead: turn.usage.cacheRead + reported.cacheRead, cacheWrite: turn.usage.cacheWrite + reported.cacheWrite }
         }
         if (message.stopReason === 'error') {

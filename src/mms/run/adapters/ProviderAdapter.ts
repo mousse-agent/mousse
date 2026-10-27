@@ -176,7 +176,7 @@ export interface TurnSink {
    * usage statistics, attributed to the latest `providerMetrics` model. The pi loop's `LlmClient`
    * records its own usage, so the pi adapter does not report here (no double counting).
    */
-  usage(u: { input: number; output: number; cacheRead: number; cacheWrite: number }): void
+  usage(u: { input: number; output: number; cacheRead: number; cacheWrite: number; /** The request's price, when the runtime knows it. */ costUsd?: number }): void
   /** The provider session reference, as soon as it is known and whenever it changes (§13.1 `nativeRef`). */
   providerRef(ref: ProviderRef): void
   /**

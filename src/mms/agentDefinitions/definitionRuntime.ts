@@ -9,6 +9,7 @@ import type {
   AgentRuntimeHostBindings,
   AgentRuntimeAttemptUsage,
   AgentRuntimeEffectTracker,
+  AgentRuntimeFeatures,
   AgentRuntimeInput,
   AgentRuntimePolicy,
   AgentRuntimePort,
@@ -81,6 +82,46 @@ export interface DefinitionCheck {
   ref: AgentModelRef
   grants: EffectiveAgentGrants
   budget: AgentExecutionBudget
+  /** The definition's output, browser, memory and delegation settings (`definitionFeatureGaps`). */
+  features?: AgentRuntimeFeatures
+}
+
+/**
+ * The definition settings, besides its tools and limits, that an instance with `caps` cannot hold
+ * (PR 4 4d-rpc). A runtime that runs the definition's own loop (`definitionLimits: 'in_loop'`, the
+ * legacy engine) holds them all, as it always has. Any other runtime (Pi's agent):
+ * - JSON and schema output: held. Their rules and the schema are in the definition's system prompt,
+ *   which replaces the runtime's own verbatim, and the reply is validated by the run owner
+ *   (`AgentExecutionService`) whatever ran it;
+ * - memory: `off` and `thread` are held (the entries are in the system prompt); any other scope
+ *   (persistent memory) is refused;
+ * - the browser: refused. The legacy loop binds the definition's browser itself; the app-tool
+ *   browser on Pi's agent has no definition coverage yet;
+ * - delegation: refused (no runtime runs child definitions; Pi's agent is never offered a
+ *   delegation tool for a definition's turn either).
+ */
+export function definitionFeatureGaps(caps: Pick<HarnessCaps, 'definitionLimits'>, features: AgentRuntimeFeatures | undefined): AgentRuntimeUnsupportedSetting[] {
+  if (caps.definitionLimits === 'in_loop' || !features) return []
+  const gaps: AgentRuntimeUnsupportedSetting[] = []
+  if (features.browserMode !== 'disabled')
+    gaps.push({ pointer: '/settings/browser/mode', reason: "The browser is not available to agent definitions on this provider's engine yet. Turn the browser off, or use the legacy engine." })
+  if (features.memoryScope !== 'off' && features.memoryScope !== 'thread')
+    gaps.push({ pointer: '/settings/memory/scope', reason: 'Persistent agent memory is not available on this provider.' })
+  if (features.delegation)
+    gaps.push({ pointer: '/settings/delegation/maxConcurrentChildren', reason: 'Child agent delegation is not available on this provider.' })
+  return gaps
+}
+
+/** A refusal for the gaps `definitionFeatureGaps` found, or undefined. */
+export function definitionFeatureRefusal(caps: Pick<HarnessCaps, 'definitionLimits'>, features: AgentRuntimeFeatures | undefined, instanceId?: string): DefinitionRefusal | undefined {
+  const gaps = definitionFeatureGaps(caps, features)
+  if (!gaps.length) return undefined
+  return {
+    code: 'policy_unenforceable',
+    message: `This provider cannot hold some of this agent's settings: ${gaps.map((gap) => gap.reason).join(' ')}`,
+    missing: ['toolControl'],
+    pointers: gaps.map((gap) => ({ pointer: gap.pointer, reason: gap.reason }))
+  }
 }
 
 /** One model turn of a definition run, on one candidate (`OrchestratorService.executeDefinitionTurn`). */
@@ -124,6 +165,8 @@ export interface DefinitionRefusal {
   message: string
   missing?: Array<keyof HarnessCaps>
   reason?: string
+  /** The settings refused, when the refusal names them itself (`definitionFeatureRefusal`). */
+  pointers?: AgentRuntimeUnsupportedSetting[]
 }
 
 export interface DefinitionTurnPort {
@@ -167,6 +210,7 @@ export function definitionRunPolicy(request: Pick<DefinitionCheck, 'origin' | 'g
 
 /** The settings a refusal points at, for the editor (PR 4 §6 table). */
 export function refusalPointers(refusal: DefinitionRefusal, budget: AgentExecutionBudget, at = '/settings/primaryModel/ref'): AgentRuntimeUnsupportedSetting[] {
+  if (refusal.pointers?.length) return refusal.pointers.map((item) => ({ ...item }))
   const reason = refusal.message
   const pointers: string[] = []
   for (const missing of refusal.missing ?? []) {
@@ -323,7 +367,7 @@ export function createDefinitionRuntime(port: DefinitionTurnPort): AgentRuntimeP
       for (let index = 0; index < candidates.length; ) {
         if (input.signal.aborted) throw input.signal.reason ?? new DOMException('Aborted', 'AbortError')
         const ref = candidates[index]!.ref
-        const check: DefinitionCheck = { threadId: input.threadId, origin, definition: { id: policy.definitionId, revision: policy.definitionRevision }, ref, grants: input.grants, budget: input.budget }
+        const check: DefinitionCheck = { threadId: input.threadId, origin, definition: { id: policy.definitionId, revision: policy.definitionRevision }, ref, grants: input.grants, budget: input.budget, ...(input.features ? { features: input.features } : {}) }
         const refusal = port.checkDefinitionTurn(check)
         if (refusal && isPolicyRefusal(refusal)) {
           // A primary that cannot hold the definition fails the run: there is no silent move to a fallback.

@@ -364,6 +364,8 @@ export default async function mousseExtension(pi: ExtensionAPI): Promise<void> {
     }
     for (const tool of turn.tools) registerTool(tool)
     pi.setActiveTools([...turn.activeBuiltins, ...turn.tools.map((tool) => tool.name)])
+    // An agent definition's turn runs on its own system prompt, never on Pi's.
+    if (turn.systemPrompt !== undefined) return { systemPrompt: turn.systemPrompt }
     return turn.sessionInstructions ? { systemPrompt: `${event.systemPrompt}\n\n${turn.sessionInstructions}` } : undefined
   })
 

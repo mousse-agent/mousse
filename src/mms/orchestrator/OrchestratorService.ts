@@ -44,6 +44,7 @@ import { AgentExecutionService } from '../agentDefinitions/AgentExecutionService
 import {
   createDefinitionRuntime,
   definitionMessages,
+  definitionFeatureRefusal,
   definitionRunPolicy,
   type DefinitionCheck,
   type DefinitionHostBindings,
@@ -920,7 +921,8 @@ export class OrchestratorService extends EventEmitter {
     try {
       const resolved = this.harness.resolveStored(this.definitionSelection(check.ref), { purpose: check.origin, scope: this.threadScope(check.threadId), definition: true })
       const verdict = this.harness.check(resolved, definitionRunPolicy(check))
-      if (verdict.ok) return undefined
+      // Its output, browser, memory and delegation settings, where the runtime does not run its loop.
+      if (verdict.ok) return definitionFeatureRefusal(resolved.caps, check.features)
       const { code, message, missing, reason } = verdict.error
       return { code, message, ...(missing ? { missing } : {}), ...(reason ? { reason } : {}) }
     } catch (error) {
@@ -1021,6 +1023,8 @@ export class OrchestratorService extends EventEmitter {
     const policy = definitionRunPolicy(turn, mcpTools.map((tool) => tool.providerName))
     const verdict = this.harness.check(resolved, policy)
     if (!verdict.ok) throw harnessAppError(verdict.error)
+    const featureRefusal = definitionFeatureRefusal(resolved.caps, turn.features, resolved.instanceId)
+    if (featureRefusal) throw harnessAppError({ code: 'policy_unenforceable', message: featureRefusal.message, missing: featureRefusal.missing ?? ['toolControl'], instanceId: resolved.instanceId })
     if (turn.signal.aborted) throw turn.signal.reason ?? new DOMException('Aborted', 'AbortError')
     const dispatched = await engine.dispatch({ kind: 'send', threadId, clientRequestId: `definition:${turn.runId}:${turn.attempt}`, source: 'definition' })
     if (dispatched.status !== 'accepted') throw harnessAppError({ code: 'operation_busy', message: "The agent's turn could not be recorded." })
@@ -1158,7 +1162,19 @@ export class OrchestratorService extends EventEmitter {
         compaction: () => {},
         retry: () => {},
         progress: () => {},
-        usage: () => {},
+        // A runtime that reports usage per request (Pi's agent): it is the record's usage, kept as it
+        // arrives, so a turn that fails (a limit reached, a provider error) is still counted. A loop
+        // that runs under the definition's limits reports its own (`effects.attemptUsage`).
+        usage: (reported) => {
+          if (loopUsed) return
+          const used = turn.effects.attemptUsage
+          turn.effects.attemptUsage = {
+            ...used,
+            inputTokens: used.inputTokens + reported.input,
+            outputTokens: used.outputTokens + reported.output,
+            costUsd: used.costUsd + (reported.costUsd ?? 0)
+          }
+        },
         providerRef: (ref) => this.markRun(runId, (runs, id) => { runs.recordProviderRef(id, ref) }),
         steerAccepted: () => {},
         providerMetrics: (metrics) => record.metrics(metrics),
@@ -1205,8 +1221,9 @@ export class OrchestratorService extends EventEmitter {
       // A limit the loop reached fails the run, as the definition's result does.
       else if (loopLimit) markTerminal('failed', { error: `The agent reached its ${loopLimit.kind} limit (${loopLimit.limit}).` }, text)
       else markTerminal('completed', undefined, text)
-      const usage = loopUsed
-        ? { inputTokens: turn.effects.attemptUsage.inputTokens, outputTokens: turn.effects.attemptUsage.outputTokens, costUsd: turn.effects.attemptUsage.costUsd }
+      const reported = turn.effects.attemptUsage
+      const usage = loopUsed || reported.inputTokens || reported.outputTokens || reported.costUsd
+        ? { inputTokens: reported.inputTokens, outputTokens: reported.outputTokens, costUsd: reported.costUsd }
         : record.usage(result.usage)
       return { text, history: record.history(turn.userMessage, text), usage, ...(loopLimit ? { limit: loopLimit } : {}) }
     } catch (error) {

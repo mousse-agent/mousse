@@ -1,9 +1,11 @@
 import type {
   AgentApprovalPolicy,
+  AgentBrowserMode,
   AgentAttachmentPolicy,
   AgentFallbackRetryCategory,
   AgentFallbackSettings,
   AgentMemoryScope,
+  AgentOutputFormat,
   AgentRuntimeKind,
   AgentScriptExecutionMode,
   AgentUnattendedBehavior,
@@ -254,6 +256,17 @@ export interface AgentRuntimeInput {
   /** Prior thread turns only; the current user message is applied separately. */
   conversation?: AgentExecutionHistoryEntry[]
   fallbacks?: AgentFallbackSettings
+  /** The definition's settings a runtime must hold besides its tools and limits (`definitionFeatureGaps`). */
+  features?: AgentRuntimeFeatures
+}
+
+/** A definition's output, browser, memory and delegation settings, as its runtime must hold them. */
+export interface AgentRuntimeFeatures {
+  outputFormat: AgentOutputFormat
+  browserMode: AgentBrowserMode
+  memoryScope: AgentMemoryScope
+  /** Any delegation setting is on (children, depth or allowed child definitions). */
+  delegation: boolean
 }
 
 export interface AgentRuntimeResult {
