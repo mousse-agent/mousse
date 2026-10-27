@@ -14,16 +14,17 @@ import { WorktreeIdentity } from '../worktree/WorktreeIdentity'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { getExternalResourceClaims } from './LifecycleClaims'
 import type { ConversationBranch, ThreadAction } from '../../shared/threadActions'
+import { withoutRepoPrograms } from '../git/repoPrograms'
 
 const hash = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
 export function lifecycleGit(cwd: string, args: string[], input?: string, maxBuffer = 32 * 1024 * 1024, env?: NodeJS.ProcessEnv): string {
-  return execFileSync('git', args, { cwd, input, ...(env ? { env: { ...process.env, ...env } } : {}), encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer, stdio: ['pipe', 'pipe', 'pipe'] }).trimEnd()
+  return execFileSync('git', withoutRepoPrograms(cwd, args), { cwd, input, ...(env ? { env: { ...process.env, ...env } } : {}), encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer, stdio: ['pipe', 'pipe', 'pipe'] }).trimEnd()
 }
 /** Never treat an unreadable reference as absent, and never dereference an owned symbolic ref. */
 export function readDirectLifecycleRef(cwd: string, ref: string): string | undefined {
   try { lifecycleGit(cwd, ['symbolic-ref', '-q', ref]); throw new Error(`Symbolic resource reference is not cleanup authority: ${ref}`) }
   catch (error) { if ((error as { status?: number }).status !== 1) throw error }
-  const listing = spawnSync('git', ['for-each-ref', '--format=%(refname)%00%(objectname)', ref], { cwd, encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 32 * 1024 * 1024 })
+  const listing = spawnSync('git', withoutRepoPrograms(cwd, ['for-each-ref', '--format=%(refname)%00%(objectname)', ref]), { cwd, encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 32 * 1024 * 1024 })
   // Git may warn about a corrupt loose ref while exiting successfully and omitting it.
   if (listing.error || listing.status !== 0 || listing.stderr.trim()) throw new Error(`Resource reference inventory is unreadable: ${ref}`)
   const rows = listing.stdout.split(/\r?\n/)
@@ -332,7 +333,7 @@ export class WorktreeRetirementService {
     if (files.length) {
       const attributes = lifecycleGit(path, ['check-attr', '-z', '--stdin', 'filter'], files.map((entry) => entry.path).join('\0') + '\0').split('\0')
       for (let index = 2; index < attributes.length; index += 3) if (!['unspecified', 'unset'].includes(attributes[index])) throw new Error('External checkout filters require retained auxiliary payloads')
-      const materialized = execFileSync('git', ['cat-file', '--batch', '--filters', '-Z'], { cwd: path, input: files.map((entry) => `${tracked.get(entry.path)!.sha} ${entry.path}\0`).join(''), windowsHide: true, timeout: 30_000, maxBuffer: 600 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] })
+      const materialized = execFileSync('git', withoutRepoPrograms(path, ['cat-file', '--batch', '--filters', '-Z']), { cwd: path, input: files.map((entry) => `${tracked.get(entry.path)!.sha} ${entry.path}\0`).join(''), windowsHide: true, timeout: 30_000, maxBuffer: 600 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] })
       let offset = 0
       for (const entry of files) {
         const headerEnd = materialized.indexOf(0, offset)

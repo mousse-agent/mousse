@@ -24,9 +24,10 @@ import type {
   WorkspaceCapability,
   WorkspaceExecutionContext
 } from '../../shared/workspace'
+import { withoutRepoPrograms } from '../git/repoPrograms'
 
 function git(cwd: string, args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+  return execFileSync('git', withoutRepoPrograms(cwd, args), { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 }
 
 function tryGit(cwd: string, args: string[]): { ok: boolean; stdout: string } {

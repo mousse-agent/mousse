@@ -1,8 +1,10 @@
 import { createErrorProvider } from '../../shared/errors'
 import { execFileSync, spawnSync } from 'node:child_process'
+import { withoutRepoPrograms } from '../git/repoPrograms'
 
+/** Git for Mousse's own actions (checkpoints, restore, undo, revert): no program the repository configures runs. */
 export function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
-  return execFileSync('git', args, {
+  return execFileSync('git', withoutRepoPrograms(cwd, args), {
     cwd,
     env: env ? { ...process.env, ...env } : process.env,
     encoding: 'utf8',
@@ -11,7 +13,13 @@ export function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): strin
 }
 
 export function tryGit(cwd: string, args: string[], env?: NodeJS.ProcessEnv): { ok: boolean; stdout: string; stderr: string } {
-  const result = spawnSync('git', args, { cwd, encoding: 'utf8', env: env ? { ...process.env, ...env } : process.env })
+  let guarded: string[]
+  try {
+    guarded = withoutRepoPrograms(cwd, args)
+  } catch (error) {
+    return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) }
+  }
+  const result = spawnSync('git', guarded, { cwd, encoding: 'utf8', env: env ? { ...process.env, ...env } : process.env })
   return { ok: result.status === 0, stdout: result.stdout.trim(), stderr: result.stderr.trim() }
 }
 

@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
 import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
 import { getMousseHomeDir } from '../data/paths'
+import { withoutRepoPrograms } from '../git/repoPrograms'
 
 export interface WorkspaceGcReport {
   /** Exact revisions inspected by this report; purge rejects changed resources. */
@@ -16,7 +17,7 @@ export interface WorkspaceGcReport {
 }
 
 function git(cwd: string, args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+  return execFileSync('git', withoutRepoPrograms(cwd, args), { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 }
 
 function canonicalPath(path: string): string {

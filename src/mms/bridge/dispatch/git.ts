@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process'
 import { nonInteractiveGitEnv } from '../../git/gitEnv'
 import { GIT_NULL_DEVICE } from '../../git/gitNullDevice'
+import { HOOK_EVENTS } from '../../git/repoPrograms'
 import { NetError } from '../../../shared/net'
 
 const remoteConfiguration = new Set([
@@ -38,6 +39,8 @@ function runGit(
     `core.hooksPath=${GIT_NULL_DEVICE}`,
     '-c',
     'core.fsmonitor=false',
+    // Hooks defined in config are not reached by `core.hooksPath`.
+    ...HOOK_EVENTS.flatMap((event) => ['-c', `hook.${event}.enabled=false`]),
     '-c',
     'protocol.ext.allow=never',
     '-c',

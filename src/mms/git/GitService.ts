@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs'
 import { mkdtemp, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
-import simpleGit, { type SimpleGit, type StatusResult } from 'simple-git'
+import type { SimpleGit, StatusResult } from 'simple-git'
 import { redactGitText } from '../../shared/gitText'
 import { holdsRepositoryMutation } from '../actions/GitOperationCoordinator'
 import type { CodeHost } from './CodeHost'
@@ -19,6 +19,7 @@ import { GitHubService } from './GitHubService'
 import { PULL_REQUEST_DRAFT_LIMITS, type DraftCommit } from './pullRequestDraft'
 import { resolveRepositoryIdentity } from './RepositoryIdentity'
 import { acquireRepositoryLease, RepositoryLeaseAbortedError } from './RepositoryLease'
+import { guardedSimpleGit, NO_DIFF_PROGRAMS, withoutRepoPrograms } from './repoPrograms'
 import type {
   GitBranchInfo,
   GitBranchOptions,
@@ -305,7 +306,14 @@ const SUMMARY_KILL_SETTLE_MS = 5_000
  */
 function readBoundedGit(cwd: string, args: readonly string[], maxBytes: number): Promise<string> {
   return new Promise((resolvePromise) => {
-    const child = spawn('git', args, {
+    let guarded: string[]
+    try {
+      guarded = withoutRepoPrograms(cwd, args)
+    } catch {
+      resolvePromise('')
+      return
+    }
+    const child = spawn('git', guarded, {
       cwd,
       env: { ...process.env, ...englishMessagesEnv(), GIT_OPTIONAL_LOCKS: '0' },
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -356,12 +364,15 @@ export class GitService {
     liveOutput?: { intervalMs?: number; maxLines?: number }
   } = {}) {}
 
+  /** Every Git command here runs no program the repository configures (`repoPrograms`). */
   private gitFor(cwd: string): SimpleGit {
-    return simpleGit(cwd)
+    return guardedSimpleGit(cwd)
   }
 
-  private runGit(cwd: string, args: readonly string[], options?: GitRunOptions): Promise<GitRun> {
-    return runGit(cwd, args, options)
+  /** `hooks` keeps the repository's hooks: only for the commit and push the user presses. */
+  private runGit(cwd: string, args: readonly string[], options?: GitRunOptions & { hooks?: boolean }): Promise<GitRun> {
+    const { hooks, ...run } = options ?? {}
+    return runGit(cwd, withoutRepoPrograms(cwd, args, { hooks }), run)
   }
 
   /**
@@ -445,7 +456,7 @@ export class GitService {
     const trace = options.hooks && live ? await HookTrace.start(live.hook) : null
     let run: GitRun
     try {
-      run = await this.runGit(cwd, args, { env: { ...options.env, ...trace?.env }, silenceMs: options.silenceMs, signal: live?.signal, onLine: live?.line })
+      run = await this.runGit(cwd, args, { env: { ...options.env, ...trace?.env }, silenceMs: options.silenceMs, signal: live?.signal, onLine: live?.line, hooks: options.hooks })
     } finally {
       await trace?.stop()
     }
@@ -514,7 +525,7 @@ export class GitService {
     if (!await this.isRepo(cwd)) return ''
     const git = this.gitFor(cwd)
     if (staged) {
-      return git.diff(['--cached', '--', filePath])
+      return git.diff([...NO_DIFF_PROGRAMS, '--cached', '--', filePath])
     }
 
     const status = await git.status()
@@ -522,10 +533,10 @@ export class GitService {
     const entry = status.files.find((file) => file.path.replace(/\\/g, '/') === normalized)
     if (entry?.index === '?' && entry.working_dir === '?') {
       const nullPath = process.platform === 'win32' ? 'NUL' : '/dev/null'
-      return git.diff(['--no-index', nullPath, filePath]).catch(() => '')
+      return git.diff([...NO_DIFF_PROGRAMS, '--no-index', nullPath, filePath]).catch(() => '')
     }
 
-    return git.diff(['--', filePath])
+    return git.diff([...NO_DIFF_PROGRAMS, '--', filePath])
   }
 
   async getLog(cwd: string, limit = 30): Promise<GitCommit[]> {
@@ -600,8 +611,8 @@ export class GitService {
     }
 
     const [unstaged, staged] = await Promise.all([
-      git.diff(['--numstat']).catch(() => ''),
-      git.diff(['--cached', '--numstat']).catch(() => '')
+      git.diff([...NO_DIFF_PROGRAMS, '--numstat']).catch(() => ''),
+      git.diff([...NO_DIFF_PROGRAMS, '--cached', '--numstat']).catch(() => '')
     ])
 
     const unstagedStats = parseNumstat(unstaged)
@@ -968,7 +979,7 @@ export class GitService {
     const maxBytes = options.maxBytes ?? limits.diff
     // From the top, like the commit: paths and pathspecs below are relative to it, not to a project subfolder.
     const top = await this.toplevel(cwd)
-    const staged = !options.all && await readBoundedGit(top, ['diff', '--cached', '--name-only', '-z'], 64) !== ''
+    const staged = !options.all && await readBoundedGit(top, ['diff', ...NO_DIFF_PROGRAMS, '--cached', '--name-only', '-z'], 64) !== ''
     const against = staged || !await this.hasHead(top) ? ['--cached'] : ['HEAD']
     // A repository's configuration must not run programs here: no external diff driver, no text conversion.
     const diff = ['diff', '--no-color', '--no-ext-diff', '--no-textconv']
@@ -1115,7 +1126,7 @@ export class GitService {
   }
 
   private async hasStagedChanges(cwd: string): Promise<boolean> {
-    const run = await this.runGit(cwd, ['diff', '--cached', '--quiet'])
+    const run = await this.runGit(cwd, ['diff', ...NO_DIFF_PROGRAMS, '--cached', '--quiet'])
     return !run.ok
   }
 
