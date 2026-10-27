@@ -5,6 +5,7 @@ import type { Project, Thread } from '../../shared/types'
 import type { ThreadDataStore } from './ThreadDataStore'
 import { atomicWriteJsonSync, quarantineUnreadableFileSync } from './AtomicFs'
 import { getMousseHomeDir } from './paths'
+import { trustRepositoryPrograms } from '../git/repoPrograms'
 
 export class ProjectManager {
   private projects: Project[] = []
@@ -44,7 +45,18 @@ export class ProjectManager {
 
     this.projects.push(project)
     this.persist()
+    // The repository's own filters as the user has them now (git-crypt, a local LFS) are theirs.
+    try { trustRepositoryPrograms(folderPath) } catch { /* not a repository yet: nothing to record */ }
     return project
+  }
+
+  /** Records the project's repository's own Git filters as the user's again, after they changed one. */
+  trustGitSettings(id: string): { filters: string[] } {
+    const project = this.getProject(id)
+    if (!project) throw new Error(`Project not found: ${id}`)
+    const record = trustRepositoryPrograms(project.path)
+    if (!record) throw new Error('This project is not in a Git repository.')
+    return { filters: [...new Set(Object.keys(record.filters).map((key) => key.split('.').slice(1, -1).join('.')))] }
   }
 
   removeProject(id: string): void {

@@ -619,6 +619,13 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     }
   }
 
+  const handleTrustGitSettings = async () => {
+    if (!contextMenu || contextMenu.target.type !== 'project') return
+    const projectId = contextMenu.target.id
+    closeContextMenu()
+    await window.mousse.projects.trustGitSettings(projectId)
+  }
+
   const handleRename = () => {
 
     if (!contextMenu) return
@@ -1356,6 +1363,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           onRename={handleRename}
 
           onRemove={handleRemove}
+          onTrustGitSettings={handleTrustGitSettings}
 
         />
 

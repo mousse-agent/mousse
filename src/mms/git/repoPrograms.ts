@@ -2,7 +2,9 @@ import { spawnSync } from 'node:child_process'
 import { statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import simpleGit, { type SimpleGit, type SimpleGitOptions } from 'simple-git'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { NO_HOOKS_PATH } from './gitNullDevice'
+import { isTrustedRepoEntry, readRepoTrust, repoTrustPath, TRUSTED_FILTER_KEY, writeRepoTrust, type RepoTrustRecord } from './repoTrust'
 
 /**
  * Git commands Mousse runs on a user's repository start no program the repository configures.
@@ -21,8 +23,10 @@ import { NO_HOOKS_PATH } from './gitNullDevice'
  *   submodule's own configuration would apply;
  * - for each program the repository's own config names (filter drivers, diff and merge drivers, ssh,
  *   askpass, editor, signing programs, upload/receive-pack, credential helpers), put back the user's
- *   value for that key, or a value that runs nothing. A filter driver only the repository defines
- *   (git-crypt, a `git lfs install --local`, nbstripout) is emptied. A read compares its files as
+ *   value for that key, or a value that runs nothing. A filter driver the repository's own config
+ *   defines (git-crypt, a `git lfs install --local`, nbstripout) runs only while its command is the
+ *   one recorded when the user added the project ({@link trustRepositoryPrograms}); otherwise it is
+ *   emptied. A read compares its files as
  *   stored (`required=false`); a command that writes the index or the working tree keeps it required,
  *   so Git refuses those files instead of storing them unfiltered ({@link filterRefusal}).
  *
@@ -159,9 +163,12 @@ function setting(key: string, value: string): string {
   return `${key}=${value}`
 }
 
-/** The overrides for one repository's config listing. */
-export function repoProgramOverrides(entries: readonly ConfigEntry[]): RepoPrograms {
-  const trusted = (entry: ConfigEntry): boolean => TRUSTED_SCOPES.has(entry.scope)
+/**
+ * The overrides for one repository's config listing. `record` holds the repository's own filter
+ * commands the user trusted; an entry with the same key and command is treated as the user's own.
+ */
+export function repoProgramOverrides(entries: readonly ConfigEntry[], record: RepoTrustRecord | null = null): RepoPrograms {
+  const trusted = (entry: ConfigEntry): boolean => TRUSTED_SCOPES.has(entry.scope) || isTrustedRepoEntry(record, entry.key, entry.value)
   const lastTrusted = (key: string): string | null | undefined => entries.filter((entry) => trusted(entry) && entry.key === key).at(-1)?.value
   const overrides: string[] = []
   const emptiedFilters = new Set<string>()
@@ -259,11 +266,11 @@ function programsFor(cwd: string): RepoPrograms {
   const listing = bareGit(key, ['config', '--null', '--show-scope', '--show-origin', '--list'])
   if (!listing.ok) return NONE
   const entries = parseConfig(listing.stdout)
-  const programs = repoProgramOverrides(entries)
   const [gitDir, commonDir, top] = where.stdout.split(/\r?\n/).map((line) => line.trim())
+  const programs = repoProgramOverrides(entries, commonDir ? readRepoTrust(commonDir) : null)
   const includes = entries.some((entry) => !TRUSTED_SCOPES.has(entry.scope) && /^include(if\..+)?\.path$/i.test(entry.key))
   if (where.ok && gitDir && commonDir && top && !includes) {
-    const paths = new Set<string>([join(gitDir, 'config'), join(gitDir, 'config.worktree'), join(gitDir, 'commondir'), join(commonDir, 'config')])
+    const paths = new Set<string>([join(gitDir, 'config'), join(gitDir, 'config.worktree'), join(gitDir, 'commondir'), join(commonDir, 'config'), repoTrustPath(commonDir)])
     for (const entry of entries) if (entry.origin.startsWith('file:')) paths.add(resolve(key, entry.origin.slice(5)))
     for (const path of dotGitsUpFrom(key, top)) paths.add(path)
     remember(key, paths, programs)
@@ -295,7 +302,46 @@ export function noRepoProgramArgs(cwd: string, args: readonly string[], options?
 export function filterRefusal(output: string): string | null {
   const match = /(?:clean|smudge) filter '([^']+)' failed/.exec(output)
   if (!match) return null
-  return `This repository's own config defines the "${match[1]}" filter (git-crypt or a local Git LFS install, for example). Mousse does not run programs from a repository's own config, so it left these files alone instead of storing them unfiltered. Run this from a terminal, or install the filter in your global Git config.`
+  return `This repository's own config defines the "${match[1]}" filter (git-crypt or a local Git LFS install, for example), and it is not the one Mousse recorded when the project was added. Mousse runs only the repository's filters it recorded, so it left these files alone instead of storing them unfiltered. If you set up or changed this filter yourself, right-click the project in the sidebar and choose "Trust Git settings again".`
+}
+
+/**
+ * Records the filter drivers the repository at `path` defines in its own config as the user's, so
+ * Mousse's own commands run them while they stay as they are now. Called when the user adds a
+ * project and when they choose "Trust Git settings again". Null when `path` is not in a repository.
+ */
+export function trustRepositoryPrograms(path: string): RepoTrustRecord | null {
+  const where = bareGit(resolve(path), ['rev-parse', '--path-format=absolute', '--git-common-dir'])
+  const commonDir = where.stdout.trim()
+  if (!where.ok || !commonDir) return null
+  const listing = bareGit(resolve(path), ['config', '--null', '--show-scope', '--show-origin', '--list'])
+  if (!listing.ok) return null
+  const filters: Record<string, string> = {}
+  for (const entry of parseConfig(listing.stdout)) {
+    if (!TRUSTED_SCOPES.has(entry.scope) && entry.value !== null && TRUSTED_FILTER_KEY.test(entry.key)) filters[entry.key] = entry.value
+  }
+  const record = writeRepoTrust(commonDir, filters)
+  cache.clear()
+  return record
+}
+
+/**
+ * For projects added before trust was recorded: records each project's repository once, the first
+ * time this profile starts with this version. A repository already recorded is left as it is.
+ */
+export function trustExistingProjectsOnce(profileHome: string, projectPaths: readonly string[]): void {
+  const marker = join(profileHome, 'git-trust-recorded')
+  if (existsSync(marker)) return
+  for (const path of projectPaths) {
+    try {
+      const where = bareGit(resolve(path), ['rev-parse', '--path-format=absolute', '--git-common-dir'])
+      if (where.ok && where.stdout.trim() && !readRepoTrust(where.stdout.trim())) trustRepositoryPrograms(path)
+    } catch {
+      /* a project folder that is gone or unreadable is recorded when the user trusts it */
+    }
+  }
+  mkdirSync(profileHome, { recursive: true })
+  writeFileSync(marker, `${new Date().toISOString()}\n`)
 }
 
 /**
