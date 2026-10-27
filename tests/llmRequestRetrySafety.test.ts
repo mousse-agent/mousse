@@ -172,7 +172,7 @@ describe('request-scoped provider retry safety', () => {
   })
 
   it.each([
-    [429, 'rate_limit_error', 'provider_rate_limited'],
+    [429, 'rate_limit_error', 'provider_usage_limit'],
     [503, 'overloaded_error', 'provider_unavailable']
   ] as const)('preserves long Retry-After from actual pi Anthropic HTTP %i before SDK stringification', async (status, errorType, code) => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({ type: 'error', error: { type: errorType, message: 'Slow down sk-privateFixture' } }), {
@@ -190,7 +190,9 @@ describe('request-scoped provider retry safety', () => {
     expect(fetch, String(failure.cause?.message ?? failure.cause ?? '')).toHaveBeenCalledOnce()
     expect(failure).toMatchObject({ code, errorInfo: { retryable: false } })
     expect(failure.message).not.toContain('privateFixture')
-    expect(failure.details).toEqual({ provider: 'anthropic', status })
+    // A wait this long on a 429 is a usage limit: the details carry the server's reset time instead of the status.
+    if (code === 'provider_usage_limit') expect(failure.details).toEqual({ provider: 'anthropic', resetsAt: expect.any(String), estimated: false })
+    else expect(failure.details).toEqual({ provider: 'anthropic', status })
     expect(streamSimple).toHaveBeenCalledOnce()
     expect(onRetry).not.toHaveBeenCalled()
   })

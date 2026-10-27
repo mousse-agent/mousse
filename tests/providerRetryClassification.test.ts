@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { normalizeProviderError } from '../src/mms/orchestrator/providerErrors'
+import { boundedResetIso, estimatedReset, normalizeProviderError, readUsageLimit, usageLimitError } from '../src/mms/orchestrator/providerErrors'
 import { serializeAppError } from '../src/shared/errors'
 import { APIConnectionError, InternalServerError } from '@anthropic-ai/sdk'
 
@@ -36,13 +36,86 @@ describe('provider error classification', () => {
       .toMatchObject({ code: 'provider_cancelled', errorInfo: { category: 'cancelled', retryable: false } })
   })
 
-  it.each([[2, true, 2000], [10, true, 10000], [11, false, undefined]])(
-    'honors bounded retry-after %i seconds without shortening long waits', (seconds, retryable, retryAfterMs) => {
+  it.each([[2, true, 2000], [10, true, 10000]])(
+    'honors bounded retry-after %i seconds', (seconds, retryable, retryAfterMs) => {
       const error = normalizeProviderError({ status: 429, headers: new Headers({ 'Retry-After': String(seconds) }) })
       expect(error.code).toBe('provider_rate_limited')
       expect(error.errorInfo.retryable).toBe(retryable)
       expect(error.errorInfo.retryAfterMs).toBe(retryAfterMs)
     })
+
+  describe('usage limits', () => {
+    const at = new Date('2026-10-01T00:00:00Z')
+    const withClock = (run: () => void) => {
+      vi.useFakeTimers()
+      try {
+        vi.setSystemTime(at)
+        run()
+      } finally { vi.useRealTimers() }
+    }
+
+    it('a 429 that asks to wait over 10 seconds is a usage limit with the server time', () => withClock(() => {
+      const error = normalizeProviderError({ status: 429, headers: new Headers({ 'Retry-After': '3600' }) }, 'openai-codex')
+      expect(error).toMatchObject({ code: 'provider_usage_limit', errorInfo: { category: 'unavailable', retryable: false } })
+      expect(error.errorInfo.retryAfterMs).toBeUndefined()
+      expect(error.details).toEqual({ provider: 'openai-codex', resetsAt: '2026-10-01T01:00:00.000Z', estimated: false })
+      expect(readUsageLimit(error)).toEqual({ provider: 'openai-codex', resetsAt: '2026-10-01T01:00:00.000Z', estimated: false })
+    }))
+
+    it('a wait of exactly 11 seconds already pauses, and captured response metadata counts', () => withClock(() => {
+      expect(normalizeProviderError('429: slow down', 'pi', { status: 429, retryAfter: '11' })).toMatchObject({
+        code: 'provider_usage_limit',
+        details: { resetsAt: '2026-10-01T00:00:11.000Z', estimated: false }
+      })
+    }))
+
+    it('the ChatGPT usage-limit message is a usage limit with an estimated reset', () => withClock(() => {
+      const error = normalizeProviderError(new Error('You hit your ChatGPT usage limit. Try again at 2:01 PM.'), 'openai-codex')
+      expect(error.code).toBe('provider_usage_limit')
+      expect(readUsageLimit(error)).toEqual({ provider: 'openai-codex', resetsAt: '2026-10-01T05:00:00.000Z', estimated: true })
+    }))
+
+    it('quota exhaustion stays a failure, not a usage limit', () => {
+      expect(normalizeProviderError({ status: 429, code: 'insufficient_quota', headers: new Headers({ 'Retry-After': '3600' }) }).code).toBe('provider_quota_exceeded')
+      expect(readUsageLimit(normalizeProviderError({ status: 429, message: 'Monthly usage limit reached' }))).toBeUndefined()
+    })
+
+    it('a reset in the past or more than 8 days ahead is replaced by the estimate', () => withClock(() => {
+      for (const resetsAt of ['2026-09-30T00:00:00Z', '2026-10-20T00:00:00Z', 'not a date']) {
+        expect(readUsageLimit(usageLimitError({ resetsAt, estimated: false, limitKind: 'five_hour' }))).toEqual({
+          resetsAt: '2026-10-01T05:00:00.000Z',
+          estimated: true,
+          limitKind: 'five_hour'
+        })
+      }
+    }))
+
+    it('boundedResetIso accepts epoch seconds and ISO text inside the window only', () => {
+      const now = at.getTime()
+      expect(boundedResetIso(now / 1000 + 60, now)).toBe('2026-10-01T00:01:00.000Z')
+      expect(boundedResetIso('2026-10-01T00:01:00Z', now)).toBe('2026-10-01T00:01:00.000Z')
+      expect(boundedResetIso(now / 1000 - 1, now)).toBeUndefined()
+      expect(boundedResetIso(now / 1000 + 8 * 86_400 + 1, now)).toBeUndefined()
+      expect(boundedResetIso(undefined, now)).toBeUndefined()
+      expect(boundedResetIso(Number.NaN, now)).toBeUndefined()
+      expect(estimatedReset(now)).toBe('2026-10-01T05:00:00.000Z')
+    })
+
+    it('names the window and says whether the reset is estimated', () => withClock(() => {
+      const reported = usageLimitError({ provider: 'claude', resetsAt: '2026-10-01T03:00:00Z', estimated: false, limitKind: 'seven_day_opus' })
+      expect(reported.message).toMatch(/^Claude's weekly Opus usage limit was reached\. It resets at /)
+      expect(reported.message).not.toMatch(/estimated/)
+      const guessed = usageLimitError({ provider: 'codex', estimated: true, limitKind: 'five_hour' })
+      expect(guessed.message).toMatch(/^Codex's 5-hour usage limit was reached\. It resets at .+ \(estimated\)\.$/)
+    }))
+
+    it('keeps the reset details through serialization and ignores other errors', () => {
+      const error = usageLimitError({ provider: 'claude', resetsAt: new Date(Date.now() + 3_600_000).toISOString(), estimated: false, limitKind: 'five_hour' })
+      expect(serializeAppError(error).details).toMatchObject({ provider: 'claude', estimated: false, limitKind: 'five_hour' })
+      expect(readUsageLimit(new Error('usage limit'))).toBeUndefined()
+      expect(readUsageLimit(normalizeProviderError({ status: 503 }))).toBeUndefined()
+    })
+  })
 
   it('keeps unfamiliar provider errors fail-fast with safe public text and local cause', () => {
     const original = new Error('unrecognized provider failure sk-privateFixture /Users/private/path')
