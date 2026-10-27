@@ -48,6 +48,24 @@ import { TurnEditSummary } from "./turn-edit-summary";
 import { SpiralLoader } from "./spiral-loader";
 import { ReadAloudButton, useIsReadingAloud } from "../../../readAloud/ReadAloudButton";
 import { useVisiblePromptIds } from "./use-visible-prompt-ids";
+import {
+  classifyIntent,
+  reduceFollow,
+  type FollowEvent,
+  type FollowMode,
+  type Intent,
+  type KeyFocus,
+} from "./virtual/follow-mode";
+import {
+  RENDER_ALL_THRESHOLD,
+  estimateTurnHeight,
+  lastIndexAtOrBefore,
+  resolveTurnKey,
+  shouldGlide,
+  windowRowItems,
+  type RowItem,
+} from "./virtual/turn-window";
+import { useTurnWindow } from "./virtual/use-turn-window";
 import "../../../styles/prompt-visibility.css";
 
 export type MessageListProps = {
@@ -539,6 +557,16 @@ function groupMessagesIntoTurns(messages: UIMessage[]) {  const turns: { userMsg
 
 type PromptMarker = { id: string; offset: number; preview: string; responsePreview: string };
 
+/**
+ * What the overlay needs from a windowed list, where most prompts are not in
+ * the DOM: every prompt's offset from the layout, and an instant, settled jump.
+ */
+export type PromptMarkerLayout = {
+  offsetOf: (id: string) => number | undefined;
+  scrollTo: (id: string) => void;
+  subscribe: (listener: () => void) => () => void;
+};
+
 function cappedWords(text: string, limit: number): string {
   const words = text.trim().split(/\s+/).filter(Boolean);
   return words.slice(0, limit).join(" ") + (words.length > limit ? "…" : "");
@@ -559,6 +587,7 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
   onUserNavigate,
   markProgrammatic,
   scrollAnimRef,
+  layout,
 }: {
   messages: UIMessage[];
   containerRef: React.RefObject<HTMLDivElement | null>;
@@ -568,27 +597,39 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
   onUserNavigate: () => void;
   markProgrammatic: () => void;
   scrollAnimRef: React.MutableRefObject<number>;
+  /** Set while the list is windowed; without it every prompt is read from the DOM. */
+  layout?: PromptMarkerLayout;
 }) {
   const [markers, setMarkers] = useState<PromptMarker[]>([]);
   const [activeId, setActiveId] = useState<string>();
   const [previewId, setPreviewId] = useState<string>();
   const markerPositionsRef = useRef<PromptMarker[]>([]);
+  const markerOffsetsRef = useRef<number[]>([]);
   const rafRef = useRef(0);
   const loggedCountRef = useRef(-1);
 
   const updateActiveMarker = useCallback(() => {
     const container = containerRef.current;
-    const positions = markerPositionsRef.current.filter((marker) => Number.isFinite(marker.offset));
-    if (!container || !positions.length) return;
+    if (!container) return;
     const atBottom = container.scrollHeight > container.clientHeight &&
       container.scrollTop + container.clientHeight >= container.scrollHeight - 2;
+    if (layout) {
+      // Offsets are ascending and all finite: binary search instead of a scan.
+      const all = markerPositionsRef.current;
+      if (!all.length) return;
+      const index = lastIndexAtOrBefore(markerOffsetsRef.current, container.scrollTop + 24);
+      setActiveId((atBottom ? all[all.length - 1] : all[Math.max(index, 0)])?.id);
+      return;
+    }
+    const positions = markerPositionsRef.current.filter((marker) => Number.isFinite(marker.offset));
+    if (!positions.length) return;
     let current = positions[0];
     for (const marker of positions) {
       if (atBottom || marker.offset <= container.scrollTop + 24) current = marker;
       else break;
     }
     setActiveId(current?.id);
-  }, [containerRef]);
+  }, [containerRef, layout]);
 
   const updateMarkers = useCallback(() => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
@@ -608,13 +649,15 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
         const userMsg = turn.userMsg;
         // A message that delivers subagent results is not a prompt the user wrote.
         if (!userMsg || readSubagentNotice(userMsg)) continue;
-        const target: Element | null = content.querySelector(
-          `[data-prompt-id="${escapeId(userMsg.id)}"]`,
-        );
+        const target: Element | null = layout
+          ? null
+          : content.querySelector(`[data-prompt-id="${escapeId(userMsg.id)}"]`);
         // Rect-based so nested `relative` wrappers / transforms can't skew it.
-        const y = target instanceof HTMLElement
-          ? target.getBoundingClientRect().top - containerRect.top + container.scrollTop
-          : markerPositionsRef.current.find((marker) => marker.id === userMsg.id)?.offset ?? Infinity;
+        const y = layout
+          ? layout.offsetOf(userMsg.id) ?? Infinity
+          : target instanceof HTMLElement
+            ? target.getBoundingClientRect().top - containerRect.top + container.scrollTop
+            : markerPositionsRef.current.find((marker) => marker.id === userMsg.id)?.offset ?? Infinity;
         const preview = cappedWords(getTextFromParts(userMsg.parts ?? [], " "), 10);
         const responsePreview = cappedWords(
           turn.assistantMsgs.map((message) => getTextFromParts(message.parts ?? [], " ")).join(" "),
@@ -633,6 +676,7 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
         console.debug(`[prompt-markers] tracking ${next.length} prompts`);
       }
       markerPositionsRef.current = next;
+      markerOffsetsRef.current = next.map((marker) => marker.offset);
       updateActiveMarker();
       setMarkers((prev) => {
         if (
@@ -649,8 +693,11 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
         return next;
       });
     });
-  }, [messages, containerRef, contentRef, updateActiveMarker]);
+  }, [messages, containerRef, contentRef, updateActiveMarker, layout]);
   const visiblePromptIds = useVisiblePromptIds(containerRef, contentRef, updateMarkers);
+
+  // The layout moves without the DOM saying so: rows measured, window shifted.
+  useEffect(() => layout?.subscribe(updateMarkers), [layout, updateMarkers]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -698,13 +745,21 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
       const el = content.querySelector(`[data-prompt-id="${escapeId}"]`);
       const y = el instanceof HTMLElement
         ? el.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop
-        : markerPositionsRef.current.find((marker) => marker.id === id)?.offset;
+        : layout?.offsetOf(id) ?? markerPositionsRef.current.find((marker) => marker.id === id)?.offset;
       if (y === undefined || !Number.isFinite(y)) return;
       onUserNavigate();
       onActive();
       const targetTop = Math.max(0, y - 16);
       const start = container.scrollTop;
       const distance = targetTop - start;
+      // A prompt that is not mounted, or is far away, lands instantly and is
+      // corrected against the real DOM; gliding across rows that are still
+      // being measured would aim at an estimate.
+      if (layout && (!(el instanceof HTMLElement) || !shouldGlide(distance, container.clientHeight))) {
+        cancelScroll();
+        layout.scrollTo(id);
+        return;
+      }
       if (Math.abs(distance) < 4) {
         container.scrollTop = targetTop;
         return;
@@ -732,6 +787,8 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
           scrollAnimRef.current = requestAnimationFrame(step);
         } else {
           scrollAnimRef.current = 0;
+          // Rows measured on the way may have moved the target.
+          layout?.scrollTo(id);
         }
       };
       scrollAnimRef.current = requestAnimationFrame(step);
@@ -744,6 +801,7 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
       cancelScroll,
       markProgrammatic,
       scrollAnimRef,
+      layout,
     ],
   );
 
@@ -812,9 +870,13 @@ export const MessageList = memo(function MessageList({
 }: MessageListProps) {
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const contentWrapperRef = useRef<HTMLDivElement>(null);
+  const rowsRef = useRef<HTMLDivElement>(null);
   const chatContainerObserverRef = useRef<ResizeObserver | null>(null);
-  const shouldAutoScrollRef = useRef(true);
-  const prevScrollTopRef = useRef(0);
+  // Follow the end of the thread, or leave it alone. Changed only by what the
+  // user does (see `virtual/follow-mode.ts`), never by a scroll position.
+  const followModeRef = useRef<FollowMode>(
+    initialScrollBehavior === "top" ? "free" : "following-end",
+  );
   const lastMessageIdRef = useRef<string | null>(
     messages[messages.length - 1]?.id ?? null,
   );
@@ -870,11 +932,24 @@ export const MessageList = memo(function MessageList({
 
   const isStreaming = status === "streaming" || status === "submitted";
 
+  const dispatchFollow = useCallback((event: FollowEvent) => {
+    const next = reduceFollow(followModeRef.current, event);
+    followModeRef.current = next;
+    setIsPinned(next === "following-end");
+  }, []);
+
+  // What the user just did to the scroll position. Assigned on every render so
+  // the listeners attached once with the element always see current callbacks.
+  const handleIntentRef = useRef<(intent: Intent) => void>(() => {});
+  const containerCleanupRef = useRef<(() => void) | null>(null);
+
   const containerRefCallback = useCallback((el: HTMLDivElement | null) => {
     (
       chatContainerRef as React.MutableRefObject<HTMLDivElement | null>
     ).current = el;
 
+    containerCleanupRef.current?.();
+    containerCleanupRef.current = null;
     if (chatContainerObserverRef.current) {
       chatContainerObserverRef.current.disconnect();
       chatContainerObserverRef.current = null;
@@ -887,6 +962,82 @@ export const MessageList = memo(function MessageList({
       });
       observer.observe(el);
       chatContainerObserverRef.current = observer;
+
+      // Attached when the element mounts: no timers, no retries.
+      const overflowing = () => el.scrollHeight > el.clientHeight;
+      const onWheel = (event: WheelEvent) =>
+        handleIntentRef.current(
+          classifyIntent({
+            type: "wheel",
+            deltaY: event.deltaY,
+            ctrlKey: event.ctrlKey,
+            metaKey: event.metaKey,
+            overflowing: overflowing(),
+          }),
+        );
+      const onPointerDown = (event: PointerEvent) =>
+        handleIntentRef.current(
+          classifyIntent({
+            type: "pointerdown",
+            onContainer: event.target === el,
+            offsetX: event.offsetX,
+            clientWidth: el.clientWidth,
+            overflowing: overflowing(),
+          }),
+        );
+      const onTouchMove = () =>
+        handleIntentRef.current(
+          classifyIntent({
+            type: "touchmove",
+            atBottom:
+              el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_THRESHOLD,
+            overflowing: overflowing(),
+          }),
+        );
+      const onKeyDown = (event: KeyboardEvent) => {
+        if (event.defaultPrevented) return;
+        const active = document.activeElement;
+        let focus: KeyFocus = "other";
+        if (
+          active instanceof HTMLElement &&
+          (active.isContentEditable ||
+            active instanceof HTMLInputElement ||
+            active instanceof HTMLTextAreaElement ||
+            active instanceof HTMLSelectElement)
+        ) {
+          focus = "editable";
+        } else if (
+          !active ||
+          active === document.body ||
+          active === document.documentElement
+        ) {
+          focus = "body";
+        } else if (el.contains(active)) {
+          focus = "container";
+        }
+        handleIntentRef.current(
+          classifyIntent({
+            type: "keydown",
+            key: event.key,
+            ctrlKey: event.ctrlKey,
+            metaKey: event.metaKey,
+            altKey: event.altKey,
+            shiftKey: event.shiftKey,
+            focus,
+            overflowing: overflowing(),
+          }),
+        );
+      };
+      el.addEventListener("wheel", onWheel, { passive: true });
+      el.addEventListener("pointerdown", onPointerDown);
+      el.addEventListener("touchmove", onTouchMove, { passive: true });
+      document.addEventListener("keydown", onKeyDown);
+      containerCleanupRef.current = () => {
+        el.removeEventListener("wheel", onWheel);
+        el.removeEventListener("pointerdown", onPointerDown);
+        el.removeEventListener("touchmove", onTouchMove);
+        document.removeEventListener("keydown", onKeyDown);
+      };
     }
   }, []);
 
@@ -911,43 +1062,6 @@ export const MessageList = memo(function MessageList({
     markProgrammaticScroll();
     container.scrollTop = container.scrollHeight;
   }, [markProgrammaticScroll]);
-
-  const scrollToBottomSmooth = useCallback(() => {
-    const container = chatContainerRef.current;
-    if (!container) return;
-    markProgrammaticScroll();
-    const reduceMotion =
-      typeof window !== "undefined" &&
-      typeof window.matchMedia === "function" &&
-      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (reduceMotion) {
-      container.scrollTop = container.scrollHeight;
-      return;
-    }
-    container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
-  }, [markProgrammaticScroll]);
-
-  const scrollToBottomSettled = useCallback(
-    (smooth = false) => {
-      let rafOne = 0;
-      let rafTwo = 0;
-      if (smooth) scrollToBottomSmooth();
-      else scrollToBottomInstant();
-      rafOne = requestAnimationFrame(() => {
-        if (smooth) scrollToBottomSmooth();
-        else scrollToBottomInstant();
-        rafTwo = requestAnimationFrame(() => {
-          if (smooth) scrollToBottomSmooth();
-          else scrollToBottomInstant();
-        });
-      });
-      return () => {
-        cancelAnimationFrame(rafOne);
-        cancelAnimationFrame(rafTwo);
-      };
-    },
-    [scrollToBottomInstant, scrollToBottomSmooth],
-  );
 
   const isAtBottom = useCallback(() => {
     const container = chatContainerRef.current;
@@ -987,35 +1101,46 @@ export const MessageList = memo(function MessageList({
     };
   }, []);
 
+  // True while the thread is long enough to be windowed.
+  const windowedRef = useRef(false);
+  // Set after `useTurnWindow` below; the callbacks that need it run later.
+  const virtualizationRef = useRef<ReturnType<typeof useTurnWindow> | null>(null);
+
+  // A scroll caused by our own writes (streaming follow, landings, marker
+  // glide) is not the user moving.
+  const isProgrammaticScroll = useCallback(
+    () =>
+      Boolean(virtualizationRef.current?.isNavigating()) ||
+      promptScrollAnimRef.current !== 0 ||
+      performance.now() - programmaticScrollAtRef.current <= 150,
+    [],
+  );
+
+  handleIntentRef.current = (intent: Intent) => {
+    if (intent === null) return;
+    // Any user motion ends a landing in progress, whatever the follow mode.
+    virtualizationRef.current?.cancelNavigation();
+    cancelPromptScroll();
+    dispatchFollow({ type: "intent", intent });
+  };
+
   const handleScroll = useCallback(() => {
     const container = chatContainerRef.current;
     if (!container) return;
 
-    const currentScrollTop = container.scrollTop;
-    const prevScrollTop = prevScrollTopRef.current;
-    prevScrollTopRef.current = currentScrollTop;
-
-    if (currentScrollTop < prevScrollTop) {
-      shouldAutoScrollRef.current = false;
-    } else {
-      shouldAutoScrollRef.current = isAtBottom();
-    }
-    const pinned = shouldAutoScrollRef.current;
-    setIsPinned((prev) => (prev === pinned ? prev : pinned));
+    const programmatic = isProgrammaticScroll();
+    dispatchFollow({ type: "scroll", atBottom: isAtBottom(), programmatic });
     // Skip auto-scroll noise (streaming follow, mount pin, marker glide) —
     // only a human moving the scrollbar reveals the markers.
-    if (performance.now() - programmaticScrollAtRef.current > 150) {
-      flashScrollbarActive();
-    }
-  }, [isAtBottom, flashScrollbarActive]);
+    if (!programmatic) flashScrollbarActive();
+  }, [isAtBottom, flashScrollbarActive, isProgrammaticScroll, dispatchFollow]);
 
   // A marker-dot jump hands control to the user: stop following the stream
   // and hide the jump-to-latest button. The glide itself is driven by the
   // overlay (shared `promptScrollAnimRef`).
   const handleMarkerNavigateStart = useCallback(() => {
-    shouldAutoScrollRef.current = false;
-    setIsPinned(false);
-  }, []);
+    dispatchFollow({ type: "navigate" });
+  }, [dispatchFollow]);
 
   // Reveal markers when the cursor drifts to the scrollbar edge. Attached to
   // the wrap (bubbles up) so no overlay ever sits between the pointer and
@@ -1035,20 +1160,28 @@ export const MessageList = memo(function MessageList({
     const contentWrapper = contentWrapperRef.current;
     if (!container || !contentWrapper) return;
 
-    if (initialScrollBehavior === "top") {
-      programmaticScrollAtRef.current = performance.now();
-      container.scrollTop = 0;
-      shouldAutoScrollRef.current = false;
-    } else {
-      programmaticScrollAtRef.current = performance.now();
-      container.scrollTop = container.scrollHeight;
-      shouldAutoScrollRef.current = true;
-    }
+    const initial = initialScrollBehavior === "top" ? "top" : "bottom";
+    programmaticScrollAtRef.current = performance.now();
+    container.scrollTop = initial === "top" ? 0 : container.scrollHeight;
+    followModeRef.current = reduceFollow(followModeRef.current, {
+      type: "thread-open",
+      initial,
+    });
 
     let lastContentHeight = contentWrapper.getBoundingClientRect().height;
     let raf = 0;
 
     const resizeObserver = new ResizeObserver(() => {
+      if (windowedRef.current) {
+        // Windowed: the rows are anchored by `useTurnWindow`. This observer
+        // only follows growth outside them (the breathing space below the
+        // last turn), before paint and never by a delta.
+        if (followModeRef.current === "following-end") {
+          programmaticScrollAtRef.current = performance.now();
+          container.scrollTop = container.scrollHeight - container.clientHeight;
+        }
+        return;
+      }
       if (raf) return;
       raf = requestAnimationFrame(() => {
         raf = 0;
@@ -1058,12 +1191,12 @@ export const MessageList = memo(function MessageList({
         }
         lastContentHeight = newContentHeight;
 
-        if (shouldAutoScrollRef.current) {
-          // Pinned: follow streaming text / images / expanding tool cards.
+        if (followModeRef.current === "following-end") {
+          // Following: track streaming text / images / expanding tool cards.
           programmaticScrollAtRef.current = performance.now();
           container.scrollTop = container.scrollHeight;
         }
-        // When reading history (unpinned): leave scrollTop untouched.
+        // When reading history (free): leave scrollTop untouched.
         // New streamed content appends below the viewport, so keeping
         // scrollTop stable keeps what the user is reading stable.
         // Growth above the viewport is handled by native CSS
@@ -1124,13 +1257,11 @@ export const MessageList = memo(function MessageList({
       lastUserMessageId &&
       lastUserMessageId !== lastUserMessageIdRef.current
     ) {
-      shouldAutoScrollRef.current = true;
-      setIsPinned(true);
-      const cancel = scrollToBottomSettled();
+      dispatchFollow({ type: "new-turn" });
+      void virtualizationRef.current?.settleToEnd();
       lastUserMessageIdRef.current = lastUserMessageId;
-      return cancel;
     }
-  }, [lastUserMessageId, scrollToBottomSettled]);
+  }, [lastUserMessageId, dispatchFollow]);
 
   const turns = useMemo(
     () => groupMessagesIntoTurns(normalizedMessages),
@@ -1176,6 +1307,47 @@ export const MessageList = memo(function MessageList({
     );
     liveOptimisticKeyRef.current = null;
   }
+  // Not memoized: the alias map is a ref that the block above mutates.
+  const turnKeys = turns.map((turn, index) =>
+    resolveTurnKey(turn, index, turnKeyAliasRef.current),
+  );
+  // Long threads mount only the turns near the viewport; short ones (and any
+  // render without a window) keep every row.
+  const windowed =
+    typeof window !== "undefined" && turns.length > RENDER_ALL_THRESHOLD;
+  windowedRef.current = windowed;
+  const virtualization = useTurnWindow({
+    containerRef: chatContainerRef,
+    rowsRef,
+    keys: turnKeys,
+    estimate: (_key, index) => estimateTurnHeight(turns[index]!),
+    enabled: windowed,
+    modeRef: followModeRef,
+    onProgrammaticScroll: markProgrammaticScroll,
+  });
+  virtualizationRef.current = virtualization;
+  const rowItems: RowItem[] = windowed
+    ? windowRowItems(turns.length, virtualization.window)
+    : turns.map((_, index) => ({ kind: "row", index }));
+  const markerLayout = useMemo(
+    () =>
+      windowed
+        ? {
+            offsetOf: (id: string) =>
+              virtualizationRef.current?.offsetOf(
+                turnKeyAliasRef.current.get(id) ?? id,
+              ),
+            scrollTo: (id: string) =>
+              void virtualizationRef.current?.scrollToKey(
+                turnKeyAliasRef.current.get(id) ?? id,
+                { align: "start", offset: 16 },
+              ),
+            subscribe: (listener: () => void) =>
+              virtualizationRef.current?.subscribe(listener) ?? (() => {}),
+          }
+        : undefined,
+    [windowed],
+  );
   const showPlanning = useMemo(() => {
     if (!isStreaming) return false;
     const lastMessage = normalizedMessages[normalizedMessages.length - 1];
@@ -1204,12 +1376,12 @@ export const MessageList = memo(function MessageList({
     lastMessageIdRef.current = lastMessageId;
   }, [lastMessageId, lastMessageRole]);
 
-  // Follow live output while pinned: every streamed token / tool update
-  // produces new `messages`, so snap to the bottom. Instant (not smooth)
-  // so it keeps up with fast streams; the ResizeObserver above covers
+  // Follow live output while following the end: every streamed token / tool
+  // update produces new `messages`, so snap to the bottom. Instant (not
+  // smooth) so it keeps up with fast streams; the ResizeObserver above covers
   // late layout (images, markdown, expanding tool cards).
   useLayoutEffect(() => {
-    if (shouldAutoScrollRef.current) scrollToBottomInstant();
+    if (followModeRef.current === "following-end") scrollToBottomInstant();
   }, [
     normalizedMessages,
     isStreaming,
@@ -1218,11 +1390,12 @@ export const MessageList = memo(function MessageList({
     scrollToBottomInstant,
   ]);
 
+  // Instant, and corrected against the real DOM until it holds: a smooth
+  // scroll outlives the programmatic window and fights the settle loop.
   const handleJumpToLatest = useCallback(() => {
-    shouldAutoScrollRef.current = true;
-    setIsPinned(true);
-    scrollToBottomSettled(true);
-  }, [scrollToBottomSettled]);
+    dispatchFollow({ type: "jump-to-latest" });
+    void virtualizationRef.current?.settleToEnd();
+  }, [dispatchFollow]);
 
   const showJumpButton = !isPinned && normalizedMessages.length > 0;
   // Tick position and active-turn state live in PromptMarkersOverlay so
@@ -1239,22 +1412,44 @@ export const MessageList = memo(function MessageList({
       onWheel={cancelPromptScroll}
       onTouchMove={cancelPromptScroll}
       onPointerDown={cancelPromptScroll}
+      data-windowed={windowed || undefined}
       className={cn(
         "an-message-list flex-1 min-h-0 overflow-y-auto overscroll-contain",
         className,
       )}
     >
       <div ref={contentWrapperRef} className="mx-auto px-6 py-6 max-w-an">
-        <div className="space-y-6">
-          {turns.map((turn, turnIndex) => {
+        <div ref={rowsRef} className="flex flex-col gap-6">
+          {rowItems.map((item) => {
+            // Spacers stand in for the turns outside the window. They are not
+            // rendered at all when empty: in a `gap-6` column even a
+            // zero-height element would add two gaps.
+            if (item.kind !== "row") {
+              return (
+                <div
+                  key={item.kind}
+                  ref={
+                    item.kind === "top-spacer"
+                      ? virtualization.topSpacerRef
+                      : virtualization.bottomSpacerRef
+                  }
+                  aria-hidden="true"
+                  data-spacer
+                />
+              );
+            }
+            const turnIndex = item.index;
+            const turn = turns[turnIndex]!;
             const isLastTurn = turnIndex === turns.length - 1;
-            const turnKey = turn.userMsg
-              ? (turnKeyAliasRef.current.get(turn.userMsg.id) ??
-                turn.userMsg.id)
-              : `turn-${turnIndex}`;
+            const turnKey = turnKeys[turnIndex]!;
 
             return (
-              <div key={turnKey} className="relative space-y-2">
+              <div
+                key={turnKey}
+                ref={windowed ? virtualization.rowRef(turnKey) : undefined}
+                data-turn-key={turnKey}
+                className="relative space-y-2"
+              >
                 {turn.userMsg &&
                   (() => {
                     // Subagent results delivered to this thread (a wake turn or a steer).
@@ -1538,6 +1733,7 @@ export const MessageList = memo(function MessageList({
       onUserNavigate={handleMarkerNavigateStart}
       markProgrammatic={markProgrammaticScroll}
       scrollAnimRef={promptScrollAnimRef}
+      layout={markerLayout}
     />
     {showJumpButton && (
       <button

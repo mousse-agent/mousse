@@ -157,9 +157,16 @@ html[data-theme='light'] {
 }
 /* Keep the viewport stable while reading history during streaming:
    new tokens append below, so native anchoring handles growth above
-   without any manual scrollTop adjustments. */
+   without any manual scrollTop adjustments. Threads over 40 turns are
+   windowed (data-windowed): spacers and programmatic scrollTop writes defeat
+   the native anchor there, so use-turn-window holds the reading line by hand
+   and native anchoring is switched off to keep it from being applied twice. */
 .an-message-list {
   overflow-anchor: auto;
+}
+.an-message-list[data-windowed="true"],
+.an-message-list [aria-hidden][data-spacer] {
+  overflow-anchor: none;
 }
 
 /* Universal reset lives in `base` (with Tailwind preflight) so `utilities`
