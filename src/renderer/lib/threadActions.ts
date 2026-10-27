@@ -29,6 +29,15 @@ export async function createAndSelectThread(): Promise<void> {
   await selectThread(thread.id)
 }
 
+/** Opens the newest empty draft thread of a project, or creates one there, and selects it. */
+export async function createAndSelectProjectThread(projectId: string): Promise<void> {
+  const store = useAppStore.getState()
+  const thread = findUnstartedThread(visibleThreads(store.threads), projectId) ?? await window.mousse.threads.create(undefined, projectId)
+  // The daemon's threads:updated broadcast can arrive after the first message is sent.
+  store.upsertThread(thread)
+  await selectThread(thread.id)
+}
+
 /** Moves to the next (1) or previous (-1) thread in the sidebar's order, wrapping at the ends. */
 export async function selectAdjacentThread(direction: 1 | -1): Promise<void> {
   const { projects, threads, threadsSidebarView, activeThreadId } = useAppStore.getState()
