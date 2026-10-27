@@ -85,6 +85,8 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     // A file tool with no path argument works in its working directory: the scratch folder.
     if (!paths.length) return { ok: true }
     for (const raw of paths) {
+      // A path the runtime itself expands is read only after this check: never inside a root.
+      if (runtimeExpandedPath(raw)) return { ok: false, wall: { kind: 'path', tool: nativeName, path: raw, access } }
       try {
         assertInsideRoots([scratch], raw, scratch)
         continue
@@ -100,6 +102,20 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     }
     return { ok: true }
   }
+}
+
+/**
+ * Whether a runtime rewrites `raw` before it opens it, so the path checked here is not the one it
+ * would use: a home folder (`~`, `~user`; Claude Code and Pi expand it), Pi's leading `@`, a
+ * variable (`$HOME`, `${HOME}`, `%USERPROFILE%`), or on Windows Claude Code's `/c/...` drive form.
+ * Such a path is refused rather than expanded here: the bot names its folders by their real paths.
+ */
+export function runtimeExpandedPath(raw: string, platform: NodeJS.Platform = process.platform): boolean {
+  const trimmed = raw.trimStart()
+  if (/^[~@]/.test(trimmed)) return true
+  if (/\$(\{|[A-Za-z_])/.test(trimmed)) return true
+  if (platform === 'win32' && (/%[^%\\/]+%/.test(trimmed) || /^\/[A-Za-z](\/|$)/.test(trimmed))) return true
+  return false
 }
 
 function firstPath(args: Record<string, unknown>): unknown {

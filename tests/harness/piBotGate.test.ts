@@ -95,3 +95,27 @@ describe('a bot’s authority over Pi’s built-in tools (Pi RPC engine, real ch
     ])
   }, 120_000)
 })
+
+describe('paths Pi rewrites before it opens them (PR 6 review: `~` and `@`)', () => {
+  it('a home-folder or `@` path is walled, whatever it would expand to', async () => {
+    const { engine, recorder, project } = await setup(cleanups)
+    const root = realpathSync(project)
+    const scratch = join(root, '..', 'scratch')
+    mkdirSync(scratch, { recursive: true })
+    const outside = join(root, '..', 'outside.txt')
+    writeFileSync(outside, 'outside-secret')
+    recorder.respond(script([
+      { tool: { name: 'read', args: { path: `@${outside}` } } },
+      { tool: { name: 'read', args: { path: '~/outside.txt' } } },
+      { tool: { name: 'grep', args: { pattern: 'secret', path: '~' } } },
+      { tool: { name: 'ls', args: { path: '~' } } },
+      { text: 'done' }
+    ]))
+    const turn = harness(root, {}, { bot: bot(root, scratch, ['read', 'search', 'list']) })
+    const result = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
+    expect(result.text).toBe('done')
+    const results = turn.events.filter((event) => event.kind === 'tool' && event.phase === 'complete')
+    expect(results.map(refused)).toEqual([true, true, true, true])
+    for (const event of results) expect(String(event.response)).not.toContain('outside-secret')
+  }, 120_000)
+})
