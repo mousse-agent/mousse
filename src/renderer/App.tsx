@@ -335,7 +335,7 @@ export default function App() {
       window.mousse.turn.onTurnState(applyIfCurrent(setTurnState)),
       window.mousse.turn.onTurnSnapshot(applyIfCurrent(setTurnSnapshot)),
       window.mousse.app.onNavigateMainView((view) => {
-        if (view === 'terminal' || view === 'browser' || view === 'files' || view === 'git' || view === 'review') {
+        if (view === 'terminal' || view === 'browser' || view === 'files' || view === 'git' || view === 'review' || view === 'pullRequest') {
           openSurface(view)
           return
         }

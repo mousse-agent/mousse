@@ -25,6 +25,7 @@ export type CommandId =
   | 'surface.files'
   | 'surface.git'
   | 'surface.review'
+  | 'surface.pullRequest'
   | 'model.pick1'
   | 'model.pick2'
   | 'model.pick3'
@@ -265,6 +266,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
   surfaceCommand('surface.files', 'Open Files', 'F'),
   surfaceCommand('surface.git', 'Open Diff', 'D'),
   surfaceCommand('surface.review', 'Open Review', 'R'),
+  surfaceCommand('surface.pullRequest', 'Open Pull request', 'P'),
   modelCommand('model.pick1', 1),
   modelCommand('model.pick2', 2),
   modelCommand('model.pick3', 3),
