@@ -247,6 +247,22 @@ describe('ThreadMessageQueue domain', () => {
     expect(normalized[0].claim?.ownerToken).toBe('alive-or-dead')
   })
 
+  it('keeps a scheduled origin through a save and load, and drops a malformed one', () => {
+    const origin = { kind: 'schedule' as const, jobId: 'job-1', jobName: 'Nightly', occurrenceKey: '2026-01-01T00:00:00.000Z', selection: { instanceId: 'codex', llmProvider: 'codex', model: 'm' } }
+    const queued = enqueueMessage([], { threadId: 't1', content: 'run it', source: 'schedule', runId: 'run-1', origin }).items
+    const [loaded] = normalizeQueuedMessages(JSON.parse(JSON.stringify(queued)), 't1')
+    expect(loaded.origin).toEqual(origin)
+    expect(loaded.runId).toBe('run-1')
+
+    const base = { id: 'a', threadId: 't1', content: 'x', enqueuedAt: '2020-01-01T00:00:00.000Z', order: 0, intent: 'normal', state: 'pending' }
+    expect(normalizeQueuedMessages([{ ...base, origin: { kind: 'schedule', jobId: 'job-1' } }], 't1')[0].origin).toBeUndefined()
+    expect(normalizeQueuedMessages([{ ...base, origin: { kind: 'other', jobId: 'job-1', occurrenceKey: 'k' } }], 't1')[0].origin).toBeUndefined()
+    expect(normalizeQueuedMessages([{ ...base, origin: 'schedule' }], 't1')[0].origin).toBeUndefined()
+    // A malformed selection is dropped, the origin itself survives.
+    expect(normalizeQueuedMessages([{ ...base, origin: { kind: 'schedule', jobId: 'job-1', occurrenceKey: 'k', selection: { model: 4 } } }], 't1')[0].origin)
+      .toEqual({ kind: 'schedule', jobId: 'job-1', occurrenceKey: 'k' })
+  })
+
   it('reclaims only abandoned claims; protects live unaccepted owners', () => {
     let items = enqueueMessage([], { threadId: 't1', content: 'dead-owner' }).items
     items = enqueueMessage(items, { threadId: 't1', content: 'live-owner' }).items

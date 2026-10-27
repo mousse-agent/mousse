@@ -53,8 +53,19 @@ describe('awaited profile work ownership', () => {
         writeFileSync(marker, 'Final owned write')
         return { text: 'Stopped after cleanup', aborted: true }
       })
-      vi.spyOn((main.orchestrator as any).llm, 'chat').mockResolvedValue({ text: 'Other profile works' })
-      const run = services.orchestrator.runIsolatedScheduledJob('Fixture owned run')
+      // A scheduled plain prompt is a real turn now, so the other profile's model answers like a provider would.
+      vi.spyOn((main.orchestrator as any).llm, 'chat').mockImplementation(async (messages: any[]) => ({
+        text: 'Other profile works',
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
+        modelName: 'fixture',
+        totalResponseTimeMs: 1,
+        totalTokensUsed: 2,
+        contextInputs: { signature: 'fixture' },
+        toolEvents: [],
+        nativeMessages: [...messages, { role: 'assistant', content: 'Other profile works', timestamp: Date.now() }]
+      }))
+      const at = new Date().toISOString()
+      const run = services.orchestrator.runIsolatedScheduledJob('Fixture owned run', { jobId: 'owned-job', occurrenceAt: at, occurrenceKey: at, jobName: 'Owned' })
       await entered.promise
       services.orchestrator.beginShutdown()
       expect(signal.aborted).toBe(true)
@@ -63,7 +74,8 @@ describe('awaited profile work ownership', () => {
       ;(services.orchestrator as any).boundSession.failedConnectionRequest = { content: 'Must not retry' }
       expect(services.orchestrator.retryLastConnection()).toBe(false)
       expect(existsSync(marker)).toBe(false)
-      expect((await main.orchestrator.runIsolatedScheduledJob('Independent fixture')).text).toBe('Other profile works')
+      const otherAt = new Date().toISOString()
+      expect((await main.orchestrator.runIsolatedScheduledJob('Independent fixture', { jobId: 'other-job', occurrenceAt: otherAt, occurrenceKey: otherAt, jobName: 'Other' })).text).toBe('Other profile works')
       release.resolve(); await Promise.all([run, services.orchestrator.shutdown()])
       expect(existsSync(marker)).toBe(true)
       expect(services.orchestrator.getOwnedActivity()['scheduled-turn'] ?? 0).toBe(0)

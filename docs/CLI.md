@@ -183,11 +183,15 @@ mousse-cli schedule list
 mousse-cli schedule add --name "Daily standup" --prompt "Summarize overnight activity" --every 1440
 mousse-cli schedule add --name "Cron job" --prompt "Check CI" --cron "0 9 * * 1-5"
 mousse-cli schedule add --name "Once" --prompt "Run audit" --at "2026-07-03T09:00:00Z"
+mousse-cli schedule add --name "Check CI" --prompt "Check CI in repo X" --manual \
+  --project <project-id> --instance <instance-id> --model <model> --mode agent --workspace new-worktree
 mousse-cli schedule run <job-id>
 mousse-cli schedule enable <job-id>
 mousse-cli schedule disable <job-id>
 mousse-cli schedule remove <job-id>
 ```
+
+A job runs as a turn on a thread. `--instance` and `--model` choose the provider instance and model, `--mode agent|plan` the mode, and `--workspace project|new-worktree|<path>` where it works (`project`, the default, is the project's own checkout: an agent-mode job there edits the folder you work in, unattended, with no checkpoints or undo. For a Git project, prefer `new-worktree`). `--thread <id>` runs the job on an existing thread with its history and its own workspace. `--manual` makes a job with no clock that runs only with `schedule run`. `schedule list` shows the job's model, and `queued` while a run waits behind a busy thread.
 
 ## agents
 

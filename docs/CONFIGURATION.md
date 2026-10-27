@@ -160,16 +160,37 @@ Job **definitions** only. Runtime fields (`state`, `nextRunAt`, `runHistory`, â€
 |-----|------|----------|-------------|
 | `id` | `string` (UUID) | yes | Stable job ID |
 | `name` | `string` | yes | Display name |
-| `prompt` | `string` | yes | Prompt sent to isolated orchestrator run |
-| `schedule` | `JobSchedule` | yes | `once`, `interval`, or cron-style schedule |
+| `prompt` | `string` | yes | Prompt each run sends as a turn; a prompt starting with `/` runs a workflow |
+| `schedule` | `JobSchedule` | yes | `once`, `interval`, cron-style, or `manual` (no clock: runs only when started) |
 | `enabled` | `boolean` | yes | Whether job is eligible to run |
-| `threadId` | `string` | no | Target thread |
-| `projectId` | `string` | no | Target project |
-| `createThread` | `boolean` | no | Create a new thread per run |
+| `threadId` | `string` | no | Run as a turn on this thread, with its history and its own workspace |
+| `projectId` | `string` | no | Project the run works in |
+| `createThread` | `boolean` | no | Kept for older jobs; every run already gets its own thread when no `threadId` is set |
+| `selection` | `{ instanceId, llmProvider, model }` | no | Provider instance and model of every run. Absent: the thread's own model (bound job) or the profile default (per-run thread) |
+| `mode` | `agent` \| `plan` | no | Mode of every run; default `agent` |
+| `workspace` | `{ kind: 'project' }` \| `{ kind: 'newWorktree' }` \| `{ kind: 'worktree', path }` | no | Per-run threads only. `project` (default) works on the project's own checkout and provisions nothing (see the warning below); `newWorktree` gives each run's thread its own worktree (needs a Git project, not `plan` mode); `worktree` runs on the thread that owns that worktree. A job bound to a thread uses that thread's workspace |
+| `createdBy` | `{ threadId, runId? }` | no | The agent that created the job; absent for jobs people create |
 | `repeat.times` | `number` | no | Stop after N successful runs |
 | `createdAt` / `updatedAt` | ISO string | yes | Metadata |
 
-**Runtime-only (not in `mousse.conf`):** `state`, `nextRunAt`, `lastRunAt`, `lastStatus`, `lastError`, `pausedAt`, `pausedReason`, `runHistory`, `repeat.completed`
+**Runtime-only (not in `mousse.conf`):** `state`, `nextRunAt`, `lastRunAt`, `lastStatus`, `lastError`, `pausedAt`, `pausedReason`, `runHistory`, `repeat.completed`, `pendingOccurrence`
+
+### How a run executes
+
+A plain-prompt run is a turn on a thread, admitted by the Run Engine like any message: the run is recorded first, then it starts at once when the thread is idle, or waits as one queue item when it is busy (a running turn, a peer process holding the thread, or a question waiting for an answer, which a scheduled run never answers). The run uses the job's model and mode whatever the thread's own selection is, and never changes the thread's saved model. The run record shows the model the run used, its thread and its run.
+
+- **One run at a time per job.** An occurrence stays outstanding until its run ends, so a job whose run is queued or still working is skipped by later ticks. Different jobs run concurrently.
+- **Run history states.** `queued` while the occurrence waits or runs elsewhere; then `ok`, `error`, `interrupted`, or `uncertain` (the run was cut off while a tool that cannot be repeated was working, so its effects may have happened).
+- **Restart.** The Run Engine owns recovery. A run the daemon had admitted but not started is started once by the engine's own recovery; a run that had started ends `interrupted` (or `uncertain`) and is never run again; an admission that can never start (the daemon stopped between recording the run and queueing it) ends `interrupted: never started`.
+- **Missed runs.** Occurrences missed while the daemon was down run once on the next tick.
+- **Per-run threads.** Each run without a `threadId` gets its own thread. A run on the project's checkout settles its thread when it succeeds (its reply is in the run history, and the thread stays reachable from there), and so does a `[SILENT]` run. A job with `workspace: newWorktree` keeps each run's thread open, because it holds that run's worktree, up to 10 open threads; settle or delete some, or bind the job to a thread.
+- **Bound threads.** A job with a `threadId` adds its prompt and the reply to that thread's history on every run, so a frequent job makes the thread's context grow and compact sooner. The prompt is marked as the job's (`scheduled` on the message), not as typed by a person.
+- **"Run now".** It starts the job at once. While the job's run is in progress or waiting in a queue, it is refused with a message instead of being dropped.
+- **Catch-up.** After the daemon was down, overdue jobs start a few at a time (3 per tick, then the next tick follows within seconds), not all in one second.
+- **Questions and approvals.** A scheduled turn asks for tool approval and questions like any turn. Nobody is likely watching a per-run thread, so a question or approval waits for its timeout (10 minutes; up to an hour for `ask_user`) and is then denied; a person's message on a bound thread dismisses it and stops the run. The job's occurrence and the thread stay held for that time. A scheduled turn has no time limit of its own yet.
+
+> **Warning: `workspace: project` lets an unattended agent edit your own checkout.** The run works in the same folder you work in, with no worktree, no checkpoints and no undo, and two jobs on one project can edit it at the same time. For an agent-mode job in a Git project, use `newWorktree` (`--workspace new-worktree`), or `mode: plan` if the job should not change files.
+- **`manual` jobs.** They have no next run and never complete; "Run now" starts them.
 
 Other scheduled files (unchanged):
 

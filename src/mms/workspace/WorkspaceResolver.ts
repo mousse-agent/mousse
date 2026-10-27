@@ -9,6 +9,27 @@ const workspaceErrors = createErrorProvider({
   workspace_recovery_required: { category: 'conflict', retryable: false, message: 'Thread workspace requires restore or recovery before execution.' }
 })
 
+/**
+ * A turn that runs on the project's own checkout and provisions nothing: no checkpoints, no publish,
+ * no undo. `reason` says why, for the tools that refuse work needing an owned workspace.
+ */
+export function unprovisionedContext(threadId: string, projectPath: string, gitBacked: boolean, reason: string): WorkspaceExecutionContext {
+  return {
+    threadId,
+    workspacePath: projectPath,
+    projectPath,
+    primaryPath: projectPath,
+    lifecycle: 'unprovisioned',
+    capability: {
+      gitBacked,
+      checkpointable: false,
+      publishable: false,
+      undoable: false,
+      unavailableReason: reason
+    }
+  }
+}
+
 export class WorkspaceResolver {
   constructor(
     private readonly threadDirectory: string,
@@ -36,20 +57,7 @@ export class WorkspaceResolver {
     }
     if (!mutating) {
       const repository = manager.resolveRepository(this.projectPath)
-      return {
-        threadId: this.threadId,
-        workspacePath: this.projectPath,
-        projectPath: this.projectPath,
-        primaryPath: this.projectPath,
-        lifecycle: 'unprovisioned',
-        capability: {
-          gitBacked: repository.capability.gitBacked,
-          checkpointable: false,
-          publishable: false,
-          undoable: false,
-          unavailableReason: 'Read-only turn uses the primary checkout'
-        }
-      }
+      return unprovisionedContext(this.threadId, this.projectPath, repository.capability.gitBacked, 'Read-only turn uses the primary checkout')
     }
     const repository = manager.resolveRepository(this.projectPath)
     if (!repository.capability.gitBacked) {

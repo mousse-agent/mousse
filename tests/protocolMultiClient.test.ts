@@ -7,6 +7,8 @@ import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { LocalMmsClient } from '../src/mms/protocol/client'
 import type { ProtocolEvent } from '../src/mms/protocol/types'
 import { readStopRequest } from '../src/cli/mmsRuntime'
+import { buildScheduleAddInput } from '../src/cli/commands/schedule'
+import { parseArgs } from '../src/cli/parseArgs'
 
 /**
  * Several clients of one daemon: settings, scheduled jobs, channels, skills and MCP
@@ -79,6 +81,26 @@ describe('daemon protocol across clients', () => {
     await c.request('scheduled.delete', { id: created.job.id })
     const after = await c.request<{ jobs: { id: string }[] }>('scheduled.list')
     expect(after.jobs.some((j) => j.id === created.job.id)).toBe(false)
+    await c.close()
+  })
+
+  it('creates the job `schedule add --instance --model --mode --workspace` describes', async () => {
+    const c = await connect('cli')
+    const project = mms.projects.openProject(home)
+    const input = buildScheduleAddInput('Check CI', 'Check CI', { kind: 'manual' }, parseArgs(['schedule', 'add', '--instance', 'claude', '--model', 'sonnet', '--mode', 'plan', '--workspace', 'project', '--project', project.id]).flags)
+    const created = await c.request<{ job: { selection?: { instanceId?: string; model: string }; mode?: string; workspace?: { kind: string } } }>('scheduled.create', { input })
+    expect(created.job).toMatchObject({ selection: { instanceId: 'claude', model: 'sonnet' }, mode: 'plan' })
+    await c.close()
+  })
+
+  it('refuses Run now while the job\'s run is waiting in a queue, and says why', async () => {
+    const c = await connect('cli')
+    const created = await c.request<{ job: { id: string } }>('scheduled.create', { input: { name: 'queued', prompt: 'x', schedule: { kind: 'manual' } } })
+    const store = (mms.scheduled as any).store
+    store.updateJob(created.job.id, { pendingOccurrence: { occurrenceKey: 'k', threadId: 't', runId: 'r', queueItemId: 'i', state: 'queued' } })
+    await expect(c.request('scheduled.run', { id: created.job.id })).rejects.toThrow(/waiting in the queue/)
+    store.updateJob(created.job.id, { pendingOccurrence: undefined, state: 'running', runClaim: { pid: process.pid, processInstanceId: 'x', token: 't', claimedAt: '', heartbeatAt: '', occurrenceKey: 'k' } })
+    await expect(c.request('scheduled.run', { id: created.job.id })).rejects.toThrow(/already running/)
     await c.close()
   })
 

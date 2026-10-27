@@ -69,6 +69,11 @@ export class ThreadSession {
    * path under read-only tool access instead of provisioning its own (SPEC §14.2).
    */
   sharedWorkspace: { path: string; parentThreadId: string } | null = null
+  /**
+   * A scheduled run's thread works on the project's own checkout (`workspaceBinding.policy ===
+   * 'primary'`): its turns never provision a worktree.
+   */
+  primaryCheckout: { path: string } | null = null
   /** Cross-process execution lease held while a main-thread turn runs. */
   executionLease: ThreadLeaseHandle | null = null
   /** Steer item ids already injected this turn (one-time drain). */

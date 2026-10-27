@@ -182,8 +182,10 @@ import type { ThreadDataStore } from '../data/ThreadDataStore'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { resolveProjectWorkingDirectory } from '../data/projectWorkingDirectory'
 import { lineageForChild } from '../data/subagentLineage'
-import { WorkspaceResolver } from '../workspace/WorkspaceResolver'
+import { WorkspaceResolver, unprovisionedContext } from '../workspace/WorkspaceResolver'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
+import { findWorktreeOwner } from '../scheduled/validateJobOptions'
+import { occurrenceResultOfRun, scheduledReceiptId, type ScheduledRunProbe } from '../scheduled/ScheduledJobStore'
 import { UndoService } from '../actions/UndoService'
 import { CodeRevertService } from '../actions/CodeRevertService'
 import { PublishService } from '../actions/PublishService'
@@ -411,6 +413,43 @@ export interface OrchestratorSendOptions {
    * (`canAnswerApproval`); one that is not leaves them pending and its message queues.
    */
   actor?: Answerer
+  /**
+   * Daemon-only (the protocol request has no such fields): the model this turn runs on, whatever the
+   * thread's own selection. A hidden or disabled model is refused before a run exists. The thread's
+   * saved selection is never written.
+   */
+  modelOverride?: ModelOverride
+  /** Who the turn runs for; recorded in the run's binding. Defaults to the thread's own origin. */
+  origin?: TurnOrigin
+  /** When false, a thread waiting on a question counts as busy and the send queues instead of answering it. Default true. */
+  preemptQuestions?: boolean
+  /** Carried by the queue item when the send queues, so the item drains with the same model and origin. */
+  queueOrigin?: QueuedMessage['origin']
+  /** The scheduled occurrence this send is; the turn's end reports to the scheduler. */
+  schedule?: ScheduledTurnRef
+  /** Called right after the run is admitted (accepted and new), before it is queued or started. */
+  onAdmitted?: (runId: string) => void
+}
+
+/** The scheduled occurrence a turn is; `jobName` lets the thread show who sent the prompt. */
+export interface ScheduledTurnRef {
+  jobId: string
+  occurrenceKey: string
+  jobName?: string
+}
+
+/** What the scheduler hears from the orchestrator about its occurrences. */
+export interface ScheduledTurnHooks {
+  onOccurrenceSettled(event: {
+    jobId: string
+    occurrenceKey: string
+    runId: string
+    status: 'ok' | 'error' | 'interrupted' | 'uncertain'
+    text?: string
+    error?: string
+    /** The model the run's binding used, so a run that waited in the queue records what ran. */
+    selection?: ModelOverride
+  }): void
 }
 
 /** What `OrchestratorService.stopThread` did: `ok` is true when anything was running or waiting. */
@@ -430,6 +469,12 @@ export interface StopThreadOutcome extends Partial<StopResult> {
  * workflow or legacy turn) before it looks again (C4: the wake stays queued instead of looping).
  */
 export const WAKE_BUSY_DEFER_MS = 5_000
+
+/** The run record's error for a scheduled occurrence whose run the daemon admitted but never started. */
+const SCHEDULED_NEVER_STARTED = 'Interrupted: never started'
+
+/** Open per-run threads one scheduled job may have; settle or delete some, or bind the job to a thread. */
+const MAX_OPEN_SCHEDULED_THREADS = 10
 
 /** Send refusals reported with their reason as the error code (SPEC §16.4). */
 /** Thrown inside the thread write to leave the file untouched when the stale rows no longer need closing. */
@@ -462,6 +507,10 @@ interface TurnStartRequest {
   subagentNotice?: SubagentNoticeItem[]
   /** A mode the turn must not exceed (`OrchestratorSendOptions.permissionMode`). */
   permissionMode?: PermissionMode
+  /** A scheduled turn's model and origin; JSON-safe, so a `turn.start` effect keeps them across a restart. */
+  modelOverride?: ModelOverride
+  origin?: TurnOrigin
+  schedule?: ScheduledTurnRef
 }
 
 /** Payload of a `turn.start` effect (SPEC §12.2). */
@@ -613,6 +662,11 @@ export class OrchestratorService extends EventEmitter {
   private workflowChat?: WorkflowChatExecutor
 
   setWorkflowChatExecutor(executor: WorkflowChatExecutor): void { this.workflowChat = executor }
+
+  private scheduledHooks?: ScheduledTurnHooks
+
+  /** The scheduler hears when a scheduled turn's run ends, wherever (and by whomever) the turn was drained. */
+  setScheduledHooks(hooks: ScheduledTurnHooks | undefined): void { this.scheduledHooks = hooks }
 
   private browserRuntime?: BrowserRuntimePort
   private mainAgentBrowser?: BrowserExecutionBinding
@@ -1439,19 +1493,65 @@ export class OrchestratorService extends EventEmitter {
    */
   private recoverOrphanedFollowUps(): void {
     const engine = this.runEngine
-    const store = this.threadStore
-    if (!engine || !store) return
+    if (!engine || !this.threadStore) return
     for (const run of engine.store.listNonTerminalRuns()) {
-      if (run.status !== 'queued' || run.source !== 'steer-followup') continue
-      if (engine.outbox.listForRun(run.runId).some((effect) => effect.kind === 'turn.start')) continue
-      try {
-        if (readDurableQueue(store, run.threadId).some((item) => item.runId === run.runId)) continue
-      } catch {
-        continue
+      if (run.status !== 'queued') continue
+      // A scheduled occurrence has the same window: its run is admitted, then its effect or queue item is written.
+      if (run.source === 'steer-followup') {
+        if (!this.admissionPending(run.runId, run.threadId)) this.cancelOrphanedAdmission(run.runId, 'The daemon stopped before the follow-up was queued.')
+      } else if (run.source === 'schedule') {
+        if (!this.admissionPending(run.runId, run.threadId)) this.cancelOrphanedAdmission(run.runId, SCHEDULED_NEVER_STARTED)
       }
-      this.markRun(run.runId, (runs, id) => {
-        if (runs.getRun(id)?.status === 'queued') runs.markTerminal(id, 'cancelled', { interruptedBy: 'daemon_restart', error: 'The daemon stopped before the follow-up was queued.' })
-      })
+    }
+  }
+
+  /**
+   * True while a queued run still has something that will start it: a `turn.start` effect or a queue
+   * item carrying its `runId`. A queue that cannot be read counts as pending (nothing is cancelled on a guess).
+   */
+  private admissionPending(runId: string, threadId: string): boolean {
+    const engine = this.runEngine
+    const store = this.threadStore
+    if (!engine || !store) return true
+    if (engine.outbox.listForRun(runId).some((effect) => effect.kind === 'turn.start')) return true
+    try {
+      return readDurableQueue(store, threadId).some((item) => item.runId === runId)
+    } catch {
+      return true
+    }
+  }
+
+  /**
+   * Ends a queued run that nothing can start (the daemon stopped between its admission and the write that
+   * would have started it) as cancelled. A stale write or a run that is already terminal changes nothing.
+   */
+  private cancelOrphanedAdmission(runId: string, error: string): void {
+    this.markRun(runId, (runs, id) => {
+      if (runs.getRun(id)?.status === 'queued') runs.markTerminal(id, 'cancelled', { interruptedBy: 'daemon_restart', error })
+    })
+  }
+
+  /** What the scheduler asks the Run Engine about its admitted occurrences (`ScheduledJobStore.setRunProbe`). */
+  scheduledRunProbe(): ScheduledRunProbe {
+    return {
+      runStatus: (runId) => {
+        const engine = this.runEngine
+        if (!engine) return 'unavailable'
+        const run = engine.getRun(runId)
+        if (!run) return 'absent'
+        const error = run.outcome?.error
+          ?? (run.outcome?.interruptedBy === 'daemon_restart' && run.status === 'interrupted' ? 'Interrupted: the daemon restarted while the run was active' : undefined)
+        return { status: run.status, threadId: run.threadId, ...(error ? { error } : {}) }
+      },
+      admissionPending: (runId, threadId) => this.admissionPending(runId, threadId),
+      cancelOrphanedAdmission: (runId) => this.cancelOrphanedAdmission(runId, SCHEDULED_NEVER_STARTED),
+      receipt: (clientRequestId) => {
+        const receipt = this.runEngine?.store.getReceipt(clientRequestId)
+        const result = receipt?.result
+        if (receipt?.status !== 'accepted' || !result || typeof result !== 'object') return undefined
+        const runId = (result as { runId?: unknown }).runId
+        return typeof runId === 'string' && runId ? { runId, threadId: receipt.threadId } : undefined
+      }
     }
   }
 
@@ -1859,6 +1959,26 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /** The access level a scheduled job's runs are capped at: its creator's, `lineage` when that is not known. */
+  private scheduledAccessCap(cap: AgentAccessLevel | undefined): AgentAccessLevel {
+    return isAgentAccessLevel(cap) ? cap : 'lineage'
+  }
+
+  /**
+   * A scheduled run is never granted more than the cap recorded on it when it was admitted (the job
+   * creator's level), whatever the profile or its thread allow now. A scheduled run with none recorded
+   * is `lineage`; any other run is returned as it is.
+   */
+  private scheduledGrant(runId: string, grant: AgentAccessLevel): AgentAccessLevel {
+    try {
+      const run = this.runEngine?.getRun(runId)
+      if (run?.source !== 'schedule') return grant
+      return narrowAgentAccess(grant, isAgentAccessLevel(run.accessGrant) ? run.accessGrant : 'lineage') ?? 'lineage'
+    } catch {
+      return 'lineage'
+    }
+  }
+
   /** The delegation tools of an in-process turn, holding the grant its registered turn was given at its start. */
   private turnDelegationTools(session: ThreadSession, runId: string, mode: ChatMode, granted: AgentAccessLevel | undefined): DelegationToolHost {
     const ceiling = this.modeCeilingFor(session.threadId, mode)
@@ -1898,7 +2018,7 @@ export class OrchestratorService extends EventEmitter {
     const modeCeiling = this.modeCeilingFor(session.threadId, mode)
     // A bot is held to its grant, which never reaches other threads: it gets the narrowest access
     // level whatever the profile's setting, and nothing continues a bot run as a plain turn.
-    const accessLevel: AgentAccessLevel = bot ? 'lineage' : this.continuedGrant(runId, session.threadId, this.grantFor(session.threadId, modeCeiling))
+    const accessLevel: AgentAccessLevel = bot ? 'lineage' : this.scheduledGrant(runId, this.continuedGrant(runId, session.threadId, this.grantFor(session.threadId, modeCeiling)))
     // Kept on the run, so whatever continues it is never granted more than it was.
     try {
       this.runEngine?.recordAccessGrant(runId, accessLevel)
@@ -2122,7 +2242,10 @@ export class OrchestratorService extends EventEmitter {
         runId: payload.runId,
         admissionHeld,
         subagentNotice: payload.subagentNotice,
-        ...(payload.permissionMode ? { permissionMode: payload.permissionMode } : {})
+        ...(payload.permissionMode ? { permissionMode: payload.permissionMode } : {}),
+        modelOverride: payload.modelOverride,
+        origin: payload.origin,
+        schedule: payload.schedule
       }
     ))
     const runId = payload.runId
@@ -2269,7 +2392,10 @@ export class OrchestratorService extends EventEmitter {
           admissionHeld: payload.admissionHeld,
           externalSignal: signal,
           subagentNotice: payload.subagentNotice,
-          ...(payload.permissionMode ? { permissionMode: payload.permissionMode } : {})
+          ...(payload.permissionMode ? { permissionMode: payload.permissionMode } : {}),
+          modelOverride: payload.modelOverride,
+          origin: payload.origin,
+          schedule: payload.schedule
         }
       )
       entry?.resolve(response)
@@ -2822,6 +2948,24 @@ export class OrchestratorService extends EventEmitter {
       if (policy?.workspace === 'shared') session.sharedWorkspace = this.sharedWorkspaceOf(lineage.parentThreadId)
     } catch (error) {
       console.warn('delegated workspace policy could not be restored', {
+        threadId: session.threadId,
+        error: error instanceof Error ? error.message : String(error)
+      })
+    }
+  }
+
+  /**
+   * A scheduled per-run thread on the project's own checkout keeps that binding: a session built from
+   * storage (after a restart, or once evicted) reads it back, so its turns never provision a worktree.
+   */
+  private restoreScheduledWorkspace(session: ThreadSession): void {
+    if (session.primaryCheckout || !this.threadStore || !this.projectManager) return
+    if (this.threadStore.getThread(session.threadId)?.workspaceBinding?.policy !== 'primary') return
+    try {
+      const path = resolveThreadProjectPath(this.projectManager, this.threadStore, session.threadId)
+      if (path) session.primaryCheckout = { path }
+    } catch (error) {
+      console.warn('scheduled workspace binding could not be restored', {
         threadId: session.threadId,
         error: error instanceof Error ? error.message : String(error)
       })
@@ -4145,6 +4289,7 @@ export class OrchestratorService extends EventEmitter {
     // Hydrate runtime after session is registered to avoid re-entrant create.
     this.sessions.set(threadId, session)
     this.restoreDelegatedWorkspace(session)
+    this.restoreScheduledWorkspace(session)
     if (this.runtimeManager) {
       const rt = this.runtimeManager.getOrHydrate(threadId)
       session.agents = rt.agents
@@ -4443,7 +4588,7 @@ export class OrchestratorService extends EventEmitter {
   enqueueForThread(
     threadId: string,
     input: OrchestratorSendInput,
-    opts?: { source?: string; intent?: 'normal' | 'steer'; internal?: boolean; runId?: string; inboxIds?: string[]; subagentNotice?: SubagentNoticeItem[]; stopGeneration?: number; permissionMode?: PermissionMode }
+    opts?: { source?: string; intent?: 'normal' | 'steer'; internal?: boolean; runId?: string; inboxIds?: string[]; subagentNotice?: SubagentNoticeItem[]; stopGeneration?: number; permissionMode?: PermissionMode; origin?: QueuedMessage['origin'] }
   ): QueuedMessage {
     if (this.threadStore && !this.threadStore.getThread(threadId)) {
       throw new QueueValidationError(`Thread not found: ${threadId}`)
@@ -4477,7 +4622,8 @@ export class OrchestratorService extends EventEmitter {
           inboxIds: opts?.inboxIds,
           subagentNotice: opts?.subagentNotice,
           stopGeneration,
-          permissionMode: opts?.permissionMode
+          permissionMode: opts?.permissionMode,
+          origin: opts?.origin
         })
         item = result.item
         return result.items
@@ -4499,7 +4645,8 @@ export class OrchestratorService extends EventEmitter {
       inboxIds: opts?.inboxIds,
       subagentNotice: opts?.subagentNotice,
       stopGeneration,
-      permissionMode: opts?.permissionMode
+      permissionMode: opts?.permissionMode,
+      origin: opts?.origin
     })
     session.queue = result.items
     item = result.item
@@ -5123,7 +5270,8 @@ export class OrchestratorService extends EventEmitter {
     mode?: ChatMode,
     workflowRun?: WorkflowChatRun,
     subagentNotice?: SubagentNoticeItem[],
-    permissionMode?: PermissionMode
+    permissionMode?: PermissionMode,
+    scheduled?: ScheduledTurnRef
   ): { claimAccepted: boolean } {
     const messagesBefore = this.messages.length
     const nativeBefore = structuredClone(this.nativeContext)
@@ -5172,6 +5320,8 @@ export class OrchestratorService extends EventEmitter {
       queueItemId: queueItemId || undefined,
       workflowInvocationId: workflowRun?.invocationId,
       ...(subagentNotice?.length ? { subagentNotice } : {}),
+      // A job's prompt is not something the person typed; the thread can say whose it is.
+      ...(scheduled ? { scheduled: { jobId: scheduled.jobId, ...(scheduled.jobName ? { jobName: scheduled.jobName } : {}) } } : {}),
       hidden: displayUserMessage ? undefined : true,
       ...(displayUserMessage && mode !== undefined
         ? { mode: normalizeChatMode(mode) }
@@ -5680,19 +5830,22 @@ export class OrchestratorService extends EventEmitter {
    * keeps the message and says why, instead of the transcript holding a prompt with no reply.
    * Other resolution failures still fail the turn as before.
    */
-  private assertSendableSelection(session: ThreadSession, input: OrchestratorSendInput): void {
+  private assertSendableSelection(session: ThreadSession, input: OrchestratorSendInput, override?: ModelOverride, scheduled = false): void {
     const request = normalizeSendRequest(input)
     if (request.workflowInvocationId) return
-    const explicit = session.modelOverride
+    const explicit = override ?? session.modelOverride
     try {
-      this.harness.resolveStored(this.turnSelection(session, request.mode), {
-        purpose: 'turn',
+      this.harness.resolveStored(this.turnSelection(session, request.mode, override), {
+        // A scheduled send is checked as one: a thread's own runtime that approves tools itself cannot
+        // run it, and that is found out before the prompt is written into the thread.
+        purpose: scheduled ? 'schedule' : 'turn',
         scope: this.threadScope(session.threadId),
         unselectedDefault: !explicit
       })
     } catch (error) {
       const code = (error as { code?: unknown } | undefined)?.code
       if (code === 'model_hidden' || code === 'instance_disabled' || code === PROVIDER_INSTANCE_ERROR_CODES.disabled) throw error
+      if (scheduled && code === 'policy_unenforceable') throw error
     }
   }
 
@@ -5721,7 +5874,7 @@ export class OrchestratorService extends EventEmitter {
     if (opts?.forceQueue || session.isTurnRunning()) this.assertQueueOpen(threadId)
     // Only a new message is checked: a replay of an accepted request returns its run as it was.
     const admit = !reuseLastUser && !opts?.continuationOfRunId && opts?.source !== 'wake'
-      ? () => this.assertSendableSelection(session, input)
+      ? () => this.assertSendableSelection(session, input, opts?.modelOverride, opts?.origin === 'schedule')
       : undefined
 
     // The run is durable before any queue/run decision or provider I/O (SPEC §2.1).
@@ -5751,12 +5904,26 @@ export class OrchestratorService extends EventEmitter {
         return { message: '', actions: [], ...replayed }
       }
       run = { runId: result.runId, sequence: result.sequence }
+      // The caller records the run before anything is queued or started, so a restart can find it. When it
+      // cannot (its claim was lost), the run is cancelled and the send fails: nothing runs unrecorded.
+      if (opts?.onAdmitted) {
+        try {
+          opts.onAdmitted(run.runId)
+        } catch (error) {
+          logDebug('OrchestratorService', 'admission observer failed', error, { threadId, runId: run.runId })
+          this.cancelOrphanedAdmission(run.runId, 'The send was refused: ' + (error instanceof Error ? error.message : String(error)))
+          throw error
+        }
+      }
     } else {
       admit?.()
     }
 
+    // A thread waiting on the user's answer is busy for a send that must not answer it (a scheduled run).
+    const waitingOnUser = opts?.preemptQuestions === false && this.questions.listPendingForThread(threadId).length > 0
+
     // A follow-up from a parent (`continue_subagent`) never answers the subagent's question for it.
-    if (!opts?.forceQueue && !opts?.delegation) {
+    if (!opts?.forceQueue && !opts?.delegation && opts?.preemptQuestions !== false) {
       // The sender denies the approvals only when it may answer them; otherwise they stay pending
       // and the message queues behind the turn.
       const preempted = this.questions.autoRejectPendingForThread(threadId, opts?.actor)
@@ -5779,8 +5946,8 @@ export class OrchestratorService extends EventEmitter {
         return this.isThreadLeaseHeldExternally(threadId, session.executionLease?.owner.token)
       })()
 
-    if (session.isTurnRunning() || opts?.forceQueue || externalLease) {
-      const item = this.enqueueForThread(threadId, input, { source: opts?.source, runId: run?.runId, permissionMode: opts?.permissionMode })
+    if (session.isTurnRunning() || opts?.forceQueue || externalLease || waitingOnUser) {
+      const item = this.enqueueForThread(threadId, input, { source: opts?.source, runId: run?.runId, permissionMode: opts?.permissionMode, origin: opts?.queueOrigin })
       return {
         message: '',
         actions: [],
@@ -5799,7 +5966,10 @@ export class OrchestratorService extends EventEmitter {
         reuseLastUser,
         displayUserMessage: opts?.source !== 'wake',
         source: opts?.source,
-        ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {})
+        ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {}),
+        ...(opts?.modelOverride ? { modelOverride: opts.modelOverride } : {}),
+        ...(opts?.origin ? { origin: opts.origin } : {}),
+        ...(opts?.schedule ? { schedule: opts.schedule } : {})
       })
       if (opts?.awaitMode === 'ack') {
         pending.catch(() => undefined)
@@ -5808,7 +5978,14 @@ export class OrchestratorService extends EventEmitter {
       return { ...(await pending), ...run }
     }
 
-    const response = await this.runTurnOnSession(session, input, reuseLastUser, opts?.source !== 'wake', { source: opts?.source, runId: run?.runId, ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {}) })
+    const response = await this.runTurnOnSession(session, input, reuseLastUser, opts?.source !== 'wake', {
+      source: opts?.source,
+      runId: run?.runId,
+      modelOverride: opts?.modelOverride,
+      origin: opts?.origin,
+      schedule: opts?.schedule,
+      ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {})
+    })
     return run ? { ...response, ...run } : response
   }
 
@@ -5881,6 +6058,10 @@ export class OrchestratorService extends EventEmitter {
       externalSignal?: AbortSignal
       externalDrainSteer?: () => string | undefined
       modelOverride?: ModelOverride
+      /** Who the turn runs for, when it is not the thread's own (a scheduled job). */
+      origin?: TurnOrigin
+      /** The scheduled occurrence this turn is; the scheduler hears when its run ends. */
+      schedule?: ScheduledTurnRef
       onTurnSettled?: (aborted: boolean) => void
       onUserInputAccepted?: () => void
       /** The caller already admitted this session (see ThreadSession.turnAdmitted) and hands ownership to this turn. */
@@ -5938,6 +6119,7 @@ export class OrchestratorService extends EventEmitter {
       const requeued = turnResponse?.queued === true ||
         (opts?.queueItemId !== undefined && session.queue.some((item) => item.id === opts.queueItemId))
       this.settleRunAfterTurn(opts?.runId, requeued, turnFailure)
+      if (opts?.schedule && opts.runId && !requeued) this.reportScheduledOccurrence(session, opts.schedule, opts.runId, turnResponse)
       this.releaseSessionExecutionLease(session)
       session.turnAdmitted = false
       session.admissionRunId = undefined
@@ -5953,6 +6135,52 @@ export class OrchestratorService extends EventEmitter {
           logDebug('OrchestratorService', 'post-turn queue drain failed to schedule', error, { threadId: session.threadId })
         }
       }
+    }
+  }
+
+  /**
+   * A scheduled turn's run ended: the scheduler hears the outcome, whichever process drained the turn
+   * (every daemon over the profile home runs this hook, and completing an occurrence is idempotent). Only a
+   * terminal run reports: a run still `queued` (a peer holds the thread lease, or the item survived a
+   * pre-accept failure) keeps its reservation until the execution that does end it. Status and error
+   * come from the Run Engine run, the reply text from the turn (or the thread's last reply when the
+   * wrapper returned none).
+   */
+  private reportScheduledOccurrence(
+    session: ThreadSession,
+    schedule: ScheduledTurnRef,
+    runId: string,
+    response: OrchestratorResponse | undefined
+  ): void {
+    const hooks = this.scheduledHooks
+    const run = this.runEngine?.getRun(runId)
+    if (!hooks || !run || !TERMINAL_RUN_STATUSES.has(run.status)) return
+    const result = occurrenceResultOfRun({ status: run.status, error: run.outcome?.error })
+    let text: string | undefined
+    if (result.status === 'ok') {
+      text = response?.message?.trim()
+      if (!text) text = [...session.messages].reverse().find((message) => message.role === 'assistant' && !message.hidden && !message.kind && message.content.trim())?.content.trim()
+      text = text || 'Done.'
+    }
+    let selection: ModelOverride | undefined
+    try {
+      const bound = this.runEngine?.bindingForRun(runId)
+      if (bound) selection = { ...this.harness.selectionOf(bound) }
+    } catch {
+      // A binding that cannot be read leaves the record without a model; the outcome still reports.
+    }
+    try {
+      hooks.onOccurrenceSettled({
+        jobId: schedule.jobId,
+        occurrenceKey: schedule.occurrenceKey,
+        runId,
+        status: result.status,
+        ...(text !== undefined ? { text } : {}),
+        ...(result.error ? { error: result.error } : {}),
+        ...(selection ? { selection } : {})
+      })
+    } catch (error) {
+      logDebug('OrchestratorService', 'scheduled occurrence observer failed', error, { runId })
     }
   }
 
@@ -6059,6 +6287,8 @@ export class OrchestratorService extends EventEmitter {
       externalSignal?: AbortSignal
       externalDrainSteer?: () => string | undefined
       modelOverride?: ModelOverride
+      origin?: TurnOrigin
+      schedule?: ScheduledTurnRef
       onTurnSettled?: (aborted: boolean) => void
       onUserInputAccepted?: () => void
       runId?: string
@@ -6110,7 +6340,9 @@ export class OrchestratorService extends EventEmitter {
               queueItem: released ?? undefined
             }
           }
-          const item = this.enqueueForThread(session.threadId, input, { source: 'lease-race', runId: opts?.runId, permissionMode: opts?.permissionMode })
+          // A scheduled turn keeps its model and origin on the item, so the drain that runs it later binds them.
+          const origin = opts?.schedule ? { kind: 'schedule' as const, ...opts.schedule, ...(opts.modelOverride ? { selection: opts.modelOverride } : {}) } : undefined
+          const item = this.enqueueForThread(session.threadId, input, { source: opts?.schedule ? 'schedule' : 'lease-race', runId: opts?.runId, permissionMode: opts?.permissionMode, origin })
           return {
             message: '',
             actions: [],
@@ -6157,6 +6389,18 @@ export class OrchestratorService extends EventEmitter {
       // A read-only delegated child observes its parent's workspace (SPEC §14.2 `shared`).
       session.workspace = null
       session.projectCwd = session.sharedWorkspace.path
+    } else if (session.primaryCheckout) {
+      // A scheduled run on the project's own checkout: never a provisioned worktree, and never `null`,
+      // so a tool that needs an owned workspace refuses instead of provisioning one.
+      let gitBacked = false
+      try {
+        const threadDir = this.resolveThreadDir(session.threadId)
+        gitBacked = Boolean(threadDir && new ThreadWorkspaceManager(threadDir).resolveRepository(session.primaryCheckout.path).capability.gitBacked)
+      } catch {
+        // Not a repository the checkout code understands: the context says so.
+      }
+      session.workspace = unprovisionedContext(session.threadId, session.primaryCheckout.path, gitBacked, 'Scheduled run on the primary checkout')
+      session.projectCwd = resolveProjectWorkingDirectory(session.primaryCheckout.path)
     } else if (session.threadId !== '__unbound__' && this.projectManager && this.threadStore) {
         const projectPath = resolveThreadProjectPath(
           this.projectManager,
@@ -6242,7 +6486,8 @@ export class OrchestratorService extends EventEmitter {
             mode,
             undefined,
             opts?.subagentNotice,
-            turnPermission
+            turnPermission,
+            opts?.schedule
           )
           claimAccepted = true
           this.notifyUserInputAccepted(session.threadId, opts?.onUserInputAccepted)
@@ -6491,7 +6736,7 @@ export class OrchestratorService extends EventEmitter {
         if (refusal) throw new AppError({ code: refusal.code, message: refusal.message, errorInfo: { category: 'unavailable', retryable: false } })
       }
       // The attempt's immutable binding; a retry of the same run keeps the one it already has.
-      const binding = await this.bindTurn(engineRunId, runBinding, instance, mode, () => this.turnOrigin(session.threadId, request.workflowInvocationId), {
+      const binding = await this.bindTurn(engineRunId, runBinding, instance, mode, () => opts?.origin ?? this.turnOrigin(session.threadId, request.workflowInvocationId), {
         permissionMode: this.requestedPermissionMode(session.threadId, opts?.permissionMode),
         cwd: opts?.bot ? opts.bot.scratch : session.projectCwd
       }, opts?.bot?.policy)
@@ -7285,7 +7530,15 @@ export class OrchestratorService extends EventEmitter {
       suppressAutoQueueDrain: managedByStartup,
       admissionHeld,
       ...(queued.permissionMode ? { permissionMode: queued.permissionMode } : {}),
-      ...(queued.inboxIds?.length ? { inboxIds: queued.inboxIds, subagentNotice: queued.subagentNotice } : {})
+            ...(queued.inboxIds?.length ? { inboxIds: queued.inboxIds, subagentNotice: queued.subagentNotice } : {}),
+      // The item is consumed when the turn accepts its input, so what the run needs travels on the request.
+      ...(queued.origin?.kind === 'schedule'
+        ? {
+            ...(queued.origin.selection ? { modelOverride: queued.origin.selection } : {}),
+            origin: 'schedule' as const,
+            schedule: { jobId: queued.origin.jobId, occurrenceKey: queued.origin.occurrenceKey, ...(queued.origin.jobName ? { jobName: queued.origin.jobName } : {}) }
+          }
+        : {})
     })
     let started: Promise<OrchestratorResponse>
     if (!item.runId && this.runEngine) {
@@ -8013,16 +8266,136 @@ export class OrchestratorService extends EventEmitter {
           })
         : null
       if (workflow) return workflow
-      const result = await this.llm.chat([userMessage(prompt)], () => {}, {
-        mode: 'agent', signal: this.lifecycle.signal
-      })
-      const text = stripActionBlocks(result.text) || result.text.trim() || 'Done.'
-      const silent = text.trim() === '[SILENT]' || text.trimStart().startsWith('[SILENT]')
-      return { text, silent }
+      if (!ingress) return { text: '', silent: false, error: 'A scheduled run needs its job' }
+      return await this.runScheduledTurn(prompt, ingress)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       return { text: '', silent: false, error: message }
     }
+  }
+
+  /**
+   * The thread a scheduled occurrence runs on: the one its claim already chose (a retry), the job's own
+   * thread, the owner of the job's existing worktree, else a new per-run thread. A bound job runs in its
+   * thread's own workspace; a per-run thread works on the project's checkout unless the job asks for a new worktree.
+   */
+  private chooseScheduledThread(ingress: ScheduledJobIngress): { threadId: string; created: boolean } {
+    const store = this.threadStore
+    if (!store) throw new Error('Scheduled turns need the thread store')
+    const usable = (id?: string): string | undefined => {
+      const thread = id ? store.getThread(id) : undefined
+      return thread && !thread.settledAt ? thread.id : undefined
+    }
+    const existing = usable(ingress.claim?.threadId) ?? usable(ingress.threadId)
+    // The project and the requested worktree are checked now, for a saved thread as much as for a new one:
+    // a removed project can leave its threads readable, and a worktree can change hands.
+    const projectId = ingress.projectId ?? (existing ? store.getThread(existing)?.projectId : undefined)
+    const projectPath = projectId ? this.projectManager?.getProject(projectId)?.path : undefined
+    // A removed project fails the run; it must not quietly become a run with no project.
+    if (projectId && !projectPath) throw new Error('The job\'s project no longer exists: ' + projectId)
+    if (ingress.workspace?.kind === 'worktree') {
+      if (!projectId) throw new Error('A job that runs in an existing worktree needs a project')
+      const owner = findWorktreeOwner(
+        store.listAllThreads().filter((thread) => thread.projectId === projectId),
+        ingress.workspace.path,
+        (threadId) => new ThreadWorkspaceManager(store.getThreadDir(threadId)).load()
+      )
+      if (!owner) throw new Error('No thread owns a ready worktree at ' + ingress.workspace.path + ' any more')
+      if (existing && existing !== owner.id) throw new Error('The thread this job runs on no longer owns the worktree at ' + ingress.workspace.path)
+      return { threadId: owner.id, created: false }
+    }
+    if (existing) return { threadId: existing, created: false }
+    if (ingress.threadId) throw new Error('Scheduled thread is unavailable')
+    // Only a new worktree per run is a resource that piles up; a run on the project's checkout settles its thread when it ends.
+    if (ingress.workspace?.kind === 'newWorktree') {
+      const open = store.listAllThreads().filter((thread) => thread.scheduledJobId === ingress.jobId && !thread.settledAt).length
+      if (open >= MAX_OPEN_SCHEDULED_THREADS) {
+        throw new Error(`Job has ${MAX_OPEN_SCHEDULED_THREADS} open per-run worktree threads; settle or delete some, or bind the job to a thread.`)
+      }
+    }
+    // The resolver runs a non-Git project on its own checkout; a job that asked for a new worktree must not.
+    if (ingress.workspace?.kind === 'newWorktree' && projectPath) {
+      let gitBacked = false
+      try {
+        gitBacked = new ThreadWorkspaceManager('').resolveRepository(projectPath).capability.gitBacked
+      } catch {
+        // Not a repository the checkout code understands.
+      }
+      if (!gitBacked) throw new Error('The job asks for a new worktree, but the project is no longer backed by a Git repository')
+    }
+    const thread = store.createThread('Scheduled: ' + (ingress.jobName ?? 'job'), ingress.projectId, projectPath, {
+      ...(ingress.selection ? { modelOverride: ingress.selection } : {}),
+      scheduledJobId: ingress.jobId,
+      // What agents in this thread may reach, fixed like a channel thread's: the job creator's level, `lineage` when unknown.
+      accessCeiling: this.scheduledAccessCap(ingress.accessCap),
+      ...(ingress.projectId && ingress.workspace?.kind !== 'newWorktree' ? { workspaceBinding: { policy: 'primary' as const } } : {})
+    })
+    return { threadId: thread.id, created: true }
+  }
+
+  /**
+   * Runs a plain-prompt occurrence as a turn on its thread, through the same admission as any send: the
+   * run is durable first (`schedule:<job>:<occurrence>` makes the dispatch idempotent), then it runs now when
+   * the thread is idle or waits as one queue item when it is not. Called inside `runIsolatedScheduledJob`'s
+   * lifecycle hold, so it uses `sendOwned`: past its claim, an occurrence is fenced by the scheduler's
+   * shutdown, not refused as `profile_draining`.
+   */
+  private async runScheduledTurn(prompt: string, ingress: ScheduledJobIngress): Promise<BackgroundWorkflowTurnResult> {
+    const occurrenceKey = ingress.occurrenceKey ?? ingress.occurrenceAt
+    const { threadId, created } = this.chooseScheduledThread(ingress)
+    let admittedRunId = ingress.claim?.runId
+    const discardIfUnused = (): void => {
+      if (!created || admittedRunId) return
+      try { this.threadStore?.discardUnusedThread(threadId) } catch { /* it has content; it stays */ }
+    }
+    try {
+      ingress.onThreadChosen?.(threadId)
+    } catch (error) {
+      discardIfUnused()
+      throw error
+    }
+    const selection = ingress.selection
+    const schedule = { jobId: ingress.jobId, occurrenceKey, ...(ingress.jobName ? { jobName: ingress.jobName } : {}) }
+    let response: OrchestratorResponse
+    try {
+      response = await this.sendOwned({ content: prompt, mode: ingress.mode ?? 'agent' }, false, {
+        threadId,
+        source: 'schedule',
+        clientRequestId: scheduledReceiptId(ingress.jobId, occurrenceKey),
+        modelOverride: selection,
+        origin: 'schedule',
+        preemptQuestions: false,
+        queueOrigin: { kind: 'schedule', jobId: ingress.jobId, occurrenceKey, ...(ingress.jobName ? { jobName: ingress.jobName } : {}), ...(selection ? { selection } : {}) },
+        schedule,
+        onAdmitted: (runId) => {
+          admittedRunId = runId
+          // Recorded on the run before anything starts (only ever narrower); a run with none is granted `lineage`.
+          try {
+            this.runEngine?.recordAccessGrant(runId, this.scheduledAccessCap(ingress.accessCap))
+          } catch (error) {
+            logDebug('OrchestratorService', 'scheduled access cap could not be recorded', error, { runId })
+          }
+          ingress.onAdmitted?.(runId)
+        },
+        awaitMode: 'turn'
+      })
+    } catch (error) {
+      discardIfUnused()
+      return { text: '', silent: false, error: error instanceof Error ? error.message : String(error), threadId, ...(admittedRunId ? { runId: admittedRunId } : {}), transcriptWritten: true }
+    }
+    const runId = response.runId
+    const bound = runId ? this.runEngine?.bindingForRun(runId) : undefined
+    const base = {
+      threadId,
+      ...(runId ? { runId } : {}),
+      ...(bound ? { selection: { ...this.harness.selectionOf(bound) } } : {}),
+      transcriptWritten: true
+    }
+    if (response.replayed) return { ...base, text: '', silent: false, status: 'replayed' }
+    if (response.queued) return { ...base, text: '', silent: false, status: 'queued', ...(response.queueItem ? { queueItemId: response.queueItem.id } : {}) }
+    const text = response.message?.trim() || 'Done.'
+    const silent = text === '[SILENT]' || text.startsWith('[SILENT]')
+    return { ...base, text, silent }
   }
 
   async runChannelTurn(

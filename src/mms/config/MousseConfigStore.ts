@@ -108,6 +108,11 @@ function jobToDefinition(job: ScheduledJob): ScheduledJobDefinition {
     threadId: job.threadId,
     projectId: job.projectId,
     createThread: job.createThread,
+    selection: job.selection,
+    mode: job.mode,
+    workspace: job.workspace,
+    createdBy: job.createdBy,
+    accessCap: job.accessCap,
     repeat: job.repeat?.times
       ? { times: job.repeat.times, completed: job.repeat.completed }
       : undefined,

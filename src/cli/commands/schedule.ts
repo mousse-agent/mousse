@@ -1,6 +1,6 @@
-import type { JobSchedule, ScheduledJob } from '../../shared/types'
+import type { CreateScheduledJobInput, JobSchedule, ScheduledJob, ScheduledJobWorkspace } from '../../shared/types'
 import type { ParsedArgs } from '../parseArgs'
-import { flagString } from '../parseArgs'
+import { flagBool, flagString } from '../parseArgs'
 import { exitWithError, formatTable, writeOutput } from '../output'
 import { closeMmsContext, openMms } from '../mmsContext'
 import { SCHEDULE_HELP } from '../help'
@@ -25,12 +25,14 @@ export async function runSchedule(args: ParsedArgs): Promise<void> {
           const rows = data as ScheduledJob[]
           if (rows.length === 0) return 'No scheduled jobs.'
           return formatTable([
-            ['ID', 'NAME', 'ENABLED', 'STATE', 'NEXT'],
+            ['ID', 'NAME', 'ENABLED', 'STATE', 'MODEL', 'NEXT'],
             ...rows.map((job: ScheduledJob) => [
               job.id.slice(0, 8),
               job.name,
               String(job.enabled),
-              job.state,
+              // An admitted occurrence that has not ended is shown as queued, whatever the job's own state.
+              job.pendingOccurrence ? 'queued' : job.state,
+              job.selection ? `${job.selection.instanceId ?? job.selection.llmProvider}/${job.selection.model}` : '-',
               job.nextRunAt ?? '-'
             ])
           ])
@@ -44,9 +46,13 @@ export async function runSchedule(args: ParsedArgs): Promise<void> {
           exitWithError('schedule add requires --name and --prompt.', globals.mode)
         }
         const schedule = parseSchedule(flags, globals.mode)
-        const res = await client.request<{ job: ScheduledJob }>('scheduled.create', {
-          input: { name, prompt, schedule }
-        })
+        let input: CreateScheduledJobInput
+        try {
+          input = buildScheduleAddInput(name, prompt, schedule, flags)
+        } catch (error) {
+          exitWithError(error instanceof Error ? error.message : String(error), globals.mode)
+        }
+        const res = await client.request<{ job: ScheduledJob }>('scheduled.create', { input })
         writeOutput(globals.mode, res.job)
         break
       }
@@ -94,12 +100,52 @@ export async function runSchedule(args: ParsedArgs): Promise<void> {
   }
 }
 
+/**
+ * The `scheduled.create` input for `schedule add`. The selection names the instance and model only: the
+ * profile fills in the provider when it resolves them. `--mode` is also the global output format
+ * (`text|json`), so only `agent` and `plan` are the job's mode.
+ */
+export function buildScheduleAddInput(
+  name: string,
+  prompt: string,
+  schedule: JobSchedule,
+  flags: ParsedArgs['flags']
+): CreateScheduledJobInput {
+  const input: CreateScheduledJobInput = { name, prompt, schedule }
+  const instance = flagString(flags, 'instance')
+  const model = flagString(flags, 'model')
+  if (instance || model) {
+    if (!instance || !model) throw new Error('--instance and --model go together.')
+    input.selection = { instanceId: instance, model } as CreateScheduledJobInput['selection']
+  }
+  const mode = flagString(flags, 'mode')
+  if (mode !== undefined && mode !== 'text' && mode !== 'json') {
+    if (mode !== 'agent' && mode !== 'plan') throw new Error('--mode must be agent or plan.')
+    input.mode = mode
+  }
+  const workspace = flagString(flags, 'workspace')
+  if (workspace !== undefined) input.workspace = parseWorkspace(workspace)
+  const project = flagString(flags, 'project')
+  if (project) input.projectId = project
+  const thread = flagString(flags, 'thread')
+  if (thread) input.threadId = thread
+  return input
+}
+
+/** `project`, `new-worktree`, or the path of an existing worktree. */
+function parseWorkspace(value: string): ScheduledJobWorkspace {
+  if (value === 'project') return { kind: 'project' }
+  if (value === 'new-worktree') return { kind: 'newWorktree' }
+  return { kind: 'worktree', path: value }
+}
+
 function parseSchedule(
   flags: ParsedArgs['flags'],
   mode: ParsedArgs['globals']['mode']
 ): JobSchedule {
   const cron = flagString(flags, 'cron')
   const every = flagString(flags, 'every')
+  if (flagBool(flags, 'manual')) return { kind: 'manual' }
   if (cron) return { kind: 'cron', expr: cron }
   if (every) {
     const minutes = Number(every)
@@ -108,6 +154,6 @@ function parseSchedule(
     }
     return { kind: 'interval', minutes }
   }
-  exitWithError('Provide --cron or --every for schedule.', mode)
+  exitWithError('Provide --cron, --every or --manual for schedule.', mode)
   return { kind: 'interval', minutes: 60 }
 }

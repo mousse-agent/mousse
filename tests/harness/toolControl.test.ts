@@ -85,7 +85,7 @@ describe('checkPolicy', () => {
     expect(checkPolicy({ ...caps('uncontrolled'), budgets: 'unsupported' }, policy({ budget: { maxWallMs: 60_000 } }))).toEqual({ ok: true })
   })
 
-  it.each(['delegated', 'workflow', 'definition', 'bot'] as const)('refuses an uncontrolled instance for a %s turn', (origin) => {
+  it.each(['delegated', 'workflow', 'definition', 'bot', 'schedule'] as const)('refuses an uncontrolled instance for a %s turn', (origin) => {
     expect(checkPolicy(caps('uncontrolled'), policy({ origin }))).toMatchObject({ ok: false, error: { missing: ['toolControl'] } })
     expect(checkPolicy(caps('approval_only'), policy({ origin }))).toEqual({ ok: true })
   })
@@ -103,7 +103,7 @@ describe('checkPolicy', () => {
 describe('purposes', () => {
   it('allows only the interactive purposes on an uncontrolled instance', () => {
     for (const purpose of INTERACTIVE_PURPOSES) expect(purposeAllowed(caps('uncontrolled'), purpose)).toBe(true)
-    for (const purpose of ['delegate_task', 'definition', 'workflow', 'title', 'bot_reply'])
+    for (const purpose of ['delegate_task', 'definition', 'workflow', 'title', 'bot_reply', 'schedule'])
       expect(purposeAllowed(caps('uncontrolled'), purpose), purpose).toBe(false)
     expect(purposeAllowed(caps('approval_only'), 'delegate_task')).toBe(true)
   })
@@ -157,9 +157,19 @@ describe('the gateway on an uncontrolled instance', () => {
   it('resolves for the composer and refuses delegation, definitions, workflows and titles', () => {
     const { harness } = fixture()
     expect(harness.resolve({ instanceId: 'codex', model: 'm' }, { kind: 'device' }, 'composer').caps.toolControl).toBe('uncontrolled')
-    for (const purpose of ['delegate_task', 'definition', 'workflow'] as const)
+    for (const purpose of ['delegate_task', 'definition', 'workflow', 'schedule'] as const)
       expect(() => harness.resolve({ instanceId: 'codex', model: 'm' }, { kind: 'device' }, purpose)).toThrow(expect.objectContaining({ code: 'policy_unenforceable' }))
     expect(() => harness.resolveStored({ instanceId: 'codex', llmProvider: '', model: 'm' }, { purpose: 'delegate_task' })).toThrow(/approves tools itself/)
+    expect(() => harness.resolveStored({ instanceId: 'codex', llmProvider: '', model: 'm' }, { purpose: 'schedule' })).toThrow(/approves tools itself/)
+  })
+
+  it('binds a scheduled turn with the schedule origin and refuses it on an uncontrolled instance', async () => {
+    const { harness, adapter, spec } = fixture()
+    const resolved = harness.resolveStored({ instanceId: 'codex', llmProvider: '', model: 'm' }, { purpose: 'turn' })
+    const scheduled = await harness.bind(resolved, { mode: 'agent', origin: 'schedule', permissionMode: 'full' })
+    expect(scheduled.policy.origin).toBe('schedule')
+    await expect(harness.startTurn(spec(scheduled, 'job-thread')).result).rejects.toMatchObject({ code: 'policy_unenforceable' })
+    expect(adapter.turns).toEqual([])
   })
 
   it('refuses a delegated child turn, its retry and its continuation, and runs a person’s turn', async () => {
