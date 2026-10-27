@@ -21,6 +21,13 @@ export interface BridgeDispatchInput {
   fetch?: boolean
   push?: boolean
 }
+/** Images per message, as for local sends (MMS_PROTOCOL_MAX_IMAGES). */
+export const REMOTE_MAX_ATTACHMENTS = 16
+/** Base64 characters in one staged chunk; keeps each request well inside one 64 KiB frame. */
+export const REMOTE_ATTACHMENT_CHUNK_CHARS = 48 * 1024
+/** Base64 characters in one staged image (MMS_PROTOCOL_MAX_IMAGE_BASE64_CHARS). */
+export const REMOTE_ATTACHMENT_MAX_CHARS = 3 * 1024 * 1024
+export const REMOTE_ATTACHMENT_MIME = /^image\/(png|jpeg|gif|webp|bmp)$/
 /** A remote send or queued message: text, optional chat mode, and images staged with `attachments.stage`. */
 export interface BridgeChatInput {
   threadId: string
@@ -169,6 +176,9 @@ export const BRIDGE_HUB_LOCAL_METHODS = [
   'bridge.hub.search',
   'bridge.hub.create',
   'bridge.hub.openProject',
+  'bridge.hub.composerOptions',
+  'bridge.hub.setModel',
+  'bridge.hub.stageAttachment',
   'bridge.hub.send',
   'bridge.hub.steer',
   'bridge.hub.abort',
@@ -210,9 +220,29 @@ export interface BridgeHubLocalParams {
     path: string
     options?: BridgeHubRequestOptions
   }
+  /** The models, modes and skills the target's composer offers (`composer.options`). */
+  'bridge.hub.composerOptions': {
+    target: NodeId
+    threadId?: string
+    options?: BridgeHubRequestOptions
+  }
+  'bridge.hub.setModel': {
+    ref: BridgeEntityRef
+    model: BridgeRemoteParams['threads.setModel']['model']
+    options?: BridgeHubRequestOptions
+  }
+  /** One base64 slice of an image the next `bridge.hub.send` names in `attachments`. */
+  'bridge.hub.stageAttachment': BridgeRemoteParams['attachments.stage'] & {
+    target: NodeId
+    options?: BridgeHubRequestOptions
+  }
   'bridge.hub.send': {
     ref: BridgeEntityRef
     content: string
+    /** Chat mode for this message, as `orchestrator.send` takes it. */
+    mode?: BridgeChatInput['mode']
+    /** Upload ids staged with `bridge.hub.stageAttachment`. */
+    attachments?: string[]
     options?: BridgeHubRequestOptions
   }
   'bridge.hub.steer': {

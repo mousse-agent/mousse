@@ -15,6 +15,7 @@ import type {
   BridgeMethod,
   BridgeRemoteParams,
   BridgeHubCreateOptions,
+  BridgeChatInput,
   BridgeHubRequestOptions,
   BridgeHubRequestStatus,
   BridgeThreadOpenResult,
@@ -606,16 +607,38 @@ export class BridgeHub {
   ): Promise<unknown> {
     return this.call(target, 'projects.open', { path }, options)
   }
+  composerOptions(
+    target: NodeId,
+    threadId?: string,
+    options: BridgeHubRequestOptions = {}
+  ): Promise<unknown> {
+    return this.call(target, 'composer.options', threadId ? { threadId } : {}, options)
+  }
+  setModel(
+    ref: BridgeEntityRef,
+    model: BridgeRemoteParams['threads.setModel']['model'],
+    options: BridgeHubRequestOptions = {}
+  ): Promise<unknown> {
+    return this.call(ref.nodeId, 'threads.setModel', { threadId: ref.entityId, model }, options)
+  }
+  stageAttachment(
+    target: NodeId,
+    chunk: BridgeRemoteParams['attachments.stage'],
+    options: BridgeHubRequestOptions = {}
+  ): Promise<unknown> {
+    return this.call(target, 'attachments.stage', chunk, options)
+  }
   send(
     ref: BridgeEntityRef,
     content: string,
     options: BridgeHubRequestOptions = {},
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    extra: Pick<BridgeChatInput, 'mode' | 'attachments'> = {}
   ): Promise<unknown> {
     return this.call(
       ref.nodeId,
       'orchestrator.send',
-      { threadId: ref.entityId, content },
+      { threadId: ref.entityId, content, ...extra },
       options,
       signal
     )

@@ -1,14 +1,20 @@
 import { NetError, isId } from '../../../shared/net'
 import { canonicalJson } from '../../net/sync/codec'
 import type { BridgeRemoteMethod } from './capabilities'
+import {
+  REMOTE_MAX_ATTACHMENTS,
+  REMOTE_ATTACHMENT_CHUNK_CHARS,
+  REMOTE_ATTACHMENT_MAX_CHARS,
+  REMOTE_ATTACHMENT_MIME
+} from '../../../shared/bridge'
 
-/** Images per message, as for local sends (MMS_PROTOCOL_MAX_IMAGES). */
-export const REMOTE_MAX_ATTACHMENTS = 16
-/** Base64 characters in one staged chunk; keeps each request well inside one 64 KiB frame. */
-export const REMOTE_ATTACHMENT_CHUNK_CHARS = 48 * 1024
-/** Base64 characters in one staged image (MMS_PROTOCOL_MAX_IMAGE_BASE64_CHARS). */
-export const REMOTE_ATTACHMENT_MAX_CHARS = 3 * 1024 * 1024
-export const REMOTE_ATTACHMENT_MIME = /^image\/(png|jpeg|gif|webp|bmp)$/
+export {
+  REMOTE_MAX_ATTACHMENTS,
+  REMOTE_ATTACHMENT_CHUNK_CHARS,
+  REMOTE_ATTACHMENT_MAX_CHARS,
+  REMOTE_ATTACHMENT_MIME
+}
+
 const UPLOAD_ID = /^[A-Za-z0-9_-]{8,64}$/
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/
 const BUILT_IN_MODES = new Set(['agent', 'plan', 'build'])

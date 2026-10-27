@@ -356,7 +356,7 @@ export class LocalMmsClient implements MmsClient {
     const effectiveTimeoutMs =
       timeoutMs ??
       this.opts.requestTimeoutMs ??
-      (method === 'orchestrator.send'
+      (method === 'orchestrator.send' || method === 'bridge.hub.send'
         ? MMS_PROTOCOL_ORCHESTRATOR_SEND_TIMEOUT_MS
         : method === 'providers.loginOAuth' || method === 'providers.loginApiKey' || method === 'mcp.beginAuth' || method === 'mcp.authenticate'
         ? MMS_PROTOCOL_LOGIN_TIMEOUT_MS
