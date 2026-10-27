@@ -146,6 +146,21 @@ export function isNetErrorCode(value: unknown): value is NetErrorCode {
   return typeof value === 'string' && Object.hasOwn(NET_ERRORS, value)
 }
 
+/**
+ * Why a routed call to another computer was refused (`forbidden`). It lets the caller say "turn on
+ * Works on threads", "this computer blocked this device" or "turned the setting off" instead of a
+ * bare "not permitted". Fixed words only: it is the one detail of an error that crosses the wire.
+ */
+export const FORBIDDEN_REASONS = ['capability', 'blocked', 'setting_off', 'terminal_off'] as const
+export type ForbiddenReason = (typeof FORBIDDEN_REASONS)[number]
+export const isForbiddenReason = (value: unknown): value is ForbiddenReason =>
+  (FORBIDDEN_REASONS as readonly unknown[]).includes(value)
+/** The reason a `forbidden` error carries in its details, if it names one. */
+export function forbiddenReason(details: unknown): ForbiddenReason | undefined {
+  const reason = (details as { reason?: unknown } | null | undefined)?.reason
+  return isForbiddenReason(reason) ? reason : undefined
+}
+
 /** Error with a stable code and an optional preserved cause chain. */
 export class NetError extends Error {
   readonly code: NetErrorCode

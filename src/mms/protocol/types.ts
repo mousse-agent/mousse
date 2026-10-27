@@ -49,7 +49,12 @@ export const MMS_PROTOCOL_MAX_COMMAND_PAYLOAD_BYTES = 1024 * 1024
 export const MMS_PROTOCOL_MAX_COMMAND_SEEN_IDS = 256
 export const MMS_PROTOCOL_COMMAND_DEFAULT_TIMEOUT_MS = 60_000
 
-export type ProtocolClientType = 'cli' | 'gui' | 'test' | 'unknown'
+/**
+ * `bridge` is a person on another of the user's computers. The daemon assigns it to a routed call
+ * (`OwnerRoutes`); a client can never say it in a hello, and it is never `gui`, so everything that
+ * is only for a window on this computer (files panel, direct saves, browser host) refuses it.
+ */
+export type ProtocolClientType = 'cli' | 'gui' | 'bridge' | 'test' | 'unknown'
 
 export type EnvelopeKind =
   | 'hello'

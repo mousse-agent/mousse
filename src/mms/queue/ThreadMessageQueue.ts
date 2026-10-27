@@ -37,6 +37,7 @@ export interface EnqueueMessageInput {
   stopGeneration?: number
   permissionMode?: PermissionMode
   origin?: QueuedMessage['origin']
+  sentFrom?: QueuedMessage['sentFrom']
 }
 
 export interface ClaimOwnerInput {
@@ -228,6 +229,7 @@ export function normalizeQueuedMessages(raw: unknown, threadId?: string): Queued
       ...(Array.isArray(item.subagentNotice) && item.subagentNotice.length ? { subagentNotice: item.subagentNotice } : {}),
       ...(typeof item.stopGeneration === 'number' && Number.isSafeInteger(item.stopGeneration) && item.stopGeneration >= 0 ? { stopGeneration: item.stopGeneration } : {}),
       ...(isPermissionMode(item.permissionMode) ? { permissionMode: item.permissionMode } : {}),
+      ...(typeof item.sentFrom?.node === 'string' && item.sentFrom.node ? { sentFrom: { node: item.sentFrom.node } } : {}),
       // Only a steering item is bound to a run.
       ...(state === 'steering' && typeof item.steerRunId === 'string' && item.steerRunId ? { steerRunId: item.steerRunId } : {}),
       ...(origin ? { origin } : {})
@@ -298,6 +300,7 @@ export function enqueueMessage(
     ...(input.subagentNotice?.length ? { subagentNotice: input.subagentNotice } : {}),
     ...(input.stopGeneration !== undefined ? { stopGeneration: input.stopGeneration } : {}),
     ...(input.permissionMode ? { permissionMode: input.permissionMode } : {}),
+    ...(input.sentFrom ? { sentFrom: input.sentFrom } : {}),
     ...(input.origin ? { origin: input.origin } : {})
   }
 
@@ -364,6 +367,8 @@ export interface QueuedMessagePatch {
   origin?: AgentOrigin | null
   /** A mode the edited item must not exceed; it can only tighten what the item already had. */
   permissionMode?: PermissionMode
+  /** The computer the edit came from: the text is theirs now. */
+  sentFrom?: QueuedMessage['sentFrom']
   /**
    * The item no longer owns the queued run it had (the caller cancels it): the run was made for the earlier
    * sender, and the item gets a fresh one, with the new sender's count, when it drains.
@@ -412,7 +417,8 @@ export function editQueuedMessage(
     content,
     ...(patch.mode !== undefined ? { mode: normalizeChatMode(patch.mode) } : {}),
     ...(patch.origin ? { origin: patch.origin } : {}),
-    ...(patch.permissionMode ? { permissionMode: patch.permissionMode } : {})
+    ...(patch.permissionMode ? { permissionMode: patch.permissionMode } : {}),
+    ...(patch.sentFrom ? { sentFrom: patch.sentFrom } : {})
   }
   const next = [...items]
   next[index] = item

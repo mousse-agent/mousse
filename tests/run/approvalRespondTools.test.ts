@@ -253,7 +253,7 @@ describe('approval_respond (SPEC §15.1)', () => {
       expect(await result(call('manage'))).toMatchObject({ ok: false, reason: 'unknown' })
     })
 
-    it.each<ApprovalRefusal>(['own_request', 'person_only', 'person_turn', 'not_parent', 'approvals_disabled', 'project_not_allowed', 'mode_forbids', 'agent_no_standing_grant', 'bridge_no_standing_grant'])(
+    it.each<ApprovalRefusal>(['own_request', 'person_only', 'person_turn', 'not_parent', 'approvals_disabled', 'project_not_allowed', 'mode_forbids', 'agent_no_standing_grant', 'bridge_no_standing_grant', 'device_mode_forbids'])(
       'a refusal by the rule (%s) is an error result that says why and leaves the request for the user',
       async (code) => {
         const { call, state, ledger } = await world()

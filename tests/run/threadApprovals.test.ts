@@ -711,6 +711,21 @@ describe('saved approval requests: the store and the question service', () => {
       expect(rules(f)).toEqual([])
     })
 
+    it("another of the user's computers makes a rule within its limit, and the record names the computer", async () => {
+      const device = (maxPermissionMode: 'ask' | 'accept_edits' | 'full') => ({ kind: 'user' as const, via: 'bridge' as const, node: 'nod_laptop', maxPermissionMode })
+      const f = await asking()
+      // A command under a device that is limited to Auto-accept edits: refused, still pending, no rule.
+      const refused = request(f, BASH('npm test'))
+      expect(f.questions.settle(refused.requestId, { permission: ALWAYS }, device('accept_edits'))).toEqual({ ok: false, reason: 'device_mode_forbids' })
+      expect(f.engine.approvals.get(refused.requestId)!.status).toBe('pending')
+      expect(rules(f)).toEqual([])
+      // The same answer from a device raised to Full access makes the rule and is recorded with the computer.
+      expect(f.questions.settle(refused.requestId, { permission: ALWAYS }, device('full'))).toEqual({ ok: true, decision: 'allow' })
+      await refused.promise
+      expect(rules(f)).toHaveLength(1)
+      expect(f.engine.approvals.get(refused.requestId)).toMatchObject({ status: 'answered', answeredBy: { kind: 'user', via: 'bridge', node: 'nod_laptop' } })
+    })
+
     it('goes with the thread', async () => {
       const f = await asking()
       await allowAlways(f, BASH('npm test'))

@@ -4,13 +4,14 @@ import type { ProtocolClientType, ProtocolEvent } from './types'
 
 /**
  * Which threads a client is shown. The thread inventory is always complete; this is the one place
- * that decides who sees subagent threads. Only the desktop app does: it needs them to fold each
- * under its parent (Lineage, sidebar roll-up). Every other client (CLI, channels, remote devices,
- * tests, unknown) gets lists without subagent threads. A client with no connection at all, such as
- * a remote device's backend, is one of those.
+ * that decides who sees subagent threads. Only the desktop app does, and a routed call from another
+ * of the user's computers (the same person, in the same app): it needs them to fold each under its
+ * parent (Lineage, sidebar roll-up). Every other client (CLI, channels, linked phones, tests,
+ * unknown) gets lists without subagent threads. A client with no connection at all, such as a
+ * phone's backend, is one of those.
  */
 export function connectionSeesSubagents(connection: { readonly clientType?: ProtocolClientType } | undefined): boolean {
-  return connection?.clientType === 'gui'
+  return connection?.clientType === 'gui' || connection?.clientType === 'bridge'
 }
 
 /**

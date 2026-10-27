@@ -94,7 +94,10 @@ export const BRIDGE_HELP = `Usage:
   mousse-cli bridge limits <node-id> [--max-mode ask|accept_edits|full] [--terminal on|off]
   mousse-cli bridge caps <node-id> --caps read,chat,write,settings
   mousse-cli bridge kind <node-id> computer|phone
+  mousse-cli bridge threads [on|off]
 
+threads turns on (or off) whether your other computers may work on this computer's threads;
+without an argument it shows the setting. It is off by default and only changes this computer.
 Only the current authority can invite, revoke or rename nodes, change capabilities or set a
 device's kind. block, unblock and limits act on this computer only, on any computer: a blocked
 device is refused every Bridge call and stream here until unblocked.
@@ -149,8 +152,10 @@ type NetMethod =
   | 'bridge.setCaps'
   | 'bridge.setKind'
   | 'bridge.policy'
+  | 'bridge.workOnThreads'
 /** CLI subcommands that are one daemon method with fixed arguments. */
 const BRIDGE_ALIASES: Record<string, NetMethod> = {
+  threads: 'bridge.workOnThreads',
   block: 'bridge.policy',
   unblock: 'bridge.policy',
   limits: 'bridge.policy',
@@ -329,7 +334,8 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
     'bridge.rename': [],
     'bridge.setCaps': ['caps'],
     'bridge.setKind': [],
-    'bridge.policy': args.subcommand === 'limits' ? ['max-mode', 'terminal'] : []
+    'bridge.policy': args.subcommand === 'limits' ? ['max-mode', 'terminal'] : [],
+    'bridge.workOnThreads': []
   }
   const permitted = options[method]
   if (!permitted) invalid('Unknown network command. Use net help or bridge help.')
@@ -369,7 +375,7 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
                 method === 'bridge.setCaps' ||
                 method === 'bridge.policy'
               ? 1
-              : method === 'bridge.join'
+              : method === 'bridge.join' || method === 'bridge.workOnThreads'
                 ? undefined
                 : 0
   if (count !== undefined && args.positional.length !== count)
@@ -547,6 +553,12 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
       invalid('bridge revoke and rename require a valid nod_ node identifier from bridge nodes.')
     params.node = node
     if (method === 'bridge.rename') params.name = name(args.positional[1])
+  }
+  if (method === 'bridge.workOnThreads') {
+    const [setting, extra] = args.positional
+    if (extra !== undefined || (setting !== undefined && setting !== 'on' && setting !== 'off'))
+      invalid('bridge threads takes on or off, or nothing to show the setting.')
+    if (setting !== undefined) params.enabled = setting === 'on'
   }
   if (method === 'bridge.setCaps' || method === 'bridge.setKind' || method === 'bridge.policy') {
     const node = args.positional[0]

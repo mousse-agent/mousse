@@ -8,7 +8,7 @@ import { tryAcquireExecutionLease, heartbeatExecutionLease, releaseExecutionLeas
 import { clearCleanupMarker, readCleanupMarker } from '../lifecycle/StorageCleanupService'
 import { enableVersionedLifecycleWriter } from '../queue/ThreadLifecycleAdmission'
 import { assertEpisodePath } from '../agents/WorkspaceAccessPolicy'
-import { isPermissionMode, PERMISSION_MODES } from '../../shared/permissionMode'
+import { isPermissionMode, PERMISSION_MODES, type PermissionMode } from '../../shared/permissionMode'
 import type { Answerer } from '../run/approvalRights'
 import { buildResourceInventory } from '../lifecycle/ResourceInventory'
 import { assertLifecyclePath } from '../lifecycle/ResourceLifecycleStore'
@@ -138,10 +138,44 @@ export interface HandlerContext {
   emitEvent?: (type: string, data: unknown, threadId?: string) => void
 }
 
+/**
+ * A person at a Mousse window on this computer, or at another of the user's computers (a routed
+ * call). Both are the user acting for themselves; the second keeps its computer in `bridgeCaller`.
+ */
+function isPerson(connection: HandlerContext['connection']): boolean {
+  return connection?.clientType === 'gui' || connection?.clientType === 'bridge'
+}
+
 /** Browser authority uses the authenticated ingress, never a caller's source label. */
 function admittedChatSource(ctx: HandlerContext, fallback: string): string {
   if (!ctx.connection) return fallback === 'gui' || fallback === 'cli' ? 'internal' : fallback
-  return ctx.connection.clientType === 'gui' ? 'gui' : ctx.connection.clientType === 'cli' ? 'cli' : 'internal'
+  // A person on another computer sends as a person (`gui`); the computer is kept in `sentFrom`.
+  return isPerson(ctx.connection) ? 'gui' : ctx.connection.clientType === 'cli' ? 'cli' : 'internal'
+}
+
+/**
+ * The most a routed caller's device may run a turn or a rule in, from this computer's policy for it;
+ * undefined for every other caller.
+ */
+function deviceLimit(ctx: HandlerContext): PermissionMode | undefined {
+  return ctx.connection?.bridgeCaller?.maxPermissionMode
+}
+
+/** The computer a routed call came from, for messages it sends. */
+function sentFromOf(ctx: HandlerContext): { node: string } | undefined {
+  const caller = ctx.connection?.bridgeCaller
+  return caller ? { node: caller.node } : undefined
+}
+
+/** Records on the thread that its latest message came from another computer (a routed call), without moving it in the sidebar. */
+function noteSentFrom(ctx: HandlerContext, threadId: string): void {
+  const sentFrom = sentFromOf(ctx)
+  if (!sentFrom) return
+  try {
+    ctx.mms.threads.updateThreadMeta(threadId, { sentFrom }, { touch: false })
+  } catch {
+    // The message is already queued; a note that cannot be written is not a reason to refuse it.
+  }
 }
 
 /**
@@ -151,6 +185,8 @@ function admittedChatSource(ctx: HandlerContext, fallback: string): string {
  */
 function questionAnswerer(ctx: HandlerContext): Answerer {
   if (!ctx.connection) return { kind: 'user', via: 'bridge' }
+  const caller = ctx.connection.bridgeCaller
+  if (caller) return { kind: 'user', via: 'bridge', node: caller.node, maxPermissionMode: caller.maxPermissionMode }
   return { kind: 'user', via: ctx.connection.clientType === 'gui' ? 'gui' : ctx.connection.clientType === 'cli' ? 'cli' : 'internal' }
 }
 
@@ -279,7 +315,7 @@ async function localActionRun<T>(
   action: () => Promise<T>,
   options: { gate?: () => RestoreReview | null; outcome?: RunOutcome } = {}
 ): Promise<{ runId: string; result: T } | { review: RestoreReview }> {
-  const busy = new Error('Wait for active or queued work to finish.')
+  const busy = new DomainRpcError('thread_busy', 'Wait for active or queued work to finish.')
   if (ctx.mms.runEngine.getActiveRun(threadId)) throw busy
   const gate = options.gate
   try {
@@ -313,8 +349,12 @@ async function prepareChatInput(ctx: HandlerContext, threadId: string, input: Or
   if (Object.hasOwn(raw, 'workflowInvocationId')) throw new DomainRpcError('invalid_params', 'Workflow receipt references are server-owned')
   const bridge = ctx.mms.platform?.workflowChat
   if (!bridge || !ctx.connection) return buildSendInput(input.content, input.mode, input.images)
-  const prepared = await bridge.prepare(threadId, { ...input, requestId: asOptionalString(raw.requestId, 64) }, ctx.connection.clientType === 'gui' ? 'gui' : 'cli')
+  const prepared = await bridge.prepare(threadId, { ...input, requestId: asOptionalString(raw.requestId, 64) }, isPerson(ctx.connection) ? 'gui' : 'cli')
   if (prepared.workflowInvocationId) {
+    // A workflow's steps run under the workflow's own policy, not under the permission mode of a turn, so a
+    // device's limit cannot bind them. Until workflows have a permission mode, a /workflow command typed on
+    // another computer is refused (the receipt written while preparing has no effects); the owner's own windows run it.
+    if (ctx.connection.bridgeCaller) throw new DomainRpcError('workflow_not_available_remotely', 'Workflows cannot be started from another computer yet. Run the workflow on the computer that runs this thread.')
     if (!ctx.connection.capabilities.has(WORKFLOW_RUN_CAPABILITY)) throw new DomainRpcError('capability_required', 'This connection cannot execute workflow commands')
     return prepared
   }
@@ -339,7 +379,7 @@ function threadLookupContext(ctx: HandlerContext, params: Record<string, unknown
 
 function threadOperationContext(ctx: HandlerContext, params: Record<string, unknown>) {
   const lookup = threadLookupContext(ctx, params)
-  if (!lookup.projectPath) throw new Error(`Thread has no project workspace: ${lookup.threadId}`)
+  if (!lookup.projectPath) throw new DomainRpcError('thread_has_no_folder', `Thread has no project workspace: ${lookup.threadId}`, { threadId: lookup.threadId })
   return { ...lookup, projectPath: lookup.projectPath }
 }
 
@@ -406,7 +446,7 @@ function projectRootContext(ctx: HandlerContext, params: Record<string, unknown>
     if (!projectPath) throw new Error(`Thread has no project workspace: ${threadId}`)
     const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
     const workspace = manager.load()
-    if (workspace && workspace.lifecycle !== 'ready') throw new Error(`Task workspace is ${workspace.lifecycle}; recovery is required.`)
+    if (workspace && workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', `Task workspace is ${workspace.lifecycle}; recovery is required.`)
     return workspace ? manager.executionContext(projectPath, workspace).projectPath : projectPath
   }
   if (!projectId) throw new Error('projectId or threadId is required')
@@ -422,14 +462,15 @@ function isLocalWindow(ctx: HandlerContext): boolean {
 
 /**
  * Runs a file call for a caller. The Files panel shows the reason a file cannot be opened or saved (too large,
- * no preview for its type, outside the folder, no longer there), so a window of this computer gets the call's own
- * message; any other caller keeps the daemon's general error for what it did not expect.
+ * no preview for its type, outside the folder, no longer there), so a window of this computer, and the same
+ * panel on another of the user's computers, get the call's own message; any other caller keeps the daemon's
+ * general error for what it did not expect.
  */
 async function fileCall<T>(ctx: HandlerContext, run: () => Promise<T>): Promise<T> {
   try {
     return await run()
   } catch (error) {
-    if (!isLocalWindow(ctx) || error instanceof DomainRpcError || error instanceof AppError) throw error
+    if (!isPerson(ctx.connection) || error instanceof DomainRpcError || error instanceof AppError) throw error
     throw new DomainRpcError('file_unavailable', error instanceof Error ? error.message : String(error))
   }
 }
@@ -666,13 +707,28 @@ function pullRequestThreadService(ctx: HandlerContext): PullRequestThreadService
     // Like `threads.create`: a new thread starts on the model last used.
     prepareThread: (thread) => {
       const lastUsed = ctx.mms.providerInstances.migrate(lastUsedChatModel(ctx.mms.settings.get()))
-      return lastUsed ? ctx.mms.threads.updateThreadMeta(thread.id, { modelOverride: lastUsed }) : thread
+      let prepared = lastUsed ? ctx.mms.threads.updateThreadMeta(thread.id, { modelOverride: lastUsed }) : thread
+      // A thread another computer starts says so, as one made with `threads.create` does.
+      const sentFrom = sentFromOf(ctx)
+      if (sentFrom) prepared = ctx.mms.threads.updateThreadMeta(thread.id, { startedFrom: { node: sentFrom.node } }, { touch: false })
+      return prepared
     },
     send: async (threadId, content) => {
       ctx.mms.orchestrator.getOrCreateSession(threadId)
       const input = await prepareChatInput(ctx, threadId, { content }, {})
-      // `ack`: the call returns once the message is accepted, not when the turn ends.
-      await ctx.mms.orchestrator.send(input, false, { threadId, source: admittedChatSource(ctx, 'protocol'), forceQueue: false, awaitMode: 'ack' })
+      const limit = deviceLimit(ctx)
+      const sentFrom = sentFromOf(ctx)
+      // `ack`: the call returns once the message is accepted, not when the turn ends. A first message from another
+      // computer is that computer's person's: it runs at no more than the device's limit, the thread's default
+      // mode notwithstanding, and says who sent it.
+      await ctx.mms.orchestrator.send(input, false, {
+        threadId,
+        source: admittedChatSource(ctx, 'protocol'),
+        forceQueue: false,
+        awaitMode: 'ack',
+        ...(limit ? { permissionMode: limit } : {}),
+        ...(sentFrom ? { sentFrom, actor: questionAnswerer(ctx) } : {})
+      })
     }
   })
 }
@@ -694,9 +750,9 @@ async function asDomainError<T>(run: () => Promise<T>): Promise<T> {
 async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<string, unknown>): Promise<void> {
   if (!params.threadId) return
   const threadId = asString(params.threadId, 'threadId', 256)
-  if (!ctx.mms.threads.getThread(threadId)) throw new Error('Task not found')
+  if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found')
   const project = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
-  if (!project) throw new Error('Task has no project workspace')
+  if (!project) throw new DomainRpcError('thread_has_no_folder', 'Task has no project workspace')
   const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
   if (!manager.load()) await manager.provision(threadId, 'main', project)
   await ensureWorkspaceMaterialized(ctx, threadId, project)
@@ -914,7 +970,7 @@ function asPlanToken(value: unknown): StorageCleanupPlanToken {
 function lifecycleExpectedGeneration(params: Record<string, unknown>): number | undefined {
   const value = params.expectedGeneration
   if (value === undefined) return undefined
-  if (!Number.isSafeInteger(value) || (value as number) < 1) throw new Error('Invalid lifecycle expectedGeneration')
+  if (!Number.isSafeInteger(value) || (value as number) < 1) throw new DomainRpcError('invalid_params', 'Invalid lifecycle expectedGeneration')
   return value as number
 }
 
@@ -1017,11 +1073,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const revisionId = asString(params.revisionId, 'revisionId', 80)
       const messages = ctx.mms.threads.loadThreadData(threadId).messages
       const visible = messages.some(message => !message.hidden && message.role === 'assistant' && !message.incomplete && !message.streaming && message.presentationParts?.some(part => part.type === 'applet' && part.reference.appletId === appletId && part.reference.revisionId === revisionId))
-      if (!visible) throw new Error('Applet is not available in this conversation.')
+      if (!visible) throw new DomainRpcError('applet_unavailable', 'Applet is not available in this conversation.')
       if (method === 'applets.get') return ctx.mms.applets.load(threadId, appletId, revisionId)
       if (method === 'applets.state.get') return {state: ctx.mms.applets.loadState(threadId, appletId, revisionId)}
       if (method === 'applets.state.save') {
-        if (appletJsonBytes(params.state) > APPLET_STATE_LIMIT) throw new Error('Applet state is too large.')
+        if (appletJsonBytes(params.state) > APPLET_STATE_LIMIT) throw new DomainRpcError('applet_state_too_large', 'Applet state is too large.')
         ctx.mms.applets.saveState(threadId, appletId, revisionId, params.state)
         return {saved:true}
       }
@@ -1255,7 +1311,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       const messages = ctx.mms.orchestrator.getMessages(threadId)
       const title = await ctx.mms.orchestrator.generateThreadTitle(messages, threadId)
-      if (!title) throw new Error('The title model returned an empty title.')
+      if (!title) throw new DomainRpcError('title_unavailable', 'The title model returned an empty title.')
       const thread = ctx.mms.threads.updateThreadMeta(threadId, { name: title })
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
@@ -1268,7 +1324,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const model = p.model
       let override: ModelOverride | undefined
       if (model !== undefined && model !== null) {
-        if (!isObject(model)) throw new Error('model must be an object')
+        if (!isObject(model)) throw new DomainRpcError('invalid_params', 'model must be an object')
         // `instanceId` is the selection (SPEC §13.8); the current GUI still sends `llmProvider`.
         const instanceId = asOptionalString(model.instanceId, 256)
         // A supplied provider name is validated even when the instance decides the stored value.
@@ -1276,7 +1332,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           ? (model.llmProvider === undefined ? undefined : asString(model.llmProvider, 'model.llmProvider', 256))
           : asString(model.llmProvider, 'model.llmProvider', 256)
         const modelId = asString(model.model, 'model.model', 512)
-        if ((!instanceId && !llmProvider) || !modelId) throw new Error('Model provider and id are required')
+        if ((!instanceId && !llmProvider) || !modelId) throw new DomainRpcError('invalid_params', 'Model provider and id are required')
         // Unknown or disabled instances are rejected here, before anything is stored.
         override = ctx.mms.providerInstances.overrideFor({ instanceId, llmProvider, model: modelId })
         // Hidden models and instances the thread's project turned off are rejected too.
@@ -1302,7 +1358,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // Refuse once an isolated workspace exists — the toggle is new-chat only.
       const workspace = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId)).load()
       if (workspace?.lifecycle === 'ready' || workspace?.lifecycle === 'provisioning') {
-        throw new Error('Worktree mode is locked once a workspace is provisioned.')
+        throw new DomainRpcError('worktree_locked', 'Worktree mode is locked once a workspace is provisioned.')
       }
       const thread = ctx.mms.threads.setThreadWorktreeEnabled(threadId, enabled)
       const threads = ctx.mms.threads.listAllThreads()
@@ -1317,7 +1373,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!isPermissionMode(mode)) throw new DomainRpcError('invalid_params', `mode must be one of ${PERMISSION_MODES.join(', ')}`)
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       // Applies from the next turn; a running turn and a pending question are not touched.
-      const thread = ctx.mms.orchestrator.setThreadPermissionMode(threadId, mode)
+      const caller = ctx.connection?.bridgeCaller
+      const thread = ctx.mms.orchestrator.setThreadPermissionMode(threadId, mode, caller ? { node: caller.node, maxPermissionMode: caller.maxPermissionMode } : undefined)
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
@@ -1367,6 +1424,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         throw new DomainRpcError('invalid_params', 'acknowledgeUncertain applies only with continuationOfRunId')
       ctx.mms.orchestrator.getOrCreateSession(threadId)
       const input = await prepareChatInput(ctx, threadId, { content, mode, images }, p)
+      const limit = deviceLimit(ctx)
+      const sentFrom = sentFromOf(ctx)
       return await ctx.mms.orchestrator.send(input, false, {
         threadId,
         source,
@@ -1374,6 +1433,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         clientRequestId,
         awaitMode,
         actor: questionAnswerer(ctx),
+        // A turn from another computer never runs looser than that computer's limit here, however the thread is set.
+        ...(limit ? { permissionMode: limit } : {}),
+        ...(sentFrom ? { sentFrom } : {}),
         ...(continuationOfRunId ? { continuationOfRunId, acknowledgeUncertain } : {})
       })
     }
@@ -1399,12 +1461,18 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const runId = asOptionalString(p.runId, 256)
       if (runId) {
         const clientRequestId = asOptionalClientRequestId(p.clientRequestId) ?? randomUUID()
-        return runCommandResponse(await ctx.mms.orchestrator.steerRun(runId, text, clientRequestId, threadId), runId)
+        const response = runCommandResponse(await ctx.mms.orchestrator.steerRun(runId, text, clientRequestId, threadId, undefined, undefined, deviceLimit(ctx)), runId)
+        noteSentFrom(ctx, threadId)
+        return response
       }
       // Prefer mid-turn steer; fall back to external enqueue when no local turn.
+      const limit = deviceLimit(ctx)
       const result = ctx.mms.orchestrator.steerThreadOrEnqueueExternal(threadId, text, {
-        source: admittedChatSource(ctx, asOptionalString(p.source, 64) ?? 'protocol-steer')
+        source: admittedChatSource(ctx, asOptionalString(p.source, 64) ?? 'protocol-steer'),
+        // Text that cannot join the running turn waits as a turn of its own, at no more than the device's limit.
+        ...(limit ? { permissionMode: limit } : {})
       })
+      noteSentFrom(ctx, threadId)
       return { ok: result.steered || result.queued, steered: result.steered, queued: result.queued }
     }
     case 'orchestrator.retry': {
@@ -1422,7 +1490,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'runs.get': {
       const p = isObject(params) ? params : {}
-      rejectUnknownKeys(p, ['runId'])
+      // `threadId` only routes a call to the computer that runs the thread (the owner checks the run is its).
+      rejectUnknownKeys(p, ['runId', 'threadId'])
       const runId = asString(p.runId, 'runId', 256)
       const run = ctx.mms.runEngine.getRun(runId)
       if (!run) throw new DomainRpcError('run_not_found', 'Run not found', { runId })
@@ -1473,14 +1542,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // Continue a run a usage limit paused, now instead of at the reset time. A run that is not paused (the
       // banner has not caught up with a hand-over or a Cancel) is refused `conflict`.
       const p = isObject(params) ? params : {}
-      rejectUnknownKeys(p, ['runId'])
+      rejectUnknownKeys(p, ['runId', 'threadId'])
       const runId = asString(p.runId, 'runId', 256)
       return asRpcRejection(() => ctx.mms.orchestrator.resumePausedRun(runId))
     }
     case 'runs.cancelPause': {
       // End a pause without continuing: the run is cancelled and the thread's held messages go on.
       const p = isObject(params) ? params : {}
-      rejectUnknownKeys(p, ['runId'])
+      rejectUnknownKeys(p, ['runId', 'threadId'])
       const runId = asString(p.runId, 'runId', 256)
       return asRpcRejection(() => ctx.mms.orchestrator.cancelPausedRun(runId))
     }
@@ -1545,11 +1614,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const images = asOptionalChatImages(p.images, 'images')
       const source = admittedChatSource(ctx, asOptionalString(p.source, 64) ?? 'protocol')
       ctx.mms.orchestrator.assertQueueOpen(threadId)
+      const limit = deviceLimit(ctx)
+      // A queued message from another computer carries that computer's limit: it runs later, at no more than that.
       const item = ctx.mms.orchestrator.enqueueForThread(
         threadId,
         await prepareChatInput(ctx, threadId, { content, mode, images }, p),
-        { source }
+        { source, ...(limit ? { permissionMode: limit } : {}), ...(sentFromOf(ctx) ? { sentFrom: sentFromOf(ctx) } : {}) }
       )
+      noteSentFrom(ctx, threadId)
       return { item, items: ctx.mms.orchestrator.listQueue(threadId) }
     }
     case 'queue.edit': {
@@ -1561,7 +1633,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (content === undefined && mode === undefined) throw new DomainRpcError('invalid_params', 'queue.edit needs content or mode.')
       const expectedRevision = asOptionalString(p.expectedRevision, 64)
       // Who wrote the message and the mode limit it carries stay as they are; the edit changes the text and chat mode only.
-      const item = queueRpc(() => ctx.mms.orchestrator.editQueuedItem(threadId, itemId, { content, mode }, { expectedRevision }))
+      // An edit from another computer leaves the message no looser than that computer's limit and records the sender.
+      const limit = deviceLimit(ctx)
+      const sentFrom = sentFromOf(ctx)
+      const item = queueRpc(() => ctx.mms.orchestrator.editQueuedItem(threadId, itemId, { content, mode }, { expectedRevision, ...(limit ? { permissionMode: limit } : {}), ...(sentFrom ? { sentFrom } : {}) }))
+      noteSentFrom(ctx, threadId)
       return { item, items: ctx.mms.orchestrator.listQueue(threadId) }
     }
     case 'queue.reorder': {
@@ -1586,9 +1662,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           .getOrCreateSession(threadId)
           .queue.find((item) => item.id === itemId)
         if (current?.state === 'claimed' || current?.state === 'steering') {
-          throw new Error('Queued message already started and can no longer be removed.')
+          throw new DomainRpcError('item_started', 'Queued message already started and can no longer be removed.')
         }
-        throw new Error('Queued message was not found or is no longer removable.')
+        throw new DomainRpcError('queue_item_not_found', 'Queued message was not found or is no longer removable.')
       }
       return { outcome: 'removed', removed }
     }
@@ -1599,7 +1675,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const expectedRevision = asOptionalString(p.expectedRevision, 64)
       const expectedRunId = asOptionalString(p.expectedRunId, 256)
       // A message an agent wrote keeps the mode limit it carries: a run that runs looser than that limit refuses it.
-      const ok = queueRpc(() => ctx.mms.orchestrator.promoteQueueItemToSteer(threadId, itemId, { expectedRevision, expectedRunId }))
+      const limit = deviceLimit(ctx)
+      const ok = queueRpc(() => ctx.mms.orchestrator.promoteQueueItemToSteer(threadId, itemId, { expectedRevision, expectedRunId, ...(limit ? { permissionCeiling: limit } : {}) }))
       return { ok, items: ctx.mms.orchestrator.listQueue(threadId) }
     }
     case 'orchestrator.contextUsage': {
@@ -1705,7 +1782,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const merge = asOptionalBoolean(p.merge, 'merge') === true
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       if (!ctx.mms.threadRuntimes.listAgents(threadId).some((agent) => agent.id === agentId)) {
-        throw new Error(`Agent not found in thread: ${agentId}`)
+        throw new DomainRpcError('agent_not_found', `Agent not found in thread: ${agentId}`, { agentId })
       }
       const logs = await ctx.mms.orchestrator.stopAgentForThread(threadId, agentId, merge)
       return { threadId, agentId, logs }
@@ -2568,7 +2645,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const operation = threadOperationContext(ctx, p)
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
-      if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
+      if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       const retention = new UndoRetentionService(operation.threadDirectory)
       if (method === 'actions.sweepRetention') {
         const logical = await retention.sweep(workspace.worktreePath)
@@ -2576,7 +2653,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         return { ...logical, physical }
       }
       // CLI/model callers cannot self-assert a human identity in request parameters.
-      const human = ctx.connection?.clientType === 'gui'
+      const human = isPerson(ctx.connection)
       if (method === 'actions.pin') await retention.pin(workspace.worktreePath, asString(p.actionId, 'actionId', 256), asBoolean(p.pinned, 'pinned'), human, asOptionalString(p.reason, 512))
       else {
         const policy = isObject(p.policy) ? p.policy : {}
@@ -2591,7 +2668,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const operation = threadOperationContext(ctx, p)
       const actionId = asString(p.actionId, 'actionId', 256)
       const action = new ThreadActionService(operation.threadDirectory).get(actionId)
-      if (!action) throw new Error(`Action not found: ${actionId}`)
+      if (!action) throw new DomainRpcError('action_not_found', `Action not found: ${actionId}`)
       return { files: action.changedPaths, externalEffects: action.externalEffects }
     }
     case 'review.files': {
@@ -2618,7 +2695,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const branchId = workspace?.conversationBranchId ?? 'main'
       const expectedTurnId = asOptionalString(p.expectedTurnId, 256)
       const validate = (target: import('../../shared/threadActions').ThreadAction): void => {
-        if (ctx.mms.orchestrator.isConversationHistoryBusy(operation.threadId)) throw new Error('Wait for active or queued work to finish.')
+        if (ctx.mms.orchestrator.isConversationHistoryBusy(operation.threadId)) throw new DomainRpcError('thread_busy', 'Wait for active or queued work to finish.')
         // Generic workspace Undo also serves editor and workflow receipts with no prompt.
         // Prompt-targeted requests and conversation-only receipts require exact provenance.
         if (target.scope !== 'conversation' && expectedTurnId === undefined) return
@@ -2626,7 +2703,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         if (target.scope === 'conversation') ctx.mms.orchestrator.validateConversationActionRestore(operation.threadId, target, 'undo')
         const messages = ctx.mms.orchestrator.getMessagesForPersistence(operation.threadId)
         const prompt = messages.filter((message) => message.role === 'user' && !message.hidden).at(-1)
-        if (!prompt || prompt.turnId !== target.turnId || messages.indexOf(prompt) < target.presentationMessageStart || messages.indexOf(prompt) >= target.presentationMessageEnd) throw new Error('The latest prompt has no eligible Undo boundary.')
+        if (!prompt || prompt.turnId !== target.turnId || messages.indexOf(prompt) < target.presentationMessageStart || messages.indexOf(prompt) >= target.presentationMessageEnd) throw new DomainRpcError('undo_boundary_unavailable', 'The latest prompt has no eligible Undo boundary.')
       }
       const restore = (target: import('../../shared/threadActions').ThreadAction, kind: 'undo' | 'redo'): void => {
         if (target.scope === 'conversation') ctx.mms.orchestrator.validateConversationActionRestore(operation.threadId, target, kind)
@@ -2638,7 +2715,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const reviewedDiffSha = asReviewedDiffSha(p)
       let gate: (() => RestoreReview | null) | undefined
       if (latest?.scope !== 'conversation') {
-        if (!workspace || workspace.lifecycle !== 'ready') throw new Error('This prompt has no eligible recorded Undo boundary.')
+        if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('undo_boundary_unavailable', 'This prompt has no eligible recorded Undo boundary.')
         // SPEC §16.3: files are restored only in an owned, unshared worktree; weak containment reviews first.
         gate = () => restoreGate(ctx, { threadId: operation.threadId, workspace, target: latest, kind: 'undo', reviewedDiffSha })
       }
@@ -2661,7 +2738,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const actionId = asString(p.actionId, 'actionId', 256)
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
-      if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
+      if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       const target = new ThreadActionService(operation.threadDirectory).get(actionId)
       const reviewedDiffSha = asReviewedDiffSha(p)
       const ran = await localActionRun(ctx, operation.threadId, 'revert', () =>
@@ -2677,10 +2754,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const branchId = asOptionalString(p.conversationBranchId, 256) ?? new ThreadWorkspaceManager(operation.threadDirectory).load()?.conversationBranchId ?? 'main'
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (new ThreadActionService(operation.threadDirectory).latest(branchId)?.scope === 'conversation') {
-        if (branchId !== (workspace?.conversationBranchId ?? 'main')) throw new Error('Conversation history requires the active branch.')
+        if (branchId !== (workspace?.conversationBranchId ?? 'main')) throw new DomainRpcError('branch_not_active', 'Conversation history requires the active branch.')
         const action = new ConversationActionService(operation.threadDirectory).apply(branchId, 'redo', operation.currentGeneration, undefined, (target) => {
           ctx.mms.orchestrator.validateConversationActionRestore(operation.threadId, target, 'redo')
-          if (ctx.mms.orchestrator.isConversationHistoryBusy(operation.threadId)) throw new Error('Wait for active or queued work to finish.')
+          if (ctx.mms.orchestrator.isConversationHistoryBusy(operation.threadId)) throw new DomainRpcError('thread_busy', 'Wait for active or queued work to finish.')
         }, (target, kind) => {
           ctx.mms.orchestrator.validateConversationActionRestore(operation.threadId, target, kind)
           if (kind === 'redo') ctx.mms.orchestrator.restoreConversationActionEnd(operation.threadId, target.presentationMessageStart, target.presentationMessageEnd, target.nativeContextBoundary)
@@ -2690,7 +2767,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         return { action }
       }
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath ?? undefined)
-      if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
+      if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       const action = await new RedoService(operation.threadDirectory).redoLatest(branchId, workspace.worktreePath, operation.currentGeneration, (original) => {
         if (original.nativeContextStartBoundary) ctx.mms.orchestrator.restoreConversationActionEnd(operation.threadId, original.presentationMessageStart, original.presentationMessageEnd, original.nativeContextBoundary)
       })
@@ -2704,11 +2781,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const name = asOptionalString(p.name, 256) ?? 'Alternate'
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
-      if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
+      if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       const action = new ThreadActionService(operation.threadDirectory).get(actionId)
-      if (!action) throw new Error(`Action not found: ${actionId}`)
+      if (!action) throw new DomainRpcError('action_not_found', `Action not found: ${actionId}`)
       saveConversationState(ctx, operation.threadId, operation.threadDirectory, sourceBranchId)
-      if (p.codeMode !== undefined && p.codeMode !== 'current' && p.codeMode !== 'historical') throw new Error('Invalid fork code mode')
+      if (p.codeMode !== undefined && p.codeMode !== 'current' && p.codeMode !== 'historical') throw new DomainRpcError('invalid_params', 'Invalid fork code mode')
       const branch = await new ConversationBranchService(operation.threadDirectory).fork(workspace.worktreePath, sourceBranchId, actionId, name, operation.currentGeneration, p.codeMode === 'current' ? 'current' : 'historical')
       saveConversationState(ctx, operation.threadId, operation.threadDirectory, branch.id, {
         presentationEnd: action.presentationMessageEnd,
@@ -2723,7 +2800,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const branchId = asString(p.conversationBranchId, 'conversationBranchId', 256)
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
-      if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
+      if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       const branches = new ConversationBranchService(operation.threadDirectory)
       const current = branches.list().find((branch) => branch.lifecycle === 'active')
       const target = loadConversationState(operation.threadDirectory, branchId)
@@ -2744,7 +2821,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const operation = threadOperationContext(ctx, p)
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
-      if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
+      if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       await new ChildAgentIntegrationService(operation.threadDirectory).recoverPending(workspace.worktreePath)
       await new PublishService(operation.threadDirectory).recoverPending(workspace.worktreePath, operation.projectPath)
       await new ThreadActionService(operation.threadDirectory).recoverPending(workspace.worktreePath)
@@ -2764,9 +2841,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const operation = threadOperationContext(ctx, p)
       const operationId = asString(p.operationId, 'operationId', 256)
       const record = new ThreadJournal(operation.threadDirectory).latestByOperation().get(operationId)
-      if (!record) throw new Error(`Operation not found: ${operationId}`)
+      if (!record) throw new DomainRpcError('operation_not_found', `Operation not found: ${operationId}`)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
-      if (record.operationType !== 'publish' && !workspace) throw new Error('Thread workspace is missing')
+      if (record.operationType !== 'publish' && !workspace) throw new DomainRpcError('workspace_not_ready', 'Thread workspace is missing')
       await new ManagedConflictService(operation.threadDirectory).abort(record.operationType === 'publish' ? operation.projectPath : workspace!.worktreePath, operationId)
       return { ok: true }
     }
@@ -2784,7 +2861,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const targetBranch = asString(p.targetBranch, 'targetBranch', 512)
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
-      if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
+      if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       return await new PublishService(operation.threadDirectory).publish(workspace.worktreePath, operation.projectPath, targetBranch, undefined, { expectedSourceSha: asOptionalString(p.expectedSourceSha, 64), expectedTargetSha: asOptionalString(p.expectedTargetSha, 64), expectedJournalRevision: asOptionalBoundedInt(p.expectedJournalGeneration, 'expectedJournalGeneration', { min: 0, max: Number.MAX_SAFE_INTEGER }) ?? operation.currentGeneration, operationId: asOptionalString(p.operationId, 256) })
     }
     case 'files.root': {
@@ -2856,7 +2933,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         const operation = threadOperationContext(ctx, p)
         const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
         if (workspace) {
-          if (workspace.lifecycle !== 'ready') throw new Error('Task workspace requires recovery before saving.')
+          if (workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Task workspace requires recovery before saving.')
           const actions = new ThreadActionService(operation.threadDirectory)
           const latest = actions.latest(workspace.conversationBranchId)
           const { result: lineEdits, action } = await actions.runCheckpointedAction({
@@ -2997,7 +3074,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         if (!metadata || !directory) return ctx.mms.gitService.push(root, { expectedBranch, ...request })
         return withGitMutationLocks(directory, root, 'user-git-push', async () => {
           const manager = new ThreadWorkspaceManager(directory)
-          if (manager.verify().lifecycle !== 'ready' || manager.load()?.headSha !== metadata.headSha) throw new Error('Task revision changed before push; refresh the reviewed revision')
+          if (manager.verify().lifecycle !== 'ready' || manager.load()?.headSha !== metadata.headSha) throw new DomainRpcError('task_revision_changed', 'Task revision changed before push; refresh the reviewed revision')
           if (workspaceGit(root, ['status', '--porcelain'])) throw gitThreadRules.create('git_thread_dirty')
           await ctx.mms.gitService.push(root, { expectedBranch, ...toPullRequest, ...request })
         }, signal)

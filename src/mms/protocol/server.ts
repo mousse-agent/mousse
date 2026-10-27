@@ -36,6 +36,7 @@ import {
 import type { TurnState } from '../../shared/types'
 import { PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { DomainRpcError, type TrustedProfileBinding } from './domainRegistry'
+import type { ProtocolEventRequest } from '../events'
 import { PROFILES_V1_CAPABILITY } from '../../shared/profiles/types'
 import { BROWSER_ATTACHED_V1_CAPABILITY } from '../../shared/browser/connectionCommands'
 import { ProfileError } from '../../shared/profiles/errors'
@@ -303,6 +304,25 @@ export class MmsProtocolServer {
     }
   }
 
+  /**
+   * Pushes an event a request handler raised to every subscriber, with a sequence from this daemon's ring.
+   * Also reached by a routed call, which has no window of its own to emit through (`protocol:event`).
+   */
+  private pushRequestEvent(
+    services: MmsProfileServices,
+    installationScoped: boolean,
+    type: string,
+    data: unknown,
+    threadId?: string
+  ): void {
+    const profileId = installationScoped ? undefined : services.profileId
+    this.emitToSubscribers(this.ring.push(type, data, threadId, profileId), profileId ?? null)
+    // In-daemon watchers (the phone's live lists) learn of project and thread list
+    // changes made through requests, which reach no service event of their own.
+    if (profileId && type === 'projects.updated') services.events.broadcast('projects:updated', data)
+    else if (profileId && type === 'threads.updated') services.events.broadcast('threads:updated', data)
+  }
+
   private wireOrchestratorEvents(services: MmsProfileServices): void {
     if (this.profileEventDisposers.has(services.profileId)) return
     const disposers: Array<() => void> = []
@@ -310,6 +330,13 @@ export class MmsProtocolServer {
     const emitToSubscribers = (event: ProtocolEvent): void => {
       this.emitToSubscribers(event, services.profileId)
     }
+    // Events a routed call raised, and the sequence it reports for this daemon's ring.
+    const requested = (request: ProtocolEventRequest): void =>
+      this.pushRequestEvent(services, false, request.type, request.data, request.threadId)
+    services.events.on('protocol:event', requested as (data: unknown) => void)
+    disposers.push(() => services.events.off('protocol:event', requested as (data: unknown) => void))
+    services.protocolSequence = () => this.ringFor(services.profileId).currentSequence
+    disposers.push(() => { services.protocolSequence = () => 0 })
     const orch = services.orchestrator
     const onOrch = (event: string, handler: (...args: any[]) => void): void => {
       orch.on(event, handler)
@@ -1015,19 +1042,8 @@ export class MmsProtocolServer {
           connection,
           ownerToken: this.opts.ownerToken,
           globalSequence: () => this.ringFor(resolved.services.profileId).currentSequence,
-          emitEvent: (type, data, threadId) => {
-            const profileId = isInstallationMethod(method) ? undefined : resolved.services.profileId
-            this.emitToSubscribers(
-              this.ring.push(type, data, threadId, profileId),
-              profileId ?? null
-            )
-            // In-daemon watchers (the phone's live lists) learn of project and thread list
-            // changes made through requests, which reach no service event of their own.
-            if (profileId && type === 'projects.updated')
-              resolved.services.events.broadcast('projects:updated', data)
-            else if (profileId && type === 'threads.updated')
-              resolved.services.events.broadcast('threads:updated', data)
-          }
+          emitEvent: (type, data, threadId) =>
+            this.pushRequestEvent(resolved.services, isInstallationMethod(method), type, data, threadId)
         },
         method,
         params

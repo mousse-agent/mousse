@@ -78,6 +78,8 @@ export class ThreadSession {
   lastMeasuredContextSignature: string | null = null
   measuredAtHistoryLength = 0
   failedConnectionRequest: import('../../shared/types').OrchestratorSendInput | null = null
+  /** The mode limit the failed request was sent under (a device's), so its Retry runs under it too. */
+  failedConnectionLimit: import('../../shared/permissionMode').PermissionMode | null = null
   queue: QueuedMessage[] = []
   /** When true, no further turns/drain may execute for this thread. */
   deleted = false
@@ -151,5 +153,6 @@ export class ThreadSession {
     this.lastCompletedAssistantMessageId = null
     this.lastCompletedAssistantContent = ''
     this.failedConnectionRequest = null
+    this.failedConnectionLimit = null
   }
 }

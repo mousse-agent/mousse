@@ -71,7 +71,15 @@ describe('network CLI validation', () => {
     })
     expect(
       prepareNetCommand(
-        args('bridge', 'join', [], [['via', 'ws://127.0.0.1:41000/mousse-net'], ['name', 'VPS']])
+        args(
+          'bridge',
+          'join',
+          [],
+          [
+            ['via', 'ws://127.0.0.1:41000/mousse-net'],
+            ['name', 'VPS']
+          ]
+        )
       )
     ).toEqual({
       method: 'bridge.join',
@@ -138,6 +146,25 @@ describe('network CLI validation', () => {
       args('bridge', 'caps', [nodeId], [['caps', 'read,root']]),
       args('bridge', 'kind', [nodeId, 'tablet']),
       args('bridge', 'block', [nodeId], [['max-mode', 'full']])
+    ])
+      expect(() => prepareNetCommand(bad)).toThrow()
+  })
+  it('turns the setting for other computers working on this one on and off, or shows it', () => {
+    expect(prepareNetCommand(args('bridge', 'threads', []))).toEqual({
+      method: 'bridge.workOnThreads',
+      params: {}
+    })
+    expect(prepareNetCommand(args('bridge', 'threads', ['on']))).toEqual({
+      method: 'bridge.workOnThreads',
+      params: { enabled: true }
+    })
+    expect(prepareNetCommand(args('bridge', 'threads', ['off']))).toEqual({
+      method: 'bridge.workOnThreads',
+      params: { enabled: false }
+    })
+    for (const bad of [
+      args('bridge', 'threads', ['maybe']),
+      args('bridge', 'threads', ['on', 'off'])
     ])
       expect(() => prepareNetCommand(bad)).toThrow()
   })
@@ -653,10 +680,15 @@ describe('hosted Plus CLI custody', () => {
         ).toThrow(/private regular file/)
         expect(() =>
           prepareNetCommand(
-            args('net', 'plus', ['bind'], [
-              ['configuration-file', config],
-              ['account-token-file', token]
-            ])
+            args(
+              'net',
+              'plus',
+              ['bind'],
+              [
+                ['configuration-file', config],
+                ['account-token-file', token]
+              ]
+            )
           )
         ).toThrow(/private regular file/)
       } else {

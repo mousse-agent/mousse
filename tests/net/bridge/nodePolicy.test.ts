@@ -476,6 +476,8 @@ describe('blocking a device on a computer', () => {
     const { a, join } = await authority()
     const laptop = await join(await inviteText(a), 'laptop')
     const rpc = a.runtime().rpc
+    // A routed method is answered only while the owner's switch is on (it is off by default).
+    await a.request('bridge.workOnThreads', { enabled: true })
     for (const family of ['bridge', 'routed'] as const)
       rpc.register({
         method: `test.${family}`,

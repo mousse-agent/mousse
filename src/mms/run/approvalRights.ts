@@ -22,8 +22,12 @@ export interface AgentApprovalAccess {
 }
 
 export type Answerer =
-  /** The user, through one of their clients. */
-  | { kind: 'user'; via?: 'gui' | 'cli' | 'bridge' | 'internal' }
+  /**
+   * The user, through one of their clients. `via: 'bridge'` with a `node` is the user at another of
+   * their own computers (a routed call): `maxPermissionMode` is what this computer lets that device
+   * run a standing rule in. A `bridge` answer without a `node` is a linked phone.
+   */
+  | { kind: 'user'; via?: 'gui' | 'cli' | 'bridge' | 'internal'; node?: string; maxPermissionMode?: PermissionMode }
   /**
    * An agent, acting within its own run's permission mode. It answers for its own subagent, and for a thread
    * outside its lineage only when `access` says the profile allows it. `toolCallId` is the call that answers,
@@ -60,6 +64,7 @@ export type ApprovalRefusal =
   | 'mode_forbids'
   | 'agent_no_standing_grant'
   | 'bridge_no_standing_grant'
+  | 'device_mode_forbids'
 
 /**
  * The run sources that are a person at their own app or CLI (`RunRecord.source`); anything else is not a person's turn.
@@ -116,8 +121,14 @@ export function canAnswerApproval(
   lineage: LineageLookup
 ): ApprovalRights {
   if (answerer.kind === 'user') {
-    // A linked device cannot list or revoke rules, so it does not make them either.
-    if (answerer.via === 'bridge' && answer.decision === 'allow' && answer.scope === 'always') return { ok: false, code: 'bridge_no_standing_grant' }
+    if (answerer.via === 'bridge' && answer.decision === 'allow' && answer.scope === 'always') {
+      // A linked phone cannot list or revoke rules, so it does not make them either.
+      if (!answerer.node) return { ok: false, code: 'bridge_no_standing_grant' }
+      // Another computer of the user can, but a rule outlives the answer and applies in later turns at
+      // whatever mode they run in: only for an action the device's own limit lets it run without asking.
+      // A request the provider reserves for a person (`reason`) is never answered by a rule at all.
+      if (request.reason || !permissionModeAllows(answerer.maxPermissionMode ?? 'ask', request.action)) return { ok: false, code: 'device_mode_forbids' }
+    }
     return { ok: true }
   }
   if (request.threadId === answerer.threadId) return { ok: false, code: 'own_request' }
@@ -162,5 +173,6 @@ export function describeApprovalRefusal(code: ApprovalRefusal): string {
     case 'mode_forbids': return 'Your permission mode would ask the user before this kind of action, so you cannot approve it for your subagent. Ask the user to answer it.'
     case 'agent_no_standing_grant': return 'Only the user can approve an action for the whole thread. Approve it once, or ask the user.'
     case 'bridge_no_standing_grant': return 'A linked device can allow a request once. "Always for this thread" is made in the app or the CLI, where the rule can be seen and revoked.'
+    case 'device_mode_forbids': return 'This computer lets that device allow this request once, but not for the whole thread: its permission limit would ask about this kind of action. Raise the limit for the device on this computer, or answer in the app there.'
   }
 }

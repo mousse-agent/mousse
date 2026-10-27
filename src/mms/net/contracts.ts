@@ -841,6 +841,13 @@ export interface RpcMethod {
   capability: NodeCapability
   /** A scoped gateway can require the registered method's capability instead. */
   capabilityFor?(params: unknown): NodeCapability
+  /**
+   * Capabilities the caller's current delegation must hold besides `capability`. A routed method
+   * requires `settings` ("Works on threads"), so a phone and an older device never reach it.
+   */
+  requires?: readonly NodeCapability[]
+  /** The owner's per-device terminal switch (`net_node_policy.terminal`) must be on for the caller. */
+  needsTerminal?: boolean
   mutating: boolean
   /**
    * Runs outside the durable ledger: no request alias, no execution record and no stored
