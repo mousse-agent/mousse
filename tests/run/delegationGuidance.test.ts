@@ -51,6 +51,7 @@ describe('subagent guidance', () => {
       - clientRequestId: pass a fresh clientRequestId for every new action that changes state (delegate_task, continue_subagent, answer_subagent, integrate_delegation). Reuse the same value only when retrying the same call after an error or timeout; Mousse then returns the first result instead of acting twice.
       - A delegated task can never exceed your own mode ceiling: a planning turn may only start planning children and cannot integrate.
       - Use ask_user for clarifying questions and present_plan for a plan the user should approve; use thread_read to read your thread's run events (and those of your parent or children).
+      - thread_list and thread_search find other threads and thread_read reads them, but only when the user has given agents that access in Mousse's settings (they are hidden otherwise); the access level decides how much you see, and a refusal names the level it needs.
       - Browser: when the browser_* tools are usable in a turn, Mousse binds them to the browser the user chose; open or observe a page before acting on it, and act on the refs an observation returns.
       - Applets: publish an offline HTML/CSS/JS applet with publish_applet rather than a mousse-applet fence when the tool is usable.
       - Skills: list_skills shows the Skills the user enabled and load_skill loads one; a skill the user invoked explicitly (/name) is already in the turn's instructions.

@@ -155,7 +155,7 @@ describe('delegated child policy', () => {
   it('the read-only Mousse tool list runtimes use matches what the registry lets a read-only child call', () => {
     const { d } = daemon(async () => undefined)
     const registry = d.orch.mcpToolRegistry()
-    const callable = registry.list().filter((tool) => !tool.hidden && (tool.access === 'reads' || tool.readOnlySafe)).map((tool) => tool.name)
+    const callable = registry.list().filter((tool) => !tool.hidden && (tool.access === 'reads' || tool.access === 'readsOthers' || tool.readOnlySafe)).map((tool) => tool.name)
     expect(new Set(callable)).toEqual(READ_ONLY_MOUSSE_TOOLS)
   })
 
@@ -499,7 +499,7 @@ describe('delegated child policy', () => {
       if (!name || probed.has(name)) return 'Looked.'
       probed.add(name)
       const tools = await registry
-      const credential = { threadId: input.threadId, runId: input.runId, provider: 'codex', modeCeiling: 'default' as const, binding: 'drained_turn' as const, current: () => true }
+      const credential = { threadId: input.threadId, runId: input.runId, provider: 'codex', modeCeiling: 'default' as const, accessLevel: 'lineage' as const, binding: 'drained_turn' as const, current: () => true }
       for (const [tool, args] of [
         ['thread_read', {}],
         ['queue_list', {}],
@@ -546,32 +546,33 @@ describe('delegated child policy', () => {
 })
 
 describe('ToolRegistry read-only gate', () => {
-  const tool = (name: string, access: 'reads' | 'actsAsCaller' | 'writesThreads' | 'startsThreads', readOnlySafe = false) => ({
+  const tool = (name: string, access: 'reads' | 'readsOthers' | 'actsAsCaller' | 'writesThreads' | 'startsThreads', readOnlySafe = false) => ({
     name, description: name, inputSchema: {}, access, class: 'read' as const, ...(readOnlySafe ? { readOnlySafe } : {}), handler: () => ({ text: 'ok' })
   })
   const turns = new AppToolTurns()
   for (const threadId of ['child', 'parent']) turns.register(appTurn({ threadId, runId: `run-${threadId}` }))
   const registry = new ToolRegistry({ activeRunId: (threadId) => `run-${threadId}`, readOnlyThread: (threadId) => threadId === 'child', turns })
     .register(tool('reads', 'reads'))
+    .register(tool('readsOthers', 'readsOthers'))
     .register(tool('safe', 'actsAsCaller', true))
     .register(tool('acts', 'actsAsCaller'))
     .register(tool('writes', 'writesThreads'))
     .register(tool('starts', 'startsThreads'))
   const call = (name: string, threadId: string) =>
     registry.call(name, {}, {
-      credential: { threadId, runId: `run-${threadId}`, provider: 'codex', modeCeiling: 'default', binding: 'drained_turn', current: () => true },
+      credential: { threadId, runId: `run-${threadId}`, provider: 'codex', modeCeiling: 'default', accessLevel: 'lineage', binding: 'drained_turn', current: () => true },
       toolCallId: 'c',
       signal: new AbortController().signal
     })
 
   it.each([
-    ['reads', true], ['safe', true], ['acts', false], ['writes', false], ['starts', false]
+    ['reads', true], ['readsOthers', true], ['safe', true], ['acts', false], ['writes', false], ['starts', false]
   ])('%s is %s for a read-only caller', async (name, allowed) => {
     if (allowed) await expect(call(name, 'child')).resolves.toMatchObject({ text: 'ok' })
     else await expect(call(name, 'child')).rejects.toMatchObject({ code: 'mousse_read_only' })
   })
 
-  it.each(['reads', 'safe', 'acts', 'writes', 'starts'])('%s works for any other caller', async (name) => {
+  it.each(['reads', 'readsOthers', 'safe', 'acts', 'writes', 'starts'])('%s works for any other caller', async (name) => {
     await expect(call(name, 'parent')).resolves.toMatchObject({ text: 'ok' })
   })
 })

@@ -56,6 +56,8 @@ interface ThreadMeta {
   modelOverride?: ModelOverride
   permissionMode?: PermissionMode
   lineage?: ThreadLineage
+  /** The thread whose agent launched this one with `thread_create`; not a subagent relation. */
+  createdByThreadId?: string
   workspaceBinding?: SubagentWorkspaceBinding
   /** Opt-in isolated git worktree. OFF by default; undefined treated as false. */
   worktreeEnabled?: boolean
@@ -261,6 +263,8 @@ export class ThreadDataStore extends EventEmitter {
       permissionMode?: PermissionMode
       workspaceBinding?: SubagentWorkspaceBinding
       ownerThreadId?: string
+      /** Never `ownerThreadId`: a launched thread is neither nested under nor deleted with its creator. */
+      createdByThreadId?: string
     }
   ): Thread {
     this.invalidateListCache()
@@ -276,6 +280,7 @@ export class ThreadDataStore extends EventEmitter {
     }
     if (opts?.worktreeEnabled === true) meta.worktreeEnabled = true
     if (opts?.lineage) meta.lineage = structuredClone(opts.lineage)
+    if (opts?.createdByThreadId) meta.createdByThreadId = opts.createdByThreadId
     if (opts?.modelOverride) meta.modelOverride = structuredClone(opts.modelOverride)
     if (opts?.permissionMode) meta.permissionMode = opts.permissionMode
     if (opts?.workspaceBinding) meta.workspaceBinding = structuredClone(opts.workspaceBinding)
@@ -531,7 +536,7 @@ export class ThreadDataStore extends EventEmitter {
   /** `touch: false` keeps `updatedAt`, for repairs that must not reorder the sidebar. */
   updateThreadMeta(
     id: string,
-    partial: Partial<Pick<Thread, 'name' | 'modelOverride' | 'permissionMode' | 'worktreeEnabled' | 'lineage' | 'workspaceBinding' | 'pullRequest'>>,
+    partial: Partial<Pick<Thread, 'name' | 'modelOverride' | 'permissionMode' | 'worktreeEnabled' | 'lineage' | 'createdByThreadId' | 'workspaceBinding' | 'pullRequest'>>,
     opts: { touch?: boolean } = {}
   ): Thread {
     const thread = this.getThread(id)

@@ -14,6 +14,7 @@ export function mousseOrchestrationInstructions(): string {
     '- clientRequestId: pass a fresh clientRequestId for every new action that changes state (delegate_task, continue_subagent, answer_subagent, integrate_delegation). Reuse the same value only when retrying the same call after an error or timeout; Mousse then returns the first result instead of acting twice.',
     '- A delegated task can never exceed your own mode ceiling: a planning turn may only start planning children and cannot integrate.',
     '- Use ask_user for clarifying questions and present_plan for a plan the user should approve; use thread_read to read your thread\'s run events (and those of your parent or children).',
+    '- thread_list and thread_search find other threads and thread_read reads them, but only when the user has given agents that access in Mousse\'s settings (they are hidden otherwise); the access level decides how much you see, and a refusal names the level it needs.',
     ...appToolGuidance(),
     '- Never ask for passwords, API keys, tokens or other secrets in chat, and never repeat a secret you were given.'
   ].join('\n')

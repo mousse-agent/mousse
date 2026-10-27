@@ -730,6 +730,11 @@ export interface Thread {
   updatedAt: string
   /** Set on a subagent thread: the thread that started it. Absent on every other thread. */
   lineage?: ThreadLineage
+  /**
+   * Set on a thread an agent launched with `thread_create`: the creating thread. Unlike `lineage` it
+   * is not a subagent relation; it only lets the creator read and stop the thread at any agent access level.
+   */
+  createdByThreadId?: string
   /** Set on a subagent created after workspace bindings were recorded. */
   workspaceBinding?: SubagentWorkspaceBinding
   /**
