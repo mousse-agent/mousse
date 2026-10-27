@@ -6,6 +6,7 @@ import { delegationTools } from './delegation'
 import { devGuiTools } from './devGui'
 import type { AppToolHost } from './host'
 import { planTools } from './plans'
+import { projectGitTools } from './projectGit'
 import { quickActionTools } from './quickActions'
 import { ToolRegistry, type ToolAccessPolicy, type ToolRegistryOptions } from './registry'
 import { scheduleTools } from './schedules'
@@ -20,6 +21,7 @@ export * from './registry'
 export * from './turns'
 export type { AgentActionDetails, AgentApprovalResult, AgentCreatedThread, AgentQueueCommand, AgentQueueResult, AgentScheduleHost, AgentRunCommandResult, AgentSendResult, AgentThreadRequest, ApprovalRequestInfo, AppToolHost, QueueSnapshot, ThreadSearchHit } from './host'
 export { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX, agentMessageText } from './agentMessage'
+export { projectGitToolDefinitions, runProjectGitTool, type ProjectGit } from './projectGit'
 export {
   delegationToolDefinitions,
   dispatchDelegationTool,
@@ -34,7 +36,7 @@ export {
 } from './delegation'
 
 /** The tool families in the order the pi loop has always sent them, after the delegation tools. */
-export const APP_TOOL_FAMILIES = ['skills', 'plans', 'tasks', 'quickActions', 'devGui', 'web', 'browser', 'applets', 'delegation', 'thread', 'schedules', 'bots'] as const
+export const APP_TOOL_FAMILIES = ['skills', 'plans', 'tasks', 'quickActions', 'devGui', 'web', 'browser', 'applets', 'delegation', 'thread', 'schedules', 'bots', 'projectGit'] as const
 export type AppToolFamily = (typeof APP_TOOL_FAMILIES)[number]
 
 /**
@@ -101,5 +103,6 @@ export function createAppToolRegistry(input: {
   add('browser', browserTools(host))
   add('applets', appletTools())
   add('bots', botTools())
+  add('projectGit', projectGitTools(host))
   return { registry, families }
 }

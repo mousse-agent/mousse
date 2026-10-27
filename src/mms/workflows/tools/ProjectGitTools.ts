@@ -4,6 +4,7 @@ import type { FileService } from '../../files/FileService'
 import type { GitService } from '../../git/GitService'
 import type { LineEditStatsStore } from '../../stats/LineEditStatsStore'
 import { isFilesystemWideBashCommand } from '../../orchestrator/toolPathSafety'
+import { projectGitToolDefinitions } from '../../run/mcp/appTools/projectGit'
 
 const COMMAND_TIMEOUT_MS = 120_000
 const MAX_COMMAND_OUTPUT = 32_000
@@ -25,23 +26,9 @@ export class ProjectGitTools {
     private lineEditStats?: LineEditStatsStore
   ) {}
 
-  /** Git helpers kept alongside Pi SDK tools (read/bash/edit/write/grep/find/ls). */
+  /** Git helpers kept alongside Pi SDK tools (read/bash/edit/write/grep/find/ls); the same definitions as the git app tools. */
   getGitToolDefinitions(): Tool[] {
-    return [
-      {
-        name: 'git_status',
-        description: 'Get git status for the project repository.',
-        parameters: Type.Object({})
-      },
-      {
-        name: 'git_diff',
-        description: 'Get a git diff for one file.',
-        parameters: Type.Object({
-          path: Type.String({ description: 'Relative file path.' }),
-          staged: Type.Optional(Type.Boolean({ description: 'Whether to diff staged changes.' }))
-        })
-      }
-    ]
+    return projectGitToolDefinitions()
   }
 
   /** @deprecated Prefer Pi SDK tools via ProjectFileTools; kept for tests/legacy. */
