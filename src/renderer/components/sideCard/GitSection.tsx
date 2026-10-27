@@ -33,7 +33,6 @@ import {
   branchLabel,
   branchSearchAria,
   canInitRepository,
-  canPush,
   changedFileCount,
   changesSummary,
   chooseAmend,
@@ -47,6 +46,7 @@ import {
   emptyCommitForm,
   forceAmend,
   formatCommitLine,
+  gitActionAvailability,
   gitActionLock,
   gitCollapsedLabel,
   gitErrorMessage,
@@ -58,6 +58,7 @@ import {
   pushFailedMessage,
   releaseForcedAmend,
   untrackedFileCount,
+  type CommitAvailability,
   type CommitDraft,
   type CommitForm,
   type GitAction,
@@ -210,8 +211,10 @@ interface CommitButtonProps {
   branch: string | null
   fileCount: number
   commits: GitCommit[]
-  /** The branch has somewhere to push to, so the commit can go on to push. */
+  /** The branch has somewhere to push to and is not behind, so the commit can go on to push. */
   pushable: boolean
+  /** What a commit would include here, and why none can be made right now. */
+  commitAvailability: CommitAvailability
   /** Another Git action is running, so nothing here may start. */
   lock: GitActionLock
   /** Claims the section's one running action; false when another already runs. */
@@ -226,7 +229,7 @@ interface CommitWork {
   phase: 'committing' | 'pushing'
 }
 
-function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, commits, pushable, lock, onBegin, onEnd, onActionError }: CommitButtonProps) {
+function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, commits, pushable, commitAvailability, lock, onBegin, onEnd, onActionError }: CommitButtonProps) {
   const [open, setOpen] = useState(false)
   const { branch: scopeBranch, head } = commitScope(branch, commits)
   const scope = useMemo(() => ({ branch: scopeBranch, head }), [scopeBranch, head])
@@ -256,7 +259,7 @@ function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, com
   const trimmed = draft.message.trim()
   const labels = commitButtonLabels(amend)
   const blocked = lock.reason !== null
-  const canSubmit = Boolean(trimmed) && !work && !blocked
+  const canSubmit = Boolean(trimmed) && !work && !blocked && commitAvailability.blockedReason === null
   // Amend with an empty message starts from the last commit's message, once: clearing it by hand sticks.
   const needsPrefill = amend && open && !work && !trimmed && draft.prefilled === null
 
@@ -382,7 +385,7 @@ function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, com
           </p>
         )}
         <div className="side-card-git-popover-footer">
-          <span className="side-card-git-hint">{commitHint(amend, menu.shortHash, fileCount)}</span>
+          <span className="side-card-git-hint">{commitHint(amend, menu.shortHash, fileCount, commitAvailability)}</span>
           <div className="side-card-git-popover-actions">
             {pushable && (
               <button
@@ -419,14 +422,16 @@ interface PushButtonProps {
 
 function PushButton({ model, busy, lock, onPush }: PushButtonProps) {
   const name = model.count === null ? undefined : model.title
+  // The running action's own button has no reason of its own; a branch state that rules a push out does.
+  const reason = lock.reason ?? model.disabledReason ?? null
   return (
     <button
       type="button"
       className="side-card-git-push"
-      title={lock.reason ?? model.title}
-      aria-label={lock.reason ? menuRowLabel(name ?? model.label, lock.reason) : name}
+      title={reason ?? model.title}
+      aria-label={reason ? menuRowLabel(name ?? model.label, reason) : name}
       aria-busy={busy}
-      disabled={lock.disabled}
+      disabled={lock.disabled || model.disabledReason !== undefined}
       onClick={onPush}
     >
       {busy ? 'Pushing…' : model.label}
@@ -576,7 +581,8 @@ export function GitSectionView({ threadId, ownThreadId = null, projectId, worksp
   const stat = diffStatLabel(git.diffStats, untrackedFileCount(git.status))
   const latest = git.commits[0] ? formatCommitLine(git.commits[0], now ?? Date.now()) : null
   const fileCount = changedFileCount(git.status)
-  const pushButton = pushButtonModel(git.status, git.commits.length)
+  const pushButton = pushButtonModel(git.status, git.commits.length, scope)
+  const availability = gitActionAvailability(git.status, pullRequest, git.commits.length, scope)
   const prRow = pullRequestRow(pullRequest, git.status)
   const createLock = gitActionLock(running, 'pullRequest')
 
@@ -601,7 +607,8 @@ export function GitSectionView({ threadId, ownThreadId = null, projectId, worksp
           branch={branch}
           fileCount={fileCount}
           commits={git.commits}
-          pushable={canPush(git.status)}
+          pushable={availability.offerCommitAndPush}
+          commitAvailability={availability.commit}
           lock={gitActionLock(running, 'commit')}
           onBegin={() => begin('commit')}
           onEnd={end}
