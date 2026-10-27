@@ -3168,6 +3168,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       return { plan: await ctx.mms.storageCleanup.plan() }
     case 'storage.cleanup.lastReport':
       return { report: ctx.mms.storageCleanup.lastReport() }
+    // Totals by project, thread and kind, from the cache (a scan only on `refresh` or the first call). Ids and names, never a path.
+    // A remote caller's params are validated to `{}`, so only a local client can force a rescan.
+    case 'storage.usage': {
+      const p = isObject(params) ? params : {}
+      return await ctx.mms.storageUsage.measure({ refresh: asOptionalBoolean(p.refresh, 'refresh') === true })
+    }
     case 'daemon.shutdown': {
       // Owner-token fencing: connection hello already verified; write uses server token only.
       const p = isObject(params) ? params : {}

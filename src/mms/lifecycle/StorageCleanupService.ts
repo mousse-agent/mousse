@@ -112,6 +112,10 @@ export interface StorageCleanupDeps {
   now?: () => number
   /** Test seam: deletes one capture file. Defaults to `unlinkSync`. */
   removeFile?: (path: string) => void
+  /** Told after every run with its report, so disk usage can be measured again when a run freed space. */
+  onRunComplete?: (report: StorageCleanupReport) => void
+  /** Stops disk measurement until the returned function is called. A run and an immediate removal hold it while they rename and delete. */
+  quiesceDisk?: () => Promise<() => void>
   /** Test seam; defaults to `measureTree`. */
   measure?: typeof measureTree
   /** Test seam: returns why the checkout cannot be removed right now (files in use), or undefined. Defaults to a rename probe on Windows. */
@@ -270,6 +274,9 @@ export class StorageCleanupService {
     this.afterPolicyChange.unref()
   }
 
+  /** True while a run is in progress (or queued behind one). Disk usage scans wait for it. */
+  isRunning(): boolean { return this.current !== undefined || this.queuedManual !== undefined }
+
   /** True while the time-based rules are paused after the clock moved backwards; saving the policy resumes them. */
   clockSuspended(): boolean { return this.deps.clock.suspended() }
 
@@ -405,6 +412,12 @@ export class StorageCleanupService {
   }
 
   private async execute(trigger: StorageCleanupReport['trigger']): Promise<StorageCleanupReport> {
+    // Disk measurement holds handles that make a worktree look in use to the rename probe; it waits for the run.
+    const resume = await this.deps.quiesceDisk?.()
+    try { return await this.executeQuiet(trigger) } finally { resume?.() }
+  }
+
+  private async executeQuiet(trigger: StorageCleanupReport['trigger']): Promise<StorageCleanupReport> {
     const startedMs = this.now()
     const items: StorageCleanupItem[] = []
     let suspended: string | undefined
@@ -443,6 +456,7 @@ export class StorageCleanupService {
     if (trigger === 'manual' || hasRule) {
       try { atomicWriteJsonSync(this.reportPath, report) } catch { /* The report is still returned. */ }
     }
+    try { this.deps.onRunComplete?.(report) } catch { /* A listener never changes what the run reports. */ }
     return report
   }
 
@@ -536,9 +550,13 @@ export class StorageCleanupService {
     if (!record || record.state !== 'trashed' || record.parentTaskId) return undefined
     const snapshot = this.deps.policy.snapshot()
     if (!snapshot.policy.worktrees.removeWithDeletedThreads) return undefined
-    const item = await this.retireDeleted(record, snapshot)
-    if (item) this.recordOutcomes(new Date(this.now()).toISOString(), 'trash', [item])
-    return item
+    // The rename probe and the removal both need the disk measurement out of the way.
+    const resume = await this.deps.quiesceDisk?.()
+    try {
+      const item = await this.retireDeleted(record, snapshot)
+      if (item) this.recordOutcomes(new Date(this.now()).toISOString(), 'trash', [item])
+      return item
+    } finally { resume?.() }
   }
 
   private deletedFingerprint(record: TaskLifecycleRecord, workspace: ThreadWorkspaceMetadata, snapshot: PolicySnapshot): string | undefined {

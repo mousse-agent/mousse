@@ -637,7 +637,8 @@ const api = {
     policy: (): Promise<{ trash: import('../shared/resourceLifecycle').TrashRetentionPolicy; trashSweepStatus: { suspended: boolean; reason?: string }; policy: import('../shared/storage').StoragePolicy; clockSuspended: boolean }> => storageInvoke('storage:policy'),
     configure: (policy: import('../shared/storage').StoragePolicy): Promise<{ policy: import('../shared/storage').StoragePolicy }> => storageInvoke('storage:configure', policy),
     cleanupRun: (): Promise<{ report: import('../shared/storage').StorageCleanupReport }> => storageInvoke('storage:cleanupRun'),
-    cleanupLastReport: (): Promise<{ report: import('../shared/storage').StorageCleanupReport | null }> => storageInvoke('storage:cleanupLastReport')
+    cleanupLastReport: (): Promise<{ report: import('../shared/storage').StorageCleanupReport | null }> => storageInvoke('storage:cleanupLastReport'),
+    usage: (options?: { refresh?: boolean }): Promise<import('../shared/storage').StorageUsageSnapshot> => storageInvoke('storage:usage', options)
   },
   workspace: {
     getStatus: (threadId: string): Promise<unknown> => ipcRenderer.invoke('workspace:getStatus', threadId),

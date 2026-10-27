@@ -389,6 +389,7 @@ export const PROTOCOL_METHODS = [
   'storage.cleanup.run',
   'storage.cleanup.plan',
   'storage.cleanup.lastReport',
+  'storage.usage',
   'files.list',
   'files.read',
   'files.write',

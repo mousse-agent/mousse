@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { linkSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs'
+import { lstat, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { measureTree } from '../src/mms/lifecycle/diskMeasure'
+import { basename, join } from 'node:path'
+import { measureTree, skipKey } from '../src/mms/lifecycle/diskMeasure'
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) })
@@ -64,6 +65,105 @@ describe('measureTree', () => {
   })
 
   it('measures a missing root as nothing', async () => {
-    expect(await measureTree(join(temp(), 'absent'), { mode: 'reclaim', budgetMs: 5000 })).toEqual({ bytes: 0, files: 0, estimated: false, partial: false })
+    expect(await measureTree(join(temp(), 'absent'), { mode: 'reclaim', budgetMs: 5000 })).toEqual({ bytes: 0, files: 0, entries: 0, estimated: false, partial: false, unreadable: 0 })
+  })
+
+  it('stops at the entry budget even when the clock never advances, and says why', async () => {
+    const root = temp()
+    for (let index = 0; index < 30; index++) writeFileSync(join(root, `f${index}.txt`), 'x')
+    const measured = await measureTree(root, { mode: 'usage', budgetMs: 60_000, maxEntries: 10, now: () => 0 })
+    expect(measured).toMatchObject({ partial: true, stopped: 'entries', entries: 10 })
+    expect(measured.files).toBeLessThan(30)
+    const whole = await measureTree(root, { mode: 'usage', budgetMs: 60_000, maxEntries: 1000 })
+    expect(whole).toMatchObject({ partial: false, files: 30 })
+    expect(whole.stopped).toBeUndefined()
+  })
+
+  it('leaves out folders named in skip, however the path is cased on Windows', async () => {
+    const root = temp(); mkdirSync(join(root, 'keep')); mkdirSync(join(root, 'other'))
+    writeFileSync(join(root, 'keep', 'a.txt'), 'x'); writeFileSync(join(root, 'other', 'b.txt'), 'x')
+    const skip = new Set([skipKey(join(root, 'other'))])
+    expect((await measureTree(root, { mode: 'usage', budgetMs: 5000, skip })).files).toBe(1)
+    expect((await measureTree(root, { mode: 'usage', budgetMs: 5000 })).files).toBe(2)
+    if (process.platform === 'win32') expect(skipKey(join(root, 'OTHER'))).toBe(skipKey(join(root, 'other')))
+  })
+
+  it('ignores an entry that disappears during the walk and counts one it cannot read', async () => {
+    const root = temp(); writeFileSync(join(root, 'ok.txt'), 'x'); writeFileSync(join(root, 'gone.txt'), 'x'); writeFileSync(join(root, 'locked.txt'), 'x')
+    const failing = (names: Record<string, string>) => ({
+      readdir: (path: string) => readdir(path),
+      lstat: (async (path: string) => {
+        const error = names[basename(path)]
+        if (error) throw Object.assign(new Error(error), { code: error })
+        return lstat(path)
+      }) as typeof lstat
+    })
+    const vanished = await measureTree(root, { mode: 'usage', budgetMs: 5000, fs: failing({ 'gone.txt': 'ENOENT' }) })
+    expect(vanished).toMatchObject({ files: 2, unreadable: 0, partial: false })
+    const locked = await measureTree(root, { mode: 'usage', budgetMs: 5000, fs: failing({ 'locked.txt': 'EBUSY' }) })
+    expect(locked).toMatchObject({ files: 2, unreadable: 1, partial: true })
+    expect(locked.stopped).toBeUndefined()
+  })
+
+  it('keeps nothing from a folder that was replaced while its entries were being read', async () => {
+    const root = temp(); mkdirSync(join(root, 'swap')); writeFileSync(join(root, 'swap', 'a.bin'), 'x'.repeat(8192)); writeFileSync(join(root, 'keep.bin'), 'y'.repeat(8192))
+    let lookups = 0
+    const fs = {
+      readdir: (path: string) => readdir(path),
+      lstat: (async (path: string, o?: { bigint?: boolean }) => {
+        const stat = await lstat(path, o as never) as import('node:fs').BigIntStats
+        if (o?.bigint && basename(path) === 'swap' && ++lookups === 2) return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { ino: stat.ino + 1n })
+        return stat
+      }) as typeof lstat
+    }
+    const measured = await measureTree(root, { mode: 'usage', budgetMs: 5000, fs })
+    expect(measured.files).toBe(1) // keep.bin; the replaced folder contributed nothing
+    expect(measured).toMatchObject({ unreadable: 1, partial: true })
+    // Unchanged, the same folder counts.
+    expect((await measureTree(root, { mode: 'usage', budgetMs: 5000 })).files).toBe(2)
+  })
+
+  it('does not walk a folder that has turned into a link since it was listed', async () => {
+    const root = temp(); mkdirSync(join(root, 'outside')); writeFileSync(join(root, 'outside', 'big.bin'), 'x'.repeat(16384))
+    mkdirSync(join(root, 'tree')); mkdirSync(join(root, 'tree', 'child'))
+    let swapped = false
+    const fs = {
+      lstat,
+      readdir: async (path: string) => {
+        // The approved child is replaced by a junction just before it is listed.
+        if (!swapped && basename(path) === 'child') {
+          swapped = true
+          rmSync(path, { recursive: true }); symlinkSync(join(root, 'outside'), path, process.platform === 'win32' ? 'junction' : 'dir')
+        }
+        return readdir(path)
+      }
+    }
+    const measured = await measureTree(join(root, 'tree'), { mode: 'usage', budgetMs: 5000, fs })
+    expect(measured.files).toBe(0)
+  })
+
+  it('tells apart hard-linked files whose 64-bit file ids differ only beyond the precision of a number', async () => {
+    const root = temp()
+    for (const name of ['one', 'two']) { writeFileSync(join(root, `${name}.bin`), 'x'.repeat(4096)); linkSync(join(root, `${name}.bin`), join(root, `${name}-link.bin`)) }
+    const fs = {
+      readdir: (path: string) => readdir(path),
+      lstat: (async (path: string, o?: { bigint?: boolean }) => {
+        const stat = await lstat(path, o as never) as import('node:fs').BigIntStats
+        if (!basename(path).startsWith('one') && !basename(path).startsWith('two')) return stat
+        const second = basename(path).startsWith('two')
+        // Both files report the same number, as a Windows file id above 2^53 would; only the BigInt form differs.
+        return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { ino: o?.bigint ? 2n ** 60n + (second ? 1n : 0n) : 2 ** 60 })
+      }) as typeof lstat
+    }
+    const measured = await measureTree(root, { mode: 'usage', budgetMs: 5000, fs })
+    expect(measured.files).toBe(2)
+  })
+
+  it.runIf(process.platform === 'win32')('sizes a tree whose paths are longer than the classic 260 characters', async () => {
+    const root = temp(); let deep = root
+    for (let level = 0; level < 8; level++) deep = join(deep, 'segment-'.padEnd(40, 'x') + level)
+    mkdirSync(deep, { recursive: true }); writeFileSync(join(deep, 'deep.txt'), 'x'.repeat(100))
+    expect(deep.length).toBeGreaterThan(300)
+    expect(await measureTree(root, { mode: 'usage', budgetMs: 5000 })).toMatchObject({ files: 1, bytes: 100, unreadable: 0, partial: false })
   })
 })

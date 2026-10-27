@@ -83,6 +83,7 @@ import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
 import { OwnedWorkBarrier } from './execution/OwnedWorkBarrier'
 import { ResourceLifecycleCoordinator } from './lifecycle/ResourceLifecycleCoordinator'
 import { clearCleanupMarker, StorageCleanupService } from './lifecycle/StorageCleanupService'
+import { StorageUsageService } from './lifecycle/StorageUsageService'
 import { StoragePolicyStore } from './lifecycle/StoragePolicyStore'
 import { StorageSweepClock } from './lifecycle/sweepClock'
 import { threadHasPendingWork } from './lifecycle/threadIdle'
@@ -99,6 +100,19 @@ const STORAGE_LIFECYCLE_METHODS = new Set([
   'threads.trash',
   'threads.restore',
   'threads.purge'
+])
+
+/**
+ * Requests that must not make a trash, restore or purge wait or look like other work: the lifecycle calls
+ * themselves, a manual cleanup run (which purges through the same checks) and its dry run, and a
+ * disk usage read, which can run for seconds and only reads. One set serves both the admission wait and
+ * the idle check, so the two cannot disagree.
+ */
+const LIFECYCLE_EXEMPT_METHODS = new Set([
+  ...STORAGE_LIFECYCLE_METHODS,
+  'storage.cleanup.run',
+  'storage.cleanup.plan',
+  'storage.usage'
 ])
 
 /** Long-poll requests that sit open while nothing happens; they are not owned profile work. */
@@ -136,6 +150,8 @@ export class MmsProfileServices {
   readonly storagePolicy: StoragePolicyStore
   /** Storage cleanup rules: the one scheduler for worktree retirement and the trash sweep. */
   readonly storageCleanup: StorageCleanupService
+  /** Disk usage for Settings > Storage, measured in the background and cached. */
+  readonly storageUsage: StorageUsageService
   readonly orchestrator: OrchestratorService
   readonly scheduled: ScheduledJobService
   readonly channels: ChannelService
@@ -614,7 +630,10 @@ export class MmsProfileServices {
           else this.orchestrator.markThreadDeleted(task.taskId)
         }
       },
+      quiesceDisk: () => this.storageUsage.pause(),
       projectPurged: (record) => {
+        // A permanent delete freed space.
+        this.storageUsage.rescanSoon()
         clearCleanupMarker(this.threads.lifecycleStore, record.taskId)
         this.threads.projectPurgedIndex(record)
         this.threadRuntimes.disposeRuntime(record.taskId)
@@ -638,7 +657,17 @@ export class MmsProfileServices {
       idle: (threadId) => this.threadPendingWork(threadId),
       installationHome: shared.installationHome,
       codeHost: this.gitService.codeHost,
-      browserCaptures: { workerArtifactRoot: this.platform.workerArtifactRoot, sessions: (staleBefore) => this.platform.browserSessionStates(staleBefore) }
+      browserCaptures: { workerArtifactRoot: this.platform.workerArtifactRoot, sessions: (staleBefore) => this.platform.browserSessionStates(staleBefore) },
+      // A run that freed space has made the cached numbers wrong.
+      onRunComplete: (report) => { if (report.counts.removed > 0) this.storageUsage.rescanSoon() },
+      quiesceDisk: () => this.storageUsage.pause()
+    })
+    this.storageUsage = new StorageUsageService({
+      store: this.threads.lifecycleStore,
+      threads: this.threads,
+      projects: this.projects,
+      installationHome: shared.installationHome,
+      busy: () => this.storageCleanup.isRunning()
     })
     this.wireServiceEvents()
     void opts?.headless
@@ -667,16 +696,7 @@ export class MmsProfileServices {
     const requests = this.requests.snapshot()
     const activeRequests = Object.entries(requests).filter(
       ([key, count]) =>
-        count > 0 &&
-        ![
-          'rpc:threads.delete',
-          'rpc:threads.trash',
-          'rpc:threads.restore',
-          'rpc:threads.purge',
-          // A manual storage run purges trash through this same idle check, and a dry run previews it; their own request is not other work.
-          'rpc:storage.cleanup.run',
-          'rpc:storage.cleanup.plan'
-        ].includes(key)
+        count > 0 && !LIFECYCLE_EXEMPT_METHODS.has(key.replace(/^rpc:/, ''))
     )
     if (activeRequests.length) {
       throw new ResourceLifecycleError(
@@ -778,7 +798,8 @@ export class MmsProfileServices {
     if (record.state === 'trashed' && this.removesWorktreesWithDeletedThreads()) {
       try {
         // The same keep rules as the hourly run (unpublished commits, links, files in use); a checkout that is kept stays until purge.
-        await this.storageCleanup.retireDeletedWorktree(taskId)
+        const item = await this.storageCleanup.retireDeletedWorktree(taskId)
+        if (item?.outcome === 'removed') this.storageUsage.rescanSoon()
       } catch (error) {
         this.threads.lifecycleStore.update(taskId, (current) => {
           current.blockedReason = `Checkout retirement retained resources: ${(error as Error).message}`
@@ -838,7 +859,7 @@ export class MmsProfileServices {
         // the move; this wait alone never does. Exclude lifecycle calls consistently
         // with that idle check, avoiding a pair of lifecycle calls waiting on itself.
         const include = (active: string) =>
-          !STORAGE_LIFECYCLE_METHODS.has(active.replace(/^rpc:/, ''))
+          !LIFECYCLE_EXEMPT_METHODS.has(active.replace(/^rpc:/, ''))
         try {
           await this.requests.waitForIdle(2_000, include)
         } catch (error) {
@@ -888,6 +909,7 @@ export class MmsProfileServices {
   beginShutdown(): void {
     void this.undoRetention.stop()
     void this.storageCleanup.stop()
+    void this.storageUsage.stop()
     void this.lifecycle.cleanup.stop()
     this.requests.beginShutdown()
     // Ends open and late window speech waits now, even when Net never started and so never closes
@@ -984,6 +1006,7 @@ export class MmsProfileServices {
     this.undoRetention.start()
     // The storage service is the only scheduler; it runs the trash sweep inside its own run.
     this.storageCleanup.start()
+    this.storageUsage.start()
 
     // Headless-safe: reclaim abandoned claims and drain pending normal work without the GUI.
     // Non-blocking; live peer ownership is never stolen.
@@ -1201,6 +1224,7 @@ export class MmsProfileServices {
     const cleanups = [
       () => this.undoRetention.stop(),
       () => this.storageCleanup.stop(),
+      () => this.storageUsage.stop(),
       () => this.lifecycle.cleanup.stop(),
       () => this.platform.dispose(),
       () => this.scheduled.shutdown(),
