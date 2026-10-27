@@ -50,6 +50,8 @@ export const STAGED_UPLOAD_TTL_MS = 10 * 60 * 1000
  * error: a mutating handler that throws reports an uncertain outcome, which hides the reason.
  */
 class RemoteInputError extends Error {}
+/** The session starts a request's deadline slightly before the dispatcher computes `deadlineAt`. */
+const DEADLINE_SKEW_MS = 1000
 const STAGED_UPLOADS_PER_CALLER = 32
 const STAGED_UPLOADS_TOTAL = 128
 /** Base64 characters held for one caller, and for everyone, before more images are refused. */
@@ -171,7 +173,13 @@ export class RemoteApi {
       }
       let accepted = false
       this.runs.set(context.id, run)
-      const stop = (): void => abort.abort()
+      // The sender's deadline covers delivery and acceptance only. The session ends a request's signal
+      // when that deadline passes, and once the turn has started that is not a reason to end it: a turn
+      // runs as long as a local one would. Stop, a cancel and a closed link still end it.
+      const stop = (): void => {
+        if (accepted && this.clock.now() >= context.deadlineAt - DEADLINE_SKEW_MS) return
+        abort.abort()
+      }
       context.signal.addEventListener('abort', stop, { once: true })
       const timer = this.clock.setTimeout(stop, Math.max(0, context.deadlineAt - this.clock.now()))
       try {
@@ -187,6 +195,7 @@ export class RemoteApi {
             },
             onAccepted: () => {
               accepted = true
+              timer.cancel()
             }
           },
           resolved.extras

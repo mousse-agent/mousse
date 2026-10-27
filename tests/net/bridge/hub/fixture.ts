@@ -20,7 +20,7 @@ import {
   ThreadStreamAdapter
 } from '../../../../src/mms/bridge/remote'
 import { BridgeArtifacts } from '../../../../src/mms/bridge/artifacts'
-import { BridgeHub } from '../../../../src/mms/bridge/hub'
+import { BridgeHub, type BridgeHubOptions } from '../../../../src/mms/bridge/hub'
 import { newId, type NodeCapability } from '../../../../src/shared/net'
 import type { StreamStore } from '../../../../src/mms/net/contracts'
 import { memoryPair } from '../../harness/MemoryTransport'
@@ -36,7 +36,8 @@ function temp() {
 }
 export async function fixture(
   caps: NodeCapability[] = ['read', 'chat', 'write'],
-  fault?: (point: string) => void
+  fault?: (point: string) => void,
+  hubOptions: Pick<BridgeHubOptions, 'clock' | 'maxJournalRecords' | 'maxJournalBytes'> = {}
 ) {
   const home = temp(),
     mms = await MousseMainService.create({ homeDir: home, headless: true, ownerKind: 'test' })
@@ -100,7 +101,7 @@ export async function fixture(
     clock: systemClock,
     fallback: new NodeStreamAuthority(targetIdentity, targetStore, targetBlobs, systemClock)
   })
-  function openCaller(maxJournalBytes?: number) {
+  function openCaller() {
     callerDb = new NetDatabase({ profileDir: callerPath, fault })
     resources.push(() => callerDb.close())
     callerIdentity = new NetIdentityService({
@@ -142,7 +143,7 @@ export async function fixture(
       store: callerStore,
       session: () => callerSession!,
       resolveResult: (...args) => callerArtifacts.resolveResult(...args),
-      maxJournalBytes
+      ...hubOptions
     })
     resources.push(async () => {
       hub.close()

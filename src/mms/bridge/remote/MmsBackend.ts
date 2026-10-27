@@ -1,5 +1,5 @@
 import { realpathSync, statSync } from 'node:fs'
-import { dirname, isAbsolute, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { portableRepository } from '../dispatch/repository'
 import { matchProject, type ProjectIdentity } from './projectMatch'
 import { withoutStandingRules } from '../../orchestrator/UserQuestionService'
@@ -109,7 +109,16 @@ function isInside(child: string, parent: string): boolean {
   const from = fold ? parent.toLowerCase() : parent
   const to = fold ? child.toLowerCase() : child
   const path = relative(from, to)
-  return path === '' || (!path.startsWith('..') && !isAbsolute(path))
+  // `..cache` is a folder name, not a step up.
+  return path === '' || (path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path))
+}
+
+/**
+ * A Windows network or device path (`\\host\share`, `\\?\C:\x`, `\\.\pipe\x`). Resolving one makes
+ * this computer reach out to a host the caller names, and the lookup blocks until it answers.
+ */
+function isNetworkOrDevicePath(path: string): boolean {
+  return process.platform === 'win32' && /^[\\/]{2}/.test(path)
 }
 
 function failure(error: unknown): { ok: false; error: string } {
@@ -213,19 +222,24 @@ export class MmsRemoteBackend implements RemoteBackendPort {
   /**
    * Registers an existing directory on this machine as a project. The path comes from another
    * machine, so it must be absolute, exist, be a directory, and not lie inside the Mousse home
-   * (which holds keys and every profile's data). A directory is never created. Refusals answer
-   * `{ ok: false, error }` so the reason survives a mutating RPC.
+   * (which holds keys and every profile's data) or contain it (a user's home folder holds it). A
+   * directory is never created. Refusals answer `{ ok: false, error }` so the reason survives a
+   * mutating RPC.
    */
   private openProject(path: unknown): { ok: true; project: unknown } | { ok: false; error: string } {
     const refuse = (error: string) => ({ ok: false as const, error })
     if (typeof path !== 'string' || !path.trim() || path.includes('\0'))
       return refuse('Enter the full path of a folder.')
+    if (isNetworkOrDevicePath(path.trim()))
+      return refuse('Network and device paths cannot be opened from another computer.')
     if (!isAbsolute(path)) return refuse('Enter the full path of a folder, starting from the root.')
     const lexical = resolve(path)
     if (dirname(lexical) === lexical) return refuse('Pick a folder, not the root of the disk.')
     let real: string
     try {
       real = realpathSync.native(lexical)
+      if (isNetworkOrDevicePath(real))
+        return refuse('Network and device paths cannot be opened from another computer.')
       if (!statSync(real).isDirectory()) return refuse('That path is a file, not a folder.')
     } catch {
       return refuse('That folder does not exist on this computer.')
@@ -238,10 +252,14 @@ export class MmsRemoteBackend implements RemoteBackendPort {
       } catch {
         // A home that cannot be resolved is still compared by its own path.
       }
-      if ([home, realHome].some((root) => isInside(lexical, root) || isInside(real, root)))
-        return refuse('That folder is part of the Mousse data folder.')
+      const homes = [home, realHome],
+        folders = [lexical, real]
+      // Inside the data folder, or a folder that holds it: file tools may edit anything below the
+      // project folder, so a thread there could change the keys and databases without asking.
+      if (homes.some((root) => folders.some((folder) => isInside(folder, root) || isInside(root, folder))))
+        return refuse('That folder is part of the Mousse data folder, or contains it.')
     }
-    const project = s.projects.openProject(lexical)
+    const project = s.projects.openProject(real)
     s.events.broadcast('projects:updated', s.projects.listProjects())
     return { ok: true, project }
   }
@@ -264,6 +282,12 @@ export class MmsRemoteBackend implements RemoteBackendPort {
         try {
           // Unknown or disabled instances are refused before anything is stored.
           const override = s.providerInstances.overrideFor(model)
+          // As the local handler does: a model hidden, or an instance the thread's project turned off, is refused.
+          const projectId = s.threads.getThread(threadId)?.projectId
+          s.harness?.resolveStored(override, {
+            purpose: 'composer',
+            scope: projectId ? { kind: 'project', projectId } : { kind: 'device' }
+          })
           const modelOverride = s.orchestrator.setThreadModelOverride(threadId, override)
           s.events.broadcast('threads:updated', { threads: s.threads.listAllThreads() })
           return { ok: true, modelOverride: modelOverride ?? null }

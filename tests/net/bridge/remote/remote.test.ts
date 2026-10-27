@@ -375,7 +375,7 @@ describe('P3 real MMS remote Bridge', () => {
     ).rejects.toMatchObject({ code: 'forbidden' })
   })
 
-  it('aborts the owned actual MMS run and releases the turn when the remote send deadline expires', async () => {
+  it('keeps an accepted actual MMS turn running when the sender deadline expires, until a Stop ends it', async () => {
     const p = await setup(),
       thread = p.mms.threads.createThread('Owned turn'),
       calls: Array<{ signal: AbortSignal; drainSteer: () => string | undefined }> = []
@@ -431,17 +431,30 @@ describe('P3 real MMS remote Bridge', () => {
     resources.push(() => adapter.close())
     adapter.activate(thread.id)
     const { b } = await p.connect()
-    const expired = b
-      .rpc(
-        'orchestrator.send',
-        { threadId: thread.id, content: 'Deadline prompt' },
-        { id: newId('rpc'), idem: 'deadline-send', deadlineMs: 1000 }
-      )
-      .catch((error) => error)
+    const run = newId('rpc'),
+      expired = b
+        .rpc(
+          'orchestrator.send',
+          { threadId: thread.id, content: 'Deadline prompt' },
+          { id: run, idem: 'deadline-send', deadlineMs: 1000 }
+        )
+        .catch((error) => error)
     await vi.waitFor(() => expect(calls).toHaveLength(1))
     // Live deltas are batched and published about every 100 ms.
     await vi.waitFor(() => expect(deltas.length).toBeGreaterThan(0))
     expect(await expired).toMatchObject({ code: 'deadline_exceeded' })
+    // The sender stopped waiting, but the turn it started is a turn like any other here: it runs on.
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    expect(calls[0].signal.aborted).toBe(false)
+    expect(p.mms.orchestrator.getOrCreateSession(thread.id).turnAdmitted).toBe(true)
+    // A Stop naming the run ends it and releases the turn.
+    expect(
+      await b.rpc(
+        'orchestrator.abort',
+        { threadId: thread.id, run },
+        { id: newId('rpc'), idem: 'deadline-stop', deadlineMs: 2000 }
+      )
+    ).toEqual({ ok: true })
     await vi.waitFor(
       () => {
         expect(calls[0].signal.aborted).toBe(true)

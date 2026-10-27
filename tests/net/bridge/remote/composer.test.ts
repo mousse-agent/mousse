@@ -495,6 +495,51 @@ describe('remote composer methods', () => {
     api.close()
   })
 
+  it('applies the sender deadline until the message is stored, never to the turn that follows', async () => {
+    const time = manualClock()
+    const runs: Array<{ signal: AbortSignal; onAccepted(): void; finish(): void }> = []
+    const backend: RemoteBackendPort = {
+      ...idleBackend,
+      run: (_threadId, _content, control) =>
+        new Promise((resolve) => {
+          const finish = (): void => resolve({ text: 'finished', silent: false })
+          runs.push({ signal: control.signal, onAccepted: control.onAccepted, finish })
+          control.signal.addEventListener('abort', finish, { once: true })
+        })
+    }
+    const api = new RemoteApi(backend, time)
+    resources.push(() => api.close())
+    const send = (threadId: string, signal = new AbortController().signal, deadlineMs = 1000) =>
+      Promise.resolve(
+        api
+          .methods()
+          .find((row) => row.method === 'orchestrator.send')!
+          .handle({ threadId, content: 'work' }, { ...context(), signal, deadlineAt: time.now() + deadlineMs })
+      )
+    // The message is stored, then the deadline passes: the turn keeps running until it is done,
+    // also when the session ends the request's signal at its deadline.
+    const session = new AbortController()
+    const accepted = send('long-turn', session.signal)
+    runs[0].onAccepted()
+    time.advance(60 * 60_000)
+    session.abort()
+    expect(runs[0].signal.aborted).toBe(false)
+    runs[0].finish()
+    expect(await accepted).toMatchObject({ text: 'finished' })
+    // The deadline passes before the message is stored: the send is abandoned.
+    const abandoned = send('never-accepted')
+    time.advance(2000)
+    expect(runs[1].signal.aborted).toBe(true)
+    await expect(abandoned).rejects.toMatchObject({ code: 'cancelled' })
+    // A cancel from the sender, well before the deadline, still ends an accepted turn.
+    const cancel = new AbortController()
+    const cancelled = send('cancelled-turn', cancel.signal, 60_000)
+    runs[2].onAccepted()
+    cancel.abort()
+    expect(runs[2].signal.aborted).toBe(true)
+    await expect(cancelled).rejects.toMatchObject({ code: 'cancelled' })
+  })
+
   it('refuses a chunk that changes an upload already in progress', async () => {
     const api = new RemoteApi(
       { execute: async () => ({}), snapshot: () => ({}), run: async () => ({}) },

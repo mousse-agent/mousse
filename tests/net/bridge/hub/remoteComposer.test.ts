@@ -2,6 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { newId } from '../../../../src/shared/net'
 import { BRIDGE_HUB_LOCAL_METHODS } from '../../../../src/shared/bridge'
 import { executeBridgeHubLocal, validateBridgeHubLocal } from '../../../../src/mms/bridge/hub'
+import { validateRemoteParams } from '../../../../src/mms/bridge/remote'
 import { fixture, cleanup } from './fixture'
 afterEach(cleanup)
 
@@ -75,6 +76,53 @@ it('reads the target composer options and refuses a model the target does not of
   ).toMatchObject({ ok: false })
 })
 
+it('reads what a thread waits on without journaling the read, and takes no other fields', async () => {
+  const f = await fixture(['read'])
+  await f.connect()
+  const created = f.mms.threads.createThread('Questions'),
+    ref = { nodeId: f.targetNode, entityId: created.id }
+  expect(BRIDGE_HUB_LOCAL_METHODS).toContain('bridge.hub.questions')
+  expect(await executeBridgeHubLocal(f.hub(), 'bridge.hub.questions', { ref })).toEqual({ pending: [] })
+  expect(
+    f.callerDb().database.prepare('SELECT count(*) AS n FROM net_bridge_hub_requests').get()
+  ).toMatchObject({ n: 0 })
+  for (const bad of [{ ref, options: {} }, { ref: { nodeId: f.targetNode } }, { target: f.targetNode }])
+    expect(() => validateBridgeHubLocal('bridge.hub.questions', bad)).toThrow(
+      expect.objectContaining({ code: 'bad_request' })
+    )
+})
+
+it('carries no permission mode: a thread made from another computer keeps the target default, and a stray key is refused', async () => {
+  const f = await fixture()
+  await f.connect()
+  const ref = { nodeId: f.targetNode, entityId: 'thread-1' }
+  for (const [method, value] of [
+    ['bridge.hub.create', { target: f.targetNode, name: 'x', permissionMode: 'full_access' }],
+    ['bridge.hub.create', { target: f.targetNode, name: 'x', options: { permissionMode: 'full_access' } }],
+    ['bridge.hub.send', { ref, content: 'hi', permissionMode: 'full_access' }],
+    ['bridge.hub.send', { ref, content: 'hi', options: { permissionMode: 'full_access' } }],
+    ['bridge.hub.setModel', { ref, model: { instanceId: 'a', model: 'b' }, permissionMode: 'full_access' }]
+  ] as Array<[Parameters<typeof validateBridgeHubLocal>[0], unknown]>)
+    expect(() => validateBridgeHubLocal(method, value), method).toThrow(
+      expect.objectContaining({ code: 'bad_request' })
+    )
+  for (const [method, value] of [
+    ['threads.create', { name: 'x', permissionMode: 'full_access' }],
+    ['orchestrator.send', { threadId: 'thread-1', content: 'hi', permissionMode: 'full_access' }],
+    ['queue.enqueue', { threadId: 'thread-1', content: 'hi', permissionMode: 'full_access' }]
+  ] as Array<[Parameters<typeof validateRemoteParams>[0], unknown]>)
+    expect(() => validateRemoteParams(method, value), method).toThrow(
+      expect.objectContaining({ code: 'bad_request' })
+    )
+  const created = (await executeBridgeHubLocal(f.hub(), 'bridge.hub.create', {
+    target: f.targetNode,
+    name: 'Default mode'
+  })) as { thread: { id: string; permissionMode?: unknown } }
+  const local = f.mms.threads.createThread('Local')
+  expect(created.thread.permissionMode).toEqual(local.permissionMode)
+  expect(f.mms.threads.getThread(created.thread.id)?.permissionMode).toEqual(local.permissionMode)
+})
+
 it('stages an image and sends it with the message, which the target stores with the user message', async () => {
   const f = await fixture()
   ;(f.mms.orchestrator as unknown as { llm: unknown }).llm = {
@@ -120,13 +168,13 @@ it('stages an image and sends it with the message, which the target stores with 
       chunk(f.targetNode, 'upload-image-0001')
     )
   ).toMatchObject({ ok: true, received: 1, total: 1 })
-  // The journal keeps a finished slice's hash, not its image data.
-  const staged = f
-    .callerDb()
-    .database.prepare("SELECT record FROM net_bridge_hub_requests WHERE method='attachments.stage'")
-    .all() as Array<{ record: string }>
-  expect(staged).toHaveLength(1)
-  expect(JSON.parse(staged[0].record).params.data).toBe('')
+  // A slice is stored once on the target and a repeat is accepted once, so it needs no journal row.
+  expect(
+    f
+      .callerDb()
+      .database.prepare("SELECT count(*) AS n FROM net_bridge_hub_requests WHERE method='attachments.stage'")
+      .get()
+  ).toMatchObject({ n: 0 })
   await executeBridgeHubLocal(f.hub(), 'bridge.hub.send', {
     ref,
     content: 'What is in this picture?',
@@ -140,4 +188,8 @@ it('stages an image and sends it with the message, which the target stores with 
     expect(user?.content).toContain('What is in this picture?')
     expect(user?.images?.length).toBe(1)
   })
+  // Sending from another computer does not change the thread's permission mode either.
+  expect(f.mms.threads.getThread(created.thread.id)?.permissionMode).toEqual(
+    f.mms.threads.createThread('Local').permissionMode
+  )
 })

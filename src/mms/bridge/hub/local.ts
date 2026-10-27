@@ -87,6 +87,7 @@ export function validateBridgeHubLocal<M extends BridgeHubLocalMethod>(
     'bridge.hub.send': [['ref', 'content'], ['mode', 'attachments', 'options']],
     'bridge.hub.steer': [['ref', 'run', 'text'], ['options']],
     'bridge.hub.abort': [['ref', 'run'], ['options']],
+    'bridge.hub.questions': [['ref'], []],
     'bridge.hub.attach': [['ref'], []],
     'bridge.hub.detach': [['ref'], []],
     'bridge.hub.dispatch': [['target', 'input'], ['options']],
@@ -199,6 +200,8 @@ export async function executeBridgeHubLocal(
       return hub.steer(row.ref, row.run, row.text, row.options)
     case 'bridge.hub.abort':
       return hub.abort(row.ref, row.run, row.options)
+    case 'bridge.hub.questions':
+      return hub.questions(row.ref)
     case 'bridge.hub.dispatch':
       return hub.dispatch(row.target, row.input, row.options)
     case 'bridge.hub.result':

@@ -176,6 +176,10 @@ export interface BridgeHubRequestStatus {
   target: NodeId
   method: BridgeMethod
   state: BridgeHubRequestState
+  /** The thread a chat method named, so a client can find the run of one thread after a reload. */
+  threadId?: string
+  /** Set while this computer is waiting for the target's answer; a restart leaves an unfinished request without it. */
+  running?: boolean
   createdAt: number
   updatedAt: number
   error?: NetErrorCode
@@ -194,6 +198,7 @@ export const BRIDGE_HUB_LOCAL_METHODS = [
   'bridge.hub.send',
   'bridge.hub.steer',
   'bridge.hub.abort',
+  'bridge.hub.questions',
   'bridge.hub.attach',
   'bridge.hub.detach',
   'bridge.hub.dispatch',
@@ -273,6 +278,10 @@ export interface BridgeHubLocalParams {
     ref: BridgeEntityRef
     run: RpcId
     options?: BridgeHubRequestOptions
+  }
+  /** The questions and approvals the thread is waiting on (`orchestrator.pendingQuestions`); resolves `{ pending }`. */
+  'bridge.hub.questions': {
+    ref: BridgeEntityRef
   }
   'bridge.hub.attach': {
     ref: BridgeEntityRef
