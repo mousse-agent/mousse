@@ -8,6 +8,8 @@ import type {
   PullRequestFormInput,
   PullRequestRef,
   PullRequestScope,
+  PullRequestWatchMode,
+  PullRequestWatchStatus,
   ThreadPullRequestLink
 } from '../../shared/pullRequests'
 import type { GitPullRequestLookup } from '../../shared/types'
@@ -45,9 +47,11 @@ interface PullRequestState {
   details: Record<string, PullRequestDetailEntry>
   /** The scope the create form is open for; the form shows in the section of that folder and branch. */
   createForm: PullRequestScope | null
+  /** What each thread's watch of its pull request is doing, by thread id. */
+  watches: Record<string, PullRequestWatchStatus>
 }
 
-export const useGitPullRequestStore = create<PullRequestState>(() => ({ entries: {}, details: {}, createForm: null }))
+export const useGitPullRequestStore = create<PullRequestState>(() => ({ entries: {}, details: {}, createForm: null, watches: {} }))
 
 /** Lookups kept in memory; the least recently fetched ones that no section shows go first. */
 const MAX_PULL_REQUEST_ENTRIES = 200
@@ -509,4 +513,48 @@ export function composeThreadPullRequest(input: {
     detailError: foundEntry ? foundEntry.error : linkNumber !== null ? linkedEntry?.error ?? null : null,
     linked: false
   }
+}
+
+/** Reads what a thread's watch is doing. Never rejects: a failed read leaves what is shown. */
+export async function refreshPullRequestWatch(threadId: string): Promise<void> {
+  try {
+    const status = await window.mousse.pullRequests.watchStatus(threadId)
+    useGitPullRequestStore.setState((state) => ({ watches: { ...state.watches, [threadId]: status } }))
+  } catch {
+    // Kept as it is.
+  }
+}
+
+/**
+ * Sets a thread's watch. `number` links that pull request to the thread first (the row found it by its branch). Rejects with the
+ * daemon's own refusal (for example, a subagent cannot let the agent act), which the caller shows.
+ */
+export async function setPullRequestWatch(threadId: string, mode: PullRequestWatchMode, number?: number): Promise<PullRequestWatchStatus> {
+  const status = await window.mousse.pullRequests.watch(threadId, mode, number)
+  useGitPullRequestStore.setState((state) => ({ watches: { ...state.watches, [threadId]: status } }))
+  return status
+}
+
+/** A watched pull request changed: its detail is read again at once, in every folder that shows it. */
+export function refreshWatchedPullRequest(threadId: string, number: number): void {
+  for (const { path, number: shown, projectId, threadId: readerThread } of retainedDetails.values()) {
+    if (shown === number) void refreshPullRequestDetail(path, shown, { force: true, projectId, threadId: readerThread })
+  }
+  void refreshPullRequestWatch(threadId)
+}
+
+/**
+ * The state of a thread's watch, kept current: read when `active` turns true, and again when the daemon says the pull request
+ * changed or the watch ended. Null while unknown, or for a thread that has no pull request to watch.
+ */
+export function useThreadPullRequestWatch(threadId: string | null, active: boolean): PullRequestWatchStatus | null {
+  const status = useGitPullRequestStore((state) => (threadId ? state.watches[threadId] ?? null : null))
+  useEffect(() => {
+    if (!threadId || !active) return
+    void refreshPullRequestWatch(threadId)
+    return window.mousse.pullRequests.onUpdated?.((event) => {
+      if (event.threadId === threadId) refreshWatchedPullRequest(threadId, event.number)
+    })
+  }, [threadId, active])
+  return threadId && active ? status : null
 }

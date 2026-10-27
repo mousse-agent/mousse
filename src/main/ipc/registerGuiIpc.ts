@@ -127,6 +127,8 @@ import type {
   PullRequestPushTarget,
   PullRequestRef,
   PullRequestScope,
+  PullRequestWatchMode,
+  PullRequestWatchStatus,
   ResolvedPullRequestSummary,
   StartPullRequestThreadInput,
   StartPullRequestThreadResult
@@ -1997,6 +1999,19 @@ export function registerGuiIpc(
   registerHandler('pullRequests:pushTarget', async (_e, threadId: string) => {
     const response = await guiMms.request<{ target: PullRequestPushTarget }>('pullRequests.pushTarget', { threadId })
     return response.target
+  })
+  // A thread's watch of its pull request: `off`, `notify` (a line in the thread) or `act` (also wakes the agent).
+  registerHandler('pullRequests:watch', async (_e, threadId: string, watch: PullRequestWatchMode, number?: number) => {
+    const response = await guiMms.request<{ status: PullRequestWatchStatus }>('pullRequests.watch', {
+      threadId,
+      watch,
+      ...(typeof number === 'number' ? { number } : {})
+    })
+    return response.status
+  })
+  registerHandler('pullRequests:watchStatus', async (_e, threadId: string) => {
+    const response = await guiMms.request<{ status: PullRequestWatchStatus }>('pullRequests.watchStatus', { threadId })
+    return response.status
   })
   registerHandler('editors:list', async (_e, options?: { refresh?: boolean }) =>
     listEditors(options)

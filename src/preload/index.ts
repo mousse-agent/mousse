@@ -79,6 +79,8 @@ import type {
   PullRequestPushTarget,
   PullRequestRef,
   PullRequestScope,
+  PullRequestWatchMode,
+  PullRequestWatchStatus,
   ResolvedPullRequestSummary,
   StartPullRequestThreadInput,
   StartPullRequestThreadResult
@@ -537,7 +539,18 @@ const api = {
       storageInvoke('pullRequests:startThread', input),
     /** Where Push goes for a thread linked to a pull request. */
     pushTarget: (threadId: string): Promise<PullRequestPushTarget> =>
-      ipcRenderer.invoke('pullRequests:pushTarget', threadId)
+      ipcRenderer.invoke('pullRequests:pushTarget', threadId),
+    /** Turns a thread's watch of its pull request off, to notify, or to wake the agent. `number` links that pull request first. */
+    watch: (threadId: string, watch: PullRequestWatchMode, number?: number): Promise<PullRequestWatchStatus> =>
+      ipcRenderer.invoke('pullRequests:watch', threadId, watch, number),
+    watchStatus: (threadId: string): Promise<PullRequestWatchStatus> =>
+      ipcRenderer.invoke('pullRequests:watchStatus', threadId),
+    /** A watched pull request changed (checks finished, a review or comment arrived, the watch ended). */
+    onUpdated: (cb: (event: { threadId: string; number: number; changes: string[] }) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, event: { threadId: string; number: number; changes: string[] }) => cb(event)
+      ipcRenderer.on('pullRequests:updated', handler)
+      return () => ipcRenderer.removeListener('pullRequests:updated', handler)
+    }
   },
   editors: {
     list: (options?: { refresh?: boolean }): Promise<EditorInfo[]> =>

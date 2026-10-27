@@ -155,6 +155,10 @@ export function bridgeProtocolEvent(
       )
       return true
     }
+    case 'pullRequests.updated': {
+      broadcast('pullRequests:updated', event.data)
+      return true
+    }
     case 'scheduled.status': {
       broadcast(
         'scheduled:status',

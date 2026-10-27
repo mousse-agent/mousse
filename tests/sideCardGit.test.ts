@@ -40,7 +40,8 @@ import {
 } from '../src/renderer/stores/gitStatusStore'
 import { anyTurnEnded } from '../src/renderer/lib/turnEnded'
 import { useAppStore } from '../src/renderer/stores/appStore'
-import type { PullRequestComment, PullRequestDetail } from '../src/shared/pullRequests'
+import type { PullRequestComment, PullRequestDetail, PullRequestWatchStatus } from '../src/shared/pullRequests'
+import { inTime, pullRequestWatchModel } from '../src/renderer/components/sideCard/pullRequestWatchLogic'
 import type {
   GitBranchInfo,
   GitCommit,
@@ -915,5 +916,80 @@ describe('the pull request row opens the panel', () => {
     const rule = /\.side-card-git-pr-external:hover\s*\{([^}]*)\}/.exec(css)
     expect(rule?.[1]).toMatch(/background:/)
     expect(rule?.[1]).not.toMatch(/border|shadow/)
+  })
+})
+
+describe('the watch of the pull request in the side card', () => {
+  const NOW = Date.parse('2026-10-27T10:00:00Z')
+  const status = (patch: Partial<PullRequestWatchStatus> = {}): PullRequestWatchStatus => ({
+    threadId: 't1',
+    mode: 'notify',
+    state: 'watching',
+    nextCheckAt: '2026-10-27T10:04:00Z',
+    ended: null,
+    viewer: 'ada',
+    host: 'github.com',
+    actRefusal: null,
+    ...patch
+  })
+
+  it('offers Off, Notify and Let the agent act, and says what the watch is doing', () => {
+    const model = pullRequestWatchModel(status(), NOW)
+    expect(model.options.map((option) => option.label)).toEqual(['Off', 'Notify', 'Let the agent act'])
+    expect(model).toMatchObject({ mode: 'notify', watching: true, summary: 'Watching · next check in 4m' })
+    expect(model.viewerLine).toBe('Comments by ada on github.com are not reported.')
+    expect(pullRequestWatchModel(null, NOW)).toMatchObject({ mode: 'off', watching: false, summary: null, viewerLine: null, endedLine: null })
+    expect(pullRequestWatchModel(status({ state: 'paused', nextCheckAt: '2026-10-27T10:10:00Z' }), NOW).summary).toBe('Waiting for GitHub · next check in 10m')
+  })
+
+  it('disables acting on a subagent thread with the reason, and names why a watch ended', () => {
+    const refusal = "A subagent thread can only be notified: a pending notice would hold its parent's task open"
+    const model = pullRequestWatchModel(status({ actRefusal: refusal }), NOW)
+    expect(model.options.find((option) => option.mode === 'act')?.disabledReason).toBe(refusal)
+    expect(model.options.find((option) => option.mode === 'notify')?.disabledReason).toBeNull()
+    const ended = pullRequestWatchModel(status({ mode: 'off', state: 'ended', ended: { reason: 'merged', at: '2026-10-27T09:59:00Z' } }), NOW)
+    expect(ended).toMatchObject({ mode: 'off', watching: false, endedLine: 'The pull request was merged, so the watch ended.' })
+  })
+
+  it('formats the wait in seconds and minutes', () => {
+    expect(inTime('2026-10-27T10:00:30Z', NOW)).toBe('in 30s')
+    expect(inTime('2026-10-27T10:10:00Z', NOW)).toBe('in 10m')
+    expect(inTime('2026-10-27T09:59:00Z', NOW)).toBe('now')
+    expect(inTime(null, NOW)).toBe('now')
+  })
+
+  const sectionWith = (props: Record<string, unknown>) => renderToStaticMarkup(createElement(GitSectionView, {
+    threadId: 't1',
+    ownThreadId: 't1',
+    projectId: 'p1',
+    path: '/repo/a',
+    git: { ...EMPTY_GIT_ENTRY, loaded: true, refresh: async () => undefined, status: repoStatus({ branch: 'feature/retry' }) },
+    pullRequest: { state: 'found', pullRequest: prDetail() },
+    pullRequestDetail: prDetail(),
+    collapsedLabel: null,
+    now: NOW,
+    ...props
+  }))
+
+  it('shows the control under the pull request, with the viewer line and the next check', () => {
+    const html = sectionWith({ pullRequestWatch: status(), onWatchChange: async () => undefined })
+    expect(html).toContain('side-card-git-pr-watch')
+    expect(html).toMatch(/role="radio"[^>]*aria-checked="true"[^>]*>Notify</)
+    expect(html).toContain('Watching · next check in 4m')
+    expect(html).toContain('Comments by ada on github.com are not reported.')
+  })
+
+  it('is hidden without a pull request, for a merged one, and for a thread that is not its own', () => {
+    expect(sectionWith({ onWatchChange: async () => undefined, pullRequest: { state: 'none', isDefaultBranch: false }, pullRequestDetail: null })).not.toContain('side-card-git-pr-watch')
+    expect(sectionWith({ onWatchChange: async () => undefined, pullRequest: { state: 'found', pullRequest: prDetail({ state: 'merged' }) } })).not.toContain('side-card-git-pr-watch')
+    expect(sectionWith({ onWatchChange: async () => undefined, ownThreadId: null })).not.toContain('side-card-git-pr-watch')
+    expect(sectionWith({})).not.toContain('side-card-git-pr-watch')
+  })
+
+  it('marks the chosen option with a background, never an edge bar', () => {
+    const css = readFileSync(resolve(__dirname, '../src/renderer/components/sideCard/gitSection.css'), 'utf8')
+    const rule = /\.side-card-git-pr-watch-option\[aria-checked='true'\]\s*\{([^}]*)\}/.exec(css)
+    expect(rule?.[1]).toMatch(/background:/)
+    expect(rule?.[1]).not.toMatch(/border|shadow|outline/)
   })
 })

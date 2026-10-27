@@ -950,3 +950,61 @@ button.side-card-git-pr-check-state {
     transition-property: none !important;
   }
 }
+
+.side-card-git-pr-watch {
+  padding: 4px 6px 0 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.side-card-git-pr-watch-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.side-card-git-pr-watch-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+.side-card-git-pr-watch-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  min-width: 0;
+}
+
+.side-card-git-pr-watch-option {
+  border: 0;
+  border-radius: var(--ui-row-radius);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 1px 6px;
+  cursor: pointer;
+}
+
+.side-card-git-pr-watch-option:hover {
+  background: var(--ui-hover);
+}
+
+/* The chosen one is a background, never a bar at an edge. */
+.side-card-git-pr-watch-option[aria-checked='true'] {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.side-card-git-pr-watch-option[aria-disabled='true'] {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.side-card-git-pr-watch-note {
+  margin: 2px 0 0;
+  color: var(--ui-faint);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
