@@ -45,7 +45,8 @@ async function fixture(grantExtras: Record<string, unknown> = {}) {
     connectorToken = 'PROFILE_ONLY_CONNECTOR_SECRET_'.repeat(3),
     calls: Array<{ method: string; path: string; auth: string | null; body: any }> = [],
     mailbox: unknown[] = [],
-    reject: { status?: number } = {}
+    reject: { status?: number } = {},
+    inventory: { body: unknown } = { body: { devices: { used: 3, limit: 5 } } }
   const fakeFetch: typeof fetch = async (url, input) => {
     const path = new URL(String(url)).pathname,
       method = input?.method ?? 'GET',
@@ -108,6 +109,7 @@ async function fixture(grantExtras: Record<string, unknown> = {}) {
       })
     if (path === '/v1/net/registrations/registration-one/enrollment-requests')
       return Response.json({ requests: mailbox })
+    if (path === '/v1/net/registrations/registration-one/inventory') return Response.json(inventory.body)
     if (reject.status && /\/enrollment-(requests\/[^/]+\/(approve|deny)|offers)$/.test(path))
       return Response.json({ error: { code: 'rejected' } }, { status: reject.status })
     if (/\/enrollment-requests\/[^/]+\/(approve|deny)$/.test(path))
@@ -128,7 +130,7 @@ async function fixture(grantExtras: Record<string, unknown> = {}) {
     })
   })
   const { accountId: _account, ...publicConfiguration } = configuration
-  return { service, calls, mailbox, reject, connectorToken, publicConfiguration }
+  return { service, calls, mailbox, reject, inventory, connectorToken, publicConfiguration }
 }
 
 describe('Mousse ID phone mailbox', () => {
@@ -206,6 +208,22 @@ describe('Mousse ID phone mailbox', () => {
       ]
     ])
     expect(mailboxCalls.every((row) => row.auth === `Bearer ${p.connectorToken}`)).toBe(true)
+  })
+
+  it('reads the account device count with the connector token and refuses malformed counts', async () => {
+    const p = await fixture()
+    await expect(p.service.inventory()).rejects.toMatchObject({ code: 'not_enrolled' })
+    const pending = await p.service.beginLogin(p.publicConfiguration, 'Desk', true)
+    await p.service.finishLogin(pending.id)
+    expect(await p.service.inventory()).toEqual({ used: 3, limit: 5 })
+    const read = p.calls.filter((row) => row.path.endsWith('/inventory'))
+    expect(read.map((row) => [row.method, row.path, row.auth])).toEqual([
+      ['GET', '/v1/net/registrations/registration-one/inventory', `Bearer ${p.connectorToken}`]
+    ])
+    for (const body of [{}, { devices: 3 }, { devices: { used: -1, limit: 5 } }, { devices: { used: 1.5, limit: 5 } }, { devices: { used: '3', limit: 5 } }, { devices: { used: 3 } }]) {
+      p.inventory.body = body
+      await expect(p.service.inventory()).rejects.toMatchObject({ code: 'bad_request' })
+    }
   })
 
   it('maps decided, expired and over-quota mailbox answers', async () => {
