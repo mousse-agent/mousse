@@ -257,7 +257,10 @@ describe('Antigravity profile admission', () => {
     for (const method of ['providers.listConfigured', 'providers.getLoginOptions', 'providers.refreshModels', 'providers.loginOAuth', 'providers.logout']) {
       expect((await resolveBoundServices({ ...args, method })).services, method).toBe(personal)
     }
-    expect((await resolveBoundServices({ ...args, method: 'providers.setApiKey' })).services).toBe(installation)
+    // The old Add dialog's key also adds a removed model API back to the bound profile (PR 5a-1), so
+    // it runs there; the key itself is still saved in the installation's shared credentials.
+    expect((await resolveBoundServices({ ...args, method: 'providers.setApiKey' })).services).toBe(personal)
+    expect((await resolveBoundServices({ ...args, method: 'providers.loginRespond' })).services).toBe(installation)
     await expect(resolveBoundServices({ ...args, binding: undefined, method: 'providers.loginOAuth' })).rejects.toMatchObject({ code: 'profile_binding_required' })
   })
 })
