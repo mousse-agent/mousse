@@ -444,6 +444,20 @@ describe('git_status and git_diff as app tools', () => {
       expect(JSON.parse((await s.call('git_status', {})).text)).toMatchObject({ isRepo: true, changes: [expect.objectContaining({ path: 'a.txt' })] })
     })
 
+    it('a submodule checkout opened as the project is read', async () => {
+      const { top } = parentRepo()
+      const inner = repo()
+      execFileSync('git', ['-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', inner, 'mod'], { cwd: top, stdio: 'pipe' })
+      const sub = join(top, 'mod')
+      writeFileSync(join(sub, 'a.txt'), 'submodule change\n')
+      const s = await setup({ projectPath: sub, definition: { policy: policy(sub), grants: grants('git_status', 'git_diff') } as DefinitionAuthority })
+      expect(await s.call('git_diff', { path: 'a.txt' })).toMatchObject({ isError: false, text: expect.stringContaining('+submodule change') })
+      const status = await s.call('git_status', {})
+      expect(status.isError).toBe(false)
+      expect(JSON.parse(status.text).changes.map((change: { path: string }) => change.path)).toEqual(['a.txt'])
+      expect(status.text).not.toContain('secret')
+    })
+
     it('a project inside a folder that is itself a repository (a home folder kept in Git) is read', async () => {
       const home = repo()
       const project = join(home, 'code', 'proj')

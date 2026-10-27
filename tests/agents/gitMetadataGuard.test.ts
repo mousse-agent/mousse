@@ -4,7 +4,7 @@
  * of a path inside any `.git` folder, or of a `.git` file, is refused wherever it is, by its path as
  * written or its real path through links. Reads are unaffected.
  */
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -90,5 +90,49 @@ describe("a bot's file tools", () => {
     expect(bot.check({ kind: 'builtin', tool: 'write', nativeName: 'write', args: { path: '.git/config' } })).toMatchObject({ ok: false })
     expect(call('write', 'src/app.ts')).toEqual({ ok: true })
     expect(call('read', '.git/config')).toEqual({ ok: true })
+  })
+})
+
+describe("the legacy loop's route: the gate checks the path Pi opens (ProjectFileTools.piArgs, then execute)", () => {
+  it('`@` and `~` forms are refused into .git and out of the roots, and the tool gets exactly the checked path', async () => {
+    const { ProjectFileTools } = await import('../../src/mms/workflows/tools/ProjectFileTools')
+    const tools = new ProjectFileTools()
+    // A test home folder outside the roots: nothing could reach the real one.
+    const home = realpathSync.native(mkdtempSync(join(tmpdir(), 'mousse-git-guard-home-')))
+    const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE }
+    process.env.HOME = home
+    process.env.USERPROFILE = home
+    try {
+      // As LlmClient runs a definition's Pi file tool: resolve as Pi does, check, then execute those arguments.
+      const run = async (toolName: string, args: Record<string, unknown>) => {
+        const resolved = tools.piArgs(toolName, args, root)
+        const prepared = prepareTrustedToolDispatch({ policy: policy(), grants, toolName, args: resolved, isMcp: false, projectPath: root })
+        return prepared.allowed ? { allowed: true, result: await tools.execute(toolName, resolved, root) } : { allowed: false, message: prepared.message }
+      }
+      for (const path of ['@.git/config', '@.git/objects/info/alternates', '@.git/hooks/post-index-change']) {
+        expect(await run('write', { path, content: 'planted\n' }), path).toMatchObject({ allowed: false, message: expect.stringMatching(/cannot change Git metadata/) })
+      }
+      expect(await run('edit', { path: '@.git/config', edits: [{ oldText: '[core]', newText: '[core]\n\tfsmonitor = x' }] })).toMatchObject({ allowed: false })
+      for (const path of ['~/escaped.txt', '@~/escaped.txt', '~/.gitconfig']) {
+        expect(await run('write', { path, content: 'out\n' }), path).toMatchObject({ allowed: false, message: expect.stringMatching(/escaped allowed workspace roots/) })
+      }
+      expect(await run('read', { path: '~/.gitconfig' })).toMatchObject({ allowed: false })
+      expect(readFileSync(join(root, '.git', 'config'), 'utf8')).toBe('[core]\n')
+      expect(existsSync(join(root, '.git', 'objects', 'info', 'alternates'))).toBe(false)
+      expect(existsSync(join(home, 'escaped.txt'))).toBe(false)
+      // `@@name` is the literal file `@name`, written there and nowhere else.
+      expect(await run('write', { path: '@@.git/config', content: 'literal\n' })).toMatchObject({ allowed: true, result: { isError: false } })
+      expect(readFileSync(join(root, '@.git', 'config'), 'utf8')).toBe('literal\n')
+      expect(readFileSync(join(root, '.git', 'config'), 'utf8')).toBe('[core]\n')
+      // An ordinary `@`-prefixed path still lands where Pi puts it.
+      expect(await run('write', { path: '@src/app.ts', content: 'ok\n' })).toMatchObject({ allowed: true, result: { isError: false } })
+      expect(readFileSync(join(root, 'src', 'app.ts'), 'utf8')).toBe('ok\n')
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
   })
 })

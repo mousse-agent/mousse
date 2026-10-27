@@ -73,7 +73,7 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     orch.setRunEngine(engine)
     harness = defs.install(orch, home)
     registry = new AgentDefinitionRegistry({ profileId, profileRoot: join(home, 'profile') })
-    const integrations = new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write', 'ask_user', 'bash', 'thread_read', 'git_status', 'git_diff'] })
+    const integrations = new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write', 'edit', 'ask_user', 'bash', 'thread_read', 'git_status', 'git_diff'] })
     const entry = (instanceId?: string) => ({ ref: { providerId: PROVIDER, modelId: MODEL, ...(instanceId ? { instanceId } : {}) }, available: true, efforts: [], speeds: [], contexts: [], capabilities: ['tools'], unavailableReasons: [] })
     resolver = new AgentResolver({ registry, integrationLookup: integrations, modelLookup: new StaticAgentModelLookup([entry(), entry(`pi:${PROVIDER}`), entry(APPROVAL_ONLY_INSTANCE), entry('stubborn'), { ...entry(`pi:${OTHER}`), ref: { providerId: OTHER, modelId: MODEL, instanceId: `pi:${OTHER}` } }] as never) })
   })
@@ -93,7 +93,7 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     settings.tools = { mode: 'explicit', allowlist: ['read', 'write', 'ask_user'] }
     mutate(settings)
     const draft = registry.createDraft({ runtimeKind, settings, systemPrompt: 'DEFINITION_SYSTEM_PROMPT' })
-    const published = registry.publish(draft.id, draft.draftHash, { integrationLookup: new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write', 'ask_user', 'bash', 'thread_read', 'git_status', 'git_diff'] }) })
+    const published = registry.publish(draft.id, draft.draftHash, { integrationLookup: new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write', 'edit', 'ask_user', 'bash', 'thread_read', 'git_status', 'git_diff'] }) })
     return { id: draft.id, revision: published.revision }
   }
 
@@ -280,7 +280,7 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     mkdirSync(join(top, 'sub'))
     const configBefore = readFileSync(join(top, '.git', 'config'), 'utf8')
     const stored = publish('mousse', `pi:${PROVIDER}`, (settings) => {
-      settings.tools = { mode: 'explicit', allowlist: ['write', 'git_diff'] }
+      settings.tools = { mode: 'explicit', allowlist: ['write', 'edit', 'git_diff'] }
       settings.script.enabled = false
     })
     const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })
@@ -289,14 +289,42 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
       call('write', { path: '.git/config', content: `${configBefore}[hook "evil"]\n\tcommand = echo ran\n\tevent = post-index-change\n` }, 'w1'),
       call('write', { path: '.git/objects/info/alternates', content: '/elsewhere/.git/objects\n' }, 'w2'),
       call('write', { path: 'sub/.git', content: 'gitdir: /elsewhere/.git\n' }, 'w3'),
+      // Forms Pi's tools expand before they open the path: the gate checks the path Pi opens.
+      call('write', { path: '@.git/config', content: 'planted\n' }, 'w5'),
+      call('write', { path: '@.git/objects/info/alternates', content: '/elsewhere/.git/objects\n' }, 'w6'),
+      call('edit', { path: '@.git/config', edits: [{ oldText: '[core]', newText: '[core]\n\tfsmonitor = planted' }] }, 'e1'),
+      call('write', { path: '~/escaped.txt', content: 'out\n' }, 'w7'),
+      call('write', { path: '@~/escaped.txt', content: 'out\n' }, 'w8'),
       call('write', { path: 'ok.txt', content: 'fine\n' }, 'w4'),
       say('done')
     ]
     defs.setNext(async () => replies.shift()!)
-    const result = await orch.runAgentDefinition(request(resolved, thread.id, { projectPath: top, host: { workspaceRoots: [top] } }))
+    // Pi expands `~` to the home folder: a test one, so nothing could reach the real one.
+    const fakeHome = join(home, 'fake-home')
+    mkdirSync(fakeHome)
+    const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE }
+    process.env.HOME = fakeHome
+    process.env.USERPROFILE = fakeHome
+    let result: Awaited<ReturnType<typeof orch.runAgentDefinition>>
+    try {
+      result = await orch.runAgentDefinition(request(resolved, thread.id, { projectPath: top, host: { workspaceRoots: [top] } }))
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
     expect(result.status).toBe('completed')
     const results = defs.captured.at(-1)!.messages.filter((message) => message.role === 'toolResult').map((message) => JSON.stringify(message.content))
-    expect(results.slice(0, 3).every((text) => /cannot change Git metadata/.test(text))).toBe(true)
+    expect(results).toHaveLength(9)
+    for (const text of results.slice(0, 3)) expect(text).toMatch(/cannot change Git metadata/)
+    // The legacy loop's Pi tools drop a leading `@` and expand `~`: refused by the path Pi opens.
+    // (The exact stand-in's tools open the literal path, which reaches no `.git` and no home.)
+    if (kind === 'legacy') {
+      for (const text of results.slice(3, 6)) expect(text).toMatch(/cannot change Git metadata/)
+      for (const text of results.slice(6, 8)) expect(text).toMatch(/escaped allowed workspace roots/)
+    }
+    expect(existsSync(join(fakeHome, 'escaped.txt'))).toBe(false)
     expect(readFileSync(join(top, '.git', 'config'), 'utf8')).toBe(configBefore)
     expect(existsSync(join(top, '.git', 'objects', 'info', 'alternates'))).toBe(false)
     expect(existsSync(join(top, 'sub', '.git'))).toBe(false)

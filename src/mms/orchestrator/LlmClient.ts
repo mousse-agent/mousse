@@ -1558,6 +1558,10 @@ export class LlmClient {
   ): Promise<ToolResultMessage> {
 
     try {
+      // A Pi file tool's path as Pi will open it (`@` dropped, `~` expanded, absolute): the
+      // definition's gate checks this path and the tool gets exactly it.
+      if (projectPath && this.piCodingTools.isPiTool(toolCall.name) && !this.appTools.registry.get(toolCall.name))
+        toolCall = { ...toolCall, arguments: this.piCodingTools.piArgs(toolCall.name, (toolCall.arguments ?? {}) as Record<string, unknown>, projectPath) }
       const settingsEnabled = (name: string): boolean => Boolean(trustedAgent) || settingsToolEnabled(this.settingsStore.get().integrations.tools, name)
       const markTrustedEffect = (): void => {
         if (trustedAgent?.effects) trustedAgent.effects.dispatched = true

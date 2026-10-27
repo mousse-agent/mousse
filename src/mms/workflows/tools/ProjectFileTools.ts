@@ -7,6 +7,7 @@ import { countLineEdits } from '../../../shared/lineEditStats'
 import { readFile } from 'fs/promises'
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../../modes/ModeRegistry'
 import { resolveToolPath, sanitizeToolArgs } from '../../orchestrator/toolPathSafety'
+import { PI_PATH_ARGUMENTS, piResolvePath, piResolveReadPath } from '../../agents/piToolPaths'
 
 /**
  * Pi coding-agent built-in tools (read, bash, edit, write, grep, find, ls).
@@ -150,6 +151,19 @@ export class ProjectFileTools {
     })
   }
 
+  /**
+   * The call's arguments with its path as Pi's tool opens it (`harness/pi/paths`: a leading `@`
+   * dropped, `~` expanded, `file://` and shell drive forms read, made absolute). A caller's gate
+   * checks this path, and `execute` hands the tool exactly it, so the checked path is the opened one.
+   */
+  piArgs(name: string, args: Record<string, unknown>, cwd: string): Record<string, unknown> {
+    const resolved = this.resolveCall(name, args)
+    if (!resolved || !PI_PATH_ARGUMENTS[resolved.name]) return args
+    const raw = args.path
+    if (typeof raw !== 'string' || !raw) return args
+    return { ...args, path: resolved.name === 'read' ? piResolveReadPath(raw, cwd) : piResolvePath(raw, cwd) }
+  }
+
   async execute(
     name: string,
     args: Record<string, unknown>,
@@ -159,7 +173,10 @@ export class ProjectFileTools {
   ): Promise<{ text: string; isError: boolean }> {
     try {
       const tools = await this.getToolsForCwd(cwd)
-      const resolved = this.resolveCall(name, args)
+      // The path as Pi opens it, absolute: checked below (a write outside the project is refused,
+      // `~/…` included) and handed to the tool as it is, never re-read by Pi as `@…` or `~…`.
+      const piPathArgs = this.piArgs(name, args, cwd)
+      const resolved = this.resolveCall(name, piPathArgs)
       if (!resolved) {
         return { text: `Unknown Pi coding tool: ${name}`, isError: true }
       }
@@ -169,6 +186,7 @@ export class ProjectFileTools {
         return { text: sanitized.error, isError: true }
       }
       resolved.args = sanitized.args
+      if (piPathArgs !== args) resolved.args.path = piPathArgs.path
 
       const tool = tools[resolved.name]
       if (!tool) {
