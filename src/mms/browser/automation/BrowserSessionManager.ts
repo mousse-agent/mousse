@@ -82,6 +82,14 @@ export class BrowserSessionManager {
       .map((entry) => ({ ...entry.record }))
   }
 
+  /**
+   * Ids of every session that is not closed, including ones left disconnected by a restart: their
+   * captures may still be needed. Host-side only (storage cleanup); it exposes ids, nothing else.
+   */
+  openSessionIds(): Set<string> {
+    return new Set([...this.sessions.values()].filter((entry) => entry.record.lifecycle !== 'closed').map((entry) => entry.record.id))
+  }
+
   /** A bounded, already-authorized observation for the viewer; never persisted page content. */
   latestObservation(context: BrowserToolContext, sessionId: string): BrowserObservation | undefined {
     const entry = this.requireOwned(sessionId, context.execution)
@@ -437,6 +445,25 @@ export class BrowserSessionManager {
     const stateFile = assertOwnedPath(this.options.profileRoot, this.stateFile, 'browser automation inventory')
     atomicWriteJsonSync(stateFile, [...this.sessions.values()], { mode: 0o600 })
   }
+}
+
+/**
+ * The same answer as `BrowserSessionManager.openSessionIds()`, read from the persisted inventory, for a
+ * profile whose browser composition has not been built in this process. Throws when the inventory is
+ * unreadable so the caller treats every session as open.
+ */
+export function readOpenSessionIds(profileRoot: string, profileId: string): Set<string> {
+  const stateFile = assertOwnedPath(profileRoot, join(profileRoot, 'browser', 'automation-sessions.json'), 'browser automation inventory')
+  if (!existsSync(stateFile)) return new Set()
+  let raw: unknown
+  try { raw = JSON.parse(readFileSync(stateFile, 'utf8')) as unknown } catch { throw new Error(`Browser automation inventory is corrupt: ${stateFile}`) }
+  if (!Array.isArray(raw)) throw new Error(`Browser automation inventory is corrupt: ${stateFile}`)
+  const open = new Set<string>()
+  for (const item of raw) {
+    if (!isStoredSession(item, profileId)) throw new Error(`Browser automation inventory is corrupt: ${stateFile}`)
+    if (item.record.lifecycle !== 'closed') open.add(item.record.id)
+  }
+  return open
 }
 
 function isIdentifier(value: string): boolean {

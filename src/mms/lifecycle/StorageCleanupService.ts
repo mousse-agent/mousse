@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, lstatSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, type Dirent } from 'node:fs'
+import { appendFileSync, existsSync, lstatSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, type Dirent } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { TaskLifecycleRecord } from '../../shared/resourceLifecycle'
 import { REPORT_ENTRY_LIMIT, storagePolicyHasRule, type StorageCleanupItem, type StorageCleanupReport, type StoragePolicy } from '../../shared/storage'
@@ -39,6 +39,11 @@ const BUSY_REASON = /^Cannot trash thread:|Cleanup owns this task|is still activ
 /** Keep reasons that can differ on the next look, so they are not remembered. */
 const TRANSIENT_REASON = /Settings changed|Commit changed|in use|busy|owns this task|still active|lease/i
 const IN_USE_REASON = 'Files in this worktree are in use'
+/** `art_<uuid>` with an optional short extension: exactly what the browser worker and the default artifact port write. */
+const CAPTURE_NAME = /^art_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(\.[A-Za-z0-9]{1,12})?$/
+const SESSION_NAME = /^[a-zA-Z0-9:_-]{1,160}$/
+/** A file another process holds open fails to delete with these codes (on Windows also EPERM and EACCES). */
+const IN_USE_CODES = new Set(process.platform === 'win32' ? ['EBUSY', 'EPERM', 'EACCES'] : ['EBUSY'])
 
 /**
  * On Windows a directory cannot be renamed while a process has its working directory inside it or holds
@@ -87,7 +92,14 @@ export interface StorageCleanupDeps {
   idle(threadId: string): string | undefined
   installationHome: string
   codeHost?: { cachedDefaultBranch(cwd: string): string | undefined }
+  /**
+   * Where the browser worker writes captures (`<root>/<profileId>/<sessionId>/art_<uuid>[.ext]`) and the
+   * sessions that are not closed. Without it the browser capture rule does nothing.
+   */
+  browserCaptures?: { workerArtifactRoot: string; openSessionIds(): Iterable<string> }
   now?: () => number
+  /** Test seam: deletes one capture file. Defaults to `unlinkSync`. */
+  removeFile?: (path: string) => void
   /** Test seam; defaults to `measureTree`. */
   measure?: typeof measureTree
   /** Test seam: returns why the checkout cannot be removed right now (files in use), or undefined. Defaults to a rename probe on Windows. */
@@ -198,11 +210,13 @@ export class StorageCleanupService {
   private now: () => number
   private readonly measure: typeof measureTree
   private readonly probeRemoval: (worktreePath: string) => string | undefined
+  private readonly removeFile: (path: string) => void
 
   constructor(private readonly deps: StorageCleanupDeps) {
     this.now = deps.now ?? Date.now
     this.measure = deps.measure ?? measureTree
     this.probeRemoval = deps.probeRemoval ?? probeRemovable
+    this.removeFile = deps.removeFile ?? unlinkSync
   }
 
   /** Test seam: replaces the clock used for ages and report times. */
@@ -292,6 +306,7 @@ export class StorageCleanupService {
         ? { ...base, rule: entry.verdict.rule, action: 'remove', reason: entry.verdict.reason, bytes: entry.verdict.measurement.bytes, ...approximate(entry.verdict.measurement) }
         : { ...base, rule: 'worktree-inactive', action: 'keep', reason: entry.verdict.keep, bytes: 0 })
     }
+    if (!clock.suspended) planned.push(...await this.planCaptures(snapshot, now))
     planned.push(...await this.planTrash(now))
     try {
       for (const orphan of await this.orphanItems()) planned.push({ rule: orphan.rule, label: orphan.label, action: 'keep', reason: orphan.reason, bytes: orphan.bytes, ...(orphan.bytesApproximate ? { bytesApproximate: true as const } : {}), ...(orphan.bytesLowerBound ? { bytesLowerBound: true as const } : {}) })
@@ -313,6 +328,20 @@ export class StorageCleanupService {
         : { ...base, action: 'remove', reason: 'Thread was deleted', bytes: verdict.measurement.bytes, ...approximate(verdict.measurement) })
     }
     return planned
+  }
+
+  /** The capture rule's rows for the dry run: the same decisions as a run, with nothing deleted. */
+  private async planCaptures(snapshot: PolicySnapshot, now: number): Promise<PlannedCleanup[]> {
+    try {
+      return (await this.captureItems(snapshot, now, false)).map((entry) => ({
+        rule: entry.rule, label: entry.label, action: entry.outcome === 'removed' ? 'remove' as const : 'keep' as const, reason: entry.reason,
+        bytes: entry.outcome === 'removed' ? entry.bytes : 0,
+        ...(entry.outcome === 'removed' && entry.bytesApproximate ? { bytesApproximate: true as const } : {}),
+        ...(entry.outcome === 'removed' && entry.bytesLowerBound ? { bytesLowerBound: true as const } : {})
+      }))
+    } catch (error) {
+      return [{ rule: 'browser-capture', label: 'Browser captures', action: 'keep', reason: (error as Error).message, bytes: 0 }]
+    }
   }
 
   private async planTrash(now: number): Promise<PlannedCleanup[]> {
@@ -387,6 +416,11 @@ export class StorageCleanupService {
       catch (error) { items.push({ rule: 'worktree-inactive', label: 'Worktrees', bytes: 0, outcome: 'failed', reason: (error as Error).message }) }
       try { items.push(...await this.trashPhase(startedMs, trigger)) }
       catch (error) { items.push({ rule: 'trash', label: 'Trash', bytes: 0, outcome: 'failed', reason: (error as Error).message }) }
+      // A time-based rule, so it waits while the clock is suspended (the report already says why).
+      if (!clock.suspended) {
+        try { items.push(...await this.captureItems(snapshot, startedMs, true)) }
+        catch (error) { items.push({ rule: 'browser-capture', label: 'Browser captures', bytes: 0, outcome: 'failed', reason: (error as Error).message }) }
+      }
       try { items.push(...await this.orphanItems()) } catch { /* Ownership could not be proven; nothing is reported. */ }
     }
     const report = this.buildReport(trigger, startedMs, items, suspended, clockNote)
@@ -752,6 +786,123 @@ export class StorageCleanupService {
     } catch (error) {
       return kept((error as Error).message)
     } finally { releaseExecutionLeaseHandle(taskLease) }
+  }
+
+  // ---- Browser captures ----
+
+  /** `name` is a real directory (not a link, junction or anything resolving elsewhere) directly inside `parent`. */
+  private isPlainDirectory(parent: string, name: string): boolean {
+    const folded = (value: string): string => process.platform === 'win32' ? value.toLowerCase() : value
+    try {
+      const child = join(parent, name), stat = lstatSync(child)
+      return !stat.isSymbolicLink() && stat.isDirectory() && folded(realpathSync(child)) === folded(join(realpathSync(parent), name))
+    } catch { return false }
+  }
+
+  /** Regular files in a session folder that are named like a capture and are not newer than `cutoff`. */
+  private oldCaptures(dir: string, cutoff: number): string[] {
+    const names: string[] = []
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!CAPTURE_NAME.test(entry.name)) continue
+      try {
+        const stat = lstatSync(join(dir, entry.name))
+        if (stat.isFile() && !stat.isSymbolicLink() && stat.mtimeMs <= cutoff) names.push(entry.name)
+      } catch { /* Gone already. */ }
+    }
+    return names
+  }
+
+  /**
+   * The browser capture rule. It deletes unimported worker captures: files named `art_<uuid>` (with or
+   * without an extension) directly inside `<workerArtifactRoot>/<profileId>/<sessionId>/` that are at
+   * least `captureDays` old, in sessions that are closed. A capture a conversation uses was copied into
+   * the profile's artifact store first, so nothing here is referenced by a thread or message; that store,
+   * its index and every other file are never touched. Nothing is followed: a link or junction at the
+   * capture folder, the profile folder, a session folder or a file is skipped. `real: false` makes the
+   * same decisions and measurements without deleting, for the dry run.
+   */
+  private async captureItems(snapshot: PolicySnapshot, now: number, real: boolean): Promise<StorageCleanupItem[]> {
+    const config = this.deps.browserCaptures
+    const days = snapshot.policy.browser.captureDays
+    if (!config || days === null) return []
+    const rule = 'browser-capture' as const
+    const root = resolve(config.workerArtifactRoot), home = this.deps.store.profileHome, profileId = this.deps.store.profileId
+    try { lstatSync(root) } catch { return [] }
+    const everything = { rule, label: 'Browser captures', bytes: 0, outcome: 'kept' as const }
+    const folded = (value: string): string => process.platform === 'win32' ? value.toLowerCase() : value
+    // The capture folder must be a real folder inside the profile with no link in between.
+    if (samePath(home, root) || !within(home, root) || lstatSync(root).isSymbolicLink() || !lstatSync(root).isDirectory()
+      || folded(realpathSync(root)) !== folded(join(realpathSync(home), relative(resolve(home), root)))) return [{ ...everything, reason: 'Outside the browser capture folder' }]
+    const profileDir = join(root, profileId)
+    try { lstatSync(profileDir) } catch { return [] }
+    if (!this.isPlainDirectory(root, profileId)) return [{ ...everything, reason: 'Outside the browser capture folder' }]
+
+    const items: StorageCleanupItem[] = []
+    const cutoff = now - days * DAY_MS
+    let open: Set<string> | undefined
+    for (const entry of readdirSync(profileDir, { withFileTypes: true })) {
+      if (this.stopping) break
+      const id = entry.name
+      if (!SESSION_NAME.test(id) || !this.isPlainDirectory(profileDir, id)) continue
+      const dir = join(profileDir, id)
+      const old = this.oldCaptures(dir, cutoff)
+      if (!old.length) continue
+      const base = { rule, label: `Browser session ${id}` }
+      try { open ??= new Set(config.openSessionIds()) }
+      catch (error) { items.push({ ...everything, reason: `Browser sessions could not be read, so no capture was deleted: ${(error as Error).message}` }); break }
+      if (open.has(id)) { items.push({ ...base, bytes: 0, outcome: 'kept', reason: 'Session is open' }); continue }
+      // A policy saved while an earlier session was being cleaned no longer authorizes the rest.
+      if (real && this.deps.policy.digest() !== snapshot.digest) { items.push({ ...everything, reason: 'Settings changed since check' }); break }
+      items.push(...await this.removeCaptures(profileDir, id, old, days, cutoff, real ? snapshot.digest : undefined))
+      if (items.at(-1)?.reason === 'Settings changed since check') break
+      await new Promise<void>((resolveYield) => setImmediate(resolveYield))
+    }
+    return items
+  }
+
+  /**
+   * Measures and deletes the old captures of one closed session, then removes the folder if nothing else
+   * is in it. `policyDigest` is given for a real run (a dry run passes none and deletes nothing).
+   */
+  private async removeCaptures(profileDir: string, id: string, names: string[], days: number, cutoff: number, policyDigest: string | undefined): Promise<StorageCleanupItem[]> {
+    const base = { rule: 'browser-capture' as const, label: `Browser session ${id}` }
+    const real = policyDigest !== undefined
+    const dir = join(profileDir, id)
+    let bytes = 0, removed = 0, inUse = 0, estimated = false, partial = false, settingsChanged = false
+    const failures: string[] = []
+    for (const name of names) {
+      if (this.stopping) break
+      const path = join(dir, name)
+      const measurement = await this.measure(path, { mode: 'reclaim', budgetMs: MEASURE_BUDGET_MS })
+      if (real) {
+        try {
+          // The policy, the folder and the file are looked at again, in one synchronous step, right before the deletion.
+          if (this.deps.policy.digest() !== policyDigest) { settingsChanged = true; break }
+          if (!this.isPlainDirectory(profileDir, id)) { failures.push('The session folder changed while it was being cleaned'); break }
+          const stat = lstatSync(path)
+          if (!stat.isFile() || stat.mtimeMs > cutoff) continue
+          this.removeFile(path)
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code
+          if (code === 'ENOENT') continue
+          // A capture another process has open is kept for the next run; only another error is a failure.
+          if (code && IN_USE_CODES.has(code)) inUse += 1
+          else failures.push((error as Error).message)
+          continue
+        }
+      }
+      removed += 1; bytes += measurement.bytes
+      estimated = estimated || measurement.estimated; partial = partial || measurement.partial
+    }
+    const items: StorageCleanupItem[] = []
+    if (removed) {
+      if (real) { try { rmdirSync(dir) } catch { /* Other files remain, or it is gone. */ } }
+      items.push({ ...base, bytes, files: removed, ...approximate({ estimated, partial }), outcome: 'removed', reason: `${plural(removed, 'capture')} older than ${plural(days, 'day')}` })
+    }
+    if (inUse) items.push({ ...base, bytes: 0, outcome: 'kept', reason: `${plural(inUse, 'capture')} in use; tried again on the next run` })
+    if (failures.length) items.push({ ...base, bytes: 0, outcome: 'failed', reason: failures[0]! })
+    if (settingsChanged) items.push({ ...base, bytes: 0, outcome: 'kept', reason: 'Settings changed since check' })
+    return items
   }
 
   // ---- Orphans ----

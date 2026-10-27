@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { BrowserBackendRouter, type BrowserBackendPort } from '../src/mms/browser/BrowserBackendRouter'
-import { BrowserSessionManager } from '../src/mms/browser/automation/BrowserSessionManager'
+import { BrowserSessionManager, readOpenSessionIds } from '../src/mms/browser/automation/BrowserSessionManager'
 import { BrowserToolDispatcher } from '../src/mms/browser/automation/BrowserToolDispatcher'
 import { BROWSER_AUTOMATION_TOOLS, type BrowserToolContext } from '../src/shared/browser/automation'
 import type { BrowserSessionRecord, BrowserWorkerRequest, BrowserWorkerResponse } from '../src/shared/browser/types'
@@ -161,6 +161,26 @@ describe('host-selected browser backend routing', () => {
     }]))
     const restored = new BrowserSessionManager({ profileId, profileRoot: root, broker: router })
     expect(restored.list(context())).toMatchObject([{ id: 'restored', backend: 'electron-attached', generation: 4, lifecycle: 'disconnected' }])
+  })
+
+  it('lists the sessions that are not closed, in memory and from the persisted inventory', async () => {
+    const managed = backend('managed-chromium'), router = new BrowserBackendRouter({ profileId, managed })
+    const root = await mkdtemp(join(tmpdir(), 'mousse-browser-open-'))
+    roots.push(root)
+    expect([...readOpenSessionIds(root, profileId)]).toEqual([])
+    const sessions = new BrowserSessionManager({ profileId, profileRoot: root, broker: router })
+    const owner = context('cli')
+    const first = await sessions.open(owner, {}), second = await sessions.open(owner, {})
+    const [a, b] = [first.session!.id, second.session!.id]
+    expect([...sessions.openSessionIds()].sort()).toEqual([a, b].sort())
+    await sessions.close(owner, a)
+    expect([...sessions.openSessionIds()]).toEqual([b])
+    expect([...readOpenSessionIds(root, profileId)]).toEqual([b])
+    // A restart leaves the survivor disconnected, which is still not closed.
+    const restarted = new BrowserSessionManager({ profileId, profileRoot: root, broker: router })
+    expect([...restarted.openSessionIds()]).toEqual([b])
+    await writeFile(join(root, 'browser', 'automation-sessions.json'), '{"unexpected":true}')
+    expect(() => readOpenSessionIds(root, profileId)).toThrow('inventory is corrupt')
   })
 
   it('closes a backend session that succeeds after router shutdown began', async () => {
