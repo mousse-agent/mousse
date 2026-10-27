@@ -27,7 +27,7 @@ export interface BotPermissions {
   mcp: Array<`${string}::${string}`>
   skills: string[]
   /** `writeRoots`: the roots the bot may change (per-folder access). */
-  workspace: { roots: string[]; access: 'read' | 'write'; writeRoots: string[]; scratch: string } | null
+  workspace: { roots: string[]; access: 'read' | 'write'; writeRoots?: string[]; scratch: string } | null
 }
 
 export interface CompileInput {

@@ -10,7 +10,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
 import { isBotWallAbort } from '../../src/mms/bots/activation/dispatcher'
 import { BotDefinitionStore } from '../../src/mms/bots/definitions/BotDefinitionStore'
-import { botManifestDigest } from '../../src/mms/bots/grants/compile'
+import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
+import { botManifestDigest, compileBotThread } from '../../src/mms/bots/grants/compile'
 import { BotStore } from '../../src/mms/bots/store/BotStore'
 import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
@@ -20,8 +21,9 @@ import { RunStore } from '../../src/mms/run/RunStore'
 import { ToolInvocations } from '../../src/mms/run/ToolInvocations'
 import { isIdempotentTool } from '../../src/mms/run/tools/idempotency'
 import { isBotTurnPayload, type BotTurnPayload, type RunOutcome } from '../../src/mms/run/types'
-import type { BotDefinition, BotManifest } from '../../src/shared/bots/personal/definition'
-import type { BotEscalationSummary } from '../../src/shared/bots/personal/escalation'
+import { foldersOf, type BotDefinition, type BotManifest } from '../../src/shared/bots/personal/definition'
+import { permissionText, withPermission, type BotEscalationSummary } from '../../src/shared/bots/personal/escalation'
+import { addedPermissions } from '../../src/shared/bots/personal/manifest'
 
 let base: string
 let profile: string
@@ -544,5 +546,315 @@ describe('trash and profile hooks', () => {
     await running()
     await bots.activate({ botId: 'site-editor', input: 'two', clientRequestId: 'c2' })
     expect(bots.ownedActivity()).toBe(2)
+  })
+})
+
+describe('round 1: folder answers grant exactly what is shown', () => {
+  const authorityFor = (granted: BotManifest) => {
+    const compiled = compileBotThread({ grant: granted, digest: 'd', thread: {}, scratch: join(profile, 'bots', 'scratch', 'x'), profileHome: profile, temps: [], nativeNames: (tools) => ({ ok: true, names: [...tools] }), remaining: { deadlineMs: 60_000 } })
+    if (!compiled.ok) throw new Error(compiled.error.message)
+    return createBotAuthority({ activationId: 'a', role: 'activation', permissions: compiled.permissions, waiting: () => false, counters: { charge: () => ({ ok: true, count: 1 }) }, time: { deadline: () => 0, signal: new AbortController().signal }, spend: null })
+  }
+  const edit = (path: string) => ({ kind: 'builtin' as const, tool: 'edit' as const, nativeName: 'edit', args: { path: join(path, 'a.md') } })
+
+  it('allowing writes to one folder leaves every other folder read-only, and the reverse', () => {
+    const readOnly = manifest({ tools: ['read', 'edit'], workspace: { roots: [root], access: 'read' } })
+    const wider = withPermission(readOnly, { path: other, access: 'write' })
+    expect(foldersOf(wider.workspace)).toEqual([[other, 'write'], [root, 'read']].sort())
+    expect(addedPermissions(wider, readOnly).map((line) => line.text)).toEqual([permissionText({ path: other, access: 'write' })])
+    const authority = authorityFor(wider)
+    expect(authority.check(edit(root))).toMatchObject({ ok: false, wall: { kind: 'path', access: 'write' } })
+    expect(authority.check(edit(other))).toEqual({ ok: true })
+
+    const writable = manifest({ tools: ['read', 'edit'], workspace: { roots: [root], access: 'write' } })
+    const plusRead = withPermission(writable, { path: other, access: 'read' })
+    expect(addedPermissions(plusRead, writable).map((line) => line.text)).toEqual([`Read files in ${other}`])
+    const second = authorityFor(plusRead)
+    expect(second.check(edit(other))).toMatchObject({ ok: false, wall: { kind: 'path' } })
+    expect(second.check(edit(root))).toEqual({ ok: true })
+  })
+
+  it('a native name that stands for several tools walls only when all are refused, and once', async () => {
+    const { activation, prepared } = await running()
+    const call = (tool: 'edit' | 'read') => ({ kind: 'builtin' as const, tool, nativeName: 'Glob', args: { path: join(root, 'a.md') } })
+    // `edit` in a read-only root is refused, `read` passes: allowed, nobody asked.
+    expect(prepared.authority.checkAny!([call('edit'), call('read')])).toEqual({ ok: true })
+    expect(store.escalations({ activationId: activation.id })).toEqual([])
+    const outside = (tool: 'edit' | 'read') => ({ kind: 'builtin' as const, tool, nativeName: 'Glob', args: { path: join(other, 'a.md') } })
+    expect(prepared.authority.checkAny!([outside('edit'), outside('read')])).toMatchObject({ ok: false, wall: { kind: 'escalated' } })
+    expect(store.escalations({ activationId: activation.id })).toHaveLength(1)
+  })
+
+  it('a relative folder is never asked for or resolved against the working directory', async () => {
+    const { activation, prepared } = await running()
+    expect(prepared.authority.escalate!({ permission: { path: 'docs', access: 'read' }, reason: 'r' })).toContain('absolute path')
+    // A relative path outside the scratch folder is refused without asking anybody.
+    expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: '../../outside.md' } })).toMatchObject({ ok: false, wall: { kind: 'path', path: '../../outside.md' } })
+    expect(store.escalations({ activationId: activation.id })).toEqual([])
+    expect(bots.getActivation(activation.id).status).toBe('running')
+  })
+})
+
+describe('round 1: startup recovery', () => {
+  async function crash() {
+    bots.close()
+    bots = makeEngine()
+    await bots.reconcileOnStartup()
+  }
+
+  /** The run DB lost what `sendWithStart` wrote for a dispatch (a crash before the send). */
+  function unsend(activationId: string, n: number) {
+    const dispatch = store.dispatch(activationId, n)!
+    runDb.statement('DELETE FROM effects WHERE run_id = ?').run(dispatch.runId!)
+    runDb.statement('DELETE FROM receipts WHERE client_request_id = ?').run(dispatch.clientRequestId)
+    runDb.statement('DELETE FROM runs WHERE run_id = ?').run(dispatch.runId!)
+    store.run('UPDATE bot_dispatches SET run_id = NULL WHERE activation_id = ? AND n = ?', activationId, n)
+  }
+
+  it('an answer given before a crash is applied at startup, once', async () => {
+    const { activation, prepared, payload } = await running()
+    prepared.authority.escalate!({ permission: { tool: 'web_fetch' }, reason: 'docs' })
+    await bots.respond({ escalationId: bots.listEscalations(activation.id)[0].id, answer: 'allow_once' })
+    // The walled run never reported its end: boot ended it. Its processes were confirmed gone, so
+    // only the window is charged (a supervisor's 15-second prepay; this build prepays everything).
+    end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    store.run('UPDATE bot_dispatches SET prepaid_ms = 15000, exit_at = ? WHERE activation_id = ? AND n = 1', clock, activation.id)
+    store.run('UPDATE bot_counters SET active_ms = 15000 WHERE activation_id = ?', activation.id)
+    await crash()
+    expect(store.dispatches(activation.id).map((dispatch) => dispatch.kind)).toEqual(['start', 'continue'])
+    expect(store.dispatch(activation.id, 2)!.prompt.text).toContain('The owner allowed: Use the tool `web_fetch`')
+    expect(bots.getActivation(activation.id).status).toBe('running')
+    await crash()
+    expect(store.dispatches(activation.id)).toHaveLength(2)
+  })
+
+  it('a wait with neither an open wall nor an answer is handed to the owner', async () => {
+    const { activation, prepared, payload } = await running()
+    prepared.authority.escalate!({ permission: { tool: 'web_fetch' }, reason: 'docs' })
+    store.run("UPDATE bot_escalations SET status = 'cancelled' WHERE activation_id = ?", activation.id)
+    end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    await crash()
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'paused', endReason: 'wall_lost', canContinue: true })
+  })
+
+  it('an activation claimed from the queue before its first dispatch was written starts at startup', async () => {
+    const first = await bots.activate({ botId: 'site-editor', input: 'one', clientRequestId: 'c1' })
+    const second = await bots.activate({ botId: 'site-editor', input: 'two', clientRequestId: 'c2' })
+    // The first ended; the pump claimed the second, then the process died.
+    store.moveActivation(first.id, ['running'], 'cancelled', { endReason: 'stopped' })
+    store.moveActivation(second.id, ['queued'], 'running')
+    await crash()
+    const dispatch = store.dispatch(second.id, 1)!
+    expect(dispatch).toMatchObject({ kind: 'start', clientRequestId: `${second.id}:d1` })
+    expect(runs.getRun(dispatch.runId!)).toMatchObject({ status: 'queued' })
+  })
+
+  it('a continuation the owner acknowledged is resent with that acknowledgement', async () => {
+    const { activation, payload } = await running()
+    end(payload.runId, 'uncertain', { uncertainReason: 'non_idempotent_tool_in_flight' })
+    bots.settle(payload, {})
+    await tick()
+    await bots.continueActivation(activation.id, { acknowledge: { calls: [], uncertainRunId: payload.runId } })
+    expect(store.dispatch(activation.id, 2)!.send).toEqual({ continuationOfRunId: payload.runId, acknowledgeUncertain: true })
+    unsend(activation.id, 2)
+    await crash()
+    const resent = store.dispatch(activation.id, 2)!
+    expect(runs.getRun(resent.runId!)).toMatchObject({ status: 'queued', outcome: { continuationOf: payload.runId } })
+    expect(bots.getActivation(activation.id).status).toBe('running')
+  })
+
+  it('a restarted dispatch: the new intent comes first, and a crash before the old run is cancelled only resends it', async () => {
+    const { activation, payload } = await running()
+    // The old dispatch's time was settled; its run never left `queued`; the new intent was written; then the crash.
+    runDb.statement("UPDATE runs SET status = 'queued', active_attempt_id = NULL WHERE run_id = ?").run(payload.runId)
+    store.run("UPDATE bot_dispatches SET settled_by = 'startup' WHERE activation_id = ? AND n = 1", activation.id)
+    store.insertDispatch({ activationId: activation.id, n: 2, kind: 'continue', clientRequestId: `${activation.id}:d2`, threadId: activation.threadId!, prompt: { text: 'Fix the footer' }, policyDigest: store.activation(activation.id)!.grantDigest })
+    await crash()
+    expect(runs.getRun(payload.runId)).toMatchObject({ status: 'cancelled' })
+    expect(runs.getRun(store.dispatch(activation.id, 2)!.runId!)).toMatchObject({ status: 'queued' })
+    expect(store.dispatches(activation.id)).toHaveLength(2)
+  })
+
+  it('a context thread trashed while the daemon runs is retired at once; the next consult starts a new one', async () => {
+    const { activation, prepared } = await running()
+    const asked = prepared.authority.consult!({ context: 'docs', question: 'one' })
+    await tick()
+    const consult = store.dispatches(activation.id).find((dispatch) => dispatch.kind === 'consult')!
+    const consultPayload = payloadOf(consult.runId!)
+    bots.prepare(consultPayload)
+    start(consult.runId!)
+    end(consult.runId!, 'completed')
+    bots.settle(consultPayload, { text: 'A' })
+    await asked
+    bots.beforeTrash([consult.threadId])
+    expect(store.contextGen('site-editor', 'docs')).toBe(2)
+    expect(bots.roleOf(consult.threadId)).toBeUndefined()
+    // Trashing a context thread ends the activation that uses it (plan §4).
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'cancelled', endReason: 'thread_trashed' })
+    const next = await running('two', 'c2')
+    void next.prepared.authority.consult!({ context: 'docs', question: 'two' })
+    for (let index = 0; index < 5; index += 1) await tick()
+    expect(store.dispatches(next.activation.id).find((dispatch) => dispatch.kind === 'consult')!.threadId).toBe('thread:bot:site-editor:ctx:docs:2')
+  })
+
+  it('an open spend reservation of an activation ended by the trash stays charged', async () => {
+    const { activation, payload } = await running()
+    store.run("INSERT INTO bot_spend_reservations(id, activation_id, run_id, input_bound, wire_cap, usd_micros, cost_limited, created_at) VALUES('r9', ?, ?, 40, 10, 3, 0, 'x')", activation.id, payload.runId)
+    bots.beforeTrash([activation.threadId!])
+    end(payload.runId, 'interrupted', { interruptedBy: 'user' })
+    await crash()
+    expect(bots.getActivation(activation.id).status).toBe('cancelled')
+    expect(store.get('SELECT committed_input, committed_output FROM bot_spend WHERE activation_id = ?', activation.id)).toEqual({ committed_input: 40, committed_output: 10 })
+  })
+})
+
+describe('round 1: trash and delete of a working bot', () => {
+  it('before the trash, a running activation ends and its run has stopped', async () => {
+    const { activation, payload } = await running()
+    host.stopThread = (threadId) => {
+      stopped.push(threadId)
+      end(payload.runId, 'interrupted', { interruptedBy: 'user' })
+    }
+    await bots.quiesceForTrash([activation.threadId!])
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'cancelled', endReason: 'thread_trashed' })
+    expect(runs.getRun(payload.runId)!.status).toBe('interrupted')
+  })
+
+  it('an ordinary thread\'s trash never reads bots.db, so an unreadable bots.db cannot block it', () => {
+    store.close()
+    expect(bots.beforeTrash(['person-thread'])).toEqual([])
+    store = new BotStore({ profileHome: profile, clock: () => clock })
+  })
+
+  it('deleting a bot stops its runs, then trashes its home thread; a refused trash is reported and retried', async () => {
+    const { activation, payload } = await running()
+    host.stopThread = (threadId) => {
+      stopped.push(threadId)
+      end(payload.runId, 'interrupted', { interruptedBy: 'user' })
+    }
+    const statusAtTrash: string[] = []
+    host.trashThread = async () => { throw new Error('busy') }
+    await expect(bots.remove('site-editor')).rejects.toMatchObject({ code: 'bot_cleanup_failed' })
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'cancelled', endReason: 'bot_deleted' })
+    host.trashThread = async (threadId) => {
+      statusAtTrash.push(runs.getRun(payload.runId)!.status)
+      trashed.push(threadId)
+      threadStates.set(threadId, 'trashed')
+    }
+    await bots.finishDeletions()
+    expect(trashed).toEqual(['thread:bot:site-editor'])
+    expect(statusAtTrash).toEqual(['interrupted'])
+    await bots.finishDeletions()
+    expect(trashed).toHaveLength(1)
+  })
+})
+
+describe('round 1: every way out of a wait starts the next activation', () => {
+  it('expiry', async () => {
+    const { prepared, payload } = await running()
+    const next = await bots.activate({ botId: 'site-editor', input: 'two', clientRequestId: 'c2' })
+    prepared.authority.escalate!({ permission: { tool: 'web_fetch' }, reason: 'r' })
+    await endAtWall(payload)
+    expect(bots.getActivation(next.id).status).toBe('queued')
+    timers.at(-1)!.fn()
+    await tick()
+    expect(bots.getActivation(next.id).status).toBe('running')
+  })
+
+  it('the sixth wall', async () => {
+    const { activation } = await running()
+    const next = await bots.activate({ botId: 'site-editor', input: 'two', clientRequestId: 'c2' })
+    for (let index = 0; index < 5; index += 1)
+      store.insertEscalation({ id: `esc_${index}`, activationId: activation.id, dispatchN: 1, toolCallId: null, kind: 'gate', permission: { tool: 'write' }, reason: 'r', createdAt: 'x', expiresAt: 'y' })
+    bots.raiseWall(activation.id, { dispatchN: 1, kind: 'gate', permission: { tool: 'write' }, reason: 'again' })
+    await tick()
+    expect(bots.getActivation(next.id).status).toBe('running')
+  })
+})
+
+describe('round 1: smaller fixes', () => {
+  it('a consult that cannot be sent fails alone: the main run goes on and the lane opens', async () => {
+    const { activation, prepared } = await running()
+    const send = runs.sendWithStart.bind(runs)
+    let refuse = true
+    runs.sendWithStart = async (command, payload) => {
+      if (refuse && command.clientRequestId.includes(':c')) {
+        refuse = false
+        return { status: 'rejected', reason: 'test_refusal' } as never
+      }
+      return send(command, payload)
+    }
+    expect(await prepared.authority.consult!({ context: 'docs', question: 'one' })).toContain('could not be sent')
+    expect(bots.getActivation(activation.id).status).toBe('running')
+    expect(store.activation(activation.id)!.scratch).not.toBeNull()
+    void prepared.authority.consult!({ context: 'docs', question: 'two' })
+    await tick()
+    await tick()
+    expect(store.dispatches(activation.id).filter((dispatch) => dispatch.kind === 'consult' && dispatch.runId)).toHaveLength(1)
+  })
+
+  it('denying a limit ends the activation blocked instead of asking again', async () => {
+    const { activation, payload } = await running()
+    timers[0].fn()
+    clock += 10 * 60_000
+    await endAtWall(payload)
+    await bots.respond({ escalationId: bots.listEscalations(activation.id)[0].id, answer: 'deny' })
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'blocked', endReason: 'budget_denied' })
+    expect(store.escalations({ activationId: activation.id })).toHaveLength(1)
+  })
+
+  it('"Allow for this bot" keeps the owner\'s unpublished edits in the draft', async () => {
+    const entry = bots.get('site-editor')
+    bots.save({ ...entry.draft, name: 'Site editor (renamed)' }, entry.draftHash)
+    const { activation, prepared, payload } = await running()
+    prepared.authority.escalate!({ permission: { tool: 'web_fetch' }, reason: 'docs' })
+    await endAtWall(payload)
+    await bots.respond({ escalationId: bots.listEscalations(activation.id)[0].id, answer: 'allow_bot' })
+    const after = bots.get('site-editor')
+    expect(after.draft.name).toBe('Site editor (renamed)')
+    expect(after.draft.permissions.tools).toContain('web_fetch')
+    expect(after.published!.name).toBe('Site editor')
+    expect(after.published!.permissions.tools).toContain('web_fetch')
+  })
+
+  it('approval checks every context thread\'s runtime too', () => {
+    const entry = bots.get('site-editor')
+    const saved = bots.save({ ...entry.draft, context: [{ ...entry.draft.context[0], selection: { instanceId: 'codex', model: 'gpt' } }] }, entry.draftHash)
+    bots.publish('site-editor', saved.draftHash)
+    host.harness.checkPolicy = (instanceId) => instanceId === 'codex'
+      ? { ok: false, error: { code: 'policy_unenforceable', message: 'no', missing: ['toolControl'], reason: 'Codex can\'t limit tools to this list.' } }
+      : { ok: true }
+    expect(bots.approval('site-editor').threads.map((thread) => [thread.key, thread.ok])).toEqual([['main', true], ['docs', false]])
+    expect(() => bots.approve('site-editor', bots.approval('site-editor').digest)).toThrow(expect.objectContaining({ code: 'policy_unenforceable' }))
+  })
+
+  it('a completed main run with an unknown consult call pauses instead of finishing', async () => {
+    const { activation, prepared, payload } = await running()
+    const asked = prepared.authority.consult!({ context: 'docs', question: 'one' })
+    await tick()
+    const consult = store.dispatches(activation.id).find((dispatch) => dispatch.kind === 'consult')!
+    const consultPayload = payloadOf(consult.runId!)
+    bots.prepare(consultPayload)
+    const attempt = start(consult.runId!)
+    runs.tools.start({ invocationId: 'c-write', runId: consult.runId!, attemptId: attempt, tool: 'write', argsDigest: 'd', now: 'n', idempotent: false })
+    end(consult.runId!, 'interrupted', { interruptedBy: 'user' })
+    bots.settle(consultPayload, {})
+    await asked
+    end(payload.runId, 'completed')
+    bots.settle(payload, { text: 'All done.' })
+    await tick()
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'paused', endReason: 'unknown_calls', result: 'All done.', unknownCalls: [{ invocationId: 'c-write', role: 'consult' }] })
+  })
+
+  it('a newly collected call is announced, so the list shown is the list acknowledged', async () => {
+    const { activation, payload } = await running()
+    const seen: string[] = []
+    bots.events.on('changed', (event: { activationId?: string }) => { if (event.activationId) seen.push(event.activationId) })
+    runs.tools.start({ invocationId: 'late-edit', runId: payload.runId, attemptId: runs.getRun(payload.runId)!.activeAttemptId!, tool: 'edit', argsDigest: 'd', now: 'n', idempotent: false })
+    end(payload.runId, 'interrupted', { interruptedBy: 'provider' })
+    bots.settle(payload, {})
+    await tick()
+    expect(seen).toContain(activation.id)
+    expect(bots.getActivation(activation.id).unknownCalls.map((call) => call.invocationId)).toEqual(['late-edit'])
   })
 })

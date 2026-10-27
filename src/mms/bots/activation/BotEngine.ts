@@ -15,7 +15,7 @@ import {
   type BotPermissionRequest,
   type BotWallKind
 } from '../../../shared/bots/personal/escalation'
-import { BOT_APP_TOOLS, manifestProblem } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { wallMessage } from '../../../shared/bots/personal/walls'
 import type { ChargeResult, CountKind, CounterScope } from '../../../shared/harness/counters'
 import type { ReserveResult, SpendLimits, SpendRequest, SpendScope } from '../../../shared/harness/spend'
@@ -1865,7 +1865,8 @@ function instructionsOf(role: string, thread: BotThreadSpec): { instructions?: s
 /** What a gate refusal asks the owner for. */
 function permissionOfWall(call: NormalisedCall, wall: WallReason): BotPermissionRequest | undefined {
   switch (wall.kind) {
-    case 'path': return { path: wall.path, access: wall.access }
+    // A folder is asked for only by its absolute path: a relative one is refused, never resolved.
+    case 'path': return isAbsolutePath(wall.path) ? { path: wall.path, access: wall.access } : undefined
     case 'skill': return { skill: wall.skill }
     case 'mcp': return { mcp: { serverId: wall.server, tool: wall.tool } }
     case 'tool':

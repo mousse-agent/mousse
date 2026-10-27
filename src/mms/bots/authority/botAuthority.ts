@@ -41,7 +41,8 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
   const appTools: ReadonlySet<string> = new Set(permissions.appTools)
   const skills: ReadonlySet<string> = new Set(permissions.skills)
   const mcp: ReadonlySet<`${string}::${string}`> = new Set(permissions.mcp)
-  const workspace = permissions.workspace
+  // Without per-folder access every root has the workspace's access.
+  const workspace = permissions.workspace ? { ...permissions.workspace, writeRoots: permissions.workspace.writeRoots ?? (permissions.workspace.access === 'write' ? permissions.workspace.roots : []) } : null
   const authority: BotAuthority = {
     activationId: input.activationId,
     role: input.role,
