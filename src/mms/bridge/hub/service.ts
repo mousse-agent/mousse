@@ -14,6 +14,7 @@ import type {
   BridgeEntityRef,
   BridgeMethod,
   BridgeRemoteParams,
+  BridgeHubCreateOptions,
   BridgeHubRequestOptions,
   BridgeHubRequestStatus,
   BridgeThreadOpenResult,
@@ -582,15 +583,28 @@ export class BridgeHub {
   create(
     target: NodeId,
     name: string,
-    options: BridgeHubRequestOptions = {},
+    options: BridgeHubCreateOptions = {},
     projectId?: string
   ): Promise<unknown> {
+    const { worktreeEnabled, ...request } = options
     return this.call(
       target,
       'threads.create',
-      { name, ...(projectId ? { projectId } : {}) },
-      options
+      {
+        name,
+        ...(projectId ? { projectId } : {}),
+        ...(worktreeEnabled === undefined ? {} : { worktreeEnabled })
+      },
+      request
     )
+  }
+  /** Registers an existing directory on the target as a project; the target validates the path. */
+  openProject(
+    target: NodeId,
+    path: string,
+    options: BridgeHubRequestOptions = {}
+  ): Promise<unknown> {
+    return this.call(target, 'projects.open', { path }, options)
   }
   send(
     ref: BridgeEntityRef,

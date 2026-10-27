@@ -1,3 +1,5 @@
+import { realpathSync, statSync } from 'node:fs'
+import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import type { MmsProfileServices } from '../../MmsProfileServices'
 import { dispatchMethod } from '../../protocol/handlers'
 import { NetError } from '../../../shared/net'
@@ -93,6 +95,15 @@ export function remoteThreadEventData(data: unknown): unknown {
   }
 }
 
+/** Whether `child` is `parent` or lies below it; case-insensitive where the filesystem usually is. */
+function isInside(child: string, parent: string): boolean {
+  const fold = process.platform === 'darwin' || process.platform === 'win32'
+  const from = fold ? parent.toLowerCase() : parent
+  const to = fold ? child.toLowerCase() : child
+  const path = relative(from, to)
+  return path === '' || (!path.startsWith('..') && !isAbsolute(path))
+}
+
 function failure(error: unknown): { ok: false; error: string } {
   return { ok: false, error: error instanceof Error ? error.message : String(error) }
 }
@@ -121,6 +132,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
       )
         return { ok: false }
     }
+    if (method === 'projects.open') return mmsJson(this.openProject(params.path))
     const composer = await this.composer(method, params)
     if (composer !== undefined) return mmsJson(composer)
     return mmsJson(
@@ -136,6 +148,41 @@ export class MmsRemoteBackend implements RemoteBackendPort {
         params
       )
     )
+  }
+  /**
+   * Registers an existing directory on this machine as a project. The path comes from another
+   * machine, so it must be absolute, exist, be a directory, and not lie inside the Mousse home
+   * (which holds keys and every profile's data). A directory is never created. Refusals answer
+   * `{ ok: false, error }` so the reason survives a mutating RPC.
+   */
+  private openProject(path: unknown): { ok: true; project: unknown } | { ok: false; error: string } {
+    const refuse = (error: string) => ({ ok: false as const, error })
+    if (typeof path !== 'string' || !path.trim() || path.includes('\0'))
+      return refuse('Enter the full path of a folder.')
+    if (!isAbsolute(path)) return refuse('Enter the full path of a folder, starting from the root.')
+    const lexical = resolve(path)
+    if (dirname(lexical) === lexical) return refuse('Pick a folder, not the root of the disk.')
+    let real: string
+    try {
+      real = realpathSync.native(lexical)
+      if (!statSync(real).isDirectory()) return refuse('That path is a file, not a folder.')
+    } catch {
+      return refuse('That folder does not exist on this computer.')
+    }
+    const s = this.services
+    for (const home of [s.getProfileHomeDir(), s.getHomeDir()]) {
+      let realHome = home
+      try {
+        realHome = realpathSync.native(home)
+      } catch {
+        // A home that cannot be resolved is still compared by its own path.
+      }
+      if ([home, realHome].some((root) => isInside(lexical, root) || isInside(real, root)))
+        return refuse('That folder is part of the Mousse data folder.')
+    }
+    const project = s.projects.openProject(lexical)
+    s.events.broadcast('projects:updated', s.projects.listProjects())
+    return { ok: true, project }
   }
   /**
    * Composer methods answer here rather than through the local protocol handlers: remote callers

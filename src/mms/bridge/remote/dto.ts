@@ -81,6 +81,12 @@ export function validateRemoteParams(
     case 'projects.list':
       keys([])
       break
+    case 'projects.open':
+      keys(['path'])
+      text('path', 4096)
+      // The receiving machine decides whether the path is acceptable; a NUL never is.
+      if ((p.path as string).includes('\0')) throw new NetError('bad_request')
+      break
     case 'threads.list':
       keys([], ['projectId'])
       text('projectId', 256, true)

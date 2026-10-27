@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { connect } from 'node:net'
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { MousseMainService } from '../../../../src/mms/MousseMainService'
@@ -262,6 +262,80 @@ describe('P3 real MMS remote Bridge', () => {
         b.rpc('threads.list', {}, { id: newId('rpc'), deadlineMs: 2000 })
       )
     ).rejects.toMatchObject({ code: 'revoked' })
+  })
+  it('opens a project only for a write caller and only for an existing folder outside the Mousse home', async () => {
+    const p = await setup(),
+      { b } = await p.connect(),
+      folder = temp(),
+      file = join(folder, 'file.txt')
+    writeFileSync(file, 'x')
+    const open = (path: unknown, idem: string) =>
+      b.rpc('projects.open', { path }, { id: newId('rpc'), idem, deadlineMs: 2000 })
+    // Shape errors are refused before admission.
+    for (const bad of [undefined, '', 42, 'a\0b', 'x'.repeat(4097)])
+      await expect(open(bad, 'bad-shape')).rejects.toMatchObject({ code: 'bad_request' })
+    await expect(
+      b.rpc(
+        'projects.open',
+        { path: folder, extra: true },
+        { id: newId('rpc'), idem: 'extra', deadlineMs: 2000 }
+      )
+    ).rejects.toMatchObject({ code: 'bad_request' })
+    // Everything else is answered with a reason and registers nothing.
+    const missing = join(folder, 'missing')
+    for (const path of [
+      'relative/folder',
+      './folder',
+      missing,
+      file,
+      p.mms.getProfileHomeDir(),
+      join(p.mms.getProfileHomeDir(), 'nested'),
+      p.mms.getHomeDir(),
+      '/'
+    ])
+      expect(await open(path, 'refuse-' + path)).toMatchObject({
+        ok: false,
+        error: expect.any(String)
+      })
+    expect(() => realpathSync(missing)).toThrow()
+    expect(p.mms.projects.listProjects()).toEqual([])
+    // An existing folder becomes a project; repeating the call names the same project.
+    const opened = (await open(folder, 'open-folder')) as {
+      ok: true
+      project: { id: string; path: string; name: string }
+    }
+    expect(opened).toMatchObject({ ok: true, project: { path: folder } })
+    expect(p.mms.projects.listProjects()).toEqual([opened.project])
+    expect(await open(folder, 'open-again')).toEqual(opened)
+    expect(p.mms.projects.listProjects()).toHaveLength(1)
+    // The target's own ledger records the admitted calls like any other remote call.
+    expect(
+      p.aDb.database
+        .prepare('SELECT count(*) AS n FROM net_executions WHERE target=?')
+        .get('projects.open')!.n
+    ).toBeGreaterThan(0)
+    // The new project is usable for a thread, with a worktree request passed through.
+    const created = (await b.rpc(
+      'threads.create',
+      { name: 'In project', projectId: opened.project.id, worktreeEnabled: true },
+      { id: newId('rpc'), idem: 'create-in-project', deadlineMs: 2000 }
+    )) as { thread: { projectId?: string; worktreeEnabled?: boolean } }
+    expect(created.thread).toMatchObject({ projectId: opened.project.id, worktreeEnabled: true })
+  })
+  it('refuses projects.open without the write capability', async () => {
+    const p = await setup(['read', 'chat']),
+      { b } = await p.connect(),
+      folder = temp()
+    mkdirSync(join(folder, 'inner'))
+    await expect(
+      b.rpc(
+        'projects.open',
+        { path: folder },
+        { id: newId('rpc'), idem: 'no-write', deadlineMs: 2000 }
+      )
+    ).rejects.toMatchObject({ code: 'forbidden' })
+    expect(p.mms.projects.listProjects()).toEqual([])
+    expect(BRIDGE_REMOTE_METHODS['projects.open']).toEqual({ capability: 'write', mutating: true })
   })
   it('rechecks changed current capabilities on retained results after a real reconnect', async () => {
     const p = await setup(),

@@ -48,6 +48,10 @@ export interface BridgeRemoteParams {
     projectId?: string
     worktreeEnabled?: boolean
   }
+  'projects.open': {
+    /** Absolute path of an existing directory on the receiving machine. */
+    path: string
+  }
   'threads.rename': {
     threadId: string
     name: string
@@ -141,6 +145,11 @@ export interface BridgeHubRequestOptions {
   idem?: string
   deadlineMs?: number
 }
+/** Options for `bridge.hub.create`: the request options plus how the new thread is set up. */
+export interface BridgeHubCreateOptions extends BridgeHubRequestOptions {
+  /** Run the thread in its own git worktree on the target machine. */
+  worktreeEnabled?: boolean
+}
 export type BridgeHubRequestState =
   'prepared' | 'unknown' | 'completed' | 'failed' | 'cancelRequested'
 export interface BridgeHubRequestStatus {
@@ -159,6 +168,7 @@ export const BRIDGE_HUB_LOCAL_METHODS = [
   'bridge.hub.get',
   'bridge.hub.search',
   'bridge.hub.create',
+  'bridge.hub.openProject',
   'bridge.hub.send',
   'bridge.hub.steer',
   'bridge.hub.abort',
@@ -192,6 +202,12 @@ export interface BridgeHubLocalParams {
     target: NodeId
     name: string
     projectId?: string
+    options?: BridgeHubCreateOptions
+  }
+  'bridge.hub.openProject': {
+    target: NodeId
+    /** Absolute path of an existing directory on the target machine. */
+    path: string
     options?: BridgeHubRequestOptions
   }
   'bridge.hub.send': {

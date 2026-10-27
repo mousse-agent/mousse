@@ -2,6 +2,7 @@ import { NetError, isId } from '../../../shared/net'
 import type {
   BridgeHubLocalMethod,
   BridgeHubLocalParams,
+  BridgeHubCreateOptions,
   BridgeHubRequestOptions,
   BridgeDisplayEvent,
   BridgeEntityRef
@@ -40,6 +41,14 @@ function options(value: unknown): BridgeHubRequestOptions {
     return invalid()
   return row as BridgeHubRequestOptions
 }
+function createOptions(value: unknown): BridgeHubCreateOptions {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const { worktreeEnabled, ...request } = value as Record<string, unknown>
+    if (worktreeEnabled !== undefined && typeof worktreeEnabled !== 'boolean') return invalid()
+    options(request)
+  } else options(value)
+  return value as BridgeHubCreateOptions
+}
 function ref(value: unknown): BridgeEntityRef {
   const row = object(value, ['nodeId', 'entityId'])
   if (!isId('node', row.nodeId)) return invalid()
@@ -61,6 +70,7 @@ export function validateBridgeHubLocal<M extends BridgeHubLocalMethod>(
       ['target', 'name'],
       ['projectId', 'options']
     ],
+    'bridge.hub.openProject': [['target', 'path'], ['options']],
     'bridge.hub.send': [['ref', 'content'], ['options']],
     'bridge.hub.steer': [['ref', 'run', 'text'], ['options']],
     'bridge.hub.abort': [['ref', 'run'], ['options']],
@@ -76,7 +86,9 @@ export function validateBridgeHubLocal<M extends BridgeHubLocalMethod>(
   if (row.target !== undefined && !isId('node', row.target)) return invalid()
   if (row.ref !== undefined) ref(row.ref)
   if (row.id !== undefined && !isId('rpc', row.id)) return invalid()
-  if (row.options !== undefined) options(row.options)
+  if (row.options !== undefined)
+    if (method === 'bridge.hub.create') createOptions(row.options)
+    else options(row.options)
   if (method === 'bridge.hub.threads')
     validateHubParams(
       'threads.list',
@@ -92,6 +104,7 @@ export function validateBridgeHubLocal<M extends BridgeHubLocalMethod>(
       name: row.name,
       ...(row.projectId === undefined ? {} : { projectId: row.projectId })
     })
+  if (method === 'bridge.hub.openProject') validateHubParams('projects.open', { path: row.path })
   if (method === 'bridge.hub.send')
     validateHubParams('orchestrator.send', {
       threadId: ref(row.ref).entityId,
@@ -133,6 +146,8 @@ export async function executeBridgeHubLocal(
       return hub.search(row.target, row.query, row.limit)
     case 'bridge.hub.create':
       return hub.create(row.target, row.name, row.options, row.projectId)
+    case 'bridge.hub.openProject':
+      return hub.openProject(row.target, row.path, row.options)
     case 'bridge.hub.send':
       return hub.send(row.ref, row.content, row.options)
     case 'bridge.hub.steer':

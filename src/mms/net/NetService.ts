@@ -484,9 +484,11 @@ export class NetService {
         case 'bridge.invite': {
           const runtime = this.requireEnrolled()
           if (!this.routes) await this.activate()
+          // The device kind is recorded only when a Mousse ID request is approved, never on request.
+          const { kind: _kind, ...input } = params
           const invite = this.transport?.hasRelayListener()
-            ? await this.issueRendezvousInvite(params)
-            : runtime.enrollment.issueNodeInvite(params)
+            ? await this.issueRendezvousInvite(input)
+            : runtime.enrollment.issueNodeInvite(input)
           return { invite: invite.text, inviteId: invite.invite, expiresAt: invite.expiresAt }
         }
         case 'bridge.join':
@@ -1866,6 +1868,7 @@ export class NetService {
         caps: node.caps.filter((cap) => NODE_CAPABILITIES.includes(cap)),
         keyEpoch: node.keyEpoch,
         expiresAt: node.expiresAt,
+        kind: rt.enrollment.nodeKind(node.subject) ?? 'computer',
         self: node.subject === rt.identity.self()!.node,
         revoked: roster.revoked.some(
           (row) => row.subject === node.subject && row.throughKeyEpoch >= node.keyEpoch

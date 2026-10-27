@@ -197,7 +197,8 @@ export class HostedNetController implements HostedNet {
           throw new NetError('invite_invalid', 'This phone request has expired or was withdrawn.')
         const invite = await this.host.issueRendezvousInvite({
           name: request.deviceName,
-          joinerTransportFingerprint: request.transportFingerprint
+          joinerTransportFingerprint: request.transportFingerprint,
+          kind: request.kind
         })
         try {
           await this.service().approveEnrollmentRequest(
