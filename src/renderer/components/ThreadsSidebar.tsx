@@ -709,9 +709,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
 
-  const renderThreadStatus = (threadId: string) => renderActivityStatus(rolledUpActivity[threadId] ?? threadActivity[threadId])
+  const renderThreadStatus = (threadId: string) => renderActivityStatus(rolledUpActivity[threadId] ?? threadActivity[threadId], threadId)
 
-  const renderActivityStatus = (state: ThreadActivityState | undefined) => {
+  // A thread on another computer passes no id: its pause time is not known here.
+  const renderActivityStatus = (state: ThreadActivityState | undefined, threadId?: string) => {
     if (!state || state === 'idle') return null
 
     if (state === 'processing') {
@@ -759,7 +760,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     }
 
     if (state === 'paused') {
-      const turn = turnStates[threadId]
+      const turn = threadId ? turnStates[threadId] : undefined
       const own = turn?.phase === 'paused' ? turn.pause : undefined
       const label = pausedStatusLabel(own, Date.now())
       return (
