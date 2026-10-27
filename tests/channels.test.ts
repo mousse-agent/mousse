@@ -1088,7 +1088,9 @@ describe('ChannelRouter slash commands', () => {
 
 
 describe('channel owner and bot replies (PR 6 §6)', () => {
-  function service(options: ConstructorParameters<typeof ChannelService>[6] = {}) {
+  function service(overrides: Partial<ConstructorParameters<typeof ChannelService>[6]> = {}) {
+    // The profile passes its guarded model listing and usage read (both required).
+    const options = { listModels: () => [], getSubscriptionUsage: async () => undefined, ...overrides }
     const configStore = MousseConfigStore.load()
     const store = new ChannelStore(configStore)
     const projects = new ProjectManager()
