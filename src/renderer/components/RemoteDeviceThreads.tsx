@@ -4,6 +4,7 @@ import type { NodeId } from '../../shared/net'
 import type { Thread } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
 import { remoteDisplay, type RemoteView } from '../services/remoteThreadDisplay'
+import { pausedStatusLabel } from '../lib/pausedRun'
 import { MarkdownPreview } from './editors/MarkdownPreview'
 import { RefreshCw } from '../lib/icons'
 import { SettingsGroup, SettingsRow } from './settings/SettingsRow'
@@ -49,12 +50,13 @@ export function RemoteThreadView({ refValue, connected }: { refValue: BridgeEnti
   const live = !!view && connected && confirmed === connection
   return <div className="remote-thread-view" aria-label="Remote thread view" role="region">
     <div className="remote-thread-head"><strong>{view?.thread.name ?? (connected ? 'Loading remote thread…' : 'Device offline')}</strong><button type="button" className="settings-icon-btn" title="Refresh display" aria-label="Refresh display" disabled={!connected} onClick={() => setRefresh(value => value + 1)}><RefreshCw size={14} /></button></div>
-    <p className="settings-muted">On the selected device · {live ? view?.active ? 'Working' : 'Display only' : connected ? 'Awaiting current display' : 'Offline'}{view && !live && ' · Cached display'}{view && ` · ${view.queued} queued · ${view.questions} pending questions`}</p>
+    <p className="settings-muted">On the selected device · {live ? view?.active ? 'Working' : view?.paused ? pausedStatusLabel(view.paused, Date.now()) : 'Display only' : connected ? 'Awaiting current display' : 'Offline'}{view && !live && ' · Cached display'}{view && ` · ${view.queued} queued · ${view.questions} pending questions`}</p>
     {error && <p className="chat-error" role="alert">{error}</p>}
     {view?.messages.filter(row => !row.hidden).slice(-512).map(row => <article key={row.id}><strong>{row.role}</strong><MarkdownPreview value={row.content || row.toolCall?.summary || row.thinking?.content || ''} className="chat-message-markdown chat-markdown" /></article>)}
     {view?.messages.length && view.messages.length > 512 ? <p className="settings-muted">This display shows the latest 512 retained messages.</p> : null}
     {view?.lastEvent && <p role="status" className="settings-muted">Latest update: {view.lastEvent.replaceAll('.', ' ')}</p>}
     {!!view?.questions && <p className="settings-muted">Open this thread on its device to answer pending questions.</p>}
+    {live && view?.paused && <p role="status" className="settings-muted">A usage limit paused this run. Resume or cancel it on its device.</p>}
   </div>
 }
 

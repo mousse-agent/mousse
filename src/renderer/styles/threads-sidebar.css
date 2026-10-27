@@ -487,6 +487,7 @@
 .threads-sidebar-card-status-input { color: var(--status-input); }
 .threads-sidebar-card-status-waiting { color: var(--status-waiting); }
 .threads-sidebar-card-status-done { color: var(--status-done); }
+.threads-sidebar-card-status-paused { color: var(--warning); }
 
 .threads-sidebar-card-title {
   display: block;
@@ -552,6 +553,10 @@
 
 .threads-sidebar-status-icon--waiting {
   color: var(--status-waiting);
+}
+
+.threads-sidebar-status-icon--paused {
+  color: var(--warning);
 }
 
 .threads-sidebar-thread-trailing {

@@ -48,6 +48,7 @@ describe('isRunningSubagent', () => {
     ['starting', true],
     ['working', true],
     ['waiting', true],
+    ['paused', true],
     ['done', false],
     ['failed', false],
     ['stopped', false],
@@ -154,6 +155,7 @@ describe('lineageStatusLabel', () => {
     expect(label('starting')).toBe('Starting')
     expect(label('queued')).toBe('Queued')
     expect(label('needs_input')).toBe('Needs input')
+    expect(label('paused')).toBe('Paused')
   })
 
   it('says a subagent is waiting on its own subagents, counting them when known', () => {
