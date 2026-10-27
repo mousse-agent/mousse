@@ -3,7 +3,7 @@ import type { PermissionMode } from '../../../../shared/permissionMode'
 import type { ModelOverride } from '../../../../shared/providerInstances'
 import type { AgentAccessLevel, AgentAccessSettings } from '../../../../shared/settings'
 import type { ApprovalTag } from '../../../orchestrator/UserQuestionService'
-import type { ChatMessage, CreateScheduledJobInput, DocumentOpenPayload, PendingUserQuestions, ScheduledJob, Thread, UserQuestionAnswers } from '../../../../shared/types'
+import type { ChatMessage, CreateScheduledJobInput, DocumentOpenPayload, PendingUserQuestions, QueuedMessage, ScheduledJob, Thread, UserQuestionAnswers } from '../../../../shared/types'
 import type { ScheduledJobOptionsInput } from '../../../scheduled/validateJobOptions'
 import type { DevGuiTools } from '../../../devgui/DevGuiTools'
 import type { SkillsRegistry } from '../../../integrations/skills/SkillsRegistry'
@@ -87,6 +87,42 @@ export type AgentRunCommandResult =
   /** A steer joins a run that is already running under a looser permission mode than the caller's own. */
   | { status: 'ceiling_exceeded'; callerMode: PermissionMode; targetMode: PermissionMode }
 
+/** A thread's queue as a reader sees it: what is waiting, what a turn has claimed, and the revision a change must name. */
+export interface QueueSnapshot {
+  /** Pending and steering items, in order; internal items are left out. */
+  items: QueuedMessage[]
+  claimed: QueuedMessage[]
+  /** Changes with every change to `items` and `claimed`; a command that names an older one is refused. */
+  revision: string
+  /** False while the queue takes no new messages (a merge-back waits for the thread's next turn). */
+  open: boolean
+  blockedReason?: 'merge_back_pending'
+}
+
+/** One change an agent asks of a thread's queue. `expectedRevision` is the revision the agent last read. */
+export type AgentQueueCommand =
+  | { op: 'enqueue'; content: string; mode: 'agent' | 'plan'; expectedRevision?: string }
+  | { op: 'edit'; itemId: string; content?: string; mode?: 'agent' | 'plan'; expectedRevision: string }
+  | { op: 'remove'; itemId: string; expectedRevision: string }
+  | { op: 'reorder'; orderedIds: string[]; expectedRevision: string }
+  | { op: 'promote'; itemId: string; expectedRevision: string; expectedRunId: string }
+
+/** What a queue command did. The same for a retry of the same request (`replayed`), whatever the queue looks like by then. */
+export interface AgentQueueResult {
+  outcome: 'enqueued' | 'edited' | 'removed' | 'reordered' | 'promoted' | 'requeued'
+  itemId: string
+  /** The queue's revision right after the change. */
+  revision: string
+  /** The queued item, for an enqueue. */
+  item?: QueuedMessage
+  /** An `agent.action` event on the thread records the change (a change to another thread's queue, or to a message the agent did not write). */
+  recorded?: boolean
+  /** The change had been made before: nothing new happened. */
+  replayed: boolean
+  /** The side effects (ending the queued run the item owned, giving its notice rows back) are committed. False for a result returned while they are still being retried. */
+  effectsSettled: boolean
+}
+
 /**
  * What the scheduled-job tools need from the profile (`schedule_*`). Every method acts as the daemon, so the tools
  * decide what the caller may do first; none of this is reachable from model input except through them.
@@ -142,9 +178,6 @@ export interface AppToolHost extends DelegationToolsHost {
   tasks(threadId: string | undefined): TaskQueue | null
   /** The run engine of the thread tools (`thread_read`, the queue, fork and merge-back); MCP only. */
   engine?: RunEngine
-  listQueue?(threadId: string): unknown[]
-  /** `permissionMode`: the mode the caller's run is bound to; the queued turn never runs looser than it (nor than the thread's own). */
-  enqueue?(threadId: string, input: { content: string; mode: 'agent' | 'plan' }, options?: { permissionMode?: PermissionMode }): unknown
   browserRuntime?(): BrowserRuntimePort | undefined
   skills?(): SkillsRegistry | undefined
   quickActions?: QuickActionTools
@@ -218,6 +251,18 @@ export interface AppToolHost extends DelegationToolsHost {
   creationStarted?(clientRequestId: string): boolean
   /** Adds a note row to the thread's transcript (the creator's: what it launched, and on which model). */
   noteOnThread?(threadId: string, text: string): void
+  /**
+   * A thread's queue with its revision, read from disk after any unfinished agent command was finished. The
+   * revision is what `queueCommand` must be given back.
+   */
+  queueSnapshot?(threadId: string): QueueSnapshot
+  /**
+   * One agent command on a thread's queue (`queue_enqueue`, `queue_edit`, `queue_remove`, `queue_reorder`,
+   * `queue_promote_to_steer`). `options.clientRequestId` is the full request key: a retry returns the first
+   * result. `options.level` is the caller's effective agent access level (it decides who may edit a message a
+   * person queued). Throws a `QueueConflictError` when the queue is not as the caller expects.
+   */
+  queueCommand?(threadId: string, command: AgentQueueCommand, options: { clientRequestId: string; actor: AgentActor; level: AgentAccessLevel }): AgentQueueResult
   /** Stops run `runId` of another thread and what is below it, as `actor`'s Stop (`thread_interrupt`). */
   stopRun?(threadId: string, runId: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult>
   /** Steers run `runId` of another thread with `text` as `actor`'s message (`thread_steer`). */

@@ -15,29 +15,27 @@ import { AgentRegistry } from '../agents/AgentRegistry'
 import { TaskQueue } from '../tasks/TaskQueue'
 import { createNativeContext, isNativeLastTurnUsage, normalizeNativeContext } from './nativeContext'
 
+/**
+ * One steer waiting for a live turn to read it. A person's typed steer has only its text. A promoted queue
+ * item carries its id, and what the item carried when it was promoted (its mode ceiling, the agent it came
+ * from), so the entry can stand in for the item if the item is gone: a steer the turn never reads becomes a
+ * turn of its own with that identity, never merged into a person's text and never under a looser mode. An
+ * agent's steer (`thread_steer`) carries the sender and the mode it may run in.
+ */
+export interface SteerEntry {
+  text: string
+  itemId?: string
+  permissionMode?: PermissionMode
+  origin?: AgentOrigin
+}
+
 export interface ActiveTurnControl {
   abort: AbortController
   /** The Run Engine run this turn executes, so a Stop aimed at one run cannot abort a later turn of the thread. */
   runId?: string
-  pendingSteer: string[]
-  promotedSteerIds: string[]
+  pendingSteer: SteerEntry[]
   /** Notices (subagent results) the steers in `pendingSteer` carry, until the model reads them or the turn ends. */
   carriedSteers?: Array<{ inboxIds: string[]; effectId: string; text: string; subagentNotice?: SubagentNoticeItem[] }>
-  /** What the last drain took (its texts and the carried entries among them), so a drained steer the provider could not take can be put back whole. */
-  lastDrained?: { parts: string[]; carried: NonNullable<ActiveTurnControl['carriedSteers']>; agent: AgentSteerEntry[] }
-  /**
-   * The steers in `pendingSteer` another thread's agent sent, with who sent them and the permission mode
-   * they may run in. A steer the turn never reads becomes a turn of its own: it keeps both, and is never
-   * merged into a person's text.
-   */
-  agentSteers?: AgentSteerEntry[]
-}
-
-/** A steer an agent sent into a live turn (`thread_steer`). */
-export interface AgentSteerEntry {
-  text: string
-  origin: AgentOrigin
-  permissionMode: PermissionMode
 }
 
 /** Mutable per-thread execution state owned by MMS. */

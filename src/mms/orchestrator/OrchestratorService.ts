@@ -72,9 +72,11 @@ import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/
 import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { stopStrategy } from '../run/CommandPolicy'
-import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type AgentCreatedThread, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type AppToolHost, type AppToolTurn, type McpCaller, type ToolRegistry } from '../run/mcp/appTools'
+import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, LAUNCHED_THREAD_ACCESS_CEILING, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { THREAD_CREATE_MAX_ACTIVE_PER_THREAD } from '../run/mcp/appTools/thread'
+import { QueueCommands, type QueueIntent } from '../run/QueueCommands'
+import type { PlannedQueueCommand, QueueEffects } from '../queue/queueJournal'
 import { modeFactsFor, prepareSkills, sessionInstructions, settingsToolEnabled, turnPreamble } from '../run/mcp/appTools/assemble'
 import { questionApproval } from '../run/mcp/appTools/quickActions'
 import { APPLET_GENERATION_GUIDANCE } from '../../shared/appletGuidance'
@@ -232,14 +234,22 @@ import {
   completeClaim,
   demoteSteerItems,
   dropSteerItems,
+  assertQueueRevision,
+  editQueuedMessage,
+  editRefusal,
   enqueueMessage,
+  listClaimedQueue,
   listPendingQueue,
   promoteQueuedMessageToSteer,
+  QueueAccessError,
+  QueueConflictError,
+  queueRevision,
   QueueValidationError,
   reclaimAbandonedClaims,
   releaseClaim,
   removeQueuedMessage,
-  reorderQueuedMessages
+  reorderQueuedMessages,
+  type QueuedMessagePatch
 } from '../queue/ThreadMessageQueue'
 import {
   createLeaseToken,
@@ -258,9 +268,11 @@ import {
   mutateDurableQueue,
   readDurableQueue,
   reclaimAbandonedClaimsDurable,
-  releaseClaimDurable
+  releaseClaimDurable,
+  repairQueueJournal,
+  runDurableQueueCommand
 } from '../queue/durableQueue'
-import { ThreadSession, type ActiveTurnControl } from './ThreadSession'
+import { ThreadSession, type ActiveTurnControl, type SteerEntry } from './ThreadSession'
 import { userQuestionService as defaultUserQuestionService, UserQuestionService } from './UserQuestionService'
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
 import { ConnectionRetriesExhaustedError } from './connectionRetry'
@@ -551,6 +563,13 @@ function agentOriginOf(agent: Pick<AgentOrigin, 'threadId' | 'runId' | 'hops'>):
   return { kind: 'agent', threadId: agent.threadId, runId: agent.runId, ...(agent.hops !== undefined ? { hops: agent.hops } : {}) }
 }
 
+/** The stricter of two modes either of which may be absent; undefined when both are (no limit at all). */
+function strictestMode(a: PermissionMode | undefined, b: PermissionMode | undefined): PermissionMode | undefined {
+  if (a === undefined) return b
+  if (b === undefined) return a
+  return isStricter(a, b) ? a : b
+}
+
 /** A turn handed to `startTurn`; `runId` is absent when the engine could not record a run. */
 interface TurnStartRequest {
   runId?: string
@@ -644,6 +663,8 @@ const queueOwner = (itemId: string): string => `queue:${itemId}`
 /** A queue item's rows that could not be given back when it was removed: tries and the wait between them. */
 const QUEUED_ROW_RELEASE_ATTEMPTS = 4
 const QUEUED_ROW_RELEASE_RETRY_MS = 2_000
+/** An agent queue command whose effects did not commit is retried this many times in the background. */
+const QUEUE_REPAIR_ATTEMPTS = 6
 
 /** Tool access of a delegated child in its parent's workspace: read-only roles only. */
 const SHARED_READER_POLICY: AgentWorkspacePolicy = { version: 1, workspace: 'shared', access: 'read-only' }
@@ -1299,7 +1320,7 @@ export class OrchestratorService extends EventEmitter {
   /** In-flight channel turns keyed by mousse thread id; `runId` once the turn is an engine run. */
   private channelTurns = new Map<
     string,
-    { abort: AbortController; pendingSteer: string[]; promotedSteerIds: string[]; runId?: string }
+    { abort: AbortController; pendingSteer: SteerEntry[]; runId?: string }
   >()
   /** Optional thread store for durable queue persistence. */
   private threadStore: ThreadDataStore | null = null
@@ -1341,6 +1362,8 @@ export class OrchestratorService extends EventEmitter {
   private questionRouterOff: (() => void) | null = null
   /** Pending retries of a queue item's row release (`releaseQueuedRows`); a shutdown clears them. */
   private readonly releaseRetries = new Set<ReturnType<typeof setTimeout>>()
+  /** Background repairs of unfinished agent queue commands tried so far, per thread. */
+  private readonly queueRepairAttempts = new Map<string, number>()
   /** Last run heartbeat (ms) per run; throttles `RunEngine.heartbeat` writes. */
   private readonly runHeartbeats = new Map<string, number>()
   /** Optional multi-tenant runtime manager (Phase 4). */
@@ -1583,6 +1606,7 @@ export class OrchestratorService extends EventEmitter {
   setThreadStore(store: ThreadDataStore | null): void {
     this.threadStore = store
     this.installTitleGuard()
+    this.installQueueJournal()
   }
 
   /**
@@ -1601,6 +1625,7 @@ export class OrchestratorService extends EventEmitter {
     this.runEngine?.handoffs.setTranscriptSource(null)
     this.unbindApprovals()
     this.runEngine = engine
+    this.installQueueJournal()
     if (!engine) return
     this.bindApprovals(engine)
     this.installTitleGuard()
@@ -2088,6 +2113,8 @@ export class OrchestratorService extends EventEmitter {
     this.recoverOrphanedFollowUps()
     this.recoverAgentThreadCreations()
     this.restorePausedTurnStates()
+    // After the runs of the earlier daemon are settled: an agent's queue command that never finished is finished now.
+    this.recoverQueueCommandsOnBoot()
     return interrupted
   }
 
@@ -2851,8 +2878,8 @@ export class OrchestratorService extends EventEmitter {
         this.sessionAls.run(session, () => this.presentPlanCard(payload, threadId))
       },
       tasks: (threadId) => (threadId ? this.getTasksForThread(threadId) : null),
-      listQueue: (threadId) => this.listQueue(threadId),
-      enqueue: (threadId, input, options) => this.enqueueAndDrain(threadId, input, 'mcp', options?.permissionMode),
+      queueSnapshot: (threadId) => this.queueSnapshot(threadId),
+      queueCommand: (threadId, command, options) => this.queueCommandAsAgent(threadId, command, options),
       browserRuntime: () => this.browserRuntime,
       skills: () => this.skillsRegistry,
       quickActions: new QuickActionTools(questionApproval(this.questions), (action) => this.emit('quick-action-created', action)),
@@ -5659,7 +5686,10 @@ export class OrchestratorService extends EventEmitter {
         kind: 'send',
         threadId: item.threadId,
         clientRequestId: `queue:${item.id}`,
-        source: item.source ?? 'queue'
+        source: item.source ?? 'queue',
+        // A message an agent queued is still its run: it counts toward the chain of agent messages and is held
+        // behind a pause, wherever it was written (the send, or an edit that made it the agent's).
+        ...(item.origin?.kind === 'agent' ? { agentOrigin: { hops: item.origin.hops ?? 1 } } : {})
       })
       return result.status === 'accepted' ? result.runId : undefined
     } catch (error) {
@@ -5979,7 +6009,6 @@ export class OrchestratorService extends EventEmitter {
       session.deleted = true
       if (session.activeTurn && !session.activeTurn.abort.signal.aborted) {
         session.activeTurn.pendingSteer = []
-        session.activeTurn.promotedSteerIds = []
         session.activeTurn.abort.abort()
       }
       session.queue = []
@@ -5988,7 +6017,6 @@ export class OrchestratorService extends EventEmitter {
       this.boundSession.deleted = true
       if (this.boundSession.activeTurn && !this.boundSession.activeTurn.abort.signal.aborted) {
         this.boundSession.activeTurn.pendingSteer = []
-        this.boundSession.activeTurn.promotedSteerIds = []
         this.boundSession.activeTurn.abort.abort()
       }
       this.boundSession.queue = []
@@ -6155,12 +6183,9 @@ export class OrchestratorService extends EventEmitter {
    * Queues a message and makes sure it runs: after the current turn settles (whoever owns it,
    * including a channel or remote turn that suppresses its own drain), or now when the thread is idle.
    */
-  enqueueAndDrain(threadId: string, input: OrchestratorSendInput, source: string, callerMode?: PermissionMode): QueuedMessage {
+  enqueueAndDrain(threadId: string, input: OrchestratorSendInput, source: string): QueuedMessage {
     this.assertQueueOpen(threadId)
-    // A turn that was narrowed (by a sender's mode, a pause it resumed from) queues its follow-up under that
-    // mode, so queueing is no way to run it looser; a turn running as the thread itself adds nothing.
-    const limit = callerMode && isStricter(callerMode, this.requestedPermissionMode(threadId)) ? callerMode : undefined
-    const item = this.enqueueForThread(threadId, input, { source, ...(limit ? { permissionMode: limit } : {}) })
+    const item = this.enqueueForThread(threadId, input, { source })
     const session = this.getOrCreateSession(threadId)
     if (session.isTurnRunning() || session.turnAdmitted) session.drainAfterSettle = true
     else this.scheduleQueueDrain(session)
@@ -6252,11 +6277,16 @@ export class OrchestratorService extends EventEmitter {
     return item
   }
 
-  removeQueuedItem(threadId: string, itemId: string): QueuedMessage | null {
+  /**
+   * A person's removal (the app, the CLI). `expectedRevision`, when given, is checked against the queue on disk
+   * inside the same lock as the change: a queue that changed since it was read refuses with a conflict.
+   */
+  removeQueuedItem(threadId: string, itemId: string, opts?: { expectedRevision?: string }): QueuedMessage | null {
     const session = this.getOrCreateSession(threadId)
     let removed: QueuedMessage | null = null
     if (this.threadStore) {
       session.queue = mutateDurableQueue(this.threadStore, threadId, (diskItems) => {
+        assertQueueRevision(diskItems, opts?.expectedRevision)
         const result = removeQueuedMessage(diskItems, itemId)
         if (result.removed?.workflowInvocationId) this.workflowChat?.abandon(result.removed.workflowInvocationId, threadId)
         removed = result.removed
@@ -6265,6 +6295,7 @@ export class OrchestratorService extends EventEmitter {
         return result.items
       })
     } else {
+      assertQueueRevision(session.queue, opts?.expectedRevision)
       const result = removeQueuedMessage(session.queue, itemId)
       if (result.removed?.workflowInvocationId) this.workflowChat?.abandon(result.removed.workflowInvocationId, threadId)
       this.releaseQueuedRows([result.removed])
@@ -6276,13 +6307,15 @@ export class OrchestratorService extends EventEmitter {
     return removed
   }
 
-  reorderQueue(threadId: string, orderedIds: string[]): QueuedMessage[] {
+  reorderQueue(threadId: string, orderedIds: string[], opts?: { expectedRevision?: string }): QueuedMessage[] {
     const session = this.getOrCreateSession(threadId)
     if (this.threadStore) {
-      session.queue = mutateDurableQueue(this.threadStore, threadId, (diskItems) =>
-        reorderQueuedMessages(diskItems, orderedIds)
-      )
+      session.queue = mutateDurableQueue(this.threadStore, threadId, (diskItems) => {
+        assertQueueRevision(diskItems, opts?.expectedRevision)
+        return reorderQueuedMessages(diskItems, orderedIds)
+      })
     } else {
+      assertQueueRevision(session.queue, opts?.expectedRevision)
       session.queue = reorderQueuedMessages(session.queue, orderedIds)
     }
     this.emitQueueUpdated(threadId, session.queue)
@@ -6296,7 +6329,11 @@ export class OrchestratorService extends EventEmitter {
    * later normal turn. If the turn ends without draining, the item is
    * demoted back to normal pending instead of being dropped.
    */
-  promoteQueueItemToSteer(threadId: string, itemId: string): boolean {
+  promoteQueueItemToSteer(
+    threadId: string,
+    itemId: string,
+    opts?: { expectedRevision?: string; expectedRunId?: string; permissionCeiling?: PermissionMode }
+  ): boolean {
     const session = this.getOrCreateSession(threadId)
     if (session.queue.find((entry) => entry.id === itemId)?.inboxIds?.length)
       throw new QueueValidationError('A queued subagent result is delivered as its own turn; it cannot be sent as a steer.')
@@ -6310,12 +6347,18 @@ export class OrchestratorService extends EventEmitter {
     }
     let item: QueuedMessage
     let promotedRunId: string | undefined
+    let steerRunId: string | undefined
     // A steer joins the active run, so the promoted item no longer owns a run of its own.
     const promote = (items: QueuedMessage[]): QueuedMessage[] => {
+      assertQueueRevision(items, opts?.expectedRevision)
       // A queued result notice is rebuilt when it runs and owns its rows; its stale text must not be sent as a steer.
       if (items.find((entry) => entry.id === itemId)?.inboxIds?.length)
         throw new QueueValidationError('A queued subagent result is delivered as its own turn; it cannot be sent as a steer.')
-      const result = promoteQueuedMessageToSteer(items, itemId)
+      // The run the text will join, and the mode it may run in, checked here under the queue lock against the run
+      // the engine has now, and written on the item: nothing else can make the text join another run.
+      const bind = this.checkPromotion(threadId, items.find((entry) => entry.id === itemId), opts)
+      steerRunId = bind.steerRunId
+      const result = promoteQueuedMessageToSteer(items, itemId, bind)
       promotedRunId = result.item.runId
       if (!promotedRunId) {
         item = result.item
@@ -6340,42 +6383,392 @@ export class OrchestratorService extends EventEmitter {
       return true
     }
 
-    const steered = this.steerThread(threadId, item!.content)
+    return this.deliverPromotedItem(session, item!, steerRunId)
+  }
+
+  /**
+   * Hands a promoted item's text to the live turn, with the item's identity, so the turn that reads it
+   * acknowledges the item and a turn that never reads it demotes the item in place. No `await` between the
+   * promotion's queue change and this call: the run it was checked against cannot end in between. A turn that
+   * is not the run the item is bound to refuses the text; the promotion is then reverted.
+   */
+  private deliverPromotedItem(session: ThreadSession, item: QueuedMessage, steerRunId: string | undefined): boolean {
+    const threadId = session.threadId
+    const steered = this.steerThread(threadId, item.content, undefined, undefined, item.origin?.kind === 'agent' ? item.origin : undefined, item.permissionMode, { id: item.id, ...(steerRunId ? { runId: steerRunId } : {}) })
     if (steered) {
-      // Keep the item queued as steering until the turn's steer drain consumes
-      // its content. Dropping here would lose the message when the turn is
-      // aborted (which discards pendingSteer) before the next drain.
-      const localTurn =
-        session.activeTurn && !session.activeTurn.abort.signal.aborted
-          ? session.activeTurn
-          : null
-      const channelTurn = localTurn ? null : this.channelTurns.get(threadId) ?? null
-      const tracker = localTurn ?? (channelTurn && !channelTurn.abort.signal.aborted ? channelTurn : null)
-      if (tracker) {
-        tracker.promotedSteerIds ??= []
-        if (!tracker.promotedSteerIds.includes(item!.id)) {
-          tracker.promotedSteerIds.push(item!.id)
-        }
-      }
+      // The item stays queued as steering until the turn's steer drain consumes its content. Dropping it here
+      // would lose the message when the turn is aborted (which discards pendingSteer) before the next drain.
       this.emitQueueUpdated(threadId, session.queue)
       return true
     }
     // Revert promotion if steer was rejected.
-    if (this.threadStore) {
-      session.queue = mutateDurableQueue(this.threadStore, threadId, (disk) =>
-        disk.map((entry) =>
-          entry.id === item!.id
-            ? { ...entry, intent: 'normal' as const, state: 'pending' as const }
-            : entry
-        )
-      )
-    } else {
-      session.queue = session.queue.map((entry) =>
-        entry.id === item!.id ? { ...entry, intent: 'normal', state: 'pending' } : entry
-      )
-    }
+    if (this.threadStore) session.queue = mutateDurableQueue(this.threadStore, threadId, (disk) => demoteSteerItems(disk, [item.id]))
+    else session.queue = demoteSteerItems(session.queue, [item.id])
     this.emitQueueUpdated(threadId, session.queue)
     return false
+  }
+
+  /**
+   * Whether a promotion may go ahead now, and what it binds the item to. The run the text will join is the
+   * thread's active engine run, which must be the one the caller named (`expectedRunId`); a paused run is not
+   * running and takes no steer. The mode the item may run in is its stored one (what the sender allowed),
+   * narrowed by the caller's own mode when given: a running turn cannot be narrowed, so a run bound to a looser
+   * mode than that never takes the text. A run that has not bound its turn yet is unknown, not strict.
+   */
+  private checkPromotion(
+    threadId: string,
+    item: QueuedMessage | undefined,
+    opts?: { expectedRunId?: string; permissionCeiling?: PermissionMode }
+  ): { steerRunId?: string; permissionMode?: PermissionMode } {
+    if (!item) throw new QueueConflictError('queue_item_not_found', 'That message is not in the queue.')
+    const engine = this.runEngine
+    const active = engine?.getActiveRun(threadId) ?? null
+    if (opts?.expectedRunId !== undefined && active?.runId !== opts.expectedRunId) {
+      const named = engine?.getRun(opts.expectedRunId)
+      const paused = named?.threadId === threadId && named.status === 'paused'
+      throw new QueueConflictError(
+        paused ? 'run_paused' : 'run_not_active',
+        paused
+          ? `Run ${opts.expectedRunId} is paused by a usage limit and has no live turn to steer; the message stays queued.`
+          : `Run ${opts.expectedRunId} is not the thread's active run${active ? ` (${active.runId} is)` : ' (it has none)'}; nothing was changed.`,
+        { expectedRunId: opts.expectedRunId, activeRunId: active?.runId ?? null }
+      )
+    }
+    const limit = strictestMode(item.permissionMode, opts?.permissionCeiling)
+    if (limit) {
+      if (!active || !engine)
+        throw new QueueConflictError('run_not_active', 'This message has a mode limit and can only join a run the engine knows; the thread has none now.', { expectedRunId: opts?.expectedRunId ?? null, activeRunId: null })
+      const binding = engine.bindingForRun(active.runId)
+      if (!binding)
+        throw new QueueConflictError('run_not_ready', `Run ${active.runId} has not started its turn yet, so its mode is not known; try again once it is running.`, { activeRunId: active.runId })
+      const targetMode = binding.policy.permissionMode ?? 'ask'
+      if (isStricter(limit, targetMode))
+        throw new QueueConflictError(
+          'ceiling_exceeded',
+          `Run ${active.runId} is running under a looser permission mode (${targetMode}) than this message may run in (${limit}); a running turn cannot be narrowed. It stays queued and runs as its own turn.`,
+          { callerMode: limit, targetMode, activeRunId: active.runId }
+        )
+    }
+    return { ...(active ? { steerRunId: active.runId } : {}), ...(limit ? { permissionMode: limit } : {}) }
+  }
+
+  /**
+   * A person's edit of a queued message (the app, the CLI): its text and chat mode. Who wrote the message and the
+   * mode limit it carries stay as they are, so an edit never changes whose message it is or what it may do.
+   * `expectedRevision` is checked under the queue lock; a message already steering a turn or started is refused.
+   */
+  editQueuedItem(threadId: string, itemId: string, patch: { content?: string; mode?: ChatMode }, opts?: { expectedRevision?: string }): QueuedMessage {
+    const session = this.getOrCreateSession(threadId)
+    let edited: QueuedMessage | undefined
+    const edit = (items: QueuedMessage[]): QueuedMessage[] => {
+      assertQueueRevision(items, opts?.expectedRevision)
+      const result = editQueuedMessage(items, itemId, { content: patch.content, mode: patch.mode })
+      edited = result.item
+      return result.items
+    }
+    session.queue = this.threadStore ? mutateDurableQueue(this.threadStore, threadId, edit) : edit(session.queue)
+    this.emitQueueUpdated(threadId, session.queue)
+    return edited!
+  }
+
+  /** The thread's queue and its revision as a reader sees it now (unfinished agent commands finished first). */
+  queueSnapshot(threadId: string): QueueSnapshot {
+    const store = this.threadStore
+    let all: QueuedMessage[]
+    if (store) {
+      if (store.getQueueJournal()?.commands.listUnfinished(threadId).length) repairQueueJournal(store, threadId)
+      all = store.loadMessageQueue(threadId)
+    } else {
+      all = this.getOrCreateSession(threadId).queue
+    }
+    let blocked: QueueSnapshot['blockedReason']
+    try {
+      this.assertQueueOpen(threadId)
+    } catch (error) {
+      if ((error as { code?: unknown } | null)?.code === 'merge_back_pending') blocked = 'merge_back_pending'
+    }
+    return {
+      items: listPendingQueue(all).filter((item) => !item.internal),
+      claimed: listClaimedQueue(all).filter((item) => !item.internal),
+      revision: queueRevision(all),
+      open: blocked === undefined,
+      ...(blocked ? { blockedReason: blocked } : {})
+    }
+  }
+
+  /**
+   * The journal of agent commands on queues: set once the thread store and the run engine are both there. A
+   * command is written to the run database before the queue file changes, and its effects commit with its
+   * marker; `mutateDurableQueue` finishes whatever a crash left before any other change, and the boot repair
+   * finishes the rest (SPEC §15.1).
+   */
+  private installQueueJournal(): void {
+    const store = this.threadStore
+    const engine = this.runEngine
+    if (!store) return
+    if (!engine) {
+      store.setQueueJournal(undefined)
+      return
+    }
+    store.setQueueJournal({ commands: new QueueCommands(engine.store.db), effects: this.queueEffects(engine) })
+  }
+
+  /**
+   * Boot: finishes what an earlier daemon left unfinished in the queue command journal, once boot
+   * reconciliation has settled the runs its effects touch (any change to a thread's queue finishes that
+   * thread's entries first as well, so nothing waits for this).
+   */
+  recoverQueueCommandsOnBoot(): void {
+    const store = this.threadStore
+    const journal = store?.getQueueJournal()
+    if (!store || !journal) return
+    try {
+      for (const threadId of journal.commands.unfinishedThreadIds()) {
+        if (!store.getThread(threadId)) continue
+        try {
+          repairQueueJournal(store, threadId)
+        } catch (error) {
+          console.warn('a thread\'s unfinished queue commands could not be finished at boot', { threadId, error: error instanceof Error ? error.message : String(error) })
+        }
+      }
+    } catch (error) {
+      console.warn('the queue command journal could not be read at boot', { error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  private queueEffects(engine: RunEngine): QueueEffects {
+    return {
+      activeRunId: (threadId) => engine.getActiveRun(threadId)?.runId ?? null,
+      applyEffects: (intent) => {
+        // The queued runs the item owned end cancelled (only still-queued ones: a claimed item's run may be starting).
+        for (const runId of intent.cancelRunIds) {
+          if (engine.getRun(runId)?.status !== 'queued') continue
+          try {
+            engine.markTerminal(runId, 'cancelled', { interruptedBy: intent.actor ? 'agent' : 'user' })
+          } catch (error) {
+            // A run from an earlier daemon epoch is the reconciler's; anything else rolls the whole commit back.
+            if (!(error instanceof RunStoreError && error.code === 'stale_write')) throw error
+          }
+        }
+        // Notice rows the removed item held go back to pending; only the rows still its own.
+        if (intent.releaseInboxIds.length) {
+          const owner = queueOwner(intent.itemId)
+          const own = engine.inbox.getMany(intent.releaseInboxIds).filter((row) => row.status === 'delivered' && row.deliveredBy === owner)
+          if (own.length) engine.inbox.release(own.map((row) => row.inboxId), owner)
+        }
+      },
+      abandonWorkflow: (invocationId, threadId) => this.workflowChat?.abandon(invocationId, threadId),
+      audit: (intent, entry) => {
+        if (!intent.actor) return
+        engine.store.appendEvent({
+          threadId: intent.threadId,
+          runId: null,
+          type: 'agent.action',
+          payload: { ...entry.details, action: entry.action, actorThreadId: intent.actor.threadId, actorRunId: intent.actor.runId, toolCallId: intent.actor.toolCallId }
+        })
+      },
+      scheduleRepair: (threadId) => this.scheduleQueueRepair(threadId)
+    }
+  }
+
+  /** An unfinished queue command is tried again in a few seconds, a few times; the next change to the queue and boot try as well. */
+  private scheduleQueueRepair(threadId: string): void {
+    const attempts = (this.queueRepairAttempts.get(threadId) ?? 0) + 1
+    if (this.lifecycle.stopping || attempts > QUEUE_REPAIR_ATTEMPTS) return
+    this.queueRepairAttempts.set(threadId, attempts)
+    const timer = setTimeout(() => {
+      this.releaseRetries.delete(timer)
+      const store = this.threadStore
+      if (this.lifecycle.stopping || !store) return
+      try {
+        repairQueueJournal(store, threadId)
+        if (!store.getQueueJournal()?.commands.listUnfinished(threadId).length) this.queueRepairAttempts.delete(threadId)
+      } catch (error) {
+        console.warn('a queue command could not be repaired', { threadId, attempts, error: error instanceof Error ? error.message : String(error) })
+      }
+    }, QUEUED_ROW_RELEASE_RETRY_MS)
+    timer.unref?.()
+    this.releaseRetries.add(timer)
+  }
+
+  /**
+   * One agent command on a thread's queue (`queue_enqueue`, `queue_edit`, `queue_remove`, `queue_reorder`,
+   * `queue_promote_to_steer`; SPEC §15.1). Journaled and replayable by `options.clientRequestId`; every command
+   * but an enqueue on the caller's own thread carries the revision the caller read and fails with a conflict when
+   * the queue is not that any more. An agent can never widen what an item may do or pass its words off as a
+   * person's: what it writes is labelled and stored as the agent's, under the stricter of the item's own limit and
+   * the agent's mode, and what it promotes joins only the run it was checked against.
+   */
+  private queueCommandAsAgent(
+    threadId: string,
+    command: AgentQueueCommand,
+    options: { clientRequestId: string; actor: AgentActor; level: AgentAccessLevel }
+  ): AgentQueueResult {
+    const store = this.threadStore
+    this.requireRunEngine()
+    if (!store?.getQueueJournal()) throw new Error('Queue commands need the run engine and the thread store.')
+    if (!store.getThread(threadId)) throw new QueueConflictError('queue_item_not_found', `Thread ${threadId} is not available.`)
+    const { actor } = options
+    const cross = threadId !== actor.threadId
+    const callerMode = this.runPermissionMode(actor.runId)
+    if (command.op !== 'remove' && command.op !== 'reorder') this.assertNotBotThread(threadId)
+    if (command.op === 'enqueue') this.assertQueueOpen(threadId)
+    // Who wrote the item: this agent (its own note on its own thread, or a message it sent) or someone else.
+    const authoredBy = (item: QueuedMessage): boolean =>
+      item.origin ? item.origin.kind === 'agent' && item.origin.threadId === actor.threadId : item.source === 'mcp' && !cross
+    const agentItems = (items: QueuedMessage[]): number => listPendingQueue(items).filter((item) => item.origin?.kind === 'agent').length
+    const full = (): never => {
+      throw new DomainRpcError('agent_queue_full', `Thread ${threadId} already has ${AGENT_QUEUE_MAX_PER_THREAD} messages from agents waiting; try again later.`)
+    }
+    const found = (items: QueuedMessage[], itemId: string): QueuedMessage => {
+      const item = items.find((entry) => entry.id === itemId)
+      if (!item) throw new QueueConflictError('queue_item_not_found', `Queue item ${itemId} is not in the queue.`, { itemId })
+      if (item.state === 'claimed' || item.internal) throw new QueueConflictError('item_started', `Queue item ${itemId} already started and can no longer be changed.`, { itemId })
+      return item
+    }
+    const notSteering = (item: QueuedMessage): void => {
+      if (item.state === 'steering') throw new QueueConflictError('item_steering', `Queue item ${item.id} is already steering the running turn.`, { itemId: item.id })
+    }
+    // The mode an own-thread item is held to: the agent's own when stricter than the thread's, so a narrowed turn
+    // cannot widen itself by writing to its own queue.
+    const ownLimit = (): PermissionMode | undefined => (isStricter(callerMode, this.requestedPermissionMode(threadId)) ? callerMode : undefined)
+    const base = { threadId, actor, cancelRunIds: [] as string[], releaseInboxIds: [] as string[] }
+    let delivered: { item: QueuedMessage; steerRunId: string | undefined } | undefined
+    const outcome = runDurableQueueCommand(store, threadId, options.clientRequestId, (items): PlannedQueueCommand => {
+      assertQueueRevision(items, command.expectedRevision)
+      switch (command.op) {
+        case 'enqueue': {
+          let content = command.content
+          let origin: AgentOrigin | undefined
+          let permissionMode: PermissionMode | undefined = ownLimit()
+          if (cross) {
+            // Another thread's queue: the same limits as a message sent to it (`thread_send`).
+            if (agentItems(items) >= AGENT_QUEUE_MAX_PER_THREAD) full()
+            const sender = this.withAgentHops(actor)
+            content = agentMessageText(sender.threadId, this.titleOf(sender.threadId), command.content)
+            origin = agentOriginOf(sender)
+            permissionMode = callerMode
+          }
+          // A thread a person keeps in Plan takes another agent's message as a plan turn, whatever mode it asked for.
+          const mode: 'agent' | 'plan' = cross && this.lastChatModeOf(threadId) === 'plan' ? 'plan' : command.mode
+          const request = normalizeSendRequest({ content, mode })
+          const { item } = enqueueMessage(items, { threadId, content: request.content, mode: request.mode, source: 'mcp', ...(permissionMode ? { permissionMode } : {}), ...(origin ? { origin } : {}) })
+          return {
+            intent: { ...base, op: 'enqueue', itemId: item.id, item, expectedRevision: command.expectedRevision },
+            ...(cross ? { audit: { action: 'queued_message', details: { itemId: item.id, length: command.content.length } } } : {})
+          }
+        }
+        case 'edit': {
+          const item = found(items, command.itemId)
+          notSteering(item)
+          const refusal = editRefusal(item)
+          if (refusal) throw new QueueValidationError(refusal)
+          if (item.origin?.kind === 'schedule') throw new QueueValidationError('A scheduled prompt keeps the text of its job; it cannot be edited by an agent.')
+          const authored = authoredBy(item)
+          // Changing a message nobody told this agent it wrote (a person's, another agent's) needs manage, on its own thread too.
+          if (!authored && options.level !== 'manage')
+            throw new QueueAccessError(`Editing a message ${item.origin ? 'another agent' : 'a person'} queued needs the "manage" agent access level (yours is "${options.level}").`)
+          if (command.mode === 'agent' && item.mode === 'plan' && !authored)
+            throw new QueueAccessError('A message queued as a plan turn cannot be turned into an agent turn by another writer.')
+          if (command.mode === 'agent' && cross && this.lastChatModeOf(threadId) === 'plan')
+            throw new QueueAccessError('A thread kept in Plan takes messages from other agents as plan turns only.')
+          const patch: NonNullable<QueueIntent['patch']> = {}
+          let cancelRunIds: string[] = []
+          if (command.mode !== undefined) patch.mode = command.mode
+          if (command.content !== undefined) {
+            if (cross || !authored) {
+              // The words are the agent's from here on: labelled, stored as its own, run under the stricter mode.
+              if (item.origin?.kind !== 'agent' && agentItems(items) >= AGENT_QUEUE_MAX_PER_THREAD) full()
+              const sender = this.withAgentHops(actor)
+              patch.content = agentMessageText(sender.threadId, this.titleOf(sender.threadId), command.content)
+              patch.origin = agentOriginOf(sender)
+              patch.permissionMode = strictestMode(item.permissionMode, callerMode)
+              // Its queued run was made for the earlier writer: it gets a fresh one, with this sender's count, when it drains.
+              patch.dropRun = true
+              if (item.runId) cancelRunIds = [item.runId]
+            } else {
+              patch.content = command.content
+              const limit = strictestMode(item.permissionMode, ownLimit())
+              if (limit) patch.permissionMode = limit
+            }
+          }
+          if (patch.content === undefined && patch.mode === undefined) throw new QueueValidationError('queue_edit needs content or mode.')
+          return {
+            intent: { ...base, op: 'edit', itemId: item.id, patch, expectedRevision: command.expectedRevision, cancelRunIds },
+            ...(cross || !authored ? { audit: { action: 'edited_queued_message', details: { itemId: item.id, ...(command.content !== undefined ? { length: command.content.length } : {}), changedMode: command.mode !== undefined, wasOrigin: item.origin?.kind ?? (item.source ?? 'person') } } } : {})
+          }
+        }
+        case 'remove': {
+          const item = found(items, command.itemId)
+          notSteering(item)
+          if (item.workflowInvocationId) throw new QueueValidationError('A workflow command can only be removed from the app.')
+          return {
+            intent: {
+              ...base,
+              op: 'remove',
+              itemId: item.id,
+              expectedRevision: command.expectedRevision,
+              cancelRunIds: item.runId ? [item.runId] : [],
+              releaseInboxIds: item.inboxIds ?? [],
+              ...(item.workflowInvocationId ? { abandonWorkflowInvocationId: item.workflowInvocationId } : {})
+            },
+            ...(cross || !authoredBy(item) ? { audit: { action: 'removed_queued_message', details: { itemId: item.id } } } : {})
+          }
+        }
+        case 'reorder': {
+          // Validated now (a permutation of the pending items); the same function applies it.
+          reorderQueuedMessages(items, command.orderedIds)
+          const touchesOthers = listPendingQueue(items).some((item) => !item.internal && !authoredBy(item))
+          return {
+            intent: { ...base, op: 'reorder', itemId: command.orderedIds[0] ?? '', orderedIds: command.orderedIds, expectedRevision: command.expectedRevision },
+            ...(cross || touchesOthers ? { audit: { action: 'reordered_queue', details: { count: command.orderedIds.length } } } : {})
+          }
+        }
+        case 'promote': {
+          const item = found(items, command.itemId)
+          notSteering(item)
+          if (item.workflowInvocationId) throw new QueueValidationError('A workflow command cannot be promoted to steering input')
+          if (item.inboxIds?.length) throw new QueueValidationError('A queued subagent result is delivered as its own turn; it cannot be sent as a steer.')
+          // Under the queue lock, against the run the engine has now: the text joins that run or nothing changes.
+          const bind = this.checkPromotion(threadId, item, { expectedRunId: command.expectedRunId, permissionCeiling: callerMode })
+          const session = this.getOrCreateSession(threadId)
+          const turn = session.activeTurn
+          if (!turn || turn.abort.signal.aborted || turn.runId !== bind.steerRunId)
+            throw new QueueConflictError('run_not_ready', `Run ${command.expectedRunId} has no turn to steer yet (or its turn is not one this daemon runs); the message stays queued.`, { expectedRunId: command.expectedRunId, activeRunId: bind.steerRunId ?? null })
+          delivered = { item, steerRunId: bind.steerRunId }
+          return {
+            intent: {
+              ...base,
+              op: 'promote',
+              itemId: item.id,
+              expectedRevision: command.expectedRevision,
+              expectedRunId: command.expectedRunId,
+              ...(bind.steerRunId ? { steerRunId: bind.steerRunId } : {}),
+              ...(bind.permissionMode ? { permissionMode: bind.permissionMode } : {}),
+              cancelRunIds: item.runId ? [item.runId] : []
+            },
+            ...(cross || !authoredBy(item) ? { audit: { action: 'promoted_queued_message', details: { itemId: item.id, runId: command.expectedRunId } } } : {})
+          }
+        }
+      }
+    })
+    const session = this.getOrCreateSession(threadId)
+    session.queue = outcome.items
+    this.emitQueueUpdated(threadId, session.queue)
+    const result = outcome.result as unknown as Omit<AgentQueueResult, 'replayed' | 'effectsSettled'>
+    if (!outcome.replayed) {
+      if (command.op === 'enqueue') {
+        this.touchUserActivityAndNotify(threadId)
+        if (session.isTurnRunning() || session.turnAdmitted) session.drainAfterSettle = true
+        else this.scheduleQueueDrain(session)
+      }
+      // No `await` since the checks above: the run is still the one the promotion was checked against.
+      if (command.op === 'promote' && delivered && result.outcome === 'promoted') {
+        const promoted = outcome.items.find((entry) => entry.id === delivered!.item.id)
+        if (promoted) this.deliverPromotedItem(session, promoted, delivered.steerRunId)
+      }
+    }
+    return { ...result, replayed: outcome.replayed, effectsSettled: outcome.effectsSettled }
   }
 
   async generateThreadTitle(messages: ChatMessage[], threadId?: string): Promise<string> {
@@ -7144,7 +7537,6 @@ export class OrchestratorService extends EventEmitter {
       }
     } else if (active && !active.abort.signal.aborted && !(opts?.runId && active.runId && active.runId !== opts.runId)) {
       active.pendingSteer = []
-      active.promotedSteerIds = []
       active.abort.abort()
       stopped = true
     }
@@ -7204,11 +7596,8 @@ export class OrchestratorService extends EventEmitter {
     if (hadUnreadSteers) {
       const pending = turn.pendingSteer
       const carried = turn.carriedSteers ?? []
-      const agentEntries = [...(turn.agentSteers ?? [])]
       turn.pendingSteer = []
-      turn.promotedSteerIds = []
       turn.carriedSteers = []
-      turn.agentSteers = []
       if (session.threadId !== '__unbound__' && !session.deleted) {
         const mode = getLastUserChatMode(session.messages) ?? 'agent'
         // What the turn never read goes on as turns of their own. A steer that carried subagent
@@ -7235,25 +7624,29 @@ export class OrchestratorService extends EventEmitter {
             this.cancelQueuedRuns([runId])
           }
         }
-        for (const text of pending) {
+        // A promoted queue item the turn never read goes back to being the queued message it was (or, if the
+        // item is gone, is queued again from the entry): the same limits, exactly one turn, in its place.
+        const items = pending.filter((entry) => entry.itemId)
+        if (items.length) this.settleUnreadItems(session, items, mode)
+        for (const steer of pending) {
+          if (steer.itemId) continue
+          const text = steer.text
           // An agent's steer the turn never read is a turn of its own, never merged into a person's text: it
           // keeps who sent it, and runs under the sender's mode (not the thread's own, which may be looser).
-          const agentAt = agentEntries.findIndex((entry) => entry.text === text)
-          if (agentAt >= 0) {
+          if (steer.origin) {
             flush()
-            const [entry] = agentEntries.splice(agentAt, 1)
             let agentRunId: string | undefined
             try {
               agentRunId = this.runEngine?.store.createRun({
                 threadId: session.threadId,
                 source: 'steer-followup',
-                outcome: { sentByAgent: true, agentHops: entry.origin.hops ?? 1 }
+                outcome: { sentByAgent: true, agentHops: steer.origin.hops ?? 1 }
               }).runId
             } catch {
               // Without a run the text is still queued; the thread is just not held for it.
             }
             try {
-              this.enqueueForThread(session.threadId, { content: entry.text, mode }, { source: 'steer-followup', internal: true, runId: agentRunId, origin: entry.origin, permissionMode: entry.permissionMode })
+              this.enqueueForThread(session.threadId, { content: steer.text, mode }, { source: 'steer-followup', internal: true, runId: agentRunId, origin: steer.origin, ...(steer.permissionMode ? { permissionMode: steer.permissionMode } : {}) })
             } catch {
               this.cancelQueuedRuns([agentRunId])
             }
@@ -7332,6 +7725,42 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /**
+   * Promoted queue items whose text the turn never read. One under the queue lock, so no reader sees a half-way
+   * state: an item still `steering` on disk is demoted in place (it keeps its place, origin and mode ceiling and
+   * is no longer bound to a run); an item that is gone, because an acknowledgement for a drain that was handed back
+   * dropped it, is queued again from its entry with the entry's ceiling and origin. An item that already is a
+   * pending or claimed message is left alone. Each runs exactly once, as a turn of its own narrowed at admission.
+   * Best-effort: settlement must not fail.
+   */
+  private settleUnreadItems(session: ThreadSession, entries: SteerEntry[], mode: ChatMode): void {
+    const threadId = session.threadId
+    const apply = (items: QueuedMessage[]): QueuedMessage[] => {
+      const byId = new Map(items.map((item) => [item.id, item]))
+      const steering = entries.filter((entry) => byId.get(entry.itemId!)?.state === 'steering').map((entry) => entry.itemId!)
+      let next = steering.length ? demoteSteerItems(items, steering) : items
+      for (const entry of entries) {
+        if (byId.has(entry.itemId!)) continue
+        next = enqueueMessage(next, {
+          threadId,
+          content: entry.text,
+          mode,
+          source: 'steer-followup',
+          ...(entry.permissionMode ? { permissionMode: entry.permissionMode } : {}),
+          ...(entry.origin ? { origin: entry.origin } : {})
+        }).items
+      }
+      return next
+    }
+    try {
+      if (this.threadStore) session.queue = mutateDurableQueue(this.threadStore, threadId, apply)
+      else session.queue = apply(session.queue)
+      this.emitQueueUpdated(threadId, session.queue)
+    } catch (error) {
+      console.warn('unread promoted steers could not be returned to the queue', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
   /** The thread's inputs to the hold predicate changed outside the run store: publish the tasks that are no longer held. */
   private reevaluateHold(threadId: string): void {
     try {
@@ -7366,7 +7795,11 @@ export class OrchestratorService extends EventEmitter {
     return this.steerThread(threadId ?? this.getBoundThreadId() ?? undefined, text)
   }
 
-  steerThread(threadId: string | undefined, text: string, subagentNotice?: SubagentNoticeItem[], carried?: { inboxIds: string[]; effectId: string }, origin?: AgentOrigin, permissionMode?: PermissionMode): boolean {
+  /**
+   * `item`: the queue item this steer is (a promotion), and the run it was checked against. A steer for another
+   * run than `item.runId` is refused, so a promotion never reaches a turn it was not checked against.
+   */
+  steerThread(threadId: string | undefined, text: string, subagentNotice?: SubagentNoticeItem[], carried?: { inboxIds: string[]; effectId: string }, origin?: AgentOrigin, permissionMode?: PermissionMode, item?: { id: string; runId?: string }): boolean {
     const trimmed = text.trim()
     if (!trimmed || !threadId) return false
     // Nothing is steered into a bot's turn: it runs exactly what its dispatch sent.
@@ -7376,10 +7809,15 @@ export class OrchestratorService extends EventEmitter {
         ? this.boundSession
         : this.sessions.get(threadId) ?? null
     if (session?.activeTurn && !session.activeTurn.abort.signal.aborted) {
-      session.activeTurn.pendingSteer.push(trimmed)
-      // An agent's steer is remembered with its sender and the mode it may run in, so a turn that never reads it
-      // runs it as a turn of its own under that mode, and as the agent's.
-      if (origin) (session.activeTurn.agentSteers ??= []).push({ text: trimmed, origin, permissionMode: permissionMode ?? 'ask' })
+      if (item?.runId && session.activeTurn.runId !== item.runId) return false
+      // An agent's steer is remembered with its sender and the mode it may run in, and a promoted item with its
+      // id and what it carried, so a turn that never reads it runs it as a turn of its own with the same limits.
+      session.activeTurn.pendingSteer.push({
+        text: trimmed,
+        ...(item ? { itemId: item.id } : {}),
+        ...(origin ? { origin } : {}),
+        ...(origin || permissionMode ? { permissionMode: permissionMode ?? 'ask' } : {})
+      })
       if (carried) {
         (session.activeTurn.carriedSteers ??= []).push({ ...carried, text: trimmed, subagentNotice })
         // Marked before the turn can end: from here an unread steer is recoverable (`deliveryFailure`).
@@ -7404,8 +7842,9 @@ export class OrchestratorService extends EventEmitter {
     }
     // Local channel turn for this thread. A steer that carries notices is not given to it: the turn
     // would take the text without the rows' identity, so it is queued as a turn of its own instead. An agent's
-    // steer is not given to it either: the channel turn would run it as a person's text and under its own mode.
-    if (!carried && !origin && this.steerChannelTurn(threadId, trimmed)) {
+    // steer, and a promoted item with a mode ceiling, are not given to it either: the channel turn would run
+    // them as a person's text and under its own mode.
+    if (!carried && !origin && !permissionMode && this.steerChannelTurn(threadId, trimmed, item)) {
       this.emit('turn-steered', { threadId, text: trimmed })
       return true
     }
@@ -7448,7 +7887,6 @@ export class OrchestratorService extends EventEmitter {
     const turn = this.channelTurns.get(threadId)
     if (!turn || turn.abort.signal.aborted) return false
     turn.pendingSteer = []
-    turn.promotedSteerIds = []
     turn.abort.abort()
     this.recordChannelControl('stop', threadId, turn.runId)
     return true
@@ -7458,11 +7896,13 @@ export class OrchestratorService extends EventEmitter {
    * Steer an in-flight channel turn for a Mousse thread. The text reaches the turn through its own
    * steer queue; an engine-run channel turn also records the `steer` against its run.
    */
-  steerChannelTurn(threadId: string, text: string): boolean {
+  steerChannelTurn(threadId: string, text: string, item?: { id: string; runId?: string }): boolean {
     const trimmed = text.trim()
     const turn = this.channelTurns.get(threadId)
     if (!trimmed || !turn || turn.abort.signal.aborted) return false
-    turn.pendingSteer.push(trimmed)
+    // A promotion checked against a run joins only that run's turn.
+    if (item?.runId && turn.runId !== item.runId) return false
+    turn.pendingSteer.push({ text: trimmed, ...(item ? { itemId: item.id } : {}) })
     this.recordChannelControl('steer', threadId, turn.runId)
     return true
   }
@@ -7813,7 +8253,8 @@ export class OrchestratorService extends EventEmitter {
       /** When true, executeTurn must not chain ordinary post-turn queue drains. */
       suppressAutoQueueDrain?: boolean
       externalSignal?: AbortSignal
-      externalDrainSteer?: () => string | undefined
+      /** Steers a channel turn collected: plain text, or entries that keep the queue items they came from. */
+      externalDrainSteer?: () => string | SteerEntry[] | undefined
       modelOverride?: ModelOverride
       /** Who the turn runs for, when it is not the thread's own (a scheduled job). */
       origin?: TurnOrigin
@@ -7979,7 +8420,7 @@ export class OrchestratorService extends EventEmitter {
     opts?: { queueItemId?: string; claimOwnerToken?: string; suppressAutoQueueDrain?: boolean; externalSignal?: AbortSignal; onTurnSettled?: (aborted: boolean) => void; onUserInputAccepted?: () => void }
   ): Promise<OrchestratorResponse> {
     if (!this.workflowChat) throw new Error('Workflow command execution is unavailable')
-    const turn = { abort: new AbortController(), pendingSteer: [] as string[], promotedSteerIds: [] as string[] }
+    const turn = { abort: new AbortController(), pendingSteer: [] as SteerEntry[] }
     const abort = () => turn.abort.abort()
     if (opts?.externalSignal?.aborted) abort()
     else opts?.externalSignal?.addEventListener('abort', abort, { once: true })
@@ -8051,7 +8492,7 @@ export class OrchestratorService extends EventEmitter {
       claimOwnerToken?: string
       suppressAutoQueueDrain?: boolean
       externalSignal?: AbortSignal
-      externalDrainSteer?: () => string | undefined
+      externalDrainSteer?: () => string | SteerEntry[] | undefined
       modelOverride?: ModelOverride
       origin?: TurnOrigin
       schedule?: ScheduledTurnRef
@@ -8335,8 +8776,7 @@ export class OrchestratorService extends EventEmitter {
     }
     const turn: ActiveTurnControl = {
       abort: new AbortController(),
-      pendingSteer: [] as string[],
-      promotedSteerIds: [] as string[],
+      pendingSteer: [] as SteerEntry[],
       ...(engineRunId ? { runId: engineRunId } : {})
     }
     const turnAuthority = session.executionLease ? new TaskWriterAuthority(session.executionLease) : undefined
@@ -8658,22 +9098,22 @@ export class OrchestratorService extends EventEmitter {
       }
       // Every drain is remembered under its own token until the provider has taken the text, so a drain
       // the provider hands back restores exactly what that drain took, whatever was drained since.
-      const drained = new Map<string, { external?: string; ownParts: string[]; carried: NonNullable<ActiveTurnControl['carriedSteers']>; agent: NonNullable<ActiveTurnControl['agentSteers']> }>()
+      const drained = new Map<string, { entries: SteerEntry[]; carried: NonNullable<ActiveTurnControl['carriedSteers']> }>()
       let drains = 0
       let returnedAhead = 0
       const drainEntry = (): { text: string; token: string } | undefined => {
-        turn.lastDrained = undefined
-        const external = opts?.externalDrainSteer?.()?.trim() || undefined
-        const own = this.drainSteerForSession(session, turn)?.trim() || undefined
-        const taken = turn.lastDrained as ActiveTurnControl['lastDrained']
-        turn.lastDrained = undefined
-        const parts = [external, own].filter((part): part is string => Boolean(part))
-        if (parts.length === 0) return undefined
+        // A channel turn's steers, then the thread's own (and the durable queue's).
+        const raw = opts?.externalDrainSteer?.()
+        const external: SteerEntry[] = typeof raw === 'string' ? (raw.trim() ? [{ text: raw.trim() }] : []) : (raw ?? [])
+        for (const steer of external) if (steer.itemId) session.drainedExternalSteerIds.add(steer.itemId)
+        const own = this.drainSteerForSession(session, turn)
+        const entries = [...external, ...(own?.entries ?? [])].filter((steer) => steer.text.trim())
+        if (entries.length === 0) return undefined
         const token = `drain-${++drains}`
-        // Each source is kept as it was drained, so a return restores them whole, never by cutting text apart.
-        drained.set(token, { external, ownParts: taken?.parts ?? (own ? [own] : []), carried: taken?.carried ?? [], agent: taken?.agent ?? [] })
+        // Each entry is kept as it was drained, identity and all, so a return restores them whole, never by cutting text apart.
+        drained.set(token, { entries, carried: own?.carried ?? [] })
         returnedAhead = 0
-        return { text: parts.join('\n'), token }
+        return { text: entries.map((steer) => steer.text.trim()).join('\n').trim(), token }
       }
       const turnControl: TurnControl = {
         drainSteer: () => drainEntry()?.text,
@@ -8685,16 +9125,17 @@ export class OrchestratorService extends EventEmitter {
           const entry = token ? drained.get(token) : undefined
           if (token) drained.delete(token)
           // Returned drains go ahead of anything steered since, oldest first.
-          const put = (...items: string[]): void => {
+          const put = (...items: SteerEntry[]): void => {
             turn.pendingSteer.splice(returnedAhead, 0, ...items)
             returnedAhead += items.length
           }
-          if (!entry) return put(text)
-          // In the order they were drained: the external text first, then the thread's own steers.
-          put(...(entry.external ? [entry.external] : []), ...entry.ownParts)
+          if (!entry) return put({ text })
+          // The items these entries stand for are not taken: the next acknowledgement must not drop them.
+          for (const steer of entry.entries) if (steer.itemId) session.drainedExternalSteerIds.delete(steer.itemId)
+          // In the order they were drained: the external steers first, then the thread's own.
+          put(...entry.entries)
           for (const carried of entry.carried) this.runEngine?.inbox.unmarkSteerTaken(carried.inboxIds, carried.effectId)
           turn.carriedSteers = [...entry.carried, ...(turn.carriedSteers ?? [])]
-          turn.agentSteers = [...entry.agent, ...(turn.agentSteers ?? [])]
         },
         heartbeat: () => this.heartbeatRun(engineRunId)
       }
@@ -9124,39 +9565,34 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * Drain local pendingSteer plus any durable external steer-intent items once.
+   * Drain local pendingSteer plus any durable external steer-intent items once, as entries.
    * External steers remain durable until the resulting native context checkpoint commits.
-   * Locally-promoted items (tracked on the turn) were already injected via
-   * pendingSteer, so they are excluded from the external scan and acknowledged
-   * exactly once their content has been durably added to native history.
+   * An entry of a promoted queue item carries the item's id: it is excluded from the external scan and
+   * acknowledged exactly once the provider has taken its text.
+   *
+   * A steering item bound to a run (`steerRunId`, set when an agent or a person's promotion was checked
+   * against that run) is taken only by that run and only while the run's mode is no looser than the item
+   * allows. Any other run that meets it, because the run ended, the daemon restarted or a replacement run
+   * drains, reverts it to a pending message before any text is taken: it runs later as a turn of its own,
+   * narrowed at admission, and is never delivered to a run it was not checked against.
    */
   private drainSteerForSession(
     session: ThreadSession,
-    turn: { pendingSteer: string[]; promotedSteerIds: string[]; carriedSteers?: ActiveTurnControl['carriedSteers']; lastDrained?: ActiveTurnControl['lastDrained']; agentSteers?: ActiveTurnControl['agentSteers'] }
-  ): string | undefined {
-    const parts: string[] = []
+    turn: { runId?: string; pendingSteer: SteerEntry[]; carriedSteers?: ActiveTurnControl['carriedSteers'] }
+  ): { entries: SteerEntry[]; carried: NonNullable<ActiveTurnControl['carriedSteers']> } | undefined {
+    const entries: SteerEntry[] = []
+    let carried: NonNullable<ActiveTurnControl['carriedSteers']> = []
     if (turn.pendingSteer.length > 0) {
-      parts.push(...turn.pendingSteer)
-      // The agent's steers among them leave with the drain, and come back with it if the provider hands it back.
-      const agent: NonNullable<ActiveTurnControl['agentSteers']> = []
-      for (const text of turn.pendingSteer) {
-        const at = (turn.agentSteers ?? []).findIndex((entry) => entry.text === text)
-        if (at >= 0) agent.push(...turn.agentSteers!.splice(at, 1))
-      }
-      // Remembered whole until the provider has taken the text (`returnSteer`).
-      turn.lastDrained = { parts: [...turn.pendingSteer], carried: [...(turn.carriedSteers ?? [])], agent }
+      entries.push(...turn.pendingSteer)
+      // Remembered whole by the caller until the provider has taken the text (`returnSteer`).
+      carried = [...(turn.carriedSteers ?? [])]
       turn.pendingSteer = []
       // The model reads them now: the rows their steers carried are delivered to this run.
       for (const entry of turn.carriedSteers ?? []) this.runEngine?.inbox.markSteerTaken(entry.inboxIds, entry.effectId)
       turn.carriedSteers = []
+      // These items are drained: the scan below must not take them again, and they are acknowledged with the others.
+      for (const entry of entries) if (entry.itemId) session.drainedExternalSteerIds.add(entry.itemId)
     }
-
-    const localPromoted = new Set<string>(turn.promotedSteerIds ?? [])
-    const channelTurn = this.channelTurns.get(session.threadId)
-    if (channelTurn) {
-      for (const id of channelTurn.promotedSteerIds ?? []) localPromoted.add(id)
-    }
-    for (const id of localPromoted) session.drainedExternalSteerIds.add(id)
 
     // Refresh durable queue so peer CLI/GUI steers are visible mid-turn.
     this.refreshSessionQueueFromDisk(session)
@@ -9166,23 +9602,46 @@ export class OrchestratorService extends EventEmitter {
         (item.state === 'pending' || item.state === 'steering') &&
         !session.drainedExternalSteerIds.has(item.id)
     )
-    if (externalSteers.length > 0) {
-      for (const item of externalSteers) {
-        parts.push(item.content)
-        session.drainedExternalSteerIds.add(item.id)
+    const revert: string[] = []
+    for (const item of externalSteers) {
+      if (item.steerRunId && !this.mayTakePromotedItem(item, turn.runId)) {
+        revert.push(item.id)
+        continue
       }
+      entries.push({
+        text: item.content,
+        itemId: item.id,
+        ...(item.permissionMode ? { permissionMode: item.permissionMode } : {}),
+        ...(item.origin?.kind === 'agent' ? { origin: item.origin } : {})
+      })
+      session.drainedExternalSteerIds.add(item.id)
     }
-    turn.promotedSteerIds = []
-    if (channelTurn && (channelTurn.promotedSteerIds ?? []).length > 0) {
-      channelTurn.promotedSteerIds = []
+    if (revert.length) {
+      try {
+        if (this.threadStore) session.queue = mutateDurableQueue(this.threadStore, session.threadId, (disk) => demoteSteerItems(disk, revert))
+        else session.queue = demoteSteerItems(session.queue, revert)
+        this.emitQueueUpdated(session.threadId, session.queue)
+      } catch (error) {
+        // Nothing was taken from them: they stay as they are and are met by the next drain or demoted at the next claim.
+        console.warn('promoted queue items could not be returned to pending', { threadId: session.threadId, error: error instanceof Error ? error.message : String(error) })
+      }
     }
 
     if (session.executionLease) {
       heartbeatExecutionLease(session.executionLease)
     }
 
-    const text = parts.join('\n').trim()
-    return text || undefined
+    return entries.length || carried.length ? { entries, carried } : undefined
+  }
+
+  /** A promoted item joins only the run it was checked against, and only while that run's mode is no looser than the item allows. */
+  private mayTakePromotedItem(item: QueuedMessage, runId: string | undefined): boolean {
+    if (!runId || item.steerRunId !== runId) return false
+    if (!item.permissionMode) return true
+    // A run with no binding yet is unknown, not strict: nothing joins it.
+    const binding = this.runEngine?.bindingForRun(runId)
+    if (!binding) return false
+    return !isStricter(item.permissionMode, binding.policy.permissionMode ?? 'ask')
   }
 
   /** Remove steer queue entries only after their content and IDs are durable. */
@@ -10340,8 +10799,8 @@ export class OrchestratorService extends EventEmitter {
     // The turn registers itself only when the caller passes no signal. Production callers (ChannelRouter and the
     // remote MmsBackend) always pass one, so this path runs only for callers without one (today, tests).
     const ownedTurn = !opts?.signal
-    const channelTurn: { abort: AbortController; pendingSteer: string[]; promotedSteerIds: string[]; runId?: string } | null = ownedTurn
-      ? { abort: new AbortController(), pendingSteer: [], promotedSteerIds: [] }
+    const channelTurn: { abort: AbortController; pendingSteer: SteerEntry[]; runId?: string } | null = ownedTurn
+      ? { abort: new AbortController(), pendingSteer: [] }
       : null
     if (channelTurn) this.channelTurns.set(threadId, channelTurn)
 
@@ -10447,9 +10906,10 @@ export class OrchestratorService extends EventEmitter {
           externalDrainSteer: opts?.drainSteer ?? (channelTurn
             ? () => {
                 if (channelTurn.pendingSteer.length === 0) return undefined
-                const steer = channelTurn.pendingSteer.join('\n')
+                // Entries, so a promoted item keeps its id through the drain, a return and the turn's end.
+                const steers = channelTurn.pendingSteer
                 channelTurn.pendingSteer = []
-                return steer
+                return steers
               }
             : undefined),
           modelOverride: opts?.modelOverride,

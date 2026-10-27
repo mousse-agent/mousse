@@ -259,7 +259,8 @@ describe('delivering a subagent result to its parent (issue #142)', () => {
       ;(w.d.orch as any).executeTurnSteerEffect(w.steer)
       const session = w.d.orch.getOrCreateSession(w.parent.id)
       // The model's next request reads the steer.
-      expect((w.d.orch as any).drainSteerForSession(session, session.activeTurn)).toContain('Subagent "API reviewer"')
+      const drained = (w.d.orch as any).drainSteerForSession(session, session.activeTurn) as { entries: Array<{ text: string }> } | undefined
+      expect(drained?.entries.map((entry) => entry.text).join('\n')).toContain('Subagent "API reviewer"')
       expect(w.d.engine.inbox.get(w.row.inboxId)!.payload).toMatchObject({ steerTakenBy: w.steer.effectId, noticeShown: true })
       await w.release()
       await w.settled(w.run.runId)

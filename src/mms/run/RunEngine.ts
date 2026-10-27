@@ -80,6 +80,12 @@ export type RunCommand =
        * and a paused thread refuses it (`thread_paused`) instead of ending the pause.
        */
       actor?: AgentActor
+      /**
+       * The run is for a message an agent queued earlier (its audit event was written when it was queued): it is
+       * remembered as an agent's, with the count of agent messages in a row, exactly as a send with an `actor`, but
+       * writes no event and does not refuse a paused thread (the queue holds such an item while a pause lasts).
+       */
+      agentOrigin?: { hops: number }
     }
   | { kind: 'stop'; threadId: string; clientRequestId: string; runId: string; actor?: AgentActor }
   | {
@@ -1721,11 +1727,11 @@ export class RunEngine extends EventEmitter {
       const continuationOf = command.continuationOfRunId
       // A run that carries on agent work (a provider's continuation, the resume after a pause) keeps the count of agent
       // messages in a row; it is not itself an agent's message.
-      const carriedHops = command.actor ? undefined : inheritedAgentHops(store, command.threadId, command.source, continuationOf)
+      const carriedHops = command.actor || command.agentOrigin ? undefined : inheritedAgentHops(store, command.threadId, command.source, continuationOf)
       const outcome: RunOutcome = {
         ...(continuationOf ? { continuationOf, ...(resuming ? { resumedFromPause: command.source === 'resume' ? 'auto' as const : 'user' as const } : {}) } : {}),
         // Remembered with the run, so a message an agent sent is still known as one when it starts later.
-        ...(command.actor ? { sentByAgent: true as const, agentHops: command.actor.hops ?? 1 } : {}),
+        ...(command.actor ? { sentByAgent: true as const, agentHops: command.actor.hops ?? 1 } : command.agentOrigin ? { sentByAgent: true as const, agentHops: command.agentOrigin.hops } : {}),
         ...(carriedHops !== undefined ? { agentHops: carriedHops } : {})
       }
       const run = store.createRun({

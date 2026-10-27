@@ -686,7 +686,7 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
     // A channel turn starts on the parent after the Stop; it is not an engine run. It is registered directly
     // on purpose: starting a real channel turn here is heavy and the test only needs Stop to see one.
     const channelTurns = (s.d.orch as unknown as { channelTurns: Map<string, unknown> }).channelTurns
-    channelTurns.set(s.parentId, { abort: new AbortController(), pendingSteer: [], promotedSteerIds: [] })
+    channelTurns.set(s.parentId, { abort: new AbortController(), pendingSteer: [] })
     try {
       s.adapter.providerStops.length = 0
       await s.d.orch.stopThread(s.parentId, 'user', { clientRequestId: 'once' })
