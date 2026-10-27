@@ -98,6 +98,11 @@
   transform: none;
 }
 
+/* The overlay card holds focus itself when it opens; the card is not a control. */
+.thread-side-card-layer--overlay .thread-side-card:focus {
+  outline: none;
+}
+
 .thread-side-card-scrim {
   position: absolute;
   inset: 0;

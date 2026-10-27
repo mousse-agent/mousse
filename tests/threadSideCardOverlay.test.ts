@@ -97,7 +97,8 @@ describe('thread side card overlay', () => {
     opener.focus()
     act(() => useAppStore.getState().setSideCardOverlayOpen(true))
     await flushFrames()
-    expect(card()?.contains(document.activeElement)).toBe(true)
+    // The card itself holds focus, so no row shows a ring; Tab reaches the first control.
+    expect(document.activeElement).toBe(card())
 
     escape()
     expect(useAppStore.getState().sideCardOverlayOpen).toBe(false)

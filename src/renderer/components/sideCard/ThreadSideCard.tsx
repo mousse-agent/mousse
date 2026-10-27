@@ -113,6 +113,11 @@ export function ThreadSideCard() {
   // Focus moves into the overlay once it has faded in and returns to the control that opened it
   // when it starts to fade out. Docked, the card is a plain part of the page.
   useDialogFocus(cardRef, overlay && shown, closeOverlay)
+  // The dialog helper lands on the first control, which would draw a focus ring on a row the user
+  // did not pick. The card itself takes focus instead; Tab moves on to its first control.
+  useEffect(() => {
+    if (overlay && shown) cardRef.current?.focus({ preventScroll: true })
+  }, [overlay, shown])
 
   // Pin the layer to the full thread width so the fading card stays where it was.
   // The aside lifts above the incoming app panel while a card is mounted there
