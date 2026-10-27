@@ -251,6 +251,24 @@ describe('the operation store', () => {
     expect(cancelOperation).not.toHaveBeenCalled()
   })
 
+  it("names the thread to the daemon when the folder is a thread's own worktree, and only then", async () => {
+    const threadId = 'nod_0123456789abcdefghjkmnpqrs:thread-1'
+    const inThread = beginGitOperation('/worktree', 'push', 1, threadId)
+    expect(op('/worktree').threadId).toBe(threadId)
+    await cancelGitOperation('/worktree')
+    expect(cancelOperation).toHaveBeenLastCalledWith(inThread, threadId)
+    let tracked = ''
+    // The request never ends here: the action stays running for Cancel.
+    void trackGitOperation('/tracked', 'fetch', (operationId) => { tracked = operationId; return new Promise(() => undefined) }, threadId)
+    expect(op('/tracked').threadId).toBe(threadId)
+    await cancelGitOperation('/tracked')
+    expect(cancelOperation).toHaveBeenLastCalledWith(tracked, threadId)
+    const inProject = beginGitOperation('/repo', 'push')
+    expect(op().threadId).toBeUndefined()
+    await cancelGitOperation('/repo')
+    expect(cancelOperation.mock.lastCall).toEqual([inProject])
+  })
+
   it('asks to cancel at once, before the first event, since the daemon registers the action first', async () => {
     const id = beginGitOperation('/repo', 'fetch')
     await cancelGitOperation('/repo')

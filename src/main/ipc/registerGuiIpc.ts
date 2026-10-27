@@ -126,6 +126,7 @@ import type {
   UserQuestionAnswers
 } from '../../shared/types'
 import { isThreadActivityActive } from '../../shared/types'
+import { isQualifiedId } from '../../shared/threadRef'
 import type {
   CreatePullRequestResult,
   PullRequestBaseBranches,
@@ -229,6 +230,20 @@ function registerHandler(
     if (!activeGuiMms) return handler(event, ...args)
     return activeGuiMms.runWithSender(event.sender, () => handler(event, ...args))
   })
+}
+
+/**
+ * `params` with the thread a call is about, when the window named one. The daemon routes a call
+ * about a thread on another computer by it and ignores it for a thread of this one.
+ */
+function withThreadId<T extends object>(params: T, threadId: unknown): T & { threadId?: string } {
+  return typeof threadId === 'string' && threadId.length > 0 ? { ...params, threadId } : params
+}
+
+/** The protocol code of a failed daemon request, without its message or details. */
+function errorCodeOf(error: unknown): string {
+  const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined
+  return typeof code === 'string' ? code : 'unknown'
 }
 
 function registerStorageHandler(channel: string, handler: Parameters<typeof ipcMain.handle>[1]): void {
@@ -927,29 +942,29 @@ export function registerGuiIpc(
     }
   )
 
-  const answerQuestions = async (requestId: string, answers: UserQuestionAnswers): Promise<QuestionAnswerOutcome> => {
-    const res = await guiMms.request<QuestionAnswerOutcome>('orchestrator.answerQuestions', {
+  const answerQuestions = async (requestId: string, answers: UserQuestionAnswers, threadId?: unknown): Promise<QuestionAnswerOutcome> => {
+    const res = await guiMms.request<QuestionAnswerOutcome>('orchestrator.answerQuestions', withThreadId({
       requestId,
       answers
-    })
+    }, threadId))
     const busy = activityTrackerFor().getBusyThreadId()
     if (res.ok && busy) setThreadActivity(busy, 'processing')
     return res
   }
   registerHandler(
     'orchestrator:answerQuestions',
-    async (_e, requestId: string, answers: UserQuestionAnswers) => (await answerQuestions(requestId, answers)).ok
+    async (_e, requestId: string, answers: UserQuestionAnswers, threadId?: unknown) => (await answerQuestions(requestId, answers, threadId)).ok
   )
   // The same answer with its outcome: when another client answered a saved approval request first,
   // the card says who decided what (SPEC §17.4).
   registerHandler(
     'orchestrator:answerQuestionsDetailed',
-    async (_e, requestId: string, answers: UserQuestionAnswers) => answerQuestions(requestId, answers)
+    async (_e, requestId: string, answers: UserQuestionAnswers, threadId?: unknown) => answerQuestions(requestId, answers, threadId)
   )
-  registerHandler('orchestrator:dismissQuestions', async (_e, requestId: string) => {
-    const res = await guiMms.request<{ ok: boolean }>('orchestrator.dismissQuestions', {
+  registerHandler('orchestrator:dismissQuestions', async (_e, requestId: string, threadId?: unknown) => {
+    const res = await guiMms.request<{ ok: boolean }>('orchestrator.dismissQuestions', withThreadId({
       requestId
-    })
+    }, threadId))
     return res.ok
   })
 
@@ -1197,10 +1212,24 @@ export function registerGuiIpc(
 
   const selectThread = async (threadId: string): Promise<void> => {
     const gen = ++selectGeneration
+    const previous = currentPresentation().getActiveThreadId()
     currentPresentation().setActiveThreadId(threadId)
     // Publish selection immediately so the sidebar/highlight updates before the
     // (potentially large) thread.snapshot round-trip completes.
     broadcast('thread:selected', { id: threadId })
+
+    // A thread on another computer is followed only while a window shows it: let go of the one left
+    // behind, and hold the new one before reading it. Plain ids of this computer ask for nothing.
+    if (previous && previous !== threadId && isQualifiedId(previous)) {
+      void guiMms.request('threads.focus', { threadId: previous, focused: false }).catch(() => undefined)
+    }
+    if (isQualifiedId(threadId)) {
+      try {
+        await guiMms.request('threads.focus', { threadId, focused: true })
+      } catch (error) {
+        console.warn('threads.focus failed:', errorCodeOf(error))
+      }
+    }
 
     const snap = await guiMms.snapshotThread(threadId)
     // A newer select won the race — discard this snapshot.
@@ -1483,12 +1512,12 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ ptys: unknown[] }>('pty.list', { threadId })
     return res.ptys
   })
-  registerHandler('pty:isAlive', async (_e, ptyId: string) => {
-    const res = await guiMms.request<{ alive: boolean }>('pty.isAlive', { ptyId })
+  registerHandler('pty:isAlive', async (_e, ptyId: string, threadId?: unknown) => {
+    const res = await guiMms.request<{ alive: boolean }>('pty.isAlive', withThreadId({ ptyId }, threadId))
     return res.alive
   })
-  registerHandler('pty:lookup', async (_e, ptyId: string) => {
-    return guiMms.request('pty.lookup', { ptyId })
+  registerHandler('pty:lookup', async (_e, ptyId: string, threadId?: unknown) => {
+    return guiMms.request('pty.lookup', withThreadId({ ptyId }, threadId))
   })
   registerHandler(
     'pty:create',
@@ -2004,8 +2033,8 @@ export function registerGuiIpc(
   gitMutation('git:renameBranch', 'git.renameBranch', (name: string, newName: string) => ({ name, newName }))
   gitMutation('git:deleteBranch', 'git.deleteBranch', (name: string, options?: GitDeleteBranchOptions) => ({ name, force: options?.force }))
   // The daemon only stops an action for the window connection that started it, which is this sender's.
-  registerStorageHandler('git:cancelOperation', async (_e, operationId: string) =>
-    guiMms.request<{ cancelled: boolean }>('git.cancelOperation', { operationId })
+  registerStorageHandler('git:cancelOperation', async (_e, operationId: string, threadId?: unknown) =>
+    guiMms.request<{ cancelled: boolean }>('git.cancelOperation', withThreadId({ operationId }, threadId))
   )
   registerHandler('git:lastCommitMessage', async (_e, scope?: GitScope) =>
     (await guiMms.request<{ message: string | null }>('git.lastCommitMessage', daemonGitParams(scope))).message

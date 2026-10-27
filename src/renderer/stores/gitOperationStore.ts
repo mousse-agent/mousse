@@ -78,12 +78,12 @@ export function receiveGitOperationEvent(event: GitOperationEvent): void {
 
 /**
  * Registers a new action of the folder and returns its id. It replaces an outcome left from the one before;
- * if an action is still running, it waits behind it.
+ * if an action is still running, it waits behind it. `threadId` is set when the folder is a thread's own worktree.
  */
-export function beginGitOperation(path: string, kind: GitOperationKind, now: number = Date.now()): string {
+export function beginGitOperation(path: string, kind: GitOperationKind, now: number = Date.now(), threadId?: string): string {
   listen()
   const operationId = crypto.randomUUID()
-  const action = newOperationState(operationId, kind, now)
+  const action = { ...newOperationState(operationId, kind, now), ...(threadId ? { threadId } : {}) }
   useGitOperationStore.setState((state) => {
     const shown = state.operations[path]
     if (shown && isActive(shown)) return { ...state, waiting: { ...state.waiting, [path]: [...(state.waiting[path] ?? []), action] } }
@@ -114,7 +114,9 @@ export async function cancelGitOperation(path: string): Promise<void> {
   if (!state || !isActive(state) || !state.cancellable || state.cancelling) return
   patchById(state.operationId, (action) => ({ ...action, cancelling: true }))
   try {
-    const { cancelled } = await window.mousse.git.cancelOperation(state.operationId)
+    const { cancelled } = state.threadId
+      ? await window.mousse.git.cancelOperation(state.operationId, state.threadId)
+      : await window.mousse.git.cancelOperation(state.operationId)
     // It had already ended, or cannot be stopped any more: the button comes back.
     if (!cancelled) patchById(state.operationId, (action) => ({ ...action, cancelling: false }))
   } catch {
@@ -122,9 +124,12 @@ export async function cancelGitOperation(path: string): Promise<void> {
   }
 }
 
-/** Runs a long Git request as a followed action of the folder: its outcome, and a cancel, end up in the store. */
-export async function trackGitOperation<T>(path: string, kind: GitOperationKind, run: (operationId: string) => Promise<T>): Promise<T> {
-  const operationId = beginGitOperation(path, kind)
+/**
+ * Runs a long Git request as a followed action of the folder: its outcome, and a cancel, end up in the store.
+ * `threadId` is set when the folder is a thread's own worktree.
+ */
+export async function trackGitOperation<T>(path: string, kind: GitOperationKind, run: (operationId: string) => Promise<T>, threadId?: string): Promise<T> {
+  const operationId = beginGitOperation(path, kind, Date.now(), threadId)
   try {
     const value = await run(operationId)
     finishGitOperation(path, operationId, 'done')

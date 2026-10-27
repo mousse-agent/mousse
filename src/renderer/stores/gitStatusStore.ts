@@ -170,6 +170,11 @@ function refreshProjectId(scope: GitScope): string | undefined {
   return scope.projectId ?? undefined
 }
 
+/** The thread a followed action of the folder is about: set only for a thread's own worktree. */
+function scopeThreadId(scope: GitScope): string | undefined {
+  return scope.workspaceThreadId ?? undefined
+}
+
 /** Refresh a folder after a mutation, whether it worked or not. */
 async function refreshAfterMutation(key: string, scope: GitScope): Promise<void> {
   await refreshGitStatus(key, { force: true, quiet: true, scope })
@@ -178,7 +183,7 @@ async function refreshAfterMutation(key: string, scope: GitScope): Promise<void>
 /** Switch branches, then refresh. Rejects with Git's message when the checkout fails. */
 export async function checkoutGitBranch(key: string, branch: string, scope: GitScope, options: GitCheckoutOptions = {}): Promise<GitCheckoutResult> {
   try {
-    const result = await trackGitOperation(key, 'checkout', (operationId) => window.mousse.git.checkout(scope, branch, { ...options, operationId }))
+    const result = await trackGitOperation(key, 'checkout', (operationId) => window.mousse.git.checkout(scope, branch, { ...options, operationId }), scopeThreadId(scope))
     return { stashKept: result.stashKept }
   } finally {
     // A failed stash-and-switch can already have taken the changes out of the working tree.
@@ -216,7 +221,7 @@ export async function discardGitPaths(key: string, paths: readonly string[], sco
 /** Fetch the branch's remote and say how far behind it is now. */
 export async function fetchGit(key: string, scope: GitScope): Promise<GitFetchResult> {
   try {
-    const result = await trackGitOperation(key, 'fetch', (operationId) => window.mousse.git.fetch(scope, { operationId }))
+    const result = await trackGitOperation(key, 'fetch', (operationId) => window.mousse.git.fetch(scope, { operationId }), scopeThreadId(scope))
     return { behindBefore: result.behindBefore, behindAfter: result.behindAfter }
   } finally {
     await refreshAfterMutation(key, scope)
@@ -226,7 +231,7 @@ export async function fetchGit(key: string, scope: GitScope): Promise<GitFetchRe
 /** Pull the upstream into the branch; `conflicted` leaves the merge or rebase for the user. */
 export async function pullGit(key: string, scope: GitScope, options: GitPullOptions = {}): Promise<GitPullResult> {
   try {
-    const result = await trackGitOperation(key, 'pull', (operationId) => window.mousse.git.pull(scope, { ...options, operationId }))
+    const result = await trackGitOperation(key, 'pull', (operationId) => window.mousse.git.pull(scope, { ...options, operationId }), scopeThreadId(scope))
     return { result: result.result }
   } finally {
     // A conflicted pull rejects nothing, but a failed one may still have changed the folder.
@@ -365,12 +370,12 @@ export async function commitGitChanges(
   // The form is for the branch the button was pressed on; if the status has moved on, nothing has run yet, so stop here.
   if (pullRequestScope && pullRequestScope.branch !== expectedBranch) throw new Error(BRANCH_CHANGED_MESSAGE)
   options.onPhase?.('committing')
-  await trackGitOperation(key, 'commit', (operationId) => git.commit(scope, message, { amend: options.amend === true, expectedBranch, operationId }))
+  await trackGitOperation(key, 'commit', (operationId) => git.commit(scope, message, { amend: options.amend === true, expectedBranch, operationId }), scopeThreadId(scope))
   let pushError: CommitPushError | null = null
   if (push) {
     options.onPhase?.('pushing')
     try {
-      await trackGitOperation(key, 'push', (operationId) => git.push(scope, { expectedBranch, operationId }))
+      await trackGitOperation(key, 'push', (operationId) => git.push(scope, { expectedBranch, operationId }), scopeThreadId(scope))
     } catch (error) {
       pushError = new CommitPushError(error)
     }
@@ -399,7 +404,7 @@ export async function suggestGitCommitMessage(key: string, scope: GitScope): Pro
 /** Push the current branch (publishing it when it has no upstream), then refresh. Rejects with Git's message. */
 export async function pushGitBranch(key: string, scope: GitScope): Promise<void> {
   const expectedBranch = useGitStatusStore.getState().entries[key]?.status?.branch ?? undefined
-  await trackGitOperation(key, 'push', (operationId) => window.mousse.git.push(scope, { expectedBranch, operationId }))
+  await trackGitOperation(key, 'push', (operationId) => window.mousse.git.push(scope, { expectedBranch, operationId }), scopeThreadId(scope))
   await refreshAfterMutation(key, scope)
   await refreshBranchPullRequest(key, refreshProjectId(scope))
 }

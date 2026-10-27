@@ -4,7 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { PausedRunBanner, PausedRunBannerView, type PausedRunBannerViewProps } from '../../src/renderer/chat/components/PausedRunBanner'
 import { useAppStore } from '../../src/renderer/stores/appStore'
-import type { PausedRunClient } from '../../src/renderer/services/pausedRunClient'
+import { createPausedRunClient, type PausedRunClient } from '../../src/renderer/services/pausedRunClient'
 import type { TurnPause, TurnState } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -172,7 +172,7 @@ describe('the banner on a thread', () => {
     setTurn(state())
     show('t1', client)
     click(button('Resume now'))
-    expect(resume).toHaveBeenCalledWith('run:1')
+    expect(resume).toHaveBeenCalledWith('run:1', 't1')
     expect(button('Resuming…').getAttribute('aria-disabled')).toBe('true')
     // A second press while the first is in flight does nothing.
     click(button('Resuming…'))
@@ -189,7 +189,7 @@ describe('the banner on a thread', () => {
     show('t1', client)
     click(button('Cancel'))
     await flush()
-    expect(client.cancel).toHaveBeenCalledWith('run:9')
+    expect(client.cancel).toHaveBeenCalledWith('run:9', 't1')
     expect(client.resumeNow).not.toHaveBeenCalled()
   })
 
@@ -213,7 +213,7 @@ describe('the banner on a thread', () => {
     // Cancel still works after the failure.
     click(button('Cancel'))
     await flush()
-    expect(client.cancel).toHaveBeenCalledWith('run:1')
+    expect(client.cancel).toHaveBeenCalledWith('run:1', 't1')
     expect(host.querySelector('[role="alert"]')).toBeNull()
   })
 
@@ -244,5 +244,22 @@ describe('the banner on a thread', () => {
     expect(text()).toContain('Resets in 2h 15m')
     act(() => { vi.advanceTimersByTime(30 * 60_000) })
     expect(text()).toContain('Resets in 1h 45m')
+  })
+})
+
+describe('the paused run client', () => {
+  it('names the run, and the thread when it is given, so a thread on another computer can be reached', async () => {
+    const request = vi.fn(async () => ({ runId: 'run:1' }))
+    const client = createPausedRunClient({ request } as never)
+    await client.resumeNow('run:1', 'nod_0123456789abcdefghjkmnpqrs:t1')
+    await client.cancel('run:2', 'nod_0123456789abcdefghjkmnpqrs:t1')
+    await client.resumeNow('run:3')
+    await client.cancel('run:4')
+    expect(request.mock.calls).toEqual([
+      ['runs.resumeNow', { runId: 'run:1', threadId: 'nod_0123456789abcdefghjkmnpqrs:t1' }],
+      ['runs.cancelPause', { runId: 'run:2', threadId: 'nod_0123456789abcdefghjkmnpqrs:t1' }],
+      ['runs.resumeNow', { runId: 'run:3' }],
+      ['runs.cancelPause', { runId: 'run:4' }]
+    ])
   })
 })

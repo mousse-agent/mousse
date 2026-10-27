@@ -26,6 +26,8 @@ export interface GitOperationState {
   hook: { name: string; exitCode?: number } | null
   lines: string[]
   message: string | null
+  /** The thread whose own worktree it runs in; unset for a project's folder. Cancel names it to the daemon. */
+  threadId?: string
 }
 
 const VERB: Record<GitOperationKind, string> = {

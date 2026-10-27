@@ -281,7 +281,7 @@ export function OrchestratorChat() {
   const submitQuickActionDecision = useCallback(
     (requestId: string, decision: 'approve' | 'reject') => {
       void window.mousse.orchestrator
-        .answerQuestions(requestId, { approval: decision })
+        .answerQuestions(requestId, { approval: decision }, useAppStore.getState().activeThreadId ?? undefined)
         .then(() => {
           // `false` means the daemon no longer knows this question (answered
           // elsewhere, dismissed, timed out, or default-rejected by a
@@ -1081,7 +1081,8 @@ export function OrchestratorChat() {
                 pending={questionsSnapshot}
                 onSubmit={(answers) => {
                   const requestId = questionsSnapshot.requestId
-                  void window.mousse.orchestrator.answerQuestionsDetailed(requestId, answers).then((outcome) => {
+                  const threadId = questionsSnapshot.threadId ?? activeThreadId ?? undefined
+                  void window.mousse.orchestrator.answerQuestionsDetailed(requestId, answers, threadId).then((outcome) => {
                     // The daemon accepted the answers or no longer knows this
                     // question (answered elsewhere / expired / preempted) —
                     // either way the prompt is settled: drop it so a decided
@@ -1097,7 +1098,7 @@ export function OrchestratorChat() {
                   })
                 }}
                 onDismiss={() => {
-                  void window.mousse.orchestrator.dismissQuestions(questionsSnapshot.requestId)
+                  void window.mousse.orchestrator.dismissQuestions(questionsSnapshot.requestId, questionsSnapshot.threadId ?? activeThreadId ?? undefined)
                   setPendingQuestions(null)
                 }}
               />

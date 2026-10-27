@@ -170,7 +170,7 @@ export function ProjectTerminalPanel() {
       let isAlive = false
       if (tab.ptyId) {
         try {
-          isAlive = await window.mousse.pty.isAlive(tab.ptyId)
+          isAlive = await window.mousse.pty.isAlive(tab.ptyId, tab.ownerThreadId ?? undefined)
         } catch {
           isAlive = false
         }
