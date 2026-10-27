@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import {
+  MessageSquare,
   Pause,
   Pencil,
   Play,
@@ -35,6 +36,7 @@ import {
   RUN_STATUS_LABEL
 } from './scheduled/scheduledLabels'
 import { WebhookDialog, type WebhookApi } from './scheduled/WebhookDialog'
+import { openThread } from '../lib/openThread'
 import '../styles/scheduled-panel.css'
 
 function formatWhen(iso: string | null | undefined): string {
@@ -43,6 +45,9 @@ function formatWhen(iso: string | null | undefined): string {
 }
 
 function stateLabel(job: ScheduledJob): string {
+  // A working occurrence says whether it waits for the person (derived when the job is listed).
+  if (job.liveStatus === 'needs_answer') return 'Needs your answer'
+  if (job.liveStatus === 'running') return 'Running'
   if (job.pendingOccurrence?.state === 'queued' && job.state !== 'paused') return 'Queued'
   switch (job.state) {
     case 'scheduled':
@@ -59,6 +64,11 @@ function stateLabel(job: ScheduledJob): string {
 }
 
 const HISTORY_ROWS = 10
+
+/** The thread where the job's occurrence runs now, or where its last recorded run ran. */
+function runThreadId(job: ScheduledJob): string | undefined {
+  return job.pendingOccurrence?.threadId ?? [...(job.runHistory ?? [])].reverse().find((record) => record.threadId)?.threadId
+}
 
 function browserWebhookApi(): WebhookApi {
   const webhook = window.mousse.scheduled.webhook
@@ -314,6 +324,17 @@ export function ScheduledPanel() {
                   {selected ? <RunHistory id={`${detailsId}-${job.id}`} job={job} /> : null}
                 </div>
                 <div className="scheduled-item-actions">
+                  {runThreadId(job) ? (
+                    <button
+                      type="button"
+                      className="scheduled-icon-btn"
+                      title="Open the run's thread"
+                      aria-label={`Open the thread of ${job.name}'s run`}
+                      onClick={() => void openThread(runThreadId(job)!)}
+                    >
+                      <MessageSquare size={14} strokeWidth={2} />
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     className="scheduled-icon-btn"
