@@ -97,15 +97,21 @@ describe('proposeBinding: conflicts', () => {
   })
 
   it('warns about a soft-reserved chord and offers only Use anyway', () => {
-    const proposal = proposeBinding('thread.new', 'CommandOrControl+F', {}, WIN)
+    const proposal = proposeBinding('thread.new', 'CommandOrControl+Shift+I', {}, WIN)
     expect(proposal).toMatchObject({
       kind: 'confirm',
       others: [],
       winner: null,
       replacePatch: null,
-      keepPatch: { 'thread.new': 'CommandOrControl+F' }
+      keepPatch: { 'thread.new': 'CommandOrControl+Shift+I' }
     })
-    expect(proposal.kind === 'confirm' && proposal.reasons[0]).toMatch(/Find in thread/)
+    expect(proposal.kind === 'confirm' && proposal.reasons[0]).toMatch(/developer tools/)
+  })
+
+  it('reports Mod+F as taken by Find in thread, which owns the reservation', () => {
+    const proposal = proposeBinding('thread.new', 'CommandOrControl+F', {}, WIN)
+    expect(proposal).toMatchObject({ kind: 'confirm', others: ['chat.findInThread'] })
+    expect(proposal.kind === 'confirm' && proposal.reasons.join(' ')).toMatch(/Find in thread/)
   })
 
   it('does not warn about Mod+S for the workflow editor save, which owns it', () => {
