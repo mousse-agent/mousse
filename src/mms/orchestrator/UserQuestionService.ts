@@ -14,7 +14,7 @@ import { EventEmitter } from 'events'
 import { redactSecrets } from '../../shared/errors'
 import type { RunPolicy, TurnOrigin } from '../../shared/harness/types'
 import { ALWAYS_OPTION_ID, ALWAYS_OPTION_LABEL } from '../../shared/permissionKeys'
-import type { PermissionAction, PermissionMode } from '../../shared/permissionMode'
+import { permissionModeAllows, type PermissionAction, type PermissionMode } from '../../shared/permissionMode'
 import type { PendingApprovalInfo, PendingUserQuestions, UserQuestionAnswers } from '../../shared/types'
 import {
   canAnswerApproval,
@@ -555,6 +555,22 @@ export class UserQuestionService extends EventEmitter {
       }
     }
     return [...this.savedPending(threadId), ...out]
+  }
+
+  /**
+   * The thread's requests as a person on another of their computers sees them. "Always for this thread"
+   * stays on a request only where the device may make that rule: the action is one its permission limit
+   * lets run without asking, and the provider does not keep the request for a person. This is the rule
+   * `canAnswerApproval` applies when the rule is asked for, so the card never offers what would be refused.
+   */
+  listPendingForDevice(threadId: string, limit: PermissionMode): Array<PendingUserQuestions & { threadId: string }> {
+    return this.listPendingForThread(threadId).map((entry) => {
+      const action = this.pending.get(entry.requestId)?.approval?.action ?? this.binding?.store.get(entry.requestId)?.action
+      const reserved = (entry as { approval?: PendingApprovalInfo }).approval?.reason !== undefined
+      if (!entry.questions.some((question) => question.options?.some((option) => option.scope === 'always'))) return entry
+      // An approval whose action is not known fails closed.
+      return !reserved && action !== undefined && permissionModeAllows(limit, action) ? entry : withoutStandingRules(entry)
+    })
   }
 
   listAllPending(): Array<PendingUserQuestions & { threadId: string }> {

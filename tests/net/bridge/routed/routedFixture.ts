@@ -6,8 +6,16 @@ import { join } from 'node:path'
 import { expect } from 'vitest'
 import { OwnerRoutes } from '../../../../src/mms/bridge/routed/OwnerRoutes'
 import { reassemblePagedReply } from '../../../../src/mms/bridge/routed/pages'
+import { PrivateSources } from '../../../../src/mms/bridge/routed/privateSources'
 import { RoutedStaging } from '../../../../src/mms/bridge/routed/staging'
-import type { Clock } from '../../../../src/mms/net/contracts'
+import { routedStreamsPort } from '../../../../src/mms/bridge/routed/streamsPort'
+import { MmsThreadSource } from '../../../../src/mms/bridge/remote/MmsThreadSource'
+import { isPrivateKey } from '../../../../src/mms/bridge/remote/privateStreams'
+import { ThreadDisplayProjection } from '../../../../src/mms/bridge/remote/ThreadDisplayProjection'
+import { ThreadStreamAdapter } from '../../../../src/mms/bridge/remote/ThreadStreamAdapter'
+import type { Clock, StreamStore } from '../../../../src/mms/net/contracts'
+import type { NetDatabase } from '../../../../src/mms/net/store/database'
+import { decodeEnvelope } from '../../../../src/mms/net/sync/codec'
 import { SqliteBridgeAudit } from '../../../../src/mms/net/store/audit'
 import { SqliteNodePolicy } from '../../../../src/mms/net/store/nodePolicy'
 import { encodeEnvelope } from '../../../../src/mms/net/sync/codec'
@@ -23,12 +31,15 @@ import {
 } from '../../../../src/shared/bridge/routed'
 import {
   newId,
+  type Envelope,
   type NodeCapability,
   type NodeDelegation,
+  type NodeId,
   type Roster,
   type RpcArtifactRef,
   type RpcId,
-  type StreamDescriptor
+  type StreamDescriptor,
+  type StreamId
 } from '../../../../src/shared/net'
 import type { PermissionMode } from '../../../../src/shared/permissionMode'
 import { fixture, resources } from '../hub/fixture'
@@ -66,11 +77,68 @@ export function testClock(
   }
 }
 
+/** Every record of a display stream, in order, decoded. Reads the store, as a reader that attached at the start would. */
+export function recordsOf(
+  f: { targetStore: StreamStore; targetDb: NetDatabase },
+  stream: StreamId
+): Envelope[] {
+  const store = f.targetStore
+  const head = store.head(stream)
+  const out: Envelope[] = []
+  // What the stream still holds starts after what it has let go of.
+  const retained = Number(
+    f.targetDb.database.prepare('SELECT retained FROM net_streams WHERE id=?').get(stream)
+      ?.retained ?? 0
+  )
+  let after = { epoch: head.epoch, seq: retained }
+  while (after.seq < head.seq) {
+    const page = store.read(stream, after, head.seq, 4 * 1024 * 1024)
+    for (const record of page.records) out.push(decodeEnvelope(record.envelope).envelope)
+    const last = page.records.at(-1)!
+    after = { epoch: last.epoch, seq: last.seq }
+  }
+  return out
+}
+
+/**
+ * What a reader of a display stream makes of its records: the snapshot (put back together and
+ * checked) and the events after it. Events are read as they are, so a private stream's own kinds show.
+ */
+export function readStream(
+  f: { targetStore: StreamStore; targetDb: NetDatabase },
+  stream: StreamId,
+  subject: string
+): { snapshot?: any; events: Array<{ type: string; data: any }> } {
+  const projection = new ThreadDisplayProjection(subject)
+  let snapshot: any
+  const events: Array<{ type: string; data: any }> = []
+  for (const envelope of recordsOf(f, stream)) {
+    const body = envelope.body as { threadId: string; type?: string; data?: any }
+    if (envelope.type === 'thread.event') {
+      expect(body.threadId).toBe(subject)
+      events.push({ type: body.type!, data: body.data })
+      continue
+    }
+    const update = projection.accept(envelope)
+    if (update?.kind === 'snapshot') snapshot = update.value
+  }
+  return { snapshot, events }
+}
+
 export interface RoutedOwnerOptions {
   caps?: NodeCapability[]
   maxMode?: PermissionMode
   /** Offers `routed.stage`, with these limits (bytes). */
   staging?: { item?: number; caller?: number; total?: number; ttlMs?: number }
+  /** Offers `routed.stream.open`, backed by a real display adapter over the owner's own stores. */
+  streams?:
+    | boolean
+    | {
+        idleMs?: number
+        maxThreads?: number
+        /** Says who is subscribed; when absent nobody is, so an idle stream can be released. */
+        isSubscribed?: (stream: StreamId, holder?: string) => boolean
+      }
   clock?: Clock
 }
 
@@ -94,6 +162,33 @@ export async function routedOwner(options: RoutedOwnerOptions = {}) {
         readInput: (ref, context) => f.targetArtifacts.input(ref, context, 'routed.stage')
       })
     : undefined
+  // The display adapter the owner's private streams run on, as the Bridge service builds it.
+  let adapter: ThreadStreamAdapter | undefined
+  if (options.streams) {
+    const sources = new PrivateSources(f.mms, policy)
+    const shared = new MmsThreadSource(f.mms)
+    const tuning = options.streams === true ? {} : options.streams
+    adapter = new ThreadStreamAdapter({
+      db: f.targetDb,
+      store: f.targetStore,
+      generations: f.targetStore,
+      identity: f.targetIdentity,
+      keys: f.targetKeys,
+      clock,
+      // As the Bridge service: a private stream's key goes to its own sources, any other id is a thread's.
+      source: {
+        snapshot: (key) => (isPrivateKey(key) ? sources.snapshot(key) : shared.snapshot(key)),
+        onThread: (key, listener, onError) =>
+          isPrivateKey(key)
+            ? sources.onThread(key, listener, onError)
+            : shared.onThread(key, listener, onError)
+      },
+      isTurnActive: (threadId) => f.mms.orchestrator.isTurnActive(threadId),
+      isSubscribed: () => false,
+      ...tuning
+    })
+    resources.push(() => adapter?.close())
+  }
   const routes = new OwnerRoutes({
     services: f.mms,
     rpc: f.targetRpc,
@@ -101,7 +196,20 @@ export async function routedOwner(options: RoutedOwnerOptions = {}) {
     audit,
     clock,
     track: (work) => work,
-    ...(staging ? { staging } : {})
+    ...(staging ? { staging } : {}),
+    ...(adapter
+      ? {
+          streams: routedStreamsPort(adapter),
+          // As the Bridge service does: Git progress goes to the computer that started the action.
+          connectionEvent: async (
+            caller: { node: NodeId },
+            type: string,
+            data: unknown
+          ): Promise<void> => {
+            if (type === 'git.operation') adapter!.pushChannel(caller.node, type, data)
+          }
+        }
+      : {})
   })
   routes.register()
   await f.connect()
@@ -196,6 +304,7 @@ export async function routedOwner(options: RoutedOwnerOptions = {}) {
     policy,
     audit,
     staging,
+    adapter,
     raw,
     call,
     ok,

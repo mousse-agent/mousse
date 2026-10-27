@@ -26,6 +26,10 @@ import { phoneSpeechMethods } from './remote/speech'
 import type { ThreadSourcePort } from './remote/ThreadStreamAdapter'
 import { DispatchService, mmsDispatchRuntime, type DispatchRuntime } from './dispatch'
 import { OwnerRoutes } from './routed/OwnerRoutes'
+import { PrivateSources } from './routed/privateSources'
+import { RoutedStaging } from './routed/staging'
+import { routedStreamsPort } from './routed/streamsPort'
+import { isPrivateKey } from './remote/privateStreams'
 
 /** Actual profile services own Bridge; no received DTO supplies a backend or path. */
 export class BridgeProfileService {
@@ -160,15 +164,22 @@ export class BridgeProfileService {
     // One display stream per open thread, plus one reserved stream for the sidebar lists.
     const threadSource = new MmsThreadSource(services),
       listsSource = new MmsListsSource(services),
+      // The streams one other computer of the user reads and nobody else does are stored under keys of
+      // their own (see `remote/privateStreams.ts`) and sourced from what that computer may see.
+      privateSources = new PrivateSources(services, rt.policy),
       source: ThreadSourcePort = {
         snapshot: (threadId) =>
-          threadId === LISTS_STREAM_THREAD_ID
-            ? listsSource.snapshot()
-            : threadSource.snapshot(threadId),
+          isPrivateKey(threadId)
+            ? privateSources.snapshot(threadId)
+            : threadId === LISTS_STREAM_THREAD_ID
+              ? listsSource.snapshot()
+              : threadSource.snapshot(threadId),
         onThread: (threadId, listener, onError) =>
-          threadId === LISTS_STREAM_THREAD_ID
-            ? listsSource.watch(() => listener({ snapshot: true }), onError)
-            : threadSource.onThread(threadId, listener, onError)
+          isPrivateKey(threadId)
+            ? privateSources.onThread(threadId, listener, onError)
+            : threadId === LISTS_STREAM_THREAD_ID
+              ? listsSource.watch(() => listener({ snapshot: true }), onError)
+              : threadSource.onThread(threadId, listener, onError)
       }
     this.threads = new ThreadStreamAdapter({
       db: rt.db,
@@ -218,13 +229,37 @@ export class BridgeProfileService {
     })
     // The methods another of the user's computers calls on the threads this one runs. Registered with
     // the rest of Bridge; each call is refused unless the owner's switch is on (see `NetService`).
-    new OwnerRoutes({
+    const staging = new RoutedStaging({
+      db: rt.db,
+      blobs: rt.blobs,
+      store: this.threads.store,
+      clock: this.clock,
+      // The upload belongs to the staging request, so it is read through its request-bound artifact.
+      readInput: (ref, context) => this.artifacts.input(ref, context, 'routed.stage')
+    })
+    const routes = new OwnerRoutes({
       services,
       rpc: rt.rpc,
       policy: rt.policy,
       audit: rt.audit,
-      track: (work) => this.track(work)
-    }).register()
+      clock: this.clock,
+      track: (work) => this.track(work),
+      staging,
+      streams: routedStreamsPort(this.threads),
+      // Progress of a Git action goes to the one computer that started it, on its own channel stream.
+      connectionEvent: async (caller, type, data) => {
+        if (type === 'git.operation') this.threads.pushChannel(caller.node, type, data)
+      }
+    })
+    routes.register()
+    // A device that is blocked has nothing held for it: its paged results and staged values go with it.
+    this.disposers.add(
+      rt.policy.onChange((event) => {
+        if (!event.after.blocked || event.before.blocked) return
+        routes.pages.dropCaller(event.node)
+        staging.dropCaller(event.node)
+      })
+    )
     for (const method of remoteListMethods({
       openLists: () => {
         const descriptor = this.threads.activate(LISTS_STREAM_THREAD_ID)
@@ -253,7 +288,14 @@ export class BridgeProfileService {
       blobs: rt.blobs,
       rpc: rt.rpc,
       clock: this.clock,
-      fallback: new NodeStreamAuthority(rt.identity, this.threads.store, rt.blobs, this.clock),
+      fallback: new NodeStreamAuthority(
+        rt.identity,
+        this.threads.store,
+        rt.blobs,
+        this.clock,
+        // The private streams this computer opens are read by the one computer each is bound to.
+        this.threads
+      ),
       ownsRequest: (...args) => this.hub.ownsRequest(...args),
       canonicalRequest: (...args) => this.hub.canonicalRequest(...args),
       onPublished: (stream, record) => {
@@ -329,6 +371,10 @@ export class BridgeProfileService {
     return {
       ...this.domain,
       store: this.threads.store,
+      privateStreams: {
+        access: (stream) => this.threads.privateAccess(stream),
+        close: (filter) => this.threads.closePrivate(filter)
+      },
       session: {
         ...session,
         capabilities: [

@@ -1294,7 +1294,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const turnRunning = ctx.mms.orchestrator.isActiveTurnRunning(threadId)
       const connectionFailed =
         session.failedConnectionRequest !== null || rt.connectionFailed
-      const pendingQuestions = ctx.mms.questions.listPendingForThread(threadId)
+      // A person on another computer is offered "Always" only for what that computer's permission limit allows.
+      const limit = deviceLimit(ctx)
+      const pendingQuestions = limit ? ctx.mms.questions.listPendingForDevice(threadId, limit) : ctx.mms.questions.listPendingForThread(threadId)
       return {
         thread,
         messages,
@@ -1768,7 +1770,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // device cannot list or revoke rules, so it does not make them.
       const shown = ctx.connection ? <T extends { questions: unknown[] }>(entry: T): T => entry : withoutStandingRules
       if (threadId) {
-        return { pending: ctx.mms.questions.listPendingForThread(threadId).map(shown) }
+        // A person on another computer is offered "Always" only for what that computer's permission limit allows.
+        const limit = deviceLimit(ctx)
+        return { pending: limit ? ctx.mms.questions.listPendingForDevice(threadId, limit) : ctx.mms.questions.listPendingForThread(threadId).map(shown) }
       }
       return { pending: ctx.mms.questions.listAllPending().map(shown) }
     }

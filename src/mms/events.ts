@@ -14,6 +14,12 @@ export type MmsEvent =
    * computer uses it, so the windows on the computer that runs the thread hear what it changed.
    */
   | { channel: 'protocol:event'; data: ProtocolEventRequest }
+  /**
+   * An event about one thread that a request handler raised, as the protocol server pushed it to its
+   * subscribers, whichever window or computer asked. In-daemon watchers (the private stream another
+   * computer reads) follow the thread through it.
+   */
+  | { channel: 'thread:event'; data: ProtocolEventRequest }
 
 export interface ProtocolEventRequest {
   type: string

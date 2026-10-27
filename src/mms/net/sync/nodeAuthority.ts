@@ -1,4 +1,4 @@
-import type { BlobId, EventId, NodeDelegation, Roster, StreamId } from '../../../shared/net'
+import type { BlobId, EventId, NodeDelegation, NodeId, Roster, StreamId } from '../../../shared/net'
 import { NetError } from '../../../shared/net/errors'
 import { NET_PROTO_MINOR } from '../../../shared/net/limits'
 import type {
@@ -12,13 +12,22 @@ import type {
 } from '../contracts'
 import { decodeEnvelope } from './codec'
 
+/**
+ * Which node a display stream is private to, if it is. A private stream carries what only one
+ * computer of the user may see (see `bridge/remote/privateStreams.ts`).
+ */
+export interface PrivateStreamBinding {
+  privateAccess(stream: StreamId): { reader: NodeId } | undefined
+}
+
 /** Same-user Bridge scope. Spaces require their independent meta authorization service. */
 export class NodeStreamAuthority implements StreamAuthority {
   constructor(
     private readonly identity: IdentityService,
     private readonly store: StreamStore,
     private readonly blobs: BlobStore,
-    private readonly clock: Clock
+    private readonly clock: Clock,
+    private readonly privateStreams?: PrivateStreamBinding
   ) {}
   canRead(stream: StreamId, peer: SyncSession['peer']): boolean {
     try {
@@ -30,7 +39,18 @@ export class NodeStreamAuthority implements StreamAuthority {
       )
         return false
       const delegation = this.current(peer)
-      if (descriptor.kind === 'node.thread') return delegation.caps.includes('read')
+      if (descriptor.kind === 'node.thread') {
+        const bound = this.privateStreams?.privateAccess(stream)
+        // A private stream is read by the one computer it is bound to, and only while that computer
+        // holds "Works on threads": a phone, a read-only device or another computer never reads it.
+        if (bound)
+          return (
+            peer.node === bound.reader &&
+            delegation.caps.includes('read') &&
+            delegation.caps.includes('settings')
+          )
+        return delegation.caps.includes('read')
+      }
       // Artifact scopes also require the durable request-alias registry (P3).
       return false
     } catch {

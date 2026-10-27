@@ -17,7 +17,14 @@ const RECONCILE_MS = 15_000
 const PREVIEW_CHARS = 280
 const ERROR_CHARS = 280
 
-export type ListsStatusState = 'processing' | 'awaiting_input' | 'completed' | 'failed'
+export type ListsStatusState =
+  | 'processing'
+  | 'awaiting_input'
+  | 'completed'
+  | 'failed'
+  /** Only in a private lists stream, which carries every state a sidebar row can show. */
+  | 'waiting'
+  | 'paused'
 
 export interface ListsStatus {
   state: ListsStatusState
@@ -59,7 +66,11 @@ export interface ListsSnapshot {
       | 'settledAt'
       | 'startedAt'
       | 'worktreeEnabled'
-    >
+    > &
+      /** Only in a private lists stream: the subagent rows' place in the tree, and what the thread runs with. */
+      Partial<
+        Pick<Thread, 'lineage' | 'permissionMode' | 'modelOverride' | 'startedFrom' | 'sentFrom'>
+      >
   >
   /** Threads that are not idle, by id. */
   status: Record<string, ListsStatus>
@@ -90,10 +101,14 @@ function clip(text: string | undefined, max: number): string | undefined {
 
 function statusOf(
   activity: ThreadActivityState | undefined,
-  turn: TurnState | undefined
+  turn: TurnState | undefined,
+  /** A private stream also reports Waiting and Paused, which a phone's row has no state for. */
+  all = false
 ): ListsStatus | undefined {
   const since = turn?.startedAt
   if (activity === 'processing' || activity === 'awaiting_input')
+    return { state: activity, ...(since ? { since } : {}) }
+  if (all && (activity === 'waiting' || activity === 'paused'))
     return { state: activity, ...(since ? { since } : {}) }
   if (activity === 'completed') return { state: 'completed' }
   if (turn?.phase === 'failed')
@@ -159,7 +174,13 @@ export class MmsListsSource {
       clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
       setInterval: (run, ms) => setInterval(run, ms),
       clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>)
-    }
+    },
+    /**
+     * `private`: the lists of one computer of the user rather than of a phone. They keep the subagent
+     * rows and each thread's `lineage`, say what each thread runs with and where it came from, and
+     * report every state a row can show. The phone's lists stay as they were.
+     */
+    private readonly options: { private?: boolean } = {}
   ) {}
 
   private chats: ListsChat[] | undefined
@@ -191,14 +212,16 @@ export class MmsListsSource {
     const s = this.services
     const activity = s.threadRuntimes.getActivitySnapshot()
     const turns = s.orchestrator.getTurnSnapshot()
-    // Remote devices list threads the way the CLI does: subagents sit under their parent, not beside it.
     const inventory = s.threads.listAllThreads()
-    const threads = visibleThreads(inventory)
-    // A parent row shows what its subagents are doing, like the desktop sidebar.
-    const rolledUp = rollUpActivities(inventory, activity)
+    const own = this.options.private === true
+    // A phone lists threads the way the CLI does: subagents sit under their parent, not beside it. Another
+    // computer lists them all, with their lineage, and builds the tree itself like the desktop sidebar.
+    const threads = own ? inventory : visibleThreads(inventory)
+    // A phone's parent row shows what its subagents are doing; another computer rolls the states up itself.
+    const rolledUp = own ? {} : rollUpActivities(inventory, activity)
     const status: Record<string, ListsStatus> = {}
     for (const thread of threads) {
-      const entry = statusOf(rolledUp[thread.id] ?? activity[thread.id], turns[thread.id])
+      const entry = statusOf(rolledUp[thread.id] ?? activity[thread.id], turns[thread.id], own)
       if (entry) status[thread.id] = entry
     }
     return mmsJson({
@@ -221,7 +244,16 @@ export class MmsListsSource {
         pinnedAt: thread.pinnedAt,
         settledAt: thread.settledAt,
         startedAt: thread.startedAt,
-        worktreeEnabled: thread.worktreeEnabled || undefined
+        worktreeEnabled: thread.worktreeEnabled || undefined,
+        ...(own
+          ? {
+              lineage: thread.lineage,
+              permissionMode: thread.permissionMode,
+              modelOverride: thread.modelOverride,
+              startedFrom: thread.startedFrom,
+              sentFrom: thread.sentFrom
+            }
+          : {})
       })),
       status,
       chats
