@@ -2480,6 +2480,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       } else await ctx.mms.gitService.push(root, { expectedBranch })
       return gitStatusResult(ctx, root)
     }
+    case 'git.suggestCommitMessage': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'projectId', 'expectedBranch'])
+      // Reads and proposes only: it never provisions a worktree or touches the repository.
+      const root = pullRequestFolder(ctx, p)
+      const threadId = asOptionalString(p.threadId, 256) ?? null
+      const expectedBranch = asOptionalString(p.expectedBranch, 512)
+      await ctx.mms.gitService.assertBranch(root, expectedBranch)
+      // A thread's own worktree commits every change (see `git.commit`), so that is what is described there.
+      const inWorktree = threadId !== null && new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId)).load() !== null
+      const projectId = asOptionalString(p.projectId, 256) ?? (threadId ? ctx.mms.threads.getThread(threadId)?.projectId ?? null : null)
+      return await ctx.mms.orchestrator.generateCommitMessage({ root, all: inWorktree, projectId, threadId: inWorktree ? threadId : null, branch: expectedBranch ?? null })
+    }
     case 'git.stage':
     case 'git.unstage': {
       const p = isObject(params) ? params : {}

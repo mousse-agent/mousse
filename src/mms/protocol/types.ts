@@ -390,6 +390,7 @@ export const PROTOCOL_METHODS = [
   'git.branches',
   'git.checkout',
   'git.commit',
+  'git.suggestCommitMessage',
   'git.push',
   'git.stage',
   'git.unstage',

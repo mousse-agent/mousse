@@ -144,6 +144,12 @@ import {
   parsePullRequestDraft,
   type PullRequestDraftInputs
 } from '../git/pullRequestDraft'
+import {
+  COMMIT_SUGGESTION_SYSTEM,
+  buildCommitSuggestionPrompt,
+  commitSuggestionErrors,
+  parseCommitSuggestion
+} from '../git/commitSuggestion'
 import { readPullRequestTemplate } from '../git/pullRequestTemplate'
 import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
 import type { ProjectManager } from '../data/ProjectManager'
@@ -4130,6 +4136,46 @@ export class OrchestratorService extends EventEmitter {
       return parsed ? { ...parsed, source: 'model' } : heuristic
     } catch {
       return heuristic
+    }
+  }
+
+  /**
+   * Writes a commit message for what the next commit in `root` would take, with the title model. Only a
+   * title model the user chose is used (Automatic never reaches a model, as for chat titles): without one
+   * this refuses with `git_suggest_no_model` before reading anything, so the caller can say so. The model
+   * is resolved in the folder's project, so an instance turned off there is never used. Nothing is written
+   * to the repository; the message is a proposal the user edits.
+   */
+  async generateCommitMessage(params: {
+    root: string
+    /** The commit takes every change, as in a thread's worktree; else staged changes when there are any. */
+    all: boolean
+    /** The folder's project; the title model is resolved in its scope. */
+    projectId: string | null
+    /** The thread whose worktree this is, when it is one; names the provider's cache session. */
+    threadId: string | null
+    branch?: string | null
+  }): Promise<{ message: string; truncated: boolean }> {
+    const titleSettings = this.settingsStore.get().title
+    if (!titleSettings.llmProvider?.trim() || !titleSettings.model?.trim()) throw commitSuggestionErrors.create('git_suggest_no_model')
+    const input = await this.gitService?.describeCommitInput(params.root, { all: params.all })
+    if (!input || input.files.length === 0) throw commitSuggestionErrors.create('git_suggest_empty')
+    try {
+      const resolved = this.harness.resolveStored(titleSettings, {
+        purpose: 'title',
+        scope: params.projectId ? { kind: 'project', projectId: params.projectId } : params.threadId ? this.threadScope(params.threadId) : { kind: 'device' }
+      })
+      const text = await this.llm.generateCommitMessage(
+        COMMIT_SUGGESTION_SYSTEM,
+        buildCommitSuggestionPrompt(input, params.branch),
+        params.threadId ?? undefined,
+        { instanceId: resolved.instanceId, llmProvider: resolved.llmProvider, model: titleSettings.model }
+      )
+      const message = parseCommitSuggestion(text)
+      if (!message) throw new Error('The model answered without a commit message')
+      return { message, truncated: input.truncated }
+    } catch (error) {
+      throw commitSuggestionErrors.create('git_suggest_failed', error)
     }
   }
 
