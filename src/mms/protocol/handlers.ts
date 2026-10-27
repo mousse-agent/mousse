@@ -103,6 +103,7 @@ import { isInstallationMethod } from '../profiles/admission'
 import { ChatReferenceMetadataResolver } from '../data/resolveChatReferenceMetadata'
 import { parseChatReference } from '../../shared/chatReferences'
 import type { ReviewFilesResult, ReviewRange, ReviewScope } from '../../shared/review'
+import { repoRelativePaths } from '../git/repoPaths'
 import { isGitRepository, listChangedFiles, readFileVersions, worktreeRange } from '../git/reviewDiff'
 import { resolveReviewScope } from '../actions/reviewRange'
 
@@ -441,8 +442,13 @@ interface GitMutationTarget {
   workspace?: ThreadWorkspaceMetadata
 }
 
-/** Resolves the folder a Git mutation runs in, provisioning the thread's worktree when it has none yet. */
-async function gitMutationTarget(ctx: HandlerContext, p: Record<string, unknown>): Promise<GitMutationTarget> {
+/**
+ * Resolves the folder a Git mutation runs in, provisioning the thread's worktree when it has none yet.
+ * Actions a thread worktree never allows name their refusal, and it comes first: a refused call must not
+ * create a worktree as a side effect.
+ */
+async function gitMutationTarget(ctx: HandlerContext, p: Record<string, unknown>, refuseInThread?: 'task_branch_authoritative' | 'thread_worktree_checkpointed'): Promise<GitMutationTarget> {
+  if (refuseInThread && p.threadId !== undefined && p.threadId !== null) throw gitThreadRules.create(refuseInThread)
   await ensureOwnedTaskWorkspace(ctx, p)
   const root = projectRootContext(ctx, p)
   const threadId = asOptionalString(p.threadId, 256)
@@ -451,16 +457,16 @@ async function gitMutationTarget(ctx: HandlerContext, p: Record<string, unknown>
   return { root, directory, workspace }
 }
 
+/** Paths as `getStatus` names them (repository-relative), accepted only inside the project folder. */
 function gitPaths(root: string, value: unknown): string[] {
   const paths = asStringArray(value, 'paths', { unique: true, maxItems: GIT_PATHS_MAX, maxItemLen: 4096 })
   if (paths.length === 0) throw new DomainRpcError('invalid_params', 'paths must name at least one file')
-  return paths.map((path) => {
-    try {
-      return requiredContainedPath(root, path)
-    } catch {
-      throw new DomainRpcError('git_path_outside', 'That path is outside the project folder.')
-    }
-  })
+  const top = workspaceGit(root, ['rev-parse', '--show-toplevel'])
+  try {
+    return repoRelativePaths(top, root, paths)
+  } catch {
+    throw new DomainRpcError('git_path_outside', 'That path is outside the project folder.')
+  }
 }
 
 /**
@@ -490,6 +496,14 @@ async function runUserThreadGitAction<T>(
     }
     throw error
   }
+}
+
+/**
+ * Runs an action that does not move the thread's branch under the thread's Git locks, like push. Without them
+ * it would queue inside GitService ahead of a commit that already holds the repository lease and stall it.
+ */
+async function underThreadLocks<T>(target: GitMutationTarget, label: string, run: () => Promise<T>): Promise<T> {
+  return target.directory && target.workspace ? withGitMutationLocks(target.directory, target.root, label, run) : run()
 }
 
 function threadWorktree(target: GitMutationTarget): Required<GitMutationTarget> | null {
@@ -2353,8 +2367,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'git.checkout': {
       const p = isObject(params) ? params : {}
-      const target = await gitMutationTarget(ctx, p)
-      if (target.workspace) throw gitThreadRules.create('task_branch_authoritative')
+      const target = await gitMutationTarget(ctx, p, 'task_branch_authoritative')
       const dirty = asOptionalString(p.dirty, 16)
       if (dirty !== undefined && dirty !== 'carry' && dirty !== 'stash') throw new DomainRpcError('invalid_params', 'dirty must be carry or stash')
       const result = await ctx.mms.gitService.checkout(target.root, asString(p.branch, 'branch', 512), dirty ? { dirty } : {})
@@ -2393,9 +2406,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'git.stage':
     case 'git.unstage': {
       const p = isObject(params) ? params : {}
-      const target = await gitMutationTarget(ctx, p)
       // The next checkpoint would sweep the index anyway.
-      if (target.workspace) throw gitThreadRules.create('thread_worktree_checkpointed')
+      const target = await gitMutationTarget(ctx, p, 'thread_worktree_checkpointed')
       const all = asOptionalBoolean(p.all, 'all') === true
       const staging = method === 'git.stage'
       if (all) await (staging ? ctx.mms.gitService.stageAll(target.root) : ctx.mms.gitService.unstageAll(target.root))
@@ -2417,13 +2429,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'git.fetch': {
       const p = isObject(params) ? params : {}
       const target = await gitMutationTarget(ctx, p)
-      const result = await ctx.mms.gitService.fetch(target.root)
+      const result = await underThreadLocks(target, 'user-git-fetch', () => ctx.mms.gitService.fetch(target.root))
       return gitStatusResult(ctx, target.root, { ...result })
     }
     case 'git.pull': {
       const p = isObject(params) ? params : {}
-      const target = await gitMutationTarget(ctx, p)
-      if (target.workspace) throw gitThreadRules.create('task_branch_authoritative')
+      const target = await gitMutationTarget(ctx, p, 'task_branch_authoritative')
       const strategy = asOptionalString(p.strategy, 16) ?? 'ff-only'
       if (strategy !== 'ff-only' && strategy !== 'merge' && strategy !== 'rebase') throw new DomainRpcError('invalid_params', 'strategy must be ff-only, merge or rebase')
       const result = await ctx.mms.gitService.pull(target.root, { strategy: strategy as GitPullStrategy })
@@ -2432,30 +2443,27 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'git.abortInProgress': {
       const p = isObject(params) ? params : {}
       const target = await gitMutationTarget(ctx, p)
-      if (target.workspace) throw gitThreadRules.create('task_branch_authoritative')
       const kind = asString(p.kind, 'kind', 16)
       if (kind !== 'merge' && kind !== 'rebase') throw new DomainRpcError('invalid_params', 'kind must be merge or rebase')
-      await ctx.mms.gitService.abortInProgress(target.root, kind)
+      // A thread worktree allows it: it gives up a merge or rebase a terminal started, back to the recorded head.
+      await underThreadLocks(target, 'user-git-abort', () => ctx.mms.gitService.abortInProgress(target.root, kind))
       return gitStatusResult(ctx, target.root)
     }
     case 'git.createBranch': {
       const p = isObject(params) ? params : {}
-      const target = await gitMutationTarget(ctx, p)
-      if (target.workspace) throw gitThreadRules.create('task_branch_authoritative')
+      const target = await gitMutationTarget(ctx, p, 'task_branch_authoritative')
       await ctx.mms.gitService.createBranch(target.root, asString(p.name, 'name', 512), { from: asOptionalString(p.from, 512), checkout: asOptionalBoolean(p.checkout, 'checkout') })
       return gitStatusResult(ctx, target.root)
     }
     case 'git.renameBranch': {
       const p = isObject(params) ? params : {}
-      const target = await gitMutationTarget(ctx, p)
-      if (target.workspace) throw gitThreadRules.create('task_branch_authoritative')
+      const target = await gitMutationTarget(ctx, p, 'task_branch_authoritative')
       await ctx.mms.gitService.renameBranch(target.root, asString(p.name, 'name', 512), asString(p.newName, 'newName', 512))
       return gitStatusResult(ctx, target.root)
     }
     case 'git.deleteBranch': {
       const p = isObject(params) ? params : {}
-      const target = await gitMutationTarget(ctx, p)
-      if (target.workspace) throw gitThreadRules.create('task_branch_authoritative')
+      const target = await gitMutationTarget(ctx, p, 'task_branch_authoritative')
       await ctx.mms.gitService.deleteBranch(target.root, asString(p.name, 'name', 512), { force: asOptionalBoolean(p.force, 'force') === true })
       return gitStatusResult(ctx, target.root)
     }
