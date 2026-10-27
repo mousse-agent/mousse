@@ -262,6 +262,7 @@ describe('Add provider choices', () => {
       ['new', 'Claude Code · another account'],
       ['new', 'ChatGPT subscription'],
       ['new', 'Cursor'],
+      ['new', 'Grok'],
       ['new', 'Custom command'],
       ['registry', 'More ACP agents…']
     ])
@@ -289,6 +290,7 @@ describe('Add provider choices', () => {
       ['new', 'ChatGPT subscription'],
       ['new', 'Antigravity'],
       ['new', 'Cursor'],
+      ['new', 'Grok'],
       ['new', 'Custom command'],
       ['registry', 'More ACP agents…']
     ])
@@ -458,6 +460,22 @@ describe('Cursor in the agent editor', () => {
     expect(html).not.toContain('Not found')
     expect(html).not.toContain('Environment')
     expect(html).not.toContain('executable path')
+  })
+})
+
+describe('Agent editor for a managed ChatGPT entry', () => {
+  it('shows no executable, launch arguments or variables: the daemon refuses them', () => {
+    const render = (setup: 'managed' | 'existing') => {
+      const entry = snapshot({ instanceId: 'codex:work', driver: 'codex', config: { home: setup === 'managed' ? 'private' : 'default', args: [], env: {}, setup } })
+      return renderToStaticMarkup(createElement(AgentEditor, { snapshot: entry, status: describeStatus(entry), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
+    }
+    const managed = render('managed')
+    expect(managed).not.toContain('Launch arguments')
+    expect(managed).not.toContain('Variables')
+    expect(managed).not.toContain('executable path')
+    const own = render('existing')
+    expect(own).toContain('Launch arguments')
+    expect(own).toContain('Variables')
   })
 })
 

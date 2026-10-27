@@ -160,14 +160,14 @@ export function AgentEditor({
             <>
               <UpdateRow snapshot={snapshot} operation={operation} actions={actions} />
               {downloaded && <DownloadedFilesRow snapshot={snapshot} bytes={downloaded.bytes} onRemoveInstall={actions.removeInstall} />}
-              {/* A managed entry runs only the Codex Mousse downloaded. */}
+              {/* A managed entry runs only the Codex Mousse downloaded, with Mousse's own settings. */}
               {!managed && <ExecutableRow snapshot={snapshot} label={info.label} onSave={(binaryPath) => actions.configure({ binaryPath })} />}
-              <ArgsRow snapshot={snapshot} onSave={(args) => actions.configure({ args })} />
+              {!managed && <ArgsRow snapshot={snapshot} onSave={(args) => actions.configure({ args })} />}
               <HomeRow snapshot={snapshot} />
             </>
           )}
         </EditorSection>
-        {!info.bundled && (
+        {!info.bundled && !managed && (
           <EditorSection title="Environment" description={deviceWideNote(snapshot)}>
             <EnvRow snapshot={snapshot} onSave={(env) => actions.configure({ env })} />
           </EditorSection>
