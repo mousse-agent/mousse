@@ -34,6 +34,8 @@ let bots: BotEngine
 let check: (instanceId: string, policy: RunPolicy) => Enforceability
 let checked: RunPolicy[]
 let stopped: string[]
+let timers: Array<{ fn: () => void; ms: number }>
+let engineHost: BotEngineHost
 
 const T0 = Date.parse('2026-10-27T09:00:00.000Z')
 
@@ -80,6 +82,7 @@ beforeEach(() => {
   runs = new RunEngine({ store: runStore, outbox, tools: new ToolInvocations(runStore), now, pid: 1 })
   checked = []
   stopped = []
+  timers = []
   check = () => ({ ok: true })
   const host: BotEngineHost = {
     profileHome: profile,
@@ -97,8 +100,13 @@ beforeEach(() => {
     notifyEffects: () => {},
     stopThread: (threadId) => { stopped.push(threadId) },
     clock: () => clock,
-    setTimer: () => ({ clear: () => {} })
+    monotonic: () => clock,
+    setTimer: (fn, ms) => {
+      timers.push({ fn, ms })
+      return { clear: () => {} }
+    }
   }
+  engineHost = host
   bots = new BotEngine(host)
 })
 
@@ -227,13 +235,93 @@ describe('activation and dispatch', () => {
     expect(bots.getActivation(activation.id).status).toBe('running')
   })
 
-  it('refuses a dispatch whose grant was revoked or replaced, and blocks the activation', async () => {
+  it('refuses a dispatch whose grant changed under it, and blocks the activation', async () => {
     const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'c1' })
-    bots.revoke('site-editor')
+    // The grant row changes without the engine (another process): prepare still refuses.
+    store.revoke('site-editor')
     const payload = turnStart(store.dispatch(activation.id, 1)!.runId!)
     expect(bots.prepare(payload)).toMatchObject({ code: 'bot_grant_revoked' })
     expect(bots.getActivation(activation.id)).toMatchObject({ status: 'blocked', endReason: 'bot_grant_revoked' })
     expect(store.counters(activation.id).activeMs).toBe(0)
+  })
+
+  it('revoking the grant stops a running dispatch, and its authority refuses the next call', async () => {
+    const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'c1' })
+    const queued = await bots.activate({ botId: 'site-editor', input: 'later', clientRequestId: 'c2' })
+    const prepared = bots.prepare(turnStart(store.dispatch(activation.id, 1)!.runId!))
+    if ('refused' in prepared) throw new Error(prepared.refused)
+    const call = { kind: 'builtin' as const, tool: 'read' as const, nativeName: 'read', args: { path: join(root, 'a.md') } }
+    expect(prepared.authority.check(call)).toEqual({ ok: true })
+    bots.revoke('site-editor')
+    expect(prepared.authority.check(call)).toEqual({ ok: false, wall: { kind: 'revoked' } })
+    expect(prepared.authority.time.signal.aborted).toBe(true)
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(stopped).toEqual([activation.threadId])
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'cancelled', endReason: 'grant_revoked' })
+    expect(bots.getActivation(queued.id)).toMatchObject({ status: 'cancelled', endReason: 'grant_revoked' })
+  })
+
+  it('approving a replacement grant ends the dispatch running under the old one', async () => {
+    const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'c1' })
+    const prepared = bots.prepare(turnStart(store.dispatch(activation.id, 1)!.runId!))
+    if ('refused' in prepared) throw new Error(prepared.refused)
+    publish({ tools: ['read'] })
+    approve()
+    expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(root, 'a.md') } })).toEqual({ ok: false, wall: { kind: 'revoked' } })
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'cancelled', endReason: 'grant_replaced' })
+  })
+
+  it('a narrower published revision is what runs: tools, folders, access, limits and work time', async () => {
+    const wide = manifest({ tools: ['read', 'search'], workspace: { roots: [root, join(base, 'docs')], access: 'read' }, budget: { maxActiveMs: 10 * 60_000, maxTurns: 30 } })
+    mkdirSync(join(base, 'docs'))
+    bots.save({ ...definition(), permissions: wide }, bots.get('site-editor').draftHash)
+    bots.publish('site-editor', bots.get('site-editor').draftHash)
+    approve()
+    publish({ tools: ['read'], workspace: { roots: [root], access: 'read' }, budget: { maxActiveMs: 2 * 60_000, maxTurns: 5 } })
+    const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'narrow' })
+    expect(store.counters(activation.id).limits).toEqual({ maxTurns: 5 })
+    const prepared = bots.prepare(turnStart(store.dispatch(activation.id, 1)!.runId!))
+    if ('refused' in prepared) throw new Error(prepared.refused)
+    expect(prepared.policy).toMatchObject({ tools: { allow: ['read'] }, budget: { maxTurns: 5, maxWallMs: 2 * 60_000 } })
+    expect(store.counters(activation.id).activeMs).toBe(2 * 60_000)
+    expect(prepared.authority.check({ kind: 'builtin', tool: 'search', nativeName: 'grep', args: { path: root } })).toMatchObject({ ok: false, wall: { kind: 'tool' } })
+    expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(base, 'docs', 'a.md') } })).toMatchObject({ ok: false, wall: { kind: 'path' } })
+  })
+
+  it('the deadline aborts the turn and stops its run; later calls are refused', async () => {
+    const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'c1' })
+    const prepared = bots.prepare(turnStart(store.dispatch(activation.id, 1)!.runId!))
+    if ('refused' in prepared) throw new Error(prepared.refused)
+    expect(timers.map((timer) => timer.ms)).toEqual([10 * 60_000])
+    timers[0].fn()
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(prepared.authority.time.signal.aborted).toBe(true)
+    expect(stopped).toEqual([activation.threadId])
+    expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(root, 'a.md') } })).toEqual({ ok: false, wall: { kind: 'ended' } })
+  })
+
+  it('the run\'s terminal event settles the dispatch on any path; the final message lands afterwards', async () => {
+    const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'c1' })
+    const payload = turnStart(store.dispatch(activation.id, 1)!.runId!)
+    bots.prepare(payload)
+    clock += 5_000
+    finish(payload.runId)
+    bots.settleRun(payload.runId)
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'done', result: '', counters: { activeMs: 5_000 } })
+    bots.settle(payload, { text: 'Done.' })
+    expect(bots.getActivation(activation.id).result).toBe('Done.')
+    // Settlement is not evidence that the processes are gone.
+    expect(store.get('SELECT exit_at FROM bot_dispatches WHERE activation_id = ?', activation.id)).toEqual({ exit_at: null })
+  })
+
+  it('a dispatch settled by a process that did not run it refunds nothing', async () => {
+    const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'c1' })
+    const payload = turnStart(store.dispatch(activation.id, 1)!.runId!)
+    bots.prepare(payload)
+    clock += 5_000
+    finish(payload.runId)
+    new BotEngine(engineHost).settleRun(payload.runId)
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'done', counters: { activeMs: 10 * 60_000 } })
   })
 
   it('refuses a dispatch the runtime cannot hold now, before any time is charged', async () => {

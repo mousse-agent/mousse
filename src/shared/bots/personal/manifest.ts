@@ -8,6 +8,25 @@ import type { BotBudget, BotManifest, BotPermissionLine } from './definition'
 
 const BUDGET_KEYS = ['maxActiveMs', 'maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTokens', 'maxUsd'] as const
 
+/** The longest work time one activation may be given: a day. */
+export const MAX_BOT_ACTIVE_MS = 24 * 60 * 60_000
+
+/**
+ * The Mousse app tools a bot may be granted: ones that read the web or the bot's own skills.
+ * Every other app tool starts, wakes, writes or reads other threads (delegation, forks, queues,
+ * merge-backs), acts in the owner's name, or asks a person, so it would run work outside the grant.
+ * Consults (6c-2) are the way a bot uses other threads. The skill tools come with granted skills.
+ */
+export const BOT_APP_TOOLS: ReadonlySet<string> = new Set(['web_search', 'web_fetch'])
+
+/** One MCP server id or tool name: no separator a qualified name or an identity key could hide. */
+const MCP_PART = /^[A-Za-z0-9](?:[A-Za-z0-9.-]|_(?!_)){0,127}$/
+
+/** The identity of a granted MCP tool: injective in its server and tool. */
+export function mcpIdentity(pair: { serverId: string; tool: string }): string {
+  return JSON.stringify([pair.serverId, pair.tool])
+}
+
 const sorted = <T>(values: readonly T[], key: (value: T) => string): T[] => {
   const seen = new Map<string, T>()
   for (const value of values) seen.set(key(value), value)
@@ -24,7 +43,7 @@ export function canonicalManifest(manifest: BotManifest): BotManifest {
   return {
     tools: sorted(manifest.tools, (tool) => tool),
     appTools: sorted(manifest.appTools, (tool) => tool),
-    mcp: sorted(manifest.mcp, (pair) => `${pair.serverId}::${pair.tool}`).map((pair) => ({ serverId: pair.serverId, tool: pair.tool })),
+    mcp: sorted(manifest.mcp, mcpIdentity).map((pair) => ({ serverId: pair.serverId, tool: pair.tool })),
     skills: sorted(manifest.skills, (skill) => skill),
     workspace: manifest.workspace
       ? { roots: sorted(manifest.workspace.roots, (root) => root), access: manifest.workspace.access }
@@ -41,8 +60,10 @@ export function manifestProblem(value: unknown): string | undefined {
   const strings = (list: unknown) => Array.isArray(list) && list.every((item) => typeof item === 'string' && item.length > 0 && item.length <= 256)
   if (!Array.isArray(manifest.tools) || !manifest.tools.every((tool) => typeof tool === 'string' && isNeutralTool(tool))) return 'A built-in tool is not one Mousse knows.'
   if (!strings(manifest.appTools)) return 'An app tool name is invalid.'
+  const refusedApp = (manifest.appTools as string[]).find((tool) => !BOT_APP_TOOLS.has(tool))
+  if (refusedApp !== undefined) return `A bot can't be given the Mousse tool ${refusedApp}: it would reach other threads, act in your name or ask you, outside the bot's permissions.`
   if (!strings(manifest.skills)) return 'A skill id is invalid.'
-  if (!Array.isArray(manifest.mcp) || !manifest.mcp.every((pair) => pair && typeof pair === 'object' && strings([pair.serverId, pair.tool]))) return 'An MCP tool is invalid.'
+  if (!Array.isArray(manifest.mcp) || !manifest.mcp.every((pair) => pair && typeof pair === 'object' && typeof pair.serverId === 'string' && typeof pair.tool === 'string' && MCP_PART.test(pair.serverId) && MCP_PART.test(pair.tool))) return 'An MCP tool is invalid.'
   if (manifest.workspace !== null) {
     const workspace = manifest.workspace
     if (!workspace || typeof workspace !== 'object' || !strings(workspace.roots) || workspace.roots.length === 0) return 'The bot needs at least one folder, or no file access.'
@@ -55,7 +76,10 @@ export function manifestProblem(value: unknown): string | undefined {
     const limit = budget[key]
     if (limit === undefined && key !== 'maxActiveMs') continue
     if (typeof limit !== 'number' || !Number.isFinite(limit) || limit <= 0) return `The limit ${key} must be a positive number.`
+    // Counts and times are whole numbers; only the spend is in dollars.
+    if (key !== 'maxUsd' && !Number.isSafeInteger(limit)) return `The limit ${key} must be a whole number.`
   }
+  if ((budget.maxActiveMs as number) > MAX_BOT_ACTIVE_MS) return 'A bot can work at most 24 hours per run.'
   if (manifest.audience !== 'owner') return 'Bots for other people are not available yet.'
   return undefined
 }
@@ -84,8 +108,8 @@ export function addedPermissions(wanted: BotManifest, granted: BotManifest | nul
   for (const tool of wanted.tools) if (!tools.has(tool)) lines.push(toolLine(tool, wanted.workspace))
   const appTools = new Set(granted.appTools)
   for (const tool of wanted.appTools) if (!appTools.has(tool)) lines.push({ kind: 'app_tool', text: `Use the Mousse tool \`${tool}\`` })
-  const mcp = new Set(granted.mcp.map((pair) => `${pair.serverId}::${pair.tool}`))
-  for (const pair of wanted.mcp) if (!mcp.has(`${pair.serverId}::${pair.tool}`)) lines.push(mcpLine(pair))
+  const mcp = new Set(granted.mcp.map(mcpIdentity))
+  for (const pair of wanted.mcp) if (!mcp.has(mcpIdentity(pair))) lines.push(mcpLine(pair))
   const skills = new Set(granted.skills)
   for (const skill of wanted.skills) if (!skills.has(skill)) lines.push({ kind: 'skill', text: `Use the skill *${skill}*` })
   if (wanted.workspace) {
@@ -188,8 +212,41 @@ export function narrowManifest(manifest: BotManifest, narrow: Partial<Pick<BotMa
   return {
     ...manifest,
     tools: keep(manifest.tools, narrow.tools, (tool) => tool),
-    mcp: keep(manifest.mcp, narrow.mcp, (pair) => `${pair.serverId}::${pair.tool}`),
+    mcp: keep(manifest.mcp, narrow.mcp, mcpIdentity),
     skills: keep(manifest.skills, narrow.skills, (skill) => skill),
     workspace
+  }
+}
+
+/**
+ * What runs: `wanted` (a published revision) held inside `granted` (the approved grant). Only
+ * what both name is kept, write access only where both say write, and each limit is the lower
+ * one. A revision that is a subset of the grant is itself; a narrower one really narrows.
+ */
+export function intersectManifest(wanted: BotManifest, granted: BotManifest): BotManifest {
+  const within = <T>(values: readonly T[], allowed: readonly T[], key: (value: T) => string): T[] => {
+    const names = new Set(allowed.map(key))
+    return values.filter((value) => names.has(key(value)))
+  }
+  let workspace: BotManifest['workspace'] = null
+  if (wanted.workspace && granted.workspace) {
+    const roots = within(wanted.workspace.roots, granted.workspace.roots, (root) => root)
+    if (roots.length) workspace = { roots, access: wanted.workspace.access === 'write' && granted.workspace.access === 'write' ? 'write' : 'read' }
+  }
+  const budget: BotBudget = { maxActiveMs: Math.min(wanted.budget.maxActiveMs, granted.budget.maxActiveMs) }
+  for (const key of BUDGET_KEYS) {
+    const a = wanted.budget[key]
+    const b = granted.budget[key]
+    const limit = a === undefined ? b : b === undefined ? a : Math.min(a, b)
+    if (limit !== undefined) budget[key] = limit
+  }
+  return {
+    tools: within(wanted.tools, granted.tools, (tool) => tool),
+    appTools: within(wanted.appTools, granted.appTools, (tool) => tool),
+    mcp: within(wanted.mcp, granted.mcp, mcpIdentity),
+    skills: within(wanted.skills, granted.skills, (skill) => skill),
+    workspace,
+    budget,
+    audience: 'owner'
   }
 }

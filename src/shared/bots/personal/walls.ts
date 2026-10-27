@@ -14,6 +14,8 @@ export function wallMessage(wall: WallReason): string {
     case 'skill': return `This bot is not allowed to use the skill ${wall.skill}.`
     case 'mcp': return `This bot is not allowed to use the ${wall.server} tool ${wall.tool}.`
     case 'policy_unenforceable': return `This bot cannot use ${wall.tool} on this runtime.`
+    case 'revoked': return 'This bot\'s permissions were withdrawn, so it cannot use tools now.'
+    case 'ended': return 'This bot\'s run has ended, so it cannot use tools now.'
   }
 }
 

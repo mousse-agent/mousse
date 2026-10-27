@@ -1,5 +1,6 @@
 import { ProfileDatabase, type Migration, type ProfileDatabaseFault } from '../../run/db/ProfileDatabase'
 import type { BotActivationStatus, BotManifest } from '../../../shared/bots/personal/definition'
+import type { ActivationLimits } from './scopes'
 import type { BotThreadRole } from '../../../shared/bots/personal/authority'
 
 /**
@@ -77,6 +78,7 @@ CREATE TABLE bot_dispatches(
   settled_by TEXT CHECK(settled_by IN ('run','startup')),
   PRIMARY KEY(activation_id, n)
 ) STRICT;
+CREATE INDEX bot_dispatches_by_run ON bot_dispatches(run_id);
 CREATE TABLE bot_counters(
   activation_id TEXT PRIMARY KEY,
   requests INTEGER NOT NULL DEFAULT 0,
@@ -355,7 +357,7 @@ export class BotStore {
     return this.all(`SELECT * FROM bot_activations WHERE bot_id = ? AND status IN (${marks}) ORDER BY created_at, id`, botId, ...statuses).map(activationOf)
   }
 
-  insertActivation(row: Pick<BotActivationRow, 'id' | 'botId' | 'revision' | 'grantDigest' | 'trigger' | 'idempotencyKey' | 'status' | 'createdAt'>, limits: Record<string, number>): void {
+  insertActivation(row: Pick<BotActivationRow, 'id' | 'botId' | 'revision' | 'grantDigest' | 'trigger' | 'idempotencyKey' | 'status' | 'createdAt'>, limits: ActivationLimits): void {
     this.run(
       'INSERT INTO bot_activations(id, bot_id, revision, grant_digest, trigger_json, idempotency_key, status, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)',
       row.id, row.botId, row.revision, row.grantDigest, JSON.stringify(row.trigger), row.idempotencyKey, row.status, row.createdAt
@@ -405,6 +407,11 @@ export class BotStore {
 
   dispatchByRequest(clientRequestId: string): BotDispatchRow | undefined {
     const row = this.get('SELECT * FROM bot_dispatches WHERE client_request_id = ?', clientRequestId)
+    return row ? dispatchOf(row) : undefined
+  }
+
+  dispatchByRun(runId: string): BotDispatchRow | undefined {
+    const row = this.get('SELECT * FROM bot_dispatches WHERE run_id = ?', runId)
     return row ? dispatchOf(row) : undefined
   }
 

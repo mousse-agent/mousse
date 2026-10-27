@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import { botManifestDigest, compileBotThread, type CompileInput } from '../../src/mms/bots/grants/compile'
-import { checkPolicy } from '../../src/mms/harness/policy'
+import { BOT_RUNTIME_GAPS, botRuntimeGapReason, checkPolicy } from '../../src/mms/harness/policy'
 import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { BotManifest } from '../../src/shared/bots/personal/definition'
@@ -40,8 +40,8 @@ afterEach(() => {
 
 const manifest = (patch: Partial<BotManifest> = {}): BotManifest => ({
   tools: ['read', 'list', 'search', 'edit', 'write'],
-  appTools: ['thread_read'],
-  mcp: [{ serverId: 'github', tool: 'create_issue' }],
+  appTools: ['web_search'],
+  mcp: [],
   skills: ['release-notes'],
   workspace: { roots: [root], access: 'write' },
   budget: { maxActiveMs: 15 * 60_000, maxTurns: 40 },
@@ -66,13 +66,13 @@ const compile = (patch: Partial<CompileInput> = {}) => {
   })
 }
 
-const authorityFor = (grant: BotManifest = manifest(), waiting = false, narrow?: CompileInput['thread']['narrow']): BotAuthority => {
+const authorityFor = (grant: BotManifest = manifest(), waiting = false, narrow?: CompileInput['thread']['narrow'], mcp: Array<`${string}::${string}`> = []): BotAuthority => {
   const compiled = compile({ grant, thread: { narrow } })
   if (!compiled.ok) throw new Error(compiled.error.message)
   return createBotAuthority({
     activationId: 'act-1',
     role: 'activation',
-    permissions: compiled.permissions,
+    permissions: { ...compiled.permissions, mcp },
     waiting: () => waiting,
     counters: { charge: () => ({ ok: true, count: 1 }) },
     time: { deadline: () => 0, signal: new AbortController().signal },
@@ -85,7 +85,7 @@ describe('compileBotThread', () => {
     const compiled = compile()
     if (!compiled.ok) throw new Error(compiled.error.message)
     expect(compiled.policy).toEqual({
-      tools: { allow: ['edit', 'find', 'grep', 'ls', 'mcp__github__create_issue', 'read', 'thread_read', 'write'] },
+      tools: { allow: ['edit', 'find', 'grep', 'ls', 'read', 'web_search', 'write'] },
       approvals: 'grants',
       approve: 'host',
       budget: { maxWallMs: 600_000, maxTurns: 40 },
@@ -109,6 +109,25 @@ describe('compileBotThread', () => {
     expect(compile({ grant: manifest({ workspace: { roots: [join(profile, 'bots')], access: 'read' } }) })).toMatchObject({ ok: false })
   })
 
+  it('refuses delegation and thread tools, and user MCP tools, even in a stored grant', () => {
+    for (const tool of ['delegate_task', 'thread_fork', 'queue_enqueue', 'create_subagent', 'ask_user'])
+      expect(compile({ grant: manifest({ appTools: [tool] }) }), tool).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', reason: expect.stringContaining(tool) } })
+    expect(compile({ grant: manifest({ mcp: [{ serverId: 'github', tool: 'create_issue' }] }) })).toMatchObject({ ok: false, error: { missing: ['mcp'], reason: 'Your MCP tools are not available to bots yet.' } })
+  })
+
+  it('compiles the published revision held inside the grant: a narrower revision really narrows', () => {
+    const grant = manifest({ workspace: { roots: [root, other], access: 'write' }, budget: { maxActiveMs: 60 * 60_000, maxTurns: 100 } })
+    const revision = manifest({ tools: ['read'], appTools: [], workspace: { roots: [root], access: 'read' }, budget: { maxActiveMs: 5 * 60_000, maxTurns: 10 } })
+    const compiled = compile({ grant, revision })
+    if (!compiled.ok) throw new Error(compiled.error.message)
+    expect(compiled.policy.tools).toEqual({ allow: ['read'] })
+    expect(compiled.permissions).toMatchObject({ tools: ['read'], appTools: [], workspace: { roots: [root], access: 'read' } })
+    // A revision can never name more than the grant: what the grant lacks is dropped.
+    const wider = compile({ grant: manifest({ tools: ['read'], appTools: [] }), revision: manifest({ tools: ['read', 'edit'] }) })
+    if (!wider.ok) throw new Error(wider.error.message)
+    expect(wider.permissions.tools).toEqual(['read'])
+  })
+
   it('passes a runtime that lacks a tool through as its refusal', () => {
     const compiled = compile({
       grant: manifest({ tools: ['web_fetch'] }),
@@ -127,17 +146,25 @@ describe('host approvals in checkPolicy', () => {
   }
 
   it('holds only where the runtime holds every call to the bot authority', () => {
-    expect(checkPolicy(exact, policy(), 'pi:x', undefined, { hostApprovals: true })).toEqual({ ok: true })
-    expect(checkPolicy(exact, policy(), 'pi:x')).toMatchObject({ ok: false, error: { missing: ['toolControl'] } })
+    expect(checkPolicy(exact, policy(), 'pi:x', undefined, { hostApprovals: true, botRuntimeGaps: [] })).toEqual({ ok: true })
+    expect(checkPolicy(exact, policy(), 'pi:x', undefined, { botRuntimeGaps: [] })).toMatchObject({ ok: false, error: { missing: ['toolControl'] } })
     // A definition authority asking the host is still refused: nothing answers it there.
-    expect(checkPolicy(exact, { ...policy(), authority: { kind: 'definition', digest: 'd' } }, 'pi:x', undefined, { hostApprovals: true })).toMatchObject({ ok: false })
+    expect(checkPolicy(exact, { ...policy(), authority: { kind: 'definition', digest: 'd' } }, 'pi:x', undefined, { hostApprovals: true, botRuntimeGaps: [] })).toMatchObject({ ok: false })
   })
 
   it('still needs exact tool control and hard budgets', () => {
     const approvalOnly = { ...exact, toolControl: 'approval_only' } as HarnessCaps
-    expect(checkPolicy(approvalOnly, policy(), 'claude', undefined, { hostApprovals: true })).toMatchObject({ ok: false, error: { missing: ['toolControl'] } })
+    expect(checkPolicy(approvalOnly, policy(), 'claude', undefined, { hostApprovals: true, botRuntimeGaps: [] })).toMatchObject({ ok: false, error: { missing: ['toolControl'] } })
     const observed = { ...exact, budgets: 'observed' } as HarnessCaps
-    expect(checkPolicy(observed, policy(), 'pi:x', undefined, { hostApprovals: true })).toMatchObject({ ok: false, error: { missing: ['budgets'] } })
+    expect(checkPolicy(observed, policy(), 'pi:x', undefined, { hostApprovals: true, botRuntimeGaps: [] })).toMatchObject({ ok: false, error: { missing: ['budgets'] } })
+  })
+
+  it('fail closed: no runtime runs a bot while bot runtimes still lack a piece, whatever its caps', () => {
+    expect(BOT_RUNTIME_GAPS.length).toBeGreaterThan(0)
+    const refused = checkPolicy(exact, policy(), 'pi:x', undefined, { hostApprovals: true })
+    expect(refused).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['containment'], reason: botRuntimeGapReason(BOT_RUNTIME_GAPS) } })
+    // Policies without a bot authority are untouched.
+    expect(checkPolicy(exact, { mode: 'default', approvals: 'grants' })).toEqual({ ok: true })
   })
 })
 
@@ -180,13 +207,15 @@ describe('BotAuthority.check', () => {
   })
 
   it('refuses an ungranted tool, skill, app tool and a same-named MCP tool on another server', () => {
-    const bot = authorityFor(manifest({ tools: ['read'] }))
+    const bot = authorityFor(manifest({ tools: ['read'] }), false, undefined, ['github::create_issue'])
     expect(bot.check(edit(join(root, 'a')))).toEqual({ ok: false, wall: { kind: 'tool', tool: 'edit' } })
     expect(bot.check({ kind: 'skill', skill: 'deploy' })).toEqual({ ok: false, wall: { kind: 'skill', skill: 'deploy' } })
     expect(bot.check({ kind: 'skill', skill: 'release-notes' })).toEqual({ ok: true })
     expect(bot.check({ kind: 'app', tool: 'delegate_task', args: {} })).toEqual({ ok: false, wall: { kind: 'tool', tool: 'delegate_task' } })
     expect(bot.check({ kind: 'mcp', server: 'github', tool: 'create_issue', args: {} })).toEqual({ ok: true })
     expect(bot.check({ kind: 'mcp', server: 'gitlab', tool: 'create_issue', args: {} })).toEqual({ ok: false, wall: { kind: 'mcp', server: 'gitlab', tool: 'create_issue' } })
+    // A separator in a call's parts never matches another pair.
+    expect(bot.check({ kind: 'mcp', server: 'github::create', tool: 'issue', args: {} })).toMatchObject({ ok: false })
   })
 
   it('refuses everything while the activation waits for its owner', () => {
@@ -217,7 +246,7 @@ describe('the check points', () => {
 
   it('the registry refuses an ungranted app tool and skill, in plain words', () => {
     const bot = authorityFor()
-    expect(botAppToolRefusal(bot, 'thread_read', {})).toBeUndefined()
+    expect(botAppToolRefusal(bot, 'web_search', {})).toBeUndefined()
     expect(botAppToolRefusal(bot, 'delegate_task', {})).toBe('This bot is not allowed to use delegate_task.')
     expect(botAppToolRefusal(bot, 'load_skill', { skill: 'release-notes' })).toBeUndefined()
     expect(botAppToolRefusal(bot, 'load_skill', { skill: 'deploy' })).toBe('This bot is not allowed to use the skill deploy.')

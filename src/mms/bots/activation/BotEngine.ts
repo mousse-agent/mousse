@@ -13,7 +13,7 @@ import {
   type BotPermissionLine,
   type BotThreadSpec
 } from '../../../shared/bots/personal/definition'
-import { addedPermissions, manifestSubset } from '../../../shared/bots/personal/manifest'
+import { addedPermissions, intersectManifest, manifestSubset } from '../../../shared/bots/personal/manifest'
 import type { Enforceability, HarnessError, RunPolicy } from '../../../shared/harness/types'
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { RunEngine } from '../../run/RunEngine'
@@ -62,8 +62,10 @@ export interface BotEngineHost {
   stopThread?(threadId: string): Promise<unknown> | void
   /** `bots.changed`. */
   changed?(event: { botId?: string; activationId?: string }): void
-  /** Milliseconds, for active time (default: `Date.now`). */
+  /** Wall-clock milliseconds, for the times `bots.db` records (default: `Date.now`). */
   clock?(): number
+  /** Monotonic milliseconds, for measured active time (default: `performance.now`). */
+  monotonic?(): number
   setTimer?(fn: () => void, ms: number): { clear(): void }
 }
 
@@ -90,6 +92,8 @@ export interface BotSummary {
 interface LiveDispatch {
   controller: AbortController
   timer: { clear(): void } | undefined
+  /** When the dispatch started, on the monotonic clock: what settlement measures from. */
+  startedMono: number
 }
 
 const ACTIVE_HOLDING = ['running'] as const
@@ -107,6 +111,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   private now(): number {
     return this.host.clock?.() ?? Date.now()
+  }
+
+  private monotonic(): number {
+    return this.host.monotonic?.() ?? performance.now()
   }
 
   private changed(event: { botId?: string; activationId?: string }): void {
@@ -212,16 +220,36 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const refused = [published.main].map((thread) => this.checkThread(thread, published.permissions)).find((check) => !check.ok)
     if (refused) throw new BotEngineError('policy_unenforceable', refused.reason ?? 'A thread of this bot cannot hold its permissions.', { thread: refused.key })
     const grant = this.store.approve(botId, digest, published.permissions)
+    // Work running under the replaced grant ends now: it never goes on under another grant.
+    this.endUnderGrant(botId, 'grant_replaced', grant.digest)
     this.changed({ botId })
     return { digest: grant.digest, approvedAt: grant.approvedAt }
   }
 
-  /** Withdraws the grant: nothing of the bot runs until it is approved again. */
+  /** Withdraws the grant: its running dispatch is stopped, and nothing of the bot runs until it is approved again. */
   revoke(botId: string): boolean {
     this.entry(botId)
     const revoked = this.store.revoke(botId)
+    this.endUnderGrant(botId, 'grant_revoked')
     this.changed({ botId })
     return revoked
+  }
+
+  /**
+   * Ends the bot's queued and running activations made under any grant but `keep`: each is
+   * cancelled with `reason`, and a running one's dispatch is stopped (its authority refuses every
+   * call from now on, since it checks the grant on each one).
+   */
+  private endUnderGrant(botId: string, reason: string, keep?: string): void {
+    const ended = this.store.db.transaction(() => {
+      const rows = this.store.activationsIn(botId, ['queued', 'running']).filter((row) => row.grantDigest !== keep)
+      return rows.filter((row) => this.store.moveActivation(row.id, [row.status], 'cancelled', { endReason: reason }))
+    })
+    for (const row of ended) {
+      if (row.status === 'running') void this.stopRun(row)
+      else this.cleanup({ ...row, status: 'cancelled' })
+      this.changed({ botId, activationId: row.id })
+    }
   }
 
   private published(botId: string): BotDefinition {
@@ -284,7 +312,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         idempotencyKey: key,
         status: 'queued',
         createdAt: this.store.now()
-      }, { ...countLimits(grant.manifest), ...spendLimits(grant.manifest) })
+      }, limitsOf(intersectManifest(published.permissions, grant.manifest)))
       const queued = this.store.activationsIn(input.botId, ['queued'])
       const over = queued.slice(0, Math.max(0, queued.length - MAX_QUEUED_ACTIVATIONS))
       for (const activation of over) this.store.moveActivation(activation.id, ['queued'], 'cancelled', { endReason: 'queue_full' })
@@ -358,11 +386,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const scratch = join(this.store.directory, 'scratch', row.id)
       mkdirSync(join(scratch, 'tmp'), { recursive: true, mode: 0o700 })
       const clientRequestId = `${row.id}:d1`
-      this.store.db.transaction(() => {
-        this.store.moveActivation(row.id, ['running'], 'running', { threadId: thread.id, scratch })
+      const still = this.store.db.transaction(() => {
+        if (!this.store.moveActivation(row.id, ['running'], 'running', { threadId: thread.id, scratch })) return false
         if (!this.store.dispatch(row.id, 1))
           this.store.insertDispatch({ activationId: row.id, n: 1, kind: 'start', clientRequestId, threadId: thread.id, prompt: { text: row.trigger.input }, policyDigest: row.grantDigest })
+        return true
       })
+      // Stopped (or its grant ended) while its threads were made: no dispatch, no folder left.
+      if (!still) {
+        rmSync(scratch, { recursive: true, force: true })
+        return
+      }
       const runs = this.host.runs()
       if (!runs) throw new BotEngineError('bots_unavailable', 'The run engine is not running.')
       const sent = await runs.sendWithStart(
@@ -398,19 +432,22 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const definition = this.host.definitions.revision(row.botId, row.revision)
     if (!definition || !manifestSubset(definition.permissions, grant.manifest))
       return this.block(row, 'bot_grant_revoked', 'The bot\'s permissions no longer cover this revision.')
+    // What runs: the revision's own permissions held inside the grant, so a narrower revision narrows.
+    const effective = intersectManifest(definition.permissions, grant.manifest)
     const counters = this.store.counters(row.id)
-    const remainingMs = grant.manifest.budget.maxActiveMs - counters.activeMs
+    const remainingMs = effective.budget.maxActiveMs - counters.activeMs
     if (remainingMs < ACTIVE_TIME_CHUNK_MS) return this.pause(row, 'active_time_exhausted', 'This bot used up its work time.')
     const scratch = row.scratch ?? join(this.store.directory, 'scratch', row.id)
     const compiled = compileBotThread({
       grant: grant.manifest,
+      revision: definition.permissions,
       digest: grant.digest,
       thread: definition.main,
       scratch,
       profileHome: this.host.profileHome,
       nativeNames: (tools) => this.nativeNames(definition.main.selection.instanceId, tools),
-      // The grant's own limits: the activation's scopes hold the shared counts and spend.
-      remaining: { ...countLimits(grant.manifest), ...spendLimits(grant.manifest), deadlineMs: remainingMs }
+      // The limits that run: the activation's scopes hold the shared counts and spend.
+      remaining: { ...limitsOf(effective), deadlineMs: remainingMs }
     })
     if (!compiled.ok) return this.block(row, 'policy_unenforceable', compiled.error.reason ?? compiled.error.message)
     const checked = this.host.harness.checkPolicy(definition.main.selection.instanceId, { mode: 'default', origin: 'bot', ...compiled.policy }, definition.main.selection.model)
@@ -429,14 +466,29 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!started) return refuse('bot_dispatch_started', 'This dispatch already started.')
     const controller = new AbortController()
     const deadline = startedAt + remainingMs
-    const timer = (this.host.setTimer ?? defaultTimer)(() => controller.abort(new Error('active_time_deadline')), remainingMs)
-    this.live.set(row.id, { controller, timer })
-    const spendLimited = spendLimits(grant.manifest)
+    const threadId = dispatch.threadId
+    // At the deadline the turn is aborted and its run stopped (the gateway's `maxWallMs` stops the
+    // attempt too). Both run on the daemon loop: bots stay refused until a supervisor outside it
+    // exists (`BOT_RUNTIME_GAPS`).
+    const timer = (this.host.setTimer ?? defaultTimer)(() => {
+      controller.abort(new Error('active_time_deadline'))
+      void Promise.resolve(this.host.stopThread?.(threadId)).catch(() => {})
+    }, remainingMs)
+    this.live.set(row.id, { controller, timer, startedMono: this.monotonic() })
+    const spendLimited = spendLimits(effective)
+    const grantDigest = grant.digest
     const authority = createBotAuthority({
       activationId: row.id,
       role: 'activation',
       permissions: compiled.permissions,
       waiting: () => this.store.activation(row.id)?.status === 'waiting_grant',
+      // Every call: the grant must still be the one the dispatch started under, and the dispatch live.
+      live: () => {
+        if (this.store.activeGrant(row.botId)?.digest !== grantDigest) return { kind: 'revoked' }
+        const status = this.store.activation(row.id)?.status
+        if (controller.signal.aborted || (status !== 'running' && status !== 'waiting_grant')) return { kind: 'ended' }
+        return undefined
+      },
       counters: new BotCounterScope(this.store, row.id),
       time: { deadline: () => deadline, signal: controller.signal },
       spend: Object.keys(spendLimited).length ? new BotSpendScope(this.store, row.id, payload.runId) : null
@@ -468,20 +520,30 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!runs || !run || !TERMINAL_RUN_STATUSES.has(run.status)) return
     const row = this.store.activation(payload.activationId)
     const dispatch = row ? this.store.dispatch(row.id, payload.dispatchN) : undefined
-    if (!row || !dispatch || dispatch.endedAt !== null) return
+    if (!row || !dispatch) return
+    if (dispatch.endedAt !== null) {
+      // Settled from the run's terminal event first: the executor's final message still lands.
+      if (outcome.text !== undefined)
+        this.store.run("UPDATE bot_activations SET result = ? WHERE id = ? AND status IN ('done', 'paused') AND (result IS NULL OR result = '')", outcome.text, row.id)
+      return
+    }
     const ledger = runs.tools.listForRun(run.runId)
     const live = this.live.get(row.id)
     this.live.delete(row.id)
     live?.timer?.clear()
     live?.controller.abort(new Error('dispatch_ended'))
-    const endedAt = this.now()
+    // Measured on the monotonic clock of the process that ran the dispatch. Without that measure
+    // (another process started it), nothing is refunded: the whole prepaid allowance stays charged.
+    const measured = live ? this.monotonic() - live.startedMono : undefined
     const next = this.store.db.transaction(() => {
       // 1. Time: the measured window, never above the deadline, applied once as a signed difference.
+      // `exit_at` stays empty: it is the evidence that the processes are gone, which only the
+      // active-time supervisor can give.
       if (dispatch.startedAt !== null && dispatch.deadlineMs !== null && dispatch.prepaidMs !== null) {
-        const used = Math.max(0, Math.min(dispatch.deadlineMs, endedAt - dispatch.startedAt))
+        const used = measured === undefined ? dispatch.deadlineMs : Math.max(0, Math.min(dispatch.deadlineMs, Math.ceil(measured)))
         const changed = this.store.run(
-          'UPDATE bot_dispatches SET used_ms = ?, prepaid_ms = ?, exit_at = COALESCE(exit_at, ?), settled_by = ? WHERE activation_id = ? AND n = ? AND settled_by IS NULL',
-          used, used, endedAt, 'run', row.id, dispatch.n
+          'UPDATE bot_dispatches SET used_ms = ?, prepaid_ms = ?, settled_by = ? WHERE activation_id = ? AND n = ? AND settled_by IS NULL',
+          used, used, 'run', row.id, dispatch.n
         )
         if (changed) this.store.run('UPDATE bot_counters SET active_ms = active_ms + ? WHERE activation_id = ?', used - dispatch.prepaidMs, row.id)
       }
@@ -508,6 +570,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.cleanup(next)
     this.changed({ botId: row.botId, activationId: row.id })
     void this.pump(row.botId).catch((error) => console.warn('next bot activation could not start', { botId: row.botId, error: error instanceof Error ? error.message : String(error) }))
+  }
+
+  /**
+   * Settles the dispatch of a bot run that reached a terminal state (the run engine's terminal
+   * event): whatever path the turn took, no activation is left running after its run ended.
+   */
+  settleRun(runId: string): void {
+    const dispatch = this.store.dispatchByRun(runId)
+    if (!dispatch || dispatch.endedAt !== null) return
+    this.settle({ kind: 'bot', runId, threadId: dispatch.threadId, activationId: dispatch.activationId, dispatchN: dispatch.n }, {})
   }
 
   /** The scratch folder goes when the activation has ended (it stays while it waits or is paused). */
@@ -591,6 +663,10 @@ function countLimits(manifest: BotManifest): ActivationLimits {
   if (manifest.budget.maxTurns !== undefined) limits.maxTurns = manifest.budget.maxTurns
   if (manifest.budget.maxToolCalls !== undefined) limits.maxToolCalls = manifest.budget.maxToolCalls
   return limits
+}
+
+function limitsOf(manifest: BotManifest): ActivationLimits {
+  return { ...countLimits(manifest), ...spendLimits(manifest) }
 }
 
 function spendLimits(manifest: BotManifest): ActivationLimits {

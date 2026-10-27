@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { realpathSync } from 'node:fs'
 import type { BotManifest, BotThreadSpec } from '../../../shared/bots/personal/definition'
-import { canonicalManifest, narrowManifest } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, canonicalManifest, intersectManifest, narrowManifest } from '../../../shared/bots/personal/manifest'
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { BindPolicy, HarnessCaps, HarnessError } from '../../../shared/harness/types'
 import { stableStringify } from '../../run/json'
@@ -32,6 +32,11 @@ export interface BotPermissions {
 export interface CompileInput {
   /** The active grant (what the owner approved). */
   grant: BotManifest
+  /**
+   * The published revision's own permissions, when the dispatch runs one: what runs is the
+   * revision held inside the grant, so a narrower revision really narrows. Absent: the grant.
+   */
+  revision?: BotManifest
   /** The grant's digest (`botManifestDigest`). */
   digest: string
   thread: Pick<BotThreadSpec, 'narrow'>
@@ -74,7 +79,12 @@ export function systemTempDirs(): string[] {
 }
 
 export function compileBotThread(input: CompileInput): CompileResult {
-  const manifest = narrowManifest(input.grant, input.thread.narrow)
+  const manifest = narrowManifest(input.revision ? intersectManifest(input.revision, input.grant) : input.grant, input.thread.narrow)
+  // Checked again here, so a grant stored before a tool was refused can never widen later.
+  const refusedApp = manifest.appTools.find((tool) => !BOT_APP_TOOLS.has(tool))
+  if (refusedApp !== undefined) return unenforceable(`The Mousse tool ${refusedApp} would reach other threads, act in your name or ask you.`)
+  // The user's MCP tools do not reach Pi's RPC engine yet, so a grant naming one cannot be held as approved.
+  if (manifest.mcp.length) return unenforceable('Your MCP tools are not available to bots yet.', ['mcp'])
   // Shell needs a proven sandbox on this runtime and platform; no runtime has that evidence yet.
   if (manifest.tools.includes('shell'))
     return unenforceable('Shell commands need a proven sandbox, and this runtime has none here.', ['containment'])

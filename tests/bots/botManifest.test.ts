@@ -6,7 +6,7 @@
 import { describe, expect, it } from 'vitest'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
 import type { BotManifest } from '../../src/shared/bots/personal/definition'
-import { addedPermissions, canonicalManifest, describeManifest, manifestProblem, manifestSubset, narrowManifest } from '../../src/shared/bots/personal/manifest'
+import { addedPermissions, canonicalManifest, describeManifest, intersectManifest, manifestProblem, manifestSubset, narrowManifest } from '../../src/shared/bots/personal/manifest'
 
 const manifest = (patch: Partial<BotManifest> = {}): BotManifest => ({
   tools: ['read', 'edit'],
@@ -116,5 +116,55 @@ describe('manifestProblem', () => {
     expect(manifestProblem(manifest({ workspace: { roots: ['relative/path'], access: 'write' } }))).toMatch(/absolute/)
     expect(manifestProblem(manifest({ budget: { maxActiveMs: 0 } }))).toMatch(/maxActiveMs/)
     expect(manifestProblem(manifest({ audience: 'others' as never }))).toMatch(/other people/)
+  })
+})
+
+describe('round-1 review fixes', () => {
+  it('MCP identity is injective: a separator in a server or tool name is refused, and pairs never collide', () => {
+    const granted = manifest({ mcp: [{ serverId: 'server-a', tool: 'branch_write' }] })
+    expect(manifestProblem(manifest({ mcp: [{ serverId: 'server-a::branch', tool: 'write' }] }))).toBe('An MCP tool is invalid.')
+    expect(manifestProblem(manifest({ mcp: [{ serverId: 'server-a', tool: 'branch::write' }] }))).toBe('An MCP tool is invalid.')
+    expect(manifestProblem(manifest({ mcp: [{ serverId: 'a__b', tool: 'c' }] }))).toBe('An MCP tool is invalid.')
+    // Even past validation, identity is the pair itself.
+    const forged = manifest({ mcp: [{ serverId: 'server-a::branch', tool: 'write' }] })
+    const hidden = manifest({ mcp: [{ serverId: 'server-a', tool: 'branch::write' }] })
+    expect(manifestSubset(forged, hidden)).toBe(false)
+    expect(botManifestDigest(manifest({ mcp: [...forged.mcp, ...hidden.mcp] }))).not.toBe(botManifestDigest(hidden))
+    expect(manifestSubset(granted, granted)).toBe(true)
+  })
+
+  it('only web and skill app tools can be granted: delegation, thread and queue tools are refused at publish', () => {
+    expect(manifestProblem(manifest({ appTools: ['web_search', 'web_fetch'] }))).toBeUndefined()
+    for (const tool of ['delegate_task', 'continue_subagent', 'create_subagents', 'thread_fork', 'thread_merge_back', 'queue_enqueue', 'thread_read', 'ask_user', 'read'])
+      expect(manifestProblem(manifest({ appTools: [tool] })), tool).toContain(`the Mousse tool ${tool}`)
+  })
+
+  it('limits are whole numbers, and work time is at most a day', () => {
+    expect(manifestProblem(manifest({ budget: { maxActiveMs: 1.5 } }))).toMatch(/whole number/)
+    expect(manifestProblem(manifest({ budget: { maxActiveMs: 60_000, maxTurns: 2.5 } }))).toMatch(/whole number/)
+    expect(manifestProblem(manifest({ budget: { maxActiveMs: 25 * 60 * 60_000 } }))).toMatch(/24 hours/)
+    expect(manifestProblem(manifest({ budget: { maxActiveMs: 60_000, maxUsd: 0.5 } }))).toBeUndefined()
+  })
+
+  it('intersectManifest keeps only what both name, with the lower limits', () => {
+    const granted = manifest({ budget: { maxActiveMs: 60 * 60_000, maxTurns: 100 } })
+    const revision = manifest({ tools: ['read', 'write'], skills: [], workspace: { roots: ['/home/me/proj/site', '/etc'], access: 'write' }, budget: { maxActiveMs: 5 * 60_000 } })
+    expect(intersectManifest(revision, granted)).toEqual({
+      tools: ['read'], appTools: [], mcp: [{ serverId: 'github', tool: 'create_issue' }], skills: [],
+      workspace: { roots: ['/home/me/proj/site'], access: 'write' },
+      budget: { maxActiveMs: 5 * 60_000, maxTurns: 100 },
+      audience: 'owner'
+    })
+  })
+})
+
+describe('intersectManifest access', () => {
+  it('is read where either side says read', () => {
+    const write = { roots: ['/a'], access: 'write' as const }
+    const read = { roots: ['/a'], access: 'read' as const }
+    const base = { tools: [], appTools: [], mcp: [], skills: [], budget: { maxActiveMs: 60_000 }, audience: 'owner' as const }
+    expect(intersectManifest({ ...base, workspace: write }, { ...base, workspace: read }).workspace).toEqual(read)
+    expect(intersectManifest({ ...base, workspace: read }, { ...base, workspace: write }).workspace).toEqual(read)
+    expect(intersectManifest({ ...base, workspace: write }, { ...base, workspace: null }).workspace).toBeNull()
   })
 })

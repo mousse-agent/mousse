@@ -25,6 +25,11 @@ export interface BotAuthorityInput {
   permissions: BotPermissions
   /** Whether the activation waits for its owner's answer (`waiting_grant`), read at call time. */
   waiting(): boolean
+  /**
+   * Read on every call: a wall when the grant was revoked or replaced, or the activation or its
+   * dispatch ended, since the turn started. Absent: always live.
+   */
+  live?(): WallReason | undefined
   counters: CounterScope
   time: ActiveTimeScope
   spend: SpendScope | null
@@ -50,12 +55,15 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     time: input.time,
     spend: input.spend,
     check(call: NormalisedCall): { ok: true } | { ok: false; wall: WallReason } {
+      const ended = input.live?.() ?? (input.time.signal.aborted ? { kind: 'ended' as const } : undefined)
+      if (ended) return { ok: false, wall: ended }
       if (input.waiting()) return { ok: false, wall: { kind: 'waiting' } }
       switch (call.kind) {
         case 'skill':
           return skills.has(call.skill) ? { ok: true } : { ok: false, wall: { kind: 'skill', skill: call.skill } }
         case 'mcp':
-          return mcp.has(`${call.server}::${call.tool}`) ? { ok: true } : { ok: false, wall: { kind: 'mcp', server: call.server, tool: call.tool } }
+          // Granted parts never hold `:`, so a call whose parts do can never match another pair.
+          return !call.server.includes(':') && !call.tool.includes(':') && mcp.has(`${call.server}::${call.tool}`) ? { ok: true } : { ok: false, wall: { kind: 'mcp', server: call.server, tool: call.tool } }
         case 'app':
           return appTools.has(call.tool) ? { ok: true } : { ok: false, wall: { kind: 'tool', tool: call.tool } }
         case 'builtin':
