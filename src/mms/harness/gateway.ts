@@ -4,6 +4,7 @@ import type {
   BinaryFingerprint,
   BindPolicy,
   CustomModel,
+  Enforceability,
   ExecutionBinding,
   HarnessCaps,
   HarnessDriverKind,
@@ -17,7 +18,6 @@ import type {
   ProviderSelection,
   RegistryAgentView,
   RemoveInstallResult,
-  Enforceability,
   RunPolicy,
   RuntimeFacts,
   SignInResponse,
@@ -185,6 +185,12 @@ export interface HarnessGateway {
    * and the bot engine's check before anything is bound.
    */
   checkPolicy(instanceId: string, policy: RunPolicy, model?: string): Enforceability
+  /**
+   * Whether the resolved instance can enforce `policy` (`checkPolicy`, with the model's own spend
+   * facts), without binding or starting anything: the typed `policy_unenforceable` refusal admission
+   * would raise, for callers that check a candidate before they run it (definitions, PR 4 §6).
+   */
+  check(resolved: ResolvedTurnSelection, policy: RunPolicy): Enforceability
   /** The selection a binding runs: a retry or recovery of a run executes its binding, never the current selection. */
   selectionOf(binding: ExecutionBinding): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'>
   /**
@@ -1045,6 +1051,19 @@ export class Harness implements HarnessGateway {
     if (this.facts.set(record.instanceId, facts) && !this.stopped) this.changed(record.instanceId, { legacy: false })
   }
 
+  check(resolved: ResolvedTurnSelection, policy: RunPolicy): Enforceability {
+    const record = resolved.instanceId === PI_DRIVER_ID ? undefined : this.recordOrUndefined(resolved.instanceId)
+    const caps = record ? this.recordCaps(record) : resolved.caps
+    const spendModel = hasSpendLimit(policy) ? record?.runtime.spendModel?.(resolved.model) : undefined
+    const verdict = checkPolicy(caps, policy, resolved.instanceId, spendModel, record ? this.policyOptions(record) : undefined)
+    // An agent definition names the provider that cannot hold it, for the editor and the run's error.
+    if (!verdict.ok && verdict.error.missing?.includes('toolControl') && (policy.origin === 'definition' || policy.origin === 'workflow')) {
+      const name = record ? this.displayName(record) : resolved.instanceId
+      return { ok: false, error: { ...verdict.error, message: `${name} can't enforce this agent's workspace and tool limits yet, so it can't run agent definitions. ${verdict.error.message}` } }
+    }
+    return verdict
+  }
+
   async bind(resolved: ResolvedTurnSelection, input: BindInput): Promise<ExecutionBinding> {
     const record = resolved.instanceId === PI_DRIVER_ID ? undefined : this.recordOrUndefined(resolved.instanceId)
     // Nothing is admitted on an instance signed out in Mousse: no account check, no runtime start.
@@ -1278,7 +1297,12 @@ export class Harness implements HarnessGateway {
         // A wall-clock budget (a bot dispatch's deadline) stops the attempt when it runs out.
         const wallMs = spec.binding.policy.budget?.maxWallMs
         if (wallMs !== undefined) signal = AbortSignal.any([signal, AbortSignal.timeout(Math.max(0, wallMs))])
-        const input: TurnInput = { ...spec.input, signal }
+        const input: TurnInput = {
+          ...spec.input,
+          signal,
+          ...(spec.session ? { session: spec.session } : {}),
+          ...(spec.instructions ? { instructions: { ...spec.instructions } } : {})
+        }
         minted = this.mintBridge(record, spec)
         // Approvals other than `ask` are answered by the turn's bridge: a turn without one would
         // ask the user after all, so it does not run. (`grants` under Full access is the permission
@@ -1419,6 +1443,16 @@ export class Harness implements HarnessGateway {
     // An instance that approves tools itself runs only in Full access, on every dispatch of a run.
     const modeCheck = checkPermissionMode(caps, binding.policy, this.displayName(record), binding.instanceId)
     if (!modeCheck.ok) throw harnessAppError(modeCheck.error)
+    // A definition's authority (roots, script rules, unattended policy, approvals), its own
+    // instructions and a session of its own are honoured only by a runtime whose tools Mousse
+    // controls exactly (PR 4 §4); any other refuses the turn, whatever its policy says.
+    if ((spec.app?.definition || spec.instructions || spec.session === 'ephemeral') && toolControlLevel(caps) !== 'exact')
+      throw harnessAppError({
+        code: 'policy_unenforceable',
+        message: `${this.displayName(record)} cannot hold an agent definition's workspace and tool limits yet.`,
+        missing: ['toolControl'],
+        instanceId: binding.instanceId
+      })
     const stale = (what: string) => harnessFail('binding_stale', `This run started before ${what} of this provider changed, so it cannot continue on it. Send the message again.`, binding.instanceId)
     if (record.env.homeId !== binding.homeId) stale('the home')
     if (this.counters.get(binding.instanceId).configRevision !== binding.configRevision) stale('the settings')

@@ -218,6 +218,8 @@ export interface AgentExecutionResult {
   history: AgentExecutionHistoryEntry[]
   usage: AgentExecutionUsage
   error?: AgentExecutionError
+  /** The runtime's trace (a fallback it skipped, a candidate it moved from). */
+  trace?: string[]
 }
 
 export interface AgentRuntimeAttemptUsage {
@@ -259,15 +261,23 @@ export interface AgentRuntimeResult {
   history?: AgentExecutionHistoryEntry[]
   usage?: Partial<AgentExecutionUsage>
   limit?: AgentExecutionLimit
+  /** What the runtime decided along the way that the result does not show (a fallback it skipped). */
+  trace?: string[]
 }
 
-/** Root binds this to the existing Mousse native loop/provider transport. */
-export interface NativeAgentRuntimePort {
+/**
+ * Runs a definition's model turns. Root binds it to the harness gateway (`definitionRuntime.ts`):
+ * every stored `runtimeKind` goes to the same port, and the instance comes from the model ref.
+ */
+export interface AgentRuntimePort {
   run(input: AgentRuntimeInput): Promise<AgentRuntimeResult>
 }
 
+/** @deprecated The in-process loop's name for `AgentRuntimePort`; it goes with that loop. */
+export type NativeAgentRuntimePort = AgentRuntimePort
+
 export interface AgentExecutionBindings {
-  native?: NativeAgentRuntimePort
+  runtime?: AgentRuntimePort
   now?: () => number
   id?: () => string
   /** Default host authority when a request does not supply its own. */

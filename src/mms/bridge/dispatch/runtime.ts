@@ -22,7 +22,7 @@ export function mmsDispatchRuntime(options: {
   return {
     resolveAgent: async (id) => {
       const definition = structuredClone(await options.resolveAgent(id))
-      if (definition.profileId !== options.profileId || definition.runtimeKind !== 'mousse')
+      if (definition.profileId !== options.profileId)
         throw new NetError('profile_unsupported')
       if (!['thread', 'off'].includes(definition.settings.memory.scope))
         throw new NetError('profile_unsupported')

@@ -11,6 +11,7 @@ import type {
   TurnSink
 } from '../ProviderAdapter'
 import { retryContextOverflowOnce } from '../shared/retryContextOverflow'
+import { harnessAppError } from '../../../../shared/harness/types'
 
 /** The slice of `LlmClient` the pi loop drives. */
 export type PiChatClient = Pick<LlmClient, 'chat'>
@@ -45,6 +46,16 @@ export class PiLoopAdapter implements ProviderAdapter {
     ctl: TurnControl,
     host: AdapterHost
   ): Promise<TurnResult> {
+    // A definition turn through the gateway carries its authority, instructions and session in the
+    // turn; this loop holds definitions only on its own in-process path (`runAgentDefinition`'s
+    // predecessor) and would run such a turn as a plain chat. Refused before anything runs.
+    if (host.definition || input.instructions || input.session === 'ephemeral')
+      throw harnessAppError({
+        code: 'policy_unenforceable',
+        message: "The legacy engine cannot hold an agent definition's workspace and tool limits through the gateway.",
+        missing: ['toolControl'],
+        instanceId: input.instanceId
+      })
     const providerRef: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model }
     sink.providerRef(providerRef)
     // Output or tool side effects make a replay after context overflow unsafe.

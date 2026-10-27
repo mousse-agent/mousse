@@ -135,6 +135,17 @@ export interface TurnInput {
    * since) is unknown, and such a session is not resumed.
    */
   handoffUnplanned?: boolean
+  /**
+   * `ephemeral`: the turn runs in a session of its own, made for this turn and not kept for the
+   * thread (an agent definition's turn, PR 4 §6); `messages` and `nativeHistory` carry its whole
+   * conversation. Only an `exact` runtime is given one (`TurnSpec.session`).
+   */
+  session?: 'thread' | 'ephemeral'
+  /**
+   * The turn's own instructions (an agent definition's system prompt): they replace the runtime's
+   * default instructions or are appended to them. Only an `exact` runtime is given them.
+   */
+  instructions?: { text: string; placement: 'replace' | 'append' }
   /** Aborted by the orchestrator on Stop, effect timeout or shutdown. */
   signal: AbortSignal
 }

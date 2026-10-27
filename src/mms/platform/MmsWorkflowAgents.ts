@@ -36,6 +36,7 @@ import {
   type WorkflowAgentPin
 } from '../../shared/workflows/agentExecutionBindings'
 import { AgentResolver } from '../agentDefinitions/AgentResolver'
+import type { DefinitionHostBindings } from '../agentDefinitions/definitionRuntime'
 import { StaticAgentIntegrationLookup } from '../agentDefinitions/lookups'
 import {
   classifyTrustedTool,
@@ -139,6 +140,11 @@ function mapAgentError(error: unknown): DomainRpcError {
   const code = error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' ? error.code : undefined
   if (code === 'thread_unavailable' || message.includes('thread is unavailable')) return new DomainRpcError('thread_unavailable', message)
   return new DomainRpcError('invalid_input', message)
+}
+
+/** The host bindings with a workspace writer of the host's own (`DefinitionHostBindings.writer`). */
+function withWriter(host: AgentRuntimeHostBindings, writer: NonNullable<DefinitionHostBindings['writer']>): DefinitionHostBindings {
+  return { ...host, writer }
 }
 
 function userMessageFromInput(input: unknown): string {
@@ -473,11 +479,6 @@ export class MmsWorkflowAgents {
   }
 
   private assertSupported(resolved: ResolvedAgentDefinition, projectPath?: string): void {
-    if (resolved.runtimeKind !== 'mousse') {
-      throw new AgentDefinitionError('SETTINGS_UNSUPPORTED', 'External CLI execution is not yet bound to the workflow agent adapter', {
-        details: { runtimeKind: resolved.runtimeKind, hostBindings: ['qualified CLI process lifecycle'] }
-      })
-    }
     if (resolved.settings.memory.scope !== 'thread' && resolved.settings.memory.scope !== 'off') {
       throw new AgentDefinitionError('SETTINGS_UNSUPPORTED', 'Persistent agent memory is not yet bound to workflow agent runs', { pointer: '/settings/memory/scope' })
     }
@@ -621,7 +622,8 @@ export class MmsWorkflowAgents {
         input: userMessage,
         runId: request.idempotencyKey,
         source: agentSource(context.source),
-        host,
+        // The node's workspace mutation lease is held for the whole call: its mutations run under it.
+        host: writer ? withWriter(host, <T>(run: () => Promise<T>) => run()) : host,
         context: {
           profileId: context.profileId,
           threadId: executionContext.threadId,

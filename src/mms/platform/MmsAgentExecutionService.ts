@@ -34,7 +34,7 @@ interface AgentRunRecord {
   integrity?: string
 }
 
-/** Profile-owned host composition; AgentExecutionService still uses the existing LlmClient loop. */
+/** Profile-owned Try Run: a scratch workspace and its own execution thread, run through the gateway. */
 export class MmsAgentExecutionService {
   private readonly lifecycle = new OwnedWorkBarrier()
   private readonly root: string
@@ -68,9 +68,6 @@ export class MmsAgentExecutionService {
     if (resolved.profileId !== this.services.profileId || input.record.profileId !== this.services.profileId) {
       throw new AgentDefinitionError('PROFILE_MISMATCH', 'Agent execution belongs to another profile')
     }
-    if (resolved.runtimeKind !== 'mousse') throw new AgentDefinitionError('SETTINGS_UNSUPPORTED', 'External CLI execution is not yet bound to this profile run owner', {
-      details: { runtimeKind: resolved.runtimeKind, hostBindings: ['qualified CLI process lifecycle'] }
-    })
     if (resolved.settings.memory.scope !== 'thread' && resolved.settings.memory.scope !== 'off') throw new AgentDefinitionError('SETTINGS_UNSUPPORTED', 'Persistent agent memory is not yet bound to this run owner', { pointer: '/settings/memory/scope' })
     if (resolved.settings.context.selectedFiles.length > 0) throw new AgentDefinitionError('SETTINGS_UNSUPPORTED', 'Try Run uses an isolated empty scratch workspace and cannot bind selected project files yet', {
       pointer: '/settings/context/selectedFiles', details: { workspace: 'isolated-scratch', projectBound: false }
@@ -117,6 +114,7 @@ export class MmsAgentExecutionService {
         summary: (result.text || result.error?.message || 'Agent run completed without text.').slice(0, 256 * 1024), runId, threadId: thread.id,
         trace: [{ at: record.createdAt, message: `Pinned definition ${resolved.definitionId} at ${resolved.revision}` },
           { at: record.createdAt, message: 'Workspace is an isolated scratch directory; no selected project is bound.' },
+          ...(result.trace ?? []).map((message) => ({ at: new Date().toISOString(), message })),
           { at: new Date().toISOString(), message: `${result.status}; ${result.usage.totalTokens ?? 0} tokens reported` }] }
     } catch (error) {
       record.state = this.lifecycle.stopping ? 'cancelled' : 'failed'
