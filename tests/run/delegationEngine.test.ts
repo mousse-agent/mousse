@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { recordRunResultText } from '../../src/mms/run/delegation/hold'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
 describe('RunEngine delegation (SPEC §14.1-§14.2)', () => {
@@ -163,6 +164,77 @@ describe('RunEngine delegation (SPEC §14.1-§14.2)', () => {
     f.finish(child.childRunId)
     expect(f.engine.acknowledgeDelegation(child.delegationId).status).toBe('acknowledged')
     expect(f.engine.inbox.listForDelegation(child.delegationId).map((row) => row.status)).toEqual(['acknowledged'])
+  })
+
+  describe('a subagent whose run is paused by a usage limit (SPEC §5)', () => {
+    const UNTIL = '2026-10-12T01:00:00.000Z'
+    const pause = { reason: 'usage_limit', until: UNTIL, estimated: false, count: 1, autoResume: true } as const
+
+    /** A parent run, its task into `child-1`, and the child's run paused with a timer at the reset. */
+    const pausedChild = async () => {
+      f = delegationFixture()
+      const parent = await f.runningRun('parent')
+      const task = await f.delegate(parent.runId, 'call-1')
+      f.engine.markStarting(task.childRunId)
+      f.engine.markRunning(task.childRunId)
+      f.engine.pauseRun({ runId: task.childRunId, pause, resumeAt: UNTIL })
+      return { parent, task }
+    }
+
+    it('keeps the task running while the pause lasts, whatever the parent does', async () => {
+      const { parent, task } = await pausedChild()
+      f!.engine.markTerminal(parent.runId, 'completed')
+      f!.engine.settleAllWaitingDelegations()
+      expect(f!.engine.delegations.get(task.delegationId)!.status).toBe('running')
+      expect(f!.engine.inbox.listForThread('parent')).toEqual([])
+    })
+
+    it('Cancel publishes the failure to the parent', async () => {
+      const { task } = await pausedChild()
+
+      f!.engine.endPause(task.childRunId, 'cancel')
+
+      expect(f!.engine.delegations.get(task.delegationId)).toMatchObject({
+        status: 'failed',
+        result: { runStatus: 'cancelled', error: 'Paused by a usage limit; cancelled.', runId: task.childRunId }
+      })
+      expect(f!.engine.inbox.listPending('parent')).toHaveLength(1)
+    })
+
+    it.each([
+      ['automatic', 'resume', 'auto'],
+      ['manual', 'resume_now', 'user']
+    ] as const)('a %s resume publishes the resumed run\'s final text and run id, not the paused run\'s partial text', async (_name, source, from) => {
+      const { task } = await pausedChild()
+      // What the paused turn said before the limit: kept as the run's text, but not the task's result.
+      recordRunResultText(f!.store, f!.engine.getRun(task.childRunId)!, 'Partial: reading the files')
+
+      const sent = await f!.engine.dispatch({ kind: 'send', threadId: 'child-1', clientRequestId: `queue:resume:${task.childRunId}`, source, continuationOfRunId: task.childRunId })
+      if (sent.status !== 'accepted') throw new Error(`rejected: ${sent.reason}`)
+      expect(f!.engine.getRun(sent.runId)!.outcome).toMatchObject({ continuationOf: task.childRunId, resumedFromPause: from })
+      // The paused run is over, but the task keeps running: the continuation is live.
+      expect(f!.engine.getRun(task.childRunId)!.status).toBe('interrupted')
+      expect(f!.engine.delegations.get(task.delegationId)!.status).toBe('running')
+
+      f!.finish(sent.runId, 'Final: all modules reviewed')
+
+      expect(f!.engine.delegations.get(task.delegationId)).toMatchObject({
+        status: 'result_available',
+        result: { runStatus: 'completed', text: 'Final: all modules reviewed', runId: sent.runId }
+      })
+      expect(f!.engine.inbox.listPending('parent')).toHaveLength(1)
+    })
+
+    it('Stop of the parent ends the child\'s pause and cancels its timer; the task is cancelled, not published', async () => {
+      const { task } = await pausedChild()
+
+      f!.engine.stopSubtree({ threadId: 'parent', reason: 'user' })
+
+      expect(f!.engine.getRun(task.childRunId)).toMatchObject({ status: 'cancelled', outcome: { pause: { endedBy: 'stop' } } })
+      expect(f!.outbox.listForRun(task.childRunId).find((effect) => effect.kind === 'run.resume')!.status).toBe('cancelled')
+      expect(f!.engine.delegations.get(task.delegationId)!.status).toBe('cancelled')
+      expect(f!.engine.inbox.listPending('parent')).toEqual([])
+    })
   })
 
   describe('a follow-up on an existing subagent (issue #142)', () => {

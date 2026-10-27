@@ -73,7 +73,8 @@ export class RunFsck {
       ...danglingActiveAttempts(db),
       ...eventSequenceFindings(db),
       ...receiptsForUnknownRuns(db),
-      ...multipleActiveRuns(db)
+      ...multipleActiveRuns(db),
+      ...(db.userVersion() >= 10 ? pausedRunsWithLiveAttempt(db) : [])
     ]
     if (db.userVersion() < 2) return findings
     const now = new Date(db.clock()).toISOString()
@@ -319,6 +320,24 @@ function multipleActiveRuns(db: ProfileDatabase): FsckFinding[] {
       severity: 'error' as const,
       message: `Thread ${String(row.thread_id)} has ${Number(row.count)} active runs.`,
       details: { threadId: row.thread_id, runIds: String(row.run_ids).split(' ') }
+    }))
+}
+
+/** A paused run waits for a usage limit; its attempt was interrupted when it paused, so none may still be live. */
+function pausedRunsWithLiveAttempt(db: ProfileDatabase): FsckFinding[] {
+  return db
+    .statement(
+      `SELECT r.run_id, r.thread_id, a.attempt_id, a.status AS attempt_status
+       FROM runs r JOIN run_attempts a ON a.run_id = r.run_id
+       WHERE r.status = 'paused' AND a.status IN ('pending','running')
+       ORDER BY r.run_id, a.ordinal`
+    )
+    .all()
+    .map((row: Row) => ({
+      code: 'paused_run_with_live_attempt',
+      severity: 'error' as const,
+      message: `Run ${String(row.run_id)} is paused but attempt ${String(row.attempt_id)} is ${String(row.attempt_status)}.`,
+      details: { runId: row.run_id, threadId: row.thread_id, attemptId: row.attempt_id, attemptStatus: row.attempt_status }
     }))
 }
 

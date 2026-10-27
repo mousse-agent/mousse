@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { isChildBusy } from '../../src/mms/run/delegation/hold'
 import { buildSubagentView, childActivity, outcomeOfRun, taskOutcome } from '../../src/mms/run/delegation/subagentView'
 import { subagentAncestorsOf, subagentParentsOfEvent } from '../../src/mms/run/delegation/subagentEvents'
+import { isRunningSubagent } from '../../src/shared/subagents'
 import type { DelegationRecord, RunRecord } from '../../src/mms/run/types'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
@@ -66,6 +67,21 @@ describe('subagent status model (plan §3.3)', () => {
       expect(only()).toMatchObject({ activity: 'needs_input', state: 'needs_input' })
       pending.delete('child-1')
       expect(only().state).toBe('working')
+    })
+
+    it('a paused child run is paused, its task still running; the row counts as going', async () => {
+      const { child } = await started()
+      running(child.childRunId)
+      f!.engine.pauseRun({
+        runId: child.childRunId,
+        pause: { reason: 'usage_limit', until: '2026-10-12T01:00:00.000Z', estimated: false, count: 1, autoResume: true }
+      })
+      expect(only()).toMatchObject({ activity: 'paused', state: 'paused' })
+      expect(only().tasks[0]).toMatchObject({ outcome: 'running' })
+      expect(isRunningSubagent(only())).toBe(true)
+      // The question still outranks it, as for any live run.
+      pending.add('child-1')
+      expect(only().state).toBe('needs_input')
     })
   })
 
@@ -420,6 +436,12 @@ describe('subagent status model (plan §3.3)', () => {
       expect(childActivity([run('queued'), run('starting')], false)).toBe('starting')
       expect(childActivity([run('queued'), run('finalizing')], false)).toBe('working')
       expect(childActivity([run('running')], true)).toBe('needs_input')
+      expect(childActivity([run('queued'), run('paused')], false)).toBe('paused')
+      expect(childActivity([run('paused'), run('completed')], true)).toBe('needs_input')
+    })
+
+    it('outcomeOfRun treats a paused run as still running', () => {
+      expect(outcomeOfRun('paused')).toBe('running')
     })
   })
 

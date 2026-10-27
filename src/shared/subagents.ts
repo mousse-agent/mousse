@@ -14,9 +14,9 @@ export type SubagentTaskOutcome = 'running' | 'waiting_for_subagents' | 'done' |
 /**
  * What the child thread is doing right now, from its runs and pending questions. `waiting` is a
  * child with no live run that is still busy: an outbound delegation is running, or an inbox row
- * addressed to it is not yet acknowledged.
+ * addressed to it is not yet acknowledged. `paused` is a run waiting for a usage limit to reset.
  */
-export type SubagentActivity = 'needs_input' | 'queued' | 'starting' | 'working' | 'waiting' | 'idle'
+export type SubagentActivity = 'needs_input' | 'queued' | 'starting' | 'working' | 'paused' | 'waiting' | 'idle'
 
 /** What a row shows: the child's activity while it has any, else its latest task's outcome. */
 export type SubagentState =
@@ -92,7 +92,7 @@ export interface SubagentsUpdatedEvent {
 }
 
 /** States of a subagent that has not finished: it is working, queued, needs input, or waits on its own subagents. */
-const RUNNING_SUBAGENT_STATES: ReadonlySet<SubagentState> = new Set<SubagentState>(['needs_input', 'queued', 'starting', 'working', 'waiting'])
+const RUNNING_SUBAGENT_STATES: ReadonlySet<SubagentState> = new Set<SubagentState>(['needs_input', 'queued', 'starting', 'working', 'paused', 'waiting'])
 
 /** True while a subagent is still going, so a list can count it as "running". */
 export function isRunningSubagent(subagent: Pick<SubagentSummary, 'state'>): boolean {

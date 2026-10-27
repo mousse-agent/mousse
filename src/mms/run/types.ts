@@ -4,12 +4,14 @@ export type RunStatus =
   | 'starting'
   | 'running'
   | 'finalizing'
+  | 'paused'
   | 'completed'
   | 'interrupted'
   | 'failed'
   | 'cancelled'
   | 'uncertain'
 
+/** `paused` is not terminal: the run waits for a usage limit to reset and is not active (SPEC §5). */
 export const TERMINAL_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
   'completed',
   'interrupted',
@@ -23,6 +25,28 @@ export type AttemptStatus =
 
 export type AttemptReason = 'initial' | 'steer_restart' | 'retry' | 'recovery'
 
+/** How a pause ended (`RunPause.endedBy`); `stale` leaves the run `paused` without its timer. */
+export type RunPauseEnd = 'resume' | 'resume_now' | 'user_message' | 'cancel' | 'stop' | 'deleted' | 'stale'
+
+/** Why a run is `paused` and when it continues (SPEC §5). Stored in `RunOutcome.pause`. */
+export interface RunPause {
+  reason: 'usage_limit'
+  /** ISO time the limit resets: the provider's, or an estimate. */
+  until: string
+  estimated: boolean
+  provider?: string
+  /** The window that was hit (`five_hour`, `weekly`, …). */
+  limitKind?: string
+  /** Automatic resumes in a row on the thread, this pause included. */
+  count: number
+  /** Whether a `run.resume` timer was armed for `until`. */
+  autoResume: boolean
+  /** The message queue item that carries the continue turn (`resume:<runId>`). */
+  resumeItemId?: string
+  resumeRequested?: 'auto' | 'user'
+  endedBy?: RunPauseEnd
+}
+
 export interface RunOutcome {
   error?: string
   interruptedBy?: 'user' | 'daemon_restart' | 'provider'
@@ -30,6 +54,10 @@ export interface RunOutcome {
   stopRequested?: boolean
   /** SPEC §16.4: the interrupted run this send continues ("Continue" after a restart). */
   continuationOf?: string
+  /** Set while the run is `paused`, and kept after the pause ended. */
+  pause?: RunPause
+  /** On the run that continues a paused one: whether the timer (`auto`) or a person (`user`) resumed it. */
+  resumedFromPause?: 'auto' | 'user'
   /**
    * SPEC §16.3: how an undo run restored the conversation (`featureGates.canUndoNatively`):
    * `native_rollback` when the provider can roll its own session back, else `checkpoint`.
@@ -127,6 +155,7 @@ export type EffectKind =
   | 'checkpoint.capture'
   | 'title.generate'
   | 'workspace.cleanup'
+  | 'run.resume'
 
 /** `process_bound` effects die with the daemon; `replay_safe` effects are re-queued on boot. */
 export type EffectClass = 'process_bound' | 'replay_safe'
@@ -150,8 +179,9 @@ export interface EffectKindSpec {
   /**
    * Lane override. Without one the lane is the effect's thread. `control` effects (interrupt,
    * steer, answers) must reach a live turn, so they never queue behind the thread's `turn.start`.
+   * `resume` effects wait for a usage limit to reset and must not hold up the thread's other work.
    */
-  lane?: 'title' | 'control'
+  lane?: 'title' | 'control' | 'resume'
   /** Defaults to `DEFAULT_EFFECT_MAX_ATTEMPTS`. */
   maxAttempts?: number
 }
@@ -196,7 +226,18 @@ export const EFFECT_KIND_SPEC: Record<EffectKind, EffectKindSpec> = {
   },
   'checkpoint.capture': { class: 'replay_safe', timeoutMs: 2 * 60_000, reserved: true },
   'title.generate': { class: 'replay_safe', timeoutMs: 60_000, lane: 'title', reserved: true },
-  'workspace.cleanup': { class: 'replay_safe', timeoutMs: 5 * 60_000, reserved: true }
+  'workspace.cleanup': { class: 'replay_safe', timeoutMs: 5 * 60_000, reserved: true },
+  'run.resume': { class: 'replay_safe', timeoutMs: 60_000, lane: 'resume' }
+}
+
+/** Payload of a `run.resume` effect: continue the paused run `runId` at `until` (or now, for Resume now). */
+export interface RunResumePayload {
+  kind: 'resume'
+  runId: string
+  threadId: string
+  until: string
+  /** A person pressed Resume now: the executor skips the staleness guard. */
+  manual?: true
 }
 
 export interface EffectRecord {

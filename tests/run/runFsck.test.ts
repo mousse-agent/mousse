@@ -93,6 +93,29 @@ describe('RunFsck', () => {
     expect(findings[0].details).toMatchObject({ reason: 'not_running' })
   })
 
+  it('reports no findings for a paused run whose attempt was interrupted', () => {
+    const store = seed()
+    const run = store.createRun({ threadId: 't', source: 'gui' })
+    const attempt = store.createAttempt({ runId: run.runId, reason: 'initial' })
+    const running = store.casRunStatus({ runId: run.runId, expectedEpoch: 0, status: 'running' })
+    store.setAttemptStatus({ attemptId: attempt.attemptId, status: 'running' })
+    store.casRunStatus({ runId: run.runId, expectedEpoch: running.epoch, status: 'paused' })
+    store.setAttemptStatus({ attemptId: attempt.attemptId, status: 'interrupted' })
+    expect(check()).toEqual([])
+  })
+
+  it('paused_run_with_live_attempt: a paused run whose attempt is still running', () => {
+    const store = seed()
+    const run = store.createRun({ threadId: 't', source: 'gui' })
+    const attempt = store.createAttempt({ runId: run.runId, reason: 'initial' })
+    const running = store.casRunStatus({ runId: run.runId, expectedEpoch: 0, status: 'running' })
+    store.setAttemptStatus({ attemptId: attempt.attemptId, status: 'running' })
+    store.casRunStatus({ runId: run.runId, expectedEpoch: running.epoch, status: 'paused' })
+    const findings = check()
+    expect(findings.map((finding) => finding.code)).toEqual(['paused_run_with_live_attempt'])
+    expect(findings[0]).toMatchObject({ severity: 'error', details: { runId: run.runId, attemptId: attempt.attemptId, attemptStatus: 'running' } })
+  })
+
   it('event_seq_gap: run event for an unknown run', () => {
     const store = seed()
     store.appendEvent({ threadId: 't', runId: 'run:thread:t:ordinal:9', type: 'run.status', payload: {} })

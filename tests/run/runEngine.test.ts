@@ -4,11 +4,13 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { RunStoreError } from '../../src/mms/run/db/RunStoreError'
+import { CommandRejection } from '../../src/mms/run/db/RunStoreError'
 import { Reconciler } from '../../src/mms/run/Reconciler'
 import { LocalActionGated, RunEngine } from '../../src/mms/run/RunEngine'
 
 import { RunStore } from '../../src/mms/run/RunStore'
-import type { ThreadEvent } from '../../src/mms/run/types'
+import type { RunPause, RunPauseEnd, RunResumePayload, ThreadEvent } from '../../src/mms/run/types'
+import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
 function codeOf(work: () => unknown): string | undefined {
   try {
@@ -450,5 +452,473 @@ describe('RunEngine.runLocalAction (SPEC §16.3)', () => {
     engine.markTerminal(engine.listRuns('t')[0].runId, 'completed')
     const { runId } = await engine.runLocalAction({ threadId: 't', source: 'undo' }, async () => 'ok', { gate: () => undefined, outcome: { undoStrategy: 'checkpoint' } })
     expect(engine.getRun(runId)).toMatchObject({ status: 'completed', outcome: { undoStrategy: 'checkpoint' } })
+  })
+})
+
+function reasonOf(work: () => unknown): string | undefined {
+  try {
+    work()
+  } catch (error) {
+    if (error instanceof CommandRejection) return error.reason
+    if (error instanceof RunStoreError) return error.code
+    throw error
+  }
+  return undefined
+}
+
+describe('RunEngine pause (SPEC §5)', () => {
+  let f: DelegationFixture | undefined
+  afterEach(() => {
+    f?.dispose()
+    f = undefined
+  })
+
+  /** The fixture clock starts at 2026-10-12T00:00:00Z; the limit resets an hour later. */
+  const UNTIL = '2026-10-12T01:00:00.000Z'
+  const pauseOf = (overrides: Partial<RunPause> = {}): RunPause => ({
+    reason: 'usage_limit',
+    until: UNTIL,
+    estimated: false,
+    provider: 'claude',
+    limitKind: 'five_hour',
+    count: 1,
+    autoResume: true,
+    ...overrides
+  })
+  const fixture = (): DelegationFixture => (f = delegationFixture())
+  /** A run in `running` on `threadId`, paused with a `run.resume` timer at `UNTIL`. */
+  const paused = async (threadId = 't1') => {
+    const run = await f!.runningRun(threadId)
+    return f!.engine.pauseRun({ runId: run.runId, pause: pauseOf(), resumeAt: UNTIL })
+  }
+  const resumeEffects = (runId: string) => f!.outbox.listForRun(runId).filter((effect) => effect.kind === 'run.resume')
+  const sendFrom = (threadId: string, clientRequestId: string, source: string, continuationOfRunId?: string) =>
+    f!.engine.dispatch({ kind: 'send', threadId, clientRequestId, source, ...(continuationOfRunId ? { continuationOfRunId } : {}) })
+
+  it('pauseRun moves a running run to paused with its attempt interrupted and a timer at the reset', async () => {
+    fixture()
+    const run = await f!.runningRun('t1')
+    const next = f!.engine.pauseRun({ runId: run.runId, pause: pauseOf(), resumeAt: UNTIL })
+
+    expect(next).toMatchObject({ status: 'paused', epoch: run.epoch + 1, outcome: { pause: pauseOf() } })
+    expect(f!.store.getAttempt(next.activeAttemptId!)).toMatchObject({ status: 'interrupted' })
+    expect(f!.store.getPausedRun('t1')).toEqual(next)
+    // Paused is not active: the thread takes a person's message, and the run is not terminal.
+    expect(f!.store.getActiveRun('t1')).toBeNull()
+    expect(next.completedAt).toBeNull()
+    const [timer] = resumeEffects(run.runId)
+    expect(timer).toMatchObject({
+      effectId: `effect:${run.runId}:run.resume:1`,
+      class: 'replay_safe',
+      status: 'pending',
+      availableAt: UNTIL,
+      payload: { kind: 'resume', runId: run.runId, threadId: 't1', until: UNTIL } satisfies RunResumePayload
+    })
+    expect(f!.store.listEvents('t1').filter((event) => event.type === 'run.status').at(-1)!.payload).toMatchObject({ status: 'paused' })
+  })
+
+  it('pauseRun arms no timer without resumeAt, and works from finalizing', async () => {
+    fixture()
+    const run = await f!.runningRun('t1')
+    f!.engine.markFinalizing(run.runId)
+    const next = f!.engine.pauseRun({ runId: run.runId, pause: pauseOf({ autoResume: false }) })
+    expect(next.status).toBe('paused')
+    expect(resumeEffects(run.runId)).toEqual([])
+  })
+
+  it('pauseRun is refused for a run being stopped, and changes nothing', async () => {
+    fixture()
+    const run = await f!.runningRun('t1')
+    const stop = await f!.engine.dispatch({ kind: 'stop', threadId: 't1', clientRequestId: 'stop-1', runId: run.runId })
+    expect(stop.status).toBe('accepted')
+
+    expect(reasonOf(() => f!.engine.pauseRun({ runId: run.runId, pause: pauseOf(), resumeAt: UNTIL }))).toBe('bad_request')
+
+    expect(f!.store.getRun(run.runId)).toMatchObject({ status: 'running', outcome: { stopRequested: true } })
+    expect(resumeEffects(run.runId)).toEqual([])
+    expect(f!.store.getAttempt(f!.store.getRun(run.runId)!.activeAttemptId!)).toMatchObject({ status: 'running' })
+  })
+
+  it('pauseRun is refused for a run that is not running, or on a thread that is already paused', async () => {
+    fixture()
+    const queued = await sendFrom('t1', 'send-1', 'gui')
+    if (queued.status !== 'accepted') throw new Error('send rejected')
+    expect(reasonOf(() => f!.engine.pauseRun({ runId: queued.runId, pause: pauseOf() }))).toBe('bad_request')
+    f!.engine.markStarting(queued.runId)
+    f!.engine.markRunning(queued.runId)
+    f!.engine.pauseRun({ runId: queued.runId, pause: pauseOf() })
+    // A second run cannot be paused beside the first: `getPausedRun` allows one per thread.
+    const other = f!.store.createRun({ threadId: 't1', source: 'gui' })
+    f!.store.casRunStatus({ runId: other.runId, expectedEpoch: 0, status: 'running' })
+    expect(reasonOf(() => f!.engine.pauseRun({ runId: other.runId, pause: pauseOf() }))).toBe('conflict')
+  })
+
+  describe('requestResume', () => {
+    it('replaces the pending timer with one available now that is marked manual', async () => {
+      fixture()
+      const run = await paused()
+      const [timer] = resumeEffects(run.runId)
+
+      const effect = f!.engine.requestResume(run.runId, true)
+
+      expect(f!.outbox.get(timer.effectId)).toMatchObject({ status: 'cancelled', lastError: 'resume_requested' })
+      expect(effect).toMatchObject({
+        effectId: `effect:${run.runId}:run.resume:2`,
+        status: 'pending',
+        availableAt: f!.now(),
+        payload: { kind: 'resume', runId: run.runId, until: UNTIL, manual: true }
+      })
+      expect(f!.store.getRun(run.runId)!.status).toBe('paused')
+    })
+
+    it('a second press returns the manual effect and writes nothing', async () => {
+      fixture()
+      const run = await paused()
+      const first = f!.engine.requestResume(run.runId, true)
+      const effects = f!.store.db.statement('SELECT COUNT(*) AS n FROM effects').get()!.n
+      expect(f!.engine.requestResume(run.runId, true)).toEqual(first)
+      expect(f!.store.db.statement('SELECT COUNT(*) AS n FROM effects').get()!.n).toBe(effects)
+    })
+
+    it('leaves a timer that is already running alone and returns it', async () => {
+      fixture()
+      const run = await paused()
+      f!.advance(61 * 60_000)
+      const claimed = f!.outbox.claimNext('owner', f!.now())
+      expect(claimed).toMatchObject({ kind: 'run.resume', status: 'running' })
+
+      expect(f!.engine.requestResume(run.runId, true)).toMatchObject({ effectId: claimed!.effectId, status: 'running' })
+      expect(resumeEffects(run.runId)).toHaveLength(1)
+    })
+
+    it('works on a stale pause and is refused with a conflict on a run that is not paused', async () => {
+      fixture()
+      const run = await paused()
+      f!.engine.endPause(run.runId, 'stale')
+      expect(f!.engine.requestResume(run.runId, true).status).toBe('pending')
+
+      f!.engine.endPause(run.runId, 'cancel')
+      expect(reasonOf(() => f!.engine.requestResume(run.runId, true))).toBe('conflict')
+      const running = await f!.runningRun('t2')
+      expect(reasonOf(() => f!.engine.requestResume(running.runId, true))).toBe('conflict')
+      expect(reasonOf(() => f!.engine.requestResume('run:missing', false))).toBe('conflict')
+    })
+  })
+
+  describe('endPause', () => {
+    const cases: Array<[RunPauseEnd, 'cancelled' | 'interrupted', 'user' | 'provider']> = [
+      ['user_message', 'cancelled', 'user'],
+      ['cancel', 'cancelled', 'user'],
+      ['stop', 'cancelled', 'user'],
+      ['deleted', 'cancelled', 'user'],
+      ['resume', 'interrupted', 'provider'],
+      ['resume_now', 'interrupted', 'provider']
+    ]
+    it.each(cases)('%s ends the run %s (interrupted by %s) and cancels only a pending timer', async (endedBy, status, interruptedBy) => {
+      fixture()
+      const run = await paused()
+      const [timer] = resumeEffects(run.runId)
+
+      const ended = f!.engine.endPause(run.runId, endedBy)
+
+      expect(ended).toMatchObject({ status, outcome: { interruptedBy, pause: { ...pauseOf(), endedBy } } })
+      if (status === 'cancelled') expect(ended.outcome!.error).toBe('Paused by a usage limit; cancelled.')
+      else expect(ended.outcome!.error).toBeUndefined()
+      expect(ended.completedAt).not.toBeNull()
+      expect(f!.outbox.get(timer.effectId)).toMatchObject({ status: 'cancelled', lastError: endedBy })
+      expect(f!.store.getPausedRun('t1')).toBeNull()
+      expect(f!.store.getAttempt(ended.activeAttemptId!)).toMatchObject({ status: 'interrupted' })
+    })
+
+    it('never cancels a timer that is running: its executor settles itself', async () => {
+      fixture()
+      const run = await paused()
+      f!.advance(61 * 60_000)
+      const claimed = f!.outbox.claimNext('owner', f!.now())!
+
+      f!.engine.endPause(run.runId, 'user_message')
+
+      expect(f!.outbox.get(claimed.effectId)).toMatchObject({ status: 'running' })
+    })
+
+    it('stale leaves the run paused without a timer and keeps every effect', async () => {
+      fixture()
+      const run = await paused()
+      const ended = f!.engine.endPause(run.runId, 'stale')
+      expect(ended).toMatchObject({ status: 'paused', outcome: { pause: { ...pauseOf(), autoResume: false, endedBy: 'stale' } } })
+      expect(resumeEffects(run.runId).map((effect) => effect.status)).toEqual(['pending'])
+    })
+
+    it('is refused with a conflict once the pause has ended', async () => {
+      fixture()
+      const run = await paused()
+      f!.engine.endPause(run.runId, 'cancel')
+      expect(reasonOf(() => f!.engine.endPause(run.runId, 'cancel'))).toBe('conflict')
+      expect(reasonOf(() => f!.engine.endPause('run:missing', 'cancel'))).toBe('conflict')
+    })
+
+    it('updatePause patches a paused run only', async () => {
+      fixture()
+      const run = await paused()
+      const next = f!.engine.updatePause(run.runId, { resumeItemId: `resume:${run.runId}`, resumeRequested: 'auto' })
+      expect(next.outcome!.pause).toMatchObject({ resumeItemId: `resume:${run.runId}`, resumeRequested: 'auto', until: UNTIL })
+      f!.engine.endPause(run.runId, 'cancel')
+      expect(reasonOf(() => f!.engine.updatePause(run.runId, { autoResume: false }))).toBe('conflict')
+    })
+  })
+
+  describe('a send on a paused thread', () => {
+    it("a person's message creates its run, then ends the pause in the same transaction", async () => {
+      fixture()
+      const run = await paused()
+      const item = f!.engine.updatePause(run.runId, { resumeItemId: `resume:${run.runId}` })
+      expect(item.outcome!.pause!.resumeItemId).toBe(`resume:${run.runId}`)
+
+      const sent = await sendFrom('t1', 'message-1', 'gui')
+
+      expect(sent).toEqual({
+        status: 'accepted',
+        runId: 'run:thread:t1:ordinal:2',
+        sequence: expect.any(Number),
+        replayed: false,
+        endedPause: { runId: run.runId, resumeItemId: `resume:${run.runId}` }
+      })
+      expect(f!.store.getRun(run.runId)).toMatchObject({ status: 'cancelled', outcome: { interruptedBy: 'user', pause: { endedBy: 'user_message' } } })
+      expect(f!.store.getRun(sent.status === 'accepted' ? sent.runId : '')).toMatchObject({ status: 'queued', source: 'gui' })
+      expect(resumeEffects(run.runId).map((effect) => effect.status)).toEqual(['cancelled'])
+      // A retry replays the receipt, endedPause included, and writes nothing.
+      expect(await sendFrom('t1', 'message-1', 'gui')).toEqual({ ...sent, replayed: true })
+    })
+
+    it('a subagent keeps its task running across the hand-over', async () => {
+      fixture()
+      const parent = await f!.runningRun('parent')
+      const task = await f!.delegate(parent.runId, 'call-1')
+      f!.engine.markStarting(task.childRunId)
+      f!.engine.markRunning(task.childRunId)
+      f!.engine.pauseRun({ runId: task.childRunId, pause: pauseOf(), resumeAt: UNTIL })
+      expect(f!.engine.delegations.get(task.delegationId)!.status).toBe('running')
+
+      await sendFrom('child-1', 'follow-up', 'gui')
+
+      expect(f!.store.getRun(task.childRunId)!.status).toBe('cancelled')
+      expect(f!.engine.delegations.get(task.delegationId)!.status).toBe('running')
+    })
+
+    it('the continue turn records what it continues, ends the pause as a hand-over and cancels the timer', async () => {
+      fixture()
+      const run = await paused()
+      const sent = await sendFrom('t1', 'queue:resume:1', 'resume', run.runId)
+      if (sent.status !== 'accepted') throw new Error(`rejected: ${sent.reason}`)
+
+      expect(sent.endedPause).toEqual({ runId: run.runId })
+      expect(f!.store.getRun(sent.runId)).toMatchObject({
+        status: 'queued',
+        source: 'resume',
+        outcome: { continuationOf: run.runId, resumedFromPause: 'auto' }
+      })
+      expect(f!.store.getRun(run.runId)).toMatchObject({ status: 'interrupted', outcome: { interruptedBy: 'provider', pause: { endedBy: 'resume' } } })
+      expect(resumeEffects(run.runId).map((effect) => effect.status)).toEqual(['cancelled'])
+      // A repeated `queue:resume:<runId>` is a replay: one continuation.
+      expect(await sendFrom('t1', 'queue:resume:1', 'resume', run.runId)).toEqual({ ...sent, replayed: true })
+      expect(f!.store.listRuns('t1')).toHaveLength(2)
+    })
+
+    it('Resume now records that a person resumed', async () => {
+      fixture()
+      const run = await paused()
+      const sent = await sendFrom('t1', 'queue:resume:now', 'resume_now', run.runId)
+      if (sent.status !== 'accepted') throw new Error(`rejected: ${sent.reason}`)
+      expect(f!.store.getRun(sent.runId)!.outcome).toEqual({ continuationOf: run.runId, resumedFromPause: 'user' })
+      expect(f!.store.getRun(run.runId)!.outcome!.pause!.endedBy).toBe('resume_now')
+    })
+
+    it('a continue turn after the pause ended is rejected pause_ended and creates nothing', async () => {
+      fixture()
+      const run = await paused()
+      await sendFrom('t1', 'message-1', 'gui')
+      const runs = f!.store.listRuns('t1').length
+
+      expect(await sendFrom('t1', 'queue:resume:late', 'resume', run.runId)).toMatchObject({ status: 'rejected', reason: 'pause_ended' })
+      expect(f!.store.listRuns('t1')).toHaveLength(runs)
+      expect(f!.store.getReceipt('queue:resume:late')).toBeNull()
+    })
+
+    it('a continue turn must name the paused run', async () => {
+      fixture()
+      const run = await paused()
+      expect(await sendFrom('t1', 'resume-a', 'resume')).toMatchObject({ status: 'rejected', reason: 'pause_ended' })
+      expect(await sendFrom('t1', 'resume-b', 'resume', 'run:thread:t1:ordinal:9')).toMatchObject({ status: 'rejected', reason: 'pause_ended' })
+      expect(f!.store.getRun(run.runId)!.status).toBe('paused')
+    })
+
+    it('only a continue turn may name a paused run as the run it continues', async () => {
+      fixture()
+      const run = await paused()
+      expect(await sendFrom('t1', 'continue-1', 'gui', run.runId)).toMatchObject({ status: 'rejected', reason: 'continuation_source_active' })
+      expect(f!.store.getRun(run.runId)!.status).toBe('paused')
+    })
+
+    it.each(['wake', 'provider-continuation', 'integration', 'steer-late'])('work started by %s is rejected thread_paused and leaves the pause and its timer intact', async (source) => {
+      fixture()
+      const run = await paused()
+      const before = f!.store.maxSeq('t1')
+
+      expect(await sendFrom('t1', `${source}-1`, source)).toMatchObject({ status: 'rejected', reason: 'thread_paused' })
+
+      expect(f!.store.getRun(run.runId)!.status).toBe('paused')
+      expect(resumeEffects(run.runId).map((effect) => effect.status)).toEqual(['pending'])
+      expect(f!.store.listRuns('t1')).toHaveLength(1)
+      expect(f!.store.maxSeq('t1')).toBe(before)
+    })
+
+    it("a parent's continue_subagent on a paused subagent waits: thread_paused, the count chain survives", async () => {
+      fixture()
+      const parent = await f!.runningRun('parent')
+      const task = await f!.delegate(parent.runId, 'call-1')
+      f!.engine.markStarting(task.childRunId)
+      f!.engine.markRunning(task.childRunId)
+      f!.engine.pauseRun({ runId: task.childRunId, pause: pauseOf(), resumeAt: UNTIL })
+
+      const result = await f!.engine.dispatch({
+        kind: 'send',
+        threadId: 'child-1',
+        clientRequestId: 'delegation:follow-up',
+        source: 'delegation',
+        delegation: { parentThreadId: 'parent', parentRunId: parent.runId, prompt: 'More', wake: 'always' }
+      })
+
+      expect(result).toMatchObject({ status: 'rejected', reason: 'thread_paused' })
+      expect(f!.store.getRun(task.childRunId)!.status).toBe('paused')
+      expect(resumeEffects(task.childRunId).map((effect) => effect.status)).toEqual(['pending'])
+      expect(f!.engine.delegations.listForChildThread('child-1')).toHaveLength(1)
+    })
+  })
+
+  describe('markStarting on a paused thread', () => {
+    it("a person's run that was queued before the pause ends it by starting", async () => {
+      fixture()
+      const first = await f!.runningRun('t1')
+      const queued = await sendFrom('t1', 'message-2', 'gui')
+      if (queued.status !== 'accepted') throw new Error('send rejected')
+      f!.engine.pauseRun({ runId: first.runId, pause: pauseOf(), resumeAt: UNTIL })
+
+      f!.engine.markStarting(queued.runId)
+
+      expect(f!.store.getRun(first.runId)).toMatchObject({ status: 'cancelled', outcome: { interruptedBy: 'user', pause: { endedBy: 'user_message' } } })
+      expect(f!.store.getRun(queued.runId)!.status).toBe('starting')
+      expect(resumeEffects(first.runId).map((effect) => effect.status)).toEqual(['cancelled'])
+    })
+
+    it('a run started on the thread\'s behalf is refused with a conflict and the pause and its timer stay', async () => {
+      fixture()
+      const first = await f!.runningRun('t1')
+      const wake = f!.store.createRun({ threadId: 't1', source: 'wake' })
+      f!.engine.pauseRun({ runId: first.runId, pause: pauseOf(), resumeAt: UNTIL })
+
+      expect(reasonOf(() => f!.engine.markStarting(wake.runId))).toBe('conflict')
+
+      expect(f!.store.getRun(wake.runId)!.status).toBe('queued')
+      expect(f!.store.getRun(first.runId)!.status).toBe('paused')
+      expect(resumeEffects(first.runId).map((effect) => effect.status)).toEqual(['pending'])
+    })
+  })
+
+  describe('Stop', () => {
+    it('a Stop after the continue turn was admitted cancels it, and the fence refuses it at execution', async () => {
+      fixture()
+      const run = await paused()
+      const sent = await sendFrom('t1', 'queue:resume:1', 'resume', run.runId)
+      if (sent.status !== 'accepted') throw new Error('send rejected')
+      expect(f!.engine.isFenced(sent.runId)).toBe(false)
+
+      const stopped = f!.engine.stopSubtree({ threadId: 't1', reason: 'user' })
+
+      expect(stopped.cancelledRuns).toEqual([{ threadId: 't1', runId: sent.runId }])
+      expect(f!.store.getRun(sent.runId)).toMatchObject({ status: 'cancelled', outcome: { interruptedBy: 'user' } })
+      expect(f!.engine.isFenced(sent.runId)).toBe(true)
+    })
+
+    it("a parent's Stop after its subagent's continue turn was admitted cancels that turn too", async () => {
+      fixture()
+      const parent = await f!.runningRun('parent')
+      const task = await f!.delegate(parent.runId, 'call-1')
+      f!.engine.markStarting(task.childRunId)
+      f!.engine.markRunning(task.childRunId)
+      f!.engine.pauseRun({ runId: task.childRunId, pause: pauseOf(), resumeAt: UNTIL })
+      const sent = await sendFrom('child-1', 'queue:resume:child', 'resume_now', task.childRunId)
+      if (sent.status !== 'accepted') throw new Error('send rejected')
+
+      const stopped = f!.engine.stopSubtree({ threadId: 'parent', reason: 'user' })
+
+      expect(stopped.cancelledRuns).toEqual([{ threadId: 'child-1', runId: sent.runId }])
+      expect(f!.store.getRun(sent.runId)).toMatchObject({ status: 'cancelled', outcome: { interruptedBy: 'user' } })
+      expect(f!.engine.isFenced(sent.runId)).toBe(true)
+      expect(f!.engine.delegations.get(task.delegationId)!.status).toBe('cancelled')
+    })
+
+    it('ends the paused run of the thread and cancels its timer', async () => {
+      fixture()
+      const run = await paused()
+      const stopped = f!.engine.stopSubtree({ threadId: 't1', reason: 'user' })
+      expect(stopped.status).toBe('stopped')
+      expect(stopped.cancelledRuns).toEqual([{ threadId: 't1', runId: run.runId }])
+      expect(f!.store.getRun(run.runId)).toMatchObject({ status: 'cancelled', outcome: { interruptedBy: 'user', pause: { endedBy: 'stop' } } })
+      expect(resumeEffects(run.runId).map((effect) => effect.status)).toEqual(['cancelled'])
+    })
+
+    it("a parent's Stop ends the pause of its subagent, cancels the task and the timer", async () => {
+      fixture()
+      const parent = await f!.runningRun('parent')
+      const task = await f!.delegate(parent.runId, 'call-1')
+      f!.engine.markStarting(task.childRunId)
+      f!.engine.markRunning(task.childRunId)
+      f!.engine.pauseRun({ runId: task.childRunId, pause: pauseOf(), resumeAt: UNTIL })
+
+      const stopped = f!.engine.stopSubtree({ threadId: 'parent', reason: 'user' })
+
+      expect(stopped.threads).toEqual(['parent', 'child-1'])
+      expect(f!.store.getRun(task.childRunId)).toMatchObject({ status: 'cancelled', outcome: { pause: { endedBy: 'stop' } } })
+      expect(resumeEffects(task.childRunId).map((effect) => effect.status)).toEqual(['cancelled'])
+      expect(f!.engine.delegations.get(task.delegationId)!.status).toBe('cancelled')
+    })
+
+    it('a Stop that names the paused run ends it, through a stop command and through stopSubtree', async () => {
+      fixture()
+      const run = await paused()
+      const ignoredBefore = f!.store.listEvents('t1').filter((event) => event.type === 'command.ignored').length
+      const stop = await f!.engine.dispatch({ kind: 'stop', threadId: 't1', clientRequestId: 'stop-1', runId: run.runId })
+      expect(stop).toMatchObject({ status: 'accepted', runId: run.runId })
+      expect(f!.store.getRun(run.runId)).toMatchObject({ status: 'cancelled', outcome: { pause: { endedBy: 'stop' } } })
+      expect(f!.store.getRun(run.runId)!.outcome!.stopRequested).toBeUndefined()
+      expect(f!.store.listEvents('t1').filter((event) => event.type === 'command.ignored')).toHaveLength(ignoredBefore)
+
+      const second = await paused('t2')
+      const scoped = f!.engine.stopSubtree({ threadId: 't2', reason: 'user', runId: second.runId })
+      expect(scoped.status).toBe('stopped')
+      expect(f!.store.getRun(second.runId)!.status).toBe('cancelled')
+    })
+
+    it('task_cancel of a subagent with a paused run ends the pause and the timer', async () => {
+      fixture()
+      const parent = await f!.runningRun('parent')
+      const task = await f!.delegate(parent.runId, 'call-1')
+      f!.engine.markStarting(task.childRunId)
+      f!.engine.markRunning(task.childRunId)
+      f!.engine.pauseRun({ runId: task.childRunId, pause: pauseOf(), resumeAt: UNTIL })
+
+      expect(await f!.engine.cancelDelegation(task.delegationId)).toEqual([task.delegationId])
+
+      expect(f!.store.getRun(task.childRunId)).toMatchObject({ status: 'cancelled', outcome: { pause: { endedBy: 'stop' } } })
+      expect(resumeEffects(task.childRunId).map((effect) => effect.status)).toEqual(['cancelled'])
+    })
+
+    it('a steer for a paused run is ignored: only a message or a Stop reaches it', async () => {
+      fixture()
+      const run = await paused()
+      const steer = await f!.engine.dispatch({ kind: 'steer', threadId: 't1', clientRequestId: 'steer-1', runId: run.runId })
+      expect(steer).toMatchObject({ status: 'ignored', reason: 'run_not_active' })
+      expect(f!.store.getRun(run.runId)!.status).toBe('paused')
+    })
   })
 })

@@ -638,6 +638,8 @@ export interface QueuedMessage {
   internal?: boolean
   /** Run Engine run this item executes when drained. */
   runId?: string
+  /** The paused run a resume item continues (`resume:<runId>`); its drain sends the continue turn for it. */
+  continuationOfRunId?: string
   /** Inbox rows whose notice this item delivers (a steer that missed its turn); rebuilt when it runs. */
   inboxIds?: string[]
   /** The subagent results the item's message reports. */

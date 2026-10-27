@@ -155,6 +155,9 @@ const RESULT_SOURCES: ReadonlySet<string> = new Set([
   // A steer that missed its turn runs as the next turn: it is how the subagent answers a notice.
   'steer-late',
   'steer-followup',
+  // The continue turn after a usage-limit pause is how a paused subagent finishes its task.
+  'resume',
+  'resume_now',
   ...FOLLOW_UP_SOURCES
   // Not sources, consistent with `FOLLOW_UP_SOURCES`: `cli-steer` and `protocol-steer` are steers a
   // client sent to a live turn (they join it and have no run of their own to answer), and
