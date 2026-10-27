@@ -468,6 +468,10 @@ export class PiRpcEngine implements ProviderAdapter {
    * or an earlier run of Mousse is refused.
    */
   private oauthHandle: string
+  /** The credential retirement in progress, if any; starts and forks wait for it. */
+  private retiring: Promise<void> | undefined
+  /** The credential epoch in which a start last wrote `auth.json`. */
+  private authWrittenEpoch = -1
   /** Moves on with every credential change; a start or refresh across one is refused. */
   private credentialEpoch = 0
   /** The account claim of the credential the processes were given (when it has one). */
@@ -508,7 +512,9 @@ export class PiRpcEngine implements ProviderAdapter {
     atomicWriteJsonSync(this.savedPath, all, { mode: 0o600 })
     // A session no thread maps to is never resumed or forked again: its file goes (best effort: a
     // process still closing may hold it open on Windows).
-    if (previous && previous !== entry?.sessionId && !Object.values(all).some((other) => other.sessionId === previous)) {
+    // Never one a thread's live process runs, either.
+    const live = [...this.threads.values()].some((thread) => thread.sessionId === previous && !thread.dead)
+    if (previous && previous !== entry?.sessionId && !live && !Object.values(all).some((other) => other.sessionId === previous)) {
       const file = sessionFileOf(this.sessionsDir, previous)
       if (file) {
         try {
@@ -536,16 +542,43 @@ export class PiRpcEngine implements ProviderAdapter {
    * with the handle it held, so none refreshes into the next account; Pi's `auth.json` is removed
    * once they closed (a refresh answered just before cannot write it back), and pending forks made
    * under the old credential are dropped.
+   *
+   * Starts and forks wait until it finished (`afterRetirement`), so nothing of the new credential
+   * exists while it cleans up: it never removes another epoch's `auth.json`, branch or session.
    */
-  async retireCredentials(): Promise<void> {
-    this.credentialEpoch += 1
+  retireCredentials(): Promise<void> {
+    const previous = this.retiring ?? Promise.resolve()
+    const retiring = previous.then(() => this.retire())
+    const gate = retiring.finally(() => {
+      if (this.retiring === gate) this.retiring = undefined
+    })
+    this.retiring = gate
+    return gate
+  }
+
+  private async retire(): Promise<void> {
+    const epoch = ++this.credentialEpoch
     this.oauthHandle = piOAuthHandle(this.options.instanceId)
     this.oauthSubject = undefined
+    for (const [threadId, entry] of Object.entries(this.saved())) if (entry.pendingFork) this.save(threadId, undefined)
     const closing = [...this.threads.values()].map((thread) => this.kill(thread))
     this.removeAuthFile()
     await within(Promise.allSettled([...closing, ...[...this.closing].map((thread) => thread.closed)]), CLEANUP_DEADLINE_MS)
-    this.removeAuthFile()
-    for (const [threadId, entry] of Object.entries(this.saved())) if (entry.pendingFork) this.save(threadId, undefined)
+    // Again once the old processes closed (a refresh answered just before cannot write it back).
+    if (epoch === this.credentialEpoch && this.authWrittenEpoch !== epoch) this.removeAuthFile()
+  }
+
+  /** Waits while a credential retirement runs (a start or fork then belongs to the new credential). */
+  private async afterRetirement(): Promise<void> {
+    while (this.retiring) await this.retiring.catch(() => {})
+  }
+
+  /**
+   * An API key or ambient credential changed: processes not running a turn go (the next turn starts
+   * with the new credential, as a rotated key restarts a process anyway); running turns finish.
+   */
+  releaseIdle(): void {
+    for (const thread of [...this.threads.values()]) if (!thread.turn && !thread.starting) void this.kill(thread)
   }
 
   /** Pi's private `auth.json` (an OAuth access token) is removed. */
@@ -715,6 +748,7 @@ export class PiRpcEngine implements ProviderAdapter {
   }
 
   private async start(thread: PiThreadProcess, sessionId: string | undefined, cancelled: () => boolean = () => false): Promise<void> {
+    await this.afterRetirement()
     const stopping = () => protocolError(this.options.instanceId, `${this.options.label} is stopping.`)
     if (this.stopped) throw stopping()
     await this.bridge.start()
@@ -734,6 +768,7 @@ export class PiRpcEngine implements ProviderAdapter {
     if (epoch !== this.credentialEpoch) throw protocolError(this.options.instanceId, `${this.options.label}'s sign-in changed while it started.`)
     if (grant) this.oauthSubject ??= grant.subject
     writePiAuth(env.home, this.options.provider, grant ? piOAuthCredential(grant, this.oauthHandle) : undefined)
+    this.authWrittenEpoch = epoch
     const registration = this.bridge.register({
       ...(this.options.oauth
         ? {
@@ -1061,7 +1096,9 @@ export class PiRpcEngine implements ProviderAdapter {
       mkdirSync(cwd, { recursive: true })
       const history = input.nativeHistory ?? ''
       const saved = this.saved()[input.threadId]
-      let resume = saved && saved.historyFingerprint === fingerprint(history) ? saved.sessionId : undefined
+      // A pending fork resumes its branch whatever the thread's history says: a first turn that failed
+      // or stopped left its message in the history, and the retry forked again from the parent.
+      let resume = saved && (saved.pendingFork || saved.historyFingerprint === fingerprint(history)) ? saved.sessionId : undefined
       // A cold resume needs the session's file, in this workspace (a fork's first turn runs in its own).
       const warm = this.threads.get(input.threadId)
       const warmOnIt = warm?.alive && warm.cwd === cwd && warm.sessionId === resume
@@ -1293,6 +1330,7 @@ export class PiRpcEngine implements ProviderAdapter {
    * to, when the turn's branch point is unknown (a turn before 2c, a stopped one) or Pi declines.
    */
   async forkSession(ref: ProviderRef, _atTurnOrdinal: number, target?: { threadId: string }): Promise<ProviderRef | null> {
+    await this.afterRetirement()
     if (!target || !ref.sessionId || !ref.nativeTurnId || !ref.model || this.stopped) return null
     const leaf = Object.values(this.saved()).find((entry) => entry.sessionId === ref.sessionId)?.turnLeaves?.[ref.nativeTurnId]
     const file = leaf ? sessionFileOf(this.sessionsDir, ref.sessionId) : undefined

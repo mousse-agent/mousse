@@ -61,6 +61,12 @@ function sha256(text: string): string {
   return createHash('sha256').update(text).digest('hex')
 }
 
+/**
+ * What a verified ambient sign-in (Bedrock, Vertex) stores as its key (pi-ai's `getEnvApiKey`): a
+ * marker, not a credential. The account comes from the environment, and Pi is never handed it.
+ */
+const AMBIENT_PLACEHOLDER = '<authenticated>'
+
 /** Providers whose credential is the machine's own cloud sign-in (profile and region decide the account). */
 const AMBIENT: Readonly<Record<string, readonly string[]>> = Object.freeze({
   'amazon-bedrock': ['AWS_PROFILE', 'AWS_REGION', 'AWS_DEFAULT_REGION', 'AWS_ACCESS_KEY_ID', 'AWS_BEARER_TOKEN_BEDROCK'],
@@ -74,7 +80,7 @@ const AMBIENT: Readonly<Record<string, readonly string[]>> = Object.freeze({
  * when none can be established (the history is then handed over on every turn).
  */
 export function piCredentialSubject(providerId: string, credential: Record<string, unknown> | undefined, env: NodeJS.ProcessEnv): string | undefined {
-  if (credential?.type === 'api_key' && typeof credential.key === 'string' && credential.key) return `apikey:${sha256(credential.key)}`
+  if (credential?.type === 'api_key' && typeof credential.key === 'string' && credential.key && credential.key !== AMBIENT_PLACEHOLDER) return `apikey:${sha256(credential.key)}`
   if (credential?.type === 'oauth') {
     const claim = oauthSubject(credential, providerId)
     return claim ? `oauth:${sha256(`${providerId}|${claim}`)}` : undefined
@@ -117,7 +123,8 @@ export function piRpcProfileOptions(inputs: PiProfileInputs): PiRpcDriverOptions
     apiKey: (providerId) => {
       const auth = inputs.auth()
       // `has` refuses a Claude subscription token stored as an Anthropic key.
-      return auth?.has(providerId) ? auth.storedApiKey(providerId) : undefined
+      const key = auth?.has(providerId) ? auth.storedApiKey(providerId) : undefined
+      return key === AMBIENT_PLACEHOLDER ? undefined : key
     },
     credentialEnv: (providerId) => {
       const stored = credential(providerId)

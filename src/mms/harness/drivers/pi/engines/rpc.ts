@@ -114,33 +114,67 @@ export function createRpcRuntime(context: DriverContext, providerId: string, lab
     }
   })
   const base = piInstanceRuntime(context.instanceId, providerId, credentials, adapter)
+  const credential = credentialChanges(engine, () => options.identity?.(providerId), Boolean(options.identity))
   return {
     ...base,
     spendModel: (model) => engine.spendModel(model),
     setLiveHost: (host) => notice.setHost(host),
-    ...(options.identity ? { identity: async () => options.identity!(providerId) } : {}),
-    // A sign-in, a sign-out or any other credential change retires every process with the
-    // credential it held, and Pi's auth.json with them.
+    ...(options.identity ? { identity: () => credential.read() } : {}),
+    // A sign-in that succeeded, a sign-out or another surface's change, compared by the credential's
+    // subject: an OAuth sign-in, sign-out or account change retires every process with what it held
+    // (handle, auth.json); a key or ambient change lets running turns finish.
     ...(base.signIn
       ? {
           signIn: async (...args: Parameters<NonNullable<DriverRuntime['signIn']>>) => {
+            const before = await credential.known()
             const result = await base.signIn!(...args)
-            await engine.retireCredentials()
+            if (result.success) await credential.changed(before)
             return result
           }
         }
       : {}),
     signOut: async () => {
+      const before = await credential.known()
       try {
         await base.signOut?.()
       } finally {
-        await engine.retireCredentials()
+        await credential.changed(before)
       }
     },
-    credentialsChanged: () => engine.retireCredentials(),
+    credentialsChanged: async () => credential.changed(await credential.known()),
     forgetConversation: (threadId) => engine.forgetConversation(threadId),
     terminate: (ref) => engine.terminate(ref),
     stop: () => engine.stop()
+  }
+}
+
+/**
+ * What a credential change does to the engine, from the credential's subject before and after
+ * (`identity`). Without an identity source every change retires (nothing can be compared).
+ */
+function credentialChanges(engine: PiRpcEngine, subject: () => string | undefined | Promise<string | undefined>, comparable: boolean) {
+  let last: { subject: string | undefined } | undefined
+  const read = async (): Promise<string | undefined> => {
+    let value: string | undefined
+    try {
+      value = await subject()
+    } catch {
+      value = undefined
+    }
+    last = { subject: value }
+    return value
+  }
+  return {
+    read,
+    /** The subject before a change: the last one read, else read now. */
+    known: async (): Promise<string | undefined> => (last ? last.subject : read()),
+    changed: async (before: string | undefined): Promise<void> => {
+      const after = await read()
+      if (!comparable) return engine.retireCredentials()
+      if (before === after) return
+      if (before?.startsWith('oauth:') || after?.startsWith('oauth:')) return engine.retireCredentials()
+      engine.releaseIdle()
+    }
   }
 }
 

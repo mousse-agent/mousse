@@ -1,0 +1,242 @@
+/**
+ * PR 2c review round 2.
+ * - Credential retirement is serialized against starts and forks: a start or fork that comes
+ *   while it cleans up waits, so the new credential's `auth.json`, branch and session survive it.
+ * - What a credential change retires depends on what changed: an OAuth sign-in, sign-out or account
+ *   change retires every process; a key or ambient change only idle ones; an unchanged credential
+ *   (a re-verify, a cancelled prompt, a failed sign-in) nothing.
+ * - A verified Bedrock or Vertex sign-in's `<authenticated>` marker is no key: the identity comes
+ *   from the environment, and Pi is never handed it.
+ * - A native fork whose first turn failed works on the resend: the orchestrator forks again and the
+ *   new branch is resumed although the thread's history now holds the failed turn's message.
+ */
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { DriverContext } from '../../src/mms/harness/driver'
+import { createRpcRuntime } from '../../src/mms/harness/drivers/pi/engines/rpc'
+import { piCredentialSubject, piRpcProfileOptions, type PiProfileAuth } from '../../src/mms/harness/drivers/pi/profile'
+import { PiRpcEngine } from '../../src/mms/harness/pi/engine'
+import { piRuntimePaths } from '../../src/mms/harness/pi/launch'
+import type { PiOAuthSource } from '../../src/mms/harness/pi/oauthBroker'
+import { phase6Daemon, piAdapter, PI } from '../run/phase6Fixture'
+
+const cleanups: Array<() => unknown> = []
+afterEach(async () => {
+  for (const clean of cleanups.splice(0).reverse()) await clean()
+  vi.restoreAllMocks()
+})
+
+function scratch(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'mousse-pi-retire-'))
+  cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+  return dir
+}
+
+const unused = () => { throw new Error('must not spawn or reach a provider') }
+const grant = (id: string) => ({ access: `fake-${id}`, expires: Date.now() + 3_600_000, fields: {}, subject: `credential:${id}` })
+
+/** An engine whose processes are never spawned (the launch input throws), over a fake vault. */
+function fixture() {
+  const dir = scratch()
+  const home = join(dir, 'home')
+  mkdirSync(home)
+  let current = grant('A')
+  const oauth: PiOAuthSource = { credential: async () => current, refresh: async () => current }
+  const engine = new PiRpcEngine({ instanceId: 'pi:openrouter', provider: 'openrouter', label: 'OpenRouter', capabilities: {} as never, env: () => ({ home, env: {} }) as never, stateDir: dir, runtime: unused, catalog: unused, oauth })
+  cleanups.push(() => engine.stop())
+  const internals = engine as unknown as {
+    bridge: { start(): Promise<void>; register(handlers: unknown): unknown }
+    closing: Set<{ closed: Promise<unknown> }>
+    threads: Map<string, unknown>
+    start(thread: unknown): Promise<void>
+    send(thread: unknown, command: { type: string }): Promise<unknown>
+    processFor(...args: unknown[]): Promise<unknown>
+    runTurn(...args: unknown[]): Promise<unknown>
+  }
+  return { dir, home, engine, internals, replace: (id: string) => { current = grant(id) } }
+}
+
+function session(dir: string, id: string, cwd: string): string {
+  mkdirSync(join(dir, 'sessions'), { recursive: true })
+  const file = join(dir, 'sessions', `2026-10-27T00-00-00-000Z_${id}.jsonl`)
+  writeFileSync(file, `${JSON.stringify({ type: 'session', id, cwd })}\n`)
+  return file
+}
+
+/** Holds the old processes' cleanup until `release`. */
+function heldCleanup(internals: ReturnType<typeof fixture>['internals']) {
+  let release!: () => void
+  const old = { closed: new Promise<void>((resolve) => (release = resolve)) }
+  internals.closing.add(old)
+  return () => {
+    release()
+    internals.closing.delete(old)
+  }
+}
+
+describe('credential retirement against starts and forks', () => {
+  it('keeps the auth.json a start of the new credential writes while old processes still close', async () => {
+    const s = fixture()
+    const release = heldCleanup(s.internals)
+    const retiring = s.engine.retireCredentials()
+    s.replace('B')
+    vi.spyOn(s.internals.bridge, 'start').mockResolvedValue(undefined)
+    vi.spyOn(s.internals.bridge, 'register').mockReturnValue({ address: {}, close: () => {} })
+    // The start waits for the retirement, then writes B's credential (and fails at the launch seam).
+    const start = s.internals.start({ model: 'm', thinking: 'off', threadId: 'new', cancelled: false })
+    release()
+    await retiring
+    await expect(start).rejects.toThrow('must not spawn')
+    expect(JSON.parse(readFileSync(join(s.home, 'auth.json'), 'utf8')).openrouter.access).toBe('fake-B')
+  })
+
+  it('keeps a fork made while old processes still close, with its session', async () => {
+    const s = fixture()
+    const file = join(s.dir, 'threads.json')
+    session(s.dir, 'parent', s.dir)
+    const branchFile = session(s.dir, 'branch', s.dir)
+    writeFileSync(file, JSON.stringify({ source: { sessionId: 'parent', turnLeaves: { sourceTurn: 'leaf' } } }))
+    const release = heldCleanup(s.internals)
+    const retiring = s.engine.retireCredentials()
+    vi.spyOn(s.internals, 'start').mockResolvedValue(undefined)
+    vi.spyOn(s.internals, 'send').mockImplementation(async (_thread, command) => (command.type === 'get_entries' ? { entries: [] } : command.type === 'clone' ? { cancelled: false } : { sessionId: 'branch' }))
+    const forking = s.engine.forkSession({ provider: 'openrouter', sessionId: 'parent', nativeTurnId: 'sourceTurn', model: 'm' }, 1, { threadId: 'fork' })
+    release()
+    await retiring
+    expect((await forking)?.sessionId).toBe('branch')
+    expect(JSON.parse(readFileSync(file, 'utf8')).fork).toMatchObject({ sessionId: 'branch', pendingFork: true })
+    expect(existsSync(branchFile)).toBe(true)
+    // The fork's first turn resumes the branch, not an empty session.
+    const processFor = vi.spyOn(s.internals, 'processFor').mockResolvedValue({ thread: {}, resumed: true })
+    vi.spyOn(s.internals, 'runTurn').mockResolvedValue({ text: 'with parent context', aborted: false })
+    const input = { threadId: 'fork', instanceId: 'pi:openrouter', llmProvider: 'openrouter', model: 'm', mode: 'agent', prompt: 'Continue', messages: [], nativeHistory: '', cwd: s.dir, signal: new AbortController().signal }
+    await expect(s.engine.startTurn(input as never, { providerRef: () => {} } as never, {} as never, {} as never)).resolves.toMatchObject({ text: 'with parent context' })
+    expect(processFor.mock.calls[0]?.[2]).toBe('branch')
+  })
+})
+
+describe('what a credential change retires', () => {
+  function runtimeWith(subjects: Array<string | undefined>, signIn = vi.fn(async () => ({ success: true }))) {
+    const dir = scratch()
+    const home = join(dir, 'home')
+    mkdirSync(home)
+    let index = 0
+    const identity = () => subjects[Math.min(index++, subjects.length - 1)]
+    const context = { instanceId: 'pi:openrouter', builtIn: true, config: { home: 'default', engine: 'rpc' }, env: { home, env: {} }, profileHome: dir, installationHome: dir, stateDir: dir, questions: {}, findBinary: () => undefined, changed: () => {} } as unknown as DriverContext
+    const runtime = createRpcRuntime(context, 'openrouter', 'OpenRouter', () => ({ logout: async () => {}, runOAuthLogin: signIn, runApiKeyLogin: signIn }) as never, { runtime: unused, catalog: unused, identity })
+    cleanups.push(() => runtime.stop())
+    const retire = vi.spyOn(runtime.adapter as unknown as { retireCredentials(): Promise<void> }, 'retireCredentials').mockResolvedValue(undefined)
+    const idle = vi.spyOn(runtime.adapter as unknown as { releaseIdle(): void }, 'releaseIdle')
+    return { runtime, retire, idle, dir }
+  }
+
+  it('retires nothing for an unchanged credential (a re-verify, a cancelled prompt)', async () => {
+    const s = runtimeWith(['ambient:x', 'ambient:x'])
+    await s.runtime.identity!(new AbortController().signal)
+    await s.runtime.credentialsChanged!()
+    expect(s.retire).not.toHaveBeenCalled()
+    expect(s.idle).not.toHaveBeenCalled()
+  })
+
+  it('lets running turns finish for a key change', async () => {
+    const s = runtimeWith(['apikey:one', 'apikey:two'])
+    await s.runtime.identity!(new AbortController().signal)
+    await s.runtime.credentialsChanged!()
+    expect(s.retire).not.toHaveBeenCalled()
+    expect(s.idle).toHaveBeenCalledTimes(1)
+  })
+
+  it('retires every process for an OAuth sign-out or another account', async () => {
+    const out = runtimeWith(['oauth:a', undefined])
+    await out.runtime.signOut!()
+    expect(out.retire).toHaveBeenCalledTimes(1)
+    const other = runtimeWith(['oauth:a', 'oauth:b'])
+    await other.runtime.signIn!({} as never, other.dir, 'oauth')
+    expect(other.retire).toHaveBeenCalledTimes(1)
+  })
+
+  it('retires nothing for a sign-in that did not succeed', async () => {
+    const s = runtimeWith(['oauth:a', 'oauth:b'], vi.fn(async () => ({ success: false })))
+    await s.runtime.signIn!({} as never, s.dir, 'oauth')
+    expect(s.retire).not.toHaveBeenCalled()
+    expect(s.idle).not.toHaveBeenCalled()
+  })
+})
+
+describe('a verified ambient sign-in', () => {
+  it('names the environment’s account, not the stored marker, and hands Pi no key', () => {
+    const marker = { type: 'api_key', key: '<authenticated>' }
+    const one = piCredentialSubject('amazon-bedrock', marker, { AWS_PROFILE: 'one' })
+    expect(one).toMatch(/^ambient:/)
+    expect(piCredentialSubject('amazon-bedrock', marker, { AWS_PROFILE: 'two' })).not.toBe(one)
+    const auth = { has: () => true, storedApiKey: () => '<authenticated>', models: { getModels: () => [] }, credentials: { get: () => marker } } as unknown as PiProfileAuth
+    expect(piRpcProfileOptions({ auth: () => auth, runtime: piRuntimePaths(process.platform === 'win32' ? 'C:\\mousse' : '/mousse') })!.apiKey!('amazon-bedrock')).toBeUndefined()
+  })
+})
+
+describe('a native fork whose first turn failed', () => {
+  it('resumes the new branch on the resend, through the orchestrator', async () => {
+    const s = fixture()
+    const priorHome = process.env.MOUSSE_HOME
+    process.env.MOUSSE_HOME = s.dir
+    cleanups.push(() => {
+      if (priorHome === undefined) delete process.env.MOUSSE_HOME
+      else process.env.MOUSSE_HOME = priorHome
+    })
+    session(s.dir, 'parent', s.dir)
+    writeFileSync(join(s.dir, 'threads.json'), JSON.stringify({ source: { sessionId: 'parent', turnLeaves: { sourceTurn: 'leaf' } } }))
+    vi.spyOn(s.internals, 'start').mockResolvedValue(undefined)
+    let branches = 0
+    vi.spyOn(s.internals, 'send').mockImplementation(async (_thread, command) => {
+      if (command.type === 'get_entries') return { entries: [] }
+      if (command.type === 'clone') return { cancelled: false }
+      const id = `branch-${++branches}`
+      session(s.dir, id, s.dir)
+      return { sessionId: id }
+    })
+    const resumed: unknown[] = []
+    vi.spyOn(s.internals, 'processFor').mockImplementation(async (...args: unknown[]) => {
+      resumed.push(args[2])
+      return { thread: {}, resumed: true }
+    })
+    vi.spyOn(s.internals, 'runTurn').mockResolvedValue({ text: 'fork reply', aborted: false, providerRef: { provider: 'openai', sessionId: 'branch-2' } })
+    const adapter = piAdapter(() => 'parent answer', { fork: 'native', historyInjection: 'prompt', containment: 'weak' }, 'parent')
+    const base = adapter.startTurn.bind(adapter)
+    let sourceId = ''
+    const received: Array<{ nativeHistory?: string }> = []
+    adapter.startTurn = async (input, sink, ctl, host) => {
+      if (input.threadId === sourceId) {
+        const result = await base(input, sink, ctl, host)
+        result.providerRef = { ...result.providerRef!, nativeTurnId: 'sourceTurn' }
+        sink.providerRef(result.providerRef)
+        return result
+      }
+      received.push(input)
+      return s.engine.startTurn(input, sink, ctl, host)
+    }
+    adapter.forkSession = async (ref, ordinal, target) => {
+      const branched = await s.engine.forkSession(ref, ordinal, target)
+      // The first branch is lost before its turn (a cleanup, a crash): that turn fails.
+      if (branches === 1) rmSync(join(s.dir, 'sessions', '2026-10-27T00-00-00-000Z_branch-1.jsonl'))
+      return branched
+    }
+    const d = phase6Daemon(s.dir, [adapter])
+    cleanups.push(() => d.stop())
+    sourceId = d.store.createThread('Source').id
+    d.orch.setThreadModelOverride(sourceId, PI)
+    expect((await d.orch.send('Parent request', false, { threadId: sourceId, clientRequestId: 'parent' })).error).toBeUndefined()
+    const fork = await d.engine.forkThread({ sourceThreadId: sourceId, clientRequestId: 'fork' })
+    const first = await d.orch.send('Continue', false, { threadId: fork.threadId, clientRequestId: 'try-1' })
+    expect(first.error?.code).toBe('binding_stale')
+    expect(d.engine.transfers.get(fork.transferId)?.status).toBe('pending')
+    // The resend forks again; the new branch is resumed although the history now holds the failed message.
+    const second = await d.orch.send('Continue', false, { threadId: fork.threadId, clientRequestId: 'try-2' })
+    expect(second.error).toBeUndefined()
+    expect(branches).toBe(2)
+    expect(received[1]?.nativeHistory).toContain('Continue')
+    expect(resumed).toEqual(['branch-2'])
+  })
+})
+
