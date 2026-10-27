@@ -67,7 +67,7 @@ import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/
 import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { stopStrategy } from '../run/CommandPolicy'
-import { AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type AppToolHost, type AppToolTurn, type McpCaller, type ToolRegistry } from '../run/mcp/appTools'
+import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type AgentRunCommandResult, type AgentSendResult, type AppToolHost, type AppToolTurn, type McpCaller, type ToolRegistry } from '../run/mcp/appTools'
 import { modeFactsFor, prepareSkills, sessionInstructions, settingsToolEnabled, turnPreamble } from '../run/mcp/appTools/assemble'
 import { questionApproval } from '../run/mcp/appTools/quickActions'
 import { APPLET_GENERATION_GUIDANCE } from '../../shared/appletGuidance'
@@ -101,6 +101,7 @@ import {
   isWakeTurnPayload,
   hasUnknownTurnPayloadKind,
   isBotTurnPayload,
+  stoppedByPerson,
   type BotTurnPayload,
   type ChildQuestionPayload,
   type AgentActor,
@@ -119,6 +120,7 @@ import {
   isTerminalAgentStatus,
   turnPhaseActivity,
   type Agent,
+  type AgentOrigin,
   type AgentStatus,
   type ChatImageAttachment,
   type ChatMode,
@@ -445,6 +447,18 @@ export interface OrchestratorSendOptions {
   origin?: TurnOrigin
   /** When false, a thread waiting on a question counts as busy and the send queues instead of answering it. Default true. */
   preemptQuestions?: boolean
+  /**
+   * Daemon-only: the send is refused (`questions_pending`) while the thread has a question or approval
+   * waiting, decided at admission before any run exists. An agent's send uses it with
+   * `preemptQuestions: false`; a question raised after admission is left alone and the message queues.
+   */
+  refuseWhileAsking?: boolean
+  /**
+   * Daemon-only: another thread's agent sends this (`thread_send`). The run's `agent.action` event is
+   * written with it, the stored message and a queued item say it came from that agent, and its text is
+   * never read for `/skill` mentions.
+   */
+  agent?: AgentActor
   /** Carried by the queue item when the send queues, so the item drains with the same model and origin. */
   queueOrigin?: QueuedMessage['origin']
   /** The scheduled occurrence this send is; the turn's end reports to the scheduler. */
@@ -533,6 +547,8 @@ interface TurnStartRequest {
   modelOverride?: ModelOverride
   origin?: TurnOrigin
   schedule?: ScheduledTurnRef
+  /** The agent that sent the message (`OrchestratorSendOptions.agent`); JSON-safe, so it survives queueing and a restart. */
+  agent?: AgentOrigin
 }
 
 /** Payload of a `turn.start` effect (SPEC §12.2). */
@@ -2160,7 +2176,7 @@ export class OrchestratorService extends EventEmitter {
   async stopThread(
     threadId: string,
     reason: string,
-    opts: { runId?: string; clientRequestId?: string; clearQueue?: boolean; requesterThreadId?: string } = {}
+    opts: { runId?: string; clientRequestId?: string; clearQueue?: boolean; requesterThreadId?: string; actor?: AgentActor } = {}
   ): Promise<StopThreadOutcome> {
     const engine = this.runEngine
     if (!engine) {
@@ -2379,15 +2395,17 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /** Steer a specific run. Only the thread's active run receives the text; anything else is ignored. */
-  async steerRun(runId: string, text: string, clientRequestId: string, threadId?: string): Promise<CommandResult> {
+  async steerRun(runId: string, text: string, clientRequestId: string, threadId?: string, actor?: AgentActor): Promise<CommandResult> {
     const engine = this.requireRunEngine()
     const target = threadId ?? engine.getRun(runId)?.threadId
     if (!target) return { status: 'ignored', reason: 'run_not_found', runId, sequence: 0 }
     this.assertNotBotThread(target)
-    const result = await engine.dispatch({ kind: 'steer', threadId: target, clientRequestId, runId })
+    const result = await engine.dispatch({ kind: 'steer', threadId: target, clientRequestId, runId, ...(actor ? { actor, textLength: text.length } : {}) })
     if (result.status === 'accepted' && !result.replayed) {
-      this.enqueueControlEffect('turn.steer', target, runId, { runId, threadId: target, text }, () => {
-        if (!this.steerThread(target, text)) {
+      // An agent's steer says so in the transcript row it leaves, also when it misses its turn and queues.
+      const origin = actor ? { kind: 'agent' as const, threadId: actor.threadId, runId: actor.runId } : undefined
+      this.enqueueControlEffect('turn.steer', target, runId, { runId, threadId: target, text, ...(origin ? { origin } : {}) }, () => {
+        if (!this.steerThread(target, text, undefined, undefined, origin)) {
           console.warn('run engine steer accepted but the legacy turn did not take it', { runId })
         }
       })
@@ -2719,8 +2737,95 @@ export class OrchestratorService extends EventEmitter {
       searchThreads: (query, limit, options) => this.threadStore?.searchThreads(query, limit, { hideSubagents: true, ...options }) ?? [],
       threadMessages: (threadId) => this.visibleMessagesWithoutLoading(threadId),
       threadActivity: (threadId) => this.threadActivity(threadId),
-      recordAgentAction: (target, actor, action, details) => this.recordAgentAction(target, actor, action, details)
+      recordAgentAction: (target, actor, action, details) => this.recordAgentAction(target, actor, action, details),
+      showAgentAction: (target, actor, summary) => this.showAgentAction(target.threadId, actor, summary),
+      sendToThread: (threadId, input, options) => this.sendToThreadAsAgent(threadId, input, options),
+      stopRun: (threadId, runId, options) => this.stopRunAsAgent(threadId, runId, options),
+      steerRun: (threadId, runId, text, options) => this.steerRunAsAgent(threadId, runId, text, options)
     }
+  }
+
+  /**
+   * `thread_send`: another thread's agent writes to this one (SPEC §15.1). The message is labelled as the
+   * agent's in what the model reads and in the stored message, runs under the caller's permission mode when
+   * that is stricter than the thread's own (`narrowPermissionMode` at the turn, so it can only tighten, and a
+   * queued message keeps the mode through a restart), queues behind a running turn, and is never a steer. A
+   * thread waiting on a question or approval, or paused, refuses it. The `agent.action` event is written by the
+   * engine with the run, in the same transaction.
+   */
+  private async sendToThreadAsAgent(
+    threadId: string,
+    input: { content: string; mode: 'agent' | 'plan' },
+    options: { clientRequestId: string; actor: AgentActor }
+  ): Promise<AgentSendResult> {
+    const engine = this.requireRunEngine()
+    const { actor } = options
+    this.assertQueueOpen(threadId)
+    const response = await this.send(
+      { content: agentMessageText(actor.threadId, this.titleOf(actor.threadId), input.content), mode: input.mode },
+      false,
+      {
+        threadId,
+        source: 'mcp',
+        clientRequestId: options.clientRequestId,
+        awaitMode: 'ack',
+        agent: actor,
+        permissionMode: this.runPermissionMode(actor.runId),
+        preemptQuestions: false,
+        refuseWhileAsking: true
+      }
+    )
+    if (!response.runId || response.sequence === undefined) throw new Error('The message was not recorded as a run.')
+    const replayed = response.replayed === true
+    return {
+      runId: response.runId,
+      sequence: response.sequence,
+      queued: response.queued === true || (replayed && engine.getRun(response.runId)?.status === 'queued'),
+      replayed
+    }
+  }
+
+  /** `thread_interrupt`: the one Stop (`stopThread`), asked for by an agent, aimed at one run. */
+  private async stopRunAsAgent(threadId: string, runId: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult> {
+    const engine = this.requireRunEngine()
+    const result = await this.stopThread(threadId, 'agent', { runId, clientRequestId: options.clientRequestId, requesterThreadId: options.actor.threadId, actor: options.actor })
+    return this.agentRunCommandResult(engine, threadId, runId, result)
+  }
+
+  /**
+   * `thread_steer`: joins a run that is live. A running turn cannot be narrowed, so a caller whose permission
+   * mode is stricter than the one the run is bound to is refused: its words would run with more authority than
+   * the caller itself has. A run bound to a stricter mode than the caller's takes the steer.
+   */
+  private async steerRunAsAgent(threadId: string, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult> {
+    const engine = this.requireRunEngine()
+    const run = engine.getRun(runId)
+    if (run?.threadId === threadId && !TERMINAL_RUN_STATUSES.has(run.status) && run.status !== 'queued' && run.status !== 'paused') {
+      const callerMode = this.runPermissionMode(options.actor.runId)
+      const targetMode = this.runPermissionMode(runId)
+      if (isStricter(callerMode, targetMode)) return { status: 'ceiling_exceeded', callerMode, targetMode }
+    }
+    const result = await this.steerRun(runId, agentMessageText(options.actor.threadId, this.titleOf(options.actor.threadId), text), options.clientRequestId, threadId, options.actor)
+    return this.agentRunCommandResult(engine, threadId, runId, result)
+  }
+
+  private agentRunCommandResult(engine: RunEngine, threadId: string, runId: string, result: CommandResult | StopThreadOutcome): AgentRunCommandResult {
+    const replayed = 'replayed' in result && result.replayed === true
+    if (result.status === 'accepted' || result.status === 'stopped') return { status: 'accepted', runId, sequence: engine.maxSeq(threadId), replayed }
+    if (result.status === 'rejected') return { status: 'rejected', reason: result.reason ?? 'rejected' }
+    return {
+      status: 'ignored',
+      reason: result.reason ?? 'run_not_active',
+      runId,
+      activeRunId: engine.getActiveRun(threadId)?.runId ?? null,
+      ...(engine.getRun(runId) ? { runStatus: engine.getRun(runId)!.status } : {})
+    }
+  }
+
+  /** The transcript row of a change an agent made (its `agent.action` event is the record; this is the projection). */
+  private showAgentAction(threadId: string, actor: AgentActor, summary: string): void {
+    const session = this.getOrCreateSession(threadId)
+    this.sessionAls.run(session, () => this.addSystemMessage(`Changed by an agent in thread «${this.titleOf(actor.threadId) ?? actor.threadId}» (${actor.threadId}): ${summary}`))
   }
 
   /**
@@ -2761,9 +2866,7 @@ export class OrchestratorService extends EventEmitter {
       type: 'agent.action',
       payload: { ...details, action, actorThreadId: actor.threadId, actorRunId: actor.runId, toolCallId: actor.toolCallId }
     })
-    const summary = typeof details.summary === 'string' && details.summary ? details.summary : action
-    const session = this.getOrCreateSession(target.threadId)
-    this.sessionAls.run(session, () => this.addSystemMessage(`Changed by an agent in thread «${this.titleOf(actor.threadId) ?? actor.threadId}» (${actor.threadId}): ${summary}`))
+    this.showAgentAction(target.threadId, actor, typeof details.summary === 'string' && details.summary ? details.summary : action)
   }
 
   /** Executors for the `turn.*` effects; the profile hands them to its `EffectWorker`. */
@@ -2800,7 +2903,8 @@ export class OrchestratorService extends EventEmitter {
         ...(payload.permissionMode ? { permissionMode: payload.permissionMode } : {}),
         modelOverride: payload.modelOverride,
         origin: payload.origin,
-        schedule: payload.schedule
+        schedule: payload.schedule,
+        agent: payload.agent
       }
     ))
     const runId = payload.runId
@@ -2846,7 +2950,7 @@ export class OrchestratorService extends EventEmitter {
         const run = payload.runId ? engine.getRun(payload.runId) : null
         if (!run || !TERMINAL_RUN_STATUSES.has(run.status)) return response
         if (run.status === 'completed') engine.store.db.transaction(() => acknowledgeRows(engine.store, own()))
-        else if (run.status === 'interrupted' && run.outcome?.interruptedBy === 'user') engine.inbox.detachDelivery(own().map((row) => row.inboxId), owner)
+        else if (run.status === 'interrupted' && stoppedByPerson(run.outcome)) engine.inbox.detachDelivery(own().map((row) => row.inboxId), owner)
         else give()
       } catch (error) {
         console.warn('queued notice rows could not be settled', { error: error instanceof Error ? error.message : String(error) })
@@ -2950,7 +3054,8 @@ export class OrchestratorService extends EventEmitter {
           ...(payload.permissionMode ? { permissionMode: payload.permissionMode } : {}),
           modelOverride: payload.modelOverride,
           origin: payload.origin,
-          schedule: payload.schedule
+          schedule: payload.schedule,
+          agent: payload.agent
         }
       )
       entry?.resolve(response)
@@ -3095,7 +3200,7 @@ export class OrchestratorService extends EventEmitter {
    * hands the rows to the queued turn it becomes.
    */
   private executeTurnSteerEffect(effect: EffectRecord): void {
-    const { runId, threadId, text, inboxIds } = effect.payload as { runId: string; threadId: string; text: string; inboxIds?: string[] }
+    const { runId, threadId, text, inboxIds, origin } = effect.payload as { runId: string; threadId: string; text: string; inboxIds?: string[]; origin?: AgentOrigin }
     const engine = this.requireRunEngine()
     // A steer of a run that a Stop came after belongs to the work that was stopped: it delivers nothing and
     // makes no work (its rows were acknowledged by the Stop).
@@ -3119,8 +3224,8 @@ export class OrchestratorService extends EventEmitter {
     // The rows stay the steer's until the model reads the text (`drainSteerForSession`) or the turn ends
     // without reading it, when the follow-up turn it leaves takes them.
     const run = engine.getRun(runId)
-    if (run && !TERMINAL_RUN_STATUSES.has(run.status) && this.steerThread(threadId, content, notice, carried)) return
-    this.enqueueLateSteer(threadId, content, carried, notice, runId)
+    if (run && !TERMINAL_RUN_STATUSES.has(run.status) && this.steerThread(threadId, content, notice, carried, origin)) return
+    this.enqueueLateSteer(threadId, content, carried, notice, runId, origin)
   }
 
   /** Titles for the notices this orchestrator writes. */
@@ -3136,14 +3241,14 @@ export class OrchestratorService extends EventEmitter {
    * item (`queue:<id>`), so exactly one delivery owns them at a time: the reconciler does not hand
    * them to a wake, and the item rebuilds its text from the rows that are still its own when it runs.
    */
-  private enqueueLateSteer(threadId: string, text: string, carried?: { inboxIds: string[]; effectId: string }, subagentNotice?: SubagentNoticeItem[], runId?: string): void {
+  private enqueueLateSteer(threadId: string, text: string, carried?: { inboxIds: string[]; effectId: string }, subagentNotice?: SubagentNoticeItem[], runId?: string, origin?: AgentOrigin): void {
     const content = text.trim()
     const session = this.getOrCreateSession(threadId)
     if (!content || session.deleted) return
     // Stamped with the generation of the run it was meant for, never the current one: the Stop fence must
     // still see a steer of an older run as older.
     const stopGeneration = runId && this.runEngine ? runStopGeneration(this.runEngine.store, runId) : undefined
-    this.enqueueCarrying(threadId, { content, mode: getLastUserChatMode(session.messages) ?? 'agent' }, { source: 'steer-late', ...(stopGeneration !== undefined ? { stopGeneration } : {}) }, carried ? [carried] : [], subagentNotice)
+    this.enqueueCarrying(threadId, { content, mode: getLastUserChatMode(session.messages) ?? 'agent' }, { source: 'steer-late', ...(stopGeneration !== undefined ? { stopGeneration } : {}), ...(origin ? { origin } : {}) }, carried ? [carried] : [], subagentNotice)
     if (session.isTurnRunning()) session.drainAfterSettle = true
     else this.scheduleQueueDrain(session)
   }
@@ -3152,7 +3257,7 @@ export class OrchestratorService extends EventEmitter {
   private enqueueCarrying(
     threadId: string,
     input: OrchestratorSendInput,
-    opts: { source: string; internal?: boolean; stopGeneration?: number },
+    opts: { source: string; internal?: boolean; stopGeneration?: number; origin?: QueuedMessage['origin'] },
     carried: ReadonlyArray<{ inboxIds: string[]; effectId: string }>,
     subagentNotice: SubagentNoticeItem[] | undefined
   ): QueuedMessage {
@@ -5765,7 +5870,8 @@ export class OrchestratorService extends EventEmitter {
     queueItemId?: string,
     mode?: ChatMode,
     subagentNotice?: SubagentNoticeItem[],
-    steered?: boolean
+    steered?: boolean,
+    origin?: AgentOrigin
   ): ChatMessage {
     const msg: ChatMessage = {
       id: uuidv4(),
@@ -5777,7 +5883,8 @@ export class OrchestratorService extends EventEmitter {
       queueItemId: role === 'user' && queueItemId ? queueItemId : undefined,
       ...(role === 'user' && mode !== undefined ? { mode: normalizeChatMode(mode) } : {}),
       ...(role === 'user' && subagentNotice?.length ? { subagentNotice } : {}),
-      ...(role === 'user' && steered ? { steered: true } : {})
+      ...(role === 'user' && steered ? { steered: true } : {}),
+      ...(role === 'user' && origin ? { origin } : {})
     }
     this.messages.push(msg)
     this.emitMessageAdded(msg)
@@ -5854,7 +5961,8 @@ export class OrchestratorService extends EventEmitter {
     subagentNotice?: SubagentNoticeItem[],
     permissionMode?: PermissionMode,
     scheduled?: ScheduledTurnRef,
-    approvalNote?: string
+    approvalNote?: string,
+    agent?: AgentOrigin
   ): { claimAccepted: boolean } {
     const messagesBefore = this.messages.length
     const nativeBefore = structuredClone(this.nativeContext)
@@ -5910,6 +6018,8 @@ export class OrchestratorService extends EventEmitter {
       ...(subagentNotice?.length ? { subagentNotice } : {}),
       // A job's prompt is not something the person typed; the thread can say whose it is.
       ...(scheduled ? { scheduled: { jobId: scheduled.jobId, ...(scheduled.jobName ? { jobName: scheduled.jobName } : {}) } } : {}),
+      // A message another thread's agent wrote is stored as that agent's, never as something a person typed.
+      ...(agent ? { origin: { kind: 'agent' as const, threadId: agent.threadId, runId: agent.runId } } : {}),
       hidden: displayUserMessage ? undefined : true,
       ...(displayUserMessage && mode !== undefined
         ? { mode: normalizeChatMode(mode) }
@@ -6274,7 +6384,7 @@ export class OrchestratorService extends EventEmitter {
     return this.steerThread(threadId ?? this.getBoundThreadId() ?? undefined, text)
   }
 
-  steerThread(threadId: string | undefined, text: string, subagentNotice?: SubagentNoticeItem[], carried?: { inboxIds: string[]; effectId: string }): boolean {
+  steerThread(threadId: string | undefined, text: string, subagentNotice?: SubagentNoticeItem[], carried?: { inboxIds: string[]; effectId: string }, origin?: AgentOrigin): boolean {
     const trimmed = text.trim()
     if (!trimmed || !threadId) return false
     // Nothing is steered into a bot's turn: it runs exactly what its dispatch sent.
@@ -6295,7 +6405,7 @@ export class OrchestratorService extends EventEmitter {
         // Mid-turn steers share the turn's mode — preserve tracking so the next
         // real turn does not mistake this UI echo for a legacy agent turn.
         const currentMode = getLastUserChatMode(this.messages)
-        this.addMessage('user', trimmed, undefined, undefined, undefined, currentMode, subagentNotice, true)
+        this.addMessage('user', trimmed, undefined, undefined, undefined, currentMode, subagentNotice, true, origin)
       }
       if (this.sessionAls.getStore()?.threadId === threadId) {
         run()
@@ -6473,7 +6583,13 @@ export class OrchestratorService extends EventEmitter {
     if (opts?.forceQueue || session.isTurnRunning()) this.assertQueueOpen(threadId)
     // Only a new message is checked: a replay of an accepted request returns its run as it was.
     const admit = !reuseLastUser && !opts?.continuationOfRunId && opts?.source !== 'wake'
-      ? () => this.assertSendableSelection(session, input, opts?.modelOverride, opts?.origin === 'schedule')
+      ? () => {
+          // Inside the engine's admission, before a run exists: a question or approval waiting on the thread
+          // refuses a message an agent sent (it never answers one for the user, and never piles up behind it).
+          if (opts?.refuseWhileAsking && this.questions.listPendingForThread(threadId).length > 0)
+            throw new DomainRpcError('questions_pending', `Thread ${threadId} is waiting for the user to answer a question or approval.`)
+          this.assertSendableSelection(session, input, opts?.modelOverride, opts?.origin === 'schedule')
+        }
       : undefined
 
     // The sender denies the thread's saved approval requests inside the send's own admission when it
@@ -6492,6 +6608,7 @@ export class OrchestratorService extends EventEmitter {
         clientRequestId: opts?.clientRequestId ?? uuidv4(),
         source: opts?.source ?? 'protocol',
         prompt: text,
+        ...(opts?.agent ? { actor: opts.agent } : {}),
         ...(opts?.delegation ? { delegation: opts.delegation } : {}),
         ...(opts?.continuationOfRunId ? { continuationOfRunId: opts.continuationOfRunId, acknowledgeUncertain: opts.acknowledgeUncertain === true } : {}),
         ...(deniesApprovals
@@ -6559,7 +6676,12 @@ export class OrchestratorService extends EventEmitter {
       })()
 
     if (session.isTurnRunning() || opts?.forceQueue || externalLease || waitingOnUser) {
-      const item = this.enqueueForThread(threadId, input, { source: opts?.source, runId: run?.runId, permissionMode: opts?.permissionMode, origin: opts?.queueOrigin })
+      const item = this.enqueueForThread(threadId, input, {
+        source: opts?.source,
+        runId: run?.runId,
+        permissionMode: opts?.permissionMode,
+        origin: opts?.queueOrigin ?? (opts?.agent ? { kind: 'agent', threadId: opts.agent.threadId, runId: opts.agent.runId } : undefined)
+      })
       return {
         message: '',
         actions: [],
@@ -6581,7 +6703,8 @@ export class OrchestratorService extends EventEmitter {
         ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {}),
         ...(opts?.modelOverride ? { modelOverride: opts.modelOverride } : {}),
         ...(opts?.origin ? { origin: opts.origin } : {}),
-        ...(opts?.schedule ? { schedule: opts.schedule } : {})
+        ...(opts?.schedule ? { schedule: opts.schedule } : {}),
+        ...(opts?.agent ? { agent: { kind: 'agent' as const, threadId: opts.agent.threadId, runId: opts.agent.runId } } : {})
       })
       if (opts?.awaitMode === 'ack') {
         pending.catch(() => undefined)
@@ -6596,6 +6719,7 @@ export class OrchestratorService extends EventEmitter {
       modelOverride: opts?.modelOverride,
       origin: opts?.origin,
       schedule: opts?.schedule,
+      ...(opts?.agent ? { agent: { kind: 'agent' as const, threadId: opts.agent.threadId, runId: opts.agent.runId } } : {}),
       ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {})
     })
     return run ? { ...response, ...run } : response
@@ -6674,6 +6798,8 @@ export class OrchestratorService extends EventEmitter {
       origin?: TurnOrigin
       /** The scheduled occurrence this turn is; the scheduler hears when its run ends. */
       schedule?: ScheduledTurnRef
+      /** The agent that sent this turn's message (`thread_send`): the stored message says so. */
+      agent?: AgentOrigin
       onTurnSettled?: (aborted: boolean) => void
       onUserInputAccepted?: () => void
       /** The caller already admitted this session (see ThreadSession.turnAdmitted) and hands ownership to this turn. */
@@ -6902,6 +7028,7 @@ export class OrchestratorService extends EventEmitter {
       modelOverride?: ModelOverride
       origin?: TurnOrigin
       schedule?: ScheduledTurnRef
+      agent?: AgentOrigin
       onTurnSettled?: (aborted: boolean) => void
       onUserInputAccepted?: () => void
       runId?: string
@@ -6953,8 +7080,13 @@ export class OrchestratorService extends EventEmitter {
               queueItem: released ?? undefined
             }
           }
-          // A scheduled turn keeps its model and origin on the item, so the drain that runs it later binds them.
-          const origin = opts?.schedule ? { kind: 'schedule' as const, ...opts.schedule, ...(opts.modelOverride ? { selection: opts.modelOverride } : {}) } : undefined
+          // A scheduled turn keeps its model and origin on the item, so the drain that runs it later binds them;
+          // an agent's message keeps who sent it.
+          const origin = opts?.schedule
+            ? { kind: 'schedule' as const, ...opts.schedule, ...(opts.modelOverride ? { selection: opts.modelOverride } : {}) }
+            : opts?.agent
+              ? { kind: 'agent' as const, threadId: opts.agent.threadId, runId: opts.agent.runId }
+              : undefined
           const item = this.enqueueForThread(session.threadId, input, { source: opts?.schedule ? 'schedule' : 'lease-race', runId: opts?.runId, permissionMode: opts?.permissionMode, origin })
           return {
             message: '',
@@ -7103,7 +7235,8 @@ export class OrchestratorService extends EventEmitter {
             opts?.subagentNotice,
             turnPermission,
             opts?.schedule,
-            approvalNote
+            approvalNote,
+            opts?.agent
           )
           claimAccepted = true
           this.notifyUserInputAccepted(session.threadId, opts?.onUserInputAccepted)
@@ -7537,7 +7670,10 @@ export class OrchestratorService extends EventEmitter {
         stagedApplets.push(validateAppletSubmission(value))
         return { queued: true, title: stagedApplets[stagedApplets.length - 1].title }
       } : undefined
-      const app = appTurn ? await this.completeAppTurn(appTurn.turn, { promptRuntime, browser: browserExecution, onPublishApplet, userContent, instanceId: instance.instanceId, model: selectedModel.model, approvals: opts?.bot ? 'never' : binding.policy.approvals, ...(opts?.bot?.instructions ? { botInstructions: opts.bot.instructions } : {}) }) : undefined
+      const app = appTurn ? await this.completeAppTurn(appTurn.turn, { promptRuntime, browser: browserExecution, onPublishApplet,
+        // What another thread's agent wrote is never read for `/skill` mentions: only a person invokes a skill.
+        userContent: opts?.agent ? '' : userContent,
+        instanceId: instance.instanceId, model: selectedModel.model, approvals: opts?.bot ? 'never' : binding.policy.approvals, ...(opts?.bot?.instructions ? { botInstructions: opts.bot.instructions } : {}) }) : undefined
       const adapterHost: AdapterHost = {
         tools: {
           onPublishApplet,
@@ -8165,7 +8301,9 @@ export class OrchestratorService extends EventEmitter {
             origin: 'schedule' as const,
             schedule: { jobId: queued.origin.jobId, occurrenceKey: queued.origin.occurrenceKey, ...(queued.origin.jobName ? { jobName: queued.origin.jobName } : {}) }
           }
-        : {})
+        : {}),
+      // An agent's message drains as that agent's, whenever it runs.
+      ...(queued.origin?.kind === 'agent' ? { agent: { kind: 'agent' as const, threadId: queued.origin.threadId, runId: queued.origin.runId } } : {})
     })
     let started: Promise<OrchestratorResponse>
     if (!item.runId && this.runEngine) {
