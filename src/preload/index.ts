@@ -30,6 +30,7 @@ import type {
   GitCheckoutResult,
   GitCommit,
   GitCommitOptions,
+  GitCommitSuggestion,
   GitDeleteBranchOptions,
   GitDiffStats,
   GitFetchResult,
@@ -465,6 +466,8 @@ const api = {
       storageInvoke('git:checkout', scope, branch, options),
     commit: (scope: GitScope, message: string, options?: GitCommitOptions): Promise<GitMutationResult> =>
       storageInvoke('git:commit', scope, message, options),
+    suggestCommitMessage: (scope: GitScope, options?: { expectedBranch?: string }): Promise<GitCommitSuggestion> =>
+      storageInvoke('git:suggestCommitMessage', scope, options),
     push: (scope: GitScope, options?: GitPushOptions): Promise<GitMutationResult> =>
       storageInvoke('git:push', scope, options),
     init: (scope: GitScope): Promise<GitMutationResult> =>

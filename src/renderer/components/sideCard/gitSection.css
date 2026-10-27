@@ -422,6 +422,21 @@
   margin: 6px 0 0;
 }
 
+.side-card-git-suggest-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+
+.side-card-git-suggest {
+  height: 24px;
+  padding: 0 10px;
+}
+
+.side-card-git-suggest[aria-busy='true'] {
+  cursor: progress;
+}
+
 .side-card-git-pr-popover {
   width: min(340px, calc(100vw - 16px));
   padding: 8px;

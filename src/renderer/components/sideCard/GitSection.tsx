@@ -17,6 +17,7 @@ import {
   commitGitChanges,
   initGitRepository,
   pushGitBranch,
+  suggestGitCommitMessage,
   useGitStatus,
   type GitStatusView
 } from '../../stores/gitStatusStore'
@@ -49,6 +50,7 @@ import {
   gitActionAvailability,
   gitActionLock,
   gitCollapsedLabel,
+  gitErrorCode,
   gitErrorMessage,
   prefillAmendDraft,
   THREAD_BRANCH_LABEL,
@@ -66,6 +68,12 @@ import {
   type PullRequestFoundRow,
   type PushButtonModel
 } from './gitSectionLogic'
+import {
+  SUGGEST_NO_MODEL_CODE,
+  applySuggestion,
+  suggestButtonState,
+  type SuggestionRequest
+} from './commitSuggestLogic'
 import './gitSection.css'
 
 interface BranchPickerProps {
@@ -262,6 +270,16 @@ function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, com
   const canSubmit = Boolean(trimmed) && !work && !blocked && commitAvailability.blockedReason === null
   // Amend with an empty message starts from the last commit's message, once: clearing it by hand sticks.
   const needsPrefill = amend && open && !work && !trimmed && draft.prefilled === null
+  // The suggestion being written, if any. Typing, committing or another branch ends interest in it, so the
+  // answer is dropped when it arrives and never replaces text the user wrote.
+  const [suggesting, setSuggesting] = useState(false)
+  const [noModel, setNoModel] = useState(false)
+  const pendingSuggestion = useRef<SuggestionRequest | null>(null)
+  const suggest = suggestButtonState({ fileCount, suggesting, committing: Boolean(work), blockedReason: lock.reason, noModel })
+  const dropSuggestion = useCallback(() => {
+    pendingSuggestion.current = null
+    setSuggesting(false)
+  }, [])
 
   // The changes may be committed elsewhere while the popover is open.
   useEffect(() => {
@@ -293,8 +311,29 @@ function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, com
     if (!amend) setDraft(clearAmendPrefill)
   }, [amend, setDraft])
 
+  const requestSuggestion = async () => {
+    if (suggest.disabled) return
+    // Only the text in the box now is ever replaced, and only on this branch and HEAD.
+    const request: SuggestionRequest = { scope, baseline: draft.message }
+    pendingSuggestion.current = request
+    setSuggesting(true)
+    setError(null)
+    try {
+      const { message } = await suggestGitCommitMessage(path, gitScope)
+      if (pendingSuggestion.current !== request) return
+      updateForm((value) => applySuggestion(value, request, message))
+    } catch (suggestError) {
+      if (pendingSuggestion.current !== request) return
+      if (gitErrorCode(suggestError) === SUGGEST_NO_MODEL_CODE) setNoModel(true)
+      setError(gitErrorMessage(suggestError))
+    } finally {
+      if (pendingSuggestion.current === request) dropSuggestion()
+    }
+  }
+
   const submit = async (push: boolean) => {
     if (!canSubmit || !onBegin()) return
+    dropSuggestion()
     setWork({ push, phase: 'committing' })
     setError(null)
     const finish = () => {
@@ -336,6 +375,8 @@ function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, com
         disabled={!menu.triggerEnabled || blocked}
         onClick={() => {
           setError(null)
+          // A title model may have been chosen since the last time.
+          setNoModel(false)
           setOpen((value) => !value)
         }}
       >
@@ -361,6 +402,8 @@ function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, com
           disabled={Boolean(work)}
           onChange={(event) => {
             const message = event.target.value
+            // Writing it by hand takes over from a suggestion that has not arrived.
+            if (pendingSuggestion.current) dropSuggestion()
             setDraft((value) => ({ message, prefilled: value.prefilled }))
           }}
           onKeyDown={(event) => {
@@ -370,6 +413,18 @@ function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, com
             }
           }}
         />
+        <div className="side-card-git-suggest-row">
+          <button
+            type="button"
+            className="side-card-git-submit side-card-git-submit-quiet side-card-git-suggest"
+            title={suggest.title}
+            aria-busy={suggesting}
+            disabled={suggest.disabled}
+            onClick={() => void requestSuggestion()}
+          >
+            {suggest.label}
+          </button>
+        </div>
         <label className="side-card-git-amend" data-disabled={menu.amendDisabled} title={menu.amendTitle ?? undefined}>
           <span>Amend last commit</span>
           <Switch
