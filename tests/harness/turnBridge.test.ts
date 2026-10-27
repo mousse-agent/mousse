@@ -116,6 +116,20 @@ describe('TurnBridge (PR 2 §2)', () => {
     expect(typeof s.claude.hosts[0].bridge?.permission?.choose).toBe('function')
   })
 
+  it('a different agent access level is a different runtime generation, so a reused runtime takes the new tool list; the default adds nothing', async () => {
+    const s = setup()
+    await s.turn('claude')
+    await s.turn('claude', { runId: 'run-2', app: s.app({ accessLevel: 'read' }) })
+    await s.turn('claude', { runId: 'run-3', app: s.app({ accessLevel: 'manage' }) })
+    await s.turn('claude', { runId: 'run-4', app: s.app({ accessLevel: 'lineage' }) })
+    expect(s.mcp.bearers.map((bearer) => [bearer.accessLevel, bearer.generation])).toEqual([
+      [undefined, 'claude|default|0|0'],
+      ['read', 'claude|default|0|0|access:read'],
+      ['manage', 'claude|default|0|0|access:manage'],
+      ['lineage', 'claude|default|0|0']
+    ])
+  })
+
   it('settles the bearer from how the turn ended and what the runtime reported', async () => {
     const s = setup()
     s.codex.endWith(async () => ({ drain: { mousseCalls: 2 } }))

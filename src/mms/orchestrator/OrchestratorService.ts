@@ -45,7 +45,7 @@ import type { AgentExecutionRequest, AgentExecutionResult } from '../../shared/a
 import { EventEmitter } from 'events'
 import { nativeAgentAssistantMessage, nativeAgentHistory } from '../providers/nativeAgentHistory'
 import { v4 as uuidv4 } from 'uuid'
-import { TitleTakenRejection, type CommandResult, type RunEngine, type SendDelegation, type StopResult } from '../run/RunEngine'
+import { narrowestAccess, TitleTakenRejection, type CommandResult, type RunEngine, type SendDelegation, type StopResult } from '../run/RunEngine'
 import { isFencedSource } from '../run/delegation/sources'
 import { currentStopGeneration, runStopGeneration } from '../run/stopGeneration'
 import { buildSubagentView } from '../run/delegation/subagentView'
@@ -1721,29 +1721,47 @@ export class OrchestratorService extends EventEmitter {
   /**
    * The agent access level granted to a run on `threadId` (SPEC §15.1), decided at turn start: the
    * profile's level now, never above what its delegations gave it (the first and the last, as for the
-   * ceiling: a follow-up may narrow, never widen), and at most `read` under a `plan` ceiling or in a
-   * read-only child. A bot thread is always `lineage`: its turns act for a person outside Mousse, who
-   * must not reach the owner's other threads through the profile's setting (a child of a bot thread
-   * inherits that through its delegation). A delegation from before the level existed counts as
-   * `lineage`. Any failure to decide, an unreadable bot index included, is `lineage`, as
-   * `modeCeilingFor` fails to `plan`.
+   * ceiling: a follow-up may narrow, never widen), and at most `read` under a `plan` ceiling. What a
+   * thread keeps whatever the profile says is `staticAccessCeiling`. Any failure to decide is `lineage`,
+   * as `modeCeilingFor` fails to `plan`.
    */
   private grantFor(threadId: string, ceiling: ModeCeiling): AgentAccessLevel {
     try {
-      if (this.botThreads?.roleOf(threadId)) return 'lineage'
-      const tasks = this.runEngine?.delegations.listForChildThread(threadId) ?? []
-      const inherited = tasks.length ? narrowAgentAccess(tasks.at(0)!.accessLevel ?? 'lineage', tasks.at(-1)!.accessLevel ?? 'lineage') : undefined
-      const capped = ceiling === 'plan' || this.isReadOnlyChild(threadId) ? 'read' : undefined
-      return narrowAgentAccess(this.agentAccessSettings().level, inherited, capped) ?? 'lineage'
+      return narrowAgentAccess(this.agentAccessSettings().level, this.staticAccessCeiling(threadId), ceiling === 'plan' ? 'read' : undefined) ?? 'lineage'
     } catch {
       return 'lineage'
     }
   }
 
-  /** The delegation tools of an in-process turn: its ceiling and access grant are those a credential would carry. */
-  private turnDelegationTools(session: ThreadSession, runId: string, mode: ChatMode): DelegationToolHost {
+  /**
+   * The most an agent in `threadId` may be granted whatever the profile says (SPEC §15.1), or undefined
+   * when the thread has no limit of its own (a person's thread). It only narrows: the narrowest of
+   * - a bot thread: `lineage` (its turns act for a person outside Mousse, who must not reach the owner's
+   *   other threads through the setting; takes effect once the bot engine registers its threads);
+   * - a read-only subagent: `read`;
+   * - the thread's stored ceiling (`Thread.accessCeiling`: a fork's, and a channel thread's);
+   * - every delegation that gave the thread work, not just the first and the latest, so a follow-up
+   *   never restores a level an earlier one narrowed (a row from before levels existed is `lineage`);
+   * - `lineage` for a fork or subagent that has no trustworthy grant (no stored ceiling, no delegation).
+   * Throws when it cannot be read; callers treat that as `lineage`.
+   */
+  private staticAccessCeiling(threadId: string): AgentAccessLevel | undefined {
+    if (this.botThreads?.roleOf(threadId)) return 'lineage'
+    const stored = this.threadStore?.getThread(threadId)?.accessCeiling
+    const tasks = this.runEngine?.delegations.listForChildThread(threadId) ?? []
+    const lineage = this.runEngine?.delegations.getLineage(threadId)
+    return narrowAgentAccess(
+      this.isReadOnlyChild(threadId) ? 'read' : undefined,
+      stored === undefined ? undefined : isAgentAccessLevel(stored) ? stored : 'lineage',
+      narrowestAccess(tasks),
+      lineage && !tasks.length && stored === undefined ? 'lineage' : undefined
+    )
+  }
+
+  /** The delegation tools of an in-process turn, holding the grant its registered turn was given at its start. */
+  private turnDelegationTools(session: ThreadSession, runId: string, mode: ChatMode, granted: AgentAccessLevel | undefined): DelegationToolHost {
     const ceiling = this.modeCeilingFor(session.threadId, mode)
-    return this.delegationTools(session, runId, ceiling, this.grantFor(session.threadId, ceiling))
+    return this.delegationTools(session, runId, ceiling, granted ?? 'lineage')
   }
 
   /** The caller's granted level narrowed by the profile's level now: what its tool calls and delegations may use. */
@@ -1911,11 +1929,20 @@ export class OrchestratorService extends EventEmitter {
       threadMeta: (threadId) => this.threadStore?.getThread(threadId),
       listThreads: () => this.threadStore?.listAllThreads() ?? [],
       listProjects: () => (this.threadStore?.listProjects() ?? []).map(({ id, name }) => ({ id, name })),
-      searchThreads: (query, limit) => this.threadStore?.searchThreads(query, limit, { hideSubagents: true }) ?? [],
-      threadMessages: (threadId) => this.getMessages(threadId),
+      searchThreads: (query, limit, options) => this.threadStore?.searchThreads(query, limit, { hideSubagents: true, ...options }) ?? [],
+      threadMessages: (threadId) => this.visibleMessagesWithoutLoading(threadId),
       threadActivity: (threadId) => this.threadActivity(threadId),
       recordAgentAction: (target, actor, action, details) => this.recordAgentAction(target, actor, action, details)
     }
+  }
+
+  /**
+   * A thread's visible transcript for a reader that is not working in it: from the live session when it
+   * is open, else straight from the store, so reading does not keep every thread it touches in memory.
+   */
+  private visibleMessagesWithoutLoading(threadId: string): ChatMessage[] {
+    if (this.sessions.has(threadId) || !this.threadStore) return this.getMessages(threadId)
+    return this.threadStore.loadThreadData(threadId).messages.filter((message) => !message.hidden)
   }
 
   /** What waits on a thread without loading it: its queued messages (from disk) and unanswered questions. */
@@ -2628,8 +2655,20 @@ export class OrchestratorService extends EventEmitter {
     if (!sourceThread) throw new Error(`Thread not found: ${creation.sourceThreadId}`)
     const source = this.getOrCreateSession(creation.sourceThreadId)
     const title = creation.title?.trim() || `Fork of ${sourceThread.name}`.slice(0, 120)
-    const fork = this.threadStore.createThread(title, sourceThread.projectId, undefined,
-      sourceThread.worktreeEnabled === undefined ? undefined : { worktreeEnabled: sourceThread.worktreeEnabled })
+    // The fork keeps the source's limits and those of the agent that forks it (SPEC §15.1), stored on the
+    // thread so every later turn applies them; a source with no limit of its own stores `manage`, which
+    // leaves the profile's setting in charge. A source whose limits cannot be read is `lineage`.
+    let sourceCeiling: AgentAccessLevel | undefined
+    try {
+      sourceCeiling = this.staticAccessCeiling(creation.sourceThreadId)
+    } catch {
+      sourceCeiling = 'lineage'
+    }
+    const accessCeiling = narrowAgentAccess(sourceCeiling ?? 'manage', creation.accessLevel === undefined ? undefined : this.effectiveAccess(creation.accessLevel)) ?? 'lineage'
+    const fork = this.threadStore.createThread(title, sourceThread.projectId, undefined, {
+      ...(sourceThread.worktreeEnabled === undefined ? {} : { worktreeEnabled: sourceThread.worktreeEnabled }),
+      accessCeiling
+    })
     const override = this.harness.instanceMap.migrate(source.modelOverride ?? sourceThread.modelOverride)
     if (override) this.threadStore.updateThreadMeta(fork.id, { modelOverride: structuredClone(override) })
     // The fork carries the mode the source may run in now: its own, narrowed by its lineage's ceiling
@@ -3153,11 +3192,12 @@ export class OrchestratorService extends EventEmitter {
     if (engine.getRun(parentRunId)?.outcome?.stopRequested)
       return { started: false as const, code: 'parent_stopping' as const, message: 'The calling run is being stopped; it cannot continue subagents.' }
     // The follow-up is bound by the subagent's own policy and the caller's authority, whichever is narrower.
-    const first = engine.delegations.listForChildThread(childThreadId).find((task) => task.parentThreadId === parentThreadId)
+    const tasks = engine.delegations.listForChildThread(childThreadId)
+    const first = tasks.find((task) => task.parentThreadId === parentThreadId)
     const modeCeiling = narrowCeiling(callerCeiling, first?.modeCeiling)
-    // And the access level: the narrower of the caller's now and the one the subagent was first given
-    // (a row from before levels existed is `lineage`).
-    const accessLevel = narrowAgentAccess(this.effectiveAccess(callerAccess ?? 'lineage'), first ? first.accessLevel ?? 'lineage' : undefined) ?? 'lineage'
+    // And the access level: the narrower of the caller's now and the narrowest level any earlier task of
+    // this subagent was given (a row from before levels existed is `lineage`).
+    const accessLevel = narrowAgentAccess(this.effectiveAccess(callerAccess ?? 'lineage'), narrowestAccess(tasks)) ?? 'lineage'
     let response: OrchestratorResponse
     try {
       response = await this.send({ content: input.prompt, mode: modeCeiling === 'plan' ? 'plan' : 'agent' }, false, {
@@ -6423,7 +6463,7 @@ export class OrchestratorService extends EventEmitter {
         tools: {
           onPublishApplet,
           browser: browserExecution,
-          delegation: engineRunId && this.effectsEnabled() ? this.turnDelegationTools(session, engineRunId, mode) : undefined,
+          delegation: engineRunId && this.effectsEnabled() ? this.turnDelegationTools(session, engineRunId, mode, appTurn?.turn.accessLevel) : undefined,
           toolAccess: session.sharedWorkspace
             ? createAgentToolAccess(SHARED_READER_POLICY, session.sharedWorkspace.path)
             : turnAuthority && turnWriter ? { allows: () => true, execute: (_name, _args, run) => { conversationToolsUsed = true; return turnAuthority.runWriter(turnWriter, run) } } : undefined,
@@ -7811,6 +7851,14 @@ export class OrchestratorService extends EventEmitter {
     try {
       if (!threadStore.getThread(threadId)) {
         return { text: '', silent: false, error: `Thread not found: ${threadId}` }
+      }
+      // A person outside Mousse drives this thread (a paired chat user, a webhook caller): agents in it
+      // reach no other thread through the profile's setting, now or in any later turn, and what they
+      // delegate inherits the limit (SPEC §15.1).
+      try {
+        threadStore.capAccessCeiling(threadId, 'lineage')
+      } catch (error) {
+        return { text: '', silent: false, error: error instanceof Error ? error.message : String(error) }
       }
 
       try {

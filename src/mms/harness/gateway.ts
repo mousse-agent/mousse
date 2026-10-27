@@ -1560,8 +1560,10 @@ export class Harness implements HarnessGateway {
           accessLevel: app.accessLevel,
           binding: record.driver.mcpTurnBinding ?? 'rotate',
           // A new runtime, a new epoch: driver, home, signed-in account and settings, and a caller's
-          // policy (a narrower grant must not keep the tool list of the last one).
-          generation: [binding.driver, binding.homeId, binding.accountGeneration, binding.configRevision, ...(binding.policyDigest ? [binding.policyDigest] : [])].join('|')
+          // policy (a narrower grant must not keep the tool list of the last one). So is a different agent
+          // access level (SPEC §15.1): a runtime caches its tool list, so it takes the new level with a new
+          // bearer. The default level adds nothing, so a profile that never sets one is unchanged.
+          generation: [binding.driver, binding.homeId, binding.accountGeneration, binding.configRevision, ...(binding.policyDigest ? [binding.policyDigest] : []), ...(app.accessLevel && app.accessLevel !== 'lineage' ? [`access:${app.accessLevel}`] : [])].join('|')
         })
       } catch (error) {
         console.warn('Mousse MCP credential could not be minted; the turn runs without Mousse tools', {

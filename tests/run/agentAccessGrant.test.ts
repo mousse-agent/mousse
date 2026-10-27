@@ -271,6 +271,197 @@ describe('agent access grant (SPEC §15.1)', () => {
     }
   }, 30_000)
 
+  it('a thread a channel drives is capped at lineage for every later turn, and what it delegates inherits the cap', async () => {
+    const out: Started[] = []
+    const { d, project } = daemon(async (delegation) => {
+      out.push(await delegate(delegation, 'from-channel'))
+    })
+    setProfile(d, 'manage')
+    const mine = d.store.createThread('Mine', project.id)
+    const chat = d.store.createThread('Telegram chat', project.id)
+    expect(grant(d, chat.id)).toBe('manage')
+    const result = await d.orch.runChannelTurn(chat.id, 'Delegate it', d.store, {})
+    expect(result.error).toBeUndefined()
+    // The turn's own grant and its child's are lineage although the profile says manage.
+    expect(levelsOf(d, chat.id)).toEqual(['lineage'])
+    await finished(d, out[0])
+    expect(grant(d, chat.id)).toBe('lineage')
+    expect(grant(d, out[0].childThreadId)).toBe('lineage')
+    // The cap is on the thread: it holds for turns that are not channel turns, and after a restart.
+    expect(d.store.getThread(chat.id)?.accessCeiling).toBe('lineage')
+    expect(new ThreadDataStore(d.projects).getThread(chat.id)?.accessCeiling).toBe('lineage')
+    await d.orch.send('A message typed in the app', false, { threadId: chat.id, clientRequestId: 'app-send' })
+    expect(grant(d, chat.id)).toBe('lineage')
+    // A person's own thread keeps the profile's level.
+    expect(grant(d, mine.id)).toBe('manage')
+    expect(d.store.getThread(mine.id)?.accessCeiling).toBeUndefined()
+  }, 30_000)
+
+  it('a later follow-up never restores a level an earlier one narrowed, in any order of profile changes', async () => {
+    const out: { child?: Started } = {}
+    const { d, project } = daemon(async (delegation, d) => {
+      out.child = await delegate(delegation, 'worker')
+      await finished(d, out.child)
+      const settled = () => waitFor(() => d.engine.delegations.listForChildThread(out.child!.childThreadId).every((task) => task.status !== 'running'), 'the follow-up to finish')
+      setProfile(d, 'read')
+      await delegation.continueSubagent({ subagent: out.child.childThreadId, prompt: 'Narrowed follow-up' }, { toolCallId: 'follow-1' })
+      await settled()
+      // The profile is back at manage and the same subagent is asked again.
+      setProfile(d, 'manage')
+      await delegation.continueSubagent({ subagent: out.child.childThreadId, prompt: 'Follow-up after the profile rose' }, { toolCallId: 'follow-2' })
+      await settled()
+    })
+    await start(d, project.id, 'manage')
+    const child = out.child!.childThreadId
+    const rows = () => d.engine.delegations.listForChildThread(child).map((task) => task.accessLevel)
+    expect(rows()).toEqual(['manage', 'read', 'read'])
+    setProfile(d, 'manage')
+    expect(grant(d, child)).toBe('read')
+    // A message a person types in the subagent's thread is recorded as a follow-up too, at the narrowest level so far.
+    await d.orch.send('A person asks again', false, { threadId: child, clientRequestId: 'person-follow-up', source: 'gui' })
+    await waitFor(() => d.engine.delegations.listForChildThread(child).every((task) => task.status !== 'running'), 'the person follow-up to finish')
+    expect(rows()).toEqual(['manage', 'read', 'read', 'read'])
+    expect(grant(d, child)).toBe('read')
+  }, 60_000)
+
+  it('a turn that starts under lineage hands out lineage even when the setting is raised while the turn is starting', async () => {
+    const out: Started[] = []
+    const { d, project } = daemon(async (delegation) => {
+      out.push(await delegate(delegation, 'racer'))
+    })
+    // The turn registers its grant, then awaits (binding, context, skills); the setting rises in between.
+    d.orch.once('turn-started', () => setProfile(d, 'manage'))
+    const thread = await start(d, project.id, 'lineage')
+    expect(levelsOf(d, thread.id)).toEqual(['lineage'])
+    await finished(d, out[0])
+    // The next turn of the parent is granted what the setting says by then.
+    expect(grant(d, thread.id)).toBe('manage')
+    expect(grant(d, out[0].childThreadId)).toBe('lineage')
+  }, 30_000)
+
+  describe('the read tools over the real store', () => {
+    const NOW = '2026-10-12T00:00:00.000Z'
+    const withMessages = (d: Phase6Daemon, threadId: string, texts: string[]) =>
+      d.store.saveThreadData(threadId, { ...d.store.loadThreadData(threadId), messages: texts.map((content, index) => ({ id: `m${index}`, role: 'user', content, timestamp: NOW }) as never) })
+
+    it('project authorization is applied before the search limit, so excluded matches never use up the slots', async () => {
+      const { d, project, dir } = daemon(async () => undefined)
+      mkdirSync(join(dir, 'other'))
+      const other = d.projects.openProject(join(dir, 'other'))
+      for (let index = 0; index < 12; index += 1) d.store.createThread(`needle excluded ${String(index).padStart(2, '0')}`, project.id)
+      const wanted = d.store.createThread('needle wanted', other.id)
+      const host = d.orch.mcpToolHost()
+      const allowed = (thread: { projectId?: string }) => thread.projectId === other.id
+      // A search that only filters afterwards sees nothing but excluded matches in its first page.
+      expect(d.store.searchThreads('needle', 5, { hideSubagents: true, titlesOnly: true }).some((hit) => hit.threadId === wanted.id)).toBe(false)
+      const found = host.searchThreads!('needle', 5, { allow: allowed, titlesOnly: true })
+      expect(found.map((hit) => hit.threadId)).toEqual([wanted.id])
+    }, 60_000)
+
+    it('titles-only reads no transcript, and a bounded search reads only the most recently updated threads', async () => {
+      const { d, project } = daemon(async () => undefined)
+      const old = d.store.createThread('Old chat', project.id)
+      const recent = d.store.createThread('Recent chat', project.id)
+      withMessages(d, old.id, ['the needle in the old chat'])
+      withMessages(d, recent.id, ['the needle in the recent chat'])
+      d.store.updateThreadMeta(old.id, { name: 'Old chat' })
+      d.store.updateThreadMeta(recent.id, { name: 'Recent chat' })
+      const messageHits = (options: Parameters<NonNullable<ReturnType<Phase6Daemon['orch']['mcpToolHost']>['searchThreads']>>[2]) =>
+        d.orch.mcpToolHost().searchThreads!('needle', 50, options).filter((hit) => hit.matchType === 'message').map((hit) => hit.threadId).sort()
+      expect(messageHits({ titlesOnly: true })).toEqual([])
+      expect(messageHits({})).toEqual([old.id, recent.id].sort())
+      // One transcript only: the thread updated last.
+      const hits = messageHits({ maxMessageThreads: 1 })
+      expect(hits).toEqual([d.store.listAllThreads().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0].id])
+    })
+
+    it('reading a transcript for another thread does not load that thread into memory', async () => {
+      const { d, project } = daemon(async () => undefined)
+      const reader = d.store.createThread('Reader', project.id)
+      const target = d.store.createThread('Target', project.id)
+      withMessages(d, target.id, ['first', 'second'])
+      const sessions = (d.orch as unknown as { sessions: Map<string, unknown> }).sessions
+      sessions.delete(target.id)
+      const messages = d.orch.mcpToolHost().threadMessages!(target.id)
+      expect(messages.map((message) => message.content)).toEqual(['first', 'second'])
+      expect(sessions.has(target.id)).toBe(false)
+      expect(reader.id).not.toBe(target.id)
+    })
+  })
+
+  describe('forks', () => {
+    const settledThread = async (d: Phase6Daemon, projectId: string, level: AgentAccessLevel) => {
+      setProfile(d, level)
+      const thread = d.store.createThread('Source', projectId)
+      await d.orch.send('Hello', false, { threadId: thread.id, clientRequestId: `source:${thread.id}` })
+      return thread
+    }
+    const fork = (d: Phase6Daemon, sourceThreadId: string, id: string, accessLevel?: AgentAccessLevel) =>
+      d.engine.forkThread({ sourceThreadId, clientRequestId: id, seedFrom: 'current_head', ...(accessLevel ? { accessLevel } : {}) })
+
+    it('a fork of a restricted subagent keeps its limit, and so does a fork of that fork, after a restart', async () => {
+      const out: Started[] = []
+      const { d, project } = daemon(async (delegation) => {
+        out.push(await delegate(delegation, 'limited'))
+      })
+      await start(d, project.id, 'lineage')
+      await finished(d, out[0])
+      setProfile(d, 'manage')
+      expect(grant(d, out[0].childThreadId)).toBe('lineage')
+      const first = await fork(d, out[0].childThreadId, 'fork-1')
+      expect(grant(d, first.threadId)).toBe('lineage')
+      expect(d.store.getThread(first.threadId)?.accessCeiling).toBe('lineage')
+      // A fork of the fork (it needs a finished run of its own to fork after).
+      const run = d.engine.store.createRun({ threadId: first.threadId, source: 'gui' })
+      d.engine.markStarting(run.runId)
+      d.engine.markRunning(run.runId)
+      d.engine.markTerminal(run.runId, 'completed')
+      const second = await fork(d, first.threadId, 'fork-2')
+      expect(grant(d, second.threadId)).toBe('lineage')
+      expect(new ThreadDataStore(d.projects).getThread(second.threadId)?.accessCeiling).toBe('lineage')
+    }, 60_000)
+
+    it('a fork keeps the limit of the narrower agent that makes it, and a person\'s fork of a person\'s thread keeps the profile in charge', async () => {
+      const { d, project } = daemon(async () => undefined)
+      const source = await settledThread(d, project.id, 'manage')
+      const byAgent = await fork(d, source.id, 'fork-by-read-agent', 'read')
+      expect(d.store.getThread(byAgent.threadId)?.accessCeiling).toBe('read')
+      expect(grant(d, byAgent.threadId)).toBe('read')
+      // An agent whose own level has since dropped forks with that level, not the one it was granted.
+      setProfile(d, 'lineage')
+      const lowered = await fork(d, source.id, 'fork-after-drop', 'manage')
+      expect(d.store.getThread(lowered.threadId)?.accessCeiling).toBe('lineage')
+      // An unknown level on the forking agent fails closed.
+      setProfile(d, 'manage')
+      const unknown = await fork(d, source.id, 'fork-bad-level', 'root' as never)
+      expect(d.store.getThread(unknown.threadId)?.accessCeiling).toBe('lineage')
+      // A person's fork records no limit beyond the profile's (stored as manage).
+      const byPerson = await fork(d, source.id, 'fork-by-person')
+      expect(d.store.getThread(byPerson.threadId)?.accessCeiling).toBe('manage')
+      expect(grant(d, byPerson.threadId)).toBe('manage')
+      setProfile(d, 'read')
+      expect(grant(d, byPerson.threadId)).toBe('read')
+    }, 60_000)
+
+    it('a fork or subagent with no trustworthy grant (nothing stored, no delegation) is lineage', async () => {
+      const out: Started[] = []
+      const { d, project } = daemon(async (delegation) => {
+        out.push(await delegate(delegation, 'orphan'))
+      })
+      const source = await start(d, project.id, 'manage')
+      await finished(d, out[0])
+      expect(grant(d, out[0].childThreadId)).toBe('manage')
+      // A subagent whose delegation rows are gone.
+      d.engine.store.db.database.prepare('DELETE FROM delegations WHERE child_thread_id = ?').run(out[0].childThreadId)
+      expect(grant(d, out[0].childThreadId)).toBe('lineage')
+      // A fork from before ceilings were stored.
+      const legacy = d.store.createThread('Old fork', project.id)
+      d.engine.delegations.createLineage({ threadId: legacy.id, parentThreadId: source.id, parentRunId: 'run-x', relationship: 'fork' })
+      expect(grant(d, legacy.id)).toBe('lineage')
+      expect(d.store.getThread(legacy.id)?.accessCeiling).toBeUndefined()
+    }, 30_000)
+  })
+
   it('a bot thread is always lineage, and so is a child it delegates; an unreadable bot index grants lineage too', async () => {
     const out: Started[] = []
     const { d, project } = daemon(async (delegation) => {
