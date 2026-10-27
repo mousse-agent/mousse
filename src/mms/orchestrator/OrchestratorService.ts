@@ -908,6 +908,25 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /**
+   * Where a definition runs on its instance: the instance's definition runtime, or its definition
+   * loop while one exists for a definition that needs it. That is one whose settings need it
+   * (`definitionNeedsLoop`: its browser), or one whose token or USD limits only the loop can hold
+   * (a cost limit on an unpriced model, a model that does not always send its output cap), which
+   * ran on the loop before Pi RPC held definitions.
+   */
+  private placeDefinition(check: DefinitionCheck): { resolved: ResolvedTurnSelection; loop: boolean } {
+    const selection = this.definitionSelection(check.ref)
+    const options = { purpose: check.origin, scope: this.threadScope(check.threadId) }
+    const loop = definitionNeedsLoop(check.features)
+    const resolved = this.harness.resolveStored(selection, { ...options, definition: { loop } })
+    if (loop || resolved.caps.definitionLimits === 'in_loop') return { resolved, loop }
+    const verdict = this.harness.check(resolved, definitionRunPolicy(check, [], false))
+    if (verdict.ok || !verdict.error.missing?.length || !verdict.error.missing.every((missing) => missing === 'spendLimits')) return { resolved, loop }
+    const onLoop = this.harness.resolveStored(selection, { ...options, definition: { loop: true } })
+    return onLoop.caps.definitionLimits === 'in_loop' ? { resolved: onLoop, loop: true } : { resolved, loop }
+  }
+
   /** The stored selection a definition's model ref names: its instance, else its provider's built-in one. */
   private definitionSelection(ref: DefinitionCheck['ref']): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'> {
     const model = ref.effort && !parseThinkingSuffixFromModelId(ref.modelId).effort ? `${ref.modelId}:${ref.effort}` : ref.modelId
@@ -920,8 +939,8 @@ export class OrchestratorService extends EventEmitter {
    */
   checkDefinitionTurn(check: DefinitionCheck): DefinitionRefusal | undefined {
     try {
-      const resolved = this.harness.resolveStored(this.definitionSelection(check.ref), { purpose: check.origin, scope: this.threadScope(check.threadId), definition: { loop: definitionNeedsLoop(check.features) } })
-      const verdict = this.harness.check(resolved, definitionRunPolicy(check))
+      const { resolved, loop } = this.placeDefinition(check)
+      const verdict = this.harness.check(resolved, definitionRunPolicy(check, [], loop))
       // Its output, browser, memory and delegation settings, where the runtime does not run its loop.
       if (verdict.ok) return definitionFeatureRefusal(resolved.caps, check.features)
       const { code, message, missing, reason } = verdict.error
@@ -1015,13 +1034,13 @@ export class OrchestratorService extends EventEmitter {
 
   private async runDefinitionTurn(turn: DefinitionTurnRequest, engine: RunEngine, lease: ThreadLeaseHandle, extras: DefinitionTurnExtras): Promise<DefinitionTurnResult> {
     const { threadId } = turn
-    const resolved = this.harness.resolveStored(this.definitionSelection(turn.ref), { purpose: turn.origin, scope: this.threadScope(threadId), definition: { loop: definitionNeedsLoop(turn.features) } })
+    const { resolved, loop } = this.placeDefinition(turn)
     // The user's MCP tools the definition was granted, by the name the runtime calls them.
     const mcpTools = this.mcpManager && turn.grants.mcpTools.length
       ? (await this.mcpManager.getEnabledTools(turn.projectPath, definitionActor(turn.grants)))
           .filter((tool) => definitionToolGranted(tool.providerName, turn.grants, [tool]))
       : []
-    const policy = definitionRunPolicy(turn, mcpTools.map((tool) => tool.providerName))
+    const policy = definitionRunPolicy(turn, mcpTools.map((tool) => tool.providerName), loop)
     const verdict = this.harness.check(resolved, policy)
     if (!verdict.ok) throw harnessAppError(verdict.error)
     const featureRefusal = definitionFeatureRefusal(resolved.caps, turn.features, resolved.instanceId)

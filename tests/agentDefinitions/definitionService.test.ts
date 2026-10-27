@@ -693,6 +693,33 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     expect(ran).toEqual(['runtime', 'loop'])
   })
 
+  it('a definition whose spend limit only the loop can hold runs on the loop instead of being refused', async () => {
+    harness.stop()
+    const ran: string[] = []
+    const adapterNamed = (name: string): ProviderAdapter => ({
+      driver: 'codex',
+      capabilities: { steer: 'none', interrupt: true, rollback: 'none', fork: 'portable', events: 'rich', containment: 'strong', historyInjection: 'prompt', mcp: true, childPolicy: 'enforced' },
+      configured: () => true,
+      startTurn: async (input, sink) => {
+        ran.push(name)
+        sink.providerRef({ provider: 'p', instanceId: input.instanceId, model: input.model })
+        return { text: name, aborted: false, modelName: input.model, totalResponseTimeMs: 1, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextSignature: 's', nativeMessages: [], providerRef: { provider: 'p' } }
+      },
+      interrupt: async () => 'not_active'
+    })
+    // A runtime that holds counts but cannot reserve spend for this model (an unpriced one), with the loop beside it.
+    const base = adapterDriver(adapterNamed('runtime'), { toolControl: 'exact', budgets: 'hard', spendLimits: 'unsupported', runtime: { definitionAdapter: adapterNamed('loop') } })
+    const driver = { ...base, definitionCaps: (config: never, needs?: { loop?: boolean }) => ({ ...base.caps(config), ...(needs?.loop ? { definitionLimits: 'in_loop' as const } : {}) }) }
+    let stored: unknown = { spend: { driver: 'codex', enabled: true }, spend2: { driver: 'codex', enabled: true } }
+    harness = testHarness({ drivers: [driver], instances: new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (state) => { stored = state.instances } } }), profileHome: home })
+    orch.setHarness(harness)
+    const plain = resolver.resolve((({ id, revision }) => ({ definitionId: id, revision }))(publish('mousse', 'spend')))
+    expect(await orch.runAgentDefinition(request(plain, store.createThread('counts only').id))).toMatchObject({ status: 'completed', text: 'runtime' })
+    const limited = resolver.resolve((({ id, revision }) => ({ definitionId: id, revision }))(publish('mousse', 'spend2', (settings) => { settings.limits.maxCostUsd = 1 })))
+    expect(await orch.runAgentDefinition(request(limited, store.createThread('cost limited').id))).toMatchObject({ status: 'completed', text: 'loop' })
+    expect(ran).toEqual(['runtime', 'loop'])
+  })
+
   it('an owned lease that another holds fails the turn as busy, and never queues it', async () => {
     const stored = publish('mousse', `pi:${PROVIDER}`)
     const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })

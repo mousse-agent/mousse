@@ -193,7 +193,12 @@ export function definitionToolNames(grants: EffectiveAgentGrants, extra: readonl
  * approvals as granted (the definition's own approval rules answer them), and the run's count and
  * spend limits. `maxElapsedMs` stays with `AgentExecutionService`, which aborts the run.
  */
-export function definitionRunPolicy(request: Pick<DefinitionCheck, 'origin' | 'grants' | 'budget' | 'definition' | 'features'>, toolNames: readonly string[] = []): RunPolicy {
+export function definitionRunPolicy(
+  request: Pick<DefinitionCheck, 'origin' | 'grants' | 'budget' | 'definition' | 'features'>,
+  toolNames: readonly string[] = [],
+  /** The definition runs on the instance's definition loop (default: when its settings need it). */
+  loop = definitionNeedsLoop(request.features)
+): RunPolicy {
   const { budget } = request
   return {
     mode: 'default',
@@ -206,7 +211,7 @@ export function definitionRunPolicy(request: Pick<DefinitionCheck, 'origin' | 'g
       kind: 'definition',
       digest: definitionAuthorityDigest({ policy: { definitionId: request.definition.id, definitionRevision: request.definition.revision }, grants: request.grants } as Pick<DefinitionAuthority, 'policy' | 'grants'>),
       // A definition that needs the instance's definition loop runs there (`definitionNeedsLoop`).
-      ...(definitionNeedsLoop(request.features) ? { loop: true as const } : {})
+      ...(loop ? { loop: true as const } : {})
     },
     budget: {
       maxTurns: budget.maxTurns,
