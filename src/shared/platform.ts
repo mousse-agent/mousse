@@ -29,6 +29,7 @@ export type PlatformRequestMethod = ChatMethod | ChatResourceMethod | WorkflowRu
   | 'skills.importPackage' | 'skills.exportPackage'
   | 'mcp.create' | 'mcp.update' | 'mcp.read' | 'mcp.enable' | 'mcp.delete'
   | 'mcp.testConnection' | 'mcp.beginAuth' | 'mcp.cancelAuth' | 'mcp.revokeAuth'
+  | 'runs.resumeNow' | 'runs.cancelPause'
 
 export type PlatformRequestErrorShape = import('./errors').AppErrorShape
 

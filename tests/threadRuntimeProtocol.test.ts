@@ -92,6 +92,20 @@ describe('ThreadRuntime over the protocol', () => {
     await c.close()
   })
 
+  it('a turn the orchestrator reports paused shows the thread as Paused, and a new turn replaces it', async () => {
+    const thread = mms.threads.createThread('Limited')
+    const c = await client()
+    mms.threadRuntimes.setActivity(thread.id, 'processing')
+
+    mms.orchestrator.emit('turn-paused', { threadId: thread.id })
+    expect(mms.threadRuntimes.getActivity(thread.id)).toBe('paused')
+    expect(mms.threadRuntimes.getActivitySnapshot()[thread.id]).toBe('paused')
+
+    mms.orchestrator.emit('turn-started', { threadId: thread.id })
+    expect(mms.threadRuntimes.getActivity(thread.id)).toBe('processing')
+    await c.close()
+  })
+
   it('thread selection via GUI does not kill PTY on another thread', async () => {
     const t1 = mms.threads.createThread('PtyA')
     const t2 = mms.threads.createThread('PtyB')

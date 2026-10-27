@@ -150,7 +150,7 @@ describe('a usage limit pauses the run', () => {
     const { thread, run } = await paused(d, pi)
     expect(run.outcome!.pause).toMatchObject({ autoResume: false })
     expect(effectsOf(d, run.runId, 'run.resume')).toEqual([])
-    expect(systemLines(d, thread.id).find((text) => text.startsWith('Paused until'))).toContain('Send a message to continue')
+    expect(systemLines(d, thread.id).find((text) => text.startsWith('Paused until'))).toContain('Press Resume now or send a message to continue.')
     await new Promise((resolve) => setTimeout(resolve, RESET_MS + 300))
     expect(d.engine.getRun(run.runId)!.status).toBe('paused')
     expect(pi.turns).toHaveLength(1)
@@ -344,10 +344,10 @@ describe('a usage limit pauses the run', () => {
       const second = boot(home, [pi], { pid: 2 })
       await waitFor(() => second.engine.getRun(run.runId)!.outcome!.pause!.stale === true, 'the stale ruling')
       expect(second.engine.getRun(run.runId)).toMatchObject({ status: 'paused', outcome: { pause: { autoResume: false, stale: true } } })
-      expect(systemLines(second, thread.id)).toContain('The usage limit reset while Mousse was off. Send a message to continue.')
+      expect(systemLines(second, thread.id)).toContain('The usage limit reset while Mousse was off. Press Resume now or send a message to continue.')
       expect(pi.turns).toHaveLength(1)
       // The run is still paused, so the thread still shows it, now with no timer to wait for.
-      expect(second.orch.getTurnState(thread.id)).toMatchObject({ phase: 'paused', turnId: run.runId, pause: { runId: run.runId, autoResume: false } })
+      expect(second.orch.getTurnState(thread.id)).toMatchObject({ phase: 'paused', turnId: run.runId, pause: { runId: run.runId, autoResume: false, stale: true } })
 
       await second.orch.resumePausedRun(run.runId)
       await waitFor(() => runsOf(second, thread.id).length === 2 && settled(second, thread.id), 'the continuation to finish')
@@ -915,7 +915,7 @@ describe('a usage limit pauses the run', () => {
       expect(pauseProviderName('openai')).toBe('OpenAI')
       expect(pauseProviderName('anthropic')).toBe('Anthropic')
       expect(pauseProviderName(undefined)).toBeUndefined()
-      expect(pausedLine({ until: new Date(Date.now() + 3_600_000).toISOString(), estimated: true, provider: 'openai-codex', limitKind: 'five_hour', autoResume: false })).toMatch(/ChatGPT's 5-hour limit was reached \(estimated\)\. Send a message to continue\.$/)
+      expect(pausedLine({ until: new Date(Date.now() + 3_600_000).toISOString(), estimated: true, provider: 'openai-codex', limitKind: 'five_hour', autoResume: false })).toMatch(/ChatGPT's 5-hour limit was reached \(estimated\)\. Press Resume now or send a message to continue\.$/)
     })
 
     it('the Bridge is not sent a turn.paused event: older peers reject event types they do not know', () => {

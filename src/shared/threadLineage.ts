@@ -91,13 +91,16 @@ function rolledUp(own: ThreadActivityState, below: readonly (ThreadActivityState
   if (own === 'awaiting_input') return own
   if (below.includes('awaiting_input')) return 'awaiting_input'
   if (own === 'processing' || below.includes('processing')) return 'processing'
+  // A run waiting out a usage limit is not working, but the row should not read Waiting or Done either.
+  if (own === 'paused' || below.includes('paused')) return 'paused'
   return own
 }
 
 /**
  * The activity a thread row shows once its subagents are counted: needing input anywhere below
  * outranks running anywhere below, and either outranks the thread's own state unless that is already
- * needing input. Finished or idle subagents add nothing, so a quiet parent stays quiet.
+ * needing input. A pause anywhere below comes after running. Finished or idle subagents add nothing,
+ * so a quiet parent stays quiet.
  */
 export function rollUpActivity(
   threadId: string,

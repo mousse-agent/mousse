@@ -295,7 +295,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
           active: s.orchestrator.isTurnActive(threadId),
           running: s.orchestrator.isActiveTurnRunning(threadId),
           // A run that hit a usage limit: when it resets and whether it continues by itself. Absent otherwise.
-          ...(pause ? { paused: { runId: pause.runId, until: pause.until, estimated: pause.estimated, autoResume: pause.autoResume, ...(pause.limitKind ? { limitKind: pause.limitKind } : {}) } } : {})
+          ...(pause ? { paused: { runId: pause.runId, until: pause.until, estimated: pause.estimated, autoResume: pause.autoResume, ...(pause.stale ? { stale: true } : {}), ...(pause.limitKind ? { limitKind: pause.limitKind } : {}) } } : {})
         },
         revision: this.revision()
       },
