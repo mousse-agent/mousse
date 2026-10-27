@@ -38,6 +38,7 @@ import {
   type GitStatusView
 } from '../src/renderer/stores/gitStatusStore'
 import { anyTurnEnded } from '../src/renderer/lib/turnEnded'
+import type { PullRequestComment, PullRequestDetail } from '../src/shared/pullRequests'
 import type {
   GitBranchInfo,
   GitCommit,
@@ -49,6 +50,50 @@ import type {
 
 const scope = { projectId: 'project-1', workspaceThreadId: null }
 const threadScope = { projectId: 'project-1', workspaceThreadId: 'thread-1' }
+
+const prComment = (id: string): PullRequestComment => ({
+  id,
+  author: 'grace',
+  authorAssociation: 'MEMBER',
+  body: 'Please rename this.',
+  bodyTruncated: false,
+  createdAt: '2026-10-26T09:00:00Z',
+  edited: false,
+  url: 'https://github.com/acme/app/pull/7#discussion_r1',
+  path: 'src/a.ts',
+  line: 14,
+  startLine: null,
+  side: 'RIGHT',
+  inReplyTo: null
+})
+
+const prDetail = (patch: Partial<PullRequestDetail> = {}): PullRequestDetail => ({
+  number: 7,
+  title: 'Add the retry button',
+  url: 'https://github.com/acme/app/pull/7',
+  state: 'open',
+  isDraft: false,
+  checks: 'failing',
+  checkCounts: { passed: 1, failed: 1, pending: 1, waiting: 1, total: 3 },
+  identity: { host: 'github.com', nameWithOwner: 'acme/app', number: 7 },
+  body: '',
+  author: 'ada',
+  headRefName: 'feature/retry',
+  baseRefName: 'main',
+  headSha: 'abc1234',
+  headRepository: 'acme/app',
+  baseRepository: 'acme/app',
+  isCrossRepository: false,
+  reviewDecision: null,
+  reviews: [],
+  comments: [],
+  commentsTruncated: false,
+  checkRuns: [],
+  updatedAt: '2026-10-26T12:00:00Z',
+  mergedAt: null,
+  closedAt: null,
+  ...patch
+})
 
 const repoStatus = (patch: Partial<GitStatusSnapshot> = {}): GitStatusSnapshot => ({
   isRepo: true,
@@ -712,5 +757,98 @@ describe('git section markup', () => {
     expect(html).toContain('title="No changes to commit"')
     expect(html).toContain('data-zero="true">+0')
     expect(html).toContain('data-zero="true">−0')
+  })
+
+  it('shows the verdict, the checks with their links, and the hint for a pull request read in full', () => {
+    const detail = prDetail({
+      reviewDecision: 'changes_requested',
+      comments: [prComment('1'), prComment('2')],
+      checkRuns: [
+        { name: 'build', state: 'passing', url: 'https://ci.example.com/build', workflowName: 'CI' },
+        { name: 'test', state: 'failing', url: 'https://ci.example.com/test', workflowName: 'CI' },
+        { name: 'deploy', state: 'waiting', url: null }
+      ]
+    })
+    const html = renderToStaticMarkup(createElement(GitSectionView, {
+      threadId: 't1',
+      ownThreadId: 't1',
+      projectId: 'p1',
+      workspaceThreadId: 't1',
+      path: '/wt/t1',
+      git: view({ status: repoStatus({ branch: 'mousse/thread/t1' }), branches: { current: 'mousse/thread/t1', branches: ['mousse/thread/t1'] } }),
+      pullRequest: { state: 'found', pullRequest: detail },
+      pullRequestDetail: detail,
+      pullRequestLink: { number: 7 } as never,
+      collapsedLabel: null
+    }))
+    expect(html).toContain('side-card-git-pr-verdict')
+    expect(html).toContain('data-tone="failing">Changes requested')
+    expect(html).toContain('2 comments')
+    // A failing check opens the list; each check names its state, and one with a link is a button to it.
+    expect(html).toContain('aria-expanded="true"')
+    expect(html).toMatch(/side-card-git-pr-check-row" data-tone="failing"[^>]*>.*?test.*?title="Open this check"[^>]*>Failed/)
+    expect(html).toMatch(/data-tone="passing"[^>]*>.*?build.*?>Passed/)
+    expect(html).toMatch(/data-tone="waiting"[^>]*>.*?deploy.*?<span class="side-card-git-pr-check-state">Waiting for approval/)
+    expect(html.indexOf('>test<')).toBeLessThan(html.indexOf('>build<'))
+    expect(html).toContain('Merge back targets the primary checkout, not the PR')
+  })
+
+  it('keeps the check list closed while every check passed, and still names how many there are', () => {
+    const detail = prDetail({ checkRuns: [{ name: 'build', state: 'passing', url: null }, { name: 'lint', state: 'skipped', url: null }] })
+    const html = renderToStaticMarkup(createElement(GitSectionView, {
+      threadId: 't1',
+      projectId: 'p1',
+      path: '/repo/a',
+      git: view({ status: repoStatus() }),
+      pullRequest: { state: 'found', pullRequest: detail },
+      pullRequestDetail: detail,
+      collapsedLabel: null
+    }))
+    expect(html).toContain('aria-expanded="false"')
+    expect(html).toContain('side-card-git-pr-checks-count">2')
+    expect(html).not.toContain('side-card-git-pr-check-list')
+    expect(html).not.toContain('side-card-git-pr-hint')
+    expect(html).not.toContain('side-card-git-pr-verdict')
+  })
+
+  it('shows the host\'s message when the pull request could not be read, under the row', () => {
+    const message = 'GraphQL: Could not resolve to a PullRequest with the number of 7. — signed in to github.com as octocat, which cannot see it.'
+    const html = renderToStaticMarkup(createElement(GitSectionView, {
+      threadId: 't1',
+      projectId: 'p1',
+      path: '/repo/a',
+      git: view({ status: repoStatus() }),
+      pullRequest: { state: 'found', pullRequest: prDetail() },
+      pullRequestError: message,
+      collapsedLabel: null
+    }))
+    expect(html).toContain('side-card-git-pr-error')
+    expect(html).toContain('role="alert"')
+    expect(html).toContain('signed in to github.com as octocat, which cannot see it.')
+  })
+
+  it('shows nothing of the detail for a merged pull request', () => {
+    const detail = prDetail({ state: 'merged', reviewDecision: 'approved', checkRuns: [{ name: 'build', state: 'failing', url: null }] })
+    const html = renderToStaticMarkup(createElement(GitSectionView, {
+      threadId: 't1',
+      projectId: 'p1',
+      path: '/repo/a',
+      git: view({ status: repoStatus() }),
+      pullRequest: { state: 'found', pullRequest: detail },
+      pullRequestDetail: detail,
+      collapsedLabel: null
+    }))
+    expect(html).toContain('side-card-git-pr-suffix">Merged')
+    expect(html).not.toContain('side-card-git-pr-checks')
+    expect(html).not.toContain('side-card-git-pr-verdict')
+  })
+
+  it('marks the pull request detail with background colours only, never a side or edge bar', () => {
+    const css = readFileSync(resolve(__dirname, '../src/renderer/components/sideCard/gitSection.css'), 'utf8')
+    const rules = [...css.matchAll(/([^{}]*side-card-git-pr-(?:review|verdict|checks|check-|hint|error)[^{}]*)\{([^}]*)\}/g)]
+    expect(rules.length).toBeGreaterThan(10)
+    for (const [, , body] of rules) {
+      expect(body).not.toMatch(/border-(?:left|right|inline)(?:-width|-color)?\s*:/)
+    }
   })
 })

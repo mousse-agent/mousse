@@ -21,6 +21,10 @@ import {
   gitCollapsedLabel,
   gitActionLock,
   prefillAmendDraft,
+  LINKED_WORKTREE_HINT,
+  pullRequestCheckRows,
+  pullRequestReadThreadId,
+  pullRequestReviewState,
   pullRequestRow,
   pullRequestScope,
   pushButtonModel,
@@ -28,6 +32,7 @@ import {
   releaseForcedAmend
 } from '../src/renderer/components/sideCard/gitSectionLogic'
 import { EMPTY_GIT_ENTRY, type GitStatusView } from '../src/renderer/stores/gitStatusStore'
+import type { PullRequestCheck, PullRequestComment, PullRequestDetail } from '../src/shared/pullRequests'
 import type {
   GitCommit,
   GitFileChange,
@@ -76,6 +81,52 @@ const found = (patch: Partial<GitPullRequestInfo> = {}): GitPullRequestLookup =>
   pullRequest: pullRequest(patch)
 })
 
+const lineComment = (id: string, patch: Partial<PullRequestComment> = {}): PullRequestComment => ({
+  id,
+  author: 'grace',
+  authorAssociation: 'MEMBER',
+  body: 'Please rename this.',
+  bodyTruncated: false,
+  createdAt: '2026-10-26T09:00:00Z',
+  edited: false,
+  url: 'https://github.com/acme/app/pull/123#discussion_r1',
+  path: 'src/a.ts',
+  line: 14,
+  startLine: null,
+  side: 'RIGHT',
+  inReplyTo: null,
+  ...patch
+})
+
+const detail = (patch: Partial<PullRequestDetail> = {}): PullRequestDetail => ({
+  ...pullRequest(),
+  identity: { host: 'github.com', nameWithOwner: 'acme/app', number: 123 },
+  body: '',
+  author: 'ada',
+  headRefName: 'feature/login',
+  baseRefName: 'main',
+  headSha: 'abc1234',
+  headRepository: 'acme/app',
+  baseRepository: 'acme/app',
+  isCrossRepository: false,
+  reviewDecision: null,
+  reviews: [],
+  comments: [],
+  commentsTruncated: false,
+  checkRuns: [],
+  updatedAt: '2026-10-26T12:00:00Z',
+  mergedAt: null,
+  closedAt: null,
+  ...patch
+})
+
+const check = (name: string, state: PullRequestCheck['state'], url: string | null = `https://github.com/acme/app/actions/runs/${name}`, workflowName?: string): PullRequestCheck => ({
+  name,
+  state,
+  url,
+  ...(workflowName ? { workflowName } : {})
+})
+
 const file = { path: 'a.ts', status: 'modified' as const, staged: false }
 
 describe('what Create PR captures', () => {
@@ -105,6 +156,158 @@ describe('what Create PR captures', () => {
   })
 })
 
+describe('which thread a pull request read is made as', () => {
+  it('is the thread only when its own worktree is the folder the card shows', () => {
+    expect(pullRequestReadThreadId('t1', 't1')).toBe('t1')
+  })
+
+  it('is no thread for a thread whose workspace is not ready, so the card and the daemon read the same folder', () => {
+    // The card shows the project's folder for it (no worktree is ready), and asks about the project.
+    expect(pullRequestReadThreadId('t1', null)).toBeNull()
+    // A workspace of another thread is not this thread's folder either.
+    expect(pullRequestReadThreadId('t1', 't2')).toBeNull()
+  })
+
+  it('is no thread for a new chat', () => {
+    expect(pullRequestReadThreadId(null, null)).toBeNull()
+    expect(pullRequestReadThreadId(null, 't2')).toBeNull()
+  })
+})
+
+describe('review state of a pull request', () => {
+  const open = { state: 'open', isDraft: false } as const
+
+  it.each([
+    ['approved', 'Approved', 'passing'],
+    ['changes_requested', 'Changes requested', 'failing'],
+    ['review_required', 'Review required', 'pending']
+  ] as const)('maps the host\'s decision %s', (decision, label, tone) => {
+    expect(pullRequestReviewState(open, decision)).toEqual({ key: decision, label, tone })
+  })
+
+  it('maps a draft, merged and closed pull request', () => {
+    expect(pullRequestReviewState({ state: 'open', isDraft: true }, null)).toEqual({ key: 'draft', label: 'Draft', tone: 'neutral' })
+    expect(pullRequestReviewState({ state: 'merged', isDraft: false }, 'approved')).toEqual({ key: 'merged', label: 'Merged', tone: 'neutral' })
+    expect(pullRequestReviewState({ state: 'closed', isDraft: false }, 'changes_requested')).toEqual({ key: 'closed', label: 'Closed', tone: 'neutral' })
+  })
+
+  it('lets a finished pull request win over what was decided, and a decision win over draft', () => {
+    expect(pullRequestReviewState({ state: 'merged', isDraft: true }, 'review_required')?.key).toBe('merged')
+    expect(pullRequestReviewState({ state: 'open', isDraft: true }, 'changes_requested')?.key).toBe('changes_requested')
+  })
+
+  it('is nothing for an open pull request nobody has to review', () => {
+    expect(pullRequestReviewState(open, null)).toBeNull()
+  })
+})
+
+describe('pull request checks', () => {
+  it('lists every check with its state and link, what needs attention first, in the host\'s order within a state', () => {
+    const rows = pullRequestCheckRows([
+      check('build', 'passing', 'https://ci.example.com/build', 'CI'),
+      check('docs', 'skipped'),
+      check('lint', 'pending'),
+      check('test', 'failing', 'https://ci.example.com/test', 'CI'),
+      check('deploy', 'waiting', 'https://ci.example.com/deploy'),
+      check('e2e', 'failing')
+    ])
+    expect(rows.map((row) => [row.name, row.tone, row.label])).toEqual([
+      ['test', 'failing', 'Failed'],
+      ['e2e', 'failing', 'Failed'],
+      ['deploy', 'waiting', 'Waiting for approval'],
+      ['lint', 'pending', 'Running'],
+      ['build', 'passing', 'Passed'],
+      ['docs', 'skipped', 'Skipped']
+    ])
+    expect(rows[0]).toEqual({ name: 'test', workflow: 'CI', tone: 'failing', label: 'Failed', url: 'https://ci.example.com/test' })
+    expect(rows.find((row) => row.name === 'build')?.workflow).toBe('CI')
+    expect(rows.find((row) => row.name === 'lint')?.workflow).toBeNull()
+  })
+
+  it('keeps only web links, and treats a check with no state yet as running', () => {
+    const rows = pullRequestCheckRows([check('a', 'passing', 'javascript:alert(1)'), check('b', 'passing', null), check('c', 'none', 'http://ci.example.com/c')])
+    expect(rows.map((row) => [row.name, row.url, row.tone])).toEqual([
+      ['c', 'http://ci.example.com/c', 'pending'],
+      ['a', null, 'passing'],
+      ['b', null, 'passing']
+    ])
+  })
+
+  it('is empty without checks', () => {
+    expect(pullRequestCheckRows([])).toEqual([])
+  })
+})
+
+describe('pull request row with its detail', () => {
+  const checkSet = [check('build', 'passing'), check('test', 'failing'), check('deploy', 'waiting')]
+
+  it('adds the reviewers\' verdict, each check with its link and the comment count to an open pull request', () => {
+    const row = pullRequestRow(
+      found({ checks: 'failing', checkCounts: { passed: 1, failed: 1, pending: 1, waiting: 1, total: 3 } }),
+      status(),
+      detail({ reviewDecision: 'changes_requested', checkRuns: checkSet, comments: [lineComment('1'), lineComment('2')] })
+    )
+    expect(row).toMatchObject({
+      review: { label: 'Changes requested', tone: 'failing' },
+      commentCount: 2,
+      commentsLabel: '2 comments',
+      linked: false,
+      hint: null,
+      tooltip: '#123 Fix login\nChanges requested\n1 failing',
+      ariaLabel: 'Pull request #123, Fix login, changes requested, 1 check failing'
+    })
+    expect(row?.kind === 'found' && row.checkRows.map((entry) => [entry.name, entry.tone, entry.url])).toEqual([
+      ['test', 'failing', 'https://github.com/acme/app/actions/runs/test'],
+      ['deploy', 'waiting', 'https://github.com/acme/app/actions/runs/deploy'],
+      ['build', 'passing', 'https://github.com/acme/app/actions/runs/build']
+    ])
+  })
+
+  it.each([
+    ['approved', 'Approved', 'passing'],
+    ['review_required', 'Review required', 'pending']
+  ] as const)('shows %s', (decision, label, tone) => {
+    expect(pullRequestRow(found(), status(), detail({ reviewDecision: decision }))).toMatchObject({ review: { label, tone } })
+  })
+
+  it('has no verdict when nobody has to review, and still shows a draft by its suffix', () => {
+    expect(pullRequestRow(found(), status(), detail())).toMatchObject({ review: null, suffix: null })
+    expect(pullRequestRow(found({ isDraft: true }), status(), detail({ isDraft: true }))).toMatchObject({ review: null, suffix: 'Draft' })
+    expect(pullRequestRow(found({ isDraft: true }), status(), detail({ isDraft: true, reviewDecision: 'approved' }))).toMatchObject({ review: { label: 'Approved' }, suffix: 'Draft' })
+  })
+
+  it('shows nothing of the detail for a merged or closed pull request', () => {
+    for (const state of ['merged', 'closed'] as const) {
+      const row = pullRequestRow(found({ state }), status(), detail({ state, reviewDecision: 'approved', checkRuns: checkSet, comments: [lineComment('1')] }))
+      expect(row).toMatchObject({ review: null, checkRows: [], commentCount: 0, commentsLabel: null, suffix: state === 'merged' ? 'Merged' : 'Closed' })
+    }
+  })
+
+  it('shows no check rows for a pull request without checks', () => {
+    expect(pullRequestRow(found({ checks: 'none', checkCounts: { passed: 0, failed: 0, pending: 0, waiting: 0, total: 0 } }), status(), detail({ checkRuns: [] }))).toMatchObject({ checkRows: [], checks: null })
+  })
+
+  it('ignores the detail of another pull request, which the branch has moved on from', () => {
+    const row = pullRequestRow(found(), status(), detail({ number: 99, reviewDecision: 'changes_requested', checkRuns: checkSet }))
+    expect(row).toMatchObject({ number: '#123', review: null, checkRows: [], commentCount: 0 })
+  })
+
+  it('counts one comment, and says when more exist than were read', () => {
+    expect(pullRequestRow(found(), status(), detail({ comments: [lineComment('1')] }))).toMatchObject({ commentCount: 1, commentsLabel: '1 comment' })
+    expect(pullRequestRow(found(), status(), detail({ comments: [lineComment('1')], commentsTruncated: true }))).toMatchObject({ commentsLabel: '1+ comments' })
+  })
+
+  it('notes that merge back targets the primary checkout, for a linked pull request of a worktree thread only', () => {
+    const open = found()
+    expect(pullRequestRow(open, status(), detail(), { number: 123 }, true)).toMatchObject({ linked: true, hint: LINKED_WORKTREE_HINT })
+    expect(LINKED_WORKTREE_HINT).toBe('Merge back targets the primary checkout, not the PR')
+    expect(pullRequestRow(open, status(), detail(), { number: 123 }, false)).toMatchObject({ linked: true, hint: null })
+    expect(pullRequestRow(open, status(), detail(), null, true)).toMatchObject({ linked: false, hint: null })
+    // A link to another pull request is not this one's.
+    expect(pullRequestRow(open, status(), detail(), { number: 7 }, true)).toMatchObject({ linked: false, hint: null })
+  })
+})
+
 describe('pull request row', () => {
   it('shows nothing until the lookup has loaded', () => {
     expect(pullRequestRow(null, status())).toBeNull()
@@ -119,6 +322,12 @@ describe('pull request row', () => {
       checks: 'passing',
       checksLabel: 'Checks passed',
       suffix: null,
+      review: null,
+      checkRows: [],
+      commentCount: 0,
+      commentsLabel: null,
+      linked: false,
+      hint: null,
       tooltip: '#123 Fix login\nChecks passed',
       ariaLabel: 'Pull request #123, Fix login, checks passed'
     })
@@ -153,6 +362,15 @@ describe('pull request row', () => {
     const closed = pullRequestRow(found({ state: 'closed', isDraft: true, checks: 'failing' }), status())
     expect(closed).toMatchObject({ suffix: 'Closed', checks: null })
     expect(closed?.kind === 'found' && closed.ariaLabel).toBe('Pull request #123, Fix login, closed')
+  })
+
+  it('says so when the checks that are left only wait for a maintainer\'s approval, and that is not failing or passing', () => {
+    const waiting = pullRequestRow(found({ checks: 'pending', checkCounts: { passed: 1, failed: 0, pending: 1, waiting: 1, total: 2 } }), status())
+    expect(waiting).toMatchObject({ checks: 'pending', checksLabel: 'Waiting for approval' })
+    expect(waiting?.kind === 'found' && waiting.ariaLabel).toBe('Pull request #123, Fix login, waiting for approval')
+    // A real run in progress next to a waiting one is still running; a failure outranks both.
+    expect(pullRequestRow(found({ checks: 'pending', checkCounts: { passed: 0, failed: 0, pending: 2, waiting: 1, total: 2 } }), status())).toMatchObject({ checksLabel: 'Checks running' })
+    expect(pullRequestRow(found({ checks: 'failing', checkCounts: { passed: 0, failed: 1, pending: 1, waiting: 1, total: 2 } }), status())).toMatchObject({ checks: 'failing', checksLabel: '1 failing' })
   })
 
   it('copes with an empty title', () => {
