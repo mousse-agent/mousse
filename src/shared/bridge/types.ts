@@ -169,7 +169,6 @@ export const BRIDGE_HUB_LOCAL_METHODS = [
   'bridge.hub.search',
   'bridge.hub.create',
   'bridge.hub.openProject',
-  'bridge.hub.stage',
   'bridge.hub.send',
   'bridge.hub.steer',
   'bridge.hub.abort',
@@ -211,24 +210,9 @@ export interface BridgeHubLocalParams {
     path: string
     options?: BridgeHubRequestOptions
   }
-  /** One slice of an image for a later send; the fields are those of the remote `attachments.stage`. */
-  'bridge.hub.stage': {
-    target: NodeId
-    upload: string
-    index: number
-    total: number
-    name: string
-    mimeType: string
-    data: string
-    options?: BridgeHubRequestOptions
-  }
   'bridge.hub.send': {
     ref: BridgeEntityRef
     content: string
-    /** A chat mode, or a skill mode, as in the remote `orchestrator.send`. */
-    mode?: BridgeChatInput['mode']
-    /** Upload ids of images staged with `bridge.hub.stage` on the same target. */
-    attachments?: string[]
     options?: BridgeHubRequestOptions
   }
   'bridge.hub.steer': {
