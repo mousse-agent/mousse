@@ -20,6 +20,7 @@ import {
   DEFAULT_SIGINT_EXIT_WINDOW_MS
 } from './sigintSemantics'
 import { canUsePiTui, loadPiTui } from './piTui'
+import { describeApproval, handleApprovalCommand, type PendingApproval } from './approvals'
 
 export interface InteractiveChatOptions {
   client: DaemonClient
@@ -73,6 +74,14 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
       if (msg?.content) {
         const role = msg.role ?? 'assistant'
         writeLine(role === 'user' ? `you> ${msg.content}` : msg.content)
+      }
+    }
+    // A saved approval request: show what it asks, why, and how to answer it from here.
+    if (ev.type === 'questions.pending') {
+      const entry = ev.data as PendingApproval
+      if (entry?.approval && entry.requestId) {
+        for (const line of describeApproval(entry)) writeLine(line)
+        writeLine('  /approve to allow once, /deny [reason] to deny')
       }
     }
     if (ev.type === 'turn.started') turnActive = true
@@ -248,6 +257,15 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
   const handleLine = async (line: string): Promise<void> => {
     const text = line.trim()
     if (!text) return
+    if (/^\/(approve|deny)(\s|$)/i.test(text) && state.threadId) {
+      try {
+        const reply = await handleApprovalCommand(text, client, state.threadId)
+        if (reply) writeLine(reply)
+      } catch (err) {
+        writeLine(`Error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+      return
+    }
     if (text.startsWith('/')) {
       await refreshCaches()
       const result = handleInteractiveSlash(text, buildCtx())
