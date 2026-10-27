@@ -154,6 +154,36 @@ describe('ProfileDatabase', () => {
     expect(codeOf(() => database.transaction(() => database.close()))).toBe('internal')
   })
 
+  describe('the agent access level columns (the migration after the runs rebuild)', () => {
+    const access = RUN_MIGRATIONS.find((migration) => migration.sql.includes('access_level'))!
+    const before = RUN_MIGRATIONS.filter((migration) => migration.version < access.version)
+
+    it('comes after the runs rebuild, so a profile already at the rebuild\'s version still gets it', () => {
+      const rebuild = RUN_MIGRATIONS.find((migration) => migration.foreignKeys === 'off')!
+      expect(access.version).toBeGreaterThan(rebuild.version)
+      expect(RUN_MIGRATIONS.map((migration) => migration.version)).toEqual(RUN_MIGRATIONS.map((_migration, index) => index + 1))
+    })
+
+    it('upgrades a database that has credentials and delegations: old rows read as lineage, and the levels are checked', () => {
+      const database = open()
+      database.migrate(before)
+      expect(database.userVersion()).toBe(access.version - 1)
+      database.database
+        .prepare("INSERT INTO credentials(token_hash, thread_id, run_id, provider, mode_ceiling, created_at, revoked_at, last_seen_at) VALUES('old', 't1', 'r1', 'claude', 'default', '2026-10-12T00:00:00.000Z', NULL, '2026-10-12T00:00:00.000Z')")
+        .run()
+      database.database
+        .prepare(`INSERT INTO delegations(delegation_id, parent_run_id, parent_thread_id, child_thread_id, child_run_id, provider, model, prompt_digest, wake, status, result, created_at, completed_at, mode_ceiling, workspace, role)
+          VALUES('d-old', 'rp', 'tp', 'tc', 'rc', NULL, NULL, 'digest', 'always', 'running', NULL, '2026-10-12T00:00:00.000Z', NULL, NULL, NULL, NULL)`)
+        .run()
+      database.migrate(RUN_MIGRATIONS)
+      expect(database.userVersion()).toBe(RUN_MIGRATIONS.at(-1)!.version)
+      expect(database.database.prepare("SELECT access_level FROM credentials WHERE token_hash = 'old'").get()).toEqual({ access_level: 'lineage' })
+      expect(database.database.prepare("SELECT access_level FROM delegations WHERE delegation_id = 'd-old'").get()).toEqual({ access_level: null })
+      expect(() => database.database.prepare("UPDATE credentials SET access_level = 'root'").run()).toThrow(/CHECK/)
+      expect(() => database.database.prepare("UPDATE delegations SET access_level = 'root'").run()).toThrow(/CHECK/)
+    })
+  })
+
   describe('the runs rebuild (a migration that runs with foreign keys off)', () => {
     const rebuild = RUN_MIGRATIONS.find((migration) => migration.foreignKeys === 'off')!
     const older = RUN_MIGRATIONS.filter((migration) => migration.version < rebuild.version)
@@ -200,7 +230,7 @@ describe('ProfileDatabase', () => {
 
       database.migrate(RUN_MIGRATIONS)
 
-      expect(database.userVersion()).toBe(rebuild.version)
+      expect(database.userVersion()).toBe(RUN_MIGRATIONS.at(-1)!.version)
       expect(runs(database)).toEqual(rows)
       expect(database.database.prepare('SELECT * FROM run_attempts ORDER BY attempt_id').all()).toEqual(attempts)
       expect(database.database.prepare('PRAGMA foreign_key_check').all()).toEqual([])
@@ -236,7 +266,7 @@ describe('ProfileDatabase', () => {
       expect(foreignKeys(database)).toBe(1)
       // The failure left nothing behind: the same migration applies on the next open.
       database.migrate(RUN_MIGRATIONS)
-      expect(database.userVersion()).toBe(rebuild.version)
+      expect(database.userVersion()).toBe(RUN_MIGRATIONS.at(-1)!.version)
       expect(runs(database)).toEqual(rows)
     })
 
