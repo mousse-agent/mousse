@@ -9,7 +9,9 @@ import {
   parseRemotes,
   parseRemoteUrl,
   parseRepositoryIdentity,
+  PULL_REQUEST_EXISTS,
   remoteForIdentity,
+  removeTempFolder,
   summarizeCheckRollup
 } from '../src/mms/git/GitHubCodeHost'
 import { createGhFallbackRunner, type ExecutableRunner } from '../src/mms/git/GitHubService'
@@ -384,6 +386,18 @@ describe('GitHubCodeHost shared read cache', () => {
     expect(prListCalls(run)).toHaveLength(2)
   })
 
+  it('never reuses a cached "no pull request" answer for a forced lookup, but still joins a read in flight', async () => {
+    let listed = '[]'
+    const run = runner({ pr: async () => ok(listed) })
+    const host = new GitHubCodeHost(run, () => 1_000_000)
+    expect(await host.lookupPullRequest('/repo')).toMatchObject({ state: 'none' })
+    // Another client opens the pull request; the clock has not moved, so the miss is far younger than the 5 second floor.
+    listed = `[${prJson}]`
+    expect(await host.lookupPullRequest('/repo')).toMatchObject({ state: 'none' })
+    expect(await host.lookupPullRequest('/repo', undefined, { force: true })).toMatchObject({ state: 'found' })
+    expect(prListCalls(run).length).toBeGreaterThan(1)
+  })
+
   it('keeps a branch separate from other branches of the repository', async () => {
     const run = runner()
     const host = new GitHubCodeHost(run)
@@ -516,7 +530,7 @@ describe('GitHubCodeHost.createPullRequest', () => {
 
   it('says so when the branch already has a pull request, and passes other errors on verbatim', async () => {
     const exists = runner({ create: async () => { throw failure('a pull request for branch "feature" into branch "main" already exists:\nhttps://github.com/acme/app/pull/3') } })
-    await expect(new GitHubCodeHost(exists).createPullRequest('/repo', input)).rejects.toThrow('A pull request for this branch already exists.')
+    await expect(new GitHubCodeHost(exists).createPullRequest('/repo', input)).rejects.toMatchObject({ message: 'A pull request for this branch already exists.', code: PULL_REQUEST_EXISTS })
     const other = runner({ create: async () => { throw failure('GraphQL: Head sha can\'t be blank, Base sha can\'t be blank (createPullRequest)') } })
     await expect(new GitHubCodeHost(other).createPullRequest('/repo', input)).rejects.toThrow('GraphQL: Head sha can\'t be blank, Base sha can\'t be blank (createPullRequest)')
     const missing = runner({ create: async () => { throw enoent() } })
@@ -645,6 +659,14 @@ describe('GitHubCodeHost.viewerLogin', () => {
     expect(await host.viewerLogin('/repo')).toBeNull()
     fail = false
     expect(await host.viewerLogin('/repo')).toBe('octocat')
+  })
+})
+
+describe('removeTempFolder', () => {
+  it('retries and then gives up quietly, so a created pull request is never turned into an error', async () => {
+    const remove = vi.fn(async () => { throw Object.assign(new Error('EPERM'), { code: 'EPERM' }) })
+    await expect(removeTempFolder('/tmp/x', remove as never)).resolves.toBeUndefined()
+    expect(remove).toHaveBeenCalledWith('/tmp/x', expect.objectContaining({ recursive: true, force: true, maxRetries: 3 }))
   })
 })
 

@@ -327,9 +327,15 @@ export interface BranchSummary {
 /** How long a read of a branch's history may take before it is given up. */
 const SUMMARY_READ_MS = 30_000
 
+/** After a read is given up, how long to wait for the process to end before settling anyway. */
+const SUMMARY_KILL_SETTLE_MS = 5_000
+
 /**
- * The first `maxBytes` of a read-only Git command's output. A command that prints more is stopped, so a
- * huge diff never fills memory; one that fails for another reason yields nothing.
+ * The first `maxBytes` of a read-only Git command's output; one that fails for another reason yields
+ * nothing. Memory stays bounded: output past the limit is read and dropped. The read settles only once
+ * the process has closed, so Git never still holds the repository's folder when it resolves (a kill does
+ * not wait for exit, and on Windows the `git` on PATH is a launcher around the real process). A command
+ * that runs past the time limit is stopped, with its whole process tree on Windows.
  */
 function readBoundedGit(cwd: string, args: readonly string[], maxBytes: number): Promise<string> {
   return new Promise((resolvePromise) => {
@@ -343,25 +349,25 @@ function readBoundedGit(cwd: string, args: readonly string[], maxBytes: number):
     let size = 0
     let truncated = false
     let done = false
+    let backstop: NodeJS.Timeout | undefined
     const finish = (ok: boolean): void => {
       if (done) return
       done = true
       clearTimeout(timer)
+      if (backstop) clearTimeout(backstop)
       resolvePromise(ok || truncated ? Buffer.concat(chunks).subarray(0, maxBytes).toString('utf8') : '')
     }
     const timer = setTimeout(() => {
-      child.kill()
-      finish(false)
+      if (process.platform === 'win32' && child.pid) spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }).on('error', () => undefined)
+      else child.kill()
+      // Close ends the read; the backstop only covers a process that never closes its pipes.
+      backstop = setTimeout(() => finish(false), SUMMARY_KILL_SETTLE_MS)
     }, SUMMARY_READ_MS)
     child.stdout.on('data', (chunk: Buffer) => {
-      if (truncated) return
+      if (size >= maxBytes) return
       chunks.push(chunk)
       size += chunk.length
-      if (size >= maxBytes) {
-        truncated = true
-        child.kill()
-        finish(true)
-      }
+      if (size >= maxBytes) truncated = true
     })
     child.on('error', () => finish(false))
     child.on('close', (code) => finish(code === 0))
@@ -802,6 +808,18 @@ export class GitService {
   /** The checked-out branch, or null for a detached HEAD. */
   async currentBranch(cwd: string): Promise<string | null> {
     return (await this.read(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD'])) || null
+  }
+
+  /**
+   * The remote and branch a local branch is set to push to and track, or null when it has none (an
+   * unpublished branch, or one that tracks a local branch).
+   */
+  async branchUpstream(cwd: string, branch: string): Promise<{ remote: string; branch: string } | null> {
+    if (!branch || branch.startsWith('-')) return null
+    const remote = await this.read(cwd, ['config', '--get', `branch.${branch}.remote`])
+    const merge = await this.read(cwd, ['config', '--get', `branch.${branch}.merge`])
+    if (!remote || remote === '.' || !merge?.startsWith('refs/heads/')) return null
+    return { remote, branch: merge.slice('refs/heads/'.length) }
   }
 
   /** Refuses with `git_branch_changed` when `expected` is given and HEAD is on another branch. */

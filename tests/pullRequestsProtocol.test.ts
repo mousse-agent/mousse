@@ -1,4 +1,4 @@
-import { writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
@@ -7,6 +7,7 @@ import { LocalMmsClient } from '../src/mms/protocol/client'
 import { PROTOCOL_METHODS } from '../src/mms/protocol/types'
 import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
 import type { GitPullRequestInfo, GitPullRequestLookup, Thread } from '../src/shared/types'
+import { PULL_REQUEST_EXISTS } from '../src/mms/git/GitHubCodeHost'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
 
 const info = (patch: Partial<GitPullRequestInfo> = {}): GitPullRequestInfo => ({
@@ -113,10 +114,16 @@ describe('pull request methods through the daemon protocol', () => {
 
   describe('drafting and creating for the branch a form opened on', () => {
     /** A project whose primary checkout is on `feature-a`, one commit ahead of its base. */
-    function openOnFeature() {
+    function openOnFeature(options: { push?: boolean } = {}) {
       const base = git(f.repo, 'rev-parse', '--abbrev-ref', 'HEAD')
       git(f.repo, 'checkout', '-q', '-b', 'feature-a')
       f.commit(f.repo, 'changed\n')
+      if (options.push !== false) {
+        // A pull request is made from a pushed branch.
+        git(f.root, 'init', '-q', '--bare', join(f.root, 'remote.git'))
+        git(f.repo, 'remote', 'add', 'origin', join(f.root, 'remote.git'))
+        git(f.repo, 'push', '-q', '-u', 'origin', 'feature-a')
+      }
       const project = mms.projects.openProject(f.repo)
       const thread = mms.threads.createThread('Task A', project.id)
       return { base, project, thread }
@@ -172,6 +179,9 @@ describe('pull request methods through the daemon protocol', () => {
       const thread = mms.threads.createThread('Task A', project.id)
       const workspace = await new WorkspaceResolver(mms.threads.getThreadDir(thread.id), thread.id, f.repo).resolve('agent')
       const branch = git(workspace.workspacePath, 'rev-parse', '--abbrev-ref', 'HEAD')
+      git(f.root, 'init', '-q', '--bare', join(f.root, 'remote.git'))
+      git(f.repo, 'remote', 'add', 'origin', join(f.root, 'remote.git'))
+      git(workspace.workspacePath, 'push', '-q', '-u', 'origin', branch)
       const host = stubHost(base)
       await client.request('pullRequests.create', { threadId: thread.id, originThreadId: thread.id, expectedBranch: branch, title: 'T', base })
       expect(normalized(host.create.mock.calls[0][0])).toBe(normalized(workspace.workspacePath))
@@ -217,6 +227,63 @@ describe('pull request methods through the daemon protocol', () => {
       expect(result.pullRequest.number).toBe(30)
       expect(host.create).toHaveBeenCalledTimes(1)
       expect(mms.threads.getThread(thread.id)?.pullRequest).toBeUndefined()
+    })
+
+    it('refuses a branch that is not pushed, or is pushed under another name, and creates nothing', async () => {
+      const unpushed = openOnFeature({ push: false })
+      const host = stubHost(unpushed.base)
+      await expect(client.request('pullRequests.create', { projectId: unpushed.project.id, expectedBranch: 'feature-a', title: 'T', base: unpushed.base })).rejects.toThrow(/Push the branch first/)
+      // Pushed, but as another branch: --head would name a branch the remote does not have.
+      git(f.root, 'init', '-q', '--bare', join(f.root, 'remote.git'))
+      git(f.repo, 'remote', 'add', 'origin', join(f.root, 'remote.git'))
+      git(f.repo, 'push', '-q', '-u', 'origin', 'feature-a:renamed')
+      await expect(client.request('pullRequests.create', { projectId: unpushed.project.id, expectedBranch: 'feature-a', title: 'T', base: unpushed.base })).rejects.toThrow(/pushed as "renamed"/)
+      expect(host.create).not.toHaveBeenCalled()
+      // An open pull request is still shown for a branch whose upstream cannot be read.
+      host.lookup.mockResolvedValue({ state: 'found', pullRequest: info({ number: 12 }) })
+      await expect(client.request('pullRequests.create', { projectId: unpushed.project.id, expectedBranch: 'feature-a', title: 'T', base: unpushed.base })).resolves.toMatchObject({ existing: true })
+    })
+
+    it('shows the pull request another client created in the same moment, and links it', async () => {
+      const { base, project, thread } = openOnFeature()
+      const host = stubHost(base)
+      host.lookup.mockResolvedValueOnce({ state: 'none', isDefaultBranch: false }).mockResolvedValue({ state: 'found', pullRequest: info({ number: 12 }) })
+      host.create.mockRejectedValue(Object.assign(new Error('A pull request for this branch already exists.'), { code: PULL_REQUEST_EXISTS }))
+      expect(await client.request('pullRequests.create', { projectId: project.id, originThreadId: thread.id, expectedBranch: 'feature-a', title: 'T', base })).toEqual({
+        pullRequest: info({ number: 12 }),
+        existing: true
+      })
+      expect(host.lookup).toHaveBeenCalledTimes(2)
+      expect(host.lookup.mock.calls[1][2]).toEqual({ force: true })
+      expect(mms.threads.getThread(thread.id)?.pullRequest?.number).toBe(12)
+      // When the other pull request cannot be found either, the host's own error is what the user sees.
+      host.lookup.mockReset().mockResolvedValue({ state: 'none', isDefaultBranch: false })
+      await expect(client.request('pullRequests.create', { projectId: project.id, expectedBranch: 'feature-a', title: 'T', base })).rejects.toThrow(/already exists/)
+      // gh's own message reaches the form, not a generic failure.
+      host.create.mockRejectedValue(new Error("GraphQL: Head sha can't be blank"))
+      await expect(client.request('pullRequests.create', { projectId: project.id, expectedBranch: 'feature-a', title: 'T', base })).rejects.toThrow(/Head sha can't be blank/)
+    })
+
+    it('takes an originating thread only from the folder it acts on', async () => {
+      const { base, project, thread } = openOnFeature()
+      const host = stubHost(base)
+      const otherDirectory = join(f.root, 'other-project')
+      mkdirSync(otherDirectory)
+      const otherProject = mms.projects.openProject(otherDirectory)
+      const elsewhere = mms.threads.createThread('Elsewhere', otherProject.id)
+      const worktreeThread = mms.threads.createThread('Worktree', project.id)
+      await new WorkspaceResolver(mms.threads.getThreadDir(worktreeThread.id), worktreeThread.id, f.repo).resolve('agent')
+      const refused = /not the thread of this folder/
+      // Another project's thread, for a project call and for a thread call.
+      await expect(client.request('pullRequests.draft', { projectId: project.id, originThreadId: elsewhere.id, expectedBranch: 'feature-a' })).rejects.toThrow(refused)
+      await expect(client.request('pullRequests.create', { threadId: thread.id, originThreadId: elsewhere.id, expectedBranch: 'feature-a', title: 'T', base })).rejects.toThrow(refused)
+      // A thread with its own worktree is not the thread of the project's checkout, and another thread is not this thread.
+      await expect(client.request('pullRequests.draft', { projectId: project.id, originThreadId: worktreeThread.id, expectedBranch: 'feature-a' })).rejects.toThrow(refused)
+      await expect(client.request('pullRequests.create', { threadId: thread.id, originThreadId: worktreeThread.id, expectedBranch: 'feature-a', title: 'T', base })).rejects.toThrow(refused)
+      expect(host.create).not.toHaveBeenCalled()
+      expect(mms.threads.getThread(elsewhere.id)?.pullRequest).toBeUndefined()
+      // A thread on the project's checkout is accepted for the project's folder.
+      await expect(client.request('pullRequests.draft', { projectId: project.id, originThreadId: thread.id, expectedBranch: 'feature-a' })).resolves.toMatchObject({ source: 'heuristic' })
     })
 
     it('refuses a draft and a create when the folder moved to another branch, and does nothing', async () => {

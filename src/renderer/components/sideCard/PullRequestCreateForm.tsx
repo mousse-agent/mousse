@@ -78,7 +78,6 @@ export function PullRequestCreateFormBody({
   }
 
   const choices = baseChoices(baseBranches, form.base, branch)
-  const busy = drafting || submitting
   const submitOnShortcut = (event: { key: string; metaKey: boolean; ctrlKey: boolean; preventDefault: () => void }) => {
     if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
       event.preventDefault()
@@ -138,13 +137,13 @@ export function PullRequestCreateFormBody({
           {branch} → {form.base || '…'}
         </span>
         <div className="side-card-git-popover-actions">
-          <button type="button" className="side-card-git-submit side-card-git-submit-quiet" disabled={busy} onClick={onDraftAgain}>
+          <button type="button" className="side-card-git-submit side-card-git-submit-quiet" disabled={drafting || submitting} onClick={onDraftAgain}>
             {drafting ? 'Drafting…' : 'Draft from thread'}
           </button>
           <button type="button" className="side-card-git-submit side-card-git-submit-quiet" disabled={submitting} onClick={onClose}>
             Cancel
           </button>
-          <button type="button" className="side-card-git-submit" disabled={!canSubmitPullRequest(form, busy)} onClick={onSubmit}>
+          <button type="button" className="side-card-git-submit" disabled={!canSubmitPullRequest(form, submitting)} onClick={onSubmit}>
             {submitting ? 'Creating…' : 'Create'}
           </button>
         </div>
@@ -173,6 +172,8 @@ export function PullRequestCreateForm({ scope, anchorRef }: PullRequestCreateFor
   const titleRef = useRef<HTMLInputElement>(null)
   /** The scope whose draft and base branches were last requested. */
   const startedKey = useRef<string | null>(null)
+  /** A draft that lands once the create has started would change text that is already being sent. */
+  const submittingRef = useRef(false)
   const scopeKey = scope ? pullRequestScopeKey(scope) : null
 
   const runDraft = useCallback(async (forScope: PullRequestScope, key: string, base: string | undefined, overwrite: boolean) => {
@@ -180,6 +181,7 @@ export function PullRequestCreateForm({ scope, anchorRef }: PullRequestCreateFor
     setError(null)
     try {
       const draft = await draftPullRequestFor(forScope, base)
+      if (submittingRef.current) return
       setForm((previous) => (previous?.scopeKey === key ? applyDraft(previous, draft, { overwrite }) : previous))
     } catch (draftError) {
       setError(pullRequestFormError(draftError))
@@ -214,7 +216,8 @@ export function PullRequestCreateForm({ scope, anchorRef }: PullRequestCreateFor
     closeCreatePullRequestForm()
   }, [])
   const submit = async () => {
-    if (!scope || !form || !canSubmitPullRequest(form, drafting || submitting)) return
+    if (!scope || !form || !canSubmitPullRequest(form, submitting)) return
+    submittingRef.current = true
     setSubmitting(true)
     setError(null)
     try {
@@ -227,6 +230,7 @@ export function PullRequestCreateForm({ scope, anchorRef }: PullRequestCreateFor
     } catch (submitError) {
       setError(pullRequestFormError(submitError))
     } finally {
+      submittingRef.current = false
       setSubmitting(false)
     }
   }

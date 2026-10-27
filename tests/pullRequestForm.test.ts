@@ -128,10 +128,10 @@ describe('pull request form markup', () => {
     expect(html).toContain('>Cancel<')
   })
 
-  it('disables Create without a title and while drafting or creating', () => {
+  it('disables Create without a title and while creating, but not while a draft is being written', () => {
     expect(render({ form: form({ title: '', base: 'main' }) })).toMatch(/class="side-card-git-submit"[^>]*disabled=""[^>]*>Create</)
     const drafting = render({ drafting: true })
-    expect(drafting).toMatch(/class="side-card-git-submit"[^>]*disabled=""[^>]*>Create</)
+    expect(drafting).toMatch(/class="side-card-git-submit"(?![^>]*disabled)[^>]*>Create</)
     expect(drafting).toContain('Drafting…')
     expect(render({ submitting: true })).toContain('>Creating…<')
   })

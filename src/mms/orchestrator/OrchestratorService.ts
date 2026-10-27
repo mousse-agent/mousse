@@ -4086,6 +4086,8 @@ export class OrchestratorService extends EventEmitter {
     base: string
     remote: string | null
     originThreadId: string | null
+    /** The folder's project; the title model is resolved in its scope, so an instance turned off there is never used. */
+    projectId: string | null
     threadName: string | null
   }): Promise<{ title: string; body: string; source: 'model' | 'heuristic' }> {
     const summary = await (this.gitService?.readBranchSummary(params.root, params).catch(() => null) ?? null)
@@ -4116,7 +4118,7 @@ export class OrchestratorService extends EventEmitter {
     try {
       const resolved = this.harness.resolveStored(titleSettings, {
         purpose: 'title',
-        ...(params.originThreadId ? { scope: this.threadScope(params.originThreadId) } : {})
+        scope: params.projectId ? { kind: 'project', projectId: params.projectId } : params.originThreadId ? this.threadScope(params.originThreadId) : { kind: 'device' }
       })
       const text = await this.llm.draftPullRequest(
         PULL_REQUEST_DRAFT_SYSTEM,

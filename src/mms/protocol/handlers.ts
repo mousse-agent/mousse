@@ -24,6 +24,7 @@ import { PROVIDER_TTS_MAX_CHARS } from '../../shared/readAloud'
 import type { ExternalEffect, ThreadAction } from '../../shared/threadActions'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
 import type { GitPullRequestInfo, RepositoryIdentity, ThreadPullRequestLink } from '../../shared/pullRequests'
+import { PULL_REQUEST_EXISTS } from '../git/GitHubCodeHost'
 import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest } from '../../shared/types'
 import { createErrorProvider } from '../../shared/errors'
 import { listClaimedQueue } from '../queue/ThreadMessageQueue'
@@ -427,16 +428,35 @@ function defaultBranchError(): DomainRpcError {
 async function pullRequestBranchContext(
   ctx: HandlerContext,
   p: Record<string, unknown>
-): Promise<{ root: string; branch: string; originThreadId: string | null }> {
+): Promise<{ root: string; branch: string; originThreadId: string | null; projectId: string | null }> {
   const root = pullRequestFolder(ctx, p)
   const branch = asString(p.expectedBranch, 'expectedBranch', 512)
   if (branch.startsWith('-')) throw new DomainRpcError('invalid_params', 'expectedBranch is not a branch name')
   const originThreadId = asOptionalString(p.originThreadId, 256) ?? null
-  if (originThreadId && !ctx.mms.threads.getThread(originThreadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId: originThreadId })
+  let projectId: string | null = null
+  if (originThreadId) {
+    const origin = ctx.mms.threads.getThread(originThreadId)
+    if (!origin) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId: originThreadId })
+    // Admitted like the thread of any other call: a thread being trashed or purged takes no new work.
+    if (ctx.mms.threads.lifecycleStore?.get(originThreadId)) ctx.mms.threads.assertThreadAdmission(originThreadId)
+    // Its conversation drafts the description and it receives the link, so it must be the thread whose folder this is:
+    // the folder's own thread, or one on the project's checkout.
+    const originFolder = projectRootContext(ctx, { threadId: originThreadId })
+    if (!samePath(originFolder, root)) {
+      throw new DomainRpcError('invalid_params', "originThreadId is not the thread of this folder", { threadId: originThreadId })
+    }
+    projectId = origin.projectId ?? null
+  }
   const git = ctx.mms.gitService
   if (await git.currentBranch(root) === null) throw new DomainRpcError('pull_request_detached_head', 'Check out a branch before creating a pull request.')
   await git.assertBranch(root, branch)
-  return { root, branch, originThreadId }
+  projectId ??= asOptionalString(p.projectId, 256) ?? (asOptionalString(p.threadId, 256) ? ctx.mms.threads.getThread(String(p.threadId))?.projectId ?? null : null)
+  return { root, branch, originThreadId, projectId }
+}
+
+function samePath(a: string, b: string): boolean {
+  const normalize = (value: string) => (process.platform === 'win32' ? resolve(value).toLowerCase() : resolve(value))
+  return normalize(a) === normalize(b)
 }
 
 /** The link a thread keeps to a pull request of its own repository (the lookup lists no forks' pull requests). */
@@ -2579,7 +2599,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       rejectUnknownKeys(p, ['threadId', 'projectId', 'originThreadId', 'expectedBranch', 'base'])
       const requestedBase = asOptionalString(p.base, 512)?.trim()
       if (requestedBase?.startsWith('-')) throw new DomainRpcError('invalid_params', 'base is not a branch name')
-      const { root, branch, originThreadId } = await pullRequestBranchContext(ctx, p)
+      const { root, branch, originThreadId, projectId } = await pullRequestBranchContext(ctx, p)
       const codeHost = ctx.mms.gitService.codeHost
       const baseBranches = await codeHost.listBaseBranches(root)
       if (baseBranches.defaultBranch === branch) throw defaultBranchError()
@@ -2590,6 +2610,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         base,
         remote: await codeHost.remoteForRepository(root),
         originThreadId,
+        projectId,
         threadName: originThreadId ? ctx.mms.threads.getThread(originThreadId)?.name ?? null : null
       })
       return { ...draft, base }
@@ -2613,8 +2634,27 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         await linkOriginThread(ctx, originThreadId, root, lookup.pullRequest)
         return { pullRequest: lookup.pullRequest, existing: true }
       }
-      // The branch is the one the caller opened the form on and the daemon has just checked out.
-      const pullRequest = await codeHost.createPullRequest(root, { title, body, base, draft, head: branch })
+      // `--head` names the local branch, so the branch must be on the remote under that name: the pull request
+      // holds what was pushed, and the draft was written from the local commits.
+      const upstream = await ctx.mms.gitService.branchUpstream(root, branch)
+      if (!upstream) throw new DomainRpcError('pull_request_unpushed', 'Push the branch first: it has no upstream on the remote yet.')
+      if (upstream.branch !== branch) {
+        throw new DomainRpcError('pull_request_upstream_renamed', `This branch is pushed as "${upstream.branch}" on the remote. Pull requests from a branch under another name are not supported here; open it on GitHub.`)
+      }
+      let pullRequest: GitPullRequestInfo
+      try {
+        // The branch is the one the caller opened the form on and the daemon has just checked out.
+        pullRequest = await codeHost.createPullRequest(root, { title, body, base, draft, head: branch })
+      } catch (error) {
+        // The host's message is what the user needs (gh says why); a plain error would reach the form as "something went wrong".
+        const failure = new DomainRpcError('pull_request_create_failed', error instanceof Error ? error.message : String(error))
+        if ((error as { code?: unknown } | null)?.code !== PULL_REQUEST_EXISTS) throw failure
+        // Another client was first (the lookup above and the create are not one step): show its pull request.
+        const again = await codeHost.lookupPullRequest(root, branch, { force: true })
+        if (again.state !== 'found' || again.pullRequest.state !== 'open') throw failure
+        await linkOriginThread(ctx, originThreadId, root, again.pullRequest)
+        return { pullRequest: again.pullRequest, existing: true }
+      }
       await linkOriginThread(ctx, originThreadId, root, pullRequest)
       return { pullRequest, existing: false }
     }

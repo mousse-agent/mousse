@@ -166,6 +166,7 @@ describe('OrchestratorService.draftPullRequest', () => {
     base: 'main',
     remote: 'origin',
     originThreadId: 't1',
+    projectId: 'p1',
     threadName: 'Fix flaky login',
     ...patch
   })
@@ -175,6 +176,7 @@ describe('OrchestratorService.draftPullRequest', () => {
       ...getDefaultSettings(),
       title: options.titleModel ? { llmProvider: 'openai', model: 'gpt-big' } : getDefaultSettings().title
     }
+    const resolveStored = vi.fn(() => ({ instanceId: 'pi:openai', llmProvider: 'openai' }))
     const draftPullRequest = vi.fn(options.draft ?? (async () => 'Retry the login\n\nIt retries.'))
     const readBranchSummary = vi.fn(async () => ({
       commits: [{ subject: 'Retry the login', body: '' }],
@@ -183,13 +185,13 @@ describe('OrchestratorService.draftPullRequest', () => {
     }))
     const orch = Object.assign(Object.create(OrchestratorService.prototype), {
       settingsStore: { get: () => settings },
-      harness: { resolveStored: () => ({ instanceId: 'pi:openai', llmProvider: 'openai' }) },
+      harness: { resolveStored },
       llm: { draftPullRequest },
       gitService: { readBranchSummary },
       getMessages: () => [{ role: 'user', content: 'Please retry the login' }],
       threadScope: () => ({})
     }) as OrchestratorService
-    return { orch, draftPullRequest, readBranchSummary }
+    return { orch, draftPullRequest, readBranchSummary, resolveStored }
   }
 
   it('without a title model drafts from the commits and the template, and calls no model', async () => {
@@ -209,6 +211,19 @@ describe('OrchestratorService.draftPullRequest', () => {
     expect(prompt).toContain('User: Please retry the login')
     expect(threadId).toBe('t1')
     expect(selection).toEqual({ instanceId: 'pi:openai', llmProvider: 'openai', model: 'gpt-big' })
+  })
+
+  it('resolves the title model in the project of the folder, even without an originating thread', async () => {
+    const { orch, resolveStored } = orchestrator({ titleModel: true })
+    await orch.draftPullRequest(params())
+    await orch.draftPullRequest(params({ originThreadId: null }))
+    expect(resolveStored.mock.calls.map((call) => (call as unknown as [unknown, { scope: unknown }])[1].scope)).toEqual([
+      { kind: 'project', projectId: 'p1' },
+      { kind: 'project', projectId: 'p1' }
+    ])
+    resolveStored.mockClear()
+    await orch.draftPullRequest(params({ originThreadId: null, projectId: null }))
+    expect((resolveStored.mock.calls[0] as unknown as [unknown, { scope: unknown }])[1].scope).toEqual({ kind: 'device' })
   })
 
   it('falls back to the plain draft when the model fails or answers without a title', async () => {

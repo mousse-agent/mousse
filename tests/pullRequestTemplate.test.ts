@@ -81,6 +81,50 @@ describe('pull request template', () => {
     expect(text).toBe('a'.repeat(PULL_REQUEST_TEMPLATE_MAX_BYTES - 1))
   })
 
+  describe('a linked folder', () => {
+    let outside: string
+
+    /** A junction on Windows (no special rights needed), a symlink elsewhere. */
+    const linkFolder = (target: string, path: string) => {
+      mkdirSync(dirname(join(root, path)), { recursive: true })
+      symlinkSync(target, join(root, path), 'junction')
+    }
+
+    beforeEach(() => {
+      outside = mkdtempSync(join(tmpdir(), 'mousse-pr-template-outside-'))
+    })
+    afterEach(() => {
+      rmSync(outside, { recursive: true, force: true })
+    })
+
+    it('is not followed out of the repository for .github/ or docs/', async () => {
+      writeFileSync(join(outside, 'pull_request_template.md'), 'OUTSIDE PRIVATE CONTENT')
+      linkFolder(outside, '.github')
+      expect(await readPullRequestTemplate(root)).toBeNull()
+      linkFolder(outside, 'docs')
+      expect(await readPullRequestTemplate(root)).toBeNull()
+    })
+
+    it('is not followed out of the repository for a PULL_REQUEST_TEMPLATE/ folder', async () => {
+      writeFileSync(join(outside, 'one.md'), 'OUTSIDE PRIVATE CONTENT')
+      linkFolder(outside, '.github/PULL_REQUEST_TEMPLATE')
+      expect(await readPullRequestTemplate(root)).toBeNull()
+    })
+
+    it('skips the escaping link and still finds a real template further down the list', async () => {
+      writeFileSync(join(outside, 'pull_request_template.md'), 'OUTSIDE PRIVATE CONTENT')
+      linkFolder(outside, '.github')
+      write('docs/pull_request_template.md', 'inside')
+      expect(await readPullRequestTemplate(root)).toBe('inside')
+    })
+
+    it('is followed when it stays inside the repository', async () => {
+      write('shared/pull_request_template.md', 'shared inside')
+      linkFolder(join(root, 'shared'), '.github')
+      expect(await readPullRequestTemplate(root)).toBe('shared inside')
+    })
+  })
+
   it('does not follow a link out of the repository', async () => {
     const outside = mkdtempSync(join(tmpdir(), 'mousse-pr-template-outside-'))
     try {
