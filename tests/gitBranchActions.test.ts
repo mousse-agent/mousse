@@ -224,20 +224,20 @@ describe('branch flows', () => {
     it('switches a clean folder with no dirty choice and refreshes', async () => {
       const git = installGit()
       await expect(switchBranch('/repo/a', 'dev', scope, null)).resolves.toEqual({ kind: 'switched', notice: null })
-      expect(git.checkout).toHaveBeenCalledWith(scope, 'dev', {})
+      expect(git.checkout).toHaveBeenCalledWith(scope, 'dev', { operationId: expect.any(String) })
       expect(git.status).toHaveBeenCalledTimes(1)
     })
 
     it('carries the changes along', async () => {
       const git = installGit()
       await expect(switchBranch('/repo/a', 'dev', scope, 'carry')).resolves.toEqual({ kind: 'switched', notice: null })
-      expect(git.checkout).toHaveBeenCalledWith(scope, 'dev', { dirty: 'carry' })
+      expect(git.checkout).toHaveBeenCalledWith(scope, 'dev', { dirty: 'carry', operationId: expect.any(String) })
     })
 
     it('stashes, switches, and says so when the stash is kept', async () => {
       const git = installGit({ checkout: vi.fn(async () => ({ status: repoStatus(), stashKept: true })) })
       await expect(switchBranch('/repo/a', 'dev', scope, 'stash')).resolves.toEqual({ kind: 'switched', notice: STASH_KEPT_NOTICE })
-      expect(git.checkout).toHaveBeenCalledWith(scope, 'dev', { dirty: 'stash' })
+      expect(git.checkout).toHaveBeenCalledWith(scope, 'dev', { dirty: 'stash', operationId: expect.any(String) })
       expect(STASH_KEPT_NOTICE).toBe('Switched; your stash is kept because it conflicts')
     })
 
@@ -438,7 +438,7 @@ describe('branch picker in the side card', () => {
       await openPicker()
       await click(option('dev'))
       expect(dialog(/Switch to/)).toBeUndefined()
-      expect(git.checkout).toHaveBeenCalledWith(scope, 'dev', {})
+      expect(git.checkout).toHaveBeenCalledWith(scope, 'dev', { operationId: expect.any(String) })
       expect(git.status).toHaveBeenCalled()
     })
 
@@ -459,7 +459,7 @@ describe('branch picker in the side card', () => {
       expect([...prompt!.querySelectorAll('button')].map((button) => button.textContent)).toEqual(['Bring changes along', 'Stash and switch', 'Cancel'])
       expect(git.checkout).not.toHaveBeenCalled()
       await click(byText('button', 'Bring changes along'))
-      expect(git.checkout).toHaveBeenCalledWith(scope, 'dev', { dirty: 'carry' })
+      expect(git.checkout).toHaveBeenCalledWith(scope, 'dev', { dirty: 'carry', operationId: expect.any(String) })
       expect(dialog('Switch to dev')).toBeUndefined()
     })
 
@@ -468,7 +468,7 @@ describe('branch picker in the side card', () => {
       await openPicker()
       await click(option('dev'))
       await click(byText('button', 'Stash and switch'))
-      expect(git.checkout).toHaveBeenCalledWith(scope, 'dev', { dirty: 'stash' })
+      expect(git.checkout).toHaveBeenCalledWith(scope, 'dev', { dirty: 'stash', operationId: expect.any(String) })
       expect(dialog('Switch to dev')).toBeUndefined()
     })
 
@@ -494,7 +494,7 @@ describe('branch picker in the side card', () => {
       expect(git.status).toHaveBeenCalledTimes(1)
       expect(byText('button', 'Stash and switch')?.hasAttribute('disabled')).toBe(false)
       await click(byText('button', 'Stash and switch'))
-      expect(git.checkout).toHaveBeenLastCalledWith(scope, 'dev', { dirty: 'stash' })
+      expect(git.checkout).toHaveBeenLastCalledWith(scope, 'dev', { dirty: 'stash', operationId: expect.any(String) })
       expect(dialog('Switch to dev')).toBeUndefined()
       expect(git.status).toHaveBeenCalledTimes(2)
     })
