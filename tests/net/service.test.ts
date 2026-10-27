@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -7,6 +8,7 @@ import type { Clock } from '../../src/mms/net/contracts'
 import { NODE_DELEGATION_TTL_MS } from '../../src/shared/net/limits'
 import { NetError, type Roster, type StreamId } from '../../src/shared/net'
 import { FakeClock } from './harness/FakeClock'
+import { fakeTailscale } from './harness/fakeTailscale'
 const cleanups: Array<() => Promise<void> | void> = []
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
@@ -48,6 +50,188 @@ it('renews through the owner timer when the authority clock ticks between reads'
   } finally {
     tick.mockRestore()
   }
+})
+async function freePort(): Promise<number> {
+  const server = createServer()
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address() as { port: number }
+  await new Promise((resolve) => server.close(resolve))
+  return port
+}
+type Listed = { records: Record<string, unknown>; settings: Record<string, unknown> }
+async function serveBed() {
+  const { net, path } = service(),
+    fake = await fakeTailscale(path)
+  cleanups.push(() => fake.restore())
+  await net.request('net.init', { name: 'authority' })
+  const port = await freePort(),
+    settings = { binary: fake.binary, mode: 'serve', port, servePort: 47890 },
+    params = { id: 'tailscale', action: 'serve' },
+    entry = { TCPForward: `127.0.0.1:${port}` },
+    listen = () =>
+      net.request('net.transport.configure', { id: 'tailscale', enabled: true, settings }),
+    listed = () => net.request('net.transport.list', {}) as Promise<Listed>,
+    tailscale = (from: NetService = net) =>
+      from.status().transports?.find((row) => row.id === 'tailscale')
+  return { net, path, fake, port, settings, params, entry, listen, listed, tailscale }
+}
+/** `request` refuses some calls before it returns a promise. */
+function thrown(call: () => unknown): unknown {
+  try {
+    call()
+  } catch (error) {
+    return error
+  }
+}
+async function until(check: () => boolean) {
+  for (let index = 0; index < 400 && !check(); index++)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  expect(check()).toBe(true)
+}
+it('turns Serve on once Mousse listens, keeps the record across a restart, and undoes it', async () => {
+  const { net, path, fake, settings, params, entry, listen, listed, tailscale } = await serveBed()
+  await listen()
+  const before = await listed()
+  expect(before.records).toEqual({})
+  expect(before.settings.tailscale).toEqual(settings)
+  await expect(
+    net.request('net.transport.action.describe', { ...params, settings })
+  ).resolves.toMatchObject({
+    ok: true,
+    changes: expect.arrayContaining([
+      expect.objectContaining({ command: expect.stringContaining('serve') })
+    ])
+  })
+  expect(fake.entries()).toEqual({})
+  await expect(net.request('net.transport.action.apply', { ...params, settings })).resolves.toEqual(
+    { ok: true }
+  )
+  expect(fake.entries()).toEqual({ '47890': entry })
+  const stored = {
+    tailscale: {
+      action: 'serve',
+      appliedAt: expect.any(Number),
+      record: {
+        servePort: 47890,
+        port: settings.port,
+        tailnet: { name: 'example.ts.net', node: 'node-1' },
+        state: 'applied'
+      }
+    }
+  }
+  expect((await listed()).records).toEqual(stored)
+  // The add-on is ready and advertises the tailnet port as soon as the mapping is confirmed.
+  expect(tailscale()).toMatchObject({
+    state: 'ready',
+    routes: [{ address: 'ws://127.0.0.1:47890/mousse-net' }]
+  })
+
+  await net.shutdown()
+  const again = new NetService({ profileDir: path })
+  cleanups.push(() => again.shutdown())
+  await again.start()
+  expect(((await again.request('net.transport.list', {})) as Listed).records).toEqual(stored)
+  // After the restart the recorded mapping is found in place and nothing is written again.
+  await until(() => tailscale(again)?.state === 'ready')
+  expect(fake.commands().filter((args) => args.includes('--bg'))).toHaveLength(1)
+
+  // Undo uses the saved settings, removes only the recorded mapping, and a second undo has nothing left.
+  await expect(again.request('net.transport.action.undo', params)).resolves.toMatchObject({
+    ok: true,
+    outcome: 'removed'
+  })
+  expect(fake.entries()).toEqual({})
+  expect(((await again.request('net.transport.list', {})) as Listed).records).toEqual({})
+  await expect(again.request('net.transport.action.undo', params)).resolves.toMatchObject({
+    ok: true,
+    outcome: 'already-removed'
+  })
+  expect(fake.commands().filter((args) => args.includes('off'))).toHaveLength(1)
+})
+it('keeps Serve visible and undoable while networking is off', async () => {
+  const { net, fake, settings, params, listen, listed } = await serveBed()
+  await listen()
+  await net.request('net.transport.action.apply', { ...params, settings })
+  await net.request('net.disable', {})
+  // Everything else is refused now, but what Mousse changed outside itself is not hidden.
+  expect(
+    thrown(() => net.request('net.transport.configure', { id: 'tailscale', enabled: false }))
+  ).toMatchObject({ code: 'disabled' })
+  const shown = await listed()
+  expect(shown.records).toMatchObject({ tailscale: { action: 'serve' } })
+  await expect(net.request('net.transport.action.undo', params)).resolves.toMatchObject({
+    ok: true,
+    outcome: 'removed'
+  })
+  expect(fake.entries()).toEqual({})
+  expect((await listed()).records).toEqual({})
+})
+it('shows an add-on refusal as a result with its message, and rejects unknown actions', async () => {
+  const { net, fake, settings, params, listen, listed } = await serveBed()
+  await listen()
+  fake.setEntry(47890, { TCPForward: '127.0.0.1:9999' })
+  await expect(
+    net.request('net.transport.action.apply', { ...params, settings })
+  ).resolves.toMatchObject({
+    ok: false,
+    code: 'conflict',
+    message: expect.stringMatching(/127\.0\.0\.1:9999/)
+  })
+  fake.clearEntries()
+  fake.failServeWith('requires --operator')
+  await expect(
+    net.request('net.transport.action.apply', { ...params, settings })
+  ).resolves.toMatchObject({
+    ok: false,
+    code: 'forbidden',
+    ...(process.platform === 'linux' ? { remedy: 'sudo tailscale set --operator=$USER' } : {})
+  })
+  // Nothing was made, so nothing stays recorded.
+  expect((await listed()).records).toEqual({})
+  expect(
+    thrown(() => net.request('net.transport.action.apply', { ...params, action: 'nope', settings }))
+  ).toMatchObject({ code: 'bad_request' })
+  expect(
+    thrown(() =>
+      net.request('net.transport.action.apply', {
+        id: 'cloudflared',
+        action: 'serve',
+        settings: {}
+      })
+    )
+  ).toMatchObject({ code: 'bad_request' })
+})
+it('will not forward a tailnet port before Mousse listens on its loopback port', async () => {
+  const { net, fake, settings, params, listed } = await serveBed()
+  // The add-on was never turned on, so nothing holds the port.
+  await expect(
+    net.request('net.transport.action.apply', { ...params, settings })
+  ).resolves.toMatchObject({ ok: false, code: 'conflict' })
+  expect(fake.commands().some((args) => args.includes('--bg'))).toBe(false)
+  expect((await listed()).records).toEqual({})
+})
+it('keeps the record and the mapping when undo cannot read Tailscale', async () => {
+  const { net, fake, settings, params, entry, listen, listed } = await serveBed()
+  await listen()
+  await net.request('net.transport.action.apply', { ...params, settings })
+  fake.setServeOutput('[]')
+  await expect(net.request('net.transport.action.undo', params)).resolves.toMatchObject({
+    ok: false,
+    code: 'unsupported_version'
+  })
+  expect((await listed()).records).toMatchObject({ tailscale: { action: 'serve' } })
+  expect(fake.entries()).toEqual({ '47890': entry })
+  expect(fake.commands().some((args) => args.includes('off'))).toBe(false)
+})
+it('runs one change per add-on at a time', async () => {
+  const { net, settings, params, listen } = await serveBed()
+  await listen()
+  const results = (await Promise.all([
+    net.request('net.transport.action.apply', { ...params, settings }),
+    net.request('net.transport.action.apply', { ...params, settings })
+  ])) as Array<{ ok: boolean; code?: string }>
+  expect(results.map((row) => row.ok).sort()).toEqual([false, true])
+  expect(results.find((row) => !row.ok)).toMatchObject({ code: 'conflict' })
 })
 it('keeps networking disabled until explicit init and listening off unless requested', async () => {
   const { net } = service()
