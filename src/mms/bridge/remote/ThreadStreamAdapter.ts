@@ -299,12 +299,15 @@ export class ThreadStreamAdapter {
    * the reader can open them again if it may. Returns the streams that were open, so the sessions
    * that serve them can be told.
    */
-  closePrivate(filter: { reader?: NodeId; kind?: RoutedStreamKind } = {}): StreamId[] {
+  closePrivate(
+    filter: { reader?: NodeId; kind?: RoutedStreamKind; subject?: string } = {}
+  ): StreamId[] {
     const closed: StreamId[] = []
     for (const thread of [...this.active.values()]) {
       const spec = thread.spec
       if (!spec || (filter.reader && spec.reader !== filter.reader)) continue
       if (filter.kind && spec.kind !== filter.kind) continue
+      if (filter.subject !== undefined && spec.subject !== filter.subject) continue
       this.deactivate(thread.threadId)
       closed.push(thread.stream)
     }

@@ -63,6 +63,8 @@ export interface RoutedStreamsPort {
     caller: NodeId,
     request: { kind: RoutedStreamKind; threadId?: string; ptyId?: string }
   ): RoutedStreamOpened
+  /** Stops serving the stream `caller` opened, which it no longer reads. Its records stay; it can open it again. */
+  close(caller: NodeId, request: { kind: RoutedStreamKind; threadId?: string; ptyId?: string }): void
   /** Where the stream `caller` holds open for `threadId` is now, if it holds one. */
   head(caller: NodeId, threadId: string): { stream: string; epoch: number; seq: number } | undefined
 }
@@ -295,28 +297,41 @@ export class OwnerRoutes {
         )
       }
     })
-    if (this.options.streams)
+    if (this.options.streams) {
+      const validateStream = (name: 'stream.open' | 'stream.close') => (params: unknown) => {
+        const value = exactKeys(name, ROUTED_TRANSPORT_METHODS[name].keys, params)
+        if (!(ROUTED_STREAM_KINDS as readonly unknown[]).includes(value.kind))
+          throw new NetError('bad_request', 'That is not a kind of stream.')
+        for (const key of ['threadId', 'ptyId'])
+          if (value[key] !== undefined && !text(value[key]))
+            throw new NetError('bad_request', `${key} is not valid.`)
+        return value
+      }
       rpc.register({
         ...common,
         method: routedNetMethod('stream.open'),
         capability: ROUTED_TRANSPORT_METHODS['stream.open'].capability,
         mutating: false,
         ephemeral: true,
-        validate: (params) => {
-          const value = exactKeys(
-            'stream.open',
-            ROUTED_TRANSPORT_METHODS['stream.open'].keys,
-            params
-          )
-          if (!(ROUTED_STREAM_KINDS as readonly unknown[]).includes(value.kind))
-            throw new NetError('bad_request', 'That is not a kind of stream.')
-          for (const key of ['threadId', 'ptyId'])
-            if (value[key] !== undefined && !text(value[key]))
-              throw new NetError('bad_request', `${key} is not valid.`)
-          return value
-        },
+        validate: validateStream('stream.open'),
         handle: (params, context) => track(this.openStream(params as never, context))
       })
+      rpc.register({
+        ...common,
+        method: routedNetMethod('stream.close'),
+        capability: ROUTED_TRANSPORT_METHODS['stream.close'].capability,
+        mutating: false,
+        ephemeral: true,
+        validate: validateStream('stream.close'),
+        handle: (params, context) =>
+          track(
+            Promise.resolve().then(() => {
+              this.options.streams!.close(context.caller.node, params as never)
+              return { ok: true, result: { closed: true } } satisfies RoutedReply
+            })
+          )
+      })
+    }
     if (this.options.staging)
       rpc.register({
         ...common,

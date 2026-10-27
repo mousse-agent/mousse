@@ -87,6 +87,7 @@ import type { SpaceProfileService } from './spaces/SpaceProfileService'
 import type { BotProfileService } from './bots/space/BotProfileService'
 import { randomUUID } from 'crypto'
 import { DomainHandlerRegistry, DomainRpcError } from './protocol/domainRegistry'
+import type { ThreadRouterPort } from './protocol/threadRouterPort'
 import type { MmsOptions } from './MmsOptions'
 import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
 import { OwnedWorkBarrier } from './execution/OwnedWorkBarrier'
@@ -186,6 +187,11 @@ export class MmsProfileServices {
    * serves this profile; a routed call reports it as the revision of what it read.
    */
   protocolSequence: () => number = () => 0
+  /**
+   * Sends the actions of a thread that another of the user's computers runs to that computer. Set by
+   * the Bridge service while it is composed and cleared when it closes; the handlers consult it first.
+   */
+  threadRouter?: ThreadRouterPort
   readonly net: NetService
   readonly chatNetwork: ChatNetworkBindingService
   private bridgeService?: BridgeProfileService

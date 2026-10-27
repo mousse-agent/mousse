@@ -1100,13 +1100,27 @@ function scheduledJobOptionsDeps(ctx: HandlerContext): ScheduledJobOptionsDeps {
 }
 
 async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
+  // A call that names a thread (or project) of another of the user's computers goes to that computer.
+  // This runs inside the profile's request barrier, so such calls drain with the profile.
+  if (ctx.mms.threadRouter) {
+    const routed = await ctx.mms.threadRouter.dispatch(ctx, method, params)
+    if (routed) return routed.result
+  }
   if (isObject(params) && typeof params.threadId === 'string' &&
-      !['threads.delete', 'threads.trash', 'threads.restore', 'threads.purge', 'threads.inventory'].includes(method) &&
+      !['threads.delete', 'threads.trash', 'threads.restore', 'threads.purge', 'threads.inventory', 'threads.focus'].includes(method) &&
       ctx.mms.threads?.lifecycleStore?.get(params.threadId)) {
     ctx.mms.threads.assertThreadAdmission(params.threadId)
   }
   if (ctx.mms.domains?.has(method)) return ctx.mms.domains.dispatch(ctx, method, params)
   switch (method) {
+    case 'threads.focus': {
+      // A window keeps a thread of another computer in view (the stream its events travel on), or lets go.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'focused'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const focused = asOptionalBoolean(p.focused, 'focused') !== false
+      return ctx.mms.threadRouter?.focus(ctx, threadId, focused) ?? { routed: false, focused: false }
+    }
     case 'applets.get':
     case 'applets.state.get':
     case 'applets.state.save':
@@ -1328,8 +1342,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       const session = ctx.mms.orchestrator.getOrCreateSession(threadId)
       const rt = ctx.mms.threadRuntimes.getOrHydrate(threadId)
-      const messages = ctx.mms.orchestrator.getMessages(threadId)
-      const queue = ctx.mms.orchestrator.listQueue(threadId)
+      // `transcript: false` is a routed reader that already holds the messages and the queue on its stream.
+      const withTranscript = asOptionalBoolean(p.transcript, 'transcript') !== false
+      const messages = withTranscript ? ctx.mms.orchestrator.getMessages(threadId) : []
+      const queue = withTranscript ? ctx.mms.orchestrator.listQueue(threadId) : []
       const claimed = listClaimedQueue(session.queue).filter((item) => !item.internal)
       const turnActive = ctx.mms.orchestrator.isTurnActive(threadId)
       const turnRunning = ctx.mms.orchestrator.isActiveTurnRunning(threadId)
