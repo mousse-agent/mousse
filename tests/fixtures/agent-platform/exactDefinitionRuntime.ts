@@ -29,6 +29,8 @@ export interface ExactRuntimeOptions {
   next?: (context: Context, signal: AbortSignal) => Promise<AssistantMessage>
   outputs?: AssistantMessage[]
   caps?: Partial<HarnessCaps>
+  /** More providers whose `pi:<provider>` instances run on the same exact stand-in. */
+  alsoProviders?: string[]
 }
 
 /** The Claude Code-like instance `claude` beside it: it only asks for approval, so it cannot hold a definition. */
@@ -130,7 +132,11 @@ export function installExactDefinitionRuntime(options: ExactRuntimeOptions): Exa
     startTurn: async () => { throw new Error('An approval-only runtime must never be given a definition turn.') },
     interrupt: async () => 'not_active'
   }
-  let stored: unknown = { [instanceId]: { driver: 'pi', enabled: true }, [APPROVAL_ONLY_INSTANCE]: { driver: 'claude', enabled: true } }
+  let stored: unknown = {
+    [instanceId]: { driver: 'pi', enabled: true },
+    ...Object.fromEntries((options.alsoProviders ?? []).map((provider) => [`pi:${provider}`, { driver: 'pi', enabled: true }])),
+    [APPROVAL_ONLY_INSTANCE]: { driver: 'claude', enabled: true }
+  }
   const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (state) => { stored = state.instances } } })
   const harness = testHarness({
     drivers: [

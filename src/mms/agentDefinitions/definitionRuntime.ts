@@ -21,7 +21,6 @@ import { RunCounters, RunSpend, type CounterScope, type SpendScope } from '../ha
 import { userMessage } from '../orchestrator/nativeContext'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import {
-  canFallbackOrRetry,
   classifyProviderFailure,
   emptyAttemptUsage,
   errorText,
@@ -219,10 +218,24 @@ export function definitionMessages(conversation: AgentExecutionHistoryEntry[] | 
 /** The runtime already retried this failure itself: the same candidate is never tried again. */
 const RUNTIME_RETRIED: ReadonlySet<AgentFallbackRetryCategory> = new Set(['rate_limit', 'timeout', 'unavailable'])
 
+/** The failure's category; the runtime's own retries running out is an unavailable provider. */
+function failureCategory(error: unknown): AgentFallbackRetryCategory | undefined {
+  return isRetriesExhausted(error) ? 'unavailable' : classifyProviderFailure(error)
+}
+
 function runtimeRetried(error: unknown): boolean {
   if (isRetriesExhausted(error)) return true
   const category = classifyProviderFailure(error)
   return category !== undefined && RUNTIME_RETRIED.has(category)
+}
+
+/** Whether the failure allows another try (the same candidate, or the next): `canFallbackOrRetry`'s rules. */
+function mayTryAgain(error: unknown, policy: AgentRuntimePolicy['fallbacks'], sameCandidate: boolean): boolean {
+  const category = failureCategory(error)
+  if (!category) return false
+  if (policy.retryOn.length > 0) return policy.retryOn.includes(category)
+  if (category === 'content_filter') return false
+  return sameCandidate ? policy.retryCount > 0 : policy.enabled
 }
 
 /** A count or spend limit refused the next step: the run ends with that limit, not an error. */
@@ -307,15 +320,13 @@ export function createDefinitionRuntime(port: DefinitionTurnPort): AgentRuntimeP
             if (isAbortError(error, input.signal) || effects.dispatched) throw error
             const retrySame = !runtimeRetried(error) &&
               sameCandidateRetries < fallbackPolicy.retryCount &&
-              canFallbackOrRetry({ error, signal: input.signal, dispatched: effects.dispatched, policy: fallbackPolicy, sameModel: true })
+              mayTryAgain(error, fallbackPolicy, true)
             if (retrySame) {
               sameCandidateRetries += 1
               await waitBackoff(fallbackPolicy.backoffMs, input.signal)
               continue
             }
-            const next = index + 1 < candidates.length && canFallbackOrRetry({
-              error, signal: input.signal, dispatched: effects.dispatched, policy: fallbackPolicy, sameModel: false
-            })
+            const next = index + 1 < candidates.length && mayTryAgain(error, fallbackPolicy, false)
             if (!next) throw error
             trace.push(`Moved from ${ref.instanceId ?? ref.providerId}/${ref.modelId} after: ${errorText(error)}`)
             await waitBackoff(fallbackPolicy.backoffMs, input.signal)
