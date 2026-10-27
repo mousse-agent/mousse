@@ -63,12 +63,14 @@ export const PI_RPC_NO_SHELL_ITEMS: readonly number[] = Object.freeze(PI_RPC_EVI
  * - Locked Claude Code: none. No platform has passed the real-CLI suite yet, so it holds no bot
  *   authority and runs no shell anywhere.
  * - Pi RPC: Linux, from runs in WSL2 (a real Linux kernel in a VM on Windows, accepted as Linux
- *   evidence): items 1–9 and 10 on their own files, 11 and 12 again at the final change. macOS
- *   needs a run on a Mac; Windows gets none (Pi's shell runs uncontained there). Without a record,
- *   definitions run on the loop.
+ *   evidence): items 1–9 and 10 on their own files, 11 and 12 again at the final change.
+ *   Windows (native Windows 11, x64): a no-shell record, items 1–9, 11 and 12 on their own files
+ *   (Pi's shell runs uncontained there, so item 10 does not apply). macOS needs a run on a Mac;
+ *   until then it has none, and without a record definitions run on the loop.
  */
 export const CONTAINMENT_EVIDENCE: readonly ContainmentEvidence[] = Object.freeze([
-  Object.freeze({ driver: 'pi', kind: 'tools', cliVersion: '0.85.1', platform: 'linux', environment: 'wsl2', items: PI_RPC_EVIDENCE_ITEMS, recordedAt: '2026-10-27T13:38:46Z' })
+  Object.freeze({ driver: 'pi', kind: 'tools', cliVersion: '0.85.1', platform: 'linux', environment: 'wsl2', items: PI_RPC_EVIDENCE_ITEMS, recordedAt: '2026-10-27T13:38:46Z' }),
+  Object.freeze({ driver: 'pi', kind: 'tools', cliVersion: '0.85.1', platform: 'win32', items: PI_RPC_NO_SHELL_ITEMS, recordedAt: '2026-10-27T14:41:24Z' })
 ] satisfies ContainmentEvidence[])
 
 export interface EvidenceQuery {
