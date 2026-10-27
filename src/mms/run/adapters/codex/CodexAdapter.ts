@@ -18,6 +18,7 @@ import type {
   TurnResult,
   TurnSink
 } from '../ProviderAdapter'
+import { readUsageLimit } from '../../../orchestrator/providerErrors'
 import { MOUSSE_MCP_SERVER_NAME } from '../../mcp/attachment'
 import { promptStreams, runtimeToolEvent } from '../../transcript/promptRuntime'
 import { retryContextOverflowOnce } from '../shared/retryContextOverflow'
@@ -214,10 +215,13 @@ export class CodexAdapter implements ProviderAdapter {
         () => !progressed && !input.signal.aborted
       )
     } catch (error) {
-      // A stopped turn keeps its Codex thread: the next turn resumes it (the stopped request is in it).
-      // A turn that failed leaves the record as it was.
-      if (input.signal.aborted && host.context.nativeHistoryNow) service.commitInterrupted?.(input.threadId, host.context.nativeHistoryNow())
-      throw this.options.managed && !input.signal.aborted ? codexHarnessError(error, input.instanceId) : error
+      // A stopped turn, and one a usage limit ended, keep their Codex thread: the next turn resumes it (the request is in it).
+      // A turn that failed otherwise leaves the record as it was.
+      const limited = readUsageLimit(error) !== undefined
+      if ((input.signal.aborted || limited) && host.context.nativeHistoryNow) service.commitInterrupted?.(input.threadId, host.context.nativeHistoryNow())
+      // A managed run still reports the failure behind a usage limit to the harness gateway, which maps it itself.
+      if (this.options.managed && !input.signal.aborted) throw codexHarnessError(limited ? (error as Error).cause : error, input.instanceId)
+      throw error
     }
     const totalResponseTimeMs = Date.now() - startedAt
     const usage = {

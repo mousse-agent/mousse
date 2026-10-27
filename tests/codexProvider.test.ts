@@ -10,6 +10,7 @@ import type { CodexLaunch, CodexProcess } from '../src/mms/providers/codex/Codex
 import {
   CODEX_ACCOUNT_TTL_MS,
   CODEX_FALLBACK_MODELS,
+  CODEX_MODEL_PROVIDER,
   CodexProviderService,
   CodexTurnFailure,
   codexEnvironment,
@@ -615,5 +616,98 @@ describe('codexMcpConfigOverrides', () => {
       'mcp_servers.mousse.tool_timeout_sec': 3600,
       'mcp_servers.mousse.default_tools_approval_mode': 'approve'
     })
+  })
+})
+
+describe('a usage limit on a Codex turn', () => {
+  const inHours = (hours: number) => Math.floor(Date.now() / 1000) + hours * 3600
+  const window = (usedPercent: number, windowDurationMins: number, resetsAt: number | null) => ({ usedPercent, windowDurationMins, resetsAt })
+  const exhausted = (resetsAt: number | null) => ({ primary: window(100, 300, resetsAt), secondary: window(20, 10_080, inHours(100)) })
+  const limitError = (codexErrorInfo?: unknown, message = "You've hit your usage limit.") => ({ message, ...(codexErrorInfo === undefined ? {} : { codexErrorInfo }) })
+
+  /** A server whose first turn fails with `error`; later turns complete. `rateLimits` answers `account/rateLimits/read`, `snapshot` is sent just before the failure. */
+  function failingServer(options: { error: Record<string, unknown>; rateLimits?: Reply; snapshot?: unknown }) {
+    let turns = 0
+    const server = scriptedServer((message) => {
+      switch (message.method) {
+        case 'account/read':
+          return chatgpt
+        case 'config/read':
+          return { result: { config: { mcp_servers: {} }, layers: [] } }
+        case 'thread/start':
+        case 'thread/resume':
+          return { result: { thread: { id: 'thr-1' }, model: 'gpt-x', modelProvider: CODEX_MODEL_PROVIDER, cwd: home } }
+        case 'turn/start': {
+          const failing = turns++ === 0
+          setImmediate(() => {
+            const out = server.processes.at(-1)!.stdout
+            if (failing && options.snapshot) out.write(JSON.stringify({ method: 'account/rateLimits/updated', params: { rateLimits: options.snapshot } }) + '\n')
+            out.write(JSON.stringify({ method: 'turn/completed', params: { threadId: 'thr-1', turn: { id: 'turn-1', status: failing ? 'failed' : 'completed', error: failing ? options.error : null } } }) + '\n')
+          })
+          return { result: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }
+        }
+        case 'account/rateLimits/read':
+          return options.rateLimits ?? { error: { code: -32601, message: 'method not found' } }
+        default:
+          return { result: {} }
+      }
+    })
+    return server
+  }
+  const chat = (service: CodexProviderService, history = '') =>
+    service.chat({ threadId: 't', cwd: home, model: 'gpt-x', prompt: 'hi', history, onText: () => {} })
+
+  it('a usageLimitExceeded failure takes its reset and window from account/rateLimits/read', async () => {
+    const reset = inHours(2)
+    const server = failingServer({ error: limitError('usageLimitExceeded'), rateLimits: { result: { rateLimits: exhausted(reset) } } })
+    const error = await chat(create(server, { models: [{ id: 'gpt-x', label: 'GPT X' }] })).catch((caught: unknown) => caught)
+    expect(error).toMatchObject({
+      code: 'provider_usage_limit',
+      details: { provider: 'codex', limitKind: 'five_hour', estimated: false, resetsAt: new Date(reset * 1000).toISOString() },
+      errorInfo: { retryable: false }
+    })
+    expect(server.methods().filter((method) => method === 'account/rateLimits/read')).toHaveLength(1)
+  })
+
+  it('falls back to the last snapshot the server sent when the read is refused', async () => {
+    const reset = inHours(3)
+    const server = failingServer({ error: limitError({ responseTooManyFailedAttempts: { httpStatusCode: 429 } }), snapshot: exhausted(reset) })
+    const error = await chat(create(server)).catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ code: 'provider_usage_limit', details: { limitKind: 'five_hour', estimated: false, resetsAt: new Date(reset * 1000).toISOString() } })
+  })
+
+  it('estimates the reset when neither the read nor a snapshot names one', async () => {
+    const before = Date.now()
+    const server = failingServer({ error: limitError('rateLimitExceeded'), rateLimits: { result: { rateLimits: exhausted(null) } } })
+    const error = await chat(create(server)).catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ code: 'provider_usage_limit', details: { estimated: true } })
+    const at = Date.parse((error as { details: { resetsAt: string } }).details.resetsAt)
+    expect(at).toBeGreaterThanOrEqual(before + 5 * 3600_000)
+    expect(at).toBeLessThan(Date.now() + 5 * 3600_000 + 1)
+  })
+
+  it('an old server without a structured kind is read from its message', async () => {
+    const server = failingServer({ error: limitError(undefined, "You've hit your usage limit. Try again at 2:01 PM."), rateLimits: { result: { rateLimits: exhausted(inHours(1)) } } })
+    const error = await chat(create(server)).catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ code: 'provider_usage_limit', details: { estimated: false } })
+  })
+
+  it('a structured kind that is not a limit is believed over the message', async () => {
+    const server = failingServer({ error: limitError('contextWindowExceeded', 'The context window is full; the usage limit of the model was exceeded') })
+    const error = await chat(create(server)).catch((caught: unknown) => caught)
+    expect(error).not.toMatchObject({ code: 'provider_usage_limit' })
+    expect((error as Error).message).toContain('context window is full')
+    expect(server.methods()).not.toContain('account/rateLimits/read')
+  })
+
+  it('the next turn resumes the same Codex thread the limit ended', async () => {
+    const server = failingServer({ error: limitError('usageLimitExceeded'), rateLimits: { result: { rateLimits: exhausted(inHours(1)) } } })
+    const service = create(server)
+    await expect(chat(service, 'H1')).rejects.toMatchObject({ code: 'provider_usage_limit' })
+    // The adapter reports the history the failed turn left: H1 and its request.
+    service.commitInterrupted('t', 'H1 + request')
+    await chat(service, 'H1 + request')
+    expect(server.methods().filter((method) => method === 'thread/start')).toHaveLength(1)
+    expect(server.messages.filter((message) => message.method === 'turn/start').map((message) => (message.params as { threadId: string }).threadId)).toEqual(['thr-1', 'thr-1'])
   })
 })

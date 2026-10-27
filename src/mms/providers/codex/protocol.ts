@@ -174,6 +174,22 @@ export function codexHttpStatus(info: unknown): number | undefined {
   const status = detail && typeof detail === 'object' ? (detail as { httpStatusCode?: unknown }).httpStatusCode : undefined
   return typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined
 }
+
+/** One plan window of the account's rate limits. */
+export interface RateLimitWindow {
+  usedPercent: number
+  windowDurationMins: number | null
+  /** Epoch seconds. */
+  resetsAt: number | null
+}
+export interface RateLimitSnapshot {
+  primary: RateLimitWindow | null
+  secondary: RateLimitWindow | null
+  rateLimitReachedType?: string | null
+}
+export interface RateLimitsReadResponse {
+  rateLimits: RateLimitSnapshot
+}
 export interface CodexTurn {
   id: string
   status: TurnStatus
@@ -251,6 +267,7 @@ export interface CodexRequestMap {
   initialize: { params: InitializeParams; result: InitializeResponse }
   'config/read': { params: ConfigReadParams; result: ConfigReadResponse }
   'account/read': { params: AccountReadParams; result: AccountReadResponse }
+  'account/rateLimits/read': { params: undefined; result: RateLimitsReadResponse }
   'model/list': { params: ModelListParams; result: ModelListResponse }
   'thread/start': { params: ThreadStartParams; result: ThreadStartResponse }
   'thread/resume': { params: ThreadResumeParams; result: ThreadResumeResponse }
@@ -313,6 +330,7 @@ export interface CodexNotificationMap {
   }
   error: { threadId: string; turnId: string; error: TurnError; willRetry: boolean }
   'account/updated': { authMode: string | null; planType?: string | null }
+  'account/rateLimits/updated': { rateLimits: RateLimitSnapshot }
   /** Broadcast to every connection, not only subscribers of the thread. */
   'thread/status/changed': { threadId: string; status: { type: string } }
   'thread/closed': { threadId: string }

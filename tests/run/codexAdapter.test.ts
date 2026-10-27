@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { usageLimitError } from '../../src/mms/orchestrator/providerErrors'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { CodexAppServerExitedError } from '../../src/mms/providers/codex/CodexAppServerClient'
 import {
@@ -661,6 +662,25 @@ describe('CodexAdapter', () => {
       codex.commitInterrupted('thread-1', STOPPED)
       expect(readFileSync(settingsPath(), 'utf8')).toBe(before)
     })
+  })
+
+  it('fingerprints the thread a usage limit ended, and no other failure', async () => {
+    const committed: Array<[string, string]> = []
+    const client = (failure: Error) =>
+      ({
+        configured: () => true,
+        chat: async () => {
+          throw failure
+        },
+        commitInterrupted: (threadId: string, history: string) => void committed.push([threadId, history])
+      }) as unknown as CodexProviderService
+    const base = host()
+    const withHistory: AdapterHost = { ...base, context: { ...base.context, nativeHistoryNow: () => 'history up to the limit' } }
+    const limit = usageLimitError({ provider: 'codex', estimated: true })
+    await expect(new CodexAdapter(() => client(limit)).startTurn(input(), recordingSink(), control(), withHistory)).rejects.toBe(limit)
+    expect(committed).toEqual([['thread-1', 'history up to the limit']])
+    await expect(new CodexAdapter(() => client(new Error('boom'))).startTurn(input(), recordingSink(), control(), withHistory)).rejects.toThrow('boom')
+    expect(committed).toHaveLength(1)
   })
 
   it('interrupts a turn that was stopped before turn/start answered', async () => {
