@@ -929,7 +929,7 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
       clientType: 'test'
     })
     const hello = await client.connect()
-    expect(hello.protocolVersion).toBe(1)
+    expect(hello.protocolVersion).toBe(MMS_PROTOCOL_VERSION)
     expect(hello.instanceId).toBeTruthy()
     expect(hello.capabilities.length).toBeGreaterThan(0)
 
