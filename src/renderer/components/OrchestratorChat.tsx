@@ -25,7 +25,7 @@ import {
 } from './ChatComposer'
 import { QueuedMessages } from './QueuedMessages'
 import { MousseLogoOutline } from './MousseLogoOutline'
-import { ComposerQuestionModal } from './ComposerQuestionModal'
+import { APPROVAL_COMPOSER_PLACEHOLDER, ComposerQuestionModal, describeAnswerOutcome } from './ComposerQuestionModal'
 import { filesToImagePayloads, imagePayloadToDataUrl, imagePayloadToFile } from '../utils/imageAttachments'
 import { stripComposerTransportMarkers } from './QueuedMessages'
 import { MousseAgentChatShell } from '../chat/components/MousseAgentChatShell'
@@ -954,7 +954,7 @@ export function OrchestratorChat() {
                 pending={questionsSnapshot}
                 onSubmit={(answers) => {
                   const requestId = questionsSnapshot.requestId
-                  void window.mousse.orchestrator.answerQuestions(requestId, answers).then(() => {
+                  void window.mousse.orchestrator.answerQuestionsDetailed(requestId, answers).then((outcome) => {
                     // The daemon accepted the answers or no longer knows this
                     // question (answered elsewhere / expired / preempted) —
                     // either way the prompt is settled: drop it so a decided
@@ -964,6 +964,9 @@ export function OrchestratorChat() {
                     setPendingQuestions((current) =>
                       current?.requestId === requestId ? null : current
                     )
+                    // Another client answered a saved approval request first, or it was closed: say so.
+                    const refusal = describeAnswerOutcome(outcome)
+                    if (refusal) setSendError(refusal)
                   })
                 }}
                 onDismiss={() => {
@@ -1068,7 +1071,7 @@ export function OrchestratorChat() {
               contextOpen={contextOpen}
               onContextOpenChange={setContextOpen}
               loading={turnActive || loading}
-              placeholder={workspaceReady ? undefined : 'Loading workspace...'}
+              placeholder={workspaceReady ? (pendingQuestions?.approval ? APPROVAL_COMPOSER_PLACEHOLDER : undefined) : 'Loading workspace...'}
               onSend={(skillMode) => void handleSend(skillMode)}
               onStop={() => void handleStop()}
               banner={<SubagentComposerBanner threadId={activeThreadId} />}

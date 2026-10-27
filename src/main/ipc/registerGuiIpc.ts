@@ -113,6 +113,7 @@ import type {
   ThreadActivityState,
   TurnState,
   TurnStateSnapshot,
+  QuestionAnswerOutcome,
   UserQuestionAnswers
 } from '../../shared/types'
 import { isThreadActivityActive } from '../../shared/types'
@@ -914,17 +915,24 @@ export function registerGuiIpc(
     }
   )
 
+  const answerQuestions = async (requestId: string, answers: UserQuestionAnswers): Promise<QuestionAnswerOutcome> => {
+    const res = await guiMms.request<QuestionAnswerOutcome>('orchestrator.answerQuestions', {
+      requestId,
+      answers
+    })
+    const busy = activityTrackerFor().getBusyThreadId()
+    if (res.ok && busy) setThreadActivity(busy, 'processing')
+    return res
+  }
   registerHandler(
     'orchestrator:answerQuestions',
-    async (_e, requestId: string, answers: UserQuestionAnswers) => {
-      const res = await guiMms.request<{ ok: boolean }>('orchestrator.answerQuestions', {
-        requestId,
-        answers
-      })
-      const busy = activityTrackerFor().getBusyThreadId()
-      if (res.ok && busy) setThreadActivity(busy, 'processing')
-      return res.ok
-    }
+    async (_e, requestId: string, answers: UserQuestionAnswers) => (await answerQuestions(requestId, answers)).ok
+  )
+  // The same answer with its outcome: when another client answered a saved approval request first,
+  // the card says who decided what (SPEC §17.4).
+  registerHandler(
+    'orchestrator:answerQuestionsDetailed',
+    async (_e, requestId: string, answers: UserQuestionAnswers) => answerQuestions(requestId, answers)
   )
   registerHandler('orchestrator:dismissQuestions', async (_e, requestId: string) => {
     const res = await guiMms.request<{ ok: boolean }>('orchestrator.dismissQuestions', {

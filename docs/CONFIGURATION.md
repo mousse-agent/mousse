@@ -45,7 +45,7 @@ Each agent enforces the mode with its own controls:
 - **Pi (both the Pi agent and the older Mousse loop):** commands (`bash`) ask under Ask and Auto-accept edits, edits (`edit`, `write`) ask under Ask; integrating a subagent's work asks unless the mode allows edits.
 - **Antigravity and other ACP agents:** the agent's own once-only permission options are asked or answered by the mode; its "always" and "session" options are not offered. An agent that approves tools itself (a generic ACP agent) runs only in Full access; a turn in another mode is refused with the fix named.
 
-Until approval requests are saved (the next change), an approval waits in memory for ten minutes and is lost if the daemon restarts.
+An approval request is saved. It waits as long as you take while you are in the chat, and survives closing the window and restarting Mousse: after a restart, answering it continues the thread, and an approval you give then covers that same action once. Any client can answer: the app, `mousse-cli approvals` (or `/approve` and `/deny` in the CLI chat), or a linked device that may chat; if another client answered first you are told who. Sending a message while an approval waits denies it, with your message as the reason. Runs nobody watches (workflows, bots, scheduled jobs, agent definitions) keep the ten-minute limit: an approval nobody answers then counts as a refusal.
 
 ## File format
 
