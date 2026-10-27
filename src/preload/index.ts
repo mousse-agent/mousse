@@ -52,6 +52,7 @@ import type {
   TurnStateSnapshot,
   UserQuestionAnswers
 } from '../shared/types'
+import type { PullRequestRef } from '../shared/pullRequests'
 import type { ProfileCreateInput, ProfilePublicDto, ProfileUpdateInput } from '../shared/profiles/types'
 import type { LlmProviderOption, MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../shared/settings'
 import type { LineEditStatsSnapshot, UsageStatsSnapshot } from '../shared/lineEditStats'
@@ -444,10 +445,12 @@ const api = {
       ipcRenderer.invoke('git:init', projectId, cwd),
     lastCommitMessage: (projectId?: string, cwd?: string): Promise<string | null> =>
       ipcRenderer.invoke('git:lastCommitMessage', projectId, cwd),
-    pullRequest: (projectId?: string, cwd?: string, branch?: string): Promise<GitPullRequestLookup> =>
-      ipcRenderer.invoke('git:pullRequest', projectId, cwd, branch),
     createPullRequest: (projectId?: string, cwd?: string): Promise<void> =>
       ipcRenderer.invoke('git:createPullRequest', projectId, cwd)
+  },
+  pullRequests: {
+    get: (ref: PullRequestRef, branch: string, force?: boolean): Promise<GitPullRequestLookup> =>
+      ipcRenderer.invoke('pullRequests:get', ref, branch, force)
   },
   editors: {
     list: (options?: { refresh?: boolean }): Promise<EditorInfo[]> =>

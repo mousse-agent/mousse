@@ -14,6 +14,7 @@ import { openSurface } from '../../lib/surfaces'
 import { useOutsideDismiss } from '../../hooks/useOutsideDismiss'
 import { useActiveProjectLocation } from '../../hooks/useActiveProjectPath'
 import { useTransientError } from '../../hooks/useTransientError'
+import { useAppStore } from '../../stores/appStore'
 import {
   CommitPushError,
   checkoutGitBranch,
@@ -706,8 +707,18 @@ export function GitSection({ threadId }: SideCardSectionContext) {
     status: git.status
   }
   const collapsedLabel = gitCollapsedLabel(collapse)
-  // No branch, or not a repository: nothing to look up.
-  const pullRequest = usePullRequest(path, git.status?.isRepo ? git.status.branch : null, projectId)
+  // The daemon runs the lookup in the thread's own folder, so a worktree thread asks about its worktree. A new chat
+  // that follows the composer's project pick has no folder of its own yet: it asks about the project.
+  const threadProjectId = useAppStore((state) => state.threads.find((thread) => thread.id === threadId)?.projectId ?? null)
+  const ownThreadId = threadId && projectId !== null && threadProjectId === projectId ? threadId : null
+  // No branch, or not a repository: nothing to look up. Only a pushed branch is looked up again on focus.
+  const pullRequest = usePullRequest(
+    path,
+    git.status?.isRepo ? git.status.branch : null,
+    projectId,
+    ownThreadId,
+    git.status?.tracking === 'tracked'
+  )
   return (
     <GitSectionView
       threadId={threadId}

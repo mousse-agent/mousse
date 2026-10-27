@@ -62,7 +62,7 @@ const pullRequest = (patch: Partial<GitPullRequestInfo> = {}): GitPullRequestInf
   state: 'open',
   isDraft: false,
   checks: 'passing',
-  checkCounts: { passed: 3, failed: 0, pending: 0, total: 3 },
+  checkCounts: { passed: 3, failed: 0, pending: 0, waiting: 0, total: 3 },
   ...patch
 })
 
@@ -93,20 +93,20 @@ describe('pull request row', () => {
   })
 
   it('counts failing checks', () => {
-    const row = pullRequestRow(found({ checks: 'failing', checkCounts: { passed: 1, failed: 2, pending: 0, total: 3 } }), status())
+    const row = pullRequestRow(found({ checks: 'failing', checkCounts: { passed: 1, failed: 2, pending: 0, waiting: 0, total: 3 } }), status())
     expect(row).toMatchObject({ checks: 'failing', checksLabel: '2 failing' })
     expect(row?.kind === 'found' && row.ariaLabel).toBe('Pull request #123, Fix login, 2 checks failing')
-    const one = pullRequestRow(found({ checks: 'failing', checkCounts: { passed: 0, failed: 1, pending: 0, total: 1 } }), status())
+    const one = pullRequestRow(found({ checks: 'failing', checkCounts: { passed: 0, failed: 1, pending: 0, waiting: 0, total: 1 } }), status())
     expect(one?.kind === 'found' && one.ariaLabel).toContain('1 check failing')
   })
 
   it('labels running checks', () => {
-    const row = pullRequestRow(found({ checks: 'pending', checkCounts: { passed: 0, failed: 0, pending: 2, total: 2 } }), status())
+    const row = pullRequestRow(found({ checks: 'pending', checkCounts: { passed: 0, failed: 0, pending: 2, waiting: 0, total: 2 } }), status())
     expect(row).toMatchObject({ checks: 'pending', checksLabel: 'Checks running' })
   })
 
   it('shows no check icon when there are no checks', () => {
-    const row = pullRequestRow(found({ checks: 'none', checkCounts: { passed: 0, failed: 0, pending: 0, total: 0 } }), status())
+    const row = pullRequestRow(found({ checks: 'none', checkCounts: { passed: 0, failed: 0, pending: 0, waiting: 0, total: 0 } }), status())
     expect(row).toMatchObject({ checks: null, checksLabel: null, tooltip: '#123 Fix login', ariaLabel: 'Pull request #123, Fix login' })
   })
 
@@ -427,7 +427,7 @@ describe('git section actions markup', () => {
   })
 
   it('renders each check state and the muted suffixes', () => {
-    expect(render(view(), found({ checks: 'failing', checkCounts: { passed: 0, failed: 2, pending: 0, total: 2 } }))).toContain('data-checks="failing"')
+    expect(render(view(), found({ checks: 'failing', checkCounts: { passed: 0, failed: 2, pending: 0, waiting: 0, total: 2 } }))).toContain('data-checks="failing"')
     expect(render(view(), found({ checks: 'pending' }))).toContain('side-card-git-pr-pending')
     const none = render(view(), found({ checks: 'none' }))
     expect(none).not.toContain('data-checks')
