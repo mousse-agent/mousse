@@ -86,4 +86,36 @@ describe('a woken pull request update runs as the thread\'s own turn', () => {
     // Nothing wakes it again: the row was delivered once.
     expect(w.reconciler.runOnce().wakes.wakes).toEqual([])
   }, 30_000)
+  it('does not wake a thread while a saved approval waits on it, and does once nothing waits', async () => {
+    const w = world()
+    setProfile(w.d, 'manage')
+    const thread = w.d.store.createThread('Watched', w.project.id)
+    await w.d.orch.send({ content: 'Fix the build', mode: 'agent' }, false, { threadId: thread.id, clientRequestId: `first:${thread.id}` })
+    // What a restart leaves: a request nobody has answered yet.
+    w.d.engine.approvals.create({
+      requestId: 'approval-1',
+      threadId: thread.id,
+      runId: null,
+      instanceId: 'claude',
+      provider: 'claude',
+      action: 'command',
+      permissionKey: 'claude:command',
+      fingerprint: 'fp-1',
+      questions: [{ id: 'permission', prompt: 'Run it?', options: [{ id: 'allow', label: 'Allow once', decision: 'allow', scope: 'once' }, { id: 'reject', label: 'Reject', decision: 'reject' }] }]
+    })
+    const turns = w.adapter.turns.length
+    const text = noticeFor()
+    w.d.engine.inbox.append({ inboxId: `inbox:pr-update:${thread.id}:1:0`, threadId: thread.id, kind: 'pr_update', payload: { text, number: 7, headSha: 'abcdef0123', changes: ['checks_failed'] } })
+    const [wakeRunId] = w.reconciler.runOnce().wakes.wakes
+    expect(wakeRunId).toBeTruthy()
+    // The wake is queued and deferred, not run; the approval is still waiting and the row is not lost.
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    expect(w.d.engine.getRun(wakeRunId)!.status).toBe('queued')
+    expect(w.adapter.turns).toHaveLength(turns)
+    expect(w.d.engine.approvals.listPending(thread.id)).toHaveLength(1)
+    // Answered by the user's reject: nothing waits, and the wake runs.
+    w.d.engine.approvals.cancel('approval-1', 'stopped')
+    await waitFor(() => w.d.engine.getRun(wakeRunId)?.status === 'completed', 'the wake once nothing waits', 20_000)
+    expect(w.adapter.turns.at(-1)!.prompt).toBe(text)
+  }, 40_000)
 })
