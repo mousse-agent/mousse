@@ -535,7 +535,7 @@ function asNullableTrimmed(v: unknown, name: string, maxLen: number): string | n
 export function asInstanceConfigPatch(v: unknown, name = 'patch'): InstanceConfigPatch {
   if (v === undefined || v === null) return {}
   const o = asPlainObject(v, name)
-  assertKnownKeys(o, name, ['displayName', 'home', 'binaryPath', 'args', 'env', 'loginMethod', 'source', 'setup'])
+  assertKnownKeys(o, name, ['displayName', 'home', 'binaryPath', 'args', 'env', 'loginMethod', 'source', 'setup', 'engine'])
   // binaryPath, args and env share the CLI launch-settings limits.
   const patch: InstanceConfigPatch = { ...parseCliConfigPatch({ binaryPath: o.binaryPath, args: o.args, env: o.env }) }
   if (o.displayName !== undefined) patch.displayName = asNullableTrimmed(o.displayName, `${name}.displayName`, 80)
@@ -548,6 +548,10 @@ export function asInstanceConfigPatch(v: unknown, name = 'patch'): InstanceConfi
   if (o.setup !== undefined) {
     if (o.setup !== 'managed' && o.setup !== 'existing') throw invalidParams(`${name}.setup must be managed|existing`)
     patch.setup = o.setup
+  }
+  if (o.engine !== undefined) {
+    if (o.engine !== null && o.engine !== 'rpc' && o.engine !== 'legacy') throw invalidParams(`${name}.engine must be rpc|legacy|null`)
+    patch.engine = o.engine
   }
   return patch
 }

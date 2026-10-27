@@ -153,3 +153,29 @@ export interface PiFatalRequest {
   reason: 'register_provider' | 'catalog'
   message: string
 }
+
+/**
+ * An OAuth credential as Pi stores it in its private `auth.json` (PR 2 §5 "OAuth broker"). `refresh`
+ * is Mousse's opaque handle, never the real refresh token; the other fields are what pi-ai's stock
+ * `toAuth`/`filterModels` read (Copilot's `enterpriseUrl` and `availableModelIds`).
+ */
+export interface PiOAuthCredential {
+  type: 'oauth'
+  access: string
+  /** `mousse:<instanceId>:<nonce>`. */
+  refresh: string
+  expires: number
+  [field: string]: unknown
+}
+
+/** `/pi/credential`: Pi's `refresh` of an OAuth provider; Mousse is the only refresher. */
+export interface PiCredentialRequest {
+  providerId: string
+  /** The `refresh` value Pi holds for the provider. */
+  handle: string
+}
+
+/** Any refusal or failure is a non-2xx answer with no detail. */
+export interface PiCredentialResponse {
+  credential: PiOAuthCredential
+}

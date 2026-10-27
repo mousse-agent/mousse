@@ -2457,6 +2457,11 @@ export class OrchestratorService extends EventEmitter {
     images: ChatImageAttachment[] | undefined
     mode: ChatMode
     modelOverride: ThreadSession['modelOverride']
+    /**
+     * Set when planning failed and the turn keeps its raw history, and when a native fork branch was
+     * made for this turn (its runtime resumes it, planned or not).
+     */
+    planning?: { failed: boolean; nativeFork?: boolean }
   }): Promise<TurnHandoffs | null> {
     const engine = this.runEngine
     const runId = input.runId
@@ -2482,7 +2487,8 @@ export class OrchestratorService extends EventEmitter {
         let branched: ProviderRef | null = null
         if (forkStrategy(caps) === 'native' && sourceRef?.sessionId && sourceRef.provider === to.provider) {
           try {
-            branched = await this.harness.forkSession(sourceRef, fork.sourceRunOrdinal)
+            branched = await this.harness.forkSession(sourceRef, fork.sourceRunOrdinal, { threadId })
+            if (branched?.sessionId && input.planning) input.planning.nativeFork = true
           } catch (error) {
             console.warn('native fork failed; using a portable handoff', { runId, error: error instanceof Error ? error.message : String(error) })
           }
@@ -2518,6 +2524,7 @@ export class OrchestratorService extends EventEmitter {
         })
       }
     } catch (error) {
+      if (input.planning) input.planning.failed = true
       console.warn('run engine handoff planning failed; the turn keeps its raw history', {
         runId,
         error: error instanceof Error ? error.message : String(error)
@@ -5972,9 +5979,10 @@ export class OrchestratorService extends EventEmitter {
           compactTranscript()
         }
       }
+      const planning: { failed: boolean; nativeFork?: boolean } = { failed: false }
       handoffs = await this.planTurnHandoffs({
         session, runId: engineRunId, resolved: instance, selection: selectedModel, previousModel, promptRuntime,
-        content: userContent, images, mode, modelOverride
+        content: userContent, images, mode, modelOverride, planning
       })
       if (handoffs) this.recordHandoffMarkers(session, handoffs, switchMarker, turnId, selectedModel)
       const activeMessages = getActiveMessages(this.nativeContext)
@@ -6001,6 +6009,10 @@ export class OrchestratorService extends EventEmitter {
         nativeHistory: promptRuntime
           ? handoffs?.replaceHistory ? '' : nativeAgentHistory(this.nativeContext, turnNativeStartBoundary.messageIndex)
           : undefined,
+        ...(promptRuntime && handoffs?.historyHandedOver ? { historyHandedOver: true } : {}),
+        // A branch forked for this very turn holds the parent's history: it stays trusted even when
+        // planning failed after it was made.
+        ...(promptRuntime && planning.failed && !planning.nativeFork ? { handoffUnplanned: true } : {}),
         signal: turn.abort.signal
       }
       const turnSink: TurnSink = {

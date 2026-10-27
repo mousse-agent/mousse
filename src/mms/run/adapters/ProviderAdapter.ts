@@ -114,6 +114,19 @@ export interface TurnInput {
    * turn hands back a fresh copy (`RecoveredContext.nativeHistory`).
    */
   nativeHistory?: string
+  /**
+   * The orchestrator handed history over in the prompt this turn (a provider switch's handover,
+   * which then stands in for the transcript and leaves `nativeHistory` empty, or a fork's portable
+   * handover of its parent): no native session the runtime kept for the thread may be resumed in
+   * its place.
+   */
+  historyHandedOver?: boolean
+  /**
+   * Planning this turn's handoffs failed, so the turn carries its raw history only: whether a native
+   * session the runtime kept for the thread is still current (a fork's branch, with turns elsewhere
+   * since) is unknown, and such a session is not resumed.
+   */
+  handoffUnplanned?: boolean
   /** Aborted by the orchestrator on Stop, effect timeout or shutdown. */
   signal: AbortSignal
 }
@@ -365,5 +378,6 @@ export interface ProviderAdapter {
    * null when the runtime cannot branch it (the fork then falls back to a portable handoff). Only
    * called when `featureGates.forkStrategy(caps)` is `native` and `ref` names a session.
    */
-  forkSession?(ref: ProviderRef, atTurnOrdinal: number): Promise<ProviderRef | null>
+  /** `target`: the thread the fork belongs to (a runtime that keeps sessions per thread binds the new one to it). */
+  forkSession?(ref: ProviderRef, atTurnOrdinal: number, target?: { threadId: string }): Promise<ProviderRef | null>
 }

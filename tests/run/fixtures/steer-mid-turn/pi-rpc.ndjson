@@ -1,0 +1,25 @@
+{"kind":"transcript","adapter":"pi-rpc","scenario":"steer-mid-turn","boundary":"Pi RPC on stdio: commands out (without ids); events in","recordedAt":"hand-authored","version":1}
+{"dir":"out","frame":{"kind":"command","command":{"type":"prompt","message":"Review the change"}}}
+{"dir":"in","frame":{"type":"agent_start"}}
+{"dir":"in","frame":{"type":"turn_start"}}
+{"dir":"in","frame":{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"Review the change"}]}}}
+{"dir":"in","frame":{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"Review the change"}]}}}
+{"dir":"in","frame":{"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"openai","model":"gpt-replay","usage":{"input":12,"output":4,"cacheRead":0,"cacheWrite":0},"stopReason":"stop"}}}
+{"dir":"in","frame":{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0}}}
+{"dir":"in","frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Working"}}}
+{"dir":"cue","frame":{"action":"steer","text":"Focus on tests"}}
+{"dir":"in","frame":{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"Working"}}}
+{"dir":"in","frame":{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Working"}],"api":"openai-completions","provider":"openai","model":"gpt-replay","usage":{"input":12,"output":4,"cacheRead":0,"cacheWrite":0},"stopReason":"stop"}}}
+{"dir":"in","frame":{"type":"turn_end"}}
+{"dir":"out","frame":{"kind":"command","command":{"type":"steer","message":"Focus on tests"}}}
+{"dir":"in","frame":{"type":"turn_start"}}
+{"dir":"in","frame":{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"Focus on tests"}]}}}
+{"dir":"in","frame":{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"Focus on tests"}]}}}
+{"dir":"in","frame":{"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"openai","model":"gpt-replay","usage":{"input":12,"output":4,"cacheRead":0,"cacheWrite":0},"stopReason":"stop"}}}
+{"dir":"in","frame":{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0}}}
+{"dir":"in","frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Done with tests"}}}
+{"dir":"in","frame":{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"Done with tests"}}}
+{"dir":"in","frame":{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Done with tests"}],"api":"openai-completions","provider":"openai","model":"gpt-replay","usage":{"input":12,"output":4,"cacheRead":0,"cacheWrite":0},"stopReason":"stop"}}}
+{"dir":"in","frame":{"type":"turn_end"}}
+{"dir":"in","frame":{"type":"agent_end","messages":[]}}
+{"dir":"in","frame":{"type":"agent_settled"}}

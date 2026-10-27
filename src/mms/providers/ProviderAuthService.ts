@@ -415,7 +415,8 @@ export class ProviderAuthService {
 
     try {
       const credentials = await oauthProvider.login(session.createAuthCallbacks())
-      await this.credentials.modify(providerId, async () => credentials)
+      // Every sign-in gets an id of its own: the account identity of tokens that name none.
+      await this.credentials.modify(providerId, async () => ({ ...credentials, credentialId: crypto.randomUUID() }))
       return { success: true, sessionId: session.sessionId }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)

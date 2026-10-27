@@ -33,6 +33,7 @@ import { replayCursorHost } from '../../../src/mms/run/testkit/cursorHostReplay'
 import { piDriver } from '../../../src/mms/harness/drivers/pi'
 import { ProviderInstanceService } from '../../../src/mms/providers/ProviderInstanceService'
 import { replayPiChat } from '../../../src/mms/run/testkit/piChatReplay'
+import { replayPiRpc, type PiRpcReplay } from '../../../src/mms/run/testkit/piRpcReplay'
 import { DEFAULT_VOLATILE_KEYS, dropKeys, readTranscript, ReplayTransport } from '../../../src/mms/run/testkit/ReplayTransport'
 import { Reconciler } from '../../../src/mms/run/Reconciler'
 import { replaySdkQuery } from '../../../src/mms/run/testkit/sdkQueryReplay'
@@ -49,6 +50,8 @@ export const FIXTURES_DIR = join(__dirname, '..', 'fixtures')
 /** Model selection per adapter; every fixture is authored against these. */
 const SELECTION: Record<string, { instanceId?: string; llmProvider: string; model: string }> = {
   pi: { llmProvider: 'openai', model: 'gpt-replay' },
+  // The same `pi:openai` instance on the Pi RPC engine (`config.engine: 'rpc'`).
+  'pi-rpc': { llmProvider: 'openai', model: 'gpt-replay' },
   // A Custom command: named by its instance only (no legacy provider name), on the agent's own model.
   acp: { instanceId: 'acp:replay', llmProvider: '', model: 'default' },
   // An added Cursor entry, on the model Cursor chooses (Auto).
@@ -146,7 +149,7 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
   const worker = new EffectWorker({ outbox: engine.outbox, executors: orch.effectExecutors(), owner: engine.leaseOwner })
   worker.start()
   orch.attachEffectWorker(worker)
-  const stops: Array<() => void> = []
+  const stops: Array<() => unknown> = []
 
   let threadId = ''
   const activeRun = (): RunRecord => {
@@ -161,10 +164,13 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
       .map((event) => event.payload as EffectRecord)
       .some((effect) => effect.kind === kind && effect.runId === runId && effect.status === 'succeeded')
   let cues = 0
+  let piRpc: PiRpcReplay | undefined
   const transport = new ReplayTransport(transcript, {
     ...(scenario.delegates ? { normalize: normalizeIds } : {}),
     onCue: async (cue) => {
       const action = cue as { action?: string; text?: string }
+      // Pi's events cross a process boundary: the cue acts once the engine read them.
+      await piRpc?.flush()
       const run = activeRun()
       cues += 1
       if (action.action === 'steer') {
@@ -194,6 +200,12 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
   const involved = new Set([adapterId, ...(scenario.before ?? []).map((turn) => turn.adapter)])
   if (involved.has('pi')) {
     ;(orch as any).llm.chat = replayPiChat(transport).chat
+  }
+  // Pi's RPC mode: a relay process per thread pipes the engine's RPC stdio to the replay.
+  if (involved.has('pi-rpc')) {
+    const replay = await replayPiRpc(transport)
+    piRpc = replay
+    stops.push(() => replay.close())
   }
   if (involved.has('claude-subscription')) {
     const binary = join(home, 'claude')
@@ -238,7 +250,7 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
     questions,
     shellPath: async () => ({ entries: [], source: 'failed' }),
     drivers: [
-      piDriver({ client: () => orch.piChatClient() }),
+      piDriver({ client: () => orch.piChatClient(), ...(piRpc ? { rpc: piRpc.driverOptions() } : {}) }),
       claudeCodeDriver({ builtIn: () => services.claude! }),
       antigravityDriver({ builtIn: () => services.antigravity! }),
       // The generic driver runs for real; only its agent connection is replayed.
@@ -248,7 +260,9 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
       cursorDriver({ connect: replayCursorHost(transport) })
     ]
   })
-  stops.push(() => harness.stop())
+  // Awaited: the RPC engine's processes must be gone before the home is removed.
+  stops.unshift(() => harness.stop())
+  if (involved.has('pi-rpc')) harness.instanceMap.setEntry('pi:openai', { driver: 'pi', enabled: true, config: { engine: 'rpc' } })
   if (involved.has('acp')) harness.instanceMap.setEntry('acp:replay', { driver: 'acp', enabled: true, config: { displayName: 'Replay agent', binaryPath: process.execPath } })
   if (involved.has('cursor')) {
     // A key saved for the entry (the vault keeps plain text outside Electron).
@@ -316,7 +330,7 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
     orch.attachEffectWorker(null)
     orch.setRunEngine(null)
     engine.store.db.close()
-    for (const stop of stops) stop()
+    for (const stop of stops) await stop()
     if (previousHome === undefined) delete process.env.MOUSSE_HOME
     else process.env.MOUSSE_HOME = previousHome
     rmSync(home, { recursive: true, force: true })

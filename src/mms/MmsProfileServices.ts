@@ -20,6 +20,9 @@ import { codexDriver } from './harness/drivers/codex'
 import { cursorDriver } from './harness/drivers/cursor'
 import { grokDriver } from './harness/drivers/grok'
 import { piDriver } from './harness/drivers/pi'
+import { findPiRuntime, piRpcProfileOptions } from './harness/drivers/pi/profile'
+import { decodeModelPrefs } from './harness/catalog'
+import { piOAuthBroker } from './harness/pi/oauthBroker'
 import { harnessAuthRunner, recordHarnessSpawn } from './harness/spawn'
 import { spawnCodexAppServer } from './providers/codex/CodexAppServerClient'
 import { createCodexProviderService, findCodexBinary, type CodexProviderService } from './providers/codex/CodexProviderService'
@@ -355,7 +358,19 @@ export class MmsProfileServices {
       installationHome: shared.installationHome,
       instanceMap: this.providerInstances,
       drivers: [
-        piDriver({ client: () => this.orchestrator.piChatClient(), credentials: () => this.providerAuth }),
+        piDriver({
+          client: () => this.orchestrator.piChatClient(),
+          credentials: () => this.providerAuth,
+          // `pi:*` instances run on Pi's agent when this build ships its runtime (PR 2 §5).
+          rpc: piRpcProfileOptions({
+            auth: () => this.providerAuth,
+            runtime: findPiRuntime(),
+            customModels: (instanceId) => decodeModelPrefs(config.getProvidersSection().modelPrefs?.[instanceId]).custom,
+            registry: () => this.orchestrator.mcpToolRegistry(),
+            // Mousse stays the only refresher of an OAuth sign-in; Pi gets the access token only.
+            oauth: piOAuthBroker(this.providerAuth)
+          })
+        }),
         claudeCodeDriver({
           builtIn: () => this.claudeSubscription,
           // Skill resolution follows the instance's environment (its own CLAUDE_CONFIG_DIR, if any).

@@ -393,6 +393,11 @@ export interface InstanceConfigPatch {
    * own) or `existing` (the user's Codex CLI). Set when the entry is added; it cannot change.
    */
   setup?: 'managed' | 'existing'
+  /**
+   * `pi` instances whose provider runs on Pi's agent: `legacy` switches back to the in-process loop
+   * (Advanced → Engine); `null` clears it back to the default engine.
+   */
+  engine?: 'rpc' | 'legacy' | null
 }
 
 /**

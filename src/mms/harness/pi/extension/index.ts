@@ -20,6 +20,7 @@ import { builtinProviders } from '@earendil-works/pi-ai/providers/all'
 import { createBashToolDefinition, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent'
 import { guardProvider, guardStreams, isGuarded, type GuardObserver, type RequestGate } from './guard'
 import { BUDGET_EXHAUSTED, GATE_REFUSALS, GATE_UNAVAILABLE, REQUEST_REFUSED } from './messages'
+import { brokerOAuth, type PiCredentialPost } from './oauth'
 import { inputBound, sizedMaxTokens, wirePlan, type PiReasoning, type ThinkingBudgets } from '../reservation'
 import { containedBashOperations } from './shell'
 
@@ -153,7 +154,9 @@ function instanceProvider(catalog: PiCatalogResponse, builtins: Map<string, Prov
   const auth = key && stock.auth.apiKey
     ? { ...stock.auth, apiKey: Object.assign(Object.create(Object.getPrototypeOf(stock.auth.apiKey) as object) as NonNullable<Provider['auth']['apiKey']>, stock.auth.apiKey, {
         resolve: async (input: Parameters<NonNullable<Provider['auth']['apiKey']>['resolve']>[0]) => {
-          const resolved = await stock.auth.apiKey!.resolve(input).catch(() => undefined)
+          // The stock resolver sees Mousse's key as the stored credential, so providers that build
+          // their address from ids beside it (Cloudflare's account) find them in the environment.
+          const resolved = await stock.auth.apiKey!.resolve({ ...input, credential: { type: 'api_key', key } } as typeof input).catch(() => undefined)
           return { ...(resolved ?? {}), auth: { ...(resolved?.auth ?? {}), apiKey: key }, source: 'Mousse' }
         },
         check: async () => ({ type: 'api_key' as const, source: 'Mousse' })
@@ -272,7 +275,9 @@ export default async function mousseExtension(pi: ExtensionAPI): Promise<void> {
   for (const entry of getApiProviders()) registerApiProvider(guardStreams({ api: entry.api, stream: entry.stream, streamSimple: entry.streamSimple }, undefined, observer, gate) as never)
 
   let catalog = await call<PiCatalogResponse>('catalog', {})
-  const builtins = new Map(builtinProviders().map((provider) => [provider.id, provider]))
+  // Mousse is the only OAuth refresher: every OAuth provider's `refresh` asks Mousse (`oauth.ts`).
+  const credential: PiCredentialPost = (request, signal) => call('credential', request, signal)
+  const builtins = new Map(builtinProviders().map((provider) => [provider.id, brokerOAuth(provider, credential)]))
   // Every built-in, guarded; the instance's provider with Mousse's catalogue and key. Queued now and
   // flushed before the session's options resolve, so `--model` finds Mousse's model.
   for (const provider of builtins.values()) if (provider.id !== catalog.provider.id) pi.registerProvider(guardProvider(provider, observer, gate))
@@ -302,7 +307,7 @@ export default async function mousseExtension(pi: ExtensionAPI): Promise<void> {
     for (const id of ids) {
       if (isGuarded(registry.getRegisteredNativeProvider(id))) continue
       const current = registry.getProvider(id)
-      if (current) await registerNow(guardProvider(current, observer, gate))
+      if (current) await registerNow(guardProvider(brokerOAuth(current, credential), observer, gate))
     }
     const guarded = [...ids].filter((id) => isGuarded(registry.getRegisteredNativeProvider(id)))
     const ready: PiReadyRequest = {

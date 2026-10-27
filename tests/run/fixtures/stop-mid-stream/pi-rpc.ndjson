@@ -1,0 +1,12 @@
+{"kind":"transcript","adapter":"pi-rpc","scenario":"stop-mid-stream","boundary":"Pi RPC on stdio: commands out (without ids); events in","recordedAt":"hand-authored","version":1}
+{"dir":"out","frame":{"kind":"command","command":{"type":"prompt","message":"Write a long essay"}}}
+{"dir":"in","frame":{"type":"agent_start"}}
+{"dir":"in","frame":{"type":"turn_start"}}
+{"dir":"in","frame":{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"Write a long essay"}]}}}
+{"dir":"in","frame":{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"Write a long essay"}]}}}
+{"dir":"in","frame":{"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"openai","model":"gpt-replay","usage":{"input":12,"output":4,"cacheRead":0,"cacheWrite":0},"stopReason":"stop"}}}
+{"dir":"in","frame":{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0}}}
+{"dir":"in","frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Partial"}}}
+{"dir":"cue","frame":{"action":"stop"}}
+{"dir":"out","frame":{"kind":"command","command":{"type":"clear_queue"}}}
+{"dir":"out","frame":{"kind":"command","command":{"type":"abort"}}}
