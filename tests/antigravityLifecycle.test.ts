@@ -103,7 +103,8 @@ describe('Antigravity turn lifecycle', () => {
     const { service, input, processes } = fixture()
     await service.chat({ ...input, history: '' })
     service.commitConversation(input.threadId, 'committed')
-    await service.setCliConfig({ args: ['--flag'] })
+    // The gateway saved new launch settings to the instance config and tells the service.
+    service.launchChanged()
     expect(processes[0].connection.close).toHaveBeenCalled()
     await service.chat({ ...input, history: 'committed' })
     expect(processes).toHaveLength(2)

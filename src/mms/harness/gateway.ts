@@ -2649,18 +2649,24 @@ export class Harness implements HarnessGateway {
   private async signIn(instanceId: string, method?: string): Promise<ProviderOperationStarted> {
     const record = this.record(instanceId, { allowDisabled: true })
     const runtime = record.runtime
-    if (!runtime.signIn) return harnessFail('unsupported', 'This provider has no sign-in.', instanceId)
+    // Signed out in Mousse on the user's own sign-in (their CLI's home): reconnecting only clears the
+    // flag. No sign-in runs; when the agent itself is signed out, the card shows its command.
+    const reconnecting = this.isSignedOut(record) && !this.ownsSignIn(record)
+    if (!reconnecting && !runtime.signIn) return harnessFail('unsupported', 'This provider has no sign-in.', instanceId)
     if ([...this.operations.values()].some((entry) => entry.started.instanceId === instanceId && entry.started.kind === 'sign_in'))
       return harnessFail('operation_busy', 'A sign-in is already running for this provider.', instanceId)
     const started: ProviderOperationStarted = { operationId: randomUUID(), instanceId, kind: 'sign_in' }
-    // Signed out in Mousse on the user's own sign-in (their CLI's home): reconnecting only clears the
-    // flag. No sign-in runs; when the agent itself is signed out, the card shows its command.
-    if (this.isSignedOut(record) && !this.ownsSignIn(record)) {
+    if (reconnecting) {
+      let failure: unknown
+      try {
+        await this.reconnect(record)
+      } catch (error) {
+        failure = error
+      }
+      // Reported after the caller has the operation id, like any sign-in.
       queueMicrotask(() => {
-        void this.reconnect(record)
-          .then(() => this.emit({ type: 'operation', data: { ...started, phase: 'completed' } }))
-          .catch((error) => this.emit({ type: 'operation', data: { ...started, phase: 'failed', error: { code: 'protocol', message: errorText(error), instanceId } } }))
-          .finally(() => void this.probe(instanceId, true))
+        this.emit({ type: 'operation', data: failure ? { ...started, phase: 'failed', error: { code: 'protocol', message: errorText(failure), instanceId } } : { ...started, phase: 'completed' } })
+        void this.probe(instanceId, true)
       })
       return started
     }
