@@ -59,6 +59,33 @@ export function cronProblem(expr: string): string | undefined {
   return parseCron(expr) ? undefined : 'A cron field is invalid: use numbers in range, ranges, lists and steps of at least 1.'
 }
 
+/**
+ * The fewest minutes between two runs of a cron expression, looking at a whole leap year (so a rule on the day of the
+ * month or week is counted). Null when it is malformed or runs at most once in that year. The calendar is read in UTC,
+ * so a change of clock does not move the answer.
+ */
+export function minCronGapMinutes(expr: string): number | null {
+  const fields = parseCron(expr)
+  if (!fields) return null
+  const [minutes, hours, daysOfMonth, months, daysOfWeek] = fields.map((values) => [...values].sort((a, b) => a - b)) as [number[], number[], number[], number[], number[]]
+  const dayMs = 24 * 60 * 60 * 1000
+  const start = Date.UTC(2028, 0, 1)
+  let previous: number | null = null
+  let shortest: number | null = null
+  for (let day = 0; day < 366; day += 1) {
+    const date = new Date(start + day * dayMs)
+    if (!daysOfMonth.includes(date.getUTCDate()) || !months.includes(date.getUTCMonth() + 1) || !daysOfWeek.includes(date.getUTCDay())) continue
+    for (const hour of hours) {
+      for (const minute of minutes) {
+        const at = day * 24 * 60 + hour * 60 + minute
+        if (previous !== null && (shortest === null || at - previous < shortest)) shortest = at - previous
+        previous = at
+      }
+    }
+  }
+  return shortest
+}
+
 function matchesCron(fields: Array<Set<number>>, date: Date): boolean {
   return (
     fields[0]!.has(date.getMinutes()) &&

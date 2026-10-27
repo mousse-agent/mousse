@@ -31,7 +31,10 @@ import { relinked, sameLinkedPullRequest, type GitPullRequestInfo, type PullRequ
 import { PULL_REQUEST_EXISTS, PullRequestReadError } from '../git/GitHubCodeHost'
 import { PullRequestThreadError, PullRequestThreadService } from '../git/PullRequestThreadService'
 import { PullRequestWatchError } from '../git/PullRequestWatchService'
-import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest, Thread } from '../../shared/types'
+import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest, ScheduledSettings, Thread } from '../../shared/types'
+import { AGENT_JOB_LIMIT_RANGES, AGENT_JOB_LIMIT_SETTINGS, type AgentJobLimitKey } from '../../shared/agentJobLimits'
+import type { MousseConfigStore } from '../config/MousseConfigStore'
+import type { ScheduledConfigSection } from '../config/types'
 import { AppError, createErrorProvider, knownAppError } from '../../shared/errors'
 import type { GitOperationHandle } from '../git/GitService'
 import { listClaimedQueue, QueueConflictError, QueueValidationError } from '../queue/ThreadMessageQueue'
@@ -914,6 +917,18 @@ function harnessGateway(ctx: HandlerContext): HarnessGateway {
 
 
 /** A scheduled-job request the profile refuses, with a message the person can act on (a plain Error would be hidden). */
+const SCHEDULED_SETTING_KEYS: readonly string[] = ['agentJobs', ...Object.values(AGENT_JOB_LIMIT_SETTINGS)]
+
+function scheduledSettings(config: MousseConfigStore): ScheduledSettings {
+  const limits = config.agentJobLimits()
+  return {
+    agentJobs: config.agentJobsEnabled(),
+    agentJobMaxActive: limits.maxActive,
+    agentJobMinIntervalMinutes: limits.minIntervalMinutes,
+    agentJobLifetimeDays: limits.lifetimeDays
+  }
+}
+
 function jobRefused(message: string): AppError {
   return knownAppError({ code: 'scheduled_job_refused', message }, { category: 'invalid', retryable: false })
 }
@@ -1956,15 +1971,24 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'scheduled.status':
       return { status: ctx.mms.scheduled.getStatus() }
     case 'scheduled.settings.get':
-      return { settings: { agentJobs: ctx.mms.config.agentJobsEnabled() } }
+      return { settings: scheduledSettings(ctx.mms.config) }
     case 'scheduled.settings.set': {
+      // A person's call over the protocol or the Scheduled page; no tool an agent holds reaches it (the `schedule_*` tools only read the limits).
       const p = isObject(params) ? params : {}
-      for (const key of Object.keys(p)) if (key !== 'agentJobs') throw jobRefused(`${key} is not allowed`)
-      const agentJobs = asBoolean(p.agentJobs, 'agentJobs')
-      ctx.mms.config.updateScheduledSection({ agentJobs })
+      for (const key of Object.keys(p)) if (!SCHEDULED_SETTING_KEYS.includes(key)) throw jobRefused(`${key} is not allowed`)
+      if (Object.keys(p).length === 0) throw jobRefused('Name at least one setting to change')
+      // Every value is checked before any is saved, so a refused one changes nothing.
+      const update: Partial<ScheduledConfigSection> = {}
+      if (p.agentJobs !== undefined) update.agentJobs = asBoolean(p.agentJobs, 'agentJobs')
+      for (const key of Object.keys(AGENT_JOB_LIMIT_SETTINGS) as AgentJobLimitKey[]) {
+        const setting = AGENT_JOB_LIMIT_SETTINGS[key]
+        if (p[setting] !== undefined) update[setting] = asBoundedInt(p[setting], setting, AGENT_JOB_LIMIT_RANGES[key])
+      }
+      ctx.mms.config.updateScheduledSection(update)
       // Off means the jobs agents made stop now, visibly paused; turning it on again does not restart them.
-      if (!agentJobs) ctx.mms.scheduled.pauseAgentJobs()
-      return { settings: { agentJobs: ctx.mms.config.agentJobsEnabled() } }
+      // A lower limit never pauses or removes a job: it only refuses the next create or change.
+      if (update.agentJobs === false) ctx.mms.scheduled.pauseAgentJobs()
+      return { settings: scheduledSettings(ctx.mms.config) }
     }
     case 'scheduled.extend': {
       const p = isObject(params) ? params : {}

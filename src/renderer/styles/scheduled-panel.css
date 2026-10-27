@@ -103,6 +103,17 @@
   white-space: nowrap;
 }
 
+.scheduled-agent-limit .scheduled-input {
+  width: 64px;
+  padding: 3px 6px;
+  font-size: 12.5px;
+}
+
+.scheduled-agent-limit-error {
+  flex-basis: 100%;
+  text-align: right;
+}
+
 .scheduled-link-btn {
   padding: 0;
   border: 0;

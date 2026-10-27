@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
 import { McpToolError, type AgentScheduleHost, type McpCallRequest } from '../../src/mms/run/mcp/appTools'
-import { AGENT_JOB_LIFETIME_DAYS, AGENT_JOB_MAX_ACTIVE, AGENT_JOB_MIN_INTERVAL_MINUTES } from '../../src/mms/scheduled/agentJobLimits'
+import { AGENT_JOB_LIMIT_DEFAULTS } from '../../src/mms/scheduled/agentJobLimits'
 import { ScheduledJobStore } from '../../src/mms/scheduled/ScheduledJobStore'
 import type { PermissionMode } from '../../src/shared/permissionMode'
 import type { AgentAccessLevel, AgentAccessSettings } from '../../src/shared/settings'
@@ -24,6 +24,8 @@ const DAY = 24 * 60 * 60 * 1000
 const thread = (id: string, patch: Partial<Thread> = {}): Thread => ({ id, name: `Thread ${id}`, createdAt: NOW, updatedAt: NOW, startedAt: NOW, projectId: 'p1', ...patch }) as Thread
 const profile = (patch: Partial<AgentAccessSettings> = {}): AgentAccessSettings => ({ level: 'manage', projectIds: [], answerApprovals: false, ...patch })
 const TOOLS = ['schedule_create', 'schedule_list', 'schedule_pause', 'schedule_run', 'schedule_update']
+/** What the profile allows until a person changes it. */
+const { maxActive: MAX_ACTIVE, minIntervalMinutes: MIN_INTERVAL, lifetimeDays: LIFETIME_DAYS } = AGENT_JOB_LIMIT_DEFAULTS
 const CREATE = { name: 'Nightly report', prompt: 'Write the nightly report', schedule: { kind: 'interval', minutes: 30 } }
 
 describe('the schedule tools (SPEC §15.1)', () => {
@@ -55,7 +57,9 @@ describe('the schedule tools (SPEC §15.1)', () => {
       enabled: true,
       /** Whether a person started the calling run (`startedByPerson`); the real rule is tested against a daemon. */
       person: true,
-      limits: { accessCap: 'manage' as AgentAccessLevel, permissionCeiling: 'full' as PermissionMode }
+      limits: { accessCap: 'manage' as AgentAccessLevel, permissionCeiling: 'full' as PermissionMode },
+      /** The limits on agent jobs a person set (`scheduled.agentJob*`): read at every call. */
+      jobLimits: { ...AGENT_JOB_LIMIT_DEFAULTS }
     }
     const threads = new Map<string, Thread>([
       ['caller', thread('caller')],
@@ -67,6 +71,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
     const woke = vi.fn()
     const schedules = {
       enabled: vi.fn(() => state.enabled),
+      jobLimits: vi.fn(() => ({ ...state.jobLimits })),
       list: vi.fn(() => jobs.listJobs()),
       get: vi.fn((id: string) => jobs.getJob(id)),
       validate: vi.fn((): { selection?: never; threadId?: string } => ({})),
@@ -304,13 +309,13 @@ describe('the schedule tools (SPEC §15.1)', () => {
     it.each([
       ['a prompt that starts with a slash', { prompt: '/workflow run ship' }, /workflows/],
       ['a prompt that starts with a slash after whitespace', { prompt: '  \n /workflow run ship' }, /workflows/],
-      ['an interval of one minute', { schedule: { kind: 'interval', minutes: 1 } }, new RegExp(`less than ${AGENT_JOB_MIN_INTERVAL_MINUTES} minutes`)],
-      ['an interval of fourteen minutes', { schedule: { kind: 'interval', minutes: 14 } }, new RegExp(`less than ${AGENT_JOB_MIN_INTERVAL_MINUTES} minutes`)],
+      ['an interval of one minute', { schedule: { kind: 'interval', minutes: 1 } }, new RegExp(`less than ${MIN_INTERVAL} minutes`)],
+      ['an interval of fourteen minutes', { schedule: { kind: 'interval', minutes: 14 } }, new RegExp(`less than ${MIN_INTERVAL} minutes`)],
       ['every minute in cron', { schedule: { kind: 'cron', expr: '* * * * *' } }, /fixed list of minutes/],
       ['a cron step in the minute field', { schedule: { kind: 'cron', expr: '*/15 * * * *' } }, /fixed list of minutes/],
       ['a cron range in the minute field', { schedule: { kind: 'cron', expr: '0-30 * * * *' } }, /fixed list of minutes/],
-      ['cron minutes closer than the floor', { schedule: { kind: 'cron', expr: '0,10 * * * *' } }, new RegExp(`at least ${AGENT_JOB_MIN_INTERVAL_MINUTES} apart`)],
-      ['cron minutes that wrap closer than the floor', { schedule: { kind: 'cron', expr: '5,55 * * * *' } }, new RegExp(`at least ${AGENT_JOB_MIN_INTERVAL_MINUTES} apart`)],
+      ['cron minutes closer than the floor', { schedule: { kind: 'cron', expr: '0,10 * * * *' } }, new RegExp(`at least ${MIN_INTERVAL} apart`)],
+      ['cron minutes that wrap closer than the floor', { schedule: { kind: 'cron', expr: '5,55 * * * *' } }, new RegExp(`at least ${MIN_INTERVAL} apart`)],
       ['a cron minute past 59', { schedule: { kind: 'cron', expr: '75 * * * *' } }, /between 0 and 59/],
       ['a cron expression with six fields', { schedule: { kind: 'cron', expr: '0 0 9 * * *' } }, /five fields/],
       ['an existing worktree', { workspace: { kind: 'worktree', path: '/work/wt' } }, /existing worktree/]
@@ -322,7 +327,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
     })
 
     it.each([
-      ['an interval at the floor', { kind: 'interval', minutes: AGENT_JOB_MIN_INTERVAL_MINUTES }],
+      ['an interval at the floor', { kind: 'interval', minutes: MIN_INTERVAL }],
       ['a daily cron', { kind: 'cron', expr: '0 9 * * 1-5' }],
       ['a list of minutes at the floor', { kind: 'cron', expr: '0,15,30,45 * * * *' }],
       ['a manual job', { kind: 'manual' }],
@@ -381,36 +386,38 @@ describe('the schedule tools (SPEC §15.1)', () => {
   })
 
   describe('bounds on cost and lifetime', () => {
-    it('a job ends after seven days unless a person extends it', async () => {
+    it('the defaults are ten active jobs, fifteen minutes and seven days', () => {
+      expect(AGENT_JOB_LIMIT_DEFAULTS).toEqual({ maxActive: 10, minIntervalMinutes: 15, lifetimeDays: 7 })
+    })
+
+    it('a job ends after the default lifetime unless a person extends it', async () => {
       const { create, stored } = await world()
       const before = Date.now()
       const job = await create()
       const ends = Date.parse(stored(job.id).expiresAt!)
-      expect(AGENT_JOB_LIFETIME_DAYS).toBe(7)
-      expect(ends).toBeGreaterThanOrEqual(before + 7 * DAY)
-      expect(ends).toBeLessThanOrEqual(Date.now() + 7 * DAY)
+      expect(ends).toBeGreaterThanOrEqual(before + LIFETIME_DAYS * DAY)
+      expect(ends).toBeLessThanOrEqual(Date.now() + LIFETIME_DAYS * DAY)
     })
 
     it('refuses the eleventh active job of the profile, however many runs, threads and restarts made them', async () => {
       const { call, create, otherJob, jobs } = await world()
-      expect(AGENT_JOB_MAX_ACTIVE).toBe(10)
       // Jobs other threads' agents made count too; a person's do not.
       for (let made = 0; made < 4; made += 1) otherJob({ name: `Other ${made}` })
       jobs.createJob({ name: 'A person\'s', prompt: 'x', schedule: { kind: 'manual' } })
-      for (let made = 0; made < AGENT_JOB_MAX_ACTIVE - 4; made += 1) await create({ name: `Mine ${made}` })
+      for (let made = 0; made < MAX_ACTIVE - 4; made += 1) await create({ name: `Mine ${made}` })
       const refused = await call('schedule_create', { ...CREATE, name: 'One too many' })
-      expect(refused).toMatchObject({ isError: true, text: expect.stringContaining(`the limit is ${AGENT_JOB_MAX_ACTIVE}`) })
-      expect(jobs.listJobs().filter((job) => job.createdBy)).toHaveLength(AGENT_JOB_MAX_ACTIVE)
+      expect(refused).toMatchObject({ isError: true, text: expect.stringContaining(`the limit is ${MAX_ACTIVE}`) })
+      expect(jobs.listJobs().filter((job) => job.createdBy)).toHaveLength(MAX_ACTIVE)
       // A restart (a new store over the same files) and a new run change nothing: the count is the saved jobs.
       const reopened = new ScheduledJobStore(MousseConfigStore.load(home!))
-      expect(reopened.listJobs().filter((job) => job.createdBy)).toHaveLength(AGENT_JOB_MAX_ACTIVE)
+      expect(reopened.listJobs().filter((job) => job.createdBy)).toHaveLength(MAX_ACTIVE)
       expect((await call('schedule_create', { ...CREATE, name: 'Still too many' })).isError).toBe(true)
     })
 
     it('paused and ended jobs do not count, so pausing one makes room', async () => {
       const { call, create, jobs } = await world()
       const ids: string[] = []
-      for (let made = 0; made < AGENT_JOB_MAX_ACTIVE; made += 1) ids.push((await create({ name: `Job ${made}` })).id)
+      for (let made = 0; made < MAX_ACTIVE; made += 1) ids.push((await create({ name: `Job ${made}` })).id)
       expect((await call('schedule_create', { ...CREATE, name: 'Over' })).isError).toBe(true)
       await call('schedule_pause', { jobId: ids[0] })
       jobs.updateJob(ids[1], { state: 'completed', nextRunAt: null })
@@ -422,11 +429,11 @@ describe('the schedule tools (SPEC §15.1)', () => {
     it('a retry with the same clientRequestId returns the first job, makes no other, even at the cap', async () => {
       const { call, create, jobs, result } = await world()
       const first = (await result(call('schedule_create', { ...CREATE, clientRequestId: 'req-1' }))).job
-      for (let made = 1; made < AGENT_JOB_MAX_ACTIVE; made += 1) await create({ name: `Job ${made}` })
+      for (let made = 1; made < MAX_ACTIVE; made += 1) await create({ name: `Job ${made}` })
       expect((await call('schedule_create', { ...CREATE, name: 'Over' })).isError).toBe(true)
       const retry = await result(call('schedule_create', { ...CREATE, clientRequestId: 'req-1' }))
       expect(retry).toMatchObject({ replayed: true, job: { id: first.id } })
-      expect(jobs.listJobs()).toHaveLength(AGENT_JOB_MAX_ACTIVE)
+      expect(jobs.listJobs()).toHaveLength(MAX_ACTIVE)
     })
 
     it('a key is the caller thread\'s own: another thread\'s same key makes its own job', async () => {
@@ -447,6 +454,95 @@ describe('the schedule tools (SPEC §15.1)', () => {
       expect(stored(job.id).repeat?.times).toBe(5)
       expect((await call('schedule_update', { jobId: job.id, repeat: { times: 2 } })).isError).toBeUndefined()
       expect(stored(job.id).repeat?.times).toBe(2)
+    })
+  })
+
+  describe('the limits are settings a person changes', () => {
+    const toolOf = (registry: Awaited<ReturnType<typeof world>>['registry'], name: string) => registry.listForThread('caller', 'default', 'manage').find((tool) => tool.name === name)!
+    const scheduleOf = (tool: { inputSchema: unknown }) => (tool.inputSchema as { properties: { schedule: { properties: { minutes: { minimum: number } }; description: string } } }).properties.schedule
+
+    it('enforces a changed number of active jobs at the next create, without a restart', async () => {
+      const { call, create, state, jobs } = await world()
+      state.jobLimits.maxActive = 2
+      await create({ name: 'One' })
+      await create({ name: 'Two' })
+      expect(await call('schedule_create', { ...CREATE, name: 'Three' })).toMatchObject({ isError: true, text: expect.stringContaining('the limit is 2') })
+      state.jobLimits.maxActive = 3
+      expect((await call('schedule_create', { ...CREATE, name: 'Three' })).isError).toBeUndefined()
+      // A lower limit leaves the jobs that exist alone (none paused or removed) and only refuses the next one.
+      state.jobLimits.maxActive = 1
+      expect(jobs.listJobs()).toHaveLength(3)
+      expect(jobs.listJobs().every((job) => job.enabled && job.state !== 'paused')).toBe(true)
+      expect(await call('schedule_create', { ...CREATE, name: 'Four' })).toMatchObject({ isError: true, text: expect.stringContaining('the limit is 1') })
+      expect(jobs.listJobs()).toHaveLength(3)
+    })
+
+    it('enforces a changed shortest interval on creates and on schedule changes, and the tool text follows it', async () => {
+      const { call, create, state, registry, stored } = await world()
+      state.jobLimits.minIntervalMinutes = 60
+      expect(await call('schedule_create', { ...CREATE, schedule: { kind: 'interval', minutes: 30 } })).toMatchObject({ isError: true, text: expect.stringContaining('less than 60 minutes') })
+      expect(await call('schedule_create', { ...CREATE, schedule: { kind: 'cron', expr: '0,30 * * * *' } })).toMatchObject({ isError: true, text: expect.stringContaining('at least 60 apart') })
+      expect(toolOf(registry, 'schedule_create').description).toContain('an interval under 60 minutes')
+      expect(scheduleOf(toolOf(registry, 'schedule_create')).properties.minutes.minimum).toBe(60)
+      expect(scheduleOf(toolOf(registry, 'schedule_update')).properties.minutes.minimum).toBe(60)
+      const job = await create({ schedule: { kind: 'interval', minutes: 60 } })
+      expect(await call('schedule_update', { jobId: job.id, schedule: { kind: 'interval', minutes: 45 } })).toMatchObject({ isError: true, text: expect.stringContaining('less than 60 minutes') })
+      expect(stored(job.id).schedule).toEqual({ kind: 'interval', minutes: 60 })
+      // Lower, and the same call is allowed.
+      state.jobLimits.minIntervalMinutes = 5
+      expect((await call('schedule_update', { jobId: job.id, schedule: { kind: 'interval', minutes: 5 } })).isError).toBeUndefined()
+      expect(toolOf(registry, 'schedule_create').description).toContain('an interval under 5 minutes')
+    })
+
+    it('above an hour, a cron expression must keep its runs that far apart by its hours too', async () => {
+      const { call, state } = await world()
+      state.jobLimits.minIntervalMinutes = 120
+      expect(await call('schedule_create', { ...CREATE, schedule: { kind: 'cron', expr: '0 * * * *' } })).toMatchObject({ isError: true, text: expect.stringContaining('every 60') })
+      expect(await call('schedule_create', { ...CREATE, schedule: { kind: 'cron', expr: '0 8,9 * * *' } })).toMatchObject({ isError: true, text: expect.stringContaining('every 60') })
+      expect((await call('schedule_create', { ...CREATE, schedule: { kind: 'cron', expr: '0 */2 * * *' } })).isError).toBeUndefined()
+      expect((await call('schedule_create', { ...CREATE, schedule: { kind: 'cron', expr: '30 9 * * 1-5' } })).isError).toBeUndefined()
+    })
+
+    it('gives a new job the changed lifetime, and leaves the end of a job that exists alone', async () => {
+      const { create, state, stored, jobs } = await world()
+      const first = await create({ name: 'Before' })
+      const firstEnds = stored(first.id).expiresAt
+      state.jobLimits.lifetimeDays = 30
+      const before = Date.now()
+      const second = await create({ name: 'After' })
+      const ends = Date.parse(stored(second.id).expiresAt!)
+      expect(ends).toBeGreaterThanOrEqual(before + 30 * DAY)
+      expect(ends).toBeLessThanOrEqual(Date.now() + 30 * DAY)
+      expect(stored(first.id).expiresAt).toBe(firstEnds)
+      expect(jobs.getJob(first.id)!.expiresAt).toBe(firstEnds)
+    })
+
+    it('the description of schedule_create states the limits as they are now', async () => {
+      const { registry, state } = await world()
+      const text = () => toolOf(registry, 'schedule_create').description
+      expect(text()).toContain(`${MAX_ACTIVE} active jobs`)
+      expect(text()).toContain(`${LIFETIME_DAYS} days after it is made`)
+      state.jobLimits = { maxActive: 3, minIntervalMinutes: 90, lifetimeDays: 14 }
+      expect(text()).toContain('3 active jobs')
+      expect(text()).toContain('14 days after it is made')
+      expect(text()).toContain('an interval under 90 minutes')
+    })
+
+    it('an agent cannot change them: no tool takes them, and a call that names one is refused and changes nothing', async () => {
+      const { call, create, state, registry, schedules } = await world()
+      const job = await create()
+      const before = { ...state.jobLimits }
+      for (const key of ['agentJobMaxActive', 'agentJobMinIntervalMinutes', 'agentJobLifetimeDays', 'maxActive', 'minIntervalMinutes', 'lifetimeDays', 'limits', 'scheduled']) {
+        expect((await call('schedule_create', { ...CREATE, name: `Sneaky ${key}`, [key]: 1000 })).isError, key).toBe(true)
+        expect((await call('schedule_update', { jobId: job.id, [key]: 1000 })).isError, key).toBe(true)
+      }
+      expect(state.jobLimits).toEqual(before)
+      // The host's limits are read only, and no registered tool has a field for them.
+      expect(schedules.jobLimits).toHaveBeenCalled()
+      const names = registry.list().map((tool) => tool.name)
+      expect(names.filter((name) => /setting|config/i.test(name))).toEqual([])
+      const fields = JSON.stringify(registry.list().map((tool) => tool.inputSchema))
+      expect(fields).not.toMatch(/agentJob(MaxActive|MinIntervalMinutes|LifetimeDays)/)
     })
   })
 

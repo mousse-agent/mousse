@@ -30,6 +30,15 @@ import type { ChannelConfig } from '../../shared/types'
 import type { ScheduledJob } from '../../shared/types'
 import { MOUSSE_CONF_PROFILE_KEYS } from '../../shared/profiles/settingsClassification'
 import { pathsEqual } from '../profiles/pathSafety'
+import {
+  AGENT_JOB_LIMIT_RANGES,
+  AGENT_JOB_LIMIT_SETTINGS,
+  agentJobLimitOrDefault,
+  agentJobLimitProblem,
+  isAgentJobLimit,
+  type AgentJobLimitKey,
+  type AgentJobLimits
+} from '../../shared/agentJobLimits'
 
 function deepMerge<T extends Record<string, unknown>>(base: T, partial: Partial<T>): T {
   const result = { ...base }
@@ -55,6 +64,17 @@ function deepMerge<T extends Record<string, unknown>>(base: T, partial: Partial<
     }
   }
   return result
+}
+
+/** The limits on agent jobs a file holds, only the ones that are whole numbers in range: a bad value reads as the default. */
+function savedAgentJobLimits(raw: Partial<ScheduledConfigSection> | undefined): Partial<ScheduledConfigSection> {
+  const saved: Partial<ScheduledConfigSection> = {}
+  for (const key of Object.keys(AGENT_JOB_LIMIT_SETTINGS) as AgentJobLimitKey[]) {
+    const setting = AGENT_JOB_LIMIT_SETTINGS[key]
+    const value = raw?.[setting]
+    if (isAgentJobLimit(key, value)) saved[setting] = value
+  }
+  return saved
 }
 
 function defaultMmsSection(): MmsConfigSection {
@@ -291,7 +311,8 @@ export class MousseConfigStore {
         enabled: raw.scheduled?.enabled ?? base.scheduled.enabled,
         jobs: raw.scheduled?.jobs ?? base.scheduled.jobs,
         ...(raw.scheduled?.webhooks ? { webhooks: raw.scheduled.webhooks } : {}),
-        ...(typeof raw.scheduled?.agentJobs === 'boolean' ? { agentJobs: raw.scheduled.agentJobs } : {})
+        ...(typeof raw.scheduled?.agentJobs === 'boolean' ? { agentJobs: raw.scheduled.agentJobs } : {}),
+        ...savedAgentJobLimits(raw.scheduled)
       },
       channels: deepMerge(
         base.channels as unknown as Record<string, unknown>,
@@ -513,12 +534,34 @@ export class MousseConfigStore {
     if (partial.agentJobs !== undefined) {
       this.conf.scheduled.agentJobs = partial.agentJobs === true
     }
+    // Checked before anything is written, so a refused value leaves every setting as it was.
+    for (const key of Object.keys(AGENT_JOB_LIMIT_SETTINGS) as AgentJobLimitKey[]) {
+      const value = partial[AGENT_JOB_LIMIT_SETTINGS[key]]
+      if (value !== undefined && !isAgentJobLimit(key, value)) throw new Error(agentJobLimitProblem(key))
+    }
+    for (const key of Object.keys(AGENT_JOB_LIMIT_SETTINGS) as AgentJobLimitKey[]) {
+      const value = partial[AGENT_JOB_LIMIT_SETTINGS[key]]
+      if (value !== undefined) this.conf.scheduled[AGENT_JOB_LIMIT_SETTINGS[key]] = value
+    }
     this.persist()
   }
 
   /** Whether agents may use the scheduled-job tools (`scheduled.agentJobs`, off by default). Cheap: read at every tool call. */
   agentJobsEnabled(): boolean {
     return this.conf.scheduled.agentJobs === true
+  }
+
+  /**
+   * The limits on jobs agents create as they are now (`scheduled.agentJobMaxActive` and its siblings), each at its
+   * default when unset or not a whole number in range. Cheap: read at every use, so a change needs no restart.
+   */
+  agentJobLimits(): AgentJobLimits {
+    const section = this.conf.scheduled
+    return {
+      maxActive: agentJobLimitOrDefault('maxActive', section.agentJobMaxActive),
+      minIntervalMinutes: agentJobLimitOrDefault('minIntervalMinutes', section.agentJobMinIntervalMinutes),
+      lifetimeDays: agentJobLimitOrDefault('lifetimeDays', section.agentJobLifetimeDays)
+    }
   }
 
   updateChannelsSection(config: ChannelConfig): void {

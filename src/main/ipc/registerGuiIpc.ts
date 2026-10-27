@@ -110,6 +110,7 @@ import type {
   OrchestratorSendInput,
   PermissionMode,
   ScheduledJobPatch,
+  ScheduledSettingsUpdate,
   ScheduledWebhookDeliveryLog,
   ScheduledWebhookGrant,
   ThreadActivitySnapshot,
@@ -1580,8 +1581,8 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ settings: unknown }>('scheduled.settings.get')
     return res.settings
   })
-  registerHandler('scheduled:settings:set', async (_e, agentJobs: boolean) => {
-    const res = await guiMms.request<{ settings: unknown }>('scheduled.settings.set', { agentJobs })
+  registerHandler('scheduled:settings:set', async (_e, update: ScheduledSettingsUpdate) => {
+    const res = await guiMms.request<{ settings: unknown }>('scheduled.settings.set', { ...update })
     return res.settings
   })
 

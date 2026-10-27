@@ -209,7 +209,16 @@ export interface ScheduledJob {
 export interface ScheduledSettings {
   /** Agents may list, create, change, pause and run jobs through the Mousse tools. Off by default. */
   agentJobs: boolean
+  /** Active jobs agents may have in the profile at once (1 to 100; 10 unless a person changes it). */
+  agentJobMaxActive: number
+  /** The fewest minutes between runs of a job an agent creates or changes (1 to 1440; 15 unless changed). */
+  agentJobMinIntervalMinutes: number
+  /** Days a job an agent creates lasts unless a person extends it (1 to 365; 7 unless changed). */
+  agentJobLifetimeDays: number
 }
+
+/** A change to the scheduler's settings: only the named ones change. */
+export type ScheduledSettingsUpdate = Partial<ScheduledSettings>
 
 export interface SchedulerStatus {
   running: boolean
