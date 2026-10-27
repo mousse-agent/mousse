@@ -114,6 +114,8 @@ describe('permission modes', () => {
     const runtime = codexDriver({ builtIn: () => ({}) as CodexProviderService }).create({ config: {} } as DriverContext)
     const limits = runtime.permissionLimits?.()
     expect(limits).toBe(CODEX_PERMISSION_LIMITS)
+    // Full access also turns Codex's sandbox off; the composer reads this from the limits, not from a name.
+    expect(limits?.sandboxOffInFull).toBe(true)
     const supported = supportedPermissionModes(CODEX_CAPS, limits)
     expect(supported).toEqual(['ask', 'full'])
     expect(effectivePermissionMode('accept_edits', supported, { agent: 'Codex', limits })).toEqual({
