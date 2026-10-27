@@ -14,7 +14,7 @@ import { TaskQueue } from '../../src/mms/tasks/TaskQueue'
 import { PtyManager } from '../../src/mms/terminals/PtyManager'
 import { WorktreeManager } from '../../src/mms/worktree/WorktreeManager'
 import type { BotThreadRole, BotThreads } from '../../src/shared/bots/personal/authority'
-import type { TurnOrigin } from '../../src/shared/harness/types'
+import type { ExecutionBinding, TurnOrigin } from '../../src/shared/harness/types'
 import { getDefaultSettings } from '../../src/shared/settings'
 
 describe('threadTurnOrigin', () => {
@@ -71,5 +71,14 @@ describe('the orchestrator binds bot threads as bot', () => {
   it('fails the turn when the bot index cannot be read, rather than binding a bot thread as the person\'s', () => {
     orch.setBotThreads({ roleOf: () => { throw new Error('bots.db locked') } })
     expect(() => origin('activation-1')).toThrow('bots.db locked')
+  })
+
+  it('reads the origin only for a new binding: a retry keeps its run\'s binding without asking the index', async () => {
+    let lookups = 0
+    orch.setBotThreads({ roleOf: () => { lookups += 1; throw new Error('bots.db locked') } })
+    const existing = { instanceId: 'claude', policy: { mode: 'default', approvals: 'ask', origin: 'bot' } } as unknown as ExecutionBinding
+    const bindTurn = (orch as unknown as { bindTurn(runId: string | undefined, existing: ExecutionBinding | undefined, resolved: unknown, mode: string, origin: () => TurnOrigin): Promise<ExecutionBinding> }).bindTurn.bind(orch)
+    expect(await bindTurn(undefined, existing, {}, 'agent', () => origin('activation-1'))).toBe(existing)
+    expect(lookups).toBe(0)
   })
 })

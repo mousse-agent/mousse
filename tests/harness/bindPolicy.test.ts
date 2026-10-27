@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { TurnSpec } from '../../src/mms/harness/gateway'
-import { checkPolicy, policyDigest } from '../../src/mms/harness/policy'
+import { checkPolicy, HOST_APPROVALS_UNAVAILABLE, policyDigest } from '../../src/mms/harness/policy'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import type { AdapterHost, ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
@@ -26,7 +26,6 @@ afterEach(() => {
 
 const BOT_POLICY: BindPolicy = {
   approvals: 'grants',
-  approve: 'host',
   tools: { allow: ['Read', 'Edit'] },
   budget: { maxWallMs: 60_000 },
   authority: { kind: 'bot', digest: 'manifest-1' }
@@ -103,7 +102,7 @@ describe('bind with a policy', () => {
 
   it('gives the same digest whatever order the caller wrote the policy in', async () => {
     const s = setup()
-    const reordered: BindPolicy = { authority: { digest: 'manifest-1', kind: 'bot' }, budget: { maxWallMs: 60_000 }, tools: { allow: ['Read', 'Edit'] }, approve: 'host', approvals: 'grants' }
+    const reordered: BindPolicy = { authority: { digest: 'manifest-1', kind: 'bot' }, budget: { maxWallMs: 60_000 }, tools: { allow: ['Read', 'Edit'] }, approvals: 'grants' }
     const a = await s.harness.bind(s.resolved(), { mode: 'agent', origin: 'bot', policy: BOT_POLICY })
     const b = await s.harness.bind(s.resolved(), { mode: 'agent', origin: 'bot', policy: reordered })
     expect(b.policyDigest).toBe(a.policyDigest)
@@ -124,6 +123,20 @@ describe('bind with a policy', () => {
     expect(checkPolicy({ ...CLAUDE_SUBSCRIPTION_CAPABILITIES, planMode: true, contextUsage: 'reported', toolControl: 'exact', budgets: 'unsupported', spendLimits: 'unsupported' }, policy)).toEqual({ ok: true })
     expect(checkPolicy({ ...CLAUDE_SUBSCRIPTION_CAPABILITIES, planMode: true, contextUsage: 'reported', toolControl: 'approval_only', budgets: 'unsupported', spendLimits: 'unsupported' }, policy))
       .toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['toolControl'] } })
+  })
+})
+
+describe('approvals answered by the host', () => {
+  it('are recorded in the binding but refused at admission until a runtime answers them', async () => {
+    const s = setup()
+    const binding = await s.harness.bind(s.resolved(), { mode: 'agent', origin: 'bot', policy: { ...BOT_POLICY, approve: 'host' } })
+    expect(binding.policy.approve).toBe('host')
+    expect(binding.policyDigest).not.toBe((await s.harness.bind(s.resolved(), { mode: 'agent', origin: 'bot', policy: BOT_POLICY })).policyDigest)
+    await expect(s.harness.startTurn(s.spec(binding)).result).rejects.toMatchObject({ code: 'policy_unenforceable', details: { missing: ['toolControl'], reason: HOST_APPROVALS_UNAVAILABLE } })
+    expect(s.hosts).toHaveLength(0)
+    const exact = { ...CLAUDE_SUBSCRIPTION_CAPABILITIES, planMode: true, contextUsage: 'reported' as const, toolControl: 'exact' as const, budgets: 'hard' as const, spendLimits: 'unsupported' as const }
+    expect(checkPolicy(exact, { mode: 'default', approvals: 'grants', approve: 'host' })).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['toolControl'], reason: HOST_APPROVALS_UNAVAILABLE } })
+    expect(checkPolicy(exact, { mode: 'default', approvals: 'grants' })).toEqual({ ok: true })
   })
 })
 

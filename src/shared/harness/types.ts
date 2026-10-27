@@ -109,6 +109,7 @@ export interface RunPolicy {
   /**
    * Who answers a call that needs approval under `grants`: the host's own authority for the turn
    * (an agent definition's or a bot's, registered with the turn's app tools), never a person.
+   * `checkPolicy` refuses it until the runtimes answer approvals that way.
    */
   approve?: 'host'
   budget?: { maxTurns?: number; maxToolCalls?: number; maxInputTokens?: number; maxOutputTokens?: number; maxUsd?: number; maxWallMs?: number }

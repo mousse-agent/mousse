@@ -132,9 +132,14 @@ function spendModelGap(budget: NonNullable<RunPolicy['budget']>, model: SpendMod
  * - a host authority (a definition's or a bot's grants, roots and rules) needs `exact` tool
  *   control: only a runtime whose every tool call Mousse decides can be held to it;
  * - pre-granted or no approvals need at least `approval_only`;
+ * - approvals answered by the host (`approve: 'host'`) are refused on every instance for now:
+ *   nothing answers them yet, and the turn would otherwise ask the person;
  * - a turn nobody watches (delegated, workflow, definition, bot) needs more than `uncontrolled`,
  *   for its first dispatch and every retry, continuation and steer.
  */
+/** Why a policy with `approve: 'host'` is refused until a runtime answers approvals for the host. */
+export const HOST_APPROVALS_UNAVAILABLE = 'No runtime answers approvals for the host yet.'
+
 export function checkPolicy(caps: HarnessCaps, policy: RunPolicy, instanceId?: string, model?: SpendModelFacts): Enforceability {
   const missing: Array<keyof HarnessCaps> = []
   const control = toolControlLevel(caps)
@@ -144,6 +149,9 @@ export function checkPolicy(caps: HarnessCaps, policy: RunPolicy, instanceId?: s
   const needsSpend = hasSpendLimit(policy)
   const needsHardBudget = needsSpend || budget.maxTurns !== undefined || budget.maxToolCalls !== undefined
   const needsApprovals = policy.approvals === 'grants' || policy.approvals === 'never'
+  // Nothing answers approvals for the host yet (PR 6's locked runtimes and bot engine will): until
+  // then a policy that asks for it is refused rather than left to ask the person.
+  const hostApprovals = policy.approve === 'host'
   const unattended = policyOrigin(policy) !== 'interactive'
   if ((needsExact && control !== 'exact') || (needsApprovals && control === 'uncontrolled') || (unattended && control === 'uncontrolled'))
     missing.push('toolControl')
@@ -152,6 +160,10 @@ export function checkPolicy(caps: HarnessCaps, policy: RunPolicy, instanceId?: s
   if (needsSpend) {
     if (spendLimitLevel(caps) !== 'reserved') missing.push('spendLimits')
     else if ((reason = spendModelGap(budget, model))) missing.push('spendLimits')
+  }
+  if (hostApprovals) {
+    reason = [reason, HOST_APPROVALS_UNAVAILABLE].filter(Boolean).join(' ')
+    if (!missing.includes('toolControl')) missing.push('toolControl')
   }
   if (!missing.length) return { ok: true }
   return {

@@ -2224,9 +2224,10 @@ export class OrchestratorService extends EventEmitter {
    * run; `resolved` was built from it), else a new one from the resolved selection. Either way it
    * is recorded on the active attempt, so a replacement attempt keeps its run's binding.
    */
-  private async bindTurn(runId: string | undefined, existing: ExecutionBinding | undefined, resolved: ResolvedTurnSelection, mode: ChatMode, origin: TurnOrigin): Promise<ExecutionBinding> {
+  private async bindTurn(runId: string | undefined, existing: ExecutionBinding | undefined, resolved: ResolvedTurnSelection, mode: ChatMode, origin: () => TurnOrigin): Promise<ExecutionBinding> {
     const engine = this.runEngine
-    const binding = existing ?? await this.harness.bind(resolved, { mode, origin })
+    // The origin is read only for a new binding: a retry or restart keeps the one its run recorded.
+    const binding = existing ?? await this.harness.bind(resolved, { mode, origin: origin() })
     if (runId && engine) {
       try {
         return engine.recordExecutionBinding(runId, binding)
@@ -5927,7 +5928,7 @@ export class OrchestratorService extends EventEmitter {
         if (refusal) throw new AppError({ code: refusal.code, message: refusal.message, errorInfo: { category: 'unavailable', retryable: false } })
       }
       // The attempt's immutable binding; a retry of the same run keeps the one it already has.
-      const binding = await this.bindTurn(engineRunId, runBinding, instance, mode, this.turnOrigin(session.threadId, request.workflowInvocationId))
+      const binding = await this.bindTurn(engineRunId, runBinding, instance, mode, () => this.turnOrigin(session.threadId, request.workflowInvocationId))
       // A transcript-native runtime (the pi loop) is sent Mousse's transcript and tools, so Mousse
       // keeps that transcript within the window before the turn. A prompt-injected runtime owns its
       // loop, context and tools and receives prior turns as a prompt preamble.
