@@ -112,7 +112,31 @@ describe('StoragePolicyStore', () => {
   })
 })
 
+describe('policy snapshot', () => {
+  it('returns the rules and the digest of the same read, and the digest follows a save', () => {
+    const f = fixture()
+    const before = f.policy.snapshot()
+    expect(before).toEqual({ policy: STORAGE_POLICY_DEFAULTS, digest: f.policy.digest() })
+    f.policy.configure(valid(), true)
+    const after = f.policy.snapshot()
+    expect(after.policy).toEqual(valid()); expect(after.digest).not.toBe(before.digest); expect(after.digest).toBe(f.policy.digest())
+    expect(before.policy).toEqual(STORAGE_POLICY_DEFAULTS) // an earlier snapshot is not changed by a later save
+  })
+})
+
 describe('StorageSweepClock', () => {
+  it('peek answers like check without persisting a suspension or moving the sample', () => {
+    const f = fixture()
+    f.clockState.now -= HOUR_MS
+    expect(f.clock.peek()).toMatchObject({ suspended: true })
+    expect(existsSync(join(f.store.root, 'storage-clock.json'))).toBe(false)
+    expect(f.clock.suspended()).toBe(false)
+    expect(f.clock.check().suspended).toBe(true) // the real check still finds the jump
+    expect(f.clock.peek()).toMatchObject({ suspended: true })
+    f.clockState.now += 30 * HOUR_MS; f.clock.resume(); f.clockState.now += 2 * HOUR_MS
+    expect(f.clock.peek()).toEqual({ suspended: false, forwardJumpMs: 2 * HOUR_MS })
+  })
+
   it('suspends only on a backward jump, not a forward one', () => {
     const f = fixture()
     f.clockState.now += 30 * HOUR_MS; expect(f.clock.check()).toEqual({ suspended: false, forwardJumpMs: 30 * HOUR_MS })

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { spawn, type ChildProcess } from 'node:child_process'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { REPORT_ENTRY_LIMIT, STORAGE_POLICY_DEFAULTS, summarizeCleanupReport, type StorageCleanupItem, type StorageCleanupReport, type StoragePolicy } from '../src/shared/storage'
@@ -43,6 +44,7 @@ interface FixtureOptions {
   codeHost?: { cachedDefaultBranch(cwd: string): string | undefined }
   thread?: Record<string, unknown>
   measure?: typeof measureTree
+  probeRemoval?: (worktreePath: string) => string | undefined
 }
 
 function fixture(options: FixtureOptions = {}) {
@@ -69,7 +71,7 @@ function fixture(options: FixtureOptions = {}) {
   const thread = { id: 'task', name: 'Task one', projectId: 'project-1', createdAt: OLD.toISOString(), ...options.thread }
   const service = new StorageCleanupService({
     store, threads: { getThread: (id) => id === 'task' ? thread as never : undefined }, purge: coordinator.cleanup, policy, clock,
-    idle: options.idle ?? (() => undefined), installationHome: options.installationHome ?? home, codeHost: options.codeHost, now, measure: options.measure
+    idle: options.idle ?? (() => undefined), installationHome: options.installationHome ?? home, codeHost: options.codeHost, now, measure: options.measure, probeRemoval: options.probeRemoval
   })
   const f = { root, home, location, repo, repositoryId, worktree, branch, sha, store, coordinator, clock, clockState, policy, service, thread, now }
   age(f)
@@ -466,7 +468,7 @@ describe('deleted threads and orphans', () => {
     const f = fixture(); writeFileSync(join(f.worktree, 'secret.txt'), 'only copy')
     await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
     setPolicy(f, { worktrees: { removeWithDeletedThreads: true } })
-    expect(item(await f.service.run('manual'))).toMatchObject({ rule: 'worktree-deleted', outcome: 'kept', reason: expect.stringMatching(/^Checkout retained: /) })
+    expect(item(await f.service.run('manual'))).toMatchObject({ rule: 'worktree-deleted', outcome: 'kept', reason: 'Has uncommitted changes (1 file)' })
     expect(readFileSync(join(f.worktree, 'secret.txt'), 'utf8')).toBe('only copy')
   }, 60_000)
 
@@ -730,6 +732,256 @@ describe('record of removals', () => {
     await f.service.run('manual')
     const lines = readFileSync(path, 'utf8').trim().split('\n')
     expect(lines.length).toBeLessThan(2_100); expect(JSON.parse(lines.at(-1)!)).toMatchObject({ threadId: 'task' }); expect(JSON.parse(lines[0]!).n).toBeGreaterThan(9_000)
+  }, 60_000)
+})
+
+/** Every file under `dir` with its content, so a test can prove that nothing was written. */
+function treeContents(dir: string, out: Record<string, string> = {}, base = dir): Record<string, string> {
+  if (!existsSync(dir)) return out
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name)
+    if (entry.isDirectory()) treeContents(path, out, base)
+    else out[path.slice(base.length)] = readFileSync(path, 'utf8')
+  }
+  return out
+}
+/** Lifecycle store, thread data and every Git ref of the repository: what a dry run must leave exactly as it found it. */
+const writtenState = (f: Fixture) => JSON.stringify({ store: treeContents(f.store.root), location: treeContents(f.location), refs: git(f.repo, ['for-each-ref']) })
+const holdRepositoryLease = (f: Fixture) => acquireRepositoryLease(resolveRepositoryIdentity(f.repo, { requireMutationCapability: true }))
+const junctionType = process.platform === 'win32' ? 'junction' : 'dir'
+/** `<installation>/repositories` replaced by a junction to a folder outside the installation. */
+function relocateRepositories(f: Fixture): { repositories: string; elsewhere: string; external: string } {
+  const repositories = join(f.home, 'repositories'), elsewhere = join(f.root, 'elsewhere')
+  renameSync(repositories, elsewhere); symlinkSync(elsewhere, repositories, junctionType)
+  return { repositories, elsewhere, external: join(elsewhere, f.repositoryId, 'worktrees', 'threads', 'task', 'main', 'a.txt') }
+}
+
+describe('deleted threads follow the same keep rules as live ones', () => {
+  const deleteRule = (f: Fixture) => setPolicy(f, { worktrees: { removeWithDeletedThreads: true } })
+
+  it('keeps a worktree under a repository folder that is a junction to somewhere else, and its target is untouched', async () => {
+    const f = fixture(); await f.coordinator.trash({ taskId: 'task', operationId: 'trash' }); deleteRule(f)
+    const { repositories, external } = relocateRepositories(f)
+    try { expect(item(await f.service.run('manual'))).toMatchObject({ rule: 'worktree-deleted', outcome: 'kept', reason: 'Outside the managed worktree folder' }) }
+    finally { rmSync(repositories, { recursive: true, force: true }) }
+    expect(existsSync(external)).toBe(true)
+  }, 60_000)
+
+  it('checks the location again under the cleanup reservation and repository lease: a folder swapped for a junction in between is not removed', async () => {
+    const f = fixture(); await f.coordinator.trash({ taskId: 'task', operationId: 'trash' }); deleteRule(f)
+    const repository = await holdRepositoryLease(f)
+    let run: Promise<StorageCleanupReport>, moved: ReturnType<typeof relocateRepositories> | undefined
+    try {
+      run = f.service.run('manual')
+      await vi.waitFor(() => expect(f.store.require('task').cleanupOwner).toBeDefined(), { timeout: 20_000, interval: 20 })
+      moved = relocateRepositories(f)
+    } finally { repository.release() }
+    try { expect(item(await run)).toMatchObject({ rule: 'worktree-deleted', outcome: 'kept' }) }
+    finally { rmSync(moved!.repositories, { recursive: true, force: true }) }
+    expect(existsSync(moved!.external)).toBe(true)
+  }, 60_000)
+
+  it('keeps a worktree with a commit that is not in the default branch, with no upstream and no default branch metadata', async () => {
+    const f = fixture(); commit(f); await f.coordinator.trash({ taskId: 'task', operationId: 'trash' }); deleteRule(f)
+    expect(item(await f.service.run('manual'))).toMatchObject({ rule: 'worktree-deleted', outcome: 'kept', reason: expect.stringContaining('Default branch is unavailable') })
+    expect(existsSync(join(f.worktree, 'b.txt'))).toBe(true)
+  }, 60_000)
+
+  it('keeps a squash-merged branch as unpublished: only ancestry counts', async () => {
+    const f = fixture(); const squashed = commit(f); addRemote(f)
+    writeFileSync(join(f.repo, 'b.txt'), 'second\n'); git(f.repo, ['add', '.']); git(f.repo, ['commit', '-q', '-m', 'squash of the thread']);
+    git(f.repo, ['update-ref', `refs/remotes/origin/${defaultName(f)}`, git(f.repo, ['rev-parse', 'HEAD'])])
+    expect(git(f.repo, ['rev-parse', 'HEAD'])).not.toBe(squashed)
+    await f.coordinator.trash({ taskId: 'task', operationId: 'trash' }); deleteRule(f)
+    expect(item(await f.service.run('manual'))).toMatchObject({ rule: 'worktree-deleted', outcome: 'kept', reason: 'Has 1 unpublished commit' })
+  }, 60_000)
+
+  it('removes a merged one, and the immediate removal when a thread is deleted applies the same rules', async () => {
+    const f = fixture(); const head = commit(f); addRemote(f); git(f.repo, ['update-ref', `refs/remotes/origin/${defaultName(f)}`, head])
+    await f.coordinator.trash({ taskId: 'task', operationId: 'trash' }); deleteRule(f)
+    expect(await f.service.retireDeletedWorktree('task')).toMatchObject({ rule: 'worktree-deleted', outcome: 'removed' })
+    expect(existsSync(f.worktree)).toBe(false)
+  }, 60_000)
+
+  it('the immediate removal keeps an unpublished commit, and a thread that is not deleted is not touched', async () => {
+    const f = fixture(); commit(f); deleteRule(f)
+    expect(await f.service.retireDeletedWorktree('task')).toBeUndefined()
+    await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+    expect(await f.service.retireDeletedWorktree('task')).toMatchObject({ outcome: 'kept', reason: expect.stringContaining('Default branch is unavailable') })
+    expect(existsSync(f.worktree)).toBe(true)
+  }, 60_000)
+
+  it('uses the policy it started with: one saved while the run is measuring keeps the checkout', async () => {
+    let saved = false
+    const f: Fixture = fixture({ measure: async (root, options) => { if (!saved) { saved = true; setPolicy(f) } return measureTree(root, options) } })
+    await f.coordinator.trash({ taskId: 'task', operationId: 'trash' }); deleteRule(f)
+    expect(item(await f.service.run('manual'))).toMatchObject({ rule: 'worktree-deleted', outcome: 'kept', reason: expect.stringContaining('Settings changed since check') })
+    expect(existsSync(f.worktree)).toBe(true)
+  }, 60_000)
+
+  it('does not read and hash a kept worktree again on every run, until something about it changes', async () => {
+    // The idle lookup runs after the memo lookup and before any Git or file reading, so its call count shows how often the worktree was examined.
+    const idle = vi.fn(() => undefined)
+    const f = fixture({ idle }); appendFileSync(join(f.repo, '.git', 'info', 'exclude'), 'cache/\n')
+    mkdirSync(join(f.worktree, 'cache')); writeFileSync(join(f.worktree, 'cache', 'a.log'), 'ignored')
+    await f.coordinator.trash({ taskId: 'task', operationId: 'trash' }); deleteRule(f)
+    expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'kept', reason: 'Has ignored files (cache/)' })
+    expect(idle).toHaveBeenCalledTimes(1)
+    for (let run = 0; run < 3; run++) expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'kept', reason: 'Has ignored files (cache/)' })
+    expect(idle).toHaveBeenCalledTimes(1)
+    // Clearing the folder changes the worktree, so the next run looks again and removes it.
+    rmSync(join(f.worktree, 'cache'), { recursive: true, force: true })
+    expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'removed' })
+    expect(idle).toHaveBeenCalledTimes(2)
+  }, 90_000)
+
+  it('reports a busy thread or profile as kept, not failed', async () => {
+    let busy: string | undefined = 'A turn is running'
+    const f = fixture({ idle: () => busy }); await f.coordinator.trash({ taskId: 'task', operationId: 'trash' }); deleteRule(f)
+    expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'kept', reason: 'A turn is running' })
+    busy = undefined
+    vi.spyOn(f.coordinator.cleanup, 'retireTrashed').mockRejectedValue(new Error('Cannot trash thread: profile requests are still active'))
+    const report = await f.service.run('manual')
+    expect(item(report)).toMatchObject({ outcome: 'kept', reason: 'Cannot trash thread: profile requests are still active' }); expect(report.counts.failed).toBe(0)
+  }, 60_000)
+})
+
+describe('plan writes nothing', () => {
+  it('leaves the lifecycle records, manifests, thread data and Git refs exactly as they were, with a deleted thread and overdue trash both present', async () => {
+    const f = fixture(); enableTrash(f); await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+    f.store.update('task', (record) => { record.trashedAt = new Date(Date.now() - 40 * DAY).toISOString() })
+    setPolicy(f, { worktrees: { removeWithDeletedThreads: true, inactiveDays: 30, removeMerged: true } })
+    const before = writtenState(f)
+    const plan = await f.service.plan()
+    expect(writtenState(f)).toBe(before)
+    expect(git(f.repo, ['for-each-ref', 'refs/mousse/lifecycle'])).toBe('')
+    expect(f.store.require('task').cleanupOwner).toBeUndefined()
+    expect(plan.find((entry) => entry.rule === 'worktree-deleted')).toMatchObject({ threadId: 'task', action: 'remove' })
+    expect(plan.find((entry) => entry.rule === 'trash')).toMatchObject({ threadId: 'task' })
+    expect(existsSync(f.worktree)).toBe(true)
+  }, 120_000)
+
+  it('does not stop a real run that follows: nothing is reserved while it runs', async () => {
+    const f = fixture(); await f.coordinator.trash({ taskId: 'task', operationId: 'trash' }); setPolicy(f, { worktrees: { removeWithDeletedThreads: true } })
+    const [plan, report] = await Promise.all([f.service.plan(), f.service.run('manual')])
+    expect(plan).toBeDefined(); expect(item(report)).toMatchObject({ rule: 'worktree-deleted', outcome: 'removed' })
+  }, 60_000)
+
+  it('matches a run: unclaimed directories, the note when automatic emptying is off, and a suspended clock', async () => {
+    const f = fixture(); rmSync(join(f.location, 'workspace.json')); setPolicy(f, inactive())
+    const orphan = join(f.home, 'repositories', f.repositoryId, 'worktrees', 'threads', 'ghost', 'main'); mkdirSync(orphan, { recursive: true }); writeFileSync(join(orphan, 'file.txt'), 'who owns this')
+    await trashed(f, 'old-1')
+    f.clockState.offset = -4 * HOUR // The clock moved back: a run would suspend the time rules.
+    const before = writtenState(f)
+    const plan = await f.service.plan()
+    expect(writtenState(f)).toBe(before); expect(existsSync(join(f.store.root, 'storage-clock.json'))).toBe(false) // peeking does not persist the suspension
+    expect(plan).toEqual(expect.arrayContaining([
+      expect.objectContaining({ rule: 'worktree-orphan', label: 'threads/ghost', action: 'keep', reason: 'No thread uses this worktree' }),
+      expect.objectContaining({ rule: 'trash', action: 'keep', reason: 'Automatic trash emptying is off' }),
+      expect.objectContaining({ label: 'Time-based rules', action: 'keep', reason: expect.stringContaining('clock moved backwards') })
+    ]))
+  }, 90_000)
+})
+
+describe('a manual run asked for during a scheduled one', () => {
+  it('follows it as its own full run, and repeated requests share it', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let first = true
+    const f = fixture({ measure: async (root, options) => { if (first) { first = false; await gate } return measureTree(root, options) } })
+    setPolicy(f, inactive())
+    const scheduled = f.service.run('schedule'), manual = f.service.run('manual'), again = f.service.run('manual')
+    expect(manual).not.toBe(scheduled); expect(again).toBe(manual); expect(f.service.run('schedule')).toBe(scheduled)
+    release()
+    const [a, b] = await Promise.all([scheduled, manual])
+    expect(a.trigger).toBe('schedule'); expect(b.trigger).toBe('manual')
+    expect(item(a)).toMatchObject({ outcome: 'removed' })
+  }, 60_000)
+})
+
+describe('use after the check', () => {
+  it('re-checks inactivity under the leases: a thread used during lease acquisition is kept', async () => {
+    const f = fixture(); setPolicy(f, inactive())
+    const repository = await holdRepositoryLease(f)
+    let run: Promise<StorageCleanupReport>
+    try {
+      run = f.service.run('manual')
+      await vi.waitFor(() => expect(readLeaseOwner(getExecutionLeasePath(f.location))?.source).toBe('storage-cleanup'), { timeout: 20_000, interval: 20 })
+      const used = new Date(); utimesSync(join(f.location, 'messages.json'), used, used)
+    } finally { repository.release() }
+    expect(item(await run)).toMatchObject({ outcome: 'kept', reason: 'Thread was used since check' })
+    expect(existsSync(f.worktree)).toBe(true)
+  }, 60_000)
+
+  it('leaves a merged worktree alone for a day after it was restored or changed, then removes it', async () => {
+    const f = fixture(); addRemote(f); setPolicy(f, { worktrees: { removeMerged: true } })
+    const head = commit(f); git(f.repo, ['update-ref', `refs/remotes/origin/${defaultName(f)}`, head])
+    const touched = new Date(); utimesSync(join(f.location, 'workspace.json'), touched, touched)
+    expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'kept', reason: 'Restored or changed within the last day' })
+    age(f)
+    expect(item(await f.service.run('manual'))).toMatchObject({ rule: 'worktree-merged', outcome: 'removed' })
+  }, 90_000)
+})
+
+describe.runIf(process.platform === 'win32')('files in use block a removal that would stop partway', () => {
+  /** A process whose working directory is inside the worktree, which is what stops Git from deleting it. */
+  async function holdFolder(f: Fixture): Promise<{ child: ChildProcess; release: () => Promise<void> }> {
+    // The commit counts as published, so only where the files are decides the outcome.
+    addRemote(f); mkdirSync(join(f.worktree, 'sub')); const head = commit(f, 'sub/x.txt', 'x\n')
+    git(f.repo, ['update-ref', `refs/remotes/origin/${defaultName(f)}`, head])
+    f.clockState.offset = 60 * DAY // The commit is recent; the thread is judged 60 days later.
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { cwd: join(f.worktree, 'sub'), stdio: 'ignore', windowsHide: true })
+    await new Promise<void>((resolve, reject) => { child.once('spawn', () => resolve()); child.once('error', reject) })
+    const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()))
+    return { child, release: async () => { child.kill(); await exited } }
+  }
+  const history = (f: Fixture) => readFileSync(join(f.store.root, 'storage-cleanup-history.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+
+  it('checks before removing: a folder a process is working in is kept as in use, untouched', async () => {
+    const f = fixture(); setPolicy(f, inactive())
+    const held = await holdFolder(f)
+    try {
+      expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'kept', reason: 'Files in this worktree are in use' })
+      expect(existsSync(join(f.worktree, '.git'))).toBe(true); expect(existsSync(join(f.worktree, 'a.txt'))).toBe(true)
+      expect(existsSync(join(f.store.root, 'storage-cleanup-history.jsonl'))).toBe(false); expect(isExecutionLeaseHeld(f.location)).toBe(false)
+    } finally { await held.release() }
+  }, 90_000)
+
+  it('reports a removal Git stopped partway as failed, records it, and the next restore sets the leftover aside and rebuilds', async () => {
+    const f = fixture({ probeRemoval: () => undefined }); setPolicy(f, inactive())
+    const held = await holdFolder(f)
+    try {
+      const report = await f.service.run('manual')
+      expect(item(report)).toMatchObject({ outcome: 'failed', reason: expect.stringContaining('partly removed') })
+      expect(report.counts).toMatchObject({ failed: 1, removed: 0 })
+      expect(existsSync(f.worktree)).toBe(true); expect(existsSync(join(f.worktree, '.git'))).toBe(false)
+      expect(history(f)).toEqual([expect.objectContaining({ outcome: 'failed', rule: 'worktree-inactive', threadId: 'task' })])
+      // Later runs say what is wrong instead of failing on "not a git repository".
+      expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'kept', reason: expect.stringContaining('partly removed') })
+    } finally { await held.release() }
+    const restored = await new ThreadWorkspaceManager(f.location).restore(f.repo)
+    expect(restored.lifecycle).toBe('ready')
+    expect(readFileSync(join(f.worktree, 'sub', 'x.txt'), 'utf8').replace(/\r\n/g, '\n')).toBe('x\n'); expect(existsSync(join(f.worktree, '.git'))).toBe(true)
+    expect(readdirSync(join(f.worktree, '..')).filter((name) => name.startsWith('main.partial-'))).toEqual([])
+  }, 120_000)
+
+  it('keeps a leftover it cannot prove is only retained content next to the rebuilt checkout', async () => {
+    const f = fixture({ probeRemoval: () => undefined }); setPolicy(f, inactive())
+    const held = await holdFolder(f)
+    try { await f.service.run('manual'); writeFileSync(join(f.worktree, 'sub', 'mine.txt'), 'not from the repository') } finally { await held.release() }
+    await new ThreadWorkspaceManager(f.location).restore(f.repo)
+    const aside = readdirSync(join(f.worktree, '..')).filter((name) => name.startsWith('main.partial-'))
+    expect(aside).toHaveLength(1); expect(readFileSync(join(f.worktree, '..', aside[0]!, 'sub', 'mine.txt'), 'utf8')).toBe('not from the repository')
+  }, 120_000)
+})
+
+describe('restore leaves a folder alone that is not a failed retirement', () => {
+  it('a folder without .git whose retirement had finished is still refused, untouched', async () => {
+    const f = fixture(); setPolicy(f, inactive())
+    expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'removed' })
+    mkdirSync(f.worktree); writeFileSync(join(f.worktree, 'mine.txt'), 'someone else')
+    await expect(new ThreadWorkspaceManager(f.location).restore(f.repo)).rejects.toThrow('Workspace recovery is blocked')
+    expect(readFileSync(join(f.worktree, 'mine.txt'), 'utf8')).toBe('someone else')
   }, 60_000)
 })
 

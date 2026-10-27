@@ -696,7 +696,8 @@ export class MmsProfileServices {
     })
     if (record.state === 'trashed' && this.removesWorktreesWithDeletedThreads()) {
       try {
-        await this.lifecycle.cleanup.retireTrashed(taskId)
+        // The same keep rules as the hourly run (unpublished commits, links, files in use); a checkout that is kept stays until purge.
+        await this.storageCleanup.retireDeletedWorktree(taskId)
       } catch (error) {
         this.threads.lifecycleStore.update(taskId, (current) => {
           current.blockedReason = `Checkout retirement retained resources: ${(error as Error).message}`

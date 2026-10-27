@@ -11,6 +11,9 @@ function days(value: unknown): number | null | undefined {
   return Number.isSafeInteger(value) && (value as number) >= 1 && (value as number) <= STORAGE_POLICY_MAX_DAYS ? value as number : undefined
 }
 
+export interface PolicySnapshot { policy: StoragePolicy; digest: string }
+const policyDigest = (policy: StoragePolicy): string => createHash('sha256').update(JSON.stringify(policy)).digest('hex')
+
 /** Parses a stored or submitted policy; anything unknown is refused rather than guessed. */
 export function parseStoragePolicy(value: unknown): StoragePolicy | undefined {
   const policy = value as Partial<StoragePolicy> | undefined
@@ -43,9 +46,19 @@ export class StoragePolicyStore {
     return policy
   }
 
+  /**
+   * The policy and its digest from one read, so a rule set and the digest that authorizes it can never
+   * come from different saves. A run takes one snapshot, evaluates with it and compares `digest()`
+   * against it under the leases.
+   */
+  snapshot(): PolicySnapshot {
+    const policy = this.policy()
+    return { policy, digest: policyDigest(policy) }
+  }
+
   /** Changes whenever a stored rule changes; a run re-reads it under the thread and repository leases. */
   digest(): string {
-    return createHash('sha256').update(JSON.stringify(this.policy())).digest('hex')
+    return policyDigest(this.policy())
   }
 
   configure(input: unknown, human: boolean): StoragePolicy {
