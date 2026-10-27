@@ -201,6 +201,7 @@ export const SERVICE_HELP = `Usage:
   mousse-cli service stop             Stop daemon via pidfile
   mousse-cli service status           Show daemon status
   mousse-cli service install          Install launch-on-startup entry
+                                      --headless adds ELECTRON_DISABLE_SANDBOX=1 to the Linux unit
   mousse-cli service uninstall        Remove launch-on-startup entry
 `
 

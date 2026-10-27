@@ -450,8 +450,8 @@ describe('ssh dialing', () => {
     expect(await spawns(t.ssh)).toHaveLength(1)
   })
   it.each([
-    ['prohibited', /AllowTcpForwarding/],
-    ['refused', /daemon on me@box\.example\.com:2222 is not listening on port 4000/],
+    ['prohibited', /could not open the forward to the daemon on port 4000.*AllowTcpForwarding/],
+    ['refused', /could not open the forward to the daemon on port 4000.*not listening/],
     ['denied', /Permission denied/]
   ] as const)('maps %s from ssh stderr to a route_unreachable detail', async (mode, detail) => {
     const t = await setup(mode)
@@ -463,6 +463,17 @@ describe('ssh dialing', () => {
       code: 'route_unreachable',
       message: expect.stringMatching(detail)
     })
+  })
+  it('says what it can when only "stdio forwarding failed" survives LogLevel=ERROR', () => {
+    // OpenSSH logs the refusal reason at INFO; at ERROR the fatal line is all that is printed.
+    const detail = describeSshFailure('stdio forwarding failed', 'box', 4000)
+    expect(detail).toMatch(/could not open the forward to the daemon on port 4000/)
+    expect(detail).toMatch(/AllowTcpForwarding/)
+    expect(detail).toMatch(/not listening/)
+    // With a log level that shows the reason, the two causes are told apart again.
+    expect(
+      describeSshFailure('channel 0: open failed: connect failed: Connection refused', 'box', 4000)
+    ).toMatch(/not listening on port 4000/)
   })
   it('never matches the shared "open failed" prefix on its own', () => {
     expect(describeSshFailure('channel 0: open failed: something else', 'box', 4000)).toMatch(

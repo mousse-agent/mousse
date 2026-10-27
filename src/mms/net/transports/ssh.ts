@@ -131,7 +131,7 @@ export async function readSshApproval(
  * Windows. `%` and `${` are refused: OpenSSH 8.4 and later expand tokens and variables in this
  * option and older versions do not, so no single escaping is right for every client.
  */
-function configPath(path: string): string {
+export function configPath(path: string): string {
   const value = process.platform === 'win32' ? path.replace(/\\/g, '/') : path
   if (/["\\\r\n%]|\$\{/u.test(value))
     throw new NetError(
@@ -141,13 +141,21 @@ function configPath(path: string): string {
   return value
 }
 
-export function sshDialArguments(input: {
-  endpoint: SshEndpoint
-  port: number
+/**
+ * The `-o` policy every Mousse `ssh` run carries: no prompts, host keys only from the two
+ * known_hosts files, no agent or X11 forwarding, one process per run. Setup commands set
+ * `clearForwardings: false` for the join, whose `-R` forward must survive.
+ */
+export function sshPolicyOptions(input: {
   knownHosts: string
   userKnownHosts: string
+  clearForwardings: boolean
+  /**
+   * `ERROR` keeps ssh quiet. OpenSSH prints a refused channel (`administratively prohibited`,
+   * `connect failed`) at INFO, so only the forwarding probe, which has no session to leak, asks for it.
+   */
+  logLevel?: 'ERROR' | 'INFO'
 }): string[] {
-  const { endpoint } = input
   return [
     '-o',
     'BatchMode=yes',
@@ -174,8 +182,7 @@ export function sshDialArguments(input: {
     'ForwardX11=no',
     '-o',
     'PermitLocalCommand=no',
-    '-o',
-    'ClearAllForwardings=yes',
+    ...(input.clearForwardings ? ['-o', 'ClearAllForwardings=yes'] : []),
     // One ssh process per session, and never a mux client that skips the checks above.
     '-o',
     'ControlMaster=no',
@@ -184,13 +191,34 @@ export function sshDialArguments(input: {
     '-o',
     'ControlPath=none',
     '-o',
-    'LogLevel=ERROR',
+    `LogLevel=${input.logLevel ?? 'ERROR'}`,
     '-o',
     'ConnectTimeout=10',
     '-o',
     'ServerAliveInterval=15',
     '-o',
-    'ServerAliveCountMax=3',
+    'ServerAliveCountMax=3'
+  ]
+}
+
+/** Mousse never asks for a password: no askpass helper may be reached from a background `ssh`. */
+export function sshEnvironment(): NodeJS.ProcessEnv {
+  const env = cleanEnvironment()
+  for (const key of Object.keys(env))
+    if (key.toUpperCase().startsWith('SSH_ASKPASS')) delete env[key]
+  return env
+}
+
+export function sshDialArguments(input: {
+  endpoint: SshEndpoint
+  port: number
+  knownHosts: string
+  userKnownHosts: string
+  logLevel?: 'ERROR' | 'INFO'
+}): string[] {
+  const { endpoint } = input
+  return [
+    ...sshPolicyOptions({ ...input, clearForwardings: true }),
     '-T',
     ...(endpoint.user ? ['-l', endpoint.user] : []),
     ...(endpoint.port !== undefined ? ['-p', String(endpoint.port)] : []),
@@ -213,11 +241,15 @@ export function describeSshFailure(stderr: string, endpoint: string, port: numbe
     detail = `Connection timed out reaching ${endpoint}.`
   else if (/Could not resolve hostname/i.test(text))
     detail = `Could not resolve the host name of ${endpoint}.`
-  // OpenSSH prefixes both channel failures with `open failed`, so only the reason tells them apart.
+  // At LogLevel=ERROR the only line OpenSSH prints for a refused forward is `stdio forwarding failed`:
+  // the reason (`administratively prohibited` or `connect failed`) is logged at INFO and is dropped.
+  // With a log level that shows it, only the reason tells the two apart.
   else if (/administratively prohibited/i.test(text))
     detail = `sshd on ${endpoint} does not allow TCP forwarding (AllowTcpForwarding).`
   else if (/connect failed/i.test(text))
     detail = `The daemon on ${endpoint} is not listening on port ${port}.`
+  else if (/stdio forwarding failed/i.test(text))
+    detail = `ssh to ${endpoint} could not open the forward to the daemon on port ${port}: sshd may forbid TCP forwarding (AllowTcpForwarding), or the daemon is not listening.`
   else {
     const last = text
       .split('\n')
@@ -340,10 +372,7 @@ export class SshDialer {
     })
     const { binary } = this.options
     const command = (typeof binary === 'function' ? binary() : binary) ?? 'ssh'
-    // Mousse never asks for a password: no askpass helper may be reached from a background dial.
-    const env = cleanEnvironment()
-    for (const key of Object.keys(env))
-      if (key.toUpperCase().startsWith('SSH_ASKPASS')) delete env[key]
+    const env = sshEnvironment()
     await this.refuseProxy(command, args, env, approval.endpoint, signal)
     return this.open(approval.endpoint, advertised.port, signal, command, args, env)
   }

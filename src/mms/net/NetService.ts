@@ -63,6 +63,11 @@ import { SqliteQuotaRateLedger } from './store/limits'
 import { FileBlobStore } from './store/blobs'
 import { FileKeyStore, NetIdentityService } from './identity'
 import { ProfileTransports } from './transports/manager'
+import { DirectTransport } from './transports/direct'
+import { inboundPrincipal } from './transports/admission'
+import { parseSshRoute, readSshApproval } from './transports/ssh'
+import { SshBootstrap, type SshBootstrapOptions } from './ssh/bootstrap'
+import { isJoinVia } from '../../shared/net/via'
 import {
   PHONE_ENDPOINTS_METHOD,
   PHONE_WEBRTC_OFFER_METHOD,
@@ -190,6 +195,9 @@ export class NetService {
   private domainClosed = false
   private shutdownInFlight?: Promise<void>
   private shutdownComplete = false
+  private sshBootstrap?: SshBootstrap
+  /** Loopback listeners that exist only while a remote machine joins; never persisted. */
+  private readonly enrollmentListeners = new Set<DirectTransport>()
   /** The optional Mousse ID module; absent in builds and tests that leave it out. */
   private readonly hosted?: HostedNet
   constructor(
@@ -199,8 +207,10 @@ export class NetService {
       onChanged?(status: NetStatus): void
       composeRuntime?(runtime: NetRuntime): NetDomainComposition | void
       hosted?: HostedNetModule
-      /** Tests replace the `ssh` executable and the user's known_hosts file. */
-      ssh?: { binary?: string; userKnownHosts?: string }
+      /** Tests replace the `ssh` executable, the user's known_hosts file and the setup's inputs. */
+      ssh?: { binary?: string; userKnownHosts?: string } & Partial<
+        Omit<SshBootstrapOptions, 'binary' | 'userKnownHosts'>
+      >
       /** Tests replace the native WebRTC stack and this computer's addresses. */
       phoneWebRtc?: {
         factory?: PeerConnectionFactory
@@ -453,6 +463,9 @@ export class NetService {
   }
   async start(): Promise<void> {
     if (!existsSync(join(this.options.profileDir, 'net', 'net.db'))) return
+    await this.bootstrap()
+      .start()
+      .catch(() => {})
     try {
       this.runtime()
       if (this.config.enabled) await this.activateWithHosted()
@@ -504,7 +517,8 @@ export class NetService {
         })
       )
     }
-    if (method === 'bridge.nodes') return this.nodes()
+    if (method === 'bridge.nodes') return this.nodesView()
+    if (method.startsWith('net.ssh.')) return this.track(this.sshRequest(method, params))
     if (method.startsWith('net.plus.') && !this.hosted) throw hostedUnavailable()
     if (method === 'net.plus.login.cancel') return this.hosted!.cancelLogin()
     if (method === 'net.plus.enrollment.requests') return this.hosted!.enrollmentRequests()
@@ -583,11 +597,22 @@ export class NetService {
             : runtime.enrollment.issueNodeInvite(params)
           return { invite: invite.text, inviteId: invite.invite, expiresAt: invite.expiresAt }
         }
+        case 'net.routes': {
+          this.requireEnrolled()
+          if (!this.routes) await this.activate()
+          const signed = this.signedRoutes()
+          return {
+            signed,
+            routes: (parseProtocolJson(Buffer.from(signed.payload, 'base64url')) as RoutesRecord)
+              .routes
+          }
+        }
         case 'bridge.join':
           return this.join(
             String(params.invite),
             params.name as string | undefined,
-            params.passphrase as string | undefined
+            params.passphrase as string | undefined,
+            params.via as string | undefined
           )
         case 'bridge.revoke': {
           const rt = this.requireEnrolled(),
@@ -804,6 +829,8 @@ export class NetService {
     return {
       manifests: this.createTransports().manifests(),
       transports: this.status().transports ?? [],
+      // The saved add-on rows, so a setup can record what it replaced and undo can restore it.
+      saved: this.transportConfigurations().filter((row) => row.id !== HOSTED_RELAY_TRANSPORT),
       records: structuredClone(this.config.addonRecords ?? {}) satisfies NetAddonRecords,
       settings: Object.fromEntries(
         this.transportConfigurations().map((row) => [row.id, row.settings])
@@ -1208,7 +1235,7 @@ export class NetService {
                 }
               }
             : undefined,
-          onEnrolled: () => this.transport?.markAuthenticated(raw),
+          onEnrolled: () => this.markAuthenticated(raw),
           normalSession: (secure, mux, context) =>
             this.makeSession(secure, mux, context, raw, { carrier })
         })
@@ -1297,7 +1324,7 @@ export class NetService {
         if (inbound?.node && session.peer.node !== inbound.node) throw new NetError('forbidden')
         if ([...this.sessions].filter((session) => session.state() === 'open').length > 64)
           throw new NetError('rate_limited')
-        if (raw) this.transport?.markAuthenticated(raw)
+        if (raw) this.markAuthenticated(raw)
         inbound?.onAuthenticated?.()
         this.routes?.markSessionOpen(channel)
         this.emit()
@@ -1755,7 +1782,13 @@ export class NetService {
         .map((session) => session.failServingStream(stream, code))
     )
   }
-  private async join(invite: string, name?: string, passphrase?: string): Promise<unknown> {
+  private async join(
+    invite: string,
+    name?: string,
+    passphrase?: string,
+    via?: string
+  ): Promise<unknown> {
+    if (via !== undefined && !isJoinVia(via)) throw new NetError('bad_request')
     const needsProtection = inviteRequiresProtection(invite),
       rt = this.runtime()
     if (passphrase !== undefined) {
@@ -1800,7 +1833,11 @@ export class NetService {
             node: prepared.authority,
             user: prepared.user,
             transportKey: prepared.authorityTransportKey,
-            routes: routes.routes
+            // A remote machine set up over SSH reaches this computer through its own tunnel first.
+            routes: [
+              ...(via ? [{ transport: 'direct', address: via, priority: 0 }] : []),
+              ...routes.routes
+            ]
           },
           this.shutdownSignal.signal
         )
@@ -1830,7 +1867,9 @@ export class NetService {
     this.adoptRoutes(prepared.routes, prepared.authority)
     this.refreshPeers()
     const authority = this.supervisors.get(prepared.authority)
-    if (authority) await authority.opened
+    // With `via` the joiner may have no route back to the inviter: the inviter dials it over SSH
+    // once it approves that route, so the join does not wait for its own connection to open.
+    if (authority && !via) await authority.opened
     return { user: prepared.user, node: prepared.node, authority: prepared.authority }
   }
   private async transferAuthority(node: NodeId): Promise<unknown> {
@@ -2024,6 +2063,9 @@ export class NetService {
     this.saveConfig()
     this.disabled = true
     this.shutdownSignal.abort()
+    void this.sshBootstrap?.close()
+    // A closed bootstrap refuses everything; enabling again needs a fresh one.
+    this.sshBootstrap = undefined
     this.webrtc?.stop()
     this.transport?.admission.close()
     this.renewal?.cancel()
@@ -2065,6 +2107,187 @@ export class NetService {
     this.disabling = result
     this.emit()
     return result
+  }
+  private markAuthenticated(raw: Duplex): void {
+    this.transport?.markAuthenticated(raw)
+    for (const direct of this.enrollmentListeners) direct.markAuthenticated(raw)
+  }
+  /**
+   * A loopback listener for one remote machine's join. Its sockets enter the normal inbound path
+   * (the profile's pre-authentication budget, then the enrollment gateway). It is not part of the
+   * configuration and is closed when the join ends, so there is nothing to restore on undo.
+   */
+  private async openEnrollmentListener(): Promise<{ port: number; close(): Promise<void> }> {
+    this.assertEnabled()
+    this.requireEnrolled()
+    if (!this.routes) await this.activate()
+    const transport = this.transport
+    if (!transport) throw new NetError('route_unreachable')
+    const direct = new DirectTransport({
+      enabled: true,
+      host: '127.0.0.1',
+      port: 0,
+      clock: this.clock
+    })
+    await direct.provision()
+    this.enrollmentListeners.add(direct)
+    try {
+      await direct.listen((raw, info) => {
+        if (this.stopped || this.disabled || !this.config.enabled) {
+          raw.destroy()
+          return
+        }
+        const deadline = transport.admission.reserve(raw, inboundPrincipal(info))
+        if (deadline === undefined) {
+          raw.destroy()
+          return
+        }
+        this.track(this.accept(raw, deadline, 'direct')).catch((error) => {
+          this.lastError = error instanceof NetError ? error.code : 'internal'
+          this.emit()
+        })
+      })
+    } catch (error) {
+      this.enrollmentListeners.delete(direct)
+      await direct.teardown()
+      throw error
+    }
+    const address = direct.status().routes[0]?.address
+    if (!address) {
+      this.enrollmentListeners.delete(direct)
+      await direct.teardown()
+      throw new NetError('route_unreachable')
+    }
+    return {
+      port: Number(new URL(address).port),
+      close: async () => {
+        this.enrollmentListeners.delete(direct)
+        await direct.teardown()
+      }
+    }
+  }
+  private bootstrap(): SshBootstrap {
+    return (this.sshBootstrap ??= new SshBootstrap(
+      {
+        profileDir: this.options.profileDir,
+        inviteNode: async (name) => {
+          const issued = (await this.request('bridge.invite', {
+            name,
+            caps: ['read', 'chat', 'write'],
+            ttlMs: 15 * 60_000
+          })) as { invite: string; inviteId: InviteId }
+          return { invite: issued.invite, inviteId: issued.inviteId }
+        },
+        inviteOutcome: (invite) => this.requireEnrolled().enrollment.inviteOutcome(invite),
+        revokeInvite: (invite) => this.requireEnrolled().enrollment.revokeInvite(invite),
+        revokeNode: async (node) => {
+          await this.request('bridge.revoke', { node })
+        },
+        openEnrollmentListener: () => this.openEnrollmentListener(),
+        adoptRoutes: (signed, node) => {
+          this.adoptRoutes(signed, node)
+          this.refreshPeers()
+        },
+        peerOpen: (node) =>
+          this.status().peers.some((peer) => peer.node === node && peer.state === 'open'),
+        knownNode: (node) => {
+          const rt = this.requireEnrolled()
+          return node !== rt.identity.self()!.node && rt.identity.isKnownNode(node)
+        }
+      },
+      {
+        ...this.options.ssh,
+        binary: () =>
+          this.options.ssh?.binary ??
+          (
+            this.transportConfigurations().find((row) => row.id === 'ssh')?.settings as
+              { binary?: string } | undefined
+          )?.binary,
+        userKnownHosts: this.options.ssh?.userKnownHosts
+      }
+    ))
+  }
+  /** Owner-only methods for adding a remote machine over SSH; a peer can never reach them. */
+  private async sshRequest(
+    method: NetLocalMethod,
+    params: Record<string, unknown>
+  ): Promise<unknown> {
+    const ssh = this.bootstrap()
+    switch (method) {
+      case 'net.ssh.check':
+        return ssh.check(String(params.host))
+      case 'net.ssh.trust':
+        return ssh.trust({
+          host: String(params.host),
+          fingerprint: String(params.fingerprint),
+          acknowledgeChanged: params.acknowledgeChanged === true
+        })
+      case 'net.ssh.plan':
+        return ssh.plan({
+          host: String(params.host),
+          name: String(params.name),
+          port: params.port as number | undefined
+        })
+      case 'net.ssh.list':
+        return ssh.list()
+      case 'net.ssh.setup.status':
+        return ssh.status(String(params.id))
+    }
+    this.requireEnrolled()
+    switch (method) {
+      case 'net.ssh.setup.begin':
+        return ssh.begin({
+          host: String(params.host),
+          name: String(params.name),
+          port: params.port as number | undefined
+        })
+      case 'net.ssh.setup.cancel':
+        return ssh.cancel(String(params.id))
+      case 'net.ssh.setup.retry':
+        return ssh.retry(String(params.id))
+      case 'net.ssh.undo':
+        return ssh.undo(String(params.id))
+      case 'net.ssh.update':
+        return ssh.update(String(params.id))
+      case 'net.ssh.rename':
+        return ssh.rename(String(params.id), String(params.endpoint))
+      case 'net.ssh.approve':
+        return ssh.approve(params.node as NodeId, String(params.endpoint))
+      default:
+        throw new NetError('bad_request')
+    }
+  }
+  /** `bridge.nodes`, plus the ssh route a peer offers that this computer has not approved. */
+  private async nodesView(): Promise<unknown> {
+    const rt = this.requireEnrolled()
+    const view = this.nodes() as { nodes: Array<{ node: NodeId; self: boolean }> }
+    const offers = await Promise.all(
+      view.nodes.map(async (entry) => {
+        if (entry.self) return undefined
+        const row = rt.db.database
+          .prepare('SELECT signed FROM net_peer_routes WHERE node=?')
+          .get(entry.node)
+        if (!row) return undefined
+        try {
+          const signed = parseProtocolJson(Buffer.from(String(row.signed))) as Signed
+          const record = parseProtocolJson(Buffer.from(signed.payload, 'base64url')) as RoutesRecord
+          const route = record.routes.find(
+            (item) => item.transport === 'ssh' && parseSshRoute(item.address)
+          )
+          const endpoint = route && /^ssh:\/\/([^/]+)\//u.exec(route.address)?.[1]
+          if (!endpoint || (await readSshApproval(this.options.profileDir, entry.node)))
+            return undefined
+          return { endpoint }
+        } catch {
+          return undefined
+        }
+      })
+    )
+    return {
+      nodes: view.nodes.map((entry, index) =>
+        offers[index] ? { ...entry, sshOffer: offers[index] } : entry
+      )
+    }
   }
   private nodes(): unknown {
     const rt = this.requireEnrolled(),
@@ -2343,6 +2566,7 @@ export class NetService {
     if (this.stopped) return
     this.stopped = true
     this.shutdownSignal.abort()
+    void this.sshBootstrap?.close()
     this.webrtc?.stop()
     this.transport?.admission.close()
     this.renewal?.cancel()

@@ -17,6 +17,7 @@ import { writeOutput } from '../output'
 import { NODE_CAPABILITIES, type NodeCapability } from '../../shared/net/capabilities'
 import { NET_ERRORS, isNetErrorCode, type NetErrorCode } from '../../shared/net/errors'
 import { isId } from '../../shared/net/ids'
+import { isJoinVia } from '../../shared/net/via'
 
 export const NET_HELP = `Usage:
   mousse-cli net init [--unlock] [--name <name>] [--listen [--host <IP>] [--port <port>]]
@@ -39,6 +40,7 @@ export const NET_HELP = `Usage:
   mousse-cli net recovery import --file <private-file> --become-authority
   mousse-cli net transports
   mousse-cli net transport configure <id> --settings-file <path> [--disable]
+  mousse-cli net routes
 
 Mousse ID (net plus) bind explicitly signs an account/service-bound challenge with this
 profile's protected unlocked root. Connect uses a recent one-shot account
@@ -70,6 +72,8 @@ transports lists the available in-tree add-ons and selected listener status.
 transport configure validates and persists a JSON settings file; --disable
 stops the selected listener. Settings must satisfy the listed add-on schema.
 Direct listeners remain opt-in. Configuration never accepts secret tokens.
+routes prints this node's signed routes, which a computer that set this one up over
+SSH adopts so it can dial here.
 authority transfer hands the protected root to an enrolled protected node;
 repeating it reads the durable receipt. recovery export writes encrypted
 backup bytes to a new private file. recovery import is an explicit authority
@@ -80,6 +84,7 @@ Recovery passphrases use hidden/piped stdin and never argv or flags.
 export const BRIDGE_HELP = `Usage:
   mousse-cli bridge invite [--ttl 10m] [--name <name>] [--caps read,chat,write]
   mousse-cli bridge join [mj1_<payload>] [--name <name>] [--protect] [--invite-file <path>]
+    [--via ws://127.0.0.1:<port>/mousse-net]
   mousse-cli bridge nodes
   mousse-cli bridge revoke <node-id>
   mousse-cli bridge rename <node-id> <name>
@@ -95,7 +100,9 @@ can be retried with the same invite; the daemon retains the same node keys.
 Relay invitations require a protected profile. --protect prepares a blank
 join profile and reads its passphrase with hidden or piped input. With piped
 --protect input, supply --invite-file (a private regular file) or an invite
-argument; stdin is reserved for the passphrase. An unfinished protected join
+argument; stdin is reserved for the passphrase. --via names where to reach the
+inviting computer first, and accepts only a loopback ws://127.0.0.1 address (a
+reverse SSH tunnel); the inviter's pinned key is still checked. An unfinished protected join
 profile cannot be initialized as a fresh authority.
 Use --profile <profile> to choose the daemon profile.
 `
@@ -116,6 +123,7 @@ type NetMethod =
   | 'net.recovery.import'
   | 'net.transport.list'
   | 'net.transport.configure'
+  | 'net.routes'
   | 'net.init'
   | 'net.disable'
   | 'net.status'
@@ -283,6 +291,7 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
     'net.recovery.import': ['file', 'become-authority'],
     'net.transport.list': [],
     'net.transport.configure': ['settings-file', 'disable'],
+    'net.routes': [],
     'net.init': ['name', 'listen', 'host', 'port', 'unlock'],
     'net.disable': [],
     'net.status': [],
@@ -290,7 +299,7 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
     'net.protect': [],
     'net.unlock': [],
     'bridge.invite': ['ttl', 'name', 'caps'],
-    'bridge.join': ['name', 'protect', 'invite-file'],
+    'bridge.join': ['name', 'protect', 'invite-file', 'via'],
     'bridge.nodes': [],
     'bridge.revoke': [],
     'bridge.rename': []
@@ -490,6 +499,11 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
     if (file && args.positional.length) invalid('Choose one invitation input.')
     if (file) params.invite = invite(readBoundedFile(file, 64 * 1024, true).trim())
     else if (args.positional.length) params.invite = invite(args.positional[0])
+    const via = stringFlag(args, 'via')
+    if (via !== undefined) {
+      if (!isJoinVia(via)) invalid('--via requires ws://127.0.0.1:<port>/mousse-net.')
+      params.via = via
+    }
     const promptPassphrase = args.flags.has('protect')
     return {
       method,

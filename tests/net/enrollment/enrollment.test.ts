@@ -212,6 +212,28 @@ describe('P2 real exporter-bound atomic node enrollment', () => {
     ).toBe('consumed')
   })
 
+  it('reports what an invitation became from its row, so a lost join reply names the exact node', async () => {
+    const { a, b, invite } = await prepared(),
+      c = await channels(a, b)
+    expect(a.service.inviteOutcome(invite.invite)).toEqual({ state: 'active' })
+    expect(a.service.consumedInvite(invite.invite)).toBeUndefined()
+    const request = b.service.nodeJoinRequest(c.client)
+    a.service.redeemNode(request, c.server)
+    expect(a.service.inviteOutcome(invite.invite)).toEqual({
+      state: 'consumed',
+      node: request.node,
+      name: request.name
+    })
+    expect(a.service.consumedInvite(invite.invite)).toEqual({
+      node: request.node,
+      name: request.name
+    })
+    expect(a.service.inviteOutcome(newId('invite'))).toEqual({ state: 'missing' })
+    const second = a.service.issueNodeInvite({})
+    a.service.revokeInvite(second.invite)
+    expect(a.service.inviteOutcome(second.invite)).toEqual({ state: 'revoked' })
+  })
+
   it('binds all claims and actual certificate before a token can mint a delegation or steal a known node ID', async () => {
     const { a, b } = await prepared(),
       c = await channels(a, b),

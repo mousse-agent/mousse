@@ -2,13 +2,16 @@ import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
 import { AlertTriangle, CircleCheck, Monitor, MonitorSmartphone, MoreHorizontal, Plus, RefreshCw } from '../lib/icons'
 import { RemoteDeviceThreads } from './RemoteDeviceThreads'
 import { ChangePlanDialog } from './devices/ChangePlanDialog'
+import { AddSshDeviceDialog } from './devices/AddSshDeviceDialog'
+import { ApproveSshRouteDialog } from './devices/ApproveSshRouteDialog'
+import { RenameEndpointDialog, UndoSetupDialog, UpdateRemoteDialog } from './devices/SshRecordDialogs'
 import { Modal } from './ui/Modal'
 import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './settings/SettingsRow'
 import { CopyButton } from './settings/IconButtons'
 import { mousseIdAvailable, useMousseIdStore } from '../stores/mousseIdStore'
-import { bindSettings, deviceLine, isIncompatible, listedDevices, readDevices, routeDetails, serveSettings, updateInstructions, type Device } from '../lib/netDevices'
+import { bindSettings, deviceLine, isIncompatible, listedDevices, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, type Device } from '../lib/netDevices'
 import type { NetDoctor, NetStatus } from '../../shared/net'
-import { TAILSCALE_FUNNEL_PORTS, type NetAddonActionResult, type NetAddonRecords } from '../../shared/net/local'
+import { TAILSCALE_FUNNEL_PORTS, type NetAddonActionResult, type NetAddonRecords, type SshRecordView, type SshSetupPhase } from '../../shared/net/local'
 import type { PlatformRequestMethod } from '../../shared/platform'
 import type { TransportManifest } from '../../mms/net/contracts'
 import '../styles/devices.css'
@@ -25,6 +28,14 @@ function networkingLine(status?: NetStatus): string {
   if (status.keystore === 'locked') return `On · locked until you enter the passphrase${error}`
   if (status.rosterState === 'conflict') return `On · device list conflict, recovery required${error}`
   return `On${error}`
+}
+
+const SETUP_PHASE: Record<SshSetupPhase, string> = {
+  running: 'Setting up',
+  done: 'Set up',
+  failed: 'Setup failed',
+  cancelled: 'Setup cancelled',
+  interrupted: 'Setup interrupted'
 }
 
 const TRANSPORT_STATE: Record<Transport['state'], string> = {
@@ -45,8 +56,10 @@ function addonLine(manifest: TransportManifest, live?: Transport): string {
   return step.command ? `${step.title}: ${step.command}` : step.title
 }
 
+interface MenuItem { label: string; danger?: boolean; onSelect: () => void }
+
 /** Overflow menu on a device row. */
-function DeviceMenu({ name, disabled, onRevoke }: { name: string; disabled: boolean; onRevoke: () => void }) {
+function DeviceMenu({ name, disabled, items }: { name: string; disabled: boolean; items: MenuItem[] }) {
   const [open, setOpen] = useState(false)
   const root = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -73,7 +86,9 @@ function DeviceMenu({ name, disabled, onRevoke }: { name: string; disabled: bool
       </button>
       {open && (
         <div className="devices-menu-panel" role="menu">
-          <button type="button" role="menuitem" className="devices-menu-item danger" onClick={() => { setOpen(false); onRevoke() }}>Revoke…</button>
+          {items.map((item) => (
+            <button key={item.label} type="button" role="menuitem" className={item.danger ? 'devices-menu-item danger' : 'devices-menu-item'} onClick={() => { setOpen(false); item.onSelect() }}>{item.label}</button>
+          ))}
         </div>
       )}
     </div>
@@ -87,13 +102,15 @@ export function NetDevicesSection() {
   const [error, setError] = useState(''), [busy, setBusy] = useState(false), [passphrase, setPassphrase] = useState(''), [name, setName] = useState('My device'), [invite, setInvite] = useState(''), [joinText, setJoinText] = useState(''), [doctor, setDoctor] = useState<NetDoctor>()
   const [relayAddress, setRelayAddress] = useState(''), [named, setNamed] = useState(false), [tunnelId, setTunnelId] = useState(''), [hostname, setHostname] = useState(''), [credentialsFile, setCredentialsFile] = useState('')
   const [sshEndpoint, setSshEndpoint] = useState(''), [sshPort, setSshPort] = useState('')
-  const [adding, setAdding] = useState(false), [revoking, setRevoking] = useState<Device>(), [updating, setUpdating] = useState<Device>()
+  const [adding, setAdding] = useState(false), [addKind, setAddKind] = useState<'computer'>(), [revoking, setRevoking] = useState<Device>(), [updating, setUpdating] = useState<Device>()
   const [records, setRecords] = useState<NetAddonRecords>({}), [saved, setSaved] = useState<Record<string, unknown>>({}), [notice, setNotice] = useState(''), [servePort, setServePort] = useState('47890'), [serveDialog, setServeDialog] = useState<{ wasOn: boolean }>()
+  const [sshRecords, setSshRecords] = useState<SshRecordView[]>([]), [sshSetup, setSshSetup] = useState<{ setupId?: string }>(), [approving, setApproving] = useState<Device & { sshOffer: { endpoint: string } }>()
+  const [recordDialog, setRecordDialog] = useState<{ kind: 'undo' | 'rename' | 'update'; record: SshRecordView; name: string }>()
   const nameEdited = useRef(false)
   const reload = async () => {
     const owner = ++generation.current
-    const { current, addons, nodes } = await readDevices(mousseIdAvailable(useMousseIdStore.getState()))
-    if (alive.current && owner === generation.current) { setStatus(current); setManifests(addons.manifests); setRecords(addons.records ?? {}); setSaved(addons.settings ?? {}); setDevices(nodes) }
+    const { current, addons, nodes, ssh } = await readDevices(mousseIdAvailable(useMousseIdStore.getState()))
+    if (alive.current && owner === generation.current) { setStatus(current); setManifests(addons.manifests); setRecords(addons.records ?? {}); setSaved(addons.settings ?? {}); setDevices(nodes); setSshRecords(ssh) }
   }
   useEffect(() => {
     alive.current = true
@@ -103,8 +120,8 @@ export function NetDevicesSection() {
       running = true
       try {
         const owner = ++generation.current
-        const { current, addons, nodes } = await readDevices(mousseIdAvailable(useMousseIdStore.getState()))
-        if (active && owner === generation.current) { setStatus(current); setManifests(addons.manifests); setRecords(addons.records ?? {}); setSaved(addons.settings ?? {}); setDevices(nodes) }
+        const { current, addons, nodes, ssh } = await readDevices(mousseIdAvailable(useMousseIdStore.getState()))
+        if (active && owner === generation.current) { setStatus(current); setManifests(addons.manifests); setRecords(addons.records ?? {}); setSaved(addons.settings ?? {}); setDevices(nodes); setSshRecords(ssh) }
       } catch (cause) { if (active) { setDevices([]); setManifests([]); setError(String((cause as Error)?.message ?? cause)) } }
       finally { running = false }
     }
@@ -193,7 +210,8 @@ export function NetDevicesSection() {
   // "Add device" joins this device to my other devices, or invites a new one from the owner.
   const addMode: 'join' | 'invite' | undefined = status && !self ? 'join' : authority ? 'invite' : undefined
   const inviteReady = unlocked && !!status?.protected
-  const closeAdd = () => { setAdding(false); setInvite(''); setJoinText(''); setPassphrase('') }
+  const closeAdd = () => { setAdding(false); setAddKind(undefined); setInvite(''); setJoinText(''); setPassphrase('') }
+  const reloadQuietly = () => void reload().catch(() => undefined)
   const submitJoin = (event: FormEvent) => {
     event.preventDefault()
     if (!joinText.trim() || !passphrase || !name.trim() || busy) return
@@ -208,6 +226,17 @@ export function NetDevicesSection() {
             : undefined
 
   const showAddons = !!status?.enabled && !!self && unlocked
+  // Setups over SSH that stopped before the machine joined; they have no device row yet.
+  const unfinished = sshRecords.filter((record) => record.phase !== 'done' && !record.node)
+  const deviceMenu = (device: Device): MenuItem[] => {
+    const record = sshRecordFor(device, sshRecords)
+    const open = (kind: 'undo' | 'rename' | 'update') => () => { if (record) setRecordDialog({ kind, record, name: device.name }) }
+    return [
+      ...(record ? [{ label: 'Undo setup…', onSelect: open('undo') }, { label: 'Rename SSH endpoint…', onSelect: open('rename') }] : []),
+      ...(record?.owner === 'managed' ? [{ label: 'Update…', onSelect: open('update') }] : []),
+      ...(authority ? [{ label: 'Revoke…', danger: true, onSelect: () => setRevoking(device) }] : [])
+    ]
+  }
 
   return <>
     {error && !adding && <p role="alert" className="chat-error devices-error">{error}</p>}
@@ -259,27 +288,53 @@ export function NetDevicesSection() {
           </button>
         )}
       >
-        {others.map((device) => [
-          <SettingsRow
-            key={device.node}
-            title={device.name}
-            description={<span title={routeDetails(device) || undefined}>{deviceLine(device, Date.now())}</span>}
-            control={authority && <DeviceMenu name={device.name} disabled={busy} onRevoke={() => setRevoking(device)} />}
-          />,
-          isIncompatible(device) && (
-            <SettingsRow key={`${device.node}-incompatible`} indent title="Incompatible version" description={`Update ${device.name} or this device so they can talk to each other.`} />
-          ),
-          device.olderThanThis && (
+        {others.map((device) => {
+          const items = deviceMenu(device), offer = device.sshOffer, record = sshRecordFor(device, sshRecords)
+          return [
             <SettingsRow
-              key={`${device.node}-older`}
-              indent
-              title={device.version ? `Older than this device (${device.version})` : 'Older than this device'}
-              description={device.version ? `This device runs ${selfDevice?.version ?? 'a newer version'}.` : `${device.name} is too old to report its version${selfDevice?.version ? `; this device runs ${selfDevice.version}` : ''}.`}
-              control={selfDevice?.version && <button type="button" className="settings-btn" onClick={() => setUpdating(device)}>{updateInstructions(device, selfDevice.version).command ? 'Show command' : 'How to update'}</button>}
-            />
-          )
-        ])}
+              key={device.node}
+              title={device.name}
+              description={<span title={routeDetails(device) || undefined}>{deviceLine(device, Date.now())}{offer ? ' · offers an SSH route' : ''}</span>}
+              control={<>
+                {offer && <button type="button" className="settings-btn" disabled={busy} onClick={() => setApproving({ ...device, sshOffer: offer })}>Use SSH route…</button>}
+                {items.length > 0 && <DeviceMenu name={device.name} disabled={busy} items={items} />}
+              </>}
+            />,
+            isIncompatible(device) && (
+              <SettingsRow key={`${device.node}-incompatible`} indent title="Incompatible version" description={`Update ${device.name} or this device so they can talk to each other.`} />
+            ),
+            device.olderThanThis && (
+              <SettingsRow
+                key={`${device.node}-older`}
+                indent
+                title={device.version ? `Older than this device (${device.version})` : 'Older than this device'}
+                description={device.version ? `This device runs ${selfDevice?.version ?? 'a newer version'}.` : `${device.name} is too old to report its version${selfDevice?.version ? `; this device runs ${selfDevice.version}` : ''}.`}
+                control={record?.owner === 'managed'
+                  ? <button type="button" className="settings-btn" onClick={() => setRecordDialog({ kind: 'update', record, name: device.name })}>Update…</button>
+                  : selfDevice?.version && <button type="button" className="settings-btn" onClick={() => setUpdating(device)}>{updateInstructions(device, selfDevice.version).command ? 'Show command' : 'How to update'}</button>}
+              />
+            )
+          ]
+        })}
         {self && unlocked && !others.length && <p className="settings-muted devices-note">No other devices yet.</p>}
+      </SettingsGroup>
+    )}
+
+    {status && unfinished.length > 0 && (
+      <SettingsGroup title="Unfinished remote machine setups" className="devices-group">
+        {unfinished.map((record) => (
+          <SettingsRow
+            key={record.id}
+            title={record.endpoint}
+            description={SETUP_PHASE[record.phase]}
+            control={record.phase === 'running'
+              ? <button type="button" className="settings-btn" onClick={() => setSshSetup({ setupId: record.id })}>Show progress</button>
+              : record.recoverable && <>
+                <button type="button" className="settings-btn" disabled={busy} onClick={() => void action('net.ssh.setup.retry', { id: record.id }, () => setSshSetup({ setupId: record.id }))}>Retry</button>
+                <button type="button" className="settings-btn" disabled={busy} onClick={() => setRecordDialog({ kind: 'undo', record, name: record.endpoint })}>Undo…</button>
+              </>}
+          />
+        ))}
       </SettingsGroup>
     )}
 
@@ -436,7 +491,22 @@ export function NetDevicesSection() {
       </Modal>
     )}
 
-    {adding && addMode === 'invite' && (
+    {adding && addMode === 'invite' && !addKind && (
+      <Modal open title="Add a device" onClose={closeAdd}>
+        <div className="devices-dialog">
+          <button type="button" className="devices-choice" onClick={() => setAddKind('computer')}>
+            <span>Another computer with Mousse</span>
+            <span className="settings-muted">Create an invitation and paste it on the other computer.</span>
+          </button>
+          <button type="button" className="devices-choice" onClick={() => { closeAdd(); setSshSetup({}) }}>
+            <span>Remote machine over SSH</span>
+            <span className="settings-muted">Set up Mousse on a machine you reach with ssh.</span>
+          </button>
+        </div>
+      </Modal>
+    )}
+
+    {adding && addMode === 'invite' && addKind === 'computer' && (
       <Modal
         open
         title="Add a device"
@@ -507,6 +577,12 @@ export function NetDevicesSection() {
         <p>{revoking.name} will no longer connect to your other devices.</p>
       </Modal>
     )}
+
+    {sshSetup && <AddSshDeviceDialog open setupId={sshSetup.setupId} onClose={() => { setSshSetup(undefined); reloadQuietly() }} onDone={reloadQuietly} />}
+    {approving && <ApproveSshRouteDialog node={approving.node} name={approving.name} endpoint={approving.sshOffer.endpoint} onClose={() => setApproving(undefined)} onDone={reloadQuietly} />}
+    {recordDialog?.kind === 'undo' && <UndoSetupDialog record={recordDialog.record} name={recordDialog.name} onClose={() => setRecordDialog(undefined)} onDone={reloadQuietly} />}
+    {recordDialog?.kind === 'rename' && <RenameEndpointDialog record={recordDialog.record} name={recordDialog.name} onClose={() => setRecordDialog(undefined)} onDone={reloadQuietly} />}
+    {recordDialog?.kind === 'update' && <UpdateRemoteDialog record={recordDialog.record} name={recordDialog.name} onClose={() => setRecordDialog(undefined)} onDone={reloadQuietly} />}
   </>
 }
 

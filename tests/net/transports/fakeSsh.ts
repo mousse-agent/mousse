@@ -53,12 +53,15 @@ const known = files.some((file) => {
 if (!known) fail('Host key verification failed.')
 const mode = ${JSON.stringify(mode)}
 if (mode === 'denied') fail('me@box: Permission denied (publickey).')
-if (mode === 'prohibited') fail('channel 0: open failed: administratively prohibited: open failed\\nstdio forwarding failed')
-if (mode === 'refused') fail('channel 0: open failed: connect failed: Connection refused\\nstdio forwarding failed')
+// Like OpenSSH, the reason is logged at INFO; at LogLevel=ERROR only the fatal line survives.
+const verbose = args.includes('LogLevel=INFO') || args.includes('LogLevel=DEBUG')
+const refusal = (reason) => fail((verbose ? 'channel 0: open failed: ' + reason + '\\n' : '') + 'stdio forwarding failed')
+if (mode === 'prohibited') refusal('administratively prohibited: open failed')
+if (mode === 'refused') refusal('connect failed: Connection refused')
 if (mode === 'hang') setInterval(() => {}, 1000)
 else setTimeout(() => {
   const socket = net.connect(Number(forward[1]), forward[0])
-  socket.on('error', () => fail('channel 0: open failed: connect failed: Connection refused'))
+  socket.on('error', () => refusal('connect failed: Connection refused'))
   socket.on('close', () => process.exit(0))
   process.stdin.on('end', () => socket.end())
   process.stdin.pipe(socket)

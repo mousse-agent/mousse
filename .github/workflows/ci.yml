@@ -145,6 +145,9 @@ jobs:
           tests/browserWindowsSandboxPermissions.test.ts
           tests/cliWindowsConsoleTty.test.ts
           tests/net/transports/ssh.test.ts
+          tests/net/ssh/bootstrap.test.ts
+          tests/net/ssh/knownHosts.test.ts
+          tests/net/ssh/shellQuote.test.ts
           tests/platformWindowsPackageQualification.test.ts
           tests/resourcePurgeWindows.test.ts
           tests/selectiveWorktree.test.ts
