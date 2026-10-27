@@ -132,6 +132,32 @@ describe('a prepared bot turn', () => {
   })
 })
 
+describe('bot turn setup', () => {
+  it('a prepare that throws cancels the run and settles it, so no activation stays running', async () => {
+    orch.setBotDispatcher({ prepare: () => { throw new Error('malformed narrow') }, settle: (payload, outcome) => { settled.push({ payload, outcome }) }, ownerOf: () => 'Site editor' })
+    const effect = await queuedBotRun()
+    await execute(effect)
+    expect(engine.getRun(effect.runId!)).toMatchObject({ status: 'cancelled', outcome: { error: 'bot_prepare_failed' } })
+    expect(settled).toHaveLength(1)
+    expect(runTurn).not.toHaveBeenCalled()
+  })
+
+  it('the bot’s role and instructions lead the turn preamble, and its app tools never ask a person', async () => {
+    const internals = orch as unknown as {
+      getOrCreateSession(threadId: string): unknown
+      registerAppTurn(session: unknown, runId: string, mode: string, continuation: boolean, bot?: unknown): { turn: { approvals?: string; bot?: unknown } }
+      completeAppTurn(turn: unknown, input: Record<string, unknown>): Promise<{ bot?: unknown; instructions(mcp: boolean): { turnPreamble: string } }>
+      appToolTurns: { get(runId: string): { approvals?: string } | undefined }
+    }
+    const authority = { skills: new Set<string>(), time: { signal: new AbortController().signal } }
+    const registered = internals.registerAppTurn(internals.getOrCreateSession('bot-thread'), 'run-bot', 'agent', false, { authority, skills: [] })
+    const app = await internals.completeAppTurn(registered.turn, { promptRuntime: false, userContent: 'go', instanceId: 'pi:x', model: 'm', approvals: 'never', botInstructions: 'You are ZEBRA-REVIEWER.' })
+    expect(app.bot).toBe(authority)
+    expect(app.instructions(true).turnPreamble.startsWith('Your role and instructions:\nYou are ZEBRA-REVIEWER.')).toBe(true)
+    expect(internals.appToolTurns.get('run-bot')?.approvals).toBe('never')
+  })
+})
+
 describe('ordinary sends to bot threads', () => {
   const readOnly = { code: 'bot_thread_read_only', message: 'This thread belongs to the bot Site editor. Use the Bots tab to continue it.' }
 
@@ -142,6 +168,36 @@ describe('ordinary sends to bot threads', () => {
     expect(() => orch.steerActiveTurn('nudge', 'bot-thread')).toThrow(expect.objectContaining(readOnly))
     const effect = await queuedBotRun('bot-steer')
     await expect(orch.steerRun(effect.runId!, 'nudge', 'steer-1')).rejects.toMatchObject(readOnly)
+    expect(runTurn).not.toHaveBeenCalled()
+  })
+
+  it('protocol steer without a run id, and Retry, are refused; nothing is steered into a bot turn', () => {
+    expect(() => orch.steerThreadOrEnqueueExternal('bot-thread', 'nudge')).toThrow(expect.objectContaining(readOnly))
+    expect(orch.steerThread('bot-thread', 'wake notice')).toBe(false)
+    expect(() => orch.retryLastConnection('bot-thread')).toThrow(expect.objectContaining(readOnly))
+    expect(runTurn).not.toHaveBeenCalled()
+  })
+
+  it('every turn start on a bot thread outside its dispatch is refused, and its run cancelled', async () => {
+    const sent = await engine.dispatch({ kind: 'send', threadId: 'bot-thread', clientRequestId: 'plain-1', source: 'gui' })
+    if (sent.status !== 'accepted') throw new Error('rejected')
+    const real = (OrchestratorService.prototype as unknown as { runTurnOnSession: (...args: unknown[]) => Promise<unknown> }).runTurnOnSession
+    const session = (orch as unknown as { getOrCreateSession(threadId: string): unknown }).getOrCreateSession('bot-thread')
+    await expect(real.call(orch, session, { content: 'hello', mode: 'agent' }, false, true, { runId: sent.runId })).rejects.toMatchObject(readOnly)
+    expect(engine.getRun(sent.runId)).toMatchObject({ status: 'cancelled', outcome: { error: 'bot_thread_read_only' } })
+  })
+
+  it('wake and integration effects on a bot thread are cancelled, never run as plain turns', async () => {
+    for (const kind of ['wake', 'integration'] as const) {
+      const sent = await engine.dispatch({ kind: 'send', threadId: 'bot-thread', clientRequestId: `${kind}-1`, source: kind === 'wake' ? 'wake' : 'integration' })
+      if (sent.status !== 'accepted') throw new Error('rejected')
+      const payload = kind === 'wake'
+        ? { kind, threadId: 'bot-thread', runId: sent.runId, inboxIds: [] }
+        : { kind, threadId: 'bot-thread', runId: sent.runId, delegationId: 'd-1' }
+      const effect = outbox.enqueue({ threadId: 'bot-thread', runId: sent.runId, kind: 'turn.start', payload })
+      await execute(effect)
+      expect(engine.getRun(sent.runId), kind).toMatchObject({ status: 'cancelled', outcome: { error: 'bot_thread_read_only' } })
+    }
     expect(runTurn).not.toHaveBeenCalled()
   })
 

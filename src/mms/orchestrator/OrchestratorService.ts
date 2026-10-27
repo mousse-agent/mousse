@@ -504,6 +504,15 @@ function isContinuationTurnPayload(payload: unknown): payload is ContinuationTur
 /** The `turn.start` payload kinds this build runs; any other string `kind` is refused (PR 6 §4). */
 const KNOWN_TURN_PAYLOAD_KINDS: readonly string[] = ['wake', 'integration', 'continuation', 'bot']
 
+/**
+ * A bot turn's preamble: the bot's role and instructions first, then Mousse's own. Bots that never
+ * ask anyone run their app tools with `approvals: 'never'`, so a tool that would ask is refused.
+ */
+function withBotInstructions(instructions: string | undefined, preamble: string): string {
+  if (!instructions?.trim()) return preamble
+  return [`Your role and instructions:\n${instructions.trim()}`, preamble].filter(Boolean).join('\n\n')
+}
+
 /** A bot turn's skills: only the granted ones are listed, and only those may be loaded. */
 function grantedSkills(skills: Pick<AppToolTurn, 'enabledSkills' | 'loadedSkills'>, granted: ReadonlySet<string>): Pick<AppToolTurn, 'enabledSkills' | 'loadedSkills'> {
   const enabledSkills = skills.enabledSkills.filter((skill) => granted.has(skill.id))
@@ -715,14 +724,29 @@ export class OrchestratorService extends EventEmitter {
    * threads: a bot request never runs as a plain turn, and only the Bots tab continues one.
    */
   private assertNotBotThread(threadId: string | undefined): void {
-    if (!threadId) return
+    const error = this.botThreadRefusal(threadId)
+    if (error) throw error
+  }
+
+  /** The refusal for a turn or input on a bot's thread that is not its bot dispatch; undefined elsewhere. */
+  private botThreadRefusal(threadId: string | undefined): AppError | undefined {
+    if (!threadId || threadId === '__unbound__') return undefined
     const bot = this.botDispatcher?.ownerOf(threadId)
-    if (bot === undefined) return
-    throw new AppError({
+    if (bot === undefined) return undefined
+    return new AppError({
       code: 'bot_thread_read_only',
       message: `This thread belongs to the bot ${bot}. Use the Bots tab to continue it.`,
       errorInfo: { category: 'invalid', retryable: false }
     })
+  }
+
+  /** Cancels a queued run that would start a turn on a bot's thread outside its bot dispatch. */
+  private refuseOnBotThread(runId: string, threadId: string): boolean {
+    if (!this.botThreadRefusal(threadId)) return false
+    this.markRun(runId, (engine, id) => {
+      if (engine.getRun(id)?.status === 'queued') engine.markTerminal(id, 'cancelled', { error: 'bot_thread_read_only' })
+    })
+    return true
   }
 
   /** The profile's harness gateway; also the test seam for fake drivers. */
@@ -1242,6 +1266,12 @@ export class OrchestratorService extends EventEmitter {
     const engine = this.requireRunEngine()
     const hold = this.pendingContinuations.get(payload.continuationId)
     const end = (): void => this.endContinuationHold(payload.continuationId, true)
+    // A bot thread runs only its bot dispatches: a turn its runtime started on its own is not one.
+    if (this.refuseOnBotThread(payload.runId, payload.threadId)) {
+      this.harness.discardContinuations(payload.threadId, payload.continuationId)
+      end()
+      return
+    }
     if (engine.getRun(payload.runId)?.status !== 'queued') {
       this.harness.discardContinuations(payload.threadId, payload.continuationId)
       end()
@@ -1900,7 +1930,7 @@ export class OrchestratorService extends EventEmitter {
    */
   private async completeAppTurn(
     registered: AppToolTurn,
-    input: { promptRuntime: boolean; browser?: AppToolTurn['browser']; onPublishApplet?: AppToolTurn['onPublishApplet']; userContent: string; instanceId: string; model: string; approvals: RunPolicy['approvals'] }
+    input: { promptRuntime: boolean; browser?: AppToolTurn['browser']; onPublishApplet?: AppToolTurn['onPublishApplet']; userContent: string; instanceId: string; model: string; approvals: RunPolicy['approvals']; botInstructions?: string }
   ): Promise<TurnAppContext> {
     let skills: Pick<AppToolTurn, 'enabledSkills' | 'loadedSkills'> = { enabledSkills: [], loadedSkills: [] }
     if (input.promptRuntime) {
@@ -1944,12 +1974,12 @@ export class OrchestratorService extends EventEmitter {
       ...(turn.bot ? { bot: turn.bot } : {}),
       instructions: (mcpAttached) => ({
         sessionInstructions: sessionInstructions({ mcp: mcpAttached, appletGuidance: this.appletStore ? APPLET_GENERATION_GUIDANCE : undefined }),
-        turnPreamble: turnPreamble({
+        turnPreamble: withBotInstructions(input.botInstructions, turnPreamble({
           loadedSkills: turn.loadedSkills,
           modePrompt,
           appletCatalogue,
           usableTools: mcpAttached ? this.usableAppTools(this.appToolTurns.get(turn.runId) ?? turn) : undefined
-        })
+        }))
       })
     }
   }
@@ -2271,7 +2301,13 @@ export class OrchestratorService extends EventEmitter {
       dispatcher?.settle(payload, {})
     }
     if (!dispatcher) return cancel('bots_unavailable')
-    const prepared = dispatcher.prepare(payload)
+    let prepared: ReturnType<BotTurnDispatcher['prepare']>
+    try {
+      prepared = dispatcher.prepare(payload)
+    } catch (error) {
+      console.warn('bot dispatch could not be prepared', { runId: payload.runId, error: error instanceof Error ? error.message : String(error) })
+      return cancel('bot_prepare_failed')
+    }
     if ('refused' in prepared) return cancel(prepared.code)
     const session = this.getOrCreateSession(payload.threadId)
     // History 'none': a fresh activation thread has no transcript, native context or summary.
@@ -3584,6 +3620,7 @@ export class OrchestratorService extends EventEmitter {
   private async executeIntegrationEffect(payload: IntegrationTurnPayload, signal: AbortSignal): Promise<void> {
     const engine = this.requireRunEngine()
     if (engine.getRun(payload.runId)?.status !== 'queued') return
+    if (this.refuseOnBotThread(payload.runId, payload.threadId)) return
     // The outcome is a row for this thread, written with the run's terminal state: the thread stays
     // busy until its model reads it, so a task waiting on this thread (it may be a subagent that
     // integrates its own subagent's work) never publishes an answer that predates the outcome.
@@ -3722,6 +3759,14 @@ export class OrchestratorService extends EventEmitter {
     const engine = this.requireRunEngine()
     if (engine.getRun(payload.runId)?.status !== 'queued') return
     const rows = this.dropStaleQuestionRows(engine.inbox.getMany(payload.inboxIds).filter((row) => row.status !== 'acknowledged'))
+    // A bot thread is never woken as a plain turn; its notices are settled so rule 4 does not wake it again.
+    if (this.botThreadRefusal(payload.threadId)) {
+      engine.store.db.transaction(() => {
+        if (engine.getRun(payload.runId)?.status === 'queued') engine.markTerminal(payload.runId, 'cancelled', { error: 'bot_thread_read_only' })
+        engine.inbox.markAcknowledged(rows.map((row) => row.inboxId))
+      })
+      return
+    }
     const session = this.getOrCreateSession(payload.threadId)
     const cancelWake = (restore: boolean): void => {
       engine.store.db.transaction(() => {
@@ -3844,7 +3889,7 @@ export class OrchestratorService extends EventEmitter {
       console.warn(`run engine tool ledger ${step} failed`, { runId, error: error instanceof Error ? error.message : String(error) })
     }
     return {
-      start: (call) => {
+      start: (call, options) => {
         try {
           const attemptId = engine.getRun(runId)?.activeAttemptId
           if (!attemptId) return undefined
@@ -3854,7 +3899,8 @@ export class OrchestratorService extends EventEmitter {
             attemptId,
             tool: call.name,
             argsDigest: toolArgsDigest(call.arguments),
-            now: now()
+            now: now(),
+            ...(options?.idempotent !== undefined ? { idempotent: options.idempotent } : {})
           }).invocationId
         } catch (error) {
           warn('start', error)
@@ -5480,6 +5526,8 @@ export class OrchestratorService extends EventEmitter {
   steerThread(threadId: string | undefined, text: string, subagentNotice?: SubagentNoticeItem[], carried?: { inboxIds: string[]; effectId: string }): boolean {
     const trimmed = text.trim()
     if (!trimmed || !threadId) return false
+    // Nothing is steered into a bot's turn: it runs exactly what its dispatch sent.
+    if (this.botThreadRefusal(threadId)) return false
     const session =
       this.boundSession.threadId === threadId
         ? this.boundSession
@@ -5526,6 +5574,7 @@ export class OrchestratorService extends EventEmitter {
     text: string,
     opts?: { source?: string }
   ): { steered: boolean; queued: boolean; item?: QueuedMessage } {
+    this.assertNotBotThread(threadId)
     if (this.steerThread(threadId, text)) {
       return { steered: true, queued: false }
     }
@@ -5846,6 +5895,12 @@ export class OrchestratorService extends EventEmitter {
       bot?: PreparedBotTurn
     }
   ): Promise<OrchestratorResponse> {
+    // One guard where every turn starts: a bot's thread runs only its bot dispatches.
+    const botRefusal = opts?.bot ? undefined : this.botThreadRefusal(session.threadId)
+    if (botRefusal) {
+      if (opts?.runId) this.refuseOnBotThread(opts.runId, session.threadId)
+      throw botRefusal
+    }
     // Admission is synchronous, before any await, so a concurrent send always observes it.
     if (!opts?.admissionHeld) {
       if (session.turnAdmitted) {
@@ -6611,7 +6666,7 @@ export class OrchestratorService extends EventEmitter {
         stagedApplets.push(validateAppletSubmission(value))
         return { queued: true, title: stagedApplets[stagedApplets.length - 1].title }
       } : undefined
-      const app = appTurn ? await this.completeAppTurn(appTurn.turn, { promptRuntime, browser: browserExecution, onPublishApplet, userContent, instanceId: instance.instanceId, model: selectedModel.model, approvals: binding.policy.approvals }) : undefined
+      const app = appTurn ? await this.completeAppTurn(appTurn.turn, { promptRuntime, browser: browserExecution, onPublishApplet, userContent, instanceId: instance.instanceId, model: selectedModel.model, approvals: opts?.bot ? 'never' : binding.policy.approvals, ...(opts?.bot?.instructions ? { botInstructions: opts.bot.instructions } : {}) }) : undefined
       const adapterHost: AdapterHost = {
         tools: {
           onPublishApplet,
@@ -6673,9 +6728,8 @@ export class OrchestratorService extends EventEmitter {
         control: turnControl,
         host: adapterHost,
         ...(app ? { app } : {}),
-        // A bot turn: its instructions, and the activation's shared counts and spend.
+        // A bot turn: the activation's shared counts and spend (its instructions are in the preamble).
         ...(opts?.bot ? {
-          ...(opts.bot.instructions ? { instructions: { text: opts.bot.instructions, placement: 'append' as const } } : {}),
           counters: opts.bot.authority.counters,
           ...(opts.bot.authority.spend ? { spend: opts.bot.authority.spend } : {})
         } : {})
@@ -6763,7 +6817,8 @@ export class OrchestratorService extends EventEmitter {
       const failure = this.messages.at(-1)!
       failure.error = providerError
       this.emitMessageUpdated(failure)
-      if (connectionFailed) {
+      // A bot turn is never retried as a plain turn (Retry is refused on its thread too).
+      if (connectionFailed && !opts?.bot) {
         this.failedConnectionRequest = input
         this.emit('connection-failed', { threadId: session.threadId, error: providerError })
       }
@@ -7495,6 +7550,7 @@ export class OrchestratorService extends EventEmitter {
     const session = threadId
       ? this.getOrCreateSession(threadId)
       : this.boundSession
+    this.assertNotBotThread(session.threadId)
     if (!session.failedConnectionRequest || session.isTurnRunning()) return false
     const request = session.failedConnectionRequest
     session.failedConnectionRequest = null

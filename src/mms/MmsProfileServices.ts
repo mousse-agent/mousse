@@ -37,7 +37,7 @@ import { ProfileDatabase } from './run/db/ProfileDatabase'
 import { McpCredentials } from './run/mcp/McpCredentials'
 import { MousseMcpServer } from './run/mcp/MousseMcpServer'
 import { EffectWorker, type EffectWorkerFibres } from './run/EffectWorker'
-import type { ThreadEvent } from './run/types'
+import { TERMINAL_RUN_STATUSES, type RunRecord, type ThreadEvent } from './run/types'
 import { Reconciler } from './run/Reconciler'
 import { RunEngine } from './run/RunEngine'
 import { BotEngine } from './bots/activation/BotEngine'
@@ -474,6 +474,16 @@ export class MmsProfileServices {
       stopThread: (threadId) => this.orchestrator.stopThread(threadId, 'user', { clientRequestId: `bot-stop:${threadId}:${Date.now()}` })
     })
     this.orchestrator.setBotThreads(this.personalBots)
+    // Every bot run that ends is settled, whatever path its turn took (no activation stays running).
+    const personalBots = this.personalBots
+    this.runEngine.on('event', (event: ThreadEvent) => {
+      if (event.type !== 'run.status') return
+      const run = event.payload as RunRecord
+      if (run.source !== 'bot' || !TERMINAL_RUN_STATUSES.has(run.status)) return
+      setImmediate(() => {
+        try { personalBots.settleRun(run.runId) } catch (error) { console.warn('bot dispatch could not be settled', { runId: run.runId, error: error instanceof Error ? error.message : String(error) }) }
+      })
+    })
     this.orchestrator.setBotDispatcher(this.personalBots)
     this.orchestrator.setWorkflowChatExecutor(this.platform.workflowChat)
     this.orchestrator.setFeatureFlags(this.config.get().features)
