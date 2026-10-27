@@ -132,10 +132,14 @@ export function normalizeAgentAccessSettings(raw?: Partial<AgentAccessSettings> 
   const malformed =
     ids !== undefined && ids !== null && (!Array.isArray(ids) || ids.some((id) => typeof id !== 'string' || id.length === 0))
   if (malformed) return { level: 'lineage', projectIds: [], answerApprovals: false }
+  const level = isAgentAccessLevel(raw?.level) ? raw.level : 'lineage'
   return {
-    level: isAgentAccessLevel(raw?.level) ? raw.level : 'lineage',
+    level,
     projectIds: Array.isArray(ids) ? [...new Set(ids as string[])] : [],
-    answerApprovals: raw?.answerApprovals === true
+    // Answering approvals is part of Manage. Below it the switch reads, and is saved, as off, whoever wrote the
+    // level (the Settings screen, a partial update from another client, a hand edit), so raising the level
+    // again never brings the permission back by itself.
+    answerApprovals: level === 'manage' && raw?.answerApprovals === true
   }
 }
 

@@ -168,7 +168,8 @@ export function AgentAccessSettings({
             <strong>Use with care.</strong> An agent can approve a command, a file change or a tool that
             another thread asked to run, in the projects above, without you seeing the request first. It can approve only what its own permission
             mode would allow without asking, never &ldquo;Always for this thread&rdquo;, and never its own thread. Each answer shows in that
-            thread as approved by an agent. Off by default, and switched off again when the level above is lowered.
+            thread as approved by an agent. Requests the provider asks for itself (such as Claude Code&rsquo;s own safety check) and turns you
+            started yourself stay yours. Off by default, and switched off again when the level above is lowered.
           </>}
           control={
             <Switch

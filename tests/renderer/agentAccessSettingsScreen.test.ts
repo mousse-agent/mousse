@@ -85,14 +85,15 @@ describe('Settings > Agents > Agent access', () => {
   })
 
   it('changing the level saves the whole setting, and the daemon reads it for new turns', () => {
+    // A stored switch below Manage reads as off (it cannot be on while the level is lower), so raising never turns it on.
     const { updates } = show({ level: 'read', projectIds: ['p2'], answerApprovals: true })
     pickLevel('Manage')
-    // The project list and the approvals switch travel with the level, so a save never drops them.
+    // The project list travels with the level, so a save never drops it.
     expect(updates).toHaveBeenCalledTimes(1)
-    expect(updates).toHaveBeenCalledWith({ agentAccess: { level: 'manage', projectIds: ['p2'], answerApprovals: true } })
+    expect(updates).toHaveBeenCalledWith({ agentAccess: { level: 'manage', projectIds: ['p2'], answerApprovals: false } })
     expect(trigger().textContent).toContain('Manage')
     expect(text()).toContain('full events and messages of other threads')
-    expect(savedByDaemon()).toEqual({ level: 'manage', projectIds: ['p2'], answerApprovals: true })
+    expect(savedByDaemon()).toEqual({ level: 'manage', projectIds: ['p2'], answerApprovals: false })
 
     pickLevel('Lineage only')
     expect(savedByDaemon().level).toBe('lineage')
