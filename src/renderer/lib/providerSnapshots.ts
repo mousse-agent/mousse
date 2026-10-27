@@ -162,6 +162,30 @@ export function clearOperation(operationId: string): void {
   })
 }
 
+type FinishedOperation = Extract<ProviderOperationEvent, { phase: 'completed' | 'failed' | 'cancelled' }>
+
+function finished(event: ProviderOperationEvent | undefined): event is FinishedOperation {
+  return event?.phase === 'completed' || event?.phase === 'failed' || event?.phase === 'cancelled'
+}
+
+/**
+ * Resolves with the operation's last event once it completed, failed or was cancelled. The event
+ * may arrive before the call that started the operation returned, so the store is read first.
+ */
+export function operationOutcome(operationId: string): Promise<FinishedOperation> {
+  ensureListening()
+  const current = useProviderSnapshotsStore.getState().operations[operationId]
+  if (finished(current)) return Promise.resolve(current)
+  return new Promise((resolve) => {
+    const unsubscribe = useProviderSnapshotsStore.subscribe((state) => {
+      const event = state.operations[operationId]
+      if (!finished(event)) return
+      unsubscribe()
+      resolve(event)
+    })
+  })
+}
+
 function ensureListening(): void {
   if (listening || typeof window === 'undefined' || !window.mousse?.providers?.onSnapshots) return
   listening = true

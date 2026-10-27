@@ -59,7 +59,7 @@ export function useProviderSpeechModels(select: (providers: readonly LlmProvider
         })
     }
     load()
-    const unsubscribe = window.mousse.providers.onChanged(load)
+    const unsubscribe = window.mousse.providers.onSnapshots(load)
     return () => {
       disposed = true
       unsubscribe()

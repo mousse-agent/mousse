@@ -8,6 +8,7 @@ import type { CliGlobals } from './parseArgs'
 import { resolveMousseHome } from './paths'
 import { exitWithError } from './output'
 import { connectDaemonClient, type DaemonClient } from './daemonClient'
+import { setProviderKey } from './providerSetup'
 
 export interface MmsContext {
   homeDir: string
@@ -45,12 +46,8 @@ export async function openMms(globals: CliGlobals): Promise<MmsContext> {
       }
       await client.request('settings.set', { partial })
     }
-    if (globals.apiKey && globals.provider) {
-      await client.request('providers.setApiKey', {
-        providerId: globals.provider,
-        apiKey: globals.apiKey
-      })
-    }
+    // Only an entry that is added takes the key; adding is `mousse config providers`.
+    if (globals.apiKey && globals.provider) await setProviderKey(client, globals.provider, globals.apiKey)
     return { homeDir, client }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)

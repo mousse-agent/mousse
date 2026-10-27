@@ -530,6 +530,8 @@ export interface ProviderAddOption {
   /** Where the environment's credentials come from (`ambient`). */
   ambientInfo?: { label: string; instructions: string[] }
   add: AddInstanceInput
+  /** The id `add` gives the entry, so a client finds the option of an entry without building ids. */
+  instanceId: string
   /** Already an entry of this profile (removed entries are not). */
   added: boolean
   /** A key for it is saved on this device already (shared by the profiles), so no key needs typing. */

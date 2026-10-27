@@ -1,9 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { FOLDED_TARGETS, foldedInto, type FoldedTarget } from '../../../shared/harness/move'
 import type { InstanceSnapshot } from '../../../shared/harness/status'
-import type { HarnessDriverKind, InstanceConfigPatch, RegistryAgentView } from '../../../shared/harness/types'
-import type { ProviderLoginOption, ProviderLoginResult } from '../../../shared/providerAuth'
-import { piInstanceId } from '../../../shared/providerInstances'
+import type { AddOptionMethod, HarnessDriverKind, InstanceConfigPatch, ProviderAddOption, RegistryAgentView } from '../../../shared/harness/types'
 import { Check } from '../../lib/icons'
 import { ProviderIcon } from '../../lib/providerIcons'
 import { llmProviderOf } from '../../lib/providerSnapshots'
@@ -28,16 +26,13 @@ export const SETUP_INFO: Record<CodexSetup, { label: string; description: string
   }
 }
 
-/** How a model API connects, from its login option. */
-function connectKind(option: ProviderLoginOption): ConnectKind {
-  if (option.ambient) return 'cloud'
-  return option.authType === 'oauth' ? 'subscription' : 'api_key'
-}
+/** How a model API connects with one of its Add option's methods. */
+const CONNECT_KIND: Record<AddOptionMethod, ConnectKind> = { oauth: 'subscription', api_key: 'api_key', ambient: 'cloud' }
 
 /**
  * A choice in the Provider step. An agent is added as a new instance: the first on the user's own
  * setup, a further one (where the agent allows it) as another account. A model API is one choice
- * with each of its sign-in methods (`options`), picked in the Sign-in method step.
+ * from `providers.catalog.addOptions`, with its sign-in methods picked in the Sign-in method step.
  */
 export type AddChoice =
   | {
@@ -55,7 +50,7 @@ export type AddChoice =
       /** The agent on a model API's key (`FOLDED_TARGETS`): Claude Code with an Anthropic API key. */
       target?: FoldedTarget
     }
-  | { kind: 'api'; key: string; label: string; iconId: string; group: string; options: ProviderLoginOption[] }
+  | { kind: 'api'; key: string; label: string; iconId: string; group: string; option: ProviderAddOption; methods: AddOptionMethod[] }
   /** An agent picked from the ACP registry, installed by Mousse as an entry of `driver`. */
   | { kind: 'registry'; key: string; label: string; iconId: string; group: string; driver: HarnessDriverKind }
 
@@ -65,18 +60,14 @@ const API_GROUP: Record<ConnectKind, string> = { subscription: 'Subscriptions', 
 const KIND_ORDER: ConnectKind[] = ['subscription', 'api_key', 'cloud']
 const METHOD_LABEL: Record<ConnectKind, string> = { subscription: 'Sign in', api_key: 'API key', cloud: 'Cloud credentials' }
 
-/** A sign-in method's key, unique within its provider. */
-export function methodKey(option: ProviderLoginOption): string {
-  return `${option.authType}${option.ambient ? ':ambient' : ''}`
-}
 
 /** An agent entry that runs on a model API's key (`FOLDED_TARGETS`), not on the agent's own sign-in. */
 export function onFoldedKey(snapshot: Pick<InstanceSnapshot, 'driver' | 'config'>): boolean {
   return Object.entries(FOLDED_TARGETS).some(([providerId, target]) => foldedInto(providerId) === snapshot.driver && snapshot.config?.loginMethod === target.loginMethod)
 }
 
-/** What the dialog offers, from the device snapshots and the model APIs not connected yet. */
-export function addChoices(snapshots: readonly InstanceSnapshot[], loginOptions: readonly ProviderLoginOption[]): AddChoice[] {
+/** What the dialog offers, from the device snapshots and the model APIs not added yet. */
+export function addChoices(snapshots: readonly InstanceSnapshot[], addOptions: readonly ProviderAddOption[]): AddChoice[] {
   const choices: AddChoice[] = []
   for (const [driver, info] of Object.entries(DRIVER_INFO) as Array<[HarnessDriverKind, (typeof DRIVER_INFO)[HarnessDriverKind]]>) {
     if (info.family !== 'agent') continue
@@ -131,27 +122,21 @@ export function addChoices(snapshots: readonly InstanceSnapshot[], loginOptions:
       target
     })
   }
-  // Agents sign in through their own instance; their login options are not model APIs. A model API
-  // that now runs as an agent (`FOLDED_INTO_AGENT`) is added as that agent only.
+  // Agents sign in through their own instance, so a provider one of them serves is not a model API
+  // here. A model API that now runs as an agent (`FOLDED_INTO_AGENT`) is added as that agent only.
   const agentProviders = new Set(snapshots.filter((snapshot) => !isApiInstance(snapshot)).map(llmProviderOf))
-  const methods = new Map<string, ProviderLoginOption[]>()
-  for (const option of loginOptions) {
-    if (option.configured || agentProviders.has(option.id) || foldedInto(option.id)) continue
-    const listed = methods.get(option.id)
-    if (!listed) methods.set(option.id, [option])
-    else if (!listed.some((entry) => methodKey(entry) === methodKey(option))) listed.push(option)
-  }
-  // One entry per provider, under the group of its first method.
-  for (const [id, options] of methods) {
-    options.sort((a, b) => KIND_ORDER.indexOf(connectKind(a)) - KIND_ORDER.indexOf(connectKind(b)))
-    choices.push({ kind: 'api', key: `api:${id}`, label: options[0]!.label, iconId: id, group: API_GROUP[connectKind(options[0]!)], options })
+  for (const option of addOptions) {
+    if (option.added || !option.methods.length || agentProviders.has(option.id) || foldedInto(option.id)) continue
+    // One entry per provider, under the group of its first method.
+    const methods = [...option.methods].sort((a, b) => KIND_ORDER.indexOf(CONNECT_KIND[a]) - KIND_ORDER.indexOf(CONNECT_KIND[b]))
+    choices.push({ kind: 'api', key: `api:${option.id}`, label: option.label, iconId: option.id, group: API_GROUP[CONNECT_KIND[methods[0]!]], option, methods })
   }
   return choices
 }
 
 /** The choice's tooltip: a model API's sign-in methods, an agent's one-line description. */
 function choiceHint(choice: AddChoice): string | undefined {
-  if (choice.kind === 'api') return choice.options.map((option) => option.description).filter(Boolean).join(' · ') || undefined
+  if (choice.kind === 'api') return choice.option.description
   if (choice.kind === 'registry') return DRIVER_INFO[choice.driver].registry?.description
   return DRIVER_INFO[choice.driver].description
 }
@@ -201,8 +186,11 @@ function WizardSteps({
 export interface AddProviderHandlers {
   /** Adds a new instance (its id from `slug` when given); resolves with its id. */
   add: (driver: HarnessDriverKind, config: InstanceConfigPatch, slug?: string) => Promise<string>
-  onApiConnected: (providerId: string) => Promise<void>
-  runLogin: (login: () => Promise<ProviderLoginResult>) => Promise<ProviderLoginResult>
+  /**
+   * Adds a model API (`option.add`), then saves `apiKey` or runs its sign-in with `method`
+   * (nothing when a credential is saved on this device already); resolves with the entry's id.
+   */
+  connectApi: (option: ProviderAddOption, method: AddOptionMethod, apiKey: string) => Promise<string>
 }
 
 /**
@@ -213,14 +201,14 @@ export interface AddProviderHandlers {
 export function AddProviderDialog({
   open,
   snapshots,
-  loginOptions,
+  addOptions,
   handlers,
   onClose,
   onFinished
 }: {
   open: boolean
   snapshots: readonly InstanceSnapshot[]
-  loginOptions: readonly ProviderLoginOption[]
+  addOptions: readonly ProviderAddOption[]
   handlers: AddProviderHandlers
   onClose: () => void
   /** The instance that was added or turned on; select it in the list. */
@@ -252,21 +240,21 @@ export function AddProviderDialog({
     registryAdded.current = null
   }, [open, setError])
 
-  const choices = useMemo(() => addChoices(snapshots, loginOptions), [snapshots, loginOptions])
+  const choices = useMemo(() => addChoices(snapshots, addOptions), [snapshots, addOptions])
   const shown = choices.filter((choice) => matches(query, choice.label, choice.key))
   const groups = GROUP_ORDER.map((group) => ({
     group,
     items: shown.filter((choice) => choice.group === group).sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }))
   })).filter((group) => group.items.length > 0)
   const selected = choices.find((choice) => choice.key === selectedKey) ?? null
-  /** The sign-in method of a model API: the one chosen in Identity, else its first. */
-  const apiOption = selected?.kind === 'api' ? (selected.options.find((option) => methodKey(option) === method) ?? selected.options[0]!) : undefined
+  /** The sign-in method of a model API: the one chosen in its step, else its first. */
+  const apiMethod = selected?.kind === 'api' ? (selected.methods.find((entry) => entry === method) ?? selected.methods[0]!) : undefined
 
   const choose = (choice: AddChoice) => {
     setSelectedKey(choice.key)
     setError(null)
     setRegistryAgent(null)
-    setMethod(choice.kind === 'api' ? methodKey(choice.options[0]!) : '')
+    setMethod(choice.kind === 'api' ? choice.methods[0]! : '')
     if (choice.kind === 'new' && choice.setups) setSetup(choice.setups[0]!)
     if (choice.kind === 'new' && choice.target) {
       const base = choice.target.displayName
@@ -277,13 +265,13 @@ export function AddProviderDialog({
     }
   }
 
-  const signInStep = apiOption !== undefined && connectKind(apiOption) === 'subscription'
+  const signInStep = apiMethod !== undefined && CONNECT_KIND[apiMethod] === 'subscription'
   /** A middle step only when there is a real choice to make: the sign-in method of a model API. */
-  const methodStep = selected?.kind === 'api' && selected.options.length > 1
+  const methodStep = selected?.kind === 'api' && selected.methods.length > 1
   const lastStep = signInStep ? 'Sign in' : selected?.kind === 'api' ? 'Connect' : selected?.kind === 'registry' ? 'Agent' : 'Add'
   const steps = methodStep ? ['Provider', 'Sign-in method', lastStep] : ['Provider', lastStep]
   const last = steps.length - 1
-  const summaries = [selected?.label ?? null, ...(methodStep && apiOption ? [METHOD_LABEL[connectKind(apiOption)]] : []), null]
+  const summaries = [selected?.label ?? null, ...(methodStep && apiMethod ? [METHOD_LABEL[CONNECT_KIND[apiMethod]]] : []), null]
 
   const goTo = (next: number) => {
     setError(null)
@@ -398,18 +386,18 @@ export function AddProviderDialog({
           </div>
         )}
 
-        {step === 1 && methodStep && selected?.kind === 'api' && apiOption && (
+        {step === 1 && methodStep && selected?.kind === 'api' && apiMethod && (
           <div className="prov-wizard-panel">
             <SettingsGroup>
               <SettingsRow
                 title="Sign-in method"
-                description={apiOption.description && apiOption.description !== apiOption.label ? apiOption.description : undefined}
+                description={selected.option.description && selected.option.description !== selected.option.label ? selected.option.description : undefined}
                 control={
                   <Segmented
                     ariaLabel="Sign-in method"
-                    value={methodKey(apiOption)}
+                    value={apiMethod}
                     onChange={setMethod}
-                    options={selected.options.map((option) => ({ value: methodKey(option), label: METHOD_LABEL[connectKind(option)] }))}
+                    options={selected.methods.map((entry) => ({ value: entry, label: METHOD_LABEL[CONNECT_KIND[entry]] }))}
                   />
                 }
               />
@@ -575,23 +563,21 @@ export function AddProviderDialog({
           </div>
         )}
 
-        {step === last && selected?.kind === 'api' && apiOption && (
+        {step === last && selected?.kind === 'api' && apiMethod && (
           <div className="prov-wizard-panel">
             <SettingsGroup>
               <ConnectStep
-                key={methodKey(apiOption)}
-                option={apiOption}
+                key={apiMethod}
+                option={selected.option}
+                method={apiMethod}
                 busy={busy === selected.key}
                 disabled={busy !== null}
                 error={error}
-                onConnect={(connect) =>
+                onConnect={(apiKey) =>
                   void run(selected.key, async () => {
-                    await connect()
-                    await handlers.onApiConnected(apiOption.id)
-                    finish(piInstanceId(apiOption.id))
+                    finish(await handlers.connectApi(selected.option, apiMethod, apiKey))
                   })
                 }
-                runLogin={handlers.runLogin}
               />
             </SettingsGroup>
           </div>
@@ -862,65 +848,48 @@ export function CustomCommandStep({
   )
 }
 
-/** The one row under a chosen model API: what to enter or do, then the connect button. */
+/**
+ * The one row under a chosen model API: what to enter or do, then the connect button. A credential
+ * another profile saved on this device is used as it is; a pasted key replaces it.
+ */
 export function ConnectStep({
   option,
+  method,
   busy,
   disabled,
   error,
-  onConnect,
-  runLogin
+  onConnect
 }: {
-  option: ProviderLoginOption
+  option: ProviderAddOption
+  method: AddOptionMethod
   busy: boolean
   disabled: boolean
   error: string | null
-  onConnect: (connect: () => Promise<void>) => void
-  runLogin: (login: () => Promise<ProviderLoginResult>) => Promise<ProviderLoginResult>
+  /** `apiKey` is the pasted key, or '' for a sign-in, a guided key or the saved credential. */
+  onConnect: (apiKey: string) => void
 }) {
   const [apiKey, setApiKey] = useState('')
-  const [instructions, setInstructions] = useState<string[]>([])
-  useEffect(() => {
-    if (!option.ambient) return
-    void window.mousse.providers
-      .getAmbientInfo(option.id)
-      .then((info) => setInstructions(info?.instructions ?? []))
-      .catch(() => {})
-  }, [option.ambient, option.id])
+  const kind = CONNECT_KIND[method]
+  const keyField = kind === 'api_key' && !option.guidedKey
+  const saved = option.hasSavedKey
+  const connect = () => onConnect(keyField ? apiKey.trim() : '')
 
-  const ensure = (result: ProviderLoginResult, fallback: string) => {
-    if (!result.success) throw new Error(result.error ?? fallback)
-  }
-  const kind = connectKind(option)
-  const keyField = kind === 'api_key' && !option.guidedLogin
-  const connect = () =>
-    onConnect(async () => {
-      if (kind === 'cloud') {
-        ensure(await window.mousse.providers.verifyAmbient(option.id), 'Could not verify the credentials.')
-      } else if (kind === 'subscription') {
-        ensure(await runLogin(() => window.mousse.providers.loginOAuth(option.id)), 'Sign-in failed.')
-      } else if (!keyField || !apiKey.trim()) {
-        ensure(await runLogin(() => window.mousse.providers.loginApiKey(option.id)), 'API key setup failed.')
-      } else {
-        await window.mousse.providers.setApiKey(option.id, apiKey.trim())
-      }
-    })
-
-  const idle = kind === 'subscription' ? 'Sign in' : keyField || kind === 'cloud' ? 'Connect' : 'Set up'
+  const idle = saved && !(keyField && apiKey.trim()) ? 'Add' : kind === 'subscription' ? 'Sign in' : keyField || kind === 'cloud' ? 'Connect' : 'Set up'
   const action = (
     <button type="button" className="settings-btn" disabled={disabled} onClick={connect}>
       {busy ? 'Connecting…' : idle}
     </button>
   )
   const extra = option.description && option.description !== option.label ? option.description : undefined
+  const savedNote = `${option.label} is already set up on this device. Add uses it.`
   const step: { title: string; description?: string } =
     kind === 'cloud'
-      ? { title: 'Credentials', description: instructions.join(' ') || undefined }
+      ? { title: 'Credentials', description: saved ? savedNote : option.ambientInfo?.instructions.join(' ') || undefined }
       : kind === 'subscription'
-        ? { title: 'Sign-in', description: extra }
+        ? { title: 'Sign-in', description: saved ? savedNote : extra }
         : keyField
-          ? { title: 'API key', description: 'Leave blank for guided setup' }
-          : { title: 'API key', description: extra ?? 'Guided setup' }
+          ? { title: 'API key', description: saved ? `A key for ${option.label} is saved on this device. Paste another to replace it.` : 'Leave blank for guided setup' }
+          : { title: 'API key', description: saved ? savedNote : (extra ?? 'Guided setup') }
 
   return (
     <SettingsRow
@@ -934,7 +903,7 @@ export function ConnectStep({
               type="password"
               value={apiKey}
               autoFocus
-              placeholder={`${option.label} key`}
+              placeholder={saved ? 'Saved key' : `${option.label} key`}
               aria-label={`${option.label} API key`}
               onChange={(event) => setApiKey(event.target.value)}
               onKeyDown={(event) => {

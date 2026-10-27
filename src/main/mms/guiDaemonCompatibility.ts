@@ -1,4 +1,4 @@
-import type { LocalMmsClient } from '../../mms/protocol/client'
+import { isProtocolVersionMismatch, type LocalMmsClient } from '../../mms/protocol/client'
 import { MMS_PROTOCOL_VERSION, type ProtocolHelloOk } from '../../mms/protocol/types'
 import { BOTS_PERSONAL_METHODS } from '../../shared/bots/personal/methods'
 
@@ -15,7 +15,8 @@ export const GUI_REQUIRED_METHODS = [
   'storage.usage',
   'subagents.list',
   // Settings → Providers runs on the harness gateway; an older service lacks it.
-  'providers.snapshots', 'providers.instances.add', 'providers.instances.remove', 'providers.instances.configure',
+  'providers.snapshots', 'providers.catalog.addOptions', 'providers.instances.add', 'providers.instances.setSecret',
+  'providers.instances.remove', 'providers.instances.configure',
   'providers.instances.setEnabled', 'providers.instances.install', 'providers.instances.cancelInstall',
   'providers.instances.update', 'providers.instances.signIn', 'providers.instances.respondSignIn',
   'providers.instances.signOut', 'providers.instances.recheck', 'providers.instances.refreshModels', 'providers.instances.refreshAllModels',
@@ -28,8 +29,28 @@ export const GUI_REQUIRED_METHODS = [
   ...BOTS_PERSONAL_METHODS
 ] as const
 
+function recoveryText(homeDir: string): string {
+  return `The running Mousse service is incompatible with this app or its API support could not be verified. Let active tasks finish, then run mousse-cli service stop --home ${JSON.stringify(homeDir)} (or, from a source checkout, node out/cli/index.js service stop --home ${JSON.stringify(homeDir)}), then reopen Mousse. The service has not been stopped automatically.`
+}
+
+/**
+ * Connects and checks the service: one that refuses this app's protocol version (an older or newer
+ * service) gets the same recovery text as one that lacks an API.
+ */
+export async function connectGuiClient(client: LocalMmsClient, homeDir: string): Promise<ProtocolHelloOk> {
+  let hello: ProtocolHelloOk
+  try {
+    hello = await client.connect()
+  } catch (error) {
+    if (isProtocolVersionMismatch(error)) throw new Error(`${recoveryText(homeDir)} The service uses another protocol version than this app (${MMS_PROTOCOL_VERSION}).`)
+    throw error
+  }
+  await assertGuiDaemonCompatible(client, hello, homeDir)
+  return hello
+}
+
 export async function assertGuiDaemonCompatible(client: LocalMmsClient, hello: ProtocolHelloOk, homeDir: string): Promise<void> {
-  const recovery = `The running Mousse service is incompatible with this app or its API support could not be verified. Let active tasks finish, then run mousse-cli service stop --home ${JSON.stringify(homeDir)} (or, from a source checkout, node out/cli/index.js service stop --home ${JSON.stringify(homeDir)}), then reopen Mousse. The service has not been stopped automatically.`
+  const recovery = recoveryText(homeDir)
   if (hello.protocolVersion !== MMS_PROTOCOL_VERSION) throw new Error(`${recovery} Incompatible protocol version ${hello.protocolVersion}.`)
   let result: { protocolVersion?: unknown; methods?: unknown }
   try { result = await client.request('capabilities') }

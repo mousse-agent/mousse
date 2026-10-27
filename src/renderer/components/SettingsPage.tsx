@@ -155,7 +155,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
   useEffect(() => {
     if (!settingsOpen) return
-    const unsub = window.mousse.providers.onChanged(() => {
+    const unsub = window.mousse.providers.onSnapshots(() => {
       void refreshProviderData()
     })
     return unsub

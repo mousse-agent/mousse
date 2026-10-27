@@ -8,7 +8,8 @@ import { spawn } from 'child_process'
 import { fileURLToPath } from 'url'
 import { existsSync } from 'fs'
 import { join } from 'path'
-import { LocalMmsClient } from '../mms/protocol/client'
+import { isProtocolVersionMismatch, LocalMmsClient } from '../mms/protocol/client'
+import { MMS_PROTOCOL_VERSION } from '../mms/protocol/types'
 import { PROFILES_V1_CAPABILITY } from '../shared/profiles/types'
 import { WORKFLOW_RUN_CAPABILITY } from '../shared/workflowRunPlatform'
 import { BROWSER_SETUP_CAPABILITY } from '../shared/browser/setup'
@@ -37,6 +38,14 @@ export interface DaemonClient {
   client: LocalMmsClient
   request: <T = unknown>(method: string, params?: unknown) => Promise<T>
   close: () => Promise<void>
+}
+
+/**
+ * What the CLI says when the running service speaks another protocol version (an older or newer
+ * Mousse): the same recovery as the app's, stop the service and run again.
+ */
+export function protocolMismatchText(homeDir: string): string {
+  return `The running Mousse service uses another protocol version than this command (${MMS_PROTOCOL_VERSION}). Let active tasks finish, then run mousse-cli service stop --home ${JSON.stringify(homeDir)} (or, from a source checkout, node out/cli/index.js service stop --home ${JSON.stringify(homeDir)}), then run the command again. The service has not been stopped automatically.`
 }
 
 /**
@@ -101,7 +110,12 @@ export async function connectDaemonClient(
     ],
     requestTimeoutMs: opts.requestTimeoutMs
   })
-  await client.connect()
+  try {
+    await client.connect()
+  } catch (error) {
+    if (isProtocolVersionMismatch(error)) throw new Error(protocolMismatchText(homeDir))
+    throw error
+  }
 
   return {
     homeDir,

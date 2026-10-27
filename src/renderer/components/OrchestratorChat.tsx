@@ -425,7 +425,7 @@ export function OrchestratorChat() {
     const unsubSettings = window.mousse.settings.onChanged(() => {
       void refreshSelection()
     })
-    const unsubProviders = window.mousse.providers.onChanged(() => {
+    const unsubProviders = window.mousse.providers.onSnapshots(() => {
       void refreshSelection()
     })
     const unsubSkills = window.mousse.skills.onChanged(() => {

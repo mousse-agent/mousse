@@ -1,9 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { LlmProviderOption, MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../../../shared/settings'
-import type { ProviderLoginOption, ProviderLoginResult } from '../../../shared/providerAuth'
 import { describeStatus, type InstanceSnapshot } from '../../../shared/harness/status'
-import type { HarnessDriverKind, InstanceConfigPatch, ProviderScope } from '../../../shared/harness/types'
-import { piProviderIdOf } from '../../../shared/providerInstances'
+import type { AddOptionMethod, HarnessDriverKind, InstanceConfigPatch, ProviderAddOption, ProviderScope } from '../../../shared/harness/types'
 import { Plus, RefreshCw, Sparkles } from '../../lib/icons'
 import { saveModelPrefs, useLegacyFavoritesImport } from '../../lib/modelFavorites'
 import {
@@ -11,6 +9,7 @@ import {
   applySnapshot,
   loadProviderSnapshots,
   modelPrefsByInstance,
+  operationOutcome,
   projectScope,
   removeSnapshot,
   sortInstances,
@@ -19,7 +18,6 @@ import {
   useRunningOperation
 } from '../../lib/providerSnapshots'
 import { useAppStore } from '../../stores/appStore'
-import { ProviderLoginModal } from '../ProviderLoginModal'
 import { Select } from '../ui/Select'
 import { AddProviderDialog, type AddProviderHandlers } from './AddProviderDialog'
 import { ApiSetupRow } from './ApiSections'
@@ -52,8 +50,20 @@ function withoutHiddenModels(providers: LlmProviderOption[]): LlmProviderOption[
     .filter((provider) => provider.models.length > 0)
 }
 
-function ensureSignedIn(result: ProviderLoginResult, fallback: string): void {
-  if (!result.success) throw new Error(result.error ?? fallback)
+/** How a model API entry signs in again: by its saved credential, else by its Add option's first method. */
+function apiMethodOf(snapshot: InstanceSnapshot, option: ProviderAddOption | undefined): AddOptionMethod | undefined {
+  const credential = snapshot.auth.credential
+  if (credential === 'subscription') return 'oauth'
+  if (credential === 'ambient') return 'ambient'
+  if (credential === 'api_key') return 'api_key'
+  return option?.methods[0]
+}
+
+/** What Remove does to the entry's credential, which pi-ai keeps for every profile on this device. */
+function apiRemoveHint(name: string, method: AddOptionMethod | undefined, retired: boolean): string {
+  if (method === 'ambient') return `Removes ${name}. Your cloud credentials stay as they are.`
+  if (method === 'oauth' || retired) return `Removes ${name} and signs it out. Other profiles on this device that use this sign-in lose it too.`
+  return `Removes ${name} and deletes its saved key. Other profiles on this device that use the key lose it too.`
 }
 
 /**
@@ -80,8 +90,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
 
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [addOpen, setAddOpen] = useState(false)
-  const [loginOptions, setLoginOptions] = useState<ProviderLoginOption[]>([])
-  const [loginActive, setLoginActive] = useState(false)
+  const [addOptions, setAddOptions] = useState<ProviderAddOption[]>([])
   const [signIn, setSignIn] = useState<{ operationId: string; name: string } | null>(null)
   const [pageError, setPageError] = useState<string | null>(null)
   /** Something a finished action wants the user to know (files kept after a remove). */
@@ -89,14 +98,14 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
   const refreshing = useAsyncAction()
   const refreshingModels = useAsyncAction()
 
-  // Model APIs still connect through the provider login methods; their options say what is connected.
-  const loadLoginOptions = useCallback(async () => {
-    setLoginOptions(await window.mousse.providers.getLoginOptions())
+  // What Add provider offers for model APIs, and how each one signs in; a change to any entry may change `added`.
+  const loadAddOptions = useCallback(async () => {
+    setAddOptions(await window.mousse.providers.catalog.addOptions())
   }, [])
   useEffect(() => {
-    void loadLoginOptions().catch(() => {})
-    return window.mousse.providers.onChanged(() => void loadLoginOptions().catch(() => {}))
-  }, [loadLoginOptions])
+    void loadAddOptions().catch(() => {})
+    return window.mousse.providers.onSnapshots(() => void loadAddOptions().catch(() => {}))
+  }, [loadAddOptions])
 
   // A failed install or update reports here; a failed sign-in stays in its dialog. A sign-in that
   // finished with a warning (its old sign-in still waits to be revoked) says so here once its
@@ -138,13 +147,16 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
     }
   }
 
-  const runLogin = async (login: () => Promise<ProviderLoginResult>) => {
-    setLoginActive(true)
-    try {
-      return await login()
-    } finally {
-      setLoginActive(false)
-    }
+  /**
+   * Starts the instance's sign-in and waits for its outcome. A browser sign-in or a guided key shows
+   * its prompts in the sign-in dialog; the environment's credentials are only checked.
+   */
+  const runSignIn = async (instanceId: string, name: string, method: AddOptionMethod) => {
+    const started = await window.mousse.providers.instances.signIn(instanceId, method)
+    if (method !== 'ambient') setSignIn({ operationId: started.operationId, name })
+    const outcome = await operationOutcome(started.operationId)
+    if (outcome.phase === 'failed') throw new Error(outcome.error.message)
+    if (outcome.phase === 'cancelled') throw new Error('Sign-in was cancelled.')
   }
 
   const setEnabled = async (snapshot: InstanceSnapshot, target: ProviderScope, enabled: boolean | null) => {
@@ -212,15 +224,22 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
       if (scope.kind === 'project') void reload()
       return snapshot.instanceId
     },
-    onApiConnected: async (providerId) => {
-      await loadLoginOptions().catch(() => {})
+    // Add (idempotent: a retry after a failed sign-in finds the entry), then the pasted key or the
+    // sign-in. A credential saved on this device already (by another profile) needs neither.
+    connectApi: async (option, method, apiKey) => {
+      const { instances } = window.mousse.providers
+      const added = await instances.add(option.add)
+      applySnapshot(added)
+      if (method === 'api_key' && apiKey) applySnapshot(await instances.setSecret(added.instanceId, apiKey))
+      else if (!option.hasSavedKey) await runSignIn(added.instanceId, added.displayName, method)
+      await loadAddOptions().catch(() => {})
       await loadProviderSnapshots(DEVICE_SCOPE)
       if (scope.kind === 'project') void reload()
-      const instance = useProviderSnapshotsStore.getState().scopes.device?.snapshots?.find((entry) => piProviderIdOf(entry.instanceId) === providerId)
+      const instance = useProviderSnapshotsStore.getState().scopes.device?.snapshots?.find((entry) => entry.instanceId === added.instanceId)
       if (instance && !instance.enabled.device) await setEnabled(instance, DEVICE_SCOPE, true)
       else await reconcileSelection()
-    },
-    runLogin
+      return added.instanceId
+    }
   }
 
   const renderEditor = (snapshot: InstanceSnapshot) => {
@@ -231,32 +250,35 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
       if (patch.hidden || patch.hide?.length) await reconcileSelection()
     }
     if (isApiInstance(snapshot)) {
-      const providerId = piProviderIdOf(snapshot.instanceId) ?? snapshot.instanceId
-      const option =
-        loginOptions.find((entry) => entry.id === providerId && entry.configured) ?? loginOptions.find((entry) => entry.id === providerId)
+      const { instances } = window.mousse.providers
+      const option = addOptions.find((entry) => entry.instanceId === snapshot.instanceId)
+      const method = apiMethodOf(snapshot, option)
+      const retired = snapshot.nextStep?.action === 'move'
       return (
         <ApiEditor
           snapshot={snapshot}
-          removeHint={option?.ambient ? undefined : option?.authType === 'oauth' || snapshot.nextStep?.action === 'move' ? 'Signs out' : 'Deletes the saved key'}
+          removeHint={apiRemoveHint(snapshot.displayName, method, retired)}
           onRemove={async () => {
-            await window.mousse.providers.logout(providerId)
-            await reload()
+            await instances.remove(snapshot.instanceId)
+            removeSnapshot(snapshot.instanceId)
+            setSelectedId(null)
             await reconcileSelection()
           }}
           setup={
             <ApiSetupRow
-              providerId={providerId}
               label={snapshot.displayName}
-              option={option}
+              method={method}
+              guidedKey={option?.guidedKey === true}
+              ambientInstructions={option?.ambientInfo?.instructions}
               status={status}
-              retired={snapshot.nextStep?.action === 'move'}
+              retired={retired}
               onReplaceKey={async (apiKey) => {
-                if (apiKey) await window.mousse.providers.setApiKey(providerId, apiKey)
-                else ensureSignedIn(await runLogin(() => window.mousse.providers.loginApiKey(providerId)), 'API key setup failed.')
+                if (apiKey) applySnapshot(await instances.setSecret(snapshot.instanceId, apiKey))
+                else await runSignIn(snapshot.instanceId, snapshot.displayName, 'api_key')
                 await reload()
               }}
               onSignIn={async () => {
-                ensureSignedIn(await runLogin(() => window.mousse.providers.loginOAuth(providerId)), 'Sign-in failed.')
+                await runSignIn(snapshot.instanceId, snapshot.displayName, 'oauth')
                 await reload()
               }}
             />
@@ -302,12 +324,11 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
     setPageError(null)
     setPageNotice(null)
     setAddOpen(true)
-    void loadLoginOptions().catch(() => {})
+    void loadAddOptions().catch(() => {})
   }
 
   return (
     <div className="prov-page">
-      <ProviderLoginModal active={loginActive} onClose={() => setLoginActive(false)} />
       <SignInDialog operationId={signIn?.operationId ?? null} name={signIn?.name ?? ''} onClose={() => setSignIn(null)} />
 
       <div className="prov-toolbar">
@@ -408,7 +429,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
       <AddProviderDialog
         open={addOpen}
         snapshots={deviceSnapshots ?? []}
-        loginOptions={loginOptions}
+        addOptions={addOptions}
         handlers={addHandlers}
         onClose={() => setAddOpen(false)}
         onFinished={setSelectedId}

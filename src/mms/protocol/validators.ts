@@ -5,7 +5,6 @@ import { knownAppError, parseErrorInfo } from '../../shared/errors'
  */
 
 import type { ChatImageAttachment, ChatMode, ScheduledJobWorkspace } from '../../shared/types'
-import type { ProviderLoginResponse } from '../../shared/providerAuth'
 import { PROVIDER_DRIVER_KINDS, type ModelOverride } from '../../shared/providerInstances'
 import { isAgentAccessLevel } from '../../shared/settings'
 import { isPermissionMode, type PermissionMode } from '../../shared/permissionMode'
@@ -473,21 +472,6 @@ export function asOptionalChannelPlatform(
 export function asScope(v: unknown, name = 'scope'): 'global' | 'project' {
   if (v !== 'global' && v !== 'project') throw new Error(`${name} must be global|project`)
   return v
-}
-
-export function asProviderLoginResponse(v: unknown): ProviderLoginResponse {
-  const response = asPlainObject(v, 'response')
-  const allowed = new Set(['sessionId', 'kind', 'value'])
-  for (const key of Object.keys(response)) {
-    if (!allowed.has(key)) throw new Error(`response contains unknown field: ${key}`)
-  }
-  const sessionId = asString(response.sessionId, 'response.sessionId', 256)
-  const kind = response.kind
-  if (kind !== 'prompt' && kind !== 'select' && kind !== 'manual_code' && kind !== 'cancel') {
-    throw new Error('response.kind must be prompt|select|manual_code|cancel')
-  }
-  const value = asOptionalString(response.value, MMS_PROTOCOL_MAX_TEXT_LENGTH)
-  return value === undefined ? { sessionId, kind } : { sessionId, kind, value }
 }
 
 // ── Harness gateway (`providers.snapshots`, `providers.instances.*`) ────────

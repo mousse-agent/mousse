@@ -44,7 +44,6 @@ import type { AttachedBrowserHost } from '../browser/AttachedBrowserHost'
 import { domainObject } from '../../mms/protocol/domainRegistry'
 import { profileBrowserPartition } from '../browser/browserPolicy'
 import { ThreadActivityTracker } from '../data/ThreadActivityTracker'
-import type { ProviderLoginEvent } from '../../shared/providerAuth'
 import { LOCAL_TTS_MODELS, type ProviderSpeechRequest, type ProviderSpeechResult } from '../../shared/readAloud'
 import { SPEECH_HOST_METHODS } from '../../shared/speechRelay'
 import {
@@ -139,7 +138,6 @@ import type {
   StartPullRequestThreadResult
 } from '../../shared/pullRequests'
 import { visibleThreads } from '../../shared/threadLineage'
-import type { ProviderLoginResponse } from '../../shared/providerAuth'
 import type {
   GitHubCloneRepositoryInput,
   GitHubCreateRepositoryInput
@@ -2215,10 +2213,6 @@ export function registerGuiIpc(
   registerHandler('lineEdits:getStats', () => guiMms.request('stats.lineEdits'))
   registerHandler('usageStats:getStats', () => guiMms.request('stats.usage'))
 
-  registerHandler('providers:listConfigured', async () => {
-    const res = await guiMms.request<{ providers: unknown[] }>('providers.listConfigured')
-    return res.providers
-  })
   registerHandler('providers:getUsage', async () =>
     guiMms.request('providers.getUsage')
   )
@@ -2227,31 +2221,6 @@ export function registerGuiIpc(
       providerId
     })
     return res.usage
-  })
-  registerHandler('providers:getLoginOptions', async (_e, authType?: 'api_key' | 'oauth') => {
-    const res = await guiMms.request<{ options: unknown[] }>('providers.getLoginOptions', {
-      authType
-    })
-    return res.options
-  })
-  registerHandler('providers:refreshModels', async (_e, providerId: string) => {
-    const res = await guiMms.request<{ options: unknown[] }>('providers.refreshModels', { providerId })
-    const configured = await guiMms.request<{ providers: unknown[] }>('providers.listConfigured')
-    broadcast('providers:changed', configured.providers)
-    return res.options
-  })
-  registerHandler('providers:getAmbientInfo', async (_e, providerId: string) => {
-    const res = await guiMms.request<{ info: unknown }>('providers.getAmbientInfo', {
-      providerId
-    })
-    return res.info
-  })
-  registerHandler('providers:setApiKey', async (_e, providerId: string, apiKey: string) => {
-    const res = await guiMms.request<{ providers: unknown[] }>('providers.setApiKey', {
-      providerId,
-      apiKey
-    })
-    broadcast('providers:changed', res.providers)
   })
 
   // Read aloud. Local model state is installation-wide, so every window hears about it.
@@ -2326,22 +2295,6 @@ export function registerGuiIpc(
   registerHandler('webTools:clearApiKey', async (_e, service: 'exa' | 'parallel') => {
     await guiMms.request('webTools.clearApiKey', { service })
   })
-  registerHandler('providers:verifyAmbient', async (_e, providerId: string) => {
-    const res = await guiMms.request<{ result: { success?: boolean }; providers: unknown[] }>(
-      'providers.verifyAmbient',
-      { providerId }
-    )
-    if (res.result?.success) {
-      broadcast('providers:changed', res.providers)
-    }
-    return res.result
-  })
-  registerHandler('providers:logout', async (_e, providerId: string) => {
-    const res = await guiMms.request<{ providers: unknown[] }>('providers.logout', {
-      providerId
-    })
-    broadcast('providers:changed', res.providers)
-  })
   // Harness gateway. Changes reach every window as `providers:snapshots` and operation progress as
   // `providers:operation` through the protocol event bridge; long operations return an id at once.
   registerHandler('providers:snapshots', async (_e, scope: unknown) => {
@@ -2351,7 +2304,9 @@ export function registerGuiIpc(
   const instanceCommand = <K extends string>(method: string, key: K) =>
     async (params: Record<string, unknown>): Promise<unknown> =>
       (await guiMms.request<Record<K, unknown>>(method, params))[key]
+  const addOptions = instanceCommand('providers.catalog.addOptions', 'options')
   const addInstance = instanceCommand('providers.instances.add', 'snapshot')
+  const setInstanceSecret = instanceCommand('providers.instances.setSecret', 'snapshot')
   const configureInstance = instanceCommand('providers.instances.configure', 'snapshot')
   const setInstanceEnabled = instanceCommand('providers.instances.setEnabled', 'snapshot')
   const installInstance = instanceCommand('providers.instances.install', 'operation')
@@ -2368,7 +2323,11 @@ export function registerGuiIpc(
   const refreshAllInstanceModels = instanceCommand('providers.instances.refreshAllModels', 'results')
   const setInstanceModelPrefs = instanceCommand('providers.instances.setModelPrefs', 'snapshot')
   // The daemon validates every payload.
+  registerHandler('providers:catalog:addOptions', async () => addOptions({}))
   registerHandler('providers:instances:add', async (_e, input: Record<string, unknown>) => addInstance(input))
+  // The key goes to the daemon only; it is never logged or broadcast.
+  registerHandler('providers:instances:setSecret', async (_e, instanceId: string, value: string) =>
+    setInstanceSecret({ instanceId, value }))
   registerHandler('providers:instances:remove', async (_e, instanceId: string) => {
     await guiMms.request('providers.instances.remove', { instanceId })
   })
@@ -2400,15 +2359,6 @@ export function registerGuiIpc(
     const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow()
     return pickExecutable((options) => (win ? dialog.showOpenDialog(win, options) : dialog.showOpenDialog(options)), request)
   })
-  registerHandler('providers:login:respond', async (_e, response: ProviderLoginResponse) => {
-    await guiMms.request('providers.loginRespond', {
-      sessionId: response.sessionId,
-      response
-    })
-  })
-  registerHandler('providers:login:cancel', async (_e, sessionId: string) => {
-    await guiMms.request('providers.loginCancel', { sessionId })
-  })
   registerHandler('providers:openLoginUrl', async (_e, url: string) => {
     const ok = await openExternalSafely(
       (target) => shell.openExternal(target),
@@ -2416,48 +2366,6 @@ export function registerGuiIpc(
       'providers:openLoginUrl'
     )
     return { ok }
-  })
-  registerHandler('providers:loginOAuth', async (_e, providerId: string) => {
-    const handler = (ev: { type?: string; data?: unknown }): void => {
-      if (ev?.type === 'providers.login-event') {
-        const data = ev.data as { event?: ProviderLoginEvent }
-        if (data?.event) broadcast('providers:login:event', data.event)
-      }
-    }
-    guiMms.on('event', handler)
-    try {
-      const res = await guiMms.request<{
-        result: unknown
-        providers: unknown[]
-      }>('providers.loginOAuth', { providerId })
-      if ((res.result as { success?: boolean })?.success) {
-        broadcast('providers:changed', res.providers)
-      }
-      return res.result
-    } finally {
-      guiMms.off('event', handler)
-    }
-  })
-  registerHandler('providers:loginApiKey', async (_e, providerId: string) => {
-    const handler = (ev: { type?: string; data?: unknown }): void => {
-      if (ev?.type === 'providers.login-event') {
-        const data = ev.data as { event?: ProviderLoginEvent }
-        if (data?.event) broadcast('providers:login:event', data.event)
-      }
-    }
-    guiMms.on('event', handler)
-    try {
-      const res = await guiMms.request<{
-        result: unknown
-        providers: unknown[]
-      }>('providers.loginApiKey', { providerId })
-      if ((res.result as { success?: boolean })?.success) {
-        broadcast('providers:changed', res.providers)
-      }
-      return res.result
-    } finally {
-      guiMms.off('event', handler)
-    }
   })
 
   registerHandler('app:restart', async () => {
