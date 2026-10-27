@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { DefinitionAuthority } from '../../src/mms/agentDefinitions/definitionGate'
+import { recordAuthorizedCall, type DefinitionAuthority } from '../../src/mms/agentDefinitions/definitionGate'
 import { ToolRegistry, type MousseTool } from '../../src/mms/run/mcp/appTools/registry'
 import { AppToolTurns } from '../../src/mms/run/mcp/appTools/turns'
 import type { AgentRuntimePolicy, AgentRuntimeToolApprovalRequest } from '../../src/shared/agents/execution'
@@ -56,6 +56,29 @@ describe('a definition app tool over MCP re-checks its run after the approval', 
   ] as const)('is not run when %s while the approval waited', async (_what, change) => {
     const { call, ran } = world(change as (state: { active: string | null; current: boolean }) => void)
     await expect(call()).rejects.toMatchObject({ code: 'mousse_caller_not_live' })
+    expect(ran).toEqual([])
+  })
+
+  it('a call the runtime’s gate already authorized (per call, as Pi RPC hands it over) is re-checked too', async () => {
+    const state = { active: 'r1' as string | null }
+    const ran: unknown[] = []
+    const definition: DefinitionAuthority = {
+      policy,
+      grants: { skills: [], mcpTools: [], builtinTools: [{ id: 'create_task', source: 'definition' as never }], denied: [] },
+      approve: async () => { throw new Error('the gate already asked; the registry must not ask again') }
+    }
+    const turns = new AppToolTurns()
+    turns.register(appTurn({ threadId: 't1', runId: 'r1', turnToken: 'tt', definition }))
+    const registry = new ToolRegistry({ activeRunId: () => state.active, turns })
+    // The run stops being the thread's active run after the registry's first liveness check, as it
+    // can while the call travels from the gate to the registry.
+    registry.register({ name: 'create_task', description: 'Create a task', inputSchema: {}, access: 'actsAsCaller', class: 'mutation', available: () => { state.active = 'r2'; return true }, handler: async (args) => (ran.push(args), { text: 'created' }) } as unknown as MousseTool)
+    recordAuthorizedCall(definition, { turnToken: 'tt', toolName: 'create_task', callId: 'call-1', args: { description: 'a task' } })
+    await expect(registry.call('create_task', { description: 'a task', _mousse_turn: 'tt' }, {
+      credential: { threadId: 't1', runId: 'r1', provider: 'pi', modeCeiling: 'default', binding: 'per_call', current: () => true },
+      toolCallId: 'mcp:call-1',
+      signal: new AbortController().signal
+    } as never)).rejects.toMatchObject({ code: 'mousse_caller_not_live' })
     expect(ran).toEqual([])
   })
 })

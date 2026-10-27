@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { CONTAINMENT_EVIDENCE, PI_RPC_EVIDENCE_ITEMS, type ContainmentEvidence } from '../../src/mms/harness/compatibility'
 import type { DriverContext } from '../../src/mms/harness/driver'
 import { PI_LEGACY_CAPS, PI_RPC_CAPS, PI_RPC_EXACT_CAPS, piDriver, piRpcCaps, type PiRpcDriverOptions } from '../../src/mms/harness/drivers/pi'
-import { piRuntimeVersion } from '../../src/mms/harness/drivers/pi/engines/rpc'
+import { hostEnvironment, piRuntimeVersion } from '../../src/mms/harness/drivers/pi/engines/rpc'
 import { checkPolicy } from '../../src/mms/harness/policy'
 import { definitionFeatureGaps, definitionNeedsLoop, definitionRunPolicy } from '../../src/mms/agentDefinitions/definitionRuntime'
 
@@ -42,6 +42,16 @@ describe('Pi RPC’s evidence gate', () => {
       { platform: 'linux' as const, piVersion: version, evidence: [] }
     ]) expect(piRpcCaps(input), JSON.stringify(input)).toBe(PI_RPC_CAPS)
     expect(PI_RPC_CAPS).toMatchObject({ toolControl: 'approval_only', containment: 'weak' })
+  })
+
+  it('a record made in WSL2 holds only in WSL2; a platform-wide record holds there too', () => {
+    const wsl = record({ environment: 'wsl2' })
+    expect(piRpcCaps({ platform: 'linux', piVersion: version, environment: 'wsl2', evidence: [wsl] })).toBe(PI_RPC_EXACT_CAPS)
+    expect(piRpcCaps({ platform: 'linux', piVersion: version, evidence: [wsl] })).toBe(PI_RPC_CAPS)
+    expect(piRpcCaps({ platform: 'linux', piVersion: version, environment: 'wsl2', evidence: [record()] })).toBe(PI_RPC_EXACT_CAPS)
+    expect(hostEnvironment('linux', () => '6.18.54.1-microsoft-standard-WSL2')).toBe('wsl2')
+    expect(hostEnvironment('linux', () => '6.8.0-45-generic')).toBeUndefined()
+    expect(hostEnvironment('darwin', () => 'microsoft')).toBeUndefined()
   })
 
   it('the shipped records claim nothing on macOS or Windows', () => {

@@ -26,7 +26,10 @@ export interface ContainmentEvidence {
   items: readonly number[]
   /** When the passing run was recorded (ISO). */
   recordedAt: string
-  /** Where the suite ran, when that is not plain hardware running the platform (a VM, WSL2). */
+  /**
+   * Where the suite ran, when that is not the platform on its own machine (`'wsl2'`). A record that
+   * names one holds only where Mousse runs in that same environment (`EvidenceQuery.environment`).
+   */
   environment?: string
 }
 
@@ -63,6 +66,8 @@ export interface EvidenceQuery {
   cliVersion?: string
   /** Items the record must hold (default: any record counts). */
   items?: readonly number[]
+  /** Where Mousse runs, when not the platform on its own machine (`'wsl2'`); see `ContainmentEvidence.environment`. */
+  environment?: string
 }
 
 /** Whether `table` holds a record for the query. An unknown version never matches a versioned query. */
@@ -72,5 +77,6 @@ export function hasContainmentEvidence(query: EvidenceQuery, table: readonly Con
     record.kind === query.kind &&
     record.platform === query.platform &&
     (!('cliVersion' in query) || record.cliVersion === query.cliVersion) &&
-    (query.items ?? []).every((item) => record.items.includes(item)))
+    (query.items ?? []).every((item) => record.items.includes(item)) &&
+    (record.environment === undefined || record.environment === query.environment))
 }

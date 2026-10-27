@@ -7,6 +7,8 @@ import { RunCounters, RunSpend, TurnBudget, type BudgetLimits } from '../../src/
 import type { PiLaunch } from '../../src/mms/harness/pi/launch'
 import type { AgentRuntimePolicy } from '../../src/shared/agents/execution'
 import type { EffectiveAgentGrants } from '../../src/shared/agents/types'
+import { sessionInstructions, turnPreamble } from '../../src/mms/run/mcp/appTools/assemble'
+import { APPLET_GENERATION_GUIDANCE } from '../../src/shared/appletGuidance'
 import { harness, script, setup as setupEngine } from './piRpcEngineFixture'
 import type { RecordedRequest } from './piRpcFixture'
 
@@ -205,4 +207,44 @@ describe('agent definition turns on the Pi RPC engine (real pinned Pi child)', (
     expect(launches).toHaveLength(0)
     expect(recorder.connections()).toBe(0)
   }, 60_000)
+
+  it('sends the definition’s prompt as written and its message as given, whatever chat instructions the bridge carries', async () => {
+    const { engine, recorder, project } = await setup()
+    recorder.respond(script([{ text: 'ok' }]))
+    // What a chat turn's bridge carries in production: Mousse's orchestration and applet guidance,
+    // and a preamble with the applet catalogue and the Mousse tools usable now.
+    const bridge = {
+      mcp: { url: 'http://127.0.0.1:9/mcp', token: 'unused' }, turnToken: 'tt', userMcp: 'proxy' as const,
+      sessionInstructions: sessionInstructions({ mcp: true, appletGuidance: APPLET_GENERATION_GUIDANCE }),
+      turnPreamble: turnPreamble({ loadedSkills: [], appletCatalogue: '## Applets - MOUSSE_APPLET_CANARY', usableTools: ['delegate_task', 'thread_send', 'create_task'] }),
+      toolPolicy: { allow: ['read'] }
+    }
+    expect(bridge.sessionInstructions.length).toBeGreaterThan(100)
+    expect(bridge.turnPreamble).toContain('delegate_task')
+    const turn = harness(project, { ...definitionInput, prompt: 'Summarize the release.' }, { definition: definition(project, 'read'), bridge })
+    await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
+    const sent = body(recorder.requests[0])
+    expect(sent.messages[0]).toEqual({ role: 'system', content: SYSTEM })
+    expect(sent.messages[1].role).toBe('user')
+    const user = JSON.stringify(sent.messages[1].content)
+    expect(user).toContain('Summarize the release.')
+    for (const leaked of ['delegate_task', 'thread_send', 'create_task', 'MOUSSE_APPLET_CANARY', 'mousse-applet', 'Usable now']) {
+      expect(user, leaked).not.toContain(leaked)
+      expect(JSON.stringify(sent.messages[0]), leaked).not.toContain(leaked)
+    }
+    expect(sent.messages[1].content === 'Summarize the release.' || JSON.stringify(sent.messages[1].content) === JSON.stringify([{ type: 'text', text: 'Summarize the release.' }])).toBe(true)
+  }, 90_000)
+
+  it('limits are shared across a run’s records: a later attempt whose turn limit the first used up sends nothing', async () => {
+    const { engine, recorder, project } = await setup()
+    recorder.respond(script([{ text: 'first' }]))
+    const shared = budget({ maxTurns: 1 })
+    const first = harness(project, { ...definitionInput, runId: 'run', attemptId: 'a1' }, { definition: definition(project, 'read'), budget: shared })
+    expect(await engine.startTurn(first.input, first.sink, first.ctl, first.host)).toMatchObject({ text: 'first' })
+    const connections = recorder.connections()
+    const second = harness(project, { ...definitionInput, runId: 'run', attemptId: 'a2' }, { definition: definition(project, 'read'), budget: shared })
+    await expect(engine.startTurn(second.input, second.sink, second.ctl, second.host)).rejects.toMatchObject({ code: 'budget_exhausted', details: { limit: { kind: 'turns', limit: 1 } } })
+    expect(recorder.requests).toHaveLength(1)
+    expect(recorder.connections()).toBe(connections)
+  }, 90_000)
 })

@@ -10,6 +10,7 @@ import { AppToolTurns } from '../../src/mms/run/mcp/appTools/turns'
 import { appTurn } from '../run/appToolsFixture'
 import type { AgentRuntimePolicy, AgentRuntimeToolApprovalRequest } from '../../src/shared/agents/execution'
 import type { EffectiveAgentGrants } from '../../src/shared/agents/types'
+import type { AdapterHost } from '../../src/mms/run/adapters/ProviderAdapter'
 import { harness, script, setup } from './piRpcEngineFixture'
 
 // PR 4 4b2: a definition's authority over Pi's built-in tools, at the gate (`/pi/gate`), on the real
@@ -41,10 +42,10 @@ function grants(...tools: string[]): EffectiveAgentGrants {
 const ALL = ['read', 'write', 'edit', 'bash', 'ls', 'grep', 'find']
 
 /** One turn whose model calls `calls` in order, under `definition`; returns the tool results. */
-async function run(definition: (project: string) => DefinitionAuthority, calls: Array<{ name: string; args: Record<string, unknown> }>) {
+async function run(definition: (project: string) => DefinitionAuthority, calls: Array<{ name: string; args: Record<string, unknown> }>, host: Partial<AdapterHost> = {}) {
   const { engine, recorder, project } = await setup(cleanups)
   recorder.respond(script([...calls.map((tool) => ({ tool })), { text: 'done' }]))
-  const turn = harness(project, {}, { definition: definition(project) })
+  const turn = harness(project, {}, { definition: definition(project), ...host })
   const result = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
   expect(result.text).toBe('done')
   const results = turn.events.filter((event) => event.kind === 'tool' && event.phase === 'complete')
@@ -251,5 +252,47 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
     expect(asked.map((request) => [request.toolName, request.arguments])).toEqual([['create_task', { description: 'a task' }], ['write', expect.anything()]])
     expect(ran).toEqual([{ description: 'a task' }])
     expect(counters.toolCalls).toBe(1)
+  }, 90_000)
+
+  it('the run stops being the thread’s active run while a built-in waits for approval: it is refused and nothing is written', async () => {
+    let active = true
+    const { project, results } = await run((root) => ({
+      policy: policy(root, { approval: { policy: 'always' } }),
+      grants: grants(...ALL),
+      // The run ends elsewhere (or another takes the thread) during the approval, which then says yes.
+      approve: async (request) => { active = false; return { status: 'approved', digest: request.argumentDigest } }
+    }), [{ name: 'write', args: { path: 'late.txt', content: 'x' } }], { tools: { runActive: () => active } })
+    expect(existsSync(join(project, 'late.txt'))).toBe(false)
+    expect(results.map(refused)).toEqual([true])
+  }, 90_000)
+
+  it('a built-in has a started ledger row before it runs, settled after: committed when it succeeds, failed when it fails', async () => {
+    const rows: Array<{ id: string; name: string; idempotent: boolean | undefined; outcome?: string }> = []
+    const toolLedger = {
+      start: (call: { id: string; name: string }, options?: { idempotent?: boolean }) => {
+        const id = `row-${rows.length + 1}`
+        rows.push({ id, name: call.name, idempotent: options?.idempotent })
+        return id
+      },
+      commit: (id: string) => void (rows.find((row) => row.id === id)!.outcome = 'committed'),
+      failed: (id: string) => void (rows.find((row) => row.id === id)!.outcome = 'failed')
+    }
+    const { project } = await run((root) => ({ policy: policy(root), grants: grants(...ALL) }), [
+      { name: 'write', args: { path: 'ledgered.txt', content: 'ok' } },
+      { name: 'read', args: { path: 'missing.txt' } }
+    ], { tools: { toolLedger: toolLedger as never } })
+    expect(readFileSync(join(project, 'ledgered.txt'), 'utf8')).toBe('ok')
+    expect(rows).toEqual([
+      { id: 'row-1', name: 'write', idempotent: false, outcome: 'committed' },
+      { id: 'row-2', name: 'read', idempotent: true, outcome: 'failed' }
+    ])
+  }, 90_000)
+
+  it('a tool offered beyond the grants is still refused by the gate itself (not granted), and nothing is written', async () => {
+    const { project, results } = await run((root) => ({ policy: policy(root), grants: grants('read') }), [
+      { name: 'write', args: { path: 'beyond.txt', content: 'x' } }
+    ], { bridge: { mcp: null, turnToken: 'tt', sessionInstructions: '', turnPreamble: '', userMcp: 'proxy', toolPolicy: { allow: ['read', 'write'] } } })
+    expect(existsSync(join(project, 'beyond.txt'))).toBe(false)
+    expect(String(results[0].response)).toContain('not granted')
   }, 90_000)
 })

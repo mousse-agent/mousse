@@ -1238,6 +1238,15 @@ export class OrchestratorService extends EventEmitter {
         : record.usage(result.usage)
       return { text, history: record.history(turn.userMessage, text), usage, ...(loopLimit ? { limit: loopLimit } : {}) }
     } catch (error) {
+      // A limit the runtime refused the next step for (Pi's agent) ends the run as the loop's does:
+      // with the reply so far and the limit, not as an error that drops it.
+      const limit = !signal.aborted && error instanceof AppError && error.code === 'budget_exhausted' ? (error.details as { limit?: AgentExecutionLimit } | undefined)?.limit : undefined
+      if (limit && typeof limit.kind === 'string' && typeof limit.limit === 'number') {
+        const text = record.finalText()
+        markTerminal('failed', { error: `The agent reached its ${limit.kind} limit (${limit.limit}).` }, text)
+        const reported = turn.effects.attemptUsage
+        return { text, history: record.history(turn.userMessage, text), usage: { inputTokens: reported.inputTokens, outputTokens: reported.outputTokens, costUsd: reported.costUsd }, limit }
+      }
       if (signal.aborted) markTerminal('interrupted', { interruptedBy: 'user' })
       else markTerminal('failed', { error: error instanceof Error ? error.message : String(error) })
       throw error

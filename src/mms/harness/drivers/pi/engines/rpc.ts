@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { release } from 'node:os'
 import { join } from 'node:path'
 import type { HarnessCaps } from '../../../../../shared/harness/types'
 import { hasContainmentEvidence, PI_RPC_EVIDENCE_ITEMS, type ContainmentEvidence } from '../../../compatibility'
@@ -52,6 +53,8 @@ export interface PiRpcEvidenceInput {
   platform: NodeJS.Platform
   /** The pinned Pi's version; unknown never matches a record. */
   piVersion: string | undefined
+  /** Where Mousse runs when not the platform on its own machine (`'wsl2'`): a record made there holds only there. */
+  environment?: string
   evidence?: readonly ContainmentEvidence[]
 }
 
@@ -61,7 +64,7 @@ export interface PiRpcEvidenceInput {
  */
 export function piRpcHasEvidence(input: PiRpcEvidenceInput): boolean {
   if (!input.piVersion) return false
-  return hasContainmentEvidence({ driver: 'pi', kind: 'tools', platform: input.platform, cliVersion: input.piVersion, items: PI_RPC_EVIDENCE_ITEMS }, input.evidence)
+  return hasContainmentEvidence({ driver: 'pi', kind: 'tools', platform: input.platform, cliVersion: input.piVersion, items: PI_RPC_EVIDENCE_ITEMS, ...(input.environment ? { environment: input.environment } : {}) }, input.evidence)
 }
 
 /** The engine's caps here: `strong`/`exact` only where the evidence suite passed (PR 2 §4, S7). */
@@ -88,6 +91,15 @@ export function piRuntimeVersion(root: string): string | undefined {
 }
 const runtimeVersions = new Map<string, string | undefined>()
 
+/** `'wsl2'` when this Linux runs in WSL (its kernel names Microsoft), else undefined. */
+export function hostEnvironment(platform: NodeJS.Platform = process.platform, kernel: () => string = release): string | undefined {
+  try {
+    return platform === 'linux' && /microsoft/i.test(kernel()) ? 'wsl2' : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** What the RPC engine needs from the profile. */
 export interface PiRpcDriverOptions {
   /** The packaged runtime (`piRuntimePaths(applicationRoot)`). */
@@ -112,6 +124,7 @@ export interface PiRpcDriverOptions {
   oauth?: PiOAuthSource
   /** Test seams for the evidence check: the platform (default `process.platform`) and the records (default `CONTAINMENT_EVIDENCE`). */
   platform?: NodeJS.Platform
+  environment?: string
   evidence?: readonly ContainmentEvidence[]
   /** Test seams passed through to the engine. */
   engine?: Partial<Pick<PiRpcEngineOptions, 'warmMs' | 'readyDeadlineMs' | 'commandDeadlineMs' | 'settings' | 'host' | 'adjustLaunch' | 'onCommand' | 'testEnv'>>
@@ -125,7 +138,9 @@ export function piRpcEvidenceOf(options: PiRpcDriverOptions): PiRpcEvidenceInput
   } catch {
     piVersion = undefined
   }
-  return { platform: options.platform ?? process.platform, piVersion, ...(options.evidence ? { evidence: options.evidence } : {}) }
+  const platform = options.platform ?? process.platform
+  const environment = options.environment ?? (options.platform === undefined ? hostEnvironment() : undefined)
+  return { platform, piVersion, ...(environment ? { environment } : {}), ...(options.evidence ? { evidence: options.evidence } : {}) }
 }
 
 export function createRpcRuntime(context: DriverContext, providerId: string, label: string, credentials: () => PiCredentials | undefined, options: PiRpcDriverOptions): DriverRuntime {

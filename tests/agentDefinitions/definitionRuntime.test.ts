@@ -69,6 +69,22 @@ describe('definitionRuntime', () => {
     expect(alone.turns).toEqual([])
   })
 
+  it('a record whose runtime used up the turn limit on the shared counters (Pi’s agent) is not followed by another: the fallback never starts', async () => {
+    const resolved = definition()
+    resolved.settings.limits.maxTurns = 2
+    const p = port({
+      turn: async (request) => {
+        // The runtime charges each request to the run's counters and reports no turns of its own.
+        request.counters.charge('request', 2)
+        request.counters.charge('request', 2)
+        throw new Error('provider unavailable')
+      }
+    })
+    const result = await run(new AgentExecutionService({ runtime: createDefinitionRuntime(p.value) }), resolved)
+    expect(p.turns.map((turn) => turn.ref.modelId)).toEqual(['primary'])
+    expect(result).toMatchObject({ error: { details: { limit: { kind: 'turns', limit: 2, actual: 2 } } } })
+  })
+
   it('reports the usage of every record, failed ones included', async () => {
     const p = port({
       turn: async (request) => {
