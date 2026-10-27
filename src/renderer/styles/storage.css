@@ -256,3 +256,47 @@
   font-weight: 600;
   color: var(--text-primary);
 }
+
+/* The one-time notice about the recommended rules */
+.storage-review-notice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-12);
+  margin-bottom: var(--space-24);
+  padding: var(--space-12) var(--space-16);
+  border-radius: var(--ui-control-radius);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  font-size: var(--settings-fs-small);
+}
+
+.storage-review-notice p {
+  margin: 0;
+}
+
+.storage-review-text {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.storage-review-actions {
+  display: flex;
+  gap: var(--space-8);
+}
+
+.storage-review-rules {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+  font-size: var(--settings-fs-small);
+}
+
+.storage-review-rules p {
+  margin: 0;
+}
+
+.storage-notice {
+  margin: 0;
+  padding: var(--space-8) var(--settings-surface-x);
+  font-size: var(--settings-fs-small);
+}

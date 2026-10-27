@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { STORAGE_POLICY_DEFAULTS, STORAGE_POLICY_MAX_DAYS, type StoragePolicy } from '../../shared/storage'
+import { STORAGE_POLICY_DEFAULTS, STORAGE_POLICY_EXISTING_INSTALL, STORAGE_POLICY_MAX_DAYS, type StoragePolicy } from '../../shared/storage'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { assertLifecyclePath, type ResourceLifecycleStore } from './ResourceLifecycleStore'
 import type { StorageSweepClock } from './sweepClock'
@@ -38,6 +38,34 @@ export class StoragePolicyStore {
 
   private get path(): string { return join(this.store.root, 'storage-policy.json') }
 
+  private get reviewPath(): string { return join(this.store.root, 'storage-policy-review.json') }
+
+  /**
+   * Saves the policy of a profile that has none, once. A profile with prior use (threads or lifecycle
+   * records) gets the behaviour it had before the recommended rules existed and a pending review, so
+   * nothing new starts deleting until the person turns it on. A new profile gets the recommended rules.
+   * Either way the file is written, so a later thread cannot change what the profile is.
+   */
+  initialize(hasPriorUse: () => boolean): 'existing' | 'new' | 'present' {
+    if (existsSync(this.path)) return 'present'
+    const existing = hasPriorUse()
+    this.store.enableCleanupWriter()
+    atomicWriteJsonSync(this.path, structuredClone(existing ? STORAGE_POLICY_EXISTING_INSTALL : STORAGE_POLICY_DEFAULTS))
+    if (existing) atomicWriteJsonSync(this.reviewPath, { schemaVersion: 1, pending: true, createdAt: new Date().toISOString() })
+    return existing ? 'existing' : 'new'
+  }
+
+  /** True until the person has reviewed the recommended rules (turned them on, saved a policy or dismissed the notice). */
+  reviewPending(): boolean {
+    try { return existsSync(this.reviewPath) && (JSON.parse(readFileSync(this.reviewPath, 'utf8')) as { pending?: unknown }).pending === true } catch { return false }
+  }
+
+  /** The notice is dismissed. Rules stay as they are. */
+  dismissReview(human: boolean): void {
+    if (!human) throw new Error('Storage cleanup changes require a human-controlled settings action')
+    try { rmSync(this.reviewPath, { force: true }) } catch { /* A marker that cannot be removed only shows the notice again. */ }
+  }
+
   policy(): StoragePolicy {
     if (!existsSync(this.path)) return structuredClone(STORAGE_POLICY_DEFAULTS)
     assertLifecyclePath(this.store.root, this.path)
@@ -67,6 +95,8 @@ export class StoragePolicyStore {
     if (!policy) throw new Error(`Invalid storage policy. Day counts must be whole numbers from 1 to ${STORAGE_POLICY_MAX_DAYS}, or off.`)
     this.store.enableCleanupWriter()
     atomicWriteJsonSync(this.path, policy)
+    // Saving a policy is the review of the recommended rules.
+    try { rmSync(this.reviewPath, { force: true }) } catch { /* See dismissReview. */ }
     // Saving the policy is the review that clears a storage clock suspension. The trash clock is
     // a safety interlock on irreversible purging and is reset only by the trash row's own save.
     this.clock.resume()

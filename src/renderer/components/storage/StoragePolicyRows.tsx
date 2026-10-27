@@ -59,6 +59,8 @@ export function DaysSelect({ id, testId, value, offLabel, offValue, disabled, la
     setCustom(false)
     onChange(next === offValue ? null : Number(next))
   }
+  // Back to the saved value: an empty field or Escape means nothing was chosen.
+  const leave = () => { setInvalid(false); setCustom(false) }
   const commit = () => {
     const days = parseCustomDays(draft)
     if (days === undefined) { setInvalid(true); return }
@@ -94,8 +96,8 @@ export function DaysSelect({ id, testId, value, offLabel, offValue, disabled, la
         disabled={disabled}
         autoFocus
         onChange={(event) => { setDraft(event.target.value); setInvalid(false) }}
-        onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); commit() } }}
-        onBlur={() => { if (draft.trim() !== '') commit() }}
+        onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); commit() } else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); leave() } }}
+        onBlur={() => { if (draft.trim() === '') leave(); else commit() }}
       />
       <span className="settings-muted">days</span>
     </span>}

@@ -3,14 +3,14 @@ import { resolve } from 'node:path'
 import { createElement, type ComponentProps } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import type { LifecyclePurgePreview } from '../../src/shared/resourceLifecycle'
 import { STORAGE_POLICY_DEFAULTS, storagePolicyHasRule, type StorageCleanupItem, type StorageCleanupPlanItem, type StorageCleanupReport, type StoragePolicy, type StorageUsageSnapshot } from '../../src/shared/storage'
-import { DeletionConfirmation, deletionSummary } from '../../src/renderer/components/storage/DeletionConfirmation'
+import { RecommendedRulesNotice, recommendedPolicy } from '../../src/renderer/components/storage/RecommendedRules'
+import { setStorageReviewPending, useStorageReviewPending } from '../../src/renderer/lib/storageReview'
 import { StorageCleanupView } from '../../src/renderer/components/storage/StorageCleanupSection'
 import { sliceArcs } from '../../src/renderer/components/storage/StorageDonut'
 import { DaysSelect, StoragePolicyRows, parseCustomDays } from '../../src/renderer/components/storage/StoragePolicyRows'
 import { StorageUsageView } from '../../src/renderer/components/storage/StorageUsageSection'
-import { KEEP_WHEN_COPY, STORAGE_RULE_COPY, WORKTREE_GROUP_DESCRIPTION, type StorageRuleId } from '../../src/renderer/lib/storageCopy'
+import { KEEP_WHEN_COPY, STORAGE_RULE_COPY, WORKTREE_GROUP_DESCRIPTION, ruleLabel, trashCountSentence, type StorageRuleId } from '../../src/renderer/lib/storageCopy'
 import { SELF_MACHINE, offlineUsage, type MachineUsage } from '../../src/renderer/lib/storageUsage'
 
 const text = (html: string) => html.replace(/<[^>]+>/g, ' ').replace(/&#x27;|&#39;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, ' ').trim()
@@ -22,7 +22,7 @@ const idTag = (html: string, id: string) => html.match(new RegExp(`<[^>]* id="${
 const trash = { schemaVersion: 1 as const, graceDays: 30, automaticPurge: true }
 const rows = (patch: Partial<ComponentProps<typeof StoragePolicyRows>> = {}) => renderToStaticMarkup(createElement(StoragePolicyRows, {
   trash, policy: STORAGE_POLICY_DEFAULTS, trashPaused: false, storagePaused: false, busy: false,
-  onTrash: noop, onPolicy: noop, onResumeTrash: noop, onResumeStorage: noop, reviewTrash: null, ...patch
+  onTrash: noop, onPolicy: noop, onResumeTrash: noop, onResumeStorage: noop, trashCount: 2, ...patch
 }))
 const policy = (patch: Partial<StoragePolicy['worktrees']> = {}, captureDays: number | null = 30): StoragePolicy => ({ schemaVersion: 1, worktrees: { ...STORAGE_POLICY_DEFAULTS.worktrees, ...patch }, browser: { captureDays } })
 
@@ -250,48 +250,6 @@ describe('Clean up now', () => {
   })
 })
 
-const preview = (items: Array<Partial<LifecyclePurgePreview['items'][number]>>): LifecyclePurgePreview => ({
-  taskId: 't', generation: 1, digest: 'd', exclusiveBytes: 1234, blockers: [], retained: [],
-  items: items.map((entry, index) => ({ id: `i${index}`, kind: 'worktree', identity: `/work/${index}`, ...entry })) as never
-} as unknown as LifecyclePurgePreview)
-const confirmation = (value: LifecyclePurgePreview, reclaim?: { bytes: number; estimated: boolean; partial: boolean }, discard = false) =>
-  renderToStaticMarkup(createElement(DeletionConfirmation, { preview: value, reclaim, discard, onDiscardChange: noop }))
-
-describe('permanent deletion confirmation', () => {
-  it('leads with one line and keeps the per-item list behind Show details', () => {
-    const html = confirmation(preview([{ discardRequired: true, reason: 'unpublished commits' }, { discardRequired: true }, { kind: 'ref', identity: 'mousse/t' }]), { bytes: 1.2 * 1024 ** 3, estimated: false, partial: false })
-    expect(html).toContain('data-testid="storage-deletion-preview"')
-    expect(html).toContain('aria-label="Permanent deletion preview"')
-    expect(text(html)).toContain('Frees 1.20 GB. 2 worktrees have unpublished work.')
-    const summary = html.indexOf('data-testid="storage-deletion-summary"')
-    const details = html.indexOf('<details class="storage-deletion-details"')
-    const firstItem = html.indexOf('/work/0')
-    expect(summary).toBeGreaterThan(0)
-    expect(details).toBeGreaterThan(summary)
-    expect(firstItem).toBeGreaterThan(details)
-    expect(html).not.toMatch(/<details class="storage-deletion-details"[^>]*open/)
-    expect(text(html)).toContain('Show details')
-  })
-
-  it('says about for an estimate or a partial measurement', () => {
-    const one = preview([{ discardRequired: true }])
-    expect(deletionSummary(one, { bytes: 2048, estimated: true, partial: false })).toBe('Frees about 2.0 KB. 1 worktree has unpublished work.')
-    expect(deletionSummary(one, { bytes: 2048, estimated: false, partial: true })).toBe('Frees about 2.0 KB. 1 worktree has unpublished work.')
-    expect(deletionSummary(one, { bytes: 2048, estimated: false, partial: false })).toBe('Frees 2.0 KB. 1 worktree has unpublished work.')
-  })
-
-  it('does not call a clean deletion unpublished, and falls back to the preview size without a measurement', () => {
-    expect(deletionSummary(preview([{}]))).toBe('Frees about 1.2 KB. No worktree has unpublished work.')
-  })
-
-  it('asks for the discard tick only when work would be lost, and shows blockers', () => {
-    expect(confirmation(preview([{}]))).not.toContain('type="checkbox"')
-    expect(confirmation(preview([{ discardRequired: true }]))).toContain('type="checkbox"')
-    const blocked = { ...preview([{}]), blockers: ['A turn is running'] }
-    expect(text(confirmation(blocked))).toContain('Can’t delete: A turn is running')
-  })
-})
-
 const snapshot = (patch: Partial<StorageUsageSnapshot> = {}): StorageUsageSnapshot => ({
   measuredAt: new Date(Date.now() - 5 * 60_000).toISOString(), durationMs: 20, partial: false,
   entries: [
@@ -412,5 +370,113 @@ describe('disk usage view', () => {
   it('draws a link only where a row has somewhere to go', () => {
     const html = usageView([ready(snapshot())], { canOpen: (group) => group.id === 'p1' })
     expect(html.match(/class="storage-row-link"/g)).toHaveLength(1)
+  })
+})
+
+describe('what a person is told while and after a cleanup', () => {
+  it('calls a kept worktree a worktree, and names the rule only where it acted', () => {
+    expect(ruleLabel('worktree-inactive', 'kept')).toBe('Worktree')
+    expect(ruleLabel('worktree-merged', 'keep')).toBe('Worktree')
+    expect(ruleLabel('worktree-inactive', 'removed')).toBe('Inactive worktree')
+    expect(ruleLabel('worktree-merged', 'remove')).toBe('Merged worktree')
+    expect(ruleLabel('worktree-orphan', 'kept')).toBe('Unused worktree')
+    const report = reportOf([item({ outcome: 'kept', reason: 'Inactive for 3 of 30 days', label: 'Recent thread' })])
+    expect(text(cleanup({ report }))).toContain('Worktree: Recent thread')
+    expect(text(cleanup({ report }))).not.toContain('Inactive worktree: Recent thread')
+  })
+
+  it('shows the size of a kept item that holds space, and says why it was kept', () => {
+    const report = reportOf([item({ outcome: 'kept', rule: 'worktree-orphan', label: 'threads/old', bytes: 5 * 1024 ** 2, reason: 'No thread uses this worktree' })])
+    expect(text(cleanup({ report }))).toContain('No thread uses this worktree · 5.0 MB')
+    const plan: StorageCleanupPlanItem[] = [{ rule: 'worktree-orphan', label: 'threads/old', action: 'keep', reason: 'No thread uses this worktree', bytes: 2 * 1024 ** 2 }]
+    expect(text(cleanup({ phase: 'confirm', plan }))).toContain('No thread uses this worktree · 2.0 MB')
+  })
+
+  it('announces the result of a run, and shows only one thing when the report cannot be read', () => {
+    const html = cleanup({ report: reportOf([item({ outcome: 'removed', bytes: 1 })], { bytesRecovered: 1 }) })
+    expect(tagOf(html, 'storage-last-run-sentence')).toContain('role="status"')
+    expect(tagOf(html, 'storage-last-run-sentence')).toContain('aria-live="polite"')
+    const unreadable = text(cleanup({ report: null, reportUnreadable: true }))
+    expect(unreadable).toContain('The last cleanup report could not be read.')
+    expect(unreadable).not.toContain('has not run yet')
+  })
+
+  it('says a run is still going, and is not an error', () => {
+    const html = cleanup({ notice: 'Cleanup is still running in the background. The result appears here when it finishes.' })
+    expect(tagOf(html, 'storage-cleanup-notice')).toContain('role="status"')
+    expect(html).not.toContain('data-testid="storage-cleanup-error"')
+  })
+
+  it('cannot be closed while it runs, and the close button says so', () => {
+    const running = cleanup({ phase: 'running', plan: [{ rule: 'trash', label: 'x', action: 'remove', reason: 'r', bytes: 0 }] })
+    expect(running).toMatch(/<button[^>]*aria-label="Close"[^>]*disabled|<button[^>]*disabled[^>]*aria-label="Close"/)
+    expect(text(running)).toContain('This cannot be closed until it finishes.')
+    const confirm = cleanup({ phase: 'confirm', plan: [{ rule: 'trash', label: 'x', action: 'remove', reason: 'r', bytes: 0 }] })
+    expect(confirm).not.toMatch(/<button[^>]*aria-label="Close"[^>]*disabled/)
+  })
+
+  it('asks to check again when the plan is out of date, and removes nothing from an old one', () => {
+    const html = cleanup({ phase: 'confirm', expired: true, plan: [{ rule: 'trash', label: 'x', action: 'remove', reason: 'r', bytes: 0 }] })
+    expect(html).not.toContain('data-testid="storage-cleanup-confirm"')
+    expect(html).toContain('data-testid="storage-cleanup-recheck"')
+    expect(text(html)).toContain('This check is out of date.')
+  })
+
+  it('says that only what is listed is removed', () => {
+    expect(text(cleanup({ phase: 'confirm', plan: [{ rule: 'trash', label: 'x', action: 'remove', reason: 'r', bytes: 0 }] }))).toContain('Only the items listed here are removed.')
+  })
+
+  it('marks the Refresh button busy while it measures', () => {
+    expect(tagOf(usageView([ready(snapshot())], { loading: true }), 'storage-usage-refresh')).toContain('aria-busy="true"')
+    expect(tagOf(usageView([ready(snapshot())]), 'storage-usage-refresh')).not.toContain('aria-busy')
+  })
+})
+
+describe('the notice about the recommended rules', () => {
+  const notice = (initialOpen = false) => renderToStaticMarkup(createElement(RecommendedRulesNotice, { busy: false, onTurnOn: noop, onDismiss: noop, initialOpen }))
+
+  it('says nothing has changed and offers to review, not to switch things on', () => {
+    const page = text(notice())
+    expect(page).toContain('Recommended cleanup rules are available')
+    expect(page).toContain('Nothing has changed: only the worktrees of deleted threads are removed automatically.')
+    expect(page).toContain('Review recommended cleanup rules')
+    expect(page).toContain('Dismiss')
+    expect(page).not.toContain('Turn on recommended rules')
+  })
+
+  it('lists each recommended rule with what it deletes and never deletes before anything is turned on', () => {
+    const page = text(notice(true))
+    for (const id of ['inactive', 'merged', 'captures'] as const) {
+      expect(page).toContain(`Deletes ${STORAGE_RULE_COPY[id].deletes}`)
+      expect(page).toContain(`Never deletes ${STORAGE_RULE_COPY[id].never}`)
+    }
+    expect(page).toContain('A download saved by an older version with a .png name')
+    expect(page).toContain('Not now')
+    expect(page).toContain('Turn on recommended rules')
+  })
+
+  it('turns on the new rules and keeps the choice about deleted threads', () => {
+    const own = { schemaVersion: 1 as const, worktrees: { removeWithDeletedThreads: false, inactiveDays: null, removeMerged: false }, browser: { captureDays: null } }
+    expect(recommendedPolicy(own)).toEqual({ schemaVersion: 1, worktrees: { removeWithDeletedThreads: false, inactiveDays: 30, removeMerged: true }, browser: { captureDays: 30 } })
+    expect(recommendedPolicy({ ...own, worktrees: { ...own.worktrees, removeWithDeletedThreads: true } }).worktrees.removeWithDeletedThreads).toBe(true)
+  })
+
+  it('shows its dot in the Settings list and the rail only while a review is waiting', () => {
+    const Probe = () => createElement('span', null, useStorageReviewPending() ? 'dot' : 'no dot')
+    setStorageReviewPending(false)
+    expect(renderToStaticMarkup(createElement(Probe))).toContain('no dot')
+    setStorageReviewPending(true)
+    expect(renderToStaticMarkup(createElement(Probe))).toContain('dot')
+    setStorageReviewPending(false)
+  })
+})
+
+describe('trash is reviewed from the sidebar', () => {
+  it('says how many threads wait there, and where to find them', () => {
+    expect(trashCountSentence(0)).toBe('No threads in trash.')
+    expect(trashCountSentence(1)).toBe('1 thread in trash · restore or delete them from Recently deleted in the sidebar.')
+    expect(trashCountSentence(3)).toContain('3 threads in trash')
+    expect(text(rows({ trashCount: 3 }))).toContain('3 threads in trash · restore or delete them from Recently deleted in the sidebar.')
+    expect(rows()).not.toContain('data-testid="storage-review-trash-button"')
   })
 })

@@ -11,7 +11,7 @@ import { acquireRepositoryLease } from '../src/mms/git/RepositoryLease'
 import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
-import { cleanupMarkerPath, readCleanupMarker, StorageCleanupService } from '../src/mms/lifecycle/StorageCleanupService'
+import { cleanupMarkerPath, findNestedRepository, readCleanupMarker, StorageCleanupService } from '../src/mms/lifecycle/StorageCleanupService'
 import { StoragePolicyStore } from '../src/mms/lifecycle/StoragePolicyStore'
 import { StorageSweepClock } from '../src/mms/lifecycle/sweepClock'
 import { lifecycleGit as git, WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
@@ -98,7 +98,9 @@ function updateWorkspace(f: Fixture, change: (workspace: Record<string, unknown>
 }
 /** A commit in the thread worktree, recorded in `workspace.json` the way a recorded operation would. */
 function commit(f: Fixture, file = 'b.txt', content = 'second\n', record = true): string {
-  writeFileSync(join(f.worktree, file), content); git(f.worktree, ['add', '.']); git(f.worktree, ['commit', '-q', '-m', file])
+  // Committed 90 days ago, like the file times, so the commit is not the recent activity that keeps a worktree.
+  writeFileSync(join(f.worktree, file), content); git(f.worktree, ['add', '.']); process.env.GIT_COMMITTER_DATE = OLD.toISOString()
+  try { git(f.worktree, ['commit', '-q', '-m', file]) } finally { delete process.env.GIT_COMMITTER_DATE }
   const head = git(f.worktree, ['rev-parse', 'HEAD'])
   if (record) updateWorkspace(f, (workspace) => { workspace.headSha = head })
   age(f)
@@ -241,10 +243,10 @@ describe('content gates', () => {
     expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'kept', reason: 'Has ignored files (cache.log)' })
   }, 60_000)
 
-  it('keeps a nested repository inside an ignored folder', async () => {
+  it('keeps a nested repository inside an ignored folder, for the ignored files, without walking it', async () => {
     const f = fixture(); setPolicy(f, inactive()); commit(f, '.gitignore', 'vendor/\n')
     const nested = join(f.worktree, 'vendor', 'dep'); mkdirSync(nested, { recursive: true }); git(nested, ['init', '-q']); writeFileSync(join(nested, 'work.txt'), 'only copy')
-    expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'kept', reason: 'Contains another repository' })
+    expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'kept', reason: 'Has ignored files (vendor/)' })
     expect(readFileSync(join(nested, 'work.txt'), 'utf8')).toBe('only copy')
   }, 60_000)
 
@@ -918,7 +920,7 @@ describe('use after the check', () => {
     const f = fixture(); addRemote(f); setPolicy(f, { worktrees: { removeMerged: true } })
     const head = commit(f); git(f.repo, ['update-ref', `refs/remotes/origin/${defaultName(f)}`, head])
     const touched = new Date(); utimesSync(join(f.location, 'workspace.json'), touched, touched)
-    expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'kept', reason: 'Restored or changed within the last day' })
+    expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'kept', reason: 'Used within the last day' })
     age(f)
     expect(item(await f.service.run('manual'))).toMatchObject({ rule: 'worktree-merged', outcome: 'removed' })
   }, 90_000)
@@ -1494,4 +1496,181 @@ describe('storage defaults', () => {
   it('ships the recommended rules on: deleted threads, 30 days inactive, merged work and 30-day captures', () => {
     expect(STORAGE_POLICY_DEFAULTS).toEqual({ schemaVersion: 1, worktrees: { removeWithDeletedThreads: true, inactiveDays: 30, removeMerged: true }, browser: { captureDays: 30 } })
   })
+})
+
+describe('a confirmed plan bounds the run', () => {
+  const keysOf = (token: { keys: string[] }) => [...token.keys].sort()
+
+  it('removes what the plan listed and nothing that became eligible after it', async () => {
+    const f = fixture(); setPolicy(f, inactive())
+    // Used a moment ago, so the plan keeps it.
+    const used = new Date(); utimesSync(join(f.location, 'messages.json'), used, used)
+    const { plan, token } = await f.service.planWithToken()
+    expect(plan.find((entry) => entry.threadId === 'task')).toMatchObject({ action: 'keep' })
+    expect(token.keys).toEqual([])
+    // Then it goes quiet, which would make it eligible for an unbounded run.
+    age(f)
+    const report = await f.service.run('manual', { plan: token })
+    expect(item(report)).toBeUndefined(); expect(report.counts).toEqual({ removed: 0, kept: 0, failed: 0 })
+    expect(existsSync(f.worktree)).toBe(true)
+    // The next ordinary run handles it.
+    expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'removed' }); expect(existsSync(f.worktree)).toBe(false)
+  }, 90_000)
+
+  it('removes a listed worktree, names it by thread, and reports it', async () => {
+    const f = fixture(); setPolicy(f, inactive())
+    const { plan, token } = await f.service.planWithToken()
+    expect(plan.find((entry) => entry.threadId === 'task')).toMatchObject({ action: 'remove', key: 'worktree:task' })
+    expect(keysOf(token)).toEqual(['worktree:task'])
+    expect(token.expiresAt - token.issuedAt).toBe(10 * 60_000)
+    expect(item(await f.service.run('manual', { plan: token }))).toMatchObject({ outcome: 'removed', rule: 'worktree-inactive' })
+    expect(existsSync(f.worktree)).toBe(false)
+  }, 90_000)
+
+  it('empties only the trash the plan listed', async () => {
+    const f = fixture(); enableTrash(f); setPolicy(f)
+    await trashed(f, 'listed')
+    const { token } = await f.service.planWithToken()
+    expect(keysOf(token)).toEqual(['trash:listed'])
+    // Past its retention only after the plan was made.
+    await trashed(f, 'later')
+    const report = await f.service.run('manual', { plan: token })
+    expect(report.items.filter((entry) => entry.rule === 'trash').map((entry) => [entry.threadId, entry.outcome])).toEqual([['listed', 'removed']])
+    expect(f.store.get('listed')?.state).toBe('purged'); expect(f.store.get('later')?.state).toBe('trashed')
+    // An unbounded run does empty it.
+    await f.service.run('manual'); expect(f.store.get('later')?.state).toBe('purged')
+  }, 120_000)
+
+  it('does not touch trash at all when the plan listed none', async () => {
+    const f = fixture(); enableTrash(f); setPolicy(f, inactive())
+    const { token } = await f.service.planWithToken()
+    await trashed(f, 'late')
+    const report = await f.service.run('manual', { plan: token })
+    expect(report.items.some((entry) => entry.rule === 'trash')).toBe(false); expect(f.store.get('late')?.state).toBe('trashed')
+  }, 120_000)
+
+  it('refuses a plan that has expired, and one made under other settings', async () => {
+    const f = fixture(); setPolicy(f, inactive())
+    const { token } = await f.service.planWithToken()
+    setPolicy(f, inactive(45))
+    await expect(f.service.run('manual', { plan: token })).rejects.toThrow(/Settings changed since the plan/)
+    expect(existsSync(f.worktree)).toBe(true)
+    const second = await f.service.planWithToken()
+    f.clockState.offset += 11 * 60_000
+    await expect(f.service.run('manual', { plan: second.token })).rejects.toThrow(/plan has expired/)
+    expect(existsSync(f.worktree)).toBe(true)
+    // A refused plan leaves the service free for the next run.
+    expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'removed' })
+  }, 120_000)
+
+  it('waits for a run in progress and is never merged into it', async () => {
+    const f = fixture(); setPolicy(f, inactive())
+    const { token } = await f.service.planWithToken()
+    const first = f.service.run('schedule')
+    const planned = f.service.run('manual', { plan: token })
+    expect(planned).not.toBe(first)
+    const [scheduled, confirmed] = await Promise.all([first, planned])
+    expect(scheduled.trigger).toBe('schedule')
+    expect(confirmed.trigger).toBe('manual')
+  }, 90_000)
+
+  it('deletes only the browser sessions the plan listed', async () => {
+    const f = captureFixture(); setCaptureDays(f, 30)
+    const listed = capture(f, 'session-a', `art_${uuid(1)}.png`, 40)
+    const { plan, token } = await f.service.planWithToken()
+    expect(plan.find((entry) => entry.rule === 'browser-capture')).toMatchObject({ action: 'remove', key: 'capture:session-a' })
+    const later = capture(f, 'session-b', `art_${uuid(2)}.png`, 40)
+    const report = await f.service.run('manual', { plan: token })
+    expect(existsSync(listed)).toBe(false); expect(existsSync(later)).toBe(true)
+    expect(captureItems(report).map((entry) => entry.label)).toEqual(['Browser session session-a'])
+  }, 60_000)
+})
+
+describe('profiles that were already in use keep what they had', () => {
+  it('a scheduled run on an existing profile removes nothing that the old defaults kept', async () => {
+    const f = fixture(); expect(f.policy.initialize(() => true)).toBe('existing')
+    expect(f.policy.policy()).toEqual({ schemaVersion: 1, worktrees: { removeWithDeletedThreads: true, inactiveDays: null, removeMerged: false }, browser: { captureDays: null } })
+    // Idle for 90 days, and merged: both new rules would remove it.
+    addRemote(f); const head = commit(f); git(f.repo, ['update-ref', `refs/remotes/origin/${defaultName(f)}`, head])
+    const report = await f.service.run('schedule')
+    expect(report.items.filter((entry) => entry.outcome === 'removed')).toEqual([])
+    expect(existsSync(f.worktree)).toBe(true)
+    expect(f.policy.reviewPending()).toBe(true)
+  }, 90_000)
+
+  it('keeps old captures on an existing profile until the rule is turned on', async () => {
+    const f = captureFixture(); expect(f.policy.initialize(() => true)).toBe('existing')
+    const old = capture(f, 'session-a', `art_${uuid(1)}.png`, 400)
+    expect(captureItems(await f.service.run('schedule'))).toEqual([]); expect(existsSync(old)).toBe(true)
+    expect(captureItems(await f.service.run('manual'))).toEqual([]); expect(existsSync(old)).toBe(true)
+    f.policy.configure({ schemaVersion: 1, worktrees: { removeWithDeletedThreads: true, inactiveDays: null, removeMerged: false }, browser: { captureDays: 30 } }, true)
+    expect(captureItems(await f.service.run('manual'))).toEqual([expect.objectContaining({ outcome: 'removed' })]); expect(existsSync(old)).toBe(false)
+  }, 60_000)
+
+  it('a new profile gets the recommended rules', async () => {
+    const f = fixture(); expect(f.policy.initialize(() => false)).toBe('new')
+    expect(f.policy.policy()).toEqual(STORAGE_POLICY_DEFAULTS); expect(f.policy.reviewPending()).toBe(false)
+    expect(item(await f.service.run('manual'))).toMatchObject({ rule: 'worktree-inactive', outcome: 'removed' })
+  }, 90_000)
+})
+
+describe('the merged rule counts conversation as use', () => {
+  it('leaves a merged worktree alone while the thread is being chatted in, then removes it', async () => {
+    const f = fixture(); addRemote(f); setPolicy(f, { worktrees: { removeMerged: true } })
+    const head = commit(f); git(f.repo, ['update-ref', `refs/remotes/origin/${defaultName(f)}`, head])
+    const chatted = new Date(Date.now() - 5 * 60_000); utimesSync(join(f.location, 'messages.json'), chatted, chatted)
+    expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'kept', reason: 'Used within the last day' })
+    expect(existsSync(f.worktree)).toBe(true)
+    age(f)
+    expect(item(await f.service.run('manual'))).toMatchObject({ rule: 'worktree-merged', outcome: 'removed' })
+  }, 90_000)
+})
+
+describe('the hourly run does not hold up the daemon', () => {
+  /** Calls between two turns of the event loop: a request can only be answered when one comes round. */
+  function watchLoop() {
+    const stamps: number[] = []; let running = true
+    const spin = () => { if (!running) return; stamps.push(Date.now()); setImmediate(spin) }
+    setImmediate(spin)
+    return { stop: () => { running = false; return stamps }, }
+  }
+  const busy = (ms: number) => { const end = Date.now() + ms; while (Date.now() < end) { /* Stands for a Git call and a file walk. */ } }
+
+  it('yields to the event loop between worktrees, so a request is answered promptly during a run', async () => {
+    const f = fixture(); setPolicy(f, inactive())
+    for (let index = 1; index <= 5; index++) {
+      const location = join(f.home, 'thread-data', `extra-${index}`); mkdirSync(location, { recursive: true })
+      writeFileSync(join(location, 'meta.json'), JSON.stringify({ id: `extra-${index}` })); writeFileSync(join(location, 'messages.json'), '[]')
+      writeFileSync(join(location, 'workspace.json'), JSON.stringify({ schemaVersion: 1, threadId: `extra-${index}`, worktreePath: f.worktree, lifecycle: 'ready' }))
+      f.store.registerTask({ taskId: `extra-${index}`, location })
+    }
+    const evaluate = vi.spyOn(f.service as unknown as { evaluateOne: () => Promise<{ keep: string }> }, 'evaluateOne').mockImplementation(async () => { busy(25); return { keep: 'Stubbed' } })
+    const watch = watchLoop()
+    await f.service.run('schedule')
+    const stamps = watch.stop()
+    expect(evaluate.mock.calls.length).toBeGreaterThanOrEqual(6)
+    // One turn of the loop after every worktree, and none of them waited for more than a worktree's work.
+    expect(stamps.length).toBeGreaterThanOrEqual(evaluate.mock.calls.length)
+    const gaps = stamps.slice(1).map((stamp, index) => stamp - stamps[index]!)
+    expect(Math.max(...gaps)).toBeLessThan(250)
+  }, 90_000)
+
+  it('walks a big folder for another repository in slices, and still finds one', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mousse-walk-')); roots.push(root)
+    for (let directory = 0; directory < 40; directory++) {
+      mkdirSync(join(root, `d${directory}`)); for (let file = 0; file < 40; file++) writeFileSync(join(root, `d${directory}`, `f${file}.txt`), '')
+    }
+    const watch = watchLoop()
+    expect(await findNestedRepository(root)).toEqual({ truncated: false })
+    expect(watch.stop().length).toBeGreaterThanOrEqual(2)
+    mkdirSync(join(root, 'd7', 'inner', '.git'), { recursive: true })
+    expect(await findNestedRepository(root)).toEqual({ nested: 'd7/inner', truncated: false })
+  }, 60_000)
+
+  it('keeps a worktree with node_modules for its ignored files without looking for another repository', async () => {
+    const f = fixture(); setPolicy(f, inactive()); commit(f, '.gitignore', 'node_modules/\n')
+    mkdirSync(join(f.worktree, 'node_modules', 'pkg'), { recursive: true }); writeFileSync(join(f.worktree, 'node_modules', 'pkg', 'index.js'), 'x')
+    mkdirSync(join(f.worktree, 'node_modules', 'pkg', '.git'))
+    expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'kept', reason: 'Has ignored files (node_modules/)' })
+  }, 60_000)
 })

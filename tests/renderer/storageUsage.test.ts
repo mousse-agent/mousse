@@ -145,10 +145,14 @@ describe('times, shares and notes', () => {
 })
 
 describe('machines', () => {
-  const device = (patch: Record<string, unknown>) => ({ node: 'nod_a' as NodeId, name: 'A', self: false, revoked: false, state: 'open', ...patch })
-  it('offers every device that is not this computer and not revoked', () => {
+  const device = (patch: Record<string, unknown>) => ({ node: 'nod_a' as NodeId, name: 'A', self: false, revoked: false, state: 'open', caps: ['read', 'chat'], ...patch })
+  it('offers every device that is not this computer, not revoked, and readable', () => {
     const list = otherMachines([device({ self: true }), device({ node: 'nod_b' as NodeId, name: 'B' }), device({ node: 'nod_c' as NodeId, name: 'C', revoked: true }), device({ node: 'nod_d' as NodeId, name: 'D', state: 'closed' })])
     expect(list).toEqual([{ node: 'nod_b', name: 'B', online: true }, { node: 'nod_d', name: 'D', online: false }])
+  })
+
+  it('leaves out a device this computer may not read from, or one that does not say', () => {
+    expect(otherMachines([device({ node: 'nod_e' as NodeId, caps: ['chat'] }), device({ node: 'nod_f' as NodeId, caps: [] }), device({ node: 'nod_g' as NodeId, caps: undefined })])).toEqual([])
   })
 
   it('names why a machine is unavailable', () => {
@@ -194,8 +198,13 @@ describe('where selecting a row goes', () => {
   })
 
   it('opens a local thread, and a remote one in a viewer', () => {
-    expect(openTarget(group({ id: 't1', machine: SELF_MACHINE }), 'thread', threads)).toEqual({ type: 'thread', threadId: 't1' })
+    expect(openTarget(group({ id: 'new', machine: SELF_MACHINE }), 'thread', threads)).toEqual({ type: 'thread', threadId: 'new' })
     expect(openTarget(group({ id: 't1', machine: LAPTOP }), 'thread', threads)).toEqual({ type: 'remote-thread', node: 'nod_laptop', threadId: 't1' })
+  })
+
+  it('leaves a local thread that is not in the thread list (in the trash, or deleted since) as a label', () => {
+    expect(openTarget(group({ id: 'deleted-since', machine: SELF_MACHINE }), 'thread', threads)).toBeUndefined()
+    expect(openTarget(group({ id: 'deleted-since', machine: LAPTOP }), 'thread', threads)).toEqual({ type: 'remote-thread', node: 'nod_laptop', threadId: 'deleted-since' })
   })
 
   it('opens the latest thread of a local project, never a subagent, and leaves other projects as labels', () => {

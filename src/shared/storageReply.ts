@@ -4,6 +4,7 @@ import {
   STORAGE_USAGE_KINDS,
   type StorageCleanupItem,
   type StorageCleanupPlanItem,
+  type StorageCleanupPlanToken,
   type StorageCleanupReport,
   type StorageCleanupRule,
   type StoragePolicy,
@@ -41,9 +42,9 @@ function count(value: unknown, what: string): number {
   return value
 }
 
-function text(value: unknown, what: string, optional = false): string | undefined {
+function text(value: unknown, what: string, optional = false, minLength = 0): string | undefined {
   if (value === undefined && optional) return undefined
-  if (typeof value !== 'string' || value.length > MAX_TEXT) throw new StorageReplyError(`${what} is not text`)
+  if (typeof value !== 'string' || value.length > MAX_TEXT || value.length < minLength) throw new StorageReplyError(`${what} is not text`)
   return value
 }
 
@@ -81,8 +82,8 @@ export function parseUsageSnapshot(value: unknown): StorageUsageSnapshot {
     const entry = record(item, 'usage entry')
     const kind = entry.kind
     if (typeof kind !== 'string' || !STORAGE_USAGE_KINDS.includes(kind as never)) throw new StorageReplyError('usage kind is unknown')
-    const projectId = text(entry.projectId, 'project id', true)
-    const threadId = text(entry.threadId, 'thread id', true)
+    const projectId = text(entry.projectId, 'project id', true, 1)
+    const threadId = text(entry.threadId, 'thread id', true, 1)
     const estimated = flag(entry.estimated, 'estimated')
     const partial = flag(entry.partial, 'partial')
     return {
@@ -112,8 +113,8 @@ function reportItem(value: unknown): StorageCleanupItem {
   const item = record(value, 'report item')
   if (typeof item.rule !== 'string' || !RULES.includes(item.rule as StorageCleanupRule)) throw new StorageReplyError('report rule is unknown')
   if (typeof item.outcome !== 'string' || !OUTCOMES.includes(item.outcome as StorageCleanupItem['outcome'])) throw new StorageReplyError('report outcome is unknown')
-  const threadId = text(item.threadId, 'thread id', true)
-  const projectId = text(item.projectId, 'project id', true)
+  const threadId = text(item.threadId, 'thread id', true, 1)
+  const projectId = text(item.projectId, 'project id', true, 1)
   const approximate = flag(item.bytesApproximate, 'bytesApproximate')
   const lower = flag(item.bytesLowerBound, 'bytesLowerBound')
   return {
@@ -139,6 +140,13 @@ export function parseCleanupReport(value: unknown): StorageCleanupReport {
   const counts = record(raw.counts, 'report counts')
   const clockNote = text(raw.clockNote, 'clockNote', true)
   const suspended = text(raw.suspended, 'suspended', true)
+  const items = list(raw.items, 'report items').map(reportItem)
+  const total = { removed: count(counts.removed, 'removed'), kept: count(counts.kept, 'kept'), failed: count(counts.failed, 'failed') }
+  const omitted = count(raw.omittedCount, 'omittedCount')
+  // The totals must account for exactly the listed items and the ones left out, or the sentence and the list would disagree.
+  if (total.removed + total.kept + total.failed !== items.length + omitted) throw new StorageReplyError('report counts do not match its items')
+  for (const outcome of OUTCOMES) if (items.filter((entry) => entry.outcome === outcome).length > total[outcome]) throw new StorageReplyError('report counts do not match its items')
+  if (raw.bytesRecovered !== 0 && total.removed === 0) throw new StorageReplyError('report recovered space without removing anything')
   return {
     startedAt: time(raw.startedAt, 'startedAt'),
     completedAt: time(raw.completedAt, 'completedAt'),
@@ -148,24 +156,36 @@ export function parseCleanupReport(value: unknown): StorageCleanupReport {
     ...(raw.bytesLowerBound !== undefined ? { bytesLowerBound: raw.bytesLowerBound as boolean } : {}),
     ...(clockNote !== undefined ? { clockNote } : {}),
     ...(suspended !== undefined ? { suspended } : {}),
-    counts: { removed: count(counts.removed, 'removed'), kept: count(counts.kept, 'kept'), failed: count(counts.failed, 'failed') },
-    items: list(raw.items, 'report items').map(reportItem),
-    omittedCount: count(raw.omittedCount, 'omittedCount')
+    counts: total,
+    items,
+    omittedCount: omitted
   }
 }
 
-/** The dry run from `storage.cleanup.plan`. */
+/** The dry run from `storage.cleanup.plan`: the items and the token a confirmed run is bounded by. */
+export function parseCleanupPlanReply(value: unknown): { plan: StorageCleanupPlanItem[]; token: StorageCleanupPlanToken } {
+  const raw = record(value, 'plan reply')
+  const token = record(raw.token, 'plan token')
+  const issuedAt = token.issuedAt, expiresAt = token.expiresAt
+  if (typeof issuedAt !== 'number' || typeof expiresAt !== 'number' || !Number.isFinite(issuedAt) || !Number.isFinite(expiresAt) || issuedAt < 0 || expiresAt < issuedAt) throw new StorageReplyError('plan token times are not valid')
+  const keys = list(token.keys, 'plan token keys').map((key) => text(key, 'plan key', false, 1)!)
+  return { plan: parseCleanupPlan(raw.plan), token: { issuedAt, expiresAt, policyDigest: text(token.policyDigest, 'plan digest', false, 1)!, keys } }
+}
+
+/** The dry run's items. */
 export function parseCleanupPlan(value: unknown): StorageCleanupPlanItem[] {
   return list(value, 'plan').map((entry) => {
     const item = record(entry, 'plan item')
     if (typeof item.rule !== 'string' || !RULES.includes(item.rule as StorageCleanupRule)) throw new StorageReplyError('plan rule is unknown')
     if (item.action !== 'remove' && item.action !== 'keep') throw new StorageReplyError('plan action is unknown')
-    const threadId = text(item.threadId, 'thread id', true)
-    const projectId = text(item.projectId, 'project id', true)
+    const threadId = text(item.threadId, 'thread id', true, 1)
+    const projectId = text(item.projectId, 'project id', true, 1)
     const approximate = flag(item.bytesApproximate, 'bytesApproximate')
     const lower = flag(item.bytesLowerBound, 'bytesLowerBound')
+    const key = text(item.key, 'key', true, 1)
     return {
       rule: item.rule as StorageCleanupRule,
+      ...(key !== undefined ? { key } : {}),
       ...(threadId !== undefined ? { threadId } : {}),
       ...(projectId !== undefined ? { projectId } : {}),
       label: text(item.label, 'label')!,
@@ -192,6 +212,8 @@ function bool(value: unknown, what: string): boolean {
 /** The stored cleanup rules, as `storage.policy` and `storage.configure` return them. */
 export function parseStoragePolicy(value: unknown): StoragePolicy {
   const raw = record(value, 'policy')
+  // A newer daemon's policy has fields this page does not know; saving it back as version 1 would drop them.
+  if (raw.schemaVersion !== 1) throw new StorageReplyError('policy version is not supported')
   const worktrees = record(raw.worktrees, 'worktree rules')
   const browser = record(raw.browser, 'browser rules')
   return {
@@ -206,6 +228,8 @@ export function parseStoragePolicy(value: unknown): StoragePolicy {
 }
 
 export interface StoragePolicyReply {
+  /** The recommended rules are waiting for the person to look at them. */
+  reviewRecommended: boolean
   trash: TrashRetentionPolicy
   trashSweepStatus: { suspended: boolean; reason?: string }
   policy: StoragePolicy
@@ -217,6 +241,7 @@ export function parseStoragePolicyReply(value: unknown): StoragePolicyReply {
   const raw = record(value, 'storage policy')
   const trash = record(raw.trash, 'trash policy')
   const status = record(raw.trashSweepStatus, 'trash status')
+  if (trash.schemaVersion !== 1) throw new StorageReplyError('trash policy version is not supported')
   const grace = trash.graceDays
   if (typeof grace !== 'number' || !Number.isSafeInteger(grace) || grace < 1 || grace > STORAGE_POLICY_MAX_DAYS) throw new StorageReplyError('graceDays is not a number of days')
   const reason = text(status.reason, 'trash status reason', true)
@@ -224,6 +249,7 @@ export function parseStoragePolicyReply(value: unknown): StoragePolicyReply {
     trash: { schemaVersion: 1, graceDays: grace, automaticPurge: bool(trash.automaticPurge, 'automaticPurge') },
     trashSweepStatus: { suspended: bool(status.suspended, 'suspended'), ...(reason !== undefined ? { reason } : {}) },
     policy: parseStoragePolicy(raw.policy),
-    clockSuspended: bool(raw.clockSuspended, 'clockSuspended')
+    clockSuspended: bool(raw.clockSuspended, 'clockSuspended'),
+    reviewRecommended: raw.reviewRecommended === undefined ? false : bool(raw.reviewRecommended, 'reviewRecommended')
   }
 }

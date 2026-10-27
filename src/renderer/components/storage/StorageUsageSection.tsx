@@ -87,7 +87,7 @@ export function StorageUsageView(props: StorageUsageViewProps) {
     description="How much space Mousse uses. Numbers come from a saved measurement, so opening this page does not scan your disk."
     action={<span className="storage-usage-actions">
       {oldest && <span className="settings-muted" data-testid="storage-measured-at">{relativeMeasuredAt(oldest, now)}</span>}
-      <button type="button" className="settings-btn" data-testid="storage-usage-refresh" disabled={loading} onClick={props.onRefresh}>
+      <button type="button" className="settings-btn" data-testid="storage-usage-refresh" disabled={loading} aria-busy={loading || undefined} onClick={props.onRefresh}>
         <RefreshCw size={13} aria-hidden="true" />{loading ? 'Measuring…' : 'Refresh'}
       </button>
     </span>}
@@ -160,7 +160,7 @@ export function StorageUsageSection({ refreshKey = 0 }: { refreshKey?: number })
   const [loading, setLoading] = useState(false)
   const [sort, setSort] = useState<Sort>({ key: 'size', direction: 'desc' })
   const [now, setNow] = useState(() => Date.now())
-  const [remote, setRemote] = useState<{ node: NodeId; threadId: string; name: string; connected: boolean }>()
+  const [remote, setRemote] = useState<{ node: NodeId; threadId: string; name: string }>()
   const token = useRef(0)
   const mounted = useRef(true)
   const machinesRef = useRef<MachineChoice[]>([])
@@ -193,16 +193,16 @@ export function StorageUsageSection({ refreshKey = 0 }: { refreshKey?: number })
     mounted.current = true
     return () => { mounted.current = false }
   }, [])
-  useEffect(() => {
-    let active = true
-    // Machines come from the same list the Devices page reads; with networking off there are none.
-    void readDevices(false).then(({ nodes }) => {
-      if (!active) return
+  // Machines come from the same list the Devices page reads; with networking off there are none.
+  const refreshMachines = useCallback(async () => {
+    try {
+      const { nodes } = await readDevices(false)
+      if (!mounted.current) return
       machinesRef.current = otherMachines(nodes)
       setMachines(machinesRef.current)
-    }, () => undefined)
-    return () => { active = false }
+    } catch { /* Without the list this computer is still shown. */ }
   }, [])
+  useEffect(() => { void refreshMachines() }, [refreshMachines])
   useEffect(() => { void load(machine, false) }, [load, machine, refreshKey])
 
   const canOpen = useCallback((group: UsageGroup) => openTarget(group, by, threads) !== undefined, [by, threads])
@@ -214,8 +214,7 @@ export function StorageUsageSection({ refreshKey = 0 }: { refreshKey?: number })
     } else if (target.type === 'thread') {
       void openThread(target.threadId).then(() => { if (useAppStore.getState().activeThreadId === target.threadId) useAppStore.getState().setSettingsOpen(false) })
     } else {
-      const choice = machinesRef.current.find((item) => item.node === target.node)
-      setRemote({ node: target.node, threadId: target.threadId, name: group.label, connected: choice?.online ?? false })
+      setRemote({ node: target.node, threadId: target.threadId, name: group.label })
     }
   }
   const onSort = (key: SortKey) => setSort((current) => current.key === key ? { key, direction: current.direction === 'asc' ? 'desc' : 'asc' } : { key, direction: key === 'name' || key === 'machine' ? 'asc' : 'desc' })
@@ -232,12 +231,12 @@ export function StorageUsageSection({ refreshKey = 0 }: { refreshKey?: number })
       canOpen={canOpen}
       onMachine={setMachine}
       onBy={setBy}
-      onRefresh={() => void load(machine, true)}
+      onRefresh={() => void refreshMachines().then(() => load(machine, true))}
       onSort={onSort}
       onOpen={open}
     />
     <Modal open={remote !== undefined} title={remote ? `${remote.name} on another machine` : 'Thread'} onClose={() => setRemote(undefined)}>
-      {remote && <RemoteThreadView refValue={{ nodeId: remote.node, entityId: remote.threadId }} connected={remote.connected} />}
+      {remote && <RemoteThreadView refValue={{ nodeId: remote.node, entityId: remote.threadId }} connected={machines.find((choice) => choice.node === remote.node)?.online ?? false} />}
     </Modal>
   </>
 }

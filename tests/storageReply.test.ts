@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import type { StorageCleanupReport, StorageUsageSnapshot } from '../src/shared/storage'
+import { groupUsage, type StorageCleanupReport, type StorageUsageSnapshot } from '../src/shared/storage'
 import {
   StorageReplyError,
   parseCleanupPlan,
+  parseCleanupPlanReply,
   parseCleanupReport,
   parseStoragePolicy,
   parseStoragePolicyReply,
@@ -111,6 +112,48 @@ describe('cleanup reply validation', () => {
     ['bytes as text', [{ rule: 'trash', label: 'x', action: 'keep', reason: 'r', bytes: '0' }]]
   ])('rejects a plan that is %s', (_label, value) => {
     expect(() => parseCleanupPlan(value)).toThrow(StorageReplyError)
+  })
+})
+
+describe('what a damaged or newer reply cannot make the page show', () => {
+  const token = { issuedAt: 1_000, expiresAt: 601_000, policyDigest: 'abc', keys: ['worktree:t1'] }
+  const plan = [{ rule: 'worktree-inactive', key: 'worktree:t1', label: 'x', action: 'remove', reason: 'r', bytes: 1 }]
+
+  it('reads a plan reply with its token and refuses one without a usable token', () => {
+    expect(parseCleanupPlanReply({ plan, token })).toEqual({ plan, token })
+    for (const bad of [undefined, { ...token, keys: [''] }, { ...token, keys: 'all' }, { ...token, expiresAt: 500 }, { ...token, issuedAt: 'now' }, { ...token, policyDigest: '' }]) {
+      expect(() => parseCleanupPlanReply({ plan, token: bad })).toThrow(StorageReplyError)
+    }
+    expect(() => parseCleanupPlanReply({ plan: 'none', token })).toThrow(StorageReplyError)
+  })
+
+  it('refuses a report whose totals do not account for its items and the ones left out', () => {
+    const ok = report()
+    expect(() => parseCleanupReport({ ...ok, counts: { removed: 1, kept: 1, failed: 0 }, omittedCount: 5 })).toThrow(/do not match/)
+    expect(() => parseCleanupReport({ ...ok, counts: { removed: 0, kept: 1, failed: 0 } })).toThrow(/do not match/)
+    expect(parseCleanupReport({ ...ok, counts: { removed: 1, kept: 4, failed: 0 }, omittedCount: 3 }).omittedCount).toBe(3)
+    const kept = [ok.items[1], ok.items[1]]
+    expect(() => parseCleanupReport({ ...ok, items: kept, counts: { removed: 0, kept: 2, failed: 0 }, bytesRecovered: 4096 })).toThrow(/recovered space/)
+  })
+
+  it('refuses empty thread and project ids, and shows an empty name as unnamed', () => {
+    expect(() => parseUsageSnapshot({ ...usage(), entries: [{ kind: 'logs', bytes: 1, files: 1, threadId: '' }] })).toThrow(StorageReplyError)
+    expect(() => parseUsageSnapshot({ ...usage(), entries: [{ kind: 'logs', bytes: 1, files: 1, projectId: '' }] })).toThrow(StorageReplyError)
+    expect(() => parseCleanupReport({ ...report(), items: [{ ...report().items[0], threadId: '' }, report().items[1]] })).toThrow(StorageReplyError)
+    const parsed = parseUsageSnapshot({ ...usage(), names: { projects: { p1: '' }, threads: { t1: '' } } })
+    const groups = groupUsage(parsed.entries.map((entry) => ({ ...entry, machine: { node: 'self', name: 'This computer' } })), 'project', { self: parsed.names })
+    expect(groups.map((group) => group.label)).toContain('Unnamed project')
+  })
+
+  it('refuses a policy or trash policy from a newer version instead of showing it as version 1', () => {
+    const policy = { schemaVersion: 1, worktrees: { removeWithDeletedThreads: true, inactiveDays: 30, removeMerged: false }, browser: { captureDays: null } }
+    expect(() => parseStoragePolicy({ ...policy, schemaVersion: 2 })).toThrow(/version/)
+    expect(() => parseStoragePolicy({ ...policy, schemaVersion: undefined })).toThrow(/version/)
+    const reply = { trash: { schemaVersion: 1, graceDays: 30, automaticPurge: false }, trashSweepStatus: { suspended: false }, policy, clockSuspended: false }
+    expect(() => parseStoragePolicyReply({ ...reply, trash: { ...reply.trash, schemaVersion: 2 } })).toThrow(/version/)
+    expect(parseStoragePolicyReply(reply).reviewRecommended).toBe(false)
+    expect(parseStoragePolicyReply({ ...reply, reviewRecommended: true }).reviewRecommended).toBe(true)
+    expect(() => parseStoragePolicyReply({ ...reply, reviewRecommended: 'yes' })).toThrow(StorageReplyError)
   })
 })
 

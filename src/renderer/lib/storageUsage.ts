@@ -172,9 +172,9 @@ export function openTarget(
   }
   if (!group.id || !group.machine) return undefined
   if (by === 'thread') {
-    return group.machine.node === 'self'
-      ? { type: 'thread', threadId: group.id }
-      : { type: 'remote-thread', node: group.machine.node as NodeId, threadId: group.id }
+    // A thread that is not in this computer's list (in the trash, or deleted since the measurement) has nothing to open.
+    if (group.machine.node === 'self') return threads.some((thread) => thread.id === group.id) ? { type: 'thread', threadId: group.id } : undefined
+    return { type: 'remote-thread', node: group.machine.node as NodeId, threadId: group.id }
   }
   if (group.machine.node !== 'self') return undefined
   const latest = threads
@@ -185,7 +185,8 @@ export function openTarget(
 
 export interface MachineChoice { node: NodeId; name: string; online: boolean }
 
-/** Machines the dropdown offers besides this computer: each device that is not this one and not revoked. */
-export function otherMachines(devices: ReadonlyArray<{ node: NodeId; name: string; self: boolean; revoked: boolean; state: string }>): MachineChoice[] {
-  return devices.filter((device) => !device.self && !device.revoked).map((device) => ({ node: device.node, name: device.name, online: device.state === 'open' }))
+/** Machines the dropdown offers besides this computer: each device that is not this one, not revoked, and readable. */
+export function otherMachines(devices: ReadonlyArray<{ node: NodeId; name: string; self: boolean; revoked: boolean; state: string; caps?: readonly string[] }>): MachineChoice[] {
+  // A device that this computer may not read from cannot report usage; offering it would only show a refusal.
+  return devices.filter((device) => !device.self && !device.revoked && device.caps?.includes('read') === true).map((device) => ({ node: device.node, name: device.name, online: device.state === 'open' }))
 }

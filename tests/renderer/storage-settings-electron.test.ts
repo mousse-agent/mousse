@@ -34,6 +34,16 @@ it('edits policies, shows usage across machines, and cleans up only after the pl
     expect(report.errors).toEqual([])
     expect(report.failures).toEqual([])
 
+    // A profile that was already in use keeps its own rules and sees a notice; nothing new is on until it says so.
+    const review = report.review
+    expect(review.legacy).toMatchObject({ inactive: 'off', captures: 'off', merged: 'false', deleted: 'true', configureCalls: 0 })
+    expect(review.legacy.notice).toContain('Recommended cleanup rules are available')
+    expect(review.legacy.notice).toContain('Nothing has changed: only the worktrees of deleted threads are removed automatically.')
+    for (const text of ['Remove worktrees inactive for 30 days', 'Remove worktrees whose work is merged into the default branch', 'Delete saved browser captures after 30 days', 'Never deletes', 'A download saved by an older version with a .png name']) expect(review.dialog, text).toContain(text)
+    expect(review.notNow).toEqual({ configureCalls: 0, notice: true })
+    expect(review.turnedOn).toEqual({ saved: { schemaVersion: 1, worktrees: { removeWithDeletedThreads: true, inactiveDays: 30, removeMerged: true }, browser: { captureDays: 30 } }, noticeGone: true })
+    expect(review.dismissed).toEqual({ dismissCalls: 1, configureCallsAdded: 0, inactive: '30' })
+
     // The saved values reach the controls, and every rule says what it deletes and never deletes.
     expect(report.initial).toMatchObject({ trash: 'never', inactive: '30', captures: '30', deleted: 'true', merged: 'true', groups: [true, true, true, true, true], machineSelect: true, measuredAt: 'Measured 5m ago', projectArcs: 3 })
     for (const row of report.initial.ruleRows) {
@@ -41,10 +51,13 @@ it('edits policies, shows usage across machines, and cleans up only after the pl
       expect(row.text, row.id).toContain('Never deletes')
     }
     expect(report.initial.keepWhen).toContain('Keep a worktree when it has any local files')
-    expect(report.initial.projectRows.map((row: any) => [row.label, row.bytes])).toEqual([['Mousse', 700 * MB], ['Website', 250 * MB], ['Other', 100 * MB]])
+    expect(report.initial.projectRows.map((row: any) => [row.label, row.bytes])).toEqual([['Mousse', 700 * MB], ['Website', 280 * MB], ['Other', 100 * MB]])
 
     // Policy editing: each setting is sent, saved and read back; a bad number is never sent.
     const policy = report.policy
+    // An empty Custom field, or Escape, goes back to the saved value instead of hiding it.
+    expect(policy.emptyBlur).toEqual({ shown: '30', configureCalls: 0 })
+    expect(policy.escape).toEqual({ shown: '30' })
     expect(policy.custom45).toMatchObject({ typed: '45', configureCalls: 1, saved: 45, shown: '45', inputGone: true, bound: '' })
     expect(policy.invalid.map((entry: any) => entry.typed)).toEqual(['0', '4000', 'abc', '4.5'])
     for (const entry of policy.invalid) {
@@ -67,13 +80,16 @@ it('edits policies, shows usage across machines, and cleans up only after the pl
     const cleanup = report.cleanup
     expect(cleanup.beforeRun).toContain('Cleanup has not run yet.')
     expect(cleanup.enabled).toBe(true)
+    // What the run is bounded by is exactly what the plan returned.
     expect(cleanup.plan).toMatchObject({ planCalls: 1, runCalls: 0, keptFolded: true, summary: 'Would remove 2 items, freeing about 250.0 MB. 1 will be kept.', confirm: 'Remove 2 items' })
     expect(cleanup.plan.text).toContain('Inactive for 41 days')
     expect(cleanup.plan.text).toContain('Has uncommitted changes (3 files)')
+    expect(cleanup.runToken).toMatchObject({ policyDigest: 'digest', keys: ['worktree:t2', 'worktree:old'] })
+    expect(cleanup.runToken.expiresAt - cleanup.runToken.issuedAt).toBe(600_000)
     expect(cleanup.afterCancel.runCalls).toBe(0)
     expect(cleanup.afterCancel.report).toContain('Cleanup has not run yet.')
     expect(cleanup.report.runCalls).toBe(1)
-    expect(cleanup.report.sentence).toBe('Removed 2, kept 1, failed 1. About 250.0 MB recovered.')
+    expect(cleanup.report.sentence).toBe('Removed 2, kept 4, failed 1. About 250.0 MB recovered.')
     expect(cleanup.report.omitted).toBe('3 more results')
     expect(cleanup.report.items.map((item: any) => item.outcome)).toEqual(['failed', 'removed', 'removed', 'kept'])
     expect(cleanup.report.items[0].text).toContain('Repository is busy')
@@ -81,13 +97,18 @@ it('edits policies, shows usage across machines, and cleans up only after the pl
     expect(cleanup.report.items[3].text).toContain('Has ignored files (node_modules/)')
     expect(cleanup.usageReread).toBe(true)
     expect(cleanup.failure).toContain('Cleanup did not finish.')
+    // A plan nobody confirmed in time has to be checked again, and the page says so before the daemon refuses it.
+    expect(cleanup.expired).toEqual({ message: 'This check is out of date. Check again to see what would be removed now.', confirm: false, recheck: true })
+    expect(cleanup.rechecked).toEqual({ planCallsAdded: 1 })
+    // A timeout is not a failure: the daemon keeps going and the page says where the result will appear.
+    expect(cleanup.timeout).toEqual({ notice: 'Cleanup is still running in the background. The result appears here when it finishes.', error: false, dialog: false })
 
     // Group by changes both the table and the chart; the arcs together fill the ring.
     const { project, thread, kind } = report.usage.byGroup
     expect(project.rows.map((row: any) => row.label)).toEqual(['Mousse', 'Website', 'Other'])
-    expect(thread.rows.map((row: any) => [row.label, row.bytes])).toEqual([['Fix storage', 500 * MB], ['Add search', 200 * MB], ['Landing page', 50 * MB], ['Other', 300 * MB]])
+    expect(thread.rows.map((row: any) => [row.label, row.bytes])).toEqual([['Fix storage', 500 * MB], ['Add search', 200 * MB], ['Landing page', 50 * MB], ['Gone thread', 30 * MB], ['Other', 300 * MB]])
     expect(kind.rows.map((row: any) => row.label)).toEqual(['Worktrees', 'Browser data', 'Logs', 'Threads'])
-    expect([project.arcs.length, thread.arcs.length, kind.arcs.length]).toEqual([3, 4, 4])
+    expect([project.arcs.length, thread.arcs.length, kind.arcs.length]).toEqual([3, 5, 4])
     expect(thread.arcs.map((arc: any) => arc.key)).not.toEqual(project.arcs.map((arc: any) => arc.key))
     for (const view of [project, thread, kind]) {
       expect(view.arcs.length).toBe(view.rows.length)
@@ -120,22 +141,24 @@ it('edits policies, shows usage across machines, and cleans up only after the pl
     expect(all.project.rows.map((row: any) => row.key)).toEqual(expect.arrayContaining(['self:p1', 'nod_laptop:p9']))
     expect(all.project.machineColumn).toBe(true)
     expect(all.kind.machineColumn).toBe(false)
-    expect(all.kind.rows.find((row: any) => row.label === 'Worktrees').bytes).toBe(950 * MB)
+    expect(all.kind.rows.find((row: any) => row.label === 'Worktrees').bytes).toBe(980 * MB)
 
     // A reply that fails validation is refused before anything is drawn.
     expect(report.usage.malformed).toMatchObject({ chart: false, rows: 0, none: 'No usage to show.' })
     expect(report.usage.malformed.text).toBe('This computer: Unavailable · Sent an unreadable reply')
 
     // Selecting a row goes somewhere.
+    // A measured thread that is no longer in the thread list is a label, not a link.
+    expect(report.links.goneThread).toEqual({ listed: true, linked: false })
     expect(report.links.localThread).toEqual({ select: 't1', settingsOpen: false })
     expect(report.links.project).toEqual({ select: 't2' })
     expect(report.links.kind).toEqual({ scrolledTo: 'storage-worktrees', logsIsLabel: true })
     expect(report.links.remoteThread).toEqual({ attach: { ref: { nodeId: 'nod_laptop', entityId: 'r1' } }, dialog: true })
 
-    // The trash lists only what is in it, and permanent deletion leads with one line.
-    expect(report.trash.dialog).not.toContain('Other threads')
-    expect(report.trash.rows).toEqual([{ id: 't9', buttons: ['Restore', 'Delete…'] }])
-    expect(report.trash.confirmation).toEqual({ summary: 'Frees 1.20 GB. 1 worktree has unpublished work.', detailsOpen: false, hasDiscard: true })
+    // Trash is reviewed from the sidebar: the row says so, and Settings has no trash dialog or other-threads list.
+    expect(report.trash.row).toContain('1 thread in trash · restore or delete them from Recently deleted in the sidebar.')
+    expect(report.trash.reviewButton).toBe(false)
+    expect(report.trash.otherThreads).toBe(false)
 
     // With every rule off, Clean up now says why it is disabled and asks for nothing.
     expect(report.noRule.disabled).toBe(true)

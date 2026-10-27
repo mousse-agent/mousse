@@ -27,6 +27,17 @@ export const STORAGE_POLICY_DEFAULTS: StoragePolicy = {
   browser: { captureDays: 30 }
 }
 
+/**
+ * What an installation that was already in use gets when the recommended rules arrive: the behaviour it
+ * had before (only the worktrees of deleted threads are removed). It is saved explicitly, so the later
+ * recommended rules are the person's choice and nothing starts deleting on its own.
+ */
+export const STORAGE_POLICY_EXISTING_INSTALL: StoragePolicy = {
+  schemaVersion: 1,
+  worktrees: { removeWithDeletedThreads: true, inactiveDays: null, removeMerged: false },
+  browser: { captureDays: null }
+}
+
 /** True when any cleanup rule, including automatic trash emptying, would act on a run. */
 export function storagePolicyHasRule(policy: StoragePolicy, trash: TrashRetentionPolicy): boolean {
   return trash.automaticPurge
@@ -46,6 +57,8 @@ export type StorageCleanupRule =
 
 export interface StorageCleanupItem {
   rule: StorageCleanupRule
+  /** What a confirmed plan names this item by (`worktree:<thread>`, `trash:<thread>`, `capture:<session>`). */
+  key?: string
   threadId?: string
   projectId?: string
   label: string
@@ -78,9 +91,25 @@ export interface StorageCleanupReport {
 
 export const REPORT_ENTRY_LIMIT = 200
 
+/** How long a plan can be confirmed. After that the person checks again. */
+export const STORAGE_PLAN_TTL_MS = 10 * 60_000
+
+/**
+ * What the person confirmed: the time of the dry run, the policy it used, and exactly which items it
+ * would remove. A run given this token removes only items that are in it and still eligible.
+ */
+export interface StorageCleanupPlanToken {
+  issuedAt: number
+  expiresAt: number
+  policyDigest: string
+  keys: string[]
+}
+
 /** One line of a dry run: what a run would do with an item right now, and why. Nothing has been changed. */
 export interface StorageCleanupPlanItem {
   rule: StorageCleanupRule
+  /** What a confirmed plan names this item by; only a removal has one. */
+  key?: string
   threadId?: string
   projectId?: string
   label: string
@@ -178,10 +207,10 @@ export function groupUsage(rows: readonly MachineUsageEntry[], by: UsageGroupBy,
       add({ key: row.kind, label: STORAGE_USAGE_KIND_LABELS[row.kind], kind: row.kind }, row.bytes)
     } else if (by === 'project') {
       const id = row.projectId
-      add({ key: `${machine.node}:${id ?? OTHER_ID}`, label: id ? names[machine.node]?.projects[id] ?? 'Unnamed project' : 'Other', machine, ...(id ? { id } : {}) }, row.bytes)
+      add({ key: `${machine.node}:${id ?? OTHER_ID}`, label: id ? names[machine.node]?.projects[id] || 'Unnamed project' : 'Other', machine, ...(id ? { id } : {}) }, row.bytes)
     } else {
       const id = row.threadId
-      add({ key: `${machine.node}:${id ?? OTHER_ID}`, label: id ? names[machine.node]?.threads[id] ?? 'Unnamed thread' : 'Other', machine, ...(id ? { id } : {}) }, row.bytes)
+      add({ key: `${machine.node}:${id ?? OTHER_ID}`, label: id ? names[machine.node]?.threads[id] || 'Unnamed thread' : 'Other', machine, ...(id ? { id } : {}) }, row.bytes)
     }
   }
   let list = [...groups.values()]

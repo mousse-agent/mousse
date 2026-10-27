@@ -390,6 +390,7 @@ export const PROTOCOL_METHODS = [
   'threads.configureTrash',
   'storage.policy',
   'storage.configure',
+  'storage.reviewDismiss',
   'storage.cleanup.run',
   'storage.cleanup.plan',
   'storage.cleanup.lastReport',

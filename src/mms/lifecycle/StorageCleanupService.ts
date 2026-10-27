@@ -1,7 +1,8 @@
+import { knownAppError } from '../../shared/errors'
 import { appendFileSync, existsSync, lstatSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, type Dirent } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { TaskLifecycleRecord } from '../../shared/resourceLifecycle'
-import { REPORT_ENTRY_LIMIT, storagePolicyHasRule, type StorageCleanupItem, type StorageCleanupPlanItem, type StorageCleanupReport, type StoragePolicy } from '../../shared/storage'
+import { REPORT_ENTRY_LIMIT, storagePolicyHasRule, STORAGE_PLAN_TTL_MS, type StorageCleanupItem, type StorageCleanupPlanItem, type StorageCleanupPlanToken, type StorageCleanupReport, type StoragePolicy } from '../../shared/storage'
 import type { Thread } from '../../shared/types'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
 import { atomicWriteFileSync, atomicWriteJsonSync } from '../data/AtomicFs'
@@ -140,6 +141,9 @@ type CheckoutFacts = { head: string; beyondBase: number; integrated: boolean }
 /** One line of a dry run; the shape the Storage page reads. */
 export type PlannedCleanup = StorageCleanupPlanItem
 
+const worktreeKey = (taskId: string): string => `worktree:${taskId}`
+const trashKey = (taskId: string): string => `trash:${taskId}`
+const captureKey = (sessionId: string): string => `capture:${sessionId}`
 const approximate = (measurement: Pick<Measurement, 'estimated' | 'partial'>) => ({
   ...(measurement.estimated || measurement.partial ? { bytesApproximate: true as const } : {}),
   ...(measurement.partial && !measurement.estimated ? { bytesLowerBound: true as const } : {})
@@ -165,14 +169,20 @@ function readWorkspaceFile(location: string): ThreadWorkspaceMetadata | undefine
  * the leases): the same entry and depth bounds, but no content digests, so an hourly scan of an idle
  * worktree does not read every file. `truncated` means a bound ended the scan.
  */
-function findNestedRepository(root: string): { nested?: string; truncated: boolean } {
-  let visited = 0
+const yieldToLoop = (): Promise<void> => new Promise<void>((resolveYield) => setImmediate(resolveYield))
+/** Entries examined between two turns of the event loop, so a long walk never holds up a request. */
+const WALK_YIELD_ENTRIES = 500
+
+export async function findNestedRepository(root: string): Promise<{ nested?: string; truncated: boolean }> {
+  let visited = 0, sinceYield = 0
   const stack: Array<{ path: string; depth: number }> = [{ path: root, depth: 0 }]
   while (stack.length) {
     const { path, depth } = stack.pop()!
     if (depth > 64) return { truncated: true }
     let entries: Dirent[]
     try { entries = readdirSync(path, { withFileTypes: true }) } catch { return { truncated: true } }
+    sinceYield += entries.length
+    if (sinceYield >= WALK_YIELD_ENTRIES) { sinceYield = 0; await yieldToLoop() }
     for (const entry of entries) {
       if (++visited > 100_000) return { truncated: true }
       if (entry.name === '.git') { if (path !== root) return { nested: relative(root, path).split('\\').join('/'), truncated: false }; continue }
@@ -280,7 +290,8 @@ export class StorageCleanupService {
    * and five trash records, so the manual request follows it and gets its own full run. Repeated manual
    * requests share that one queued run.
    */
-  run(trigger: StorageCleanupReport['trigger']): Promise<StorageCleanupReport> {
+  run(trigger: StorageCleanupReport['trigger'], options?: { plan?: StorageCleanupPlanToken }): Promise<StorageCleanupReport> {
+    if (options?.plan) return this.runPlanned(options.plan)
     if (!this.current) return this.begin(trigger)
     if (trigger === 'manual' && this.currentTrigger === 'schedule') {
       this.queuedManual ??= this.current.catch(() => undefined).then(() => this.begin('manual')).finally(() => { this.queuedManual = undefined })
@@ -289,9 +300,15 @@ export class StorageCleanupService {
     return this.current
   }
 
-  private begin(trigger: StorageCleanupReport['trigger']): Promise<StorageCleanupReport> {
+  /** A confirmed plan waits for any run in progress and then gets a run of its own: it is never merged with another request. */
+  private async runPlanned(plan: StorageCleanupPlanToken): Promise<StorageCleanupReport> {
+    while (this.current || this.queuedManual) await (this.queuedManual ?? this.current)!.catch(() => undefined)
+    return this.begin('manual', plan)
+  }
+
+  private begin(trigger: StorageCleanupReport['trigger'], plan?: StorageCleanupPlanToken): Promise<StorageCleanupReport> {
     this.currentTrigger = trigger
-    const run: Promise<StorageCleanupReport> = this.execute(trigger).finally(() => { if (this.current === run) { this.current = undefined; this.currentTrigger = undefined } })
+    const run: Promise<StorageCleanupReport> = this.execute(trigger, plan).finally(() => { if (this.current === run) { this.current = undefined; this.currentTrigger = undefined } })
     this.current = run
     return run
   }
@@ -305,7 +322,21 @@ export class StorageCleanupService {
    * repeats under the thread and repository leases, and by whether files are in use at that moment.
    */
   async plan(now = this.now()): Promise<PlannedCleanup[]> {
+    return this.buildPlan(this.deps.policy.snapshot(), now)
+  }
+
+  /**
+   * The dry run and what a confirmed run is bounded by: the time, the policy it used, and the keys of
+   * exactly the items it would remove. `run('manual', { plan })` removes only those, and only while
+   * they are still eligible, within ten minutes, under the same policy.
+   */
+  async planWithToken(now = this.now()): Promise<{ plan: PlannedCleanup[]; token: StorageCleanupPlanToken }> {
     const snapshot = this.deps.policy.snapshot()
+    const plan = await this.buildPlan(snapshot, now)
+    return { plan, token: { issuedAt: now, expiresAt: now + STORAGE_PLAN_TTL_MS, policyDigest: snapshot.digest, keys: plan.flatMap((item) => item.action === 'remove' && item.key ? [item.key] : []) } }
+  }
+
+  private async buildPlan(snapshot: PolicySnapshot, now: number): Promise<PlannedCleanup[]> {
     const clock = this.deps.clock.peek()
     const planned: PlannedCleanup[] = []
     if (clock.suspended) planned.push({ rule: 'worktree-inactive', label: 'Time-based rules', action: 'keep', reason: clock.reason ?? 'Paused after the system clock moved backwards', bytes: 0 })
@@ -313,7 +344,7 @@ export class StorageCleanupService {
     for (const entry of await this.evaluateWorktrees(snapshot, !clock.suspended, now, false)) {
       const base = { threadId: entry.record.taskId, projectId: entry.projectId, label: entry.label }
       planned.push('rule' in entry.verdict
-        ? { ...base, rule: entry.verdict.rule, action: 'remove', reason: entry.verdict.reason, bytes: entry.verdict.measurement.bytes, ...approximate(entry.verdict.measurement) }
+        ? { ...base, key: worktreeKey(entry.record.taskId), rule: entry.verdict.rule, action: 'remove', reason: entry.verdict.reason, bytes: entry.verdict.measurement.bytes, ...approximate(entry.verdict.measurement) }
         : { ...base, rule: 'worktree-inactive', action: 'keep', reason: entry.verdict.keep, bytes: 0 })
     }
     if (!clock.suspended) planned.push(...await this.planCaptures(snapshot, now))
@@ -335,7 +366,8 @@ export class StorageCleanupService {
       if ('skip' in verdict) continue
       planned.push('keep' in verdict
         ? { ...base, action: 'keep', reason: verdict.keep, bytes: 0 }
-        : { ...base, action: 'remove', reason: 'Thread was deleted', bytes: verdict.measurement.bytes, ...approximate(verdict.measurement) })
+        : { ...base, key: worktreeKey(record.taskId), action: 'remove', reason: 'Thread was deleted', bytes: verdict.measurement.bytes, ...approximate(verdict.measurement) })
+      await yieldToLoop()
     }
     return planned
   }
@@ -345,6 +377,7 @@ export class StorageCleanupService {
     try {
       return (await this.captureItems(snapshot, now, false)).map((entry) => ({
         rule: entry.rule, label: entry.label, action: entry.outcome === 'removed' ? 'remove' as const : 'keep' as const, reason: entry.reason,
+        ...(entry.outcome === 'removed' && entry.key ? { key: entry.key } : {}),
         bytes: entry.outcome === 'removed' ? entry.bytes : 0,
         ...(entry.outcome === 'removed' && entry.bytesApproximate ? { bytesApproximate: true as const } : {}),
         ...(entry.outcome === 'removed' && entry.bytesLowerBound ? { bytesLowerBound: true as const } : {})
@@ -376,7 +409,7 @@ export class StorageCleanupService {
             continue
           }
           const reclaim = await purge.reclaimEstimate(preview)
-          planned.push({ ...base, action: 'remove', reason: 'Retention passed', bytes: reclaim.bytes, ...approximate(reclaim) })
+          planned.push({ ...base, key: trashKey(taskId), action: 'remove', reason: 'Retention passed', bytes: reclaim.bytes, ...approximate(reclaim) })
         } catch (error) {
           planned.push({ ...base, action: 'keep', reason: (error as Error).message, bytes: 0 })
         }
@@ -400,13 +433,13 @@ export class StorageCleanupService {
     return { label: taskId }
   }
 
-  private async execute(trigger: StorageCleanupReport['trigger']): Promise<StorageCleanupReport> {
+  private async execute(trigger: StorageCleanupReport['trigger'], plan?: StorageCleanupPlanToken): Promise<StorageCleanupReport> {
     // Disk measurement holds handles that make a worktree look in use to the rename probe; it waits for the run.
     const resume = await this.deps.quiesceDisk?.()
-    try { return await this.executeQuiet(trigger) } finally { resume?.() }
+    try { return await this.executeQuiet(trigger, plan) } finally { resume?.() }
   }
 
-  private async executeQuiet(trigger: StorageCleanupReport['trigger']): Promise<StorageCleanupReport> {
+  private async executeQuiet(trigger: StorageCleanupReport['trigger'], plan?: StorageCleanupPlanToken): Promise<StorageCleanupReport> {
     const startedMs = this.now()
     const items: StorageCleanupItem[] = []
     let suspended: string | undefined
@@ -422,19 +455,27 @@ export class StorageCleanupService {
     } catch (error) {
       items.push({ rule: 'worktree-inactive', label: 'Storage settings', bytes: 0, outcome: 'failed', reason: `Storage policy could not be read: ${(error as Error).message}` })
     }
+    // A confirmed plan authorizes only what it named, only for a short while, and only under the policy it was made with.
+    let allowed: ReadonlySet<string> | undefined
+    if (plan) {
+      // Known errors, so the person reads these two sentences instead of a generic failure.
+      if (this.now() > plan.expiresAt) throw knownAppError({ code: 'storage_plan_expired', message: 'This plan has expired. Check what would be removed again.' }, { category: 'invalid', retryable: false })
+      if (!snapshot || snapshot.digest !== plan.policyDigest) throw knownAppError({ code: 'storage_plan_stale', message: 'Settings changed since the plan was made. Check what would be removed again.' }, { category: 'invalid', retryable: false })
+      allowed = new Set(plan.keys)
+    }
     // Checked before any age is evaluated and whether or not automatic trash emptying is on.
     const clock = this.deps.clock.check()
     if (clock.suspended) suspended = clock.reason
     else if ((clock.forwardJumpMs ?? 0) > FORWARD_JUMP_NOTE_MS) clockNote = `Clock moved forward by ${Math.round(clock.forwardJumpMs! / 3_600_000)} h since the last run`
 
     if (snapshot && (hasRule || trigger === 'manual')) {
-      try { items.push(...await this.worktreePhase(snapshot, !clock.suspended, startedMs, trigger)) }
+      try { items.push(...await this.worktreePhase(snapshot, !clock.suspended, startedMs, trigger, allowed)) }
       catch (error) { items.push({ rule: 'worktree-inactive', label: 'Worktrees', bytes: 0, outcome: 'failed', reason: (error as Error).message }) }
-      try { items.push(...await this.trashPhase(startedMs, trigger)) }
+      try { items.push(...await this.trashPhase(startedMs, trigger, allowed)) }
       catch (error) { items.push({ rule: 'trash', label: 'Trash', bytes: 0, outcome: 'failed', reason: (error as Error).message }) }
       // A time-based rule, so it waits while the clock is suspended (the report already says why).
       if (!clock.suspended) {
-        try { items.push(...await this.captureItems(snapshot, startedMs, true)) }
+        try { items.push(...await this.captureItems(snapshot, startedMs, true, allowed)) }
         catch (error) { items.push({ rule: 'browser-capture', label: 'Browser captures', bytes: 0, outcome: 'failed', reason: (error as Error).message }) }
       }
       try { items.push(...await this.orphanItems()) } catch { /* Ownership could not be proven; nothing is reported. */ }
@@ -494,10 +535,10 @@ export class StorageCleanupService {
 
   // ---- Worktrees ----
 
-  private async worktreePhase(snapshot: PolicySnapshot, timeRulesEnabled: boolean, now: number, trigger: StorageCleanupReport['trigger']): Promise<StorageCleanupItem[]> {
+  private async worktreePhase(snapshot: PolicySnapshot, timeRulesEnabled: boolean, now: number, trigger: StorageCleanupReport['trigger'], allowed?: ReadonlySet<string>): Promise<StorageCleanupItem[]> {
     const items: StorageCleanupItem[] = []
-    if (snapshot.policy.worktrees.removeWithDeletedThreads) items.push(...await this.deletedThreadWorktrees(snapshot))
-    const evaluations = await this.evaluateWorktrees(snapshot, timeRulesEnabled, now, trigger === 'schedule')
+    if (snapshot.policy.worktrees.removeWithDeletedThreads) items.push(...await this.deletedThreadWorktrees(snapshot, allowed))
+    const evaluations = await this.evaluateWorktrees(snapshot, timeRulesEnabled, now, trigger === 'schedule', allowed)
     for (const entry of evaluations) {
       if (this.stopping) break
       if ('keep' in entry.verdict) {
@@ -514,10 +555,11 @@ export class StorageCleanupService {
   }
 
   /** Worktrees of threads already in the trash, for a policy turned on after the thread was deleted. */
-  private async deletedThreadWorktrees(snapshot: PolicySnapshot): Promise<StorageCleanupItem[]> {
+  private async deletedThreadWorktrees(snapshot: PolicySnapshot, allowed?: ReadonlySet<string>): Promise<StorageCleanupItem[]> {
     const items: StorageCleanupItem[] = []
     for (const record of this.deletedRoots()) {
       if (this.stopping) break
+      if (allowed && !allowed.has(worktreeKey(record.taskId))) continue
       // A policy saved while this loop was waiting on an earlier thread no longer authorizes the rest of it.
       if (this.deps.policy.digest() !== snapshot.digest) {
         items.push({ rule: 'worktree-deleted', label: 'Worktrees of deleted threads', bytes: 0, outcome: 'kept', reason: 'Settings changed since check' })
@@ -525,6 +567,7 @@ export class StorageCleanupService {
       }
       const item = await this.retireDeleted(record, snapshot)
       if (item) items.push(item)
+      await yieldToLoop()
     }
     return items
   }
@@ -576,8 +619,8 @@ export class StorageCleanupService {
     if (busy) return { keep: busy, remember: false }
     if (isExecutionLeaseHeld(record.location)) return { keep: 'Thread is in use', remember: false }
     if (workspace.lifecycle !== 'ready') return { keep: 'Workspace is not ready', remember: true, fingerprint }
-    let facts: ReturnType<StorageCleanupService['inspectCheckout']>
-    try { facts = this.inspectCheckout(record, workspace) } catch (error) { return { keep: (error as Error).message, remember: false } }
+    let facts: Awaited<ReturnType<StorageCleanupService['inspectCheckout']>>
+    try { facts = await this.inspectCheckout(record, workspace) } catch (error) { return { keep: (error as Error).message, remember: false } }
     if ('keep' in facts) return { keep: facts.keep, remember: true, fingerprint }
     if (real) {
       const inUse = this.probeRemoval(workspace.worktreePath)
@@ -632,14 +675,14 @@ export class StorageCleanupService {
    * Pre-filter: every reason-producing check runs here with no lease held, so nothing in this phase
    * blocks a thread. A scheduled run looks at one batch per tick; a manual run looks at all of them.
    */
-  private async evaluateWorktrees(snapshot: PolicySnapshot, timeRulesEnabled: boolean, now: number, batched: boolean): Promise<Evaluation[]> {
+  private async evaluateWorktrees(snapshot: PolicySnapshot, timeRulesEnabled: boolean, now: number, batched: boolean, allowed?: ReadonlySet<string>): Promise<Evaluation[]> {
     const policy = snapshot.policy
     const inactiveOn = policy.worktrees.inactiveDays !== null && timeRulesEnabled
     const mergedOn = policy.worktrees.removeMerged
     if (!inactiveOn && !mergedOn) return []
     // Only live root threads. A trashed record belongs to the deleted-threads rule alone, and a
     // subagent's worktree goes with its thread.
-    let candidates = this.deps.store.list().filter((record) => record.state === 'active' && !record.parentTaskId).sort((a, b) => a.taskId.localeCompare(b.taskId))
+    let candidates = this.deps.store.list().filter((record) => record.state === 'active' && !record.parentTaskId && (!allowed || allowed.has(worktreeKey(record.taskId)))).sort((a, b) => a.taskId.localeCompare(b.taskId))
     candidates = candidates.filter((record) => {
       try { const workspace = readWorkspaceFile(record.location); return workspace === undefined ? false : existsSync(workspace.worktreePath) || workspace.lifecycle !== 'ready' }
       catch { return true }
@@ -658,6 +701,8 @@ export class StorageCleanupService {
       try { verdict = await this.evaluateOne(record, snapshot, inactiveOn, mergedOn, now) }
       catch (error) { verdict = { keep: (error as Error).message } }
       if (verdict) evaluations.push({ record, label, projectId, verdict })
+      // Each candidate runs Git and reads files; let requests, turns and terminals in between.
+      await yieldToLoop()
     }
     return evaluations
   }
@@ -695,7 +740,7 @@ export class StorageCleanupService {
    * another repository inside it, and commits that are not in the default branch. Reads only. A Git
    * failure throws and the caller keeps the worktree with its message.
    */
-  private inspectCheckout(record: TaskLifecycleRecord, workspace: ThreadWorkspaceMetadata): { keep: string } | CheckoutFacts {
+  private async inspectCheckout(record: TaskLifecycleRecord, workspace: ThreadWorkspaceMetadata): Promise<{ keep: string } | CheckoutFacts> {
     const path = workspace.worktreePath
     if (!existsSync(join(path, '.git'))) return { keep: 'Worktree is partly removed; it is rebuilt the next time the thread is used' }
     const placement = this.placementProblem(workspace, record.taskId)
@@ -706,10 +751,12 @@ export class StorageCleanupService {
     if (workspace.headSha !== head) return { keep: 'Workspace HEAD moved outside a recorded operation' }
     const changed = readOnlyGit(path, ['status', '--porcelain', '--untracked-files=all']).split(/\r?\n/).filter(Boolean).length
     if (changed) return { keep: `Has uncommitted changes (${plural(changed, 'file')})` }
-    const nested = findNestedRepository(path)
-    if (nested.nested) return { keep: 'Contains another repository' }
+    // Cheap checks first: a worktree with ignored files (node_modules, .env) is kept without walking it for another repository.
     const ignored = readOnlyGit(path, ['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z']).split('\0').filter(Boolean).filter((entry) => !onlyControlFiles(path, entry))
     if (ignored.length) return { keep: `Has ignored files (${ignored[0]})` }
+    await yieldToLoop()
+    const nested = await findNestedRepository(path)
+    if (nested.nested) return { keep: 'Contains another repository' }
     if (nested.truncated) return { keep: 'Worktree is too large to check for another repository' }
     const target = workspace.integrationTarget
     if (!target || !/^[a-f0-9]{40,64}$/.test(target.baseSha)) return { keep: 'Integration target is unknown' }
@@ -736,7 +783,7 @@ export class StorageCleanupService {
     const busy = this.deps.idle(record.taskId)
     if (busy) return { keep: busy }
     if (isExecutionLeaseHeld(record.location)) return { keep: 'Thread is in use' }
-    const facts = this.inspectCheckout(record, workspace)
+    const facts = await this.inspectCheckout(record, workspace)
     if ('keep' in facts) return facts
     const { head, beyondBase, integrated } = facts
     let rule: 'worktree-inactive' | 'worktree-merged' | undefined
@@ -749,10 +796,10 @@ export class StorageCleanupService {
     }
     if (!rule && mergedOn) {
       if (beyondBase === 0 || !integrated) reasons.push('No commits to merge yet')
-      // The merged rule reads no age, so a merged thread the person keeps coming back to would be retired,
-      // restored by the next status refresh and retired again every hour. A worktree restored or changed in
-      // the last day is left alone.
-      else if (now - statSync(join(record.location, 'workspace.json')).mtimeMs < DAY_MS) reasons.push('Restored or changed within the last day')
+      // A merged thread the person keeps coming back to would be retired, restored by the next status
+      // refresh and retired again every hour. A worktree used in the last day (a message, an operation,
+      // a commit or a restore) is left alone.
+      else if (now - this.activityAt(record, workspace, head) < DAY_MS) reasons.push('Used within the last day')
       else { rule = 'worktree-merged'; reason = 'Work is merged into the default branch' }
     }
     if (!rule) return { keep: reasons.join('; ') }
@@ -845,11 +892,11 @@ export class StorageCleanupService {
   }
 
   /** Row identity for one session: the thread's name when the session's thread is known, and always the session id. */
-  private captureBase(id: string, threadId: string | undefined): Pick<StorageCleanupItem, 'rule' | 'label' | 'threadId' | 'projectId'> {
+  private captureBase(id: string, threadId: string | undefined): Pick<StorageCleanupItem, 'rule' | 'label' | 'threadId' | 'projectId' | 'key'> {
     const known = threadId !== undefined && (this.deps.threads.getThread(threadId) !== undefined || this.deps.store.get(threadId) !== undefined)
-    if (!known) return { rule: 'browser-capture', label: `Browser session ${id}` }
+    if (!known) return { rule: 'browser-capture', label: `Browser session ${id}`, key: captureKey(id) }
     const { label, projectId } = this.labelFor(threadId!)
-    return { rule: 'browser-capture', label: `${label}: browser session ${id}`, threadId, ...(projectId ? { projectId } : {}) }
+    return { rule: 'browser-capture', label: `${label}: browser session ${id}`, key: captureKey(id), threadId, ...(projectId ? { projectId } : {}) }
   }
 
   /**
@@ -866,7 +913,7 @@ export class StorageCleanupService {
    * One session failing does not stop the others or erase what earlier sessions already deleted. `real: false`
    * makes the same decisions and measurements without deleting, for the dry run.
    */
-  private async captureItems(snapshot: PolicySnapshot, now: number, real: boolean): Promise<StorageCleanupItem[]> {
+  private async captureItems(snapshot: PolicySnapshot, now: number, real: boolean, allowed?: ReadonlySet<string>): Promise<StorageCleanupItem[]> {
     const config = this.deps.browserCaptures
     const days = snapshot.policy.browser.captureDays
     if (!config || days === null) return []
@@ -896,9 +943,10 @@ export class StorageCleanupService {
         if (this.stopping) break
         const id = entry.name
         if (!SESSION_NAME.test(id)) continue
+        if (allowed && !allowed.has(captureKey(id))) continue
         const chain: CaptureChain = { root, rootReal, profileDir, profileReal, dir: join(profileDir, id), dirReal: join(profileReal, id) }
         if (!this.captureChainIntact(chain)) continue
-        let base = { rule, label: `Browser session ${id}` } as ReturnType<StorageCleanupService['captureBase']>
+        let base = { rule, label: `Browser session ${id}`, key: captureKey(id) } as ReturnType<StorageCleanupService['captureBase']>
         try {
           const old = this.oldCaptures(chain.dir!, cutoff)
           if (!old.length) continue
@@ -928,7 +976,7 @@ export class StorageCleanupService {
    * Measures and deletes the old captures of one closed session, then removes the folder if nothing else
    * is in it. `policyDigest` is given for a real run (a dry run passes none and deletes nothing).
    */
-  private async removeCaptures(chain: CaptureChain, base: Pick<StorageCleanupItem, 'rule' | 'label' | 'threadId' | 'projectId'>, names: string[], days: number, cutoff: number, policyDigest: string | undefined): Promise<StorageCleanupItem[]> {
+  private async removeCaptures(chain: CaptureChain, base: Pick<StorageCleanupItem, 'rule' | 'label' | 'threadId' | 'projectId' | 'key'>, names: string[], days: number, cutoff: number, policyDigest: string | undefined): Promise<StorageCleanupItem[]> {
     const real = policyDigest !== undefined
     const dir = chain.dir!
     let bytes = 0, removed = 0, inUse = 0, estimated = false, partial = false, settingsChanged = false
@@ -1020,10 +1068,12 @@ export class StorageCleanupService {
    * overdue records at its start and attempts each at most once (kept and failed count as attempted),
    * so a record that stays retained cannot make it loop. A later run may try kept records again.
    */
-  private async trashPhase(now: number, trigger: StorageCleanupReport['trigger']): Promise<StorageCleanupItem[]> {
+  private async trashPhase(now: number, trigger: StorageCleanupReport['trigger'], allowed?: ReadonlySet<string>): Promise<StorageCleanupItem[]> {
     const purge = this.deps.purge
     if (trigger === 'schedule') return (await purge.requestSweep(now, { limit: 5 })).map((outcome) => this.trashItem(outcome))
-    const snapshot = purge.overdueTaskIds(now)
+    // A confirmed plan empties only the trash it listed; anything that became overdue since stays for the next run.
+    const snapshot = purge.overdueTaskIds(now).filter((taskId) => !allowed || allowed.has(trashKey(taskId)))
+    if (allowed && !snapshot.length) return []
     if (!purge.policy().automaticPurge) {
       // Only worth a line when something in the trash is already past its retention.
       const waiting = purge.overdueTaskIds(now, true).length

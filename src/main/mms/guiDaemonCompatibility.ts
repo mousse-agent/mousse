@@ -11,7 +11,7 @@ export const GUI_REQUIRED_METHODS = [
   'review.files', 'review.file',
   'operations.get', 'operations.abort', 'operations.recover', 'publish.status', 'publish.start',
   'threads.inventory', 'threads.trash', 'threads.restore', 'threads.purge', 'threads.configureTrash',
-  'storage.policy', 'storage.configure', 'storage.cleanup.plan', 'storage.cleanup.run', 'storage.cleanup.lastReport',
+  'storage.policy', 'storage.configure', 'storage.reviewDismiss', 'storage.cleanup.plan', 'storage.cleanup.run', 'storage.cleanup.lastReport',
   'storage.usage',
   'subagents.list',
   // Settings → Providers runs on the harness gateway; an older service lacks it.

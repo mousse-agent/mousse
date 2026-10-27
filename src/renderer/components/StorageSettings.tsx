@@ -4,6 +4,8 @@ import type { TaskLifecycleRecord, TrashRetentionPolicy } from '../../shared/res
 import { storagePolicyHasRule, type StoragePolicy } from '../../shared/storage'
 import { parseStoragePolicy, parseStoragePolicyReply } from '../../shared/storageReply'
 import { trashCount } from '../lib/trashInventory'
+import { setStorageReviewPending } from '../lib/storageReview'
+import { RecommendedRulesNotice, recommendedPolicy } from './storage/RecommendedRules'
 import { StorageCleanupSection } from './storage/StorageCleanupSection'
 import { StoragePolicyRows } from './storage/StoragePolicyRows'
 import { StorageUsageSection } from './storage/StorageUsageSection'
@@ -15,6 +17,7 @@ export function StorageSettings() {
   const [trashPaused, setTrashPaused] = useState(false)
   const [policy, setPolicy] = useState<StoragePolicy>()
   const [storagePaused, setStoragePaused] = useState(false)
+  const [reviewRecommended, setReviewRecommended] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [usageKey, setUsageKey] = useState(0)
@@ -32,6 +35,8 @@ export function StorageSettings() {
       setTrashPaused(reply.trashSweepStatus.suspended)
       setPolicy(reply.policy)
       setStoragePaused(reply.clockSuspended)
+      setReviewRecommended(reply.reviewRecommended)
+      setStorageReviewPending(reply.reviewRecommended)
     }).finally(() => { if (inFlight.current === request) inFlight.current = null })
     inFlight.current = request
     return request
@@ -90,9 +95,12 @@ export function StorageSettings() {
     if (mounted.current) setPolicy(parseStoragePolicy(saved.policy))
   })
 
+  // Dismissing leaves every rule as it is; turning the recommended rules on is an ordinary save.
+  const dismissReview = () => void run(async () => { await window.mousse.storage.reviewDismiss() })
   const hasRule = Boolean(policy && trash && storagePolicyHasRule(policy, trash))
 
   return <section className="settings-section storage-settings">
+    {reviewRecommended && policy && <RecommendedRulesNotice busy={busy} onTurnOn={() => savePolicy(recommendedPolicy(policy))} onDismiss={dismissReview} />}
     <StoragePolicyRows
       trash={trash}
       policy={policy}

@@ -2,7 +2,7 @@ import type { CSSProperties } from 'react'
 import { createRoot } from 'react-dom/client'
 import { StorageSettings } from '../../../src/renderer/components/StorageSettings'
 import { useAppStore } from '../../../src/renderer/stores/appStore'
-import { STORAGE_POLICY_DEFAULTS, type StoragePolicy } from '../../../src/shared/storage'
+import { STORAGE_POLICY_DEFAULTS, STORAGE_POLICY_EXISTING_INSTALL, type StoragePolicy } from '../../../src/shared/storage'
 // The page's own styles and theme tokens; global.css adds Tailwind, which this page does not use.
 import '../../../src/renderer/styles/themes/index.css'
 import '../../../src/renderer/styles/layout-tokens.css'
@@ -25,13 +25,17 @@ window.addEventListener('unhandledrejection', (event) => failures.push(String(ev
 const MB = 1024 * 1024
 const daemon = {
   trash: { schemaVersion: 1 as const, graceDays: 30, automaticPurge: false },
-  policy: structuredClone(STORAGE_POLICY_DEFAULTS) as StoragePolicy,
+  // A profile that was already in use when the recommended rules arrived: its own rules, and a review waiting.
+  policy: structuredClone(STORAGE_POLICY_EXISTING_INSTALL) as StoragePolicy,
+  reviewRecommended: true,
   usageMode: 'ok' as 'ok' | 'malformed',
   report: null as unknown,
-  runShouldFail: false
+  runMode: 'ok' as 'ok' | 'fail' | 'timeout',
+  /** How long the dry run's token stays valid. */
+  planTtl: 600_000
 }
 
-const names = { projects: { p1: 'Mousse', p2: 'Website' }, threads: { t1: 'Fix storage', t2: 'Add search', t3: 'Landing page' } }
+const names = { projects: { p1: 'Mousse', p2: 'Website' }, threads: { t1: 'Fix storage', t2: 'Add search', t3: 'Landing page', t4: 'Gone thread' } }
 const localUsage = (fresh: boolean) => daemon.usageMode === 'malformed'
   ? { measuredAt: 'soon', durationMs: 'fast', partial: false, entries: [{ kind: 'logs', bytes: -1, files: 'many' }], names }
   : {
@@ -42,6 +46,8 @@ const localUsage = (fresh: boolean) => daemon.usageMode === 'malformed'
         { kind: 'threads', projectId: 'p1', threadId: 't1', bytes: 100 * MB, files: 10 },
         { kind: 'browser', projectId: 'p2', bytes: 200 * MB, files: 20 },
         { kind: 'worktrees', projectId: 'p2', threadId: 't3', bytes: 50 * MB, files: 5 },
+        // Measured, but no longer in the thread list (deleted since).
+        { kind: 'worktrees', projectId: 'p2', threadId: 't4', bytes: 30 * MB, files: 3 },
         { kind: 'logs', bytes: 100 * MB, files: 3 }
       ]
     }
@@ -69,7 +75,7 @@ const plan = [
 ]
 const report = () => ({
   startedAt: new Date(Date.now() - 4000).toISOString(), completedAt: new Date().toISOString(), trigger: 'manual', bytesRecovered: 250 * MB, bytesApproximate: true,
-  counts: { removed: 2, kept: 1, failed: 1 }, omittedCount: 3,
+  counts: { removed: 2, kept: 4, failed: 1 }, omittedCount: 3,
   items: [
     { rule: 'worktree-inactive', label: 'Fix storage', bytes: 0, outcome: 'kept', reason: 'Has ignored files (node_modules/)' },
     { rule: 'worktree-inactive', threadId: 't2', label: 'Add search', bytes: 200 * MB, outcome: 'removed', reason: 'Inactive for 41 days' },
@@ -78,30 +84,24 @@ const report = () => ({
   ]
 })
 
-const trashedReclaim = { bytes: Math.round(1.2 * 1024 ** 3), estimated: false, partial: false }
-const trashedPreview = {
-  taskId: 't9', generation: 1, digest: 'digest', exclusiveBytes: 1, blockers: [], retained: [],
-  items: [{ id: 'w1', kind: 'worktree', identity: '/work/t9', discardRequired: true, reason: 'unpublished commits' }]
-}
-
 const unsubscribe = () => () => {}
 Object.assign(window, {
   mousse: {
     threads: {
       inventory: async () => ({ lifecycles: [lifecycle('t1', 'active'), lifecycle('t9', 'trashed')], taskNames: { t1: 'Fix storage', t9: 'Old experiment' }, trashPolicy: daemon.trash, trashSweepStatus: { suspended: false } }),
       configureTrash: record('threads.configureTrash', (next: typeof daemon.trash) => { daemon.trash = { ...daemon.trash, ...next, schemaVersion: 1 } }),
-      select: record('threads.select', async (_id: string) => undefined),
-      purge: record('threads.purge', async (_id: string, _options?: unknown) => ({ preview: trashedPreview, reclaim: trashedReclaim })),
-      restore: record('threads.restore', async (_id: string) => undefined)
+      select: record('threads.select', async (_id: string) => undefined)
     },
     storage: {
-      policy: async () => ({ trash: daemon.trash, trashSweepStatus: { suspended: false }, policy: daemon.policy, clockSuspended: false }),
-      configure: record('storage.configure', (next: StoragePolicy) => { daemon.policy = structuredClone(next); return { policy: daemon.policy } }),
+      policy: async () => ({ trash: daemon.trash, trashSweepStatus: { suspended: false }, policy: daemon.policy, clockSuspended: false, reviewRecommended: daemon.reviewRecommended }),
+      configure: record('storage.configure', (next: StoragePolicy) => { daemon.policy = structuredClone(next); daemon.reviewRecommended = false; return { policy: daemon.policy } }),
+      reviewDismiss: record('storage.reviewDismiss', () => { daemon.reviewRecommended = false; return { reviewRecommended: false } }),
       usage: record('storage.usage', (options?: { refresh?: boolean }) => localUsage(options?.refresh === true)),
       cleanupLastReport: async () => ({ report: daemon.report }),
-      cleanupPlan: record('storage.cleanupPlan', () => ({ plan })),
-      cleanupRun: record('storage.cleanupRun', () => {
-        if (daemon.runShouldFail) throw Object.assign(new Error('The cleanup service stopped'), { code: 'internal' })
+      cleanupPlan: record('storage.cleanupPlan', () => ({ plan, token: { issuedAt: Date.now(), expiresAt: Date.now() + daemon.planTtl, policyDigest: 'digest', keys: ['worktree:t2', 'worktree:old'] } })),
+      cleanupRun: record('storage.cleanupRun', (_token?: unknown) => {
+        if (daemon.runMode === 'fail') throw Object.assign(new Error('The cleanup service stopped'), { code: 'internal' })
+        if (daemon.runMode === 'timeout') throw new Error('Request timeout: storage.cleanup.run')
         daemon.report = report()
         return { report: daemon.report }
       })
@@ -114,7 +114,7 @@ Object.assign(window, {
           case 'net.status': return { enabled: true, self: { node: 'nod_self', name: 'This computer' }, keystore: 'unlocked' }
           case 'net.transport.list': return { manifests: [], records: {}, settings: {} }
           case 'net.ssh.list': return { records: [] }
-          case 'bridge.nodes': return { nodes: [device('nod_self', 'This computer', 'open', true), device('nod_laptop', 'Laptop', 'open'), device('nod_server', 'Server', 'open'), device('nod_phone', 'Phone', 'closed')] }
+          case 'bridge.nodes': return { nodes: [device('nod_self', 'This computer', 'open', true), device('nod_laptop', 'Laptop', 'open'), device('nod_server', 'Server', 'open'), device('nod_phone', 'Phone', 'closed'), { ...device('nod_guest', 'Guest', 'open'), caps: ['chat'] }] }
           case 'bridge.hub.storage':
             if (params.target === 'nod_laptop') return laptopUsage()
             throw Object.assign(new Error('Not permitted.'), { code: 'forbidden' })
@@ -188,6 +188,31 @@ async function run() {
   await settled()
   const evidence: Record<string, unknown> = {}
 
+  // A profile that was already in use sees its own rules, a notice, and nothing turned on for it.
+  const review: Record<string, unknown> = {}
+  await until(() => $(tid('storage-review-notice')), 'review notice')
+  review.legacy = { notice: text(tid('storage-review-notice')), inactive: valueOf('storage-inactive-select'), captures: valueOf('storage-captures-select'), merged: $('#storage-merged-switch')?.getAttribute('aria-checked'), deleted: $('#storage-remove-deleted-switch')?.getAttribute('aria-checked'), configureCalls: callsOf('storage.configure').length }
+  $<HTMLButtonElement>(tid('storage-review-open'))!.click()
+  await until(() => $(tid('storage-review-rules')), 'review dialog')
+  review.dialog = text(tid('storage-review-rules'))
+  $<HTMLButtonElement>('[role="dialog"] .settings-btn')!.click()
+  await until(() => !$(tid('storage-review-rules')), 'review dialog closed')
+  review.notNow = { configureCalls: callsOf('storage.configure').length, notice: Boolean($(tid('storage-review-notice'))) }
+  $<HTMLButtonElement>(tid('storage-review-open'))!.click()
+  await until(() => $(tid('storage-review-turn-on')), 'turn on button')
+  $<HTMLButtonElement>(tid('storage-review-turn-on'))!.click()
+  await until(() => !$(tid('storage-review-notice')) && valueOf('storage-inactive-select') === '30', 'recommended rules on')
+  review.turnedOn = { saved: structuredClone(callsOf('storage.configure').at(-1)!.args[0]), noticeGone: !$(tid('storage-review-notice')) }
+  // Dismissing the notice again leaves every rule as it is.
+  daemon.reviewRecommended = true
+  document.dispatchEvent(new Event('visibilitychange'))
+  await until(() => $(tid('storage-review-dismiss')), 'notice back', 8000)
+  const configureBefore = callsOf('storage.configure').length
+  $<HTMLButtonElement>(tid('storage-review-dismiss'))!.click()
+  await until(() => !$(tid('storage-review-notice')), 'notice dismissed')
+  review.dismissed = { dismissCalls: callsOf('storage.reviewDismiss').length, configureCallsAdded: callsOf('storage.configure').length - configureBefore, inactive: valueOf('storage-inactive-select') }
+  evidence.review = review
+
   // The saved values reach the controls, and the rules say what they delete and never delete.
   evidence.initial = {
     trash: valueOf('storage-auto-empty-select'), inactive: valueOf('storage-inactive-select'), captures: valueOf('storage-captures-select'),
@@ -202,11 +227,22 @@ async function run() {
 
   // Policy editing: each setting is sent, saved by the daemon and read back.
   const policy: Record<string, unknown> = {}
+  // Choosing Custom and leaving the field empty, or pressing Escape, goes back to the saved value.
+  await pick('storage-captures-select', 'custom')
+  const emptyInput = await until(() => $<HTMLInputElement>(tid('storage-captures-select-custom')), 'custom input')
+  // React's onBlur listens for focusout; the window itself may not hold focus.
+  emptyInput.dispatchEvent(new FocusEvent('focusout', { bubbles: true }))
+  await until(() => !$(tid('storage-captures-select-custom')), 'empty custom left')
+  policy.emptyBlur = { shown: valueOf('storage-captures-select'), configureCalls: callsOf('storage.configure').length - 1 }
+  await pick('storage-captures-select', 'custom')
+  press(await until(() => $<HTMLInputElement>(tid('storage-captures-select-custom')), 'custom input again'), 'Escape')
+  await until(() => !$(tid('storage-captures-select-custom')), 'escape left custom')
+  policy.escape = { shown: valueOf('storage-captures-select') }
   const typed45 = await customDays('storage-inactive-select', '45')
   await until(() => valueOf('storage-inactive-select') === '45', 'inactive shows 45')
   policy.custom45 = { ...typed45, saved: (callsOf('storage.configure').at(-1)!.args[0] as StoragePolicy).worktrees.inactiveDays, shown: valueOf('storage-inactive-select'), inputGone: !$(tid('storage-inactive-select-custom')) }
   policy.invalid = [await customDays('storage-inactive-select', '0'), await customDays('storage-inactive-select', '4000'), await customDays('storage-inactive-select', 'abc'), await customDays('storage-inactive-select', '4.5')]
-  policy.stillSaved = { daemon: daemon.policy.worktrees.inactiveDays, configureCalls: callsOf('storage.configure').length }
+  policy.stillSaved = { daemon: daemon.policy.worktrees.inactiveDays, configureCalls: callsOf('storage.configure').length - 1 }
   // A valid number after a refusal goes through and clears the message.
   const typed60 = await customDays('storage-inactive-select', '60')
   await until(() => valueOf('storage-inactive-select') === '60', 'inactive shows 60')
@@ -242,6 +278,7 @@ async function run() {
   cleanup.enabled = !$<HTMLButtonElement>(tid('storage-cleanup-button'))!.disabled
   $<HTMLButtonElement>(tid('storage-cleanup-button'))!.click()
   await until(() => $(tid('storage-cleanup-plan')), 'plan shown')
+  cleanup.closeWhileRunning = undefined
   cleanup.plan = { text: text(tid('storage-cleanup-plan')), summary: text(tid('storage-plan-summary')), planCalls: callsOf('storage.cleanupPlan').length, runCalls: callsOf('storage.cleanupRun').length, keptFolded: $<HTMLDetailsElement>(tid('storage-plan-kept'))!.open === false, confirm: text(tid('storage-cleanup-confirm')) }
   $<HTMLButtonElement>(tid('storage-cleanup-cancel'))!.click()
   await until(() => !$(tid('storage-cleanup-plan')), 'plan dismissed')
@@ -250,6 +287,7 @@ async function run() {
   await until(() => $(tid('storage-cleanup-confirm')), 'plan shown again')
   const usageCallsBefore = callsOf('storage.usage').length
   $<HTMLButtonElement>(tid('storage-cleanup-confirm'))!.click()
+  cleanup.runToken = await until(() => callsOf('storage.cleanupRun').at(-1)?.args[0], 'run token')
   await until(() => $(tid('storage-report-list')) || $(tid('storage-last-run-sentence')), 'report shown')
   await until(() => !$(tid('storage-cleanup-plan')), 'dialog closed after run')
   $<HTMLDetailsElement>('.storage-last-run-list')!.open = true
@@ -260,13 +298,30 @@ async function run() {
   await until(() => callsOf('storage.usage').length > usageCallsBefore, 'usage re-read after a run')
   cleanup.usageReread = true
   // A failing run says so and keeps the last report.
-  daemon.runShouldFail = true
+  daemon.runMode = 'fail'
   $<HTMLButtonElement>(tid('storage-cleanup-button'))!.click()
   await until(() => $(tid('storage-cleanup-confirm')), 'plan for failing run')
   $<HTMLButtonElement>(tid('storage-cleanup-confirm'))!.click()
   await until(() => $(tid('storage-cleanup-error')), 'failure shown')
   cleanup.failure = text(tid('storage-cleanup-error'))
-  daemon.runShouldFail = false
+  daemon.runMode = 'ok'
+  // A plan that is not confirmed in time has to be checked again; the page says so before the daemon refuses it.
+  daemon.planTtl = 600
+  $<HTMLButtonElement>(tid('storage-cleanup-button'))!.click()
+  await until(() => $(tid('storage-cleanup-confirm')), 'short plan shown')
+  await until(() => $(tid('storage-plan-expired')), 'plan expired', 3000)
+  cleanup.expired = { message: text(tid('storage-plan-expired')), confirm: Boolean($(tid('storage-cleanup-confirm'))), recheck: Boolean($(tid('storage-cleanup-recheck'))) }
+  daemon.planTtl = 600_000
+  const plansBefore = callsOf('storage.cleanupPlan').length
+  $<HTMLButtonElement>(tid('storage-cleanup-recheck'))!.click()
+  await until(() => $(tid('storage-cleanup-confirm')) && !$(tid('storage-plan-expired')), 'plan checked again')
+  cleanup.rechecked = { planCallsAdded: callsOf('storage.cleanupPlan').length - plansBefore }
+  // While it runs the dialog cannot be closed, and says so. A timeout is not a failure.
+  daemon.runMode = 'timeout'
+  $<HTMLButtonElement>(tid('storage-cleanup-confirm'))!.click()
+  await until(() => $(tid('storage-cleanup-notice')), 'timeout notice')
+  cleanup.timeout = { notice: text(tid('storage-cleanup-notice')), error: Boolean($(tid('storage-cleanup-error'))), dialog: Boolean($('[role="dialog"]')) }
+  daemon.runMode = 'ok'
   evidence.cleanup = cleanup
 
   // Disk usage: Group by changes both the table and the chart.
@@ -342,6 +397,7 @@ async function run() {
   const links: Record<string, unknown> = {}
   await pick('storage-groupby-select', 'thread')
   await until(() => $$('.storage-row-link').some((link) => link.textContent === 'Fix storage'), 'thread links')
+  links.goneThread = { listed: rowsOf().some((row) => row.label === 'Gone thread'), linked: $$('.storage-row-link').some((link) => link.textContent === 'Gone thread') }
   $$('.storage-row-link').find((link) => link.textContent === 'Fix storage')!.click()
   await until(() => callsOf('threads.select').length > 0, 'thread opened')
   await until(() => useAppStore.getState().settingsOpen === false, 'settings closed')
@@ -372,19 +428,8 @@ async function run() {
   await settled()
   evidence.usage = usage
 
-  // The trash review lists only what is in the trash, and permanent deletion leads with one line.
-  const trash: Record<string, unknown> = {}
-  $<HTMLButtonElement>(tid('storage-review-trash-button'))!.click()
-  await until(() => $(tid('storage-trash-dialog')), 'trash dialog')
-  await until(() => $$(tid('storage-thread-row')).length > 0, 'trash rows')
-  trash.dialog = text(tid('storage-trash-dialog'))
-  trash.rows = $$(tid('storage-thread-row')).map((row) => ({ id: row.dataset.taskId, buttons: [...row.querySelectorAll('button')].map((button) => button.getAttribute('aria-label')) }))
-  $('[data-task-id="t9"] button[aria-label="Delete…"]')!.click()
-  await until(() => $(tid('storage-deletion-preview')), 'deletion preview')
-  trash.confirmation = { summary: text(tid('storage-deletion-summary')), detailsOpen: $<HTMLDetailsElement>(tid('storage-deletion-details'))!.open, hasDiscard: Boolean($('.storage-discard input')) }
-  evidence.trash = trash
-  $<HTMLButtonElement>('.modal-close')!.click()
-  await until(() => !$(tid('storage-trash-dialog')), 'trash dialog closed')
+  // Trash is reviewed from the sidebar; the row says how many threads wait there.
+  evidence.trash = { row: text(tid('storage-auto-empty')), reviewButton: Boolean($(tid('storage-review-trash-button'))), otherThreads: document.body.textContent?.includes('Other threads') ?? false }
 
   // With every rule off, Clean up now has nothing to do and says so.
   await pick('storage-auto-empty-select', 'never')

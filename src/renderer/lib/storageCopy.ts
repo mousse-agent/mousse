@@ -59,7 +59,9 @@ export const CLEANUP_COPY = {
   idle: 'Runs the rules above now. You see what would be removed, and confirm, before anything is deleted.',
   noRule: 'Turn on a cleanup rule to use this.',
   trashWarning: 'Threads removed from the trash cannot be restored.',
-  worktreeNote: 'A removed worktree is restored the next time you use its thread.'
+  worktreeNote: 'A removed worktree is restored the next time you use its thread.',
+  onlyListed: 'Only the items listed here are removed. Anything else that becomes eligible waits for the next run.',
+  expired: 'This check is out of date. Check again to see what would be removed now.'
 }
 
 /** Short names for the report and the dry run: which rule acted. */
@@ -70,6 +72,12 @@ export const STORAGE_RULE_LABELS: Record<StorageCleanupRule, string> = {
   'worktree-orphan': 'Unused worktree',
   'browser-capture': 'Browser capture',
   trash: 'Trash'
+}
+
+/** The name of the rule in front of an item. A kept worktree is just a worktree: the rule that looked at it did not act. */
+export function ruleLabel(rule: StorageCleanupRule, outcome: 'removed' | 'kept' | 'failed' | 'keep' | 'remove'): string {
+  if ((rule === 'worktree-inactive' || rule === 'worktree-merged') && (outcome === 'kept' || outcome === 'keep')) return 'Worktree'
+  return STORAGE_RULE_LABELS[rule]
 }
 
 /** Where each kind's size is cleaned up, for "selecting a kind jumps to that kind's cleanup rule". */
@@ -92,4 +100,16 @@ export function retiredWorktreeNote(at: string): string {
 export function trashCountSentence(count: number): string {
   if (count === 0) return 'No threads in trash.'
   return `${count} ${count === 1 ? 'thread' : 'threads'} in trash · restore or delete them from Recently deleted in the sidebar.`
+}
+
+/** The notice for a profile that was already in use when the recommended rules arrived. */
+export const RECOMMENDED_COPY = {
+  title: 'Recommended cleanup rules are available',
+  body: 'Nothing has changed: only the worktrees of deleted threads are removed automatically. Turning on more rules is up to you.',
+  modalIntro: 'These rules are off for you now. Turning them on lets Mousse remove these things on a schedule, and Clean up now shows you what before it removes anything.',
+  rules: {
+    inactive: 'Remove worktrees inactive for 30 days',
+    merged: 'Remove worktrees whose work is merged into the default branch',
+    captures: 'Delete saved browser captures after 30 days'
+  }
 }
