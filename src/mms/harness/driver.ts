@@ -47,7 +47,8 @@ export interface InstanceConfig {
   setup?: 'managed' | 'existing'
   /**
    * Which engine runs a `pi` instance: Pi's agent as its own process (`rpc`) or the in-process pi
-   * loop (`legacy`, the default until PR 2c). Part of the record key: a switch builds a new runtime.
+   * loop (`legacy`). Stored only as the user's choice; decoded with the instance id it is the
+   * engine in effect (`drivers/pi/engines.ts`). Part of the record key: a switch builds a new runtime.
    */
   engine?: 'rpc' | 'legacy'
 }
@@ -317,8 +318,16 @@ export interface HarnessDriver {
    * agent without it reads images when its `initialize` says so (`promptCapabilities.image`).
    */
   readonly mcpImageResults?: boolean
-  /** Lenient decoder of an instance's stored `config`: unknown or malformed fields fall back. */
-  decodeConfig(raw: Record<string, unknown> | undefined): InstanceConfig
+  /**
+   * Lenient decoder of an instance's stored `config`: unknown or malformed fields fall back. With
+   * `instanceId`, fields that default per instance are resolved (the `pi` driver's engine).
+   */
+  decodeConfig(raw: Record<string, unknown> | undefined, instanceId?: string): InstanceConfig
+  /**
+   * The engine an instance of a driver with several runs on (`pi`): the one in effect for its
+   * stored config, and whether the user may switch it (Providers → Advanced → Engine).
+   */
+  engine?(instanceId: string, stored: Record<string, unknown> | undefined): { effective: 'rpc' | 'legacy'; switchable: boolean }
   /**
    * Capabilities for an instance at an installed version. `facts` (when the runtime reported them)
    * refine what a preset cannot know statically: fork, plan mode, models.
