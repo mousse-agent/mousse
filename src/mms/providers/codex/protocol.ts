@@ -288,23 +288,67 @@ export type ThreadItem =
   | { type: 'userMessage'; id: string; content?: UserInput[] }
   | { type: 'agentMessage'; id: string; text: string; phase?: string | null }
   | { type: 'reasoning'; id: string; summary?: string[]; content?: string[] }
+  | { type: 'plan'; id: string; text?: string }
   | {
       type: 'commandExecution'
       id: string
       command: string
       cwd?: string
+      /** `inProgress`, `completed`, `failed` or `declined`. */
       status: string
       exitCode?: number | null
+      /** stdout and stderr together, whole, on `item/completed`. */
+      aggregatedOutput?: string | null
+      durationMs?: number | null
+      processId?: string | null
     }
   | {
       type: 'fileChange'
       id: string
-      changes: Array<{ path: string; kind: { type: string }; diff: string }>
+      /** `diff` is a unified diff for an update, and the file's text as it is for an add or a delete. */
+      changes: Array<{ path: string; kind: { type: string; move_path?: string | null }; diff: string }>
       status: string
     }
-  | { type: 'mcpToolCall'; id: string; server: string; tool: string; status: string }
-  | { type: 'dynamicToolCall'; id: string; tool: string; status: string }
-  | { type: 'webSearch'; id: string; query?: string }
+  | {
+      type: 'mcpToolCall'
+      id: string
+      server: string
+      tool: string
+      status: string
+      arguments?: unknown
+      result?: { content?: unknown; structuredContent?: unknown } | null
+      error?: { message?: string } | null
+      durationMs?: number | null
+    }
+  | {
+      type: 'dynamicToolCall'
+      id: string
+      tool: string
+      status: string
+      arguments?: unknown
+      contentItems?: Array<{ type: string; text?: string }> | null
+      success?: boolean | null
+      durationMs?: number | null
+    }
+  | {
+      type: 'webSearch'
+      id: string
+      query?: string
+      action?: { type: 'search'; query?: string; queries?: string[] } | { type: 'open_page'; url?: string } | { type: string } | null
+      results?: unknown[] | null
+    }
+  | {
+      type: 'collabAgentToolCall'
+      id: string
+      /** `spawnAgent` starts a helper (`receiverThreadIds` names it); the others talk to or wait for one. */
+      tool: string
+      status?: string
+      receiverThreadIds?: string[]
+      prompt?: string | null
+      model?: string | null
+      agentsStates?: Record<string, { status?: string; message?: string | null }>
+    }
+  | { type: 'subAgentActivity'; id: string; kind: string; agentThreadId: string; model?: string | null }
   | { type: string; id: string }
 
 export interface TokenUsageBreakdown {
@@ -322,6 +366,10 @@ export interface CodexNotificationMap {
   'item/started': { threadId: string; turnId: string; item: ThreadItem }
   'item/completed': { threadId: string; turnId: string; item: ThreadItem }
   'item/agentMessage/delta': { threadId: string; turnId: string; itemId: string; delta: string }
+  /** A running command's output, in order, until its `item/completed` brings the whole of it. */
+  'item/commandExecution/outputDelta': { threadId: string; turnId: string; itemId: string; delta: string }
+  /** The model's plan for the turn; there is no completion of its own. */
+  'turn/plan/updated': { threadId: string; turnId: string; explanation: string | null; plan: Array<{ step: string; status: string }> }
   'item/reasoning/summaryTextDelta': { threadId: string; turnId: string; itemId: string; delta: string }
   'thread/tokenUsage/updated': {
     threadId: string
