@@ -1,5 +1,5 @@
 import type { NetStatus, NodeCapability, NodeId } from '../../shared/net'
-import type { PlusStatus } from '../../shared/net/local'
+import type { NetAddonRecords, PlusStatus } from '../../shared/net/local'
 import type { PlatformRequestMethod } from '../../shared/platform'
 import type { TransportManifest } from '../../mms/net/contracts'
 import { formatAgo } from './formatAgo'
@@ -170,6 +170,27 @@ export function listedDevices(devices: Device[]): Device[] {
   return devices.filter((device) => !device.revoked)
 }
 
+/** `net.transport.list`: the add-ons, what their actions changed, and the saved settings. */
+export interface AddonListing {
+  manifests: TransportManifest[]
+  records?: NetAddonRecords
+  settings?: Record<string, unknown>
+}
+
+const asSettings = (value: unknown): Record<string, unknown> =>
+  value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
+
+/** Tailscale settings for Serve, keeping what is saved (a custom binary path). */
+export function serveSettings(saved: unknown, port: number, servePort: number): Record<string, unknown> {
+  return { ...asSettings(saved), mode: 'serve', port, servePort }
+}
+
+/** Tailscale settings without Serve: the saved ones, listening on the tailnet address again. */
+export function bindSettings(saved: unknown): Record<string, unknown> {
+  const { mode: _mode, servePort: _servePort, ...rest } = asSettings(saved)
+  return rest
+}
+
 /**
  * Core device state for the Devices screen. Mousse ID status is read only when this build has
  * the service, and a failing read never holds up the rest.
@@ -181,13 +202,15 @@ export async function readDevices(withMousseId: boolean) {
   const hosted = withMousseId
     ? await request<PlusStatus>('net.plus.status', {}).catch(() => undefined)
     : undefined
-  const listed = current.enabled
-    ? await request<{ manifests: TransportManifest[] }>('net.transport.list', {})
-    : { manifests: [] }
+  // What an add-on changed outside Mousse stays listed while networking is off, so it can be undone.
+  const list = () => request<AddonListing>('net.transport.list', {})
+  const listed: AddonListing = current.enabled
+    ? await list()
+    : await list().catch((): AddonListing => ({ manifests: [], records: {}, settings: {} }))
   // The hosted relay add-on is Mousse ID too; it is offered only with the service.
-  const addons = withMousseId
+  const addons: AddonListing = withMousseId
     ? listed
-    : { manifests: listed.manifests.filter((manifest) => manifest.id !== 'plus-relay') }
+    : { ...listed, manifests: listed.manifests.filter((manifest) => manifest.id !== 'plus-relay') }
   const nodes =
     current.enabled && current.self && current.keystore === 'unlocked'
       ? (await request<{ nodes: Device[] }>('bridge.nodes', {})).nodes

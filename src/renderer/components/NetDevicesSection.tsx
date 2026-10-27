@@ -1,12 +1,14 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
 import { AlertTriangle, CircleCheck, Monitor, MonitorSmartphone, MoreHorizontal, Plus, RefreshCw } from '../lib/icons'
 import { RemoteDeviceThreads } from './RemoteDeviceThreads'
+import { ChangePlanDialog } from './devices/ChangePlanDialog'
 import { Modal } from './ui/Modal'
 import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './settings/SettingsRow'
 import { CopyButton } from './settings/IconButtons'
 import { mousseIdAvailable, useMousseIdStore } from '../stores/mousseIdStore'
-import { deviceLine, isIncompatible, listedDevices, readDevices, routeDetails, updateInstructions, type Device } from '../lib/netDevices'
+import { bindSettings, deviceLine, isIncompatible, listedDevices, readDevices, routeDetails, serveSettings, updateInstructions, type Device } from '../lib/netDevices'
 import type { NetDoctor, NetStatus } from '../../shared/net'
+import { TAILSCALE_FUNNEL_PORTS, type NetAddonActionResult, type NetAddonRecords } from '../../shared/net/local'
 import type { PlatformRequestMethod } from '../../shared/platform'
 import type { TransportManifest } from '../../mms/net/contracts'
 import '../styles/devices.css'
@@ -34,7 +36,10 @@ const TRANSPORT_STATE: Record<Transport['state'], string> = {
 }
 
 function addonLine(manifest: TransportManifest, live?: Transport): string {
-  if (live?.enabled) return `${TRANSPORT_STATE[live.state]}${live.error ? ` · ${live.error}` : ''}`
+  if (live?.enabled) {
+    const why = live.detail ?? live.error
+    return `${TRANSPORT_STATE[live.state]}${why ? ` · ${why}` : ''}`
+  }
   const step = manifest.setupSteps[0]
   if (!step) return live?.error ? `Off · ${live.error}` : 'Off'
   return step.command ? `${step.title}: ${step.command}` : step.title
@@ -83,11 +88,12 @@ export function NetDevicesSection() {
   const [relayAddress, setRelayAddress] = useState(''), [named, setNamed] = useState(false), [tunnelId, setTunnelId] = useState(''), [hostname, setHostname] = useState(''), [credentialsFile, setCredentialsFile] = useState('')
   const [sshEndpoint, setSshEndpoint] = useState(''), [sshPort, setSshPort] = useState('')
   const [adding, setAdding] = useState(false), [revoking, setRevoking] = useState<Device>(), [updating, setUpdating] = useState<Device>()
+  const [records, setRecords] = useState<NetAddonRecords>({}), [saved, setSaved] = useState<Record<string, unknown>>({}), [notice, setNotice] = useState(''), [servePort, setServePort] = useState('47890'), [serveDialog, setServeDialog] = useState<{ wasOn: boolean }>()
   const nameEdited = useRef(false)
   const reload = async () => {
     const owner = ++generation.current
     const { current, addons, nodes } = await readDevices(mousseIdAvailable(useMousseIdStore.getState()))
-    if (alive.current && owner === generation.current) { setStatus(current); setManifests(addons.manifests); setDevices(nodes) }
+    if (alive.current && owner === generation.current) { setStatus(current); setManifests(addons.manifests); setRecords(addons.records ?? {}); setSaved(addons.settings ?? {}); setDevices(nodes) }
   }
   useEffect(() => {
     alive.current = true
@@ -98,7 +104,7 @@ export function NetDevicesSection() {
       try {
         const owner = ++generation.current
         const { current, addons, nodes } = await readDevices(mousseIdAvailable(useMousseIdStore.getState()))
-        if (active && owner === generation.current) { setStatus(current); setManifests(addons.manifests); setDevices(nodes) }
+        if (active && owner === generation.current) { setStatus(current); setManifests(addons.manifests); setRecords(addons.records ?? {}); setSaved(addons.settings ?? {}); setDevices(nodes) }
       } catch (cause) { if (active) { setDevices([]); setManifests([]); setError(String((cause as Error)?.message ?? cause)) } }
       finally { running = false }
     }
@@ -117,6 +123,52 @@ export function NetDevicesSection() {
     finally { if (alive.current) { setBusy(false); setPassphrase('') } }
   }
   const transport = (transportId: string, enabled: boolean, settings?: Record<string, unknown>) => action('net.transport.configure', { id: transportId, enabled, ...(settings ? { settings } : {}) })
+
+  // Tailscale Serve keeps the daemon on loopback and lets Tailscale forward a tailnet port to it.
+  const call = <T,>(method: PlatformRequestMethod, params: unknown) => window.mousse.platformRequest.request<T>(method, params)
+  const tailscale = status?.transports?.find((t) => t.id === 'tailscale')
+  const served = records.tailscale?.action === 'serve' ? (records.tailscale.record as { port: number; servePort: number; state?: string }) : undefined
+  const servePending = served?.state === 'pending'
+  const portValue = Number.parseInt(servePort, 10)
+  // Tailscale uses 443, 8443 and 10000 for Funnel (the public internet); Serve never does.
+  const portValid = /^\d+$/.test(servePort) && portValue >= 1024 && portValue <= 65535 && !TAILSCALE_FUNNEL_PORTS.includes(portValue)
+  const tailscaleSaved = saved.tailscale
+  // The saved settings (a custom binary path) travel with every change to this add-on.
+  const serveSettingsNow = served ? serveSettings(tailscaleSaved, served.port, served.servePort) : serveSettings(tailscaleSaved, portValue, portValue)
+  const serveUndo = async (enabled: boolean) => {
+    const result = await call<NetAddonActionResult>('net.transport.action.undo', { id: 'tailscale', action: 'serve' })
+    // Without Serve the add-on goes back to listening on the tailnet address, as before. While networking is off there is nothing to restart.
+    if (result.ok && status?.enabled) await call('net.transport.configure', { id: 'tailscale', enabled, settings: bindSettings(tailscaleSaved) })
+    return result
+  }
+  const turnOffServe = async () => {
+    generation.current++; setBusy(true); setError(''); setNotice('')
+    try {
+      const result = await serveUndo(!!tailscale?.enabled)
+      if (!result.ok) setError(result.message)
+      else if (result.outcome && result.outcome !== 'removed' && result.message) setNotice(result.message)
+      if (alive.current) await reload()
+    } catch (cause) { if (alive.current) setError(String((cause as Error)?.message ?? cause)) }
+    finally { if (alive.current) setBusy(false) }
+  }
+  // Mousse takes its loopback port first; only then is a tailnet port forwarded to it. A failed run puts the add-on back as it was.
+  const turnOnServe = async (wasOn: boolean): Promise<NetAddonActionResult> => {
+    const revert = () => call('net.transport.configure', { id: 'tailscale', enabled: wasOn, settings: bindSettings(tailscaleSaved) }).catch(() => undefined)
+    try {
+      const configured = await call<{ transports?: Transport[] }>('net.transport.configure', { id: 'tailscale', enabled: true, settings: serveSettingsNow })
+      const row = configured.transports?.find((t) => t.id === 'tailscale')
+      if (row?.state === 'failed') {
+        await revert()
+        return { ok: false, code: 'route_unreachable', message: row.detail ?? 'Tailscale could not start with Serve.' }
+      }
+      const result = await call<NetAddonActionResult>('net.transport.action.apply', { id: 'tailscale', action: 'serve', settings: serveSettingsNow })
+      if (!result.ok) await revert()
+      return result
+    } catch (cause) {
+      await revert()
+      throw cause
+    }
+  }
 
   const self = status?.self
   const selfDevice = devices.find((device) => device.self)
@@ -231,6 +283,17 @@ export function NetDevicesSection() {
       </SettingsGroup>
     )}
 
+    {status && served && !showAddons && (
+      <SettingsGroup className="devices-group" title="Tailscale Serve">
+        <SettingsRow
+          title="Tailscale Serve"
+          description={servePending ? 'Started but not confirmed · Turn off Serve clears it' : `Still on · tailnet port ${served.servePort} forwards to this device, also while networking is off`}
+          control={<button type="button" className="settings-btn" disabled={busy} onClick={() => void turnOffServe()}>Turn off Serve</button>}
+        />
+      </SettingsGroup>
+    )}
+    {notice && <p role="status" className="settings-muted devices-note">{notice}</p>}
+
     {status && (
       <SettingsAdvanced>
         {showAddons && (
@@ -245,13 +308,13 @@ export function NetDevicesSection() {
               const enableSettings: Record<string, unknown> | undefined =
                 cloudflare ? (named ? { mode: 'named', tunnelId, hostname, credentialsFile } : { mode: 'quick' })
                   : manifest.id === 'direct' ? { host: '127.0.0.1', port: 0 }
-                    : manifest.id === 'tailscale' ? {}
+                    : manifest.id === 'tailscale' ? (served ? serveSettingsNow : bindSettings(tailscaleSaved))
                       : relay ? { address: relayAddress }
                         : ssh ? (sshReady ? { endpoint: sshEndpoint.trim(), port: sshPortNumber } : undefined)
                           : undefined
               const canEnable = !!enableSettings && (!cloudflare || namedReady) && (!relay || !!relayAddress)
               // Switching SSH off keeps the saved settings, which the screen may not have (a listener that failed to start has no route and the form starts empty).
-              const disableSettings = cloudflare ? { mode: 'quick' } : relay ? { address: relayAddress || live?.routes[0]?.address || '' } : ssh ? undefined : {}
+              const disableSettings = cloudflare ? { mode: 'quick' } : relay ? { address: relayAddress || live?.routes[0]?.address || '' } : ssh || manifest.id === 'tailscale' ? undefined : {}
               const label = manifest.id === 'direct' ? 'Local listener' : manifest.id === 'tailscale' ? 'Tailscale' : relay ? 'Relay' : ssh ? 'SSH (for devices that can ssh here)' : manifest.displayName
               return [
                 <SettingsRow
@@ -272,6 +335,22 @@ export function NetDevicesSection() {
                     </>
                   }
                 />,
+                manifest.id === 'tailscale' && manifest.actions?.some((entry) => entry.id === 'serve') && (
+                  <SettingsRow
+                    key={`${manifest.id}-serve`}
+                    indent
+                    title="Tailscale Serve"
+                    description={served ? (servePending ? 'Started but not confirmed · Turn off Serve clears it' : `On · tailnet port ${served.servePort} forwards to this device`) : 'Keep the listener on this computer only and let Tailscale forward a tailnet port to it'}
+                    control={served
+                      ? <button type="button" className="settings-btn" disabled={busy} onClick={() => void turnOffServe()}>Turn off Serve</button>
+                      : (
+                        <div className="devices-inline-form">
+                          <input className="settings-input devices-port-input" inputMode="numeric" aria-label="Tailnet port" title="Not 443, 8443 or 10000: Tailscale uses those for Funnel" aria-invalid={!portValid} value={servePort} disabled={busy} onChange={(event) => setServePort(event.target.value)} />
+                          <button type="button" className="settings-btn" disabled={busy || !portValid} onClick={() => { setError(''); setServeDialog({ wasOn: !!tailscale?.enabled }) }}>Turn on Serve…</button>
+                        </div>
+                      )}
+                  />
+                ),
                 cloudflare && (
                   <SettingsRow key={`${manifest.id}-named`} indent title="Use a named tunnel" description="A tunnel in your own Cloudflare account" control={<Switch checked={named} label="Use a named tunnel" onChange={setNamed} />} />
                 ),
@@ -406,6 +485,17 @@ export function NetDevicesSection() {
         </Modal>
       )
     })()}
+
+    {serveDialog && (
+      <ChangePlanDialog
+        title="Turn on Tailscale Serve"
+        describe={() => call<NetAddonActionResult>('net.transport.action.describe', { id: 'tailscale', action: 'serve', settings: serveSettingsNow })}
+        apply={() => turnOnServe(serveDialog.wasOn)}
+        undo={() => serveUndo(serveDialog.wasOn)}
+        onClose={() => setServeDialog(undefined)}
+        onChanged={() => void reload()}
+      />
+    )}
 
     {revoking && (
       <Modal

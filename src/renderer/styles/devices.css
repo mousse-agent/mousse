@@ -49,6 +49,10 @@
   width: 180px;
 }
 
+.devices-inline-form .devices-port-input {
+  width: 80px;
+}
+
 .devices-code {
   font-family: var(--font-mono);
   font-size: 12px;
@@ -148,6 +152,29 @@
 .devices-dialog-actions {
   display: flex;
   justify-content: flex-end;
+}
+
+/* Change list in a plan dialog. */
+.change-plan {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.change-plan li {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  font-size: var(--settings-fs-small);
+}
+
+.change-plan-command {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
 }
 
 /* Remote thread display: flat transcript under the pickers. */
