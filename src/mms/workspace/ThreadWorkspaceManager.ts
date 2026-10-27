@@ -1,8 +1,8 @@
 import { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
-import { WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
+import { walkOwnedContent, WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
 import { getThreadLifecycleGate } from '../queue/ThreadLifecycleAdmission'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
@@ -206,7 +206,8 @@ export class ThreadWorkspaceManager {
     const verified = this.verify(metadata)
     const unfinishedProvision = [...this.journal.latestByOperation().values()].some((entry) => entry.operationType === 'workspace-provision' && !['completed', 'cancelled'].includes(entry.state))
     if (verified.lifecycle === 'ready' && metadata.lifecycle === 'ready' && !unfinishedProvision) return verified
-    if (verified.lifecycle !== 'missing' && verified.lifecycle !== 'ready') throw new Error(`Workspace recovery is blocked: ${verified.lifecycle}`)
+    const leftover = verified.lifecycle === 'recovery_required' && this.partlyRemoved(metadata)
+    if (verified.lifecycle !== 'missing' && verified.lifecycle !== 'ready' && !leftover) throw new Error(`Workspace recovery is blocked: ${verified.lifecycle}`)
     const repository = this.resolveRepository(projectPath)
     if (repository.repositoryId !== metadata.repositoryId) throw new Error('Workspace recovery repository identity changed.')
     let threadLease: ThreadLeaseHandle | undefined
@@ -223,6 +224,7 @@ export class ThreadWorkspaceManager {
         this.finishProvisionRecovery(ready)
         return ready
       }
+      if (leftover && this.partlyRemoved(metadata)) this.setAsidePartlyRemoved(metadata)
       const gate = getThreadLifecycleGate(this.threadDirectory)
       if (gate instanceof ResourceLifecycleStore && this.hasReconstructionManifest(metadata)) {
         const retirement = new WorktreeRetirementService(gate, { taskLease: threadLease, repositoryLease })
@@ -248,6 +250,40 @@ export class ThreadWorkspaceManager {
       repositoryLease?.release()
       if (threadLease && !heldThreadLease) releaseExecutionLeaseHandle(threadLease)
     }
+  }
+
+  /**
+   * A folder that a failed retirement left behind: it has no `.git` file, and the reconstruction manifest
+   * is still `prepared` because the removal never finished. Only that case is repaired; a checkout
+   * whose `.git` file went missing for another reason is never moved.
+   */
+  private partlyRemoved(metadata: ThreadWorkspaceMetadata): boolean {
+    if (existsSync(join(metadata.worktreePath, '.git')) || !existsSync(metadata.worktreePath) || !this.hasReconstructionManifest(metadata)) return false
+    const gate = getThreadLifecycleGate(this.threadDirectory)
+    if (!(gate instanceof ResourceLifecycleStore)) return false
+    try {
+      const retirement = new WorktreeRetirementService(gate)
+      return retirement.load(retirement.pathFor(metadata.threadId, metadata.worktreePath)).state === 'prepared'
+    } catch { return false }
+  }
+
+  /**
+   * Moves the leftover folder aside so the worktree can be rebuilt from the pinned refs, and deletes
+   * the moved folder when everything in it is exactly what the manifest retained. Anything else stays
+   * next to the checkout for the person to look at. The caller holds the thread and repository leases.
+   */
+  private setAsidePartlyRemoved(metadata: ThreadWorkspaceMetadata): void {
+    const gate = getThreadLifecycleGate(this.threadDirectory) as ResourceLifecycleStore
+    const retirement = new WorktreeRetirementService(gate)
+    const manifest = retirement.load(retirement.pathFor(metadata.threadId, metadata.worktreePath))
+    const aside = `${metadata.worktreePath}.partial-${Date.now()}`
+    try { renameSync(metadata.worktreePath, aside) }
+    catch { throw new Error('The worktree was partly removed and programs are still using files in it; close them and try again.') }
+    try {
+      const retained = new Map(manifest.content.map((entry) => [entry.path, entry]))
+      const verified = walkOwnedContent(aside, true).every((entry) => entry.kind === 'directory' || (retained.get(entry.path)?.kind === entry.kind && retained.get(entry.path)?.digest === entry.digest))
+      if (verified) rmSync(aside, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+    } catch { /* The moved folder stays; the worktree is rebuilt beside it. */ }
   }
 
   private finishProvisionRecovery(metadata: ThreadWorkspaceMetadata): void {
