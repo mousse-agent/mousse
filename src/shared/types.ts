@@ -1,5 +1,7 @@
 import type { AgentActivityItem } from './agentActivity'
 import type { ModelOverride } from './providerInstances'
+import type { ThreadPullRequestLink } from './pullRequests'
+export type { GitPullRequestInfo, GitPullRequestLookup, PullRequestCheckState } from './pullRequests'
 export type MainView = 'browser' | 'terminal' | 'files' | 'git' | 'review' | 'documents'
 
 export type ScheduledJobState = 'scheduled' | 'running' | 'paused' | 'completed' | 'error'
@@ -730,6 +732,8 @@ export interface Thread {
    * thread has started.
    */
   worktreeEnabled?: boolean
+  /** The pull request this thread created, started from, or watches; set by the daemon, never inferred from a branch name. */
+  pullRequest?: ThreadPullRequestLink
   /** Explicit sidebar position within this thread's project (or standalone group). */
   order: number
   pinnedAt?: string
@@ -1088,28 +1092,6 @@ export interface GitDeleteBranchOptions {
   /** Delete even when the branch has commits no other branch has. */
   force?: boolean
 }
-
-export type PullRequestCheckState = 'passing' | 'failing' | 'pending' | 'none'
-
-export interface GitPullRequestInfo {
-  number: number
-  title: string
-  url: string
-  state: 'open' | 'closed' | 'merged'
-  isDraft: boolean
-  checks: PullRequestCheckState
-  checkCounts: { passed: number; failed: number; pending: number; total: number }
-}
-
-export type GitPullRequestLookup =
-  | { state: 'found'; pullRequest: GitPullRequestInfo }
-  /** isDefaultBranch is null when the repository's default branch could not be read. */
-  | { state: 'none'; isDefaultBranch: boolean | null }
-  | {
-      state: 'unavailable'
-      reason: 'gh-missing' | 'unauthenticated' | 'not-github' | 'no-branch' | 'error'
-      message: string
-    }
 
 export interface EditorInfo {
   /** Stable id, e.g. 'vscode', 'cursor', 'zed', 'files'. */

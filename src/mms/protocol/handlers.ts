@@ -400,6 +400,16 @@ function projectRootContext(ctx: HandlerContext, params: Record<string, unknown>
   return project.path
 }
 
+/** The folder of a `pullRequests.*` call; a missing or doubled reference is the caller's mistake, not an internal error. */
+function pullRequestFolder(ctx: HandlerContext, params: Record<string, unknown>): string {
+  const threadId = asOptionalString(params.threadId, 256)
+  const projectId = asOptionalString(params.projectId, 256)
+  if (threadId && projectId) throw new DomainRpcError('invalid_params', 'Specify either threadId or projectId, not both')
+  if (!threadId && !projectId) throw new DomainRpcError('invalid_params', 'projectId or threadId is required')
+  if (threadId && !ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+  return projectRootContext(ctx, params)
+}
+
 async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<string, unknown>): Promise<void> {
   if (!params.threadId) return
   const threadId = asString(params.threadId, 'threadId', 256)
@@ -2319,6 +2329,78 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const projects = ctx.mms.projects.listProjects()
       ctx.emitEvent?.('projects.updated', { projects })
       return { project, projects }
+    }
+    case 'pullRequests.get': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'projectId', 'branch', 'force'])
+      const lookup = await ctx.mms.gitService.codeHost.lookupPullRequest(
+        pullRequestFolder(ctx, p),
+        asOptionalString(p.branch, 512),
+        { force: asOptionalBoolean(p.force, 'force') === true }
+      )
+      return { lookup }
+    }
+    case 'pullRequests.create': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'projectId', 'title', 'body', 'base', 'draft', 'head'])
+      const root = pullRequestFolder(ctx, p)
+      const pullRequest = await ctx.mms.gitService.codeHost.createPullRequest(root, {
+        title: asString(p.title, 'title', 256),
+        // An empty description is a valid one.
+        body: asOptionalString(p.body, 64 * 1024) ?? '',
+        base: asString(p.base, 'base', 512),
+        draft: asOptionalBoolean(p.draft, 'draft') === true,
+        head: asOptionalString(p.head, 512)
+      })
+      return { pullRequest }
+    }
+    case 'pullRequests.baseBranches': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'projectId'])
+      return { baseBranches: await ctx.mms.gitService.codeHost.listBaseBranches(pullRequestFolder(ctx, p)) }
+    }
+    case 'pullRequests.link': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'number'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const number = asBoundedInt(p.number, 'number', { min: 1, max: Number.MAX_SAFE_INTEGER })
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      const root = pullRequestFolder(ctx, { threadId })
+      const codeHost = ctx.mms.gitService.codeHost
+      // The lookup is what the host reports for the thread's own branch; a pull request from any other branch needs the detail read.
+      const lookup = await codeHost.lookupPullRequest(root, undefined, { force: true })
+      if (lookup.state !== 'found' || lookup.pullRequest.number !== number) {
+        throw new DomainRpcError('pull_request_not_found', `Pull request #${number} is not the pull request of this thread's branch`, { threadId, number })
+      }
+      const identity = await codeHost.repositoryIdentity(root)
+      const { pullRequest } = lookup
+      const thread = ctx.mms.threads.updateThreadMeta(threadId, {
+        pullRequest: {
+          number,
+          url: pullRequest.url,
+          host: identity.host,
+          nameWithOwner: identity.nameWithOwner,
+          headRefName: pullRequest.headRefName ?? '',
+          baseRefName: pullRequest.baseRefName ?? '',
+          // The lookup lists only this repository's own pull requests.
+          headRepository: identity.nameWithOwner,
+          isCrossRepository: false,
+          linkedAt: new Date().toISOString()
+        }
+      })
+      const threads = ctx.mms.threads.listAllThreads()
+      ctx.emitEvent?.('threads.updated', { threads })
+      return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
+    }
+    case 'pullRequests.unlink': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      const thread = ctx.mms.threads.updateThreadMeta(threadId, { pullRequest: undefined })
+      const threads = ctx.mms.threads.listAllThreads()
+      ctx.emitEvent?.('threads.updated', { threads })
+      return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
     }
     case 'threads.inventory': {
       const p = isObject(params) ? params : {}

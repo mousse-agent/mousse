@@ -1,190 +1,15 @@
-import { execFile } from 'node:child_process'
 import { lstat, readdir } from 'node:fs/promises'
 import { dirname, isAbsolute, parse, resolve } from 'node:path'
-import type {
-  GitPullRequestInfo,
-  GitPullRequestLookup,
-  PullRequestCheckState
-} from '../../shared/types'
 import type {
   GitHubAvailability,
   GitHubCloneRepositoryInput,
   GitHubCreateRepositoryInput,
   GitHubCreateRepositoryResult
 } from '../../shared/github'
+import { defaultRunner, isMissingExecutable, processMessage, type ExecutableRunner } from './ghRunner'
 
-export interface ExecutableResult {
-  stdout: string
-  stderr: string
-}
-
-export type ExecutableRunner = (
-  executable: string,
-  args: readonly string[],
-  options?: { cwd?: string }
-) => Promise<ExecutableResult>
-
-const execRunner: ExecutableRunner = (executable, args, options) =>
-  new Promise((resolvePromise, reject) => {
-    execFile(
-      executable,
-      [...args],
-      {
-        cwd: options?.cwd,
-        windowsHide: true,
-        encoding: 'utf8',
-        timeout: 60_000,
-        maxBuffer: 1024 * 1024
-      },
-      (error, stdout, stderr) => {
-        if (error) {
-          Object.assign(error, { stdout, stderr })
-          reject(error)
-          return
-        }
-        resolvePromise({ stdout, stderr })
-      }
-    )
-  })
-
-/** A packaged macOS app gets a minimal PATH, so Homebrew's gh is not found by name. */
-export function createGhFallbackRunner(
-  base: ExecutableRunner,
-  platform: NodeJS.Platform = process.platform
-): ExecutableRunner {
-  const fallbacks = platform === 'darwin' || platform === 'linux' ? ['/opt/homebrew/bin/gh', '/usr/local/bin/gh', '/home/linuxbrew/.linuxbrew/bin/gh'] : []
-  let remembered: string | null = null
-  return async (executable, args, options) => {
-    if (executable !== 'gh') return base(executable, args, options)
-    if (remembered) return base(remembered, args, options)
-    try {
-      return await base('gh', args, options)
-    } catch (error) {
-      if (!isMissingExecutable(error)) throw error
-      for (const candidate of fallbacks) {
-        try {
-          const result = await base(candidate, args, options)
-          remembered = candidate
-          return result
-        } catch (candidateError) {
-          if (isMissingExecutable(candidateError)) continue
-          remembered = candidate
-          throw candidateError
-        }
-      }
-      throw error
-    }
-  }
-}
-
-const defaultRunner = createGhFallbackRunner(execRunner)
-
-function processMessage(error: unknown): string {
-  if (!error || typeof error !== 'object') return String(error)
-  const value = error as { stderr?: unknown; message?: unknown }
-  const stderr = typeof value.stderr === 'string' ? value.stderr.trim() : ''
-  const message = typeof value.message === 'string' ? value.message.trim() : ''
-  return stderr || message || 'Unknown command failure'
-}
-
-function isMissingExecutable(error: unknown): boolean {
-  return Boolean(error && typeof error === 'object' && (error as { code?: unknown }).code === 'ENOENT')
-}
-
-const FAILED_CONCLUSIONS = new Set(['FAILURE', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED', 'STARTUP_FAILURE'])
-const FAILED_STATES = new Set(['FAILURE', 'ERROR'])
-const PENDING_STATES = new Set(['PENDING', 'EXPECTED'])
-
-export interface PullRequestCheckSummary {
-  checks: PullRequestCheckState
-  checkCounts: GitPullRequestInfo['checkCounts']
-}
-
-function upper(value: unknown): string {
-  return typeof value === 'string' ? value.toUpperCase() : ''
-}
-
-/** Maps gh's statusCheckRollup (CheckRun and StatusContext items) to one summary. */
-export function summarizeCheckRollup(rollup: unknown): PullRequestCheckSummary {
-  const counts = { passed: 0, failed: 0, pending: 0, total: 0 }
-  for (const item of Array.isArray(rollup) ? rollup : []) {
-    if (!item || typeof item !== 'object') continue
-    const { status, conclusion, state } = item as Record<string, unknown>
-    counts.total++
-    if (FAILED_CONCLUSIONS.has(upper(conclusion)) || FAILED_STATES.has(upper(state))) counts.failed++
-    else if ((upper(status) && upper(status) !== 'COMPLETED') || PENDING_STATES.has(upper(state))) counts.pending++
-    else counts.passed++
-  }
-  const checks: PullRequestCheckState = counts.failed > 0
-    ? 'failing'
-    : counts.pending > 0
-      ? 'pending'
-      : counts.total > 0
-        ? 'passing'
-        : 'none'
-  return { checks, checkCounts: counts }
-}
-
-const PULL_REQUEST_FIELDS = 'number,title,url,state,isDraft,statusCheckRollup,isCrossRepository'
-/** Enough to find this repository's own pull request among forks with a branch of the same name. */
-const PULL_REQUEST_CANDIDATES = 10
-
-/**
- * Parses `gh pr list --json …` output, newest first: the newest pull request from this
- * repository (a fork's branch can share the name), 'empty' for none, or null when unreadable.
- */
-export function parsePullRequestList(stdout: string): GitPullRequestInfo | 'empty' | null {
-  let data: unknown
-  try {
-    data = JSON.parse(stdout)
-  } catch {
-    return null
-  }
-  if (!Array.isArray(data)) return null
-  if (data.length === 0) return 'empty'
-  const own = data.find((item) => item && typeof item === 'object' && (item as { isCrossRepository?: unknown }).isCrossRepository !== true)
-  return own === undefined ? 'empty' : parsePullRequest(own)
-}
-
-/** Parses one pull request from gh's JSON (`number,title,url,state,isDraft,statusCheckRollup`). */
-export function parsePullRequestJson(stdout: string): GitPullRequestInfo | null {
-  let data: unknown
-  try {
-    data = JSON.parse(stdout)
-  } catch {
-    return null
-  }
-  return parsePullRequest(data)
-}
-
-function parsePullRequest(data: unknown): GitPullRequestInfo | null {
-  if (!data || typeof data !== 'object') return null
-  const value = data as Record<string, unknown>
-  const state = upper(value.state).toLowerCase()
-  if (typeof value.number !== 'number' || typeof value.url !== 'string') return null
-  if (state !== 'open' && state !== 'closed' && state !== 'merged') return null
-  return {
-    number: value.number,
-    title: typeof value.title === 'string' ? value.title : '',
-    url: value.url,
-    state,
-    isDraft: value.isDraft === true,
-    ...summarizeCheckRollup(value.statusCheckRollup)
-  }
-}
-
-/** Classifies a failed `gh pr view` by its error text. */
-export function classifyPullRequestFailure(message: string): 'none' | 'not-github' | 'unauthenticated' | 'error' {
-  const text = message.toLowerCase()
-  if (text.includes('no pull requests found')) return 'none'
-  if (text.includes('point to a known github host') || text.includes('not a github repository')) return 'not-github'
-  if (text.includes('gh auth login') || text.includes('not logged in')) return 'unauthenticated'
-  return 'error'
-}
-
-const AVAILABILITY_TTL_MS = 60_000
-
-type GhProbe = { ok: true } | { ok: false; reason: 'gh-missing' | 'error'; message: string }
+export { createGhFallbackRunner } from './ghRunner'
+export type { ExecutableResult, ExecutableRunner } from './ghRunner'
 
 function validateRepository(value: string): string {
   const repository = value.trim()
@@ -206,8 +31,6 @@ function validateRepositoryName(value: string): string {
 
 export class GitHubService {
   private operationActive = false
-  private probe: { at: number; result: GhProbe } | null = null
-  private readonly defaultBranches = new Map<string, string>()
 
   constructor(private readonly runExecutable: ExecutableRunner = defaultRunner) {}
 
@@ -239,45 +62,6 @@ export class GitHubService {
     }
   }
 
-  /**
-   * Looks up the pull request for a branch, by default the folder's current one. Naming
-   * the branch keeps a slow lookup from answering for a branch checked out meanwhile.
-   * Never takes the operation lock.
-   */
-  async getPullRequest(cwd: string, requestedBranch?: string): Promise<GitPullRequestLookup> {
-    const branch = requestedBranch?.trim() || await this.runExecutable('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd })
-      .then((result) => result.stdout.trim())
-      .catch(() => '')
-    if (!branch) return { state: 'unavailable', reason: 'no-branch', message: 'There is no branch checked out.' }
-    // Git refuses branch names that start with a dash; never let one read as a gh flag.
-    if (branch.startsWith('-')) return { state: 'unavailable', reason: 'error', message: 'Unsupported branch name.' }
-
-    const probe = await this.probeGh()
-    if (!probe.ok) return { state: 'unavailable', reason: probe.reason, message: probe.message }
-
-    try {
-      // `pr list --head` matches branch names only; `pr view <branch>` reads an all-digit branch as a PR number.
-      // An open pull request wins over a newer closed one, as `pr view` would choose.
-      const list = (state: 'open' | 'all') => this.runExecutable(
-        'gh',
-        ['pr', 'list', '--head', branch, '--state', state, '--limit', String(PULL_REQUEST_CANDIDATES), '--json', PULL_REQUEST_FIELDS],
-        { cwd }
-      ).then((result) => parsePullRequestList(result.stdout))
-      let listed = await list('open')
-      if (listed === 'empty') listed = await list('all')
-      if (listed === 'empty') return { state: 'none', isDefaultBranch: await this.isDefaultBranch(cwd, branch) }
-      if (listed) return { state: 'found', pullRequest: listed }
-      return { state: 'unavailable', reason: 'error', message: 'GitHub CLI returned an unexpected pull request response.' }
-    } catch (error) {
-      const message = processMessage(error)
-      const kind = classifyPullRequestFailure(message)
-      if (kind === 'none') return { state: 'none', isDefaultBranch: await this.isDefaultBranch(cwd, branch) }
-      if (kind === 'not-github') return { state: 'unavailable', reason: 'not-github', message }
-      if (kind === 'unauthenticated') return { state: 'unavailable', reason: 'unauthenticated', message }
-      return { state: 'unavailable', reason: 'error', message }
-    }
-  }
-
   /** Opens GitHub's create page in the browser. */
   async createPullRequest(cwd: string): Promise<void> {
     await this.runExclusive(async () => {
@@ -288,45 +72,6 @@ export class GitHubService {
         throw new Error(processMessage(error))
       }
     })
-  }
-
-  /**
-   * Only checks that gh is installed. Sign-in is judged from the lookup itself, because
-   * `gh auth status` also fails when an unrelated host's token is stale.
-   */
-  private async probeGh(): Promise<GhProbe> {
-    if (this.probe && Date.now() - this.probe.at < AVAILABILITY_TTL_MS) return this.probe.result
-    let result: GhProbe
-    try {
-      await this.runExecutable('gh', ['--version'])
-      result = { ok: true }
-    } catch (error) {
-      result = isMissingExecutable(error)
-        ? { ok: false, reason: 'gh-missing', message: 'GitHub CLI (gh) was not found. Install it to see pull requests.' }
-        : { ok: false, reason: 'error', message: `Could not run GitHub CLI: ${processMessage(error)}` }
-    }
-    this.probe = { at: Date.now(), result }
-    return result
-  }
-
-  /** Null when the repository's default branch could not be read. */
-  private async isDefaultBranch(cwd: string, branch: string): Promise<boolean | null> {
-    let name = this.defaultBranches.get(cwd)
-    if (!name) {
-      try {
-        const { stdout } = await this.runExecutable(
-          'gh',
-          ['repo', 'view', '--json', 'defaultBranchRef', '-q', '.defaultBranchRef.name'],
-          { cwd }
-        )
-        name = stdout.trim()
-      } catch {
-        return null
-      }
-      if (!name) return null
-      this.defaultBranches.set(cwd, name)
-    }
-    return name === branch
   }
 
   async createRepository(

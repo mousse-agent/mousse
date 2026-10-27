@@ -41,6 +41,7 @@ import { ThreadStorageMigration } from './ThreadStorageMigration'
 import { ThreadTrashService, type LegacyTrashDiagnostic } from './ThreadTrashService'
 import { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
 import type { TaskLifecycleRecord } from '../../shared/resourceLifecycle'
+import type { ThreadPullRequestLink } from '../../shared/pullRequests'
 import { registerThreadLifecycleGate, withThreadLifecyclePath } from '../queue/ThreadLifecycleAdmission'
 import { withFileLock } from '../scheduled/fileLock'
 import { pathsEqual } from '../profiles/pathSafety'
@@ -56,6 +57,7 @@ interface ThreadMeta {
   workspaceBinding?: SubagentWorkspaceBinding
   /** Opt-in isolated git worktree. OFF by default; undefined treated as false. */
   worktreeEnabled?: boolean
+  pullRequest?: ThreadPullRequestLink
   order: number
   pinnedAt?: string
   settledAt?: string
@@ -525,7 +527,7 @@ export class ThreadDataStore extends EventEmitter {
   /** `touch: false` keeps `updatedAt`, for repairs that must not reorder the sidebar. */
   updateThreadMeta(
     id: string,
-    partial: Partial<Pick<Thread, 'name' | 'modelOverride' | 'worktreeEnabled' | 'lineage' | 'workspaceBinding'>>,
+    partial: Partial<Pick<Thread, 'name' | 'modelOverride' | 'worktreeEnabled' | 'lineage' | 'workspaceBinding' | 'pullRequest'>>,
     opts: { touch?: boolean } = {}
   ): Thread {
     const thread = this.getThread(id)
