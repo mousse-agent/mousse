@@ -24,20 +24,17 @@ import type { AgentRuntimeKind, ResolvedAgentDefinition } from '../../src/shared
 import { getDefaultSettings } from '../../src/shared/settings'
 import { providerResponse } from '../fixtures/agent-platform/agent-runtime-policy/helpers'
 import { APPROVAL_ONLY_INSTANCE } from '../fixtures/agent-platform/exactDefinitionRuntime'
-import { createDefinitionEngine, DEFINITION_ENGINES, ENGINE_MODEL, FAKE_KEY, type DefinitionEngine } from '../fixtures/agent-platform/definitionEngines'
+import { createDefinitionEngine, ENGINE_MODEL, type DefinitionEngine } from '../fixtures/agent-platform/definitionEngines'
 import type { Harness } from '../../src/mms/harness/gateway'
 import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
 import { harnessAppError } from '../../src/shared/harness/types'
-import { definitionCheckIssues } from '../../src/mms/agentDefinitions/definitionRuntime'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import type { BrowserRuntimePort } from '../../src/shared/browser/runtime'
 
 // PR 4 §6 / §16 `definitionService`, through the real AgentExecutionService, orchestrator, gateway
-// and run engine, on each runtime that holds definitions: the real legacy Pi engine (where they run
-// today, its transport at a local recorder with a fake key) and a stand-in for a runtime with its
-// own loop that earned `exact`. The Claude Code-like instance only asks for approval, as Claude
-// Code, Codex and Pi RPC do today.
+// and run engine, on a stand-in for Pi RPC with evidence (a runtime with its own loop that earned
+// `exact`). The Claude Code-like instance only asks for approval, as Claude Code and Codex do.
 
 const PROVIDER = 'fixture'
 const MODEL = ENGINE_MODEL
@@ -47,7 +44,7 @@ const call = (name: string, args: Record<string, unknown>, id = `${name}-1`) => 
 const say = (text: string) => providerResponse([{ type: 'text', text }], 'stop')
 const mcpServer = { bearerForTurn: () => ({ url: 'http://127.0.0.1:9/mcp', token: 'fake-bearer', tokenHash: 'fake-hash' }), turnEnded: () => undefined, revokeThread: () => {} }
 
-describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind) => {
+describe('definitions through the gateway', () => {
   let home: string
   let work: string
   let engine: RunEngine
@@ -66,7 +63,7 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     work = join(home, 'work')
     mkdirSync(work)
     store = new ThreadDataStore(new ProjectManager())
-    defs = await createDefinitionEngine(kind, [PROVIDER, OTHER])
+    defs = await createDefinitionEngine([PROVIDER, OTHER])
     settings = getDefaultSettings()
     settings.integrations.skills.enabled = false
     orch = new OrchestratorService(new AgentRegistry(), new TaskQueue(), new WorktreeManager(home), new PtyManager(), { get: () => settings } as never, defs.providerAuth)
@@ -192,7 +189,6 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     // The definition's own system prompt and only its granted tools reach the model.
     expect(defs.captured[0]!.systemPrompt).toContain('DEFINITION_SYSTEM_PROMPT')
     expect(defs.captured[0]!.tools!.map((tool) => tool.name)).not.toContain('bash')
-    if (kind === 'legacy') expect(defs.requests[0]!.authorization).toBe(`Bearer ${FAKE_KEY}`)
     // The run took the thread's lease and gave it back.
     const lease = tryAcquireExecutionLease(store.getThreadDir(thread.id))
     expect(lease).not.toBeNull()
@@ -322,12 +318,6 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     const results = defs.captured.at(-1)!.messages.filter((message) => message.role === 'toolResult').map((message) => JSON.stringify(message.content))
     expect(results).toHaveLength(9)
     for (const text of results.slice(0, 3)) expect(text).toMatch(/cannot change Git metadata/)
-    // The legacy loop's Pi tools drop a leading `@` and expand `~`: refused by the path Pi opens.
-    // (The exact stand-in's tools open the literal path, which reaches no `.git` and no home.)
-    if (kind === 'legacy') {
-      for (const text of results.slice(3, 6)) expect(text).toMatch(/cannot change Git metadata/)
-      for (const text of results.slice(6, 8)) expect(text).toMatch(/escaped allowed workspace roots/)
-    }
     expect(existsSync(join(fakeHome, 'escaped.txt'))).toBe(false)
     expect(readFileSync(join(top, '.git', 'config'), 'utf8')).toBe(configBefore)
     expect(existsSync(join(top, '.git', 'objects', 'info', 'alternates'))).toBe(false)
@@ -426,24 +416,6 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     }
   })
 
-  it('a Pi connection set to the new engine still runs definitions on the loop (no regression)', async () => {
-    if (kind !== 'legacy') return
-    harness.stop()
-    harness = defs.install(orch, home, { engine: 'rpc' })
-    // Its chats run on Pi RPC, which only asks for approval…
-    expect(harness.resolveStored({ instanceId: `pi:${PROVIDER}`, llmProvider: PROVIDER, model: MODEL }, { purpose: 'turn' }).caps.toolControl).toBe('approval_only')
-    // …while a definition, a workflow node, a chat reply or a dispatch runs on the loop, as on master.
-    const stored = publish('mousse', `pi:${PROVIDER}`)
-    const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })
-    const thread = store.createThread('rpc engine')
-    defs.outputs.push(call('write', { path: 'on-rpc-instance.txt', content: 'loop' }), say('ran on the loop'))
-    const result = await orch.runAgentDefinition(request(resolved, thread.id))
-    expect(result).toMatchObject({ status: 'completed', text: 'ran on the loop' })
-    expect(readFileSync(join(work, 'on-rpc-instance.txt'), 'utf8')).toBe('loop')
-    expect(defs.requests).toHaveLength(2)
-    expect(engine.bindingForRun(engine.listRuns(thread.id)[0]!.runId)?.caps).toMatchObject({ toolControl: 'exact', definitionLimits: 'in_loop' })
-  })
-
   for (const how of ['stopThread', 'abortRun'] as const) {
     it(`a public Stop (${how}) ends the definition run: no tool after it, cancelled, and its record interrupted`, async () => {
       const stored = publish('mousse', `pi:${PROVIDER}`)
@@ -530,10 +502,9 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
       await expect(turn.result).rejects.toMatchObject({ code: 'policy_unenforceable' })
     }
     expect(defs.turns).toEqual([])
-    if (kind === 'legacy') expect(defs.requests).toEqual([])
   })
 
-  it('runs granted tools under the host writer and records them in the run ledger', async () => {
+  it('runs granted tools under the host writer', async () => {
     const stored = publish('mousse', `pi:${PROVIDER}`)
     const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })
     // A writer the run lost: the write never happens.
@@ -550,11 +521,9 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     expect(ledgered.error).toBeUndefined()
     expect(ledgered.status).toBe('completed')
     expect(readFileSync(join(work, 'ledgered.txt'), 'utf8')).toBe('x')
-    if (kind === 'legacy') expect(engine.tools.listForRun(engine.listRuns(thread.id)[0]!.runId).map((tool) => [tool.tool, tool.status])).toEqual([['write', 'committed']])
   })
 
   it('a definition that reaches its limit fails, in its result and its run record alike', async () => {
-    if (kind !== 'legacy') return
     const stored = publish('mousse', `pi:${PROVIDER}`, (settings) => { settings.limits.maxTurns = 1 })
     const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })
     const thread = store.createThread('limited')
@@ -585,8 +554,7 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
   })
 
   it('a run that ends while its approval is pending runs nothing after the approval, and reports no answer', async () => {
-    // The legacy loop dispatches the tool itself; an exact runtime's gate owns this check (unit 4d-rpc).
-    if (kind !== 'legacy') return
+    // The runtime's gate checks the run is still active after the approval, as Pi's does.
     const stored = publish('mousse', `pi:${PROVIDER}`, (settings) => { settings.approval.policy = 'always' })
     const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })
     const thread = store.createThread('ended during approval')
@@ -663,27 +631,6 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     expect(defs.turns.filter((turn) => turn.input.prompt === 'scheduled prompt')).toHaveLength(1)
   })
 
-  it("on the legacy engine a definition's in-process app tools stay at `lineage`, even under a profile set to `manage`", async () => {
-    if (kind !== 'legacy') return
-    settings.agentAccess = { ...settings.agentAccess, level: 'manage' }
-    const stored = publish('mousse', `pi:${PROVIDER}`, (value) => { value.tools = { mode: 'explicit', allowlist: ['read', 'thread_read'] } })
-    const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })
-    resolved.grants.builtinTools = [...resolved.grants.builtinTools, { id: 'thread_read', source: 'explicit' }]
-    const stranger = store.createThread('someone else')
-    const thread = store.createThread('lineage on the loop')
-    defs.outputs.push(call('thread_read', { threadId: stranger.id }), say('done'))
-    const result = await orch.runAgentDefinition(request(resolved, thread.id))
-    expect(result.status).toBe('completed')
-    // The record carries `lineage`, a definition's level on every runtime, not the profile's…
-    expect(engine.listRuns(thread.id)[0]!.accessGrant).toBe('lineage')
-    // …but the loop's in-process call to another thread still reaches nothing, as on master (its tools act at
-    // `lineage`, and the loop has no tools that read other threads).
-    const results = defs.captured.at(-1)!.messages.filter((message) => message.role === 'toolResult').map((message) => JSON.stringify(message.content))
-    expect(results).toHaveLength(1)
-    expect(results[0]).toMatch(/Unknown tool|lineage|scope|not available/i)
-    expect(results[0]).not.toContain('someone else')
-  })
-
   it('a later record that finds the thread taken keeps the provider failure that moved the run', async () => {
     const stored = publish('mousse', `pi:${PROVIDER}`, (settings) => {
       settings.fallbacks = { enabled: true, models: [{ providerId: OTHER, modelId: MODEL, instanceId: `pi:${OTHER}` }], retryOn: [], allowHigherCost: true }
@@ -704,7 +651,7 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
       // The fallback never reached its runtime: the thread was taken, and the run failed with the primary's error.
       expect(defs.turns).toHaveLength(1)
       expect(result.error!.message).not.toContain('running other work')
-      expect(result.error!.message).toMatch(kind === 'legacy' ? /provider could not accept/ : /fixture provider unavailable/)
+      expect(result.error!.message).toMatch(/fixture provider unavailable/)
     } finally {
       if (held) releaseExecutionLeaseHandle(held)
     }
@@ -790,7 +737,7 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     expect(completed).toMatchObject({ status: 'completed', usage: { inputTokens: 150, outputTokens: 30, costUsd: 0.375 } })
     limited = true
     const stopped = await orch.runAgentDefinition(request(resolved, store.createThread('usage-limit').id))
-    // The limit ends the run as the loop's does: the reply so far, the limit, and the usage.
+    // The limit ends the run with the reply so far, the limit, and the usage.
     expect(stopped).toMatchObject({ status: 'failed', text: 'partial answer', error: { code: 'BUDGET_EXCEEDED', details: { limit: { kind: 'turns', limit: 2 } } }, usage: { inputTokens: 150, outputTokens: 30, costUsd: 0.375 } })
   })
 
@@ -836,12 +783,10 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
         interrupt: async () => 'not_active'
       }
     }
-    function install(adapter: ProviderAdapter, loop: ProviderAdapter): void {
+    function install(adapter: ProviderAdapter): void {
       harness.stop()
-      // As the Pi driver declares on an RPC connection with evidence: the runtime for definitions,
-      // its loop (with the loop's caps) only for one that needs it.
-      const base = adapterDriver(adapter, { toolControl: 'exact', budgets: 'hard', runtime: { definitionAdapter: loop } })
-      const driver = { ...base, definitionCaps: (config: never, needs?: { loop?: boolean }) => ({ ...base.caps(config), ...(needs?.loop ? { definitionLimits: 'in_loop' as const } : {}) }) }
+      // As the Pi driver declares on an RPC connection with evidence.
+      const driver = adapterDriver(adapter, { toolControl: 'exact', budgets: 'hard' })
       let stored: unknown = { browsing: { driver: 'codex', enabled: true } }
       harness = testHarness({ drivers: [driver], instances: new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (state) => { stored = state.instances } } }), profileHome: home })
       orch.setHarness(harness)
@@ -858,26 +803,22 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
       const entry = { ref: { providerId: PROVIDER, modelId: MODEL, instanceId: 'browsing' }, available: true, efforts: [], speeds: [], contexts: [], capabilities: ['tools'], unavailableReasons: [] }
       return new AgentResolver({ registry, integrationLookup: lookup, modelLookup: new StaticAgentModelLookup([entry] as never) }).resolve({ definitionId: draft.id, revision: published.revision })
     }
-    const noLoop = mcpRuntime([], { results: [], ran: [] }, 'loop')
-
-    it('runs on the runtime, not the loop; its granted browser tools run over the Mousse MCP server on the host’s browser, with a ledger row', async () => {
+    it('runs on the runtime; its granted browser tools run over the Mousse MCP server on the host’s browser, with a ledger row', async () => {
       const seen = { results: [] as Array<{ text: string; isError?: boolean }>, ran: [] as string[], tools: undefined as string[] | undefined, runId: undefined as string | undefined }
-      const loopSeen = { results: [], ran: [] as string[] }
       install(mcpRuntime([
         { name: 'browser_open', args: { url: 'http://127.0.0.1:9/local-page' } },
         { name: 'browser_act', args: { sessionId: 's', tabId: 't', generation: 1, observationId: 'o', controlLeaseId: 'l', action: { type: 'reload' } } }
-      ], seen, 'runtime'), mcpRuntime([], loopSeen, 'loop'))
+      ], seen, 'runtime'))
       const profile = localBrowser('profile')
       const host = localBrowser('host')
       orch.setBrowserRuntime(profile.runtime)
       // The profile turned every Mousse tool off in its settings: a definition's grants decide its
-      // tools, as on the loop.
+      // tools.
       settings.integrations.tools.enabled = false
       const resolved = browsing(['read', 'browser_open', 'browser_observe', 'browser_screenshot'])
       const result = await orch.runAgentDefinition(request(resolved, store.createThread('browsing').id, { runId: 'definition-run', host: { workspaceRoots: [work], browserRuntime: host.runtime } as never }))
       expect(result).toMatchObject({ status: 'completed', text: 'runtime' })
       expect(seen.ran).toEqual(['runtime'])
-      expect(loopSeen.ran).toEqual([])
       // Sent the browser tools the turn's binding offers, none outside the grants.
       expect(seen.tools).toEqual(expect.arrayContaining(['browser_open', 'browser_observe']))
       expect(seen.tools).not.toContain('browser_act')
@@ -891,25 +832,25 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
       expect(engine.tools.listForRun(seen.runId!).map((row) => [row.tool, row.status])).toEqual([['browser_open', 'committed']])
     })
 
-    it('an unattended run is held as on the loop: an action its approval policy denies never reaches the browser', async () => {
+    it('an unattended run is held: an action its approval policy denies never reaches the browser', async () => {
       const seen = { results: [] as Array<{ text: string; isError?: boolean }>, ran: [] as string[] }
       install(mcpRuntime([
         { name: 'browser_act', args: { sessionId: 's', tabId: 't', generation: 1, observationId: 'o', controlLeaseId: 'l', action: { type: 'reload' } } },
         { name: 'browser_observe', args: { sessionId: 's' } }
-      ], seen, 'runtime'), noLoop)
+      ], seen, 'runtime'))
       const browser = localBrowser('profile')
       orch.setBrowserRuntime(browser.runtime)
       const resolved = browsing(['browser_act', 'browser_observe'], (agent) => { agent.approval.policy = 'unattended_deny' })
       expect(await orch.runAgentDefinition(request(resolved, store.createThread('scheduled').id, { source: 'schedule', host: { workspaceRoots: [work], browserRuntime: browser.runtime } as never }))).toMatchObject({ status: 'completed' })
       expect(seen.results[0]).toMatchObject({ isError: true, text: expect.stringContaining('/settings/approval/policy') })
-      // A read is not refused by that policy, on the loop or here.
+      // A read is not refused by that policy.
       expect(seen.results[1]).toMatchObject({ isError: false })
       expect(browser.dispatched.map((call) => call.name)).toEqual(['browser_observe'])
     })
 
-    it('without a browser runtime it fails before the turn, as on the loop', async () => {
+    it('without a browser runtime it fails before the turn', async () => {
       const seen = { results: [] as Array<{ text: string; isError?: boolean }>, ran: [] as string[] }
-      install(mcpRuntime([], seen, 'runtime'), noLoop)
+      install(mcpRuntime([], seen, 'runtime'))
       const resolved = browsing(['browser_open'])
       const host = localBrowser('host')
       const result = await orch.runAgentDefinition(request(resolved, store.createThread('unbound').id, { host: { workspaceRoots: [work], browserRuntime: host.runtime } as never }))
@@ -919,7 +860,7 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
 
     it('without an MCP bearer for the turn it is refused before the turn, never run without its browser', async () => {
       const seen = { results: [] as Array<{ text: string; isError?: boolean }>, ran: [] as string[] }
-      install(mcpRuntime([], seen, 'runtime'), noLoop)
+      install(mcpRuntime([], seen, 'runtime'))
       const browser = localBrowser('profile')
       orch.setBrowserRuntime(browser.runtime)
       // The Mousse MCP server is not running: no bearer can be issued.
@@ -931,7 +872,7 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     })
   })
 
-  it('a definition whose spend limit the runtime cannot reserve is refused at publish, Try Run and run time, saying what to change; never moved to the loop', async () => {
+  it('a definition whose spend limit the runtime cannot reserve is refused at publish, Try Run and run time, saying what to change', async () => {
     harness.stop()
     const ran: string[] = []
     const adapterNamed = (name: string): ProviderAdapter => ({
@@ -945,9 +886,8 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
       },
       interrupt: async () => 'not_active'
     })
-    // A runtime that reserves spend, with the loop beside it, on a model without a price.
-    const base = adapterDriver(adapterNamed('runtime'), { toolControl: 'exact', budgets: 'hard', spendLimits: 'reserved', runtime: { definitionAdapter: adapterNamed('loop'), spendModel: () => ({ label: 'Local model', outputCap: true, priced: false }) } })
-    const driver = { ...base, definitionCaps: (config: never, needs?: { loop?: boolean }) => ({ ...base.caps(config), ...(needs?.loop ? { definitionLimits: 'in_loop' as const } : {}) }) }
+    // A runtime that reserves spend, on a model without a price.
+    const driver = adapterDriver(adapterNamed('runtime'), { toolControl: 'exact', budgets: 'hard', spendLimits: 'reserved', runtime: { spendModel: () => ({ label: 'Local model', outputCap: true, priced: false }) } })
     let stored: unknown = { spend: { driver: 'codex', enabled: true }, spend2: { driver: 'codex', enabled: true } }
     harness = testHarness({ drivers: [driver], instances: new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (state) => { stored = state.instances } } }), profileHome: home })
     orch.setHarness(harness)

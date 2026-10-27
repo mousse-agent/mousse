@@ -8,7 +8,6 @@ import {
   SHELL_APPROVAL_UNAVAILABLE,
   UNATTENDED_SHELL_REFUSAL
 } from '../../src/mms/agentDefinitions/runtimePolicy'
-import { CONTAINMENT_EVIDENCE, platformShellContained } from '../../src/mms/harness/compatibility'
 import type { AgentRuntimePolicy } from '../../src/shared/agents/execution'
 import type { EffectiveAgentGrants } from '../../src/shared/agents/types'
 
@@ -84,14 +83,5 @@ describe('a definition’s shell where the platform’s shell is not contained',
   it('a host that cannot show a call in full says so, so the model splits it', () => {
     expect(approvalTooLongReason({ classification: 'script' })).toBe('This command is too long to show for approval in full, so it was not run. Split it into shorter steps.')
     expect(approvalTooLongReason({ classification: 'write' })).toContain('This tool call is too long')
-  })
-})
-
-describe('which platforms have shell-containment evidence', () => {
-  it('Linux and macOS have it (their full Pi records); Windows (a no-shell record) and a platform without a record do not', () => {
-    expect(platformShellContained('linux', CONTAINMENT_EVIDENCE)).toBe(true)
-    expect(platformShellContained('win32', CONTAINMENT_EVIDENCE)).toBe(false)
-    expect(platformShellContained('darwin', CONTAINMENT_EVIDENCE)).toBe(true)
-    expect(platformShellContained('freebsd', CONTAINMENT_EVIDENCE)).toBe(false)
   })
 })

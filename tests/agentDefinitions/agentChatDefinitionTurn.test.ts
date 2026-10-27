@@ -25,13 +25,12 @@ import { WorktreeManager } from '../../src/mms/worktree/WorktreeManager'
 import { defaultAgentSettings } from '../../src/shared/agents/defaults'
 import { getDefaultSettings } from '../../src/shared/settings'
 import { providerResponse } from '../fixtures/agent-platform/agent-runtime-policy/helpers'
-import { createDefinitionEngine, DEFINITION_ENGINES, ENGINE_MODEL, type DefinitionEngineKind } from '../fixtures/agent-platform/definitionEngines'
+import { createDefinitionEngine, ENGINE_MODEL } from '../fixtures/agent-platform/definitionEngines'
 
 // PR 4 §6 / §16 `agentChatDefinitionTurn`: agent chats run each reply as a definition turn through
 // the real orchestrator, gateway and run engine. The chat holds the backing thread's lease for the
 // whole response; each turn borrows it and never takes, stores or releases it. The host checkpoints
-// once per reply. Each case runs on the real legacy Pi engine (its transport at a local recorder
-// with a fake key, where chats run today) and on a stand-in for a runtime that earned `exact`.
+// once per reply. Each case runs on a stand-in for Pi RPC with evidence (a runtime that earned `exact`).
 
 const say = (text: string) => providerResponse([{ type: 'text', text }], 'stop')
 const cleanups: Array<() => Promise<void> | void> = []
@@ -40,14 +39,14 @@ afterEach(async () => {
   vi.restoreAllMocks()
 })
 
-async function fixture(kind: DefinitionEngineKind, options: { next?: (context: Context, signal: AbortSignal) => Promise<AssistantMessage>; bobProvider?: string } = {}) {
+async function fixture(options: { next?: (context: Context, signal: AbortSignal) => Promise<AssistantMessage>; bobProvider?: string } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-chat-defturn-')))
   process.env.MOUSSE_HOME = root
   const profileId = randomUUID()
   const projects = new ProjectManager(root)
   const threads = new ThreadDataStore(projects, root, { profileId, allowLegacyProjectData: false })
   projects.setThreadStore(threads)
-  const defs = await createDefinitionEngine(kind, ['alpha', 'beta'])
+  const defs = await createDefinitionEngine(['alpha', 'beta'])
   const settings = getDefaultSettings()
   settings.integrations.skills.enabled = false
   const orch = new OrchestratorService(new AgentRegistry(), new TaskQueue(), new WorktreeManager(root), new PtyManager(), { get: () => settings } as never, defs.providerAuth)
@@ -89,11 +88,11 @@ async function fixture(kind: DefinitionEngineKind, options: { next?: (context: C
   return { root, orch, engine, runtime, outputs, captured, service, threads, projects, alice, bob }
 }
 
-describe.each(DEFINITION_ENGINES)('agent chats on definition turns (%s)', (kind) => {
+describe('agent chats on definition turns', () => {
   it('a direct reply borrows the chat lease once, never takes or releases it, and the next reply sees the first', async () => {
     let leaseDuringTurn: { source?: string } | null = null
     let sessionLease: unknown = 'unset'
-    const f = await fixture(kind, {
+    const f = await fixture({
       next: async (context) => {
         const threadId = f.runtime.turns.at(-1)!.input.threadId
         leaseDuringTurn = readLeaseOwner(getExecutionLeasePath(f.threads.getThreadDir(threadId)))
@@ -127,7 +126,7 @@ describe.each(DEFINITION_ENGINES)('agent chats on definition turns (%s)', (kind)
   it('a composer send to the backing thread during a reply waits for the response, then runs once', async () => {
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
-    const f = await fixture(kind, { next: async () => { await gate; return say('done') } })
+    const f = await fixture({ next: async () => { await gate; return say('done') } })
     const chat = await f.service.create({ kind: 'direct', agentIds: [f.alice] })
     f.orch.setThreadModelOverride(chat.threadId, { instanceId: 'pi:alpha', llmProvider: 'alpha', model: ENGINE_MODEL })
     f.service.send({ chatId: chat.id, text: 'take your time' })
@@ -144,7 +143,7 @@ describe.each(DEFINITION_ENGINES)('agent chats on definition turns (%s)', (kind)
   })
 
   it('a group reply hands over to the mentioned agent on another provider, with one checkpoint per reply', async () => {
-    const f = await fixture(kind, { bobProvider: 'pi:beta' })
+    const f = await fixture({ bobProvider: 'pi:beta' })
     const repo = join(f.root, 'repo')
     mkdirSync(repo)
     const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, stdio: 'pipe' })
@@ -170,7 +169,7 @@ describe.each(DEFINITION_ENGINES)('agent chats on definition turns (%s)', (kind)
   })
 
   it('cancel stops the reply, checkpoints it as stopped and ends its run interrupted', async () => {
-    const f = await fixture(kind, { next: (_context, signal) => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })) })
+    const f = await fixture({ next: (_context, signal) => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })) })
     const repo = join(f.root, 'repo')
     mkdirSync(repo)
     const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, stdio: 'pipe' })

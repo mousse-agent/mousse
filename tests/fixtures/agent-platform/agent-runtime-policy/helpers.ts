@@ -2,11 +2,9 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, symlinkSyn
 import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { rm } from 'node:fs/promises'
-import type { AssistantMessage, Context } from '@earendil-works/pi-ai'
-import { getDefaultSettings } from '../../../../src/shared/settings'
+import type { AssistantMessage } from '@earendil-works/pi-ai'
 import { defaultAgentSettings } from '../../../../src/shared/agents/defaults'
 import type { ResolvedAgentDefinition } from '../../../../src/shared/agents/types'
-import { LlmClient } from '../../../../src/mms/orchestrator/LlmClient'
 
 export const POLICY_TEMP_PREFIX = 'mousse-agent-runtime-policy-'
 
@@ -131,35 +129,6 @@ export function fixtureModel(provider: string, id: string) {
     contextWindow: 128_000,
     maxTokens: 8_000
   }
-}
-
-export function nativeClient(outputs: AssistantMessage[], captured: Context[], options?: {
-  getModel?: (provider: string, id: string) => object | undefined
-  onStream?: (modelId: string, context: Context) => void
-  streamSimple?: (model: { id: string }, context: Context) => unknown
-}) {
-  const settings = getDefaultSettings()
-  settings.provider = { llmProvider: 'fixture-provider', model: 'fixture-model' }
-  settings.integrations.skills.enabled = false
-  const models = {
-    getModel: (provider: string, id: string) => {
-      if (options?.getModel) return options.getModel(provider, id) as never
-      return fixtureModel(provider, id)
-    },
-    getAuth: async () => ({ apiKey: 'fixture' }),
-    streamSimple: (model: { id: string }, context: Context) => {
-      options?.onStream?.(model.id, context)
-      captured.push(structuredClone(context))
-      if (options?.streamSimple) return options.streamSimple(model, context)
-      const next = outputs.shift()
-      if (!next) throw new Error('fixture stream exhausted')
-      return streamOf(next)
-    }
-  }
-  return new LlmClient(
-    { get: () => settings } as never,
-    { has: () => true, credentials: { listProviderIds: () => ['fixture-provider'] }, models } as never
-  )
 }
 
 export function grantTools(snapshot: ResolvedAgentDefinition, ids: string[]): void {

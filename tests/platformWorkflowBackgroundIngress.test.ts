@@ -10,7 +10,6 @@ import { WORKFLOW_DEFINITIONS_CAPABILITY } from '../src/shared/workflowPlatform'
 import { WORKFLOW_RUN_CAPABILITY } from '../src/shared/workflowRunPlatform'
 import type { WorkflowBundle, WorkflowNode } from '../src/shared/workflows'
 import { Harness } from '../src/mms/harness/gateway'
-import { LlmClient } from '../src/mms/orchestrator/LlmClient'
 import { ChannelAuth } from '../src/mms/channels/ChannelAuth'
 import { ChannelRouter } from '../src/mms/channels/ChannelRouter'
 import { ChannelSessionManager } from '../src/mms/channels/ChannelSessionManager'
@@ -177,7 +176,7 @@ describe('background workflow ingress', () => {
     const f = await fixture()
     let restored: MousseMainService | undefined
     try {
-      vi.spyOn(LlmClient.prototype, 'chat').mockRejectedValue(new Error('Workflow commands must not ask a model'))
+      vi.spyOn(Harness.prototype, 'startTurn').mockImplementation(() => { throw new Error('Workflow commands must not ask a model') })
       const content = bundle(undefined, 'restart-ingress')
       const published = await f.publish(f.alice.id, content)
       const alice = await f.services(f.alice.id)
@@ -214,20 +213,18 @@ describe('background workflow ingress', () => {
     try {
       const content = bundle()
       const published = await f.publish(f.alice.id, content)
-      const model = vi.spyOn(LlmClient.prototype, 'chat').mockImplementation(async (messages) => {
-        const last = messages[messages.length - 1]
-        const content = typeof last?.content === 'string' ? last.content : JSON.stringify(last?.content ?? '')
-        if (content.trim().startsWith('/')) throw new Error('Workflow commands must not ask a model')
-        return {
-          text: 'plain-ok',
-          usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
-          modelName: 'fixture',
-          totalResponseTimeMs: 1,
-          totalTokensUsed: 2,
-          contextInputs: { signature: 'fixture' },
-          toolEvents: [],
-          nativeMessages: [...messages, { role: 'assistant', content: 'plain-ok', timestamp: Date.now() }]
-        } as Awaited<ReturnType<LlmClient['chat']>>
+      // The model's turn, through the gateway: a workflow command never reaches it; a plain prompt says 'plain-ok'.
+      const model = vi.spyOn(Harness.prototype, 'startTurn').mockImplementation((spec) => {
+        if (spec.input.prompt.trim().startsWith('/')) throw new Error('Workflow commands must not ask a model')
+        const providerRef = { provider: spec.input.llmProvider, model: spec.input.model }
+        spec.sink.providerRef(providerRef)
+        spec.sink.text({ phase: 'complete', content: 'plain-ok', contentIndex: 0 })
+        spec.host.context.nativeHistoryAfterTurn('plain-ok')
+        const result = Promise.resolve({
+          text: 'plain-ok', aborted: false, modelName: 'fixture', totalResponseTimeMs: 1,
+          usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, contextSignature: 'fixture', nativeMessages: [], providerRef
+        })
+        return { result, steer: async () => 'not_active' as const, interrupt: async () => 'not_active' as const, providerRef: () => providerRef }
       })
       vi.spyOn(Harness.prototype, 'oneShot').mockRejectedValue(new Error('No model title request for explicit workflow execution'))
       await f.publish(f.bob.id, bundle(undefined, published.slug))
@@ -313,7 +310,7 @@ describe('background workflow ingress', () => {
   it('delivers waiting channel and scheduled workflows honestly, and cancellation leaves the durable run', async () => {
     const f = await fixture()
     try {
-      vi.spyOn(LlmClient.prototype, 'chat').mockRejectedValue(new Error('Workflow commands must not ask a model'))
+      vi.spyOn(Harness.prototype, 'startTurn').mockImplementation(() => { throw new Error('Workflow commands must not ask a model') })
       const waitingBundle = bundle({
         id: 'wait', type: 'delay', version: 1, config: { durationMs: 60_000 }
       }, 'wait-fixture')
