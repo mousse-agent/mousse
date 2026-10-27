@@ -6,6 +6,7 @@ import {
   PERMISSION_MODES,
   type PermissionMode
 } from '../../../shared/permissionMode'
+import { isExecutableJobEdit, isWorkflowPrompt } from '../../../shared/jobPermissionEdit'
 import { listingKey, listingServes, selectionFromListing, type ModelOverride } from '../../../shared/providerInstances'
 import type { LlmProviderOption } from '../../../shared/settings'
 import type {
@@ -152,30 +153,52 @@ export function modeChoices(draft: JobDraft): Array<{ value: JobDraft['mode']; l
   return choices
 }
 
+/** A prompt that starts with `/` runs a workflow, which takes no permission mode: the form hides the choice. */
+export const takesPermissionMode = (draft: JobDraft): boolean => !isWorkflowPrompt(draft.prompt)
+
 /**
- * The permission mode the person holds for this job: its target thread's mode, else the mode threads start in. This is
- * the job's ceiling, which the profile works out the same way and has the last word on. `undefined` when the form cannot
- * tell (a job on an existing worktree runs on a thread the form does not know), so nothing is limited here.
+ * The permission mode the person holds for this job, which is the job's ceiling: its target thread's mode, else the mode
+ * threads start in. The profile works it out the same way and has the last word. `exact` is false when the form cannot
+ * tell (the owner of an existing worktree is not known for a path just typed, or the thread is not in the list), and the
+ * mode is then `ask`, so nothing above it is offered.
  */
-export function heldPermissionMode(draft: JobDraft, catalog: ScheduledCatalog): PermissionMode | undefined {
-  if (draft.workspaceKind === 'worktree' && draft.projectId !== '') return undefined
-  const thread = draft.threadId ? catalog.threads.find((candidate) => candidate.id === draft.threadId) : undefined
-  if (draft.threadId && !thread) return undefined
-  return normalizePermissionMode(thread?.permissionMode ?? catalog.defaultPermissionMode)
+export function heldPermissionMode(draft: JobDraft, catalog: ScheduledCatalog, job?: ScheduledJob): { mode: PermissionMode; exact: boolean } {
+  let threadId = draft.threadId
+  if (draft.workspaceKind === 'worktree' && draft.projectId !== '') {
+    // A job on an existing worktree runs on the thread that owns it; a saved job records which one.
+    const sameWorktree = job?.workspace?.kind === 'worktree' && job.workspace.path === draft.worktreePath.trim()
+    threadId = sameWorktree && job?.threadId ? job.threadId : ''
+    if (!threadId) return { mode: 'ask', exact: false }
+  }
+  if (!threadId) return { mode: normalizePermissionMode(catalog.defaultPermissionMode), exact: true }
+  const thread = catalog.threads.find((candidate) => candidate.id === threadId)
+  if (!thread) return { mode: 'ask', exact: false }
+  return { mode: normalizePermissionMode(thread.permissionMode ?? catalog.defaultPermissionMode), exact: true }
 }
 
-/** The modes a job can run in: "Default" follows the thread, and none is wider than what the person holds. */
-export function permissionChoices(draft: JobDraft, catalog: ScheduledCatalog): Array<{ value: JobDraft['permissionMode']; label: string; disabled: boolean }> {
-  const held = heldPermissionMode(draft, catalog)
+/** The modes a job can run in: "Default" follows the thread up to the job's limit, and none is above what the person holds. */
+export function permissionChoices(draft: JobDraft, catalog: ScheduledCatalog, job?: ScheduledJob): Array<{ value: JobDraft['permissionMode']; label: string; disabled: boolean }> {
+  const held = heldPermissionMode(draft, catalog, job).mode
+  const followsThread = draft.threadId !== '' || (draft.workspaceKind === 'worktree' && draft.projectId !== '')
   return [
-    { value: '', label: draft.threadId ? "Default (the thread's mode)" : 'Default (the mode new threads start in)', disabled: false },
-    ...PERMISSION_MODES.map((mode) => ({
-      value: mode,
-      label: describePermissionMode(mode),
-      // A mode the job already has stays visible, so the form never shows a different one than the job runs with.
-      disabled: held !== undefined && isStricter(held, mode) && draft.permissionMode !== mode
-    }))
+    {
+      value: '',
+      label: followsThread ? "Default (the thread's mode, up to the job's limit)" : "Default (the mode new threads start in, up to the job's limit)",
+      disabled: false
+    },
+    ...PERMISSION_MODES.map((mode) => ({ value: mode, label: describePermissionMode(mode), disabled: isStricter(held, mode) }))
   ]
+}
+
+/**
+ * What saving will do to a mode the job already has when the person now holds less (a stricter thread): the profile
+ * brings it down to what they hold. Only for an edit that changes what the job does, and not when they are choosing a mode now.
+ */
+export function loweredPermission(draft: JobDraft, initial: JobDraft, catalog: ScheduledCatalog, job?: ScheduledJob): PermissionMode | undefined {
+  if (draft.permissionMode === '' || draft.permissionMode !== initial.permissionMode) return undefined
+  const held = heldPermissionMode(draft, catalog, job)
+  if (!held.exact || !isStricter(held.mode, draft.permissionMode)) return undefined
+  return isExecutableJobEdit(patchOf(initial, draft, catalog)) ? held.mode : undefined
 }
 
 export function workspaceChoices(draft: JobDraft): Array<{ value: WorkspaceKind; label: string }> {
@@ -227,7 +250,7 @@ export function validateDraft(draft: JobDraft, context: { hasWebhook: boolean; r
   if (draft.scheduleKind === 'once' && context.hasWebhook) {
     errors.schedule = 'A job with a webhook cannot be one-time. Use a manual schedule, or disable its webhook first.'
   }
-  if (draft.permissionMode !== '' && context.held !== undefined && isStricter(context.held, draft.permissionMode)) {
+  if (takesPermissionMode(draft) && draft.permissionMode !== '' && context.held !== undefined && isStricter(context.held, draft.permissionMode)) {
     errors.permission = `A job cannot run above the mode you hold here. ${describePermissionMode(draft.permissionMode)} is wider than ${describePermissionMode(context.held)}; choose ${describePermissionMode(context.held)} or stricter.`
   }
   if (showsWorkspace(draft) || draft.workspaceKind === 'worktree') {
@@ -269,7 +292,7 @@ export function createInputOf(draft: JobDraft, catalog: ScheduledCatalog): Creat
     ...(thread ? { threadId: draft.threadId } : { createThread: true }),
     ...(choice ? { selection: choice.selection } : {}),
     ...(draft.mode ? { mode: draft.mode } : {}),
-    ...(draft.permissionMode ? { permissionMode: draft.permissionMode } : {}),
+    ...(draft.permissionMode && takesPermissionMode(draft) ? { permissionMode: draft.permissionMode } : {}),
     ...(workspace ? { workspace } : {})
   }
 }
@@ -282,7 +305,9 @@ export function patchOf(initial: JobDraft, draft: JobDraft, catalog: ScheduledCa
   if (!sameSchedule(initial, draft)) patch.schedule = scheduleOf(draft)
   if (draft.modelKey !== initial.modelKey) patch.selection = choiceOf(draft, catalog)?.selection ?? null
   if (draft.mode !== initial.mode) patch.mode = draft.mode || null
-  if (draft.permissionMode !== initial.permissionMode) patch.permissionMode = draft.permissionMode || null
+  // A prompt that became a workflow loses its permission mode: workflows do not run under one.
+  const wantedPermission = takesPermissionMode(draft) ? draft.permissionMode : ''
+  if (wantedPermission !== initial.permissionMode) patch.permissionMode = wantedPermission || null
   if (draft.projectId !== initial.projectId) patch.projectId = draft.projectId || null
   const workspace = workspaceOf(draft) ?? null
   const workspaceChanged = JSON.stringify(workspace) !== JSON.stringify(workspaceOf(initial) ?? null)

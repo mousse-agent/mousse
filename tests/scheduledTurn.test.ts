@@ -14,6 +14,7 @@ import { releaseExecutionLeaseHandle, tryAcquireExecutionLease } from '../src/mm
 import type { HarnessDriver } from '../src/mms/harness/driver'
 import { adapterDriver } from '../src/mms/run/testkit/harness'
 import { Reconciler } from '../src/mms/run/Reconciler'
+import { jobPermissionRequest } from '../src/mms/scheduled/jobPermission'
 import { ScheduledJobService } from '../src/mms/scheduled/ScheduledJobService'
 import { ScheduledJobStore } from '../src/mms/scheduled/ScheduledJobStore'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
@@ -66,7 +67,14 @@ describe('scheduled jobs run as turns', () => {
     const jobs = new ScheduledJobStore(MousseConfigStore.load(fx.home))
     jobs.setRunProbe(daemon.orch.scheduledRunProbe())
     const service = new ScheduledJobService({ runIsolated: (prompt, ingress) => daemon.orch.runIsolatedScheduledJob(prompt, ingress) }, jobs, daemon.store, daemon.projects)
-    daemon.orch.setScheduledHooks({ onOccurrenceSettled: (event) => service.occurrenceSettled(event) })
+    daemon.orch.setScheduledHooks({
+      onOccurrenceSettled: (event) => service.occurrenceSettled(event),
+      // As a profile wires it: a run takes the mode its job holds when it starts.
+      currentPermissionRequest: (jobId) => {
+        const job = jobs.getJob(jobId)
+        return job ? jobPermissionRequest(job) : undefined
+      }
+    })
     // The rest of boot recovery that a profile runs after the engine's own (the fixture runs the engine's).
     if (options.recover) {
       ;(daemon.orch as any).recoverQueuedRows()
@@ -792,6 +800,28 @@ describe('scheduled jobs run as turns', () => {
       expect(second.jobs.getJob(job.id)?.pendingOccurrence).toBeUndefined()
     })
 
+    it('keeps the mode of the job for an occurrence that was admitted but not started when the daemon died', async () => {
+      const first = boot([piAdapter(() => 'unused')], { start: false })
+      const { job, claimed } = jobOn(first, { permissionMode: 'ask', permissionCeiling: 'full' })
+      await first.worker.stop()
+      void startByHand(first, claimed).catch(() => undefined)
+      await waitFor(() => first.engine.store.listNonTerminalRuns().some((run) => first.engine.outbox.listForRun(run.runId).some((effect) => effect.kind === 'turn.start')), 'the turn.start effect')
+      const runId = first.jobs.getJob(job.id)!.runClaim!.runId!
+      killOwner(first, job.id)
+      await first.crash()
+
+      const pi = piAdapter((input) => `after restart: ${input.prompt}`)
+      const second = boot([pi], { pid: 2, recover: true })
+      new Reconciler({ store: second.engine.store, outbox: second.engine.outbox, tools: second.engine.tools }).runOnce()
+      const record = await finished(second, job.id)
+
+      expect(record).toMatchObject({ status: 'ok', runId })
+      // The thread follows the profile default (Auto-accept edits); the job's own mode is the stricter one.
+      expect(second.orch.requestedPermissionMode(record.threadId!)).toBe('accept_edits')
+      expect(second.engine.bindingForRun(runId)?.policy.permissionMode).toBe('ask')
+      expect(record.permissionMode).toBe('ask')
+    })
+
     it.each([
       ['crash right after the run was recorded', true],
       ['crash between the dispatch and the claim write', false]
@@ -1204,6 +1234,29 @@ describe('scheduled jobs run as turns', () => {
       // The person's own turn on that thread ran in the thread's mode.
       const person = w.engine.listRuns(thread.id).find((run) => run.clientRequestId === 'person-1')!
       expect(w.engine.bindingForRun(person.runId)?.policy.permissionMode).toBe('full')
+    })
+
+    it.each([
+      ['tightened', 'full', 'ask', 'ask'],
+      ['widened', 'ask', 'full', 'ask']
+    ] as const)('runs a queued occurrence in the stricter of the mode it was admitted with and the mode of the job now: job %s while it waited', async (_label, admittedWith, editedTo, expected) => {
+      const release = gate()
+      const pi = holdingAdapter(release)
+      const w = boot([pi])
+      const { project, thread } = await holdThread(w, pi, 'full')
+      const job = addJob(w, { threadId: thread.id, projectId: project.id, schedule: { kind: 'interval', minutes: 10 }, permissionMode: admittedWith, permissionCeiling: 'full' })
+      makeDue(w, job)
+      await w.tick()
+      await waitFor(() => w.jobs.getJob(job.id)?.pendingOccurrence?.state === 'queued', 'the queued occurrence')
+      expect(readDurableQueue(w.store, thread.id)[0]).toMatchObject({ permissionMode: admittedWith })
+
+      // The job is edited while its occurrence waits. The run has not started, so it takes the narrower of the two.
+      w.jobs.updateJob(job.id, { permissionMode: editedTo })
+      release.resolve()
+      const record = await finished(w, job.id)
+
+      expect(modeOf(w, record)).toBe(expected)
+      expect(record.permissionMode).toBe(expected)
     })
 
     it('does the same through the direct path when no effect worker is attached', async () => {

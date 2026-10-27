@@ -46,6 +46,7 @@ import type { BotEngine } from './bots/activation/BotEngine'
 import { openPersonalBots } from './bots/activation/open'
 import type { BotStore } from './bots/store/BotStore'
 import { RunStore } from './run/RunStore'
+import { jobPermissionRequest } from './scheduled/jobPermission'
 import { ScheduledJobService, ScheduledWebhookError } from './scheduled/ScheduledJobService'
 import { ScheduledJobStore } from './scheduled/ScheduledJobStore'
 import { ScheduledWebhookServer, scheduledWebhookPort } from './scheduled/ScheduledWebhookServer'
@@ -577,7 +578,13 @@ export class MmsProfileServices {
     )
     // The Run Engine decides when a scheduled occurrence is over, including after a restart.
     this.scheduledStore.setRunProbe(this.orchestrator.scheduledRunProbe())
-    this.orchestrator.setScheduledHooks({ onOccurrenceSettled: (event) => this.scheduled.occurrenceSettled(event) })
+    this.orchestrator.setScheduledHooks({
+      onOccurrenceSettled: (event) => this.scheduled.occurrenceSettled(event),
+      currentPermissionRequest: (jobId) => {
+        const job = this.scheduled.getJob(jobId)
+        return job ? jobPermissionRequest(job) : undefined
+      }
+    })
     // Jobs saved before permission ceilings existed get one now: the mode of the thread they run on, else the
     // mode threads start in, else `ask`. Jobs that already have one are untouched, so this is safe on every start.
     try {

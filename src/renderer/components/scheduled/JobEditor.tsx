@@ -1,11 +1,13 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { errorText } from './scheduledLabels'
-import { describePermissionMode } from '../../../shared/permissionMode'
+import { describePermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 import type { ScheduledJob, ScheduleKind } from '../../../shared/types'
 import {
   heldPermissionMode,
+  loweredPermission,
   modeChoices,
   permissionChoices,
+  takesPermissionMode,
   showsWorkspace,
   validateDraft,
   workspaceChoices,
@@ -24,6 +26,8 @@ const SCHEDULE_KINDS: Array<{ value: ScheduleKind; label: string }> = [
 
 export const MODE_NOTE =
   "Default uses the thread's own permission settings, and nobody is there to approve anything. Choose Plan for a job that must not change files."
+export const WORKFLOW_PERMISSION_NOTE =
+  'A prompt that starts with / runs a workflow. Workflows do not run under a permission mode, so there is nothing to choose here.'
 export const PROJECT_WORKSPACE_WARNING =
   'The run works in your own checkout, unattended, with no checkpoints or undo. For a Git project, a new worktree per run is safer.'
 
@@ -57,12 +61,13 @@ export function JobEditor({
   useEffect(() => { formRef.current?.querySelector<HTMLElement>('[data-first-field]')?.focus() }, [])
 
   // The mode the person holds is checked only for a permission mode they are choosing now, not one the job already had.
-  const held = heldPermissionMode(draft, catalog)
+  const held = heldPermissionMode(draft, catalog, job)
   const choosingPermission = draft.permissionMode !== initial.permissionMode
   const errors = useMemo(
-    () => validateDraft(draft, { hasWebhook: Boolean(job?.trigger?.webhook), requireName: Boolean(job), ...(choosingPermission && held ? { held } : {}) }),
-    [draft, job, choosingPermission, held]
+    () => validateDraft(draft, { hasWebhook: Boolean(job?.trigger?.webhook), requireName: Boolean(job), ...(choosingPermission ? { held: held.mode } : {}) }),
+    [draft, job, choosingPermission, held.mode]
   )
+  const lowered = loweredPermission(draft, initial, catalog, job)
   const shown = attempted ? errors : {}
   const patch = (changes: Partial<JobDraft>) => { setDraft((current) => ({ ...current, ...changes })); setFailure(null) }
 
@@ -202,23 +207,30 @@ export function JobEditor({
       </div>
       {draft.mode === '' ? <p className="scheduled-note" data-testid="mode-note">{MODE_NOTE}</p> : null}
 
-      <div className="scheduled-field">
-        <label className="scheduled-label" htmlFor={id('permission')}>Permissions</label>
-        <select
-          id={id('permission')}
-          className="scheduled-input"
-          value={draft.permissionMode}
-          {...field('permission')}
-          onChange={(event) => patch({ permissionMode: event.target.value as JobDraft['permissionMode'] })}
-        >
-          {permissionChoices(draft, catalog).map((choice) => <option key={choice.value} value={choice.value} disabled={choice.disabled}>{choice.label}</option>)}
-        </select>
-        {fieldError('permission')}
-        <p className="scheduled-note" data-testid="permission-note">
-          {held ? `A run never does more without asking than ${describePermissionMode(held)}, the mode you hold for this job now.` : "A run never does more without asking than the mode you hold; the profile checks it when you save."}
-          {job?.permissionCeiling ? ` This job's limit is ${describePermissionMode(job.permissionCeiling)}: what its creator held.` : ''}
-        </p>
-      </div>
+      {takesPermissionMode(draft) ? (
+        <div className="scheduled-field">
+          <label className="scheduled-label" htmlFor={id('permission')}>Permissions</label>
+          <select
+            id={id('permission')}
+            className="scheduled-input"
+            value={draft.permissionMode}
+            {...field('permission')}
+            onChange={(event) => patch({ permissionMode: event.target.value as JobDraft['permissionMode'] })}
+          >
+            {permissionChoices(draft, catalog, job).map((choice) => <option key={choice.value} value={choice.value} disabled={choice.disabled}>{choice.label}</option>)}
+          </select>
+          {fieldError('permission')}
+          <p className="scheduled-note" data-testid="permission-note">
+            {held.exact
+              ? `A run never does more without asking than ${describePermissionMode(held.mode)}, the mode you hold for this job now.`
+              : 'The thread that owns the worktree sets what you can choose, so only Ask before acting is offered here. Default follows that thread.'}
+            {job?.permissionCeiling ? ` This job's limit is ${describePermissionMode(job.permissionCeiling)}: what its creator held. A run follows its thread, never above that limit.` : ''}
+          </p>
+          {lowered ? <p className="scheduled-note warn" data-testid="permission-lowered">Saving lowers this job's mode from {describePermissionMode(draft.permissionMode as PermissionMode)} to {describePermissionMode(lowered)}, the most you hold for the thread you chose.</p> : null}
+        </div>
+      ) : (
+        <p className="scheduled-note" data-testid="workflow-permission-note">{WORKFLOW_PERMISSION_NOTE}</p>
+      )}
 
       <div className="scheduled-field-grid">
         <div className="scheduled-field">

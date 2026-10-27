@@ -6,7 +6,7 @@
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MousseConfigStore } from '../src/mms/config/MousseConfigStore'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { LocalMmsClient } from '../src/mms/protocol/client'
@@ -48,7 +48,7 @@ describe('what a run of a job asks for', () => {
 })
 
 describe('the permissions of a job after an edit', () => {
-  const edit = (options: Parameters<typeof permissionsAfterEdit>[0]) => permissionsAfterEdit(options)
+  const edit = (options: Omit<Parameters<typeof permissionsAfterEdit>[0], 'canRaise'> & { canRaise?: boolean }) => permissionsAfterEdit({ canRaise: true, ...options })
 
   it('never raises the ceiling above the editor\'s own', () => {
     for (const stored of MODES) {
@@ -88,6 +88,27 @@ describe('the permissions of a job after an edit', () => {
       .toMatchObject({ ok: false, error: expect.stringContaining('wider than Auto-accept edits') })
   })
 
+  it('never lets an agent editor raise a ceiling, whatever mode it chooses', () => {
+    // The person-only raise: a stored Ask ceiling becomes Full for an editor holding Full.
+    expect(edit({ stored: { permissionCeiling: 'ask' }, editor: 'full', patchMode: 'full', executable: true, canRaise: true })).toMatchObject({ ok: true, permissionCeiling: 'full' })
+    // The same edit by an agent: the ceiling stays Ask and the wider mode is refused.
+    expect(edit({ stored: { permissionCeiling: 'ask' }, editor: 'full', patchMode: 'full', executable: true, canRaise: false }))
+      .toMatchObject({ ok: false, error: expect.stringContaining('wider than Ask before acting') })
+    expect(edit({ stored: { permissionCeiling: 'ask' }, editor: 'full', patchMode: 'ask', executable: true, canRaise: false }))
+      .toEqual({ ok: true, permissionMode: 'ask', permissionCeiling: 'ask', changed: true })
+    for (const stored of MODES) {
+      for (const editor of MODES) {
+        for (const patchMode of [undefined, null, ...MODES]) {
+          for (const executable of [false, true]) {
+            const result = edit({ stored: { permissionCeiling: stored }, editor, patchMode, executable, canRaise: false })
+            if (!result.ok || result.permissionCeiling === undefined) continue
+            expect(MODES.indexOf(result.permissionCeiling)).toBeLessThanOrEqual(MODES.indexOf(stored))
+          }
+        }
+      }
+    }
+  })
+
   it('keeps the ceiling when the mode is cleared', () => {
     expect(edit({ stored: { permissionMode: 'ask', permissionCeiling: 'ask' }, editor: 'full', patchMode: null, executable: true }))
       .toEqual({ ok: true, permissionMode: undefined, permissionCeiling: 'ask', changed: true })
@@ -120,6 +141,27 @@ describe('the protocol refuses a ceiling', () => {
   })
 })
 
+describe('workflow jobs take no permission mode', () => {
+  let home: string
+  beforeEach(() => { home = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-job-workflow-')) })
+  afterEach(() => { rmSync(home, { recursive: true, force: true }) })
+  const open = () => new ScheduledJobStore(MousseConfigStore.load(home))
+
+  it('refuses a permission mode on a prompt that starts with / (after leading space), at creation and on an edit', () => {
+    const store = open()
+    for (const prompt of ['/deploy', '   /deploy staging']) {
+      expect(() => store.createJob({ name: 'W', prompt, schedule: { kind: 'manual' }, permissionMode: 'ask', permissionCeiling: 'ask' })).toThrow(/takes no permission mode/)
+    }
+    expect(store.listJobs()).toHaveLength(0)
+    const plain = store.createJob({ name: 'P', prompt: 'work', schedule: { kind: 'manual' }, permissionMode: 'ask', permissionCeiling: 'ask' })
+    // Turning it into a workflow while it still has a mode is refused; clearing the mode in the same edit is not.
+    expect(() => store.updateJob(plain.id, { prompt: '/deploy' })).toThrow(/takes no permission mode/)
+    expect(store.updateJob(plain.id, { prompt: '/deploy', permissionMode: undefined })?.prompt).toBe('/deploy')
+    // A workflow job can still get a ceiling (migration stamps every job) but no mode.
+    expect(() => store.updateJob(plain.id, { permissionMode: 'ask' })).toThrow(/takes no permission mode/)
+  })
+})
+
 describe('the store keeps a job within its ceiling', () => {
   let home: string
   beforeEach(() => { home = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-job-ceiling-store-')) })
@@ -137,6 +179,37 @@ describe('the store keeps a job within its ceiling', () => {
     // Nothing was stored by the refused calls.
     expect(store.listJobs()).toHaveLength(1)
     expect(store.getJob(job.id)).toMatchObject({ permissionMode: 'ask', permissionCeiling: 'accept_edits' })
+  })
+
+  it('gives a mode with no ceiling the strictest ceiling, and brings the mode down to it', () => {
+    const store = open()
+    const created = store.createJob({ ...input, permissionMode: 'full' })
+    expect(created).toMatchObject({ permissionMode: 'ask', permissionCeiling: 'ask' })
+    // A job with neither keeps neither: migration stamps it at the next start.
+    const plain = store.createJob(input)
+    expect(plain.permissionMode).toBeUndefined()
+    expect(plain.permissionCeiling).toBeUndefined()
+    // The same for an edit that sets a mode on a job with no ceiling.
+    expect(store.updateJob(plain.id, { permissionMode: 'full' })).toMatchObject({ permissionMode: 'ask', permissionCeiling: 'ask' })
+  })
+
+  it('works out the permissions of an edit from the job as stored under the lock, so a later edit cannot undo an earlier lowering', () => {
+    const store = open()
+    const job = store.createJob({ ...input, permissionMode: 'full', permissionCeiling: 'full' })
+    const stale = store.getJob(job.id)!
+    // Edit one: someone holding Ask changes the prompt, which lowers the ceiling and the mode.
+    store.updateJob(job.id, { prompt: 'first' }, { permissions: (current) => permissionsAfterEdit({ stored: current, editor: 'ask', patchMode: undefined, executable: true, canRaise: true }) })
+    // Edit two was prepared against the stale job (Full), by an editor holding Full.
+    const seen: Array<ScheduledJob['permissionCeiling']> = []
+    store.updateJob(job.id, { prompt: 'second' }, {
+      permissions: (current) => {
+        seen.push(current.permissionCeiling)
+        return permissionsAfterEdit({ stored: current, editor: 'full', patchMode: undefined, executable: true, canRaise: true })
+      }
+    })
+    expect(stale.permissionCeiling).toBe('full')
+    expect(seen).toEqual(['ask'])
+    expect(store.getJob(job.id)).toMatchObject({ prompt: 'second', permissionMode: 'ask', permissionCeiling: 'ask' })
   })
 
   it('does not stop an unrelated edit of a job a file already holds out of range', () => {
@@ -336,6 +409,32 @@ describe('creating and editing a job through the protocol', () => {
     })
   })
 
+  describe('workflow jobs', () => {
+    it('refuses a permission mode on a prompt that starts with /, and tells the person why', async () => {
+      await setDefaultMode('full')
+      const refused = /takes no permission mode/
+      await expect(create({ prompt: '/deploy', permissionMode: 'ask' })).rejects.toThrow(refused)
+      await expect(create({ prompt: '  /deploy', permissionMode: 'ask' })).rejects.toThrow(refused)
+      expect((await client.request<{ jobs: ScheduledJob[] }>('scheduled.list')).jobs).toHaveLength(0)
+
+      // A workflow job without a mode is created as before, with a ceiling, and refuses one on an edit.
+      const { job } = await create({ prompt: '/deploy' })
+      expect(job.permissionMode).toBeUndefined()
+      await expect(update(job.id, { permissionMode: 'ask' })).rejects.toThrow(refused)
+      expect(mms.scheduled.getJob(job.id)?.permissionMode).toBeUndefined()
+    })
+
+    it('refuses turning a plain job with a mode into a workflow unless the mode is cleared in the same edit', async () => {
+      await setDefaultMode('full')
+      const { job } = await create({ permissionMode: 'ask' })
+      await expect(update(job.id, { prompt: '/deploy' })).rejects.toThrow(/takes no permission mode/)
+      expect(mms.scheduled.getJob(job.id)).toMatchObject({ prompt: 'work', permissionMode: 'ask' })
+      await update(job.id, { prompt: '/deploy', permissionMode: null })
+      expect(mms.scheduled.getJob(job.id)).toMatchObject({ prompt: '/deploy' })
+      expect(mms.scheduled.getJob(job.id)?.permissionMode).toBeUndefined()
+    })
+  })
+
   describe('jobs saved before ceilings existed', () => {
     it('get a ceiling at the next start: their thread\'s mode, else the default for threads', async () => {
       await setDefaultMode('full')
@@ -351,6 +450,28 @@ describe('creating and editing a job through the protocol', () => {
 
       expect(mms.scheduled.getJob(bound.id)).toMatchObject({ permissionCeiling: 'ask' })
       expect(mms.scheduled.getJob(perRun.id)).toMatchObject({ permissionCeiling: 'full' })
+    })
+
+    it('start anyway when the stamp cannot be written, and the job then follows its thread', async () => {
+      const job = mms.scheduled.createJob({ name: 'Old', prompt: 'work', schedule: { kind: 'manual' } })
+      await stop()
+      const stamp = vi.spyOn(ScheduledJobStore.prototype, 'stampMissingPermissionCeilings').mockImplementation(() => { throw new Error('disk full') })
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      try {
+        await start()
+        expect(stamp).toHaveBeenCalled()
+        expect(warn.mock.calls.flat().join(' ')).toContain('could not be stamped')
+        // No ceiling was written; the job is intact and the run follows its thread (see the scheduled-turn tests).
+        expect(mms.scheduled.getJob(job.id)).toMatchObject({ name: 'Old' })
+        expect(mms.scheduled.getJob(job.id)?.permissionCeiling).toBeUndefined()
+      } finally {
+        stamp.mockRestore()
+        warn.mockRestore()
+      }
+      // The next start, with the disk back, stamps it.
+      await stop()
+      await start()
+      expect(mms.scheduled.getJob(job.id)?.permissionCeiling).toBeDefined()
     })
 
     it('are stamped once: a later start keeps the ceiling they got', async () => {

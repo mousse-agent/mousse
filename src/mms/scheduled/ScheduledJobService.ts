@@ -286,9 +286,9 @@ export class ScheduledJobService extends EventEmitter {
     return job
   }
 
-  updateJob(id: string, patch: Partial<ScheduledJob>): ScheduledJob | null {
+  updateJob(id: string, patch: Partial<ScheduledJob>, options?: Parameters<ScheduledJobStore['updateJob']>[2]): ScheduledJob | null {
     this.lifecycle.assertAccepting()
-    const job = this.store.updateJob(id, patch)
+    const job = this.store.updateJob(id, patch, options)
     if (job) this.emitUpdated()
     return job
   }
