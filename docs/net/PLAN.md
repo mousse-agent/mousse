@@ -24,7 +24,7 @@ Identity and keys; signed versioned event streams; sync protocol for node↔node
 - `historyVisibility: sinceJoin`. Members see full channel history in v1.
 - Sandboxed shell for restricted bots. v1 offers only permission profiles the runtime can actually enforce (§4.8.3).
 - Sharing PR #41's local browser/PTY/file resources across the network.
-- Loading add-ons from outside the repo; SSH bootstrap (installing Mousse on another machine; the `ssh` route add-on only reaches a daemon that is already running); short-code enrollment through a relay; Tailscale Funnel automation; the hosted relay add-on itself; `mousse://` deep-link registration (v1 uses pasted strings).
+- Loading add-ons from outside the repo; Windows hosts for the SSH bootstrap (the app installs Mousse on Linux machines over SSH, see [ssh-setup.md](ssh-setup.md)); short-code enrollment through a relay; Tailscale Funnel automation; the hosted relay add-on itself; `mousse://` deep-link registration (v1 uses pasted strings).
 - Rewriting `ThreadDataStore` or the GUI↔daemon local protocol.
 
 ### Kept

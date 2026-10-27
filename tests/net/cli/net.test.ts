@@ -69,6 +69,16 @@ describe('network CLI validation', () => {
       params: {},
       promptInvite: true
     })
+    expect(
+      prepareNetCommand(
+        args('bridge', 'join', [], [['via', 'ws://127.0.0.1:41000/mousse-net'], ['name', 'VPS']])
+      )
+    ).toEqual({
+      method: 'bridge.join',
+      params: { name: 'VPS', via: 'ws://127.0.0.1:41000/mousse-net' },
+      promptInvite: true
+    })
+    expect(prepareNetCommand(args('net', 'routes'))).toEqual({ method: 'net.routes', params: {} })
     expect(prepareNetCommand(args('bridge', 'nodes'))).toEqual({
       method: 'bridge.nodes',
       params: {}
@@ -88,6 +98,10 @@ describe('network CLI validation', () => {
       args('net', 'status', [], [['token', bearer]]),
       args('bridge', 'join', ['not-an-invite']),
       args('bridge', 'join', [bearer, bearer]),
+      args('bridge', 'join', [bearer], [['via', 'ws://10.0.0.1:41000/mousse-net']]),
+      args('bridge', 'join', [bearer], [['via', 'ws://127.0.0.1:41000/mousse-net?x=1']]),
+      args('bridge', 'join', [bearer], [['via', 'ws://[::1]:41000/mousse-net']]),
+      args('net', 'routes', ['extra']),
       args('bridge', 'rename', ['node']),
       args('bridge', 'invite', [], [['caps', 'read,read']]),
       args('bridge', 'invite', [], [['caps', 'admin']]),

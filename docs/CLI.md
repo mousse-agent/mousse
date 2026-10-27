@@ -96,6 +96,8 @@ mousse-cli service stop
 
 For boot-time autostart, see [STARTUP.md](STARTUP.md) (installed via `mousse-cli service install`).
 
+Or add the machine from the app: **Settings → Devices → Add device → Remote machine over SSH** installs `mousse-cli`, installs the service and joins the machine to your devices over SSH, with a plan shown first and an undo afterwards. See [net/ssh-setup.md](net/ssh-setup.md).
+
 ### Reachable only over SSH
 
 A machine that other devices can only reach with `ssh` (no open port, no Tailscale) can advertise an SSH route. Put the settings in a private file and enable the `ssh` add-on on that machine:
@@ -107,6 +109,16 @@ mousse-cli net transport configure ssh --settings-file ssh.json
 ```
 
 SSH is dial-side only on the devices that connect: each one approves the endpoint for that machine before Mousse will run `ssh` against it. See [net/ssh-setup.md](net/ssh-setup.md).
+
+The app uses three CLI pieces that you can also run by hand:
+
+```bash
+mousse-cli net routes                       # this node's signed routes, which the computer that set it up adopts
+mousse-cli bridge join --via ws://127.0.0.1:<port>/mousse-net   # reach the inviter through a reverse SSH tunnel first (invite on stdin)
+mousse-cli service install --headless       # Linux: add ELECTRON_DISABLE_SANDBOX=1 to the unit (no windows, no setuid sandbox helper)
+```
+
+`--via` accepts only a loopback `ws://127.0.0.1:<port>/mousse-net` address; the inviter's pinned key is still checked. `mousse-cli net transports` also lists the saved add-on settings (`saved`).
 
 ## Global options
 
