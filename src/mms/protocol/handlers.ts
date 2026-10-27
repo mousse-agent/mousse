@@ -23,7 +23,7 @@ import { PROVIDER_STT_MAX_BYTES } from '../../shared/dictation'
 import { PROVIDER_TTS_MAX_CHARS } from '../../shared/readAloud'
 import type { ThreadAction } from '../../shared/threadActions'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
-import type { ChatMessage, FileSearchResponse, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest } from '../../shared/types'
+import type { ChatMessage, FileGrepResponse, FileSearchResponse, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest } from '../../shared/types'
 import { listClaimedQueue } from '../queue/ThreadMessageQueue'
 import { formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
 import type { ModelOverride } from '../../shared/providerInstances'
@@ -89,6 +89,7 @@ import { ChangeReceiptService } from '../actions/ChangeReceiptService'
 import { PublishService } from '../actions/PublishService'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { resolveWithinRoot } from '../files/pathGuard'
+import { grepWorkspace } from '../files/WorkspaceGrep'
 import { getWorkspaceIndexRegistry } from '../files/WorkspaceIndexRegistry'
 import { searchWorkspacePaths } from '../files/WorkspaceSearch'
 import { devGuiBridge } from '../devgui/DevGuiBridge'
@@ -2240,6 +2241,20 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         indexing,
         complete: snapshot.complete && ranked.complete
       } satisfies FileSearchResponse
+    }
+    case 'files.grep': {
+      const p = isObject(params) ? params : {}
+      const root = projectRootContext(ctx, p)
+      // Not `asString`: a query of spaces is a legitimate search, an empty one is not.
+      const query = asOptionalString(p.query, 512)
+      if (!query) throw new DomainRpcError('invalid_params', 'query must be a non-empty string')
+      return await grepWorkspace(root, query, {
+        regex: asOptionalBoolean(p.regex, 'regex') === true,
+        caseSensitive: asOptionalBoolean(p.caseSensitive, 'caseSensitive'),
+        wholeWord: asOptionalBoolean(p.wholeWord, 'wholeWord') === true,
+        limit: asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: 2000 }) ?? 500,
+        timeoutMs: asOptionalBoundedInt(p.timeoutMs, 'timeoutMs', { min: 100, max: 10_000 }) ?? 1_000
+      }) satisfies FileGrepResponse
     }
     case 'git.status': {
       const p = isObject(params) ? params : {}

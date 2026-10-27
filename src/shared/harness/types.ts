@@ -1,4 +1,5 @@
 import { AppError, type ErrorCategory } from '../errors'
+import type { AgentExecutionLimit } from '../agents/execution'
 import type { ProviderDriverKind } from '../providerInstances'
 
 /**
@@ -88,9 +89,10 @@ export interface ProviderSelection {
 
 /**
  * Who started the turn: a person in a chat (`interactive`), a delegated child, a workflow step, an
- * agent definition or a bot. Retries, continuations and steers of a turn keep its origin.
+ * agent definition, a bot or a scheduled job (`schedule`). Retries, continuations and steers of a
+ * turn keep its origin.
  */
-export type TurnOrigin = 'interactive' | 'delegated' | 'workflow' | 'definition' | 'bot'
+export type TurnOrigin = 'interactive' | 'delegated' | 'workflow' | 'definition' | 'bot' | 'schedule'
 
 /** Restrictions a run must honour. Turn admission fails closed when an instance cannot enforce them. */
 export interface RunPolicy {
@@ -99,6 +101,10 @@ export interface RunPolicy {
   origin?: TurnOrigin
   /** Exact tool allowlist (and optional denylist); absent = the instance's normal tools. */
   tools?: { allow: string[]; deny?: string[] }
+  /**
+   * Tools that need the user's approval: ask the user, allow them as granted, or refuse them all
+   * without asking (`never`: the turn bridge denies every permission request).
+   */
   approvals: 'ask' | 'grants' | 'never'
   budget?: { maxTurns?: number; maxToolCalls?: number; maxInputTokens?: number; maxOutputTokens?: number; maxUsd?: number; maxWallMs?: number }
 }
@@ -165,6 +171,12 @@ export interface RuntimeFacts {
   source: 'handshake' | 'session'
 }
 
+/** What a runtime or Mousse tool tells the model when a run refuses tools that need approval (`approvals: 'never'`). */
+export const APPROVALS_REFUSED_MESSAGE = 'Tools that need approval are refused here.'
+
+/** What the model is told when it asks the user a question in a run nobody answers (`approvals: 'never'`). */
+export const QUESTIONS_REFUSED_MESSAGE = 'Nobody can answer questions here. Continue without asking.'
+
 /** Why the gateway could not serve a request. Typed so callers never parse messages. */
 export const HARNESS_ERROR_CODES = [
   'instance_unknown',
@@ -191,7 +203,13 @@ export const HARNESS_ERROR_CODES = [
   'cancelled',
   'not_implemented',
   /** A retry or recovery cannot run on its run's binding: the instance's config, home or account changed. */
-  'binding_stale'
+  'binding_stale',
+  /** No model is selected and the profile has no default model. */
+  'no_model_selected',
+  /** A turn, tool-call, token or cost limit refused the next step (`HarnessError.limit`). */
+  'budget_exhausted',
+  /** The connection was retired by a Mousse update and must be moved before it runs again. */
+  'provider_retired'
 ] as const
 export type HarnessErrorCode = (typeof HARNESS_ERROR_CODES)[number]
 
@@ -203,6 +221,13 @@ export interface HarnessError {
   resetAt?: string
   /** `policy_unenforceable`: the capabilities the instance lacks. */
   missing?: Array<keyof HarnessCaps>
+  /**
+   * `policy_unenforceable`: why, when the gap is not a missing capability of the instance but a
+   * fact of the model (it has no price, or its output cannot be capped).
+   */
+  reason?: string
+  /** `budget_exhausted`: the limit that refused the next step, and what was used when known. */
+  limit?: AgentExecutionLimit
 }
 
 const HARNESS_ERROR_CATEGORY: Record<HarnessErrorCode, ErrorCategory> = {
@@ -227,7 +252,10 @@ const HARNESS_ERROR_CATEGORY: Record<HarnessErrorCode, ErrorCategory> = {
   timeout: 'timeout',
   cancelled: 'cancelled',
   not_implemented: 'unsupported',
-  binding_stale: 'conflict'
+  binding_stale: 'conflict',
+  no_model_selected: 'invalid',
+  budget_exhausted: 'denied',
+  provider_retired: 'unsupported'
 }
 
 /** The protocol-safe error for a `HarnessError` (its message is audited text, never vendor output). */
