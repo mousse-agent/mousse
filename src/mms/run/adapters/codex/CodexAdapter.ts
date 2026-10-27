@@ -1,3 +1,4 @@
+import { AppError } from '../../../../shared/errors'
 import { harnessAppError, type HarnessError } from '../../../../shared/harness/types'
 import {
   CodexTurnFailure,
@@ -221,7 +222,13 @@ export class CodexAdapter implements ProviderAdapter {
       const limited = readUsageLimit(error) !== undefined
       if ((input.signal.aborted || limited) && host.context.nativeHistoryNow) service.commitInterrupted?.(input.threadId, host.context.nativeHistoryNow())
       // A managed run still reports the failure behind a usage limit to the harness gateway, which maps it itself.
-      if (this.options.managed && !input.signal.aborted) throw codexHarnessError(limited ? (error as Error).cause : error, input.instanceId)
+      // The typed limit stays on the mapped error as its cause: that is how the run's pause reads the reset time and window.
+      if (this.options.managed && !input.signal.aborted) {
+        const mapped = codexHarnessError(limited ? (error as Error).cause : error, input.instanceId)
+        if (limited && mapped instanceof AppError)
+          throw new AppError({ code: mapped.code, message: mapped.message, details: mapped.details, errorInfo: mapped.errorInfo }, error)
+        throw mapped
+      }
       throw error
     }
     const totalResponseTimeMs = Date.now() - startedAt
