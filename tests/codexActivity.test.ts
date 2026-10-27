@@ -22,7 +22,7 @@ import { CODEX_APP_SERVER_BOUNDARY, replayCodexAppServer } from '../src/mms/run/
 import { ReplayTransport, parseTranscript } from '../src/mms/run/testkit/ReplayTransport'
 import { TranscriptAssembler, type TranscriptStreamState } from '../src/mms/run/transcript/TranscriptAssembler'
 import { runtimeToolEvent } from '../src/mms/run/transcript/promptRuntime'
-import { ACTIVITY_DIFF_CAP_BYTES, ACTIVITY_OUTPUT_CAP_BYTES, type AgentActivityItem, type ProviderToolEvent } from '../src/shared/agentActivity'
+import { ACTIVITY_DIFF_CAP_BYTES, diffSides, ACTIVITY_OUTPUT_CAP_BYTES, type AgentActivityItem, type ProviderToolEvent } from '../src/shared/agentActivity'
 import type { ChatMessage } from '../src/shared/types'
 import type { StreamingLlmToolEvent } from '../src/mms/harness/turnEvents'
 
@@ -64,7 +64,7 @@ describe('codexToolEvent: patches', () => {
       ]),
       'complete'
     )
-    expect(event.title).toBe('Edit a.ts, b.ts, c.ts, d.ts')
+    expect(event.title).toBe('Edit a.ts, b.ts, c.ts and 1 more')
     const { changes } = event.activity as { changes: Array<Record<string, unknown>> }
     expect(changes.map((change) => [change.path, change.change, change.added, change.removed])).toEqual([
       ['a.ts', 'update', 1, 1],
@@ -108,6 +108,35 @@ describe('codexToolEvent: patches', () => {
     expect(editedLines(item(patch([{ path: 'a', kind: { type: 'update' }, diff: '--- a\n+++ b\n@@\n-x\n+y' }])))).toBe(2)
     expect(editedLines(item(patch([{ path: 'a', kind: { type: 'add' }, diff: 'one\ntwo\n' }, { path: 'b', kind: { type: 'delete' }, diff: 'x\n' }])))).toBe(3)
     expect(editedLines(item({ type: 'fileChange', id: 'p' }))).toBe(0)
+  })
+
+  it('an added or deleted file is counted by its lines whatever its text holds, @@ included', () => {
+    const ruby = 'class A\n  @@count = 0\n\n  def x; end\nend\n'
+    const text = 'contact: foo@@bar\n\nlast\n'
+    const counts = (kind: string, diff: string) => {
+      const changes = [{ path: 'f.rb', kind: { type: kind }, diff }]
+      const { changes: listed } = eventOf(patch(changes), 'complete').activity as { changes: Array<{ added: number; removed: number; diff?: string }> }
+      return { added: listed[0]!.added, removed: listed[0]!.removed, diff: listed[0]!.diff, edited: editedLines(item(patch(changes))) }
+    }
+    expect(counts('add', ruby)).toMatchObject({ added: 5, removed: 0, diff: ruby, edited: 5 })
+    expect(counts('delete', ruby)).toMatchObject({ added: 0, removed: 5, edited: 5 })
+    expect(counts('add', text)).toMatchObject({ added: 3, removed: 0, edited: 3 })
+    expect(counts('delete', text)).toMatchObject({ added: 0, removed: 3, edited: 3 })
+    // A real hunk in an added file's payload is still read as one.
+    expect(counts('add', '@@ -0,0 +1,2 @@\n+a\n+b\n')).toMatchObject({ added: 2, removed: 0 })
+    expect(diffSides(ruby, 'add')).toEqual({ oldText: '', newText: ruby })
+    expect(diffSides(text, 'delete')).toEqual({ oldText: text, newText: '' })
+  })
+
+  it('the title names a few files and a count, so a huge patch gives a small row', () => {
+    const files = Array.from({ length: 10_000 }, (_, index) => ({ path: 'd/'.repeat(100) + 'f' + index + '.ts', kind: { type: 'add' }, diff: 'x\n' }))
+    const event = eventOf(patch(files), 'start')
+    expect(event.title.length).toBeLessThanOrEqual(200)
+    expect(event.title.startsWith('Edit d/d/')).toBe(true)
+    expect(eventOf(patch([{ path: 'a.ts', kind: { type: 'add' }, diff: 'x' }, { path: 'b.ts', kind: { type: 'add' }, diff: 'x' }]), 'start').title).toBe('Edit a.ts, b.ts')
+    const harness = assembled()
+    harness.feed([event, eventOf(patch(files), 'complete')])
+    expect(JSON.stringify(harness.rows).length).toBeLessThan(100_000)
   })
 })
 
@@ -612,6 +641,58 @@ describe('Codex activity against a scripted app-server', () => {
     harness.feed(events)
     for (const entry of itemsOf(harness.rows)) expect(entry, entry.callId).toMatchObject({ status: 'interrupted', interruptedBy: 'stop' })
     expect(itemsOf(harness.rows)).toHaveLength(4)
+  })
+
+  it('a turn that completes after Stop was requested leaves the plan to Stop: it ends stopped, not done', async () => {
+    const events: ProviderToolEvent[] = []
+    const s = server({
+      onTurnStart: (send) =>
+        setImmediate(() => {
+          send(spawn())
+          send(helperTurn())
+          send(note('turn/plan/updated', { threadId: PARENT, turnId: 'turn-1', explanation: null, plan: [{ step: 'Work', status: 'inProgress' }] }))
+        })
+    })
+    const service = create(s)
+    const stop = new AbortController()
+    const running = chat(service, events, { signal: stop.signal })
+    running.catch(() => undefined)
+    await vi.waitFor(() => expect(events.some((event) => event.callId === 'plan:turn-1')).toBe(true))
+    await service.interrupt(PARENT)
+    // The turn finishes normally just as Stop lands; the helper keeps the chat waiting until the abort.
+    s.emit(turnDone(PARENT, 'turn-1'))
+    await new Promise((done) => setTimeout(done, 60))
+    expect(completeOf(events, 'plan:turn-1')).toBeUndefined()
+    stop.abort(new Error('Stopped'))
+    await expect(running).rejects.toThrow('Stopped')
+    expect(completeOf(events, 'plan:turn-1')?.activity).toEqual({ status: 'interrupted', interruptedBy: 'stop', summary: 'Stopped' })
+    const harness = assembled()
+    harness.feed(events)
+    expect(harness.byCall('plan:turn-1')).toMatchObject({ status: 'interrupted', interruptedBy: 'stop' })
+  })
+
+  it('more work for a helper that already ended shows no empty row; its row opens when the helper runs, with the work under it', async () => {
+    const events: ProviderToolEvent[] = []
+    const s = server({
+      onTurnStart: (send) =>
+        setImmediate(() => {
+          // The helper's earlier turn ended before this run's item names it (an earlier run gave up on it).
+          send(helperTurn('h-turn-0'))
+          send(turnDone(HELPER, 'h-turn-0'))
+          send(itemFrame('completed', PARENT, 'turn-1', { type: 'subAgentActivity', id: 'sub-1', kind: 'interacted', agentThreadId: HELPER, agentPath: '/' }))
+          send(helperTurn('h-turn-1'))
+          send(itemFrame('started', HELPER, 'h-turn-1', cmd('hc1')))
+          send(itemFrame('completed', HELPER, 'h-turn-1', cmd('hc1', { status: 'completed', exitCode: 0 })))
+          send(turnDone(HELPER, 'h-turn-1'))
+          send(turnDone(PARENT, 'turn-1'))
+        })
+    })
+    await chat(create(s), events)
+    const rows = events.filter((event) => event.phase === 'start' && event.callId.startsWith('helper:'))
+    expect(rows.map((event) => event.callId)).toEqual([`helper:${HELPER}`])
+    expect(rows[0]!.activity).toMatchObject({ kind: 'subagent', summary: 'More work' })
+    expect(events.find((event) => event.callId === `${HELPER}:hc1`)?.parentCallId).toBe(`helper:${HELPER}`)
+    expect(completeOf(events, `helper:${HELPER}`)?.activity).toEqual({ status: 'done' })
   })
 
   it('a helper that is still being stopped after the chat ended adds no rows', async () => {

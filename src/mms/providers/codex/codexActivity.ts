@@ -6,6 +6,7 @@ import {
   capHead,
   capRecord,
   diffLineCounts,
+  hasHunkHeader,
   type ActivityFileChange,
   type ActivityInterruptedBy,
   type ActivityPatch,
@@ -65,8 +66,8 @@ function outcome(status: unknown, failed = false): Pick<ActivityPatch, 'status' 
  * every other diff is a unified one.
  */
 function changeCounts(kind: string | undefined, diff: string): { added: number; removed: number } {
-  if (!diff.includes('@@') && kind === 'add') return { added: textLines(diff), removed: 0 }
-  if (!diff.includes('@@') && kind === 'delete') return { added: 0, removed: textLines(diff) }
+  if (kind === 'add' && !hasHunkHeader(diff)) return { added: textLines(diff), removed: 0 }
+  if (kind === 'delete' && !hasHunkHeader(diff)) return { added: 0, removed: textLines(diff) }
   return diffLineCounts(diff)
 }
 
@@ -118,6 +119,13 @@ function fileChanges(item: Record<string, unknown>): { changes: ActivityFileChan
     }
   })
   return { changes, omitted: Math.max(0, all.length - changes.length) }
+}
+
+/** `Edit a.ts, b.ts and 7 more`: a few paths and a count, never every file of a large patch. */
+function patchTitle(paths: string[]): string {
+  if (!paths.length) return 'Edit files'
+  const shown = paths.slice(0, 3).join(', ')
+  return clip(`Edit ${shown}${paths.length > 3 ? ` and ${paths.length - 3} more` : ''}`, TITLE_CHARS)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -186,7 +194,7 @@ export function codexToolEvent(item: ThreadItem, phase: 'start' | 'complete'): P
       return {
         phase,
         callId,
-        title: paths.length ? `Edit ${paths.join(', ')}` : 'Edit files',
+        title: patchTitle(paths),
         toolName: 'apply_patch',
         activity: {
           kind: 'file_change',
@@ -302,7 +310,7 @@ export type HelperEnd = 'done' | 'failed' | 'interrupted'
 /** What a parent-thread item says about its native helpers. */
 export interface HelperNote {
   /** Threads the item says were started, or sent more work. */
-  launched: Array<{ threadId: string; description?: string; agentType?: string }>
+  launched: Array<{ threadId: string; description?: string; agentType?: string; /** More work for a helper, not a new one. */ reuse?: boolean }>
   /** Threads the item says ended, and how. */
   ended: Array<{ threadId: string; outcome: HelperEnd }>
 }
@@ -336,7 +344,7 @@ export function helperNote(item: ThreadItem): HelperNote | undefined {
     if (raw.kind === 'completed') return { launched: [], ended: [{ threadId, outcome: 'done' }] }
     if (raw.kind === 'interrupted') return { launched: [], ended: [{ threadId, outcome: 'interrupted' }] }
     const agentType = str(raw.model)
-    return { launched: [{ threadId, ...(agentType ? { agentType } : {}) }], ended: [] }
+    return { launched: [{ threadId, ...(agentType ? { agentType } : {}), ...(raw.kind === 'interacted' ? { reuse: true } : {}) }], ended: [] }
   }
   if (item.type !== 'collabAgentToolCall') return undefined
   const launched: HelperNote['launched'] = []

@@ -442,6 +442,8 @@ class TurnRun {
   private readonly openTools = new Map<string, OpenCall>()
   /** One row per native helper thread (and per episode of work it is sent), by helper thread id. */
   private readonly helperRows = new Map<string, HelperRow>()
+  /** Helpers named by more work before the tracker lists them as running: their row opens when they do. */
+  private readonly awaitingWork = new Set<string>()
   /** Turns whose plan row was opened (a plan row is never reopened once it ended). */
   private readonly plans = new Set<string>()
   private usageStart: TokenUsageBreakdown | undefined
@@ -703,19 +705,27 @@ class TurnRun {
   private noteHelperItem(item: ThreadItem): void {
     const note = helperNote(item)
     if (note) {
-      for (const launched of note.launched) this.openHelper(launched.threadId, launched)
+      for (const launched of note.launched) if (!launched.reuse) this.openHelper(launched.threadId, launched)
       for (const ended of note.ended) this.endHelper(ended.threadId, ended.outcome)
     }
     this.helpers.noteItem(item as never)
-    if (note) for (const threadId of new Set([...note.launched, ...note.ended].map((entry) => entry.threadId))) this.syncHelper(threadId)
+    if (!note) return
+    // More work for a helper this run has no row for (one an earlier run launched) shows a row only once the
+    // tracker says it runs: a helper that already ended has nothing to show.
+    for (const launched of note.launched)
+      if (launched.reuse) {
+        if (this.helperRows.has(launched.threadId) || this.helpers.running().includes(launched.threadId)) this.openHelper(launched.threadId, launched, 'More work')
+        else this.awaitingWork.add(launched.threadId)
+      }
+    for (const threadId of new Set([...note.launched, ...note.ended].map((entry) => entry.threadId))) this.syncHelper(threadId)
   }
 
-  private openHelper(threadId: string, details: { description?: string; agentType?: string }): void {
+  private openHelper(threadId: string, details: { description?: string; agentType?: string }, summary?: string): void {
     const row = this.helperRows.get(threadId)
     if (!row) {
       const callId = `helper:${threadId}`
       this.helperRows.set(threadId, { callId, episode: 1, open: true, ...details })
-      this.openCall(helperStart(callId, threadId, details), { helper: threadId })
+      this.openCall(helperStart(callId, threadId, { ...details, ...(summary ? { summary } : {}) }), { helper: threadId })
       return
     }
     // A second item naming a running helper can know more about it (the prompt, the model).
@@ -726,6 +736,11 @@ class TurnRun {
     this.input.onTool?.(helperStart(row.callId, threadId, details))
   }
 
+  /** Stop was requested (it may reach the turn's own handler a moment later), or the chat was aborted. */
+  private stopRequested(): boolean {
+    return this.interruptRequested || this.signal.aborted
+  }
+
   private endHelper(threadId: string, how: HelperEnd): void {
     const row = this.helperRows.get(threadId)
     if (!row?.open) return
@@ -733,15 +748,17 @@ class TurnRun {
     this.openTools.delete(row.callId)
     // Stop interrupts the helpers and their end can be reported before the abort reaches the turn's own
     // handler: a helper that ends once Stop was requested was stopped, whatever it reports.
-    const stopped = this.interruptRequested || this.signal.aborted
-    this.input.onTool?.(helperEnd(row.callId, how === 'done' && stopped ? 'interrupted' : how))
+    this.input.onTool?.(helperEnd(row.callId, how === 'done' && this.stopRequested() ? 'interrupted' : how))
   }
 
   /** Brings a helper's row in line with the tracker: closed when the helper stopped running, a new episode when it runs again. */
   private syncHelper(threadId: string): void {
     const row = this.helperRows.get(threadId)
-    if (!row) return
     const running = this.helpers.running().includes(threadId)
+    if (!row) {
+      if (running && this.awaitingWork.delete(threadId)) this.openHelper(threadId, {}, 'More work')
+      return
+    }
     if (row.open && !running) this.endHelper(threadId, 'done')
     else if (!row.open && running) {
       const episode = row.episode + 1
@@ -797,7 +814,8 @@ class TurnRun {
     if (completed) {
       this.completedTurns.set(completed.turn.id, completed.turn)
       // A stopped or failed turn leaves its plan open for `closeTools`, which ends it as stopped.
-      if (!this.muted && completed.turn.status === 'completed') this.finishPlan(completed.turn.id)
+      // Nor does a turn that completed after Stop was requested: Stop ends what it shows.
+      if (!this.muted && completed.turn.status === 'completed' && !this.stopRequested()) this.finishPlan(completed.turn.id)
       if (this.adoptedTurn === completed.turn.id) {
         this.adoptedTurn = undefined
         // Mousse's own turn may be running by now; it keeps its turn open, and this one's end is not its news.
