@@ -115,11 +115,12 @@ export interface TurnInput {
    */
   nativeHistory?: string
   /**
-   * The thread's history reached the runtime in the prompt, standing in for its transcript (a
-   * provider switch's handover): `nativeHistory` is then empty, and no native session the runtime
-   * kept for the thread may be resumed in its place.
+   * The orchestrator handed history over in the prompt this turn (a provider switch's handover,
+   * which then stands in for the transcript and leaves `nativeHistory` empty, or a fork's portable
+   * handover of its parent): no native session the runtime kept for the thread may be resumed in
+   * its place.
    */
-  historyReplaced?: boolean
+  historyHandedOver?: boolean
   /** Aborted by the orchestrator on Stop, effect timeout or shutdown. */
   signal: AbortSignal
 }

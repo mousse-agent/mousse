@@ -226,20 +226,6 @@ function prepareSession(dir: string, sessionId: string, cwd: string): boolean {
   }
 }
 
-/**
- * The thread's history (`nativeAgentHistory`: `{summary, messages}` as JSON, or empty) holds only
- * user messages: what a fork thread holds after first turns that failed or stopped before a reply.
- */
-function onlyUserMessages(history: string): boolean {
-  if (!history) return true
-  try {
-    const parsed = JSON.parse(history) as { summary?: unknown; messages?: Array<{ role?: unknown }> }
-    return !parsed.summary && Array.isArray(parsed.messages) && parsed.messages.every((message) => message?.role === 'user')
-  } catch {
-    return false
-  }
-}
-
 /** A Pi process failed before or during a turn in a way Mousse must not paper over. */
 function protocolError(instanceId: string, message: string): AppError {
   return harnessAppError({ code: 'protocol', message, instanceId })
@@ -482,8 +468,6 @@ export class PiRpcEngine implements ProviderAdapter {
    * or an earlier run of Mousse is refused.
    */
   private oauthHandle: string
-  /** Fork threads whose next turn is the one the branch was just made for (`forkSession`). */
-  private readonly freshForks = new Set<string>()
   /** The credential retirement in progress, if any; starts and forks wait for it. */
   private retiring: Promise<void> | undefined
   /** The credential epoch in which a start last wrote `auth.json`. */
@@ -577,7 +561,6 @@ export class PiRpcEngine implements ProviderAdapter {
     const epoch = ++this.credentialEpoch
     this.oauthHandle = piOAuthHandle(this.options.instanceId)
     this.oauthSubject = undefined
-    this.freshForks.clear()
     // The processes and the token go first: a failed write of the thread list below cannot keep them.
     const closing = [...this.threads.values()].map((thread) => this.kill(thread))
     this.removeAuthFile()
@@ -1126,20 +1109,20 @@ export class PiRpcEngine implements ProviderAdapter {
       mkdirSync(cwd, { recursive: true })
       const history = input.nativeHistory ?? ''
       let saved: SavedThread | undefined = this.saved()[input.threadId]
-      // The turn right after `forkSession` resumes the branch although the thread's history is no
-      // longer empty, but only when what it holds is the resent message(s): a fork thread starts with
-      // no history, and a first turn that failed or stopped leaves only its user message. A turn that
-      // ran anywhere (another provider included) left a reply, and then the branch is stale. Any
-      // later turn of the thread consumes the exemption.
-      const fresh = this.freshForks.delete(input.threadId) && onlyUserMessages(history) && !input.historyReplaced
-      const matches = saved?.historyFingerprint === fingerprint(history) && !input.historyReplaced
-      if (saved?.pendingFork && !fresh && !matches) {
-        // A branch the thread has moved past (a failed first turn, then turns elsewhere, or a re-fork
-        // that did not happen): resuming it would lose those turns. The history is handed over.
+      // History the orchestrator handed over in the prompt (a provider switch, or a fork that could
+      // not branch natively) stands in for any native session of the thread.
+      const handedOver = input.historyHandedOver === true
+      if (saved?.pendingFork && handedOver) {
+        // The prompt carries the parent's history: the branch (made before turns elsewhere, or before
+        // a re-fork that did not happen) is not resumed beside it.
         this.save(input.threadId, undefined)
         saved = undefined
       }
-      let resume = saved && ((saved.pendingFork && fresh) || matches) ? saved.sessionId : undefined
+      // A pending fork resumes its branch whatever the thread's history holds: every turn of the fork
+      // thread since the branch was made ran here and failed or stopped (one that completed replaced
+      // the mapping; one elsewhere comes back with the history handed over), and its message is resent.
+      const matches = !handedOver && saved?.historyFingerprint === fingerprint(history)
+      let resume = saved && (saved.pendingFork || matches) ? saved.sessionId : undefined
       // A cold resume needs the session's file, in this workspace (a fork's first turn runs in its own).
       const warm = this.threads.get(input.threadId)
       const warmOnIt = warm?.alive && warm.cwd === cwd && warm.sessionId === resume
@@ -1406,7 +1389,6 @@ export class PiRpcEngine implements ProviderAdapter {
       if (!sessionId || sessionId === ref.sessionId || !sessionFileOf(this.sessionsDir, sessionId)) return null
       // The fork's thread has no history of its own before its first turn, which resumes the branch.
       this.save(target.threadId, { sessionId, historyFingerprint: fingerprint(''), pendingFork: true })
-      this.freshForks.add(target.threadId)
       return { provider: ref.provider, ...(ref.instanceId ? { instanceId: ref.instanceId } : {}), model: ref.model, sessionId }
     } finally {
       await within(this.kill(thread), CLEANUP_DEADLINE_MS)

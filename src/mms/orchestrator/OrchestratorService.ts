@@ -6001,7 +6001,7 @@ export class OrchestratorService extends EventEmitter {
         nativeHistory: promptRuntime
           ? handoffs?.replaceHistory ? '' : nativeAgentHistory(this.nativeContext, turnNativeStartBoundary.messageIndex)
           : undefined,
-        ...(promptRuntime && handoffs?.replaceHistory ? { historyReplaced: true } : {}),
+        ...(promptRuntime && handoffs?.historyHandedOver ? { historyHandedOver: true } : {}),
         signal: turn.abort.signal
       }
       const turnSink: TurnSink = {
