@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import type { Api, Context, Model, SimpleStreamOptions } from '@earendil-works/pi-ai'
 import { streamSimple as anthropicStream } from '@earendil-works/pi-ai/api/anthropic-messages'
@@ -98,6 +99,11 @@ describe('the wire-cap mirror (pinned pi-ai 0.85.1)', () => {
       tools: [{ name: 'read', description: 'Read', parameters: {} }]
     }] as Context[])
       expect(estimateContextTokens(ctx)).toBe(piEstimate(ctx).tokens)
+  })
+
+  it('the answer room is also a literal 1024 in the Anthropic and Bedrock builders (re-checked on every Pi upgrade)', () => {
+    const source = (api: string) => readFileSync(new URL(`../../node_modules/@earendil-works/pi-ai/dist/api/${api}.js`, import.meta.url), 'utf8')
+    for (const api of ['anthropic-messages', 'bedrock-converse-stream']) expect(source(api)).toContain('Math.max(0, maxTokens - 1024)')
   })
 
   it('the listed APIs; openai-responses only while it sends max_output_tokens', () => {

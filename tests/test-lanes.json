@@ -31,6 +31,7 @@
     "tests/harness/piRpcLifecycle.test.ts",
     "tests/harness/piRpcProcess.test.ts",
     "tests/harness/piRuntimeProcess.test.ts",
+    "tests/harness/piSpendReservation.test.ts",
     "tests/harness/piToolBudget.test.ts",
     "tests/mmsOwnerLease.test.ts",
     "tests/namedAgentProtocol.test.ts",

@@ -112,6 +112,8 @@ export interface RequestGrant {
   id: string
   cap: number
   maxTokens: number
+  /** The thinking budget pi-ai adds to the cap at the request's effort (0 when none). */
+  thinkingBudget: number
 }
 
 /** How a reserved request ended (`/pi/settle`). */

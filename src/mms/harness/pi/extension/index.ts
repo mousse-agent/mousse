@@ -195,7 +195,16 @@ export default async function mousseExtension(pi: ExtensionAPI): Promise<void> {
     // The final hook parameters of each reserved request, as `onPayload` saw them after Mousse's check.
     const payloads = process.env.MOUSSE_PI_TEST_PAYLOAD_LOG
     delete process.env.MOUSSE_PI_TEST_PAYLOAD_LOG
-    if (payloads) observer = { ...observer, payload: (model, params, grant) => appendFileSync(payloads, `${JSON.stringify({ api: model.api, id: model.id, cap: grant.cap, params })}\n`) }
+    if (payloads) observer = { ...observer, payload: (model, params, grant) => appendFileSync(payloads, `${JSON.stringify({ api: model.api, id: model.id, cap: grant.cap, thinkingBudget: grant.thinkingBudget, params })}\n`) }
+    // A `before_provider_request` that raises the output cap, as a careless extension could.
+    if (process.env.MOUSSE_PI_TEST_RAISE_CAP) {
+      delete process.env.MOUSSE_PI_TEST_RAISE_CAP
+      pi.on('before_provider_request', (event) => {
+        const payload = { ...(event.payload as Record<string, unknown>) }
+        for (const key of ['max_tokens', 'max_completion_tokens', 'max_output_tokens']) if (typeof payload[key] === 'number') payload[key] = (payload[key] as number) + 1_000
+        return payload
+      })
+    }
   }
 
   // Linux and macOS: every shell runs in a process group the engine recorded first (`shell.ts`).
@@ -238,7 +247,7 @@ export default async function mousseExtension(pi: ExtensionAPI): Promise<void> {
         if (!spend) return undefined
         const reservation = answer.reservation
         if (!reservation || typeof reservation.cap !== 'number') throw new Error(REQUEST_REFUSED)
-        return { id: reservation.id, cap: reservation.cap, maxTokens: sizedMaxTokens(reservation.cap, { thinkingBudget }) }
+        return { id: reservation.id, cap: reservation.cap, maxTokens: sizedMaxTokens(reservation.cap, { thinkingBudget }), thinkingBudget }
       }
       throw new Error(answer?.ok === false && answer.reason === BUDGET_EXHAUSTED ? BUDGET_EXHAUSTED : REQUEST_REFUSED)
     },
