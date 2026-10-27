@@ -425,12 +425,32 @@ export function knownModelLabel(selection: { providerId: string; instanceId?: st
   return undefined
 }
 
-/** A model as a transcript names it: its listed name and the effort its id carries ("Haiku 4.5 · Low"). */
+/** Claude's model families, which Claude Code lists without the brand ("Sonnet 5.5"). */
+const CLAUDE_FAMILY = /^(?:claude[- ])?(opus|sonnet|haiku|fable)(?:[- ](\d+)(?:[-.](\d{1,2}))?(?![\d.]))?/i
+
+/**
+ * A name for a model no loaded list names: "claude-haiku-5-5" → "Claude Haiku 5.5", "sonnet" →
+ * "Claude Sonnet". A variant the id carries stays ("opus:fast" → "Claude Opus (fast)"), so two
+ * variants never read the same; a release date is dropped.
+ */
+function modelNameFromId(baseId: string): string {
+  const claude = CLAUDE_FAMILY.exec(baseId)
+  if (!claude) return baseId
+  const family = claude[1]!.charAt(0).toUpperCase() + claude[1]!.slice(1).toLowerCase()
+  const version = claude[2] ? ` ${claude[2]}${claude[3] ? `.${claude[3]}` : ''}` : ''
+  const variant = baseId.slice(claude[0].length).replace(/^-\d{8}/, '').replace(/^[-:@]/, '')
+  return `Claude ${family}${version}${variant ? ` (${variant})` : ''}`
+}
+
+/**
+ * A model as a transcript names it: its listed name with the brand, and the effort its id carries
+ * ("Claude Haiku 4.5 · Low"). Without a loaded list the name comes from the id itself.
+ */
 export function modelDisplayName(providerId: string, modelId: string): string {
+  const { baseId, effort } = parseThinkingSuffixFromModelId(modelId)
   const label = knownModelLabel({ providerId }, modelId)
-  if (!label) return modelId
-  const { effort } = parseThinkingSuffixFromModelId(modelId)
-  return effort ? `${label} · ${formatEffortLabel(effort)}` : label
+  const name = !label ? modelNameFromId(baseId) : CLAUDE_FAMILY.test(label) && !/^claude/i.test(label) ? `Claude ${label}` : label
+  return effort ? `${name} · ${formatEffortLabel(effort)}` : name
 }
 
 /** The picker entry a stored selection names: by instance first, then by its provider name. */

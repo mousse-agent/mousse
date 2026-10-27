@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { LlmModelOption } from '../../shared/settings'
 import { applyEffortToModelId, findModelFamily, formatEffortLabel, getCurrentEffort, getEffortsForModel, getModelFastToggle, parseModelVariant, parseThinkingSuffixFromModelId, resolveModelVariant } from '../../shared/modelVariants'
-import { Check, ChevronDown } from '../lib/icons'
+import { Brain, Check, ChevronDown } from '../lib/icons'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 
 /** The check column shared by the composer's single-line menus (same as Select). */
@@ -45,7 +45,7 @@ export function ComposerEffortPicker({ providerId, modelId, models, readOnly, on
   if (!efforts.length && !fast) return null
   return <div className="composer-effort-picker">
     <button ref={anchorRef} type="button" className={`composer-pill-btn${open ? ' open' : ''}`} disabled={readOnly} aria-label="Reasoning effort and speed" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}>
-      <span>{effort ? formatEffortLabel(effort) : 'Effort'}{fast?.active ? ' · Fast' : ''}</span><ChevronDown size={12} />
+      <Brain size={14} aria-hidden="true" /><span>{effort ? formatEffortLabel(effort) : 'Effort'}{fast?.active ? ' · Fast' : ''}</span><ChevronDown size={12} />
     </button>
     {open && !readOnly && <FloatingPortal><div ref={contentRef} style={style} className="composer-mode-menu composer-mode-menu-floating" role="menu" aria-label="Reasoning effort and speed">
       {efforts.length > 0 && <div className="composer-mode-menu-section" role="group" aria-label="Reasoning">

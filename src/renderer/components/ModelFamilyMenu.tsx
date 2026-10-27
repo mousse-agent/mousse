@@ -67,6 +67,8 @@ interface FlatModelEntry {
   family: ModelFamily
   brandId: string
   brandLabel: string
+  /** The provider lists models from several makers (a multi-brand API). */
+  multiBrand: boolean
   key: ModelFavoriteKey
 }
 
@@ -247,6 +249,7 @@ function ProfileModelFamilyMenu({
           family,
           brandId: family.brandId,
           brandLabel: family.brandLabel,
+          multiBrand: Boolean(provider.multiBrand),
           key: favoriteKey(provider.instanceId ?? provider.providerId, family.familyId)
         })
       }
@@ -496,6 +499,13 @@ function ProfileModelFamilyMenu({
     return <>{emptyState}</>
   }
 
+  // Rows filtered to one single-maker provider drop the logo and provider line, which would only
+  // repeat the selected rail item on every row. A multi-brand API keeps them: the logo is the maker.
+  const compactRows =
+    (railFilter !== null || railItems.length <= 1) &&
+    filteredEntries.length > 0 &&
+    filteredEntries.every((entry) => entry.listing === filteredEntries[0]!.listing && !entry.multiBrand)
+
   const renderEntry = (entry: FlatModelEntry, index: number) => {
     const selected = isEntrySelected(entry)
     const isFavorite = isEntryFavorite(entry)
@@ -522,9 +532,9 @@ function ProfileModelFamilyMenu({
       <div
         key={entry.key}
         data-model-index={index}
-        className={`model-picker-row${isActive ? ' active' : ''}${isHighlighted ? ' highlighted' : ''}${
-          selected ? ' selected' : ''
-        }`}
+        className={`model-picker-row${compactRows ? ' compact' : ''}${isActive ? ' active' : ''}${
+          isHighlighted ? ' highlighted' : ''
+        }${selected ? ' selected' : ''}`}
         onMouseEnter={(event) => {
           setHighlightIndex(index)
           openVariantPanel(event.currentTarget)
@@ -543,16 +553,20 @@ function ProfileModelFamilyMenu({
           }}
           onClick={() => selectEntry(entry)}
         >
-          <span className="model-picker-row-icon">
-            <ProviderIcon providerId={entry.brandId === 'anthropic' ? 'claude' : entry.brandId} size={16} />
-            {entry.badge ? <span className="model-picker-instance-badge" aria-hidden="true">{entry.badge}</span> : null}
-          </span>
+          {compactRows ? null : (
+            <span className="model-picker-row-icon">
+              <ProviderIcon providerId={entry.brandId === 'anthropic' ? 'claude' : entry.brandId} size={16} />
+              {entry.badge ? <span className="model-picker-instance-badge" aria-hidden="true">{entry.badge}</span> : null}
+            </span>
+          )}
           <span className="model-picker-row-text">
             <span className="model-picker-row-title">{entry.family.familyLabel}</span>
-            <span className="model-picker-row-subtitle">
-              <span className="model-picker-row-provider">{entry.providerLabel}</span>
-              {entry.providerStatus ? <span className="model-picker-row-status">{entry.providerStatus}</span> : null}
-            </span>
+            {compactRows && !entry.providerStatus ? null : (
+              <span className="model-picker-row-subtitle">
+                {compactRows ? null : <span className="model-picker-row-provider">{entry.providerLabel}</span>}
+                {entry.providerStatus ? <span className="model-picker-row-status">{entry.providerStatus}</span> : null}
+              </span>
+            )}
           </span>
           {(entry.family.contexts.length > 1) ? (
             <ChevronRight size={12} className="model-picker-row-chevron" />

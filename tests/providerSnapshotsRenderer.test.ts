@@ -117,11 +117,19 @@ describe('composer picker from snapshots', () => {
     try {
       const listings = pickerProviders(useProviderSnapshotsStore.getState().scopes.device!.snapshots, [])
       expect(getGroupedModelButtonParts('claude-subscription', 'haiku:low', listings, false)).toEqual(['Haiku 4.5'])
-      expect(modelDisplayName('claude-subscription', 'haiku:low')).toBe('Haiku 4.5 · Low')
+      expect(modelDisplayName('claude-subscription', 'haiku:low')).toBe('Claude Haiku 4.5 · Low')
+      expect(modelDisplayName('claude-subscription', 'claude-opus-4')).toBe('Claude Opus 4')
       expect(modelDisplayName('claude-subscription', 'unknown-model')).toBe('unknown-model')
     } finally {
       useProviderSnapshotsStore.setState({ scopes: {} })
     }
+    // Before any list loads, a switch marker still reads as names, not ids.
+    expect(modelDisplayName('claude-subscription', 'sonnet:low')).toBe('Claude Sonnet · Low')
+    expect(modelDisplayName('claude-subscription', 'claude-haiku-5-5')).toBe('Claude Haiku 5.5')
+    expect(modelDisplayName('claude-subscription', 'claude-sonnet-4-5-20250929:high')).toBe('Claude Sonnet 4.5 · High')
+    expect(modelDisplayName('claude-subscription', 'opus:fast')).toBe('Claude Opus (fast)')
+    expect(modelDisplayName('claude-subscription', 'opus@1m:high')).toBe('Claude Opus (1m) · High')
+    expect(modelDisplayName('codex', 'gpt-5.3-codex:xhigh')).toBe('gpt-5.3-codex · XHigh')
     expect(sendErrorLine({ code: 'model_hidden', message: 'Haiku 4.5 is hidden.' })).toBe('Haiku 4.5 is hidden.')
     expect(sendErrorLine({ code: 'internal_error', message: 'Boom' })).toBe('[internal_error] Boom')
   })

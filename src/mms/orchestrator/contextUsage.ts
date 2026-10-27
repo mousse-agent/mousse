@@ -8,7 +8,7 @@ const MESSAGE_OVERHEAD = 4
 export const CONTEXT_CATEGORY_COLORS = {
   systemPrompt: '#6b7280', mcpTools: '#f59e0b', otherTools: '#ec4899',
   conversation: '#06b6d4', thinking: '#3b82f6', toolData: '#14b8a6',
-  summary: '#f97316', draft: '#8b5cf6', cacheRead: '#22c55e'
+  summary: '#f97316', draft: '#8b5cf6', cacheRead: '#22c55e', newMessages: '#818cf8'
 } as const
 
 export function estimateTokens(text: string): number {
@@ -60,7 +60,7 @@ export function computeContextUsage(params: ComputeContextUsageParams): ContextU
     if (uncached) categories.push({ label: 'Prompt (uncached)', color: CONTEXT_CATEGORY_COLORS.conversation, tokens: uncached })
     if (cached) categories.push({ label: 'Prompt cache', color: CONTEXT_CATEGORY_COLORS.cacheRead, tokens: cached })
     const trailing = messages.slice(measuredAtMessageLength).reduce((sum, message) => sum + estimateMessageTokens(message), 0)
-    if (trailing) categories.push({ label: 'New conversation', color: CONTEXT_CATEGORY_COLORS.conversation, tokens: trailing })
+    if (trailing) categories.push({ label: 'New conversation', color: CONTEXT_CATEGORY_COLORS.newMessages, tokens: trailing })
   } else {
     const system = estimateTokens(systemPromptText)
     if (system) categories.push({ label: 'System prompt & skills', color: CONTEXT_CATEGORY_COLORS.systemPrompt, tokens: system })

@@ -1,20 +1,15 @@
 import { forwardRef, useEffect, useRef } from 'react'
-import { Pencil, X } from '../lib/icons'
+import { Settings } from '../lib/icons'
 import { useAppStore } from '../stores/appStore'
+import { modelDisplayName } from '../lib/providerSnapshots'
 import type { ContextUsageSnapshot } from '../../shared/types'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 
 function formatTokenCount(tokens: number): string {
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
   if (tokens >= 1000) {
     const k = tokens / 1000
     return k >= 100 ? `${Math.round(k)}K` : `${k.toFixed(1).replace(/\.0$/, '')}K`
-  }
-  return String(tokens)
-}
-
-function formatTotalTokens(tokens: number): string {
-  if (tokens >= 1000) {
-    return `${(tokens / 1000).toFixed(1)}K`
   }
   return String(tokens)
 }
@@ -23,13 +18,20 @@ interface ContextUsagePopoverProps {
   open: boolean
   onClose: () => void
   usage: ContextUsageSnapshot
+  /** The selected provider, to name the measured model as the picker does. */
+  providerId: string
   anchorRef: React.RefObject<HTMLElement | null>
 }
 
+/**
+ * How full the model's context is: the share as a number and a bar against capacity, what fills
+ * it, and a link to the compaction settings.
+ */
 export function ContextUsagePopover({
   open,
   onClose,
   usage,
+  providerId,
   anchorRef
 }: ContextUsagePopoverProps) {
   const popoverRef = useRef<HTMLDivElement>(null)
@@ -71,6 +73,16 @@ export function ContextUsagePopover({
 
   const capacityKnown = Number.isFinite(usage.limit) && usage.limit > 0
   const segmentTotal = usage.categories.reduce((sum, category) => sum + category.tokens, 0)
+  // Against capacity the bar shows how full the context is; without one, only what fills it.
+  const barScale = capacityKnown ? Math.max(usage.limit, segmentTotal) : segmentTotal
+  const percentLabel = !capacityKnown ? '—' : usage.percent === 0 && usage.used > 0 ? '<1%' : `${usage.percent}%`
+  const approximate = usage.source === 'measured' ? '' : '~'
+  const openSettings = () => {
+    onClose()
+    window.location.hash = 'settings-context-compaction'
+    useAppStore.getState().setSettingsOpen(true)
+    window.dispatchEvent(new CustomEvent('mousse:settings-section', { detail: 'context' }))
+  }
 
   return (
     <FloatingPortal>
@@ -78,47 +90,32 @@ export function ContextUsagePopover({
         className="context-usage-popover context-usage-popover-floating"
         ref={popoverRef}
         role="dialog"
-        aria-label="Context Usage"
+        aria-label="Context usage"
         style={floatingStyle}
       >
         <div className="context-usage-header">
-          <span className="context-usage-title">Context Usage</span>
-          <button type="button" className="context-usage-close" onClick={onClose} aria-label="Close">
-            <X size={14} strokeWidth={2} />
+          <span className="context-usage-title">Context</span>
+          {usage.modelName && (
+            <span className="context-usage-model" title={usage.modelName}>{modelDisplayName(providerId, usage.modelName)}</span>
+          )}
+          <button
+            type="button"
+            className="context-usage-settings"
+            aria-label="Context compaction settings"
+            title="Compaction settings. Context compacts at your threshold, sometimes sooner to leave room for the reply."
+            onClick={openSettings}
+          >
+            <Settings size={14} />
           </button>
         </div>
 
-        {usage.modelName && (
-          <div className="context-usage-model">{usage.modelName}</div>
-        )}
-
         <div className="context-usage-summary">
-          <span className="context-usage-percent">{capacityKnown ? `${usage.percent}% of model context` : 'Model capacity not reported yet'}</span>
+          <span className="context-usage-percent">{percentLabel}</span>
           <span className="context-usage-total">
-            {usage.source === 'measured' ? '' : '~'}
-            {formatTotalTokens(usage.used)} / {capacityKnown ? formatTokenCount(usage.limit) : 'Unknown'}
-            <button
-              type="button"
-              className="context-usage-close"
-              style={{ display: 'inline-flex', verticalAlign: 'middle', marginLeft: 4 }}
-              aria-label="Edit context compaction settings"
-              title="Edit context compaction settings"
-              onClick={() => {
-                onClose()
-                window.location.hash = 'settings-context-compaction'
-                useAppStore.getState().setSettingsOpen(true)
-                window.dispatchEvent(new CustomEvent('mousse:settings-section', { detail: 'context' }))
-              }}
-            ><Pencil size={12} /></button> Tokens
+            {approximate}{formatTokenCount(usage.used)}
+            {capacityKnown ? ` of ${formatTokenCount(usage.limit)} tokens` : ' tokens · capacity not reported yet'}
           </span>
         </div>
-        <div className="context-usage-model">Current prompt / model capacity. Automatic compaction uses your configured threshold and may begin sooner to preserve response headroom.</div>
-        {usage.processedTokens !== undefined && <div className="context-usage-model">Last response processed: {formatTotalTokens(usage.processedTokens)} tokens across model calls</div>}
-        {usage.source === 'legacy-estimated' && (
-          <div className="context-usage-model">
-            Legacy estimate: older tool calls, results, and reasoning were not recoverable.
-          </div>
-        )}
 
         <div className="context-usage-bar" aria-hidden="true">
           {usage.categories.map((category) => (
@@ -126,7 +123,7 @@ export function ContextUsagePopover({
               key={category.label}
               className="context-usage-bar-segment"
               style={{
-                flex: segmentTotal > 0 ? category.tokens / segmentTotal : 0,
+                width: barScale > 0 ? `${(category.tokens / barScale) * 100}%` : 0,
                 backgroundColor: category.color
               }}
             />
@@ -136,14 +133,23 @@ export function ContextUsagePopover({
         <ul className="context-usage-breakdown">
           {usage.categories.map((category) => (
             <li key={category.label} className="context-usage-item">
-              <span className="context-usage-item-label">
-                <span className="context-usage-swatch" style={{ backgroundColor: category.color }} />
-                {category.label}
-              </span>
+              <span className="context-usage-swatch" style={{ backgroundColor: category.color }} />
+              <span className="context-usage-item-label">{category.label}</span>
               <span className="context-usage-item-value">{formatTokenCount(category.tokens)}</span>
             </li>
           ))}
         </ul>
+
+        {(usage.processedTokens !== undefined || usage.source === 'legacy-estimated') && (
+          <div className="context-usage-notes">
+            {usage.processedTokens !== undefined && (
+              <p>Last reply read {formatTokenCount(usage.processedTokens)} tokens across model calls.</p>
+            )}
+            {usage.source === 'legacy-estimated' && (
+              <p>Estimate: older tool calls, results and reasoning could not be recovered.</p>
+            )}
+          </div>
+        )}
       </div>
     </FloatingPortal>
   )

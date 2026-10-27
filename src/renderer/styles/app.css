@@ -1697,10 +1697,11 @@ html.platform-darwin .titlebar-left {
   max-width: 100%;
 }
 
+/* Sized to the model button, so the reasoning picker sits right beside it. */
 .composer-model-picker {
   position: relative;
   min-width: 0;
-  flex: 1;
+  flex: 0 1 auto;
 }
 
 .composer-model-btn.open {
@@ -2052,6 +2053,15 @@ html[data-theme='high-contrast'] .model-picker-row.selected {
 .model-picker-row-status::before {
   content: '·';
   margin-right: 5px;
+}
+
+/* One provider's models: name only, so rows are shorter and the status needs no separator. */
+.model-picker-row.compact .model-picker-row-main {
+  padding-block: 7px;
+}
+
+.model-picker-row.compact .model-picker-row-status::before {
+  content: none;
 }
 
 /* Shortcut hints and stars are quiet chrome: faint, no fill, no colour. */
@@ -2624,19 +2634,21 @@ html[data-theme='high-contrast'] .model-picker-row.selected {
   50% { opacity: 0.65; }
 }
 
+/* Matches the composer's menus (model, mode, reasoning): raised surface, menu radius and drop. */
 .context-usage-popover {
   position: absolute;
-  bottom: calc(100% + 10px);
+  bottom: calc(100% + 8px);
   right: 0;
   z-index: var(--z-floating, 50000);
-  width: min(320px, calc(100vw - 48px));
-  padding: 14px 16px;
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.2);
-  border-radius: 12px;
-  background: rgba(var(--surface-strong-rgb), 0.95);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
-  box-shadow: 0 12px 32px rgba(var(--surface-base-rgb), 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(280px, calc(100vw - 48px));
+  padding: 10px 12px 12px;
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-menu-radius);
+  background: var(--ui-raised);
+  box-shadow: var(--ui-specular), var(--ui-menu-drop);
 }
 
 .context-usage-popover-floating {
@@ -2648,100 +2660,135 @@ html[data-theme='high-contrast'] .model-picker-row.selected {
 .context-usage-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: 10px;
+  gap: 8px;
+  min-width: 0;
 }
 
 .context-usage-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.context-usage-close {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 4px;
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 500;
   color: var(--text-secondary);
-  transition: background 0.15s, color 0.15s;
-}
-
-.context-usage-close:hover {
-  background: rgba(var(--accent-rgb), 0.16);
-  color: var(--text-primary);
 }
 
 .context-usage-model {
-  margin-bottom: 8px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
   font-size: 11px;
-  color: var(--text-secondary);
+  color: var(--ui-faint);
+}
+
+.context-usage-settings {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  margin: -3px -4px -3px 0;
+  border-radius: var(--ui-menu-row-radius);
+  color: var(--ui-faint);
+  transition: background 0.12s, color 0.12s;
+}
+
+.context-usage-settings:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
 }
 
 .context-usage-summary {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
-  margin-bottom: 10px;
-  font-size: 12px;
+  gap: 8px;
 }
 
 .context-usage-percent {
+  font-size: 22px;
   font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.01em;
   color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
 }
 
 .context-usage-total {
+  font-size: 12px;
   color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
 }
 
+/* Filled against the model's capacity; the empty track is the room left. */
 .context-usage-bar {
   display: flex;
-  height: 6px;
-  border-radius: 3px;
+  gap: 2px;
+  height: 8px;
+  border-radius: 4px;
   overflow: hidden;
-  margin-bottom: 12px;
-  background: rgba(var(--surface-soft-rgb), 0.6);
+  background: var(--ui-hover);
 }
 
+/* Segments shrink to fit when the gaps and minimum widths would overflow a full bar. */
 .context-usage-bar-segment {
-  min-width: 2px;
-  transition: flex 0.2s;
+  flex-shrink: 1;
+  min-width: 3px;
+  border-radius: 2px;
+  transition: width 0.2s;
 }
 
 .context-usage-breakdown {
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
 }
 
 .context-usage-item {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 8px;
   font-size: 12px;
 }
 
-.context-usage-item-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--text-secondary);
+.context-usage-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
 }
 
-.context-usage-swatch {
-  width: 10px;
-  height: 10px;
-  border-radius: 2px;
-  flex-shrink: 0;
+.context-usage-item-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
 }
 
 .context-usage-item-value {
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
+}
+
+.context-usage-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--ui-line);
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--ui-faint);
+}
+
+.context-usage-notes p {
+  margin: 0;
 }
 
 .message {
