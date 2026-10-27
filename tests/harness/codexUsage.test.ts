@@ -57,7 +57,7 @@ describe("the user's own Codex reports its plan limits", () => {
     const home = mkdtempSync(join(tmpdir(), 'mousse-codex-usage-'))
     homes.push(home)
     const context: DriverContext = {
-      instanceId: 'codex', builtIn: true, config: { home: 'default' },
+      instanceId: 'codex', builtIn: false, config: { home: 'default' },
       env: instanceEnv({ instanceId: 'codex', driver: 'codex', configRevision: 0, home: undefined, searchPath: [], base: {} }),
       profileHome: home, installationHome: home, stateDir: join(home, 'harness', 'codex'), questions: new UserQuestionService(), findBinary: () => undefined, changed: () => {}
     }
