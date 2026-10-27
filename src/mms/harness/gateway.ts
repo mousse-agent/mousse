@@ -1018,7 +1018,6 @@ export class Harness implements HarnessGateway {
       ...(input.effort ? { effort: input.effort } : {}),
       policy,
       ...(input.policy ? { policyDigest: policyDigest(policy) } : {}),
-@@POLICY@@
       caps: { ...caps },
       factsRevision: record ? this.facts.revision(record.instanceId) : 0,
       ...(binary ? { binary: { ...binary } } : {})
