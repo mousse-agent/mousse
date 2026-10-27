@@ -1716,7 +1716,8 @@ export class ClaudeSubscriptionProviderService {
       } finally {
         input.onMetrics?.(report)
       }
-      frames.closeTools()
+      // A turn that was stopped or failed stopped its open calls; one that settled never got their results.
+      frames.closeTools(success && input.signal?.aborted !== true ? 'no_result' : 'stop')
     }
   }
   /** What a new process would start with besides the turn's model and folder: launch settings and integrations. */

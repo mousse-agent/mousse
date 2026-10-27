@@ -1105,6 +1105,10 @@ export class LiveSession<Turn = unknown> {
     }
     if (frame.subtype === 'task_notification' && typeof frame.task_id === 'string')
       this.routeNotification(frame.task_id, typeof frame.summary === 'string' ? frame.summary : '', typeof frame.status === 'string' ? frame.status : '')
+    // A task's start and end name the call that spawned it: the run that owns the frames shows them on its row.
+    // With no owner the frame is dropped (the call's row was closed when its turn settled).
+    if ((frame.subtype === 'task_started' || frame.subtype === 'task_notification') && typeof frame.tool_use_id === 'string')
+      this.notificationOwner()?.deliver(message)
   }
 
   /**
