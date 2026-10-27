@@ -205,6 +205,12 @@ class PiTurn {
   /** `running` until `agent_end`; `ending` after it (a steer then waits); `retrying` during a backoff; `stopping` after Stop. */
   phase: 'running' | 'ending' | 'retrying' | 'stopping' = 'running'
   pendingError: string | undefined
+  /**
+   * Mousse refused a request or tool call of this turn (one of the fixed request-path texts). It
+   * decides the turn's end whatever Pi reports after it: an automatic compaction whose summary was
+   * refused ends only in a `compaction_end` error, never in a failed assistant message.
+   */
+  refusal: string | undefined
   retryExhaustedError: AppError | undefined
   /** Pi's retry limit, as its last `auto_retry_start` stated it. */
   maxRetries = 0
@@ -684,9 +690,14 @@ export class PiRpcEngine implements ProviderAdapter {
    */
   private admitRequest(thread: PiThreadProcess): PiRequestResponse {
     const turn = thread.turn
-    if (!turn || turn.phase === 'stopping' || !thread.alive) return { ok: false, reason: REQUEST_REFUSED }
+    if (!turn || turn.phase === 'stopping' || !thread.alive) {
+      if (turn && turn.phase !== 'stopping') turn.refusal ??= REQUEST_REFUSED
+      return { ok: false, reason: REQUEST_REFUSED }
+    }
     const decision = turn.host.budget?.request() ?? { ok: true }
-    return decision.ok ? { ok: true } : { ok: false, reason: BUDGET_EXHAUSTED }
+    if (decision.ok) return { ok: true }
+    turn.refusal ??= BUDGET_EXHAUSTED
+    return { ok: false, reason: BUDGET_EXHAUSTED }
   }
 
   /**
@@ -738,6 +749,7 @@ export class PiRpcEngine implements ProviderAdapter {
     const counted = turn.host.budget?.toolCall() ?? { ok: true }
     if (!counted.ok) {
       turn.episode.ended(request.toolCallId)
+      turn.refusal ??= BUDGET_EXHAUSTED
       return { allow: false, reason: GATE_REFUSALS.budget }
     }
     return rewritten ? { allow: true, input: rewritten } : { allow: true }
@@ -1177,14 +1189,21 @@ export class PiRpcEngine implements ProviderAdapter {
       case 'compaction_start':
         sink.compaction('start')
         return
-      case 'compaction_end':
+      case 'compaction_end': {
+        // A summary request Mousse refused (or could not be asked about) fails the compaction only.
+        const failure = typeof event.errorMessage === 'string' ? event.errorMessage : ''
+        const refusal = [BUDGET_EXHAUSTED, REQUEST_REFUSED, GATE_UNAVAILABLE].find((text) => failure.includes(text))
+        if (refusal) turn.refusal ??= refusal
         sink.compaction(event.result ? 'complete' : 'unchanged')
         return
+      }
       case 'agent_end':
         if (turn.phase === 'running') turn.phase = 'ending'
         return
       case 'agent_settled':
         if (turn.phase === 'stopping') return turn.settled()
+        // Mousse's own record decides: a refused step ends the turn, whatever Pi made of it.
+        if (turn.refusal) return turn.failed(this.requestError(turn.refusal, turn))
         if (turn.pendingError && this.mousseRefusal(turn.pendingError)) return turn.failed(this.requestError(turn.pendingError, turn))
         if (turn.retryExhaustedError) return turn.failed(turn.retryExhaustedError)
         if (turn.pendingError) return turn.failed(this.requestError(turn.pendingError, turn))

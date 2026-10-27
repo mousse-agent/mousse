@@ -18,12 +18,12 @@ const setup = (options: SetupOptions = {}) => setupEngine(cleanups, options)
 
 /** A run's own counters, with every charge recorded (one per `/pi/request` or allowed tool call). */
 function counted(limits: CountLimits) {
-  const counters = new RunCounters(limits)
+  const counters = new RunCounters()
   const charges: string[] = []
   const scope: CounterScope = {
-    charge: (kind, key) => {
-      const result = counters.charge(kind, key)
-      charges.push(`${kind}:${result}`)
+    charge: (kind, limit) => {
+      const result = counters.charge(kind, limit)
+      charges.push(`${kind}:${result.ok ? 'ok' : 'refused'}`)
       return result
     }
   }
@@ -51,6 +51,29 @@ describe('the request gate in the real Pi child (Pi RPC engine)', () => {
     await expect(engine.startTurn(again.input, again.sink, again.ctl, again.host)).rejects.toMatchObject({ code: 'budget_exhausted' })
     expect(recorder.requests).toHaveLength(1)
     expect(recorder.connections()).toBe(connections)
+  }, 90_000)
+
+  it('maxTurns 1 with a reply large enough for an automatic compaction: the summary request is refused, and the turn ends budget_exhausted with Mousse’s numbers', async () => {
+    const { engine, recorder, project } = await setup()
+    recorder.respond((_request, res) => {
+      // Usage near the model's window: Pi compacts after the reply, which needs a second request.
+      const chunks = [
+        { id: 'c', object: 'chat.completion.chunk', choices: [{ index: 0, delta: { role: 'assistant', content: 'large answer '.repeat(10_000) } }] },
+        { id: 'c', object: 'chat.completion.chunk', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 120_000, completion_tokens: 30_000, total_tokens: 150_000 } }
+      ]
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.end(`${chunks.map((chunk) => `data: ${JSON.stringify(chunk)}
+
+`).join('')}data: [DONE]
+
+`)
+    })
+    const { budget, requests } = counted({ maxTurns: 1 })
+    const turn = harness(project, {}, { budget })
+    const error = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host).catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ code: 'budget_exhausted', details: { limit: { kind: 'turns', limit: 1, actual: 1 } } })
+    expect(recorder.requests).toHaveLength(1)
+    expect(requests()).toBe(2)
   }, 90_000)
 
   it('maxTurns 0: nothing is sent, and the refusal is not retried even with Pi’s retry on', async () => {
