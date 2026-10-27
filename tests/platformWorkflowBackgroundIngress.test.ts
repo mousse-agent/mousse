@@ -292,6 +292,8 @@ describe('background workflow ingress', () => {
       expect(retried.text).toMatch(/succeeded/i)
       expect((await alice.platform.workflowRuns.runtime.list({ profileId: f.alice.id })).filter((run) => run.runId !== aliceRuns[0].runId)).toHaveLength(1)
 
+      // A plain prompt is a model turn on the profile's default model (there is no bare pi route).
+      alice.settings.set({ provider: { llmProvider: 'openai', model: 'fixture' } })
       aliceChannel.sent.length = 0
       await aliceChannel.inbound('just a prompt', 'msg-plain')
       expect(aliceChannel.sent.at(-1)).toBe('plain-ok')
