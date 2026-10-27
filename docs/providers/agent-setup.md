@@ -123,6 +123,41 @@ sign-in check, chat) runs `grok --permission-mode default agent --no-leader stdi
   entry (Move…, optionally with the same API key). An xAI account sign-in is not carried over: sign
   in to Grok on its entry.
 
+## Claude Code, a second account
+
+| OS | Sign-in | State |
+|---|---|---|
+| Windows x64 | `claude auth login` in a pseudo-terminal, in the instance's own home | tested with a fake CLI and a fake terminal; real sign-in not run (manual smoke pending) |
+| Windows arm64 | no `node-pty` prebuild: the page shows the command to copy | untested |
+| macOS arm64, Linux x64, Linux arm64 | as Windows x64 | untested: no machine in this PR's runs |
+
+- An added Claude Code entry with its own home runs every process (status, chats, sign-in, sign-out)
+  with `CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR` set to that home (the secure-storage
+  variable picks the credential file and the Keychain or Credential Manager item, and wins over the
+  config dir) and `ANTHROPIC_CONFIG_DIR` set to a folder inside it, so the user's shared Anthropic
+  profile is never read. `HOME` is not changed. Nothing in the `ANTHROPIC_*`, `CLAUDE_*`, `AWS_*`,
+  `GOOGLE_*`, `GCLOUD_*`, `CLOUDSDK_*` or `AZURE_*` families is inherited from Mousse's environment
+  (no key, token, profile or cloud route of the user's), except `CLAUDE_CODE_GIT_BASH_PATH`.
+  Variables set on the entry apply on top, except those that choose where the sign-in lives or which
+  credential or route is used: Settings refuses them, a stored one is dropped at launch, and the
+  entry says which ones are not used. The variable names were checked against the Claude Code
+  2.1.291 binary's text.
+- **Sign in** runs `claude auth login` there, starting in the home folder, shows the link (only an
+  OAuth authorize address counts), and offers a field for the code Claude may ask for, again after a
+  code Claude refuses. It counts only once `claude auth status` in that home says signed in; a
+  sign-in that is not finished in ten minutes is ended. A cancel after Claude printed its success
+  lets it finish writing its files, then takes the account up. Nothing the terminal prints is
+  logged or stored. The command to copy stays beside the button.
+- **Sign out** runs `claude auth logout` in that home, and counts only when `claude auth status` there
+  then says signed out. A command that cannot start, fails or changes nothing is an error. The user's
+  own Claude entry keeps the terminal sign-in and is never signed out by Mousse.
+- Sign-in and sign-out refuse a home that is, or sits under, a link or junction: they would act on
+  another account's folder.
+- **Keychain naming.** Verified for Claude Code 2.1.291: the item name includes a hash of the
+  secure-storage folder, so each home has its own. Not verified for the lowest tested version
+  (2.0.0); check a second sign-in on macOS does not replace the user's own before relying on it.
+- Two entries signed in to the same account say so ("Same account as …").
+
 ## Notes
 
 - A Custom command runs without a shell. A name without a path is looked up on PATH; a `.cmd`
