@@ -243,3 +243,77 @@
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.04em;
 }
+
+/* Remote machine over SSH: host key, plan, setup steps and commands. */
+.devices-host-key {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+
+.devices-fingerprint,
+.devices-command {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-8);
+  font-size: var(--settings-fs-small);
+}
+
+.devices-command .devices-code {
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+}
+
+.devices-check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  font-size: var(--settings-fs-small);
+}
+
+.devices-steps,
+.devices-plan {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--settings-fs-small);
+}
+
+.devices-steps li {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-12);
+  padding: var(--space-4) 0;
+}
+
+.devices-plan {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+
+.devices-plan li {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* Add device: one choice per way to add. */
+.devices-choice {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  width: 100%;
+  padding: var(--space-8) var(--space-12);
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-control-radius);
+  font-size: var(--settings-fs-small);
+  color: var(--text-primary);
+  text-align: left;
+}
+
+.devices-choice:hover {
+  background: var(--ui-hover);
+}

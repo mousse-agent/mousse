@@ -1,5 +1,5 @@
 import type { NetStatus, NodeCapability, NodeId } from '../../shared/net'
-import type { NetAddonRecords, PlusStatus } from '../../shared/net/local'
+import type { NetAddonRecords, PlusStatus, SshRecordView } from '../../shared/net/local'
 import type { PlatformRequestMethod } from '../../shared/platform'
 import type { TransportManifest } from '../../mms/net/contracts'
 import { formatAgo } from './formatAgo'
@@ -37,6 +37,8 @@ export interface Device {
   lastSeenAt?: number
   /** True for a device on an older version, including one too old to report its version. */
   olderThanThis?: boolean
+  /** A route over SSH this device advertises and this computer has not approved yet. */
+  sshOffer?: { endpoint: string }
 }
 
 const ROUTE_LABELS: Record<string, string> = {
@@ -165,6 +167,11 @@ export function updateInstructions(device: Device, target: string): UpdateInstru
   }
 }
 
+/** The remote machine record that set up or approved a device, if any. */
+export function sshRecordFor(device: Device, records: SshRecordView[]): SshRecordView | undefined {
+  return records.find((record) => record.node === device.node)
+}
+
 /** Devices shown under "My devices": a revoked device is gone from this user's devices. */
 export function listedDevices(devices: Device[]): Device[] {
   return devices.filter((device) => !device.revoked)
@@ -215,5 +222,7 @@ export async function readDevices(withMousseId: boolean) {
     current.enabled && current.self && current.keystore === 'unlocked'
       ? (await request<{ nodes: Device[] }>('bridge.nodes', {})).nodes
       : []
-  return { current, hosted, addons, nodes }
+  // Remote machines set up over SSH; an older daemon without the methods has none.
+  const ssh = await request<{ records: SshRecordView[] }>('net.ssh.list', {}).then((value) => value?.records ?? [], () => [])
+  return { current, hosted, addons, nodes, ssh }
 }
