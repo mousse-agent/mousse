@@ -20,7 +20,8 @@ import {
   useGitStatus,
   type GitStatusView
 } from '../../stores/gitStatusStore'
-import { createPullRequestForBranch, useGitPullRequestStore, usePullRequest } from '../../stores/pullRequestStore'
+import { createPullRequestForBranch, useGitPullRequestStore, useThreadPullRequest } from '../../stores/pullRequestStore'
+import type { PullRequestDetail, ThreadPullRequestLink } from '../../../shared/pullRequests'
 import { gitScopeFor } from '../../lib/activeProject'
 import type { GitCommit, GitPullRequestLookup, GitScope } from '../../../shared/types'
 import { Switch } from '../settings/SettingsRow'
@@ -70,6 +71,7 @@ import {
   gitErrorMessage,
   localBranchNames,
   prefillAmendDraft,
+  pullRequestReadThreadId,
   pullRequestRow,
   pullRequestScope,
   pushButtonModel,
@@ -710,6 +712,10 @@ function PushButton({ model, busy, lock, onPush }: PushButtonProps) {
   )
 }
 
+function openWeb(url: string) {
+  window.open(url, '_blank', 'noopener,noreferrer')
+}
+
 function PullRequestLink({ row }: { row: PullRequestFoundRow }) {
   return (
     <button
@@ -717,7 +723,7 @@ function PullRequestLink({ row }: { row: PullRequestFoundRow }) {
       className="side-card-git-pr"
       title={row.tooltip}
       aria-label={row.ariaLabel}
-      onClick={() => window.open(row.url, '_blank', 'noopener,noreferrer')}
+      onClick={() => openWeb(row.url)}
     >
       {row.checks === 'passing' && <Check className="side-card-git-pr-check" data-checks="passing" size={13} strokeWidth={2} aria-hidden="true" />}
       {row.checks === 'failing' && <X className="side-card-git-pr-check" data-checks="failing" size={13} strokeWidth={2} aria-hidden="true" />}
@@ -726,6 +732,63 @@ function PullRequestLink({ row }: { row: PullRequestFoundRow }) {
       <span className="side-card-git-pr-title">{row.title}</span>
       {row.suffix && <span className="side-card-git-pr-suffix">{row.suffix}</span>}
     </button>
+  )
+}
+
+/** The checks of a pull request, collapsed unless one failed or waits for approval, each with its state and a link to it. */
+function PullRequestChecks({ row }: { row: PullRequestFoundRow }) {
+  const [open, setOpen] = useState(() => row.checkRows.some((check) => check.tone === 'failing' || check.tone === 'waiting'))
+  if (row.checkRows.length === 0) return null
+  return (
+    <div className="side-card-git-pr-checks">
+      <button
+        type="button"
+        className="side-card-git-pr-checks-toggle"
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+      >
+        <span className="side-card-git-pr-checks-label">{row.checksLabel ?? `${row.checkRows.length} checks`}</span>
+        <span className="side-card-git-pr-checks-count">{row.checkRows.length}</span>
+      </button>
+      {open && (
+        <ul className="side-card-git-pr-check-list" aria-label="Checks">
+          {row.checkRows.map((check, index) => (
+            <li key={`${check.name}\u0000${index}`} className="side-card-git-pr-check-row" data-tone={check.tone}>
+              <span className="side-card-git-pr-check-dot" aria-hidden="true" />
+              <span className="side-card-git-pr-check-name" title={check.workflow ? `${check.workflow} / ${check.name}` : check.name}>{check.name}</span>
+              {check.url ? (
+                <button type="button" className="side-card-git-pr-check-state" title="Open this check" onClick={() => openWeb(check.url!)}>
+                  {check.label}
+                </button>
+              ) : (
+                <span className="side-card-git-pr-check-state">{check.label}</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+/** Below the pull request row: the reviewers' verdict, comments, the checks, a note for linked threads, and why the pull request could not be read. */
+function PullRequestDetailLines({ row, error }: { row: PullRequestFoundRow | null; error: string | null }) {
+  return (
+    <>
+      {row && (row.review || row.commentsLabel) && (
+        <div className="side-card-git-pr-review">
+          {row.review && <span className="side-card-git-pr-verdict" data-tone={row.review.tone}>{row.review.label}</span>}
+          {row.commentsLabel && <span className="side-card-git-pr-comments">{row.commentsLabel}</span>}
+        </div>
+      )}
+      {row && <PullRequestChecks key={row.number} row={row} />}
+      {row?.hint && <p className="side-card-git-pr-hint">{row.hint}</p>}
+      {error && (
+        <p className="side-card-git-pr-error" role="alert" title={error}>
+          {error}
+        </p>
+      )}
+    </>
   )
 }
 
@@ -741,6 +804,12 @@ interface GitSectionViewProps {
   git: GitStatusView
   /** The current branch's pull request lookup; null until it has loaded or when there is no branch. */
   pullRequest?: GitPullRequestLookup | null
+  /** The same pull request read in full: reviewers' verdict, comments and each check. */
+  pullRequestDetail?: PullRequestDetail | null
+  /** The host's message when that read failed. */
+  pullRequestError?: string | null
+  /** The pull request the thread is linked to, if any. */
+  pullRequestLink?: ThreadPullRequestLink | null
   /** When set, the section collapses to this one muted line. */
   collapsedLabel: string | null
   /** The folder is not a repository, so the collapsed section offers to make it one. */
@@ -750,7 +819,21 @@ interface GitSectionViewProps {
 }
 
 /** The section's markup, given its data. `GitSection` supplies the data. */
-export function GitSectionView({ threadId, ownThreadId = null, projectId, workspaceThreadId = null, path, git, pullRequest = null, collapsedLabel, canInitialize = false, now }: GitSectionViewProps) {
+export function GitSectionView({
+  threadId,
+  ownThreadId = null,
+  projectId,
+  workspaceThreadId = null,
+  path,
+  git,
+  pullRequest = null,
+  pullRequestDetail = null,
+  pullRequestError = null,
+  pullRequestLink = null,
+  collapsedLabel,
+  canInitialize = false,
+  now
+}: GitSectionViewProps) {
   const scope = useMemo(() => gitScopeFor({ projectId, workspaceThreadId }), [projectId, workspaceThreadId])
   const [running, setRunning] = useState<GitAction | null>(null)
   const rowRef = useRef<HTMLDivElement>(null)
@@ -841,7 +924,7 @@ export function GitSectionView({ threadId, ownThreadId = null, projectId, worksp
   const fileCount = changedFileCount(git.status)
   const pushButton = pushButtonModel(git.status, git.commits.length, scope)
   const availability = gitActionAvailability(git.status, pullRequest, git.commits.length, scope)
-  const prRow = pullRequestRow(pullRequest, git.status)
+  const prRow = pullRequestRow(pullRequest, git.status, pullRequestDetail, pullRequestLink, workspaceThreadId !== null)
   const createLock = gitActionLock(running, 'pullRequest')
   const branchActions = branchActionState(scope.workspaceThreadId)
 
@@ -885,6 +968,7 @@ export function GitSectionView({ threadId, ownThreadId = null, projectId, worksp
         anchorRef={rowRef}
       />
       {prRow?.kind === 'found' && <PullRequestLink row={prRow} />}
+      <PullRequestDetailLines row={prRow?.kind === 'found' ? prRow : null} error={pullRequestError} />
       {prRow?.kind === 'create' && (
         <button
           type="button"
@@ -949,18 +1033,21 @@ export function GitSection({ threadId }: SideCardSectionContext) {
     status: git.status
   }
   const collapsedLabel = gitCollapsedLabel(collapse)
-  // The daemon runs the lookup in the thread's own folder, so a worktree thread asks about its worktree. A new chat
-  // that follows the composer's project pick has no folder of its own yet: it asks about the project.
+  // A thread's own conversation drafts and receives its pull request. A new chat that follows the composer's
+  // project pick has no thread of its own yet; it asks about the project.
   const threadProjectId = useAppStore((state) => state.threads.find((thread) => thread.id === threadId)?.projectId ?? null)
   const ownThreadId = threadId && projectId !== null && threadProjectId === projectId ? threadId : null
-  // No branch, or not a repository: nothing to look up. Only a pushed branch is looked up again on focus.
-  const pullRequest = usePullRequest(
+  const folderThreadId = pullRequestReadThreadId(ownThreadId, location.workspaceThreadId)
+  const link = useAppStore((state) => (ownThreadId ? state.threads.find((thread) => thread.id === ownThreadId)?.pullRequest ?? null : null))
+  // No branch, or not a repository: nothing to look up. A branch without an upstream is looked up on focus only once it has a pull request.
+  const { lookup: pullRequest, detail, detailError } = useThreadPullRequest({
     path,
-    git.status?.isRepo ? git.status.branch : null,
+    branch: git.status?.isRepo ? git.status.branch : null,
     projectId,
-    ownThreadId,
-    git.status?.tracking === 'tracked'
-  )
+    threadId: folderThreadId,
+    tracked: git.status?.tracking === 'tracked',
+    link
+  })
   return (
     <GitSectionView
       threadId={threadId}
@@ -970,6 +1057,9 @@ export function GitSection({ threadId }: SideCardSectionContext) {
       path={path}
       git={git}
       pullRequest={pullRequest}
+      pullRequestDetail={detail}
+      pullRequestError={detailError}
+      pullRequestLink={link}
       collapsedLabel={collapsedLabel}
       canInitialize={canInitRepository(collapse)}
     />

@@ -1,0 +1,25 @@
+{
+  "number": 12,
+  "title": "Fix typo from a fork",
+  "url": "https://github.com/acme/app/pull/12",
+  "state": "OPEN",
+  "isDraft": false,
+  "body": "",
+  "author": { "login": "forker" },
+  "baseRefName": "main",
+  "headRefName": "fix-typo",
+  "headRefOid": "fedcba9876543210fedcba9876543210fedcba98",
+  "headRepository": { "id": "R_2", "name": "app" },
+  "headRepositoryOwner": { "id": "U_2", "login": "forker" },
+  "isCrossRepository": true,
+  "reviewDecision": "REVIEW_REQUIRED",
+  "updatedAt": "2026-10-26T12:00:00Z",
+  "mergedAt": null,
+  "closedAt": null,
+  "reviews": [],
+  "comments": [],
+  "statusCheckRollup": [
+    { "__typename": "CheckRun", "name": "build", "workflowName": "CI", "status": "COMPLETED", "conclusion": "ACTION_REQUIRED", "detailsUrl": "https://github.com/acme/app/actions/runs/9/job/1" },
+    { "__typename": "CheckRun", "name": "test", "workflowName": "CI", "status": "COMPLETED", "conclusion": "SUCCESS", "detailsUrl": "https://github.com/acme/app/actions/runs/9/job/2" }
+  ]
+}

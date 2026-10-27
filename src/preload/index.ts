@@ -68,6 +68,7 @@ import type {
 import type {
   CreatePullRequestResult,
   PullRequestBaseBranches,
+  PullRequestDetail,
   PullRequestDraft,
   PullRequestFormInput,
   PullRequestRef,
@@ -496,6 +497,8 @@ const api = {
   pullRequests: {
     get: (ref: PullRequestRef, branch: string, force?: boolean): Promise<GitPullRequestLookup> =>
       ipcRenderer.invoke('pullRequests:get', ref, branch, force),
+    detail: (ref: PullRequestRef, number: number, force?: boolean): Promise<PullRequestDetail> =>
+      ipcRenderer.invoke('pullRequests:detail', ref, number, force),
     draft: (scope: PullRequestScope, base?: string): Promise<PullRequestDraft> =>
       ipcRenderer.invoke('pullRequests:draft', scope, base),
     create: (scope: PullRequestScope, input: PullRequestFormInput): Promise<CreatePullRequestResult> =>

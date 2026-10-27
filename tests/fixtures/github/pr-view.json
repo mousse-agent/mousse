@@ -1,0 +1,82 @@
+{
+  "number": 7,
+  "title": "Add the retry button",
+  "url": "https://github.com/acme/app/pull/7",
+  "state": "OPEN",
+  "isDraft": false,
+  "body": "Adds a retry button.\n\nCloses the flaky upload report.",
+  "author": { "login": "ada" },
+  "baseRefName": "main",
+  "headRefName": "feature/retry",
+  "headRefOid": "0123456789abcdef0123456789abcdef01234567",
+  "headRepository": { "id": "R_1", "name": "app" },
+  "headRepositoryOwner": { "id": "U_1", "login": "acme" },
+  "isCrossRepository": false,
+  "reviewDecision": "CHANGES_REQUESTED",
+  "updatedAt": "2026-10-26T12:00:00Z",
+  "mergedAt": null,
+  "closedAt": null,
+  "reviews": [
+    {
+      "id": "PRR_approved",
+      "author": { "login": "grace" },
+      "authorAssociation": "MEMBER",
+      "state": "APPROVED",
+      "body": "Looks good.",
+      "bodyTruncated": false,
+      "submittedAt": "2026-10-26T09:00:00Z",
+      "includesCreatedEdit": true,
+      "url": "https://github.com/acme/app/pull/7#pullrequestreview-1"
+    },
+    {
+      "id": "PRR_changes",
+      "author": { "login": "linus" },
+      "authorAssociation": "COLLABORATOR",
+      "state": "CHANGES_REQUESTED",
+      "body": "Please add a test.",
+      "bodyTruncated": false,
+      "submittedAt": "2026-10-26T10:00:00Z",
+      "includesCreatedEdit": false,
+      "url": "https://github.com/acme/app/pull/7#pullrequestreview-2"
+    },
+    {
+      "id": "PRR_commented",
+      "author": { "login": "outsider" },
+      "authorAssociation": "NONE",
+      "state": "COMMENTED",
+      "body": "",
+      "bodyTruncated": false,
+      "submittedAt": "2026-10-26T10:30:00Z",
+      "includesCreatedEdit": false
+    }
+  ],
+  "comments": [
+    {
+      "id": "IC_first",
+      "author": { "login": "ada" },
+      "authorAssociation": "OWNER",
+      "body": "Ready for another look.",
+      "bodyTruncated": false,
+      "createdAt": "2026-10-26T11:00:00Z",
+      "includesCreatedEdit": true,
+      "url": "https://github.com/acme/app/pull/7#issuecomment-1"
+    },
+    {
+      "id": "IC_second",
+      "author": null,
+      "authorAssociation": "NONE",
+      "body": "Thanks!",
+      "bodyTruncated": false,
+      "createdAt": "2026-10-26T08:00:00Z",
+      "includesCreatedEdit": false,
+      "url": "https://github.com/acme/app/pull/7#issuecomment-2"
+    }
+  ],
+  "statusCheckRollup": [
+    { "__typename": "CheckRun", "name": "build", "workflowName": "CI", "status": "COMPLETED", "conclusion": "SUCCESS", "detailsUrl": "https://github.com/acme/app/actions/runs/1/job/1" },
+    { "__typename": "CheckRun", "name": "test", "workflowName": "CI", "status": "COMPLETED", "conclusion": "FAILURE", "detailsUrl": "https://github.com/acme/app/actions/runs/1/job/2" },
+    { "__typename": "CheckRun", "name": "lint", "workflowName": "CI", "status": "IN_PROGRESS", "conclusion": "", "detailsUrl": "https://github.com/acme/app/actions/runs/1/job/3" },
+    { "__typename": "CheckRun", "name": "docs", "workflowName": "Docs", "status": "COMPLETED", "conclusion": "SKIPPED", "detailsUrl": "https://github.com/acme/app/actions/runs/2/job/4" },
+    { "__typename": "StatusContext", "context": "ci/deploy-preview", "state": "SUCCESS", "targetUrl": "https://preview.example.com/7" }
+  ]
+}

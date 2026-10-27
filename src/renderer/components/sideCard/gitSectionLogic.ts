@@ -1,9 +1,16 @@
-import type { PullRequestScope } from '../../../shared/pullRequests'
+import type {
+  PullRequestCheck,
+  PullRequestDetail,
+  PullRequestReviewDecision,
+  PullRequestScope,
+  ThreadPullRequestLink
+} from '../../../shared/pullRequests'
 import type {
   GitBranchInfo,
   GitCommit,
   GitDiffStats,
   GitInProgress,
+  GitPullRequestInfo,
   GitPullRequestLookup,
   GitScope,
   GitStatusSnapshot
@@ -327,6 +334,78 @@ export function branchSearchAria(listId: string, activeIndex: number, choiceCoun
 
 export type PullRequestChecksTone = 'passing' | 'failing' | 'pending'
 
+export type PullRequestReviewTone = 'passing' | 'failing' | 'pending' | 'neutral'
+
+export type PullRequestReviewKey = 'approved' | 'changes_requested' | 'review_required' | 'draft' | 'merged' | 'closed'
+
+export interface PullRequestReviewLine {
+  key: PullRequestReviewKey
+  label: string
+  tone: PullRequestReviewTone
+}
+
+/**
+ * Where a pull request stands with its reviewers. A finished pull request is merged or closed whatever
+ * was decided; otherwise the host's decision speaks, and a draft with none is a draft. Null for an open
+ * pull request nobody has to review.
+ */
+export function pullRequestReviewState(
+  pullRequest: Pick<GitPullRequestInfo, 'state' | 'isDraft'>,
+  decision: PullRequestReviewDecision | null
+): PullRequestReviewLine | null {
+  if (pullRequest.state === 'merged') return { key: 'merged', label: 'Merged', tone: 'neutral' }
+  if (pullRequest.state === 'closed') return { key: 'closed', label: 'Closed', tone: 'neutral' }
+  if (decision === 'approved') return { key: 'approved', label: 'Approved', tone: 'passing' }
+  if (decision === 'changes_requested') return { key: 'changes_requested', label: 'Changes requested', tone: 'failing' }
+  if (decision === 'review_required') return { key: 'review_required', label: 'Review required', tone: 'pending' }
+  if (pullRequest.isDraft) return { key: 'draft', label: 'Draft', tone: 'neutral' }
+  return null
+}
+
+export type PullRequestCheckRowTone = 'failing' | 'waiting' | 'pending' | 'passing' | 'skipped'
+
+export interface PullRequestCheckRow {
+  name: string
+  /** The workflow a check run belongs to, when the host names one. */
+  workflow: string | null
+  tone: PullRequestCheckRowTone
+  /** "Failed", "Waiting for approval", "Running", "Passed" or "Skipped". */
+  label: string
+  /** Where the host shows this check; only web links. */
+  url: string | null
+}
+
+const CHECK_ROW_ORDER: PullRequestCheckRowTone[] = ['failing', 'waiting', 'pending', 'passing', 'skipped']
+const CHECK_ROW_LABELS: Record<PullRequestCheckRowTone, string> = {
+  failing: 'Failed',
+  waiting: 'Waiting for approval',
+  pending: 'Running',
+  passing: 'Passed',
+  skipped: 'Skipped'
+}
+
+function webUrl(url: string | null): string | null {
+  return url && /^https?:\/\//i.test(url) ? url : null
+}
+
+/** Each check with its state and link, what needs attention first. A check with no state yet counts as running. */
+export function pullRequestCheckRows(checks: readonly PullRequestCheck[]): PullRequestCheckRow[] {
+  return checks
+    .map((check, index) => {
+      const tone: PullRequestCheckRowTone = check.state === 'none' ? 'pending' : check.state
+      return {
+        order: CHECK_ROW_ORDER.indexOf(tone),
+        index,
+        row: { name: check.name, workflow: check.workflowName ?? null, tone, label: CHECK_ROW_LABELS[tone], url: webUrl(check.url) }
+      }
+    })
+    .sort((a, b) => a.order - b.order || a.index - b.index)
+    .map(({ row }) => row)
+}
+
+/** Shown on a linked pull request of a thread that works in its own worktree. */
+export const LINKED_WORKTREE_HINT = 'Merge back targets the primary checkout, not the PR'
+
 export interface PullRequestFoundRow {
   kind: 'found'
   url: string
@@ -335,10 +414,22 @@ export interface PullRequestFoundRow {
   title: string
   /** Icon for the check state; null when there are no checks or the PR is finished. */
   checks: PullRequestChecksTone | null
-  /** "Checks passed", "2 failing" or "Checks running". */
+  /** "Checks passed", "2 failing", "Checks running" or "Waiting for approval". */
   checksLabel: string | null
   /** Muted word after the title. */
   suffix: 'Draft' | 'Merged' | 'Closed' | null
+  /** The reviewers' verdict of an open pull request; null when the host has none (a draft, merged or closed pull request shows its suffix instead). */
+  review: { label: string; tone: PullRequestReviewTone } | null
+  /** Each check with its state and link; only for an open pull request whose detail has been read. */
+  checkRows: PullRequestCheckRow[]
+  /** Conversation and line comments read so far. */
+  commentCount: number
+  /** "3 comments"; null when there are none. */
+  commentsLabel: string | null
+  /** The thread is linked to this pull request, which it did not only find by its branch. */
+  linked: boolean
+  /** A short note about what the pull request means for this thread; null when there is none. */
+  hint: string | null
   tooltip: string
   ariaLabel: string
 }
@@ -352,20 +443,30 @@ export interface PullRequestCreateRow {
 
 export type PullRequestRow = PullRequestFoundRow | PullRequestCreateRow
 
-function checksText(tone: PullRequestChecksTone, failed: number): { label: string; spoken: string } {
+function checksText(tone: PullRequestChecksTone, counts: GitPullRequestInfo['checkCounts']): { label: string; spoken: string } {
   if (tone === 'passing') return { label: 'Checks passed', spoken: 'checks passed' }
   if (tone === 'failing') {
-    const count = Math.max(1, failed)
+    const count = Math.max(1, counts.failed)
     return { label: `${count} failing`, spoken: `${count} ${count === 1 ? 'check' : 'checks'} failing` }
   }
+  // Runs held for a maintainer's approval have not started; when they are all that is left, say so.
+  if (counts.waiting > 0 && counts.waiting >= counts.pending) return { label: 'Waiting for approval', spoken: 'waiting for approval' }
   return { label: 'Checks running', spoken: 'checks running' }
 }
 
 /**
  * The pull request row under the branch row. Only a found pull request, or a branch
  * with none that could get one, shows a row; every unavailable lookup shows nothing.
+ * `detail` (the same pull request, read in full) adds the reviewers' verdict, each check and the comment
+ * count; `link` and `worktreeThread` say whether the thread is linked to it and works in its own worktree.
  */
-export function pullRequestRow(lookup: GitPullRequestLookup | null, status: GitStatusSnapshot | null): PullRequestRow | null {
+export function pullRequestRow(
+  lookup: GitPullRequestLookup | null,
+  status: GitStatusSnapshot | null,
+  detail: PullRequestDetail | null = null,
+  link: Pick<ThreadPullRequestLink, 'number'> | null = null,
+  worktreeThread = false
+): PullRequestRow | null {
   if (!lookup) return null
   if (lookup.state === 'none') {
     // Only a branch known not to be the default one can get a pull request; unknown (null) shows nothing.
@@ -378,10 +479,18 @@ export function pullRequestRow(lookup: GitPullRequestLookup | null, status: GitS
   const { pullRequest } = lookup
   const open = pullRequest.state === 'open'
   const tone = open && pullRequest.checks !== 'none' ? pullRequest.checks : null
-  const checks = tone ? checksText(tone, pullRequest.checkCounts.failed) : null
+  const checks = tone ? checksText(tone, pullRequest.checkCounts) : null
   const suffix = pullRequest.state === 'merged' ? 'Merged' : pullRequest.state === 'closed' ? 'Closed' : pullRequest.isDraft ? 'Draft' : null
   const number = `#${pullRequest.number}`
   const title = pullRequest.title.trim()
+  // A detail of another pull request (the branch moved on to a new one) says nothing about this one.
+  const own = open && detail !== null && detail.number === pullRequest.number ? detail : null
+  const verdict = own ? pullRequestReviewState(pullRequest, own.reviewDecision) : null
+  const review = verdict && (verdict.key === 'approved' || verdict.key === 'changes_requested' || verdict.key === 'review_required')
+    ? { label: verdict.label, tone: verdict.tone }
+    : null
+  const commentCount = own?.comments.length ?? 0
+  const linked = link?.number === pullRequest.number
   return {
     kind: 'found',
     url: pullRequest.url,
@@ -390,8 +499,16 @@ export function pullRequestRow(lookup: GitPullRequestLookup | null, status: GitS
     checks: tone,
     checksLabel: checks?.label ?? null,
     suffix,
-    tooltip: [title ? `${number} ${title}` : number, checks?.label].filter(Boolean).join('\n'),
-    ariaLabel: ['Pull request ' + number, title, suffix?.toLowerCase(), checks?.spoken].filter(Boolean).join(', ')
+    review,
+    checkRows: own ? pullRequestCheckRows(own.checkRuns) : [],
+    commentCount,
+    commentsLabel: commentCount > 0
+      ? `${commentCount}${own?.commentsTruncated ? '+' : ''} ${commentCount === 1 && !own?.commentsTruncated ? 'comment' : 'comments'}`
+      : null,
+    linked,
+    hint: linked && worktreeThread ? LINKED_WORKTREE_HINT : null,
+    tooltip: [title ? `${number} ${title}` : number, review?.label, checks?.label].filter(Boolean).join('\n'),
+    ariaLabel: ['Pull request ' + number, title, suffix?.toLowerCase(), review?.label.toLowerCase(), checks?.spoken].filter(Boolean).join(', ')
   }
 }
 
@@ -413,6 +530,15 @@ export function pullRequestScope(input: {
     path: input.path,
     branch: input.branch
   }
+}
+
+/**
+ * The thread a pull request read is made as. The daemon runs it in that thread's worktree, so only a thread
+ * whose worktree is the folder the card shows asks as the thread; a thread whose workspace is not ready is
+ * shown the project's folder, and asks about the project, as does one working on the project's checkout.
+ */
+export function pullRequestReadThreadId(ownThreadId: string | null, workspaceThreadId: string | null): string | null {
+  return ownThreadId !== null && workspaceThreadId === ownThreadId ? ownThreadId : null
 }
 
 export interface PushButtonModel {
