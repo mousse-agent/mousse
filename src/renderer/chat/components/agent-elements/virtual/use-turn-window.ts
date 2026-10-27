@@ -372,9 +372,13 @@ function createEngine(
     if (!callback) {
       callback = (el) => {
         if (el) {
+          // Not measured here: this runs while React is still committing, with
+          // the spacers of the previous window in place, and reading a size
+          // would lay out that half-way state (a jump to the end, where the
+          // bottom spacer is dropped, clamps `scrollTop` back to the old
+          // content). `commit` measures once the spacers are written.
           rowEls.set(key, el);
           keyOfEl.set(el, key);
-          measured.set(key, el.getBoundingClientRect().height);
           getObserver().observe(el);
         } else {
           const previous = rowEls.get(key);
@@ -524,6 +528,13 @@ function createEngine(
     keysChanged: boolean,
   ) => {
     committed = window;
+    // Spacers for the new window first, from the heights known so far, so the
+    // content is whole again before any row is measured (see `rowRef`).
+    rebuildLayout();
+    writeSpacers();
+    for (const [key, el] of rowEls) {
+      if (!measured.has(key)) measured.set(key, el.getBoundingClientRect().height);
+    }
     transact(opening);
     if (keysChanged) prune();
     if (opening && getOptions().modeRef.current === "following-end") void settleToEnd();
