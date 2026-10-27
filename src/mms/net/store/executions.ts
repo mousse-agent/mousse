@@ -28,6 +28,9 @@ const transitions: Record<ExecutionState, readonly ExecutionState[]> = {
   expired: []
 }
 
+/** Rows per pruning transaction; the Net transaction budget is 500 rows. */
+const PRUNE_BATCH = 100
+
 export class SqliteExecutionLedger implements ExecutionLedger {
   constructor(private readonly db: NetDatabase) {}
   admit(
@@ -152,6 +155,33 @@ export class SqliteExecutionLedger implements ExecutionLedger {
         )
     }
     return changed
+  }
+  /**
+   * Delete settled request rows that no retry can still need. Only rows owned by a node (the
+   * request ledger of the RPC dispatcher) are eligible: space-scoped rows are bot outcomes that
+   * can be exported, and rows a budget reservation references keep their accounting history.
+   * `beforeDelete` runs in the same transaction, so aliases leave together with their rows.
+   */
+  prune(
+    olderThan: number,
+    limit = PRUNE_BATCH,
+    beforeDelete?: (ids: ExecutionId[]) => void
+  ): number {
+    integer(olderThan)
+    return this.db.transaction(() => {
+      const ids = this.db.database
+        .prepare(
+          `SELECT id FROM net_executions e WHERE e.scope LIKE 'nod\\_%' ESCAPE '\\' AND e.state IN ('completed','failed','expired') AND e.updated_at<? AND NOT EXISTS(SELECT 1 FROM net_budget_reservations r WHERE r.execution=e.id) ORDER BY e.updated_at,e.id LIMIT ?`
+        )
+        .all(olderThan, limit)
+        .map((row) => row.id as ExecutionId)
+      if (!ids.length) return 0
+      this.db.charge(ids.length * 2)
+      beforeDelete?.(ids)
+      const drop = this.db.database.prepare('DELETE FROM net_executions WHERE id=?')
+      for (const id of ids) drop.run(id)
+      return ids.length
+    })
   }
   exportFor(target: BotId): ExecutionRecord[] {
     return this.db.database

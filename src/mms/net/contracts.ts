@@ -411,6 +411,12 @@ export interface ExecutionLedger {
     now: number,
     sideEffects?: (record: ExecutionRecord) => void
   ): ExecutionRecord[]
+  /**
+   * Deletes up to `limit` settled (`completed`, `failed`, `expired`) node-scoped request rows last
+   * updated before `olderThan`, keeping rows a budget reservation references. `beforeDelete` runs
+   * in the same transaction with the ids about to go. Returns the number deleted.
+   */
+  prune(olderThan: number, limit?: number, beforeDelete?: (ids: ExecutionId[]) => void): number
   /** Dedup state for a bot placement move. */
   exportFor(target: BotId): ExecutionRecord[]
   importFor(target: BotId, rows: ReturnType<ExecutionLedger['exportFor']>): void
