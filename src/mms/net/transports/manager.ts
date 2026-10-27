@@ -323,6 +323,11 @@ export class ProfileTransports {
       } else if (route.transport !== 'direct') throw new NetError('route_unreachable')
       raw = await this.direct.dial({ ...route, transport: 'direct' }, signal)
     }
+    if (this.stopping) {
+      // A dial that finished during teardown must not leave its stream (or an ssh child) behind.
+      raw.destroy()
+      throw new NetError('cancelled')
+    }
     this.sockets.add(raw)
     raw.once('close', () => this.sockets.delete(raw))
     return raw

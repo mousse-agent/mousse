@@ -26,6 +26,7 @@ const fs = require('fs'), net = require('net')
 const args = process.argv.slice(2)
 fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + '\\n')
 fs.writeFileSync(${JSON.stringify(pid)}, String(process.pid))
+fs.writeFileSync(${JSON.stringify(log + '.env')}, JSON.stringify({ askpass: Object.keys(process.env).filter((key) => key.toUpperCase().startsWith('SSH_ASKPASS')) }))
 const fail = (text) => { process.stderr.write(text + '\\n'); process.exit(255) }
 const forward = args[args.indexOf('-W') + 1].split(':')
 const target = args[args.length - 1]

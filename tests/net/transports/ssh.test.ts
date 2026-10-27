@@ -17,6 +17,7 @@ import {
   parseSshRoute,
   readSshApproval,
   sshAddon,
+  sshDialArguments,
   sshKnownHostsPath
 } from '../../../src/mms/net/transports/ssh'
 import { systemClock } from '../../../src/mms/net/clock'
@@ -283,6 +284,31 @@ describe('ssh dialing', () => {
     expect(argv.filter((value) => /invite|password/i.test(value))).toEqual([
       'PasswordAuthentication=no'
     ])
+  })
+  it('keeps the known_hosts option value literal for ssh_config', () => {
+    const endpoint = { host: 'box' }
+    const value = (knownHosts: string, userKnownHosts: string) =>
+      sshDialArguments({ endpoint, port: 4000, knownHosts, userKnownHosts }).find((argument) =>
+        argument.startsWith('UserKnownHostsFile=')
+      )
+    // `%` would be read as a token such as %d or %h.
+    expect(value('/p/100%/ssh_known_hosts', '/h/.ssh/known_hosts')).toBe(
+      'UserKnownHostsFile="/p/100%%/ssh_known_hosts" "/h/.ssh/known_hosts"'
+    )
+    for (const hostile of ['/p/a"b', '/p/${HOME}', '/p/a\nb', '/p/a\rb'])
+      expect(() => value(hostile, '/h/.ssh/known_hosts'), hostile).toThrow()
+  })
+  it('gives ssh no askpass helper to prompt for a password with', async () => {
+    const t = await setup(),
+      daemon = await listener()
+    await approve(t.where, { [t.node]: ENDPOINT })
+    await trustHost(t.knownHosts, 'box.example.com', 2222)
+    vi.stubEnv('SSH_ASKPASS', '/usr/bin/ssh-askpass')
+    vi.stubEnv('SSH_ASKPASS_REQUIRE', 'force')
+    cleanup.push(() => vi.unstubAllEnvs())
+    const raw = await t.dialer.dial(route(ENDPOINT, daemon.port), open(), { peer: t.node })
+    cleanup.push(() => raw.destroy())
+    expect(JSON.parse(await readFile(`${t.ssh.log}.env`, 'utf8'))).toEqual({ askpass: [] })
   })
   it('uses the key from either known_hosts file', async () => {
     const t = await setup(),

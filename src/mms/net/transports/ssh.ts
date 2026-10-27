@@ -122,10 +122,14 @@ export async function readSshApproval(
   return { endpoint: row.endpoint!, fingerprint: row.fingerprint, approvedAt: row.approvedAt }
 }
 
-/** Paths go inside a quoted `ssh_config` argument; forward slashes avoid its backslash escapes on Windows. */
+/**
+ * Paths go inside a quoted `ssh_config` argument. Forward slashes avoid its backslash escapes on
+ * Windows; `%` is doubled because ssh expands `%d`-style tokens, and `${` would expand a variable.
+ */
 function configPath(path: string): string {
-  if (path.includes('"') || path.includes('\n')) throw new NetError('bad_request')
-  return path.replace(/\\/g, '/')
+  const value = process.platform === 'win32' ? path.replace(/\\/g, '/') : path
+  if (/["\\\r\n]|\$\{/u.test(value)) throw new NetError('bad_request')
+  return value.replace(/%/g, '%%')
 }
 
 export function sshDialArguments(input: {
@@ -328,10 +332,14 @@ export class SshDialer {
       userKnownHosts: this.options.userKnownHosts ?? join(homedir(), '.ssh', 'known_hosts')
     })
     const { binary } = this.options
+    // Mousse never asks for a password: no askpass helper may be reached from a background dial.
+    const env = cleanEnvironment()
+    for (const key of Object.keys(env))
+      if (key.toUpperCase().startsWith('SSH_ASKPASS')) delete env[key]
     const child = spawn((typeof binary === 'function' ? binary() : binary) ?? 'ssh', args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
-      env: cleanEnvironment()
+      env
     })
     let tail = '',
       missing = false
