@@ -48,8 +48,10 @@ export const PI_RPC_EVIDENCE_ITEMS: readonly number[] = Object.freeze([1, 2, 3, 
  * Every record so far.
  * - Locked Claude Code: none. No platform has passed the real-CLI suite yet, so it holds no bot
  *   authority and runs no shell anywhere.
- * - Pi RPC: Linux only, from a run in WSL2 (a real Linux kernel, not a Linux machine). macOS has no
- *   record until the suite passes on a Mac; Windows has none (Pi's shell runs uncontained there).
+ * - Pi RPC: none yet. A run in WSL2 (a real Linux kernel, not a Linux machine) passed items 1–9, 11
+ *   and 12, and each contained-shell test (item 10) alone, but the contained-shell file did not
+ *   finish as a whole, so Linux has no record until it does. macOS needs a run on a Mac; Windows
+ *   gets none (Pi's shell runs uncontained there). Without a record, definitions run on the loop.
  */
 export const CONTAINMENT_EVIDENCE: readonly ContainmentEvidence[] = Object.freeze([])
 
