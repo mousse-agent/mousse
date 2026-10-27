@@ -25,12 +25,13 @@ import { WorktreeManager } from '../../src/mms/worktree/WorktreeManager'
 import { defaultAgentSettings } from '../../src/shared/agents/defaults'
 import { getDefaultSettings } from '../../src/shared/settings'
 import { providerResponse } from '../fixtures/agent-platform/agent-runtime-policy/helpers'
-import { installExactDefinitionRuntime } from '../fixtures/agent-platform/exactDefinitionRuntime'
+import { createDefinitionEngine, DEFINITION_ENGINES, ENGINE_MODEL, type DefinitionEngineKind } from '../fixtures/agent-platform/definitionEngines'
 
 // PR 4 §6 / §16 `agentChatDefinitionTurn`: agent chats run each reply as a definition turn through
 // the real orchestrator, gateway and run engine. The chat holds the backing thread's lease for the
 // whole response; each turn borrows it and never takes, stores or releases it. The host checkpoints
-// once per reply. The runtime is the exact stand-in (no production runtime declares `exact` yet).
+// once per reply. Each case runs on the real legacy Pi engine (its transport at a local recorder
+// with a fake key, where chats run today) and on a stand-in for a runtime that earned `exact`.
 
 const say = (text: string) => providerResponse([{ type: 'text', text }], 'stop')
 const cleanups: Array<() => Promise<void> | void> = []
@@ -39,27 +40,31 @@ afterEach(async () => {
   vi.restoreAllMocks()
 })
 
-function fixture(options: { next?: (context: Context, signal: AbortSignal) => Promise<AssistantMessage>; bobProvider?: string } = {}) {
+async function fixture(kind: DefinitionEngineKind, options: { next?: (context: Context, signal: AbortSignal) => Promise<AssistantMessage>; bobProvider?: string } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-chat-defturn-')))
   process.env.MOUSSE_HOME = root
   const profileId = randomUUID()
   const projects = new ProjectManager(root)
   const threads = new ThreadDataStore(projects, root, { profileId, allowLegacyProjectData: false })
   projects.setThreadStore(threads)
-  const orch = new OrchestratorService(new AgentRegistry(), new TaskQueue(), new WorktreeManager(root), new PtyManager(), { get: () => getDefaultSettings() } as never, {} as never)
+  const defs = await createDefinitionEngine(kind, ['alpha', 'beta'])
+  const settings = getDefaultSettings()
+  settings.integrations.skills.enabled = false
+  const orch = new OrchestratorService(new AgentRegistry(), new TaskQueue(), new WorktreeManager(root), new PtyManager(), { get: () => settings } as never, defs.providerAuth)
   orch.setThreadStore(threads)
   const engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: root })) })
   orch.setRunEngine(engine)
-  const outputs: AssistantMessage[] = []
-  const captured: Context[] = []
-  const runtime = installExactDefinitionRuntime({ orchestrator: orch, providerId: 'alpha', alsoProviders: ['beta'], profileHome: root, captured, ...(options.next ? { next: options.next } : { outputs }) })
+  if (options.next) defs.setNext(options.next)
+  const harness = defs.install(orch, root)
+  const { outputs, captured } = defs
+  const runtime = { turns: defs.turns }
   const registry = new AgentDefinitionRegistry({ profileId, profileRoot: root })
   const lookup = new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write'] })
-  const entry = (instanceId: string) => ({ ref: { providerId: instanceId.slice(3), modelId: 'model', instanceId }, available: true, efforts: [], speeds: [], contexts: [], capabilities: ['tools'], unavailableReasons: [] })
+  const entry = (instanceId: string) => ({ ref: { providerId: instanceId.slice(3), modelId: ENGINE_MODEL, instanceId }, available: true, efforts: [], speeds: [], contexts: [], capabilities: ['tools'], unavailableReasons: [] })
   const resolver = new AgentResolver({ registry, integrationLookup: lookup, modelLookup: new StaticAgentModelLookup([entry('pi:alpha'), entry('pi:beta')] as never) })
   const createAgent = (slug: string, instanceId: string) => {
     const settings = defaultAgentSettings({ name: slug.toUpperCase(), slug, purpose: `${slug} purpose` })
-    settings.primaryModel.ref = { providerId: instanceId.slice(3), modelId: 'model', instanceId }
+    settings.primaryModel.ref = { providerId: instanceId.slice(3), modelId: ENGINE_MODEL, instanceId }
     settings.recovery.retryCount = 0
     const draft = registry.createDraft({ settings, systemPrompt: `You are ${slug}.` })
     registry.publish(draft.id, draft.draftHash, { integrationLookup: lookup })
@@ -76,18 +81,19 @@ function fixture(options: { next?: (context: Context, signal: AbortSignal) => Pr
     await service.dispose()
     orch.setRunEngine(null)
     engine.store.db.close()
-    runtime.harness.stop()
+    harness.stop()
+    await defs.close()
     rmSync(root, { recursive: true, force: true })
     delete process.env.MOUSSE_HOME
   })
   return { root, orch, engine, runtime, outputs, captured, service, threads, projects, alice, bob }
 }
 
-describe('agent chats on definition turns', () => {
+describe.each(DEFINITION_ENGINES)('agent chats on definition turns (%s)', (kind) => {
   it('a direct reply borrows the chat lease once, never takes or releases it, and the next reply sees the first', async () => {
     let leaseDuringTurn: { source?: string } | null = null
     let sessionLease: unknown = 'unset'
-    const f = fixture({
+    const f = await fixture(kind, {
       next: async (context) => {
         const threadId = f.runtime.turns.at(-1)!.input.threadId
         leaseDuringTurn = readLeaseOwner(getExecutionLeasePath(f.threads.getThreadDir(threadId)))
@@ -121,7 +127,7 @@ describe('agent chats on definition turns', () => {
   it('a composer send to the backing thread during a reply never starts a turn beside it', async () => {
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
-    const f = fixture({ next: async () => { await gate; return say('done') } })
+    const f = await fixture(kind, { next: async () => { await gate; return say('done') } })
     const chat = await f.service.create({ kind: 'direct', agentIds: [f.alice] })
     f.service.send({ chatId: chat.id, text: 'take your time' })
     await vi.waitFor(() => expect(f.runtime.turns).toHaveLength(1))
@@ -134,7 +140,7 @@ describe('agent chats on definition turns', () => {
   })
 
   it('a group reply hands over to the mentioned agent on another provider, with one checkpoint per reply', async () => {
-    const f = fixture({ bobProvider: 'pi:beta' })
+    const f = await fixture(kind, { bobProvider: 'pi:beta' })
     const repo = join(f.root, 'repo')
     mkdirSync(repo)
     const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, stdio: 'pipe' })
@@ -160,7 +166,7 @@ describe('agent chats on definition turns', () => {
   })
 
   it('cancel stops the reply, checkpoints it as stopped and ends its run interrupted', async () => {
-    const f = fixture({ next: (_context, signal) => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })) })
+    const f = await fixture(kind, { next: (_context, signal) => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })) })
     const repo = join(f.root, 'repo')
     mkdirSync(repo)
     const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, stdio: 'pipe' })

@@ -1,7 +1,6 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { AssistantMessage, Context } from '@earendil-works/pi-ai'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentDefinitionRegistry } from '../../src/mms/agentDefinitions/AgentDefinitionRegistry'
 import { AgentResolver } from '../../src/mms/agentDefinitions/AgentResolver'
@@ -22,18 +21,22 @@ import type { AgentExecutionRequest, AgentRuntimeToolApprovalCallback } from '..
 import type { AgentRuntimeKind, ResolvedAgentDefinition } from '../../src/shared/agents/types'
 import { getDefaultSettings } from '../../src/shared/settings'
 import { providerResponse } from '../fixtures/agent-platform/agent-runtime-policy/helpers'
-import { APPROVAL_ONLY_INSTANCE, installExactDefinitionRuntime, type ExactRuntime } from '../fixtures/agent-platform/exactDefinitionRuntime'
+import { APPROVAL_ONLY_INSTANCE } from '../fixtures/agent-platform/exactDefinitionRuntime'
+import { createDefinitionEngine, DEFINITION_ENGINES, ENGINE_MODEL, FAKE_KEY, type DefinitionEngine } from '../fixtures/agent-platform/definitionEngines'
+import type { Harness } from '../../src/mms/harness/gateway'
 
 // PR 4 §6 / §16 `definitionService`, through the real AgentExecutionService, orchestrator, gateway
-// and run engine. The exact runtime is a stand-in (no production runtime declares `exact` yet); the
-// Claude Code-like instance only asks for approval, as Claude Code, Codex and Pi RPC do today.
+// and run engine, on each runtime that holds definitions: the real legacy Pi engine (where they run
+// today, its transport at a local recorder with a fake key) and a stand-in for a runtime with its
+// own loop that earned `exact`. The Claude Code-like instance only asks for approval, as Claude
+// Code, Codex and Pi RPC do today.
 
 const PROVIDER = 'fixture'
-const MODEL = 'fixture-model'
+const MODEL = ENGINE_MODEL
 const call = (name: string, args: Record<string, unknown>, id = `${name}-1`) => providerResponse([{ type: 'toolCall', id, name, arguments: args }], 'toolUse')
 const say = (text: string) => providerResponse([{ type: 'text', text }], 'stop')
 
-describe('definitions through the gateway', () => {
+describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind) => {
   let home: string
   let work: string
   let engine: RunEngine
@@ -41,34 +44,35 @@ describe('definitions through the gateway', () => {
   let store: ThreadDataStore
   let registry: AgentDefinitionRegistry
   let resolver: AgentResolver
-  let runtime: ExactRuntime
-  let outputs: AssistantMessage[]
-  let captured: Context[]
+  let defs: DefinitionEngine
+  let harness: Harness
   const profileId = 'profile-defs'
 
-  beforeEach(() => {
+  beforeEach(async () => {
     home = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-defsvc-')))
     process.env.MOUSSE_HOME = home
     work = join(home, 'work')
     mkdirSync(work)
     store = new ThreadDataStore(new ProjectManager())
-    orch = new OrchestratorService(new AgentRegistry(), new TaskQueue(), new WorktreeManager(home), new PtyManager(), { get: () => getDefaultSettings() } as never, {} as never)
+    defs = await createDefinitionEngine(kind, [PROVIDER])
+    const settings = getDefaultSettings()
+    settings.integrations.skills.enabled = false
+    orch = new OrchestratorService(new AgentRegistry(), new TaskQueue(), new WorktreeManager(home), new PtyManager(), { get: () => settings } as never, defs.providerAuth)
     orch.setThreadStore(store)
     engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home })) })
     orch.setRunEngine(engine)
-    outputs = []
-    captured = []
-    runtime = installExactDefinitionRuntime({ orchestrator: orch, providerId: PROVIDER, profileHome: home, captured, outputs })
+    harness = defs.install(orch, home)
     registry = new AgentDefinitionRegistry({ profileId, profileRoot: join(home, 'profile') })
     const integrations = new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write', 'ask_user', 'bash'] })
     const entry = (instanceId?: string) => ({ ref: { providerId: PROVIDER, modelId: MODEL, ...(instanceId ? { instanceId } : {}) }, available: true, efforts: [], speeds: [], contexts: [], capabilities: ['tools'], unavailableReasons: [] })
     resolver = new AgentResolver({ registry, integrationLookup: integrations, modelLookup: new StaticAgentModelLookup([entry(), entry(`pi:${PROVIDER}`), entry(APPROVAL_ONLY_INSTANCE)] as never) })
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     orch.setRunEngine(null)
     engine.store.db.close()
-    runtime.harness.stop()
+    harness.stop()
+    await defs.close()
     rmSync(home, { recursive: true, force: true })
     delete process.env.MOUSSE_HOME
   })
@@ -115,21 +119,21 @@ describe('definitions through the gateway', () => {
     expect(result.error!.message).toMatch(/can't enforce this agent's workspace and tool limits/)
     expect(result.error!.details).toMatchObject({ code: 'policy_unenforceable', missing: ['toolControl'], pointers: ['/settings/tools/mode', '/settings/workspace/mode'] })
     // Nothing ran: no turn, no run record.
-    expect(runtime.turns).toEqual([])
+    expect(defs.turns).toEqual([])
     expect(engine.listRuns(thread.id)).toEqual([])
     expect(revisionBytes(stored.revision)).toEqual(before)
   })
 
-  it('runs the same stored kind when its model is on an exact instance, with its own session, instructions, grants and limits', async () => {
+  it('runs the same stored kind on a runtime that holds definitions, with its own session, instructions, grants and limits', async () => {
     const stored = publish('claude-code', `pi:${PROVIDER}`)
     const before = revisionBytes(stored.revision)
     expect(before.size).toBeGreaterThan(0)
     const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })
     const thread = store.createThread('runs')
-    outputs.push(say('reviewed'))
+    defs.outputs.push(say('reviewed'))
     const result = await orch.runAgentDefinition(request(resolved, thread.id))
     expect(result).toMatchObject({ status: 'completed', text: 'reviewed', runtimeKind: 'claude-code' })
-    const [{ input, host }] = runtime.turns
+    const [{ input, host }] = defs.turns
     expect(input).toMatchObject({ session: 'ephemeral', instructions: { placement: 'replace' }, instanceId: `pi:${PROVIDER}`, cwd: work, prompt: 'review the work' })
     expect(input.instructions!.text).toContain('DEFINITION_SYSTEM_PROMPT')
     expect(host.definition?.grants).toEqual(resolved.grants)
@@ -144,6 +148,10 @@ describe('definitions through the gateway', () => {
     })
     expect(engine.bindingForRun(runs[0]!.runId)?.policyDigest).toMatch(/^[0-9a-f]{64}$/)
     expect(revisionBytes(stored.revision)).toEqual(before)
+    // The definition's own system prompt and only its granted tools reach the model.
+    expect(defs.captured[0]!.systemPrompt).toContain('DEFINITION_SYSTEM_PROMPT')
+    expect(defs.captured[0]!.tools!.map((tool) => tool.name)).not.toContain('bash')
+    if (kind === 'legacy') expect(defs.requests[0]!.authorization).toBe(`Bearer ${FAKE_KEY}`)
     // The run took the thread's lease and gave it back.
     const lease = tryAcquireExecutionLease(store.getThreadDir(thread.id))
     expect(lease).not.toBeNull()
@@ -162,26 +170,27 @@ describe('definitions through the gateway', () => {
     )
     const thread = store.createThread('denied')
     let actor: unknown
-    runtime.adapter.startTurn = ((original) => async (...args: Parameters<typeof original>) => {
-      actor = orch.appToolTurns.get(args[0].runId)?.actor
-      return original(...args)
-    })(runtime.adapter.startTurn.bind(runtime.adapter))
-    outputs.push(
+    const replies = [
       call('write', { path: 'denied.txt', content: 'x' }),
       call('mcp__srv__drop_table', {}),
       call('read', { path: '../outside.txt' }),
       call('ask_user', { questions: [{ id: 'q', prompt: 'May I?' }] }),
       say('done')
-    )
+    ]
+    defs.setNext(async () => {
+      actor ??= orch.appToolTurns.get(defs.turns.at(-1)!.input.runId)?.actor
+      return replies.shift()!
+    })
     const result = await orch.runAgentDefinition(request(resolved, thread.id))
     expect(result.status).toBe('completed')
-    const results = captured.at(-1)!.messages.filter((message) => message.role === 'toolResult').map((message) => JSON.stringify(message.content))
-    expect(results[0]).toContain('not granted')
-    expect(results[1]).toContain('not granted')
+    const results = defs.captured.at(-1)!.messages.filter((message) => message.role === 'toolResult').map((message) => JSON.stringify(message.content))
+    expect(results[0]).toMatch(/not granted/)
+    expect(results[1]).toMatch(/not granted/)
     expect(results[2]).toContain('escaped allowed workspace roots')
     expect(results[3]).toContain('disabled by /settings/approval/askUser')
     expect(existsSync(join(work, 'denied.txt'))).toBe(false)
-    expect(host(runtime).bridge?.toolPolicy?.allow).not.toContain('write')
+    expect(defs.turns.at(-1)!.host.bridge?.toolPolicy?.allow).not.toContain('write')
+    expect(defs.captured.at(-1)!.tools!.map((tool) => tool.name)).not.toContain('write')
     expect((actor as { skillIds?: string[] }).skillIds ?? []).not.toContain('secret-skill')
   })
 
@@ -194,10 +203,10 @@ describe('definitions through the gateway', () => {
     const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })
     expect(resolved.grants.builtinTools.map((grant) => grant.id)).toEqual(expect.arrayContaining(['write', 'bash']))
     const thread = store.createThread('script and read-only')
-    outputs.push(call('bash', { command: 'echo hi > script.txt' }), call('write', { path: 'ro.txt', content: 'x' }), say('done'))
+    defs.outputs.push(call('bash', { command: 'echo hi > script.txt' }), call('write', { path: 'ro.txt', content: 'x' }), say('done'))
     const result = await orch.runAgentDefinition(request(resolved, thread.id))
     expect(result.status).toBe('completed')
-    const results = captured.at(-1)!.messages.filter((message) => message.role === 'toolResult').map((message) => JSON.stringify(message.content))
+    const results = defs.captured.at(-1)!.messages.filter((message) => message.role === 'toolResult').map((message) => JSON.stringify(message.content))
     expect(results).toHaveLength(2)
     expect(results[0]).toContain('Workspace is read-only; bash is blocked by /settings/workspace/mode.')
     expect(results[1]).toContain('Workspace is read-only; write is blocked by /settings/workspace/mode.')
@@ -208,9 +217,9 @@ describe('definitions through the gateway', () => {
       settings.tools = { mode: 'explicit', allowlist: ['read', 'write', 'bash'] }
       settings.script.enabled = false
     })
-    outputs.push(call('bash', { command: 'echo hi' }), say('done'))
+    defs.outputs.push(call('bash', { command: 'echo hi' }), say('done'))
     expect((await orch.runAgentDefinition(request(resolver.resolve({ definitionId: scripts.id, revision: scripts.revision }), store.createThread('scripts off').id))).status).toBe('completed')
-    expect(JSON.stringify(captured.at(-1)!.messages)).toContain('Script execution is disabled by /settings/script/enabled.')
+    expect(JSON.stringify(defs.captured.at(-1)!.messages)).toContain('Script execution is disabled by /settings/script/enabled.')
   })
 
   it('applies the unattended policy without asking anyone', async () => {
@@ -223,10 +232,10 @@ describe('definitions through the gateway', () => {
       })
       const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })
       const thread = store.createThread(`unattended ${behavior}`)
-      outputs.push(call('write', { path: `${behavior}.txt`, content: 'x' }), say('ok'))
+      defs.outputs.push(call('write', { path: `${behavior}.txt`, content: 'x' }), say('ok'))
       const result = await orch.runAgentDefinition(request(resolved, thread.id, { source: 'schedule', host: { workspaceRoots: [work], approveToolRequest: approve } }))
       expect(result.status).toBe('completed')
-      expect(JSON.stringify(captured.at(-1)!.messages)).toMatch(/Unattended/)
+      expect(JSON.stringify(defs.captured.at(-1)!.messages)).toMatch(/Unattended/)
       expect(existsSync(join(work, `${behavior}.txt`))).toBe(false)
     }
     expect(approve).not.toHaveBeenCalled()
@@ -242,7 +251,7 @@ describe('definitions through the gateway', () => {
       return approvals.length === 1 ? { status: 'approved', digest: '0'.repeat(64) } : { status: 'approved', digest: approval.argumentDigest }
     }
     const thread = store.createThread('approvals')
-    outputs.push(call('write', { path: 'stale.txt', content: 'stale' }, 'w1'), call('write', { path: 'approved.txt', content: 'exact bytes' }, 'w2'), say('ok'))
+    defs.outputs.push(call('write', { path: 'stale.txt', content: 'stale' }, 'w1'), call('write', { path: 'approved.txt', content: 'exact bytes' }, 'w2'), say('ok'))
     const result = await orch.runAgentDefinition(request(resolved, thread.id, { host: { workspaceRoots: [work], approveToolRequest: approve } }))
     expect(result.status).toBe('completed')
     expect(approvals).toHaveLength(2)
@@ -256,7 +265,8 @@ describe('definitions through the gateway', () => {
     const thread = store.createThread('restart')
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
-    const blocked = installExactDefinitionRuntime({ orchestrator: orch, providerId: PROVIDER, profileHome: home, captured, next: async () => { await gate; return say('late') } })
+    defs.setNext(async () => { await gate; return say('late') })
+    const blocked = defs
     try {
       const pending = orch.runAgentDefinition(request(resolved, thread.id))
       await vi.waitFor(() => expect(blocked.turns).toHaveLength(1))
@@ -272,7 +282,6 @@ describe('definitions through the gateway', () => {
       expect(blocked.turns).toHaveLength(1)
     } finally {
       release()
-      blocked.harness.stop()
     }
   })
 
@@ -282,18 +291,14 @@ describe('definitions through the gateway', () => {
     const thread = store.createThread('busy')
     const held = tryAcquireExecutionLease(store.getThreadDir(thread.id), { source: 'test' })!
     try {
-      outputs.push(say('must not run'))
+      defs.outputs.push(say('must not run'))
       const result = await orch.runAgentDefinition(request(resolved, thread.id))
       expect(result).toMatchObject({ status: 'failed' })
       expect(result.error!.message).toMatch(/running other work/)
-      expect(runtime.turns).toEqual([])
+      expect(defs.turns).toEqual([])
       expect(orch.listQueue(thread.id)).toEqual([])
     } finally {
       releaseExecutionLeaseHandle(held)
     }
   })
 })
-
-function host(runtime: ExactRuntime) {
-  return runtime.turns.at(-1)!.host
-}

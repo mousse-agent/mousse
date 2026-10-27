@@ -29,6 +29,8 @@ export interface ExactRuntimeOptions {
   next?: (context: Context, signal: AbortSignal) => Promise<AssistantMessage>
   outputs?: AssistantMessage[]
   caps?: Partial<HarnessCaps>
+  /** Where the turns are recorded (default: a new list). */
+  turns?: ExactRuntime['turns']
   /** More providers whose `pi:<provider>` instances run on the same exact stand-in. */
   alsoProviders?: string[]
 }
@@ -49,7 +51,7 @@ function blocks<T extends AssistantMessage['content'][number]['type']>(message: 
 
 export function installExactDefinitionRuntime(options: ExactRuntimeOptions): ExactRuntime {
   const instanceId = `pi:${options.providerId}`
-  const turns: ExactRuntime['turns'] = []
+  const turns: ExactRuntime['turns'] = options.turns ?? []
   const outputs = options.outputs ?? []
   const next = options.next ?? (async () => {
     const reply = outputs.shift()

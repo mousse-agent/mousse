@@ -4,6 +4,8 @@ import { createDefinitionRuntime, type DefinitionCheck, type DefinitionRefusal, 
 import { harnessAppError } from '../../src/shared/harness/types'
 import { AppError } from '../../src/shared/errors'
 import { resolvedDefinition } from '../fixtures/agent-platform/agent-runtime-policy/helpers'
+import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import type { TurnInput } from '../../src/mms/run/adapters/ProviderAdapter'
 
 // PR 4 §6 / §16 `definitionRuntime`: candidates are checked before they run, fallbacks only before
 // a tool started, runtime-retried failures are never retried on the same candidate, and the time
@@ -153,5 +155,30 @@ describe('definitionRuntime', () => {
     await vi.waitFor(() => expect(p.turns).toHaveLength(1))
     controller.abort()
     expect(await pending).toMatchObject({ status: 'cancelled', error: { code: 'ABORTED' } })
+  })
+})
+
+describe('the legacy loop and definition turns', () => {
+  it('refuses a definition turn that lacks its authority, its loop, its instructions or a session of its own, before anything runs', async () => {
+    const chat = vi.fn()
+    const adapter = new PiLoopAdapter(() => ({ chat }))
+    const input = { runId: 'r', attemptId: 'a', threadId: 't', cwd: null, instanceId: 'pi:p', model: 'm', llmProvider: 'p', modelPinned: true, mode: 'agent', prompt: 'go', messages: [], signal: new AbortController().signal } as unknown as TurnInput
+    const noop = () => {}
+    const sink = { text: noop, thinking: noop, tool: noop, nativeMessages: noop, compaction: noop, retry: noop, progress: noop, usage: noop, providerRef: noop, steerAccepted: noop, providerMetrics: noop, lineEdits: noop }
+    const authority = { policy: {}, grants: { skills: [], mcpTools: [], builtinTools: [], denied: [] } } as never
+    const loop = { client: () => ({ chat }), budget: {}, effects: {}, actor: { kind: 'agent' }, limitReached: noop } as never
+    const host = (extra: object) => ({ tools: {}, context: { recoverOverflow: () => null, prepareNativeContext: () => null, nativeHistoryAfterTurn: () => '' }, ...extra }) as never
+    const full = { ...input, session: 'ephemeral', instructions: { text: 'SYSTEM', placement: 'replace' } } as TurnInput
+    for (const [turn, extra] of [
+      [full, { definitionLoop: loop }],
+      [full, { definition: authority }],
+      [{ ...full, session: undefined }, { definition: authority, definitionLoop: loop }],
+      [{ ...full, instructions: undefined }, { definition: authority, definitionLoop: loop }],
+      [{ ...full, instructions: { text: 'SYSTEM', placement: 'append' } }, { definition: authority, definitionLoop: loop }],
+      [input, { definition: authority }]
+    ] as Array<[TurnInput, object]>) {
+      await expect(adapter.startTurn(turn, sink, { drainSteer: () => undefined, heartbeat: noop }, host(extra))).rejects.toMatchObject({ code: 'policy_unenforceable' })
+    }
+    expect(chat).not.toHaveBeenCalled()
   })
 })
