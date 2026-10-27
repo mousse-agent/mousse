@@ -667,6 +667,7 @@ const api = {
   storage: {
     policy: (): Promise<{ trash: import('../shared/resourceLifecycle').TrashRetentionPolicy; trashSweepStatus: { suspended: boolean; reason?: string }; policy: import('../shared/storage').StoragePolicy; clockSuspended: boolean }> => storageInvoke('storage:policy'),
     configure: (policy: import('../shared/storage').StoragePolicy): Promise<{ policy: import('../shared/storage').StoragePolicy }> => storageInvoke('storage:configure', policy),
+    cleanupPlan: (): Promise<{ plan: import('../shared/storage').StorageCleanupPlanItem[] }> => storageInvoke('storage:cleanupPlan'),
     cleanupRun: (): Promise<{ report: import('../shared/storage').StorageCleanupReport }> => storageInvoke('storage:cleanupRun'),
     cleanupLastReport: (): Promise<{ report: import('../shared/storage').StorageCleanupReport | null }> => storageInvoke('storage:cleanupLastReport'),
     usage: (options?: { refresh?: boolean }): Promise<import('../shared/storage').StorageUsageSnapshot> => storageInvoke('storage:usage', options)

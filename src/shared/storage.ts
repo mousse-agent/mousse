@@ -16,13 +16,15 @@ export interface StoragePolicy {
 export const STORAGE_POLICY_MAX_DAYS = 3650
 
 /**
- * Remove-with-deleted-threads is on because that is what deleting a thread already does. The other
- * rules are off until the Storage page can show and change them.
+ * What a profile gets until it saves a policy: remove the worktrees of deleted threads (what deleting a
+ * thread already does), remove worktrees inactive for 30 days or already merged, and delete browser
+ * captures after 30 days. Every rule keeps unpublished work, and a profile that already saved a policy
+ * keeps what it saved. The Storage page shows each of these and can turn each off.
  */
 export const STORAGE_POLICY_DEFAULTS: StoragePolicy = {
   schemaVersion: 1,
-  worktrees: { removeWithDeletedThreads: true, inactiveDays: null, removeMerged: false },
-  browser: { captureDays: null }
+  worktrees: { removeWithDeletedThreads: true, inactiveDays: 30, removeMerged: true },
+  browser: { captureDays: 30 }
 }
 
 /** True when any cleanup rule, including automatic trash emptying, would act on a run. */
@@ -75,6 +77,20 @@ export interface StorageCleanupReport {
 }
 
 export const REPORT_ENTRY_LIMIT = 200
+
+/** One line of a dry run: what a run would do with an item right now, and why. Nothing has been changed. */
+export interface StorageCleanupPlanItem {
+  rule: StorageCleanupRule
+  threadId?: string
+  projectId?: string
+  label: string
+  action: 'remove' | 'keep'
+  reason: string
+  /** Space a removal would free (0 for a kept item), measured the way a run measures it. */
+  bytes: number
+  bytesApproximate?: true
+  bytesLowerBound?: true
+}
 
 // ---- Disk usage ----
 

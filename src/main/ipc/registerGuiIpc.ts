@@ -1070,6 +1070,8 @@ export function registerGuiIpc(
   registerStorageHandler('threads:configureTrash', async (_e, policy: { graceDays: number; automaticPurge: boolean }) => guiMms.request('threads.configureTrash', policy))
   registerStorageHandler('storage:policy', async () => guiMms.request('storage.policy', {}))
   registerStorageHandler('storage:configure', async (_e, policy: unknown) => guiMms.request('storage.configure', { policy }))
+  // The dry run measures what a run would remove, so it can take as long as the scan phase of a run.
+  registerStorageHandler('storage:cleanupPlan', async () => guiMms.request('storage.cleanup.plan', {}, 5 * 60_000))
   // A run may purge large trees; it must not hit the 60 s default.
   registerStorageHandler('storage:cleanupRun', async () => guiMms.request('storage.cleanup.run', {}, 15 * 60_000))
   registerStorageHandler('storage:cleanupLastReport', async () => guiMms.request('storage.cleanup.lastReport', {}))

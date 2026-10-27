@@ -75,10 +75,10 @@ describe('StoragePolicyStore', () => {
   it('changes its digest when a rule changes and not when nothing does', () => {
     const f = fixture()
     const defaults = f.policy.digest()
-    f.policy.configure(valid(), true)
+    f.policy.configure(valid({ inactiveDays: 45 }), true)
     const saved = f.policy.digest()
     expect(saved).not.toBe(defaults)
-    f.policy.configure(valid(), true); expect(f.policy.digest()).toBe(saved)
+    f.policy.configure(valid({ inactiveDays: 45 }), true); expect(f.policy.digest()).toBe(saved)
     f.policy.configure(valid({ inactiveDays: 31 }), true); expect(f.policy.digest()).not.toBe(saved)
   })
 
@@ -117,9 +117,9 @@ describe('policy snapshot', () => {
     const f = fixture()
     const before = f.policy.snapshot()
     expect(before).toEqual({ policy: STORAGE_POLICY_DEFAULTS, digest: f.policy.digest() })
-    f.policy.configure(valid(), true)
+    f.policy.configure(valid({ inactiveDays: 45 }), true)
     const after = f.policy.snapshot()
-    expect(after.policy).toEqual(valid()); expect(after.digest).not.toBe(before.digest); expect(after.digest).toBe(f.policy.digest())
+    expect(after.policy).toEqual(valid({ inactiveDays: 45 })); expect(after.digest).not.toBe(before.digest); expect(after.digest).toBe(f.policy.digest())
     expect(before.policy).toEqual(STORAGE_POLICY_DEFAULTS) // an earlier snapshot is not changed by a later save
   })
 })

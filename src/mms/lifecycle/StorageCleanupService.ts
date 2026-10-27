@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, lstatSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, type Dirent } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { TaskLifecycleRecord } from '../../shared/resourceLifecycle'
-import { REPORT_ENTRY_LIMIT, storagePolicyHasRule, type StorageCleanupItem, type StorageCleanupReport, type StoragePolicy } from '../../shared/storage'
+import { REPORT_ENTRY_LIMIT, storagePolicyHasRule, type StorageCleanupItem, type StorageCleanupPlanItem, type StorageCleanupReport, type StoragePolicy } from '../../shared/storage'
 import type { Thread } from '../../shared/types'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
 import { atomicWriteFileSync, atomicWriteJsonSync } from '../data/AtomicFs'
@@ -137,19 +137,8 @@ type DeletedVerdict =
 /** What the content checks found in a checkout that has nothing to keep it for the location and content reasons. */
 type CheckoutFacts = { head: string; beyondBase: number; integrated: boolean }
 
-/** One line of a dry run: what a run would do with an item right now, and why. Nothing has been changed. */
-export interface PlannedCleanup {
-  rule: StorageCleanupItem['rule']
-  threadId?: string
-  projectId?: string
-  label: string
-  action: 'remove' | 'keep'
-  reason: string
-  /** Space a removal would free (0 for a kept item), measured the way a run measures it. */
-  bytes: number
-  bytesApproximate?: true
-  bytesLowerBound?: true
-}
+/** One line of a dry run; the shape the Storage page reads. */
+export type PlannedCleanup = StorageCleanupPlanItem
 
 const approximate = (measurement: Pick<Measurement, 'estimated' | 'partial'>) => ({
   ...(measurement.estimated || measurement.partial ? { bytesApproximate: true as const } : {}),

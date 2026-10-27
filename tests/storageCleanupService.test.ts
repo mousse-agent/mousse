@@ -1491,7 +1491,7 @@ describe('browser capture rows can be traced', () => {
 })
 
 describe('storage defaults', () => {
-  it('ships every time-based and merged rule off', () => {
-    expect(STORAGE_POLICY_DEFAULTS).toEqual({ schemaVersion: 1, worktrees: { removeWithDeletedThreads: true, inactiveDays: null, removeMerged: false }, browser: { captureDays: null } })
+  it('ships the recommended rules on: deleted threads, 30 days inactive, merged work and 30-day captures', () => {
+    expect(STORAGE_POLICY_DEFAULTS).toEqual({ schemaVersion: 1, worktrees: { removeWithDeletedThreads: true, inactiveDays: 30, removeMerged: true }, browser: { captureDays: 30 } })
   })
 })
