@@ -15,7 +15,13 @@ import {
   type ClaimOwnerInput
 } from './ThreadMessageQueue'
 import { withQueueMutationLock } from './ThreadExecutionLease'
+import { recoverQueueJournal, runQueueCommand, type PlannedQueueCommand, type QueueCommandOutcome } from './queueJournal'
 
+/**
+ * One change to a thread's durable queue under its mutation lock. Agent commands the journal holds unfinished
+ * (a crash after their entry was written) are finished first, so every reader and writer of the queue meets it in
+ * the state those commands left it in.
+ */
 export function mutateDurableQueue(
   store: ThreadDataStore,
   threadId: string,
@@ -31,12 +37,29 @@ export function mutateDurableQueue(
 ): QueuedMessage[] {
   const threadDir = store.getThreadDir(threadId)
   return withQueueMutationLock(threadDir, () => {
-    const current = store.loadMessageQueue(threadId)
+    const current = recoverQueueJournal(store, threadId, store.loadMessageQueue(threadId))
     const next = normalizeQueuedMessages(mutator(current), threadId)
     store.saveMessageQueue(threadId, next)
     options?.afterSave?.(next)
     return next
   })
+}
+
+/** Finishes the thread's unfinished agent commands now (boot, the retry of a failed effect, a read that wants the settled queue). */
+export function repairQueueJournal(store: ThreadDataStore, threadId: string): QueuedMessage[] {
+  return mutateDurableQueue(store, threadId, (items) => items)
+}
+
+/** An agent command on a thread's queue, journaled and replayable by `commandKey` (see `queueJournal.ts`). */
+export function runDurableQueueCommand(
+  store: ThreadDataStore,
+  threadId: string,
+  commandKey: string,
+  plan: (items: QueuedMessage[], ctx: { activeRunId: string | null }) => PlannedQueueCommand,
+  fingerprint?: string
+): QueueCommandOutcome {
+  const threadDir = store.getThreadDir(threadId)
+  return withQueueMutationLock(threadDir, () => runQueueCommand(store, threadId, commandKey, store.loadMessageQueue(threadId), plan, fingerprint))
 }
 
 export function readDurableQueue(store: ThreadDataStore, threadId: string): QueuedMessage[] {

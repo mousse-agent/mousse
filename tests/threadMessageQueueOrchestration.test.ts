@@ -89,13 +89,14 @@ describe('OrchestratorService concurrent threads and queue', () => {
 
     const item = orch.enqueueForThread(thread.id, 'please prefer tests')
     expect(orch.promoteQueueItemToSteer(thread.id, item.id)).toBe(true)
-    expect(session.activeTurn.pendingSteer).toContain('please prefer tests')
+    expect(session.activeTurn.pendingSteer).toEqual([expect.objectContaining({ text: 'please prefer tests', itemId: item.id })])
     // The promoted item stays visible as `steering` until the turn's steer
     // drain consumes its content, so abort-before-drain can't lose it and
     // the queue pill can show sticky "Steering" state.
     const retained = orch.listQueue(thread.id).find((i) => i.id === item.id)
     expect(retained?.state).toBe('steering')
-    expect((orch as unknown as { drainSteerForSession: (s: unknown, t: unknown) => string | undefined }).drainSteerForSession(session, session.activeTurn)).toContain('please prefer tests')
+    const drained = (orch as unknown as { drainSteerForSession: (s: unknown, t: unknown) => { entries: Array<{ text: string; itemId?: string }> } | undefined }).drainSteerForSession(session, session.activeTurn)
+    expect(drained?.entries).toEqual([expect.objectContaining({ text: 'please prefer tests', itemId: item.id })])
     // Drain alone is not an acknowledgement: a crash here must leave the steer
     // recoverable. It is removed only after the native checkpoint is durable.
     expect(orch.listQueue(thread.id).find((i) => i.id === item.id)?.state).toBe('steering')
@@ -181,7 +182,7 @@ describe('OrchestratorService concurrent threads and queue', () => {
     const session = orch.getOrCreateSession(thread.id)
     session.activeTurn = { abort: new AbortController(), pendingSteer: [] }
     expect(orch.steerThread(thread.id, 'local-fast')).toBe(true)
-    expect(session.activeTurn.pendingSteer).toContain('local-fast')
+    expect(session.activeTurn.pendingSteer).toEqual([{ text: 'local-fast' }])
   })
 
   it('promotes a queued GUI item for a live external owner', () => {

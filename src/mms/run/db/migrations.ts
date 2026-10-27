@@ -414,5 +414,28 @@ CREATE TABLE approval_rules(
 -- NULL on requests saved before version 14 (they create no rule).
 ALTER TABLE approval_requests ADD COLUMN permission_mode TEXT CHECK(permission_mode IS NULL OR permission_mode IN ('ask','accept_edits','full'));
 `
+  },
+  {
+    version: 15,
+    sql: `
+-- An agent's change to a thread's queued messages (issue #184), written before the queue file changes. 'pending':
+-- the change may not be in the file yet; 'effects_pending': it is, but a side effect (cancelling the item's queued run,
+-- giving its notice rows back) did not commit and is retried; 'applied': done, and the stored result is what a retry of
+-- the same request returns. The intent holds the complete change so an unfinished one is finished from it alone; once
+-- applied it is cut down to what tells a reused request id from a retry, and its result holds no message text. An entry
+-- that cannot be finished after a few tries becomes 'failed' and is left alone; old finished entries are pruned.
+CREATE TABLE queue_commands(
+  command_key TEXT PRIMARY KEY,
+  thread_id   TEXT NOT NULL,
+  intent      TEXT NOT NULL,
+  status      TEXT NOT NULL CHECK(status IN ('pending','effects_pending','applied','failed')),
+  result      TEXT,
+  attempts    INTEGER NOT NULL DEFAULT 0,
+  last_error  TEXT,
+  created_at  TEXT NOT NULL,
+  applied_at  TEXT
+) STRICT;
+CREATE INDEX queue_commands_thread_status ON queue_commands(thread_id, status);
+`
   }
 ]

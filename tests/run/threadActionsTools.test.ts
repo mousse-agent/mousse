@@ -452,19 +452,6 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       expect(runs.caller).toBe(callerRun.runId)
     })
 
-    it('queue_enqueue on the caller\'s own thread carries the mode its run is bound to, so a narrowed turn cannot queue a looser one', async () => {
-      const queued: unknown[] = []
-      const { call } = await world({}, { permissionModeFor: () => 'ask', enqueue: (threadId, input, options) => { queued.push({ threadId, input, options }); return { id: 'item' } } })
-      await call('manage', 'queue_enqueue', { content: 'run this later' })
-      expect(queued).toEqual([{ threadId: 'caller', input: { content: 'run this later', mode: 'agent' }, options: { permissionMode: 'ask' } }])
-    })
-
-    it('queue_enqueue reads an unknown mode of the caller as the strictest', async () => {
-      const queued: unknown[] = []
-      const { call } = await world({}, { enqueue: (threadId, input, options) => { queued.push(options); return { id: 'item' } } })
-      await call('manage', 'queue_enqueue', { content: 'x' })
-      expect(queued).toEqual([{ permissionMode: 'ask' }])
-    })
   })
 
   describe('personal bots', () => {

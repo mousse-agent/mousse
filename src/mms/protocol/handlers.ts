@@ -34,7 +34,7 @@ import { PullRequestWatchError } from '../git/PullRequestWatchService'
 import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest, Thread } from '../../shared/types'
 import { AppError, createErrorProvider, knownAppError } from '../../shared/errors'
 import type { GitOperationHandle } from '../git/GitService'
-import { listClaimedQueue } from '../queue/ThreadMessageQueue'
+import { listClaimedQueue, QueueConflictError, QueueValidationError } from '../queue/ThreadMessageQueue'
 import { formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
 import { withoutStandingRules } from '../orchestrator/UserQuestionService'
 import type { ModelOverride } from '../../shared/providerInstances'
@@ -217,6 +217,21 @@ async function asRpcRejection<T>(run: () => Promise<T> | T): Promise<T> {
     return await run()
   } catch (error) {
     if (error instanceof CommandRejection) throw new DomainRpcError(error.reason, error.message)
+    throw error
+  }
+}
+
+/**
+ * A change to the queue that failed because the queue or the run is not as the caller expects (the conflict's code,
+ * with the ids to read again), or because the message cannot be changed that way (a message a turn started, a workflow
+ * command): the reason reaches the client instead of a generic failure.
+ */
+function queueRpc<T>(run: () => T): T {
+  try {
+    return run()
+  } catch (error) {
+    if (error instanceof QueueConflictError) throw new DomainRpcError(error.code, error.message, error.details)
+    if (error instanceof QueueValidationError) throw new DomainRpcError('queue_change_refused', error.message)
     throw error
   }
 }
@@ -1453,10 +1468,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'queue.list': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
-      const session = ctx.mms.orchestrator.getOrCreateSession(threadId)
+      ctx.mms.orchestrator.getOrCreateSession(threadId)
+      // Read from disk (after an agent command a crash left unfinished is finished): the queue a change that names
+      // the revision is checked against. `open` is false while a merge-back keeps the queue from taking messages.
+      const snapshot = ctx.mms.orchestrator.queueSnapshot(threadId)
       return {
-        items: ctx.mms.orchestrator.listQueue(threadId),
-        claimed: listClaimedQueue(session.queue).filter((item) => !item.internal)
+        items: snapshot.items,
+        claimed: snapshot.claimed,
+        revision: snapshot.revision,
+        open: snapshot.open,
+        ...(snapshot.blockedReason ? { blockedReason: snapshot.blockedReason } : {})
       }
     }
     case 'queue.enqueue': {
@@ -1474,6 +1495,18 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       )
       return { item, items: ctx.mms.orchestrator.listQueue(threadId) }
     }
+    case 'queue.edit': {
+      const p = isObject(params) ? params : {}
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const itemId = asString(p.itemId, 'itemId', 256)
+      const content = asOptionalString(p.content)
+      const mode = asOptionalChatMode(p.mode, 'mode')
+      if (content === undefined && mode === undefined) throw new DomainRpcError('invalid_params', 'queue.edit needs content or mode.')
+      const expectedRevision = asOptionalString(p.expectedRevision, 64)
+      // Who wrote the message and the mode limit it carries stay as they are; the edit changes the text and chat mode only.
+      const item = queueRpc(() => ctx.mms.orchestrator.editQueuedItem(threadId, itemId, { content, mode }, { expectedRevision }))
+      return { item, items: ctx.mms.orchestrator.listQueue(threadId) }
+    }
     case 'queue.reorder': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
@@ -1481,14 +1514,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         unique: true,
         maxItems: 10_000
       })
-      const items = ctx.mms.orchestrator.reorderQueue(threadId, orderedIds)
+      const expectedRevision = asOptionalString(p.expectedRevision, 64)
+      const items = queueRpc(() => ctx.mms.orchestrator.reorderQueue(threadId, orderedIds, { expectedRevision }))
       return { items }
     }
     case 'queue.remove': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       const itemId = asString(p.itemId, 'itemId', 256)
-      const removed = ctx.mms.orchestrator.removeQueuedItem(threadId, itemId)
+      const expectedRevision = asOptionalString(p.expectedRevision, 64)
+      const removed = queueRpc(() => ctx.mms.orchestrator.removeQueuedItem(threadId, itemId, { expectedRevision }))
       if (!removed) {
         const current = ctx.mms.orchestrator
           .getOrCreateSession(threadId)
@@ -1504,7 +1539,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       const itemId = asString(p.itemId, 'itemId', 256)
-      const ok = ctx.mms.orchestrator.promoteQueueItemToSteer(threadId, itemId)
+      const expectedRevision = asOptionalString(p.expectedRevision, 64)
+      const expectedRunId = asOptionalString(p.expectedRunId, 256)
+      // A message an agent wrote keeps the mode limit it carries: a run that runs looser than that limit refuses it.
+      const ok = queueRpc(() => ctx.mms.orchestrator.promoteQueueItemToSteer(threadId, itemId, { expectedRevision, expectedRunId }))
       return { ok, items: ctx.mms.orchestrator.listQueue(threadId) }
     }
     case 'orchestrator.contextUsage': {

@@ -1,17 +1,22 @@
 // Pure queue tables: ordering, claims and recovery rules. No store, orchestrator or daemon.
 import { describe, expect, it } from 'vitest'
+import type { QueuedMessage } from '../src/shared/types'
 import {
+  assertQueueRevision,
   claimNextNormal,
   clearPendingQueue,
   completeClaim,
   demoteSteerItems,
   drainNextNormal,
+  editQueuedMessage,
   dropSteerItems,
   enqueueMessage,
   listClaimedQueue,
   listPendingQueue,
   normalizeQueuedMessages,
   promoteQueuedMessageToSteer,
+  QueueConflictError,
+  queueRevision,
   QueueValidationError,
   reclaimAbandonedClaims,
   releaseClaim,
@@ -349,5 +354,144 @@ describe('ThreadMessageQueue fixed ids and the front of the queue (the continue 
     expect(normalizeQueuedMessages(JSON.parse(JSON.stringify(items)), 't1').find((item) => item.id === 'resume:run:1')).toMatchObject({ continuationOfRunId: 'run:1', order: -1 })
     const reordered = reorderQueuedMessages(items, [b.id, a.id])
     expect(listPendingQueue(reordered).map((item) => item.content)).toEqual(['continue', 'b', 'a'])
+  })
+})
+
+describe('editing, the queue revision and a promotion bound to a run', () => {
+  const agent = { kind: 'agent' as const, threadId: 'sender', runId: 'run-s', hops: 1 }
+  const seed = () => {
+    let items = enqueueMessage([], { threadId: 't1', content: 'first', mode: 'agent' }).items
+    items = enqueueMessage(items, { threadId: 't1', content: 'second', mode: 'plan', images: [{ data: 'aGk=', mimeType: 'image/png' }] }).items
+    return { items, first: items[0], second: items[1] }
+  }
+
+  describe('queueRevision', () => {
+    it('is stable for the same queue and changes with every change to what a caller can act on', () => {
+      const { items, first, second } = seed()
+      const revision = queueRevision(items)
+      expect(queueRevision(structuredClone(items))).toBe(revision)
+      expect(revision).toMatch(/^[0-9a-f]{16}$/)
+      const changes: Array<[string, QueuedMessage[]]> = [
+        ['an add', enqueueMessage(items, { threadId: 't1', content: 'third' }).items],
+        ['an edit of the text', editQueuedMessage(items, first.id, { content: 'first, edited' }).items],
+        ['an edit of the mode', editQueuedMessage(items, first.id, { mode: 'plan' }).items],
+        ['a mode limit', editQueuedMessage(items, first.id, { permissionMode: 'ask' }).items],
+        ['an origin', editQueuedMessage(items, first.id, { origin: agent }).items],
+        ['a removal', removeQueuedMessage(items, first.id).items],
+        ['a reorder', reorderQueuedMessages(items, [second.id, first.id])],
+        ['a promotion', promoteQueuedMessageToSteer(items, first.id).items],
+        ['a claim', claimNextNormal(items, { ownerPid: process.pid, ownerToken: 'tok' }).items]
+      ]
+      for (const [name, changed] of changes) expect(queueRevision(changed), name).not.toBe(revision)
+      // A claim takes the item out of the pending list, as a removal does: the revision is of what can still be changed.
+      expect(queueRevision(claimNextNormal(items, { ownerPid: process.pid, ownerToken: 'tok' }).items)).toBe(queueRevision(removeQueuedMessage(items, first.id).items))
+    })
+
+    it('does not move for an internal item, nor for the order the items are held in', () => {
+      const { items } = seed()
+      const revision = queueRevision(items)
+      const withInternal = enqueueMessage(items, { threadId: 't1', content: 'automatic report', source: 'wake', internal: true }).items
+      expect(queueRevision(withInternal)).toBe(revision)
+      expect(queueRevision([...items].reverse())).toBe(revision)
+    })
+
+    it('assertQueueRevision refuses a stale revision with both revisions, and accepts none or the current one', () => {
+      const { items } = seed()
+      expect(() => assertQueueRevision(items, undefined)).not.toThrow()
+      expect(() => assertQueueRevision(items, queueRevision(items))).not.toThrow()
+      try {
+        assertQueueRevision(items, 'deadbeefdeadbeef')
+        expect.unreachable()
+      } catch (error) {
+        expect(error).toBeInstanceOf(QueueConflictError)
+        expect(error).toMatchObject({ code: 'revision_mismatch', details: { expectedRevision: 'deadbeefdeadbeef', revision: queueRevision(items) } })
+      }
+    })
+  })
+
+  describe('editQueuedMessage', () => {
+    it('changes the text and mode in place: the item keeps its id, place, images and state', () => {
+      const { items, second } = seed()
+      const result = editQueuedMessage(items, second.id, { content: '  second, edited  ', mode: 'agent' })
+      expect(result.item).toMatchObject({ id: second.id, content: 'second, edited', mode: 'agent', order: second.order, state: 'pending', intent: 'normal' })
+      expect(result.item.images).toHaveLength(1)
+      expect(listPendingQueue(result.items).map((item) => item.id)).toEqual(items.map((item) => item.id))
+    })
+
+    it('records who wrote the edited text and the limit it carries, and can drop the run the item owned', () => {
+      const { items, first } = seed()
+      const owned = { ...first, runId: 'run-queued' }
+      const result = editQueuedMessage([owned, items[1]], first.id, { content: 'new words', origin: agent, permissionMode: 'ask', dropRun: true })
+      expect(result.item).toMatchObject({ origin: agent, permissionMode: 'ask' })
+      expect(result.item.runId).toBeUndefined()
+      expect(editQueuedMessage([owned], first.id, { content: 'x' }).item.runId).toBe('run-queued')
+    })
+
+    it('a null origin makes the message a person\'s again, keeps the mode limit, and drops the run made for the agent message', () => {
+      const { items, first } = seed()
+      const agentOwned = editQueuedMessage([{ ...first, runId: 'run-queued' }, items[1]], first.id, { origin: agent, permissionMode: 'ask' }).items
+      const result = editQueuedMessage(agentOwned, first.id, { content: 'new words from a person', origin: null, dropRun: true })
+      expect(result.item.origin).toBeUndefined()
+      expect(result.item).toMatchObject({ content: 'new words from a person', permissionMode: 'ask' })
+      expect(result.item.runId).toBeUndefined()
+      // Without a null the origin stays.
+      expect(editQueuedMessage(agentOwned, first.id, { content: 'x' }).item.origin).toEqual(agent)
+    })
+
+    it('is idempotent against its own effect', () => {
+      const { items, first } = seed()
+      const patch = { content: 'once', origin: agent, permissionMode: 'ask' as const, dropRun: true }
+      const once = editQueuedMessage(items, first.id, patch)
+      expect(editQueuedMessage(once.items, first.id, patch).items).toEqual(once.items)
+    })
+
+    it('refuses an unknown item, a started one, a steering one, an internal one, a workflow command, a notice and empty text', () => {
+      const { items, first } = seed()
+      expect(() => editQueuedMessage(items, 'nope', { content: 'x' })).toThrow(expect.objectContaining({ code: 'queue_item_not_found' }))
+      const claimed = claimNextNormal(items, { ownerPid: process.pid, ownerToken: 'tok' })
+      expect(() => editQueuedMessage(claimed.items, first.id, { content: 'x' })).toThrow(/already started/)
+      const steering = promoteQueuedMessageToSteer(items, first.id).items
+      expect(() => editQueuedMessage(steering, first.id, { content: 'x' })).toThrow(expect.objectContaining({ code: 'item_steering' }))
+      const internal = enqueueMessage([], { threadId: 't1', content: 'automatic', internal: true, source: 'wake' })
+      expect(() => editQueuedMessage(internal.items, internal.item.id, { content: 'x' })).toThrow(QueueValidationError)
+      const workflow = [{ ...first, workflowInvocationId: '123e4567-e89b-42d3-a456-426614174000' }]
+      expect(() => editQueuedMessage(workflow, first.id, { content: 'x' })).toThrow(/workflow command/)
+      const notice = [{ ...first, inboxIds: ['inbox-1'] }]
+      expect(() => editQueuedMessage(notice, first.id, { content: 'x' })).toThrow(/subagent result/)
+      expect(() => editQueuedMessage(items, first.id, { content: '   ' })).toThrow(/content is required/)
+      // An item with images may lose its text.
+      expect(editQueuedMessage(items, items[1].id, { content: ' ' }).item.content).toBe('')
+    })
+  })
+
+  describe('normalization keeps what the queue file holds', () => {
+    it('keeps origin, mode limit and the run a steering item is bound to, and drops a bound run from any other state', () => {
+      const { items, first } = seed()
+      const steering = promoteQueuedMessageToSteer(editQueuedMessage(items, first.id, { origin: agent, permissionMode: 'ask' }).items, first.id, { steerRunId: 'run-a' }).item
+      expect(steering).toMatchObject({ state: 'steering', intent: 'steer', steerRunId: 'run-a', origin: agent, permissionMode: 'ask' })
+      const [loaded] = normalizeQueuedMessages(JSON.parse(JSON.stringify([steering])), 't1')
+      expect(loaded).toMatchObject({ steerRunId: 'run-a', origin: agent, permissionMode: 'ask' })
+      expect(normalizeQueuedMessages([{ ...steering, state: 'pending', intent: 'normal' }], 't1')[0].steerRunId).toBeUndefined()
+    })
+  })
+
+  describe('promotion and demotion', () => {
+    it('binds the promotion to a run and keeps the narrowed mode on the item', () => {
+      const { items, first } = seed()
+      const promoted = promoteQueuedMessageToSteer(items, first.id, { steerRunId: 'run-a', permissionMode: 'ask' })
+      expect(promoted.item).toMatchObject({ intent: 'steer', state: 'steering', steerRunId: 'run-a', permissionMode: 'ask' })
+      expect(promoteQueuedMessageToSteer(items, first.id).item.steerRunId).toBeUndefined()
+    })
+
+    it('demotes the named items only, clears the bound run, and keeps origin and mode limit', () => {
+      const { items, first, second } = seed()
+      const edited = editQueuedMessage(items, first.id, { origin: agent, permissionMode: 'ask' }).items
+      const both = promoteQueuedMessageToSteer(promoteQueuedMessageToSteer(edited, first.id, { steerRunId: 'run-a' }).items, second.id, { steerRunId: 'run-a' }).items
+      const some = demoteSteerItems(both, [first.id])
+      expect(some.find((item) => item.id === first.id)).toMatchObject({ intent: 'normal', state: 'pending', origin: agent, permissionMode: 'ask' })
+      expect(some.find((item) => item.id === first.id)!.steerRunId).toBeUndefined()
+      expect(some.find((item) => item.id === second.id)).toMatchObject({ intent: 'steer', state: 'steering', steerRunId: 'run-a' })
+      expect(demoteSteerItems(both).every((item) => item.intent === 'normal' && item.steerRunId === undefined)).toBe(true)
+    })
   })
 })
