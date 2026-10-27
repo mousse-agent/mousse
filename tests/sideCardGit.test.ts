@@ -191,12 +191,15 @@ describe('shared git status store', () => {
     expect(entry.diffStats?.additions).toBe(4)
   })
 
-  it('fetches paths independently', async () => {
+  it('fetches folders independently, each through its own scope', async () => {
     const git = installGit()
-    await Promise.all([refreshGitStatus('/repo/a'), refreshGitStatus('/repo/b')])
+    await Promise.all([refreshGitStatus('/repo/a', { scope }), refreshGitStatus('/repo/b', { scope: threadScope })])
     expect(git.status).toHaveBeenCalledTimes(2)
-    expect(git.status).toHaveBeenCalledWith(undefined, '/repo/a')
-    expect(git.status).toHaveBeenCalledWith(undefined, '/repo/b')
+    expect(git.status).toHaveBeenCalledWith(scope)
+    expect(git.status).toHaveBeenCalledWith(threadScope)
+    expect(git.log).toHaveBeenCalledWith(expect.any(Number), threadScope)
+    expect(git.branches).toHaveBeenCalledWith(scope)
+    expect(git.diffStats).toHaveBeenCalledWith(threadScope)
   })
 
   it('skips an ordinary request while the data is fresh, but a forced refresh refetches', async () => {

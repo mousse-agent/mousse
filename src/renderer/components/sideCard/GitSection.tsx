@@ -435,7 +435,6 @@ function BranchPicker({ path, scope, status, branches, fileCount, busyLabel, loc
 
 interface CommitButtonProps {
   path: string
-  projectId: string | null
   /** Tells the daemon which folder to commit in, and which rules apply there. */
   scope: GitScope
   branch: string | null
@@ -465,7 +464,7 @@ interface CommitWork {
   phase: CommitPhase
 }
 
-function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, commits, pushable, openPullRequest, commitAvailability, lock, onBegin, onEnd, onActionError, onNotice }: CommitButtonProps) {
+function CommitButton({ path, scope: gitScope, branch, fileCount, commits, pushable, openPullRequest, commitAvailability, lock, onBegin, onEnd, onActionError, onNotice }: CommitButtonProps) {
   const [open, setOpen] = useState(false)
   const { branch: scopeBranch, head } = commitScope(branch, commits)
   const scope = useMemo(() => ({ branch: scopeBranch, head }), [scopeBranch, head])
@@ -527,12 +526,12 @@ function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, com
   useEffect(() => {
     if (!needsPrefill) return
     let current = true
-    window.mousse.git.lastCommitMessage(projectId ?? undefined, path).then(
+    window.mousse.git.lastCommitMessage(gitScope).then(
       (last) => { if (current) setDraft((value) => prefillAmendDraft(value, last)) },
       () => undefined
     )
     return () => { current = false }
-  }, [needsPrefill, path, projectId, scope, setDraft])
+  }, [needsPrefill, gitScope, scope, setDraft])
 
   useEffect(() => {
     if (!amend) setDraft(clearAmendPrefill)
@@ -824,7 +823,7 @@ interface GitSectionViewProps {
   projectId: string | null
   /** The thread whose own worktree `path` is, when it is one; its branch is then fixed. */
   workspaceThreadId?: string | null
-  /** Folder Git runs in; null when there is none. */
+  /** Key of the folder Git runs in (`folderKey`, not a path on disk); null when there is none. */
   path: string | null
   git: GitStatusView
   /** The current branch's pull request lookup; null until it has loaded or when there is no branch. */
@@ -986,7 +985,6 @@ export function GitSectionView({
         )}
         <CommitButton
           path={path}
-          projectId={projectId}
           scope={scope}
           branch={branch}
           fileCount={fileCount}

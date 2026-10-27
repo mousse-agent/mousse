@@ -2,13 +2,14 @@ import type { ThreadPullRequestLink } from '../../shared/pullRequests'
 import { pullRequestReadThreadId } from '../components/sideCard/gitSectionLogic'
 import { useThreadPullRequest, type ThreadPullRequestView } from '../stores/pullRequestStore'
 import { useAppStore } from '../stores/appStore'
+import { gitScopeFor } from '../lib/activeProject'
 import { useGitStatus } from '../stores/gitStatusStore'
 import { useActiveProjectLocation } from './useActiveProjectPath'
 
 export interface ActiveThreadPullRequest extends ThreadPullRequestView {
   location: ReturnType<typeof useActiveProjectLocation>
   git: ReturnType<typeof useGitStatus>
-  /** The folder the pull request is read in; null when the thread has no project. */
+  /** The key of the folder the pull request is read in (`folderKey`, not a path); null when the thread has no project. */
   path: string | null
   projectId: string | null
   /** The thread whose conversation owns the pull request; null for a new chat that follows the composer's project pick. */
@@ -31,8 +32,8 @@ export function useActiveThreadPullRequest(threadId: string | null): ActiveThrea
   const location = useActiveProjectLocation()
   const { projectId } = location
   // A project-less thread has no folder of its own to show Git state for.
-  const path = projectId ? location.path : null
-  const git = useGitStatus(path, projectId)
+  const path = projectId ? location.key : null
+  const git = useGitStatus(path, gitScopeFor(location))
   // A thread's own conversation drafts and receives its pull request. A new chat that follows the composer's
   // project pick has no thread of its own yet; it asks about the project.
   const threadProjectId = useAppStore((state) => state.threads.find((thread) => thread.id === threadId)?.projectId ?? null)

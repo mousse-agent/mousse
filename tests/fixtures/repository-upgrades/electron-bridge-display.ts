@@ -12,7 +12,7 @@ const evidence:Record<string,any>={ok:false,parts:0,foreignParts:0,views:0,api:f
 async function run(){
   await app.whenReady();const gui=new GuiMmsController({homeDir:config.home,endpointOverride:config.endpoint,ownerTokenOverride:config.ownerToken,disableAutoStart:true,requestTimeoutMs:10000});gui.on('error',()=>{})
   let active:BrowserWindow|null=null
-  registerGuiIpc({guiMms:gui,presentation:new PresentationState(),settings:{get:()=>getDefaultSettings()} as never,fileService:{} as never,gitService:{} as never,browserView:{init:()=>{}} as never,repoRoot:config.home},()=>active)
+  registerGuiIpc({guiMms:gui,presentation:new PresentationState(),settings:{get:()=>getDefaultSettings()} as never,browserView:{init:()=>{}} as never,repoRoot:config.home},()=>active)
   const windows=config.profiles.map(()=>new BrowserWindow({show:false,webPreferences:{preload:config.preload,sandbox:false,contextIsolation:true,nodeIntegration:false,backgroundThrottling:false}})),[owner,foreign,device]=windows
   const call=<T=any>(win:BrowserWindow,method:string,params:unknown={}):Promise<T>=>{active=win;return win.webContents.executeJavaScript(`window.mousse.platformRequest.request(${JSON.stringify(method)},${JSON.stringify(params)})`) as Promise<T>}
   const state=()=>owner.webContents.executeJavaScript('window.display.state')

@@ -24,7 +24,7 @@ async function run() {
   // Only IPC transport is under test. Local file/browser/window operations are
   // never invoked; their host services remain inert in this disposable app.
   registerGuiIpc({ guiMms, presentation: new PresentationState(), settings: { get: () => defaults } as never,
-    fileService: {} as never, gitService: {} as never, browserView: { init: () => {} } as never, repoRoot: config.home }, () => win)
+    browserView: { init: () => {} } as never, repoRoot: config.home }, () => win)
   try {
     await guiMms.start()
     await guiMms.prepareWindow(win.webContents)

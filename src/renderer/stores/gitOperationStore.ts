@@ -13,6 +13,8 @@ import { errorText } from '../lib/errorText'
  * A folder shows one action. When a second starts while the first still runs (the daemon queues it
  * behind the first), the first stays on screen with its output and Cancel, and the second waits here
  * and is shown when the first has ended.
+ *
+ * A folder is named by its key (`folderKey`), which the `path` parameters below hold; never a path on disk.
  */
 interface GitOperationStoreState {
   /** What each folder shows. */

@@ -70,7 +70,8 @@ function CommitsSection({
 
 export function GitPanel() {
   const location = useActiveProjectLocation()
-  const { path: projectPath, projectId, workspaceThreadId } = location
+  // `projectPath` is the folder as shown; `folderId` is what its Git state and running actions are cached under.
+  const { path: projectPath, key: folderId, projectId, workspaceThreadId } = location
   // Tells the daemon which folder a Git action belongs to; a thread's own worktree gets the thread's rules.
   const scope = useMemo(() => gitScopeFor({ projectId, workspaceThreadId }), [projectId, workspaceThreadId])
   const projects = useAppStore((state) => state.projects)
@@ -78,7 +79,7 @@ export function GitPanel() {
     () => projects.find((project) => project.id === projectId) ?? projects.find((project) => project.path === projectPath),
     [projectId, projectPath, projects]
   )
-  const { status, commits, loading, refresh } = useGitStatus(projectPath)
+  const { status, commits, loading, refresh } = useGitStatus(folderId, scope)
   const reviewIgnoreWhitespace = useAppStore((state) => state.reviewIgnoreWhitespace)
   // The daemon resolves the folder the status came from: a thread's worktree through the thread,
   // any other project folder through the project.
@@ -125,7 +126,7 @@ export function GitPanel() {
     setGithubNotice('')
     setActivity(IDLE_SYNC_ACTIVITY)
     setRowError('')
-  }, [projectPath])
+  }, [folderId])
 
   // A file that is no longer listed (staged, discarded or committed elsewhere) has no diff to show.
   useEffect(() => {
@@ -148,17 +149,17 @@ export function GitPanel() {
   }, [])
 
   const runSyncAction = useCallback((request: SyncRequest) => {
-    if (!projectPath) return
-    void withBusy(() => runSync(projectPath, scope, request, setActivity))
-  }, [projectPath, scope, withBusy])
+    if (!folderId) return
+    void withBusy(() => runSync(folderId, scope, request, setActivity))
+  }, [folderId, scope, withBusy])
 
   const runFileRequest = useCallback((request: RowRequest) => {
-    if (!projectPath) return
+    if (!folderId) return
     setRowError('')
     // The open file as it was when the button was pressed: the refresh after the action drops a row that moved, so it is read first.
     const before = selectedRef.current
     void withBusy(async () => {
-      const outcome = await runRowAction(projectPath, scope, request)
+      const outcome = await runRowAction(folderId, scope, request)
       if (outcome.kind === 'failed') {
         setRowError(outcome.message)
       } else if (outcome.kind === 'done') {
@@ -168,7 +169,7 @@ export function GitPanel() {
         setSelected((current) => (current === null || current === before ? followed : current))
       }
     })
-  }, [projectPath, scope, withBusy])
+  }, [folderId, scope, withBusy])
 
   const onRowAction = useCallback((action: RowAction, file: GitFileChange) => {
     runFileRequest({ action, files: [file] })
@@ -297,7 +298,7 @@ export function GitPanel() {
   }
 
   const renderSidebarBody = () => {
-    if (!projectPath) return <div className="git-empty">No project open</div>
+    if (!folderId) return <div className="git-empty">No project open</div>
     if (loading) return <div className="git-empty">Loading…</div>
     if (!status?.isRepo) return (
       <div className="github-setup">
@@ -370,7 +371,7 @@ export function GitPanel() {
           </button>
         </div>
 
-        {projectPath && !loading && (
+        {folderId && !loading && (
           <GitSyncBar
             status={status}
             scope={scope}
@@ -381,7 +382,7 @@ export function GitPanel() {
             onAbort={(kind) => runSyncAction({ action: 'abort', kind })}
           />
         )}
-        <GitOperationStatus path={projectPath} />
+        <GitOperationStatus path={folderId} />
         {rowError && <div className="git-changes-error" role="alert">{rowError}</div>}
 
         <div className="git-changes">{renderSidebarBody()}</div>
