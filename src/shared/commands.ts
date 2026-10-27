@@ -13,6 +13,7 @@ export type CommandId =
   | 'thread.next'
   | 'thread.previous'
   | 'threads.search'
+  | 'chat.findInThread'
   | 'run.stop'
   | 'sideCard.toggle'
   | 'terminal.open'
@@ -162,6 +163,20 @@ export const COMMANDS: readonly CommandDefinition[] = [
     textInput: 'allow',
     terminal: 'deny',
     guest: 'allow'
+  },
+  {
+    // The transcript's own find bar. A text field may be focused (the composer); a terminal or the
+    // browser surface keeps the key, and the handler also leaves Monaco its own find widget.
+    id: 'chat.findInThread',
+    title: 'Find in thread',
+    category: 'Thread',
+    searchTerms: ['search', 'text', 'messages', 'transcript'],
+    defaultBinding: `${MOD}+F`,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'deny',
+    guest: 'deny',
+    when: threadIsOpen
   },
   {
     id: 'run.stop',
@@ -669,7 +684,12 @@ export const RESERVED_BINDINGS: readonly ReservedBinding[] = [
   { match: `${MOD}+R`, reason: 'Reloads the window in development builds', hard: false },
   { match: `${MOD}+Shift+R`, reason: 'Reloads the window in development builds', hard: false },
   { match: `${MOD}+Shift+I`, reason: 'Opens developer tools in development builds', hard: false },
-  { match: `${MOD}+F`, reason: 'Reserved for Find in thread (chat.findInThread)', hard: false },
+  {
+    match: `${MOD}+F`,
+    reason: 'Reserved for Find in thread (chat.findInThread)',
+    hard: false,
+    except: ['chat.findInThread']
+  },
   { match: `${MOD}+P`, reason: 'Reserved for Files quick open (files.quickOpen)', hard: false },
   { match: `${MOD}+Shift+F`, reason: 'Reserved for Files text search (files.textSearch)', hard: false },
   {

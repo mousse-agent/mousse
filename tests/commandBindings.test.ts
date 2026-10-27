@@ -361,9 +361,15 @@ describe('findConflicts', () => {
   })
 
   it('warns about a soft-reserved chord with its reason, and not for the command it is kept for', () => {
-    const [conflict] = findConflicts({ 'thread.new': 'CommandOrControl+F' }, 'win32')
+    const conflict = findConflicts({ 'thread.new': 'CommandOrControl+F' }, 'win32').find((entry) => entry.kind === 'reserved')
     expect(conflict).toMatchObject({ kind: 'reserved', command: 'thread.new', hard: false })
     expect(conflict!.kind === 'reserved' && conflict!.reason).toContain('chat.findInThread')
+    // Find in thread keeps Mod+F as its default without a warning, and rebinding another command there clashes with it.
+    expect(findConflicts({}, 'win32')).toEqual([])
+    expect(findConflicts({ 'thread.new': 'CommandOrControl+F' }, 'win32')[0]).toMatchObject({
+      kind: 'command',
+      commands: ['thread.new', 'chat.findInThread']
+    })
     expect(findConflicts({ 'thread.new': 'CommandOrControl+P' }, 'win32')[0]).toMatchObject({ kind: 'reserved', hard: false })
     expect(findConflicts({ 'thread.new': 'CommandOrControl+Shift+F' }, 'win32')[0]).toMatchObject({ kind: 'reserved', hard: false })
     expect(findConflicts({ 'thread.new': 'CommandOrControl+S' }, 'win32')).toEqual([
@@ -448,7 +454,31 @@ describe('the command table', () => {
 
   it('keeps the reserved ids for later features out of the table', () => {
     const ids = COMMANDS.map((command) => command.id as string)
-    for (const id of ['chat.findInThread', 'files.quickOpen', 'files.textSearch']) expect(ids).not.toContain(id)
+    for (const id of ['files.quickOpen', 'files.textSearch']) expect(ids).not.toContain(id)
+  })
+
+  it('binds Find in thread to Mod+F, apart from the palette (Mod+K) and thread search (Mod+Shift+O)', () => {
+    expect(COMMANDS.find((command) => command.id === 'chat.findInThread')).toMatchObject({ title: 'Find in thread', category: 'Thread' })
+    expect(defaultBindingFor('chat.findInThread', 'win32')).toBe('CommandOrControl+F')
+    const win = resolveBindings({}, 'win32')
+    expect(win.get(resolveBinding('CommandOrControl+F', 'win32')!)).toEqual(['chat.findInThread'])
+    expect(win.get(resolveBinding('CommandOrControl+K', 'win32')!)).toEqual(['palette.open'])
+    expect(win.get(resolveBinding('CommandOrControl+Shift+O', 'win32')!)).toEqual(['threads.search'])
+    expect(resolveBindings({}, 'darwin').get(resolveBinding('CommandOrControl+F', 'darwin')!)).toEqual(['chat.findInThread'])
+  })
+
+  it('runs Find in thread from a text field, but not from a terminal, without a thread, or under an overlay', () => {
+    expect(resolve('Ctrl+F')).toBe('chat.findInThread')
+    expect(resolve('Ctrl+F', context({ inTextInput: true }))).toBe('chat.findInThread')
+    expect(resolve('Ctrl+F', context({ inTerminal: true }))).toBeNull()
+    expect(resolve('Ctrl+F', context({ threadOpen: false }))).toBeNull()
+    for (const overlay of ['palette', 'thread-search', 'modal', 'model-picker'] as const) {
+      expect(resolve('Ctrl+F', context({ overlay }))).toBeNull()
+    }
+    expect(resolveCommand(press('Meta+F'), {}, context({ platform: 'darwin' }), everythingRegistered)).toBe('chat.findInThread')
+    expect(resolveCommand(press('Ctrl+F'), {}, context({ platform: 'darwin' }), everythingRegistered)).toBeNull()
+    // Nothing is registered until a transcript is mounted: the key is left alone.
+    expect(resolveCommand(press('Ctrl+F'), {}, context(), (id: CommandId) => id !== 'chat.findInThread')).toBeNull()
   })
 })
 
