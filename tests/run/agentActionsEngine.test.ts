@@ -5,8 +5,9 @@
  * agent's message.
  */
 import { afterEach, describe, expect, it } from 'vitest'
-import { readRunResultText } from '../../src/mms/run/delegation/hold'
+import { deleteRunResults, readRunResultText } from '../../src/mms/run/delegation/hold'
 import { outcomeOfRun } from '../../src/mms/run/delegation/subagentView'
+import type { PermissionMode } from '../../src/shared/permissionMode'
 import { stoppedByPerson, type AgentActor, type RunPause } from '../../src/mms/run/types'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
@@ -157,13 +158,49 @@ describe('agent actions in the Run Engine (SPEC §15.1)', () => {
     })
   })
 
+  /** Binds the run's attempt to `mode`, as the turn does when it starts. */
+  const bindTo = (runId: string, mode: PermissionMode) => {
+    const attempt = fx!.engine.getRun(runId)!.activeAttemptId!
+    fx!.store.setAttemptBinding(attempt, { policy: { permissionMode: mode } } as never)
+  }
+
   describe('steer', () => {
+    it('is refused for a run that has not bound its turn yet, and for a run bound to a looser mode than the sender\'s, inside the transaction', async () => {
+      fx = delegationFixture()
+      const sent = await fx.engine.dispatch({ kind: 'send', threadId: 'target', clientRequestId: 'start', source: 'gui' })
+      if (sent.status !== 'accepted') throw new Error('send rejected')
+      fx.engine.markStarting(sent.runId)
+      // Starting: no binding, so no mode to compare with. Unknown is never "strictest".
+      for (const ceiling of ['ask', 'full'] as const) {
+        const result = await fx.engine.dispatch({ kind: 'steer', threadId: 'target', clientRequestId: `steer-${ceiling}`, runId: sent.runId, actor: actor(), ceiling })
+        expect(result, ceiling).toMatchObject({ status: 'rejected', reason: 'steer_target_not_ready' })
+      }
+      fx.engine.markRunning(sent.runId)
+      bindTo(sent.runId, 'full')
+      const tooStrict = await fx.engine.dispatch({ kind: 'steer', threadId: 'target', clientRequestId: 'steer-ask', runId: sent.runId, actor: actor(), ceiling: 'ask' })
+      expect(tooStrict).toMatchObject({ status: 'rejected', reason: 'ceiling_exceeded' })
+      // Without a ceiling the sender reads as the strictest mode.
+      const none = await fx.engine.dispatch({ kind: 'steer', threadId: 'target', clientRequestId: 'steer-none', runId: sent.runId, actor: actor() })
+      expect(none).toMatchObject({ status: 'rejected', reason: 'ceiling_exceeded' })
+      expect(agentEvents('target')).toEqual([])
+      // Nothing was stored for a refused command: the same id may be used once the run is bound.
+      expect(fx.store.getReceipt('steer-ask')).toBeNull()
+      const ok = await fx.engine.dispatch({ kind: 'steer', threadId: 'target', clientRequestId: 'steer-ask', runId: sent.runId, actor: actor(), ceiling: 'full' })
+      expect(ok).toMatchObject({ status: 'accepted' })
+      // A run bound to a stricter mode than the sender's, or to the same one, takes the steer.
+      const strict = await fx.runningRun('strict')
+      bindTo(strict.runId, 'ask')
+      for (const ceiling of ['ask', 'accept_edits', 'full'] as const)
+        expect(await fx.engine.dispatch({ kind: 'steer', threadId: 'strict', clientRequestId: `steer-strict-${ceiling}`, runId: strict.runId, actor: actor(), ceiling }), ceiling).toMatchObject({ status: 'accepted' })
+    })
+
     it('writes the agent.action event with the steer, with its length and never its text; a replay writes no second', async () => {
       fx = delegationFixture()
       const run = await fx.runningRun('target')
-      const steered = await fx.engine.dispatch({ kind: 'steer', threadId: 'target', clientRequestId: 'steer-1', runId: run.runId, actor: actor(), textLength: 11 })
+      bindTo(run.runId, 'full')
+      const steered = await fx.engine.dispatch({ kind: 'steer', threadId: 'target', clientRequestId: 'steer-1', runId: run.runId, actor: actor(), textLength: 11, ceiling: 'full' })
       expect(steered).toMatchObject({ status: 'accepted', replayed: false })
-      const again = await fx.engine.dispatch({ kind: 'steer', threadId: 'target', clientRequestId: 'steer-1', runId: run.runId, actor: actor(), textLength: 11 })
+      const again = await fx.engine.dispatch({ kind: 'steer', threadId: 'target', clientRequestId: 'steer-1', runId: run.runId, actor: actor(), textLength: 11, ceiling: 'full' })
       expect(again).toMatchObject({ status: 'accepted', replayed: true })
       expect(agentEvents('target')).toEqual([
         expect.objectContaining({ runId: run.runId, payload: { action: 'steered_run', actorThreadId: 'caller', actorRunId: 'run:caller', toolCallId: 'mcp:call-1', runId: run.runId, length: 11 } })
@@ -195,7 +232,7 @@ describe('agent actions in the Run Engine (SPEC §15.1)', () => {
       expect(stoppedByPerson(undefined)).toBe(false)
     })
 
-    it('an integration run an agent stopped leaves no "interrupted" notice for its thread, as a user\'s Stop leaves none', async () => {
+    it('an integration run an agent stopped still leaves its thread the "interrupted" notice (the person may not know), where a user\'s Stop leaves none', async () => {
       fx = delegationFixture()
       const integration = async (threadId: string) => {
         const sent = await fx!.engine.dispatch({ kind: 'send', threadId, clientRequestId: `integrate:${threadId}`, source: 'integration' })
@@ -204,37 +241,96 @@ describe('agent actions in the Run Engine (SPEC §15.1)', () => {
         return fx!.engine.markRunning(sent.runId)
       }
       const inboxRows = (threadId: string) => Number(fx!.store.db.statement('SELECT COUNT(*) AS n FROM inbox WHERE thread_id = ?').get(threadId)?.n)
-      const stopped = await integration('stopped')
-      fx.engine.stopSubtree({ threadId: 'stopped', reason: 'agent', runId: stopped.runId, actor: actor() })
-      fx.engine.markTerminal(stopped.runId, 'interrupted', { interruptedBy: 'user' })
-      expect(fx.engine.getRun(stopped.runId)?.outcome?.interruptedBy).toBe('agent')
-      expect(inboxRows('stopped')).toBe(0)
-      // The same run cut off by something else still owes its thread the notice.
-      const cutOff = await integration('cut-off')
-      fx.engine.markTerminal(cutOff.runId, 'interrupted', { interruptedBy: 'provider' })
-      expect(inboxRows('cut-off')).toBe(1)
+      const byUser = await integration('by-user')
+      fx.engine.stopSubtree({ threadId: 'by-user', reason: 'user', runId: byUser.runId })
+      fx.engine.markTerminal(byUser.runId, 'interrupted', { interruptedBy: 'user' })
+      expect(inboxRows('by-user')).toBe(0)
+      const byAgent = await integration('by-agent')
+      fx.engine.stopSubtree({ threadId: 'by-agent', reason: 'agent', runId: byAgent.runId, actor: actor() })
+      fx.engine.markTerminal(byAgent.runId, 'interrupted', { interruptedBy: 'user' })
+      expect(fx.engine.getRun(byAgent.runId)?.outcome?.interruptedBy).toBe('agent')
+      expect(inboxRows('by-agent')).toBe(1)
+    })
+  })
+
+  describe('a message an agent sent', () => {
+    it('is remembered on its run with the hop count, and never ends a usage-limit pause by starting, however it came to be queued', async () => {
+      fx = delegationFixture()
+      const running = await fx.runningRun('target')
+      // Admitted while the thread was busy, so nothing paused it then.
+      const queued = await fx.engine.dispatch({ kind: 'send', threadId: 'target', clientRequestId: 'send-1', source: 'mcp', prompt: 'x', actor: actor({ hops: 2 }) })
+      if (queued.status !== 'accepted') throw new Error('send rejected')
+      expect(fx.engine.getRun(queued.runId)?.outcome).toMatchObject({ sentByAgent: true, agentHops: 2 })
+      fx.engine.pauseRun({ runId: running.runId, pause: PAUSE })
+      expect(() => fx!.engine.markStarting(queued.runId)).toThrow(/paused/)
+      expect(fx.engine.getRun(running.runId)).toMatchObject({ status: 'paused' })
+      expect(fx.engine.getRun(queued.runId)?.status).toBe('queued')
+      // A person's message queued the same way does end it, as it always did.
+      const typed = await fx.engine.dispatch({ kind: 'send', threadId: 'target', clientRequestId: 'typed', source: 'gui', prompt: 'x' })
+      if (typed.status !== 'accepted') throw new Error('send rejected')
+      fx.engine.markStarting(typed.runId)
+      expect(fx.engine.getRun(running.runId)).toMatchObject({ status: 'cancelled', outcome: { interruptedBy: 'user' } })
     })
   })
 
   describe('the final text of a run', () => {
-    it('is kept for every conversational run, bound to the run it came from', async () => {
+    const mcpRun = async (threadId: string, id: string, extra: { continuationOfRunId?: string; source?: string } = {}) => {
+      const sent = await fx!.engine.dispatch({ kind: 'send', threadId, clientRequestId: id, source: extra.source ?? 'mcp', prompt: 'x', ...(extra.continuationOfRunId ? { continuationOfRunId: extra.continuationOfRunId } : {}) })
+      if (sent.status !== 'accepted') throw new Error('send rejected')
+      return sent
+    }
+
+    it('is kept for a run an agent sent, bound to the run it came from', async () => {
       fx = delegationFixture()
-      const first = await fx.runningRun('target')
+      const first = await mcpRun('target', 'one')
       fx.finish(first.runId, 'first answer')
-      const second = await fx.runningRun('target')
+      const second = await mcpRun('target', 'two')
       fx.finish(second.runId, 'second answer')
       expect(readRunResultText(fx.store, 'target', first.runId)).toBe('first answer')
       expect(readRunResultText(fx.store, 'target', second.runId)).toBe('second answer')
     })
 
-    it('is kept for a run an agent sent, and is cut to the delegation result limit', async () => {
+    it('is not kept for a person\'s own turns (a thread\'s answers to its user, a channel\'s), only for what an agent can wait on', async () => {
       fx = delegationFixture()
-      const sent = await fx.engine.dispatch({ kind: 'send', threadId: 'target', clientRequestId: 'send-1', source: 'mcp', prompt: 'x', actor: actor() })
-      if (sent.status !== 'accepted') throw new Error('send rejected')
+      for (const source of ['gui', 'channel', 'cli', 'protocol', 'schedule']) {
+        const run = await mcpRun(`thread-${source}`, `run-${source}`, { source })
+        fx.finish(run.runId, `the answer to ${source}`)
+        expect(readRunResultText(fx.store, `thread-${source}`, run.runId), source).toBeUndefined()
+      }
+    })
+
+    it('is kept for a subagent\'s run, as it always was, and for the run that continues a run an agent sent', async () => {
+      fx = delegationFixture()
+      const parent = await fx.runningRun('parent')
+      const child = await fx.delegate(parent.runId, 'call-1')
+      fx.finish(child.childRunId, 'the task result')
+      expect(readRunResultText(fx.store, child.childThreadId, child.childRunId)).toBe('the task result')
+
+      const first = await mcpRun('target', 'one')
+      fx.engine.markStarting(first.runId)
+      fx.engine.markRunning(first.runId)
+      fx.engine.pauseRun({ runId: first.runId, pause: PAUSE })
+      const resumed = await mcpRun('target', 'resume', { source: 'resume_now', continuationOfRunId: first.runId })
+      fx.finish(resumed.runId, 'after the pause')
+      expect(readRunResultText(fx.store, 'target', resumed.runId)).toBe('after the pause')
+    })
+
+    it('is cut to the delegation result limit, and removed with the thread\'s other answers by deleteRunResults', async () => {
+      fx = delegationFixture()
+      const sent = await mcpRun('target', 'send-1')
       fx.finish(sent.runId, 'y'.repeat(100_000))
       const text = readRunResultText(fx.store, 'target', sent.runId)
       expect(text?.startsWith('yyyy')).toBe(true)
       expect(text!.length).toBeLessThan(100_000)
+      const other = await mcpRun('target', 'send-2')
+      fx.finish(other.runId, 'another')
+      expect(deleteRunResults(fx.store, 'target', [sent.runId])).toBe(1)
+      expect(readRunResultText(fx.store, 'target', sent.runId)).toBeUndefined()
+      expect(readRunResultText(fx.store, 'target', other.runId)).toBe('another')
+      expect(deleteRunResults(fx.store, 'target')).toBe(1)
+      expect(readRunResultText(fx.store, 'target', other.runId)).toBeUndefined()
+      // The audit trail of the runs stays.
+      expect(fx.engine.listEvents('target').some((event) => event.type === 'run.status')).toBe(true)
     })
 
     it('does not make an `mcp` run the answer of a subagent\'s task', async () => {

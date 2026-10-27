@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events'
 import type { ExecutionBinding } from '../../shared/harness/types'
+import { isStricter, type PermissionMode } from '../../shared/permissionMode'
 import { narrowAgentAccess, type AgentAccessLevel } from '../../shared/settings'
 import { DaemonEpoch } from './DaemonEpoch'
 import { CommandRejection, fail, reject, RunStoreError } from './db/RunStoreError'
@@ -80,7 +81,22 @@ export type RunCommand =
       actor?: AgentActor
     }
   | { kind: 'stop'; threadId: string; clientRequestId: string; runId: string; actor?: AgentActor }
-  | { kind: 'steer'; threadId: string; clientRequestId: string; runId: string; actor?: AgentActor; /** The steer's length, for the audit row (never its text). */ textLength?: number }
+  | {
+      kind: 'steer'
+      threadId: string
+      clientRequestId: string
+      runId: string
+      actor?: AgentActor
+      /** The steer's length, for the audit row (never its text). */
+      textLength?: number
+      /**
+       * With `actor`: the permission mode the sender runs in. Decided inside the transaction against the
+       * mode the run is bound to: a run with no binding yet (it is still starting) is refused
+       * (`steer_target_not_ready`), and so is one bound to a looser mode (`ceiling_exceeded`), because a running
+       * turn cannot be narrowed. Absent with an `actor` reads as the strictest mode.
+       */
+      ceiling?: PermissionMode
+    }
 
 /** The delegation row a follow-up `send` writes with its run (the child thread is the command's). */
 export interface SendDelegation {
@@ -452,7 +468,8 @@ export class RunEngine extends EventEmitter {
       // pause and its timer stay intact.
       const paused = this.store.getPausedRun(run.threadId)
       if (paused) {
-        if (isFencedSource(run.source)) fail('conflict', `Thread ${run.threadId} is paused by run ${paused.runId}.`)
+        // A message another thread's agent sent is never a person's: it waits for the pause to end on its own.
+        if (isFencedSource(run.source) || run.outcome?.sentByAgent) fail('conflict', `Thread ${run.threadId} is paused by run ${paused.runId}.`)
         this.endPause(paused.runId, 'user_message')
       }
       const attemptId =
@@ -1701,14 +1718,17 @@ export class RunEngine extends EventEmitter {
       if (command.bindDelivery && this.approvals.deliverableCount(command.bindDelivery.requestIds) === 0) return refuse('approvals_already_delivered')
       const settlement = command.settleApprovals ? this.approvals.settleForSend(command.threadId, command.settleApprovals) : null
       const continuationOf = command.continuationOfRunId
+      const outcome: RunOutcome = {
+        ...(continuationOf ? { continuationOf, ...(resuming ? { resumedFromPause: command.source === 'resume' ? 'auto' as const : 'user' as const } : {}) } : {}),
+        // Remembered with the run, so a message an agent sent is still known as one when it starts later.
+        ...(command.actor ? { sentByAgent: true as const, agentHops: command.actor.hops ?? 1 } : {})
+      }
       const run = store.createRun({
         threadId: command.threadId,
         source: command.source,
         clientRequestId: command.clientRequestId,
         userMessageId: command.userMessageId,
-        ...(continuationOf
-          ? { outcome: { continuationOf, ...(resuming ? { resumedFromPause: command.source === 'resume' ? 'auto' as const : 'user' as const } : {}) } }
-          : {})
+        ...(Object.keys(outcome).length ? { outcome } : {})
       })
       if (tracked) {
         // Whatever the caller recorded, the row is never wider than any earlier task of this thread.
@@ -1805,6 +1825,15 @@ export class RunEngine extends EventEmitter {
         const sequence = store.maxSeq(threadId)
         this.putReceipt(command, 'ignored', { runId, activeRunId, reason, sequence })
         return { status: 'ignored', reason, runId, activeRunId, sequence }
+      }
+      // An agent's steer joins the live turn as it is: its authority is the run's, which the sender must not
+      // exceed. Decided here, with the run, so no start or binding can slip in between.
+      if (kind === 'steer' && command.actor) {
+        const binding = this.bindingForRun(runId)
+        const refuse = (reason: string): CommandResult => ({ status: 'rejected', reason, sequence: store.maxSeq(threadId) })
+        // A run that has not bound its turn yet has no mode to compare with: unknown, never "strictest".
+        if (!binding) return refuse('steer_target_not_ready')
+        if (isStricter(command.ceiling ?? 'ask', binding.policy.permissionMode ?? 'ask')) return refuse('ceiling_exceeded')
       }
       if (kind === 'stop') {
         const next = store.casRunOutcome({

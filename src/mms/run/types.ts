@@ -66,6 +66,12 @@ export interface RunOutcome {
   stopRequested?: boolean
   /** Set with `stopRequested` (or on a paused run a Stop ends) when an agent asked for the Stop; the terminal write then records `interruptedBy: 'agent'`. */
   stopRequestedBy?: 'agent'
+  /**
+   * Another thread's agent sent the message this run answers (`thread_send`). Such a run never ends a usage-limit
+   * pause by starting, and `agentHops` is how many agent messages in a row led to it.
+   */
+  sentByAgent?: true
+  agentHops?: number
   /** SPEC §16.4: the interrupted run this send continues ("Continue" after a restart). */
   continuationOf?: string
   /** Set while the run is `paused`, and kept after the pause ended. */
@@ -392,6 +398,8 @@ export interface AgentActor {
   threadId: string
   runId: string
   toolCallId: string
+  /** How many agent messages in a row led to this one (the sender's own count plus one); set by the thread owner. */
+  hops?: number
 }
 
 export type InboxKind = 'child_result' | 'restart_note' | 'reconcile_notice' | 'pr_update'
