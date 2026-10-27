@@ -369,10 +369,14 @@ export class GitService {
     return guardedSimpleGit(cwd)
   }
 
-  /** `hooks` keeps the repository's hooks: only for the commit and push the user presses. */
-  private runGit(cwd: string, args: readonly string[], options?: GitRunOptions & { hooks?: boolean }): Promise<GitRun> {
-    const { hooks, ...run } = options ?? {}
-    return runGit(cwd, withoutRepoPrograms(cwd, args, { hooks }), run)
+  /**
+   * `userAction` is for what the user pressed in the Git panel (stage, discard, commit, fetch, pull,
+   * switch, push): the repository's hooks and programs run, as from a terminal. Every other command
+   * here (status polling, diffs, the reads behind them) runs none of them.
+   */
+  private runGit(cwd: string, args: readonly string[], options?: GitRunOptions & { userAction?: boolean }): Promise<GitRun> {
+    const { userAction, ...run } = options ?? {}
+    return runGit(cwd, withoutRepoPrograms(cwd, args, { userAction }), run)
   }
 
   /**
@@ -456,7 +460,8 @@ export class GitService {
     const trace = options.hooks && live ? await HookTrace.start(live.hook) : null
     let run: GitRun
     try {
-      run = await this.runGit(cwd, args, { env: { ...options.env, ...trace?.env }, silenceMs: options.silenceMs, signal: live?.signal, onLine: live?.line, hooks: options.hooks })
+      // Every long action is one the user pressed: fetch, pull, switch, commit, push.
+      run = await this.runGit(cwd, args, { env: { ...options.env, ...trace?.env }, silenceMs: options.silenceMs, signal: live?.signal, onLine: live?.line, userAction: true })
     } finally {
       await trace?.stop()
     }
@@ -723,7 +728,8 @@ export class GitService {
     try {
       const file = join(dir, 'paths')
       await writeFile(file, `${paths.join('\0')}\0`)
-      const run = await this.runGit(cwd, [...command, `--pathspec-from-file=${file}`, '--pathspec-file-nul'], { env: { GIT_LITERAL_PATHSPECS: '1' } })
+      // Stage, unstage and discard: the user's own actions.
+      const run = await this.runGit(cwd, [...command, `--pathspec-from-file=${file}`, '--pathspec-file-nul'], { env: { GIT_LITERAL_PATHSPECS: '1' }, userAction: true })
       if (!run.ok) throw failure(fail, run)
     } finally {
       await rm(dir, { recursive: true, force: true }).catch(() => undefined)
@@ -741,7 +747,7 @@ export class GitService {
 
   async stageAll(cwd: string): Promise<void> {
     await this.serialized(cwd, async () => {
-      const run = await this.runGit(await this.toplevel(cwd), ['add', '-A'])
+      const run = await this.runGit(await this.toplevel(cwd), ['add', '-A'], { userAction: true })
       if (!run.ok) throw failure('git_failed', run)
     })
   }
@@ -766,7 +772,7 @@ export class GitService {
     await this.serialized(cwd, async () => {
       const top = await this.toplevel(cwd)
       const unborn = !await this.hasHead(top)
-      const run = await this.runGit(top, unborn ? ['rm', '--cached', '-r', '-f', '--ignore-unmatch', '-q', '--', '.'] : ['restore', '--staged', '--', '.'])
+      const run = await this.runGit(top, unborn ? ['rm', '--cached', '-r', '-f', '--ignore-unmatch', '-q', '--', '.'] : ['restore', '--staged', '--', '.'], { userAction: true })
       if (!run.ok) throw failure('git_failed', run)
     })
   }
@@ -904,7 +910,7 @@ export class GitService {
   /** Gives up a merge or rebase that stopped on conflicts. Only ever called by an explicit user action. */
   async abortInProgress(cwd: string, kind: 'merge' | 'rebase'): Promise<void> {
     await this.serialized(cwd, async () => {
-      const run = await this.runGit(cwd, [kind, '--abort'])
+      const run = await this.runGit(cwd, [kind, '--abort'], { userAction: true })
       if (!run.ok) throw failure('git_failed', run)
     })
   }
@@ -1094,7 +1100,7 @@ export class GitService {
       }
       const stashRef = () => this.read(cwd, ['rev-parse', '-q', '--verify', 'refs/stash'])
       const before = await stashRef()
-      const push = await this.runGit(cwd, ['stash', 'push', '-u', '-m', `mousse: switch to ${branch}`])
+      const push = await this.runGit(cwd, ['stash', 'push', '-u', '-m', `mousse: switch to ${branch}`], { userAction: true })
       // With nothing to stash Git exits 0 and says so; popping then would apply an older, unrelated stash.
       const stashed = await stashRef() !== before
       if (!push.ok) {
@@ -1119,9 +1125,9 @@ export class GitService {
    * touching anything, and the plain pop still brings the edits back. False means the stash is kept.
    */
   private async popStash(cwd: string): Promise<boolean> {
-    const indexed = await this.runGit(cwd, ['stash', 'pop', '--index'])
+    const indexed = await this.runGit(cwd, ['stash', 'pop', '--index'], { userAction: true })
     if (indexed.ok) return true
-    if (/Conflicts in index|Try without --index/i.test(indexed.output)) return (await this.runGit(cwd, ['stash', 'pop'])).ok
+    if (/Conflicts in index|Try without --index/i.test(indexed.output)) return (await this.runGit(cwd, ['stash', 'pop'], { userAction: true })).ok
     return false
   }
 
@@ -1155,7 +1161,7 @@ export class GitService {
         if (!tree.ok) throw failure('git_commit_failed', tree)
         snapshot = tree.stdout.trim()
         // From the top of the repository: the project can be a subfolder, and the checkpoint that follows sweeps the whole tree.
-        const add = await this.runGit(await this.toplevel(cwd), ['add', '-A', ...(options.all ? ['--', '.', ':(exclude).mousse/**'] : [])])
+        const add = await this.runGit(await this.toplevel(cwd), ['add', '-A', ...(options.all ? ['--', '.', ':(exclude).mousse/**'] : [])], { userAction: true })
         if (!add.ok) {
           await this.restoreIndex(cwd, snapshot, add)
           throw failure('git_commit_failed', add)
@@ -1190,7 +1196,7 @@ export class GitService {
 
   /** Puts the index back as it was before `add -A`. If that fails the caller is told, because everything is staged now. */
   private async restoreIndex(cwd: string, tree: string, cause: GitRun): Promise<void> {
-    const run = await this.runGit(cwd, ['read-tree', tree])
+    const run = await this.runGit(cwd, ['read-tree', tree], { userAction: true })
     if (!run.ok) throw gitErrors.create('git_index_restore_failed', redactGitText(`${cause.output}
 ${run.output}`))
   }

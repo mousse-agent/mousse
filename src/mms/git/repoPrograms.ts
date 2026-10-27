@@ -12,7 +12,8 @@ import { NO_HOOKS_PATH } from './gitNullDevice'
  * it wrote. The user's global and system configuration is theirs, so the user's identity, line endings,
  * Git LFS (installed globally or by Git for Windows), credential helpers and signing keep working.
  *
- * Every command gets `-c` settings that:
+ * Every command Mousse runs by itself (checkpoints, restore and undo, status polling, diffs, worktree
+ * creation and removal, agent-triggered reads) gets `-c` settings that:
  * - turn hooks off (`core.hooksPath` to a folder that cannot exist, {@link NO_HOOKS_PATH}, and every event's config-defined hooks), so a
  *   husky-style relative hooks path, a `post-commit` that `--no-verify` does not skip, or a `.git` file
  *   pointing at a planted hooks folder never runs;
@@ -20,12 +21,19 @@ import { NO_HOOKS_PATH } from './gitNullDevice'
  *   submodule's own configuration would apply;
  * - for each program the repository's own config names (filter drivers, diff and merge drivers, ssh,
  *   askpass, editor, signing programs, upload/receive-pack, credential helpers), put back the user's
- *   value for that key, or a value that runs nothing. A filter driver the repository defines is
- *   emptied and not required, so its files are read and written as stored.
+ *   value for that key, or a value that runs nothing. A filter driver only the repository defines
+ *   (git-crypt, a `git lfs install --local`, nbstripout) is emptied. A read compares its files as
+ *   stored (`required=false`); a command that writes the index or the working tree keeps it required,
+ *   so Git refuses those files instead of storing them unfiltered ({@link filterRefusal}).
  *
- * The settings reach every Git process the command starts (Git passes `-c` on to its children).
- * Diff-producing commands also add {@link NO_DIFF_PROGRAMS}. The commit and push the user presses in
- * the Git panel keep the repository's hooks (`hooks: true`), as a commit from a terminal would.
+ * The settings are worked out for each command, so a config written between two commands is seen,
+ * and they reach every Git process the command starts (Git passes `-c` on to its children). One race
+ * remains: config written between the check and Git reading it. Diff-producing commands also add
+ * {@link NO_DIFF_PROGRAMS}.
+ *
+ * The actions the user presses in the Git panel (stage, discard, commit, fetch, pull, switch, push)
+ * are theirs, as in a terminal: `userAction` keeps the repository's hooks and programs (a per-repo
+ * `core.sshCommand` for a second account, git-crypt, a signing program). Only the fixed settings apply.
  */
 
 /** Every hook event in githooks(5); each is turned off by name, which `core.hooksPath` does not reach. */
@@ -42,10 +50,35 @@ export const NO_DIFF_PROGRAMS = ['--no-ext-diff', '--no-textconv'] as const
 
 export interface RepoProgramOptions {
   /**
-   * Keep the repository's hooks. Only for the commit and push the user presses in the Git panel, whose
-   * hook output and rejection are shown to them. Every other setting still applies.
+   * An action the user pressed in the Git panel: the repository's hooks and programs run, as they
+   * would from a terminal. Only the fixed settings (no fsmonitor, no `ext::`, no submodules) apply.
    */
-  hooks?: boolean
+  userAction?: boolean
+}
+
+/** Subcommands that write the index, objects from files, or the working tree through filters. */
+const WRITES = new Set([
+  'add', 'commit', 'checkout', 'switch', 'restore', 'reset', 'stash', 'merge', 'pull', 'rebase', 'cherry-pick',
+  'revert', 'am', 'apply', 'read-tree', 'checkout-index', 'update-index', 'sparse-checkout', 'clone', 'mv'
+])
+
+/** Global options that take a value as the next argument. */
+const OPTIONS_WITH_VALUE = new Set(['-c', '-C', '--git-dir', '--work-tree', '--namespace', '--config-env', '--exec-path'])
+
+/** The subcommand and its arguments, past Git's own options. */
+function subcommand(args: readonly string[]): readonly string[] {
+  let index = 0
+  while (index < args.length && args[index]!.startsWith('-')) index += OPTIONS_WITH_VALUE.has(args[index]!) ? 2 : 1
+  return args.slice(index)
+}
+
+/** Whether a command can write files through a filter into the index, the object store or the worktree. */
+export function writesThroughFilters(args: readonly string[]): boolean {
+  const [command, ...rest] = subcommand(args)
+  if (!command) return false
+  if (command === 'worktree') return rest[0] === 'add'
+  if (command === 'hash-object') return rest.includes('-w')
+  return WRITES.has(command)
 }
 
 /** Settings that do not depend on the repository. */
@@ -91,9 +124,13 @@ interface ConfigEntry { scope: string; origin: string; key: string; value: strin
 interface RepoPrograms {
   /** `key=value` settings for the repository's own programs. */
   overrides: string[]
+  /** Filter drivers only the repository defines, emptied in `overrides`. */
+  emptiedFilters: string[]
   /** Hooks named in config (`hook.<name>.*`), turned off by name. */
   hookNames: string[]
 }
+
+const NONE: RepoPrograms = { overrides: [], emptiedFilters: [], hookNames: [] }
 
 /** Thrown instead of running Git when the repository configures a program that cannot be turned off. */
 export class RepoProgramError extends Error {}
@@ -150,23 +187,50 @@ export function repoProgramOverrides(entries: readonly ConfigEntry[]): RepoProgr
     const filter = /^filter\.(.+)\.(clean|smudge|process)$/.exec(entry.key)
     if (filter && own == null) emptiedFilters.add(filter[1]!)
   }
-  for (const name of emptiedFilters) overrides.push(setting(`filter.${name}.required`, 'false'))
   if (credentials) {
-    // An empty helper clears the list; the user's own helpers are then added back in their order.
+    // An empty helper clears the list; the user's own entries are then added back in their order,
+    // their own empty resets included (`gh auth setup-git` clears the list for github.com).
     overrides.push('credential.helper=')
-    for (const entry of entries) if (trusted(entry) && CREDENTIAL_HELPER.test(entry.key) && entry.value) overrides.push(setting(entry.key, entry.value))
+    for (const entry of entries) if (trusted(entry) && CREDENTIAL_HELPER.test(entry.key) && entry.value !== null) overrides.push(setting(entry.key, entry.value))
   }
-  return { overrides, hookNames: [...hookNames] }
+  // A hook whose name cannot be written as `-c` is still off: every event is turned off by name.
+  return { overrides, emptiedFilters: [...emptiedFilters], hookNames: [...hookNames].filter((name) => !/[=\n\r\0]/.test(name)) }
 }
 
 interface Cached { watched: Array<readonly [string, string]>; programs: RepoPrograms }
 
 const cache = new Map<string, Cached>()
 const CACHE_LIMIT = 256
+let probes = 0
 
+/** For tests: how many times a repository's config has been read rather than taken from the cache. */
+export function repoProgramProbes(): number {
+  return probes
+}
+
+/**
+ * What a watched path is now. A folder is known by its identity only: Git changes a `.git` folder's
+ * times on every `index.lock`, and the config files in it are watched one by one.
+ */
 function signature(path: string): string {
   const stat = statSync(path, { bigint: true, throwIfNoEntry: false })
-  return stat ? `${stat.mtimeNs}:${stat.ctimeNs}:${stat.size}:${stat.ino}` : '-'
+  if (!stat) return '-'
+  return stat.isDirectory() ? `dir:${stat.dev}:${stat.ino}` : `${stat.mtimeNs}:${stat.ctimeNs}:${stat.size}:${stat.ino}`
+}
+
+/** Every `.git` from `dir` up to the root (or to `top`): a new one would make Git find another repository. */
+function dotGitsUpFrom(dir: string, top?: string): string[] {
+  const paths: string[] = []
+  for (let current = dir; ; current = dirname(current)) {
+    paths.push(join(current, '.git'))
+    if ((top && resolve(current) === resolve(top)) || dirname(current) === current) break
+  }
+  return paths
+}
+
+function remember(key: string, paths: Iterable<string>, programs: RepoPrograms): void {
+  if (cache.size >= CACHE_LIMIT) cache.delete(cache.keys().next().value!)
+  cache.set(key, { watched: [...new Set(paths)].map((path) => [path, signature(path)] as const), programs })
 }
 
 function bareGit(cwd: string, args: string[]): { ok: boolean; stdout: string } {
@@ -185,10 +249,15 @@ function programsFor(cwd: string): RepoPrograms {
   const hit = cache.get(key)
   if (hit && hit.watched.every(([path, sig]) => signature(path) === sig)) return hit.programs
   cache.delete(key)
+  probes += 1
   const where = bareGit(key, ['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir', '--show-toplevel'])
+  // Not a repository: nothing of a repository's own can run. Remembered until a `.git` appears above it.
+  if (!where.ok) {
+    remember(key, [key, ...dotGitsUpFrom(key)], NONE)
+    return NONE
+  }
   const listing = bareGit(key, ['config', '--null', '--show-scope', '--show-origin', '--list'])
-  // Not a repository (or not readable): nothing of a repository's own can run.
-  if (!listing.ok) return { overrides: [], hookNames: [] }
+  if (!listing.ok) return NONE
   const entries = parseConfig(listing.stdout)
   const programs = repoProgramOverrides(entries)
   const [gitDir, commonDir, top] = where.stdout.split(/\r?\n/).map((line) => line.trim())
@@ -196,26 +265,37 @@ function programsFor(cwd: string): RepoPrograms {
   if (where.ok && gitDir && commonDir && top && !includes) {
     const paths = new Set<string>([join(gitDir, 'config'), join(gitDir, 'config.worktree'), join(gitDir, 'commondir'), join(commonDir, 'config')])
     for (const entry of entries) if (entry.origin.startsWith('file:')) paths.add(resolve(key, entry.origin.slice(5)))
-    for (let dir = key; ; dir = dirname(dir)) {
-      paths.add(join(dir, '.git'))
-      if (resolve(dir) === resolve(top) || dirname(dir) === dir) break
-    }
-    if (cache.size >= CACHE_LIMIT) cache.delete(cache.keys().next().value!)
-    cache.set(key, { watched: [...paths].map((path) => [path, signature(path)] as const), programs })
+    for (const path of dotGitsUpFrom(key, top)) paths.add(path)
+    remember(key, paths, programs)
   }
   return programs
 }
 
-/** The `key=value` settings for a Git command in `cwd` (simple-git's `config` option takes these). */
-export function repoProgramSettings(cwd: string, options: RepoProgramOptions = {}): string[] {
+/**
+ * The `key=value` settings for a Git command in `cwd`. `write` keeps an emptied filter required (see
+ * {@link writesThroughFilters}).
+ */
+export function repoProgramSettings(cwd: string, options: RepoProgramOptions & { write?: boolean } = {}): string[] {
+  if (options.userAction) return [...FIXED]
   const programs = programsFor(cwd)
-  const hooks = options.hooks ? [] : [...HOOKS_OFF, ...programs.hookNames.filter((name) => !(HOOK_EVENTS as readonly string[]).includes(name)).map((name) => setting(`hook.${name}.enabled`, 'false'))]
-  return [...FIXED, ...hooks, ...programs.overrides]
+  const hooks = [...HOOKS_OFF, ...programs.hookNames.filter((name) => !(HOOK_EVENTS as readonly string[]).includes(name)).map((name) => `hook.${name}.enabled=false`)]
+  const required = programs.emptiedFilters.map((name) => `filter.${name}.required=${options.write ? 'true' : 'false'}`)
+  return [...FIXED, ...hooks, ...programs.overrides, ...required]
 }
 
-/** `-c` arguments that go before the Git subcommand. */
-export function noRepoProgramArgs(cwd: string, options?: RepoProgramOptions): string[] {
-  return repoProgramSettings(cwd, options).flatMap((value) => ['-c', value])
+/** `-c` arguments that go before the Git subcommand `args`. */
+export function noRepoProgramArgs(cwd: string, args: readonly string[], options?: RepoProgramOptions): string[] {
+  return repoProgramSettings(cwd, { ...options, write: writesThroughFilters(args) }).flatMap((value) => ['-c', value])
+}
+
+/**
+ * A clear message for Git refusing to write files whose filter only the repository defines, or null
+ * when `output` is not that refusal.
+ */
+export function filterRefusal(output: string): string | null {
+  const match = /(?:clean|smudge) filter '([^']+)' failed/.exec(output)
+  if (!match) return null
+  return `This repository's own config defines the "${match[1]}" filter (git-crypt or a local Git LFS install, for example). Mousse does not run programs from a repository's own config, so it left these files alone instead of storing them unfiltered. Run this from a terminal, or install the filter in your global Git config.`
 }
 
 /**
@@ -225,32 +305,47 @@ export function noRepoProgramArgs(cwd: string, options?: RepoProgramOptions): st
  */
 export function withoutRepoPrograms(cwd: string, args: readonly string[], options?: RepoProgramOptions): string[] {
   if (args[0] === 'config') return [...args]
-  return [...noRepoProgramArgs(cwd, options), ...args]
+  return [...noRepoProgramArgs(cwd, args, options), ...args]
 }
 
+const UNSAFE_ALLOWED = {
+  allowUnsafeHooksPath: true,
+  allowUnsafeFsMonitor: true,
+  allowUnsafeFilter: true,
+  allowUnsafeDiffTextConv: true,
+  allowUnsafeDiffExternal: true,
+  allowUnsafeMergeDriver: true,
+  allowUnsafeSshCommand: true,
+  allowUnsafeAskPass: true,
+  allowUnsafeEditor: true,
+  allowUnsafeGpgProgram: true,
+  allowUnsafePack: true,
+  allowUnsafeCredentialHelper: true,
+  allowUnsafeProtocolOverride: true
+} as const
+
 /**
- * simple-git for `cwd` with the settings applied. simple-git refuses these keys unless allowed; they
- * are only ever set to the values above, never to a caller's.
+ * simple-git for `cwd`. Each method call gets a fresh instance with the settings worked out for that
+ * command, so a config written after an earlier call is seen. simple-git refuses these keys unless
+ * allowed; they are only ever set to the values above, never to a caller's.
  */
 export function guardedSimpleGit(cwd: string, options: Partial<Omit<SimpleGitOptions, 'baseDir' | 'config' | 'unsafe'>> = {}): SimpleGit {
-  return simpleGit({
+  const forCommand = (args: readonly string[]): SimpleGit => simpleGit({
     ...options,
     baseDir: cwd,
-    config: repoProgramSettings(cwd),
-    unsafe: {
-      allowUnsafeHooksPath: true,
-      allowUnsafeFsMonitor: true,
-      allowUnsafeFilter: true,
-      allowUnsafeDiffTextConv: true,
-      allowUnsafeDiffExternal: true,
-      allowUnsafeMergeDriver: true,
-      allowUnsafeSshCommand: true,
-      allowUnsafeAskPass: true,
-      allowUnsafeEditor: true,
-      allowUnsafeGpgProgram: true,
-      allowUnsafePack: true,
-      allowUnsafeCredentialHelper: true,
-      allowUnsafeProtocolOverride: true
+    config: repoProgramSettings(cwd, { write: writesThroughFilters(args) }),
+    unsafe: UNSAFE_ALLOWED
+  })
+  return new Proxy({} as SimpleGit, {
+    get(_target, key) {
+      // Not a thenable: awaiting the instance itself must not call a Git method.
+      if (key === 'then' || typeof key === 'symbol') return undefined
+      return (...parameters: unknown[]) => {
+        // Only `raw` takes free-form arguments; every other method used here only reads.
+        const args = key === 'raw' ? parameters.flat().filter((value): value is string => typeof value === 'string') : []
+        const instance = forCommand(args) as unknown as Record<string, (...values: unknown[]) => unknown>
+        return instance[key]!(...parameters)
+      }
     }
   })
 }
