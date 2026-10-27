@@ -36,6 +36,12 @@ export interface ApprovalSubject {
   threadId: string
   action: PermissionAction
   permissionKey: string
+  /**
+   * Why the provider asks, when it asks for something only a person may allow (Claude Code's own safety check under
+   * Full access, a path outside the allowed folders, one of the user's own ask rules, a refusal to be remembered).
+   * Any reason makes the request a person's alone: no agent answers it.
+   */
+  reason?: string | null
 }
 
 /** What the answer says: allow or reject, and for an allow, once or for the thread (`always`). */
@@ -46,6 +52,8 @@ export interface ApprovalAnswer {
 
 export type ApprovalRefusal =
   | 'own_request'
+  | 'person_only'
+  | 'person_turn'
   | 'not_parent'
   | 'approvals_disabled'
   | 'project_not_allowed'
@@ -113,12 +121,20 @@ export function canAnswerApproval(
     return { ok: true }
   }
   if (request.threadId === answerer.threadId) return { ok: false, code: 'own_request' }
+  // A request Claude Code (or the provider) will not let anything but a person answer, in any mode: no agent answers it,
+  // not even the parent of the subagent that asked. This is the set a standing rule never answers either.
+  if (request.reason) return { ok: false, code: 'person_only' }
   const link = lineage(request.threadId)
   const ownSubagent = link !== null && link.parentThreadId === answerer.threadId && link.relationship === 'subagent'
   if (!ownSubagent) {
     const access = answerer.access
     if (!access || access.level !== 'manage') return { ok: false, code: 'not_parent' }
-    if (ancestorsOf(request.threadId, lineage).includes(answerer.threadId) || ancestorsOf(answerer.threadId, lineage).includes(request.threadId))
+    // A subagent is answered by its parent alone. Nothing in the answerer's own lineage is answered through the access
+    // branch: not below it, not above it, and not beside it (a sibling or cousin shares an ancestor with it).
+    if (link !== null && link.relationship === 'subagent') return { ok: false, code: 'not_parent' }
+    const above = ancestorsOf(request.threadId, lineage)
+    const mine = ancestorsOf(answerer.threadId, lineage)
+    if (above.includes(answerer.threadId) || mine.includes(request.threadId) || above.some((id) => mine.includes(id)))
       return { ok: false, code: 'not_parent' }
     if (!access.answerApprovals) return { ok: false, code: 'approvals_disabled' }
     let projectAllowed = false
@@ -138,6 +154,8 @@ export function canAnswerApproval(
 export function describeApprovalRefusal(code: ApprovalRefusal): string {
   switch (code) {
     case 'own_request': return 'An agent cannot answer its own approval request; the user does.'
+    case 'person_only': return 'The provider asks for this itself (its own safety check, a path outside the allowed folders, or a rule the user made), so only the user can answer it.'
+    case 'person_turn': return 'The user started the turn that asks, so the user answers it. Agents answer for turns that agents, jobs or subagents started.'
     case 'not_parent': return 'Only the parent of a subagent can answer its approval requests.'
     case 'approvals_disabled': return 'The user has not allowed agents to answer approvals on other threads (Settings > Agents). Ask the user to answer it.'
     case 'project_not_allowed': return 'That thread is in a project the user has not given agents access to. Ask the user to answer it.'

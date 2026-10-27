@@ -341,8 +341,8 @@ function acceptedRunCommand(result: AgentRunCommandResult, expectedRunId: string
   }
 }
 
-/** The most characters of one answer an agent may give (the reason it rejects with). */
-const APPROVAL_ANSWER_MAX_CHARS = 2000
+/** The most characters of one answer an agent may give (a note on a rejection; the settlement keeps a shorter one). */
+const APPROVAL_ANSWER_MAX_CHARS = 500
 
 /** `answers` of `approval_respond`: question ids mapped to an option id, a list of them, or text. */
 function approvalAnswers(value: unknown): UserQuestionAnswers {
@@ -822,7 +822,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
     },
     {
       name: 'approval_respond',
-      description: `Answer a pending approval of another thread (a command, a file change or a tool its agent asked to run), as the user would. Needs the manage agent access level, a project the profile allows AND the profile's switch "Agents may answer approvals on other threads", which is off by default; a refusal names what is missing. You can approve only what your own permission mode would allow without asking, never your own thread's request (nor one of a thread in your lineage other than your direct subagents', which answer_subagent covers), and never "always for this thread": approve once or reject. Read the request first with thread_list (with manage it lists each thread's pending requests with their option ids), then answer with the question id and the option id. The thread's transcript shows "Approved by an agent in thread ..." and the user sees who answered. A plain question for the user (ask_user) cannot be answered here. If a person or another agent answered first you get already_answered with who decided what, and nothing changes.`,
+      description: `Answer a pending approval of another thread (a command, a file change or a tool its agent asked to run), as the user would. Needs the manage agent access level, a project the profile allows AND the profile's switch "Agents may answer approvals on other threads", which is off by default; a refusal names what is missing. You can approve only what your own permission mode would allow without asking, never your own thread's request (nor one of a thread in your lineage other than your direct subagents', which answer_subagent covers), and never "always for this thread": approve once or reject. Read the request first with thread_list (with manage it lists each thread's pending requests with their option ids), then answer with the question id and the option id. The thread's transcript shows "Approved by an agent in thread ..." and the user sees who answered. A request the provider asks for itself (its own safety check, a path outside the allowed folders, one of the user's own ask rules) and one on a turn the user started are the user's alone; they are refused. A plain question for the user (ask_user) cannot be answered here. If a person or another agent answered first you get already_answered with who decided what, and nothing changes.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -830,7 +830,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
           requestId: { type: 'string', description: 'The request id from thread_list.' },
           answers: {
             type: 'object',
-            description: 'The question id of the request mapped to the chosen option id (an approval has one question). Text that is no option rejects the request and is given to its agent as the reason.',
+            description: 'The question id of the request mapped to the chosen option id (an approval has one question). Text that is no option rejects the request; a short note of it (up to 200 characters) is passed on to its agent, labelled as coming from an agent, not from the user.',
             additionalProperties: { oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] }
           },
           clientRequestId: CLIENT_REQUEST_ID_SCHEMA

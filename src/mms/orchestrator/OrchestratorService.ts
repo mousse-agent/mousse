@@ -167,8 +167,8 @@ import {
   type PermissionMode
 } from '../../shared/permissionMode'
 import { describeApprovalRefusal, startedByPerson, type Answerer } from '../run/approvalRights'
-import { formatApprovalDecisions } from '../run/approvalNote'
-import type { ApprovalRecord, ContinuationDue } from '../run/ThreadApprovals'
+import { describeApproval, formatApprovalDecisions } from '../run/approvalNote'
+import { agentNoteOf, type ApprovalRecord, type ContinuationDue } from '../run/ThreadApprovals'
 import { allowsOrchestrationActions, buildModeChangeNotice, chatModeEquals, getChatModeLabel, getLastUserChatMode, normalizeChatMode } from '../../shared/chatMode'
 import { AgentRegistry } from '../agents/AgentRegistry'
 import { TaskQueue } from '../tasks/TaskQueue'
@@ -1814,7 +1814,7 @@ export class OrchestratorService extends EventEmitter {
     const engine = this.runEngine
     if (!engine || !runId) return undefined
     try {
-      const text = formatApprovalDecisions(engine.approvals.listDeliveredToRun(runId))
+      const text = formatApprovalDecisions(engine.approvals.listDeliveredToRun(runId), (threadId) => this.titleOf(threadId))
       return text || undefined
     } catch (error) {
       console.warn('approval decisions could not be read', { runId, error: error instanceof Error ? error.message : String(error) })
@@ -2973,9 +2973,14 @@ export class OrchestratorService extends EventEmitter {
       const named = (earlier.result as { requestId?: unknown } | null)?.requestId
       if (earlier.commandKind !== 'approval_respond' || named !== requestId) return { ok: false, reason: 'client_request_id_conflict' }
     } else {
-      // `runId` is the caller's run: every accepted receipt names a run that exists.
-      engine.store.putReceipt({ clientRequestId: key, threadId, commandKind: 'approval_respond', status: 'accepted', result: { requestId, runId: actor.runId }, createdAt: new Date().toISOString() })
+      // Filed under the caller's thread and run, as its key says (`approval_respond:<caller thread>:<call>`), like the
+      // other receipts of a command a thread's run issued; the approval it names is in `result`.
+      engine.store.putReceipt({ clientRequestId: key, threadId: actor.threadId, commandKind: 'approval_respond', status: 'accepted', result: { requestId, threadId, runId: actor.runId }, createdAt: new Date().toISOString() })
     }
+    // A turn a person started is the person's to answer: they may be reading the card. A request that is already
+    // answered or closed is settled below so the loser learns who won.
+    const asking = engine.approvals.get(requestId)
+    if (asking?.status === 'pending' && this.askedInPersonTurn(asking.runId)) return { ok: false, reason: 'person_turn' }
     let level: AgentAccessLevel
     try {
       // The most the thread may have whatever the profile says (a bot or channel thread is lineage) narrows what the credential was granted.
@@ -2988,7 +2993,9 @@ export class OrchestratorService extends EventEmitter {
       threadId: actor.threadId,
       runId: actor.runId,
       toolCallId: actor.toolCallId,
-      permissionMode: this.runPermissionMode(actor.runId),
+      // The mode of the run, and of its thread now when that is stricter: a tighter mode applies to the next turn, but an
+      // answer for another thread acts like a rule and stops at once, as a rule does.
+      permissionMode: this.answeringMode(actor),
       access: {
         level,
         answerApprovals: this.agentAccessSettings().answerApprovals,
@@ -3002,7 +3009,7 @@ export class OrchestratorService extends EventEmitter {
     }
     const settled = this.questions.settle(requestId, answers, answerer)
     if (settled.ok) {
-      this.showApprovalAnswer(threadId, actor, settled.decision ?? 'reject', request)
+      this.showApprovalAnswer(threadId, actor, settled.decision ?? 'reject', requestId, answers)
       return { ok: true, decision: settled.decision ?? 'reject', replayed: false }
     }
     switch (settled.reason) {
@@ -3024,17 +3031,46 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /** The mode an answering agent is held to: its run's, narrowed by its thread's own mode now; `ask` when that cannot be read. */
+  private answeringMode(actor: AgentActor): PermissionMode {
+    try {
+      return narrowPermissionMode(this.runPermissionMode(actor.runId), this.requestedPermissionMode(actor.threadId))
+    } catch {
+      return 'ask'
+    }
+  }
+
+  /**
+   * Whether a person started the run that asked (`startedByPerson`): a request with no run to name is not. An unreadable
+   * run counts as a person's, so a failure refuses rather than allows.
+   */
+  private askedInPersonTurn(runId: string | null): boolean {
+    if (!runId) return false
+    try {
+      const engine = this.requireRunEngine()
+      const run = engine.getRun(runId)
+      if (!run) return false
+      const binding = engine.bindingForRun(runId)
+      return startedByPerson({ origin: binding ? policyOrigin(binding.policy) : 'interactive', source: run.source })
+    } catch {
+      return true
+    }
+  }
+
   /**
    * The transcript row of an agent's answer, shown only for the call that won it. It is no message from the user:
    * the person reads who decided, in which thread, and what about. The `approval.answered` event (with the agent's
    * thread, run and call) is the record.
    */
-  private showApprovalAnswer(threadId: string, actor: AgentActor, decision: 'allow' | 'reject', request: Pick<ApprovalRequestInfo, 'questions'>): void {
+  private showApprovalAnswer(threadId: string, actor: AgentActor, decision: 'allow' | 'reject', requestId: string, answers: UserQuestionAnswers): void {
     try {
-      const asked = (request.questions[0]?.prompt ?? '').split('\n')[0]!.trim().slice(0, 200)
+      const record = this.requireRunEngine().approvals.get(requestId)
+      // What was approved, as the card showed it (the command or the path): redacted, on one line and capped.
+      const asked = record ? describeApproval(record) : ''
+      const note = record && decision === 'reject' ? agentNoteOf(record.questions, answers) : ''
       const session = this.getOrCreateSession(threadId)
       this.sessionAls.run(session, () => this.addSystemMessage(
-        `${decision === 'allow' ? 'Approved' : 'Rejected'} by an agent in thread «${this.titleOf(actor.threadId) ?? actor.threadId}» (${actor.threadId})${asked ? `: ${asked}` : ''}`
+        `${decision === 'allow' ? 'Approved' : 'Rejected'} by an agent in thread «${this.titleOf(actor.threadId) ?? actor.threadId}» (${actor.threadId})${asked ? `: ${asked}` : ''}${note ? ` Its note: "${note}"` : ''}`
       ))
     } catch (error) {
       console.warn('the transcript row of an agent\'s approval answer could not be written', { threadId, error: error instanceof Error ? error.message : String(error) })

@@ -191,7 +191,7 @@ describe('approval_respond (SPEC §15.1)', () => {
       [{ ...ANSWER, answers: {} }, /between 1 and 20 questions/],
       [{ ...ANSWER, answers: { permission: 7 } }, /answers.permission must be an option id/],
       [{ ...ANSWER, answers: { permission: ['allow', 3] } }, /answers.permission must be an option id/],
-      [{ ...ANSWER, answers: { permission: 'x'.repeat(2001) } }, /at most 2000 characters/],
+      [{ ...ANSWER, answers: { permission: 'x'.repeat(501) } }, /at most 500 characters/],
       [{ ...ANSWER, requestId: ' ' }, /requestId must be a non-empty string/]
     ])('invalid input %#: a tool error and no settlement', async (args, message) => {
       const { call, host } = await world()
@@ -253,7 +253,7 @@ describe('approval_respond (SPEC §15.1)', () => {
       expect(await result(call('manage'))).toMatchObject({ ok: false, reason: 'unknown' })
     })
 
-    it.each<ApprovalRefusal>(['own_request', 'not_parent', 'approvals_disabled', 'project_not_allowed', 'mode_forbids', 'agent_no_standing_grant', 'bridge_no_standing_grant'])(
+    it.each<ApprovalRefusal>(['own_request', 'person_only', 'person_turn', 'not_parent', 'approvals_disabled', 'project_not_allowed', 'mode_forbids', 'agent_no_standing_grant', 'bridge_no_standing_grant'])(
       'a refusal by the rule (%s) is an error result that says why and leaves the request for the user',
       async (code) => {
         const { call, state, ledger } = await world()
