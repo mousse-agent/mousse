@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { git as mousseGit } from '../src/mms/actions/git'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { GitService } from '../src/mms/git/GitService'
-import { clearRepoProgramCache, repoProgramOverrides } from '../src/mms/git/repoPrograms'
+import { clearRepoProgramCache, guardedSimpleGit, repoProgramOverrides, repoProgramProbes, withoutRepoPrograms, writesThroughFilters } from '../src/mms/git/repoPrograms'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { actionOptions, gitFoundationFixture } from './fixtures/gitFoundation'
 
@@ -18,6 +18,7 @@ import { actionOptions, gitFoundationFixture } from './fixtures/gitFoundation'
 
 const roots: string[] = []
 const previousGlobal = process.env.GIT_CONFIG_GLOBAL
+const previousNoSystem = process.env.GIT_CONFIG_NOSYSTEM
 let root: string
 let markers: string
 let marker: string
@@ -42,6 +43,8 @@ beforeEach(() => {
 afterEach(() => {
   if (previousGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL
   else process.env.GIT_CONFIG_GLOBAL = previousGlobal
+  if (previousNoSystem === undefined) delete process.env.GIT_CONFIG_NOSYSTEM
+  else process.env.GIT_CONFIG_NOSYSTEM = previousNoSystem
   for (const dir of roots.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
 })
 
@@ -59,7 +62,7 @@ function writeHook(dir: string, event: string, name: string): void {
   writeFileSync(join(dir, event), `#!/bin/sh\n${command(name)}\n`, { mode: 0o755 })
 }
 
-/** Each way an agent could make a commit run a program, applied to `cwd`. */
+/** Each way an agent could make a commit run a program, applied to `cwd`. Filters on a file being committed refuse the checkpoint instead. */
 const COMMIT_PLANTS: Record<string, (cwd: string) => void> = {
   'a post-commit hook in the hooks folder': (cwd) => writeHook(join(cwd, '.git', 'hooks'), 'post-commit', 'post-commit'),
   'a husky-style relative hooks path': (cwd) => { plain(cwd, 'config', 'core.hooksPath', '.husky/_'); writeHook(join(cwd, '.husky', '_'), 'post-commit', 'husky') },
@@ -89,11 +92,20 @@ describe('a checkpoint commit runs no program the repository configures', () => 
       writeFileSync(join(cwd, 'a.txt'), 'changed\n')
       const before = mousseGit(cwd, ['rev-parse', 'HEAD'])
       // The commands `ThreadActionService.checkpoint` runs.
-      mousseGit(cwd, ['add', '-A', '--', '.', ':(exclude).mousse/**'])
-      mousseGit(cwd, ['commit', '--no-verify', '-m', 'checkpoint'])
+      const checkpoint = () => {
+        mousseGit(cwd, ['add', '-A', '--', '.', ':(exclude).mousse/**'])
+        mousseGit(cwd, ['commit', '--no-verify', '-m', 'checkpoint'])
+      }
+      if (plant.includes('filter')) {
+        // The file is not stored unfiltered: Git refuses it, and says why.
+        expect(checkpoint).toThrow(/repository's own config defines the "(evil|proc)" filter/)
+        expect(mousseGit(cwd, ['rev-parse', 'HEAD'])).toBe(before)
+      } else {
+        checkpoint()
+        expect(mousseGit(cwd, ['rev-parse', 'HEAD'])).not.toBe(before)
+        expect(mousseGit(cwd, ['status', '--porcelain'])).toBe('')
+      }
       expect(ran()).toEqual([])
-      expect(mousseGit(cwd, ['rev-parse', 'HEAD'])).not.toBe(before)
-      expect(mousseGit(cwd, ['status', '--porcelain'])).toBe('')
     })
   }
 })
@@ -143,21 +155,131 @@ describe('a real checkpoint', () => {
   beforeEach(() => { f = gitFoundationFixture() })
   afterEach(() => f.dispose())
 
-  it('commits the turn without running a planted hook, config hook, fsmonitor or filter', async () => {
+  it('commits the turn without running a planted hook, config hook or fsmonitor', async () => {
     writeHook(join(f.repo, '.husky', '_'), 'post-commit', 'husky')
-    writeFileSync(join(f.repo, '.gitattributes'), 'value.txt filter=evil\n')
     plain(f.repo, 'add', '-A'); plain(f.repo, 'commit', '-qm', 'files an agent wrote')
     const cwd = (await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)).worktreePath
     // The thread's worktree shares the repository's config, which an agent with file access can write.
     plain(f.repo, 'config', 'core.hooksPath', '.husky/_')
     plain(f.repo, 'config', 'hook.planted.event', 'post-commit'); plain(f.repo, 'config', 'hook.planted.command', command('config-hook'))
     plain(f.repo, 'config', 'core.fsmonitor', command('fsmonitor'))
-    plain(f.repo, 'config', 'filter.evil.clean', command('clean', true))
+    // A hook whose name cannot be written as `-c` does not stop the checkpoint, and does not run.
+    plain(f.repo, 'config', 'hook.x=y.event', 'post-commit'); plain(f.repo, 'config', 'hook.x=y.command', command('odd-hook'))
     const start = plain(cwd, 'rev-parse', 'HEAD')
     const { action } = await new ThreadActionService(f.thread).runCheckpointedAction(actionOptions(cwd, 'turn-1'), () => writeFileSync(join(cwd, 'value.txt'), 'turn\n'))
     expect(action.endSha).not.toBe(start)
     expect(action.changedPaths.map((change) => change.path)).toEqual(['value.txt'])
     expect(ran()).toEqual([])
+  })
+})
+
+describe('files under a filter only the repository defines are refused, never stored unfiltered', () => {
+  /** A git-crypt-like filter: `git-crypt unlock` writes it to the repository's own config. */
+  function cryptRepo(): string {
+    const cwd = repo()
+    plain(cwd, 'config', 'filter.crypt.clean', command('crypt-clean', true))
+    plain(cwd, 'config', 'filter.crypt.smudge', command('crypt-smudge', true))
+    plain(cwd, 'config', 'filter.crypt.required', 'true')
+    writeFileSync(join(cwd, '.gitattributes'), 'secrets.env filter=crypt\n')
+    writeFileSync(join(cwd, 'secrets.env'), 'TOKEN=one\n')
+    plain(cwd, 'add', '-A'); plain(cwd, 'commit', '-qm', 'secrets')
+    rmSync(markers, { recursive: true }); mkdirSync(markers)
+    return cwd
+  }
+
+  it('a checkpoint refuses an edited git-crypt file, with a message, and stores nothing', () => {
+    const cwd = cryptRepo()
+    writeFileSync(join(cwd, 'secrets.env'), 'TOKEN=two\n')
+    expect(() => mousseGit(cwd, ['add', '-A', '--', '.', ':(exclude).mousse/**'])).toThrow(/"crypt" filter .*instead of storing them unfiltered/)
+    expect(plain(cwd, 'diff', '--cached', '--name-only')).toBe('')
+    expect(ran()).toEqual([])
+  })
+
+  it("the user's own Stage runs the filter, as a terminal would", async () => {
+    const cwd = cryptRepo()
+    writeFileSync(join(cwd, 'secrets.env'), 'TOKEN=two\n')
+    await new GitService().stageAll(cwd)
+    expect(ran()).toEqual(['crypt-clean'])
+  })
+
+  it('a Git LFS installed only in the repository (git lfs install --local) is refused rather than stored as content', () => {
+    // As for a user without a system or global LFS install.
+    process.env.GIT_CONFIG_NOSYSTEM = '1'
+    const cwd = repo()
+    plain(cwd, 'config', 'filter.lfs.clean', command('lfs-clean', true))
+    plain(cwd, 'config', 'filter.lfs.smudge', command('lfs-smudge', true))
+    plain(cwd, 'config', 'filter.lfs.process', command('lfs-process'))
+    plain(cwd, 'config', 'filter.lfs.required', 'true')
+    writeFileSync(join(cwd, '.gitattributes'), '*.bin filter=lfs diff=lfs merge=lfs -text\n')
+    writeFileSync(join(cwd, 'big.bin'), 'x'.repeat(4096))
+    expect(() => mousseGit(cwd, ['add', '-A'])).toThrow(/"lfs" filter/)
+    expect(plain(cwd, 'ls-files', 'big.bin')).toBe('')
+    expect(ran()).toEqual([])
+    // A read compares the files as stored instead.
+    expect(mousseGit(cwd, ['status', '--porcelain'])).toContain('big.bin')
+    expect(ran()).toEqual([])
+  })
+
+  it('only commands that write through filters keep the filter required', () => {
+    expect(writesThroughFilters(['add', '-A'])).toBe(true)
+    expect(writesThroughFilters(['-c', 'x=y', 'commit', '-m', 'm'])).toBe(true)
+    expect(writesThroughFilters(['worktree', 'add', 'p'])).toBe(true)
+    expect(writesThroughFilters(['worktree', 'remove', 'p'])).toBe(false)
+    expect(writesThroughFilters(['status', '--porcelain'])).toBe(false)
+    expect(writesThroughFilters(['diff', '--cached'])).toBe(false)
+    expect(writesThroughFilters(['hash-object', '--stdin'])).toBe(false)
+    expect(writesThroughFilters(['hash-object', '-w', 'f'])).toBe(true)
+  })
+})
+
+describe("the user's own actions keep the repository's programs; Mousse's own commands do not", () => {
+  it("a per-repo core.sshCommand (a second GitHub account) reaches the user's Fetch, not Mousse's own Git", async () => {
+    const cwd = repo()
+    plain(cwd, 'config', 'core.sshCommand', command('ssh'))
+    plain(cwd, 'remote', 'add', 'origin', 'ssh://git@example.invalid/work/repo.git')
+    expect(withoutRepoPrograms(cwd, ['fetch'])).toContain('core.sshcommand=ssh')
+    await new GitService().fetch(cwd).catch(() => undefined)
+    expect(ran()).toEqual(['ssh'])
+  })
+
+  it("the user's branch switch runs post-checkout; a checkout Mousse runs does not", async () => {
+    const cwd = repo()
+    plain(cwd, 'branch', 'other')
+    writeHook(join(cwd, '.git', 'hooks'), 'post-checkout', 'post-checkout')
+    mousseGit(cwd, ['checkout', '-q', 'other'])
+    expect(ran()).toEqual([])
+    await new GitService().checkout(cwd, 'main')
+    expect(ran()).toEqual(['post-checkout'])
+  })
+})
+
+describe('settings are worked out for each command', () => {
+  it('a filter written between two commands on one simple-git does not run', async () => {
+    const cwd = repo()
+    const git = guardedSimpleGit(cwd)
+    await git.status()
+    plain(cwd, 'config', 'filter.z.clean', command('late-filter', true))
+    writeFileSync(join(cwd, '.gitattributes'), '*.txt filter=z\n')
+    writeFileSync(join(cwd, 'a.txt'), 'changed\n')
+    expect(await git.diff(['--no-ext-diff', '--no-textconv', '--', 'a.txt'])).toContain('+changed')
+    expect(ran()).toEqual([])
+  })
+
+  it("polling the main checkout's status reads the repository's config once, and a folder that is not a repository once", async () => {
+    const cwd = repo()
+    const service = new GitService()
+    writeFileSync(join(cwd, 'a.txt'), 'changed\n')
+    await service.getStatus(cwd)
+    const warm = repoProgramProbes()
+    for (let poll = 0; poll < 3; poll++) await service.getStatus(cwd)
+    expect(repoProgramProbes()).toBe(warm)
+
+    const folder = join(root, 'plain-folder'); mkdirSync(folder)
+    mousseGit(cwd, ['rev-parse', 'HEAD'])
+    await service.getStatus(folder)
+    const once = repoProgramProbes()
+    await service.getStatus(folder)
+    expect(repoProgramProbes()).toBe(once)
   })
 })
 
@@ -220,8 +342,7 @@ describe('repoProgramOverrides', () => {
       'gpg.program=C:/gpg/gpg.exe',
       'core.sshcommand=ssh',
       'remote.origin.uploadpack=git-upload-pack',
-      'merge.ours.driver=false',
-      'filter.evil.required=false'
+      'merge.ours.driver=false'
     ])
   })
 
@@ -236,6 +357,20 @@ describe('repoProgramOverrides', () => {
       entry('local', 'credential.https://example.com.helper', 'evil')
     ])
     expect(overrides).toEqual(['credential.helper=', 'credential.helper=manager'])
+  })
+
+  it("keeps the user's own empty helper resets, in order, when it puts their helpers back", () => {
+    const { overrides } = repoProgramOverrides([
+      entry('system', 'credential.helper', 'manager'),
+      entry('global', 'credential.https://github.com.helper', ''),
+      entry('global', 'credential.https://github.com.helper', '!gh auth git-credential'),
+      entry('local', 'credential.helper', 'evil')
+    ])
+    expect(overrides).toEqual(['credential.helper=', 'credential.helper=manager', 'credential.https://github.com.helper=', 'credential.https://github.com.helper=!gh auth git-credential'])
+  })
+
+  it('does not refuse a repository for a hook name that cannot be written as -c', () => {
+    expect(repoProgramOverrides([entry('local', 'hook.x=y.event', 'post-commit')]).hookNames).toEqual([])
   })
 
   it('collects config-defined hook names from every scope', () => {
