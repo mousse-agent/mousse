@@ -4,6 +4,7 @@ import { join } from 'path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { MousseConfigStore } from '../src/mms/config/MousseConfigStore'
 import { SettingsStore } from '../src/mms/settings/SettingsStore'
+import { proposeBinding, resetAllPatch, resetPatch } from '../src/renderer/commands/shortcutEditing'
 import { defaultBindingFor } from '../src/shared/commands'
 import { getDefaultSettings } from '../src/shared/settings'
 
@@ -97,6 +98,31 @@ describe('shortcut settings', () => {
     conf.settings.shortcuts = { 'terminal.open': 'CommandOrControl+V', 'sideCard.toggle': 'CommandOrControl+Shift+Q', 'thread.previous': 7 }
     writeFileSync(confPath, JSON.stringify(conf), 'utf8')
     expect(open().get().shortcuts).toEqual({ 'sideCard.toggle': 'CommandOrControl+Shift+Q' })
+  })
+
+  it('keeps what the Shortcuts section saves across a restart, and what it resets', () => {
+    const platform = process.platform
+    const settings = open()
+
+    // Record a binding, then a second one that clashes and is replaced.
+    const recorded = proposeBinding('thread.new', 'CommandOrControl+Shift+X', settings.get().shortcuts, platform)
+    if (recorded.kind !== 'save') throw new Error('expected a plain save')
+    settings.set({ shortcuts: recorded.patch })
+    const clash = proposeBinding('terminal.open', 'CommandOrControl+Shift+X', open().get().shortcuts, platform)
+    if (clash.kind !== 'confirm' || !clash.replacePatch) throw new Error('expected a clash with a Replace choice')
+    settings.set({ shortcuts: clash.replacePatch })
+
+    expect(open().get().shortcuts).toEqual({ 'thread.new': null, 'terminal.open': 'CommandOrControl+Shift+X' })
+
+    // Reset one: the entry is gone after the restart, the other stays.
+    settings.set({ shortcuts: resetPatch('thread.new', open().get().shortcuts, platform) })
+    expect(open().get().shortcuts).toEqual({ 'terminal.open': 'CommandOrControl+Shift+X' })
+
+    // Reset all leaves no entry in the file.
+    settings.set({ shortcuts: { 'run.stop': null } })
+    settings.set({ shortcuts: resetAllPatch(open().get().shortcuts, platform) })
+    expect(open().get().shortcuts).toEqual({})
+    expect(JSON.parse(readFileSync(join(tempHome, 'mousse.conf'), 'utf8')).settings.shortcuts).toEqual({})
   })
 
   it('reads a config saved before shortcuts existed as having none', () => {

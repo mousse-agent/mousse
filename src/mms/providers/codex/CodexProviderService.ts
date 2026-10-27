@@ -71,6 +71,7 @@ import { DEFAULT_TREE_TIMING, HelperTree, RpcRefused, ThreadStatuses, TreeOff, i
 import { NativeHelpers, type StrayThread } from './nativeHelpers'
 import { readCodexUserSetup, type CodexUserSetup } from './userSetup'
 import type { ChildTurnPolicy } from '../../run/adapters/ProviderAdapter'
+import { QUESTIONS_REFUSED_MESSAGE } from '../../harness/acp/permissions'
 
 export const CODEX_PROVIDER_ID = 'codex'
 /** How long a live `account/read` result stands before it is checked again. */
@@ -286,6 +287,11 @@ export type CodexChatInput = {
    * that continues with other instructions gets the new text in that turn's prompt.
    */
   developerInstructions?: string
+  /**
+   * `never`: every command and file change that needs approval is declined, and every question to
+   * the user refused, without asking (`RunPolicy.approvals`).
+   */
+  approvals?: 'never'
   onText: (text: string) => void
   onThinking?: (text: string) => void
   onTool?: (event: CodexToolEvent) => void
@@ -524,6 +530,11 @@ class TurnRun {
   /** A read-only (`shared`) delegated child: every command and file change is declined, never asked. */
   get readOnlyChild(): boolean {
     return this.input.child?.readOnly === true
+  }
+
+  /** The run refuses tools that need approval (`approvals: 'never'`): declined, never asked. */
+  get refusesApprovals(): boolean {
+    return this.input.approvals === 'never'
   }
 
   get text(): string {
@@ -1467,7 +1478,7 @@ export class CodexProviderService {
       case 'item/commandExecution/requestApproval': {
         const approval = request.params as CodexServerRequestMap['item/commandExecution/requestApproval']['params']
         if (!run || run.questionSignal.aborted) return { decision: 'cancel' } satisfies Result<'item/commandExecution/requestApproval'>
-        if (run.mode === 'plan' || run.readOnlyChild) return { decision: 'decline' } satisfies Result<'item/commandExecution/requestApproval'>
+        if (run.mode === 'plan' || run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/commandExecution/requestApproval'>
         const command = approval.command ?? (run.item(approval.itemId) as { command?: string } | undefined)?.command ?? 'a command'
         const decision = await this.approve(
           run,
@@ -1478,7 +1489,7 @@ export class CodexProviderService {
       case 'item/fileChange/requestApproval': {
         const approval = request.params as CodexServerRequestMap['item/fileChange/requestApproval']['params']
         if (!run || run.questionSignal.aborted) return { decision: 'cancel' } satisfies Result<'item/fileChange/requestApproval'>
-        if (run.mode === 'plan' || run.readOnlyChild) return { decision: 'decline' } satisfies Result<'item/fileChange/requestApproval'>
+        if (run.mode === 'plan' || run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/fileChange/requestApproval'>
         const changes = (run.item(approval.itemId) as { changes?: Array<{ path: string }> } | undefined)?.changes ?? []
         const decision = await this.approve(
           run,
@@ -1489,6 +1500,8 @@ export class CodexProviderService {
       case 'item/tool/requestUserInput': {
         const input = request.params as CodexServerRequestMap['item/tool/requestUserInput']['params']
         if (!run || run.questionSignal.aborted) throw new Error('No Mousse turn is waiting for this answer')
+        // Nobody answers a run whose approvals are `never`.
+        if (run.refusesApprovals) throw new Error(QUESTIONS_REFUSED_MESSAGE)
         const answers = await this.questions.requestAnswers(
           input.questions.map((question) => ({
             id: question.id,

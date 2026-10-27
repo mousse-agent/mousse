@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { applyAcrylicIntensity, persistLinuxAcrylicIntensity } from '../lib/acrylicIntensity'
-import { ArrowLeft, Bot, Laptop, Plug, Server, Settings, Sparkles, UserCircle, VolumeHigh } from '../lib/icons'
+import { ArrowLeft, Bot, Keyboard, Laptop, Plug, Server, Settings, Sparkles, UserCircle, VolumeHigh } from '../lib/icons'
 import { SettingsPageTitle } from './settings/SettingsRow'
 import { SettingsSearch } from './settings/SettingsSearch'
 import type {
@@ -21,6 +21,7 @@ import { GeneralSettings } from './settings/GeneralSettings'
 import { DownloadsIndicator } from './downloads/DownloadsIndicator'
 import { WindowCaptionButtons } from './WindowCaptionButtons'
 import { SkillsMcpSettings } from './settings/SkillsMcpSettings'
+import { ShortcutsSettings } from './settings/ShortcutsSettings'
 import { createIntegrationPlatformClient } from '../services/integrationPlatformClient'
 import { confirmNavigation } from '../services/navigationGuards'
 import '../styles/settings.css'
@@ -41,6 +42,7 @@ const SETTINGS_SECTIONS = [
   { id: 'agents', label: 'Agents', icon: Bot, hue: 1, group: 'Customize', keywords: ['main agent', 'orchestrator', 'model', 'title', 'subagent', 'cli', 'headless', 'claude code', 'codex', 'context', 'compaction', 'tokens'] },
   { id: 'integrations', label: 'Skills & MCP', icon: Sparkles, hue: 6, group: 'Customize', keywords: ['skills', 'mcp', 'integrations', 'tools', 'web search', 'exa', 'parallel', 'servers', 'skill defaults'] },
   { id: 'speech', label: 'Speech', icon: VolumeHigh, hue: 3, group: 'Customize', keywords: ['voice', 'read aloud', 'dictation', 'microphone', 'noise', 'speed'] },
+  { id: 'shortcuts', label: 'Shortcuts', icon: Keyboard, hue: 2, group: 'Customize', keywords: ['keyboard', 'keys', 'keybindings', 'hotkeys', 'rebind', 'command palette', 'accelerator', 'reset'] },
   { id: 'connections', label: 'Devices', icon: Laptop, hue: 2, group: 'This computer', keywords: ['devices', 'network', 'pair', 'remote'] },
   { id: 'storage', label: 'Storage', icon: Server, hue: 0, group: 'This computer', keywords: ['trash', 'delete', 'purge', 'retention', 'disk'] }
 ] as const
@@ -403,6 +405,8 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
           <SpeechSettings />
         </section>
           )}
+
+          {activeSection === 'shortcuts' && <ShortcutsSettings settings={settings} onUpdate={updateSettings} />}
 
           {activeSection === 'agents' && <AgentsSettings settings={settings} options={options} updateSettings={updateSettings} />}
 

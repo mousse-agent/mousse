@@ -102,7 +102,7 @@ export function redactSecrets(text: unknown, secrets: Iterable<string> = []): st
     .replace(/(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/g, '[redacted]')
 }
 
-const ERROR_DETAIL_KEYS = new Set(['supportId', 'operation', 'operationId', 'requestId', 'provider', 'status', 'attempt', 'projectId', 'profileId', 'profileRef', 'taskId', 'threadId', 'runId', 'epoch', 'expectedEpoch', 'actualEpoch', 'expectedRevision', 'actualRevision', 'expectedGeneration', 'actualGeneration', 'capability', 'revision', 'expected', 'actual', 'state', 'path', 'label', 'reason', 'pointer', 'pointers', 'runtimeKind', 'hostBindings', 'workspace', 'projectBound', 'issues', 'diagnostics', 'code', 'severity', 'location', 'field', 'index', 'limit', 'count', 'retryAfterMs', 'resetsAt', 'estimated', 'limitKind'])
+const ERROR_DETAIL_KEYS = new Set(['supportId', 'operation', 'operationId', 'requestId', 'provider', 'status', 'attempt', 'projectId', 'profileId', 'profileRef', 'taskId', 'threadId', 'runId', 'epoch', 'expectedEpoch', 'actualEpoch', 'expectedRevision', 'actualRevision', 'expectedGeneration', 'actualGeneration', 'capability', 'revision', 'expected', 'actual', 'state', 'path', 'label', 'reason', 'pointer', 'pointers', 'runtimeKind', 'hostBindings', 'workspace', 'projectBound', 'issues', 'diagnostics', 'code', 'severity', 'location', 'field', 'index', 'limit', 'count', 'retryAfterMs', 'resetsAt', 'estimated', 'limitKind', 'missing', 'kind'])
 
 /** Explicit safe detail vocabulary. New domain fields need an audited addition. */
 export function safeErrorDetails(value: unknown): unknown {

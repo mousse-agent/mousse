@@ -82,7 +82,14 @@ export interface Roster {
   issuedAt: number
 }
 
-export const TRANSPORT_IDS = ['memory', 'direct', 'tailscale', 'relay', 'cloudflared'] as const
+export const TRANSPORT_IDS = [
+  'memory',
+  'direct',
+  'tailscale',
+  'relay',
+  'cloudflared',
+  'ssh'
+] as const
 export type TransportId = (typeof TRANSPORT_IDS)[number] | (string & {})
 
 export interface Route {

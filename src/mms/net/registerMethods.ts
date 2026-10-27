@@ -178,10 +178,13 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
     (typeof params.id !== 'string' ||
       !/^[a-z][a-z0-9.-]{0,63}$/.test(params.id) ||
       typeof params.enabled !== 'boolean' ||
-      !params.settings ||
-      typeof params.settings !== 'object' ||
-      Array.isArray(params.settings) ||
-      Buffer.byteLength(JSON.stringify(params.settings)) > 16 * 1024)
+      // Switching a transport off may omit settings: the saved ones are kept.
+      (params.settings === undefined
+        ? params.enabled !== false
+        : !params.settings ||
+          typeof params.settings !== 'object' ||
+          Array.isArray(params.settings) ||
+          Buffer.byteLength(JSON.stringify(params.settings)) > 16 * 1024))
   )
     throw new DomainRpcError('invalid_params', 'A bounded transport configuration is required')
   return params

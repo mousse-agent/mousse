@@ -1555,6 +1555,68 @@ html.platform-darwin .titlebar-left {
   line-height: 1.4;
 }
 
+/* `@` mention rows: icon, name, dimmed parent folder. The selected row only gets the shared background. */
+.composer-mention-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.composer-mention-icon {
+  flex: none;
+  color: var(--text-secondary);
+}
+
+.composer-mention-name {
+  flex: none;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-mention-name mark,
+.composer-mention-path mark {
+  color: var(--text-primary);
+  background: transparent;
+  font-weight: 700;
+}
+
+.composer-mention-path {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-mention-badge {
+  flex: none;
+  padding: 0 6px;
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 16px;
+  background: rgba(var(--accent-pale-rgb), 0.14);
+  border-radius: 8px;
+}
+
+.composer-mention-description {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-mention-footer {
+  padding: 6px 10px 4px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+  opacity: 0.8;
+}
+
 .composer-footer {
   display: flex;
   align-items: center;

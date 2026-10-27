@@ -535,6 +535,11 @@ export interface InboundInfo {
   transport: TransportId
 }
 
+/** Who a dial is for. Only transports that must check local permission for a peer read it. */
+export interface TransportDialContext {
+  peer?: NodeId
+}
+
 /**
  * A transport yields plain byte streams. It provides no security: TLS with key
  * pinning always runs on top.
@@ -545,7 +550,7 @@ export interface Transport {
   /** Idempotent. May spawn or configure external tools. */
   provision(): Promise<void>
   listen(onConnection: (stream: Duplex, info: InboundInfo) => void): Promise<Listener>
-  dial(route: Route, signal: AbortSignal): Promise<Duplex>
+  dial(route: Route, signal: AbortSignal, context?: TransportDialContext): Promise<Duplex>
   status(): TransportStatus
   onStatus(listener: (status: TransportStatus) => void): () => void
   /** Idempotent. */

@@ -7,17 +7,28 @@ import type {
   BrowserElementAttachment,
   ChatMode,
   ContextUsageSnapshot,
+  FileSearchResponse,
   SkillChatMode
 } from '../../shared/types'
 import type { SkillDescriptor } from '../../shared/integrations'
 import {
+  applyMentionPick,
   filterComposerCommandSuggestions,
   filterSkillSuggestions,
   findInlineSkillToken,
+  findMentionQueryAtCaret,
+  isImeComposing,
+  isMentionResultCurrent,
+  mentionItemReference,
+  mergeMentionSuggestions,
+  moveSelection,
   parseSkillsPickerQuery,
+  pickerKeyAction,
   removeInlineSkillToken,
-  type ChannelCommandDef
+  type ChannelCommandDef,
+  type MentionItem
 } from '../../shared/channelCommands'
+import { ComposerSuggestionList, MentionRowContent, type SuggestionRow } from './ComposerSuggestionList'
 import { ComposerFooter } from './ComposerFooter'
 import { BrowserElementPill } from './BrowserElementPill'
 import { FileAttachment } from '../chat/components/agent-elements/input/file-attachment'
@@ -80,6 +91,34 @@ export interface ChatComposerProps {
   disableSkillsPicker?: boolean
   /** A row above the input, such as a subagent asking a question; it brings its own layout. */
   banner?: ReactNode
+  /** Searches the project's files and folders for an `@` mention; rejects when there is no project to search. */
+  searchMentions?: (query: string) => Promise<FileSearchResponse>
+  /**
+   * Which thread and project `searchMentions` answers for. Results from another scope are
+   * dropped, and picked files get this thread and project on their reference.
+   */
+  mentionScope?: { scopeKey: string; threadId?: string; projectId?: string }
+}
+
+const MENTION_SEARCH_DEBOUNCE_MS = 120
+const MENTION_INDEXING_RETRY_MS = 500
+const MENTION_ROW_LIMIT = 20
+
+interface MentionSearchState {
+  scopeKey: string
+  query: string
+  /** Absolute root the result paths are relative to. */
+  root: string
+  results: FileSearchResponse['results']
+  indexing: boolean
+  truncated: boolean
+  /** The search was refused (no project, or an older service). */
+  failed: boolean
+}
+
+/** Caret of a text box, or -1 while a range is selected. */
+function readCaret(node: HTMLTextAreaElement): number {
+  return node.selectionStart === node.selectionEnd ? node.selectionStart : -1
 }
 
 function formatDuration(seconds: number): string {
@@ -119,7 +158,9 @@ export function ChatComposer({
   onSend,
   onStop,
   disableSkillsPicker = false,
-  banner
+  banner,
+  searchMentions,
+  mentionScope
 }: ChatComposerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const composerInputRef = useRef<HTMLTextAreaElement>(null)
@@ -148,8 +189,21 @@ export function ChatComposer({
   }, [resizeDraft])
 
   const suggestionRefs = useRef(new Map<number, HTMLButtonElement>())
+  const registerSuggestionRow = (index: number, element: HTMLButtonElement | null) => {
+    if (element) suggestionRefs.current.set(index, element)
+    else suggestionRefs.current.delete(index)
+  }
   const [suggestionsDismissed, setSuggestionsDismissed] = useState(false)
   const [selectedSuggestion, setSelectedSuggestion] = useState(0)
+  // Caret of the text box, or -1 while a range is selected (a range is never a mention).
+  const [caret, setCaret] = useState(0)
+  // True between compositionstart and compositionend of an input method.
+  const composingRef = useRef(false)
+  const [mentionSearch, setMentionSearch] = useState<MentionSearchState | null>(null)
+  const searchMentionsRef = useRef(searchMentions)
+  searchMentionsRef.current = searchMentions
+  const currentMentionRef = useRef<{ scopeKey: string; query: string }>({ scopeKey: '', query: '' })
+  const shownMentionKeyRef = useRef('')
   const inputValueRef = useRef(input)
   inputValueRef.current = input
   // Dictated text goes where the caret is when the transcript arrives, then the box gets focus.
@@ -187,9 +241,44 @@ export function ChatComposer({
   const skillSuggestions =
     skillsPickerQuery !== null ? filterSkillSuggestions(enabledSkills, skillsPickerQuery) : []
   const showSkillsPicker = !disabled && !suggestionsDismissed && skillsPickerQuery !== null
-  const suggestions = showSkillsPicker ? [] : filterComposerCommandSuggestions(input).filter((command) => !skillsPickerDisabled || command.name !== 'skills')
+
+  // `@query` at the caret: skills, files and folders in one list. File rows show only while the
+  // stored search belongs to the current thread, project and query, so a pick can never choose a
+  // row from an earlier query or another thread.
+  const mentionQuery = !disabled && skillsPickerQuery === null ? findMentionQueryAtCaret(input, caret) : null
+  const mentionScopeKey = mentionScope?.scopeKey
+  currentMentionRef.current = { scopeKey: mentionScopeKey ?? '', query: mentionQuery?.query ?? '' }
+  const mentionResult =
+    mentionQuery && mentionScopeKey && mentionSearch &&
+    isMentionResultCurrent(mentionSearch, { scopeKey: mentionScopeKey, query: mentionQuery.query })
+      ? mentionSearch
+      : null
+  const mentionItems: MentionItem<SkillDescriptor>[] = mentionQuery
+    ? mergeMentionSuggestions(
+        skillsPickerDisabled ? [] : enabledSkills,
+        mentionResult && !mentionResult.failed ? mentionResult.results : [],
+        { query: mentionQuery.query, limit: MENTION_ROW_LIMIT }
+      )
+    : []
+  const mentionFooter = mentionResult?.failed
+    ? 'File search needs a project'
+    : mentionResult?.indexing
+      ? 'Indexing files…'
+      : mentionResult?.truncated && mentionResult.results.length > 0
+        ? 'Large project: showing the first matches, keep typing'
+        : null
+  // With nothing to pick and nothing to say the list stays closed, so Enter sends the text as typed.
+  const showMentionPicker =
+    !disabled && !suggestionsDismissed && mentionQuery !== null && (mentionItems.length > 0 || mentionFooter !== null)
+
+  const suggestions = showSkillsPicker || showMentionPicker ? [] : filterComposerCommandSuggestions(input).filter((command) => !skillsPickerDisabled || command.name !== 'skills')
   const showSuggestions = !disabled && !suggestionsDismissed && suggestions.length > 0
-  const pickerItemCount = showSkillsPicker ? skillSuggestions.length : suggestions.length
+  const pickerOpen = showSuggestions || showSkillsPicker || showMentionPicker
+  const pickerItemCount = showMentionPicker
+    ? mentionItems.length
+    : showSkillsPicker
+      ? skillSuggestions.length
+      : suggestions.length
   // `/skills` is a local UI command — never send it as a chat message.
   // While a turn is active, ordinary sends are still allowed (they stack on the per-thread queue).
   const canSend =
@@ -202,17 +291,66 @@ export function ChatComposer({
     skillsPickerQuery === null
 
   useEffect(() => {
-    if (!showSuggestions && !showSkillsPicker) return
+    if (!pickerOpen) return
     setSelectedSuggestion((current) =>
       pickerItemCount === 0 ? 0 : Math.min(current, pickerItemCount - 1)
     )
-  }, [showSuggestions, showSkillsPicker, pickerItemCount])
+  }, [pickerOpen, pickerItemCount])
 
   useEffect(() => {
-    if (showSuggestions || showSkillsPicker) {
+    if (pickerOpen) {
       suggestionRefs.current.get(selectedSuggestion)?.scrollIntoView({ block: 'nearest' })
     }
-  }, [selectedSuggestion, showSuggestions, showSkillsPicker])
+  }, [selectedSuggestion, pickerOpen])
+
+  // Search the project for the typed query after a short pause. The effect re-runs only when the
+  // query or the scope changes; a response is kept only while it still belongs to both.
+  const mentionQueryText = mentionQuery?.query
+  useEffect(() => {
+    setMentionSearch((current) => (current && current.scopeKey === mentionScopeKey ? current : null))
+    if (mentionQueryText === undefined || !mentionScopeKey || !searchMentionsRef.current) return
+    const scopeKey = mentionScopeKey
+    const query = mentionQueryText
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const owned = () => !cancelled && isMentionResultCurrent({ scopeKey, query }, currentMentionRef.current)
+    const run = () => {
+      const request = searchMentionsRef.current
+      if (!request) return
+      void Promise.resolve()
+        .then(() => request(query))
+        .then(
+          (response) => {
+            if (!owned()) return
+            const shownKey = `${scopeKey}\u0000${query}`
+            if (shownMentionKeyRef.current !== shownKey) {
+              shownMentionKeyRef.current = shownKey
+              setSelectedSuggestion(0)
+            }
+            setMentionSearch({
+              scopeKey,
+              query,
+              root: response.root,
+              results: response.results,
+              indexing: response.indexing,
+              truncated: response.truncated,
+              failed: false
+            })
+            // The first index of a large project is still building: ask again for fuller results.
+            if (response.indexing) timer = setTimeout(run, MENTION_INDEXING_RETRY_MS)
+          },
+          () => {
+            if (!owned()) return
+            setMentionSearch({ scopeKey, query, root: '', results: [], indexing: false, truncated: false, failed: true })
+          }
+        )
+    }
+    timer = setTimeout(run, MENTION_SEARCH_DEBOUNCE_MS)
+    return () => {
+      cancelled = true
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }, [mentionQueryText, mentionScopeKey])
 
   const addFiles = useCallback(
     (files: File[]) => {
@@ -285,16 +423,31 @@ export function ChatComposer({
     requestAnimationFrame(() => composerInputRef.current?.focus())
   }
 
-  const applySkill = (skillId: string) => {
+  // Put the text box at `edit`: new value, caret after the inserted text, focus kept.
+  const commitEdit = (edit: { value: string; caret: number }) => {
+    onInputChange(edit.value)
+    setCaret(edit.caret)
+    requestAnimationFrame(() => {
+      const target = composerInputRef.current
+      if (!target) return
+      target.focus()
+      target.setSelectionRange(edit.caret, edit.caret)
+    })
+  }
+
+  const applySkill = (skillId: string, range?: { index: number; end: number }) => {
     // Embed as an inline `@skill` token instead of switching the global chat
     // mode. The `/skills …` command becomes the token; other text is kept so
-    // the skill sits between the user's typing.
+    // the skill sits between the user's typing. A picked `@query` is replaced
+    // by the same token typing the full name would leave.
     const skill =
       enabledSkills.find((entry) => entry.id === skillId) ??
       enabledSkills.find((entry) => entry.name === skillId)
     const name = skill?.name ?? skillId
     const node = composerInputRef.current
-    if (parseSkillsPickerQuery(input) !== null) {
+    if (range) {
+      commitEdit(applyMentionPick(input, range, `@${name} `))
+    } else if (parseSkillsPickerQuery(input) !== null) {
       onInputChange(`@${name} `)
     } else {
       const caret = node?.selectionStart ?? input.length
@@ -315,6 +468,35 @@ export function ChatComposer({
     setSuggestionsDismissed(true)
     setSelectedSuggestion(0)
     requestAnimationFrame(() => composerInputRef.current?.focus())
+  }
+
+  // Picks a row of the `@` list. Text from an input method that is still composing is never replaced.
+  const pickMention = (item: MentionItem<SkillDescriptor> | undefined) => {
+    if (!item || !mentionQuery || composingRef.current) return
+    const range = { index: mentionQuery.index, end: Math.min(Math.max(caret, 0), input.length) }
+    if (item.kind === 'skill') {
+      applySkill(item.skill.id, range)
+      return
+    }
+    if (
+      !mentionScope ||
+      !mentionResult ||
+      mentionResult.failed ||
+      !isMentionResultCurrent(mentionResult, { scopeKey: mentionScope.scopeKey, query: mentionQuery.query })
+    ) return
+    const reference = mentionItemReference(
+      item,
+      mentionResult.root,
+      { threadId: mentionScope.threadId, projectId: mentionScope.projectId },
+      `${item.kind}:${crypto.randomUUID()}`
+    )
+    commitEdit(applyMentionPick(input, range, ''))
+    setSuggestionsDismissed(true)
+    setSelectedSuggestion(0)
+    setPendingReferences((count) => count + 1)
+    void Promise.resolve().then(() => onAddReference(reference)).catch((error) => {
+      onReferenceError(error instanceof Error ? error.message : String(error))
+    }).finally(() => setPendingReferences((count) => count - 1))
   }
 
   const submit = () => {
@@ -354,56 +536,47 @@ export function ChatComposer({
       }
     }
 
-    if (showSkillsPicker) {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault()
-        if (skillSuggestions.length === 0) return
-        setSelectedSuggestion((current) => (current + 1) % skillSuggestions.length)
-        return
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault()
-        if (skillSuggestions.length === 0) return
-        setSelectedSuggestion((current) => (current - 1 + skillSuggestions.length) % skillSuggestions.length)
-        return
-      }
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        setSuggestionsDismissed(true)
-        return
-      }
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault()
-        const skill = skillSuggestions[selectedSuggestion]
-        if (skill) applySkill(skill.id)
-        return
-      }
+    // An input method that is composing text owns every key: Enter commits its text, it never picks or sends.
+    const keyInfo = {
+      key: e.key,
+      shiftKey: e.shiftKey,
+      ctrlKey: e.ctrlKey,
+      metaKey: e.metaKey,
+      altKey: e.altKey,
+      isComposing: e.nativeEvent.isComposing || composingRef.current,
+      keyCode: e.keyCode
     }
-    if (showSuggestions) {
-      if (e.key === 'ArrowDown') {
+    if (isImeComposing(keyInfo)) return
+
+    // One keyboard map for all three pickers: arrows, pages and Home/End move, Enter and Tab pick,
+    // Escape closes. With no `@` rows Enter falls through and sends the text as typed.
+    const picker = showMentionPicker ? 'mention' : showSkillsPicker ? 'skills' : showSuggestions ? 'slash' : null
+    if (picker) {
+      const action = pickerKeyAction(keyInfo, { count: pickerItemCount, swallowWhenEmpty: picker === 'skills' })
+      if (action) {
         e.preventDefault()
-        setSelectedSuggestion((current) => (current + 1) % suggestions.length)
-        return
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault()
-        setSelectedSuggestion((current) => (current - 1 + suggestions.length) % suggestions.length)
-        return
-      }
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        setSuggestionsDismissed(true)
-        return
-      }
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault()
-        const suggestion = suggestions[selectedSuggestion]!
-        // An exact no-argument command is already complete: execute it instead of
-        // making users press Enter twice (first to re-apply the same suggestion).
-        if (!suggestion.argsHint && input.trim().toLowerCase() === `/${suggestion.name}`) {
-          submit()
-        } else {
-          applySuggestion(suggestion)
+        if (action.type === 'move') {
+          setSelectedSuggestion((current) => moveSelection(current, action.key, pickerItemCount))
+        } else if (action.type === 'dismiss') {
+          setSuggestionsDismissed(true)
+        } else if (action.type === 'pick') {
+          if (picker === 'mention') {
+            pickMention(mentionItems[selectedSuggestion])
+          } else if (picker === 'skills') {
+            const skill = skillSuggestions[selectedSuggestion]
+            if (skill) applySkill(skill.id)
+          } else {
+            const suggestion = suggestions[selectedSuggestion]
+            if (suggestion) {
+              // An exact no-argument command is already complete: execute it instead of
+              // making users press Enter twice (first to re-apply the same suggestion).
+              if (e.key === 'Enter' && !suggestion.argsHint && input.trim().toLowerCase() === `/${suggestion.name}`) {
+                submit()
+              } else {
+                applySuggestion(suggestion)
+              }
+            }
+          }
         }
         return
       }
@@ -529,7 +702,15 @@ export function ChatComposer({
           onChange={(e) => {
             setSuggestionsDismissed(false)
             setSelectedSuggestion(0)
+            setCaret(readCaret(e.target))
             onInputChange(e.target.value)
+          }}
+          onSelect={(e) => setCaret(readCaret(e.currentTarget))}
+          onKeyUp={(e) => setCaret(readCaret(e.currentTarget))}
+          onCompositionStart={() => { composingRef.current = true }}
+          onCompositionEnd={(e) => {
+            composingRef.current = false
+            setCaret(readCaret(e.currentTarget))
           }}
           onKeyDown={handleKeyDown}
           onScroll={handleInputScroll}
@@ -542,86 +723,86 @@ export function ChatComposer({
           }
           rows={3}
           disabled={disabled}
-          aria-expanded={showSuggestions || showSkillsPicker}
-          aria-controls={
-            showSuggestions || showSkillsPicker ? 'composer-command-suggestions' : undefined
-          }
+          aria-expanded={pickerOpen}
+          aria-controls={pickerOpen ? 'composer-command-suggestions' : undefined}
           aria-activedescendant={
-            showSuggestions || showSkillsPicker
+            pickerOpen && pickerItemCount > 0
               ? `composer-command-suggestion-${selectedSuggestion}`
               : undefined
           }
         />
       </div>
 
-      {showSkillsPicker && (
-        <div
-          id="composer-command-suggestions"
-          className="composer-command-suggestions scrollbar-ultra-thin"
-          role="listbox"
-          aria-label="Skill suggestions"
-        >
-          {skillSuggestions.length === 0 ? (
-            <div className="composer-command-suggestion-empty">
-              {enabledSkills.length === 0
-                ? 'No skills enabled. Enable skills in Settings.'
-                : 'No skills match that filter.'}
-            </div>
-          ) : (
-            skillSuggestions.map((skill, index) => (
-              <button
-                key={skill.id}
-                ref={(element) => {
-                  if (element) suggestionRefs.current.set(index, element)
-                  else suggestionRefs.current.delete(index)
-                }}
-                id={`composer-command-suggestion-${index}`}
-                className={`composer-command-suggestion${index === selectedSuggestion ? ' selected' : ''}`}
-                type="button"
-                role="option"
-                aria-selected={index === selectedSuggestion}
-                onMouseEnter={() => setSelectedSuggestion(index)}
-                onClick={() => applySkill(skill.id)}
-              >
-                <span className="composer-command-suggestion-name">{skill.name}</span>
-                <span className="composer-command-suggestion-description">
-                  {skill.description || skill.id}
-                </span>
-              </button>
-            ))
+      {showMentionPicker && (
+        <ComposerSuggestionList
+          ariaLabel="File, folder and skill suggestions"
+          rows={mentionItems.map(
+            (item): SuggestionRow => ({
+              key: item.kind === 'skill' ? `skill:${item.skill.id}` : `${item.kind}:${item.path}`,
+              content: <MentionRowContent item={item} />
+            })
           )}
-        </div>
+          selected={selectedSuggestion}
+          onHover={setSelectedSuggestion}
+          onPick={(index) => pickMention(mentionItems[index])}
+          footer={mentionFooter}
+          registerRow={registerSuggestionRow}
+        />
+      )}
+
+      {showSkillsPicker && (
+        <ComposerSuggestionList
+          ariaLabel="Skill suggestions"
+          rows={skillSuggestions.map(
+            (skill): SuggestionRow => ({
+              key: skill.id,
+              content: (
+                <>
+                  <span className="composer-command-suggestion-name">{skill.name}</span>
+                  <span className="composer-command-suggestion-description">{skill.description || skill.id}</span>
+                </>
+              )
+            })
+          )}
+          selected={selectedSuggestion}
+          onHover={setSelectedSuggestion}
+          onPick={(index) => {
+            const skill = skillSuggestions[index]
+            if (skill) applySkill(skill.id)
+          }}
+          emptyText={
+            enabledSkills.length === 0
+              ? 'No skills enabled. Enable skills in Settings.'
+              : 'No skills match that filter.'
+          }
+          registerRow={registerSuggestionRow}
+        />
       )}
 
       {showSuggestions && (
-        <div
-          id="composer-command-suggestions"
-          className="composer-command-suggestions scrollbar-ultra-thin"
-          role="listbox"
-          aria-label="Slash command suggestions"
-        >
-          {suggestions.map((command, index) => (
-            <button
-              key={command.name}
-              ref={(element) => {
-                if (element) suggestionRefs.current.set(index, element)
-                else suggestionRefs.current.delete(index)
-              }}
-              id={`composer-command-suggestion-${index}`}
-              className={`composer-command-suggestion${index === selectedSuggestion ? ' selected' : ''}`}
-              type="button"
-              role="option"
-              aria-selected={index === selectedSuggestion}
-              onMouseEnter={() => setSelectedSuggestion(index)}
-              onClick={() => applySuggestion(command)}
-            >
-              <span className="composer-command-suggestion-name">
-                /{command.name}{command.argsHint ? ` ${command.argsHint}` : ''}
-              </span>
-              <span className="composer-command-suggestion-description">{command.description}</span>
-            </button>
-          ))}
-        </div>
+        <ComposerSuggestionList
+          ariaLabel="Slash command suggestions"
+          rows={suggestions.map(
+            (command): SuggestionRow => ({
+              key: command.name,
+              content: (
+                <>
+                  <span className="composer-command-suggestion-name">
+                    /{command.name}{command.argsHint ? ` ${command.argsHint}` : ''}
+                  </span>
+                  <span className="composer-command-suggestion-description">{command.description}</span>
+                </>
+              )
+            })
+          )}
+          selected={selectedSuggestion}
+          onHover={setSelectedSuggestion}
+          onPick={(index) => {
+            const command = suggestions[index]
+            if (command) applySuggestion(command)
+          }}
+          registerRow={registerSuggestionRow}
+        />
       )}
 
       <input

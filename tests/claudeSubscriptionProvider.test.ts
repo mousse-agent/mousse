@@ -157,7 +157,16 @@ describe('Claude Subscription native provider', () => {
     const starts = (callId: string) => onTool.mock.calls.map(([event]) => event).filter((event) => event.phase === 'start' && event.callId === callId)
     expect(starts('sub1').map((event) => event.record?.input)).toEqual([{ recordVersion: 1 }, { recordVersion: 1, title: 'API reviewer' }])
     expect(starts('sub2').map((event) => event.record?.input)).toEqual([{ recordVersion: 1 }, { recordVersion: 1, title: 'Docs' }])
-    expect(starts('read1')).toEqual([{ phase: 'start', callId: 'read1', title: 'Read', toolName: 'Read' }])
+    // Another tool repeats its start with the typed fields its arguments carry.
+    expect(starts('read1')).toEqual([
+      { phase: 'start', callId: 'read1', title: 'Read', toolName: 'Read' },
+      { phase: 'start', callId: 'read1', title: 'Read', toolName: 'Read', activity: { kind: 'generic', input: { file_path: 'a.ts' } } }
+    ])
+    // A Mousse subagent tool keeps its bounded record only: nothing typed is derived from its arguments.
+    for (const callId of ['sub1', 'sub2']) {
+      const events = onTool.mock.calls.map(([event]) => event).filter((event) => event.callId === callId)
+      expect(events.some((event) => event.activity)).toBe(false)
+    }
     expect(complete('sub2').record).toEqual({
       input: { recordVersion: 1, title: 'Docs' },
       response: JSON.stringify({ delegationId: 'd2', childThreadId: 't2', title: 'Docs' }),
@@ -167,7 +176,7 @@ describe('Claude Subscription native provider', () => {
     expect(refused.input).toEqual({ recordVersion: 1, title: 'API reviewer' })
     expect(JSON.parse(refused.response)).toEqual({ started: false, code: 'title_taken', message: 'You already have a subagent titled "API reviewer".' })
     expect(JSON.stringify(onTool.mock.calls)).not.toContain('SECRET PROMPT TEXT')
-    expect(complete('read1')).toEqual({ phase: 'complete', callId: 'read1', title: 'Read' })
+    expect(complete('read1')).toEqual({ phase: 'complete', callId: 'read1', title: 'Read', toolName: 'Read', activity: { kind: 'generic' } })
   })
 
   it('streams text/thinking/tools and only resumes committed matching history', async () => {

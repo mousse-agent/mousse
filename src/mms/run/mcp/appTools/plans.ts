@@ -70,6 +70,7 @@ export function planTools(host: AppToolHost): MousseTool[] {
       access: 'actsAsCaller',
       class: 'read',
       readOnlySafe: true,
+      ...(tool.name === 'ask_user' ? { asksUser: 'question' as const } : {}),
       available: available(tool.name),
       offered: offered(tool.name),
       describe: () => `Plan tool ${tool.name}`,
