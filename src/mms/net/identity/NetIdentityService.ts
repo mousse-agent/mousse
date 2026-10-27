@@ -18,7 +18,7 @@ import { isId, newId } from '../../../shared/net/ids'
 import { NetError } from '../../../shared/net/errors'
 import {
   NODE_CAPABILITIES,
-  DEFAULT_NODE_CAPABILITIES,
+  COMPUTER_NODE_CAPABILITIES,
   SESSION_CAPABILITIES
 } from '../../../shared/net/capabilities'
 import {
@@ -155,7 +155,7 @@ export class NetIdentityService implements IdentityService {
     const self = { user: newId('user'), node: newId('node') }
     const now = this.clock.now()
     const node = this.nodeDelegation(
-      { node: self.node, keys: this.keys.nodeKeys(), name, caps: [...DEFAULT_NODE_CAPABILITIES] },
+      { node: self.node, keys: this.keys.nodeKeys(), name, caps: [...COMPUTER_NODE_CAPABILITIES] },
       self.user,
       1,
       now
@@ -623,6 +623,76 @@ export class NetIdentityService implements IdentityService {
       roster.nodes.push(signedDocument(renamed, (bytes) => this.keys.signAsRoot(bytes)))
     })
   }
+  /**
+   * Re-signs a node's current delegation with another capability set: same key epoch, same lease,
+   * so nothing about the device's keys or expiry changes. The new `issuedAt` is the previous row's
+   * plus one, never `now`: an authority whose clock runs ahead would otherwise date the row in
+   * the future, and every peer would refuse the device until its own clock caught up.
+   */
+  setNodeCaps(node: NodeId, caps: readonly NodeCapability[]): Signed {
+    if (!isId('node', node)) throw new NetError('bad_request')
+    if (
+      !Array.isArray(caps) ||
+      !caps.length ||
+      new Set(caps).size !== caps.length ||
+      caps.some((cap) => !NODE_CAPABILITIES.includes(cap))
+    )
+      throw new NetError('bad_request', 'Invalid node capabilities.')
+    // The same order every time, so equal sets sign equal documents.
+    const next = NODE_CAPABILITIES.filter((cap) => caps.includes(cap))
+    const self = this.self(),
+      current = this.roster()
+    if (self?.isAuthority && current) {
+      const held = this.latestNode(
+        this.rosterDocument(current, this.pinnedRootKey(self.user)!),
+        node
+      )
+      // A repeated request leaves the roster, and with it every peer's copy, as it is.
+      if (held && held.caps.length === next.length && held.caps.every((cap) => next.includes(cap)))
+        return current
+    }
+    return this.authorityUpdate((roster) => {
+      const held = this.latestNode(roster, node)
+      // Revocation prunes the delegation, so a revoked node has no row left to change.
+      if (!held)
+        throw new NetError(
+          roster.revoked.some((row) => row.subject === node) ? 'revoked' : 'bad_request'
+        )
+      if (
+        (roster.revoked.find((row) => row.subject === node)?.throughKeyEpoch ?? 0) >= held.keyEpoch
+      )
+        throw new NetError('revoked')
+      const changed: NodeDelegation = { ...held, caps: next, issuedAt: held.issuedAt + 1 }
+      this.validDelegation(changed)
+      roster.nodes = roster.nodes.filter((signed) => {
+        const row = verifyDocument<NodeDelegation>(signed, roster.rootKey, 'nodeDelegation')
+        return row.subject !== node || row.keyEpoch !== held.keyEpoch
+      })
+      roster.nodes.push(signedDocument(changed, (bytes) => this.keys.signAsRoot(bytes)))
+    })
+  }
+  /**
+   * The authority is a computer, so its own delegation holds `settings`. An authority created
+   * before that grant existed adds it here, once, so the main computer of a current user is not
+   * refused by their other computers. Returns the new roster, or nothing when no change was due.
+   */
+  grantAuthoritySettings(): Signed | undefined {
+    const self = this.self(),
+      current = this.roster()
+    if (!self?.isAuthority || !current) return undefined
+    const held = this.latestNode(
+      this.rosterDocument(current, this.pinnedRootKey(self.user)!),
+      self.node
+    )
+    if (!held || held.caps.includes('settings') || held.expiresAt <= this.clock.now())
+      return undefined
+    return this.setNodeCaps(self.node, [...held.caps, 'settings'])
+  }
+  private latestNode(roster: Roster, node: NodeId): NodeDelegation | undefined {
+    return this.delegations(roster)
+      .filter((row): row is NodeDelegation => row.kind === 'node' && row.subject === node)
+      .sort((a, b) => b.keyEpoch - a.keyEpoch || b.issuedAt - a.issuedAt)[0]
+  }
   revoke(subject: NodeId | BotId): Signed {
     // Revocation prunes the delegation; revoking again (another admin device, a retried
     // request) leaves the roster as it is.
@@ -1057,7 +1127,7 @@ export class NetIdentityService implements IdentityService {
           node: self.node,
           keys: this.keys.nodeKeys(),
           name: 'Recovered authority',
-          caps: [...DEFAULT_NODE_CAPABILITIES]
+          caps: [...COMPUTER_NODE_CAPABILITIES]
         },
         self.user,
         this.nextEpoch(current, self.node),

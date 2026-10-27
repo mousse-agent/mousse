@@ -22,7 +22,7 @@ function service(): NetService {
   return net
 }
 
-it('lists a device approved as a phone with kind phone and every other device as a computer', async () => {
+it('lists a device approved as a phone with kind phone and every device invited here as a computer', async () => {
   const a = service(),
     b = service(),
     c = service()
@@ -35,7 +35,10 @@ it('lists a device approved as a phone with kind phone and every other device as
   })) as { node: string }
   // `bridge.invite` cannot name a kind; only an approved Mousse ID request records one.
   const asked = (await a.request('bridge.invite', { kind: 'phone' })) as { invite: string }
-  const claimed = (await service().request('bridge.join', { invite: asked.invite, name: 'claims' })) as {
+  const claimed = (await service().request('bridge.join', {
+    invite: asked.invite,
+    name: 'claims'
+  })) as {
     node: string
   }
   const phone = a.runtime().enrollment.issueNodeInvite({ name: 'pocket', kind: 'phone' })
@@ -50,12 +53,22 @@ it('lists a device approved as a phone with kind phone and every other device as
   expect(kind(claimed.node)).toBe('computer')
   expect(nodes.find((row) => row.self)?.kind).toBe('computer')
   expect(a.runtime().enrollment.nodeKind(joined.node as never)).toBe('phone')
-  // A device that never had a kind recorded reads as a computer.
+  // An invite made on the authority is recorded as a computer; a device with no record is unknown.
+  expect(a.runtime().enrollment.nodeKind(computer.node as never)).toBe('computer')
+  a.runtime()
+    .db.database.prepare('DELETE FROM net_enrollment_kinds WHERE node=?')
+    .run(computer.node)
   expect(a.runtime().enrollment.nodeKind(computer.node as never)).toBeUndefined()
+  const after = (await a.request('bridge.nodes', {})) as { nodes: Device[] }
+  expect(after.nodes.find((row) => row.node === computer.node)?.kind).toBe('unknown')
 })
 
 it('records the kind of a Mousse ID enrollment request when it is approved', async () => {
-  const issue = vi.fn(async () => ({ text: 'mj1_x', invite: 'inv_1', expiresAt: Date.now() + 60_000 })),
+  const issue = vi.fn(async () => ({
+      text: 'mj1_x',
+      invite: 'inv_1',
+      expiresAt: Date.now() + 60_000
+    })),
     approve = vi.fn(async () => undefined),
     controller = new HostedNetController({
       clock: { now: () => Date.now() },

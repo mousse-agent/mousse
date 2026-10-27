@@ -7,6 +7,7 @@ import {
 import { isId, NODE_CAPABILITIES, NET_ERRORS, NetError } from '../../shared/net'
 import { isJoinVia } from '../../shared/net/via'
 import { AppError } from '../../shared/errors'
+import { isPermissionMode } from '../../shared/permissionMode'
 import { DomainHandlerRegistry, DomainRpcError, domainObject } from '../protocol/domainRegistry'
 
 export interface NetLocalService {
@@ -60,7 +61,10 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
   'bridge.join': ['invite', 'name', 'passphrase', 'via'],
   'bridge.nodes': [],
   'bridge.revoke': ['node'],
-  'bridge.rename': ['node', 'name']
+  'bridge.rename': ['node', 'name'],
+  'bridge.setCaps': ['node', 'caps'],
+  'bridge.setKind': ['node', 'kind'],
+  'bridge.policy': ['node', 'blocked', 'maxPermissionMode', 'terminal']
 }
 const SSH_ID = /^[A-Za-z0-9_-]{1,64}$/u
 const FINGERPRINT = /^SHA256:[A-Za-z0-9+/]{43}$/u
@@ -221,10 +225,35 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
   )
     throw new DomainRpcError('invalid_params', 'Invalid node capabilities')
   if (
-    ['bridge.revoke', 'bridge.rename', 'net.authority.transfer'].includes(method) &&
+    [
+      'bridge.revoke',
+      'bridge.rename',
+      'bridge.setCaps',
+      'bridge.setKind',
+      'bridge.policy',
+      'net.authority.transfer'
+    ].includes(method) &&
     !isId('node', params.node)
   )
     throw new DomainRpcError('invalid_params', 'A node identity is required')
+  if (method === 'bridge.setKind' && params.kind !== 'computer' && params.kind !== 'phone')
+    throw new DomainRpcError('invalid_params', 'kind must be computer or phone')
+  if (method === 'bridge.setCaps' && params.caps === undefined)
+    throw new DomainRpcError('invalid_params', 'A capability list is required')
+  if (method === 'bridge.policy') {
+    if (
+      params.blocked === undefined &&
+      params.maxPermissionMode === undefined &&
+      params.terminal === undefined
+    )
+      throw new DomainRpcError('invalid_params', 'Choose a limit to change')
+    if (params.blocked !== undefined && typeof params.blocked !== 'boolean')
+      throw new DomainRpcError('invalid_params', 'blocked must be boolean')
+    if (params.terminal !== undefined && typeof params.terminal !== 'boolean')
+      throw new DomainRpcError('invalid_params', 'terminal must be boolean')
+    if (params.maxPermissionMode !== undefined && !isPermissionMode(params.maxPermissionMode))
+      throw new DomainRpcError('invalid_params', 'Unknown permission mode')
+  }
   if (
     method === 'net.recovery.import' &&
     (params.becomeAuthority !== true ||

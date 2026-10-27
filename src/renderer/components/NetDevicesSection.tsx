@@ -9,7 +9,8 @@ import { Modal } from './ui/Modal'
 import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './settings/SettingsRow'
 import { CopyButton } from './settings/IconButtons'
 import { mousseIdAvailable, useMousseIdStore } from '../stores/mousseIdStore'
-import { bindSettings, deviceLine, isIncompatible, listedDevices, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, type Device } from '../lib/netDevices'
+import { DeviceLimitsDialog } from './devices/DeviceLimitsDialog'
+import { bindSettings, canWorkOnThreads, deviceLine, isComputer, isIncompatible, listedDevices, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, worksOnThreads, WORKS_ON_THREADS, type Device } from '../lib/netDevices'
 import type { NetDoctor, NetStatus } from '../../shared/net'
 import { TAILSCALE_FUNNEL_PORTS, type NetAddonActionResult, type NetAddonRecords, type SshRecordView, type SshSetupPhase } from '../../shared/net/local'
 import type { PlatformRequestMethod } from '../../shared/platform'
@@ -106,6 +107,7 @@ export function NetDevicesSection() {
   const [records, setRecords] = useState<NetAddonRecords>({}), [saved, setSaved] = useState<Record<string, unknown>>({}), [notice, setNotice] = useState(''), [servePort, setServePort] = useState('47890'), [serveDialog, setServeDialog] = useState<{ wasOn: boolean }>()
   const [sshRecords, setSshRecords] = useState<SshRecordView[]>([]), [sshSetup, setSshSetup] = useState<{ setupId?: string }>(), [approving, setApproving] = useState<Device & { sshOffer: { endpoint: string } }>()
   const [recordDialog, setRecordDialog] = useState<{ kind: 'undo' | 'rename' | 'update'; record: SshRecordView; name: string }>()
+  const [limits, setLimits] = useState<Device>()
   const nameEdited = useRef(false)
   const reload = async () => {
     const owner = ++generation.current
@@ -231,7 +233,25 @@ export function NetDevicesSection() {
   const deviceMenu = (device: Device): MenuItem[] => {
     const record = sshRecordFor(device, sshRecords)
     const open = (kind: 'undo' | 'rename' | 'update') => () => { if (record) setRecordDialog({ kind, record, name: device.name }) }
+    const blocked = !!device.policy?.blocked
     return [
+      // Limits live on this computer, so they need no authority. A daemon from before them sends no policy.
+      ...(device.policy ? [
+        blocked
+          ? { label: 'Unblock', onSelect: () => void action('bridge.policy', { node: device.node, blocked: false }) }
+          : { label: 'Block on this computer', danger: true, onSelect: () => void action('bridge.policy', { node: device.node, blocked: true }) },
+        ...(isComputer(device) ? [{ label: 'Limits on this computer…', onSelect: () => setLimits(device) }] : [])
+      ] : []),
+      // Only the device that owns the identity can sign a grant, and only to a device it knows is a
+      // computer. One it never recorded a kind for is asked about first.
+      ...(authority && canWorkOnThreads(device) ? [{
+        label: worksOnThreads(device) ? 'Turn off Works on threads' : 'Turn on Works on threads',
+        onSelect: () => void action('bridge.setCaps', { node: device.node, caps: worksOnThreads(device) ? device.caps.filter((cap) => cap !== WORKS_ON_THREADS) : [...device.caps, WORKS_ON_THREADS] })
+      }] : []),
+      ...(authority && device.kind === 'unknown' ? [
+        { label: 'This is a computer', onSelect: () => void action('bridge.setKind', { node: device.node, kind: 'computer' }) },
+        { label: 'This is a phone', onSelect: () => void action('bridge.setKind', { node: device.node, kind: 'phone' }) }
+      ] : []),
       ...(record ? [{ label: 'Undo setup…', onSelect: open('undo') }, { label: 'Rename SSH endpoint…', onSelect: open('rename') }] : []),
       ...(record?.owner === 'managed' ? [{ label: 'Update…', onSelect: open('update') }] : []),
       ...(authority ? [{ label: 'Revoke…', danger: true, onSelect: () => setRevoking(device) }] : [])
@@ -294,7 +314,11 @@ export function NetDevicesSection() {
             <SettingsRow
               key={device.node}
               title={device.name}
-              titleAction={device.kind === 'phone' ? <span className="devices-kind" title="Phone"><Smartphone size={13} aria-hidden="true" />Phone</span> : undefined}
+              titleAction={device.kind === 'phone'
+                ? <span className="devices-kind" title="Phone"><Smartphone size={13} aria-hidden="true" />Phone</span>
+                : authority && device.kind === 'unknown'
+                  ? <span className="devices-kind" title="This device never told this computer what it is. Choose This is a computer or This is a phone in its menu.">Unknown device</span>
+                  : undefined}
               description={<span title={routeDetails(device) || undefined}>{deviceLine(device, Date.now())}{offer ? ' · offers an SSH route' : ''}</span>}
               control={<>
                 {offer && <button type="button" className="settings-btn" disabled={busy} onClick={() => setApproving({ ...device, sshOffer: offer })}>Use SSH route…</button>}
@@ -584,6 +608,7 @@ export function NetDevicesSection() {
     {recordDialog?.kind === 'undo' && <UndoSetupDialog record={recordDialog.record} name={recordDialog.name} onClose={() => setRecordDialog(undefined)} onDone={reloadQuietly} />}
     {recordDialog?.kind === 'rename' && <RenameEndpointDialog record={recordDialog.record} name={recordDialog.name} onClose={() => setRecordDialog(undefined)} onDone={reloadQuietly} />}
     {recordDialog?.kind === 'update' && <UpdateRemoteDialog record={recordDialog.record} name={recordDialog.name} onClose={() => setRecordDialog(undefined)} onDone={reloadQuietly} />}
+    {limits?.policy && <DeviceLimitsDialog node={limits.node} name={limits.name} policy={limits.policy} onClose={() => setLimits(undefined)} onDone={reloadQuietly} />}
   </>
 }
 

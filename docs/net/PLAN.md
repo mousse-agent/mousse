@@ -429,7 +429,7 @@ Devices page (init, invite, list, revoke, routes, status); add-ons page with gui
 | Node delegation lifetime | fixed | 7 days, auto-renew |
 | Invite TTL (node / space) | inviter | 10 min / 24 h |
 | Space invite uses | inviter | 1 |
-| New node capabilities | user | read, chat, write |
+| New node capabilities | user | read, chat, write; a computer also gets settings ("works on threads") |
 | Inline envelope size | fixed | 64 KiB |
 | Blob max size | space admin | 25 MiB |
 | Space storage quota | host operator | 5 GiB |

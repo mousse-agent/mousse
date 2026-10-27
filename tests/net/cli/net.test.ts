@@ -92,6 +92,55 @@ describe('network CLI validation', () => {
       params: { node: nodeId, name: 'Desk' }
     })
   })
+  it('maps block, unblock, limits, caps and kind to the daemon methods and refuses bad input', () => {
+    expect(prepareNetCommand(args('bridge', 'block', [nodeId]))).toEqual({
+      method: 'bridge.policy',
+      params: { node: nodeId, blocked: true }
+    })
+    expect(prepareNetCommand(args('bridge', 'unblock', [nodeId]))).toEqual({
+      method: 'bridge.policy',
+      params: { node: nodeId, blocked: false }
+    })
+    expect(
+      prepareNetCommand(
+        args(
+          'bridge',
+          'limits',
+          [nodeId],
+          [
+            ['max-mode', 'full'],
+            ['terminal', 'on']
+          ]
+        )
+      )
+    ).toEqual({
+      method: 'bridge.policy',
+      params: { node: nodeId, maxPermissionMode: 'full', terminal: true }
+    })
+    expect(
+      prepareNetCommand(args('bridge', 'caps', [nodeId], [['caps', 'read,chat,write,settings']]))
+    ).toEqual({
+      method: 'bridge.setCaps',
+      params: { node: nodeId, caps: ['read', 'chat', 'write', 'settings'] }
+    })
+    expect(prepareNetCommand(args('bridge', 'kind', [nodeId, 'phone']))).toEqual({
+      method: 'bridge.setKind',
+      params: { node: nodeId, kind: 'phone' }
+    })
+    for (const bad of [
+      args('bridge', 'block', []),
+      args('bridge', 'block', ['not-a-node']),
+      args('bridge', 'limits', [nodeId]),
+      args('bridge', 'limits', [nodeId], [['max-mode', 'root']]),
+      args('bridge', 'limits', [nodeId], [['terminal', 'maybe']]),
+      args('bridge', 'caps', [nodeId]),
+      args('bridge', 'caps', [nodeId], [['caps', 'read,read']]),
+      args('bridge', 'caps', [nodeId], [['caps', 'read,root']]),
+      args('bridge', 'kind', [nodeId, 'tablet']),
+      args('bridge', 'block', [nodeId], [['max-mode', 'full']])
+    ])
+      expect(() => prepareNetCommand(bad)).toThrow()
+  })
   it('rejects malformed, unexpected or privilege-confusing arguments without exposing them', () => {
     const cases = [
       args('net', 'init', ['extra']),

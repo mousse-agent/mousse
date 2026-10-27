@@ -15,6 +15,7 @@ import { join } from 'node:path'
 import type { Duplex } from 'node:stream'
 import type {
   InviteId,
+  NodeCapability,
   NodeDelegation,
   NodeId,
   PresenceMessage,
@@ -30,6 +31,7 @@ import {
   NetError,
   NET_ERRORS,
   DIAL_TLS_DEADLINE_MS,
+  COMPUTER_NODE_CAPABILITIES,
   NODE_CAPABILITIES,
   newId,
   isId
@@ -38,10 +40,13 @@ import type {
   NetAddonActionResult,
   NetAddonRecords,
   NetDoctor,
+  BridgeNodePolicy,
   NetInitInput,
   NetLocalMethod,
   NetStatus
 } from '../../shared/net/local'
+import type { PermissionMode } from '../../shared/permissionMode'
+import type { NodePolicy } from './store/nodePolicy'
 import type {
   AddonRecordStore,
   Clock,
@@ -60,6 +65,7 @@ import { SqliteExecutionLedger } from './store/executions'
 import { SqliteBudgetLedger } from './store/budgets'
 import { SqliteOutbox } from './store/outbox'
 import { SqliteQuotaRateLedger } from './store/limits'
+import { SqliteNodePolicy } from './store/nodePolicy'
 import { FileBlobStore } from './store/blobs'
 import { FileKeyStore, NetIdentityService } from './identity'
 import { ProfileTransports } from './transports/manager'
@@ -103,6 +109,12 @@ import {
   type GatewayNormalContext
 } from './enrollment'
 
+const policyView = (policy: NodePolicy): BridgeNodePolicy => ({
+  blocked: policy.blocked,
+  maxPermissionMode: policy.maxPermissionMode,
+  terminal: policy.terminal
+})
+
 interface NetConfiguration {
   v: 1
   enabled: boolean
@@ -124,6 +136,8 @@ export interface NetRuntime {
   outbox: SqliteOutbox
   limits: SqliteQuotaRateLedger
   blobs: FileBlobStore
+  /** What this computer lets each other device do here (`net_node_policy`). */
+  policy: SqliteNodePolicy
   rpc: DurableRpcDispatcher
   enrollment: EnrollmentService
   transfer: AuthorityTransferDelivery
@@ -186,6 +200,7 @@ export class NetService {
   private lastError?: keyof typeof NET_ERRORS
   private renewal?: { cancel(): void }
   private rosterListener?: () => void
+  private policyListener?: () => void
   private domain?: NetDomainComposition
   private presenceStore?: PeerPresence
   private presenceTimer?: { cancel(): void }
@@ -317,15 +332,24 @@ export class NetService {
         clock: this.clock,
         routes: () => this.signedRoutes()
       })
+      const policy = new SqliteNodePolicy(db, this.clock)
       const rpc = new DurableRpcDispatcher({
           db,
           identity,
           executions,
           clock: this.clock,
-          authorizeMethod: (method) => {
+          authorizeMethod: (method, peer) => {
             this.assertEnabled()
-            if (method.family === 'bridge') this.assertFeature('netBridge')
+            if (method.family === 'bridge' || method.family === 'routed')
+              this.assertFeature('netBridge')
             else if (method.family === 'spaces') this.assertFeature('netSpaces')
+            // Read on every call, so a block takes effect on the device's next request, and
+            // on the lookup of a result it asked for earlier.
+            if (
+              (method.family === 'bridge' || method.family === 'routed') &&
+              policy.isBlocked(peer.node)
+            )
+              throw new NetError('forbidden')
           }
         }),
         transfer = new AuthorityTransferDelivery({ db, identity, keys })
@@ -344,6 +368,10 @@ export class NetService {
           )
             throw new NetError('bad_request')
           return params
+        },
+        // These carry no family, so the block is checked here: a blocked phone gets no endpoints.
+        authorize: (_params, context) => {
+          if (policy.isBlocked(context.caller.node)) throw new NetError('forbidden')
         },
         handle: async (_params, context) => this.phoneEndpoints(context.carrier)
       })
@@ -367,6 +395,9 @@ export class NetService {
           )
             throw new NetError('bad_request')
           return { sdp: value.sdp, v: 1 }
+        },
+        authorize: (_params, context) => {
+          if (policy.isBlocked(context.caller.node)) throw new NetError('forbidden')
         },
         handle: async (params, context) =>
           this.phoneWebRtcOffer((params as { sdp: string }).sdp, context.carrier, context.caller)
@@ -430,8 +461,13 @@ export class NetService {
         budgets: new SqliteBudgetLedger(db),
         outbox: new SqliteOutbox(db),
         limits: new SqliteQuotaRateLedger(db),
+        policy,
         rpc
       }
+      // A block ends what the device is doing here now, not only what it asks for next.
+      this.policyListener = policy.onChange((event) => {
+        if (event.after.blocked && !event.before.blocked) this.endBlockedNode(event.node)
+      })
       this.domain = this.options.composeRuntime?.(this.state) ?? undefined
       this.rosterListener = identity.onRosterChanged((user) => {
         this.emit()
@@ -593,7 +629,14 @@ export class NetService {
           const runtime = this.requireEnrolled()
           if (!this.routes) await this.activate()
           // The device kind is recorded only when a Mousse ID request is approved, never on request.
-          const { kind: _kind, ...input } = params
+          const { kind: _kind, ...rest } = params
+          // An invite made here is for another computer, and is recorded as one; a phone joins
+          // through Mousse ID, where its kind is known, and never gets `settings`.
+          const input = {
+            ...rest,
+            kind: 'computer' as const,
+            caps: (rest.caps as NodeCapability[] | undefined) ?? [...COMPUTER_NODE_CAPABILITIES]
+          }
           const invite = this.transport?.hasRelayListener()
             ? await this.issueRendezvousInvite(input)
             : runtime.enrollment.issueNodeInvite(input)
@@ -630,6 +673,70 @@ export class NetService {
           const rt = this.requireEnrolled()
           rt.identity.renameNode(params.node as NodeId, String(params.name))
           return { ok: true }
+        }
+        case 'bridge.setCaps': {
+          const rt = this.requireEnrolled(),
+            node = params.node as NodeId,
+            caps = params.caps as NodeCapability[]
+          // The thread grant goes to a device this authority knows is a computer, and to nothing
+          // else: a phone, and a device whose kind was never recorded, are refused.
+          if (
+            caps.includes('settings') &&
+            node !== rt.identity.self()!.node &&
+            rt.enrollment.nodeKind(node) !== 'computer'
+          )
+            throw new NetError(
+              'forbidden',
+              'Only a device known to be a computer can work on threads.'
+            )
+          rt.identity.setNodeCaps(node, caps)
+          this.emit()
+          return { ok: true }
+        }
+        case 'bridge.setKind': {
+          const rt = this.requireEnrolled(),
+            node = params.node as NodeId,
+            kind = params.kind as 'computer' | 'phone'
+          if (!rt.identity.self()!.isAuthority) throw new NetError('forbidden')
+          if (node === rt.identity.self()!.node) throw new NetError('bad_request')
+          try {
+            this.currentNode(node)
+          } catch {
+            throw new NetError('bad_request', 'Unknown device.')
+          }
+          rt.enrollment.recordNodeKind(node, kind)
+          // A device said to be a phone keeps no thread grant it may have been given.
+          if (kind === 'phone') {
+            const held = this.nodes() as { nodes: Array<{ node: NodeId; caps: NodeCapability[] }> }
+            const caps = held.nodes.find((row) => row.node === node)?.caps ?? []
+            if (caps.includes('settings'))
+              rt.identity.setNodeCaps(
+                node,
+                caps.filter((cap) => cap !== 'settings')
+              )
+          }
+          this.emit()
+          return { ok: true }
+        }
+        case 'bridge.policy': {
+          const rt = this.requireEnrolled(),
+            node = params.node as NodeId
+          if (node === rt.identity.self()!.node) throw new NetError('bad_request')
+          // Only a device on the roster; a revoked or unknown id has nothing to limit.
+          try {
+            this.currentNode(node)
+          } catch {
+            throw new NetError('bad_request', 'Unknown device.')
+          }
+          const policy = rt.policy.set(node, {
+            ...(params.blocked === undefined ? {} : { blocked: params.blocked as boolean }),
+            ...(params.maxPermissionMode === undefined
+              ? {}
+              : { maxPermissionMode: params.maxPermissionMode as PermissionMode }),
+            ...(params.terminal === undefined ? {} : { terminal: params.terminal as boolean })
+          })
+          this.emit()
+          return { policy: policyView(policy) }
         }
         default:
           throw new NetError('bad_request')
@@ -698,7 +805,9 @@ export class NetService {
     if (!this.state) return []
     return this.transportConfigurations()
       .map((row) => (row.settings as { port?: unknown } | undefined)?.port)
-      .filter((port): port is number => typeof port === 'number' && Number.isInteger(port) && port > 0)
+      .filter(
+        (port): port is number => typeof port === 'number' && Number.isInteger(port) && port > 0
+      )
   }
 
   private transportConfigurations(): TransportConfiguration[] {
@@ -1294,6 +1403,9 @@ export class NetService {
     const check = (stream: StreamId): void => {
       if (!allowed(stream)) throw new NetError('disabled')
     }
+    // A device this computer blocked reads, fetches and writes none of its Bridge streams.
+    const blockedFor = (stream: StreamId, peer: { node: NodeId }): boolean =>
+      !store.getStream(stream)?.kind.startsWith('space.') && rt.policy.isBlocked(peer.node)
     const session = new NetSyncSession({
       ...this.domain?.session,
       channel,
@@ -1312,19 +1424,25 @@ export class NetService {
       clock: this.clock,
       isStreamQuiesced: (stream) => this.streamQuiesced(stream),
       isSpaceQuiesced: (space) => this.archiveFences.has(space),
+      isStreamBlocked: (stream, peer) => blockedFor(stream, peer),
       authority: {
-        canRead: (...args) => allowed(args[0]) && baseAuthority.canRead(...args),
-        canFetchBlob: (...args) => allowed(args[0]) && baseAuthority.canFetchBlob(...args),
+        canRead: (...args) =>
+          allowed(args[0]) && !blockedFor(args[0], args[1]) && baseAuthority.canRead(...args),
+        canFetchBlob: (...args) =>
+          allowed(args[0]) && !blockedFor(args[0], args[2]) && baseAuthority.canFetchBlob(...args),
         append: (...args) => {
           check(args[0])
+          if (blockedFor(args[0], args[4])) throw new NetError('forbidden')
           return baseAuthority.append(...args)
         },
         acceptBlob: (...args) => {
           check(args[0])
+          if (blockedFor(args[0], args[4])) throw new NetError('forbidden')
           baseAuthority.acceptBlob(...args)
         },
         blobCommitted: (...args) => {
           check(args[0])
+          if (blockedFor(args[0], args[4])) throw new NetError('forbidden')
           baseAuthority.blobCommitted?.(...args)
         }
       },
@@ -1610,6 +1728,21 @@ export class NetService {
     )
       throw new NetError('revoked')
     return result
+  }
+  /**
+   * A device was just blocked: its subscriptions end and its running requests are asked to stop.
+   * Its next call is refused by the policy check itself; this is for what is already under way.
+   */
+  private endBlockedNode(node: NodeId): void {
+    this.state?.rpc.abortCaller(node)
+    for (const session of this.sessions) {
+      try {
+        if (session.state() === 'open' && session.peer.node === node)
+          void session.endServing('forbidden').catch(() => {})
+      } catch {
+        // Not authenticated yet: its first read is checked against the policy.
+      }
+    }
   }
   /** Sessions that authenticated `node` but are not open yet do not see roster changes. */
   private closeHandshakingSessions(node: NodeId): void {
@@ -1982,8 +2115,17 @@ export class NetService {
     this.emit()
     return { ...query, phase: 'activated', authority: node }
   }
+  /** An authority from before the thread grant existed gets it on its own delegation. */
+  private grantAuthoritySettings(): void {
+    try {
+      this.state?.identity.grantAuthoritySettings()
+    } catch {
+      // A roster conflict leaves it for the next renewal; it must not fail activation.
+    }
+  }
   private scheduleRenewal(): void {
     this.renewal?.cancel()
+    this.grantAuthoritySettings()
     this.renewal = this.clock.setTimeout(
       () => {
         if (this.stopped || this.disabled || !this.config.enabled) return
@@ -2198,7 +2340,8 @@ export class NetService {
         inviteNode: async (name) => {
           const issued = (await this.request('bridge.invite', {
             name,
-            caps: ['read', 'chat', 'write'],
+            // A machine set up over SSH is a computer that works on threads.
+            caps: [...COMPUTER_NODE_CAPABILITIES],
             ttlMs: 15 * 60_000
           })) as { invite: string; inviteId: InviteId }
           return { invite: issued.invite, inviteId: issued.inviteId }
@@ -2338,7 +2481,14 @@ export class NetService {
         caps: node.caps.filter((cap) => NODE_CAPABILITIES.includes(cap)),
         keyEpoch: node.keyEpoch,
         expiresAt: node.expiresAt,
-        kind: rt.enrollment.nodeKind(node.subject) ?? 'computer',
+        // Only the authority records kinds. A device with none recorded is unknown, never assumed
+        // to be a computer: it cannot be given the thread grant until the owner says what it is.
+        kind:
+          node.subject === rt.identity.self()!.node
+            ? 'computer'
+            : (rt.enrollment.nodeKind(node.subject) ?? 'unknown'),
+        // What this computer lets the device do here; the device's own limits are on that device.
+        policy: policyView(rt.policy.get(node.subject)),
         self: node.subject === rt.identity.self()!.node,
         revoked: roster.revoked.some(
           (row) => row.subject === node.subject && row.throughKeyEpoch >= node.keyEpoch
@@ -2356,7 +2506,8 @@ export class NetService {
         const delegation = rt.identity.verifySigned<NodeDelegation>(signed, roster.rootKey)
         if (
           !roster.revoked.some(
-            (row) => row.subject === delegation.subject && row.throughKeyEpoch >= delegation.keyEpoch
+            (row) =>
+              row.subject === delegation.subject && row.throughKeyEpoch >= delegation.keyEpoch
           )
         )
           live.add(delegation.subject)
@@ -2598,6 +2749,7 @@ export class NetService {
     this.renewal?.cancel()
     this.presenceTimer?.cancel()
     this.rosterListener?.()
+    this.policyListener?.()
     for (const gateway of this.gateways) gateway.close()
     for (const supervisor of this.supervisors.values()) supervisor.close()
     for (const session of this.sessions) session.close()

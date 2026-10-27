@@ -183,7 +183,7 @@ describe('NetIdentityService durable security foundation', () => {
       signature = a.keys.signAsNode(bytes)
     expect(
       a.identity.verifyAuthor(author, bytes, signature, originalAt, 'history').delegation
-    ).toMatchObject({ caps: ['read', 'chat', 'write'] })
+    ).toMatchObject({ caps: ['read', 'chat', 'write', 'settings'] })
     expect(
       a.identity.verifyAuthor(author, bytes, signature, originalAt, 'newWork').delegation
     ).toMatchObject({ caps: ['read'] })

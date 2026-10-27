@@ -18,6 +18,7 @@ import { NODE_CAPABILITIES, type NodeCapability } from '../../shared/net/capabil
 import { NET_ERRORS, isNetErrorCode, type NetErrorCode } from '../../shared/net/errors'
 import { isId } from '../../shared/net/ids'
 import { isJoinVia } from '../../shared/net/via'
+import { isPermissionMode } from '../../shared/permissionMode'
 
 export const NET_HELP = `Usage:
   mousse-cli net init [--unlock] [--name <name>] [--listen [--host <IP>] [--port <port>]]
@@ -88,9 +89,19 @@ export const BRIDGE_HELP = `Usage:
   mousse-cli bridge nodes
   mousse-cli bridge revoke <node-id>
   mousse-cli bridge rename <node-id> <name>
+  mousse-cli bridge block <node-id>
+  mousse-cli bridge unblock <node-id>
+  mousse-cli bridge limits <node-id> [--max-mode ask|accept_edits|full] [--terminal on|off]
+  mousse-cli bridge caps <node-id> --caps read,chat,write,settings
+  mousse-cli bridge kind <node-id> computer|phone
 
-Only the current authority can invite, revoke or rename nodes.
+Only the current authority can invite, revoke or rename nodes, change capabilities or set a
+device's kind. block, unblock and limits act on this computer only, on any computer: a blocked
+device is refused every Bridge call and stream here until unblocked.
+caps settings is "works on threads"; it is refused for a device not known to be a computer.
 revoke and rename require the nod_ identifier shown by bridge nodes.
+An invite without --caps is for another computer: read, chat, write and settings
+("works on threads"). Name --caps read,chat,write for a device that should not.
 bridge nodes also reports each device's version, the route in use, every known
 route with its last result, and when it was last seen. A device that predates
 these fields shows none of them.
@@ -135,6 +146,17 @@ type NetMethod =
   | 'bridge.nodes'
   | 'bridge.revoke'
   | 'bridge.rename'
+  | 'bridge.setCaps'
+  | 'bridge.setKind'
+  | 'bridge.policy'
+/** CLI subcommands that are one daemon method with fixed arguments. */
+const BRIDGE_ALIASES: Record<string, NetMethod> = {
+  block: 'bridge.policy',
+  unblock: 'bridge.policy',
+  limits: 'bridge.policy',
+  caps: 'bridge.setCaps',
+  kind: 'bridge.setKind'
+}
 export interface NetCliRequest {
   method: NetMethod
   params: Record<string, unknown>
@@ -273,7 +295,9 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
           ? 'net.transport.list'
           : args.command === 'net' && args.subcommand === 'transport'
             ? 'net.transport.configure'
-            : `${args.command}.${args.subcommand}`
+            : args.command === 'bridge' && Object.hasOwn(BRIDGE_ALIASES, args.subcommand ?? '')
+              ? BRIDGE_ALIASES[args.subcommand!]
+              : `${args.command}.${args.subcommand}`
   ) as NetMethod
   const options: Partial<Record<NetMethod, string[]>> = {
     'net.plus.login.begin': ['configuration-file', 'name', 'bind-root'],
@@ -302,7 +326,10 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
     'bridge.join': ['name', 'protect', 'invite-file', 'via'],
     'bridge.nodes': [],
     'bridge.revoke': [],
-    'bridge.rename': []
+    'bridge.rename': [],
+    'bridge.setCaps': ['caps'],
+    'bridge.setKind': [],
+    'bridge.policy': args.subcommand === 'limits' ? ['max-mode', 'terminal'] : []
   }
   const permitted = options[method]
   if (!permitted) invalid('Unknown network command. Use net help or bridge help.')
@@ -336,9 +363,11 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
             method === 'net.authority.transfer' ||
             method === 'net.transport.configure'
           ? 2
-          : method === 'bridge.rename'
+          : method === 'bridge.rename' || method === 'bridge.setKind'
             ? 2
-            : method === 'bridge.revoke'
+            : method === 'bridge.revoke' ||
+                method === 'bridge.setCaps' ||
+                method === 'bridge.policy'
               ? 1
               : method === 'bridge.join'
                 ? undefined
@@ -518,6 +547,42 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
       invalid('bridge revoke and rename require a valid nod_ node identifier from bridge nodes.')
     params.node = node
     if (method === 'bridge.rename') params.name = name(args.positional[1])
+  }
+  if (method === 'bridge.setCaps' || method === 'bridge.setKind' || method === 'bridge.policy') {
+    const node = args.positional[0]
+    if (!isId('node', node)) invalid('A valid nod_ node identifier from bridge nodes is required.')
+    params.node = node
+    if (method === 'bridge.setKind') {
+      const kind = args.positional[1]
+      if (kind !== 'computer' && kind !== 'phone')
+        invalid('bridge kind requires computer or phone.')
+      params.kind = kind
+    } else if (method === 'bridge.setCaps') {
+      const raw = stringFlag(args, 'caps')
+      if (raw === undefined) invalid('bridge caps requires --caps read,chat,write,...')
+      const caps = raw.split(',')
+      if (
+        new Set(caps).size !== caps.length ||
+        caps.some((cap) => !NODE_CAPABILITIES.includes(cap as NodeCapability))
+      )
+        invalid('--caps requires distinct capabilities: read, chat, write, terminal, settings.')
+      params.caps = caps
+    } else if (args.subcommand === 'block') params.blocked = true
+    else if (args.subcommand === 'unblock') params.blocked = false
+    else {
+      const mode = stringFlag(args, 'max-mode'),
+        terminal = stringFlag(args, 'terminal')
+      if (mode === undefined && terminal === undefined)
+        invalid('bridge limits requires --max-mode ask|accept_edits|full and/or --terminal on|off.')
+      if (mode !== undefined) {
+        if (!isPermissionMode(mode)) invalid('--max-mode requires ask, accept_edits or full.')
+        params.maxPermissionMode = mode
+      }
+      if (terminal !== undefined) {
+        if (terminal !== 'on' && terminal !== 'off') invalid('--terminal requires on or off.')
+        params.terminal = terminal === 'on'
+      }
+    }
   }
   return {
     method,

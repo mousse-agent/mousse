@@ -1,4 +1,5 @@
 import type { NodeCapability } from './capabilities'
+import type { PermissionMode } from '../permissionMode'
 import type { NodeId, UserId } from './ids'
 import type { Route } from './identity'
 import type { KeystoreState, RosterState } from './identity'
@@ -50,6 +51,9 @@ export const NET_LOCAL_METHODS = [
   'bridge.nodes',
   'bridge.revoke',
   'bridge.rename',
+  'bridge.setCaps',
+  'bridge.setKind',
+  'bridge.policy',
   'net.authority.transfer',
   'net.authority.status',
   'net.recovery.export',
@@ -93,6 +97,18 @@ export interface BridgeInviteInput {
   ttlMs?: number
   name?: string
   caps?: NodeCapability[]
+}
+/**
+ * What this computer lets another device do here (`bridge.policy`, and `policy` on each
+ * `bridge.nodes` row). It is kept on this computer only, so every computer sets its own.
+ */
+export interface BridgeNodePolicy {
+  /** Every Bridge call, stream and routed call from the device is refused. */
+  blocked: boolean
+  /** The most permissive permission mode a person on the device can run a turn or rule in. */
+  maxPermissionMode: PermissionMode
+  /** The device may open terminals on this computer. */
+  terminal: boolean
 }
 export interface NetStatus {
   enabled: boolean

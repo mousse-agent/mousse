@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { NodeCapability, NodeDelegation, Roster, RpcId } from '../../../shared/net'
+import type { NodeCapability, NodeDelegation, NodeId, Roster, RpcId } from '../../../shared/net'
 import { NetError, isNetErrorCode } from '../../../shared/net/errors'
 import type {
   Clock,
@@ -37,7 +37,7 @@ const isOmittedResult = (value: unknown): value is OmittedResult =>
 /** Durable request aliases share the execution ledger's database/transaction manager. */
 export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
   private registry = new Map<string, RpcMethod>()
-  private running = new Map<string, AbortController>()
+  private running = new Map<string, { controller: AbortController; caller: NodeId }>()
   private lastPruneAt = Number.NEGATIVE_INFINITY
   private resultPublisher?: (
     result: unknown,
@@ -210,7 +210,7 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
     const terminalEffects: Array<() => void> = []
     const abort = (): void => controller.abort()
     context.signal.addEventListener('abort', abort, { once: true })
-    this.running.set(id, controller)
+    this.running.set(id, { controller, caller: context.caller.node })
     try {
       this.authorize(name, context.caller, capability)
       method.authorize?.(params, context)
@@ -305,8 +305,21 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
     // A cancelled unsent request may never have been admitted. Cancel is idempotent.
     if (!alias) return
     this.authorize(alias.method, peer, alias.capability)
-    this.running.get(alias.execution)?.abort()
+    this.running.get(alias.execution)?.controller.abort()
     // Missing live handler is not evidence that a persisted effect was rolled back.
+  }
+  /**
+   * Asks every handler that is running for `node` to stop, as a block does. A handler that has
+   * already made its effect still ends `outcome_uncertain`: stopping is a request, not a rollback.
+   */
+  abortCaller(node: NodeId): number {
+    let aborted = 0
+    for (const entry of this.running.values())
+      if (entry.caller === node) {
+        entry.controller.abort()
+        aborted++
+      }
+    return aborted
   }
   private alias(
     id: RpcId,
