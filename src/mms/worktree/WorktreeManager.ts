@@ -4,6 +4,7 @@ import { spawn } from 'child_process'
 import { GIT_NULL_DEVICE } from '../git/gitNullDevice'
 import { basename, dirname, join, relative, resolve, sep } from 'path'
 import simpleGit, { SimpleGit } from 'simple-git'
+import { guardedSimpleGit, HOOK_EVENTS, repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
 import { RepositoryContext } from './RepositoryContext'
 import { WorktreeIdentity } from './WorktreeIdentity'
 import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
@@ -51,7 +52,6 @@ export interface OrphanWorktreeReport {
 const AGENT_DIR_PATTERN = /^agent-[0-9a-z][0-9a-z_-]{2,63}$/i
 
 export class WorktreeManager {
-  private git: SimpleGit
   private repoRoot: string
   private worktreesBase: string
   private repository?: RepositoryContext
@@ -60,7 +60,11 @@ export class WorktreeManager {
     if (!repoRoot?.trim()) throw new Error('WorktreeManager requires an explicit repository path.')
     this.repoRoot = resolve(repoRoot)
     this.worktreesBase = join(this.repoRoot, '.mousse-worktrees')
-    this.git = simpleGit(this.repoRoot)
+  }
+
+  /** Git for the repository; no program the repository configures runs. */
+  private get git(): SimpleGit {
+    return this.repository?.git ?? guardedSimpleGit(this.repoRoot)
   }
 
   async init(): Promise<void> {
@@ -71,7 +75,6 @@ export class WorktreeManager {
     // callers. RepositoryContext still owns the canonical Git command context.
     this.repository = await RepositoryContext.open(this.repoRoot)
     this.worktreesBase = join(this.repoRoot, '.mousse-worktrees')
-    this.git = this.repository.git
     if (!existsSync(this.worktreesBase)) mkdirSync(this.worktreesBase, { recursive: true })
   }
 
@@ -98,7 +101,6 @@ export class WorktreeManager {
     if (!repoRoot?.trim()) throw new Error('WorktreeManager requires an explicit repository path.')
     this.repoRoot = resolve(repoRoot)
     this.worktreesBase = join(this.repoRoot, '.mousse-worktrees')
-    this.git = simpleGit(this.repoRoot)
     this.repository = undefined
   }
 
@@ -166,7 +168,7 @@ export class WorktreeManager {
         ['sparse-checkout', 'set', '--no-cone', '--stdin'],
         `${selection.includedFiles.join('\n')}\n`
       )
-      await simpleGit(identity.path).raw(['checkout', 'HEAD'])
+      await guardedSimpleGit(identity.path).raw(['checkout', 'HEAD'])
       // Sparse checkout only materializes files present in HEAD. Explicit task inputs
       // can be intentionally untracked (videos, screenshots, local fixtures), so copy
       // selected existing files that checkout did not create, without overwriting HEAD.
@@ -188,7 +190,7 @@ export class WorktreeManager {
       mkdirSync(mousseDir, { recursive: true })
       writeFileSync(excludesFile, `.mousse/\nnode_modules\n${materializedInputs.join('\n')}\n`)
       await repository.git.raw(['config', 'extensions.worktreeConfig', 'true'])
-      await simpleGit(identity.path).raw([
+      await guardedSimpleGit(identity.path).raw([
         'config', '--worktree', 'core.excludesFile', excludesFile
       ])
       const sharedDependencyPaths = await linkSharedDependencies(repository.root, identity.path)
@@ -393,7 +395,7 @@ export class WorktreeManager {
 
 function runGitWithInput(cwd: string, args: string[], input: string): Promise<void> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn('git', args, { cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+    const child = spawn('git', withoutRepoPrograms(cwd, args), { cwd, env: repoProgramEnv(), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
     let stderr = ''
     child.stderr.setEncoding('utf8')
     child.stderr.on('data', (chunk: string) => { stderr += chunk })
@@ -436,7 +438,7 @@ export async function safeWorktreeGit(repositoryRoot: string): Promise<{ git: Si
       allowUnsafeFilter: true
     }
   })
-  const safety = ['-c', `core.hooksPath=${GIT_NULL_DEVICE}`, '-c', 'core.fsmonitor=false']
+  const safety = ['-c', `core.hooksPath=${GIT_NULL_DEVICE}`, '-c', 'core.fsmonitor=false', ...HOOK_EVENTS.flatMap((event) => ['-c', `hook.${event}.enabled=false`])]
   // Git LFS and other inherited drivers must never execute on dispatched content,
   // including Git's dirty-file check before worktree removal.
   const configuration = await git.raw([...safety, 'config', '--null', '--show-scope', '--list'])

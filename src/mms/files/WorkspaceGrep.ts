@@ -6,6 +6,7 @@ import type { FileGrepMatch, FileGrepResponse } from '../../shared/types'
 import { SKIP_DIR_NAMES, resolveWithinRoot } from './pathGuard'
 import { detectGitRoute, isPhysicallyWithin, type GitRoute } from './WorkspaceIndex'
 import { getWorkspaceIndexRegistry, type WorkspaceIndexLookup } from './WorkspaceIndexRegistry'
+import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
 
 export interface GrepWorkspaceOptions {
   /** Regular expressions run in `git grep` only; elsewhere the query is searched literally. */
@@ -298,11 +299,11 @@ async function grepWithGit(
       if (context.wholeWord) args.push('-w')
       args.push(mode === 'regex' ? '-E' : '-F', '-e', query, '--')
 
-      const child = spawnGit('git', args, {
+      const child = spawnGit('git', withoutRepoPrograms(root, args), {
         cwd: root,
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' }
+        env: repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' })
       })
       let stoppedByUs = false
       let deadlineHit = false

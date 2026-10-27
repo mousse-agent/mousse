@@ -9,6 +9,7 @@ import { WorktreeRetirementService } from './WorktreeRetirementService'
 import { UndoRetentionService } from '../actions/UndoRetentionService'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 import { ThreadJournal } from '../data/ThreadJournal'
+import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
 
 type JsonObject = Record<string, unknown>
 const object = (value: unknown): JsonObject | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : undefined
@@ -114,7 +115,7 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
           return
         }
         if (lstatSync(path).isSymbolicLink() || !lstatSync(join(path, '.git')).isFile()) throw new Error('Not a regular linked Git worktree')
-        const git = (...args: string[]) => execFileSync('git', args, { cwd: path, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim()
+        const git = (...args: string[]) => execFileSync('git', withoutRepoPrograms(path, args), { cwd: path, env: repoProgramEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim()
         const common = realpathSync(resolve(path, git('rev-parse', '--git-common-dir')))
         const repositoryId = digest(common.toLowerCase()).slice(0, 32)
         if (expectedRepository && repositoryId !== expectedRepository) throw new Error('Repository common-directory identity changed')

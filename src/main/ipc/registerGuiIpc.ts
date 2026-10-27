@@ -1131,6 +1131,9 @@ export function registerGuiIpc(
     broadcast('projects:updated', res.projects)
     return res.project
   })
+  registerHandler('projects:trustGitSettings', async (_e, projectId: string) =>
+    guiMms.request<{ filters: string[] }>('projects.trustGitSettings', { projectId })
+  )
   registerHandler('projects:reorder', async (_e, projectIds: string[]) => {
     const res = await guiMms.request<{ projects: unknown[] }>('projects.reorder', {
       projectIds

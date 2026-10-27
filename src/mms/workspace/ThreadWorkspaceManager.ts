@@ -24,9 +24,10 @@ import type {
   WorkspaceCapability,
   WorkspaceExecutionContext
 } from '../../shared/workspace'
+import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
 
 function git(cwd: string, args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+  return execFileSync('git', withoutRepoPrograms(cwd, args), { cwd, env: repoProgramEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 }
 
 function tryGit(cwd: string, args: string[]): { ok: boolean; stdout: string } {
@@ -74,7 +75,7 @@ async function addUntrustedWorktree(primaryCheckoutPath: string, addArguments: s
   const safety = await untrustedSafety(primaryCheckoutPath)
   execFileSync('git', [...safety, 'worktree', 'add', ...addArguments], {
     cwd: primaryCheckoutPath,
-    env: { ...process.env, ...nonInteractiveGitEnv(), GIT_LFS_SKIP_SMUDGE: '1' },
+    env: repoProgramEnv({ ...process.env, ...nonInteractiveGitEnv(), GIT_LFS_SKIP_SMUDGE: '1' }),
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe']
   })

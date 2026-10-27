@@ -6,7 +6,8 @@ import {
   DeleteRegular,
   EditRegular,
   PinOffRegular,
-  PinRegular
+  PinRegular,
+  ShieldCheck
 } from '../lib/icons'
 import { FloatingPortal, FLOATING_LAYER_Z_INDEX } from '../lib/floatingLayer'
 
@@ -28,6 +29,8 @@ interface ThreadsContextMenuProps {
   onRegenerateTitle: () => void
   onRename: () => void
   onRemove: () => void
+  /** Projects only: record the repository's own Git filters as the user's again. */
+  onTrustGitSettings?: () => void
 }
 
 export function ThreadsContextMenu({
@@ -39,7 +42,8 @@ export function ThreadsContextMenu({
   onSettle,
   onRegenerateTitle,
   onRename,
-  onRemove
+  onRemove,
+  onTrustGitSettings
 }: ThreadsContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null)
 
@@ -118,6 +122,18 @@ export function ThreadsContextMenu({
           <EditRegular />
           <span>Rename</span>
         </button>
+        {target.type === 'project' && onTrustGitSettings && (
+          <button
+            type="button"
+            className="threads-context-menu-item"
+            role="menuitem"
+            title="Mousse runs this repository's own Git filters (git-crypt, a local Git LFS) only as they were when you added it. Use this after you changed one yourself."
+            onClick={onTrustGitSettings}
+          >
+            <ShieldCheck />
+            <span>Trust Git settings again</span>
+          </button>
+        )}
         <button
           type="button"
           className="threads-context-menu-item threads-context-menu-item-danger"

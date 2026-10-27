@@ -12,6 +12,7 @@ import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { UndoRetentionService } from './UndoRetentionService'
+import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
 
 interface ReleaseIntent { version: 1; receiptId: string; repositoryId: string; refs: Array<{ name: string; sha: string }> }
 export interface ReceiptRefReleaseResult { releasedRefs: string[]; retained: Array<{ receiptId: string; reason: string }>; reclaimedGitBytes: null }
@@ -75,8 +76,8 @@ export class ReceiptRefReleaseService {
           })
           if (!candidate.intent) journal.append({ operationId: candidate.operationId, operationType: 'undo-ref-release', state: 'prepared', details: intent })
           options.afterPrepared?.()
-          if (present.length) execFileSync('git', ['update-ref', '--no-deref', '--stdin'], {
-            cwd: workspacePath, input: `start\n${present.map((ref) => `delete ${ref.name} ${ref.sha}`).join('\n')}\nprepare\ncommit\n`, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true
+          if (present.length) execFileSync('git', withoutRepoPrograms(workspacePath, ['update-ref', '--no-deref', '--stdin']), {
+            cwd: workspacePath, env: repoProgramEnv(), input: `start\n${present.map((ref) => `delete ${ref.name} ${ref.sha}`).join('\n')}\nprepare\ncommit\n`, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true
           })
           options.afterGit?.()
           if (intent.refs.some((ref) => readDirectLifecycleRef(workspacePath, ref.name) !== undefined)) throw new Error('Receipt reference survived the release transaction.')

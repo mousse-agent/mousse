@@ -106,6 +106,7 @@ import { PullRequestWatchService } from './git/PullRequestWatchService'
 import { resolveThreadProjectPath } from './data/resolveActiveProjectPath'
 import { SpeechRelay } from './speech/SpeechRelay'
 import { systemClock } from './net/clock'
+import { trustExistingProjectsOnce } from './git/repoPrograms'
 
 const STORAGE_LIFECYCLE_METHODS = new Set([
   'threads.delete',
@@ -386,6 +387,8 @@ export class MmsProfileServices {
     this.ptyManager.setSendSink(terminalSink)
 
     this.projects = new ProjectManager(homeDir)
+    // Projects added before Mousse recorded their repositories' own Git filters: recorded once, now.
+    trustExistingProjectsOnce(homeDir, this.projects.listProjects().map((project) => project.path))
     this.threads = new ThreadDataStore(this.projects, homeDir, {
       profileId: this.profileId,
       allowLegacyProjectData: shared.allowLegacyProjectData ?? !shared.personal

@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process'
+import { repoProgramEnv, withoutRepoPrograms } from './repoPrograms'
 
 export interface ExecutableResult {
   stdout: string
@@ -11,14 +12,22 @@ export type ExecutableRunner = (
   options?: { cwd?: string; /** Added to the process environment. */ env?: Record<string, string>; /** Longer than the default minute, for a download. */ timeoutMs?: number }
 ) => Promise<ExecutableResult>
 
+/** Runs a program; `git` runs no program the repository configures (`repoPrograms`). */
 export const execRunner: ExecutableRunner = (executable, args, options) =>
   new Promise((resolvePromise, reject) => {
+    let argv: string[]
+    try {
+      argv = executable === 'git' ? withoutRepoPrograms(options?.cwd ?? process.cwd(), args) : [...args]
+    } catch (error) {
+      reject(error)
+      return
+    }
     execFile(
       executable,
-      [...args],
+      argv,
       {
         cwd: options?.cwd,
-        ...(options?.env ? { env: { ...process.env, ...options.env } } : {}),
+        ...(executable === 'git' ? { env: repoProgramEnv({ ...process.env, ...options?.env }) } : options?.env ? { env: { ...process.env, ...options.env } } : {}),
         windowsHide: true,
         encoding: 'utf8',
         timeout: options?.timeoutMs ?? 60_000,

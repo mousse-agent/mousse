@@ -1,18 +1,37 @@
 import { createErrorProvider } from '../../shared/errors'
 import { execFileSync, spawnSync } from 'node:child_process'
+import { filterRefusal, repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
 
+/**
+ * Git for Mousse's own actions (checkpoints, restore, undo, revert): no program the repository
+ * configures runs. Files under a filter only the repository defines (git-crypt) are refused, with a
+ * message saying why, rather than stored unfiltered.
+ */
 export function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
-  return execFileSync('git', args, {
-    cwd,
-    env: env ? { ...process.env, ...env } : process.env,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe']
-  }).trim()
+  try {
+    return execFileSync('git', withoutRepoPrograms(cwd, args), {
+      cwd,
+      env: repoProgramEnv(env ? { ...process.env, ...env } : process.env),
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe']
+    }).trim()
+  } catch (error) {
+    const refusal = filterRefusal(String((error as { stderr?: unknown }).stderr ?? ''))
+    if (refusal) throw new Error(refusal, { cause: error })
+    throw error
+  }
 }
 
 export function tryGit(cwd: string, args: string[], env?: NodeJS.ProcessEnv): { ok: boolean; stdout: string; stderr: string } {
-  const result = spawnSync('git', args, { cwd, encoding: 'utf8', env: env ? { ...process.env, ...env } : process.env })
-  return { ok: result.status === 0, stdout: result.stdout.trim(), stderr: result.stderr.trim() }
+  let guarded: string[]
+  try {
+    guarded = withoutRepoPrograms(cwd, args)
+  } catch (error) {
+    return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) }
+  }
+  const result = spawnSync('git', guarded, { cwd, encoding: 'utf8', env: repoProgramEnv(env ? { ...process.env, ...env } : process.env) })
+  const stderr = result.stderr.trim()
+  return { ok: result.status === 0, stdout: result.stdout.trim(), stderr: (result.status !== 0 && filterRefusal(stderr)) || stderr }
 }
 
 const gitOperationErrors = createErrorProvider({

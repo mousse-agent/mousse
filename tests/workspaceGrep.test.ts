@@ -281,7 +281,9 @@ describe('grepWorkspace: git arguments and output handling', () => {
     const root = tempDir()
     const fake = fakeGit((child) => { child.stdout.end(); child.emit('close', 1) })
     await search(root, '--no-index', { deps: { spawn: fake.spawn, detectGit: gitRoute() } })
-    const args = fake.calls[0]
+    // The settings that keep the repository's programs from running (`repoPrograms`) come first.
+    const args = fake.calls[0].slice(fake.calls[0].indexOf('grep'))
+    expect(fake.calls[0].slice(0, fake.calls[0].indexOf('grep'))).toContain('core.fsmonitor=false')
     expect(args.slice(0, 2)).toEqual(['grep', '-I'])
     expect(args[args.indexOf('-e') + 1]).toBe('--no-index')
     expect(args.at(-1)).toBe('--')

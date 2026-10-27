@@ -712,6 +712,8 @@ const api = {
       ipcRenderer.invoke('projects:pin', projectId, pinned),
     reorder: (projectIds: string[]): Promise<Project[]> =>
       ipcRenderer.invoke('projects:reorder', projectIds),
+    trustGitSettings: (projectId: string): Promise<{ filters: string[] }> =>
+      ipcRenderer.invoke('projects:trustGitSettings', projectId),
     listThreads: (projectId: string): Promise<Thread[]> =>
       ipcRenderer.invoke('projects:threads', projectId),
     onUpdated: (cb: (projects: Project[]) => void): (() => void) => {

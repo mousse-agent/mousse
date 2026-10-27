@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process'
 import { createReadStream } from 'node:fs'
 import { lstat, open, readlink, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative } from 'node:path'
-import simpleGit from 'simple-git'
+import { guardedSimpleGit, NO_DIFF_PROGRAMS, repoProgramEnv, withoutRepoPrograms } from './repoPrograms'
 import {
   EMPTY_TREE_SHA,
   REVIEW_MAX_COUNTED_UNTRACKED,
@@ -112,7 +112,7 @@ export function parseNumstatZ(output: string): NumstatEntry[] {
 
 function hashEmptyTree(cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = execFile('git', ['hash-object', '-t', 'tree', '--stdin'], { cwd, encoding: 'utf8' }, (error, stdout) => {
+    const child = execFile('git', withoutRepoPrograms(cwd, ['hash-object', '-t', 'tree', '--stdin']), { cwd, env: repoProgramEnv(), encoding: 'utf8' }, (error, stdout) => {
       if (error) reject(error)
       else resolve(stdout.trim())
     })
@@ -122,7 +122,7 @@ function hashEmptyTree(cwd: string): Promise<string> {
 
 /** The empty tree of this repository. `/dev/null` cannot stand in for it through `execFile` on Windows. */
 export async function emptyTreeSha(cwd: string): Promise<string> {
-  const format = await simpleGit(cwd).raw(['rev-parse', '--show-object-format']).then((value) => value.trim()).catch(() => 'sha1')
+  const format = await guardedSimpleGit(cwd).raw(['rev-parse', '--show-object-format']).then((value) => value.trim()).catch(() => 'sha1')
   return format === 'sha256' ? hashEmptyTree(cwd) : EMPTY_TREE_SHA
 }
 
@@ -133,13 +133,13 @@ export function commitExists(cwd: string, sha: string): boolean {
 
 /** The range for the working tree: HEAD to index when staged, index to working tree otherwise. */
 export async function worktreeRange(cwd: string, staged: boolean): Promise<ReviewRange> {
-  const head = await simpleGit(cwd).raw(['rev-parse', '--verify', 'HEAD']).then((value) => value.trim()).catch(() => '')
+  const head = await guardedSimpleGit(cwd).raw(['rev-parse', '--verify', 'HEAD']).then((value) => value.trim()).catch(() => '')
   const headSide: ReviewSide | null = head ? { kind: 'commit', sha: head } : null
   return staged ? { from: headSide, to: { kind: 'index' } } : { from: { kind: 'index' }, to: { kind: 'worktree' } }
 }
 
 export async function isGitRepository(cwd: string): Promise<boolean> {
-  return simpleGit(cwd).checkIsRepo().catch(() => false)
+  return guardedSimpleGit(cwd).checkIsRepo().catch(() => false)
 }
 
 /** Git revision arguments for a range, or null when the range is known to be empty without asking Git. */
@@ -212,8 +212,8 @@ async function forEachLimited<T>(items: T[], limit: number, work: (item: T) => P
 export async function listChangedFiles(cwd: string, range: ReviewRange, options: ListChangedFilesOptions = {}): Promise<ChangedFiles> {
   const revision = await revisionArgs(cwd, range)
   if (revision === null) return { files: [], truncated: false, mergeCommits: 0 }
-  const git = simpleGit(cwd)
-  const base = ['diff', '--no-ext-diff', '--no-color', '--relative', '-M', '-z']
+  const git = guardedSimpleGit(cwd)
+  const base = ['diff', ...NO_DIFF_PROGRAMS, '--no-color', '--relative', '-M', '-z']
   const includeUntracked = range.to.kind === 'worktree'
   const [nameStatus, numstat, untracked] = await Promise.all([
     git.raw([...base, '--name-status', ...revision, ...PATHSPEC]),
@@ -277,7 +277,7 @@ function classify(content: string, size: number, symlink?: true): ReviewFileSide
 
 /** Mode and object of a path in a commit or the index, or null when nothing is there. */
 async function lookupEntry(cwd: string, side: { kind: 'commit'; sha: string } | { kind: 'index' }, path: string): Promise<{ mode: string; sha: string } | null> {
-  const git = simpleGit(cwd)
+  const git = guardedSimpleGit(cwd)
   // Paths in both listings are relative to `cwd`. Absence is an empty listing, so a real Git
   // failure (a bad object, a lock, a spawn error) surfaces as an error instead of "no file".
   if (side.kind === 'commit') {
@@ -300,7 +300,7 @@ async function readGitObject(cwd: string, side: { kind: 'commit'; sha: string } 
   const entry = await lookupEntry(cwd, side, path)
   // A directory (040000) or a submodule (160000) has no file text; only blobs and links do.
   if (!entry || entry.mode === '040000' || entry.mode === '160000') return null
-  const git = simpleGit(cwd)
+  const git = guardedSimpleGit(cwd)
   const size = Number((await git.raw(['cat-file', '-s', entry.sha])).trim())
   if (size > REVIEW_MAX_FILE_BYTES) return { tooLarge: true, size, reason: 'bytes' }
   const content = await git.raw(['show', entry.sha])

@@ -1040,6 +1040,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.emitEvent?.('projects.updated', { projects })
       return { project, projects }
     }
+    case 'projects.trustGitSettings': {
+      const p = isObject(params) ? params : {}
+      const projectId = asString(p.projectId, 'projectId', 256)
+      return ctx.mms.projects.trustGitSettings(projectId)
+    }
     case 'projects.reorder': {
       const p = isObject(params) ? params : {}
       const projectIds = asStringArray(p.projectIds, 'projectIds', { unique: true })
