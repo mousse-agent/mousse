@@ -4,19 +4,11 @@ import { createHash } from 'node:crypto'
 import { readFileSync, realpathSync, writeFileSync, renameSync, appendFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import {
-  createAssistantMessageEventStream,
-  type Model,
-  type Provider,
-  type AssistantMessage,
-  type Context
-} from '@earendil-works/pi-ai'
 import { MousseMainService } from '../../../src/mms/MousseMainService'
 import { MmsProtocolServer } from '../../../src/mms/protocol'
 import {
   effectiveBotPolicyDigest,
   loadNativeReader,
-  modelDigest,
   nativeSdkVersion,
   type NativeBotDefinition
 } from '../../../src/mms/bots/runtime'
@@ -28,6 +20,7 @@ import {
 } from '../../../src/cli/mmsRuntime'
 import { decodeEnvelope } from '../../../src/mms/net/sync/codec'
 import { isId, type StreamId } from '../../../src/shared/net'
+import { ScriptedBotRuntime, readerScript } from '../../../tests/net/bots/scriptedRuntime'
 
 const [homeArg, projectArg, role] = process.argv.slice(2)
 if (!homeArg || !projectArg || !['host', 'executor', 'sender'].includes(role))
@@ -49,26 +42,14 @@ const qualification = {
   packaged: true
 }
 const native = loadNativeReader(artifact, qualification)
-const model: Model<'anthropic-messages'> = {
-  id: 'fixed-reader',
-  name: 'Deterministic QA reader',
-  api: 'anthropic-messages',
-  provider: 'fixed-reader-qa',
-  baseUrl: 'https://invalid.test',
-  reasoning: false,
-  input: ['text'],
-  cost: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 },
-  contextWindow: 10000,
-  maxTokens: 1000
-}
 const definition: NativeBotDefinition = {
   revision: 'immutable-reader-qa-v1',
   systemPrompt: 'Use only the supplied reader compartment and enumerated safe tools.',
   billing: {
-    provider: model.provider,
-    model: model.id,
-    api: model.api,
-    modelDigest: modelDigest(model),
+    provider: 'fixed-reader-qa',
+    model: 'fixed-reader',
+    api: 'anthropic-messages',
+    modelDigest: 'fixed-reader-digest',
     sdkVersion: nativeSdkVersion(),
     platform: process.platform,
     nodeVersion: process.versions.node,
@@ -86,104 +67,56 @@ const definition: NativeBotDefinition = {
   maxElapsedMs: 180000
 }
 let callCount = 0
-const stream = (_model: Model<'anthropic-messages'>, context: Context) => {
-  callCount++
-  appendFileSync(
-    callsPath,
-    JSON.stringify({
-      call: callCount,
-      at: Date.now(),
-      systemPrompt: context.systemPrompt,
-      tools: context.tools?.map((tool) => tool.name),
-      toolResults: context.messages.filter((message) => message.role === 'toolResult')
-    }) + '\n',
-    { mode: 0o600 }
-  )
-  const result = createAssistantMessageEventStream(),
-    hasResults = context.messages.some((message) => message.role === 'toolResult')
-  const actions = [
-    { name: 'safe_read', arguments: { path: 'allowed.txt' } },
-    { name: 'safe_list', arguments: { path: '' } },
-    { name: 'safe_search', arguments: { query: 'SAFE_READER_MARKER', path: '' } },
-    { name: 'safe_read', arguments: { path: '../sensitive/secret.txt' } },
-    { name: 'safe_read', arguments: { path: 'secret-link' } },
-    { name: 'safe_read', arguments: { path: 'secret-hardlink' } },
-    { name: 'bash', arguments: { command: 'cat ../sensitive/secret.txt' } },
-    { name: 'mcp_secret', arguments: {} },
-    { name: 'write', arguments: { path: 'mutated.txt', content: 'denied' } }
-  ]
-  const message: AssistantMessage = {
-    role: 'assistant',
-    api: model.api,
-    provider: model.provider,
-    model: model.id,
-    content: hasResults
-      ? [{ type: 'text', text: 'Reader QA finished.' }]
-      : actions.map((action, index) => ({ type: 'toolCall', id: `reader-${index}`, ...action })),
-    stopReason: hasResults ? 'stop' : 'toolUse',
-    timestamp: Date.now(),
-    usage: {
-      input: 10,
-      output: 10,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 20,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 10 / 1000000 }
+// The scripted model asks for nine tool calls in its first step and finishes in its second.
+// Three are in the reader inventory and read allowed data; the rest must be refused.
+const actions = [
+  { name: 'safe_read', arguments: { path: 'allowed.txt' } },
+  { name: 'safe_list', arguments: { path: '' } },
+  { name: 'safe_search', arguments: { query: 'SAFE_READER_MARKER', path: '' } },
+  { name: 'safe_read', arguments: { path: '../sensitive/secret.txt' } },
+  { name: 'safe_read', arguments: { path: 'secret-link' } },
+  { name: 'safe_read', arguments: { path: 'secret-hardlink' } },
+  { name: 'bash', arguments: { command: 'cat ../sensitive/secret.txt' } },
+  { name: 'mcp_secret', arguments: {} },
+  { name: 'write', arguments: { path: 'mutated.txt', content: 'denied' } }
+]
+const scripted = new ScriptedBotRuntime({
+  profiles: ['reader'],
+  spendInScript: true,
+  script: readerScript({
+    module: native,
+    deniedRoots: [home, join(dirname(project), 'sensitive')],
+    installationHome: home,
+    definition,
+    actions,
+    answer: 'Reader QA finished.',
+    current: (request) => mms.bots.admission.assertExecutionCurrent(request.execution),
+    spend: { maximumUnits: definition.billing.maximumUnits, units: 10 },
+    record: (step) => {
+      callCount++
+      appendFileSync(
+        callsPath,
+        JSON.stringify({
+          call: callCount,
+          at: Date.now(),
+          systemPrompt: definition.systemPrompt,
+          tools: step.tools,
+          toolResults: step.toolResults ?? []
+        }) + '\n',
+        { mode: 0o600 }
+      )
     }
-  }
-  queueMicrotask(() => {
-    result.push({ type: 'done', reason: hasResults ? 'stop' : 'toolUse', message })
-    result.end(message)
   })
-  return result
-}
-const provider: Provider<'anthropic-messages'> = {
-  id: model.provider,
-  name: 'Fixed local QA',
-  auth: {
-    apiKey: {
-      name: 'Fixture',
-      resolve: async () => ({ auth: { apiKey: 'fixed-test-only-value' } })
-    }
-  },
-  getModels: () => [model],
-  stream,
-  streamSimple: stream
-}
+})
 const mms = await MousseMainService.create({
   homeDir: home,
   repoRoot: project,
   headless: true,
   ownerKind: 'daemon',
   requireOwnership: true,
-  nativeBotAdapters:
-    role === 'executor'
-      ? ({ services }) =>
-          new Map([
-            [
-              'mousse',
-              {
-                settings: services.settings,
-                providerAuth: services.providerAuth,
-                sdkVersion: nativeSdkVersion(),
-                definition,
-                qualification: { active: (profile) => profile === 'reader', invalidate: () => {} },
-                reader: {
-                  module: native,
-                  qualification,
-                  deniedRoots: [home, join(dirname(project), 'sensitive')]
-                }
-              }
-            ]
-          ])
-      : undefined
+  trustedQaBotAdapters: role === 'executor' ? () => new Map([['mousse', scripted]]) : undefined
 })
 await mms.providerAuth.init()
-mms.providerAuth.models.setProvider(provider)
-await mms.providerAuth.credentials.modify(provider.id, async () => ({
-  type: 'api_key',
-  key: 'fixed-test-only-value'
-}))
 await mms.start()
 // This fixed Net QA owner explicitly opts in before observing gated domains.
 // Existing protected profiles retain their saved opt-in and unlock through IPC.
@@ -486,7 +419,7 @@ const snapshot = () => {
       role,
       paidProviderQualified: false,
       artifact: qualification,
-      readerSupported: mms.bots.nativeRuntimes.get('mousse')?.supports('reader') ?? false,
+      readerSupported: role === 'executor' && scripted.supports('reader'),
       definitionRevision: definition.revision,
       profileDigest: effectiveBotPolicyDigest(definition, 'reader'),
       profileId: mms.profileId,

@@ -34,7 +34,7 @@ async function profile(options: { native?: boolean } = {}) {
   const services = new MmsProfileServices(MousseConfigStore.load(home), { homeDir: home, repoRoot: home, headless: true, requireOwnership: false }, null, home,
     { providerAuth: auth, domains: new DomainHandlerRegistry(), installationHome: home, profileId: randomUUID(), allowLegacyProjectData: false })
   cleanup.push(() => services.stop())
-  const contexts: Array<{ tools?: string[]; toolResult?: string }> = []
+  const contexts: Array<{ tools?: string[]; toolResults?: unknown[] }> = []
   const definition: NativeBotDefinition = { revision: 'central-v1', systemPrompt: 'Only the central bot compartment.', billing: { provider: 'central-fixture', model: 'fixture', api: 'anthropic-messages',
     modelDigest: 'fixture-digest', sdkVersion: nativeSdkVersion(), platform: process.platform, nodeVersion: process.versions.node, runtimeVersion: 'mousse-net-native-v1', maximumUnits: 60,
     maxOutputTokens: 50, maxRequestBytes: 65536, evidence: 'Deterministic local charge10 fixture only; no paid-provider qualification.' }, readerTools: ['safe_read'], approval: 'always', maxModelCalls: 2, maxToolCalls: 1, maxElapsedMs: 60000 }

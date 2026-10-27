@@ -35,6 +35,8 @@ export interface ScriptedBotRuntimeOptions {
   stubborn?: boolean
   /** Replaces the default body. The reserved call is still settled with `units` afterwards. */
   script?(context: ScriptedRunContext): Promise<string>
+  /** The script reserves and settles its own calls; the runtime does not. */
+  spendInScript?: boolean
 }
 
 /**
@@ -65,7 +67,9 @@ export class ScriptedBotRuntime implements BotRuntimeAdapter {
     if (!this.supports(request.profile)) throw new NetError('profile_unsupported')
     if (request.signal.aborted) throw new NetError('cancelled')
     const units = this.options.units ?? 10,
-      call = await request.spend.authorizeCall(this.options.maximumUnits ?? 60)
+      call = this.options.spendInScript
+        ? { id: 'script-owned' }
+        : await request.spend.authorizeCall(this.options.maximumUnits ?? 60)
     // A real provider answers after some latency, never within the same tick; concurrent
     // mentions rely on that gap for their outbox flushes to interleave as in production.
     if (!this.options.paused) await new Promise<void>((resolve) => setTimeout(resolve, 10))
@@ -110,7 +114,7 @@ export class ScriptedBotRuntime implements BotRuntimeAdapter {
         ? await this.options.script({ request, events, spend: request.spend })
         : (this.options.answer ?? 'Scripted answer')
       // Known terminal spend is settled even when the run was cancelled meanwhile.
-      await (late ?? request.spend.settleCall(call.id, units))
+      if (!this.options.spendInScript) await (late ?? request.spend.settleCall(call.id, units))
       if (request.signal.aborted) throw new NetError('cancelled')
       return { text, spentUnits: units }
     } catch (error) {
@@ -125,33 +129,54 @@ export class ScriptedBotRuntime implements BotRuntimeAdapter {
   }
 }
 
+export interface ReaderAction {
+  name: string
+  arguments: Record<string, unknown>
+}
+
 export interface ReaderScriptOptions {
   module: NativeReaderModule
   deniedRoots: readonly string[]
   installationHome: string
   definition: NativeBotDefinition
-  /** The one file the scripted model asks `safe_read` for. */
-  path: string
+  /** The tool calls the scripted model asks for in its first step. Defaults to one `safe_read` of `path`. */
+  actions?: readonly ReaderAction[]
+  /** The one file the default action reads. */
+  path?: string
   answer: string
   /** Re-checks that the execution is still current (the admission service's own check). */
   current(request: BotRunRequest): void
-  /** One entry per scripted model step: the tool inventory first, then the tool result it received. */
-  record(step: { tools?: string[]; toolResult?: string }): void
+  /** One entry per scripted model step: the tool inventory first, then the tool results it received. */
+  record(step: { tools?: string[]; toolResults?: unknown[] }): void
+  /** When set, each scripted model step reserves `maximumUnits` and settles `units` itself. */
+  spend?: { maximumUnits: number; units: number }
 }
 
-/** A script that drives the real reader dispatcher and native reader with one `safe_read` call. */
+/**
+ * A script that drives the real reader dispatcher and native reader. Like the former model
+ * loop, a refused or failed tool call becomes an error result; a cancelled run ends the script.
+ */
 export function readerScript(options: ReaderScriptOptions) {
+  const actions: readonly ReaderAction[] = options.actions ?? [
+    { name: 'safe_read', arguments: { path: options.path ?? '' } }
+  ]
   return async ({ request, events }: ScriptedRunContext): Promise<string> => {
     const abort = new AbortController(),
       signal = AbortSignal.any([request.signal, abort.signal]),
       current = () => {
         options.current(request)
         if (signal.aborted) throw new NetError('cancelled')
-      }
-    current()
-    options.record({
-      tools: readerToolDefinitions(options.definition.readerTools).map((t) => t.name)
-    })
+      },
+      modelStep = async (step: { tools?: string[]; toolResults?: unknown[] }) => {
+        current()
+        const call = options.spend
+          ? await request.spend.authorizeCall(options.spend.maximumUnits)
+          : undefined
+        options.record(step)
+        if (call) await request.spend.settleCall(call.id, options.spend!.units)
+      },
+      tools = readerToolDefinitions(options.definition.readerTools).map((t) => t.name)
+    await modelStep({ tools })
     const reader = new NativeReader(
       options.module,
       request.projectRoot!,
@@ -168,21 +193,25 @@ export function readerScript(options: ReaderScriptOptions) {
         signal,
         () => abort.abort()
       )
-      let result
-      try {
-        result = await port.execute({
-          type: 'toolCall',
-          id: 'bounded-read',
-          name: 'safe_read',
-          arguments: { path: options.path }
-        })
-      } catch (error) {
-        if (signal.aborted) throw new NetError('cancelled')
-        current()
-        throw error
+      const results: unknown[] = []
+      for (const [index, action] of actions.entries()) {
+        const call = { type: 'toolCall' as const, id: `reader-${index}`, ...action }
+        try {
+          results.push(await port.execute(call))
+        } catch (error) {
+          if (signal.aborted) throw new NetError('cancelled')
+          current()
+          results.push({
+            role: 'toolResult',
+            toolCallId: call.id,
+            toolName: call.name,
+            content: [{ type: 'text', text: error instanceof Error ? error.message : 'failed' }],
+            isError: true,
+            timestamp: Date.now()
+          })
+        }
       }
-      current()
-      options.record({ toolResult: JSON.stringify(result.content) })
+      await modelStep({ tools, toolResults: results })
       return options.answer
     } finally {
       reader.close()

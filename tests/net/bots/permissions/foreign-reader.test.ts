@@ -83,7 +83,7 @@ async function profile(options: { native?: boolean } = {}) {
     }
   )
   cleanup.push(() => services.stop())
-  const contexts: Array<{ tools?: string[]; toolResult?: string }> = []
+  const contexts: Array<{ tools?: string[]; toolResults?: unknown[] }> = []
   const definition: NativeBotDefinition = {
     revision: 'central-v1',
     systemPrompt: 'Only the central bot compartment.',
