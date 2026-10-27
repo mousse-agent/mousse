@@ -273,6 +273,11 @@ export class ThreadDataStore extends EventEmitter {
     projectId?: string,
     projectPath?: string,
     opts?: {
+      /**
+       * The id the thread gets, for a command that decided it before creating anything and may have to
+       * finish creating it after a crash. An id that already names a thread is refused.
+       */
+      id?: string
       worktreeEnabled?: boolean
       lineage?: ThreadLineage
       modelOverride?: ModelOverride
@@ -286,9 +291,10 @@ export class ThreadDataStore extends EventEmitter {
       scheduledJobId?: string
     }
   ): Thread {
+    const id = opts?.id ?? uuidv4()
+    if (opts?.id && this.getThread(opts.id)) throw new Error(`Thread ${opts.id} already exists`)
     this.invalidateListCache()
     const now = new Date().toISOString()
-    const id = uuidv4()
     const meta: ThreadMeta = {
       id,
       name,

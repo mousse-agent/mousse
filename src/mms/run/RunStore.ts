@@ -416,6 +416,23 @@ export class RunStore {
     return row ? toReceipt(row) : null
   }
 
+  /** Every receipt of one command kind, oldest first (boot repair of a command that creates something outside this database). */
+  listReceiptsByKind(commandKind: string): ReceiptRecord[] {
+    return this.db
+      .statement('SELECT * FROM receipts WHERE command_kind = ? ORDER BY created_at, client_request_id')
+      .all(commandKind)
+      .map(toReceipt)
+  }
+
+  /** The thread has an `agent.action` event of this action (the completion marker of a thread an agent created). */
+  hasAgentAction(threadId: string, action: string): boolean {
+    return Boolean(
+      this.db
+        .statement(`SELECT 1 AS found FROM thread_events WHERE thread_id = ? AND type = 'agent.action' AND json_extract(payload, '$.action') = ? LIMIT 1`)
+        .get(threadId, action)
+    )
+  }
+
   putReceipt(record: ReceiptRecord): ReceiptRecord {
     return this.db.transaction(() => {
       if (this.getReceipt(record.clientRequestId))
