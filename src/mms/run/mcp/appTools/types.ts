@@ -194,6 +194,8 @@ export interface ToolListing {
   modeCeiling: ModeCeiling
   /** The caller's effective agent access level; absent is `lineage`, which hides tools that need more. */
   accessLevel?: AgentAccessLevel
+  /** The thread's role when it is a personal bot's thread (PR 6 §5): only bot threads list the bot tools. */
+  botRole?: 'activation' | 'context'
 }
 
 export interface MousseTool {

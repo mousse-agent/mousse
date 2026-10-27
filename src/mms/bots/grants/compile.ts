@@ -48,6 +48,11 @@ export interface CompileInput {
   remaining: { maxTurns?: number; maxToolCalls?: number; maxInputTokens?: number; maxOutputTokens?: number; maxUsd?: number; deadlineMs: number }
   /** System temporary folders (default: `systemTempDirs()`). */
   temps?: readonly string[]
+  /**
+   * The bot tools the thread gets beside its grant (6c-2): `escalate` on every bot thread, and
+   * `consult` on the activation thread of a bot with context threads.
+   */
+  botTools?: { escalate: boolean; consult: boolean }
 }
 
 export type CompileResult =
@@ -108,7 +113,12 @@ export function compileBotThread(input: CompileInput): CompileResult {
   for (const key of ['maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTokens', 'maxUsd'] as const)
     if (counts[key] !== undefined) budget[key] = counts[key]
   // Granted skills come with the skill tools that list and load them.
-  const appTools = [...new Set([...manifest.appTools, ...(manifest.skills.length ? ['list_skills', 'load_skill'] : [])])].sort()
+  const appTools = [...new Set([
+    ...manifest.appTools,
+    ...(manifest.skills.length ? ['list_skills', 'load_skill'] : []),
+    ...(input.botTools?.escalate ? ['escalate'] : []),
+    ...(input.botTools?.consult ? ['consult'] : [])
+  ])].sort()
   const mcp = [...new Set(manifest.mcp.map((pair) => `${pair.serverId}::${pair.tool}` as const))].sort()
   return {
     ok: true,

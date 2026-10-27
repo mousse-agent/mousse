@@ -2,6 +2,7 @@ import { ProfileDatabase, type Migration, type ProfileDatabaseFault } from '../.
 import type { BotActivationStatus, BotManifest } from '../../../shared/bots/personal/definition'
 import type { ActivationLimits } from './scopes'
 import type { BotThreadRole } from '../../../shared/bots/personal/authority'
+import type { BotEscalationStatus, BotPermissionRequest, BotWallKind } from '../../../shared/bots/personal/escalation'
 
 /**
  * `<profileHome>/bots/bots.db` (PR 6 §4): personal bots' grants, threads, activations, dispatches
@@ -117,6 +118,43 @@ CREATE TABLE bot_unknown_calls(
   PRIMARY KEY(activation_id, invocation_id)
 ) STRICT;
 `
+  },
+  {
+    // 6c-2: walls and their answers, the overlays "Allow this time" adds to one activation, and the
+    // generation of each context thread ("Reset context" starts a new one).
+    version: 2,
+    sql: `
+CREATE TABLE bot_escalations(
+  id TEXT PRIMARY KEY,
+  activation_id TEXT NOT NULL,
+  dispatch_n INTEGER NOT NULL,
+  tool_call_id TEXT,
+  kind TEXT NOT NULL CHECK(kind IN ('escalate','gate','budget')),
+  permission_json TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('open','allowed_bot','allowed_once','denied','expired','cancelled')),
+  amount REAL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  answered_at TEXT,
+  applied_at TEXT
+) STRICT;
+CREATE INDEX bot_escalations_by_activation ON bot_escalations(activation_id, status);
+CREATE TABLE bot_overlays(
+  activation_id TEXT NOT NULL,
+  escalation_id TEXT NOT NULL,
+  permission_json TEXT NOT NULL,
+  amount REAL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(activation_id, escalation_id)
+) STRICT;
+CREATE TABLE bot_contexts(
+  bot_id TEXT NOT NULL,
+  key TEXT NOT NULL,
+  gen INTEGER NOT NULL,
+  PRIMARY KEY(bot_id, key)
+) STRICT;
+`
   }
 ]
 
@@ -170,6 +208,40 @@ export interface BotDispatchRow {
   endedAt: string | null
   outcome: string | null
   settledBy: 'run' | 'startup' | null
+}
+
+export interface BotEscalationRow {
+  id: string
+  activationId: string
+  dispatchN: number
+  toolCallId: string | null
+  kind: BotWallKind
+  permission: BotPermissionRequest
+  reason: string
+  status: BotEscalationStatus
+  amount: number | null
+  createdAt: string
+  expiresAt: string
+  answeredAt: string | null
+  appliedAt: string | null
+}
+
+function escalationOf(row: Row): BotEscalationRow {
+  return {
+    id: row.id as string,
+    activationId: row.activation_id as string,
+    dispatchN: num(row.dispatch_n)!,
+    toolCallId: str(row.tool_call_id),
+    kind: row.kind as BotWallKind,
+    permission: JSON.parse(row.permission_json as string) as BotPermissionRequest,
+    reason: row.reason as string,
+    status: row.status as BotEscalationStatus,
+    amount: num(row.amount),
+    createdAt: row.created_at as string,
+    expiresAt: row.expires_at as string,
+    answeredAt: str(row.answered_at),
+    appliedAt: str(row.applied_at)
+  }
 }
 
 export interface BotCountersRow {
@@ -420,11 +492,22 @@ export class BotStore {
     return this.all('SELECT * FROM bot_dispatches WHERE ended_at IS NULL ORDER BY activation_id, n').map(dispatchOf)
   }
 
-  insertDispatch(row: Pick<BotDispatchRow, 'activationId' | 'n' | 'kind' | 'clientRequestId' | 'threadId' | 'prompt' | 'policyDigest'>): void {
+  insertDispatch(row: Pick<BotDispatchRow, 'activationId' | 'n' | 'kind' | 'clientRequestId' | 'threadId' | 'prompt' | 'policyDigest'> & { mainN?: number }): void {
     this.run(
-      'INSERT INTO bot_dispatches(activation_id, n, kind, client_request_id, thread_id, prompt_json, policy_digest) VALUES(?, ?, ?, ?, ?, ?, ?)',
-      row.activationId, row.n, row.kind, row.clientRequestId, row.threadId, JSON.stringify(row.prompt), row.policyDigest
+      'INSERT INTO bot_dispatches(activation_id, n, kind, main_n, client_request_id, thread_id, prompt_json, policy_digest) VALUES(?, ?, ?, ?, ?, ?, ?, ?)',
+      row.activationId, row.n, row.kind, row.mainN ?? null, row.clientRequestId, row.threadId, JSON.stringify(row.prompt), row.policyDigest
     )
+  }
+
+  /** The next dispatch number of an activation (main and consult dispatches share one sequence). */
+  nextDispatchN(activationId: string): number {
+    return Number(this.get('SELECT COALESCE(MAX(n), 0) + 1 AS n FROM bot_dispatches WHERE activation_id = ?', activationId)?.n ?? 1)
+  }
+
+  /** The activation's latest main dispatch (`start` or `continue`). */
+  lastMainDispatch(activationId: string): BotDispatchRow | undefined {
+    const row = this.get("SELECT * FROM bot_dispatches WHERE activation_id = ? AND kind IN ('start', 'continue') ORDER BY n DESC LIMIT 1", activationId)
+    return row ? dispatchOf(row) : undefined
   }
 
   setDispatchRun(activationId: string, n: number, runId: string): void {
@@ -467,5 +550,108 @@ export class BotStore {
 
   dropUnknownCall(activationId: string, invocationId: string): void {
     this.run('DELETE FROM bot_unknown_calls WHERE activation_id = ? AND invocation_id = ?', activationId, invocationId)
+  }
+
+  acknowledgeUnknownCalls(activationId: string): number {
+    return this.run('UPDATE bot_unknown_calls SET acknowledged_at = ? WHERE activation_id = ? AND acknowledged_at IS NULL', this.now(), activationId)
+  }
+
+  // -- Escalations -----------------------------------------------------------------------------
+
+  escalation(id: string): BotEscalationRow | undefined {
+    const row = this.get('SELECT * FROM bot_escalations WHERE id = ?', id)
+    return row ? escalationOf(row) : undefined
+  }
+
+  escalations(filter: { activationId?: string; status?: BotEscalationStatus } = {}): BotEscalationRow[] {
+    const where: string[] = []
+    const params: Param[] = []
+    if (filter.activationId) { where.push('activation_id = ?'); params.push(filter.activationId) }
+    if (filter.status) { where.push('status = ?'); params.push(filter.status) }
+    return this.all(`SELECT * FROM bot_escalations ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY created_at, id`, ...params).map(escalationOf)
+  }
+
+  countEscalations(activationId: string): number {
+    return Number(this.get('SELECT COUNT(*) AS n FROM bot_escalations WHERE activation_id = ?', activationId)?.n ?? 0)
+  }
+
+  insertEscalation(row: Omit<BotEscalationRow, 'status' | 'amount' | 'answeredAt' | 'appliedAt'>): void {
+    this.run(
+      "INSERT INTO bot_escalations(id, activation_id, dispatch_n, tool_call_id, kind, permission_json, reason, status, created_at, expires_at) VALUES(?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)",
+      row.id, row.activationId, row.dispatchN, row.toolCallId, row.kind, JSON.stringify(row.permission), row.reason, row.createdAt, row.expiresAt
+    )
+  }
+
+  /** Compare-and-set from `open`: false when it was already answered, expired or cancelled. */
+  answerEscalation(id: string, status: Exclude<BotEscalationStatus, 'open'>, amount?: number): boolean {
+    return this.run("UPDATE bot_escalations SET status = ?, amount = ?, answered_at = ? WHERE id = ? AND status = 'open'", status, amount ?? null, this.now(), id) > 0
+  }
+
+  /** Ends every open escalation of an activation (it ended, expired, or was trashed). */
+  closeEscalations(activationId: string, status: 'expired' | 'cancelled'): number {
+    return this.run("UPDATE bot_escalations SET status = ?, answered_at = ? WHERE activation_id = ? AND status = 'open'", status, this.now(), activationId)
+  }
+
+  /** The answered escalation whose continuation has not been sent yet. */
+  pendingAnswer(activationId: string): BotEscalationRow | undefined {
+    const row = this.get("SELECT * FROM bot_escalations WHERE activation_id = ? AND status IN ('allowed_bot', 'allowed_once', 'denied') AND applied_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 1", activationId)
+    return row ? escalationOf(row) : undefined
+  }
+
+  markApplied(id: string): void {
+    this.run('UPDATE bot_escalations SET applied_at = ? WHERE id = ? AND applied_at IS NULL', this.now(), id)
+  }
+
+  // -- Overlays and context generations --------------------------------------------------------
+
+  overlays(activationId: string): Array<{ permission: BotPermissionRequest; amount: number | null }> {
+    return this.all('SELECT * FROM bot_overlays WHERE activation_id = ? ORDER BY created_at, escalation_id', activationId).map((row) => ({
+      permission: JSON.parse(row.permission_json as string) as BotPermissionRequest,
+      amount: num(row.amount)
+    }))
+  }
+
+  putOverlay(activationId: string, escalationId: string, permission: BotPermissionRequest, amount?: number): void {
+    this.run(
+      'INSERT INTO bot_overlays(activation_id, escalation_id, permission_json, amount, created_at) VALUES(?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
+      activationId, escalationId, JSON.stringify(permission), amount ?? null, this.now()
+    )
+  }
+
+  contextGen(botId: string, key: string): number {
+    return num(this.get('SELECT gen FROM bot_contexts WHERE bot_id = ? AND key = ?', botId, key)?.gen) ?? 1
+  }
+
+  bumpContextGen(botId: string, key: string): number {
+    const next = this.contextGen(botId, key) + 1
+    this.run('INSERT INTO bot_contexts(bot_id, key, gen) VALUES(?, ?, ?) ON CONFLICT(bot_id, key) DO UPDATE SET gen = excluded.gen', botId, key, next)
+    return next
+  }
+
+  allThreads(): Array<{ threadId: string; botId: string; role: 'home' | BotThreadRole; key: string; activationId: string | null }> {
+    return this.all('SELECT * FROM bot_threads').map((row) => ({ threadId: row.thread_id as string, botId: row.bot_id as string, role: row.role as 'home' | BotThreadRole, key: row.key as string, activationId: str(row.activation_id) }))
+  }
+
+  dropThread(threadId: string): void {
+    this.run('DELETE FROM bot_threads WHERE thread_id = ?', threadId)
+  }
+
+  /** Every activation in `statuses`, oldest first. */
+  activationsWith(statuses: readonly BotActivationStatus[]): BotActivationRow[] {
+    const marks = statuses.map(() => '?').join(', ')
+    return this.all(`SELECT * FROM bot_activations WHERE status IN (${marks}) ORDER BY created_at, id`, ...statuses).map(activationOf)
+  }
+
+  setAutoRestarts(id: string, count: number): void {
+    this.run('UPDATE bot_activations SET auto_restarts = ? WHERE id = ?', count, id)
+  }
+
+  setLimits(activationId: string, limits: ActivationLimits): void {
+    this.run('UPDATE bot_counters SET limits_json = ? WHERE activation_id = ?', JSON.stringify(limits), activationId)
+  }
+
+  /** Moves a bot's unfinished activations from one grant to its wider successor ("Allow for this bot"). */
+  regrant(botId: string, fromDigest: string, toDigest: string, revision: string): void {
+    this.run("UPDATE bot_activations SET grant_digest = ?, revision = ? WHERE bot_id = ? AND grant_digest = ? AND status NOT IN ('done', 'failed', 'cancelled')", toDigest, revision, botId, fromDigest)
   }
 }

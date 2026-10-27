@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { type BotDefinition, type BotThreadSpec } from '../../../shared/bots/personal/definition'
+import { MAX_BOT_CONTEXT_THREADS, type BotDefinition, type BotThreadSpec } from '../../../shared/bots/personal/definition'
 import { canonicalManifest, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import { stableStringify } from '../../run/json'
@@ -34,8 +34,14 @@ export function definitionProblem(definition: BotDefinition): string | undefined
   const thread = threadProblem(definition.main)
   if (thread) return thread
   if (!Array.isArray(definition.context)) return 'The context threads are invalid.'
-  // Consults come later; a context thread cannot be used yet.
-  if (definition.context.length > 0) return 'Context threads are not available yet.'
+  if (definition.context.length > MAX_BOT_CONTEXT_THREADS) return `A bot can have at most ${MAX_BOT_CONTEXT_THREADS} context threads.`
+  const keys = new Set([definition.main.key])
+  for (const context of definition.context) {
+    const problem = threadProblem(context)
+    if (problem) return problem
+    if (keys.has(context.key)) return 'Each thread needs its own key.'
+    keys.add(context.key)
+  }
   if (!definition.triggers || definition.triggers.manual !== true || Object.keys(definition.triggers).some((key) => key !== 'manual'))
     return 'Only manual activation is available yet.'
   return manifestProblem(definition.permissions)

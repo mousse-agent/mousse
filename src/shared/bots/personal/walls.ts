@@ -16,6 +16,8 @@ export function wallMessage(wall: WallReason): string {
     case 'policy_unenforceable': return `This bot cannot use ${wall.tool} on this runtime.`
     case 'revoked': return 'This bot\'s permissions were withdrawn, so it cannot use tools now.'
     case 'ended': return 'This bot\'s run has ended, so it cannot use tools now.'
+    case 'escalated': return `Paused: waiting for the owner to allow: ${wall.permission}. End your turn now.`
+    case 'paused': return 'Paused: earlier tool calls need checking by the owner. End your turn now.'
   }
 }
 

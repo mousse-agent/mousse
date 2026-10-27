@@ -46,6 +46,13 @@ export type WallReason =
   | { kind: 'revoked' }
   /** The activation or its dispatch ended (stopped, deadline): nothing more runs. */
   | { kind: 'ended' }
+  /**
+   * The call hit a wall and the owner was asked (6c-2): the dispatch ends now. `permission` is
+   * what was asked for, in plain words.
+   */
+  | { kind: 'escalated'; permission: string }
+  /** The activation paused: earlier tool calls need the owner's check first (6c-2). */
+  | { kind: 'paused' }
 
 /**
  * A bot activation's authority over one turn, registered with the turn's app tools (never in the
@@ -76,6 +83,18 @@ export interface BotAuthority {
    * the bot has no token or USD limit.
    */
   spend: SpendScope | null
+  /**
+   * The `escalate` app tool (6c-2): the bot asks its owner for a permission it lacks. The dispatch
+   * ends at the wall; the text is what the call returns. Absent: the turn cannot escalate.
+   */
+  escalate?(request: { permission: unknown; reason: string; toolCallId?: string }): string
+  /**
+   * The `consult` app tool (6c-2), on activation threads only: asks the context thread `context`
+   * and returns its final message. Absent on context threads (depth is 1).
+   */
+  consult?(request: { context: string; question: string; signal?: AbortSignal }): Promise<string>
+  /** The context threads `consult` may name, by key and title. */
+  contexts?: ReadonlyArray<{ key: string; title: string }>
 }
 
 /** The active time of an activation's main dispatch, which its consults share. */

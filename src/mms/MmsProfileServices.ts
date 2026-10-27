@@ -492,7 +492,15 @@ export class MmsProfileServices {
     const harness = this.harnessImpl
     const opened = openPersonalBots({
       profileHome: homeDir,
-      threads: this.threads,
+      threads: {
+        ensureExecutionThread: (key, name, projectId, ownership) => this.threads.ensureExecutionThread(key, name, projectId, ownership),
+        threadState: (threadId) => {
+          const record = this.threads.lifecycleStore.get(threadId)
+          if (record && record.state !== 'active') return 'trashed'
+          return this.threads.getThread(threadId) ? 'active' : record ? 'trashed' : 'missing'
+        }
+      },
+      trashThread: (threadId) => this.trashThread(threadId),
       runs: () => this.runEngine,
       harness,
       notifyEffects: () => this.orchestrator.notifyEffects(),
@@ -628,6 +636,8 @@ export class MmsProfileServices {
       drain: async (record) => {
         const owned = this.lifecycleOwnedTasks(record.taskId)
         for (const task of owned) this.threadRuntimes.assertDeletable(task.taskId)
+        // A bot activation whose own, home or context thread goes to the trash ends first (PR 6 §4).
+        if (record.state === 'active') this.personalBots?.beforeTrash(owned.map((task) => task.taskId))
         const runs = await this.platform.workflowRuns.runtime.list({ profileId: this.profileId })
         if (
           runs.some(
@@ -656,6 +666,8 @@ export class MmsProfileServices {
             this.orchestrator.markThreadRestored(task.taskId)
           else this.orchestrator.markThreadDeleted(task.taskId)
         }
+        // A second, idempotent pass once the threads moved; restoring never revives an activation.
+        if (record.location !== record.originalLocation) this.personalBots?.afterTrash(this.lifecycleOwnedTasks(record.taskId).map((task) => task.taskId))
       },
       quiesceDisk: () => this.storageUsage.pause(),
       projectPurged: (record) => {
@@ -1157,6 +1169,14 @@ export class MmsProfileServices {
     // and before anything that can send one (H4): scheduled jobs, channels and the network all
     // start below, so none of their sends can create a run that boot recovery then interrupts.
     this.orchestrator.recoverRunEngineOnBoot()
+    // Personal bots settle what the crash left before any worker can change a bot run (PR 6 §5a).
+    if (this.personalBots) {
+      try {
+        await this.personalBots.reconcileOnStartup()
+      } catch (error) {
+        console.warn('the bot startup pass failed', { error: error instanceof Error ? error.message : String(error) })
+      }
+    }
     this.startRunEngineWorkers()
 
     if (this.config.getScheduledSection().enabled) {

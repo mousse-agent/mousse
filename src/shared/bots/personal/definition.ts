@@ -1,5 +1,6 @@
 import type { NeutralTool } from '../../harness/tools'
 import type { ProviderSelection } from '../../harness/types'
+import type { BotEscalationSummary } from './escalation'
 
 /**
  * A personal bot (PR 6 §4): a role, the thread it works in on each activation, and the permissions
@@ -88,6 +89,45 @@ export interface BotActivationSummary {
   counters: { requests: number; toolCalls: number; activeMs: number }
   /** Tool calls whose outcome is unknown, which the owner must check before the activation goes on. */
   unknownCalls: Array<{ runId: string; invocationId: string; tool: string; role: 'main' | 'consult'; acknowledged: boolean }>
+  /** The wall the activation waits at (`waiting_grant`), if any. */
+  openEscalation: BotEscalationSummary | null
+  /** Whether "Continue" can be offered now (paused, or blocked once its check passes). */
+  canContinue: boolean
+  /** A paused activation whose run completed: "Mark done" keeps its draft result. */
+  canMarkDone: boolean
+  /** The main run being continued is `uncertain`: Continue needs the acknowledgement. */
+  uncertain: boolean
+}
+
+/** One thread's check result, as the approval dialog shows it. */
+export interface BotThreadCheck {
+  key: string
+  instanceId: string
+  model: string
+  ok: boolean
+  reason?: string
+}
+
+/** One bot, as the Bots tab lists it. */
+export interface BotSummary {
+  id: string
+  name: string
+  role: string
+  draftHash: string
+  revision: string | null
+  grant: { digest: string; approvedAt: string } | null
+  /** Permissions the published revision asks for beyond the active grant (empty: it runs without asking). */
+  needsApproval: BotPermissionLine[]
+  /** Open escalations of the bot's activations (the inbox badge). */
+  openEscalations: number
+}
+
+/** What approving the published revision means (`bots.definitions.get`'s `approval`). */
+export interface BotApprovalView {
+  revision: string
+  digest: string
+  added: BotPermissionLine[]
+  threads: BotThreadCheck[]
 }
 
 /** A permission of a manifest, as the approval dialog states it. */
