@@ -14,10 +14,31 @@ import type { NetDatabase } from '../store/database'
 import { canonicalJson } from './codec'
 import type { SessionRpcPort } from './session'
 
+/** Settled request rows and their aliases are kept this long; no retry window comes close. */
+export const LEDGER_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+/** Pruning runs at start and then at most this often while requests arrive. */
+const PRUNE_INTERVAL_MS = 60 * 60 * 1000
+const PRUNE_BATCH = 100
+/** One pass stops after this long, so a first backlog never blocks the daemon. */
+const PRUNE_BUDGET_MS = 200
+/** A pass that left a backlog runs again after this long. */
+const PRUNE_RETRY_MS = 60 * 1000
+
+interface OmittedResult {
+  $ledger: 'omitted'
+  sha256: string
+  bytes: number
+}
+const isOmittedResult = (value: unknown): value is OmittedResult =>
+  typeof value === 'object' &&
+  value !== null &&
+  (value as { $ledger?: unknown }).$ledger === 'omitted'
+
 /** Durable request aliases share the execution ledger's database/transaction manager. */
 export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
   private registry = new Map<string, RpcMethod>()
   private running = new Map<string, AbortController>()
+  private lastPruneAt = Number.NEGATIVE_INFINITY
   private resultPublisher?: (
     result: unknown,
     context: RpcContext,
@@ -29,6 +50,8 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
       executions: ExecutionLedger
       identity: import('../contracts').IdentityService
       clock: Clock
+      /** How long settled requests are kept (default 7 days). */
+      ledgerRetentionMs?: number
       /** Parameter-independent current policy, including retained aliases and artifact bindings. */
       authorizeMethod?(
         method: RpcMethod,
@@ -47,6 +70,49 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
         .some((row) => row.name === 'capability')
     )
       options.db.database.exec('ALTER TABLE net_rpc_aliases ADD COLUMN capability TEXT')
+    // Pruning deletes aliases by execution, and retries look them up by it; both need the index
+    // before the first pass, or each deleted request scans the whole table.
+    options.db.database.exec(
+      'CREATE INDEX IF NOT EXISTS net_rpc_aliases_execution ON net_rpc_aliases(execution)'
+    )
+    this.pruneLedger()
+  }
+  /**
+   * Drops settled requests and their aliases after the retention window. Best effort and bounded:
+   * a failure or a long backlog is picked up by the next run.
+   */
+  pruneLedger(): number {
+    const now = this.options.clock.now(),
+      started = this.options.clock.monotonic()
+    this.lastPruneAt = now
+    let removed = 0
+    try {
+      for (;;) {
+        const count = this.options.executions.prune(
+          now - (this.options.ledgerRetentionMs ?? LEDGER_RETENTION_MS),
+          PRUNE_BATCH,
+          (ids) => {
+            const drop = this.options.db.database.prepare(
+              'DELETE FROM net_rpc_aliases WHERE execution=?'
+            )
+            for (const id of ids) drop.run(id)
+          }
+        )
+        removed += count
+        if (count < PRUNE_BATCH) break
+        if (this.options.clock.monotonic() - started >= PRUNE_BUDGET_MS) {
+          // More is waiting: come back soon instead of in an hour.
+          this.lastPruneAt = now - PRUNE_INTERVAL_MS + PRUNE_RETRY_MS
+          break
+        }
+      }
+    } catch {
+      // The ledger stays correct without pruning; try again at the next interval.
+    }
+    return removed
+  }
+  private pruneIfDue(): void {
+    if (this.options.clock.now() - this.lastPruneAt >= PRUNE_INTERVAL_MS) this.pruneLedger()
   }
   register(method: RpcMethod): void {
     if (this.registry.has(method.method)) throw new NetError('conflict')
@@ -116,6 +182,7 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
       if (canonicalJson(result).byteLength > 63 * 1024) throw new NetError('too_large')
       return result
     }
+    this.pruneIfDue()
     const payloadHash = createHash('sha256')
       .update(canonicalJson({ method: name, params }))
       .digest('hex')
@@ -176,11 +243,22 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
         result = publication.result
         if (canonicalJson(result).byteLength > 63 * 1024) throw new NetError('too_large')
       }
+      const settled = canonicalJson(result)
       this.options.executions.transition(
         id,
         'completed',
         this.options.clock.now(),
-        { result },
+        {
+          result:
+            method.ledgerResultMaxBytes !== undefined &&
+            settled.byteLength > method.ledgerResultMaxBytes
+              ? ({
+                  $ledger: 'omitted',
+                  sha256: createHash('sha256').update(settled).digest('hex'),
+                  bytes: settled.byteLength
+                } satisfies OmittedResult)
+              : result
+        },
         () => {
           for (const work of terminalEffects) {
             const returned: unknown = work()
@@ -284,7 +362,15 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
     return method
   }
   private terminal(record: ExecutionRecord): unknown {
-    if (record.state === 'completed') return record.result
+    if (record.state === 'completed') {
+      // A large result was not kept; the request did complete, but its answer cannot be replayed.
+      if (isOmittedResult(record.result))
+        throw new NetError(
+          'outcome_uncertain',
+          'The request completed; its large result was not kept.'
+        )
+      return record.result
+    }
     if (record.state === 'failed' || record.state === 'cancelled' || record.state === 'expired')
       throw new NetError(
         isNetErrorCode(record.error?.code) ? record.error.code : 'outcome_uncertain'

@@ -1628,6 +1628,17 @@ export class NetService {
       if (session.state() === 'open' && session.peer.node === node) return session
     throw new NetError('peer_offline')
   }
+  /** True while an open session (of `node`, when given) is being served the stream. */
+  streamSubscribed(stream: StreamId, node?: NodeId): boolean {
+    for (const session of this.sessions)
+      if (
+        session.state() === 'open' &&
+        (node === undefined || session.peer.node === node) &&
+        session.serves(stream)
+      )
+        return true
+    return false
+  }
   private streamQuiesced(stream: StreamId): boolean {
     const space = (this.domain?.store ?? this.state?.streams)?.getStream(stream)?.space
     return (

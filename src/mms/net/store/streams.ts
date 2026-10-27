@@ -595,7 +595,7 @@ export class SqliteStreamStore implements StreamStore {
         .run(epoch, stream)
     })
   }
-  truncate(stream: StreamId, throughSeq: number): void {
+  truncate(stream: StreamId, throughSeq: number, options?: { forgetIds?: boolean }): void {
     integer(throughSeq)
     const initial = this.row(stream)
     if (initial.kind === 'space.meta') fail('forbidden', 'Meta history cannot be truncated.')
@@ -612,18 +612,19 @@ export class SqliteStreamStore implements StreamStore {
       if (!records.length) break
       this.db.transaction(() => {
         for (const record of records) {
-          this.db.charge(2)
-          this.db.database
-            .prepare('INSERT OR IGNORE INTO net_event_ids VALUES(?,?,?,?,?,?,?)')
-            .run(
-              stream,
-              record.id,
-              record.epoch,
-              record.seq,
-              record.recv_ts,
-              digest(record.envelope),
-              digest(record.sig)
-            )
+          this.db.charge(options?.forgetIds ? 1 : 2)
+          if (!options?.forgetIds)
+            this.db.database
+              .prepare('INSERT OR IGNORE INTO net_event_ids VALUES(?,?,?,?,?,?,?)')
+              .run(
+                stream,
+                record.id,
+                record.epoch,
+                record.seq,
+                record.recv_ts,
+                digest(record.envelope),
+                digest(record.sig)
+              )
           this.db.database
             .prepare('DELETE FROM net_records WHERE generation=? AND epoch=? AND seq=?')
             .run(r.active_generation, r.epoch, record.seq)
@@ -641,6 +642,26 @@ export class SqliteStreamStore implements StreamStore {
         .prepare('UPDATE net_streams SET retained=max(retained,?) WHERE id=?')
         .run(throughSeq, stream)
     })
+    // The caller owns this stream's history, so no peer can replay an id into it: the identities
+    // of records that are gone need no tombstone, and the ones kept earlier are released.
+    if (options?.forgetIds) {
+      const epoch = this.row(stream).epoch
+      while (
+        this.db.transaction(() => {
+          const rows = this.db.database
+            .prepare(
+              'SELECT rowid FROM net_event_ids WHERE stream=? AND (epoch<? OR seq<=?) LIMIT 200'
+            )
+            .all(stream, epoch, throughSeq)
+          this.db.charge(rows.length)
+          for (const row of rows)
+            this.db.database.prepare('DELETE FROM net_event_ids WHERE rowid=?').run(row.rowid!)
+          return rows.length
+        }) > 0
+      ) {
+        /* bounded progress */
+      }
+    }
     // A single event may hold many blob references. Drain the remaining dead
     // rows in bounded transactions, retaining references to archived history.
     while (this.db.transaction(() => this.removeDeadBlobRefs(stream, STORE_TXN_MAX_ROWS)) > 0) {
