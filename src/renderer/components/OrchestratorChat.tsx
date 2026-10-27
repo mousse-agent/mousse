@@ -418,9 +418,11 @@ export function OrchestratorChat() {
 
   // Picking a computer swaps the picker to its default model; coming back restores this computer's.
   const remoteDefault = remoteOptions.defaultModel
+  const refreshSelectionRef = useRef(refreshSelection)
+  refreshSelectionRef.current = refreshSelection
   useEffect(() => {
     if (!remoteDraft) {
-      void refreshSelection()
+      void refreshSelectionRef.current()
       return
     }
     if (!remoteOptions.loaded) return
