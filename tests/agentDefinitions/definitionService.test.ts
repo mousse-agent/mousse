@@ -36,6 +36,8 @@ import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanc
 
 const PROVIDER = 'fixture'
 const MODEL = ENGINE_MODEL
+/** A second provider, for a fallback on another model. */
+const OTHER = 'other'
 const call = (name: string, args: Record<string, unknown>, id = `${name}-1`) => providerResponse([{ type: 'toolCall', id, name, arguments: args }], 'toolUse')
 const say = (text: string) => providerResponse([{ type: 'text', text }], 'stop')
 
@@ -57,7 +59,7 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     work = join(home, 'work')
     mkdirSync(work)
     store = new ThreadDataStore(new ProjectManager())
-    defs = await createDefinitionEngine(kind, [PROVIDER])
+    defs = await createDefinitionEngine(kind, [PROVIDER, OTHER])
     const settings = getDefaultSettings()
     settings.integrations.skills.enabled = false
     orch = new OrchestratorService(new AgentRegistry(), new TaskQueue(), new WorktreeManager(home), new PtyManager(), { get: () => settings } as never, defs.providerAuth)
@@ -68,7 +70,7 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     registry = new AgentDefinitionRegistry({ profileId, profileRoot: join(home, 'profile') })
     const integrations = new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write', 'ask_user', 'bash'] })
     const entry = (instanceId?: string) => ({ ref: { providerId: PROVIDER, modelId: MODEL, ...(instanceId ? { instanceId } : {}) }, available: true, efforts: [], speeds: [], contexts: [], capabilities: ['tools'], unavailableReasons: [] })
-    resolver = new AgentResolver({ registry, integrationLookup: integrations, modelLookup: new StaticAgentModelLookup([entry(), entry(`pi:${PROVIDER}`), entry(APPROVAL_ONLY_INSTANCE), entry('stubborn')] as never) })
+    resolver = new AgentResolver({ registry, integrationLookup: integrations, modelLookup: new StaticAgentModelLookup([entry(), entry(`pi:${PROVIDER}`), entry(APPROVAL_ONLY_INSTANCE), entry('stubborn'), { ...entry(`pi:${OTHER}`), ref: { providerId: OTHER, modelId: MODEL, instanceId: `pi:${OTHER}` } }] as never) })
   })
 
   afterEach(async () => {
@@ -145,9 +147,13 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     const runs = engine.listRuns(thread.id)
     expect(runs).toHaveLength(1)
     expect(runs[0]).toMatchObject({ source: 'definition', status: 'completed' })
+    // Held to the profile's agent access level, recorded on the run as any run's grant (SPEC §15.1).
+    expect(runs[0]!.accessGrant).toBe((orch as unknown as { grantFor(id: string, ceiling: string): string }).grantFor(thread.id, 'default'))
     expect(engine.bindingForRun(runs[0]!.runId)?.policy).toEqual({
       mode: 'default', origin: 'definition', approvals: 'grants', tools: { allow: ['ask_user', 'read', 'write'] }, budget: { maxTurns: 32, maxToolCalls: 64 },
-      authority: { kind: 'definition', digest: expect.stringMatching(/^[0-9a-f]{64}$/) }
+      authority: { kind: 'definition', digest: expect.stringMatching(/^[0-9a-f]{64}$/) },
+      // The strictest permission mode: the definition's own approval rules decide its calls.
+      permissionMode: 'ask'
     })
     expect(engine.bindingForRun(runs[0]!.runId)?.policyDigest).toMatch(/^[0-9a-f]{64}$/)
     expect(revisionBytes(stored.revision)).toEqual(before)
@@ -444,6 +450,113 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     expect((await pending).status).toBe('completed')
     await vi.waitFor(() => expect(orch.listQueue(thread.id)).toEqual([]), { timeout: 5_000, interval: 25 })
     await vi.waitFor(() => expect(defs.turns.map((turn) => turn.input.prompt)).toContain('queued composer'), { timeout: 5_000, interval: 25 })
+  })
+
+  it('a run that ends while its approval is pending runs nothing after the approval, and reports no answer', async () => {
+    // The legacy loop dispatches the tool itself; an exact runtime's gate owns this check (unit 4d-rpc).
+    if (kind !== 'legacy') return
+    const stored = publish('mousse', `pi:${PROVIDER}`, (settings) => { settings.approval.policy = 'always' })
+    const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })
+    const thread = store.createThread('ended during approval')
+    // The approval is answered right after the run was ended elsewhere, well before any heartbeat.
+    const approve: AgentRuntimeToolApprovalCallback = async (approval) => {
+      const runId = engine.listRuns(thread.id)[0]!.runId
+      engine.markTerminal(runId, 'interrupted', { interruptedBy: 'provider', error: 'no terminal event' })
+      return { status: 'approved', digest: approval.argumentDigest }
+    }
+    defs.outputs.push(call('write', { path: 'after-end-in-approval.txt', content: 'x' }), say('done'))
+    const result = await orch.runAgentDefinition(request(resolved, thread.id, { host: { workspaceRoots: [work], approveToolRequest: approve } }))
+    expect(existsSync(join(work, 'after-end-in-approval.txt'))).toBe(false)
+    expect(result.status).toBe('cancelled')
+    expect(result.text).toBe('')
+    expect(engine.listRuns(thread.id)[0]!.status).toBe('interrupted')
+  })
+
+  it('a message queued during a failed primary waits for the fallback, which keeps the thread, then runs once', async () => {
+    const stored = publish('mousse', `pi:${PROVIDER}`, (settings) => {
+      settings.fallbacks = { enabled: true, models: [{ providerId: OTHER, modelId: MODEL, instanceId: `pi:${OTHER}` }], retryOn: [], allowHigherCost: true }
+      settings.recovery.retryCount = 0
+      settings.recovery.backoffMs = 250
+    })
+    const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })
+    const thread = store.createThread('queue across fallback')
+    orch.setThreadModelOverride(thread.id, { instanceId: `pi:${PROVIDER}`, llmProvider: PROVIDER, model: MODEL })
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let calls = 0
+    defs.setNext(async () => {
+      calls += 1
+      if (calls === 1) {
+        await gate
+        throw new Error('fixture provider unavailable')
+      }
+      return say(calls === 2 ? 'fallback done' : 'composer reply')
+    })
+    const pending = orch.runAgentDefinition(request(resolved, thread.id))
+    await vi.waitFor(() => expect(defs.turns).toHaveLength(1))
+    const sent = await orch.send('queued composer', false, { threadId: thread.id, awaitMode: 'ack' })
+    expect(sent.queued).toBe(true)
+    release()
+    const result = await pending
+    expect(result).toMatchObject({ status: 'completed', text: 'fallback done' })
+    expect(defs.turns.map((turn) => turn.input.instanceId)).toEqual([`pi:${PROVIDER}`, `pi:${OTHER}`])
+    // Only then the queued message, once.
+    await vi.waitFor(() => expect(defs.turns.filter((turn) => turn.input.prompt === 'queued composer')).toHaveLength(1), { timeout: 5_000, interval: 25 })
+    expect(defs.turns.slice(0, 2).every((turn) => turn.input.prompt !== 'queued composer')).toBe(true)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(defs.turns.filter((turn) => turn.input.prompt === 'queued composer')).toHaveLength(1)
+  })
+
+  it('a later record that finds the thread taken keeps the provider failure that moved the run', async () => {
+    const stored = publish('mousse', `pi:${PROVIDER}`, (settings) => {
+      settings.fallbacks = { enabled: true, models: [{ providerId: OTHER, modelId: MODEL, instanceId: `pi:${OTHER}` }], retryOn: [], allowHigherCost: true }
+      settings.recovery.retryCount = 0
+      settings.recovery.backoffMs = 200
+    })
+    const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })
+    const thread = store.createThread('taken across processes')
+    let held: ReturnType<typeof tryAcquireExecutionLease> = null
+    defs.setNext(async () => {
+      // Another process takes the thread's lease during the backoff (the in-process fence cannot stop it).
+      setTimeout(() => { held = tryAcquireExecutionLease(store.getThreadDir(thread.id), { source: 'other-process' }) }, 20)
+      throw new Error('fixture provider unavailable')
+    })
+    try {
+      const result = await orch.runAgentDefinition(request(resolved, thread.id))
+      expect(result.status).toBe('failed')
+      // The fallback never reached its runtime: the thread was taken, and the run failed with the primary's error.
+      expect(defs.turns).toHaveLength(1)
+      expect(result.error!.message).not.toContain('running other work')
+      expect(result.error!.message).toMatch(kind === 'legacy' ? /provider could not accept/ : /fixture provider unavailable/)
+    } finally {
+      if (held) releaseExecutionLeaseHandle(held)
+    }
+  })
+
+  it('a Stop during a definition run also stops an ordinary turn admitted on the thread, and a Stop for one run spares the other', () => {
+    const thread = store.createThread('two stops')
+    const session = (orch as unknown as { getOrCreateSession(id: string): { turnAdmitted: boolean; abortRequested: boolean } }).getOrCreateSession(thread.id)
+    const stops = (orch as unknown as { definitionStops: Map<string, Set<{ abort: AbortController; runIds: Set<string>; admitted: boolean }>> }).definitionStops
+    const definition = { abort: new AbortController(), runIds: new Set(['run:definition']), admitted: false }
+    stops.set(thread.id, new Set([definition]))
+    // An ordinary turn is admitted and still starting.
+    session.turnAdmitted = true
+    try {
+      // A Stop for the definition's record stops only the definition.
+      expect(orch.abortActiveTurn(thread.id, { runId: 'run:definition' })).toBe(true)
+      expect(definition.abort.signal.aborted).toBe(true)
+      expect(session.abortRequested).toBe(false)
+      // A thread Stop also reaches the admitted turn.
+      const again = { abort: new AbortController(), runIds: new Set(['run:definition-2']), admitted: false }
+      stops.set(thread.id, new Set([again]))
+      expect(orch.abortActiveTurn(thread.id)).toBe(true)
+      expect(again.abort.signal.aborted).toBe(true)
+      expect(session.abortRequested).toBe(true)
+    } finally {
+      stops.delete(thread.id)
+      session.turnAdmitted = false
+      session.abortRequested = false
+    }
   })
 
   it('the gateway ends a definition turn whose runtime ignores the time budget', async () => {
