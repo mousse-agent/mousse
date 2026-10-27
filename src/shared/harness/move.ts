@@ -45,6 +45,12 @@ export interface MoveResult {
   to: string
   /** Defaults that named the old entry and now name the new one ("Default model", "Project Foo"). */
   rewritten: string[]
+  /**
+   * What became of the old entry's sign-in (an entry whose old route is going away): `removed`;
+   * `kept_shared` because another profile of the device still uses it; `remains` because it could
+   * not be deleted (the move stands, and the stale credential is not used).
+   */
+  oldSignIn?: 'removed' | 'kept_shared' | 'remains'
 }
 
 /** The persistent Move banner of an entry (its card, and every thread whose selection it is). */

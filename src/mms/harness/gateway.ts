@@ -478,6 +478,11 @@ export interface HarnessGatewayOptions {
    * changed, for the Move dialog. Project defaults are the gateway's own.
    */
   defaults?: { rewrite(from: string, to: { instanceId: string; llmProvider: string; model(model: string): string }): string[] }
+  /**
+   * Whether another profile of this device still has an unmoved entry `instanceId` (or cannot be
+   * read), so a sign-in the profiles share is kept when this profile moves. Absent: none does.
+   */
+  otherProfilesUse?: (instanceId: string) => boolean
   /** Test seam: the agent a model API moves to (`FOLDED_INTO_AGENT`). */
   foldedInto?: (providerId: string | undefined) => HarnessDriverKind | undefined
   /** The ACP agent registry; without it the search finds nothing. */
@@ -644,6 +649,8 @@ export class Harness implements HarnessGateway {
   /** The account reading `bind` took, for the `startTurn` of that binding (once). */
   private readonly boundAccounts = new WeakMap<ExecutionBinding, { accountId?: string }>()
   private readonly probes = new Map<string, ProbeState>()
+  /** Entries being moved now (`move`): one move at a time per entry. */
+  private readonly moving = new Set<string>()
   private readonly facts: RuntimeFactsStore
   /** Executable stats taken when no probe recorded one, reused for the probe TTL. */
   private readonly stats = new Map<string, { fingerprint?: BinaryFingerprint; atMs: number }>()
@@ -2443,8 +2450,22 @@ export class Harness implements HarnessGateway {
     if (fromId === toId || !agent || to.driver.kind !== agent)
       harnessFail('unsupported', `${this.displayName(from)} cannot move to ${this.displayName(to)}.`, fromId)
     if (from.config.movedTo) harnessFail('unsupported', `${this.displayName(from)} has already moved.`, fromId)
-    // An entry whose old route is going away moves only onto a route that works now, and drops its
-    // old sign-in with the move (nothing is copied: the new route has its own sign-in).
+    // Two moves of one entry (the card's dialog and a chat's, or two windows) never run together:
+    // the second would split the defaults and the pinned chats across two targets.
+    if (this.moving.has(fromId)) harnessFail('unsupported', `${this.displayName(from)} is already being moved.`, fromId)
+    this.moving.add(fromId)
+    try {
+      return await this.moveEntry(from, to, options)
+    } finally {
+      this.moving.delete(fromId)
+    }
+  }
+
+  private async moveEntry(from: InstanceRecord, to: InstanceRecord, options: { copyKey?: boolean }): Promise<MoveResult> {
+    const fromId = from.instanceId
+    const toId = to.instanceId
+    // An entry whose old route is going away moves only onto a route that works now (nothing is
+    // copied: the new route has its own sign-in), and its old sign-in goes last, after the move is saved.
     const retiring = movePromptOf(piProviderIdOf(fromId)) !== undefined
     if (retiring) {
       if (!to.entry.enabled) harnessFail('unsupported', `Turn on ${this.displayName(to)} first, then move ${this.displayName(from)} to it. Nothing moved.`, toId)
@@ -2462,14 +2483,8 @@ export class Harness implements HarnessGateway {
       this.counters.bumpAccount(toId)
       void this.probe(toId, true)
     }
-    // The old sign-in goes first: when it cannot be deleted, nothing has moved yet.
-    if (retiring) {
-      if (!from.runtime.signOut) harnessFail('unsupported', `${this.displayName(from)} has no sign-in to remove.`, fromId)
-      await from.runtime.signOut()
-      this.counters.bumpAccount(fromId)
-      this.options.onProvidersChanged?.()
-    }
-    // Turned off, never deleted: an older build can still turn it back on.
+    // Turned off, never deleted: an older build can still turn it back on. A save that fails throws
+    // here, before anything else changed: the old sign-in is still there and the entry still works.
     this.instanceMap.setEntry(fromId, { ...from.entry, enabled: false, config: { ...(from.entry.config ?? {}), movedTo: toId } })
     const llmProvider = legacyProviderForInstance(toId, to.entry) ?? ''
     // A model the agent lists keeps its id; any other becomes the agent's default (its first model).
@@ -2480,8 +2495,28 @@ export class Harness implements HarnessGateway {
       ...this.scopes.moveDefaults(fromId, toId, model).map(({ projectId, from: before, to: after }) =>
         `Project default (${projectId})${before !== after ? `: ${this.modelName(toId, after)} instead of ${before}` : ''}`)
     ]
+    const oldSignIn = retiring ? await this.dropOldSignIn(from) : undefined
     this.changed(fromId)
-    return { from: fromId, to: toId, rewritten }
+    return { from: fromId, to: toId, rewritten, ...(oldSignIn ? { oldSignIn } : {}) }
+  }
+
+  /**
+   * Deletes the old sign-in of a moved entry, after the move is saved. The sign-in belongs to the
+   * whole device, so it stays while another profile still has an unmoved entry using it. A deletion
+   * that fails leaves the move standing and a stale credential nobody uses.
+   */
+  private async dropOldSignIn(from: InstanceRecord): Promise<NonNullable<MoveResult['oldSignIn']>> {
+    if (this.options.otherProfilesUse?.(from.instanceId)) return 'kept_shared'
+    try {
+      if (!from.runtime.signOut) return 'remains'
+      await from.runtime.signOut()
+      this.counters.bumpAccount(from.instanceId)
+      this.options.onProvidersChanged?.()
+      return 'removed'
+    } catch (error) {
+      console.warn('[harness] the old sign-in of a moved entry could not be deleted', { instanceId: from.instanceId, message: errorText(error) })
+      return 'remains'
+    }
   }
 
   private async setEnabled(instanceId: string, scope: ProviderScope, enabled: boolean | null): Promise<InstanceSnapshot> {

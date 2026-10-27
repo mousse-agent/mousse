@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { MmsProfileServices } from '../../src/mms/MmsProfileServices'
 import { resolveBoundServices } from '../../src/mms/profiles/admission'
+import { ProfileHost } from '../../src/mms/profiles/ProfileHost'
 import { PROFILES_V1_CAPABILITY } from '../../src/shared/profiles/types'
 import { dispatchMethod, type HandlerContext } from '../../src/mms/protocol/handlers'
 import { PROTOCOL_METHODS } from '../../src/mms/protocol/types'
@@ -85,6 +86,23 @@ describe('provider methods on two profiles', () => {
     expect(work.services.harness!.catalog.models('claude', { kind: 'device' })).toEqual([])
     expect(() => work.services.harness!.resolve({ instanceId: 'claude', model: 'opus' }, { kind: 'device' }, 'composer')).toThrow()
     expect(personal.services.harness!.resolve({ instanceId: 'claude', model: 'opus' }, { kind: 'device' }, 'composer').driver).toBe('claude')
+  })
+
+  it('the profile host says whether another profile still uses a provider entry: unmoved counts, moved does not, a profile it cannot read does', () => {
+    const entries = (movedTo?: string) => ({ services: { providerInstances: { list: () => ({ 'pi:openai-codex': { driver: 'pi', enabled: true, ...(movedTo ? { config: { movedTo } } : {}) } }) } } })
+    const host = (live: Record<string, ReturnType<typeof entries> | undefined>) => {
+      const instance = Object.create(ProfileHost.prototype) as ProfileHost & Record<string, unknown>
+      instance.manager = { list: () => Object.keys(live).map((id) => ({ id })) }
+      instance.live = new Map(Object.entries(live).flatMap(([id, value]) => (value ? [[id, value.services]] : [])))
+      return instance
+    }
+    expect(host({ me: entries(), other: entries() }).otherProfilesUse('me', 'pi:openai-codex')).toBe(true)
+    expect(host({ me: entries(), other: entries('codex') }).otherProfilesUse('me', 'pi:openai-codex')).toBe(false)
+    expect(host({ me: entries() }).otherProfilesUse('me', 'pi:openai-codex')).toBe(false)
+    expect(host({ me: entries(), other: undefined }).otherProfilesUse('me', 'pi:openai-codex')).toBe(true)
+    // A profile without the entry at all does not use it.
+    const bare = { services: { providerInstances: { list: () => ({}) } } }
+    expect(host({ me: entries(), other: bare as never }).otherProfilesUse('me', 'pi:openai-codex')).toBe(false)
   })
 
   it('usage shows each profile only its own Codex, next to the shared pi-ai providers', async () => {

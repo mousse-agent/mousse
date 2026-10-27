@@ -416,6 +416,8 @@ export class MmsProfileServices {
         grokDriver({ agents: agentInstalls })
       ],
       registry: { search: (query) => agentRegistry.search(query) },
+      // A sign-in the profiles share (the pi-ai credentials) stays while another profile still uses it.
+      otherProfilesUse: (instanceId) => this.getInstallationHost()?.otherProfilesUse(this.profileId, instanceId) ?? false,
       questions: this.questions,
       prefs: {
         read: () => config.getProvidersSection().modelPrefs,

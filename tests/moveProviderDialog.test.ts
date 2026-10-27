@@ -1,7 +1,7 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import { MoveNotice, MoveProviderDialog, isMoveReady, moveTargets } from '../src/renderer/components/providers/MoveProviderDialog'
+import { MoveNotice, MoveProviderDialog, isMoveReady, moveTargets, oldSignInNote } from '../src/renderer/components/providers/MoveProviderDialog'
 import { ApiEditor } from '../src/renderer/components/providers/ProviderEditor'
 import { moveBannerOf } from '../src/shared/harness/move'
 import { describeStatus, type InstanceSnapshot } from '../src/shared/harness/status'
@@ -124,6 +124,13 @@ describe('the Move dialog for such an entry', () => {
     const html = dialog(chatgpt(), [target])
     expect(html).toContain('Moving turns the old connection off and removes its sign-in.')
     expect(disabled(html, 'Move')).toBe(false)
+  })
+
+  it('says what became of the old sign-in', () => {
+    const move = { from: 'pi:openai-codex', to: 'codex:managed', rewritten: [] }
+    expect(oldSignInNote({ ...move, oldSignIn: 'removed' })).toBe(' and its old sign-in is removed')
+    expect(oldSignInNote({ ...move, oldSignIn: 'kept_shared' })).toContain('another profile still uses it')
+    expect(oldSignInNote({ ...move, oldSignIn: 'remains' })).toContain('could not be removed')
   })
 
   it('with no Codex entry, says to add one first', () => {

@@ -95,6 +95,21 @@ export class ProfileHost {
     this.cache.set(profileId, Promise.resolve(services))
   }
 
+  /**
+   * Whether a profile other than `profileId` still has an unmoved provider entry `instanceId`. The
+   * sign-in of a model API is shared by the device's profiles, so a profile that moved away keeps
+   * it while one does. A profile that is not running cannot be read, so it counts as using it.
+   */
+  otherProfilesUse(profileId: string, instanceId: string): boolean {
+    return this.manager.list().some((profile) => {
+      if (profile.id === profileId) return false
+      const services = this.live.get(profile.id)
+      if (!services) return true
+      const entry = services.providerInstances.list()[instanceId]
+      return entry !== undefined && !(entry.config as { movedTo?: unknown } | undefined)?.movedTo
+    })
+  }
+
   activeProfileCount(): number {
     return this.manager.list().filter((record) => record.status === 'active').length
   }
@@ -467,8 +482,7 @@ export class ProfileHost {
       installationHome: this.installation.homeDir,
       personal: true,
       profileId: record.id,
-      listProfiles: () => this.manager.list().map((profile) => ({ id: profile.id, displayName: profile.displayName })),
-      allowLegacyProjectData: isDefault,
+      listProfiles: () => this.manager.list().map((profile) => ({ id: profile.id, displayName: profile.displayName })),      allowLegacyProjectData: isDefault,
       inheritChannelEnvironment: isDefault,
       includeExternalCliConfigs: isDefault
     })

@@ -154,6 +154,13 @@ export function ThreadMoveBanner({ instanceId, snapshots }: { instanceId: string
   )
 }
 
+/** What became of the old sign-in, said after "… is off now". */
+export function oldSignInNote(result: MoveResult): string {
+  if (result.oldSignIn === 'kept_shared') return ', and its old sign-in stays because another profile still uses it'
+  if (result.oldSignIn === 'remains') return ', but its old sign-in could not be removed and stays unused'
+  return ' and its old sign-in is removed'
+}
+
 /** What the chosen target still needs before an entry with a Move banner can move onto it. */
 function TargetReadiness({ target, onSignIn, onRecheck }: { target: InstanceSnapshot; onSignIn?: MoveHandlers['onSignIn']; onRecheck?: MoveHandlers['onRecheck'] }) {
   const { busy, error, run } = useAsyncAction()
@@ -236,8 +243,7 @@ export function MoveProviderDialog({
       {result ? (
         <div className="prov-wizard-panel">
           <p>
-            {snapshot.displayName} is off now{retiring ? ' and its old sign-in is removed' : ''}. Chats that used it continue on the agent with their
-            history.
+            {snapshot.displayName} is off now{retiring ? oldSignInNote(result) : ''}. Chats that used it continue on the agent with their history.
           </p>
           {result.rewritten.length > 0 ? (
             <>

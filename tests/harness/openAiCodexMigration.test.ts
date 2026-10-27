@@ -18,7 +18,7 @@ import { ThreadMoveBanner } from '../../src/renderer/components/providers/MovePr
 import { describeStatus, type InstanceSnapshot } from '../../src/shared/harness/status'
 import { threadMoveBanner } from '../../src/shared/harness/move'
 import { FakeIssuer, guardNetwork, plainCodec } from './chatgpt/fakeIssuer'
-import { signIn } from './chatgpt/signInFlow'
+import { signIn, startSignIn } from './chatgpt/signInFlow'
 import { cleanupProfiles, FIXTURE, intermediateProfile, read } from './openAiCodexFixture'
 
 /**
@@ -50,7 +50,7 @@ afterEach(async () => {
 })
 
 /** An agent entry that is installed (a fake install) and signs in with ChatGPT (the fake service). */
-function managedCodex() {
+function managedCodex(own?: unknown) {
   const holder: { auth?: ChatGptAuth } = {}
   const installation = {
     installed: () => ({ path: join(FIXTURE, 'auth.json'), version: '0.162.1' }),
@@ -61,7 +61,8 @@ function managedCodex() {
   } as unknown as CodexInstallation
   const driver = codexDriver({
     builtIn: () => {
-      throw new Error('the user’s own Codex is not part of this profile')
+      if (!own) throw new Error('the user’s own Codex is not part of this profile')
+      return own as never
     },
     managed: (context) =>
       createManagedCodexRuntime(context, {
@@ -73,19 +74,58 @@ function managedCodex() {
   return { driver, holder }
 }
 
-async function profile() {
-  const { driver, holder } = managedCodex()
+/** The user's own Codex, signed in (a stub of its service: no CLI, no `~/.codex`). */
+function ownCodex() {
+  const models = [{ id: read('thread.json').modelOverride.model as string, label: 'Own model' }]
+  return {
+    configured: () => true,
+    configuredProvider: () => undefined,
+    llmProvider: () => ({ id: 'codex', label: 'Codex', models }),
+    models: () => models,
+    modelsRefreshedAt: () => undefined,
+    vendorMirror: () => ({ fields: [], read: () => 'unreadable' as const, write: () => {} }),
+    validateLaunch: () => {},
+    launchChanged: () => {},
+    status: async () => ({ state: 'connected' }),
+    account: () => ({ label: 'ChatGPT Pro', subject: 'chatgpt:me@example.com' }),
+    forgetConversation: () => {}
+  }
+}
+
+interface ProfileOptions {
+  /** One credentials object shared by profiles (the pi-ai credentials are installation-wide). */
+  sharedAuth?: Record<string, unknown>
+  /** Adds the user's own Codex (`codex`) as a second target. */
+  withOwnCodex?: boolean
+  /** Whether another profile still uses the entry (the profile host's answer). */
+  otherProfilesUse?: (instanceId: string) => boolean
+  /** Makes the credentials' `logout` fail. */
+  logoutFails?: boolean
+}
+
+async function profile(options: ProfileOptions = {}) {
+  const { driver, holder } = managedCodex(options.withOwnCodex ? ownCodex() : undefined)
   let deviceDefault: Record<string, unknown> = read('defaults.json').provider
   const made = await intermediateProfile({
-    extraInstances: { [MANAGED]: { driver: 'codex', enabled: true, config: { setup: 'managed', home: 'private' } } },
+    extraInstances: {
+      [MANAGED]: { driver: 'codex', enabled: true, config: { setup: 'managed', home: 'private' } },
+      ...(options.withOwnCodex ? { codex: { driver: 'codex', enabled: true } } : {})
+    },
     drivers: [driver],
-    credentials: (auth) => ({
-      has: (providerId: string) => providerId in auth,
-      logout: async (providerId: string) => void delete auth[providerId],
-      getProviderDisplayName: () => 'ChatGPT',
-      getConfiguredProviders: () => ('openai-codex' in auth ? [{ id: 'openai-codex', label: 'ChatGPT', authType: 'oauth' as const, source: 'stored' }] : [])
-    }),
+    credentials: (own) => {
+      const auth = options.sharedAuth ?? own
+      return {
+        has: (providerId: string) => providerId in auth,
+        logout: async (providerId: string) => {
+          if (options.logoutFails) throw new Error('the credential file is locked')
+          delete auth[providerId]
+        },
+        getProviderDisplayName: () => 'ChatGPT',
+        getConfiguredProviders: () => ('openai-codex' in auth ? [{ id: 'openai-codex', label: 'ChatGPT', authType: 'oauth' as const, source: 'stored' }] : [])
+      }
+    },
     gateway: {
+      ...(options.otherProfilesUse ? { otherProfilesUse: options.otherProfilesUse } : {}),
       // The profile's settings: the device default names the old entry, and the move rewrites it.
       defaults: {
         rewrite: (from, to) => {
@@ -231,7 +271,7 @@ describe('openai-codex in the PR 3 release', () => {
 
     const result = await harness.instances.move('pi:openai-codex', MANAGED)
     const model = read('thread.json').modelOverride.model
-    expect(result).toMatchObject({ from: 'pi:openai-codex', to: MANAGED })
+    expect(result).toMatchObject({ from: 'pi:openai-codex', to: MANAGED, oldSignIn: 'removed' })
     expect(result.rewritten).toEqual(['Default model', expect.stringContaining('Project default (project-1)')])
     expect(stored()['pi:openai-codex']).toEqual({ driver: 'pi', enabled: false, config: { displayName: 'ChatGPT', movedTo: MANAGED } })
     expect(auth['openai-codex']).toBeUndefined()
@@ -248,6 +288,103 @@ describe('openai-codex in the PR 3 release', () => {
     expect(snapshot.config).toMatchObject({ movedTo: MANAGED })
     expect(threadMoveBanner('pi:openai-codex', await harness.instances.snapshots(device))).toBeNull()
     await expect(harness.instances.move('pi:openai-codex', MANAGED)).rejects.toMatchObject({ code: 'unsupported' })
+  })
+
+  it('a move whose save fails changes nothing: the old sign-in stays and the entry still works', async () => {
+    const made = await profile()
+    await signManagedIn(made)
+    const real = made.instanceMap.setEntry.bind(made.instanceMap)
+    const failing = vi.spyOn(made.instanceMap, 'setEntry').mockImplementation((instanceId, entry) => {
+      if ((entry.config as { movedTo?: string } | undefined)?.movedTo) throw new Error('Mousse could not save the provider instances')
+      return real(instanceId, entry)
+    })
+    await expect(made.harness.instances.move('pi:openai-codex', MANAGED)).rejects.toThrow('could not save')
+    expect(made.auth['openai-codex']).toBeDefined()
+    expect(made.deviceDefault()).toEqual(read('defaults.json').provider)
+    expect(new HarnessScopeStore(made.profileHome).project('project-1')?.defaultSelection).toMatchObject({ instanceId: 'pi:openai-codex' })
+    const snapshot = await snapshotOf(made.harness, 'pi:openai-codex')
+    expect(snapshot).toMatchObject({ enabled: { device: true }, auth: { state: 'signed_in' }, nextStep: { action: 'move' } })
+    expect(snapshot.config?.movedTo).toBeUndefined()
+    expect(made.harness.resolveStored(read('thread.json').modelOverride, { purpose: 'turn' })).toMatchObject({ instanceId: 'pi:openai-codex', driver: 'pi' })
+    // Once the disk is back, Move goes through.
+    failing.mockRestore()
+    expect(await made.harness.instances.move('pi:openai-codex', MANAGED)).toMatchObject({ oldSignIn: 'removed' })
+    expect(made.auth['openai-codex']).toBeUndefined()
+  })
+
+  it('a move whose old sign-in cannot be deleted stands, says so, and leaves a stale credential nothing uses', async () => {
+    const made = await profile({ logoutFails: true })
+    await signManagedIn(made)
+    const result = await made.harness.instances.move('pi:openai-codex', MANAGED)
+    expect(result).toMatchObject({ from: 'pi:openai-codex', to: MANAGED, oldSignIn: 'remains' })
+    expect(made.stored()['pi:openai-codex']).toMatchObject({ enabled: false, config: { movedTo: MANAGED } })
+    expect(made.deviceDefault()).toMatchObject({ instanceId: MANAGED })
+    expect(made.harness.resolveStored(read('thread.json').modelOverride, { purpose: 'turn' })).toMatchObject({ instanceId: MANAGED, movedFrom: 'pi:openai-codex' })
+    expect(made.auth['openai-codex']).toBeDefined()
+    await expect(made.harness.instances.move('pi:openai-codex', MANAGED)).rejects.toMatchObject({ code: 'unsupported', message: expect.stringContaining('already moved') })
+  })
+
+  it("the old sign-in is shared by the device's profiles: it is deleted only when no other profile still uses it", async () => {
+    const shared: Record<string, unknown> = { ...read('auth.json') }
+    const profiles: Record<string, Awaited<ReturnType<typeof profile>>> = {}
+    const usedBy = (other: string) => (instanceId: string) => {
+      const entry = profiles[other]?.instanceMap.list()[instanceId]
+      return entry !== undefined && !(entry.config as { movedTo?: string } | undefined)?.movedTo
+    }
+    profiles.a = await profile({ sharedAuth: shared, otherProfilesUse: usedBy('b') })
+    profiles.b = await profile({ sharedAuth: shared, otherProfilesUse: usedBy('a') })
+    await signManagedIn(profiles.a)
+    await signManagedIn(profiles.b)
+
+    // A moves while B's entry is unmoved: the credential stays and B keeps chatting.
+    expect(await profiles.a.harness.instances.move('pi:openai-codex', MANAGED)).toMatchObject({ oldSignIn: 'kept_shared' })
+    expect(shared['openai-codex']).toBeDefined()
+    expect(await snapshotOf(profiles.b.harness, 'pi:openai-codex')).toMatchObject({ auth: { state: 'signed_in' }, nextStep: { action: 'move' } })
+    expect(profiles.b.harness.resolveStored(read('thread.json').modelOverride, { purpose: 'turn' })).toMatchObject({ instanceId: 'pi:openai-codex', driver: 'pi' })
+    expect(profiles.a.stored()['pi:openai-codex']).toMatchObject({ enabled: false, config: { movedTo: MANAGED } })
+
+    // B is the last profile to move: now nothing uses the sign-in, and it is deleted.
+    expect(await profiles.b.harness.instances.move('pi:openai-codex', MANAGED)).toMatchObject({ oldSignIn: 'removed' })
+    expect(shared['openai-codex']).toBeUndefined()
+  })
+
+  it('a sign-in started for the target and cancelled leaves the move impossible, and nothing changed', async () => {
+    const made = await profile()
+    await made.harness.instances.snapshots(device)
+    await vi.waitFor(() => {
+      if (!made.holder.auth) throw new Error('the entry has no sign-in yet')
+    })
+    const flow = startSignIn(made.holder.auth!)
+    await flow.link()
+    flow.cancel()
+    await flow.result.catch(() => undefined)
+    const before = JSON.stringify(made.stored())
+    await expect(made.harness.instances.move('pi:openai-codex', MANAGED)).rejects.toMatchObject({ code: 'signed_out' })
+    expect(JSON.stringify(made.stored())).toBe(before)
+    expect(made.auth['openai-codex']).toBeDefined()
+    expect(made.deviceDefault()).toEqual(read('defaults.json').provider)
+  })
+
+  it("moves onto the user's own Codex when it is signed in: defaults, the pinned chat and the old credential", async () => {
+    const made = await profile({ withOwnCodex: true })
+    const result = await made.harness.instances.move('pi:openai-codex', 'codex')
+    const model = read('thread.json').modelOverride.model
+    expect(result).toMatchObject({ from: 'pi:openai-codex', to: 'codex', oldSignIn: 'removed' })
+    expect(made.stored()['pi:openai-codex']).toMatchObject({ enabled: false, config: { movedTo: 'codex' } })
+    expect(made.deviceDefault()).toMatchObject({ instanceId: 'codex', model })
+    expect(made.harness.resolveStored(read('thread.json').modelOverride, { purpose: 'turn' })).toMatchObject({ instanceId: 'codex', driver: 'codex', movedFrom: 'pi:openai-codex' })
+    expect(made.auth['openai-codex']).toBeUndefined()
+  })
+
+  it('two moves of one entry never run together: the second is refused and both defaults and chats follow the first', async () => {
+    const made = await profile({ withOwnCodex: true })
+    await signManagedIn(made)
+    const settled = await Promise.allSettled([made.harness.instances.move('pi:openai-codex', MANAGED), made.harness.instances.move('pi:openai-codex', 'codex')])
+    expect(settled.map((entry) => entry.status)).toEqual(['fulfilled', 'rejected'])
+    expect((settled[1] as PromiseRejectedResult).reason).toMatchObject({ code: 'unsupported', message: expect.stringContaining('already being moved') })
+    expect(made.stored()['pi:openai-codex']).toMatchObject({ config: { movedTo: MANAGED } })
+    expect(made.deviceDefault()).toMatchObject({ instanceId: MANAGED })
+    expect(made.harness.resolveStored(read('thread.json').modelOverride, { purpose: 'turn' })).toMatchObject({ instanceId: MANAGED })
   })
 
   it('the PR 2 build still reads the profile after the move: both entries, the old one off with its target', async () => {
