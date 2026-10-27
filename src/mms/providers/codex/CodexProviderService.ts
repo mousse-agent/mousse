@@ -87,12 +87,12 @@ import { QUESTIONS_REFUSED_MESSAGE } from '../../harness/acp/permissions'
 export const CODEX_PROVIDER_ID = 'codex'
 /** How long a live `account/read` result stands before it is checked again. */
 export const CODEX_ACCOUNT_TTL_MS = 5 * 60_000
-/** Model id that leaves the choice to the user's Codex config (`model` in `config.toml`). */
+/**
+ * Model id that leaves the choice to the user's Codex config (`model` in `config.toml`). Chats and
+ * defaults saved with it keep working; it is no longer offered, so an entry lists the models Codex
+ * reports (or none, and "Refresh models").
+ */
 export const CODEX_DEFAULT_MODEL_ID = 'default'
-/** Offered until `model/list` has run once (or when it fails). */
-export const CODEX_FALLBACK_MODELS: LlmModelOption[] = [
-  { id: CODEX_DEFAULT_MODEL_ID, label: 'Codex default (from your Codex config)' }
-]
 /**
  * Codex's built-in provider for OpenAI models, which uses the ChatGPT sign-in. Codex refuses to let
  * any config layer redefine it (`model_providers` cannot contain built-in ids), so pinning it per
@@ -966,6 +966,8 @@ export class CodexProviderService {
   private modelsEpoch = 0
   /** Model listings in flight; they keep the process open. */
   private listing = 0
+  /** The plan limits as the process last reported them (a read, or a turn's update), for when a read fails. */
+  private lastLimits?: { snapshot: RateLimitSnapshot; at: number; account: string }
   private idleClose?: { timer: ReturnType<typeof setTimeout>; at: number }
   /** Bumped by disconnect; a turn from an older scope does not save its thread. */
   private scope = 0
@@ -1094,10 +1096,9 @@ export class CodexProviderService {
     }
   }
 
-  /** The listed models, or the Codex default until a listing runs. */
+  /** The listed models; none until a listing has run. */
   models(): LlmModelOption[] {
-    if (this.options.models) return this.settings.models ?? []
-    return this.settings.models?.length ? this.settings.models : CODEX_FALLBACK_MODELS
+    return this.settings.models ?? []
   }
 
   /** When Codex last listed the models, kept with them across restarts. */
@@ -1172,7 +1173,7 @@ export class CodexProviderService {
         if (result.kind === 'signed_in' && !this.settings.models?.length && !this.modelDiscoveryStarted) {
           this.modelDiscoveryStarted = true
           void this.refreshModels().catch(() => {
-            /* the fallback model stays available */
+            /* "Refresh models" lists them later */
           })
         }
       })().finally(() => {
@@ -1242,7 +1243,7 @@ export class CodexProviderService {
       try {
         await this.refreshModels()
       } catch {
-        interaction.notify({ type: 'progress', message: 'Signed in. Model discovery is unavailable; your Codex default model is available.' })
+        interaction.notify({ type: 'progress', message: 'Signed in. Models could not be listed yet; use Refresh models to try again.' })
       }
       checkpoint()
       return { success: true, sessionId: session.sessionId }
@@ -1320,6 +1321,30 @@ export class CodexProviderService {
   }
 
   /**
+   * The plan's usage limits (`account/rateLimits/read`), read now from Codex itself: the same
+   * numbers `codex` shows, through the user's own sign-in. When the read fails the last snapshot
+   * Codex sent stands in (`live: false`, with its age); with none, the failure is thrown.
+   */
+  async rateLimits(signal?: AbortSignal): Promise<{ snapshot: RateLimitSnapshot; at: number; live: boolean }> {
+    this.listing += 1
+    try {
+      const conn = await this.connection()
+      const response = await conn.request('account/rateLimits/read', undefined, { timeoutMs: 10_000, signal })
+      const account = this.account()?.subject
+      if (account) this.lastLimits = { snapshot: response.rateLimits, at: Date.now(), account }
+      return { snapshot: response.rateLimits, at: Date.now(), live: true }
+    } catch (error) {
+      // Only the signed-in account's own last snapshot stands in: never another account's limits.
+      const last = this.lastLimits
+      if (signal?.aborted || !last || last.account !== this.account()?.subject) throw error
+      return { snapshot: last.snapshot, at: last.at, live: false }
+    } finally {
+      this.listing -= 1
+      this.closeWhenIdle(CODEX_CHECK_CLOSE_MS)
+    }
+  }
+
+  /**
    * Drops the saved Codex thread of `threadId`, so its next turn starts a new Codex thread with the
    * history in the prompt (the account it was saved under changed).
    */
@@ -1354,6 +1379,7 @@ export class CodexProviderService {
     this.scope += 1
     this.settings.threads = {}
     this.probeResult = undefined
+    this.lastLimits = undefined
     this.save()
     this.abortInFlight()
     this.app?.conn.close()
@@ -1624,6 +1650,8 @@ export class CodexProviderService {
     // Account-wide, not tied to a thread: every open run keeps the latest, for a usage limit it may hit.
     const limits = notificationParams(notification, 'account/rateLimits/updated')
     if (limits) {
+      const owner = this.account()?.subject
+      this.lastLimits = owner ? { snapshot: limits.rateLimits, at: Date.now(), account: owner } : undefined
       for (const held of this.turns.values()) held.rateLimits = limits.rateLimits
       return
     }

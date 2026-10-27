@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { describeStatus, type InstanceSnapshot } from '../src/shared/harness/status'
 import type { ProviderLoginOption } from '../src/shared/providerAuth'
 import { AgentConnectStep, CustomCommandStep, addChoices, type AddChoice } from '../src/renderer/components/providers/AddProviderDialog'
-import { AccountRow, BinaryRow, PlanUsageRow, SetupRow, UpdateRow, type InstanceActions } from '../src/renderer/components/providers/CliSections'
+import { AccountRow, BinaryRow, SetupRow, UpdateRow, type InstanceActions } from '../src/renderer/components/providers/CliSections'
 import { ProviderModelsSection, bulkVisibilityPatch, capabilityChips, displayModels, modelsSummary, movedOrder, nextOrder } from '../src/renderer/components/providers/ProviderModelsSection'
 import { AgentEditor, ApiEditor, allowsCustomModels, engineSetting } from '../src/renderer/components/providers/ProviderEditor'
 import { ProviderListRow, StatusLine, shortStatus } from '../src/renderer/components/providers/parts'
@@ -59,14 +59,12 @@ describe('Setup row: the status and its one next step', () => {
     expect(buttons(html)).toEqual(['Sign in'])
   })
 
-  it('signs a managed ChatGPT entry in with Continue with ChatGPT, and links its usage without a meter', () => {
+  it('signs a managed ChatGPT entry in with Continue with ChatGPT, and shows no usage on its card', () => {
     const managed = { driver: 'codex' as const, config: { home: 'private' as const, args: [], env: {}, setup: 'managed' as const } }
     expect(buttons(setupRow({ ...managed, auth: { state: 'signed_out', account: undefined } }))).toEqual(['Continue with ChatGPT'])
-    const usage = renderToStaticMarkup(createElement(PlanUsageRow, { snapshot: snapshot(managed) }))
-    expect(usage).toContain('ChatGPT plan usage')
-    expect(buttons(usage)).toEqual(['Manage usage'])
-    expect(usage).not.toMatch(/meter|progress|%/)
-    expect(renderToStaticMarkup(createElement(PlanUsageRow, { snapshot: snapshot({ driver: 'codex' }) }))).toBe('')
+    // Usage lives on the usage page, never in provider settings.
+    const editor = renderToStaticMarkup(createElement(AgentEditor, { snapshot: snapshot(managed), status: describeStatus(snapshot(managed)), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
+    expect(editor).not.toMatch(/usage/i)
   })
 
   it('offers Sign in for an agent whose account is not checked but that offers its sign-in', () => {

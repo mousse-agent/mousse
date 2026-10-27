@@ -441,6 +441,7 @@ html.platform-darwin .titlebar-left {
   line-height: 1.4;
   word-break: break-word;
 }
+.usage-manage { margin-top: 10px; }
 
 /* Functional progress indicators must keep spinning even when Windows
    reports prefers-reduced-motion (global baseline short-circuits animation). */

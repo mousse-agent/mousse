@@ -11,6 +11,7 @@ import { createManagedCodexRuntime, MANAGED_MODEL_PROVIDER } from '../../src/mms
 import type { DriverContext } from '../../src/mms/harness/driver'
 import { decodeCodexConfig } from '../../src/mms/harness/drivers/codex'
 import { instanceEnv } from '../../src/mms/harness/env'
+import { CHATGPT_USAGE_URL } from '../../src/shared/providerAuth'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import type { CodexLaunch, CodexProcess } from '../../src/mms/providers/codex/CodexAppServerClient'
 import type { CodexProviderService } from '../../src/mms/providers/codex/CodexProviderService'
@@ -206,6 +207,20 @@ describe('managed Codex: launch', () => {
     expect(token).toMatchObject({ code: 0, stdout: (await auth.access()).accessToken })
     expect(token.stdout).toMatch(/^at-\d+$/)
     expect(server.methods()).not.toContain('account/read')
+  })
+
+  it('has no usage meter: it points to ChatGPT, and starts nothing and contacts nothing to say so', async () => {
+    const { runtime, auth, server } = setup()
+    await signIn(issuer, auth, alice)
+    const requests = issuer.modelRequests.length
+    expect(await runtime.usage!(new AbortController().signal)).toEqual({
+      status: 'unavailable',
+      windows: [],
+      message: "ChatGPT shows this plan's usage on its own page.",
+      manageUrl: CHATGPT_USAGE_URL
+    })
+    expect(server.launches).toHaveLength(0)
+    expect(issuer.modelRequests).toHaveLength(requests)
   })
 
   it('refuses to launch while signed out', async () => {

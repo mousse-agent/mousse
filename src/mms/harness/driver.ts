@@ -1,7 +1,7 @@
 import type { AuthState, CredentialKind, InstallOwner } from '../../shared/harness/status'
 import type { CustomModel, HarnessCaps, HarnessDriverKind, RemoveInstallResult, RuntimeFacts } from '../../shared/harness/types'
 import type { NeutralTool } from '../../shared/harness/tools'
-import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult } from '../../shared/providerAuth'
+import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult, ProviderUsage } from '../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
 import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import type { AcpSource } from './acp/preset'
@@ -88,6 +88,9 @@ export interface ManagedInstall {
   /** Something to tell the user about the install. */
   advisory?: string
 }
+
+/** What a runtime says of the account's usage; the gateway adds the instance's id and name. */
+export type RuntimeUsage = Pick<ProviderUsage, 'status' | 'windows' | 'message' | 'manageUrl'>
 
 /** Runtime facts as a runtime reports them; the gateway stamps the instance and its counters. */
 export type RuntimeFactsReport = Omit<RuntimeFacts, 'instanceId' | 'configRevision' | 'accountGeneration'>
@@ -204,6 +207,12 @@ export interface DriverRuntime {
   validateLaunch?(patch: CliProviderConfigPatch): void
   /** The instance's launch settings changed: processes started with the old ones are replaced. */
   launchChanged?(): void
+  /**
+   * The plan usage of the signed-in account, for the usage page (`HarnessInstances.usage`): the
+   * windows the provider reports, or `unavailable` with a link when only its own site has them.
+   * Throws when it cannot be read; the gateway reports that as an error entry. Absent: no usage.
+   */
+  usage?(signal: AbortSignal): Promise<RuntimeUsage>
   /** `force` skips the runtime's own cache (Recheck; turn admission without `identity`). */
   auth(options: { force: boolean; signal?: AbortSignal }): Promise<AuthReading>
   /**

@@ -218,6 +218,8 @@ export class MmsProfileServices {
       includeExternalCliConfigs?: boolean
       /** The installation's profiles: an agent install another profile uses counts only while it is listed. */
       listProfiles?: () => Array<{ id: string; displayName?: string }>
+      /** Whether another profile still has an unmoved provider entry `instanceId` (the profile host's answer for a profile it builds). */
+      otherProfilesUse?: (instanceId: string) => boolean
       /**
        * Effect worker fibres per lane class (SPEC §12.3). `turn` caps this profile's concurrent
        * turns (default 8); control fibres keep Stop and steer responsive while turns run.
@@ -416,6 +418,10 @@ export class MmsProfileServices {
         grokDriver({ agents: agentInstalls })
       ],
       registry: { search: (query) => agentRegistry.search(query) },
+      // A sign-in the profiles share (the pi-ai credentials) stays while another profile still uses it.
+      // With no host to ask, it is treated as in use: the credential is kept.
+      otherProfilesUse: (instanceId) =>
+        shared.otherProfilesUse?.(instanceId) ?? this.getInstallationHost()?.otherProfilesUse(this.profileId, instanceId) ?? true,
       questions: this.questions,
       prefs: {
         read: () => config.getProvidersSection().modelPrefs,

@@ -3,7 +3,8 @@ import type { HarnessCaps } from '../../../shared/harness/types'
 import type { CodexProviderService } from '../../providers/codex/CodexProviderService'
 import { CODEX_CAPABILITIES, CodexAdapter } from '../../run/adapters/codex/CodexAdapter'
 import { cliNames } from '../env'
-import { decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig } from '../driver'
+import { usageWindows } from '../../providers/codex/rateLimits'
+import { decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig, type RuntimeUsage } from '../driver'
 import { createManagedCodexRuntime } from '../codex/managedRuntime'
 import { ALL_MIRROR_FIELDS } from '../vendorMirror'
 
@@ -34,6 +35,21 @@ function readAuth(service: CodexProviderService, status: Awaited<ReturnType<Code
       return { state: 'signed_out', methodLabel, message: status.message, signInCommand: SIGN_IN_COMMAND }
     default:
       return { state: 'unknown', methodLabel, ...(status.message ? { message: status.message } : {}) }
+  }
+}
+
+/**
+ * The plan's limits as Codex reports them to the user's own sign-in (the same numbers the CLI
+ * shows). When Codex cannot be asked now, the last snapshot it sent stands in and says so.
+ */
+async function readUsage(service: CodexProviderService, signal: AbortSignal): Promise<RuntimeUsage> {
+  const limits = await service.rateLimits(signal)
+  const windows = usageWindows(limits.snapshot)
+  if (!windows.length) return { status: 'unavailable', windows: [], message: 'Codex reported no usage limits for this plan.' }
+  return {
+    status: 'available',
+    windows,
+    ...(limits.live ? {} : { message: `Codex could not be reached; these are the limits it last reported (${new Date(limits.at).toISOString()}).` })
   }
 }
 
@@ -94,6 +110,7 @@ export function codexDriver(options: { builtIn: () => CodexProviderService; mana
         ...(context.builtIn ? { vendorMirror: service.vendorMirror(ALL_MIRROR_FIELDS) } : {}),
         validateLaunch: (patch) => service.validateLaunch(patch),
         launchChanged: () => service.launchChanged(),
+        usage: (signal) => readUsage(service, signal),
         auth: async ({ force }) => readAuth(service, await service.status({ force })),
         refreshModels: async () => {
           await service.status()

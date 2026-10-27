@@ -1,3 +1,4 @@
+import type { ProviderUsageWindow } from '../../../shared/providerAuth'
 import { codexErrorKind, codexHttpStatus, type CodexErrorInfo, type RateLimitSnapshot, type RateLimitWindow } from './protocol'
 
 /** The limit the windows of a snapshot stand for. `resetsAt` (epoch seconds) is absent when the server did not report every exhausted window's reset. */
@@ -12,6 +13,30 @@ function windowKind(window: RateLimitWindow, slot: 'primary' | 'secondary'): str
   if (minutes === 300) return 'five_hour'
   if (minutes === 10_080) return 'seven_day'
   return slot
+}
+
+function windowLabel(window: RateLimitWindow, slot: 'primary' | 'secondary'): string {
+  const minutes = window.windowDurationMins
+  if (minutes === 300) return '5-hour limit'
+  if (minutes === 10_080) return 'Weekly limit'
+  if (minutes && minutes % 1_440 === 0) return `${minutes / 1_440}-day limit`
+  if (minutes && minutes % 60 === 0) return `${minutes / 60}-hour limit`
+  return slot === 'primary' ? 'Usage limit' : 'Secondary usage limit'
+}
+
+/** The usage page's windows for a snapshot: what is left of each limit and when it resets. */
+export function usageWindows(snapshot: RateLimitSnapshot | null | undefined): ProviderUsageWindow[] {
+  return (['primary', 'secondary'] as const).flatMap((slot) => {
+    const window = snapshot?.[slot]
+    if (!window || typeof window.usedPercent !== 'number' || !Number.isFinite(window.usedPercent)) return []
+    const reset = typeof window.resetsAt === 'number' && Number.isFinite(window.resetsAt) ? new Date(window.resetsAt * 1000) : undefined
+    return [{
+      id: windowKind(window, slot),
+      label: windowLabel(window, slot),
+      remainingPercent: Math.max(0, Math.min(100, 100 - window.usedPercent)),
+      ...(reset && !Number.isNaN(reset.getTime()) ? { resetsAt: reset.toISOString() } : {})
+    }]
+  })
 }
 
 /**

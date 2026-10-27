@@ -40,12 +40,17 @@ export type NextStepAction =
   | 'recheck'
   | 'sign_in'
   | 'update'
+  /** The entry's old route is going away: move to the agent that replaces it. */
+  | 'move'
 
 export interface NextStep {
   action: NextStepAction
   label: string
   /** A command the user can copy (advisory update, terminal sign-in). */
   command?: string
+  /** The headline and the explanation of a persistent prompt (`move`). */
+  title?: string
+  detail?: string
 }
 
 export interface InstanceEnabled {
@@ -204,12 +209,18 @@ const DEFAULT_STEPS: Record<NextStepAction, string> = {
   fix_override: 'Change path',
   recheck: 'Check again',
   sign_in: 'Sign in',
-  update: 'Update'
+  update: 'Update',
+  move: 'Move'
 }
 
 function step(snapshot: InstanceSnapshot, action: NextStepAction, label = DEFAULT_STEPS[action]): NextStep {
   const hint = snapshot.nextStep
   return hint?.action === action ? hint : { action, label }
+}
+
+/** An entry whose old route is going away has no sign-in to offer: signed out, its step stays Move. */
+function signInStep(snapshot: InstanceSnapshot, label?: string): NextStep {
+  return snapshot.nextStep?.action === 'move' ? snapshot.nextStep : step(snapshot, 'sign_in', label)
 }
 
 function updateStep(snapshot: InstanceSnapshot): NextStep | null {
@@ -318,7 +329,7 @@ export function describeStatus(snapshot: InstanceSnapshot): StatusDescription {
       headline: 'Not signed in',
       detail: auth.message ?? staleDetail,
       tone: 'neutral',
-      nextStep: step(snapshot, 'sign_in')
+      nextStep: signInStep(snapshot)
     }
   }
 
@@ -327,7 +338,7 @@ export function describeStatus(snapshot: InstanceSnapshot): StatusDescription {
       headline: 'Sign-in expired',
       detail: auth.message ?? staleDetail,
       tone: 'warning',
-      nextStep: step(snapshot, 'sign_in', 'Sign in again')
+      nextStep: signInStep(snapshot, 'Sign in again')
     }
   }
 

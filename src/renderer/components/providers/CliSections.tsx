@@ -5,7 +5,6 @@ import { Download, Plus, RotateCcw, X } from '../../lib/icons'
 import { SettingsRow } from '../settings/SettingsRow'
 import { BrowseButton, CommandBox, RefreshButton, StatusLine, useAsyncAction } from './parts'
 import {
-  CHATGPT_USAGE_URL,
   DRIVER_INFO,
   binaryOverrideOf,
   binarySourceLabel,
@@ -188,25 +187,6 @@ export function AccountRow({ snapshot, actions }: { snapshot: InstanceSnapshot; 
             Sign out
           </button>
         ) : undefined
-      }
-    />
-  )
-}
-
-/**
- * A managed ChatGPT entry's usage lives at ChatGPT: a link, never a meter (OpenAI publishes no
- * usage reading for plan use).
- */
-export function PlanUsageRow({ snapshot }: { snapshot: InstanceSnapshot }) {
-  if (!isManagedSetup(snapshot)) return null
-  return (
-    <SettingsRow
-      title="Usage"
-      description="ChatGPT plan usage"
-      control={
-        <button type="button" className="prov-link" onClick={() => void window.mousse.providers.openLoginUrl(CHATGPT_USAGE_URL)}>
-          Manage usage
-        </button>
       }
     />
   )

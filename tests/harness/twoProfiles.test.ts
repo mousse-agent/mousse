@@ -4,13 +4,14 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { MmsProfileServices } from '../../src/mms/MmsProfileServices'
 import { resolveBoundServices } from '../../src/mms/profiles/admission'
+import { ProfileHost } from '../../src/mms/profiles/ProfileHost'
 import { PROFILES_V1_CAPABILITY } from '../../src/shared/profiles/types'
 import { dispatchMethod, type HandlerContext } from '../../src/mms/protocol/handlers'
 import { PROTOCOL_METHODS } from '../../src/mms/protocol/types'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
 import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
-import { testHarness } from '../../src/mms/run/testkit/harness'
+import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 
 const homes: string[] = []
 afterEach(() => {
@@ -31,7 +32,28 @@ function profile(): { services: MmsProfileServices; stored: () => Record<string,
   return { services: { harness, providerInstances: instances } as unknown as MmsProfileServices, stored: () => (stored ?? {}) as Record<string, unknown> }
 }
 
-const HARNESS_METHODS = PROTOCOL_METHODS.filter((method) => method === 'providers.snapshots' || method.startsWith('providers.instances.'))
+const HARNESS_METHODS = PROTOCOL_METHODS.filter((method) => method === 'providers.snapshots' || method.startsWith('providers.instances.') || method === 'providers.getUsage' || method === 'providers.getSubscriptionUsage')
+
+/** A profile with one Codex entry whose plan usage is `remaining` percent left, and the shared pi-ai usage (one provider). */
+function profileWithCodexUsage(remaining: number): MmsProfileServices {
+  const home = mkdtempSync(join(tmpdir(), 'mousse-profile-usage-'))
+  homes.push(home)
+  const instances = new ProviderInstanceService({ store: { read: () => ({ instances: { codex: { driver: 'codex', enabled: true } }, seedVersion: 1 }), write: () => {} } })
+  const codex: ProviderAdapter = { driver: 'codex', capabilities: pi.capabilities, startTurn: async () => { throw new Error('unused') }, interrupt: async () => 'not_active' }
+  const harness = testHarness({
+    drivers: [adapterDriver(codex, { runtime: { configured: () => true, usage: async () => ({ status: 'available', windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: remaining }] }) } })],
+    instances,
+    profileHome: home
+  })
+  return {
+    harness,
+    providerInstances: instances,
+    claudeSubscription: { status: async () => undefined, configured: () => false },
+    // The pi-ai credential service is shared by every profile.
+    providerAuth: { getUsage: async () => ({ providers: [{ id: 'xai', label: 'xAI', status: 'unavailable', windows: [] }], fetchedAt: '' }), getSubscriptionUsage: async (id: string) => (id === 'xai' ? 'xAI usage' : undefined) },
+    worktrees: { getRepoRoot: () => home }
+  } as unknown as MmsProfileServices
+}
 
 describe('provider methods on two profiles', () => {
   it('admission binds every provider method to the connection\'s profile', async () => {
@@ -55,7 +77,8 @@ describe('provider methods on two profiles', () => {
     await dispatchMethod(context(work.services), 'providers.instances.setModelPrefs', { instanceId: 'claude', patch: { hidden: ['opus'] } })
 
     expect(work.stored().claude).toMatchObject({ enabled: false })
-    expect(personal.stored().claude).toBeUndefined()
+    // The other profile only has the built-in entry it was seeded with, still on: nothing leaked into it.
+    expect(personal.stored().claude).toEqual({ driver: 'claude', enabled: true })
     const workSnapshots = await dispatchMethod(context(work.services), 'providers.snapshots', { scope: { kind: 'device' } }) as { snapshots: Array<{ instanceId: string; enabled: { device: boolean } }> }
     const personalSnapshots = await dispatchMethod(context(personal.services), 'providers.snapshots', { scope: { kind: 'device' } }) as { snapshots: Array<{ instanceId: string; enabled: { device: boolean } }> }
     expect(workSnapshots.snapshots.find((entry) => entry.instanceId === 'claude')?.enabled.device).toBe(false)
@@ -63,5 +86,38 @@ describe('provider methods on two profiles', () => {
     expect(work.services.harness!.catalog.models('claude', { kind: 'device' })).toEqual([])
     expect(() => work.services.harness!.resolve({ instanceId: 'claude', model: 'opus' }, { kind: 'device' }, 'composer')).toThrow()
     expect(personal.services.harness!.resolve({ instanceId: 'claude', model: 'opus' }, { kind: 'device' }, 'composer').driver).toBe('claude')
+  })
+
+  it('the profile host says whether another profile still uses a provider entry: unmoved counts, moved does not, a profile it cannot read does', () => {
+    const entries = (movedTo?: string) => ({ services: { providerInstances: { list: () => ({ 'pi:openai-codex': { driver: 'pi', enabled: true, ...(movedTo ? { config: { movedTo } } : {}) } }) } } })
+    const host = (live: Record<string, ReturnType<typeof entries> | undefined>) => {
+      const instance = Object.create(ProfileHost.prototype) as ProfileHost & Record<string, unknown>
+      instance.manager = { list: () => Object.keys(live).map((id) => ({ id })) }
+      instance.live = new Map(Object.entries(live).flatMap(([id, value]) => (value ? [[id, value.services]] : [])))
+      return instance
+    }
+    expect(host({ me: entries(), other: entries() }).otherProfilesUse('me', 'pi:openai-codex')).toBe(true)
+    expect(host({ me: entries(), other: entries('codex') }).otherProfilesUse('me', 'pi:openai-codex')).toBe(false)
+    expect(host({ me: entries() }).otherProfilesUse('me', 'pi:openai-codex')).toBe(false)
+    expect(host({ me: entries(), other: undefined }).otherProfilesUse('me', 'pi:openai-codex')).toBe(true)
+    // A profile without the entry at all does not use it.
+    const bare = { services: { providerInstances: { list: () => ({}) } } }
+    expect(host({ me: entries(), other: bare as never }).otherProfilesUse('me', 'pi:openai-codex')).toBe(false)
+  })
+
+  it('usage shows each profile only its own Codex, next to the shared pi-ai providers', async () => {
+    const personal = profileWithCodexUsage(80)
+    const work = profileWithCodexUsage(15)
+    const context = (services: MmsProfileServices) => ({ mms: services, globalSequence: () => 0 }) as unknown as HandlerContext
+    const usageOf = async (services: MmsProfileServices) =>
+      ((await dispatchMethod(context(services), 'providers.getUsage', {})) as { providers: Array<{ id: string; windows: Array<{ remainingPercent: number }> }> }).providers
+    expect((await usageOf(personal)).map((entry) => [entry.id, entry.windows[0]?.remainingPercent])).toEqual([['xai', undefined], ['codex', 80]])
+    expect((await usageOf(work)).map((entry) => [entry.id, entry.windows[0]?.remainingPercent])).toEqual([['xai', undefined], ['codex', 15]])
+    // The text form reads the same: a shared pi-ai provider through the credentials, an agent through the profile.
+    const textOf = async (services: MmsProfileServices, providerId: string) => ((await dispatchMethod(context(services), 'providers.getSubscriptionUsage', { providerId })) as { usage?: string }).usage
+    expect(await textOf(personal, 'xai')).toBe('xAI usage')
+    expect(await textOf(personal, 'codex')).toContain('20% used')
+    expect(await textOf(work, 'codex')).toContain('85% used')
+    expect(await textOf(work, 'nobody')).toBeUndefined()
   })
 })

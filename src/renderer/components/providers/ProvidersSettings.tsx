@@ -237,7 +237,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
       return (
         <ApiEditor
           snapshot={snapshot}
-          removeHint={option?.ambient ? undefined : option?.authType === 'oauth' ? 'Signs out' : 'Deletes the saved key'}
+          removeHint={option?.ambient ? undefined : option?.authType === 'oauth' || snapshot.nextStep?.action === 'move' ? 'Signs out' : 'Deletes the saved key'}
           onRemove={async () => {
             await window.mousse.providers.logout(providerId)
             await reload()
@@ -249,6 +249,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
               label={snapshot.displayName}
               option={option}
               status={status}
+              retired={snapshot.nextStep?.action === 'move'}
               onReplaceKey={async (apiKey) => {
                 if (apiKey) await window.mousse.providers.setApiKey(providerId, apiKey)
                 else ensureSignedIn(await runLogin(() => window.mousse.providers.loginApiKey(providerId)), 'API key setup failed.')
@@ -260,17 +261,8 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
               }}
             />
           }
-          move={
-            <MoveNotice
-              snapshot={snapshot}
-              snapshots={sorted}
-              onMove={async (toInstanceId, options) => {
-                const result = await window.mousse.providers.instances.move(snapshot.instanceId, toInstanceId, options)
-                await reload()
-                return result
-              }}
-            />
-          }
+          banner={<MoveNotice variant="banner" snapshot={snapshot} snapshots={sorted} onMoved={reload} />}
+          move={<MoveNotice snapshot={snapshot} snapshots={sorted} onMoved={reload} />}
           onSaveModelPrefs={onSaveModelPrefs}
           onRefreshModels={refreshModels(snapshot)}
           onSetEngine={(engine) => actionsFor(snapshot).configure({ engine })}

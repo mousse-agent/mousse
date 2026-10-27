@@ -4,7 +4,7 @@ import type { ModelPrefsPatch, ProviderOperationEvent } from '../../../shared/ha
 import { ChevronRight } from '../../lib/icons'
 import { ProviderIcon } from '../../lib/providerIcons'
 import { Segmented, SettingsAdvanced, SettingsRow } from '../settings/SettingsRow'
-import { AccountRow, ArgsRow, BinaryRow, EnvRow, ExecutableRow, HomeRow, PlanUsageRow, SetupRow, UpdateRow, type InstanceActions } from './CliSections'
+import { AccountRow, ArgsRow, BinaryRow, EnvRow, ExecutableRow, HomeRow, SetupRow, UpdateRow, type InstanceActions } from './CliSections'
 import { ProviderModelsSection, modelsSummary } from './ProviderModelsSection'
 import { EditorSection, RemoveButton, useAsyncAction } from './parts'
 import { DownloadedFilesRow, RegistrySourceRow, RemoveWithFilesButton, type RemoveOptions } from './RegistryAgents'
@@ -149,7 +149,6 @@ export function AgentEditor({
         <SetupRow snapshot={snapshot} status={status} operation={operation?.kind === 'update' ? undefined : operation} actions={actions} />
         {source && <RegistrySourceRow snapshot={snapshot} source={source} actions={actions} />}
         <AccountRow snapshot={snapshot} actions={actions} />
-        <PlanUsageRow snapshot={snapshot} />
       </EditorSection>
       <ModelsEditorSection snapshot={snapshot} onSave={onSaveModelPrefs} onRefresh={onRefreshModels} />
       <SettingsAdvanced>
@@ -269,6 +268,7 @@ export function EngineRow({ snapshot, onSetEngine }: { snapshot: InstanceSnapsho
 export function ApiEditor({
   snapshot,
   setup,
+  banner,
   move,
   removeHint,
   onRemove,
@@ -278,6 +278,8 @@ export function ApiEditor({
 }: {
   snapshot: InstanceSnapshot
   setup: ReactNode
+  /** The persistent Move banner of an entry whose old route is going away, above its Setup. */
+  banner?: ReactNode
   move?: ReactNode
   removeHint?: string
   onRemove: () => Promise<void>
@@ -288,6 +290,7 @@ export function ApiEditor({
   return (
     <>
       <EditorHeader snapshot={snapshot} removeLabel="Remove provider" removeHint={removeHint} onRemove={onRemove} />
+      {banner}
       <EditorSection title="Setup">
         {setup}
         {move}
