@@ -314,6 +314,9 @@ async function child(options: { provider: PiCatalogProvider; model: string; gran
     ready: () => {},
     turn: async () => ({ attemptToken: 'a1', sessionInstructions: '', tools: [], activeBuiltins: [], mcp: null, catalogRevision: 1 }),
     gate: async () => ({ allow: false, reason: 'test' }),
+    // Every model request is admitted (the request gate of PR 4; nothing is counted here).
+    request: async () => ({ ok: true }),
+    settle: () => {},
     quiesce: async () => ({ ok: false, reason: 'test' }),
     fatal: () => {},
     credential: (request) => {
