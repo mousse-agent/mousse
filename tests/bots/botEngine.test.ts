@@ -381,6 +381,18 @@ describe('activation and dispatch', () => {
     expect(bots.prepare(payload)).toMatchObject({ code: 'bot_activation_not_running' })
   })
 
+  it('when bots.db cannot be read, a known bot thread stays read-only and other threads are left alone', async () => {
+    const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'c1' })
+    const reader = new BotEngine(engineHost)
+    store.close()
+    // The name is in bots.db too; the id still names the bot in the refusal.
+    expect(reader.ownerOf(activation.threadId!)).toBe('site-editor')
+    expect(reader.roleOf(activation.threadId!)).toBe('activation')
+    expect(reader.ownerOf('person-thread')).toBeUndefined()
+    expect(reader.roleOf('person-thread')).toBeUndefined()
+    store = new BotStore({ profileHome: profile, clock: () => clock })
+  })
+
   it('keeps at most 20 waiting activations; the oldest is dropped', async () => {
     await bots.activate({ botId: 'site-editor', input: 'running', clientRequestId: 'run' })
     const waiting = []

@@ -107,7 +107,8 @@ export function compileBotThread(input: CompileInput): CompileResult {
   const budget: NonNullable<BindPolicy['budget']> = { maxWallMs: deadlineMs }
   for (const key of ['maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTokens', 'maxUsd'] as const)
     if (counts[key] !== undefined) budget[key] = counts[key]
-  const appTools = [...new Set(manifest.appTools)].sort()
+  // Granted skills come with the skill tools that list and load them.
+  const appTools = [...new Set([...manifest.appTools, ...(manifest.skills.length ? ['list_skills', 'load_skill'] : [])])].sort()
   const mcp = [...new Set(manifest.mcp.map((pair) => `${pair.serverId}::${pair.tool}` as const))].sort()
   return {
     ok: true,

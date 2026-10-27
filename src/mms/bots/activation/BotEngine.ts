@@ -103,7 +103,25 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** `changed` with `{botId?, activationId?}` after every change (`bots.changed`). */
   readonly events = new EventEmitter()
 
-  constructor(private readonly host: BotEngineHost) {}
+  /**
+   * The bot threads this process knows of, kept beside `bots.db`: when a read of it fails, a
+   * known bot thread stays read-only and every other thread is left alone.
+   */
+  private readonly known = new Map<string, { botId: string; role: 'home' | BotThreadRole }>()
+
+  constructor(private readonly host: BotEngineHost) {
+    try {
+      for (const row of host.store.all('SELECT thread_id, bot_id, role FROM bot_threads'))
+        this.known.set(row.thread_id as string, { botId: row.bot_id as string, role: row.role as 'home' | BotThreadRole })
+    } catch (error) {
+      console.warn('bot threads could not be read', { error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  private putThread(input: { threadId: string; botId: string; role: 'home' | BotThreadRole; key: string; activationId?: string }): void {
+    this.store.putThread(input)
+    this.known.set(input.threadId, { botId: input.botId, role: input.role })
+  }
 
   private get store(): BotStore {
     return this.host.store
@@ -378,11 +396,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const definition = this.host.definitions.revision(row.botId, row.revision)
       if (!definition) throw new BotEngineError('bot_not_published', 'The revision this activation was made for is gone.')
       const home = this.host.threads.ensureExecutionThread(`bot:${row.botId}`, definition.name.slice(0, 120))
-      this.store.putThread({ threadId: home.id, botId: row.botId, role: 'home', key: 'home' })
+      this.putThread({ threadId: home.id, botId: row.botId, role: 'home', key: 'home' })
       this.store.setHomeThread(row.botId, home.id)
       const title = `${definition.name}: ${summarise(row.trigger.input)}`.slice(0, 120)
       const thread = this.host.threads.ensureExecutionThread(`bot:${row.botId}:act:${row.id}`, title, undefined, { parentTaskId: home.id })
-      this.store.putThread({ threadId: thread.id, botId: row.botId, role: 'activation', key: definition.main.key, activationId: row.id })
+      this.putThread({ threadId: thread.id, botId: row.botId, role: 'activation', key: definition.main.key, activationId: row.id })
       const scratch = join(this.store.directory, 'scratch', row.id)
       mkdirSync(join(scratch, 'tmp'), { recursive: true, mode: 0o700 })
       const clientRequestId = `${row.id}:d1`
@@ -607,12 +625,23 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   // -- Threads ----------------------------------------------------------------------------------
 
   roleOf(threadId: string): BotThreadRole | undefined {
-    const role = this.store.threadRole(threadId)
+    let role: 'home' | BotThreadRole | undefined
+    try {
+      role = this.store.threadRole(threadId)
+    } catch {
+      role = this.known.get(threadId)?.role
+    }
     return role === 'activation' || role === 'context' ? role : undefined
   }
 
+  /** Never throws: a failed read answers from the threads this process knows of. */
   ownerOf(threadId: string): string | undefined {
-    const botId = this.store.threadBot(threadId)
+    let botId: string | undefined
+    try {
+      botId = this.store.threadBot(threadId)
+    } catch {
+      botId = this.known.get(threadId)?.botId
+    }
     if (!botId) return undefined
     try {
       const entry = this.host.definitions.get(botId)

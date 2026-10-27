@@ -66,7 +66,7 @@ async function handle(method: BotsPersonalMethod, p: Params, bots: BotEngine): P
 }
 
 /** Bind once before server seal. The engine comes from the daemon's admitted profile, never a client path. */
-export function registerPersonalBotMethods(domains: DomainHandlerRegistry, botsForProfile: (profileId: string) => BotEngine | Promise<BotEngine>): void {
+export function registerPersonalBotMethods(domains: DomainHandlerRegistry, botsForProfile: (profileId: string) => BotEngine | null | Promise<BotEngine | null>): void {
   for (const method of BOTS_PERSONAL_METHODS) {
     domains.register({
       method,
@@ -75,7 +75,10 @@ export function registerPersonalBotMethods(domains: DomainHandlerRegistry, botsF
       validate: (params) => validate(method, params),
       async handle(_context, params, binding) {
         try {
-          return await handle(method, params, await botsForProfile(binding!.profileId))
+          const bots = await botsForProfile(binding!.profileId)
+          // The profile's bots.db could not be opened: bots are unavailable, nothing else is affected.
+          if (!bots) throw new DomainRpcError('bots_unavailable', 'Bots are unavailable in this profile: their data could not be opened.')
+          return await handle(method, params, bots)
         } catch (error) {
           if (error instanceof BotEngineError) throw new DomainRpcError(error.code, error.message, error.details)
           if (error instanceof BotDefinitionError) throw new DomainRpcError(error.code, error.message)

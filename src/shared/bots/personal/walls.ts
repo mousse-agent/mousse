@@ -44,10 +44,12 @@ const SKILL_TOOLS: ReadonlySet<string> = new Set(['list_skills', 'load_skill'])
  */
 export function botAppToolRefusal(bot: Pick<BotAuthority, 'check' | 'skills'>, name: string, args: Record<string, unknown>): string | undefined {
   if (SKILL_TOOLS.has(name)) {
-    if (name === 'list_skills') return bot.skills.size ? undefined : wallMessage({ kind: 'tool', tool: name })
-    const skill = typeof args.skill === 'string' ? args.skill : ''
-    const decided = bot.check({ kind: 'skill', skill })
-    return decided.ok ? undefined : wallMessage(decided.wall)
+    // The skill tools come with granted skills. Which skill loads is held by the turn itself: a
+    // bot turn's skills are only its granted ones (by id), whether `load_skill` names one by id or name.
+    if (!bot.skills.size) return wallMessage({ kind: 'tool', tool: name })
+    const decided = bot.check({ kind: 'app', tool: name, args })
+    if (!decided.ok && decided.wall.kind !== 'tool') return wallMessage(decided.wall)
+    return undefined
   }
   const decided = bot.check({ kind: 'app', tool: name, args })
   return decided.ok ? undefined : wallMessage(decided.wall)

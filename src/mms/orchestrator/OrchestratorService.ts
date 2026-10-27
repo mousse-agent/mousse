@@ -516,7 +516,9 @@ function withBotInstructions(instructions: string | undefined, preamble: string)
 /** A bot turn's skills: only the granted ones are listed, and only those may be loaded. */
 function grantedSkills(skills: Pick<AppToolTurn, 'enabledSkills' | 'loadedSkills'>, granted: ReadonlySet<string>): Pick<AppToolTurn, 'enabledSkills' | 'loadedSkills'> {
   const enabledSkills = skills.enabledSkills.filter((skill) => granted.has(skill.id))
-  const names = new Set(enabledSkills.map((skill) => skill.name))
+  // Loaded skills carry only a name: one that an ungranted skill shares is dropped, never guessed.
+  const ungranted = new Set(skills.enabledSkills.filter((skill) => !granted.has(skill.id)).map((skill) => skill.name))
+  const names = new Set(enabledSkills.map((skill) => skill.name).filter((name) => !ungranted.has(name)))
   return { enabledSkills, loadedSkills: skills.loadedSkills.filter((loaded) => names.has(loaded.name)) }
 }
 
@@ -5899,6 +5901,14 @@ export class OrchestratorService extends EventEmitter {
     const botRefusal = opts?.bot ? undefined : this.botThreadRefusal(session.threadId)
     if (botRefusal) {
       if (opts?.runId) this.refuseOnBotThread(opts.runId, session.threadId)
+      // Nothing of the refused turn is left holding the thread: its claim and the admission it was handed.
+      if (opts?.queueItemId) this.releaseSessionClaim(session, opts.queueItemId, opts.claimOwnerToken)
+      if (opts?.admissionHeld) {
+        session.turnAdmitted = false
+        session.admissionRunId = undefined
+        session.abortRequested = false
+        this.effectWorker?.notify()
+      }
       throw botRefusal
     }
     // Admission is synchronous, before any await, so a concurrent send always observes it.

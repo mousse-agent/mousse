@@ -187,6 +187,19 @@ describe('ordinary sends to bot threads', () => {
     expect(engine.getRun(sent.runId)).toMatchObject({ status: 'cancelled', outcome: { error: 'bot_thread_read_only' } })
   })
 
+  it('a refused turn that was handed the thread’s admission and a queue claim releases both', async () => {
+    const real = (OrchestratorService.prototype as unknown as { runTurnOnSession: (...args: unknown[]) => Promise<unknown> }).runTurnOnSession
+    const session = (orch as unknown as { getOrCreateSession(threadId: string): { turnAdmitted: boolean; admissionRunId?: string } }).getOrCreateSession('bot-thread')
+    session.turnAdmitted = true
+    session.admissionRunId = 'run-x'
+    const release = vi.fn()
+    ;(orch as unknown as { releaseSessionClaim: unknown }).releaseSessionClaim = release
+    await expect(real.call(orch, session, { content: 'queued', mode: 'agent' }, false, true, { admissionHeld: true, queueItemId: 'q-1', claimOwnerToken: 'tok' })).rejects.toMatchObject(readOnly)
+    expect(session.turnAdmitted).toBe(false)
+    expect(session.admissionRunId).toBeUndefined()
+    expect(release).toHaveBeenCalledWith(session, 'q-1', 'tok')
+  })
+
   it('wake and integration effects on a bot thread are cancelled, never run as plain turns', async () => {
     for (const kind of ['wake', 'integration'] as const) {
       const sent = await engine.dispatch({ kind: 'send', threadId: 'bot-thread', clientRequestId: `${kind}-1`, source: kind === 'wake' ? 'wake' : 'integration' })

@@ -40,9 +40,9 @@ import { EffectWorker, type EffectWorkerFibres } from './run/EffectWorker'
 import { TERMINAL_RUN_STATUSES, type RunRecord, type ThreadEvent } from './run/types'
 import { Reconciler } from './run/Reconciler'
 import { RunEngine } from './run/RunEngine'
-import { BotEngine } from './bots/activation/BotEngine'
-import { BotDefinitionStore } from './bots/definitions/BotDefinitionStore'
-import { BotStore } from './bots/store/BotStore'
+import type { BotEngine } from './bots/activation/BotEngine'
+import { openPersonalBots } from './bots/activation/open'
+import type { BotStore } from './bots/store/BotStore'
 import { RunStore } from './run/RunStore'
 import { ScheduledJobService } from './scheduled/ScheduledJobService'
 import { ScheduledJobStore } from './scheduled/ScheduledJobStore'
@@ -187,8 +187,9 @@ export class MmsProfileServices {
   /** Profile Run Engine (`<profileHome>/run/run.db`); Phase 1 dual-writes beside the orchestrator. */
   readonly runEngine: RunEngine
   /** Personal bots (PR 6 §4). */
-  readonly personalBots: BotEngine
-  private readonly botStore: BotStore
+  /** Null when `bots.db` could not be opened: bots are unavailable, every other thread works. */
+  readonly personalBots: BotEngine | null
+  private readonly botStore: BotStore | null
   /** Phase 5 (SPEC §15.1): durable bearer credentials of the Mousse MCP server. */
   readonly mcpCredentials: McpCredentials
   /** Phase 5: Mousse's tools for vendor runtimes over MCP Streamable HTTP on 127.0.0.1. */
@@ -460,23 +461,23 @@ export class MmsProfileServices {
     this.harnessImpl.startModelRefreshSchedule()
     this.orchestrator.setHarness(this.harnessImpl)
     // Personal bots (PR 6): their own database under `<profileHome>/bots/`, which older builds never open.
-    this.botStore = new BotStore({ profileHome: homeDir })
-    const botStore = this.botStore
+    // A `bots.db` that cannot be opened (corrupt, newer schema) fails closed for bots only: the
+    // profile opens, its other threads work, and bot methods report bots unavailable.
     const harness = this.harnessImpl
-    this.personalBots = new BotEngine({
+    const opened = openPersonalBots({
       profileHome: homeDir,
-      store: botStore,
-      definitions: new BotDefinitionStore(botStore.directory, (botId) => botStore.registry(botId)?.revision ?? null),
       threads: this.threads,
       runs: () => this.runEngine,
       harness,
       notifyEffects: () => this.orchestrator.notifyEffects(),
       stopThread: (threadId) => this.orchestrator.stopThread(threadId, 'user', { clientRequestId: `bot-stop:${threadId}:${Date.now()}` })
     })
-    this.orchestrator.setBotThreads(this.personalBots)
-    // Every bot run that ends is settled, whatever path its turn took (no activation stays running).
+    this.botStore = opened?.store ?? null
+    this.personalBots = opened?.engine ?? null
     const personalBots = this.personalBots
-    this.runEngine.on('event', (event: ThreadEvent) => {
+    if (personalBots) this.orchestrator.setBotThreads(personalBots)
+    // Every bot run that ends is settled, whatever path its turn took (no activation stays running).
+    if (personalBots) this.runEngine.on('event', (event: ThreadEvent) => {
       if (event.type !== 'run.status') return
       const run = event.payload as RunRecord
       if (run.source !== 'bot' || !TERMINAL_RUN_STATUSES.has(run.status)) return
@@ -484,7 +485,7 @@ export class MmsProfileServices {
         try { personalBots.settleRun(run.runId) } catch (error) { console.warn('bot dispatch could not be settled', { runId: run.runId, error: error instanceof Error ? error.message : String(error) }) }
       })
     })
-    this.orchestrator.setBotDispatcher(this.personalBots)
+    this.orchestrator.setBotDispatcher(personalBots)
     this.orchestrator.setWorkflowChatExecutor(this.platform.workflowChat)
     this.orchestrator.setFeatureFlags(this.config.get().features)
     this.threadRuntimes = new ThreadRuntimeManager()
@@ -1233,8 +1234,8 @@ export class MmsProfileServices {
       this.orchestrator.setRunEngine(null)
       this.orchestrator.setBotDispatcher(null)
       this.orchestrator.setBotThreads(null)
-      this.personalBots.close()
-      this.botStore.close()
+      this.personalBots?.close()
+      this.botStore?.close()
       this.runEngine.store.db.close()
     } catch (error) {
       console.warn('run engine database close failed', error)

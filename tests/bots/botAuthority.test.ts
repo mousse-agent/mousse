@@ -85,7 +85,8 @@ describe('compileBotThread', () => {
     const compiled = compile()
     if (!compiled.ok) throw new Error(compiled.error.message)
     expect(compiled.policy).toEqual({
-      tools: { allow: ['edit', 'find', 'grep', 'ls', 'read', 'web_search', 'write'] },
+      // Granted skills bring the skill tools.
+      tools: { allow: ['edit', 'find', 'grep', 'list_skills', 'load_skill', 'ls', 'read', 'web_search', 'write'] },
       approvals: 'grants',
       approve: 'host',
       budget: { maxWallMs: 600_000, maxTurns: 40 },
@@ -120,8 +121,8 @@ describe('compileBotThread', () => {
     const revision = manifest({ tools: ['read'], appTools: [], workspace: { roots: [root], access: 'read' }, budget: { maxActiveMs: 5 * 60_000, maxTurns: 10 } })
     const compiled = compile({ grant, revision })
     if (!compiled.ok) throw new Error(compiled.error.message)
-    expect(compiled.policy.tools).toEqual({ allow: ['read'] })
-    expect(compiled.permissions).toMatchObject({ tools: ['read'], appTools: [], workspace: { roots: [root], access: 'read' } })
+    expect(compiled.policy.tools).toEqual({ allow: ['list_skills', 'load_skill', 'read'] })
+    expect(compiled.permissions).toMatchObject({ tools: ['read'], appTools: ['list_skills', 'load_skill'], workspace: { roots: [root], access: 'read' } })
     // A revision can never name more than the grant: what the grant lacks is dropped.
     const wider = compile({ grant: manifest({ tools: ['read'], appTools: [] }), revision: manifest({ tools: ['read', 'edit'] }) })
     if (!wider.ok) throw new Error(wider.error.message)
@@ -249,7 +250,9 @@ describe('the check points', () => {
     expect(botAppToolRefusal(bot, 'web_search', {})).toBeUndefined()
     expect(botAppToolRefusal(bot, 'delegate_task', {})).toBe('This bot is not allowed to use delegate_task.')
     expect(botAppToolRefusal(bot, 'load_skill', { skill: 'release-notes' })).toBeUndefined()
-    expect(botAppToolRefusal(bot, 'load_skill', { skill: 'deploy' })).toBe('This bot is not allowed to use the skill deploy.')
+    // Which skill loads is held by the turn's own skills (granted ids only), by id or by name.
+    expect(botAppToolRefusal(bot, 'load_skill', { skill: 'Release Notes' })).toBeUndefined()
+    expect(botAppToolRefusal(authorityFor(manifest({ skills: [] })), 'load_skill', { skill: 'release-notes' })).toBe('This bot is not allowed to use load_skill.')
     expect(botAppToolRefusal(authorityFor(manifest({ skills: [] })), 'list_skills', {})).toBe('This bot is not allowed to use list_skills.')
   })
 })
