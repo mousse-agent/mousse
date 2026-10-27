@@ -47,6 +47,8 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
     mcpTurnBinding: 'drained_turn',
     userMcp: 'native',
     mirrorsVendorFile: true,
+    // The Google sign-in is the profile's session Mousse keeps, with the installed or a manual agent.
+    ownsSignIn: true,
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),
     caps: () => ANTIGRAVITY_CAPS,
     updateCommand: () => undefined,

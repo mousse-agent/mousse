@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { accessSync, constants, mkdirSync, readFileSync } from 'node:fs'
+import { accessSync, constants, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import type { ModelInfo, Options, PermissionMode, Query, SDKResultMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
@@ -401,6 +401,8 @@ export class ClaudeSubscriptionProviderService {
   private settings: Settings = {}
   /** Set when settings.json exists but cannot be read; blocks migration and every write. */
   private settingsError?: string
+  /** Another service of the instance writes its settings now (`freezeSettings`). */
+  private settingsFrozen = false
   private stopped = false
   private readonly queries = new Map<string, Query>()
   /** Live queries by thread: the Claude processes that outlive a turn. Null disables them (one query per turn). */
@@ -466,7 +468,7 @@ export class ClaudeSubscriptionProviderService {
   }
 
   private save(): void {
-    if (this.settingsError) return
+    if (this.settingsError || this.settingsFrozen) return
     mkdirSync(dirname(this.settingsPath), { recursive: true, mode: 0o700 })
     atomicWriteJsonSync(this.settingsPath, this.settings)
     this.policyStored = true
@@ -503,8 +505,9 @@ export class ClaudeSubscriptionProviderService {
   vendorMirror(fields: readonly MirrorField[]): VendorMirror {
     return settingsMirror(fields, {
       settings: () => this.settings as Record<string, unknown>,
-      settingsError: () => this.settingsError,
+      settingsError: () => this.settingsError ?? (this.settingsFrozen ? 'Another Claude service writes these settings now.' : undefined),
       save: () => this.save(),
+      exists: () => existsSync(this.settingsPath),
       signedOutKey: 'cliDisconnected'
     })
   }
@@ -1833,6 +1836,13 @@ export class ClaudeSubscriptionProviderService {
     this.settings.sessions = {}
     this.save()
     this.abortInFlight()
+  }
+  /**
+   * Another service of this instance writes its settings from now on (its home changed): this one
+   * finishes its turns but never writes the file again, so one file never has two writers.
+   */
+  freezeSettings(): void {
+    this.settingsFrozen = true
   }
   stop(): void {
     this.stopped = true

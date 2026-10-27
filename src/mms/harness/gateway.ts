@@ -780,7 +780,9 @@ export class Harness implements HarnessGateway {
             .finally(() => void this.probe(record.instanceId, true))
         return record.runtime.signIn(session, cwd)
           .then(async (result) => {
-            if (result.success && this.isSignedOut(record)) await this.reconnect(record)
+            // Through the record serving the instance now (the sign-in may have changed its config).
+            const current = this.recordOrUndefined(record.instanceId) ?? record
+            if (result.success && this.isSignedOut(current)) await this.reconnect(current)
             return result
           })
           .finally(() => void this.probe(record.instanceId, true))
@@ -796,9 +798,10 @@ export class Harness implements HarnessGateway {
         // Processes started with the old credential stop holding it (Pi's agent: its auth.json too).
         const record = this.records.get(instanceId)
         await record?.runtime.credentialsChanged?.().catch((error) => console.warn('[harness] could not retire old credentials', { instanceId, error: errorText(error) }))
-        // A key saved for an instance signed out in Mousse signs it in again.
+        // A key saved for an instance signed out in Mousse signs it in again; a call that saved
+        // nothing (a removed key, a failed check) leaves it signed out.
         const flagged = this.recordOrUndefined(instanceId)
-        if (flagged && this.isSignedOut(flagged)) await this.reconnect(flagged).catch((error) => console.warn('[harness] could not clear a sign-out', { instanceId, error: errorText(error) }))
+        if (flagged && this.isSignedOut(flagged) && flagged.runtime.configured()) await this.reconnect(flagged).catch((error) => console.warn('[harness] could not clear a sign-out', { instanceId, error: errorText(error) }))
         // A check already running read the old credentials: wait for it, then check again.
         await this.probes.get(instanceId)?.probing
         await this.probe(instanceId, true)
@@ -1902,10 +1905,11 @@ export class Harness implements HarnessGateway {
 
   /**
    * Whether Mousse owns the instance's sign-in: a private home, a Mousse-managed agent, or a pi
-   * provider key Mousse stores. The built-in CLIs use the user's own terminal login.
+   * provider key Mousse stores, or a driver whose sign-in is always Mousse's (Antigravity's Google
+   * session, whichever executable runs). The built-in CLIs use the user's own terminal login.
    */
   private ownsSignIn(record: InstanceRecord): boolean {
-    if (record.entry.driver === 'pi') return true
+    if (record.entry.driver === 'pi' || record.driver.ownsSignIn) return true
     if (record.env.home) return true
     return Boolean(record.runtime.managed?.()) && !record.config.binaryPath
   }
@@ -1989,23 +1993,32 @@ export class Harness implements HarnessGateway {
         }, driver)
       : this.applyConfigPatch({ home: driver.privateHome && rule !== 'forbidden' ? 'private' : 'default' }, patch, driver)
     const entry: ProviderInstanceConfig = { driver: driver.kind, enabled: true, config }
-    // An instance with a vendor mirror starts signed in, and records the vendor tuple it found in
-    // the same write (the marker), so a later start never takes the vendor file for its first copy.
+    // An instance with a vendor mirror starts signed in, takes the launch settings its vendor file
+    // still holds (a re-added built-in keeps them, as the seed does) unless the add set them, and
+    // records the vendor tuple it found in the same write (the marker). When the file cannot be read
+    // now, no marker is written, and the first start that reads it copies the same values.
     const record = driver.mirrorsVendorFile ? this.build(instanceId, entry) : undefined
     const mirror = record?.runtime.vendorMirror
     const vendor = mirror?.read()
     if (mirror) {
+      if (vendor && vendor !== 'unreadable') {
+        const copied = tupleConfig(vendor, mirror.fields)
+        for (const field of unsetFields(config, mirror.fields)) if (field !== 'signedOut') config[field] = copied[field]
+        config[MIRROR_MARKER_KEY] = mirrorHash(vendor)
+      }
       config.signedOutInMousse = false
-      if (vendor && vendor !== 'unreadable') config[MIRROR_MARKER_KEY] = mirrorHash(vendor)
     }
     try {
       this.instanceMap.setEntry(instanceId, entry)
     } catch (error) {
-      if (record) this.records.delete(instanceId)
+      if (record) {
+        this.records.delete(instanceId)
+        void Promise.resolve(record.runtime.stop()).catch(() => {})
+      }
       throw error
     }
     if (record) this.noteStored(record, config)
-    // The vendor file still holds other values than the new entry's (a re-added built-in): mirror them.
+    // The vendor file holds other values than the new entry's (its sign-out, or launch settings the add set): mirror them.
     if (record && mirror && vendor && vendor !== 'unreadable' && mirrorHash(instanceTuple(config, mirror.fields)) !== mirrorHash(vendor)) {
       const failure = this.mirrorWrite(record, config)
       if (failure) console.warn('[harness] could not mirror a new instance to its settings file', { instanceId, error: errorText(failure) })
@@ -2106,6 +2119,11 @@ export class Harness implements HarnessGateway {
     // The three-step write: the instance first, then its vendor mirror, then the marker. A write
     // that stops between them is finished at the next start (`reconcileRow`).
     const config = this.applyConfigPatch(record.entry.config ?? {}, patch, record.driver)
+    // A change that leaves the mirrored values as they were, on an instance in step with its vendor
+    // file (a new name, a sign-in method), has nothing to mirror, whatever state that file is in.
+    const fields = record.runtime.vendorMirror?.fields ?? []
+    const mirrored = mirrorHash(instanceTuple(config, fields))
+    const unchanged = mirrored === mirrorHash(instanceTuple(record.entry.config, fields)) && storedMarker(config) === mirrored
     this.storeConfig(record, config)
     this.settingsNotices.delete(instanceId)
     // A new name changes nothing a turn runs with: the runtime and its sessions stay.
@@ -2114,7 +2132,7 @@ export class Harness implements HarnessGateway {
       this.counters.bumpConfig(instanceId)
       if (Object.keys(launch).length) record.runtime.launchChanged?.()
     }
-    const failure = this.mirrorWrite(record, config)
+    const failure = unchanged ? undefined : this.mirrorWrite(record, config)
     if (runChanged) void this.probe(instanceId, true)
     this.changed(instanceId)
     if (failure)
@@ -2241,11 +2259,31 @@ export class Harness implements HarnessGateway {
     return undefined
   }
 
+  /**
+   * Steps 2 and 3 for a sign-out or reconnect. While a conflict with an older version's settings
+   * is open, only the flag goes to the vendor file and the marker stays: the older values survive
+   * for "Use the older settings", and the next start still reports the conflict.
+   */
+  private mirrorSignOut(record: InstanceRecord, config: Record<string, unknown>): unknown {
+    const mirror = record.runtime.vendorMirror
+    if (!mirror || this.settingsNotices.get(record.instanceId)?.kind !== 'older_conflict') return this.mirrorWrite(record, config)
+    if (!mirror.fields.includes('signedOut')) return undefined
+    const vendor = mirror.read()
+    if (vendor === 'unreadable') return new Error("The provider's own settings file cannot be read.")
+    const { signedOut: _previous, ...launch } = vendor
+    try {
+      mirror.write({ ...launch, ...(config.signedOutInMousse === true ? { signedOut: true as const } : {}) })
+    } catch (error) {
+      return error
+    }
+    return undefined
+  }
+
   /** Sets or clears the instance's sign-out flag with the three-step write. */
   private setSignedOut(record: InstanceRecord, signedOut: boolean): unknown {
     const config = { ...this.storedConfig(record), signedOutInMousse: signedOut }
     this.storeConfig(record, config)
-    return this.mirrorWrite(record, config)
+    return this.mirrorSignOut(record, config)
   }
 
   /**
@@ -2293,6 +2331,9 @@ export class Harness implements HarnessGateway {
     const marker = storedMarker(stored)
     let instance = instanceTuple(stored, fields)
     let row = reconcileRow(mirrorHash(instance), vendorHash, marker)
+    // A vendor file deleted since the last write (the settings error says "fix or remove the file")
+    // is no older version's change: the instance's values are written back, with no notice.
+    if (marker !== undefined && mirror.exists?.() === false) row = mirrorHash(instance) === vendorHash ? 'in_sync' : 'finish_write'
     if (row === 'first_copy') {
       // Only what the instance never set comes over; the vendor file is not changed by the copy.
       const copied = tupleConfig(vendor, fields)
@@ -2420,7 +2461,10 @@ export class Harness implements HarnessGateway {
     } catch (error) {
       failure = error
     }
-    const mirrorFailure = this.mirrorWrite(record, config)
+    // Read again: a change saved while the runtime signed out (a configure, an install dropping a
+    // manual path) is kept, and goes to the runtime that serves the instance now.
+    const current = this.recordOrUndefined(instanceId)
+    const mirrorFailure = current ? this.mirrorSignOut(current, { ...this.storedConfig(current), signedOutInMousse: true }) : undefined
     if (mirrorFailure) console.warn('[harness] could not mirror a sign-out to the settings file', { instanceId, error: errorText(mirrorFailure) })
     // 3. Nothing bound before the sign-out resumes, and the card reads signed out.
     this.counters.bumpAccount(instanceId)
@@ -2689,8 +2733,11 @@ export class Harness implements HarnessGateway {
           if (session.abort.signal.aborted) this.emit({ type: 'operation', data: { ...started, phase: 'cancelled' } })
           else if (result.success) {
             // A sign-in Mousse owns clears a sign-out only once it succeeded.
-            if (this.isSignedOut(record)) {
-              const failure = this.setSignedOut(record, false)
+            // Through the record serving the instance now: a config change during the sign-in (a
+            // new home, an executable path) built another runtime, whose mirror is the live one.
+            const current = this.recordOrUndefined(instanceId) ?? record
+            if (this.isSignedOut(current)) {
+              const failure = this.setSignedOut(current, false)
               if (failure) console.warn('[harness] could not mirror a sign-in to the settings file', { instanceId, error: errorText(failure) })
             }
             // A completed sign-in may be another account: sessions made before it are not resumed.

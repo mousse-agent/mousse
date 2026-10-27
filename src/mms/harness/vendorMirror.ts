@@ -37,6 +37,11 @@ export interface VendorMirror {
    * reached the file.
    */
   write(tuple: MirrorTuple): void
+  /**
+   * Whether the vendor file is on disk. A missing file is never an older version's change (an
+   * older build never deletes it): with a marker, the instance's values are written back.
+   */
+  exists?(): boolean
 }
 
 /** Every field: the built-in Claude Code and Codex instances. */
@@ -171,6 +176,8 @@ export interface MirrorSource {
   save(): void
   /** The vendor file's key of the sign-out flag, for services that mirror it. */
   signedOutKey?: string
+  /** Whether the settings file is on disk. */
+  exists?: () => boolean
 }
 
 /** The vendor settings key each mirrored field is stored under. */
@@ -187,6 +194,7 @@ function vendorKey(field: MirrorField, source: MirrorSource): string {
 export function settingsMirror(fields: readonly MirrorField[], source: MirrorSource): VendorMirror {
   return {
     fields,
+    ...(source.exists ? { exists: source.exists } : {}),
     read() {
       if (source.settingsError()) return 'unreadable'
       const settings = source.settings()

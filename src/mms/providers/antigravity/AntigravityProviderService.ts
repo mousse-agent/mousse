@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { methods } from '@agentclientprotocol/sdk'
 import type { CliProviderConfig, CliProviderConfigPatch, ConfiguredProvider, ProviderLoginOption, ProviderLoginResult } from '../../../shared/providerAuth'
@@ -150,7 +150,8 @@ export class AntigravityProviderService {
     return settingsMirror(fields, {
       settings: () => this.settings as Record<string, unknown>,
       settingsError: () => this.settingsError,
-      save: () => this.save()
+      save: () => this.save(),
+      exists: () => existsSync(this.settingsPath)
     })
   }
 

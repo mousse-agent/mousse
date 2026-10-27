@@ -1,6 +1,6 @@
 import type { ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { accessSync, constants, mkdirSync, readFileSync } from 'node:fs'
+import { accessSync, constants, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, isAbsolute, join, resolve } from 'node:path'
 import { AppError, redactSecrets } from '../../../shared/errors'
@@ -1043,6 +1043,7 @@ export class CodexProviderService {
       settings: () => this.settings as Record<string, unknown>,
       settingsError: () => this.settingsError,
       save: () => this.save(),
+      exists: () => existsSync(this.settingsPath),
       signedOutKey: 'disconnected'
     })
   }

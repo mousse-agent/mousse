@@ -349,6 +349,11 @@ export interface HarnessDriver {
    */
   readonly mirrorsVendorFile?: boolean
   /**
+   * Mousse holds the sign-in of every instance (its own sign-in flow and saved session), whatever
+   * executable runs: a sign-out revokes it, and only a sign-in in Mousse restores it.
+   */
+  readonly ownsSignIn?: boolean
+  /**
    * Lenient decoder of an instance's stored `config`: unknown or malformed fields fall back. With
    * `instanceId`, fields that default per instance are resolved (the `pi` driver's engine).
    */

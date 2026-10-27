@@ -4,16 +4,23 @@
  * profile on disk started, stopped, edited the way an older build or a crash leaves it, and started
  * again. No CLI or agent runs: sign-in checks are fakes and PATH is empty.
  */
-import { readFileSync, readdirSync } from 'node:fs'
+import { readFileSync, readdirSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { claudeCodeDriver } from '../../src/mms/harness/drivers/claudeCode'
+import { createHarnessGateway } from '../../src/mms/harness/gateway'
+import { instanceStateDir } from '../../src/mms/harness/instances'
 import { mirrorHash, reconcileRow, settingsMirror, type MirrorTuple } from '../../src/mms/harness/vendorMirror'
+import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
+import { ClaudeSubscriptionProviderService } from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
+import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import { LoginSession } from '../../src/mms/providers/LoginSession'
 import {
   executable,
   readVendor,
   readVendorText,
   removeHome,
+  settingsPath,
   startProfile,
   storedConfig,
   tempHome,
@@ -24,6 +31,7 @@ import {
 
 const homes: string[] = []
 const running: StartedProfile[] = []
+const cleanups: Array<() => void> = []
 
 beforeEach(() => {
   // No CLI on PATH or in a home: nothing the user installed is ever found or started.
@@ -37,6 +45,8 @@ beforeEach(() => {
 
 afterEach(() => {
   for (const profile of running.splice(0)) profile.stop()
+  for (const cleanup of cleanups.splice(0)) cleanup()
+  vi.restoreAllMocks()
   vi.unstubAllEnvs()
   for (const home of homes.splice(0)) removeHome(home)
 })
@@ -557,5 +567,203 @@ describe('source guard: only the mirror assigns mirrored keys in a vendor servic
     '// this.settings.binaryPath = documented only'
   ])('allows %s', (allowed) => {
     expect(violations(`class S {\n  run() {\n    ${allowed}\n  }\n}`)).toEqual([])
+  })
+})
+
+describe('review round 1', () => {
+  function conflicted(): { dir: string; store: ProfileStore; profile: StartedProfile } {
+    const dir = home()
+    writeVendor(dir, 'claude', { loginPolicy: 'cli', args: ['--a'] })
+    const store = legacyStore()
+    start(dir, store)
+    stopAll()
+    setStored(store, 'claude', { args: ['--mine'] })
+    writeVendor(dir, 'claude', { ...readVendor(dir, 'claude'), args: ['--older'] })
+    return { dir, store, profile: start(dir, store) }
+  }
+
+  it('a sign-out during a conflict mirrors only the flag: the older values stay for "Use the older settings"', async () => {
+    const { dir, store, profile } = conflicted()
+    const marker = storedConfig(store, 'claude').vendorMirror
+    await profile.harness.instances.signOut('claude')
+    expect(readVendor(dir, 'claude')).toMatchObject({ args: ['--older'], cliDisconnected: true })
+    expect(storedConfig(store, 'claude')).toMatchObject({ args: ['--mine'], signedOutInMousse: true, vendorMirror: marker })
+    expect((await snapshotOf(profile, 'claude')).settingsNotice).toMatchObject({ kind: 'older_conflict' })
+    await profile.harness.instances.configure('claude', { useOlderSettings: true })
+    expect(profile.harness.launchFor('claude')).toEqual({ args: ['--older'] })
+    expect(profile.harness.signedOutInMousse('claude')).toBe(true)
+  })
+
+  it('a reconnect during a conflict keeps the conflict for the next start', async () => {
+    const { dir, store, profile } = conflicted()
+    await profile.harness.instances.signOut('claude')
+    await profile.harness.instances.signIn('claude')
+    expect(readVendor(dir, 'claude').args).toEqual(['--older'])
+    expect(readVendor(dir, 'claude').cliDisconnected).toBeUndefined()
+    const next = restart(dir, store)
+    expect((await snapshotOf(next, 'claude')).settingsNotice).toMatchObject({ kind: 'older_conflict' })
+    expect(next.harness.launchFor('claude')).toEqual({ args: ['--mine'] })
+    expect(next.harness.signedOutInMousse('claude')).toBe(false)
+  })
+
+  it('keeps a configuration saved while the sign-out awaits the runtime', async () => {
+    const dir = home()
+    writeVendor(dir, 'codex', {})
+    const store = legacyStore()
+    const profile = start(dir, store)
+    let release!: () => void
+    vi.spyOn(profile.codex, 'logout').mockImplementation(() => new Promise<void>((resolve) => { release = resolve }))
+    const signOut = profile.harness.instances.signOut('codex')
+    await profile.harness.instances.configure('codex', { env: { NEW_VALUE: 'keep' } })
+    release()
+    await signOut
+    expect(storedConfig(store, 'codex')).toMatchObject({ env: { NEW_VALUE: 'keep' }, signedOutInMousse: true })
+    expect(readVendor(dir, 'codex')).toMatchObject({ env: { NEW_VALUE: 'keep' }, disconnected: true })
+    const next = restart(dir, store)
+    expect((await snapshotOf(next, 'codex')).settingsNotice).toBeUndefined()
+  })
+
+  it('a re-added built-in keeps the launch settings its vendor file holds, readable at the add or not', async () => {
+    const dir = home()
+    const bin = executable(join(dir, 'bin'), 'claude')
+    const vendor = { loginPolicy: 'cli', binaryPath: bin, args: ['--a'], env: { A: '1' }, cliDisconnected: true }
+    writeVendor(dir, 'claude', vendor)
+    const store = legacyStore()
+    const profile = start(dir, store)
+    await profile.harness.instances.remove('claude')
+    await profile.harness.instances.add({ driver: 'claude' })
+    expect(profile.harness.launchFor('claude')).toEqual({ binaryPath: bin, args: ['--a'], env: { A: '1' } })
+    expect(profile.harness.signedOutInMousse('claude')).toBe(false)
+    // Only the sign-out goes to the vendor file: the add starts signed in.
+    expect(readVendor(dir, 'claude')).toMatchObject({ binaryPath: bin, args: ['--a'], env: { A: '1' } })
+    expect(readVendor(dir, 'claude').cliDisconnected).toBeUndefined()
+
+    // The same add while the file cannot be read ends the same once it is fixed.
+    await profile.harness.instances.remove('claude')
+    writeVendor(dir, 'claude', '{broken')
+    stopAll()
+    const broken = start(dir, store)
+    await broken.harness.instances.add({ driver: 'claude' })
+    writeVendor(dir, 'claude', vendor)
+    const fixed = restart(dir, store)
+    expect(fixed.harness.launchFor('claude')).toEqual({ binaryPath: bin, args: ['--a'], env: { A: '1' } })
+    expect(fixed.harness.signedOutInMousse('claude')).toBe(false)
+    expect(readVendor(dir, 'claude').cliDisconnected).toBeUndefined()
+    expect((await snapshotOf(fixed, 'claude')).settingsNotice).toBeUndefined()
+  })
+
+  it('Antigravity with a manual agent: Sign in after a sign-out runs its real sign-in', async () => {
+    const dir = home()
+    writeVendor(dir, 'antigravity', { signedIn: true })
+    const store = legacyStore()
+    setStored(store, 'antigravity', { binaryPath: join(dir, 'manual', 'agy_acp_server') })
+    const profile = start(dir, store)
+    const login = vi.spyOn(profile.antigravity, 'login').mockImplementation(async (session) => ({ success: true, sessionId: session.sessionId }))
+    await profile.harness.instances.signOut('antigravity')
+    expect(profile.antigravity.signedIn()).toBe(false)
+    expect((await snapshotOf(profile, 'antigravity')).auth.message).toBe('Signed out in Mousse.')
+    await profile.harness.instances.signIn('antigravity')
+    await vi.waitFor(() => expect(profile.harness.signedOutInMousse('antigravity')).toBe(false))
+    expect(login).toHaveBeenCalledTimes(1)
+  })
+
+  it('a deleted vendor file is not an older version\'s change: the instance keeps its values and writes them back', async () => {
+    const dir = home()
+    writeVendor(dir, 'claude', { loginPolicy: 'cli', args: ['--a'] })
+    const store = legacyStore()
+    const profile = start(dir, store)
+    await profile.harness.instances.signOut('claude')
+    stopAll()
+    rmSync(settingsPath(dir, 'claude'))
+    const next = start(dir, store)
+    expect(next.harness.launchFor('claude')).toEqual({ args: ['--a'] })
+    expect(next.harness.signedOutInMousse('claude')).toBe(true)
+    expect(readVendor(dir, 'claude')).toMatchObject({ args: ['--a'], cliDisconnected: true })
+    expect((await snapshotOf(next, 'claude')).settingsNotice).toBeUndefined()
+  })
+
+  it('a new name while the vendor file is unreadable saves without a mirror error', async () => {
+    const dir = home()
+    writeVendor(dir, 'claude', { loginPolicy: 'cli', args: ['--a'] })
+    const store = legacyStore()
+    start(dir, store)
+    stopAll()
+    writeVendor(dir, 'claude', '{broken')
+    const profile = start(dir, store)
+    await expect(profile.harness.instances.configure('claude', { displayName: 'Mine' })).resolves.toMatchObject({ displayName: 'Mine' })
+    expect(readVendorText(dir, 'claude')).toBe('{broken')
+    // A change to a mirrored value still says it was not mirrored.
+    await expect(profile.harness.instances.configure('claude', { args: ['--b'] })).rejects.toThrow(/own settings file was not updated/)
+  })
+})
+
+describe('an added Claude instance: one service per settings file', () => {
+  function addedProfile() {
+    const dir = home()
+    const questions = new UserQuestionService()
+    const services: ClaudeSubscriptionProviderService[] = []
+    let stored: Record<string, { driver: string; enabled: boolean; config?: Record<string, unknown> }> = {
+      'claude:work': { driver: 'claude', enabled: true, config: { home: 'private', signedOutInMousse: false, vendorMirror: mirrorHash({}) } }
+    }
+    const map = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances as typeof stored } } })
+    const harness = createHarnessGateway({
+      profileHome: dir,
+      installationHome: dir,
+      instanceMap: map,
+      questions,
+      latest: { get: () => undefined, refresh: async () => false } as never,
+      shellPath: async () => ({ entries: [], source: 'failed' }),
+      drivers: [claudeCodeDriver({
+        createService: (_context, options) => {
+          const service = new ClaudeSubscriptionProviderService(dir, questions, {
+            ...options,
+            live: false,
+            runAuth: async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }),
+            query: () => { throw new Error('no query in this test') }
+          })
+          services.push(service)
+          return service
+        }
+      })]
+    })
+    cleanups.push(() => {
+      harness.stop()
+      for (const service of services) service.stop()
+      questions.shutdown()
+    })
+    return { dir, harness, services, stored: () => stored }
+  }
+
+  it('an executable path entered at sign-in saves the path and the sign-in goes on', async () => {
+    const { dir, harness, services, stored } = addedProfile()
+    const bin = executable(dir, 'claude-test')
+    const session = new LoginSession('added-login')
+    session.on('event', (event: { type: string }) => {
+      if (event.type === 'prompt') session.respond({ sessionId: session.sessionId, kind: 'prompt', value: bin })
+    })
+    const result = await services[0]!.login(session, dir)
+    expect(stored()['claude:work']!.config!.binaryPath).toBe(bin)
+    expect({ result, aborted: session.abort.signal.aborted }).toMatchObject({ result: { success: true }, aborted: false })
+    // The rebuilt runtime kept the same service, which now runs the new path.
+    expect(services).toHaveLength(1)
+    expect(harness.launchFor('claude:work')).toEqual({ binaryPath: bin })
+  })
+
+  it('a new home gets its own service, and the old one never writes the file again', async () => {
+    const { dir, harness, services } = addedProfile()
+    const settings = join(instanceStateDir(dir, 'claude:work'), 'settings.json')
+    expect(services).toHaveLength(1)
+    await harness.instances.configure('claude:work', { args: ['--x'] })
+    expect(services).toHaveLength(1)
+    await harness.instances.configure('claude:work', { home: 'default' })
+    harness.instances.snapshots({ kind: 'device' }).catch(() => {})
+    expect(services).toHaveLength(2)
+    await harness.instances.signOut('claude:work')
+    const written = readFileSync(settings, 'utf8')
+    // The old service's last save (a turn that ends) is dropped: the sign-out stays on disk.
+    services[0]!.forgetConversation('any')
+    ;(services[0] as unknown as { save(): void }).save()
+    expect(readFileSync(settings, 'utf8')).toBe(written)
+    expect(JSON.parse(written)).toMatchObject({ cliDisconnected: true })
   })
 })

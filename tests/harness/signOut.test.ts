@@ -201,3 +201,21 @@ describe('sign-out in Mousse', () => {
     expect(harness.signedOutInMousse('claude:work')).toBe(false)
   })
 })
+
+describe('a pi provider signed out in Mousse', () => {
+  it('a saved key signs it in again; a call that saved none leaves it signed out', async () => {
+    let hasKey = true
+    const pi = adapterDriver(new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } })), {
+      runtime: { configured: () => hasKey, signOut: async () => { hasKey = false } }
+    })
+    const { harness } = gateway(pi, { 'pi:openrouter': { driver: 'pi', enabled: true } })
+    await harness.instances.signOut('pi:openrouter')
+    expect(harness.signedOutInMousse('pi:openrouter')).toBe(true)
+    // A removed key or a failed check calls in too, with nothing saved.
+    await harness.legacy.credentialsChanged('openrouter')
+    expect(harness.signedOutInMousse('pi:openrouter')).toBe(true)
+    hasKey = true
+    await harness.legacy.credentialsChanged('openrouter')
+    expect(harness.signedOutInMousse('pi:openrouter')).toBe(false)
+  })
+})
