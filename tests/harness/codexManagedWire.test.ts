@@ -2,8 +2,11 @@
  * The managed-Codex wire gate: the pinned Codex binary (`npm run codex:pin`) run by Mousse's real
  * `CodexProviderService` and `CodexAdapter` mapping, the built token helper (`npm run build:cli`)
  * and the broker, against a fake ChatGPT issuer and a fake Responses server on 127.0.0.1. Nothing
- * reaches OpenAI: the base URL is the fake's, set only here. `MOUSSE_CODEX_WIRE=skip` skips it
- * (hosted CI); otherwise a missing binary or helper fails.
+ * reaches OpenAI: the base URL is the fake's, set only here.
+ *
+ * Without the pinned binary or the built helper it skips, so a plain `npm test` passes;
+ * `MOUSSE_CODEX_WIRE=required` (the merge gate) makes either missing a failure, and
+ * `MOUSSE_CODEX_WIRE=skip` (hosted CI) always skips.
  */
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
@@ -25,9 +28,11 @@ import { FakeIssuer, plainCodec } from './chatgpt/fakeIssuer'
 import { signIn } from './chatgpt/signInFlow'
 
 const root = resolve(__dirname, '..', '..')
-const skip = process.env.MOUSSE_CODEX_WIRE === 'skip'
 const pinHome = join(root, '.cache', 'codex-pin')
 const helperScript = join(root, 'out', 'cli', 'chatgpt-token.js')
+const required = process.env.MOUSSE_CODEX_WIRE === 'required'
+const missing = !new CodexInstallation({ installationHome: pinHome }).installed() || !existsSync(helperScript)
+const skip = process.env.MOUSSE_CODEX_WIRE === 'skip' || (missing && !required)
 
 interface Recorded {
   at?: string
@@ -177,9 +182,6 @@ describe.skipIf(skip)('managed Codex on the wire (pinned binary, fake ChatGPT)',
     await openai?.stop()
   })
   afterEach(async () => {
-    // Codex reached no host but the fakes (Mousse's config turns off what would call out).
-    const outside = proxy.targets.splice(0)
-    if (outside.length) throw new Error(`Codex tried to reach ${[...new Set(outside)].join(', ')}`)
     if (process.env.MOUSSE_CODEX_WIRE_LOG) writeFileSync(`${process.env.MOUSSE_CODEX_WIRE_LOG}.requests.json`, JSON.stringify(openai.requests, null, 2))
     for (const stop of stops.splice(0)) stop()
     await broker?.close()
@@ -193,6 +195,10 @@ describe.skipIf(skip)('managed Codex on the wire (pinned binary, fake ChatGPT)',
     openai.requests.length = 0
     openai.answer = () => ({ status: 200, sse: reply('Hello from the plan.') })
     issuer.onToken = undefined
+    // Checked after everything is stopped and removed: Codex reached no host but the fakes
+    // (Mousse's config turns off what would call out).
+    const outside = proxy.targets.splice(0)
+    if (outside.length) throw new Error(`Codex tried to reach ${[...new Set(outside)].join(', ')}`)
   })
 
   /** A signed-in managed entry whose Codex runs with `extraArgs` after Mousse's own. */
