@@ -1152,7 +1152,7 @@ describe('ScheduledJobService webhook placeholders', () => {
     await vi.waitFor(() => expect(store.getJob(job.id)?.lastStatus).toBe('ok'))
     expect(prompts[0]!.startsWith('/')).toBe(false)
     expect(prompts[0]!.startsWith('<webhook-data-')).toBe(true)
-    expect(values(prompts[0]!)).toEqual(['⁠/deploy production'])
+    expect(values(prompts[0]!)).toEqual(['／deploy production'])
   })
 
   it.each(['/deploy {{body.env}}', '  \n/deploy {{ body.env }}'])('refuses a workflow template with placeholders (%j) and runs nothing', async (template) => {
