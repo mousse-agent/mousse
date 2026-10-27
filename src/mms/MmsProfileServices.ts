@@ -30,6 +30,7 @@ import { createCodexProviderService, findCodexBinary, type CodexProviderService 
 import { ANTIGRAVITY_INSTANCE_ID, CLAUDE_INSTANCE_ID, CODEX_INSTANCE_ID, piProviderIdOf } from '../shared/providerInstances'
 import { ALL_MIRROR_FIELDS, LAUNCH_MIRROR_FIELDS } from './harness/vendorMirror'
 import type { CliProviderConfigPatch } from '../shared/providerAuth'
+import type { ScheduledJob } from '../shared/types'
 import { ProjectManager } from './data/ProjectManager'
 import { ThreadDataStore } from './data/ThreadDataStore'
 import { backfillSubagentLineage } from './data/subagentLineage'
@@ -47,6 +48,7 @@ import type { BotStore } from './bots/store/BotStore'
 import { RunStore } from './run/RunStore'
 import { ScheduledJobService } from './scheduled/ScheduledJobService'
 import { ScheduledJobStore } from './scheduled/ScheduledJobStore'
+import { ScheduledWebhookServer, scheduledWebhookPort } from './scheduled/ScheduledWebhookServer'
 import { ChannelService } from './channels/ChannelService'
 import { ChannelStore } from './channels/ChannelStore'
 import { AgentRegistry } from './agents/AgentRegistry'
@@ -64,7 +66,7 @@ import { type MmsOwnerHandle, type MmsOwnerRecord } from './ownership/MmsOwnerLe
 import { ThreadRuntimeManager } from './runtime/ThreadRuntimeManager'
 import { UserQuestionService } from './orchestrator/UserQuestionService'
 import { ModeRegistry } from './modes/ModeRegistry'
-import { createProfileSecretAdapter } from './profiles/secrets'
+import { createProfileSecretAdapter, deleteProfileSecret, writeProfileSecret } from './profiles/secrets'
 import type { ProfileHost } from './profiles/ProfileHost'
 import {
   createLegacySingleProfileContext,
@@ -225,6 +227,7 @@ export class MmsProfileServices {
 
   private readonly channelStore: ChannelStore
   private readonly scheduledStore: ScheduledJobStore
+  private readonly scheduledWebhookServer: ScheduledWebhookServer
   private started = false
   private stopped = false
   private readonly requests = new OwnedWorkBarrier()
@@ -541,6 +544,25 @@ export class MmsProfileServices {
     // The Run Engine decides when a scheduled occurrence is over, including after a restart.
     this.scheduledStore.setRunProbe(this.orchestrator.scheduledRunProbe())
     this.orchestrator.setScheduledHooks({ onOccurrenceSettled: (event) => this.scheduled.occurrenceSettled(event) })
+    // Job webhooks: secrets live in this profile's secret file, read on each request (a rotation applies at once)
+    // and never from the process environment.
+    const webhookSecrets = createProfileSecretAdapter({ profileRoot: homeDir, inheritProcessEnv: false })
+    this.scheduled.setWebhookSecrets({
+      write: (ref, value) => writeProfileSecret(homeDir, ref, value),
+      delete: (ref) => deleteProfileSecret(homeDir, ref)
+    })
+    this.scheduledWebhookServer = new ScheduledWebhookServer({
+      resolveSecret: (jobId) => {
+        const job = this.scheduledStore.getJob(jobId)
+        const webhook = job && !job.createdBy ? job.trigger?.webhook : undefined
+        // An unknown job does the same lookup, under a name no job has, so the work does not tell them apart.
+        const secret = webhookSecrets.resolveSecretRef?.(webhook?.secretRef ?? 'scheduled-webhook-none')
+        return webhook ? secret : undefined
+      },
+      trigger: (jobId, request) => this.scheduledStore.triggerFromWebhook(jobId, request),
+      recordRejection: (jobId, outcome, bodyBytes) => this.scheduledStore.recordWebhookRejection(jobId, outcome, bodyBytes),
+      accepted: () => this.scheduled.wake()
+    })
     this.channels = new ChannelService(
       this.orchestrator,
       this.threads,
@@ -922,6 +944,7 @@ export class MmsProfileServices {
     this.platform.beginShutdown()
     this.orchestrator.beginShutdown()
     this.scheduled.beginShutdown()
+    void this.scheduledWebhookServer.stop().catch(() => undefined)
     this.ptyManager.beginShutdown()
   }
 
@@ -976,6 +999,44 @@ export class MmsProfileServices {
     })
   }
 
+  /** Brings the job webhook listener up when the profile has it enabled; a taken port is reported, not fatal. */
+  private async listenScheduledWebhooksIfEnabled(): Promise<void> {
+    const section = this.config.getScheduledSection().webhooks
+    if (!section?.enabled) return
+    await this.listenScheduledWebhooks(scheduledWebhookPort(section.port))
+  }
+
+  private async listenScheduledWebhooks(port: number): Promise<string | undefined> {
+    try {
+      await this.scheduledWebhookServer.start(port)
+      this.scheduled.setWebhookListenerError(null)
+      return undefined
+    } catch (error) {
+      const message = `Webhook listener could not start on 127.0.0.1:${port}: ${error instanceof Error ? error.message : String(error)}`
+      this.scheduled.setWebhookListenerError(message)
+      return message
+    }
+  }
+
+  /** The URL a sender posts to for a job (the configured port; the listener may not be up). */
+  scheduledWebhookUrl(jobId: string): string {
+    const port = scheduledWebhookPort(this.config.getScheduledSection().webhooks?.port)
+    return `http://127.0.0.1:${port}/hooks/${jobId}`
+  }
+
+  /**
+   * Gives a job a webhook, turns the listener on (and moves it when a different port is asked for) and returns the
+   * secret, shown only here. A listener that cannot bind is reported with the result; the job keeps its webhook.
+   */
+  async enableScheduledWebhook(jobId: string, options: { port?: number } = {}): Promise<{ job: ScheduledJob; secret: string; url: string; listening: boolean; error?: string }> {
+    const { job, secret } = this.scheduled.enableWebhook(jobId)
+    const current = this.config.getScheduledSection().webhooks
+    const port = scheduledWebhookPort(options.port ?? current?.port)
+    if (!current?.enabled || current.port !== port) this.config.updateScheduledSection({ webhooks: { enabled: true, port } })
+    const error = await this.listenScheduledWebhooks(port)
+    return { job, secret, url: this.scheduledWebhookUrl(jobId), listening: error === undefined, ...(error ? { error } : {}) }
+  }
+
   start(): Promise<void> {
     return this.requests.run('profile-start', () => this.startOwned())
   }
@@ -994,6 +1055,7 @@ export class MmsProfileServices {
     if (this.config.getScheduledSection().enabled) {
       this.scheduled.start()
     }
+    await this.listenScheduledWebhooksIfEnabled()
     await this.channels.startEnabled()
     await this.net.start()
 
@@ -1227,6 +1289,7 @@ export class MmsProfileServices {
       () => this.storageUsage.stop(),
       () => this.lifecycle.cleanup.stop(),
       () => this.platform.dispose(),
+      () => this.scheduledWebhookServer.stop(),
       () => this.scheduled.shutdown(),
       () => this.channels.shutdown(),
       () => this.stopRunEngine(),
