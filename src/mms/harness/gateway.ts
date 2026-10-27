@@ -53,7 +53,7 @@ import { LoginSession as LoginSessionImpl } from '../providers/LoginSession'
 import { fail } from '../run/db/RunStoreError'
 import { hidesModel, modelsWithPrefs, ModelPrefsService, visibleProviderOption, type ModelPrefsStore } from './catalog'
 import { privateHomeRule, type AuthReading, type DriverRuntime, type HarnessDriver, type InstallProgress, type InstanceConfig, type LiveProcessHost } from './driver'
-import { DEFAULT_HOME_ID, findOnPath, instanceEnv, type InstanceEnv } from './env'
+import { DEFAULT_HOME_ID, findOnPath, instanceEnv, reservedEnvName, type InstanceEnv } from './env'
 import { addedInstanceId, defaultInstanceId, InstanceCounterStore, instanceStateDir, isBuiltInInstance } from './instances'
 import { LatestVersionCache } from './latest'
 import { RuntimeFactsStore } from './facts'
@@ -539,6 +539,8 @@ interface ProbeState {
   models?: { refreshedAt?: string; error?: string; live?: boolean }
   /** The account read running for a turn admission (resolves undefined = unknown). */
   accountCheck?: Promise<string | undefined>
+  /** The signed-in account without its home (`accountFingerprint`), to tell two instances on one account. In memory only. */
+  fingerprint?: string
   /** The last start-up check: what it found, for which executable and config revision. */
   handshake?: { runs: ProbeResult['runs']; fingerprint?: BinaryFingerprint; revision: number }
 }
@@ -1061,12 +1063,15 @@ export class Harness implements HarnessGateway {
       if (!state.result.timedOut) state.lastGood = state.result
       if (!this.stopped && !state.probing) this.changed(record.instanceId, { legacy: false })
     }
+    // Signed out: no account to share with another instance any more.
+    if (reading.state === 'signed_out' || reading.state === 'expired') delete state.fingerprint
     return reading.state === 'signed_in' ? this.noteSubject(record, reading.subject) : undefined
   }
 
   /** Records the account `subject` names; a different one than last time moves the generation on. */
   private noteSubject(record: InstanceRecord, subject: string | undefined): string | undefined {
     if (!subject) return undefined
+    this.probeState(record.instanceId).fingerprint = this.counters.accountFingerprint(subject)
     const accountId = this.counters.accountIdentity(record.env.homeId, subject)
     this.counters.noteAccount(record.instanceId, accountId)
     return accountId
@@ -1855,6 +1860,8 @@ export class Harness implements HarnessGateway {
     const auth = this.isSignedOut(record) ? this.signedOutReading(record) : shown?.auth ?? { state: 'unknown' as const }
     const update = this.updateFor(record)
     const settingsNotice = this.settingsNotices.get(instanceId)
+    const sameAccount = auth.state === 'signed_in' ? this.sameAccountNote(record) : undefined
+    const dropped = this.droppedEnvNote(record)
     const prefs = this.prefs.get(instanceId)
     const listed = runtime.models()
     const models = state?.models
@@ -1888,7 +1895,7 @@ export class Harness implements HarnessGateway {
         // Keyed by its salted hash: the vendor's account id never leaves the gateway.
         ...(auth.account?.label ? { account: { id: auth.subject ? this.counters.accountIdentity(record.env.homeId, auth.subject) : 'unknown', label: auth.account.label } } : {}),
         ...(auth.methodLabel ?? driver.methodLabel ? { methodLabel: auth.methodLabel ?? driver.methodLabel } : {}),
-        ...(auth.message ? { message: auth.message } : {}),
+        ...(sameAccount || dropped || auth.message ? { message: [auth.message, sameAccount, dropped].filter(Boolean).join(' ') } : {}),
         canSignOut: Boolean(runtime.signOut) && (auth.state === 'signed_in' || auth.state === 'expired') && (this.ownsSignIn(record) || auth.ownedByMousse === true),
         ...(runtime.signIn && auth.canSignIn ? { canSignIn: true } : {}),
         ...(auth.credential ? { credential: auth.credential } : {})
@@ -1912,6 +1919,34 @@ export class Harness implements HarnessGateway {
       ...(nextStep ? { nextStep } : {}),
       ...(settingsNotice ? { settingsNotice } : {})
     }
+  }
+
+  /**
+   * Variables stored on an instance with its own home that its processes no longer get (they say
+   * where the sign-in lives or pick a credential), so the editor's list does not mislead.
+   */
+  private droppedEnvNote(record: InstanceRecord): string | undefined {
+    if (!record.env.home || !record.config.env) return undefined
+    const names = Object.keys(record.config.env).filter((name) => reservedEnvName(record.driver.kind, name))
+    return names.length
+      ? `Not used: ${names.join(', ')}. This entry signs in to its own account, so Mousse does not pass these variables to it; remove them, or add an entry on your own setup to run with a key.`
+      : undefined
+  }
+
+  /**
+   * "Same account as <name>." when another enabled instance of the driver is signed in to the same
+   * account (a second sign-in that picked the account the first one has). Undefined otherwise.
+   */
+  private sameAccountNote(record: InstanceRecord): string | undefined {
+    const mine = this.probes.get(record.instanceId)?.fingerprint
+    if (!mine) return undefined
+    const names: string[] = []
+    for (const [otherId, entry] of Object.entries(this.instanceMap.list())) {
+      if (otherId === record.instanceId || entry.driver !== record.driver.kind || !entry.enabled) continue
+      const other = this.records.get(otherId)
+      if (other && this.probes.get(otherId)?.fingerprint === mine) names.push(this.displayName(other))
+    }
+    return names.length ? `Same account as ${names.join(' and ')}.` : undefined
   }
 
   /**
@@ -2440,6 +2475,17 @@ export class Harness implements HarnessGateway {
     const rule = privateHomeRule(driver, driver.decodeConfig({ ...config, home: undefined }))
     if (rule === 'required') config.home = 'private'
     else if (rule === 'forbidden' && config.home !== undefined) config.home = 'default'
+    // An instance with its own home runs as the account signed in there: its configured variables
+    // cannot point it at another home or hand it another credential (`ownedLaunchEnv`).
+    if (config.home === 'private' && (patch.env !== undefined || patch.home !== undefined)) {
+      for (const name of Object.keys((config.env ?? {}) as Record<string, unknown>)) {
+        const reserved = reservedEnvName(driver.kind, name)
+        if (reserved?.kind === 'home')
+          harnessFail('unsupported', `Mousse sets ${reserved.variable} for this ${driver.label} instance, so it cannot be set here. Remove it from the variables.`)
+        if (reserved)
+          harnessFail('unsupported', `${reserved.variable} is not passed to a ${driver.label} instance with its own home: it signs in to its own account. Remove it from the variables.`)
+      }
+    }
     return config
   }
 

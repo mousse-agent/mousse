@@ -108,12 +108,15 @@ export function SetupRow({
         break
       case 'sign_in':
         if (step.command) {
+          // A sign-in Mousse can run keeps the command beside its button, for when the link does not show.
+          const inApp = snapshot.auth.canSignIn === true
           below = (
             <>
-              <span className="prov-command-hint">Run this in a terminal, then check again.</span>
+              <span className="prov-command-hint">{inApp ? 'Or run this in a terminal, then check again.' : 'Run this in a terminal, then check again.'}</span>
               <CommandBox command={step.command} label="Copy sign-in command" />
             </>
           )
+          if (inApp) control = button('signin', step.label, actions.signIn)
         } else control = button('signin', isManagedSetup(snapshot) ? 'Continue with ChatGPT' : step.label, actions.signIn)
         break
       case 'update':

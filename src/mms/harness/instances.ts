@@ -92,9 +92,24 @@ export class InstanceCounterStore {
    * the home `homeId`: a salted one-way hash.
    */
   accountIdentity(homeId: string, subject: string): string {
+    return createHash('sha256').update(`${this.salt()}|${homeId}|${subject}`).digest('hex').slice(0, 32)
+  }
+
+  /**
+   * `subject` hashed with the profile's salt but without a home: two instances signed in to the same
+   * account read the same, which is how the page tells the user. Kept in memory only, never shown.
+   */
+  accountFingerprint(subject: string): string {
+    return createHash('sha256').update(`${this.salt()}|account|${subject}`).digest('hex').slice(0, 32)
+  }
+
+  /** The profile's salt, created and saved on first use. */
+  private salt(): string {
     const state = this.read()
-    if (!state.salt) this.write({ ...state, salt: randomBytes(16).toString('hex') })
-    return createHash('sha256').update(`${this.read().salt}|${homeId}|${subject}`).digest('hex').slice(0, 32)
+    if (state.salt) return state.salt
+    const salt = randomBytes(16).toString('hex')
+    this.write({ ...state, salt })
+    return salt
   }
 
   bumpConfig(instanceId: string): InstanceCounters {

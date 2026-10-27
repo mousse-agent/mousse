@@ -473,7 +473,9 @@ describe('the marker is written at creation', () => {
     const profile = start(dir, store)
     const added = await profile.harness.instances.add({ driver: 'claude', config: { displayName: 'Work' } })
     expect(storedConfig(store, added.instanceId)).toMatchObject({ signedOutInMousse: false, vendorMirror: mirrorHash({}) })
-    await profile.harness.instances.signOut(added.instanceId)
+    // No Claude Code is installed here, so the account's own `claude auth logout` cannot run and the
+    // sign-out reports that; the flag still holds (the gateway fails closed) and is what this checks.
+    await expect(profile.harness.instances.signOut(added.instanceId)).rejects.toThrow(/not found/)
     const next = restart(dir, store)
     expect(next.harness.signedOutInMousse(added.instanceId)).toBe(true)
     expect((await snapshotOf(next, added.instanceId)).settingsNotice).toBeUndefined()
@@ -752,7 +754,8 @@ describe('an added Claude instance: one service per settings file', () => {
   it('a sign-in that ends after a home change clears the sign-out through the service that writes the file now', async () => {
     const { dir, harness, services, stored } = addedProfile()
     const settings = join(instanceStateDir(dir, 'claude:work'), 'settings.json')
-    await harness.instances.signOut('claude:work')
+    // No Claude Code is installed here: its own logout cannot run (reported), the flag holds all the same.
+    await expect(harness.instances.signOut('claude:work')).rejects.toThrow(/not found/)
     expect(JSON.parse(readFileSync(settings, 'utf8'))).toMatchObject({ cliDisconnected: true })
     const done = new Promise<void>((resolve) => {
       const off = harness.instances.subscribe((event) => {

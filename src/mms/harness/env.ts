@@ -53,7 +53,14 @@ export const HOME_VARIABLES: Partial<Record<HarnessDriverKind, string>> = {
  * whatever its home holds. Variables set on the instance itself still apply.
  */
 export const INHERITED_CREDENTIALS: Partial<Record<HarnessDriverKind, readonly string[]>> = {
-  claude: ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'],
+  claude: [
+    'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN',
+    // The other ways Claude Code takes a token, a key or a file holding one.
+    'CLAUDE_CODE_OAUTH_REFRESH_TOKEN', 'CLAUDE_CODE_SESSION_ACCESS_TOKEN', 'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR',
+    'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR', 'CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR', 'CLAUDE_CODE_HOST_AUTH_ENV_VAR',
+    'CLAUDE_CODE_HOST_CREDS_FILE', 'ANTHROPIC_FOUNDRY_API_KEY', 'ANTHROPIC_FOUNDRY_AUTH_TOKEN', 'ANTHROPIC_AWS_API_KEY',
+    'AWS_BEARER_TOKEN_BEDROCK', 'ANTHROPIC_ENVIRONMENT_KEY', 'ANTHROPIC_WORK_SECRET', 'ANTHROPIC_IDENTITY_TOKEN', 'ANTHROPIC_IDENTITY_TOKEN_FILE'
+  ],
   codex: ['CODEX_API_KEY', 'OPENAI_API_KEY', 'ACCESS_TOKEN', 'CODEX_ACCESS_TOKEN', 'OPENAI_BASE_URL'],
   pi: PI_ENV_KEYS,
   // Cursor has no home of its own: its host always runs with the instance's key and never sees this.
@@ -97,6 +104,99 @@ export function grokStandaloneBin(base: NodeJS.ProcessEnv = process.env): string
   return join(home && isAbsolute(home) ? home : join(homedir(), '.grok'), 'bin')
 }
 
+/**
+ * How the environment of an instance with its own home is built, for the drivers that take part
+ * (`ownedLaunchEnv`). Mousse's own environment may hold the user's sign-in in more places than a
+ * list of credential names can follow, so the families that choose or hold a credential are closed:
+ * nothing in them is inherited but what `inherit` names. What the instance configures is applied
+ * on top, except the `reserved` names, which Settings refuses and a stored one loses at launch.
+ */
+interface OwnedEnvRules {
+  /** Families (a trailing `*` is a prefix) that are not inherited from Mousse's environment. */
+  closed: readonly string[]
+  /** Inherited although they are in a closed family. */
+  inherit: readonly string[]
+  /** Names the instance cannot configure: where the sign-in lives, and how a process picks one. */
+  reserved: readonly string[]
+  /** The variables Mousse sets to point the driver at the instance's home. */
+  fixed(home: string): Record<string, string>
+}
+
+const CLAUDE_OWNED_ENV: OwnedEnvRules = {
+  // Anthropic's and Claude Code's own variables, and the cloud providers it can sign in through.
+  closed: ['ANTHROPIC_*', 'CLAUDE_*', 'AWS_*', 'GOOGLE_*', 'GCLOUD_*', 'CLOUDSDK_*', 'AZURE_*'],
+  // Where Git for Windows is: not a credential, and Claude Code needs it.
+  inherit: ['CLAUDE_CODE_GIT_BASH_PATH'],
+  reserved: [
+    // Where the sign-in is kept: the credential file and the Keychain / Credential Manager item (the
+    // secure-storage variable wins over the config dir; empty means `~/.claude`), and the Anthropic
+    // profile store, which outranks the config dir.
+    'CLAUDE_CONFIG_DIR', 'CLAUDE_SECURESTORAGE_CONFIG_DIR', 'ANTHROPIC_CONFIG_DIR', 'ANTHROPIC_PROFILE',
+    // Credentials, and the identities that stand for one.
+    ...(INHERITED_CREDENTIALS.claude ?? []),
+    'ANTHROPIC_FEDERATION_RULE_ID', 'ANTHROPIC_ORGANIZATION_ID', 'ANTHROPIC_WORKSPACE_ID', 'ANTHROPIC_SERVICE_ACCOUNT_ID', 'ANTHROPIC_SCOPE',
+    'CLAUDE_CODE_OAUTH_*', 'CLAUDE_CODE_SESSION_*', 'CLAUDE_CODE_HOST_*', 'CLAUDE_CODE_ACCOUNT_*', 'CLAUDE_CODE_ORGANIZATION_UUID', 'CLAUDE_CODE_USER_EMAIL',
+    // The route a process signs in through (a cloud provider or a gateway) instead of the account.
+    'CLAUDE_CODE_USE_*', 'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST', 'CLAUDE_CODE_SKIP_BEDROCK_AUTH', 'CLAUDE_CODE_SKIP_VERTEX_AUTH', 'CLAUDE_CODE_SKIP_FOUNDRY_AUTH',
+    'CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH', 'CLAUDE_CODE_SKIP_ANTHROPIC_GOOGLE_CLOUD_AUTH', 'CLAUDE_CODE_SKIP_MANTLE_AUTH',
+    'AWS_*', 'GOOGLE_APPLICATION_CREDENTIALS', 'GCLOUD_*', 'CLOUDSDK_*', 'AZURE_*'
+  ],
+  // The credential file and the OS credential item of each instance are its own (the item's name is
+  // made from this folder), and the Anthropic profile store is inside the home, so the user's shared
+  // one (`%APPDATA%\Anthropic`, `~/.config/anthropic`) is never looked at.
+  fixed: (home) => ({ CLAUDE_CONFIG_DIR: home, CLAUDE_SECURESTORAGE_CONFIG_DIR: home, ANTHROPIC_CONFIG_DIR: join(home, 'anthropic') })
+}
+
+const OWNED_ENV_RULES: Partial<Record<HarnessDriverKind, OwnedEnvRules>> = { claude: CLAUDE_OWNED_ENV }
+
+/**
+ * Why `name` cannot be set in the configured variables of an instance with its own home: it says
+ * where the sign-in lives or how a process picks one (`home`: Mousse sets it; `credential`: it is
+ * not passed). Undefined when it is free to set, and for drivers without rules. Case-insensitive,
+ * as Windows is.
+ */
+export function reservedEnvName(driver: HarnessDriverKind, name: string): { kind: 'home' | 'credential'; variable: string } | undefined {
+  const rules = OWNED_ENV_RULES[driver]
+  if (!rules) return undefined
+  const fixed = Object.keys(rules.fixed('')).find((variable) => variable.toUpperCase() === name.toUpperCase())
+  if (fixed) return { kind: 'home', variable: fixed }
+  return matchesVariable(rules.reserved, name) ? { kind: 'credential', variable: name } : undefined
+}
+
+/** The configured variables of an instance with its own home, without the ones Mousse reserves. */
+export function ownedUserEnv(driver: HarnessDriverKind, userEnv: Readonly<Record<string, string>> | undefined): Record<string, string> {
+  const kept: Record<string, string> = {}
+  for (const [name, value] of Object.entries(userEnv ?? {})) if (!reservedEnvName(driver, name)) kept[name] = value
+  return kept
+}
+
+/**
+ * The one environment every process of an instance with its own home starts with (status checks,
+ * turns, sign-in, sign-out): Mousse's environment without the families that choose or hold a
+ * credential, the instance's configured variables on top (minus the reserved ones), then the
+ * driver's home variables set to the instance's home. A configured or inherited `CLAUDE_CONFIG_DIR`,
+ * `CLAUDE_SECURESTORAGE_CONFIG_DIR`, Anthropic profile, key or cloud route therefore never reaches a
+ * process that must run as its own account. An instance without a home of its own, and a driver
+ * without rules, run as configured.
+ */
+export function ownedLaunchEnv(
+  driver: HarnessDriverKind,
+  instance: Pick<InstanceEnv, 'env' | 'home'>,
+  userEnv: Readonly<Record<string, string>> | undefined
+): NodeJS.ProcessEnv {
+  const rules = OWNED_ENV_RULES[driver]
+  if (!instance.home || !rules) return withUserEnv(instance.env, { ...(userEnv ?? {}) })
+  const inherited: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(instance.env)) {
+    if (!matchesVariable(rules.closed, key) || matchesVariable(rules.inherit, key)) inherited[key] = value
+  }
+  const env = withUserEnv(inherited, ownedUserEnv(driver, userEnv))
+  const fixed = rules.fixed(instance.home)
+  const names = new Set(Object.keys(fixed).map((name) => name.toUpperCase()))
+  for (const key of Object.keys(env)) if (names.has(key.toUpperCase())) delete env[key]
+  return Object.assign(env, fixed)
+}
+
 export function instanceEnv(input: {
   instanceId: string
   driver: HarnessDriverKind
@@ -108,8 +208,10 @@ export function instanceEnv(input: {
 }): InstanceEnv {
   const base = input.base ?? process.env
   const variable = HOME_VARIABLES[input.driver]
-  let env = input.home && variable ? withUserEnv(base, { [variable]: input.home }) : { ...base }
-  if (input.home) {
+  const owned = Boolean(input.home && OWNED_ENV_RULES[input.driver])
+  // A driver with rules (Claude Code) starts from the owned environment; the others drop their listed credentials.
+  let env = owned ? ownedLaunchEnv(input.driver, { env: base, home: input.home }, undefined) : input.home && variable ? withUserEnv(base, { [variable]: input.home }) : { ...base }
+  if (input.home && !owned) {
     const drop = INHERITED_CREDENTIALS[input.driver] ?? []
     for (const key of Object.keys(env)) if (matchesVariable(drop, key)) delete env[key]
   }

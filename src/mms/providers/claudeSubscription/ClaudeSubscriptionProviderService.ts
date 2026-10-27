@@ -511,6 +511,23 @@ export class ClaudeSubscriptionProviderService {
       signedOutKey: 'cliDisconnected'
     })
   }
+  /**
+   * `claude` as Mousse starts it, with the environment of its own commands (status, turns): what the
+   * sign-in and sign-out of an instance with its own home run with. Undefined when no executable is found.
+   */
+  authLaunch(): { command: string; args: string[]; env: NodeJS.ProcessEnv } | undefined {
+    const launch = this.launchTarget()
+    return launch ? { command: launch.command, args: [...launch.args], env: this.environment() } : undefined
+  }
+  /**
+   * What `claude auth status` says in this instance's environment now, whatever Mousse recorded (a
+   * disconnect included) and without touching the recorded state. `unknown`: it did not answer.
+   */
+  async authState(): Promise<'signed_in' | 'signed_out' | 'unknown'> {
+    if (!this.binary()) return 'unknown'
+    const result = await this.probe(this.environment())
+    return result.kind === 'signed_in' ? 'signed_in' : result.kind === 'signed_out' ? 'signed_out' : 'unknown'
+  }
   /** The terminal command that signs this instance in. */
   private signInCommand(): string {
     return this.dependencies.signInCommand ?? 'claude auth login'
@@ -1829,8 +1846,9 @@ export class ClaudeSubscriptionProviderService {
   }
   /**
    * Disconnects this profile. Only Mousse-side state is cleared: the terminal sign-in is shared
-   * with the user's own `claude`, so `claude auth logout` never runs. The gateway keeps the
-   * signed-out flag in the instance config (and mirrors it to `settings.json`).
+   * with the user's own `claude`, so `claude auth logout` never runs here. (An instance with its own
+   * home signs out in that home first: `claudeCodeDriver`.) The gateway keeps the signed-out flag in
+   * the instance config (and mirrors it to `settings.json`).
    */
   async logout(): Promise<void> {
     this.settings.sessions = {}
@@ -1843,6 +1861,17 @@ export class ClaudeSubscriptionProviderService {
    */
   freezeSettings(): void {
     this.settingsFrozen = true
+  }
+  /**
+   * Takes the sign-in the CLI now holds as this instance's: ends every turn and live query that
+   * started under the old one, and asks `claude auth status` again with no cached result, whatever
+   * Mousse has flagged (the gateway clears a sign-out flag once the sign-in succeeded). True when
+   * the home reads signed in.
+   */
+  async reconnect(): Promise<boolean> {
+    this.abortInFlight()
+    this.cliProbe = undefined
+    return this.authenticated()
   }
   stop(): void {
     this.stopped = true

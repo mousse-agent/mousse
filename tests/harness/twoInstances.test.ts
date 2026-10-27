@@ -82,6 +82,8 @@ describe('two Claude Code instances', () => {
         piDriver({ client: () => ({ chat: async () => { throw new Error('unused') } }) }),
         claudeCodeDriver({
           builtIn: () => builtIn,
+          // No sign-in terminal: the page offers the command to copy.
+          pty: { available: () => false },
           integrations: (env) => {
             integrationEnvs.push(env)
             return { resolve: async () => ({ mcpServers: {}, proxiedServers: {}, env: {}, toolRules: {}, warnings: [] }) }
@@ -220,7 +222,9 @@ describe('instance environments', () => {
     expect(own.env).toEqual(base)
     expect(own.homeId).toBe('default')
     const work = instanceEnv({ instanceId: 'claude:work', driver: 'claude', configRevision: 2, home: '/profiles/p/harness/claude_work/home', searchPath: [], base })
-    expect(work.env).toEqual({ PATH: '/bin', KEEP: '1', CLAUDE_CONFIG_DIR: '/profiles/p/harness/claude_work/home' })
+    // The home, its own secure-storage folder (the keychain item follows it) and its own Anthropic profile folder.
+    const home = '/profiles/p/harness/claude_work/home'
+    expect(work.env).toEqual({ PATH: '/bin', KEEP: '1', CLAUDE_CONFIG_DIR: home, CLAUDE_SECURESTORAGE_CONFIG_DIR: home, ANTHROPIC_CONFIG_DIR: join(home, 'anthropic') })
     expect(work).toMatchObject({ homeId: 'private:claude:work', configRevision: 2 })
   })
 })
