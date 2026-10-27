@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { ERROR_INFO_CAPABILITY } from '../src/shared/errors'
 import type { LifecyclePurgePreview, TrashRetentionPolicy } from '../src/shared/resourceLifecycle'
+import { STORAGE_POLICY_DEFAULTS, summarizeCleanupReport, type StorageCleanupReport, type StoragePolicy } from '../src/shared/storage'
 import type { Thread } from '../src/shared/types'
 import type { WorkflowRunView } from '../src/shared/workflowRunPlatform'
 import { releaseExecutionLeaseHandle, tryAcquireExecutionLease } from '../src/mms/queue/ThreadExecutionLease'
@@ -206,5 +207,73 @@ describe('lifecycle public protocol acceptance', () => {
       if (ptyId) await f.rpc.request('pty.kill', { ptyId }).catch(() => undefined)
       await f.close()
     }
+  })
+
+  it('storage.policy reports the storage rules, the trash policy and whether the storage clock paused cleanup', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
+      expect(await cli.request('storage.policy', {})).toEqual({
+        trash: { schemaVersion: 1, graceDays: 30, automaticPurge: false }, trashSweepStatus: { suspended: false },
+        policy: STORAGE_POLICY_DEFAULTS, clockSuspended: false
+      })
+    } finally { await f.close() }
+  })
+
+  it('storage.configure saves a validated policy for a gui client and refuses a cli client', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const gui = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY])
+      const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
+      const policy: StoragePolicy = { schemaVersion: 1, worktrees: { removeWithDeletedThreads: false, inactiveDays: 14, removeMerged: true }, browser: { captureDays: 30 } }
+      expect((await gui.request<{ policy: StoragePolicy }>('storage.configure', { policy })).policy).toEqual(policy)
+      await expect(cli.request('storage.configure', { policy: STORAGE_POLICY_DEFAULTS })).rejects.toMatchObject({ code: 'handler_error' })
+      for (const bad of [{ ...policy, worktrees: { ...policy.worktrees, inactiveDays: 0 } }, { ...policy, worktrees: { ...policy.worktrees, inactiveDays: 4000 } }, { ...policy, worktrees: { inactiveDays: 14, removeMerged: true } }, { ...policy, browser: { captureDays: 'soon' } }]) {
+        await expect(gui.request('storage.configure', { policy: bad })).rejects.toThrow()
+      }
+      expect((await cli.request<{ policy: StoragePolicy }>('storage.policy', {})).policy).toEqual(policy)
+      expect(JSON.parse(readFileSync(join(f.services.threads.lifecycleStore.root, 'storage-policy.json'), 'utf8'))).toEqual(policy)
+    } finally { await f.close() }
+  })
+
+  it('storage.cleanup.run is open to a cli client, always answers with a report, and storage.cleanup.lastReport returns it', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
+      expect(await cli.request('storage.cleanup.lastReport', {})).toEqual({ report: null })
+      const { report } = await cli.request<{ report: StorageCleanupReport }>('storage.cleanup.run', {})
+      expect(report).toMatchObject({ trigger: 'manual', counts: { removed: 0, kept: 0, failed: 0 }, items: [], omittedCount: 0 })
+      expect(summarizeCleanupReport(report)).toBe('Nothing needed cleanup.')
+      expect(await cli.request('storage.cleanup.lastReport', {})).toEqual({ report })
+    } finally { await f.close() }
+  })
+
+  it('storage.cleanup.plan is a dry run open to a cli client: it lists what a run would do and records nothing', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const gui = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY])
+      const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
+      const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'plan me' })
+      await f.rpc.request('threads.trash', { threadId: thread.id })
+      await gui.request('threads.configureTrash', { graceDays: 1, automaticPurge: true })
+      f.services.threads.lifecycleStore.update(thread.id, (record) => { record.trashedAt = new Date(Date.now() - 3 * 86_400_000).toISOString() })
+      const { plan } = await cli.request<{ plan: Array<{ rule: string; threadId?: string; action: string }> }>('storage.cleanup.plan', {})
+      expect(plan).toEqual([expect.objectContaining({ rule: 'trash', threadId: thread.id, action: 'remove' })])
+      expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('trashed')
+      expect(await cli.request('storage.cleanup.lastReport', {})).toEqual({ report: null })
+    } finally { await f.close() }
+  })
+
+  it('a purge preview carries a reclaim estimate beside a preview whose digest is unchanged', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'preview with reclaim' })
+      writeFileSync(join(f.services.threads.getThreadDir(thread.id), 'payload.bin'), Buffer.alloc(64 * 1024, 1))
+      await f.rpc.request('threads.trash', { threadId: thread.id })
+      const response = await f.rpc.request<{ preview: LifecyclePurgePreview; reclaim: { bytes: number; estimated: boolean; partial: boolean } }>('threads.purge', { threadId: thread.id, preview: true })
+      expect(response.reclaim.bytes).toBeGreaterThanOrEqual(64 * 1024); expect(response.reclaim.partial).toBe(false)
+      expect(response.preview).not.toHaveProperty('reclaim')
+      expect((await f.services.lifecycle.cleanup.preview(thread.id)).digest).toBe(response.preview.digest)
+    } finally { await f.close() }
   })
 })

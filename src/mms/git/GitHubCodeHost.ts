@@ -839,6 +839,10 @@ export class GitHubCodeHost implements CodeHost {
     return result
   }
 
+  cachedDefaultBranch(cwd: string): string | undefined {
+    return this.defaultBranches.get(cwd)
+  }
+
   /** Null when the repository's default branch could not be read. */
   private async defaultBranchName(cwd: string): Promise<string | null> {
     let name = this.defaultBranches.get(cwd)
