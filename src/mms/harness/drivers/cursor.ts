@@ -57,6 +57,8 @@ export const CURSOR_SIGN_IN_METHODS = [
 interface CursorState {
   sessions?: Record<string, SavedCursorAgent>
   models?: LlmModelOption[]
+  /** ISO time `models` was last listed by Cursor. */
+  modelsRefreshedAt?: string
   /** Cursor refused the saved credential during a turn. */
   refused?: boolean
   /** The user signed out here: the minted key is not revoked on Cursor's side. */
@@ -236,6 +238,7 @@ function createCursorRuntime(context: DriverContext, options: CursorDriverOption
     if (!credential) throw new Error(`Sign in to ${label} first.`)
     const { models } = await host.request('models', { apiKey: credential.key })
     state.models = modelOptions(models)
+    state.modelsRefreshedAt = new Date().toISOString()
     save()
   }
 
@@ -368,12 +371,17 @@ function createCursorRuntime(context: DriverContext, options: CursorDriverOption
     // Read at every admission, without a network call: the subject saved with the key.
     identity: async () => (state.refused ? undefined : effective()?.subject),
     refreshModels: async () => refreshModels(),
+    modelsRefreshedAt: () => (state.models?.length ? state.modelsRefreshedAt : undefined),
     signIn,
     signOut: async () => {
       loginGeneration += 1
       sessions.forgetAll()
       vault.clear()
-      state = { signedOutHere: true, ...(state.models ? { models: state.models } : {}) }
+      state = {
+        signedOutHere: true,
+        ...(state.models ? { models: state.models } : {}),
+        ...(state.modelsRefreshedAt ? { modelsRefreshedAt: state.modelsRefreshedAt } : {})
+      }
       save()
     },
     adoptApiKey: (apiKey) => saveApiKey(apiKey),

@@ -14,7 +14,7 @@ function context(instances?: Partial<HarnessInstances>, registry?: Partial<Harne
 
 describe('harness provider protocol', () => {
   it('declares the full command set', () => {
-    expect(HARNESS_METHODS).toHaveLength(17)
+    expect(HARNESS_METHODS).toHaveLength(18)
   })
 
   it('the GUI refuses, with recovery steps, a running service that predates the provider methods', async () => {
@@ -48,6 +48,14 @@ describe('harness provider protocol', () => {
     expect(setEnabled).toHaveBeenCalledWith('claude', { kind: 'project', projectId: 'p1' }, null)
     expect(await dispatchMethod(ctx, 'providers.instances.signIn', { instanceId: 'claude' }))
       .toEqual({ operation: { operationId: 'op-1', instanceId: 'claude', kind: 'sign_in' } })
+  })
+
+  it('refreshes the models of every instance in one call and returns each result', async () => {
+    const results = [{ instanceId: 'claude', outcome: 'refreshed', snapshot: { instanceId: 'claude' } }, { instanceId: 'codex', outcome: 'skipped', message: 'Not signed in', snapshot: { instanceId: 'codex' } }]
+    const refreshAllModels = vi.fn(async () => results)
+    const ctx = context({ refreshAllModels } as unknown as Partial<HarnessInstances>)
+    expect(await dispatchMethod(ctx, 'providers.instances.refreshAllModels', {})).toEqual({ results })
+    expect(refreshAllModels).toHaveBeenCalledOnce()
   })
 
   it('passes registry searches, file deletions and registry sources to the gateway', async () => {

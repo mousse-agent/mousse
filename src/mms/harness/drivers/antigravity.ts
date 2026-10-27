@@ -56,6 +56,7 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
         configuredProvider: () => service.configuredProvider(),
         llmProvider: () => service.llmProvider(),
         models: () => service.models(),
+        modelsRefreshedAt: () => service.modelsRefreshedAt(),
         launch: () => service.storedLaunch(),
         setLaunch: async (patch) => void (await service.setCliConfig(patch)),
         // The sign-in is the profile's saved Google session; checking it would start the agent. It

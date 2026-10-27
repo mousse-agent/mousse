@@ -82,6 +82,8 @@ type Settings = {
   /** Extra environment variables, applied over the subscription environment. */
   env?: Record<string, string>
   models?: LlmModelOption[]
+  /** ISO time `models` was last listed by Claude Code (absent for the fallback aliases). */
+  modelsRefreshedAt?: string
   sessions?: Record<string, SavedSession>
 }
 export type ClaudeSubscriptionChatInput = {
@@ -540,6 +542,10 @@ export class ClaudeSubscriptionProviderService {
   models(): LlmModelOption[] {
     return this.settings.models?.length ? this.settings.models : FALLBACK_MODELS
   }
+  /** When Claude Code last listed the models, kept with them across restarts. */
+  modelsRefreshedAt(): string | undefined {
+    return this.settings.models?.length ? this.settings.modelsRefreshedAt : undefined
+  }
   llmProvider(): LlmProviderOption | undefined {
     if (!this.configured()) return undefined
     // Offer the CLI aliases until model discovery runs.
@@ -811,6 +817,7 @@ export class ClaudeSubscriptionProviderService {
       controller.signal.throwIfAborted()
       if (models.length) {
         this.settings.models = claudeModelOptions(models)
+        this.settings.modelsRefreshedAt = new Date().toISOString()
         this.save()
       }
     } finally {

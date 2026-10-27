@@ -87,6 +87,7 @@ export function codexDriver(options: { builtIn: () => CodexProviderService; mana
         configuredProvider: () => service.configuredProvider(),
         llmProvider: () => service.llmProvider(),
         models: () => service.models(),
+        modelsRefreshedAt: () => service.modelsRefreshedAt(),
         launch: () => service.storedLaunch(),
         setLaunch: async (patch) => void (await service.setCliConfig(patch)),
         auth: async ({ force }) => readAuth(service, await service.status({ force })),

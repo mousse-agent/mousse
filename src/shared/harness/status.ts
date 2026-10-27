@@ -141,6 +141,17 @@ export interface InstanceSnapshot {
   nextStep?: NextStep
 }
 
+/**
+ * What "Refresh models" did for one instance (`providers.instances.refreshAllModels`). `skipped`
+ * leaves the list alone on purpose (not signed in, a chat is running); `failed` carries the reason.
+ */
+export interface ModelRefreshResult {
+  instanceId: string
+  outcome: 'refreshed' | 'skipped' | 'failed'
+  message?: string
+  snapshot: InstanceSnapshot
+}
+
 /** `{ scope, snapshots }`: pushed on every change, and returned by `providers.snapshots`. */
 export interface ProviderSnapshotsEvent {
   scope: ProviderScope

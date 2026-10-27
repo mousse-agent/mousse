@@ -41,6 +41,8 @@ const LABEL = 'ACP agent'
 interface AcpState {
   sessions?: Record<string, SavedAcpSession>
   models?: LlmModelOption[]
+  /** ISO time `models` was last updated from the agent (a model refresh, or a turn's session state). */
+  modelsRefreshedAt?: string
   /** What the agent last reported; the gateway keeps its own copy per revision. */
   facts?: RuntimeFactsReport
   /** `initialize.authMethods` as the agent sent them (facts keep only a summary). */
@@ -345,6 +347,7 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
       models: () => state.models ?? [],
       setModels: (models) => {
         state.models = models
+        state.modelsRefreshedAt = new Date().toISOString()
         save()
       }
     },
@@ -581,6 +584,7 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
     },
     llmProvider: () => (runtime.configured() ? { id: context.instanceId, label, models: runtime.models() } : undefined),
     models: () => [{ id: AGENT_DEFAULT_MODEL, label: 'Agent default' }, ...(state.models ?? []).filter((model) => model.id !== AGENT_DEFAULT_MODEL)],
+    modelsRefreshedAt: () => (state.models?.length ? state.modelsRefreshedAt : undefined),
     auth: async () => reading(),
     // Read at every admission; an arbitrary agent's account cannot be read, so it is unknown.
     identity: async () => undefined,

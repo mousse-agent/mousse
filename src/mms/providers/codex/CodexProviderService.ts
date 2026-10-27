@@ -134,6 +134,8 @@ type Settings = {
   /** Extra environment variables, applied over `codexEnvironment()`. */
   env?: Record<string, string>
   models?: LlmModelOption[]
+  /** ISO time `models` was last listed by Codex. */
+  modelsRefreshedAt?: string
   /** Disconnected in Mousse; the terminal sign-in in `~/.codex` stays intact. */
   disconnected?: boolean
   threads?: Record<string, SavedThread>
@@ -919,6 +921,11 @@ export class CodexProviderService {
     return this.settings.models?.length ? this.settings.models : CODEX_FALLBACK_MODELS
   }
 
+  /** When Codex last listed the models, kept with them across restarts. */
+  modelsRefreshedAt(): string | undefined {
+    return this.settings.models?.length ? this.settings.modelsRefreshedAt : undefined
+  }
+
   llmProvider(): LlmProviderOption | undefined {
     if (!this.configured()) return undefined
     return {
@@ -1073,6 +1080,7 @@ export class CodexProviderService {
     this.modelDiscoveryStarted = false
     if (!this.settings.models) return
     delete this.settings.models
+    delete this.settings.modelsRefreshedAt
     this.save()
   }
 
@@ -1084,6 +1092,7 @@ export class CodexProviderService {
       if (!listed.length) throw new Error('Codex returned no models')
       if (epoch !== this.modelsEpoch) throw new Error('The account changed while its models were listed. Refresh models again.')
       this.settings.models = listed
+      this.settings.modelsRefreshedAt = new Date().toISOString()
       this.save()
       return listed
     }
@@ -1104,6 +1113,7 @@ export class CodexProviderService {
       }
       if (!models.length) throw new Error('Codex returned no models')
       this.settings.models = models
+      this.settings.modelsRefreshedAt = new Date().toISOString()
       this.save()
       return models
     } finally {

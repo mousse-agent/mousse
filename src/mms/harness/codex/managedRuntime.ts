@@ -267,6 +267,7 @@ export function createManagedCodexRuntime(context: DriverContext, deps: ManagedC
     configured,
     llmProvider: () => (configured() ? { id: CODEX_PROVIDER_ID, label: 'Codex', models: codex.models() } : undefined),
     models: () => codex.models(),
+    modelsRefreshedAt: () => codex.modelsRefreshedAt(),
     // `default` runs the plan's first listed model, fixed when the turn is bound.
     concreteModel: (model) => (model && model !== 'default' ? model : codex.models()[0]?.id),
     auth: async () => {

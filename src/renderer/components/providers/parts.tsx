@@ -4,7 +4,7 @@ import { ProviderIcon } from '../../lib/providerIcons'
 import { Check, CircleArrowUp, Copy, Folder, Layers, RefreshCw, RotateCcw } from '../../lib/icons'
 import { Switch } from '../settings/SettingsRow'
 import { ipcErrorMessage } from '../../utils/voiceErrors'
-import type { SwitchState } from './providerView'
+import type { ModelsFreshness, SwitchState } from './providerView'
 
 /** Only warning and error show a dot. */
 export function needsAttention(status: StatusDescription): boolean {
@@ -190,6 +190,16 @@ function OverrideInheritance({ projectEnabled, deviceEnabled }: { projectEnabled
   )
 }
 
+/** "Models updated 2 h ago", ticking, or "Models: cached list" when no update time is known. */
+export function ModelsFreshnessLine({ freshness }: { freshness: ModelsFreshness }) {
+  return freshness.kind === 'updated' ? <ModelsUpdated at={freshness.at} /> : <span className="prov-item-models">Models: cached list</span>
+}
+
+function ModelsUpdated({ at }: { at: number }) {
+  const ago = useRelativeTime(at)
+  return <span className="prov-item-models">Models updated {ago}</span>
+}
+
 /**
  * A provider in the list pane: logo, name and version, then the status
  * line; the enable switch on the right. Selection is a background fill only. Switched off, the row
@@ -202,6 +212,7 @@ export function ProviderListRow({
   version,
   update,
   status,
+  models,
   toggle,
   selected,
   onSelect,
@@ -214,6 +225,8 @@ export function ProviderListRow({
   /** An update is available: a small button takes the version's place. */
   update?: { label: string; onClick: () => void }
   status: StatusDescription
+  /** How fresh the model list is, when the row has something to say about it. */
+  models?: ModelsFreshness | null
   toggle: SwitchState
   selected: boolean
   onSelect: () => void
@@ -252,6 +265,7 @@ export function ProviderListRow({
             )}
           </span>
           <CompactStatus status={status} />
+          {models && <ModelsFreshnessLine freshness={models} />}
           {toggle.overridden && onReset && (
             <span className="prov-item-override">
               <OverrideInheritance projectEnabled={toggle.checked} deviceEnabled={toggle.deviceEnabled} />

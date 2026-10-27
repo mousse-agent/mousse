@@ -397,6 +397,7 @@ export class MmsProfileServices {
       }
     })
     this.harness = this.harnessImpl
+    this.harnessImpl.startModelRefreshSchedule()
     this.orchestrator.setHarness(this.harnessImpl)
     this.orchestrator.setWorkflowChatExecutor(this.platform.workflowChat)
     this.orchestrator.setFeatureFlags(this.config.get().features)
