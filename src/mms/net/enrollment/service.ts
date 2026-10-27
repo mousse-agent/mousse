@@ -50,7 +50,13 @@ export interface NodeInviteInput {
    * the invite (phones that enroll through Mousse ID announce it ahead of time).
    */
   joinerTransportFingerprint?: string
+  /**
+   * What kind of device the invite is for. Kept in local metadata on this node only (never in the
+   * signed invite), so the device list can tell phones from computers; unknown reads as a computer.
+   */
+  kind?: NodeKind
 }
+export type NodeKind = 'computer' | 'phone'
 export interface NodeInviteAuthorization {
   v: 1
   kind: 'nodeInvite'
@@ -309,7 +315,7 @@ export class EnrollmentService {
   constructor(private readonly options: EnrollmentServiceOptions) {
     options.db.transaction(() =>
       options.db.database.exec(
-        `CREATE TABLE IF NOT EXISTS net_enrollment_invites(id TEXT PRIMARY KEY, authorization TEXT NOT NULL, token_id TEXT NOT NULL, expires INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('active','consumed','revoked')), claims TEXT, result TEXT, retain_until INTEGER); CREATE TABLE IF NOT EXISTS net_enrollment_join(singleton INTEGER PRIMARY KEY CHECK(singleton=1), journal TEXT NOT NULL)`
+        `CREATE TABLE IF NOT EXISTS net_enrollment_invites(id TEXT PRIMARY KEY, authorization TEXT NOT NULL, token_id TEXT NOT NULL, expires INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('active','consumed','revoked')), claims TEXT, result TEXT, retain_until INTEGER); CREATE TABLE IF NOT EXISTS net_enrollment_join(singleton INTEGER PRIMARY KEY CHECK(singleton=1), journal TEXT NOT NULL); CREATE TABLE IF NOT EXISTS net_enrollment_kinds(invite TEXT PRIMARY KEY, node TEXT, kind TEXT NOT NULL CHECK(kind IN ('computer','phone'))); CREATE INDEX IF NOT EXISTS net_enrollment_kinds_node ON net_enrollment_kinds(node)`
       )
     )
   }
@@ -472,7 +478,8 @@ export class EnrollmentService {
   private persistInvite(
     authorization: NodeInviteAuthorization,
     token: Buffer,
-    joinerTransportFingerprint?: string
+    joinerTransportFingerprint?: string,
+    kind?: NodeKind
   ): { text: string; invite: InviteId; expiresAt: number } {
     const { identity, keys, db, clock } = this.options,
       { invite, expiresAt } = authorization
@@ -506,6 +513,10 @@ export class EnrollmentService {
           'INSERT INTO net_enrollment_invites(id,authorization,token_id,expires,state) VALUES(?,?,?,?,?)'
         )
         .run(invite, encoded, sha(token).subarray(0, 16).toString('base64url'), expiresAt, 'active')
+      if (kind !== undefined)
+        db.database
+          .prepare('INSERT INTO net_enrollment_kinds(invite,node,kind) VALUES(?,NULL,?)')
+          .run(invite, kind)
     })
     return { text, invite, expiresAt }
   }
@@ -516,7 +527,7 @@ export class EnrollmentService {
   } {
     const { token, authorization } = this.createInvite(input)
     try {
-      return this.persistInvite(authorization, token, input.joinerTransportFingerprint)
+      return this.persistInvite(authorization, token, input.joinerTransportFingerprint, input.kind)
     } finally {
       token.fill(0)
     }
@@ -541,11 +552,19 @@ export class EnrollmentService {
       return this.persistInvite(
         { ...authorization, rendezvous },
         token,
-        input.joinerTransportFingerprint
+        input.joinerTransportFingerprint,
+        input.kind
       )
     } finally {
       token.fill(0)
     }
+  }
+  /** The kind recorded when this node approved the device's invite; `undefined` when none was. */
+  nodeKind(node: NodeId): NodeKind | undefined {
+    const row = this.options.db.database
+      .prepare('SELECT kind FROM net_enrollment_kinds WHERE node=?')
+      .get(node) as { kind: NodeKind } | undefined
+    return row?.kind
   }
   revokeInvite(invite: InviteId): void {
     if (!this.options.identity.self()?.isAuthority) throw new NetError('forbidden')
@@ -844,6 +863,9 @@ export class EnrollmentService {
           "UPDATE net_enrollment_invites SET state='consumed',claims=?,result=?,retain_until=? WHERE id=?"
         )
         .run(bound, encoded, delegated.expiresAt, request.invite)
+      db.database
+        .prepare('UPDATE net_enrollment_kinds SET node=? WHERE invite=?')
+        .run(request.node, request.invite)
       this.options.fault?.('enroll.beforeCommit')
     })
     return result

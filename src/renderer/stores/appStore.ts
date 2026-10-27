@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import type { ComposerWorkspace } from '../lib/newThread'
 import { createJSONStorage, persist } from 'zustand/middleware'
 import type {
   Agent,
@@ -168,8 +169,8 @@ interface AppState {
   browserActiveTabByThread: Record<string, string>
   browserElementAttachmentsByThread: Record<string, BrowserElementAttachment[]>
   /** Workspace choices for each new-chat draft, isolated by profile. */
-  composerWorkspaceDrafts: Record<string, { projectId?: string; worktreeEnabled: boolean }>
-  setComposerWorkspaceDraft: (threadId: string | null, workspace?: { projectId?: string; worktreeEnabled: boolean }) => void
+  composerWorkspaceDrafts: Record<string, ComposerWorkspace>
+  setComposerWorkspaceDraft: (threadId: string | null, workspace?: ComposerWorkspace) => void
   /**
    * New threads or blank drafts whose workspace a send is preparing, keyed by
    * `workspacePendingKey`. Not persisted; the composer and quick actions both set it.

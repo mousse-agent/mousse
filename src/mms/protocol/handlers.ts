@@ -1,3 +1,4 @@
+import { portableRepository } from '../bridge/dispatch/repository'
 import type { StorageCleanupPlanToken } from '../../shared/storage'
 import { validateAppletAppearance } from '../../shared/appletAppearance'
 import { appletJsonBytes, APPLET_STATE_LIMIT } from '../../shared/applets'
@@ -1013,6 +1014,20 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const projects = ctx.mms.projects.listProjects()
       ctx.emitEvent?.('projects.updated', { projects })
       return { project, projects }
+    }
+    case 'projects.identity': {
+      // The repository identity of one project, for matching it with a project on another
+      // computer; null when it is not a Git repository. Never sent anywhere with its path.
+      const p = isObject(params) ? params : {}
+      const projectId = asString(p.projectId, 'projectId', 256)
+      const project = ctx.mms.projects.getProject(projectId)
+      if (!project) return { identity: null }
+      try {
+        const { roots, remotes } = await portableRepository(project.path)
+        return { identity: { roots, remotes } }
+      } catch {
+        return { identity: null }
+      }
     }
     case 'projects.remove': {
       const p = isObject(params) ? params : {}

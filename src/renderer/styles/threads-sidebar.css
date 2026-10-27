@@ -578,6 +578,31 @@
   opacity: 0.85;
 }
 
+/* The computer a thread on another computer runs on. */
+.threads-sidebar-device-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  opacity: 0.85;
+}
+
+.threads-sidebar-card-device {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.threads-sidebar-card-device + svg {
+  margin-left: 4px;
+}
+
+.threads-sidebar-card-device-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .threads-sidebar-project-new-chat {
   flex-shrink: 0;
   opacity: 0;

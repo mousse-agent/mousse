@@ -8,6 +8,10 @@ export const BRIDGE_REMOTE_METHODS = {
   'threads.search': { capability: 'read', mutating: false },
   'thread.snapshot': { capability: 'read', mutating: false },
   'threads.create': { capability: 'write', mutating: true },
+  // Which of this machine's projects is the same Git repository; answers an id, never a path.
+  'projects.match': { capability: 'read', mutating: false },
+  // Registers an existing directory as a project on the receiving machine; it never creates one.
+  'projects.open': { capability: 'write', mutating: true },
   'threads.rename': { capability: 'write', mutating: true },
   'threads.pin': { capability: 'write', mutating: true },
   'threads.settle': { capability: 'write', mutating: true },

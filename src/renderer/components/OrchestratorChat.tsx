@@ -38,11 +38,16 @@ import {
   type QuickActionApproval,
 } from '../chat/components/agent-elements/tools/quick-action-approval'
 import '../chat/components/agent-elements/agent-ui.css'
-import { prepareComposerThread } from '../lib/createComposerThread'
+import type { NodeId } from '../../shared/net'
+import { RemoteNotConnectedError, prepareComposerThread, startRemoteComposerThread } from '../lib/createComposerThread'
+import { openRemoteThread, remoteImageProblem, remoteThreadKey, shownRemoteThread, submitRemoteMessage } from '../lib/remoteThreadStore'
+import { openRemoteProject, readRunOnDevices, remoteErrorMessage, workspaceOnDevice } from '../lib/remoteComputers'
+import { useRemoteComposerOptions, useRemoteProjects, useRunOnDevices } from '../hooks/useRunOnDevices'
+import { localDeviceName, runOnLabel } from './sideCard/deviceMenu'
 import { onProviderListingsChanged, pickerIdFor, pickerProviders, projectScope, useProviderSnapshots } from '../lib/providerSnapshots'
 import { sendErrorLine } from '../lib/errorText'
 import { composerThreadActions } from '../lib/composerThreadActions'
-import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending } from '../lib/newThread'
+import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending, workspaceOnThisComputer, type ComposerWorkspace } from '../lib/newThread'
 import { ComposerWorkspaceToolbar } from './ComposerWorkspaceToolbar'
 import { ChatBrowserAccess } from './chats/ChatBrowserAccess'
 import { extractChatReferences, type ChatReference } from '../../shared/chatReferences'
@@ -111,6 +116,10 @@ export function OrchestratorChat() {
   const workspaceDraft = useAppStore((s) => s.composerWorkspaceDrafts[s.activeThreadId ?? '__blank__'])
   const setComposerWorkspaceDraft = useAppStore((s) => s.setComposerWorkspaceDraft)
   const workspace = composerWorkspaceFor(workspaceDraft, activeThread)
+  const localName = useAppStore((s) => localDeviceName(s.appInfo?.deviceName))
+  const { devices: runOnDevices, refresh: refreshRunOnDevices } = useRunOnDevices()
+  const remoteProjects = useRemoteProjects(workspace.node)
+  const pickedDeviceName = runOnLabel(localName, runOnDevices, workspace.node)
   // Shared with quick actions and the side card, which also prepare or edit the new chat's workspace.
   const workspacePending = useAppStore(isWorkspacePending)
   const workspaceLocked = useAppStore(isComposerWorkspaceLocked)
@@ -139,10 +148,19 @@ export function OrchestratorChat() {
   }, [setComposerDraft])
   const [catalog, setCatalog] = useState<LlmProviderOption[]>([])
   // The picker lists the instances the thread's project allows, from the daemon's snapshots.
-  const { snapshots: providerSnapshots } = useProviderSnapshots(projectScope(workspace.projectId))
-  const providers = useMemo(() => pickerProviders(providerSnapshots, catalog), [providerSnapshots, catalog])
+  // A new chat for another computer offers that computer's models, not this one's.
+  const remoteDraft = newChat && Boolean(workspace.node)
+  const remoteOptions = useRemoteComposerOptions(remoteDraft ? workspace.node : undefined)
+  const { snapshots: providerSnapshots } = useProviderSnapshots(projectScope(remoteDraft ? undefined : workspace.projectId))
+  const providers = useMemo(
+    () => remoteDraft ? pickerProviders(undefined, remoteOptions.providers) : pickerProviders(providerSnapshots, catalog),
+    [remoteDraft, remoteOptions.providers, providerSnapshots, catalog]
+  )
+  const remoteDraftRef = useRef(remoteDraft)
+  remoteDraftRef.current = remoteDraft
   // `@` mentions search the thread's own checkout, or the project picked for a blank composer.
-  const mentionProjectId = workspace.projectId
+  // A draft for another computer names that computer's project, which has no files here.
+  const mentionProjectId = remoteDraft ? null : workspace.projectId
   const searchMentions = useCallback(
     (query: string) => window.mousse.fs.search(query, { limit: 20 }, mentionProjectId ?? undefined, activeThreadId ?? undefined),
     [mentionProjectId, activeThreadId]
@@ -403,9 +421,12 @@ export function OrchestratorChat() {
     setCatalog(options.llmProviders)
     setDefaultPermissionMode(normalizePermissionMode(settings.permissions?.defaultMode))
     const selectedModel = activeThreadModelOverride ?? settings.provider
-    setSelectedLlmProvider(selectedModel.llmProvider)
-    setSelectedInstanceId(selectedModel.instanceId)
-    setSelectedModelId(selectedModel.model)
+    // The picker shows the other computer's model while a chat for it is being written.
+    if (!remoteDraftRef.current) {
+      setSelectedLlmProvider(selectedModel.llmProvider)
+      setSelectedInstanceId(selectedModel.instanceId)
+      setSelectedModelId(selectedModel.model)
+    }
 
     const skillsSnapshot = await skillsRequest
     const enabled = new Set(settings.integrations.skills.enabledSkills)
@@ -419,6 +440,21 @@ export function OrchestratorChat() {
     // activeThreadId: project-scoped skills follow the active thread, so a
     // snapshot fetched for another thread goes stale on switch.
   }, [activeThreadModelOverride, activeThreadId, profileReady, profileId])
+
+  // Picking a computer swaps the picker to its default model; coming back restores this computer's.
+  const remoteDefault = remoteOptions.defaultModel
+  const refreshSelectionRef = useRef(refreshSelection)
+  refreshSelectionRef.current = refreshSelection
+  useEffect(() => {
+    if (!remoteDraft) {
+      void refreshSelectionRef.current()
+      return
+    }
+    if (!remoteOptions.loaded) return
+    setSelectedLlmProvider(remoteDefault?.llmProvider ?? '')
+    setSelectedInstanceId(remoteDefault?.instanceId)
+    setSelectedModelId(remoteDefault?.model ?? '')
+  }, [remoteDraft, workspace.node, remoteOptions.loaded, remoteDefault])
 
   useEffect(() => {
     void refreshSelection()
@@ -706,7 +742,8 @@ export function OrchestratorChat() {
     await refreshTurnActive()
   }, [activeThreadId, refreshTurnActive])
   // Stop run is bound to a key; the command's own rule limits it to a thread with a run going.
-  useCommand('run.stop', () => void handleStop())
+  // While a thread on another computer is shown, this hidden chat is not what Stop acts on.
+  useCommand('run.stop', () => void handleStop(), () => shownRemoteThread() === null)
 
   const handleSend = async (skillMode?: SkillChatMode) => {
     if (!useAppStore.getState().workspaceReady) return
@@ -775,6 +812,44 @@ export function OrchestratorChat() {
     if (newThreadMatch && images.length === 0) {
       setInput('')
       await window.mousse.threads.createAndSelect(newThreadMatch[1]?.trim())
+      return
+    }
+
+    if (newChat && workspace.node) {
+      // A chat for another computer is created there; nothing is prepared on this one.
+      try {
+        const started = await startRemoteComposerThread({
+          node: workspace.node,
+          devices: readRunOnDevices,
+          projectId: workspace.projectId,
+          localProjectId: workspace.localProjectId,
+          worktreeEnabled: workspace.worktreeEnabled,
+          content: text,
+          images,
+          mode: skillMode ?? chatMode,
+          imageProblem: remoteImageProblem,
+          model: selectedProviderId && selectedModelId
+            ? { ...selectionFor(selectedProviderId), model: selectedModelId }
+            : undefined,
+          request: (method, params) => window.mousse.platformRequest.request(method, params),
+          stillVisible,
+          openRemoteThread,
+          submit: (ref, input) => submitRemoteMessage(remoteThreadKey(ref), input)
+        })
+        if (!started) return
+        // A mode picked for this draft belongs to it; it must not carry over to the next local chat.
+        setBlankPermissionMode(undefined)
+        // The remote thread view shows the turn and any refusal of it.
+        clearComposer(false)
+        releaseComposerUrls()
+      } catch (error) {
+        if (!(error instanceof RemoteNotConnectedError)) throw error
+        // Back to this computer and the project the draft had here, so another send cannot reach a stale target.
+        if (stillVisible()) {
+          setComposerWorkspaceDraft(activeThreadId, workspaceOnThisComputer(workspace, projects))
+          setSendError(error.message)
+        }
+      }
       return
     }
 
@@ -866,11 +941,14 @@ export function OrchestratorChat() {
     // Persist as last-used default for new threads. Existing chats keep their
     // own modelOverride, which is stamped at create time from this value.
     if (!activeThreadId) {
-      void window.mousse.settings.set({
+      // A chat for another computer takes its model there; this computer's default stays as it is.
+      if (!remoteDraft) void window.mousse.settings.set({
         provider: { ...instance, model: modelId }
       })
       return
     }
+    // The empty local thread behind a remote draft is not the chat; its model is not the other computer's pick.
+    if (remoteDraft) return
 
     // Optimistic local meta so the composer badge updates before IPC returns.
     const current = useAppStore.getState().threads.find((t) => t.id === activeThreadId)
@@ -887,6 +965,47 @@ export function OrchestratorChat() {
       model: modelId
     })
     if (updated) useAppStore.getState().upsertThread(updated)
+  }
+
+  // The projects the toolbar offers: this computer's, or the picked computer's.
+  const toolbarProjects = workspace.node ? remoteProjects.projects : projects
+  useEffect(() => {
+    if (workspace.node && remoteProjects.failed) setSendError(`${pickedDeviceName} is not connected`)
+  }, [workspace.node, remoteProjects.failed, pickedDeviceName])
+
+  /** Picks where the new chat runs; the project carries over only if the target has the same Git repository. */
+  const selectRunOnDevice = async (node: NodeId | undefined) => {
+    if (node === workspace.node) return
+    let next: ComposerWorkspace
+    try {
+      next = await workspaceOnDevice(workspace, projects, node)
+    } catch (error) {
+      const known = (await readRunOnDevices()).find((device) => device.node === node)
+      setSendError(remoteErrorMessage(error, known?.name ?? 'That computer'))
+      return
+    }
+    const state = useAppStore.getState()
+    if (state.profileId !== profileId || state.activeThreadId !== activeThreadId) return
+    setSendError(null)
+    setComposerWorkspaceDraft(activeThreadId, next)
+  }
+
+  /** Asks the picked computer to open a folder; resolves with its refusal, if any. */
+  const openProjectOnRunOnDevice = async (path: string): Promise<string | undefined> => {
+    const node = workspace.node
+    if (!node) return 'Pick a computer first.'
+    try {
+      const opened = await openRemoteProject(node, path)
+      if (!opened.ok) return opened.error
+      const state = useAppStore.getState()
+      if (state.profileId !== profileId || state.activeThreadId !== activeThreadId) return undefined
+      remoteProjects.add(opened.project)
+      // A project picked on this computer replaces the one remembered from here.
+      setComposerWorkspaceDraft(activeThreadId, { projectId: opened.project.id, worktreeEnabled: workspace.worktreeEnabled, node })
+      return undefined
+    } catch (error) {
+      return remoteErrorMessage(error, pickedDeviceName)
+    }
   }
 
   // Applies from the next turn; a running turn and a pending approval keep what they were asked under.
@@ -1039,9 +1158,16 @@ export function OrchestratorChat() {
             {newChat && (
               <ComposerWorkspaceToolbar
                 key={`${profileId}:${activeThreadId ?? '__blank__'}`}
-                projects={projects}
+                projects={toolbarProjects}
                 workspace={workspace}
                 disabled={workspaceLocked}
+                device={{
+                  localName,
+                  devices: runOnDevices,
+                  onRefresh: refreshRunOnDevices,
+                  onSelect: (node) => void selectRunOnDevice(node),
+                  onOpenRemoteProject: openProjectOnRunOnDevice
+                }}
                 onChange={(next) => setComposerWorkspaceDraft(activeThreadId, next)}
                 onOpenProject={async () => {
                   const project = await window.mousse.projects.open()

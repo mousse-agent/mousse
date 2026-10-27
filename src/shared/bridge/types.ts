@@ -21,6 +21,13 @@ export interface BridgeDispatchInput {
   fetch?: boolean
   push?: boolean
 }
+/** Images per message, as for local sends (MMS_PROTOCOL_MAX_IMAGES). */
+export const REMOTE_MAX_ATTACHMENTS = 16
+/** Base64 characters in one staged chunk; keeps each request well inside one 64 KiB frame. */
+export const REMOTE_ATTACHMENT_CHUNK_CHARS = 48 * 1024
+/** Base64 characters in one staged image (MMS_PROTOCOL_MAX_IMAGE_BASE64_CHARS). */
+export const REMOTE_ATTACHMENT_MAX_CHARS = 3 * 1024 * 1024
+export const REMOTE_ATTACHMENT_MIME = /^image\/(png|jpeg|gif|webp|bmp)$/
 /** A remote send or queued message: text, optional chat mode, and images staged with `attachments.stage`. */
 export interface BridgeChatInput {
   threadId: string
@@ -47,6 +54,18 @@ export interface BridgeRemoteParams {
     name: string
     projectId?: string
     worktreeEnabled?: boolean
+    /** The caller's own project the thread is started from; stored on the thread for the caller. */
+    startedFromProjectId?: string
+  }
+  'projects.match': {
+    /** Root commits of the source repository (1 to 256). */
+    roots: string[]
+    /** Normalized remotes of the source repository, as `portableRepository` lists them. */
+    remotes?: string[]
+  }
+  'projects.open': {
+    /** Absolute path of an existing directory on the receiving machine. */
+    path: string
   }
   'threads.rename': {
     threadId: string
@@ -142,6 +161,13 @@ export interface BridgeHubRequestOptions {
   idem?: string
   deadlineMs?: number
 }
+/** Options for `bridge.hub.create`: the request options plus how the new thread is set up. */
+export interface BridgeHubCreateOptions extends BridgeHubRequestOptions {
+  /** Run the thread in its own git worktree on the target machine. */
+  worktreeEnabled?: boolean
+  /** This machine's project the thread is started from, so every device can list it there. */
+  startedFromProjectId?: string
+}
 export type BridgeHubRequestState =
   'prepared' | 'unknown' | 'completed' | 'failed' | 'cancelRequested'
 export interface BridgeHubRequestStatus {
@@ -150,6 +176,10 @@ export interface BridgeHubRequestStatus {
   target: NodeId
   method: BridgeMethod
   state: BridgeHubRequestState
+  /** The thread a chat method named, so a client can find the run of one thread after a reload. */
+  threadId?: string
+  /** Set while this computer is waiting for the target's answer; a restart leaves an unfinished request without it. */
+  running?: boolean
   createdAt: number
   updatedAt: number
   error?: NetErrorCode
@@ -160,9 +190,15 @@ export const BRIDGE_HUB_LOCAL_METHODS = [
   'bridge.hub.get',
   'bridge.hub.search',
   'bridge.hub.create',
+  'bridge.hub.openProject',
+  'bridge.hub.matchProject',
+  'bridge.hub.composerOptions',
+  'bridge.hub.setModel',
+  'bridge.hub.stageAttachment',
   'bridge.hub.send',
   'bridge.hub.steer',
   'bridge.hub.abort',
+  'bridge.hub.questions',
   'bridge.hub.attach',
   'bridge.hub.detach',
   'bridge.hub.dispatch',
@@ -194,11 +230,42 @@ export interface BridgeHubLocalParams {
     target: NodeId
     name: string
     projectId?: string
+    options?: BridgeHubCreateOptions
+  }
+  'bridge.hub.openProject': {
+    target: NodeId
+    /** Absolute path of an existing directory on the target machine. */
+    path: string
+    options?: BridgeHubRequestOptions
+  }
+  /** Which project on the target is the same Git repository; resolves `{ projectId }` or `{}`. */
+  'bridge.hub.matchProject': BridgeRemoteParams['projects.match'] & {
+    target: NodeId
+    options?: BridgeHubRequestOptions
+  }
+  /** The models, modes and skills the target's composer offers (`composer.options`). */
+  'bridge.hub.composerOptions': {
+    target: NodeId
+    threadId?: string
+    options?: BridgeHubRequestOptions
+  }
+  'bridge.hub.setModel': {
+    ref: BridgeEntityRef
+    model: BridgeRemoteParams['threads.setModel']['model']
+    options?: BridgeHubRequestOptions
+  }
+  /** One base64 slice of an image the next `bridge.hub.send` names in `attachments`. */
+  'bridge.hub.stageAttachment': BridgeRemoteParams['attachments.stage'] & {
+    target: NodeId
     options?: BridgeHubRequestOptions
   }
   'bridge.hub.send': {
     ref: BridgeEntityRef
     content: string
+    /** Chat mode for this message, as `orchestrator.send` takes it. */
+    mode?: BridgeChatInput['mode']
+    /** Upload ids staged with `bridge.hub.stageAttachment`. */
+    attachments?: string[]
     options?: BridgeHubRequestOptions
   }
   'bridge.hub.steer': {
@@ -211,6 +278,10 @@ export interface BridgeHubLocalParams {
     ref: BridgeEntityRef
     run: RpcId
     options?: BridgeHubRequestOptions
+  }
+  /** The questions and approvals the thread is waiting on (`orchestrator.pendingQuestions`); resolves `{ pending }`. */
+  'bridge.hub.questions': {
+    ref: BridgeEntityRef
   }
   'bridge.hub.attach': {
     ref: BridgeEntityRef

@@ -1,7 +1,11 @@
+import { realpathSync, statSync } from 'node:fs'
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { portableRepository } from '../dispatch/repository'
+import { matchProject, type ProjectIdentity } from './projectMatch'
 import { withoutStandingRules } from '../../orchestrator/UserQuestionService'
 import type { MmsProfileServices } from '../../MmsProfileServices'
 import { dispatchMethod } from '../../protocol/handlers'
-import { NetError } from '../../../shared/net'
+import { NetError, type NodeId } from '../../../shared/net'
 import { REMOTE_MESSAGE_IMAGES_MAX_CHARS } from './RemoteApi'
 import type { RemoteBackendPort, RemoteChatExtras } from './RemoteApi'
 import { mmsJson } from './jsonOutput'
@@ -94,17 +98,42 @@ export function remoteThreadEventData(data: unknown): unknown {
   }
 }
 
+/** How long a project's repository identity is reused before its repository is read again. */
+const IDENTITY_TTL_MS = 5 * 60_000
+/** Projects looked at for one match; a profile with more is matched against the first ones. */
+const MATCH_PROJECT_LIMIT = 256
+
+/** Whether `child` is `parent` or lies below it; case-insensitive where the filesystem usually is. */
+function isInside(child: string, parent: string): boolean {
+  const fold = process.platform === 'darwin' || process.platform === 'win32'
+  const from = fold ? parent.toLowerCase() : parent
+  const to = fold ? child.toLowerCase() : child
+  const path = relative(from, to)
+  // `..cache` is a folder name, not a step up.
+  return path === '' || (path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path))
+}
+
+/**
+ * A Windows network or device path (`\\host\share`, `\\?\C:\x`, `\\.\pipe\x`). Resolving one makes
+ * this computer reach out to a host the caller names, and the lookup blocks until it answers.
+ */
+function isNetworkOrDevicePath(path: string): boolean {
+  return process.platform === 'win32' && /^[\\/]{2}/.test(path)
+}
+
 function failure(error: unknown): { ok: false; error: string } {
   return { ok: false, error: error instanceof Error ? error.message : String(error) }
 }
 
 /** Adapts the actual profile services, never a client-supplied ingress/profile/path. */
 export class MmsRemoteBackend implements RemoteBackendPort {
+  /** Repository identity per project path, null for a folder that is not a Git repository. */
+  private readonly identities = new Map<string, { at: number; identity: ProjectIdentity | null }>()
   constructor(
     private readonly services: MmsProfileServices,
     private readonly revision: () => number = () => 0
   ) {}
-  async execute(method: BridgeOrdinaryMethod, params: Record<string, unknown>): Promise<unknown> {
+  async execute(method: BridgeOrdinaryMethod, params: Record<string, unknown>, caller?: { node: NodeId }): Promise<unknown> {
     if (
       typeof params.threadId === 'string' &&
       !this.services.threads.listAllThreads().some((thread) => thread.id === params.threadId)
@@ -124,8 +153,11 @@ export class MmsRemoteBackend implements RemoteBackendPort {
       )
         return { ok: false }
     }
+    if (method === 'projects.open') return mmsJson(this.openProject(params.path))
+    if (method === 'projects.match') return mmsJson(await this.matchProject(params))
     const composer = await this.composer(method, params)
     if (composer !== undefined) return mmsJson(composer)
+    if (method === 'threads.create') return mmsJson(await this.createThread(params, caller))
     return mmsJson(
       await dispatchMethod(
         {
@@ -139,6 +171,97 @@ export class MmsRemoteBackend implements RemoteBackendPort {
         params
       )
     )
+  }
+  /**
+   * Creates the thread as the local protocol does, then records the device that asked (and its own
+   * project id) on it, so every device that lists this machine's threads can show where it began.
+   */
+  private async createThread(params: Record<string, unknown>, caller?: { node: NodeId }): Promise<unknown> {
+    const { startedFromProjectId, ...create } = params
+    const result = (await dispatchMethod({ mms: this.services, globalSequence: this.revision }, 'threads.create', create)) as
+      { thread: { id: string } } & Record<string, unknown>
+    if (!caller) return result
+    const thread = this.services.threads.updateThreadMeta(
+      result.thread.id,
+      { startedFrom: { node: caller.node, ...(typeof startedFromProjectId === 'string' ? { projectId: startedFromProjectId } : {}) } },
+      { touch: false }
+    )
+    this.services.events.broadcast('threads:updated', { threads: this.services.threads.listAllThreads() })
+    return { ...result, thread }
+  }
+  /**
+   * Which of this machine's projects is the same Git repository as the one described: an id, or
+   * nothing. Read-only; only ids leave this machine, never a path. Identities are cached by path
+   * for a few minutes, so a profile's repositories are read once per window of use.
+   */
+  private async matchProject(params: Record<string, unknown>): Promise<{ projectId?: string }> {
+    const now = Date.now()
+    const candidates: Array<{ id: string; identity: ProjectIdentity | null }> = []
+    for (const [path, held] of this.identities) if (now - held.at > IDENTITY_TTL_MS) this.identities.delete(path)
+    for (const project of this.services.projects.listProjects().slice(0, MATCH_PROJECT_LIMIT)) {
+      let held = this.identities.get(project.path)
+      if (!held || now - held.at > IDENTITY_TTL_MS) {
+        let identity: ProjectIdentity | null = null
+        try {
+          const { roots, remotes } = await portableRepository(project.path)
+          identity = { roots, remotes }
+        } catch {
+          // Not a Git repository, or not readable: it never matches.
+        }
+        held = { at: now, identity }
+        this.identities.set(project.path, held)
+      }
+      candidates.push({ id: project.id, identity: held.identity })
+    }
+    const projectId = matchProject(
+      { roots: params.roots as string[], remotes: (params.remotes as string[] | undefined) ?? [] },
+      candidates
+    )
+    return projectId ? { projectId } : {}
+  }
+  /**
+   * Registers an existing directory on this machine as a project. The path comes from another
+   * machine, so it must be absolute, exist, be a directory, and not lie inside the Mousse home
+   * (which holds keys and every profile's data) or contain it (a user's home folder holds it). A
+   * directory is never created. Refusals answer `{ ok: false, error }` so the reason survives a
+   * mutating RPC.
+   */
+  private openProject(path: unknown): { ok: true; project: unknown } | { ok: false; error: string } {
+    const refuse = (error: string) => ({ ok: false as const, error })
+    if (typeof path !== 'string' || !path.trim() || path.includes('\0'))
+      return refuse('Enter the full path of a folder.')
+    if (isNetworkOrDevicePath(path.trim()))
+      return refuse('Network and device paths cannot be opened from another computer.')
+    if (!isAbsolute(path)) return refuse('Enter the full path of a folder, starting from the root.')
+    const lexical = resolve(path)
+    if (dirname(lexical) === lexical) return refuse('Pick a folder, not the root of the disk.')
+    let real: string
+    try {
+      real = realpathSync.native(lexical)
+      if (isNetworkOrDevicePath(real))
+        return refuse('Network and device paths cannot be opened from another computer.')
+      if (!statSync(real).isDirectory()) return refuse('That path is a file, not a folder.')
+    } catch {
+      return refuse('That folder does not exist on this computer.')
+    }
+    const s = this.services
+    for (const home of [s.getProfileHomeDir(), s.getHomeDir()]) {
+      let realHome = home
+      try {
+        realHome = realpathSync.native(home)
+      } catch {
+        // A home that cannot be resolved is still compared by its own path.
+      }
+      const homes = [home, realHome],
+        folders = [lexical, real]
+      // Inside the data folder, or a folder that holds it: file tools may edit anything below the
+      // project folder, so a thread there could change the keys and databases without asking.
+      if (homes.some((root) => folders.some((folder) => isInside(folder, root) || isInside(root, folder))))
+        return refuse('That folder is part of the Mousse data folder, or contains it.')
+    }
+    const project = s.projects.openProject(real)
+    s.events.broadcast('projects:updated', s.projects.listProjects())
+    return { ok: true, project }
   }
   /**
    * Composer methods answer here rather than through the local protocol handlers: remote callers
@@ -159,6 +282,12 @@ export class MmsRemoteBackend implements RemoteBackendPort {
         try {
           // Unknown or disabled instances are refused before anything is stored.
           const override = s.providerInstances.overrideFor(model)
+          // As the local handler does: a model hidden, or an instance the thread's project turned off, is refused.
+          const projectId = s.threads.getThread(threadId)?.projectId
+          s.harness?.resolveStored(override, {
+            purpose: 'composer',
+            scope: projectId ? { kind: 'project', projectId } : { kind: 'device' }
+          })
           const modelOverride = s.orchestrator.setThreadModelOverride(threadId, override)
           s.events.broadcast('threads:updated', { threads: s.threads.listAllThreads() })
           return { ok: true, modelOverride: modelOverride ?? null }

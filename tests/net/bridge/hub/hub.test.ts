@@ -3,7 +3,10 @@ import { NetError, newId } from '../../../../src/shared/net'
 import { BridgeHub, executeBridgeHubLocal } from '../../../../src/mms/bridge/hub'
 import { FileKeyStore, NetIdentityService } from '../../../../src/mms/net/identity'
 import { systemClock } from '../../../../src/mms/net/clock'
-import { fixture, cleanup } from './fixture'
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { fixture, cleanup, resources } from './fixture'
 afterEach(cleanup)
 
 it('persists exact original IDs/idem aliases before sending and rejects cross-payload aliases', async () => {
@@ -220,6 +223,210 @@ it('attaches real thread snapshots/events and reopens stable thread identity aft
   f.hub().close()
   await f.hub().drain()
   expect(f.hub().activeCount()).toBe(0)
+})
+
+it('passes worktreeEnabled through bridge.hub.create to the target thread', async () => {
+  const f = await fixture(),
+    path = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-worktree-')))
+  resources.push(() => rmSync(path, { recursive: true, force: true }))
+  const project = f.mms.projects.openProject(path)
+  await f.connect()
+  const create = (options: Record<string, unknown>, name = 'Worktree thread') =>
+    executeBridgeHubLocal(f.hub(), 'bridge.hub.create', {
+      target: f.targetNode,
+      name,
+      projectId: project.id,
+      options: { id: newId('rpc'), ...options }
+    }) as Promise<{ thread: { worktreeEnabled?: boolean } }>
+  expect((await create({ worktreeEnabled: true })).thread.worktreeEnabled).toBe(true)
+  expect((await create({ worktreeEnabled: false })).thread.worktreeEnabled).not.toBe(true)
+  expect((await create({})).thread.worktreeEnabled).not.toBe(true)
+  const threads = f.mms.threads.listAllThreads()
+  expect(threads.filter((thread) => thread.worktreeEnabled === true)).toHaveLength(1)
+  // The flag is part of the request: a retry with the same key but another value conflicts.
+  f.hub().prepare(
+    f.targetNode,
+    'threads.create',
+    { name: 'Keyed', projectId: project.id, worktreeEnabled: true },
+    { id: newId('rpc'), idem: 'worktree-once' }
+  )
+  expect(() =>
+    f.hub().prepare(
+      f.targetNode,
+      'threads.create',
+      { name: 'Keyed', projectId: project.id, worktreeEnabled: false },
+      { id: newId('rpc'), idem: 'worktree-once' }
+    )
+  ).toThrow(expect.objectContaining({ code: 'conflict' }))
+  for (const bad of [{ worktreeEnabled: 'yes' }, { worktreeEnabled: 1 }, { worktree: true }])
+    await expect(create(bad)).rejects.toMatchObject({ code: 'bad_request' })
+  // Only create takes the flag.
+  await expect(
+    executeBridgeHubLocal(f.hub(), 'bridge.hub.projects', {
+      target: f.targetNode,
+      options: { worktreeEnabled: true }
+    })
+  ).rejects.toMatchObject({ code: 'bad_request' })
+  expect(f.mms.threads.listAllThreads()).toHaveLength(threads.length)
+})
+
+it('records on the target which device started a thread, and its project there', async () => {
+  const f = await fixture()
+  await f.connect()
+  const create = (options: Record<string, unknown>) =>
+    executeBridgeHubLocal(f.hub(), 'bridge.hub.create', {
+      target: f.targetNode,
+      name: 'Started elsewhere',
+      options: { id: newId('rpc'), ...options }
+    }) as Promise<{ thread: { id: string; startedFrom?: unknown } }>
+  const withProject = await create({ startedFromProjectId: 'caller-project' })
+  expect(withProject.thread.startedFrom).toEqual({ node: f.callerNode, projectId: 'caller-project' })
+  const plain = await create({})
+  expect(plain.thread.startedFrom).toEqual({ node: f.callerNode })
+  // Every device that lists the target's threads sees where they began.
+  const listed = (await executeBridgeHubLocal(f.hub(), 'bridge.hub.threads', { target: f.targetNode })) as { threads: Array<{ id: string; startedFrom?: unknown }> }
+  expect(listed.threads.find((thread) => thread.id === withProject.thread.id)?.startedFrom).toEqual({ node: f.callerNode, projectId: 'caller-project' })
+  // A thread made on the target itself has no origin.
+  expect(f.mms.threads.createThread('Local').startedFrom).toBeUndefined()
+  await expect(create({ startedFromProjectId: 7 })).rejects.toMatchObject({ code: 'bad_request' })
+})
+
+it('delivers the first turn of a remote thread when the hub attaches before it sends', async () => {
+  const f = await fixture()
+  // The turn runs on the profile's default model, a pi instance over the replaced loop client.
+  f.mms.settings.set({ provider: { llmProvider: 'openai', model: 'fixture' } })
+  ;(f.mms.orchestrator as unknown as { llm: unknown }).llm = {
+    getSelectedModelContextLimit: () => ({ limit: 128000, modelName: 'fixture' }),
+    getContextInputs: async () => ({
+      systemPromptText: '',
+      mcpToolsText: '',
+      otherToolsText: '',
+      signature: 'fixture'
+    }),
+    generateTitle: async () => 'First turn',
+    chat: async (
+      _messages: unknown,
+      _tools: unknown,
+      _options: unknown,
+      _thinking: unknown,
+      onText: (event: unknown) => void
+    ) => {
+      onText({ phase: 'start', content: '', contentIndex: 0 })
+      onText({ phase: 'delta', content: 'first reply', contentIndex: 0 })
+      return {
+        text: 'first reply',
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+        modelName: 'fixture',
+        totalResponseTimeMs: 1,
+        totalTokensUsed: 2,
+        contextInputs: { signature: 'fixture' },
+        toolEvents: [],
+        nativeMessages: []
+      }
+    }
+  }
+  const adapter = f.makeAdapter()
+  await f.connect(adapter.store)
+  const created = (await executeBridgeHubLocal(f.hub(), 'bridge.hub.create', {
+      target: f.targetNode,
+      name: 'Attach first'
+    })) as { thread: { id: string } },
+    ref = { nodeId: f.targetNode, entityId: created.thread.id },
+    updates: any[] = [],
+    errors: string[] = []
+  await executeBridgeHubLocal(
+    f.hub(),
+    'bridge.hub.attach',
+    { ref },
+    {
+      owner: 'trusted-gui-connection',
+      thread: (event: unknown) => updates.push(event),
+      error: (_ref: unknown, code: string) => errors.push(code)
+    }
+  )
+  await vi.waitFor(() =>
+    expect(updates.some((event) => event.update?.kind === 'snapshot')).toBe(true)
+  )
+  const before = updates.length
+  await executeBridgeHubLocal(f.hub(), 'bridge.hub.send', {
+    ref,
+    content: 'Hello from the first turn',
+    options: { id: newId('rpc') }
+  })
+  const text = () => JSON.stringify(updates.slice(before))
+  await vi.waitFor(() => expect(text()).toContain('Hello from the first turn'))
+  await vi.waitFor(() => expect(text()).toContain('first reply'))
+  expect(errors).toEqual([])
+})
+
+it('delivers the first turn of a remote thread when the hub attaches after the send has started', async () => {
+  const f = await fixture()
+  // The turn runs on the profile's default model, a pi instance over the replaced loop client.
+  f.mms.settings.set({ provider: { llmProvider: 'openai', model: 'fixture' } })
+  ;(f.mms.orchestrator as unknown as { llm: unknown }).llm = {
+    getSelectedModelContextLimit: () => ({ limit: 128000, modelName: 'fixture' }),
+    getContextInputs: async () => ({
+      systemPromptText: '',
+      mcpToolsText: '',
+      otherToolsText: '',
+      signature: 'fixture'
+    }),
+    generateTitle: async () => 'First turn',
+    chat: async (
+      _messages: unknown,
+      _tools: unknown,
+      _options: unknown,
+      _thinking: unknown,
+      onText: (event: unknown) => void
+    ) => {
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      onText({ phase: 'start', content: '', contentIndex: 0 })
+      onText({ phase: 'delta', content: 'first reply', contentIndex: 0 })
+      return {
+        text: 'first reply',
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+        modelName: 'fixture',
+        totalResponseTimeMs: 1,
+        totalTokensUsed: 2,
+        contextInputs: { signature: 'fixture' },
+        toolEvents: [],
+        nativeMessages: []
+      }
+    }
+  }
+  const adapter = f.makeAdapter()
+  await f.connect(adapter.store)
+  const created = (await executeBridgeHubLocal(f.hub(), 'bridge.hub.create', {
+      target: f.targetNode,
+      name: 'Attach after'
+    })) as { thread: { id: string } },
+    ref = { nodeId: f.targetNode, entityId: created.thread.id },
+    updates: any[] = [],
+    errors: string[] = []
+  const sending = executeBridgeHubLocal(f.hub(), 'bridge.hub.send', {
+    ref,
+    content: 'Hello from the first turn',
+    options: { id: newId('rpc') }
+  })
+  await executeBridgeHubLocal(
+    f.hub(),
+    'bridge.hub.attach',
+    { ref },
+    {
+      owner: 'trusted-gui-connection',
+      thread: (event: unknown) => updates.push(event),
+      error: (_ref: unknown, code: string) => errors.push(code)
+    }
+  )
+  await vi.waitFor(() =>
+    expect(updates.some((event) => event.update?.kind === 'snapshot')).toBe(true)
+  )
+  const before = 0
+  const text = () => JSON.stringify(updates.slice(before))
+  await vi.waitFor(() => expect(text()).toContain('Hello from the first turn'))
+  await vi.waitFor(() => expect(text()).toContain('first reply'), { timeout: 5000 })
+  await sending
+  expect(errors).toEqual([])
 })
 
 it('bounds journal aliases/results and supports an unenrolled construction without admitting requests', async () => {

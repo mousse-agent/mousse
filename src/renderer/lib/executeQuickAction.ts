@@ -2,7 +2,7 @@ import type { QuickAction } from './quickActions'
 import { useAppStore } from '../stores/appStore'
 import { composerThreadActions } from './composerThreadActions'
 import { prepareComposerThread } from './createComposerThread'
-import { composerWorkspaceFor, isNewEmptyThread, isWorkspacePending } from './newThread'
+import { isNewEmptyThread, isWorkspacePending, localWorkspaceFor } from './newThread'
 
 const TERMINAL_SPAWN_TIMEOUT_MS = 15_000
 const TERMINAL_SPAWN_POLL_MS = 150
@@ -45,7 +45,7 @@ async function threadForSend(profileId: string): Promise<string | null> {
   try {
     return await prepareComposerThread({
       thread,
-      workspace: composerWorkspaceFor(store.composerWorkspaceDrafts[startId ?? '__blank__'], thread),
+      workspace: localWorkspaceFor(store.composerWorkspaceDrafts[startId ?? '__blank__'], thread),
       ...composerThreadActions(),
       stillVisible,
       activate: (created) => {

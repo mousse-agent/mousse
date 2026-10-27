@@ -1026,6 +1026,15 @@ export interface SubagentWorkspaceBinding {
   sharedPath?: string
 }
 
+/**
+ * The device that started a thread on this one through Bridge (its Net node id), and the id of the
+ * project it was started from on that device, which only that device can read.
+ */
+export interface ThreadStartedFrom {
+  node: string
+  projectId?: string
+}
+
 export interface Thread {
   id: string
   name: string
@@ -1039,6 +1048,8 @@ export interface Thread {
    * is not a subagent relation; it only lets the creator read and stop the thread at any agent access level.
    */
   createdByThreadId?: string
+  /** Set on a thread another of the user's devices created through Bridge. */
+  startedFrom?: ThreadStartedFrom
   /**
    * The most an agent running in this thread may reach beyond its own thread and lineage (agent access
    * level, SPEC §15.1), fixed for the thread's life. Set on a fork from its source and the forking agent,

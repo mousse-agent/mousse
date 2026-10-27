@@ -19,6 +19,8 @@ export interface Device {
   caps: NodeCapability[]
   keyEpoch: number
   expiresAt: number
+  /** Absent from a daemon that predates it: read that as a computer. */
+  kind?: 'computer' | 'phone'
   self: boolean
   revoked: boolean
   state: 'connecting' | 'open' | 'closed'

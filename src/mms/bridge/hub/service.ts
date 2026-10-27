@@ -14,6 +14,8 @@ import type {
   BridgeEntityRef,
   BridgeMethod,
   BridgeRemoteParams,
+  BridgeHubCreateOptions,
+  BridgeChatInput,
   BridgeHubRequestOptions,
   BridgeHubRequestStatus,
   BridgeThreadOpenResult,
@@ -88,6 +90,26 @@ const fail = (code: NetErrorCode): never => {
 const same = (a: unknown, b: unknown): boolean => json(a) === json(b)
 const hash = (value: unknown): string =>
   createHash('sha256').update(canonicalJson(value)).digest('hex')
+/** How long a finished or stale request stays in the journal; a request can wait at most a day. */
+const JOURNAL_RETENTION_MS = 7 * 24 * 60 * 60_000
+/** The age sweep scans the whole journal, so it runs at most this often. */
+const JOURNAL_SWEEP_MS = 10 * 60_000
+/** Journaled for the dispatch flow, which verifies a signed result later: never pruned here. */
+const UNPRUNED_METHODS = ['bridge.dispatch', 'bridge.artifacts.open'] as const
+/**
+ * Methods whose retry needs no journal row. A read can simply be asked again. An image slice is
+ * stored once per (upload, index) on the target and a repeat is accepted once, so a retried slice
+ * is safe too, and staging one image would otherwise cost a row per slice.
+ */
+const UNJOURNALED_WRITES: ReadonlySet<string> = new Set(['attachments.stage'])
+/**
+ * An image slice is up to 48 KiB of base64, so a finished journaled `attachments.stage` keeps only
+ * its hash (retries are matched on `hash`, not on params).
+ */
+function dropStagedData(request: { method: string; params: unknown }): void {
+  if (request.method === 'attachments.stage' && request.params && typeof request.params === 'object')
+    request.params = { ...(request.params as object), data: '' } as typeof request.params
+}
 /** Trusted local caller journal. A sent mutation is never resubmitted by recovery. */
 export class BridgeHub {
   private readonly clock: Clock
@@ -119,6 +141,7 @@ export class BridgeHub {
   private readonly inputs: DispatchInputJournal
   private readonly listeners = new Set<(status: BridgeHubRequestStatus) => void>()
   private stopped = false
+  private lastSweepAt = Number.NEGATIVE_INFINITY
   constructor(readonly options: BridgeHubOptions) {
     this.clock = options.clock ?? systemClock
     for (const [key, maximum] of [
@@ -272,6 +295,59 @@ export class BridgeHub {
       .prepare('INSERT OR IGNORE INTO net_bridge_hub_aliases VALUES(?,?)')
       .run(id, request.id)
   }
+  /**
+   * Keeps the journal far below its caps. Requests untouched for a week go (a request waits at most
+   * a day, so such a row is finished or abandoned). Past three quarters of either cap, the oldest
+   * finished requests go until the journal is back under half. A request that may still be running
+   * is never dropped for space.
+   */
+  private prune(): void {
+    const database = this.options.db.database,
+      now = this.clock.now(),
+      maxRows = this.options.maxJournalRecords ?? 16384,
+      maxBytes = this.options.maxJournalBytes ?? 16 * 1024 * 1024,
+      [keepA, keepB] = UNPRUNED_METHODS
+    let removed = 0
+    if (now - this.lastSweepAt >= JOURNAL_SWEEP_MS) {
+      this.lastSweepAt = now
+      removed += Number(
+        database
+          .prepare(
+            `DELETE FROM net_bridge_hub_requests WHERE method NOT IN (?,?) AND json_extract(record,'$.updatedAt') < ?`
+          )
+          .run(keepA, keepB, now - JOURNAL_RETENTION_MS).changes
+      )
+    }
+    const usage = database
+      .prepare(
+        'SELECT count(*) AS rows,coalesce(sum(length(record)),0) AS bytes FROM net_bridge_hub_requests'
+      )
+      .get()!
+    let rows = Number(usage.rows),
+      bytes = Number(usage.bytes)
+    if (rows * 4 > maxRows * 3 || bytes * 4 > maxBytes * 3) {
+      const finished = database
+        .prepare(
+          `SELECT id,length(record) AS size FROM net_bridge_hub_requests WHERE method NOT IN (?,?) AND json_extract(record,'$.state') IN ('completed','failed') ORDER BY json_extract(record,'$.updatedAt') ASC,rowid ASC`
+        )
+        .all(keepA, keepB)
+      const drop = database.prepare('DELETE FROM net_bridge_hub_requests WHERE id=?')
+      for (const row of finished) {
+        if (rows * 2 <= maxRows && bytes * 2 <= maxBytes) break
+        if (this.active.has(row.id as RpcId)) continue
+        drop.run(row.id as string)
+        rows -= 1
+        bytes -= Number(row.size)
+        removed += 1
+      }
+    }
+    if (removed)
+      database
+        .prepare(
+          'DELETE FROM net_bridge_hub_aliases WHERE original NOT IN (SELECT id FROM net_bridge_hub_requests)'
+        )
+        .run()
+  }
   prepare<M extends BridgeMethod>(
     target: NodeId,
     method: M,
@@ -325,6 +401,7 @@ export class BridgeHub {
         this.alias(id, request)
         return id
       }
+      this.prune()
       const usage = this.options.db.database
         .prepare(
           'SELECT count(*) AS rows,coalesce(sum(length(record)),0) AS bytes FROM net_bridge_hub_requests'
@@ -365,12 +442,15 @@ export class BridgeHub {
       if (error instanceof NetError && error.code === 'bad_request') return this.inputs.status(id)
       throw error
     }
+    const threadId = (request.params as { threadId?: unknown } | null)?.threadId
     return {
       id,
       original: request.id,
       target: request.target,
       method: request.method,
       state: request.state,
+      ...(typeof threadId === 'string' ? { threadId } : {}),
+      ...(this.active.has(request.id) ? { running: true } : {}),
       createdAt: request.createdAt,
       updatedAt: request.updatedAt,
       ...(request.error ? { error: request.error } : {})
@@ -469,6 +549,7 @@ export class BridgeHub {
       this.options.db.transaction(() => {
         request.state = 'completed'
         request.wireResult = value
+        dropStagedData(request)
         delete request.error
         request.updatedAt = this.clock.now()
         this.save(request)
@@ -487,6 +568,7 @@ export class BridgeHub {
         this.options.db.transaction(() => {
           request.state = 'failed'
           request.error = error.code
+          dropStagedData(request)
           request.updatedAt = this.clock.now()
           this.save(request)
         })
@@ -565,7 +647,76 @@ export class BridgeHub {
     options: BridgeHubRequestOptions = {},
     signal?: AbortSignal
   ): Promise<unknown> {
+    // A caller that names an id or idempotency key wants to find the request again, so it is journaled.
+    if (
+      Object.hasOwn(HUB_METHODS, method) &&
+      (!HUB_METHODS[method].mutating || UNJOURNALED_WRITES.has(method)) &&
+      options.id === undefined &&
+      options.idem === undefined
+    )
+      return this.callUnjournaled(target, method, params, options, signal)
     return this.submit(this.prepare(target, method, params, options), signal)
+  }
+  /**
+   * Sends one request that nobody needs to recover: no journal row, so polling cannot fill the
+   * journal. It has the same checks as a journaled call and fails if the outcome is unknown.
+   */
+  private callUnjournaled<M extends BridgeMethod>(
+    target: NodeId,
+    method: M,
+    params: BridgeRemoteParams[M],
+    options: BridgeHubRequestOptions,
+    signal?: AbortSignal
+  ): Promise<unknown> {
+    this.guard()
+    if (!isId('node', target)) return Promise.reject(new NetError('bad_request'))
+    const self = this.self(HUB_METHODS[method].capability)
+    this.current(target)
+    if (target === self.node) return Promise.reject(new NetError('bad_request'))
+    const validated = validateHubParams(method, params),
+      deadlineMs = options.deadlineMs ?? 10000
+    if (!Number.isSafeInteger(deadlineMs) || deadlineMs < 1 || deadlineMs > 86400000)
+      return Promise.reject(new NetError('bad_request'))
+    if (signal?.aborted) return Promise.reject(new NetError('cancelled'))
+    if (this.active.size >= (this.options.maxActiveRequests ?? 32))
+      return Promise.reject(new NetError('rate_limited'))
+    const id = newId('rpc'),
+      now = this.clock.now(),
+      request: Request = {
+        id,
+        original: id,
+        target,
+        method,
+        params: validated,
+        hash: '',
+        idem: HUB_METHODS[method].mutating ? id : null,
+        deadlineMs,
+        caller: self.node,
+        user: self.user,
+        state: 'unknown',
+        createdAt: now,
+        updatedAt: now
+      },
+      controller = new AbortController(),
+      abort = () => controller.abort()
+    signal?.addEventListener('abort', abort, { once: true })
+    const promise = (async () => {
+      const session = this.session(target, method)
+      const value = await session.rpc(method, validated, {
+        id,
+        ...(request.idem ? { idem: request.idem } : {}),
+        deadlineMs,
+        signal: controller.signal
+      })
+      if (canonicalJson(value).length > 64 * 1024) return fail('too_large')
+      this.session(target, method)
+      return this.resolve(value, session, request, controller.signal)
+    })().finally(() => {
+      signal?.removeEventListener('abort', abort)
+      this.active.delete(id)
+    })
+    this.active.set(id, { controller, promise })
+    return promise
   }
   projects(target: NodeId): Promise<unknown> {
     return this.call(target, 'projects.list', {})
@@ -586,26 +737,70 @@ export class BridgeHub {
   create(
     target: NodeId,
     name: string,
-    options: BridgeHubRequestOptions = {},
+    options: BridgeHubCreateOptions = {},
     projectId?: string
   ): Promise<unknown> {
+    const { worktreeEnabled, startedFromProjectId, ...request } = options
     return this.call(
       target,
       'threads.create',
-      { name, ...(projectId ? { projectId } : {}) },
-      options
+      {
+        name,
+        ...(projectId ? { projectId } : {}),
+        ...(worktreeEnabled === undefined ? {} : { worktreeEnabled }),
+        ...(startedFromProjectId ? { startedFromProjectId } : {})
+      },
+      request
     )
+  }
+  /** Registers an existing directory on the target as a project; the target validates the path. */
+  openProject(
+    target: NodeId,
+    path: string,
+    options: BridgeHubRequestOptions = {}
+  ): Promise<unknown> {
+    return this.call(target, 'projects.open', { path }, options)
+  }
+  /** Asks the target which of its projects is the same repository; read-only, and sends no path. */
+  matchProject(
+    target: NodeId,
+    identity: BridgeRemoteParams['projects.match'],
+    options: BridgeHubRequestOptions = {}
+  ): Promise<unknown> {
+    return this.call(target, 'projects.match', identity, options)
+  }
+  composerOptions(
+    target: NodeId,
+    threadId?: string,
+    options: BridgeHubRequestOptions = {}
+  ): Promise<unknown> {
+    return this.call(target, 'composer.options', threadId ? { threadId } : {}, options)
+  }
+  setModel(
+    ref: BridgeEntityRef,
+    model: BridgeRemoteParams['threads.setModel']['model'],
+    options: BridgeHubRequestOptions = {}
+  ): Promise<unknown> {
+    return this.call(ref.nodeId, 'threads.setModel', { threadId: ref.entityId, model }, options)
+  }
+  stageAttachment(
+    target: NodeId,
+    chunk: BridgeRemoteParams['attachments.stage'],
+    options: BridgeHubRequestOptions = {}
+  ): Promise<unknown> {
+    return this.call(target, 'attachments.stage', chunk, options)
   }
   send(
     ref: BridgeEntityRef,
     content: string,
     options: BridgeHubRequestOptions = {},
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    extra: Pick<BridgeChatInput, 'mode' | 'attachments'> = {}
   ): Promise<unknown> {
     return this.call(
       ref.nodeId,
       'orchestrator.send',
-      { threadId: ref.entityId, content },
+      { threadId: ref.entityId, content, ...extra },
       options,
       signal
     )
@@ -622,6 +817,10 @@ export class BridgeHub {
       { threadId: ref.entityId, run, text },
       options
     )
+  }
+  /** What the thread is waiting on someone to answer; a read, so it is not journaled. */
+  questions(ref: BridgeEntityRef): Promise<unknown> {
+    return this.call(ref.nodeId, 'orchestrator.pendingQuestions', { threadId: ref.entityId })
   }
   abort(ref: BridgeEntityRef, run: RpcId, options: BridgeHubRequestOptions = {}): Promise<unknown> {
     return this.call(ref.nodeId, 'orchestrator.abort', { threadId: ref.entityId, run }, options)

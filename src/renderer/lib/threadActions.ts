@@ -4,6 +4,7 @@ import { findUnstartedThread } from '../../shared/threadTitle'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useAppStore } from '../stores/appStore'
 import { useChatsStore } from '../stores/chatsStore'
+import { clearRemoteSelection } from './remoteThreadStore'
 import { orderedThreadIds } from './threadOrder'
 
 /** Opens a thread in the main workspace after the navigation guards agree. */
@@ -14,6 +15,8 @@ export async function selectThread(threadId: string): Promise<void> {
   // A page opened from the rail covers the workspace; the thread has to be visible.
   store.setScheduledOpen(false)
   store.setChannelsOpen(false)
+  // A remote thread shown in the main area gives way to the local thread, even when it is the one already selected.
+  clearRemoteSelection()
   if (threadId === store.activeThreadId) return
   // One store update: highlight + restore cached transcript (if any) while
   // the daemon snapshot loads. Main also broadcasts thread:selected early.

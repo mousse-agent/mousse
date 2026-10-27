@@ -14,14 +14,16 @@
 }
 
 .composer-workspace-project,
-.composer-workspace-device {
+.composer-workspace-device,
+.composer-workspace-device-btn {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
 }
 
-.composer-workspace-project {
+.composer-workspace-project,
+.composer-workspace-device-btn {
   flex: 0 1 auto;
   padding: 6px 8px;
   margin-left: -8px;
@@ -33,11 +35,17 @@
   cursor: pointer;
   max-width: 240px;
 }
-.composer-workspace-project span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.composer-workspace-project svg { flex-shrink: 0; }
+.composer-workspace-project span,
+.composer-workspace-device-btn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-workspace-project svg,
+.composer-workspace-device-btn svg { flex-shrink: 0; }
 .composer-workspace-project:hover:not(:disabled),
-.composer-workspace-project.open { background: rgba(var(--surface-soft-rgb), 0.9); }
-.composer-workspace-project:disabled { opacity: 0.5; cursor: default; }
+.composer-workspace-project.open,
+.composer-workspace-device-btn:hover:not(:disabled),
+.composer-workspace-device-btn.open { background: rgba(var(--surface-soft-rgb), 0.9); }
+.composer-workspace-project:disabled,
+.composer-workspace-device-btn:disabled { opacity: 0.5; cursor: default; }
+.composer-workspace-device-btn { margin-left: 0; }
 .composer-workspace-device { white-space: nowrap; }
 .composer-workspace-device svg { flex-shrink: 0; }
 .composer-icon-btn.composer-workspace-worktree { margin-left: auto; flex-shrink: 0; }
@@ -81,6 +89,46 @@
 .composer-workspace-menu-item[aria-checked='true'] { color: var(--accent); }
 .composer-workspace-menu-check { margin-left: auto; }
 .composer-workspace-menu-separator { height: 1px; background: var(--border); margin: 5px; }
+.composer-workspace-menu-label { padding: 6px 10px 3px; color: var(--text-secondary); font-size: 11px; font-weight: 500; }
+
+/* Open project on another computer. */
+.remote-project-dialog { display: flex; flex-direction: column; gap: 12px; min-width: min(420px, 100%); }
+.remote-project-field { display: flex; flex-direction: column; gap: 4px; color: var(--text-secondary); font-size: 12.5px; }
+.remote-project-field input {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12.5px;
+}
+.remote-project-recents { display: flex; flex-direction: column; gap: 1px; margin: 0; padding: 0; list-style: none; }
+.remote-project-recents-label { color: var(--text-secondary); font-size: 11px; font-weight: 500; }
+.remote-project-recent {
+  display: block;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.remote-project-recent:hover,
+.remote-project-recent:focus-visible { background: rgba(var(--surface-soft-rgb), 0.9); }
+.remote-project-error { margin: 0; color: var(--danger, #e5484d); font-size: 12.5px; }
 
 @media (max-width: 600px) {
   .composer-workspace-toolbar { flex-wrap: wrap; gap: 10px 16px; }

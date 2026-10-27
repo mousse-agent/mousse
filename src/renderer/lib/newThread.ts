@@ -1,10 +1,19 @@
+import type { NodeId } from '../../shared/net'
 import { isThreadStarted } from '../../shared/threadTitle'
-import { isTurnActivePhase, type TurnPhase } from '../../shared/types'
+import { isTurnActivePhase, type Project, type TurnPhase } from '../../shared/types'
 
-/** Where a new chat will run: the project it starts in and whether that is a fresh worktree. */
+/**
+ * Where a new chat will run: the project it starts in and whether that is a fresh worktree.
+ * `node` names another of the user's computers; without it the chat runs here, and `projectId`
+ * then names a project of this computer. With it, `projectId` is that computer's own project id,
+ * and `localProjectId` remembers the project the draft had here.
+ */
 export interface ComposerWorkspace {
   projectId?: string
   worktreeEnabled: boolean
+  node?: NodeId
+  /** With `node`: the project this draft had on this computer, restored when it is picked again. */
+  localProjectId?: string
 }
 
 /**
@@ -26,6 +35,54 @@ export function composerWorkspaceFor(
   thread: { projectId?: string; worktreeEnabled?: boolean } | undefined
 ): ComposerWorkspace {
   return draft ?? { projectId: thread?.projectId, worktreeEnabled: Boolean(thread?.worktreeEnabled) }
+}
+
+/**
+ * The workspace for work that can only run here (quick actions, file context). A draft that
+ * names another computer holds that computer's project ids, so it counts for nothing here.
+ */
+export function localWorkspaceFor(
+  draft: ComposerWorkspace | undefined,
+  thread: { projectId?: string; worktreeEnabled?: boolean } | undefined
+): ComposerWorkspace {
+  return draft?.node ? { worktreeEnabled: false } : composerWorkspaceFor(draft, thread)
+}
+
+/** The project of this computer a draft stands for, also while another computer is picked. */
+export function localProjectIdOf(workspace: ComposerWorkspace): string | undefined {
+  return workspace.node ? workspace.localProjectId : workspace.projectId
+}
+
+/**
+ * The draft after going back to this computer: the project it had here comes back, if it is
+ * still there. The worktree choice only counts with a project.
+ */
+export function workspaceOnThisComputer(
+  workspace: ComposerWorkspace,
+  localProjects: readonly Pick<Project, 'id'>[]
+): ComposerWorkspace {
+  const id = localProjectIdOf(workspace)
+  const projectId = localProjects.some((project) => project.id === id) ? id : undefined
+  return { projectId, worktreeEnabled: Boolean(projectId && workspace.worktreeEnabled) }
+}
+
+/**
+ * The draft after picking another computer. `projectId` is that computer's project for the same
+ * repository (found by `bridge.hub.matchProject`), or none. The project the draft had on this
+ * computer is kept, so going back restores it.
+ */
+export function workspaceOnOtherComputer(
+  workspace: ComposerWorkspace,
+  node: NodeId,
+  matchedProjectId: string | undefined
+): ComposerWorkspace {
+  const local = localProjectIdOf(workspace)
+  return {
+    projectId: matchedProjectId,
+    worktreeEnabled: Boolean(matchedProjectId && workspace.worktreeEnabled),
+    node,
+    ...(local ? { localProjectId: local } : {})
+  }
 }
 
 /**

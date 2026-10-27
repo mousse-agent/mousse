@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { resolveActiveProject, type ActiveProject } from '../lib/activeProject'
-import { composerWorkspaceFor, isNewEmptyThread } from '../lib/newThread'
+import { isNewEmptyThread, localWorkspaceFor } from '../lib/newThread'
 import { useAppStore } from '../stores/appStore'
 
 interface ResolvedWorkspace {
@@ -39,7 +39,7 @@ export function useActiveProjectLocation(): ActiveProject {
     s.threads.find((thread) => thread.id === s.activeThreadId),
     s.messages.length
   ))
-  const draftProjectId = useAppStore((s) => composerWorkspaceFor(
+  const draftProjectId = useAppStore((s) => localWorkspaceFor(
     s.composerWorkspaceDrafts[s.activeThreadId ?? '__blank__'],
     s.threads.find((thread) => thread.id === s.activeThreadId)
   ).projectId)

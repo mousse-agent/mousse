@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
-import { AlertTriangle, CircleCheck, Monitor, MonitorSmartphone, MoreHorizontal, Plus, RefreshCw } from '../lib/icons'
+import { AlertTriangle, CircleCheck, Monitor, MonitorSmartphone, MoreHorizontal, Plus, RefreshCw, Smartphone } from '../lib/icons'
 import { RemoteDeviceThreads } from './RemoteDeviceThreads'
 import { ChangePlanDialog } from './devices/ChangePlanDialog'
 import { AddSshDeviceDialog } from './devices/AddSshDeviceDialog'
@@ -294,6 +294,7 @@ export function NetDevicesSection() {
             <SettingsRow
               key={device.node}
               title={device.name}
+              titleAction={device.kind === 'phone' ? <span className="devices-kind" title="Phone"><Smartphone size={13} aria-hidden="true" />Phone</span> : undefined}
               description={<span title={routeDetails(device) || undefined}>{deviceLine(device, Date.now())}{offer ? ' · offers an SSH route' : ''}</span>}
               control={<>
                 {offer && <button type="button" className="settings-btn" disabled={busy} onClick={() => setApproving({ ...device, sshOffer: offer })}>Use SSH route…</button>}

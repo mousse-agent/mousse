@@ -1109,6 +1109,13 @@ export function registerGuiIpc(
     return res.project
   })
 
+  registerHandler('projects:identity', async (_e, projectId: string) => {
+    const res = await guiMms.request<{ identity: { roots: string[]; remotes: string[] } | null }>(
+      'projects.identity',
+      { projectId }
+    )
+    return res.identity
+  })
   registerHandler('projects:remove', async (_e, projectId: string) => {
     const res = await guiMms.request<{ projects: unknown[] }>('projects.remove', {
       projectId

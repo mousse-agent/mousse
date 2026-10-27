@@ -1,13 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
+import type { NodeId } from '../../../shared/net'
 import { FloatingPortal } from '../../lib/floatingLayer'
 import { ChevronDown, Folder, FolderPlus, Laptop, Server } from '../../lib/icons'
-import { readDevices, type Device } from '../../lib/netDevices'
+import { useRunOnDevices } from '../../hooks/useRunOnDevices'
+import { workspaceOnDevice } from '../../lib/remoteComputers'
 import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread } from '../../lib/newThread'
 import { useAppStore } from '../../stores/appStore'
 import {
+  LOCAL_RUN_ON_ID,
   buildDeviceMenu,
   hasDeviceChoices,
   localDeviceName,
+  runOnLabel,
   workspaceDraftForChoice,
   type WorkspaceChoice
 } from './deviceMenu'
@@ -24,8 +28,10 @@ const rowIcon = (Icon: typeof Laptop) => <Icon size={14} aria-hidden="true" />
 /**
  * Name of the computer the thread runs on. Plain text once the thread has
  * started, while a send is in flight, or when there is nothing to pick; on a
- * new, empty thread it opens a menu to pick where it runs and whether it
- * starts in a new worktree. Below it, a local thread's folder opens in an editor.
+ * new, empty thread it opens a menu to pick where it runs (this computer or a
+ * connected one, as in the composer toolbar) and whether it starts in a new
+ * worktree. A thread that has started cannot move to another computer, so it
+ * only names the one it runs on. Below it, a local thread's folder opens in an editor.
  */
 export function DeviceSection({ threadId }: SideCardSectionContext) {
   const name = useAppStore((s) => localDeviceName(s.appInfo?.deviceName))
@@ -56,9 +62,11 @@ function DeviceMenuButton({ threadId, name, locked }: { threadId: string | null;
   const workspace = composerWorkspaceFor(draft, thread)
 
   const [menuOpen, setOpen] = useState(false)
-  const [devices, setDevices] = useState<Device[]>([])
+  const { devices, refresh } = useRunOnDevices()
+  const localProjects = useAppStore((s) => s.projects)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const model = buildDeviceMenu({ localName: name, devices, workspace })
+  const label = runOnLabel(name, devices, workspace.node)
   // Nothing to pick without a project or another device, and nothing can change mid-send.
   const interactive = !locked && hasDeviceChoices(model)
   const open = menuOpen && interactive
@@ -70,23 +78,28 @@ function DeviceMenuButton({ threadId, name, locked }: { threadId: string | null;
     sizeKey: model.runOn?.length ?? 0
   })
 
-  // Devices are read when the menu opens, not in the background.
+  // The list is read again each time the menu opens.
   useEffect(() => {
-    if (!open) return
-    let active = true
-    readDevices(false).then(
-      ({ nodes }) => { if (active) setDevices(nodes) },
-      () => { if (active) setDevices([]) }
+    if (open) refresh()
+  }, [open, refresh])
+
+  const chooseDevice = (id: string) => {
+    closeAndFocus()
+    const node = id === LOCAL_RUN_ON_ID ? undefined : id as NodeId
+    if (node === workspace.node) return
+    // The project carries over only when the picked computer has the same Git repository.
+    void workspaceOnDevice(workspace, localProjects, node).then(
+      (next) => setComposerWorkspaceDraft(threadId, next),
+      () => undefined
     )
-    return () => { active = false }
-  }, [open])
+  }
 
   const chooseWorkspace = (choice: WorkspaceChoice) => {
     setComposerWorkspaceDraft(threadId, workspaceDraftForChoice(workspace, choice))
     closeAndFocus()
   }
 
-  if (!interactive) return <DeviceName name={name} />
+  if (!interactive) return <DeviceName name={label} />
 
   return (
     <>
@@ -100,7 +113,7 @@ function DeviceMenuButton({ threadId, name, locked }: { threadId: string | null;
         onClick={() => setOpen((current) => !current)}
         onKeyDown={triggerKeyDown}
       >
-        <span className="side-card-device-label">{name}</span>
+        <span className="side-card-device-label">{label}</span>
         <ChevronDown size={12} aria-hidden="true" />
       </button>
       {open && (
@@ -125,12 +138,9 @@ function DeviceMenuButton({ threadId, name, locked }: { threadId: string | null;
                     active={option.active}
                     disabled={option.disabled}
                     reason={option.reason}
-                    onSelect={closeAndFocus}
+                    onSelect={() => chooseDevice(option.id)}
                   />
                 ))}
-                {model.runOnNote && (
-                  <div className="side-card-device-note" aria-hidden="true">{model.runOnNote}</div>
-                )}
               </div>
             )}
             <div role="group" aria-labelledby={`${menuId}-workspace`}>

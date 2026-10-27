@@ -2,7 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react'
 
 import type { CSSProperties, KeyboardEvent } from 'react'
 
-import { Archive, CircleCheck, CircleDotDashed, Edit, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, GitPullRequest, ListTree, Loader2, MessageQuestion, MessagesSquare, MessageSquarePlus, Pause, Pin, Search } from '../lib/icons'
+import { Archive, CircleCheck, CircleDotDashed, Edit, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, GitPullRequest, ListTree, Loader2, MessageQuestion, MessagesSquare, MessageSquarePlus, Pause, Pin, Search, Server, X } from '../lib/icons'
 
 import { isThreadActivityActive, type Thread, type ThreadActivityState, type TurnPause } from '../../shared/types'
 import { pausedStatusLabel } from '../lib/pausedRun'
@@ -14,6 +14,8 @@ import { useAppStore } from '../stores/appStore'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useChatsStore } from '../stores/chatsStore'
 import { createAndSelectThread, selectThread } from '../lib/threadActions'
+import { closeRemoteThread, openRemoteThread, selectRemoteThread, useRemoteThreads } from '../lib/remoteThreadStore'
+import { remoteRowActivity, sidebarRemoteThreads, useRemoteListedThreads, useRemoteThreadListing, type RemoteSidebarThread } from '../lib/remoteThreadList'
 import { ChatsSidebar } from './chats/ChatsSidebar'
 import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 import { RecentlyDeletedSection } from './sidebar/RecentlyDeletedSection'
@@ -227,20 +229,23 @@ function ThreadCardBody({
   renamingName,
   isGeneratingTitle,
   onRename,
-  onCancelRename
+  onCancelRename,
+  device
 }: {
-  thread: Thread
+  thread: Pick<Thread, 'name' | 'projectId' | 'updatedAt' | 'pinnedAt' | 'worktreeEnabled'>
   projectName?: string
   activity?: ThreadActivityState
   startedAt?: string
   /** This thread's own pause (not one a subagent below it is in): when its limit resets. */
-  pause?: TurnPause
+  pause?: Pick<TurnPause, 'until' | 'estimated'>
 
   isRenaming: boolean
   renamingName: string
   isGeneratingTitle: boolean
   onRename: (name: string) => void
   onCancelRename: () => void
+  /** Name of the other computer the thread runs on; threads of this computer have none. */
+  device?: string
 }) {
   const hue = thread.projectId ? (Math.abs(hashText(thread.projectId)) % 6) + 1 : 0
   const age = threadAge(isThreadActivityActive(activity) ? startedAt ?? thread.updatedAt : thread.updatedAt)
@@ -295,10 +300,20 @@ function ThreadCardBody({
             {thread.name}
           </span>
         )}
-        {thread.worktreeEnabled && (
+        {(thread.worktreeEnabled || device) && (
           <span className="threads-sidebar-card-sub">
-            <GitBranch size={11} strokeWidth={2} aria-hidden="true" />
-            Worktree
+            {device && (
+              <span className="threads-sidebar-card-device" title={`Runs on ${device}`}>
+                <Server size={11} strokeWidth={2} aria-hidden="true" />
+                <span className="threads-sidebar-card-device-name">{device}</span>
+              </span>
+            )}
+            {thread.worktreeEnabled && (
+              <>
+                <GitBranch size={11} strokeWidth={2} aria-hidden="true" />
+                Worktree
+              </>
+            )}
           </span>
         )}
       </span>
@@ -395,6 +410,17 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     [listedThreads, agentThreadIds]
   )
   const orphanThreads = availableThreads.filter((thread) => !thread.projectId)
+  // Threads on other computers sit with the local ones, marked with their computer.
+  const remoteEntries = useRemoteThreads((state) => state.entries)
+  const remoteOrder = useRemoteThreads((state) => state.order)
+  const activeRemoteKey = useRemoteThreads((state) => state.activeKey)
+  const listedRemoteThreads = useRemoteListedThreads((state) => state.threads)
+  const profileId = useAppStore((s) => s.profileId)
+  useRemoteThreadListing(profileId)
+  const remoteThreads = useMemo(
+    () => sidebarRemoteThreads(remoteEntries, remoteOrder, listedRemoteThreads, new Set(projects.map((project) => project.id))),
+    [remoteEntries, remoteOrder, listedRemoteThreads, projects]
+  )
 
   useEffect(() => {
     if (!activeThreadId) return
@@ -690,8 +716,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
 
-  const renderThreadStatus = (threadId: string) => {
-    const state = rolledUpActivity[threadId] ?? threadActivity[threadId]
+  const renderThreadStatus = (threadId: string) => renderActivityStatus(rolledUpActivity[threadId] ?? threadActivity[threadId], threadId)
+
+  // A thread on another computer passes no id, and the pause its display reports.
+  const renderActivityStatus = (state: ThreadActivityState | undefined, threadId?: string, remotePause?: Pick<TurnPause, 'until' | 'estimated'>) => {
     if (!state || state === 'idle') return null
 
     if (state === 'processing') {
@@ -739,8 +767,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     }
 
     if (state === 'paused') {
-      const turn = turnStates[threadId]
-      const own = turn?.phase === 'paused' ? turn.pause : undefined
+      const turn = threadId ? turnStates[threadId] : undefined
+      const own = remotePause ?? (turn?.phase === 'paused' ? turn.pause : undefined)
       const label = pausedStatusLabel(own, Date.now())
       return (
         <Pause
@@ -1001,6 +1029,78 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
 
+  const openRemote = async (thread: RemoteSidebarThread) => {
+    if (!await confirmNavigation()) return
+    const store = useAppStore.getState()
+    store.setSidebarMode('projects')
+    store.setScheduledOpen(false)
+    store.setChannelsOpen(false)
+    if (thread.entry) selectRemoteThread(thread.key)
+    else openRemoteThread({ ...thread.ref, deviceName: thread.deviceName, title: thread.name, localProjectId: thread.localProjectId })
+  }
+
+  /** A thread on another computer: the same row or card as a local one, plus its computer. */
+  const renderRemoteThreadRow = (thread: RemoteSidebarThread, root = false, layout: 'row' | 'card' = 'row') => {
+    const { entry, name } = thread
+    const device = thread.deviceName ?? 'Another computer'
+    const active = activeRemoteKey === thread.key
+    // Live status is known only while this window is attached to the thread.
+    const { activity, pause: paused } = remoteRowActivity(entry)
+    const statusNode = renderActivityStatus(activity, undefined, paused)
+    return (
+      <div key={thread.key} className="threads-sidebar-thread-container">
+        <button
+          type="button"
+          className={`threads-sidebar-thread${layout === 'card' ? ' threads-sidebar-card' : ''}${root ? ' threads-sidebar-thread-root' : ''}${active ? ' active' : ''}`}
+          aria-current={active ? 'page' : undefined}
+          onClick={() => void openRemote(thread)}
+        >
+          {layout === 'row' && active && <span className="threads-sidebar-selected-dot" aria-hidden="true" />}
+          {layout === 'card' ? (
+            <ThreadCardBody
+              thread={{ name, projectId: thread.localProjectId, updatedAt: thread.updatedAt ?? '', worktreeEnabled: thread.worktreeEnabled }}
+              projectName={thread.localProjectId ? projects.find((project) => project.id === thread.localProjectId)?.name : undefined}
+              activity={activity}
+              pause={paused}
+              device={device}
+              isRenaming={false}
+              renamingName=""
+              isGeneratingTitle={false}
+              onRename={() => {}}
+              onCancelRename={() => {}}
+            />
+          ) : (
+            <>
+              <ScrollingThreadTitle name={name} />
+              <span className="threads-sidebar-thread-trailing">
+                {statusNode}
+                <span className="threads-sidebar-device-icon" title={`Runs on ${device}`}>
+                  <Server size={12} strokeWidth={2} aria-label={`Runs on ${device}`} />
+                </span>
+              </span>
+            </>
+          )}
+        </button>
+        {entry && (
+          <span className="threads-sidebar-thread-actions">
+            <button
+              type="button"
+              className="threads-sidebar-thread-action"
+              aria-label={`Detach ${name}`}
+              title="Detach"
+              onClick={(event) => {
+                event.stopPropagation()
+                closeRemoteThread(thread.key)
+              }}
+            >
+              <X size={13} strokeWidth={2} aria-hidden="true" />
+            </button>
+          </span>
+        )}
+      </div>
+    )
+  }
+
   return (
 
     <aside className={`threads-sidebar${className ? ` ${className}` : ''}`} style={{ width: threadsSidebarWidth }}>
@@ -1056,6 +1156,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
               const expanded = expandedProjects.has(project.id)
 
               const projectThreads = availableThreads.filter((thread) => thread.projectId === project.id)
+              const projectRemoteThreads = remoteThreads.byProject.get(project.id) ?? []
+              const projectThreadCount = projectThreads.length + projectRemoteThreads.length
 
               const showAllProjectThreads = expandedProjectThreadLists.has(project.id)
 
@@ -1212,7 +1314,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                     <div className="threads-sidebar-children">
 
-                      {projectThreads.length === 0 ? (
+                      {projectThreadCount === 0 ? (
 
                         <div className="threads-sidebar-empty threads-sidebar-empty-nested">
 
@@ -1225,11 +1327,12 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
                         <>
                           <div
                             className={`threads-sidebar-thread-list${showAllProjectThreads ? ' expanded' : ''}`}
-                            style={{ '--project-thread-count': projectThreads.length } as CSSProperties}
+                            style={{ '--project-thread-count': projectThreadCount } as CSSProperties}
                           >
+                            {projectRemoteThreads.map((thread) => renderRemoteThreadRow(thread))}
                             {projectThreads.map((thread) => renderThreadRow(thread))}
                           </div>
-                          {projectThreads.length > PROJECT_THREAD_PREVIEW_LIMIT && (
+                          {projectThreadCount > PROJECT_THREAD_PREVIEW_LIMIT && (
                             <button
                               type="button"
                               className="threads-sidebar-show-more"
@@ -1274,10 +1377,13 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
       <div className="threads-sidebar-section threads-sidebar-section-feed" role="tabpanel" id={`${tabsId}-threads-panel`} aria-labelledby={`${tabsId}-threads-tab`} hidden={sidebarView !== 'threads'}>
         <div className="threads-sidebar-tree threads-sidebar-thread-feed">
-          {availableThreads.length === 0 ? (
+          {availableThreads.length + remoteThreads.all.length === 0 ? (
             <div className="threads-sidebar-empty">No threads</div>
           ) : (
-            availableThreads.map((thread) => renderThreadRow(thread, true, 'threads', 'card'))
+            <>
+              {remoteThreads.all.map((thread) => renderRemoteThreadRow(thread, true, 'card'))}
+              {availableThreads.map((thread) => renderThreadRow(thread, true, 'threads', 'card'))}
+            </>
           )}
         </div>
       </div>
@@ -1294,13 +1400,19 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             onClick={() => setRecentExpanded((expanded) => !expanded)} aria-expanded={recentExpanded}>
             <MessagesSquare size={14} strokeWidth={2} aria-hidden="true" />
             <span>Recent chats</span>
-            <span className="threads-sidebar-settled-count">{orphanThreads.length}</span>
+            <span className="threads-sidebar-settled-count">{orphanThreads.length + remoteThreads.unfiled.length}</span>
           </button>
           </div>
           {recentExpanded && <div className="threads-sidebar-tree">
-            {orphanThreads.length === 0 ? <div className="threads-sidebar-empty">No recent chats</div> : orphanThreads.map((thread) => renderThreadRow(thread, true))}
+            {orphanThreads.length + remoteThreads.unfiled.length === 0 ? <div className="threads-sidebar-empty">No recent chats</div> : (
+              <>
+                {remoteThreads.unfiled.map((thread) => renderRemoteThreadRow(thread, true))}
+                {orphanThreads.map((thread) => renderThreadRow(thread, true))}
+              </>
+            )}
           </div>}
         </section>
+
 
       <div
 

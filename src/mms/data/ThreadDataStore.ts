@@ -25,7 +25,8 @@ import type {
   Task,
   Thread,
   ThreadData,
-  ThreadLineage
+  ThreadLineage,
+  ThreadStartedFrom
 } from '../../shared/types'
 import { isDefaultThreadName } from '../../shared/threadTitle'
 import { visibleThreads } from '../../shared/threadLineage'
@@ -60,6 +61,7 @@ interface ThreadMeta {
   lineage?: ThreadLineage
   /** The thread whose agent launched this one with `thread_create`; not a subagent relation. */
   createdByThreadId?: string
+  startedFrom?: ThreadStartedFrom
   /** See `Thread.accessCeiling`. */
   accessCeiling?: AgentAccessLevel
   workspaceBinding?: SubagentWorkspaceBinding
@@ -584,7 +586,7 @@ export class ThreadDataStore extends EventEmitter {
   /** `touch: false` keeps `updatedAt`, for repairs that must not reorder the sidebar. */
   updateThreadMeta(
     id: string,
-    partial: Partial<Pick<Thread, 'name' | 'modelOverride' | 'permissionMode' | 'worktreeEnabled' | 'lineage' | 'createdByThreadId' | 'accessCeiling' | 'workspaceBinding' | 'pullRequest'>>,
+    partial: Partial<Pick<Thread, 'name' | 'modelOverride' | 'permissionMode' | 'worktreeEnabled' | 'lineage' | 'createdByThreadId' | 'startedFrom' | 'accessCeiling' | 'workspaceBinding' | 'pullRequest'>>,
     opts: { touch?: boolean } = {}
   ): Thread {
     const thread = this.getThread(id)

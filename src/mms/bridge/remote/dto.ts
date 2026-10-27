@@ -1,14 +1,22 @@
 import { NetError, isId } from '../../../shared/net'
 import { canonicalJson } from '../../net/sync/codec'
 import type { BridgeRemoteMethod } from './capabilities'
+import {
+  REMOTE_MAX_ATTACHMENTS,
+  REMOTE_ATTACHMENT_CHUNK_CHARS,
+  REMOTE_ATTACHMENT_MAX_CHARS,
+  REMOTE_ATTACHMENT_MIME
+} from '../../../shared/bridge'
 
-/** Images per message, as for local sends (MMS_PROTOCOL_MAX_IMAGES). */
-export const REMOTE_MAX_ATTACHMENTS = 16
-/** Base64 characters in one staged chunk; keeps each request well inside one 64 KiB frame. */
-export const REMOTE_ATTACHMENT_CHUNK_CHARS = 48 * 1024
-/** Base64 characters in one staged image (MMS_PROTOCOL_MAX_IMAGE_BASE64_CHARS). */
-export const REMOTE_ATTACHMENT_MAX_CHARS = 3 * 1024 * 1024
-export const REMOTE_ATTACHMENT_MIME = /^image\/(png|jpeg|gif|webp|bmp)$/
+export {
+  REMOTE_MAX_ATTACHMENTS,
+  REMOTE_ATTACHMENT_CHUNK_CHARS,
+  REMOTE_ATTACHMENT_MAX_CHARS,
+  REMOTE_ATTACHMENT_MIME
+}
+
+/** A Git commit id: SHA-1 or SHA-256 in hex. */
+const COMMIT_HASH = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/
 const UPLOAD_ID = /^[A-Za-z0-9_-]{8,64}$/
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/
 const BUILT_IN_MODES = new Set(['agent', 'plan', 'build'])
@@ -83,6 +91,35 @@ export function validateRemoteParams(
     case 'storage.usage':
       keys([])
       break
+    case 'projects.match': {
+      keys(['roots'], ['remotes'])
+      const roots = p.roots
+      if (
+        !Array.isArray(roots) ||
+        roots.length < 1 ||
+        roots.length > 256 ||
+        new Set(roots).size !== roots.length ||
+        roots.some((root) => typeof root !== 'string' || !COMMIT_HASH.test(root))
+      )
+        throw new NetError('bad_request')
+      const remotes = p.remotes ?? []
+      if (
+        !Array.isArray(remotes) ||
+        remotes.length > 64 ||
+        remotes.some(
+          (remote) =>
+            typeof remote !== 'string' || !remote || remote.length > 512 || /[\x00-\x20\x7f]/.test(remote)
+        )
+      )
+        throw new NetError('bad_request')
+      break
+    }
+    case 'projects.open':
+      keys(['path'])
+      text('path', 4096)
+      // The receiving machine decides whether the path is acceptable; a NUL never is.
+      if ((p.path as string).includes('\0')) throw new NetError('bad_request')
+      break
     case 'threads.list':
       keys([], ['projectId'])
       text('projectId', 256, true)
@@ -104,10 +141,11 @@ export function validateRemoteParams(
         throw new NetError('bad_request')
       break
     case 'threads.create':
-      keys(['name'], ['projectId', 'worktreeEnabled'])
+      keys(['name'], ['projectId', 'worktreeEnabled', 'startedFromProjectId'])
       text('name', 512)
       text('projectId', 256, true)
       boolean('worktreeEnabled', true)
+      text('startedFromProjectId', 256, true)
       break
     case 'threads.rename':
       keys(['threadId', 'name'])
