@@ -39,6 +39,7 @@ export interface SetupOptions {
   testEnv?: Record<`MOUSSE_PI_TEST_${string}`, string>
   adjustLaunch?: PiRpcEngineOptions['adjustLaunch']
   holdTurn?: PiRpcEngineOptions['holdTurn']
+  mousseTools?: PiRpcEngineOptions['mousseTools']
 }
 
 /** An engine on a fresh scratch dir with a recorder; `cleanups` gets what to undo, in order. */
@@ -78,6 +79,7 @@ export async function setup(cleanups: Array<() => unknown>, options: SetupOption
     ...(options.testEnv ? { testEnv: options.testEnv } : {}),
     ...(options.adjustLaunch ? { adjustLaunch: options.adjustLaunch } : {}),
     ...(options.holdTurn ? { holdTurn: options.holdTurn } : {}),
+    ...(options.mousseTools ? { mousseTools: options.mousseTools } : {}),
     ...(options.retry ? { settings: { retry: options.retry } } : { settings: { retry: { enabled: false, maxRetries: 0, baseDelayMs: 10, provider: { maxRetries: 0 } } } })
   })
   cleanups.push(() => engine.stop())

@@ -123,6 +123,32 @@ describe('the runs’ count records', () => {
     expect(back.toolCall()).toMatchObject({ ok: false })
   })
 
+  it('records are keyed on the run alone: an attempt with other limits continues the counts', () => {
+    const book = new RunCounterBook()
+    const first = book.acquire('r1', { maxTurns: 1 })
+    expect(first.budget.request()).toEqual({ ok: true })
+    first.release()
+    const looser = book.acquire('r1', { maxTurns: 2 }).budget
+    expect(looser.request()).toEqual({ ok: true })
+    expect(looser.request()).toEqual({ ok: false, limit: { kind: 'turns', limit: 2, actual: 2 } })
+  })
+
+  it('a later attempt with no record in this process (after a restart) fails closed; a first attempt starts fresh', () => {
+    const book = new RunCounterBook()
+    const recovered = book.acquire('from-before-restart', { maxTurns: 5 }, undefined, { laterAttempt: true }).budget
+    expect(recovered.request()).toMatchObject({ ok: false, limit: { kind: 'turns', limit: 5 } })
+    expect(recovered.exhausted).not.toHaveProperty('actual')
+    // It stays refused for any further attempt.
+    expect(book.acquire('from-before-restart', { maxTurns: 5 }).budget.request()).toMatchObject({ ok: false })
+    expect(book.acquire('fresh', { maxTurns: 5 }).budget.request()).toEqual({ ok: true })
+    // A later attempt whose record exists continues it.
+    book.acquire('kept', { maxTurns: 5 }).release()
+    expect(book.acquire('kept', { maxTurns: 5 }, undefined, { laterAttempt: true }).budget.request()).toEqual({ ok: true })
+    // A caller's scope keeps its own counts across a restart: nothing is lost.
+    const scope = new RunCounters()
+    expect(book.acquire('scoped', { maxTurns: 5 }, scope, { laterAttempt: true }).budget.request()).toEqual({ ok: true })
+  })
+
   it('a settled run that comes back is refused every step', () => {
     const book = new RunCounterBook()
     book.acquire('done', { maxTurns: 3, maxToolCalls: 3 }).release()

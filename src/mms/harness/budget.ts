@@ -119,8 +119,11 @@ interface RunEntry {
 }
 
 /**
- * The runs' count records, by run id: every attempt of a run (a retry, a recovery) shares one, so
- * a new attempt never gets a fresh allowance.
+ * The runs' count records, by run id only: every attempt of a run (a retry, a recovery, one with
+ * other limits) shares one, so a new attempt never gets a fresh allowance.
+ *
+ * The records are in memory. A later attempt of a run whose record is missing (the app restarted
+ * since its first attempt) cannot know what the run used, so it fails closed like a dropped run.
  *
  * A run is pinned while an attempt is in flight and until its final settlement (`settle`). A run
  * that settled is dropped and remembered as dropped. Only if more than `keptIdle` runs sit between
@@ -137,9 +140,15 @@ export class RunCounterBook {
    * The budget of one attempt of `runId` under `limits` (the attempt's binding). `scope`, when
    * given, holds the counts instead of the run's own counters. `release` ends the attempt.
    */
-  acquire(runId: string, limits: CountLimits, scope?: CounterScope): { budget: TurnBudget; release(): void } {
+  acquire(runId: string, limits: CountLimits, scope?: CounterScope, options: { laterAttempt?: boolean } = {}): { budget: TurnBudget; release(): void } {
     if (this.dropped.has(runId)) return { budget: TurnBudget.lost(limits), release: () => {} }
     let entry = this.runs.get(runId)
+    // A later attempt with no record: its first ran in an earlier process (or before limits). A
+    // caller-given scope keeps its own counts, so only the run's own counters are lost.
+    if (!entry && options.laterAttempt && !scope) {
+      this.remember(runId)
+      return { budget: TurnBudget.lost(limits), release: () => {} }
+    }
     if (!entry) {
       entry = { state: { scope: scope ?? new RunCounters() }, live: 0 }
       this.runs.set(runId, entry)

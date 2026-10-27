@@ -26,7 +26,7 @@ import { COMMAND_DEADLINE_MS, INTERRUPT_DEADLINE_MS, READY_DEADLINE_MS } from '.
 import { PiBridge, type PiBridgeRegistration } from './bridge'
 import { DescendantTracker, OwnedGroups } from './descendants'
 import { WriterEpisode, type PiToolClass } from './episode'
-import { authorizeDefinitionCall } from '../../agentDefinitions/definitionGate'
+import { authorizeDefinitionCall, definitionRefusal } from '../../agentDefinitions/definitionGate'
 import type { AgentExecutionLimit } from '../../../shared/agents/execution'
 import { ANTHROPIC_OAUTH_REFUSED, BUDGET_EXHAUSTED, CREDENTIAL_UNAVAILABLE, GATE_REFUSALS, GATE_UNAVAILABLE, REQUEST_REFUSED } from './extension/messages'
 import { PI_BRIDGE_ENV, type PiCatalogProvider, type PiGateRequest, type PiGateResponse, type PiReadyRequest, type PiRequestResponse, type PiTurnResponse, type PiTurnTool } from './extension/protocol'
@@ -677,7 +677,7 @@ export class PiRpcEngine implements ProviderAdapter {
       attemptToken: turn.attemptToken,
       sessionInstructions: turn.host.bridge?.sessionInstructions ?? '',
       tools,
-      activeBuiltins: [...turn.active].filter((name) => name in BUILTIN_CLASSES),
+      activeBuiltins: [...turn.active].filter((name) => Object.hasOwn(BUILTIN_CLASSES, name)),
       mcp: turn.host.bridge?.mcp ?? null,
       catalogRevision
     }
@@ -714,7 +714,8 @@ export class PiRpcEngine implements ProviderAdapter {
     if (!turn.active.has(request.toolName)) return { allow: false, reason: `${GATE_REFUSALS.denied}: ${request.toolName} is not available in this turn` }
     const kind = turn.classes.get(request.toolName) ?? 'mutation'
     const access = turn.input.child?.readOnly ? turn.host.tools.toolAccess : undefined
-    const definition = request.toolName in BUILTIN_CLASSES ? turn.host.definition : undefined
+    const builtin = Object.hasOwn(BUILTIN_CLASSES, request.toolName)
+    const definition = builtin ? turn.host.definition : undefined
     let input = request.input
     let rewritten: Record<string, unknown> | undefined
     if (access || definition) {
@@ -736,6 +737,13 @@ export class PiRpcEngine implements ProviderAdapter {
       } catch (error) {
         return { allow: false, reason: error instanceof Error ? error.message : GATE_REFUSALS.denied }
       }
+    }
+    // A definition run's app and MCP tools: refused here when the definition refuses them outright,
+    // so a refused call is never charged (as a refused built-in is not). The registry checks them
+    // again, with approval, when they execute.
+    if (!builtin && turn.host.definition) {
+      const refusal = definitionRefusal(turn.host.definition, { toolName: request.toolName, args: input, projectPath: thread.cwd })
+      if (refusal) return { allow: false, reason: refusal }
     }
     if (definition) {
       // The arguments checked (and approved) are the ones the tool runs with.
@@ -1121,7 +1129,7 @@ export class PiRpcEngine implements ProviderAdapter {
         void thread.descendants?.snapshot()
         void thread.groups.refresh().catch(() => {})
         const name = String(event.toolName)
-        const mousse = !(name in BUILTIN_CLASSES)
+        const mousse = !Object.hasOwn(BUILTIN_CLASSES, name)
         turn.openTools.set(String(event.toolCallId), { name, mousse })
         turn.progress()
         sink.tool({

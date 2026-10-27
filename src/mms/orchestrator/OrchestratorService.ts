@@ -1726,6 +1726,7 @@ export class OrchestratorService extends EventEmitter {
       turnToken: turn.turnToken,
       modeCeiling: turn.modeCeiling,
       mcpEligible: Boolean(this.runEngine),
+      ...(turn.definition ? { definition: turn.definition } : {}),
       instructions: (mcpAttached) => ({
         sessionInstructions: sessionInstructions({ mcp: mcpAttached, appletGuidance: this.appletStore ? APPLET_GENERATION_GUIDANCE : undefined }),
         turnPreamble: turnPreamble({
@@ -5955,9 +5956,11 @@ export class OrchestratorService extends EventEmitter {
         }
       }
       const previous = engineRunId ? this.runEngine?.previousBinding(session.threadId, engineRunId, binding.instanceId) : undefined
+      const attemptOrdinal = engineRunId ? this.runEngine?.activeAttemptOrdinal(engineRunId) : undefined
       const result = await this.harness.startTurn({
         binding,
         ...(previous ? { previous } : {}),
+        ...(attemptOrdinal ? { attemptOrdinal } : {}),
         input: turnInput,
         sink: turnSink,
         control: turnControl,

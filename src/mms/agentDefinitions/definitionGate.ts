@@ -34,6 +34,23 @@ export function definitionToolGranted(toolName: string, grants: EffectiveAgentGr
 }
 
 /**
+ * Why the definition refuses a call outright (not granted, or refused by its policy before any
+ * approval), or undefined when it may go on to approval. It asks nobody.
+ */
+export function definitionRefusal(authority: DefinitionAuthority, call: { toolName: string; args: Record<string, unknown>; projectPath?: string }): string | undefined {
+  if (!definitionToolGranted(call.toolName, authority.grants, authority.mcpTools)) return `Tool "${call.toolName}" is not granted to this agent definition.`
+  const prepared = prepareTrustedToolDispatch({
+    policy: authority.policy,
+    grants: authority.grants,
+    toolName: call.toolName,
+    args: call.args,
+    isMcp: (authority.mcpTools ?? []).some((tool) => tool.providerName === call.toolName),
+    ...(call.projectPath ? { projectPath: call.projectPath } : {})
+  })
+  return prepared.allowed ? undefined : prepared.message ?? 'Tool dispatch denied.'
+}
+
+/**
  * One call under the definition's authority: granted, prepared, approved when the policy says so,
  * and revalidated. `args` are the arguments the call runs with; the caller never changes them
  * after this check.

@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { DefinitionAuthority } from '../../src/mms/agentDefinitions/definitionGate'
+import { RunCounters, TurnBudget } from '../../src/mms/harness/budget'
 import type { AgentRuntimePolicy, AgentRuntimeToolApprovalRequest } from '../../src/shared/agents/execution'
 import type { EffectiveAgentGrants } from '../../src/shared/agents/types'
 import { harness, script, setup } from './piRpcEngineFixture'
@@ -129,4 +130,29 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
     expect(readdirSync(project)).toEqual(['approved.txt'])
     expect(starts).toHaveLength(1)
   }, 120_000)
+
+  it('an app tool the definition refuses is refused at the gate and costs no tool call, as a refused built-in does', async () => {
+    const { engine, recorder, project } = await setup(cleanups, {
+      mousseTools: () => [{ name: 'create_task', description: 'Create a task', inputSchema: { type: 'object', properties: { description: { type: 'string' } } }, class: 'mutation' }]
+    })
+    recorder.respond(script([
+      { tool: { name: 'create_task', args: { description: 'not granted' } } },
+      { tool: { name: 'write', args: { path: 'granted.txt', content: 'ok' } } },
+      { text: 'done' }
+    ]))
+    const counters = new RunCounters()
+    const turn = harness(project, {}, {
+      definition: { policy: policy(project), grants: grants('write') },
+      budget: new TurnBudget({ maxToolCalls: 1 }, counters),
+      // Nothing listens here: a refused call never reaches the Mousse MCP server.
+      bridge: { mcp: { url: 'http://127.0.0.1:9/mcp', token: 'unused' }, turnToken: 'tt', sessionInstructions: '', turnPreamble: '', userMcp: 'proxy' }
+    })
+    const result = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
+    expect(result.text).toBe('done')
+    const results = turn.events.filter((event) => event.kind === 'tool' && event.phase === 'complete')
+    expect(String(results[0].response)).toContain('not granted')
+    // The refused app tool cost nothing: the one allowed call was the granted write.
+    expect(readFileSync(join(project, 'granted.txt'), 'utf8')).toBe('ok')
+    expect(counters.toolCalls).toBe(1)
+  }, 90_000)
 })

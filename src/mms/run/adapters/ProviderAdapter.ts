@@ -286,8 +286,9 @@ export interface AdapterHost {
   budget?: TurnBudget
   /**
    * A definition run's authority over its tool calls (PR 4 §5a), checked before each call the
-   * runtime's own tools would run. App tools are checked by the Mousse MCP registry instead, from
-   * the same authority on the run's `AppToolTurn`.
+   * runtime's own tools would run. Set only by the gateway, from the turn's app context, which
+   * takes it from the run's `AppToolTurn`: the Mousse MCP registry checks app and MCP tools against
+   * that same object.
    */
   definition?: DefinitionAuthority
   context: {
