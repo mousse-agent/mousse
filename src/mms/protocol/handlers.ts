@@ -23,7 +23,7 @@ import { PROVIDER_STT_MAX_BYTES } from '../../shared/dictation'
 import { PROVIDER_TTS_MAX_CHARS } from '../../shared/readAloud'
 import type { ThreadAction } from '../../shared/threadActions'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
-import type { ChatMessage, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest } from '../../shared/types'
+import type { ChatMessage, FileSearchResponse, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest } from '../../shared/types'
 import { listClaimedQueue } from '../queue/ThreadMessageQueue'
 import { formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
 import type { ModelOverride } from '../../shared/providerInstances'
@@ -89,9 +89,11 @@ import { ChangeReceiptService } from '../actions/ChangeReceiptService'
 import { PublishService } from '../actions/PublishService'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { resolveWithinRoot } from '../files/pathGuard'
+import { getWorkspaceIndexRegistry } from '../files/WorkspaceIndexRegistry'
+import { searchWorkspacePaths } from '../files/WorkspaceSearch'
 import { devGuiBridge } from '../devgui/DevGuiBridge'
 import { existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { join, relative, resolve } from 'node:path'
 import type { DomainConnectionContext } from './domainRegistry'
 import { DomainRpcError } from './domainRegistry'
 import { WORKFLOW_RUN_CAPABILITY } from '../../shared/workflowRunPlatform'
@@ -2183,16 +2185,51 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
             presentationMessageStart: latest?.presentationMessageEnd ?? 0, presentationMessageEnd: latest?.presentationMessageEnd ?? 0,
             nativeContextBoundary: latest?.nativeContextBoundary ?? { messageIndex: 0, compactionGeneration: 0, fidelity: 'legacy' }
           }, () => ctx.mms.fileService.writeFile(root, path, content))
+          // Covers daemon-side writers only: desktop saves and agent edits never reach this method
+          // (the search index refreshes on its own 15 s stale rule).
+          getWorkspaceIndexRegistry().invalidate(root)
           ctx.emitEvent?.('actions.updated', { threadId, action }, threadId)
           return { path, lineEdits, receiptId: action.receiptId }
         }
       }
-      return { path, lineEdits: await ctx.mms.fileService.writeFile(root, path, content) }
+      const lineEdits = await ctx.mms.fileService.writeFile(root, path, content)
+      getWorkspaceIndexRegistry().invalidate(root)
+      return { path, lineEdits }
     }
     case 'files.stat': {
       const p = isObject(params) ? params : {}
       const root = projectRootContext(ctx, p)
       return { stat: await ctx.mms.fileService.stat(root, requiredContainedPath(root, p.path)) }
+    }
+    case 'files.search': {
+      const p = isObject(params) ? params : {}
+      const root = projectRootContext(ctx, p)
+      const query = asOptionalString(p.query, 512) ?? ''
+      const limit = asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: 200 }) ?? 50
+      const kinds = p.kinds === undefined || p.kinds === null
+        ? undefined
+        : asStringArray(p.kinds, 'kinds', { unique: true, maxItems: 2, maxItemLen: 16 }).map((kind) => {
+          if (kind !== 'file' && kind !== 'directory') throw new DomainRpcError('invalid_params', "kinds must be 'file' or 'directory'")
+          return kind
+        })
+      const absoluteRoot = resolve(root)
+      const { snapshot, indexing } = await getWorkspaceIndexRegistry().get(absoluteRoot)
+      if (!snapshot) {
+        return { root: absoluteRoot, source: null, results: [], indexed: 0, indexedAt: null, truncated: false, indexing: true, complete: false } satisfies FileSearchResponse
+      }
+      const ranked = await searchWorkspacePaths(snapshot, query, { limit, kinds })
+      // Results only, never the index: a client never receives the path list itself.
+      return {
+        root: absoluteRoot,
+        source: snapshot.source,
+        ...(snapshot.fallbackReason ? { fallbackReason: snapshot.fallbackReason } : {}),
+        results: ranked.results,
+        indexed: snapshot.files.length + snapshot.folders.length,
+        indexedAt: new Date(snapshot.builtAt).toISOString(),
+        truncated: snapshot.truncated,
+        indexing,
+        complete: snapshot.complete && ranked.complete
+      } satisfies FileSearchResponse
     }
     case 'git.status': {
       const p = isObject(params) ? params : {}

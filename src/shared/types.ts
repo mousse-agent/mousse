@@ -949,6 +949,35 @@ export interface FileEntry {
   kind: 'file' | 'directory'
 }
 
+export interface FileSearchResult {
+  /** Root-relative, `/`-separated. */
+  path: string
+  kind: 'file' | 'directory'
+  score: number
+  /** Indexes into `path` of the matched characters. */
+  positions: number[]
+}
+
+export interface FileSearchResponse {
+  /** Absolute root the result paths are relative to (a thread worktree, not necessarily the project). */
+  root: string
+  /** `null` while the first index has produced nothing yet. */
+  source: 'git' | 'walk' | null
+  /** Why a Git repository was walked instead of listed by git; absent for `git` and when nothing was indexed. */
+  fallbackReason?: 'not-a-repo' | 'git-missing' | 'git-too-old'
+  results: FileSearchResult[]
+  /** Paths (files and folders) in the index this answer came from. */
+  indexed: number
+  /** ISO time the index was built; `null` before any snapshot. */
+  indexedAt: string | null
+  /** The index hit its path cap. */
+  truncated: boolean
+  /** The index is still building; results come from what was collected so far. */
+  indexing: boolean
+  /** Neither the index nor the ranking was cut short. */
+  complete: boolean
+}
+
 export interface FileStat {
   path: string
   kind: 'file' | 'directory'

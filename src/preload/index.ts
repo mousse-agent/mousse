@@ -21,6 +21,7 @@ import type {
   FileAsset,
   EditorInfo,
   FileEntry,
+  FileSearchResponse,
   GitBranchInfo,
   GitCommit,
   GitCommitOptions,
@@ -407,7 +408,13 @@ const api = {
     readAsset: (filePath: string, projectId?: string, threadId?: string | null): Promise<FileAsset> =>
       ipcRenderer.invoke('fs:readAsset', filePath, projectId, threadId),
     writeFile: (filePath: string, content: string, projectId?: string, threadId?: string | null): Promise<void> =>
-      ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId)
+      ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId),
+    search: (
+      query: string,
+      options?: { limit?: number; kinds?: Array<'file' | 'directory'> },
+      projectId?: string,
+      threadId?: string | null
+    ): Promise<FileSearchResponse> => ipcRenderer.invoke('fs:search', query, options, projectId, threadId)
   },
   github: {
     status: (): Promise<GitHubAvailability> => ipcRenderer.invoke('github:status'),
