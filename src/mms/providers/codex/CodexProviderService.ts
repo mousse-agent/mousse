@@ -958,6 +958,8 @@ export class CodexProviderService {
   private readonly settingsPath: string
   private settings: Settings = {}
   private settingsError?: string
+  /** Another service of this instance writes the settings now (its home changed); this one never writes them again. */
+  private settingsFrozen = false
   private stopped = false
   /** `verified`: this process answered `account/read` with a ChatGPT account. */
   private app?: {
@@ -1040,7 +1042,7 @@ export class CodexProviderService {
   }
 
   private save(): void {
-    if (this.settingsError) return
+    if (this.settingsError || this.settingsFrozen) return
     mkdirSync(this.dir, { recursive: true, mode: 0o700 })
     atomicWriteJsonSync(this.settingsPath, this.settings)
   }
@@ -1062,7 +1064,7 @@ export class CodexProviderService {
   vendorMirror(fields: readonly MirrorField[]): VendorMirror {
     return settingsMirror(fields, {
       settings: () => this.settings as Record<string, unknown>,
-      settingsError: () => this.settingsError,
+      settingsError: () => this.settingsError ?? (this.settingsFrozen ? 'Another Codex service writes these settings now.' : undefined),
       save: () => this.save(),
       exists: () => existsSync(this.settingsPath),
       signedOutKey: 'disconnected'
@@ -1402,6 +1404,56 @@ export class CodexProviderService {
     this.save()
     this.abortInFlight()
     this.app?.conn.close()
+  }
+
+  /**
+   * `codex` as Mousse starts it, with the environment of its own commands (the sign-in check, turns):
+   * what the sign-in and sign-out of an instance with its own home run with. Undefined when no
+   * executable is found.
+   */
+  authLaunch(): { command: string; args: string[]; env: NodeJS.ProcessEnv } | undefined {
+    const launch = this.launchTarget()
+    return launch ? { command: launch.command, args: [...launch.args], env: this.environment() } : undefined
+  }
+
+  /**
+   * What Codex says of the account in this instance's environment now, whatever Mousse recorded (a
+   * disconnect included) and without touching the recorded state. A process that is already running
+   * answers for the account it started with: callers that just changed the sign-in stop every
+   * process first (`stopAll`). `unknown`: it did not answer.
+   */
+  async authState(): Promise<'signed_in' | 'signed_out' | 'unknown'> {
+    if (this.stopped || !this.binary()) return 'unknown'
+    try {
+      const result = await this.probe()
+      return result.kind === 'signed_in' ? 'signed_in' : result.kind === 'signed_out' ? 'signed_out' : 'unknown'
+    } finally {
+      this.closeWhenIdle(CODEX_CHECK_CLOSE_MS)
+    }
+  }
+
+  /**
+   * Takes the sign-in the CLI now holds in this home as the instance's: every process that started
+   * under the old one ends (a long-lived app-server keeps the account it started with), the listed
+   * models are forgotten (the plan may list others), and a new process says who is signed in,
+   * whatever Mousse has flagged (the gateway clears a sign-out flag once the sign-in succeeded).
+   * True when the home reads signed in; rejects when a process could not be stopped.
+   */
+  async reconnect(): Promise<boolean> {
+    await this.stopAll('The Codex sign-in changed')
+    this.lastLimits = undefined
+    this.clearModels()
+    const state = await this.authState()
+    this.probeResult = undefined
+    return state === 'signed_in'
+  }
+
+  /**
+   * Another service of this instance writes its settings from now on (its home changed): this one
+   * finishes its turns but never writes the file again, so one file never has two writers.
+   */
+  freezeSettings(): void {
+    this.settingsFrozen = true
   }
 
   /** The executable path, launch args and environment set in Settings → Providers. */

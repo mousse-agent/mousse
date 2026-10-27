@@ -147,7 +147,21 @@ const CLAUDE_OWNED_ENV: OwnedEnvRules = {
   fixed: (home) => ({ CLAUDE_CONFIG_DIR: home, CLAUDE_SECURESTORAGE_CONFIG_DIR: home, ANTHROPIC_CONFIG_DIR: join(home, 'anthropic') })
 }
 
-const OWNED_ENV_RULES: Partial<Record<HarnessDriverKind, OwnedEnvRules>> = { claude: CLAUDE_OWNED_ENV }
+const CODEX_OWNED_ENV: OwnedEnvRules = {
+  // Codex's own variables (the home and the state database, access tokens, keys, login servers and
+  // identity services) and the other routes it can take instead of a ChatGPT sign-in: OpenAI and
+  // Azure OpenAI keys and addresses, ChatGPT, and Amazon Bedrock. Names checked against the text of
+  // Codex 0.162's program file, which was not run.
+  closed: ['CODEX_*', 'OPENAI_*', 'CHATGPT_*', 'AZURE_*', 'AWS_*', ...(INHERITED_CREDENTIALS.codex ?? [])],
+  // A certificate bundle for the network is not a credential, and a company network needs it.
+  inherit: ['CODEX_CA_CERTIFICATE'],
+  reserved: ['CODEX_*', 'OPENAI_*', 'CHATGPT_*', 'AZURE_*', 'AWS_*', ...(INHERITED_CREDENTIALS.codex ?? [])],
+  // The sign-in file and the OS credential item are named after this folder, and the state database
+  // stays in it, so one instance never reads or writes another account's files.
+  fixed: (home) => ({ CODEX_HOME: home, CODEX_SQLITE_HOME: home })
+}
+
+const OWNED_ENV_RULES: Partial<Record<HarnessDriverKind, OwnedEnvRules>> = { claude: CLAUDE_OWNED_ENV, codex: CODEX_OWNED_ENV }
 
 /**
  * Why `name` cannot be set in the configured variables of an instance with its own home: it says
@@ -160,6 +174,7 @@ export function reservedEnvName(driver: HarnessDriverKind, name: string): { kind
   if (!rules) return undefined
   const fixed = Object.keys(rules.fixed('')).find((variable) => variable.toUpperCase() === name.toUpperCase())
   if (fixed) return { kind: 'home', variable: fixed }
+  if (matchesVariable(rules.inherit, name)) return undefined
   return matchesVariable(rules.reserved, name) ? { kind: 'credential', variable: name } : undefined
 }
 
@@ -209,7 +224,7 @@ export function instanceEnv(input: {
   const base = input.base ?? process.env
   const variable = HOME_VARIABLES[input.driver]
   const owned = Boolean(input.home && OWNED_ENV_RULES[input.driver])
-  // A driver with rules (Claude Code) starts from the owned environment; the others drop their listed credentials.
+  // A driver with rules (Claude Code, Codex) starts from the owned environment; the others drop their listed credentials.
   let env = owned ? ownedLaunchEnv(input.driver, { env: base, home: input.home }, undefined) : input.home && variable ? withUserEnv(base, { [variable]: input.home }) : { ...base }
   if (input.home && !owned) {
     const drop = INHERITED_CREDENTIALS[input.driver] ?? []
