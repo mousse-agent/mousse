@@ -1089,6 +1089,9 @@ export class Harness implements HarnessGateway {
   }
 
   async bind(resolved: ResolvedTurnSelection, input: BindInput): Promise<ExecutionBinding> {
+    // A selection resolved before its entry was removed binds nothing (a removed entry is unknown).
+    if (this.instanceMap.isRemoved(resolved.instanceId))
+      harnessFail('instance_unknown', `Provider instance "${resolved.instanceId}" was removed. Add it again in Settings → Providers, or choose another model.`, resolved.instanceId)
     const record = this.recordOrUndefined(resolved.instanceId)
     // Nothing is admitted on an instance signed out in Mousse: no account check, no runtime start.
     if (record) this.refuseSignedOut(record)
@@ -2073,16 +2076,19 @@ export class Harness implements HarnessGateway {
 
   listedLlmProviders(scope: ProviderScope): LlmProviderOption[] {
     const entries = this.instanceMap.list()
-    const listed: LlmProviderOption[] = []
+    const apis: LlmProviderOption[] = []
+    const agents: LlmProviderOption[] = []
     for (const [instanceId, entry] of Object.entries(entries)) {
       if (!this.scopes.enabled(instanceId, entry.enabled, scope).effective) continue
       const record = this.listedRecord(instanceId)
       // A runtime lists nothing while it cannot run (a model API without its credential).
       const option = record && this.named(record, record.runtime.llmProvider?.())
       if (!option) continue
-      listed.push({ ...visibleProviderOption({ ...option, instanceId }, this.prefs.get(instanceId)), instanceId, oneShot: this.oneShotAvailable(instanceId) })
+      const listed = { ...visibleProviderOption({ ...option, instanceId }, this.prefs.get(instanceId)), instanceId, oneShot: this.oneShotAvailable(instanceId) }
+      // In the order the pickers have always shown: model APIs (fixed-id entries) by name, then agents.
+      ;(record.driver.instanceIdFor ? apis : agents).push(listed)
     }
-    return listed
+    return [...apis.sort((a, b) => a.label.localeCompare(b.label)), ...agents]
   }
 
   /** The record of an instance the listings show, or undefined (unknown, or signed out in Mousse). */

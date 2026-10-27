@@ -115,14 +115,14 @@ describe('seed versions', () => {
 describe('ProviderInstanceService', () => {
   /** `seedVersion` absent: a profile that was never seeded. */
   const service = (stored?: unknown, credentials: string[] = [], seedVersion?: unknown) => {
-    const store = { value: stored, seedVersion, writes: 0, fail: undefined as Error | undefined }
+    const store = { value: stored, seedVersion, removed: undefined as unknown, writes: 0, fail: undefined as Error | undefined }
     const instances = new ProviderInstanceService({
       store: {
         read: () => {
           if (store.fail) throw store.fail
-          return { instances: store.value, seedVersion: store.seedVersion }
+          return { instances: store.value, seedVersion: store.seedVersion, removed: store.removed }
         },
-        write: (next) => { store.value = next.instances; store.seedVersion = next.seedVersion; store.writes += 1 }
+        write: (next) => { store.value = next.instances; store.seedVersion = next.seedVersion; store.removed = next.removed; store.writes += 1 }
       },
       providerAuth: {
         credentials: { listProviderIds: () => credentials },
@@ -220,7 +220,7 @@ describe('ProviderInstanceService', () => {
     expect(instances.migrate(undefined)).toBeUndefined()
   })
 
-  it('lists configured providers and model catalogs from one instance map, with instance ids', () => {
+  it('lists configured providers from one instance map, with instance ids (transitional, until 5a-2)', () => {
     const { instances } = service({ 'pi:openrouter': { driver: 'pi', enabled: false }, antigravity: { driver: 'antigravity', enabled: false } }, ['openai', 'openrouter'])
     instances
       .registerVendor('claude', { configuredProvider: () => ({ id: 'claude-subscription', label: 'Claude', authType: 'oauth' }), llmProvider: () => ({ id: 'claude-subscription', label: 'Claude', models: [] }) })
@@ -229,9 +229,64 @@ describe('ProviderInstanceService', () => {
       ['openai', 'pi:openai'],
       ['claude-subscription', 'claude']
     ])
-    expect(instances.llmProviders().map((provider) => [provider.id, provider.instanceId])).toEqual([
-      ['openai', 'pi:openai'],
-      ['claude-subscription', 'claude']
-    ])
+  })
+})
+
+describe('removed instances (tombstones)', () => {
+  const service = (stored: Record<string, unknown>, credentials: string[], removed?: unknown) => {
+    const store = { value: stored as unknown, seedVersion: 1 as unknown, removed, writes: 0 }
+    const instances = new ProviderInstanceService({
+      store: {
+        read: () => ({ instances: store.value, seedVersion: store.seedVersion, removed: store.removed }),
+        write: (next) => { store.value = next.instances; store.seedVersion = next.seedVersion; store.removed = next.removed; store.writes += 1 }
+      },
+      providerAuth: {
+        credentials: { listProviderIds: () => credentials },
+        has: (id: string) => credentials.includes(id),
+        getConfiguredProviders: () => credentials.map((id) => ({ id, label: id, authType: 'api_key' as const }))
+      }
+    })
+    return { instances, store }
+  }
+
+  it('removing tombstones the id in the same write, and a credentialed pi provider is not seeded back', () => {
+    const { instances, store } = service({ 'pi:openrouter': { driver: 'pi', enabled: true } }, ['openrouter'])
+    instances.removeEntry('pi:openrouter')
+    expect(store.removed).toEqual(['pi:openrouter'])
+    expect(store.value).toEqual({})
+    // The key is still saved (another profile's), yet nothing brings the entry back.
+    expect(instances.list()).toEqual({})
+    expect(store.value).toEqual({})
+    expect(instances.isRemoved('pi:openrouter')).toBe(true)
+  })
+
+  it('is authoritative over a stored entry an older build re-seeded, which stays on disk untouched', () => {
+    const stale = { driver: 'pi', enabled: true, config: { legacy: 'kept' } }
+    const { instances, store } = service({ 'pi:openrouter': stale, claude: { driver: 'claude', enabled: true } }, ['openrouter'], ['pi:openrouter'])
+    expect(Object.keys(instances.list())).toEqual(['claude'])
+    // No stored entry and no implicit pi instance: the id is unknown everywhere.
+    expect(instances.get('pi:openrouter')).toBeUndefined()
+    expect(codeOf(() => instances.resolve('pi:openrouter'))).toBe('provider_instance_unknown')
+    expect(codeOf(() => instances.overrideFor({ instanceId: 'pi:openrouter', model: 'm' }))).toBe('provider_instance_unknown')
+    expect(instances.migrate({ instanceId: 'pi:openrouter', llmProvider: 'openrouter', model: 'm' })).toEqual({ instanceId: 'pi:openrouter', llmProvider: 'openrouter', model: 'm' })
+    expect(instances.configuredProviders().map((provider) => provider.instanceId)).not.toContain('pi:openrouter')
+    expect(store.writes).toBe(0)
+    expect((store.value as Record<string, unknown>)['pi:openrouter']).toBe(stale)
+  })
+
+  it('takes no entry for a removed id except an explicit add, which writes it fresh and clears the tombstone in one write', () => {
+    const { instances, store } = service({ 'pi:openrouter': { driver: 'pi', enabled: true, config: { legacy: 'stale' } } }, ['openrouter'], ['pi:openrouter', 'codex'])
+    expect(codeOf(() => instances.setEntry('pi:openrouter', { driver: 'pi', enabled: false }))).toBe('provider_instance_unknown')
+    expect(store.writes).toBe(0)
+    instances.setEntry('pi:openrouter', { driver: 'pi', enabled: true }, { revive: true })
+    expect(store.writes).toBe(1)
+    expect(store.removed).toEqual(['codex'])
+    expect((store.value as Record<string, unknown>)['pi:openrouter']).toEqual({ driver: 'pi', enabled: true })
+    expect(instances.get('pi:openrouter')).toEqual({ driver: 'pi', enabled: true })
+  })
+
+  it('reads a malformed tombstone list as empty', () => {
+    const { instances } = service({}, ['openai'], 'pi:openai')
+    expect(Object.keys(instances.list())).toEqual(['pi:openai'])
   })
 })

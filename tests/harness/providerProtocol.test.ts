@@ -14,11 +14,12 @@ function context(instances?: Partial<HarnessInstances>, registry?: Partial<Harne
 
 describe('harness provider protocol', () => {
   it('declares the full command set', () => {
-    expect(HARNESS_METHODS).toHaveLength(18)
+    expect(HARNESS_METHODS).toHaveLength(19)
   })
 
   it('the GUI refuses, with recovery steps, a running service that predates the provider methods', async () => {
-    expect(GUI_REQUIRED_METHODS.filter((method) => HARNESS_METHODS.includes(method as never))).toHaveLength(HARNESS_METHODS.length)
+    // `setSecret` is required once the GUI calls it (5a-2); until then a daemon without it still serves this GUI.
+    expect(GUI_REQUIRED_METHODS.filter((method) => HARNESS_METHODS.includes(method as never))).toHaveLength(HARNESS_METHODS.length - 1)
     const current = [...PROTOCOL_METHODS, ...GUI_REQUIRED_METHODS]
     const older = current.filter((method) => !HARNESS_METHODS.includes(method as never))
     const client = (methods: readonly string[]) => ({ request: async () => ({ protocolVersion: MMS_PROTOCOL_VERSION, methods }) }) as never
