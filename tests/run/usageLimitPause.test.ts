@@ -36,6 +36,8 @@ const managedCodexLimit = (): AppError =>
 /** One turn of a scripted adapter: it fails with the error (built when the turn runs, so its reset is still ahead), waits on a gate, or replies. */
 type Step = { fail?: () => Error; gate?: Promise<void> }
 
+const rowId = (threadId: string): string => `inbox:pr-update:${threadId}:1:0`
+
 /** The notice a watched pull request writes into a thread's inbox, and a phrase that appears in it once. */
 const NOTICE = formatPullRequestNotice([{ kind: 'checks_failed', checks: [{ name: 'build', state: 'failing', url: null }] }], { number: 7, title: 'Add thing', url: 'https://github.com/acme/app/pull/7', headSha: 'abcdef0123', authorAssociation: 'OWNER' }, 'act')
 const NOTICE_MARK = 'Add thing'
@@ -87,6 +89,10 @@ describe('a usage limit pauses the run', () => {
   const systemLines = (d: Phase6Daemon, threadId: string): string[] => d.orch.getMessages(threadId).filter((message) => message.role === 'system').map((message) => message.content)
   const queueOf = (d: Phase6Daemon, threadId: string) => readDurableQueue(d.store, threadId)
   const settled = (d: Phase6Daemon, threadId: string) => runsOf(d, threadId).every((run) => ['completed', 'failed', 'cancelled', 'interrupted', 'uncertain'].includes(run.status))
+
+  /** What `thread_send` does: another thread's agent writes to `threadId`. */
+  const agentSend = (d: Phase6Daemon, threadId: string, clientRequestId: string) =>
+    (d.orch as any).sendToThreadAsAgent(threadId, { content: 'second', mode: 'agent' }, { clientRequestId, actor: { kind: 'agent', threadId: 'other-thread', runId: 'run:other:1', toolCallId: 'call-1' } })
 
   /** A thread whose first message hit a usage limit; the run is paused. */
   const paused = async (d: Phase6Daemon, pi: ScriptedAdapter, title = 'Limited') => {
@@ -195,6 +201,26 @@ describe('a usage limit pauses the run', () => {
       expect(queueOf(d, thread.id)).toEqual([])
       expect(pi.turns).toHaveLength(1)
     })
+  })
+
+  it('a Stop that came before the limit stays a Stop: the run is interrupted by the user and never paused', async () => {
+    const gate = deferred()
+    const pi = scripted([{ gate: gate.promise, fail: () => limit({ ms: 60_000 }) }])
+    const d = boot(newHome(), [pi])
+    const thread = d.store.createThread('Stopping')
+    d.orch.setThreadModelOverride(thread.id, PI)
+    const first = await d.orch.send('Do the work', false, { threadId: thread.id, clientRequestId: 'first', awaitMode: 'ack' })
+    await waitFor(() => pi.turns.length === 1, 'the turn')
+
+    const stopping = d.orch.stopThread(thread.id, 'user')
+    await waitFor(() => d.engine.getRun(first.runId!)!.outcome?.stopRequested === true, 'the Stop to be recorded')
+    gate.release()
+    await stopping
+    await waitFor(() => d.engine.getRun(first.runId!)!.status === 'interrupted', 'the run to end')
+
+    expect(d.engine.getRun(first.runId!)).toMatchObject({ status: 'interrupted', outcome: { interruptedBy: 'user' } })
+    expect(d.engine.store.getPausedRun(thread.id)).toBeNull()
+    expect(effectsOf(d, first.runId!, 'run.resume')).toEqual([])
   })
 
   describe('Resume now', () => {
@@ -384,6 +410,18 @@ describe('a usage limit pauses the run', () => {
       expect(runsOf(d, thread.id)[1].outcome!.pause).toMatchObject({ count: 2 })
     })
 
+    it('a message another thread\'s agent sends is refused too: it never ends the pause', async () => {
+      const pi = scripted([{ fail: () => limit({ ms: 60_000 }) }])
+      const d = boot(newHome(), [pi])
+      const { thread, run } = await paused(d, pi)
+
+      await expect(agentSend(d, thread.id, 'agent-1')).rejects.toMatchObject({ code: 'thread_paused' })
+
+      expect(d.engine.getRun(run.runId)!.status).toBe('paused')
+      expect(effectsOf(d, run.runId, 'run.resume').map((effect) => effect.status)).toEqual(['pending'])
+      expect(runsOf(d, thread.id)).toHaveLength(1)
+    })
+
     it('a scheduled run admitted before the pause waits: starting it neither ends the pause nor runs beside it', async () => {
       const gate = deferred()
       const pi = scripted([{ gate: gate.promise, fail: () => limit({ ms: 60_000 }) }])
@@ -511,7 +549,7 @@ describe('a usage limit pauses the run', () => {
     })
   })
 
-  describe.each([['a message a person queued', 'gui'], ['a follow-up a parent queued for a subagent', 'delegation']])('%s before the limit', (_name, source) => {
+  describe.each([['a message a person queued', 'gui'], ['a follow-up a parent queued for a subagent', 'delegation'], ['a message another thread\'s agent queued', 'mcp']])('%s before the limit', (_name, source) => {
     const ordered = async (automatic: boolean) => {
       const gate = deferred()
       const pi = scripted([{ gate: gate.promise, fail: () => limit({ ms: automatic ? 1500 : 60_000 }) }])
@@ -521,7 +559,7 @@ describe('a usage limit pauses the run', () => {
       d.orch.setThreadModelOverride(thread.id, PI)
       const first = await d.orch.send('first', false, { threadId: thread.id, clientRequestId: 'a', awaitMode: 'ack' })
       await waitFor(() => pi.turns.length === 1, 'the first turn')
-      const queued = await d.orch.send('second', false, { threadId: thread.id, clientRequestId: 'b', source, awaitMode: 'ack' })
+      const queued = source === 'mcp' ? await agentSend(d, thread.id, 'b') : await d.orch.send('second', false, { threadId: thread.id, clientRequestId: 'b', source, awaitMode: 'ack' })
       expect(queued.queued).toBe(true)
       gate.release()
       await waitFor(() => d.engine.getRun(first.runId!)!.status === 'paused', 'the pause')
@@ -532,11 +570,11 @@ describe('a usage limit pauses the run', () => {
       const { d, pi, thread, first } = await ordered(false)
       await new Promise((resolve) => setTimeout(resolve, 300))
       expect(pi.turns).toHaveLength(1)
-      expect(queueOf(d, thread.id).filter((item) => !item.internal).map((item) => item.content)).toEqual(['second'])
+      expect(queueOf(d, thread.id).filter((item) => !item.internal).map((item) => item.content)).toEqual([expect.stringContaining('second')])
 
       await d.orch.resumePausedRun(first.runId!)
       await waitFor(() => pi.turns.length === 3 && settled(d, thread.id), 'both turns')
-      expect(pi.turns.map((turn) => turn.prompt)).toEqual(['first', CONTINUE_TEXT, 'second'])
+      expect(pi.turns.map((turn) => turn.prompt)).toEqual(['first', CONTINUE_TEXT, expect.stringContaining('second')])
       expect(queueOf(d, thread.id)).toEqual([])
     })
 
@@ -546,9 +584,9 @@ describe('a usage limit pauses the run', () => {
       const second = boot(home, [pi], { pid: 2 })
       // The startup drain looks at the thread too: the queue is held, so it takes nothing.
       second.orch.recoverAndDrainPendingQueues()
-      expect(queueOf(second, thread.id).filter((item) => !item.internal).map((item) => item.content)).toEqual(['second'])
+      expect(queueOf(second, thread.id).filter((item) => !item.internal).map((item) => item.content)).toEqual([expect.stringContaining('second')])
       await waitFor(() => pi.turns.length === 3 && settled(second, thread.id), 'both turns')
-      expect(pi.turns.map((turn) => turn.prompt)).toEqual(['first', CONTINUE_TEXT, 'second'])
+      expect(pi.turns.map((turn) => turn.prompt)).toEqual(['first', CONTINUE_TEXT, expect.stringContaining('second')])
       expect(second.engine.getRun(first.runId!)!.status).toBe('interrupted')
     })
   })
@@ -564,8 +602,6 @@ describe('a usage limit pauses the run', () => {
       }
       return { state, fault }
     }
-    const rowId = (threadId: string) => `inbox:pr-update:${threadId}:1:0`
-
     /** A paused run with a notice row waiting for it, whose limit resets in a moment. */
     const pausedWithRow = async (home: string, pi: ScriptedAdapter, fault: (point: string) => void) => {
       const d = boot(home, [pi], { pid: 1, fault })
@@ -643,6 +679,24 @@ describe('a usage limit pauses the run', () => {
       await waitFor(() => runsOf(d, thread.id).length === 2 && settled(d, thread.id), 'the continuation to finish')
       expect(ownedAtFailure).toBe(0)
       expectOneContinuation(d, pi, thread.id)
+    })
+
+    it('every carried row read before the claim: the continue turn still runs with the fixed text, and nothing stays owned', async () => {
+      const pi = scripted([{ fail: () => limit({ ms: 60_000 }) }])
+      let acknowledge: (() => void) | undefined
+      const d = boot(newHome(), [pi], { fault: (point) => { if (point === 'resume.afterRows') { const run = acknowledge; acknowledge = undefined; run?.() } } })
+      const { thread, run } = await paused(d, pi)
+      d.engine.inbox.append({ inboxId: rowId(thread.id), threadId: thread.id, kind: 'pr_update', payload: { text: NOTICE, number: 7, headSha: 'abcdef0123', changes: ['checks_failed'] } })
+      // `task_status` reads the row between the item's write and its claim.
+      acknowledge = () => d.engine.inbox.markAcknowledged([rowId(thread.id)])
+
+      await d.orch.resumePausedRun(run.runId)
+      await waitFor(() => runsOf(d, thread.id).length === 2 && settled(d, thread.id), 'the continuation to finish')
+
+      expect(pi.turns.map((turn) => turn.prompt)).toEqual(['Do the work', CONTINUE_TEXT])
+      expect(d.engine.getRun(run.runId)!.status).toBe('interrupted')
+      expect(d.engine.inbox.listDeliveredByQueue()).toEqual([])
+      expect(queueOf(d, thread.id)).toEqual([])
     })
 
     it('a crash between the continuation\'s admission and its turn.start: the queue re-drains the item, one run', async () => {
