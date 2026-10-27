@@ -25,7 +25,7 @@ import type {
 import type { NeutralTool } from '../../shared/harness/tools'
 import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult } from '../../shared/providerAuth'
 import type { ModelOverride } from '../../shared/providerInstances'
-import type { LlmProviderOption } from '../../shared/settings'
+import type { AgentAccessLevel, LlmProviderOption } from '../../shared/settings'
 import type { ChatMode } from '../../shared/types'
 import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import type { LoginSession } from '../providers/LoginSession'
@@ -431,6 +431,8 @@ export interface TurnAppContext {
   turnToken: string
   /** The credential ceiling of the run. */
   modeCeiling: ModeCeiling
+  /** The agent access level granted to the run (SPEC §15.1); absent is `lineage`. */
+  accessLevel?: AgentAccessLevel
   /** The turn may attach the Mousse MCP server (a run engine run). */
   mcpEligible: boolean
   /** The session text and turn preamble, given whether the server was attached. */
@@ -1555,6 +1557,7 @@ export class Harness implements HarnessGateway {
           instanceId: binding.instanceId,
           runId: input.runId,
           modeCeiling: app.modeCeiling,
+          accessLevel: app.accessLevel,
           binding: record.driver.mcpTurnBinding ?? 'rotate',
           // A new runtime, a new epoch: driver, home, signed-in account and settings, and a caller's
           // policy (a narrower grant must not keep the tool list of the last one).

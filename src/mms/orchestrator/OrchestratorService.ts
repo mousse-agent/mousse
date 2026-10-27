@@ -14,7 +14,15 @@ import { AsyncLocalStorage } from 'async_hooks'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { readFileSync } from 'node:fs'
-import { normalizeContextSettings, resolveContextCompactionTokens, resolveModelForMode } from '../../shared/settings'
+import {
+  isAgentAccessLevel,
+  narrowAgentAccess,
+  normalizeAgentAccessSettings,
+  normalizeContextSettings,
+  resolveContextCompactionTokens,
+  resolveModelForMode,
+  type AgentAccessLevel
+} from '../../shared/settings'
 import { piInstanceId, PROVIDER_INSTANCE_ERROR_CODES, type ModelOverride } from '../../shared/providerInstances'
 import type { Api, Model } from '@earendil-works/pi-ai'
 import { customModelDefinition } from '../harness/catalog'
@@ -78,6 +86,7 @@ import {
   isChildQuestionRow,
   isWakeTurnPayload,
   type ChildQuestionPayload,
+  type AgentActor,
   type DelegationRecord,
   type EffectKind,
   type InboxRecord,
@@ -104,6 +113,7 @@ import {
   type OrchestratorContextUsageInput,
   type OrchestratorResponse,
   type OrchestratorSendInput,
+  type PendingUserQuestions,
   type QueuedMessage,
   type Thread,
   type TurnPhase,
@@ -1708,6 +1718,49 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /**
+   * The agent access level granted to a run on `threadId` (SPEC §15.1), decided at turn start: the
+   * profile's level now, never above what its delegations gave it (the first and the last, as for the
+   * ceiling: a follow-up may narrow, never widen), and at most `read` under a `plan` ceiling or in a
+   * read-only child. A bot thread is always `lineage`: its turns act for a person outside Mousse, who
+   * must not reach the owner's other threads through the profile's setting (a child of a bot thread
+   * inherits that through its delegation). A delegation from before the level existed counts as
+   * `lineage`. Any failure to decide, an unreadable bot index included, is `lineage`, as
+   * `modeCeilingFor` fails to `plan`.
+   */
+  private grantFor(threadId: string, ceiling: ModeCeiling): AgentAccessLevel {
+    try {
+      if (this.botThreads?.roleOf(threadId)) return 'lineage'
+      const tasks = this.runEngine?.delegations.listForChildThread(threadId) ?? []
+      const inherited = tasks.length ? narrowAgentAccess(tasks.at(0)!.accessLevel ?? 'lineage', tasks.at(-1)!.accessLevel ?? 'lineage') : undefined
+      const capped = ceiling === 'plan' || this.isReadOnlyChild(threadId) ? 'read' : undefined
+      return narrowAgentAccess(this.agentAccessSettings().level, inherited, capped) ?? 'lineage'
+    } catch {
+      return 'lineage'
+    }
+  }
+
+  /** The delegation tools of an in-process turn: its ceiling and access grant are those a credential would carry. */
+  private turnDelegationTools(session: ThreadSession, runId: string, mode: ChatMode): DelegationToolHost {
+    const ceiling = this.modeCeilingFor(session.threadId, mode)
+    return this.delegationTools(session, runId, ceiling, this.grantFor(session.threadId, ceiling))
+  }
+
+  /** The caller's granted level narrowed by the profile's level now: what its tool calls and delegations may use. */
+  private effectiveAccess(granted: AgentAccessLevel): AgentAccessLevel {
+    try {
+      // An absent or unknown grant is the most restrictive level, never the profile's.
+      if (!isAgentAccessLevel(granted)) return 'lineage'
+      return narrowAgentAccess(granted, this.agentAccessSettings().level) ?? 'lineage'
+    } catch {
+      return 'lineage'
+    }
+  }
+
+  private agentAccessSettings() {
+    return normalizeAgentAccessSettings(this.settingsStore.get().agentAccess)
+  }
+
   /** Revokes the thread's Mousse MCP credentials (thread deleted, provider switched). */
   private revokeMcp(threadId: string): void {
     try {
@@ -1723,12 +1776,14 @@ export class OrchestratorService extends EventEmitter {
    */
   private registerAppTurn(session: ThreadSession, runId: string, mode: ChatMode, continuation: boolean): { turn: AppToolTurn; drop(): void } {
     const projectPath = session.projectCwd ?? undefined
+    const modeCeiling = this.modeCeilingFor(session.threadId, mode)
     return this.appToolTurns.register({
       threadId: session.threadId,
       runId,
       mode,
       modeFacts: modeFactsFor(this.modeRegistry, mode, projectPath),
-      modeCeiling: this.modeCeilingFor(session.threadId, mode),
+      modeCeiling,
+      accessLevel: this.grantFor(session.threadId, modeCeiling),
       subagent: false,
       discovery: false,
       projectPath,
@@ -1784,6 +1839,7 @@ export class OrchestratorService extends EventEmitter {
     return {
       turnToken: turn.turnToken,
       modeCeiling: turn.modeCeiling,
+      ...(turn.accessLevel ? { accessLevel: turn.accessLevel } : {}),
       mcpEligible: Boolean(this.runEngine),
       ...(turn.definition ? { definition: turn.definition } : {}),
       instructions: (mcpAttached) => ({
@@ -1801,7 +1857,7 @@ export class OrchestratorService extends EventEmitter {
   /** The Mousse tools a thread's credential lists that the turn may use now. */
   private usableAppTools(turn: AppToolTurn): string[] {
     return this.mcpToolRegistry()
-      .listForThread(turn.threadId)
+      .listForThread(turn.threadId, 'default', turn.accessLevel)
       // A Plan turn cannot start threads; everything else listed is usable when available now.
       .filter((tool) => !(turn.modeCeiling === 'plan' && tool.access === 'startsThreads'))
       .filter((tool) => (tool.available?.(turn) ?? true) === true)
@@ -1828,7 +1884,7 @@ export class OrchestratorService extends EventEmitter {
   mcpToolHost(): AppToolHost {
     return {
       delegation: (caller: McpCaller) =>
-        this.delegationTools(this.getOrCreateSession(caller.threadId), caller.runId, caller.modeCeiling),
+        this.delegationTools(this.getOrCreateSession(caller.threadId), caller.runId, caller.modeCeiling, caller.accessLevel),
       askUser: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
       dismissQuestions: (threadId) => this.questions.dismissAllForThread(threadId),
       presentPlan: (threadId, payload) => {
@@ -1850,8 +1906,50 @@ export class OrchestratorService extends EventEmitter {
       threadCeiling: (threadId) => this.modeCeilingFor(threadId, 'agent'),
       awaitLiveRun: (threadId) => this.continuationGate(threadId),
       permissionModeFor: (runId) => this.runPermissionMode(runId),
-      askApproval: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options)
+      askApproval: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
+      agentAccess: () => this.agentAccessSettings(),
+      threadMeta: (threadId) => this.threadStore?.getThread(threadId),
+      listThreads: () => this.threadStore?.listAllThreads() ?? [],
+      listProjects: () => (this.threadStore?.listProjects() ?? []).map(({ id, name }) => ({ id, name })),
+      searchThreads: (query, limit) => this.threadStore?.searchThreads(query, limit, { hideSubagents: true }) ?? [],
+      threadMessages: (threadId) => this.getMessages(threadId),
+      threadActivity: (threadId) => this.threadActivity(threadId),
+      recordAgentAction: (target, actor, action, details) => this.recordAgentAction(target, actor, action, details)
     }
+  }
+
+  /** What waits on a thread without loading it: its queued messages (from disk) and unanswered questions. */
+  private threadActivity(threadId: string): { queuedCount: number; pendingQuestions: PendingUserQuestions[] } {
+    let queuedCount = 0
+    try {
+      queuedCount = listPendingQueue(this.threadStore?.loadMessageQueue(threadId) ?? []).filter((item) => !item.internal).length
+    } catch {
+      /* An unreadable queue file counts as empty here; the queue tools report it. */
+    }
+    return { queuedCount, pendingQuestions: this.questions.listPendingForThread(threadId) }
+  }
+
+  /**
+   * Records a change an agent made to another thread (SPEC §15.1): an `agent.action` event on the
+   * thread, the durable record, and a transcript row "Changed by an agent in thread …" as its
+   * projection. `details` hold ids, counts and lengths, never message content; its `summary` is the row's
+   * text. Callers add the row only for the call that made the change, not for a replay.
+   */
+  private recordAgentAction(
+    target: { threadId: string; runId?: string },
+    actor: AgentActor,
+    action: string,
+    details: Record<string, string | number | boolean | null> = {}
+  ): void {
+    this.requireRunEngine().store.appendEvent({
+      threadId: target.threadId,
+      runId: target.runId ?? null,
+      type: 'agent.action',
+      payload: { ...details, action, actorThreadId: actor.threadId, actorRunId: actor.runId, toolCallId: actor.toolCallId }
+    })
+    const summary = typeof details.summary === 'string' && details.summary ? details.summary : action
+    const session = this.getOrCreateSession(target.threadId)
+    this.sessionAls.run(session, () => this.addSystemMessage(`Changed by an agent in thread «${this.titleOf(actor.threadId) ?? actor.threadId}» (${actor.threadId}): ${summary}`))
   }
 
   /** Executors for the `turn.*` effects; the profile hands them to its `EffectWorker`. */
@@ -2832,12 +2930,12 @@ export class OrchestratorService extends EventEmitter {
    * loop and the Mousse MCP server so both enforce the caller's ceiling the same way (SPEC §15.1):
    * a `plan` caller cannot start a `default` child or integrate (integration writes the workspace).
    */
-  private delegationTools(session: ThreadSession, parentRunId: string, callerCeiling?: ModeCeiling): DelegationToolHost {
+  private delegationTools(session: ThreadSession, parentRunId: string, callerCeiling?: ModeCeiling, callerAccess?: AgentAccessLevel): DelegationToolHost {
     const parentThreadId = session.threadId
     const delegateTask = (input: DelegateTaskInput, call: DelegationToolCall) =>
-      this.delegateTask(parentThreadId, parentRunId, input, call, callerCeiling)
+      this.delegateTask(parentThreadId, parentRunId, input, call, callerCeiling, callerAccess)
     const continueSubagent = (input: { subagent: string; prompt: string }, call: DelegationToolCall) =>
-      this.continueSubagent(parentThreadId, parentRunId, input, call, callerCeiling)
+      this.continueSubagent(parentThreadId, parentRunId, input, call, callerCeiling, callerAccess)
     const integrateDelegation = async (ref: SubagentRef, call: DelegationToolCall) => {
       if (this.isReadOnlyChild(parentThreadId))
         throw new McpToolError('mousse_read_only', 'Integration writes the workspace; a read-only subagent cannot integrate.')
@@ -2889,13 +2987,16 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  private async delegateTask(parentThreadId: string, parentRunId: string, input: DelegateTaskInput, call: DelegationToolCall, callerCeiling?: ModeCeiling) {
+  private async delegateTask(parentThreadId: string, parentRunId: string, input: DelegateTaskInput, call: DelegationToolCall, callerCeiling?: ModeCeiling, callerAccess?: AgentAccessLevel) {
     const engine = this.requireRunEngine()
     if (!this.effectsEnabled()) throw new Error('Delegation needs the run engine worker')
     // SPEC §15.1: a child inherits its caller's ceiling and can never exceed it.
     if (callerCeiling === 'plan' && input.modeCeiling === 'default')
       throw new McpToolError('mousse_ceiling_exceeded', 'A plan-ceiling caller cannot start a child with the default ceiling.')
     const modeCeiling = narrowCeiling(callerCeiling, input.modeCeiling)
+    // The same for the agent access level (SPEC §15.1): the child is granted the caller's level as it
+    // stands now (its grant narrowed by the profile setting), never one the model chose.
+    const accessLevel = this.effectiveAccess(callerAccess ?? 'lineage')
     const role = input.role?.trim() || undefined
     if (input.workspace === 'shared' && !(role && SHARED_WORKSPACE_ROLES.has(role)))
       throw new Error('workspace "shared" is allowed only for read-only roles (role "research" or "review"); use workspace "isolated" for work that edits, builds or tests.')
@@ -2927,7 +3028,8 @@ export class OrchestratorService extends EventEmitter {
         workspace: input.workspace,
         wake: input.wake ?? 'always',
         title,
-        ...(modeCeiling ? { modeCeiling } : {})
+        ...(modeCeiling ? { modeCeiling } : {}),
+        accessLevel
       })
     } catch (error) {
       // A retry already replayed its receipt; what is left is a title that belongs to another subagent.
@@ -3022,7 +3124,8 @@ export class OrchestratorService extends EventEmitter {
     parentRunId: string,
     input: { subagent: string; prompt: string },
     call: DelegationToolCall,
-    callerCeiling?: ModeCeiling
+    callerCeiling?: ModeCeiling,
+    callerAccess?: AgentAccessLevel
   ) {
     const engine = this.requireRunEngine()
     if (!this.effectsEnabled()) throw new Error('Delegation needs the run engine worker')
@@ -3052,6 +3155,9 @@ export class OrchestratorService extends EventEmitter {
     // The follow-up is bound by the subagent's own policy and the caller's authority, whichever is narrower.
     const first = engine.delegations.listForChildThread(childThreadId).find((task) => task.parentThreadId === parentThreadId)
     const modeCeiling = narrowCeiling(callerCeiling, first?.modeCeiling)
+    // And the access level: the narrower of the caller's now and the one the subagent was first given
+    // (a row from before levels existed is `lineage`).
+    const accessLevel = narrowAgentAccess(this.effectiveAccess(callerAccess ?? 'lineage'), first ? first.accessLevel ?? 'lineage' : undefined) ?? 'lineage'
     let response: OrchestratorResponse
     try {
       response = await this.send({ content: input.prompt, mode: modeCeiling === 'plan' ? 'plan' : 'agent' }, false, {
@@ -3065,6 +3171,7 @@ export class OrchestratorService extends EventEmitter {
           prompt: input.prompt,
           wake: 'always',
           ...(modeCeiling ? { modeCeiling } : {}),
+          accessLevel,
           workspace: first?.workspace,
           role: first?.role,
           provider: first?.provider,
@@ -6316,7 +6423,7 @@ export class OrchestratorService extends EventEmitter {
         tools: {
           onPublishApplet,
           browser: browserExecution,
-          delegation: engineRunId && this.effectsEnabled() ? this.delegationTools(session, engineRunId, this.modeCeilingFor(session.threadId, mode)) : undefined,
+          delegation: engineRunId && this.effectsEnabled() ? this.turnDelegationTools(session, engineRunId, mode) : undefined,
           toolAccess: session.sharedWorkspace
             ? createAgentToolAccess(SHARED_READER_POLICY, session.sharedWorkspace.path)
             : turnAuthority && turnWriter ? { allows: () => true, execute: (_name, _args, run) => { conversationToolsUsed = true; return turnAuthority.runWriter(turnWriter, run) } } : undefined,
