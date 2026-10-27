@@ -46,6 +46,15 @@ export interface PlusEnrollmentRequest {
   createdAt: number
   expiresAt: number
 }
+/** `devices` of Mousse ID's inventory: whole numbers, with room for a plan's limit. */
+function checkedDeviceCount(value: unknown): { used: number; limit: number } {
+  const row = value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
+  const count = (item: unknown) => (Number.isSafeInteger(item) && (item as number) >= 0 && (item as number) <= 100000 ? (item as number) : undefined)
+  const used = count(row.used)
+  const limit = count(row.limit)
+  if (used === undefined || limit === undefined) throw new NetError('bad_request')
+  return { used, limit }
+}
 const MAILBOX_ID = /^[A-Za-z0-9_-]{1,128}$/
 function checkedEnrollmentRequest(value: unknown, now: number): PlusEnrollmentRequest | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return
@@ -755,6 +764,17 @@ export class HostedProfileService {
     const stored = this.read()
     if (!stored?.registration || !stored.connectorToken) throw new NetError('not_enrolled')
     return { stored, registrationId: stored.registration.id, token: stored.connectorToken }
+  }
+  /** How many computers and phones this account has, and how many its plan allows. */
+  async inventory(): Promise<{ used: number; limit: number }> {
+    const { stored, registrationId, token } = this.connector()
+    const result = await this.request<{ devices?: unknown }>(
+      'GET',
+      stored.configuration,
+      `/v1/net/registrations/${registrationId}/inventory`,
+      token
+    )
+    return checkedDeviceCount(result?.devices)
   }
   /** Pending phone requests targeting this node (contract §3). Malformed rows are dropped. */
   async enrollmentRequests(): Promise<PlusEnrollmentRequest[]> {
