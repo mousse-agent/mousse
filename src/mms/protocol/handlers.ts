@@ -1247,6 +1247,24 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
     }
+    case 'threads.approvalRules': {
+      // The thread's "Always for this thread" rules (SPEC §17.8). Not exposed on the Bridge.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      return { threadId, rules: ctx.mms.orchestrator.listApprovalRules(threadId) }
+    }
+    case 'threads.clearApprovalRules': {
+      // Revokes one rule (`ruleId`) or every rule of the thread. Not exposed on the Bridge.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'ruleId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const ruleId = asOptionalString(p.ruleId, 256)
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      const { removed } = ctx.mms.orchestrator.clearApprovalRules(threadId, ruleId)
+      return { threadId, removed, rules: ctx.mms.orchestrator.listApprovalRules(threadId) }
+    }
     case 'orchestrator.send': {
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, [

@@ -187,6 +187,13 @@ describe('P3 real MMS remote Bridge', () => {
     expect(exposed.filter((method) => /permission/i.test(method))).toEqual([])
   })
 
+  it('never exposes a thread\'s "Always for this thread" rules: a remote client can answer a request, not list or revoke the rules', () => {
+    const exposed = Object.keys(BRIDGE_REMOTE_METHODS)
+    expect(exposed).not.toContain('threads.approvalRules')
+    expect(exposed).not.toContain('threads.clearApprovalRules')
+    expect(exposed.filter((method) => /approvalRules|ApprovalRules/.test(method))).toEqual([])
+  })
+
   it('maps every exposed method, denies local/secret ingress, validates before admission, and deduplicates real thread creation', async () => {
     const p = await setup(),
       { b } = await p.connect()

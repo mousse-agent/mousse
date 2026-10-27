@@ -4,7 +4,8 @@
  * speaks the protocol (`orchestrator.pendingQuestions`, `orchestrator.answerQuestions`).
  */
 
-import type { PendingApprovalInfo, UserQuestion, UserQuestionOption } from '../../shared/types'
+import { ALWAYS_OPTION_NOTE } from '../../shared/permissionKeys'
+import type { ApprovalRuleInfo, PendingApprovalInfo, UserQuestion, UserQuestionOption } from '../../shared/types'
 
 export interface ApprovalClient {
   request<T>(method: string, params?: unknown): Promise<T>
@@ -38,6 +39,11 @@ export function allowOption(question: UserQuestion): UserQuestionOption | undefi
   return question.options.find((option) => option.decision === 'allow' && option.scope !== 'always')
 }
 
+/** The option that allows the same request again for the whole thread, when the request offers one. */
+export function alwaysOption(question: UserQuestion): UserQuestionOption | undefined {
+  return question.options.find((option) => option.decision === 'allow' && option.scope === 'always')
+}
+
 /** The option that rejects, by the decision it declares, else by what it is called. */
 export function rejectOption(question: UserQuestion): UserQuestionOption | undefined {
   return question.options.find((option) => option.decision === 'reject') ?? question.options.find((option) => !option.decision && (REJECT_LIKE.test(option.id) || REJECT_LIKE.test(option.label)))
@@ -52,6 +58,7 @@ export function describeApproval(entry: PendingApproval): string[] {
   }
   const info = entry.approval
   if (info?.reason) lines.push(`  Why: ${info.reason}`)
+  if (entry.questions.some((question) => alwaysOption(question))) lines.push(`  ${ALWAYS_OPTION_NOTE}`)
   if (info?.answerPath === 'continue') {
     lines.push(info.uncertain
       ? `  The agent's process ended and ${info.uncertainTools?.length ? info.uncertainTools.join(', ') : 'a tool'} may already have run. Answering continues the thread.`
@@ -78,6 +85,21 @@ export async function answerApproval(
   return client.request<AnswerResult>('orchestrator.answerQuestions', { requestId, answers })
 }
 
+/** The thread's "Always for this thread" rules. */
+export async function listApprovalRules(client: ApprovalClient, threadId: string): Promise<ApprovalRuleInfo[]> {
+  return (await client.request<{ rules: ApprovalRuleInfo[] }>('threads.approvalRules', { threadId })).rules
+}
+
+/** Revokes one rule of the thread (by id) or all of them; returns how many were removed. */
+export async function revokeApprovalRules(client: ApprovalClient, threadId: string, ruleId?: string): Promise<number> {
+  return (await client.request<{ removed: number }>('threads.clearApprovalRules', { threadId, ...(ruleId ? { ruleId } : {}) })).removed
+}
+
+/** The lines that show a thread's rules: the id that revokes one, what it allows, and under which mode. */
+export function describeRules(rules: readonly ApprovalRuleInfo[]): string[] {
+  return rules.map((rule) => `${rule.id.slice(0, 12)}  ${rule.summary}  (granted under ${rule.grantedUnder}${rule.active ? '' : '; paused while this thread is stricter'})`)
+}
+
 /** One line for the outcome of an answer. */
 export function describeAnswerResult(result: AnswerResult, optionId?: string): string {
   if (result.ok) return optionId ? `Answered: ${optionId}` : 'Answered.'
@@ -98,7 +120,13 @@ export async function handleApprovalCommand(text: string, client: ApprovalClient
   const match = /^\/(approve|deny)(?:\s+([\s\S]*))?$/i.exec(text.trim())
   if (!match) return null
   const verb = match[1]!.toLowerCase()
-  const rest = match[2]?.trim() ?? ''
+  let rest = match[2]?.trim() ?? ''
+  // `/approve always [id]`: allow this exact request again for the thread, not just once.
+  let always = false
+  if (verb === 'approve' && /^always(\s|$)/i.test(rest)) {
+    always = true
+    rest = rest.slice('always'.length).trim()
+  }
   const pending = await listPendingApprovals(client, threadId)
   if (!pending.length) return 'No approval is waiting on this thread.'
   // The request is the one named by its id (four or more characters of it are enough); without an id the
@@ -120,6 +148,11 @@ export async function handleApprovalCommand(text: string, client: ApprovalClient
   }
   const question = latest.questions[0]
   if (!question) return 'The waiting approval has no options to answer.'
+  if (verb === 'approve' && always) {
+    const option = alwaysOption(question)
+    if (!option) return 'This request cannot be allowed for the thread: it has no "always" option. Use /approve to allow it once.'
+    return describeAnswerResult(await answerApproval(client, latest.requestId, option.id, { threadId }), option.id)
+  }
   if (verb === 'approve') {
     const option = allowOption(question)
     if (!option) return 'This request has no option that allows it once.'
