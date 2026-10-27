@@ -301,19 +301,21 @@ export interface LineCommentRead {
   nextPage: number
   /** The latest time any comment read was updated, as the host wrote it; null when none was read. */
   newestUpdatedAt: string | null
+  /** How many requests the read made. */
+  pages?: number
 }
 
 /** Why a watch ended; the thread gets a line that names it. */
 export type PullRequestWatchEnd =
   | 'merged'
   | 'closed'
-  | 'comment_loop'
   | 'id_cap'
   | 'read_failures'
   | 'not_found'
   | 'signed_out'
   | 'stopped'
   | 'unlinked'
+  | 'project_missing'
   | 'settled'
   | 'trashed'
 

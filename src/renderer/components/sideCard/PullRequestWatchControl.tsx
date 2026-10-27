@@ -46,7 +46,7 @@ export function PullRequestWatchControl({ status, onChange, now = Date.now() }: 
               role="radio"
               aria-checked={option.mode === model.mode}
               aria-disabled={option.disabledReason !== null || busy}
-              title={option.disabledReason ?? undefined}
+              title={option.disabledReason ?? option.hint}
               className="side-card-git-pr-watch-option"
               onClick={() => {
                 if (option.disabledReason === null) void pick(option.mode)

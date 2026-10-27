@@ -39,6 +39,9 @@ export class FakeGh {
   title = 'Add thing'
   state: 'OPEN' | 'MERGED' | 'CLOSED' = 'OPEN'
   headSha = 'a'.repeat(40)
+  /** How the pull request's author relates to the repository, and whether the branch is in a fork. */
+  authorAssociation = 'OWNER'
+  fork = false
   viewer = 'me'
   checks: FakeCheck[] = []
   reviews: Array<{ id: string; login: string; association: string; state: string; body: string; submittedAt: string }> = []
@@ -95,13 +98,13 @@ export class FakeGh {
       isDraft: false,
       body: '',
       author: { login: 'dev' },
-      authorAssociation: 'OWNER',
+      authorAssociation: this.authorAssociation,
       baseRefName: 'main',
       headRefName: 'feature',
       headRefOid: this.headSha,
       headRepository: { name },
-      headRepositoryOwner: { login: owner },
-      isCrossRepository: false,
+      headRepositoryOwner: { login: this.fork ? 'forker' : owner },
+      isCrossRepository: this.fork,
       reviewDecision: '',
       updatedAt: stamp(Date.now()),
       mergedAt: this.state === 'MERGED' ? stamp(Date.now()) : null,

@@ -683,6 +683,12 @@ export class MmsProfileServices {
       isSubagent: (threadId) => Boolean(this.threads.getThread(threadId)?.lineage || this.runEngine.delegations.getLineage(threadId)),
       runStore: () => this.runEngine.store,
       inbox: () => this.runEngine.inbox,
+      // A person's message is a visible user message that is not a job's prompt; wakes and notices are hidden or not user messages.
+      lastPersonMessageAt: (threadId) => {
+        const mine = this.orchestrator.getMessages(threadId).filter((message) => message.role === 'user' && !message.scheduled && !message.subagentNotice?.length)
+        const at = Date.parse(mine.at(-1)?.timestamp ?? '')
+        return Number.isNaN(at) ? null : at
+      },
       notify: (threadId, text, messageId) => this.orchestrator.noteThreadUpdate(threadId, text, { messageId }),
       onRunEnd: (listener) => {
         const handler = (event: ThreadEvent): void => {
@@ -841,6 +847,9 @@ export class MmsProfileServices {
   ): Promise<TaskLifecycleRecord> {
     this.threads.assertLifecycleMutationAvailable()
     if (!this.threads.lifecycleStore.get(taskId)) this.threads.getThreadDir(taskId)
+    // A trashed thread is not listed and cannot be written to, so its watch ends now, while its folder still resolves, and a
+    // restore does not bring it back with a backlog.
+    this.pullRequestWatch.onEnded(taskId, 'trashed')
     const record = await this.lifecycle.trash({
       taskId,
       operationId: this.resolveLifecycleOperationId(taskId, 'trash', operationId),

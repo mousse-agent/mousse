@@ -21,8 +21,11 @@ import type { PullRequestUpdatePayload } from '../run/types'
 export const WATCH_ID_CAP = 20_000
 /** How often the whole set of line comments is read again in creation order, whatever the incremental reads saw. */
 export const RECONCILE_MS = 30 * 60_000
-/** Notices made only of comments in a row after which the watch ends: a stranger's thread cannot keep an agent busy forever. */
-export const COMMENT_ONLY_LIMIT = 10
+/**
+ * Times a watch may wake the agent without a person's message in between. The agent is told to push, and a push starts
+ * checks that can fail and wake it again, so the count is what ends that loop: past it the watch only notifies.
+ */
+export const AUTONOMOUS_WAKE_LIMIT = 3
 /** The size of one notice, in bytes of UTF-8. */
 export const NOTICE_PR_BYTES = 4 * 1024
 /** Items one section of a notice lists, and the longest snippet of a remark. */
@@ -44,10 +47,12 @@ export interface PendingDelivery {
   /** The remarks this delivery reports; they count as delivered from the moment it is prepared. */
   ids: string[]
   preparedAt: string
+  /** The last wake the watch allows before it switches itself to Notify: it still wakes, though the watch already reads Notify. */
+  final?: true
 }
 
 export interface WatchState {
-  /** True until the first evaluation, which records what is there and reports nothing. */
+  /** True until the first evaluation, which records the checks and what was posted before the watch began and reports no check. */
   baseline: boolean
   headSha: string | null
   outcome: CheckOutcome
@@ -67,7 +72,10 @@ export interface WatchState {
   seq: number
   /** Deliveries prepared and not yet acknowledged by their sink, oldest first. */
   pending: PendingDelivery[]
-  commentOnlyWakes: number
+  /** Wakes of the agent since a person last wrote to the thread (or since the watch began). */
+  autonomousWakes: number
+  /** The time the count started: the watch's start, or the last person's message it has seen. */
+  wakeCountSince: string
   readFailures: number
   notFound: number
 }
@@ -106,7 +114,8 @@ export function initialWatchState(now: number): WatchState {
     reconcile: { page: 1, dueAt: new Date(now).toISOString() },
     seq: 0,
     pending: [],
-    commentOnlyWakes: 0,
+    autonomousWakes: 0,
+    wakeCountSince: new Date(now).toISOString(),
     readFailures: 0,
     notFound: 0
   }
@@ -147,7 +156,9 @@ function remarksOf(detail: PullRequestDetail, lineComments: readonly PullRequest
 }
 
 /**
- * Compares what the host says now with the watch's memory. The first evaluation only records. After it: failed checks not
+ * Compares what the host says now with the watch's memory. The first evaluation records the checks and what was posted up
+ * to the second the watch began, and reports no check; a remark posted after that second is reported even then, since the
+ * first read can come late (a rate limit, a sign-out). After it: failed checks not
  * already failed on this head, a head whose checks all passed, and every new remark by someone other than `viewer`.
  * A remark is new exactly when it was created at or after the cutoff and its id is not remembered; an edit changes
  * neither, so an old remark that comes back edited, and a new one that comes back edited, both report nothing.
@@ -183,9 +194,10 @@ export function evaluatePullRequestWatch(
   const viewerName = viewer?.toLowerCase() ?? null
   for (const remark of remarksOf(detail, lineComments)) {
     if (Number.isNaN(remark.at) || remark.at < cutoff || remembered.has(remark.id)) continue
-    // Seen from now on: at baseline so it is never reported, and when skipped so a later edit is not looked at again.
+    // Seen from now on: what was there when the watch began (the host's times have no fraction, so the whole second counts),
+    // and what is skipped, so a later edit is not looked at again.
     const own = viewerName !== null && remark.author.toLowerCase() === viewerName
-    if (state.baseline || own || remark.change === null) {
+    if ((state.baseline && remark.at < cutoff + SECOND) || own || remark.change === null) {
       seen.add(remark.id)
       continue
     }
@@ -194,24 +206,21 @@ export function evaluatePullRequestWatch(
   const deliveredIds = seen.size ? [...state.deliveredIds, ...seen] : state.deliveredIds
   const next: WatchState = { ...base, deliveredIds }
   if (deliveredIds.length + remarkChanges.length > WATCH_ID_CAP) return { changes: [], next, ended: 'id_cap' }
-  if (state.baseline) return { changes: [], next, ended: null }
 
   const changes: PullRequestChange[] = []
   const headMoved = state.headSha !== null && state.headSha !== head
   const earlierOutcome: CheckOutcome = headMoved ? 'none' : state.outcome
   const earlierFailed = headMoved ? [] : state.failedChecks
   const newlyFailed = failedNow.filter((check) => !earlierFailed.includes(check.name))
-  if (newlyFailed.length) changes.push({ kind: 'checks_failed', checks: newlyFailed })
-  // Never while a maintainer's approval is awaited: only `passed` counts, which has no waiting check in it.
-  if (outcome === 'passed' && earlierOutcome !== 'passed') changes.push({ kind: 'checks_passed' })
+  // The first evaluation only records the checks as they are.
+  if (!state.baseline) {
+    if (newlyFailed.length) changes.push({ kind: 'checks_failed', checks: newlyFailed })
+    // Never while a maintainer's approval is awaited: only `passed` counts, which has no waiting check in it.
+    if (outcome === 'passed' && earlierOutcome !== 'passed') changes.push({ kind: 'checks_passed' })
+  }
   remarkChanges.sort((a, b) => a.at - b.at)
   for (const item of remarkChanges) changes.push(item.change)
-
-  if (changes.length) {
-    const commentOnly = changes.every((change) => change.kind === 'comment')
-    next.commentOnlyWakes = commentOnly ? state.commentOnlyWakes + 1 : 0
-  }
-  return { changes, next, ended: next.commentOnlyWakes >= COMMENT_ONLY_LIMIT ? 'comment_loop' : null }
+  return { changes, next, ended: null }
 }
 
 /** One tick's line comment reads: the incremental one from `lineCursor`, and the creation-ordered one when it was due. */
@@ -270,15 +279,26 @@ export function changeKinds(changes: readonly PullRequestChange[]): string[] {
 }
 
 /**
- * Splits a batch for a thread whose watch lets the agent act. Only checks, and reviews and comments by an owner, member
- * or collaborator, may wake it; the rest goes out as a plain notice, since the agent must not act on a stranger's words.
+ * Whether a failed check may wake the agent. Check names come from the workflow files of the pull request's branch, so
+ * they are the author's words: only a pull request opened by an owner, member or collaborator from a branch of the
+ * repository itself qualifies. Any other pull request (a fork, a stranger's) gets its failed checks as a plain notice.
  */
-export function splitByTrust(changes: readonly PullRequestChange[]): { act: PullRequestChange[]; notify: PullRequestChange[] } {
+export function checksMayWake(detail: Pick<PullRequestDetail, 'authorAssociation' | 'isCrossRepository'>): boolean {
+  return !detail.isCrossRepository && isTrustedAssociation(detail.authorAssociation)
+}
+
+/**
+ * Splits a batch for a thread whose watch lets the agent act. Only a failed check (see `checksMayWake`) and reviews and
+ * comments by an owner, member or collaborator may wake it; the rest goes out as a plain notice, since the agent must
+ * not act on a stranger's words. Checks passing never wakes: there is nothing to do.
+ */
+export function splitByTrust(changes: readonly PullRequestChange[], options: { checksMayWake: boolean }): { act: PullRequestChange[]; notify: PullRequestChange[] } {
   const act: PullRequestChange[] = []
   const notify: PullRequestChange[] = []
   for (const change of changes) {
-    const association = change.kind === 'review' ? change.review.authorAssociation : change.kind === 'comment' ? change.comment.authorAssociation : 'OWNER'
-    ;(isTrustedAssociation(association) ? act : notify).push(change)
+    if (change.kind === 'checks_passed') notify.push(change)
+    else if (change.kind === 'checks_failed') (options.checksMayWake ? act : notify).push(change)
+    else (isTrustedAssociation(change.kind === 'review' ? change.review.authorAssociation : change.comment.authorAssociation) ? act : notify).push(change)
   }
   return { act, notify }
 }
@@ -286,7 +306,7 @@ export function splitByTrust(changes: readonly PullRequestChange[]): { act: Pull
 /** Step 1 of a delivery: one record per sink, written with the advanced read state before any sink is touched. */
 export function prepareDeliveries(
   state: WatchState,
-  deliveries: ReadonlyArray<{ idPrefix: string; mode: PendingDelivery['mode']; text: string; payload: PullRequestUpdatePayload | null; ids: string[] }>,
+  deliveries: ReadonlyArray<{ idPrefix: string; mode: PendingDelivery['mode']; text: string; payload: PullRequestUpdatePayload | null; ids: string[]; final?: true }>,
   now: number
 ): { next: WatchState; deliveries: PendingDelivery[] } {
   let seq = state.seq
@@ -296,7 +316,8 @@ export function prepareDeliveries(
     text: delivery.text,
     payload: delivery.payload,
     ids: delivery.ids,
-    preparedAt: new Date(now).toISOString()
+    preparedAt: new Date(now).toISOString(),
+    ...(delivery.final ? { final: true as const } : {})
   }))
   return { next: { ...state, seq, pending: [...state.pending, ...prepared] }, deliveries: prepared }
 }
@@ -306,6 +327,16 @@ export function completeDelivery(state: WatchState, deliveryId: string): WatchSt
   const delivery = state.pending.find((candidate) => candidate.deliveryId === deliveryId)
   if (!delivery) return state
   return { ...state, deliveredIds: [...state.deliveredIds, ...delivery.ids], pending: state.pending.filter((candidate) => candidate !== delivery) }
+}
+
+/**
+ * A prepared delivery that was to wake the agent, as a plain notice: used when the watch no longer lets the agent act
+ * (the person chose Notify, the wake limit was reached). The instruction to change code is taken out of its text.
+ */
+export function downgradeDelivery(delivery: PendingDelivery): PendingDelivery {
+  if (delivery.mode !== 'act') return delivery
+  const text = delivery.text.replace(`${String.fromCharCode(10)}${String.fromCharCode(10)}${ACT_INSTRUCTION}`, '')
+  return { ...delivery, mode: 'notify', payload: null, text }
 }
 
 /** The watch was turned off, stopped or unlinked before a prepared delivery reached its sink: nothing is delivered and nothing is remembered. */
@@ -406,16 +437,21 @@ export function watchEndedLine(reason: PullRequestWatchEnd, number: number): str
   const why: Record<PullRequestWatchEnd, string> = {
     merged: `Pull request #${number} was merged.`,
     closed: `Pull request #${number} was closed.`,
-    comment_loop: `Pull request #${number} had ${COMMENT_ONLY_LIMIT} updates in a row that were only comments.`,
     id_cap: `Pull request #${number} has more than ${WATCH_ID_CAP.toLocaleString('en-US')} comments since the watch began.`,
     read_failures: `Pull request #${number} could not be read 8 times in a row.`,
     not_found: `Pull request #${number} was not found 3 times in a row.`,
     signed_out: `GitHub could not be reached for pull request #${number}: not signed in or not a GitHub repository.`,
     stopped: `The thread was stopped, so the watch on pull request #${number} ended.`,
+    project_missing: `The project of this thread is not available, so the watch on pull request #${number} ended.`,
     unlinked: `The thread's link to pull request #${number} was removed, so the watch ended.`,
     settled: `The thread was archived, so the watch on pull request #${number} ended.`,
     trashed: `The thread was deleted, so the watch on pull request #${number} ended.`
   }
   const advice = reason === 'merged' || reason === 'closed' || reason === 'unlinked' || reason === 'settled' || reason === 'trashed' ? '' : ` ${again}`
   return `Watch ended: ${why[reason]}${advice}`
+}
+
+/** The line a thread gets when its watch stops waking the agent by itself. */
+export function wakeLimitLine(number: number): string {
+  return `Watch on pull request #${number} switched from "Let the agent act" to Notify: the agent was woken ${AUTONOMOUS_WAKE_LIMIT} times without a message from you. Write to this thread, then choose "Let the agent act" again to continue.`
 }

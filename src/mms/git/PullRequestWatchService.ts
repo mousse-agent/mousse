@@ -23,10 +23,13 @@ import type { CodeHost } from './CodeHost'
 import { PullRequestReadError } from './GitHubCodeHost'
 import {
   advanceWatchReads,
+  AUTONOMOUS_WAKE_LIMIT,
   changeIds,
+  checksMayWake,
   changeKinds,
   completeDelivery,
   cutoffMs,
+  downgradeDelivery,
   dropPendingDeliveries,
   evaluatePullRequestWatch,
   formatPullRequestNotice,
@@ -35,6 +38,7 @@ import {
   prepareDeliveries,
   reconcileDue,
   splitByTrust,
+  wakeLimitLine,
   watchEndedLine,
   type PendingDelivery,
   type PullRequestChange,
@@ -57,7 +61,8 @@ const MAX_INTERVAL_MS = 600_000
 const TICK_MS = 15_000
 /** Distinct pull requests read in one tick; the rest stay due and go first in the next. */
 const MAX_READS_PER_TICK = 8
-const RUN_END_GAP_MS = 15_000
+/** Requests to the host (a pull request read, a page of line comments) one tick may make; the rest wait for the next. */
+const MAX_REQUESTS_PER_TICK = 30
 const RATE_LIMIT_PAUSE_MS = 10 * 60_000
 const SIGNED_OUT_PAUSE_MAX_MS = 30 * 60_000
 const READ_FAILURE_LIMIT = 8
@@ -78,6 +83,8 @@ interface Sidecar {
   intervalMs: number
   /** A rate limit or a sign-out is being waited out until then. */
   pausedUntil: string | null
+  /** When the pull request was last asked about: a run's end cannot bring the next read closer than the interval floor. */
+  lastReadAt?: string | null
   ended: { reason: PullRequestWatchEnd; at: string } | null
 }
 
@@ -103,11 +110,14 @@ export interface PullRequestWatchDeps {
   notify(threadId: string, text: string, messageId: string): Promise<'delivered' | 'already'>
   /** Calls `listener` when a run of any thread ends; returns the unsubscribe function. */
   onRunEnd?(listener: (threadId: string) => void): () => void
+  /** When a person last wrote to the thread (a message they sent, not a notice or a wake), in epoch milliseconds; null when never. */
+  lastPersonMessageAt(threadId: string): number | null
   clock?: () => number
   minIntervalMs?: number
   maxIntervalMs?: number
   tickMs?: number
   maxReadsPerTick?: number
+  maxRequestsPerTick?: number
 }
 
 interface Due {
@@ -126,8 +136,9 @@ interface Due {
 export class PullRequestWatchService extends EventEmitter {
   private readonly entries = new Map<string, Sidecar>()
   private readonly hostPaused = new Map<string, number>()
-  /** When each thread's pull request was last read; memory only, it spaces the reads that run ends ask for. */
-  private readonly lastRead = new Map<string, number>()
+  /** Line comment pages already read in this tick, so threads with the same position share the request. */
+  private pageReads = new Map<string, Promise<LineCommentRead>>()
+  private requestsLeft = 0
   private timer: ReturnType<typeof setInterval> | undefined
   private flight: Promise<void> | undefined
   private unsubscribe: (() => void) | undefined
@@ -139,6 +150,7 @@ export class PullRequestWatchService extends EventEmitter {
   private readonly minInterval: number
   private readonly maxInterval: number
   private readonly maxReads: number
+  private readonly maxRequests: number
 
   constructor(private readonly deps: PullRequestWatchDeps) {
     super()
@@ -146,6 +158,7 @@ export class PullRequestWatchService extends EventEmitter {
     this.minInterval = deps.minIntervalMs ?? MIN_INTERVAL_MS
     this.maxInterval = deps.maxIntervalMs ?? MAX_INTERVAL_MS
     this.maxReads = deps.maxReadsPerTick ?? MAX_READS_PER_TICK
+    this.maxRequests = deps.maxRequestsPerTick ?? MAX_REQUESTS_PER_TICK
   }
 
   /** Starts the timer (unref'd) and the first tick, which also replays any notice a restart cut off. */
@@ -204,7 +217,9 @@ export class PullRequestWatchService extends EventEmitter {
     const previous = this.load(threadId)
     const now = this.clock()
     if (mode === 'off') {
-      if (previous) this.save(threadId, { ...previous, mode: 'off', ended: null, state: dropPendingDeliveries(previous.state), watchRevision: previous.watchRevision + 1 })
+      if (previous) this.saveOrRefuse(threadId, { ...previous, mode: 'off', ended: null, state: dropPendingDeliveries(previous.state), watchRevision: previous.watchRevision + 1 })
+      // What was prepared but not yet delivered is withdrawn, and a notice that waits for a wake no longer wakes.
+      this.revokeWakes(threadId)
       this.writeLinkWatch(threadId, 'off')
       return this.status(threadId)
     }
@@ -215,8 +230,15 @@ export class PullRequestWatchService extends EventEmitter {
     const pr: PullRequestIdentity = { host: link.host, nameWithOwner: link.nameWithOwner, number: link.number }
     const running = previous && previous.mode !== 'off' && !previous.ended && sameLinkedPullRequest(previous.pr, pr)
     const revision = (previous?.watchRevision ?? Math.floor(now / 1000)) + 1
+    // Choosing Notify takes the right to wake from what was prepared; choosing Let the agent act starts the count of wakes over.
+    const downgraded = running && mode === 'notify' ? { ...previous.state, pending: previous.state.pending.map(downgradeDelivery) } : undefined
     const next: Sidecar = running
-      ? { ...previous, mode, watchRevision: revision }
+      ? {
+          ...previous,
+          mode,
+          watchRevision: revision,
+          state: downgraded ?? (mode === 'act' && previous.mode !== 'act' ? { ...previous.state, autonomousWakes: 0, wakeCountSince: new Date(now).toISOString() } : previous.state)
+        }
       : {
           version: 1,
           mode,
@@ -229,7 +251,8 @@ export class PullRequestWatchService extends EventEmitter {
           pausedUntil: null,
           ended: null
         }
-    this.save(threadId, next)
+    this.saveOrRefuse(threadId, next)
+    if (mode === 'notify') this.revokeWakes(threadId)
     this.writeLinkWatch(threadId, mode)
     this.nudge()
     return this.status(threadId)
@@ -270,8 +293,9 @@ export class PullRequestWatchService extends EventEmitter {
     if (!this.isWatched(threadId)) return
     const entry = this.load(threadId)
     if (!entry || entry.mode === 'off' || entry.ended) return
-    // Not sooner than a quarter minute after the last read, however many runs end.
-    const at = Math.max(this.clock(), (this.lastRead.get(threadId) ?? 0) + RUN_END_GAP_MS)
+    // A run's end brings the next read forward, but never closer than the floor to the last one, however many runs end.
+    const lastRead = Date.parse(entry.lastReadAt ?? '')
+    const at = Math.max(this.clock(), Number.isNaN(lastRead) ? 0 : lastRead + this.minInterval)
     this.save(threadId, { ...entry, nextAt: new Date(at).toISOString(), intervalMs: this.minInterval })
     this.nudge()
   }
@@ -288,6 +312,8 @@ export class PullRequestWatchService extends EventEmitter {
 
   private async pass(): Promise<void> {
     const now = this.clock()
+    this.pageReads = new Map()
+    this.requestsLeft = this.maxRequests
     const due: Due[] = []
     for (const thread of this.deps.threads.listAllThreads()) {
       const link = thread.pullRequest
@@ -310,7 +336,11 @@ export class PullRequestWatchService extends EventEmitter {
       if (current.pausedUntil !== null && Date.parse(current.pausedUntil) > now) continue
       if ((this.hostPaused.get(current.pr.host.toLowerCase()) ?? 0) > now) continue
       const folder = this.deps.folderFor(thread.id)
-      if (!folder) continue
+      if (!folder) {
+        // The project was removed: nothing can be read, and nothing will bring it back.
+        this.end(thread.id, 'project_missing')
+        continue
+      }
       due.push({ threadId: thread.id, folder, pr: current.pr })
     }
     due.sort((a, b) => Date.parse(this.entries.get(a.threadId)!.nextAt) - Date.parse(this.entries.get(b.threadId)!.nextAt))
@@ -321,12 +351,12 @@ export class PullRequestWatchService extends EventEmitter {
     }
     let reads = 0
     for (const members of groups.values()) {
-      if (this.stopped || reads >= this.maxReads) break
+      if (this.stopped || reads >= this.maxReads || this.requestsLeft <= 0) break
       const host = members[0].pr.host.toLowerCase()
-      if ((this.hostPaused.get(host) ?? 0) > this.clock()) continue
+      if (this.hostIsPaused(host)) continue
       reads++
+      this.requestsLeft--
       const captured = new Map(members.map((member) => [member.threadId, this.entries.get(member.threadId)!.watchRevision]))
-      for (const member of members) this.lastRead.set(member.threadId, this.clock())
       let detail: PullRequestDetail | null = null
       let failure: unknown = null
       try {
@@ -339,7 +369,8 @@ export class PullRequestWatchService extends EventEmitter {
         failure = error
       }
       for (const member of members) {
-        if (this.stopped) break
+        // A rate limit met by one thread of the group (or by the read itself) holds back the rest of it.
+        if (this.stopped || this.hostIsPaused(host)) break
         await this.processMember(member, captured.get(member.threadId)!, detail, failure)
       }
     }
@@ -351,17 +382,22 @@ export class PullRequestWatchService extends EventEmitter {
       this.readFailed(member.threadId, failure)
       return
     }
+    const host = member.pr.host.toLowerCase()
+    // Out of requests for this tick: the thread stays due and goes first in the next.
+    if (this.requestsLeft <= 0 || this.hostIsPaused(host)) return
     const viewer = await this.deps.codeHost.viewerLogin(member.folder)
-    if (!this.current(member.threadId, revision)) return
+    if (!this.current(member.threadId, revision) || this.hostIsPaused(host)) return
     const entry = this.entries.get(member.threadId)!
     const state = entry.state
     const startedAt = this.clock()
+    const identity = pullRequestIdentityKey(member.pr)
     let incremental: LineCommentRead | undefined
     let reconcile: LineCommentRead | undefined
     try {
-      incremental = await this.deps.codeHost.listLineCommentsSince(member.folder, member.pr, state.lineCursor)
-      if (reconcileDue(state, startedAt)) {
-        reconcile = await this.deps.codeHost.listLineCommentsCreatedSince(member.folder, member.pr, hostTimestamp(cutoffMs(state.watchStartedAt) - 1000), state.reconcile.page)
+      incremental = await this.readPages(`since|${identity}|${state.lineCursor.since}|${state.lineCursor.page}`, () => this.deps.codeHost.listLineCommentsSince(member.folder, member.pr, state.lineCursor))
+      if (reconcileDue(state, startedAt) && this.requestsLeft > 0 && !this.hostIsPaused(host) && this.current(member.threadId, revision)) {
+        const createdSince = hostTimestamp(cutoffMs(state.watchStartedAt) - 1000)
+        reconcile = await this.readPages(`created|${identity}|${createdSince}|${state.reconcile.page}`, () => this.deps.codeHost.listLineCommentsCreatedSince(member.folder, member.pr, createdSince, state.reconcile.page))
       }
     } catch (error) {
       if (this.current(member.threadId, revision)) this.readFailed(member.threadId, error)
@@ -377,36 +413,57 @@ export class PullRequestWatchService extends EventEmitter {
     const changed = evaluated.changes.length > 0
     // The baseline only records, so it does not count as a quiet read.
     const intervalMs = changed || state.baseline ? this.minInterval : Math.min(entry.intervalMs * 2, this.maxInterval)
-    const deliveries = this.deliveriesFor(member.threadId, entry, detail, evaluated.changes, viewer !== null)
-    const prepared = prepareDeliveries(next, deliveries, now)
-    this.save(member.threadId, { ...entry, state: prepared.next, intervalMs, nextAt: new Date(now + intervalMs).toISOString(), pausedUntil: null })
+    const plan = this.deliveriesFor(member.threadId, entry, next, detail, evaluated.changes, viewer !== null, now)
+    const prepared = prepareDeliveries(plan.state, plan.deliveries, now)
+    // Step 1 must be on disk before any sink is touched: if it cannot be written, nothing is delivered and the read repeats.
+    try {
+      this.saveStrict(member.threadId, { ...entry, mode: plan.mode, state: prepared.next, intervalMs, nextAt: new Date(now + intervalMs).toISOString(), pausedUntil: null, lastReadAt: new Date(startedAt).toISOString() })
+    } catch (error) {
+      if (this.current(member.threadId, revision)) this.readFailed(member.threadId, error)
+      return
+    }
+    if (plan.mode !== entry.mode) {
+      this.writeLinkWatch(member.threadId, plan.mode)
+      this.emit('updated', { threadId: member.threadId, number: detail.number, changes: ['wake_limit'] })
+    }
     if (!(await this.replay(member.threadId, revision))) return
     if (changed) this.emit('updated', { threadId: member.threadId, number: detail.number, changes: changeKinds(evaluated.changes) })
     if (evaluated.ended && this.current(member.threadId, revision)) this.end(member.threadId, evaluated.ended)
   }
 
   /**
-   * The notices a batch becomes. With `notify`, one for everything. With `act`, one that wakes the agent for the checks and
-   * for what owners, members and collaborators wrote, and a plain notice for the rest: the agent never acts on a stranger.
+   * The notices a batch becomes. With `notify`, one for everything. With `act`, one that wakes the agent for what may wake it
+   * (a failed check of a pull request from a branch of the repository opened by a maintainer, and what owners, members and
+   * collaborators wrote) and a plain notice for the rest: the agent never acts on a stranger. Each wake counts; the count
+   * starts over when a person writes to the thread, and at `AUTONOMOUS_WAKE_LIMIT` the watch switches itself to Notify and says so.
    */
-  private deliveriesFor(threadId: string, entry: Sidecar, detail: PullRequestDetail, changes: PullRequestChange[], viewerKnown: boolean) {
-    if (!changes.length) return []
+  private deliveriesFor(threadId: string, entry: Sidecar, state: WatchState, detail: PullRequestDetail, changes: PullRequestChange[], viewerKnown: boolean, now: number) {
+    type Planned = { idPrefix: string; mode: 'notify' | 'act'; text: string; payload: PullRequestUpdatePayload | null; ids: string[]; final?: true }
     const idPrefix = `pr-update:${threadId}:${entry.watchRevision}`
-    const make = (mode: 'notify' | 'act', part: PullRequestChange[]) => {
+    const make = (mode: 'notify' | 'act', part: PullRequestChange[]): Planned => {
       const text = formatPullRequestNotice(part, detail, mode)
       const payload: PullRequestUpdatePayload | null = mode === 'act' ? { text, number: detail.number, headSha: detail.headSha, changes: changeKinds(part) } : null
       return { idPrefix, mode, text, payload, ids: changeIds(part) }
     }
-    if (entry.mode !== 'act' || this.deps.isSubagent(threadId)) return [make('notify', changes)]
-    const { act, notify } = splitByTrust(changes)
+    let counted = state
+    // A person's message since the count began starts it over.
+    const person = this.deps.lastPersonMessageAt(threadId)
+    if (person !== null && person > Date.parse(counted.wakeCountSince)) counted = { ...counted, autonomousWakes: 0, wakeCountSince: new Date(person).toISOString() }
+    if (!changes.length) return { deliveries: [] as Planned[], state: counted, mode: entry.mode }
+    if (entry.mode !== 'act' || this.deps.isSubagent(threadId)) return { deliveries: [make('notify', changes)], state: counted, mode: entry.mode }
+    const { act, notify } = splitByTrust(changes, { checksMayWake: checksMayWake(detail) })
+    const isRemark = (change: PullRequestChange): boolean => change.kind === 'review' || change.kind === 'comment'
     // Without the signed-in account the agent's own comments cannot be told from anyone's, so no remark wakes it.
-    if (!viewerKnown) {
-      const isRemark = (change: PullRequestChange): boolean => change.kind === 'review' || change.kind === 'comment'
-      const checks = act.filter((change) => !isRemark(change))
-      const remarks = act.filter(isRemark)
-      return [...(checks.length ? [make('act', checks)] : []), ...(notify.length + remarks.length ? [make('notify', [...remarks, ...notify])] : [])]
-    }
-    return [...(act.length ? [make('act', act)] : []), ...(notify.length ? [make('notify', notify)] : [])]
+    const waking = viewerKnown ? act : act.filter((change) => !isRemark(change))
+    const rest = viewerKnown ? notify : [...act.filter(isRemark), ...notify]
+    const deliveries: Planned[] = [...(waking.length ? [make('act', waking)] : []), ...(rest.length ? [make('notify', rest)] : [])]
+    if (!waking.length) return { deliveries, state: counted, mode: entry.mode }
+    counted = { ...counted, autonomousWakes: counted.autonomousWakes + 1 }
+    if (counted.autonomousWakes < AUTONOMOUS_WAKE_LIMIT) return { deliveries, state: counted, mode: entry.mode }
+    // The last wake the watch allows: it goes out, then the watch only notifies, with a line that says why.
+    for (const delivery of deliveries) if (delivery.mode === 'act') delivery.final = true
+    deliveries.push({ idPrefix, mode: 'notify', text: wakeLimitLine(detail.number), payload: null, ids: [] })
+    return { deliveries, state: counted, mode: 'notify' as const }
   }
 
   // Delivery -----------------------------------------------------------------------------------------------------
@@ -439,14 +496,23 @@ export class PullRequestWatchService extends EventEmitter {
       const completed = completeDelivery(after.state, delivery.deliveryId)
       // The delivery must have left the queue, or this loop would never end.
       if (completed === after.state) return false
-      this.save(threadId, { ...after, state: completed })
+      // Step 3 is not acknowledged unless it is on disk. If it cannot be written the delivery stays prepared, nothing newer is
+      // admitted behind it, and the next replay finds the sink already holds it and tries again.
+      try {
+        this.saveStrict(threadId, { ...after, state: completed })
+      } catch (error) {
+        if (this.current(threadId, revision)) this.readFailed(threadId, error)
+        return false
+      }
     }
   }
 
-  private async sink(threadId: string, delivery: PendingDelivery): Promise<'delivered' | 'already'> {
-    const messageId = `msg:${delivery.deliveryId}`
-    // An agent is never woken in a subagent thread, whatever the notice was prepared as.
-    if (delivery.mode === 'act' && delivery.payload && !this.deps.isSubagent(threadId)) {
+  private async sink(threadId: string, prepared: PendingDelivery): Promise<'delivered' | 'already'> {
+    const messageId = `msg:${prepared.deliveryId}`
+    // Whether it may wake is decided now, not when it was prepared: a watch that is no longer set to act, and a subagent, only notify.
+    const permitted = (this.entries.get(threadId)?.mode === 'act' || prepared.final === true) && !this.deps.isSubagent(threadId)
+    const delivery = permitted ? prepared : downgradeDelivery(prepared)
+    if (delivery.mode === 'act' && delivery.payload) {
       const inbox = this.deps.inbox()
       const store = this.deps.runStore()
       if (!inbox || !store) throw new Error('The run engine is not available to wake the thread.')
@@ -504,6 +570,8 @@ export class PullRequestWatchService extends EventEmitter {
     if (!entry) return
     const now = new Date(this.clock()).toISOString()
     this.save(threadId, { ...entry, ended: { reason, at: now }, state: dropPendingDeliveries(entry.state), watchRevision: entry.watchRevision + 1 })
+    // A notice written for the agent and not yet read is withdrawn with the watch.
+    this.revokeWakes(threadId)
     if (reason !== 'unlinked') this.writeLinkWatch(threadId, 'off')
     if (reason === 'trashed') return
     const line = watchEndedLine(reason, entry.pr.number)
@@ -601,7 +669,27 @@ export class PullRequestWatchService extends EventEmitter {
     }
   }
 
-  /** Memory first, then the file: a failed write leaves the next tick to write it again. */
+  /**
+   * Writes the state, and only then makes it the state in memory: a write that fails throws and leaves the previous state.
+   * Used wherever a failed write would break the handoff (before a delivery, after it, and when the person changes the watch).
+   */
+  private saveStrict(threadId: string, entry: Sidecar): void {
+    const file = this.path(threadId)
+    if (!file) throw new Error('The thread folder is not available to save the watch.')
+    atomicWriteJsonSync(file, entry)
+    this.entries.set(threadId, entry)
+  }
+
+  /** `saveStrict` for a change a person asked for: a refusal they can read when it cannot be saved. */
+  private saveOrRefuse(threadId: string, entry: Sidecar): void {
+    try {
+      this.saveStrict(threadId, entry)
+    } catch (error) {
+      throw new PullRequestWatchError('watch_not_saved', `The watch could not be saved: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /** Memory first, then the file, for what is only a schedule or a counter: a failed write is repeated by the next one. */
   private save(threadId: string, entry: Sidecar): void {
     this.entries.set(threadId, entry)
     const file = this.path(threadId)
@@ -610,6 +698,39 @@ export class PullRequestWatchService extends EventEmitter {
       atomicWriteJsonSync(file, entry)
     } catch (error) {
       console.warn('pull request watch state could not be saved', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /** The inbox rows a watch wrote that nobody has read are acknowledged, so none of them can still wake the thread. */
+  private revokeWakes(threadId: string): void {
+    try {
+      const inbox = this.deps.inbox()
+      if (!inbox) return
+      const open = inbox.listForThread(threadId).filter((row) => row.kind === 'pr_update' && row.status !== 'acknowledged')
+      if (open.length) inbox.markAcknowledged(open.map((row) => row.inboxId))
+    } catch (error) {
+      console.warn('pull request updates could not be withdrawn', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  private hostIsPaused(host: string): boolean {
+    return (this.hostPaused.get(host) ?? 0) > this.clock()
+  }
+
+  /** A page read shared by the threads of one tick that ask for the same position; every read spends requests from the tick's budget. */
+  private async readPages(key: string, read: () => Promise<LineCommentRead>): Promise<LineCommentRead> {
+    const shared = this.pageReads.get(key)
+    if (shared) return shared
+    const started = read().then((result) => {
+      this.requestsLeft -= Math.max(1, result.pages ?? 1)
+      return result
+    })
+    this.pageReads.set(key, started)
+    try {
+      return await started
+    } catch (error) {
+      this.pageReads.delete(key)
+      throw error
     }
   }
 

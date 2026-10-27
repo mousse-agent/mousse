@@ -152,6 +152,48 @@ describe('the watch through the daemon protocol', () => {
     expect(mms.threads.getThread(thread.id)?.pullRequest?.watch).toBe('off')
   })
 
+  it('ends the watch when the thread is archived, saying so, not that it was stopped', async () => {
+    const thread = newThread()
+    await client.request('pullRequests.watch', { threadId: thread.id, watch: 'notify', number: 7 })
+    await client.request('threads.settle', { threadId: thread.id, settled: true })
+    expect(mms.pullRequestWatch.status(thread.id)).toMatchObject({ state: 'ended', ended: { reason: 'settled' } })
+    const lines = mms.orchestrator.getMessagesForPersistence(thread.id).filter((message) => message.role === 'system').map((message) => message.content)
+    expect(lines).toEqual([expect.stringContaining('archived')])
+  })
+
+  it('ends the watch of a thread that is moved to the trash, and a restore does not bring it back or report a backlog', async () => {
+    const thread = newThread()
+    await client.request('pullRequests.watch', { threadId: thread.id, watch: 'act', number: 7 })
+    await mms.trashThread(thread.id)
+    // Posted while the thread was in the trash.
+    const lineReads = vi.mocked(mms.gitService.codeHost.listLineCommentsSince)
+    lineReads.mockClear()
+    await mms.pullRequestWatch.tick()
+    expect(lineReads).not.toHaveBeenCalled()
+    await mms.restoreThread(thread.id)
+    expect(mms.threads.getThread(thread.id)?.pullRequest?.watch).toBe('off')
+    expect(mms.pullRequestWatch.status(thread.id)).toMatchObject({ state: 'ended', ended: { reason: 'trashed' } })
+    await mms.pullRequestWatch.tick()
+    expect(lineReads).not.toHaveBeenCalled()
+    expect(mms.runEngine.inbox.listForThread(thread.id)).toEqual([])
+    expect(mms.orchestrator.getMessagesForPersistence(thread.id).filter((message) => message.role === 'system')).toEqual([])
+  }, 30_000)
+
+  it('ends the old watch when the thread is linked to a different pull request, and a later watch of the first starts fresh', async () => {
+    const thread = newThread()
+    await client.request('pullRequests.watch', { threadId: thread.id, watch: 'notify', number: 7 })
+    vi.mocked(mms.gitService.codeHost.getPullRequestDetail).mockImplementation(async (_cwd, number) => detailOf({ number, identity: { host: 'github.com', nameWithOwner: 'acme/app', number } }))
+    await client.request('pullRequests.link', { threadId: thread.id, number: 8 })
+    const lines = () => mms.orchestrator.getMessagesForPersistence(thread.id).filter((message) => message.role === 'system').map((message) => message.content)
+    expect(lines()).toEqual([expect.stringContaining('link to pull request #7 was removed')])
+    // The watch of pull request 8 is a different one; nothing of the old one is left running.
+    await client.request('pullRequests.watch', { threadId: thread.id, watch: 'notify', number: 7 })
+    expect(mms.threads.getThread(thread.id)?.pullRequest).toMatchObject({ number: 7, watch: 'notify' })
+    // Pull request 8 was never watched, so nothing more is said; the new watch of 7 has its own record.
+    expect(lines()).toHaveLength(1)
+    expect(mms.pullRequestWatch.status(thread.id)).toMatchObject({ state: 'watching', mode: 'notify' })
+  })
+
   it('announces a change of a watched pull request to every client', async () => {
     const thread = newThread()
     mms.pullRequestWatch.emit('updated', { threadId: thread.id, number: 7, changes: ['checks_failed'] })

@@ -922,6 +922,7 @@ export class GitHubCodeHost implements CodeHost {
     const endpoint = `repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/pulls/${pullRequest.number}/comments`
     const comments: PullRequestComment[] = []
     let newestUpdatedAt: string | null = null
+    let requests = 0
     let page = firstPage
     for (let read = 0; read < pages; read++, page++) {
       let stdout: string
@@ -937,14 +938,15 @@ export class GitHubCodeHost implements CodeHost {
       const parsed = parseLineCommentPage(stdout)
       if (!parsed) throw new PullRequestReadError('GitHub CLI returned an unexpected comments response.', 'error')
       comments.push(...parsed)
+      requests++
       newestUpdatedAt = laterTimestamp(newestUpdatedAt, newestUpdate(stdout))
       const olderSeen = createdNotBefore !== undefined && parsed.some((comment) => {
         const at = Date.parse(comment.createdAt)
         return !Number.isNaN(at) && at < createdNotBefore
       })
-      if (parsed.length < LINE_COMMENT_PAGE_SIZE || olderSeen) return { comments, drained: true, nextPage: 1, newestUpdatedAt }
+      if (parsed.length < LINE_COMMENT_PAGE_SIZE || olderSeen) return { comments, drained: true, nextPage: 1, newestUpdatedAt, pages: requests }
     }
-    return { comments, drained: false, nextPage: page, newestUpdatedAt }
+    return { comments, drained: false, nextPage: page, newestUpdatedAt, pages: requests }
   }
 
   async viewerLogin(cwd: string): Promise<string | null> {

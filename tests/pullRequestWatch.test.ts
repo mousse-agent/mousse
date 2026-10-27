@@ -11,7 +11,10 @@ import {
   changeIds,
   checkOutcome,
   completeDelivery,
-  COMMENT_ONLY_LIMIT,
+  AUTONOMOUS_WAKE_LIMIT,
+  checksMayWake,
+  downgradeDelivery,
+  wakeLimitLine,
   cutoffMs,
   dropPendingDeliveries,
   evaluatePullRequestWatch,
@@ -136,7 +139,7 @@ describe('timestamps', () => {
 })
 
 describe('the baseline', () => {
-  it('reports nothing and remembers what is there after the cutoff, even in the cutoff second', () => {
+  it('reports no check and remembers what was posted up to the second the watch began; later remarks are reported', () => {
     const lines = [comment('9', { createdAt: T(0) }), comment('8', { createdAt: T(-30) })]
     const first = evaluatePullRequestWatch(
       initialWatchState(START),
@@ -149,12 +152,20 @@ describe('the baseline', () => {
       'me',
       START
     )
-    expect(first.changes).toEqual([])
+    // The review and the comment came after the watch began, so a late first read still reports them; no check is reported.
+    expect(changeIds(first.changes)).toEqual(['C1', 'R1'])
+    expect(kinds(first.changes)).toEqual(['comment', 'review'])
     expect(first.ended).toBeNull()
     expect(first.next.baseline).toBe(false)
-    expect([...first.next.deliveredIds].sort()).toEqual(['9', 'C1', 'R1'])
+    expect([...first.next.deliveredIds].sort()).toEqual(['9'])
     expect(first.next.failedChecks).toEqual(['build'])
     expect(first.next.outcome).toBe('failed')
+  })
+
+  it('does not lose a remark made after the watch was turned on when the first read comes ten minutes late', () => {
+    const late = comment('late', { createdAt: T(300) })
+    const first = evaluatePullRequestWatch(initialWatchState(START), detail(), [late], 'me', START + 600_000)
+    expect(changeIds(first.changes)).toEqual(['late'])
   })
 })
 
@@ -285,21 +296,13 @@ describe('ending', () => {
     expect(evaluate(state, detail({ state: 'closed' }))).toMatchObject({ ended: 'closed', changes: [] })
   })
 
-  it('ends after ten notices in a row that were only comments, and a check or review resets the count', () => {
+  it('never ends a watch because of how many comments came: a busy discussion is not a loop of wakes', () => {
     let state = baselined()
-    for (let index = 0; index < COMMENT_ONLY_LIMIT - 1; index++) {
+    for (let index = 0; index < 30; index++) {
       const result = evaluate(state, detail(), [comment(`c${index}`, { createdAt: T(10 + index) })])
       expect(result.ended).toBeNull()
       state = result.next
     }
-    // A review in the same pull request resets it.
-    const reset = evaluate(state, detail({ reviews: [review('R1', { submittedAt: T(300) })] }))
-    expect(reset.next.commentOnlyWakes).toBe(0)
-    state = reset.next
-    for (let index = 0; index < COMMENT_ONLY_LIMIT - 1; index++) state = evaluate(state, detail(), [comment(`d${index}`, { createdAt: T(400 + index) })]).next
-    const last = evaluate(state, detail(), [comment('last', { createdAt: T(500) })])
-    expect(last.ended).toBe('comment_loop')
-    expect(changeIds(last.changes)).toEqual(['last'])
   })
 })
 
@@ -345,8 +348,8 @@ describe('reads', () => {
   it('seeds the baseline from the detail and from both reads, and reports nothing', () => {
     const result = evaluatePullRequestWatch(
       initialWatchState(START),
-      detail({ comments: [comment('D1', { path: null, line: null })] }),
-      [comment('I1'), comment('R1')],
+      detail({ comments: [comment('D1', { path: null, line: null, createdAt: T(0) })] }),
+      [comment('I1', { createdAt: T(0) }), comment('R1', { createdAt: T(0) })],
       'me',
       START
     )
@@ -381,9 +384,40 @@ describe('deliveries', () => {
       { kind: 'review', id: 'R', review: review('R', { authorAssociation: 'FIRST_TIME_CONTRIBUTOR' }) },
       { kind: 'review', id: 'R2', review: review('R2', { authorAssociation: 'owner' }) }
     ]
-    const { act, notify } = splitByTrust(changes)
+    const { act, notify } = splitByTrust(changes, { checksMayWake: true })
     expect(act.map((change) => (change.kind === 'comment' || change.kind === 'review' ? change.id : change.kind))).toEqual(['checks_failed', '1', 'R2'])
     expect(notify.map((change) => (change.kind === 'comment' || change.kind === 'review' ? change.id : change.kind))).toEqual(['2', 'R'])
+  })
+
+  it('never wakes for checks passing, and wakes for failed checks only of a pull request from a branch of the repository by a maintainer', () => {
+    const changes: PullRequestChange[] = [{ kind: 'checks_failed', checks: [check('a', 'failing')] }, { kind: 'checks_passed' }]
+    expect(splitByTrust(changes, { checksMayWake: true })).toMatchObject({ act: [{ kind: 'checks_failed' }], notify: [{ kind: 'checks_passed' }] })
+    const plain = splitByTrust(changes, { checksMayWake: false })
+    expect(plain.act).toEqual([])
+    expect(kinds(plain.notify)).toEqual(['checks_failed', 'checks_passed'])
+    expect(checksMayWake({ authorAssociation: 'OWNER', isCrossRepository: false })).toBe(true)
+    expect(checksMayWake({ authorAssociation: 'COLLABORATOR', isCrossRepository: false })).toBe(true)
+    // A fork's workflow files name its checks, whoever opened it.
+    expect(checksMayWake({ authorAssociation: 'OWNER', isCrossRepository: true })).toBe(false)
+    expect(checksMayWake({ authorAssociation: 'CONTRIBUTOR', isCrossRepository: false })).toBe(false)
+    expect(checksMayWake({ authorAssociation: 'NONE', isCrossRepository: false })).toBe(false)
+  })
+
+  it('turns a prepared wake into a plain notice without the instruction to change code', () => {
+    const act = formatPullRequestNotice([{ kind: 'checks_failed', checks: [check('a', 'failing')] }], { number: 7, title: 't', url: 'https://github.com/acme/app/pull/7', headSha: 'abcdef0123', authorAssociation: 'OWNER' }, 'act')
+    const prepared = prepareDeliveries(baselined(), [{ idPrefix: 'p', mode: 'act', text: act, payload: { text: act, number: 7, headSha: 'abcdef0', changes: ['checks_failed'] }, ids: [], final: true }], START).deliveries[0]
+    expect(prepared.final).toBe(true)
+    const down = downgradeDelivery(prepared)
+    expect(down).toMatchObject({ mode: 'notify', payload: null, deliveryId: prepared.deliveryId })
+    expect(down.text).not.toContain('Address what needs code changes')
+    expect(down.text).toContain('Checks failed')
+    expect(downgradeDelivery(down)).toBe(down)
+  })
+
+  it('says why the watch stopped waking the agent', () => {
+    expect(AUTONOMOUS_WAKE_LIMIT).toBe(3)
+    expect(wakeLimitLine(7)).toContain('switched from "Let the agent act" to Notify')
+    expect(wakeLimitLine(7)).toContain('woken 3 times without a message from you')
   })
 })
 
@@ -455,8 +489,7 @@ describe('the notice', () => {
 
   it('names why a watch ended and how to turn it on again', () => {
     expect(watchEndedLine('merged', 7)).toBe('Watch ended: Pull request #7 was merged.')
-    expect(watchEndedLine('comment_loop', 7)).toContain('10 updates in a row that were only comments')
-    expect(watchEndedLine('comment_loop', 7)).toContain('Turn the watch on again')
+    expect(watchEndedLine('read_failures', 7)).toContain('Turn the watch on again')
     expect(watchEndedLine('id_cap', 7)).toContain('more than 20,000 comments')
     expect(watchEndedLine('read_failures', 7)).toContain('8 times')
     expect(watchEndedLine('not_found', 7)).toContain('3 times')

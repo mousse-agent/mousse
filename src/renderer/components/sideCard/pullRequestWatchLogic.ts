@@ -1,8 +1,13 @@
 import type { PullRequestWatchEnd, PullRequestWatchMode, PullRequestWatchStatus } from '../../../shared/pullRequests'
 
+/** What "Let the agent act" does and who it listens to; "member" means any member of the organisation that owns the repository. */
+const ACT_HINT = 'Wakes the agent when checks fail on a pull request from a branch of this repository, and for reviews and comments by owners, members and collaborators (on an organisation\'s repository, a member is anyone in the organisation). After 3 wakes without a message from you it only notifies.'
+
 export interface WatchOption {
   mode: PullRequestWatchMode
   label: string
+  /** What the choice does; shown on hover. */
+  hint?: string
   /** Why this choice cannot be picked; null when it can. */
   disabledReason: string | null
 }
@@ -23,13 +28,13 @@ export interface WatchControlModel {
 const ENDED: Record<PullRequestWatchEnd, string> = {
   merged: 'The pull request was merged, so the watch ended.',
   closed: 'The pull request was closed, so the watch ended.',
-  comment_loop: 'Ten updates in a row were only comments, so the watch ended.',
   id_cap: 'The pull request has too many comments to keep watching.',
   read_failures: 'The pull request could not be read several times, so the watch ended.',
   not_found: 'The pull request was not found, so the watch ended.',
   signed_out: 'GitHub could not be reached (not signed in?), so the watch ended.',
   stopped: 'The thread was stopped, so the watch ended.',
   unlinked: 'The thread was unlinked from the pull request, so the watch ended.',
+  project_missing: "The thread's project is not available, so the watch ended.",
   settled: 'The thread was archived, so the watch ended.',
   trashed: 'The thread was deleted, so the watch ended.'
 }
@@ -49,7 +54,7 @@ export function pullRequestWatchModel(status: PullRequestWatchStatus | null, now
   const options: WatchOption[] = [
     { mode: 'off', label: 'Off', disabledReason: null },
     { mode: 'notify', label: 'Notify', disabledReason: null },
-    { mode: 'act', label: 'Let the agent act', disabledReason: status?.actRefusal ?? null }
+    { mode: 'act', label: 'Let the agent act', disabledReason: status?.actRefusal ?? null, hint: ACT_HINT }
   ]
   const watching = mode !== 'off'
   const summary = !status || !watching
