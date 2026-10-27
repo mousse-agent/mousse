@@ -55,7 +55,7 @@ async function run(definition: (project: string) => DefinitionAuthority, calls: 
 const refused = (event: { summary?: unknown }) => event.summary === 'The tool returned an error.'
 
 describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, real child)', () => {
-  it('read-only denies write; scripts off deny bash; a tool outside the grants is refused', async () => {
+  it('read-only denies write; scripts off deny bash; a tool outside the grants is not even offered', async () => {
     const readOnly = await run((project) => ({ policy: policy(project, { workspace: { mode: 'read_only' } }), grants: grants(...ALL) }), [
       { name: 'write', args: { path: 'blocked.txt', content: 'x' } }
     ])
@@ -73,7 +73,8 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
       { name: 'write', args: { path: 'ungranted.txt', content: 'x' } }
     ])
     expect(existsSync(join(notGranted.project, 'ungranted.txt'))).toBe(false)
-    expect(String(notGranted.results[0].response)).toContain('not granted')
+    // A definition's turn is offered exactly its grants: Pi has no such tool to run.
+    expect(String(notGranted.results[0].response)).toBe('Tool write not found')
   }, 120_000)
 
   it('a path outside the roots is denied in every form Pi would open, and a path inside runs', async () => {
@@ -136,7 +137,7 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
     expect(starts).toHaveLength(1)
   }, 120_000)
 
-  it('an app tool the definition refuses is refused at the gate and costs no tool call, as a refused built-in does', async () => {
+  it('an app tool the definition does not grant is not offered and costs no tool call, as an ungranted built-in', async () => {
     const { engine, recorder, project } = await setup(cleanups, {
       mousseTools: () => [{ name: 'create_task', description: 'Create a task', inputSchema: { type: 'object', properties: { description: { type: 'string' } } }, class: 'mutation' }]
     })
@@ -155,7 +156,7 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
     const result = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
     expect(result.text).toBe('done')
     const results = turn.events.filter((event) => event.kind === 'tool' && event.phase === 'complete')
-    expect(String(results[0].response)).toContain('not granted')
+    expect(String(results[0].response)).toBe('Tool create_task not found')
     // The refused app tool cost nothing: the one allowed call was the granted write.
     expect(readFileSync(join(project, 'granted.txt'), 'utf8')).toBe('ok')
     expect(counters.toolCalls).toBe(1)

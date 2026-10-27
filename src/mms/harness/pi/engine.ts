@@ -30,6 +30,7 @@ import { PiBridge, type PiBridgeRegistration } from './bridge'
 import { DescendantTracker, OwnedGroups } from './descendants'
 import { WriterEpisode, type PiToolClass } from './episode'
 import { authorizeDefinitionCall, recordAuthorizedCall, withoutTransportFields } from '../../agentDefinitions/definitionGate'
+import { canonicalizeBuiltinToolName } from '../../agentDefinitions/runtimePolicy'
 import type { ToolCall } from '@earendil-works/pi-ai'
 import type { AgentExecutionLimit } from '../../../shared/agents/execution'
 import { ANTHROPIC_OAUTH_REFUSED, BUDGET_EXHAUSTED, CREDENTIAL_UNAVAILABLE, GATE_REFUSALS, GATE_UNAVAILABLE, REQUEST_REFUSED, SPEND_CAP_MISMATCH } from './extension/messages'
@@ -1304,10 +1305,15 @@ export class PiRpcEngine implements ProviderAdapter {
     if (thread.sessionId) sink.providerRef(ref)
     let builtins = !input.cwd ? [] : input.mode === 'plan' || input.child?.readOnly ? PI_READ_ONLY_BUILTINS : PI_ALL_BUILTINS
     let tools = host.bridge?.mcp ? this.options.mousseTools?.(input.threadId) ?? [] : []
-    // An agent definition's turn offers exactly its grants (the policy's allowlist, none without
-    // one), and never a delegation tool: a definition delegates nothing, as on the legacy loop.
+    // An agent definition's turn offers exactly its grants (the policy's allowlist, else its effective
+    // grants), and never a delegation tool: a definition delegates nothing, as on the legacy loop.
     if (host.definition) {
-      const allowed = new Set(host.bridge?.toolPolicy?.allow ?? [])
+      const { grants, mcpTools } = host.definition
+      const allowed = new Set(host.bridge?.toolPolicy?.allow ?? [
+        ...grants.builtinTools.map((grant) => canonicalizeBuiltinToolName(grant.id)),
+        ...grants.mcpTools.map((grant) => grant.id),
+        ...(mcpTools ?? []).map((tool) => tool.providerName)
+      ])
       builtins = builtins.filter((name) => allowed.has(name))
       tools = tools.filter((tool) => allowed.has(tool.name) && tool.class !== 'delegation')
     }
