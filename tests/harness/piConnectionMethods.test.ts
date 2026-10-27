@@ -8,8 +8,8 @@ import { builtinProviders } from '@earendil-works/pi-ai/providers/all'
 import type { Api, Model } from '@earendil-works/pi-ai'
 import { describe, expect, it } from 'vitest'
 import { piDriver } from '../../src/mms/harness/drivers/pi'
-import { piCredentialSubject, piRpcProfileOptions, type PiProfileAuth } from '../../src/mms/harness/drivers/pi/profile'
-import { piOwnProviderKeys } from '../../src/mms/harness/pi/envKeys'
+import { PI_AMBIENT_SUBJECT_ENV, piCredentialSubject, piRpcProfileOptions, type PiProfileAuth } from '../../src/mms/harness/drivers/pi/profile'
+import { PI_AMBIENT_ENV, PI_AMBIENT_MARKER, piOwnProviderKeys } from '../../src/mms/harness/pi/envKeys'
 import { piRuntimePaths } from '../../src/mms/harness/pi/launch'
 
 type Method =
@@ -155,5 +155,13 @@ describe('Pi connection methods', () => {
     expect(piCredentialSubject('amazon-bedrock', undefined, { AWS_BEARER_TOKEN_BEDROCK: 'b' })).not.toBe(piCredentialSubject('amazon-bedrock', undefined, {}))
     // Never the secret itself.
     expect(piCredentialSubject('groq', { type: 'api_key', key: 'secret-key' }, {})).not.toContain('secret-key')
+  })
+
+  it('names an ambient account from the variables the locked environment keeps, and reads the shared marker', () => {
+    for (const [provider, names] of Object.entries(PI_AMBIENT_SUBJECT_ENV))
+      for (const name of names) expect(PI_AMBIENT_ENV[provider], `${provider} ${name}`).toContain(name)
+    expect(piCredentialSubject('amazon-bedrock', { type: 'api_key', key: PI_AMBIENT_MARKER }, { AWS_PROFILE: 'p' })).toMatch(/^ambient:/)
+    // A real key saved for Vertex is a key, as the credential kind counts it.
+    expect(piCredentialSubject('google-vertex', { type: 'api_key', key: 'real-vertex-key' }, {})).toMatch(/^apikey:/)
   })
 })

@@ -11,7 +11,7 @@ import type { ToolRegistry } from '../../../run/mcp/appTools/registry'
 import { customModelDefinition } from '../../catalog'
 import type { PiEngineCatalog, PiMousseTool } from '../../pi/engine'
 import { piRuntimePaths, type PiRuntimePaths } from '../../pi/launch'
-import { PI_PROVIDER_ENV_KEYS } from '../../pi/envKeys'
+import { PI_AMBIENT_MARKER, PI_PROVIDER_ENV_KEYS, piAmbientProvider } from '../../pi/envKeys'
 import { oauthSubject, type PiOAuthSource } from '../../pi/oauthBroker'
 import type { PiRpcDriverOptions } from './engines/rpc'
 
@@ -62,13 +62,11 @@ function sha256(text: string): string {
 }
 
 /**
- * What a verified ambient sign-in (Bedrock, Vertex) stores as its key (pi-ai's `getEnvApiKey`): a
- * marker, not a credential. The account comes from the environment, and Pi is never handed it.
+ * The variables of `PI_AMBIENT_ENV` that name an ambient account (profile, region, the access key id
+ * or bearer token; project and location): what the identity hashes. Rotating values (a session
+ * token, its expiry) stay out, so a refreshed sign-in keeps its identity.
  */
-const AMBIENT_PLACEHOLDER = '<authenticated>'
-
-/** Providers whose credential is the machine's own cloud sign-in (profile and region decide the account). */
-const AMBIENT: Readonly<Record<string, readonly string[]>> = Object.freeze({
+export const PI_AMBIENT_SUBJECT_ENV: Readonly<Record<string, readonly string[]>> = Object.freeze({
   'amazon-bedrock': ['AWS_PROFILE', 'AWS_REGION', 'AWS_DEFAULT_REGION', 'AWS_ACCESS_KEY_ID', 'AWS_BEARER_TOKEN_BEDROCK'],
   'google-vertex': ['GOOGLE_CLOUD_PROJECT', 'GCLOUD_PROJECT', 'GOOGLE_CLOUD_LOCATION', 'GOOGLE_APPLICATION_CREDENTIALS']
 })
@@ -80,12 +78,14 @@ const AMBIENT: Readonly<Record<string, readonly string[]>> = Object.freeze({
  * when none can be established (the history is then handed over on every turn).
  */
 export function piCredentialSubject(providerId: string, credential: Record<string, unknown> | undefined, env: NodeJS.ProcessEnv): string | undefined {
-  if (credential?.type === 'api_key' && typeof credential.key === 'string' && credential.key && credential.key !== AMBIENT_PLACEHOLDER) return `apikey:${sha256(credential.key)}`
+  // The ambient marker (`PI_AMBIENT_MARKER`) is no key: the account comes from the environment. Any
+  // other key stored for Bedrock or Vertex is a real key, as the credential kind counts it.
+  if (credential?.type === 'api_key' && typeof credential.key === 'string' && credential.key && credential.key !== PI_AMBIENT_MARKER) return `apikey:${sha256(credential.key)}`
   if (credential?.type === 'oauth') {
     const claim = oauthSubject(credential, providerId)
     return claim ? `oauth:${sha256(`${providerId}|${claim}`)}` : undefined
   }
-  const ambient = AMBIENT[providerId]
+  const ambient = piAmbientProvider(providerId) ? PI_AMBIENT_SUBJECT_ENV[providerId] : undefined
   if (ambient) {
     return `ambient:${sha256(`${providerId}|${ambient.map((name) => env[name] ?? '').join('|')}`)}`
   }
@@ -124,7 +124,7 @@ export function piRpcProfileOptions(inputs: PiProfileInputs): PiRpcDriverOptions
       const auth = inputs.auth()
       // `has` refuses a Claude subscription token stored as an Anthropic key.
       const key = auth?.has(providerId) ? auth.storedApiKey(providerId) : undefined
-      return key === AMBIENT_PLACEHOLDER ? undefined : key
+      return key === PI_AMBIENT_MARKER ? undefined : key
     },
     credentialEnv: (providerId) => {
       const stored = credential(providerId)
