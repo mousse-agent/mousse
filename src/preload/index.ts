@@ -3,6 +3,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
 import type { BridgeDisplayPart } from '../shared/bridge'
 import type { NetStatus } from '../shared/net/local'
+import type { CommandId } from '../shared/commands'
 import type { LocalTtsModelId, LocalTtsModelStatus, ProviderSpeechRequest, ProviderSpeechResult } from '../shared/readAloud'
 import type { LocalSttModelId, LocalSttModelStatus, ProviderTranscriptionRequest, ProviderTranscriptionResult } from '../shared/dictation'
 import type { WindowResizeEdge } from '../shared/windowResize'
@@ -964,6 +965,17 @@ const api = {
       ipcRenderer.on('app:navigateMainView', handler)
       return () => ipcRenderer.removeListener('app:navigateMainView', handler)
     }
+  },
+  /** Registry commands started outside the renderer: the application menu and keys typed in the browser surface. */
+  commands: {
+    onRun: (cb: (run: { id: CommandId; source: 'menu' | 'guest' }) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, run: { id: CommandId; source: 'menu' | 'guest' }) => cb(run)
+      ipcRenderer.on('commands:run', handler)
+      return () => ipcRenderer.removeListener('commands:run', handler)
+    },
+    /** The chords the browser surface forwards to the renderer: binding and the command it runs. */
+    setGuestShortcuts: (shortcuts: { binding: string; id: CommandId }[]): Promise<void> =>
+      ipcRenderer.invoke('commands:setGuestShortcuts', shortcuts)
   },
   net: {
     /** Network status pushed by the daemon whenever it changes, including its list of phone requests. */

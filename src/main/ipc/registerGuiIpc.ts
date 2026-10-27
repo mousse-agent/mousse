@@ -35,6 +35,9 @@ import { SettingsStore } from '../../mms/settings/SettingsStore'
 import { FileService } from '../../mms/files/FileService'
 import { GitService } from '../../mms/git/GitService'
 import { listEditors, openInEditor } from '../editors'
+import { refreshApplicationMenu } from '../applicationMenu'
+import { setGuestShortcuts } from '../menu/guestShortcutForward'
+import type { ShortcutOverrides } from '../../shared/commands'
 import { BrowserViewManager } from '../browser/BrowserViewManager'
 import type { AttachedBrowserHost } from '../browser/AttachedBrowserHost'
 import { domainObject } from '../../mms/protocol/domainRegistry'
@@ -189,6 +192,14 @@ class PlatformRequestError extends AppError {
 
 let mousseIdCallbacks: MousseIdCallbacks | undefined
 
+/** The shortcut overrides of each window's bound profile, by the window's webContents id. */
+const shortcutsByWindow = new Map<number, ShortcutOverrides>()
+
+/** What the window's before-input gate reads: undefined until the window's settings have arrived. */
+export function getWindowShortcuts(senderId: number): ShortcutOverrides | undefined {
+  return shortcutsByWindow.get(senderId)
+}
+
 function registerHandler(
   channel: string,
   handler: Parameters<typeof ipcMain.handle>[1]
@@ -326,6 +337,12 @@ export function registerGuiIpc(
   // repainting another profile's window.
   const windowPresentations = new Map<number, PresentationState>()
   const windowSettings = new Map<number, MousseSettings>()
+  // The application menu and the key gate show the shortcuts of the profile this window is bound to.
+  const rememberWindowSettings = (senderId: number, next: MousseSettings): void => {
+    windowSettings.set(senderId, next)
+    shortcutsByWindow.set(senderId, next.shortcuts ?? {})
+    refreshApplicationMenu(next.shortcuts)
+  }
   const currentPresentation = (): PresentationState => {
     const senderId = guiMms.getCurrentSenderId()
     if (senderId === null) return presentation
@@ -733,7 +750,7 @@ export function registerGuiIpc(
     if (event.type === 'settings.changed') {
       const next = (event.data as { settings?: MousseSettings } | null)?.settings
       if (next) {
-        windowSettings.set(senderId, next)
+        rememberWindowSettings(senderId, next)
         if (binding.profileId === guiMms.getBaseBinding()?.profileId) {
           try {
             settings.set(next)
@@ -1994,7 +2011,7 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ settings: MousseSettings }>('settings.get')
     const senderId = guiMms.getCurrentSenderId()
     if (senderId !== null) {
-      windowSettings.set(senderId, res.settings)
+      rememberWindowSettings(senderId, res.settings)
       const win = BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.id === senderId)
       applyWindowAccentBackground(win, res.settings)
     }
@@ -2011,7 +2028,7 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ settings: MousseSettings }>('settings.set', {
       partial
     })
-    windowSettings.set(event.sender.id, res.settings)
+    rememberWindowSettings(event.sender.id, res.settings)
     if (guiMms.getWindowBinding()?.profileId === guiMms.getBaseBinding()?.profileId) {
       try {
         settings.set(res.settings)
@@ -2021,6 +2038,10 @@ export function registerGuiIpc(
     }
     applyWindowAccentBackground(BrowserWindow.fromWebContents(event.sender), res.settings)
     return res.settings
+  })
+  // Chords the renderer can run when they are typed into the browser surface (see menu/guestShortcutForward).
+  registerHandler('commands:setGuestShortcuts', (event, entries: unknown) => {
+    setGuestShortcuts(event.sender.id, entries)
   })
   registerHandler('settings:getOptions', async () => {
     const res = await guiMms.request<{ options: unknown }>('settings.getOptions')
