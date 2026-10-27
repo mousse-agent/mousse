@@ -2978,7 +2978,8 @@ export class OrchestratorService extends EventEmitter {
       quickActions: new QuickActionTools(questionApproval(this.questions), (action) => this.emit('quick-action-created', action)),
       web: new WebTools(this.providerAuth.credentials),
       devGui: new DevGuiTools(),
-      ...(this.gitService ? { projectGit: this.gitService } : {}),
+      // The git app tools read the project through their own scoped Git read (`git/scopedRead`).
+      projectGit: true,
       toolLedger: (runId) => this.toolLedgerFor(runId),
       readOnlyThread: (threadId) => this.isReadOnlyChild(threadId),
       // The ceiling the thread's delegations gave it: a Plan turn narrows only its own calls.

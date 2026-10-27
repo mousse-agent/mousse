@@ -17,7 +17,6 @@ import type { RunEngine } from '../../RunEngine'
 import type { AnsweredBy } from '../../ThreadApprovals'
 import type { AgentActor, ModeCeiling } from '../../types'
 import type { DelegationToolsHost } from './delegation'
-import type { ProjectGit } from './projectGit'
 import type { LiveRunGate } from './registry'
 import type { ToolLedger } from './types'
 
@@ -219,8 +218,11 @@ export interface AppToolHost extends DelegationToolsHost {
   quickActions?: QuickActionTools
   web?: WebTools
   devGui?: DevGuiTools
-  /** The project's repository for `git_status` and `git_diff`; absent: no git app tools (the pi loop runs its own). */
-  projectGit?: ProjectGit
+  /**
+   * The host serves `git_status` and `git_diff` (they read through `git/scopedRead`); absent: no git
+   * app tools (the pi loop runs its own copies, through the same scoped read).
+   */
+  projectGit?: true
   /** SPEC §12.6 tool ledger of the caller's run, for calls over MCP. */
   toolLedger?(runId: string): ToolLedger | undefined
   /** The thread is a read-only (`shared`) delegated child; it may call only `reads` and `readOnlySafe` tools. */

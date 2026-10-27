@@ -21,7 +21,7 @@ export * from './registry'
 export * from './turns'
 export type { AgentActionDetails, AgentApprovalResult, AgentCreatedThread, AgentQueueCommand, AgentQueueResult, AgentScheduleHost, AgentRunCommandResult, AgentSendResult, AgentThreadRequest, ApprovalRequestInfo, AppToolHost, QueueSnapshot, ThreadSearchHit } from './host'
 export { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX, agentMessageText } from './agentMessage'
-export { projectGitToolDefinitions, runProjectGitTool, type ProjectGit } from './projectGit'
+export { projectGitToolDefinitions, runProjectGitTool } from './projectGit'
 export {
   delegationToolDefinitions,
   dispatchDelegationTool,

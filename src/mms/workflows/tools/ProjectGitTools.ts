@@ -4,6 +4,7 @@ import type { FileService } from '../../files/FileService'
 import type { GitService } from '../../git/GitService'
 import type { LineEditStatsStore } from '../../stats/LineEditStatsStore'
 import { isFilesystemWideBashCommand } from '../../orchestrator/toolPathSafety'
+import { runProjectGitTool } from '../../git/scopedRead'
 import { projectGitToolDefinitions } from '../../run/mcp/appTools/projectGit'
 
 const COMMAND_TIMEOUT_MS = 120_000
@@ -78,10 +79,15 @@ export class ProjectGitTools {
     return this.getToolDefinitions().some((tool) => tool.name === name)
   }
 
+  /**
+   * `roots`: where `git_status` and `git_diff` may read (a definition's canonical roots); the project
+   * by default. Both read through the scoped Git read the app tools use, never the GUI's status.
+   */
   async execute(
     name: string,
     args: Record<string, unknown>,
-    projectRoot: string
+    projectRoot: string,
+    roots: readonly string[] = [projectRoot]
   ): Promise<{ text: string; isError: boolean }> {
     try {
       switch (name) {
@@ -102,16 +108,9 @@ export class ProjectGitTools {
           this.lineEditStats?.record('orchestrator', lines)
           return { text: `Wrote ${path}`, isError: false }
         }
-        case 'git_status': {
-          const status = await this.gitService.getStatus(projectRoot)
-          return { text: JSON.stringify(status, null, 2), isError: false }
-        }
-        case 'git_diff': {
-          const path = String(args.path ?? '')
-          const staged = args.staged === true
-          const diff = await this.gitService.getDiff(projectRoot, path, staged)
-          return { text: diff || '(no diff)', isError: false }
-        }
+        case 'git_status':
+        case 'git_diff':
+          return await runProjectGitTool(name, args, { projectPath: projectRoot, roots })
         case 'run_command': {
           const command = String(args.command ?? '').trim()
           const cmdArgs = Array.isArray(args.args) ? args.args.map(String) : []

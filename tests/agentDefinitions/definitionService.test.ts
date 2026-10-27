@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -72,7 +73,7 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     orch.setRunEngine(engine)
     harness = defs.install(orch, home)
     registry = new AgentDefinitionRegistry({ profileId, profileRoot: join(home, 'profile') })
-    const integrations = new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write', 'ask_user', 'bash', 'thread_read'] })
+    const integrations = new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write', 'ask_user', 'bash', 'thread_read', 'git_status', 'git_diff'] })
     const entry = (instanceId?: string) => ({ ref: { providerId: PROVIDER, modelId: MODEL, ...(instanceId ? { instanceId } : {}) }, available: true, efforts: [], speeds: [], contexts: [], capabilities: ['tools'], unavailableReasons: [] })
     resolver = new AgentResolver({ registry, integrationLookup: integrations, modelLookup: new StaticAgentModelLookup([entry(), entry(`pi:${PROVIDER}`), entry(APPROVAL_ONLY_INSTANCE), entry('stubborn'), { ...entry(`pi:${OTHER}`), ref: { providerId: OTHER, modelId: MODEL, instanceId: `pi:${OTHER}` } }] as never) })
   })
@@ -92,7 +93,7 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     settings.tools = { mode: 'explicit', allowlist: ['read', 'write', 'ask_user'] }
     mutate(settings)
     const draft = registry.createDraft({ runtimeKind, settings, systemPrompt: 'DEFINITION_SYSTEM_PROMPT' })
-    const published = registry.publish(draft.id, draft.draftHash, { integrationLookup: new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write', 'ask_user', 'bash', 'thread_read'] }) })
+    const published = registry.publish(draft.id, draft.draftHash, { integrationLookup: new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write', 'ask_user', 'bash', 'thread_read', 'git_status', 'git_diff'] }) })
     return { id: draft.id, revision: published.revision }
   }
 
@@ -228,6 +229,41 @@ describe.each(DEFINITION_ENGINES)('definitions through the gateway (%s)', (kind)
     expect(defs.turns.at(-1)!.host.bridge?.toolPolicy?.allow).not.toContain('write')
     expect(defs.captured.at(-1)!.tools!.map((tool) => tool.name)).not.toContain('write')
     expect((actor as { skillIds?: string[] }).skillIds ?? []).not.toContain('secret-skill')
+  })
+
+  it("a definition's git reads stay in its roots on its runtime: a magic pathspec and the parent repository stay out", async () => {
+    // A repository whose agent may use only `allowed`; `secret.txt` beside it is changed too.
+    const top = join(home, 'repo')
+    const allowed = join(top, 'allowed')
+    mkdirSync(allowed, { recursive: true })
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: top, stdio: 'pipe' })
+    git('init', '-q')
+    git('config', 'user.email', 'test@example.invalid')
+    git('config', 'user.name', 'Test')
+    git('config', 'commit.gpgsign', 'false')
+    writeFileSync(join(top, 'secret.txt'), 'old\n')
+    writeFileSync(join(allowed, 'a.txt'), 'one\n')
+    git('add', '.')
+    git('commit', '-q', '-m', 'init')
+    writeFileSync(join(top, 'secret.txt'), 'TOP SECRET OUTSIDE ROOT\n')
+    writeFileSync(join(allowed, 'a.txt'), 'two\n')
+    const stored = publish('mousse', `pi:${PROVIDER}`, (settings) => {
+      settings.tools = { mode: 'explicit', allowlist: ['git_status', 'git_diff'] }
+      settings.workspace.mode = 'read_only'
+      settings.script.enabled = false
+    })
+    const resolved = resolver.resolve({ definitionId: stored.id, revision: stored.revision })
+    const thread = store.createThread('git-roots')
+    const replies = [call('git_diff', { path: ':(top)secret.txt' }), call('git_status', {}, 'git_status-1'), call('git_diff', { path: 'a.txt' }, 'git_diff-2'), say('done')]
+    defs.setNext(async () => replies.shift()!)
+    const result = await orch.runAgentDefinition(request(resolved, thread.id, { projectPath: allowed, host: { workspaceRoots: [allowed] } }))
+    expect(result.status).toBe('completed')
+    const results = defs.captured.at(-1)!.messages.filter((message) => message.role === 'toolResult').map((message) => JSON.stringify(message.content))
+    expect(results).toHaveLength(3)
+    expect(results.join('\n')).not.toContain('TOP SECRET')
+    expect(results[1]).not.toContain('secret.txt')
+    expect(results[1]).toContain('a.txt')
+    expect(results[2]).toContain('+two')
   })
 
   it('holds the script rule and a read-only workspace even for granted tools', async () => {

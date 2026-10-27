@@ -1697,7 +1697,9 @@ export class LlmClient {
           : await this.buildTools.execute(
               toolCall.name,
               toolCall.arguments as Record<string, unknown>,
-              projectPath
+              projectPath,
+              // A definition's git reads stay in its roots; any other turn's in the project.
+              trustedAgent?.policy ? trustedAgent.policy.workspace.canonicalRoots : [projectPath]
             )
 
         const resultEvent: LlmToolEvent = {
