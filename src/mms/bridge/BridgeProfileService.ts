@@ -25,6 +25,7 @@ import { remoteListMethods } from './remote/RemoteLists'
 import { phoneSpeechMethods } from './remote/speech'
 import type { ThreadSourcePort } from './remote/ThreadStreamAdapter'
 import { DispatchService, mmsDispatchRuntime, type DispatchRuntime } from './dispatch'
+import { OwnerRoutes } from './routed/OwnerRoutes'
 
 /** Actual profile services own Bridge; no received DTO supplies a backend or path. */
 export class BridgeProfileService {
@@ -215,6 +216,15 @@ export class BridgeProfileService {
         return { descriptor, head: this.threads.store.head(descriptor.id) }
       }
     })
+    // The methods another of the user's computers calls on the threads this one runs. Registered with
+    // the rest of Bridge; each call is refused unless the owner's switch is on (see `NetService`).
+    new OwnerRoutes({
+      services,
+      rpc: rt.rpc,
+      policy: rt.policy,
+      audit: rt.audit,
+      track: (work) => this.track(work)
+    }).register()
     for (const method of remoteListMethods({
       openLists: () => {
         const descriptor = this.threads.activate(LISTS_STREAM_THREAD_ID)
