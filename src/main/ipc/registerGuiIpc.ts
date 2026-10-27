@@ -1061,6 +1061,10 @@ export function registerGuiIpc(
   // A run may purge large trees; it must not hit the 60 s default.
   registerStorageHandler('storage:cleanupRun', async () => guiMms.request('storage.cleanup.run', {}, 15 * 60_000))
   registerStorageHandler('storage:cleanupLastReport', async () => guiMms.request('storage.cleanup.lastReport', {}))
+  // The first call on a profile measures it, which can take most of the scan budget.
+  registerStorageHandler('storage:usage', async (_e, options?: { refresh?: boolean }) =>
+    guiMms.request('storage.usage', options?.refresh === true ? { refresh: true } : {}, 120_000)
+  )
 
   registerHandler('projects:list', async () => {
     const res = await guiMms.request<{ projects: unknown[] }>('projects.list')

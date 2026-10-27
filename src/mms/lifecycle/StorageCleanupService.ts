@@ -112,6 +112,8 @@ export interface StorageCleanupDeps {
   now?: () => number
   /** Test seam: deletes one capture file. Defaults to `unlinkSync`. */
   removeFile?: (path: string) => void
+  /** Told after every run with its report, so disk usage can be measured again when a run freed space. */
+  onRunComplete?: (report: StorageCleanupReport) => void
   /** Test seam; defaults to `measureTree`. */
   measure?: typeof measureTree
   /** Test seam: returns why the checkout cannot be removed right now (files in use), or undefined. Defaults to a rename probe on Windows. */
@@ -269,6 +271,9 @@ export class StorageCleanupService {
     }, POLICY_CHANGE_DELAY_MS)
     this.afterPolicyChange.unref()
   }
+
+  /** True while a run is in progress (or queued behind one). Disk usage scans wait for it. */
+  isRunning(): boolean { return this.current !== undefined || this.queuedManual !== undefined }
 
   /** True while the time-based rules are paused after the clock moved backwards; saving the policy resumes them. */
   clockSuspended(): boolean { return this.deps.clock.suspended() }
@@ -443,6 +448,7 @@ export class StorageCleanupService {
     if (trigger === 'manual' || hasRule) {
       try { atomicWriteJsonSync(this.reportPath, report) } catch { /* The report is still returned. */ }
     }
+    try { this.deps.onRunComplete?.(report) } catch { /* A listener never changes what the run reports. */ }
     return report
   }
 

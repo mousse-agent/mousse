@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { ERROR_INFO_CAPABILITY } from '../src/shared/errors'
 import type { LifecyclePurgePreview, TrashRetentionPolicy } from '../src/shared/resourceLifecycle'
-import { STORAGE_POLICY_DEFAULTS, summarizeCleanupReport, type StorageCleanupReport, type StoragePolicy } from '../src/shared/storage'
+import { STORAGE_POLICY_DEFAULTS, summarizeCleanupReport, type StorageCleanupReport, type StoragePolicy, type StorageUsageSnapshot } from '../src/shared/storage'
 import type { Thread } from '../src/shared/types'
 import type { WorkflowRunView } from '../src/shared/workflowRunPlatform'
 import { releaseExecutionLeaseHandle, tryAcquireExecutionLease } from '../src/mms/queue/ThreadExecutionLease'
@@ -261,6 +261,50 @@ describe('lifecycle public protocol acceptance', () => {
       expect(plan).toEqual([expect.objectContaining({ rule: 'trash', threadId: thread.id, action: 'remove' })])
       expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('trashed')
       expect(await cli.request('storage.cleanup.lastReport', {})).toEqual({ report: null })
+    } finally { await f.close() }
+  })
+
+  it('storage.usage is open to a cli client, answers from the cache until asked to refresh, and names no path', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
+      const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'measured thread' })
+      writeFileSync(join(f.services.threads.getThreadDir(thread.id), 'payload.bin'), Buffer.alloc(96 * 1024, 1))
+      const first = await cli.request<StorageUsageSnapshot>('storage.usage', {})
+      expect(first.entries.find((entry) => entry.kind === 'threads' && entry.threadId === thread.id)!.bytes).toBeGreaterThanOrEqual(96 * 1024)
+      expect(first.names.threads[thread.id]).toBe('measured thread')
+      // New data does not show until a refresh.
+      writeFileSync(join(f.services.threads.getThreadDir(thread.id), 'more.bin'), Buffer.alloc(96 * 1024, 2))
+      expect(await cli.request('storage.usage', {})).toEqual(first)
+      const refreshed = await cli.request<StorageUsageSnapshot>('storage.usage', { refresh: true })
+      expect(refreshed.measuredAt).not.toBe(first.measuredAt)
+      expect(refreshed.entries.find((entry) => entry.threadId === thread.id)!.bytes).toBeGreaterThanOrEqual(192 * 1024)
+      expect(JSON.stringify(refreshed)).not.toContain(f.services.threads.getThreadDir(thread.id).replaceAll('\\', '\\\\'))
+      await expect(cli.request('storage.usage', { refresh: 'yes' })).rejects.toThrow()
+    } finally { await f.close() }
+  })
+
+  it('a usage scan and a cleanup run overlap without failing, and the next scan shows the space the run freed', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const gui = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY])
+      const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
+      const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'to be purged' })
+      writeFileSync(join(f.services.threads.getThreadDir(thread.id), 'payload.bin'), Buffer.alloc(128 * 1024, 1))
+      await f.rpc.request('threads.trash', { threadId: thread.id })
+      await gui.request('threads.configureTrash', { graceDays: 1, automaticPurge: true })
+      f.services.threads.lifecycleStore.update(thread.id, (record) => { record.trashedAt = new Date(Date.now() - 3 * 86_400_000).toISOString() })
+      const unattributed = (usage: StorageUsageSnapshot): number => usage.entries.find((entry) => entry.kind === 'threads' && !entry.threadId)?.bytes ?? 0
+      const before = await cli.request<StorageUsageSnapshot>('storage.usage', { refresh: true })
+      expect(unattributed(before)).toBeGreaterThanOrEqual(128 * 1024)
+      const [report, during] = await Promise.all([
+        cli.request<{ report: StorageCleanupReport }>('storage.cleanup.run', {}),
+        cli.request<StorageUsageSnapshot>('storage.usage', { refresh: true })
+      ])
+      expect(report.report.counts.removed).toBe(1)
+      expect(during.entries.length).toBeGreaterThan(0)
+      const after = await cli.request<StorageUsageSnapshot>('storage.usage', { refresh: true })
+      expect(unattributed(after)).toBeLessThan(unattributed(before) - 100 * 1024)
     } finally { await f.close() }
   })
 
