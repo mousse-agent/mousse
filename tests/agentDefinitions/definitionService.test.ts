@@ -139,8 +139,10 @@ describe('definitions through the gateway', () => {
     expect(runs).toHaveLength(1)
     expect(runs[0]).toMatchObject({ source: 'definition', status: 'completed' })
     expect(engine.bindingForRun(runs[0]!.runId)?.policy).toEqual({
-      mode: 'default', origin: 'definition', approvals: 'grants', tools: { allow: ['ask_user', 'read', 'write'] }, budget: { maxTurns: 32, maxToolCalls: 64 }
+      mode: 'default', origin: 'definition', approvals: 'grants', tools: { allow: ['ask_user', 'read', 'write'] }, budget: { maxTurns: 32, maxToolCalls: 64 },
+      authority: { kind: 'definition', digest: expect.stringMatching(/^[0-9a-f]{64}$/) }
     })
+    expect(engine.bindingForRun(runs[0]!.runId)?.policyDigest).toMatch(/^[0-9a-f]{64}$/)
     expect(revisionBytes(stored.revision)).toEqual(before)
     // The run took the thread's lease and gave it back.
     const lease = tryAcquireExecutionLease(store.getThreadDir(thread.id))
