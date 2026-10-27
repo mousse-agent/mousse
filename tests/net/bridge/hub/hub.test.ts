@@ -270,8 +270,7 @@ it('passes worktreeEnabled through bridge.hub.create to the target thread', asyn
   expect(f.mms.threads.listAllThreads()).toHaveLength(threads.length)
 })
 
-it('delivers the first turn of a remote thread when the hub attaches before it sends', async () => {
-  const f = await fixture()
+function stubModel(f: Awaited<ReturnType<typeof fixture>>, seen: unknown[] = []) {
   ;(f.mms.orchestrator as unknown as { llm: unknown }).llm = {
     getSelectedModelContextLimit: () => ({ limit: 128000, modelName: 'fixture' }),
     getContextInputs: async () => ({
@@ -282,12 +281,13 @@ it('delivers the first turn of a remote thread when the hub attaches before it s
     }),
     generateTitle: async () => 'First turn',
     chat: async (
-      _messages: unknown,
+      messages: unknown,
       _tools: unknown,
       _options: unknown,
       _thinking: unknown,
       onText: (event: unknown) => void
     ) => {
+      seen.push(messages)
       onText({ phase: 'start', content: '', contentIndex: 0 })
       onText({ phase: 'delta', content: 'first reply', contentIndex: 0 })
       return {
@@ -302,6 +302,11 @@ it('delivers the first turn of a remote thread when the hub attaches before it s
       }
     }
   }
+}
+
+it('delivers the first turn of a remote thread when the hub attaches before it sends', async () => {
+  const f = await fixture()
+  stubModel(f)
   const adapter = f.makeAdapter()
   await f.connect(adapter.store)
   const created = (await executeBridgeHubLocal(f.hub(), 'bridge.hub.create', {
@@ -334,6 +339,82 @@ it('delivers the first turn of a remote thread when the hub attaches before it s
   await vi.waitFor(() => expect(text()).toContain('Hello from the first turn'))
   await vi.waitFor(() => expect(text()).toContain('first reply'))
   expect(errors).toEqual([])
+})
+
+it('stages an image and sends it with a message, without keeping the image data in the journal', async () => {
+  const f = await fixture(),
+    seen: unknown[] = []
+  stubModel(f, seen)
+  await f.connect()
+  const created = (await executeBridgeHubLocal(f.hub(), 'bridge.hub.create', {
+      target: f.targetNode,
+      name: 'With image'
+    })) as { thread: { id: string } },
+    ref = { nodeId: f.targetNode, entityId: created.thread.id },
+    data = Buffer.from('not really a png').toString('base64'),
+    stageId = newId('rpc')
+  expect(
+    await executeBridgeHubLocal(f.hub(), 'bridge.hub.stage', {
+      target: f.targetNode,
+      upload: 'upload-0001',
+      index: 0,
+      total: 1,
+      name: 'shot.png',
+      mimeType: 'image/png',
+      data,
+      options: { id: stageId }
+    })
+  ).toMatchObject({ ok: true, received: 1, total: 1 })
+  const row = f.callerDb().database
+    .prepare('SELECT record FROM net_bridge_hub_requests WHERE id=?')
+    .get(stageId)!
+  expect(String(row.record)).not.toContain(data)
+  // An id that was never staged is refused by the target, so the attachments reached it.
+  expect(
+    await executeBridgeHubLocal(f.hub(), 'bridge.hub.send', {
+      ref,
+      content: 'Look',
+      attachments: ['upload-9999'],
+      options: { id: newId('rpc') }
+    })
+  ).toMatchObject({ error: expect.stringContaining('did not finish uploading') })
+  const sent = await executeBridgeHubLocal(f.hub(), 'bridge.hub.send', {
+    ref,
+    content: 'Look at this',
+    mode: 'plan',
+    attachments: ['upload-0001'],
+    options: { id: newId('rpc') }
+  })
+  expect(sent).not.toMatchObject({ error: expect.anything() })
+  const messages = f.mms.orchestrator.getMessages(created.thread.id)
+  expect(JSON.stringify(messages)).toContain('shot.png')
+  for (const bad of [
+    { attachments: [] },
+    { attachments: ['bad id'] },
+    { mode: 'unknown' },
+    { mode: { type: 'skill' } }
+  ])
+    await expect(
+      executeBridgeHubLocal(f.hub(), 'bridge.hub.send', { ref, content: 'x', ...bad })
+    ).rejects.toMatchObject({ code: 'bad_request' })
+  for (const bad of [
+    { index: 1 },
+    { mimeType: 'text/html' },
+    { data: 'not base64!' },
+    { extra: true }
+  ])
+    await expect(
+      executeBridgeHubLocal(f.hub(), 'bridge.hub.stage', {
+        target: f.targetNode,
+        upload: 'upload-0002',
+        index: 0,
+        total: 1,
+        name: 'shot.png',
+        mimeType: 'image/png',
+        data,
+        ...bad
+      })
+    ).rejects.toMatchObject({ code: 'bad_request' })
 })
 
 it('bounds journal aliases/results and supports an unenrolled construction without admitting requests', async () => {

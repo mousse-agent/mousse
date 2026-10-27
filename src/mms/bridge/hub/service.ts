@@ -11,6 +11,7 @@ import type {
   Signed
 } from '../../../shared/net'
 import type {
+  BridgeChatInput,
   BridgeEntityRef,
   BridgeMethod,
   BridgeRemoteParams,
@@ -470,6 +471,9 @@ export class BridgeHub {
       this.options.db.transaction(() => {
         request.state = 'completed'
         request.wireResult = value
+        // The image slice is on the target now; the journal keeps its hash, not megabytes of data.
+        if (request.method === 'attachments.stage')
+          request.params = { ...(request.params as object), data: '' } as typeof request.params
         delete request.error
         request.updatedAt = this.clock.now()
         this.save(request)
@@ -610,15 +614,24 @@ export class BridgeHub {
     ref: BridgeEntityRef,
     content: string,
     options: BridgeHubRequestOptions = {},
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    extras: Pick<BridgeChatInput, 'mode' | 'attachments'> = {}
   ): Promise<unknown> {
     return this.call(
       ref.nodeId,
       'orchestrator.send',
-      { threadId: ref.entityId, content },
+      { threadId: ref.entityId, content, ...extras },
       options,
       signal
     )
+  }
+  /** Sends one slice of an image to the target, to be named in a later send's `attachments`. */
+  stage(
+    target: NodeId,
+    slice: BridgeRemoteParams['attachments.stage'],
+    options: BridgeHubRequestOptions = {}
+  ): Promise<unknown> {
+    return this.call(target, 'attachments.stage', slice, options)
   }
   steer(
     ref: BridgeEntityRef,

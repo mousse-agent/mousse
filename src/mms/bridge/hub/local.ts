@@ -3,6 +3,7 @@ import type {
   BridgeHubLocalMethod,
   BridgeHubLocalParams,
   BridgeHubCreateOptions,
+  BridgeRemoteParams,
   BridgeHubRequestOptions,
   BridgeDisplayEvent,
   BridgeEntityRef
@@ -71,7 +72,11 @@ export function validateBridgeHubLocal<M extends BridgeHubLocalMethod>(
       ['projectId', 'options']
     ],
     'bridge.hub.openProject': [['target', 'path'], ['options']],
-    'bridge.hub.send': [['ref', 'content'], ['options']],
+    'bridge.hub.stage': [
+      ['target', 'upload', 'index', 'total', 'name', 'mimeType', 'data'],
+      ['options']
+    ],
+    'bridge.hub.send': [['ref', 'content'], ['options', 'mode', 'attachments']],
     'bridge.hub.steer': [['ref', 'run', 'text'], ['options']],
     'bridge.hub.abort': [['ref', 'run'], ['options']],
     'bridge.hub.attach': [['ref'], []],
@@ -105,10 +110,16 @@ export function validateBridgeHubLocal<M extends BridgeHubLocalMethod>(
       ...(row.projectId === undefined ? {} : { projectId: row.projectId })
     })
   if (method === 'bridge.hub.openProject') validateHubParams('projects.open', { path: row.path })
+  if (method === 'bridge.hub.stage') {
+    const { target: _target, options: _options, ...slice } = row
+    validateHubParams('attachments.stage', slice)
+  }
   if (method === 'bridge.hub.send')
     validateHubParams('orchestrator.send', {
       threadId: ref(row.ref).entityId,
-      content: row.content
+      content: row.content,
+      ...(row.mode === undefined ? {} : { mode: row.mode }),
+      ...(row.attachments === undefined ? {} : { attachments: row.attachments })
     })
   if (method === 'bridge.hub.steer')
     validateHubParams('orchestrator.steer', {
@@ -148,8 +159,15 @@ export async function executeBridgeHubLocal(
       return hub.create(row.target, row.name, row.options, row.projectId)
     case 'bridge.hub.openProject':
       return hub.openProject(row.target, row.path, row.options)
+    case 'bridge.hub.stage': {
+      const { target, options, ...slice } = row
+      return hub.stage(target, slice as BridgeRemoteParams['attachments.stage'], options)
+    }
     case 'bridge.hub.send':
-      return hub.send(row.ref, row.content, row.options)
+      return hub.send(row.ref, row.content, row.options, undefined, {
+        ...(row.mode === undefined ? {} : { mode: row.mode }),
+        ...(row.attachments === undefined ? {} : { attachments: row.attachments })
+      })
     case 'bridge.hub.steer':
       return hub.steer(row.ref, row.run, row.text, row.options)
     case 'bridge.hub.abort':
