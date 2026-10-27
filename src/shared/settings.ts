@@ -91,6 +91,47 @@ export function resolveContextCompactionTokens(selected: ContextCompactionTokens
   return selected === 'model-max' ? maximum : Math.min(selected, maximum)
 }
 
+/**
+ * What an agent calling the Mousse MCP server may do on threads other than its own and its
+ * delegation lineage (docs/run-engine/SPEC.md §15.1): `lineage` nothing more, `read` list, search and
+ * read other threads, `manage` also change them.
+ */
+export type AgentAccessLevel = 'lineage' | 'read' | 'manage'
+
+export interface AgentAccessSettings {
+  level: AgentAccessLevel
+  /** Projects the level applies to; empty means every project. */
+  projectIds: string[]
+  /** `manage` only: an agent may answer a pending approval on another thread. */
+  answerApprovals: boolean
+}
+
+const AGENT_ACCESS_LEVELS: readonly AgentAccessLevel[] = ['lineage', 'read', 'manage']
+
+export function isAgentAccessLevel(value: unknown): value is AgentAccessLevel {
+  return AGENT_ACCESS_LEVELS.includes(value as AgentAccessLevel)
+}
+
+/** The narrower of two levels; an absent level does not narrow. */
+export function narrowAgentAccess(...levels: Array<AgentAccessLevel | null | undefined>): AgentAccessLevel | undefined {
+  let narrowest: AgentAccessLevel | undefined
+  for (const level of levels) {
+    if (!isAgentAccessLevel(level)) continue
+    if (!narrowest || AGENT_ACCESS_LEVELS.indexOf(level) < AGENT_ACCESS_LEVELS.indexOf(narrowest)) narrowest = level
+  }
+  return narrowest
+}
+
+export function normalizeAgentAccessSettings(raw?: Partial<AgentAccessSettings> | null): AgentAccessSettings {
+  return {
+    level: isAgentAccessLevel(raw?.level) ? raw.level : 'lineage',
+    projectIds: Array.isArray(raw?.projectIds)
+      ? [...new Set(raw.projectIds.filter((id): id is string => typeof id === 'string' && id.length > 0))]
+      : [],
+    answerApprovals: raw?.answerApprovals === true
+  }
+}
+
 export interface MousseSettings {
   profile: {
     username: string
@@ -101,6 +142,7 @@ export interface MousseSettings {
   shortcuts: ShortcutOverrides
   permissions: PermissionSettings
   context: ContextSettings
+  agentAccess: AgentAccessSettings
   provider: {
     llmProvider: LlmProviderId
     model: string
@@ -382,6 +424,7 @@ export function getDefaultSettings(): MousseSettings {
     shortcuts: {},
     permissions: normalizePermissionSettings(),
     context: normalizeContextSettings(),
+    agentAccess: normalizeAgentAccessSettings(),
     provider: {
       llmProvider: '',
       model: ''

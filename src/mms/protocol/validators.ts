@@ -934,6 +934,7 @@ export function asSettingsPartial(v: unknown): Record<string, unknown> {
     'notifications',
     'shortcuts',
     'context',
+    'agentAccess',
     'provider',
     'title',
     'agents',
