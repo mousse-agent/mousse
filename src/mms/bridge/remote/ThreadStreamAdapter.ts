@@ -123,6 +123,8 @@ export class ThreadStreamAdapter {
   private readonly active = new Map<StreamId, ActiveThread>()
   private readonly boot: string
   private sweepTimer?: { cancel(): void }
+  private sweepSlow = false
+  private swept = false
   private lastStaleCheckAt = Number.NEGATIVE_INFINITY
   private closed = false
   constructor(private readonly options: ThreadStreamOptions) {
@@ -134,26 +136,26 @@ export class ThreadStreamAdapter {
       (options.maxBytes ?? 1024 * 1024) < 65536
     )
       throw new NetError('bad_request')
-    options.db.transaction(() =>
+    // The column check and the ALTERs share one write transaction, so two openers cannot both add.
+    options.db.transaction(() => {
       options.db.database.exec(
         'CREATE TABLE IF NOT EXISTS bridge_thread_streams(thread_id TEXT PRIMARY KEY,stream TEXT NOT NULL UNIQUE,boot TEXT NOT NULL) STRICT'
       )
-    )
-    // Streams opened before the idle columns existed start their stale period now.
-    if (
-      !options.db.database
-        .prepare('PRAGMA table_info(bridge_thread_streams)')
-        .all()
-        .some((row) => row.name === 'last_active')
-    )
-      options.db.transaction(() => {
+      // Streams opened before the idle columns existed start their stale period now.
+      if (
+        !options.db.database
+          .prepare('PRAGMA table_info(bridge_thread_streams)')
+          .all()
+          .some((row) => row.name === 'last_active')
+      ) {
         options.db.database.exec(
           'ALTER TABLE bridge_thread_streams ADD COLUMN last_active INTEGER NOT NULL DEFAULT 0;ALTER TABLE bridge_thread_streams ADD COLUMN dropped INTEGER NOT NULL DEFAULT 0'
         )
         options.db.database
           .prepare('UPDATE bridge_thread_streams SET last_active=?')
           .run(options.clock.now())
-      })
+      }
+    })
     this.store = new Proxy(options.store, {
       get: (target, key) => {
         if (key === 'getStream')
@@ -174,6 +176,7 @@ export class ThreadStreamAdapter {
         return typeof value === 'function' ? value.bind(target) : value
       }
     })
+    this.scheduleSweep()
   }
   /**
    * Opens the thread's display stream. `holder` names the caller (a node) opening it: one holder
@@ -405,11 +408,11 @@ export class ThreadStreamAdapter {
         )
       })
     this.append(thread, 'thread.snapshot.end', { threadId: thread.threadId, snapshot, sha256 })
-    if (previous) this.options.store.truncate(thread.stream, previous)
+    if (previous) this.options.store.truncate(thread.stream, previous, { forgetIds: true })
   }
   private trim(thread: ActiveThread): void {
     if (thread.ring.length && thread.ring[0].seq > 1)
-      this.options.store.truncate(thread.stream, thread.ring[0].seq - 1)
+      this.options.store.truncate(thread.stream, thread.ring[0].seq - 1, { forgetIds: true })
   }
   deactivate(threadId: string): void {
     for (const [stream, thread] of this.active)
@@ -425,7 +428,12 @@ export class ThreadStreamAdapter {
   }
   private threadsHeldBy(holder: string): number {
     let held = 0
-    for (const thread of this.active.values()) if (thread.holders.has(holder)) held++
+    for (const thread of this.active.values())
+      if (
+        this.metered(thread.threadId) &&
+        (thread.holders.has(holder) || this.options.isSubscribed?.(thread.stream, holder))
+      )
+        held++
     return held
   }
   private assertHolderRoom(holder: string): void {
@@ -441,19 +449,32 @@ export class ThreadStreamAdapter {
     if (!thread.holders.has(holder)) this.assertHolderRoom(holder)
     thread.holders.set(holder, now)
   }
-  /** Housekeeping runs on its own only where the host can say who is subscribed. */
+  /**
+   * Housekeeping runs on its own only where the host can say who is subscribed. It sweeps every
+   * minute while a stream is open, and hourly while none is, so stale records go either way.
+   */
   private scheduleSweep(): void {
-    if (this.closed || this.sweepTimer || !this.active.size || !this.options.isSubscribed) return
-    this.sweepTimer = this.options.clock.setTimeout(() => {
-      this.sweepTimer = undefined
-      try {
-        this.releaseIdle()
-        this.dropStale()
-      } catch {
-        // Housekeeping only; the next sweep tries again.
-      }
-      this.scheduleSweep()
-    }, this.options.sweepMs ?? SWEEP_MS)
+    if (this.closed || !this.options.isSubscribed) return
+    const quick = this.active.size > 0 || !this.swept
+    if (this.sweepTimer) {
+      if (!this.sweepSlow || !quick) return
+      this.sweepTimer.cancel()
+    }
+    this.sweepSlow = !quick
+    this.sweepTimer = this.options.clock.setTimeout(
+      () => {
+        this.sweepTimer = undefined
+        this.swept = true
+        try {
+          this.releaseIdle()
+          this.dropStale()
+        } catch {
+          // Housekeeping only; the next sweep tries again.
+        }
+        this.scheduleSweep()
+      },
+      quick ? (this.options.sweepMs ?? SWEEP_MS) : STALE_CHECK_MS
+    )
   }
   /**
    * Releases streams that no session is subscribed to and no turn is running on, once they have
@@ -492,17 +513,20 @@ export class ThreadStreamAdapter {
     const now = this.options.clock.now()
     if (now - this.lastStaleCheckAt < STALE_CHECK_MS) return 0
     this.lastStaleCheckAt = now
+    // Open streams are left out in SQL, so many long-lived ones cannot fill the batch.
+    const open = [...this.active.keys()]
     const rows = this.options.db.database
       .prepare(
-        'SELECT thread_id,stream FROM bridge_thread_streams WHERE dropped=0 AND last_active<? ORDER BY last_active LIMIT ?'
+        `SELECT thread_id,stream FROM bridge_thread_streams WHERE dropped=0 AND last_active<? AND stream NOT IN (${open.map(() => '?').join(',') || "''"}) ORDER BY last_active LIMIT ?`
       )
-      .all(now - (this.options.staleMs ?? STALE_MS), STALE_BATCH)
+      .all(now - (this.options.staleMs ?? STALE_MS), ...open, STALE_BATCH)
     let dropped = 0
     for (const row of rows) {
       const stream = row.stream as StreamId
-      if (this.active.has(stream)) continue
       try {
-        this.options.store.truncate(stream, this.options.store.head(stream).seq)
+        this.options.store.truncate(stream, this.options.store.head(stream).seq, {
+          forgetIds: true
+        })
         this.options.db.transaction(() =>
           this.options.db.database
             .prepare('UPDATE bridge_thread_streams SET dropped=1 WHERE thread_id=?')

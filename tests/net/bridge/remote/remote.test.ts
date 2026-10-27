@@ -618,6 +618,83 @@ describe('P3 real MMS remote Bridge', () => {
     expect(p.mms.threads.listAllThreads()).toHaveLength(1)
   })
 
+  it('keeps a stream while a session is subscribed, releases it after, and resumes an old cursor with a fresh snapshot', async () => {
+    const p = await setup()
+    let live: Awaited<ReturnType<typeof p.connect>> | undefined
+    const adapter = new ThreadStreamAdapter({
+      db: p.aDb,
+      store: p.aStore,
+      generations: p.aStore,
+      identity: p.aIdentity,
+      keys: p.aKeys,
+      clock: systemClock,
+      source: {
+        snapshot: (threadId) => ({ kind: 'idle-test', threadId, at: Date.now() }),
+        onThread: () => () => undefined
+      },
+      // The real check: is the connected peer being served this stream?
+      isSubscribed: (stream) => live?.a.serves(stream) ?? false,
+      idleMs: 0,
+      staleMs: 0,
+      sweepMs: 3_600_000
+    })
+    resources.push(() => adapter.close())
+    const descriptor = adapter.activate('idle-thread')
+    p.bStore.createStream(descriptor, 1)
+    live = await p.connect(adapter.store)
+    const caughtUp = () =>
+      vi.waitFor(() =>
+        expect(p.bStore.cursor(descriptor.id).seq).toBe(adapter.store.head(descriptor.id).seq)
+      )
+    const subscribe = () =>
+      live!.b.subscribe(descriptor.id, {
+        onRecord() {},
+        onCaughtUp() {},
+        onSnapshotInstalled() {},
+        onError(code) {
+          throw new Error(code)
+        }
+      })
+    let subscription = subscribe()
+    await caughtUp()
+    await vi.waitFor(() => expect(live!.a.serves(descriptor.id)).toBe(true))
+    // A subscribed peer keeps the stream, however long it has been quiet.
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(adapter.releaseIdle()).toBe(0)
+    expect(() => adapter.ringStats(descriptor.id)).not.toThrow()
+
+    // Once it leaves, the stream is released.
+    const oldCursor = p.bStore.cursor(descriptor.id)
+    subscription.close()
+    await vi.waitFor(() => expect(live!.a.serves(descriptor.id)).toBe(false))
+    expect(adapter.releaseIdle()).toBe(1)
+    expect(() => adapter.ringStats(descriptor.id)).toThrow(
+      expect.objectContaining({ code: 'stream_unknown' })
+    )
+
+    // A subscriber whose cursor is at the old head reopens it and is sent the new snapshot,
+    // not told to start over.
+    adapter.store.getStream(descriptor.id)
+    expect(adapter.store.head(descriptor.id).seq).toBeGreaterThan(oldCursor.seq)
+    expect(adapter.store.snapshotReason(descriptor.id, oldCursor)).toBeUndefined()
+    subscription = subscribe()
+    await caughtUp()
+    expect(p.bStore.cursor(descriptor.id).seq).toBeGreaterThan(oldCursor.seq)
+
+    // The same after the stored records were dropped as stale.
+    const dropCursor = p.bStore.cursor(descriptor.id)
+    subscription.close()
+    await vi.waitFor(() => expect(live!.a.serves(descriptor.id)).toBe(false))
+    expect(adapter.releaseIdle()).toBe(1)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(adapter.dropStale()).toBe(1)
+    adapter.store.getStream(descriptor.id)
+    expect(adapter.store.snapshotReason(descriptor.id, dropCursor)).toBeUndefined()
+    subscribe()
+    await caughtUp()
+    expect(p.bStore.cursor(descriptor.id).seq).toBeGreaterThan(dropCursor.seq)
+  })
+
   it('installs a chunked large actual source snapshot over TLS', async () => {
     const p = await setup(),
       thread = p.mms.threads.createThread('Large display')

@@ -274,8 +274,12 @@ export interface StreamStore {
   ): Cursor
   /** Start a new authority epoch for all streams of a space (restore or move). */
   beginEpoch(space: SpaceId, epoch: number): void
-  /** Drop records up to `throughSeq`. Never allowed on `space.meta`. */
-  truncate(stream: StreamId, throughSeq: number): void
+  /**
+   * Drop records up to `throughSeq`. Never allowed on `space.meta`. The ids of dropped records
+   * stay as tombstones that reject a replay with different bytes; `forgetIds` is only for a
+   * stream the caller alone authors, where no peer can append and the tombstones guard nothing.
+   */
+  truncate(stream: StreamId, throughSeq: number, options?: { forgetIds?: boolean }): void
   getById(stream: StreamId, id: EventId): StoredRecord | undefined
 }
 
@@ -412,7 +416,7 @@ export interface ExecutionLedger {
     sideEffects?: (record: ExecutionRecord) => void
   ): ExecutionRecord[]
   /**
-   * Deletes up to `limit` settled (`completed`, `failed`, `expired`) node-scoped request rows last
+   * Deletes up to `limit` settled (`completed`, `failed`, `expired`, `uncertain`, `cancelled`) node-scoped request rows last
    * updated before `olderThan`, keeping rows a budget reservation references. `beforeDelete` runs
    * in the same transaction with the ids about to go. Returns the number deleted.
    */
@@ -840,6 +844,12 @@ export interface RpcMethod {
    * never be written to disk.
    */
   ephemeral?: boolean
+  /**
+   * A durable result larger than this is kept in the ledger as its hash and size only; the waiting
+   * caller still gets it whole, and a later retry is told the outcome may have happened. Absent,
+   * the whole result is kept, as long as it fits an RPC reply.
+   */
+  ledgerResultMaxBytes?: number
   /** Explicitly registered methods may accept request-scoped input artifacts. */
   uploadEnabled?: boolean
   /** Pure exact DTO validation, before admission or any execution state exists. */

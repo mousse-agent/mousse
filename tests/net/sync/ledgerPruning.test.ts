@@ -3,10 +3,7 @@ import { systemClock } from '../../../src/mms/net/clock'
 import type { Clock, ExecutionKey, IdentityService } from '../../../src/mms/net/contracts'
 import { NetDatabase } from '../../../src/mms/net/store/database'
 import { SqliteExecutionLedger } from '../../../src/mms/net/store/executions'
-import {
-  DurableRpcDispatcher,
-  LEDGER_RESULT_MAX_BYTES
-} from '../../../src/mms/net/sync/rpcDispatcher'
+import { DurableRpcDispatcher } from '../../../src/mms/net/sync/rpcDispatcher'
 import {
   newId,
   type NodeDelegation,
@@ -23,6 +20,7 @@ afterEach(() => {
 
 const MINUTE = 60 * 1000
 const DAY = 24 * 60 * MINUTE
+const CAP = 16 * 1024
 const hash = (seed: string): string => seed.repeat(64).slice(0, 64)
 
 function fakeClock(start = Date.now()): Clock & { advance(ms: number): void } {
@@ -73,18 +71,26 @@ async function fixture(options: { clock?: Clock; retention?: number } = {}) {
   })
   const peer = { node, user, delegation }
   let handled = 0
+  const handle = async (params: unknown) => {
+    handled++
+    const size = (params as { size?: number }).size ?? 0
+    return size ? { text: 'x'.repeat(size) } : { ok: true }
+  }
+  rpc.register({ method: 'test.write', capability: 'write', mutating: true, handle })
   rpc.register({
-    method: 'test.write',
+    method: 'test.capped',
     capability: 'write',
     mutating: true,
-    handle: async (params) => {
-      handled++
-      const size = (params as { size?: number }).size ?? 0
-      return size ? { text: 'x'.repeat(size) } : { ok: true }
-    }
+    ledgerResultMaxBytes: CAP,
+    handle
   })
-  const call = (idem: string, params: unknown = {}, id: RpcId = newId('rpc')) =>
-    rpc.dispatch('test.write', params, idem, {
+  const call = (
+    idem: string,
+    params: unknown = {},
+    id: RpcId = newId('rpc'),
+    method = 'test.write'
+  ) =>
+    rpc.dispatch(method, params, idem, {
       id,
       caller: peer,
       signal: new AbortController().signal,
@@ -167,11 +173,9 @@ describe('request ledger retention', () => {
       .prepare('INSERT INTO net_budget_reservations VALUES(?,?,?,?,?,NULL)')
       .run(referenced, 'bot_x', 'spc_x', 0, 1)
     const removed = executions.prune(10_000)
-    expect(removed).toBe(2)
-    expect(executions.get(done)).toBeUndefined()
-    expect(executions.get(failed)).toBeUndefined()
-    for (const kept of [uncertain, running, referenced, botOutcome])
-      expect(executions.get(kept)).toBeDefined()
+    expect(removed).toBe(3)
+    for (const gone of [done, failed, uncertain]) expect(executions.get(gone)).toBeUndefined()
+    for (const kept of [running, referenced, botOutcome]) expect(executions.get(kept)).toBeDefined()
     // Nothing newer than the cutoff goes.
     const recent = settled(node, 'recent', 'completed')
     expect(executions.prune(1_001)).toBe(0)
@@ -179,26 +183,99 @@ describe('request ledger retention', () => {
   })
 })
 
-describe('request ledger results', () => {
-  it('keeps small results and only a hash of large ones', async () => {
+describe('request ledger pruning at scale', () => {
+  it('deletes aliases through the execution index', async () => {
     const f = await fixture()
-    const small = await f.call('small', { size: 100 })
-    expect(await f.call('small', { size: 100 })).toEqual(small)
+    const plan = f.db.database
+      .prepare('EXPLAIN QUERY PLAN DELETE FROM net_rpc_aliases WHERE execution=?')
+      .all('exe_x')
+      .map((row) => String(row.detail))
+      .join(' ')
+    expect(plan).toContain('net_rpc_aliases_execution')
+    const prune = f.db.database
+      .prepare(
+        "EXPLAIN QUERY PLAN SELECT id FROM net_executions e WHERE e.scope>='nod_' AND e.scope<'nod`' AND e.updated_at<? ORDER BY e.updated_at LIMIT 1"
+      )
+      .all(1)
+    // The node-owned range is a search on the (scope, target, trigger) key, not a table scan.
+    expect(prune.map((row) => String(row.detail)).join(' ')).toMatch(
+      /SEARCH e USING INDEX sqlite_autoindex_net_executions_\d \(scope>\? AND scope<\?\)/
+    )
+  })
+
+  it('prunes a large backlog quickly and in passes that stop on a time budget', async () => {
+    let tick = 0
+    const clock: Clock = { ...systemClock, monotonic: () => (tick += 300) },
+      f = await fixture({ clock })
+    const node = f.peer.node as NodeId
+    f.db.transaction(() => {
+      const alias = f.db.database.prepare(
+        'INSERT INTO net_rpc_aliases(caller,id,method,payload_hash,execution,capability) VALUES(?,?,?,?,?,?)'
+      )
+      // A large table of live aliases, so a scan per deleted request would be slow.
+      for (let i = 0; i < 50_000; i++)
+        alias.run(node, `rpc_filler${i}`, 'test.write', hash('f'), `exe_filler${i}`, 'write')
+    })
+    const ids: string[] = []
+    for (let i = 0; i < 500; i++) {
+      f.db.transaction(() => {
+        const { record } = f.executions.admit(
+          { scope: node, target: 'test.write', trigger: `old-${i}` },
+          hash('b'),
+          1_000
+        )
+        f.executions.transition(record.id, 'running', 1_001)
+        f.executions.transition(record.id, 'completed', 1_002, { result: null })
+        f.db.database
+          .prepare(
+            'INSERT INTO net_rpc_aliases(caller,id,method,payload_hash,execution,capability) VALUES(?,?,?,?,?,?)'
+          )
+          .run(node, `rpc_old${i}`, 'test.write', hash('b'), record.id, 'write')
+        ids.push(record.id)
+      })
+    }
+    // The fake monotonic clock jumps 300 ms per read: each pass does one batch of 100.
+    const started = performance.now()
+    expect(f.rpc.pruneLedger()).toBe(100)
+    expect(f.count('net_executions')).toBe(400)
+    let removed = 100
+    for (let pass = 0; pass < 10 && removed < 500; pass++) removed += f.rpc.pruneLedger()
+    expect(removed).toBe(500)
+    expect(performance.now() - started).toBeLessThan(2_000)
+    expect(f.count('net_rpc_aliases')).toBe(50_000)
+  })
+})
+
+describe('request ledger results', () => {
+  it('keeps the whole result of a method that sets no limit, so a lost reply can be replayed', async () => {
+    const f = await fixture()
+    const id = newId('rpc'),
+      big = (await f.call('create', { size: 40 * 1024 }, id)) as { text: string }
+    expect(big.text).toHaveLength(40 * 1024)
+    expect(await f.call('create', { size: 40 * 1024 })).toEqual(big)
+    expect(await f.rpc.result(id, f.peer)).toEqual(big)
+    expect(f.handled()).toBe(1)
+  })
+
+  it('keeps small results and only a hash of large ones for a method that sets a limit', async () => {
+    const f = await fixture()
+    const small = await f.call('small', { size: 100 }, newId('rpc'), 'test.capped')
+    expect(await f.call('small', { size: 100 }, newId('rpc'), 'test.capped')).toEqual(small)
     expect(f.handled()).toBe(1)
 
     const id = newId('rpc'),
-      large = (await f.call('large', { size: LEDGER_RESULT_MAX_BYTES + 1 }, id)) as { text: string }
+      large = (await f.call('large', { size: CAP + 1 }, id, 'test.capped')) as { text: string }
     // The caller that is waiting gets the whole result.
-    expect(large.text).toHaveLength(LEDGER_RESULT_MAX_BYTES + 1)
+    expect(large.text).toHaveLength(CAP + 1)
     const row = f.db.database
       .prepare("SELECT length(result) AS bytes, result FROM net_executions WHERE trigger='large'")
       .get() as { bytes: number; result: string }
     expect(row.bytes).toBeLessThan(512)
     expect(JSON.parse(row.result)).toMatchObject({ $ledger: 'omitted', bytes: expect.any(Number) })
     // A retry cannot be given the answer back, and says so instead of inventing one.
-    await expect(f.call('large', { size: LEDGER_RESULT_MAX_BYTES + 1 })).rejects.toMatchObject({
-      code: 'outcome_uncertain'
-    })
+    await expect(
+      f.call('large', { size: CAP + 1 }, newId('rpc'), 'test.capped')
+    ).rejects.toMatchObject({ code: 'outcome_uncertain' })
     await expect(f.rpc.result(id, f.peer)).rejects.toMatchObject({ code: 'outcome_uncertain' })
     expect(f.handled()).toBe(2)
   })

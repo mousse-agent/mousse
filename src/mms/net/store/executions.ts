@@ -160,6 +160,7 @@ export class SqliteExecutionLedger implements ExecutionLedger {
    * Delete settled request rows that no retry can still need. Only rows owned by a node (the
    * request ledger of the RPC dispatcher) are eligible: space-scoped rows are bot outcomes that
    * can be exported, and rows a budget reservation references keep their accounting history.
+   * Uncertain rows go too: for a node-owned request they only ever answer "may have happened".
    * `beforeDelete` runs in the same transaction, so aliases leave together with their rows.
    */
   prune(
@@ -171,7 +172,7 @@ export class SqliteExecutionLedger implements ExecutionLedger {
     return this.db.transaction(() => {
       const ids = this.db.database
         .prepare(
-          `SELECT id FROM net_executions e WHERE e.scope LIKE 'nod\\_%' ESCAPE '\\' AND e.state IN ('completed','failed','expired') AND e.updated_at<? AND NOT EXISTS(SELECT 1 FROM net_budget_reservations r WHERE r.execution=e.id) ORDER BY e.updated_at,e.id LIMIT ?`
+          `SELECT id FROM net_executions e WHERE e.scope>='nod_' AND e.scope<'nod\`' AND e.state IN ('completed','failed','expired','uncertain','cancelled') AND e.updated_at<? AND NOT EXISTS(SELECT 1 FROM net_budget_reservations r WHERE r.execution=e.id) ORDER BY e.updated_at,e.id LIMIT ?`
         )
         .all(olderThan, limit)
         .map((row) => row.id as ExecutionId)

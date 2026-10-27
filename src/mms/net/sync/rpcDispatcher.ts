@@ -19,9 +19,10 @@ export const LEDGER_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 /** Pruning runs at start and then at most this often while requests arrive. */
 const PRUNE_INTERVAL_MS = 60 * 60 * 1000
 const PRUNE_BATCH = 100
-const PRUNE_MAX_BATCHES = 100
-/** A result larger than this is recorded as its hash and size only. */
-export const LEDGER_RESULT_MAX_BYTES = 16 * 1024
+/** One pass stops after this long, so a first backlog never blocks the daemon. */
+const PRUNE_BUDGET_MS = 200
+/** A pass that left a backlog runs again after this long. */
+const PRUNE_RETRY_MS = 60 * 1000
 
 interface OmittedResult {
   $ledger: 'omitted'
@@ -69,6 +70,11 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
         .some((row) => row.name === 'capability')
     )
       options.db.database.exec('ALTER TABLE net_rpc_aliases ADD COLUMN capability TEXT')
+    // Pruning deletes aliases by execution, and retries look them up by it; both need the index
+    // before the first pass, or each deleted request scans the whole table.
+    options.db.database.exec(
+      'CREATE INDEX IF NOT EXISTS net_rpc_aliases_execution ON net_rpc_aliases(execution)'
+    )
     this.pruneLedger()
   }
   /**
@@ -76,11 +82,12 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
    * a failure or a long backlog is picked up by the next run.
    */
   pruneLedger(): number {
-    const now = this.options.clock.now()
+    const now = this.options.clock.now(),
+      started = this.options.clock.monotonic()
     this.lastPruneAt = now
     let removed = 0
     try {
-      for (let batch = 0; batch < PRUNE_MAX_BATCHES; batch++) {
+      for (;;) {
         const count = this.options.executions.prune(
           now - (this.options.ledgerRetentionMs ?? LEDGER_RETENTION_MS),
           PRUNE_BATCH,
@@ -93,6 +100,11 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
         )
         removed += count
         if (count < PRUNE_BATCH) break
+        if (this.options.clock.monotonic() - started >= PRUNE_BUDGET_MS) {
+          // More is waiting: come back soon instead of in an hour.
+          this.lastPruneAt = now - PRUNE_INTERVAL_MS + PRUNE_RETRY_MS
+          break
+        }
       }
     } catch {
       // The ledger stays correct without pruning; try again at the next interval.
@@ -238,7 +250,8 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
         this.options.clock.now(),
         {
           result:
-            settled.byteLength > LEDGER_RESULT_MAX_BYTES
+            method.ledgerResultMaxBytes !== undefined &&
+            settled.byteLength > method.ledgerResultMaxBytes
               ? ({
                   $ledger: 'omitted',
                   sha256: createHash('sha256').update(settled).digest('hex'),

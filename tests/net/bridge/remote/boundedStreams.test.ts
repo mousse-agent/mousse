@@ -23,25 +23,39 @@ afterEach(() => {
 const MINUTE = 60 * 1000
 const DAY = 24 * 60 * MINUTE
 
-function manualClock(): Clock & { advance(ms: number): void; pending(): number } {
+function manualClock(): Clock & {
+  advance(ms: number): void
+  pending(): number
+  delays(): number[]
+  fire(): void
+} {
   let now = Date.now()
-  const timers = new Set<unknown>()
+  const timers = new Map<object, { callback: () => void; ms: number }>()
   return {
     now: () => now,
     monotonic: () => now,
-    setTimeout() {
+    setTimeout(callback, ms) {
       const handle = {}
-      timers.add(handle)
+      timers.set(handle, { callback, ms })
       return { cancel: () => timers.delete(handle) }
     },
     advance(ms) {
       now += ms
     },
-    pending: () => timers.size
+    pending: () => timers.size,
+    delays: () => [...timers.values()].map((timer) => timer.ms),
+    fire() {
+      const due = [...timers.entries()]
+      timers.clear()
+      for (const [, timer] of due) timer.callback()
+    }
   }
 }
 
-async function fixture(options: Partial<ThreadStreamOptions> = {}) {
+async function fixture(
+  options: Partial<ThreadStreamOptions> = {},
+  before?: (db: NetDatabase) => void
+) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bounded-')))
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
   const db = new NetDatabase({ profileDir: dir })
@@ -56,6 +70,7 @@ async function fixture(options: Partial<ThreadStreamOptions> = {}) {
   await identity.bootstrapAuthority('Bounded streams')
   const store = new SqliteStreamStore(db)
   cleanups.push(() => store.close())
+  before?.(db)
   const clock = manualClock(),
     watching = new Map<string, number>(),
     subscribed = new Set<string>(),
@@ -97,6 +112,19 @@ async function fixture(options: Partial<ThreadStreamOptions> = {}) {
 }
 
 describe('thread stream quotas', () => {
+  it('counts streams a caller is subscribed to, however they were reopened', async () => {
+    const f = await fixture()
+    // Reopened by a direct subscribe (or after an owner restart), these have no opening caller.
+    for (let i = 1; i <= 16; i++) {
+      const descriptor = f.adapter.activate(`thread-${i}`)
+      f.subscribed.add(`${descriptor.id}|nod_laptop`)
+    }
+    expect(() => f.adapter.activate('thread-17', 'nod_laptop')).toThrow(
+      expect.objectContaining({ code: 'rate_limited' })
+    )
+    expect(() => f.adapter.activate('thread-17', 'nod_phone')).not.toThrow()
+  })
+
   it('refuses the 17th thread from one caller and not from another', async () => {
     const f = await fixture()
     for (let i = 1; i <= 16; i++) f.adapter.activate(`thread-${i}`, 'nod_laptop')
@@ -195,11 +223,14 @@ describe('idle thread streams', () => {
     expect(f.clock.pending()).toBe(0)
   })
 
-  it('schedules its sweep only while a stream is open and stops it on close', async () => {
+  it('keeps one sweep timer, quick while a stream is open and hourly while none is, and stops it on close', async () => {
     const f = await fixture()
-    expect(f.clock.pending()).toBe(0)
+    // One timer from the start, so stale records go even when nothing is ever opened.
+    expect(f.clock.delays()).toEqual([60 * 1000])
+    f.clock.fire()
+    expect(f.clock.delays()).toEqual([60 * MINUTE])
     f.adapter.activate('t1')
-    expect(f.clock.pending()).toBe(1)
+    expect(f.clock.delays()).toEqual([60 * 1000])
     f.adapter.activate('t2')
     expect(f.clock.pending()).toBe(1)
     f.adapter.close()
@@ -239,6 +270,92 @@ describe('stale thread streams', () => {
     expect(types.at(-1)).toBe('thread.snapshot.end')
   })
 
+  it('is not starved by many long-open streams, and runs while nothing is open', async () => {
+    const f = await fixture({ staleMs: 2 * DAY })
+    const stored = (id: StreamId) =>
+      (
+        f.db.database
+          .prepare(
+            'SELECT count(*) AS n FROM net_records WHERE generation=(SELECT active_generation FROM net_streams WHERE id=?)'
+          )
+          .get(id) as { n: number }
+      ).n
+    // More open streams than one batch holds, all older than the one that has gone stale.
+    for (let i = 0; i < 25; i++) {
+      const open = f.adapter.activate(`open-${i}`)
+      f.subscribed.add(`${open.id}|nod_laptop`)
+    }
+    f.clock.advance(5 * MINUTE)
+    const stale = f.adapter.activate('stale')
+    f.clock.advance(11 * MINUTE)
+    f.clock.fire()
+    expect(f.watching.get('stale')).toBe(0)
+    f.clock.advance(3 * DAY)
+    expect(f.adapter.dropStale()).toBe(1)
+    expect(stored(stale.id)).toBe(0)
+    expect(f.records(f.adapter.activate('open-0').id).length).toBeGreaterThan(0)
+
+    // With every stream closed, the hourly sweep still drops what has gone stale.
+    const quiet = await fixture({ staleMs: 2 * DAY })
+    const only = quiet.adapter.activate('only')
+    quiet.clock.advance(11 * MINUTE)
+    quiet.clock.fire()
+    expect(quiet.clock.delays()).toEqual([60 * MINUTE])
+    quiet.clock.advance(3 * DAY)
+    quiet.clock.fire()
+    expect(
+      (
+        quiet.db.database
+          .prepare(
+            'SELECT count(*) AS n FROM net_records WHERE generation=(SELECT active_generation FROM net_streams WHERE id=?)'
+          )
+          .get(only.id) as { n: number }
+      ).n
+    ).toBe(0)
+  })
+
+  it('leaves no id tombstones for a stream only this computer authors', async () => {
+    const f = await fixture({ staleMs: 2 * DAY })
+    const descriptor = f.adapter.activate('t1')
+    const ids = () =>
+      (
+        f.db.database
+          .prepare('SELECT count(*) AS n FROM net_event_ids WHERE stream=?')
+          .get(descriptor.id) as { n: number }
+      ).n
+    // Every reopen publishes a snapshot and truncates the one before it.
+    for (let i = 0; i < 5; i++) {
+      f.clock.advance(11 * MINUTE)
+      f.adapter.releaseIdle()
+      f.adapter.activate('t1')
+    }
+    expect(ids()).toBe(0)
+    f.clock.advance(11 * MINUTE)
+    f.adapter.releaseIdle()
+    f.clock.advance(3 * DAY)
+    expect(f.adapter.dropStale()).toBe(1)
+    expect(ids()).toBe(0)
+  })
+
+  it('releases tombstones an earlier version kept for such a stream', async () => {
+    const f = await fixture({ staleMs: 2 * DAY })
+    const descriptor = f.adapter.activate('t1')
+    const epoch = f.adapter.store.head(descriptor.id).epoch
+    const insert = f.db.database.prepare('INSERT INTO net_event_ids VALUES(?,?,?,?,?,?,?)')
+    insert.run(descriptor.id, 'evt_old', epoch, 1, 0, 'a', 'b')
+    insert.run(descriptor.id, 'evt_older', epoch - 1, 99, 0, 'a', 'b')
+    f.clock.advance(11 * MINUTE)
+    f.adapter.releaseIdle()
+    f.adapter.activate('t1')
+    expect(
+      (
+        f.db.database
+          .prepare('SELECT count(*) AS n FROM net_event_ids WHERE stream=?')
+          .get(descriptor.id) as { n: number }
+      ).n
+    ).toBe(0)
+  })
+
   it('leaves streams that are open, or were opened recently, alone', async () => {
     const f = await fixture({ staleMs: 2 * DAY })
     const open = f.adapter.activate('open')
@@ -253,5 +370,38 @@ describe('stale thread streams', () => {
     expect(f.adapter.releaseIdle()).toBe(1)
     f.clock.advance(1 * DAY)
     expect(f.adapter.dropStale()).toBe(0)
+  })
+})
+
+describe('thread stream table upgrade', () => {
+  it('adds the idle columns to a table from an earlier version and starts its rows now', async () => {
+    const f = await fixture({}, (db) =>
+      db.database.exec(
+        "CREATE TABLE bridge_thread_streams(thread_id TEXT PRIMARY KEY,stream TEXT NOT NULL UNIQUE,boot TEXT NOT NULL) STRICT;INSERT INTO bridge_thread_streams VALUES('old-thread','stm_old','boot-1')"
+      )
+    )
+    const columns = () =>
+      f.db.database
+        .prepare('PRAGMA table_info(bridge_thread_streams)')
+        .all()
+        .map((row) => String(row.name))
+    expect(columns()).toEqual(['thread_id', 'stream', 'boot', 'last_active', 'dropped'])
+    const row = f.db.database
+      .prepare("SELECT last_active,dropped FROM bridge_thread_streams WHERE thread_id='old-thread'")
+      .get() as { last_active: number; dropped: number }
+    expect(row.dropped).toBe(0)
+    expect(row.last_active).toBeGreaterThan(Date.now() - 60 * 1000)
+    // A second opener of the same database finds the columns and leaves the row alone.
+    const second = new ThreadStreamAdapter({
+      db: f.db,
+      store: f.store,
+      generations: f.store,
+      identity: undefined as never,
+      keys: undefined as never,
+      clock: f.clock,
+      source: { snapshot: () => ({}), onThread: () => () => undefined }
+    })
+    second.close()
+    expect(columns()).toHaveLength(5)
   })
 })
