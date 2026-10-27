@@ -9,6 +9,7 @@ import {
   Webhook,
   Zap
 } from '../lib/icons'
+import { normalizePermissionMode } from '../../shared/permissionMode'
 import type { LlmProviderOption } from '../../shared/settings'
 import type { ScheduledJob, ScheduledJobRunRecord, SchedulerStatus } from '../../shared/types'
 import { JobEditor } from './scheduled/JobEditor'
@@ -27,6 +28,7 @@ import {
   describeLastStatus,
   describeMode,
   describeModel,
+  describePermission,
   describeSchedule,
   describeWorkspace,
   errorText,
@@ -91,16 +93,19 @@ export function ScheduledPanel() {
 
   const loadCatalog = useCallback(async () => {
     try {
-      const [options, projects, threads] = await Promise.all([
+      const [options, projects, threads, settings] = await Promise.all([
         window.mousse.settings.getOptions(),
         window.mousse.projects.list(),
-        window.mousse.threads.listAll()
+        window.mousse.threads.listAll(),
+        window.mousse.settings.get()
       ])
       setProviders(options.llmProviders)
       setCatalog({
         models: modelGroups(options.llmProviders),
         projects,
-        threads: threads.filter((thread) => !thread.lineage && !thread.settledAt)
+        threads: threads.filter((thread) => !thread.lineage && !thread.settledAt),
+        // A job made without a thread is made in the mode threads start in; it is also the most the job may run with.
+        defaultPermissionMode: normalizePermissionMode(settings.permissions?.defaultMode)
       })
     } catch {
       // The form still works with the defaults; a model or project it cannot list is simply not offered.
@@ -294,6 +299,7 @@ export function ScheduledPanel() {
                     <span>{describeSchedule(job.schedule)}</span>
                     <span data-meta="model">{describeModel(job.selection)}</span>
                     <span data-meta="mode">{describeMode(job.mode)}</span>
+                    {job.permissionMode ? <span data-meta="permission">{describePermission(job.permissionMode)}</span> : null}
                     {workspace ? <span data-meta="workspace">{workspace}</span> : null}
                     {project ? <span data-meta="project">{project}</span> : null}
                     {thread ? <span data-meta="thread">Thread: {thread}</span> : null}
@@ -404,6 +410,7 @@ function RunHistory({ id, job }: { id: string; job: ScheduledJob }) {
                 <span>{formatWhen(record.runAt)}</span>
                 {record.selection ? <span data-meta="model">{describeModel(record.selection)}</span> : null}
                 {record.mode ? <span data-meta="mode">{describeMode(record.mode)}</span> : null}
+                {record.permissionMode ? <span data-meta="permission">{describePermission(record.permissionMode)}</span> : null}
                 {workspace && record.workspace ? <span data-meta="workspace">{workspace}</span> : null}
                 {record.missingPlaceholders?.length ? <span data-meta="missing">Missing fields: {record.missingPlaceholders.join(', ')}</span> : null}
                 {record.error ? <span className="scheduled-history-error">{record.error}</span> : null}

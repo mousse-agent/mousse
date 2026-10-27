@@ -1,8 +1,11 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { errorText } from './scheduledLabels'
+import { describePermissionMode } from '../../../shared/permissionMode'
 import type { ScheduledJob, ScheduleKind } from '../../../shared/types'
 import {
+  heldPermissionMode,
   modeChoices,
+  permissionChoices,
   showsWorkspace,
   validateDraft,
   workspaceChoices,
@@ -53,7 +56,13 @@ export function JobEditor({
   useEffect(() => () => { mounted.current = false }, [])
   useEffect(() => { formRef.current?.querySelector<HTMLElement>('[data-first-field]')?.focus() }, [])
 
-  const errors = useMemo(() => validateDraft(draft, { hasWebhook: Boolean(job?.trigger?.webhook), requireName: Boolean(job) }), [draft, job])
+  // The mode the person holds is checked only for a permission mode they are choosing now, not one the job already had.
+  const held = heldPermissionMode(draft, catalog)
+  const choosingPermission = draft.permissionMode !== initial.permissionMode
+  const errors = useMemo(
+    () => validateDraft(draft, { hasWebhook: Boolean(job?.trigger?.webhook), requireName: Boolean(job), ...(choosingPermission && held ? { held } : {}) }),
+    [draft, job, choosingPermission, held]
+  )
   const shown = attempted ? errors : {}
   const patch = (changes: Partial<JobDraft>) => { setDraft((current) => ({ ...current, ...changes })); setFailure(null) }
 
@@ -192,6 +201,24 @@ export function JobEditor({
         </div>
       </div>
       {draft.mode === '' ? <p className="scheduled-note" data-testid="mode-note">{MODE_NOTE}</p> : null}
+
+      <div className="scheduled-field">
+        <label className="scheduled-label" htmlFor={id('permission')}>Permissions</label>
+        <select
+          id={id('permission')}
+          className="scheduled-input"
+          value={draft.permissionMode}
+          {...field('permission')}
+          onChange={(event) => patch({ permissionMode: event.target.value as JobDraft['permissionMode'] })}
+        >
+          {permissionChoices(draft, catalog).map((choice) => <option key={choice.value} value={choice.value} disabled={choice.disabled}>{choice.label}</option>)}
+        </select>
+        {fieldError('permission')}
+        <p className="scheduled-note" data-testid="permission-note">
+          {held ? `A run never does more without asking than ${describePermissionMode(held)}, the mode you hold for this job now.` : "A run never does more without asking than the mode you hold; the profile checks it when you save."}
+          {job?.permissionCeiling ? ` This job's limit is ${describePermissionMode(job.permissionCeiling)}: what its creator held.` : ''}
+        </p>
+      </div>
 
       <div className="scheduled-field-grid">
         <div className="scheduled-field">

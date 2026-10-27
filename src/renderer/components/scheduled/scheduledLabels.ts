@@ -1,4 +1,5 @@
 import { ipcErrorMessage } from '../../utils/voiceErrors'
+import { describePermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 import type {
   JobSchedule,
   ScheduledJob,
@@ -39,6 +40,11 @@ export function describeModel(selection: { model: string } | undefined): string 
 
 export function describeMode(mode: 'agent' | 'plan' | undefined): string {
   return mode === 'plan' ? 'Plan' : mode === 'agent' ? 'Agent' : 'Default mode'
+}
+
+/** The permission mode a job was set to, or what an unset one follows. */
+export function describePermission(mode: PermissionMode | undefined): string {
+  return mode ? describePermissionMode(mode) : 'Thread permissions'
 }
 
 export const RUN_STATUS_LABEL: Record<ScheduledJobRunRecord['status'], string> = {
