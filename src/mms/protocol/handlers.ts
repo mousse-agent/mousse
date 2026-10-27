@@ -84,6 +84,7 @@ import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { validateScheduledJobOptions, type ScheduledJobOptionsDeps } from '../scheduled/validateJobOptions'
+import { ScheduledWebhookError } from '../scheduled/ScheduledJobService'
 import { ActionExecutionError, StaleThreadActionRevisionError, ThreadActionService, type RunThreadActionOptions } from '../actions/ThreadActionService'
 import { UndoService } from '../actions/UndoService'
 import { UndoRetentionService } from '../actions/UndoRetentionService'
@@ -869,6 +870,16 @@ function harnessGateway(ctx: HandlerContext): HarnessGateway {
 /** A scheduled-job request the profile refuses, with a message the person can act on (a plain Error would be hidden). */
 function jobRefused(message: string): AppError {
   return knownAppError({ code: 'scheduled_job_refused', message }, { category: 'invalid', retryable: false })
+}
+
+/** Runs a webhook request; the service's refusals ("already has a webhook", "agent-created jobs ...") reach the caller as readable errors. */
+async function withWebhookRefusals<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run()
+  } catch (error) {
+    if (error instanceof ScheduledWebhookError) throw jobRefused(error.message)
+    throw error
+  }
 }
 
 /** `validateScheduledJobOptions` with its plain-text refusals made visible to the caller. */
@@ -1739,6 +1750,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const patch = asScheduledJobPatch(p.patch)
       const existing = ctx.mms.scheduled.getJob(id)
       if (!existing) throw new Error(`Job not found: ${id}`)
+      if (patch.schedule?.kind === 'once' && existing.trigger?.webhook) {
+        throw jobRefused('A job with a webhook cannot become a one-time job; disable its webhook first, or use a manual schedule.')
+      }
       // Validate the job as it would be after the change; `null` clears a field.
       const merged = {
         threadId: patch.threadId === undefined ? existing.threadId : patch.threadId ?? undefined,
@@ -1808,6 +1822,28 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'scheduled.status':
       return { status: ctx.mms.scheduled.getStatus() }
+    // The secret is in the `enable` and `rotate` answers only; no other method returns it.
+    case 'scheduled.webhook.enable': {
+      const p = isObject(params) ? params : {}
+      const id = asString(p.id, 'id', 256)
+      const port = p.port === undefined ? undefined : asBoundedInt(p.port, 'port', { min: 1024, max: 65535 })
+      return withWebhookRefusals(async () => ({ ...(await ctx.mms.enableScheduledWebhook(id, { port })), jobs: ctx.mms.scheduled.listJobs() }))
+    }
+    case 'scheduled.webhook.rotate': {
+      const p = isObject(params) ? params : {}
+      const id = asString(p.id, 'id', 256)
+      return withWebhookRefusals(async () => ({ ...ctx.mms.scheduled.rotateWebhook(id), url: ctx.mms.scheduledWebhookUrl(id), jobs: ctx.mms.scheduled.listJobs() }))
+    }
+    case 'scheduled.webhook.disable': {
+      const p = isObject(params) ? params : {}
+      const id = asString(p.id, 'id', 256)
+      return withWebhookRefusals(async () => ({ job: ctx.mms.scheduled.disableWebhook(id), jobs: ctx.mms.scheduled.listJobs() }))
+    }
+    case 'scheduled.webhook.deliveries': {
+      const p = isObject(params) ? params : {}
+      const id = asString(p.id, 'id', 256)
+      return withWebhookRefusals(async () => ({ deliveries: ctx.mms.scheduled.listWebhookDeliveries(id) }))
+    }
     // ── Channels ──────────────────────────────────────────────────────────
     case 'channels.getSnapshot':
       return { snapshot: ctx.mms.channels.getSnapshot() }

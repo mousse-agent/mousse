@@ -205,6 +205,48 @@ mousse-cli schedule remove <job-id>
 
 A job runs as a turn on a thread. `--instance` and `--model` choose the provider instance and model, `--mode agent|plan` the mode, and `--workspace project|new-worktree|<path>` where it works (`project`, the default, is the project's own checkout: an agent-mode job there edits the folder you work in, unattended, with no checkpoints or undo. For a Git project, prefer `new-worktree`). `--thread <id>` runs the job on an existing thread with its history and its own workspace. `--manual` makes a job with no clock that runs only with `schedule run`. `schedule list` shows the job's model, and `queued` while a run waits behind a busy thread.
 
+### Webhook trigger
+
+A job can also be started by a signed HTTP request, for example from a CI system or a script on this machine.
+
+```bash
+mousse-cli schedule webhook enable <job-id> [--port 18790]   # prints the URL and the secret, once
+mousse-cli schedule webhook rotate <job-id>                  # new secret; the old one stops working at once
+mousse-cli schedule webhook disable <job-id>
+mousse-cli schedule webhook deliveries <job-id>              # recent requests and what became of each
+```
+
+Sending a request (the signature covers the timestamp and the exact body bytes):
+
+```bash
+BODY='{"event":"deploy","ref":"main"}'
+TS=$(date +%s)
+SIG=$(printf '%s.%s' "$TS" "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -hex | sed 's/^.* //')
+curl -sS -X POST "http://127.0.0.1:18790/hooks/<job-id>" \
+  -H "X-Mousse-Timestamp: $TS" -H "X-Mousse-Signature: sha256=$SIG" \
+  --data-binary "$BODY"
+```
+
+| Status | Meaning |
+|--------|---------|
+| `202` | Accepted: the delivery and its replay record are saved, and the job starts within seconds. |
+| `401` | Not authenticated: wrong or missing signature, a timestamp more than 5 minutes from this machine's clock, a job without a webhook, or an unknown job. All look the same on purpose. |
+| `403` | Not a plain local request (a browser `Origin`, or a `Host` other than `127.0.0.1`, `localhost` or `[::1]` with the port). |
+| `404` | Not `POST /hooks/<job-id>`. |
+| `409` | `replay` (this exact request was already received), `running` (the job is running or its run is waiting in a queue), `pending` (another delivery is waiting to start) or `paused`. |
+| `413` | Body over 1 MiB. |
+| `429` | More than 60 signed requests for this job in a minute. |
+
+Things to know:
+
+- **A request that is answered `409` or `429` is used up.** Its signature is remembered for ten minutes, so it can never be delivered later. To retry, sign again with a fresh timestamp (two requests with the same body in the same second share a signature).
+- **One delivery at a time per job.** While a run is going or waiting, further requests get `409`; none is queued.
+- **The body does not reach the job's prompt.** It is stored (readable only by you) until the run ends and then deleted. Placeholders for body fields come later.
+- **Local only.** The listener binds `127.0.0.1` and refuses browser requests; it is not meant to be exposed. To reach it from another machine, use a tunnel you control.
+- **The secret** is stored in the profile's secret file and is never logged or returned again after `enable` or `rotate`. The daemon's own protocol belongs to processes running as you (they hold its owner token), and any of them can rotate a job's secret or read the secret file; the signature keeps other senders out, not the rest of your own account.
+- A one-time job cannot have a webhook (it would finish after one run); use a `--manual` job. Jobs created by an agent cannot have one either.
+- A webhook-started run is an ordinary scheduled run: same model, mode, workspace and access cap, and it does not move an interval or cron job's timer.
+
 ## agents
 
 Agents in git worktrees kept from earlier versions. New work is delegated from a turn with `delegate_task`.
