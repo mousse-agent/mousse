@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 import { StartupCommandError, formatManualCommand, runCommand } from './run'
 
@@ -9,7 +10,16 @@ export function getSystemdUnitPath(homeDir: string): string {
   return path.posix.join(homeDir, '.config', 'systemd', 'user', SYSTEMD_UNIT_FILENAME)
 }
 
-export function buildSystemdUnitContent(cliPath: string, homeDir: string): string {
+/** `environment` adds `Environment=` lines, e.g. the sandbox opt-out a headless Electron CLI needs. */
+export function buildSystemdUnitContent(
+  cliPath: string,
+  homeDir: string,
+  environment: Record<string, string> = {}
+): string {
+  const extra = Object.entries(environment)
+    .map(([key, value]) => `Environment=${key}=${value}
+`)
+    .join('')
   return `[Unit]
 Description=Mousse Main Service
 After=network.target
@@ -18,7 +28,7 @@ After=network.target
 ExecStart=${cliPath} service run
 Restart=on-failure
 Environment=MOUSSE_HOME=${homeDir}
-
+${extra}
 [Install]
 WantedBy=default.target
 `
@@ -59,16 +69,22 @@ async function assertSystemdAvailable(): Promise<void> {
   }
 }
 
+/**
+ * `homeDir` is Mousse's data directory (it goes into `MOUSSE_HOME`). The unit file belongs under the
+ * user's own home, where `systemctl --user` looks and where status and uninstall read it.
+ */
 export async function installLinuxSystemdStartup(
   cliPath: string,
-  homeDir: string
+  homeDir: string,
+  environment: Record<string, string> = {},
+  userHome: string = os.homedir()
 ): Promise<void> {
   await assertSystemdAvailable()
 
-  const unitPath = getSystemdUnitPath(homeDir)
+  const unitPath = getSystemdUnitPath(userHome)
   const unitDir = path.posix.dirname(unitPath)
   await fs.mkdir(unitDir, { recursive: true })
-  await fs.writeFile(unitPath, buildSystemdUnitContent(cliPath, homeDir), 'utf8')
+  await fs.writeFile(unitPath, buildSystemdUnitContent(cliPath, homeDir, environment), 'utf8')
 
   const reloadArgs = buildSystemctlDaemonReloadArgs()
   const reloadResult = await runCommand('systemctl', reloadArgs)

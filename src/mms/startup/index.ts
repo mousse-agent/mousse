@@ -35,6 +35,8 @@ function resolveHomeDir(homeDir?: string): string {
 export async function installStartup(opts: {
   cliPath: string
   homeDir: string
+  /** Extra `Environment=` entries for the Linux unit. */
+  environment?: Record<string, string>
 }): Promise<void> {
   const platform = detectPlatform()
   const homeDir = resolveHomeDir(opts.homeDir)
@@ -45,7 +47,7 @@ export async function installStartup(opts: {
     case 'windows':
       return installWindowsStartup(cliPath)
     case 'linux-systemd':
-      return installLinuxSystemdStartup(cliPath, homeDir)
+      return installLinuxSystemdStartup(cliPath, homeDir, opts.environment)
     case 'macos':
       return installMacosStartup(cliPath, homeDir)
   }

@@ -30,7 +30,11 @@ export interface MousseMainServiceModule {
 
 export interface MmsStartupModule {
   detectPlatform(): StartupPlatform
-  installStartup(opts: { cliPath: string; homeDir: string }): Promise<void>
+  installStartup(opts: {
+    cliPath: string
+    homeDir: string
+    environment?: Record<string, string>
+  }): Promise<void>
   uninstallStartup(): Promise<void>
   startupStatus(): Promise<{ installed: boolean; detail: string }>
 }

@@ -40,6 +40,7 @@ export async function detectStartupPlatform(): Promise<import('./contract').Star
 export async function installMmsStartup(opts: {
   cliPath: string
   homeDir: string
+  environment?: Record<string, string>
 }): Promise<void> {
   const startup = await loadMmsStartup()
   return startup.installStartup(opts)

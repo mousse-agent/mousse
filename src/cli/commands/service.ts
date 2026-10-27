@@ -61,7 +61,7 @@ export async function runService(args: ParsedArgs): Promise<void> {
       await showStatus(globals.homeDir || undefined, globals.mode)
       break
     case 'install':
-      await installService(globals.homeDir || undefined, globals.mode)
+      await installService(globals.homeDir || undefined, globals.mode, args.flags.has('headless'))
       break
     case 'uninstall':
       await uninstallService(globals.mode)
@@ -376,13 +376,17 @@ async function showStatus(
 
 async function installService(
   homeFlag: string | undefined,
-  mode: ParsedArgs['globals']['mode']
+  mode: ParsedArgs['globals']['mode'],
+  headless: boolean
 ): Promise<void> {
   const homeDir = canonicalizeHome(resolveMousseHome(homeFlag))
 
   await installMmsStartup({
     cliPath: resolveCliPathForInstall(process.argv[1] ?? fileURLToPath(import.meta.url)),
-    homeDir
+    homeDir,
+    // The service shows no windows, so Chromium's sandbox protects nothing it uses; an unpacked
+    // headless build has no setuid helper and would not start without the opt-out.
+    ...(headless ? { environment: { ELECTRON_DISABLE_SANDBOX: '1' } } : {})
   })
   const status = await getMmsStartupStatus()
   writeOutput(mode, { ...status, installed: true })
