@@ -468,7 +468,7 @@ export interface QuestionAnswerOutcome {
   ok: boolean
   reason?: 'already_answered' | 'cancelled'
   decision?: 'allow' | 'reject'
-  answeredBy?: { kind: 'user'; via?: string } | { kind: 'agent'; threadId: string; runId: string }
+  answeredBy?: { kind: 'user'; via?: string } | { kind: 'agent'; threadId: string; runId: string; toolCallId?: string }
   cancelReason?: string
 }
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { PermissionAction, PermissionMode } from '../../src/shared/permissionMode'
-import { canAnswerApproval, startedByPerson, type Answerer, type LineageLookup } from '../../src/mms/run/approvalRights'
+import { canAnswerApproval, describeApprovalRefusal, startedByPerson, type AgentApprovalAccess, type Answerer, type LineageLookup } from '../../src/mms/run/approvalRights'
 import { UserQuestionService, type ApprovalTag } from '../../src/mms/orchestrator/UserQuestionService'
 
 const lineage: LineageLookup = (threadId) => {
@@ -53,6 +53,105 @@ describe('canAnswerApproval', () => {
     expect(canAnswerApproval(request('child', 'edit'), agent('parent', 'full'), { decision: 'allow', scope: 'always' }, lineage)).toEqual({ ok: false, code: 'agent_no_standing_grant' })
     expect(canAnswerApproval(request('child', 'edit'), agent('parent', 'full'), { decision: 'reject' }, lineage)).toEqual({ ok: true })
     expect(canAnswerApproval(request('child', 'command'), agent('parent', 'accept_edits'), { decision: 'reject' }, lineage)).toEqual({ ok: false, code: 'mode_forbids' })
+  })
+})
+
+/**
+ * `approval_respond` (#184): an agent answers a thread outside its lineage only when the profile allows it.
+ * The access is what the host read at the moment of the answer.
+ */
+describe('canAnswerApproval for an agent with access beyond its subagents', () => {
+  const access = (patch: Partial<AgentApprovalAccess> = {}): AgentApprovalAccess => ({ level: 'manage', answerApprovals: true, projectAllowed: () => true, ...patch })
+  const manager = (threadId: string, mode: PermissionMode, patch: Partial<AgentApprovalAccess> = {}): Answerer => ({ ...agent(threadId, mode), access: access(patch) })
+  const answers = (who: Answerer, threadId: string, action: PermissionAction = 'command', answer: Parameters<typeof canAnswerApproval>[2] = once) =>
+    canAnswerApproval(request(threadId, action), who, answer, lineage)
+
+  it('answers a thread outside its lineage when it manages, the switch is on and the project is allowed', () => {
+    expect(answers(manager('stranger', 'full'), 'child')).toEqual({ ok: true })
+    expect(answers(manager('stranger', 'full'), 'unrelated')).toEqual({ ok: true })
+    // A sibling is outside the lineage too, and it can reject as well as approve.
+    expect(answers(manager('child', 'full'), 'fork')).toEqual({ ok: true })
+    expect(answers(manager('stranger', 'full'), 'unrelated', 'edit', { decision: 'reject' })).toEqual({ ok: true })
+  })
+
+  it('refuses every agent without the manage level, whatever else it holds', () => {
+    for (const level of ['lineage', 'read'] as const) expect(answers(manager('stranger', 'full', { level }), 'unrelated')).toEqual({ ok: false, code: 'not_parent' })
+    expect(answers(agent('stranger', 'full'), 'unrelated')).toEqual({ ok: false, code: 'not_parent' })
+  })
+
+  it('needs the profile switch, which is off until the user turns it on', () => {
+    expect(answers(manager('stranger', 'full', { answerApprovals: false }), 'unrelated')).toEqual({ ok: false, code: 'approvals_disabled' })
+  })
+
+  it('needs the thread\'s project to be one agents may reach, read when the agent answers, and fails closed', () => {
+    const asked: string[] = []
+    const only = (allowed: string): Partial<AgentApprovalAccess> => ({ projectAllowed: (id) => { asked.push(id); return id === allowed } })
+    expect(answers(manager('stranger', 'full', only('listed')), 'listed')).toEqual({ ok: true })
+    expect(answers(manager('stranger', 'full', only('listed')), 'other')).toEqual({ ok: false, code: 'project_not_allowed' })
+    expect(asked).toEqual(['listed', 'other'])
+    expect(answers(manager('stranger', 'full', { projectAllowed: () => { throw new Error('project index unreadable') } }), 'unrelated')).toEqual({ ok: false, code: 'project_not_allowed' })
+  })
+
+  it('never answers its own thread, with every switch on', () => {
+    expect(answers(manager('stranger', 'full'), 'stranger')).toEqual({ ok: false, code: 'own_request' })
+  })
+
+  it('never answers for a thread of its own lineage beyond its direct subagents: not a grandchild, not its parent, not an ancestor', () => {
+    // Below it: only the direct parent answers for a child.
+    expect(answers(manager('parent', 'full'), 'grandchild')).toEqual({ ok: false, code: 'not_parent' })
+    // Above it: a subagent approves nothing for the agent that started it.
+    expect(answers(manager('child', 'full'), 'parent')).toEqual({ ok: false, code: 'not_parent' })
+    expect(answers(manager('grandchild', 'full'), 'parent')).toEqual({ ok: false, code: 'not_parent' })
+    expect(answers(manager('grandchild', 'full'), 'child')).toEqual({ ok: false, code: 'not_parent' })
+    // Its direct subagent stays the parent's own business, and the switch does not touch it.
+    expect(answers(manager('parent', 'full', { answerApprovals: false }), 'child')).toEqual({ ok: true })
+    expect(answers(manager('parent', 'full', { level: 'lineage', projectAllowed: () => false }), 'child')).toEqual({ ok: true })
+  })
+
+  it('never approves what its own mode would ask about, so it widens nothing', () => {
+    for (const [mode, action, allowed] of [
+      ['ask', 'edit', false], ['ask', 'command', false], ['ask', 'tool', false],
+      ['accept_edits', 'edit', true], ['accept_edits', 'command', false], ['accept_edits', 'tool', false],
+      ['full', 'edit', true], ['full', 'command', true], ['full', 'tool', true]
+    ] as const)
+      expect(answers(manager('stranger', mode), 'unrelated', action), `${mode} / ${action}`).toEqual(allowed ? { ok: true } : { ok: false, code: 'mode_forbids' })
+    // A rejection widens nothing either, so it is held to the same mode as the approval is.
+    expect(answers(manager('stranger', 'ask'), 'unrelated', 'command', { decision: 'reject' })).toEqual({ ok: false, code: 'mode_forbids' })
+  })
+
+  it('never creates a standing rule, whatever the agent holds', () => {
+    expect(answers(manager('stranger', 'full'), 'unrelated', 'edit', { decision: 'allow', scope: 'always' })).toEqual({ ok: false, code: 'agent_no_standing_grant' })
+    // Rejecting "always" is no rule: a rejection carries no scope.
+    expect(answers(manager('stranger', 'full'), 'unrelated', 'edit', { decision: 'reject' })).toEqual({ ok: true })
+  })
+
+  it('checks the access before the mode, and the mode before "always"', () => {
+    expect(answers(manager('stranger', 'ask', { answerApprovals: false }), 'unrelated')).toEqual({ ok: false, code: 'approvals_disabled' })
+    expect(answers(manager('stranger', 'ask', { projectAllowed: () => false }), 'unrelated')).toEqual({ ok: false, code: 'project_not_allowed' })
+    expect(answers(manager('stranger', 'ask'), 'unrelated', 'command', { decision: 'allow', scope: 'always' })).toEqual({ ok: false, code: 'mode_forbids' })
+  })
+
+  it('says in plain words why an agent was refused', () => {
+    expect(describeApprovalRefusal('approvals_disabled')).toMatch(/not allowed agents to answer approvals on other threads/)
+    expect(describeApprovalRefusal('project_not_allowed')).toMatch(/project the user has not given agents access to/)
+  })
+
+  it('is the same rule at the settlement boundary: a refusal leaves the request pending for the user, and an answer settles it once', async () => {
+    const questions = new UserQuestionService()
+    questions.setLineageSource(lineage)
+    const waiter = questions.requestAnswers(
+      [{ id: 'permission', prompt: 'Allow?', options: [{ id: 'allow', label: 'Allow' }, { id: 'allow_always', label: 'Always' }, { id: 'reject', label: 'Reject' }] }],
+      'unrelated',
+      { approval: { action: 'command', permissionKey: 'test:command', options: [{ id: 'allow', ...once }, { id: 'allow_always', decision: 'allow', scope: 'always' }, { id: 'reject', decision: 'reject' }] } }
+    )
+    const requestId = questions.listPendingForThread('unrelated')[0]!.requestId
+    expect(questions.settle(requestId, { permission: 'allow' }, manager('stranger', 'full', { answerApprovals: false }))).toEqual({ ok: false, reason: 'approvals_disabled' })
+    expect(questions.settle(requestId, { permission: 'allow' }, manager('stranger', 'ask'))).toEqual({ ok: false, reason: 'mode_forbids' })
+    expect(questions.settle(requestId, { permission: 'allow_always' }, manager('stranger', 'full'))).toEqual({ ok: false, reason: 'agent_no_standing_grant' })
+    expect(questions.getPending(requestId)).not.toBeNull()
+    expect(questions.settle(requestId, { permission: 'allow' }, manager('stranger', 'full'))).toEqual({ ok: true, decision: 'allow' })
+    await expect(waiter).resolves.toEqual({ permission: 'allow' })
+    expect(questions.getPending(requestId)).toBeNull()
   })
 })
 

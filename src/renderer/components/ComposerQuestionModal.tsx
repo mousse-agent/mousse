@@ -50,7 +50,7 @@ export function describeAnswerOutcome(outcome: QuestionAnswerOutcome | undefined
   if (outcome.reason === 'already_answered') {
     const decided = outcome.decision === 'allow' ? 'approved' : outcome.decision === 'reject' ? 'denied' : 'decided'
     const by = outcome.answeredBy
-    const via = by?.kind === 'agent' ? 'the parent agent' : by?.via === 'cli' ? 'the CLI' : by?.via === 'bridge' ? 'a remote device' : by?.via === 'gui' ? 'the app' : 'another client'
+    const via = by?.kind === 'agent' ? 'an agent' : by?.via === 'cli' ? 'the CLI' : by?.via === 'bridge' ? 'a remote device' : by?.via === 'gui' ? 'the app' : 'another client'
     return `Already answered: ${decided} from ${via}.`
   }
   if (outcome.reason === 'cancelled') return 'This approval request was closed before it was answered.'

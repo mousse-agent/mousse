@@ -42,10 +42,10 @@ export interface ApprovalQuestion {
   allowMultiple?: boolean
 }
 
-/** Who answered, as stored (an agent's permission mode is not kept). */
+/** Who answered, as stored (an agent's permission mode and access are not kept; the tool call that answered is, when there was one). */
 export type AnsweredBy =
   | { kind: 'user'; via?: 'gui' | 'cli' | 'bridge' | 'internal' }
-  | { kind: 'agent'; threadId: string; runId: string }
+  | { kind: 'agent'; threadId: string; runId: string; toolCallId?: string }
 
 export interface ApprovalRecord {
   requestId: string
@@ -226,7 +226,7 @@ export function onceAllowOption(questions: readonly ApprovalQuestion[]): Approva
 function storedAnswerer(answerer: Answerer): AnsweredBy {
   return answerer.kind === 'user'
     ? { kind: 'user', ...(answerer.via ? { via: answerer.via } : {}) }
-    : { kind: 'agent', threadId: answerer.threadId, runId: answerer.runId }
+    : { kind: 'agent', threadId: answerer.threadId, runId: answerer.runId, ...(answerer.toolCallId ? { toolCallId: answerer.toolCallId } : {}) }
 }
 
 const now = (store: RunStore): string => new Date(store.db.clock()).toISOString()
