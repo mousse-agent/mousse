@@ -10,6 +10,7 @@
  * - A native fork whose first turn failed works on the resend: the orchestrator forks again and the
  *   new branch is resumed although the thread's history now holds the failed turn's message.
  */
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -19,7 +20,7 @@ import { createRpcRuntime } from '../../src/mms/harness/drivers/pi/engines/rpc'
 import { piCredentialSubject, piRpcProfileOptions, type PiProfileAuth } from '../../src/mms/harness/drivers/pi/profile'
 import { PiRpcEngine } from '../../src/mms/harness/pi/engine'
 import { piRuntimePaths } from '../../src/mms/harness/pi/launch'
-import type { PiOAuthSource } from '../../src/mms/harness/pi/oauthBroker'
+import { writePiAuth, type PiOAuthSource } from '../../src/mms/harness/pi/oauthBroker'
 import { phase6Daemon, piAdapter, PI } from '../run/phase6Fixture'
 
 const cleanups: Array<() => unknown> = []
@@ -240,3 +241,96 @@ describe('a native fork whose first turn failed', () => {
   })
 })
 
+describe('review round 3', () => {
+  const turnInput = (threadId: string, nativeHistory = '', cwd?: string) => ({ runId: 'r', attemptId: 'a', threadId, instanceId: 'pi:openrouter', llmProvider: 'openrouter', model: 'm', mode: 'agent', prompt: 'hello', messages: [], nativeHistory, ...(cwd ? { cwd } : {}), signal: new AbortController().signal }) as never
+
+  it('retires an OAuth turn when a turn’s identity read sees the change before the notification', async () => {
+    const dir = scratch()
+    const home = join(dir, 'home')
+    mkdirSync(home)
+    let subject = 'oauth:account-A'
+    const context = { instanceId: 'pi:openrouter', builtIn: true, config: { home: 'default', engine: 'rpc' }, env: { home, env: {} }, profileHome: dir, installationHome: dir, stateDir: dir, questions: {}, findBinary: () => undefined, changed: () => {} } as unknown as DriverContext
+    const runtime = createRpcRuntime(context, 'openrouter', 'OpenRouter', () => ({}) as never, { runtime: unused, catalog: unused, identity: () => subject, oauth: { credential: async () => undefined, refresh: async () => undefined } })
+    cleanups.push(() => runtime.stop())
+    const engine = runtime.adapter as unknown as { threads: Map<string, { cancelled?: boolean }> }
+    await runtime.identity!(new AbortController().signal)
+    const old = { threadId: 'old', turn: {}, cancelled: false }
+    engine.threads.set('old', old)
+    writePiAuth(home, 'openrouter', { type: 'oauth', access: 'fake-account-A', refresh: 'fake-handle', expires: Date.now() + 3_600_000 })
+    // `providers.setApiKey` wrote the key and awaits a model refresh; a bind reads the identity meanwhile.
+    subject = 'apikey:account-B'
+    await runtime.identity!(new AbortController().signal)
+    await runtime.credentialsChanged!()
+    await vi.waitFor(() => expect(existsSync(join(home, 'auth.json'))).toBe(false))
+    expect(old.cancelled).toBe(true)
+    expect(engine.threads.has('old')).toBe(false)
+  })
+
+  it('lets a start that comes during a retirement wait for it instead of being killed by it', async () => {
+    const s = fixture()
+    vi.spyOn(s.internals.bridge, 'start').mockResolvedValue(undefined)
+    vi.spyOn(s.internals.bridge, 'register').mockReturnValue({ address: {}, close: () => {} })
+    const release = heldCleanup(s.internals)
+    const retiring = s.engine.retireCredentials()
+    const start = s.engine.startTurn(turnInput('new'), { providerRef: () => {} } as never, {} as never, {} as never)
+    const outcome = start.then(() => 'resolved', (error: Error) => error.message)
+    await Promise.resolve()
+    release()
+    await retiring
+    // It reached the launch (the test seam throws there), not "is stopping".
+    expect(await outcome).toContain('must not spawn')
+  })
+
+  it('hands the history over instead of resuming a fork branch the thread has moved past', async () => {
+    const s = fixture()
+    session(s.dir, 'stale-branch', s.dir)
+    writeFileSync(join(s.dir, 'threads.json'), JSON.stringify({ fork: { sessionId: 'stale-branch', historyFingerprint: createHashOf(''), pendingFork: true } }))
+    const handOver = vi.spyOn(s.internals as unknown as { handOver(...args: unknown[]): Promise<unknown> }, 'handOver').mockResolvedValue({ thread: {}, resumed: false })
+    const processFor = vi.spyOn(s.internals, 'processFor')
+    vi.spyOn(s.internals, 'runTurn').mockResolvedValue({ text: 'handed over', aborted: false })
+    // A failed first turn, then turns on another provider: the history moved on, and no re-fork came.
+    await s.engine.startTurn(turnInput('fork', 'user: Continue\nassistant: elsewhere', s.dir), { providerRef: () => {} } as never, {} as never, {} as never)
+    expect(handOver).toHaveBeenCalledTimes(1)
+    expect(processFor).not.toHaveBeenCalled()
+    expect(JSON.parse(readFileSync(join(s.dir, 'threads.json'), 'utf8')).fork).toBeUndefined()
+  })
+
+  it('stops idle processes for a key change, and a started process is no longer “starting”', async () => {
+    const s = fixture()
+    vi.spyOn(s.internals, 'start').mockResolvedValue(undefined)
+    const started = await s.internals.processFor(turnInput('t1', '', s.dir), s.dir, undefined, { threadId: 't1', cancelled: false }) as { thread: { starting?: unknown; warm?: unknown } }
+    expect(started.thread.starting).toBeUndefined()
+    // Idle in its warm period, and one running a turn.
+    started.thread.warm = setTimeout(() => {}, 60_000)
+    const busy = { threadId: 'busy', turn: {}, cancelled: false }
+    s.internals.threads.set('busy', busy)
+    s.engine.releaseIdle()
+    expect(s.internals.threads.has('t1')).toBe(false)
+    expect(s.internals.threads.get('busy')).toBe(busy)
+    s.internals.threads.delete('busy')
+  })
+
+  it('runs a retirement after a failed one, and retires processes even when the thread list cannot be written', async () => {
+    const s = fixture()
+    const internals = s.internals as unknown as { retire(): Promise<void>; save(...args: unknown[]): void }
+    const retire = vi.spyOn(internals, 'retire').mockRejectedValueOnce(new Error('first failed'))
+    const first = s.engine.retireCredentials()
+    const second = s.engine.retireCredentials()
+    await expect(first).rejects.toThrow('first failed')
+    await second
+    expect(retire).toHaveBeenCalledTimes(2)
+    retire.mockRestore()
+    writeFileSync(join(s.dir, 'threads.json'), JSON.stringify({ fork: { sessionId: 'b', pendingFork: true } }))
+    writePiAuth(s.home, 'openrouter', { type: 'oauth', access: 'fake-A', refresh: 'h', expires: Date.now() + 3_600_000 })
+    const old = { threadId: 'old', turn: {}, cancelled: false }
+    s.internals.threads.set('old', old)
+    vi.spyOn(internals, 'save').mockImplementation(() => { throw new Error('disk full') })
+    await s.engine.retireCredentials()
+    expect(old.cancelled).toBe(true)
+    expect(existsSync(join(s.home, 'auth.json'))).toBe(false)
+  })
+})
+
+function createHashOf(text: string): string {
+  return createHash('sha256').update(text).digest('hex')
+}

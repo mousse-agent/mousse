@@ -468,6 +468,8 @@ export class PiRpcEngine implements ProviderAdapter {
    * or an earlier run of Mousse is refused.
    */
   private oauthHandle: string
+  /** Fork threads whose next turn is the one the branch was just made for (`forkSession`). */
+  private readonly freshForks = new Set<string>()
   /** The credential retirement in progress, if any; starts and forks wait for it. */
   private retiring: Promise<void> | undefined
   /** The credential epoch in which a start last wrote `auth.json`. */
@@ -548,7 +550,8 @@ export class PiRpcEngine implements ProviderAdapter {
    */
   retireCredentials(): Promise<void> {
     const previous = this.retiring ?? Promise.resolve()
-    const retiring = previous.then(() => this.retire())
+    // A failed retirement does not skip the next one.
+    const retiring = previous.catch(() => {}).then(() => this.retire())
     const gate = retiring.finally(() => {
       if (this.retiring === gate) this.retiring = undefined
     })
@@ -560,9 +563,15 @@ export class PiRpcEngine implements ProviderAdapter {
     const epoch = ++this.credentialEpoch
     this.oauthHandle = piOAuthHandle(this.options.instanceId)
     this.oauthSubject = undefined
-    for (const [threadId, entry] of Object.entries(this.saved())) if (entry.pendingFork) this.save(threadId, undefined)
+    this.freshForks.clear()
+    // The processes and the token go first: a failed write of the thread list below cannot keep them.
     const closing = [...this.threads.values()].map((thread) => this.kill(thread))
     this.removeAuthFile()
+    try {
+      for (const [threadId, entry] of Object.entries(this.saved())) if (entry.pendingFork) this.save(threadId, undefined)
+    } catch (error) {
+      console.warn('[harness] could not drop pending forks', { instanceId: this.options.instanceId, error: error instanceof Error ? error.message : String(error) })
+    }
     await within(Promise.allSettled([...closing, ...[...this.closing].map((thread) => thread.closed)]), CLEANUP_DEADLINE_MS)
     // Again once the old processes closed (a refresh answered just before cannot write it back).
     if (epoch === this.credentialEpoch && this.authWrittenEpoch !== epoch) this.removeAuthFile()
@@ -578,7 +587,8 @@ export class PiRpcEngine implements ProviderAdapter {
    * with the new credential, as a rotated key restarts a process anyway); running turns finish.
    */
   releaseIdle(): void {
-    for (const thread of [...this.threads.values()]) if (!thread.turn && !thread.starting) void this.kill(thread)
+    // Idle: between turns, in its warm period (not starting, not handed to a turn being set up).
+    for (const thread of [...this.threads.values()]) if (thread.warm && !thread.turn && !thread.starting) void this.kill(thread)
   }
 
   /** Pi's private `auth.json` (an OAuth access token) is removed. */
@@ -707,6 +717,10 @@ export class PiRpcEngine implements ProviderAdapter {
 
   /** The thread's process for this turn: the warm one, or a new one that reported ready. */
   private async processFor(input: TurnInput, cwd: string, resume: string | undefined, starting: StartingTurn): Promise<{ thread: PiThreadProcess; resumed: boolean }> {
+    // Before the process is registered: a credential retirement in progress would count it as one
+    // of the old credential's and kill it.
+    await this.afterRetirement()
+    if (starting.cancelled || this.stopped) throw protocolError(this.options.instanceId, `${this.options.label} was stopped while it started.`)
     const { modelId, thinking } = this.thinkingFor(input.model)
     const keyFingerprint = fingerprint(this.options.apiKey?.() ?? '')
     const existing = this.threads.get(input.threadId)
@@ -739,6 +753,8 @@ export class PiRpcEngine implements ProviderAdapter {
       await started
     } finally {
       this.starts.delete(started)
+      // Started (or failed): no longer starting, so `releaseIdle` sees it as the idle process it is.
+      if (thread.starting === started) thread.starting = undefined
     }
     if (starting.cancelled) {
       await within(this.kill(thread), CLEANUP_DEADLINE_MS)
@@ -1095,10 +1111,19 @@ export class PiRpcEngine implements ProviderAdapter {
       const cwd = input.cwd ?? join(this.options.stateDir, 'chats', fingerprint(input.threadId).slice(0, 16))
       mkdirSync(cwd, { recursive: true })
       const history = input.nativeHistory ?? ''
-      const saved = this.saved()[input.threadId]
-      // A pending fork resumes its branch whatever the thread's history says: a first turn that failed
-      // or stopped left its message in the history, and the retry forked again from the parent.
-      let resume = saved && (saved.pendingFork || saved.historyFingerprint === fingerprint(history)) ? saved.sessionId : undefined
+      let saved: SavedThread | undefined = this.saved()[input.threadId]
+      // The turn right after `forkSession` resumes the branch whatever the thread's history says (a
+      // resend after a failed or stopped first turn holds that turn's message, and the branch was
+      // forked again for it). Any later turn of the thread consumes the exemption.
+      const fresh = this.freshForks.delete(input.threadId)
+      const matches = saved?.historyFingerprint === fingerprint(history)
+      if (saved?.pendingFork && !fresh && !matches) {
+        // A branch the thread has moved past (a failed first turn, then turns elsewhere, or a re-fork
+        // that did not happen): resuming it would lose those turns. The history is handed over.
+        this.save(input.threadId, undefined)
+        saved = undefined
+      }
+      let resume = saved && ((saved.pendingFork && fresh) || matches) ? saved.sessionId : undefined
       // A cold resume needs the session's file, in this workspace (a fork's first turn runs in its own).
       const warm = this.threads.get(input.threadId)
       const warmOnIt = warm?.alive && warm.cwd === cwd && warm.sessionId === resume
@@ -1349,6 +1374,7 @@ export class PiRpcEngine implements ProviderAdapter {
         await started
       } finally {
         this.starts.delete(started)
+        if (thread.starting === started) thread.starting = undefined
       }
       const after = await this.send<{ entries: Array<{ id: string; type: string; message?: { role?: string } }> }>(thread, { type: 'get_entries', since: leaf })
       const next = after.entries.find((entry) => entry.type === 'message')
@@ -1364,6 +1390,7 @@ export class PiRpcEngine implements ProviderAdapter {
       if (!sessionId || sessionId === ref.sessionId || !sessionFileOf(this.sessionsDir, sessionId)) return null
       // The fork's thread has no history of its own before its first turn, which resumes the branch.
       this.save(target.threadId, { sessionId, historyFingerprint: fingerprint(''), pendingFork: true })
+      this.freshForks.add(target.threadId)
       return { provider: ref.provider, ...(ref.instanceId ? { instanceId: ref.instanceId } : {}), model: ref.model, sessionId }
     } finally {
       await within(this.kill(thread), CLEANUP_DEADLINE_MS)

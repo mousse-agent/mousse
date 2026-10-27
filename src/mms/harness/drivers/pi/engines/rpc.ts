@@ -126,22 +126,22 @@ export function createRpcRuntime(context: DriverContext, providerId: string, lab
     ...(base.signIn
       ? {
           signIn: async (...args: Parameters<NonNullable<DriverRuntime['signIn']>>) => {
-            const before = await credential.known()
+            await credential.prime()
             const result = await base.signIn!(...args)
-            if (result.success) await credential.changed(before)
+            if (result.success) await credential.changed()
             return result
           }
         }
       : {}),
     signOut: async () => {
-      const before = await credential.known()
+      await credential.prime()
       try {
         await base.signOut?.()
       } finally {
-        await credential.changed(before)
+        await credential.changed()
       }
     },
-    credentialsChanged: async () => credential.changed(await credential.known()),
+    credentialsChanged: () => credential.changed(),
     forgetConversation: (threadId) => engine.forgetConversation(threadId),
     terminate: (ref) => engine.terminate(ref),
     stop: () => engine.stop()
@@ -153,27 +153,50 @@ export function createRpcRuntime(context: DriverContext, providerId: string, lab
  * (`identity`). Without an identity source every change retires (nothing can be compared).
  */
 function credentialChanges(engine: PiRpcEngine, subject: () => string | undefined | Promise<string | undefined>, comparable: boolean) {
-  let last: { subject: string | undefined } | undefined
-  const read = async (): Promise<string | undefined> => {
-    let value: string | undefined
+  /**
+   * The subject the engine's processes were started under. Only a transition moves it on, and every
+   * transition is applied as it is seen, by whichever read sees it first (a turn's identity read
+   * during another surface's change included), so a later notification never compares new with new.
+   */
+  let baseline: { subject: string | undefined } | undefined
+  const current = async (): Promise<string | undefined> => {
     try {
-      value = await subject()
+      return await subject()
     } catch {
-      value = undefined
+      return undefined
     }
-    last = { subject: value }
-    return value
+  }
+  const apply = (before: string | undefined, after: string | undefined): Promise<void> => {
+    if (before?.startsWith('oauth:') || after?.startsWith('oauth:')) return engine.retireCredentials()
+    engine.releaseIdle()
+    return Promise.resolve()
+  }
+  /** Records `value`; a different one than the baseline is a change, applied now. */
+  const observe = (value: string | undefined): Promise<void> => {
+    if (!baseline) {
+      baseline = { subject: value }
+      return Promise.resolve()
+    }
+    if (baseline.subject === value) return Promise.resolve()
+    const before = baseline.subject
+    baseline = { subject: value }
+    return apply(before, value)
   }
   return {
-    read,
-    /** The subject before a change: the last one read, else read now. */
-    known: async (): Promise<string | undefined> => (last ? last.subject : read()),
-    changed: async (before: string | undefined): Promise<void> => {
-      const after = await read()
+    /** A turn's identity read: a change it sees is applied (a turn of the new credential waits for the retirement). */
+    read: async (): Promise<string | undefined> => {
+      const value = await current()
+      void observe(value).catch(() => {})
+      return value
+    },
+    /** Sets the baseline before a sign-in or sign-out, when nothing was read yet. */
+    prime: async (): Promise<void> => {
+      if (!baseline) baseline = { subject: await current() }
+    },
+    /** After a sign-in, sign-out or another surface's change: applies it if the subject moved. */
+    changed: async (): Promise<void> => {
       if (!comparable) return engine.retireCredentials()
-      if (before === after) return
-      if (before?.startsWith('oauth:') || after?.startsWith('oauth:')) return engine.retireCredentials()
-      engine.releaseIdle()
+      await observe(await current())
     }
   }
 }
