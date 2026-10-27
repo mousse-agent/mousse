@@ -2263,6 +2263,36 @@ describe('a plan usage limit', () => {
     expect(f.cli.processes).toHaveLength(1)
   })
 
+  it('a turn that goes on after a rejected window is not interrupted by the hold timer', async () => {
+    const f = fixture({}, new FakeClaudeCli(), 150)
+    f.cli.reply = (message, process) => {
+      process.emit(rejected(), toolStart('tool-1', 'Bash', String(message.uuid)))
+      // A long tool: far longer than the hold, with no frame the session routes to the turn.
+      setTimeout(() => process.emit(toolResult('tool-1'), resultFrame({ uuids: [String(message.uuid)], text: 'built' })), 500)
+    }
+    expect(await f.chat()).toBe('built')
+    expect(f.cli.last.interrupts).toBe(0)
+  })
+
+  it('a later failure that is not a limit stays a plain failure after the turn went on', async () => {
+    const f = fixture()
+    f.cli.reply = (message, process) => process.emit(rejected(), textDelta('working', String(message.uuid)), resultFrame({ uuids: [String(message.uuid)], error: 'connection dropped' }))
+    const error = await f.chat().catch((caught: unknown) => caught)
+    expect(error).not.toMatchObject({ code: 'provider_usage_limit' })
+    expect((error as Error).message).toBe('connection dropped')
+  })
+
+  it('a held turn whose process ends after the interrupt, with no result, still fails with the limit', async () => {
+    const f = fixture({}, new FakeClaudeCli(), 150)
+    f.cli.reply = (_message, process) => {
+      process.emit(rejected())
+      process.onInterrupt = (self) => self.end()
+    }
+    const error = await f.chat({ history: 'H1' }).catch((caught: unknown) => caught)
+    expect(f.cli.last.interrupts).toBe(1)
+    expect(error).toMatchObject({ code: 'provider_usage_limit', details: { limitKind: 'five_hour', estimated: false } })
+  })
+
   it('a user Stop during the hold cancels the turn; Mousse does not end it as a limit', async () => {
     const f = fixture({}, new FakeClaudeCli(), 600)
     f.cli.reply = (_message, process) => process.emit(rejected())

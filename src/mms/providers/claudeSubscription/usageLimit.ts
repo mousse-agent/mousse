@@ -39,9 +39,16 @@ export class RejectedWindows {
     this.quietSince = nowMs
   }
 
-  /** Any other frame shows the turn is moving. */
-  touch(nowMs: number): void {
-    if (this.quietSince !== undefined) this.quietSince = nowMs
+  /**
+   * The turn went on after a rejection (a model or tool frame): the rejection did not end it, so it
+   * is forgotten. The hold clock stops, and a later, unrelated failure is not read as a limit. Once
+   * Mousse has ended the turn itself the record stays, because the limit is why it ended.
+   */
+  progressed(): void {
+    if (this.hold) return
+    this.windows.clear()
+    this.assistantError = false
+    this.quietSince = undefined
   }
 
   /** A rejected window was seen and nothing has arrived since for `holdMs`. */
@@ -78,7 +85,10 @@ function rejectedWindow(info: unknown): RejectedWindow | undefined {
   }
 }
 
-/** Feeds one frame of a turn to its record of rejected windows. */
+/**
+ * Feeds one frame of a turn to its record of rejected windows. A frame that shows the turn going on
+ * after a rejection (text, a tool call or its progress) clears the record.
+ */
 export function observeRateLimit(message: SDKMessage, seen: RejectedWindows, nowMs = Date.now()): void {
   if (message.type === 'rate_limit_event') {
     const window = rejectedWindow(message.rate_limit_info)
@@ -93,7 +103,8 @@ export function observeRateLimit(message: SDKMessage, seen: RejectedWindows, now
     else seen.recordAssistantError(nowMs)
     return
   }
-  seen.touch(nowMs)
+  // A result is the end of the turn, not progress; every other frame of the model or its tools is.
+  if (message.type === 'stream_event' || message.type === 'assistant' || message.type === 'user' || message.type === 'tool_progress') seen.progressed()
 }
 
 function limitError(resetsAt: string | undefined, limitKind: string | undefined): AppError {

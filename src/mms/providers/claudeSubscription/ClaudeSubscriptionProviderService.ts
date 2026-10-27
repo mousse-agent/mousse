@@ -50,6 +50,7 @@ import { claudeMcpToolBlocked, claudeProxiedMcpServer, type ClaudeTurnIntegratio
 import { claudeChildToolDenial } from './childPolicy'
 import { CancelInProgress, DEFAULT_LIVE_TIMINGS, LiveSession, type LiveRun, type LiveTimings } from './liveSession'
 import { TurnFrames } from './turnFrames'
+import { readUsageLimit } from '../../orchestrator/providerErrors'
 import { USAGE_LIMIT_HOLD_MS, usageLimitFromResult, usageLimitFromWindows, type RejectedWindows } from './usageLimit'
 import type { ChildTurnPolicy } from '../../run/adapters/ProviderAdapter'
 
@@ -1349,6 +1350,8 @@ export class ClaudeSubscriptionProviderService {
     let query: Query | undefined
     let live: LiveSession<TurnContext> | undefined
     let liveRun: LiveRun | undefined
+    /** The turn failed with a usage limit: its request is in the session, whatever evidence classified it. */
+    let usageLimited = false
     const cancel = () => {
       controller.abort()
       // A live query outlives the turn: the turn is interrupted, and only Stop, an idle release or a
@@ -1597,7 +1600,14 @@ export class ClaudeSubscriptionProviderService {
           else controller.signal.addEventListener('abort', fail, { once: true })
         })
         aborted.catch(() => undefined)
-        const outcome = await Promise.race([liveRun.done, aborted])
+        let outcome: Awaited<typeof liveRun.done>
+        try {
+          outcome = await Promise.race([liveRun.done, aborted])
+        } catch (error) {
+          // The interrupt that ended a held turn may end the query with an error instead of a result.
+          if (liveRun.rateLimits.hold && !controller.signal.aborted && !(error instanceof AppError && error.code === 'provider_usage_limit')) throw usageLimitFromWindows(liveRun.rateLimits)
+          throw error
+        }
         controller.signal.throwIfAborted()
         const result = outcome.result
         if (result) {
@@ -1607,6 +1617,9 @@ export class ClaudeSubscriptionProviderService {
             frames.text += result.result
             input.onText(frames.text)
           }
+        } else if (liveRun.rateLimits.hold) {
+          // The interrupt that ended a held turn left no result.
+          throw usageLimitFromWindows(liveRun.rateLimits)
         } else if (outcome.reason === 'folded') {
           // A wake Claude folded a message of ours into has no turn of its own; the message got the answer.
           throw new AppError({
@@ -1655,6 +1668,8 @@ export class ClaudeSubscriptionProviderService {
             // The SDK throws after the error result an interrupt produces; a steer resumes from here.
             if (!(interruptRequested && steers.length) || controller.signal.aborted) throw error
           }
+          // The interrupt that ended a held turn may end the stream without a result.
+          if (frames.rateLimits.hold && !success && !controller.signal.aborted) throw usageLimitFromWindows(frames.rateLimits)
           const completed = query
           query = undefined
           collectSteer()
@@ -1691,6 +1706,9 @@ export class ClaudeSubscriptionProviderService {
       this.readyToCommit.add(input.threadId)
       if (live && liveRun) this.liveCommits.set(input.threadId, { live, run: liveRun })
       return frames.text
+    } catch (error) {
+      if (readUsageLimit(error)) usageLimited = true
+      throw error
     } finally {
       // Only this turn's controller: a live query is not the turn's to abort.
       controller.abort()
@@ -1717,7 +1735,7 @@ export class ClaudeSubscriptionProviderService {
         const sessionId = frames.sessionId
         // A turn the user stopped, or that a usage limit ended, once the SDK had a session: its request is in
         // that session, and the adapter may fingerprint it (`commitInterrupted`, `commitFailed`).
-        const stopped = !success && sessionId !== undefined && (input.signal?.aborted === true || (liveRun ? liveRun.rateLimits : frames.rateLimits).recorded)
+        const stopped = !success && sessionId !== undefined && (input.signal?.aborted === true || usageLimited)
         const savedSessionId = baseline?.sessionId ?? (stopped ? sessionId : undefined)
         if (savedSessionId && this.configured()) {
           const current = this.settings.sessions?.[input.threadId]

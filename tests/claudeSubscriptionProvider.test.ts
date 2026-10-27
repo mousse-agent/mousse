@@ -816,6 +816,48 @@ describe('a plan usage limit (one-shot query)', () => {
     expect(error).toMatchObject({ code: 'provider_usage_limit', details: { limitKind: 'five_hour', estimated: false } })
   })
 
+  it('a turn that goes on after a rejected window is not interrupted by the hold timer', async () => {
+    const q = fakeQuery()
+    q[Symbol.asyncIterator] = async function* () {
+      yield init as never
+      yield rejected({ rateLimitType: 'seven_day_opus' }) as never
+      yield { type: 'assistant', session_id: 'vendor-session', parent_tool_use_id: null, message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tool-1', name: 'Bash', input: {} }] } } as never
+      // A long tool: far longer than the hold, with no frame.
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      yield result as never
+    }
+    const { service, home } = fixture(() => q, true, 150)
+    expect(await service.chat(chatInput(home))).toBe('hello')
+    expect(q.interrupt).not.toHaveBeenCalled()
+  })
+
+  it('a later failure that is not a limit stays a plain failure after the turn went on', async () => {
+    const assistantText = { type: 'assistant', session_id: 'vendor-session', parent_tool_use_id: null, message: { role: 'assistant', content: [{ type: 'text', text: 'working' }] } }
+    const { service, home } = fixture(() => fakeQuery([init, rejected(), assistantText, failure({ api_error_status: null, errors: ['connection dropped'] })]))
+    const error = await service.chat(chatInput(home)).catch((caught: unknown) => caught)
+    expect(error).not.toMatchObject({ code: 'provider_usage_limit' })
+    expect((error as Error).message).toBe('connection dropped')
+  })
+
+  it('a held turn whose stream ends without a result after the interrupt still fails with the limit', async () => {
+    for (const how of ['ends', 'throws'] as const) {
+      const q = fakeQuery()
+      let release!: () => void
+      const released = new Promise<void>((resolve) => (release = resolve))
+      q[Symbol.asyncIterator] = async function* () {
+        yield init as never
+        yield rejected() as never
+        await released
+        if (how === 'throws') throw new Error('Claude Code process exited')
+      }
+      vi.mocked(q.interrupt).mockImplementation(async () => release())
+      const { service, home } = fixture(() => q, true, 150)
+      const error = await service.chat(chatInput(home)).catch((caught: unknown) => caught)
+      expect(q.interrupt).toHaveBeenCalledOnce()
+      expect(error, how).toMatchObject({ code: 'provider_usage_limit', details: { limitKind: 'five_hour', estimated: false } })
+    }
+  })
+
   it('a user Stop during the hold cancels the turn and Mousse never interrupts it', async () => {
     const q = heldQuery()
     const { service, home } = fixture(() => q, true, 600)
@@ -840,5 +882,32 @@ describe('a plan usage limit (one-shot query)', () => {
     service.commitFailed('thread', 'H1 + request')
     await service.chat({ ...chatInput(home), history: 'H1 + request' })
     expect(inputs[1].options.resume).toBe('vendor-session')
+  })
+
+  it('a limit read only from the result text also keeps the session for the next turn', async () => {
+    const inputs: Array<{ options: Options; prompt: unknown }> = []
+    const body = failure({ errors: ['API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"Usage limit reached (reset after 1h)"}}'] })
+    const { service, home } = fixture((input) => {
+      inputs.push(input)
+      return inputs.length === 1 ? fakeQuery([init, body]) : fakeQuery([result])
+    })
+    const error = await service.chat({ ...chatInput(home), history: 'H1' }).catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ code: 'provider_usage_limit', details: { estimated: false } })
+    service.commitFailed('thread', 'H1 + request')
+    await service.chat({ ...chatInput(home), history: 'H1 + request' })
+    expect(inputs[1].options.resume).toBe('vendor-session')
+  })
+
+  it('a failure that is not a limit saves no session, even when a rejected window was seen earlier', async () => {
+    const inputs: Array<{ options: Options; prompt: unknown }> = []
+    const assistantText = { type: 'assistant', session_id: 'vendor-session', parent_tool_use_id: null, message: { role: 'assistant', content: [{ type: 'text', text: 'working' }] } }
+    const { service, home } = fixture((input) => {
+      inputs.push(input)
+      return inputs.length === 1 ? fakeQuery([init, rejected(), assistantText, failure({ api_error_status: 503, errors: ['overloaded'] })]) : fakeQuery([result])
+    })
+    await expect(service.chat({ ...chatInput(home), history: 'H1' })).rejects.toThrow('overloaded')
+    service.commitFailed('thread', 'H1 + request')
+    await service.chat({ ...chatInput(home), history: 'H1 + request' })
+    expect(inputs[1].options.resume).toBeUndefined()
   })
 })

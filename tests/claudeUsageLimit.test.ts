@@ -124,11 +124,41 @@ describe('the hold watchdog clock', () => {
     expect(seen.held(NOW + USAGE_LIMIT_HOLD_MS)).toBe(true)
   })
 
-  it('any later frame restarts the wait', () => {
+  it.each([
+    ['a stream frame', { type: 'stream_event', session_id: 's', event: {} }],
+    ['an assistant message', { type: 'assistant', session_id: 's', message: { role: 'assistant', content: [{ type: 'tool_use', id: 't', name: 'Bash', input: {} }] } }],
+    ['a tool result', { type: 'user', session_id: 's', message: { role: 'user', content: [] } }],
+    ['tool progress', { type: 'tool_progress', session_id: 's', tool_use_id: 't', tool_name: 'Bash', elapsed_time_seconds: 3 }]
+  ])('%s after the rejection means the turn went on: the wait stops and the windows are forgotten', (_name, frame) => {
+    const seen = seenFrom(rejected('five_hour', seconds(HOUR)))
+    observeRateLimit(frame as unknown as SDKMessage, seen, NOW + 20_000)
+    expect(seen.recorded).toBe(false)
+    expect(seen.held(NOW + 20_000 + 10 * USAGE_LIMIT_HOLD_MS)).toBe(false)
+    // A failure that follows is not read as the limit.
+    expect(usageLimitFromResult(errorResult(), seen, NOW + 21_000)).toBeUndefined()
+  })
+
+  it('a system frame or the result itself does not stop the wait', () => {
+    const seen = seenFrom(rejected('five_hour', seconds(HOUR)))
+    observeRateLimit({ type: 'system', subtype: 'status', session_id: 's' } as unknown as SDKMessage, seen, NOW + 20_000)
+    observeRateLimit(errorResult(), seen, NOW + 21_000)
+    expect(seen.held(NOW + USAGE_LIMIT_HOLD_MS)).toBe(true)
+    expect(readUsageLimit(usageLimitFromResult(errorResult(), seen, NOW + 21_000))).toMatchObject({ limitKind: 'five_hour' })
+  })
+
+  it('a rejection that comes after progress starts the wait again', () => {
     const seen = seenFrom(rejected('five_hour', seconds(HOUR)))
     observeRateLimit({ type: 'stream_event', session_id: 's', event: {} } as unknown as SDKMessage, seen, NOW + 20_000)
-    expect(seen.held(NOW + USAGE_LIMIT_HOLD_MS)).toBe(false)
-    expect(seen.held(NOW + 20_000 + USAGE_LIMIT_HOLD_MS)).toBe(true)
+    observeRateLimit(rejected('seven_day', seconds(2 * HOUR)), seen, NOW + 25_000)
+    expect(seen.held(NOW + 25_000 + USAGE_LIMIT_HOLD_MS)).toBe(true)
+    expect(readUsageLimit(usageLimitFromResult(errorResult(), seen, NOW + 26_000))).toMatchObject({ limitKind: 'seven_day' })
+  })
+
+  it('progress after Mousse ended the turn itself does not forget the limit', () => {
+    const seen = seenFrom(rejected('five_hour', seconds(HOUR)))
+    seen.hold = true
+    observeRateLimit({ type: 'stream_event', session_id: 's', event: {} } as unknown as SDKMessage, seen, NOW + 40_000)
+    expect(readUsageLimit(usageLimitFromResult(errorResult(), seen, NOW + 41_000))).toMatchObject({ limitKind: 'five_hour', estimated: false })
   })
 
   it('frames before any rejection never start it', () => {
