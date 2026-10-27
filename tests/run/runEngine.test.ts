@@ -553,6 +553,35 @@ describe('RunEngine pause (SPEC §5)', () => {
     expect(reasonOf(() => f!.engine.pauseRun({ runId: other.runId, pause: pauseOf() }))).toBe('conflict')
   })
 
+  it('markTerminal refuses a paused run: a pause ends only through endPause, so its timer cannot be left behind', async () => {
+    fixture()
+    const run = await paused()
+    for (const status of ['failed', 'cancelled', 'interrupted', 'completed'] as const)
+      expect(reasonOf(() => f!.engine.markTerminal(run.runId, status))).toBe('conflict')
+    expect(f!.store.getRun(run.runId)).toMatchObject({ status: 'paused', epoch: run.epoch })
+    expect(resumeEffects(run.runId).map((effect) => effect.status)).toEqual(['pending'])
+
+    // The way out keeps working, and the later run's Resume now is not held up by a dead timer.
+    f!.engine.endPause(run.runId, 'cancel')
+    const next = await f!.runningRun('t1')
+    f!.engine.pauseRun({ runId: next.runId, pause: pauseOf(), resumeAt: '2026-10-12T05:00:00.000Z' })
+    const manual = f!.engine.requestResume(next.runId, true)
+    expect(f!.outbox.claimNext('o', f!.now())!.effectId).toBe(manual.effectId)
+  })
+
+  it('pauseRun cancels a pending timer left on the thread by a run that is not paused', async () => {
+    fixture()
+    const first = await f!.runningRun('t1')
+    f!.engine.markTerminal(first.runId, 'failed')
+    // Whatever left it (a bug, an older build), it would hold up the resume lane for hours.
+    const dead = f!.outbox.enqueue({ threadId: 't1', runId: first.runId, kind: 'run.resume', availableAt: '2026-10-12T05:00:00.000Z' })
+    const second = await f!.runningRun('t1')
+    f!.engine.pauseRun({ runId: second.runId, pause: pauseOf(), resumeAt: UNTIL })
+
+    expect(f!.outbox.get(dead.effectId)).toMatchObject({ status: 'cancelled', lastError: 'run_not_paused' })
+    expect(resumeEffects(second.runId).map((effect) => effect.status)).toEqual(['pending'])
+  })
+
   describe('requestResume', () => {
     it('replaces the pending timer with one available now that is marked manual', async () => {
       fixture()
@@ -580,14 +609,59 @@ describe('RunEngine pause (SPEC §5)', () => {
       expect(f!.store.db.statement('SELECT COUNT(*) AS n FROM effects').get()!.n).toBe(effects)
     })
 
-    it('leaves a timer that is already running alone and returns it', async () => {
+    it('queues a manual timer behind an automatic one that is running: the press is not absorbed', async () => {
       fixture()
       const run = await paused()
       f!.advance(61 * 60_000)
       const claimed = f!.outbox.claimNext('owner', f!.now())
       expect(claimed).toMatchObject({ kind: 'run.resume', status: 'running' })
 
-      expect(f!.engine.requestResume(run.runId, true)).toMatchObject({ effectId: claimed!.effectId, status: 'running' })
+      const effect = f!.engine.requestResume(run.runId, true)
+
+      expect(effect).toMatchObject({ status: 'pending', payload: { manual: true } })
+      expect(effect.effectId).not.toBe(claimed!.effectId)
+      expect(f!.outbox.get(claimed!.effectId)!.status).toBe('running')
+      expect(resumeEffects(run.runId)).toHaveLength(2)
+      // The resume lane is first-in, first-out: the manual one is claimable once the running one settles.
+      expect(f!.outbox.claimNext('owner-2', f!.now())).toBeNull()
+      f!.outbox.succeed(claimed!.effectId, 'owner', f!.now())
+      expect(f!.outbox.claimNext('owner-2', f!.now())!.effectId).toBe(effect.effectId)
+    })
+
+    it('a Resume now press is not lost when the running automatic timer rules the pause stale', async () => {
+      fixture()
+      const run = await paused()
+      f!.advance(3 * 24 * 60 * 60_000)
+      const claimed = f!.outbox.claimNext('owner', f!.now())!
+      const manual = f!.engine.requestResume(run.runId, true)
+
+      // The running executor drops its own (automatic) timer as stale; the press stays queued.
+      f!.engine.endPause(run.runId, 'stale')
+      f!.outbox.succeed(claimed.effectId, 'owner', f!.now())
+
+      expect(f!.store.getRun(run.runId)!.status).toBe('paused')
+      expect(f!.outbox.get(manual.effectId)!.status).toBe('pending')
+      expect(f!.outbox.claimNext('owner-2', f!.now())!.effectId).toBe(manual.effectId)
+    })
+
+    it('leaves a manual timer that is already running alone and returns it', async () => {
+      fixture()
+      const run = await paused()
+      const manual = f!.engine.requestResume(run.runId, true)
+      const claimed = f!.outbox.claimNext('owner', f!.now())
+      expect(claimed!.effectId).toBe(manual.effectId)
+
+      expect(f!.engine.requestResume(run.runId, true)).toMatchObject({ effectId: manual.effectId, status: 'running' })
+      // The automatic timer the first press replaced is the only other one, and it is cancelled.
+      expect(resumeEffects(run.runId).map((effect) => effect.status).sort()).toEqual(['cancelled', 'running'])
+    })
+
+    it('an automatic request leaves a running timer alone', async () => {
+      fixture()
+      const run = await paused()
+      f!.advance(61 * 60_000)
+      const claimed = f!.outbox.claimNext('owner', f!.now())!
+      expect(f!.engine.requestResume(run.runId, false)).toMatchObject({ effectId: claimed.effectId, status: 'running' })
       expect(resumeEffects(run.runId)).toHaveLength(1)
     })
 
@@ -641,12 +715,23 @@ describe('RunEngine pause (SPEC §5)', () => {
       expect(f!.outbox.get(claimed.effectId)).toMatchObject({ status: 'running' })
     })
 
-    it('stale leaves the run paused without a timer and keeps every effect', async () => {
+    it('stale is not an end: the run stays paused with its automatic timer dropped and endedBy unset', async () => {
       fixture()
       const run = await paused()
       const ended = f!.engine.endPause(run.runId, 'stale')
-      expect(ended).toMatchObject({ status: 'paused', outcome: { pause: { ...pauseOf(), autoResume: false, endedBy: 'stale' } } })
-      expect(resumeEffects(run.runId).map((effect) => effect.status)).toEqual(['pending'])
+      expect(ended).toMatchObject({ status: 'paused', outcome: { pause: { ...pauseOf(), autoResume: false, stale: true } } })
+      expect(ended.outcome!.pause!.endedBy).toBeUndefined()
+      expect(resumeEffects(run.runId).map((effect) => effect.status)).toEqual(['cancelled'])
+      // Resume now still works, and ends it as any resume does.
+      expect(f!.engine.requestResume(run.runId, true)).toMatchObject({ status: 'pending', payload: { manual: true } })
+    })
+
+    it('stale keeps a Resume now that is already queued', async () => {
+      fixture()
+      const run = await paused()
+      const manual = f!.engine.requestResume(run.runId, true)
+      f!.engine.endPause(run.runId, 'stale')
+      expect(f!.outbox.get(manual.effectId)!.status).toBe('pending')
     })
 
     it('is refused with a conflict once the pause has ended', async () => {

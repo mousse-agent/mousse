@@ -25,8 +25,8 @@ export type AttemptStatus =
 
 export type AttemptReason = 'initial' | 'steer_restart' | 'retry' | 'recovery'
 
-/** How a pause ended (`RunPause.endedBy`); `stale` leaves the run `paused` without its timer. */
-export type RunPauseEnd = 'resume' | 'resume_now' | 'user_message' | 'cancel' | 'stop' | 'deleted' | 'stale'
+/** How a pause ended (`RunPause.endedBy`). Set only once the run has left `paused`. */
+export type RunPauseEnd = 'resume' | 'resume_now' | 'user_message' | 'cancel' | 'stop' | 'deleted'
 
 /** Why a run is `paused` and when it continues (SPEC §5). Stored in `RunOutcome.pause`. */
 export interface RunPause {
@@ -44,6 +44,13 @@ export interface RunPause {
   /** The message queue item that carries the continue turn (`resume:<runId>`). */
   resumeItemId?: string
   resumeRequested?: 'auto' | 'user'
+  /**
+   * The automatic timer fired more than 24 h after `until` (Mousse was off) and was dropped
+   * (`endPause(…, 'stale')`): the run is still `paused`, `autoResume` is off, and only Resume now
+   * continues it. Not an end: `endedBy` stays unset.
+   */
+  stale?: true
+  /** How the pause ended; only on a run that is no longer `paused`. */
   endedBy?: RunPauseEnd
 }
 

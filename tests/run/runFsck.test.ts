@@ -116,6 +116,56 @@ describe('RunFsck', () => {
     expect(findings[0]).toMatchObject({ severity: 'error', details: { runId: run.runId, attemptId: attempt.attemptId, attemptStatus: 'running' } })
   })
 
+  describe('paused_run_without_timer', () => {
+    const until = '2026-10-12T05:00:00.000Z'
+    /** A paused run with an interrupted attempt and `pause` in its outcome; returns the store and the run id. */
+    const pausedWith = (pause: Record<string, unknown>) => {
+      const store = seed()
+      const run = store.createRun({ threadId: 't', source: 'gui' })
+      const attempt = store.createAttempt({ runId: run.runId, reason: 'initial' })
+      const running = store.casRunStatus({ runId: run.runId, expectedEpoch: 0, status: 'running' })
+      store.setAttemptStatus({ attemptId: attempt.attemptId, status: 'interrupted' })
+      store.casRunStatus({
+        runId: run.runId,
+        expectedEpoch: running.epoch,
+        status: 'paused',
+        patch: { outcome: { pause: { reason: 'usage_limit', until, estimated: false, count: 1, autoResume: true, ...pause } } }
+      })
+      return { store, runId: run.runId }
+    }
+
+    it('reports a paused run that continues by itself but has no live run.resume', () => {
+      const { runId } = pausedWith({})
+      const findings = check()
+      expect(findings.map((finding) => finding.code)).toEqual(['paused_run_without_timer'])
+      expect(findings[0]).toMatchObject({ severity: 'warning', details: { runId, until } })
+    })
+
+    it('reports a run whose timer ended failed or cancelled', () => {
+      const { store, runId } = pausedWith({})
+      const outbox = new EffectOutbox(store)
+      const timer = outbox.enqueue({ threadId: 't', runId, kind: 'run.resume', availableAt: until })
+      outbox.cancel(timer.effectId, until, 'test')
+      expect(codes()).toEqual(['paused_run_without_timer'])
+    })
+
+    it('does not report a run with a pending timer, one that was dropped as stale, or one with a queued continue turn', () => {
+      const withTimer = pausedWith({})
+      new EffectOutbox(withTimer.store).enqueue({ threadId: 't', runId: withTimer.runId, kind: 'run.resume', availableAt: until })
+      expect(codes()).toEqual([])
+      db?.close()
+      db = undefined
+      rmSync(profileHome!, { recursive: true, force: true })
+
+      pausedWith({ autoResume: false, stale: true })
+      expect(codes()).toEqual([])
+      rmSync(profileHome!, { recursive: true, force: true })
+
+      pausedWith({ resumeItemId: 'resume:run' })
+      expect(codes()).toEqual([])
+    })
+  })
+
   it('event_seq_gap: run event for an unknown run', () => {
     const store = seed()
     store.appendEvent({ threadId: 't', runId: 'run:thread:t:ordinal:9', type: 'run.status', payload: {} })

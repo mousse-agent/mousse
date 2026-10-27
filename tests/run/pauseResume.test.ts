@@ -232,15 +232,16 @@ describe('a paused run until the usage limit resets (SPEC §5, §16.4)', () => {
       expect(runsOf(second, 't1')).toHaveLength(2)
     })
 
-    it('a stale timer is the caller\'s to settle: the run stays paused without one until Resume now', async () => {
+    it('a timer that fires more than a day late is dropped as stale: the run stays paused until Resume now', async () => {
       const first = delegationFixture()
       const paused = await pausedRun(first)
       const { second } = restart(first)
       second.advance(2 * 24 * HOUR)
 
-      // The executor ends a pause that the reset left behind while Mousse was off; only Resume now continues it.
+      // The executor's 24 h rule (PR 3) drops an automatic timer the reset left behind while Mousse was off.
       second.engine.endPause(paused.runId, 'stale')
-      expect(second.store.getRun(paused.runId)).toMatchObject({ status: 'paused', outcome: { pause: { autoResume: false, endedBy: 'stale' } } })
+      expect(second.store.getRun(paused.runId)).toMatchObject({ status: 'paused', outcome: { pause: { autoResume: false, stale: true } } })
+      expect(second.store.getRun(paused.runId)!.outcome!.pause!.endedBy).toBeUndefined()
       second.engine.requestResume(paused.runId, true)
       expect(await fire(second)).toMatchObject({ result: { status: 'accepted' } })
       expect(second.store.getRun(paused.runId)!.status).toBe('interrupted')

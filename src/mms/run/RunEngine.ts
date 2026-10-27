@@ -434,8 +434,10 @@ export class RunEngine extends EventEmitter {
   }
 
   /**
-   * Any non-terminal status -> terminal. The active attempt mirrors the run status. `resultText`
-   * is the run's final assistant text; a delegated child run publishes it (SPEC §14.1).
+   * Any non-terminal status except `paused` -> terminal. The active attempt mirrors the run status.
+   * `resultText` is the run's final assistant text; a delegated child run publishes it (SPEC §14.1).
+   * A pause ends only through `endPause`, which also cancels its timer: ending a paused run here
+   * would leave a `run.resume` pending that holds up every later resume on the thread.
    */
   markTerminal(
     runId: string,
@@ -443,9 +445,10 @@ export class RunEngine extends EventEmitter {
     outcome?: RunOutcome,
     options: { resultText?: string; notice?: TerminalNotice } = {}
   ): RunRecord {
-    return this.mark(runId, false, (run, expectedEpoch) =>
-      this.writeTerminal(run, expectedEpoch, status, outcome, options.resultText, options.notice)
-    )
+    return this.mark(runId, false, (run, expectedEpoch) => {
+      if (run.status === 'paused') fail('conflict', `Run ${run.runId} is paused; end the pause with endPause.`)
+      return this.writeTerminal(run, expectedEpoch, status, outcome, options.resultText, options.notice)
+    })
   }
 
   /**
@@ -470,17 +473,37 @@ export class RunEngine extends EventEmitter {
       const attempt = next.activeAttemptId ? this.store.getAttempt(next.activeAttemptId) : null
       if (attempt && (attempt.status === 'pending' || attempt.status === 'running'))
         this.store.setAttemptStatus({ attemptId: attempt.attemptId, status: 'interrupted', completedAt: this.now() })
-      if (input.resumeAt) this.enqueueResume(next, input.pause.until, input.resumeAt)
+      if (input.resumeAt) {
+        this.cancelDeadResumeTimers(run.threadId, run.runId)
+        this.enqueueResume(next, input.pause.until, input.resumeAt)
+      }
       return next
     })
+  }
+
+  /**
+   * A pending `run.resume` of a run that is no longer paused can only be left behind by a bug; the
+   * resume lane is first-in, first-out, so it would hold up this thread's real timers. Cancelled
+   * before a new one is armed. Joins the caller's transaction.
+   */
+  private cancelDeadResumeTimers(threadId: string, exceptRunId: string): void {
+    const now = this.now()
+    for (const effect of this.outbox.listForThread(threadId, { status: 'pending' })) {
+      if (effect.kind !== 'run.resume' || effect.runId === exceptRunId) continue
+      const owner = effect.runId ? this.store.getRun(effect.runId) : null
+      if (!owner || owner.status !== 'paused') this.outbox.cancel(effect.effectId, now, 'run_not_paused')
+    }
   }
 
   /**
    * Resume now (or the timer's own request): continue the paused run. Only a run that is `paused`
    * (a `stale` pause still is); anything else is refused `conflict`, so a press on a banner that has
    * not caught up with a hand-over or Cancel gets feedback. The thread's pending `run.resume` timer is
-   * replaced by one available now with `manual` set; a manual one already pending, or one that is
-   * running (its executor is already doing it), is left alone and returned. Returns the effect.
+   * replaced by one available now with `manual` set; a manual one already pending or running is left
+   * alone and returned. An automatic timer that is running does not absorb the press: it acts on its
+   * own payload, so it may rule the pause stale and end with nothing live. A manual timer is queued
+   * behind it (the resume lane is first-in, first-out); if the running one hands the run over, the
+   * manual one finds the pause ended and does nothing. Returns the effect.
    */
   requestResume(runId: string, manual: boolean): EffectRecord {
     return this.store.db.transaction(() => {
@@ -488,7 +511,7 @@ export class RunEngine extends EventEmitter {
       if (!run || run.status !== 'paused') reject('conflict', `Run ${runId} is not paused.`)
       const effects = this.outbox.listForRun(runId).filter((effect) => effect.kind === 'run.resume')
       const running = effects.find((effect) => effect.status === 'running')
-      if (running) return running
+      if (running && (!manual || (running.payload as RunResumePayload).manual === true)) return running
       const pending = effects.filter((effect) => effect.status === 'pending')
       const manualPending = pending.find((effect) => (effect.payload as RunResumePayload).manual === true)
       if (manualPending) return manualPending
@@ -501,20 +524,25 @@ export class RunEngine extends EventEmitter {
   /**
    * Ends the pause of a `paused` run (SPEC §5). `resume` and `resume_now` hand the run over to its
    * continuation: `interrupted` by `provider`. `user_message`, `cancel`, `stop` and `deleted` end it
-   * `cancelled` by `user`. `stale` (the reset passed while Mousse was off) leaves the run `paused`
-   * with no timer: only Resume now continues it. A pending `run.resume` is cancelled; a running one
-   * never is (its executor settles itself and checks the run again). The terminal write publishes a
-   * subagent's result as for any run. Joins the caller's transaction.
+   * `cancelled` by `user`. `stale` is not an end: the reset passed long ago (the executor's 24 h rule,
+   * SPEC §5), so the automatic timer is dropped and the run stays `paused` with `autoResume` off and
+   * `pause.stale` set; only Resume now continues it. A pending `run.resume` is cancelled (for `stale`
+   * only automatic ones: a Resume now already queued stays); a running one never is (its executor
+   * settles itself and checks the run again). The terminal write publishes a subagent's result as for
+   * any run. Joins the caller's transaction.
    */
-  endPause(runId: string, endedBy: RunPauseEnd): RunRecord {
+  endPause(runId: string, endedBy: RunPauseEnd | 'stale'): RunRecord {
     return this.store.db.transaction(() => {
       const run = this.store.getRun(runId)
       if (!run || run.status !== 'paused' || !run.outcome?.pause) reject('conflict', `Run ${runId} is not paused.`)
-      const pause: RunPause = { ...run.outcome.pause, endedBy }
-      if (endedBy === 'stale') return this.updatePause(runId, { autoResume: false, endedBy })
       const now = this.now()
-      for (const effect of this.outbox.listForRun(runId))
-        if (effect.kind === 'run.resume' && effect.status === 'pending') this.outbox.cancel(effect.effectId, now, endedBy)
+      for (const effect of this.outbox.listForRun(runId)) {
+        if (effect.kind !== 'run.resume' || effect.status !== 'pending') continue
+        if (endedBy === 'stale' && (effect.payload as RunResumePayload).manual === true) continue
+        this.outbox.cancel(effect.effectId, now, endedBy)
+      }
+      if (endedBy === 'stale') return this.updatePause(runId, { autoResume: false, stale: true })
+      const pause: RunPause = { ...run.outcome.pause, endedBy }
       const handedOver = endedBy === 'resume' || endedBy === 'resume_now'
       const next = this.writeTerminal(
         run,
