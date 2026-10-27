@@ -221,3 +221,11 @@
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
 }
+
+/* The side card of a thread on another computer: its name, and what does not reach it. */
+.side-card-device-note {
+  margin: 4px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}

@@ -4,6 +4,8 @@ import { ActionsSection } from './ActionsSection'
 import { DeviceSection } from './DeviceSection'
 import { GitSection } from './GitSection'
 import { LineageSection } from './LineageSection'
+import { RemoteDeviceSection } from './RemoteDeviceSection'
+import { useRemoteThreads } from '../../lib/remoteThreadStore'
 import {
   sideCardFitsThreadWidth,
   threadsSidebarReservedWidth,
@@ -51,6 +53,7 @@ export function ThreadSideCard({ onReservedChange }: ThreadSideCardProps) {
   const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
   const setSideCardFits = useAppStore((s) => s.setSideCardFits)
   const threadId = useAppStore((s) => s.activeThreadId)
+  const remote = useRemoteThreads((s) => (s.activeKey ? s.entries[s.activeKey] : undefined))
   const projectId = useAppStore((s) => s.threads.find((thread) => thread.id === s.activeThreadId)?.projectId ?? null)
 
   const layerRef = useRef<HTMLDivElement>(null)
@@ -111,7 +114,7 @@ export function ThreadSideCard({ onReservedChange }: ThreadSideCardProps) {
     >
       {mounted && (
         <section className="thread-side-card" aria-label="Thread details" data-shown={shown} inert={!shown}>
-          <SideCardSections threadId={threadId} projectId={projectId} />
+          {remote ? <RemoteDeviceSection entry={remote} /> : <SideCardSections threadId={threadId} projectId={projectId} />}
         </section>
       )}
     </div>

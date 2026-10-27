@@ -1,50 +1,28 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
-import { BridgeDisplayDecoder, type BridgeEntityRef } from '../../shared/bridge'
+import { useEffect, useId, useMemo, useState } from 'react'
+import type { BridgeEntityRef } from '../../shared/bridge'
 import type { NodeId } from '../../shared/net'
 import type { Thread } from '../../shared/types'
+import type { RemoteView } from '../services/remoteThreadDisplay'
+import { watchRemoteThread } from '../lib/remoteThreadStore'
 import { useAppStore } from '../stores/appStore'
-import { remoteDisplay, type RemoteView } from '../services/remoteThreadDisplay'
 import { MarkdownPreview } from './editors/MarkdownPreview'
 import { RefreshCw } from '../lib/icons'
 import { SettingsGroup, SettingsRow } from './settings/SettingsRow'
 import { Select } from './ui/Select'
 
-// Serialize attachment and final detachment for repeated mounts of one display.
-const attachments = new Map<string, { users: number; tail: Promise<unknown> }>()
 function RemoteThreadView({ refValue, connected }: { refValue: BridgeEntityRef; connected: boolean }) {
   const profile = useAppStore(state => state.profileId)
-  const currentView = useRef<RemoteView>(undefined)
   const { nodeId, entityId } = refValue
   const [view, setView] = useState<RemoteView>(), [error, setError] = useState(''), [refresh, setRefresh] = useState(0)
   const connection = useMemo(() => ({ connected, refresh }), [connected, refresh])
   const [confirmed, setConfirmed] = useState<typeof connection>()
   useEffect(() => {
-    currentView.current = undefined; setError('')
+    setError('')
     if (!connection.connected) return
-    let active = true
-    const ref = { nodeId, entityId }
-    const decoder = new BridgeDisplayDecoder({ ref }), key = JSON.stringify([profile, nodeId, entityId])
-    const held = attachments.get(key) ?? { users: 0, tail: Promise.resolve() }
-    attachments.set(key, held); held.users++
-    const off = window.mousse.bridge.onThreadPart(part => {
-      if (!active || part.ref.nodeId !== nodeId || part.ref.entityId !== entityId) return
-      void decoder.accept(part).then(event => {
-        if (!active || !event) return
-        try { currentView.current = remoteDisplay(currentView.current, event); if (currentView.current) { setView(currentView.current); setConfirmed(connection) } }
-        catch (cause) { currentView.current = undefined; setView(undefined); setError(String((cause as Error)?.message ?? cause)) }
-      }, cause => { if (active) { currentView.current = undefined; setView(undefined); setError(String(cause?.message ?? cause)) } })
+    return watchRemoteThread({ nodeId, entityId }, {
+      view: value => { setView(value); setConfirmed(connection) },
+      error: message => { setView(undefined); setError(message) }
     })
-    const attaching = held.tail.catch(() => undefined).then(() => active ? window.mousse.platformRequest.request('bridge.hub.attach', { ref }) : undefined)
-    held.tail = attaching
-    void attaching.catch(cause => { if (active) { setView(undefined); setError(String(cause?.message ?? cause)) } })
-    return () => {
-      active = false; off(); decoder.close(); held.users--
-      const closing = held.tail.catch(() => undefined).then(async () => {
-        if (held.users || useAppStore.getState().profileId !== profile) return
-        await window.mousse.platformRequest.request('bridge.hub.detach', { ref })
-      }).catch(() => undefined).finally(() => { if (!held.users && attachments.get(key) === held && held.tail === closing) attachments.delete(key) })
-      held.tail = closing
-    }
   }, [profile, nodeId, entityId, refresh, connection])
   const live = !!view && connected && confirmed === connection
   return <div className="remote-thread-view" aria-label="Remote thread view" role="region">
