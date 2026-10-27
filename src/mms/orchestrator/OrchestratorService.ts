@@ -2958,6 +2958,7 @@ export class OrchestratorService extends EventEmitter {
     if (!dispatcher) return cancel('bots_unavailable')
     let prepared: ReturnType<BotTurnDispatcher['prepare']>
     try {
+      await dispatcher.refresh?.(payload)
       prepared = dispatcher.prepare(payload)
     } catch (error) {
       console.warn('bot dispatch could not be prepared', { runId: payload.runId, error: error instanceof Error ? error.message : String(error) })

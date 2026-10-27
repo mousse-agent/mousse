@@ -18,7 +18,8 @@ function setup() {
     list: vi.fn(() => []),
     activate: vi.fn(async (input: unknown) => ({ id: ACTIVATION, input })),
     approve: vi.fn(() => { throw new BotEngineError('bot_grant_changed', 'These permissions changed since they were shown.') }),
-    stop: vi.fn(async () => ({ id: ACTIVATION, status: 'cancelled' }))
+    stop: vi.fn(async () => ({ id: ACTIVATION, status: 'cancelled' })),
+    refreshRuntimes: vi.fn(async () => {})
   }
   const profiles: string[] = []
   registerPersonalBotMethods(domains, (profileId) => (profiles.push(profileId), engine as unknown as BotEngine))
@@ -51,7 +52,10 @@ describe('personal bot methods', () => {
   })
 
   it('keeps the engine\'s error codes', async () => {
-    const { domains } = setup()
+    const { domains, engine } = setup()
     await expect(domains.dispatch(context(), 'bots.approve', { botId: 'site-editor', manifestDigest: 'a'.repeat(64) })).rejects.toMatchObject({ code: 'bot_grant_changed' })
+    // Approval decides on a fresh reading of the runtimes' policy facts (review r2).
+    expect(engine.refreshRuntimes).toHaveBeenCalledWith('site-editor')
+    expect(engine.refreshRuntimes.mock.invocationCallOrder[0]).toBeLessThan(engine.approve.mock.invocationCallOrder[0])
   })
 })

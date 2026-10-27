@@ -60,6 +60,12 @@ export interface InstanceConfig {
    * out without asking the runtime, whatever the agent's own sign-in says.
    */
   signedOutInMousse?: boolean
+  /**
+   * `locked`: the entry runs bots only, in a home of its own, under the locked profile of its driver
+   * (Claude Code, PR 6 §3): no user settings, plugins or launch settings, the exact granted tools,
+   * Mousse's grant gate on every call. Chosen when the entry is added; absent for every other entry.
+   */
+  profile?: 'locked'
 }
 
 /** Whether an entry runs in a Mousse-owned home: it must, it may, or it must not. */
@@ -402,7 +408,8 @@ export interface HarnessDriver {
    * Capabilities for an instance at an installed version. `facts` (when the runtime reported them)
    * refine what a preset cannot know statically: fork, plan mode, models.
    */
-  caps(config: InstanceConfig, installedVersion?: string, facts?: RuntimeFacts): HarnessCaps
+  /** `instanceId`: the entry, for caps that depend on what was read for it (a locked entry's policy). */
+  caps(config: InstanceConfig, installedVersion?: string, facts?: RuntimeFacts, instanceId?: string): HarnessCaps
   /**
    * The caps an agent definition's turn runs on, when the instance runs definitions on another
    * runtime than its chats (`DriverRuntime.definitionAdapter`): a Pi connection on the RPC engine
@@ -426,7 +433,13 @@ export interface HarnessDriver {
    * (`AdapterHost.bot`) before it runs, so a bot policy's approvals are answered by the host
    * (`approve: 'host'`) and never reach a person. Absent: such a policy is refused.
    */
-  botAuthority?(config: InstanceConfig): boolean
+  botAuthority?(config: InstanceConfig, instanceId?: string): boolean
+  /**
+   * Reads again, now, what the entry's caps and `botAuthority` depend on beyond its config (a
+   * locked Claude entry's organisation policy). The gateway calls it before every bot check point:
+   * approval, dispatch and turn admission.
+   */
+  readPolicyFacts?(config: InstanceConfig, instanceId: string): Promise<void>
   create(context: DriverContext): DriverRuntime
   /** The command that updates a binary installed by `owner`, when there is one. */
   updateCommand?(owner: InstallOwner): string | undefined
@@ -452,6 +465,8 @@ export function decodeInstanceConfig(raw: Record<string, unknown> | undefined, o
     if (Object.keys(env).length) config.env = env
   }
   if (raw.signedOutInMousse === true) config.signedOutInMousse = true
+  // Only an entry with a home of its own can be locked: the user's own setup is never.
+  if (raw.profile === 'locked' && config.home === 'private') config.profile = 'locked'
   return config
 }
 

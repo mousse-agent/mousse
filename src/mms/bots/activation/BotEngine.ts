@@ -54,6 +54,8 @@ export interface BotEngineHost {
   runs(): RunEngine | null
   harness: {
     checkPolicy(instanceId: string, policy: RunPolicy, model?: string): Enforceability
+    /** Reads the instance's policy facts again (`HarnessGateway.refreshPolicyFacts`). */
+    refreshPolicyFacts?(instanceId: string): Promise<void>
     nativeToolNames(instanceId: string, tools: readonly NeutralTool[]): { ok: true; names: string[] } | { ok: false; error: HarnessError & { code: 'policy_unenforceable' } }
   }
   /** Wakes the effect worker after a `turn.start` was written. */
@@ -227,6 +229,29 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       digest: botManifestDigest(published.permissions),
       added: addedPermissions(published.permissions, grant?.manifest ?? null),
       threads: [published.main].map((thread) => this.checkThread(thread, published.permissions))
+    }
+  }
+
+  /**
+   * Reads again the policy facts of every runtime the published revision runs on, so `approval`
+   * and `approve` decide on a fresh reading. Never throws.
+   */
+  async refreshRuntimes(botId: string): Promise<void> {
+    let instanceIds: string[]
+    try {
+      const published = this.published(botId)
+      instanceIds = [...new Set([published.main].map((thread) => thread.selection.instanceId))]
+    } catch {
+      return
+    }
+    await Promise.all(instanceIds.map((instanceId) => this.refreshInstance(instanceId)))
+  }
+
+  private async refreshInstance(instanceId: string): Promise<void> {
+    try {
+      await this.host.harness.refreshPolicyFacts?.(instanceId)
+    } catch {
+      // Unread facts claim nothing: the check that follows refuses.
     }
   }
 
@@ -434,6 +459,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   // -- Execution (BotTurnDispatcher) -----------------------------------------------------------
+
+  async refresh(payload: BotTurnPayload): Promise<void> {
+    const row = this.store.activation(payload.activationId)
+    const definition = row ? this.host.definitions.revision(row.botId, row.revision) : undefined
+    if (definition) await this.refreshInstance(definition.main.selection.instanceId)
+  }
 
   prepare(payload: BotTurnPayload): PreparedBotTurn | { refused: string; code: string } {
     const row = this.store.activation(payload.activationId)

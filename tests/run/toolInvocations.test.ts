@@ -32,6 +32,11 @@ describe('isIdempotentTool', () => {
     // A registered side-effecting tool cannot be relabelled by an annotation.
     expect(isIdempotentTool('bash', { readOnlyHint: true })).toBe(false)
   })
+
+  it('a bot\'s consult and escalate are idempotent: their effects are other rows, or bots.db only', () => {
+    expect(isIdempotentTool('consult')).toBe(true)
+    expect(isIdempotentTool('escalate')).toBe(true)
+  })
 })
 
 describe('ToolInvocations', () => {
