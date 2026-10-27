@@ -1,4 +1,4 @@
-import type { AssistantMessage } from '@earendil-works/pi-ai'
+import type { AssistantMessage } from '../../shared/transcript'
 import type { NativeLlmContext } from '../../shared/types'
 
 /** Persisted conversation lineage, excluding binary images and private reasoning. */

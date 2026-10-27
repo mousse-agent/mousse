@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { getCacheSessionId, getReasoningStreamOptions } from '../src/mms/orchestrator/LlmClient'
+import { getCacheSessionId, getReasoningStreamOptions } from '../src/mms/harness/drivers/pi/stream'
 
 describe('getReasoningStreamOptions', () => {
   it('requests a visible reasoning summary for ChatGPT subscription models', () => {

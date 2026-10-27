@@ -4,9 +4,9 @@ import {
   type TranscriptHooks,
   type TranscriptStreamState,
   type TranscriptTextMode
-} from '../../src/mms/run/adapters/shared/TranscriptAssembler'
+} from '../../src/mms/run/transcript/TranscriptAssembler'
 import { ACTIVITY_CHECKPOINT_MS, type AgentActivityItem } from '../../src/shared/agentActivity'
-import type { StreamingLlmToolEvent } from '../../src/mms/orchestrator/LlmClient'
+import type { StreamingLlmToolEvent } from '../../src/mms/harness/turnEvents'
 import type { ChatMessage, TurnPhase } from '../../src/shared/types'
 
 function harness(mode: TranscriptTextMode = 'replace') {

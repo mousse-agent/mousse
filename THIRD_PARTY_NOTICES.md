@@ -8,6 +8,10 @@ Adapted from `@earendil-works/pi-ai` 1.4.0 (MIT, declared in its `package.json`;
 
 - `src/mms/harness/chatgpt/oauth.ts`, `pkce.ts` and `tokens.ts`: the Sign in with ChatGPT authorize request, the local callback server, the race between the browser callback and a pasted redirect, and PKCE.
 
+Adapted from `@earendil-works/pi-ai` 0.85.1 (MIT, same author), `dist/types.d.ts` and `dist/utils/diagnostics.d.ts`:
+
+- `src/shared/transcript.ts`: the message, content-block, tool-call and usage types, kept as the shape of Mousse's stored transcript.
+
 ```
 MIT License
 

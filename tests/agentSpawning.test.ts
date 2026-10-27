@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { AgentRegistry } from '../src/mms/agents/AgentRegistry'
-import { dispatchDelegationTool, parseActions, type DelegationToolHost } from '../src/mms/orchestrator/LlmClient'
+import { parseActions } from '../src/mms/orchestrator/actions'
+import { dispatchDelegationTool, type DelegationToolHost } from '../src/mms/run/mcp/appTools/delegation'
 import { shouldFinalizeAgent } from '../src/mms/orchestrator/OrchestratorService'
 import { getToolCallDisplay } from '../src/shared/toolCallDisplay'
 

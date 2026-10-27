@@ -1,8 +1,9 @@
 import type { Message } from '@earendil-works/pi-ai'
 import { describe, expect, it, vi } from 'vitest'
-import type { LlmChatOptions, LlmChatResult, StreamingLlmToolEvent } from '../../src/mms/orchestrator/LlmClient'
+import type { LlmChatOptions, LlmChatResult } from '../../src/mms/orchestrator/LlmClient'
+import type { StreamingLlmToolEvent } from '../../src/mms/harness/turnEvents'
 import { PiLoopAdapter, type PiChatClient } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
-import { TranscriptAssembler } from '../../src/mms/run/adapters/shared/TranscriptAssembler'
+import { TranscriptAssembler } from '../../src/mms/run/transcript/TranscriptAssembler'
 import type { ChatMessage } from '../../src/shared/types'
 import type {
   AdapterHost,

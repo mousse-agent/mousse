@@ -1,4 +1,4 @@
-import type { Message } from '@earendil-works/pi-ai'
+import type { Message } from '../../shared/transcript'
 import type { HandoffPlan } from '../run/handoff/HandoffService'
 import { handoffMessages, renderHandoffBlock } from '../run/handoff/delivery'
 import type { RunEngine } from '../run/RunEngine'

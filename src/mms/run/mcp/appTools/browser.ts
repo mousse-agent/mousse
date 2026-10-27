@@ -6,7 +6,7 @@ import {
   getBrowserToolDefinitions,
   resolveTrustedBrowserTarget
 } from '../../../orchestrator/browser'
-import type { LlmToolEvent } from '../../../orchestrator/LlmClient'
+import type { LlmToolEvent } from '../../../harness/turnEvents'
 import type { AppToolHost } from './host'
 import { disabledInSettings, plainSchema, type AppToolTurn, type MousseTool, type ToolOutcome } from './types'
 

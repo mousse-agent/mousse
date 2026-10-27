@@ -1,6 +1,5 @@
-import type { ActivityPatch, ProviderToolEvent } from '../../../../shared/agentActivity'
-import type { StreamingLlmToolEvent } from '../../../orchestrator/LlmClient'
-import type { TurnSink } from '../ProviderAdapter'
+import type { ActivityPatch, ProviderToolEvent } from '../../../shared/agentActivity'
+import type { StreamingLlmTextEvent, StreamingLlmThinkingEvent, StreamingLlmToolEvent } from '../../harness/turnEvents'
 
 /**
  * Shared pieces of the prompt-injected vendor runtimes (SPEC §13.4): they run their own loop and
@@ -54,8 +53,14 @@ export function runtimeToolEvent(event: RuntimeToolEvent): StreamingLlmToolEvent
   }
 }
 
+/** The part of a turn sink (`TurnSink`) the text and thinking relays write to. */
+export interface StreamSink {
+  text(event: StreamingLlmTextEvent): void
+  thinking(event: StreamingLlmThinkingEvent): void
+}
+
 /** Text and thinking relays for one turn, bound to the sink. */
-export function promptStreams(sink: TurnSink): { text: CumulativeStream; thinking: CumulativeStream } {
+export function promptStreams(sink: StreamSink): { text: CumulativeStream; thinking: CumulativeStream } {
   return {
     text: new CumulativeStream((phase, content) => sink.text({ phase, content, contentIndex: 0 })),
     thinking: new CumulativeStream((phase, content) => sink.thinking({ phase, content }))

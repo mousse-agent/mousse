@@ -19,7 +19,7 @@ import type {
   TurnSink
 } from '../ProviderAdapter'
 import { MOUSSE_MCP_SERVER_NAME } from '../../mcp/attachment'
-import { promptStreams, runtimeToolEvent } from '../shared/promptRuntime'
+import { promptStreams, runtimeToolEvent } from '../../transcript/promptRuntime'
 import { retryContextOverflowOnce } from '../shared/retryContextOverflow'
 
 /** Codex names a Mousse server call `mcp__mousse__<tool>` (`CodexProviderService` tool events). */

@@ -11,15 +11,15 @@ import {
   type ActivityPatch,
   type ActivityStatus,
   type AgentActivityItem
-} from '../../../../shared/agentActivity'
-import { subagentToolName } from '../../../../shared/subagentTools'
-import { parseProviderToolCall } from '../../../../shared/toolCallDisplay'
-import type { ChatMessage, TurnPhase } from '../../../../shared/types'
+} from '../../../shared/agentActivity'
+import { subagentToolName } from '../../../shared/subagentTools'
+import { parseProviderToolCall } from '../../../shared/toolCallDisplay'
+import type { ChatMessage, TurnPhase } from '../../../shared/types'
 import type {
   StreamingLlmTextEvent,
   StreamingLlmThinkingEvent,
   StreamingLlmToolEvent
-} from '../../../orchestrator/LlmClient'
+} from '../../harness/turnEvents'
 
 /**
  * Where an assembler keeps its open-message bookkeeping. The orchestrator's `ThreadSession`

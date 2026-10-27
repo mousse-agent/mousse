@@ -69,7 +69,7 @@ import { isRunningSubagent, type SubagentNoticeItem } from '../../shared/subagen
 import type { DelegationRequest, ForkPointSeed, ThreadCreation } from '../run/RunEngine'
 import type { HandoffItem } from '../run/handoff/budget'
 import { committedTransfers, TurnHandoffs, type PlannedHandoff } from './turnHandoffs'
-import { TranscriptAssembler } from '../run/adapters/shared/TranscriptAssembler'
+import { TranscriptAssembler } from '../run/transcript/TranscriptAssembler'
 import { forkStrategy, handoffDelivery, mcpAttachable, subagentTargetRefusal, type SubagentRefusal } from '../run/policy/featureGates'
 import { isContextOverflowError, retryContextOverflowOnce } from '../run/adapters/shared/retryContextOverflow'
 import {
@@ -118,7 +118,10 @@ import { WorktreeManager } from '../worktree/WorktreeManager'
 import { PtyManager } from '../terminals/PtyManager'
 import { HeadlessAgentRunner } from '../terminals/HeadlessAgentRunner'
 import { MacroEngine } from '../macros/MacroEngine'
-import { LlmClient, parseActions, stripActionBlocks, type StreamingLlmThinkingEvent, type StreamingLlmToolEvent, type LlmChatOptions, filterActionsForChatMode, rejectOrchestrationAction, type DelegateTaskInput, type DelegationToolCall, type DelegationToolHost, type NamedAgentToolRequest, type SubagentRef } from './LlmClient'
+import { filterActionsForChatMode, parseActions, rejectOrchestrationAction, stripActionBlocks } from './actions'
+import { LlmClient, type LlmChatOptions } from './LlmClient'
+import type { DelegateTaskInput, DelegationToolCall, DelegationToolHost, NamedAgentToolRequest, SubagentRef } from '../run/mcp/appTools/delegation'
+import type { StreamingLlmTextEvent, StreamingLlmThinkingEvent, StreamingLlmToolEvent } from '../harness/turnEvents'
 import type { BrowserRuntimePort } from '../../shared/browser/runtime'
 import {
   type BrowserExecutionBinding,
@@ -4624,7 +4627,7 @@ export class OrchestratorService extends EventEmitter {
     this.persist(true)
   }
 
-  private handleStreamingTextEvent(event: import('./LlmClient').StreamingLlmTextEvent): void {
+  private handleStreamingTextEvent(event: StreamingLlmTextEvent): void {
     this.transcript.text(event)
   }
 

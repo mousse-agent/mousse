@@ -8,7 +8,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { DelegationToolHost } from '../../src/mms/orchestrator/LlmClient'
+import type { DelegationToolHost } from '../../src/mms/run/mcp/appTools/delegation'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { ClaudeSubscriptionProviderService } from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
 import { claudeCodeDriver } from '../../src/mms/harness/drivers/claudeCode'

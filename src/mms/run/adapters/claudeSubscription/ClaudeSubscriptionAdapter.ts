@@ -15,7 +15,7 @@ import type {
   TurnResult,
   TurnSink
 } from '../ProviderAdapter'
-import { promptStreams, runtimeToolEvent } from '../shared/promptRuntime'
+import { promptStreams, runtimeToolEvent } from '../../transcript/promptRuntime'
 import { retryContextOverflowOnce } from '../shared/retryContextOverflow'
 
 /** The slice of the provider service a turn drives. */

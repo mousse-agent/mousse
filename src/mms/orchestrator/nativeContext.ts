@@ -4,7 +4,7 @@ import type {
   Message,
   TextContent,
   UserMessage
-} from '@earendil-works/pi-ai'
+} from '../../shared/transcript'
 import type {
   ChatMessage,
   NativeCompactionCheckpoint,

@@ -3,7 +3,7 @@ import type { McpToolDescriptor } from '../../../../shared/integrations'
 import type { IntegrationActor } from '../../../../shared/integrations/actor'
 import type { McpToolCallResult } from '../../../../shared/integrations/results'
 import type { McpManager } from '../../../integrations/mcp/McpManager'
-import type { LlmToolEvent } from '../../../orchestrator/LlmClient'
+import type { LlmToolEvent } from '../../../harness/turnEvents'
 import { truncateForDisplay, type ToolTimeline } from './types'
 
 /**

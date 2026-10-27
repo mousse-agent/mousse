@@ -1,11 +1,7 @@
 import type { Message, ToolCall } from '@earendil-works/pi-ai'
-import {
-  dispatchDelegationTool,
-  type LlmChatResult,
-  type StreamingLlmTextEvent,
-  type StreamingLlmThinkingEvent,
-  type StreamingLlmToolEvent
-} from '../../orchestrator/LlmClient'
+import type { LlmChatResult } from '../../orchestrator/LlmClient'
+import type { StreamingLlmTextEvent, StreamingLlmThinkingEvent, StreamingLlmToolEvent } from '../../harness/turnEvents'
+import { dispatchDelegationTool } from '../mcp/appTools/delegation'
 import type { PiChatClient } from '../adapters/pi/PiLoopAdapter'
 import { DEFAULT_VOLATILE_KEYS, dropKeys, ReplayMismatchError, type ReplayTransport } from './ReplayTransport'
 

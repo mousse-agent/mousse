@@ -1,13 +1,8 @@
-import type { AssistantMessage, Message } from '@earendil-works/pi-ai'
+import type { AssistantMessage, Message } from '../../../shared/transcript'
 import type { ProviderDriverKind } from '../../../shared/providerInstances'
 import type { ChatImageAttachment, ChatMode } from '../../../shared/types'
-import type {
-  LlmChatOptions,
-  StreamingLlmTextEvent,
-  StreamingLlmThinkingEvent,
-  StreamingLlmToolEvent,
-  ToolLoopSafetyOptions
-} from '../../orchestrator/LlmClient'
+import type { LlmChatOptions, ToolLoopSafetyOptions } from '../../orchestrator/LlmClient'
+import type { StreamingLlmTextEvent, StreamingLlmThinkingEvent, StreamingLlmToolEvent } from '../../harness/turnEvents'
 import type { NativeMessageCheckpoint } from '../../orchestrator/nativeContext'
 import type { ChildPreflightContext, SubagentRefusal } from '../policy/featureGates'
 import type { PermissionPrompter } from '../../harness/acp/permissions'

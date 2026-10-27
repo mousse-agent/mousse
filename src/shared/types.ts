@@ -868,7 +868,7 @@ export interface MousseAgentSessionSnapshot {
   /** Presentation timeline shown in the subagent tab. */
   messages: ChatMessage[]
   /** Pi-native transcript used for LLM resume (assistant + tool results). */
-  history?: import('@earendil-works/pi-ai').Message[]
+  history?: import('./transcript').Message[]
   /** Version 2 preserves the archive and active compaction checkpoint. */
   nativeContext?: NativeLlmContext
   runState: MousseAgentRunState
@@ -919,9 +919,9 @@ export interface NativeCompactionCheckpoint {
 
 export interface NativeLlmContext {
   version: 1 | 2
-  messages: import('@earendil-works/pi-ai').Message[]
+  messages: import('./transcript').Message[]
   /** Events removed from the active lineage by explicit undo; retained for audit. */
-  retiredMessages?: import('@earendil-works/pi-ai').Message[]
+  retiredMessages?: import('./transcript').Message[]
   fidelity: 'native' | 'legacy-estimated'
   activeStartIndex: number
   /** Incremented whenever provider-visible history or its checkpoint changes. */

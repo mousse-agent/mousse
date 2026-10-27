@@ -8,8 +8,6 @@ import {
   Type,
   type AssistantMessage,
   type ProviderResponse,
-  type AssistantMessageEvent,
-  type AssistantMessageEventStream,
   type Api,
   type Message,
   type Model,
@@ -39,16 +37,15 @@ import {
   prepareTrustedToolDispatch
 } from '../agentDefinitions/runtimePolicy'
 
-import type { ChatMode, OrchestratorAction } from '../../shared/types'
+import type { ChatMode } from '../../shared/types'
 
-import { allowsOrchestrationActions, filterActionsForMode, normalizeChatMode } from '../../shared/chatMode'
+import { normalizeChatMode } from '../../shared/chatMode'
 import { isToolAllowedForMode } from '../../shared/modes'
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
 
 import { resolveModelForMode, resolveTitleModel, normalizeContextSettings, resolveContextCompactionTokens } from '../../shared/settings'
 
 import { EFFORT_SUFFIXES, parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
-import type { ActivityPatch } from '../../shared/agentActivity'
 
 import { getModelEffortLevels } from '../../shared/modelEfforts'
 
@@ -97,6 +94,15 @@ import {
   type NativeMessageCheckpoint
 } from './nativeContext'
 import { appendSteerToToolResultContent, formatSteerMarker } from './steer'
+import type { LlmTextEventHandler, LlmThinkingEventHandler, LlmToolEvent, LlmToolEventHandler } from '../harness/turnEvents'
+import {
+  assertAssistantResponseSucceeded,
+  consumeAssistantStream,
+  DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS,
+  getCacheSessionId,
+  getReasoningStreamOptions,
+  resolveStreamInactivityTimeout
+} from '../harness/drivers/pi/stream'
 import {
   CURSOR_PROVIDER_ID,
   setCursorSessionProjectScope
@@ -130,21 +136,6 @@ export interface LlmMessage {
 }
 
 
-
-// The delegation tools live with the other app tools (`run/mcp/appTools`); re-exported for callers
-// that name them through the loop.
-export {
-  delegationToolDefinitions,
-  dispatchDelegationTool,
-  executeDelegationTool,
-  LISTED_DELEGATION_TOOL_NAMES,
-  type DelegateTaskInput,
-  type DelegationToolCall,
-  type DelegationToolHost,
-  type NamedAgentRecallRequest,
-  type NamedAgentToolRequest,
-  type SubagentRef
-} from '../run/mcp/appTools/delegation'
 
 export interface LlmChatOptions {
   appletInstructions?: string
@@ -258,19 +249,6 @@ export interface TrustedAgentExecutionOptions {
   policy?: AgentRuntimePolicy
   approveToolRequest?: AgentRuntimeToolApprovalCallback
   effects?: AgentRuntimeEffectTracker
-}
-
-
-
-export function assertAssistantResponseSucceeded(message: AssistantMessage, response?: ProviderFailureResponse): void {
-
-  // Aborted streams may still carry partial text plus an errorMessage.
-  if (message.errorMessage && message.stopReason !== 'aborted') {
-
-    throw normalizeProviderError(message.errorMessage, message.provider, response)
-
-  }
-
 }
 
 
@@ -410,61 +388,6 @@ export interface LlmChatResult {
 
 
 
-export interface LlmToolEvent {
-
-  kind: 'mcp_tool_call' | 'mcp_tool_result' | 'skill_loaded' | 'build_tool_call' | 'build_tool_result'
-
-  title: string
-
-  summary: string
-
-  details: string[]
-
-  response?: string
-
-}
-
-
-
-export interface StreamingLlmToolEvent extends LlmToolEvent {
-
-  /** `update` carries a running call's streamed output or changed fields; it never starts or ends the call. */
-  phase: 'start' | 'update' | 'complete'
-
-  callId?: string
-
-  /** The call's arguments when the runtime reports them apart from `response` (a bounded record, see `recordSubagentCall`). */
-  input?: Record<string, unknown>
-
-  /**
-   * The typed fields the provider has. The assembler fills `id`, `callId`, `status` and the
-   * timestamps; a provider closing a call it never saw end sends `{ status: 'interrupted', interruptedBy, summary }`.
-   */
-  activity?: ActivityPatch
-
-  /** The provider's call id of the call this one ran under; the assembler maps it to that row's id. */
-  parentCallId?: string
-
-}
-
-
-
-export type LlmToolEventHandler = (event: StreamingLlmToolEvent) => void
-
-export interface StreamingLlmThinkingEvent {
-  phase: 'start' | 'delta' | 'complete'
-  content: string
-}
-
-export type LlmThinkingEventHandler = (event: StreamingLlmThinkingEvent) => void
-
-export interface StreamingLlmTextEvent {
-  phase: 'start' | 'delta' | 'complete'
-  content: string
-  /** Content-block identity supplied by the provider stream. */
-  contentIndex: number
-}
-
 export interface LlmContextInputs {
   systemPromptText: string
   /** System prompt before generated compaction memory is appended. */
@@ -473,215 +396,6 @@ export interface LlmContextInputs {
   otherToolsText: string
   signature: string
   modelKey?: string
-}
-
-export type LlmTextEventHandler = (event: StreamingLlmTextEvent) => void
-
-export function getReasoningStreamOptions(
-  modelApi: string,
-  reasoning: ThinkingLevel | 'off',
-  signal?: AbortSignal,
-  sessionId?: string,
-  providerId?: string
-) {
-  const cacheOptions = sessionId ? { sessionId } : {}
-  // OpenCode Go requires this exact header on every request. The generic Pi
-  // adapters use sessionId for prompt caching, but translate it into
-  // API-specific affinity headers that Console Go does not accept.
-  const providerOptions = providerId === 'opencode-go' && sessionId
-    ? {
-        transformHeaders: (headers: Record<string, string | null>) => ({
-          ...headers,
-          'user-agent': 'mousse/0.1.1',
-          'x-opencode-session': sessionId
-        })
-      }
-    : {}
-  if (modelApi === 'openai-codex-responses') {
-    return {
-      reasoningEffort: reasoning === 'off' ? 'none' : reasoning,
-      reasoningSummary: 'auto' as const,
-      signal,
-      ...cacheOptions,
-      ...providerOptions
-    }
-  }
-
-  return {
-    reasoning,
-    signal,
-    ...cacheOptions,
-    ...providerOptions
-  }
-}
-
-/**
- * Produces a provider-safe prompt-cache affinity key without exposing a thread
- * identifier to providers. Each thread (including an isolated subagent) gets
- * an independent key; all requests in that thread retain the same key.
- */
-export function getCacheSessionId(threadId: string | undefined): string | undefined {
-  const normalized = threadId?.trim()
-  if (!normalized) return undefined
-  return `mousse-${createHash('sha256').update(normalized).digest('hex').slice(0, 48)}`
-}
-
-/**
- * Default silence budget between provider stream events. A connection that goes
- * quiet for this long is treated as a retryable stall (ProviderStreamStallError)
- * instead of spinning forever — previously only xAI had a bound, so any other
- * provider could hang every concurrent turn on the same network blip with Stop
- * as the only way out.
- */
-export const DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS = 180_000
-
-/**
- * Resolve the effective per-stream inactivity timeout. An explicit override
- * (including 0 to disable) always wins; otherwise every provider gets the
- * bounded default.
- */
-export function resolveStreamInactivityTimeout(
-  overrideMs?: number
-): number | undefined {
-  if (overrideMs !== undefined) return overrideMs
-  return DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS
-}
-
-export class ProviderStreamStallError extends Error {
-  constructor(timeoutMs: number) {
-    super(`Provider connection timed out after ${timeoutMs}ms without a stream event`)
-    this.name = 'ProviderStreamStallError'
-  }
-}
-
-async function nextStreamEvent(
-  iterator: AsyncIterator<AssistantMessageEvent>,
-  timeoutMs: number | undefined,
-  signal?: AbortSignal,
-  onTimeout?: () => void
-): Promise<IteratorResult<AssistantMessageEvent>> {
-  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
-  if ((!timeoutMs || timeoutMs <= 0) && !signal) return iterator.next()
-
-  return new Promise<IteratorResult<AssistantMessageEvent>>((resolve, reject) => {
-    let settled = false
-    const finish = (
-      result?: IteratorResult<AssistantMessageEvent>,
-      error?: unknown
-    ): void => {
-      if (settled) return
-      settled = true
-      if (timer) clearTimeout(timer)
-      signal?.removeEventListener('abort', onAbort)
-      if (error) reject(error)
-      else resolve(result!)
-    }
-    const onAbort = (): void => finish(undefined, new DOMException('Aborted', 'AbortError'))
-    const timer = timeoutMs && timeoutMs > 0
-      ? setTimeout(() => {
-          finish(undefined, new ProviderStreamStallError(timeoutMs))
-          onTimeout?.()
-        }, timeoutMs)
-      : undefined
-    signal?.addEventListener('abort', onAbort, { once: true })
-    void iterator.next().then(
-      (result) => finish(result),
-      (error) => finish(undefined, error)
-    )
-  })
-}
-
-export async function consumeAssistantStream(
-  stream: AssistantMessageEventStream,
-  handlers: {
-    onThinking?: LlmThinkingEventHandler
-    onText?: LlmTextEventHandler
-  } = {},
-  options: {
-    inactivityTimeoutMs?: number
-    signal?: AbortSignal
-    onTimeout?: () => void
-    onProgress?: () => void
-  } = {}
-): Promise<AssistantMessage> {
-  const thinkingContentRef = { current: '' }
-  const textContentByIndex = new Map<number, string>()
-  const iterator = stream[Symbol.asyncIterator]()
-
-  for (;;) {
-    const next = await nextStreamEvent(
-      iterator,
-      options.inactivityTimeoutMs,
-      options.signal,
-      options.onTimeout
-    )
-    if (next.done) break
-    const event = next.value
-    if (/^(?:text_|thinking_|toolcall_)/.test(event.type)) options.onProgress?.()
-    if ((event.type === 'error' && event.error.content.length > 0) || (event.type === 'done' && event.message.content.length > 0)) options.onProgress?.()
-    handleThinkingStreamEvent(event, handlers.onThinking, thinkingContentRef)
-    handleTextStreamEvent(event, handlers.onText, textContentByIndex)
-  }
-
-  const result = await stream.result()
-  if (result.content.length > 0) options.onProgress?.()
-  return result
-}
-
-function handleThinkingStreamEvent(
-  event: AssistantMessageEvent,
-  onThinking: LlmThinkingEventHandler | undefined,
-  thinkingContentRef: { current: string }
-): void {
-  if (!onThinking) return
-
-  if (event.type === 'thinking_start') {
-    thinkingContentRef.current = ''
-    onThinking({ phase: 'start', content: '' })
-    return
-  }
-
-  if (event.type === 'thinking_delta') {
-    thinkingContentRef.current += event.delta
-    onThinking({ phase: 'delta', content: thinkingContentRef.current })
-    return
-  }
-
-  if (event.type === 'thinking_end') {
-    thinkingContentRef.current = event.content
-    onThinking({ phase: 'complete', content: event.content })
-  }
-}
-
-export function handleTextStreamEvent(
-  event: AssistantMessageEvent,
-  onText: LlmTextEventHandler | undefined,
-  textContentByIndex: Map<number, string>
-): void {
-  if (!onText) return
-
-  if (event.type === 'text_start') {
-    textContentByIndex.set(event.contentIndex, '')
-    onText({ phase: 'start', content: '', contentIndex: event.contentIndex })
-    return
-  }
-
-  if (event.type === 'text_delta') {
-    if (!textContentByIndex.has(event.contentIndex)) {
-      textContentByIndex.set(event.contentIndex, '')
-      onText({ phase: 'start', content: '', contentIndex: event.contentIndex })
-    }
-    const content = `${textContentByIndex.get(event.contentIndex) ?? ''}${event.delta}`
-    textContentByIndex.set(event.contentIndex, content)
-    onText({ phase: 'delta', content, contentIndex: event.contentIndex })
-    return
-  }
-
-  if (event.type === 'text_end') {
-    const content = event.content ?? textContentByIndex.get(event.contentIndex) ?? ''
-    textContentByIndex.set(event.contentIndex, content)
-    onText({ phase: 'complete', content, contentIndex: event.contentIndex })
-  }
 }
 
 export class LlmClient {
@@ -2108,237 +1822,5 @@ function emptyUsage(): Usage {
 function truncateForDisplay(value: string): string {
 
   return value.length > 1_200 ? `${value.slice(0, 1_200)}\n...[truncated]` : value
-
-}
-
-
-
-export function parseActions(response: string): OrchestratorAction[] {
-  const actions: OrchestratorAction[] = []
-
-  // Orchestration is executable only in an explicitly marked fence. Generic JSON
-  // is frequently used for discussion/examples and must never have side effects.
-  // Extract by brace-balanced JSON so nested markdown fences inside task strings
-  // (for example ```ts) cannot truncate the payload.
-  for (const block of extractMousseActionBlocks(response)) {
-    try {
-      const parsed = JSON.parse(block.json)
-
-      if (Array.isArray(parsed.actions)) {
-        for (const a of parsed.actions) {
-          if (isValidAction(a)) actions.push(a)
-        }
-      } else if (isValidAction(parsed)) {
-        actions.push(parsed)
-      }
-    } catch {
-      /* skip invalid JSON */
-    }
-  }
-
-  return actions
-}
-
-export function stripActionBlocks(response: string): string {
-  const blocks = extractMousseActionBlocks(response)
-  if (blocks.length === 0) return response.trim()
-
-  let result = ''
-  let cursor = 0
-  for (const block of blocks) {
-    result += response.slice(cursor, block.start)
-    try {
-      const parsed = JSON.parse(block.json)
-      if (!hasActionPayload(parsed)) {
-        result += response.slice(block.start, block.end)
-      }
-    } catch {
-      result += response.slice(block.start, block.end)
-    }
-    cursor = block.end
-  }
-  result += response.slice(cursor)
-
-  return result.trim()
-}
-
-/**
- * Locate ```mousse-actions fences and extract their JSON payloads with a
- * string-aware brace balancer. Closing ``` is optional for extraction; nested
- * ``` markers inside JSON string values must not terminate the payload.
- */
-function extractMousseActionBlocks(
-  response: string
-): Array<{ start: number; end: number; json: string }> {
-  const blocks: Array<{ start: number; end: number; json: string }> = []
-  const openTag = '```mousse-actions'
-  let searchFrom = 0
-
-  while (searchFrom < response.length) {
-    const fenceStart = response.indexOf(openTag, searchFrom)
-    if (fenceStart === -1) break
-
-    const afterTag = fenceStart + openTag.length
-    // Require a whitespace/newline boundary so ```mousse-actions-extra is ignored.
-    if (afterTag < response.length && !/\s/.test(response[afterTag]!)) {
-      searchFrom = afterTag
-      continue
-    }
-
-    let i = afterTag
-    while (i < response.length && /\s/.test(response[i]!)) i++
-
-    const jsonStartChar = response[i]
-    if (jsonStartChar !== '{' && jsonStartChar !== '[') {
-      searchFrom = afterTag
-      continue
-    }
-
-    const extracted = extractBalancedJson(response, i)
-    if (!extracted) {
-      searchFrom = afterTag
-      continue
-    }
-
-    let end = extracted.end
-    // Prefer consuming a trailing closing fence when present.
-    let j = end
-    while (j < response.length && /[ \t\r\n]/.test(response[j]!)) j++
-    if (response.startsWith('```', j)) {
-      end = j + 3
-    }
-
-    blocks.push({ start: fenceStart, end, json: extracted.json })
-    searchFrom = end
-  }
-
-  return blocks
-}
-
-function extractBalancedJson(
-  source: string,
-  start: number
-): { json: string; end: number } | null {
-  const open = source[start]
-  if (open !== '{' && open !== '[') return null
-
-  const stack: string[] = []
-  let inString = false
-  let escaped = false
-
-  for (let i = start; i < source.length; i++) {
-    const ch = source[i]!
-
-    if (inString) {
-      if (escaped) {
-        escaped = false
-        continue
-      }
-      if (ch === '\\') {
-        escaped = true
-        continue
-      }
-      if (ch === '"') {
-        inString = false
-      }
-      continue
-    }
-
-    if (ch === '"') {
-      inString = true
-      continue
-    }
-
-    if (ch === '{' || ch === '[') {
-      stack.push(ch)
-      continue
-    }
-
-    if (ch === '}' || ch === ']') {
-      const expected = ch === '}' ? '{' : '['
-      if (stack.length === 0 || stack[stack.length - 1] !== expected) {
-        return null
-      }
-      stack.pop()
-      if (stack.length === 0) {
-        return { json: source.slice(start, i + 1), end: i + 1 }
-      }
-    }
-  }
-
-  return null
-}
-
-export function filterActionsForChatMode(
-
-  actions: OrchestratorAction[],
-
-  mode: ChatMode
-
-): OrchestratorAction[] {
-  if (typeof mode === 'string') {
-    const desc = defaultModeRegistry.getModeSync(mode, {})
-    if (desc) {
-      const allowed = desc.permission?.['task'] !== 'deny'
-      if (allowed) return actions
-      return actions.filter((a) => a.type !== 'complete_task')
-    }
-  }
-  return filterActionsForMode(actions, mode)
-
-}
-
-
-
-export function rejectOrchestrationAction(action: OrchestratorAction, mode: ChatMode): boolean {
-  if (typeof mode === 'string') {
-    const desc = defaultModeRegistry.getModeSync(mode, {})
-    if (desc) {
-      const allowed = desc.permission?.['task'] !== 'deny'
-      if (allowed) return false
-      return action.type === 'complete_task'
-    }
-  }
-  if (allowsOrchestrationActions(mode)) return false
-
-  return action.type === 'complete_task'
-
-}
-
-
-
-function hasActionPayload(value: unknown): boolean {
-
-  if (isValidAction(value)) return true
-
-  if (!value || typeof value !== 'object') return false
-
-
-
-  const obj = value as Record<string, unknown>
-
-  return Array.isArray(obj.actions) && obj.actions.some((action) => isValidAction(action))
-
-}
-
-
-
-function isValidAction(a: unknown): a is OrchestratorAction {
-
-  if (!a || typeof a !== 'object') return false
-
-  const obj = a as Record<string, unknown>
-
-
-  if (
-    obj.type === 'complete_task' &&
-    Array.isArray(obj.agentIds) &&
-    obj.agentIds.length > 0 &&
-    obj.agentIds.every((id) => typeof id === 'string' && id.trim().length > 0)
-  ) return true
-
-  if (obj.type === 'message' && typeof obj.content === 'string') return true
-
-  return false
 
 }

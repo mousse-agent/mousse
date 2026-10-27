@@ -1,4 +1,4 @@
-import type { Message } from '@earendil-works/pi-ai'
+import type { Message } from '../../shared/transcript'
 import { ORCHESTRATOR_SYSTEM_PROMPT } from './systemPrompt'
 import type { ContextUsageSnapshot } from '../../shared/types'
 import { estimateMessageTokens } from './nativeContext'

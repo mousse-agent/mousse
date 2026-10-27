@@ -1,7 +1,7 @@
 import type { CursorChatInput, CursorChatResult } from '../../../harness/cursor/session'
 import type { ProviderRef } from '../../types'
 import type { AdapterHost, ModelInfo, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../ProviderAdapter'
-import { promptStreams, runtimeToolEvent } from '../shared/promptRuntime'
+import { promptStreams, runtimeToolEvent } from '../../transcript/promptRuntime'
 
 /**
  * Cursor runs its own agent loop and tools in the project workspace (weak containment) through
