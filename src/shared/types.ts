@@ -895,6 +895,12 @@ export interface QueuedMessage {
   /** A mode this turn must not exceed, set by a daemon-side sender (a scheduled job); it only tightens. */
   permissionMode?: PermissionMode
   /**
+   * The run a promoted item (`steering`) was promoted into. Only that run's steer drain takes the text, and
+   * only when the run's mode is no stricter than the item's own; any other run that meets the item reverts it
+   * to a pending message, so a promotion never reaches a run it was not checked against.
+   */
+  steerRunId?: string
+  /**
    * Who the item is from when it is not a person. `schedule`: set on the occurrence of a scheduled job
    * that found its thread busy; the run drains with the job's model and origin, and the ids travel on to
    * the turn so its end completes the occurrence. `agent`: a message another thread's agent sent; it

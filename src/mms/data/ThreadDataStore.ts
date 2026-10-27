@@ -31,6 +31,7 @@ import { isDefaultThreadName } from '../../shared/threadTitle'
 import { visibleThreads } from '../../shared/threadLineage'
 import { parseMousseAgentSessions } from '../agents/legacyAgentSessions'
 import { normalizeQueuedMessages } from '../queue/ThreadMessageQueue'
+import type { QueueJournal } from '../queue/queueJournal'
 import { withThreadDataMutationLock } from '../queue/ThreadExecutionLease'
 import type { ProjectManager } from './ProjectManager'
 import { getMousseHomeDir } from './paths'
@@ -887,6 +888,20 @@ export class ThreadDataStore extends EventEmitter {
       this.saveThreadDataUnlocked(id, next)
       return next
     })
+  }
+
+  private queueJournal: QueueJournal | undefined
+
+  /**
+   * The journal of agent commands on queues, set once by the thread owner when the run engine is attached. Every
+   * durable queue change finishes the thread's unfinished commands first; a store without one behaves as before.
+   */
+  setQueueJournal(journal: QueueJournal | undefined): void {
+    this.queueJournal = journal
+  }
+
+  getQueueJournal(): QueueJournal | undefined {
+    return this.queueJournal
   }
 
   /** Load durable per-thread message queue (queue.json; empty for legacy threads). */

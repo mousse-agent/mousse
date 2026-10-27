@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { v4 as uuidv4 } from 'uuid'
 import type {
   AgentOrigin,
@@ -50,6 +51,70 @@ export class QueueValidationError extends Error {
     super(message)
     this.name = 'QueueValidationError'
   }
+}
+
+/**
+ * Why a change to the queue was refused because the queue is not as the caller last saw it. The code is
+ * stable (agents act on it); `details` carry the ids and values the caller needs to read again.
+ */
+export type QueueConflictCode =
+  | 'revision_mismatch'
+  | 'queue_item_not_found'
+  | 'item_steering'
+  | 'run_not_active'
+  | 'run_paused'
+  | 'ceiling_exceeded'
+  | 'run_not_ready'
+  | 'item_started'
+  | 'request_conflict'
+
+export class QueueConflictError extends Error {
+  constructor(
+    readonly code: QueueConflictCode,
+    message: string,
+    readonly details: Record<string, string | number | boolean | null> = {}
+  ) {
+    super(message)
+    this.name = 'QueueConflictError'
+  }
+}
+
+/** A change the caller's agent access does not allow (it is not a stale queue: reading again does not help). */
+export class QueueAccessError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'QueueAccessError'
+  }
+}
+
+/**
+ * A short digest of what a caller can act on: the pending, visible items with their order, intent, state,
+ * modes, origin and a hash of the text. It changes with every change to those items (an add, edit, removal,
+ * reorder, promotion, claim) and with nothing else (an internal item or a claimed one's heartbeat does not
+ * move it), so a command that carries it fails instead of acting on a queue that changed after it was read.
+ */
+export function queueRevision(items: QueuedMessage[]): string {
+  const rows = listPendingQueue(items)
+    .filter((item) => !item.internal)
+    .map((item) => [
+      item.id,
+      item.order,
+      item.intent,
+      item.state,
+      item.mode ?? null,
+      item.permissionMode ?? null,
+      item.origin?.kind === 'agent' ? `agent:${item.origin.threadId}` : item.origin?.kind ?? null,
+      createHash('sha256').update(item.content).digest('hex')
+    ])
+  return createHash('sha256').update(JSON.stringify(rows)).digest('hex').slice(0, 16)
+}
+
+/** Throws a `revision_mismatch` conflict when `expected` is given and is not the queue's revision now. */
+export function assertQueueRevision(items: QueuedMessage[], expected: string | undefined): void {
+  if (expected === undefined) return
+  const revision = queueRevision(items)
+  if (revision !== expected)
+    throw new QueueConflictError('revision_mismatch', 'The queue changed since you read it; read it again before changing it.', { expectedRevision: expected, revision })
 }
 
 function nextOrder(items: QueuedMessage[]): number {
@@ -161,6 +226,8 @@ export function normalizeQueuedMessages(raw: unknown, threadId?: string): Queued
       ...(Array.isArray(item.subagentNotice) && item.subagentNotice.length ? { subagentNotice: item.subagentNotice } : {}),
       ...(typeof item.stopGeneration === 'number' && Number.isSafeInteger(item.stopGeneration) && item.stopGeneration >= 0 ? { stopGeneration: item.stopGeneration } : {}),
       ...(isPermissionMode(item.permissionMode) ? { permissionMode: item.permissionMode } : {}),
+      // Only a steering item is bound to a run.
+      ...(state === 'steering' && typeof item.steerRunId === 'string' && item.steerRunId ? { steerRunId: item.steerRunId } : {}),
       ...(origin ? { origin } : {})
     })
   }
@@ -287,10 +354,76 @@ export function reorderQueuedMessages(
   return sortQueue([...preserved, ...reordered])
 }
 
-/** Promote a pending normal queue item to steer intent for the active turn. */
+/** What changes in an edit of a queued message; a field left out stays as it is. */
+export interface QueuedMessagePatch {
+  content?: string
+  mode?: ChatMode
+  /** Who the edited text is from: set when an agent wrote it, so the item never passes for a person's. */
+  origin?: AgentOrigin
+  /** A mode the edited item must not exceed; it can only tighten what the item already had. */
+  permissionMode?: PermissionMode
+  /**
+   * The item no longer owns the queued run it had (the caller cancels it): the run was made for the earlier
+   * sender, and the item gets a fresh one, with the new sender's count, when it drains.
+   */
+  dropRun?: boolean
+}
+
+/**
+ * Why a queued item cannot be edited, or undefined when it can. A message that is already steering a live
+ * turn, one a turn has claimed, an internal one, a workflow command and one that delivers subagent results
+ * (rebuilt when it runs) are not text to edit.
+ */
+export function editRefusal(item: QueuedMessage): string | undefined {
+  if (item.internal) return `Queue item ${item.id} is internal.`
+  if (item.workflowInvocationId) return 'A workflow command cannot be edited.'
+  if (item.inboxIds?.length) return 'A queued subagent result is rebuilt when it runs; it cannot be edited.'
+  if (item.state === 'claimed') return `Queue item ${item.id} already started and can no longer be edited.`
+  if (item.state !== 'pending' && item.state !== 'steering') return `Queue item ${item.id} is not pending.`
+  return undefined
+}
+
+/**
+ * Edit a pending queue item in place: its place in the order, id, images and state stay. Idempotent: an edit
+ * that is already in effect changes nothing, which a recovered journal entry relies on.
+ */
+export function editQueuedMessage(
+  items: QueuedMessage[],
+  id: string,
+  patch: QueuedMessagePatch
+): { items: QueuedMessage[]; item: QueuedMessage } {
+  const index = items.findIndex((entry) => entry.id === id)
+  if (index === -1) throw new QueueConflictError('queue_item_not_found', `Queue item ${id} is not in the queue.`, { itemId: id })
+  const current = items[index]
+  if (current.state === 'steering') throw new QueueConflictError('item_steering', `Queue item ${id} is already steering the running turn; its text can no longer be edited.`, { itemId: id })
+  const refusal = editRefusal(current)
+  if (refusal) throw new QueueValidationError(refusal)
+  let content = current.content
+  if (patch.content !== undefined) {
+    content = patch.content.trim()
+    if (!content && !(current.images && current.images.length > 0)) throw new QueueValidationError('Queued message content is required.')
+  }
+  const { runId: _runId, ...rest } = current
+  const item: QueuedMessage = {
+    ...(patch.dropRun ? rest : current),
+    content,
+    ...(patch.mode !== undefined ? { mode: normalizeChatMode(patch.mode) } : {}),
+    ...(patch.origin ? { origin: patch.origin } : {}),
+    ...(patch.permissionMode ? { permissionMode: patch.permissionMode } : {})
+  }
+  const next = [...items]
+  next[index] = item
+  return { items: sortQueue(next), item }
+}
+
+/**
+ * Promote a pending normal queue item to steer intent for the active turn. `steerRunId` binds the promotion
+ * to the run it was checked against; `permissionMode` is the (narrowed) mode the item keeps from here on.
+ */
 export function promoteQueuedMessageToSteer(
   items: QueuedMessage[],
-  id: string
+  id: string,
+  bind?: { steerRunId?: string; permissionMode?: PermissionMode }
 ): { items: QueuedMessage[]; item: QueuedMessage } {
   const index = items.findIndex((entry) => entry.id === id)
   if (index === -1) {
@@ -308,7 +441,9 @@ export function promoteQueuedMessageToSteer(
     ...current,
     intent: 'steer',
     state: 'steering',
-    claim: undefined
+    claim: undefined,
+    ...(bind?.steerRunId ? { steerRunId: bind.steerRunId } : {}),
+    ...(bind?.permissionMode ? { permissionMode: bind.permissionMode } : {})
   }
   const next = [...items]
   next[index] = item
@@ -494,14 +629,19 @@ export function dropSteerItems(items: QueuedMessage[], ids?: string[]): QueuedMe
   return items.filter((item) => !(item.intent === 'steer' && drop.has(item.id)))
 }
 
-/** Recover steer intents that arrived after the active turn's final steer boundary. */
-export function demoteSteerItems(items: QueuedMessage[]): QueuedMessage[] {
+/**
+ * Recover steer intents that arrived after the active turn's final steer boundary: they become pending
+ * messages again and run as turns of their own. `ids` limits it to those items; a demoted item keeps its
+ * origin and mode but is no longer bound to a run.
+ */
+export function demoteSteerItems(items: QueuedMessage[], ids?: readonly string[]): QueuedMessage[] {
+  const only = ids ? new Set(ids) : undefined
   return sortQueue(
-    items.map((item) =>
-      item.intent === 'steer' && item.state !== 'claimed'
-        ? { ...item, intent: 'normal' as const, state: 'pending' as const, claim: undefined }
-        : item
-    )
+    items.map((item) => {
+      if (item.intent !== 'steer' || item.state === 'claimed' || (only && !only.has(item.id))) return item
+      const { steerRunId: _steerRunId, ...rest } = item
+      return { ...rest, intent: 'normal' as const, state: 'pending' as const, claim: undefined }
+    })
   )
 }
 
