@@ -14,7 +14,6 @@ Legacy personal data migrates to Default using the durable `migration/journal.js
 |----------|---------|--------|
 | `MOUSSE_HOME` | `~/.mousse` | Root directory for all Mousse data and `mousse.conf` |
 | `MOUSSE_REPO_ROOT` | `process.cwd()` (CLI/MMS) or homedir when packaged (GUI) | Default git repo for worktrees |
-| `MOUSSE_MACROS_PATH` | *(auto-detected)* | Override path to macro JSON files |
 | `MOUSSE_TELEGRAM_BOT_TOKEN` | — | Overrides Telegram token; enables Telegram channel |
 | `MOUSSE_DISCORD_BOT_TOKEN` | — | Overrides Discord token; enables Discord channel |
 | `MOUSSE_CHANNELS_WEBHOOK_PORT` | — | Overrides webhook listen port |
@@ -115,7 +114,7 @@ Orchestrator LLM provider selection. **Secrets (API keys, OAuth tokens) are not 
 
 ## `agents`
 
-CLI coding agent defaults (Claude Code, Codex, OpenCode, Cursor Agents CLI).
+Settings of the retired CLI-agent launcher (Claude Code, Codex, OpenCode, Cursor Agents CLI). Mousse no longer reads them; they stay in the file so older versions can still read it.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -129,7 +128,7 @@ CLI coding agent defaults (Claude Code, Codex, OpenCode, Cursor Agents CLI).
 
 **Default `agents.headless`:** `mousse: false`; all other CLI agents: `true`
 
-Permission bypass flags correspond to `--dangerously-skip-permissions`, Codex sandbox bypass, Cursor `--trust`/`--force`, etc. (see `src/mms/macros/agentPermissionFlags.ts`).
+Permission bypass flags corresponded to `--dangerously-skip-permissions`, Codex sandbox bypass and Cursor `--trust`/`--force`.
 
 ---
 

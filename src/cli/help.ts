@@ -132,12 +132,9 @@ during watch only stops monitoring (exit 130); disconnect alone does not cancel.
 
 export const AGENTS_HELP = `Usage:
   mousse-cli agents list
-  mousse-cli agents spawn --cli <type> --task <description> [--provider <id> --model <id>] [--effort <level>]
   mousse-cli agents stop <id> [--merge]
 
-Mousse subagent overrides:
-  --provider <id> --model <id>  Use a specific connected provider and model (supply both)
-  --effort <level>              Reasoning effort: off, minimal, low, medium, high, xhigh, or max
+Lists and stops agents kept from earlier versions. Delegate new work from a turn.
 `
 
 export const ENGINE_HELP = `Usage:

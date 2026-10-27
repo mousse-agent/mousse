@@ -179,17 +179,13 @@ mousse-cli schedule remove <job-id>
 
 ## agents
 
-Background CLI agents in git worktrees.
+Agents in git worktrees kept from earlier versions. New work is delegated from a turn with `delegate_task`.
 
 ```bash
 mousse-cli agents list
-mousse-cli agents spawn --cli claude-code --task "Implement feature X"
-mousse-cli agents spawn --cli codex --task "Fix failing tests"
 mousse-cli agents stop <agent-id>
 mousse-cli agents stop <agent-id> --merge
 ```
-
-Supported `--cli` values: `mousse`, `claude-code`, `codex`, `opencode`, `cursor-agents-cli`.
 
 ## channels
 
