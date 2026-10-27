@@ -39,9 +39,9 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import type { InstanceConfigView, InstanceEngine, NextStep, UpdateAffordance } from '../../shared/harness/status'
-import { foldedInto, type MoveResult } from '../../shared/harness/move'
+import { foldedInto, movePromptOf, type MoveResult } from '../../shared/harness/move'
 import { harnessAppError, type HarnessErrorCode, type ModelPrefs, type SignInPrompt } from '../../shared/harness/types'
-import type { ProviderLoginEvent } from '../../shared/providerAuth'
+import type { ProviderLoginEvent, ProviderUsage } from '../../shared/providerAuth'
 import {
   legacyProviderForInstance,
   piProviderIdOf,
@@ -287,6 +287,12 @@ export interface ResolvedSelection {
  */
 export interface HarnessInstances {
   snapshots(scope: ProviderScope): Promise<InstanceSnapshot[]>
+  /**
+   * The plan usage of every enabled, signed-in instance whose runtime reports any (`DriverRuntime.usage`),
+   * for the usage page: keyed by the instance and named like it. An instance that cannot be read
+   * says so in its own entry; one failing never fails the others.
+   */
+  usage(scope: ProviderScope): Promise<ProviderUsage[]>
   add(input: AddInstanceInput): Promise<InstanceSnapshot>
   /** Deletes any instance, built-in ones too; a vendor agent is not seeded again. */
   remove(instanceId: string): Promise<void>
@@ -441,6 +447,8 @@ const MODEL_REFRESH_CONCURRENCY = 2
 const MODEL_REFRESH_INTERVAL_ENV = 'MOUSSE_MODEL_REFRESH_INTERVAL_MS'
 /** A one-shot request ends with `timeout` after this long without a provider event. */
 export const ONE_SHOT_INACTIVITY_MS = 60_000
+/** A usage read gives up after this long (the usage page shows the instance as unreadable). */
+export const USAGE_READ_MS = 15_000
 /** How long turn admission waits for the account check; past it the account counts as unknown. */
 export const TURN_ACCOUNT_CHECK_MS = 10_000
 
@@ -702,6 +710,7 @@ export class Harness implements HarnessGateway {
     )
     this.instances = {
       snapshots: (scope) => this.snapshots(scope),
+      usage: (scope) => this.usage(scope),
       add: (input) => this.add(input),
       remove: (instanceId) => this.remove(instanceId),
       configure: (instanceId, patch) => this.configure(instanceId, patch),
@@ -1732,6 +1741,27 @@ export class Harness implements HarnessGateway {
     })
   }
 
+  private async usage(scope: ProviderScope): Promise<ProviderUsage[]> {
+    const entries = this.instanceMap.list()
+    const ids = Object.keys(entries).filter((instanceId) => {
+      const record = this.recordOrUndefined(instanceId)
+      return record?.runtime.usage && !record.stopped && this.scopes.enabled(instanceId, entries[instanceId]!.enabled, scope).effective && record.runtime.configured()
+    })
+    return Promise.all(ids.map(async (instanceId): Promise<ProviderUsage> => {
+      const record = this.record(instanceId, { allowDisabled: true })
+      const named = { id: instanceId, label: this.displayName(record) }
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), USAGE_READ_MS)
+      try {
+        return { ...named, ...(await record.runtime.usage!(controller.signal)) }
+      } catch (error) {
+        return { ...named, status: 'error', windows: [], message: controller.signal.aborted ? 'The usage did not arrive in time.' : errorText(error) }
+      } finally {
+        clearTimeout(timer)
+      }
+    }))
+  }
+
   /**
    * Single-flight probe of one instance; a timeout keeps the last good values (stale). `handshake`
    * (Add, Recheck, after install) also runs the runtime's start-up check, which records its facts.
@@ -1824,6 +1854,9 @@ export class Harness implements HarnessGateway {
     const signInStep: NextStep | undefined = auth.state === 'signed_out' || auth.state === 'expired'
       ? { action: 'sign_in', label: auth.state === 'expired' ? 'Sign in again' : 'Sign in', ...(auth.signInCommand ? { command: auth.signInCommand } : {}) }
       : undefined
+    // An entry whose old route is going away keeps asking to move (and offers no sign-in) until it moved.
+    const prompt = record.entry.driver === 'pi' && !record.config.movedTo ? movePromptOf(piProviderIdOf(instanceId)) : undefined
+    const nextStep: NextStep | undefined = prompt ? { action: 'move', label: 'Move', title: prompt.title, detail: prompt.detail } : signInStep
     return {
       instanceId,
       driver: driver.kind,
@@ -1867,7 +1900,7 @@ export class Harness implements HarnessGateway {
       ...(latest ? { checkedAt: latest.checkedAt } : {}),
       stale,
       ...(state?.lastGood ? { lastGoodAt: state.lastGood.checkedAt } : {}),
-      ...(signInStep ? { nextStep: signInStep } : {}),
+      ...(nextStep ? { nextStep } : {}),
       ...(settingsNotice ? { settingsNotice } : {})
     }
   }
@@ -2408,6 +2441,16 @@ export class Harness implements HarnessGateway {
     if (fromId === toId || !agent || to.driver.kind !== agent)
       harnessFail('unsupported', `${this.displayName(from)} cannot move to ${this.displayName(to)}.`, fromId)
     if (from.config.movedTo) harnessFail('unsupported', `${this.displayName(from)} has already moved.`, fromId)
+    // An entry whose old route is going away moves only onto a route that works now, and drops its
+    // old sign-in with the move (nothing is copied: the new route has its own sign-in).
+    const retiring = movePromptOf(piProviderIdOf(fromId)) !== undefined
+    if (retiring) {
+      if (!to.entry.enabled) harnessFail('unsupported', `Turn on ${this.displayName(to)} first, then move ${this.displayName(from)} to it. Nothing moved.`, toId)
+      await this.probe(toId, true)
+      // Installed and signed in: a chat on it can run now.
+      if (!to.runtime.configured())
+        harnessFail('signed_out', `Install and sign in to ${this.displayName(to)} first, then move ${this.displayName(from)} to it. Nothing moved.`, toId)
+    }
     // The key goes over first: when it cannot, nothing has moved yet.
     if (options.copyKey) {
       const key = await from.runtime.exportApiKey?.()
@@ -2416,6 +2459,13 @@ export class Harness implements HarnessGateway {
       await to.runtime.adoptApiKey(key)
       this.counters.bumpAccount(toId)
       void this.probe(toId, true)
+    }
+    // The old sign-in goes first: when it cannot be deleted, nothing has moved yet.
+    if (retiring) {
+      if (!from.runtime.signOut) harnessFail('unsupported', `${this.displayName(from)} has no sign-in to remove.`, fromId)
+      await from.runtime.signOut()
+      this.counters.bumpAccount(fromId)
+      this.options.onProvidersChanged?.()
     }
     // Turned off, never deleted: an older build can still turn it back on.
     this.instanceMap.setEntry(fromId, { ...from.entry, enabled: false, config: { ...(from.entry.config ?? {}), movedTo: toId } })

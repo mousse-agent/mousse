@@ -15,6 +15,7 @@ export function ApiSetupRow({
   label,
   option,
   status,
+  retired,
   onReplaceKey,
   onSignIn
 }: {
@@ -22,6 +23,8 @@ export function ApiSetupRow({
   label: string
   option?: ProviderLoginOption
   status: StatusDescription
+  /** Its sign-in is going away (the entry has a Move banner): no sign-in or key to set here. */
+  retired?: boolean
   /** Blank runs the guided key prompt. */
   onReplaceKey: (apiKey: string) => Promise<void>
   onSignIn: () => Promise<void>
@@ -50,6 +53,11 @@ export function ApiSetupRow({
 
   if (ambient) {
     return <SettingsRow title="Cloud credentials" description={errorLine ?? (instructions.join(' ') || statusLine)} />
+  }
+
+  // An old sign-in that is going away: it keeps working, but there is no signing in to it again.
+  if (retired) {
+    return <SettingsRow title="Account" description={statusLine} />
   }
 
   if (option?.authType === 'oauth') {

@@ -13,6 +13,7 @@ import type {
   ProvidersUsageResponse,
   ProviderUsageWindow
 } from '../../shared/providerAuth'
+import { usageText } from './usageText'
 import {
   isSttModelId,
   providerSupportsStt,
@@ -61,6 +62,13 @@ const AMBIENT_PROVIDERS: Record<string, AmbientProviderInfo> = {
     ]
   }
 }
+
+/**
+ * Subscription sign-ins Mousse no longer offers: Claude's belongs to the Claude Code agent, and
+ * ChatGPT's (`openai-codex`, a borrowed client) to the managed Codex or the user's Codex CLI. A
+ * credential that exists keeps working (and refreshing) until the entry moves.
+ */
+const RETIRED_OAUTH: ReadonlySet<string> = new Set(['anthropic', 'openai-codex'])
 
 /** Providers whose apiKey.login needs multiple prompts (not a single secret field). */
 const GUIDED_API_KEY_PROVIDERS = new Set([
@@ -365,7 +373,7 @@ export class ProviderAuthService {
         })
       }
 
-      if ((!authType || authType === 'oauth') && oauthAuth && id !== 'anthropic') {
+      if ((!authType || authType === 'oauth') && oauthAuth && !RETIRED_OAUTH.has(id)) {
         pushOption({
           id,
           label,
@@ -405,6 +413,9 @@ export class ProviderAuthService {
   async runOAuthLogin(session: LoginSession, providerId: string): Promise<ProviderLoginResult> {
     if (providerId === 'anthropic') {
       return { success: false, error: 'Claude subscription sign-in belongs to the official Claude Code agent, not the Anthropic Messages provider.' }
+    }
+    if (providerId === 'openai-codex') {
+      return { success: false, error: 'This older ChatGPT sign-in is retired. Move to the ChatGPT subscription in Settings → Providers.' }
     }
     const provider = this.models.getProvider(providerId)
     const oauthProvider = provider?.auth.oauth
@@ -546,20 +557,7 @@ export class ProviderAuthService {
             : normalized === 'opencode-go'
               ? await this.fetchOpenCodeGoUsage(provider)
               : undefined
-    if (!usage) return undefined
-    if (usage.status !== 'available' || usage.windows.length === 0) {
-      const message =
-        'message' in usage && typeof usage.message === 'string'
-          ? usage.message
-          : `Subscription usage is not available for ${label}.`
-      return message
-    }
-    const lines = usage.windows.map((window) => {
-      const usedPercent = Math.max(0, Math.min(100, 100 - window.remainingPercent))
-      const reset = window.resetsAt ? ` (${formatUsageResetCountdown(window.resetsAt)})` : ''
-      return `${window.label}: ${usedPercent}% used${reset}`
-    })
-    return [`${label} usage:`, ...lines.map((line) => `- ${line}`)].join('\n')
+    return usage ? usageText(label, usage) : undefined
   }
 
   /** Speaks text with a provider's OpenAI-compatible text-to-speech model. */
@@ -1016,22 +1014,6 @@ export function parseOpenCodeGoUsage(value: unknown): ProviderUsageWindow[] {
     windows.push({ id, label, remainingPercent, resetsAt })
   }
   return windows
-}
-
-/** Compact countdown down to the minute for channel `/usage` text (`45m`, `5h 12m`, `4d 3h 12m`). */
-export function formatUsageResetCountdown(resetsAt: string): string {
-  const date = new Date(resetsAt)
-  if (Number.isNaN(date.getTime())) return 'reset unknown'
-  const deltaMs = date.getTime() - Date.now()
-  if (deltaMs <= 0) return 'resets soon'
-  const totalMinutes = Math.floor(deltaMs / 60_000)
-  if (totalMinutes < 1) return 'resets soon'
-  if (totalMinutes < 60) return `resets in ${totalMinutes}m`
-  const days = Math.floor(totalMinutes / 1440)
-  const hours = Math.floor((totalMinutes % 1440) / 60)
-  const mins = totalMinutes % 60
-  if (days === 0) return `resets in ${hours}h ${mins}m`
-  return `resets in ${days}d ${hours}h ${mins}m`
 }
 
 function toApiKeyCredential(raw: ApiKeyCredential): ApiKeyCredential {

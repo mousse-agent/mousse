@@ -1,0 +1,42 @@
+/* The Move prompt of an entry whose old route is going away (its card, and the top of its chats). */
+
+.move-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px clamp(12px, 1.5vw, 18px) 0;
+  padding: 10px 12px;
+  border-radius: var(--ui-card-radius, 10px);
+  background: var(--settings-surface, var(--ui-hover));
+  box-shadow: var(--settings-surface-edge, none);
+}
+
+.move-banner-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.move-banner-text strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.move-banner-action {
+  flex: 0 0 auto;
+}
+
+/* On a card the banner sits inside the editor column, which has its own margins. */
+.prov-editor .move-banner {
+  margin: 0 0 var(--space-12, 12px);
+}
+
+/* The conversation fills what the bar leaves. */
+.chat:has(> .move-banner) > .mousse-chat-shell {
+  flex: 1 1 0;
+  min-height: 0;
+  height: auto;
+}

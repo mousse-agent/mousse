@@ -30,6 +30,7 @@ import { stripComposerTransportMarkers } from './QueuedMessages'
 import { MousseAgentChatShell } from '../chat/components/MousseAgentChatShell'
 import { SubagentParentBar } from './SubagentParentBar'
 import { SubagentComposerBanner } from './SubagentComposerBanner'
+import { ThreadMoveBanner } from './providers/MoveProviderDialog'
 import { mousseToUIMessages, chatStatusFromPhase } from '../chat/adapters/mousseToUI'
 import {
   findQuickActionCardForApproval,
@@ -870,6 +871,7 @@ export function OrchestratorChat() {
   return (
     <div className={`chat${emptyThread ? ' chat--empty' : ''}`} style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <SubagentParentBar />
+      <ThreadMoveBanner instanceId={selectedInstanceId ?? providers.find((entry) => entry.id === selectedProviderId)?.instanceId} snapshots={providerSnapshots} />
       <MousseAgentChatShell
         key={activeThreadId ?? 'no-thread'}
         threadId={activeThreadId}
