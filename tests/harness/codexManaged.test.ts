@@ -332,17 +332,15 @@ describe('managed Codex: models and readings', () => {
 
 
 describe('codex driver config', () => {
-  it('a managed entry always has a private home; the own setup never keeps one', () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    try {
-      expect(decodeCodexConfig({ setup: 'managed', home: 'default' })).toMatchObject({ setup: 'managed', home: 'private' })
-      expect(decodeCodexConfig({ home: 'private' })).toMatchObject({ home: 'default' })
-      expect(decodeCodexConfig({ setup: 'existing', home: 'private' })).toMatchObject({ setup: 'existing', home: 'default' })
-      expect(warn).toHaveBeenCalledTimes(2)
-      expect(decodeCodexConfig(undefined)).toEqual({ home: 'default' })
-    } finally {
-      warn.mockRestore()
-    }
+  it('a managed entry always has a private home; the built-in entry never keeps one; another entry on the user\'s CLI may', () => {
+    expect(decodeCodexConfig({ setup: 'managed', home: 'default' })).toMatchObject({ setup: 'managed', home: 'private' })
+    // The built-in `codex` entry is the user's own setup, whatever was stored.
+    expect(decodeCodexConfig({ home: 'private' }, 'codex')).toMatchObject({ home: 'default' })
+    expect(decodeCodexConfig({ setup: 'existing', home: 'private' }, 'codex')).toMatchObject({ setup: 'existing', home: 'default' })
+    // An added entry on the user's CLI keeps the home it was added with (another account).
+    expect(decodeCodexConfig({ setup: 'existing', home: 'private' }, 'codex:work')).toMatchObject({ setup: 'existing', home: 'private' })
+    expect(decodeCodexConfig({ setup: 'existing', home: 'default' }, 'codex:work')).toMatchObject({ setup: 'existing', home: 'default' })
+    expect(decodeCodexConfig(undefined)).toEqual({ home: 'default' })
   })
 })
 

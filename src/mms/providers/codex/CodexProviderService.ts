@@ -212,6 +212,12 @@ export interface CodexServiceOptions {
   signedOut?: () => boolean
   /** Saves an executable path entered at sign-in to the instance config (the gateway's `configure`). */
   saveLaunch?: (patch: CliProviderConfigPatch) => Promise<void>
+  /**
+   * For an instance with a home of its own: the sentence that tells the user how to sign it in, used
+   * in every message about the sign-in. Without it the messages tell the user to run plain `codex
+   * login`, which would sign in their own home instead of this one.
+   */
+  ownSignIn?: string
 }
 
 /** A turn Codex ended as failed, with what it said about why. The message is redacted. */
@@ -353,9 +359,10 @@ export interface CodexChatResult {
 }
 
 /**
- * The environment of the app-server process. It reuses the terminal sign-in: `CODEX_HOME` is
- * never set (an inherited one is kept, as the terminal `codex` would use it), so `~/.codex` and
- * its ChatGPT tokens are shared. API keys and OpenAI routing variables are always removed so a
+ * The environment of the app-server process of the built-in entry. It reuses the terminal sign-in:
+ * `CODEX_HOME` is not set here (an inherited one is kept, as the terminal `codex` would use it), so
+ * `~/.codex` and its ChatGPT tokens are shared. An entry with a home of its own sets it before this
+ * runs (`harness/env.ts` `ownedLaunchEnv`). API keys and OpenAI routing variables are always removed so a
  * turn can never bill an API key instead of the subscription, and variables a parent Codex
  * session sets for its own sandbox do not leak in.
  */
@@ -394,18 +401,23 @@ export function findCodexBinary(env: NodeJS.ProcessEnv = process.env): string | 
 
 const historyKey = (history: string): string => createHash('sha256').update(history).digest('hex')
 
-function classifyAccount(response: AccountReadResponse): AccountProbe {
+/**
+ * What the account check says. `ownSignIn` is the instruction for an instance with a home of its own
+ * (`CodexServiceOptions.ownSignIn`): plain `codex login` there would sign in the user's own home.
+ */
+function classifyAccount(response: AccountReadResponse, ownSignIn?: string): AccountProbe {
   const account = response.account
   if (account?.type === 'chatgpt') return { kind: 'signed_in', planType: account.planType, email: account.email }
   if (account)
     return {
       kind: 'signed_out',
-      message:
-        'Codex in your terminal is signed in without a ChatGPT account. Mousse only uses a ChatGPT sign-in, so turns never bill an API key. Run `codex login` in a terminal, then recheck.'
+      message: ownSignIn
+        ? `This account's Codex is signed in without a ChatGPT account. Mousse only uses a ChatGPT sign-in, so turns never bill an API key. ${ownSignIn}`
+        : 'Codex in your terminal is signed in without a ChatGPT account. Mousse only uses a ChatGPT sign-in, so turns never bill an API key. Run `codex login` in a terminal, then recheck.'
     }
   return {
     kind: 'signed_out',
-    message: 'Codex in your terminal is not signed in. Run `codex login` in a terminal, then recheck.'
+    message: ownSignIn ? `This account is not signed in. ${ownSignIn}` : 'Codex in your terminal is not signed in. Run `codex login` in a terminal, then recheck.'
   }
 }
 
@@ -958,6 +970,8 @@ export class CodexProviderService {
   private readonly settingsPath: string
   private settings: Settings = {}
   private settingsError?: string
+  /** Another service of this instance writes the settings now (its home changed); this one never writes them again. */
+  private settingsFrozen = false
   private stopped = false
   /** `verified`: this process answered `account/read` with a ChatGPT account. */
   private app?: {
@@ -1040,7 +1054,7 @@ export class CodexProviderService {
   }
 
   private save(): void {
-    if (this.settingsError) return
+    if (this.settingsError || this.settingsFrozen) return
     mkdirSync(this.dir, { recursive: true, mode: 0o700 })
     atomicWriteJsonSync(this.settingsPath, this.settings)
   }
@@ -1062,7 +1076,7 @@ export class CodexProviderService {
   vendorMirror(fields: readonly MirrorField[]): VendorMirror {
     return settingsMirror(fields, {
       settings: () => this.settings as Record<string, unknown>,
-      settingsError: () => this.settingsError,
+      settingsError: () => this.settingsError ?? (this.settingsFrozen ? 'Another Codex service writes these settings now.' : undefined),
       save: () => this.save(),
       exists: () => existsSync(this.settingsPath),
       signedOutKey: 'disconnected'
@@ -1154,7 +1168,7 @@ export class CodexProviderService {
 
   /** `account/read` on `conn`; a ChatGPT answer marks that process as verified. */
   private async readAccount(conn: CodexConnection, signal?: AbortSignal): Promise<AccountProbe> {
-    const result = classifyAccount(await conn.request('account/read', { refreshToken: false }, { timeoutMs: 15_000, signal }))
+    const result = classifyAccount(await conn.request('account/read', { refreshToken: false }, { timeoutMs: 15_000, signal }), this.options.ownSignIn)
     if (this.app?.conn === conn) this.app.verified = result.kind === 'signed_in'
     return result
   }
@@ -1209,7 +1223,10 @@ export class CodexProviderService {
     if (!this.binary())
       return { state: 'missing_binary', message: 'Codex CLI not found. Install the Codex CLI, then recheck.' }
     if (this.signedOut())
-      return { state: 'disconnected', message: 'Disconnected in Mousse. The Codex sign-in in your terminal is unchanged.' }
+      return {
+        state: 'disconnected',
+        message: this.options.ownSignIn ? `Signed out in Mousse. ${this.options.ownSignIn}` : 'Disconnected in Mousse. The Codex sign-in in your terminal is unchanged.'
+      }
     const probe = this.probeResult
     if (!probe) return { state: 'error', message: 'Mousse has not checked the Codex sign-in yet.' }
     const checkedAt = new Date(probe.at).toISOString()
@@ -1402,6 +1419,56 @@ export class CodexProviderService {
     this.save()
     this.abortInFlight()
     this.app?.conn.close()
+  }
+
+  /**
+   * `codex` as Mousse starts it, with the environment of its own commands (the sign-in check, turns):
+   * what the sign-in and sign-out of an instance with its own home run with. Undefined when no
+   * executable is found.
+   */
+  authLaunch(): { command: string; args: string[]; env: NodeJS.ProcessEnv } | undefined {
+    const launch = this.launchTarget()
+    return launch ? { command: launch.command, args: [...launch.args], env: this.environment() } : undefined
+  }
+
+  /**
+   * What Codex says of the account in this instance's environment now, whatever Mousse recorded (a
+   * disconnect included) and without touching the recorded state. A process that is already running
+   * answers for the account it started with: callers that just changed the sign-in stop every
+   * process first (`stopAll`). `unknown`: it did not answer.
+   */
+  async authState(): Promise<'signed_in' | 'signed_out' | 'unknown'> {
+    if (this.stopped || !this.binary()) return 'unknown'
+    try {
+      const result = await this.probe()
+      return result.kind === 'signed_in' ? 'signed_in' : result.kind === 'signed_out' ? 'signed_out' : 'unknown'
+    } finally {
+      this.closeWhenIdle(CODEX_CHECK_CLOSE_MS)
+    }
+  }
+
+  /**
+   * Takes the sign-in the CLI now holds in this home as the instance's: every process that started
+   * under the old one ends (a long-lived app-server keeps the account it started with), the listed
+   * models are forgotten (the plan may list others), and a new process says who is signed in,
+   * whatever Mousse has flagged (the gateway clears a sign-out flag once the sign-in succeeded).
+   * True when the home reads signed in; rejects when a process could not be stopped.
+   */
+  async reconnect(): Promise<boolean> {
+    await this.stopAll('The Codex sign-in changed')
+    this.lastLimits = undefined
+    this.clearModels()
+    const state = await this.authState()
+    this.probeResult = undefined
+    return state === 'signed_in'
+  }
+
+  /**
+   * Another service of this instance writes its settings from now on (its home changed): this one
+   * finishes its turns but never writes the file again, so one file never has two writers.
+   */
+  freezeSettings(): void {
+    this.settingsFrozen = true
   }
 
   /** The executable path, launch args and environment set in Settings → Providers. */
@@ -2603,7 +2670,9 @@ export class CodexProviderService {
     const probe = this.probeResult?.result
     return probe && probe.kind !== 'signed_in'
       ? probe.message
-      : 'Codex in your terminal is not signed in. Run `codex login` in a terminal, then try again.'
+      : this.options.ownSignIn
+        ? `This account is not signed in. ${this.options.ownSignIn}`
+        : 'Codex in your terminal is not signed in. Run `codex login` in a terminal, then try again.'
   }
 }
 

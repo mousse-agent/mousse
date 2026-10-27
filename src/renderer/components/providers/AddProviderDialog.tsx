@@ -22,7 +22,10 @@ export const SETUP_INFO: Record<CodexSetup, { label: string; description: string
     label: 'Managed by Mousse (recommended)',
     description: "Mousse downloads OpenAI's Codex (about 160 MB) and keeps its settings separate from yours."
   },
-  existing: { label: 'Use my Codex CLI', description: 'Your installed `codex`, signed in with `codex login`.' }
+  existing: {
+    label: 'Use my Codex CLI',
+    description: 'Your installed `codex`. The first entry shares your terminal sign-in; another one gets a home of its own and signs in from Mousse.'
+  }
 }
 
 /** How a model API connects, from its login option. */
@@ -47,6 +50,8 @@ export type AddChoice =
       existing?: InstanceSnapshot
       /** The setups it can be added with (`DriverInfo.setups`), the recommended one first. */
       setups?: CodexSetup[]
+      /** The user's own CLI is already added: a further entry on it is another account, with a home of its own. */
+      ownSetup?: boolean
       /** The agent on a model API's key (`FOLDED_TARGETS`): Claude Code with an Anthropic API key. */
       target?: FoldedTarget
     }
@@ -79,7 +84,7 @@ export function addChoices(snapshots: readonly InstanceSnapshot[], loginOptions:
     // An entry on a model API's key (`claude:api`) is not the agent's own setup.
     const existing = snapshots.find((snapshot) => snapshot.driver === driver && !onFoldedKey(snapshot))
     if (info.setups) {
-      // The user's own CLI is added once; every further entry is managed, with its own sign-in.
+      // The user's own CLI is added once on their home; a further entry is managed, or their CLI as another account with its own home.
       const ownSetup = snapshots.some((snapshot) => snapshot.driver === driver && snapshot.config?.setup !== 'managed')
       const managed = snapshots.some((snapshot) => snapshot.driver === driver && snapshot.config?.setup === 'managed')
       choices.push({
@@ -90,7 +95,8 @@ export function addChoices(snapshots: readonly InstanceSnapshot[], loginOptions:
         group: 'Agents',
         driver,
         existing,
-        setups: ownSetup ? ['managed'] : ['managed', 'existing']
+        setups: ['managed', 'existing'],
+        ...(ownSetup ? { ownSetup } : {})
       })
     } else if (!existing || info.multiInstance) {
       choices.push({
@@ -474,7 +480,7 @@ export function AddProviderDialog({
                   }
                 />
               )}
-              {selected.existing && setup === 'managed' && (
+              {selected.existing && (setup === 'managed' || selected.ownSetup) && (
                 <SettingsRow
                   title="Name"
                   description="A separate account, with its own sign-in. Shown in the provider list and the model picker."
@@ -505,7 +511,16 @@ export function AddProviderDialog({
                   error={error}
                   onAdd={(binaryPath) =>
                     void run(selected.key, async () => {
-                      finish(await handlers.add(selected.driver, { displayName: DRIVER_INFO[selected.driver].label, setup: 'existing', ...(binaryPath ? { binaryPath } : {}) }))
+                      // Another account on the user's CLI gets a home of its own, and is signed in from Mousse.
+                      const another = selected.ownSetup === true
+                      finish(
+                        await handlers.add(selected.driver, {
+                          displayName: (another ? label.trim() : '') || DRIVER_INFO[selected.driver].label,
+                          setup: 'existing',
+                          home: another ? 'private' : 'default',
+                          ...(binaryPath ? { binaryPath } : {})
+                        })
+                      )
                     })
                   }
                 />
