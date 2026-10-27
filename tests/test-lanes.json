@@ -16,6 +16,7 @@
     "tests/gitFoundationRecovery.test.ts",
     "tests/gitFoundationUndo.test.ts",
     "tests/gitFoundationWorkspaceLifecycle.test.ts",
+    "tests/gitProcess.test.ts",
     "tests/gitServiceConfiguredUpstream.test.ts",
     "tests/gitServiceWrites.test.ts",
     "tests/guiMmsController.test.ts",

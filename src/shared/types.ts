@@ -1086,6 +1086,8 @@ export interface GitCommitOptions {
   all?: boolean
   /** Refuse with `git_branch_changed` when HEAD is on another branch by now. */
   expectedBranch?: string
+  /** Names the action so its live output reaches the caller and Cancel can find it. */
+  operationId?: string
 }
 
 /** A proposed commit message; the user edits it before committing. */
@@ -1098,9 +1100,13 @@ export interface GitCommitSuggestion {
 export interface GitPushOptions {
   /** Refuse with `git_branch_changed` when HEAD is on another branch by now. */
   expectedBranch?: string
+  /** Names the action so its live output reaches the caller and Cancel can find it. */
+  operationId?: string
 }
 
 export interface GitCheckoutOptions {
+  /** Names the action so its live output reaches the caller. A branch switch cannot be cancelled. */
+  operationId?: string
   /** With uncommitted changes: `carry` them along (default) or `stash` them, switch and re-apply. */
   dirty?: 'carry' | 'stash'
 }
@@ -1127,6 +1133,13 @@ export type GitPullStrategy = 'ff-only' | 'merge' | 'rebase'
 
 export interface GitPullOptions {
   strategy?: GitPullStrategy
+  /** Names the action so its live output reaches the caller and Cancel can find it. */
+  operationId?: string
+}
+
+export interface GitFetchOptions {
+  /** Names the action so its live output reaches the caller and Cancel can find it. */
+  operationId?: string
 }
 
 export interface GitPullResult {
@@ -1136,6 +1149,44 @@ export interface GitPullResult {
 export interface GitFetchResult {
   behindBefore: number
   behindAfter: number
+}
+
+export type GitOperationKind = 'push' | 'pull' | 'fetch' | 'commit' | 'checkout'
+
+export type GitOperationPhase = 'started' | 'hook' | 'output' | 'done' | 'failed' | 'cancelled'
+
+/**
+ * What a long Git action reports while it runs. Sent only to the client that started it,
+ * and never replayed: the request's own answer carries the outcome.
+ */
+export interface GitOperationEvent {
+  /** Chosen by the client that started the action. */
+  operationId: string
+  kind: GitOperationKind
+  /** The folder Git runs in. */
+  path: string
+  phase: GitOperationPhase
+  /** On `started`: whether Cancel can stop it. */
+  cancellable?: boolean
+  /** On `output`: the new lines, redacted and each at most 500 characters. */
+  lines?: string[]
+  /** On `hook`: a hook has started, or has ended with `exitCode`. */
+  hook?: { name: string; exitCode?: number }
+  /** On `failed`: Git's message, redacted. */
+  message?: string
+  /** On `failed`: the error code the request rejects with. */
+  code?: string
+  /** Milliseconds since the epoch. */
+  at: number
+}
+
+/** Passed to a long GitService action to follow it and to stop it. */
+export interface GitOperationOptions {
+  /** Names the action for `cancelOperation` and in every event. */
+  operationId?: string
+  /** Only the client that started the action may cancel it. */
+  owner?: string
+  onEvent?: (event: GitOperationEvent) => void
 }
 
 export interface GitBranchOptions {

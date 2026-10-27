@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { GitService } from '../src/mms/git/GitService'
+import type { GitOperationEvent } from '../src/shared/types'
 
 const roots: string[] = []
 const git = (cwd: string, ...args: string[]): string => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
@@ -716,4 +717,254 @@ describe('GitService describeCommitInput', () => {
     const plain = mkdtempSync(join(tmpdir(), 'mousse-git-writes-')); roots.push(plain)
     expect((await new GitService().describeCommitInput(plain)).files).toEqual([])
   })
+})
+
+describe('GitService live output and cancel', () => {
+  const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true } catch { return false } }
+  const waitDead = async (pid: number): Promise<boolean> => {
+    for (const end = Date.now() + 5_000; Date.now() < end && alive(pid);) await new Promise((resolve) => setTimeout(resolve, 50))
+    return !alive(pid)
+  }
+  const until = async (ready: () => boolean, ms = 15_000) => {
+    for (const end = Date.now() + ms; !ready();) {
+      if (Date.now() > end) throw new Error('timed out waiting')
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+  }
+  /** Runs until the sentinel file exists; `before` runs first. */
+  const blocksUntil = (sentinel: string, before = '') => `${before}\nconst t = setInterval(() => { if (require('node:fs').existsSync(${JSON.stringify(sentinel)})) { clearInterval(t); process.exit(0) } }, 25)`
+  /** Starts a grandchild, records both pids and hangs. */
+  const hangs = (pidFile: string) => `const { spawn } = require('node:child_process'); const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, process.pid + ',' + child.pid); console.error('hook started'); setInterval(() => {}, 1000)`
+  const scratch = (cwd: string, name: string): string => { const file = join(dirname(cwd), `${basename(cwd)}.${name}`); roots.push(file); return file }
+  const pidsOf = (file: string): number[] => readFileSync(file, 'utf8').split(',').map(Number)
+  const collect = () => { const events: GitOperationEvent[] = []; return { events, onEvent: (event: GitOperationEvent) => events.push(event) } }
+  const phases = (events: GitOperationEvent[]) => events.map((event) => event.phase)
+  const outputText = (events: GitOperationEvent[]) => events.flatMap((event) => event.lines ?? []).join('\n')
+  /** A bare remote the branch tracks, with a commit waiting to be pushed. */
+  function withRemote(cwd: string, ahead = true): string {
+    const origin = join(dirname(cwd), `${basename(cwd)}-origin.git`); roots.push(origin)
+    git(dirname(cwd), 'init', '--bare', '-q', origin)
+    git(cwd, 'remote', 'add', 'origin', origin); git(cwd, 'push', '-q', '-u', 'origin', 'main')
+    if (ahead) { write(cwd, 'ahead.txt'); git(cwd, 'add', '.'); git(cwd, 'commit', '-qm', 'ahead') }
+    return origin
+  }
+  /** A transport program that records its pids and never answers, as a stalled server would. */
+  function stalledTransport(cwd: string, key: 'uploadpack' | 'receivepack', pidFile: string): void {
+    const script = scratch(cwd, `${key}.cjs`)
+    writeFileSync(script, hangs(pidFile))
+    git(cwd, 'config', `remote.origin.${key}`, `node "${script.replace(/\\/g, '/')}"`)
+  }
+
+  it('a commit rejected by a hook says which hook and how it ended, then shows what it printed', async () => {
+    const cwd = repo()
+    withHook(cwd, "console.log('lint: 3 problems'); console.error('hook says no'); process.exit(1)")
+    write(cwd, 'a.txt')
+    const error = await new GitService().commit(cwd, 'rejected').then(() => null, (cause: unknown) => cause as Error & { code?: string })
+    expect(error).toMatchObject({ code: 'git_commit_failed' })
+    expect(error!.message).toMatch(/^pre-commit hook failed \(exit 1\):\n/)
+    expect(error!.message).toContain('hook says no')
+  })
+
+  it('reports a hook as it starts and as it ends, while the commit is still running', async () => {
+    const cwd = repo(), sentinel = scratch(cwd, 'go')
+    // The hook runs Git itself, so the trace holds events of two processes with their own session and child ids.
+    withHook(cwd, blocksUntil(sentinel, "require('node:child_process').execFileSync('git', ['status', '--porcelain']); console.error('linting')"))
+    write(cwd, 'a.txt')
+    const { events, onEvent } = collect()
+    const commit = new GitService().commit(cwd, 'with a hook', { operationId: 'op-hook', onEvent })
+    await until(() => events.some((event) => event.phase === 'hook'))
+    expect(events.filter((event) => event.phase === 'hook')).toEqual([expect.objectContaining({ hook: { name: 'pre-commit' } })])
+    expect(phases(events)).not.toContain('done')
+    writeFileSync(sentinel, '')
+    await commit
+    const hooks = events.filter((event) => event.phase === 'hook').map((event) => event.hook)
+    expect(hooks).toEqual([{ name: 'pre-commit' }, { name: 'pre-commit', exitCode: 0 }])
+    expect(phases(events)[0]).toBe('started')
+    expect(phases(events).at(-1)).toBe('done')
+    expect(events.every((event) => event.operationId === 'op-hook' && event.kind === 'commit' && event.path === cwd)).toBe(true)
+    expect(outputText(events)).toContain('linting')
+    expect(git(cwd, 'log', '-1', '--format=%s')).toBe('with a hook')
+  }, 30_000)
+
+  it('a push to a bare remote reports started, its output, and done', async () => {
+    const cwd = repo(); withRemote(cwd)
+    const { events, onEvent } = collect()
+    await new GitService().push(cwd, { operationId: 'op-push', onEvent })
+    expect(phases(events)[0]).toBe('started')
+    expect(events[0]).toMatchObject({ cancellable: true, kind: 'push' })
+    expect(phases(events)).toContain('output')
+    expect(phases(events).at(-1)).toBe('done')
+    expect(outputText(events)).toMatch(/Writing objects|Total|Enumerating/)
+  })
+
+  it('a failed action ends with failed, its code and the redacted message', async () => {
+    const cwd = repo()
+    const { events, onEvent } = collect()
+    await expect(new GitService().push(cwd, { operationId: 'op-fail', onEvent })).rejects.toMatchObject({ code: 'git_no_remote' })
+    expect(events.at(-1)).toMatchObject({ phase: 'failed', code: 'git_no_remote', message: expect.any(String) })
+  })
+
+  it('redacts credentials in live output and in the failure message', async () => {
+    const cwd = repo()
+    withHook(cwd, "console.error('fatal: unable to access https://user:s3cret-token@example.com/repo.git/'); process.exit(1)")
+    write(cwd, 'a.txt')
+    const { events, onEvent } = collect()
+    await expect(new GitService().commit(cwd, 'leaky', { operationId: 'op-redact', onEvent })).rejects.toThrow()
+    const everything = JSON.stringify(events)
+    expect(everything).not.toContain('s3cret-token')
+    expect(outputText(events)).toContain('https://[redacted]@example.com')
+  })
+
+  it('bounds live output: short lines, small batches, a total cap and a notice at the cap', async () => {
+    const cwd = repo()
+    withHook(cwd, "for (let i = 0; i < 20000; i++) console.error('line ' + i + ' ' + 'x'.repeat(2000))")
+    write(cwd, 'a.txt')
+    const normal = collect()
+    await new GitService().commit(cwd, 'noisy', { operationId: 'op-noisy', onEvent: normal.onEvent })
+    const sent = normal.events.flatMap((event) => event.lines ?? [])
+    expect(sent.length).toBeGreaterThan(0)
+    expect(sent.length).toBeLessThanOrEqual(5001)
+    expect(Math.max(...sent.map((line) => line.length))).toBeLessThanOrEqual(501)
+    expect(Math.max(...normal.events.map((event) => event.lines?.length ?? 0))).toBeLessThanOrEqual(40)
+    expect(phases(normal.events).at(-1)).toBe('done')
+
+    write(cwd, 'b.txt')
+    const capped = collect()
+    await new GitService({ liveOutput: { intervalMs: 5, maxLines: 30 } }).commit(cwd, 'noisy again', { operationId: 'op-capped', onEvent: capped.onEvent })
+    const lines = capped.events.flatMap((event) => event.lines ?? [])
+    expect(lines.length).toBeLessThanOrEqual(31)
+    expect(lines.at(-1)).toBe('The rest of the output is not shown.')
+  }, 60_000)
+
+  it('never lets a throwing listener or a missing one stop the command', async () => {
+    const cwd = repo(); write(cwd, 'a.txt')
+    await new GitService().commit(cwd, 'listener throws', { operationId: 'op-throws', onEvent: () => { throw new Error('boom') } })
+    expect(git(cwd, 'log', '-1', '--format=%s')).toBe('listener throws')
+  })
+
+  it('refuses an operation id that is already running', async () => {
+    const cwd = repo(), sentinel = scratch(cwd, 'go')
+    withHook(cwd, blocksUntil(sentinel))
+    write(cwd, 'a.txt')
+    const service = new GitService()
+    const { events, onEvent } = collect()
+    const first = service.commit(cwd, 'first', { operationId: 'same', onEvent })
+    await until(() => events.some((event) => event.phase === 'hook'))
+    await expect(service.push(cwd, { operationId: 'same' })).rejects.toMatchObject({ code: 'git_operation_exists' })
+    writeFileSync(sentinel, '')
+    await first
+  }, 30_000)
+
+  it.each([['an empty index', false], ['a partly staged index', true]])('cancelling a commit during its hook leaves %s, HEAD and the tree as they were', async (_name, prestaged) => {
+    const cwd = repo(), pidFile = scratch(cwd, 'pids')
+    withHook(cwd, hangs(pidFile))
+    write(cwd, 'a.txt'); write(cwd, 'b.txt'); if (prestaged) git(cwd, 'add', 'a.txt')
+    const head = git(cwd, 'rev-parse', 'HEAD'), state = porcelain(cwd)
+    const service = new GitService()
+    const { events, onEvent } = collect()
+    const commit = service.commit(cwd, 'never lands', { operationId: 'op-cancel', owner: 'window-1', onEvent })
+    const settled = commit.then(() => null, (error: unknown) => error as { code?: string })
+    await until(() => outputText(events).includes('hook started'))
+    expect(service.cancelOperation('nobody', 'window-1')).toBe(false)
+    // Only the client that started it may cancel it.
+    expect(service.cancelOperation('op-cancel', 'window-2')).toBe(false)
+    expect(service.cancelOperation('op-cancel', 'window-1')).toBe(true)
+    expect(await settled).toMatchObject({ code: 'git_cancelled' })
+    expect(phases(events).at(-1)).toBe('cancelled')
+    expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
+    expect(porcelain(cwd)).toEqual(state)
+    expect(existsSync(join(cwd, '.git', 'index.lock'))).toBe(false)
+    for (const pid of pidsOf(pidFile)) expect(await waitDead(pid)).toBe(true)
+    // Nothing is left half done: the same commit works once the hook is gone.
+    withHook(cwd, 'process.exit(0)')
+    await service.commit(cwd, 'now it lands')
+    expect(git(cwd, 'log', '-1', '--format=%s')).toBe('now it lands')
+    expect(service.cancelOperation('op-cancel', 'window-1')).toBe(false)
+  }, 60_000)
+
+  it('cancelling a fetch whose server never answers ends the whole process tree and leaves the repository usable', async () => {
+    const cwd = repo(); withRemote(cwd, false)
+    const pidFile = scratch(cwd, 'pids'); stalledTransport(cwd, 'uploadpack', pidFile)
+    const service = new GitService()
+    const { events, onEvent } = collect()
+    const fetching = service.fetch(cwd, { operationId: 'op-fetch', onEvent }).then(() => null, (error: unknown) => error as { code?: string })
+    await until(() => existsSync(pidFile) && outputText(events).includes('hook started'))
+    expect(service.cancelOperation('op-fetch')).toBe(true)
+    expect(await fetching).toMatchObject({ code: 'git_cancelled' })
+    expect(phases(events).at(-1)).toBe('cancelled')
+    for (const pid of pidsOf(pidFile)) expect(await waitDead(pid)).toBe(true)
+    expect((await service.getStatus(cwd)).changes).toEqual([])
+    git(cwd, 'config', '--unset', 'remote.origin.uploadpack')
+    await expect(service.fetch(cwd)).resolves.toMatchObject({ behindAfter: 0 })
+  }, 60_000)
+
+  it('cancelling a push whose server never answers leaves the remote and the branch as they were', async () => {
+    const cwd = repo(), origin = withRemote(cwd)
+    const remoteHead = git(origin, 'rev-parse', 'main'), localHead = git(cwd, 'rev-parse', 'HEAD')
+    const pidFile = scratch(cwd, 'pids'); stalledTransport(cwd, 'receivepack', pidFile)
+    const service = new GitService()
+    const { events, onEvent } = collect()
+    const pushing = service.push(cwd, { operationId: 'op-push-cancel', onEvent }).then(() => null, (error: unknown) => error as { code?: string })
+    await until(() => existsSync(pidFile) && outputText(events).includes('hook started'))
+    expect(service.cancelOperation('op-push-cancel')).toBe(true)
+    expect(await pushing).toMatchObject({ code: 'git_cancelled' })
+    expect(phases(events).at(-1)).toBe('cancelled')
+    for (const pid of pidsOf(pidFile)) expect(await waitDead(pid)).toBe(true)
+    expect(git(origin, 'rev-parse', 'main')).toBe(remoteHead)
+    expect(git(cwd, 'rev-parse', 'HEAD')).toBe(localHead)
+    // The repository lease is free again: another action runs at once.
+    git(cwd, 'config', '--unset', 'remote.origin.receivepack')
+    await service.push(cwd)
+    expect(git(origin, 'rev-parse', 'main')).toBe(localHead)
+  }, 60_000)
+
+  it('cancels a pre-push hook with the process tree it started', async () => {
+    const cwd = repo(), origin = withRemote(cwd), pidFile = scratch(cwd, 'pids')
+    const remoteHead = git(origin, 'rev-parse', 'main')
+    withHook(cwd, hangs(pidFile), 'pre-push')
+    const service = new GitService()
+    const { events, onEvent } = collect()
+    const pushing = service.push(cwd, { operationId: 'op-pre-push', onEvent }).then(() => null, (error: unknown) => error as { code?: string })
+    await until(() => events.some((event) => event.phase === 'hook' && event.hook?.name === 'pre-push'))
+    service.cancelOperation('op-pre-push')
+    expect(await pushing).toMatchObject({ code: 'git_cancelled' })
+    for (const pid of pidsOf(pidFile)) expect(await waitDead(pid)).toBe(true)
+    expect(git(origin, 'rev-parse', 'main')).toBe(remoteHead)
+  }, 60_000)
+
+  it('cancelling an action that still waits for its turn stops it before Git runs', async () => {
+    const cwd = repo(), origin = withRemote(cwd), sentinel = scratch(cwd, 'go')
+    const remoteHead = git(origin, 'rev-parse', 'main')
+    const service = new GitService()
+    // The first action holds the folder while its hook waits.
+    withHook(cwd, blocksUntil(sentinel))
+    write(cwd, 'b.txt')
+    const first = collect()
+    const committing = service.commit(cwd, 'first', { operationId: 'first', onEvent: first.onEvent })
+    await until(() => first.events.some((event) => event.phase === 'hook'))
+    const queued = collect()
+    const pushing = service.push(cwd, { operationId: 'queued', onEvent: queued.onEvent }).then(() => null, (error: unknown) => error as { code?: string })
+    await until(() => phases(queued.events).includes('started'))
+    expect(service.cancelOperation('queued')).toBe(true)
+    writeFileSync(sentinel, '')
+    await committing
+    expect(await pushing).toMatchObject({ code: 'git_cancelled' })
+    expect(phases(queued.events)).toEqual(['started', 'cancelled'])
+    expect(git(origin, 'rev-parse', 'main')).toBe(remoteHead)
+  }, 60_000)
+
+  it('follows a branch switch but never offers to cancel it', async () => {
+    const cwd = repo(), sentinel = scratch(cwd, 'go'); git(cwd, 'branch', 'feature')
+    withHook(cwd, blocksUntil(sentinel), 'post-checkout')
+    const service = new GitService()
+    const { events, onEvent } = collect()
+    const switching = service.checkout(cwd, 'feature', { operationId: 'op-switch', onEvent })
+    await until(() => phases(events).includes('started'))
+    expect(events[0]).toMatchObject({ kind: 'checkout', cancellable: false })
+    expect(service.cancelOperation('op-switch')).toBe(false)
+    writeFileSync(sentinel, '')
+    await switching
+    expect(git(cwd, 'symbolic-ref', '--short', 'HEAD')).toBe('feature')
+    expect(phases(events).at(-1)).toBe('done')
+  }, 30_000)
 })
