@@ -1,5 +1,5 @@
 import type { MousseSettings, MousseSettingsUpdate } from '../../shared/settings'
-import { getDefaultSettings, normalizeAppearance, normalizeContextSettings, normalizePermissionSettings } from '../../shared/settings'
+import { getDefaultSettings, normalizeAgentAccessSettings, normalizeAppearance, normalizeContextSettings, normalizePermissionSettings } from '../../shared/settings'
 import { MOUSSE_BUILTIN_TOOL_IDS } from '../../shared/integrations'
 import { generateRandomUsername } from '../../shared/randomUsername'
 import { normalizeShortcuts } from '../../shared/commands'
@@ -72,6 +72,7 @@ function normalizeSettings(settings: MousseSettings): MousseSettings {
     // The daemon and the desktop run on one machine, so its platform resolves the defaults.
     shortcuts: normalizeShortcuts(settings.shortcuts, process.platform),
     permissions: normalizePermissionSettings(settings.permissions),
+    agentAccess: normalizeAgentAccessSettings(settings.agentAccess),
     ...(settings.title ? { title: withInstance(settings.title) } : {}),
     integrations: {
       ...settings.integrations,

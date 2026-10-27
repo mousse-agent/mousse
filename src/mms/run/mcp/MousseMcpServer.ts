@@ -33,6 +33,7 @@ export const MCP_ERROR_CODES: Record<McpToolErrorCode | 'mousse_unauthorized', n
   mousse_scope_denied: -32003,
   mousse_ceiling_exceeded: -32004,
   mousse_read_only: -32005,
+  mousse_conflict: -32006,
   mousse_unknown_tool: -32601
 }
 
@@ -186,8 +187,10 @@ export class MousseMcpServer implements McpAttachmentProvider {
     )
     const { registry, credentials } = this.options
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      // Stable for the thread (its ceiling, not the turn's mode), so a list a runtime cached stays valid.
-      tools: registry.listForThread(resolved.threadId).map((tool) => ({
+      // For the thread's ceiling, not the turn's mode, and for the credential's agent access level as it
+      // is now. A runtime that caches the list gets a new bearer when the level changes (the level is part
+      // of the runtime generation), and the call-time check refuses a tool the list left out in any case.
+      tools: registry.listForThread(resolved.threadId, 'default', (credentials.current(resolved.tokenHash) ?? resolved).accessLevel).map((tool) => ({
         name: tool.name,
         description: tool.description,
         inputSchema: tool.inputSchema as { type: 'object'; properties?: Record<string, object> }
@@ -207,6 +210,7 @@ export class MousseMcpServer implements McpAttachmentProvider {
         runId: record.runId,
         provider: record.provider,
         modeCeiling: record.modeCeiling,
+        accessLevel: record.accessLevel,
         binding: record.binding,
         current: () => credentials.isCurrent(record)
       }
@@ -219,7 +223,7 @@ export class MousseMcpServer implements McpAttachmentProvider {
         return toolContent(outcome)
       } catch (error) {
         if (error instanceof McpToolError)
-          throw Object.assign(new Error(error.message), { code: MCP_ERROR_CODES[error.code], data: { reason: error.code } })
+          throw Object.assign(new Error(error.message), { code: MCP_ERROR_CODES[error.code], data: { ...error.details, reason: error.code } })
         throw error
       } finally {
         credentials.callRunning(record.tokenHash, record.runId, -1)

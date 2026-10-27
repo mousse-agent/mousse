@@ -116,7 +116,7 @@ describe('a vendor thread\'s tool list across a plan turn and an agent turn', ()
     const listed = d!.orch.mcpToolRegistry().listForThread(childThreadId)
     expect(listed.length).toBeGreaterThan(0)
     expect(listed.map((tool) => tool.name)).not.toContain('thread_fork')
-    for (const tool of listed) expect(tool.access === 'reads' || tool.readOnlySafe === true, tool.name).toBe(true)
+    for (const tool of listed) expect(tool.access === 'reads' || tool.access === 'readsOthers' || tool.readOnlySafe === true, tool.name).toBe(true)
     // The parent's list is unaffected.
     expect(d!.orch.mcpToolRegistry().listForThread(parentId).map((tool) => tool.name)).toContain('thread_fork')
   }
@@ -183,7 +183,7 @@ describe('listing and per-turn availability over the server', () => {
     const { bearer, registry } = await setup({ readOnlyThread: () => true })
     const mcp = bearer()
     const tools = await listTools(mcp)
-    const expected = registry.listFor({ readOnly: false, modeCeiling: 'default' }).filter((tool) => tool.access === 'reads' || tool.readOnlySafe).map((tool) => tool.name).sort()
+    const expected = registry.listFor({ readOnly: false, modeCeiling: 'default' }).filter((tool) => tool.access === 'reads' || tool.access === 'readsOthers' || tool.readOnlySafe).map((tool) => tool.name).sort()
     expect(tools).toEqual(expected)
     expect(tools).toEqual(expect.arrayContaining(['thread_read', 'queue_list', 'ask_user', 'present_plan']))
     expect(tools).not.toContain('thread_fork')

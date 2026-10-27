@@ -6,17 +6,17 @@ import { devGuiTools } from './devGui'
 import type { AppToolHost } from './host'
 import { planTools } from './plans'
 import { quickActionTools } from './quickActions'
-import { ToolRegistry, type ToolRegistryOptions } from './registry'
+import { ToolRegistry, type ToolAccessPolicy, type ToolRegistryOptions } from './registry'
 import { skillTools } from './skills'
 import { taskTools } from './tasks'
-import { threadTools } from './thread'
+import { lineageRelation, threadTools } from './thread'
 import type { AppToolTurns } from './turns'
 import { webTools } from './web'
 
 export * from './types'
 export * from './registry'
 export * from './turns'
-export type { AppToolHost } from './host'
+export type { AgentActionDetails, AppToolHost, ThreadSearchHit } from './host'
 export {
   delegationToolDefinitions,
   dispatchDelegationTool,
@@ -33,6 +33,28 @@ export {
 /** The tool families in the order the pi loop has always sent them, after the delegation tools. */
 export const APP_TOOL_FAMILIES = ['skills', 'plans', 'tasks', 'quickActions', 'devGui', 'web', 'browser', 'applets', 'delegation', 'thread'] as const
 export type AppToolFamily = (typeof APP_TOOL_FAMILIES)[number]
+
+/**
+ * What the central check of `readsOthers` and `managesOthers` tools reads (SPEC §15.1), all of it at
+ * call time. A host that cannot say what the profile allows grants no more than `lineage`.
+ */
+function agentAccessPolicy(host: AppToolHost, engine: RunEngine): ToolAccessPolicy {
+  return {
+    profileLevel: () => host.agentAccess?.().level ?? 'lineage',
+    projectAllowed: (target) => {
+      const projectIds = host.agentAccess?.().projectIds ?? []
+      if (projectIds.length === 0) return true
+      const projectId = target.projectId ?? (target.threadId ? host.threadMeta?.(target.threadId)?.projectId : undefined)
+      return projectId !== undefined && projectIds.includes(projectId)
+    },
+    threadExists: (threadId) => host.threadMeta?.(threadId) !== undefined,
+    relation: (caller, threadId) => {
+      if (host.threadMeta?.(threadId)?.createdByThreadId === caller.threadId) return 'launched'
+      const lineage = lineageRelation(engine, caller.threadId, threadId)
+      return lineage === 'descendant' ? 'descendant' : lineage ? 'ancestor_or_sibling' : null
+    }
+  }
+}
 
 /**
  * One registry over every app-tool module (PR 2 §2). The Mousse MCP server's is built over the
@@ -55,6 +77,7 @@ export function createAppToolRegistry(input: {
     permissionModeFor: host.permissionModeFor ? (runId) => host.permissionModeFor!(runId) : undefined,
     askApproval: host.askApproval ? (threadId, questions, options) => host.askApproval!(threadId, questions, options) : undefined,
     turns: input.turns,
+    access: engine ? agentAccessPolicy(host, engine) : undefined,
     ...input.options
   })
   const families = {} as Record<AppToolFamily, string[]>

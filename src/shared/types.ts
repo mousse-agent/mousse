@@ -730,6 +730,18 @@ export interface Thread {
   updatedAt: string
   /** Set on a subagent thread: the thread that started it. Absent on every other thread. */
   lineage?: ThreadLineage
+  /**
+   * Set on a thread an agent launched with `thread_create`: the creating thread. Unlike `lineage` it
+   * is not a subagent relation; it only lets the creator read and stop the thread at any agent access level.
+   */
+  createdByThreadId?: string
+  /**
+   * The most an agent running in this thread may reach beyond its own thread and lineage (agent access
+   * level, SPEC §15.1), fixed for the thread's life. Set on a fork from its source and the forking agent,
+   * and on a thread a remote person drives (a channel); it only ever narrows. Absent: no limit of its own
+   * (the profile's setting and the thread's delegations still apply).
+   */
+  accessCeiling?: import('./settings').AgentAccessLevel
   /** Set on a subagent created after workspace bindings were recorded. */
   workspaceBinding?: SubagentWorkspaceBinding
   /**

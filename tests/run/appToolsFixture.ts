@@ -1,4 +1,5 @@
 import { vi } from 'vitest'
+import type { AgentAccessLevel } from '../../src/shared/settings'
 import type { DelegationToolHost } from '../../src/mms/run/mcp/appTools/delegation'
 import {
   AppToolTurns,
@@ -71,6 +72,8 @@ export function appToolRegistry(engine: RunEngine, host: AppToolHost) {
     runId: string
     binding?: McpTurnBinding
     modeCeiling?: ModeCeiling
+    /** The level the credential was granted; default `lineage`. */
+    accessLevel?: AgentAccessLevel
     provider?: string
     current?: () => boolean
     toolCallId?: string
@@ -81,6 +84,7 @@ export function appToolRegistry(engine: RunEngine, host: AppToolHost) {
       runId: input.runId,
       provider: input.provider ?? 'codex',
       modeCeiling: input.modeCeiling ?? 'default',
+      accessLevel: input.accessLevel ?? 'lineage',
       binding: input.binding ?? 'drained_turn',
       current: input.current ?? (() => true)
     }

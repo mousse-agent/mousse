@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { AgentAccessLevel, AgentAccessSettings } from '../../src/shared/settings'
+import type { ChatMessage, PendingUserQuestions, Thread } from '../../src/shared/types'
 import {
   ATTEMPT_TOKEN_KEY,
   McpToolError,
   ToolRegistry,
   TURN_TOKEN_KEY,
   type McpCallRequest,
+  type ThreadSearchHit,
   type ToolOutcome
 } from '../../src/mms/run/mcp/appTools'
 import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
@@ -24,7 +27,7 @@ const PHASE5_TOOLS: Record<string, string> = {
   create_task: 'actsAsCaller',
   update_task: 'actsAsCaller',
   list_tasks: 'actsAsCaller',
-  thread_read: 'reads',
+  thread_read: 'readsOthers',
   queue_list: 'reads',
   queue_enqueue: 'writesThreads',
   // Phase 6 (SPEC §16.2).
@@ -419,6 +422,548 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
   })
 })
 
+describe('agent access level (SPEC §15.1)', () => {
+  let fx: DelegationFixture | undefined
+  afterEach(() => {
+    fx?.dispose()
+    fx = undefined
+  })
+
+  const NOW = '2026-10-12T00:00:00.000Z'
+  const thread = (id: string, patch: Partial<Thread> = {}): Thread =>
+    ({ id, name: `Thread ${id}`, createdAt: NOW, updatedAt: NOW, startedAt: NOW, projectId: 'p1', ...patch }) as Thread
+  const profile = (patch: Partial<AgentAccessSettings> = {}): AgentAccessSettings => ({ level: 'manage', projectIds: [], answerApprovals: false, ...patch })
+
+  /**
+   * `parent` (the caller) and `stranger` hold live runs; `elsewhere` (another project) and `loose` (no project)
+   * are known to the host. `state.profile` is the setting as it is now, read at every call.
+   */
+  const world = async (initial: Partial<AgentAccessSettings> = {}, extraHost: Parameters<typeof fakeAppToolHost>[0] = {}) => {
+    fx = delegationFixture()
+    const parentRun = await fx.runningRun('parent')
+    const strangerRun = await fx.runningRun('stranger')
+    const state = { profile: profile(initial) }
+    const threads = new Map<string, Thread>([
+      ['parent', thread('parent')],
+      ['stranger', thread('stranger', { name: 'Stranger work' })],
+      ['elsewhere', thread('elsewhere', { projectId: 'p2', name: 'Elsewhere work' })],
+      ['loose', thread('loose', { projectId: undefined, name: 'Loose notes' })]
+    ])
+    const messages = new Map<string, ChatMessage[]>()
+    const activity = new Map<string, { queuedCount: number; pendingQuestions: PendingUserQuestions[] }>()
+    const hits: ThreadSearchHit[] = []
+    const ledger = { start: vi.fn(() => 'inv'), commit: vi.fn(), failed: vi.fn() }
+    const fake = fakeAppToolHost({
+      agentAccess: () => state.profile,
+      threadMeta: (id) => threads.get(id),
+      listThreads: () => [...threads.values()],
+      listProjects: () => [{ id: 'p1', name: 'One' }, { id: 'p2', name: 'Two' }],
+      searchThreads: (query, limit, options) =>
+        hits
+          .filter((hit) => !options?.allow || options.allow(threads.get(hit.threadId) ?? thread(hit.threadId, { projectId: hit.projectId })))
+          .filter((hit) => !options?.titlesOnly || hit.matchType !== 'message')
+          .filter((hit) => hit.threadName.toLowerCase().includes(query.toLowerCase()) || hit.snippet?.includes(query))
+          .slice(0, limit),
+      threadMessages: (id) => messages.get(id) ?? [],
+      threadActivity: (id) => activity.get(id) ?? { queuedCount: 0, pendingQuestions: [] },
+      toolLedger: () => ledger,
+      ...extraHost
+    })
+    const { registry, turns, request } = appToolRegistry(fx.engine, fake.host)
+    turns.register(appTurn({ threadId: 'parent', runId: parentRun.runId }))
+    turns.register(appTurn({ threadId: 'stranger', runId: strangerRun.runId }))
+    const runs: Record<string, string> = { parent: parentRun.runId, stranger: strangerRun.runId }
+    /** A call as `who`, whose credential was granted `granted` (an absent or unknown grant is passed through as is). */
+    const as = (who: string, granted: unknown): McpCallRequest => {
+      const built = request({ threadId: who, runId: runs[who] })
+      return { ...built, credential: { ...built.credential, accessLevel: granted as AgentAccessLevel } }
+    }
+    const call = (who: string, granted: unknown, name: string, args: Record<string, unknown> = {}) => registry.call(name, args, as(who, granted))
+    const read = async (who: string, granted: unknown, args: Record<string, unknown>) => JSON.parse((await call(who, granted, 'thread_read', args)).text)
+    const denied = (promise: Promise<unknown>) => promise.then(() => undefined, (error: McpToolError) => error)
+    return { fx, registry, turns, request, as, state, threads, messages, activity, hits, ledger, runs, call, read, denied, parentRun, strangerRun, ...fake }
+  }
+
+  const message = (index: number, content: string, role: ChatMessage['role'] = 'user'): ChatMessage => ({ id: `m${index}`, role, content, timestamp: NOW })
+
+  it('lists thread_list and thread_search only for a caller whose effective level is read or manage', async () => {
+    const { registry, state } = await world()
+    const names = (granted: AgentAccessLevel) => registry.listForThread('parent', 'default', granted).map((tool) => tool.name)
+    expect(names('lineage')).not.toContain('thread_list')
+    expect(names('lineage')).not.toContain('thread_search')
+    expect(names('lineage')).toContain('thread_read')
+    for (const level of ['read', 'manage'] as const) expect(names(level)).toEqual(expect.arrayContaining(['thread_list', 'thread_search', 'thread_read']))
+    // The level on the credential is narrowed by the profile as it is now.
+    state.profile = profile({ level: 'lineage' })
+    expect(names('manage')).not.toContain('thread_list')
+    state.profile = profile({ level: 'read' })
+    expect(names('manage')).toContain('thread_list')
+    // An unknown or absent grant lists nothing extra.
+    expect(registry.listForThread('parent', 'default', 'root' as never).map((tool) => tool.name)).not.toContain('thread_list')
+    expect(registry.listForThread('parent').map((tool) => tool.name)).not.toContain('thread_list')
+  })
+
+  describe('registration guard for tools that take a thread id', () => {
+    const tool = (name: string, access: string, properties: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+      ({ name, description: name, inputSchema: { type: 'object', properties }, access, class: 'read', handler: () => ({ text: '' }), ...extra }) as never
+    const id = { type: 'string' }
+
+    it.each([
+      ['a reads tool with threadId', 'reads', { threadId: id }],
+      ['an actsAsCaller tool with threadId', 'actsAsCaller', { threadId: id }],
+      ['a startsThreads tool with sourceThreadId', 'startsThreads', { sourceThreadId: id }],
+      ['a readsOthers tool with a second thread id', 'readsOthers', { threadId: id, otherThreadId: id }],
+      ['a managesOthers tool with threadIds', 'managesOthers', { threadIds: { type: 'array', items: id } }],
+      ['a writesThreads tool with forkThreadId', 'writesThreads', { threadId: id, forkThreadId: id }],
+      ['a thread id nested in an array of objects', 'reads', { targets: { type: 'array', items: { type: 'object', properties: { parentThreadId: id } } } }]
+    ])('refuses %s', (_name, access, properties) => {
+      const registry = new ToolRegistry({ activeRunId: () => 'run-1' })
+      expect(() => registry.register(tool('t', access, properties))).toThrow(/takes a thread id .* the access check does not cover/)
+    })
+
+    it('accepts the tools the check covers, a tool that says where it checks, and a tool with no thread input', () => {
+      const registry = new ToolRegistry({ activeRunId: () => 'run-1' })
+      registry.register(tool('reads_others', 'readsOthers', { threadId: id }))
+      registry.register(tool('manages_others', 'managesOthers', { threadId: id }))
+      registry.register(tool('writes_own', 'writesThreads', { threadId: id }))
+      registry.register(tool('declared', 'reads', { threadId: id, sourceThreadId: id }, { threadArgChecked: 'the handler accepts the caller\'s own thread only' }))
+      registry.register(tool('plain', 'reads', { query: id, projectId: id }))
+      expect(() => registry.register(tool('blank', 'reads', { threadId: id }, { threadArgChecked: '  ' }))).toThrow(/does not cover/)
+    })
+
+    it('every tool of the Mousse registry passes it, so a new one must declare how it checks a thread', async () => {
+      const { registry } = await world()
+      for (const registered of registry.list()) {
+        const names = JSON.stringify(registered.inputSchema).match(/"\w*[tT]hreadIds?"\s*:/g) ?? []
+        if (names.length) expect(['readsOthers', 'managesOthers', 'writesThreads'].includes(registered.access) || Boolean(registered.threadArgChecked), registered.name).toBe(true)
+      }
+      expect(registry.get('queue_list')!.threadArgChecked).toBeTruthy()
+      expect(registry.get('thread_fork')!.threadArgChecked).toBeTruthy()
+    })
+  })
+
+  it('every access class registers, and the new tools carry the class and level the plan names', async () => {
+    const { registry } = await world()
+    expect(registry.get('thread_list')).toMatchObject({ access: 'readsOthers', minLevel: 'read', class: 'read' })
+    expect(registry.get('thread_search')).toMatchObject({ access: 'readsOthers', minLevel: 'read', class: 'read' })
+    expect(registry.get('thread_read')).toMatchObject({ access: 'readsOthers' })
+    const bare = new ToolRegistry({ activeRunId: () => 'run-1' })
+    const tool = { name: 'x', description: 'x', inputSchema: { type: 'object' }, class: 'read', handler: () => ({ text: '' }) }
+    bare.register({ ...tool, access: 'readsOthers' } as never)
+    bare.register({ ...tool, name: 'y', access: 'managesOthers', class: 'mutation' } as never)
+  })
+
+  it('a lineage caller is refused an unrelated thread, naming the level it needs, with no ledger row and no handler run', async () => {
+    const { call, denied, ledger, threads } = await world()
+    for (const [name, args] of [
+      ['thread_read', { threadId: 'stranger' }],
+      ['thread_read', { threadId: 'stranger', view: 'messages' }],
+      ['thread_list', {}],
+      ['thread_search', { query: 'work' }]
+    ] as const) {
+      const error = await denied(call('parent', 'lineage', name, { ...args }))
+      expect(error, name).toBeInstanceOf(McpToolError)
+      expect(error!.code).toBe('mousse_scope_denied')
+      expect(error!.message).toMatch(/needs the "read" agent access level \(yours is "lineage"\)/)
+    }
+    expect(ledger.start).not.toHaveBeenCalled()
+    // Its own thread is always readable.
+    expect((await call('parent', 'lineage', 'thread_read', {})).isError).toBeUndefined()
+    expect((await call('parent', 'lineage', 'thread_read', { threadId: 'parent' })).isError).toBeUndefined()
+    expect(threads.size).toBe(4)
+  })
+
+  it('a thread that does not exist is refused like one the caller may not reach', async () => {
+    const { call, denied, state } = await world({ projectIds: ['p1'] })
+    const unknown = await denied(call('parent', 'manage', 'thread_read', { threadId: 'no-such-thread' }))
+    const outside = await denied(call('parent', 'manage', 'thread_read', { threadId: 'elsewhere' }))
+    expect(unknown!.code).toBe('mousse_scope_denied')
+    expect(outside!.code).toBe('mousse_scope_denied')
+    expect(unknown!.message.replace('no-such-thread', 'X')).toBe(outside!.message.replace('elsewhere', 'X'))
+    // A thread that is known but whose project is not listed is the same as an unknown one for a manager too.
+    state.profile = profile({ projectIds: [] })
+    expect(JSON.parse((await call('parent', 'manage', 'thread_read', { threadId: 'elsewhere' })).text).threadId).toBe('elsewhere')
+    expect((await denied(call('parent', 'manage', 'thread_read', { threadId: 'no-such-thread' })))!.code).toBe('mousse_scope_denied')
+  })
+
+  it('read sees the run lifecycle and metadata of another thread; manage sees every event and the messages', async () => {
+    const { fx, call, read, denied, messages, threads, state, strangerRun } = await world({ level: 'read' })
+    const child = await fx.delegate(strangerRun.runId, 'call-1', { prompt: 'a private prompt' })
+    threads.set(child.childThreadId, thread(child.childThreadId))
+    fx.finish(child.childRunId, 'a private child result')
+    messages.set('stranger', [message(0, 'hello'), message(1, 'x'.repeat(5000), 'assistant'), message(2, 'last')])
+
+    const lifecycle = await read('parent', 'read', { threadId: 'stranger' })
+    expect(lifecycle).toMatchObject({ threadId: 'stranger', view: 'events', scope: 'read' })
+    const types = new Set((lifecycle.events as Array<{ type: string }>).map((event) => event.type))
+    expect(types.has('run.status')).toBe(true)
+    for (const hidden of ['inbox.status', 'effect.status', 'tool.status']) expect(types.has(hidden), hidden).toBe(false)
+    expect(JSON.stringify(lifecycle.events)).not.toContain('a private child result')
+    expect(JSON.stringify(lifecycle.events)).not.toContain('a private prompt')
+    // A subagent's final text is not part of the read level's view either.
+    const subagent = await read('parent', 'read', { threadId: child.childThreadId })
+    expect(JSON.stringify(subagent.events)).not.toContain('a private child result')
+    // The messages need manage.
+    const refused = await denied(call('parent', 'read', 'thread_read', { threadId: 'stranger', view: 'messages' }))
+    expect(refused!.code).toBe('mousse_scope_denied')
+    expect(refused!.message).toMatch(/needs the "manage" agent access level/)
+
+    // The same manage credential under a read profile still sees only the read view.
+    expect((await read('parent', 'manage', { threadId: 'stranger' })).scope).toBe('read')
+    state.profile = profile({ level: 'manage' })
+    const everything = await read('parent', 'manage', { threadId: 'stranger' })
+    expect(everything.scope).toBe('manage')
+    expect(everything.events.length).toBeGreaterThan(lifecycle.events.length)
+    expect(JSON.stringify(everything.events)).toContain('a private child result')
+    expect(JSON.stringify((await read('parent', 'manage', { threadId: child.childThreadId })).events)).toContain('a private child result')
+  })
+
+  it('thread_read messages: paged by afterIndex and limit, each text cut at 4 KB, manage only', async () => {
+    const { call, read, messages } = await world({ level: 'manage' })
+    messages.set('stranger', [message(0, 'one'), message(1, 'y'.repeat(5000), 'assistant'), message(2, 'three'), message(3, 'four')])
+    const first = await read('parent', 'manage', { threadId: 'stranger', view: 'messages', limit: 2 })
+    expect(first).toMatchObject({ view: 'messages', scope: 'manage', total: 4, nextAfterIndex: 2 })
+    expect(first.messages.map((entry: { index: number; text: string }) => [entry.index, entry.text.length])).toEqual([[0, 3], [1, 4096]])
+    expect(first.messages[1].truncated).toBe(true)
+    expect(first.messages[0].truncated).toBeUndefined()
+    const second = await read('parent', 'manage', { threadId: 'stranger', view: 'messages', afterIndex: first.nextAfterIndex, limit: 50 })
+    expect(second.messages.map((entry: { id: string }) => entry.id)).toEqual(['m2', 'm3'])
+    // The caller's own transcript is its own at any level.
+    messages.set('parent', [message(0, 'mine')])
+    expect((await read('parent', 'lineage', { view: 'messages' })).messages[0].text).toBe('mine')
+    expect((await call('parent', 'manage', 'thread_read', { threadId: 'stranger', view: 'transcript' })).isError).toBe(true)
+    expect((await call('parent', 'manage', 'thread_read', { threadId: 'stranger', view: 'messages', limit: 201 })).isError).toBe(true)
+  })
+
+  it('the messages of an ancestor are refused at read, and a sibling is refused outright under lineage', async () => {
+    const { fx, registry, turns, request, denied, messages, threads, state, parentRun } = await world({ level: 'read' })
+    const a = await fx.delegate(parentRun.runId, 'call-a')
+    const b = await fx.delegate(parentRun.runId, 'call-b')
+    threads.set(a.childThreadId, thread(a.childThreadId))
+    threads.set(b.childThreadId, thread(b.childThreadId))
+    messages.set('parent', [message(0, 'the parent transcript')])
+    messages.set(a.childThreadId, [message(0, 'sibling transcript')])
+    fx.engine.markStarting(a.childRunId)
+    fx.engine.markRunning(a.childRunId)
+    turns.register(appTurn({ threadId: a.childThreadId, runId: a.childRunId }))
+    const asChild = (granted: AgentAccessLevel, name: string, args: Record<string, unknown>) =>
+      registry.call(name, args, request({ threadId: a.childThreadId, runId: a.childRunId, accessLevel: granted }))
+    // The child may read its parent's lifecycle through lineage at any level, never its transcript below manage.
+    expect(JSON.parse((await asChild('lineage', 'thread_read', { threadId: 'parent' })).text).scope).toBe('ancestor_or_sibling')
+    const refused = await denied(asChild('read', 'thread_read', { threadId: 'parent', view: 'messages' }))
+    expect(refused!.code).toBe('mousse_scope_denied')
+    expect(await denied(asChild('lineage', 'thread_read', { threadId: 'parent', view: 'messages' }))).toBeInstanceOf(McpToolError)
+    // A sibling is not lineage: refused at lineage; at read the lifecycle only; messages need manage.
+    expect((await denied(asChild('lineage', 'thread_read', { threadId: b.childThreadId })))!.code).toBe('mousse_scope_denied')
+    expect(JSON.parse((await asChild('read', 'thread_read', { threadId: b.childThreadId })).text).scope).toBe('read')
+    expect((await denied(asChild('read', 'thread_read', { threadId: b.childThreadId, view: 'messages' })))!.code).toBe('mousse_scope_denied')
+    // A manager reads the parent transcript.
+    state.profile = profile({ level: 'manage' })
+    expect(JSON.parse((await asChild('manage', 'thread_read', { threadId: 'parent', view: 'messages' })).text).messages[0].text).toBe('the parent transcript')
+  })
+
+  it('a thread the caller launched is readable at lineage', async () => {
+    const { call, threads, read } = await world({ level: 'lineage' })
+    threads.set('stranger', thread('stranger', { createdByThreadId: 'parent' }))
+    expect((await read('parent', 'lineage', { threadId: 'stranger' })).scope).toBe('launched')
+    // The launched relation is the caller's alone.
+    threads.set('stranger', thread('stranger', { createdByThreadId: 'someone-else' }))
+    await expect(call('parent', 'lineage', 'thread_read', { threadId: 'stranger' })).rejects.toMatchObject({ code: 'mousse_scope_denied' })
+  })
+
+  it('the effective level is the narrower of the grant and the profile now; an absent or invalid grant is lineage', async () => {
+    const { call, state, denied } = await world({ level: 'manage' })
+    const reach = async (granted: unknown) => {
+      const error = await denied(call('parent', granted, 'thread_read', { threadId: 'stranger', view: 'messages' }))
+      if (!error) return 'manage'
+      const events = await denied(call('parent', granted, 'thread_read', { threadId: 'stranger' }))
+      return events ? 'lineage' : 'read'
+    }
+    expect(await reach('manage')).toBe('manage')
+    expect(await reach('read')).toBe('read')
+    expect(await reach('lineage')).toBe('lineage')
+    // Whatever the profile says, a credential without a valid grant gets the most restrictive level.
+    for (const bad of [undefined, null, 'root', 'MANAGE', 3, {}]) expect(await reach(bad), String(bad)).toBe('lineage')
+    // A grant higher than the profile is held down to it.
+    state.profile = profile({ level: 'read' })
+    expect(await reach('manage')).toBe('read')
+    state.profile = profile({ level: 'lineage' })
+    expect(await reach('manage')).toBe('lineage')
+    // A profile read that is invalid is lineage too.
+    state.profile = { level: 'root' } as never
+    expect(await reach('manage')).toBe('lineage')
+  })
+
+  it('a host that cannot say what the profile allows grants lineage, whatever the credential holds', async () => {
+    const { registry, call, denied } = await world({}, { agentAccess: undefined })
+    const error = await denied(call('parent', 'manage', 'thread_read', { threadId: 'stranger' }))
+    expect(error!.code).toBe('mousse_scope_denied')
+    expect(registry.effectiveLevel('manage')).toBe('lineage')
+  })
+
+  it('a settings read that fails is lineage, never the credential\'s level', async () => {
+    const { registry, call, denied } = await world({}, { agentAccess: () => { throw new Error('settings unreadable') } })
+    expect(registry.effectiveLevel('manage')).toBe('lineage')
+    expect((await denied(call('parent', 'manage', 'thread_list')))!.code).toBe('mousse_scope_denied')
+  })
+
+  it('revocation: lowering the level, or removing the project, refuses the next call of a running manage turn', async () => {
+    const { call, state, denied, registry } = await world({ level: 'manage', projectIds: ['p1'] })
+    expect(JSON.parse((await call('parent', 'manage', 'thread_list')).text).threads.map((row: { id: string }) => row.id)).toContain('stranger')
+    expect((await call('parent', 'manage', 'thread_read', { threadId: 'stranger' })).isError).toBeUndefined()
+    // The project leaves the list: the same credential is refused that project at once.
+    state.profile = profile({ level: 'manage', projectIds: ['p2'] })
+    expect((await denied(call('parent', 'manage', 'thread_read', { threadId: 'stranger' })))!.code).toBe('mousse_scope_denied')
+    expect((await denied(call('parent', 'manage', 'thread_list', { projectId: 'p1' })))!.code).toBe('mousse_scope_denied')
+    // The level drops to lineage: thread_list is refused, and no longer listed.
+    state.profile = profile({ level: 'lineage' })
+    const error = await denied(call('parent', 'manage', 'thread_list'))
+    expect(error!.code).toBe('mousse_scope_denied')
+    expect(error!.message).toMatch(/yours is "lineage"/)
+    expect(registry.listForThread('parent', 'default', 'manage').map((tool) => tool.name)).not.toContain('thread_list')
+    // Raising it again applies to the same credential only up to what it was granted.
+    state.profile = profile({ level: 'manage' })
+    expect((await call('parent', 'manage', 'thread_list')).isError).toBeUndefined()
+    expect((await denied(call('parent', 'read', 'thread_read', { threadId: 'stranger', view: 'messages' })))!.code).toBe('mousse_scope_denied')
+  })
+
+  it('the project list allows only its projects; a thread without a project is allowed only by an empty list', async () => {
+    const { call, state, denied, read } = await world({ level: 'manage', projectIds: ['p1'] })
+    expect((await read('parent', 'manage', { threadId: 'stranger' })).threadId).toBe('stranger')
+    expect((await denied(call('parent', 'manage', 'thread_read', { threadId: 'elsewhere' })))!.code).toBe('mousse_scope_denied')
+    expect((await denied(call('parent', 'manage', 'thread_read', { threadId: 'loose' })))!.code).toBe('mousse_scope_denied')
+    state.profile = profile({ level: 'manage', projectIds: [] })
+    expect((await read('parent', 'manage', { threadId: 'loose' })).threadId).toBe('loose')
+    expect((await read('parent', 'manage', { threadId: 'elsewhere' })).threadId).toBe('elsewhere')
+  })
+
+  it('thread_list: allow-listed projects only, started and unsettled by default, filters and limits, questions for managers only', async () => {
+    const { call, fx, state, threads, activity, denied, strangerRun } = await world({ level: 'read', projectIds: ['p1'] })
+    threads.set('draft', thread('draft', { startedAt: undefined }))
+    threads.set('old', thread('old', { settledAt: NOW }))
+    threads.set('quiet', thread('quiet', { updatedAt: '2026-10-11T00:00:00.000Z' }))
+    const sub = await fx.delegate(strangerRun.runId, 'call-sub')
+    threads.set(sub.childThreadId, thread(sub.childThreadId, { lineage: { parentThreadId: 'stranger', rootThreadId: 'stranger', relationship: 'subagent' } }))
+    activity.set('stranger', {
+      queuedCount: 2,
+      pendingQuestions: [{ requestId: 'req-1', threadId: 'stranger', questions: [{ id: 'q', prompt: 'Which?', options: [{ id: 'a', label: 'A' }] }] } as never]
+    })
+    const list = async (granted: AgentAccessLevel, args: Record<string, unknown> = {}) => JSON.parse((await call('parent', granted, 'thread_list', args)).text) as { threads: Array<Record<string, unknown>>; projects: unknown[] }
+    const ids = (value: { threads: Array<Record<string, unknown>> }) => value.threads.map((row) => row.id)
+
+    const base = await list('read')
+    expect(ids(base)).toEqual(['parent', 'stranger', 'quiet'])
+    expect(ids(base)).not.toEqual(expect.arrayContaining(['elsewhere', 'loose', 'draft', 'old', sub.childThreadId]))
+    expect(base.projects).toEqual([{ id: 'p1', name: 'One' }])
+    const stranger = base.threads.find((row) => row.id === 'stranger')!
+    expect(stranger).toMatchObject({ projectId: 'p1', projectName: 'One', queuedCount: 2, pendingQuestionCount: 1, status: 'awaiting_input', activeRunId: strangerRun.runId })
+    // The questions themselves, with their request ids, are for a manager.
+    expect(stranger.pendingQuestions).toBeUndefined()
+    expect(JSON.stringify(base)).not.toContain('req-1')
+    state.profile = profile({ level: 'manage', projectIds: ['p1'] })
+    const managed = await list('manage')
+    expect(managed.threads.find((row) => row.id === 'stranger')!.pendingQuestions).toEqual([expect.objectContaining({ requestId: 'req-1' })])
+
+    expect(ids(await list('manage', { includeUnstarted: true }))).toContain('draft')
+    expect(ids(await list('manage', { includeSettled: true }))).toContain('old')
+    expect(ids(await list('manage', { includeSubagents: true }))).toContain(sub.childThreadId)
+    expect(ids(await list('manage', { status: 'awaiting_input' }))).toEqual(['stranger'])
+    expect(ids(await list('manage', { status: 'active' }))).toEqual(['parent'])
+    expect(ids(await list('manage', { status: 'idle' }))).toContain('quiet')
+    expect(ids(await list('manage', { limit: 1 }))).toHaveLength(1)
+    expect((await call('parent', 'manage', 'thread_list', { limit: 0 })).isError).toBe(true)
+    expect((await call('parent', 'manage', 'thread_list', { status: 'busy' })).isError).toBe(true)
+    // Subagents are listed only for a manager.
+    state.profile = profile({ level: 'read', projectIds: ['p1'] })
+    expect((await denied(call('parent', 'read', 'thread_list', { includeSubagents: true })))!.code).toBe('mousse_scope_denied')
+    // A thread the caller launched is listed whatever the project list says (a draft and a settled one too).
+    threads.set('mine', thread('mine', { projectId: 'p2', startedAt: undefined, settledAt: NOW, createdByThreadId: 'parent' }))
+    expect(ids(await list('read'))).toContain('mine')
+    expect(ids(await list('read', { projectId: 'p1' }))).not.toContain('mine')
+  })
+
+  it('thread_search: titles and projects at read, message matches and snippets only for manage, inside the project list', async () => {
+    const { call, hits, state } = await world({ level: 'read', projectIds: ['p1'] })
+    hits.push(
+      { threadId: 'stranger', threadName: 'Stranger work', projectId: 'p1', projectName: 'One', matchType: 'thread' },
+      { threadId: 'stranger', threadName: 'Stranger work', projectId: 'p1', projectName: 'One', matchType: 'message', snippet: 'the work: secret plan', messageId: 'm1' },
+      { threadId: 'elsewhere', threadName: 'Elsewhere work', projectId: 'p2', projectName: 'Two', matchType: 'thread' }
+    )
+    const search = async (granted: AgentAccessLevel, args: Record<string, unknown>) => JSON.parse((await call('parent', granted, 'thread_search', args)).text).results as Array<Record<string, unknown>>
+    const asRead = await search('read', { query: 'work' })
+    expect(asRead).toEqual([{ threadId: 'stranger', threadName: 'Stranger work', projectId: 'p1', projectName: 'One', matchType: 'thread' }])
+    expect(JSON.stringify(asRead)).not.toContain('secret plan')
+    state.profile = profile({ level: 'manage', projectIds: ['p1'] })
+    const asManage = await search('manage', { query: 'work' })
+    expect(asManage.map((hit) => hit.matchType)).toEqual(['thread', 'message'])
+    expect(asManage[1].snippet).toBe('the work: secret plan')
+    expect(JSON.stringify(asManage)).not.toContain('Elsewhere')
+    state.profile = profile({ level: 'manage' })
+    expect((await search('manage', { query: 'work', limit: 2 }))).toHaveLength(2)
+    expect((await call('parent', 'manage', 'thread_search', { query: '  ' })).isError).toBe(true)
+    expect((await call('parent', 'manage', 'thread_search', { query: 'x'.repeat(513) })).isError).toBe(true)
+    expect((await call('parent', 'manage', 'thread_search', { query: 'work', limit: 201 })).isError).toBe(true)
+  })
+
+  it('thread_search hands the caller\'s project list and titles-only to the host, to apply before its limit', async () => {
+    const seen: Array<{ limit: number; titlesOnly?: boolean; maxMessageThreads?: number; allow?: (thread: Thread) => boolean }> = []
+    const { call, state } = await world({ level: 'read', projectIds: ['p1'] }, { searchThreads: (_query, limit, options) => { seen.push({ limit, ...options }); return [] } })
+    await call('parent', 'read', 'thread_search', { query: 'work', limit: 5 })
+    expect(seen[0]).toMatchObject({ limit: 5, titlesOnly: true })
+    const allow = seen[0].allow!
+    expect(allow(thread('in-list', { projectId: 'p1' }))).toBe(true)
+    expect(allow(thread('elsewhere', { projectId: 'p2' }))).toBe(false)
+    expect(allow(thread('loose', { projectId: undefined }))).toBe(false)
+    // A thread the caller launched is searchable whatever the list says.
+    expect(allow(thread('mine', { projectId: 'p2', createdByThreadId: 'parent' }))).toBe(true)
+    state.profile = profile({ level: 'manage', projectIds: ['p1'] })
+    await call('parent', 'manage', 'thread_search', { query: 'work' })
+    expect(seen[1]).toMatchObject({ limit: 50, titlesOnly: false, maxMessageThreads: 100 })
+  })
+
+  it('what read returns of a thread is a trimmed copy: no error text, request ids, provider sessions, homes or prompts', async () => {
+    const { fx, read, state, threads, strangerRun } = await world({ level: 'read' })
+    const child = await fx.delegate(strangerRun.runId, 'call-1', { prompt: 'a private prompt', instanceId: 'claude', model: 'secret-model' })
+    threads.set(child.childThreadId, thread(child.childThreadId))
+    fx.store.appendEvent({
+      threadId: 'stranger',
+      runId: strangerRun.runId,
+      type: 'attempt.created',
+      payload: {
+        attemptId: 'attempt-1', runId: strangerRun.runId, ordinal: 1, reason: 'initial', status: 'running', startedAt: '2026-10-12T00:00:00.000Z', completedAt: null,
+        providerRef: { provider: 'claude', sessionId: 'sess-secret' },
+        executionBinding: { homeId: 'C:\\Users\\someone\\.claude', accountGeneration: 'acct-secret' }
+      }
+    })
+    fx.store.appendEvent({ threadId: 'stranger', runId: strangerRun.runId, type: 'restart.note', payload: { note: 'secret restart detail' } })
+    fx.store.appendEvent({ threadId: 'stranger', runId: strangerRun.runId, type: 'agent.action', payload: { action: 'sent_message', actorThreadId: 'other', actorRunId: 'r', toolCallId: 'tc-secret', summary: 'a summary' } })
+    fx.engine.markTerminal(strangerRun.runId, 'failed', { error: 'boom at C:\\Users\\someone\\project\\secret.ts' })
+    const trimmed = await read('parent', 'read', { threadId: 'stranger' })
+    const text = JSON.stringify(trimmed.events)
+    for (const secret of ['sess-secret', 'someone', 'acct-secret', 'boom at', 'secret restart detail', 'tc-secret', 'a summary', 'a private prompt', 'secret-model', 'claude', 'promptDigest']) expect(text, secret).not.toContain(secret)
+    // What it keeps: which run, in what state, when.
+    const statuses = (trimmed.events as Array<{ type: string; payload: Record<string, unknown> }>).filter((event) => event.type === 'run.status')
+    expect(statuses.at(-1)!.payload).toMatchObject({ runId: strangerRun.runId, ordinal: 1, status: 'failed' })
+    expect(statuses.at(-1)!.payload).not.toHaveProperty('clientRequestId')
+    expect(trimmed.events.find((event: { type: string; payload: { attemptId?: string } }) => event.type === 'attempt.created' && event.payload.attemptId === 'attempt-1').payload).toEqual({
+      attemptId: 'attempt-1', runId: strangerRun.runId, ordinal: 1, reason: 'initial', status: 'running', startedAt: '2026-10-12T00:00:00.000Z', completedAt: null
+    })
+    expect(trimmed.events.find((event: { type: string }) => event.type === 'agent.action').payload).toEqual({ action: 'sent_message', actorThreadId: 'other', actorRunId: 'r' })
+    // A manager still sees the whole record.
+    state.profile = profile({ level: 'manage' })
+    const full = JSON.stringify((await read('parent', 'manage', { threadId: 'stranger' })).events)
+    for (const secret of ['sess-secret', 'boom at', 'secret restart detail']) expect(full, secret).toContain(secret)
+  })
+
+  it('a call during a provider-started continuation run is accepted for another thread at the granted level, and refused below it', async () => {
+    const state = { profile: profile({ level: 'manage' }) }
+    fx = delegationFixture()
+    const first = await fx.runningRun('parent')
+    await fx.runningRun('stranger')
+    fx.engine.markTerminal(first.runId, 'completed')
+    const ledger = { start: vi.fn(() => 'inv'), commit: vi.fn(), failed: vi.fn() }
+    const fake = fakeAppToolHost({ agentAccess: () => state.profile, threadMeta: (id) => thread(id), toolLedger: () => ledger })
+    let release!: (gate: { runId: string | null }) => void
+    const gate = new Promise<{ runId: string | null }>((resolve) => { release = resolve })
+    fake.host.awaitLiveRun = () => gate
+    const { registry, turns, request } = appToolRegistry(fx.engine, fake.host)
+    const previous = turns.register(appTurn({ threadId: 'parent', runId: first.runId }))
+    const asCredential = (accessLevel: AgentAccessLevel) => {
+      const built = request({ threadId: 'parent', runId: first.runId, binding: 'per_call', provider: 'claude' })
+      return { ...built, credential: { ...built.credential, accessLevel } }
+    }
+    const args = { threadId: 'stranger', [TURN_TOKEN_KEY]: previous.turn.turnToken }
+    // The credential still names the run that ended; the provider's own turn is about to become active.
+    const manager = registry.call('thread_read', { ...args }, asCredential('manage'))
+    const reader = registry.call('thread_read', { ...args, view: 'messages' }, asCredential('read'))
+    const lineage = registry.call('thread_list', { [TURN_TOKEN_KEY]: previous.turn.turnToken }, asCredential('lineage')).catch((error) => error)
+    const continuation = await fx.runningRun('parent')
+    turns.register(appTurn({ threadId: 'parent', runId: continuation.runId }), { continuation: true })
+    release({ runId: continuation.runId })
+    const read = JSON.parse((await manager).text)
+    expect(read).toMatchObject({ threadId: 'stranger', scope: 'manage' })
+    // The same continuation run: a credential granted read is still refused the transcript, and lineage the listing.
+    await expect(reader).rejects.toMatchObject({ code: 'mousse_scope_denied' })
+    expect((await lineage).code).toBe('mousse_scope_denied')
+    // The listing refused by the central check never reached the ledger; the two thread_read calls did, under the continuation run.
+    expect(ledger.start).toHaveBeenCalledTimes(2)
+  })
+
+  it('a definition run is held to the access level before its approval is asked, so a refused call never prompts a person', async () => {
+    fx = delegationFixture()
+    const run = await fx.runningRun('parent')
+    await fx.runningRun('stranger')
+    const state = { profile: profile({ level: 'manage' }) }
+    const asked: string[] = []
+    const policy = {
+      profileId: 'default', threadId: 'parent', runId: 'r', definitionId: 'def-1', definitionRevision: 'rev-1', source: 'editor',
+      workspace: { mode: 'thread_worktree', canonicalRoots: [process.cwd()] },
+      script: { enabled: false, allowFilesystem: false, allowNetwork: false, executionMode: 'workspace', interpreters: [] },
+      approval: { askUser: true, policy: 'always', unattendedBehavior: 'pause' },
+      memoryScope: 'off', includeCurrentThread: false, includeProjectInstructions: false, attachmentPolicy: 'none',
+      fallbacks: { enabled: false, retryOn: [], allowHigherCost: false, retryCount: 0, backoffMs: 0 },
+      fallbackModels: []
+    }
+    const definition = {
+      policy,
+      grants: { skills: [], mcpTools: [], builtinTools: ['thread_read', 'thread_list'].map((id) => ({ id, source: 'definition' })), denied: [] },
+      approve: async (request: { argumentDigest: string }) => (asked.push('asked'), { status: 'approved', digest: request.argumentDigest })
+    }
+    const fake = fakeAppToolHost({ agentAccess: () => state.profile, threadMeta: (id) => thread(id), listThreads: () => [thread('stranger')], listProjects: () => [] })
+    const { registry, turns, request } = appToolRegistry(fx.engine, fake.host)
+    turns.register(appTurn({ threadId: 'parent', runId: run.runId, definition: definition as never }))
+    const as = (accessLevel: AgentAccessLevel) => {
+      const built = request({ threadId: 'parent', runId: run.runId })
+      return { ...built, credential: { ...built.credential, accessLevel } }
+    }
+    // A lineage grant: refused by the access check, which comes before the definition's approval.
+    for (const [name, args] of [['thread_read', { threadId: 'stranger' }], ['thread_list', {}]] as const)
+      await expect(registry.call(name, { ...args }, as('lineage'))).rejects.toMatchObject({ code: 'mousse_scope_denied' })
+    expect(asked).toEqual([])
+    // A manage grant passes the access check and then meets the definition's own approval, as before.
+    expect((await registry.call('thread_read', { threadId: 'stranger' }, as('manage'))).isError).toBeFalsy()
+    expect(asked).toEqual(['asked'])
+    // Lowering the setting refuses the same grant again without asking.
+    state.profile = profile({ level: 'lineage' })
+    await expect(registry.call('thread_read', { threadId: 'stranger' }, as('manage'))).rejects.toMatchObject({ code: 'mousse_scope_denied' })
+    expect(asked).toEqual(['asked'])
+  })
+
+  it('a tool whose host method is absent answers "not available in this host"', async () => {
+    const { call } = await world({ level: 'manage' }, { listThreads: undefined, searchThreads: undefined, threadMessages: undefined })
+    expect(await call('parent', 'manage', 'thread_list')).toMatchObject({ isError: true, text: expect.stringContaining('not available in this host') })
+    expect(await call('parent', 'manage', 'thread_search', { query: 'a' })).toMatchObject({ isError: true, text: expect.stringContaining('not available in this host') })
+    expect(await call('parent', 'manage', 'thread_read', { threadId: 'stranger', view: 'messages' })).toMatchObject({ isError: true, text: expect.stringContaining('not available in this host') })
+  })
+
+  it('a read-only subagent may call the read-others tools, at its own level', async () => {
+    const { registry, request, runs, read } = await world({ level: 'read' }, { readOnlyThread: (id) => id === 'parent' })
+    expect((await read('parent', 'read', { threadId: 'stranger' })).scope).toBe('read')
+    expect((await registry.call('thread_list', {}, request({ threadId: 'parent', runId: runs.parent, accessLevel: 'read' }))).isError).toBeUndefined()
+    expect(registry.listForThread('parent', 'default', 'read').map((tool) => tool.name)).toEqual(expect.arrayContaining(['thread_read', 'thread_list', 'thread_search']))
+  })
+
+  it('an in-process call of a tool that reaches other threads is held to the same check', async () => {
+    const { registry, turns, parentRun } = await world({ level: 'manage' })
+    const turn = turns.get(parentRun.runId)!
+    const inProcess = (args: Record<string, unknown>, accessLevel?: AgentAccessLevel) =>
+      registry.callInProcess('thread_read', args, { kind: 'run', runId: parentRun.runId }, { turn: { ...turn, ...(accessLevel ? { accessLevel } : {}) }, toolCallId: 'c', signal: new AbortController().signal })
+    expect(await inProcess({ threadId: 'stranger' })).toMatchObject({ isError: true, text: expect.stringContaining('needs the "read" agent access level') })
+    expect((await inProcess({ threadId: 'stranger' }, 'manage')).isError).toBeUndefined()
+    expect((await inProcess({})).isError).toBeUndefined()
+  })
+
+  it('the model cannot choose the level of a task it delegates: the host works it out from the caller', async () => {
+    const { call, host, delegation } = await world({ level: 'manage' })
+    await call('parent', 'lineage', 'delegate_task', { prompt: 'Look', title: 'Looker', workspace: 'shared', role: 'research', accessLevel: 'manage' })
+    expect(delegation.delegateTask).toHaveBeenCalledWith(expect.not.objectContaining({ accessLevel: expect.anything() }), expect.anything())
+    // The host is built for the caller, whose granted level it narrows by the profile when it starts the child.
+    expect(host.delegation).toHaveBeenLastCalledWith(expect.objectContaining({ threadId: 'parent', accessLevel: 'lineage' }))
+    await call('parent', 'manage', 'delegate_task', { prompt: 'Look again', title: 'Looker 2', workspace: 'shared', role: 'research' })
+    expect(host.delegation).toHaveBeenLastCalledWith(expect.objectContaining({ accessLevel: 'manage' }))
+  })
+})
+
 /** A bare registry (no run engine) whose single thread `t` runs `active()`, with a turn for each run asked about. */
 function appToolRegistryWithoutEngine(forRun: (runId: string) => { start: (call: never) => string | undefined; commit: (id: string) => void; failed: (id: string) => void }, active: () => string | null) {
   const turns = new Map<string, ReturnType<typeof appTurn>>()
@@ -428,7 +973,7 @@ function appToolRegistryWithoutEngine(forRun: (runId: string) => { start: (call:
     turns: { get: (runId: string) => turns.get(runId) ?? { ...appTurn({ threadId: 't', runId }), turnToken: 'tok' } } as never
   })
   const request = (runId: string, id = 'call-1'): McpCallRequest => ({
-    credential: { threadId: 't', runId, provider: 'p', modeCeiling: 'default', binding: 'drained_turn', current: () => true },
+    credential: { threadId: 't', runId, provider: 'p', modeCeiling: 'default', accessLevel: 'lineage', binding: 'drained_turn', current: () => true },
     toolCallId: id,
     signal: new AbortController().signal
   })

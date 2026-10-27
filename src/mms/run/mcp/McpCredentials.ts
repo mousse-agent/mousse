@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto'
+import { isAgentAccessLevel, type AgentAccessLevel } from '../../../shared/settings'
 import { str, type Row } from '../db/rows'
 import { fail } from '../db/RunStoreError'
 import type { RunStore } from '../RunStore'
@@ -18,6 +19,11 @@ export interface CredentialRecord {
   runId: string
   provider: string
   modeCeiling: ModeCeiling
+  /**
+   * The agent access level the run's turn was granted (SPEC §15.1), re-pointed with the run like the
+   * ceiling. The call-time check narrows it by the profile's setting as it is then.
+   */
+  accessLevel: AgentAccessLevel
   /**
    * The runtime epoch of (thread, instance) it was minted in; a newer epoch closes it. Kept in this
    * process's memory with the token, like the token never stored: a row from an earlier process is
@@ -45,6 +51,8 @@ export interface BearerTurn {
   instanceId: string
   runId: string
   modeCeiling: ModeCeiling
+  /** The level the turn was granted; absent, or anything but a known level, is `lineage`. */
+  accessLevel?: AgentAccessLevel
   binding: McpTurnBinding
   /**
    * The runtime the turn runs in: driver, home, account generation and config revision (and the
@@ -137,8 +145,8 @@ export class McpCredentials {
       for (const tokenHash of stale) this.revokeHash(tokenHash)
       if (!reusable) return { ...this.mint({ ...input, epoch }), reused: false, epoch }
       this.db
-        .statement('UPDATE credentials SET run_id = ?, mode_ceiling = ?, last_seen_at = ? WHERE token_hash = ?')
-        .run(input.runId, input.modeCeiling, new Date(now).toISOString(), reusable.record.tokenHash)
+        .statement('UPDATE credentials SET run_id = ?, mode_ceiling = ?, access_level = ?, last_seen_at = ? WHERE token_hash = ?')
+        .run(input.runId, input.modeCeiling, grantedLevel(input.accessLevel), new Date(now).toISOString(), reusable.record.tokenHash)
       this.calls.set(reusable.record.tokenHash, { runId: input.runId, received: 0, running: 0 })
       return { token: reusable.token, tokenHash: reusable.record.tokenHash, reused: true, epoch }
     })
@@ -148,7 +156,7 @@ export class McpCredentials {
    * A fresh credential for a run in the given epoch (default: the current one of thread and
    * instance). Tests and `bearerForTurn` use it; a turn takes its bearer from `bearerForTurn`.
    */
-  mint(input: { threadId: string; runId: string; provider?: string; instanceId?: string; modeCeiling: ModeCeiling; binding?: McpTurnBinding; epoch?: number }): {
+  mint(input: { threadId: string; runId: string; provider?: string; instanceId?: string; modeCeiling: ModeCeiling; accessLevel?: AgentAccessLevel; binding?: McpTurnBinding; epoch?: number }): {
     token: string
     tokenHash: string
   } {
@@ -164,11 +172,11 @@ export class McpCredentials {
     const now = this.now()
     this.db
       .statement(
-        `INSERT INTO credentials(token_hash, thread_id, run_id, provider, mode_ceiling, created_at,
-           revoked_at, last_seen_at)
-         VALUES(?, ?, ?, ?, ?, ?, NULL, ?)`
+        `INSERT INTO credentials(token_hash, thread_id, run_id, provider, mode_ceiling, access_level,
+           created_at, revoked_at, last_seen_at)
+         VALUES(?, ?, ?, ?, ?, ?, ?, NULL, ?)`
       )
-      .run(tokenHash, input.threadId, input.runId, provider, input.modeCeiling, now, now)
+      .run(tokenHash, input.threadId, input.runId, provider, input.modeCeiling, grantedLevel(input.accessLevel), now, now)
     this.tokens.set(tokenHash, token)
     this.meta.set(tokenHash, { epoch, binding })
     this.calls.set(tokenHash, { runId: input.runId, received: 0, running: 0 })
@@ -363,6 +371,11 @@ export class McpCredentials {
   }
 }
 
+/** An absent or unknown level is the most restrictive one, `lineage`. */
+function grantedLevel(level: unknown): AgentAccessLevel {
+  return isAgentAccessLevel(level) ? level : 'lineage'
+}
+
 function epochKey(threadId: string, instanceId: string): string {
   return `${threadId}\u0000${instanceId}`
 }
@@ -374,6 +387,7 @@ function rowRecord(row: Row, meta: { epoch: number; binding: McpTurnBinding } | 
     runId: String(row.run_id),
     provider: String(row.provider),
     modeCeiling: row.mode_ceiling === 'plan' ? 'plan' : 'default',
+    accessLevel: grantedLevel(row.access_level),
     // A row this process did not mint (one from before a restart, revoked at boot) is of epoch 0 and rotates.
     epoch: meta?.epoch ?? 0,
     binding: meta?.binding ?? 'rotate',

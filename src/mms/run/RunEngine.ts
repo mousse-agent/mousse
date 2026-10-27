@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events'
 import type { ExecutionBinding } from '../../shared/harness/types'
+import { narrowAgentAccess, type AgentAccessLevel } from '../../shared/settings'
 import { DaemonEpoch } from './DaemonEpoch'
 import { CommandRejection, fail, reject, RunStoreError } from './db/RunStoreError'
 import { isFencedSource, isFollowUpSource, isResumeSource } from './delegation/sources'
@@ -70,6 +71,8 @@ export interface SendDelegation {
   wake: DelegationWake
   /** The follow-up's ceiling: the caller's authority narrowed by the subagent's own policy. */
   modeCeiling?: ModeCeiling
+  /** The follow-up's access level, narrowed the same way. */
+  accessLevel?: AgentAccessLevel
   /** The subagent's workspace policy, role and selection, copied from its first task. */
   workspace?: DelegationWorkspace | null
   role?: string | null
@@ -174,6 +177,8 @@ export interface DelegationRequest {
   title?: string
   /** The most the child may do (SPEC §15.1); the caller has already checked it against its own. */
   modeCeiling?: ModeCeiling
+  /** The agent access level the child is granted (SPEC §15.1); the caller has already narrowed it by its own. */
+  accessLevel?: AgentAccessLevel
 }
 
 export interface DelegationAccepted {
@@ -197,6 +202,11 @@ export interface ForkThreadRequest {
    * fork starts from the source's current HEAD. Recorded in the transfer payload as `seedFrom`.
    */
   seedFrom?: 'checkpoint' | 'current_head'
+  /**
+   * The agent access level of the agent that forks, when an agent does (a tool call); absent for a
+   * person's fork. The host narrows the fork's own ceiling by it (SPEC §15.1).
+   */
+  accessLevel?: AgentAccessLevel
 }
 
 /**
@@ -236,10 +246,18 @@ export interface MergeBackAccepted {
   replayed: boolean
 }
 
+/**
+ * The narrowest agent access level any of a thread's delegations carries (a row from before levels
+ * existed counts as `lineage`), or undefined when it has none.
+ */
+export function narrowestAccess(tasks: ReadonlyArray<Pick<DelegationRecord, 'accessLevel'>>): AgentAccessLevel | undefined {
+  return tasks.length ? narrowAgentAccess(...tasks.map((task) => task.accessLevel ?? 'lineage')) : undefined
+}
+
 /** A thread the engine asks its host to create: a delegated child or a fork. */
 export type ThreadCreation =
   | { kind: 'delegation'; request: DelegationRequest }
-  | { kind: 'fork'; sourceThreadId: string; sourceRunId: string; title?: string }
+  | { kind: 'fork'; sourceThreadId: string; sourceRunId: string; title?: string; accessLevel?: AgentAccessLevel }
 
 /** Source runs a fork may start after (SPEC §16.2): never `running` or `uncertain`. */
 export const FORKABLE_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
@@ -555,6 +573,14 @@ export class RunEngine extends EventEmitter {
       this.epochs.delete(runId)
       return next
     })
+  }
+
+  /**
+   * Records the agent access level the run's turn was granted (`RunRecord.accessGrant`), only ever
+   * narrower, without a status write. Returns the level now recorded.
+   */
+  recordAccessGrant(runId: string, level: AgentAccessLevel): AgentAccessLevel | undefined {
+    return this.store.setRunAccessGrant(runId, level)
   }
 
   /** Changes fields of a paused run's `pause` (the resume item the executor wrote, `autoResume` after a stale timer). */
@@ -1142,6 +1168,7 @@ export class RunEngine extends EventEmitter {
       prompt: input.prompt,
       wake: input.wake,
       modeCeiling: input.modeCeiling,
+      accessLevel: input.accessLevel,
       workspace: input.workspace,
       role: input.role
     })
@@ -1274,7 +1301,8 @@ export class RunEngine extends EventEmitter {
         kind: 'fork',
         sourceThreadId: input.sourceThreadId,
         sourceRunId: source.runId,
-        title: input.title
+        title: input.title,
+        ...(input.accessLevel ? { accessLevel: input.accessLevel } : {})
       })
       return this.withCreatedThread(host, threadId, () => this.store.db.transaction((): ForkAccepted => {
         this.delegations.createLineage({
@@ -1542,7 +1570,8 @@ export class RunEngine extends EventEmitter {
     const lineage = this.delegations.getLineage(command.threadId)
     if (!lineage || lineage.relationship !== 'subagent') return undefined
     if (this.delegationHost?.threadLive && !this.delegationHost.threadLive(lineage.parentThreadId)) return undefined
-    const first = this.delegations.listForChildThread(command.threadId).find((task) => task.parentThreadId === lineage.parentThreadId)
+    const tasks = this.delegations.listForChildThread(command.threadId)
+    const first = tasks.find((task) => task.parentThreadId === lineage.parentThreadId)
     const parentRun = this.store.listRuns(lineage.parentThreadId, { limit: 1 })[0]
     if (!first || !parentRun) return undefined
     return {
@@ -1551,6 +1580,9 @@ export class RunEngine extends EventEmitter {
       prompt: command.prompt ?? '',
       wake: 'always',
       modeCeiling: first.modeCeiling ?? undefined,
+      // The narrowest level any task of this subagent was given: a follow-up never restores what an
+      // earlier one narrowed (SPEC §15.1).
+      accessLevel: narrowestAccess(tasks),
       workspace: first.workspace,
       role: first.role,
       provider: first.provider,
@@ -1583,7 +1615,9 @@ export class RunEngine extends EventEmitter {
           ? { outcome: { continuationOf, ...(resuming ? { resumedFromPause: command.source === 'resume' ? 'auto' as const : 'user' as const } : {}) } }
           : {})
       })
-      if (tracked)
+      if (tracked) {
+        // Whatever the caller recorded, the row is never wider than any earlier task of this thread.
+        const accessLevel = narrowAgentAccess(tracked.accessLevel, narrowestAccess(this.delegations.listForChildThread(command.threadId)))
         this.delegations.create({
           parentRunId: tracked.parentRunId,
           parentThreadId: tracked.parentThreadId,
@@ -1594,9 +1628,11 @@ export class RunEngine extends EventEmitter {
           prompt: tracked.prompt,
           wake: tracked.wake,
           modeCeiling: tracked.modeCeiling,
+          accessLevel,
           workspace: tracked.workspace,
           role: tracked.role
         })
+      }
       // The replacement exists before the pause ends, so a subagent's task stays `running` across the hand-over.
       let endedPause: { runId: string; resumeItemId?: string } | undefined
       if (paused) {
