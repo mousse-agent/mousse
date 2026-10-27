@@ -5,6 +5,7 @@ import type {
   ScheduledJobWorkspace,
   ScheduledWebhookDelivery
 } from '../../shared/types'
+import { isPermissionMode } from '../../shared/permissionMode'
 import type { ParsedArgs } from '../parseArgs'
 import { flagBool, flagString } from '../parseArgs'
 import { exitWithError, formatTable, writeOutput } from '../output'
@@ -206,6 +207,11 @@ export function buildScheduleAddInput(
   if (mode !== undefined && mode !== 'text' && mode !== 'json') {
     if (mode !== 'agent' && mode !== 'plan') throw new Error('--mode must be agent or plan.')
     input.mode = mode
+  }
+  const permission = flagString(flags, 'permission')
+  if (permission !== undefined) {
+    if (!isPermissionMode(permission)) throw new Error('--permission must be ask, accept_edits or full.')
+    input.permissionMode = permission
   }
   const workspace = flagString(flags, 'workspace')
   if (workspace !== undefined) input.workspace = parseWorkspace(workspace)

@@ -203,7 +203,7 @@ mousse-cli schedule disable <job-id>
 mousse-cli schedule remove <job-id>
 ```
 
-A job runs as a turn on a thread. `--instance` and `--model` choose the provider instance and model, `--mode agent|plan` the mode, and `--workspace project|new-worktree|<path>` where it works (`project`, the default, is the project's own checkout: an agent-mode job there edits the folder you work in, unattended, with no checkpoints or undo. For a Git project, prefer `new-worktree`). `--thread <id>` runs the job on an existing thread with its history and its own workspace. `--manual` makes a job with no clock that runs only with `schedule run`. `schedule list` shows the job's model, and `queued` while a run waits behind a busy thread.
+A job runs as a turn on a thread. `--instance` and `--model` choose the provider instance and model, `--mode agent|plan` the mode, and `--workspace project|new-worktree|<path>` where it works (`project`, the default, is the project's own checkout: an agent-mode job there edits the folder you work in, unattended, with no checkpoints or undo. For a Git project, prefer `new-worktree`). `--thread <id>` runs the job on an existing thread with its history and its own workspace. `--manual` makes a job with no clock that runs only with `schedule run`. `schedule list` shows the job's model, and `queued` while a run waits behind a busy thread. `--permission ask|accept_edits|full` sets how much the run may do without asking; see "Permission mode and ceiling" in `docs/CONFIGURATION.md`.
 
 ### Webhook trigger
 
